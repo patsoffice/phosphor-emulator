@@ -10,6 +10,7 @@ mod overlay;
 mod profile;
 mod rom_path;
 mod screenshot;
+mod state;
 mod vector_gl;
 mod video;
 
@@ -94,6 +95,7 @@ fn main() {
     let screenshot_dir = screenshot_dir();
     let key_map = input::default_key_map(machine.input_map());
     let controller_map = input::default_controller_map(machine.input_map());
+    let mut state = state::load();
     machine.reset();
     emulator::run(
         machine.as_mut(),
@@ -106,7 +108,9 @@ fn main() {
         cli.debug,
         cli.profile,
         cli.no_mouse_grab,
+        &mut state,
     );
+    state::save(&state);
 
     // Save battery-backed NVRAM to disk on exit
     if let Some(data) = machine.save_nvram()

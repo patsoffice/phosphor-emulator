@@ -24,6 +24,7 @@ impl Video {
     /// `native_width`/`native_height` define the framebuffer texture size.
     /// `window_width`/`window_height` define the initial window size (may differ
     /// for rotated displays, e.g. portrait vector games).
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         sdl_video: &sdl2::VideoSubsystem,
         title: &str,
@@ -32,6 +33,7 @@ impl Video {
         window_width: u32,
         window_height: u32,
         scale: u32,
+        position: Option<(i32, i32)>,
     ) -> Self {
         let gl_attr = sdl_video.gl_attr();
         gl_attr.set_context_profile(GLProfile::Core);
@@ -40,12 +42,14 @@ impl Video {
         gl_attr.set_multisample_samples(4);
         gl_attr.set_framebuffer_srgb_compatible(true);
 
-        let window = sdl_video
-            .window(title, window_width * scale, window_height * scale)
-            .opengl()
-            .position_centered()
-            .build()
-            .expect("Failed to create window");
+        let mut builder = sdl_video.window(title, window_width * scale, window_height * scale);
+        builder.opengl();
+        if let Some((x, y)) = position {
+            builder.position(x, y);
+        } else {
+            builder.position_centered();
+        }
+        let window = builder.build().expect("Failed to create window");
 
         let gl_ctx = window
             .gl_create_context()
@@ -196,6 +200,11 @@ impl Video {
         self.egui_ctx.begin_pass(self.egui_state.input.take());
         overlay_fn(&self.egui_ctx);
         self.finish_frame();
+    }
+
+    /// Return the current window position.
+    pub fn window_position(&self) -> (i32, i32) {
+        self.window.position()
     }
 
     /// Resize the window.

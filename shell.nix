@@ -1,5 +1,17 @@
 { pkgs ? import <nixpkgs> {} }:
 
+let
+  isLinux = pkgs.stdenv.isLinux;
+  linuxPkgs = pkgs.lib.optionals isLinux [
+    pkgs.wayland
+    pkgs.wayland-protocols
+    pkgs.libxkbcommon
+  ];
+  linuxLibs = pkgs.lib.optionals isLinux [
+    pkgs.wayland
+    pkgs.libxkbcommon
+  ];
+in
 pkgs.mkShell {
   buildInputs = [
     pkgs.cargo
@@ -8,17 +20,12 @@ pkgs.mkShell {
     pkgs.SDL2
     pkgs.pkg-config
     pkgs.libGL
-    pkgs.wayland
-    pkgs.wayland-protocols
-    pkgs.libxkbcommon
-  ];
+  ] ++ linuxPkgs;
 
-  LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [
+  LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath ([
     pkgs.SDL2
     pkgs.libGL
-    pkgs.wayland
-    pkgs.libxkbcommon
-  ];
+  ] ++ linuxLibs);
 
   shellHook = ''
     export CC="${pkgs.clang}/bin/clang"

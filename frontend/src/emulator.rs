@@ -21,6 +21,7 @@ pub fn run(
     start_in_debug: bool,
     start_in_profile: bool,
     no_mouse_grab: bool,
+    state: &mut crate::state::State,
 ) {
     // Enable controller backends before SDL init — needed for Xbox on macOS
     sdl2::hint::set("SDL_JOYSTICK_HIDAPI", "1");
@@ -83,6 +84,7 @@ pub fn run(
         } else {
             (width, height)
         };
+    let window_pos = state.window_x.zip(state.window_y);
     let mut video = Video::new(
         &sdl_video,
         "Phosphor Emulator",
@@ -91,6 +93,7 @@ pub fn run(
         win_w,
         win_h,
         scale,
+        window_pos,
     );
     let mut event_pump = sdl_context.event_pump().expect("Failed to get event pump");
 
@@ -603,6 +606,11 @@ pub fn run(
             profile_state.record_frame(t1 - t0, t2 - t1, t3 - t2, t4 - t3, t5 - t4, sub_spans);
         }
     }
+
+    // Save window position for next launch
+    let (wx, wy) = video.window_position();
+    state.window_x = Some(wx);
+    state.window_y = Some(wy);
 
     // Flush profiler trace if still recording
     if profile_state.active {
