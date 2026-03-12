@@ -11,11 +11,11 @@ use crate::set_bit_active_high;
 use crate::tkg04::{self, MainRegion, SoundRegion, Tkg04Board};
 
 // ---------------------------------------------------------------------------
-// Donkey Kong Jr ROM definitions ("dkongjr2" MAME set — contiguous layout)
+// Donkey Kong Jr ROM definitions
 // ---------------------------------------------------------------------------
-// The parent "dkongjr" set uses ROM_CONTINUE for non-contiguous loading which
-// is not supported by our RomRegion system. The "dkongjr2" set contains the
-// same code arranged in three simple contiguous 8KB ROMs.
+// Primary definitions use the "dkongjr2" MAME set (three contiguous 8KB ROMs).
+// The parent "dkongjr" set uses ROM_CONTINUE for non-contiguous loading; see
+// `load_parent_program_rom()` for that fallback path.
 
 /// Main CPU program ROMs: 24KB at 0x0000-0x5FFF (three 8KB chips).
 pub static DKONGJR_PROGRAM_ROM: RomRegion = RomRegion {
@@ -233,7 +233,12 @@ impl DkongJrSystem {
 
     /// Load all ROM sets.
     pub fn load_rom_set(&mut self, rom_set: &RomSet) -> Result<(), RomLoadError> {
-        let rom_data = DKONGJR_PROGRAM_ROM.load(rom_set)?;
+        // Try "dkongjr2" contiguous layout first, then fall back to the parent
+        // "dkongjr" set which uses ROM_CONTINUE (non-contiguous loading).
+        let rom_data = match DKONGJR_PROGRAM_ROM.load(rom_set) {
+            Ok(data) => data,
+            Err(_) => load_parent_program_rom(rom_set)?,
+        };
         self.board.main_map.load_region(MainRegion::Rom, &rom_data);
 
         let sound_data = DKONGJR_SOUND_ROM.load(rom_set)?;
@@ -525,6 +530,35 @@ impl Machine for DkongJrSystem {
 }
 
 // ---------------------------------------------------------------------------
+// Parent "dkongjr" ROM set support (ROM_CONTINUE layout)
+// ---------------------------------------------------------------------------
+
+/// Load program ROMs from the parent "dkongjr" MAME set.
+///
+/// The parent set uses ROM_CONTINUE for non-contiguous loading:
+/// - djr1-c_5b_f-2.5b (16KB, CRC 0xdea28158): first 8KB → 0x0000, next 8KB → 0x4000
+/// - djr1-c_5c_f-2.5c (8KB,  CRC 0x6a9a2e6f): → 0x2000
+fn load_parent_program_rom(rom_set: &RomSet) -> Result<Vec<u8>, RomLoadError> {
+    const PARENT_5B_CRC: u32 = 0xdea28158;
+    const PARENT_5C_CRC: u32 = 0x6a9a2e6f;
+
+    let rom_5b = rom_set
+        .find_by_crc32(PARENT_5B_CRC, 0x4000)
+        .map(|(_, data)| data)
+        .ok_or_else(|| RomLoadError::MissingFile("djr1-c_5b_f-2.5b".to_string()))?;
+    let rom_5c = rom_set
+        .find_by_crc32(PARENT_5C_CRC, 0x2000)
+        .map(|(_, data)| data)
+        .ok_or_else(|| RomLoadError::MissingFile("djr1-c_5c_f-2.5c".to_string()))?;
+
+    let mut region = vec![0u8; 0x6000];
+    region[0x0000..0x2000].copy_from_slice(&rom_5b[..0x2000]);
+    region[0x2000..0x4000].copy_from_slice(rom_5c);
+    region[0x4000..0x6000].copy_from_slice(&rom_5b[0x2000..]);
+    Ok(region)
+}
+
+// ---------------------------------------------------------------------------
 // Machine registry
 // ---------------------------------------------------------------------------
 
@@ -537,5 +571,5 @@ fn create_machine(
 }
 
 inventory::submit! {
-    MachineEntry::new("dkongjr", &["dkongjr"], create_machine)
+    MachineEntry::new("dkongjr", &["dkongjr", "dkongjr2"], create_machine)
 }

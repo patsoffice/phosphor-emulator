@@ -76,8 +76,7 @@ fn main() {
         std::process::exit(1);
     });
 
-    let rom_set = load_first_rom_set(entry.rom_names, &rom_path);
-    let mut machine = (entry.create)(&rom_set).expect("Failed to initialize machine");
+    let mut machine = create_from_first_rom_set(entry, &rom_path);
 
     // Load battery-backed NVRAM from disk (if available)
     let nvram_path = nvram_path_for(&config, &machine_name);
@@ -156,12 +155,25 @@ fn screenshot_dir() -> std::path::PathBuf {
     dir
 }
 
-/// Try each ROM set name in order, returning the first that loads successfully.
-fn load_first_rom_set(rom_names: &[&str], path: &str) -> phosphor_machines::rom_loader::RomSet {
+/// Try each ROM set name in order, returning the first machine that
+/// initialises successfully. This ensures that ROM loading *and* machine
+/// creation (which validates CRC32s, sizes, and ROM_CONTINUE layouts) both
+/// succeed before we commit to a ROM set.
+fn create_from_first_rom_set(
+    entry: &phosphor_machines::registry::MachineEntry,
+    path: &str,
+) -> Box<dyn phosphor_core::core::machine::Machine> {
     let mut last_err = None;
-    for name in rom_names {
-        match rom_path::load_rom_set(name, path) {
-            Ok(set) => return set,
+    for name in entry.rom_names {
+        let rom_set = match rom_path::load_rom_set(name, path) {
+            Ok(set) => set,
+            Err(e) => {
+                last_err = Some(e);
+                continue;
+            }
+        };
+        match (entry.create)(&rom_set) {
+            Ok(machine) => return machine,
             Err(e) => last_err = Some(e),
         }
     }
@@ -172,7 +184,7 @@ fn load_first_rom_set(rom_names: &[&str], path: &str) -> phosphor_machines::rom_
         ))
     });
     eprintln!("Failed to load ROMs: {err}");
-    eprintln!("Tried: {}", rom_names.join(", "));
+    eprintln!("Tried: {}", entry.rom_names.join(", "));
     std::process::exit(1);
 }
 
