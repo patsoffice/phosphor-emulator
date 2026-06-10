@@ -4,3 +4,4 @@ cpu-validation/test_data/
 .DS_Store
 phosphor_profile_*.json
 cross-validation/mame0148/
+.direnv/
