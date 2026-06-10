@@ -42,6 +42,7 @@ pub struct InterruptState {
     pub irq: bool,
     pub firq: bool,     // 6809-specific; ignored by other CPUs
     pub irq_vector: u8, // Byte placed on data bus during Z80 IRQ ACK (IM2 vectoring)
+    pub irq_level: u8,  // 68000 interrupt priority: 0 = none, 1-7 = level (7 = NMI)
 }
 
 impl Default for InterruptState {
@@ -51,6 +52,7 @@ impl Default for InterruptState {
             irq: false,
             firq: false,
             irq_vector: 0xFF,
+            irq_level: 0,
         }
     }
 }
@@ -89,6 +91,12 @@ macro_rules! bus_split {
         let __ptr: *mut _ = $self;
         #[allow(unused_unsafe)]
         let $bus = unsafe { &mut *__ptr as &mut dyn $crate::core::Bus<Address = u32, Data = u8> };
+        $body
+    }};
+    ($self:expr, $bus:ident : u32 word => $body:block) => {{
+        let __ptr: *mut _ = $self;
+        #[allow(unused_unsafe)]
+        let $bus = unsafe { &mut *__ptr as &mut dyn $crate::core::Bus<Address = u32, Data = u16> };
         $body
     }};
 }

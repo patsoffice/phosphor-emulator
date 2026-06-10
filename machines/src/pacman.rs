@@ -185,6 +185,7 @@ impl Bus for PacmanSystem {
             irq: self.board.vblank_irq_pending && self.board.irq_enabled,
             firq: false,
             irq_vector: self.board.interrupt_vector,
+            irq_level: 0,
         }
     }
 }

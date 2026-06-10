@@ -343,6 +343,7 @@ impl Bus for AsteroidsDeluxeSystem {
             irq: self.pokey.irq(),
             firq: false,
             irq_vector: 0,
+            irq_level: 0,
         }
     }
 }

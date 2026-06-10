@@ -801,6 +801,7 @@ impl Bus for GridleeSystem {
             irq: self.irq_pending,
             firq: self.firq_pending,
             irq_vector: 0,
+            irq_level: 0,
         }
     }
 }

@@ -475,6 +475,7 @@ impl Bus for TempestSystem {
             irq: self.board.irq_pending,
             firq: false,
             irq_vector: 0,
+            irq_level: 0,
         }
     }
 }

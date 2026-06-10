@@ -967,6 +967,7 @@ impl Bus for CrystalCastlesSystem {
             irq: self.irq_state,
             firq: false,
             irq_vector: 0,
+            irq_level: 0,
         }
     }
 }

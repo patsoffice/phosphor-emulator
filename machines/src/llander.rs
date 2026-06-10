@@ -326,6 +326,7 @@ impl Bus for LunarLanderSystem {
             irq: false,
             firq: false,
             irq_vector: 0,
+            irq_level: 0,
         }
     }
 }

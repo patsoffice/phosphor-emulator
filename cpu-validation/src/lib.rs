@@ -466,3 +466,48 @@ impl Bus for TracingBus20 {
         InterruptState::default()
     }
 }
+
+// --- 16MB word bus for 68000 (24-bit address space, 16-bit data) ---
+
+/// A bus with 16 MB of byte memory for 68000 validation, served as 16-bit
+/// big-endian words at even addresses (the 68000 bus transaction width).
+pub struct TracingBus68k {
+    pub memory: Box<[u8]>,
+}
+
+impl TracingBus68k {
+    pub fn new() -> Self {
+        Self {
+            memory: vec![0; 0x100_0000].into_boxed_slice(),
+        }
+    }
+}
+
+impl Default for TracingBus68k {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Bus for TracingBus68k {
+    type Address = u32;
+    type Data = u16;
+
+    fn read(&mut self, _master: BusMaster, addr: u32) -> u16 {
+        let i = (addr & 0x00FF_FFFE) as usize;
+        u16::from_be_bytes([self.memory[i], self.memory[i + 1]])
+    }
+
+    fn write(&mut self, _master: BusMaster, addr: u32, data: u16) {
+        let i = (addr & 0x00FF_FFFE) as usize;
+        self.memory[i..i + 2].copy_from_slice(&data.to_be_bytes());
+    }
+
+    fn is_halted_for(&self, _master: BusMaster) -> bool {
+        false
+    }
+
+    fn check_interrupts(&mut self, _target: BusMaster) -> InterruptState {
+        InterruptState::default()
+    }
+}

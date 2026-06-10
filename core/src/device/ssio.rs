@@ -364,6 +364,7 @@ impl Bus for SsioBoard {
             irq: self.irq_pending,
             firq: false,
             irq_vector: 0xFF,
+            irq_level: 0,
         }
     }
 }
