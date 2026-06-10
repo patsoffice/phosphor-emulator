@@ -7,3 +7,6 @@
 [submodule "cpu-validation/test_data/8088"]
 	path = cpu-validation/test_data/8088
 	url = https://github.com/SingleStepTests/8088
+[submodule "cpu-validation/test_data/680x0"]
+	path = cpu-validation/test_data/680x0
+	url = https://github.com/SingleStepTests/680x0.git

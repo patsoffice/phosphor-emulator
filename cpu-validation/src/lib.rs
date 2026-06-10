@@ -410,6 +410,87 @@ impl Default for TracingBus20 {
     }
 }
 
+// --- M68000 JSON test vector types (SingleStepTests/680x0 format) ---
+//
+// Each test holds a full flat register file before and after one
+// instruction. A7 is implicit: the SR supervisor bit selects whether `ssp`
+// or `usp` is the active stack pointer. `pc` is the address of the
+// instruction under test and `prefetch` holds the two words the real CPU
+// has already fetched from `pc`/`pc+2` (they are not necessarily present in
+// `ram`). RAM is sparse byte (address, value) pairs.
+
+/// A single 68000 test vector.
+#[derive(Debug, Clone, Deserialize)]
+pub struct M68000TestCase {
+    pub name: String,
+    pub initial: M68000Regs,
+    #[serde(rename = "final")]
+    pub final_state: M68000Regs,
+    /// Documented execution length in clock cycles (not compared yet:
+    /// the harness is state-only).
+    pub length: u32,
+    // `transactions` (per-cycle bus trace) is present but unused
+}
+
+/// Full 68000 register file + memory state (initial and final use the same
+/// shape; the final state is complete, not sparse).
+#[derive(Debug, Clone, Deserialize)]
+pub struct M68000Regs {
+    pub d0: u32,
+    pub d1: u32,
+    pub d2: u32,
+    pub d3: u32,
+    pub d4: u32,
+    pub d5: u32,
+    pub d6: u32,
+    pub d7: u32,
+    pub a0: u32,
+    pub a1: u32,
+    pub a2: u32,
+    pub a3: u32,
+    pub a4: u32,
+    pub a5: u32,
+    pub a6: u32,
+    pub usp: u32,
+    pub ssp: u32,
+    pub sr: u16,
+    pub pc: u32,
+    /// The two instruction words already in the prefetch queue.
+    pub prefetch: [u16; 2],
+    /// Sparse byte memory: (24-bit address, value) pairs.
+    pub ram: Vec<(u32, u8)>,
+}
+
+impl M68000Regs {
+    /// Data registers as an array (mirrors `M68000::d`).
+    pub fn d(&self) -> [u32; 8] {
+        [
+            self.d0, self.d1, self.d2, self.d3, self.d4, self.d5, self.d6, self.d7,
+        ]
+    }
+
+    /// Address registers A0-A6 (A7 lives in `usp`/`ssp` per the SR S bit).
+    pub fn a(&self) -> [u32; 7] {
+        [
+            self.a0, self.a1, self.a2, self.a3, self.a4, self.a5, self.a6,
+        ]
+    }
+
+    /// True if the SR supervisor bit selects SSP as the active A7.
+    pub fn is_supervisor(&self) -> bool {
+        self.sr & 0x2000 != 0
+    }
+
+    /// The active stack pointer (what `M68000::a[7]` should hold).
+    pub fn active_sp(&self) -> u32 {
+        if self.is_supervisor() {
+            self.ssp
+        } else {
+            self.usp
+        }
+    }
+}
+
 // --- MB88XX JSON test vector types ---
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -473,12 +554,17 @@ impl Bus for TracingBus20 {
 /// big-endian words at even addresses (the 68000 bus transaction width).
 pub struct TracingBus68k {
     pub memory: Box<[u8]>,
+    /// Masked word addresses written through the `Bus` trait. Harnesses
+    /// reuse one 16 MB bus across thousands of test cases and zero only the
+    /// touched words between cases instead of memsetting the whole array.
+    pub dirty_writes: Vec<u32>,
 }
 
 impl TracingBus68k {
     pub fn new() -> Self {
         Self {
             memory: vec![0; 0x100_0000].into_boxed_slice(),
+            dirty_writes: Vec::new(),
         }
     }
 }
@@ -501,6 +587,7 @@ impl Bus for TracingBus68k {
     fn write(&mut self, _master: BusMaster, addr: u32, data: u16) {
         let i = (addr & 0x00FF_FFFE) as usize;
         self.memory[i..i + 2].copy_from_slice(&data.to_be_bytes());
+        self.dirty_writes.push(i as u32);
     }
 
     fn is_halted_for(&self, _master: BusMaster) -> bool {
