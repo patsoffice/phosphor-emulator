@@ -4,6 +4,24 @@
 
 Cycle-accurate retro CPU emulator framework in Rust with arcade machine support.
 
+### Read-Only Inspection (sak)
+
+A global pre-tool-use hook redirects common shell read commands to `sak` (Swiss Army Knife for LLMs), a read-only inspection tool. When you reach for a shell CLI to *look at* something, use the `sak` equivalent — the hook blocks the raw command otherwise. Mutating operations (`cargo build`, `git commit`, writing files) are unaffected.
+
+- `ls` / `find` / `**` globs → `sak fs glob '<pattern>'`
+- `cat` / `sed -n` / `head` / `tail` → prefer the Read tool; else `sak fs read <f> -n <lo>-<hi>` or `sak fs head|tail <f> [n]`
+- `grep` / `rg` → `sak fs grep <pattern> <path>` (pass `-` to read stdin)
+- `cut` / `awk '{print $n}'` → `sak fs cut -d <delim> -f <n>`
+- `tree` / `ls -R` / `stat` / `wc` → `sak fs tree [path]` / `sak fs stat <path…>` / `sak fs wc`
+- `git status|log|diff|blame|show` → `sak git status|log|diff|blame|show` (flags: `--staged`, `--name-only`, `--stat`)
+- `jq` on `*.json` → `sak json query|keys|grep|diff|…`
+- reading `Cargo.toml` / YAML / plist → `sak config query|keys|grep|diff|convert`
+- `sha256sum` / `shasum` / `b3sum` → `sak hash sha256|sha1|md5|blake3 <file>`
+
+- Discover flags with `sak <domain> <command> --help`.
+- To drop a tool's stderr noise (e.g. nix's "dirty tree" warning), redirect with `2>/dev/null` — **don't** pipe through `grep -v`, the hook blocks `grep`.
+- Escape hatch when a sak path genuinely won't work: prefix the command with `SAK_HOOK_BYPASS=1`.
+
 ### Build & Test
 
 ```bash
@@ -37,9 +55,19 @@ cargo run --package phosphor-frontend -- joust /path/to/roms --scale 3
 
 - Never create circular dependencies between crates
 
+### Nix Dev Environment
+
+The repo ships a `flake.nix` that pins the toolchain (cargo, rustc, clang, SDL2, pkg-config, libGL, plus Wayland on Linux) and sets `CC`/`CXX` and `LD_LIBRARY_PATH`. This is the source of truth for the build environment — prefer it over a system Rust/SDL2 install.
+
+- **Enter the shell:** `nix develop`, or just `cd` into the repo if you use direnv (`.envrc` runs `use flake`; run `direnv allow` once).
+- **Run one command without entering:** `nix develop -c cargo test` (etc.).
+- **`nix-shell` still works** — `shell.nix` is a flake-compat shim that re-exports the same dev shell for anyone without flakes enabled.
+- **Bump pinned deps:** `nix flake update` (rewrites `flake.lock`); commit the lockfile. Don't hand-edit a nixpkgs URL/sha.
+- `nix develop -c …` prints `warning: Git tree '…' is dirty` to **stderr** when the tree has uncommitted changes — strip with `2>/dev/null`, not a `grep` filter.
+
 ### SDL2 Dependency
 
-- `phosphor-frontend` requires SDL2: `brew install sdl2`
+- The Nix dev shell provides SDL2. Outside Nix, `phosphor-frontend` requires it via `brew install sdl2`.
 - `.cargo/config.toml` sets the Homebrew library path for aarch64-apple-darwin automatically
 - Core and machines crates have no external C dependencies (only Rust crates)
 
@@ -66,6 +94,24 @@ cd cross-validation && make
 
 - If cross-validation differs from datasheet for timings, use the datasheet values
 - Any changes to the CPUs must run the cross-validation script
+
+### Issue Tracking (beads)
+
+Local issues are tracked with `br` (beads). They live in `.beads/` and are committed to git.
+
+```bash
+RUST_LOG=error br list                          # Show open issues (RUST_LOG=error quiets log noise)
+br ready --json                                 # Actionable issues (not blocked/deferred)
+br show <id>                                     # Issue details
+br create "Title" -p 2 --type bug               # Create (types: feature, bug, task, chore)
+br update <id> --status in_progress             # Claim work
+br close <id> --reason "explanation"            # Close with a descriptive reason
+br sync --flush-only                            # Export to issues.jsonl for committing
+```
+
+- Priority: 0 = critical … 4 = backlog. Statuses: `open`, `in_progress`, `deferred`, `closed`.
+- `br` never auto-commits — run `br sync --flush-only`, then commit `.beads/` yourself.
+- Check `br ready --json` at the start of a session to see what's actionable.
 
 ### Commit Style
 
