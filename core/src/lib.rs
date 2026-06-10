@@ -7,6 +7,8 @@ pub mod device;
 pub mod dirty_bitset;
 pub mod gfx;
 
+pub use cpu::m68000::M68000;
+
 pub mod prelude {
     pub use crate::core::machine::{
         AnalogInput, FrontendMachine, InputButton, Machine, MachineCore, Nvram, Profilable,

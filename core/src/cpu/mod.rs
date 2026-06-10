@@ -20,8 +20,8 @@ pub use disasm::{Disassemble, DisassembledInstruction};
 // Re-export state types
 pub mod state;
 pub use state::{
-    CpuStateTrait, I8035State, I8088State, M6502State, M6800State, M6809State, Mb88xxState,
-    Z80State,
+    CpuStateTrait, I8035State, I8088State, M6502State, M6800State, M6809State, M68000State,
+    Mb88xxState, Z80State,
 };
 
 // Shared flag and signal helpers
@@ -56,3 +56,7 @@ pub use i8088::I8088;
 // Fujitsu MB88xx (4-bit MCU, used in Namco custom chips)
 pub mod mb88xx;
 pub use mb88xx::Mb88xx;
+
+// Motorola 68000 (16/32-bit, word bus)
+pub mod m68000;
+pub use m68000::M68000;

@@ -220,6 +220,59 @@ impl I8035State {
     }
 }
 
+/// M68000 CPU state snapshot
+#[derive(Debug, Clone, PartialEq)]
+pub struct M68000State {
+    pub d: [u32; 8], // Data registers D0-D7
+    pub a: [u32; 8], // Address registers A0-A7 (A7 = active stack pointer)
+    pub usp: u32,    // Inactive user stack pointer
+    pub ssp: u32,    // Inactive supervisor stack pointer
+    pub pc: u32,     // Program counter
+    pub sr: u16,     // Status register (system byte + CCR)
+}
+
+impl M68000State {
+    pub fn debug_registers(&self) -> Vec<DebugRegister> {
+        let mut regs = vec![DebugRegister {
+            name: "PC",
+            value: self.pc as u64,
+            width: 32,
+        }];
+        const D_NAMES: [&str; 8] = ["D0", "D1", "D2", "D3", "D4", "D5", "D6", "D7"];
+        const A_NAMES: [&str; 8] = ["A0", "A1", "A2", "A3", "A4", "A5", "A6", "A7"];
+        for (i, name) in D_NAMES.iter().enumerate() {
+            regs.push(DebugRegister {
+                name,
+                value: self.d[i] as u64,
+                width: 32,
+            });
+        }
+        for (i, name) in A_NAMES.iter().enumerate() {
+            regs.push(DebugRegister {
+                name,
+                value: self.a[i] as u64,
+                width: 32,
+            });
+        }
+        regs.push(DebugRegister {
+            name: "USP",
+            value: self.usp as u64,
+            width: 32,
+        });
+        regs.push(DebugRegister {
+            name: "SSP",
+            value: self.ssp as u64,
+            width: 32,
+        });
+        regs.push(DebugRegister {
+            name: "SR",
+            value: self.sr as u64,
+            width: 16,
+        });
+        regs
+    }
+}
+
 // I8088 state is defined in its own module; re-export here for consistency
 pub use super::i8088::I8088State;
 
