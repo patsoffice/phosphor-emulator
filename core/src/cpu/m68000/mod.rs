@@ -12,6 +12,9 @@
 //! remaining documented cycles are burned as bus-idle wait states. Per-cycle
 //! bus traces and exact prefetch behavior are not modeled.
 
+pub mod flags;
+pub use flags::SrFlag;
+
 use crate::core::save_state::{SaveError, StateReader, StateWriter};
 use crate::core::{Bus, BusMaster, bus::InterruptState, component::BusMasterComponent};
 use crate::cpu::{

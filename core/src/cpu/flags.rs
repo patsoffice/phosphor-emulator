@@ -24,6 +24,26 @@ pub fn flag_is_set<F: Into<u8>>(src: u8, flag: F) -> bool {
     src & flag.into() != 0
 }
 
+/// Set or clear a single flag bit in a 16-bit status register.
+///
+/// 16-bit counterpart of [`set_flag`] for CPUs whose status register is
+/// wider than a byte (M68000 SR, i8088 FLAGS).
+#[inline]
+pub fn set_flag_u16<F: Into<u16>>(dest: &mut u16, flag: F, set: bool) {
+    let mask = flag.into();
+    if set {
+        *dest |= mask;
+    } else {
+        *dest &= !mask;
+    }
+}
+
+/// Test whether a single flag bit is set in a 16-bit status register.
+#[inline]
+pub fn flag_is_set_u16<F: Into<u16>>(src: u16, flag: F) -> bool {
+    src & flag.into() != 0
+}
+
 /// Detect a rising edge on a boolean signal, updating the previous state.
 ///
 /// Returns `true` when `current` is high and `*previous` was low.
