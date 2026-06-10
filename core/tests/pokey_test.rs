@@ -147,7 +147,7 @@ fn test_pot_scan() {
 fn test_stimer_reset() {
     let mut pokey = Pokey::new(44100);
     pokey.write(0x08, 0x40); // 1.79MHz
-    pokey.write(0x00, 10); // Period 11
+    pokey.write(0x00, 10); // AUDF 10 -> period 14 in 1.79 MHz mode (AUDF + 4)
     pokey.write(0x0E, 0x01); // Enable IRQ1
     pokey.write(0x09, 0); // Reset
 
@@ -159,10 +159,11 @@ fn test_stimer_reset() {
     for _ in 0..10 {
         pokey.tick();
     }
-    assert!(!pokey.irq()); // Should not have fired
+    assert!(!pokey.irq()); // Should not have fired yet (period 14)
 
-    pokey.tick();
-    pokey.tick(); // 12 ticks from reset
+    for _ in 0..4 {
+        pokey.tick();
+    } // 14 ticks from reset
     assert!(pokey.irq());
 }
 
@@ -363,26 +364,29 @@ fn test_noise_output_latched_at_channel_rate() {
     );
 }
 
-/// Guard the working path: a pure-tone channel must still toggle exactly once
-/// per timer period (this path was already correct and must not regress).
+/// A channel clocked at 1.79 MHz divides by AUDF + 4 (not AUDF + 1) — the
+/// documented POKEY counter offset for the direct-clock mode. This also guards
+/// the pure-tone path against the output-latch change (it must still toggle
+/// exactly once per period).
 #[test]
-fn test_pure_tone_frequency_unchanged() {
+fn test_pure_tone_period_1_79mhz() {
     let mut pokey = Pokey::with_clock(1_789_773, 1_789_773);
     pokey.write(0x08, 0x40); // AUDCTL: Ch1 at 1.79 MHz
-    pokey.write(0x00, 50); // AUDF1: period 51 master clocks
+    pokey.write(0x00, 50); // AUDF1: 50 -> period 54 (AUDF + 4)
     pokey.write(0x01, 0xAF); // AUDC1: pure tone, vol 15
     pokey.write(0x09, 0); // STIMER reset
 
     pokey.drain_audio();
-    for _ in 0..5100 {
+    for _ in 0..5400 {
         pokey.tick();
     }
     let samples = pokey.drain_audio();
     let transitions = count_transitions(&samples);
 
-    // 5100 / 51 = 100 toggles expected (one transition per period).
+    // 5400 / 54 = 100 toggles expected. Divide-by-51 (the old AUDF + 1) would
+    // yield ~106 over the same window.
     assert!(
         (96..=104).contains(&transitions),
-        "pure tone should toggle once per period (~100), got {transitions}"
+        "1.79 MHz pure tone should divide by AUDF + 4 (~100 toggles), got {transitions}"
     );
 }

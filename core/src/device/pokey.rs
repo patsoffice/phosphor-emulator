@@ -287,7 +287,7 @@ impl Pokey {
                 // Only resets channel counters and output flip-flops; the
                 // base clock dividers (28/114) are free-running and unaffected.
                 for i in 0..4 {
-                    self.divider[i] = self.audf[i] as u16;
+                    self.divider[i] = self.reload_8bit(i);
                     self.div_out[i] = false;
                 }
             }
@@ -389,9 +389,8 @@ impl Pokey {
             // 16-bit mode for Ch1+Ch2
             if ch1_tick {
                 if self.divider[0] == 0 {
-                    // Reload 16-bit value: AUDF1 (low) + AUDF2 (high)
-                    let reload = (self.audf[0] as u16) | ((self.audf[1] as u16) << 8);
-                    self.divider[0] = reload;
+                    // Reload 16-bit value: AUDF1 (low) + AUDF2 (high), +6 in 1.79 MHz mode
+                    self.divider[0] = self.reload_16bit(0);
 
                     // Update Ch2 output (Ch1 output is ignored in linked mode)
                     self.process_channel(1);
@@ -408,7 +407,7 @@ impl Pokey {
             // 8-bit mode for Ch1
             if ch1_tick {
                 if self.divider[0] == 0 {
-                    self.divider[0] = self.audf[0] as u16;
+                    self.divider[0] = self.reload_8bit(0);
                     self.process_channel(0);
                     // IRQ for Ch1 (Timer 1)
                     if (self.irqen & IRQ_TIMER1) != 0 {
@@ -422,7 +421,7 @@ impl Pokey {
             // 8-bit mode for Ch2 (always uses base clock in 8-bit mode)
             if base_tick {
                 if self.divider[1] == 0 {
-                    self.divider[1] = self.audf[1] as u16;
+                    self.divider[1] = self.reload_8bit(1);
                     self.process_channel(1);
                     // IRQ for Ch2 (Timer 2)
                     if (self.irqen & IRQ_TIMER2) != 0 {
@@ -446,8 +445,8 @@ impl Pokey {
             // 16-bit mode for Ch3+Ch4
             if ch3_tick {
                 if self.divider[2] == 0 {
-                    let reload = (self.audf[2] as u16) | ((self.audf[3] as u16) << 8);
-                    self.divider[2] = reload;
+                    // Reload 16-bit value: AUDF3 (low) + AUDF4 (high), +6 in 1.79 MHz mode
+                    self.divider[2] = self.reload_16bit(2);
 
                     self.process_channel(3);
 
@@ -468,7 +467,7 @@ impl Pokey {
             // 8-bit mode for Ch3
             if ch3_tick {
                 if self.divider[2] == 0 {
-                    self.divider[2] = self.audf[2] as u16;
+                    self.divider[2] = self.reload_8bit(2);
                     self.process_channel(2);
 
                     // Capture Ch1 output into HPF flip-flop on Ch3 underflow edge
@@ -484,7 +483,7 @@ impl Pokey {
             // 8-bit mode for Ch4
             if base_tick {
                 if self.divider[3] == 0 {
-                    self.divider[3] = self.audf[3] as u16;
+                    self.divider[3] = self.reload_8bit(3);
                     self.process_channel(3);
 
                     // Capture Ch2 output into HPF flip-flop on Ch4 underflow edge
@@ -590,6 +589,36 @@ impl Pokey {
         self.poly17 >>= 1;
         self.poly17 = (self.poly17 & 0x1_FF7F) | (in8 << 7);
         self.poly17 |= in0 << 16;
+    }
+
+    /// Divider reload value for an 8-bit channel, including the mode-dependent
+    /// offset that sets the effective divide ratio to match the hardware (the
+    /// "counter values" defined in the POKEY manual / MAME `pokey.cpp`):
+    ///   64/15 kHz base  : AUDF + 1   (reload = AUDF)
+    ///   1.79 MHz, 8-bit : AUDF + 4   (reload = AUDF + 3)
+    ///
+    /// Only Ch1 and Ch3 can select the 1.79 MHz clock; Ch2/Ch4 are always
+    /// base-clocked in 8-bit mode.
+    fn reload_8bit(&self, ch: usize) -> u16 {
+        let hiclk = match ch {
+            0 => (self.audctl & AUDCTL_CH1_179MHZ) != 0,
+            2 => (self.audctl & AUDCTL_CH3_179MHZ) != 0,
+            _ => false,
+        };
+        self.audf[ch] as u16 + if hiclk { 3 } else { 0 }
+    }
+
+    /// Divider reload value for a 16-bit linked pair whose low channel is `low`
+    /// (0 for Ch1+Ch2, 2 for Ch3+Ch4):
+    ///   1.79 MHz, 16-bit : AUDF16 + 7  (reload = AUDF16 + 6)
+    ///   base,     16-bit : AUDF16 + 1  (reload = AUDF16)
+    fn reload_16bit(&self, low: usize) -> u16 {
+        let audf16 = (self.audf[low] as u16) | ((self.audf[low + 1] as u16) << 8);
+        let hiclk = match low {
+            0 => (self.audctl & AUDCTL_CH1_179MHZ) != 0,
+            _ => (self.audctl & AUDCTL_CH3_179MHZ) != 0,
+        };
+        audf16.wrapping_add(if hiclk { 6 } else { 0 })
     }
 
     /// Update a channel's output flip-flop on a timer underflow, matching
