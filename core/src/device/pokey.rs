@@ -97,8 +97,8 @@ pub struct Pokey {
 
     // Audio channel runtime state
     divider: [u16; 4],  // Current divider countdown (u16 for 16-bit linked mode)
-    div_out: [bool; 4], // Divider output toggle (flips on underflow -> square wave)
-    channel_out: [bool; 4], // Final channel output after distortion gating
+    div_out: [bool; 4], // Channel output flip-flop, latched at underflow (process_channel)
+    channel_out: [bool; 4], // Final channel output after high-pass filtering
     hp_ff: [bool; 2],   // High-pass filter flip-flop [ch1, ch2]
 
     // Polynomial counters (free-running LFSRs, clocked at 1.79 MHz)
@@ -142,9 +142,11 @@ const AUDCTL_HPF_CH1: u8 = 0x04; // Bit 2: High-pass filter Ch1 (clocked by Ch3)
 const AUDCTL_HPF_CH2: u8 = 0x02; // Bit 1: High-pass filter Ch2 (clocked by Ch4)
 const AUDCTL_CLOCK_15KHZ: u8 = 0x01; // Bit 0: 0 = 64 kHz base, 1 = 15 kHz base
 
-// AUDC (per-channel control) bit positions
-const AUDC_DIST_MASK: u8 = 0xE0; // Bits 7:5: distortion (polynomial select)
-const AUDC_DIST_SHIFT: u8 = 5; // Right-shift to extract distortion field
+// AUDC (per-channel control) bit positions. Bits 7:5 select the distortion
+// (which polynomial, if any, gates/samples the output); see process_channel().
+const AUDC_NOTPOLY5: u8 = 0x80; // Bit 7: 1 = bypass the poly5 clock gate (direct clock)
+const AUDC_POLY4: u8 = 0x40; // Bit 6: 1 = sample 4-bit poly, 0 = sample 17/9-bit poly
+const AUDC_PURE: u8 = 0x20; // Bit 5: 1 = pure tone (toggle), 0 = poly-sampled
 const AUDC_VOLUME_ONLY: u8 = 0x10; // Bit 4: 1 = force volume level (DAC mode), 0 = use poly/tone
 const AUDC_VOL_MASK: u8 = 0x0F; // Bits 3:0: volume (0-15)
 
@@ -391,8 +393,8 @@ impl Pokey {
                     let reload = (self.audf[0] as u16) | ((self.audf[1] as u16) << 8);
                     self.divider[0] = reload;
 
-                    // Toggle Ch2 output (Ch1 output is ignored in linked mode)
-                    self.div_out[1] = !self.div_out[1];
+                    // Update Ch2 output (Ch1 output is ignored in linked mode)
+                    self.process_channel(1);
 
                     // IRQ for Ch2 (Timer 2)
                     if (self.irqen & IRQ_TIMER2) != 0 {
@@ -407,7 +409,7 @@ impl Pokey {
             if ch1_tick {
                 if self.divider[0] == 0 {
                     self.divider[0] = self.audf[0] as u16;
-                    self.div_out[0] = !self.div_out[0];
+                    self.process_channel(0);
                     // IRQ for Ch1 (Timer 1)
                     if (self.irqen & IRQ_TIMER1) != 0 {
                         self.irqst &= !IRQ_TIMER1;
@@ -421,7 +423,7 @@ impl Pokey {
             if base_tick {
                 if self.divider[1] == 0 {
                     self.divider[1] = self.audf[1] as u16;
-                    self.div_out[1] = !self.div_out[1];
+                    self.process_channel(1);
                     // IRQ for Ch2 (Timer 2)
                     if (self.irqen & IRQ_TIMER2) != 0 {
                         self.irqst &= !IRQ_TIMER2;
@@ -447,7 +449,7 @@ impl Pokey {
                     let reload = (self.audf[2] as u16) | ((self.audf[3] as u16) << 8);
                     self.divider[2] = reload;
 
-                    self.div_out[3] = !self.div_out[3];
+                    self.process_channel(3);
 
                     // Capture Ch2 output into HPF flip-flop on Ch4 underflow edge
                     if (self.audctl & AUDCTL_HPF_CH2) != 0 {
@@ -467,7 +469,7 @@ impl Pokey {
             if ch3_tick {
                 if self.divider[2] == 0 {
                     self.divider[2] = self.audf[2] as u16;
-                    self.div_out[2] = !self.div_out[2];
+                    self.process_channel(2);
 
                     // Capture Ch1 output into HPF flip-flop on Ch3 underflow edge
                     if (self.audctl & AUDCTL_HPF_CH1) != 0 {
@@ -483,7 +485,7 @@ impl Pokey {
             if base_tick {
                 if self.divider[3] == 0 {
                     self.divider[3] = self.audf[3] as u16;
-                    self.div_out[3] = !self.div_out[3];
+                    self.process_channel(3);
 
                     // Capture Ch2 output into HPF flip-flop on Ch4 underflow edge
                     if (self.audctl & AUDCTL_HPF_CH2) != 0 {
@@ -500,25 +502,23 @@ impl Pokey {
             }
         }
 
-        // 4. Generate audio output
+        // 4. Generate audio output. Each channel's output flip-flop is already
+        // latched at its own underflow edge (see process_channel), so here we
+        // only apply the high-pass filter and mix the held levels. This matches
+        // MAME's per-channel mix: `(m_output ^ m_filter_sample) || VOLUME_ONLY`.
         let mut mixed_sample = 0.0;
 
         for i in 0..4 {
             let audc = self.audc[i];
             let vol = audc & AUDC_VOL_MASK;
-            let dist = (audc & AUDC_DIST_MASK) >> AUDC_DIST_SHIFT;
 
-            // When AUDC bit 4 is set, the channel output is forced to the
+            // When AUDC bit 4 is set, the channel output is forced on at the
             // volume level (bypassing tone/polynomial gating). This is
             // "volume only" mode, used for DAC-style sample playback.
             let volume_only = (audc & AUDC_VOLUME_ONLY) != 0;
 
-            let mut signal = if volume_only {
-                true
-            } else {
-                let poly_val = self.get_poly_output(dist);
-                self.div_out[i] && poly_val
-            };
+            // Held flip-flop output (updated only on underflow).
+            let mut signal = self.div_out[i];
 
             // High-pass filter: XOR with captured flip-flop value.
             // The flip-flop captures the source channel's output on the
@@ -532,7 +532,7 @@ impl Pokey {
 
             self.channel_out[i] = signal;
 
-            if signal {
+            if signal || volume_only {
                 mixed_sample += vol as f32;
             }
         }
@@ -592,39 +592,38 @@ impl Pokey {
         self.poly17 |= in0 << 16;
     }
 
-    /// Return the current output bit for the given distortion mode.
+    /// Update a channel's output flip-flop on a timer underflow, matching
+    /// MAME's `pokey_device::process_channel()`.
     ///
-    /// The 3-bit `dist` field from AUDC bits 7:5 selects which polynomial
-    /// counter combination gates the channel's square wave:
+    /// Crucially, the output bit is latched *only here* — on the channel's own
+    /// underflow edge — so the polynomial counters are sampled at the channel
+    /// rate, not at the 1.79 MHz master clock. The 5-bit polynomial acts as a
+    /// clock gate: unless `NOTPOLY5` (AUDC bit 7) is set, the flip-flop only
+    /// updates while poly5 is high (this is what makes poly5 alter pitch, not
+    /// just amplitude).
     ///
-    /// | dist | Polynomials      | Sound character            |
-    /// |------|------------------|----------------------------|
-    /// | 0    | 5-bit AND 17-bit | Harsh noise                |
-    /// | 1,3  | 5-bit only       | Buzzy tone                 |
-    /// | 2    | 5-bit AND 4-bit  | Gritty buzz                |
-    /// | 4    | 17-bit only      | White noise                |
-    /// | 5,7  | None (pure tone) | Clean square wave          |
-    /// | 6    | 4-bit only       | "Metallic" 15-cycle noise  |
-    ///
-    /// When AUDCTL bit 7 is set, the 17-bit counter is replaced by the
-    /// 9-bit counter (shorter period = coarser noise).
-    fn get_poly_output(&self, dist: u8) -> bool {
-        let poly9_mode = (self.audctl & AUDCTL_POLY9) != 0;
-        let p4 = (self.poly4 & 1) != 0;
-        let p5 = (self.poly5 & 1) != 0;
-        let p17 = if poly9_mode {
-            (self.poly9 & 1) != 0
-        } else {
-            (self.poly17 & 1) != 0
-        };
+    /// Once gated through, the distortion field (AUDC bits 6:5) selects the
+    /// source of the new bit:
+    /// - `PURE`  : toggle the flip-flop (clean square at channel rate / 2)
+    /// - `POLY4` : latch the 4-bit polynomial bit
+    /// - else, with AUDCTL bit 7 set: latch the 9-bit polynomial bit
+    /// - else    : latch the 17-bit polynomial bit
+    fn process_channel(&mut self, ch: usize) {
+        let audc = self.audc[ch];
 
-        match dist {
-            0 => p5 && p17, // 5-bit AND 17-bit
-            1 | 3 => p5,    // 5-bit only
-            2 => p5 && p4,  // 5-bit AND 4-bit
-            4 => p17,       // 17-bit only
-            6 => p4,        // 4-bit only
-            _ => true,      // Pure tone (covers 5, 7)
+        // poly5 gates whether the flip-flop updates at all.
+        if (audc & AUDC_NOTPOLY5) == 0 && (self.poly5 & 1) == 0 {
+            return;
+        }
+
+        if (audc & AUDC_PURE) != 0 {
+            self.div_out[ch] = !self.div_out[ch];
+        } else if (audc & AUDC_POLY4) != 0 {
+            self.div_out[ch] = (self.poly4 & 1) != 0;
+        } else if (self.audctl & AUDCTL_POLY9) != 0 {
+            self.div_out[ch] = (self.poly9 & 1) != 0;
+        } else {
+            self.div_out[ch] = (self.poly17 & 1) != 0;
         }
     }
 

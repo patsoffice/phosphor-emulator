@@ -321,3 +321,68 @@ fn test_default_impl() {
     assert!(!pokey.irq());
     assert_eq!(pokey.read_serout(), 0);
 }
+
+/// Count how many times the (0.0 / positive) output sample stream flips state.
+fn count_transitions(samples: &[f32]) -> usize {
+    samples
+        .windows(2)
+        .filter(|w| (w[0] > 0.05) != (w[1] > 0.05))
+        .count()
+}
+
+/// Regression test for the channel output-flip-flop model. The polynomial that
+/// gates/samples a channel must be read at the *channel* underflow rate, not at
+/// the master clock. The previous implementation recomputed
+/// `div_out && poly_bit` every master clock, so a noise channel toggled at ~1.79
+/// MHz instead of at its (slow) timer rate — making all distortion/noise sounds
+/// far too harsh. Here the output is latched only on underflow, so the number of
+/// transitions stays near the (rare) underflow count rather than exploding.
+#[test]
+fn test_noise_output_latched_at_channel_rate() {
+    // Resample 1:1 with the master clock so each tick yields one observable
+    // output sample (no box-filter smoothing).
+    let mut pokey = Pokey::with_clock(1_789_773, 1_789_773);
+    pokey.write(0x0F, 0x03); // SKCTL: take poly counters out of reset
+    pokey.write(0x08, 0x40); // AUDCTL: Ch1 clocked at 1.79 MHz (ticks every master clock)
+    pokey.write(0x00, 200); // AUDF1: long period (201 ticks) -> rare underflows
+    pokey.write(0x01, 0x0F); // AUDC1: 17-bit poly noise (poly5-gated), vol 15
+    pokey.write(0x09, 0); // STIMER reset
+
+    pokey.drain_audio();
+    for _ in 0..4020 {
+        pokey.tick();
+    }
+    let samples = pokey.drain_audio();
+    let transitions = count_transitions(&samples);
+
+    // ~20 underflows occur over this window, each of which may (poly5-gated)
+    // update the latched output. The old continuous-AND model produced hundreds.
+    assert!(
+        (1..=40).contains(&transitions),
+        "noise output should latch at the channel rate, got {transitions} transitions"
+    );
+}
+
+/// Guard the working path: a pure-tone channel must still toggle exactly once
+/// per timer period (this path was already correct and must not regress).
+#[test]
+fn test_pure_tone_frequency_unchanged() {
+    let mut pokey = Pokey::with_clock(1_789_773, 1_789_773);
+    pokey.write(0x08, 0x40); // AUDCTL: Ch1 at 1.79 MHz
+    pokey.write(0x00, 50); // AUDF1: period 51 master clocks
+    pokey.write(0x01, 0xAF); // AUDC1: pure tone, vol 15
+    pokey.write(0x09, 0); // STIMER reset
+
+    pokey.drain_audio();
+    for _ in 0..5100 {
+        pokey.tick();
+    }
+    let samples = pokey.drain_audio();
+    let transitions = count_transitions(&samples);
+
+    // 5100 / 51 = 100 toggles expected (one transition per period).
+    assert!(
+        (96..=104).contains(&transitions),
+        "pure tone should toggle once per period (~100), got {transitions}"
+    );
+}
