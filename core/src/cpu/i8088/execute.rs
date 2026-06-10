@@ -632,9 +632,9 @@ impl I8088 {
             // =============================================================
             0xD4 => {
                 let base = self.fetch_byte(bus, master);
-                if base != 0 {
-                    let al = self.al();
-                    self.set_ah(al / base);
+                let al = self.al();
+                if let Some(quotient) = al.checked_div(base) {
+                    self.set_ah(quotient);
                     self.set_al(al % base);
                     let result_al = self.al();
                     flags::update_szp8(&mut self.flags, result_al);
@@ -843,17 +843,14 @@ impl I8088 {
                     6 => {
                         // DIV r/m8: AL = AX / r/m8, AH = AX % r/m8
                         let val = self.read_operand8(operand, bus, master) as u16;
-                        if val != 0 {
-                            let quotient = self.ax / val;
-                            if quotient <= 0xFF {
+                        match self.ax.checked_div(val) {
+                            Some(quotient) if quotient <= 0xFF => {
                                 let remainder = self.ax % val;
                                 self.set_al(quotient as u8);
                                 self.set_ah(remainder as u8);
-                            } else {
-                                self.divide_error(bus, master);
                             }
-                        } else {
-                            self.divide_error(bus, master);
+                            // Divisor of zero or quotient overflow: INT 0
+                            _ => self.divide_error(bus, master),
                         }
                     }
                     7 => {
@@ -931,18 +928,15 @@ impl I8088 {
                     6 => {
                         // DIV r/m16: AX = DX:AX / r/m16, DX = DX:AX % r/m16
                         let val = self.read_operand16(operand, bus, master) as u32;
-                        if val != 0 {
-                            let dividend = ((self.dx as u32) << 16) | self.ax as u32;
-                            let quotient = dividend / val;
-                            if quotient <= 0xFFFF {
+                        let dividend = ((self.dx as u32) << 16) | self.ax as u32;
+                        match dividend.checked_div(val) {
+                            Some(quotient) if quotient <= 0xFFFF => {
                                 let remainder = dividend % val;
                                 self.ax = quotient as u16;
                                 self.dx = remainder as u16;
-                            } else {
-                                self.divide_error(bus, master);
                             }
-                        } else {
-                            self.divide_error(bus, master);
+                            // Divisor of zero or quotient overflow: INT 0
+                            _ => self.divide_error(bus, master),
                         }
                     }
                     7 => {
