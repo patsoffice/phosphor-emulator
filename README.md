@@ -86,7 +86,7 @@ This project uses a **workspace structure** to separate reusable components from
 
 Contains all reusable components — zero external dependencies:
 
-- CPU implementations (M6800, M6809, M6502, Z80, I8035, I8088)
+- CPU implementations (M6800, M6809, M6502, Z80, I8035, I8088, M68000)
 - Bus abstractions (Bus trait, BusMasterComponent)
 - Machine traits — `MachineCore` (frame execution contract) plus capability traits (`Renderable`, `AudioSource`, `InputReceiver`, `MachineDebug`, `SaveState`, `Nvram`, `Profilable`), bundled into the object-safe `FrontendMachine` for frontend use
 - Device trait (common interface for all peripherals: reset, read/write, tick)
@@ -115,7 +115,7 @@ Complete system implementations that wire core components together:
 - **QbertSystem** — Q*Bert on shared Gottlieb System 80 board (I8088 + M6502 sound + RIOT + DAC)
 - **GalagaSystem** — Galaga on shared Namco Galaga board (3×Z80 + WSG + 05XX starfield generator)
 - **GridleeSystem** — Videa arcade (M6809 + bitmap video + trackball — freely distributable ROMs)
-- Simple6502System, Simple6800System, Simple6809System, SimpleZ80System (test harnesses)
+- Simple6502System, Simple6800System, Simple6809System, SimpleZ80System, Simple68000System (test harnesses)
 
 ### Macros Crate (`phosphor-macros`)
 
@@ -142,6 +142,7 @@ SDL2 + egui windowed frontend — external dependencies: SDL2, zip, egui:
 - **Z80** — 1604 opcodes, 1,604,000 test vectors, validated against [SingleStepTests/z80](https://github.com/SingleStepTests/z80) with full register/flag/timing verification. See [cpu-validation/README_z80.md](cpu-validation/README_z80.md).
 - **I8035** — 229 opcodes, 229,000 test vectors, cross-validated against [mame4all](https://github.com/ValveSoftware/steamlink-sdk/tree/master/examples/mame4all) MCS-48. See [cpu-validation/README_i8035.md](cpu-validation/README_i8035.md).
 - **I8088** — 279 opcodes, 2,577,000 test vectors, validated against [SingleStepTests/8088](https://github.com/SingleStepTests/8088) with full register/flag/memory verification. See [cpu-validation/README_i8088.md](cpu-validation/README_i8088.md).
+- **M68000** — 12 instructions (M1 subset), 106,147 test vectors, validated against [SingleStepTests/680x0](https://github.com/SingleStepTests/680x0) with register/flag/memory (state-only) verification. See [core/src/cpu/m68000/README.md](core/src/cpu/m68000/README.md).
 
 ### Cross-Validation (`cross-validation/`)
 
@@ -223,7 +224,7 @@ assert_eq!(bus.memory[0x10], 0x42);
 
 ### CPUs
 
-- Motorola 68000 (32-bit address space, 16-bit data bus)
+- Motorola 68000 (32-bit registers, 16-bit data bus) — **in progress**: M1 foundation landed (word bus, full EA decoder, MOVE family, core ALU, SingleStepTests harness); remaining milestones M2-M7 (full ALU, branches, bit ops/MOVEM, exceptions/interrupts, disassembler, full validation coverage)
 
 ### Peripherals
 
