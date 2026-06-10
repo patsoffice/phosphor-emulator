@@ -14,6 +14,7 @@
 
 pub(crate) mod addressing;
 pub mod flags;
+mod move_ops;
 pub use flags::SrFlag;
 
 use crate::core::save_state::{SaveError, StateReader, StateWriter};
@@ -200,6 +201,17 @@ impl M68000 {
         }
     }
 
+    /// Complete an instruction that took `total_cycles` clock cycles: the
+    /// current tick already counts as one, and any remainder is burned as
+    /// bus-idle wait states.
+    pub(crate) fn finish(&mut self, total_cycles: u32) {
+        self.state = if total_cycles <= 1 {
+            ExecState::Fetch
+        } else {
+            ExecState::Execute(total_cycles - 1)
+        };
+    }
+
     /// Decode and execute one instruction, leaving `self.state` either back
     /// at `Fetch` or in `Execute(n)` to burn the remaining documented cycles.
     ///
@@ -209,14 +221,18 @@ impl M68000 {
     fn execute_instruction<B: Bus<Address = u32, Data = u16> + ?Sized>(
         &mut self,
         opcode: u16,
-        _bus: &mut B,
-        _master: BusMaster,
+        bus: &mut B,
+        master: BusMaster,
     ) {
-        let _line = (opcode >> 12) & 0xF;
-        // No instruction lines are implemented yet. Unimplemented opcodes are
-        // treated as 4-cycle NOPs; the illegal-instruction / line-A / line-F
-        // exceptions land in M5.
-        self.state = ExecState::Execute(3);
+        match (opcode >> 12) & 0xF {
+            // MOVE.b / MOVE.l / MOVE.w (and MOVEA for An destinations)
+            0x1..=0x3 => self.op_move(opcode, bus, master),
+            // MOVEQ (bit 8 set is unassigned on the 68000)
+            0x7 if opcode & 0x0100 == 0 => self.op_moveq(opcode),
+            // Remaining lines are treated as 4-cycle NOPs; the
+            // illegal-instruction / line-A / line-F exceptions land in M5.
+            _ => self.finish(4),
+        }
     }
 }
 

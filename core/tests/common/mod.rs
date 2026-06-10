@@ -1,12 +1,14 @@
 use phosphor_core::core::{Bus, BusMaster, bus::InterruptState};
 
 /// Minimal bus for testing: flat 64KB read/write memory, no peripherals.
+#[allow(dead_code)] // not every test binary that includes `common` uses it
 pub struct TestBus {
     pub memory: [u8; 0x10000],
     pub nmi: bool,
     pub irq: bool,
 }
 
+#[allow(dead_code)]
 impl TestBus {
     pub fn new() -> Self {
         Self {

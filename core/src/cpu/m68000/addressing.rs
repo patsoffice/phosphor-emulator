@@ -25,8 +25,6 @@
 //! Effective addresses are masked to the physical bus width (24 bits on the
 //! 68000/010) both when computed and when used.
 
-#![allow(dead_code)] // consumed by instruction dispatch starting with the MOVE family
-
 use super::M68000;
 use crate::core::{Bus, BusMaster};
 
@@ -85,6 +83,29 @@ pub(crate) enum Ea {
     Mem(u32),
     /// Immediate value (already fetched from the instruction stream).
     Imm(u32),
+}
+
+/// Documented effective-address calculation time in clock cycles for a
+/// *source* operand (M68000UM table 8-1): the extension-word fetches plus
+/// the operand read. Long operands add one extra word transaction (4 cycles)
+/// over byte/word for every memory mode.
+pub(crate) fn ea_cycles(mode: u8, reg: u8, size: Size) -> u32 {
+    let long = matches!(size, Size::Long);
+    let bw_l = |bw: u32, l: u32| if long { l } else { bw };
+    match mode & 7 {
+        0 | 1 => 0,          // Dn / An
+        2 | 3 => bw_l(4, 8), // (An) / (An)+
+        4 => bw_l(6, 10),    // -(An)
+        5 => bw_l(8, 12),    // d16(An)
+        6 => bw_l(10, 14),   // d8(An,Xn)
+        _ => match reg & 7 {
+            0 => bw_l(8, 12),  // abs.w
+            1 => bw_l(12, 16), // abs.l
+            2 => bw_l(8, 12),  // d16(PC)
+            3 => bw_l(10, 14), // d8(PC,Xn)
+            _ => bw_l(4, 8),   // #imm
+        },
+    }
 }
 
 /// Sign-extend a byte to 32 bits.
