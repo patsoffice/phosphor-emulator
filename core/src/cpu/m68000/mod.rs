@@ -12,6 +12,7 @@
 //! remaining documented cycles are burned as bus-idle wait states. Per-cycle
 //! bus traces and exact prefetch behavior are not modeled.
 
+pub(crate) mod addressing;
 pub mod flags;
 pub use flags::SrFlag;
 
@@ -103,6 +104,12 @@ pub struct M68000 {
     #[allow(dead_code)]
     #[save_skip(default)]
     pub(crate) opcode: u16,
+    /// Set when a word/long access used an odd address during the current
+    /// instruction. The address-error exception (vector 3) lands in M5;
+    /// until then this flag lets callers identify such accesses (the
+    /// validation harness skips them).
+    #[save_skip(default)]
+    pub(crate) address_error: bool,
 }
 
 impl Default for M68000 {
@@ -127,12 +134,19 @@ impl M68000 {
             halted: false,
             state: ExecState::Fetch,
             opcode: 0,
+            address_error: false,
         }
     }
 
     /// Returns true when the CPU is at an instruction boundary (ready to fetch).
     pub fn at_instruction_boundary(&self) -> bool {
         matches!(self.state, ExecState::Fetch)
+    }
+
+    /// True if the instruction that just executed performed a word or long
+    /// access at an odd address (would raise an address error on hardware).
+    pub fn took_address_error(&self) -> bool {
+        self.address_error
     }
 
     /// Mask an effective address to the physical address-bus width.
@@ -143,18 +157,6 @@ impl M68000 {
             M68kVariant::M68000 | M68kVariant::M68010 => addr & 0x00FF_FFFF,
             M68kVariant::M68020 | M68kVariant::M68030 => addr,
         }
-    }
-
-    /// Read a big-endian long word as two word transactions at `addr`/`addr+2`.
-    fn read_long_raw<B: Bus<Address = u32, Data = u16> + ?Sized>(
-        &mut self,
-        bus: &mut B,
-        master: BusMaster,
-        addr: u32,
-    ) -> u32 {
-        let hi = bus.read(master, self.mask_addr(addr));
-        let lo = bus.read(master, self.mask_addr(addr.wrapping_add(2)));
-        ((hi as u32) << 16) | lo as u32
     }
 
     /// Execute one bus cycle.
@@ -176,8 +178,8 @@ impl M68000 {
                 // Interrupt sampling at the instruction boundary lands in M5.
 
                 // Fetch the opcode word and execute the instruction atomically.
-                let opcode = bus.read(master, self.mask_addr(self.pc));
-                self.pc = self.pc.wrapping_add(2);
+                self.address_error = false;
+                let opcode = self.read_imm_word(bus, master);
                 self.opcode = opcode;
                 self.execute_instruction(opcode, bus, master);
             }
@@ -239,10 +241,11 @@ impl Cpu for M68000 {
         self.stopped = false;
         self.halted = false;
         self.nmi_previous = false;
+        self.address_error = false;
         self.state = ExecState::Fetch;
 
-        self.a[7] = self.read_long_raw(bus, master, 0x0000_0000);
-        self.pc = self.read_long_raw(bus, master, 0x0000_0004);
+        self.a[7] = self.read_long_at(bus, master, 0x0000_0000);
+        self.pc = self.read_long_at(bus, master, 0x0000_0004);
     }
 
     fn signal_interrupt(&mut self, _int: InterruptState) {
@@ -317,22 +320,27 @@ impl DebugCpu for M68000 {
 // Tests
 // ---------------------------------------------------------------------------
 
+/// Minimal word bus shared by the m68000 unit tests: 64 KB of big-endian
+/// byte memory served 16 bits at a time at even addresses.
 #[cfg(test)]
-mod tests {
-    use super::*;
+pub(crate) mod test_support {
+    use crate::core::{Bus, BusMaster, bus::InterruptState};
 
-    /// Minimal word bus: 64 KB of big-endian byte memory served 16 bits at a
-    /// time. The shared `TestBus68k` integration-test bus lands with the
-    /// word-bus system work; unit tests here only need reset vectors.
-    struct WordBus {
-        memory: Vec<u8>,
+    pub(crate) struct WordBus {
+        pub(crate) memory: Vec<u8>,
     }
 
     impl WordBus {
-        fn new() -> Self {
+        pub(crate) fn new() -> Self {
             Self {
                 memory: vec![0; 0x10000],
             }
+        }
+
+        /// Load bytes at a byte address (test setup helper).
+        pub(crate) fn load(&mut self, addr: u32, data: &[u8]) {
+            let start = addr as usize;
+            self.memory[start..start + data.len()].copy_from_slice(data);
         }
     }
 
@@ -358,6 +366,12 @@ mod tests {
             InterruptState::default()
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_support::WordBus;
+    use super::*;
 
     #[test]
     fn new_state() {
