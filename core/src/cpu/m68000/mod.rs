@@ -13,6 +13,7 @@
 //! bus traces and exact prefetch behavior are not modeled.
 
 pub(crate) mod addressing;
+mod alu;
 pub mod flags;
 mod move_ops;
 pub use flags::SrFlag;
@@ -225,10 +226,22 @@ impl M68000 {
         master: BusMaster,
     ) {
         match (opcode >> 12) & 0xF {
+            // ADDI / SUBI / CMPI (the rest of line 0x0 lands in M2/M4)
+            0x0 => {
+                if !self.op_imm_alu(opcode, bus, master) {
+                    self.finish(4);
+                }
+            }
             // MOVE.b / MOVE.l / MOVE.w (and MOVEA for An destinations)
             0x1..=0x3 => self.op_move(opcode, bus, master),
             // MOVEQ (bit 8 set is unassigned on the 68000)
             0x7 if opcode & 0x0100 == 0 => self.op_moveq(opcode),
+            // SUB / SUBA
+            0x9 => self.op_add_sub(opcode, bus, master, false),
+            // CMP / CMPA
+            0xB => self.op_cmp(opcode, bus, master),
+            // ADD / ADDA
+            0xD => self.op_add_sub(opcode, bus, master, true),
             // Remaining lines are treated as 4-cycle NOPs; the
             // illegal-instruction / line-A / line-F exceptions land in M5.
             _ => self.finish(4),
