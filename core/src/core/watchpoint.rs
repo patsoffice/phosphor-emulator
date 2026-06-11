@@ -201,6 +201,18 @@ impl Watchpoints {
         self.check(cpu_index, source, addr, WatchpointKind::Write, value, width)
     }
 
+    /// True if the exact address is watched for `kind` in `cpu_index`'s
+    /// address space. Does not queue a hit — callers that populate richer
+    /// metadata (e.g. region names) match first and then [`push_hit`].
+    ///
+    /// [`push_hit`]: Self::push_hit
+    #[inline]
+    pub fn matches(&self, cpu_index: usize, addr: u32, kind: WatchpointKind) -> bool {
+        self.watched
+            .iter()
+            .any(|w| w.cpu_index == cpu_index && w.addr == addr && w.kind == kind)
+    }
+
     fn check(
         &mut self,
         cpu_index: usize,
@@ -210,11 +222,7 @@ impl Watchpoints {
         value: u32,
         width: u8,
     ) -> bool {
-        let matched = self
-            .watched
-            .iter()
-            .any(|w| w.cpu_index == cpu_index && w.addr == addr && w.kind == kind);
-        if !matched {
+        if !self.matches(cpu_index, addr, kind) {
             return false;
         }
         self.push_hit(WatchpointHit {

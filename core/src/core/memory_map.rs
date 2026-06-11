@@ -19,7 +19,8 @@
 //! sibling (`AddressSpace32`) are described in
 //! `docs/designs/address-space-refactor.md`.
 
-use crate::core::watchpoint::{DebugAccessSource, WatchpointPhase};
+use crate::core::bus::BusMaster;
+use crate::core::watchpoint::{DebugAccessSource, WatchpointPhase, Watchpoints};
 
 // Canonical watchpoint types live in `core::watchpoint`; re-exported here so
 // existing `memory_map::WatchpointHit` paths keep working during migration.
@@ -466,11 +467,13 @@ pub struct AddressSpace16 {
     map: AddressMap16,
     backing: MemoryBacking,
 
+    /// Number of pages with at least one watch flag set; the hot-path
+    /// zero-cost check.
     active_watch_count: u16,
-    pending_hit: Option<WatchpointHit>,
-    /// Exact watched addresses. Page flags serve as a fast filter; this vec
-    /// provides address-level precision so only the exact address fires.
-    watched_addrs: Vec<(u16, WatchpointKind)>,
+    /// Exact-address watchpoint set and hit queue. Page flags serve as a
+    /// fast filter; this provides address-level precision so only the
+    /// exact address fires.
+    watchpoints: Watchpoints,
 }
 
 /// Migration-only alias for [`AddressSpace16`].
@@ -488,8 +491,7 @@ impl AddressSpace16 {
             map: AddressMap16::new(),
             backing: MemoryBacking::new(),
             active_watch_count: 0,
-            pending_hit: None,
-            watched_addrs: Vec::new(),
+            watchpoints: Watchpoints::new(),
         }
     }
 
@@ -663,8 +665,8 @@ impl AddressSpace16 {
     // Watchpoint methods
     // -----------------------------------------------------------------------
 
-    /// Check for a read watchpoint hit. Returns true if the page has an
-    /// active read watchpoint, setting `pending_hit`.
+    /// Check for a read watchpoint hit. Returns true if the exact address
+    /// is read-watched, queueing a hit.
     ///
     /// When no watchpoints are set anywhere (`active_watch_count == 0`),
     /// this compiles to a single branch-not-taken — effectively zero cost.
@@ -676,18 +678,18 @@ impl AddressSpace16 {
         let page = &self.map.pages[(addr >> 8) as usize];
         if page.watch_read
             && self
-                .watched_addrs
-                .iter()
-                .any(|&(a, k)| a == addr && k == WatchpointKind::Read)
+                .watchpoints
+                .matches(0, addr as u32, WatchpointKind::Read)
         {
-            self.pending_hit = Some(self.make_hit(addr, WatchpointKind::Read, value));
+            let hit = self.make_hit(addr, WatchpointKind::Read, value);
+            self.watchpoints.push_hit(hit);
             return true;
         }
         false
     }
 
-    /// Check for a write watchpoint hit. Returns true if the page has an
-    /// active write watchpoint, setting `pending_hit`.
+    /// Check for a write watchpoint hit. Returns true if the exact address
+    /// is write-watched, queueing a hit.
     #[inline(always)]
     pub fn check_write_watch(&mut self, addr: u16, value: u8) -> bool {
         if self.active_watch_count == 0 {
@@ -696,11 +698,11 @@ impl AddressSpace16 {
         let page = &self.map.pages[(addr >> 8) as usize];
         if page.watch_write
             && self
-                .watched_addrs
-                .iter()
-                .any(|&(a, k)| a == addr && k == WatchpointKind::Write)
+                .watchpoints
+                .matches(0, addr as u32, WatchpointKind::Write)
         {
-            self.pending_hit = Some(self.make_hit(addr, WatchpointKind::Write, value));
+            let hit = self.make_hit(addr, WatchpointKind::Write, value);
+            self.watchpoints.push_hit(hit);
             return true;
         }
         false
@@ -727,10 +729,11 @@ impl AddressSpace16 {
         }
     }
 
-    /// Consume the pending watchpoint hit (polled by debugger after each tick).
+    /// Consume the oldest queued watchpoint hit (polled by debugger after
+    /// each tick). Hits queue in FIFO order; none are lost between polls.
     #[inline]
     pub fn take_hit(&mut self) -> Option<WatchpointHit> {
-        self.pending_hit.take()
+        self.watchpoints.take_hit()
     }
 
     /// True if any watchpoint is set on any page.
@@ -742,16 +745,9 @@ impl AddressSpace16 {
     /// Set a watchpoint on the exact address `addr`.
     ///
     /// The page-level flag is set as a fast filter; the exact address is
-    /// recorded in `watched_addrs` so only that address fires.
+    /// recorded in the watchpoint set so only that address fires.
     pub fn set_watchpoint(&mut self, addr: u16, kind: WatchpointKind) {
-        // Record exact address (avoid duplicates)
-        if !self
-            .watched_addrs
-            .iter()
-            .any(|&(a, k)| a == addr && k == kind)
-        {
-            self.watched_addrs.push((addr, kind));
-        }
+        self.watchpoints.set(0, addr as u32, kind);
         let page = &mut self.map.pages[(addr >> 8) as usize];
         let was_active = page.watch_read || page.watch_write;
         match kind {
@@ -768,16 +764,15 @@ impl AddressSpace16 {
     /// The page-level flag is only cleared if no other watched addresses
     /// on the same page still need it.
     pub fn clear_watchpoint(&mut self, addr: u16, kind: WatchpointKind) {
-        // Remove exact address entry
-        self.watched_addrs
-            .retain(|&(a, k)| !(a == addr && k == kind));
+        self.watchpoints.clear(0, addr as u32, kind);
 
         // Check if any remaining entries share this page and kind
         let page_idx = (addr >> 8) as usize;
         let still_has_kind = self
-            .watched_addrs
+            .watchpoints
+            .watched()
             .iter()
-            .any(|&(a, k)| (a >> 8) as usize == page_idx && k == kind);
+            .any(|w| (w.addr >> 8) as usize == page_idx && w.kind == kind);
 
         let page = &mut self.map.pages[page_idx];
         let was_active = page.watch_read || page.watch_write;
@@ -800,8 +795,7 @@ impl AddressSpace16 {
             page.watch_write = false;
         }
         self.active_watch_count = 0;
-        self.pending_hit = None;
-        self.watched_addrs.clear();
+        self.watchpoints.clear_all();
     }
 
     // -----------------------------------------------------------------------
@@ -1345,18 +1339,32 @@ mod tests {
     }
 
     #[test]
-    fn last_hit_overwrites_previous() {
+    fn multiple_hits_queue_in_order() {
         let mut map = MemoryMap::new();
         map.region(RAM, "RAM", 0x0000, 0x10000, AccessKind::ReadWrite);
         map.set_watchpoint(0x1000, WatchpointKind::Read);
         map.set_watchpoint(0x1001, WatchpointKind::Read);
 
         map.check_read_watch(0x1000, 0xAA);
-        map.check_read_watch(0x1001, 0xBB); // overwrites previous
+        map.check_read_watch(0x1001, 0xBB); // queued behind the first
 
+        let hit = map.take_hit().unwrap();
+        assert_eq!(hit.addr, 0x1000);
+        assert_eq!(hit.value, 0xAA);
         let hit = map.take_hit().unwrap();
         assert_eq!(hit.addr, 0x1001);
         assert_eq!(hit.value, 0xBB);
+        assert!(map.take_hit().is_none());
+    }
+
+    #[test]
+    fn hit_records_region_name() {
+        let mut map = MemoryMap::new();
+        map.region(RAM, "Work RAM", 0x0000, 0x8000, AccessKind::ReadWrite);
+        map.set_watchpoint(0x1234, WatchpointKind::Write);
+
+        map.check_write_watch(0x1234, 0x42);
+        assert_eq!(map.take_hit().unwrap().region, Some("Work RAM"));
     }
 
     // -----------------------------------------------------------------------
