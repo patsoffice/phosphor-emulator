@@ -53,7 +53,10 @@ pub struct PageEntry {
     /// Byte offset into the region for the start of this page.
     /// For a region starting at address 0x4000 mapped to pages 0x40..0x43,
     /// page 0x40 has `base_offset = 0`, page 0x41 has `base_offset = 0x100`, etc.
-    pub base_offset: u16,
+    ///
+    /// `u32` (not `u16`) so banked regions and shared backing stores are not
+    /// limited to 64 KB of region-local offsets.
+    pub base_offset: u32,
 
     /// True if read watchpoint is active on this page.
     pub watch_read: bool,
@@ -136,62 +139,25 @@ pub enum DebugWrite {
     UnmappedIgnored,
 }
 
-/// Composed address-space container for a 16-bit (64 KB) address space.
+/// Page-table decode metadata for a 16-bit (64 KB) address space.
 ///
-/// Owns page-table decode (256 pages of 256 bytes each), backing storage,
-/// and watchpoint state. Machines build this at init time and use it in
-/// `Bus::read`/`write` to look up the `region_id` for dispatch.
-///
-/// Non-I/O regions (RAM, ROM) have backing memory stored in a flat `Vec<u8>`.
-/// This enables side-effect-free `debug_read`/`debug_write` for the debugger
-/// without requiring machines to write manual `memory_read` methods.
-///
-/// The debugger uses it for watchpoints (per-page flags checked only on
-/// flagged pages) and region introspection (list of named regions).
-pub struct AddressSpace16 {
+/// Owns only the 256-entry page table and the region descriptors — it maps
+/// addresses to region IDs and answers region lookup questions. It holds no
+/// bytes and no watchpoint hits; [`AddressSpace16`] composes it with those
+/// services.
+pub struct AddressMap16 {
     pages: [PageEntry; 256],
     regions: Vec<RegionDescriptor>,
-
-    /// Flat backing store for all non-I/O regions (RAM, ROM, etc.).
-    backing: Vec<u8>,
-    /// Offset into `backing` for each region_id. `u32::MAX` = no backing (I/O).
-    region_backing: [u32; 256],
-    /// Byte length of each region's backing.
-    region_lengths: [u32; 256],
-
-    active_watch_count: u16,
-    pending_hit: Option<WatchpointHit>,
-    /// Exact watched addresses. Page flags serve as a fast filter; this vec
-    /// provides address-level precision so only the exact address fires.
-    watched_addrs: Vec<(u16, WatchpointKind)>,
 }
 
-/// Migration-only alias for [`AddressSpace16`].
-///
-/// New code should use `AddressSpace16` directly; this alias exists so
-/// current machines keep compiling while call sites migrate, and will be
-/// removed once migration completes (see
-/// `docs/designs/address-space-refactor.md`, Phase 7).
-pub type MemoryMap = AddressSpace16;
-
-impl AddressSpace16 {
-    /// Create a new address space with all pages unmapped.
+impl AddressMap16 {
+    /// Create a new map with all pages unmapped.
     pub fn new() -> Self {
         Self {
             pages: [PageEntry::default(); 256],
             regions: Vec::new(),
-            backing: Vec::new(),
-            region_backing: [u32::MAX; 256],
-            region_lengths: [0; 256],
-            active_watch_count: 0,
-            pending_hit: None,
-            watched_addrs: Vec::new(),
         }
     }
-
-    // -----------------------------------------------------------------------
-    // Builder methods (called at machine init time)
-    // -----------------------------------------------------------------------
 
     /// Map a contiguous address range to a region.
     ///
@@ -224,7 +190,7 @@ impl AddressSpace16 {
             if idx < 256 {
                 self.pages[idx] = PageEntry {
                     region_id: id,
-                    base_offset: (i as u16) * 256,
+                    base_offset: (i as u32) * 256,
                     watch_read: false,
                     watch_write: false,
                 };
@@ -243,45 +209,6 @@ impl AddressSpace16 {
             start_addr: start,
             end_addr,
             access,
-        });
-
-        // Allocate backing memory for non-I/O regions
-        if matches!(
-            access,
-            AccessKind::ReadWrite | AccessKind::ReadOnly | AccessKind::WriteOnly
-        ) {
-            let offset = self.backing.len() as u32;
-            self.backing.resize(self.backing.len() + length as usize, 0);
-            self.region_backing[id as usize] = offset;
-            self.region_lengths[id as usize] = length;
-        }
-
-        self
-    }
-
-    /// Register a region with backing memory but no page mapping.
-    ///
-    /// Used for bank-switched overlays (e.g., banked ROM) that share an
-    /// address range with another region. Use `remap_pages()` to switch
-    /// pages to this region at runtime.
-    pub fn backing_region(
-        &mut self,
-        id: impl Into<RegionId>,
-        name: &'static str,
-        length: u32,
-    ) -> &mut Self {
-        let id = id.into();
-        let offset = self.backing.len() as u32;
-        self.backing.resize(self.backing.len() + length as usize, 0);
-        self.region_backing[id as usize] = offset;
-        self.region_lengths[id as usize] = length;
-
-        self.regions.push(RegionDescriptor {
-            id,
-            name,
-            start_addr: 0,
-            end_addr: 0,
-            access: AccessKind::ReadOnly,
         });
 
         self
@@ -319,21 +246,17 @@ impl AddressSpace16 {
         start_page: u8,
         page_count: u8,
         new_region_id: impl Into<RegionId>,
-        new_base_offset: u16,
+        new_base_offset: u32,
     ) {
         let new_region_id = new_region_id.into();
         for i in 0..page_count as usize {
             let idx = start_page as usize + i;
             if idx < 256 {
                 self.pages[idx].region_id = new_region_id;
-                self.pages[idx].base_offset = new_base_offset + (i as u16) * 256;
+                self.pages[idx].base_offset = new_base_offset + (i as u32) * 256;
             }
         }
     }
-
-    // -----------------------------------------------------------------------
-    // Dispatch helpers (called on the hot path)
-    // -----------------------------------------------------------------------
 
     /// Look up the page entry for an address.
     #[inline(always)]
@@ -349,6 +272,183 @@ impl AddressSpace16 {
     pub fn region_offset(&self, addr: u16) -> usize {
         let page = self.page(addr);
         page.base_offset as usize + (addr & 0xFF) as usize
+    }
+
+    /// Get all named region descriptors.
+    pub fn regions(&self) -> &[RegionDescriptor] {
+        &self.regions
+    }
+
+    /// Get the region descriptor for the page containing `addr`, if mapped.
+    pub fn region_at(&self, addr: u16) -> Option<&RegionDescriptor> {
+        let id = self.page(addr).region_id;
+        if id == UNMAPPED {
+            return None;
+        }
+        self.regions.iter().find(|r| r.id == id)
+    }
+}
+
+impl Default for AddressMap16 {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Composed address-space container for a 16-bit (64 KB) address space.
+///
+/// Composes page-table decode ([`AddressMap16`]), backing storage, and
+/// watchpoint state. Machines build this at init time and use it in
+/// `Bus::read`/`write` to look up the `region_id` for dispatch.
+///
+/// Non-I/O regions (RAM, ROM) have backing memory stored in a flat `Vec<u8>`.
+/// This enables side-effect-free `debug_read`/`debug_write` for the debugger
+/// without requiring machines to write manual `memory_read` methods.
+///
+/// The debugger uses it for watchpoints (per-page flags checked only on
+/// flagged pages) and region introspection (list of named regions).
+pub struct AddressSpace16 {
+    map: AddressMap16,
+
+    /// Flat backing store for all non-I/O regions (RAM, ROM, etc.).
+    backing: Vec<u8>,
+    /// Offset into `backing` for each region_id. `u32::MAX` = no backing (I/O).
+    region_backing: [u32; 256],
+    /// Byte length of each region's backing.
+    region_lengths: [u32; 256],
+
+    active_watch_count: u16,
+    pending_hit: Option<WatchpointHit>,
+    /// Exact watched addresses. Page flags serve as a fast filter; this vec
+    /// provides address-level precision so only the exact address fires.
+    watched_addrs: Vec<(u16, WatchpointKind)>,
+}
+
+/// Migration-only alias for [`AddressSpace16`].
+///
+/// New code should use `AddressSpace16` directly; this alias exists so
+/// current machines keep compiling while call sites migrate, and will be
+/// removed once migration completes (see
+/// `docs/designs/address-space-refactor.md`, Phase 7).
+pub type MemoryMap = AddressSpace16;
+
+impl AddressSpace16 {
+    /// Create a new address space with all pages unmapped.
+    pub fn new() -> Self {
+        Self {
+            map: AddressMap16::new(),
+            backing: Vec::new(),
+            region_backing: [u32::MAX; 256],
+            region_lengths: [0; 256],
+            active_watch_count: 0,
+            pending_hit: None,
+            watched_addrs: Vec::new(),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Builder methods (called at machine init time)
+    // -----------------------------------------------------------------------
+
+    /// Map a contiguous address range to a region.
+    ///
+    /// `start` must be page-aligned (low 8 bits == 0) and `length` must be
+    /// a multiple of 256. Sets page entries, adds a region descriptor, and
+    /// allocates backing memory for non-I/O regions.
+    pub fn region(
+        &mut self,
+        id: impl Into<RegionId>,
+        name: &'static str,
+        start: u16,
+        length: u32,
+        access: AccessKind,
+    ) -> &mut Self {
+        let id = id.into();
+        self.map.region(id, name, start, length, access);
+
+        // Allocate backing memory for non-I/O regions
+        if matches!(
+            access,
+            AccessKind::ReadWrite | AccessKind::ReadOnly | AccessKind::WriteOnly
+        ) {
+            self.allocate_backing(id, length);
+        }
+
+        self
+    }
+
+    /// Register a region with backing memory but no page mapping.
+    ///
+    /// Used for bank-switched overlays (e.g., banked ROM) that share an
+    /// address range with another region. Use `remap_pages()` to switch
+    /// pages to this region at runtime.
+    pub fn backing_region(
+        &mut self,
+        id: impl Into<RegionId>,
+        name: &'static str,
+        length: u32,
+    ) -> &mut Self {
+        let id = id.into();
+        self.allocate_backing(id, length);
+
+        self.map.regions.push(RegionDescriptor {
+            id,
+            name,
+            start_addr: 0,
+            end_addr: 0,
+            access: AccessKind::ReadOnly,
+        });
+
+        self
+    }
+
+    /// Allocate `length` zeroed bytes of backing for `region_id`.
+    fn allocate_backing(&mut self, region_id: RegionId, length: u32) {
+        let offset = self.backing.len() as u32;
+        self.backing.resize(self.backing.len() + length as usize, 0);
+        self.region_backing[region_id as usize] = offset;
+        self.region_lengths[region_id as usize] = length;
+    }
+
+    /// Copy page entries from a source range to a mirror range.
+    ///
+    /// All three parameters must be page-aligned and `length` must be a
+    /// multiple of 256. Watch flags are not copied (mirrors start clean).
+    pub fn mirror(&mut self, mirror_start: u16, source_start: u16, length: u32) -> &mut Self {
+        self.map.mirror(mirror_start, source_start, length);
+        self
+    }
+
+    /// Remap a range of pages to a different region (for bank switching).
+    ///
+    /// Called at runtime when a bank register is written.
+    pub fn remap_pages(
+        &mut self,
+        start_page: u8,
+        page_count: u8,
+        new_region_id: impl Into<RegionId>,
+        new_base_offset: u32,
+    ) {
+        self.map
+            .remap_pages(start_page, page_count, new_region_id, new_base_offset);
+    }
+
+    // -----------------------------------------------------------------------
+    // Dispatch helpers (called on the hot path)
+    // -----------------------------------------------------------------------
+
+    /// Look up the page entry for an address.
+    #[inline(always)]
+    pub fn page(&self, addr: u16) -> &PageEntry {
+        self.map.page(addr)
+    }
+
+    /// Compute the byte offset into the region for an address.
+    ///
+    /// This is `page.base_offset + (addr & 0xFF)` — the region-local index.
+    #[inline(always)]
+    pub fn region_offset(&self, addr: u16) -> usize {
+        self.map.region_offset(addr)
     }
 
     // -----------------------------------------------------------------------
@@ -490,7 +590,7 @@ impl AddressSpace16 {
         if self.active_watch_count == 0 {
             return false;
         }
-        let page = &self.pages[(addr >> 8) as usize];
+        let page = &self.map.pages[(addr >> 8) as usize];
         if page.watch_read
             && self
                 .watched_addrs
@@ -510,7 +610,7 @@ impl AddressSpace16 {
         if self.active_watch_count == 0 {
             return false;
         }
-        let page = &self.pages[(addr >> 8) as usize];
+        let page = &self.map.pages[(addr >> 8) as usize];
         if page.watch_write
             && self
                 .watched_addrs
@@ -569,7 +669,7 @@ impl AddressSpace16 {
         {
             self.watched_addrs.push((addr, kind));
         }
-        let page = &mut self.pages[(addr >> 8) as usize];
+        let page = &mut self.map.pages[(addr >> 8) as usize];
         let was_active = page.watch_read || page.watch_write;
         match kind {
             WatchpointKind::Read => page.watch_read = true,
@@ -596,7 +696,7 @@ impl AddressSpace16 {
             .iter()
             .any(|&(a, k)| (a >> 8) as usize == page_idx && k == kind);
 
-        let page = &mut self.pages[page_idx];
+        let page = &mut self.map.pages[page_idx];
         let was_active = page.watch_read || page.watch_write;
         if !still_has_kind {
             match kind {
@@ -612,7 +712,7 @@ impl AddressSpace16 {
 
     /// Clear all watchpoints on all pages.
     pub fn clear_all_watchpoints(&mut self) {
-        for page in &mut self.pages {
+        for page in &mut self.map.pages {
             page.watch_read = false;
             page.watch_write = false;
         }
@@ -627,16 +727,12 @@ impl AddressSpace16 {
 
     /// Get all named region descriptors.
     pub fn regions(&self) -> &[RegionDescriptor] {
-        &self.regions
+        self.map.regions()
     }
 
     /// Get the region descriptor for the page containing `addr`, if mapped.
     pub fn region_at(&self, addr: u16) -> Option<&RegionDescriptor> {
-        let id = self.page(addr).region_id;
-        if id == UNMAPPED {
-            return None;
-        }
-        self.regions.iter().find(|r| r.id == id)
+        self.map.region_at(addr)
     }
 }
 
@@ -650,6 +746,108 @@ impl Default for AddressSpace16 {
 // Tests
 // ---------------------------------------------------------------------------
 
+/// Decode-only tests for the bare [`AddressMap16`] (no backing, no
+/// watchpoints).
+#[cfg(test)]
+mod address_map16_tests {
+    use super::*;
+
+    const RAM: RegionId = 1;
+    const ROM: RegionId = 2;
+    const IO: RegionId = 3;
+
+    #[test]
+    fn new_map_is_all_unmapped() {
+        let map = AddressMap16::new();
+        for page_idx in 0..=255u8 {
+            let addr = (page_idx as u16) << 8;
+            assert_eq!(map.page(addr).region_id, UNMAPPED);
+        }
+        assert!(map.regions().is_empty());
+    }
+
+    #[test]
+    fn region_sets_page_entries_and_descriptor() {
+        let mut map = AddressMap16::new();
+        map.region(RAM, "RAM", 0x4000, 0x1000, AccessKind::ReadWrite);
+
+        for page_idx in 0x40..0x50u8 {
+            let addr = (page_idx as u16) << 8;
+            let entry = map.page(addr);
+            assert_eq!(entry.region_id, RAM);
+            assert_eq!(entry.base_offset, (page_idx as u32 - 0x40) * 256);
+        }
+        assert_eq!(map.page(0x3F00).region_id, UNMAPPED);
+        assert_eq!(map.page(0x5000).region_id, UNMAPPED);
+
+        let desc = &map.regions()[0];
+        assert_eq!(desc.name, "RAM");
+        assert_eq!(desc.start_addr, 0x4000);
+        assert_eq!(desc.end_addr, 0x4FFF);
+        assert_eq!(desc.access, AccessKind::ReadWrite);
+    }
+
+    #[test]
+    fn region_offset_is_region_local() {
+        let mut map = AddressMap16::new();
+        map.region(ROM, "ROM", 0xD000, 0x3000, AccessKind::ReadOnly);
+
+        assert_eq!(map.region_offset(0xD000), 0);
+        assert_eq!(map.region_offset(0xD042), 0x42);
+        assert_eq!(map.region_offset(0xFFFF), 0x2FFF);
+    }
+
+    #[test]
+    fn mirror_copies_page_entries() {
+        let mut map = AddressMap16::new();
+        map.region(RAM, "Work RAM", 0x4C00, 0x0400, AccessKind::ReadWrite)
+            .mirror(0xCC00, 0x4C00, 0x0400);
+
+        let src = map.page(0x4C00);
+        let dst = map.page(0xCC00);
+        assert_eq!(src.region_id, dst.region_id);
+        assert_eq!(src.base_offset, dst.base_offset);
+    }
+
+    #[test]
+    fn remap_pages_switches_region() {
+        let mut map = AddressMap16::new();
+        map.region(RAM, "RAM", 0x0000, 0x9000, AccessKind::ReadWrite);
+
+        map.remap_pages(0x00, 0x90, ROM, 0);
+        assert_eq!(map.page(0x0000).region_id, ROM);
+        assert_eq!(map.page(0x8F00).region_id, ROM);
+
+        map.remap_pages(0x00, 0x90, RAM, 0);
+        assert_eq!(map.page(0x0000).region_id, RAM);
+    }
+
+    #[test]
+    fn remap_pages_supports_offsets_beyond_64k() {
+        let mut map = AddressMap16::new();
+        map.region(RAM, "RAM", 0x0000, 0x4000, AccessKind::ReadWrite);
+
+        // Bank window pointing 128 KB into a large backing region —
+        // exercises the u32 widening of PageEntry::base_offset.
+        map.remap_pages(0x00, 0x40, ROM, 0x2_0000);
+        assert_eq!(map.page(0x0000).base_offset, 0x2_0000);
+        assert_eq!(map.page(0x0100).base_offset, 0x2_0100);
+        assert_eq!(map.region_offset(0x3FFF), 0x2_3FFF);
+    }
+
+    #[test]
+    fn region_at_finds_descriptor() {
+        let mut map = AddressMap16::new();
+        map.region(RAM, "Work RAM", 0x0000, 0x8000, AccessKind::ReadWrite)
+            .region(IO, "I/O", 0xC000, 0x1000, AccessKind::Io);
+
+        assert_eq!(map.region_at(0x1234).unwrap().name, "Work RAM");
+        assert_eq!(map.region_at(0xC042).unwrap().name, "I/O");
+        assert!(map.region_at(0xA000).is_none());
+    }
+}
+
+/// Composed [`AddressSpace16`] tests (decode + backing + watchpoints).
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -678,7 +876,7 @@ mod tests {
             let addr = (page_idx as u16) << 8;
             let entry = map.page(addr);
             assert_eq!(entry.region_id, RAM);
-            assert_eq!(entry.base_offset, (page_idx as u16) * 256);
+            assert_eq!(entry.base_offset, (page_idx as u32) * 256);
         }
 
         // Pages 0x80..0xFF should still be unmapped
