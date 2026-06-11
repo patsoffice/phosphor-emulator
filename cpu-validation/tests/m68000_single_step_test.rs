@@ -5,14 +5,10 @@
 //! counts and per-cycle bus transactions are not compared.
 //!
 //! The suite is gated incrementally: `should_run` enables only the files
-//! whose instructions are implemented (M1: MOVE/MOVEA/MOVEQ, ADD/ADDA,
-//! SUB/SUBA, CMP/CMPA). Within a file, individual tests are skipped when
-//! they exercise behavior that lands in M5: trace exceptions (initial T bit
-//! set) and address errors (odd PC or odd word/long operand address).
-//!
-//! The M1 instructions define every CCR bit, so no undefined-flag mask is
-//! needed yet; the per-opcode masks (DIVU/DIVS, CHK, ...) get wired when
-//! those instructions land.
+//! whose instructions are implemented. Within a file, individual tests are
+//! skipped when they exercise behavior that lands in M5: trace exceptions
+//! (initial T bit set) and address errors (odd PC or odd word/long operand
+//! address).
 
 use std::io::Read;
 use std::path::Path;
@@ -52,6 +48,18 @@ fn should_run(filename: &str) -> bool {
             | "CMP.l"
             | "CMPA.w"
             | "CMPA.l"
+            | "AND.b"
+            | "AND.w"
+            | "AND.l"
+            | "OR.b"
+            | "OR.w"
+            | "OR.l"
+            | "EOR.b"
+            | "EOR.w"
+            | "EOR.l"
+            | "TST.b"
+            | "TST.w"
+            | "TST.l"
     )
 }
 

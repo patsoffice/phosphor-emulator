@@ -5,7 +5,6 @@
 
 use super::M68000;
 use super::addressing::{Size, ea_cycles, sext8};
-use super::flags::SrFlag;
 use crate::core::{Bus, BusMaster};
 
 /// Destination effective-address time for MOVE (M68000UM table 8-2). Same as
@@ -59,10 +58,7 @@ impl M68000 {
         self.ea_write(bus, master, dst, size, value);
 
         if dst_mode != 1 {
-            self.set_flag(SrFlag::N, value & size.sign_bit() != 0);
-            self.set_flag(SrFlag::Z, value & size.mask() == 0);
-            self.set_flag(SrFlag::V, false);
-            self.set_flag(SrFlag::C, false);
+            self.set_flags_logical(size, value);
         }
 
         let cycles =
@@ -78,10 +74,7 @@ impl M68000 {
         let reg = ((opcode >> 9) & 7) as usize;
         let value = sext8(opcode as u8);
         self.d[reg] = value;
-        self.set_flag(SrFlag::N, value & Size::Long.sign_bit() != 0);
-        self.set_flag(SrFlag::Z, value == 0);
-        self.set_flag(SrFlag::V, false);
-        self.set_flag(SrFlag::C, false);
+        self.set_flags_logical(Size::Long, value);
         self.finish(4);
     }
 }

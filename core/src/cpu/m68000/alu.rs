@@ -1,8 +1,8 @@
 //! M68000 integer ALU — shared flag-setting arithmetic cores.
 //!
-//! Submodules hold the instruction families (`binary` = ADD/SUB/CMP now;
-//! AND/OR/EOR and the X/BCD variants land in M2). The sized add/subtract
-//! cores live here so every family shares one flag computation.
+//! Submodules hold the instruction families. The sized add/subtract cores
+//! and the logical N/Z/V/C rule live here so every family shares one flag
+//! computation.
 
 pub mod binary;
 
@@ -11,6 +11,17 @@ use super::addressing::Size;
 use super::flags::SrFlag;
 
 impl M68000 {
+    /// Set the flags for a logical / data-movement result: N and Z from the
+    /// sized value, V and C cleared. X is *never* touched by this rule
+    /// (AND/OR/EOR/NOT/TST/MOVE/CLR/Scc all leave it alone).
+    pub(crate) fn set_flags_logical(&mut self, size: Size, value: u32) {
+        let value = value & size.mask();
+        self.set_flag(SrFlag::N, value & size.sign_bit() != 0);
+        self.set_flag(SrFlag::Z, value == 0);
+        self.set_flag(SrFlag::V, false);
+        self.set_flag(SrFlag::C, false);
+    }
+
     /// Sized add core: returns `(a + b)` masked to `size` and sets N/Z/V/C.
     ///
     /// X is *not* touched here — ADD-family callers set X = C themselves,

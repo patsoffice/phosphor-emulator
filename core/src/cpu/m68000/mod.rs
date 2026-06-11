@@ -16,6 +16,7 @@ pub(crate) mod addressing;
 mod alu;
 pub mod flags;
 mod move_ops;
+use alu::binary::LogicalOp;
 pub use flags::SrFlag;
 
 use crate::core::save_state::{SaveError, StateReader, StateWriter};
@@ -225,8 +226,11 @@ impl M68000 {
         bus: &mut B,
         master: BusMaster,
     ) {
+        let opmode = (opcode >> 6) & 7;
+        let ea_mode = (opcode >> 3) & 7;
         match (opcode >> 12) & 0xF {
-            // ADDI / SUBI / CMPI (the rest of line 0x0 lands in M2/M4)
+            // ORI/ANDI/SUBI/ADDI/EORI/CMPI (bit ops land in M4, the
+            // to-CCR/to-SR variants in M5)
             0x0 => {
                 if !self.op_imm_alu(opcode, bus, master) {
                     self.finish(4);
@@ -234,14 +238,40 @@ impl M68000 {
             }
             // MOVE.b / MOVE.l / MOVE.w (and MOVEA for An destinations)
             0x1..=0x3 => self.op_move(opcode, bus, master),
+            // TST (the rest of the line-0x4 "misc" ops land in M2-M5)
+            0x4 if opcode & 0x0F00 == 0x0A00 => self.op_tst(opcode, bus, master),
             // MOVEQ (bit 8 set is unassigned on the 68000)
             0x7 if opcode & 0x0100 == 0 => self.op_moveq(opcode),
-            // SUB / SUBA
-            0x9 => self.op_add_sub(opcode, bus, master, false),
-            // CMP / CMPA
-            0xB => self.op_cmp(opcode, bus, master),
-            // ADD / ADDA
-            0xD => self.op_add_sub(opcode, bus, master, true),
+            // OR; the line also carries DIVU/DIVS (M2 muldiv) and SBCD (M2
+            // extended arithmetic) plus the illegal PACK/UNPK slots
+            0x8 => match opmode {
+                3 | 7 => self.finish(4),                // DIVU / DIVS
+                4..=6 if ea_mode < 2 => self.finish(4), // SBCD / illegal
+                _ => self.op_logical(opcode, bus, master, LogicalOp::Or),
+            },
+            // SUB / SUBA (SUBX lands in M2 extended arithmetic)
+            0x9 => match opmode {
+                4..=6 if ea_mode < 2 => self.finish(4), // SUBX
+                _ => self.op_add_sub(opcode, bus, master, false),
+            },
+            // CMP / CMPA / EOR (CMPM lands in M2 extended arithmetic)
+            0xB => match opmode {
+                4..=6 if ea_mode == 1 => self.finish(4), // CMPM
+                4..=6 => self.op_logical(opcode, bus, master, LogicalOp::Eor),
+                _ => self.op_cmp(opcode, bus, master),
+            },
+            // AND; the line also carries MULU/MULS (M2 muldiv), ABCD (M2
+            // extended arithmetic), and EXG (M4)
+            0xC => match opmode {
+                3 | 7 => self.finish(4),                // MULU / MULS
+                4..=6 if ea_mode < 2 => self.finish(4), // ABCD / EXG
+                _ => self.op_logical(opcode, bus, master, LogicalOp::And),
+            },
+            // ADD / ADDA (ADDX lands in M2 extended arithmetic)
+            0xD => match opmode {
+                4..=6 if ea_mode < 2 => self.finish(4), // ADDX
+                _ => self.op_add_sub(opcode, bus, master, true),
+            },
             // Remaining lines are treated as 4-cycle NOPs; the
             // illegal-instruction / line-A / line-F exceptions land in M5.
             _ => self.finish(4),
@@ -443,6 +473,9 @@ mod tests {
         let mut cpu = M68000::new();
         let mut bus = WordBus::new();
         cpu.pc = 0x1000;
+        // Line-A opcodes are unassigned (the trap lands in M5); until then
+        // they execute as bounded NOPs.
+        bus.load(0x1000, &[0xA0, 0x00]);
 
         // First tick fetches and "executes"; instruction must complete in a
         // bounded number of cycles and advance PC by one word.
