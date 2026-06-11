@@ -1,6 +1,6 @@
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
-use phosphor_core::core::machine::{InputButton, InputReceiver, Machine};
+use phosphor_core::core::machine::{InputButton, InputReceiver, Machine, MachineCore, SaveState};
 use phosphor_core::core::memory_map::{AccessKind, MemoryMap};
 use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
@@ -323,8 +323,8 @@ impl InputReceiver for AsteroidsSystem {
     }
 }
 
-impl Machine for AsteroidsSystem {
-    crate::machine_save_state!("asteroids", atari_dvg::TIMING);
+impl MachineCore for AsteroidsSystem {
+    crate::machine_core_metadata!("asteroids", atari_dvg::TIMING);
 
     fn run_frame(&mut self) {
         bus_split!(self, bus => {
@@ -351,6 +351,12 @@ impl Machine for AsteroidsSystem {
     }
 }
 
+impl SaveState for AsteroidsSystem {
+    crate::machine_save_state!();
+}
+
+crate::impl_default_frontend_capabilities!(AsteroidsSystem);
+
 // ---------------------------------------------------------------------------
 // Machine registry
 // ---------------------------------------------------------------------------
@@ -369,7 +375,6 @@ inventory::submit! {
 mod tests {
     use super::*;
     use crate::atari_dvg::Region;
-    use phosphor_core::core::machine::Machine;
     use phosphor_core::cpu::CpuStateTrait;
 
     #[test]

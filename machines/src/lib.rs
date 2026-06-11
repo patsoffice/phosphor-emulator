@@ -280,8 +280,6 @@ pub(crate) use impl_board_debug;
 ///     fn reset(&mut self) { ... }
 /// }
 /// ```
-// TODO(machine-caps): remove the unused allows once machines are converted.
-#[allow(unused_macros)]
 macro_rules! machine_core_metadata {
     ($id:expr, $timing:expr) => {
         fn frame_rate_hz(&self) -> f64 {
@@ -292,7 +290,6 @@ macro_rules! machine_core_metadata {
         }
     };
 }
-#[allow(unused_imports)]
 pub(crate) use machine_core_metadata;
 
 /// Implements default-only frontend capabilities for machines without
@@ -301,14 +298,12 @@ pub(crate) use machine_core_metadata;
 /// Expands to empty `Nvram` and `Profilable` impls. Machines that override
 /// either capability must write that impl by hand instead of using this
 /// macro (never hide non-default behavior in macros).
-#[allow(unused_macros)]
 macro_rules! impl_default_frontend_capabilities {
     ($type:ty) => {
         impl phosphor_core::core::machine::Nvram for $type {}
         impl phosphor_core::core::machine::Profilable for $type {}
     };
 }
-#[allow(unused_imports)]
 pub(crate) use impl_default_frontend_capabilities;
 
 /// Generates standard `save_state()`/`load_state()` methods inside an
@@ -323,32 +318,8 @@ pub(crate) use impl_default_frontend_capabilities;
 ///     crate::machine_save_state!();
 /// }
 /// ```
-///
-/// The two-arg form is transitional (expands inside `impl Machine` blocks)
-/// and goes away once all machines use the capability traits.
 macro_rules! machine_save_state {
     () => {
-        fn save_state(&self) -> Option<Vec<u8>> {
-            Some(phosphor_core::core::save_state::save_machine(
-                self,
-                self.machine_id(),
-            ))
-        }
-        fn load_state(
-            &mut self,
-            data: &[u8],
-        ) -> Result<(), phosphor_core::core::save_state::SaveError> {
-            let id = self.machine_id().to_string();
-            phosphor_core::core::save_state::load_machine(self, &id, data)
-        }
-    };
-    ($id:expr, $timing:expr) => {
-        fn frame_rate_hz(&self) -> f64 {
-            $timing.frame_rate_hz()
-        }
-        fn machine_id(&self) -> &str {
-            $id
-        }
         fn save_state(&self) -> Option<Vec<u8>> {
             Some(phosphor_core::core::save_state::save_machine(
                 self,

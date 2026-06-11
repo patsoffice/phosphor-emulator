@@ -1,7 +1,9 @@
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::debug::{BusDebug, DebugCpu, Debuggable};
-use phosphor_core::core::machine::{AudioSource, InputReceiver, Machine, MachineDebug, Renderable};
+use phosphor_core::core::machine::{
+    AudioSource, InputReceiver, MachineCore, MachineDebug, Nvram, Profilable, Renderable, SaveState,
+};
 use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
 use phosphor_core::device::Er2055;
@@ -1080,8 +1082,8 @@ impl MachineDebug for DigDugSystem {
     }
 }
 
-impl Machine for DigDugSystem {
-    crate::machine_save_state!("digdug", namco_galaga::TIMING);
+impl MachineCore for DigDugSystem {
+    crate::machine_core_metadata!("digdug", namco_galaga::TIMING);
 
     fn run_frame(&mut self) {
         bus_split!(self, bus => {
@@ -1112,7 +1114,13 @@ impl Machine for DigDugSystem {
             self.board.sound_cpu.reset(bus, BusMaster::Cpu(2));
         });
     }
+}
 
+impl SaveState for DigDugSystem {
+    crate::machine_save_state!();
+}
+
+impl Nvram for DigDugSystem {
     fn save_nvram(&self) -> Option<&[u8]> {
         Some(self.earom.snapshot())
     }
@@ -1121,6 +1129,8 @@ impl Machine for DigDugSystem {
         self.earom.load_from(data);
     }
 }
+
+impl Profilable for DigDugSystem {}
 
 // ---------------------------------------------------------------------------
 // Machine registry

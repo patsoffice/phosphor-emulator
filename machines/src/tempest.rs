@@ -1,6 +1,9 @@
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
-use phosphor_core::core::machine::{AnalogInput, AudioSource, InputButton, InputReceiver, Machine};
+use phosphor_core::core::machine::{
+    AnalogInput, AudioSource, InputButton, InputReceiver, Machine, MachineCore, Nvram, Profilable,
+    SaveState,
+};
 use phosphor_core::core::memory_map::{AccessKind, MemoryMap};
 use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
@@ -551,8 +554,8 @@ impl InputReceiver for TempestSystem {
 
 crate::impl_board_debug!(TempestSystem, board, atari_avg::TIMING, debug_tick_pre);
 
-impl Machine for TempestSystem {
-    crate::machine_save_state!("tempest", atari_avg::TIMING);
+impl MachineCore for TempestSystem {
+    crate::machine_core_metadata!("tempest", atari_avg::TIMING);
 
     fn run_frame(&mut self) {
         self.update_pot_inputs();
@@ -597,7 +600,13 @@ impl Machine for TempestSystem {
             self.board.cpu.reset(bus, BusMaster::Cpu(0));
         });
     }
+}
 
+impl SaveState for TempestSystem {
+    crate::machine_save_state!();
+}
+
+impl Nvram for TempestSystem {
     fn save_nvram(&self) -> Option<&[u8]> {
         Some(self.earom.snapshot())
     }
@@ -606,6 +615,8 @@ impl Machine for TempestSystem {
         self.earom.load_from(data);
     }
 }
+
+impl Profilable for TempestSystem {}
 
 // ---------------------------------------------------------------------------
 // Machine registry
@@ -624,7 +635,6 @@ inventory::submit! {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use phosphor_core::core::machine::Machine;
     use phosphor_core::cpu::CpuStateTrait;
 
     #[test]

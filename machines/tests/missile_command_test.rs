@@ -1,4 +1,4 @@
-use phosphor_core::core::machine::{InputReceiver, Machine, Renderable};
+use phosphor_core::core::machine::{InputReceiver, MachineCore, Renderable};
 use phosphor_core::core::{Bus, BusMaster};
 use phosphor_machines::missile_command::{
     INPUT_COIN, INPUT_FIRE_CENTER, INPUT_FIRE_LEFT, INPUT_FIRE_RIGHT, INPUT_START1, INPUT_START2,

@@ -1,7 +1,9 @@
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::debug::{BusDebug, DebugCpu, Debuggable};
-use phosphor_core::core::machine::{AudioSource, InputReceiver, Machine, MachineDebug, Renderable};
+use phosphor_core::core::machine::{
+    AudioSource, InputReceiver, MachineCore, MachineDebug, Renderable, SaveState,
+};
 use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
 use phosphor_core::gfx;
@@ -972,8 +974,8 @@ impl MachineDebug for GalagaSystem {
     }
 }
 
-impl Machine for GalagaSystem {
-    crate::machine_save_state!("galaga", namco_galaga::TIMING);
+impl MachineCore for GalagaSystem {
+    crate::machine_core_metadata!("galaga", namco_galaga::TIMING);
 
     fn run_frame(&mut self) {
         bus_split!(self, bus => {
@@ -1005,6 +1007,12 @@ impl Machine for GalagaSystem {
         });
     }
 }
+
+impl SaveState for GalagaSystem {
+    crate::machine_save_state!();
+}
+
+crate::impl_default_frontend_capabilities!(GalagaSystem);
 
 // ---------------------------------------------------------------------------
 // Machine registry

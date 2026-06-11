@@ -4,11 +4,11 @@
 //! - save → load → save produces identical bytes (round-trip)
 //! - corrupted machine IDs are rejected
 
-use phosphor_core::core::machine::Machine;
+use phosphor_core::core::machine::SaveState;
 
 /// Generate standard save-state round-trip tests for a machine.
 ///
-/// `$create` must be an expression producing a `Machine` impl with
+/// `$create` must be an expression producing a machine with
 /// `save_state()` / `load_state()` support.
 macro_rules! save_state_tests {
     ($mod_name:ident, $create:expr) => {

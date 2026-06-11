@@ -1,7 +1,7 @@
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
-    AnalogInput, AudioSource, InputButton, InputReceiver, Machine, Renderable,
+    AnalogInput, AudioSource, InputButton, InputReceiver, MachineCore, Renderable, SaveState,
 };
 use phosphor_core::core::memory_map::{AccessKind, MemoryMap};
 use phosphor_core::core::save_state::{self, SaveError, Saveable, StateReader, StateWriter};
@@ -865,7 +865,7 @@ impl Saveable for MissileCommandSystem {
     }
 }
 
-impl Machine for MissileCommandSystem {
+impl MachineCore for MissileCommandSystem {
     fn run_frame(&mut self) {
         for _ in 0..TIMING.cycles_per_frame() {
             self.tick();
@@ -908,7 +908,9 @@ impl Machine for MissileCommandSystem {
     fn machine_id(&self) -> &str {
         "missile_command"
     }
+}
 
+impl SaveState for MissileCommandSystem {
     fn save_state(&self) -> Option<Vec<u8>> {
         Some(save_state::save_machine(self, self.machine_id()))
     }
@@ -918,6 +920,8 @@ impl Machine for MissileCommandSystem {
         save_state::load_machine(self, &id, data)
     }
 }
+
+crate::impl_default_frontend_capabilities!(MissileCommandSystem);
 
 // ---------------------------------------------------------------------------
 // Machine registry
@@ -938,7 +942,6 @@ inventory::submit! {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use phosphor_core::core::machine::Machine;
     use phosphor_core::cpu::CpuStateTrait;
 
     #[test]
@@ -965,7 +968,7 @@ mod tests {
         sys.watchdog_frame_count = 5;
 
         // Save
-        let data = Machine::save_state(&sys).expect("save_state should return Some");
+        let data = SaveState::save_state(&sys).expect("save_state should return Some");
         let cpu_snap = sys.cpu.snapshot();
 
         // Mutate everything
@@ -974,7 +977,7 @@ mod tests {
         sys2.clock = 999;
 
         // Load
-        Machine::load_state(&mut sys2, &data).unwrap();
+        SaveState::load_state(&mut sys2, &data).unwrap();
 
         // Verify
         assert_eq!(sys2.cpu.snapshot(), cpu_snap);
@@ -1003,10 +1006,10 @@ mod tests {
         let mut sys = MissileCommandSystem::new();
         sys.map.region_data_mut(Region::Rom)[0] = 0xDE;
 
-        let data = Machine::save_state(&sys).unwrap();
+        let data = SaveState::save_state(&sys).unwrap();
 
         let mut sys2 = MissileCommandSystem::new();
-        Machine::load_state(&mut sys2, &data).unwrap();
+        SaveState::load_state(&mut sys2, &data).unwrap();
 
         assert_eq!(sys2.map.region_data_mut(Region::Rom)[0], 0x00);
     }

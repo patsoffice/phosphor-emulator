@@ -1,4 +1,4 @@
-use phosphor_core::core::machine::{InputReceiver, Machine, Renderable};
+use phosphor_core::core::machine::{InputReceiver, MachineCore, Renderable};
 use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::m6809::CcFlag;
 use phosphor_machines::joust::JoustSystem;

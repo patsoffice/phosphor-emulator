@@ -1,6 +1,8 @@
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
-use phosphor_core::core::machine::{InputButton, InputReceiver, Machine};
+use phosphor_core::core::machine::{
+    InputButton, InputReceiver, MachineCore, Nvram, Profilable, SaveState,
+};
 use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
 use phosphor_macros::Saveable;
@@ -316,16 +318,8 @@ impl InputReceiver for JoustSystem {
     }
 }
 
-impl Machine for JoustSystem {
-    crate::machine_save_state!("joust", williams::TIMING);
-
-    fn save_nvram(&self) -> Option<&[u8]> {
-        Some(self.board.save_cmos())
-    }
-
-    fn load_nvram(&mut self, data: &[u8]) {
-        self.board.load_cmos(data);
-    }
+impl MachineCore for JoustSystem {
+    crate::machine_core_metadata!("joust", williams::TIMING);
 
     fn run_frame(&mut self) {
         self.board
@@ -351,6 +345,22 @@ impl Machine for JoustSystem {
     }
 }
 
+impl SaveState for JoustSystem {
+    crate::machine_save_state!();
+}
+
+impl Nvram for JoustSystem {
+    fn save_nvram(&self) -> Option<&[u8]> {
+        Some(self.board.save_cmos())
+    }
+
+    fn load_nvram(&mut self, data: &[u8]) {
+        self.board.load_cmos(data);
+    }
+}
+
+impl Profilable for JoustSystem {}
+
 // ---------------------------------------------------------------------------
 // Machine registry
 // ---------------------------------------------------------------------------
@@ -374,7 +384,6 @@ inventory::submit! {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use phosphor_core::core::machine::Machine;
     use phosphor_core::cpu::CpuStateTrait;
 
     #[test]

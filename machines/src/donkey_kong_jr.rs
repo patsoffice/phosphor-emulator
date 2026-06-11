@@ -1,6 +1,6 @@
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
-use phosphor_core::core::machine::{InputButton, InputReceiver, Machine};
+use phosphor_core::core::machine::{InputButton, InputReceiver, MachineCore, SaveState};
 use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
 use phosphor_macros::Saveable;
@@ -500,8 +500,8 @@ impl InputReceiver for DkongJrSystem {
     }
 }
 
-impl Machine for DkongJrSystem {
-    crate::machine_save_state!("dkongjr", tkg04::TIMING);
+impl MachineCore for DkongJrSystem {
+    crate::machine_core_metadata!("dkongjr", tkg04::TIMING);
 
     fn run_frame(&mut self) {
         bus_split!(self, bus => {
@@ -520,6 +520,12 @@ impl Machine for DkongJrSystem {
         });
     }
 }
+
+impl SaveState for DkongJrSystem {
+    crate::machine_save_state!();
+}
+
+crate::impl_default_frontend_capabilities!(DkongJrSystem);
 
 // ---------------------------------------------------------------------------
 // Parent "dkongjr" ROM set support (ROM_CONTINUE layout)

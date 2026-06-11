@@ -1,6 +1,6 @@
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
-use phosphor_core::core::machine::{InputReceiver, Machine};
+use phosphor_core::core::machine::{InputReceiver, MachineCore, SaveState};
 use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
 use phosphor_macros::Saveable;
@@ -205,8 +205,8 @@ impl InputReceiver for PacmanSystem {
     }
 }
 
-impl Machine for PacmanSystem {
-    crate::machine_save_state!("pacman", namco_pac::TIMING);
+impl MachineCore for PacmanSystem {
+    crate::machine_core_metadata!("pacman", namco_pac::TIMING);
 
     fn run_frame(&mut self) {
         bus_split!(self, bus => {
@@ -223,6 +223,12 @@ impl Machine for PacmanSystem {
         });
     }
 }
+
+impl SaveState for PacmanSystem {
+    crate::machine_save_state!();
+}
+
+crate::impl_default_frontend_capabilities!(PacmanSystem);
 
 // ---------------------------------------------------------------------------
 // Machine registry
@@ -244,7 +250,6 @@ inventory::submit! {
 mod tests {
     use super::*;
     use crate::namco_pac::Region;
-    use phosphor_core::core::machine::Machine;
     use phosphor_core::cpu::CpuStateTrait;
 
     #[test]

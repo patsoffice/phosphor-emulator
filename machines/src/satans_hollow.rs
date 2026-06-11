@@ -1,6 +1,8 @@
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
-use phosphor_core::core::machine::{InputButton, InputReceiver, Machine};
+use phosphor_core::core::machine::{
+    InputButton, InputReceiver, Machine, MachineCore, Nvram, Profilable, SaveState,
+};
 use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
 use phosphor_macros::Saveable;
@@ -380,18 +382,8 @@ impl InputReceiver for SatansHollowSystem {
     }
 }
 
-impl Machine for SatansHollowSystem {
-    crate::machine_save_state!("shollow", mcr2::TIMING);
-
-    fn save_nvram(&self) -> Option<&[u8]> {
-        Some(self.board.map.region_data(mcr2::Region::Nvram))
-    }
-
-    fn load_nvram(&mut self, data: &[u8]) {
-        let nvram = self.board.map.region_data_mut(mcr2::Region::Nvram);
-        let len = data.len().min(nvram.len());
-        nvram[..len].copy_from_slice(&data[..len]);
-    }
+impl MachineCore for SatansHollowSystem {
+    crate::machine_core_metadata!("shollow", mcr2::TIMING);
 
     fn run_frame(&mut self) {
         bus_split!(self, bus => {
@@ -411,6 +403,24 @@ impl Machine for SatansHollowSystem {
         self.board.ssio.set_input_port(3, 0x00);
     }
 }
+
+impl SaveState for SatansHollowSystem {
+    crate::machine_save_state!();
+}
+
+impl Nvram for SatansHollowSystem {
+    fn save_nvram(&self) -> Option<&[u8]> {
+        Some(self.board.map.region_data(mcr2::Region::Nvram))
+    }
+
+    fn load_nvram(&mut self, data: &[u8]) {
+        let nvram = self.board.map.region_data_mut(mcr2::Region::Nvram);
+        let len = data.len().min(nvram.len());
+        nvram[..len].copy_from_slice(&data[..len]);
+    }
+}
+
+impl Profilable for SatansHollowSystem {}
 
 // ---------------------------------------------------------------------------
 // Machine registry
@@ -433,7 +443,6 @@ inventory::submit! {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use phosphor_core::core::machine::Machine;
     use phosphor_core::cpu::CpuStateTrait;
 
     #[test]

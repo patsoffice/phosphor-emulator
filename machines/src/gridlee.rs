@@ -1,7 +1,8 @@
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
-    AnalogInput, AudioSource, InputButton, InputReceiver, Machine, Renderable,
+    AnalogInput, AudioSource, InputButton, InputReceiver, MachineCore, Nvram, Profilable,
+    Renderable, SaveState,
 };
 use phosphor_core::core::memory_map::{AccessKind, MemoryMap};
 use phosphor_core::core::save_state::{self, SaveError, Saveable, StateReader, StateWriter};
@@ -959,7 +960,7 @@ impl Saveable for GridleeSystem {
     }
 }
 
-impl Machine for GridleeSystem {
+impl MachineCore for GridleeSystem {
     fn run_frame(&mut self) {
         for _ in 0..TIMING.cycles_per_frame() {
             self.tick();
@@ -988,16 +989,6 @@ impl Machine for GridleeSystem {
         });
     }
 
-    fn save_nvram(&self) -> Option<&[u8]> {
-        Some(self.map.region_data(Region::Nvram))
-    }
-
-    fn load_nvram(&mut self, data: &[u8]) {
-        let nvram = self.map.region_data_mut(Region::Nvram);
-        let len = data.len().min(nvram.len());
-        nvram[..len].copy_from_slice(&data[..len]);
-    }
-
     fn frame_rate_hz(&self) -> f64 {
         TIMING.frame_rate_hz()
     }
@@ -1005,7 +996,9 @@ impl Machine for GridleeSystem {
     fn machine_id(&self) -> &str {
         "gridlee"
     }
+}
 
+impl SaveState for GridleeSystem {
     fn save_state(&self) -> Option<Vec<u8>> {
         Some(save_state::save_machine(self, self.machine_id()))
     }
@@ -1015,6 +1008,20 @@ impl Machine for GridleeSystem {
         save_state::load_machine(self, &id, data)
     }
 }
+
+impl Nvram for GridleeSystem {
+    fn save_nvram(&self) -> Option<&[u8]> {
+        Some(self.map.region_data(Region::Nvram))
+    }
+
+    fn load_nvram(&mut self, data: &[u8]) {
+        let nvram = self.map.region_data_mut(Region::Nvram);
+        let len = data.len().min(nvram.len());
+        nvram[..len].copy_from_slice(&data[..len]);
+    }
+}
+
+impl Profilable for GridleeSystem {}
 
 // ---------------------------------------------------------------------------
 // Machine registry
@@ -1035,7 +1042,6 @@ inventory::submit! {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use phosphor_core::core::machine::Machine;
     use phosphor_core::cpu::CpuStateTrait;
 
     fn make_system() -> GridleeSystem {
@@ -1630,7 +1636,7 @@ mod tests {
         sys.watchdog_frame_count = 3;
 
         // Save
-        let data = Machine::save_state(&sys).expect("save_state should return Some");
+        let data = SaveState::save_state(&sys).expect("save_state should return Some");
         let cpu_snap = sys.cpu.snapshot();
 
         // Mutate everything
@@ -1639,7 +1645,7 @@ mod tests {
         sys2.clock = 999;
 
         // Load
-        Machine::load_state(&mut sys2, &data).unwrap();
+        SaveState::load_state(&mut sys2, &data).unwrap();
 
         // Verify
         assert_eq!(sys2.cpu.snapshot(), cpu_snap);
@@ -1673,10 +1679,10 @@ mod tests {
         sys.map.region_data_mut(Region::Rom)[0] = 0xDE;
         sys.gfx_rom[0] = 0xAD;
 
-        let data = Machine::save_state(&sys).unwrap();
+        let data = SaveState::save_state(&sys).unwrap();
 
         let mut sys2 = make_system();
-        Machine::load_state(&mut sys2, &data).unwrap();
+        SaveState::load_state(&mut sys2, &data).unwrap();
 
         assert_eq!(sys2.map.region_data_mut(Region::Rom)[0], 0x00);
         assert_eq!(sys2.gfx_rom[0], 0x00);

@@ -349,64 +349,12 @@ impl<T> FrontendMachine for T where
 {
 }
 
-/// Machine-agnostic interface for emulated systems.
-///
-/// Transitional trait: machines are being migrated to [`MachineCore`] plus
-/// the capability traits ([`SaveState`], [`Nvram`], [`Profilable`]), bundled
-/// for frontend use by [`FrontendMachine`]. Once all machines are converted,
-/// this becomes a compatibility alias for [`FrontendMachine`].
-pub trait Machine: Renderable + AudioSource + InputReceiver + MachineDebug {
-    /// Run one frame of emulation (advance the clock by one frame's worth of cycles).
-    fn run_frame(&mut self);
+/// Compatibility alias for [`FrontendMachine`] during the capability-trait
+/// migration. New code should use [`FrontendMachine`] (frontend bundle) or
+/// [`MachineCore`] (execution contract) directly.
+pub trait Machine: FrontendMachine {}
 
-    /// Reset the machine to its initial power-on state.
-    fn reset(&mut self);
-
-    /// Native frame rate in Hz (e.g., 60.10 for Joust, 61.04 for Missile Command).
-    /// Used by the frontend for real-time frame throttling.
-    fn frame_rate_hz(&self) -> f64 {
-        60.0
-    }
-
-    /// Short identifier for this machine type (e.g., "joust", "pacman").
-    /// Used to validate save files against the correct machine.
-    fn machine_id(&self) -> &str {
-        ""
-    }
-
-    /// Capture complete machine state for later restoration.
-    /// Returns `None` if this machine does not support save states.
-    fn save_state(&self) -> Option<Vec<u8>> {
-        None
-    }
-
-    /// Restore machine state from a previous `save_state()` snapshot.
-    fn load_state(&mut self, _data: &[u8]) -> Result<(), SaveError> {
-        Err(SaveError::InvalidFormat("save states not supported".into()))
-    }
-
-    /// Return battery-backed RAM contents for saving, or None if this machine has none.
-    fn save_nvram(&self) -> Option<&[u8]> {
-        None
-    }
-
-    /// Load battery-backed RAM contents from a previous save.
-    fn load_nvram(&mut self, _data: &[u8]) {}
-
-    /// Enable or disable internal sub-span profiling.
-    ///
-    /// Machines that support fine-grained timing should start/stop capturing
-    /// per-device or per-CPU measurements when this is called.
-    fn set_profiling(&mut self, _enabled: bool) {}
-
-    /// Return sub-span timing from the last `run_frame()` call.
-    ///
-    /// Machines that override `set_profiling` can report detailed breakdowns
-    /// (e.g., main CPU, sound CPU, scanline rendering, blitter DMA).
-    fn frame_profile_spans(&self) -> &[ProfileSpan] {
-        &[]
-    }
-}
+impl<T> Machine for T where T: FrontendMachine {}
 
 #[cfg(test)]
 mod tests {

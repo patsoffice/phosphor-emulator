@@ -1,6 +1,8 @@
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
-use phosphor_core::core::machine::{AudioSource, InputButton, InputReceiver, Machine};
+use phosphor_core::core::machine::{
+    AudioSource, InputButton, InputReceiver, Machine, MachineCore, Nvram, Profilable, SaveState,
+};
 use phosphor_core::core::memory_map::{AccessKind, MemoryMap};
 use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
@@ -394,8 +396,8 @@ crate::impl_board_debug!(
     debug_tick_pre
 );
 
-impl Machine for AsteroidsDeluxeSystem {
-    crate::machine_save_state!("astdelux", atari_dvg::TIMING);
+impl MachineCore for AsteroidsDeluxeSystem {
+    crate::machine_core_metadata!("astdelux", atari_dvg::TIMING);
 
     fn run_frame(&mut self) {
         bus_split!(self, bus => {
@@ -427,7 +429,13 @@ impl Machine for AsteroidsDeluxeSystem {
             self.board.cpu.reset(bus, BusMaster::Cpu(0));
         });
     }
+}
 
+impl SaveState for AsteroidsDeluxeSystem {
+    crate::machine_save_state!();
+}
+
+impl Nvram for AsteroidsDeluxeSystem {
     fn save_nvram(&self) -> Option<&[u8]> {
         Some(self.earom.snapshot())
     }
@@ -436,6 +444,8 @@ impl Machine for AsteroidsDeluxeSystem {
         self.earom.load_from(data);
     }
 }
+
+impl Profilable for AsteroidsDeluxeSystem {}
 
 // ---------------------------------------------------------------------------
 // Machine registry
@@ -455,7 +465,6 @@ inventory::submit! {
 mod tests {
     use super::*;
     use crate::atari_dvg::Region;
-    use phosphor_core::core::machine::Machine;
     use phosphor_core::cpu::CpuStateTrait;
 
     #[test]

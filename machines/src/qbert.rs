@@ -7,7 +7,9 @@ use std::time::Instant;
 
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
-use phosphor_core::core::machine::{InputButton, InputReceiver, Machine, ProfileSpan};
+use phosphor_core::core::machine::{
+    InputButton, InputReceiver, Machine, MachineCore, Nvram, Profilable, ProfileSpan, SaveState,
+};
 use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
 use phosphor_macros::Saveable;
@@ -393,18 +395,8 @@ impl InputReceiver for QbertSystem {
     }
 }
 
-impl Machine for QbertSystem {
-    crate::machine_save_state!("qbert", gottlieb::TIMING);
-
-    fn save_nvram(&self) -> Option<&[u8]> {
-        Some(self.board.map.region_data(gottlieb::Region::Nvram))
-    }
-
-    fn load_nvram(&mut self, data: &[u8]) {
-        let nvram = self.board.map.region_data_mut(gottlieb::Region::Nvram);
-        let len = data.len().min(nvram.len());
-        nvram[..len].copy_from_slice(&data[..len]);
-    }
+impl MachineCore for QbertSystem {
+    crate::machine_core_metadata!("qbert", gottlieb::TIMING);
 
     fn run_frame(&mut self) {
         let t0 = self.board.profiling.then(Instant::now);
@@ -433,14 +425,6 @@ impl Machine for QbertSystem {
         }
     }
 
-    fn set_profiling(&mut self, enabled: bool) {
-        self.board.profiling = enabled;
-    }
-
-    fn frame_profile_spans(&self) -> &[ProfileSpan] {
-        &self.board.profile_spans
-    }
-
     fn reset(&mut self) {
         self.board.reset_board();
         bus_split!(self, bus : u32 => {
@@ -448,6 +432,32 @@ impl Machine for QbertSystem {
         });
         // Re-initialize IN1 idle state
         self.board.input_ports[0] = 0x40;
+    }
+}
+
+impl SaveState for QbertSystem {
+    crate::machine_save_state!();
+}
+
+impl Nvram for QbertSystem {
+    fn save_nvram(&self) -> Option<&[u8]> {
+        Some(self.board.map.region_data(gottlieb::Region::Nvram))
+    }
+
+    fn load_nvram(&mut self, data: &[u8]) {
+        let nvram = self.board.map.region_data_mut(gottlieb::Region::Nvram);
+        let len = data.len().min(nvram.len());
+        nvram[..len].copy_from_slice(&data[..len]);
+    }
+}
+
+impl Profilable for QbertSystem {
+    fn set_profiling(&mut self, enabled: bool) {
+        self.board.profiling = enabled;
+    }
+
+    fn frame_profile_spans(&self) -> &[ProfileSpan] {
+        &self.board.profile_spans
     }
 }
 
@@ -472,7 +482,6 @@ inventory::submit! {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use phosphor_core::core::machine::Machine;
 
     #[test]
     fn save_load_round_trip() {

@@ -1,7 +1,8 @@
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
-    AnalogInput, AudioSource, InputButton, InputReceiver, Machine, Renderable,
+    AnalogInput, AudioSource, InputButton, InputReceiver, MachineCore, Nvram, Profilable,
+    Renderable, SaveState,
 };
 use phosphor_core::core::memory_map::{AccessKind, MemoryMap};
 use phosphor_core::core::save_state::{self, SaveError, Saveable, StateReader, StateWriter};
@@ -1103,7 +1104,7 @@ impl Saveable for CrystalCastlesSystem {
     }
 }
 
-impl Machine for CrystalCastlesSystem {
+impl MachineCore for CrystalCastlesSystem {
     fn run_frame(&mut self) {
         for _ in 0..TIMING.cycles_per_frame() {
             self.tick();
@@ -1146,16 +1147,6 @@ impl Machine for CrystalCastlesSystem {
         });
     }
 
-    fn save_nvram(&self) -> Option<&[u8]> {
-        Some(self.map.region_data(Region::Nvram))
-    }
-
-    fn load_nvram(&mut self, data: &[u8]) {
-        let nvram = self.map.region_data_mut(Region::Nvram);
-        let len = data.len().min(nvram.len());
-        nvram[..len].copy_from_slice(&data[..len]);
-    }
-
     fn frame_rate_hz(&self) -> f64 {
         TIMING.frame_rate_hz()
     }
@@ -1163,7 +1154,9 @@ impl Machine for CrystalCastlesSystem {
     fn machine_id(&self) -> &str {
         "ccastles"
     }
+}
 
+impl SaveState for CrystalCastlesSystem {
     fn save_state(&self) -> Option<Vec<u8>> {
         Some(save_state::save_machine(self, self.machine_id()))
     }
@@ -1173,6 +1166,20 @@ impl Machine for CrystalCastlesSystem {
         save_state::load_machine(self, &id, data)
     }
 }
+
+impl Nvram for CrystalCastlesSystem {
+    fn save_nvram(&self) -> Option<&[u8]> {
+        Some(self.map.region_data(Region::Nvram))
+    }
+
+    fn load_nvram(&mut self, data: &[u8]) {
+        let nvram = self.map.region_data_mut(Region::Nvram);
+        let len = data.len().min(nvram.len());
+        nvram[..len].copy_from_slice(&data[..len]);
+    }
+}
+
+impl Profilable for CrystalCastlesSystem {}
 
 // ---------------------------------------------------------------------------
 // Machine registry
@@ -1193,7 +1200,6 @@ inventory::submit! {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use phosphor_core::core::machine::Machine;
     use phosphor_core::cpu::CpuStateTrait;
 
     #[test]
@@ -1219,11 +1225,11 @@ mod tests {
         sys.watchdog_frame_count = 3;
         sys.dip_switches = 0x55;
 
-        let data = Machine::save_state(&sys).expect("save_state should return Some");
+        let data = SaveState::save_state(&sys).expect("save_state should return Some");
         let cpu_snap = sys.cpu.snapshot();
 
         let mut sys2 = CrystalCastlesSystem::new();
-        Machine::load_state(&mut sys2, &data).unwrap();
+        SaveState::load_state(&mut sys2, &data).unwrap();
 
         assert_eq!(sys2.cpu.snapshot(), cpu_snap);
         assert_eq!(sys2.map.region_data(Region::VideoRam)[0x1000], 0xAB);

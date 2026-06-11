@@ -1,6 +1,6 @@
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
-use phosphor_core::core::machine::{InputReceiver, Machine};
+use phosphor_core::core::machine::{InputReceiver, MachineCore, SaveState};
 use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
 use phosphor_macros::Saveable;
@@ -385,8 +385,8 @@ impl InputReceiver for MsPacmanSystem {
     }
 }
 
-impl Machine for MsPacmanSystem {
-    crate::machine_save_state!("mspacman", namco_pac::TIMING);
+impl MachineCore for MsPacmanSystem {
+    crate::machine_core_metadata!("mspacman", namco_pac::TIMING);
 
     fn run_frame(&mut self) {
         bus_split!(self, bus => {
@@ -404,6 +404,12 @@ impl Machine for MsPacmanSystem {
         });
     }
 }
+
+impl SaveState for MsPacmanSystem {
+    crate::machine_save_state!();
+}
+
+crate::impl_default_frontend_capabilities!(MsPacmanSystem);
 
 // ---------------------------------------------------------------------------
 // Machine registry
@@ -452,7 +458,6 @@ fn bitswap_data(val: u8) -> u8 {
 mod tests {
     use super::*;
     use crate::namco_pac::Region;
-    use phosphor_core::core::machine::Machine;
     use phosphor_core::cpu::CpuStateTrait;
 
     #[test]

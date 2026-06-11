@@ -1,6 +1,8 @@
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
-use phosphor_core::core::machine::{InputButton, InputReceiver, Machine};
+use phosphor_core::core::machine::{
+    InputButton, InputReceiver, MachineCore, Nvram, Profilable, SaveState,
+};
 use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
 use phosphor_macros::Saveable;
@@ -317,16 +319,8 @@ impl InputReceiver for RobotronSystem {
     }
 }
 
-impl Machine for RobotronSystem {
-    crate::machine_save_state!("robotron", williams::TIMING);
-
-    fn save_nvram(&self) -> Option<&[u8]> {
-        Some(self.board.save_cmos())
-    }
-
-    fn load_nvram(&mut self, data: &[u8]) {
-        self.board.load_cmos(data);
-    }
+impl MachineCore for RobotronSystem {
+    crate::machine_core_metadata!("robotron", williams::TIMING);
 
     fn run_frame(&mut self) {
         self.board.widget_pia.set_port_a_input(self.widget_port_a);
@@ -352,6 +346,22 @@ impl Machine for RobotronSystem {
     }
 }
 
+impl SaveState for RobotronSystem {
+    crate::machine_save_state!();
+}
+
+impl Nvram for RobotronSystem {
+    fn save_nvram(&self) -> Option<&[u8]> {
+        Some(self.board.save_cmos())
+    }
+
+    fn load_nvram(&mut self, data: &[u8]) {
+        self.board.load_cmos(data);
+    }
+}
+
+impl Profilable for RobotronSystem {}
+
 // ---------------------------------------------------------------------------
 // Machine registry
 // ---------------------------------------------------------------------------
@@ -371,7 +381,6 @@ inventory::submit! {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use phosphor_core::core::machine::Machine;
     use phosphor_core::cpu::CpuStateTrait;
 
     #[test]

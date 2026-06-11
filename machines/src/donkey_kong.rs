@@ -1,6 +1,6 @@
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
-use phosphor_core::core::machine::{InputButton, InputReceiver, Machine};
+use phosphor_core::core::machine::{InputButton, InputReceiver, MachineCore, SaveState};
 use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
 use phosphor_macros::Saveable;
@@ -505,8 +505,8 @@ impl InputReceiver for DkongSystem {
     }
 }
 
-impl Machine for DkongSystem {
-    crate::machine_save_state!("dkong", tkg04::TIMING);
+impl MachineCore for DkongSystem {
+    crate::machine_core_metadata!("dkong", tkg04::TIMING);
 
     fn run_frame(&mut self) {
         bus_split!(self, bus => {
@@ -525,6 +525,12 @@ impl Machine for DkongSystem {
         });
     }
 }
+
+impl SaveState for DkongSystem {
+    crate::machine_save_state!();
+}
+
+crate::impl_default_frontend_capabilities!(DkongSystem);
 
 // ---------------------------------------------------------------------------
 // Machine registry
@@ -549,7 +555,6 @@ inventory::submit! {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use phosphor_core::core::machine::Machine;
     use phosphor_core::cpu::CpuStateTrait;
 
     #[test]
