@@ -134,6 +134,21 @@ fn should_run(filename: &str) -> bool {
             | "MOVEM.l"
             | "TRAP"
             | "TRAPV"
+            | "ANDItoCCR"
+            | "ANDItoSR"
+            | "EORItoCCR"
+            | "EORItoSR"
+            | "ORItoCCR"
+            | "ORItoSR"
+            | "MOVEfromSR"
+            | "MOVEtoCCR"
+            | "MOVEtoSR"
+            | "MOVEfromUSP"
+            | "MOVEtoUSP"
+            | "RTE"
+            | "STOP"
+            | "RESET"
+            | "NOP"
     )
 }
 

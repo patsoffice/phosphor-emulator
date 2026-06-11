@@ -36,7 +36,7 @@ impl M68000 {
     /// Load a new PC, flagging the address error a real 68000 would raise
     /// when fetching the first instruction word from an odd address.
     #[inline]
-    fn set_pc_checked(&mut self, target: u32) {
+    pub(crate) fn set_pc_checked(&mut self, target: u32) {
         if target & 1 != 0 {
             self.address_error = true;
         }

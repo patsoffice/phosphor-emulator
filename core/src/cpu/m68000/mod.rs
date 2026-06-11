@@ -240,11 +240,16 @@ impl M68000 {
         let opmode = (opcode >> 6) & 7;
         let ea_mode = (opcode >> 3) & 7;
         match (opcode >> 12) & 0xF {
+            // ANDI/ORI/EORI to CCR (byte forms) and to SR (word forms,
+            // privileged)
+            0x0 if matches!(opcode, 0x003C | 0x007C | 0x023C | 0x027C | 0x0A3C | 0x0A7C) => {
+                self.op_sr_imm(opcode, bus, master)
+            }
             // Dynamic bit ops (bit number in Dn); EA mode 001 there
-            // encodes MOVEP (M5)
+            // encodes MOVEP (M7)
             0x0 if opcode & 0x0100 != 0 => {
                 if ea_mode == 1 {
-                    self.finish(4); // MOVEP (M5)
+                    self.finish(4); // MOVEP (M7)
                 } else {
                     self.op_bitop(opcode, bus, master, true);
                 }
@@ -263,14 +268,18 @@ impl M68000 {
             // CHK (line 0x4, bits 8-6 = 110) and LEA (111) share the line
             0x4 if opcode & 0x01C0 == 0x0180 => self.op_chk(opcode, bus, master),
             0x4 if opcode & 0x01C0 == 0x01C0 => self.op_lea_pea(opcode, bus, master, false),
-            // Line 0x4 "misc": the unary ALU group and JMP/JSR/RTS/RTR live
-            // here; the rest (SWAP/PEA/MOVEM/LEA and the exception ops)
-            // lands in M4-M5. Size bits 11 select the MOVE from/to SR/CCR
-            // group (M5), which op_unary/op_tst route to a NOP themselves.
+            // Line 0x4 "misc": the unary ALU group, the SR/CCR moves (the
+            // size-11 encodings of the unary sub-ops), JMP/JSR/RTS/RTR,
+            // MOVEM, and the privileged one-words all live here.
             0x4 => match (opcode >> 8) & 0xF {
+                0x0 if opcode & 0x00C0 == 0x00C0 => self.op_move_from_sr(opcode, bus, master),
                 0x0 => self.op_unary(opcode, bus, master, UnaryOp::Negx),
+                // 0x42C0 (MOVE from CCR) is 68010+; on the 68000 the CLR
+                // size-11 hole stays a bounded NOP via op_unary
                 0x2 => self.op_unary(opcode, bus, master, UnaryOp::Clr),
+                0x4 if opcode & 0x00C0 == 0x00C0 => self.op_move_to_ccr(opcode, bus, master),
                 0x4 => self.op_unary(opcode, bus, master, UnaryOp::Neg),
+                0x6 if opcode & 0x00C0 == 0x00C0 => self.op_move_to_sr(opcode, bus, master),
                 0x6 => self.op_unary(opcode, bus, master, UnaryOp::Not),
                 // NBCD (size bits 00); SWAP and PEA (M4) share sub-op 0x8
                 0x8 if opcode & 0x00C0 == 0 => self.op_nbcd(opcode, bus, master),
@@ -297,6 +306,11 @@ impl M68000 {
                         0x4E40..=0x4E4F => self.op_trap(opcode, bus, master),
                         0x4E50..=0x4E57 => self.op_link(opcode, bus, master),
                         0x4E58..=0x4E5F => self.op_unlk(opcode, bus, master),
+                        0x4E60..=0x4E6F => self.op_move_usp(opcode, bus, master),
+                        0x4E70 => self.op_reset_instruction(bus, master),
+                        0x4E71 => self.finish(4), // NOP
+                        0x4E72 => self.op_stop(bus, master),
+                        0x4E73 => self.op_rte(bus, master),
                         0x4E75 => self.op_rts(bus, master),
                         0x4E76 => self.op_trapv(bus, master),
                         0x4E77 => self.op_rtr(bus, master),

@@ -218,12 +218,13 @@ fn eori_l_immediate_to_register() {
 
 #[test]
 fn andi_to_ccr_encoding_is_not_executed_as_andi() {
-    // ANDI to CCR (0x023C) lands in M5; until then it must not decode as a
-    // byte ANDI with an immediate destination.
+    // ANDI to CCR (0x023C) is its own instruction: it must clear the flag
+    // byte here, not decode as a byte ANDI with an immediate destination.
     let (mut cpu, mut bus) = setup(&[0x023C, 0x0000]);
     cpu.sr = 0x271F;
     step(&mut cpu, &mut bus);
-    assert_eq!(cpu.sr, 0x271F, "CCR untouched until M5");
+    assert_eq!(cpu.sr, 0x2700, "ANDI #0,CCR clears the CCR");
+    assert_eq!(cpu.pc, 0x1004, "immediate word consumed");
 }
 
 // ---------------------------------------------------------------------------

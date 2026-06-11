@@ -1,7 +1,7 @@
-//! MOVE / MOVEA / MOVEQ / SWAP / EXG — data movement instructions.
+//! MOVE / MOVEA / MOVEQ / SWAP / EXG and the SR/CCR/USP moves — data
+//! movement instructions.
 //!
-//! (MOVE to/from SR/CCR/USP and MOVEP live on lines 0x0/0x4 and land
-//! in M5.)
+//! (MOVEP lives on line 0x0 and lands in M7.)
 
 use super::M68000;
 use super::addressing::{Size, ea_cycles, sext8};
@@ -88,6 +88,102 @@ impl M68000 {
         let value = self.d[reg].rotate_left(16);
         self.d[reg] = value;
         self.set_flags_logical(Size::Long, value);
+        self.finish(4);
+    }
+
+    /// MOVE SR,<ea> (0x40C0): write the status register to a word
+    /// data-alterable destination. Unprivileged on the 68000 (the 68010
+    /// made it privileged).
+    ///
+    /// Flags: none. 6 cycles to Dn, 8 + EA to memory.
+    pub(crate) fn op_move_from_sr<B: Bus<Address = u32, Data = u16> + ?Sized>(
+        &mut self,
+        opcode: u16,
+        bus: &mut B,
+        master: BusMaster,
+    ) {
+        let ea_mode = ((opcode >> 3) & 7) as u8;
+        let ea_reg = (opcode & 7) as u8;
+        if ea_mode == 1 || (ea_mode == 7 && ea_reg >= 2) {
+            self.finish(4); // illegal destination
+            return;
+        }
+        let dst = self.decode_ea(bus, master, ea_mode, ea_reg, Size::Word);
+        self.ea_write(bus, master, dst, Size::Word, self.sr as u32);
+        self.finish(if ea_mode == 0 {
+            6
+        } else {
+            8 + ea_cycles(ea_mode, ea_reg, Size::Word)
+        });
+    }
+
+    /// MOVE <ea>,CCR (0x44C0): load the flag byte from a word data source;
+    /// only the five implemented CCR bits stick.
+    ///
+    /// Flags: X/N/Z/V/C all loaded. 12 cycles + EA.
+    pub(crate) fn op_move_to_ccr<B: Bus<Address = u32, Data = u16> + ?Sized>(
+        &mut self,
+        opcode: u16,
+        bus: &mut B,
+        master: BusMaster,
+    ) {
+        let ea_mode = ((opcode >> 3) & 7) as u8;
+        let ea_reg = (opcode & 7) as u8;
+        if ea_mode == 1 {
+            self.finish(4); // address-register source is illegal
+            return;
+        }
+        let src = self.decode_ea(bus, master, ea_mode, ea_reg, Size::Word);
+        let value = self.ea_read(bus, master, src, Size::Word) as u16;
+        self.sr = (self.sr & 0xFF00) | (value & 0x001F);
+        self.finish(12 + ea_cycles(ea_mode, ea_reg, Size::Word));
+    }
+
+    /// MOVE <ea>,SR (0x46C0, privileged): load the whole status register
+    /// from a word data source, routing the S bit through the SP swap.
+    ///
+    /// Flags: the whole SR is loaded. 12 cycles + EA.
+    pub(crate) fn op_move_to_sr<B: Bus<Address = u32, Data = u16> + ?Sized>(
+        &mut self,
+        opcode: u16,
+        bus: &mut B,
+        master: BusMaster,
+    ) {
+        if !self.privilege_check(bus, master) {
+            return;
+        }
+        let ea_mode = ((opcode >> 3) & 7) as u8;
+        let ea_reg = (opcode & 7) as u8;
+        if ea_mode == 1 {
+            self.finish(4); // address-register source is illegal
+            return;
+        }
+        let src = self.decode_ea(bus, master, ea_mode, ea_reg, Size::Word);
+        let value = self.ea_read(bus, master, src, Size::Word) as u16;
+        self.write_sr(value);
+        self.finish(12 + ea_cycles(ea_mode, ea_reg, Size::Word));
+    }
+
+    /// MOVE An,USP / MOVE USP,An (0x4E60-0x4E6F, privileged): transfer
+    /// between an address register and the parked user stack pointer
+    /// (bit 3 selects the direction).
+    ///
+    /// Flags: none. 4 cycles.
+    pub(crate) fn op_move_usp<B: Bus<Address = u32, Data = u16> + ?Sized>(
+        &mut self,
+        opcode: u16,
+        bus: &mut B,
+        master: BusMaster,
+    ) {
+        if !self.privilege_check(bus, master) {
+            return;
+        }
+        let reg = (opcode & 7) as usize;
+        if opcode & 8 != 0 {
+            self.a[reg] = self.usp;
+        } else {
+            self.usp = self.a[reg];
+        }
         self.finish(4);
     }
 

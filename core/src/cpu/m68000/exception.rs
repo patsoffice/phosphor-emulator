@@ -82,4 +82,113 @@ impl M68000 {
         self.exception(bus, master, vector, self.instr_pc);
         self.finish(34);
     }
+
+    /// Verify supervisor privilege for a privileged instruction. In user
+    /// mode the privilege-violation exception (vector 8) is entered with
+    /// the frame PC at the unexecuted instruction, and false is returned.
+    pub(crate) fn privilege_check<B: Bus<Address = u32, Data = u16> + ?Sized>(
+        &mut self,
+        bus: &mut B,
+        master: BusMaster,
+    ) -> bool {
+        if self.flag_is_set(SrFlag::S) {
+            return true;
+        }
+        self.exception(bus, master, 8, self.instr_pc);
+        self.finish(34);
+        false
+    }
+
+    /// Load a full status-register value: route the S bit through the
+    /// stack-pointer swap and mask the bits the 68000 does not implement
+    /// (only T, S, the interrupt mask, and the CCR exist).
+    pub(crate) fn write_sr(&mut self, value: u16) {
+        self.set_supervisor(value & SrFlag::S as u16 != 0);
+        self.sr = value & 0xA71F;
+    }
+
+    /// ANDI/ORI/EORI to CCR (0x023C/0x003C/0x0A3C) and to SR
+    /// (0x027C/0x007C/0x0A7C): combine the immediate with the flag byte or
+    /// the whole status register. The SR forms are privileged.
+    ///
+    /// Flags: per the operation, on the five CCR bits (and the system byte
+    /// for the SR forms). 20 cycles.
+    pub(crate) fn op_sr_imm<B: Bus<Address = u32, Data = u16> + ?Sized>(
+        &mut self,
+        opcode: u16,
+        bus: &mut B,
+        master: BusMaster,
+    ) {
+        let to_sr = opcode & 0x0040 != 0;
+        if to_sr && !self.privilege_check(bus, master) {
+            return;
+        }
+        let imm = self.read_imm_word(bus, master);
+        let combine = |a: u16, b: u16| match opcode & 0x0F00 {
+            0x0200 => a & b, // ANDI
+            0x0A00 => a ^ b, // EORI
+            _ => a | b,      // ORI
+        };
+        if to_sr {
+            self.write_sr(combine(self.sr, imm));
+        } else {
+            let ccr = combine(self.sr & 0x00FF, imm & 0x00FF);
+            self.sr = (self.sr & 0xFF00) | (ccr & 0x001F);
+        }
+        self.finish(20);
+    }
+
+    /// RTE (0x4E73, privileged): pop SR then PC from the supervisor stack
+    /// and resume the interrupted context. The 68000 frame has no format
+    /// word (68010+ gate here when implemented).
+    ///
+    /// Flags: the whole SR is restored from the frame. 20 cycles.
+    pub(crate) fn op_rte<B: Bus<Address = u32, Data = u16> + ?Sized>(
+        &mut self,
+        bus: &mut B,
+        master: BusMaster,
+    ) {
+        if !self.privilege_check(bus, master) {
+            return;
+        }
+        let sr = self.pop_word(bus, master);
+        let pc = self.pop_long(bus, master);
+        self.write_sr(sr);
+        self.set_pc_checked(pc);
+        self.finish(20);
+    }
+
+    /// STOP #imm (0x4E72, privileged): load the immediate into SR and halt
+    /// instruction execution until an interrupt (or reset) arrives.
+    ///
+    /// Flags: the whole SR is loaded. 4 cycles.
+    pub(crate) fn op_stop<B: Bus<Address = u32, Data = u16> + ?Sized>(
+        &mut self,
+        bus: &mut B,
+        master: BusMaster,
+    ) {
+        if !self.privilege_check(bus, master) {
+            return;
+        }
+        let imm = self.read_imm_word(bus, master);
+        self.write_sr(imm);
+        self.stopped = true;
+        self.finish(4);
+    }
+
+    /// RESET (0x4E70, privileged): assert the external reset line for 124
+    /// clocks. Devices are not wired to the line in this core yet, so the
+    /// instruction is a long supervisor no-op; CPU state is unaffected.
+    ///
+    /// Flags: none. 132 cycles.
+    pub(crate) fn op_reset_instruction<B: Bus<Address = u32, Data = u16> + ?Sized>(
+        &mut self,
+        bus: &mut B,
+        master: BusMaster,
+    ) {
+        if !self.privilege_check(bus, master) {
+            return;
+        }
+        self.finish(132);
+    }
 }
