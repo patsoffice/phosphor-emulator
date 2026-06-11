@@ -17,6 +17,7 @@ mod alu;
 pub mod flags;
 mod move_ops;
 use alu::binary::LogicalOp;
+use alu::unary::UnaryOp;
 pub use flags::SrFlag;
 
 use crate::core::save_state::{SaveError, StateReader, StateWriter};
@@ -238,10 +239,25 @@ impl M68000 {
             }
             // MOVE.b / MOVE.l / MOVE.w (and MOVEA for An destinations)
             0x1..=0x3 => self.op_move(opcode, bus, master),
-            // NBCD (line 0x4 sub-op 0x8 with size bits 00)
-            0x4 if opcode & 0x0FC0 == 0x0800 => self.op_nbcd(opcode, bus, master),
-            // TST (the rest of the line-0x4 "misc" ops land in M2-M5)
-            0x4 if opcode & 0x0F00 == 0x0A00 => self.op_tst(opcode, bus, master),
+            // Line 0x4 "misc": the unary ALU group lives here; the rest
+            // (SWAP/PEA/MOVEM/LEA/CHK and the control-flow ops) lands in
+            // M2-M5. Size bits 11 select the MOVE from/to SR/CCR group (M5),
+            // which op_unary/op_tst route to a NOP themselves.
+            0x4 => match (opcode >> 8) & 0xF {
+                0x0 => self.op_unary(opcode, bus, master, UnaryOp::Negx),
+                0x2 => self.op_unary(opcode, bus, master, UnaryOp::Clr),
+                0x4 => self.op_unary(opcode, bus, master, UnaryOp::Neg),
+                0x6 => self.op_unary(opcode, bus, master, UnaryOp::Not),
+                // NBCD (size bits 00); SWAP/PEA share sub-op 0x8 (M4)
+                0x8 if opcode & 0x00C0 == 0 => self.op_nbcd(opcode, bus, master),
+                // EXT.w / EXT.l (EA mode bits 000; other modes are MOVEM, M4)
+                0x8 if opcode & 0x0038 == 0 && opcode & 0x0080 != 0 => self.op_ext(opcode),
+                0xA => self.op_tst(opcode, bus, master),
+                _ => self.finish(4),
+            },
+            // Scc (size bits 11, EA mode != An); DBcc shares the encoding
+            // with an An mode (M3), ADDQ/SUBQ the rest of the line (M4)
+            0x5 if opmode & 3 == 3 && ea_mode != 1 => self.op_scc(opcode, bus, master),
             // MOVEQ (bit 8 set is unassigned on the 68000)
             0x7 if opcode & 0x0100 == 0 => self.op_moveq(opcode),
             // OR / SBCD; the line also carries DIVU/DIVS (M2 muldiv) plus

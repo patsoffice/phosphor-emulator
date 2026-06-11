@@ -69,6 +69,21 @@ fn should_run(filename: &str) -> bool {
             | "ABCD"
             | "SBCD"
             | "NBCD"
+            | "NEG.b"
+            | "NEG.w"
+            | "NEG.l"
+            | "NEGX.b"
+            | "NEGX.w"
+            | "NEGX.l"
+            | "NOT.b"
+            | "NOT.w"
+            | "NOT.l"
+            | "CLR.b"
+            | "CLR.w"
+            | "CLR.l"
+            | "EXT.w"
+            | "EXT.l"
+            | "Scc"
     )
 }
 
@@ -113,8 +128,10 @@ fn load_initial(cpu: &mut M68000, bus: &mut TracingBus68k, st: &M68000Regs, load
 /// encodings into the M1 files (`prefetch[0]` is the opcode word).
 fn should_skip_opcode(op: u16) -> Option<&'static str> {
     match op >> 12 {
-        // ADDQ/SUBQ share the ADD/SUB files but live on line 5 (M4)
-        0x5 => Some("ADDQ/SUBQ lands in M4"),
+        // Line 5 with size bits 11 is Scc (implemented) or DBcc (M3);
+        // the other sizes are ADDQ/SUBQ, which share the ADD/SUB files (M4)
+        0x5 if (op >> 6) & 3 == 3 && (op >> 3) & 7 == 1 => Some("DBcc lands in M3"),
+        0x5 if (op >> 6) & 3 != 3 => Some("ADDQ/SUBQ lands in M4"),
         _ => None,
     }
 }
