@@ -295,13 +295,168 @@ impl Default for AddressMap16 {
     }
 }
 
+/// Named byte storage for RAM/ROM/NVRAM/inactive banks, indexed by region.
+///
+/// Owns a flat `Vec<u8>` plus per-region offset/length tables. It knows
+/// nothing about address decode; callers resolve an address to a
+/// `(region_id, region-local offset)` pair first (via [`AddressMap16`]) and
+/// read or write through that. Shared by the 16-bit and (future) 32-bit
+/// address spaces.
+pub struct MemoryBacking {
+    /// Flat backing store for all regions with storage.
+    data: Vec<u8>,
+    /// Offset into `data` for each region_id. `u32::MAX` = no backing (I/O).
+    region_backing: [u32; 256],
+    /// Byte length of each region's backing.
+    region_lengths: [u32; 256],
+}
+
+impl MemoryBacking {
+    /// Create empty storage with no regions allocated.
+    pub fn new() -> Self {
+        Self {
+            data: Vec::new(),
+            region_backing: [u32::MAX; 256],
+            region_lengths: [0; 256],
+        }
+    }
+
+    /// Allocate `length` zeroed bytes of backing for `region_id`.
+    pub fn allocate(&mut self, region_id: impl Into<RegionId>, length: u32) {
+        let region_id = region_id.into();
+        let offset = self.data.len() as u32;
+        self.data.resize(self.data.len() + length as usize, 0);
+        self.region_backing[region_id as usize] = offset;
+        self.region_lengths[region_id as usize] = length;
+    }
+
+    /// True if `region_id` has backing storage allocated.
+    pub fn has_region(&self, region_id: impl Into<RegionId>) -> bool {
+        self.region_backing[region_id.into() as usize] != u32::MAX
+    }
+
+    /// Get a read-only slice of a region's backing store.
+    ///
+    /// Panics if the region has no backing (I/O or unregistered).
+    pub fn region_data(&self, region_id: impl Into<RegionId>) -> &[u8] {
+        let region_id = region_id.into();
+        let offset = self.region_backing[region_id as usize];
+        debug_assert!(
+            offset != u32::MAX,
+            "region_data called on region {region_id} with no backing"
+        );
+        let offset = offset as usize;
+        let length = self.region_lengths[region_id as usize] as usize;
+        &self.data[offset..offset + length]
+    }
+
+    /// Get a mutable slice of a region's backing store.
+    ///
+    /// Panics if the region has no backing (I/O or unregistered).
+    pub fn region_data_mut(&mut self, region_id: impl Into<RegionId>) -> &mut [u8] {
+        let region_id = region_id.into();
+        let offset = self.region_backing[region_id as usize];
+        debug_assert!(
+            offset != u32::MAX,
+            "region_data_mut called on region {region_id} with no backing"
+        );
+        let offset = offset as usize;
+        let length = self.region_lengths[region_id as usize] as usize;
+        &mut self.data[offset..offset + length]
+    }
+
+    /// Bulk-copy data into a region's backing store (e.g., ROM loading).
+    ///
+    /// `data` must exactly match the region's length.
+    pub fn load_region(&mut self, region_id: impl Into<RegionId>, data: &[u8]) {
+        let region_id = region_id.into();
+        let dest = self.region_data_mut(region_id);
+        assert_eq!(
+            dest.len(),
+            data.len(),
+            "load_region: data length {} doesn't match region {} length {}",
+            data.len(),
+            region_id,
+            dest.len()
+        );
+        dest.copy_from_slice(data);
+    }
+
+    /// Copy data into a region's backing store at the given byte offset.
+    pub fn load_region_at(&mut self, region_id: impl Into<RegionId>, offset: usize, data: &[u8]) {
+        let region_id = region_id.into();
+        let dest = self.region_data_mut(region_id);
+        let end = (offset + data.len()).min(dest.len());
+        let len = end - offset;
+        dest[offset..end].copy_from_slice(&data[..len]);
+    }
+
+    /// Side-effect-free read at a region-local offset. Returns `None` if
+    /// the region has no backing (I/O or unregistered).
+    #[inline]
+    pub fn read_region_offset(&self, region_id: RegionId, offset: usize) -> Option<u8> {
+        let backing_offset = self.region_backing[region_id as usize];
+        if backing_offset == u32::MAX {
+            return None;
+        }
+        Some(self.data[backing_offset as usize + offset])
+    }
+
+    /// Side-effect-free write at a region-local offset. Returns false (and
+    /// ignores the write) if the region has no backing.
+    #[inline]
+    pub fn write_region_offset(&mut self, region_id: RegionId, offset: usize, data: u8) -> bool {
+        let backing_offset = self.region_backing[region_id as usize];
+        if backing_offset == u32::MAX {
+            return false;
+        }
+        self.data[backing_offset as usize + offset] = data;
+        true
+    }
+
+    /// Read at a region-local offset (hot-path version).
+    ///
+    /// Only call on regions with backing (RAM/ROM). Panics in debug builds
+    /// if the region has no backing.
+    #[inline(always)]
+    pub fn read(&self, region_id: RegionId, offset: usize) -> u8 {
+        let backing_offset = self.region_backing[region_id as usize];
+        debug_assert!(
+            backing_offset != u32::MAX,
+            "backing read on region {region_id} with no backing (offset={offset:#06X})"
+        );
+        self.data[backing_offset as usize + offset]
+    }
+
+    /// Write at a region-local offset (hot-path version).
+    ///
+    /// Only call on regions with backing (RAM/ROM). Panics in debug builds
+    /// if the region has no backing.
+    #[inline(always)]
+    pub fn write(&mut self, region_id: RegionId, offset: usize, data: u8) {
+        let backing_offset = self.region_backing[region_id as usize];
+        debug_assert!(
+            backing_offset != u32::MAX,
+            "backing write on region {region_id} with no backing (offset={offset:#06X})"
+        );
+        self.data[backing_offset as usize + offset] = data;
+    }
+}
+
+impl Default for MemoryBacking {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Composed address-space container for a 16-bit (64 KB) address space.
 ///
-/// Composes page-table decode ([`AddressMap16`]), backing storage, and
-/// watchpoint state. Machines build this at init time and use it in
-/// `Bus::read`/`write` to look up the `region_id` for dispatch.
+/// Composes page-table decode ([`AddressMap16`]), backing storage
+/// ([`MemoryBacking`]), and watchpoint state. Machines build this at init
+/// time and use it in `Bus::read`/`write` to look up the `region_id` for
+/// dispatch.
 ///
-/// Non-I/O regions (RAM, ROM) have backing memory stored in a flat `Vec<u8>`.
+/// Non-I/O regions (RAM, ROM) have backing memory stored in `MemoryBacking`.
 /// This enables side-effect-free `debug_read`/`debug_write` for the debugger
 /// without requiring machines to write manual `memory_read` methods.
 ///
@@ -309,13 +464,7 @@ impl Default for AddressMap16 {
 /// flagged pages) and region introspection (list of named regions).
 pub struct AddressSpace16 {
     map: AddressMap16,
-
-    /// Flat backing store for all non-I/O regions (RAM, ROM, etc.).
-    backing: Vec<u8>,
-    /// Offset into `backing` for each region_id. `u32::MAX` = no backing (I/O).
-    region_backing: [u32; 256],
-    /// Byte length of each region's backing.
-    region_lengths: [u32; 256],
+    backing: MemoryBacking,
 
     active_watch_count: u16,
     pending_hit: Option<WatchpointHit>,
@@ -337,9 +486,7 @@ impl AddressSpace16 {
     pub fn new() -> Self {
         Self {
             map: AddressMap16::new(),
-            backing: Vec::new(),
-            region_backing: [u32::MAX; 256],
-            region_lengths: [0; 256],
+            backing: MemoryBacking::new(),
             active_watch_count: 0,
             pending_hit: None,
             watched_addrs: Vec::new(),
@@ -371,7 +518,7 @@ impl AddressSpace16 {
             access,
             AccessKind::ReadWrite | AccessKind::ReadOnly | AccessKind::WriteOnly
         ) {
-            self.allocate_backing(id, length);
+            self.backing.allocate(id, length);
         }
 
         self
@@ -389,7 +536,7 @@ impl AddressSpace16 {
         length: u32,
     ) -> &mut Self {
         let id = id.into();
-        self.allocate_backing(id, length);
+        self.backing.allocate(id, length);
 
         self.map.regions.push(RegionDescriptor {
             id,
@@ -400,14 +547,6 @@ impl AddressSpace16 {
         });
 
         self
-    }
-
-    /// Allocate `length` zeroed bytes of backing for `region_id`.
-    fn allocate_backing(&mut self, region_id: RegionId, length: u32) {
-        let offset = self.backing.len() as u32;
-        self.backing.resize(self.backing.len() + length as usize, 0);
-        self.region_backing[region_id as usize] = offset;
-        self.region_lengths[region_id as usize] = length;
     }
 
     /// Copy page entries from a source range to a mirror range.
@@ -460,26 +599,16 @@ impl AddressSpace16 {
     #[inline]
     pub fn debug_read(&self, addr: u16) -> Option<u8> {
         let page = self.page(addr);
-        let backing_offset = self.region_backing[page.region_id as usize];
-        if backing_offset == u32::MAX {
-            return None;
-        }
-        let byte_offset =
-            backing_offset as usize + page.base_offset as usize + (addr as usize & 0xFF);
-        Some(self.backing[byte_offset])
+        self.backing
+            .read_region_offset(page.region_id, self.map.region_offset(addr))
     }
 
     /// Side-effect-free write to backing memory. No-op for I/O and unmapped regions.
     #[inline]
     pub fn debug_write(&mut self, addr: u16, data: u8) {
-        let page = self.page(addr);
-        let backing_offset = self.region_backing[page.region_id as usize];
-        if backing_offset == u32::MAX {
-            return;
-        }
-        let byte_offset =
-            backing_offset as usize + page.base_offset as usize + (addr as usize & 0xFF);
-        self.backing[byte_offset] = data;
+        let page = self.map.page(addr);
+        self.backing
+            .write_region_offset(page.region_id, self.map.region_offset(addr), data);
     }
 
     /// Read a byte from backing memory (hot-path version).
@@ -489,16 +618,8 @@ impl AddressSpace16 {
     #[inline(always)]
     pub fn read_backing(&self, addr: u16) -> u8 {
         let page = self.page(addr);
-        let backing_offset = self.region_backing[page.region_id as usize];
-        debug_assert!(
-            backing_offset != u32::MAX,
-            "read_backing called on region {} with no backing (addr={:#06X})",
-            page.region_id,
-            addr
-        );
-        let byte_offset =
-            backing_offset as usize + page.base_offset as usize + (addr as usize & 0xFF);
-        self.backing[byte_offset]
+        self.backing
+            .read(page.region_id, self.map.region_offset(addr))
     }
 
     /// Write a byte to backing memory (hot-path version).
@@ -507,73 +628,35 @@ impl AddressSpace16 {
     /// Panics in debug builds if the region has no backing.
     #[inline(always)]
     pub fn write_backing(&mut self, addr: u16, data: u8) {
-        let page = self.page(addr);
-        let backing_offset = self.region_backing[page.region_id as usize];
-        debug_assert!(
-            backing_offset != u32::MAX,
-            "write_backing called on region {} with no backing (addr={:#06X})",
-            page.region_id,
-            addr
-        );
-        let byte_offset =
-            backing_offset as usize + page.base_offset as usize + (addr as usize & 0xFF);
-        self.backing[byte_offset] = data;
+        let region_id = self.map.page(addr).region_id;
+        self.backing
+            .write(region_id, self.map.region_offset(addr), data);
     }
 
     /// Get a read-only slice of a region's backing store.
     ///
     /// Panics if the region has no backing (I/O or unregistered).
     pub fn region_data(&self, region_id: impl Into<RegionId>) -> &[u8] {
-        let region_id = region_id.into();
-        let offset = self.region_backing[region_id as usize];
-        debug_assert!(
-            offset != u32::MAX,
-            "region_data called on region {region_id} with no backing"
-        );
-        let offset = offset as usize;
-        let length = self.region_lengths[region_id as usize] as usize;
-        &self.backing[offset..offset + length]
+        self.backing.region_data(region_id)
     }
 
     /// Get a mutable slice of a region's backing store.
     ///
     /// Panics if the region has no backing (I/O or unregistered).
     pub fn region_data_mut(&mut self, region_id: impl Into<RegionId>) -> &mut [u8] {
-        let region_id = region_id.into();
-        let offset = self.region_backing[region_id as usize];
-        debug_assert!(
-            offset != u32::MAX,
-            "region_data_mut called on region {region_id} with no backing"
-        );
-        let offset = offset as usize;
-        let length = self.region_lengths[region_id as usize] as usize;
-        &mut self.backing[offset..offset + length]
+        self.backing.region_data_mut(region_id)
     }
 
     /// Bulk-copy data into a region's backing store (e.g., ROM loading).
     ///
     /// `data` must exactly match the region's length.
     pub fn load_region(&mut self, region_id: impl Into<RegionId>, data: &[u8]) {
-        let region_id = region_id.into();
-        let dest = self.region_data_mut(region_id);
-        assert_eq!(
-            dest.len(),
-            data.len(),
-            "load_region: data length {} doesn't match region {} length {}",
-            data.len(),
-            region_id,
-            dest.len()
-        );
-        dest.copy_from_slice(data);
+        self.backing.load_region(region_id, data);
     }
 
     /// Copy data into a region's backing store at the given byte offset.
     pub fn load_region_at(&mut self, region_id: impl Into<RegionId>, offset: usize, data: &[u8]) {
-        let region_id = region_id.into();
-        let dest = self.region_data_mut(region_id);
-        let end = (offset + data.len()).min(dest.len());
-        let len = end - offset;
-        dest[offset..end].copy_from_slice(&data[..len]);
+        self.backing.load_region_at(region_id, offset, data);
     }
 
     // -----------------------------------------------------------------------
@@ -844,6 +927,88 @@ mod address_map16_tests {
         assert_eq!(map.region_at(0x1234).unwrap().name, "Work RAM");
         assert_eq!(map.region_at(0xC042).unwrap().name, "I/O");
         assert!(map.region_at(0xA000).is_none());
+    }
+}
+
+/// Storage-only tests for the bare [`MemoryBacking`] (no decode).
+#[cfg(test)]
+mod memory_backing_tests {
+    use super::*;
+
+    const RAM: RegionId = 1;
+    const ROM: RegionId = 2;
+    const IO: RegionId = 3;
+
+    #[test]
+    fn allocate_zeroed_backing() {
+        let mut backing = MemoryBacking::new();
+        backing.allocate(RAM, 0x0400);
+
+        assert!(backing.has_region(RAM));
+        assert!(!backing.has_region(IO));
+        assert_eq!(backing.region_data(RAM).len(), 0x0400);
+        assert!(backing.region_data(RAM).iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn regions_get_independent_slices() {
+        let mut backing = MemoryBacking::new();
+        backing.allocate(RAM, 0x100);
+        backing.allocate(ROM, 0x100);
+
+        backing.region_data_mut(RAM)[0] = 0x11;
+        backing.region_data_mut(ROM)[0] = 0x22;
+
+        assert_eq!(backing.region_data(RAM)[0], 0x11);
+        assert_eq!(backing.region_data(ROM)[0], 0x22);
+    }
+
+    #[test]
+    fn load_whole_region() {
+        let mut backing = MemoryBacking::new();
+        backing.allocate(ROM, 0x0400);
+
+        let rom_data: Vec<u8> = (0..0x0400).map(|i| (i & 0xFF) as u8).collect();
+        backing.load_region(ROM, &rom_data);
+
+        assert_eq!(backing.region_data(ROM)[0x00], 0x00);
+        assert_eq!(backing.region_data(ROM)[0xFF], 0xFF);
+        assert_eq!(backing.region_data(ROM)[0x100], 0x00);
+    }
+
+    #[test]
+    fn load_region_at_offset() {
+        let mut backing = MemoryBacking::new();
+        backing.allocate(ROM, 0x300);
+
+        backing.load_region_at(ROM, 0x100, &[0xAA, 0xBB, 0xCC]);
+
+        assert_eq!(backing.region_data(ROM)[0x100], 0xAA);
+        assert_eq!(backing.region_data(ROM)[0x102], 0xCC);
+        assert_eq!(backing.region_data(ROM)[0x103], 0x00);
+    }
+
+    #[test]
+    fn read_write_region_offset() {
+        let mut backing = MemoryBacking::new();
+        backing.allocate(RAM, 0x100);
+
+        assert!(backing.write_region_offset(RAM, 0x42, 0xBE));
+        assert_eq!(backing.read_region_offset(RAM, 0x42), Some(0xBE));
+        assert_eq!(backing.read(RAM, 0x42), 0xBE);
+
+        backing.write(RAM, 0x43, 0xEF);
+        assert_eq!(backing.read_region_offset(RAM, 0x43), Some(0xEF));
+    }
+
+    #[test]
+    fn missing_backing_reads_none_writes_ignored() {
+        let mut backing = MemoryBacking::new();
+        backing.allocate(RAM, 0x100);
+
+        assert_eq!(backing.read_region_offset(IO, 0x00), None);
+        assert!(!backing.write_region_offset(IO, 0x00, 0xFF));
+        assert!(!backing.has_region(IO));
     }
 }
 
