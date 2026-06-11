@@ -6,21 +6,22 @@ registers, big-endian, 24-bit address space. Validated against
 (state-only). Architected so the 68010/68020/68030 can be layered on later
 via the `M68kVariant` gate; only 68000 behavior is implemented.
 
-**Status: M4 complete — bit ops, register blocks, and stack frames.** Full
+**Status: M5 complete — exceptions, interrupts, and privilege.** Full
 effective-address decoder, MOVE family, the complete integer ALU with
-multiply/divide and all shifts/rotates, the branch/jump/subroutine family,
-bit operations, MOVEM, and LEA/PEA/LINK/UNLK. Milestones M5-M7
-(exceptions/interrupts, disassembler, full validation coverage) are
+multiply/divide and all shifts/rotates, control flow, bit operations,
+MOVEM and stack frames, and the exception model: traps, illegal/privilege
+vectors, RTE, STOP/RESET, SR/CCR/USP access, and boundary-sampled
+interrupts. Milestones M6-M7 (disassembler, full validation coverage) are
 tracked as beads issues under `phosphor-emulator-m68000-emulator-puk`.
 
 ## Status
 
 | Metric           | Value                                                  |
 |------------------|--------------------------------------------------------|
-| Instructions     | 65 of ~80 mnemonics (M1-M4)                            |
+| Instructions     | 72 of ~80 mnemonics (M1-M5)                            |
 | Addressing modes | 12 of 12                                               |
-| Integration tests| 212 (+ 48 unit tests)                                  |
-| Validation       | 677,799/677,799 SingleStepTests vectors (105 files)    |
+| Integration tests| 245 (+ 48 unit tests)                                  |
+| Validation       | 797,776/797,776 SingleStepTests vectors (121 files)    |
 | Timing           | Approximate documented cycle counts (state-accurate)   |
 
 ## Registers
@@ -40,7 +41,7 @@ leave it untouched; the extended ops (ADDX/SUBX/NEGX/ABCD/SBCD/NBCD/ROXx)
 consume it as carry-in and set X = C on the way out. See `flags.rs` for the
 full rules; every instruction doc comment states which rule it follows.
 
-## Instruction Set (M1-M4)
+## Instruction Set (M1-M5)
 
 | Category   | Instructions                             | Notes                                                                     |
 |------------|------------------------------------------|---------------------------------------------------------------------------|
@@ -57,10 +58,13 @@ full rules; every instruction doc comment states which rule it follows.
 | Jumps      | JMP, JSR, RTS, RTR                       | Control EA modes; RTR restores the five CCR bits; none alter the CCR else |
 | Bit ops    | BTST, BCHG, BCLR, BSET                   | Dynamic + static forms; long mod 32 on Dn, byte mod 8 in memory; Z only   |
 | Stack/addr | LEA, PEA, LINK, UNLK, MOVEM              | Full 32-bit EAs; MOVEM predec mask reversal, word loads sign-extend       |
+| Exceptions | TRAP, TRAPV, ILLEGAL, RTE                | Line-A/F + divide-zero/CHK/privilege vectors; 68000 short frame           |
+| System     | STOP, RESET, NOP, MOVE SR/CCR/USP        | Privileged set raises vector 8 from user mode; ANDI/ORI/EORI to CCR/SR    |
 
-All sizes (.b/.w/.l) where the 68000 defines them. Unimplemented opcodes
-execute as 4-cycle NOPs until the illegal-instruction/line-A/line-F
-exceptions land in M5; ANDI/ORI/EORI to CCR/SR are deferred with them.
+All sizes (.b/.w/.l) where the 68000 defines them. TAS and MOVEP are the
+only remaining unimplemented instructions (M7); they execute as bounded
+NOPs, as do the unassigned encodings inside implemented lines. Line-A,
+line-F, and ILLEGAL vector through their exceptions.
 
 ## Addressing Modes
 
@@ -91,7 +95,7 @@ states via `ExecState::Execute(n)`:
 enum ExecState {
     Fetch,        // ready to fetch the next opcode
     Execute(u32), // burning remaining documented cycles
-    Stopped,      // STOP instruction (M5), waiting for interrupt
+    Stopped,      // STOP executed, waiting for an interrupt
     Halted,       // double bus fault / external halt
 }
 ```
@@ -113,10 +117,11 @@ other CPU in the workspace uses this instantiation; `SimpleSystem68k`,
   writes read-modify-write the containing word** — correct for RAM and
   state validation, not faithful for side-effecting memory-mapped
   registers. Revisit if a real machine needs strobe-accurate byte writes.
-- Word/long access at an odd address flags `address_error`; the actual
-  vector-3 exception lands in M5. Until then the access is forced even so
-  execution stays deterministic. Branch/jump/return targets at odd
-  addresses flag the same way (the fault would hit the target fetch).
+- Word/long access at an odd address is forced even, the instruction
+  completes, and the vector-3 address-error exception is entered at its
+  end (real hardware aborts mid-flight — see Exceptions below).
+  Branch/jump/return targets at odd addresses fault the same way (the
+  error would hit the target fetch).
 - Effective addresses are computed at the full 32 bits — JMP/JSR load the
   unmasked value into PC, matching hardware — and masked to 24 bits only
   at the bus (`variant`-gated for 68020+).
@@ -124,9 +129,32 @@ other CPU in the workspace uses this instantiation; `SimpleSystem68k`,
 ### Supervisor/user stack switching
 
 `a[7]` always holds the active SP; `set_supervisor(on)` swaps it with the
-parked `usp`/`ssp` exactly once per S-bit change. Every future SR
-system-byte write path (MOVE to SR, RTE, exception entry) must go through
-it.
+parked `usp`/`ssp` exactly once per S-bit change. Every SR system-byte
+write path (MOVE to SR, ANDI/ORI/EORI to SR, STOP, RTE, exception entry)
+goes through `write_sr`/`set_supervisor`.
+
+### Exceptions and interrupts
+
+All exception entry funnels through `exception(vector, pushed_pc)`: copy
+SR, force supervisor mode (SP swap), clear trace, push the 68000 short
+frame (SR at the lowest address, then PC), vector. The stacked PC is the
+next instruction for completed traps (TRAP/TRAPV/CHK), the unexecuted
+opcode for illegal-instruction and privilege violations, and the divide
+instruction itself for zero divide (hardware-verified quirk, along with
+its clearing of N/Z/V/C before stacking).
+
+- Interrupts are sampled at instruction boundaries from
+  `InterruptState.irq_level`: level 7 is an edge-triggered NMI, levels 1-6
+  are taken while above the SR mask; entry raises the mask to the taken
+  level. The vector is the autovector `24 + level` unless the device
+  supplies one via `irq_vector` (0xFF, the default, means autovector).
+  STOP wakes through the same path.
+- Address errors push the seven-word group-0 frame but enter *after* the
+  instruction completes with the offending access forced even; the exact
+  mid-instruction abort (and double-fault halt) is not modeled, so the
+  validation harness skips those vectors.
+- Trace (T bit) exceptions and the 68010+ frame formats are not yet
+  implemented (M7 / variant work).
 
 ## File Structure
 
@@ -135,7 +163,7 @@ core/src/cpu/m68000/
   mod.rs         -- M68000 struct, M68kVariant, ExecState, dispatch, reset, traits
   flags.rs       -- SrFlag, interrupt mask, set_supervisor SP-swap, cc_true
   addressing.rs  -- Size/Ea, decode_ea, sized word-bus access, ea_cycles
-  move_ops.rs    -- MOVE, MOVEA, MOVEQ
+  move_ops.rs    -- MOVE, MOVEA, MOVEQ, SWAP, EXG, MOVE SR/CCR/USP
   alu.rs         -- shared flag cores: add/sub, extended addx/subx, logical
   alu/binary.rs  -- ADD/SUB/CMP families, AND/OR/EOR + immediates, TST,
                     ADDX/SUBX, CMPM, ABCD/SBCD/NBCD
@@ -145,9 +173,11 @@ core/src/cpu/m68000/
   branch.rs      -- BRA/BSR/Bcc, DBcc, JMP/JSR/RTS/RTR
   bit.rs         -- BTST/BCHG/BCLR/BSET (dynamic + static forms)
   stack.rs       -- LEA/PEA, LINK/UNLK, MOVEM
+  exception.rs   -- exception entry, traps, privilege, RTE/STOP/RESET,
+                    interrupts, address error
 ```
 
-Planned (per the design doc): `exception.rs` (M5), `disasm.rs` (M6).
+Planned (per the design doc): `disasm.rs` (M6).
 
 ## Validation
 
@@ -158,10 +188,12 @@ cargo test -p phosphor-cpu-validation --release --test m68000_single_step_test
 
 The TomHarte/SingleStepTests 680x0 suite is the correctness gate
 (state-only: registers, SR, PC, RAM; cycles and bus transactions are not
-compared). The harness gates files to implemented instructions and skips
-address-error, divide-by-zero, and CHK-trap cases (exception entry lands
-in M5). Current M1-M4 result: **677,799 passed, 0 failed** across all 105
-implemented-instruction files.
+compared). The harness gates files to implemented instructions (only TAS
+and MOVEP remain off, M7) and skips vectors whose initial trace bit is
+set, whose PC is odd, or that hit an odd operand address — the exact
+mid-instruction address-error abort is not modeled. Current M1-M5 result:
+**797,776 passed, 0 failed** across all 121 enabled files, including
+every divide-by-zero, CHK-trap, and privilege-violation vector.
 
 The suite's vectors capture real-hardware behavior for the "undefined"
 flag cases, and this core matches them exactly: the BCD instructions model
