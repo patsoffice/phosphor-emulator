@@ -270,6 +270,19 @@ impl M68000 {
                 // EXT.w / EXT.l (EA mode bits 000; other modes are MOVEM, M4)
                 0x8 if opcode & 0x0038 == 0 && opcode & 0x0080 != 0 => self.op_ext(opcode),
                 0xA => self.op_tst(opcode, bus, master),
+                // 0x4E40-0x4EFF: JMP/JSR plus the one-word specials. NOP,
+                // TRAP, LINK/UNLK, MOVE USP, RESET, STOP, RTE, and TRAPV
+                // stay bounded NOPs until M4/M5.
+                0xE => match (opcode >> 6) & 3 {
+                    3 => self.op_jmp_jsr(opcode, bus, master, false),
+                    2 => self.op_jmp_jsr(opcode, bus, master, true),
+                    1 => match opcode {
+                        0x4E75 => self.op_rts(bus, master),
+                        0x4E77 => self.op_rtr(bus, master),
+                        _ => self.finish(4),
+                    },
+                    _ => self.finish(4),
+                },
                 _ => self.finish(4),
             },
             // Size bits 11 on line 0x5 split into DBcc (EA mode 001 = An)

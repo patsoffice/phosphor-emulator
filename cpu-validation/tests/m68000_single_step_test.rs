@@ -116,6 +116,10 @@ fn should_run(filename: &str) -> bool {
             | "Bcc"
             | "BSR"
             | "DBcc"
+            | "JMP"
+            | "JSR"
+            | "RTS"
+            | "RTR"
     )
 }
 

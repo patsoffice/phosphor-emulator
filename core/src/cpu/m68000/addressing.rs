@@ -22,8 +22,10 @@
 //!   hardware. The exception lands in M5; until then the access is flagged
 //!   via `address_error` and forced even so execution stays deterministic.
 //!
-//! Effective addresses are masked to the physical bus width (24 bits on the
-//! 68000/010) both when computed and when used.
+//! Effective addresses are computed at the full 32 bits (the 68000 ALU is
+//! 32-bit internally — JMP/JSR load the unmasked value into PC, LEA into
+//! An) and masked to the physical bus width (24 bits on the 68000/010)
+//! only when driven onto the bus.
 
 use super::M68000;
 use crate::core::{Bus, BusMaster};
@@ -79,7 +81,8 @@ pub(crate) enum Ea {
     DataReg(usize),
     /// Address register An.
     AddrReg(usize),
-    /// Memory operand at a physical (masked) address.
+    /// Memory operand at a full 32-bit effective address (masked to the
+    /// physical bus width on access).
     Mem(u32),
     /// Immediate value (already fetched from the instruction stream).
     Imm(u32),
@@ -225,6 +228,28 @@ impl M68000 {
         self.write_long_at(bus, master, self.a[7], value);
     }
 
+    /// Pop a word from the active stack (A7 postincrements by 2).
+    pub(crate) fn pop_word<B: Bus<Address = u32, Data = u16> + ?Sized>(
+        &mut self,
+        bus: &mut B,
+        master: BusMaster,
+    ) -> u16 {
+        let value = self.read_word_at(bus, master, self.a[7]);
+        self.a[7] = self.a[7].wrapping_add(2);
+        value
+    }
+
+    /// Pop a long word from the active stack (A7 postincrements by 4).
+    pub(crate) fn pop_long<B: Bus<Address = u32, Data = u16> + ?Sized>(
+        &mut self,
+        bus: &mut B,
+        master: BusMaster,
+    ) -> u32 {
+        let value = self.read_long_at(bus, master, self.a[7]);
+        self.a[7] = self.a[7].wrapping_add(4);
+        value
+    }
+
     /// Fetch one extension word from the instruction stream and advance PC
     /// (the prefetch primitive).
     pub(crate) fn read_imm_word<B: Bus<Address = u32, Data = u16> + ?Sized>(
@@ -289,22 +314,22 @@ impl M68000 {
             // An — address register direct
             1 => Ea::AddrReg(reg),
             // (An) — address register indirect
-            2 => Ea::Mem(self.mask_addr(self.a[reg])),
+            2 => Ea::Mem(self.a[reg]),
             // (An)+ — postincrement: use the current address, then advance
             3 => {
                 let addr = self.a[reg];
                 self.a[reg] = addr.wrapping_add(self.step_for(reg, size));
-                Ea::Mem(self.mask_addr(addr))
+                Ea::Mem(addr)
             }
             // -(An) — predecrement: retreat first, then use the new address
             4 => {
                 self.a[reg] = self.a[reg].wrapping_sub(self.step_for(reg, size));
-                Ea::Mem(self.mask_addr(self.a[reg]))
+                Ea::Mem(self.a[reg])
             }
             // d16(An) — indirect with 16-bit signed displacement
             5 => {
                 let disp = sext16(self.read_imm_word(bus, master));
-                Ea::Mem(self.mask_addr(self.a[reg].wrapping_add(disp)))
+                Ea::Mem(self.a[reg].wrapping_add(disp))
             }
             // d8(An,Xn) — indirect with index register and 8-bit displacement
             6 => {
@@ -312,26 +337,23 @@ impl M68000 {
                 let addr = self.a[reg]
                     .wrapping_add(sext8(ext as u8))
                     .wrapping_add(self.index_value(ext));
-                Ea::Mem(self.mask_addr(addr))
+                Ea::Mem(addr)
             }
             // Mode 7 submodes, selected by the register field
             _ => match reg {
                 // abs.w — sign-extended 16-bit absolute address
-                0 => {
-                    let addr = sext16(self.read_imm_word(bus, master));
-                    Ea::Mem(self.mask_addr(addr))
-                }
+                0 => Ea::Mem(sext16(self.read_imm_word(bus, master))),
                 // abs.l — full 32-bit absolute address (two words, high first)
                 1 => {
                     let hi = self.read_imm_word(bus, master) as u32;
                     let lo = self.read_imm_word(bus, master) as u32;
-                    Ea::Mem(self.mask_addr((hi << 16) | lo))
+                    Ea::Mem((hi << 16) | lo)
                 }
                 // d16(PC) — PC-relative; base is the extension word address
                 2 => {
                     let base = self.pc;
                     let disp = sext16(self.read_imm_word(bus, master));
-                    Ea::Mem(self.mask_addr(base.wrapping_add(disp)))
+                    Ea::Mem(base.wrapping_add(disp))
                 }
                 // d8(PC,Xn) — PC-relative with index; same base convention
                 3 => {
@@ -340,7 +362,7 @@ impl M68000 {
                     let addr = base
                         .wrapping_add(sext8(ext as u8))
                         .wrapping_add(self.index_value(ext));
-                    Ea::Mem(self.mask_addr(addr))
+                    Ea::Mem(addr)
                 }
                 // #imm — 1 extension word for byte/word, 2 for long
                 4 => {
@@ -673,12 +695,13 @@ mod tests {
             Ea::Mem(0x2000)
         );
 
-        // $8000 sign-extends to $FFFF8000, masked to 24 bits = $FF8000
+        // $8000 sign-extends to the full $FFFF8000 (the bus masks to
+        // $FF8000 on access; JMP/LEA would see all 32 bits)
         cpu.pc = 0x1000;
         bus.load(0x1000, &[0x80, 0x00]);
         assert_eq!(
             cpu.decode_ea(&mut bus, M, 7, 0, Size::Word),
-            Ea::Mem(0x00FF_8000)
+            Ea::Mem(0xFFFF_8000)
         );
     }
 
@@ -746,13 +769,15 @@ mod tests {
     }
 
     #[test]
-    fn decode_masks_addresses_to_24_bits() {
+    fn decode_keeps_full_32_bit_address_and_bus_access_masks() {
         let (mut cpu, mut bus) = setup();
         cpu.a[0] = 0xFF12_3456;
-        assert_eq!(
-            cpu.decode_ea(&mut bus, M, 2, 0, Size::Word),
-            Ea::Mem(0x0012_3456)
-        );
+        let ea = cpu.decode_ea(&mut bus, M, 2, 0, Size::Word);
+        assert_eq!(ea, Ea::Mem(0xFF12_3456), "EA computed at full width");
+        // mask_addr (separately unit-tested) truncates to 24 bits at the
+        // word/byte access layer, so reads through the full-width EA work.
+        cpu.ea_write(&mut bus, M, ea, Size::Word, 0xBEEF);
+        assert_eq!(cpu.ea_read(&mut bus, M, ea, Size::Word), 0xBEEF);
     }
 
     // --- ea_read / ea_write ---
