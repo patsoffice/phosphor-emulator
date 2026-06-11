@@ -1145,7 +1145,7 @@ const ALL_CONFIGS: &[&DigDugRomConfig] = &[
 
 fn create_machine(
     rom_set: &RomSet,
-) -> Result<Box<dyn phosphor_core::core::machine::Machine>, RomLoadError> {
+) -> Result<Box<dyn phosphor_core::core::machine::FrontendMachine>, RomLoadError> {
     let mut last_err = None;
     for config in ALL_CONFIGS {
         let mut sys = DigDugSystem::new();

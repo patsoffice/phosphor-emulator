@@ -5,7 +5,7 @@
 //! factory function. The front-end discovers available machines at runtime
 //! without any central list.
 
-use phosphor_core::core::machine::Machine;
+use phosphor_core::core::machine::FrontendMachine;
 
 use crate::rom_loader::{RomLoadError, RomSet};
 
@@ -15,15 +15,15 @@ pub struct MachineEntry {
     pub name: &'static str,
     /// MAME ROM set names to try for ZIP lookup, in priority order.
     pub rom_names: &'static [&'static str],
-    /// Factory: construct a Machine from a loaded ROM set.
-    pub create: fn(&RomSet) -> Result<Box<dyn Machine>, RomLoadError>,
+    /// Factory: construct a FrontendMachine from a loaded ROM set.
+    pub create: fn(&RomSet) -> Result<Box<dyn FrontendMachine>, RomLoadError>,
 }
 
 impl MachineEntry {
     pub const fn new(
         name: &'static str,
         rom_names: &'static [&'static str],
-        create: fn(&RomSet) -> Result<Box<dyn Machine>, RomLoadError>,
+        create: fn(&RomSet) -> Result<Box<dyn FrontendMachine>, RomLoadError>,
     ) -> Self {
         Self {
             name,

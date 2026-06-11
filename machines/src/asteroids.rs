@@ -1,6 +1,8 @@
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
-use phosphor_core::core::machine::{InputButton, InputReceiver, Machine, MachineCore, SaveState};
+use phosphor_core::core::machine::{
+    FrontendMachine, InputButton, InputReceiver, MachineCore, SaveState,
+};
 use phosphor_core::core::memory_map::{AccessKind, MemoryMap};
 use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
@@ -361,7 +363,7 @@ crate::impl_default_frontend_capabilities!(AsteroidsSystem);
 // Machine registry
 // ---------------------------------------------------------------------------
 
-fn create_machine(rom_set: &RomSet) -> Result<Box<dyn Machine>, RomLoadError> {
+fn create_machine(rom_set: &RomSet) -> Result<Box<dyn FrontendMachine>, RomLoadError> {
     let mut sys = AsteroidsSystem::new();
     sys.load_rom_set(rom_set)?;
     Ok(Box::new(sys))

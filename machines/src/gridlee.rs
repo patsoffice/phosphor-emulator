@@ -1029,7 +1029,7 @@ impl Profilable for GridleeSystem {}
 
 fn create_machine(
     rom_set: &RomSet,
-) -> Result<Box<dyn phosphor_core::core::machine::Machine>, RomLoadError> {
+) -> Result<Box<dyn phosphor_core::core::machine::FrontendMachine>, RomLoadError> {
     let mut sys = GridleeSystem::new();
     sys.load_rom_set(rom_set)?;
     Ok(Box::new(sys))

@@ -162,7 +162,7 @@ fn screenshot_dir() -> std::path::PathBuf {
 fn create_from_first_rom_set(
     entry: &phosphor_machines::registry::MachineEntry,
     path: &str,
-) -> Box<dyn phosphor_core::core::machine::Machine> {
+) -> Box<dyn phosphor_core::core::machine::FrontendMachine> {
     let mut last_err = None;
     for name in entry.rom_names {
         let rom_set = match rom_path::load_rom_set(name, path) {

@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use phosphor_core::core::machine::Machine;
+use phosphor_core::core::machine::FrontendMachine;
 use sdl2::event::Event;
 use sdl2::keyboard::Scancode;
 
@@ -11,7 +11,7 @@ use crate::video::Video;
 
 #[allow(clippy::too_many_arguments)]
 pub fn run(
-    machine: &mut dyn Machine,
+    machine: &mut dyn FrontendMachine,
     key_map: &KeyMap,
     controller_map: &ControllerMap,
     scale: u32,

@@ -562,7 +562,7 @@ fn load_parent_program_rom(rom_set: &RomSet) -> Result<Vec<u8>, RomLoadError> {
 
 fn create_machine(
     rom_set: &RomSet,
-) -> Result<Box<dyn phosphor_core::core::machine::Machine>, RomLoadError> {
+) -> Result<Box<dyn phosphor_core::core::machine::FrontendMachine>, RomLoadError> {
     let mut sys = DkongJrSystem::new();
     sys.load_rom_set(rom_set)?;
     Ok(Box::new(sys))

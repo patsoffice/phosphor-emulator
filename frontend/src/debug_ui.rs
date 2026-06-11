@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use phosphor_core::core::debug::{BusDebug, DebugCpu, DebugRegister};
-use phosphor_core::core::machine::Machine;
+use phosphor_core::core::machine::FrontendMachine;
 use phosphor_core::core::memory_map::{WatchpointHit, WatchpointKind};
 
 /// Execution modes for the debug interface.
@@ -168,7 +168,7 @@ impl DebugState {
 
 /// Execute one frame of emulation according to the current run mode.
 /// Returns true if a full frame was executed (caller should drain audio).
-pub fn execute_frame(machine: &mut dyn Machine, state: &mut DebugState) -> bool {
+pub fn execute_frame(machine: &mut dyn FrontendMachine, state: &mut DebugState) -> bool {
     if !state.active {
         machine.run_frame();
         return true;
