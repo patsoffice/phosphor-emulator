@@ -38,7 +38,7 @@ impl M68000 {
     #[inline]
     pub(crate) fn set_pc_checked(&mut self, target: u32) {
         if target & 1 != 0 {
-            self.address_error = true;
+            self.flag_address_error(target, true);
         }
         self.pc = target;
     }

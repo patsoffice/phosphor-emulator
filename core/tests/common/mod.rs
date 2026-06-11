@@ -56,6 +56,9 @@ impl Bus for TestBus {
 pub struct TestBus68k {
     pub memory: Vec<u8>,
     pub irq_level: u8,
+    /// Device-supplied interrupt vector; 0xFF (the default) selects the
+    /// autovector `24 + level`.
+    pub irq_vector: u8,
 }
 
 #[allow(dead_code)]
@@ -64,6 +67,7 @@ impl TestBus68k {
         Self {
             memory: vec![0; 0x100_0000],
             irq_level: 0,
+            irq_vector: 0xFF,
         }
     }
 
@@ -95,6 +99,7 @@ impl Bus for TestBus68k {
     fn check_interrupts(&mut self, _target: BusMaster) -> InterruptState {
         InterruptState {
             irq_level: self.irq_level,
+            irq_vector: self.irq_vector,
             ..Default::default()
         }
     }

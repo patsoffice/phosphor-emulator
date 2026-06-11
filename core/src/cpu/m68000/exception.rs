@@ -13,7 +13,8 @@
 
 use super::M68000;
 use super::flags::SrFlag;
-use crate::core::{Bus, BusMaster};
+use crate::core::{Bus, BusMaster, bus::InterruptState};
+use crate::cpu::flags::detect_rising_edge;
 
 impl M68000 {
     /// Enter an exception: push the stack frame on the supervisor stack and
@@ -190,5 +191,71 @@ impl M68000 {
             return;
         }
         self.finish(132);
+    }
+
+    /// Decide whether a sampled interrupt should be taken at this
+    /// instruction boundary: level 7 (NMI) is edge-triggered, levels 1-6
+    /// are taken while above the SR mask.
+    pub(crate) fn pending_interrupt(&mut self, ints: InterruptState) -> Option<u8> {
+        let level = ints.irq_level & 7;
+        let level7_edge = detect_rising_edge(level == 7, &mut self.nmi_previous);
+        if level == 7 {
+            return level7_edge.then_some(7);
+        }
+        (level > self.interrupt_mask()).then_some(level)
+    }
+
+    /// Take a level-`level` interrupt: wake from STOP, stack the frame
+    /// (PC = the next unexecuted instruction), raise the mask to the taken
+    /// level, and vector — the autovector `24 + level` unless the device
+    /// supplied one (`irq_vector` other than 0xFF, the bus default).
+    ///
+    /// 44 cycles.
+    pub(crate) fn enter_interrupt<B: Bus<Address = u32, Data = u16> + ?Sized>(
+        &mut self,
+        bus: &mut B,
+        master: BusMaster,
+        level: u8,
+        irq_vector: u8,
+    ) {
+        self.stopped = false;
+        let vector = if irq_vector != 0xFF {
+            irq_vector
+        } else {
+            24 + level
+        };
+        self.exception(bus, master, vector, self.pc);
+        self.set_interrupt_mask(level);
+        self.finish(44);
+    }
+
+    /// Address-error (vector 3) entry with the 68000 seven-word group-0
+    /// frame: status word, access address, instruction register, SR, PC.
+    ///
+    /// Approximate by design: real hardware aborts the instruction
+    /// mid-flight, while this core completes it with the offending access
+    /// forced even, so the stacked PC/SR reflect the completed instruction
+    /// (the validation harness skips these vectors). A misaligned
+    /// supervisor stack would double-fault to a halt on hardware; here the
+    /// frame pushes are themselves forced even. 50 cycles.
+    pub(crate) fn enter_address_error<B: Bus<Address = u32, Data = u16> + ?Sized>(
+        &mut self,
+        bus: &mut B,
+        master: BusMaster,
+    ) {
+        let old_sr = self.sr;
+        self.set_supervisor(true);
+        self.set_flag(SrFlag::T, false);
+        self.push_long(bus, master, self.pc);
+        self.push_word(bus, master, old_sr);
+        self.push_word(bus, master, self.opcode);
+        self.push_long(bus, master, self.fault_addr);
+        // Status word: R/W in bit 4, I/N = 0, FC2-0 = data space at the
+        // pre-fault privilege (program-space faults are not distinguished).
+        let fc: u16 = if old_sr & SrFlag::S as u16 != 0 { 5 } else { 1 };
+        let status = if self.fault_read { 0x10 } else { 0 } | fc;
+        self.push_word(bus, master, status);
+        self.pc = self.read_long_at(bus, master, 3 * 4);
+        self.finish(50);
     }
 }

@@ -57,11 +57,13 @@ fn bra_word_form() {
 }
 
 #[test]
-fn bra_to_odd_address_flags_address_error() {
+fn bra_to_odd_address_takes_address_error() {
     let (mut cpu, mut bus) = setup(&[0x6003]); // BRA.s +3
+    cpu.a[7] = 0x2000;
+    bus.load(3 * 4, &0x4000u32.to_be_bytes()); // vector 3 handler
     step(&mut cpu, &mut bus);
-    assert_eq!(cpu.pc, 0x1005);
-    assert!(cpu.took_address_error(), "odd target fetch is vector 3");
+    assert_eq!(cpu.pc, 0x4000, "odd target fetch enters vector 3");
+    assert!(cpu.took_address_error());
 }
 
 // ---------------------------------------------------------------------------
@@ -288,12 +290,14 @@ fn jmp_pc_relative_and_indexed() {
 }
 
 #[test]
-fn jmp_to_odd_address_flags_address_error() {
+fn jmp_to_odd_address_takes_address_error() {
     let (mut cpu, mut bus) = setup(&[0x4ED0]); // JMP (A0)
     cpu.a[0] = 0x3001;
+    cpu.a[7] = 0x2000;
+    bus.load(3 * 4, &0x4000u32.to_be_bytes()); // vector 3 handler
     step(&mut cpu, &mut bus);
-    assert_eq!(cpu.pc, 0x3001);
-    assert!(cpu.took_address_error(), "odd target fetch is vector 3");
+    assert_eq!(cpu.pc, 0x4000, "odd target fetch enters vector 3");
+    assert!(cpu.took_address_error());
 }
 
 #[test]

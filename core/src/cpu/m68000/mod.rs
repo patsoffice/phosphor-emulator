@@ -97,8 +97,7 @@ pub struct M68000 {
     pub variant: M68kVariant,
 
     // Internal state (serialized)
-    /// Previous level-7 interrupt state for NMI edge detection (used from M5).
-    #[allow(dead_code)]
+    /// Previous level-7 interrupt state for NMI edge detection.
     pub(crate) nmi_previous: bool,
     /// STOP instruction executed, waiting for interrupt.
     pub(crate) stopped: bool,
@@ -117,11 +116,17 @@ pub struct M68000 {
     #[save_skip(default)]
     pub(crate) instr_pc: u32,
     /// Set when a word/long access used an odd address during the current
-    /// instruction. The exact mid-instruction abort of the address-error
-    /// exception (vector 3) is not modeled; this flag lets callers identify
-    /// such accesses (the validation harness skips them).
+    /// instruction. The vector-3 exception is entered once the instruction
+    /// completes (real hardware aborts mid-flight; the validation harness
+    /// skips these vectors because of that difference).
     #[save_skip(default)]
     pub(crate) address_error: bool,
+    /// First faulting odd address of the current instruction.
+    #[save_skip(default)]
+    pub(crate) fault_addr: u32,
+    /// Whether that faulting access was a read.
+    #[save_skip(default)]
+    pub(crate) fault_read: bool,
 }
 
 impl Default for M68000 {
@@ -148,6 +153,8 @@ impl M68000 {
             opcode: 0,
             instr_pc: 0,
             address_error: false,
+            fault_addr: 0,
+            fault_read: false,
         }
     }
 
@@ -157,9 +164,21 @@ impl M68000 {
     }
 
     /// True if the instruction that just executed performed a word or long
-    /// access at an odd address (would raise an address error on hardware).
+    /// access at an odd address (the vector-3 exception was entered after
+    /// it completed).
     pub fn took_address_error(&self) -> bool {
         self.address_error
+    }
+
+    /// Record the first misaligned access of the current instruction for
+    /// the address-error frame.
+    #[inline]
+    pub(crate) fn flag_address_error(&mut self, addr: u32, read: bool) {
+        if !self.address_error {
+            self.address_error = true;
+            self.fault_addr = addr;
+            self.fault_read = read;
+        }
     }
 
     /// Mask an effective address to the physical address-bus width.
@@ -188,14 +207,30 @@ impl M68000 {
                     self.state = ExecState::Stopped;
                     return;
                 }
-                // Interrupt sampling at the instruction boundary lands in M5.
+                // Sample interrupts at the instruction boundary.
+                let ints = bus.check_interrupts(master);
+                if let Some(level) = self.pending_interrupt(ints) {
+                    self.enter_interrupt(bus, master, level, ints.irq_vector);
+                    return;
+                }
 
-                // Fetch the opcode word and execute the instruction atomically.
                 self.address_error = false;
                 self.instr_pc = self.pc;
+                if self.pc & 1 != 0 {
+                    // The instruction fetch itself is misaligned.
+                    self.flag_address_error(self.pc, true);
+                    self.enter_address_error(bus, master);
+                    return;
+                }
+                // Fetch the opcode word and execute the instruction atomically.
                 let opcode = self.read_imm_word(bus, master);
                 self.opcode = opcode;
                 self.execute_instruction(opcode, bus, master);
+                if self.address_error {
+                    // The instruction completed with the offending access
+                    // forced even (addressing.rs); vector 3 is entered now.
+                    self.enter_address_error(bus, master);
+                }
             }
             ExecState::Execute(remaining) => {
                 if remaining <= 1 {
@@ -205,8 +240,11 @@ impl M68000 {
                 }
             }
             ExecState::Stopped => {
-                // Wake-up on interrupt lands in M5 (STOP itself is an M5
-                // instruction); nothing can leave this state yet.
+                // STOP: only an interrupt (or external reset) resumes.
+                let ints = bus.check_interrupts(master);
+                if let Some(level) = self.pending_interrupt(ints) {
+                    self.enter_interrupt(bus, master, level, ints.irq_vector);
+                }
             }
             ExecState::Halted => {
                 // Only an external reset recovers from a halt.
@@ -412,7 +450,8 @@ impl Cpu for M68000 {
     }
 
     fn signal_interrupt(&mut self, _int: InterruptState) {
-        // Interrupts are sampled from the bus at instruction boundaries (M5).
+        // Interrupts are sampled from the bus at instruction boundaries
+        // (execute_cycle), not pushed through this entry point.
     }
 
     fn is_sleeping(&self) -> bool {

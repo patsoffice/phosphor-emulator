@@ -125,12 +125,12 @@ pub(crate) fn sext16(v: u16) -> u32 {
 
 impl M68000 {
     /// Flag word/long access at an odd address (address error, vector 3 —
-    /// exception entry lands in M5) and force the address even so execution
-    /// continues deterministically.
+    /// entered once the instruction completes) and force the address even
+    /// so execution continues deterministically.
     #[inline]
-    fn check_aligned(&mut self, addr: u32) -> u32 {
+    fn check_aligned(&mut self, addr: u32, read: bool) -> u32 {
         if addr & 1 != 0 {
-            self.address_error = true;
+            self.flag_address_error(addr, read);
         }
         addr & !1
     }
@@ -142,7 +142,7 @@ impl M68000 {
         master: BusMaster,
         addr: u32,
     ) -> u16 {
-        let addr = self.check_aligned(addr);
+        let addr = self.check_aligned(addr, true);
         bus.read(master, self.mask_addr(addr))
     }
 
@@ -154,7 +154,7 @@ impl M68000 {
         addr: u32,
         data: u16,
     ) {
-        let addr = self.check_aligned(addr);
+        let addr = self.check_aligned(addr, false);
         bus.write(master, self.mask_addr(addr), data);
     }
 
