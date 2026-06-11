@@ -114,6 +114,12 @@ pub struct M68000 {
     /// validation harness skips them).
     #[save_skip(default)]
     pub(crate) address_error: bool,
+    /// Set when the current instruction would raise a trap (divide-by-zero,
+    /// vector 5; CHK out of bounds, vector 6). Exception entry lands in M5;
+    /// until then this flag lets callers identify such instructions (the
+    /// validation harness skips them).
+    #[save_skip(default)]
+    pub(crate) trap_pending: bool,
 }
 
 impl Default for M68000 {
@@ -139,6 +145,7 @@ impl M68000 {
             state: ExecState::Fetch,
             opcode: 0,
             address_error: false,
+            trap_pending: false,
         }
     }
 
@@ -151,6 +158,12 @@ impl M68000 {
     /// access at an odd address (would raise an address error on hardware).
     pub fn took_address_error(&self) -> bool {
         self.address_error
+    }
+
+    /// True if the instruction that just executed would have raised a
+    /// divide-by-zero or CHK trap on hardware (exception entry lands in M5).
+    pub fn took_trap(&self) -> bool {
+        self.trap_pending
     }
 
     /// Mask an effective address to the physical address-bus width.
@@ -183,6 +196,7 @@ impl M68000 {
 
                 // Fetch the opcode word and execute the instruction atomically.
                 self.address_error = false;
+                self.trap_pending = false;
                 let opcode = self.read_imm_word(bus, master);
                 self.opcode = opcode;
                 self.execute_instruction(opcode, bus, master);
@@ -239,9 +253,11 @@ impl M68000 {
             }
             // MOVE.b / MOVE.l / MOVE.w (and MOVEA for An destinations)
             0x1..=0x3 => self.op_move(opcode, bus, master),
+            // CHK (line 0x4, bits 8-6 = 110; LEA shares the line with 111)
+            0x4 if opcode & 0x01C0 == 0x0180 => self.op_chk(opcode, bus, master),
             // Line 0x4 "misc": the unary ALU group lives here; the rest
-            // (SWAP/PEA/MOVEM/LEA/CHK and the control-flow ops) lands in
-            // M2-M5. Size bits 11 select the MOVE from/to SR/CCR group (M5),
+            // (SWAP/PEA/MOVEM/LEA and the control-flow ops) lands in
+            // M3-M5. Size bits 11 select the MOVE from/to SR/CCR group (M5),
             // which op_unary/op_tst route to a NOP themselves.
             0x4 => match (opcode >> 8) & 0xF {
                 0x0 => self.op_unary(opcode, bus, master, UnaryOp::Negx),
@@ -260,10 +276,10 @@ impl M68000 {
             0x5 if opmode & 3 == 3 && ea_mode != 1 => self.op_scc(opcode, bus, master),
             // MOVEQ (bit 8 set is unassigned on the 68000)
             0x7 if opcode & 0x0100 == 0 => self.op_moveq(opcode),
-            // OR / SBCD; the line also carries DIVU/DIVS (M2 muldiv) plus
-            // the illegal PACK/UNPK slots
+            // OR / DIVU / DIVS / SBCD plus the illegal PACK/UNPK slots
             0x8 => match opmode {
-                3 | 7 => self.finish(4), // DIVU / DIVS
+                3 => self.op_div(opcode, bus, master, false),
+                7 => self.op_div(opcode, bus, master, true),
                 4 if ea_mode < 2 => self.op_bcd(opcode, bus, master, false),
                 5 | 6 if ea_mode < 2 => self.finish(4), // illegal (PACK/UNPK on 68020+)
                 _ => self.op_logical(opcode, bus, master, LogicalOp::Or),
@@ -279,10 +295,10 @@ impl M68000 {
                 4..=6 => self.op_logical(opcode, bus, master, LogicalOp::Eor),
                 _ => self.op_cmp(opcode, bus, master),
             },
-            // AND / ABCD; the line also carries MULU/MULS (M2 muldiv) and
-            // EXG (M4)
+            // AND / MULU / MULS / ABCD; the line also carries EXG (M4)
             0xC => match opmode {
-                3 | 7 => self.finish(4), // MULU / MULS
+                3 => self.op_mul(opcode, bus, master, false),
+                7 => self.op_mul(opcode, bus, master, true),
                 4 if ea_mode < 2 => self.op_bcd(opcode, bus, master, true),
                 5 | 6 if ea_mode < 2 => self.finish(4), // EXG (M4)
                 _ => self.op_logical(opcode, bus, master, LogicalOp::And),
@@ -321,6 +337,7 @@ impl Cpu for M68000 {
         self.halted = false;
         self.nmi_previous = false;
         self.address_error = false;
+        self.trap_pending = false;
         self.state = ExecState::Fetch;
 
         self.a[7] = self.read_long_at(bus, master, 0x0000_0000);

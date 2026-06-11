@@ -84,6 +84,11 @@ fn should_run(filename: &str) -> bool {
             | "EXT.w"
             | "EXT.l"
             | "Scc"
+            | "MULU"
+            | "MULS"
+            | "DIVU"
+            | "DIVS"
+            | "CHK"
     )
 }
 
@@ -173,6 +178,10 @@ fn run_test_case(tc: &M68000TestCase, cpu: &mut M68000, bus: &mut TracingBus68k)
         // Odd word/long operand address: the test expects an address-error
         // exception frame, which lands in M5.
         Outcome::Skip("odd operand address (address error lands in M5)")
+    } else if cpu.took_trap() {
+        // Divide-by-zero or CHK out of bounds: the test expects a trap
+        // exception frame, which lands in M5.
+        Outcome::Skip("divide-by-zero / CHK trap (exception entry lands in M5)")
     } else {
         compare_final(tc, cpu, bus)
     };

@@ -5,6 +5,7 @@
 //! computation.
 
 pub mod binary;
+pub mod muldiv;
 pub mod unary;
 
 use super::M68000;
