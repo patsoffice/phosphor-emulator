@@ -32,6 +32,8 @@
           buildInputs = [
             pkgs.cargo
             pkgs.rustc
+            pkgs.clippy
+            pkgs.rustfmt
             pkgs.clang
             pkgs.SDL2
             pkgs.pkg-config
