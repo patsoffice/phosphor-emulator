@@ -120,6 +120,10 @@ fn should_run(filename: &str) -> bool {
             | "JSR"
             | "RTS"
             | "RTR"
+            | "BTST"
+            | "BCHG"
+            | "BCLR"
+            | "BSET"
     )
 }
 

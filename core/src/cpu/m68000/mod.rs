@@ -14,6 +14,7 @@
 
 pub(crate) mod addressing;
 mod alu;
+mod bit;
 mod branch;
 pub mod flags;
 mod move_ops;
@@ -245,8 +246,19 @@ impl M68000 {
         let opmode = (opcode >> 6) & 7;
         let ea_mode = (opcode >> 3) & 7;
         match (opcode >> 12) & 0xF {
-            // ORI/ANDI/SUBI/ADDI/EORI/CMPI (bit ops land in M4, the
-            // to-CCR/to-SR variants in M5)
+            // Dynamic bit ops (bit number in Dn); EA mode 001 there
+            // encodes MOVEP (M5)
+            0x0 if opcode & 0x0100 != 0 => {
+                if ea_mode == 1 {
+                    self.finish(4); // MOVEP (M5)
+                } else {
+                    self.op_bitop(opcode, bus, master, true);
+                }
+            }
+            // Static bit ops (bit number in an extension word)
+            0x0 if opcode & 0x0F00 == 0x0800 => self.op_bitop(opcode, bus, master, false),
+            // ORI/ANDI/SUBI/ADDI/EORI/CMPI (the to-CCR/to-SR variants
+            // land in M5)
             0x0 => {
                 if !self.op_imm_alu(opcode, bus, master) {
                     self.finish(4);
