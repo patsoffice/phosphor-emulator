@@ -257,7 +257,7 @@ impl Bus for SatansHollowSystem {
     type Address = u16;
     type Data = u8;
 
-    fn read(&mut self, _master: BusMaster, addr: u16) -> u8 {
+    fn read(&mut self, master: BusMaster, addr: u16) -> u8 {
         let data = match self.board.map.page(addr).region_id {
             mcr2::Region::ROM
             | mcr2::Region::NVRAM
@@ -265,12 +265,12 @@ impl Bus for SatansHollowSystem {
             | mcr2::Region::VIDEO_RAM => self.board.map.read_backing(addr),
             _ => 0xFF,
         };
-        self.board.map.check_read_watch(addr, data);
+        self.board.map.watch_read(0, master, addr, data);
         data
     }
 
-    fn write(&mut self, _master: BusMaster, addr: u16, data: u8) {
-        self.board.map.check_write_watch(addr, data);
+    fn write(&mut self, master: BusMaster, addr: u16, data: u8) {
+        self.board.map.watch_write(0, master, addr, data);
         match self.board.map.page(addr).region_id {
             mcr2::Region::NVRAM | mcr2::Region::SPRITE_RAM => {
                 self.board.map.write_backing(addr, data);

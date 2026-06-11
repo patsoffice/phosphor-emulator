@@ -656,7 +656,7 @@ impl Bus for MissileCommandSystem {
         false // No DMA hardware on Missile Command
     }
 
-    fn read(&mut self, _master: BusMaster, addr: u16) -> u8 {
+    fn read(&mut self, master: BusMaster, addr: u16) -> u8 {
         // MADSEL check: if active, redirect read to VRAM (bypasses normal decoding)
         if self.get_madsel() {
             return self.vram_madsel_read(addr);
@@ -693,11 +693,11 @@ impl Bus for MissileCommandSystem {
             self.madsel_lastcycles = self.cpu_cycles;
         }
 
-        self.map.check_read_watch(addr, data);
+        self.map.watch_read(0, master, addr, data);
         data
     }
 
-    fn write(&mut self, _master: BusMaster, addr: u16, data: u8) {
+    fn write(&mut self, master: BusMaster, addr: u16, data: u8) {
         // MADSEL check: if active, redirect write to VRAM (bypasses normal decoding)
         if self.get_madsel() {
             self.vram_madsel_write(addr, data);
@@ -706,7 +706,7 @@ impl Bus for MissileCommandSystem {
 
         // 15-bit address bus masking
         let addr = addr & 0x7FFF;
-        self.map.check_write_watch(addr, data);
+        self.map.watch_write(0, master, addr, data);
 
         match self.map.page(addr).region_id {
             Region::RAM => self.map.write_backing(addr, data),

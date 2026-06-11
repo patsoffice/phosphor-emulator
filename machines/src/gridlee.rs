@@ -743,7 +743,7 @@ impl Bus for GridleeSystem {
         false
     }
 
-    fn read(&mut self, _master: BusMaster, addr: u16) -> u8 {
+    fn read(&mut self, master: BusMaster, addr: u16) -> u8 {
         let data = match self.map.page(addr).region_id {
             Region::RAM | Region::VIDEO_RAM | Region::NVRAM | Region::ROM => {
                 self.map.read_backing(addr)
@@ -771,12 +771,12 @@ impl Bus for GridleeSystem {
             _ => 0xFF,
         };
 
-        self.map.check_read_watch(addr, data);
+        self.map.watch_read(0, master, addr, data);
         data
     }
 
-    fn write(&mut self, _master: BusMaster, addr: u16, data: u8) {
-        self.map.check_write_watch(addr, data);
+    fn write(&mut self, master: BusMaster, addr: u16, data: u8) {
+        self.map.watch_write(0, master, addr, data);
 
         match self.map.page(addr).region_id {
             Region::RAM | Region::VIDEO_RAM | Region::NVRAM => {

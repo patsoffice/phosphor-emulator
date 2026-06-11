@@ -308,7 +308,7 @@ impl Bus for DkongSystem {
                     },
                     _ => 0x00,
                 };
-                self.board.main_map.check_read_watch(addr, data);
+                self.board.main_map.watch_read(0, master, addr, data);
                 data
             }
 
@@ -381,7 +381,7 @@ impl Bus for DkongSystem {
                     },
                     _ => {} // ROM or unmapped: ignored
                 }
-                self.board.main_map.check_write_watch(addr, data);
+                self.board.main_map.watch_write(0, master, addr, data);
             }
 
             // Sound CPU writes to program memory are ignored

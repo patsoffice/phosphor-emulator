@@ -527,7 +527,7 @@ impl WilliamsBoard {
                 SoundRegion::RAM | SoundRegion::ROM => self.sound_map.read_backing(addr),
                 _ => 0xFF,
             };
-            self.sound_map.check_read_watch(addr, data);
+            self.sound_map.watch_read(1, master, addr, data);
             return data;
         }
 
@@ -557,7 +557,7 @@ impl WilliamsBoard {
             | MainRegion::PROGRAM_ROM => self.main_map.read_backing(addr),
             _ => 0xFF,
         };
-        self.main_map.check_read_watch(addr, data);
+        self.main_map.watch_read(0, master, addr, data);
         data
     }
 
@@ -571,7 +571,7 @@ impl WilliamsBoard {
                 }
                 _ => {} // ROM or unmapped: ignored
             }
-            self.sound_map.check_write_watch(addr, data);
+            self.sound_map.watch_write(1, master, addr, data);
             return;
         }
 
@@ -610,7 +610,7 @@ impl WilliamsBoard {
             MainRegion::CMOS => self.main_map.write_backing(addr, data | 0xF0),
             _ => {} // ROM or unmapped: ignored
         }
-        self.main_map.check_write_watch(addr, data);
+        self.main_map.watch_write(0, master, addr, data);
     }
 
     pub(crate) fn bus_is_halted_for(&self, master: BusMaster) -> bool {

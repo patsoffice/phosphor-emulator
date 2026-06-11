@@ -173,16 +173,17 @@ pub fn derive_bus_debug(input: TokenStream) -> TokenStream {
             quote! { .or_else(|| self.#ident.take_hit()) }
         });
 
-        // set_watchpoint / clear_watchpoint: match on cpu_index
+        // set_watchpoint / clear_watchpoint: match on cpu_index, passing it
+        // through so hits record which CPU's address space fired
         let set_arms = map_entries.iter().map(|entry| {
             let idx = entry.cpu_index;
             let ident = &entry.field_ident;
-            quote! { #idx => self.#ident.set_watchpoint(addr, kind) }
+            quote! { #idx => self.#ident.set_watchpoint(cpu_index, addr, kind) }
         });
         let clear_arms = map_entries.iter().map(|entry| {
             let idx = entry.cpu_index;
             let ident = &entry.field_ident;
-            quote! { #idx => self.#ident.clear_watchpoint(addr, kind) }
+            quote! { #idx => self.#ident.clear_watchpoint(cpu_index, addr, kind) }
         });
 
         // clear_all_watchpoints: call on every map

@@ -307,7 +307,7 @@ impl Bus for MsPacmanSystem {
     type Address = u16;
     type Data = u8;
 
-    fn read(&mut self, _master: BusMaster, addr: u16) -> u8 {
+    fn read(&mut self, master: BusMaster, addr: u16) -> u8 {
         // Check decode latch trap addresses — latch toggles BEFORE data is returned
         self.check_decode_latch(addr);
 
@@ -316,7 +316,7 @@ impl Bus for MsPacmanSystem {
             match addr {
                 0x0000..=0x3FFF | 0x8000..=0x97FF => {
                     let data = self.decoded_rom[addr as usize];
-                    self.board.map.check_read_watch(addr, data);
+                    self.board.map.watch_read(0, master, addr, data);
                     return data;
                 }
                 _ => {}
@@ -325,7 +325,7 @@ impl Bus for MsPacmanSystem {
             match addr {
                 0x0000..=0x3FFF | 0x8000..=0xBFFF => {
                     let data = self.undecoded_rom[addr as usize];
-                    self.board.map.check_read_watch(addr & 0x7FFF, data);
+                    self.board.map.watch_read(0, master, addr & 0x7FFF, data);
                     return data;
                 }
                 _ => {}

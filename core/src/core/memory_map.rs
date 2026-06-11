@@ -665,13 +665,16 @@ impl AddressSpace16 {
     // Watchpoint methods
     // -----------------------------------------------------------------------
 
-    /// Check for a read watchpoint hit. Returns true if the exact address
-    /// is read-watched, queueing a hit.
+    /// Check a read access against this space's watchpoints. Returns true
+    /// if the exact address is read-watched, queueing a hit.
+    ///
+    /// `cpu_index` is the CPU that owns this address space (matching
+    /// `#[debug_map(cpu = N)]`); `master` is who performed the access.
     ///
     /// When no watchpoints are set anywhere (`active_watch_count == 0`),
     /// this compiles to a single branch-not-taken — effectively zero cost.
     #[inline(always)]
-    pub fn check_read_watch(&mut self, addr: u16, value: u8) -> bool {
+    pub fn watch_read(&mut self, cpu_index: usize, master: BusMaster, addr: u16, data: u8) -> bool {
         if self.active_watch_count == 0 {
             return false;
         }
@@ -679,19 +682,28 @@ impl AddressSpace16 {
         if page.watch_read
             && self
                 .watchpoints
-                .matches(0, addr as u32, WatchpointKind::Read)
+                .matches(cpu_index, addr as u32, WatchpointKind::Read)
         {
-            let hit = self.make_hit(addr, WatchpointKind::Read, value);
+            let hit = self.make_hit(cpu_index, master, addr, WatchpointKind::Read, data);
             self.watchpoints.push_hit(hit);
             return true;
         }
         false
     }
 
-    /// Check for a write watchpoint hit. Returns true if the exact address
-    /// is write-watched, queueing a hit.
+    /// Check a write access against this space's watchpoints. Returns true
+    /// if the exact address is write-watched, queueing a hit.
+    ///
+    /// `cpu_index` is the CPU that owns this address space (matching
+    /// `#[debug_map(cpu = N)]`); `master` is who performed the access.
     #[inline(always)]
-    pub fn check_write_watch(&mut self, addr: u16, value: u8) -> bool {
+    pub fn watch_write(
+        &mut self,
+        cpu_index: usize,
+        master: BusMaster,
+        addr: u16,
+        data: u8,
+    ) -> bool {
         if self.active_watch_count == 0 {
             return false;
         }
@@ -699,9 +711,9 @@ impl AddressSpace16 {
         if page.watch_write
             && self
                 .watchpoints
-                .matches(0, addr as u32, WatchpointKind::Write)
+                .matches(cpu_index, addr as u32, WatchpointKind::Write)
         {
-            let hit = self.make_hit(addr, WatchpointKind::Write, value);
+            let hit = self.make_hit(cpu_index, master, addr, WatchpointKind::Write, data);
             self.watchpoints.push_hit(hit);
             return true;
         }
@@ -710,13 +722,19 @@ impl AddressSpace16 {
 
     /// Build a canonical hit for a byte access through this map.
     ///
-    /// The observability metadata (`source`, `cycle`, `pc`) stays at its
-    /// defaults here; populating it at the bus/board boundary is
-    /// debug-observability work.
-    fn make_hit(&self, addr: u16, kind: WatchpointKind, value: u8) -> WatchpointHit {
+    /// The remaining observability metadata (`cycle`, `pc`, `device`) stays
+    /// at its defaults here; populating it is debug-observability work.
+    fn make_hit(
+        &self,
+        cpu_index: usize,
+        master: BusMaster,
+        addr: u16,
+        kind: WatchpointKind,
+        value: u8,
+    ) -> WatchpointHit {
         WatchpointHit {
-            cpu_index: 0,
-            source: DebugAccessSource::Unknown,
+            cpu_index,
+            source: DebugAccessSource::from(master),
             cycle: 0,
             pc: None,
             addr: addr as u32,
@@ -742,12 +760,13 @@ impl AddressSpace16 {
         self.active_watch_count > 0
     }
 
-    /// Set a watchpoint on the exact address `addr`.
+    /// Set a watchpoint on the exact address `addr` for the CPU that owns
+    /// this address space.
     ///
     /// The page-level flag is set as a fast filter; the exact address is
     /// recorded in the watchpoint set so only that address fires.
-    pub fn set_watchpoint(&mut self, addr: u16, kind: WatchpointKind) {
-        self.watchpoints.set(0, addr as u32, kind);
+    pub fn set_watchpoint(&mut self, cpu_index: usize, addr: u16, kind: WatchpointKind) {
+        self.watchpoints.set(cpu_index, addr as u32, kind);
         let page = &mut self.map.pages[(addr >> 8) as usize];
         let was_active = page.watch_read || page.watch_write;
         match kind {
@@ -763,8 +782,8 @@ impl AddressSpace16 {
     ///
     /// The page-level flag is only cleared if no other watched addresses
     /// on the same page still need it.
-    pub fn clear_watchpoint(&mut self, addr: u16, kind: WatchpointKind) {
-        self.watchpoints.clear(0, addr as u32, kind);
+    pub fn clear_watchpoint(&mut self, cpu_index: usize, addr: u16, kind: WatchpointKind) {
+        self.watchpoints.clear(cpu_index, addr as u32, kind);
 
         // Check if any remaining entries share this page and kind
         let page_idx = (addr >> 8) as usize;
@@ -1142,8 +1161,8 @@ mod tests {
         let mut map = MemoryMap::new();
         map.region(RAM, "RAM", 0x0000, 0x10000, AccessKind::ReadWrite);
 
-        assert!(!map.check_read_watch(0x1234, 0x42));
-        assert!(!map.check_write_watch(0x1234, 0x42));
+        assert!(!map.watch_read(0, BusMaster::Cpu(0), 0x1234, 0x42));
+        assert!(!map.watch_write(0, BusMaster::Cpu(0), 0x1234, 0x42));
         assert!(map.take_hit().is_none());
     }
 
@@ -1152,26 +1171,26 @@ mod tests {
         let mut map = MemoryMap::new();
         map.region(RAM, "RAM", 0x0000, 0x10000, AccessKind::ReadWrite);
 
-        map.set_watchpoint(0x4000, WatchpointKind::Read);
+        map.set_watchpoint(0, 0x4000, WatchpointKind::Read);
         assert!(map.has_any_watchpoints());
         assert_eq!(map.active_watch_count, 1);
 
         // Read at the exact watched address → hit
-        assert!(map.check_read_watch(0x4000, 0xAB));
+        assert!(map.watch_read(0, BusMaster::Cpu(0), 0x4000, 0xAB));
         let hit = map.take_hit().unwrap();
         assert_eq!(hit.addr, 0x4000);
         assert_eq!(hit.kind, WatchpointKind::Read);
         assert_eq!(hit.value, 0xAB);
 
         // Read at a different address on the same page → no hit (exact match only)
-        assert!(!map.check_read_watch(0x4042, 0xCD));
+        assert!(!map.watch_read(0, BusMaster::Cpu(0), 0x4042, 0xCD));
 
         // Write at the watched address → no hit (only read watchpoint set)
-        assert!(!map.check_write_watch(0x4000, 0xCD));
+        assert!(!map.watch_write(0, BusMaster::Cpu(0), 0x4000, 0xCD));
         assert!(map.take_hit().is_none());
 
         // Read in a different page → no hit
-        assert!(!map.check_read_watch(0x5000, 0x00));
+        assert!(!map.watch_read(0, BusMaster::Cpu(0), 0x5000, 0x00));
     }
 
     #[test]
@@ -1179,16 +1198,16 @@ mod tests {
         let mut map = MemoryMap::new();
         map.region(RAM, "RAM", 0x0000, 0x10000, AccessKind::ReadWrite);
 
-        map.set_watchpoint(0x1000, WatchpointKind::Write);
+        map.set_watchpoint(0, 0x1000, WatchpointKind::Write);
 
-        assert!(map.check_write_watch(0x1000, 0x99));
+        assert!(map.watch_write(0, BusMaster::Cpu(0), 0x1000, 0x99));
         let hit = map.take_hit().unwrap();
         assert_eq!(hit.addr, 0x1000);
         assert_eq!(hit.kind, WatchpointKind::Write);
         assert_eq!(hit.value, 0x99);
 
         // Read on same page → no hit
-        assert!(!map.check_read_watch(0x1000, 0x00));
+        assert!(!map.watch_read(0, BusMaster::Cpu(0), 0x1000, 0x00));
     }
 
     #[test]
@@ -1196,14 +1215,14 @@ mod tests {
         let mut map = MemoryMap::new();
         map.region(RAM, "RAM", 0x0000, 0x10000, AccessKind::ReadWrite);
 
-        map.set_watchpoint(0x2000, WatchpointKind::Read);
-        map.set_watchpoint(0x2000, WatchpointKind::Write);
+        map.set_watchpoint(0, 0x2000, WatchpointKind::Read);
+        map.set_watchpoint(0, 0x2000, WatchpointKind::Write);
         // Same page, so active_watch_count should still be 1
         assert_eq!(map.active_watch_count, 1);
 
-        assert!(map.check_read_watch(0x2000, 0x11));
+        assert!(map.watch_read(0, BusMaster::Cpu(0), 0x2000, 0x11));
         map.take_hit();
-        assert!(map.check_write_watch(0x2000, 0x22));
+        assert!(map.watch_write(0, BusMaster::Cpu(0), 0x2000, 0x22));
     }
 
     #[test]
@@ -1211,19 +1230,19 @@ mod tests {
         let mut map = MemoryMap::new();
         map.region(RAM, "RAM", 0x0000, 0x10000, AccessKind::ReadWrite);
 
-        map.set_watchpoint(0x3000, WatchpointKind::Read);
-        map.set_watchpoint(0x3000, WatchpointKind::Write);
+        map.set_watchpoint(0, 0x3000, WatchpointKind::Read);
+        map.set_watchpoint(0, 0x3000, WatchpointKind::Write);
         assert_eq!(map.active_watch_count, 1);
 
         // Clear read but keep write
-        map.clear_watchpoint(0x3000, WatchpointKind::Read);
+        map.clear_watchpoint(0, 0x3000, WatchpointKind::Read);
         assert_eq!(map.active_watch_count, 1); // still active (write remains)
-        assert!(!map.check_read_watch(0x3000, 0x00));
-        assert!(map.check_write_watch(0x3000, 0x00));
+        assert!(!map.watch_read(0, BusMaster::Cpu(0), 0x3000, 0x00));
+        assert!(map.watch_write(0, BusMaster::Cpu(0), 0x3000, 0x00));
 
         // Clear write too
         map.take_hit();
-        map.clear_watchpoint(0x3000, WatchpointKind::Write);
+        map.clear_watchpoint(0, 0x3000, WatchpointKind::Write);
         assert_eq!(map.active_watch_count, 0);
         assert!(!map.has_any_watchpoints());
     }
@@ -1233,16 +1252,16 @@ mod tests {
         let mut map = MemoryMap::new();
         map.region(RAM, "RAM", 0x0000, 0x10000, AccessKind::ReadWrite);
 
-        map.set_watchpoint(0x1000, WatchpointKind::Read);
-        map.set_watchpoint(0x2000, WatchpointKind::Write);
-        map.set_watchpoint(0x3000, WatchpointKind::Read);
+        map.set_watchpoint(0, 0x1000, WatchpointKind::Read);
+        map.set_watchpoint(0, 0x2000, WatchpointKind::Write);
+        map.set_watchpoint(0, 0x3000, WatchpointKind::Read);
         assert_eq!(map.active_watch_count, 3);
 
         map.clear_all_watchpoints();
         assert_eq!(map.active_watch_count, 0);
         assert!(!map.has_any_watchpoints());
-        assert!(!map.check_read_watch(0x1000, 0x00));
-        assert!(!map.check_write_watch(0x2000, 0x00));
+        assert!(!map.watch_read(0, BusMaster::Cpu(0), 0x1000, 0x00));
+        assert!(!map.watch_write(0, BusMaster::Cpu(0), 0x2000, 0x00));
     }
 
     #[test]
@@ -1250,16 +1269,16 @@ mod tests {
         let mut map = MemoryMap::new();
         map.region(RAM, "RAM", 0x0000, 0x10000, AccessKind::ReadWrite);
 
-        map.set_watchpoint(0x1000, WatchpointKind::Read);
-        map.set_watchpoint(0x2000, WatchpointKind::Read);
+        map.set_watchpoint(0, 0x1000, WatchpointKind::Read);
+        map.set_watchpoint(0, 0x2000, WatchpointKind::Read);
         assert_eq!(map.active_watch_count, 2);
 
         // Only exact addresses fire
-        assert!(!map.check_read_watch(0x0000, 0x00));
-        assert!(map.check_read_watch(0x1000, 0x42));
+        assert!(!map.watch_read(0, BusMaster::Cpu(0), 0x0000, 0x00));
+        assert!(map.watch_read(0, BusMaster::Cpu(0), 0x1000, 0x42));
         map.take_hit();
         // Different address on same page → no hit
-        assert!(!map.check_read_watch(0x1050, 0x00));
+        assert!(!map.watch_read(0, BusMaster::Cpu(0), 0x1050, 0x00));
     }
 
     #[test]
@@ -1267,16 +1286,16 @@ mod tests {
         let mut map = MemoryMap::new();
         map.region(RAM, "RAM", 0x0000, 0x10000, AccessKind::ReadWrite);
 
-        map.set_watchpoint(0x2042, WatchpointKind::Write);
+        map.set_watchpoint(0, 0x2042, WatchpointKind::Write);
 
         // Same page, different address → no hit
-        assert!(!map.check_write_watch(0x2000, 0x11));
-        assert!(!map.check_write_watch(0x2041, 0x22));
-        assert!(!map.check_write_watch(0x2043, 0x33));
-        assert!(!map.check_write_watch(0x20FF, 0x44));
+        assert!(!map.watch_write(0, BusMaster::Cpu(0), 0x2000, 0x11));
+        assert!(!map.watch_write(0, BusMaster::Cpu(0), 0x2041, 0x22));
+        assert!(!map.watch_write(0, BusMaster::Cpu(0), 0x2043, 0x33));
+        assert!(!map.watch_write(0, BusMaster::Cpu(0), 0x20FF, 0x44));
 
         // Exact address → hit
-        assert!(map.check_write_watch(0x2042, 0x55));
+        assert!(map.watch_write(0, BusMaster::Cpu(0), 0x2042, 0x55));
         let hit = map.take_hit().unwrap();
         assert_eq!(hit.addr, 0x2042);
         assert_eq!(hit.value, 0x55);
@@ -1287,15 +1306,15 @@ mod tests {
         let mut map = MemoryMap::new();
         map.region(RAM, "RAM", 0x0000, 0x10000, AccessKind::ReadWrite);
 
-        map.set_watchpoint(0x3000, WatchpointKind::Read);
-        map.set_watchpoint(0x3010, WatchpointKind::Read);
+        map.set_watchpoint(0, 0x3000, WatchpointKind::Read);
+        map.set_watchpoint(0, 0x3010, WatchpointKind::Read);
         assert_eq!(map.active_watch_count, 1); // same page
 
         // Clear the first; page flag should stay (0x3010 still active)
-        map.clear_watchpoint(0x3000, WatchpointKind::Read);
+        map.clear_watchpoint(0, 0x3000, WatchpointKind::Read);
         assert_eq!(map.active_watch_count, 1);
-        assert!(!map.check_read_watch(0x3000, 0x00)); // cleared
-        assert!(map.check_read_watch(0x3010, 0xAA)); // still active
+        assert!(!map.watch_read(0, BusMaster::Cpu(0), 0x3000, 0x00)); // cleared
+        assert!(map.watch_read(0, BusMaster::Cpu(0), 0x3010, 0xAA)); // still active
     }
 
     // -----------------------------------------------------------------------
@@ -1342,11 +1361,11 @@ mod tests {
     fn multiple_hits_queue_in_order() {
         let mut map = MemoryMap::new();
         map.region(RAM, "RAM", 0x0000, 0x10000, AccessKind::ReadWrite);
-        map.set_watchpoint(0x1000, WatchpointKind::Read);
-        map.set_watchpoint(0x1001, WatchpointKind::Read);
+        map.set_watchpoint(0, 0x1000, WatchpointKind::Read);
+        map.set_watchpoint(0, 0x1001, WatchpointKind::Read);
 
-        map.check_read_watch(0x1000, 0xAA);
-        map.check_read_watch(0x1001, 0xBB); // queued behind the first
+        map.watch_read(0, BusMaster::Cpu(0), 0x1000, 0xAA);
+        map.watch_read(0, BusMaster::Cpu(0), 0x1001, 0xBB); // queued behind the first
 
         let hit = map.take_hit().unwrap();
         assert_eq!(hit.addr, 0x1000);
@@ -1361,10 +1380,30 @@ mod tests {
     fn hit_records_region_name() {
         let mut map = MemoryMap::new();
         map.region(RAM, "Work RAM", 0x0000, 0x8000, AccessKind::ReadWrite);
-        map.set_watchpoint(0x1234, WatchpointKind::Write);
+        map.set_watchpoint(0, 0x1234, WatchpointKind::Write);
 
-        map.check_write_watch(0x1234, 0x42);
+        map.watch_write(0, BusMaster::Cpu(0), 0x1234, 0x42);
         assert_eq!(map.take_hit().unwrap().region, Some("Work RAM"));
+    }
+
+    #[test]
+    fn hit_records_cpu_index_and_source() {
+        // A sound-CPU map (cpu 1), accessed by CPU 1 and by DMA.
+        let mut map = MemoryMap::new();
+        map.region(RAM, "Sound RAM", 0x0000, 0x1000, AccessKind::ReadWrite);
+        map.set_watchpoint(1, 0x0200, WatchpointKind::Read);
+
+        // Wrong owning CPU index → no match
+        assert!(!map.watch_read(0, BusMaster::Cpu(0), 0x0200, 0x11));
+
+        assert!(map.watch_read(1, BusMaster::Cpu(1), 0x0200, 0x22));
+        assert!(map.watch_read(1, BusMaster::Dma, 0x0200, 0x33));
+
+        let hit = map.take_hit().unwrap();
+        assert_eq!(hit.cpu_index, 1);
+        assert_eq!(hit.source, DebugAccessSource::Cpu(1));
+        let hit = map.take_hit().unwrap();
+        assert_eq!(hit.source, DebugAccessSource::Dma);
     }
 
     // -----------------------------------------------------------------------

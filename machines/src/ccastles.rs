@@ -864,7 +864,7 @@ impl Bus for CrystalCastlesSystem {
         false // No DMA hardware on Crystal Castles
     }
 
-    fn read(&mut self, _master: BusMaster, addr: u16) -> u8 {
+    fn read(&mut self, master: BusMaster, addr: u16) -> u8 {
         let data = match self.map.page(addr).region_id {
             Region::VIDEO_RAM => {
                 if addr == 0x0002 {
@@ -904,12 +904,12 @@ impl Bus for CrystalCastlesSystem {
             _ => 0xFF,
         };
 
-        self.map.check_read_watch(addr, data);
+        self.map.watch_read(0, master, addr, data);
         data
     }
 
-    fn write(&mut self, _master: BusMaster, addr: u16, data: u8) {
-        self.map.check_write_watch(addr, data);
+    fn write(&mut self, master: BusMaster, addr: u16, data: u8) {
+        self.map.watch_write(0, master, addr, data);
 
         match self.map.page(addr).region_id {
             Region::VIDEO_RAM => match addr {

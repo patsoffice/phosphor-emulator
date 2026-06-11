@@ -246,7 +246,7 @@ impl Bus for QbertSystem {
     type Address = u32;
     type Data = u8;
 
-    fn read(&mut self, _master: BusMaster, addr: u32) -> u8 {
+    fn read(&mut self, master: BusMaster, addr: u32) -> u8 {
         let addr16 = (addr & 0xFFFF) as u16;
         let data = match addr16 {
             // NVRAM: 0x0000-0x0FFF
@@ -282,13 +282,13 @@ impl Bus for QbertSystem {
             // Program ROM: 0x6000-0xFFFF
             0x6000..=0xFFFF => self.board.map.read_backing(addr16),
         };
-        self.board.map.check_read_watch(addr16, data);
+        self.board.map.watch_read(0, master, addr16, data);
         data
     }
 
-    fn write(&mut self, _master: BusMaster, addr: u32, data: u8) {
+    fn write(&mut self, master: BusMaster, addr: u32, data: u8) {
         let addr16 = (addr & 0xFFFF) as u16;
-        self.board.map.check_write_watch(addr16, data);
+        self.board.map.watch_write(0, master, addr16, data);
         match addr16 {
             // NVRAM: 0x0000-0x0FFF
             0x0000..=0x0FFF => self.board.map.write_backing(addr16, data),

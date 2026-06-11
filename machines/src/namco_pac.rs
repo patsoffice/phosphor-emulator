@@ -314,14 +314,15 @@ impl NamcoPacBoard {
             }
         };
 
-        self.map.check_read_watch(addr, data);
+        // Single-CPU board: all bus accesses originate from CPU 0.
+        self.map.watch_read(0, BusMaster::Cpu(0), addr, data);
         data
     }
 
     /// Shared memory write logic for all Namco Pac hardware.
     /// Caller is responsible for address masking (e.g. A15 mirror).
     pub fn bus_write_common(&mut self, addr: u16, data: u8) {
-        self.map.check_write_watch(addr, data);
+        self.map.watch_write(0, BusMaster::Cpu(0), addr, data);
 
         match self.map.page(addr).region_id {
             Region::VIDEO_RAM | Region::COLOR_RAM | Region::RAM => {

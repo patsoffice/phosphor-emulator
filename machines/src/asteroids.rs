@@ -201,7 +201,7 @@ impl Bus for AsteroidsSystem {
         false
     }
 
-    fn read(&mut self, _master: BusMaster, addr: u16) -> u8 {
+    fn read(&mut self, master: BusMaster, addr: u16) -> u8 {
         let addr = addr & 0x7FFF; // 15-bit address bus
 
         let data = match self.board.map.page(addr).region_id {
@@ -258,14 +258,14 @@ impl Bus for AsteroidsSystem {
             _ => 0,
         };
 
-        self.board.map.check_read_watch(addr, data);
+        self.board.map.watch_read(0, master, addr, data);
         data
     }
 
-    fn write(&mut self, _master: BusMaster, addr: u16, data: u8) {
+    fn write(&mut self, master: BusMaster, addr: u16, data: u8) {
         let addr = addr & 0x7FFF; // 15-bit address bus
 
-        self.board.map.check_write_watch(addr, data);
+        self.board.map.watch_write(0, master, addr, data);
 
         match self.board.map.page(addr).region_id {
             Region::RAM | Region::VECTOR_RAM => self.board.map.write_backing(addr, data),
