@@ -308,6 +308,17 @@ impl M68000 {
                 4..=6 if ea_mode < 2 => self.op_addx_subx(opcode, bus, master, true),
                 _ => self.op_add_sub(opcode, bus, master, true),
             },
+            // Shifts and rotates. Size bits 11 select the one-bit memory
+            // form (bit 11 set there is unassigned on the 68000); other
+            // sizes are the register form.
+            0xE if opmode & 3 == 3 => {
+                if opcode & 0x0800 == 0 {
+                    self.op_shift_mem(opcode, bus, master);
+                } else {
+                    self.finish(4);
+                }
+            }
+            0xE => self.op_shift_reg(opcode),
             // Remaining lines are treated as 4-cycle NOPs; the
             // illegal-instruction / line-A / line-F exceptions land in M5.
             _ => self.finish(4),

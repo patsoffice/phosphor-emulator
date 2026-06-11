@@ -6,6 +6,7 @@
 
 pub mod binary;
 pub mod muldiv;
+pub mod shift;
 pub mod unary;
 
 use super::M68000;

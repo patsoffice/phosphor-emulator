@@ -89,6 +89,30 @@ fn should_run(filename: &str) -> bool {
             | "DIVU"
             | "DIVS"
             | "CHK"
+            | "ASL.b"
+            | "ASL.w"
+            | "ASL.l"
+            | "ASR.b"
+            | "ASR.w"
+            | "ASR.l"
+            | "LSL.b"
+            | "LSL.w"
+            | "LSL.l"
+            | "LSR.b"
+            | "LSR.w"
+            | "LSR.l"
+            | "ROL.b"
+            | "ROL.w"
+            | "ROL.l"
+            | "ROR.b"
+            | "ROR.w"
+            | "ROR.l"
+            | "ROXL.b"
+            | "ROXL.w"
+            | "ROXL.l"
+            | "ROXR.b"
+            | "ROXR.w"
+            | "ROXR.l"
     )
 }
 
@@ -141,9 +165,18 @@ fn should_skip_opcode(op: u16) -> Option<&'static str> {
     }
 }
 
+/// Vectors whose expected final state is unrelated to the executed
+/// instruction (the expected destination register bears no relation to any
+/// shift of its initial value) — generation glitches in the current suite
+/// snapshot.
+const KNOWN_BAD_VECTORS: [&str; 2] = ["e502 [ASL.b Q, D2] 1583", "e502 [ASL.b Q, D2] 1761"];
+
 fn run_test_case(tc: &M68000TestCase, cpu: &mut M68000, bus: &mut TracingBus68k) -> Outcome {
     if let Some(reason) = should_skip_opcode(tc.initial.prefetch[0]) {
         return Outcome::Skip(reason);
+    }
+    if KNOWN_BAD_VECTORS.contains(&tc.name.as_str()) {
+        return Outcome::Skip("known-bad vector (expected state unrelated to instruction)");
     }
     if tc.initial.sr & 0x8000 != 0 {
         return Outcome::Skip("trace bit set (trace exception lands in M5)");
