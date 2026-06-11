@@ -16,6 +16,7 @@ pub(crate) mod addressing;
 mod alu;
 mod bit;
 mod branch;
+mod exception;
 pub mod flags;
 mod move_ops;
 mod stack;
@@ -111,18 +112,16 @@ pub struct M68000 {
     #[allow(dead_code)]
     #[save_skip(default)]
     pub(crate) opcode: u16,
+    /// Address of that opcode word (PC before the fetch). Exception frames
+    /// that point at the faulting instruction push this value.
+    #[save_skip(default)]
+    pub(crate) instr_pc: u32,
     /// Set when a word/long access used an odd address during the current
-    /// instruction. The address-error exception (vector 3) lands in M5;
-    /// until then this flag lets callers identify such accesses (the
-    /// validation harness skips them).
+    /// instruction. The exact mid-instruction abort of the address-error
+    /// exception (vector 3) is not modeled; this flag lets callers identify
+    /// such accesses (the validation harness skips them).
     #[save_skip(default)]
     pub(crate) address_error: bool,
-    /// Set when the current instruction would raise a trap (divide-by-zero,
-    /// vector 5; CHK out of bounds, vector 6). Exception entry lands in M5;
-    /// until then this flag lets callers identify such instructions (the
-    /// validation harness skips them).
-    #[save_skip(default)]
-    pub(crate) trap_pending: bool,
 }
 
 impl Default for M68000 {
@@ -147,8 +146,8 @@ impl M68000 {
             halted: false,
             state: ExecState::Fetch,
             opcode: 0,
+            instr_pc: 0,
             address_error: false,
-            trap_pending: false,
         }
     }
 
@@ -161,12 +160,6 @@ impl M68000 {
     /// access at an odd address (would raise an address error on hardware).
     pub fn took_address_error(&self) -> bool {
         self.address_error
-    }
-
-    /// True if the instruction that just executed would have raised a
-    /// divide-by-zero or CHK trap on hardware (exception entry lands in M5).
-    pub fn took_trap(&self) -> bool {
-        self.trap_pending
     }
 
     /// Mask an effective address to the physical address-bus width.
@@ -199,7 +192,7 @@ impl M68000 {
 
                 // Fetch the opcode word and execute the instruction atomically.
                 self.address_error = false;
-                self.trap_pending = false;
+                self.instr_pc = self.pc;
                 let opcode = self.read_imm_word(bus, master);
                 self.opcode = opcode;
                 self.execute_instruction(opcode, bus, master);
@@ -288,6 +281,9 @@ impl M68000 {
                 // set are the MOVEM store direction
                 0x8 if opcode & 0x0038 == 0 && opcode & 0x0080 != 0 => self.op_ext(opcode),
                 0x8 if opcode & 0x0080 != 0 => self.op_movem(opcode, bus, master, false),
+                // ILLEGAL is the one architecturally-guaranteed illegal
+                // encoding (a TAS hole); the rest of sub-op 0xA is TST/TAS
+                0xA if opcode == 0x4AFC => self.op_illegal(bus, master, 4),
                 0xA => self.op_tst(opcode, bus, master),
                 // MOVEM load direction (bit 7 clear is unassigned here)
                 0xC if opcode & 0x0080 != 0 => self.op_movem(opcode, bus, master, true),
@@ -298,9 +294,11 @@ impl M68000 {
                     3 => self.op_jmp_jsr(opcode, bus, master, false),
                     2 => self.op_jmp_jsr(opcode, bus, master, true),
                     1 => match opcode {
+                        0x4E40..=0x4E4F => self.op_trap(opcode, bus, master),
                         0x4E50..=0x4E57 => self.op_link(opcode, bus, master),
                         0x4E58..=0x4E5F => self.op_unlk(opcode, bus, master),
                         0x4E75 => self.op_rts(bus, master),
+                        0x4E76 => self.op_trapv(bus, master),
                         0x4E77 => self.op_rtr(bus, master),
                         _ => self.finish(4),
                     },
@@ -360,8 +358,12 @@ impl M68000 {
                 }
             }
             0xE => self.op_shift_reg(opcode),
-            // Remaining lines are treated as 4-cycle NOPs; the
-            // illegal-instruction / line-A / line-F exceptions land in M5.
+            // Line-A and line-F opcodes are unassigned on the 68000 and
+            // vector through their dedicated exceptions
+            0xA => self.op_illegal(bus, master, 10),
+            0xF => self.op_illegal(bus, master, 11),
+            // Remaining unassigned encodings inside implemented lines stay
+            // bounded NOPs (full illegal-instruction coverage lands in M7)
             _ => self.finish(4),
         }
     }
@@ -389,7 +391,6 @@ impl Cpu for M68000 {
         self.halted = false;
         self.nmi_previous = false;
         self.address_error = false;
-        self.trap_pending = false;
         self.state = ExecState::Fetch;
 
         self.a[7] = self.read_long_at(bus, master, 0x0000_0000);
@@ -562,9 +563,9 @@ mod tests {
         let mut cpu = M68000::new();
         let mut bus = WordBus::new();
         cpu.pc = 0x1000;
-        // Line-A opcodes are unassigned (the trap lands in M5); until then
-        // they execute as bounded NOPs.
-        bus.load(0x1000, &[0xA0, 0x00]);
+        // TAS is not implemented until M7; until then it executes as a
+        // bounded NOP.
+        bus.load(0x1000, &[0x4A, 0xC0]);
 
         // First tick fetches and "executes"; instruction must complete in a
         // bounded number of cycles and advance PC by one word.

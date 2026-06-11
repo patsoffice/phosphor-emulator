@@ -217,6 +217,17 @@ impl M68000 {
         bus.write(master, word_addr, merged);
     }
 
+    /// Push a word onto the active stack (A7 predecrements by 2).
+    pub(crate) fn push_word<B: Bus<Address = u32, Data = u16> + ?Sized>(
+        &mut self,
+        bus: &mut B,
+        master: BusMaster,
+        value: u16,
+    ) {
+        self.a[7] = self.a[7].wrapping_sub(2);
+        self.write_word_at(bus, master, self.a[7], value);
+    }
+
     /// Push a long word onto the active stack (A7 predecrements by 4).
     pub(crate) fn push_long<B: Bus<Address = u32, Data = u16> + ?Sized>(
         &mut self,

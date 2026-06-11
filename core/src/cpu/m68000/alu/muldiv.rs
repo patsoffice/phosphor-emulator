@@ -68,8 +68,7 @@ impl M68000 {
     /// Flags: N/Z from the quotient, V/C cleared. On overflow (quotient too
     /// large for 16 bits) V is set and Dn and the other flags are left
     /// unchanged. **X untouched** in every case. Division by zero leaves Dn
-    /// and the flags alone and raises the vector-5 trap (M5; flagged via
-    /// `trap_pending` until then).
+    /// and the flags alone and takes the vector-5 exception.
     pub(crate) fn op_div<B: Bus<Address = u32, Data = u16> + ?Sized>(
         &mut self,
         opcode: u16,
@@ -85,8 +84,16 @@ impl M68000 {
         let dst = self.d[dn];
 
         if src == 0 {
-            self.trap_pending = true;
-            self.finish(8 + ea_time);
+            // Division by zero: N/Z/V/C are cleared (X kept) and the frame
+            // PC is the *divide instruction itself*, not the next one —
+            // both pinned by the suite's lone zero-divide vector
+            // (80ef [DIVU (d16, A7), D0]); Dn is untouched.
+            self.set_flag(SrFlag::N, false);
+            self.set_flag(SrFlag::Z, false);
+            self.set_flag(SrFlag::V, false);
+            self.set_flag(SrFlag::C, false);
+            self.exception(bus, master, 5, self.instr_pc);
+            self.finish(42 + ea_time);
             return;
         }
 
@@ -133,7 +140,7 @@ impl M68000 {
         }
     }
 
-    /// CHK.w <ea>,Dn — trap (vector 6, M5) if the signed word in Dn is
+    /// CHK.w <ea>,Dn — vector-6 exception if the signed word in Dn is
     /// negative or greater than the bound read from <ea>.
     ///
     /// Flags: Z from the checked word, V/C cleared (undefined on hardware,
@@ -159,8 +166,10 @@ impl M68000 {
         self.set_flag(SrFlag::C, false);
         if src < 0 || src > bound {
             self.set_flag(SrFlag::N, src < 0);
-            self.trap_pending = true;
+            self.exception(bus, master, 6, self.pc);
+            self.finish(44 + ea_time);
+        } else {
+            self.finish(10 + ea_time);
         }
-        self.finish(10 + ea_time);
     }
 }

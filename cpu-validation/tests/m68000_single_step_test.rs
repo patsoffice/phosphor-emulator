@@ -132,6 +132,8 @@ fn should_run(filename: &str) -> bool {
             | "UNLINK"
             | "MOVEM.w"
             | "MOVEM.l"
+            | "TRAP"
+            | "TRAPV"
     )
 }
 
@@ -212,13 +214,10 @@ fn run_test_case(tc: &M68000TestCase, cpu: &mut M68000, bus: &mut TracingBus68k)
             tc.name
         ))
     } else if cpu.took_address_error() {
-        // Odd word/long operand address: the test expects an address-error
-        // exception frame, which lands in M5.
-        Outcome::Skip("odd operand address (address error lands in M5)")
-    } else if cpu.took_trap() {
-        // Divide-by-zero or CHK out of bounds: the test expects a trap
-        // exception frame, which lands in M5.
-        Outcome::Skip("divide-by-zero / CHK trap (exception entry lands in M5)")
+        // Odd word/long operand address: the test expects the exact
+        // mid-instruction abort state of the address-error exception,
+        // which this core does not model.
+        Outcome::Skip("odd operand address (address-error abort not modeled)")
     } else {
         compare_final(tc, cpu, bus)
     };
