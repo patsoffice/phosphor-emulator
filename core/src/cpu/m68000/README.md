@@ -6,20 +6,21 @@ registers, big-endian, 24-bit address space. Validated against
 (state-only). Architected so the 68010/68020/68030 can be layered on later
 via the `M68kVariant` gate; only 68000 behavior is implemented.
 
-**Status: M3 complete — control flow.** Full effective-address decoder,
-MOVE family, the complete integer ALU with multiply/divide and all
-shifts/rotates, and the branch/jump/subroutine family. Milestones M4-M7
-(bit ops, MOVEM/LEA/stack frames, exceptions, disassembler) are tracked as
-beads issues under `phosphor-emulator-m68000-emulator-puk`.
+**Status: M4 complete — bit ops, register blocks, and stack frames.** Full
+effective-address decoder, MOVE family, the complete integer ALU with
+multiply/divide and all shifts/rotates, the branch/jump/subroutine family,
+bit operations, MOVEM, and LEA/PEA/LINK/UNLK. Milestones M5-M7
+(exceptions/interrupts, disassembler, full validation coverage) are
+tracked as beads issues under `phosphor-emulator-m68000-emulator-puk`.
 
 ## Status
 
 | Metric           | Value                                                  |
 |------------------|--------------------------------------------------------|
-| Instructions     | 52 of ~80 mnemonics (M1-M3)                            |
+| Instructions     | 65 of ~80 mnemonics (M1-M4)                            |
 | Addressing modes | 12 of 12                                               |
-| Integration tests| 171 (+ 48 unit tests)                                  |
-| Validation       | 575,801/575,801 SingleStepTests vectors (93 files)     |
+| Integration tests| 212 (+ 48 unit tests)                                  |
+| Validation       | 677,799/677,799 SingleStepTests vectors (105 files)    |
 | Timing           | Approximate documented cycle counts (state-accurate)   |
 
 ## Registers
@@ -39,12 +40,12 @@ leave it untouched; the extended ops (ADDX/SUBX/NEGX/ABCD/SBCD/NBCD/ROXx)
 consume it as carry-in and set X = C on the way out. See `flags.rs` for the
 full rules; every instruction doc comment states which rule it follows.
 
-## Instruction Set (M1-M3)
+## Instruction Set (M1-M4)
 
 | Category   | Instructions                             | Notes                                                                     |
 |------------|------------------------------------------|---------------------------------------------------------------------------|
-| Move       | MOVE, MOVEA, MOVEQ                       | All source/dest EA modes; MOVEA sign-extends word sources, sets no flags  |
-| Arithmetic | ADD, ADDA, ADDI, SUB, SUBA, SUBI         | Both directions; ADDA/SUBA full-width, no flags; X = C                    |
+| Move       | MOVE, MOVEA, MOVEQ, SWAP, EXG            | All source/dest EA modes; MOVEA sign-extends word sources, sets no flags  |
+| Arithmetic | ADD/A/I/Q, SUB/A/I/Q                     | Both directions; ADDA/SUBA full-width, no flags; ADDQ data 1-8; X = C     |
 | Compare    | CMP, CMPA, CMPI, CMPM, TST, CHK          | Flags only; never alter X; CHK trap entry lands in M5                     |
 | Logical    | AND, ANDI, OR, ORI, EOR, EORI, NOT       | N/Z set, V/C cleared, X untouched                                         |
 | Extended   | ADDX, SUBX, NEGX                         | Consume X as carry/borrow-in; Z cleared but never set                     |
@@ -54,6 +55,8 @@ full rules; every instruction doc comment states which rule it follows.
 | Shifts     | ASL, ASR, LSL, LSR, ROL, ROR, ROXL, ROXR | Register count mod 64; one-bit memory forms; ROL/ROR never touch X        |
 | Branches   | BRA, BSR, Bcc, DBcc                      | 8/16-bit displacements from the word after the opcode; all 14 conditions  |
 | Jumps      | JMP, JSR, RTS, RTR                       | Control EA modes; RTR restores the five CCR bits; none alter the CCR else |
+| Bit ops    | BTST, BCHG, BCLR, BSET                   | Dynamic + static forms; long mod 32 on Dn, byte mod 8 in memory; Z only   |
+| Stack/addr | LEA, PEA, LINK, UNLK, MOVEM              | Full 32-bit EAs; MOVEM predec mask reversal, word loads sign-extend       |
 
 All sizes (.b/.w/.l) where the 68000 defines them. Unimplemented opcodes
 execute as 4-cycle NOPs until the illegal-instruction/line-A/line-F
@@ -140,10 +143,11 @@ core/src/cpu/m68000/
   alu/muldiv.rs  -- MULU/MULS, DIVU/DIVS, CHK
   alu/shift.rs   -- ASL/ASR, LSL/LSR, ROL/ROR, ROXL/ROXR
   branch.rs      -- BRA/BSR/Bcc, DBcc, JMP/JSR/RTS/RTR
+  bit.rs         -- BTST/BCHG/BCLR/BSET (dynamic + static forms)
+  stack.rs       -- LEA/PEA, LINK/UNLK, MOVEM
 ```
 
-Planned (per the design doc): `bit.rs`, `stack.rs` (M4), `exception.rs`
-(M5), `disasm.rs` (M6).
+Planned (per the design doc): `exception.rs` (M5), `disasm.rs` (M6).
 
 ## Validation
 
@@ -155,9 +159,8 @@ cargo test -p phosphor-cpu-validation --release --test m68000_single_step_test
 The TomHarte/SingleStepTests 680x0 suite is the correctness gate
 (state-only: registers, SR, PC, RAM; cycles and bus transactions are not
 compared). The harness gates files to implemented instructions and skips
-encodings that land in later milestones (ADDQ/SUBQ) plus address-error,
-divide-by-zero, and CHK-trap cases (exception entry lands in M5). Current
-M1-M3 result: **575,801 passed, 0 failed** across all 93
+address-error, divide-by-zero, and CHK-trap cases (exception entry lands
+in M5). Current M1-M4 result: **677,799 passed, 0 failed** across all 105
 implemented-instruction files.
 
 The suite's vectors capture real-hardware behavior for the "undefined"
