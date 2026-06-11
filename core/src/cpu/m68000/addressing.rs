@@ -214,6 +214,17 @@ impl M68000 {
         bus.write(master, word_addr, merged);
     }
 
+    /// Push a long word onto the active stack (A7 predecrements by 4).
+    pub(crate) fn push_long<B: Bus<Address = u32, Data = u16> + ?Sized>(
+        &mut self,
+        bus: &mut B,
+        master: BusMaster,
+        value: u32,
+    ) {
+        self.a[7] = self.a[7].wrapping_sub(4);
+        self.write_long_at(bus, master, self.a[7], value);
+    }
+
     /// Fetch one extension word from the instruction stream and advance PC
     /// (the prefetch primitive).
     pub(crate) fn read_imm_word<B: Bus<Address = u32, Data = u16> + ?Sized>(

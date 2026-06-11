@@ -14,6 +14,7 @@
 
 pub(crate) mod addressing;
 mod alu;
+mod branch;
 pub mod flags;
 mod move_ops;
 use alu::binary::LogicalOp;
@@ -271,9 +272,12 @@ impl M68000 {
                 0xA => self.op_tst(opcode, bus, master),
                 _ => self.finish(4),
             },
-            // Scc (size bits 11, EA mode != An); DBcc shares the encoding
-            // with an An mode (M3), ADDQ/SUBQ the rest of the line (M4)
-            0x5 if opmode & 3 == 3 && ea_mode != 1 => self.op_scc(opcode, bus, master),
+            // Size bits 11 on line 0x5 split into DBcc (EA mode 001 = An)
+            // and Scc (everything else); ADDQ/SUBQ take the other sizes (M4)
+            0x5 if opmode & 3 == 3 && ea_mode == 1 => self.op_dbcc(opcode, bus, master),
+            0x5 if opmode & 3 == 3 => self.op_scc(opcode, bus, master),
+            // BRA / BSR / Bcc
+            0x6 => self.op_bcc(opcode, bus, master),
             // MOVEQ (bit 8 set is unassigned on the 68000)
             0x7 if opcode & 0x0100 == 0 => self.op_moveq(opcode),
             // OR / DIVU / DIVS / SBCD plus the illegal PACK/UNPK slots

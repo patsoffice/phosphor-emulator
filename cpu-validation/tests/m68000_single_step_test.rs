@@ -20,7 +20,7 @@ use phosphor_cpu_validation::{M68000Regs, M68000TestCase, TracingBus68k};
 const ADDR_MASK: u32 = 0x00FF_FFFF;
 
 // ---------------------------------------------------------------------------
-// File gating — only M1 instruction families are enabled
+// File gating — M1-M3 instruction families are enabled
 // ---------------------------------------------------------------------------
 
 fn should_run(filename: &str) -> bool {
@@ -113,6 +113,9 @@ fn should_run(filename: &str) -> bool {
             | "ROXR.b"
             | "ROXR.w"
             | "ROXR.l"
+            | "Bcc"
+            | "BSR"
+            | "DBcc"
     )
 }
 
@@ -157,9 +160,8 @@ fn load_initial(cpu: &mut M68000, bus: &mut TracingBus68k, st: &M68000Regs, load
 /// encodings into the M1 files (`prefetch[0]` is the opcode word).
 fn should_skip_opcode(op: u16) -> Option<&'static str> {
     match op >> 12 {
-        // Line 5 with size bits 11 is Scc (implemented) or DBcc (M3);
-        // the other sizes are ADDQ/SUBQ, which share the ADD/SUB files (M4)
-        0x5 if (op >> 6) & 3 == 3 && (op >> 3) & 7 == 1 => Some("DBcc lands in M3"),
+        // Line 5 sizes other than 11 (Scc/DBcc) are ADDQ/SUBQ, which share
+        // the ADD/SUB files (M4)
         0x5 if (op >> 6) & 3 != 3 => Some("ADDQ/SUBQ lands in M4"),
         _ => None,
     }
