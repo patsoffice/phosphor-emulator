@@ -15,6 +15,10 @@ impl I8088 {
     /// Dispatch and execute a single instruction given its opcode byte.
     /// The opcode has already been fetched; IP points to the first operand
     /// byte (ModR/M, immediate, or displacement).
+    // AAM/DIV/IDIV keep explicit zero checks (not checked_div) because the
+    // zero branch raises the 8088 divide error and the quotient still needs
+    // a separate range check, matching the datasheet structure.
+    #[allow(clippy::manual_checked_ops)]
     pub(crate) fn execute<B: Bus<Address = u32, Data = u8> + ?Sized>(
         &mut self,
         opcode: u8,
@@ -575,11 +579,9 @@ impl I8088 {
                 let vector = self.fetch_byte(bus, master);
                 self.interrupt(bus, master, vector);
             }
-            0xCE => {
-                // INTO: interrupt if OF is set (vector 4)
-                if flags::get(self.flags, Flag::OF) {
-                    self.interrupt(bus, master, 4);
-                }
+            // INTO: interrupt if OF is set (vector 4); no-op when OF is clear
+            0xCE if flags::get(self.flags, Flag::OF) => {
+                self.interrupt(bus, master, 4);
             }
             0xCF => {
                 // IRET: pop IP, CS, FLAGS

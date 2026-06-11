@@ -282,13 +282,7 @@ impl Bus for DkongJrSystem {
                     | MainRegion::RAM
                     | MainRegion::SPRITE_RAM
                     | MainRegion::VIDEO_RAM => self.board.main_map.read_backing(addr),
-                    MainRegion::IO_DMA => {
-                        if addr <= 0x7808 {
-                            self.board.dma.read(addr - 0x7800)
-                        } else {
-                            0x00
-                        }
-                    }
+                    MainRegion::IO_DMA if addr <= 0x7808 => self.board.dma.read(addr - 0x7800),
                     MainRegion::IO_PORTS => match addr {
                         0x7C00 => self.board.in0,
                         0x7C80 => self.board.in1,
@@ -319,10 +313,8 @@ impl Bus for DkongJrSystem {
                     MainRegion::RAM | MainRegion::SPRITE_RAM | MainRegion::VIDEO_RAM => {
                         self.board.main_map.write_backing(addr, data);
                     }
-                    MainRegion::IO_DMA => {
-                        if addr <= 0x7808 {
-                            self.board.dma.write(addr - 0x7800, data);
-                        }
+                    MainRegion::IO_DMA if addr <= 0x7808 => {
+                        self.board.dma.write(addr - 0x7800, data);
                     }
                     MainRegion::IO_PORTS => match addr {
                         // Sound latch (ls174.3d)

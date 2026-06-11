@@ -521,12 +521,8 @@ impl WilliamsBoard {
         if master == BusMaster::Cpu(1) {
             // Sound board
             let data = match self.sound_map.page(addr).region_id {
-                SoundRegion::IO_PIA => {
-                    if (0x0400..=0x0403).contains(&addr) {
-                        self.sound_pia.read(addr - 0x0400)
-                    } else {
-                        0xFF
-                    }
+                SoundRegion::IO_PIA if (0x0400..=0x0403).contains(&addr) => {
+                    self.sound_pia.read(addr - 0x0400)
                 }
                 SoundRegion::RAM | SoundRegion::ROM => self.sound_map.read_backing(addr),
                 _ => 0xFF,
@@ -544,12 +540,8 @@ impl WilliamsBoard {
         // Main board — backed regions use page-table dispatch (banking
         // is handled by remap_pages, so read_backing follows automatically)
         let data = match self.main_map.page(addr).region_id {
-            MainRegion::PALETTE => {
-                if addr <= 0xC00F {
-                    self.main_map.region_data(MainRegion::Palette)[(addr & 0x0F) as usize]
-                } else {
-                    0xFF
-                }
+            MainRegion::PALETTE if addr <= 0xC00F => {
+                self.main_map.region_data(MainRegion::Palette)[(addr & 0x0F) as usize]
             }
             MainRegion::IO_PIA => match addr {
                 0xC804..=0xC807 => self.widget_pia.read(addr - 0xC804),
@@ -574,10 +566,8 @@ impl WilliamsBoard {
             // Sound board
             match self.sound_map.page(addr).region_id {
                 SoundRegion::RAM => self.sound_map.write_backing(addr, data),
-                SoundRegion::IO_PIA => {
-                    if (0x0400..=0x0403).contains(&addr) {
-                        self.sound_pia.write(addr - 0x0400, data);
-                    }
+                SoundRegion::IO_PIA if (0x0400..=0x0403).contains(&addr) => {
+                    self.sound_pia.write(addr - 0x0400, data);
                 }
                 _ => {} // ROM or unmapped: ignored
             }
@@ -591,11 +581,8 @@ impl WilliamsBoard {
             MainRegion::VIDEO_RAM | MainRegion::BANKED_ROM => {
                 self.main_map.region_data_mut(MainRegion::VideoRam)[addr as usize] = data;
             }
-            MainRegion::PALETTE => {
-                if addr <= 0xC00F {
-                    self.main_map.region_data_mut(MainRegion::Palette)[(addr & 0x0F) as usize] =
-                        data;
-                }
+            MainRegion::PALETTE if addr <= 0xC00F => {
+                self.main_map.region_data_mut(MainRegion::Palette)[(addr & 0x0F) as usize] = data;
             }
             MainRegion::IO_PIA => match addr {
                 0xC804..=0xC807 => self.widget_pia.write(addr - 0xC804, data),
@@ -613,15 +600,11 @@ impl WilliamsBoard {
                         .remap_pages(0x00, 0x90, MainRegion::VideoRam, 0);
                 }
             }
-            MainRegion::IO_BLITTER => {
-                if (0xCA00..=0xCA07).contains(&addr) {
-                    self.blitter.write_register(addr - 0xCA00, data);
-                }
+            MainRegion::IO_BLITTER if (0xCA00..=0xCA07).contains(&addr) => {
+                self.blitter.write_register(addr - 0xCA00, data);
             }
-            MainRegion::IO_VIDEO => {
-                if addr == 0xCBFF && data == 0x39 {
-                    self.watchdog_counter = 0;
-                }
+            MainRegion::IO_VIDEO if addr == 0xCBFF && data == 0x39 => {
+                self.watchdog_counter = 0;
             }
             // Only lower 4 bits valid on Williams 5114/6514 SRAM
             MainRegion::CMOS => self.main_map.write_backing(addr, data | 0xF0),

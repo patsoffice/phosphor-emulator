@@ -184,25 +184,23 @@ pub fn run(
                     scancode: Some(Scancode::F1),
                     repeat: false,
                     ..
-                } => {
-                    if has_debug {
-                        debug_state.active = !debug_state.active;
-                        let pw = if profile_state.active {
-                            crate::profile::PANEL_WIDTH
-                        } else {
-                            0
-                        };
-                        if debug_state.active {
-                            if let Some(bus) = machine.debug_bus() {
-                                debug_state.refresh(bus);
-                            }
-                            let dw = debug_state.debug_panel_width();
-                            video.resize_window(width * scale + dw + pw, height * scale);
-                            debug_state.run_mode = RunMode::Paused;
-                        } else {
-                            video.resize_window(width * scale + pw, height * scale);
-                            debug_state.run_mode = RunMode::Running;
+                } if has_debug => {
+                    debug_state.active = !debug_state.active;
+                    let pw = if profile_state.active {
+                        crate::profile::PANEL_WIDTH
+                    } else {
+                        0
+                    };
+                    if debug_state.active {
+                        if let Some(bus) = machine.debug_bus() {
+                            debug_state.refresh(bus);
                         }
+                        let dw = debug_state.debug_panel_width();
+                        video.resize_window(width * scale + dw + pw, height * scale);
+                        debug_state.run_mode = RunMode::Paused;
+                    } else {
+                        video.resize_window(width * scale + pw, height * scale);
+                        debug_state.run_mode = RunMode::Running;
                     }
                 }
 
@@ -211,10 +209,8 @@ pub fn run(
                     scancode: Some(Scancode::F2),
                     repeat: false,
                     ..
-                } => {
-                    if debug_state.active && debug_state.run_mode == RunMode::Paused {
-                        debug_state.run_mode = RunMode::StepInstruction;
-                    }
+                } if debug_state.active && debug_state.run_mode == RunMode::Paused => {
+                    debug_state.run_mode = RunMode::StepInstruction;
                 }
 
                 // F3: Step cycle (debug + paused)
@@ -222,10 +218,8 @@ pub fn run(
                     scancode: Some(Scancode::F3),
                     repeat: false,
                     ..
-                } => {
-                    if debug_state.active && debug_state.run_mode == RunMode::Paused {
-                        debug_state.run_mode = RunMode::StepCycle;
-                    }
+                } if debug_state.active && debug_state.run_mode == RunMode::Paused => {
+                    debug_state.run_mode = RunMode::StepCycle;
                 }
 
                 // F4: Continue (resume running)
@@ -233,10 +227,8 @@ pub fn run(
                     scancode: Some(Scancode::F4),
                     repeat: false,
                     ..
-                } => {
-                    if debug_state.active {
-                        debug_state.run_mode = RunMode::Running;
-                    }
+                } if debug_state.active => {
+                    debug_state.run_mode = RunMode::Running;
                 }
 
                 Event::KeyDown {
@@ -408,14 +400,14 @@ pub fn run(
                 }
 
                 // Mouse motion → analog axes (trackball games)
-                Event::MouseMotion { xrel, yrel, .. } => {
-                    if !video.wants_pointer() && mouse_grabbed {
-                        if let Some(&ax) = analog_axes.first() {
-                            machine.set_analog(ax, xrel);
-                        }
-                        if let Some(&ay) = analog_axes.get(1) {
-                            machine.set_analog(ay, yrel);
-                        }
+                Event::MouseMotion { xrel, yrel, .. }
+                    if !video.wants_pointer() && mouse_grabbed =>
+                {
+                    if let Some(&ax) = analog_axes.first() {
+                        machine.set_analog(ax, xrel);
+                    }
+                    if let Some(&ay) = analog_axes.get(1) {
+                        machine.set_analog(ay, yrel);
                     }
                 }
 
