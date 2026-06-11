@@ -88,7 +88,7 @@ Contains all reusable components — zero external dependencies:
 
 - CPU implementations (M6800, M6809, M6502, Z80, I8035, I8088)
 - Bus abstractions (Bus trait, BusMasterComponent)
-- Machine trait (frontend-agnostic display/input/render interface)
+- Machine traits — `MachineCore` (frame execution contract) plus capability traits (`Renderable`, `AudioSource`, `InputReceiver`, `MachineDebug`, `SaveState`, `Nvram`, `Profilable`), bundled into the object-safe `FrontendMachine` for frontend use
 - Device trait (common interface for all peripherals: reset, read/write, tick)
 - Debug traits (Debuggable, DebugCpu, BusDebug) for interactive inspection and device register writes
 - MemoryMap (page-table dispatch with backing memory for side-effect-free debug reads, watchpoints, region introspection, and bank switching)
@@ -125,11 +125,11 @@ Proc macro crate providing `#[derive(BusDebug)]` and `#[derive(MemoryRegion)]`. 
 
 SDL2 + egui windowed frontend — external dependencies: SDL2, zip, egui:
 
-- **Machine-agnostic** — operates entirely through the `Machine` trait, no hardware-specific knowledge
+- **Machine-agnostic** — operates entirely through the `FrontendMachine` trait object, no hardware-specific knowledge
 - **ROM path resolution** — loads from MAME ZIP files, rompath directories, or extracted loose files
 - SDL2 window with GPU-scaled texture rendering (VSync frame timing)
 - **Debug panel** (F1 or `--debug`) — egui side panel showing all CPU and device registers, step/cycle/continue controls
-- Keyboard and game controller input mapping built automatically from `Machine::input_map()`
+- Keyboard and game controller input mapping built automatically from `InputReceiver::input_map()`
 - Quick save/load (F6/F7), debug overlay with FPS and machine stats (F10), mouse grab for trackball games (F11)
 
 ### CPU Validation Crate (`phosphor-cpu-validation`)
@@ -160,7 +160,7 @@ C++ harnesses that validate phosphor-core's test vectors against independent ref
 phosphor-emulator/
 ├── core/                        # phosphor-core — zero external dependencies
 │   └── src/
-│       ├── core/                #   Bus, Machine, MemoryMap, ClockDivider, debug traits
+│       ├── core/                #   Bus, MachineCore/FrontendMachine, MemoryMap, ClockDivider, debug traits
 │       ├── cpu/                 #   M6800, M6809, M6502, Z80, I8035, I8088
 │       ├── device/              #   PIA, AY-8910, POKEY, WSG, Z80 CTC, blitter, DVG, DMA, RIOT, SSIO, ...
 │       ├── audio/               #   Resampler utilities
