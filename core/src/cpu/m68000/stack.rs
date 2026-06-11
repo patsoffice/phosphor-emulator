@@ -1,5 +1,5 @@
-//! Address computation and stack-frame instructions: LEA / PEA (line 0x4)
-//! and LINK / UNLK (the 0x4E50 group).
+//! Address computation, stack-frame, and register-block instructions:
+//! LEA / PEA / MOVEM (line 0x4) and LINK / UNLK (the 0x4E50 group).
 //!
 //! LEA and PEA materialize a control-mode effective address without
 //! touching memory at it — LEA into An, PEA onto the stack. Like JMP/JSR
@@ -103,5 +103,137 @@ impl M68000 {
         let value = self.pop_long(bus, master);
         self.a[reg] = value;
         self.finish(12);
+    }
+
+    /// Register file indexed the MOVEM way: 0-7 = D0-D7, 8-15 = A0-A7.
+    #[inline]
+    fn movem_reg(&self, r: usize) -> u32 {
+        if r < 8 { self.d[r] } else { self.a[r - 8] }
+    }
+
+    #[inline]
+    fn set_movem_reg(&mut self, r: usize, value: u32) {
+        if r < 8 {
+            self.d[r] = value;
+        } else {
+            self.a[r - 8] = value;
+        }
+    }
+
+    /// MOVEM `<list>,<ea>` (0x4880) / MOVEM `<ea>,<list>` (0x4C80): move
+    /// multiple registers to or from memory. The register-list mask word
+    /// follows the opcode, ahead of any EA extension words. Word-size loads
+    /// sign-extend into the full register — address and data registers
+    /// alike.
+    ///
+    /// The mask is bit 0 = D0 … bit 15 = A7, except the predecrement store
+    /// form, which reverses it (bit 0 = A7 … bit 15 = D0) and stores
+    /// descending so the block ends up in ascending register order.
+    /// 68000-specific corner cases: storing the predecrement base register
+    /// writes its *initial* value (the 68010+ write the decremented one),
+    /// and a postincrement load that includes the base register leaves it
+    /// at the final incremented address (the fetched value is discarded).
+    ///
+    /// Flags: none.
+    pub(crate) fn op_movem<B: Bus<Address = u32, Data = u16> + ?Sized>(
+        &mut self,
+        opcode: u16,
+        bus: &mut B,
+        master: BusMaster,
+        to_registers: bool,
+    ) {
+        let size = if opcode & 0x0040 != 0 {
+            Size::Long
+        } else {
+            Size::Word
+        };
+        let ea_mode = ((opcode >> 3) & 7) as u8;
+        let ea_reg = (opcode & 7) as u8;
+        // Loads take control modes plus (An)+; stores take control-alterable
+        // modes plus -(An).
+        let valid = if to_registers {
+            matches!(ea_mode, 2 | 3 | 5 | 6) || (ea_mode == 7 && ea_reg < 4)
+        } else {
+            matches!(ea_mode, 2 | 4 | 5 | 6) || (ea_mode == 7 && ea_reg < 2)
+        };
+        if !valid {
+            self.finish(4); // illegal encoding (exception lands in M5)
+            return;
+        }
+        let mask = self.read_imm_word(bus, master);
+
+        if ea_mode == 4 {
+            // Predecrement store: reversed mask, descending addresses
+            let reg = ea_reg as usize;
+            let initial = self.a[reg];
+            let mut addr = initial;
+            for i in 0..16 {
+                if mask & (1 << i) == 0 {
+                    continue;
+                }
+                let r = 15 - i; // bit 0 = A7 … bit 15 = D0
+                addr = addr.wrapping_sub(size.bytes());
+                let value = if r == 8 + reg {
+                    initial
+                } else {
+                    self.movem_reg(r)
+                };
+                match size {
+                    Size::Word => self.write_word_at(bus, master, addr, value as u16),
+                    _ => self.write_long_at(bus, master, addr, value),
+                }
+            }
+            self.a[reg] = addr;
+        } else {
+            let mut addr = if ea_mode == 3 {
+                self.a[ea_reg as usize]
+            } else {
+                let Ea::Mem(base) = self.decode_ea(bus, master, ea_mode, ea_reg, size) else {
+                    unreachable!("MOVEM EA modes always resolve to memory");
+                };
+                base
+            };
+            for r in 0..16 {
+                if mask & (1 << r) == 0 {
+                    continue;
+                }
+                if to_registers {
+                    let value = match size {
+                        Size::Word => sext16(self.read_word_at(bus, master, addr)),
+                        _ => self.read_long_at(bus, master, addr),
+                    };
+                    self.set_movem_reg(r, value);
+                } else {
+                    let value = self.movem_reg(r);
+                    match size {
+                        Size::Word => self.write_word_at(bus, master, addr, value as u16),
+                        _ => self.write_long_at(bus, master, addr, value),
+                    }
+                }
+                addr = addr.wrapping_add(size.bytes());
+            }
+            if ea_mode == 3 {
+                // Postincrement: the base ends at the final address, even
+                // when it was itself in the load list
+                self.a[ea_reg as usize] = addr;
+            }
+        }
+
+        // Documented timing: a per-register transfer cost on top of a
+        // per-mode setup cost (loads pay one extra read ahead of the
+        // transfers).
+        let per_reg = if size == Size::Long { 8 } else { 4 } * mask.count_ones();
+        let base = match ea_mode {
+            2..=4 => 8,
+            5 => 12,
+            6 => 14,
+            _ => match ea_reg {
+                0 => 12,
+                1 => 16,
+                2 => 12,
+                _ => 14,
+            },
+        } + if to_registers { 4 } else { 0 };
+        self.finish(base + per_reg);
     }
 }

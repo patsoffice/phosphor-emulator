@@ -284,9 +284,13 @@ impl M68000 {
                 // SWAP Dn (PEA takes the other EA modes of this encoding)
                 0x8 if opcode & 0x00F8 == 0x0040 => self.op_swap(opcode),
                 0x8 if opcode & 0x00C0 == 0x0040 => self.op_lea_pea(opcode, bus, master, true),
-                // EXT.w / EXT.l (EA mode bits 000; other modes are MOVEM, M4)
+                // EXT.w / EXT.l (EA mode bits 000); other modes with bit 7
+                // set are the MOVEM store direction
                 0x8 if opcode & 0x0038 == 0 && opcode & 0x0080 != 0 => self.op_ext(opcode),
+                0x8 if opcode & 0x0080 != 0 => self.op_movem(opcode, bus, master, false),
                 0xA => self.op_tst(opcode, bus, master),
+                // MOVEM load direction (bit 7 clear is unassigned here)
+                0xC if opcode & 0x0080 != 0 => self.op_movem(opcode, bus, master, true),
                 // 0x4E40-0x4EFF: JMP/JSR plus the one-word specials. NOP,
                 // TRAP, LINK/UNLK, MOVE USP, RESET, STOP, RTE, and TRAPV
                 // stay bounded NOPs until M4/M5.

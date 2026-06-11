@@ -130,6 +130,8 @@ fn should_run(filename: &str) -> bool {
             | "PEA"
             | "LINK"
             | "UNLINK"
+            | "MOVEM.w"
+            | "MOVEM.l"
     )
 }
 
