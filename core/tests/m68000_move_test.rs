@@ -390,3 +390,66 @@ fn moveq_boundary_values() {
     assert_eq!(cpu.d[0], 0xFFFF_FF80);
     assert!(flag(&cpu, SrFlag::N));
 }
+
+// ---------------------------------------------------------------------------
+// SWAP
+// ---------------------------------------------------------------------------
+
+#[test]
+fn swap_exchanges_halves_and_sets_n_from_new_bit_31() {
+    let (mut cpu, mut bus) = setup(&[0x4840]); // SWAP D0
+    cpu.d[0] = 0x1234_8765;
+    step(&mut cpu, &mut bus);
+    assert_eq!(cpu.d[0], 0x8765_1234);
+    assert!(flag(&cpu, SrFlag::N), "new upper word has bit 15 set");
+    assert!(!flag(&cpu, SrFlag::Z));
+}
+
+#[test]
+fn swap_zero_sets_z_and_leaves_x() {
+    let (mut cpu, mut bus) = setup(&[0x4847]); // SWAP D7
+    cpu.set_flag(SrFlag::X, true);
+    cpu.set_flag(SrFlag::C, true);
+    cpu.d[7] = 0;
+    step(&mut cpu, &mut bus);
+    assert_eq!(cpu.d[7], 0);
+    assert!(flag(&cpu, SrFlag::Z));
+    assert!(!flag(&cpu, SrFlag::C), "C cleared by the logical rule");
+    assert!(flag(&cpu, SrFlag::X), "X untouched by data movement");
+}
+
+// ---------------------------------------------------------------------------
+// EXG
+// ---------------------------------------------------------------------------
+
+#[test]
+fn exg_data_registers() {
+    let (mut cpu, mut bus) = setup(&[0xC342]); // EXG D1,D2
+    cpu.d[1] = 0x1111_1111;
+    cpu.d[2] = 0x2222_2222;
+    step(&mut cpu, &mut bus);
+    assert_eq!(cpu.d[1], 0x2222_2222);
+    assert_eq!(cpu.d[2], 0x1111_1111);
+}
+
+#[test]
+fn exg_address_registers() {
+    let (mut cpu, mut bus) = setup(&[0xC34A]); // EXG A1,A2
+    cpu.a[1] = 0xAAAA_0001;
+    cpu.a[2] = 0xBBBB_0002;
+    step(&mut cpu, &mut bus);
+    assert_eq!(cpu.a[1], 0xBBBB_0002);
+    assert_eq!(cpu.a[2], 0xAAAA_0001);
+}
+
+#[test]
+fn exg_data_with_address_register_and_no_flags() {
+    let (mut cpu, mut bus) = setup(&[0xC38A]); // EXG D1,A2
+    cpu.sr = (cpu.sr & 0xFF00) | 0x1F;
+    cpu.d[1] = 0x8000_0000;
+    cpu.a[2] = 0x0000_0000;
+    step(&mut cpu, &mut bus);
+    assert_eq!(cpu.d[1], 0x0000_0000);
+    assert_eq!(cpu.a[2], 0x8000_0000);
+    assert_eq!(cpu.sr & 0x1F, 0x1F, "EXG never alters the CCR");
+}

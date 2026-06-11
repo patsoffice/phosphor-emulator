@@ -1,7 +1,7 @@
-//! MOVE / MOVEA / MOVEQ — data movement instructions.
+//! MOVE / MOVEA / MOVEQ / SWAP / EXG — data movement instructions.
 //!
-//! (MOVE to/from SR/CCR/USP, MOVEP, EXG, and SWAP live on lines 0x0/0x4/0xC
-//! and land in later milestones.)
+//! (MOVE to/from SR/CCR/USP and MOVEP live on lines 0x0/0x4 and land
+//! in M5.)
 
 use super::M68000;
 use super::addressing::{Size, ea_cycles, sext8};
@@ -76,6 +76,39 @@ impl M68000 {
         self.d[reg] = value;
         self.set_flags_logical(Size::Long, value);
         self.finish(4);
+    }
+
+    /// SWAP Dn (0x4840): exchange the upper and lower words of a data
+    /// register.
+    ///
+    /// Flags: N and Z from the full 32-bit result (N = new bit 31), V and C
+    /// cleared, X untouched (data-movement rule).
+    pub(crate) fn op_swap(&mut self, opcode: u16) {
+        let reg = (opcode & 7) as usize;
+        let value = self.d[reg].rotate_left(16);
+        self.d[reg] = value;
+        self.set_flags_logical(Size::Long, value);
+        self.finish(4);
+    }
+
+    /// EXG Rx,Ry (line 0xC, opmodes 01000/01001/10001): exchange two full
+    /// 32-bit registers — Dx,Dy / Ax,Ay / Dx,Ay.
+    ///
+    /// Flags: none. 6 cycles.
+    pub(crate) fn op_exg(&mut self, opcode: u16) {
+        let rx = ((opcode >> 9) & 7) as usize;
+        let ry = (opcode & 7) as usize;
+        match (opcode >> 3) & 0x1F {
+            0x08 => self.d.swap(rx, ry),
+            0x09 => self.a.swap(rx, ry),
+            0x11 => std::mem::swap(&mut self.d[rx], &mut self.a[ry]),
+            // 10000 (opmode 6, EA mode 0) is an unassigned encoding
+            _ => {
+                self.finish(4);
+                return;
+            }
+        }
+        self.finish(6);
     }
 }
 

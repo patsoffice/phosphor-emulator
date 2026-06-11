@@ -124,6 +124,8 @@ fn should_run(filename: &str) -> bool {
             | "BCHG"
             | "BCLR"
             | "BSET"
+            | "SWAP"
+            | "EXG"
     )
 }
 
@@ -164,17 +166,6 @@ fn load_initial(cpu: &mut M68000, bus: &mut TracingBus68k, st: &M68000Regs, load
     }
 }
 
-/// Per-test opcode gate: the suite groups some not-yet-implemented
-/// encodings into the M1 files (`prefetch[0]` is the opcode word).
-fn should_skip_opcode(op: u16) -> Option<&'static str> {
-    match op >> 12 {
-        // Line 5 sizes other than 11 (Scc/DBcc) are ADDQ/SUBQ, which share
-        // the ADD/SUB files (M4)
-        0x5 if (op >> 6) & 3 != 3 => Some("ADDQ/SUBQ lands in M4"),
-        _ => None,
-    }
-}
-
 /// Vectors whose expected final state is unrelated to the executed
 /// instruction (the expected destination register bears no relation to any
 /// shift of its initial value) — generation glitches in the current suite
@@ -182,9 +173,6 @@ fn should_skip_opcode(op: u16) -> Option<&'static str> {
 const KNOWN_BAD_VECTORS: [&str; 2] = ["e502 [ASL.b Q, D2] 1583", "e502 [ASL.b Q, D2] 1761"];
 
 fn run_test_case(tc: &M68000TestCase, cpu: &mut M68000, bus: &mut TracingBus68k) -> Outcome {
-    if let Some(reason) = should_skip_opcode(tc.initial.prefetch[0]) {
-        return Outcome::Skip(reason);
-    }
     if KNOWN_BAD_VECTORS.contains(&tc.name.as_str()) {
         return Outcome::Skip("known-bad vector (expected state unrelated to instruction)");
     }

@@ -421,3 +421,68 @@ fn cmpi_b_boundary_values() {
     assert!(cpu.flag_is_set(SrFlag::V));
     assert!(cpu.flag_is_set(SrFlag::N));
 }
+
+// ---------------------------------------------------------------------------
+// ADDQ / SUBQ
+// ---------------------------------------------------------------------------
+
+#[test]
+fn addq_b_carry_and_data_field_zero_means_eight() {
+    let (mut cpu, mut bus) = setup(&[0x5200]); // ADDQ.b #1,D0
+    cpu.d[0] = 0xFF;
+    step(&mut cpu, &mut bus);
+    assert_eq!(cpu.d[0] & 0xFF, 0x00);
+    assert_flags(&cpu, true, false, true, false, true, "0xFF + 1 wraps");
+
+    let (mut cpu, mut bus) = setup(&[0x5041]); // ADDQ.w #8,D1 (data field 0)
+    cpu.d[1] = 0x0010;
+    step(&mut cpu, &mut bus);
+    assert_eq!(cpu.d[1], 0x0018, "data field 0 encodes 8");
+}
+
+#[test]
+fn addq_l_sign_boundary_overflows() {
+    let (mut cpu, mut bus) = setup(&[0x5280]); // ADDQ.l #1,D0
+    cpu.d[0] = 0x7FFF_FFFF;
+    step(&mut cpu, &mut bus);
+    assert_eq!(cpu.d[0], 0x8000_0000);
+    assert_flags(&cpu, false, true, false, true, false, "max positive + 1");
+}
+
+#[test]
+fn addq_to_address_register_is_full_width_and_flagless() {
+    let (mut cpu, mut bus) = setup(&[0x544B]); // ADDQ.w #2,A3
+    cpu.sr = (cpu.sr & 0xFF00) | 0x1F;
+    cpu.a[3] = 0xFFFF_FFFF;
+    step(&mut cpu, &mut bus);
+    assert_eq!(cpu.a[3], 0x0000_0001, "word size still adjusts all 32 bits");
+    assert_eq!(cpu.sr & 0x1F, 0x1F, "An destination never alters the CCR");
+}
+
+#[test]
+fn subq_b_borrow_sets_n_c_x() {
+    let (mut cpu, mut bus) = setup(&[0x5300]); // SUBQ.b #1,D0
+    cpu.d[0] = 0x00;
+    step(&mut cpu, &mut bus);
+    assert_eq!(cpu.d[0] & 0xFF, 0xFF);
+    assert_flags(&cpu, true, true, false, false, true, "0 - 1 borrows");
+}
+
+#[test]
+fn subq_w_memory_destination() {
+    let (mut cpu, mut bus) = setup(&[0x5350]); // SUBQ.w #1,(A0)
+    cpu.a[0] = 0x4000;
+    bus.load(0x4000, &[0x00, 0x01]);
+    step(&mut cpu, &mut bus);
+    assert_eq!(&bus.memory[0x4000..0x4002], &[0x00, 0x00]);
+    assert!(cpu.flag_is_set(SrFlag::Z));
+}
+
+#[test]
+fn subq_from_address_register() {
+    let (mut cpu, mut bus) = setup(&[0x5589]); // SUBQ.l #2,A1
+    cpu.a[1] = 0x0000_0001;
+    step(&mut cpu, &mut bus);
+    assert_eq!(cpu.a[1], 0xFFFF_FFFF, "wraps below zero, no flags");
+    assert!(!cpu.flag_is_set(SrFlag::C));
+}

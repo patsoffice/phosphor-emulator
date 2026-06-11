@@ -559,4 +559,70 @@ impl M68000 {
         );
         true
     }
+
+    /// ADDQ/SUBQ #d,<ea> (line 0x5, sizes 00-10; bit 8 selects SUBQ): add
+    /// or subtract a literal 1-8 (0 encodes 8) at any alterable destination.
+    ///
+    /// Flags: N/Z/V/C from the sized result with **X = C** (arithmetic
+    /// rule). An An destination behaves like ADDA/SUBA: the full 32-bit
+    /// register is adjusted regardless of the word/long size bits and no
+    /// flags are set (byte size with An is an illegal encoding).
+    pub(crate) fn op_addq_subq<B: Bus<Address = u32, Data = u16> + ?Sized>(
+        &mut self,
+        opcode: u16,
+        bus: &mut B,
+        master: BusMaster,
+    ) {
+        let size = size_from_bits(opcode >> 6).expect("size 11 is Scc/DBcc");
+        let is_sub = opcode & 0x0100 != 0;
+        let data = match (opcode >> 9) & 7 {
+            0 => 8,
+            n => n as u32,
+        };
+        let ea_mode = ((opcode >> 3) & 7) as u8;
+        let ea_reg = (opcode & 7) as u8;
+
+        if ea_mode == 1 {
+            if size == Size::Byte {
+                self.finish(4); // ADDQ.b to An is illegal
+                return;
+            }
+            let reg = ea_reg as usize;
+            self.a[reg] = if is_sub {
+                self.a[reg].wrapping_sub(data)
+            } else {
+                self.a[reg].wrapping_add(data)
+            };
+            self.finish(8);
+            return;
+        }
+        if ea_mode == 7 && ea_reg >= 2 {
+            self.finish(4); // PC-relative/immediate destinations are illegal
+            return;
+        }
+
+        let dst = self.decode_ea(bus, master, ea_mode, ea_reg, size);
+        let a = self.ea_read(bus, master, dst, size);
+        let result = if is_sub {
+            self.sub_with_flags(size, a, data)
+        } else {
+            self.add_with_flags(size, a, data)
+        };
+        self.set_flag(SrFlag::X, self.flag_is_set(SrFlag::C));
+        self.ea_write(bus, master, dst, size, result);
+
+        let base = match (ea_mode == 0, size == Size::Long) {
+            (true, false) => 4,
+            (true, true) => 8,
+            (false, false) => 8,
+            (false, true) => 12,
+        };
+        self.finish(
+            base + if ea_mode == 0 {
+                0
+            } else {
+                ea_cycles(ea_mode, ea_reg, size)
+            },
+        );
+    }
 }

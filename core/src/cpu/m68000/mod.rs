@@ -277,8 +277,10 @@ impl M68000 {
                 0x2 => self.op_unary(opcode, bus, master, UnaryOp::Clr),
                 0x4 => self.op_unary(opcode, bus, master, UnaryOp::Neg),
                 0x6 => self.op_unary(opcode, bus, master, UnaryOp::Not),
-                // NBCD (size bits 00); SWAP/PEA share sub-op 0x8 (M4)
+                // NBCD (size bits 00); SWAP and PEA (M4) share sub-op 0x8
                 0x8 if opcode & 0x00C0 == 0 => self.op_nbcd(opcode, bus, master),
+                // SWAP Dn (PEA takes the other EA modes of this encoding)
+                0x8 if opcode & 0x00F8 == 0x0040 => self.op_swap(opcode),
                 // EXT.w / EXT.l (EA mode bits 000; other modes are MOVEM, M4)
                 0x8 if opcode & 0x0038 == 0 && opcode & 0x0080 != 0 => self.op_ext(opcode),
                 0xA => self.op_tst(opcode, bus, master),
@@ -298,9 +300,10 @@ impl M68000 {
                 _ => self.finish(4),
             },
             // Size bits 11 on line 0x5 split into DBcc (EA mode 001 = An)
-            // and Scc (everything else); ADDQ/SUBQ take the other sizes (M4)
+            // and Scc (everything else); the other sizes are ADDQ/SUBQ
             0x5 if opmode & 3 == 3 && ea_mode == 1 => self.op_dbcc(opcode, bus, master),
             0x5 if opmode & 3 == 3 => self.op_scc(opcode, bus, master),
+            0x5 => self.op_addq_subq(opcode, bus, master),
             // BRA / BSR / Bcc
             0x6 => self.op_bcc(opcode, bus, master),
             // MOVEQ (bit 8 set is unassigned on the 68000)
@@ -329,7 +332,7 @@ impl M68000 {
                 3 => self.op_mul(opcode, bus, master, false),
                 7 => self.op_mul(opcode, bus, master, true),
                 4 if ea_mode < 2 => self.op_bcd(opcode, bus, master, true),
-                5 | 6 if ea_mode < 2 => self.finish(4), // EXG (M4)
+                5 | 6 if ea_mode < 2 => self.op_exg(opcode),
                 _ => self.op_logical(opcode, bus, master, LogicalOp::And),
             },
             // ADD / ADDA / ADDX
