@@ -1,6 +1,8 @@
-//! Page-table-based memory map for 16-bit address spaces.
+//! Composed address-space container for 16-bit machines.
 //!
-//! Provides three capabilities that hand-rolled match arms cannot:
+//! [`AddressSpace16`] owns address decode, memory backing, and watchpoint
+//! state for a 64 KB address space. It provides three capabilities that
+//! hand-rolled match arms cannot:
 //!
 //! 1. **Watchpoints** — per-page read/write watch flags with zero cost when
 //!    no watchpoints are active (a single `active_watch_count == 0` check).
@@ -9,9 +11,13 @@
 //! 3. **Declarative mirroring** — `mirror()` copies page entries at build time
 //!    instead of hand-coding `addr & mask` per machine.
 //!
-//! The map divides the 64 KB address space into 256 pages of 256 bytes each.
+//! Decode divides the 64 KB address space into 256 pages of 256 bytes each.
 //! Each page entry carries a machine-defined `region_id` (a plain `u8`) that
 //! the machine's `Bus::read`/`write` dispatches on with a small match.
+//!
+//! The split into decode / backing / watchpoint services and the 32-bit
+//! sibling (`AddressSpace32`) are described in
+//! `docs/designs/address-space-refactor.md`.
 
 use crate::core::watchpoint::{DebugAccessSource, WatchpointPhase};
 
@@ -130,10 +136,11 @@ pub enum DebugWrite {
     UnmappedIgnored,
 }
 
-/// Page-table-based memory map for a 16-bit address space.
+/// Composed address-space container for a 16-bit (64 KB) address space.
 ///
-/// 256 pages of 256 bytes each. Machines build this at init time and
-/// use it in `Bus::read`/`write` to look up the `region_id` for dispatch.
+/// Owns page-table decode (256 pages of 256 bytes each), backing storage,
+/// and watchpoint state. Machines build this at init time and use it in
+/// `Bus::read`/`write` to look up the `region_id` for dispatch.
 ///
 /// Non-I/O regions (RAM, ROM) have backing memory stored in a flat `Vec<u8>`.
 /// This enables side-effect-free `debug_read`/`debug_write` for the debugger
@@ -141,7 +148,7 @@ pub enum DebugWrite {
 ///
 /// The debugger uses it for watchpoints (per-page flags checked only on
 /// flagged pages) and region introspection (list of named regions).
-pub struct MemoryMap {
+pub struct AddressSpace16 {
     pages: [PageEntry; 256],
     regions: Vec<RegionDescriptor>,
 
@@ -159,8 +166,16 @@ pub struct MemoryMap {
     watched_addrs: Vec<(u16, WatchpointKind)>,
 }
 
-impl MemoryMap {
-    /// Create a new memory map with all pages unmapped.
+/// Migration-only alias for [`AddressSpace16`].
+///
+/// New code should use `AddressSpace16` directly; this alias exists so
+/// current machines keep compiling while call sites migrate, and will be
+/// removed once migration completes (see
+/// `docs/designs/address-space-refactor.md`, Phase 7).
+pub type MemoryMap = AddressSpace16;
+
+impl AddressSpace16 {
+    /// Create a new address space with all pages unmapped.
     pub fn new() -> Self {
         Self {
             pages: [PageEntry::default(); 256],
@@ -625,7 +640,7 @@ impl MemoryMap {
     }
 }
 
-impl Default for MemoryMap {
+impl Default for AddressSpace16 {
     fn default() -> Self {
         Self::new()
     }

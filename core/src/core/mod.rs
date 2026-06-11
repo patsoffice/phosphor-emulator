@@ -15,7 +15,7 @@ pub use machine::{
     AnalogInput, AudioSource, FrontendMachine, InputButton, InputReceiver, Machine, MachineCore,
     MachineDebug, Nvram, Profilable, ProfileSpan, Renderable, SaveState, TimingConfig,
 };
-pub use memory_map::{DebugRead, DebugWrite, MemoryMap};
+pub use memory_map::{AddressSpace16, DebugRead, DebugWrite, MemoryMap};
 pub use save_state::{SaveError, Saveable, StateReader, StateWriter, load_machine, save_machine};
 pub use watchpoint::{
     DebugAccessSource, Watchpoint, WatchpointHit, WatchpointKind, WatchpointPhase, Watchpoints,
