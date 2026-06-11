@@ -256,10 +256,10 @@ impl M68000 {
             0x1..=0x3 => self.op_move(opcode, bus, master),
             // CHK (line 0x4, bits 8-6 = 110; LEA shares the line with 111)
             0x4 if opcode & 0x01C0 == 0x0180 => self.op_chk(opcode, bus, master),
-            // Line 0x4 "misc": the unary ALU group lives here; the rest
-            // (SWAP/PEA/MOVEM/LEA and the control-flow ops) lands in
-            // M3-M5. Size bits 11 select the MOVE from/to SR/CCR group (M5),
-            // which op_unary/op_tst route to a NOP themselves.
+            // Line 0x4 "misc": the unary ALU group and JMP/JSR/RTS/RTR live
+            // here; the rest (SWAP/PEA/MOVEM/LEA and the exception ops)
+            // lands in M4-M5. Size bits 11 select the MOVE from/to SR/CCR
+            // group (M5), which op_unary/op_tst route to a NOP themselves.
             0x4 => match (opcode >> 8) & 0xF {
                 0x0 => self.op_unary(opcode, bus, master, UnaryOp::Negx),
                 0x2 => self.op_unary(opcode, bus, master, UnaryOp::Clr),

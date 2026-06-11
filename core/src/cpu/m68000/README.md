@@ -6,20 +6,20 @@ registers, big-endian, 24-bit address space. Validated against
 (state-only). Architected so the 68010/68020/68030 can be layered on later
 via the `M68kVariant` gate; only 68000 behavior is implemented.
 
-**Status: M2 complete — full integer ALU.** Full effective-address decoder,
-MOVE family, the complete binary/unary/extended/BCD integer ALU, multiply
-and divide, and all shifts/rotates. Milestones M3-M7 (control flow, bit
-ops, exceptions, disassembler) are tracked as beads issues under
-`phosphor-emulator-m68000-emulator-puk`.
+**Status: M3 complete — control flow.** Full effective-address decoder,
+MOVE family, the complete integer ALU with multiply/divide and all
+shifts/rotates, and the branch/jump/subroutine family. Milestones M4-M7
+(bit ops, MOVEM/LEA/stack frames, exceptions, disassembler) are tracked as
+beads issues under `phosphor-emulator-m68000-emulator-puk`.
 
 ## Status
 
 | Metric           | Value                                                  |
 |------------------|--------------------------------------------------------|
-| Instructions     | 44 of ~80 mnemonics (M1 + M2)                          |
+| Instructions     | 52 of ~80 mnemonics (M1-M3)                            |
 | Addressing modes | 12 of 12                                               |
-| Integration tests| 150 (+ 48 unit tests)                                  |
-| Validation       | 543,262/543,262 SingleStepTests vectors (86 files)     |
+| Integration tests| 171 (+ 48 unit tests)                                  |
+| Validation       | 575,801/575,801 SingleStepTests vectors (93 files)     |
 | Timing           | Approximate documented cycle counts (state-accurate)   |
 
 ## Registers
@@ -39,7 +39,7 @@ leave it untouched; the extended ops (ADDX/SUBX/NEGX/ABCD/SBCD/NBCD/ROXx)
 consume it as carry-in and set X = C on the way out. See `flags.rs` for the
 full rules; every instruction doc comment states which rule it follows.
 
-## Instruction Set (M1 + M2)
+## Instruction Set (M1-M3)
 
 | Category   | Instructions                             | Notes                                                                     |
 |------------|------------------------------------------|---------------------------------------------------------------------------|
@@ -52,6 +52,8 @@ full rules; every instruction doc comment states which rule it follows.
 | Unary      | NEG, CLR, EXT, Scc                       | Scc never alters the CCR                                                  |
 | Mul/Div    | MULU, MULS, DIVU, DIVS                   | Divide overflow: V set, C cleared, N/Z/Dn unchanged; ÷0 trap lands in M5  |
 | Shifts     | ASL, ASR, LSL, LSR, ROL, ROR, ROXL, ROXR | Register count mod 64; one-bit memory forms; ROL/ROR never touch X        |
+| Branches   | BRA, BSR, Bcc, DBcc                      | 8/16-bit displacements from the word after the opcode; all 14 conditions  |
+| Jumps      | JMP, JSR, RTS, RTR                       | Control EA modes; RTR restores the five CCR bits; none alter the CCR else |
 
 All sizes (.b/.w/.l) where the 68000 defines them. Unimplemented opcodes
 execute as 4-cycle NOPs until the illegal-instruction/line-A/line-F
@@ -110,8 +112,11 @@ other CPU in the workspace uses this instantiation; `SimpleSystem68k`,
   registers. Revisit if a real machine needs strobe-accurate byte writes.
 - Word/long access at an odd address flags `address_error`; the actual
   vector-3 exception lands in M5. Until then the access is forced even so
-  execution stays deterministic.
-- Effective addresses are masked to 24 bits (`variant`-gated for 68020+).
+  execution stays deterministic. Branch/jump/return targets at odd
+  addresses flag the same way (the fault would hit the target fetch).
+- Effective addresses are computed at the full 32 bits — JMP/JSR load the
+  unmasked value into PC, matching hardware — and masked to 24 bits only
+  at the bus (`variant`-gated for 68020+).
 
 ### Supervisor/user stack switching
 
@@ -134,10 +139,11 @@ core/src/cpu/m68000/
   alu/unary.rs   -- NEG/NEGX/NOT/CLR, EXT, Scc
   alu/muldiv.rs  -- MULU/MULS, DIVU/DIVS, CHK
   alu/shift.rs   -- ASL/ASR, LSL/LSR, ROL/ROR, ROXL/ROXR
+  branch.rs      -- BRA/BSR/Bcc, DBcc, JMP/JSR/RTS/RTR
 ```
 
-Planned (per the design doc): `branch.rs` (M3), `bit.rs`, `stack.rs` (M4),
-`exception.rs` (M5), `disasm.rs` (M6).
+Planned (per the design doc): `bit.rs`, `stack.rs` (M4), `exception.rs`
+(M5), `disasm.rs` (M6).
 
 ## Validation
 
@@ -149,9 +155,9 @@ cargo test -p phosphor-cpu-validation --release --test m68000_single_step_test
 The TomHarte/SingleStepTests 680x0 suite is the correctness gate
 (state-only: registers, SR, PC, RAM; cycles and bus transactions are not
 compared). The harness gates files to implemented instructions and skips
-encodings that land in later milestones (ADDQ/SUBQ, DBcc) plus
-address-error, divide-by-zero, and CHK-trap cases (exception entry lands
-in M5). Current M1+M2 result: **543,262 passed, 0 failed** across all 86
+encodings that land in later milestones (ADDQ/SUBQ) plus address-error,
+divide-by-zero, and CHK-trap cases (exception entry lands in M5). Current
+M1-M3 result: **575,801 passed, 0 failed** across all 93
 implemented-instruction files.
 
 The suite's vectors capture real-hardware behavior for the "undefined"
