@@ -126,6 +126,10 @@ fn should_run(filename: &str) -> bool {
             | "BSET"
             | "SWAP"
             | "EXG"
+            | "LEA"
+            | "PEA"
+            | "LINK"
+            | "UNLINK"
     )
 }
 

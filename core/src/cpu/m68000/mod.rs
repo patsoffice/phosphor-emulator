@@ -18,6 +18,7 @@ mod bit;
 mod branch;
 pub mod flags;
 mod move_ops;
+mod stack;
 use alu::binary::LogicalOp;
 use alu::unary::UnaryOp;
 pub use flags::SrFlag;
@@ -266,8 +267,9 @@ impl M68000 {
             }
             // MOVE.b / MOVE.l / MOVE.w (and MOVEA for An destinations)
             0x1..=0x3 => self.op_move(opcode, bus, master),
-            // CHK (line 0x4, bits 8-6 = 110; LEA shares the line with 111)
+            // CHK (line 0x4, bits 8-6 = 110) and LEA (111) share the line
             0x4 if opcode & 0x01C0 == 0x0180 => self.op_chk(opcode, bus, master),
+            0x4 if opcode & 0x01C0 == 0x01C0 => self.op_lea_pea(opcode, bus, master, false),
             // Line 0x4 "misc": the unary ALU group and JMP/JSR/RTS/RTR live
             // here; the rest (SWAP/PEA/MOVEM/LEA and the exception ops)
             // lands in M4-M5. Size bits 11 select the MOVE from/to SR/CCR
@@ -281,6 +283,7 @@ impl M68000 {
                 0x8 if opcode & 0x00C0 == 0 => self.op_nbcd(opcode, bus, master),
                 // SWAP Dn (PEA takes the other EA modes of this encoding)
                 0x8 if opcode & 0x00F8 == 0x0040 => self.op_swap(opcode),
+                0x8 if opcode & 0x00C0 == 0x0040 => self.op_lea_pea(opcode, bus, master, true),
                 // EXT.w / EXT.l (EA mode bits 000; other modes are MOVEM, M4)
                 0x8 if opcode & 0x0038 == 0 && opcode & 0x0080 != 0 => self.op_ext(opcode),
                 0xA => self.op_tst(opcode, bus, master),
@@ -291,6 +294,8 @@ impl M68000 {
                     3 => self.op_jmp_jsr(opcode, bus, master, false),
                     2 => self.op_jmp_jsr(opcode, bus, master, true),
                     1 => match opcode {
+                        0x4E50..=0x4E57 => self.op_link(opcode, bus, master),
+                        0x4E58..=0x4E5F => self.op_unlk(opcode, bus, master),
                         0x4E75 => self.op_rts(bus, master),
                         0x4E77 => self.op_rtr(bus, master),
                         _ => self.finish(4),
