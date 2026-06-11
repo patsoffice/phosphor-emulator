@@ -298,18 +298,13 @@ impl Pokey {
                 self.skstat |= SKSTAT_RESET_MASK;
             }
             0x0B => {
-                // POTGO: Start pot scan
+                // POTGO: Start pot scan. All ALLPOT bits read as "still
+                // scanning" (0xFF) until each pot's counter reaches its input
+                // value during the scan; nothing completes instantly.
                 self.pot_scanning = true;
                 self.pot_scan_count = 0;
                 self.pot_counter = [0; 8];
                 self.pot_done = 0xFF;
-                // Pots with input value 0 are immediately done (no capacitor
-                // connected). Matches MAME's pokey_potgo() behavior.
-                for i in 0..8 {
-                    if self.pot_input[i] == 0 {
-                        self.pot_done &= !(1 << i);
-                    }
-                }
             }
             0x0D => self.serout = data, // SEROUT
             0x0E => {
@@ -548,7 +543,11 @@ impl Pokey {
             for i in 0..8 {
                 if (self.pot_done & (1 << i)) != 0 {
                     self.pot_counter[i] = self.pot_counter[i].wrapping_add(1);
-                    if self.pot_counter[i] > self.pot_input[i] || self.pot_counter[i] == 228 {
+                    // A pot completes when its counter reaches the input value,
+                    // latching ALLPOT clear with the counter == input. Pots whose
+                    // target exceeds POT_SCAN_MAX never complete: the global scan
+                    // halts at 228 (below) and leaves their ALLPOT bit set.
+                    if self.pot_counter[i] >= self.pot_input[i] {
                         self.pot_done &= !(1 << i);
                     }
                 }

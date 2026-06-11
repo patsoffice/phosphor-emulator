@@ -22,6 +22,7 @@ fn test_register_routing() {
 #[test]
 fn test_poly_counters() {
     let mut pokey = Pokey::new(44100);
+    pokey.write(0x0F, 0x03); // SKCTL: take poly counters out of reset
 
     // 17-bit poly: starting at all-1s, zeros propagate from bit 0 but
     // RANDOM reads bits 16:9 — need enough ticks for changes to reach bit 9.
