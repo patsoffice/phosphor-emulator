@@ -13,6 +13,12 @@
 //! Each page entry carries a machine-defined `region_id` (a plain `u8`) that
 //! the machine's `Bus::read`/`write` dispatches on with a small match.
 
+use crate::core::watchpoint::{DebugAccessSource, WatchpointPhase};
+
+// Canonical watchpoint types live in `core::watchpoint`; re-exported here so
+// existing `memory_map::WatchpointHit` paths keep working during migration.
+pub use crate::core::watchpoint::{WatchpointHit, WatchpointKind};
+
 /// Machine-defined region identifier. Values are assigned by each machine
 /// as constants (e.g., `const VIDEO_RAM: RegionId = 1`). The MemoryMap
 /// stores and reports them but does not interpret them.
@@ -76,19 +82,52 @@ pub struct RegionDescriptor {
     pub access: AccessKind,
 }
 
-/// Details of a watchpoint hit, consumed by the debugger after each tick.
+/// Result of a side-effect-free debug read from an address space.
+///
+/// Canonical memory-result type shared with debug-observability (see
+/// `docs/designs/address-space-refactor.md`). Lets the debugger label
+/// memory cells as backed, I/O, or unmapped instead of displaying `FF`.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct WatchpointHit {
-    pub addr: u16,
-    pub kind: WatchpointKind,
-    pub value: u8,
+pub enum DebugRead {
+    /// The address resolves to backing storage.
+    Backed {
+        /// Value read (low `width * 8` bits significant).
+        value: u32,
+        /// Access width in bytes (1, 2, or 4).
+        width: u8,
+        /// Region the address resolved to.
+        region_id: RegionId,
+    },
+    /// The address is mapped to I/O; reading it would have side effects.
+    Io,
+    /// The address is not mapped.
+    Unmapped,
 }
 
-/// Whether a watchpoint triggers on reads, writes, or both.
+/// Result of a side-effect-free debug write to an address space.
+///
+/// Canonical memory-result type shared with debug-observability. Debug
+/// writes may modify ROM backing; `access` lets the UI distinguish
+/// "patched Program ROM" from "edited RAM".
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub enum WatchpointKind {
-    Read,
-    Write,
+pub enum DebugWrite {
+    /// The write landed in backing storage.
+    Backed {
+        /// Value before the write.
+        old: u32,
+        /// Value after the write.
+        new: u32,
+        /// Access width in bytes (1, 2, or 4).
+        width: u8,
+        /// Region the address resolved to.
+        region_id: RegionId,
+        /// Access kind of the region (e.g. `ReadOnly` indicates a ROM patch).
+        access: AccessKind,
+    },
+    /// The address is mapped to I/O; the write was ignored.
+    IoIgnored,
+    /// The address is not mapped; the write was ignored.
+    UnmappedIgnored,
 }
 
 /// Page-table-based memory map for a 16-bit address space.
@@ -443,11 +482,7 @@ impl MemoryMap {
                 .iter()
                 .any(|&(a, k)| a == addr && k == WatchpointKind::Read)
         {
-            self.pending_hit = Some(WatchpointHit {
-                addr,
-                kind: WatchpointKind::Read,
-                value,
-            });
+            self.pending_hit = Some(self.make_hit(addr, WatchpointKind::Read, value));
             return true;
         }
         false
@@ -467,14 +502,31 @@ impl MemoryMap {
                 .iter()
                 .any(|&(a, k)| a == addr && k == WatchpointKind::Write)
         {
-            self.pending_hit = Some(WatchpointHit {
-                addr,
-                kind: WatchpointKind::Write,
-                value,
-            });
+            self.pending_hit = Some(self.make_hit(addr, WatchpointKind::Write, value));
             return true;
         }
         false
+    }
+
+    /// Build a canonical hit for a byte access through this map.
+    ///
+    /// The observability metadata (`source`, `cycle`, `pc`) stays at its
+    /// defaults here; populating it at the bus/board boundary is
+    /// debug-observability work.
+    fn make_hit(&self, addr: u16, kind: WatchpointKind, value: u8) -> WatchpointHit {
+        WatchpointHit {
+            cpu_index: 0,
+            source: DebugAccessSource::Unknown,
+            cycle: 0,
+            pc: None,
+            addr: addr as u32,
+            kind,
+            phase: WatchpointPhase::After,
+            value: value as u32,
+            width: 1,
+            region: self.region_at(addr).map(|r| r.name),
+            device: None,
+        }
     }
 
     /// Consume the pending watchpoint hit (polled by debugger after each tick).
