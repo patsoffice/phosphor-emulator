@@ -238,38 +238,42 @@ impl M68000 {
             }
             // MOVE.b / MOVE.l / MOVE.w (and MOVEA for An destinations)
             0x1..=0x3 => self.op_move(opcode, bus, master),
+            // NBCD (line 0x4 sub-op 0x8 with size bits 00)
+            0x4 if opcode & 0x0FC0 == 0x0800 => self.op_nbcd(opcode, bus, master),
             // TST (the rest of the line-0x4 "misc" ops land in M2-M5)
             0x4 if opcode & 0x0F00 == 0x0A00 => self.op_tst(opcode, bus, master),
             // MOVEQ (bit 8 set is unassigned on the 68000)
             0x7 if opcode & 0x0100 == 0 => self.op_moveq(opcode),
-            // OR; the line also carries DIVU/DIVS (M2 muldiv) and SBCD (M2
-            // extended arithmetic) plus the illegal PACK/UNPK slots
+            // OR / SBCD; the line also carries DIVU/DIVS (M2 muldiv) plus
+            // the illegal PACK/UNPK slots
             0x8 => match opmode {
-                3 | 7 => self.finish(4),                // DIVU / DIVS
-                4..=6 if ea_mode < 2 => self.finish(4), // SBCD / illegal
+                3 | 7 => self.finish(4), // DIVU / DIVS
+                4 if ea_mode < 2 => self.op_bcd(opcode, bus, master, false),
+                5 | 6 if ea_mode < 2 => self.finish(4), // illegal (PACK/UNPK on 68020+)
                 _ => self.op_logical(opcode, bus, master, LogicalOp::Or),
             },
-            // SUB / SUBA (SUBX lands in M2 extended arithmetic)
+            // SUB / SUBA / SUBX
             0x9 => match opmode {
-                4..=6 if ea_mode < 2 => self.finish(4), // SUBX
+                4..=6 if ea_mode < 2 => self.op_addx_subx(opcode, bus, master, false),
                 _ => self.op_add_sub(opcode, bus, master, false),
             },
-            // CMP / CMPA / EOR (CMPM lands in M2 extended arithmetic)
+            // CMP / CMPA / CMPM / EOR
             0xB => match opmode {
-                4..=6 if ea_mode == 1 => self.finish(4), // CMPM
+                4..=6 if ea_mode == 1 => self.op_cmpm(opcode, bus, master),
                 4..=6 => self.op_logical(opcode, bus, master, LogicalOp::Eor),
                 _ => self.op_cmp(opcode, bus, master),
             },
-            // AND; the line also carries MULU/MULS (M2 muldiv), ABCD (M2
-            // extended arithmetic), and EXG (M4)
+            // AND / ABCD; the line also carries MULU/MULS (M2 muldiv) and
+            // EXG (M4)
             0xC => match opmode {
-                3 | 7 => self.finish(4),                // MULU / MULS
-                4..=6 if ea_mode < 2 => self.finish(4), // ABCD / EXG
+                3 | 7 => self.finish(4), // MULU / MULS
+                4 if ea_mode < 2 => self.op_bcd(opcode, bus, master, true),
+                5 | 6 if ea_mode < 2 => self.finish(4), // EXG (M4)
                 _ => self.op_logical(opcode, bus, master, LogicalOp::And),
             },
-            // ADD / ADDA (ADDX lands in M2 extended arithmetic)
+            // ADD / ADDA / ADDX
             0xD => match opmode {
-                4..=6 if ea_mode < 2 => self.finish(4), // ADDX
+                4..=6 if ea_mode < 2 => self.op_addx_subx(opcode, bus, master, true),
                 _ => self.op_add_sub(opcode, bus, master, true),
             },
             // Remaining lines are treated as 4-cycle NOPs; the

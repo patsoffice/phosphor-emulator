@@ -249,6 +249,201 @@ impl M68000 {
         }
     }
 
+    /// ADDX (line 0xD) and SUBX (line 0x9), opmodes 100-110 with an EA mode
+    /// of Dn (register form) or An (`-(Ay),-(Ax)` memory form).
+    ///
+    /// Flags: extended-arithmetic rule — X is consumed as carry/borrow-in
+    /// and set to C on the way out; Z is cleared by a non-zero result but
+    /// never set (multi-precision chains report zero only if every limb
+    /// was zero).
+    pub(crate) fn op_addx_subx<B: Bus<Address = u32, Data = u16> + ?Sized>(
+        &mut self,
+        opcode: u16,
+        bus: &mut B,
+        master: BusMaster,
+        is_add: bool,
+    ) {
+        let rx = ((opcode >> 9) & 7) as u8; // destination
+        let ry = (opcode & 7) as u8; // source
+        let size = size_from_bits(opcode >> 6).unwrap();
+        let mem = opcode & 0x0008 != 0;
+
+        if mem {
+            // Source predecrements first, then the destination.
+            let src = self.decode_ea(bus, master, 4, ry, size);
+            let b = self.ea_read(bus, master, src, size);
+            let dst = self.decode_ea(bus, master, 4, rx, size);
+            let a = self.ea_read(bus, master, dst, size);
+            let result = if is_add {
+                self.addx_with_flags(size, a, b)
+            } else {
+                self.subx_with_flags(size, a, b)
+            };
+            self.ea_write(bus, master, dst, size, result);
+            self.finish(if size == Size::Long { 30 } else { 18 });
+        } else {
+            let a = self.d[rx as usize];
+            let b = self.d[ry as usize];
+            let result = if is_add {
+                self.addx_with_flags(size, a, b)
+            } else {
+                self.subx_with_flags(size, a, b)
+            };
+            self.d[rx as usize] = (a & !size.mask()) | result;
+            self.finish(if size == Size::Long { 8 } else { 4 });
+        }
+    }
+
+    /// CMPM (Ay)+,(Ax)+ — line 0xB, opmodes 100-110 with EA mode An.
+    ///
+    /// Flags: N/Z/V/C from `dst - src`; the result is discarded and **X is
+    /// never altered** (the CMP rule, not the extended rule).
+    pub(crate) fn op_cmpm<B: Bus<Address = u32, Data = u16> + ?Sized>(
+        &mut self,
+        opcode: u16,
+        bus: &mut B,
+        master: BusMaster,
+    ) {
+        let ax = ((opcode >> 9) & 7) as u8;
+        let ay = (opcode & 7) as u8;
+        let size = size_from_bits(opcode >> 6).unwrap();
+
+        // Source postincrements first, then the destination.
+        let src = self.decode_ea(bus, master, 3, ay, size);
+        let b = self.ea_read(bus, master, src, size);
+        let dst = self.decode_ea(bus, master, 3, ax, size);
+        let a = self.ea_read(bus, master, dst, size);
+        self.sub_with_flags(size, a, b);
+        self.finish(if size == Size::Long { 20 } else { 12 });
+    }
+
+    /// Shared ABCD core: BCD-add `src + dst + X`, modeling the hardware's
+    /// per-nibble correction adder exactly (verified against the
+    /// SingleStepTests vectors, including the undefined N/V/C behavior):
+    ///
+    /// - `bc` collects the binary carries out of bits 3 and 7, `dc` the
+    ///   decimal carries (nibble > 9); each carried nibble gets a +6
+    ///   correction.
+    /// - C/X are set by a binary carry or by the correction overflowing
+    ///   bit 7; V is set when the correction flips bit 7 from 0 to 1.
+    /// - N comes from the corrected result; Z follows the multi-precision
+    ///   rule (cleared by a non-zero result, never set).
+    fn abcd_core(&mut self, src: u32, dst: u32) -> u32 {
+        let x = self.flag_is_set(SrFlag::X) as u32;
+        let (src, dst) = (src & 0xFF, dst & 0xFF);
+        let simple = src + dst + x;
+        let bc = ((src & dst) | (!simple & dst) | (!simple & src)) & 0x88;
+        let dc = ((simple + 0x66) ^ simple) & 0x110;
+        let corf = (bc | (dc >> 1)) - ((bc | (dc >> 1)) >> 2);
+        let res = simple + corf;
+
+        let carry = (bc | (simple & !res)) & 0x80 != 0;
+        self.set_flag(SrFlag::C, carry);
+        self.set_flag(SrFlag::X, carry);
+        self.set_flag(SrFlag::V, !simple & res & 0x80 != 0);
+        self.set_flag(SrFlag::N, res & 0x80 != 0);
+
+        let res = res & 0xFF;
+        if res != 0 {
+            self.set_flag(SrFlag::Z, false);
+        }
+        res
+    }
+
+    /// Shared SBCD/NBCD core: BCD-subtract `dst - src - X`, modeling the
+    /// hardware's per-nibble correction exactly (verified against the
+    /// SingleStepTests vectors): each nibble that borrowed in the binary
+    /// subtraction gets a -6 correction. C/X are set by a binary borrow or
+    /// by the correction flipping bit 7 from 0 to 1; V is set when the
+    /// correction flips bit 7 from 1 to 0. N/Z as in [`Self::abcd_core`].
+    fn sbcd_core(&mut self, src: u32, dst: u32) -> u32 {
+        let x = self.flag_is_set(SrFlag::X) as u32;
+        let (src, dst) = (src & 0xFF, dst & 0xFF);
+        let simple = dst.wrapping_sub(src).wrapping_sub(x);
+        let bc = ((!dst & src) | (simple & !dst) | (simple & src)) & 0x88;
+        let corf = bc - (bc >> 2);
+        let res = simple.wrapping_sub(corf);
+
+        let borrow = (bc | (!simple & res)) & 0x80 != 0;
+        self.set_flag(SrFlag::C, borrow);
+        self.set_flag(SrFlag::X, borrow);
+        self.set_flag(SrFlag::V, simple & !res & 0x80 != 0);
+        self.set_flag(SrFlag::N, res & 0x80 != 0);
+
+        let res = res & 0xFF;
+        if res != 0 {
+            self.set_flag(SrFlag::Z, false);
+        }
+        res
+    }
+
+    /// ABCD (line 0xC) and SBCD (line 0x8), opmode 100 with an EA mode of
+    /// Dn (register form) or An (`-(Ay),-(Ax)` memory form). Byte only.
+    ///
+    /// Flags: extended rule (X consumed and set to decimal carry/borrow,
+    /// Z never set); N and V follow the hardware's undefined behavior.
+    pub(crate) fn op_bcd<B: Bus<Address = u32, Data = u16> + ?Sized>(
+        &mut self,
+        opcode: u16,
+        bus: &mut B,
+        master: BusMaster,
+        is_add: bool,
+    ) {
+        let rx = ((opcode >> 9) & 7) as u8;
+        let ry = (opcode & 7) as u8;
+        let mem = opcode & 0x0008 != 0;
+
+        if mem {
+            let src = self.decode_ea(bus, master, 4, ry, Size::Byte);
+            let b = self.ea_read(bus, master, src, Size::Byte);
+            let dst = self.decode_ea(bus, master, 4, rx, Size::Byte);
+            let a = self.ea_read(bus, master, dst, Size::Byte);
+            let result = if is_add {
+                self.abcd_core(b, a)
+            } else {
+                self.sbcd_core(b, a)
+            };
+            self.ea_write(bus, master, dst, Size::Byte, result);
+            self.finish(18);
+        } else {
+            let a = self.d[rx as usize];
+            let b = self.d[ry as usize];
+            let result = if is_add {
+                self.abcd_core(b, a)
+            } else {
+                self.sbcd_core(b, a)
+            };
+            self.d[rx as usize] = (a & !0xFF) | result;
+            self.finish(6);
+        }
+    }
+
+    /// NBCD <ea> (line 0x4, 0x4800): BCD-negate the operand — `0 - dst - X`
+    /// in decimal, implemented as SBCD with a zero destination. Byte only,
+    /// data-alterable EA.
+    ///
+    /// Flags: same extended/undefined rules as SBCD.
+    pub(crate) fn op_nbcd<B: Bus<Address = u32, Data = u16> + ?Sized>(
+        &mut self,
+        opcode: u16,
+        bus: &mut B,
+        master: BusMaster,
+    ) {
+        let ea_mode = ((opcode >> 3) & 7) as u8;
+        let ea_reg = (opcode & 7) as u8;
+        if ea_mode == 1 || (ea_mode == 7 && ea_reg >= 2) {
+            self.finish(4);
+            return;
+        }
+        let ea = self.decode_ea(bus, master, ea_mode, ea_reg, Size::Byte);
+        let operand = self.ea_read(bus, master, ea, Size::Byte);
+        let result = self.sbcd_core(operand, 0);
+        self.ea_write(bus, master, ea, Size::Byte, result);
+
+        let base = if ea_mode == 0 { 6 } else { 8 };
+        self.finish(base + ea_cycles(ea_mode, ea_reg, Size::Byte));
+    }
+
     /// TST <ea> (line 0x4, sub-op 0xA, sizes 00-10): read the operand and
     /// set the condition codes; nothing is written. On the 68000 the operand
     /// must be data-alterable (An, PC-relative, and immediate are illegal).

@@ -64,4 +64,51 @@ impl M68000 {
         self.set_flag(SrFlag::C, borrow);
         result
     }
+
+    /// Extended add core for ADDX: returns `(a + b + X)` masked to `size`
+    /// and sets N/V/C and **X = C**. Z follows the multi-precision rule:
+    /// cleared by a non-zero result, *unchanged* by a zero one, so a chained
+    /// sum reports zero only if every limb was zero.
+    pub(crate) fn addx_with_flags(&mut self, size: Size, a: u32, b: u32) -> u32 {
+        let x = self.flag_is_set(SrFlag::X) as u32;
+        let mask = size.mask();
+        let sign = size.sign_bit();
+        let (a, b) = (a & mask, b & mask);
+        let result = a.wrapping_add(b).wrapping_add(x) & mask;
+
+        let carry = (a as u64 + b as u64 + x as u64) > mask as u64;
+        let overflow = !(a ^ b) & (a ^ result) & sign != 0;
+
+        self.set_flag(SrFlag::N, result & sign != 0);
+        if result != 0 {
+            self.set_flag(SrFlag::Z, false);
+        }
+        self.set_flag(SrFlag::V, overflow);
+        self.set_flag(SrFlag::C, carry);
+        self.set_flag(SrFlag::X, carry);
+        result
+    }
+
+    /// Extended subtract core for SUBX/NEGX: returns `(a - b - X)` masked to
+    /// `size` and sets N/V/C (C = borrow) and **X = C**. Z follows the same
+    /// multi-precision rule as [`Self::addx_with_flags`].
+    pub(crate) fn subx_with_flags(&mut self, size: Size, a: u32, b: u32) -> u32 {
+        let x = self.flag_is_set(SrFlag::X) as u32;
+        let mask = size.mask();
+        let sign = size.sign_bit();
+        let (a, b) = (a & mask, b & mask);
+        let result = a.wrapping_sub(b).wrapping_sub(x) & mask;
+
+        let borrow = (b as u64 + x as u64) > a as u64;
+        let overflow = (a ^ b) & (a ^ result) & sign != 0;
+
+        self.set_flag(SrFlag::N, result & sign != 0);
+        if result != 0 {
+            self.set_flag(SrFlag::Z, false);
+        }
+        self.set_flag(SrFlag::V, overflow);
+        self.set_flag(SrFlag::C, borrow);
+        self.set_flag(SrFlag::X, borrow);
+        result
+    }
 }

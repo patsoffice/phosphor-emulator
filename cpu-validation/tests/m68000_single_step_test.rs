@@ -60,6 +60,15 @@ fn should_run(filename: &str) -> bool {
             | "TST.b"
             | "TST.w"
             | "TST.l"
+            | "ADDX.b"
+            | "ADDX.w"
+            | "ADDX.l"
+            | "SUBX.b"
+            | "SUBX.w"
+            | "SUBX.l"
+            | "ABCD"
+            | "SBCD"
+            | "NBCD"
     )
 }
 
@@ -106,8 +115,6 @@ fn should_skip_opcode(op: u16) -> Option<&'static str> {
     match op >> 12 {
         // ADDQ/SUBQ share the ADD/SUB files but live on line 5 (M4)
         0x5 => Some("ADDQ/SUBQ lands in M4"),
-        // CMPM (line 0xB, opmodes 100-110, EA mode 001) shares the CMP files
-        0xB if matches!((op >> 6) & 7, 4..=6) && (op >> 3) & 7 == 1 => Some("CMPM lands in M2"),
         _ => None,
     }
 }
