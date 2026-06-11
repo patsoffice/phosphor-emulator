@@ -8,7 +8,10 @@ pub mod dirty_bitset;
 pub mod gfx;
 
 pub mod prelude {
-    pub use crate::core::machine::{AnalogInput, InputButton, Machine};
+    pub use crate::core::machine::{
+        AnalogInput, FrontendMachine, InputButton, Machine, MachineCore, Nvram, Profilable,
+        SaveState,
+    };
     pub use crate::core::{
         Bus, BusMaster, BusMasterComponent, SaveError, Saveable, StateReader, StateWriter,
         bus::InterruptState,

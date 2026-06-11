@@ -231,19 +231,130 @@ pub trait MachineDebug {
     }
 }
 
+/// Save-state capability: snapshot and restore complete machine state.
+///
+/// Machines without save-state support use the defaults (no snapshot,
+/// load returns an error).
+pub trait SaveState {
+    /// Capture complete machine state for later restoration.
+    /// Returns `None` if this machine does not support save states.
+    fn save_state(&self) -> Option<Vec<u8>> {
+        None
+    }
+
+    /// Restore machine state from a previous `save_state()` snapshot.
+    fn load_state(&mut self, _data: &[u8]) -> Result<(), SaveError> {
+        Err(SaveError::InvalidFormat("save states not supported".into()))
+    }
+}
+
+/// Battery-backed RAM persistence.
+///
+/// The frontend owns NVRAM file loading/saving; machines with battery-backed
+/// RAM expose its contents here. Machines without NVRAM use the defaults.
+pub trait Nvram {
+    /// Return battery-backed RAM contents for saving, or None if this machine has none.
+    fn save_nvram(&self) -> Option<&[u8]> {
+        None
+    }
+
+    /// Load battery-backed RAM contents from a previous save.
+    fn load_nvram(&mut self, _data: &[u8]) {}
+}
+
+/// Frame-level profiling instrumentation.
+///
+/// Every machine can be profiled at frame granularity by the frontend;
+/// machines that capture per-device sub-spans override these methods.
+pub trait Profilable {
+    /// Enable or disable internal sub-span profiling.
+    ///
+    /// Machines that support fine-grained timing should start/stop capturing
+    /// per-device or per-CPU measurements when this is called.
+    fn set_profiling(&mut self, _enabled: bool) {}
+
+    /// Return sub-span timing from the last `run_frame()` call.
+    ///
+    /// Machines that override `set_profiling` can report detailed breakdowns
+    /// (e.g., main CPU, sound CPU, scanline rendering, blitter DMA).
+    fn frame_profile_spans(&self) -> &[ProfileSpan] {
+        &[]
+    }
+}
+
 // ---------------------------------------------------------------------------
-// Machine trait
+// Core machine trait
 // ---------------------------------------------------------------------------
+
+/// Minimum contract for an emulated system that advances in frames.
+///
+/// This is the core execution trait: it carries no display, audio, input,
+/// or persistence concerns. Optional frontend services live in capability
+/// traits ([`SaveState`], [`Nvram`], [`Profilable`], etc.) and are bundled
+/// for frontend use by [`FrontendMachine`].
+pub trait MachineCore {
+    /// Run one frame of emulation (advance the clock by one frame's worth of cycles).
+    fn run_frame(&mut self);
+
+    /// Reset the machine to its initial power-on state.
+    fn reset(&mut self);
+
+    /// Native frame rate in Hz (e.g., 60.10 for Joust, 61.04 for Missile Command).
+    /// Used by the frontend for real-time frame throttling.
+    fn frame_rate_hz(&self) -> f64 {
+        60.0
+    }
+
+    /// Short identifier for this machine type (e.g., "joust", "pacman").
+    /// Used to validate save files against the correct machine.
+    fn machine_id(&self) -> &str {
+        ""
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Frontend bundle trait
+// ---------------------------------------------------------------------------
+
+/// The full machine contract for the SDL frontend.
+///
+/// The frontend is machine-agnostic: it receives a `Box<dyn FrontendMachine>`
+/// from the registry and drives display, audio, input, debugging, save
+/// states, NVRAM, and profiling through trait methods.
+///
+/// This trait is implemented automatically (blanket impl) for any type that
+/// implements [`MachineCore`] plus all the capability traits. Machines never
+/// implement it directly.
+pub trait FrontendMachine:
+    MachineCore
+    + Renderable
+    + AudioSource
+    + InputReceiver
+    + MachineDebug
+    + SaveState
+    + Nvram
+    + Profilable
+{
+}
+
+impl<T> FrontendMachine for T where
+    T: MachineCore
+        + Renderable
+        + AudioSource
+        + InputReceiver
+        + MachineDebug
+        + SaveState
+        + Nvram
+        + Profilable
+{
+}
 
 /// Machine-agnostic interface for emulated systems.
 ///
-/// Each machine (Joust, Robotron, etc.) implements this trait to provide
-/// a uniform interface for the frontend. The frontend is a pure rendering
-/// engine that does not know about specific hardware (PIAs, blitters,
-/// palette formats, etc.).
-///
-/// Composed from sub-traits: [`Renderable`], [`AudioSource`],
-/// [`InputReceiver`], and [`MachineDebug`].
+/// Transitional trait: machines are being migrated to [`MachineCore`] plus
+/// the capability traits ([`SaveState`], [`Nvram`], [`Profilable`]), bundled
+/// for frontend use by [`FrontendMachine`]. Once all machines are converted,
+/// this becomes a compatibility alias for [`FrontendMachine`].
 pub trait Machine: Renderable + AudioSource + InputReceiver + MachineDebug {
     /// Run one frame of emulation (advance the clock by one frame's worth of cycles).
     fn run_frame(&mut self);
@@ -294,5 +405,48 @@ pub trait Machine: Renderable + AudioSource + InputReceiver + MachineDebug {
     /// (e.g., main CPU, sound CPU, scanline rendering, blitter DMA).
     fn frame_profile_spans(&self) -> &[ProfileSpan] {
         &[]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Smoke test: a type implementing `MachineCore` + all capability traits
+    /// gets `FrontendMachine` via the blanket impl and coerces to the
+    /// object-safe `dyn FrontendMachine`.
+    #[test]
+    fn blanket_impl_provides_frontend_machine() {
+        struct Dummy;
+
+        impl MachineCore for Dummy {
+            fn run_frame(&mut self) {}
+            fn reset(&mut self) {}
+        }
+        impl Renderable for Dummy {
+            fn display_size(&self) -> (u32, u32) {
+                (1, 1)
+            }
+            fn render_frame(&self, _buffer: &mut [u8]) {}
+        }
+        impl AudioSource for Dummy {}
+        impl InputReceiver for Dummy {
+            fn set_input(&mut self, _button: u8, _pressed: bool) {}
+            fn input_map(&self) -> &[InputButton] {
+                &[]
+            }
+        }
+        impl MachineDebug for Dummy {}
+        impl SaveState for Dummy {}
+        impl Nvram for Dummy {}
+        impl Profilable for Dummy {}
+
+        let mut dummy = Dummy;
+        let machine: &mut dyn FrontendMachine = &mut dummy;
+        machine.run_frame();
+        assert_eq!(machine.frame_rate_hz(), 60.0);
+        assert!(machine.save_state().is_none());
+        assert!(machine.save_nvram().is_none());
+        assert!(machine.frame_profile_spans().is_empty());
     }
 }
