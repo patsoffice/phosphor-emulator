@@ -4,11 +4,10 @@
 //! to the instruction boundary, compare the final registers and RAM. Cycle
 //! counts and per-cycle bus transactions are not compared.
 //!
-//! The suite is gated incrementally: `should_run` enables only the files
-//! whose instructions are implemented. Within a file, individual tests are
-//! skipped when they exercise behavior that lands in M5: trace exceptions
-//! (initial T bit set) and address errors (odd PC or odd word/long operand
-//! address).
+//! Every suite file is enabled. Within a file, individual tests are
+//! skipped when they exercise the exact mid-instruction address-error
+//! abort (odd word/long operand address), which this core approximates,
+//! plus two known-bad vectors.
 
 use std::io::Read;
 use std::path::Path;
@@ -18,139 +17,6 @@ use phosphor_core::cpu::m68000::M68000;
 use phosphor_cpu_validation::{M68000Regs, M68000TestCase, TracingBus68k};
 
 const ADDR_MASK: u32 = 0x00FF_FFFF;
-
-// ---------------------------------------------------------------------------
-// File gating — M1-M3 instruction families are enabled
-// ---------------------------------------------------------------------------
-
-fn should_run(filename: &str) -> bool {
-    let stem = filename.strip_suffix(".json.gz").unwrap_or(filename);
-    matches!(
-        stem,
-        "MOVE.b"
-            | "MOVE.w"
-            | "MOVE.l"
-            | "MOVE.q"
-            | "MOVEA.w"
-            | "MOVEA.l"
-            | "ADD.b"
-            | "ADD.w"
-            | "ADD.l"
-            | "ADDA.w"
-            | "ADDA.l"
-            | "SUB.b"
-            | "SUB.w"
-            | "SUB.l"
-            | "SUBA.w"
-            | "SUBA.l"
-            | "CMP.b"
-            | "CMP.w"
-            | "CMP.l"
-            | "CMPA.w"
-            | "CMPA.l"
-            | "AND.b"
-            | "AND.w"
-            | "AND.l"
-            | "OR.b"
-            | "OR.w"
-            | "OR.l"
-            | "EOR.b"
-            | "EOR.w"
-            | "EOR.l"
-            | "TST.b"
-            | "TST.w"
-            | "TST.l"
-            | "ADDX.b"
-            | "ADDX.w"
-            | "ADDX.l"
-            | "SUBX.b"
-            | "SUBX.w"
-            | "SUBX.l"
-            | "ABCD"
-            | "SBCD"
-            | "NBCD"
-            | "NEG.b"
-            | "NEG.w"
-            | "NEG.l"
-            | "NEGX.b"
-            | "NEGX.w"
-            | "NEGX.l"
-            | "NOT.b"
-            | "NOT.w"
-            | "NOT.l"
-            | "CLR.b"
-            | "CLR.w"
-            | "CLR.l"
-            | "EXT.w"
-            | "EXT.l"
-            | "Scc"
-            | "MULU"
-            | "MULS"
-            | "DIVU"
-            | "DIVS"
-            | "CHK"
-            | "ASL.b"
-            | "ASL.w"
-            | "ASL.l"
-            | "ASR.b"
-            | "ASR.w"
-            | "ASR.l"
-            | "LSL.b"
-            | "LSL.w"
-            | "LSL.l"
-            | "LSR.b"
-            | "LSR.w"
-            | "LSR.l"
-            | "ROL.b"
-            | "ROL.w"
-            | "ROL.l"
-            | "ROR.b"
-            | "ROR.w"
-            | "ROR.l"
-            | "ROXL.b"
-            | "ROXL.w"
-            | "ROXL.l"
-            | "ROXR.b"
-            | "ROXR.w"
-            | "ROXR.l"
-            | "Bcc"
-            | "BSR"
-            | "DBcc"
-            | "JMP"
-            | "JSR"
-            | "RTS"
-            | "RTR"
-            | "BTST"
-            | "BCHG"
-            | "BCLR"
-            | "BSET"
-            | "SWAP"
-            | "EXG"
-            | "LEA"
-            | "PEA"
-            | "LINK"
-            | "UNLINK"
-            | "MOVEM.w"
-            | "MOVEM.l"
-            | "TRAP"
-            | "TRAPV"
-            | "ANDItoCCR"
-            | "ANDItoSR"
-            | "EORItoCCR"
-            | "EORItoSR"
-            | "ORItoCCR"
-            | "ORItoSR"
-            | "MOVEfromSR"
-            | "MOVEtoCCR"
-            | "MOVEtoSR"
-            | "MOVEfromUSP"
-            | "MOVEtoUSP"
-            | "RTE"
-            | "STOP"
-            | "RESET"
-            | "NOP"
-    )
-}
 
 // ---------------------------------------------------------------------------
 // State loading and comparison
@@ -323,7 +189,6 @@ fn test_m68000_single_step() {
 
     let mut total_tests = 0;
     let mut total_files = 0;
-    let mut skipped_files = 0;
     let mut skipped_tests = 0;
     let mut skip_reasons: std::collections::BTreeMap<&'static str, usize> =
         std::collections::BTreeMap::new();
@@ -334,11 +199,6 @@ fn test_m68000_single_step() {
     for entry in &entries {
         let filename = entry.file_name();
         let filename_str = filename.to_string_lossy();
-
-        if !should_run(&filename_str) {
-            skipped_files += 1;
-            continue;
-        }
 
         let gz_data = std::fs::read(entry.path())
             .unwrap_or_else(|e| panic!("Failed to read {:?}: {}", entry.path(), e));
@@ -378,12 +238,11 @@ fn test_m68000_single_step() {
     }
 
     eprintln!(
-        "\nM68000 SingleStepTests: {} passed, {} failed, {} skipped across {} files ({} files gated off)",
+        "\nM68000 SingleStepTests: {} passed, {} failed, {} skipped across {} files",
         total_tests - failed_tests - skipped_tests,
         failed_tests,
         skipped_tests,
-        total_files,
-        skipped_files
+        total_files
     );
     for (reason, count) in &skip_reasons {
         eprintln!("  skipped {count}: {reason}");

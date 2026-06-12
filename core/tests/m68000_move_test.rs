@@ -453,3 +453,66 @@ fn exg_data_with_address_register_and_no_flags() {
     assert_eq!(cpu.a[2], 0x8000_0000);
     assert_eq!(cpu.sr & 0x1F, 0x1F, "EXG never alters the CCR");
 }
+
+// ---------------------------------------------------------------------------
+// MOVEP
+// ---------------------------------------------------------------------------
+
+#[test]
+fn movep_w_register_to_memory_alternating_bytes() {
+    let (mut cpu, mut bus) = setup(&[0x0188, 0x0010]); // MOVEP.w D0,$10(A0)
+    cpu.d[0] = 0xAABB_1234;
+    cpu.a[0] = 0x3000;
+    bus.load(0x3010, &[0xFF, 0xFF, 0xFF, 0xFF]);
+    step(&mut cpu, &mut bus);
+    assert_eq!(
+        &bus.memory[0x3010..0x3014],
+        &[0x12, 0xFF, 0x34, 0xFF],
+        "high byte first, every other byte, gaps untouched"
+    );
+}
+
+#[test]
+fn movep_l_memory_to_register() {
+    let (mut cpu, mut bus) = setup(&[0x0348, 0x0000]); // MOVEP.l $0(A0),D1
+    cpu.a[0] = 0x3000;
+    bus.load(0x3000, &[0xDE, 0x00, 0xAD, 0x00, 0xBE, 0x00, 0xEF, 0x00]);
+    step(&mut cpu, &mut bus);
+    assert_eq!(cpu.d[1], 0xDEAD_BEEF, "four alternating bytes assembled");
+}
+
+#[test]
+fn movep_w_load_preserves_upper_register_bytes() {
+    let (mut cpu, mut bus) = setup(&[0x0108, 0x0000]); // MOVEP.w $0(A0),D0
+    cpu.d[0] = 0xAABB_CCDD;
+    cpu.a[0] = 0x3000;
+    bus.load(0x3000, &[0x12, 0x00, 0x34, 0x00]);
+    step(&mut cpu, &mut bus);
+    assert_eq!(cpu.d[0], 0xAABB_1234, "word load merges into the register");
+}
+
+#[test]
+fn movep_odd_base_address_and_no_flags() {
+    // Peripherals on the odd byte lane: an odd base address is legal
+    let (mut cpu, mut bus) = setup(&[0x01C8, 0x0001]); // MOVEP.l D0,$1(A0)
+    cpu.sr = (cpu.sr & 0xFF00) | 0x1F;
+    cpu.d[0] = 0x0102_0304;
+    cpu.a[0] = 0x3000;
+    step(&mut cpu, &mut bus);
+    assert_eq!(
+        &bus.memory[0x3001..0x3008],
+        &[0x01, 0x00, 0x02, 0x00, 0x03, 0x00, 0x04],
+        "bytes at odd addresses, two apart"
+    );
+    assert_eq!(cpu.sr & 0x1F, 0x1F, "MOVEP never alters the CCR");
+    assert_eq!(cpu.pc, 0x1004);
+}
+
+#[test]
+fn movep_negative_displacement() {
+    let (mut cpu, mut bus) = setup(&[0x0188, 0xFFF0]); // MOVEP.w D0,-$10(A0)
+    cpu.d[0] = 0x5678;
+    cpu.a[0] = 0x3010;
+    step(&mut cpu, &mut bus);
+    assert_eq!(&bus.memory[0x3000..0x3003], &[0x56, 0x00, 0x78]);
+}

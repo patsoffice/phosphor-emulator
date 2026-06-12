@@ -284,10 +284,10 @@ impl M68000 {
                 self.op_sr_imm(opcode, bus, master)
             }
             // Dynamic bit ops (bit number in Dn); EA mode 001 there
-            // encodes MOVEP (M7)
+            // encodes MOVEP
             0x0 if opcode & 0x0100 != 0 => {
                 if ea_mode == 1 {
-                    self.finish(4); // MOVEP (M7)
+                    self.op_movep(opcode, bus, master);
                 } else {
                     self.op_bitop(opcode, bus, master, true);
                 }
@@ -329,8 +329,10 @@ impl M68000 {
                 0x8 if opcode & 0x0038 == 0 && opcode & 0x0080 != 0 => self.op_ext(opcode),
                 0x8 if opcode & 0x0080 != 0 => self.op_movem(opcode, bus, master, false),
                 // ILLEGAL is the one architecturally-guaranteed illegal
-                // encoding (a TAS hole); the rest of sub-op 0xA is TST/TAS
+                // encoding (a TAS hole); the other size-11 encodings of
+                // sub-op 0xA are TAS, the rest TST
                 0xA if opcode == 0x4AFC => self.op_illegal(bus, master, 4),
+                0xA if opcode & 0x00C0 == 0x00C0 => self.op_tas(opcode, bus, master),
                 0xA => self.op_tst(opcode, bus, master),
                 // MOVEM load direction (bit 7 clear is unassigned here)
                 0xC if opcode & 0x0080 != 0 => self.op_movem(opcode, bus, master, true),
@@ -616,9 +618,9 @@ mod tests {
         let mut cpu = M68000::new();
         let mut bus = WordBus::new();
         cpu.pc = 0x1000;
-        // TAS is not implemented until M7; until then it executes as a
-        // bounded NOP.
-        bus.load(0x1000, &[0x4A, 0xC0]);
+        // 0x4E7A is the 68010+ MOVEC slot — a permanent hole on the 68000
+        // that executes as a bounded NOP.
+        bus.load(0x1000, &[0x4E, 0x7A]);
 
         // First tick fetches and "executes"; instruction must complete in a
         // bounded number of cycles and advance PC by one word.

@@ -1,10 +1,8 @@
-//! MOVE / MOVEA / MOVEQ / SWAP / EXG and the SR/CCR/USP moves — data
-//! movement instructions.
-//!
-//! (MOVEP lives on line 0x0 and lands in M7.)
+//! MOVE / MOVEA / MOVEQ / MOVEP / SWAP / EXG and the SR/CCR/USP moves —
+//! data movement instructions.
 
 use super::M68000;
-use super::addressing::{Size, ea_cycles, sext8};
+use super::addressing::{Size, ea_cycles, sext8, sext16};
 use crate::core::{Bus, BusMaster};
 
 /// Destination effective-address time for MOVE (M68000UM table 8-2). Same as
@@ -89,6 +87,49 @@ impl M68000 {
         self.d[reg] = value;
         self.set_flags_logical(Size::Long, value);
         self.finish(4);
+    }
+
+    /// MOVEP Dx,d16(Ay) / MOVEP d16(Ay),Dx (line 0x0, bit 8 set, EA mode
+    /// 001): transfer a word or long between a data register and every
+    /// *other* byte of memory — the high byte at the displaced address,
+    /// then descending register bytes at addr+2, +4, +6. Built for 8-bit
+    /// peripherals on one half of the 16-bit bus; byte accesses mean an odd
+    /// base address is legal and nothing can address-error.
+    ///
+    /// Opmode bits 8-6: 100 word mem→reg, 101 long mem→reg, 110 word
+    /// reg→mem, 111 long reg→mem.
+    ///
+    /// Flags: none. 16 cycles (word) / 24 (long).
+    pub(crate) fn op_movep<B: Bus<Address = u32, Data = u16> + ?Sized>(
+        &mut self,
+        opcode: u16,
+        bus: &mut B,
+        master: BusMaster,
+    ) {
+        let dn = ((opcode >> 9) & 7) as usize;
+        let an = (opcode & 7) as usize;
+        let long = opcode & 0x0040 != 0;
+        let to_memory = opcode & 0x0080 != 0;
+        let disp = sext16(self.read_imm_word(bus, master));
+        let base = self.a[an].wrapping_add(disp);
+        let bytes: u32 = if long { 4 } else { 2 };
+
+        if to_memory {
+            for i in 0..bytes {
+                let shift = 8 * (bytes - 1 - i);
+                let addr = base.wrapping_add(2 * i);
+                self.write_byte_at(bus, master, addr, (self.d[dn] >> shift) as u8);
+            }
+        } else {
+            let mut value = 0u32;
+            for i in 0..bytes {
+                let addr = base.wrapping_add(2 * i);
+                value = (value << 8) | self.read_byte_at(bus, master, addr) as u32;
+            }
+            let mask = if long { 0xFFFF_FFFF } else { 0x0000_FFFF };
+            self.d[dn] = (self.d[dn] & !mask) | (value & mask);
+        }
+        self.finish(if long { 24 } else { 16 });
     }
 
     /// MOVE SR,<ea> (0x40C0): write the status register to a word

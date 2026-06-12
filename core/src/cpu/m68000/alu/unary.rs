@@ -107,6 +107,42 @@ impl M68000 {
         self.finish(4);
     }
 
+    /// TAS <ea> (0x4AC0, line 0x4 sub-op 0xA size bits 11): test-and-set —
+    /// read the byte operand, set the flags from it, write it back with
+    /// bit 7 set. On hardware this is one indivisible read-modify-write bus
+    /// cycle; this core's two transactions are equivalent for a single bus
+    /// master. Data-alterable destination only (0x4AFC is ILLEGAL, routed
+    /// before this handler).
+    ///
+    /// Flags: N/Z from the value *before* bit 7 is set, V/C cleared,
+    /// **X untouched**.
+    pub(crate) fn op_tas<B: Bus<Address = u32, Data = u16> + ?Sized>(
+        &mut self,
+        opcode: u16,
+        bus: &mut B,
+        master: BusMaster,
+    ) {
+        let ea_mode = ((opcode >> 3) & 7) as u8;
+        let ea_reg = (opcode & 7) as u8;
+        if ea_mode == 1 || (ea_mode == 7 && ea_reg >= 2) {
+            self.finish(4); // illegal destination
+            return;
+        }
+        let ea = self.decode_ea(bus, master, ea_mode, ea_reg, Size::Byte);
+        let value = self.ea_read(bus, master, ea, Size::Byte);
+        self.set_flags_logical(Size::Byte, value);
+        self.ea_write(bus, master, ea, Size::Byte, value | 0x80);
+
+        let base = if ea_mode == 0 { 4 } else { 14 };
+        self.finish(
+            base + if ea_mode == 0 {
+                0
+            } else {
+                ea_cycles(ea_mode, ea_reg, Size::Byte)
+            },
+        );
+    }
+
     /// Scc <ea> (line 0x5, size bits 11, EA mode != An): write 0xFF to the
     /// byte destination if the condition holds, 0x00 otherwise.
     /// Data-alterable destination only.

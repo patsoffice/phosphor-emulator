@@ -313,3 +313,53 @@ fn sgt_signed_condition() {
     step(&mut cpu, &mut bus);
     assert_eq!(cpu.d[0] & 0xFF, 0x00);
 }
+
+// ---------------------------------------------------------------------------
+// TAS
+// ---------------------------------------------------------------------------
+
+#[test]
+fn tas_register_sets_bit_7_and_flags_from_prior_value() {
+    let (mut cpu, mut bus) = setup(&[0x4AC0]); // TAS D0
+    cpu.set_flag(SrFlag::X, true);
+    cpu.d[0] = 0xAABB_CC42;
+    step(&mut cpu, &mut bus);
+    assert_eq!(cpu.d[0], 0xAABB_CCC2, "bit 7 set, upper bytes preserved");
+    assert_flags(&cpu, true, false, false, false, false, "flags from before");
+}
+
+#[test]
+fn tas_negative_and_zero_values() {
+    let (mut cpu, mut bus) = setup(&[0x4AC0]); // TAS D0
+    cpu.d[0] = 0x80;
+    step(&mut cpu, &mut bus);
+    assert_eq!(cpu.d[0] & 0xFF, 0x80);
+    assert!(
+        cpu.flag_is_set(SrFlag::N),
+        "already-set bit 7 reads negative"
+    );
+
+    let (mut cpu, mut bus) = setup(&[0x4AC0]);
+    cpu.d[0] = 0x00;
+    step(&mut cpu, &mut bus);
+    assert_eq!(cpu.d[0] & 0xFF, 0x80, "zero becomes 0x80");
+    assert!(
+        cpu.flag_is_set(SrFlag::Z),
+        "Z from the value before setting"
+    );
+    assert!(!cpu.flag_is_set(SrFlag::N));
+}
+
+#[test]
+fn tas_memory_read_modify_write() {
+    let (mut cpu, mut bus) = setup(&[0x4AD0]); // TAS (A0)
+    cpu.a[0] = 0x3001; // odd byte address is fine
+    bus.load(0x3000, &[0x11, 0x22]);
+    step(&mut cpu, &mut bus);
+    assert_eq!(
+        &bus.memory[0x3000..0x3002],
+        &[0x11, 0xA2],
+        "only the addressed byte gains bit 7"
+    );
+    assert!(!cpu.flag_is_set(SrFlag::Z));
+}
