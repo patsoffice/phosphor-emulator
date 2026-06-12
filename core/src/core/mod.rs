@@ -1,3 +1,4 @@
+pub mod address_space32;
 pub mod bus;
 pub mod clock;
 pub mod component;
@@ -8,6 +9,7 @@ pub mod memory_map;
 pub mod save_state;
 pub mod watchpoint;
 
+pub use address_space32::{AddressMap32, AddressRegion32, RegionTarget};
 pub use bus::{Bus, BusMaster, InterruptState};
 pub use clock::ClockDivider;
 pub use component::BusMasterComponent;
