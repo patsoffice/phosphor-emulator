@@ -6,7 +6,7 @@ use phosphor_machines::missile_command::{
 };
 
 // =================================================================
-// Machine Trait Tests
+// Machine traits tests
 // =================================================================
 
 #[test]

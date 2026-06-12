@@ -4,7 +4,7 @@ use phosphor_core::cpu::m6809::CcFlag;
 use phosphor_machines::joust::JoustSystem;
 
 // =================================================================
-// Machine Trait Tests
+// Machine traits tests
 // =================================================================
 
 #[test]

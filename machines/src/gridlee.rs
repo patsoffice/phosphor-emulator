@@ -817,7 +817,7 @@ impl Bus for GridleeSystem {
 }
 
 // ---------------------------------------------------------------------------
-// Machine trait
+// Machine traits (MachineCore + capabilities)
 // ---------------------------------------------------------------------------
 
 impl Renderable for GridleeSystem {

@@ -298,7 +298,7 @@ impl Bus for AsteroidsSystem {
 }
 
 // ---------------------------------------------------------------------------
-// Machine implementation
+// Machine traits (MachineCore + capabilities)
 // ---------------------------------------------------------------------------
 
 crate::impl_board_delegation!(AsteroidsSystem, board, atari_dvg::TIMING, no_audio, vectors);

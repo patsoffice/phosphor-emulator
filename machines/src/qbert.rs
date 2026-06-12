@@ -349,7 +349,7 @@ impl Bus for QbertSystem {
 }
 
 // ---------------------------------------------------------------------------
-// Machine trait implementations
+// Machine traits (MachineCore + capabilities)
 // ---------------------------------------------------------------------------
 
 crate::impl_board_delegation!(QbertSystem, board, gottlieb::TIMING, bus_addr: u32);

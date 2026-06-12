@@ -278,7 +278,7 @@ impl Bus for RobotronSystem {
 }
 
 // ---------------------------------------------------------------------------
-// Machine trait — delegates to WilliamsBoard with Robotron input wiring
+// Machine traits — delegates to WilliamsBoard with Robotron input wiring
 // ---------------------------------------------------------------------------
 
 crate::impl_board_delegation!(RobotronSystem, board, williams::TIMING, debug_tick_pre);

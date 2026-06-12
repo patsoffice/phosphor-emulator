@@ -471,7 +471,7 @@ impl Bus for DkongJrSystem {
 }
 
 // ---------------------------------------------------------------------------
-// Machine implementation
+// Machine traits (MachineCore + capabilities)
 // ---------------------------------------------------------------------------
 
 crate::impl_board_delegation!(DkongJrSystem, board, tkg04::TIMING);

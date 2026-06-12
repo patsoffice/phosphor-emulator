@@ -983,7 +983,7 @@ impl Bus for CrystalCastlesSystem {
 }
 
 // ---------------------------------------------------------------------------
-// Machine trait
+// Machine traits (MachineCore + capabilities)
 // ---------------------------------------------------------------------------
 
 impl Renderable for CrystalCastlesSystem {

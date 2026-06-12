@@ -333,7 +333,7 @@ impl Bus for LunarLanderSystem {
 }
 
 // ---------------------------------------------------------------------------
-// Machine implementation
+// Machine traits (MachineCore + capabilities)
 // ---------------------------------------------------------------------------
 
 crate::impl_board_delegation!(

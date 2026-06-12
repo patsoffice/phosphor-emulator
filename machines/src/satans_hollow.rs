@@ -350,7 +350,7 @@ impl Bus for SatansHollowSystem {
 }
 
 // ---------------------------------------------------------------------------
-// Machine trait implementations
+// Machine traits (MachineCore + capabilities)
 // ---------------------------------------------------------------------------
 
 crate::impl_board_delegation!(SatansHollowSystem, board, mcr2::TIMING, overlay_stats);

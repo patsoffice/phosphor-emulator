@@ -281,7 +281,7 @@ impl Bus for JoustSystem {
 }
 
 // ---------------------------------------------------------------------------
-// Machine trait — delegates to WilliamsBoard with Joust input wiring
+// Machine traits — delegates to WilliamsBoard with Joust input wiring
 // ---------------------------------------------------------------------------
 
 crate::impl_board_delegation!(JoustSystem, board, williams::TIMING, debug_tick_pre);

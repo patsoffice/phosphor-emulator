@@ -350,7 +350,7 @@ impl Bus for AsteroidsDeluxeSystem {
 }
 
 // ---------------------------------------------------------------------------
-// Machine implementation
+// Machine traits (MachineCore + capabilities)
 // ---------------------------------------------------------------------------
 
 crate::impl_board_renderable!(AsteroidsDeluxeSystem, board, atari_dvg::TIMING, vectors);

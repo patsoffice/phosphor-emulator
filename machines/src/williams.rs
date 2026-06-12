@@ -483,7 +483,7 @@ impl WilliamsBoard {
         result
     }
 
-    // --- Machine trait helpers (called by game wrappers) ---
+    // --- Capability-trait helpers (called by game wrappers) ---
 
     pub fn render_frame(&self, buffer: &mut [u8]) {
         buffer.copy_from_slice(&self.scanline_buffer);

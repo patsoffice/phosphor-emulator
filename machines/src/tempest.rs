@@ -482,7 +482,7 @@ impl Bus for TempestSystem {
 }
 
 // ---------------------------------------------------------------------------
-// Machine implementation
+// Machine traits (MachineCore + capabilities)
 // ---------------------------------------------------------------------------
 
 impl phosphor_core::core::machine::Renderable for TempestSystem {
