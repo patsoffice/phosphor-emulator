@@ -474,6 +474,15 @@ pub struct AddressSpace16 {
     /// fast filter; this provides address-level precision so only the
     /// exact address fires.
     watchpoints: Watchpoints,
+
+    /// Machine cycle latched by the board before CPU execution, used for
+    /// hit attribution. Bus dispatch cannot read board/CPU state while a
+    /// CPU is mid-tick (borrow splitting), so boards latch it up front via
+    /// [`latch_access_context`](Self::latch_access_context).
+    debug_cycle: u64,
+    /// Address of the instruction currently executing on the owning CPU
+    /// (latched at instruction boundaries), when known.
+    debug_pc: Option<u32>,
 }
 
 /// Migration-only alias for [`AddressSpace16`].
@@ -492,6 +501,8 @@ impl AddressSpace16 {
             backing: MemoryBacking::new(),
             active_watch_count: 0,
             watchpoints: Watchpoints::new(),
+            debug_cycle: 0,
+            debug_pc: None,
         }
     }
 
@@ -665,16 +676,50 @@ impl AddressSpace16 {
     // Watchpoint methods
     // -----------------------------------------------------------------------
 
+    /// Latch the owning CPU's execution context for watchpoint-hit
+    /// attribution.
+    ///
+    /// Boards call this from `tick()` before executing the owning CPU
+    /// (gated on [`has_any_watchpoints`](Self::has_any_watchpoints)),
+    /// because bus dispatch cannot read CPU state while the CPU is
+    /// mid-tick. `pc` should be `Some(cpu.pc)` when the CPU is at an
+    /// instruction boundary — the address of the instruction about to
+    /// execute — and `None` mid-instruction (the previously latched
+    /// instruction address is retained).
+    #[inline]
+    pub fn latch_access_context(&mut self, cycle: u64, pc: Option<u32>) {
+        self.debug_cycle = cycle;
+        if pc.is_some() {
+            self.debug_pc = pc;
+        }
+    }
+
     /// Check a read access against this space's watchpoints. Returns true
     /// if the exact address is read-watched, queueing a hit.
     ///
     /// `cpu_index` is the CPU that owns this address space (matching
     /// `#[debug_map(cpu = N)]`); `master` is who performed the access.
+    /// Call after the value is read; the hit records
+    /// [`WatchpointPhase::After`].
     ///
     /// When no watchpoints are set anywhere (`active_watch_count == 0`),
     /// this compiles to a single branch-not-taken — effectively zero cost.
     #[inline(always)]
     pub fn watch_read(&mut self, cpu_index: usize, master: BusMaster, addr: u16, data: u8) -> bool {
+        self.watch_read_with(cpu_index, master, addr, data, None)
+    }
+
+    /// [`watch_read`](Self::watch_read) with the name of the device that
+    /// owns `addr` (for boards that can attribute I/O addresses).
+    #[inline(always)]
+    pub fn watch_read_with(
+        &mut self,
+        cpu_index: usize,
+        master: BusMaster,
+        addr: u16,
+        data: u8,
+        device: Option<&'static str>,
+    ) -> bool {
         if self.active_watch_count == 0 {
             return false;
         }
@@ -684,7 +729,7 @@ impl AddressSpace16 {
                 .watchpoints
                 .matches(cpu_index, addr as u32, WatchpointKind::Read)
         {
-            let hit = self.make_hit(cpu_index, master, addr, WatchpointKind::Read, data);
+            let hit = self.make_hit(cpu_index, master, addr, WatchpointKind::Read, data, device);
             self.watchpoints.push_hit(hit);
             return true;
         }
@@ -696,6 +741,9 @@ impl AddressSpace16 {
     ///
     /// `cpu_index` is the CPU that owns this address space (matching
     /// `#[debug_map(cpu = N)]`); `master` is who performed the access.
+    /// Call before applying the write's side effect; the hit records
+    /// [`WatchpointPhase::Before`], so the metadata snapshot (including
+    /// the region lookup) reflects pre-write state.
     #[inline(always)]
     pub fn watch_write(
         &mut self,
@@ -703,6 +751,20 @@ impl AddressSpace16 {
         master: BusMaster,
         addr: u16,
         data: u8,
+    ) -> bool {
+        self.watch_write_with(cpu_index, master, addr, data, None)
+    }
+
+    /// [`watch_write`](Self::watch_write) with the name of the device that
+    /// owns `addr` (for boards that can attribute I/O addresses).
+    #[inline(always)]
+    pub fn watch_write_with(
+        &mut self,
+        cpu_index: usize,
+        master: BusMaster,
+        addr: u16,
+        data: u8,
+        device: Option<&'static str>,
     ) -> bool {
         if self.active_watch_count == 0 {
             return false;
@@ -713,7 +775,7 @@ impl AddressSpace16 {
                 .watchpoints
                 .matches(cpu_index, addr as u32, WatchpointKind::Write)
         {
-            let hit = self.make_hit(cpu_index, master, addr, WatchpointKind::Write, data);
+            let hit = self.make_hit(cpu_index, master, addr, WatchpointKind::Write, data, device);
             self.watchpoints.push_hit(hit);
             return true;
         }
@@ -722,8 +784,10 @@ impl AddressSpace16 {
 
     /// Build a canonical hit for a byte access through this map.
     ///
-    /// The remaining observability metadata (`cycle`, `pc`, `device`) stays
-    /// at its defaults here; populating it is debug-observability work.
+    /// `cycle`/`pc` come from the context latched by the board (see
+    /// [`latch_access_context`](Self::latch_access_context)); the latched
+    /// PC belongs to the owning CPU, so it is attributed only when that
+    /// CPU performed the access (DMA and cross-CPU masters get `None`).
     fn make_hit(
         &self,
         cpu_index: usize,
@@ -731,19 +795,26 @@ impl AddressSpace16 {
         addr: u16,
         kind: WatchpointKind,
         value: u8,
+        device: Option<&'static str>,
     ) -> WatchpointHit {
         WatchpointHit {
             cpu_index,
             source: DebugAccessSource::from(master),
-            cycle: 0,
-            pc: None,
+            cycle: self.debug_cycle,
+            pc: match master {
+                BusMaster::Cpu(i) if i == cpu_index => self.debug_pc,
+                _ => None,
+            },
             addr: addr as u32,
             kind,
-            phase: WatchpointPhase::After,
+            phase: match kind {
+                WatchpointKind::Read => WatchpointPhase::After,
+                WatchpointKind::Write => WatchpointPhase::Before,
+            },
             value: value as u32,
             width: 1,
             region: self.region_at(addr).map(|r| r.name),
-            device: None,
+            device,
         }
     }
 
@@ -1404,6 +1475,65 @@ mod tests {
         assert_eq!(hit.source, DebugAccessSource::Cpu(1));
         let hit = map.take_hit().unwrap();
         assert_eq!(hit.source, DebugAccessSource::Dma);
+    }
+
+    #[test]
+    fn hit_records_latched_cycle_and_pc() {
+        let mut map = MemoryMap::new();
+        map.region(RAM, "RAM", 0x0000, 0x8000, AccessKind::ReadWrite);
+        map.set_watchpoint(0, 0x4000, WatchpointKind::Write);
+
+        // Board latches context at an instruction boundary, then the CPU
+        // performs the watched access mid-instruction.
+        map.latch_access_context(123_456, Some(0x1BCC));
+        map.latch_access_context(123_457, None); // mid-instruction: PC retained
+
+        assert!(map.watch_write(0, BusMaster::Cpu(0), 0x4000, 0x12));
+        let hit = map.take_hit().unwrap();
+        assert_eq!(hit.cycle, 123_457);
+        assert_eq!(hit.pc, Some(0x1BCC));
+    }
+
+    #[test]
+    fn pc_attributed_only_to_owning_cpu() {
+        let mut map = MemoryMap::new();
+        map.region(RAM, "RAM", 0x0000, 0x8000, AccessKind::ReadWrite);
+        map.set_watchpoint(0, 0x4000, WatchpointKind::Write);
+        map.latch_access_context(100, Some(0x2000));
+
+        // DMA access: latched PC belongs to the owning CPU, not the master.
+        assert!(map.watch_write(0, BusMaster::Dma, 0x4000, 0x12));
+        assert_eq!(map.take_hit().unwrap().pc, None);
+
+        // Owning CPU access: PC attributed.
+        assert!(map.watch_write(0, BusMaster::Cpu(0), 0x4000, 0x12));
+        assert_eq!(map.take_hit().unwrap().pc, Some(0x2000));
+    }
+
+    #[test]
+    fn hit_records_phase_by_kind() {
+        let mut map = MemoryMap::new();
+        map.region(RAM, "RAM", 0x0000, 0x8000, AccessKind::ReadWrite);
+        map.set_watchpoint(0, 0x4000, WatchpointKind::Read);
+        map.set_watchpoint(0, 0x4000, WatchpointKind::Write);
+
+        assert!(map.watch_read(0, BusMaster::Cpu(0), 0x4000, 0xAA));
+        assert_eq!(map.take_hit().unwrap().phase, WatchpointPhase::After);
+
+        assert!(map.watch_write(0, BusMaster::Cpu(0), 0x4000, 0xBB));
+        assert_eq!(map.take_hit().unwrap().phase, WatchpointPhase::Before);
+    }
+
+    #[test]
+    fn hit_records_device_name() {
+        let mut map = MemoryMap::new();
+        map.region(IO, "I/O", 0xC000, 0x100, AccessKind::Io);
+        map.set_watchpoint(0, 0xC004, WatchpointKind::Write);
+
+        assert!(map.watch_write_with(0, BusMaster::Cpu(0), 0xC004, 0x01, Some("Widget PIA")));
+        let hit = map.take_hit().unwrap();
+        assert_eq!(hit.device, Some("Widget PIA"));
+        assert_eq!(hit.region, Some("I/O"));
     }
 
     // -----------------------------------------------------------------------

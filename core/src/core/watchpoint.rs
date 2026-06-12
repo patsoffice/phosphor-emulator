@@ -13,9 +13,10 @@
 //! - [`DebugAccessSource`] — debug-facing "who did the access" enum
 //! - [`Watchpoints`] — watchpoint set plus a FIFO hit queue
 //!
-//! This module owns the structural shape; populating the observability
-//! metadata (`cycle`, `pc`, `phase`, `region`, `device`) at the bus/board
-//! boundary is debug-observability work.
+//! `check_read`/`check_write` accept the observability metadata (`cycle`,
+//! `pc`) from the caller and derive `phase` from the access kind; callers
+//! that also know `region`/`device` names build the hit themselves and
+//! queue it with [`Watchpoints::push_hit`].
 
 use std::collections::VecDeque;
 
@@ -30,8 +31,11 @@ pub enum WatchpointKind {
 
 /// Whether a hit was recorded before or after the access took effect.
 ///
-/// Today all hits are recorded after the access (`After`); `Before` exists
-/// for debug-observability work that pauses execution pre-access.
+/// Write hits are recorded `Before` the side effect is applied: boards
+/// check write watchpoints at the top of bus dispatch, so the hit (and the
+/// debugger pause at the end of the cycle) reflects metadata captured
+/// pre-mutation. Read hits are recorded `After` the access because the
+/// value is only known once the read completes.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum WatchpointPhase {
     Before,
@@ -80,10 +84,9 @@ pub struct Watchpoint {
 /// Details of a watchpoint hit, consumed by the debugger.
 ///
 /// Canonical shape shared between the address-space refactor and
-/// debug-observability. The structural fields (`cpu_index`, `addr`, `kind`,
-/// `value`, `width`) are populated today; the observability metadata
-/// (`source`, `cycle`, `pc`, `phase`, `region`, `device`) is populated as
-/// boards and buses are instrumented.
+/// debug-observability. Instrumented boards populate all fields; boards
+/// not yet migrated leave the unknown metadata at its defaults (`cycle` 0,
+/// `pc`/`region`/`device` `None`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct WatchpointHit {
     /// Index of the CPU whose address space the watchpoint lives in.
@@ -175,30 +178,61 @@ impl Watchpoints {
 
     /// Check a read access against the set. Queues a hit and returns true
     /// if `addr` is read-watched in `cpu_index`'s address space.
+    ///
+    /// Call after the value is read; the hit records [`WatchpointPhase::After`].
+    /// `cycle` is the machine clock at the access and `pc` the address of
+    /// the instruction performing it, when known (pass 0 / `None` otherwise).
     #[inline]
     pub fn check_read(
         &mut self,
         cpu_index: usize,
         source: DebugAccessSource,
+        cycle: u64,
+        pc: Option<u32>,
         addr: u32,
         value: u32,
         width: u8,
     ) -> bool {
-        self.check(cpu_index, source, addr, WatchpointKind::Read, value, width)
+        self.check(
+            cpu_index,
+            source,
+            cycle,
+            pc,
+            addr,
+            WatchpointKind::Read,
+            value,
+            width,
+        )
     }
 
     /// Check a write access against the set. Queues a hit and returns true
     /// if `addr` is write-watched in `cpu_index`'s address space.
+    ///
+    /// Call before applying the side effect; the hit records
+    /// [`WatchpointPhase::Before`]. `cycle` is the machine clock at the
+    /// access and `pc` the address of the instruction performing it, when
+    /// known (pass 0 / `None` otherwise).
     #[inline]
     pub fn check_write(
         &mut self,
         cpu_index: usize,
         source: DebugAccessSource,
+        cycle: u64,
+        pc: Option<u32>,
         addr: u32,
         value: u32,
         width: u8,
     ) -> bool {
-        self.check(cpu_index, source, addr, WatchpointKind::Write, value, width)
+        self.check(
+            cpu_index,
+            source,
+            cycle,
+            pc,
+            addr,
+            WatchpointKind::Write,
+            value,
+            width,
+        )
     }
 
     /// True if the exact address is watched for `kind` in `cpu_index`'s
@@ -213,10 +247,13 @@ impl Watchpoints {
             .any(|w| w.cpu_index == cpu_index && w.addr == addr && w.kind == kind)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn check(
         &mut self,
         cpu_index: usize,
         source: DebugAccessSource,
+        cycle: u64,
+        pc: Option<u32>,
         addr: u32,
         kind: WatchpointKind,
         value: u32,
@@ -228,11 +265,14 @@ impl Watchpoints {
         self.push_hit(WatchpointHit {
             cpu_index,
             source,
-            cycle: 0,
-            pc: None,
+            cycle,
+            pc,
             addr,
             kind,
-            phase: WatchpointPhase::After,
+            phase: match kind {
+                WatchpointKind::Read => WatchpointPhase::After,
+                WatchpointKind::Write => WatchpointPhase::Before,
+            },
             value,
             width,
             region: None,
@@ -274,8 +314,8 @@ mod tests {
     fn empty_set_matches_nothing() {
         let mut wp = Watchpoints::new();
         assert!(wp.is_empty());
-        assert!(!wp.check_read(0, DebugAccessSource::Unknown, 0x1234, 0x42, 1));
-        assert!(!wp.check_write(0, DebugAccessSource::Unknown, 0x1234, 0x42, 1));
+        assert!(!wp.check_read(0, DebugAccessSource::Unknown, 0, None, 0x1234, 0x42, 1));
+        assert!(!wp.check_write(0, DebugAccessSource::Unknown, 0, None, 0x1234, 0x42, 1));
         assert!(wp.take_hit().is_none());
     }
 
@@ -285,16 +325,16 @@ mod tests {
         wp.set(0, 0x2042, WatchpointKind::Write);
 
         // Nearby addresses do not fire
-        assert!(!wp.check_write(0, DebugAccessSource::Unknown, 0x2041, 0x11, 1));
-        assert!(!wp.check_write(0, DebugAccessSource::Unknown, 0x2043, 0x22, 1));
+        assert!(!wp.check_write(0, DebugAccessSource::Unknown, 0, None, 0x2041, 0x11, 1));
+        assert!(!wp.check_write(0, DebugAccessSource::Unknown, 0, None, 0x2043, 0x22, 1));
 
         // Exact address fires
-        assert!(wp.check_write(0, DebugAccessSource::Unknown, 0x2042, 0x55, 1));
+        assert!(wp.check_write(0, DebugAccessSource::Unknown, 0, None, 0x2042, 0x55, 1));
         let hit = wp.take_hit().unwrap();
         assert_eq!(hit.addr, 0x2042);
         assert_eq!(hit.value, 0x55);
         assert_eq!(hit.kind, WatchpointKind::Write);
-        assert_eq!(hit.phase, WatchpointPhase::After);
+        assert_eq!(hit.phase, WatchpointPhase::Before);
     }
 
     #[test]
@@ -302,8 +342,8 @@ mod tests {
         let mut wp = Watchpoints::new();
         wp.set(0, 0x4000, WatchpointKind::Read);
 
-        assert!(!wp.check_write(0, DebugAccessSource::Unknown, 0x4000, 0xCD, 1));
-        assert!(wp.check_read(0, DebugAccessSource::Unknown, 0x4000, 0xAB, 1));
+        assert!(!wp.check_write(0, DebugAccessSource::Unknown, 0, None, 0x4000, 0xCD, 1));
+        assert!(wp.check_read(0, DebugAccessSource::Unknown, 0, None, 0x4000, 0xAB, 1));
         let hit = wp.take_hit().unwrap();
         assert_eq!(hit.kind, WatchpointKind::Read);
         assert!(wp.take_hit().is_none());
@@ -315,9 +355,9 @@ mod tests {
         wp.set(1, 0x4000, WatchpointKind::Read);
 
         // Same address in CPU 0's space does not fire
-        assert!(!wp.check_read(0, DebugAccessSource::Unknown, 0x4000, 0x00, 1));
+        assert!(!wp.check_read(0, DebugAccessSource::Unknown, 0, None, 0x4000, 0x00, 1));
         // CPU 1's space fires
-        assert!(wp.check_read(1, DebugAccessSource::Unknown, 0x4000, 0x77, 1));
+        assert!(wp.check_read(1, DebugAccessSource::Unknown, 0, None, 0x4000, 0x77, 1));
         let hit = wp.take_hit().unwrap();
         assert_eq!(hit.cpu_index, 1);
     }
@@ -328,8 +368,8 @@ mod tests {
         wp.set(0, 0x1000, WatchpointKind::Read);
         wp.set(0, 0x1001, WatchpointKind::Read);
 
-        assert!(wp.check_read(0, DebugAccessSource::Unknown, 0x1000, 0xAA, 1));
-        assert!(wp.check_read(0, DebugAccessSource::Unknown, 0x1001, 0xBB, 1));
+        assert!(wp.check_read(0, DebugAccessSource::Unknown, 0, None, 0x1000, 0xAA, 1));
+        assert!(wp.check_read(0, DebugAccessSource::Unknown, 0, None, 0x1001, 0xBB, 1));
         assert_eq!(wp.pending_hits(), 2);
 
         // FIFO: oldest first
@@ -344,7 +384,7 @@ mod tests {
         wp.set(0, 0x1000, WatchpointKind::Write);
 
         for i in 0..(MAX_PENDING_HITS as u32 + 8) {
-            wp.check_write(0, DebugAccessSource::Unknown, 0x1000, i, 1);
+            wp.check_write(0, DebugAccessSource::Unknown, 0, None, 0x1000, i, 1);
         }
         assert_eq!(wp.pending_hits(), MAX_PENDING_HITS);
         // Oldest hits were dropped; the first remaining is hit #8
@@ -356,11 +396,51 @@ mod tests {
         let mut wp = Watchpoints::new();
         wp.set(0, 0x5000, WatchpointKind::Read);
 
-        assert!(wp.check_read(0, DebugAccessSource::Cpu(0), 0x5000, 0x01, 1));
-        assert!(wp.check_read(0, DebugAccessSource::Dma, 0x5000, 0x02, 1));
+        assert!(wp.check_read(0, DebugAccessSource::Cpu(0), 0, None, 0x5000, 0x01, 1));
+        assert!(wp.check_read(0, DebugAccessSource::Dma, 0, None, 0x5000, 0x02, 1));
 
         assert_eq!(wp.take_hit().unwrap().source, DebugAccessSource::Cpu(0));
         assert_eq!(wp.take_hit().unwrap().source, DebugAccessSource::Dma);
+    }
+
+    #[test]
+    fn cycle_and_pc_metadata_recorded() {
+        let mut wp = Watchpoints::new();
+        wp.set(0, 0x5000, WatchpointKind::Read);
+        wp.set(0, 0x5001, WatchpointKind::Write);
+
+        assert!(wp.check_read(
+            0,
+            DebugAccessSource::Cpu(0),
+            12_345,
+            Some(0x1BCC),
+            0x5000,
+            0x01,
+            1
+        ));
+        assert!(wp.check_write(0, DebugAccessSource::Dma, 67_890, None, 0x5001, 0x02, 1));
+
+        let hit = wp.take_hit().unwrap();
+        assert_eq!(hit.cycle, 12_345);
+        assert_eq!(hit.pc, Some(0x1BCC));
+        let hit = wp.take_hit().unwrap();
+        assert_eq!(hit.cycle, 67_890);
+        assert_eq!(hit.pc, None);
+    }
+
+    #[test]
+    fn phase_follows_access_kind() {
+        let mut wp = Watchpoints::new();
+        wp.set(0, 0x7000, WatchpointKind::Read);
+        wp.set(0, 0x7000, WatchpointKind::Write);
+
+        // Reads record after the value is known
+        assert!(wp.check_read(0, DebugAccessSource::Unknown, 0, None, 0x7000, 0xAA, 1));
+        assert_eq!(wp.take_hit().unwrap().phase, WatchpointPhase::After);
+
+        // Writes record before the side effect
+        assert!(wp.check_write(0, DebugAccessSource::Unknown, 0, None, 0x7000, 0xBB, 1));
+        assert_eq!(wp.take_hit().unwrap().phase, WatchpointPhase::Before);
     }
 
     #[test]
@@ -368,7 +448,15 @@ mod tests {
         let mut wp = Watchpoints::new();
         wp.set(0, 0x6000, WatchpointKind::Write);
 
-        assert!(wp.check_write(0, DebugAccessSource::Unknown, 0x6000, 0x1234_5678, 4));
+        assert!(wp.check_write(
+            0,
+            DebugAccessSource::Unknown,
+            0,
+            None,
+            0x6000,
+            0x1234_5678,
+            4
+        ));
         let hit = wp.take_hit().unwrap();
         assert_eq!(hit.value, 0x1234_5678);
         assert_eq!(hit.width, 4);
@@ -381,8 +469,8 @@ mod tests {
         wp.set(0, 0x3000, WatchpointKind::Write);
 
         wp.clear(0, 0x3000, WatchpointKind::Read);
-        assert!(!wp.check_read(0, DebugAccessSource::Unknown, 0x3000, 0x00, 1));
-        assert!(wp.check_write(0, DebugAccessSource::Unknown, 0x3000, 0x00, 1));
+        assert!(!wp.check_read(0, DebugAccessSource::Unknown, 0, None, 0x3000, 0x00, 1));
+        assert!(wp.check_write(0, DebugAccessSource::Unknown, 0, None, 0x3000, 0x00, 1));
 
         wp.take_hit();
         wp.clear(0, 0x3000, WatchpointKind::Write);
@@ -394,12 +482,12 @@ mod tests {
         let mut wp = Watchpoints::new();
         wp.set(0, 0x1000, WatchpointKind::Read);
         wp.set(0, 0x2000, WatchpointKind::Write);
-        wp.check_read(0, DebugAccessSource::Unknown, 0x1000, 0xAA, 1);
+        wp.check_read(0, DebugAccessSource::Unknown, 0, None, 0x1000, 0xAA, 1);
 
         wp.clear_all();
         assert!(wp.is_empty());
         assert!(wp.take_hit().is_none());
-        assert!(!wp.check_read(0, DebugAccessSource::Unknown, 0x1000, 0x00, 1));
+        assert!(!wp.check_read(0, DebugAccessSource::Unknown, 0, None, 0x1000, 0x00, 1));
     }
 
     #[test]
