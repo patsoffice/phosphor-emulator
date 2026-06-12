@@ -300,7 +300,10 @@ pub fn execute_frame(machine: &mut dyn FrontendMachine, state: &mut DebugState) 
                             for (i, (_name, cpu)) in cpus.iter().enumerate() {
                                 if (boundaries >> i) & 1 != 0
                                     && let Some(bp_set) = state.breakpoints.get(i)
-                                    && bp_set.contains(&cpu.debug_pc())
+                                    // Breakpoint set is still u16 (widened with the
+                                    // 32-bit UI pass); PCs above 0xFFFF never match.
+                                    && u16::try_from(cpu.debug_pc())
+                                        .is_ok_and(|pc| bp_set.contains(&pc))
                                 {
                                     state.refresh(bus);
                                     state.run_mode = RunMode::Paused;
@@ -954,7 +957,7 @@ fn disassemble_from(
                 .read(cpu_index, addr.wrapping_add(i as u16))
                 .unwrap_or(0);
         }
-        let insn = cpu.debug_disassemble(addr, &bytes);
+        let insn = cpu.debug_disassemble(u32::from(addr), &bytes);
         let text = format!("{insn}");
         let raw = bytes[..insn.byte_len as usize].to_vec();
         result.push((addr, raw, text));
@@ -1002,7 +1005,8 @@ fn draw_disassembly_panel(
         return;
     }
     let (_name, cpu) = &cpus[cpu_idx];
-    let pc = cpu.debug_pc();
+    // The disassembly scan is still u16 (widened with the 32-bit UI pass).
+    let pc = cpu.debug_pc() as u16;
 
     let (lines, pc_idx) = disassemble_around_pc(bus, cpu_idx, *cpu, pc, 8, 16);
 

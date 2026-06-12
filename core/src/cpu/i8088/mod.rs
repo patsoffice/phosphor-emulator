@@ -436,8 +436,8 @@ impl Debuggable for I8088 {
 }
 
 impl crate::core::debug::DebugCpu for I8088 {
-    fn debug_pc(&self) -> u16 {
-        self.ip
+    fn debug_pc(&self) -> u32 {
+        u32::from(self.ip)
     }
 
     fn debug_at_instruction_boundary(&self) -> bool {
@@ -446,7 +446,7 @@ impl crate::core::debug::DebugCpu for I8088 {
 
     fn debug_disassemble(
         &self,
-        _addr: u16,
+        _addr: u32,
         bytes: &[u8],
     ) -> crate::cpu::disasm::DisassembledInstruction {
         // Stub disassembler: show raw opcode byte. Full x86 disassembly TBD.

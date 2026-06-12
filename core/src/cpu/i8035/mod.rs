@@ -757,16 +757,16 @@ impl Debuggable for I8035 {
 }
 
 impl DebugCpu for I8035 {
-    fn debug_pc(&self) -> u16 {
-        self.pc
+    fn debug_pc(&self) -> u32 {
+        u32::from(self.pc)
     }
 
     fn debug_at_instruction_boundary(&self) -> bool {
         self.at_instruction_boundary()
     }
 
-    fn debug_disassemble(&self, addr: u16, bytes: &[u8]) -> DisassembledInstruction {
-        <Self as crate::cpu::Disassemble>::disassemble(addr, bytes)
+    fn debug_disassemble(&self, addr: u32, bytes: &[u8]) -> DisassembledInstruction {
+        <Self as crate::cpu::Disassemble>::disassemble(addr as u16, bytes)
     }
 }
 

@@ -473,9 +473,8 @@ impl Debuggable for M68000 {
 }
 
 impl DebugCpu for M68000 {
-    fn debug_pc(&self) -> u16 {
-        // The debug interface is 16-bit today; expose the low half of PC.
-        self.pc as u16
+    fn debug_pc(&self) -> u32 {
+        self.pc
     }
 
     fn debug_at_instruction_boundary(&self) -> bool {
@@ -484,7 +483,7 @@ impl DebugCpu for M68000 {
 
     fn debug_disassemble(
         &self,
-        _addr: u16,
+        _addr: u32,
         bytes: &[u8],
     ) -> crate::cpu::disasm::DisassembledInstruction {
         // Stub disassembler: show the raw opcode word. Full 68000 disassembly

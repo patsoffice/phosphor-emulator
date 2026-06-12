@@ -21,7 +21,7 @@ pub struct DebugRegister {
 /// Result of disassembling one instruction at a given address.
 pub struct DebugDisassembly {
     /// Address of the instruction.
-    pub addr: u16,
+    pub addr: u32,
     /// Raw instruction bytes.
     pub bytes: Vec<u8>,
     /// Formatted instruction text (e.g., "LDA  #$42").
@@ -45,13 +45,19 @@ pub trait Debuggable {
 /// and disassembly. The debugger uses this for stepping and code display.
 pub trait DebugCpu: Debuggable {
     /// Read the current program counter.
-    fn debug_pc(&self) -> u16;
+    ///
+    /// `u32` so 24/32-bit CPUs (M68000) report their full PC; 16-bit CPUs
+    /// widen losslessly.
+    fn debug_pc(&self) -> u32;
 
     /// True if the CPU is at an instruction boundary (ready to fetch next opcode).
     fn debug_at_instruction_boundary(&self) -> bool;
 
     /// Disassemble one instruction from raw bytes at the given address.
-    fn debug_disassemble(&self, addr: u16, bytes: &[u8]) -> DisassembledInstruction;
+    ///
+    /// 16-bit CPUs decode `addr` modulo their 64 KB space; their debuggers
+    /// never pass addresses above `0xFFFF`.
+    fn debug_disassemble(&self, addr: u32, bytes: &[u8]) -> DisassembledInstruction;
 }
 
 /// Debug view of a bus and its connected devices.
