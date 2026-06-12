@@ -1,6 +1,8 @@
+use phosphor_core::core::debug_trace::{DebugEvent, DebugEventKind, DebugTraceBuffer};
 use phosphor_core::core::machine::InputButton;
 use phosphor_core::core::memory_map::{AccessKind, MemoryMap};
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
+use phosphor_core::core::watchpoint::DebugAccessSource;
 use phosphor_core::core::{Bus, BusMaster, TimingConfig};
 use phosphor_core::cpu::CpuStateTrait;
 use phosphor_core::cpu::state::Z80State;
@@ -8,7 +10,7 @@ use phosphor_core::cpu::z80::Z80;
 use phosphor_core::device::namco_wsg::NamcoWsg;
 use phosphor_core::gfx;
 use phosphor_core::gfx::decode::{GfxLayout, decode_gfx};
-use phosphor_macros::{BusDebug, MemoryRegion};
+use phosphor_macros::{BusDebug, DebugTrace, MemoryRegion};
 
 // ---------------------------------------------------------------------------
 // Memory map region IDs (shared across all Namco Pac-Man hardware games)
@@ -144,7 +146,7 @@ const PACMAN_SPRITE_LAYOUT: GfxLayout<'static> = GfxLayout {
 ///
 /// Shared by Pac-Man, Ms. Pac-Man, and other games on identical hardware.
 /// Game wrappers compose this struct and implement Bus to route memory accesses.
-#[derive(BusDebug)]
+#[derive(BusDebug, DebugTrace)]
 pub struct NamcoPacBoard {
     #[debug_cpu("Z80")]
     pub(crate) cpu: Z80,
@@ -190,6 +192,10 @@ pub struct NamcoPacBoard {
     // Timing
     pub(crate) clock: u64,
     pub(crate) watchdog_counter: u32,
+
+    // Debug event ring (observer state — never saved in save states)
+    #[debug_events]
+    pub(crate) debug_trace: DebugTraceBuffer,
 }
 
 impl Default for NamcoPacBoard {
@@ -222,6 +228,7 @@ impl NamcoPacBoard {
             vblank_irq_pending: false,
             clock: 0,
             watchdog_counter: 0,
+            debug_trace: DebugTraceBuffer::new(),
         }
     }
 
@@ -274,14 +281,26 @@ impl NamcoPacBoard {
         let vblank_cycle = VISIBLE_LINES * TIMING.cycles_per_scanline;
         if frame_cycle == vblank_cycle {
             self.vblank_irq_pending = true;
+            if self.debug_trace.enabled() {
+                self.debug_trace.record(DebugEvent {
+                    cpu_index: Some(0),
+                    detail: Some("VBLANK IRQ"),
+                    ..DebugEvent::new(
+                        self.clock,
+                        DebugAccessSource::Unknown,
+                        DebugEventKind::InterruptAssert,
+                    )
+                });
+            }
         }
 
         // WSG tick (runs at CPU clock rate)
         self.wsg.tick();
 
-        // Latch watchpoint attribution context (cycle + instruction PC)
-        // before CPU execution — bus dispatch cannot read CPU state mid-tick.
-        if self.map.has_any_watchpoints() {
+        // Latch debug attribution context (cycle + instruction PC) before
+        // CPU execution — bus dispatch cannot read CPU state mid-tick.
+        // Both watchpoint hits and trace events draw PC from this latch.
+        if self.map.has_any_watchpoints() || self.debug_trace.enabled() {
             let pc = self
                 .cpu
                 .at_instruction_boundary()
@@ -298,6 +317,29 @@ impl NamcoPacBoard {
     // -----------------------------------------------------------------------
     // Bus dispatch helpers — called from game wrapper Bus impls
     // -----------------------------------------------------------------------
+
+    /// Record a bus event (caller gates on `debug_trace.enabled()`).
+    /// All bus accesses on this single-CPU board originate from CPU 0.
+    fn trace_access(
+        &mut self,
+        kind: DebugEventKind,
+        addr: u16,
+        value: u8,
+        device: Option<&'static str>,
+        detail: Option<&'static str>,
+    ) {
+        self.debug_trace.record(DebugEvent {
+            cpu_index: Some(0),
+            pc: self.map.latched_pc(),
+            addr: Some(addr as u32),
+            value: Some(value as u32),
+            width: 1,
+            region: self.map.region_at(addr).map(|r| r.name),
+            device,
+            detail,
+            ..DebugEvent::new(self.clock, DebugAccessSource::Cpu(0), kind)
+        });
+    }
 
     /// Shared memory read logic for all Namco Pac hardware.
     /// Caller is responsible for address masking (e.g. A15 mirror).
@@ -326,6 +368,11 @@ impl NamcoPacBoard {
 
         // Single-CPU board: all bus accesses originate from CPU 0.
         self.map.watch_read(0, BusMaster::Cpu(0), addr, data);
+        // Trace I/O reads only — memory reads (instruction fetches) would
+        // drown the ring.
+        if self.debug_trace.enabled() && self.map.page(addr).region_id == Region::IO {
+            self.trace_access(DebugEventKind::DeviceRead, addr, data, None, None);
+        }
         data
     }
 
@@ -333,6 +380,34 @@ impl NamcoPacBoard {
     /// Caller is responsible for address masking (e.g. A15 mirror).
     pub fn bus_write_common(&mut self, addr: u16, data: u8) {
         self.map.watch_write(0, BusMaster::Cpu(0), addr, data);
+
+        if self.debug_trace.enabled() {
+            let (kind, device, detail) = if self.map.page(addr).region_id == Region::IO {
+                match addr {
+                    0x5000..=0x5007 => (
+                        DebugEventKind::DeviceWrite,
+                        Some("I/O latch"),
+                        Some(match addr & 7 {
+                            0 => "IRQ enable",
+                            1 => "sound enable",
+                            3 => "flip screen",
+                            _ => "latch bit",
+                        }),
+                    ),
+                    0x5040..=0x505F => (DebugEventKind::DeviceWrite, Some("NamcoWSG"), None),
+                    0x5060..=0x506F => (
+                        DebugEventKind::DeviceWrite,
+                        Some("Sprites"),
+                        Some("sprite coordinate"),
+                    ),
+                    0x50C0..=0x50FF => (DebugEventKind::Watchdog, None, Some("watchdog cleared")),
+                    _ => (DebugEventKind::IoWrite, None, None),
+                }
+            } else {
+                (DebugEventKind::MemoryWrite, None, None)
+            };
+            self.trace_access(kind, addr, data, device, detail);
+        }
 
         match self.map.page(addr).region_id {
             Region::VIDEO_RAM | Region::COLOR_RAM | Region::RAM => {
@@ -691,6 +766,79 @@ impl NamcoPacBoard {
             INPUT_P1_START => crate::set_bit_active_low(&mut self.in1, 5, pressed),
             INPUT_P2_START => crate::set_bit_active_low(&mut self.in1, 6, pressed),
             _ => {}
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    mod debug_events {
+        use super::*;
+
+        #[test]
+        fn tracing_disabled_records_nothing() {
+            let mut board = NamcoPacBoard::new();
+            board.bus_write_common(0x5045, 0x07);
+            board.bus_read_common(0x5000);
+            assert!(board.debug_trace.is_empty());
+        }
+
+        #[test]
+        fn wsg_write_emits_device_write_event() {
+            let mut board = NamcoPacBoard::new();
+            board.debug_trace.set_enabled(true);
+            board.clock = 777;
+
+            board.bus_write_common(0x5045, 0x07);
+
+            let events = board.debug_trace.events();
+            assert_eq!(events.len(), 1);
+            let e = &events[0];
+            assert_eq!(e.kind, DebugEventKind::DeviceWrite);
+            assert_eq!(e.device, Some("NamcoWSG"));
+            assert_eq!(e.cycle, 777);
+            assert_eq!(e.addr, Some(0x5045));
+            assert_eq!(e.value, Some(0x07));
+            assert_eq!(e.region, Some("I/O"));
+        }
+
+        #[test]
+        fn latch_and_watchdog_writes_emit_annotated_events() {
+            let mut board = NamcoPacBoard::new();
+            board.debug_trace.set_enabled(true);
+
+            board.bus_write_common(0x5000, 0x01); // IRQ enable
+            board.bus_write_common(0x50C0, 0x00); // watchdog clear
+
+            let events = board.debug_trace.events();
+            assert_eq!(events[0].kind, DebugEventKind::DeviceWrite);
+            assert_eq!(events[0].device, Some("I/O latch"));
+            assert_eq!(events[0].detail, Some("IRQ enable"));
+            assert_eq!(events[1].kind, DebugEventKind::Watchdog);
+            assert_eq!(events[1].detail, Some("watchdog cleared"));
+        }
+
+        #[test]
+        fn io_reads_traced_memory_writes_plain() {
+            let mut board = NamcoPacBoard::new();
+            board.debug_trace.set_enabled(true);
+
+            board.bus_read_common(0x5080); // DIP switches: DeviceRead
+            board.bus_read_common(0x4C10); // RAM: not traced
+            board.bus_write_common(0x4C10, 0x42); // RAM: MemoryWrite
+
+            let events = board.debug_trace.events();
+            assert_eq!(events.len(), 2);
+            assert_eq!(events[0].kind, DebugEventKind::DeviceRead);
+            assert_eq!(events[0].addr, Some(0x5080));
+            assert_eq!(events[1].kind, DebugEventKind::MemoryWrite);
+            assert_eq!(events[1].region, Some("RAM"));
         }
     }
 }

@@ -229,7 +229,9 @@ impl SaveState for PacmanSystem {
     crate::machine_save_state!();
 }
 
-crate::impl_default_frontend_capabilities!(PacmanSystem);
+impl phosphor_core::core::machine::Nvram for PacmanSystem {}
+impl phosphor_core::core::machine::Profilable for PacmanSystem {}
+crate::impl_board_debug_trace!(PacmanSystem, board);
 
 // ---------------------------------------------------------------------------
 // Machine registry

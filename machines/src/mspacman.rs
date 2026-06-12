@@ -410,7 +410,9 @@ impl SaveState for MsPacmanSystem {
     crate::machine_save_state!();
 }
 
-crate::impl_default_frontend_capabilities!(MsPacmanSystem);
+impl phosphor_core::core::machine::Nvram for MsPacmanSystem {}
+impl phosphor_core::core::machine::Profilable for MsPacmanSystem {}
+crate::impl_board_debug_trace!(MsPacmanSystem, board);
 
 // ---------------------------------------------------------------------------
 // Machine registry
