@@ -216,7 +216,7 @@ pub fn derive_bus_debug(input: TokenStream) -> TokenStream {
                 }
                 match cpu_index {
                     #(#peek_arms,)*
-                    _ => match self.read(cpu_index, addr as u16) {
+                    _ => match self.read(cpu_index, addr) {
                         Some(value) => phosphor_core::core::memory_map::DebugRead::Backed {
                             value: value as u32,
                             width: 1,
@@ -231,14 +231,21 @@ pub fn derive_bus_debug(input: TokenStream) -> TokenStream {
                 None #(#take_hit_chain)*
             }
 
-            fn set_watchpoint(&mut self, cpu_index: usize, addr: u16, kind: phosphor_core::core::memory_map::WatchpointKind) {
+            fn set_watchpoint(&mut self, cpu_index: usize, addr: u32, kind: phosphor_core::core::memory_map::WatchpointKind) {
+                // 16-bit maps: addresses above 0xFFFF can never fire.
+                let Ok(addr) = u16::try_from(addr) else {
+                    return;
+                };
                 match cpu_index {
                     #(#set_arms,)*
                     _ => {}
                 }
             }
 
-            fn clear_watchpoint(&mut self, cpu_index: usize, addr: u16, kind: phosphor_core::core::memory_map::WatchpointKind) {
+            fn clear_watchpoint(&mut self, cpu_index: usize, addr: u32, kind: phosphor_core::core::memory_map::WatchpointKind) {
+                let Ok(addr) = u16::try_from(addr) else {
+                    return;
+                };
                 match cpu_index {
                     #(#clear_arms,)*
                     _ => {}
@@ -270,14 +277,20 @@ pub fn derive_bus_debug(input: TokenStream) -> TokenStream {
                 vec![#(#cpu_items),*]
             }
 
-            fn read(&self, cpu_index: usize, addr: u16) -> Option<u8> {
+            fn read(&self, cpu_index: usize, addr: u32) -> Option<u8> {
+                // Board maps and read methods are 16-bit; higher addresses
+                // are unmapped.
+                let addr = u16::try_from(addr).ok()?;
                 match cpu_index {
                     #(#read_arms,)*
                     _ => None,
                 }
             }
 
-            fn write(&mut self, cpu_index: usize, addr: u16, data: u8) {
+            fn write(&mut self, cpu_index: usize, addr: u32, data: u8) {
+                let Ok(addr) = u16::try_from(addr) else {
+                    return;
+                };
                 match cpu_index {
                     #(#write_arms,)*
                     _ => {}

@@ -228,7 +228,7 @@ pub fn execute_frame(machine: &mut dyn FrontendMachine, state: &mut DebugState) 
         state.watchpoints_dirty = false;
         machine.clear_all_watchpoints();
         for &(cpu_idx, addr, kind) in &state.watchpoints {
-            machine.set_watchpoint(cpu_idx, addr, kind);
+            machine.set_watchpoint(cpu_idx, u32::from(addr), kind);
         }
     }
 
@@ -954,7 +954,7 @@ fn disassemble_from(
         let mut bytes = [0u8; 6];
         for (i, b) in bytes.iter_mut().enumerate() {
             *b = bus
-                .read(cpu_index, addr.wrapping_add(i as u16))
+                .read(cpu_index, u32::from(addr.wrapping_add(i as u16)))
                 .unwrap_or(0);
         }
         let insn = cpu.debug_disassemble(u32::from(addr), &bytes);

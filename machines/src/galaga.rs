@@ -928,7 +928,9 @@ impl BusDebug for GalagaSystem {
         ]
     }
 
-    fn read(&self, cpu_index: usize, addr: u16) -> Option<u8> {
+    fn read(&self, cpu_index: usize, addr: u32) -> Option<u8> {
+        // All three Z80 address spaces are 16-bit.
+        let addr = u16::try_from(addr).ok()?;
         match addr {
             0x0000..=0x3FFF => {
                 let offset = addr as usize;
@@ -948,7 +950,10 @@ impl BusDebug for GalagaSystem {
         }
     }
 
-    fn write(&mut self, _cpu_index: usize, addr: u16, data: u8) {
+    fn write(&mut self, _cpu_index: usize, addr: u32, data: u8) {
+        let Ok(addr) = u16::try_from(addr) else {
+            return;
+        };
         match addr {
             0x8000..=0x87FF => self.video_ram[(addr - 0x8000) as usize] = data,
             0x8800..=0x8BFF => self.ram1[(addr - 0x8800) as usize] = data,
@@ -967,19 +972,19 @@ impl BusDebug for GalagaSystem {
     fn set_watchpoint(
         &mut self,
         cpu_index: usize,
-        addr: u16,
+        addr: u32,
         kind: phosphor_core::core::watchpoint::WatchpointKind,
     ) {
-        self.board.watchpoints.set(cpu_index, addr as u32, kind);
+        self.board.watchpoints.set(cpu_index, addr, kind);
     }
 
     fn clear_watchpoint(
         &mut self,
         cpu_index: usize,
-        addr: u16,
+        addr: u32,
         kind: phosphor_core::core::watchpoint::WatchpointKind,
     ) {
-        self.board.watchpoints.clear(cpu_index, addr as u32, kind);
+        self.board.watchpoints.clear(cpu_index, addr, kind);
     }
 
     fn clear_all_watchpoints(&mut self) {

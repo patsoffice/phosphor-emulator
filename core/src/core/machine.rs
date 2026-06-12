@@ -200,7 +200,7 @@ pub trait MachineDebug {
     /// Set a memory watchpoint in the address space of `cpu_index`.
     ///
     /// Default: delegates to `BusDebug::set_watchpoint()` via `debug_bus_mut()`.
-    fn set_watchpoint(&mut self, cpu_index: usize, addr: u16, kind: WatchpointKind) {
+    fn set_watchpoint(&mut self, cpu_index: usize, addr: u32, kind: WatchpointKind) {
         if let Some(bus) = self.debug_bus_mut() {
             bus.set_watchpoint(cpu_index, addr, kind);
         }
@@ -209,7 +209,7 @@ pub trait MachineDebug {
     /// Clear a memory watchpoint in the address space of `cpu_index`.
     ///
     /// Default: delegates to `BusDebug::clear_watchpoint()` via `debug_bus_mut()`.
-    fn clear_watchpoint(&mut self, cpu_index: usize, addr: u16, kind: WatchpointKind) {
+    fn clear_watchpoint(&mut self, cpu_index: usize, addr: u32, kind: WatchpointKind) {
         if let Some(bus) = self.debug_bus_mut() {
             bus.clear_watchpoint(cpu_index, addr, kind);
         }

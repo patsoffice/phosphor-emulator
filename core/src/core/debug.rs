@@ -74,10 +74,16 @@ pub trait BusDebug {
 
     /// Side-effect-free memory read from a CPU's address space.
     /// Returns `None` for unmapped or I/O addresses.
-    fn read(&self, cpu_index: usize, addr: u16) -> Option<u8>;
+    ///
+    /// Addresses are `u32`; implementations for 16-bit machines return
+    /// `None` above `0xFFFF`.
+    fn read(&self, cpu_index: usize, addr: u32) -> Option<u8>;
 
     /// Debug memory write into a CPU's address space.
-    fn write(&mut self, cpu_index: usize, addr: u16, data: u8);
+    ///
+    /// Addresses are `u32`; implementations for 16-bit machines ignore
+    /// writes above `0xFFFF`.
+    fn write(&mut self, cpu_index: usize, addr: u32, data: u8);
 
     /// Side-effect-free memory read with full address semantics: backed
     /// memory (value returned), mapped I/O (reading the live device would
@@ -88,10 +94,7 @@ pub trait BusDebug {
     /// `#[derive(BusDebug)]` overrides this with per-map semantics via
     /// `AddressSpace16::debug_peek`.
     fn peek(&self, cpu_index: usize, addr: u32) -> DebugRead {
-        if addr > 0xFFFF {
-            return DebugRead::Unmapped;
-        }
-        match self.read(cpu_index, addr as u16) {
+        match self.read(cpu_index, addr) {
             Some(value) => DebugRead::Backed {
                 value: value as u32,
                 width: 1,
@@ -118,10 +121,10 @@ pub trait BusDebug {
     }
 
     /// Set a memory watchpoint in the address space of `cpu_index`.
-    fn set_watchpoint(&mut self, _cpu_index: usize, _addr: u16, _kind: WatchpointKind) {}
+    fn set_watchpoint(&mut self, _cpu_index: usize, _addr: u32, _kind: WatchpointKind) {}
 
     /// Clear a memory watchpoint in the address space of `cpu_index`.
-    fn clear_watchpoint(&mut self, _cpu_index: usize, _addr: u16, _kind: WatchpointKind) {}
+    fn clear_watchpoint(&mut self, _cpu_index: usize, _addr: u32, _kind: WatchpointKind) {}
 
     /// Clear all memory watchpoints across all address spaces.
     fn clear_all_watchpoints(&mut self) {}
@@ -138,7 +141,8 @@ mod tests {
 
     /// Manual `BusDebug` with only `read`/`write`, exercising the default
     /// `peek`: backed bytes report `Backed`, everything else `Unmapped`
-    /// (the default cannot distinguish I/O).
+    /// (the default cannot distinguish I/O). Backs a low 16-bit window
+    /// and a high 32-bit window to show the widened surface.
     struct ReadOnlyBus;
 
     impl BusDebug for ReadOnlyBus {
@@ -148,10 +152,10 @@ mod tests {
         fn cpus(&self) -> Vec<(&str, &dyn DebugCpu)> {
             Vec::new()
         }
-        fn read(&self, _cpu_index: usize, addr: u16) -> Option<u8> {
-            (addr < 0x8000).then_some(addr as u8)
+        fn read(&self, _cpu_index: usize, addr: u32) -> Option<u8> {
+            (addr < 0x8000 || (0x00FF_0000..0x00FF_8000).contains(&addr)).then_some(addr as u8)
         }
-        fn write(&mut self, _cpu_index: usize, _addr: u16, _data: u8) {}
+        fn write(&mut self, _cpu_index: usize, _addr: u32, _data: u8) {}
     }
 
     #[test]
@@ -166,7 +170,16 @@ mod tests {
             }
         );
         assert_eq!(bus.peek(0, 0x9000), DebugRead::Unmapped);
-        // Out of 16-bit range: unmapped until the debug surface widens
-        assert_eq!(bus.peek(0, 0x1_0000), DebugRead::Unmapped);
+        // Addresses above 0xFFFF reach the implementation now that the
+        // debug surface is u32.
+        assert_eq!(
+            bus.peek(0, 0x00FF_1234),
+            DebugRead::Backed {
+                value: 0x34,
+                width: 1,
+                region_id: 0
+            }
+        );
+        assert_eq!(bus.peek(0, 0x00FF_9000), DebugRead::Unmapped);
     }
 }
