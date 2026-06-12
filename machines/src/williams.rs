@@ -389,6 +389,23 @@ impl WilliamsBoard {
             self.sound_pia.set_cb1(command != 0xFF);
         }
 
+        // Latch watchpoint attribution context (cycle + instruction PC)
+        // before CPU execution — bus dispatch cannot read CPU state mid-tick.
+        if self.main_map.has_any_watchpoints() {
+            let pc = self
+                .cpu
+                .at_instruction_boundary()
+                .then(|| self.cpu.pc as u32);
+            self.main_map.latch_access_context(self.clock, pc);
+        }
+        if self.sound_map.has_any_watchpoints() {
+            let pc = self
+                .sound_cpu
+                .at_instruction_boundary()
+                .then(|| self.sound_cpu.pc as u32);
+            self.sound_map.latch_access_context(self.clock, pc);
+        }
+
         if self.blitter.is_active() {
             self.blitter.do_dma_cycle(bus);
         } else {
@@ -517,6 +534,24 @@ impl Default for WilliamsBoard {
 // ---------------------------------------------------------------------------
 
 impl WilliamsBoard {
+    /// Device that owns a main-board I/O address, for watchpoint attribution.
+    fn main_device(addr: u16) -> Option<&'static str> {
+        match addr {
+            0xC804..=0xC807 => Some("Widget PIA"),
+            0xC80C..=0xC80F => Some("ROM PIA"),
+            0xCA00..=0xCA07 => Some("Blitter"),
+            _ => None,
+        }
+    }
+
+    /// Device that owns a sound-board I/O address, for watchpoint attribution.
+    fn sound_device(addr: u16) -> Option<&'static str> {
+        match addr {
+            0x0400..=0x0403 => Some("Sound PIA"),
+            _ => None,
+        }
+    }
+
     pub(crate) fn bus_read(&mut self, master: BusMaster, addr: u16) -> u8 {
         if master == BusMaster::Cpu(1) {
             // Sound board
@@ -527,14 +562,17 @@ impl WilliamsBoard {
                 SoundRegion::RAM | SoundRegion::ROM => self.sound_map.read_backing(addr),
                 _ => 0xFF,
             };
-            self.sound_map.watch_read(1, master, addr, data);
+            self.sound_map
+                .watch_read_with(1, master, addr, data, Self::sound_device(addr));
             return data;
         }
 
         // DmaVram reads bypass ROM banking — the blitter reads dest
         // directly from VRAM for keepmask blending.
         if master == BusMaster::DmaVram && addr <= 0x8FFF {
-            return self.main_map.region_data(MainRegion::VideoRam)[addr as usize];
+            let data = self.main_map.region_data(MainRegion::VideoRam)[addr as usize];
+            self.main_map.watch_read(0, master, addr, data);
+            return data;
         }
 
         // Main board — backed regions use page-table dispatch (banking
@@ -557,13 +595,17 @@ impl WilliamsBoard {
             | MainRegion::PROGRAM_ROM => self.main_map.read_backing(addr),
             _ => 0xFF,
         };
-        self.main_map.watch_read(0, master, addr, data);
+        self.main_map
+            .watch_read_with(0, master, addr, data, Self::main_device(addr));
         data
     }
 
     pub(crate) fn bus_write(&mut self, master: BusMaster, addr: u16, data: u8) {
         if master == BusMaster::Cpu(1) {
-            // Sound board
+            // Sound board — check the watchpoint before the side effect so
+            // the hit records pre-write state (WatchpointPhase::Before).
+            self.sound_map
+                .watch_write_with(1, master, addr, data, Self::sound_device(addr));
             match self.sound_map.page(addr).region_id {
                 SoundRegion::RAM => self.sound_map.write_backing(addr, data),
                 SoundRegion::IO_PIA if (0x0400..=0x0403).contains(&addr) => {
@@ -571,11 +613,12 @@ impl WilliamsBoard {
                 }
                 _ => {} // ROM or unmapped: ignored
             }
-            self.sound_map.watch_write(1, master, addr, data);
             return;
         }
 
-        // Main board
+        // Main board — watchpoint check precedes the side effect (see above).
+        self.main_map
+            .watch_write_with(0, master, addr, data, Self::main_device(addr));
         match self.main_map.page(addr).region_id {
             // Writes always go to video RAM, even when banked ROM is overlaid
             MainRegion::VIDEO_RAM | MainRegion::BANKED_ROM => {
@@ -610,7 +653,6 @@ impl WilliamsBoard {
             MainRegion::CMOS => self.main_map.write_backing(addr, data | 0xF0),
             _ => {} // ROM or unmapped: ignored
         }
-        self.main_map.watch_write(0, master, addr, data);
     }
 
     pub(crate) fn bus_is_halted_for(&self, master: BusMaster) -> bool {
@@ -756,5 +798,98 @@ mod tests {
             0x33,
             "sound ROM should be untouched"
         );
+    }
+
+    mod watchpoint_metadata {
+        use super::*;
+        use phosphor_core::core::watchpoint::{DebugAccessSource, WatchpointKind, WatchpointPhase};
+
+        #[test]
+        fn write_hit_carries_latched_context_and_region() {
+            let mut board = WilliamsBoard::new();
+            board.clock = 4242;
+            board
+                .main_map
+                .set_watchpoint(0, 0x1234, WatchpointKind::Write);
+            board
+                .main_map
+                .latch_access_context(board.clock, Some(0xD0_42));
+
+            board.bus_write(BusMaster::Cpu(0), 0x1234, 0x56);
+
+            let hit = board.main_map.take_hit().unwrap();
+            assert_eq!(hit.cpu_index, 0);
+            assert_eq!(hit.source, DebugAccessSource::Cpu(0));
+            assert_eq!(hit.cycle, 4242);
+            assert_eq!(hit.pc, Some(0xD0_42));
+            assert_eq!(hit.phase, WatchpointPhase::Before);
+            assert_eq!(hit.value, 0x56);
+            assert_eq!(hit.region, Some("Video RAM"));
+            assert_eq!(hit.device, None);
+        }
+
+        #[test]
+        fn io_hits_attribute_owning_device() {
+            let mut board = WilliamsBoard::new();
+            board
+                .main_map
+                .set_watchpoint(0, 0xC804, WatchpointKind::Write);
+            board
+                .main_map
+                .set_watchpoint(0, 0xC80C, WatchpointKind::Read);
+            board
+                .sound_map
+                .set_watchpoint(1, 0x0400, WatchpointKind::Write);
+
+            board.bus_write(BusMaster::Cpu(0), 0xC804, 0x01);
+            board.bus_read(BusMaster::Cpu(0), 0xC80C);
+            board.bus_write(BusMaster::Cpu(1), 0x0400, 0x02);
+
+            assert_eq!(
+                board.main_map.take_hit().unwrap().device,
+                Some("Widget PIA")
+            );
+            assert_eq!(board.main_map.take_hit().unwrap().device, Some("ROM PIA"));
+            assert_eq!(
+                board.sound_map.take_hit().unwrap().device,
+                Some("Sound PIA")
+            );
+        }
+
+        #[test]
+        fn blitter_vram_bypass_read_fires_watchpoint() {
+            let mut board = WilliamsBoard::new();
+            board
+                .main_map
+                .set_watchpoint(0, 0x2000, WatchpointKind::Read);
+            board.write_video_ram(0x2000, 0x99);
+
+            // DmaVram reads bypass page-table dispatch but must still hit.
+            let data = board.bus_read(BusMaster::DmaVram, 0x2000);
+            assert_eq!(data, 0x99);
+
+            let hit = board.main_map.take_hit().unwrap();
+            assert_eq!(hit.source, DebugAccessSource::Dma);
+            assert_eq!(hit.pc, None, "DMA access carries no PC");
+            assert_eq!(hit.value, 0x99);
+        }
+
+        #[test]
+        fn write_hit_recorded_before_side_effect_applies() {
+            // The hit's region lookup must reflect pre-write decode: a bank
+            // switch write that remaps pages still reports the I/O region.
+            let mut board = WilliamsBoard::new();
+            board
+                .main_map
+                .set_watchpoint(0, 0xC900, WatchpointKind::Write);
+
+            board.bus_write(BusMaster::Cpu(0), 0xC900, 0x01);
+
+            let hit = board.main_map.take_hit().unwrap();
+            assert_eq!(hit.phase, WatchpointPhase::Before);
+            assert_eq!(hit.region, Some("ROM Bank"));
+            // The side effect still happened after the hit was queued.
+            assert_eq!(board.rom_bank, 0x01);
+        }
     }
 }
