@@ -353,13 +353,6 @@ impl<T> FrontendMachine for T where
 {
 }
 
-/// Compatibility alias for [`FrontendMachine`] during the capability-trait
-/// migration. New code should use [`FrontendMachine`] (frontend bundle) or
-/// [`MachineCore`] (execution contract) directly.
-pub trait Machine: FrontendMachine {}
-
-impl<T> Machine for T where T: FrontendMachine {}
-
 #[cfg(test)]
 mod tests {
     use super::*;

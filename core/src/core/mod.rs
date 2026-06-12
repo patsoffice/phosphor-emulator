@@ -19,7 +19,7 @@ pub use component::BusMasterComponent;
 pub use debug::{BusDebug, DebugCpu, DebugDisassembly, DebugRegister, Debuggable};
 pub use debug_trace::{DebugEvent, DebugEventKind, DebugTrace, DebugTraceBuffer};
 pub use machine::{
-    AnalogInput, AudioSource, FrontendMachine, InputButton, InputReceiver, Machine, MachineCore,
+    AnalogInput, AudioSource, FrontendMachine, InputButton, InputReceiver, MachineCore,
     MachineDebug, Nvram, Profilable, ProfileSpan, Renderable, SaveState, TimingConfig,
 };
 pub use save_state::{SaveError, Saveable, StateReader, StateWriter, load_machine, save_machine};
