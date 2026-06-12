@@ -9,7 +9,7 @@ fn dis(bytes: &[u8]) -> phosphor_core::cpu::DisassembledInstruction {
     M6502::disassemble(0x0000, bytes)
 }
 
-fn dis_at(addr: u16, bytes: &[u8]) -> phosphor_core::cpu::DisassembledInstruction {
+fn dis_at(addr: u32, bytes: &[u8]) -> phosphor_core::cpu::DisassembledInstruction {
     M6502::disassemble(addr, bytes)
 }
 

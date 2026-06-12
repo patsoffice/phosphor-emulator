@@ -455,7 +455,7 @@ impl crate::core::debug::DebugCpu for I8088 {
             mnemonic: "DB",
             operands: format!("${opcode:02X}"),
             byte_len: 1,
-            bytes: [opcode, 0, 0, 0, 0, 0],
+            bytes: [opcode, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             target_addr: None,
         }
     }

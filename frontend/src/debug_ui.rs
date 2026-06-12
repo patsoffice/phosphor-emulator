@@ -968,7 +968,7 @@ fn disassemble_from(
     let mut result = Vec::with_capacity(count);
     let mut addr = start_addr;
     for _ in 0..count {
-        let mut bytes = [0u8; 6];
+        let mut bytes = [0u8; 10];
         for (i, b) in bytes.iter_mut().enumerate() {
             *b = bus
                 .read(cpu_index, addr.wrapping_add(i as u32))

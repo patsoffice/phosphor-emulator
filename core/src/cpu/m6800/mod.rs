@@ -770,6 +770,6 @@ impl DebugCpu for M6800 {
     }
 
     fn debug_disassemble(&self, addr: u32, bytes: &[u8]) -> DisassembledInstruction {
-        <Self as crate::cpu::Disassemble>::disassemble(addr as u16, bytes)
+        <Self as crate::cpu::Disassemble>::disassemble(addr, bytes)
     }
 }

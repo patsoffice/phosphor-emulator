@@ -11,28 +11,35 @@ pub struct DisassembledInstruction {
     pub operands: String,
     /// Total byte length of the instruction (opcode + operands)
     pub byte_len: u8,
-    /// The raw bytes of the instruction (valid entries: 0..byte_len)
-    pub bytes: [u8; 6],
+    /// The raw bytes of the instruction (valid entries: 0..byte_len).
+    /// 10 bytes covers the longest supported instruction (the M68000's
+    /// `MOVE.L #imm,abs.l`).
+    pub bytes: [u8; 10],
     /// Resolved absolute address for branches, jumps, and calls
-    pub target_addr: Option<u16>,
+    pub target_addr: Option<u32>,
 }
 
 impl DisassembledInstruction {
     /// Format with symbol substitution. If the resolver returns a name for
     /// `target_addr`, it replaces the hex address in the output.
-    pub fn format_with_symbols<'a>(&self, resolve: impl Fn(u16) -> Option<&'a str>) -> String {
+    pub fn format_with_symbols<'a>(&self, resolve: impl Fn(u32) -> Option<&'a str>) -> String {
         if let Some(target) = self.target_addr
             && let Some(name) = resolve(target)
         {
-            let hex4 = format!("${:04X}", target);
-            let substituted = self.operands.replace(&hex4, name);
-            // If 4-digit hex didn't match, try 2-digit for direct/zero-page addressing
-            let substituted = if substituted == self.operands && target <= 0xFF {
-                let hex2 = format!("${:02X}", target);
-                self.operands.replace(&hex2, name)
-            } else {
-                substituted
-            };
+            // Try the hex widths the operand formatters emit, widest
+            // first; skip widths the target doesn't fit in.
+            let mut substituted = self.operands.clone();
+            for digits in [8usize, 6, 4, 2] {
+                if digits < 8 && (target >> (digits * 4)) != 0 {
+                    continue;
+                }
+                let hex = format!("${target:0digits$X}");
+                let replaced = self.operands.replace(&hex, name);
+                if replaced != self.operands {
+                    substituted = replaced;
+                    break;
+                }
+            }
             if self.operands.is_empty() {
                 return self.mnemonic.to_string();
             }
@@ -56,11 +63,13 @@ impl fmt::Display for DisassembledInstruction {
 /// and returns a structured disassembly result.
 ///
 /// The `bytes` slice must contain enough data to decode one instruction.
-/// A minimum of 6 bytes is sufficient for all supported CPUs.
+/// A minimum of 10 bytes is sufficient for all supported CPUs.
 /// If the slice is too short, the disassembler returns a partial result
-/// with the mnemonic set to `"???"` and `byte_len` set to 1.
+/// with the mnemonic set to `"???"` and `byte_len` set to 1 (one opcode
+/// word, 2, on the M68000).
 pub trait Disassemble {
     /// Disassemble one instruction from the given byte slice.
-    /// `addr` is the address of the first byte (needed for relative branch targets).
-    fn disassemble(addr: u16, bytes: &[u8]) -> DisassembledInstruction;
+    /// `addr` is the address of the first byte (needed for relative
+    /// branch targets); 16-bit CPUs decode it modulo their 64 KB space.
+    fn disassemble(addr: u32, bytes: &[u8]) -> DisassembledInstruction;
 }

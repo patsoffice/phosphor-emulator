@@ -497,7 +497,7 @@ impl DebugCpu for M68000 {
             mnemonic: "DC.W",
             operands: format!("${opcode:04X}"),
             byte_len: 2,
-            bytes: [(opcode >> 8) as u8, opcode as u8, 0, 0, 0, 0],
+            bytes: [(opcode >> 8) as u8, opcode as u8, 0, 0, 0, 0, 0, 0, 0, 0],
             target_addr: None,
         }
     }

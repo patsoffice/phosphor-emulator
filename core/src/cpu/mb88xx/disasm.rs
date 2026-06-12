@@ -11,20 +11,21 @@ fn make_inst(
     raw: &[u8],
     target_addr: Option<u16>,
 ) -> DisassembledInstruction {
-    let mut bytes = [0u8; 6];
-    let n = (byte_len as usize).min(raw.len()).min(6);
+    let mut bytes = [0u8; 10];
+    let n = (byte_len as usize).min(raw.len()).min(10);
     bytes[..n].copy_from_slice(&raw[..n]);
     DisassembledInstruction {
         mnemonic,
         operands,
         byte_len,
         bytes,
-        target_addr,
+        target_addr: target_addr.map(u32::from),
     }
 }
 
 impl Disassemble for Mb88xx {
-    fn disassemble(addr: u16, bytes: &[u8]) -> DisassembledInstruction {
+    fn disassemble(addr: u32, bytes: &[u8]) -> DisassembledInstruction {
+        let addr = addr as u16;
         if bytes.is_empty() {
             return make_inst("???", String::new(), 1, &[0], None);
         }

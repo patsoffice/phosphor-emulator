@@ -3,7 +3,7 @@
 use phosphor_core::cpu::disasm::{Disassemble, DisassembledInstruction};
 use phosphor_core::cpu::z80::Z80;
 
-fn dis(addr: u16, bytes: &[u8]) -> DisassembledInstruction {
+fn dis(addr: u32, bytes: &[u8]) -> DisassembledInstruction {
     Z80::disassemble(addr, bytes)
 }
 
