@@ -17,7 +17,11 @@
 //! effective-address mask is CPU-variant behavior and is **not** applied
 //! here, so 68020+ class machines inherit correct semantics.
 
-use crate::core::memory_map::{AccessKind, RegionId};
+use crate::core::bus::BusMaster;
+use crate::core::memory_map::{AccessKind, DebugRead, DebugWrite, MemoryBacking, RegionId};
+use crate::core::watchpoint::{
+    DebugAccessSource, WatchpointHit, WatchpointKind, WatchpointPhase, Watchpoints,
+};
 
 /// Where accesses to an [`AddressRegion32`] land.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -280,6 +284,428 @@ fn range_end(start: u32, length: u32) -> u32 {
         .unwrap_or_else(|| panic!("range at {start:#010X} (length {length:#X}) overflows u32"))
 }
 
+/// Composed address-space container for a 32-bit address space.
+///
+/// Composes sparse range decode ([`AddressMap32`]), backing storage
+/// ([`MemoryBacking`]), and watchpoint state ([`Watchpoints`]) — the
+/// 32-bit sibling of [`AddressSpace16`](crate::core::memory_map::AddressSpace16),
+/// built for 68000-class machines whose `Bus` implementations dispatch on
+/// `u32` addresses.
+///
+/// The CPU core never sees this type: `M68000` talks only to the `Bus`
+/// trait. Machines and test harnesses implement that bus on top of this
+/// container.
+pub struct AddressSpace32 {
+    map: AddressMap32,
+    backing: MemoryBacking,
+
+    /// Exact-address watchpoint set and hit queue. There is no page table
+    /// to carry per-page flags, so the hot-path zero-cost check is
+    /// `watchpoints.is_empty()`.
+    watchpoints: Watchpoints,
+
+    /// Machine cycle latched by the board before CPU execution, used for
+    /// hit attribution (see `AddressSpace16::latch_access_context`).
+    debug_cycle: u64,
+    /// Address of the instruction currently executing on the owning CPU
+    /// (latched at instruction boundaries), when known.
+    debug_pc: Option<u32>,
+}
+
+impl AddressSpace32 {
+    /// Create a new address space with everything unmapped.
+    pub fn new() -> Self {
+        Self {
+            map: AddressMap32::new(),
+            backing: MemoryBacking::new(),
+            watchpoints: Watchpoints::new(),
+            debug_cycle: 0,
+            debug_pc: None,
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Builder methods (called at machine init time)
+    // -----------------------------------------------------------------------
+
+    /// Map a contiguous address range to a region.
+    ///
+    /// Adds the range to the decode map and allocates backing memory for
+    /// non-I/O access kinds. Panics on overlap with an existing range.
+    pub fn region(
+        &mut self,
+        id: impl Into<RegionId>,
+        name: &'static str,
+        start: u32,
+        length: u32,
+        access: AccessKind,
+    ) -> &mut Self {
+        let id = id.into();
+        self.map.region(id, name, start, length, access);
+        if matches!(
+            access,
+            AccessKind::ReadWrite | AccessKind::ReadOnly | AccessKind::WriteOnly
+        ) {
+            self.backing.allocate(id, length);
+        }
+        self
+    }
+
+    /// Allocate backing memory for a region with no address mapping.
+    ///
+    /// Used for bank overlays: the inactive bank's bytes exist (loadable
+    /// via [`load_region`](Self::load_region)) but no address decodes to
+    /// them until [`remap_range`](Self::remap_range) points a window at
+    /// the region.
+    pub fn backing_region(&mut self, id: impl Into<RegionId>, length: u32) -> &mut Self {
+        self.backing.allocate(id, length);
+        self
+    }
+
+    /// Mirror an address range (see [`AddressMap32::alias`]).
+    pub fn alias(
+        &mut self,
+        name: &'static str,
+        mirror_start: u32,
+        source_start: u32,
+        length: u32,
+    ) -> &mut Self {
+        self.map.alias(name, mirror_start, source_start, length);
+        self
+    }
+
+    /// Retarget an existing range for bank switching (see
+    /// [`AddressMap32::remap_range`]).
+    pub fn remap_range(&mut self, start: u32, length: u32, target: RegionTarget) {
+        self.map.remap_range(start, length, target);
+    }
+
+    // -----------------------------------------------------------------------
+    // Backing memory access
+    // -----------------------------------------------------------------------
+
+    /// Side-effect-free read from backing memory. Returns `None` for I/O
+    /// and unmapped addresses (which have no backing store).
+    ///
+    /// Convenience over [`debug_peek`](Self::debug_peek) for callers that
+    /// don't need to distinguish I/O from unmapped.
+    #[inline]
+    pub fn debug_read(&self, addr: u32) -> Option<u8> {
+        match self.debug_peek(addr) {
+            DebugRead::Backed { value, .. } => Some(value as u8),
+            DebugRead::Io | DebugRead::Unmapped => None,
+        }
+    }
+
+    /// Side-effect-free read with full address semantics.
+    ///
+    /// Follows aliases and bank remaps, then distinguishes backed memory
+    /// (value returned) from mapped I/O and unmapped addresses so a memory
+    /// viewer can label cells instead of showing a fake bus value.
+    pub fn debug_peek(&self, addr: u32) -> DebugRead {
+        let Some((region, resolved)) = self.map.resolve(addr) else {
+            return DebugRead::Unmapped;
+        };
+        match region.target {
+            RegionTarget::Backing {
+                region_id,
+                base_offset,
+            } => {
+                let offset = base_offset + (resolved - region.start);
+                match self.backing.read_region_offset(region_id, offset as usize) {
+                    Some(value) => DebugRead::Backed {
+                        value: value as u32,
+                        width: 1,
+                        region_id,
+                    },
+                    None => DebugRead::Unmapped,
+                }
+            }
+            RegionTarget::Io => DebugRead::Io,
+            RegionTarget::Unmapped => DebugRead::Unmapped,
+            // resolve() never returns an alias region.
+            RegionTarget::Alias { .. } => DebugRead::Unmapped,
+        }
+    }
+
+    /// Side-effect-free write to backing memory.
+    ///
+    /// Debug pokes may modify ROM backing (useful for patching while
+    /// debugging); the returned `access` lets the UI distinguish "patched
+    /// Program ROM" from "edited RAM". I/O and unmapped addresses are left
+    /// untouched.
+    pub fn debug_poke(&mut self, addr: u32, data: u8) -> DebugWrite {
+        let Some((region, resolved)) = self.map.resolve(addr) else {
+            return DebugWrite::UnmappedIgnored;
+        };
+        match region.target {
+            RegionTarget::Backing {
+                region_id,
+                base_offset,
+            } => {
+                let access = region.access;
+                let offset = (base_offset + (resolved - region.start)) as usize;
+                let Some(old) = self.backing.read_region_offset(region_id, offset) else {
+                    return DebugWrite::UnmappedIgnored;
+                };
+                self.backing.write_region_offset(region_id, offset, data);
+                DebugWrite::Backed {
+                    old: old as u32,
+                    new: data as u32,
+                    width: 1,
+                    region_id,
+                    access,
+                }
+            }
+            RegionTarget::Io => DebugWrite::IoIgnored,
+            RegionTarget::Unmapped | RegionTarget::Alias { .. } => DebugWrite::UnmappedIgnored,
+        }
+    }
+
+    /// Get a read-only slice of a region's backing store.
+    ///
+    /// Panics if the region has no backing (I/O or unregistered).
+    pub fn region_data(&self, region_id: impl Into<RegionId>) -> &[u8] {
+        self.backing.region_data(region_id)
+    }
+
+    /// Get a mutable slice of a region's backing store.
+    ///
+    /// Panics if the region has no backing (I/O or unregistered).
+    pub fn region_data_mut(&mut self, region_id: impl Into<RegionId>) -> &mut [u8] {
+        self.backing.region_data_mut(region_id)
+    }
+
+    /// Bulk-copy data into a region's backing store (e.g., ROM loading).
+    ///
+    /// `data` must exactly match the region's length.
+    pub fn load_region(&mut self, region_id: impl Into<RegionId>, data: &[u8]) {
+        self.backing.load_region(region_id, data);
+    }
+
+    /// Copy data into a region's backing store at the given byte offset.
+    pub fn load_region_at(&mut self, region_id: impl Into<RegionId>, offset: usize, data: &[u8]) {
+        self.backing.load_region_at(region_id, offset, data);
+    }
+
+    // -----------------------------------------------------------------------
+    // Watchpoint methods
+    // -----------------------------------------------------------------------
+
+    /// Latch the owning CPU's execution context for watchpoint-hit
+    /// attribution (see `AddressSpace16::latch_access_context`).
+    ///
+    /// `pc` should be `Some` at instruction boundaries and `None`
+    /// mid-instruction (the previously latched address is retained).
+    #[inline]
+    pub fn latch_access_context(&mut self, cycle: u64, pc: Option<u32>) {
+        self.debug_cycle = cycle;
+        if pc.is_some() {
+            self.debug_pc = pc;
+        }
+    }
+
+    /// The latched instruction PC of the owning CPU, when known.
+    #[inline]
+    pub fn latched_pc(&self) -> Option<u32> {
+        self.debug_pc
+    }
+
+    /// Check a read access against this space's watchpoints. Returns true
+    /// if the exact address is read-watched, queueing a hit.
+    ///
+    /// `value` carries the low `width * 8` bits of a byte/word/long
+    /// access. Call after the value is read; the hit records
+    /// [`WatchpointPhase::After`]. Zero cost while no watchpoints are set.
+    #[inline(always)]
+    pub fn watch_read(
+        &mut self,
+        cpu_index: usize,
+        master: BusMaster,
+        addr: u32,
+        value: u32,
+        width: u8,
+    ) -> bool {
+        self.watch_read_with(cpu_index, master, addr, value, width, None)
+    }
+
+    /// [`watch_read`](Self::watch_read) with the name of the device that
+    /// owns `addr` (for boards that can attribute I/O addresses).
+    #[inline(always)]
+    pub fn watch_read_with(
+        &mut self,
+        cpu_index: usize,
+        master: BusMaster,
+        addr: u32,
+        value: u32,
+        width: u8,
+        device: Option<&'static str>,
+    ) -> bool {
+        if self.watchpoints.is_empty() {
+            return false;
+        }
+        if self
+            .watchpoints
+            .matches(cpu_index, addr, WatchpointKind::Read)
+        {
+            let hit = self.make_hit(
+                cpu_index,
+                master,
+                addr,
+                WatchpointKind::Read,
+                value,
+                width,
+                device,
+            );
+            self.watchpoints.push_hit(hit);
+            return true;
+        }
+        false
+    }
+
+    /// Check a write access against this space's watchpoints. Returns true
+    /// if the exact address is write-watched, queueing a hit.
+    ///
+    /// Call before applying the write's side effect; the hit records
+    /// [`WatchpointPhase::Before`]. Zero cost while no watchpoints are set.
+    #[inline(always)]
+    pub fn watch_write(
+        &mut self,
+        cpu_index: usize,
+        master: BusMaster,
+        addr: u32,
+        value: u32,
+        width: u8,
+    ) -> bool {
+        self.watch_write_with(cpu_index, master, addr, value, width, None)
+    }
+
+    /// [`watch_write`](Self::watch_write) with the name of the device that
+    /// owns `addr` (for boards that can attribute I/O addresses).
+    #[inline(always)]
+    pub fn watch_write_with(
+        &mut self,
+        cpu_index: usize,
+        master: BusMaster,
+        addr: u32,
+        value: u32,
+        width: u8,
+        device: Option<&'static str>,
+    ) -> bool {
+        if self.watchpoints.is_empty() {
+            return false;
+        }
+        if self
+            .watchpoints
+            .matches(cpu_index, addr, WatchpointKind::Write)
+        {
+            let hit = self.make_hit(
+                cpu_index,
+                master,
+                addr,
+                WatchpointKind::Write,
+                value,
+                width,
+                device,
+            );
+            self.watchpoints.push_hit(hit);
+            return true;
+        }
+        false
+    }
+
+    /// Build a canonical hit for an access through this space (see
+    /// `AddressSpace16::make_hit` for the attribution rules).
+    #[allow(clippy::too_many_arguments)]
+    fn make_hit(
+        &self,
+        cpu_index: usize,
+        master: BusMaster,
+        addr: u32,
+        kind: WatchpointKind,
+        value: u32,
+        width: u8,
+        device: Option<&'static str>,
+    ) -> WatchpointHit {
+        WatchpointHit {
+            cpu_index,
+            source: DebugAccessSource::from(master),
+            cycle: self.debug_cycle,
+            pc: match master {
+                BusMaster::Cpu(i) if i == cpu_index => self.debug_pc,
+                _ => None,
+            },
+            addr,
+            kind,
+            phase: match kind {
+                WatchpointKind::Read => WatchpointPhase::After,
+                WatchpointKind::Write => WatchpointPhase::Before,
+            },
+            value,
+            width,
+            region: self.map.region_at(addr).map(|r| r.name),
+            device,
+        }
+    }
+
+    /// Consume the oldest queued watchpoint hit (polled by debugger after
+    /// each tick). Hits queue in FIFO order; none are lost between polls.
+    #[inline]
+    pub fn take_hit(&mut self) -> Option<WatchpointHit> {
+        self.watchpoints.take_hit()
+    }
+
+    /// True if any watchpoint is set.
+    #[inline]
+    pub fn has_any_watchpoints(&self) -> bool {
+        !self.watchpoints.is_empty()
+    }
+
+    /// Set a watchpoint on the exact address `addr` for the CPU that owns
+    /// this address space.
+    pub fn set_watchpoint(&mut self, cpu_index: usize, addr: u32, kind: WatchpointKind) {
+        self.watchpoints.set(cpu_index, addr, kind);
+    }
+
+    /// Clear a watchpoint on the exact address `addr`.
+    pub fn clear_watchpoint(&mut self, cpu_index: usize, addr: u32, kind: WatchpointKind) {
+        self.watchpoints.clear(cpu_index, addr, kind);
+    }
+
+    /// Clear all watchpoints and drop any queued hits.
+    pub fn clear_all_watchpoints(&mut self) {
+        self.watchpoints.clear_all();
+    }
+
+    // -----------------------------------------------------------------------
+    // Introspection (for debugger / memory viewer)
+    // -----------------------------------------------------------------------
+
+    /// Get all mapped ranges, sorted by start address.
+    pub fn regions(&self) -> &[AddressRegion32] {
+        self.map.regions()
+    }
+
+    /// Get the region containing `addr`, if mapped. Alias regions are
+    /// returned as themselves so the debugger can label mirrors.
+    pub fn region_at(&self, addr: u32) -> Option<&AddressRegion32> {
+        self.map.region_at(addr)
+    }
+
+    /// Resolve `addr` to a backing location, following aliases (see
+    /// [`AddressMap32::resolved_offset`]).
+    #[inline]
+    pub fn resolved_offset(&self, addr: u32) -> Option<(RegionId, u32)> {
+        self.map.resolved_offset(addr)
+    }
+}
+
+impl Default for AddressSpace32 {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -525,5 +951,307 @@ mod address_map32_tests {
     fn range_past_end_of_address_space_is_rejected() {
         let mut map = AddressMap32::new();
         map.region(ROM, "ROM", 0xFFFF_0000, 0x2_0000, AccessKind::ReadOnly);
+    }
+}
+
+/// Composed [`AddressSpace32`] tests (decode + backing + watchpoints).
+#[cfg(test)]
+mod address_space32_tests {
+    use super::*;
+
+    const ROM: RegionId = 1;
+    const RAM: RegionId = 2;
+    const IO: RegionId = 3;
+    const BANK_B: RegionId = 4;
+
+    /// A small 68000-style map: ROM at 0, RAM and I/O up high.
+    fn test_space() -> AddressSpace32 {
+        let mut space = AddressSpace32::new();
+        space
+            .region(
+                ROM,
+                "Program ROM",
+                0x0000_0000,
+                0x4_0000,
+                AccessKind::ReadOnly,
+            )
+            .region(IO, "I/O", 0x00A0_0000, 0x1000, AccessKind::Io)
+            .region(
+                RAM,
+                "Work RAM",
+                0x00FF_0000,
+                0x1_0000,
+                AccessKind::ReadWrite,
+            );
+        space
+    }
+
+    #[test]
+    fn region_allocates_backing_for_backed_kinds() {
+        let space = test_space();
+        assert_eq!(space.region_data(ROM).len(), 0x4_0000);
+        assert_eq!(space.region_data(RAM).len(), 0x1_0000);
+        assert!(space.region_data(RAM).iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn debug_peek_distinguishes_backed_io_unmapped() {
+        let mut space = test_space();
+        space.region_data_mut(RAM)[0x42] = 0xAB;
+
+        assert_eq!(
+            space.debug_peek(0x00FF_0042),
+            DebugRead::Backed {
+                value: 0xAB,
+                width: 1,
+                region_id: RAM
+            }
+        );
+        assert_eq!(space.debug_peek(0x00A0_0000), DebugRead::Io);
+        assert_eq!(space.debug_peek(0x0050_0000), DebugRead::Unmapped);
+    }
+
+    #[test]
+    fn debug_read_convenience() {
+        let mut space = test_space();
+        space.region_data_mut(ROM)[0x100] = 0xCD;
+
+        assert_eq!(space.debug_read(0x0000_0100), Some(0xCD));
+        assert_eq!(space.debug_read(0x00A0_0000), None);
+        assert_eq!(space.debug_read(0x0050_0000), None);
+    }
+
+    #[test]
+    fn debug_poke_edits_ram() {
+        let mut space = test_space();
+        space.region_data_mut(RAM)[0x42] = 0x11;
+
+        let result = space.debug_poke(0x00FF_0042, 0x99);
+        assert_eq!(
+            result,
+            DebugWrite::Backed {
+                old: 0x11,
+                new: 0x99,
+                width: 1,
+                region_id: RAM,
+                access: AccessKind::ReadWrite,
+            }
+        );
+        assert_eq!(space.debug_read(0x00FF_0042), Some(0x99));
+    }
+
+    #[test]
+    fn debug_poke_patches_rom() {
+        let mut space = test_space();
+
+        // ROM debug patching is allowed; `access` flags it for the UI.
+        let result = space.debug_poke(0x0000_0010, 0x4E);
+        assert_eq!(
+            result,
+            DebugWrite::Backed {
+                old: 0x00,
+                new: 0x4E,
+                width: 1,
+                region_id: ROM,
+                access: AccessKind::ReadOnly,
+            }
+        );
+        assert_eq!(space.debug_read(0x0000_0010), Some(0x4E));
+    }
+
+    #[test]
+    fn debug_poke_ignores_io_and_unmapped() {
+        let mut space = test_space();
+        assert_eq!(space.debug_poke(0x00A0_0000, 0xFF), DebugWrite::IoIgnored);
+        assert_eq!(
+            space.debug_poke(0x0050_0000, 0xFF),
+            DebugWrite::UnmappedIgnored
+        );
+    }
+
+    #[test]
+    fn alias_reads_same_backing() {
+        let mut space = test_space();
+        space.alias("RAM Mirror", 0x00CF_0000, 0x00FF_0000, 0x1_0000);
+        space.region_data_mut(RAM)[0x42] = 0xEE;
+
+        assert_eq!(space.debug_read(0x00CF_0042), Some(0xEE));
+        space.debug_poke(0x00CF_0042, 0x55);
+        assert_eq!(space.debug_read(0x00FF_0042), Some(0x55));
+    }
+
+    #[test]
+    fn remap_range_switches_backing() {
+        let mut space = test_space();
+        space.backing_region(BANK_B, 0x4_0000);
+        space.region_data_mut(ROM)[0x42] = 0xAA;
+        space.region_data_mut(BANK_B)[0x42] = 0xBB;
+
+        assert_eq!(space.debug_read(0x0000_0042), Some(0xAA));
+
+        // Bank B into the ROM window…
+        space.remap_range(
+            0x0000_0000,
+            0x4_0000,
+            RegionTarget::Backing {
+                region_id: BANK_B,
+                base_offset: 0,
+            },
+        );
+        assert_eq!(space.debug_read(0x0000_0042), Some(0xBB));
+
+        // …and back.
+        space.remap_range(
+            0x0000_0000,
+            0x4_0000,
+            RegionTarget::Backing {
+                region_id: ROM,
+                base_offset: 0,
+            },
+        );
+        assert_eq!(space.debug_read(0x0000_0042), Some(0xAA));
+    }
+
+    #[test]
+    fn load_region_copies_rom_data() {
+        let mut space = test_space();
+        let rom: Vec<u8> = (0..0x4_0000).map(|i| (i & 0xFF) as u8).collect();
+        space.load_region(ROM, &rom);
+
+        assert_eq!(space.debug_read(0x0000_0000), Some(0x00));
+        assert_eq!(space.debug_read(0x0000_00FF), Some(0xFF));
+
+        space.load_region_at(RAM, 0x100, &[0xAA, 0xBB]);
+        assert_eq!(space.debug_read(0x00FF_0100), Some(0xAA));
+        assert_eq!(space.debug_read(0x00FF_0101), Some(0xBB));
+    }
+
+    #[test]
+    fn no_implicit_24_bit_masking() {
+        let mut space = AddressSpace32::new();
+        space.region(RAM, "Low RAM", 0x0000_0000, 0x1000, AccessKind::ReadWrite);
+        space.region_data_mut(RAM)[0] = 0x77;
+
+        // A 24-bit-masked bus would alias this to address 0.
+        assert_eq!(space.debug_peek(0x0100_0000), DebugRead::Unmapped);
+        assert_eq!(space.debug_read(0x0000_0000), Some(0x77));
+    }
+
+    // -----------------------------------------------------------------------
+    // Watchpoint tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn no_watchpoints_by_default() {
+        let mut space = test_space();
+        assert!(!space.has_any_watchpoints());
+        assert!(!space.watch_read(0, BusMaster::Cpu(0), 0x00FF_0000, 0x42, 1));
+        assert!(!space.watch_write(0, BusMaster::Cpu(0), 0x00FF_0000, 0x42, 1));
+        assert!(space.take_hit().is_none());
+    }
+
+    #[test]
+    fn read_watchpoint_fires_exact_address() {
+        let mut space = test_space();
+        space.set_watchpoint(0, 0x00FF_1000, WatchpointKind::Read);
+        assert!(space.has_any_watchpoints());
+
+        assert!(!space.watch_read(0, BusMaster::Cpu(0), 0x00FF_0FFF, 0x00, 1));
+        assert!(space.watch_read(0, BusMaster::Cpu(0), 0x00FF_1000, 0xAB, 1));
+
+        let hit = space.take_hit().unwrap();
+        assert_eq!(hit.addr, 0x00FF_1000);
+        assert_eq!(hit.kind, WatchpointKind::Read);
+        assert_eq!(hit.phase, WatchpointPhase::After);
+        assert_eq!(hit.value, 0xAB);
+        assert_eq!(hit.region, Some("Work RAM"));
+    }
+
+    #[test]
+    fn write_watchpoint_records_word_width() {
+        let mut space = test_space();
+        space.set_watchpoint(0, 0x00FF_2000, WatchpointKind::Write);
+
+        // 68000 word write: value and width recorded as a unit.
+        assert!(space.watch_write(0, BusMaster::Cpu(0), 0x00FF_2000, 0xBEEF, 2));
+        let hit = space.take_hit().unwrap();
+        assert_eq!(hit.kind, WatchpointKind::Write);
+        assert_eq!(hit.phase, WatchpointPhase::Before);
+        assert_eq!(hit.value, 0xBEEF);
+        assert_eq!(hit.width, 2);
+    }
+
+    #[test]
+    fn hit_records_latched_cycle_and_pc() {
+        let mut space = test_space();
+        space.set_watchpoint(0, 0x00FF_4000, WatchpointKind::Write);
+
+        space.latch_access_context(123_456, Some(0x0000_1BCC));
+        space.latch_access_context(123_457, None); // mid-instruction: PC retained
+        assert_eq!(space.latched_pc(), Some(0x0000_1BCC));
+
+        assert!(space.watch_write(0, BusMaster::Cpu(0), 0x00FF_4000, 0x12, 1));
+        let hit = space.take_hit().unwrap();
+        assert_eq!(hit.cycle, 123_457);
+        assert_eq!(hit.pc, Some(0x0000_1BCC));
+
+        // DMA access: latched PC belongs to the owning CPU, not the master.
+        assert!(space.watch_write(0, BusMaster::Dma, 0x00FF_4000, 0x12, 1));
+        let hit = space.take_hit().unwrap();
+        assert_eq!(hit.pc, None);
+        assert_eq!(hit.source, DebugAccessSource::Dma);
+    }
+
+    #[test]
+    fn hit_records_device_name() {
+        let mut space = test_space();
+        space.set_watchpoint(0, 0x00A0_0004, WatchpointKind::Write);
+
+        assert!(space.watch_write_with(0, BusMaster::Cpu(0), 0x00A0_0004, 0x01, 1, Some("Duart")));
+        let hit = space.take_hit().unwrap();
+        assert_eq!(hit.device, Some("Duart"));
+        assert_eq!(hit.region, Some("I/O"));
+    }
+
+    #[test]
+    fn multiple_hits_queue_in_order() {
+        let mut space = test_space();
+        space.set_watchpoint(0, 0x00FF_1000, WatchpointKind::Read);
+        space.set_watchpoint(0, 0x00FF_1002, WatchpointKind::Read);
+
+        space.watch_read(0, BusMaster::Cpu(0), 0x00FF_1000, 0xAA, 1);
+        space.watch_read(0, BusMaster::Cpu(0), 0x00FF_1002, 0xBB, 1);
+
+        assert_eq!(space.take_hit().unwrap().value, 0xAA);
+        assert_eq!(space.take_hit().unwrap().value, 0xBB);
+        assert!(space.take_hit().is_none());
+    }
+
+    #[test]
+    fn clear_watchpoints() {
+        let mut space = test_space();
+        space.set_watchpoint(0, 0x00FF_1000, WatchpointKind::Read);
+        space.set_watchpoint(0, 0x00FF_2000, WatchpointKind::Write);
+
+        space.clear_watchpoint(0, 0x00FF_1000, WatchpointKind::Read);
+        assert!(!space.watch_read(0, BusMaster::Cpu(0), 0x00FF_1000, 0x00, 1));
+        assert!(space.has_any_watchpoints());
+
+        space.clear_all_watchpoints();
+        assert!(!space.has_any_watchpoints());
+        assert!(!space.watch_write(0, BusMaster::Cpu(0), 0x00FF_2000, 0x00, 1));
+    }
+
+    // -----------------------------------------------------------------------
+    // Introspection tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn introspection_delegates_to_map() {
+        let space = test_space();
+        assert_eq!(space.regions().len(), 3);
+        assert_eq!(space.region_at(0x00FF_0042).unwrap().name, "Work RAM");
+        assert_eq!(space.resolved_offset(0x00FF_0042), Some((RAM, 0x42)));
+        assert!(space.region_at(0x0050_0000).is_none());
     }
 }
