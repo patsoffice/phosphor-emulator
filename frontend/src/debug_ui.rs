@@ -6,6 +6,19 @@ use phosphor_core::core::machine::FrontendMachine;
 use phosphor_core::core::memory_map::{DebugRead, WatchpointHit, WatchpointKind};
 use phosphor_core::core::watchpoint::{DebugAccessSource, WatchpointPhase};
 
+/// Format an address at its natural width: 4 hex digits within the 16-bit
+/// range, 6 within 24-bit (M68000), 8 beyond. Keeps 16-bit machines'
+/// displays unchanged while letting wide addresses show in full.
+fn fmt_addr(addr: u32) -> String {
+    if addr <= 0xFFFF {
+        format!("{addr:04X}")
+    } else if addr <= 0x00FF_FFFF {
+        format!("{addr:06X}")
+    } else {
+        format!("{addr:08X}")
+    }
+}
+
 /// Execution modes for the debug interface.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum RunMode {
@@ -66,7 +79,7 @@ pub struct DebugState {
 
     // Breakpoints
     /// PC breakpoints per CPU (index = cpu_index).
-    pub breakpoints: Vec<HashSet<u16>>,
+    pub breakpoints: Vec<HashSet<u32>>,
     /// Hex address input buffer for adding PC breakpoints.
     pub breakpoint_input: String,
     /// Break when cycle_count reaches this value.
@@ -76,7 +89,7 @@ pub struct DebugState {
 
     // Watchpoints
     /// Active memory watchpoints: (cpu_index, address, kind).
-    pub watchpoints: Vec<(usize, u16, WatchpointKind)>,
+    pub watchpoints: Vec<(usize, u32, WatchpointKind)>,
     /// Hex address input buffer for adding watchpoints.
     pub watchpoint_input: String,
     /// Whether the next watchpoint should watch reads.
@@ -228,7 +241,7 @@ pub fn execute_frame(machine: &mut dyn FrontendMachine, state: &mut DebugState) 
         state.watchpoints_dirty = false;
         machine.clear_all_watchpoints();
         for &(cpu_idx, addr, kind) in &state.watchpoints {
-            machine.set_watchpoint(cpu_idx, u32::from(addr), kind);
+            machine.set_watchpoint(cpu_idx, addr, kind);
         }
     }
 
@@ -300,10 +313,7 @@ pub fn execute_frame(machine: &mut dyn FrontendMachine, state: &mut DebugState) 
                             for (i, (_name, cpu)) in cpus.iter().enumerate() {
                                 if (boundaries >> i) & 1 != 0
                                     && let Some(bp_set) = state.breakpoints.get(i)
-                                    // Breakpoint set is still u16 (widened with the
-                                    // 32-bit UI pass); PCs above 0xFFFF never match.
-                                    && u16::try_from(cpu.debug_pc())
-                                        .is_ok_and(|pc| bp_set.contains(&pc))
+                                    && bp_set.contains(&cpu.debug_pc())
                                 {
                                     state.refresh(bus);
                                     state.run_mode = RunMode::Paused;
@@ -674,7 +684,7 @@ fn draw_breakpoints_panel(ui: &mut egui::Ui, state: &mut DebugState) {
                 let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                 if (ui.button("Add").clicked() || enter)
                     && let Ok(addr) =
-                        u16::from_str_radix(state.breakpoint_input.trim_start_matches('$'), 16)
+                        u32::from_str_radix(state.breakpoint_input.trim_start_matches('$'), 16)
                 {
                     if let Some(bp_set) = state.breakpoints.get_mut(state.step_cpu) {
                         bp_set.insert(addr);
@@ -685,12 +695,12 @@ fn draw_breakpoints_panel(ui: &mut egui::Ui, state: &mut DebugState) {
 
             // List active PC breakpoints (sorted)
             if let Some(bp_set) = state.breakpoints.get(state.step_cpu) {
-                let mut sorted: Vec<u16> = bp_set.iter().copied().collect();
+                let mut sorted: Vec<u32> = bp_set.iter().copied().collect();
                 sorted.sort();
                 let mut to_remove = None;
                 for addr in &sorted {
                     ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new(format!("${:04X}", addr)).monospace());
+                        ui.label(egui::RichText::new(format!("${}", fmt_addr(*addr))).monospace());
                         if ui.small_button("\u{2715}").clicked() {
                             to_remove = Some(*addr);
                         }
@@ -756,7 +766,7 @@ fn draw_watchpoints_panel(ui: &mut egui::Ui, state: &mut DebugState) {
                 let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                 if (ui.button("Add").clicked() || enter)
                     && let Ok(addr) =
-                        u16::from_str_radix(state.watchpoint_input.trim_start_matches('$'), 16)
+                        u32::from_str_radix(state.watchpoint_input.trim_start_matches('$'), 16)
                 {
                     let kinds: Vec<WatchpointKind> = [
                         state.watchpoint_read.then_some(WatchpointKind::Read),
@@ -790,7 +800,7 @@ fn draw_watchpoints_panel(ui: &mut egui::Ui, state: &mut DebugState) {
                         String::new()
                     };
                     ui.label(
-                        egui::RichText::new(format!("{cpu_label}${addr:04X} {kind_str}"))
+                        egui::RichText::new(format!("{cpu_label}${} {kind_str}", fmt_addr(addr)))
                             .monospace(),
                     );
                     if ui.small_button("\u{2715}").clicked() {
@@ -827,8 +837,8 @@ fn draw_watchpoints_panel(ui: &mut egui::Ui, state: &mut DebugState) {
                 ui.add_space(4.0);
                 ui.label(
                     egui::RichText::new(format!(
-                        "{source} {kind_str} ${:04X} = ${value} ({phase_str})",
-                        hit.addr
+                        "{source} {kind_str} ${} = ${value} ({phase_str})",
+                        fmt_addr(hit.addr)
                     ))
                     .monospace()
                     .color(hit_color),
@@ -846,7 +856,7 @@ fn draw_watchpoints_panel(ui: &mut egui::Ui, state: &mut DebugState) {
 
                 let pc_str = hit
                     .pc
-                    .map(|pc| format!("  PC ${pc:04X}"))
+                    .map(|pc| format!("  PC ${}", fmt_addr(pc)))
                     .unwrap_or_default();
                 ui.label(
                     egui::RichText::new(format!("cycle {}{pc_str}", hit.cycle))
@@ -882,7 +892,7 @@ fn format_trace_event(e: &DebugEvent) -> String {
         e.kind.label()
     );
     if let Some(addr) = e.addr {
-        line.push_str(&format!(" ${addr:04X}"));
+        line.push_str(&format!(" ${}", fmt_addr(addr)));
     }
     if let Some(value) = e.value {
         match e.width {
@@ -892,7 +902,7 @@ fn format_trace_event(e: &DebugEvent) -> String {
         }
     }
     if let Some(pc) = e.pc {
-        line.push_str(&format!(" PC ${pc:04X}"));
+        line.push_str(&format!(" PC ${}", fmt_addr(pc)));
     }
     if let Some(location) = e.device.or(e.region) {
         line.push_str(&format!(" {location}"));
@@ -1019,7 +1029,7 @@ fn draw_disassembly_panel(
                 let is_bp = state
                     .breakpoints
                     .get(cpu_idx)
-                    .is_some_and(|bp| bp.contains(addr));
+                    .is_some_and(|bp| bp.contains(&u32::from(*addr)));
 
                 let bp_marker = if is_bp { "\u{25CF} " } else { "  " };
                 let hex_bytes: String = raw_bytes
@@ -1043,10 +1053,11 @@ fn draw_disassembly_panel(
                     .clicked()
                     && let Some(bp_set) = state.breakpoints.get_mut(cpu_idx)
                 {
-                    if bp_set.contains(addr) {
-                        bp_set.remove(addr);
+                    let bp_addr = u32::from(*addr);
+                    if bp_set.contains(&bp_addr) {
+                        bp_set.remove(&bp_addr);
                     } else {
-                        bp_set.insert(*addr);
+                        bp_set.insert(bp_addr);
                     }
                 }
             }
