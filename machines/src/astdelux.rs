@@ -301,6 +301,7 @@ impl Bus for AsteroidsDeluxeSystem {
         let addr = addr & 0x7FFF; // 15-bit address bus
 
         self.board.map.watch_write(0, master, addr, data);
+        self.board.trace_main_write(addr, data);
 
         match self.board.map.page(addr).region_id {
             Region::RAM | Region::VECTOR_RAM => self.board.map.write_backing(addr, data),
@@ -448,7 +449,7 @@ impl Nvram for AsteroidsDeluxeSystem {
 }
 
 impl Profilable for AsteroidsDeluxeSystem {}
-impl phosphor_core::core::debug_trace::DebugTrace for AsteroidsDeluxeSystem {}
+crate::impl_board_debug_trace!(AsteroidsDeluxeSystem, board);
 
 // ---------------------------------------------------------------------------
 // Machine registry

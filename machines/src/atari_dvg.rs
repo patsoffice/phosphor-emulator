@@ -1,10 +1,12 @@
+use phosphor_core::core::debug_trace::{DebugEvent, DebugEventKind, DebugTraceBuffer};
 use phosphor_core::core::machine::Renderable;
 use phosphor_core::core::memory_map::MemoryMap;
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
+use phosphor_core::core::watchpoint::DebugAccessSource;
 use phosphor_core::core::{Bus, BusMaster, TimingConfig};
 use phosphor_core::cpu::m6502::M6502;
 use phosphor_core::device::dvg::{Dvg, VectorLine};
-use phosphor_macros::{BusDebug, MemoryRegion};
+use phosphor_macros::{BusDebug, DebugTrace, MemoryRegion};
 
 // ---------------------------------------------------------------------------
 // Memory regions (shared by Asteroids, Asteroids Deluxe, Lunar Lander)
@@ -50,7 +52,7 @@ pub const NMI_PERIOD_CYCLES: u64 = TIMING.cpu_clock_hz / 250;
 ///
 /// Each game provides its own memory map, I/O decode, and ROM definitions
 /// via a thin wrapper struct that owns this board and implements `Bus`.
-#[derive(BusDebug)]
+#[derive(BusDebug, DebugTrace)]
 pub struct AtariDvgBoard {
     #[debug_cpu("M6502")]
     pub(crate) cpu: M6502,
@@ -79,6 +81,10 @@ pub struct AtariDvgBoard {
     //   Lunar Lander:     offset 0x0800, size 0x1800 (6 KB)
     vrom_dvg_offset: usize,
     vrom_size: usize,
+
+    // Debug event ring (observer state — never saved in save states)
+    #[debug_events]
+    pub(crate) debug_trace: DebugTraceBuffer,
 }
 
 impl AtariDvgBoard {
@@ -95,6 +101,7 @@ impl AtariDvgBoard {
             display_list: Vec::with_capacity(512),
             vrom_dvg_offset,
             vrom_size,
+            debug_trace: DebugTraceBuffer::new(),
         }
     }
 
@@ -109,15 +116,27 @@ impl AtariDvgBoard {
         if self.nmi_counter >= NMI_PERIOD_CYCLES {
             self.nmi_counter = 0;
             self.nmi_pending = true;
+            if self.debug_trace.enabled() {
+                self.debug_trace.record(DebugEvent {
+                    cpu_index: Some(0),
+                    detail: Some("250 Hz NMI"),
+                    ..DebugEvent::new(
+                        self.clock,
+                        DebugAccessSource::Unknown,
+                        DebugEventKind::InterruptAssert,
+                    )
+                });
+            }
         }
         // Clear NMI pulse after 16 cycles (long enough for CPU to detect the edge).
         if self.nmi_pending && self.nmi_counter == 16 {
             self.nmi_pending = false;
         }
 
-        // Latch watchpoint attribution context (cycle + instruction PC)
-        // before CPU execution — bus dispatch cannot read CPU state mid-tick.
-        if self.map.has_any_watchpoints() {
+        // Latch debug attribution context (cycle + instruction PC) before
+        // CPU execution — bus dispatch cannot read CPU state mid-tick.
+        // Both watchpoint hits and trace events draw PC from this latch.
+        if self.map.has_any_watchpoints() || self.debug_trace.enabled() {
             let pc = self
                 .cpu
                 .at_instruction_boundary()
@@ -130,12 +149,54 @@ impl AtariDvgBoard {
         self.clock += 1;
     }
 
+    /// Record a main-bus write event from a game wrapper's `Bus::write`.
+    /// Maps the shared DVG-platform I/O layout to event kinds; cheap no-op
+    /// while tracing is disabled.
+    pub(crate) fn trace_main_write(&mut self, addr: u16, data: u8) {
+        if !self.debug_trace.enabled() {
+            return;
+        }
+        let (kind, device, detail) = match addr {
+            // DVG GO is recorded by trigger_dvg itself.
+            0x3000 => return,
+            0x3400..=0x34FF => (DebugEventKind::Watchdog, None, Some("watchdog cleared")),
+            _ => match self.map.page(addr).region_id {
+                Region::IO => (DebugEventKind::IoWrite, None, None),
+                _ => (DebugEventKind::MemoryWrite, None, None),
+            },
+        };
+        self.debug_trace.record(DebugEvent {
+            cpu_index: Some(0),
+            pc: self.map.latched_pc(),
+            addr: Some(addr as u32),
+            value: Some(data as u32),
+            width: 1,
+            region: self.map.region_at(addr).map(|r| r.name),
+            device,
+            detail,
+            ..DebugEvent::new(self.clock, DebugAccessSource::Cpu(0), kind)
+        });
+    }
+
     /// Trigger the DVG: assemble vector memory and run to completion.
     ///
     /// The DVG has a 13-bit (8 KB) byte address space:
     ///   0x0000–0x07FF  Vector RAM (always)
     ///   0x0800–0x1FFF  Vector ROM (game-specific offset and size)
     pub fn trigger_dvg(&mut self) {
+        if self.debug_trace.enabled() {
+            self.debug_trace.record(DebugEvent {
+                cpu_index: Some(0),
+                pc: self.map.latched_pc(),
+                device: Some("DVG"),
+                detail: Some("vector generator start"),
+                ..DebugEvent::new(
+                    self.clock,
+                    DebugAccessSource::Cpu(0),
+                    DebugEventKind::DeviceWrite,
+                )
+            });
+        }
         let mut vmem = vec![0u8; 0x2000]; // 8 KB DVG address space
         vmem[0x0000..0x0800].copy_from_slice(self.map.region_data(Region::VectorRam));
         let vrom = self.map.region_data(Region::VectorRom);
@@ -380,6 +441,86 @@ fn draw_line(buffer: &mut [u8], x0: i32, y0: i32, x1: i32, y1: i32, width: i32, 
         if e2 <= dx {
             err += dx;
             y += sy;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use phosphor_core::core::memory_map::AccessKind;
+
+    mod debug_events {
+        use super::*;
+
+        /// Minimal Asteroids-like map: RAM, I/O (covers the watchdog at
+        /// 0x3400), and the two vector regions trigger_dvg requires.
+        fn board() -> AtariDvgBoard {
+            let mut map = MemoryMap::new();
+            map.region(Region::Ram, "RAM", 0x0000, 0x0400, AccessKind::ReadWrite)
+                .region(Region::Io, "I/O", 0x3000, 0x1000, AccessKind::Io)
+                .region(
+                    Region::VectorRam,
+                    "Vector RAM",
+                    0x4000,
+                    0x0800,
+                    AccessKind::ReadWrite,
+                )
+                .region(
+                    Region::VectorRom,
+                    "Vector ROM",
+                    0x4800,
+                    0x0800,
+                    AccessKind::ReadOnly,
+                );
+            AtariDvgBoard::new(map, 0x0800, 0x0800)
+        }
+
+        #[test]
+        fn tracing_disabled_records_nothing() {
+            let mut b = board();
+            b.trace_main_write(0x3400, 0x00);
+            b.trigger_dvg();
+            assert!(b.debug_trace.is_empty());
+        }
+
+        #[test]
+        fn trigger_dvg_records_vector_generator_start() {
+            let mut b = board();
+            b.debug_trace.set_enabled(true);
+            b.clock = 321;
+
+            b.trigger_dvg();
+
+            let events = b.debug_trace.events();
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].kind, DebugEventKind::DeviceWrite);
+            assert_eq!(events[0].device, Some("DVG"));
+            assert_eq!(events[0].detail, Some("vector generator start"));
+            assert_eq!(events[0].cycle, 321);
+        }
+
+        #[test]
+        fn write_kinds_map_by_address_and_region() {
+            let mut b = board();
+            b.debug_trace.set_enabled(true);
+
+            b.trace_main_write(0x3400, 0x00); // watchdog
+            b.trace_main_write(0x3200, 0x01); // other I/O
+            b.trace_main_write(0x0100, 0x42); // RAM
+            b.trace_main_write(0x3000, 0xFF); // DVG GO: recorded by trigger only
+
+            let events = b.debug_trace.events();
+            assert_eq!(events.len(), 3);
+            assert_eq!(events[0].kind, DebugEventKind::Watchdog);
+            assert_eq!(events[0].detail, Some("watchdog cleared"));
+            assert_eq!(events[1].kind, DebugEventKind::IoWrite);
+            assert_eq!(events[2].kind, DebugEventKind::MemoryWrite);
+            assert_eq!(events[2].region, Some("RAM"));
         }
     }
 }

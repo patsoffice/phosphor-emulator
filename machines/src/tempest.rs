@@ -399,6 +399,7 @@ impl Bus for TempestSystem {
 
     fn write(&mut self, master: BusMaster, addr: u16, data: u8) {
         self.board.map.watch_write(0, master, addr, data);
+        self.board.trace_main_write(addr, data);
 
         match self.board.map.page(addr).region_id {
             Region::RAM | Region::COLOR_RAM | Region::VECTOR_RAM => {
@@ -618,7 +619,7 @@ impl Nvram for TempestSystem {
 }
 
 impl Profilable for TempestSystem {}
-impl phosphor_core::core::debug_trace::DebugTrace for TempestSystem {}
+crate::impl_board_debug_trace!(TempestSystem, board);
 
 // ---------------------------------------------------------------------------
 // Machine registry
