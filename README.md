@@ -91,7 +91,7 @@ Contains all reusable components — zero external dependencies:
 - Machine traits — `MachineCore` (frame execution contract) plus capability traits (`Renderable`, `AudioSource`, `InputReceiver`, `MachineDebug`, `SaveState`, `Nvram`, `Profilable`), bundled into the object-safe `FrontendMachine` for frontend use
 - Device trait (common interface for all peripherals: reset, read/write, tick)
 - Debug traits (Debuggable, DebugCpu, BusDebug) for interactive inspection and device register writes
-- MemoryMap (page-table dispatch with backing memory for side-effect-free debug reads, watchpoints, region introspection, and bank switching)
+- Address spaces — `AddressSpace16` (page-table dispatch for 16-bit boards) and `AddressSpace32` (sparse range decode for 68000-class machines), sharing backing memory, side-effect-free debug reads, watchpoints, region introspection, and bank switching
 - Audio utilities (AudioResampler, AudioResamplerF32 — Bresenham box-filter downsampling from CPU clock to output rate)
 - ClockDivider (Bresenham fractional clock divider for cross-domain ticking)
 - DirtyBitset (fixed-capacity dirty-tracking bitset with O(1) bulk invalidation for tile/scanline change tracking)
@@ -119,7 +119,7 @@ Complete system implementations that wire core components together:
 
 ### Macros Crate (`phosphor-macros`)
 
-Proc macro crate providing `#[derive(BusDebug)]`, `#[derive(DebugTrace)]`, and `#[derive(MemoryRegion)]`. `BusDebug` auto-generates bus-level debug discovery, device register writes, watchpoint routing, and device reset dispatch from struct annotations (`#[debug_cpu(...)]`, `#[debug_device(...)]`, `#[debug_map(...)]`). When `#[debug_cpu]` omits explicit read/write methods, debug memory access is auto-routed through the matching `#[debug_map]` field's MemoryMap backing store. `DebugTrace` generates the event-tracing capability from a `#[debug_events]`-annotated `DebugTraceBuffer` field. `MemoryRegion` generates `From<Region> for u8` and SCREAMING_SNAKE_CASE `u8` constants from `#[repr(u8)]` region enums.
+Proc macro crate providing `#[derive(BusDebug)]`, `#[derive(DebugTrace)]`, and `#[derive(MemoryRegion)]`. `BusDebug` auto-generates bus-level debug discovery, device register writes, watchpoint routing, and device reset dispatch from struct annotations (`#[debug_cpu(...)]`, `#[debug_device(...)]`, `#[debug_map(...)]`). When `#[debug_cpu]` omits explicit read/write methods, debug memory access is auto-routed through the matching `#[debug_map]` field's `AddressSpace16` backing store. `DebugTrace` generates the event-tracing capability from a `#[debug_events]`-annotated `DebugTraceBuffer` field. `MemoryRegion` generates `From<Region> for u8` and SCREAMING_SNAKE_CASE `u8` constants from `#[repr(u8)]` region enums.
 
 ### Frontend Crate (`phosphor-frontend`)
 
@@ -161,8 +161,8 @@ C++ harnesses that validate phosphor-core's test vectors against independent ref
 phosphor-emulator/
 ├── core/                        # phosphor-core — zero external dependencies
 │   └── src/
-│       ├── core/                #   Bus, MachineCore/FrontendMachine, MemoryMap, ClockDivider, debug traits
-│       ├── cpu/                 #   M6800, M6809, M6502, Z80, I8035, I8088
+│       ├── core/                #   Bus, MachineCore/FrontendMachine, AddressSpace16/32, ClockDivider, debug traits
+│       ├── cpu/                 #   M6800, M6809, M6502, Z80, I8035, I8088, M68000
 │       ├── device/              #   PIA, AY-8910, POKEY, WSG, Z80 CTC, blitter, DVG, DMA, RIOT, SSIO, ...
 │       ├── audio/               #   Resampler utilities
 │       └── gfx/                 #   Tile/sprite decode, rotation, tilemap rendering
@@ -199,7 +199,7 @@ The `Bus` trait connects CPUs to their board's address space using associated ty
 
 - **`BusMasterComponent`** — anything that drives the bus (CPUs, DMA controllers)
 - **`Device`** — uniform interface for peripherals (PIAs, sound chips, timers): register read/write, tick, reset, plus debug inspection and save/load via supertraits
-- **`MemoryMap`** — page-table address decoding with backing memory for side-effect-free debug reads, watchpoints, and bank switching
+- **`AddressSpace16` / `AddressSpace32`** — address decoding (page-table for 16-bit boards, sorted sparse ranges for 32-bit) with backing memory for side-effect-free debug reads, watchpoints, and bank switching
 - **`BusDebug`** — auto-derived via `#[derive(BusDebug)]`, layers debug access on top for the frontend's register inspector, memory viewer, and device discovery
 
 ### Testing CPUs
