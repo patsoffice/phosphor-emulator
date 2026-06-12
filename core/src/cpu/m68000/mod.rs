@@ -16,6 +16,7 @@ pub(crate) mod addressing;
 mod alu;
 mod bit;
 mod branch;
+mod disasm;
 mod exception;
 pub mod flags;
 mod move_ops;
@@ -483,23 +484,10 @@ impl DebugCpu for M68000 {
 
     fn debug_disassemble(
         &self,
-        _addr: u32,
+        addr: u32,
         bytes: &[u8],
     ) -> crate::cpu::disasm::DisassembledInstruction {
-        // Stub disassembler: show the raw opcode word. Full 68000 disassembly
-        // lands in M6.
-        let opcode = if bytes.len() >= 2 {
-            u16::from_be_bytes([bytes[0], bytes[1]])
-        } else {
-            0
-        };
-        crate::cpu::disasm::DisassembledInstruction {
-            mnemonic: "DC.W",
-            operands: format!("${opcode:04X}"),
-            byte_len: 2,
-            bytes: [(opcode >> 8) as u8, opcode as u8, 0, 0, 0, 0, 0, 0, 0, 0],
-            target_addr: None,
-        }
+        disasm::disassemble(addr, bytes)
     }
 }
 

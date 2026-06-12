@@ -43,10 +43,21 @@ impl DisassembledInstruction {
             if self.operands.is_empty() {
                 return self.mnemonic.to_string();
             }
-            return format!("{:<6}{}", self.mnemonic, substituted);
+            return format!(
+                "{:<width$}{}",
+                self.mnemonic,
+                substituted,
+                width = mnemonic_pad(self.mnemonic)
+            );
         }
         format!("{}", self)
     }
+}
+
+/// Mnemonic column width: 6 for the classic short mnemonics, one space
+/// past the mnemonic for the longer sized forms ("MOVEA.W").
+fn mnemonic_pad(mnemonic: &str) -> usize {
+    (mnemonic.len() + 1).max(6)
 }
 
 impl fmt::Display for DisassembledInstruction {
@@ -54,7 +65,13 @@ impl fmt::Display for DisassembledInstruction {
         if self.operands.is_empty() {
             write!(f, "{}", self.mnemonic)
         } else {
-            write!(f, "{:<6}{}", self.mnemonic, self.operands)
+            write!(
+                f,
+                "{:<width$}{}",
+                self.mnemonic,
+                self.operands,
+                width = mnemonic_pad(self.mnemonic)
+            )
         }
     }
 }
