@@ -361,6 +361,75 @@ impl syn::parse::Parse for MapArgs {
     }
 }
 
+/// Derive macro that generates a `DebugTrace` implementation for a struct
+/// that embeds a `DebugTraceBuffer`.
+///
+/// Annotate exactly one field with `#[debug_events]`:
+///
+/// ```ignore
+/// #[derive(DebugTrace)]
+/// pub struct WilliamsBoard {
+///     #[debug_events]
+///     debug_trace: DebugTraceBuffer,
+///     // ...
+/// }
+/// ```
+///
+/// Generates `set_trace_enabled`, `trace_enabled`, `trace_events`, and
+/// `clear_trace_events` delegating to the annotated field.
+#[proc_macro_derive(DebugTrace, attributes(debug_events))]
+pub fn derive_debug_trace(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    let struct_name = &input.ident;
+
+    let fields = match &input.data {
+        syn::Data::Struct(data) => match &data.fields {
+            Fields::Named(fields) => &fields.named,
+            _ => panic!("DebugTrace can only be derived on structs with named fields"),
+        },
+        _ => panic!("DebugTrace can only be derived on structs"),
+    };
+
+    let mut buffer_field: Option<syn::Ident> = None;
+    for field in fields {
+        if field
+            .attrs
+            .iter()
+            .any(|attr| attr.path().is_ident("debug_events"))
+        {
+            assert!(
+                buffer_field.is_none(),
+                "DebugTrace allows only one #[debug_events] field"
+            );
+            buffer_field = Some(field.ident.clone().expect("named field"));
+        }
+    }
+    let buffer = buffer_field
+        .expect("DebugTrace requires one #[debug_events] field holding a DebugTraceBuffer");
+
+    let expanded = quote! {
+        impl phosphor_core::core::debug_trace::DebugTrace for #struct_name {
+            fn set_trace_enabled(&mut self, enabled: bool) {
+                self.#buffer.set_enabled(enabled);
+            }
+
+            fn trace_enabled(&self) -> bool {
+                self.#buffer.enabled()
+            }
+
+            fn trace_events(&mut self) -> &[phosphor_core::core::debug_trace::DebugEvent] {
+                self.#buffer.events()
+            }
+
+            fn clear_trace_events(&mut self) {
+                self.#buffer.clear();
+            }
+        }
+    };
+
+    TokenStream::from(expanded)
+}
+
 /// Derive macro that generates boilerplate for memory region ID enums.
 ///
 /// Given a `#[repr(u8)]` enum, generates:
