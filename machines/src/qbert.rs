@@ -462,6 +462,8 @@ impl Profilable for QbertSystem {
     }
 }
 
+impl phosphor_core::core::debug_trace::DebugTrace for QbertSystem {}
+
 // ---------------------------------------------------------------------------
 // Machine registry
 // ---------------------------------------------------------------------------

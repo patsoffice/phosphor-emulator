@@ -361,6 +361,7 @@ impl Nvram for RobotronSystem {
 }
 
 impl Profilable for RobotronSystem {}
+impl phosphor_core::core::debug_trace::DebugTrace for RobotronSystem {}
 
 // ---------------------------------------------------------------------------
 // Machine registry

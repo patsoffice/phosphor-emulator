@@ -293,15 +293,16 @@ macro_rules! machine_core_metadata {
 pub(crate) use machine_core_metadata;
 
 /// Implements default-only frontend capabilities for machines without
-/// battery-backed RAM or sub-span profiling.
+/// battery-backed RAM, sub-span profiling, or event tracing.
 ///
-/// Expands to empty `Nvram` and `Profilable` impls. Machines that override
-/// either capability must write that impl by hand instead of using this
-/// macro (never hide non-default behavior in macros).
+/// Expands to empty `Nvram`, `Profilable`, and `DebugTrace` impls. Machines
+/// that override any of these capabilities must write that impl by hand
+/// instead of using this macro (never hide non-default behavior in macros).
 macro_rules! impl_default_frontend_capabilities {
     ($type:ty) => {
         impl phosphor_core::core::machine::Nvram for $type {}
         impl phosphor_core::core::machine::Profilable for $type {}
+        impl phosphor_core::core::debug_trace::DebugTrace for $type {}
     };
 }
 pub(crate) use impl_default_frontend_capabilities;

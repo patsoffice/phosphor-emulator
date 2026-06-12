@@ -1191,6 +1191,7 @@ impl Nvram for CrystalCastlesSystem {
 }
 
 impl Profilable for CrystalCastlesSystem {}
+impl phosphor_core::core::debug_trace::DebugTrace for CrystalCastlesSystem {}
 
 // ---------------------------------------------------------------------------
 // Machine registry

@@ -1131,6 +1131,7 @@ impl Nvram for DigDugSystem {
 }
 
 impl Profilable for DigDugSystem {}
+impl phosphor_core::core::debug_trace::DebugTrace for DigDugSystem {}
 
 // ---------------------------------------------------------------------------
 // Machine registry

@@ -448,6 +448,7 @@ impl Nvram for AsteroidsDeluxeSystem {
 }
 
 impl Profilable for AsteroidsDeluxeSystem {}
+impl phosphor_core::core::debug_trace::DebugTrace for AsteroidsDeluxeSystem {}
 
 // ---------------------------------------------------------------------------
 // Machine registry

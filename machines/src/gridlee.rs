@@ -1033,6 +1033,7 @@ impl Nvram for GridleeSystem {
 }
 
 impl Profilable for GridleeSystem {}
+impl phosphor_core::core::debug_trace::DebugTrace for GridleeSystem {}
 
 // ---------------------------------------------------------------------------
 // Machine registry

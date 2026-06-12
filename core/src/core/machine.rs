@@ -19,6 +19,7 @@ use std::time::Duration;
 use crate::device::dvg::VectorLine;
 
 use super::debug::BusDebug;
+use super::debug_trace::DebugTrace;
 use super::memory_map::{MemoryMap, WatchpointHit, WatchpointKind};
 use super::save_state::SaveError;
 
@@ -331,6 +332,7 @@ pub trait FrontendMachine:
     + AudioSource
     + InputReceiver
     + MachineDebug
+    + DebugTrace
     + SaveState
     + Nvram
     + Profilable
@@ -343,6 +345,7 @@ impl<T> FrontendMachine for T where
         + AudioSource
         + InputReceiver
         + MachineDebug
+        + DebugTrace
         + SaveState
         + Nvram
         + Profilable
@@ -385,6 +388,7 @@ mod tests {
             }
         }
         impl MachineDebug for Dummy {}
+        impl DebugTrace for Dummy {}
         impl SaveState for Dummy {}
         impl Nvram for Dummy {}
         impl Profilable for Dummy {}

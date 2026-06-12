@@ -421,6 +421,7 @@ impl Nvram for SatansHollowSystem {
 }
 
 impl Profilable for SatansHollowSystem {}
+impl phosphor_core::core::debug_trace::DebugTrace for SatansHollowSystem {}
 
 // ---------------------------------------------------------------------------
 // Machine registry

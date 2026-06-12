@@ -618,6 +618,7 @@ impl Nvram for TempestSystem {
 }
 
 impl Profilable for TempestSystem {}
+impl phosphor_core::core::debug_trace::DebugTrace for TempestSystem {}
 
 // ---------------------------------------------------------------------------
 // Machine registry
