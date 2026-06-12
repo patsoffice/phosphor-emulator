@@ -142,7 +142,7 @@ SDL2 + egui windowed frontend — external dependencies: SDL2, zip, egui:
 - **Z80** — 1604 opcodes, 1,604,000 test vectors, validated against [SingleStepTests/z80](https://github.com/SingleStepTests/z80) with full register/flag/timing verification. See [cpu-validation/README_z80.md](cpu-validation/README_z80.md).
 - **I8035** — 229 opcodes, 229,000 test vectors, cross-validated against [mame4all](https://github.com/ValveSoftware/steamlink-sdk/tree/master/examples/mame4all) MCS-48. See [cpu-validation/README_i8035.md](cpu-validation/README_i8035.md).
 - **I8088** — 279 opcodes, 2,577,000 test vectors, validated against [SingleStepTests/8088](https://github.com/SingleStepTests/8088) with full register/flag/memory verification. See [cpu-validation/README_i8088.md](cpu-validation/README_i8088.md).
-- **M68000** — 72 instructions (M1-M5: full integer ALU, control flow, bit ops, MOVEM/stack frames, exceptions/interrupts/privilege), 797,776 test vectors, validated against [SingleStepTests/680x0](https://github.com/SingleStepTests/680x0) with register/flag/memory (state-only) verification. See [core/src/cpu/m68000/README.md](core/src/cpu/m68000/README.md).
+- **M68000** — complete instruction set (74 mnemonics), 1,000,058 test vectors (every file, every vector incl. address-error aborts), validated against [SingleStepTests/680x0](https://github.com/SingleStepTests/680x0) with register/flag/memory (state-only) verification. See [core/src/cpu/m68000/README.md](core/src/cpu/m68000/README.md).
 
 ### Cross-Validation (`cross-validation/`)
 
@@ -224,7 +224,7 @@ assert_eq!(bus.memory[0x10], 0x42);
 
 ### CPUs
 
-- Motorola 68000 (32-bit registers, 16-bit data bus) — **in progress**: M1-M5 landed (word bus, full EA decoder, MOVE family, complete binary/unary/extended/BCD ALU, MUL/DIV/CHK, all shifts/rotates, branches/jumps/subroutines, bit ops, ADDQ/SUBQ, SWAP/EXG, LEA/PEA/LINK/UNLK, MOVEM, traps/illegal/privilege exceptions, RTE/STOP/RESET, SR/CCR/USP access, boundary-sampled interrupts with NMI edge and autovectors, SingleStepTests harness); remaining milestones M6-M7 (disassembler, full validation coverage incl. TAS/MOVEP/trace)
+- Motorola 68000 (32-bit registers, 16-bit data bus) — **instruction set and validation complete**: full instruction set incl. TAS/MOVEP, all exceptions/interrupts/privilege with hardware-exact address-error aborts, 1,000,058 SingleStepTests vectors passing across every suite file; remaining milestone M6 (disassembler)
 
 ### Peripherals
 
