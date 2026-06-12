@@ -1154,4 +1154,37 @@ mod tests {
             assert!(trace.trace_events().is_empty());
         }
     }
+
+    mod debug_peek {
+        use super::*;
+        use phosphor_core::core::debug::BusDebug;
+        use phosphor_core::core::memory_map::DebugRead;
+
+        #[test]
+        fn derived_peek_reports_backed_io_unmapped_per_map() {
+            let mut board = WilliamsBoard::new();
+            board.write_video_ram(0x2000, 0x5A);
+
+            let bus: &dyn BusDebug = &board;
+
+            // Main CPU space: backed video RAM, I/O at the PIAs
+            assert_eq!(
+                bus.peek(0, 0x2000),
+                DebugRead::Backed {
+                    value: 0x5A,
+                    width: 1,
+                    region_id: MainRegion::VIDEO_RAM
+                }
+            );
+            assert_eq!(bus.peek(0, 0xC804), DebugRead::Io);
+
+            // Sound CPU space: I/O at the PIA, unmapped between regions
+            assert_eq!(bus.peek(1, 0x0400), DebugRead::Io);
+            assert_eq!(bus.peek(1, 0x0500), DebugRead::Unmapped);
+
+            // Unknown CPU index and >16-bit addresses are unmapped
+            assert_eq!(bus.peek(2, 0x0000), DebugRead::Unmapped);
+            assert_eq!(bus.peek(0, 0x1_0000), DebugRead::Unmapped);
+        }
+    }
 }

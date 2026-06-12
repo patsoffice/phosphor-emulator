@@ -14,7 +14,9 @@ use syn::{DeriveInput, Expr, Fields, Type, parse_macro_input};
 /// - `#[debug_cpu("Name", read = "method", write = "method")]` — explicit version:
 ///   names `&self` / `&mut self` methods on the struct for side-effect-free memory access.
 /// - `#[debug_map(cpu = N)]` — field is a `MemoryMap` linked to CPU index N.
-///   Generates watchpoint routing and (when linked to a `#[debug_cpu]`) debug memory access.
+///   Generates watchpoint routing, `peek` (backed/I/O/unmapped semantics via
+///   `AddressSpace16::debug_peek`), and (when linked to a `#[debug_cpu]`)
+///   debug memory access.
 ///
 /// CPU index assignment is positional: first `#[debug_cpu]` is index 0, etc.
 /// Device indices for `write_device_register` / `reset_device` match `devices()` order.
@@ -199,7 +201,32 @@ pub fn derive_bus_debug(input: TokenStream) -> TokenStream {
             quote! { #idx => Some(&self.#ident) }
         });
 
+        // peek: per-map backed/io/unmapped semantics; CPUs without a map
+        // fall back to the read()-based default semantics
+        let peek_arms = map_entries.iter().map(|entry| {
+            let idx = entry.cpu_index;
+            let ident = &entry.field_ident;
+            quote! { #idx => self.#ident.debug_peek(addr as u16) }
+        });
+
         quote! {
+            fn peek(&self, cpu_index: usize, addr: u32) -> phosphor_core::core::memory_map::DebugRead {
+                if addr > 0xFFFF {
+                    return phosphor_core::core::memory_map::DebugRead::Unmapped;
+                }
+                match cpu_index {
+                    #(#peek_arms,)*
+                    _ => match self.read(cpu_index, addr as u16) {
+                        Some(value) => phosphor_core::core::memory_map::DebugRead::Backed {
+                            value: value as u32,
+                            width: 1,
+                            region_id: 0,
+                        },
+                        None => phosphor_core::core::memory_map::DebugRead::Unmapped,
+                    },
+                }
+            }
+
             fn take_watchpoint_hit(&mut self) -> Option<phosphor_core::core::memory_map::WatchpointHit> {
                 None #(#take_hit_chain)*
             }
