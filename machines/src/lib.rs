@@ -307,6 +307,31 @@ macro_rules! impl_default_frontend_capabilities {
 }
 pub(crate) use impl_default_frontend_capabilities;
 
+/// Implements `DebugTrace` delegating to a board field, for board-wrapper
+/// machines whose board embeds a `DebugTraceBuffer` (via `#[derive(DebugTrace)]`).
+macro_rules! impl_board_debug_trace {
+    ($type:ty, $board:ident) => {
+        impl phosphor_core::core::debug_trace::DebugTrace for $type {
+            fn set_trace_enabled(&mut self, enabled: bool) {
+                phosphor_core::core::debug_trace::DebugTrace::set_trace_enabled(
+                    &mut self.$board,
+                    enabled,
+                );
+            }
+            fn trace_enabled(&self) -> bool {
+                phosphor_core::core::debug_trace::DebugTrace::trace_enabled(&self.$board)
+            }
+            fn trace_events(&mut self) -> &[phosphor_core::core::debug_trace::DebugEvent] {
+                phosphor_core::core::debug_trace::DebugTrace::trace_events(&mut self.$board)
+            }
+            fn clear_trace_events(&mut self) {
+                phosphor_core::core::debug_trace::DebugTrace::clear_trace_events(&mut self.$board);
+            }
+        }
+    };
+}
+pub(crate) use impl_board_debug_trace;
+
 /// Generates standard `save_state()`/`load_state()` methods inside an
 /// `impl SaveState` block.
 ///

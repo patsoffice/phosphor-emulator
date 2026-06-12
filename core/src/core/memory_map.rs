@@ -694,6 +694,16 @@ impl AddressSpace16 {
         }
     }
 
+    /// The latched instruction PC of the owning CPU, when known.
+    ///
+    /// Valid only while the board latches context each tick (see
+    /// [`latch_access_context`](Self::latch_access_context)); used by
+    /// boards to attribute debug events as well as watchpoint hits.
+    #[inline]
+    pub fn latched_pc(&self) -> Option<u32> {
+        self.debug_pc
+    }
+
     /// Check a read access against this space's watchpoints. Returns true
     /// if the exact address is read-watched, queueing a hit.
     ///

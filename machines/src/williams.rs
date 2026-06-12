@@ -1,7 +1,9 @@
 use phosphor_core::audio::AudioResampler;
 use phosphor_core::core::bus::InterruptState;
+use phosphor_core::core::debug_trace::{DebugEvent, DebugEventKind, DebugTraceBuffer};
 use phosphor_core::core::memory_map::{AccessKind, MemoryMap};
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
+use phosphor_core::core::watchpoint::DebugAccessSource;
 use phosphor_core::core::{Bus, BusMaster, TimingConfig};
 use phosphor_core::cpu::CpuStateTrait;
 use phosphor_core::cpu::m6800::M6800;
@@ -10,7 +12,7 @@ use phosphor_core::cpu::state::{M6800State, M6809State};
 use phosphor_core::device::dac::Mc1408Dac;
 use phosphor_core::device::pia6820::Pia6820;
 use phosphor_core::device::williams_blitter::WilliamsBlitter;
-use phosphor_macros::{BusDebug, MemoryRegion};
+use phosphor_macros::{BusDebug, DebugTrace, MemoryRegion};
 
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
 
@@ -100,7 +102,7 @@ pub static WILLIAMS_SOUND_ROM: RomRegion = RomRegion {
 ///
 /// Game-specific machines (Joust, Robotron, etc.) compose this struct and
 /// provide their own ROM definitions and input wiring.
-#[derive(BusDebug)]
+#[derive(BusDebug, DebugTrace)]
 pub struct WilliamsBoard {
     // CPUs (debug reads/writes auto-routed through matching #[debug_map])
     #[debug_cpu("M6809 Main")]
@@ -144,6 +146,10 @@ pub struct WilliamsBoard {
 
     // Scanline-rendered framebuffer (292 × 240 × RGB24)
     pub(crate) scanline_buffer: Vec<u8>,
+
+    // Debug event ring (observer state — never saved in save states)
+    #[debug_events]
+    pub(crate) debug_trace: DebugTraceBuffer,
 }
 
 impl WilliamsBoard {
@@ -167,6 +173,7 @@ impl WilliamsBoard {
                 0u8;
                 TIMING.display_width as usize * TIMING.display_height as usize * 3
             ],
+            debug_trace: DebugTraceBuffer::new(),
         }
     }
 
@@ -387,18 +394,32 @@ impl WilliamsBoard {
             let command = self.rom_pia.read_output_b() | 0xC0;
             self.sound_pia.set_port_b_input(command);
             self.sound_pia.set_cb1(command != 0xFF);
+            if self.debug_trace.enabled() {
+                self.debug_trace.record(DebugEvent {
+                    value: Some(command as u32),
+                    width: 1,
+                    device: Some("Sound PIA"),
+                    detail: Some("sound command"),
+                    ..DebugEvent::new(
+                        self.clock,
+                        DebugAccessSource::Device("ROM PIA"),
+                        DebugEventKind::DeviceWrite,
+                    )
+                });
+            }
         }
 
-        // Latch watchpoint attribution context (cycle + instruction PC)
-        // before CPU execution — bus dispatch cannot read CPU state mid-tick.
-        if self.main_map.has_any_watchpoints() {
+        // Latch debug attribution context (cycle + instruction PC) before
+        // CPU execution — bus dispatch cannot read CPU state mid-tick.
+        // Both watchpoint hits and trace events draw PC from this latch.
+        if self.main_map.has_any_watchpoints() || self.debug_trace.enabled() {
             let pc = self
                 .cpu
                 .at_instruction_boundary()
                 .then_some(self.cpu.pc as u32);
             self.main_map.latch_access_context(self.clock, pc);
         }
-        if self.sound_map.has_any_watchpoints() {
+        if self.sound_map.has_any_watchpoints() || self.debug_trace.enabled() {
             let pc = self
                 .sound_cpu
                 .at_instruction_boundary()
@@ -552,6 +573,59 @@ impl WilliamsBoard {
         }
     }
 
+    /// Record a main-board bus event. Callers gate on
+    /// `self.debug_trace.enabled()` so event construction is skipped when
+    /// tracing is off.
+    fn trace_main_access(
+        &mut self,
+        master: BusMaster,
+        kind: DebugEventKind,
+        addr: u16,
+        value: u8,
+        detail: Option<&'static str>,
+    ) {
+        // The latched PC belongs to the main CPU; DMA carries no PC.
+        let pc = match master {
+            BusMaster::Cpu(0) => self.main_map.latched_pc(),
+            _ => None,
+        };
+        self.debug_trace.record(DebugEvent {
+            cpu_index: Some(0),
+            pc,
+            addr: Some(addr as u32),
+            value: Some(value as u32),
+            width: 1,
+            region: self.main_map.region_at(addr).map(|r| r.name),
+            device: Self::main_device(addr),
+            detail,
+            ..DebugEvent::new(self.clock, master.into(), kind)
+        });
+    }
+
+    /// Record a sound-board bus event (see [`trace_main_access`](Self::trace_main_access)).
+    fn trace_sound_access(
+        &mut self,
+        master: BusMaster,
+        kind: DebugEventKind,
+        addr: u16,
+        value: u8,
+    ) {
+        let pc = match master {
+            BusMaster::Cpu(1) => self.sound_map.latched_pc(),
+            _ => None,
+        };
+        self.debug_trace.record(DebugEvent {
+            cpu_index: Some(1),
+            pc,
+            addr: Some(addr as u32),
+            value: Some(value as u32),
+            width: 1,
+            region: self.sound_map.region_at(addr).map(|r| r.name),
+            device: Self::sound_device(addr),
+            ..DebugEvent::new(self.clock, master.into(), kind)
+        });
+    }
+
     pub(crate) fn bus_read(&mut self, master: BusMaster, addr: u16) -> u8 {
         if master == BusMaster::Cpu(1) {
             // Sound board
@@ -564,6 +638,13 @@ impl WilliamsBoard {
             };
             self.sound_map
                 .watch_read_with(1, master, addr, data, Self::sound_device(addr));
+            // Trace device reads only — memory reads (instruction fetches)
+            // would drown the ring.
+            if self.debug_trace.enabled()
+                && self.sound_map.page(addr).region_id == SoundRegion::IO_PIA
+            {
+                self.trace_sound_access(master, DebugEventKind::DeviceRead, addr, data);
+            }
             return data;
         }
 
@@ -572,6 +653,9 @@ impl WilliamsBoard {
         if master == BusMaster::DmaVram && addr <= 0x8FFF {
             let data = self.main_map.region_data(MainRegion::VideoRam)[addr as usize];
             self.main_map.watch_read(0, master, addr, data);
+            if self.debug_trace.enabled() {
+                self.trace_main_access(master, DebugEventKind::DmaRead, addr, data, None);
+            }
             return data;
         }
 
@@ -597,6 +681,21 @@ impl WilliamsBoard {
         };
         self.main_map
             .watch_read_with(0, master, addr, data, Self::main_device(addr));
+        // Trace DMA reads and device reads only — CPU memory reads
+        // (instruction fetches) would drown the ring.
+        if self.debug_trace.enabled() {
+            if matches!(master, BusMaster::Dma | BusMaster::DmaVram) {
+                self.trace_main_access(master, DebugEventKind::DmaRead, addr, data, None);
+            } else if matches!(
+                self.main_map.page(addr).region_id,
+                MainRegion::IO_PIA
+                    | MainRegion::IO_BANK
+                    | MainRegion::IO_BLITTER
+                    | MainRegion::IO_VIDEO
+            ) {
+                self.trace_main_access(master, DebugEventKind::DeviceRead, addr, data, None);
+            }
+        }
         data
     }
 
@@ -606,6 +705,14 @@ impl WilliamsBoard {
             // the hit records pre-write state (WatchpointPhase::Before).
             self.sound_map
                 .watch_write_with(1, master, addr, data, Self::sound_device(addr));
+            if self.debug_trace.enabled() {
+                let kind = if self.sound_map.page(addr).region_id == SoundRegion::IO_PIA {
+                    DebugEventKind::DeviceWrite
+                } else {
+                    DebugEventKind::MemoryWrite
+                };
+                self.trace_sound_access(master, kind, addr, data);
+            }
             match self.sound_map.page(addr).region_id {
                 SoundRegion::RAM => self.sound_map.write_backing(addr, data),
                 SoundRegion::IO_PIA if (0x0400..=0x0403).contains(&addr) => {
@@ -619,6 +726,30 @@ impl WilliamsBoard {
         // Main board — watchpoint check precedes the side effect (see above).
         self.main_map
             .watch_write_with(0, master, addr, data, Self::main_device(addr));
+        if self.debug_trace.enabled() {
+            let (kind, detail) = if matches!(master, BusMaster::Dma | BusMaster::DmaVram) {
+                (DebugEventKind::DmaWrite, None)
+            } else {
+                match self.main_map.page(addr).region_id {
+                    MainRegion::IO_BANK => (
+                        DebugEventKind::BankSwitch,
+                        Some(if data != 0 {
+                            "banked ROM mapped at $0000-$8FFF"
+                        } else {
+                            "video RAM mapped at $0000-$8FFF"
+                        }),
+                    ),
+                    MainRegion::IO_VIDEO if addr == 0xCBFF && data == 0x39 => {
+                        (DebugEventKind::Watchdog, Some("watchdog cleared"))
+                    }
+                    MainRegion::IO_PIA | MainRegion::IO_BLITTER | MainRegion::IO_VIDEO => {
+                        (DebugEventKind::DeviceWrite, None)
+                    }
+                    _ => (DebugEventKind::MemoryWrite, None),
+                }
+            };
+            self.trace_main_access(master, kind, addr, data, detail);
+        }
         match self.main_map.page(addr).region_id {
             // Writes always go to video RAM, even when banked ROM is overlaid
             MainRegion::VIDEO_RAM | MainRegion::BANKED_ROM => {
@@ -890,6 +1021,137 @@ mod tests {
             assert_eq!(hit.region, Some("ROM Bank"));
             // The side effect still happened after the hit was queued.
             assert_eq!(board.rom_bank, 0x01);
+        }
+    }
+
+    mod debug_events {
+        use super::*;
+        use phosphor_core::core::debug_trace::{DebugEventKind, DebugTrace};
+        use phosphor_core::core::watchpoint::DebugAccessSource;
+
+        #[test]
+        fn tracing_disabled_records_nothing() {
+            let mut board = WilliamsBoard::new();
+            board.bus_write(BusMaster::Cpu(0), 0xC900, 0x01);
+            board.bus_read(BusMaster::Cpu(0), 0xC80C);
+            assert!(board.debug_trace.is_empty());
+        }
+
+        #[test]
+        fn bank_switch_write_emits_bank_switch_event() {
+            let mut board = WilliamsBoard::new();
+            board.debug_trace.set_enabled(true);
+            board.clock = 99;
+            board
+                .main_map
+                .latch_access_context(board.clock, Some(0xD042));
+
+            board.bus_write(BusMaster::Cpu(0), 0xC900, 0x03);
+
+            let events = board.debug_trace.events();
+            assert_eq!(events.len(), 1);
+            let e = &events[0];
+            assert_eq!(e.kind, DebugEventKind::BankSwitch);
+            assert_eq!(e.cycle, 99);
+            assert_eq!(e.pc, Some(0xD042));
+            assert_eq!(e.source, DebugAccessSource::Cpu(0));
+            assert_eq!(e.addr, Some(0xC900));
+            assert_eq!(e.value, Some(0x03));
+            assert_eq!(e.region, Some("ROM Bank"));
+            assert_eq!(e.detail, Some("banked ROM mapped at $0000-$8FFF"));
+        }
+
+        #[test]
+        fn watchdog_clear_emits_watchdog_event() {
+            let mut board = WilliamsBoard::new();
+            board.debug_trace.set_enabled(true);
+            board.bus_write(BusMaster::Cpu(0), 0xCBFF, 0x39);
+
+            let e = board.debug_trace.events()[0];
+            assert_eq!(e.kind, DebugEventKind::Watchdog);
+            assert_eq!(e.detail, Some("watchdog cleared"));
+        }
+
+        #[test]
+        fn pia_write_emits_device_write_with_device_name() {
+            let mut board = WilliamsBoard::new();
+            board.debug_trace.set_enabled(true);
+            board.bus_write(BusMaster::Cpu(0), 0xC804, 0x55);
+            board.bus_write(BusMaster::Cpu(1), 0x0400, 0xAA);
+
+            let events = board.debug_trace.events();
+            assert_eq!(events[0].kind, DebugEventKind::DeviceWrite);
+            assert_eq!(events[0].device, Some("Widget PIA"));
+            assert_eq!(events[0].cpu_index, Some(0));
+            assert_eq!(events[1].kind, DebugEventKind::DeviceWrite);
+            assert_eq!(events[1].device, Some("Sound PIA"));
+            assert_eq!(events[1].cpu_index, Some(1));
+        }
+
+        #[test]
+        fn blitter_dma_accesses_emit_dma_events() {
+            let mut board = WilliamsBoard::new();
+            board.debug_trace.set_enabled(true);
+            board.write_video_ram(0x2000, 0x77);
+
+            board.bus_read(BusMaster::DmaVram, 0x2000); // keepmask dest read
+            board.bus_write(BusMaster::Dma, 0x2001, 0x42); // blit write
+
+            let events = board.debug_trace.events();
+            assert_eq!(events[0].kind, DebugEventKind::DmaRead);
+            assert_eq!(events[0].value, Some(0x77));
+            assert_eq!(events[0].pc, None, "DMA events carry no PC");
+            assert_eq!(events[1].kind, DebugEventKind::DmaWrite);
+            assert_eq!(events[1].value, Some(0x42));
+        }
+
+        #[test]
+        fn device_reads_traced_memory_reads_not() {
+            let mut board = WilliamsBoard::new();
+            board.debug_trace.set_enabled(true);
+
+            board.bus_read(BusMaster::Cpu(0), 0x1234); // video RAM: not traced
+            board.bus_read(BusMaster::Cpu(0), 0xC80C); // ROM PIA: traced
+
+            let events = board.debug_trace.events();
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].kind, DebugEventKind::DeviceRead);
+            assert_eq!(events[0].device, Some("ROM PIA"));
+        }
+
+        #[test]
+        fn save_state_excludes_debug_events() {
+            let mut board = WilliamsBoard::new();
+            board.debug_trace.set_enabled(true);
+            board.bus_write(BusMaster::Cpu(0), 0xC900, 0x01);
+            assert!(!board.debug_trace.is_empty());
+
+            let mut w = StateWriter::new();
+            board.save_state(&mut w);
+            let data = w.into_vec();
+
+            // Loading must not restore or disturb observer state.
+            let mut board2 = WilliamsBoard::new();
+            let mut r = StateReader::new(&data);
+            board2.load_state(&mut r).unwrap();
+            assert!(board2.debug_trace.is_empty());
+            assert!(!board2.debug_trace.enabled());
+        }
+
+        #[test]
+        fn derive_provides_debug_trace_capability() {
+            let mut board = WilliamsBoard::new();
+            let trace: &mut dyn DebugTrace = &mut board;
+
+            assert!(!trace.trace_enabled());
+            trace.set_trace_enabled(true);
+            assert!(trace.trace_enabled());
+
+            board.bus_write(BusMaster::Cpu(0), 0xC900, 0x01);
+            let trace: &mut dyn DebugTrace = &mut board;
+            assert_eq!(trace.trace_events().len(), 1);
+            trace.clear_trace_events();
+            assert!(trace.trace_events().is_empty());
         }
     }
 }

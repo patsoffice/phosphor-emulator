@@ -360,7 +360,7 @@ impl Nvram for JoustSystem {
 }
 
 impl Profilable for JoustSystem {}
-impl phosphor_core::core::debug_trace::DebugTrace for JoustSystem {}
+crate::impl_board_debug_trace!(JoustSystem, board);
 
 // ---------------------------------------------------------------------------
 // Machine registry
