@@ -10,7 +10,7 @@
 //! N/V/C/X are never touched.
 
 use super::M68000;
-use super::addressing::{Size, ea_cycles};
+use super::addressing::{AccessResult, Size, ea_cycles};
 use super::flags::SrFlag;
 use crate::core::{Bus, BusMaster};
 
@@ -25,7 +25,7 @@ impl M68000 {
         bus: &mut B,
         master: BusMaster,
         dynamic: bool,
-    ) {
+    ) -> AccessResult<()> {
         let op = (opcode >> 6) & 3;
         let ea_mode = ((opcode >> 3) & 7) as u8;
         let ea_reg = (opcode & 7) as u8;
@@ -39,8 +39,8 @@ impl M68000 {
             (true, true) => 5,
         };
         if ea_mode == 1 || (ea_mode == 7 && ea_reg >= reg7_limit) {
-            self.finish(4); // illegal encoding (exception lands in M5)
-            return;
+            self.finish(4); // illegal encoding
+            return Ok(());
         }
 
         // The static bit number is an extension word ahead of the EA words.
@@ -74,7 +74,7 @@ impl M68000 {
             // Memory (or immediate, for dynamic BTST): byte operation mod 8
             let mask = 1u32 << (bit_number & 7);
             let ea = self.decode_ea(bus, master, ea_mode, ea_reg, Size::Byte);
-            let old = self.ea_read(bus, master, ea, Size::Byte);
+            let old = self.ea_read(bus, master, ea, Size::Byte)?;
             self.set_flag(SrFlag::Z, old & mask == 0);
             if !is_btst {
                 let new = match op {
@@ -82,11 +82,12 @@ impl M68000 {
                     2 => old & !mask,
                     _ => old | mask,
                 };
-                self.ea_write(bus, master, ea, Size::Byte, new);
+                self.ea_write(bus, master, ea, Size::Byte, new)?;
             }
 
             let base = if is_btst { 4 } else { 8 };
             self.finish(base + static_extra + ea_cycles(ea_mode, ea_reg, Size::Byte));
         }
+        Ok(())
     }
 }

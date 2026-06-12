@@ -12,6 +12,7 @@
 //! all timing in this core).
 
 use super::M68000;
+use super::addressing::{AccessResult, AddressError};
 use super::flags::SrFlag;
 use crate::core::{Bus, BusMaster, bus::InterruptState};
 use crate::cpu::flags::detect_rising_edge;
@@ -20,22 +21,27 @@ impl M68000 {
     /// Enter an exception: push the stack frame on the supervisor stack and
     /// vector to the handler. `pushed_pc` is the PC value the frame stores
     /// (see the module docs for which address each source pushes).
+    ///
+    /// A misaligned supervisor stack makes the frame push itself fault; the
+    /// error propagates so the address-error entry (and from there the
+    /// double-fault halt) takes over.
     pub(crate) fn exception<B: Bus<Address = u32, Data = u16> + ?Sized>(
         &mut self,
         bus: &mut B,
         master: BusMaster,
         vector: u8,
         pushed_pc: u32,
-    ) {
+    ) -> AccessResult<()> {
         let old_sr = self.sr;
         self.set_supervisor(true);
         self.set_flag(SrFlag::T, false);
         // 68000 short frame — PC pushed first, SR at the lowest address.
         // 68010+ add a format/vector word; gate on `self.variant` here when
         // those frames are implemented.
-        self.push_long(bus, master, pushed_pc);
-        self.push_word(bus, master, old_sr);
-        self.pc = self.read_long_at(bus, master, vector as u32 * 4);
+        self.push_long(bus, master, pushed_pc)?;
+        self.push_word(bus, master, old_sr)?;
+        self.pc = self.read_long_at(bus, master, vector as u32 * 4)?;
+        Ok(())
     }
 
     /// TRAP #n (0x4E40-0x4E4F): unconditional trap to vector 32 + n. The
@@ -47,10 +53,11 @@ impl M68000 {
         opcode: u16,
         bus: &mut B,
         master: BusMaster,
-    ) {
+    ) -> AccessResult<()> {
         let vector = 32 + (opcode & 0xF) as u8;
-        self.exception(bus, master, vector, self.pc);
+        self.exception(bus, master, vector, self.pc)?;
         self.finish(38);
+        Ok(())
     }
 
     /// TRAPV (0x4E76): trap to vector 7 if V is set, otherwise continue.
@@ -60,13 +67,14 @@ impl M68000 {
         &mut self,
         bus: &mut B,
         master: BusMaster,
-    ) {
+    ) -> AccessResult<()> {
         if self.flag_is_set(SrFlag::V) {
-            self.exception(bus, master, 7, self.pc);
+            self.exception(bus, master, 7, self.pc)?;
             self.finish(34);
         } else {
             self.finish(4);
         }
+        Ok(())
     }
 
     /// Illegal-instruction family: ILLEGAL (0x4AFC) and unassigned opcodes
@@ -79,9 +87,10 @@ impl M68000 {
         bus: &mut B,
         master: BusMaster,
         vector: u8,
-    ) {
-        self.exception(bus, master, vector, self.instr_pc);
+    ) -> AccessResult<()> {
+        self.exception(bus, master, vector, self.instr_pc)?;
         self.finish(34);
+        Ok(())
     }
 
     /// Verify supervisor privilege for a privileged instruction. In user
@@ -91,13 +100,13 @@ impl M68000 {
         &mut self,
         bus: &mut B,
         master: BusMaster,
-    ) -> bool {
+    ) -> AccessResult<bool> {
         if self.flag_is_set(SrFlag::S) {
-            return true;
+            return Ok(true);
         }
-        self.exception(bus, master, 8, self.instr_pc);
+        self.exception(bus, master, 8, self.instr_pc)?;
         self.finish(34);
-        false
+        Ok(false)
     }
 
     /// Load a full status-register value: route the S bit through the
@@ -119,10 +128,10 @@ impl M68000 {
         opcode: u16,
         bus: &mut B,
         master: BusMaster,
-    ) {
+    ) -> AccessResult<()> {
         let to_sr = opcode & 0x0040 != 0;
-        if to_sr && !self.privilege_check(bus, master) {
-            return;
+        if to_sr && !self.privilege_check(bus, master)? {
+            return Ok(());
         }
         let imm = self.read_imm_word(bus, master);
         let combine = |a: u16, b: u16| match opcode & 0x0F00 {
@@ -137,6 +146,7 @@ impl M68000 {
             self.sr = (self.sr & 0xFF00) | (ccr & 0x001F);
         }
         self.finish(20);
+        Ok(())
     }
 
     /// RTE (0x4E73, privileged): pop SR then PC from the supervisor stack
@@ -148,15 +158,16 @@ impl M68000 {
         &mut self,
         bus: &mut B,
         master: BusMaster,
-    ) {
-        if !self.privilege_check(bus, master) {
-            return;
+    ) -> AccessResult<()> {
+        if !self.privilege_check(bus, master)? {
+            return Ok(());
         }
-        let sr = self.pop_word(bus, master);
-        let pc = self.pop_long(bus, master);
+        let sr = self.pop_word(bus, master)?;
+        let pc = self.pop_long(bus, master)?;
         self.write_sr(sr);
-        self.set_pc_checked(pc);
+        self.set_pc_checked(pc)?;
         self.finish(20);
+        Ok(())
     }
 
     /// STOP #imm (0x4E72, privileged): load the immediate into SR and halt
@@ -167,14 +178,15 @@ impl M68000 {
         &mut self,
         bus: &mut B,
         master: BusMaster,
-    ) {
-        if !self.privilege_check(bus, master) {
-            return;
+    ) -> AccessResult<()> {
+        if !self.privilege_check(bus, master)? {
+            return Ok(());
         }
         let imm = self.read_imm_word(bus, master);
         self.write_sr(imm);
         self.stopped = true;
         self.finish(4);
+        Ok(())
     }
 
     /// RESET (0x4E70, privileged): assert the external reset line for 124
@@ -186,11 +198,12 @@ impl M68000 {
         &mut self,
         bus: &mut B,
         master: BusMaster,
-    ) {
-        if !self.privilege_check(bus, master) {
-            return;
+    ) -> AccessResult<()> {
+        if !self.privilege_check(bus, master)? {
+            return Ok(());
         }
         self.finish(132);
+        Ok(())
     }
 
     /// Decide whether a sampled interrupt should be taken at this
@@ -224,7 +237,12 @@ impl M68000 {
         } else {
             24 + level
         };
-        self.exception(bus, master, vector, self.pc);
+        let pushed_pc = self.pc;
+        if let Err(fault) = self.exception(bus, master, vector, pushed_pc) {
+            // Misaligned supervisor stack: the entry itself address-errors.
+            self.enter_address_error(bus, master, fault);
+            return;
+        }
         self.set_interrupt_mask(level);
         self.finish(44);
     }
@@ -232,30 +250,46 @@ impl M68000 {
     /// Address-error (vector 3) entry with the 68000 seven-word group-0
     /// frame: status word, access address, instruction register, SR, PC.
     ///
-    /// Approximate by design: real hardware aborts the instruction
-    /// mid-flight, while this core completes it with the offending access
-    /// forced even, so the stacked PC/SR reflect the completed instruction
-    /// (the validation harness skips these vectors). A misaligned
-    /// supervisor stack would double-fault to a halt on hardware; here the
-    /// frame pushes are themselves forced even. 50 cycles.
+    /// Hardware-verified frame contents: the status word carries the
+    /// opcode's upper 11 bits (the internal IR rides along on the bus)
+    /// above R/W, I/N, and the function code; the stacked PC follows the
+    /// per-fault rules recorded in [`AddressError`]. A fault while pushing
+    /// this frame is a double bus fault: the processor halts. 50 cycles.
     pub(crate) fn enter_address_error<B: Bus<Address = u32, Data = u16> + ?Sized>(
         &mut self,
         bus: &mut B,
         master: BusMaster,
+        fault: AddressError,
     ) {
         let old_sr = self.sr;
         self.set_supervisor(true);
         self.set_flag(SrFlag::T, false);
-        self.push_long(bus, master, self.pc);
-        self.push_word(bus, master, old_sr);
-        self.push_word(bus, master, self.opcode);
-        self.push_long(bus, master, self.fault_addr);
-        // Status word: R/W in bit 4, I/N = 0, FC2-0 = data space at the
-        // pre-fault privilege (program-space faults are not distinguished).
-        let fc: u16 = if old_sr & SrFlag::S as u16 != 0 { 5 } else { 1 };
-        let status = if self.fault_read { 0x10 } else { 0 } | fc;
-        self.push_word(bus, master, status);
-        self.pc = self.read_long_at(bus, master, 3 * 4);
+        let fc: u16 = match (fault.program, old_sr & SrFlag::S as u16 != 0) {
+            (true, true) => 6,
+            (true, false) => 2,
+            (false, true) => 5,
+            (false, false) => 1,
+        };
+        let status = (self.opcode & 0xFFE0)
+            | if fault.write { 0 } else { 0x10 }
+            | if fault.program { 0x08 } else { 0 }
+            | fc;
+        let opcode = self.opcode;
+        let frame = self
+            .push_long(bus, master, fault.stacked_pc)
+            .and_then(|()| self.push_word(bus, master, old_sr))
+            .and_then(|()| self.push_word(bus, master, opcode))
+            .and_then(|()| self.push_long(bus, master, fault.addr))
+            .and_then(|()| self.push_word(bus, master, status));
+        if frame.is_err() {
+            // Address error during address-error processing: double bus
+            // fault; only an external reset recovers.
+            self.halted = true;
+            return;
+        }
+        self.pc = self
+            .read_long_at(bus, master, 3 * 4)
+            .expect("vector 3 is aligned");
         self.finish(50);
     }
 }

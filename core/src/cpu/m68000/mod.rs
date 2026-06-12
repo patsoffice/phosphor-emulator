@@ -115,18 +115,6 @@ pub struct M68000 {
     /// that point at the faulting instruction push this value.
     #[save_skip(default)]
     pub(crate) instr_pc: u32,
-    /// Set when a word/long access used an odd address during the current
-    /// instruction. The vector-3 exception is entered once the instruction
-    /// completes (real hardware aborts mid-flight; the validation harness
-    /// skips these vectors because of that difference).
-    #[save_skip(default)]
-    pub(crate) address_error: bool,
-    /// First faulting odd address of the current instruction.
-    #[save_skip(default)]
-    pub(crate) fault_addr: u32,
-    /// Whether that faulting access was a read.
-    #[save_skip(default)]
-    pub(crate) fault_read: bool,
 }
 
 impl Default for M68000 {
@@ -152,33 +140,12 @@ impl M68000 {
             state: ExecState::Fetch,
             opcode: 0,
             instr_pc: 0,
-            address_error: false,
-            fault_addr: 0,
-            fault_read: false,
         }
     }
 
     /// Returns true when the CPU is at an instruction boundary (ready to fetch).
     pub fn at_instruction_boundary(&self) -> bool {
         matches!(self.state, ExecState::Fetch)
-    }
-
-    /// True if the instruction that just executed performed a word or long
-    /// access at an odd address (the vector-3 exception was entered after
-    /// it completed).
-    pub fn took_address_error(&self) -> bool {
-        self.address_error
-    }
-
-    /// Record the first misaligned access of the current instruction for
-    /// the address-error frame.
-    #[inline]
-    pub(crate) fn flag_address_error(&mut self, addr: u32, read: bool) {
-        if !self.address_error {
-            self.address_error = true;
-            self.fault_addr = addr;
-            self.fault_read = read;
-        }
     }
 
     /// Mask an effective address to the physical address-bus width.
@@ -214,22 +181,27 @@ impl M68000 {
                     return;
                 }
 
-                self.address_error = false;
                 self.instr_pc = self.pc;
                 if self.pc & 1 != 0 {
-                    // The instruction fetch itself is misaligned.
-                    self.flag_address_error(self.pc, true);
-                    self.enter_address_error(bus, master);
+                    // Defensive: control transfers fault before loading an
+                    // odd PC, but external state (a bad reset vector, a
+                    // debugger) can still plant one.
+                    let fault = addressing::AddressError {
+                        addr: self.pc,
+                        write: false,
+                        program: true,
+                        stacked_pc: self.pc,
+                    };
+                    self.enter_address_error(bus, master, fault);
                     return;
                 }
-                // Fetch the opcode word and execute the instruction atomically.
+                // Fetch the opcode word and execute the instruction
+                // atomically; an odd word/long access aborts the
+                // instruction at the fault, exactly like hardware.
                 let opcode = self.read_imm_word(bus, master);
                 self.opcode = opcode;
-                self.execute_instruction(opcode, bus, master);
-                if self.address_error {
-                    // The instruction completed with the offending access
-                    // forced even (addressing.rs); vector 3 is entered now.
-                    self.enter_address_error(bus, master);
+                if let Err(fault) = self.execute_instruction(opcode, bus, master) {
+                    self.enter_address_error(bus, master, fault);
                 }
             }
             ExecState::Execute(remaining) => {
@@ -269,12 +241,14 @@ impl M68000 {
     /// Dispatch is two-level: first on the opcode "line" (top 4 bits), then
     /// on the line-specific sub-encoding. Instruction families are wired in
     /// here as they are implemented.
+    /// Returns the [`addressing::AddressError`] of the access that aborted
+    /// the instruction, if any; the caller enters the vector-3 exception.
     fn execute_instruction<B: Bus<Address = u32, Data = u16> + ?Sized>(
         &mut self,
         opcode: u16,
         bus: &mut B,
         master: BusMaster,
-    ) {
+    ) -> addressing::AccessResult<()> {
         let opmode = (opcode >> 6) & 7;
         let ea_mode = (opcode >> 3) & 7;
         match (opcode >> 12) & 0xF {
@@ -287,19 +261,19 @@ impl M68000 {
             // encodes MOVEP
             0x0 if opcode & 0x0100 != 0 => {
                 if ea_mode == 1 {
-                    self.op_movep(opcode, bus, master);
+                    self.op_movep(opcode, bus, master)
                 } else {
-                    self.op_bitop(opcode, bus, master, true);
+                    self.op_bitop(opcode, bus, master, true)
                 }
             }
             // Static bit ops (bit number in an extension word)
             0x0 if opcode & 0x0F00 == 0x0800 => self.op_bitop(opcode, bus, master, false),
-            // ORI/ANDI/SUBI/ADDI/EORI/CMPI (the to-CCR/to-SR variants
-            // land in M5)
+            // ORI/ANDI/SUBI/ADDI/EORI/CMPI
             0x0 => {
-                if !self.op_imm_alu(opcode, bus, master) {
+                if !self.op_imm_alu(opcode, bus, master)? {
                     self.finish(4);
                 }
+                Ok(())
             }
             // MOVE.b / MOVE.l / MOVE.w (and MOVEA for An destinations)
             0x1..=0x3 => self.op_move(opcode, bus, master),
@@ -348,17 +322,17 @@ impl M68000 {
                         0x4E58..=0x4E5F => self.op_unlk(opcode, bus, master),
                         0x4E60..=0x4E6F => self.op_move_usp(opcode, bus, master),
                         0x4E70 => self.op_reset_instruction(bus, master),
-                        0x4E71 => self.finish(4), // NOP
+                        0x4E71 => self.op_nop(), // NOP
                         0x4E72 => self.op_stop(bus, master),
                         0x4E73 => self.op_rte(bus, master),
                         0x4E75 => self.op_rts(bus, master),
                         0x4E76 => self.op_trapv(bus, master),
                         0x4E77 => self.op_rtr(bus, master),
-                        _ => self.finish(4),
+                        _ => self.op_nop(),
                     },
-                    _ => self.finish(4),
+                    _ => self.op_nop(),
                 },
-                _ => self.finish(4),
+                _ => self.op_nop(),
             },
             // Size bits 11 on line 0x5 split into DBcc (EA mode 001 = An)
             // and Scc (everything else); the other sizes are ADDQ/SUBQ
@@ -374,7 +348,7 @@ impl M68000 {
                 3 => self.op_div(opcode, bus, master, false),
                 7 => self.op_div(opcode, bus, master, true),
                 4 if ea_mode < 2 => self.op_bcd(opcode, bus, master, false),
-                5 | 6 if ea_mode < 2 => self.finish(4), // illegal (PACK/UNPK on 68020+)
+                5 | 6 if ea_mode < 2 => self.op_nop(), // illegal (PACK/UNPK on 68020+)
                 _ => self.op_logical(opcode, bus, master, LogicalOp::Or),
             },
             // SUB / SUBA / SUBX
@@ -406,9 +380,9 @@ impl M68000 {
             // sizes are the register form.
             0xE if opmode & 3 == 3 => {
                 if opcode & 0x0800 == 0 {
-                    self.op_shift_mem(opcode, bus, master);
+                    self.op_shift_mem(opcode, bus, master)
                 } else {
-                    self.finish(4);
+                    self.op_nop()
                 }
             }
             0xE => self.op_shift_reg(opcode),
@@ -417,9 +391,16 @@ impl M68000 {
             0xA => self.op_illegal(bus, master, 10),
             0xF => self.op_illegal(bus, master, 11),
             // Remaining unassigned encodings inside implemented lines stay
-            // bounded NOPs (full illegal-instruction coverage lands in M7)
-            _ => self.finish(4),
+            // bounded NOPs
+            _ => self.op_nop(),
         }
+    }
+
+    /// Bounded 4-cycle no-op: NOP itself and the unassigned encodings
+    /// inside implemented lines.
+    fn op_nop(&mut self) -> addressing::AccessResult<()> {
+        self.finish(4);
+        Ok(())
     }
 }
 
@@ -444,11 +425,14 @@ impl Cpu for M68000 {
         self.stopped = false;
         self.halted = false;
         self.nmi_previous = false;
-        self.address_error = false;
         self.state = ExecState::Fetch;
 
-        self.a[7] = self.read_long_at(bus, master, 0x0000_0000);
-        self.pc = self.read_long_at(bus, master, 0x0000_0004);
+        self.a[7] = self
+            .read_long_at(bus, master, 0x0000_0000)
+            .expect("vector 0 is aligned");
+        self.pc = self
+            .read_long_at(bus, master, 0x0000_0004)
+            .expect("vector 1 is aligned");
     }
 
     fn signal_interrupt(&mut self, _int: InterruptState) {

@@ -16,7 +16,7 @@
 //!   changed at any point during the shift.
 
 use super::super::M68000;
-use super::super::addressing::{Size, ea_cycles};
+use super::super::addressing::{AccessResult, Size, ea_cycles};
 use super::super::flags::SrFlag;
 use super::binary::size_from_bits;
 use crate::core::{Bus, BusMaster};
@@ -153,7 +153,7 @@ impl M68000 {
 
     /// Register-form shift/rotate (line 0xE, size bits 00-10): immediate
     /// count 1-8 or a register count modulo 64, any size, Dn destination.
-    pub(crate) fn op_shift_reg(&mut self, opcode: u16) {
+    pub(crate) fn op_shift_reg(&mut self, opcode: u16) -> AccessResult<()> {
         let size = size_from_bits(opcode >> 6).unwrap();
         let left = opcode & 0x0100 != 0;
         let kind = ShiftKind::from_bits(opcode >> 3);
@@ -171,6 +171,7 @@ impl M68000 {
 
         let base = if size == Size::Long { 8 } else { 6 };
         self.finish(base + 2 * count);
+        Ok(())
     }
 
     /// Memory-form shift/rotate (line 0xE, size bits 11, type in bits
@@ -180,21 +181,22 @@ impl M68000 {
         opcode: u16,
         bus: &mut B,
         master: BusMaster,
-    ) {
+    ) -> AccessResult<()> {
         let kind = ShiftKind::from_bits(opcode >> 9);
         let left = opcode & 0x0100 != 0;
         let ea_mode = ((opcode >> 3) & 7) as u8;
         let ea_reg = (opcode & 7) as u8;
         if ea_mode < 2 || (ea_mode == 7 && ea_reg >= 2) {
             self.finish(4);
-            return;
+            return Ok(());
         }
 
         let ea = self.decode_ea(bus, master, ea_mode, ea_reg, Size::Word);
-        let src = self.ea_read(bus, master, ea, Size::Word);
+        let src = self.ea_read(bus, master, ea, Size::Word)?;
         let result = self.shift_core(Size::Word, kind, left, 1, src);
-        self.ea_write(bus, master, ea, Size::Word, result);
+        self.ea_write(bus, master, ea, Size::Word, result)?;
 
         self.finish(8 + ea_cycles(ea_mode, ea_reg, Size::Word));
+        Ok(())
     }
 }

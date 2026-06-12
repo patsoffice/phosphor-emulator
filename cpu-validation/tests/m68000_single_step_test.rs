@@ -4,10 +4,8 @@
 //! to the instruction boundary, compare the final registers and RAM. Cycle
 //! counts and per-cycle bus transactions are not compared.
 //!
-//! Every suite file is enabled. Within a file, individual tests are
-//! skipped when they exercise the exact mid-instruction address-error
-//! abort (odd word/long operand address), which this core approximates,
-//! plus two known-bad vectors.
+//! Every suite file is enabled and every vector is compared except two
+//! known-bad ones (suite generation glitches).
 
 use std::io::Read;
 use std::path::Path;
@@ -65,12 +63,6 @@ fn run_test_case(tc: &M68000TestCase, cpu: &mut M68000, bus: &mut TracingBus68k)
     if KNOWN_BAD_VECTORS.contains(&tc.name.as_str()) {
         return Outcome::Skip("known-bad vector (expected state unrelated to instruction)");
     }
-    if tc.initial.sr & 0x8000 != 0 {
-        return Outcome::Skip("trace bit set (trace exception lands in M5)");
-    }
-    if tc.initial.pc & 1 != 0 {
-        return Outcome::Skip("odd PC (address error lands in M5)");
-    }
 
     let mut loaded = Vec::new();
     load_initial(cpu, bus, &tc.initial, &mut loaded);
@@ -94,11 +86,6 @@ fn run_test_case(tc: &M68000TestCase, cpu: &mut M68000, bus: &mut TracingBus68k)
             "{}: instruction did not complete in 500 cycles",
             tc.name
         ))
-    } else if cpu.took_address_error() {
-        // Odd word/long operand address: the test expects the exact
-        // mid-instruction abort state of the address-error exception,
-        // which this core does not model.
-        Outcome::Skip("odd operand address (address-error abort not modeled)")
     } else {
         compare_final(tc, cpu, bus)
     };

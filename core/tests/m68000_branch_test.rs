@@ -63,7 +63,7 @@ fn bra_to_odd_address_takes_address_error() {
     bus.load(3 * 4, &0x4000u32.to_be_bytes()); // vector 3 handler
     step(&mut cpu, &mut bus);
     assert_eq!(cpu.pc, 0x4000, "odd target fetch enters vector 3");
-    assert!(cpu.took_address_error());
+    assert_eq!(cpu.a[7], 0x2000 - 14, "group-0 frame pushed");
 }
 
 // ---------------------------------------------------------------------------
@@ -297,7 +297,22 @@ fn jmp_to_odd_address_takes_address_error() {
     bus.load(3 * 4, &0x4000u32.to_be_bytes()); // vector 3 handler
     step(&mut cpu, &mut bus);
     assert_eq!(cpu.pc, 0x4000, "odd target fetch enters vector 3");
-    assert!(cpu.took_address_error());
+    assert_eq!(cpu.a[7], 0x2000 - 14, "group-0 frame pushed");
+}
+
+#[test]
+fn jsr_to_odd_address_faults_before_pushing() {
+    let (mut cpu, mut bus) = setup(&[0x4E90]); // JSR (A0)
+    cpu.a[0] = 0x3001;
+    cpu.a[7] = 0x2000;
+    bus.load(3 * 4, &0x4000u32.to_be_bytes());
+    step(&mut cpu, &mut bus);
+    assert_eq!(cpu.pc, 0x4000);
+    assert_eq!(
+        cpu.a[7],
+        0x2000 - 14,
+        "only the exception frame: the return address never pushed"
+    );
 }
 
 #[test]
@@ -343,12 +358,13 @@ fn rts_pops_return_address() {
 }
 
 #[test]
-fn rts_to_odd_address_flags_address_error() {
+fn rts_to_odd_address_takes_address_error() {
     let (mut cpu, mut bus) = setup(&[0x4E75]); // RTS
     cpu.a[7] = 0x1FFC;
     bus.load(0x1FFC, &[0x00, 0x00, 0x34, 0x57]);
+    bus.load(3 * 4, &0x4000u32.to_be_bytes());
     step(&mut cpu, &mut bus);
-    assert!(cpu.took_address_error());
+    assert_eq!(cpu.pc, 0x4000, "odd return address enters vector 3");
 }
 
 #[test]

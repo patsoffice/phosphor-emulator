@@ -8,12 +8,12 @@
 //! RTR, which exists to restore it.
 //!
 //! A control-flow target at an odd address raises an address error
-//! (vector 3) on the target fetch. Exception entry lands in M5; until then
-//! the odd target is flagged via `address_error`, the same as odd operand
-//! accesses (the validation harness skips such vectors).
+//! (vector 3) at the target fetch, aborting before PC is loaded; the
+//! frame stacks `target - 4` and a program-space function code (empirical,
+//! from the hardware-derived test vectors).
 
 use super::M68000;
-use super::addressing::{Ea, Size, sext8, sext16};
+use super::addressing::{AccessResult, AddressError, Ea, Size, sext8, sext16};
 use crate::core::{Bus, BusMaster};
 
 /// Documented JMP timing per control addressing mode (M68000UM table 8-1);
@@ -33,14 +33,21 @@ fn jump_cycles(mode: u8, reg: u8) -> u32 {
 }
 
 impl M68000 {
-    /// Load a new PC, flagging the address error a real 68000 would raise
-    /// when fetching the first instruction word from an odd address.
+    /// Load a new PC; an odd target raises the address error a real 68000
+    /// takes on the target fetch (program-space read, stacked PC =
+    /// target - 4) and PC is left for the exception entry to set.
     #[inline]
-    pub(crate) fn set_pc_checked(&mut self, target: u32) {
+    pub(crate) fn set_pc_checked(&mut self, target: u32) -> AccessResult<()> {
         if target & 1 != 0 {
-            self.flag_address_error(target, true);
+            return Err(AddressError {
+                addr: target,
+                write: false,
+                program: true,
+                stacked_pc: target.wrapping_sub(4),
+            });
         }
         self.pc = target;
+        Ok(())
     }
 
     /// BRA / BSR / Bcc `<label>` (line 0x6): PC-relative branch. The low
@@ -56,7 +63,7 @@ impl M68000 {
         opcode: u16,
         bus: &mut B,
         master: BusMaster,
-    ) {
+    ) -> AccessResult<()> {
         // The displacement base is the address of the word after the opcode.
         let base = self.pc;
         let disp8 = opcode as u8;
@@ -71,18 +78,19 @@ impl M68000 {
         match cond {
             // BSR: the return address is past the displacement word
             1 => {
-                self.push_long(bus, master, self.pc);
-                self.set_pc_checked(base.wrapping_add(disp));
+                self.push_long(bus, master, self.pc)?;
+                self.set_pc_checked(base.wrapping_add(disp))?;
                 self.finish(18);
             }
             // BRA (condition 0 encodes T) and taken Bcc
             _ if self.cc_true(cond) => {
-                self.set_pc_checked(base.wrapping_add(disp));
+                self.set_pc_checked(base.wrapping_add(disp))?;
                 self.finish(10);
             }
             // Not taken: the word form pays for its extension-word fetch
             _ => self.finish(if word_form { 12 } else { 8 }),
         }
+        Ok(())
     }
 
     /// DBcc Dn,`<label>` (line 0x5, size bits 11, EA mode 001): loop
@@ -97,13 +105,13 @@ impl M68000 {
         opcode: u16,
         bus: &mut B,
         master: BusMaster,
-    ) {
+    ) -> AccessResult<()> {
         let base = self.pc;
         let disp = sext16(self.read_imm_word(bus, master));
         let cond = ((opcode >> 8) & 0xF) as u8;
         if self.cc_true(cond) {
             self.finish(12);
-            return;
+            return Ok(());
         }
         let reg = (opcode & 7) as usize;
         let counter = (self.d[reg] as u16).wrapping_sub(1);
@@ -111,9 +119,10 @@ impl M68000 {
         if counter == 0xFFFF {
             self.finish(14);
         } else {
-            self.set_pc_checked(base.wrapping_add(disp));
+            self.set_pc_checked(base.wrapping_add(disp))?;
             self.finish(10);
         }
+        Ok(())
     }
 
     /// JMP `<ea>` / JSR `<ea>` (0x4EC0 / 0x4E80): load PC from a
@@ -128,25 +137,29 @@ impl M68000 {
         bus: &mut B,
         master: BusMaster,
         call: bool,
-    ) {
+    ) -> AccessResult<()> {
         let ea_mode = ((opcode >> 3) & 7) as u8;
         let ea_reg = (opcode & 7) as u8;
         // Control addressing only: register direct, (An)+/-(An), and #imm
-        // are illegal here (the exception lands in M5).
+        // are illegal here (the exception lands with full illegal coverage).
         if !(matches!(ea_mode, 2 | 5 | 6) || (ea_mode == 7 && ea_reg < 4)) {
             self.finish(4);
-            return;
+            return Ok(());
         }
         // The size only governs operand access, which never happens for an
         // address-only decode; control modes have no side effects.
         let Ea::Mem(target) = self.decode_ea(bus, master, ea_mode, ea_reg, Size::Word) else {
             unreachable!("control addressing modes always resolve to memory");
         };
+        // JSR faults on an odd target *before* pushing the return address
+        // (unlike BSR, which pushes first) — hardware-verified.
+        let return_pc = self.pc;
+        self.set_pc_checked(target)?;
         if call {
-            self.push_long(bus, master, self.pc);
+            self.push_long(bus, master, return_pc)?;
         }
-        self.set_pc_checked(target);
         self.finish(jump_cycles(ea_mode, ea_reg) + if call { 8 } else { 0 });
+        Ok(())
     }
 
     /// RTS (0x4E75): pop the return address into PC.
@@ -156,10 +169,11 @@ impl M68000 {
         &mut self,
         bus: &mut B,
         master: BusMaster,
-    ) {
-        let target = self.pop_long(bus, master);
-        self.set_pc_checked(target);
+    ) -> AccessResult<()> {
+        let target = self.pop_long(bus, master)?;
+        self.set_pc_checked(target)?;
         self.finish(16);
+        Ok(())
     }
 
     /// RTR (0x4E77): pop a word into the CCR, then pop the return address
@@ -172,11 +186,12 @@ impl M68000 {
         &mut self,
         bus: &mut B,
         master: BusMaster,
-    ) {
-        let ccr = self.pop_word(bus, master);
+    ) -> AccessResult<()> {
+        let ccr = self.pop_word(bus, master)?;
         self.sr = (self.sr & 0xFF00) | (ccr & 0x001F);
-        let target = self.pop_long(bus, master);
-        self.set_pc_checked(target);
+        let target = self.pop_long(bus, master)?;
+        self.set_pc_checked(target)?;
         self.finish(20);
+        Ok(())
     }
 }

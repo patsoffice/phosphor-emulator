@@ -6,7 +6,7 @@
 //! 0x48C0) but operates on a data register only.
 
 use super::super::M68000;
-use super::super::addressing::{Size, ea_cycles, sext8, sext16};
+use super::super::addressing::{AccessResult, Size, ea_cycles, sext8, sext16};
 use super::super::flags::SrFlag;
 use super::binary::size_from_bits;
 use crate::core::{Bus, BusMaster};
@@ -38,20 +38,20 @@ impl M68000 {
         bus: &mut B,
         master: BusMaster,
         op: UnaryOp,
-    ) {
+    ) -> AccessResult<()> {
         let Some(size) = size_from_bits(opcode >> 6) else {
             self.finish(4); // size 11 encodes the MOVE from/to SR/CCR group
-            return;
+            return Ok(());
         };
         let ea_mode = ((opcode >> 3) & 7) as u8;
         let ea_reg = (opcode & 7) as u8;
         if ea_mode == 1 || (ea_mode == 7 && ea_reg >= 2) {
             self.finish(4);
-            return;
+            return Ok(());
         }
 
         let ea = self.decode_ea(bus, master, ea_mode, ea_reg, size);
-        let dst = self.ea_read(bus, master, ea, size);
+        let dst = self.ea_read(bus, master, ea, size)?;
         let result = match op {
             UnaryOp::Negx => self.subx_with_flags(size, 0, dst),
             UnaryOp::Neg => {
@@ -69,7 +69,7 @@ impl M68000 {
                 0
             }
         };
-        self.ea_write(bus, master, ea, size, result);
+        self.ea_write(bus, master, ea, size, result)?;
 
         let base = match (ea_mode == 0, size == Size::Long) {
             (true, false) => 4,
@@ -84,6 +84,7 @@ impl M68000 {
                 ea_cycles(ea_mode, ea_reg, size)
             },
         );
+        Ok(())
     }
 
     /// EXT.w / EXT.l Dn (0x4880 / 0x48C0): sign-extend the low byte to a
@@ -91,7 +92,7 @@ impl M68000 {
     ///
     /// Flags: logical rule — N/Z from the extended result, V/C cleared,
     /// X untouched.
-    pub(crate) fn op_ext(&mut self, opcode: u16) {
+    pub(crate) fn op_ext(&mut self, opcode: u16) -> AccessResult<()> {
         let reg = (opcode & 7) as usize;
         if opcode & 0x0040 != 0 {
             // EXT.l: word -> long
@@ -105,6 +106,7 @@ impl M68000 {
             self.set_flags_logical(Size::Word, value);
         }
         self.finish(4);
+        Ok(())
     }
 
     /// TAS <ea> (0x4AC0, line 0x4 sub-op 0xA size bits 11): test-and-set —
@@ -121,17 +123,17 @@ impl M68000 {
         opcode: u16,
         bus: &mut B,
         master: BusMaster,
-    ) {
+    ) -> AccessResult<()> {
         let ea_mode = ((opcode >> 3) & 7) as u8;
         let ea_reg = (opcode & 7) as u8;
         if ea_mode == 1 || (ea_mode == 7 && ea_reg >= 2) {
             self.finish(4); // illegal destination
-            return;
+            return Ok(());
         }
         let ea = self.decode_ea(bus, master, ea_mode, ea_reg, Size::Byte);
-        let value = self.ea_read(bus, master, ea, Size::Byte);
+        let value = self.ea_read(bus, master, ea, Size::Byte)?;
         self.set_flags_logical(Size::Byte, value);
-        self.ea_write(bus, master, ea, Size::Byte, value | 0x80);
+        self.ea_write(bus, master, ea, Size::Byte, value | 0x80)?;
 
         let base = if ea_mode == 0 { 4 } else { 14 };
         self.finish(
@@ -141,6 +143,7 @@ impl M68000 {
                 ea_cycles(ea_mode, ea_reg, Size::Byte)
             },
         );
+        Ok(())
     }
 
     /// Scc <ea> (line 0x5, size bits 11, EA mode != An): write 0xFF to the
@@ -153,17 +156,17 @@ impl M68000 {
         opcode: u16,
         bus: &mut B,
         master: BusMaster,
-    ) {
+    ) -> AccessResult<()> {
         let ea_mode = ((opcode >> 3) & 7) as u8;
         let ea_reg = (opcode & 7) as u8;
         if ea_mode == 7 && ea_reg >= 2 {
             self.finish(4);
-            return;
+            return Ok(());
         }
         let cond = ((opcode >> 8) & 0xF) as u8;
         let taken = self.cc_true(cond);
         let ea = self.decode_ea(bus, master, ea_mode, ea_reg, Size::Byte);
-        self.ea_write(bus, master, ea, Size::Byte, if taken { 0xFF } else { 0x00 });
+        self.ea_write(bus, master, ea, Size::Byte, if taken { 0xFF } else { 0x00 })?;
 
         let base = if ea_mode == 0 {
             if taken { 6 } else { 4 }
@@ -177,5 +180,6 @@ impl M68000 {
                 ea_cycles(ea_mode, ea_reg, Size::Byte)
             },
         );
+        Ok(())
     }
 }

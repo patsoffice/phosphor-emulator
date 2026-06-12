@@ -2,13 +2,11 @@
 //! opmodes 011/111), and CHK (line 0x4, bits 8-6 = 110).
 //!
 //! All five take a word source operand (data addressing only) and a data
-//! register. Divide-by-zero (vector 5) and the CHK trap (vector 6) cannot
-//! be entered until exception support lands in M5; until then they set
-//! `trap_pending` and leave the destination register unchanged, and the
-//! validation harness skips affected vectors.
+//! register. Division by zero enters the vector-5 exception, an
+//! out-of-bounds CHK enters vector 6.
 
 use super::super::M68000;
-use super::super::addressing::{Size, ea_cycles, sext16};
+use super::super::addressing::{AccessResult, Size, ea_cycles, sext16};
 use super::super::flags::SrFlag;
 use crate::core::{Bus, BusMaster};
 
@@ -20,15 +18,15 @@ impl M68000 {
         opcode: u16,
         bus: &mut B,
         master: BusMaster,
-    ) -> Option<(u16, u32)> {
+    ) -> AccessResult<Option<(u16, u32)>> {
         let ea_mode = ((opcode >> 3) & 7) as u8;
         let ea_reg = (opcode & 7) as u8;
         if ea_mode == 1 {
-            return None;
+            return Ok(None);
         }
         let ea = self.decode_ea(bus, master, ea_mode, ea_reg, Size::Word);
-        let value = self.ea_read(bus, master, ea, Size::Word) as u16;
-        Some((value, ea_cycles(ea_mode, ea_reg, Size::Word)))
+        let value = self.ea_read(bus, master, ea, Size::Word)? as u16;
+        Ok(Some((value, ea_cycles(ea_mode, ea_reg, Size::Word))))
     }
 
     /// MULU.w / MULS.w <ea>,Dn — 16 × 16 → 32-bit product into the full Dn.
@@ -41,10 +39,10 @@ impl M68000 {
         bus: &mut B,
         master: BusMaster,
         signed: bool,
-    ) {
-        let Some((src, ea_time)) = self.muldiv_operand(opcode, bus, master) else {
+    ) -> AccessResult<()> {
+        let Some((src, ea_time)) = self.muldiv_operand(opcode, bus, master)? else {
             self.finish(4);
-            return;
+            return Ok(());
         };
         let dn = ((opcode >> 9) & 7) as usize;
         let dst = self.d[dn] as u16;
@@ -60,6 +58,7 @@ impl M68000 {
         // Documented worst case is 38 + 2n internal cycles; the data-dependent
         // refinement can land with cycle-exact timing work.
         self.finish(70 + ea_time);
+        Ok(())
     }
 
     /// DIVU.w / DIVS.w <ea>,Dn — 32 ÷ 16 → 16-bit quotient in the low word
@@ -75,10 +74,10 @@ impl M68000 {
         bus: &mut B,
         master: BusMaster,
         signed: bool,
-    ) {
-        let Some((src, ea_time)) = self.muldiv_operand(opcode, bus, master) else {
+    ) -> AccessResult<()> {
+        let Some((src, ea_time)) = self.muldiv_operand(opcode, bus, master)? else {
             self.finish(4);
-            return;
+            return Ok(());
         };
         let dn = ((opcode >> 9) & 7) as usize;
         let dst = self.d[dn];
@@ -92,9 +91,9 @@ impl M68000 {
             self.set_flag(SrFlag::Z, false);
             self.set_flag(SrFlag::V, false);
             self.set_flag(SrFlag::C, false);
-            self.exception(bus, master, 5, self.instr_pc);
+            self.exception(bus, master, 5, self.instr_pc)?;
             self.finish(42 + ea_time);
-            return;
+            return Ok(());
         }
 
         if signed {
@@ -104,7 +103,7 @@ impl M68000 {
                 self.d[dn] = 0;
                 self.set_flags_logical(Size::Long, 0);
                 self.finish(158 + ea_time);
-                return;
+                return Ok(());
             }
             let quotient = (dst as i32) / divisor;
             let remainder = (dst as i32) % divisor;
@@ -138,6 +137,7 @@ impl M68000 {
             }
             self.finish(140 + ea_time);
         }
+        Ok(())
     }
 
     /// CHK.w <ea>,Dn — vector-6 exception if the signed word in Dn is
@@ -152,10 +152,10 @@ impl M68000 {
         opcode: u16,
         bus: &mut B,
         master: BusMaster,
-    ) {
-        let Some((bound, ea_time)) = self.muldiv_operand(opcode, bus, master) else {
+    ) -> AccessResult<()> {
+        let Some((bound, ea_time)) = self.muldiv_operand(opcode, bus, master)? else {
             self.finish(4);
-            return;
+            return Ok(());
         };
         let dn = ((opcode >> 9) & 7) as usize;
         let src = sext16(self.d[dn] as u16) as i32;
@@ -166,10 +166,11 @@ impl M68000 {
         self.set_flag(SrFlag::C, false);
         if src < 0 || src > bound {
             self.set_flag(SrFlag::N, src < 0);
-            self.exception(bus, master, 6, self.pc);
+            self.exception(bus, master, 6, self.pc)?;
             self.finish(44 + ea_time);
         } else {
             self.finish(10 + ea_time);
         }
+        Ok(())
     }
 }

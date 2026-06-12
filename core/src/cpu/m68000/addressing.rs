@@ -18,9 +18,10 @@
 //!   state-comparison validation, since the other byte is preserved) but not
 //!   faithful for write-only or side-effecting memory-mapped registers —
 //!   revisit if a real machine needs strobe-accurate byte writes.
-//! - **Odd word/long addresses** raise an address error (vector 3) on real
-//!   hardware. The exception lands in M5; until then the access is flagged
-//!   via `address_error` and forced even so execution stays deterministic.
+//! - **Odd word/long addresses** raise an [`AddressError`] that propagates
+//!   out of the instruction handler, aborting the instruction at the
+//!   faulting access exactly like hardware (side effects already applied
+//!   stay applied); `enter_address_error` then builds the group-0 frame.
 //!
 //! Effective addresses are computed at the full 32 bits (the 68000 ALU is
 //! 32-bit internally — JMP/JSR load the unmasked value into PC, LEA into
@@ -69,6 +70,26 @@ impl Size {
         }
     }
 }
+
+/// A word or long access faulted on an odd address (address error,
+/// vector 3). Raised at the access site and propagated out of the
+/// instruction handler, aborting the instruction exactly where real
+/// hardware does; `enter_address_error` builds the group-0 frame from it.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) struct AddressError {
+    /// The faulting (odd) address.
+    pub(crate) addr: u32,
+    /// True for a write access.
+    pub(crate) write: bool,
+    /// Program-space fault (control-flow target fetch) vs data operand.
+    pub(crate) program: bool,
+    /// PC value the frame stacks: `current PC - 2` for operand faults,
+    /// `target - 4` for control-transfer faults (empirical, from the
+    /// hardware-derived test vectors).
+    pub(crate) stacked_pc: u32,
+}
+
+pub(crate) type AccessResult<T> = Result<T, AddressError>;
 
 /// A resolved operand location.
 ///
@@ -124,38 +145,45 @@ pub(crate) fn sext16(v: u16) -> u32 {
 }
 
 impl M68000 {
-    /// Flag word/long access at an odd address (address error, vector 3 —
-    /// entered once the instruction completes) and force the address even
-    /// so execution continues deterministically.
+    /// Build the operand-fault error for an odd word/long access: the
+    /// stacked PC is the current PC minus one word (empirical rule — it
+    /// tracks how many extension words the instruction had consumed).
     #[inline]
-    fn check_aligned(&mut self, addr: u32, read: bool) -> u32 {
-        if addr & 1 != 0 {
-            self.flag_address_error(addr, read);
+    fn operand_fault(&self, addr: u32, write: bool) -> AddressError {
+        AddressError {
+            addr,
+            write,
+            program: false,
+            stacked_pc: self.pc.wrapping_sub(2),
         }
-        addr & !1
     }
 
-    /// Read one word at `addr` (must be even; odd flags an address error).
+    /// Read one word at `addr`; odd addresses raise the address error.
     pub(crate) fn read_word_at<B: Bus<Address = u32, Data = u16> + ?Sized>(
         &mut self,
         bus: &mut B,
         master: BusMaster,
         addr: u32,
-    ) -> u16 {
-        let addr = self.check_aligned(addr, true);
-        bus.read(master, self.mask_addr(addr))
+    ) -> AccessResult<u16> {
+        if addr & 1 != 0 {
+            return Err(self.operand_fault(addr, false));
+        }
+        Ok(bus.read(master, self.mask_addr(addr)))
     }
 
-    /// Write one word at `addr` (must be even; odd flags an address error).
+    /// Write one word at `addr`; odd addresses raise the address error.
     pub(crate) fn write_word_at<B: Bus<Address = u32, Data = u16> + ?Sized>(
         &mut self,
         bus: &mut B,
         master: BusMaster,
         addr: u32,
         data: u16,
-    ) {
-        let addr = self.check_aligned(addr, false);
+    ) -> AccessResult<()> {
+        if addr & 1 != 0 {
+            return Err(self.operand_fault(addr, true));
+        }
         bus.write(master, self.mask_addr(addr), data);
+        Ok(())
     }
 
     /// Read a long word as two word transactions (big-endian, high first).
@@ -164,10 +192,10 @@ impl M68000 {
         bus: &mut B,
         master: BusMaster,
         addr: u32,
-    ) -> u32 {
-        let hi = self.read_word_at(bus, master, addr);
-        let lo = self.read_word_at(bus, master, addr.wrapping_add(2));
-        ((hi as u32) << 16) | lo as u32
+    ) -> AccessResult<u32> {
+        let hi = self.read_word_at(bus, master, addr)?;
+        let lo = self.read_word_at(bus, master, addr.wrapping_add(2))?;
+        Ok(((hi as u32) << 16) | lo as u32)
     }
 
     /// Write a long word as two word transactions (big-endian, high first).
@@ -177,9 +205,9 @@ impl M68000 {
         master: BusMaster,
         addr: u32,
         data: u32,
-    ) {
-        self.write_word_at(bus, master, addr, (data >> 16) as u16);
-        self.write_word_at(bus, master, addr.wrapping_add(2), data as u16);
+    ) -> AccessResult<()> {
+        self.write_word_at(bus, master, addr, (data >> 16) as u16)?;
+        self.write_word_at(bus, master, addr.wrapping_add(2), data as u16)
     }
 
     /// Read one byte: fetch the containing word and select the high byte
@@ -223,9 +251,9 @@ impl M68000 {
         bus: &mut B,
         master: BusMaster,
         value: u16,
-    ) {
+    ) -> AccessResult<()> {
         self.a[7] = self.a[7].wrapping_sub(2);
-        self.write_word_at(bus, master, self.a[7], value);
+        self.write_word_at(bus, master, self.a[7], value)
     }
 
     /// Push a long word onto the active stack (A7 predecrements by 4).
@@ -234,9 +262,9 @@ impl M68000 {
         bus: &mut B,
         master: BusMaster,
         value: u32,
-    ) {
+    ) -> AccessResult<()> {
         self.a[7] = self.a[7].wrapping_sub(4);
-        self.write_long_at(bus, master, self.a[7], value);
+        self.write_long_at(bus, master, self.a[7], value)
     }
 
     /// Pop a word from the active stack (A7 postincrements by 2).
@@ -244,10 +272,10 @@ impl M68000 {
         &mut self,
         bus: &mut B,
         master: BusMaster,
-    ) -> u16 {
-        let value = self.read_word_at(bus, master, self.a[7]);
+    ) -> AccessResult<u16> {
+        let value = self.read_word_at(bus, master, self.a[7])?;
         self.a[7] = self.a[7].wrapping_add(2);
-        value
+        Ok(value)
     }
 
     /// Pop a long word from the active stack (A7 postincrements by 4).
@@ -255,20 +283,23 @@ impl M68000 {
         &mut self,
         bus: &mut B,
         master: BusMaster,
-    ) -> u32 {
-        let value = self.read_long_at(bus, master, self.a[7]);
+    ) -> AccessResult<u32> {
+        let value = self.read_long_at(bus, master, self.a[7])?;
         self.a[7] = self.a[7].wrapping_add(4);
-        value
+        Ok(value)
     }
 
     /// Fetch one extension word from the instruction stream and advance PC
-    /// (the prefetch primitive).
+    /// (the prefetch primitive). PC is invariantly even — every control
+    /// transfer to an odd address faults before it is fetched from — so
+    /// this access cannot raise an address error.
     pub(crate) fn read_imm_word<B: Bus<Address = u32, Data = u16> + ?Sized>(
         &mut self,
         bus: &mut B,
         master: BusMaster,
     ) -> u16 {
-        let word = self.read_word_at(bus, master, self.pc);
+        debug_assert!(self.pc & 1 == 0, "instruction stream PC must be even");
+        let word = bus.read(master, self.mask_addr(self.pc));
         self.pc = self.pc.wrapping_add(2);
         word
     }
@@ -277,7 +308,7 @@ impl M68000 {
     /// operand size in bytes, except byte-sized accesses through A7 step by
     /// 2 to keep the stack pointer word-aligned.
     #[inline]
-    fn step_for(&self, reg: usize, size: Size) -> u32 {
+    pub(crate) fn step_for(&self, reg: usize, size: Size) -> u32 {
         if reg == 7 && size == Size::Byte {
             2
         } else {
@@ -404,8 +435,8 @@ impl M68000 {
         master: BusMaster,
         ea: Ea,
         size: Size,
-    ) -> u32 {
-        match ea {
+    ) -> AccessResult<u32> {
+        Ok(match ea {
             Ea::DataReg(r) => self.d[r] & size.mask(),
             Ea::AddrReg(r) => {
                 debug_assert!(size != Size::Byte, "byte access to An is illegal");
@@ -413,11 +444,11 @@ impl M68000 {
             }
             Ea::Mem(addr) => match size {
                 Size::Byte => self.read_byte_at(bus, master, addr) as u32,
-                Size::Word => self.read_word_at(bus, master, addr) as u32,
-                Size::Long => self.read_long_at(bus, master, addr),
+                Size::Word => self.read_word_at(bus, master, addr)? as u32,
+                Size::Long => self.read_long_at(bus, master, addr)?,
             },
             Ea::Imm(v) => v & size.mask(),
-        }
+        })
     }
 
     /// Write an operand of `size` through a resolved [`Ea`].
@@ -432,7 +463,7 @@ impl M68000 {
         ea: Ea,
         size: Size,
         value: u32,
-    ) {
+    ) -> AccessResult<()> {
         match ea {
             Ea::DataReg(r) => {
                 self.d[r] = (self.d[r] & !size.mask()) | (value & size.mask());
@@ -446,11 +477,12 @@ impl M68000 {
             }
             Ea::Mem(addr) => match size {
                 Size::Byte => self.write_byte_at(bus, master, addr, value as u8),
-                Size::Word => self.write_word_at(bus, master, addr, value as u16),
-                Size::Long => self.write_long_at(bus, master, addr, value),
+                Size::Word => return self.write_word_at(bus, master, addr, value as u16),
+                Size::Long => return self.write_long_at(bus, master, addr, value),
             },
             Ea::Imm(_) => debug_assert!(false, "write to immediate operand"),
         }
+        Ok(())
     }
 }
 
@@ -471,20 +503,19 @@ mod tests {
     fn word_access_is_big_endian() {
         let (mut cpu, mut bus) = setup();
         bus.load(0x1000, &[0x12, 0x34]);
-        assert_eq!(cpu.read_word_at(&mut bus, M, 0x1000), 0x1234);
+        assert_eq!(cpu.read_word_at(&mut bus, M, 0x1000).unwrap(), 0x1234);
 
-        cpu.write_word_at(&mut bus, M, 0x2000, 0xBEEF);
+        cpu.write_word_at(&mut bus, M, 0x2000, 0xBEEF).unwrap();
         assert_eq!(&bus.memory[0x2000..0x2002], &[0xBE, 0xEF]);
-        assert!(!cpu.took_address_error());
     }
 
     #[test]
     fn long_access_is_two_words_high_first() {
         let (mut cpu, mut bus) = setup();
         bus.load(0x1000, &[0x12, 0x34, 0x56, 0x78]);
-        assert_eq!(cpu.read_long_at(&mut bus, M, 0x1000), 0x1234_5678);
+        assert_eq!(cpu.read_long_at(&mut bus, M, 0x1000).unwrap(), 0x1234_5678);
 
-        cpu.write_long_at(&mut bus, M, 0x2000, 0xDEAD_BEEF);
+        cpu.write_long_at(&mut bus, M, 0x2000, 0xDEAD_BEEF).unwrap();
         assert_eq!(&bus.memory[0x2000..0x2004], &[0xDE, 0xAD, 0xBE, 0xEF]);
     }
 
@@ -493,8 +524,11 @@ mod tests {
         let (mut cpu, mut bus) = setup();
         bus.load(0x1000, &[0xAB, 0xCD]);
         assert_eq!(cpu.read_byte_at(&mut bus, M, 0x1000), 0xAB, "even = UDS");
-        assert_eq!(cpu.read_byte_at(&mut bus, M, 0x1001), 0xCD, "odd = LDS");
-        assert!(!cpu.took_address_error(), "byte access is never misaligned");
+        assert_eq!(
+            cpu.read_byte_at(&mut bus, M, 0x1001),
+            0xCD,
+            "odd = LDS, byte access is never misaligned"
+        );
     }
 
     #[test]
@@ -508,18 +542,20 @@ mod tests {
     }
 
     #[test]
-    fn odd_word_access_flags_address_error() {
+    fn odd_word_access_raises_address_error() {
         let (mut cpu, mut bus) = setup();
-        cpu.read_word_at(&mut bus, M, 0x1001);
-        assert!(cpu.took_address_error());
+        cpu.pc = 0x0C04; // pretend one extension word was consumed
+        let err = cpu.read_word_at(&mut bus, M, 0x1001).unwrap_err();
+        assert_eq!(err.addr, 0x1001);
+        assert!(!err.write);
+        assert!(!err.program);
+        assert_eq!(err.stacked_pc, 0x0C02, "operand faults stack PC - 2");
 
-        let (mut cpu, mut bus) = setup();
-        cpu.write_word_at(&mut bus, M, 0x1001, 0);
-        assert!(cpu.took_address_error());
+        let err = cpu.write_word_at(&mut bus, M, 0x1001, 0).unwrap_err();
+        assert!(err.write);
 
-        let (mut cpu, mut bus) = setup();
-        cpu.read_long_at(&mut bus, M, 0x1003);
-        assert!(cpu.took_address_error());
+        let err = cpu.read_long_at(&mut bus, M, 0x1003).unwrap_err();
+        assert_eq!(err.addr, 0x1003, "the first (odd) word transaction faults");
     }
 
     #[test]
@@ -787,8 +823,8 @@ mod tests {
         assert_eq!(ea, Ea::Mem(0xFF12_3456), "EA computed at full width");
         // mask_addr (separately unit-tested) truncates to 24 bits at the
         // word/byte access layer, so reads through the full-width EA work.
-        cpu.ea_write(&mut bus, M, ea, Size::Word, 0xBEEF);
-        assert_eq!(cpu.ea_read(&mut bus, M, ea, Size::Word), 0xBEEF);
+        cpu.ea_write(&mut bus, M, ea, Size::Word, 0xBEEF).unwrap();
+        assert_eq!(cpu.ea_read(&mut bus, M, ea, Size::Word).unwrap(), 0xBEEF);
     }
 
     // --- ea_read / ea_write ---
@@ -797,10 +833,19 @@ mod tests {
     fn ea_read_data_register_masks_to_size() {
         let (mut cpu, mut bus) = setup();
         cpu.d[1] = 0x8765_4321;
-        assert_eq!(cpu.ea_read(&mut bus, M, Ea::DataReg(1), Size::Byte), 0x21);
-        assert_eq!(cpu.ea_read(&mut bus, M, Ea::DataReg(1), Size::Word), 0x4321);
         assert_eq!(
-            cpu.ea_read(&mut bus, M, Ea::DataReg(1), Size::Long),
+            cpu.ea_read(&mut bus, M, Ea::DataReg(1), Size::Byte)
+                .unwrap(),
+            0x21
+        );
+        assert_eq!(
+            cpu.ea_read(&mut bus, M, Ea::DataReg(1), Size::Word)
+                .unwrap(),
+            0x4321
+        );
+        assert_eq!(
+            cpu.ea_read(&mut bus, M, Ea::DataReg(1), Size::Long)
+                .unwrap(),
             0x8765_4321
         );
     }
@@ -809,9 +854,14 @@ mod tests {
     fn ea_read_address_register_masks_to_size() {
         let (mut cpu, mut bus) = setup();
         cpu.a[2] = 0x8765_4321;
-        assert_eq!(cpu.ea_read(&mut bus, M, Ea::AddrReg(2), Size::Word), 0x4321);
         assert_eq!(
-            cpu.ea_read(&mut bus, M, Ea::AddrReg(2), Size::Long),
+            cpu.ea_read(&mut bus, M, Ea::AddrReg(2), Size::Word)
+                .unwrap(),
+            0x4321
+        );
+        assert_eq!(
+            cpu.ea_read(&mut bus, M, Ea::AddrReg(2), Size::Long)
+                .unwrap(),
             0x8765_4321
         );
     }
@@ -820,11 +870,14 @@ mod tests {
     fn ea_write_data_register_preserves_upper_bits() {
         let (mut cpu, mut bus) = setup();
         cpu.d[3] = 0xAABB_CCDD;
-        cpu.ea_write(&mut bus, M, Ea::DataReg(3), Size::Byte, 0x11);
+        cpu.ea_write(&mut bus, M, Ea::DataReg(3), Size::Byte, 0x11)
+            .unwrap();
         assert_eq!(cpu.d[3], 0xAABB_CC11);
-        cpu.ea_write(&mut bus, M, Ea::DataReg(3), Size::Word, 0x2222);
+        cpu.ea_write(&mut bus, M, Ea::DataReg(3), Size::Word, 0x2222)
+            .unwrap();
         assert_eq!(cpu.d[3], 0xAABB_2222);
-        cpu.ea_write(&mut bus, M, Ea::DataReg(3), Size::Long, 0x3333_3333);
+        cpu.ea_write(&mut bus, M, Ea::DataReg(3), Size::Long, 0x3333_3333)
+            .unwrap();
         assert_eq!(cpu.d[3], 0x3333_3333);
     }
 
@@ -832,9 +885,11 @@ mod tests {
     fn ea_write_address_register_word_sign_extends() {
         let (mut cpu, mut bus) = setup();
         cpu.a[4] = 0xAABB_CCDD;
-        cpu.ea_write(&mut bus, M, Ea::AddrReg(4), Size::Word, 0x8000);
+        cpu.ea_write(&mut bus, M, Ea::AddrReg(4), Size::Word, 0x8000)
+            .unwrap();
         assert_eq!(cpu.a[4], 0xFFFF_8000, "negative word fills upper bits");
-        cpu.ea_write(&mut bus, M, Ea::AddrReg(4), Size::Word, 0x7FFF);
+        cpu.ea_write(&mut bus, M, Ea::AddrReg(4), Size::Word, 0x7FFF)
+            .unwrap();
         assert_eq!(cpu.a[4], 0x0000_7FFF, "positive word clears upper bits");
     }
 
@@ -843,14 +898,19 @@ mod tests {
         let (mut cpu, mut bus) = setup();
         let ea = Ea::Mem(0x4000);
 
-        cpu.ea_write(&mut bus, M, ea, Size::Long, 0x1122_3344);
-        assert_eq!(cpu.ea_read(&mut bus, M, ea, Size::Long), 0x1122_3344);
-        assert_eq!(cpu.ea_read(&mut bus, M, ea, Size::Word), 0x1122);
-        assert_eq!(cpu.ea_read(&mut bus, M, ea, Size::Byte), 0x11);
-
-        cpu.ea_write(&mut bus, M, Ea::Mem(0x4001), Size::Byte, 0xFF);
+        cpu.ea_write(&mut bus, M, ea, Size::Long, 0x1122_3344)
+            .unwrap();
         assert_eq!(
-            cpu.ea_read(&mut bus, M, ea, Size::Long),
+            cpu.ea_read(&mut bus, M, ea, Size::Long).unwrap(),
+            0x1122_3344
+        );
+        assert_eq!(cpu.ea_read(&mut bus, M, ea, Size::Word).unwrap(), 0x1122);
+        assert_eq!(cpu.ea_read(&mut bus, M, ea, Size::Byte).unwrap(), 0x11);
+
+        cpu.ea_write(&mut bus, M, Ea::Mem(0x4001), Size::Byte, 0xFF)
+            .unwrap();
+        assert_eq!(
+            cpu.ea_read(&mut bus, M, ea, Size::Long).unwrap(),
             0x11FF_3344,
             "byte write into the middle of the long"
         );
@@ -860,11 +920,13 @@ mod tests {
     fn ea_read_immediate_masks_to_size() {
         let (mut cpu, mut bus) = setup();
         assert_eq!(
-            cpu.ea_read(&mut bus, M, Ea::Imm(0x1234_5678), Size::Byte),
+            cpu.ea_read(&mut bus, M, Ea::Imm(0x1234_5678), Size::Byte)
+                .unwrap(),
             0x78
         );
         assert_eq!(
-            cpu.ea_read(&mut bus, M, Ea::Imm(0x1234_5678), Size::Word),
+            cpu.ea_read(&mut bus, M, Ea::Imm(0x1234_5678), Size::Word)
+                .unwrap(),
             0x5678
         );
     }

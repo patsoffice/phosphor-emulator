@@ -15,7 +15,7 @@
 //! handlers here run.
 
 use super::super::M68000;
-use super::super::addressing::{Size, ea_cycles, sext16};
+use super::super::addressing::{AccessResult, Ea, Size, ea_cycles, sext16};
 use super::super::flags::SrFlag;
 use crate::core::{Bus, BusMaster};
 
@@ -60,7 +60,7 @@ impl M68000 {
         bus: &mut B,
         master: BusMaster,
         is_add: bool,
-    ) {
+    ) -> AccessResult<()> {
         let dn = ((opcode >> 9) & 7) as usize;
         let opmode = (opcode >> 6) & 7;
         let ea_mode = ((opcode >> 3) & 7) as u8;
@@ -73,10 +73,10 @@ impl M68000 {
                 // Byte reads from An are illegal encodings
                 if size == Size::Byte && ea_mode == 1 {
                     self.finish(4);
-                    return;
+                    return Ok(());
                 }
                 let src = self.decode_ea(bus, master, ea_mode, ea_reg, size);
-                let b = self.ea_read(bus, master, src, size);
+                let b = self.ea_read(bus, master, src, size)?;
                 let a = self.d[dn];
                 let result = if is_add {
                     self.add_with_flags(size, a, b)
@@ -90,15 +90,15 @@ impl M68000 {
                 self.finish(base + ea_cycles(ea_mode, ea_reg, size));
             }
             // <ea> ⟵ <ea> op Dn (memory-alterable destinations only;
-            // Dn/An here encode ADDX/SUBX, which land in M2)
+            // Dn/An here encode ADDX/SUBX, routed by the caller)
             4..=6 => {
                 let size = size_from_bits(opmode).unwrap();
                 if ea_mode < 2 || (ea_mode == 7 && ea_reg >= 2) {
-                    self.finish(4); // ADDX/SUBX (M2) or illegal destination
-                    return;
+                    self.finish(4); // illegal destination
+                    return Ok(());
                 }
                 let dst = self.decode_ea(bus, master, ea_mode, ea_reg, size);
-                let a = self.ea_read(bus, master, dst, size);
+                let a = self.ea_read(bus, master, dst, size)?;
                 let b = self.d[dn];
                 let result = if is_add {
                     self.add_with_flags(size, a, b)
@@ -106,7 +106,7 @@ impl M68000 {
                     self.sub_with_flags(size, a, b)
                 };
                 self.set_flag(SrFlag::X, self.flag_is_set(SrFlag::C));
-                self.ea_write(bus, master, dst, size, result);
+                self.ea_write(bus, master, dst, size, result)?;
 
                 let base = if size == Size::Long { 12 } else { 8 };
                 self.finish(base + ea_cycles(ea_mode, ea_reg, size));
@@ -115,7 +115,7 @@ impl M68000 {
             _ => {
                 let size = if opmode == 3 { Size::Word } else { Size::Long };
                 let src = self.decode_ea(bus, master, ea_mode, ea_reg, size);
-                let value = self.ea_read(bus, master, src, size);
+                let value = self.ea_read(bus, master, src, size)?;
                 let value = if size == Size::Word {
                     sext16(value as u16)
                 } else {
@@ -132,6 +132,7 @@ impl M68000 {
                 self.finish(base + ea_cycles(ea_mode, ea_reg, size));
             }
         }
+        Ok(())
     }
 
     /// CMP (line 0xB, opmodes 000-010) and CMPA (011/111).
@@ -145,7 +146,7 @@ impl M68000 {
         opcode: u16,
         bus: &mut B,
         master: BusMaster,
-    ) {
+    ) -> AccessResult<()> {
         let dn = ((opcode >> 9) & 7) as usize;
         let opmode = (opcode >> 6) & 7;
         let ea_mode = ((opcode >> 3) & 7) as u8;
@@ -156,10 +157,10 @@ impl M68000 {
                 let size = size_from_bits(opmode).unwrap();
                 if size == Size::Byte && ea_mode == 1 {
                     self.finish(4); // byte read from An is illegal
-                    return;
+                    return Ok(());
                 }
                 let src = self.decode_ea(bus, master, ea_mode, ea_reg, size);
-                let b = self.ea_read(bus, master, src, size);
+                let b = self.ea_read(bus, master, src, size)?;
                 self.sub_with_flags(size, self.d[dn], b);
 
                 let base = if size == Size::Long { 6 } else { 4 };
@@ -168,7 +169,7 @@ impl M68000 {
             3 | 7 => {
                 let size = if opmode == 3 { Size::Word } else { Size::Long };
                 let src = self.decode_ea(bus, master, ea_mode, ea_reg, size);
-                let value = self.ea_read(bus, master, src, size);
+                let value = self.ea_read(bus, master, src, size)?;
                 let value = if size == Size::Word {
                     sext16(value as u16)
                 } else {
@@ -181,6 +182,7 @@ impl M68000 {
             // CMPM / EOR — routed by execute_instruction before this runs
             _ => self.finish(4),
         }
+        Ok(())
     }
 
     /// AND (line 0xC) and OR (line 0x8) in both directions, and EOR
@@ -196,7 +198,7 @@ impl M68000 {
         bus: &mut B,
         master: BusMaster,
         op: LogicalOp,
-    ) {
+    ) -> AccessResult<()> {
         let dn = ((opcode >> 9) & 7) as usize;
         let opmode = (opcode >> 6) & 7;
         let ea_mode = ((opcode >> 3) & 7) as u8;
@@ -208,10 +210,10 @@ impl M68000 {
                 let size = size_from_bits(opmode).unwrap();
                 if ea_mode == 1 {
                     self.finish(4);
-                    return;
+                    return Ok(());
                 }
                 let src = self.decode_ea(bus, master, ea_mode, ea_reg, size);
-                let b = self.ea_read(bus, master, src, size);
+                let b = self.ea_read(bus, master, src, size)?;
                 let result = op.apply(self.d[dn], b) & size.mask();
                 self.set_flags_logical(size, result);
                 self.d[dn] = (self.d[dn] & !size.mask()) | result;
@@ -227,13 +229,13 @@ impl M68000 {
                 let dn_dest_ok = op == LogicalOp::Eor && ea_mode == 0;
                 if (ea_mode < 2 && !dn_dest_ok) || (ea_mode == 7 && ea_reg >= 2) {
                     self.finish(4);
-                    return;
+                    return Ok(());
                 }
                 let dst = self.decode_ea(bus, master, ea_mode, ea_reg, size);
-                let a = self.ea_read(bus, master, dst, size);
+                let a = self.ea_read(bus, master, dst, size)?;
                 let result = op.apply(a, self.d[dn]) & size.mask();
                 self.set_flags_logical(size, result);
-                self.ea_write(bus, master, dst, size, result);
+                self.ea_write(bus, master, dst, size, result)?;
 
                 let base = if ea_mode == 0 {
                     if size == Size::Long { 8 } else { 4 }
@@ -247,6 +249,7 @@ impl M68000 {
             // Opmodes 011/111 (MULx/DIVx) are routed by the caller
             _ => self.finish(4),
         }
+        Ok(())
     }
 
     /// ADDX (line 0xD) and SUBX (line 0x9), opmodes 100-110 with an EA mode
@@ -262,7 +265,7 @@ impl M68000 {
         bus: &mut B,
         master: BusMaster,
         is_add: bool,
-    ) {
+    ) -> AccessResult<()> {
         let rx = ((opcode >> 9) & 7) as u8; // destination
         let ry = (opcode & 7) as u8; // source
         let size = size_from_bits(opcode >> 6).unwrap();
@@ -270,16 +273,15 @@ impl M68000 {
 
         if mem {
             // Source predecrements first, then the destination.
-            let src = self.decode_ea(bus, master, 4, ry, size);
-            let b = self.ea_read(bus, master, src, size);
-            let dst = self.decode_ea(bus, master, 4, rx, size);
-            let a = self.ea_read(bus, master, dst, size);
+            let b = self.addx_predec_read(bus, master, ry as usize, size)?;
+            let a = self.addx_predec_read(bus, master, rx as usize, size)?;
             let result = if is_add {
                 self.addx_with_flags(size, a, b)
             } else {
                 self.subx_with_flags(size, a, b)
             };
-            self.ea_write(bus, master, dst, size, result);
+            let dst = Ea::Mem(self.a[rx as usize]);
+            self.ea_write(bus, master, dst, size, result)?;
             self.finish(if size == Size::Long { 30 } else { 18 });
         } else {
             let a = self.d[rx as usize];
@@ -292,6 +294,31 @@ impl M68000 {
             self.d[rx as usize] = (a & !size.mask()) | result;
             self.finish(if size == Size::Long { 8 } else { 4 });
         }
+        Ok(())
+    }
+
+    /// Read the `-(An)` operand of the extended-arithmetic memory forms.
+    /// ADDX/SUBX read long operands low word first, stepping An by 2 at a
+    /// time, so a fault on an odd address leaves An decremented by only 2
+    /// (hardware-verified; ordinary predecrement EAs like CLR.l move An by
+    /// the full operand size before the high-first access).
+    fn addx_predec_read<B: Bus<Address = u32, Data = u16> + ?Sized>(
+        &mut self,
+        bus: &mut B,
+        master: BusMaster,
+        reg: usize,
+        size: Size,
+    ) -> AccessResult<u32> {
+        if size == Size::Long {
+            self.a[reg] = self.a[reg].wrapping_sub(2);
+            let lo = self.read_word_at(bus, master, self.a[reg])?;
+            self.a[reg] = self.a[reg].wrapping_sub(2);
+            let hi = self.read_word_at(bus, master, self.a[reg])?;
+            Ok(((hi as u32) << 16) | lo as u32)
+        } else {
+            let ea = self.decode_ea(bus, master, 4, reg as u8, size);
+            self.ea_read(bus, master, ea, size)
+        }
     }
 
     /// CMPM (Ay)+,(Ax)+ — line 0xB, opmodes 100-110 with EA mode An.
@@ -303,18 +330,19 @@ impl M68000 {
         opcode: u16,
         bus: &mut B,
         master: BusMaster,
-    ) {
+    ) -> AccessResult<()> {
         let ax = ((opcode >> 9) & 7) as u8;
         let ay = (opcode & 7) as u8;
         let size = size_from_bits(opcode >> 6).unwrap();
 
         // Source postincrements first, then the destination.
         let src = self.decode_ea(bus, master, 3, ay, size);
-        let b = self.ea_read(bus, master, src, size);
+        let b = self.ea_read(bus, master, src, size)?;
         let dst = self.decode_ea(bus, master, 3, ax, size);
-        let a = self.ea_read(bus, master, dst, size);
+        let a = self.ea_read(bus, master, dst, size)?;
         self.sub_with_flags(size, a, b);
         self.finish(if size == Size::Long { 20 } else { 12 });
+        Ok(())
     }
 
     /// Shared ABCD core: BCD-add `src + dst + X`, modeling the hardware's
@@ -388,22 +416,22 @@ impl M68000 {
         bus: &mut B,
         master: BusMaster,
         is_add: bool,
-    ) {
+    ) -> AccessResult<()> {
         let rx = ((opcode >> 9) & 7) as u8;
         let ry = (opcode & 7) as u8;
         let mem = opcode & 0x0008 != 0;
 
         if mem {
             let src = self.decode_ea(bus, master, 4, ry, Size::Byte);
-            let b = self.ea_read(bus, master, src, Size::Byte);
+            let b = self.ea_read(bus, master, src, Size::Byte)?;
             let dst = self.decode_ea(bus, master, 4, rx, Size::Byte);
-            let a = self.ea_read(bus, master, dst, Size::Byte);
+            let a = self.ea_read(bus, master, dst, Size::Byte)?;
             let result = if is_add {
                 self.abcd_core(b, a)
             } else {
                 self.sbcd_core(b, a)
             };
-            self.ea_write(bus, master, dst, Size::Byte, result);
+            self.ea_write(bus, master, dst, Size::Byte, result)?;
             self.finish(18);
         } else {
             let a = self.d[rx as usize];
@@ -416,6 +444,7 @@ impl M68000 {
             self.d[rx as usize] = (a & !0xFF) | result;
             self.finish(6);
         }
+        Ok(())
     }
 
     /// NBCD <ea> (line 0x4, 0x4800): BCD-negate the operand — `0 - dst - X`
@@ -428,20 +457,21 @@ impl M68000 {
         opcode: u16,
         bus: &mut B,
         master: BusMaster,
-    ) {
+    ) -> AccessResult<()> {
         let ea_mode = ((opcode >> 3) & 7) as u8;
         let ea_reg = (opcode & 7) as u8;
         if ea_mode == 1 || (ea_mode == 7 && ea_reg >= 2) {
             self.finish(4);
-            return;
+            return Ok(());
         }
         let ea = self.decode_ea(bus, master, ea_mode, ea_reg, Size::Byte);
-        let operand = self.ea_read(bus, master, ea, Size::Byte);
+        let operand = self.ea_read(bus, master, ea, Size::Byte)?;
         let result = self.sbcd_core(operand, 0);
-        self.ea_write(bus, master, ea, Size::Byte, result);
+        self.ea_write(bus, master, ea, Size::Byte, result)?;
 
         let base = if ea_mode == 0 { 6 } else { 8 };
         self.finish(base + ea_cycles(ea_mode, ea_reg, Size::Byte));
+        Ok(())
     }
 
     /// TST <ea> (line 0x4, sub-op 0xA, sizes 00-10): read the operand and
@@ -454,21 +484,22 @@ impl M68000 {
         opcode: u16,
         bus: &mut B,
         master: BusMaster,
-    ) {
+    ) -> AccessResult<()> {
         let Some(size) = size_from_bits(opcode >> 6) else {
-            self.finish(4); // TAS / ILLEGAL share the size-11 encoding
-            return;
+            self.finish(4); // TAS / ILLEGAL are routed by the caller
+            return Ok(());
         };
         let ea_mode = ((opcode >> 3) & 7) as u8;
         let ea_reg = (opcode & 7) as u8;
         if ea_mode == 1 || (ea_mode == 7 && ea_reg >= 2) {
             self.finish(4);
-            return;
+            return Ok(());
         }
         let ea = self.decode_ea(bus, master, ea_mode, ea_reg, size);
-        let value = self.ea_read(bus, master, ea, size);
+        let value = self.ea_read(bus, master, ea, size)?;
         self.set_flags_logical(size, value);
         self.finish(4 + ea_cycles(ea_mode, ea_reg, size));
+        Ok(())
     }
 
     /// ORI / ANDI / SUBI / ADDI / EORI / CMPI (line 0x0, sub-ops
@@ -479,34 +510,35 @@ impl M68000 {
     /// ORI/ANDI/EORI follow the logical rule (N/Z, V/C cleared, X
     /// untouched); CMPI sets N/Z/V/C only and leaves X untouched.
     ///
-    /// Returns false if the opcode is not one of the immediate forms handled
-    /// here (the to-CCR/to-SR variants land in M5, bit ops in M4).
+    /// Returns `Ok(false)` if the opcode is not one of the immediate forms
+    /// handled here (the to-CCR/to-SR variants and bit ops are routed by
+    /// the caller).
     pub(crate) fn op_imm_alu<B: Bus<Address = u32, Data = u16> + ?Sized>(
         &mut self,
         opcode: u16,
         bus: &mut B,
         master: BusMaster,
-    ) -> bool {
+    ) -> AccessResult<bool> {
         let op = opcode & 0x0F00;
         if !matches!(op, 0x0000 | 0x0200 | 0x0400 | 0x0600 | 0x0A00 | 0x0C00) {
-            return false;
+            return Ok(false);
         }
         let Some(size) = size_from_bits(opcode >> 6) else {
-            return false;
+            return Ok(false);
         };
         let ea_mode = ((opcode >> 3) & 7) as u8;
         let ea_reg = (opcode & 7) as u8;
         // Destination must be data-alterable: An, PC-relative, and immediate
         // destinations are illegal encodings.
         if ea_mode == 1 || (ea_mode == 7 && ea_reg >= 2) {
-            return false;
+            return Ok(false);
         }
 
         // Immediate data precedes the destination extension words.
         let imm = self.decode_ea(bus, master, 7, 4, size);
-        let b = self.ea_read(bus, master, imm, size);
+        let b = self.ea_read(bus, master, imm, size)?;
         let dst = self.decode_ea(bus, master, ea_mode, ea_reg, size);
-        let a = self.ea_read(bus, master, dst, size);
+        let a = self.ea_read(bus, master, dst, size)?;
 
         let mem = ea_mode != 0;
         let long = size == Size::Long;
@@ -515,13 +547,13 @@ impl M68000 {
                 // ADDI
                 let result = self.add_with_flags(size, a, b);
                 self.set_flag(SrFlag::X, self.flag_is_set(SrFlag::C));
-                self.ea_write(bus, master, dst, size, result);
+                self.ea_write(bus, master, dst, size, result)?;
             }
             0x0400 => {
                 // SUBI
                 let result = self.sub_with_flags(size, a, b);
                 self.set_flag(SrFlag::X, self.flag_is_set(SrFlag::C));
-                self.ea_write(bus, master, dst, size, result);
+                self.ea_write(bus, master, dst, size, result)?;
             }
             0x0C00 => {
                 // CMPI — result discarded, X untouched
@@ -536,7 +568,7 @@ impl M68000 {
                 };
                 let result = logical.apply(a, b) & size.mask();
                 self.set_flags_logical(size, result);
-                self.ea_write(bus, master, dst, size, result);
+                self.ea_write(bus, master, dst, size, result)?;
             }
         }
 
@@ -557,7 +589,7 @@ impl M68000 {
                 0
             },
         );
-        true
+        Ok(true)
     }
 
     /// ADDQ/SUBQ #d,<ea> (line 0x5, sizes 00-10; bit 8 selects SUBQ): add
@@ -572,7 +604,7 @@ impl M68000 {
         opcode: u16,
         bus: &mut B,
         master: BusMaster,
-    ) {
+    ) -> AccessResult<()> {
         let size = size_from_bits(opcode >> 6).expect("size 11 is Scc/DBcc");
         let is_sub = opcode & 0x0100 != 0;
         let data = match (opcode >> 9) & 7 {
@@ -585,7 +617,7 @@ impl M68000 {
         if ea_mode == 1 {
             if size == Size::Byte {
                 self.finish(4); // ADDQ.b to An is illegal
-                return;
+                return Ok(());
             }
             let reg = ea_reg as usize;
             self.a[reg] = if is_sub {
@@ -594,22 +626,22 @@ impl M68000 {
                 self.a[reg].wrapping_add(data)
             };
             self.finish(8);
-            return;
+            return Ok(());
         }
         if ea_mode == 7 && ea_reg >= 2 {
             self.finish(4); // PC-relative/immediate destinations are illegal
-            return;
+            return Ok(());
         }
 
         let dst = self.decode_ea(bus, master, ea_mode, ea_reg, size);
-        let a = self.ea_read(bus, master, dst, size);
+        let a = self.ea_read(bus, master, dst, size)?;
         let result = if is_sub {
             self.sub_with_flags(size, a, data)
         } else {
             self.add_with_flags(size, a, data)
         };
         self.set_flag(SrFlag::X, self.flag_is_set(SrFlag::C));
-        self.ea_write(bus, master, dst, size, result);
+        self.ea_write(bus, master, dst, size, result)?;
 
         let base = match (ea_mode == 0, size == Size::Long) {
             (true, false) => 4,
@@ -624,5 +656,6 @@ impl M68000 {
                 ea_cycles(ea_mode, ea_reg, size)
             },
         );
+        Ok(())
     }
 }

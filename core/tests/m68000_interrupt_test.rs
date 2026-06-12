@@ -155,12 +155,17 @@ fn odd_jump_target_takes_vector_3_with_full_frame() {
     assert_eq!(cpu.a[7], 0x2000 - 14, "seven-word group-0 frame");
 
     let m = &bus.memory;
+    // Status word: opcode upper bits ride along on the internal bus; a
+    // jump-target fault is a program-space read with I/N set (low 5 bits
+    // 0x1E) — all hardware-verified against the suite vectors.
     let status = u16::from_be_bytes([m[0x1FF2], m[0x1FF3]]);
-    assert_eq!(status, 0x0015, "read fault, supervisor data space");
+    assert_eq!(status, (0x4ED0 & 0xFFE0) | 0x1E, "program-space read fault");
     let fault = u32::from_be_bytes([m[0x1FF4], m[0x1FF5], m[0x1FF6], m[0x1FF7]]);
     assert_eq!(fault, 0x3001, "faulting access address");
     let ir = u16::from_be_bytes([m[0x1FF8], m[0x1FF9]]);
     assert_eq!(ir, 0x4ED0, "instruction register");
+    let pc = u32::from_be_bytes([m[0x1FFC], m[0x1FFD], m[0x1FFE], m[0x1FFF]]);
+    assert_eq!(pc, 0x3001 - 4, "control-transfer faults stack target - 4");
 }
 
 #[test]
@@ -170,11 +175,11 @@ fn odd_pc_fetch_takes_vector_3() {
     bus.load(3 * 4, &0x4000u32.to_be_bytes());
     step(&mut cpu, &mut bus);
     assert_eq!(cpu.pc, 0x4000);
-    assert!(cpu.took_address_error());
+    assert_eq!(cpu.a[7], 0x2000 - 14, "frame pushed for the fetch fault");
 }
 
 #[test]
-fn odd_write_records_write_fault() {
+fn odd_write_aborts_instruction_and_records_write_fault() {
     let (mut cpu, mut bus) = setup(&[0x3080]); // MOVE.w D0,(A0)
     cpu.a[0] = 0x3001;
     cpu.d[0] = 0x1234;
@@ -183,4 +188,9 @@ fn odd_write_records_write_fault() {
     assert_eq!(cpu.pc, 0x4000);
     let status = u16::from_be_bytes([bus.memory[0x1FF2], bus.memory[0x1FF3]]);
     assert_eq!(status & 0x10, 0, "R/W bit clear for a write fault");
+    assert_eq!(
+        &bus.memory[0x3000..0x3002],
+        &[0x00, 0x00],
+        "the faulting write never happened (instruction aborted)"
+    );
 }
