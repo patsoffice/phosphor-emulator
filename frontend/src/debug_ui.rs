@@ -955,23 +955,23 @@ fn disassemble_from(
     bus: &dyn BusDebug,
     cpu_index: usize,
     cpu: &dyn DebugCpu,
-    start_addr: u16,
+    start_addr: u32,
     count: usize,
-) -> Vec<(u16, Vec<u8>, String)> {
+) -> Vec<(u32, Vec<u8>, String)> {
     let mut result = Vec::with_capacity(count);
     let mut addr = start_addr;
     for _ in 0..count {
         let mut bytes = [0u8; 6];
         for (i, b) in bytes.iter_mut().enumerate() {
             *b = bus
-                .read(cpu_index, u32::from(addr.wrapping_add(i as u16)))
+                .read(cpu_index, addr.wrapping_add(i as u32))
                 .unwrap_or(0);
         }
-        let insn = cpu.debug_disassemble(u32::from(addr), &bytes);
+        let insn = cpu.debug_disassemble(addr, &bytes);
         let text = format!("{insn}");
         let raw = bytes[..insn.byte_len as usize].to_vec();
         result.push((addr, raw, text));
-        addr = addr.wrapping_add(insn.byte_len as u16);
+        addr = addr.wrapping_add(u32::from(insn.byte_len));
     }
     result
 }
@@ -981,14 +981,16 @@ fn disassemble_around_pc(
     bus: &dyn BusDebug,
     cpu_index: usize,
     cpu: &dyn DebugCpu,
-    pc: u16,
+    pc: u32,
     before: usize,
     after: usize,
-) -> (Vec<(u16, Vec<u8>, String)>, usize) {
+) -> (Vec<(u32, Vec<u8>, String)>, usize) {
     // Try scanning from several start points before PC to find one that aligns
     let max_instr = before + after + 40;
-    for offset in (48u16..=64).rev() {
-        let scan_start = pc.wrapping_sub(offset);
+    for offset in (48u32..=64).rev() {
+        // Saturating: near address 0 the scan just starts at 0 rather
+        // than wrapping to the top of a 4 GB space.
+        let scan_start = pc.saturating_sub(offset);
         let all = disassemble_from(bus, cpu_index, cpu, scan_start, max_instr);
         if let Some(pc_idx) = all.iter().position(|(addr, _, _)| *addr == pc) {
             let start = pc_idx.saturating_sub(before);
@@ -1015,8 +1017,7 @@ fn draw_disassembly_panel(
         return;
     }
     let (_name, cpu) = &cpus[cpu_idx];
-    // The disassembly scan is still u16 (widened with the 32-bit UI pass).
-    let pc = cpu.debug_pc() as u16;
+    let pc = cpu.debug_pc();
 
     let (lines, pc_idx) = disassemble_around_pc(bus, cpu_idx, *cpu, pc, 8, 16);
 
@@ -1029,7 +1030,7 @@ fn draw_disassembly_panel(
                 let is_bp = state
                     .breakpoints
                     .get(cpu_idx)
-                    .is_some_and(|bp| bp.contains(&u32::from(*addr)));
+                    .is_some_and(|bp| bp.contains(addr));
 
                 let bp_marker = if is_bp { "\u{25CF} " } else { "  " };
                 let hex_bytes: String = raw_bytes
@@ -1037,7 +1038,8 @@ fn draw_disassembly_panel(
                     .map(|b| format!("{:02X}", b))
                     .collect::<Vec<_>>()
                     .join(" ");
-                let line_text = format!("{bp_marker}{:04X}  {:<12} {}", addr, hex_bytes, text);
+                let line_text =
+                    format!("{bp_marker}{}  {:<12} {}", fmt_addr(*addr), hex_bytes, text);
 
                 let mut label = egui::RichText::new(line_text).monospace();
                 if is_pc {
@@ -1053,11 +1055,10 @@ fn draw_disassembly_panel(
                     .clicked()
                     && let Some(bp_set) = state.breakpoints.get_mut(cpu_idx)
                 {
-                    let bp_addr = u32::from(*addr);
-                    if bp_set.contains(&bp_addr) {
-                        bp_set.remove(&bp_addr);
+                    if bp_set.contains(addr) {
+                        bp_set.remove(addr);
                     } else {
-                        bp_set.insert(bp_addr);
+                        bp_set.insert(*addr);
                     }
                 }
             }
