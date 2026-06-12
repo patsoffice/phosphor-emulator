@@ -1187,4 +1187,72 @@ mod tests {
             assert_eq!(bus.peek(0, 0x1_0000), DebugRead::Unmapped);
         }
     }
+
+    mod device_controls {
+        use super::*;
+        use phosphor_core::core::debug::BusDebug;
+
+        /// devices() index of the Widget PIA (after the two CPU entries).
+        const WIDGET_PIA: usize = 2;
+
+        #[test]
+        fn devices_order_matches_dispatch_indices() {
+            let board = WilliamsBoard::new();
+            let names: Vec<&str> = board.devices().iter().map(|(name, _)| *name).collect();
+            assert_eq!(
+                names,
+                vec![
+                    "M6809 Main",
+                    "M6800 Sound",
+                    "Widget PIA",
+                    "ROM PIA",
+                    "Blitter",
+                    "Sound PIA",
+                    "DAC",
+                ]
+            );
+        }
+
+        /// Program a PIA's port A as all-output and write a value to it,
+        /// going through the derived `write_device_register` dispatch.
+        fn write_pia_port_a(board: &mut WilliamsBoard, device_index: usize, value: u8) {
+            board.write_device_register(device_index, 0, 0xFF); // DDRA: all output
+            board.write_device_register(device_index, 1, 0x04); // CRA: select ORA
+            board.write_device_register(device_index, 0, value); // ORA
+        }
+
+        #[test]
+        fn write_device_register_reaches_the_device() {
+            let mut board = WilliamsBoard::new();
+            write_pia_port_a(&mut board, WIDGET_PIA, 0x5A);
+            assert_eq!(board.widget_pia.read_output_a(), 0x5A);
+        }
+
+        #[test]
+        fn reset_device_resets_only_that_device() {
+            let mut board = WilliamsBoard::new();
+            write_pia_port_a(&mut board, WIDGET_PIA, 0x5A);
+            write_pia_port_a(&mut board, WIDGET_PIA + 1, 0xA5); // ROM PIA
+
+            board.reset_device(WIDGET_PIA);
+
+            assert_eq!(board.widget_pia.read_output_a(), 0x00);
+            assert_eq!(
+                board.rom_pia.read_output_a(),
+                0xA5,
+                "other devices untouched"
+            );
+        }
+
+        #[test]
+        fn cpu_and_out_of_range_indices_are_ignored() {
+            let mut board = WilliamsBoard::new();
+            // Indices 0/1 are CPUs; 99 is out of range. All must no-op.
+            board.write_device_register(0, 0, 0xFF);
+            board.write_device_register(1, 0, 0xFF);
+            board.write_device_register(99, 0, 0xFF);
+            board.reset_device(0);
+            board.reset_device(99);
+        }
+    }
 }
