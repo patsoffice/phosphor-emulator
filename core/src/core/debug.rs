@@ -5,7 +5,7 @@
 //! - `DebugCpu` — CPU-specific capabilities (extends Debuggable)
 //! - `BusDebug` — bus-level discovery of all devices and CPUs
 
-use crate::core::memory_map::{DebugRead, MemoryMap, WatchpointHit, WatchpointKind};
+use crate::core::memory_map::{AddressSpace16, DebugRead, WatchpointHit, WatchpointKind};
 use crate::cpu::disasm::DisassembledInstruction;
 
 /// A single CPU register for display in the debug panel.
@@ -130,7 +130,7 @@ pub trait BusDebug {
     fn clear_all_watchpoints(&mut self) {}
 
     /// Get the memory map for a CPU's address space (for region introspection).
-    fn memory_map(&self, _cpu_index: usize) -> Option<&MemoryMap> {
+    fn memory_map(&self, _cpu_index: usize) -> Option<&AddressSpace16> {
         None
     }
 }

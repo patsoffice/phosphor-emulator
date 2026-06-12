@@ -3,7 +3,7 @@ use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
     FrontendMachine, InputButton, InputReceiver, MachineCore, SaveState,
 };
-use phosphor_core::core::memory_map::{AccessKind, MemoryMap};
+use phosphor_core::core::memory_map::{AccessKind, AddressSpace16};
 use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
 use phosphor_macros::Saveable;
@@ -159,8 +159,8 @@ pub struct LunarLanderSystem {
 }
 
 impl LunarLanderSystem {
-    fn build_map() -> MemoryMap {
-        let mut map = MemoryMap::new();
+    fn build_map() -> AddressSpace16 {
+        let mut map = AddressSpace16::new();
         // Lunar Lander has only 256 bytes of RAM, mirrored throughout 0x0000–0x01FF.
         map.region(Region::Ram, "RAM", 0x0000, 0x0100, AccessKind::ReadWrite)
             .mirror(0x0100, 0x0000, 0x0100)

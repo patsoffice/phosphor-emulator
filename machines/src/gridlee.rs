@@ -4,7 +4,7 @@ use phosphor_core::core::machine::{
     AnalogInput, AudioSource, InputButton, InputReceiver, MachineCore, Nvram, Profilable,
     Renderable, SaveState,
 };
-use phosphor_core::core::memory_map::{AccessKind, MemoryMap};
+use phosphor_core::core::memory_map::{AccessKind, AddressSpace16};
 use phosphor_core::core::save_state::{self, SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::{Bus, BusMaster, ClockDivider, TimingConfig};
 use phosphor_core::cpu::m6809::M6809;
@@ -262,7 +262,7 @@ pub struct GridleeSystem {
     cpu: M6809,
 
     #[debug_map(cpu = 0)]
-    map: MemoryMap,
+    map: AddressSpace16,
 
     // Graphics ROMs (not CPU-addressable)
     gfx_rom: [u8; 0x4000],  // 16KB sprite graphics
@@ -352,9 +352,9 @@ impl GridleeSystem {
         }
     }
 
-    fn build_map() -> MemoryMap {
+    fn build_map() -> AddressSpace16 {
         use Region::*;
-        let mut map = MemoryMap::new();
+        let mut map = AddressSpace16::new();
         map.region(Ram, "RAM", 0x0000, 0x0800, AccessKind::ReadWrite)
             .region(VideoRam, "Video RAM", 0x0800, 0x7800, AccessKind::ReadWrite)
             .region(Io, "I/O", 0x9000, 0x0C00, AccessKind::Io)

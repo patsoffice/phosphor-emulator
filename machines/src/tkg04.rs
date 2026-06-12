@@ -1,7 +1,7 @@
 use phosphor_core::audio::AudioResampler;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::debug_trace::{DebugEvent, DebugEventKind, DebugTraceBuffer};
-use phosphor_core::core::memory_map::{AccessKind, MemoryMap};
+use phosphor_core::core::memory_map::{AccessKind, AddressSpace16};
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::watchpoint::DebugAccessSource;
 use phosphor_core::core::{Bus, BusMaster, ClockDivider, TimingConfig};
@@ -167,11 +167,11 @@ pub struct Tkg04Board {
     pub(crate) sound_cpu: I8035,
 
     // Memory maps (page-table dispatch + watchpoints + backing memory)
-    // CPU-addressable RAM/ROM storage lives in the MemoryMap backing store.
+    // CPU-addressable RAM/ROM storage lives in the AddressSpace16 backing store.
     #[debug_map(cpu = 0)]
-    pub(crate) main_map: MemoryMap,
+    pub(crate) main_map: AddressSpace16,
     #[debug_map(cpu = 1)]
-    pub(crate) sound_map: MemoryMap,
+    pub(crate) sound_map: AddressSpace16,
     pub(crate) tune_rom: [u8; 0x0800], // 2KB (DK only, unused by DK Jr)
 
     // GFX ROMs
@@ -284,9 +284,9 @@ impl Tkg04Board {
         }
     }
 
-    fn build_main_map() -> MemoryMap {
+    fn build_main_map() -> AddressSpace16 {
         use MainRegion::*;
-        let mut map = MemoryMap::new();
+        let mut map = AddressSpace16::new();
         map.region(Rom, "Program ROM", 0x0000, 0x6000, AccessKind::ReadOnly)
             .region(Ram, "Work RAM", 0x6000, 0x1000, AccessKind::ReadWrite)
             .region(
@@ -302,9 +302,9 @@ impl Tkg04Board {
         map
     }
 
-    fn build_sound_map() -> MemoryMap {
+    fn build_sound_map() -> AddressSpace16 {
         use SoundRegion::*;
-        let mut map = MemoryMap::new();
+        let mut map = AddressSpace16::new();
         map.region(Rom, "Sound ROM", 0x0000, 0x1000, AccessKind::ReadOnly);
         map
     }

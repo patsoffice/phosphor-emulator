@@ -1,6 +1,6 @@
 use phosphor_core::core::debug_trace::{DebugEvent, DebugEventKind, DebugTraceBuffer};
 use phosphor_core::core::machine::Renderable;
-use phosphor_core::core::memory_map::MemoryMap;
+use phosphor_core::core::memory_map::AddressSpace16;
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::watchpoint::DebugAccessSource;
 use phosphor_core::core::{Bus, BusMaster, TimingConfig};
@@ -60,7 +60,7 @@ pub struct AtariDvgBoard {
     pub(crate) dvg: Dvg,
 
     #[debug_map(cpu = 0)]
-    pub(crate) map: MemoryMap,
+    pub(crate) map: AddressSpace16,
 
     // NMI timing
     pub(crate) clock: u64,
@@ -89,7 +89,7 @@ pub struct AtariDvgBoard {
 
 impl AtariDvgBoard {
     /// Create a new board with a pre-configured memory map and DVG ROM placement.
-    pub fn new(map: MemoryMap, vrom_dvg_offset: usize, vrom_size: usize) -> Self {
+    pub fn new(map: AddressSpace16, vrom_dvg_offset: usize, vrom_size: usize) -> Self {
         Self {
             cpu: M6502::new(),
             dvg: Dvg::new(),
@@ -460,7 +460,7 @@ mod tests {
         /// Minimal Asteroids-like map: RAM, I/O (covers the watchdog at
         /// 0x3400), and the two vector regions trigger_dvg requires.
         fn board() -> AtariDvgBoard {
-            let mut map = MemoryMap::new();
+            let mut map = AddressSpace16::new();
             map.region(Region::Ram, "RAM", 0x0000, 0x0400, AccessKind::ReadWrite)
                 .region(Region::Io, "I/O", 0x3000, 0x1000, AccessKind::Io)
                 .region(

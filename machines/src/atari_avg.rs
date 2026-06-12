@@ -1,6 +1,6 @@
 use phosphor_core::core::debug_trace::{DebugEvent, DebugEventKind, DebugTraceBuffer};
 use phosphor_core::core::machine::Renderable;
-use phosphor_core::core::memory_map::MemoryMap;
+use phosphor_core::core::memory_map::AddressSpace16;
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::watchpoint::DebugAccessSource;
 use phosphor_core::core::{Bus, BusMaster, TimingConfig};
@@ -66,7 +66,7 @@ pub struct AtariAvgBoard {
     pub(crate) avg: Avg,
 
     #[debug_map(cpu = 0)]
-    pub(crate) map: MemoryMap,
+    pub(crate) map: AddressSpace16,
 
     // IRQ timing (250 Hz periodic)
     pub(crate) clock: u64,
@@ -89,7 +89,7 @@ impl AtariAvgBoard {
     ///
     /// `visible_width`/`visible_height` define the AVG beam center (half of each).
     /// For Tempest: 580×570.
-    pub fn new(map: MemoryMap, visible_width: i32, visible_height: i32) -> Self {
+    pub fn new(map: AddressSpace16, visible_width: i32, visible_height: i32) -> Self {
         Self {
             cpu: M6502::new(),
             avg: Avg::new(visible_width, visible_height),
@@ -300,7 +300,7 @@ mod tests {
         /// watchdog at 0x5000 and AVG reset at 0x5800), and the vector
         /// regions trigger_avg requires.
         fn board() -> AtariAvgBoard {
-            let mut map = MemoryMap::new();
+            let mut map = AddressSpace16::new();
             map.region(Region::Ram, "RAM", 0x0000, 0x0800, AccessKind::ReadWrite)
                 .region(
                     Region::ColorRam,

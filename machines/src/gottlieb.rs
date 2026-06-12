@@ -18,7 +18,7 @@ use phosphor_core::audio::AudioResampler;
 use phosphor_core::bus_split;
 use phosphor_core::core::debug::{DebugRegister, Debuggable};
 use phosphor_core::core::machine::ProfileSpan;
-use phosphor_core::core::memory_map::{AccessKind, MemoryMap};
+use phosphor_core::core::memory_map::{AccessKind, AddressSpace16};
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::{Bus, BusMaster, ClockDivider, InterruptState, TimingConfig};
 use phosphor_core::cpu::Cpu;
@@ -374,7 +374,7 @@ pub struct GottliebBoard {
 
     // Memory
     #[debug_map(cpu = 0)]
-    pub(crate) map: MemoryMap,
+    pub(crate) map: AddressSpace16,
 
     // GFX caches
     pub(crate) tile_rom_cache: gfx::GfxCache,
@@ -438,8 +438,8 @@ impl GottliebBoard {
         }
     }
 
-    fn build_map() -> MemoryMap {
-        let mut map = MemoryMap::new();
+    fn build_map() -> AddressSpace16 {
+        let mut map = AddressSpace16::new();
         map.region(
             Region::Nvram,
             "NVRAM",

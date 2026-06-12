@@ -10,10 +10,10 @@ use syn::{DeriveInput, Expr, Fields, Type, parse_macro_input};
 ///   Also generates `write_device_register()` and `reset_device()` dispatch.
 /// - `#[debug_cpu("Name")]` — field implements `DebugCpu`, listed in both `devices()`
 ///   AND `cpus()`. Debug reads/writes are auto-routed through the matching
-///   `#[debug_map(cpu = N)]` field's `MemoryMap::debug_read`/`debug_write`.
+///   `#[debug_map(cpu = N)]` field's `AddressSpace16::debug_read`/`debug_write`.
 /// - `#[debug_cpu("Name", read = "method", write = "method")]` — explicit version:
 ///   names `&self` / `&mut self` methods on the struct for side-effect-free memory access.
-/// - `#[debug_map(cpu = N)]` — field is a `MemoryMap` linked to CPU index N.
+/// - `#[debug_map(cpu = N)]` — field is an `AddressSpace16` linked to CPU index N.
 ///   Generates watchpoint routing, `peek` (backed/I/O/unmapped semantics via
 ///   `AddressSpace16::debug_peek`), and (when linked to a `#[debug_cpu]`)
 ///   debug memory access.
@@ -40,7 +40,7 @@ pub fn derive_bus_debug(input: TokenStream) -> TokenStream {
         Option<syn::LitStr>,
         Option<syn::LitStr>,
     )> = Vec::new(); // (name, field_ident, read_method?, write_method?)
-    let mut map_entries: Vec<MapEntry> = Vec::new(); // (cpu_index, field_ident) for MemoryMap fields
+    let mut map_entries: Vec<MapEntry> = Vec::new(); // (cpu_index, field_ident) for AddressSpace16 fields
 
     for field in fields {
         let field_ident = field.ident.as_ref().expect("named field");
@@ -61,7 +61,7 @@ pub fn derive_bus_debug(input: TokenStream) -> TokenStream {
                 device_entries.push((args.name.clone(), field_ident.clone(), false));
                 cpu_entries.push((args.name, field_ident.clone(), args.read, args.write));
             } else if attr.path().is_ident("debug_map") {
-                // #[debug_map(cpu = N)] — field is a MemoryMap linked to CPU index N
+                // #[debug_map(cpu = N)] — field is an AddressSpace16 linked to CPU index N
                 let args: MapArgs = attr.parse_args().expect("debug_map expects: (cpu = N)");
                 map_entries.push(MapEntry {
                     cpu_index: args.cpu_index,
@@ -256,7 +256,7 @@ pub fn derive_bus_debug(input: TokenStream) -> TokenStream {
                 #(#clear_all_calls)*
             }
 
-            fn memory_map(&self, cpu_index: usize) -> Option<&phosphor_core::core::memory_map::MemoryMap> {
+            fn memory_map(&self, cpu_index: usize) -> Option<&phosphor_core::core::memory_map::AddressSpace16> {
                 match cpu_index {
                     #(#map_arms,)*
                     _ => None,

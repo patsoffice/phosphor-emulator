@@ -1,4 +1,4 @@
-use phosphor_core::core::memory_map::{AccessKind, MemoryMap};
+use phosphor_core::core::memory_map::{AccessKind, AddressSpace16};
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::{ClockDivider, TimingConfig};
 use phosphor_core::cpu::z80::Z80;
@@ -90,7 +90,7 @@ pub struct Mcr2Board {
 
     // Memory
     #[debug_map(cpu = 0)]
-    pub(crate) map: MemoryMap,
+    pub(crate) map: AddressSpace16,
 
     // GFX caches (pre-decoded from ROM)
     pub(crate) tile_cache: gfx::GfxCache,
@@ -146,8 +146,8 @@ impl Mcr2Board {
         }
     }
 
-    fn build_map() -> MemoryMap {
-        let mut map = MemoryMap::new();
+    fn build_map() -> AddressSpace16 {
+        let mut map = AddressSpace16::new();
         map.region(
             Region::Rom,
             "Program ROM",

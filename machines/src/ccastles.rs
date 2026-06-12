@@ -4,7 +4,7 @@ use phosphor_core::core::machine::{
     AnalogInput, AudioSource, InputButton, InputReceiver, MachineCore, Nvram, Profilable,
     Renderable, SaveState,
 };
-use phosphor_core::core::memory_map::{AccessKind, MemoryMap};
+use phosphor_core::core::memory_map::{AccessKind, AddressSpace16};
 use phosphor_core::core::save_state::{self, SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::{Bus, BusMaster, TimingConfig};
 use phosphor_core::cpu::m6502::M6502;
@@ -298,7 +298,7 @@ pub struct CrystalCastlesSystem {
     pokey2: Pokey,
 
     #[debug_map(cpu = 0)]
-    map: MemoryMap,
+    map: AddressSpace16,
 
     gfx_rom: [u8; 0x4000],  // 16KB sprite graphics (not CPU-addressable)
     sprite_cache: GfxCache, // Pre-decoded 256 sprites (8×16, 3bpp)
@@ -359,8 +359,8 @@ pub struct CrystalCastlesSystem {
 }
 
 impl CrystalCastlesSystem {
-    fn build_map() -> MemoryMap {
-        let mut map = MemoryMap::new();
+    fn build_map() -> AddressSpace16 {
+        let mut map = AddressSpace16::new();
         map.region(
             Region::VideoRam,
             "Video RAM",

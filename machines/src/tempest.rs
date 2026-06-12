@@ -4,7 +4,7 @@ use phosphor_core::core::machine::{
     AnalogInput, AudioSource, FrontendMachine, InputButton, InputReceiver, MachineCore, Nvram,
     Profilable, SaveState,
 };
-use phosphor_core::core::memory_map::{AccessKind, MemoryMap};
+use phosphor_core::core::memory_map::{AccessKind, AddressSpace16};
 use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
 use phosphor_core::device::Er2055;
@@ -211,8 +211,8 @@ pub struct TempestSystem {
 }
 
 impl TempestSystem {
-    fn build_map() -> MemoryMap {
-        let mut map = MemoryMap::new();
+    fn build_map() -> AddressSpace16 {
+        let mut map = AddressSpace16::new();
         map.region(Region::Ram, "RAM", 0x0000, 0x0800, AccessKind::ReadWrite)
             .region(
                 Region::ColorRam,

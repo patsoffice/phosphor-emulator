@@ -27,7 +27,7 @@ use crate::core::watchpoint::{DebugAccessSource, WatchpointPhase, Watchpoints};
 pub use crate::core::watchpoint::{WatchpointHit, WatchpointKind};
 
 /// Machine-defined region identifier. Values are assigned by each machine
-/// as constants (e.g., `const VIDEO_RAM: RegionId = 1`). The MemoryMap
+/// as constants (e.g., `const VIDEO_RAM: RegionId = 1`). The AddressSpace16
 /// stores and reports them but does not interpret them.
 pub type RegionId = u8;
 
@@ -484,14 +484,6 @@ pub struct AddressSpace16 {
     /// (latched at instruction boundaries), when known.
     debug_pc: Option<u32>,
 }
-
-/// Migration-only alias for [`AddressSpace16`].
-///
-/// New code should use `AddressSpace16` directly; this alias exists so
-/// current machines keep compiling while call sites migrate, and will be
-/// removed once migration completes (see
-/// `docs/designs/address-space-refactor.md`, Phase 7).
-pub type MemoryMap = AddressSpace16;
 
 impl AddressSpace16 {
     /// Create a new address space with all pages unmapped.
@@ -1146,7 +1138,7 @@ mod tests {
 
     #[test]
     fn new_map_is_all_unmapped() {
-        let map = MemoryMap::new();
+        let map = AddressSpace16::new();
         for page_idx in 0..=255u8 {
             let addr = (page_idx as u16) << 8;
             assert_eq!(map.page(addr).region_id, UNMAPPED);
@@ -1156,7 +1148,7 @@ mod tests {
 
     #[test]
     fn region_populates_pages_and_descriptor() {
-        let mut map = MemoryMap::new();
+        let mut map = AddressSpace16::new();
         map.region(RAM, "RAM", 0x0000, 0x8000, AccessKind::ReadWrite);
 
         // Pages 0x00..0x7F should be RAM
@@ -1181,7 +1173,7 @@ mod tests {
 
     #[test]
     fn region_offset_calculation() {
-        let mut map = MemoryMap::new();
+        let mut map = AddressSpace16::new();
         map.region(ROM, "ROM", 0xD000, 0x3000, AccessKind::ReadOnly);
 
         // Address 0xD000 → page 0xD0, base_offset=0, low byte=0x00 → offset 0
@@ -1196,7 +1188,7 @@ mod tests {
 
     #[test]
     fn multiple_regions() {
-        let mut map = MemoryMap::new();
+        let mut map = AddressSpace16::new();
         map.region(RAM, "RAM", 0x0000, 0x8000, AccessKind::ReadWrite)
             .region(ROM, "ROM", 0x8000, 0x8000, AccessKind::ReadOnly);
 
@@ -1209,13 +1201,13 @@ mod tests {
 
     #[test]
     fn mirror_copies_entries() {
-        let mut map = MemoryMap::new();
+        let mut map = AddressSpace16::new();
         map.region(RAM, "RAM", 0x0000, 0x8000, AccessKind::ReadWrite)
             .region(ROM, "ROM", 0x8000, 0x8000, AccessKind::ReadOnly);
 
         // Pac-Man style: mirror lower 32K to upper 32K
         // (In practice you'd mirror before setting ROM, but this tests the mechanic)
-        let mut map2 = MemoryMap::new();
+        let mut map2 = AddressSpace16::new();
         map2.region(RAM, "RAM", 0x0000, 0x8000, AccessKind::ReadWrite)
             .mirror(0x8000, 0x0000, 0x8000);
 
@@ -1228,7 +1220,7 @@ mod tests {
 
     #[test]
     fn mirror_preserves_region_offsets() {
-        let mut map = MemoryMap::new();
+        let mut map = AddressSpace16::new();
         map.region(RAM, "Work RAM", 0x4C00, 0x0400, AccessKind::ReadWrite)
             .mirror(0xCC00, 0x4C00, 0x0400);
 
@@ -1240,7 +1232,7 @@ mod tests {
 
     #[test]
     fn remap_pages_for_bank_switching() {
-        let mut map = MemoryMap::new();
+        let mut map = AddressSpace16::new();
         map.region(RAM, "Video RAM", 0x0000, 0x9000, AccessKind::ReadWrite);
 
         // Bank in ROM over pages 0x00..0x90
@@ -1261,14 +1253,14 @@ mod tests {
 
     #[test]
     fn no_watchpoints_by_default() {
-        let map = MemoryMap::new();
+        let map = AddressSpace16::new();
         assert!(!map.has_any_watchpoints());
         assert_eq!(map.active_watch_count, 0);
     }
 
     #[test]
     fn check_watch_is_noop_when_no_watchpoints() {
-        let mut map = MemoryMap::new();
+        let mut map = AddressSpace16::new();
         map.region(RAM, "RAM", 0x0000, 0x10000, AccessKind::ReadWrite);
 
         assert!(!map.watch_read(0, BusMaster::Cpu(0), 0x1234, 0x42));
@@ -1278,7 +1270,7 @@ mod tests {
 
     #[test]
     fn read_watchpoint_fires() {
-        let mut map = MemoryMap::new();
+        let mut map = AddressSpace16::new();
         map.region(RAM, "RAM", 0x0000, 0x10000, AccessKind::ReadWrite);
 
         map.set_watchpoint(0, 0x4000, WatchpointKind::Read);
@@ -1305,7 +1297,7 @@ mod tests {
 
     #[test]
     fn write_watchpoint_fires() {
-        let mut map = MemoryMap::new();
+        let mut map = AddressSpace16::new();
         map.region(RAM, "RAM", 0x0000, 0x10000, AccessKind::ReadWrite);
 
         map.set_watchpoint(0, 0x1000, WatchpointKind::Write);
@@ -1322,7 +1314,7 @@ mod tests {
 
     #[test]
     fn both_read_and_write_watchpoint() {
-        let mut map = MemoryMap::new();
+        let mut map = AddressSpace16::new();
         map.region(RAM, "RAM", 0x0000, 0x10000, AccessKind::ReadWrite);
 
         map.set_watchpoint(0, 0x2000, WatchpointKind::Read);
@@ -1337,7 +1329,7 @@ mod tests {
 
     #[test]
     fn clear_watchpoint() {
-        let mut map = MemoryMap::new();
+        let mut map = AddressSpace16::new();
         map.region(RAM, "RAM", 0x0000, 0x10000, AccessKind::ReadWrite);
 
         map.set_watchpoint(0, 0x3000, WatchpointKind::Read);
@@ -1359,7 +1351,7 @@ mod tests {
 
     #[test]
     fn clear_all_watchpoints() {
-        let mut map = MemoryMap::new();
+        let mut map = AddressSpace16::new();
         map.region(RAM, "RAM", 0x0000, 0x10000, AccessKind::ReadWrite);
 
         map.set_watchpoint(0, 0x1000, WatchpointKind::Read);
@@ -1376,7 +1368,7 @@ mod tests {
 
     #[test]
     fn multiple_watchpoints_on_different_pages() {
-        let mut map = MemoryMap::new();
+        let mut map = AddressSpace16::new();
         map.region(RAM, "RAM", 0x0000, 0x10000, AccessKind::ReadWrite);
 
         map.set_watchpoint(0, 0x1000, WatchpointKind::Read);
@@ -1393,7 +1385,7 @@ mod tests {
 
     #[test]
     fn watchpoint_exact_address_only() {
-        let mut map = MemoryMap::new();
+        let mut map = AddressSpace16::new();
         map.region(RAM, "RAM", 0x0000, 0x10000, AccessKind::ReadWrite);
 
         map.set_watchpoint(0, 0x2042, WatchpointKind::Write);
@@ -1413,7 +1405,7 @@ mod tests {
 
     #[test]
     fn clear_one_of_two_on_same_page() {
-        let mut map = MemoryMap::new();
+        let mut map = AddressSpace16::new();
         map.region(RAM, "RAM", 0x0000, 0x10000, AccessKind::ReadWrite);
 
         map.set_watchpoint(0, 0x3000, WatchpointKind::Read);
@@ -1433,7 +1425,7 @@ mod tests {
 
     #[test]
     fn region_at_returns_descriptor() {
-        let mut map = MemoryMap::new();
+        let mut map = AddressSpace16::new();
         map.region(RAM, "Work RAM", 0x0000, 0x8000, AccessKind::ReadWrite)
             .region(ROM, "Program ROM", 0xD000, 0x3000, AccessKind::ReadOnly);
 
@@ -1450,7 +1442,7 @@ mod tests {
 
     #[test]
     fn region_descriptors_have_correct_bounds() {
-        let mut map = MemoryMap::new();
+        let mut map = AddressSpace16::new();
         map.region(RAM, "Video RAM", 0x0000, 0xC000, AccessKind::ReadWrite)
             .region(IO, "I/O", 0xC000, 0x1000, AccessKind::Io)
             .region(ROM, "ROM", 0xD000, 0x3000, AccessKind::ReadOnly);
@@ -1469,7 +1461,7 @@ mod tests {
 
     #[test]
     fn multiple_hits_queue_in_order() {
-        let mut map = MemoryMap::new();
+        let mut map = AddressSpace16::new();
         map.region(RAM, "RAM", 0x0000, 0x10000, AccessKind::ReadWrite);
         map.set_watchpoint(0, 0x1000, WatchpointKind::Read);
         map.set_watchpoint(0, 0x1001, WatchpointKind::Read);
@@ -1488,7 +1480,7 @@ mod tests {
 
     #[test]
     fn hit_records_region_name() {
-        let mut map = MemoryMap::new();
+        let mut map = AddressSpace16::new();
         map.region(RAM, "Work RAM", 0x0000, 0x8000, AccessKind::ReadWrite);
         map.set_watchpoint(0, 0x1234, WatchpointKind::Write);
 
@@ -1499,7 +1491,7 @@ mod tests {
     #[test]
     fn hit_records_cpu_index_and_source() {
         // A sound-CPU map (cpu 1), accessed by CPU 1 and by DMA.
-        let mut map = MemoryMap::new();
+        let mut map = AddressSpace16::new();
         map.region(RAM, "Sound RAM", 0x0000, 0x1000, AccessKind::ReadWrite);
         map.set_watchpoint(1, 0x0200, WatchpointKind::Read);
 
@@ -1518,7 +1510,7 @@ mod tests {
 
     #[test]
     fn hit_records_latched_cycle_and_pc() {
-        let mut map = MemoryMap::new();
+        let mut map = AddressSpace16::new();
         map.region(RAM, "RAM", 0x0000, 0x8000, AccessKind::ReadWrite);
         map.set_watchpoint(0, 0x4000, WatchpointKind::Write);
 
@@ -1535,7 +1527,7 @@ mod tests {
 
     #[test]
     fn pc_attributed_only_to_owning_cpu() {
-        let mut map = MemoryMap::new();
+        let mut map = AddressSpace16::new();
         map.region(RAM, "RAM", 0x0000, 0x8000, AccessKind::ReadWrite);
         map.set_watchpoint(0, 0x4000, WatchpointKind::Write);
         map.latch_access_context(100, Some(0x2000));
@@ -1551,7 +1543,7 @@ mod tests {
 
     #[test]
     fn hit_records_phase_by_kind() {
-        let mut map = MemoryMap::new();
+        let mut map = AddressSpace16::new();
         map.region(RAM, "RAM", 0x0000, 0x8000, AccessKind::ReadWrite);
         map.set_watchpoint(0, 0x4000, WatchpointKind::Read);
         map.set_watchpoint(0, 0x4000, WatchpointKind::Write);
@@ -1565,7 +1557,7 @@ mod tests {
 
     #[test]
     fn hit_records_device_name() {
-        let mut map = MemoryMap::new();
+        let mut map = AddressSpace16::new();
         map.region(IO, "I/O", 0xC000, 0x100, AccessKind::Io);
         map.set_watchpoint(0, 0xC004, WatchpointKind::Write);
 
@@ -1581,7 +1573,7 @@ mod tests {
 
     #[test]
     fn region_allocates_backing_for_rw() {
-        let mut map = MemoryMap::new();
+        let mut map = AddressSpace16::new();
         map.region(RAM, "RAM", 0x0000, 0x0400, AccessKind::ReadWrite);
 
         assert_eq!(map.region_data(RAM).len(), 0x0400);
@@ -1590,7 +1582,7 @@ mod tests {
 
     #[test]
     fn region_allocates_backing_for_rom() {
-        let mut map = MemoryMap::new();
+        let mut map = AddressSpace16::new();
         map.region(ROM, "ROM", 0xD000, 0x3000, AccessKind::ReadOnly);
 
         assert_eq!(map.region_data(ROM).len(), 0x3000);
@@ -1598,7 +1590,7 @@ mod tests {
 
     #[test]
     fn io_region_has_no_backing() {
-        let mut map = MemoryMap::new();
+        let mut map = AddressSpace16::new();
         map.region(IO, "I/O", 0xC000, 0x100, AccessKind::Io);
 
         assert!(map.debug_read(0xC042).is_none());
@@ -1606,7 +1598,7 @@ mod tests {
 
     #[test]
     fn debug_read_returns_backing_data() {
-        let mut map = MemoryMap::new();
+        let mut map = AddressSpace16::new();
         map.region(RAM, "RAM", 0x0000, 0x8000, AccessKind::ReadWrite)
             .region(IO, "I/O", 0xC000, 0x100, AccessKind::Io)
             .region(ROM, "ROM", 0xD000, 0x3000, AccessKind::ReadOnly);
@@ -1628,7 +1620,7 @@ mod tests {
 
     #[test]
     fn debug_peek_distinguishes_backed_io_unmapped() {
-        let mut map = MemoryMap::new();
+        let mut map = AddressSpace16::new();
         map.region(RAM, "RAM", 0x0000, 0x8000, AccessKind::ReadWrite)
             .region(IO, "I/O", 0xC000, 0x100, AccessKind::Io);
 
@@ -1650,7 +1642,7 @@ mod tests {
     fn debug_peek_follows_mirrors_and_banking() {
         const BANK_ROM: RegionId = 4;
 
-        let mut map = MemoryMap::new();
+        let mut map = AddressSpace16::new();
         map.region(ROM, "ROM", 0xF000, 0x1000, AccessKind::ReadOnly)
             .mirror(0xB000, 0xF000, 0x1000)
             .backing_region(BANK_ROM, "Banked ROM", 0x1000);
@@ -1682,7 +1674,7 @@ mod tests {
 
     #[test]
     fn debug_write_updates_backing() {
-        let mut map = MemoryMap::new();
+        let mut map = AddressSpace16::new();
         map.region(RAM, "RAM", 0x0000, 0x8000, AccessKind::ReadWrite)
             .region(IO, "I/O", 0xC000, 0x100, AccessKind::Io);
 
@@ -1695,7 +1687,7 @@ mod tests {
 
     #[test]
     fn read_write_backing_hot_path() {
-        let mut map = MemoryMap::new();
+        let mut map = AddressSpace16::new();
         map.region(RAM, "RAM", 0x0000, 0x8000, AccessKind::ReadWrite);
 
         map.write_backing(0x4000, 0xBE);
@@ -1704,7 +1696,7 @@ mod tests {
 
     #[test]
     fn load_region_copies_data() {
-        let mut map = MemoryMap::new();
+        let mut map = AddressSpace16::new();
         map.region(ROM, "ROM", 0xD000, 0x0400, AccessKind::ReadOnly);
 
         let rom_data: Vec<u8> = (0..0x0400).map(|i| (i & 0xFF) as u8).collect();
@@ -1717,7 +1709,7 @@ mod tests {
 
     #[test]
     fn load_region_at_partial() {
-        let mut map = MemoryMap::new();
+        let mut map = AddressSpace16::new();
         map.region(ROM, "ROM", 0xD000, 0x3000, AccessKind::ReadOnly);
 
         let chunk = [0xAA, 0xBB, 0xCC];
@@ -1733,7 +1725,7 @@ mod tests {
     fn remap_pages_switches_backing() {
         const BANK_ROM: RegionId = 4;
 
-        let mut map = MemoryMap::new();
+        let mut map = AddressSpace16::new();
         map.region(RAM, "Video RAM", 0x0000, 0x9000, AccessKind::ReadWrite)
             .backing_region(BANK_ROM, "Banked ROM", 0x9000);
 
@@ -1755,7 +1747,7 @@ mod tests {
 
     #[test]
     fn mirror_reads_same_backing() {
-        let mut map = MemoryMap::new();
+        let mut map = AddressSpace16::new();
         map.region(ROM, "Sound ROM", 0xF000, 0x1000, AccessKind::ReadOnly)
             .mirror(0xB000, 0xF000, 0x1000);
 
@@ -1770,7 +1762,7 @@ mod tests {
     fn backing_region_has_no_page_mapping() {
         const OVERLAY: RegionId = 5;
 
-        let mut map = MemoryMap::new();
+        let mut map = AddressSpace16::new();
         map.region(RAM, "RAM", 0x0000, 0x8000, AccessKind::ReadWrite)
             .backing_region(OVERLAY, "Overlay", 0x8000);
 
@@ -1784,7 +1776,7 @@ mod tests {
 
     #[test]
     fn multiple_regions_share_backing_vec() {
-        let mut map = MemoryMap::new();
+        let mut map = AddressSpace16::new();
         map.region(RAM, "RAM", 0x0000, 0x8000, AccessKind::ReadWrite)
             .region(ROM, "ROM", 0xD000, 0x3000, AccessKind::ReadOnly);
 

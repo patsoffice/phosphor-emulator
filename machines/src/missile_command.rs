@@ -3,7 +3,7 @@ use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
     AnalogInput, AudioSource, InputButton, InputReceiver, MachineCore, Renderable, SaveState,
 };
-use phosphor_core::core::memory_map::{AccessKind, MemoryMap};
+use phosphor_core::core::memory_map::{AccessKind, AddressSpace16};
 use phosphor_core::core::save_state::{self, SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::{Bus, BusMaster, TimingConfig};
 use phosphor_core::cpu::m6502::M6502;
@@ -189,7 +189,7 @@ pub struct MissileCommandSystem {
     pokey: Pokey,
 
     #[debug_map(cpu = 0)]
-    map: MemoryMap,
+    map: AddressSpace16,
 
     // I/O registers
     // IN0 at 0x4800 (active-low switches, directly stored active-low: 1=released, 0=pressed)
@@ -279,8 +279,8 @@ impl MissileCommandSystem {
         }
     }
 
-    fn build_map() -> MemoryMap {
-        let mut map = MemoryMap::new();
+    fn build_map() -> AddressSpace16 {
+        let mut map = AddressSpace16::new();
         map.region(Region::Ram, "RAM", 0x0000, 0x4000, AccessKind::ReadWrite)
             .region(Region::Io, "I/O", 0x4000, 0x1000, AccessKind::Io)
             .region(

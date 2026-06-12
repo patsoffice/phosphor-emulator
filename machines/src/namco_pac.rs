@@ -1,6 +1,6 @@
 use phosphor_core::core::debug_trace::{DebugEvent, DebugEventKind, DebugTraceBuffer};
 use phosphor_core::core::machine::InputButton;
-use phosphor_core::core::memory_map::{AccessKind, MemoryMap};
+use phosphor_core::core::memory_map::{AccessKind, AddressSpace16};
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::watchpoint::DebugAccessSource;
 use phosphor_core::core::{Bus, BusMaster, TimingConfig};
@@ -152,7 +152,7 @@ pub struct NamcoPacBoard {
     pub(crate) cpu: Z80,
 
     #[debug_map(cpu = 0)]
-    pub(crate) map: MemoryMap,
+    pub(crate) map: AddressSpace16,
 
     pub(crate) sprite_coords: [u8; 0x10], // 0x5060-0x506F: sprite X/Y positions
 
@@ -232,8 +232,8 @@ impl NamcoPacBoard {
         }
     }
 
-    fn build_map() -> MemoryMap {
-        let mut map = MemoryMap::new();
+    fn build_map() -> AddressSpace16 {
+        let mut map = AddressSpace16::new();
         map.region(
             Region::Rom,
             "Program ROM",

@@ -1,7 +1,7 @@
 use phosphor_core::audio::AudioResampler;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::debug_trace::{DebugEvent, DebugEventKind, DebugTraceBuffer};
-use phosphor_core::core::memory_map::{AccessKind, MemoryMap};
+use phosphor_core::core::memory_map::{AccessKind, AddressSpace16};
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::watchpoint::DebugAccessSource;
 use phosphor_core::core::{Bus, BusMaster, TimingConfig};
@@ -131,11 +131,11 @@ pub struct WilliamsBoard {
     pub(crate) resampler: AudioResampler<i16>,
 
     // Memory maps (page-table dispatch + watchpoints + backing memory)
-    // All RAM/ROM storage lives in the MemoryMap backing store.
+    // All RAM/ROM storage lives in the AddressSpace16 backing store.
     #[debug_map(cpu = 0)]
-    pub(crate) main_map: MemoryMap,
+    pub(crate) main_map: AddressSpace16,
     #[debug_map(cpu = 1)]
-    pub(crate) sound_map: MemoryMap,
+    pub(crate) sound_map: AddressSpace16,
 
     // System state
     pub watchdog_counter: u32,
@@ -177,9 +177,9 @@ impl WilliamsBoard {
         }
     }
 
-    fn build_main_map() -> MemoryMap {
+    fn build_main_map() -> AddressSpace16 {
         use MainRegion::*;
-        let mut map = MemoryMap::new();
+        let mut map = AddressSpace16::new();
         map.region(VideoRam, "Video RAM", 0x0000, 0xC000, AccessKind::ReadWrite)
             .region(Palette, "Palette", 0xC000, 0x100, AccessKind::ReadWrite)
             .region(IoPia, "PIAs", 0xC800, 0x100, AccessKind::Io)
@@ -198,9 +198,9 @@ impl WilliamsBoard {
         map
     }
 
-    fn build_sound_map() -> MemoryMap {
+    fn build_sound_map() -> AddressSpace16 {
         use SoundRegion::*;
-        let mut map = MemoryMap::new();
+        let mut map = AddressSpace16::new();
         map.region(Ram, "Sound RAM", 0x0000, 0x100, AccessKind::ReadWrite)
             .region(IoPia, "Sound PIA", 0x0400, 0x100, AccessKind::Io)
             .region(Rom, "Sound ROM", 0xF000, 0x1000, AccessKind::ReadOnly)

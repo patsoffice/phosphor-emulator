@@ -20,7 +20,7 @@ use crate::device::dvg::VectorLine;
 
 use super::debug::BusDebug;
 use super::debug_trace::DebugTrace;
-use super::memory_map::{MemoryMap, WatchpointHit, WatchpointKind};
+use super::memory_map::{AddressSpace16, WatchpointHit, WatchpointKind};
 use super::save_state::SaveError;
 
 /// A named timing span from machine-level profiling.
@@ -227,7 +227,7 @@ pub trait MachineDebug {
     /// Get the memory map for a CPU's address space (for region introspection).
     ///
     /// Default: delegates to `BusDebug::memory_map()` via `debug_bus()`.
-    fn memory_map(&self, cpu_index: usize) -> Option<&MemoryMap> {
+    fn memory_map(&self, cpu_index: usize) -> Option<&AddressSpace16> {
         self.debug_bus()?.memory_map(cpu_index)
     }
 }
