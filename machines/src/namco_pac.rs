@@ -1,8 +1,8 @@
 use phosphor_core::core::debug_trace::{DebugEvent, DebugEventKind, DebugTraceBuffer};
 use phosphor_core::core::machine::InputButton;
-use phosphor_core::core::memory_map::{AccessKind, AddressSpace16};
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::watchpoint::DebugAccessSource;
+use phosphor_core::core::{AccessKind, AddressSpace16};
 use phosphor_core::core::{Bus, BusMaster, TimingConfig};
 use phosphor_core::cpu::CpuStateTrait;
 use phosphor_core::cpu::state::Z80State;

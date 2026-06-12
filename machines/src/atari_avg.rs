@@ -1,6 +1,6 @@
+use phosphor_core::core::AddressSpace16;
 use phosphor_core::core::debug_trace::{DebugEvent, DebugEventKind, DebugTraceBuffer};
 use phosphor_core::core::machine::Renderable;
-use phosphor_core::core::memory_map::AddressSpace16;
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::watchpoint::DebugAccessSource;
 use phosphor_core::core::{Bus, BusMaster, TimingConfig};
@@ -291,7 +291,7 @@ impl Renderable for AtariAvgBoard {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use phosphor_core::core::memory_map::AccessKind;
+    use phosphor_core::core::AccessKind;
 
     mod debug_events {
         use super::*;

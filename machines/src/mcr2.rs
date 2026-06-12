@@ -1,5 +1,5 @@
-use phosphor_core::core::memory_map::{AccessKind, AddressSpace16};
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
+use phosphor_core::core::{AccessKind, AddressSpace16};
 use phosphor_core::core::{ClockDivider, TimingConfig};
 use phosphor_core::cpu::z80::Z80;
 use phosphor_core::device::Z80Ctc;

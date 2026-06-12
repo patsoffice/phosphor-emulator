@@ -1,7 +1,7 @@
 //! Composed address-space container for 32-bit machines.
 //!
 //! [`AddressMap32`] is the sparse decode sibling of
-//! [`AddressMap16`](crate::core::memory_map::AddressMap16). A flat page
+//! [`AddressMap16`](crate::core::address_space16::AddressMap16). A flat page
 //! table is the wrong shape for a 32-bit address space (a 256-byte page
 //! table would need 16,777,216 entries), and arcade/computer maps of this
 //! class are sparse: a handful of ROM/RAM/I-O windows in a sea of unmapped
@@ -17,8 +17,8 @@
 //! effective-address mask is CPU-variant behavior and is **not** applied
 //! here, so 68020+ class machines inherit correct semantics.
 
+use crate::core::address_space::{AccessKind, DebugRead, DebugWrite, MemoryBacking, RegionId};
 use crate::core::bus::BusMaster;
-use crate::core::memory_map::{AccessKind, DebugRead, DebugWrite, MemoryBacking, RegionId};
 use crate::core::watchpoint::{
     DebugAccessSource, WatchpointHit, WatchpointKind, WatchpointPhase, Watchpoints,
 };
@@ -288,7 +288,7 @@ fn range_end(start: u32, length: u32) -> u32 {
 ///
 /// Composes sparse range decode ([`AddressMap32`]), backing storage
 /// ([`MemoryBacking`]), and watchpoint state ([`Watchpoints`]) — the
-/// 32-bit sibling of [`AddressSpace16`](crate::core::memory_map::AddressSpace16),
+/// 32-bit sibling of [`AddressSpace16`](crate::core::address_space16::AddressSpace16),
 /// built for 68000-class machines whose `Bus` implementations dispatch on
 /// `u32` addresses.
 ///

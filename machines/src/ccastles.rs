@@ -4,8 +4,8 @@ use phosphor_core::core::machine::{
     AnalogInput, AudioSource, InputButton, InputReceiver, MachineCore, Nvram, Profilable,
     Renderable, SaveState,
 };
-use phosphor_core::core::memory_map::{AccessKind, AddressSpace16};
 use phosphor_core::core::save_state::{self, SaveError, Saveable, StateReader, StateWriter};
+use phosphor_core::core::{AccessKind, AddressSpace16};
 use phosphor_core::core::{Bus, BusMaster, TimingConfig};
 use phosphor_core::cpu::m6502::M6502;
 use phosphor_core::cpu::state::M6502State;

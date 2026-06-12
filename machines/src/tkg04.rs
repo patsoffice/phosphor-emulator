@@ -1,9 +1,9 @@
 use phosphor_core::audio::AudioResampler;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::debug_trace::{DebugEvent, DebugEventKind, DebugTraceBuffer};
-use phosphor_core::core::memory_map::{AccessKind, AddressSpace16};
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::watchpoint::DebugAccessSource;
+use phosphor_core::core::{AccessKind, AddressSpace16};
 use phosphor_core::core::{Bus, BusMaster, ClockDivider, TimingConfig};
 use phosphor_core::cpu::i8035::I8035;
 use phosphor_core::cpu::z80::Z80;

@@ -4,7 +4,7 @@ use phosphor_core::core::machine::{
     AnalogInput, AudioSource, FrontendMachine, InputButton, InputReceiver, MachineCore, Nvram,
     Profilable, SaveState,
 };
-use phosphor_core::core::memory_map::{AccessKind, AddressSpace16};
+use phosphor_core::core::{AccessKind, AddressSpace16};
 use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
 use phosphor_core::device::Er2055;

@@ -210,28 +210,28 @@ pub fn derive_bus_debug(input: TokenStream) -> TokenStream {
         });
 
         quote! {
-            fn peek(&self, cpu_index: usize, addr: u32) -> phosphor_core::core::memory_map::DebugRead {
+            fn peek(&self, cpu_index: usize, addr: u32) -> phosphor_core::core::DebugRead {
                 if addr > 0xFFFF {
-                    return phosphor_core::core::memory_map::DebugRead::Unmapped;
+                    return phosphor_core::core::DebugRead::Unmapped;
                 }
                 match cpu_index {
                     #(#peek_arms,)*
                     _ => match self.read(cpu_index, addr) {
-                        Some(value) => phosphor_core::core::memory_map::DebugRead::Backed {
+                        Some(value) => phosphor_core::core::DebugRead::Backed {
                             value: value as u32,
                             width: 1,
                             region_id: 0,
                         },
-                        None => phosphor_core::core::memory_map::DebugRead::Unmapped,
+                        None => phosphor_core::core::DebugRead::Unmapped,
                     },
                 }
             }
 
-            fn take_watchpoint_hit(&mut self) -> Option<phosphor_core::core::memory_map::WatchpointHit> {
+            fn take_watchpoint_hit(&mut self) -> Option<phosphor_core::core::WatchpointHit> {
                 None #(#take_hit_chain)*
             }
 
-            fn set_watchpoint(&mut self, cpu_index: usize, addr: u32, kind: phosphor_core::core::memory_map::WatchpointKind) {
+            fn set_watchpoint(&mut self, cpu_index: usize, addr: u32, kind: phosphor_core::core::WatchpointKind) {
                 // 16-bit maps: addresses above 0xFFFF can never fire.
                 let Ok(addr) = u16::try_from(addr) else {
                     return;
@@ -242,7 +242,7 @@ pub fn derive_bus_debug(input: TokenStream) -> TokenStream {
                 }
             }
 
-            fn clear_watchpoint(&mut self, cpu_index: usize, addr: u32, kind: phosphor_core::core::memory_map::WatchpointKind) {
+            fn clear_watchpoint(&mut self, cpu_index: usize, addr: u32, kind: phosphor_core::core::WatchpointKind) {
                 let Ok(addr) = u16::try_from(addr) else {
                     return;
                 };
@@ -256,7 +256,7 @@ pub fn derive_bus_debug(input: TokenStream) -> TokenStream {
                 #(#clear_all_calls)*
             }
 
-            fn memory_map(&self, cpu_index: usize) -> Option<&phosphor_core::core::memory_map::AddressSpace16> {
+            fn memory_map(&self, cpu_index: usize) -> Option<&phosphor_core::core::AddressSpace16> {
                 match cpu_index {
                     #(#map_arms,)*
                     _ => None,

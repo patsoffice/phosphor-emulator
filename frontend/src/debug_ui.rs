@@ -3,8 +3,8 @@ use std::collections::HashSet;
 use phosphor_core::core::debug::{BusDebug, DebugCpu, DebugRegister};
 use phosphor_core::core::debug_trace::DebugEvent;
 use phosphor_core::core::machine::FrontendMachine;
-use phosphor_core::core::memory_map::{DebugRead, WatchpointHit, WatchpointKind};
 use phosphor_core::core::watchpoint::{DebugAccessSource, WatchpointPhase};
+use phosphor_core::core::{DebugRead, WatchpointHit, WatchpointKind};
 
 /// Format an address at its natural width: 4 hex digits within the 16-bit
 /// range, 6 within 24-bit (M68000), 8 beyond. Keeps 16-bit machines'

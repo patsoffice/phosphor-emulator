@@ -18,10 +18,11 @@ use std::time::Duration;
 
 use crate::device::dvg::VectorLine;
 
+use super::address_space16::AddressSpace16;
 use super::debug::BusDebug;
 use super::debug_trace::DebugTrace;
-use super::memory_map::{AddressSpace16, WatchpointHit, WatchpointKind};
 use super::save_state::SaveError;
+use super::watchpoint::{WatchpointHit, WatchpointKind};
 
 /// A named timing span from machine-level profiling.
 ///

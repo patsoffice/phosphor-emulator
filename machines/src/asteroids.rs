@@ -3,7 +3,7 @@ use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
     FrontendMachine, InputButton, InputReceiver, MachineCore, SaveState,
 };
-use phosphor_core::core::memory_map::{AccessKind, AddressSpace16};
+use phosphor_core::core::{AccessKind, AddressSpace16};
 use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
 use phosphor_macros::Saveable;

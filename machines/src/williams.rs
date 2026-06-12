@@ -1,9 +1,9 @@
 use phosphor_core::audio::AudioResampler;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::debug_trace::{DebugEvent, DebugEventKind, DebugTraceBuffer};
-use phosphor_core::core::memory_map::{AccessKind, AddressSpace16};
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::watchpoint::DebugAccessSource;
+use phosphor_core::core::{AccessKind, AddressSpace16};
 use phosphor_core::core::{Bus, BusMaster, TimingConfig};
 use phosphor_core::cpu::CpuStateTrait;
 use phosphor_core::cpu::m6800::M6800;
@@ -1157,8 +1157,8 @@ mod tests {
 
     mod debug_peek {
         use super::*;
+        use phosphor_core::core::DebugRead;
         use phosphor_core::core::debug::BusDebug;
-        use phosphor_core::core::memory_map::DebugRead;
 
         #[test]
         fn derived_peek_reports_backed_io_unmapped_per_map() {

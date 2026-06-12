@@ -5,7 +5,9 @@
 //! - `DebugCpu` — CPU-specific capabilities (extends Debuggable)
 //! - `BusDebug` — bus-level discovery of all devices and CPUs
 
-use crate::core::memory_map::{AddressSpace16, DebugRead, WatchpointHit, WatchpointKind};
+use crate::core::address_space::DebugRead;
+use crate::core::address_space16::AddressSpace16;
+use crate::core::watchpoint::{WatchpointHit, WatchpointKind};
 use crate::cpu::disasm::DisassembledInstruction;
 
 /// A single CPU register for display in the debug panel.
