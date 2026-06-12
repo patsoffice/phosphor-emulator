@@ -380,6 +380,17 @@ impl MissileCommandSystem {
         };
 
         if run_cpu {
+            // Latch watchpoint attribution context (cycle + instruction PC)
+            // before CPU execution — bus dispatch cannot read CPU state
+            // mid-tick.
+            if self.map.has_any_watchpoints() {
+                let pc = self
+                    .cpu
+                    .at_instruction_boundary()
+                    .then(|| self.cpu.pc as u32);
+                self.map.latch_access_context(self.clock, pc);
+            }
+
             bus_split!(self, bus => {
                 self.cpu.execute_cycle(bus, BusMaster::Cpu(0));
             });

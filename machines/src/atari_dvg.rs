@@ -115,6 +115,16 @@ impl AtariDvgBoard {
             self.nmi_pending = false;
         }
 
+        // Latch watchpoint attribution context (cycle + instruction PC)
+        // before CPU execution — bus dispatch cannot read CPU state mid-tick.
+        if self.map.has_any_watchpoints() {
+            let pc = self
+                .cpu
+                .at_instruction_boundary()
+                .then(|| self.cpu.pc as u32);
+            self.map.latch_access_context(self.clock, pc);
+        }
+
         // CPU tick
         self.cpu.execute_cycle(bus, BusMaster::Cpu(0));
         self.clock += 1;

@@ -307,6 +307,16 @@ impl Mcr2Board {
         // Tick CTC (timer-mode channels count CPU clocks)
         self.ctc.tick();
 
+        // Latch watchpoint attribution context (cycle + instruction PC)
+        // before CPU execution — bus dispatch cannot read CPU state mid-tick.
+        if self.map.has_any_watchpoints() {
+            let pc = self
+                .cpu
+                .at_instruction_boundary()
+                .then(|| self.cpu.pc as u32);
+            self.map.latch_access_context(self.clock, pc);
+        }
+
         // Execute main CPU cycle
         self.cpu
             .execute_cycle(bus, phosphor_core::core::BusMaster::Cpu(0));

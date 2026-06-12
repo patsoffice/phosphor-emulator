@@ -608,6 +608,17 @@ impl GottliebBoard {
 
     /// Execute one CPU cycle at the I8088 clock rate (5 MHz).
     pub fn tick(&mut self, bus: &mut dyn Bus<Address = u32, Data = u8>) {
+        // Latch watchpoint attribution context (cycle + instruction PC)
+        // before CPU execution — bus dispatch cannot read CPU state mid-tick.
+        // The I8088 debug surface uses IP as its PC (matching debug_pc).
+        if self.map.has_any_watchpoints() {
+            let pc = self
+                .cpu
+                .at_instruction_boundary()
+                .then(|| self.cpu.ip as u32);
+            self.map.latch_access_context(self.clock, pc);
+        }
+
         // Execute main CPU cycle
         self.cpu.execute_cycle(bus, BusMaster::Cpu(0));
 

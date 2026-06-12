@@ -322,6 +322,9 @@ impl Bus for DkongSystem {
     fn write(&mut self, master: BusMaster, addr: u16, data: u8) {
         match master {
             BusMaster::Cpu(0) => {
+                // Check the watchpoint before the side effect so the hit
+                // records pre-write state (WatchpointPhase::Before).
+                self.board.main_map.watch_write(0, master, addr, data);
                 match self.board.main_map.page(addr).region_id {
                     MainRegion::RAM | MainRegion::SPRITE_RAM | MainRegion::VIDEO_RAM => {
                         self.board.main_map.write_backing(addr, data);
@@ -381,7 +384,6 @@ impl Bus for DkongSystem {
                     },
                     _ => {} // ROM or unmapped: ignored
                 }
-                self.board.main_map.watch_write(0, master, addr, data);
             }
 
             // Sound CPU writes to program memory are ignored
