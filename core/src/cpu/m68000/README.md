@@ -6,11 +6,10 @@ registers, big-endian, 24-bit address space. Validated against
 (state-only). Architected so the 68010/68020/68030 can be layered on later
 via the `M68kVariant` gate; only 68000 behavior is implemented.
 
-**Status: M7 complete — full instruction set, full validation coverage.**
-Every 68000 instruction is implemented and every vector of the
-SingleStepTests suite is compared (the exact mid-instruction address-error
-abort included). The remaining milestone is M6 (disassembler), tracked as
-a beads issue under `phosphor-emulator-m68000-emulator-puk`.
+**Status: complete (M1-M7).** Every 68000 instruction is implemented and
+every vector of the SingleStepTests suite is compared (the exact
+mid-instruction address-error abort included). The debugger-facing
+disassembler (M6) covers the full instruction set in Motorola syntax.
 
 ## Status
 
@@ -178,9 +177,8 @@ core/src/cpu/m68000/
   stack.rs       -- LEA/PEA, LINK/UNLK, MOVEM
   exception.rs   -- exception entry, traps, privilege, RTE/STOP/RESET,
                     interrupts, address error
+  disasm.rs      -- Disassemble + DebugCpu disassembly (Motorola syntax)
 ```
-
-Planned (per the design doc): `disasm.rs` (M6).
 
 ## Validation
 

@@ -108,6 +108,24 @@ fn size_bits(bits: u16) -> Option<Sz> {
     }
 }
 
+/// Bcc mnemonics by condition field (0/1 are BRA/BSR on line 6).
+const BCC: [&str; 16] = [
+    "BRA", "BSR", "BHI", "BLS", "BCC", "BCS", "BNE", "BEQ", "BVC", "BVS", "BPL", "BMI", "BGE",
+    "BLT", "BGT", "BLE",
+];
+
+/// Scc mnemonics by condition field.
+const SCC: [&str; 16] = [
+    "ST", "SF", "SHI", "SLS", "SCC", "SCS", "SNE", "SEQ", "SVC", "SVS", "SPL", "SMI", "SGE", "SLT",
+    "SGT", "SLE",
+];
+
+/// DBcc mnemonics by condition field.
+const DBCC: [&str; 16] = [
+    "DBT", "DBF", "DBHI", "DBLS", "DBCC", "DBCS", "DBNE", "DBEQ", "DBVC", "DBVS", "DBPL", "DBMI",
+    "DBGE", "DBLT", "DBGT", "DBLE",
+];
+
 /// Format a signed displacement as `$xx` / `-$xx`.
 fn disp(d: i32) -> String {
     if d < 0 {
@@ -129,8 +147,6 @@ fn index_reg(ext: u16) -> String {
 /// address (absolute modes and `d16(PC)`), used for jump targets.
 struct EaText {
     text: String,
-    /// Read by the control-flow decoders (JMP/JSR targets).
-    #[allow(dead_code)]
     target: Option<u32>,
 }
 
@@ -197,6 +213,44 @@ fn ea(mode: u8, reg: u8, sz: Sz, cur: &mut Cur, addr: u32) -> Option<EaText> {
         }
         _ => return None,
     })
+}
+
+/// Format a MOVEM register-list mask as `D0-D2/D7/A0-A6`.
+///
+/// `reversed` is the predecrement form, where bit 0 is A7 and bit 15 is
+/// D0 (hardware reverses the mask for that mode).
+fn movem_list(mask: u16, reversed: bool) -> String {
+    // Normalize to bit 0 = D0 .. bit 15 = A7.
+    let mask = if reversed { mask.reverse_bits() } else { mask };
+    let name = |i: usize| {
+        if i < 8 {
+            format!("D{i}")
+        } else {
+            format!("A{}", i - 8)
+        }
+    };
+    let mut parts: Vec<String> = Vec::new();
+    // Runs never span the D/A boundary.
+    for half in [0usize, 8] {
+        let mut i = half;
+        while i < half + 8 {
+            if mask & (1 << i) == 0 {
+                i += 1;
+                continue;
+            }
+            let start = i;
+            while i + 1 < half + 8 && mask & (1 << (i + 1)) != 0 {
+                i += 1;
+            }
+            parts.push(if i == start {
+                name(start)
+            } else {
+                format!("{}-{}", name(start), name(i))
+            });
+            i += 1;
+        }
+    }
+    parts.join("/")
 }
 
 /// Disassemble one instruction. Split out so `mod.rs` can call it from
@@ -320,9 +374,174 @@ fn dis_inner(opcode: u16, addr: u32, cur: &mut Cur) -> Option<DisassembledInstru
                 )
             }
         }
-        // Line 0x4 (misc) and lines 0x5/0x6 (ADDQ/Scc/DBcc, branches)
-        // land with the control-flow pass; everything not yet decoded
-        // renders as data below.
+        // CHK and LEA share line 4 with the misc group
+        0x4 if opcode & 0x01C0 == 0x0180 => {
+            let src = ea(ea_mode, ea_reg, Sz::W, cur, addr)?;
+            make("CHK", format!("{},D{dreg}", src.text), cur.pos, raw, None)
+        }
+        0x4 if opcode & 0x01C0 == 0x01C0 => {
+            let src = ea(ea_mode, ea_reg, Sz::L, cur, addr)?;
+            make("LEA", format!("{},A{dreg}", src.text), cur.pos, raw, None)
+        }
+        // Line 4 misc: unary ALU group, SR/CCR moves, SWAP/PEA/EXT/MOVEM,
+        // TST/TAS/ILLEGAL, and the JMP/JSR + one-word specials.
+        0x4 => match (opcode >> 8) & 0xF {
+            0x0 if opcode & 0x00C0 == 0x00C0 => {
+                let dst = ea(ea_mode, ea_reg, Sz::W, cur, addr)?;
+                make("MOVE", format!("SR,{}", dst.text), cur.pos, raw, None)
+            }
+            0x0 => unary("NEGX", opcode, addr, cur)?,
+            // 0x42C0 (MOVE from CCR) is 68010+; data on the 68000
+            0x2 if opcode & 0x00C0 == 0x00C0 => dc_w(opcode, raw),
+            0x2 => unary("CLR", opcode, addr, cur)?,
+            0x4 if opcode & 0x00C0 == 0x00C0 => {
+                let src = ea(ea_mode, ea_reg, Sz::W, cur, addr)?;
+                make("MOVE", format!("{},CCR", src.text), cur.pos, raw, None)
+            }
+            0x4 => unary("NEG", opcode, addr, cur)?,
+            0x6 if opcode & 0x00C0 == 0x00C0 => {
+                let src = ea(ea_mode, ea_reg, Sz::W, cur, addr)?;
+                make("MOVE", format!("{},SR", src.text), cur.pos, raw, None)
+            }
+            0x6 => unary("NOT", opcode, addr, cur)?,
+            0x8 if opcode & 0x00C0 == 0 => {
+                let dst = ea(ea_mode, ea_reg, Sz::B, cur, addr)?;
+                make("NBCD", dst.text, cur.pos, raw, None)
+            }
+            0x8 if opcode & 0x00F8 == 0x0040 => {
+                make("SWAP", format!("D{ea_reg}"), cur.pos, raw, None)
+            }
+            0x8 if opcode & 0x00C0 == 0x0040 => {
+                let src = ea(ea_mode, ea_reg, Sz::L, cur, addr)?;
+                make("PEA", src.text, cur.pos, raw, None)
+            }
+            0x8 if opcode & 0x0038 == 0 && opcode & 0x0080 != 0 => {
+                let sz = if opcode & 0x0040 != 0 { Sz::L } else { Sz::W };
+                make(sized("EXT", sz), format!("D{ea_reg}"), cur.pos, raw, None)
+            }
+            // MOVEM store: the mask word precedes the EA extensions;
+            // the predecrement mode carries a bit-reversed mask
+            0x8 if opcode & 0x0080 != 0 => {
+                let sz = if opcode & 0x0040 != 0 { Sz::L } else { Sz::W };
+                let mask = cur.word()?;
+                let dst = ea(ea_mode, ea_reg, sz, cur, addr)?;
+                let list = movem_list(mask, ea_mode == 4);
+                make(
+                    sized("MOVEM", sz),
+                    format!("{list},{}", dst.text),
+                    cur.pos,
+                    raw,
+                    None,
+                )
+            }
+            0xA if opcode == 0x4AFC => make("ILLEGAL", String::new(), cur.pos, raw, None),
+            0xA if opcode & 0x00C0 == 0x00C0 => {
+                let dst = ea(ea_mode, ea_reg, Sz::B, cur, addr)?;
+                make("TAS", dst.text, cur.pos, raw, None)
+            }
+            0xA => unary("TST", opcode, addr, cur)?,
+            // MOVEM load
+            0xC if opcode & 0x0080 != 0 => {
+                let sz = if opcode & 0x0040 != 0 { Sz::L } else { Sz::W };
+                let mask = cur.word()?;
+                let src = ea(ea_mode, ea_reg, sz, cur, addr)?;
+                make(
+                    sized("MOVEM", sz),
+                    format!("{},{}", src.text, movem_list(mask, false)),
+                    cur.pos,
+                    raw,
+                    None,
+                )
+            }
+            0xE => match (opcode >> 6) & 3 {
+                3 | 2 => {
+                    let mn = if (opcode >> 6) & 3 == 3 { "JMP" } else { "JSR" };
+                    let dst = ea(ea_mode, ea_reg, Sz::L, cur, addr)?;
+                    make(mn, dst.text, cur.pos, raw, dst.target)
+                }
+                1 => match opcode {
+                    0x4E40..=0x4E4F => {
+                        make("TRAP", format!("#{}", opcode & 0xF), cur.pos, raw, None)
+                    }
+                    0x4E50..=0x4E57 => {
+                        let d = cur.word()? as i16;
+                        make(
+                            "LINK",
+                            format!("A{ea_reg},#{}", disp(d as i32)),
+                            cur.pos,
+                            raw,
+                            None,
+                        )
+                    }
+                    0x4E58..=0x4E5F => make("UNLK", format!("A{ea_reg}"), cur.pos, raw, None),
+                    0x4E60..=0x4E67 => make("MOVE", format!("A{ea_reg},USP"), cur.pos, raw, None),
+                    0x4E68..=0x4E6F => make("MOVE", format!("USP,A{ea_reg}"), cur.pos, raw, None),
+                    0x4E70 => make("RESET", String::new(), cur.pos, raw, None),
+                    0x4E71 => make("NOP", String::new(), cur.pos, raw, None),
+                    0x4E72 => make("STOP", format!("#${:04X}", cur.word()?), cur.pos, raw, None),
+                    0x4E73 => make("RTE", String::new(), cur.pos, raw, None),
+                    0x4E75 => make("RTS", String::new(), cur.pos, raw, None),
+                    0x4E76 => make("TRAPV", String::new(), cur.pos, raw, None),
+                    0x4E77 => make("RTR", String::new(), cur.pos, raw, None),
+                    _ => dc_w(opcode, raw),
+                },
+                _ => dc_w(opcode, raw),
+            },
+            _ => dc_w(opcode, raw),
+        },
+        // DBcc / Scc / ADDQ / SUBQ
+        0x5 if opmode & 3 == 3 && ea_mode == 1 => {
+            let d = cur.word()? as i16;
+            let target = addr.wrapping_add(2).wrapping_add(d as i32 as u32);
+            make(
+                DBCC[((opcode >> 8) & 0xF) as usize],
+                format!("D{ea_reg},${target:06X}"),
+                cur.pos,
+                raw,
+                Some(target),
+            )
+        }
+        0x5 if opmode & 3 == 3 => {
+            let dst = ea(ea_mode, ea_reg, Sz::B, cur, addr)?;
+            make(
+                SCC[((opcode >> 8) & 0xF) as usize],
+                dst.text,
+                cur.pos,
+                raw,
+                None,
+            )
+        }
+        0x5 => {
+            let mn = if opcode & 0x0100 != 0 { "SUBQ" } else { "ADDQ" };
+            let sz = size_bits(opcode >> 6)?;
+            let n = if dreg == 0 { 8 } else { dreg };
+            let dst = ea(ea_mode, ea_reg, sz, cur, addr)?;
+            make(
+                sized(mn, sz),
+                format!("#{n},{}", dst.text),
+                cur.pos,
+                raw,
+                None,
+            )
+        }
+        // BRA / BSR / Bcc: 8-bit displacement in the opcode, or a word
+        // displacement when the 8-bit field is zero
+        0x6 => {
+            let d8 = opcode as i8;
+            let target = if d8 == 0 {
+                let d16 = cur.word()? as i16;
+                addr.wrapping_add(2).wrapping_add(d16 as i32 as u32)
+            } else {
+                addr.wrapping_add(2).wrapping_add(d8 as i32 as u32)
+            };
+            make(
+                BCC[((opcode >> 8) & 0xF) as usize],
+                format!("${target:06X}"),
+                cur.pos,
+                raw,
+                Some(target),
+            )
+        }
         // MOVEQ
         0x7 if opcode & 0x0100 == 0 => {
             let val = opcode as i8 as i32;
@@ -455,8 +674,8 @@ fn dis_inner(opcode: u16, addr: u32, cur: &mut Cur) -> Option<DisassembledInstru
                 None,
             )
         }
-        // Everything else (lines 4-6 until the control-flow pass; lines
-        // A/F always) renders as data.
+        // Lines A and F are unassigned on the 68000 (they vector through
+        // their dedicated exceptions); everything else left is data.
         _ => dc_w(opcode, raw),
     };
     Some(inst)
@@ -510,6 +729,19 @@ fn xop_pair(
         format!("-(A{ea_reg}),-(A{dreg})")
     };
     Some(make(sized(mn, sz), ops, cur.pos, raw, None))
+}
+
+/// Sized single-EA unary forms (NEGX/CLR/NEG/NOT/TST).
+fn unary(
+    mn: &'static str,
+    opcode: u16,
+    addr: u32,
+    cur: &mut Cur,
+) -> Option<DisassembledInstruction> {
+    let raw = cur.bytes;
+    let sz = size_bits(opcode >> 6)?;
+    let dst = ea(((opcode >> 3) & 7) as u8, (opcode & 7) as u8, sz, cur, addr)?;
+    Some(make(sized(mn, sz), dst.text, cur.pos, raw, None))
 }
 
 /// AND/OR: opmode 0-2 is `<ea>,Dn`, 4-6 is `Dn,<ea>`.
