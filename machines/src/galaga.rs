@@ -790,7 +790,7 @@ impl Bus for GalagaSystem {
     type Data = u8;
 
     fn read(&mut self, master: BusMaster, addr: u16) -> u8 {
-        match addr {
+        let data = match addr {
             0x0000..=0x3FFF => self.board.read_rom(master, addr),
             0x6800..=0x6807 => {
                 // DIP switch reads (active-low, accent via 51XX/53XX).
@@ -808,10 +808,16 @@ impl Bus for GalagaSystem {
             0x9800..=0x9BFF => self.ram3[(addr - 0x9800) as usize],
             0xA000..=0xA007 => 0, // video latch (write-only)
             _ => 0xFF,
-        }
+        };
+        self.board.watch_read(master, addr, data);
+        data
     }
 
-    fn write(&mut self, _master: BusMaster, addr: u16, data: u8) {
+    fn write(&mut self, master: BusMaster, addr: u16, data: u8) {
+        // Check the watchpoint before the side effect so the hit records
+        // pre-write state (WatchpointPhase::Before); trace alongside.
+        self.board.watch_write(master, addr, data);
+        self.board.trace_bus_write(master, addr, data);
         match addr {
             0x0000..=0x3FFF => {} // ROM (nopw)
             0x6800..=0x681F => {
@@ -951,6 +957,34 @@ impl BusDebug for GalagaSystem {
             _ => {}
         }
     }
+
+    // --- Watchpoints (board-level Watchpoints set; no AddressSpace16) ---
+
+    fn take_watchpoint_hit(&mut self) -> Option<phosphor_core::core::watchpoint::WatchpointHit> {
+        self.board.watchpoints.take_hit()
+    }
+
+    fn set_watchpoint(
+        &mut self,
+        cpu_index: usize,
+        addr: u16,
+        kind: phosphor_core::core::watchpoint::WatchpointKind,
+    ) {
+        self.board.watchpoints.set(cpu_index, addr as u32, kind);
+    }
+
+    fn clear_watchpoint(
+        &mut self,
+        cpu_index: usize,
+        addr: u16,
+        kind: phosphor_core::core::watchpoint::WatchpointKind,
+    ) {
+        self.board.watchpoints.clear(cpu_index, addr as u32, kind);
+    }
+
+    fn clear_all_watchpoints(&mut self) {
+        self.board.watchpoints.clear_all();
+    }
 }
 
 impl MachineDebug for GalagaSystem {
@@ -1012,7 +1046,9 @@ impl SaveState for GalagaSystem {
     crate::machine_save_state!();
 }
 
-crate::impl_default_frontend_capabilities!(GalagaSystem);
+impl phosphor_core::core::machine::Nvram for GalagaSystem {}
+impl phosphor_core::core::machine::Profilable for GalagaSystem {}
+crate::impl_board_debug_trace!(GalagaSystem, board);
 
 // ---------------------------------------------------------------------------
 // Machine registry
