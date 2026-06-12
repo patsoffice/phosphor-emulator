@@ -5,7 +5,7 @@
 //! - `DebugCpu` — CPU-specific capabilities (extends Debuggable)
 //! - `BusDebug` — bus-level discovery of all devices and CPUs
 
-use crate::core::memory_map::{MemoryMap, WatchpointHit, WatchpointKind};
+use crate::core::memory_map::{DebugRead, MemoryMap, WatchpointHit, WatchpointKind};
 use crate::cpu::disasm::DisassembledInstruction;
 
 /// A single CPU register for display in the debug panel.
@@ -73,6 +73,28 @@ pub trait BusDebug {
     /// Debug memory write into a CPU's address space.
     fn write(&mut self, cpu_index: usize, addr: u16, data: u8);
 
+    /// Side-effect-free memory read with full address semantics: backed
+    /// memory (value returned), mapped I/O (reading the live device would
+    /// have side effects), or unmapped.
+    ///
+    /// The default routes through [`read`](Self::read), which cannot
+    /// distinguish I/O from unmapped — both report `Unmapped`.
+    /// `#[derive(BusDebug)]` overrides this with per-map semantics via
+    /// `AddressSpace16::debug_peek`.
+    fn peek(&self, cpu_index: usize, addr: u32) -> DebugRead {
+        if addr > 0xFFFF {
+            return DebugRead::Unmapped;
+        }
+        match self.read(cpu_index, addr as u16) {
+            Some(value) => DebugRead::Backed {
+                value: value as u32,
+                width: 1,
+                region_id: 0,
+            },
+            None => DebugRead::Unmapped,
+        }
+    }
+
     /// Write to a device register by device index and register offset.
     /// Device indices match the order returned by `devices()`.
     /// Only `#[debug_device]` fields respond; CPU indices are ignored.
@@ -101,5 +123,44 @@ pub trait BusDebug {
     /// Get the memory map for a CPU's address space (for region introspection).
     fn memory_map(&self, _cpu_index: usize) -> Option<&MemoryMap> {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Manual `BusDebug` with only `read`/`write`, exercising the default
+    /// `peek`: backed bytes report `Backed`, everything else `Unmapped`
+    /// (the default cannot distinguish I/O).
+    struct ReadOnlyBus;
+
+    impl BusDebug for ReadOnlyBus {
+        fn devices(&self) -> Vec<(&str, &dyn Debuggable)> {
+            Vec::new()
+        }
+        fn cpus(&self) -> Vec<(&str, &dyn DebugCpu)> {
+            Vec::new()
+        }
+        fn read(&self, _cpu_index: usize, addr: u16) -> Option<u8> {
+            (addr < 0x8000).then_some(addr as u8)
+        }
+        fn write(&mut self, _cpu_index: usize, _addr: u16, _data: u8) {}
+    }
+
+    #[test]
+    fn default_peek_routes_through_read() {
+        let bus = ReadOnlyBus;
+        assert_eq!(
+            bus.peek(0, 0x1234),
+            DebugRead::Backed {
+                value: 0x34,
+                width: 1,
+                region_id: 0
+            }
+        );
+        assert_eq!(bus.peek(0, 0x9000), DebugRead::Unmapped);
+        // Out of 16-bit range: unmapped until the debug surface widens
+        assert_eq!(bus.peek(0, 0x1_0000), DebugRead::Unmapped);
     }
 }

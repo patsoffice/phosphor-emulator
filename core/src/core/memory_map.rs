@@ -609,11 +609,40 @@ impl AddressSpace16 {
 
     /// Side-effect-free read from backing memory. Returns `None` for I/O
     /// and unmapped regions (which have no backing store).
+    ///
+    /// Convenience over [`debug_peek`](Self::debug_peek) for callers that
+    /// don't need to distinguish I/O from unmapped.
     #[inline]
     pub fn debug_read(&self, addr: u16) -> Option<u8> {
+        match self.debug_peek(addr) {
+            DebugRead::Backed { value, .. } => Some(value as u8),
+            DebugRead::Io | DebugRead::Unmapped => None,
+        }
+    }
+
+    /// Side-effect-free read with full address semantics.
+    ///
+    /// Distinguishes backed memory (RAM/ROM, value returned) from mapped
+    /// I/O (reading the live device would have side effects) and unmapped
+    /// addresses — so a memory viewer can label cells instead of showing
+    /// a fake bus value.
+    #[inline]
+    pub fn debug_peek(&self, addr: u16) -> DebugRead {
         let page = self.page(addr);
-        self.backing
+        if page.region_id == UNMAPPED {
+            return DebugRead::Unmapped;
+        }
+        match self
+            .backing
             .read_region_offset(page.region_id, self.map.region_offset(addr))
+        {
+            Some(value) => DebugRead::Backed {
+                value: value as u32,
+                width: 1,
+                region_id: page.region_id,
+            },
+            None => DebugRead::Io,
+        }
     }
 
     /// Side-effect-free write to backing memory. No-op for I/O and unmapped regions.
@@ -1595,6 +1624,60 @@ mod tests {
 
         // Unmapped returns None
         assert_eq!(map.debug_read(0xA000), None);
+    }
+
+    #[test]
+    fn debug_peek_distinguishes_backed_io_unmapped() {
+        let mut map = MemoryMap::new();
+        map.region(RAM, "RAM", 0x0000, 0x8000, AccessKind::ReadWrite)
+            .region(IO, "I/O", 0xC000, 0x100, AccessKind::Io);
+
+        map.region_data_mut(RAM)[0x1234] = 0xAB;
+
+        assert_eq!(
+            map.debug_peek(0x1234),
+            DebugRead::Backed {
+                value: 0xAB,
+                width: 1,
+                region_id: RAM
+            }
+        );
+        assert_eq!(map.debug_peek(0xC042), DebugRead::Io);
+        assert_eq!(map.debug_peek(0xA000), DebugRead::Unmapped);
+    }
+
+    #[test]
+    fn debug_peek_follows_mirrors_and_banking() {
+        const BANK_ROM: RegionId = 4;
+
+        let mut map = MemoryMap::new();
+        map.region(ROM, "ROM", 0xF000, 0x1000, AccessKind::ReadOnly)
+            .mirror(0xB000, 0xF000, 0x1000)
+            .backing_region(BANK_ROM, "Banked ROM", 0x1000);
+
+        map.region_data_mut(ROM)[0x42] = 0xEE;
+        map.region_data_mut(BANK_ROM)[0x42] = 0x99;
+
+        // Mirror resolves to the same backing byte
+        assert_eq!(
+            map.debug_peek(0xB042),
+            DebugRead::Backed {
+                value: 0xEE,
+                width: 1,
+                region_id: ROM
+            }
+        );
+
+        // After banking, the same address peeks the banked region
+        map.remap_pages(0xF0, 0x10, BANK_ROM, 0);
+        assert_eq!(
+            map.debug_peek(0xF042),
+            DebugRead::Backed {
+                value: 0x99,
+                width: 1,
+                region_id: BANK_ROM
+            }
+        );
     }
 
     #[test]
