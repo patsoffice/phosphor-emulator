@@ -462,6 +462,109 @@ impl AddressSpace32 {
         }
     }
 
+    // -----------------------------------------------------------------------
+    // Bus access helpers (big-endian, for 68000-class board bus code)
+    // -----------------------------------------------------------------------
+    //
+    // ROM/RAM backing is byte-addressable even when the CPU bus is
+    // word-wide; these helpers assemble big-endian words/longs byte by
+    // byte, so accesses may legally span adjacent regions. They model
+    // memory only — boards dispatch I/O regions to device code themselves.
+    // Byte-vs-word write semantics on a word bus (e.g. the M68000's
+    // read-modify-write byte writes) belong in the CPU's bus adapter, not
+    // here.
+
+    /// Bus-side read of one byte. Returns `None` for I/O and unmapped
+    /// addresses; the board decides what the bus floats.
+    #[inline]
+    pub fn read_u8(&self, addr: u32) -> Option<u8> {
+        let (region_id, offset) = self.map.resolved_offset(addr)?;
+        self.backing.read_region_offset(region_id, offset as usize)
+    }
+
+    /// Bus-side read of a big-endian word. Returns `None` unless both
+    /// bytes are backed.
+    #[inline]
+    pub fn read_u16_be(&self, addr: u32) -> Option<u16> {
+        let hi = self.read_u8(addr)?;
+        let lo = self.read_u8(addr.wrapping_add(1))?;
+        Some(u16::from_be_bytes([hi, lo]))
+    }
+
+    /// Bus-side read of a big-endian long. Returns `None` unless all four
+    /// bytes are backed.
+    #[inline]
+    pub fn read_u32_be(&self, addr: u32) -> Option<u32> {
+        let hi = self.read_u16_be(addr)?;
+        let lo = self.read_u16_be(addr.wrapping_add(2))?;
+        Some(((hi as u32) << 16) | lo as u32)
+    }
+
+    /// Bus-side write of one byte. Lands only in writable regions
+    /// (`ReadWrite`/`WriteOnly`); ROM, I/O, and unmapped writes are
+    /// ignored and return false. Debug ROM patching goes through
+    /// [`debug_poke`](Self::debug_poke) instead.
+    #[inline]
+    pub fn write_u8(&mut self, addr: u32, data: u8) -> bool {
+        let Some((region, resolved)) = self.map.resolve(addr) else {
+            return false;
+        };
+        if !matches!(region.access, AccessKind::ReadWrite | AccessKind::WriteOnly) {
+            return false;
+        }
+        match region.target {
+            RegionTarget::Backing {
+                region_id,
+                base_offset,
+            } => {
+                let offset = (base_offset + (resolved - region.start)) as usize;
+                self.backing.write_region_offset(region_id, offset, data)
+            }
+            _ => false,
+        }
+    }
+
+    /// Bus-side write of a big-endian word. Each byte is written
+    /// independently (a word spanning a writable/non-writable boundary
+    /// writes the writable byte); returns true only if both landed.
+    #[inline]
+    pub fn write_u16_be(&mut self, addr: u32, data: u16) -> bool {
+        let [hi, lo] = data.to_be_bytes();
+        let hi_ok = self.write_u8(addr, hi);
+        let lo_ok = self.write_u8(addr.wrapping_add(1), lo);
+        hi_ok && lo_ok
+    }
+
+    /// Bus-side write of a big-endian long. Each half is written
+    /// independently; returns true only if all four bytes landed.
+    #[inline]
+    pub fn write_u32_be(&mut self, addr: u32, data: u32) -> bool {
+        let hi_ok = self.write_u16_be(addr, (data >> 16) as u16);
+        let lo_ok = self.write_u16_be(addr.wrapping_add(2), data as u16);
+        hi_ok && lo_ok
+    }
+
+    // -----------------------------------------------------------------------
+    // Word-bus adapters (for `Bus<Address = u32, Data = u16>` impls)
+    // -----------------------------------------------------------------------
+
+    /// Word-bus read adapter: big-endian word, or `0xFFFF` when any byte
+    /// is I/O or unmapped — a simple float value suitable for validation
+    /// harnesses. Real boards that float different data, or dispatch I/O
+    /// reads to devices, handle those address ranges before falling back
+    /// to this.
+    #[inline]
+    pub fn read_bus_word_be(&self, addr: u32) -> u16 {
+        self.read_u16_be(addr).unwrap_or(0xFFFF)
+    }
+
+    /// Word-bus write adapter: big-endian word write, silently ignored
+    /// for ROM, I/O, and unmapped bytes (as the hardware would).
+    #[inline]
+    pub fn write_bus_word_be(&mut self, addr: u32, data: u16) {
+        self.write_u16_be(addr, data);
+    }
+
     /// Get a read-only slice of a region's backing store.
     ///
     /// Panics if the region has no backing (I/O or unregistered).
@@ -1253,5 +1356,131 @@ mod address_space32_tests {
         assert_eq!(space.region_at(0x00FF_0042).unwrap().name, "Work RAM");
         assert_eq!(space.resolved_offset(0x00FF_0042), Some((RAM, 0x42)));
         assert!(space.region_at(0x0050_0000).is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // Big-endian bus helper tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn read_u8_reads_backing_only() {
+        let mut space = test_space();
+        space.region_data_mut(ROM)[0x42] = 0xCD;
+
+        assert_eq!(space.read_u8(0x0000_0042), Some(0xCD));
+        assert_eq!(space.read_u8(0x00A0_0000), None); // I/O
+        assert_eq!(space.read_u8(0x0050_0000), None); // unmapped
+    }
+
+    #[test]
+    fn read_u16_u32_are_big_endian() {
+        let mut space = test_space();
+        space.load_region_at(ROM, 0x100, &[0x12, 0x34, 0x56, 0x78]);
+
+        assert_eq!(space.read_u16_be(0x0000_0100), Some(0x1234));
+        assert_eq!(space.read_u16_be(0x0000_0102), Some(0x5678));
+        assert_eq!(space.read_u32_be(0x0000_0100), Some(0x1234_5678));
+
+        // Odd addresses are not the address space's business to reject.
+        assert_eq!(space.read_u16_be(0x0000_0101), Some(0x3456));
+    }
+
+    #[test]
+    fn write_u16_u32_are_big_endian() {
+        let mut space = test_space();
+
+        assert!(space.write_u16_be(0x00FF_0000, 0xBEEF));
+        assert_eq!(&space.region_data(RAM)[0..2], &[0xBE, 0xEF]);
+
+        assert!(space.write_u32_be(0x00FF_0010, 0xDEAD_BEEF));
+        assert_eq!(
+            &space.region_data(RAM)[0x10..0x14],
+            &[0xDE, 0xAD, 0xBE, 0xEF]
+        );
+        assert_eq!(space.read_u32_be(0x00FF_0010), Some(0xDEAD_BEEF));
+    }
+
+    #[test]
+    fn write_u8_respects_access_kind() {
+        let mut space = test_space();
+
+        assert!(space.write_u8(0x00FF_0042, 0x55)); // RAM
+        assert_eq!(space.read_u8(0x00FF_0042), Some(0x55));
+
+        // ROM bus writes are ignored (debug_poke is the patching path).
+        assert!(!space.write_u8(0x0000_0042, 0x55));
+        assert_eq!(space.read_u8(0x0000_0042), Some(0x00));
+
+        assert!(!space.write_u8(0x00A0_0000, 0x55)); // I/O
+        assert!(!space.write_u8(0x0050_0000, 0x55)); // unmapped
+    }
+
+    #[test]
+    fn multibyte_access_spans_adjacent_regions() {
+        const RAM_B: RegionId = 5;
+        let mut space = AddressSpace32::new();
+        space
+            .region(RAM, "RAM A", 0x0000_0000, 0x1000, AccessKind::ReadWrite)
+            .region(RAM_B, "RAM B", 0x0000_1000, 0x1000, AccessKind::ReadWrite);
+
+        assert!(space.write_u16_be(0x0000_0FFF, 0xABCD));
+        assert_eq!(space.region_data(RAM)[0xFFF], 0xAB);
+        assert_eq!(space.region_data(RAM_B)[0], 0xCD);
+        assert_eq!(space.read_u16_be(0x0000_0FFF), Some(0xABCD));
+    }
+
+    #[test]
+    fn multibyte_access_into_unmapped_fails() {
+        let mut space = test_space();
+
+        // ROM ends at 0x0003_FFFF; the next byte is unmapped.
+        assert_eq!(space.read_u16_be(0x0003_FFFF), None);
+        assert_eq!(space.read_u32_be(0x0003_FFFD), None);
+
+        // RAM ends at 0x00FF_FFFF; the high byte lands, the low does not.
+        assert!(!space.write_u16_be(0x00FF_FFFF, 0xAABB));
+        assert_eq!(space.read_u8(0x00FF_FFFF), Some(0xAA));
+    }
+
+    #[test]
+    fn read_through_alias_and_bank() {
+        let mut space = test_space();
+        space.alias("RAM Mirror", 0x00CF_0000, 0x00FF_0000, 0x1_0000);
+        space.write_u16_be(0x00FF_0042, 0xCAFE);
+
+        assert_eq!(space.read_u16_be(0x00CF_0042), Some(0xCAFE));
+        assert!(space.write_u16_be(0x00CF_0042, 0xF00D));
+        assert_eq!(space.read_u16_be(0x00FF_0042), Some(0xF00D));
+    }
+
+    // -----------------------------------------------------------------------
+    // Word-bus adapter tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn bus_word_adapter_reads_mapped_words() {
+        let mut space = test_space();
+        space.load_region_at(ROM, 0, &[0x4E, 0x75]);
+
+        assert_eq!(space.read_bus_word_be(0x0000_0000), 0x4E75);
+    }
+
+    #[test]
+    fn bus_word_adapter_floats_unmapped_as_ffff() {
+        let space = test_space();
+        assert_eq!(space.read_bus_word_be(0x0050_0000), 0xFFFF); // unmapped
+        assert_eq!(space.read_bus_word_be(0x00A0_0000), 0xFFFF); // I/O
+        assert_eq!(space.read_bus_word_be(0x0003_FFFF), 0xFFFF); // spans into a gap
+    }
+
+    #[test]
+    fn bus_word_adapter_write_ignores_rom() {
+        let mut space = test_space();
+
+        space.write_bus_word_be(0x00FF_0000, 0x1234);
+        assert_eq!(space.read_bus_word_be(0x00FF_0000), 0x1234);
+
+        space.write_bus_word_be(0x0000_0000, 0x1234); // ROM: silently ignored
+        assert_eq!(space.read_bus_word_be(0x0000_0000), 0x0000);
     }
 }
