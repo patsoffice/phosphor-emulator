@@ -1,5 +1,12 @@
 # Design: Address Space and MemoryMap Refactor
 
+> **Status: implemented.** All seven phases are complete. The `MemoryMap`
+> alias is removed; the final modules are `core::address_space` (shared
+> `RegionId`/`AccessKind`/`DebugRead`/`DebugWrite`/`MemoryBacking`),
+> `core::address_space16`, `core::address_space32`, and
+> `core::watchpoint`. The text below is the design as written, kept as a
+> record of the starting point and rationale.
+
 ## Context
 
 `MemoryMap` started as a page-table-based decoder for 16-bit address spaces.

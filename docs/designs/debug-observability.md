@@ -1,5 +1,11 @@
 # Design: Debug Observability Improvements
 
+> **Status: implemented.** Event tracing, rich watchpoint metadata, peek
+> semantics, and the u16→u32 debug-surface widening have all landed.
+> Where the text says `MemoryMap`, the final type is `AddressSpace16`
+> (the alias is removed); the canonical shared debug types live in
+> `core::address_space` and `core::watchpoint`.
+
 ## Context
 
 The current debugger is already useful for CPU-level work. It supports:

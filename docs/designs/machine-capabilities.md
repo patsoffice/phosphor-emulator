@@ -1,5 +1,11 @@
 # Design: Machine Capability Refactor
 
+> **Status: implemented.** `MachineCore` plus the capability traits are
+> the final shape, bundled into the object-safe `FrontendMachine` for
+> the frontend and registry. The migration-only `Machine` alias trait
+> described below is removed; the unqualified `Machine` name no longer
+> exists in code.
+
 ## Context
 
 `Machine` is the front-end contract for every playable system. The front end is
