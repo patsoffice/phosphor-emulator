@@ -32,6 +32,23 @@ pub struct CpuPanel {
 pub struct DevicePanel {
     pub name: String,
     pub registers: Vec<DebugRegister>,
+    /// Index in `BusDebug::devices()` order (CPUs occupy the first
+    /// indices), used for `reset_device`/`write_device_register` dispatch.
+    pub device_index: usize,
+}
+
+/// A device control requested by the UI, applied to the machine at the
+/// start of the next `execute_frame` (panel drawing has no machine access).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum DeviceAction {
+    /// Reset the device at this `devices()` index.
+    Reset(usize),
+    /// Write a register byte on the device at this `devices()` index.
+    WriteRegister {
+        device_index: usize,
+        offset: u16,
+        value: u8,
+    },
 }
 
 /// Persistent state for the debug UI across frames.
@@ -82,6 +99,12 @@ pub struct DebugState {
     /// frame while tracing is enabled).
     pub trace_events: Vec<DebugEvent>,
 
+    // Device controls
+    /// Device actions requested by the UI, applied on the next frame.
+    pub pending_device_actions: Vec<DeviceAction>,
+    /// Per-device-panel (offset, value) hex input buffers for register writes.
+    pub device_write_inputs: Vec<(String, String)>,
+
     // Per-CPU column state
     /// Which tab (Disassembly/Memory) is selected per CPU column.
     pub bottom_tabs: Vec<BottomTab>,
@@ -119,6 +142,8 @@ impl DebugState {
             trace_enabled_dirty: false,
             trace_clear_requested: false,
             trace_events: Vec::new(),
+            pending_device_actions: Vec::new(),
+            device_write_inputs: Vec::new(),
             bottom_tabs: Vec::new(),
             memory_addr_inputs: Vec::new(),
             memory_scroll_to: Vec::new(),
@@ -153,13 +178,16 @@ impl DebugState {
             .collect();
 
         // Device panels exclude CPUs (they're already shown in cpu_panels)
+        // but keep the devices()-order index for control dispatch.
         self.device_panels = bus
             .devices()
             .iter()
-            .filter(|(name, _)| !cpu_names.contains(name))
-            .map(|(name, dev)| DevicePanel {
+            .enumerate()
+            .filter(|(_, (name, _))| !cpu_names.contains(name))
+            .map(|(device_index, (name, dev))| DevicePanel {
                 name: name.to_string(),
                 registers: dev.debug_registers(),
+                device_index,
             })
             .collect();
 
@@ -175,6 +203,10 @@ impl DebugState {
         }
         while self.memory_scroll_to.len() < cpus.len() {
             self.memory_scroll_to.push(None);
+        }
+        while self.device_write_inputs.len() < self.device_panels.len() {
+            self.device_write_inputs
+                .push((String::new(), String::new()));
         }
 
         if self.step_cpu >= self.cpu_panels.len() && !self.cpu_panels.is_empty() {
@@ -215,6 +247,27 @@ pub fn execute_frame(machine: &mut dyn FrontendMachine, state: &mut DebugState) 
     if state.trace_enabled {
         state.trace_events.clear();
         state.trace_events.extend_from_slice(machine.trace_events());
+    }
+
+    // Apply device controls requested by the UI (reset / register write).
+    if !state.pending_device_actions.is_empty() {
+        if let Some(bus) = machine.debug_bus_mut() {
+            for action in &state.pending_device_actions {
+                match *action {
+                    DeviceAction::Reset(device_index) => bus.reset_device(device_index),
+                    DeviceAction::WriteRegister {
+                        device_index,
+                        offset,
+                        value,
+                    } => bus.write_device_register(device_index, offset, value),
+                }
+            }
+        }
+        state.pending_device_actions.clear();
+        // Show the effect immediately, even while paused.
+        if let Some(bus) = machine.debug_bus() {
+            state.refresh(bus);
+        }
     }
 
     match state.run_mode {
@@ -470,18 +523,75 @@ fn draw_controls_column(ui: &mut egui::Ui, state: &mut DebugState, min_top_heigh
     egui::ScrollArea::vertical()
         .id_salt("ctrl_scroll")
         .show(ui, |ui| {
-            for (i, panel) in state.device_panels.iter().enumerate() {
+            for i in 0..state.device_panels.len() {
+                let name = state.device_panels[i].name.clone();
                 let id = egui::Id::new(format!("dev_{i}"));
-                egui::CollapsingHeader::new(egui::RichText::new(&panel.name).monospace())
+                egui::CollapsingHeader::new(egui::RichText::new(name).monospace())
                     .id_salt(id)
                     .default_open(false)
                     .show(ui, |ui| {
-                        draw_register_grid(ui, &format!("dev_regs_{i}"), &panel.registers);
+                        draw_register_grid(
+                            ui,
+                            &format!("dev_regs_{i}"),
+                            &state.device_panels[i].registers,
+                        );
+                        draw_device_controls(ui, state, i);
                     });
             }
         });
 
     natural_height
+}
+
+/// Device control row: reset button + register write (offset/value) inputs.
+/// Actions queue into `pending_device_actions` and apply on the next frame.
+fn draw_device_controls(ui: &mut egui::Ui, state: &mut DebugState, panel_index: usize) {
+    let device_index = state.device_panels[panel_index].device_index;
+
+    ui.add_space(2.0);
+    ui.horizontal(|ui| {
+        if ui
+            .button("Reset")
+            .on_hover_text("Reset this device to power-on state")
+            .clicked()
+        {
+            state
+                .pending_device_actions
+                .push(DeviceAction::Reset(device_index));
+        }
+
+        let Some((offset_input, value_input)) = state.device_write_inputs.get_mut(panel_index)
+        else {
+            return;
+        };
+        ui.label("+$");
+        ui.add(
+            egui::TextEdit::singleline(offset_input)
+                .desired_width(28.0)
+                .font(egui::TextStyle::Monospace),
+        );
+        ui.label("=$");
+        let value_resp = ui.add(
+            egui::TextEdit::singleline(value_input)
+                .desired_width(22.0)
+                .font(egui::TextStyle::Monospace),
+        );
+        let enter = value_resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        if (ui.button("Write").clicked() || enter)
+            && let (Ok(offset), Ok(value)) = (
+                u16::from_str_radix(offset_input.trim_start_matches('$'), 16),
+                u8::from_str_radix(value_input.trim_start_matches('$'), 16),
+            )
+        {
+            state
+                .pending_device_actions
+                .push(DeviceAction::WriteRegister {
+                    device_index,
+                    offset,
+                    value,
+                });
+        }
+    });
 }
 
 // ---------------------------------------------------------------------------
