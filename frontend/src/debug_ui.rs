@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use phosphor_core::core::debug::{BusDebug, DebugCpu, DebugRegister};
 use phosphor_core::core::debug_trace::DebugEvent;
 use phosphor_core::core::machine::FrontendMachine;
-use phosphor_core::core::memory_map::{WatchpointHit, WatchpointKind};
+use phosphor_core::core::memory_map::{DebugRead, WatchpointHit, WatchpointKind};
 use phosphor_core::core::watchpoint::{DebugAccessSource, WatchpointPhase};
 
 /// Execution modes for the debug interface.
@@ -999,16 +999,30 @@ fn draw_memory_panel(
 
             for col in 0..16u16 {
                 let addr = base_addr.wrapping_add(col);
-                let byte = bus.read(cpu_idx, addr).unwrap_or(0xFF);
                 if col == 8 {
                     hex_part.push(' ');
                 }
-                hex_part.push_str(&format!("{:02X} ", byte));
-                ascii_part.push(if byte.is_ascii_graphic() || byte == b' ' {
-                    byte as char
-                } else {
-                    '.'
-                });
+                // Label non-backed cells instead of showing a fake bus
+                // value: `--` = mapped I/O, `..` = unmapped.
+                match bus.peek(cpu_idx, addr as u32) {
+                    DebugRead::Backed { value, .. } => {
+                        let byte = value as u8;
+                        hex_part.push_str(&format!("{byte:02X} "));
+                        ascii_part.push(if byte.is_ascii_graphic() || byte == b' ' {
+                            byte as char
+                        } else {
+                            '.'
+                        });
+                    }
+                    DebugRead::Io => {
+                        hex_part.push_str("-- ");
+                        ascii_part.push('-');
+                    }
+                    DebugRead::Unmapped => {
+                        hex_part.push_str(".. ");
+                        ascii_part.push(' ');
+                    }
+                }
             }
 
             let line = format!("{:04X}  {} |{}|", base_addr, hex_part, ascii_part);
