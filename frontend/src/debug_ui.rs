@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
 use phosphor_core::core::debug::{BusDebug, DebugCpu, DebugRegister};
+use phosphor_core::core::debug_trace::DebugEvent;
 use phosphor_core::core::machine::FrontendMachine;
 use phosphor_core::core::memory_map::{WatchpointHit, WatchpointKind};
 use phosphor_core::core::watchpoint::{DebugAccessSource, WatchpointPhase};
@@ -70,6 +71,17 @@ pub struct DebugState {
     /// True when the UI has modified watchpoints and they need to be synced to the machine.
     pub watchpoints_dirty: bool,
 
+    // Event trace
+    /// Whether event tracing is enabled (UI checkbox, synced to machine).
+    pub trace_enabled: bool,
+    /// True when `trace_enabled` changed and needs to be synced to the machine.
+    pub trace_enabled_dirty: bool,
+    /// True when the user requested the trace be cleared.
+    pub trace_clear_requested: bool,
+    /// Snapshot of the machine's event ring for display (refreshed each
+    /// frame while tracing is enabled).
+    pub trace_events: Vec<DebugEvent>,
+
     // Per-CPU column state
     /// Which tab (Disassembly/Memory) is selected per CPU column.
     pub bottom_tabs: Vec<BottomTab>,
@@ -103,6 +115,10 @@ impl DebugState {
             watchpoint_write: true,
             last_watchpoint_hit: None,
             watchpoints_dirty: false,
+            trace_enabled: false,
+            trace_enabled_dirty: false,
+            trace_clear_requested: false,
+            trace_events: Vec::new(),
             bottom_tabs: Vec::new(),
             memory_addr_inputs: Vec::new(),
             memory_scroll_to: Vec::new(),
@@ -182,6 +198,23 @@ pub fn execute_frame(machine: &mut dyn FrontendMachine, state: &mut DebugState) 
         for &(cpu_idx, addr, kind) in &state.watchpoints {
             machine.set_watchpoint(cpu_idx, addr, kind);
         }
+    }
+
+    // Sync event-trace controls and snapshot the ring for the panel.
+    // (The panel draws from the snapshot; events recorded this frame
+    // appear on the next draw.)
+    if state.trace_enabled_dirty {
+        state.trace_enabled_dirty = false;
+        machine.set_trace_enabled(state.trace_enabled);
+    }
+    if state.trace_clear_requested {
+        state.trace_clear_requested = false;
+        machine.clear_trace_events();
+        state.trace_events.clear();
+    }
+    if state.trace_enabled {
+        state.trace_events.clear();
+        state.trace_events.extend_from_slice(machine.trace_events());
     }
 
     match state.run_mode {
@@ -420,9 +453,10 @@ fn draw_controls_column(ui: &mut egui::Ui, state: &mut DebugState, min_top_heigh
         }
     }
 
-    // Breakpoints & Watchpoints
+    // Breakpoints & Watchpoints & Event trace
     draw_breakpoints_panel(ui, state);
     draw_watchpoints_panel(ui, state);
+    draw_event_trace_panel(ui, state);
 
     let natural_height = ui.cursor().top() - top_y;
 
@@ -663,13 +697,7 @@ fn draw_watchpoints_panel(ui: &mut egui::Ui, state: &mut DebugState) {
                     WatchpointKind::Read => "read",
                     WatchpointKind::Write => "write",
                 };
-                let source = match hit.source {
-                    DebugAccessSource::Cpu(i) => format!("CPU{i}"),
-                    DebugAccessSource::Dma => "DMA".to_string(),
-                    DebugAccessSource::Device(name) => name.to_string(),
-                    DebugAccessSource::Frontend => "frontend".to_string(),
-                    DebugAccessSource::Unknown => "?".to_string(),
-                };
+                let source = format_access_source(hit.source);
                 // pre: hit recorded before the write side effect;
                 // post: after the read completed (value known).
                 let phase_str = match hit.phase {
@@ -713,6 +741,85 @@ fn draw_watchpoints_panel(ui: &mut egui::Ui, state: &mut DebugState) {
                         .color(hit_color),
                 );
             }
+        });
+}
+
+// ---------------------------------------------------------------------------
+// Event trace panel (controls column)
+// ---------------------------------------------------------------------------
+
+/// Format `source` for trace/watchpoint display ("CPU0", "DMA", device name).
+fn format_access_source(source: DebugAccessSource) -> String {
+    match source {
+        DebugAccessSource::Cpu(i) => format!("CPU{i}"),
+        DebugAccessSource::Dma => "DMA".to_string(),
+        DebugAccessSource::Device(name) => name.to_string(),
+        DebugAccessSource::Frontend => "frontend".to_string(),
+        DebugAccessSource::Unknown => "?".to_string(),
+    }
+}
+
+/// One-line rendering of a trace event:
+/// `   123456 CPU0  bank   $C900=$03 PC $D042 ROM Bank — banked ROM mapped…`
+fn format_trace_event(e: &DebugEvent) -> String {
+    let mut line = format!(
+        "{:>10} {:<5} {:<7}",
+        e.cycle,
+        format_access_source(e.source),
+        e.kind.label()
+    );
+    if let Some(addr) = e.addr {
+        line.push_str(&format!(" ${addr:04X}"));
+    }
+    if let Some(value) = e.value {
+        match e.width {
+            2 => line.push_str(&format!("=${value:04X}")),
+            4 => line.push_str(&format!("=${value:08X}")),
+            _ => line.push_str(&format!("=${value:02X}")),
+        }
+    }
+    if let Some(pc) = e.pc {
+        line.push_str(&format!(" PC ${pc:04X}"));
+    }
+    if let Some(location) = e.device.or(e.region) {
+        line.push_str(&format!(" {location}"));
+    }
+    if let Some(detail) = e.detail {
+        line.push_str(&format!(" \u{2014} {detail}"));
+    }
+    line
+}
+
+fn draw_event_trace_panel(ui: &mut egui::Ui, state: &mut DebugState) {
+    egui::CollapsingHeader::new("Event Trace")
+        .default_open(false)
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                if ui.checkbox(&mut state.trace_enabled, "Record").changed() {
+                    state.trace_enabled_dirty = true;
+                }
+                if ui.button("Clear").clicked() {
+                    state.trace_clear_requested = true;
+                }
+                ui.label(format!("{}", state.trace_events.len()));
+            });
+
+            if state.trace_events.is_empty() {
+                return;
+            }
+
+            // Virtualized list (the ring holds thousands of events),
+            // pinned to the newest entries while recording.
+            let row_height = ui.text_style_height(&egui::TextStyle::Monospace);
+            egui::ScrollArea::vertical()
+                .id_salt("trace_scroll")
+                .max_height(200.0)
+                .stick_to_bottom(true)
+                .show_rows(ui, row_height, state.trace_events.len(), |ui, row_range| {
+                    for event in &state.trace_events[row_range] {
+                        ui.label(egui::RichText::new(format_trace_event(event)).monospace());
+                    }
+                });
         });
 }
 
