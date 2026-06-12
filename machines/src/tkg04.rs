@@ -1,7 +1,9 @@
 use phosphor_core::audio::AudioResampler;
 use phosphor_core::core::bus::InterruptState;
+use phosphor_core::core::debug_trace::{DebugEvent, DebugEventKind, DebugTraceBuffer};
 use phosphor_core::core::memory_map::{AccessKind, MemoryMap};
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
+use phosphor_core::core::watchpoint::DebugAccessSource;
 use phosphor_core::core::{Bus, BusMaster, ClockDivider, TimingConfig};
 use phosphor_core::cpu::i8035::I8035;
 use phosphor_core::cpu::z80::Z80;
@@ -11,7 +13,7 @@ use phosphor_core::device::i8257::I8257;
 use phosphor_core::device::output_latch::OutputLatch;
 use phosphor_core::gfx;
 use phosphor_core::gfx::decode::{GfxLayout, decode_gfx};
-use phosphor_macros::{BusDebug, MemoryRegion};
+use phosphor_macros::{BusDebug, DebugTrace, MemoryRegion};
 
 // ---------------------------------------------------------------------------
 // Memory map region IDs (machine-specific constants for page table dispatch)
@@ -156,7 +158,7 @@ fn compute_tkg04_channel(
 /// Video: 32×32 tile playfield + 16×16 sprites, 2bpp, PROM palette.
 /// Audio: I8035 DAC + discrete circuits (walk, jump, stomp effects).
 /// Screen: 256×240 displayed rotated 90° CCW on vertical monitor.
-#[derive(BusDebug)]
+#[derive(BusDebug, DebugTrace)]
 pub struct Tkg04Board {
     // CPUs (debug reads/writes auto-routed through matching #[debug_map])
     #[debug_cpu("Z80 Main")]
@@ -231,6 +233,10 @@ pub struct Tkg04Board {
     // Discrete sound effects (walk, jump, stomp)
     #[debug_device("Discrete")]
     pub(crate) discrete: DkongDiscrete,
+
+    // Debug event ring (observer state — never saved in save states)
+    #[debug_events]
+    pub(crate) debug_trace: DebugTraceBuffer,
 }
 
 impl Tkg04Board {
@@ -274,6 +280,7 @@ impl Tkg04Board {
             sound_clock: ClockDivider::new(SOUND_TICK_NUM, SOUND_TICK_DEN),
             vblank_nmi_pending: false,
             discrete: DkongDiscrete::new(),
+            debug_trace: DebugTraceBuffer::new(),
         }
     }
 
@@ -523,16 +530,31 @@ impl Tkg04Board {
         let vblank_cycle = VISIBLE_LINES * TIMING.cycles_per_scanline;
         if frame_cycle == vblank_cycle {
             self.vblank_nmi_pending = true;
+            if self.debug_trace.enabled() {
+                self.debug_trace.record(DebugEvent {
+                    cpu_index: Some(0),
+                    detail: Some(if self.nmi_mask {
+                        "VBLANK NMI"
+                    } else {
+                        "VBLANK NMI (masked)"
+                    }),
+                    ..DebugEvent::new(
+                        self.clock,
+                        DebugAccessSource::Unknown,
+                        DebugEventKind::InterruptAssert,
+                    )
+                });
+            }
         }
         // Clear NMI at frame boundary (end of VBLANK)
         if frame_cycle == 0 && self.clock > 0 {
             self.vblank_nmi_pending = false;
         }
 
-        // Latch watchpoint attribution context (cycle + instruction PC)
-        // before CPU execution — bus dispatch cannot read CPU state mid-tick.
+        // Latch debug attribution context (cycle + instruction PC) before
+        // CPU execution — bus dispatch cannot read CPU state mid-tick.
         // (sound_map has no watchpoint hooks in bus dispatch yet.)
-        if self.main_map.has_any_watchpoints() {
+        if self.main_map.has_any_watchpoints() || self.debug_trace.enabled() {
             let pc = self
                 .cpu
                 .at_instruction_boundary()
@@ -626,6 +648,15 @@ impl Tkg04Board {
         let src_addr = self.dma.channel_address(0);
         let sprite_len = self.main_map.region_data(MainRegion::SpriteRam).len();
         let count = ((self.dma.channel_count(0) & 0x3FFF) + 1).min(sprite_len as u16);
+        if self.debug_trace.enabled() {
+            self.debug_trace.record(DebugEvent {
+                addr: Some(src_addr as u32),
+                value: Some(count as u32),
+                device: Some("DMA"),
+                detail: Some("sprite DMA transfer (value = byte count)"),
+                ..DebugEvent::new(self.clock, DebugAccessSource::Dma, DebugEventKind::DmaWrite)
+            });
+        }
         // Two-phase: read source bytes first, then bulk-write to sprite RAM
         let mut buf = [0u8; 0x0400];
         for i in 0..count {
@@ -643,6 +674,85 @@ impl Tkg04Board {
         if bit < 3 {
             self.discrete.write_latch(bit, value);
         }
+    }
+
+    /// Record a main-bus write event from a game wrapper's `Bus::write`.
+    /// Maps the shared TKG-04 I/O layout to event kinds; cheap no-op while
+    /// tracing is disabled.
+    pub(crate) fn trace_main_write(&mut self, addr: u16, data: u8) {
+        if !self.debug_trace.enabled() {
+            return;
+        }
+        let (kind, device, detail) = match self.main_map.page(addr).region_id {
+            MainRegion::IO_DMA => (DebugEventKind::DeviceWrite, Some("DMA"), None),
+            MainRegion::IO_PORTS => match addr {
+                0x7C00 => (DebugEventKind::DeviceWrite, None, Some("sound latch")),
+                0x7C80..=0x7C87 => (
+                    DebugEventKind::DeviceWrite,
+                    None,
+                    Some("sound/gfx control latch"),
+                ),
+                0x7D00..=0x7D07 => (
+                    DebugEventKind::DeviceWrite,
+                    Some("Discrete"),
+                    Some("sound control bit"),
+                ),
+                0x7D80 => (
+                    if data != 0 {
+                        DebugEventKind::InterruptAssert
+                    } else {
+                        DebugEventKind::InterruptClear
+                    },
+                    None,
+                    Some("sound CPU IRQ"),
+                ),
+                0x7D84 => (DebugEventKind::DeviceWrite, None, Some("NMI mask")),
+                // 0x7D85 sprite DMA trigger: the transfer itself is
+                // recorded by trigger_sprite_dma.
+                0x7D85 => return,
+                _ => (DebugEventKind::IoWrite, None, None),
+            },
+            _ => (DebugEventKind::MemoryWrite, None, None),
+        };
+        self.debug_trace.record(DebugEvent {
+            cpu_index: Some(0),
+            pc: self.main_map.latched_pc(),
+            addr: Some(addr as u32),
+            value: Some(data as u32),
+            width: 1,
+            region: self.main_map.region_at(addr).map(|r| r.name),
+            device,
+            detail,
+            ..DebugEvent::new(self.clock, DebugAccessSource::Cpu(0), kind)
+        });
+    }
+
+    /// Record a main-bus I/O read event from a game wrapper's `Bus::read`.
+    /// Only I/O regions are traced — memory reads (instruction fetches)
+    /// would drown the ring.
+    pub(crate) fn trace_main_read(&mut self, addr: u16, data: u8) {
+        if !self.debug_trace.enabled() {
+            return;
+        }
+        if !matches!(
+            self.main_map.page(addr).region_id,
+            MainRegion::IO_DMA | MainRegion::IO_PORTS
+        ) {
+            return;
+        }
+        self.debug_trace.record(DebugEvent {
+            cpu_index: Some(0),
+            pc: self.main_map.latched_pc(),
+            addr: Some(addr as u32),
+            value: Some(data as u32),
+            width: 1,
+            region: self.main_map.region_at(addr).map(|r| r.name),
+            ..DebugEvent::new(
+                self.clock,
+                DebugAccessSource::Cpu(0),
+                DebugEventKind::DeviceRead,
+            )
+        });
     }
 
     // -----------------------------------------------------------------------
@@ -738,6 +848,105 @@ impl Tkg04Board {
                 ..Default::default()
             },
             _ => InterruptState::default(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    mod debug_events {
+        use super::*;
+
+        /// DK tile ROM layout — the offset doesn't matter for these tests.
+        fn board() -> Tkg04Board {
+            Tkg04Board::new(0x800)
+        }
+
+        #[test]
+        fn tracing_disabled_records_nothing() {
+            let mut b = board();
+            b.trace_main_write(0x7C00, 0x05);
+            b.trigger_sprite_dma();
+            assert!(b.debug_trace.is_empty());
+        }
+
+        #[test]
+        fn sound_latch_and_irq_writes_emit_annotated_events() {
+            let mut b = board();
+            b.debug_trace.set_enabled(true);
+            b.clock = 555;
+
+            b.trace_main_write(0x7C00, 0x05); // sound latch
+            b.trace_main_write(0x7D80, 0x01); // sound CPU IRQ assert
+            b.trace_main_write(0x7D80, 0x00); // sound CPU IRQ clear
+
+            let events = b.debug_trace.events();
+            assert_eq!(events[0].kind, DebugEventKind::DeviceWrite);
+            assert_eq!(events[0].detail, Some("sound latch"));
+            assert_eq!(events[0].cycle, 555);
+            assert_eq!(events[1].kind, DebugEventKind::InterruptAssert);
+            assert_eq!(events[1].detail, Some("sound CPU IRQ"));
+            assert_eq!(events[2].kind, DebugEventKind::InterruptClear);
+        }
+
+        #[test]
+        fn sprite_dma_emits_dma_event_with_count() {
+            let mut b = board();
+            b.debug_trace.set_enabled(true);
+
+            // Program i8257 channel 0: source 0x6900, count 0x17F
+            b.dma.write(0, 0x00);
+            b.dma.write(0, 0x69);
+            b.dma.write(1, 0x7F);
+            b.dma.write(1, 0x01);
+            b.debug_trace.clear(); // drop the register-write noise (none traced here anyway)
+
+            b.trigger_sprite_dma();
+
+            let events = b.debug_trace.events();
+            assert_eq!(events.len(), 1);
+            let e = &events[0];
+            assert_eq!(e.kind, DebugEventKind::DmaWrite);
+            assert_eq!(e.source, DebugAccessSource::Dma);
+            assert_eq!(e.addr, Some(0x6900));
+            assert_eq!(e.value, Some(0x180), "count = (0x17F & 0x3FFF) + 1");
+            assert_eq!(e.device, Some("DMA"));
+        }
+
+        #[test]
+        fn memory_and_io_writes_map_to_kinds() {
+            let mut b = board();
+            b.debug_trace.set_enabled(true);
+
+            b.trace_main_write(0x6100, 0x42); // work RAM
+            b.trace_main_write(0x7801, 0x10); // i8257 register
+            b.trace_main_write(0x7D85, 0x01); // sprite DMA trigger: not traced here
+
+            let events = b.debug_trace.events();
+            assert_eq!(events.len(), 2);
+            assert_eq!(events[0].kind, DebugEventKind::MemoryWrite);
+            assert_eq!(events[0].region, Some("Work RAM"));
+            assert_eq!(events[1].kind, DebugEventKind::DeviceWrite);
+            assert_eq!(events[1].device, Some("DMA"));
+        }
+
+        #[test]
+        fn io_reads_traced_memory_reads_not() {
+            let mut b = board();
+            b.debug_trace.set_enabled(true);
+
+            b.trace_main_read(0x7C00, 0x12); // input port: traced
+            b.trace_main_read(0x6100, 0x34); // work RAM: not traced
+
+            let events = b.debug_trace.events();
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].kind, DebugEventKind::DeviceRead);
         }
     }
 }

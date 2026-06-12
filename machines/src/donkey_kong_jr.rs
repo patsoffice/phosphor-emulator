@@ -296,6 +296,7 @@ impl Bus for DkongJrSystem {
                     _ => 0x00,
                 };
                 self.board.main_map.watch_read(0, master, addr, data);
+                self.board.trace_main_read(addr, data);
                 data
             }
 
@@ -312,6 +313,7 @@ impl Bus for DkongJrSystem {
                 // Check the watchpoint before the side effect so the hit
                 // records pre-write state (WatchpointPhase::Before).
                 self.board.main_map.watch_write(0, master, addr, data);
+                self.board.trace_main_write(addr, data);
                 match self.board.main_map.page(addr).region_id {
                     MainRegion::RAM | MainRegion::SPRITE_RAM | MainRegion::VIDEO_RAM => {
                         self.board.main_map.write_backing(addr, data);
@@ -527,7 +529,9 @@ impl SaveState for DkongJrSystem {
     crate::machine_save_state!();
 }
 
-crate::impl_default_frontend_capabilities!(DkongJrSystem);
+impl phosphor_core::core::machine::Nvram for DkongJrSystem {}
+impl phosphor_core::core::machine::Profilable for DkongJrSystem {}
+crate::impl_board_debug_trace!(DkongJrSystem, board);
 
 // ---------------------------------------------------------------------------
 // Parent "dkongjr" ROM set support (ROM_CONTINUE layout)
