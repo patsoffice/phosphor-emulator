@@ -3,6 +3,7 @@ use std::collections::HashSet;
 use phosphor_core::core::debug::{BusDebug, DebugCpu, DebugRegister};
 use phosphor_core::core::machine::FrontendMachine;
 use phosphor_core::core::memory_map::{WatchpointHit, WatchpointKind};
+use phosphor_core::core::watchpoint::{DebugAccessSource, WatchpointPhase};
 
 /// Execution modes for the debug interface.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -655,20 +656,61 @@ fn draw_watchpoints_panel(ui: &mut egui::Ui, state: &mut DebugState) {
                 state.watchpoints_dirty = true;
             }
 
-            // Display last watchpoint hit
+            // Display last watchpoint hit with full attribution:
+            // who accessed, what, where (region/device), and when (cycle/PC).
             if let Some(hit) = &state.last_watchpoint_hit {
                 let kind_str = match hit.kind {
-                    WatchpointKind::Read => "Read",
-                    WatchpointKind::Write => "Write",
+                    WatchpointKind::Read => "read",
+                    WatchpointKind::Write => "write",
                 };
+                let source = match hit.source {
+                    DebugAccessSource::Cpu(i) => format!("CPU{i}"),
+                    DebugAccessSource::Dma => "DMA".to_string(),
+                    DebugAccessSource::Device(name) => name.to_string(),
+                    DebugAccessSource::Frontend => "frontend".to_string(),
+                    DebugAccessSource::Unknown => "?".to_string(),
+                };
+                // pre: hit recorded before the write side effect;
+                // post: after the read completed (value known).
+                let phase_str = match hit.phase {
+                    WatchpointPhase::Before => "pre",
+                    WatchpointPhase::After => "post",
+                };
+                let value = match hit.width {
+                    2 => format!("{:04X}", hit.value),
+                    4 => format!("{:08X}", hit.value),
+                    _ => format!("{:02X}", hit.value),
+                };
+
+                let hit_color = egui::Color32::from_rgb(255, 200, 80);
                 ui.add_space(4.0);
                 ui.label(
                     egui::RichText::new(format!(
-                        "{kind_str} ${:04X} = ${:02X}",
-                        hit.addr, hit.value
+                        "{source} {kind_str} ${:04X} = ${value} ({phase_str})",
+                        hit.addr
                     ))
                     .monospace()
-                    .color(egui::Color32::from_rgb(255, 200, 80)),
+                    .color(hit_color),
+                );
+
+                let location = match (hit.region, hit.device) {
+                    (Some(region), Some(device)) => Some(format!("{region} \u{2022} {device}")),
+                    (Some(region), None) => Some(region.to_string()),
+                    (None, Some(device)) => Some(device.to_string()),
+                    (None, None) => None,
+                };
+                if let Some(location) = location {
+                    ui.label(egui::RichText::new(location).monospace().color(hit_color));
+                }
+
+                let pc_str = hit
+                    .pc
+                    .map(|pc| format!("  PC ${pc:04X}"))
+                    .unwrap_or_default();
+                ui.label(
+                    egui::RichText::new(format!("cycle {}{pc_str}", hit.cycle))
+                        .monospace()
+                        .color(hit_color),
                 );
             }
         });
