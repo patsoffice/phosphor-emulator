@@ -125,6 +125,9 @@ pub struct DebugState {
     pub memory_addr_inputs: Vec<String>,
     /// Pending scroll-to offset per CPU (consumed on next draw).
     pub memory_scroll_to: Vec<Option<f32>>,
+    /// 64 KB-aligned base of the memory viewer window per CPU. Always 0
+    /// for 16-bit machines; "Go" retargets it for wider address spaces.
+    pub memory_view_base: Vec<u32>,
 
     // Layout alignment
     /// Max top-section height from the previous frame (controls/registers).
@@ -160,6 +163,7 @@ impl DebugState {
             bottom_tabs: Vec::new(),
             memory_addr_inputs: Vec::new(),
             memory_scroll_to: Vec::new(),
+            memory_view_base: Vec::new(),
             top_section_height: 0.0,
         }
     }
@@ -216,6 +220,9 @@ impl DebugState {
         }
         while self.memory_scroll_to.len() < cpus.len() {
             self.memory_scroll_to.push(None);
+        }
+        while self.memory_view_base.len() < cpus.len() {
+            self.memory_view_base.push(0);
         }
         while self.device_write_inputs.len() < self.device_panels.len() {
             self.device_write_inputs
@@ -1088,12 +1095,15 @@ fn draw_memory_panel(
             );
             let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
             if (ui.button("Go").clicked() || enter)
-                && let Ok(addr) = u16::from_str_radix(
+                && let Ok(addr) = u32::from_str_radix(
                     state.memory_addr_inputs[cpu_idx].trim_start_matches('$'),
                     16,
                 )
             {
-                let target_row = (addr & 0xFFF0) / 16;
+                // Retarget the 64 KB window to the address's high bits and
+                // scroll to its row within the window.
+                state.memory_view_base[cpu_idx] = addr & 0xFFFF_0000;
+                let target_row = (addr & 0xFFFF) >> 4;
                 state.memory_scroll_to[cpu_idx] = Some(target_row as f32 * row_height);
             }
         });
@@ -1101,7 +1111,10 @@ fn draw_memory_panel(
 
     ui.separator();
 
-    // Hex dump with virtual scrolling (4096 rows for full 64K address space)
+    // Hex dump with virtual scrolling: a 64 KB window starting at the
+    // CPU's view base (always 0 for 16-bit machines, so the window is the
+    // whole address space).
+    let view_base = state.memory_view_base.get(cpu_idx).copied().unwrap_or(0);
     let total_rows: usize = 4096;
 
     let mut scroll = egui::ScrollArea::vertical()
@@ -1119,18 +1132,18 @@ fn draw_memory_panel(
 
     scroll.show_rows(ui, row_height, total_rows, |ui, row_range| {
         for row in row_range {
-            let base_addr = (row as u16).wrapping_mul(16);
+            let base_addr = view_base + (row as u32) * 16;
             let mut hex_part = String::with_capacity(52);
             let mut ascii_part = String::with_capacity(16);
 
-            for col in 0..16u16 {
-                let addr = base_addr.wrapping_add(col);
+            for col in 0..16u32 {
+                let addr = base_addr + col;
                 if col == 8 {
                     hex_part.push(' ');
                 }
                 // Label non-backed cells instead of showing a fake bus
                 // value: `--` = mapped I/O, `..` = unmapped.
-                match bus.peek(cpu_idx, addr as u32) {
+                match bus.peek(cpu_idx, addr) {
                     DebugRead::Backed { value, .. } => {
                         let byte = value as u8;
                         hex_part.push_str(&format!("{byte:02X} "));
@@ -1151,7 +1164,7 @@ fn draw_memory_panel(
                 }
             }
 
-            let line = format!("{:04X}  {} |{}|", base_addr, hex_part, ascii_part);
+            let line = format!("{}  {} |{}|", fmt_addr(base_addr), hex_part, ascii_part);
             ui.label(egui::RichText::new(line).monospace());
         }
     });
