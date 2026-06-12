@@ -182,6 +182,7 @@ impl Watchpoints {
     /// Call after the value is read; the hit records [`WatchpointPhase::After`].
     /// `cycle` is the machine clock at the access and `pc` the address of
     /// the instruction performing it, when known (pass 0 / `None` otherwise).
+    #[allow(clippy::too_many_arguments)]
     #[inline]
     pub fn check_read(
         &mut self,
@@ -212,6 +213,7 @@ impl Watchpoints {
     /// [`WatchpointPhase::Before`]. `cycle` is the machine clock at the
     /// access and `pc` the address of the instruction performing it, when
     /// known (pass 0 / `None` otherwise).
+    #[allow(clippy::too_many_arguments)]
     #[inline]
     pub fn check_write(
         &mut self,

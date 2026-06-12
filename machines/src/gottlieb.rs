@@ -615,7 +615,7 @@ impl GottliebBoard {
             let pc = self
                 .cpu
                 .at_instruction_boundary()
-                .then(|| self.cpu.ip as u32);
+                .then_some(self.cpu.ip as u32);
             self.map.latch_access_context(self.clock, pc);
         }
 

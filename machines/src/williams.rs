@@ -395,14 +395,14 @@ impl WilliamsBoard {
             let pc = self
                 .cpu
                 .at_instruction_boundary()
-                .then(|| self.cpu.pc as u32);
+                .then_some(self.cpu.pc as u32);
             self.main_map.latch_access_context(self.clock, pc);
         }
         if self.sound_map.has_any_watchpoints() {
             let pc = self
                 .sound_cpu
                 .at_instruction_boundary()
-                .then(|| self.sound_cpu.pc as u32);
+                .then_some(self.sound_cpu.pc as u32);
             self.sound_map.latch_access_context(self.clock, pc);
         }
 

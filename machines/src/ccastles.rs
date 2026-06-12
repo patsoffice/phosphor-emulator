@@ -843,7 +843,7 @@ impl CrystalCastlesSystem {
             let pc = self
                 .cpu
                 .at_instruction_boundary()
-                .then(|| self.cpu.pc as u32);
+                .then_some(self.cpu.pc as u32);
             self.map.latch_access_context(self.clock, pc);
         }
 
