@@ -413,6 +413,7 @@ impl phosphor_core::core::machine::InputConfigurable for MsPacmanSystem {
     }
 }
 impl phosphor_core::core::machine::Profilable for MsPacmanSystem {}
+impl phosphor_core::core::machine::DipSwitches for MsPacmanSystem {}
 crate::impl_board_debug_trace!(MsPacmanSystem, board);
 
 // ---------------------------------------------------------------------------

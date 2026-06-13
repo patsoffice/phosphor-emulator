@@ -489,6 +489,7 @@ impl Nvram for AsteroidsDeluxeSystem {
 }
 
 impl Profilable for AsteroidsDeluxeSystem {}
+impl phosphor_core::core::machine::DipSwitches for AsteroidsDeluxeSystem {}
 crate::impl_board_debug_trace!(AsteroidsDeluxeSystem, board);
 
 // ---------------------------------------------------------------------------

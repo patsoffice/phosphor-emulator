@@ -1052,6 +1052,7 @@ impl phosphor_core::core::machine::InputConfigurable for GalagaSystem {
     }
 }
 impl phosphor_core::core::machine::Profilable for GalagaSystem {}
+impl phosphor_core::core::machine::DipSwitches for GalagaSystem {}
 crate::impl_board_debug_trace!(GalagaSystem, board);
 
 // ---------------------------------------------------------------------------

@@ -439,6 +439,7 @@ impl SaveState for LunarLanderSystem {
 
 impl phosphor_core::core::machine::Nvram for LunarLanderSystem {}
 impl phosphor_core::core::machine::Profilable for LunarLanderSystem {}
+impl phosphor_core::core::machine::DipSwitches for LunarLanderSystem {}
 crate::impl_board_debug_trace!(LunarLanderSystem, board);
 
 // ---------------------------------------------------------------------------

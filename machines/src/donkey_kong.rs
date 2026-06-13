@@ -614,6 +614,7 @@ impl SaveState for DkongSystem {
 
 impl phosphor_core::core::machine::Nvram for DkongSystem {}
 impl phosphor_core::core::machine::Profilable for DkongSystem {}
+impl phosphor_core::core::machine::DipSwitches for DkongSystem {}
 crate::impl_board_debug_trace!(DkongSystem, board);
 
 // ---------------------------------------------------------------------------

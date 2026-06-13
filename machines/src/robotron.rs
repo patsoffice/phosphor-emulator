@@ -420,6 +420,7 @@ impl Nvram for RobotronSystem {
 }
 
 impl Profilable for RobotronSystem {}
+impl phosphor_core::core::machine::DipSwitches for RobotronSystem {}
 crate::impl_board_debug_trace!(RobotronSystem, board);
 
 // ---------------------------------------------------------------------------

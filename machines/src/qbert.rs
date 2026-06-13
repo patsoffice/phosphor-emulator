@@ -492,6 +492,7 @@ impl Profilable for QbertSystem {
         &self.board.profile_spans
     }
 }
+impl phosphor_core::core::machine::DipSwitches for QbertSystem {}
 
 impl phosphor_core::core::debug_trace::DebugTrace for QbertSystem {}
 

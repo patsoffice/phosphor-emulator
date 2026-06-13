@@ -427,6 +427,7 @@ impl InputConfigurable for JoustSystem {
     }
 }
 impl Profilable for JoustSystem {}
+impl phosphor_core::core::machine::DipSwitches for JoustSystem {}
 crate::impl_board_debug_trace!(JoustSystem, board);
 
 // ---------------------------------------------------------------------------

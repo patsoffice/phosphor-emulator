@@ -664,6 +664,7 @@ impl Nvram for TempestSystem {
 }
 
 impl Profilable for TempestSystem {}
+impl phosphor_core::core::machine::DipSwitches for TempestSystem {}
 crate::impl_board_debug_trace!(TempestSystem, board);
 
 // ---------------------------------------------------------------------------

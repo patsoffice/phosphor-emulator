@@ -402,6 +402,7 @@ impl SaveState for AsteroidsSystem {
 
 impl phosphor_core::core::machine::Nvram for AsteroidsSystem {}
 impl phosphor_core::core::machine::Profilable for AsteroidsSystem {}
+impl phosphor_core::core::machine::DipSwitches for AsteroidsSystem {}
 crate::impl_board_debug_trace!(AsteroidsSystem, board);
 
 // ---------------------------------------------------------------------------
