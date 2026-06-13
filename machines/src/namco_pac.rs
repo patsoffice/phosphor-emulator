@@ -1,5 +1,8 @@
 use phosphor_core::core::debug_trace::{DebugEvent, DebugEventKind, DebugTraceBuffer};
-use phosphor_core::core::machine::{Direction, InputControl, InputId, InputKind};
+use phosphor_core::core::machine::{
+    DipApplyTiming, DipChoice, DipOption, DipSwitchBank, Direction, InputControl, InputId,
+    InputKind,
+};
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::watchpoint::DebugAccessSource;
 use phosphor_core::core::{AccessKind, AddressSpace16};
@@ -200,6 +203,120 @@ const PACMAN_SPRITE_LAYOUT: GfxLayout<'static> = GfxLayout {
     ],
     char_increment: 512,
 };
+
+// ---------------------------------------------------------------------------
+// DIP switches
+// ---------------------------------------------------------------------------
+
+/// DIP switch metadata for the Pac-Man DSW1 bank (the single byte read at
+/// 0x5080). Choice bit patterns and labels follow MAME's `pacman` layout; the
+/// factory default of every option OR's together to the historical `0xC9`
+/// (1 coin/1 credit, 3 lives, 10000 bonus, normal difficulty, normal ghosts)
+/// that [`NamcoPacBoard::new`] initializes `dip_switches` to.
+pub(crate) const DIP_BANKS: &[DipSwitchBank] = &[DipSwitchBank {
+    name: "DSW1",
+    options: &[
+        DipOption {
+            name: "Coinage",
+            mask: 0x03,
+            apply: DipApplyTiming::Immediate,
+            choices: &[
+                DipChoice {
+                    label: "Free Play",
+                    value: 0x00,
+                },
+                DipChoice {
+                    label: "1 Coin/1 Credit",
+                    value: 0x01,
+                },
+                DipChoice {
+                    label: "1 Coin/2 Credits",
+                    value: 0x02,
+                },
+                DipChoice {
+                    label: "2 Coins/1 Credit",
+                    value: 0x03,
+                },
+            ],
+        },
+        DipOption {
+            name: "Lives",
+            mask: 0x0C,
+            apply: DipApplyTiming::Immediate,
+            choices: &[
+                DipChoice {
+                    label: "1",
+                    value: 0x00,
+                },
+                DipChoice {
+                    label: "2",
+                    value: 0x04,
+                },
+                DipChoice {
+                    label: "3",
+                    value: 0x08,
+                },
+                DipChoice {
+                    label: "5",
+                    value: 0x0C,
+                },
+            ],
+        },
+        DipOption {
+            name: "Bonus Life",
+            mask: 0x30,
+            apply: DipApplyTiming::Immediate,
+            choices: &[
+                DipChoice {
+                    label: "10000",
+                    value: 0x00,
+                },
+                DipChoice {
+                    label: "15000",
+                    value: 0x10,
+                },
+                DipChoice {
+                    label: "20000",
+                    value: 0x20,
+                },
+                DipChoice {
+                    label: "None",
+                    value: 0x30,
+                },
+            ],
+        },
+        DipOption {
+            name: "Difficulty",
+            mask: 0x40,
+            apply: DipApplyTiming::Immediate,
+            choices: &[
+                DipChoice {
+                    label: "Hard",
+                    value: 0x00,
+                },
+                DipChoice {
+                    label: "Normal",
+                    value: 0x40,
+                },
+            ],
+        },
+        DipOption {
+            name: "Ghost Names",
+            mask: 0x80,
+            apply: DipApplyTiming::Immediate,
+            choices: &[
+                DipChoice {
+                    label: "Alternate",
+                    value: 0x00,
+                },
+                DipChoice {
+                    label: "Normal",
+                    value: 0x80,
+                },
+            ],
+        },
+    ],
+}];
 
 // ---------------------------------------------------------------------------
 // NamcoPacBoard — shared hardware for the Namco Pac-Man platform

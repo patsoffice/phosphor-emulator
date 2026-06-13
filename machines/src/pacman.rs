@@ -1,6 +1,6 @@
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
-use phosphor_core::core::machine::{MachineCore, SaveState};
+use phosphor_core::core::machine::{DipSwitchBank, DipSwitches, MachineCore, SaveState};
 use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
 use phosphor_macros::Saveable;
@@ -232,7 +232,25 @@ impl phosphor_core::core::machine::InputConfigurable for PacmanSystem {
     }
 }
 impl phosphor_core::core::machine::Profilable for PacmanSystem {}
-impl phosphor_core::core::machine::DipSwitches for PacmanSystem {}
+impl DipSwitches for PacmanSystem {
+    fn dip_banks(&self) -> &'static [DipSwitchBank] {
+        namco_pac::DIP_BANKS
+    }
+
+    fn dip_bank_value(&self, bank: usize) -> u8 {
+        if bank == 0 {
+            self.board.dip_switches
+        } else {
+            0
+        }
+    }
+
+    fn set_dip_bank_value(&mut self, bank: usize, value: u8) {
+        if bank == 0 {
+            self.board.dip_switches = value;
+        }
+    }
+}
 crate::impl_board_debug_trace!(PacmanSystem, board);
 
 // ---------------------------------------------------------------------------
@@ -325,5 +343,84 @@ mod tests {
         // ROMs and GFX caches should remain at their default, not overwritten
         assert_eq!(sys2.board.map.region_data(Region::Rom)[0], 0x00);
         assert_eq!(sys2.board.tile_cache.pixel(0, 0, 0), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // DIP switches
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn dip_default_matches_historical_byte() {
+        let sys = PacmanSystem::new();
+        // Historical default: 1C/1C, 3 lives, 10000 bonus, normal difficulty,
+        // normal ghosts — the byte the board powers on with.
+        assert_eq!(sys.dip_bank_value(0), 0xC9);
+        // Only one bank, out-of-range reads 0.
+        assert_eq!(sys.dip_banks().len(), 1);
+        assert_eq!(sys.dip_bank_value(1), 0);
+    }
+
+    #[test]
+    fn dip_metadata_is_well_formed() {
+        for bank in sys_dip_banks() {
+            // Options within a bank occupy disjoint bits and every choice fits
+            // its option's mask.
+            let mut covered = 0u8;
+            for opt in bank.options {
+                assert_eq!(covered & opt.mask, 0, "overlapping masks in {}", bank.name);
+                covered |= opt.mask;
+                for choice in opt.choices {
+                    assert_eq!(
+                        choice.value & !opt.mask,
+                        0,
+                        "choice {} escapes mask of {}",
+                        choice.label,
+                        opt.name
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn dip_default_decomposes_into_known_choices() {
+        // Each option's slice of the default byte must be a defined choice.
+        let default = PacmanSystem::new().dip_bank_value(0);
+        for opt in sys_dip_banks()[0].options {
+            let selected = default & opt.mask;
+            assert!(
+                opt.choices.iter().any(|c| c.value == selected),
+                "default 0x{default:02X} has no choice for {} (slice 0x{selected:02X})",
+                opt.name
+            );
+        }
+    }
+
+    #[test]
+    fn set_dip_option_mutates_only_masked_bits() {
+        let mut sys = PacmanSystem::new();
+        // Lives is option index 1 (mask 0x0C); pick "5" (0x0C).
+        sys.set_dip_option(0, 1, 0x0C);
+        // 0xC9 with bits 2-3 set -> 0xCD; all other bits unchanged.
+        assert_eq!(sys.dip_bank_value(0), 0xCD);
+
+        // A value with stray bits outside the mask is filtered to the mask.
+        sys.set_dip_option(0, 1, 0xFF);
+        assert_eq!(sys.dip_bank_value(0) & !0x0C, 0xCD & !0x0C);
+        assert_eq!(sys.dip_bank_value(0) & 0x0C, 0x0C);
+    }
+
+    #[test]
+    fn dip_bank_value_round_trips() {
+        let mut sys = PacmanSystem::new();
+        sys.set_dip_bank_value(0, 0x55);
+        assert_eq!(sys.dip_bank_value(0), 0x55);
+        // Out-of-range writes are ignored (no panic, bank 0 untouched).
+        sys.set_dip_bank_value(9, 0xAA);
+        assert_eq!(sys.dip_bank_value(0), 0x55);
+    }
+
+    fn sys_dip_banks() -> &'static [DipSwitchBank] {
+        PacmanSystem::new().dip_banks()
     }
 }
