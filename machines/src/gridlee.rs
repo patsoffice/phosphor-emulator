@@ -1,8 +1,9 @@
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
-    AnalogInput, AudioSource, InputButton, InputReceiver, MachineCore, Nvram, Profilable,
-    Renderable, SaveState,
+    AnalogAxisKind, AnalogInput, AudioSource, DefaultBinding, Direction, InputButton,
+    InputConfigurable, InputControl, InputEvent, InputId, InputKind, InputReceiver, KeyId,
+    MachineCore, MouseControl, Nvram, PadButton, PadControl, Profilable, Renderable, SaveState,
 };
 use phosphor_core::core::save_state::{self, SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::{AccessKind, AddressSpace16};
@@ -194,6 +195,114 @@ const GRIDLEE_ANALOG_MAP: &[AnalogInput] = &[
     AnalogInput {
         id: ANALOG_TRACKBALL_Y,
         name: "Trackball Y",
+    },
+];
+
+// Typed control ids for the analog axes (distinct from the 0..=7 digital ids).
+const CTRL_TRACKBALL_X: InputId = InputId(8);
+const CTRL_TRACKBALL_Y: InputId = InputId(9);
+
+/// Typed logical controls. `InputId`s reuse the `INPUT_*` numbering for digital
+/// controls; default bindings mirror the legacy name-matched defaults. P1 Fire
+/// is also bound to the left mouse button (trackball cabinet); the trackball
+/// axes map to the mouse.
+const GRIDLEE_CONTROLS: &[InputControl] = &[
+    InputControl {
+        id: InputId(INPUT_TRACK_U as u16),
+        stable_name: "p1_up",
+        label: "P1 Up",
+        kind: InputKind::DigitalDirection {
+            direction: Direction::Up,
+        },
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_UP,
+    },
+    InputControl {
+        id: InputId(INPUT_TRACK_D as u16),
+        stable_name: "p1_down",
+        label: "P1 Down",
+        kind: InputKind::DigitalDirection {
+            direction: Direction::Down,
+        },
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_DOWN,
+    },
+    InputControl {
+        id: InputId(INPUT_TRACK_L as u16),
+        stable_name: "p1_left",
+        label: "P1 Left",
+        kind: InputKind::DigitalDirection {
+            direction: Direction::Left,
+        },
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_LEFT,
+    },
+    InputControl {
+        id: InputId(INPUT_TRACK_R as u16),
+        stable_name: "p1_right",
+        label: "P1 Right",
+        kind: InputKind::DigitalDirection {
+            direction: Direction::Right,
+        },
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_RIGHT,
+    },
+    InputControl {
+        id: InputId(INPUT_P1_FIRE as u16),
+        stable_name: "p1_fire",
+        label: "P1 Fire",
+        kind: InputKind::Button,
+        player: Some(1),
+        // FIRE (Space + gamepad A) plus the left mouse button (trackball cabinet).
+        default_bindings: &[
+            DefaultBinding::Key(KeyId::Space),
+            DefaultBinding::Pad(PadControl::Button(PadButton::A)),
+            DefaultBinding::Mouse(MouseControl::Left),
+        ],
+    },
+    InputControl {
+        id: InputId(INPUT_COIN as u16),
+        stable_name: "coin",
+        label: "Coin",
+        kind: InputKind::Coin,
+        player: None,
+        default_bindings: crate::input_defaults::COIN,
+    },
+    InputControl {
+        id: InputId(INPUT_START1 as u16),
+        stable_name: "p1_start",
+        label: "P1 Start",
+        kind: InputKind::Start,
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_START,
+    },
+    InputControl {
+        id: InputId(INPUT_START2 as u16),
+        stable_name: "p2_start",
+        label: "P2 Start",
+        kind: InputKind::Start,
+        player: Some(2),
+        default_bindings: crate::input_defaults::P2_START,
+    },
+    InputControl {
+        id: CTRL_TRACKBALL_X,
+        stable_name: "trackball_x",
+        label: "Trackball X",
+        kind: InputKind::AnalogAxis {
+            axis: AnalogAxisKind::X,
+        },
+        player: Some(1),
+        default_bindings: &[DefaultBinding::Mouse(MouseControl::AxisX)],
+    },
+    InputControl {
+        id: CTRL_TRACKBALL_Y,
+        stable_name: "trackball_y",
+        label: "Trackball Y",
+        kind: InputKind::AnalogAxis {
+            axis: AnalogAxisKind::Y,
+        },
+        player: Some(1),
+        default_bindings: &[DefaultBinding::Mouse(MouseControl::AxisY)],
     },
 ];
 
@@ -845,42 +954,10 @@ impl AudioSource for GridleeSystem {
 
 impl InputReceiver for GridleeSystem {
     fn set_input(&mut self, button: u8, pressed: bool) {
-        match button {
-            INPUT_TRACK_U => self.track_u_pressed = pressed,
-            INPUT_TRACK_D => self.track_d_pressed = pressed,
-            INPUT_TRACK_L => self.track_l_pressed = pressed,
-            INPUT_TRACK_R => self.track_r_pressed = pressed,
-            // Active-low buttons: clear bit on press, set bit on release
-            INPUT_P1_FIRE => {
-                if pressed {
-                    self.fire_buttons &= !0x01;
-                } else {
-                    self.fire_buttons |= 0x01;
-                }
-            }
-            INPUT_COIN => {
-                if pressed {
-                    self.coin_start &= !0x01;
-                } else {
-                    self.coin_start |= 0x01;
-                }
-            }
-            INPUT_START1 => {
-                if pressed {
-                    self.coin_start &= !0x04;
-                } else {
-                    self.coin_start |= 0x04;
-                }
-            }
-            INPUT_START2 => {
-                if pressed {
-                    self.coin_start &= !0x08;
-                } else {
-                    self.coin_start |= 0x08;
-                }
-            }
-            _ => {}
-        }
+        self.handle_input(InputEvent::Button {
+            id: InputId(button as u16),
+            pressed,
+        });
     }
 
     fn input_map(&self) -> &[InputButton] {
@@ -888,23 +965,78 @@ impl InputReceiver for GridleeSystem {
     }
 
     fn set_analog(&mut self, axis: u8, delta: i32) {
-        // Scale down mouse motion for comfortable sensitivity (÷3, clamp ±6)
-        let scaled = (delta / 3).clamp(-6, 6) as i8;
-        match axis {
-            // X axis is reversed: positive mouse motion (right) decreases counter
-            ANALOG_TRACKBALL_X => {
-                self.trackball_pos[1] = self.trackball_pos[1].wrapping_sub(scaled as u8);
-            }
-            // Y axis: positive mouse motion (down) increases counter
-            ANALOG_TRACKBALL_Y => {
-                self.trackball_pos[0] = self.trackball_pos[0].wrapping_add(scaled as u8);
-            }
-            _ => {}
-        }
+        let id = match axis {
+            ANALOG_TRACKBALL_X => CTRL_TRACKBALL_X,
+            ANALOG_TRACKBALL_Y => CTRL_TRACKBALL_Y,
+            _ => return,
+        };
+        self.handle_input(InputEvent::Relative {
+            id,
+            delta: delta as f32,
+        });
     }
 
     fn analog_map(&self) -> &[AnalogInput] {
         GRIDLEE_ANALOG_MAP
+    }
+}
+
+impl InputConfigurable for GridleeSystem {
+    fn input_controls(&self) -> &'static [InputControl] {
+        GRIDLEE_CONTROLS
+    }
+
+    fn handle_input(&mut self, event: InputEvent) {
+        match event {
+            InputEvent::Button { id, pressed } => match id.0 as u8 {
+                INPUT_TRACK_U => self.track_u_pressed = pressed,
+                INPUT_TRACK_D => self.track_d_pressed = pressed,
+                INPUT_TRACK_L => self.track_l_pressed = pressed,
+                INPUT_TRACK_R => self.track_r_pressed = pressed,
+                // Active-low buttons: clear bit on press, set bit on release
+                INPUT_P1_FIRE => {
+                    if pressed {
+                        self.fire_buttons &= !0x01;
+                    } else {
+                        self.fire_buttons |= 0x01;
+                    }
+                }
+                INPUT_COIN => {
+                    if pressed {
+                        self.coin_start &= !0x01;
+                    } else {
+                        self.coin_start |= 0x01;
+                    }
+                }
+                INPUT_START1 => {
+                    if pressed {
+                        self.coin_start &= !0x04;
+                    } else {
+                        self.coin_start |= 0x04;
+                    }
+                }
+                INPUT_START2 => {
+                    if pressed {
+                        self.coin_start &= !0x08;
+                    } else {
+                        self.coin_start |= 0x08;
+                    }
+                }
+                _ => {}
+            },
+            InputEvent::Relative { id, delta } => {
+                // Scale down mouse motion for comfortable sensitivity (÷3, clamp ±6)
+                let scaled = ((delta as i32) / 3).clamp(-6, 6) as i8;
+                if id == CTRL_TRACKBALL_X {
+                    // X axis reversed: positive mouse motion (right) decreases counter
+                    self.trackball_pos[1] = self.trackball_pos[1].wrapping_sub(scaled as u8);
+                } else if id == CTRL_TRACKBALL_Y {
+                    // Y axis: positive mouse motion (down) increases counter
+                    self.trackball_pos[0] = self.trackball_pos[0].wrapping_add(scaled as u8);
+                }
+            }
+            InputEvent::Absolute { .. } => {}
+        }
     }
 }
 
@@ -1032,7 +1164,6 @@ impl Nvram for GridleeSystem {
     }
 }
 
-impl phosphor_core::core::machine::InputConfigurable for GridleeSystem {}
 impl Profilable for GridleeSystem {}
 impl phosphor_core::core::debug_trace::DebugTrace for GridleeSystem {}
 
