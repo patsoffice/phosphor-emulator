@@ -1,7 +1,9 @@
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
-    InputButton, InputReceiver, MachineCore, Nvram, Profilable, SaveState,
+    AxisSign, DefaultBinding, Direction, InputButton, InputConfigurable, InputControl, InputEvent,
+    InputId, InputKind, InputReceiver, KeyId, MachineCore, Nvram, PadAxis, PadButton, PadControl,
+    Profilable, SaveState,
 };
 use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
@@ -168,6 +170,109 @@ const JOUST_INPUT_MAP: &[InputButton] = &[
     },
 ];
 
+/// Typed logical controls. The `InputId`s reuse the `INPUT_*` numbering so the
+/// `handle_input` match and the legacy `set_input` shim share one id space.
+/// Default bindings reproduce the historical name-matched defaults.
+const JOUST_CONTROLS: &[InputControl] = &[
+    InputControl {
+        id: InputId(INPUT_P1_LEFT as u16),
+        stable_name: "p1_left",
+        label: "P1 Left",
+        kind: InputKind::DigitalDirection {
+            direction: Direction::Left,
+        },
+        player: Some(1),
+        default_bindings: &[
+            DefaultBinding::Key(KeyId::Left),
+            DefaultBinding::Pad(PadControl::Button(PadButton::DPadLeft)),
+            DefaultBinding::Pad(PadControl::Axis(PadAxis::LeftX, AxisSign::Negative)),
+        ],
+    },
+    InputControl {
+        id: InputId(INPUT_P1_RIGHT as u16),
+        stable_name: "p1_right",
+        label: "P1 Right",
+        kind: InputKind::DigitalDirection {
+            direction: Direction::Right,
+        },
+        player: Some(1),
+        default_bindings: &[
+            DefaultBinding::Key(KeyId::Right),
+            DefaultBinding::Pad(PadControl::Button(PadButton::DPadRight)),
+            DefaultBinding::Pad(PadControl::Axis(PadAxis::LeftX, AxisSign::Positive)),
+        ],
+    },
+    InputControl {
+        id: InputId(INPUT_P1_FLAP as u16),
+        stable_name: "p1_flap",
+        label: "P1 Flap",
+        kind: InputKind::Button,
+        player: Some(1),
+        default_bindings: &[
+            DefaultBinding::Key(KeyId::LCtrl),
+            DefaultBinding::Pad(PadControl::Button(PadButton::A)),
+        ],
+    },
+    InputControl {
+        id: InputId(INPUT_P2_LEFT as u16),
+        stable_name: "p2_left",
+        label: "P2 Left",
+        kind: InputKind::DigitalDirection {
+            direction: Direction::Left,
+        },
+        player: Some(2),
+        default_bindings: &[DefaultBinding::Key(KeyId::A)],
+    },
+    InputControl {
+        id: InputId(INPUT_P2_RIGHT as u16),
+        stable_name: "p2_right",
+        label: "P2 Right",
+        kind: InputKind::DigitalDirection {
+            direction: Direction::Right,
+        },
+        player: Some(2),
+        default_bindings: &[DefaultBinding::Key(KeyId::D)],
+    },
+    InputControl {
+        id: InputId(INPUT_P2_FLAP as u16),
+        stable_name: "p2_flap",
+        label: "P2 Flap",
+        kind: InputKind::Button,
+        player: Some(2),
+        default_bindings: &[DefaultBinding::Key(KeyId::W)],
+    },
+    InputControl {
+        id: InputId(INPUT_P1_START as u16),
+        stable_name: "p1_start",
+        label: "P1 Start",
+        kind: InputKind::Start,
+        player: Some(1),
+        default_bindings: &[
+            DefaultBinding::Key(KeyId::Num1),
+            DefaultBinding::Pad(PadControl::Button(PadButton::Start)),
+        ],
+    },
+    InputControl {
+        id: InputId(INPUT_P2_START as u16),
+        stable_name: "p2_start",
+        label: "P2 Start",
+        kind: InputKind::Start,
+        player: Some(2),
+        default_bindings: &[DefaultBinding::Key(KeyId::Num2)],
+    },
+    InputControl {
+        id: InputId(INPUT_COIN as u16),
+        stable_name: "coin",
+        label: "Coin",
+        kind: InputKind::Coin,
+        player: None,
+        default_bindings: &[
+            DefaultBinding::Key(KeyId::Num5),
+            DefaultBinding::Pad(PadControl::Button(PadButton::Back)),
+        ],
+    },
+];
+
 // ---------------------------------------------------------------------------
 // JoustSystem — Williams gen-1 board configured for Joust (1982)
 // ---------------------------------------------------------------------------
@@ -287,30 +392,13 @@ impl Bus for JoustSystem {
 crate::impl_board_delegation!(JoustSystem, board, williams::TIMING, debug_tick_pre);
 
 impl InputReceiver for JoustSystem {
+    // Legacy shim: forwards to the typed `handle_input`. Removed once
+    // `InputReceiver` is retired.
     fn set_input(&mut self, button: u8, pressed: bool) {
-        match button {
-            // Player controls go into separate P1/P2 registers.
-            // The LS157 mux selects which register appears on Widget PIA
-            // Port A bits 0-3 based on CB2 output.
-            INPUT_P1_LEFT => set_bit_active_high(&mut self.p1_controls, 0, pressed),
-            INPUT_P1_RIGHT => set_bit_active_high(&mut self.p1_controls, 1, pressed),
-            INPUT_P1_FLAP => set_bit_active_high(&mut self.p1_controls, 2, pressed),
-            INPUT_P2_LEFT => set_bit_active_high(&mut self.p2_controls, 0, pressed),
-            INPUT_P2_RIGHT => set_bit_active_high(&mut self.p2_controls, 1, pressed),
-            INPUT_P2_FLAP => set_bit_active_high(&mut self.p2_controls, 2, pressed),
-            // Start buttons are wired directly to Port A (not muxed)
-            INPUT_P1_START => set_bit_active_high(&mut self.start_bits, 5, pressed),
-            INPUT_P2_START => set_bit_active_high(&mut self.start_bits, 4, pressed),
-            // Coin goes to ROM PIA Port A bit 4 (Left Coin)
-            INPUT_COIN => {
-                set_bit_active_high(&mut self.board.rom_pia_input, 4, pressed);
-                self.board
-                    .rom_pia
-                    .set_port_a_input(self.board.rom_pia_input);
-            }
-            _ => {}
-        }
-        self.update_widget_mux();
+        self.handle_input(InputEvent::Button {
+            id: InputId(button as u16),
+            pressed,
+        });
     }
 
     fn input_map(&self) -> &[InputButton] {
@@ -359,7 +447,40 @@ impl Nvram for JoustSystem {
     }
 }
 
-impl phosphor_core::core::machine::InputConfigurable for JoustSystem {}
+impl InputConfigurable for JoustSystem {
+    fn input_controls(&self) -> &'static [InputControl] {
+        JOUST_CONTROLS
+    }
+
+    fn handle_input(&mut self, event: InputEvent) {
+        let InputEvent::Button { id, pressed } = event else {
+            return;
+        };
+        match id.0 as u8 {
+            // Player controls go into separate P1/P2 registers.
+            // The LS157 mux selects which register appears on Widget PIA
+            // Port A bits 0-3 based on CB2 output.
+            INPUT_P1_LEFT => set_bit_active_high(&mut self.p1_controls, 0, pressed),
+            INPUT_P1_RIGHT => set_bit_active_high(&mut self.p1_controls, 1, pressed),
+            INPUT_P1_FLAP => set_bit_active_high(&mut self.p1_controls, 2, pressed),
+            INPUT_P2_LEFT => set_bit_active_high(&mut self.p2_controls, 0, pressed),
+            INPUT_P2_RIGHT => set_bit_active_high(&mut self.p2_controls, 1, pressed),
+            INPUT_P2_FLAP => set_bit_active_high(&mut self.p2_controls, 2, pressed),
+            // Start buttons are wired directly to Port A (not muxed)
+            INPUT_P1_START => set_bit_active_high(&mut self.start_bits, 5, pressed),
+            INPUT_P2_START => set_bit_active_high(&mut self.start_bits, 4, pressed),
+            // Coin goes to ROM PIA Port A bit 4 (Left Coin)
+            INPUT_COIN => {
+                set_bit_active_high(&mut self.board.rom_pia_input, 4, pressed);
+                self.board
+                    .rom_pia
+                    .set_port_a_input(self.board.rom_pia_input);
+            }
+            _ => {}
+        }
+        self.update_widget_mux();
+    }
+}
 impl Profilable for JoustSystem {}
 crate::impl_board_debug_trace!(JoustSystem, board);
 
@@ -447,5 +568,38 @@ mod tests {
         assert_eq!(sys2.p1_controls, 0x05);
         assert_eq!(sys2.p2_controls, 0x03);
         assert_eq!(sys2.start_bits, 0x30);
+    }
+
+    #[test]
+    fn handle_input_matches_set_input() {
+        // The typed handle_input and the legacy set_input shim must mutate the
+        // same hardware register bits.
+        let mut typed = JoustSystem::new();
+        typed.handle_input(InputEvent::Button {
+            id: InputId(INPUT_P1_FLAP as u16),
+            pressed: true,
+        });
+
+        let mut legacy = JoustSystem::new();
+        legacy.set_input(INPUT_P1_FLAP, true);
+
+        assert_eq!(typed.p1_controls, 0b100);
+        assert_eq!(typed.p1_controls, legacy.p1_controls);
+
+        // Release clears the bit again.
+        typed.handle_input(InputEvent::Button {
+            id: InputId(INPUT_P1_FLAP as u16),
+            pressed: false,
+        });
+        assert_eq!(typed.p1_controls, 0);
+    }
+
+    #[test]
+    fn input_controls_exposed_with_stable_names() {
+        let sys = JoustSystem::new();
+        let controls = sys.input_controls();
+        assert_eq!(controls.len(), JOUST_INPUT_MAP.len());
+        assert!(controls.iter().any(|c| c.stable_name == "p1_flap"));
+        assert!(controls.iter().any(|c| c.stable_name == "coin"));
     }
 }
