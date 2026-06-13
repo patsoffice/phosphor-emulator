@@ -42,9 +42,10 @@
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
-    AnalogAxisKind, AudioSource, DefaultBinding, Direction, InputConfigurable, InputControl,
-    InputEvent, InputId, InputKind, KeyId, MachineCore, MachineDebug, MouseControl, Nvram,
-    Profilable, Renderable, SaveState,
+    AnalogAxisKind, AudioSource, DefaultBinding, DipApplyTiming, DipChoice, DipOption,
+    DipSwitchBank, DipSwitches, Direction, InputConfigurable, InputControl, InputEvent, InputId,
+    InputKind, KeyId, MachineCore, MachineDebug, MouseControl, Nvram, Profilable, Renderable,
+    SaveState,
 };
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::{AccessKind, AddressSpace32};
@@ -1066,7 +1067,119 @@ impl Nvram for FoodFightSystem {
 }
 
 impl Profilable for FoodFightSystem {}
-impl phosphor_core::core::machine::DipSwitches for FoodFightSystem {}
+/// DIP switch metadata for Food Fight's single DIP byte (read back bit-by-bit
+/// through POKEY pot lines POT0-7, so bit n of `dip_switches` is DIP switch n).
+/// Choice bits and labels follow MAME's `foodf` layout; option defaults OR to
+/// the historical 0x00.
+const FOODF_DIP_BANKS: &[DipSwitchBank] = &[DipSwitchBank {
+    name: "DSW",
+    options: &[
+        DipOption {
+            name: "Bonus Coins",
+            mask: 0x07,
+            apply: DipApplyTiming::Immediate,
+            choices: &[
+                DipChoice {
+                    label: "None",
+                    value: 0x00,
+                },
+                DipChoice {
+                    label: "1 for every 5",
+                    value: 0x01,
+                },
+                DipChoice {
+                    label: "1 for every 4",
+                    value: 0x02,
+                },
+                DipChoice {
+                    label: "1 for every 2",
+                    value: 0x05,
+                },
+                DipChoice {
+                    label: "2 for every 4",
+                    value: 0x06,
+                },
+            ],
+        },
+        DipOption {
+            name: "Coin A",
+            mask: 0x08,
+            apply: DipApplyTiming::Immediate,
+            choices: &[
+                DipChoice {
+                    label: "1 Coin/1 Credit",
+                    value: 0x00,
+                },
+                DipChoice {
+                    label: "1 Coin/2 Credits",
+                    value: 0x08,
+                },
+            ],
+        },
+        DipOption {
+            name: "Coin B",
+            mask: 0x30,
+            apply: DipApplyTiming::Immediate,
+            choices: &[
+                DipChoice {
+                    label: "1 Coin/1 Credit",
+                    value: 0x00,
+                },
+                DipChoice {
+                    label: "1 Coin/5 Credits",
+                    value: 0x10,
+                },
+                DipChoice {
+                    label: "1 Coin/4 Credits",
+                    value: 0x20,
+                },
+                DipChoice {
+                    label: "1 Coin/6 Credits",
+                    value: 0x30,
+                },
+            ],
+        },
+        DipOption {
+            name: "Coinage",
+            mask: 0xC0,
+            apply: DipApplyTiming::Immediate,
+            choices: &[
+                DipChoice {
+                    label: "1 Coin/1 Credit",
+                    value: 0x00,
+                },
+                DipChoice {
+                    label: "Free Play",
+                    value: 0x40,
+                },
+                DipChoice {
+                    label: "2 Coins/1 Credit",
+                    value: 0x80,
+                },
+                DipChoice {
+                    label: "1 Coin/2 Credits",
+                    value: 0xC0,
+                },
+            ],
+        },
+    ],
+}];
+
+impl DipSwitches for FoodFightSystem {
+    fn dip_banks(&self) -> &'static [DipSwitchBank] {
+        FOODF_DIP_BANKS
+    }
+
+    fn dip_bank_value(&self, bank: usize) -> u8 {
+        if bank == 0 { self.dip_switches } else { 0 }
+    }
+
+    fn set_dip_bank_value(&mut self, bank: usize, value: u8) {
+        if bank == 0 {
+            self.dip_switches = value;
+        }
+    }
+}
 impl phosphor_core::core::debug_trace::DebugTrace for FoodFightSystem {}
 
 // ---------------------------------------------------------------------------
@@ -1088,6 +1201,21 @@ inventory::submit! {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dip_default_and_metadata() {
+        let sys = FoodFightSystem::new();
+        assert_eq!(sys.dip_bank_value(0), 0x00);
+        crate::assert_dip_banks_valid(sys.dip_banks(), &[sys.dip_bank_value(0)]);
+    }
+
+    #[test]
+    fn set_dip_option_masks_only_its_bits() {
+        let mut sys = FoodFightSystem::new();
+        // Coinage is option 3 (mask 0xC0); pick "Free Play" (0x40).
+        sys.set_dip_option(0, 3, 0x40);
+        assert_eq!(sys.dip_bank_value(0), 0x40);
+    }
 
     #[test]
     fn map_decodes_documented_windows() {
