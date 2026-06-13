@@ -568,6 +568,7 @@ pub trait FrontendMachine:
     + Renderable
     + AudioSource
     + InputConfigurable
+    + DipSwitches
     + MachineDebug
     + DebugTrace
     + SaveState
@@ -581,6 +582,7 @@ impl<T> FrontendMachine for T where
         + Renderable
         + AudioSource
         + InputConfigurable
+        + DipSwitches
         + MachineDebug
         + DebugTrace
         + SaveState
