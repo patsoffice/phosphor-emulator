@@ -1,7 +1,9 @@
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
-    FrontendMachine, InputButton, InputReceiver, MachineCore, Nvram, Profilable, SaveState,
+    DefaultBinding, Direction, FrontendMachine, InputButton, InputConfigurable, InputControl,
+    InputEvent, InputId, InputKind, InputReceiver, KeyId, MachineCore, Nvram, Profilable,
+    SaveState,
 };
 use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
@@ -191,6 +193,97 @@ const SHOLLOW_INPUT_MAP: &[InputButton] = &[
     },
 ];
 
+/// Typed logical controls. `InputId`s reuse the `INPUT_*` numbering; default
+/// bindings mirror the legacy name-matched defaults. P1 Fire is the primary
+/// action (gamepad A); P1 Jump (shield) is key-only; Tilt has no default.
+const SHOLLOW_CONTROLS: &[InputControl] = &[
+    InputControl {
+        id: InputId(INPUT_COIN1 as u16),
+        stable_name: "coin1",
+        label: "Coin 1",
+        kind: InputKind::Coin,
+        player: None,
+        default_bindings: crate::input_defaults::COIN,
+    },
+    InputControl {
+        id: InputId(INPUT_COIN2 as u16),
+        stable_name: "coin2",
+        label: "Coin 2",
+        kind: InputKind::Coin,
+        player: None,
+        default_bindings: &[DefaultBinding::Key(KeyId::Num5)],
+    },
+    InputControl {
+        id: InputId(INPUT_START1 as u16),
+        stable_name: "p1_start",
+        label: "P1 Start",
+        kind: InputKind::Start,
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_START,
+    },
+    InputControl {
+        id: InputId(INPUT_START2 as u16),
+        stable_name: "p2_start",
+        label: "P2 Start",
+        kind: InputKind::Start,
+        player: Some(2),
+        default_bindings: crate::input_defaults::P2_START,
+    },
+    InputControl {
+        id: InputId(INPUT_TILT as u16),
+        stable_name: "tilt",
+        label: "Tilt",
+        kind: InputKind::Button,
+        player: None,
+        default_bindings: &[],
+    },
+    InputControl {
+        id: InputId(INPUT_SERVICE as u16),
+        stable_name: "service",
+        label: "Service",
+        kind: InputKind::Service,
+        player: None,
+        default_bindings: crate::input_defaults::SERVICE,
+    },
+    InputControl {
+        id: InputId(INPUT_LEFT as u16),
+        stable_name: "p1_left",
+        label: "P1 Left",
+        kind: InputKind::DigitalDirection {
+            direction: Direction::Left,
+        },
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_LEFT,
+    },
+    InputControl {
+        id: InputId(INPUT_RIGHT as u16),
+        stable_name: "p1_right",
+        label: "P1 Right",
+        kind: InputKind::DigitalDirection {
+            direction: Direction::Right,
+        },
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_RIGHT,
+    },
+    InputControl {
+        id: InputId(INPUT_SHIELD as u16),
+        stable_name: "p1_shield",
+        label: "P1 Shield",
+        kind: InputKind::Button,
+        player: Some(1),
+        // P1 Fire takes gamepad A, so the shield button is key-only (LShift).
+        default_bindings: &[DefaultBinding::Key(KeyId::LShift)],
+    },
+    InputControl {
+        id: InputId(INPUT_FIRE as u16),
+        stable_name: "p1_fire",
+        label: "P1 Fire",
+        kind: InputKind::Button,
+        player: Some(1),
+        default_bindings: crate::input_defaults::FIRE,
+    },
+];
+
 // ---------------------------------------------------------------------------
 // SatansHollowSystem
 // ---------------------------------------------------------------------------
@@ -357,7 +450,27 @@ crate::impl_board_delegation!(SatansHollowSystem, board, mcr2::TIMING, overlay_s
 
 impl InputReceiver for SatansHollowSystem {
     fn set_input(&mut self, button: u8, pressed: bool) {
-        let (port, bit) = match button {
+        self.handle_input(InputEvent::Button {
+            id: InputId(button as u16),
+            pressed,
+        });
+    }
+
+    fn input_map(&self) -> &[InputButton] {
+        SHOLLOW_INPUT_MAP
+    }
+}
+
+impl InputConfigurable for SatansHollowSystem {
+    fn input_controls(&self) -> &'static [InputControl] {
+        SHOLLOW_CONTROLS
+    }
+
+    fn handle_input(&mut self, event: InputEvent) {
+        let InputEvent::Button { id, pressed } = event else {
+            return;
+        };
+        let (port, bit) = match id.0 as u8 {
             // IP0: coin/start/service (active-low, bits 0-7)
             INPUT_COIN1 => (0usize, 0u8),
             INPUT_COIN2 => (0, 1),
@@ -375,10 +488,6 @@ impl InputReceiver for SatansHollowSystem {
         let mut val = self.board.ssio.input_port(port);
         set_bit_active_low(&mut val, bit, pressed);
         self.board.ssio.set_input_port(port, val);
-    }
-
-    fn input_map(&self) -> &[InputButton] {
-        SHOLLOW_INPUT_MAP
     }
 }
 
@@ -420,7 +529,6 @@ impl Nvram for SatansHollowSystem {
     }
 }
 
-impl phosphor_core::core::machine::InputConfigurable for SatansHollowSystem {}
 impl Profilable for SatansHollowSystem {}
 impl phosphor_core::core::debug_trace::DebugTrace for SatansHollowSystem {}
 
