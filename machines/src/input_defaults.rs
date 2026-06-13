@@ -54,3 +54,21 @@ pub const P2_START: &[D] = &[D::Key(K::Num2)];
 // gamepad A to the first present of P1 Fire / P1 Flap / P1 Jump / Fire Center,
 // so use this for a machine's single primary fire action.
 pub const FIRE: &[D] = &[D::Key(K::Space), D::Pad(P::Button(PB::A))];
+
+// Twin-stick fire directions (Robotron): IJKL keys and the right analog stick.
+pub const P1_FIRE_UP: &[D] = &[
+    D::Key(K::I),
+    D::Pad(P::Axis(PA::RightY, AxisSign::Negative)),
+];
+pub const P1_FIRE_DOWN: &[D] = &[
+    D::Key(K::K),
+    D::Pad(P::Axis(PA::RightY, AxisSign::Positive)),
+];
+pub const P1_FIRE_LEFT: &[D] = &[
+    D::Key(K::J),
+    D::Pad(P::Axis(PA::RightX, AxisSign::Negative)),
+];
+pub const P1_FIRE_RIGHT: &[D] = &[
+    D::Key(K::L),
+    D::Pad(P::Axis(PA::RightX, AxisSign::Positive)),
+];

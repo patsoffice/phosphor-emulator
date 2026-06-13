@@ -1,7 +1,8 @@
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
-    InputButton, InputReceiver, MachineCore, Nvram, Profilable, SaveState,
+    Direction, InputButton, InputConfigurable, InputControl, InputEvent, InputId, InputKind,
+    InputReceiver, MachineCore, Nvram, Profilable, SaveState,
 };
 use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
@@ -190,6 +191,108 @@ const ROBOTRON_INPUT_MAP: &[InputButton] = &[
     },
 ];
 
+/// Typed logical controls. `InputId`s reuse the `INPUT_*` numbering; default
+/// bindings mirror the legacy name-matched defaults (move stick = left stick,
+/// fire stick = right stick / IJKL).
+const ROBOTRON_CONTROLS: &[InputControl] = &[
+    InputControl {
+        id: InputId(INPUT_MOVE_UP as u16),
+        stable_name: "move_up",
+        label: "Move Up",
+        kind: InputKind::DigitalDirection {
+            direction: Direction::Up,
+        },
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_UP,
+    },
+    InputControl {
+        id: InputId(INPUT_MOVE_DOWN as u16),
+        stable_name: "move_down",
+        label: "Move Down",
+        kind: InputKind::DigitalDirection {
+            direction: Direction::Down,
+        },
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_DOWN,
+    },
+    InputControl {
+        id: InputId(INPUT_MOVE_LEFT as u16),
+        stable_name: "move_left",
+        label: "Move Left",
+        kind: InputKind::DigitalDirection {
+            direction: Direction::Left,
+        },
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_LEFT,
+    },
+    InputControl {
+        id: InputId(INPUT_MOVE_RIGHT as u16),
+        stable_name: "move_right",
+        label: "Move Right",
+        kind: InputKind::DigitalDirection {
+            direction: Direction::Right,
+        },
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_RIGHT,
+    },
+    InputControl {
+        id: InputId(INPUT_P1_START as u16),
+        stable_name: "p1_start",
+        label: "P1 Start",
+        kind: InputKind::Start,
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_START,
+    },
+    InputControl {
+        id: InputId(INPUT_P2_START as u16),
+        stable_name: "p2_start",
+        label: "P2 Start",
+        kind: InputKind::Start,
+        player: Some(2),
+        default_bindings: crate::input_defaults::P2_START,
+    },
+    InputControl {
+        id: InputId(INPUT_FIRE_UP as u16),
+        stable_name: "fire_up",
+        label: "Fire Up",
+        kind: InputKind::Button,
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_FIRE_UP,
+    },
+    InputControl {
+        id: InputId(INPUT_FIRE_DOWN as u16),
+        stable_name: "fire_down",
+        label: "Fire Down",
+        kind: InputKind::Button,
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_FIRE_DOWN,
+    },
+    InputControl {
+        id: InputId(INPUT_FIRE_LEFT as u16),
+        stable_name: "fire_left",
+        label: "Fire Left",
+        kind: InputKind::Button,
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_FIRE_LEFT,
+    },
+    InputControl {
+        id: InputId(INPUT_FIRE_RIGHT as u16),
+        stable_name: "fire_right",
+        label: "Fire Right",
+        kind: InputKind::Button,
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_FIRE_RIGHT,
+    },
+    InputControl {
+        id: InputId(INPUT_COIN as u16),
+        stable_name: "coin",
+        label: "Coin",
+        kind: InputKind::Coin,
+        player: None,
+        default_bindings: crate::input_defaults::COIN,
+    },
+];
+
 // ---------------------------------------------------------------------------
 // RobotronSystem — Williams gen-1 board configured for Robotron 2084 (1982)
 // ---------------------------------------------------------------------------
@@ -284,8 +387,29 @@ impl Bus for RobotronSystem {
 crate::impl_board_delegation!(RobotronSystem, board, williams::TIMING, debug_tick_pre);
 
 impl InputReceiver for RobotronSystem {
+    // Legacy shim: forwards to the typed handle_input.
     fn set_input(&mut self, button: u8, pressed: bool) {
-        match button {
+        self.handle_input(InputEvent::Button {
+            id: InputId(button as u16),
+            pressed,
+        });
+    }
+
+    fn input_map(&self) -> &[InputButton] {
+        ROBOTRON_INPUT_MAP
+    }
+}
+
+impl InputConfigurable for RobotronSystem {
+    fn input_controls(&self) -> &'static [InputControl] {
+        ROBOTRON_CONTROLS
+    }
+
+    fn handle_input(&mut self, event: InputEvent) {
+        let InputEvent::Button { id, pressed } = event else {
+            return;
+        };
+        match id.0 as u8 {
             // Move stick → Widget PIA Port A bits 0-3
             INPUT_MOVE_UP => set_bit_active_high(&mut self.widget_port_a, 0, pressed),
             INPUT_MOVE_DOWN => set_bit_active_high(&mut self.widget_port_a, 1, pressed),
@@ -312,10 +436,6 @@ impl InputReceiver for RobotronSystem {
         // Update PIA inputs immediately so direct reads see current state
         self.board.widget_pia.set_port_a_input(self.widget_port_a);
         self.board.widget_pia.set_port_b_input(self.widget_port_b);
-    }
-
-    fn input_map(&self) -> &[InputButton] {
-        ROBOTRON_INPUT_MAP
     }
 }
 
@@ -360,7 +480,6 @@ impl Nvram for RobotronSystem {
     }
 }
 
-impl phosphor_core::core::machine::InputConfigurable for RobotronSystem {}
 impl Profilable for RobotronSystem {}
 crate::impl_board_debug_trace!(RobotronSystem, board);
 
