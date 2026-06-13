@@ -266,10 +266,35 @@ core trait and the full frontend bundle.
 ### Deferred Capabilities
 
 DIP switch configuration and input remapping were deferred past the main
-capability refactor as larger semantic changes. **Input configuration is now
-implemented** (see the status note below); **DIP switches remain to be done.**
+capability refactor as larger semantic changes. **Both are now implemented**
+(see the status notes below).
 
 #### DIP Switches
+
+> **Status: implemented.** The `DipSwitches` capability is bundled into
+> `FrontendMachine`; machines expose `&'static` bank metadata and own the live
+> byte(s). The frontend renders a DIP settings panel (backtick key) and persists
+> per-machine selections in `state.toml`. The shape below is the original
+> proposal; the as-built design differs in a few details:
+>
+> - The trait is `dip_banks() -> &'static [DipSwitchBank]`,
+>   `dip_bank_value(bank) -> u8`, `set_dip_bank_value(bank, value)`, and
+>   `set_dip_option(bank, option, value)` — not `dip_switches()` /
+>   `set_dip_switch()`.
+> - Metadata is `&'static` and the machine owns the live byte(s), so
+>   `DipSwitchBank` has **no** `value` field (it is just `{ name, options }`);
+>   the current value is read via `dip_bank_value`.
+> - `set_dip_option` has a metadata-aware default that merges the chosen value
+>   into the bank byte using the option's `mask`, so machines usually implement
+>   only the three byte accessors.
+> - Each bank is one byte — a single physical ≤8-switch DIP package read at one
+>   address. Machines with two switch banks expose two banks (Tempest, Dig Dug,
+>   Galaga). `DipChoice` / `DipOption` / `DipApplyTiming` match the proposal.
+> - 12 of the 13 DIP-bearing machines ship real tables whose option defaults
+>   reconstruct the historical power-on bytes. Satan's Hollow's SSIO sound-board
+>   DIP is left unmodelled (firmware-interpreted coinage with no documented
+>   per-bit layout); Missile Command and Asteroids Deluxe currently expose one
+>   of their two physical banks. Each has a follow-up issue.
 
 DIP switches should be a frontend capability with default empty behavior,
 similar to NVRAM but with structured metadata and mutation:
@@ -531,8 +556,8 @@ trait impls, not inside a widening macro option language.
 After the core split lands and the frontend uses `FrontendMachine`, add the
 larger semantic capabilities:
 
-1. `DipSwitches` for structured DIP switch metadata and settings. *(Not yet
-   implemented.)*
+1. `DipSwitches` for structured DIP switch metadata and settings.
+   **Implemented** — see the DIP Switches status note above.
 2. `InputConfigurable` for stable logical controls and persistent bindings.
    **Implemented** — see the Input Configuration status note above.
 

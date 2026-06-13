@@ -473,6 +473,15 @@ impl Nvram for SatansHollowSystem {
 }
 
 impl Profilable for SatansHollowSystem {}
+// DipSwitches intentionally left at the empty default. Satan's Hollow's user
+// options are the SSIO sound board's 8 DIP switches (the byte set via
+// ssio.set_dip_switches and read by the sound CPU at 0xF000). MAME treats this
+// port as 8 IPT_UNKNOWN switches for every MCR game — the coin/option meaning
+// lives in the SSIO sound ROM firmware, not a documented per-bit layout — so
+// there is no verifiable table to expose here. The game-side DIPs MAME does
+// document (Coin Meters, Cabinet) sit on a separate SSIO input port, not the
+// persisted DIP byte. Exposing this would require reverse-engineering the SSIO
+// coinage routine; left for follow-up rather than guessed.
 impl phosphor_core::core::machine::DipSwitches for SatansHollowSystem {}
 impl phosphor_core::core::debug_trace::DebugTrace for SatansHollowSystem {}
 
