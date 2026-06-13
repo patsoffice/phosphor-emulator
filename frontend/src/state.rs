@@ -17,6 +17,12 @@ pub struct State {
     /// typed controls (stable names) appear here; absent means "use defaults".
     #[serde(default)]
     pub input_bindings: HashMap<String, Vec<SerializedBinding>>,
+    /// Per-machine DIP switch settings, keyed by `machine_id`. The `Vec` holds
+    /// one live byte per bank, in `dip_banks()` order. Only machines whose DIP
+    /// settings differ from their power-on defaults appear here; absent means
+    /// "use defaults".
+    #[serde(default)]
+    pub dip_switches: HashMap<String, Vec<u8>>,
 }
 
 /// Load state from `~/.config/phosphor/state.toml`, falling back to defaults.

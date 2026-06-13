@@ -104,6 +104,19 @@ fn main() {
         bindings.apply_overrides(machine.input_controls(), saved);
     }
 
+    // Snapshot the machine's power-on DIP bytes, then overlay any persisted
+    // per-machine overrides. Applied before reset() so that OnReset options
+    // latch when the machine powers on.
+    let has_dip = !machine.dip_banks().is_empty();
+    let dip_defaults: Vec<u8> = (0..machine.dip_banks().len())
+        .map(|i| machine.dip_bank_value(i))
+        .collect();
+    if has_dip && let Some(saved) = state.dip_switches.get(&machine_id) {
+        for (bank, &byte) in saved.iter().enumerate() {
+            machine.set_dip_bank_value(bank, byte);
+        }
+    }
+
     machine.reset();
     emulator::run(
         machine.as_mut(),
@@ -128,6 +141,19 @@ fn main() {
             state.input_bindings.remove(&machine_id);
         } else {
             state.input_bindings.insert(machine_id.clone(), current);
+        }
+    }
+
+    // Persist DIP bytes, dropping the entry when it matches the machine's
+    // power-on defaults (keeps state.toml free of redundant entries).
+    if has_dip {
+        let current: Vec<u8> = (0..machine.dip_banks().len())
+            .map(|i| machine.dip_bank_value(i))
+            .collect();
+        if current == dip_defaults {
+            state.dip_switches.remove(&machine_id);
+        } else {
+            state.dip_switches.insert(machine_id.clone(), current);
         }
     }
     state::save(&state);
