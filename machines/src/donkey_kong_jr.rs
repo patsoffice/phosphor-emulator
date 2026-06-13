@@ -1,7 +1,8 @@
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
-    InputConfigurable, InputControl, InputEvent, MachineCore, SaveState,
+    DipApplyTiming, DipChoice, DipOption, DipSwitchBank, DipSwitches, InputConfigurable,
+    InputControl, InputEvent, MachineCore, SaveState,
 };
 use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
@@ -482,7 +483,152 @@ impl SaveState for DkongJrSystem {
 
 impl phosphor_core::core::machine::Nvram for DkongJrSystem {}
 impl phosphor_core::core::machine::Profilable for DkongJrSystem {}
-impl phosphor_core::core::machine::DipSwitches for DkongJrSystem {}
+/// DIP switch metadata for Donkey Kong Jr's DSW0 byte (read at 0x7D80). Same
+/// layout as Donkey Kong except the Bonus Life thresholds; the option defaults
+/// OR to the historical 0x80 (3 lives, 10000 bonus, 1C/1C, upright).
+const DKONGJR_DIP_BANKS: &[DipSwitchBank] = &[DipSwitchBank {
+    name: "DSW0",
+    options: &[
+        DipOption {
+            name: "Lives",
+            mask: 0x03,
+            apply: DipApplyTiming::Immediate,
+            choices: &[
+                DipChoice {
+                    label: "3",
+                    value: 0x00,
+                },
+                DipChoice {
+                    label: "4",
+                    value: 0x01,
+                },
+                DipChoice {
+                    label: "5",
+                    value: 0x02,
+                },
+                DipChoice {
+                    label: "6",
+                    value: 0x03,
+                },
+            ],
+        },
+        DipOption {
+            name: "Bonus Life",
+            mask: 0x0C,
+            apply: DipApplyTiming::Immediate,
+            choices: &[
+                DipChoice {
+                    label: "10000",
+                    value: 0x00,
+                },
+                DipChoice {
+                    label: "15000",
+                    value: 0x04,
+                },
+                DipChoice {
+                    label: "20000",
+                    value: 0x08,
+                },
+                DipChoice {
+                    label: "25000",
+                    value: 0x0C,
+                },
+            ],
+        },
+        DipOption {
+            name: "Coinage",
+            mask: 0x70,
+            apply: DipApplyTiming::Immediate,
+            choices: &[
+                DipChoice {
+                    label: "1 Coin/1 Credit",
+                    value: 0x00,
+                },
+                DipChoice {
+                    label: "2 Coins/1 Credit",
+                    value: 0x10,
+                },
+                DipChoice {
+                    label: "1 Coin/2 Credits",
+                    value: 0x20,
+                },
+                DipChoice {
+                    label: "3 Coins/1 Credit",
+                    value: 0x30,
+                },
+                DipChoice {
+                    label: "1 Coin/3 Credits",
+                    value: 0x40,
+                },
+                DipChoice {
+                    label: "4 Coins/1 Credit",
+                    value: 0x50,
+                },
+                DipChoice {
+                    label: "1 Coin/4 Credits",
+                    value: 0x60,
+                },
+                DipChoice {
+                    label: "5 Coins/1 Credit",
+                    value: 0x70,
+                },
+            ],
+        },
+        DipOption {
+            name: "Cabinet",
+            mask: 0x80,
+            apply: DipApplyTiming::Immediate,
+            choices: &[
+                DipChoice {
+                    label: "Cocktail",
+                    value: 0x00,
+                },
+                DipChoice {
+                    label: "Upright",
+                    value: 0x80,
+                },
+            ],
+        },
+    ],
+}];
+
+impl DipSwitches for DkongJrSystem {
+    fn dip_banks(&self) -> &'static [DipSwitchBank] {
+        DKONGJR_DIP_BANKS
+    }
+
+    fn dip_bank_value(&self, bank: usize) -> u8 {
+        if bank == 0 { self.board.dsw0 } else { 0 }
+    }
+
+    fn set_dip_bank_value(&mut self, bank: usize, value: u8) {
+        if bank == 0 {
+            self.board.dsw0 = value;
+        }
+    }
+}
+
+#[cfg(test)]
+mod dip_tests {
+    use super::*;
+
+    #[test]
+    fn dip_default_and_metadata() {
+        let sys = DkongJrSystem::new();
+        assert_eq!(sys.dip_bank_value(0), 0x80);
+        crate::assert_dip_banks_valid(sys.dip_banks(), &[sys.dip_bank_value(0)]);
+    }
+
+    #[test]
+    fn set_dip_option_masks_only_its_bits() {
+        let mut sys = DkongJrSystem::new();
+        // Bonus Life is option 1 (mask 0x0C); pick "25000" (0x0C).
+        sys.set_dip_option(0, 1, 0x0C);
+        assert_eq!(sys.dip_bank_value(0), 0x8C);
+        sys.set_dip_bank_value(0, 0x55);
+        assert_eq!(sys.dip_bank_value(0), 0x55);
+    }
+}
 crate::impl_board_debug_trace!(DkongJrSystem, board);
 
 // ---------------------------------------------------------------------------

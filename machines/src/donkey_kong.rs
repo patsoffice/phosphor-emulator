@@ -1,8 +1,8 @@
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
-    DefaultBinding, Direction, InputConfigurable, InputControl, InputEvent, InputId, InputKind,
-    KeyId, MachineCore, SaveState,
+    DefaultBinding, DipApplyTiming, DipChoice, DipOption, DipSwitchBank, DipSwitches, Direction,
+    InputConfigurable, InputControl, InputEvent, InputId, InputKind, KeyId, MachineCore, SaveState,
 };
 use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
@@ -614,7 +614,131 @@ impl SaveState for DkongSystem {
 
 impl phosphor_core::core::machine::Nvram for DkongSystem {}
 impl phosphor_core::core::machine::Profilable for DkongSystem {}
-impl phosphor_core::core::machine::DipSwitches for DkongSystem {}
+/// DIP switch metadata for Donkey Kong's DSW0 byte (read at 0x7D80). Choice
+/// bits and labels follow MAME's `dkong` layout; the option defaults OR to the
+/// historical 0x80 the board powers on with (3 lives, 7000 bonus, 1C/1C,
+/// upright).
+const DKONG_DIP_BANKS: &[DipSwitchBank] = &[DipSwitchBank {
+    name: "DSW0",
+    options: &[
+        DipOption {
+            name: "Lives",
+            mask: 0x03,
+            apply: DipApplyTiming::Immediate,
+            choices: &[
+                DipChoice {
+                    label: "3",
+                    value: 0x00,
+                },
+                DipChoice {
+                    label: "4",
+                    value: 0x01,
+                },
+                DipChoice {
+                    label: "5",
+                    value: 0x02,
+                },
+                DipChoice {
+                    label: "6",
+                    value: 0x03,
+                },
+            ],
+        },
+        DipOption {
+            name: "Bonus Life",
+            mask: 0x0C,
+            apply: DipApplyTiming::Immediate,
+            choices: &[
+                DipChoice {
+                    label: "7000",
+                    value: 0x00,
+                },
+                DipChoice {
+                    label: "10000",
+                    value: 0x04,
+                },
+                DipChoice {
+                    label: "15000",
+                    value: 0x08,
+                },
+                DipChoice {
+                    label: "20000",
+                    value: 0x0C,
+                },
+            ],
+        },
+        DipOption {
+            name: "Coinage",
+            mask: 0x70,
+            apply: DipApplyTiming::Immediate,
+            choices: &[
+                DipChoice {
+                    label: "1 Coin/1 Credit",
+                    value: 0x00,
+                },
+                DipChoice {
+                    label: "2 Coins/1 Credit",
+                    value: 0x10,
+                },
+                DipChoice {
+                    label: "1 Coin/2 Credits",
+                    value: 0x20,
+                },
+                DipChoice {
+                    label: "3 Coins/1 Credit",
+                    value: 0x30,
+                },
+                DipChoice {
+                    label: "1 Coin/3 Credits",
+                    value: 0x40,
+                },
+                DipChoice {
+                    label: "4 Coins/1 Credit",
+                    value: 0x50,
+                },
+                DipChoice {
+                    label: "1 Coin/4 Credits",
+                    value: 0x60,
+                },
+                DipChoice {
+                    label: "5 Coins/1 Credit",
+                    value: 0x70,
+                },
+            ],
+        },
+        DipOption {
+            name: "Cabinet",
+            mask: 0x80,
+            apply: DipApplyTiming::Immediate,
+            choices: &[
+                DipChoice {
+                    label: "Cocktail",
+                    value: 0x00,
+                },
+                DipChoice {
+                    label: "Upright",
+                    value: 0x80,
+                },
+            ],
+        },
+    ],
+}];
+
+impl DipSwitches for DkongSystem {
+    fn dip_banks(&self) -> &'static [DipSwitchBank] {
+        DKONG_DIP_BANKS
+    }
+
+    fn dip_bank_value(&self, bank: usize) -> u8 {
+        if bank == 0 { self.board.dsw0 } else { 0 }
+    }
+
+    fn set_dip_bank_value(&mut self, bank: usize, value: u8) {
+        if bank == 0 {
+            self.board.dsw0 = value;
+        }
+    }
+}
 crate::impl_board_debug_trace!(DkongSystem, board);
 
 // ---------------------------------------------------------------------------
@@ -732,5 +856,22 @@ mod tests {
         assert_eq!(sys2.board.sound_map.region_data(SoundRegion::Rom)[0], 0x00);
         assert_eq!(sys2.board.tile_rom[0], 0x00);
         assert_eq!(sys2.board.sprite_rom[0], 0x00);
+    }
+
+    #[test]
+    fn dip_default_and_metadata() {
+        let sys = DkongSystem::new();
+        assert_eq!(sys.dip_bank_value(0), 0x80); // historical power-on byte
+        crate::assert_dip_banks_valid(sys.dip_banks(), &[sys.dip_bank_value(0)]);
+    }
+
+    #[test]
+    fn set_dip_option_masks_only_its_bits() {
+        let mut sys = DkongSystem::new();
+        // Lives is option 0 (mask 0x03); pick "6" (0x03).
+        sys.set_dip_option(0, 0, 0x03);
+        assert_eq!(sys.dip_bank_value(0), 0x83); // 0x80 with low two bits set
+        sys.set_dip_bank_value(0, 0x55);
+        assert_eq!(sys.dip_bank_value(0), 0x55);
     }
 }

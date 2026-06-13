@@ -419,3 +419,43 @@ pub use simple_system::{
     SimpleSystem, SimpleSystem32, SimpleZ80System,
 };
 pub use tempest::TempestSystem;
+
+/// Shared DIP-table validator for machine unit tests.
+///
+/// Asserts that, for each bank: options occupy disjoint bits, every choice fits
+/// its option's mask, and the live `defaults[bank]` byte decomposes into a
+/// defined choice for every option (so a table can't silently drift from the
+/// machine's historical power-on byte).
+#[cfg(test)]
+pub(crate) fn assert_dip_banks_valid(
+    banks: &[phosphor_core::core::machine::DipSwitchBank],
+    defaults: &[u8],
+) {
+    assert_eq!(banks.len(), defaults.len(), "default count != bank count");
+    for (bank_idx, bank) in banks.iter().enumerate() {
+        let mut covered = 0u8;
+        for opt in bank.options {
+            assert_eq!(covered & opt.mask, 0, "overlapping masks in {}", bank.name);
+            covered |= opt.mask;
+            for choice in opt.choices {
+                assert_eq!(
+                    choice.value & !opt.mask,
+                    0,
+                    "choice {} escapes mask of {}",
+                    choice.label,
+                    opt.name
+                );
+            }
+        }
+        let default = defaults[bank_idx];
+        for opt in bank.options {
+            let selected = default & opt.mask;
+            assert!(
+                opt.choices.iter().any(|c| c.value == selected),
+                "{} default 0x{default:02X} has no choice for {} (slice 0x{selected:02X})",
+                bank.name,
+                opt.name
+            );
+        }
+    }
+}
