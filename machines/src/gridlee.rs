@@ -146,12 +146,6 @@ const INPUT_COIN: u8 = 5;
 const INPUT_START1: u8 = 6;
 const INPUT_START2: u8 = 7;
 
-// ---------------------------------------------------------------------------
-// Analog axis IDs (trackball)
-// ---------------------------------------------------------------------------
-const ANALOG_TRACKBALL_X: u8 = 0;
-const ANALOG_TRACKBALL_Y: u8 = 1;
-
 // Typed control ids for the analog axes (distinct from the 0..=7 digital ids).
 const CTRL_TRACKBALL_X: InputId = InputId(8);
 const CTRL_TRACKBALL_Y: InputId = InputId(9);

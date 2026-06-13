@@ -83,8 +83,6 @@ pub const INPUT_START2: u8 = 6;
 pub const INPUT_LEFT: u8 = 7;
 pub const INPUT_RIGHT: u8 = 8;
 
-const ANALOG_SPINNER: u8 = 0;
-
 // Typed control id for the spinner (distinct from the 0..=8 digital ids).
 const CTRL_SPINNER: InputId = InputId(9);
 

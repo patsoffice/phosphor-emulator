@@ -1,7 +1,7 @@
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
-    InputConfigurable, InputControl, InputEvent, InputId, MachineCore, SaveState,
+    InputConfigurable, InputControl, InputEvent, MachineCore, SaveState,
 };
 use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
