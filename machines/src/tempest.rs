@@ -1,8 +1,9 @@
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
-    AnalogAxisKind, AudioSource, DefaultBinding, FrontendMachine, InputConfigurable, InputControl,
-    InputEvent, InputId, InputKind, KeyId, MachineCore, MouseControl, Nvram, Profilable, SaveState,
+    AnalogAxisKind, AudioSource, DefaultBinding, DipApplyTiming, DipChoice, DipOption,
+    DipSwitchBank, DipSwitches, FrontendMachine, InputConfigurable, InputControl, InputEvent,
+    InputId, InputKind, KeyId, MachineCore, MouseControl, Nvram, Profilable, SaveState,
 };
 use phosphor_core::core::{AccessKind, AddressSpace16};
 use phosphor_core::core::{Bus, BusMaster};
@@ -664,7 +665,244 @@ impl Nvram for TempestSystem {
 }
 
 impl Profilable for TempestSystem {}
-impl phosphor_core::core::machine::DipSwitches for TempestSystem {}
+/// DIP switch metadata for Tempest's two banks: DSW1 (pricing, read at $0D00,
+/// byte `dsw1`) and DSW2 (game options, read at $0E00, byte `dsw2`). Choice
+/// bits and labels follow MAME's `tempest` layout; option defaults OR to the
+/// historical 0x00 for both banks.
+const TEMPEST_DIP_BANKS: &[DipSwitchBank] = &[
+    DipSwitchBank {
+        name: "DSW1 (Pricing)",
+        options: &[
+            DipOption {
+                name: "Coinage",
+                mask: 0x03,
+                apply: DipApplyTiming::Immediate,
+                choices: &[
+                    DipChoice {
+                        label: "1 Coin/1 Credit",
+                        value: 0x00,
+                    },
+                    DipChoice {
+                        label: "2 Coins/1 Credit",
+                        value: 0x01,
+                    },
+                    DipChoice {
+                        label: "Free Play",
+                        value: 0x02,
+                    },
+                    DipChoice {
+                        label: "1 Coin/2 Credits",
+                        value: 0x03,
+                    },
+                ],
+            },
+            DipOption {
+                name: "Right Coin",
+                mask: 0x0C,
+                apply: DipApplyTiming::Immediate,
+                choices: &[
+                    DipChoice {
+                        label: "x1",
+                        value: 0x00,
+                    },
+                    DipChoice {
+                        label: "x4",
+                        value: 0x04,
+                    },
+                    DipChoice {
+                        label: "x5",
+                        value: 0x08,
+                    },
+                    DipChoice {
+                        label: "x6",
+                        value: 0x0C,
+                    },
+                ],
+            },
+            DipOption {
+                name: "Left Coin",
+                mask: 0x10,
+                apply: DipApplyTiming::Immediate,
+                choices: &[
+                    DipChoice {
+                        label: "x1",
+                        value: 0x00,
+                    },
+                    DipChoice {
+                        label: "x2",
+                        value: 0x10,
+                    },
+                ],
+            },
+            DipOption {
+                name: "Bonus Coins",
+                mask: 0xE0,
+                apply: DipApplyTiming::Immediate,
+                choices: &[
+                    DipChoice {
+                        label: "None",
+                        value: 0x00,
+                    },
+                    DipChoice {
+                        label: "1 each 2",
+                        value: 0x20,
+                    },
+                    DipChoice {
+                        label: "1 each 4 (+demo)",
+                        value: 0x40,
+                    },
+                    DipChoice {
+                        label: "2 each 4 (+demo)",
+                        value: 0x60,
+                    },
+                    DipChoice {
+                        label: "1 each 5",
+                        value: 0x80,
+                    },
+                    DipChoice {
+                        label: "1 each 3",
+                        value: 0xA0,
+                    },
+                    DipChoice {
+                        label: "Freeze Mode",
+                        value: 0xC0,
+                    },
+                    DipChoice {
+                        label: "Freeze Mode",
+                        value: 0xE0,
+                    },
+                ],
+            },
+        ],
+    },
+    DipSwitchBank {
+        name: "DSW2 (Game)",
+        options: &[
+            DipOption {
+                name: "Minimum",
+                mask: 0x01,
+                apply: DipApplyTiming::Immediate,
+                choices: &[
+                    DipChoice {
+                        label: "1 Credit",
+                        value: 0x00,
+                    },
+                    DipChoice {
+                        label: "2 Credits",
+                        value: 0x01,
+                    },
+                ],
+            },
+            DipOption {
+                name: "Language",
+                mask: 0x06,
+                apply: DipApplyTiming::Immediate,
+                choices: &[
+                    DipChoice {
+                        label: "English",
+                        value: 0x00,
+                    },
+                    DipChoice {
+                        label: "French",
+                        value: 0x02,
+                    },
+                    DipChoice {
+                        label: "German",
+                        value: 0x04,
+                    },
+                    DipChoice {
+                        label: "Spanish",
+                        value: 0x06,
+                    },
+                ],
+            },
+            DipOption {
+                name: "Bonus Life",
+                mask: 0x38,
+                apply: DipApplyTiming::Immediate,
+                choices: &[
+                    DipChoice {
+                        label: "20000",
+                        value: 0x00,
+                    },
+                    DipChoice {
+                        label: "10000",
+                        value: 0x08,
+                    },
+                    DipChoice {
+                        label: "30000",
+                        value: 0x10,
+                    },
+                    DipChoice {
+                        label: "40000",
+                        value: 0x18,
+                    },
+                    DipChoice {
+                        label: "50000",
+                        value: 0x20,
+                    },
+                    DipChoice {
+                        label: "60000",
+                        value: 0x28,
+                    },
+                    DipChoice {
+                        label: "70000",
+                        value: 0x30,
+                    },
+                    DipChoice {
+                        label: "None",
+                        value: 0x38,
+                    },
+                ],
+            },
+            DipOption {
+                name: "Lives",
+                mask: 0xC0,
+                apply: DipApplyTiming::Immediate,
+                choices: &[
+                    DipChoice {
+                        label: "3",
+                        value: 0x00,
+                    },
+                    DipChoice {
+                        label: "4",
+                        value: 0x40,
+                    },
+                    DipChoice {
+                        label: "5",
+                        value: 0x80,
+                    },
+                    DipChoice {
+                        label: "2",
+                        value: 0xC0,
+                    },
+                ],
+            },
+        ],
+    },
+];
+
+impl DipSwitches for TempestSystem {
+    fn dip_banks(&self) -> &'static [DipSwitchBank] {
+        TEMPEST_DIP_BANKS
+    }
+
+    fn dip_bank_value(&self, bank: usize) -> u8 {
+        match bank {
+            0 => self.dsw1,
+            1 => self.dsw2,
+            _ => 0,
+        }
+    }
+
+    fn set_dip_bank_value(&mut self, bank: usize, value: u8) {
+        match bank {
+            0 => self.dsw1 = value,
+            1 => self.dsw2 = value,
+            _ => {}
+        }
+    }
+}
 crate::impl_board_debug_trace!(TempestSystem, board);
 
 // ---------------------------------------------------------------------------
@@ -685,6 +923,23 @@ inventory::submit! {
 mod tests {
     use super::*;
     use phosphor_core::cpu::CpuStateTrait;
+
+    #[test]
+    fn dip_defaults_and_metadata() {
+        let sys = TempestSystem::new();
+        assert_eq!(sys.dip_bank_value(0), 0x00);
+        assert_eq!(sys.dip_bank_value(1), 0x00);
+        crate::assert_dip_banks_valid(sys.dip_banks(), &[0x00, 0x00]);
+    }
+
+    #[test]
+    fn set_dip_option_masks_only_its_bits() {
+        let mut sys = TempestSystem::new();
+        // DSW2 Lives is bank 1, option 3 (mask 0xC0); pick "5" (0x80).
+        sys.set_dip_option(1, 3, 0x80);
+        assert_eq!(sys.dip_bank_value(1), 0x80);
+        assert_eq!(sys.dip_bank_value(0), 0x00); // pricing bank untouched
+    }
 
     #[test]
     fn save_load_round_trip() {
