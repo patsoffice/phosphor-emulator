@@ -11,7 +11,9 @@ pub use cpu::m68000::M68000;
 
 pub mod prelude {
     pub use crate::core::machine::{
-        AnalogInput, FrontendMachine, InputButton, MachineCore, Nvram, Profilable, SaveState,
+        AnalogInput, DefaultBinding, FrontendMachine, InputButton, InputConfigurable, InputControl,
+        InputEvent, InputId, InputKind, KeyId, MachineCore, MouseControl, Nvram, PadControl,
+        Profilable, SaveState,
     };
     pub use crate::core::{
         Bus, BusMaster, BusMasterComponent, SaveError, Saveable, StateReader, StateWriter,

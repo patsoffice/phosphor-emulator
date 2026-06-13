@@ -161,6 +161,215 @@ pub trait InputReceiver {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Typed input configuration
+//
+// The successor to the name-matched `InputReceiver` model. Machines expose
+// stable logical controls and consume typed events, so the frontend can
+// persist per-machine bindings by stable name rather than by display text.
+// During migration the `InputConfigurable` default methods bridge to
+// `InputReceiver`; machines are converted one at a time.
+// ---------------------------------------------------------------------------
+
+/// Stable identifier for a logical input control within a machine.
+///
+/// Unlike the `u8` ids used by [`InputReceiver`], an `InputId` is paired with a
+/// stable string name in [`InputControl`], so persistent bindings survive
+/// machine-side renumbering. The frontend keys saved bindings by the control's
+/// `stable_name`, never by this numeric value or by display text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct InputId(pub u16);
+
+/// Joystick / D-pad direction for a digital directional control.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Direction {
+    Up,
+    Down,
+    Left,
+    Right,
+}
+
+/// Which analog axis a continuous control drives.
+///
+/// Trackballs, spinners, wheels, and paddles all reduce to a one-dimensional
+/// axis; `X` is horizontal motion, `Y` is vertical.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AnalogAxisKind {
+    X,
+    Y,
+}
+
+/// The semantic role of a logical control, used by the frontend to pick
+/// sensible default physical bindings and to group the rebinding UI.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InputKind {
+    /// A generic action button (fire, flap, jump, throw…).
+    Button,
+    /// Coin / credit insert.
+    Coin,
+    /// Player start.
+    Start,
+    /// Operator service / self-test button.
+    Service,
+    /// One direction of a digital (switch) joystick.
+    DigitalDirection { direction: Direction },
+    /// A continuous analog axis (trackball, spinner, wheel, paddle).
+    AnalogAxis { axis: AnalogAxisKind },
+}
+
+/// A keyboard key, mirrored from common SDL scancodes but free of any SDL
+/// dependency so `phosphor-core` stays platform-agnostic. The frontend
+/// translates these into `sdl2::keyboard::Scancode`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[rustfmt::skip]
+pub enum KeyId {
+    A, B, C, D, E, F, G, H, I, J, K, L, M,
+    N, O, P, Q, R, S, T, U, V, W, X, Y, Z,
+    Num0, Num1, Num2, Num3, Num4, Num5, Num6, Num7, Num8, Num9,
+    Up, Down, Left, Right,
+    Space, Enter, Tab, Escape,
+    LShift, RShift, LCtrl, RCtrl, LAlt, RAlt,
+}
+
+/// A gamepad button, free of SDL dependency. Mirrors the SDL game-controller
+/// button set; the frontend translates these into `sdl2::controller::Button`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PadButton {
+    A,
+    B,
+    X,
+    Y,
+    Back,
+    Start,
+    Guide,
+    LeftShoulder,
+    RightShoulder,
+    LeftStick,
+    RightStick,
+    DPadUp,
+    DPadDown,
+    DPadLeft,
+    DPadRight,
+}
+
+/// A gamepad analog axis, free of SDL dependency.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PadAxis {
+    LeftX,
+    LeftY,
+    RightX,
+    RightY,
+    TriggerLeft,
+    TriggerRight,
+}
+
+/// Sign of an axis deflection, so a gamepad axis can stand in for a digital input.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AxisSign {
+    Positive,
+    Negative,
+}
+
+/// A gamepad control referenced by a default binding: either a button or a
+/// signed axis deflection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PadControl {
+    Button(PadButton),
+    Axis(PadAxis, AxisSign),
+}
+
+/// A mouse control referenced by a default binding.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MouseControl {
+    Left,
+    Right,
+    Middle,
+    AxisX,
+    AxisY,
+}
+
+/// A default physical binding suggested by a machine for one of its controls.
+///
+/// These are portable (SDL-free) descriptors; the frontend resolves them to
+/// concrete devices and lets the user override them. A control may suggest
+/// several defaults (e.g. keyboard *and* gamepad).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DefaultBinding {
+    Key(KeyId),
+    Pad(PadControl),
+    Mouse(MouseControl),
+}
+
+/// A single logical control exposed by a machine.
+///
+/// The frontend binds physical inputs to these controls and persists the
+/// bindings by `stable_name`. `label` is for display only and may change
+/// without breaking saved configs.
+#[derive(Clone, Copy, Debug)]
+pub struct InputControl {
+    /// Machine-local identifier, echoed back in [`InputEvent`].
+    pub id: InputId,
+    /// Stable, machine-unique key for persistence (e.g. "p1_flap"). Never
+    /// display text — renaming the label must not change this.
+    pub stable_name: &'static str,
+    /// Human-readable label for the rebinding UI (e.g. "P1 Flap").
+    pub label: &'static str,
+    /// Semantic role, used for default bindings and UI grouping.
+    pub kind: InputKind,
+    /// Owning player (1-based), or `None` for shared / system controls.
+    pub player: Option<u8>,
+    /// Suggested default physical bindings.
+    pub default_bindings: &'static [DefaultBinding],
+}
+
+/// An input event from the frontend, targeting a logical control by `InputId`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum InputEvent {
+    /// Digital press / release.
+    Button { id: InputId, pressed: bool },
+    /// Absolute analog position in `-1.0..=1.0` (e.g. an analog stick).
+    Absolute { id: InputId, value: f32 },
+    /// Relative motion delta (e.g. trackball / spinner / mouse), in device units.
+    Relative { id: InputId, delta: f32 },
+}
+
+/// Typed, rebindable input configuration — the successor to [`InputReceiver`].
+///
+/// Machines expose stable logical controls via [`input_controls`](Self::input_controls)
+/// and consume typed events via [`handle_input`](Self::handle_input), letting the
+/// frontend persist per-machine bindings by stable name rather than by display
+/// text.
+///
+/// During migration the default methods *bridge* to [`InputReceiver`]:
+/// `handle_input` forwards to `set_input` / `set_analog`, and `input_controls`
+/// returns empty so the frontend falls back to its legacy name-based key map for
+/// machines that have not yet been converted. A migrated machine overrides both
+/// methods. Once every machine is migrated, `InputReceiver`, this bridge, and the
+/// supertrait bound are removed.
+pub trait InputConfigurable: InputReceiver {
+    /// The logical controls this machine exposes.
+    ///
+    /// Empty (the default) means "not yet migrated": the frontend then builds
+    /// bindings from [`InputReceiver::input_map`] using its legacy matching.
+    fn input_controls(&self) -> &'static [InputControl] {
+        &[]
+    }
+
+    /// Handle a typed input event.
+    ///
+    /// The default bridges to [`InputReceiver`]: [`InputEvent::Button`] becomes
+    /// `set_input`, [`InputEvent::Relative`] becomes `set_analog`. The legacy
+    /// model has no absolute-axis concept, so [`InputEvent::Absolute`] is
+    /// ignored by the bridge — machines that need it override this method.
+    fn handle_input(&mut self, event: InputEvent) {
+        match event {
+            InputEvent::Button { id, pressed } => self.set_input(id.0 as u8, pressed),
+            InputEvent::Relative { id, delta } => self.set_analog(id.0 as u8, delta as i32),
+            InputEvent::Absolute { .. } => {}
+        }
+    }
+}
+
 /// Debug/inspection capabilities for interactive debugging.
 ///
 /// Machines without debug support can skip implementing this trait
@@ -394,5 +603,53 @@ mod tests {
         assert!(machine.save_state().is_none());
         assert!(machine.save_nvram().is_none());
         assert!(machine.frame_profile_spans().is_empty());
+    }
+
+    /// The `InputConfigurable` bridge default forwards typed events to the
+    /// legacy `InputReceiver` methods and exposes no logical controls until a
+    /// machine is migrated. Also confirms the trait is object-safe.
+    #[test]
+    fn input_configurable_bridges_to_input_receiver() {
+        #[derive(Default)]
+        struct Recv {
+            buttons: Vec<(u8, bool)>,
+            analog: Vec<(u8, i32)>,
+        }
+
+        impl InputReceiver for Recv {
+            fn set_input(&mut self, button: u8, pressed: bool) {
+                self.buttons.push((button, pressed));
+            }
+            fn input_map(&self) -> &[InputButton] {
+                &[]
+            }
+            fn set_analog(&mut self, axis: u8, delta: i32) {
+                self.analog.push((axis, delta));
+            }
+        }
+
+        // Empty impl: relies entirely on the bridge defaults.
+        impl InputConfigurable for Recv {}
+
+        let mut recv = Recv::default();
+        let cfg: &mut dyn InputConfigurable = &mut recv;
+
+        assert!(cfg.input_controls().is_empty());
+        cfg.handle_input(InputEvent::Button {
+            id: InputId(3),
+            pressed: true,
+        });
+        cfg.handle_input(InputEvent::Relative {
+            id: InputId(1),
+            delta: 5.0,
+        });
+        // Absolute has no legacy equivalent and is dropped by the bridge.
+        cfg.handle_input(InputEvent::Absolute {
+            id: InputId(0),
+            value: 0.5,
+        });
+
+        assert_eq!(recv.buttons, vec![(3, true)]);
+        assert_eq!(recv.analog, vec![(1, 5)]);
     }
 }
