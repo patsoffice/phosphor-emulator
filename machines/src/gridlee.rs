@@ -1,9 +1,10 @@
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
-    AnalogAxisKind, AudioSource, DefaultBinding, Direction, InputConfigurable, InputControl,
-    InputEvent, InputId, InputKind, KeyId, MachineCore, MouseControl, Nvram, PadButton, PadControl,
-    Profilable, Renderable, SaveState,
+    AnalogAxisKind, AudioSource, DefaultBinding, DipApplyTiming, DipChoice, DipOption,
+    DipSwitchBank, DipSwitches, Direction, InputConfigurable, InputControl, InputEvent, InputId,
+    InputKind, KeyId, MachineCore, MouseControl, Nvram, PadButton, PadControl, Profilable,
+    Renderable, SaveState,
 };
 use phosphor_core::core::save_state::{self, SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::{AccessKind, AddressSpace16};
@@ -1084,7 +1085,136 @@ impl Nvram for GridleeSystem {
 }
 
 impl Profilable for GridleeSystem {}
-impl phosphor_core::core::machine::DipSwitches for GridleeSystem {}
+/// DIP switch metadata for Gridlee's DSW byte (read at 0x9600). Choice bits and
+/// labels follow MAME's `gridlee` layout; option defaults OR to the historical
+/// 0x05 (10000-point bonus, 3 lives).
+const GRIDLEE_DIP_BANKS: &[DipSwitchBank] = &[DipSwitchBank {
+    name: "DSW",
+    options: &[
+        DipOption {
+            name: "Bonus Life",
+            mask: 0x03,
+            apply: DipApplyTiming::Immediate,
+            choices: &[
+                DipChoice {
+                    label: "8000 points",
+                    value: 0x00,
+                },
+                DipChoice {
+                    label: "10000 points",
+                    value: 0x01,
+                },
+                DipChoice {
+                    label: "12000 points",
+                    value: 0x02,
+                },
+                DipChoice {
+                    label: "14000 points",
+                    value: 0x03,
+                },
+            ],
+        },
+        DipOption {
+            name: "Lives",
+            mask: 0x0C,
+            apply: DipApplyTiming::Immediate,
+            choices: &[
+                DipChoice {
+                    label: "2",
+                    value: 0x00,
+                },
+                DipChoice {
+                    label: "3",
+                    value: 0x04,
+                },
+                DipChoice {
+                    label: "4",
+                    value: 0x08,
+                },
+                DipChoice {
+                    label: "5",
+                    value: 0x0C,
+                },
+            ],
+        },
+        DipOption {
+            name: "Free Play",
+            mask: 0x10,
+            apply: DipApplyTiming::Immediate,
+            choices: &[
+                DipChoice {
+                    label: "Off",
+                    value: 0x00,
+                },
+                DipChoice {
+                    label: "On",
+                    value: 0x10,
+                },
+            ],
+        },
+        DipOption {
+            name: "Cabinet",
+            mask: 0x20,
+            apply: DipApplyTiming::Immediate,
+            choices: &[
+                DipChoice {
+                    label: "Upright",
+                    value: 0x00,
+                },
+                DipChoice {
+                    label: "Cocktail",
+                    value: 0x20,
+                },
+            ],
+        },
+        DipOption {
+            name: "Reset Hall of Fame",
+            mask: 0x40,
+            apply: DipApplyTiming::Immediate,
+            choices: &[
+                DipChoice {
+                    label: "No",
+                    value: 0x00,
+                },
+                DipChoice {
+                    label: "Yes",
+                    value: 0x40,
+                },
+            ],
+        },
+        DipOption {
+            name: "Reset Game Data",
+            mask: 0x80,
+            apply: DipApplyTiming::Immediate,
+            choices: &[
+                DipChoice {
+                    label: "No",
+                    value: 0x00,
+                },
+                DipChoice {
+                    label: "Yes",
+                    value: 0x80,
+                },
+            ],
+        },
+    ],
+}];
+
+impl DipSwitches for GridleeSystem {
+    fn dip_banks(&self) -> &'static [DipSwitchBank] {
+        GRIDLEE_DIP_BANKS
+    }
+
+    fn dip_bank_value(&self, bank: usize) -> u8 {
+        if bank == 0 { self.dip_switches } else { 0 }
+    }
+
+    fn set_dip_bank_value(&mut self, bank: usize, value: u8) {
+        if bank == 0 {
+            self.dip_switches = value;
+        }
+    }
+}
 impl phosphor_core::core::debug_trace::DebugTrace for GridleeSystem {}
 
 // ---------------------------------------------------------------------------
@@ -1480,6 +1610,16 @@ mod tests {
         let sys = make_system();
         // Default: 3 lives (bits 3-2 = 01), bonus 10000 (bits 1-0 = 01)
         assert_eq!(sys.dip_switches, 0x05);
+        assert_eq!(sys.dip_bank_value(0), 0x05);
+        crate::assert_dip_banks_valid(sys.dip_banks(), &[0x05]);
+    }
+
+    #[test]
+    fn set_dip_option_masks_only_its_bits() {
+        let mut sys = make_system();
+        // Lives is option 1 (mask 0x0C); pick "5" (0x0C). Bonus bits preserved.
+        sys.set_dip_option(0, 1, 0x0C);
+        assert_eq!(sys.dip_bank_value(0), 0x0D); // 0x05 with lives bits set
     }
 
     // -----------------------------------------------------------------------

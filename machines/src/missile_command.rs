@@ -1,9 +1,10 @@
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
-    AnalogAxisKind, AudioSource, AxisSign, DefaultBinding, Direction, InputConfigurable,
-    InputControl, InputEvent, InputId, InputKind, KeyId, MachineCore, MouseControl, PadAxis,
-    PadButton, PadControl, Renderable, SaveState,
+    AnalogAxisKind, AudioSource, AxisSign, DefaultBinding, DipApplyTiming, DipChoice, DipOption,
+    DipSwitchBank, DipSwitches, Direction, InputConfigurable, InputControl, InputEvent, InputId,
+    InputKind, KeyId, MachineCore, MouseControl, PadAxis, PadButton, PadControl, Renderable,
+    SaveState,
 };
 use phosphor_core::core::save_state::{self, SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::{AccessKind, AddressSpace16};
@@ -1033,7 +1034,134 @@ impl SaveState for MissileCommandSystem {
     }
 }
 
+// No battery RAM, sub-span profiling, or event tracing; DIP switches are real
+// (see the DipSwitches impl below).
 crate::impl_default_frontend_capabilities!(MissileCommandSystem);
+
+/// DIP switch metadata for Missile Command's R10 pricing DIP (read at 0x4A00).
+/// The separate R8 game-options bank (cities, bonus city, cabinet) is not
+/// emulated as a settable byte. Choice bits and labels follow MAME's `missile`
+/// R10 layout; option defaults OR to the historical 0x00.
+const MISSILE_DIP_BANKS: &[DipSwitchBank] = &[DipSwitchBank {
+    name: "R10 (Pricing)",
+    options: &[
+        DipOption {
+            name: "Coinage",
+            mask: 0x03,
+            apply: DipApplyTiming::Immediate,
+            choices: &[
+                DipChoice {
+                    label: "1 Coin/1 Credit",
+                    value: 0x00,
+                },
+                DipChoice {
+                    label: "2 Coins/1 Credit",
+                    value: 0x01,
+                },
+                DipChoice {
+                    label: "Free Play",
+                    value: 0x02,
+                },
+                DipChoice {
+                    label: "1 Coin/2 Credits",
+                    value: 0x03,
+                },
+            ],
+        },
+        DipOption {
+            name: "Right Coin",
+            mask: 0x0C,
+            apply: DipApplyTiming::Immediate,
+            choices: &[
+                DipChoice {
+                    label: "x1",
+                    value: 0x00,
+                },
+                DipChoice {
+                    label: "x4",
+                    value: 0x04,
+                },
+                DipChoice {
+                    label: "x5",
+                    value: 0x08,
+                },
+                DipChoice {
+                    label: "x6",
+                    value: 0x0C,
+                },
+            ],
+        },
+        DipOption {
+            name: "Center Coin",
+            mask: 0x10,
+            apply: DipApplyTiming::Immediate,
+            choices: &[
+                DipChoice {
+                    label: "x1",
+                    value: 0x00,
+                },
+                DipChoice {
+                    label: "x2",
+                    value: 0x10,
+                },
+            ],
+        },
+        DipOption {
+            name: "Language",
+            mask: 0x60,
+            apply: DipApplyTiming::Immediate,
+            choices: &[
+                DipChoice {
+                    label: "English",
+                    value: 0x00,
+                },
+                DipChoice {
+                    label: "French",
+                    value: 0x20,
+                },
+                DipChoice {
+                    label: "German",
+                    value: 0x40,
+                },
+                DipChoice {
+                    label: "Spanish",
+                    value: 0x60,
+                },
+            ],
+        },
+        DipOption {
+            name: "Unknown",
+            mask: 0x80,
+            apply: DipApplyTiming::Immediate,
+            choices: &[
+                DipChoice {
+                    label: "On",
+                    value: 0x00,
+                },
+                DipChoice {
+                    label: "Off",
+                    value: 0x80,
+                },
+            ],
+        },
+    ],
+}];
+
+impl DipSwitches for MissileCommandSystem {
+    fn dip_banks(&self) -> &'static [DipSwitchBank] {
+        MISSILE_DIP_BANKS
+    }
+
+    fn dip_bank_value(&self, bank: usize) -> u8 {
+        if bank == 0 { self.dip_switches } else { 0 }
+    }
+
+    fn set_dip_bank_value(&mut self, bank: usize, value: u8) {
+        if bank == 0 {
+            self.dip_switches = value;
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Machine registry
@@ -1055,6 +1183,21 @@ inventory::submit! {
 mod tests {
     use super::*;
     use phosphor_core::cpu::CpuStateTrait;
+
+    #[test]
+    fn dip_default_and_metadata() {
+        let sys = MissileCommandSystem::new();
+        assert_eq!(sys.dip_bank_value(0), 0x00);
+        crate::assert_dip_banks_valid(sys.dip_banks(), &[sys.dip_bank_value(0)]);
+    }
+
+    #[test]
+    fn set_dip_option_masks_only_its_bits() {
+        let mut sys = MissileCommandSystem::new();
+        // Language is option 3 (mask 0x60); pick "German" (0x40).
+        sys.set_dip_option(0, 3, 0x40);
+        assert_eq!(sys.dip_bank_value(0), 0x40);
+    }
 
     #[test]
     fn save_load_round_trip() {
