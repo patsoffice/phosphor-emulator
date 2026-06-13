@@ -10,6 +10,7 @@ mod overlay;
 mod profile;
 mod rom_path;
 mod screenshot;
+mod settings_ui;
 mod state;
 mod vector_gl;
 mod video;
@@ -106,7 +107,7 @@ fn main() {
     machine.reset();
     emulator::run(
         machine.as_mut(),
-        &bindings,
+        &mut bindings,
         scale,
         &save_path,
         &screenshot_dir,

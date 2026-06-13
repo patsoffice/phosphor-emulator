@@ -26,6 +26,14 @@ use serde::{Deserialize, Serialize};
 /// (±10000 of the ±32768 axis range, ~30%), expressed as a normalized fraction.
 const STICK_DEADZONE_NORM: f32 = 10_000.0 / 32_768.0;
 
+/// Coarse class of a physical input, used to scope rebinding.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PhysicalCategory {
+    Keyboard,
+    Pad,
+    Mouse,
+}
+
 /// Sign of a gamepad-axis deflection used as a digital direction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AxisDir {
@@ -81,6 +89,36 @@ impl PhysicalInput {
                     MouseAxis::Y => "y",
                 }
             ),
+        }
+    }
+
+    /// Human-readable name for the rebinding UI (e.g. `"Left"`, `"Pad A"`,
+    /// `"Pad LeftX-"`, `"Mouse Left"`, `"Mouse X"`).
+    pub fn display_name(&self) -> String {
+        match self {
+            PhysicalInput::Key(sc) => format!("{sc:?}"),
+            PhysicalInput::PadButton(b) => format!("Pad {b:?}"),
+            PhysicalInput::PadAxis(axis, dir) => format!(
+                "Pad {axis:?}{}",
+                match dir {
+                    AxisDir::Positive => "+",
+                    AxisDir::Negative => "-",
+                }
+            ),
+            PhysicalInput::MouseButtonInput(mb) => format!("Mouse {mb:?}"),
+            PhysicalInput::MouseAxis(axis) => format!("Mouse {axis:?}"),
+        }
+    }
+
+    /// Category used when rebinding: replacing a control's keyboard binding
+    /// leaves its gamepad/mouse bindings intact, and vice versa.
+    fn category(&self) -> PhysicalCategory {
+        match self {
+            PhysicalInput::Key(_) => PhysicalCategory::Keyboard,
+            PhysicalInput::PadButton(_) | PhysicalInput::PadAxis(..) => PhysicalCategory::Pad,
+            PhysicalInput::MouseButtonInput(_) | PhysicalInput::MouseAxis(_) => {
+                PhysicalCategory::Mouse
+            }
         }
     }
 
@@ -283,6 +321,33 @@ impl BindingSet {
                 });
             }
         }
+    }
+
+    /// Physical inputs currently bound to a control (for the rebinding UI).
+    pub fn physical_for(&self, target: InputId) -> impl Iterator<Item = PhysicalInput> + '_ {
+        self.bindings
+            .iter()
+            .filter(move |b| b.target == target)
+            .map(|b| b.physical)
+    }
+
+    /// Rebind a control to a captured physical input, replacing only the
+    /// control's existing bindings of the same category (keyboard / pad /
+    /// mouse), so rebinding a key keeps the gamepad binding and vice versa.
+    pub fn rebind(&mut self, target: InputId, physical: PhysicalInput) {
+        let category = physical.category();
+        self.bindings
+            .retain(|b| b.target != target || b.physical.category() != category);
+        let deadzone = match physical {
+            PhysicalInput::PadAxis(..) => STICK_DEADZONE_NORM,
+            _ => 0.0,
+        };
+        self.bindings.push(InputBinding {
+            physical,
+            target,
+            scale: 1.0,
+            deadzone,
+        });
     }
 }
 

@@ -7,12 +7,49 @@ use sdl2::keyboard::Scancode;
 
 use crate::debug_ui::{self, DebugState, RunMode};
 use crate::input::{AxisDir, BindingSet, MouseAxis, PhysicalInput};
+use crate::profile::ProfileState;
+use crate::settings_ui::{self, SettingsState};
 use crate::video::Video;
+
+/// Combined width of all active right-side panels, used when resizing the window.
+fn panels_width(debug: &DebugState, profile: &ProfileState, settings: &SettingsState) -> u32 {
+    let dw = if debug.active {
+        debug.debug_panel_width()
+    } else {
+        0
+    };
+    let pw = if profile.active {
+        crate::profile::PANEL_WIDTH
+    } else {
+        0
+    };
+    let sw = if settings.active {
+        settings_ui::PANEL_WIDTH
+    } else {
+        0
+    };
+    dw + pw + sw
+}
+
+/// Translate an SDL event into a physical input for rebind capture, if it is a
+/// bindable press (key, gamepad button, or mouse button).
+fn capture_physical(event: &Event) -> Option<PhysicalInput> {
+    match event {
+        Event::KeyDown {
+            scancode: Some(sc), ..
+        } => Some(PhysicalInput::Key(*sc)),
+        Event::ControllerButtonDown { button, .. } => Some(PhysicalInput::PadButton(*button)),
+        Event::MouseButtonDown { mouse_btn, .. } => {
+            Some(PhysicalInput::MouseButtonInput(*mouse_btn))
+        }
+        _ => None,
+    }
+}
 
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     machine: &mut dyn FrontendMachine,
-    bindings: &BindingSet,
+    bindings: &mut BindingSet,
     scale: u32,
     save_path: &Path,
     screenshot_dir: &Path,
@@ -122,6 +159,11 @@ pub fn run(
     // Profiler state (F8 to toggle)
     let mut profile_state = crate::profile::ProfileState::new();
 
+    // Input settings panel (F12 to toggle); only meaningful for machines with
+    // typed controls.
+    let mut settings_state = SettingsState::default();
+    let has_typed_controls = !machine.input_controls().is_empty();
+
     // Mouse grab for trackball games (F11 to toggle)
     let has_analog = !machine.analog_map().is_empty()
         || machine
@@ -150,18 +192,9 @@ pub fn run(
     }
     // Resize window if any side panels are active at startup
     {
-        let dw = if debug_state.active {
-            debug_state.debug_panel_width()
-        } else {
-            0
-        };
-        let pw = if profile_state.active {
-            crate::profile::PANEL_WIDTH
-        } else {
-            0
-        };
-        if dw + pw > 0 {
-            video.resize_window(width * scale + dw + pw, height * scale);
+        let panels = panels_width(&debug_state, &profile_state, &settings_state);
+        if panels > 0 {
+            video.resize_window(width * scale + panels, height * scale);
         }
     }
 
@@ -172,6 +205,27 @@ pub fn run(
         for event in event_pump.poll_iter() {
             // Forward every event to egui first
             video.process_event(event.clone());
+
+            // Rebind capture: while awaiting an input for a control, consume the
+            // next bindable press (Esc cancels) instead of routing it to the game.
+            if let Some(target) = settings_state.capturing {
+                match &event {
+                    Event::KeyDown {
+                        scancode: Some(Scancode::Escape),
+                        ..
+                    } => {
+                        settings_state.capturing = None;
+                        continue;
+                    }
+                    _ => {
+                        if let Some(physical) = capture_physical(&event) {
+                            bindings.rebind(target, physical);
+                            settings_state.capturing = None;
+                            continue;
+                        }
+                    }
+                }
+            }
 
             match event {
                 Event::Quit { .. } => break 'main,
@@ -188,22 +242,18 @@ pub fn run(
                     ..
                 } if has_debug => {
                     debug_state.active = !debug_state.active;
-                    let pw = if profile_state.active {
-                        crate::profile::PANEL_WIDTH
-                    } else {
-                        0
-                    };
                     if debug_state.active {
                         if let Some(bus) = machine.debug_bus() {
                             debug_state.refresh(bus);
                         }
-                        let dw = debug_state.debug_panel_width();
-                        video.resize_window(width * scale + dw + pw, height * scale);
                         debug_state.run_mode = RunMode::Paused;
                     } else {
-                        video.resize_window(width * scale + pw, height * scale);
                         debug_state.run_mode = RunMode::Running;
                     }
+                    video.resize_window(
+                        width * scale + panels_width(&debug_state, &profile_state, &settings_state),
+                        height * scale,
+                    );
                 }
 
                 // F2: Step instruction (debug + paused)
@@ -276,23 +326,31 @@ pub fn run(
                     repeat: false,
                     ..
                 } => {
-                    let dw = if debug_state.active {
-                        debug_state.debug_panel_width()
-                    } else {
-                        0
-                    };
                     if profile_state.active {
                         machine.set_profiling(false);
                         profile_state.stop();
-                        video.resize_window(width * scale + dw, height * scale);
                     } else {
                         machine.set_profiling(true);
                         profile_state.start();
-                        video.resize_window(
-                            width * scale + dw + crate::profile::PANEL_WIDTH,
-                            height * scale,
-                        );
                     }
+                    video.resize_window(
+                        width * scale + panels_width(&debug_state, &profile_state, &settings_state),
+                        height * scale,
+                    );
+                }
+
+                // F12: Toggle input settings panel (machines with typed controls)
+                Event::KeyDown {
+                    scancode: Some(Scancode::F12),
+                    repeat: false,
+                    ..
+                } if has_typed_controls => {
+                    settings_state.active = !settings_state.active;
+                    settings_state.capturing = None;
+                    video.resize_window(
+                        width * scale + panels_width(&debug_state, &profile_state, &settings_state),
+                        height * scale,
+                    );
                 }
 
                 Event::KeyDown {
@@ -485,6 +543,7 @@ pub fn run(
                 && let Some(lines) = machine.vector_display_list()
                 && !debug_state.active
                 && !profile_state.active
+                && !settings_state.active
             {
                 let ds = machine.display_size();
                 let rot = match machine.screen_rotation() {
@@ -540,13 +599,25 @@ pub fn run(
 
                 video.update_game_texture(&framebuffer);
 
-                if debug_state.active || profile_state.active {
+                if debug_state.active || profile_state.active || settings_state.active {
                     let bus_ref = machine.debug_bus();
                     let profiling = profile_state.active;
+                    let show_settings = settings_state.active;
+                    let controls = machine.input_controls();
+                    let bindings_ref: &BindingSet = bindings;
                     video.present_with_debug(|ctx, tex_id, native_size| {
                         // Profiler side panel (outermost right, drawn first)
                         if profiling {
                             crate::profile::draw_profile_panel(ctx, &profile_state, frame_duration);
+                        }
+                        // Input settings side panel
+                        if show_settings {
+                            settings_ui::draw_input_panel(
+                                ctx,
+                                controls,
+                                bindings_ref,
+                                &mut settings_state,
+                            );
                         }
                         if debug_state.active {
                             // Debug panels + game central panel
@@ -562,6 +633,12 @@ pub fn run(
                             draw_game_panel(ctx, tex_id, native_size);
                         }
                     });
+
+                    // Apply a requested reset-to-defaults after the UI frame.
+                    if settings_state.reset_requested {
+                        *bindings = crate::input::build_bindings(&*machine);
+                        settings_state.reset_requested = false;
+                    }
                 } else {
                     video.present_game_only();
                 }
