@@ -68,8 +68,14 @@ pub fn default_key_map(buttons: &[InputButton]) -> KeyMap {
             "Fire Center" => Some(Scancode::X),
             "Fire Right" => Some(Scancode::C),
 
+            // Food Fight
+            "P1 Throw" => Some(Scancode::Space),
+            "P2 Throw" => Some(Scancode::RShift),
+            "Self-Test" => Some(Scancode::T),
+
             // System
             "Coin" => Some(Scancode::Num5),
+            "Service" => Some(Scancode::Num6),
 
             // Substring fallback for combo-named buttons
             name if name.contains("P1 Start") => Some(Scancode::Num1),

@@ -107,6 +107,7 @@ Complete system implementations that wire core components together:
 - **DkongJrSystem** — Donkey Kong Junior on shared TKG-04 board (24KB ROM, gfx bank, different sound I/O)
 - **JoustSystem** — Williams arcade board (M6809 + 48KB video RAM + two PIAs + blitter + CMOS + 12KB ROM)
 - **CrystalCastlesSystem** — Atari arcade (M6502 + 2×POKEY + bitmap video + sprites + trackball)
+- **FoodFightSystem** — Atari arcade (MC68000 + 3×POKEY + tilemap/sprite video + analog sticks + X2212 NVRAM)
 - **MissileCommandSystem** — Atari raster arcade (M6502 + POKEY + bitmap video)
 - **PacmanSystem** — Pac-Man on shared Namco Pac board (Z80 + WSG + tile/sprite video)
 - **MsPacmanSystem** — Ms. Pac-Man on shared Namco Pac board (auxiliary decode latch + ROM encryption)
