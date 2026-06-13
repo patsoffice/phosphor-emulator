@@ -8,8 +8,9 @@ use std::time::Instant;
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
-    FrontendMachine, InputButton, InputReceiver, MachineCore, Nvram, Profilable, ProfileSpan,
-    SaveState,
+    DefaultBinding, Direction, FrontendMachine, InputButton, InputConfigurable, InputControl,
+    InputEvent, InputId, InputKind, InputReceiver, KeyId, MachineCore, Nvram, Profilable,
+    ProfileSpan, SaveState,
 };
 use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
@@ -178,6 +179,91 @@ const QBERT_INPUT_MAP: &[InputButton] = &[
     InputButton {
         id: INPUT_DOWN,
         name: "P1 Down",
+    },
+];
+
+/// Typed logical controls. `InputId`s reuse the `INPUT_*` numbering; default
+/// bindings mirror the legacy name-matched defaults.
+const QBERT_CONTROLS: &[InputControl] = &[
+    InputControl {
+        id: InputId(INPUT_COIN1 as u16),
+        stable_name: "coin1",
+        label: "Coin 1",
+        kind: InputKind::Coin,
+        player: None,
+        default_bindings: crate::input_defaults::COIN,
+    },
+    InputControl {
+        id: InputId(INPUT_COIN2 as u16),
+        stable_name: "coin2",
+        label: "Coin 2",
+        kind: InputKind::Coin,
+        player: None,
+        default_bindings: &[DefaultBinding::Key(KeyId::Num5)],
+    },
+    InputControl {
+        id: InputId(INPUT_START1 as u16),
+        stable_name: "p1_start",
+        label: "P1 Start",
+        kind: InputKind::Start,
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_START,
+    },
+    InputControl {
+        id: InputId(INPUT_START2 as u16),
+        stable_name: "p2_start",
+        label: "P2 Start",
+        kind: InputKind::Start,
+        player: Some(2),
+        default_bindings: crate::input_defaults::P2_START,
+    },
+    InputControl {
+        id: InputId(INPUT_SERVICE as u16),
+        stable_name: "service",
+        label: "Service",
+        kind: InputKind::Service,
+        player: None,
+        default_bindings: crate::input_defaults::SERVICE,
+    },
+    InputControl {
+        id: InputId(INPUT_RIGHT as u16),
+        stable_name: "p1_right",
+        label: "P1 Right",
+        kind: InputKind::DigitalDirection {
+            direction: Direction::Right,
+        },
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_RIGHT,
+    },
+    InputControl {
+        id: InputId(INPUT_LEFT as u16),
+        stable_name: "p1_left",
+        label: "P1 Left",
+        kind: InputKind::DigitalDirection {
+            direction: Direction::Left,
+        },
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_LEFT,
+    },
+    InputControl {
+        id: InputId(INPUT_UP as u16),
+        stable_name: "p1_up",
+        label: "P1 Up",
+        kind: InputKind::DigitalDirection {
+            direction: Direction::Up,
+        },
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_UP,
+    },
+    InputControl {
+        id: InputId(INPUT_DOWN as u16),
+        stable_name: "p1_down",
+        label: "P1 Down",
+        kind: InputKind::DigitalDirection {
+            direction: Direction::Down,
+        },
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_DOWN,
     },
 ];
 
@@ -356,43 +442,41 @@ crate::impl_board_delegation!(QbertSystem, board, gottlieb::TIMING, bus_addr: u3
 
 impl InputReceiver for QbertSystem {
     fn set_input(&mut self, button: u8, pressed: bool) {
-        match button {
-            // IN1: start/coin (active-high, bits 0-3; service active-low, bit 6)
-            INPUT_START1 => {
-                set_bit_active_high(&mut self.board.input_ports[0], 0, pressed);
-            }
-            INPUT_START2 => {
-                set_bit_active_high(&mut self.board.input_ports[0], 1, pressed);
-            }
-            INPUT_COIN1 => {
-                set_bit_active_high(&mut self.board.input_ports[0], 2, pressed);
-            }
-            INPUT_COIN2 => {
-                set_bit_active_high(&mut self.board.input_ports[0], 3, pressed);
-            }
-            INPUT_SERVICE => {
-                // Active-LOW: clear on press, set on release
-                crate::set_bit_active_low(&mut self.board.input_ports[0], 6, pressed);
-            }
-            // IN4: joystick (active-high, bits 0-3)
-            INPUT_RIGHT => {
-                set_bit_active_high(&mut self.board.input_ports[3], 0, pressed);
-            }
-            INPUT_LEFT => {
-                set_bit_active_high(&mut self.board.input_ports[3], 1, pressed);
-            }
-            INPUT_UP => {
-                set_bit_active_high(&mut self.board.input_ports[3], 2, pressed);
-            }
-            INPUT_DOWN => {
-                set_bit_active_high(&mut self.board.input_ports[3], 3, pressed);
-            }
-            _ => {}
-        }
+        self.handle_input(InputEvent::Button {
+            id: InputId(button as u16),
+            pressed,
+        });
     }
 
     fn input_map(&self) -> &[InputButton] {
         QBERT_INPUT_MAP
+    }
+}
+
+impl InputConfigurable for QbertSystem {
+    fn input_controls(&self) -> &'static [InputControl] {
+        QBERT_CONTROLS
+    }
+
+    fn handle_input(&mut self, event: InputEvent) {
+        let InputEvent::Button { id, pressed } = event else {
+            return;
+        };
+        match id.0 as u8 {
+            // IN1: start/coin (active-high, bits 0-3; service active-low, bit 6)
+            INPUT_START1 => set_bit_active_high(&mut self.board.input_ports[0], 0, pressed),
+            INPUT_START2 => set_bit_active_high(&mut self.board.input_ports[0], 1, pressed),
+            INPUT_COIN1 => set_bit_active_high(&mut self.board.input_ports[0], 2, pressed),
+            INPUT_COIN2 => set_bit_active_high(&mut self.board.input_ports[0], 3, pressed),
+            // Active-LOW: clear on press, set on release
+            INPUT_SERVICE => crate::set_bit_active_low(&mut self.board.input_ports[0], 6, pressed),
+            // IN4: joystick (active-high, bits 0-3)
+            INPUT_RIGHT => set_bit_active_high(&mut self.board.input_ports[3], 0, pressed),
+            INPUT_LEFT => set_bit_active_high(&mut self.board.input_ports[3], 1, pressed),
+            INPUT_UP => set_bit_active_high(&mut self.board.input_ports[3], 2, pressed),
+            INPUT_DOWN => set_bit_active_high(&mut self.board.input_ports[3], 3, pressed),
+            _ => {}
+        }
     }
 }
 
@@ -452,7 +536,6 @@ impl Nvram for QbertSystem {
     }
 }
 
-impl phosphor_core::core::machine::InputConfigurable for QbertSystem {}
 impl Profilable for QbertSystem {
     fn set_profiling(&mut self, enabled: bool) {
         self.board.profiling = enabled;
