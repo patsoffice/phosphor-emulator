@@ -265,9 +265,9 @@ core trait and the full frontend bundle.
 
 ### Deferred Capabilities
 
-DIP switch configuration and input remapping should be added after the main
-machine capability refactor. They are important, but they are larger semantic
-changes than splitting the current trait.
+DIP switch configuration and input remapping were deferred past the main
+capability refactor as larger semantic changes. **Input configuration is now
+implemented** (see the status note below); **DIP switches remain to be done.**
 
 #### DIP Switches
 
@@ -310,6 +310,32 @@ selected bits into their board-specific `dip_switches`, `dsw1`, `dsw2`, or
 input-port state.
 
 #### Input Configuration
+
+> **Status: implemented.** The `InputConfigurable` capability replaced the
+> name-matched `InputReceiver` model, which (along with `InputButton`,
+> `AnalogInput`, and the frontend's display-name key matching) has been deleted.
+> All machines expose typed `input_controls()` and consume `InputEvent`s via
+> `handle_input()`; the frontend builds a `BindingSet` from each control's
+> `default_bindings` and persists per-machine overrides (rebindable via the F12
+> settings panel). The shape below is the original proposal; the as-built
+> design differs in a few details:
+>
+> - `input_controls()` returns `&'static [InputControl]` (const tables, not a
+>   borrowed slice). `InputId` is `InputId(pub u16)`.
+> - `InputEvent` is `Button` / `Absolute` / `Relative` (no `Analog`); the
+>   bridge-era `Absolute` is currently unused by machines.
+> - `InputKind::DigitalDirection { direction }` carries only a `Direction`
+>   (the redundant `DigitalAxis` field was dropped); `AnalogAxisKind` is `X`/`Y`.
+> - Core stays SDL-free: `DefaultBinding` is `Key(KeyId)` / `Pad(PadControl)` /
+>   `Mouse(MouseControl)` with portable enums; the frontend
+>   ([frontend/src/input.rs](../../frontend/src/input.rs)) owns the SDL
+>   `PhysicalInput` / `InputBinding` / `BindingSet` types and translates the
+>   portable descriptors to SDL scancodes/buttons/axes.
+> - Shared default bindings live in
+>   [machines/src/input_defaults.rs](../../machines/src/input_defaults.rs) so
+>   every machine's defaults come from one place.
+> - Trackball / spinner / analog-stick controls use `InputId`s distinct from the
+>   digital ids (one `InputId` namespace, unlike the old split button/analog ids).
 
 The current input model is intentionally not expanded in the main refactor,
 but it should be replaced afterward. The existing `InputButton { id, name }`
@@ -505,8 +531,10 @@ trait impls, not inside a widening macro option language.
 After the core split lands and the frontend uses `FrontendMachine`, add the
 larger semantic capabilities:
 
-1. `DipSwitches` for structured DIP switch metadata and settings.
+1. `DipSwitches` for structured DIP switch metadata and settings. *(Not yet
+   implemented.)*
 2. `InputConfigurable` for stable logical controls and persistent bindings.
+   **Implemented** — see the Input Configuration status note above.
 
 These should not block the main refactor because they require frontend UI,
 config-file, and per-machine metadata work.

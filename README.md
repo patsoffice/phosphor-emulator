@@ -88,7 +88,7 @@ Contains all reusable components — zero external dependencies:
 
 - CPU implementations (M6800, M6809, M6502, Z80, I8035, I8088, M68000)
 - Bus abstractions (Bus trait, BusMasterComponent)
-- Machine traits — `MachineCore` (frame execution contract) plus capability traits (`Renderable`, `AudioSource`, `InputReceiver`, `MachineDebug`, `SaveState`, `Nvram`, `Profilable`), bundled into the object-safe `FrontendMachine` for frontend use
+- Machine traits — `MachineCore` (frame execution contract) plus capability traits (`Renderable`, `AudioSource`, `InputConfigurable`, `MachineDebug`, `SaveState`, `Nvram`, `Profilable`), bundled into the object-safe `FrontendMachine` for frontend use
 - Device trait (common interface for all peripherals: reset, read/write, tick)
 - Debug traits (Debuggable, DebugCpu, BusDebug) for interactive inspection and device register writes
 - Address spaces — `AddressSpace16` (page-table dispatch for 16-bit boards) and `AddressSpace32` (sparse range decode for 68000-class machines), sharing backing memory, side-effect-free debug reads, watchpoints, region introspection, and bank switching
@@ -130,7 +130,7 @@ SDL2 + egui windowed frontend — external dependencies: SDL2, zip, egui:
 - **ROM path resolution** — loads from MAME ZIP files, rompath directories, or extracted loose files
 - SDL2 window with GPU-scaled texture rendering (VSync frame timing)
 - **Debug panel** (F1 or `--debug`) — egui side panel showing all CPU and device registers, step/cycle/continue controls
-- Keyboard and game controller input mapping built automatically from `InputReceiver::input_map()`
+- Keyboard, game controller, and mouse input bound from each machine's typed `InputConfigurable` controls; rebindable in the settings panel (F12) and persisted per machine
 - Quick save/load (F6/F7), debug overlay with FPS and machine stats (F10), mouse grab for trackball games (F11)
 
 ### CPU Validation Crate (`phosphor-cpu-validation`)
