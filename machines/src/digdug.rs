@@ -2,7 +2,8 @@ use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::debug::{BusDebug, DebugCpu, Debuggable};
 use phosphor_core::core::machine::{
-    AudioSource, MachineCore, MachineDebug, Nvram, Profilable, Renderable, SaveState,
+    AudioSource, DipApplyTiming, DipChoice, DipOption, DipSwitchBank, DipSwitches, MachineCore,
+    MachineDebug, Nvram, Profilable, Renderable, SaveState,
 };
 use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
@@ -1171,7 +1172,253 @@ impl phosphor_core::core::machine::InputConfigurable for DigDugSystem {
     }
 }
 impl Profilable for DigDugSystem {}
-impl phosphor_core::core::machine::DipSwitches for DigDugSystem {}
+/// DIP switch metadata for Dig Dug's two switch banks (DSWA at board byte
+/// `dswa`, DSWB at `dswb`). Choice bit patterns and labels follow MAME's
+/// `digdug` layout; each option's factory default OR's together to the
+/// historical `0x99` (DSWA) and `0x24` (DSWB) that [`DigDugSystem::reset`]
+/// initializes. The Bonus Life thresholds shown are those MAME displays for
+/// the default (non-5) Lives setting.
+const DIGDUG_DIP_BANKS: &[DipSwitchBank] = &[
+    DipSwitchBank {
+        name: "DSWA",
+        options: &[
+            DipOption {
+                name: "Coin B",
+                mask: 0x07,
+                apply: DipApplyTiming::Immediate,
+                choices: &[
+                    DipChoice {
+                        label: "1 Coin/7 Credits",
+                        value: 0x00,
+                    },
+                    DipChoice {
+                        label: "1 Coin/1 Credit",
+                        value: 0x01,
+                    },
+                    DipChoice {
+                        label: "1 Coin/3 Credits",
+                        value: 0x02,
+                    },
+                    DipChoice {
+                        label: "2 Coins/1 Credit",
+                        value: 0x03,
+                    },
+                    DipChoice {
+                        label: "1 Coin/6 Credits",
+                        value: 0x04,
+                    },
+                    DipChoice {
+                        label: "2 Coins/3 Credits",
+                        value: 0x05,
+                    },
+                    DipChoice {
+                        label: "1 Coin/2 Credits",
+                        value: 0x06,
+                    },
+                    DipChoice {
+                        label: "3 Coins/1 Credit",
+                        value: 0x07,
+                    },
+                ],
+            },
+            DipOption {
+                name: "Bonus Life",
+                mask: 0x38,
+                apply: DipApplyTiming::Immediate,
+                choices: &[
+                    DipChoice {
+                        label: "None",
+                        value: 0x00,
+                    },
+                    DipChoice {
+                        label: "20K, 70K, Every 70K",
+                        value: 0x08,
+                    },
+                    DipChoice {
+                        label: "10K, 50K, Every 50K",
+                        value: 0x10,
+                    },
+                    DipChoice {
+                        label: "20K and 60K Only",
+                        value: 0x18,
+                    },
+                    DipChoice {
+                        label: "10K, 40K, Every 40K",
+                        value: 0x20,
+                    },
+                    DipChoice {
+                        label: "10K and 40K Only",
+                        value: 0x28,
+                    },
+                    DipChoice {
+                        label: "20K, 60K, Every 60K",
+                        value: 0x30,
+                    },
+                    DipChoice {
+                        label: "10K Only",
+                        value: 0x38,
+                    },
+                ],
+            },
+            DipOption {
+                name: "Lives",
+                mask: 0xC0,
+                apply: DipApplyTiming::Immediate,
+                choices: &[
+                    DipChoice {
+                        label: "1",
+                        value: 0x00,
+                    },
+                    DipChoice {
+                        label: "2",
+                        value: 0x40,
+                    },
+                    DipChoice {
+                        label: "3",
+                        value: 0x80,
+                    },
+                    DipChoice {
+                        label: "5",
+                        value: 0xC0,
+                    },
+                ],
+            },
+        ],
+    },
+    DipSwitchBank {
+        name: "DSWB",
+        options: &[
+            DipOption {
+                name: "Coin A",
+                mask: 0xC0,
+                apply: DipApplyTiming::Immediate,
+                choices: &[
+                    DipChoice {
+                        label: "1 Coin/1 Credit",
+                        value: 0x00,
+                    },
+                    DipChoice {
+                        label: "2 Coins/1 Credit",
+                        value: 0x40,
+                    },
+                    DipChoice {
+                        label: "1 Coin/2 Credits",
+                        value: 0x80,
+                    },
+                    DipChoice {
+                        label: "2 Coins/3 Credits",
+                        value: 0xC0,
+                    },
+                ],
+            },
+            DipOption {
+                name: "Freeze",
+                mask: 0x20,
+                apply: DipApplyTiming::Immediate,
+                choices: &[
+                    DipChoice {
+                        label: "Off",
+                        value: 0x20,
+                    },
+                    DipChoice {
+                        label: "On",
+                        value: 0x00,
+                    },
+                ],
+            },
+            DipOption {
+                name: "Demo Sounds",
+                mask: 0x10,
+                apply: DipApplyTiming::Immediate,
+                choices: &[
+                    DipChoice {
+                        label: "Off",
+                        value: 0x10,
+                    },
+                    DipChoice {
+                        label: "On",
+                        value: 0x00,
+                    },
+                ],
+            },
+            DipOption {
+                name: "Allow Continue",
+                mask: 0x08,
+                apply: DipApplyTiming::Immediate,
+                choices: &[
+                    DipChoice {
+                        label: "Yes",
+                        value: 0x00,
+                    },
+                    DipChoice {
+                        label: "No",
+                        value: 0x08,
+                    },
+                ],
+            },
+            DipOption {
+                name: "Cabinet",
+                mask: 0x04,
+                apply: DipApplyTiming::Immediate,
+                choices: &[
+                    DipChoice {
+                        label: "Upright",
+                        value: 0x04,
+                    },
+                    DipChoice {
+                        label: "Cocktail",
+                        value: 0x00,
+                    },
+                ],
+            },
+            DipOption {
+                name: "Difficulty",
+                mask: 0x03,
+                apply: DipApplyTiming::Immediate,
+                choices: &[
+                    DipChoice {
+                        label: "Easy",
+                        value: 0x00,
+                    },
+                    DipChoice {
+                        label: "Hard",
+                        value: 0x01,
+                    },
+                    DipChoice {
+                        label: "Medium",
+                        value: 0x02,
+                    },
+                    DipChoice {
+                        label: "Hardest",
+                        value: 0x03,
+                    },
+                ],
+            },
+        ],
+    },
+];
+
+impl DipSwitches for DigDugSystem {
+    fn dip_banks(&self) -> &'static [DipSwitchBank] {
+        DIGDUG_DIP_BANKS
+    }
+
+    fn dip_bank_value(&self, bank: usize) -> u8 {
+        match bank {
+            0 => self.board.dswa,
+            1 => self.board.dswb,
+            _ => 0,
+        }
+    }
+
+    fn set_dip_bank_value(&mut self, bank: usize, value: u8) {
+        match bank {
+            0 => self.board.dswa = value,
+            1 => self.board.dswb = value,
+            _ => {}
+        }
+    }
+}
 crate::impl_board_debug_trace!(DigDugSystem, board);
 
 // ---------------------------------------------------------------------------
@@ -1205,4 +1452,89 @@ inventory::submit! {
         &["digdug", "digdug1", "digdugat", "digdugat1"],
         create_machine,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dip_defaults_match_historical_bytes() {
+        let sys = DigDugSystem::new();
+        // DSWA: 1C/1C coin B, 20K/60K bonus, 3 lives. DSWB: freeze off,
+        // upright cabinet, everything else at factory default.
+        assert_eq!(sys.dip_bank_value(0), 0x99);
+        assert_eq!(sys.dip_bank_value(1), 0x24);
+        // Two banks; out-of-range reads 0.
+        assert_eq!(sys.dip_banks().len(), 2);
+        assert_eq!(sys.dip_bank_value(2), 0);
+    }
+
+    #[test]
+    fn dip_metadata_is_well_formed() {
+        for bank in DigDugSystem::new().dip_banks() {
+            let mut covered = 0u8;
+            for opt in bank.options {
+                assert_eq!(covered & opt.mask, 0, "overlapping masks in {}", bank.name);
+                covered |= opt.mask;
+                for choice in opt.choices {
+                    assert_eq!(
+                        choice.value & !opt.mask,
+                        0,
+                        "choice {} escapes mask of {}",
+                        choice.label,
+                        opt.name
+                    );
+                }
+            }
+            // Both Dig Dug banks fully populate their byte.
+            assert_eq!(covered, 0xFF, "{} leaves bits unmapped", bank.name);
+        }
+    }
+
+    #[test]
+    fn dip_defaults_decompose_into_known_choices() {
+        let sys = DigDugSystem::new();
+        for (bank_idx, bank) in sys.dip_banks().iter().enumerate() {
+            let default = sys.dip_bank_value(bank_idx);
+            for opt in bank.options {
+                let selected = default & opt.mask;
+                assert!(
+                    opt.choices.iter().any(|c| c.value == selected),
+                    "{} default 0x{default:02X} has no choice for {} (slice 0x{selected:02X})",
+                    bank.name,
+                    opt.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn set_dip_option_mutates_only_masked_bits() {
+        let mut sys = DigDugSystem::new();
+        // DSWA Lives is option index 2 (mask 0xC0); pick "5" (0xC0).
+        sys.set_dip_option(0, 2, 0xC0);
+        // 0x99 with bits 6-7 set -> 0xD9; lower bits unchanged.
+        assert_eq!(sys.dip_bank_value(0), 0xD9);
+        // DSWB untouched by a DSWA edit.
+        assert_eq!(sys.dip_bank_value(1), 0x24);
+
+        // Stray bits outside the mask are filtered out.
+        sys.set_dip_option(0, 2, 0xFF);
+        assert_eq!(sys.dip_bank_value(0) & 0xC0, 0xC0);
+        assert_eq!(sys.dip_bank_value(0) & !0xC0, 0x19);
+    }
+
+    #[test]
+    fn dip_bank_values_round_trip() {
+        let mut sys = DigDugSystem::new();
+        sys.set_dip_bank_value(0, 0x3C);
+        sys.set_dip_bank_value(1, 0xC3);
+        assert_eq!(sys.dip_bank_value(0), 0x3C);
+        assert_eq!(sys.dip_bank_value(1), 0xC3);
+        // Out-of-range writes are ignored.
+        sys.set_dip_bank_value(5, 0xFF);
+        assert_eq!(sys.dip_bank_value(0), 0x3C);
+        assert_eq!(sys.dip_bank_value(1), 0xC3);
+    }
 }
