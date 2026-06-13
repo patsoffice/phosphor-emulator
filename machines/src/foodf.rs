@@ -977,6 +977,7 @@ impl Nvram for FoodFightSystem {
     }
 }
 
+impl phosphor_core::core::machine::InputConfigurable for FoodFightSystem {}
 impl Profilable for FoodFightSystem {}
 impl phosphor_core::core::debug_trace::DebugTrace for FoodFightSystem {}
 

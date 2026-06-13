@@ -1052,6 +1052,7 @@ impl SaveState for GalagaSystem {
 }
 
 impl phosphor_core::core::machine::Nvram for GalagaSystem {}
+impl phosphor_core::core::machine::InputConfigurable for GalagaSystem {}
 impl phosphor_core::core::machine::Profilable for GalagaSystem {}
 crate::impl_board_debug_trace!(GalagaSystem, board);
 

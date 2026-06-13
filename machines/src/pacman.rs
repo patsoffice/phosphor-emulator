@@ -230,6 +230,7 @@ impl SaveState for PacmanSystem {
 }
 
 impl phosphor_core::core::machine::Nvram for PacmanSystem {}
+impl phosphor_core::core::machine::InputConfigurable for PacmanSystem {}
 impl phosphor_core::core::machine::Profilable for PacmanSystem {}
 crate::impl_board_debug_trace!(PacmanSystem, board);
 

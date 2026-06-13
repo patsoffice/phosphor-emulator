@@ -1032,6 +1032,7 @@ impl Nvram for GridleeSystem {
     }
 }
 
+impl phosphor_core::core::machine::InputConfigurable for GridleeSystem {}
 impl Profilable for GridleeSystem {}
 impl phosphor_core::core::debug_trace::DebugTrace for GridleeSystem {}
 

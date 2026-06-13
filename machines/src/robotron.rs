@@ -360,6 +360,7 @@ impl Nvram for RobotronSystem {
     }
 }
 
+impl phosphor_core::core::machine::InputConfigurable for RobotronSystem {}
 impl Profilable for RobotronSystem {}
 crate::impl_board_debug_trace!(RobotronSystem, board);
 

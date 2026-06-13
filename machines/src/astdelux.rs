@@ -448,6 +448,7 @@ impl Nvram for AsteroidsDeluxeSystem {
     }
 }
 
+impl phosphor_core::core::machine::InputConfigurable for AsteroidsDeluxeSystem {}
 impl Profilable for AsteroidsDeluxeSystem {}
 crate::impl_board_debug_trace!(AsteroidsDeluxeSystem, board);
 

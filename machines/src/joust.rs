@@ -359,6 +359,7 @@ impl Nvram for JoustSystem {
     }
 }
 
+impl phosphor_core::core::machine::InputConfigurable for JoustSystem {}
 impl Profilable for JoustSystem {}
 crate::impl_board_debug_trace!(JoustSystem, board);
 

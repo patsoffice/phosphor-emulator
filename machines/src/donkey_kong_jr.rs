@@ -530,6 +530,7 @@ impl SaveState for DkongJrSystem {
 }
 
 impl phosphor_core::core::machine::Nvram for DkongJrSystem {}
+impl phosphor_core::core::machine::InputConfigurable for DkongJrSystem {}
 impl phosphor_core::core::machine::Profilable for DkongJrSystem {}
 crate::impl_board_debug_trace!(DkongJrSystem, board);
 

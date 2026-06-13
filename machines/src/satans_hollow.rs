@@ -420,6 +420,7 @@ impl Nvram for SatansHollowSystem {
     }
 }
 
+impl phosphor_core::core::machine::InputConfigurable for SatansHollowSystem {}
 impl Profilable for SatansHollowSystem {}
 impl phosphor_core::core::debug_trace::DebugTrace for SatansHollowSystem {}
 

@@ -1169,6 +1169,7 @@ impl Nvram for DigDugSystem {
     }
 }
 
+impl phosphor_core::core::machine::InputConfigurable for DigDugSystem {}
 impl Profilable for DigDugSystem {}
 crate::impl_board_debug_trace!(DigDugSystem, board);
 

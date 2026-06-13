@@ -452,6 +452,7 @@ impl Nvram for QbertSystem {
     }
 }
 
+impl phosphor_core::core::machine::InputConfigurable for QbertSystem {}
 impl Profilable for QbertSystem {
     fn set_profiling(&mut self, enabled: bool) {
         self.board.profiling = enabled;
