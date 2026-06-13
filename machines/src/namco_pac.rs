@@ -1,5 +1,5 @@
 use phosphor_core::core::debug_trace::{DebugEvent, DebugEventKind, DebugTraceBuffer};
-use phosphor_core::core::machine::InputButton;
+use phosphor_core::core::machine::{Direction, InputButton, InputControl, InputId, InputKind};
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::watchpoint::DebugAccessSource;
 use phosphor_core::core::{AccessKind, AddressSpace16};
@@ -85,6 +85,116 @@ pub const NAMCO_PAC_INPUT_MAP: &[InputButton] = &[
     InputButton {
         id: INPUT_P2_DOWN,
         name: "P2 Down",
+    },
+];
+
+/// Typed logical controls shared by Pac-Man and Ms. Pac-Man. `InputId`s reuse
+/// the `INPUT_*` numbering so `handle_input` and the legacy `set_input` shim
+/// share one id space.
+pub const NAMCO_PAC_CONTROLS: &[InputControl] = &[
+    InputControl {
+        id: InputId(INPUT_P1_UP as u16),
+        stable_name: "p1_up",
+        label: "P1 Up",
+        kind: InputKind::DigitalDirection {
+            direction: Direction::Up,
+        },
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_UP,
+    },
+    InputControl {
+        id: InputId(INPUT_P1_LEFT as u16),
+        stable_name: "p1_left",
+        label: "P1 Left",
+        kind: InputKind::DigitalDirection {
+            direction: Direction::Left,
+        },
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_LEFT,
+    },
+    InputControl {
+        id: InputId(INPUT_P1_RIGHT as u16),
+        stable_name: "p1_right",
+        label: "P1 Right",
+        kind: InputKind::DigitalDirection {
+            direction: Direction::Right,
+        },
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_RIGHT,
+    },
+    InputControl {
+        id: InputId(INPUT_P1_DOWN as u16),
+        stable_name: "p1_down",
+        label: "P1 Down",
+        kind: InputKind::DigitalDirection {
+            direction: Direction::Down,
+        },
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_DOWN,
+    },
+    InputControl {
+        id: InputId(INPUT_COIN as u16),
+        stable_name: "coin",
+        label: "Coin",
+        kind: InputKind::Coin,
+        player: None,
+        default_bindings: crate::input_defaults::COIN,
+    },
+    InputControl {
+        id: InputId(INPUT_P1_START as u16),
+        stable_name: "p1_start",
+        label: "P1 Start",
+        kind: InputKind::Start,
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_START,
+    },
+    InputControl {
+        id: InputId(INPUT_P2_START as u16),
+        stable_name: "p2_start",
+        label: "P2 Start",
+        kind: InputKind::Start,
+        player: Some(2),
+        default_bindings: crate::input_defaults::P2_START,
+    },
+    InputControl {
+        id: InputId(INPUT_P2_UP as u16),
+        stable_name: "p2_up",
+        label: "P2 Up",
+        kind: InputKind::DigitalDirection {
+            direction: Direction::Up,
+        },
+        player: Some(2),
+        default_bindings: crate::input_defaults::P2_UP,
+    },
+    InputControl {
+        id: InputId(INPUT_P2_LEFT as u16),
+        stable_name: "p2_left",
+        label: "P2 Left",
+        kind: InputKind::DigitalDirection {
+            direction: Direction::Left,
+        },
+        player: Some(2),
+        default_bindings: crate::input_defaults::P2_LEFT,
+    },
+    InputControl {
+        id: InputId(INPUT_P2_RIGHT as u16),
+        stable_name: "p2_right",
+        label: "P2 Right",
+        kind: InputKind::DigitalDirection {
+            direction: Direction::Right,
+        },
+        player: Some(2),
+        default_bindings: crate::input_defaults::P2_RIGHT,
+    },
+    InputControl {
+        id: InputId(INPUT_P2_DOWN as u16),
+        stable_name: "p2_down",
+        label: "P2 Down",
+        kind: InputKind::DigitalDirection {
+            direction: Direction::Down,
+        },
+        player: Some(2),
+        default_bindings: crate::input_defaults::P2_DOWN,
     },
 ];
 

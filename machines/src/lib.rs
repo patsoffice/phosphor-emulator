@@ -385,6 +385,7 @@ pub mod foodf;
 pub mod galaga;
 pub mod gottlieb;
 pub mod gridlee;
+pub(crate) mod input_defaults;
 pub mod joust;
 pub mod llander;
 pub mod mcr2;

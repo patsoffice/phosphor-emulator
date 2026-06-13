@@ -198,7 +198,11 @@ crate::impl_board_delegation!(PacmanSystem, board, namco_pac::TIMING);
 
 impl InputReceiver for PacmanSystem {
     fn set_input(&mut self, button: u8, pressed: bool) {
-        self.board.handle_input(button, pressed);
+        use phosphor_core::core::machine::{InputConfigurable, InputEvent, InputId};
+        self.handle_input(InputEvent::Button {
+            id: InputId(button as u16),
+            pressed,
+        });
     }
 
     fn input_map(&self) -> &[phosphor_core::core::machine::InputButton] {
@@ -230,7 +234,17 @@ impl SaveState for PacmanSystem {
 }
 
 impl phosphor_core::core::machine::Nvram for PacmanSystem {}
-impl phosphor_core::core::machine::InputConfigurable for PacmanSystem {}
+impl phosphor_core::core::machine::InputConfigurable for PacmanSystem {
+    fn input_controls(&self) -> &'static [phosphor_core::core::machine::InputControl] {
+        namco_pac::NAMCO_PAC_CONTROLS
+    }
+
+    fn handle_input(&mut self, event: phosphor_core::core::machine::InputEvent) {
+        if let phosphor_core::core::machine::InputEvent::Button { id, pressed } = event {
+            self.board.handle_input(id.0 as u8, pressed);
+        }
+    }
+}
 impl phosphor_core::core::machine::Profilable for PacmanSystem {}
 crate::impl_board_debug_trace!(PacmanSystem, board);
 
