@@ -23,11 +23,8 @@ fn panels_width(debug: &DebugState, profile: &ProfileState, settings: &SettingsS
     } else {
         0
     };
-    let sw = if settings.active {
-        settings_ui::PANEL_WIDTH
-    } else {
-        0
-    };
+    // The input and DIP panels are independent side panels that stack.
+    let sw = (settings.active as u32 + settings.dip_active as u32) * settings_ui::PANEL_WIDTH;
     dw + pw + sw
 }
 
@@ -163,6 +160,9 @@ pub fn run(
     // typed controls.
     let mut settings_state = SettingsState::default();
     let has_typed_controls = !machine.input_controls().is_empty();
+
+    // DIP switch panel (backtick to toggle); only for machines with DIP banks.
+    let has_dip = !machine.dip_banks().is_empty();
 
     // Mouse grab for trackball games (F11 to toggle)
     let has_analog = machine
@@ -346,6 +346,19 @@ pub fn run(
                 } if has_typed_controls => {
                     settings_state.active = !settings_state.active;
                     settings_state.capturing = None;
+                    video.resize_window(
+                        width * scale + panels_width(&debug_state, &profile_state, &settings_state),
+                        height * scale,
+                    );
+                }
+
+                // Backtick (`): Toggle DIP switch panel (machines with DIP banks)
+                Event::KeyDown {
+                    scancode: Some(Scancode::Grave),
+                    repeat: false,
+                    ..
+                } if has_dip => {
+                    settings_state.dip_active = !settings_state.dip_active;
                     video.resize_window(
                         width * scale + panels_width(&debug_state, &profile_state, &settings_state),
                         height * scale,
@@ -598,12 +611,23 @@ pub fn run(
 
                 video.update_game_texture(&framebuffer);
 
-                if debug_state.active || profile_state.active || settings_state.active {
+                if debug_state.active
+                    || profile_state.active
+                    || settings_state.active
+                    || settings_state.dip_active
+                {
                     let bus_ref = machine.debug_bus();
                     let profiling = profile_state.active;
                     let show_settings = settings_state.active;
                     let controls = machine.input_controls();
                     let bindings_ref: &BindingSet = bindings;
+                    // Snapshot DIP metadata + live bank bytes before the egui
+                    // closure (which must not hold `&mut machine`).
+                    let show_dip = settings_state.dip_active;
+                    let dip_banks = machine.dip_banks();
+                    let dip_values: Vec<u8> = (0..dip_banks.len())
+                        .map(|i| machine.dip_bank_value(i))
+                        .collect();
                     video.present_with_debug(|ctx, tex_id, native_size| {
                         // Profiler side panel (outermost right, drawn first)
                         if profiling {
@@ -615,6 +639,15 @@ pub fn run(
                                 ctx,
                                 controls,
                                 bindings_ref,
+                                &mut settings_state,
+                            );
+                        }
+                        // DIP switch side panel
+                        if show_dip {
+                            settings_ui::draw_dip_panel(
+                                ctx,
+                                dip_banks,
+                                &dip_values,
                                 &mut settings_state,
                             );
                         }
@@ -637,6 +670,10 @@ pub fn run(
                     if settings_state.reset_requested {
                         *bindings = crate::input::build_bindings(&*machine);
                         settings_state.reset_requested = false;
+                    }
+                    // Apply DIP edits recorded by the panel this frame.
+                    for change in settings_state.pending_dip_changes.drain(..) {
+                        machine.set_dip_option(change.bank, change.option, change.value);
                     }
                 } else {
                     video.present_game_only();
