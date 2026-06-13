@@ -1,8 +1,8 @@
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
-    FrontendMachine, InputConfigurable, InputControl, InputEvent, InputId, InputKind, MachineCore,
-    SaveState,
+    DipApplyTiming, DipChoice, DipOption, DipSwitchBank, DipSwitches, FrontendMachine,
+    InputConfigurable, InputControl, InputEvent, InputId, InputKind, MachineCore, SaveState,
 };
 use phosphor_core::core::{AccessKind, AddressSpace16};
 use phosphor_core::core::{Bus, BusMaster};
@@ -439,7 +439,131 @@ impl SaveState for LunarLanderSystem {
 
 impl phosphor_core::core::machine::Nvram for LunarLanderSystem {}
 impl phosphor_core::core::machine::Profilable for LunarLanderSystem {}
-impl phosphor_core::core::machine::DipSwitches for LunarLanderSystem {}
+/// DIP switch metadata for Lunar Lander's DSW1 byte (read bit-paired through
+/// the 74LS253 mux at 0x2800-0x2803). Choice bits and labels follow MAME's
+/// `llander` layout; option defaults OR to the historical 0x80 (750 fuel units
+/// per coin). Fuel Units Per Coin spans the non-contiguous mask 0xD0.
+const LLANDER_DIP_BANKS: &[DipSwitchBank] = &[DipSwitchBank {
+    name: "DSW1",
+    options: &[
+        DipOption {
+            name: "Right Coin",
+            mask: 0x03,
+            apply: DipApplyTiming::Immediate,
+            choices: &[
+                DipChoice {
+                    label: "x1",
+                    value: 0x00,
+                },
+                DipChoice {
+                    label: "x4",
+                    value: 0x01,
+                },
+                DipChoice {
+                    label: "x5",
+                    value: 0x02,
+                },
+                DipChoice {
+                    label: "x6",
+                    value: 0x03,
+                },
+            ],
+        },
+        DipOption {
+            name: "Language",
+            mask: 0x0C,
+            apply: DipApplyTiming::Immediate,
+            choices: &[
+                DipChoice {
+                    label: "English",
+                    value: 0x00,
+                },
+                DipChoice {
+                    label: "French",
+                    value: 0x04,
+                },
+                DipChoice {
+                    label: "Spanish",
+                    value: 0x08,
+                },
+                DipChoice {
+                    label: "German",
+                    value: 0x0C,
+                },
+            ],
+        },
+        DipOption {
+            name: "Coinage",
+            mask: 0x20,
+            apply: DipApplyTiming::Immediate,
+            choices: &[
+                DipChoice {
+                    label: "Normal",
+                    value: 0x00,
+                },
+                DipChoice {
+                    label: "Free Play",
+                    value: 0x20,
+                },
+            ],
+        },
+        DipOption {
+            name: "Fuel Units Per Coin",
+            mask: 0xD0,
+            apply: DipApplyTiming::Immediate,
+            choices: &[
+                DipChoice {
+                    label: "450",
+                    value: 0x00,
+                },
+                DipChoice {
+                    label: "1100",
+                    value: 0x10,
+                },
+                DipChoice {
+                    label: "600",
+                    value: 0x40,
+                },
+                DipChoice {
+                    label: "1300",
+                    value: 0x50,
+                },
+                DipChoice {
+                    label: "750",
+                    value: 0x80,
+                },
+                DipChoice {
+                    label: "1550",
+                    value: 0x90,
+                },
+                DipChoice {
+                    label: "900",
+                    value: 0xC0,
+                },
+                DipChoice {
+                    label: "1800",
+                    value: 0xD0,
+                },
+            ],
+        },
+    ],
+}];
+
+impl DipSwitches for LunarLanderSystem {
+    fn dip_banks(&self) -> &'static [DipSwitchBank] {
+        LLANDER_DIP_BANKS
+    }
+
+    fn dip_bank_value(&self, bank: usize) -> u8 {
+        if bank == 0 { self.dip_switches } else { 0 }
+    }
+
+    fn set_dip_bank_value(&mut self, bank: usize, value: u8) {
+        if bank == 0 {
+            self.dip_switches = value;
+        }
+    }
+}
 crate::impl_board_debug_trace!(LunarLanderSystem, board);
 
 // ---------------------------------------------------------------------------
@@ -461,6 +585,22 @@ mod tests {
     use super::*;
     use crate::atari_dvg::Region;
     use phosphor_core::cpu::CpuStateTrait;
+
+    #[test]
+    fn dip_default_and_metadata() {
+        let sys = LunarLanderSystem::new();
+        assert_eq!(sys.dip_bank_value(0), 0x80); // 750 fuel units per coin
+        crate::assert_dip_banks_valid(sys.dip_banks(), &[sys.dip_bank_value(0)]);
+    }
+
+    #[test]
+    fn set_dip_option_masks_only_its_bits() {
+        let mut sys = LunarLanderSystem::new();
+        // Language is option 1 (mask 0x0C); pick "German" (0x0C). The Fuel bit
+        // 0x80 (in the 0xD0 mask) must be preserved.
+        sys.set_dip_option(0, 1, 0x0C);
+        assert_eq!(sys.dip_bank_value(0), 0x8C);
+    }
 
     #[test]
     fn save_load_round_trip() {

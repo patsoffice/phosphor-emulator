@@ -1,8 +1,9 @@
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
-    DefaultBinding, FrontendMachine, InputConfigurable, InputControl, InputEvent, InputId,
-    InputKind, KeyId, MachineCore, SaveState,
+    DefaultBinding, DipApplyTiming, DipChoice, DipOption, DipSwitchBank, DipSwitches,
+    FrontendMachine, InputConfigurable, InputControl, InputEvent, InputId, InputKind, KeyId,
+    MachineCore, SaveState,
 };
 use phosphor_core::core::{AccessKind, AddressSpace16};
 use phosphor_core::core::{Bus, BusMaster};
@@ -402,7 +403,130 @@ impl SaveState for AsteroidsSystem {
 
 impl phosphor_core::core::machine::Nvram for AsteroidsSystem {}
 impl phosphor_core::core::machine::Profilable for AsteroidsSystem {}
-impl phosphor_core::core::machine::DipSwitches for AsteroidsSystem {}
+/// DIP switch metadata for Asteroids' DSW1 byte (read bit-paired through the
+/// 74LS253 mux at 0x2800-0x2803). Choice bits and labels follow MAME's
+/// `asteroid` layout; option defaults OR to the historical 0x84 (English,
+/// 3 lives, 1 coin/1 credit).
+const ASTEROIDS_DIP_BANKS: &[DipSwitchBank] = &[DipSwitchBank {
+    name: "DSW1",
+    options: &[
+        DipOption {
+            name: "Language",
+            mask: 0x03,
+            apply: DipApplyTiming::Immediate,
+            choices: &[
+                DipChoice {
+                    label: "English",
+                    value: 0x00,
+                },
+                DipChoice {
+                    label: "German",
+                    value: 0x01,
+                },
+                DipChoice {
+                    label: "French",
+                    value: 0x02,
+                },
+                DipChoice {
+                    label: "Spanish",
+                    value: 0x03,
+                },
+            ],
+        },
+        DipOption {
+            name: "Lives",
+            mask: 0x04,
+            apply: DipApplyTiming::Immediate,
+            choices: &[
+                DipChoice {
+                    label: "4",
+                    value: 0x00,
+                },
+                DipChoice {
+                    label: "3",
+                    value: 0x04,
+                },
+            ],
+        },
+        DipOption {
+            name: "Center Mech",
+            mask: 0x08,
+            apply: DipApplyTiming::Immediate,
+            choices: &[
+                DipChoice {
+                    label: "x1",
+                    value: 0x00,
+                },
+                DipChoice {
+                    label: "x2",
+                    value: 0x08,
+                },
+            ],
+        },
+        DipOption {
+            name: "Right Mech",
+            mask: 0x30,
+            apply: DipApplyTiming::Immediate,
+            choices: &[
+                DipChoice {
+                    label: "x1",
+                    value: 0x00,
+                },
+                DipChoice {
+                    label: "x4",
+                    value: 0x10,
+                },
+                DipChoice {
+                    label: "x5",
+                    value: 0x20,
+                },
+                DipChoice {
+                    label: "x6",
+                    value: 0x30,
+                },
+            ],
+        },
+        DipOption {
+            name: "Coinage",
+            mask: 0xC0,
+            apply: DipApplyTiming::Immediate,
+            choices: &[
+                DipChoice {
+                    label: "Free Play",
+                    value: 0x00,
+                },
+                DipChoice {
+                    label: "1 Coin/2 Credits",
+                    value: 0x40,
+                },
+                DipChoice {
+                    label: "1 Coin/1 Credit",
+                    value: 0x80,
+                },
+                DipChoice {
+                    label: "2 Coins/1 Credit",
+                    value: 0xC0,
+                },
+            ],
+        },
+    ],
+}];
+
+impl DipSwitches for AsteroidsSystem {
+    fn dip_banks(&self) -> &'static [DipSwitchBank] {
+        ASTEROIDS_DIP_BANKS
+    }
+
+    fn dip_bank_value(&self, bank: usize) -> u8 {
+        if bank == 0 { self.dip_switches } else { 0 }
+    }
+
+    fn set_dip_bank_value(&mut self, bank: usize, value: u8) {
+        if bank == 0 {
+            self.dip_switches = value;
+        }
+    }
+}
 crate::impl_board_debug_trace!(AsteroidsSystem, board);
 
 // ---------------------------------------------------------------------------
@@ -424,6 +548,21 @@ mod tests {
     use super::*;
     use crate::atari_dvg::Region;
     use phosphor_core::cpu::CpuStateTrait;
+
+    #[test]
+    fn dip_default_and_metadata() {
+        let sys = AsteroidsSystem::new();
+        assert_eq!(sys.dip_bank_value(0), 0x84); // English, 3 lives, 1C/1C
+        crate::assert_dip_banks_valid(sys.dip_banks(), &[sys.dip_bank_value(0)]);
+    }
+
+    #[test]
+    fn set_dip_option_masks_only_its_bits() {
+        let mut sys = AsteroidsSystem::new();
+        // Coinage is option 4 (mask 0xC0); pick "2 Coins/1 Credit" (0xC0).
+        sys.set_dip_option(0, 4, 0xC0);
+        assert_eq!(sys.dip_bank_value(0), 0xC4); // 0x84 low bits kept, top two set
+    }
 
     #[test]
     fn save_load_round_trip() {

@@ -1,8 +1,9 @@
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
-    AudioSource, DefaultBinding, FrontendMachine, InputConfigurable, InputControl, InputEvent,
-    InputId, InputKind, KeyId, MachineCore, Nvram, Profilable, SaveState,
+    AudioSource, DefaultBinding, DipApplyTiming, DipChoice, DipOption, DipSwitchBank, DipSwitches,
+    FrontendMachine, InputConfigurable, InputControl, InputEvent, InputId, InputKind, KeyId,
+    MachineCore, Nvram, Profilable, SaveState,
 };
 use phosphor_core::core::{AccessKind, AddressSpace16};
 use phosphor_core::core::{Bus, BusMaster};
@@ -489,7 +490,130 @@ impl Nvram for AsteroidsDeluxeSystem {
 }
 
 impl Profilable for AsteroidsDeluxeSystem {}
-impl phosphor_core::core::machine::DipSwitches for AsteroidsDeluxeSystem {}
+/// DIP switch metadata for Asteroids Deluxe's game-options DIP (the R5 bank
+/// read through the 74LS253 mux at 0x2800-0x2803; the separate coinage bank is
+/// not emulated). Choice bits and labels follow MAME's `astdelux` R5 layout;
+/// option defaults OR to the historical 0x00.
+const ASTDELUX_DIP_BANKS: &[DipSwitchBank] = &[DipSwitchBank {
+    name: "DSW1",
+    options: &[
+        DipOption {
+            name: "Language",
+            mask: 0x03,
+            apply: DipApplyTiming::Immediate,
+            choices: &[
+                DipChoice {
+                    label: "English",
+                    value: 0x00,
+                },
+                DipChoice {
+                    label: "German",
+                    value: 0x01,
+                },
+                DipChoice {
+                    label: "French",
+                    value: 0x02,
+                },
+                DipChoice {
+                    label: "Spanish",
+                    value: 0x03,
+                },
+            ],
+        },
+        DipOption {
+            name: "Lives",
+            mask: 0x0C,
+            apply: DipApplyTiming::Immediate,
+            choices: &[
+                DipChoice {
+                    label: "2-4",
+                    value: 0x00,
+                },
+                DipChoice {
+                    label: "3-5",
+                    value: 0x04,
+                },
+                DipChoice {
+                    label: "4-6",
+                    value: 0x08,
+                },
+                DipChoice {
+                    label: "5-7",
+                    value: 0x0C,
+                },
+            ],
+        },
+        DipOption {
+            name: "Minimum Plays",
+            mask: 0x10,
+            apply: DipApplyTiming::Immediate,
+            choices: &[
+                DipChoice {
+                    label: "1",
+                    value: 0x00,
+                },
+                DipChoice {
+                    label: "2",
+                    value: 0x10,
+                },
+            ],
+        },
+        DipOption {
+            name: "Difficulty",
+            mask: 0x20,
+            apply: DipApplyTiming::Immediate,
+            choices: &[
+                DipChoice {
+                    label: "Easy",
+                    value: 0x00,
+                },
+                DipChoice {
+                    label: "Hard",
+                    value: 0x20,
+                },
+            ],
+        },
+        DipOption {
+            name: "Bonus Life",
+            mask: 0xC0,
+            apply: DipApplyTiming::Immediate,
+            choices: &[
+                DipChoice {
+                    label: "10000",
+                    value: 0x00,
+                },
+                DipChoice {
+                    label: "12000",
+                    value: 0x40,
+                },
+                DipChoice {
+                    label: "15000",
+                    value: 0x80,
+                },
+                DipChoice {
+                    label: "None",
+                    value: 0xC0,
+                },
+            ],
+        },
+    ],
+}];
+
+impl DipSwitches for AsteroidsDeluxeSystem {
+    fn dip_banks(&self) -> &'static [DipSwitchBank] {
+        ASTDELUX_DIP_BANKS
+    }
+
+    fn dip_bank_value(&self, bank: usize) -> u8 {
+        if bank == 0 { self.dip_switches } else { 0 }
+    }
+
+    fn set_dip_bank_value(&mut self, bank: usize, value: u8) {
+        if bank == 0 {
+            self.dip_switches = value;
+        }
+    }
+}
 crate::impl_board_debug_trace!(AsteroidsDeluxeSystem, board);
 
 // ---------------------------------------------------------------------------
@@ -511,6 +635,21 @@ mod tests {
     use super::*;
     use crate::atari_dvg::Region;
     use phosphor_core::cpu::CpuStateTrait;
+
+    #[test]
+    fn dip_default_and_metadata() {
+        let sys = AsteroidsDeluxeSystem::new();
+        assert_eq!(sys.dip_bank_value(0), 0x00);
+        crate::assert_dip_banks_valid(sys.dip_banks(), &[sys.dip_bank_value(0)]);
+    }
+
+    #[test]
+    fn set_dip_option_masks_only_its_bits() {
+        let mut sys = AsteroidsDeluxeSystem::new();
+        // Bonus Life is option 4 (mask 0xC0); pick "None" (0xC0).
+        sys.set_dip_option(0, 4, 0xC0);
+        assert_eq!(sys.dip_bank_value(0), 0xC0);
+    }
 
     #[test]
     fn save_load_round_trip() {
