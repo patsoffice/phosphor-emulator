@@ -92,8 +92,17 @@ fn main() {
 
     let save_path = save_path_for(&config, &machine_name);
     let screenshot_dir = screenshot_dir();
-    let bindings = input::build_bindings(machine.as_ref());
     let mut state = state::load();
+
+    // Build input bindings from machine defaults, then overlay any persisted
+    // per-machine overrides (only machines with typed controls participate).
+    let mut bindings = input::build_bindings(machine.as_ref());
+    let machine_id = machine.machine_id().to_string();
+    let has_typed_controls = !machine.input_controls().is_empty();
+    if has_typed_controls && let Some(saved) = state.input_bindings.get(&machine_id) {
+        bindings.apply_overrides(machine.input_controls(), saved);
+    }
+
     machine.reset();
     emulator::run(
         machine.as_mut(),
@@ -107,6 +116,19 @@ fn main() {
         cli.no_mouse_grab,
         &mut state,
     );
+
+    // Persist input bindings, but only when they differ from the machine
+    // defaults (keeps state.toml free of redundant default entries).
+    if has_typed_controls {
+        let controls = machine.input_controls();
+        let current = bindings.to_serialized(controls);
+        let default = input::build_bindings(machine.as_ref()).to_serialized(controls);
+        if input::bindings_eq(&current, &default) {
+            state.input_bindings.remove(&machine_id);
+        } else {
+            state.input_bindings.insert(machine_id.clone(), current);
+        }
+    }
     state::save(&state);
 
     // Save battery-backed NVRAM to disk on exit

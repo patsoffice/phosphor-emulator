@@ -3,12 +3,20 @@
 //! Stored at `~/.config/phosphor/state.toml`. Unlike `config.toml` (user-edited),
 //! this file is written automatically on exit.
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
+
+use crate::input::SerializedBinding;
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct State {
     pub window_x: Option<i32>,
     pub window_y: Option<i32>,
+    /// Per-machine input bindings, keyed by `machine_id`. Only machines with
+    /// typed controls (stable names) appear here; absent means "use defaults".
+    #[serde(default)]
+    pub input_bindings: HashMap<String, Vec<SerializedBinding>>,
 }
 
 /// Load state from `~/.config/phosphor/state.toml`, falling back to defaults.

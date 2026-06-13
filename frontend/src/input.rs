@@ -11,6 +11,8 @@
 //! the typed [`phosphor_core::core::machine::InputConfigurable`] model, and is
 //! removed once every machine is migrated.
 
+use std::collections::HashMap;
+
 use phosphor_core::core::machine::{
     AnalogInput, AxisSign, DefaultBinding, FrontendMachine, InputButton, InputControl, InputId,
     KeyId, MouseControl, PadAxis as CorePadAxis, PadButton as CorePadButton, PadControl,
@@ -18,33 +20,110 @@ use phosphor_core::core::machine::{
 use sdl2::controller::{Axis, Button};
 use sdl2::keyboard::Scancode;
 use sdl2::mouse::MouseButton;
+use serde::{Deserialize, Serialize};
 
 /// Deadzone threshold for analog sticks acting as digital directions
 /// (±10000 of the ±32768 axis range, ~30%), expressed as a normalized fraction.
 const STICK_DEADZONE_NORM: f32 = 10_000.0 / 32_768.0;
 
 /// Sign of a gamepad-axis deflection used as a digital direction.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AxisDir {
     Positive,
     Negative,
 }
 
 /// A mouse motion axis.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MouseAxis {
     X,
     Y,
 }
 
 /// A concrete physical input that can be bound to a logical control.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum PhysicalInput {
     Key(Scancode),
     PadButton(Button),
     PadAxis(Axis, AxisDir),
     MouseButtonInput(MouseButton),
     MouseAxis(MouseAxis),
+}
+
+impl PhysicalInput {
+    /// Encode as a stable, human-readable token for persistence
+    /// (e.g. `"key:4"`, `"pad:a"`, `"padaxis:leftx:-"`, `"mouse:left"`,
+    /// `"mouseaxis:y"`). The token is independent of `InputId` numbering.
+    pub fn to_token(&self) -> String {
+        match self {
+            PhysicalInput::Key(sc) => format!("key:{}", *sc as i32),
+            PhysicalInput::PadButton(b) => format!("pad:{}", b.string()),
+            PhysicalInput::PadAxis(axis, dir) => format!(
+                "padaxis:{}:{}",
+                axis.string(),
+                match dir {
+                    AxisDir::Positive => "+",
+                    AxisDir::Negative => "-",
+                }
+            ),
+            PhysicalInput::MouseButtonInput(mb) => format!(
+                "mouse:{}",
+                match mb {
+                    MouseButton::Right => "right",
+                    MouseButton::Middle => "middle",
+                    _ => "left",
+                }
+            ),
+            PhysicalInput::MouseAxis(axis) => format!(
+                "mouseaxis:{}",
+                match axis {
+                    MouseAxis::X => "x",
+                    MouseAxis::Y => "y",
+                }
+            ),
+        }
+    }
+
+    /// Parse a token produced by [`to_token`](Self::to_token). Returns `None`
+    /// for unrecognized tokens (e.g. a key name no longer known to SDL), so
+    /// stale persisted bindings are skipped rather than failing the load.
+    pub fn from_token(token: &str) -> Option<Self> {
+        let (kind, rest) = token.split_once(':')?;
+        match kind {
+            "key" => Scancode::from_i32(rest.parse().ok()?).map(PhysicalInput::Key),
+            "pad" => Button::from_string(rest).map(PhysicalInput::PadButton),
+            "padaxis" => {
+                let (axis, sign) = rest.rsplit_once(':')?;
+                let dir = match sign {
+                    "+" => AxisDir::Positive,
+                    "-" => AxisDir::Negative,
+                    _ => return None,
+                };
+                Some(PhysicalInput::PadAxis(Axis::from_string(axis)?, dir))
+            }
+            "mouse" => Some(PhysicalInput::MouseButtonInput(match rest {
+                "left" => MouseButton::Left,
+                "right" => MouseButton::Right,
+                "middle" => MouseButton::Middle,
+                _ => return None,
+            })),
+            "mouseaxis" => Some(PhysicalInput::MouseAxis(match rest {
+                "x" => MouseAxis::X,
+                "y" => MouseAxis::Y,
+                _ => return None,
+            })),
+            _ => None,
+        }
+    }
+}
+
+/// A persisted binding: a control referenced by its stable name plus a physical
+/// input token. Stored per machine (keyed by `machine_id`) so saved configs
+/// survive `InputId` renumbering.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SerializedBinding {
+    pub control: String,
+    pub input: String,
 }
 
 /// One physical input bound to one logical control.
@@ -154,6 +233,71 @@ impl BindingSet {
         }
         set
     }
+
+    /// Serialize the current bindings, mapping each target `InputId` back to its
+    /// control's stable name. Bindings whose target has no named control (e.g.
+    /// a not-yet-migrated machine) are skipped.
+    pub fn to_serialized(&self, controls: &[InputControl]) -> Vec<SerializedBinding> {
+        let id_to_name: HashMap<InputId, &str> =
+            controls.iter().map(|c| (c.id, c.stable_name)).collect();
+        self.bindings
+            .iter()
+            .filter_map(|b| {
+                id_to_name.get(&b.target).map(|name| SerializedBinding {
+                    control: (*name).to_string(),
+                    input: b.physical.to_token(),
+                })
+            })
+            .collect()
+    }
+
+    /// Overlay persisted bindings onto the defaults. Any control named in
+    /// `saved` has its default bindings replaced by the saved ones; controls
+    /// not mentioned keep their defaults (so controls added in a later version
+    /// still work). Unknown control names and unparseable tokens are ignored.
+    pub fn apply_overrides(&mut self, controls: &[InputControl], saved: &[SerializedBinding]) {
+        let name_to_id: HashMap<&str, InputId> =
+            controls.iter().map(|c| (c.stable_name, c.id)).collect();
+
+        // Controls whose defaults are being overridden.
+        let touched: Vec<InputId> = saved
+            .iter()
+            .filter_map(|s| name_to_id.get(s.control.as_str()).copied())
+            .collect();
+        self.bindings.retain(|b| !touched.contains(&b.target));
+
+        for s in saved {
+            if let (Some(&target), Some(physical)) = (
+                name_to_id.get(s.control.as_str()),
+                PhysicalInput::from_token(&s.input),
+            ) {
+                let deadzone = match physical {
+                    PhysicalInput::PadAxis(..) => STICK_DEADZONE_NORM,
+                    _ => 0.0,
+                };
+                self.bindings.push(InputBinding {
+                    physical,
+                    target,
+                    scale: 1.0,
+                    deadzone,
+                });
+            }
+        }
+    }
+}
+
+/// Order-insensitive equality of two serialized binding lists, used to decide
+/// whether a machine's bindings differ from its defaults (and thus need saving).
+pub fn bindings_eq(a: &[SerializedBinding], b: &[SerializedBinding]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let key = |s: &SerializedBinding| (s.control.clone(), s.input.clone());
+    let mut a = a.to_vec();
+    let mut b = b.to_vec();
+    a.sort_by_key(key);
+    b.sort_by_key(key);
+    a == b
 }
 
 /// Build the active binding set for a machine.
@@ -536,6 +680,115 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![1]
         );
+    }
+
+    #[test]
+    fn physical_input_token_round_trips() {
+        let cases = [
+            PhysicalInput::Key(Scancode::Left),
+            PhysicalInput::Key(Scancode::Num5),
+            PhysicalInput::PadButton(Button::A),
+            PhysicalInput::PadButton(Button::DPadLeft),
+            PhysicalInput::PadAxis(Axis::LeftX, AxisDir::Negative),
+            PhysicalInput::PadAxis(Axis::LeftY, AxisDir::Positive),
+            PhysicalInput::MouseButtonInput(MouseButton::Left),
+            PhysicalInput::MouseButtonInput(MouseButton::Right),
+            PhysicalInput::MouseButtonInput(MouseButton::Middle),
+            PhysicalInput::MouseAxis(MouseAxis::X),
+            PhysicalInput::MouseAxis(MouseAxis::Y),
+        ];
+        for c in cases {
+            let token = c.to_token();
+            assert_eq!(PhysicalInput::from_token(&token), Some(c), "token {token}");
+        }
+        assert_eq!(PhysicalInput::from_token("bogus:1"), None);
+        assert_eq!(PhysicalInput::from_token("key:not_a_number"), None);
+    }
+
+    const TEST_CONTROLS: &[InputControl] = &[
+        InputControl {
+            id: InputId(0),
+            stable_name: "fire",
+            label: "Fire",
+            kind: InputKind::Button,
+            player: Some(1),
+            default_bindings: &[DefaultBinding::Key(KeyId::Space)],
+        },
+        InputControl {
+            id: InputId(1),
+            stable_name: "coin",
+            label: "Coin",
+            kind: InputKind::Coin,
+            player: None,
+            default_bindings: &[DefaultBinding::Key(KeyId::Num5)],
+        },
+    ];
+
+    #[test]
+    fn to_serialized_uses_stable_names() {
+        let set = BindingSet::from_controls(TEST_CONTROLS);
+        let ser = set.to_serialized(TEST_CONTROLS);
+        assert!(ser.contains(&SerializedBinding {
+            control: "fire".to_string(),
+            input: PhysicalInput::Key(Scancode::Space).to_token(),
+        }));
+        assert!(ser.contains(&SerializedBinding {
+            control: "coin".to_string(),
+            input: PhysicalInput::Key(Scancode::Num5).to_token(),
+        }));
+    }
+
+    #[test]
+    fn apply_overrides_replaces_only_named_controls() {
+        let mut set = BindingSet::from_controls(TEST_CONTROLS);
+        // Rebind "fire" from Space to Enter; leave "coin" untouched.
+        let saved = vec![SerializedBinding {
+            control: "fire".to_string(),
+            input: PhysicalInput::Key(Scancode::Return).to_token(),
+        }];
+        set.apply_overrides(TEST_CONTROLS, &saved);
+
+        // fire now responds to Enter, not Space.
+        assert_eq!(
+            ids(set.digital_targets(PhysicalInput::Key(Scancode::Return))),
+            vec![0]
+        );
+        assert!(ids(set.digital_targets(PhysicalInput::Key(Scancode::Space))).is_empty());
+        // coin default preserved.
+        assert_eq!(
+            ids(set.digital_targets(PhysicalInput::Key(Scancode::Num5))),
+            vec![1]
+        );
+    }
+
+    #[test]
+    fn bindings_eq_is_order_insensitive() {
+        let a = vec![
+            SerializedBinding {
+                control: "fire".into(),
+                input: "key:1".into(),
+            },
+            SerializedBinding {
+                control: "coin".into(),
+                input: "key:2".into(),
+            },
+        ];
+        let b = vec![
+            SerializedBinding {
+                control: "coin".into(),
+                input: "key:2".into(),
+            },
+            SerializedBinding {
+                control: "fire".into(),
+                input: "key:1".into(),
+            },
+        ];
+        assert!(bindings_eq(&a, &b));
+        let c = vec![SerializedBinding {
+            control: "fire".into(),
+            input: "key:9".into(),
+        }];
+        assert!(!bindings_eq(&a, &c));
     }
 
     #[test]
