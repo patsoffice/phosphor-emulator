@@ -376,6 +376,99 @@ pub trait MachineDebug {
     }
 }
 
+// ---------------------------------------------------------------------------
+// DIP switches
+//
+// Machines expose static metadata describing their DIP switch banks and own
+// the live byte(s); the frontend reads/writes whole bank bytes or individual
+// options, persisting selections by stable bank/option position.
+// ---------------------------------------------------------------------------
+
+/// When a DIP switch change takes hardware effect.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DipApplyTiming {
+    /// The change is visible to the game on the next bus read of the bank.
+    Immediate,
+    /// The change only takes effect after the machine is reset (the game
+    /// latches the value at power-on / reset and ignores later edits).
+    OnReset,
+}
+
+/// One selectable value of a [`DipOption`], paired with its display label.
+#[derive(Clone, Copy, Debug)]
+pub struct DipChoice {
+    /// Human-readable label for this setting (e.g. "3 Lives", "Hard").
+    pub label: &'static str,
+    /// The bits this choice sets within the owning option's `mask`. Only the
+    /// masked bits are significant; the rest of the bank byte is untouched.
+    pub value: u8,
+}
+
+/// A single logical DIP setting within a bank (e.g. "Lives", "Difficulty").
+#[derive(Clone, Copy, Debug)]
+pub struct DipOption {
+    /// Human-readable name of the setting.
+    pub name: &'static str,
+    /// Which bits of the bank byte this option occupies.
+    pub mask: u8,
+    /// The selectable values for this option.
+    pub choices: &'static [DipChoice],
+    /// When edits to this option take effect.
+    pub apply: DipApplyTiming,
+}
+
+/// Static metadata describing one physical DIP switch bank (a single byte).
+///
+/// The bank's live byte value is owned by the machine, not stored here; the
+/// frontend reads it via [`DipSwitches::dip_bank_value`].
+#[derive(Clone, Copy, Debug)]
+pub struct DipSwitchBank {
+    /// Human-readable name of the bank (e.g. "DSW1").
+    pub name: &'static str,
+    /// The options packed into this bank's byte.
+    pub options: &'static [DipOption],
+}
+
+/// User-settable DIP switch configuration.
+///
+/// Machines expose static bank metadata via [`dip_banks`](Self::dip_banks) and
+/// own the live byte(s), surfaced through [`dip_bank_value`](Self::dip_bank_value)
+/// and mutated via [`set_dip_bank_value`](Self::set_dip_bank_value). Machines
+/// remain responsible for mapping the live byte(s) into their board-specific
+/// input-port state. Systems without DIP switches use the defaults (no banks).
+pub trait DipSwitches {
+    /// Static metadata for each DIP bank this machine exposes, in bank order.
+    fn dip_banks(&self) -> &'static [DipSwitchBank] {
+        &[]
+    }
+
+    /// Current live byte value of bank `bank` (0 if out of range).
+    fn dip_bank_value(&self, _bank: usize) -> u8 {
+        0
+    }
+
+    /// Replace the entire live byte value of bank `bank` (no-op if out of range).
+    fn set_dip_bank_value(&mut self, _bank: usize, _value: u8) {}
+
+    /// Set a single option within a bank, masking `value` into the bank byte.
+    ///
+    /// The default merges `value` into the live bank byte using the option's
+    /// `mask`, leaving other options' bits untouched; it is a no-op if the
+    /// bank or option index is out of range.
+    fn set_dip_option(&mut self, bank: usize, option: usize, value: u8) {
+        let Some(mask) = self
+            .dip_banks()
+            .get(bank)
+            .and_then(|b| b.options.get(option))
+            .map(|o| o.mask)
+        else {
+            return;
+        };
+        let merged = (self.dip_bank_value(bank) & !mask) | (value & mask);
+        self.set_dip_bank_value(bank, merged);
+    }
+}
+
 /// Save-state capability: snapshot and restore complete machine state.
 ///
 /// Machines without save-state support use the defaults (no snapshot,
@@ -526,6 +619,7 @@ mod tests {
         }
         impl MachineDebug for Dummy {}
         impl DebugTrace for Dummy {}
+        impl DipSwitches for Dummy {}
         impl SaveState for Dummy {}
         impl Nvram for Dummy {}
         impl Profilable for Dummy {}
