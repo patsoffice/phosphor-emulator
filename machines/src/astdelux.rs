@@ -1,7 +1,8 @@
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
-    AudioSource, FrontendMachine, InputButton, InputReceiver, MachineCore, Nvram, Profilable,
+    AudioSource, DefaultBinding, FrontendMachine, InputButton, InputConfigurable, InputControl,
+    InputEvent, InputId, InputKind, InputReceiver, KeyId, MachineCore, Nvram, Profilable,
     SaveState,
 };
 use phosphor_core::core::{AccessKind, AddressSpace16};
@@ -115,6 +116,78 @@ const ASTDELUX_INPUT_MAP: &[InputButton] = &[
     InputButton {
         id: INPUT_ROT_RIGHT,
         name: "P1 Right",
+    },
+];
+
+/// Typed logical controls. `InputId`s reuse the `INPUT_*` numbering; default
+/// bindings mirror the legacy name-matched defaults (thrust = "P1 Up", shield =
+/// "P1 Jump", rotate = "P1 Left/Right"). Fire is the primary action (gamepad A);
+/// shield is key-only.
+const ASTDELUX_CONTROLS: &[InputControl] = &[
+    InputControl {
+        id: InputId(INPUT_COIN as u16),
+        stable_name: "coin",
+        label: "Coin",
+        kind: InputKind::Coin,
+        player: None,
+        default_bindings: crate::input_defaults::COIN,
+    },
+    InputControl {
+        id: InputId(INPUT_START1 as u16),
+        stable_name: "p1_start",
+        label: "P1 Start",
+        kind: InputKind::Start,
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_START,
+    },
+    InputControl {
+        id: InputId(INPUT_START2 as u16),
+        stable_name: "p2_start",
+        label: "P2 Start",
+        kind: InputKind::Start,
+        player: Some(2),
+        default_bindings: crate::input_defaults::P2_START,
+    },
+    InputControl {
+        id: InputId(INPUT_THRUST as u16),
+        stable_name: "thrust",
+        label: "Thrust",
+        kind: InputKind::Button,
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_UP,
+    },
+    InputControl {
+        id: InputId(INPUT_FIRE as u16),
+        stable_name: "fire",
+        label: "Fire",
+        kind: InputKind::Button,
+        player: Some(1),
+        default_bindings: crate::input_defaults::FIRE,
+    },
+    InputControl {
+        id: InputId(INPUT_SHIELD as u16),
+        stable_name: "shield",
+        label: "Shield",
+        kind: InputKind::Button,
+        player: Some(1),
+        // Fire takes gamepad A, so shield is key-only (LShift).
+        default_bindings: &[DefaultBinding::Key(KeyId::LShift)],
+    },
+    InputControl {
+        id: InputId(INPUT_ROT_LEFT as u16),
+        stable_name: "rotate_left",
+        label: "Rotate Left",
+        kind: InputKind::Button,
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_LEFT,
+    },
+    InputControl {
+        id: InputId(INPUT_ROT_RIGHT as u16),
+        stable_name: "rotate_right",
+        label: "Rotate Right",
+        kind: InputKind::Button,
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_RIGHT,
     },
 ];
 
@@ -370,7 +443,27 @@ impl AudioSource for AsteroidsDeluxeSystem {
 
 impl InputReceiver for AsteroidsDeluxeSystem {
     fn set_input(&mut self, button: u8, pressed: bool) {
-        match button {
+        self.handle_input(InputEvent::Button {
+            id: InputId(button as u16),
+            pressed,
+        });
+    }
+
+    fn input_map(&self) -> &[InputButton] {
+        ASTDELUX_INPUT_MAP
+    }
+}
+
+impl InputConfigurable for AsteroidsDeluxeSystem {
+    fn input_controls(&self) -> &'static [InputControl] {
+        ASTDELUX_CONTROLS
+    }
+
+    fn handle_input(&mut self, event: InputEvent) {
+        let InputEvent::Button { id, pressed } = event else {
+            return;
+        };
+        match id.0 as u8 {
             // IN1 (active-HIGH)
             INPUT_COIN => set_bit_active_high(&mut self.in1, 0, pressed),
             INPUT_START1 => set_bit_active_high(&mut self.in1, 3, pressed),
@@ -385,10 +478,6 @@ impl InputReceiver for AsteroidsDeluxeSystem {
 
             _ => {}
         }
-    }
-
-    fn input_map(&self) -> &[InputButton] {
-        ASTDELUX_INPUT_MAP
     }
 }
 
@@ -448,7 +537,6 @@ impl Nvram for AsteroidsDeluxeSystem {
     }
 }
 
-impl phosphor_core::core::machine::InputConfigurable for AsteroidsDeluxeSystem {}
 impl Profilable for AsteroidsDeluxeSystem {}
 crate::impl_board_debug_trace!(AsteroidsDeluxeSystem, board);
 

@@ -1,7 +1,8 @@
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
-    FrontendMachine, InputButton, InputReceiver, MachineCore, SaveState,
+    FrontendMachine, InputButton, InputConfigurable, InputControl, InputEvent, InputId, InputKind,
+    InputReceiver, MachineCore, SaveState,
 };
 use phosphor_core::core::{AccessKind, AddressSpace16};
 use phosphor_core::core::{Bus, BusMaster};
@@ -113,6 +114,69 @@ const LLANDER_INPUT_MAP: &[InputButton] = &[
     InputButton {
         id: INPUT_THRUST,
         name: "P1 Up",
+    },
+];
+
+/// Typed logical controls. `InputId`s reuse the `INPUT_*` numbering; default
+/// bindings mirror the legacy name-matched defaults (abort = "P1 Fire", thrust
+/// = "P1 Up", rotate = "P1 Left/Right"). The Select button had no legacy
+/// default binding (now rebindable via the settings UI).
+const LLANDER_CONTROLS: &[InputControl] = &[
+    InputControl {
+        id: InputId(INPUT_COIN as u16),
+        stable_name: "coin",
+        label: "Coin",
+        kind: InputKind::Coin,
+        player: None,
+        default_bindings: crate::input_defaults::COIN,
+    },
+    InputControl {
+        id: InputId(INPUT_START as u16),
+        stable_name: "p1_start",
+        label: "P1 Start",
+        kind: InputKind::Start,
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_START,
+    },
+    InputControl {
+        id: InputId(INPUT_SELECT as u16),
+        stable_name: "select",
+        label: "Select",
+        kind: InputKind::Button,
+        player: Some(1),
+        default_bindings: &[],
+    },
+    InputControl {
+        id: InputId(INPUT_ABORT as u16),
+        stable_name: "abort",
+        label: "Abort / Fire",
+        kind: InputKind::Button,
+        player: Some(1),
+        default_bindings: crate::input_defaults::FIRE,
+    },
+    InputControl {
+        id: InputId(INPUT_ROT_LEFT as u16),
+        stable_name: "rotate_left",
+        label: "Rotate Left",
+        kind: InputKind::Button,
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_LEFT,
+    },
+    InputControl {
+        id: InputId(INPUT_ROT_RIGHT as u16),
+        stable_name: "rotate_right",
+        label: "Rotate Right",
+        kind: InputKind::Button,
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_RIGHT,
+    },
+    InputControl {
+        id: InputId(INPUT_THRUST as u16),
+        stable_name: "thrust",
+        label: "Thrust",
+        kind: InputKind::Button,
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_UP,
     },
 ];
 
@@ -346,7 +410,27 @@ crate::impl_board_delegation!(
 
 impl InputReceiver for LunarLanderSystem {
     fn set_input(&mut self, button: u8, pressed: bool) {
-        match button {
+        self.handle_input(InputEvent::Button {
+            id: InputId(button as u16),
+            pressed,
+        });
+    }
+
+    fn input_map(&self) -> &[InputButton] {
+        LLANDER_INPUT_MAP
+    }
+}
+
+impl InputConfigurable for LunarLanderSystem {
+    fn input_controls(&self) -> &'static [InputControl] {
+        LLANDER_CONTROLS
+    }
+
+    fn handle_input(&mut self, event: InputEvent) {
+        let InputEvent::Button { id, pressed } = event else {
+            return;
+        };
+        match id.0 as u8 {
             // IN1
             INPUT_COIN => set_bit_active_low(&mut self.in1, 1, pressed),
             INPUT_START => set_bit_active_high(&mut self.in1, 0, pressed),
@@ -362,10 +446,6 @@ impl InputReceiver for LunarLanderSystem {
 
             _ => {}
         }
-    }
-
-    fn input_map(&self) -> &[InputButton] {
-        LLANDER_INPUT_MAP
     }
 }
 
@@ -402,7 +482,6 @@ impl SaveState for LunarLanderSystem {
 }
 
 impl phosphor_core::core::machine::Nvram for LunarLanderSystem {}
-impl phosphor_core::core::machine::InputConfigurable for LunarLanderSystem {}
 impl phosphor_core::core::machine::Profilable for LunarLanderSystem {}
 crate::impl_board_debug_trace!(LunarLanderSystem, board);
 

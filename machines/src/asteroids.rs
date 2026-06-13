@@ -1,7 +1,8 @@
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
-    FrontendMachine, InputButton, InputReceiver, MachineCore, SaveState,
+    DefaultBinding, FrontendMachine, InputButton, InputConfigurable, InputControl, InputEvent,
+    InputId, InputKind, InputReceiver, KeyId, MachineCore, SaveState,
 };
 use phosphor_core::core::{AccessKind, AddressSpace16};
 use phosphor_core::core::{Bus, BusMaster};
@@ -98,6 +99,78 @@ const ASTEROIDS_INPUT_MAP: &[InputButton] = &[
     InputButton {
         id: INPUT_ROT_RIGHT,
         name: "P1 Right",
+    },
+];
+
+/// Typed logical controls. `InputId`s reuse the `INPUT_*` numbering; default
+/// bindings mirror the legacy name-matched defaults (the board reuses standard
+/// names — thrust = "P1 Up", hyperspace = "P1 Jump", rotate = "P1 Left/Right").
+/// Fire is the primary action (gamepad A); hyperspace is key-only.
+const ASTEROIDS_CONTROLS: &[InputControl] = &[
+    InputControl {
+        id: InputId(INPUT_COIN as u16),
+        stable_name: "coin",
+        label: "Coin",
+        kind: InputKind::Coin,
+        player: None,
+        default_bindings: crate::input_defaults::COIN,
+    },
+    InputControl {
+        id: InputId(INPUT_START1 as u16),
+        stable_name: "p1_start",
+        label: "P1 Start",
+        kind: InputKind::Start,
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_START,
+    },
+    InputControl {
+        id: InputId(INPUT_START2 as u16),
+        stable_name: "p2_start",
+        label: "P2 Start",
+        kind: InputKind::Start,
+        player: Some(2),
+        default_bindings: crate::input_defaults::P2_START,
+    },
+    InputControl {
+        id: InputId(INPUT_THRUST as u16),
+        stable_name: "thrust",
+        label: "Thrust",
+        kind: InputKind::Button,
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_UP,
+    },
+    InputControl {
+        id: InputId(INPUT_FIRE as u16),
+        stable_name: "fire",
+        label: "Fire",
+        kind: InputKind::Button,
+        player: Some(1),
+        default_bindings: crate::input_defaults::FIRE,
+    },
+    InputControl {
+        id: InputId(INPUT_HYPERSPACE as u16),
+        stable_name: "hyperspace",
+        label: "Hyperspace",
+        kind: InputKind::Button,
+        player: Some(1),
+        // Fire takes gamepad A, so hyperspace is key-only (LShift).
+        default_bindings: &[DefaultBinding::Key(KeyId::LShift)],
+    },
+    InputControl {
+        id: InputId(INPUT_ROT_LEFT as u16),
+        stable_name: "rotate_left",
+        label: "Rotate Left",
+        kind: InputKind::Button,
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_LEFT,
+    },
+    InputControl {
+        id: InputId(INPUT_ROT_RIGHT as u16),
+        stable_name: "rotate_right",
+        label: "Rotate Right",
+        kind: InputKind::Button,
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_RIGHT,
     },
 ];
 
@@ -305,7 +378,27 @@ crate::impl_board_delegation!(AsteroidsSystem, board, atari_dvg::TIMING, no_audi
 
 impl InputReceiver for AsteroidsSystem {
     fn set_input(&mut self, button: u8, pressed: bool) {
-        match button {
+        self.handle_input(InputEvent::Button {
+            id: InputId(button as u16),
+            pressed,
+        });
+    }
+
+    fn input_map(&self) -> &[InputButton] {
+        ASTEROIDS_INPUT_MAP
+    }
+}
+
+impl InputConfigurable for AsteroidsSystem {
+    fn input_controls(&self) -> &'static [InputControl] {
+        ASTEROIDS_CONTROLS
+    }
+
+    fn handle_input(&mut self, event: InputEvent) {
+        let InputEvent::Button { id, pressed } = event else {
+            return;
+        };
+        match id.0 as u8 {
             // IN1 (active-HIGH: set bit on press, clear on release)
             INPUT_COIN => set_bit_active_high(&mut self.in1, 0, pressed),
             INPUT_START1 => set_bit_active_high(&mut self.in1, 3, pressed),
@@ -320,10 +413,6 @@ impl InputReceiver for AsteroidsSystem {
 
             _ => {}
         }
-    }
-
-    fn input_map(&self) -> &[InputButton] {
-        ASTEROIDS_INPUT_MAP
     }
 }
 
@@ -360,7 +449,6 @@ impl SaveState for AsteroidsSystem {
 }
 
 impl phosphor_core::core::machine::Nvram for AsteroidsSystem {}
-impl phosphor_core::core::machine::InputConfigurable for AsteroidsSystem {}
 impl phosphor_core::core::machine::Profilable for AsteroidsSystem {}
 crate::impl_board_debug_trace!(AsteroidsSystem, board);
 

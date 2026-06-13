@@ -1,8 +1,9 @@
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
-    AnalogInput, AudioSource, FrontendMachine, InputButton, InputReceiver, MachineCore, Nvram,
-    Profilable, SaveState,
+    AnalogAxisKind, AnalogInput, AudioSource, DefaultBinding, FrontendMachine, InputButton,
+    InputConfigurable, InputControl, InputEvent, InputId, InputKind, InputReceiver, KeyId,
+    MachineCore, MouseControl, Nvram, Profilable, SaveState,
 };
 use phosphor_core::core::{AccessKind, AddressSpace16};
 use phosphor_core::core::{Bus, BusMaster};
@@ -128,6 +129,99 @@ const TEMPEST_ANALOG_MAP: &[AnalogInput] = &[AnalogInput {
     id: ANALOG_SPINNER,
     name: "Spinner",
 }];
+
+// Typed control id for the spinner (distinct from the 0..=8 digital ids).
+const CTRL_SPINNER: InputId = InputId(9);
+
+/// Typed logical controls. `InputId`s reuse the `INPUT_*` numbering for digital
+/// controls; default bindings mirror the legacy name-matched defaults. The
+/// spinner maps to the mouse X axis; Fire is the primary action (gamepad A),
+/// so the superzapper is key-only.
+const TEMPEST_CONTROLS: &[InputControl] = &[
+    InputControl {
+        id: InputId(INPUT_COIN1 as u16),
+        stable_name: "coin1",
+        label: "Coin",
+        kind: InputKind::Coin,
+        player: None,
+        default_bindings: crate::input_defaults::COIN,
+    },
+    InputControl {
+        id: InputId(INPUT_COIN2 as u16),
+        stable_name: "coin2",
+        label: "Coin 2",
+        kind: InputKind::Coin,
+        player: None,
+        default_bindings: &[DefaultBinding::Key(KeyId::Num5)],
+    },
+    InputControl {
+        id: InputId(INPUT_COIN3 as u16),
+        stable_name: "coin3",
+        label: "Coin 3",
+        kind: InputKind::Coin,
+        player: None,
+        default_bindings: &[DefaultBinding::Key(KeyId::Num5)],
+    },
+    InputControl {
+        id: InputId(INPUT_FIRE as u16),
+        stable_name: "fire",
+        label: "Fire",
+        kind: InputKind::Button,
+        player: Some(1),
+        default_bindings: crate::input_defaults::FIRE,
+    },
+    InputControl {
+        id: InputId(INPUT_ZAP as u16),
+        stable_name: "superzapper",
+        label: "Superzapper",
+        kind: InputKind::Button,
+        player: Some(1),
+        // Fire takes gamepad A, so the superzapper is key-only (LShift).
+        default_bindings: &[DefaultBinding::Key(KeyId::LShift)],
+    },
+    InputControl {
+        id: InputId(INPUT_START1 as u16),
+        stable_name: "p1_start",
+        label: "P1 Start",
+        kind: InputKind::Start,
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_START,
+    },
+    InputControl {
+        id: InputId(INPUT_START2 as u16),
+        stable_name: "p2_start",
+        label: "P2 Start",
+        kind: InputKind::Start,
+        player: Some(2),
+        default_bindings: crate::input_defaults::P2_START,
+    },
+    InputControl {
+        id: InputId(INPUT_LEFT as u16),
+        stable_name: "rotate_left",
+        label: "Rotate Left",
+        kind: InputKind::Button,
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_LEFT,
+    },
+    InputControl {
+        id: InputId(INPUT_RIGHT as u16),
+        stable_name: "rotate_right",
+        label: "Rotate Right",
+        kind: InputKind::Button,
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_RIGHT,
+    },
+    InputControl {
+        id: CTRL_SPINNER,
+        stable_name: "spinner",
+        label: "Spinner",
+        kind: InputKind::AnalogAxis {
+            axis: AnalogAxisKind::X,
+        },
+        player: Some(1),
+        default_bindings: &[DefaultBinding::Mouse(MouseControl::AxisX)],
+    },
+];
 
 // ---------------------------------------------------------------------------
 // TempestSystem — Atari AVG board configured for Tempest (1981)
@@ -515,33 +609,18 @@ impl AudioSource for TempestSystem {
 
 impl InputReceiver for TempestSystem {
     fn set_input(&mut self, button: u8, pressed: bool) {
-        match button {
-            // IN0: coins and tilt (active-LOW)
-            INPUT_COIN1 => set_bit_active_low(&mut self.in0, 2, pressed),
-            INPUT_COIN2 => set_bit_active_low(&mut self.in0, 1, pressed),
-            INPUT_COIN3 => set_bit_active_low(&mut self.in0, 0, pressed),
-
-            // IN2 bits 3-4: fire/zap buttons (active-LOW in buttons port)
-            // Button port bit 1 (fire) → IN2 bit 4
-            // Button port bit 0 (zap) → IN2 bit 3
-            INPUT_FIRE => set_bit_active_low(&mut self.in2, 4, pressed),
-            INPUT_ZAP => set_bit_active_low(&mut self.in2, 3, pressed),
-
-            // IN2 bits 5-6: start buttons (active-LOW)
-            INPUT_START1 => set_bit_active_low(&mut self.in2, 5, pressed),
-            INPUT_START2 => set_bit_active_low(&mut self.in2, 6, pressed),
-
-            // Digital spinner via left/right keys
-            INPUT_LEFT => self.spinner_left = pressed,
-            INPUT_RIGHT => self.spinner_right = pressed,
-
-            _ => {}
-        }
+        self.handle_input(InputEvent::Button {
+            id: InputId(button as u16),
+            pressed,
+        });
     }
 
     fn set_analog(&mut self, axis: u8, delta: i32) {
         if axis == ANALOG_SPINNER {
-            self.spinner_accum += delta;
+            self.handle_input(InputEvent::Relative {
+                id: CTRL_SPINNER,
+                delta: delta as f32,
+            });
         }
     }
 
@@ -551,6 +630,45 @@ impl InputReceiver for TempestSystem {
 
     fn analog_map(&self) -> &[AnalogInput] {
         TEMPEST_ANALOG_MAP
+    }
+}
+
+impl InputConfigurable for TempestSystem {
+    fn input_controls(&self) -> &'static [InputControl] {
+        TEMPEST_CONTROLS
+    }
+
+    fn handle_input(&mut self, event: InputEvent) {
+        match event {
+            InputEvent::Button { id, pressed } => match id.0 as u8 {
+                // IN0: coins and tilt (active-LOW)
+                INPUT_COIN1 => set_bit_active_low(&mut self.in0, 2, pressed),
+                INPUT_COIN2 => set_bit_active_low(&mut self.in0, 1, pressed),
+                INPUT_COIN3 => set_bit_active_low(&mut self.in0, 0, pressed),
+
+                // IN2 bits 3-4: fire/zap buttons (active-LOW in buttons port)
+                // Button port bit 1 (fire) → IN2 bit 4
+                // Button port bit 0 (zap) → IN2 bit 3
+                INPUT_FIRE => set_bit_active_low(&mut self.in2, 4, pressed),
+                INPUT_ZAP => set_bit_active_low(&mut self.in2, 3, pressed),
+
+                // IN2 bits 5-6: start buttons (active-LOW)
+                INPUT_START1 => set_bit_active_low(&mut self.in2, 5, pressed),
+                INPUT_START2 => set_bit_active_low(&mut self.in2, 6, pressed),
+
+                // Digital spinner via left/right keys
+                INPUT_LEFT => self.spinner_left = pressed,
+                INPUT_RIGHT => self.spinner_right = pressed,
+
+                _ => {}
+            },
+            InputEvent::Relative { id, delta } => {
+                if id == CTRL_SPINNER {
+                    self.spinner_accum += delta as i32;
+                }
+            }
+            InputEvent::Absolute { .. } => {}
+        }
     }
 }
 
@@ -618,7 +736,6 @@ impl Nvram for TempestSystem {
     }
 }
 
-impl phosphor_core::core::machine::InputConfigurable for TempestSystem {}
 impl Profilable for TempestSystem {}
 crate::impl_board_debug_trace!(TempestSystem, board);
 
