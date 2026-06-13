@@ -1,7 +1,10 @@
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::debug::{BusDebug, DebugCpu, Debuggable};
-use phosphor_core::core::machine::{AudioSource, MachineCore, MachineDebug, Renderable, SaveState};
+use phosphor_core::core::machine::{
+    AudioSource, DipApplyTiming, DipChoice, DipOption, DipSwitchBank, DipSwitches, MachineCore,
+    MachineDebug, Renderable, SaveState,
+};
 use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
 use phosphor_core::gfx;
@@ -1052,7 +1055,263 @@ impl phosphor_core::core::machine::InputConfigurable for GalagaSystem {
     }
 }
 impl phosphor_core::core::machine::Profilable for GalagaSystem {}
-impl phosphor_core::core::machine::DipSwitches for GalagaSystem {}
+/// DIP switch metadata for Galaga's two banks (DSWA at board byte `dswa`, DSWB
+/// at `dswb`). Choice bits and labels follow MAME's `galaga` layout; the option
+/// defaults OR to the historical 0xF7 (DSWA) and 0x97 (DSWB). The two unused
+/// DSWA bits (0x04, 0x40) are not modelled and keep their power-on value. The
+/// Bonus Life thresholds shown are those MAME displays for the default (non-5)
+/// Lives setting.
+const GALAGA_DIP_BANKS: &[DipSwitchBank] = &[
+    DipSwitchBank {
+        name: "DSWA",
+        options: &[
+            DipOption {
+                name: "Difficulty",
+                mask: 0x03,
+                apply: DipApplyTiming::Immediate,
+                choices: &[
+                    DipChoice {
+                        label: "Medium",
+                        value: 0x00,
+                    },
+                    DipChoice {
+                        label: "Hard",
+                        value: 0x01,
+                    },
+                    DipChoice {
+                        label: "Hardest",
+                        value: 0x02,
+                    },
+                    DipChoice {
+                        label: "Easy",
+                        value: 0x03,
+                    },
+                ],
+            },
+            DipOption {
+                name: "Demo Sounds",
+                mask: 0x08,
+                apply: DipApplyTiming::Immediate,
+                choices: &[
+                    DipChoice {
+                        label: "On",
+                        value: 0x00,
+                    },
+                    DipChoice {
+                        label: "Off",
+                        value: 0x08,
+                    },
+                ],
+            },
+            DipOption {
+                name: "Freeze",
+                mask: 0x10,
+                apply: DipApplyTiming::Immediate,
+                choices: &[
+                    DipChoice {
+                        label: "On",
+                        value: 0x00,
+                    },
+                    DipChoice {
+                        label: "Off",
+                        value: 0x10,
+                    },
+                ],
+            },
+            DipOption {
+                name: "Rack Test",
+                mask: 0x20,
+                apply: DipApplyTiming::Immediate,
+                choices: &[
+                    DipChoice {
+                        label: "On",
+                        value: 0x00,
+                    },
+                    DipChoice {
+                        label: "Off",
+                        value: 0x20,
+                    },
+                ],
+            },
+            DipOption {
+                name: "Cabinet",
+                mask: 0x80,
+                apply: DipApplyTiming::Immediate,
+                choices: &[
+                    DipChoice {
+                        label: "Cocktail",
+                        value: 0x00,
+                    },
+                    DipChoice {
+                        label: "Upright",
+                        value: 0x80,
+                    },
+                ],
+            },
+        ],
+    },
+    DipSwitchBank {
+        name: "DSWB",
+        options: &[
+            DipOption {
+                name: "Coinage",
+                mask: 0x07,
+                apply: DipApplyTiming::Immediate,
+                choices: &[
+                    DipChoice {
+                        label: "Free Play",
+                        value: 0x00,
+                    },
+                    DipChoice {
+                        label: "2 Coins/3 Credits",
+                        value: 0x01,
+                    },
+                    DipChoice {
+                        label: "3 Coins/1 Credit",
+                        value: 0x02,
+                    },
+                    DipChoice {
+                        label: "1 Coin/2 Credits",
+                        value: 0x03,
+                    },
+                    DipChoice {
+                        label: "4 Coins/1 Credit",
+                        value: 0x04,
+                    },
+                    DipChoice {
+                        label: "1 Coin/3 Credits",
+                        value: 0x05,
+                    },
+                    DipChoice {
+                        label: "2 Coins/1 Credit",
+                        value: 0x06,
+                    },
+                    DipChoice {
+                        label: "1 Coin/1 Credit",
+                        value: 0x07,
+                    },
+                ],
+            },
+            DipOption {
+                name: "Bonus Life",
+                mask: 0x38,
+                apply: DipApplyTiming::Immediate,
+                choices: &[
+                    DipChoice {
+                        label: "None",
+                        value: 0x00,
+                    },
+                    DipChoice {
+                        label: "30K, 100K, Every 100K",
+                        value: 0x08,
+                    },
+                    DipChoice {
+                        label: "20K, 70K, Every 70K",
+                        value: 0x10,
+                    },
+                    DipChoice {
+                        label: "20K and 60K Only",
+                        value: 0x18,
+                    },
+                    DipChoice {
+                        label: "20K, 60K, Every 60K",
+                        value: 0x20,
+                    },
+                    DipChoice {
+                        label: "30K, 120K, Every 120K",
+                        value: 0x28,
+                    },
+                    DipChoice {
+                        label: "20K, 80K, Every 80K",
+                        value: 0x30,
+                    },
+                    DipChoice {
+                        label: "30K and 80K Only",
+                        value: 0x38,
+                    },
+                ],
+            },
+            DipOption {
+                name: "Lives",
+                mask: 0xC0,
+                apply: DipApplyTiming::Immediate,
+                choices: &[
+                    DipChoice {
+                        label: "2",
+                        value: 0x00,
+                    },
+                    DipChoice {
+                        label: "4",
+                        value: 0x40,
+                    },
+                    DipChoice {
+                        label: "3",
+                        value: 0x80,
+                    },
+                    DipChoice {
+                        label: "5",
+                        value: 0xC0,
+                    },
+                ],
+            },
+        ],
+    },
+];
+
+impl DipSwitches for GalagaSystem {
+    fn dip_banks(&self) -> &'static [DipSwitchBank] {
+        GALAGA_DIP_BANKS
+    }
+
+    fn dip_bank_value(&self, bank: usize) -> u8 {
+        match bank {
+            0 => self.board.dswa,
+            1 => self.board.dswb,
+            _ => 0,
+        }
+    }
+
+    fn set_dip_bank_value(&mut self, bank: usize, value: u8) {
+        match bank {
+            0 => self.board.dswa = value,
+            1 => self.board.dswb = value,
+            _ => {}
+        }
+    }
+}
+
+#[cfg(test)]
+mod dip_tests {
+    use super::*;
+
+    // Galaga's DIP defaults are applied in load_roms() (which a ROM-free unit
+    // test can't run — new() leaves the shared board byte at 0x99/0x24), so set
+    // the historical galaga bytes explicitly before validating the tables.
+    const DSWA_DEFAULT: u8 = 0xF7;
+    const DSWB_DEFAULT: u8 = 0x97;
+
+    fn galaga_at_defaults() -> GalagaSystem {
+        let mut sys = GalagaSystem::new();
+        sys.set_dip_bank_value(0, DSWA_DEFAULT);
+        sys.set_dip_bank_value(1, DSWB_DEFAULT);
+        sys
+    }
+
+    #[test]
+    fn dip_defaults_and_metadata() {
+        let sys = galaga_at_defaults();
+        crate::assert_dip_banks_valid(sys.dip_banks(), &[DSWA_DEFAULT, DSWB_DEFAULT]);
+    }
+
+    #[test]
+    fn set_dip_option_masks_only_its_bits() {
+        let mut sys = galaga_at_defaults();
+        // DSWB Lives is bank 1, option 2 (mask 0xC0); pick "5" (0xC0).
+        sys.set_dip_option(1, 2, 0xC0);
+        assert_eq!(sys.dip_bank_value(1), 0xD7); // 0x97 with bits 6-7 set
+        assert_eq!(sys.dip_bank_value(0), 0xF7); // other bank untouched
+    }
+}
 crate::impl_board_debug_trace!(GalagaSystem, board);
 
 // ---------------------------------------------------------------------------
