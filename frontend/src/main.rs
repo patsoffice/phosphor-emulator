@@ -92,14 +92,12 @@ fn main() {
 
     let save_path = save_path_for(&config, &machine_name);
     let screenshot_dir = screenshot_dir();
-    let key_map = input::default_key_map(machine.input_map());
-    let controller_map = input::default_controller_map(machine.input_map());
+    let bindings = input::build_bindings(machine.as_ref());
     let mut state = state::load();
     machine.reset();
     emulator::run(
         machine.as_mut(),
-        &key_map,
-        &controller_map,
+        &bindings,
         scale,
         &save_path,
         &screenshot_dir,

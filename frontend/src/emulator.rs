@@ -1,19 +1,18 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use phosphor_core::core::machine::FrontendMachine;
+use phosphor_core::core::machine::{FrontendMachine, InputEvent, InputKind};
 use sdl2::event::Event;
 use sdl2::keyboard::Scancode;
 
 use crate::debug_ui::{self, DebugState, RunMode};
-use crate::input::{self, ControllerMap, KeyMap};
+use crate::input::{AxisDir, BindingSet, MouseAxis, PhysicalInput};
 use crate::video::Video;
 
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     machine: &mut dyn FrontendMachine,
-    key_map: &KeyMap,
-    controller_map: &ControllerMap,
+    bindings: &BindingSet,
     scale: u32,
     save_path: &Path,
     screenshot_dir: &Path,
@@ -124,8 +123,11 @@ pub fn run(
     let mut profile_state = crate::profile::ProfileState::new();
 
     // Mouse grab for trackball games (F11 to toggle)
-    let has_analog = !machine.analog_map().is_empty();
-    let analog_axes: Vec<u8> = machine.analog_map().iter().map(|a| a.id).collect();
+    let has_analog = !machine.analog_map().is_empty()
+        || machine
+            .input_controls()
+            .iter()
+            .any(|c| matches!(c.kind, InputKind::AnalogAxis { .. }));
     let mut mouse_grabbed = false;
     if has_analog && !no_mouse_grab {
         sdl_context.mouse().set_relative_mouse_mode(true);
@@ -349,40 +351,45 @@ pub fn run(
                     repeat: false,
                     ..
                 } => {
-                    if !video.wants_keyboard()
-                        && let Some(button_id) = key_map.get(sc)
-                    {
-                        machine.set_input(button_id, true);
+                    if !video.wants_keyboard() {
+                        for id in bindings.digital_targets(PhysicalInput::Key(sc)) {
+                            machine.handle_input(InputEvent::Button { id, pressed: true });
+                        }
                     }
                 }
 
                 Event::KeyUp {
                     scancode: Some(sc), ..
                 } => {
-                    if !video.wants_keyboard()
-                        && let Some(button_id) = key_map.get(sc)
-                    {
-                        machine.set_input(button_id, false);
+                    if !video.wants_keyboard() {
+                        for id in bindings.digital_targets(PhysicalInput::Key(sc)) {
+                            machine.handle_input(InputEvent::Button { id, pressed: false });
+                        }
                     }
                 }
 
                 // Game controller button press/release (egui never intercepts these)
                 Event::ControllerButtonDown { button, .. } => {
-                    if let Some(button_id) = controller_map.get_button(button) {
-                        machine.set_input(button_id, true);
+                    for id in bindings.digital_targets(PhysicalInput::PadButton(button)) {
+                        machine.handle_input(InputEvent::Button { id, pressed: true });
                     }
                 }
 
                 Event::ControllerButtonUp { button, .. } => {
-                    if let Some(button_id) = controller_map.get_button(button) {
-                        machine.set_input(button_id, false);
+                    for id in bindings.digital_targets(PhysicalInput::PadButton(button)) {
+                        machine.handle_input(InputEvent::Button { id, pressed: false });
                     }
                 }
 
                 // Game controller analog stick → digital directions
                 Event::ControllerAxisMotion { axis, value, .. } => {
-                    for (button_id, pressed) in controller_map.axis_to_digital(axis, value) {
-                        machine.set_input(button_id, pressed);
+                    let normalized = value as f32 / 32_768.0;
+                    for (id, dir, deadzone) in bindings.pad_axis_targets(axis) {
+                        let pressed = match dir {
+                            AxisDir::Positive => normalized > deadzone,
+                            AxisDir::Negative => normalized < -deadzone,
+                        };
+                        machine.handle_input(InputEvent::Button { id, pressed });
                     }
                 }
 
@@ -403,32 +410,34 @@ pub fn run(
                 Event::MouseMotion { xrel, yrel, .. }
                     if !video.wants_pointer() && mouse_grabbed =>
                 {
-                    if let Some(&ax) = analog_axes.first() {
-                        machine.set_analog(ax, xrel);
+                    for (id, scale) in bindings.mouse_axis_targets(MouseAxis::X) {
+                        let delta = xrel as f32 * scale;
+                        machine.handle_input(InputEvent::Relative { id, delta });
                     }
-                    if let Some(&ay) = analog_axes.get(1) {
-                        machine.set_analog(ay, yrel);
+                    for (id, scale) in bindings.mouse_axis_targets(MouseAxis::Y) {
+                        let delta = yrel as f32 * scale;
+                        machine.handle_input(InputEvent::Relative { id, delta });
                     }
                 }
 
                 // Mouse buttons → fire (trackball games)
                 Event::MouseButtonDown { mouse_btn, .. } => {
-                    if !video.wants_pointer()
-                        && mouse_grabbed
-                        && let Some(id) =
-                            input::mouse_button_to_input(machine.input_map(), mouse_btn)
-                    {
-                        machine.set_input(id, true);
+                    if !video.wants_pointer() && mouse_grabbed {
+                        for id in
+                            bindings.digital_targets(PhysicalInput::MouseButtonInput(mouse_btn))
+                        {
+                            machine.handle_input(InputEvent::Button { id, pressed: true });
+                        }
                     }
                 }
 
                 Event::MouseButtonUp { mouse_btn, .. } => {
-                    if !video.wants_pointer()
-                        && mouse_grabbed
-                        && let Some(id) =
-                            input::mouse_button_to_input(machine.input_map(), mouse_btn)
-                    {
-                        machine.set_input(id, false);
+                    if !video.wants_pointer() && mouse_grabbed {
+                        for id in
+                            bindings.digital_targets(PhysicalInput::MouseButtonInput(mouse_btn))
+                        {
+                            machine.handle_input(InputEvent::Button { id, pressed: false });
+                        }
                     }
                 }
 
