@@ -42,8 +42,9 @@
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
-    AnalogInput, AudioSource, InputButton, InputReceiver, MachineCore, MachineDebug, Nvram,
-    Profilable, Renderable, SaveState,
+    AnalogAxisKind, AnalogInput, AudioSource, DefaultBinding, Direction, InputButton,
+    InputConfigurable, InputControl, InputEvent, InputId, InputKind, InputReceiver, KeyId,
+    MachineCore, MachineDebug, MouseControl, Nvram, Profilable, Renderable, SaveState,
 };
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::{AccessKind, AddressSpace32};
@@ -299,6 +300,162 @@ const FOODF_ANALOG_MAP: &[AnalogInput] = &[
     AnalogInput {
         id: ANALOG_P2_Y,
         name: "P2 Stick Y",
+    },
+];
+
+// Typed control ids for the analog axes (distinct from the 0..=11 digital ids).
+const CTRL_P1_STICK_X: InputId = InputId(12);
+const CTRL_P1_STICK_Y: InputId = InputId(13);
+const CTRL_P2_STICK_X: InputId = InputId(14);
+const CTRL_P2_STICK_Y: InputId = InputId(15);
+
+/// Typed logical controls. Default bindings mirror the legacy name-matched
+/// defaults: the P1 stick axes map to the mouse; the P2 stick axes have no
+/// default (the legacy frontend only bound the first two analog axes).
+const FOODF_CONTROLS: &[InputControl] = &[
+    InputControl {
+        id: InputId(INPUT_COIN1 as u16),
+        stable_name: "coin1",
+        label: "Coin",
+        kind: InputKind::Coin,
+        player: None,
+        default_bindings: crate::input_defaults::COIN,
+    },
+    InputControl {
+        id: InputId(INPUT_COIN2 as u16),
+        stable_name: "coin2",
+        label: "Coin 2",
+        kind: InputKind::Coin,
+        player: None,
+        default_bindings: &[DefaultBinding::Key(KeyId::Num5)],
+    },
+    InputControl {
+        id: InputId(INPUT_START1 as u16),
+        stable_name: "p1_start",
+        label: "P1 Start",
+        kind: InputKind::Start,
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_START,
+    },
+    InputControl {
+        id: InputId(INPUT_START2 as u16),
+        stable_name: "p2_start",
+        label: "P2 Start",
+        kind: InputKind::Start,
+        player: Some(2),
+        default_bindings: crate::input_defaults::P2_START,
+    },
+    InputControl {
+        id: InputId(INPUT_SERVICE as u16),
+        stable_name: "service",
+        label: "Service",
+        kind: InputKind::Service,
+        player: None,
+        default_bindings: crate::input_defaults::SERVICE,
+    },
+    InputControl {
+        id: InputId(INPUT_P1_THROW as u16),
+        stable_name: "p1_throw",
+        label: "P1 Throw",
+        kind: InputKind::Button,
+        player: Some(1),
+        default_bindings: &[DefaultBinding::Key(KeyId::Space)],
+    },
+    InputControl {
+        id: InputId(INPUT_P2_THROW as u16),
+        stable_name: "p2_throw",
+        label: "P2 Throw",
+        kind: InputKind::Button,
+        player: Some(2),
+        default_bindings: &[DefaultBinding::Key(KeyId::RShift)],
+    },
+    InputControl {
+        id: InputId(INPUT_P1_LEFT as u16),
+        stable_name: "p1_left",
+        label: "P1 Left",
+        kind: InputKind::DigitalDirection {
+            direction: Direction::Left,
+        },
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_LEFT,
+    },
+    InputControl {
+        id: InputId(INPUT_P1_RIGHT as u16),
+        stable_name: "p1_right",
+        label: "P1 Right",
+        kind: InputKind::DigitalDirection {
+            direction: Direction::Right,
+        },
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_RIGHT,
+    },
+    InputControl {
+        id: InputId(INPUT_P1_UP as u16),
+        stable_name: "p1_up",
+        label: "P1 Up",
+        kind: InputKind::DigitalDirection {
+            direction: Direction::Up,
+        },
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_UP,
+    },
+    InputControl {
+        id: InputId(INPUT_P1_DOWN as u16),
+        stable_name: "p1_down",
+        label: "P1 Down",
+        kind: InputKind::DigitalDirection {
+            direction: Direction::Down,
+        },
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_DOWN,
+    },
+    InputControl {
+        id: InputId(INPUT_SELFTEST as u16),
+        stable_name: "self_test",
+        label: "Self-Test",
+        kind: InputKind::Service,
+        player: None,
+        default_bindings: &[DefaultBinding::Key(KeyId::T)],
+    },
+    InputControl {
+        id: CTRL_P1_STICK_X,
+        stable_name: "p1_stick_x",
+        label: "P1 Stick X",
+        kind: InputKind::AnalogAxis {
+            axis: AnalogAxisKind::X,
+        },
+        player: Some(1),
+        default_bindings: &[DefaultBinding::Mouse(MouseControl::AxisX)],
+    },
+    InputControl {
+        id: CTRL_P1_STICK_Y,
+        stable_name: "p1_stick_y",
+        label: "P1 Stick Y",
+        kind: InputKind::AnalogAxis {
+            axis: AnalogAxisKind::Y,
+        },
+        player: Some(1),
+        default_bindings: &[DefaultBinding::Mouse(MouseControl::AxisY)],
+    },
+    InputControl {
+        id: CTRL_P2_STICK_X,
+        stable_name: "p2_stick_x",
+        label: "P2 Stick X",
+        kind: InputKind::AnalogAxis {
+            axis: AnalogAxisKind::X,
+        },
+        player: Some(2),
+        default_bindings: &[],
+    },
+    InputControl {
+        id: CTRL_P2_STICK_Y,
+        stable_name: "p2_stick_y",
+        label: "P2 Stick Y",
+        kind: InputKind::AnalogAxis {
+            axis: AnalogAxisKind::Y,
+        },
+        player: Some(2),
+        default_bindings: &[],
     },
 ];
 
@@ -799,33 +956,10 @@ impl AudioSource for FoodFightSystem {
 
 impl InputReceiver for FoodFightSystem {
     fn set_input(&mut self, button: u8, pressed: bool) {
-        match button {
-            INPUT_COIN1 => set_bit_active_low(&mut self.system_input, 0, pressed),
-            INPUT_COIN2 => set_bit_active_low(&mut self.system_input, 1, pressed),
-            INPUT_START1 => set_bit_active_low(&mut self.system_input, 2, pressed),
-            INPUT_START2 => set_bit_active_low(&mut self.system_input, 3, pressed),
-            INPUT_SERVICE => set_bit_active_low(&mut self.system_input, 4, pressed),
-            INPUT_SELFTEST => set_bit_active_low(&mut self.system_input, 7, pressed),
-            INPUT_P1_THROW => set_bit_active_low(&mut self.system_input, 5, pressed),
-            INPUT_P2_THROW => set_bit_active_low(&mut self.system_input, 6, pressed),
-            INPUT_P1_LEFT => {
-                self.p1_left = pressed;
-                self.update_p1_stick();
-            }
-            INPUT_P1_RIGHT => {
-                self.p1_right = pressed;
-                self.update_p1_stick();
-            }
-            INPUT_P1_UP => {
-                self.p1_up = pressed;
-                self.update_p1_stick();
-            }
-            INPUT_P1_DOWN => {
-                self.p1_down = pressed;
-                self.update_p1_stick();
-            }
-            _ => {}
-        }
+        self.handle_input(InputEvent::Button {
+            id: InputId(button as u16),
+            pressed,
+        });
     }
 
     fn input_map(&self) -> &[InputButton] {
@@ -833,18 +967,73 @@ impl InputReceiver for FoodFightSystem {
     }
 
     fn set_analog(&mut self, axis: u8, delta: i32) {
-        let apply = |v: &mut u8, d: i32| *v = (*v as i32 + d).clamp(0, 255) as u8;
-        match axis {
-            ANALOG_P1_X => apply(&mut self.stick[3], delta),
-            ANALOG_P1_Y => apply(&mut self.stick[1], delta),
-            ANALOG_P2_X => apply(&mut self.stick[2], delta),
-            ANALOG_P2_Y => apply(&mut self.stick[0], delta),
-            _ => {}
-        }
+        let id = match axis {
+            ANALOG_P1_X => CTRL_P1_STICK_X,
+            ANALOG_P1_Y => CTRL_P1_STICK_Y,
+            ANALOG_P2_X => CTRL_P2_STICK_X,
+            ANALOG_P2_Y => CTRL_P2_STICK_Y,
+            _ => return,
+        };
+        self.handle_input(InputEvent::Relative {
+            id,
+            delta: delta as f32,
+        });
     }
 
     fn analog_map(&self) -> &[AnalogInput] {
         FOODF_ANALOG_MAP
+    }
+}
+
+impl InputConfigurable for FoodFightSystem {
+    fn input_controls(&self) -> &'static [InputControl] {
+        FOODF_CONTROLS
+    }
+
+    fn handle_input(&mut self, event: InputEvent) {
+        match event {
+            InputEvent::Button { id, pressed } => match id.0 as u8 {
+                INPUT_COIN1 => set_bit_active_low(&mut self.system_input, 0, pressed),
+                INPUT_COIN2 => set_bit_active_low(&mut self.system_input, 1, pressed),
+                INPUT_START1 => set_bit_active_low(&mut self.system_input, 2, pressed),
+                INPUT_START2 => set_bit_active_low(&mut self.system_input, 3, pressed),
+                INPUT_SERVICE => set_bit_active_low(&mut self.system_input, 4, pressed),
+                INPUT_SELFTEST => set_bit_active_low(&mut self.system_input, 7, pressed),
+                INPUT_P1_THROW => set_bit_active_low(&mut self.system_input, 5, pressed),
+                INPUT_P2_THROW => set_bit_active_low(&mut self.system_input, 6, pressed),
+                INPUT_P1_LEFT => {
+                    self.p1_left = pressed;
+                    self.update_p1_stick();
+                }
+                INPUT_P1_RIGHT => {
+                    self.p1_right = pressed;
+                    self.update_p1_stick();
+                }
+                INPUT_P1_UP => {
+                    self.p1_up = pressed;
+                    self.update_p1_stick();
+                }
+                INPUT_P1_DOWN => {
+                    self.p1_down = pressed;
+                    self.update_p1_stick();
+                }
+                _ => {}
+            },
+            InputEvent::Relative { id, delta } => {
+                let delta = delta as i32;
+                let apply = |v: &mut u8, d: i32| *v = (*v as i32 + d).clamp(0, 255) as u8;
+                if id == CTRL_P1_STICK_X {
+                    apply(&mut self.stick[3], delta);
+                } else if id == CTRL_P1_STICK_Y {
+                    apply(&mut self.stick[1], delta);
+                } else if id == CTRL_P2_STICK_X {
+                    apply(&mut self.stick[2], delta);
+                } else if id == CTRL_P2_STICK_Y {
+                    apply(&mut self.stick[0], delta);
+                }
+            }
+            InputEvent::Absolute { .. } => {}
+        }
     }
 }
 
@@ -977,7 +1166,6 @@ impl Nvram for FoodFightSystem {
     }
 }
 
-impl phosphor_core::core::machine::InputConfigurable for FoodFightSystem {}
 impl Profilable for FoodFightSystem {}
 impl phosphor_core::core::debug_trace::DebugTrace for FoodFightSystem {}
 
