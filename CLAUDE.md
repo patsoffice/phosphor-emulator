@@ -22,6 +22,24 @@ A global pre-tool-use hook redirects common shell read commands to `sak` (Swiss 
 - To drop a tool's stderr noise (e.g. nix's "dirty tree" warning), redirect with `2>/dev/null` — **don't** pipe through `grep -v`, the hook blocks `grep`.
 - Escape hatch when a sak path genuinely won't work: prefix the command with `SAK_HOOK_BYPASS=1`.
 
+### Structural Code Mods (ast-grep)
+
+`sak` is read-only; for *modifying* code across many sites, prefer `ast-grep`
+(in the Nix dev shell) over hand-rolled `perl`/`sed` regexes. It matches on the
+Rust AST via metavariables, so it won't fire inside comments/strings and
+handles brace/bracket balancing for you — far safer than text regex for
+refactors like "rewrite this call pattern" or "delete every block of this shape".
+
+- Preview matches (read-only): `ast-grep run -p '<pattern>' -l rust <paths>`
+- Rewrite (prints a diff; review it): `ast-grep run -p '<pattern>' -r '<rewrite>' -l rust <paths>`
+- Apply in place once the diff looks right: add `-U` (update all).
+- Metavariables are `$NAME` (single node) and `$$$NAME` (variadic), e.g.
+  `ast-grep run -p 'foo($A, $B)' -r 'bar($A, $B)' -l rust`.
+
+Use the harness `Edit` tool (with `replace_all`) for literal single-file
+substitutions; reach for `ast-grep` when the change is pattern-shaped or spans
+many files. Always re-run `cargo build`/`test` after a codemod.
+
 ### Build & Test
 
 ```bash

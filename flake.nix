@@ -38,6 +38,7 @@
             pkgs.SDL2
             pkgs.pkg-config
             pkgs.libGL
+            pkgs.ast-grep # structural (AST-aware) search/replace for code mods
           ] ++ linuxPkgs;
 
           LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath ([
