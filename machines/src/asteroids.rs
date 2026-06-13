@@ -1,8 +1,8 @@
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
-    DefaultBinding, FrontendMachine, InputButton, InputConfigurable, InputControl, InputEvent,
-    InputId, InputKind, InputReceiver, KeyId, MachineCore, SaveState,
+    DefaultBinding, FrontendMachine, InputConfigurable, InputControl, InputEvent, InputId,
+    InputKind, KeyId, MachineCore, SaveState,
 };
 use phosphor_core::core::{AccessKind, AddressSpace16};
 use phosphor_core::core::{Bus, BusMaster};
@@ -66,41 +66,6 @@ pub const INPUT_FIRE: u8 = 4;
 pub const INPUT_HYPERSPACE: u8 = 5;
 pub const INPUT_ROT_LEFT: u8 = 6;
 pub const INPUT_ROT_RIGHT: u8 = 7;
-
-const ASTEROIDS_INPUT_MAP: &[InputButton] = &[
-    InputButton {
-        id: INPUT_COIN,
-        name: "Coin",
-    },
-    InputButton {
-        id: INPUT_START1,
-        name: "P1 Start",
-    },
-    InputButton {
-        id: INPUT_START2,
-        name: "P2 Start",
-    },
-    InputButton {
-        id: INPUT_THRUST,
-        name: "P1 Up",
-    },
-    InputButton {
-        id: INPUT_FIRE,
-        name: "P1 Fire",
-    },
-    InputButton {
-        id: INPUT_HYPERSPACE,
-        name: "P1 Jump",
-    },
-    InputButton {
-        id: INPUT_ROT_LEFT,
-        name: "P1 Left",
-    },
-    InputButton {
-        id: INPUT_ROT_RIGHT,
-        name: "P1 Right",
-    },
-];
 
 /// Typed logical controls. `InputId`s reuse the `INPUT_*` numbering; default
 /// bindings mirror the legacy name-matched defaults (the board reuses standard
@@ -375,19 +340,6 @@ impl Bus for AsteroidsSystem {
 // ---------------------------------------------------------------------------
 
 crate::impl_board_delegation!(AsteroidsSystem, board, atari_dvg::TIMING, no_audio, vectors);
-
-impl InputReceiver for AsteroidsSystem {
-    fn set_input(&mut self, button: u8, pressed: bool) {
-        self.handle_input(InputEvent::Button {
-            id: InputId(button as u16),
-            pressed,
-        });
-    }
-
-    fn input_map(&self) -> &[InputButton] {
-        ASTEROIDS_INPUT_MAP
-    }
-}
 
 impl InputConfigurable for AsteroidsSystem {
     fn input_controls(&self) -> &'static [InputControl] {

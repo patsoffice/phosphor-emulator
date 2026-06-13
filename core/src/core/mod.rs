@@ -19,10 +19,10 @@ pub use component::BusMasterComponent;
 pub use debug::{BusDebug, DebugCpu, DebugDisassembly, DebugRegister, Debuggable};
 pub use debug_trace::{DebugEvent, DebugEventKind, DebugTrace, DebugTraceBuffer};
 pub use machine::{
-    AnalogAxisKind, AnalogInput, AudioSource, AxisSign, DefaultBinding, Direction, FrontendMachine,
-    InputButton, InputConfigurable, InputControl, InputEvent, InputId, InputKind, InputReceiver,
-    KeyId, MachineCore, MachineDebug, MouseControl, Nvram, PadAxis, PadButton, PadControl,
-    Profilable, ProfileSpan, Renderable, SaveState, TimingConfig,
+    AnalogAxisKind, AudioSource, AxisSign, DefaultBinding, Direction, FrontendMachine,
+    InputConfigurable, InputControl, InputEvent, InputId, InputKind, KeyId, MachineCore,
+    MachineDebug, MouseControl, Nvram, PadAxis, PadButton, PadControl, Profilable, ProfileSpan,
+    Renderable, SaveState, TimingConfig,
 };
 pub use save_state::{SaveError, Saveable, StateReader, StateWriter, load_machine, save_machine};
 pub use watchpoint::{

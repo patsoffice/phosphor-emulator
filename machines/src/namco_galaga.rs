@@ -1,6 +1,6 @@
 use phosphor_core::core::debug_trace::{DebugEvent, DebugEventKind, DebugTraceBuffer};
 use phosphor_core::core::machine::{
-    DefaultBinding, Direction, InputButton, InputControl, InputId, InputKind, KeyId, TimingConfig,
+    DefaultBinding, Direction, InputControl, InputId, InputKind, KeyId, TimingConfig,
 };
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::watchpoint::Watchpoints;
@@ -32,69 +32,6 @@ pub const INPUT_START2: u8 = 11;
 pub const INPUT_COIN1: u8 = 12;
 pub const INPUT_COIN2: u8 = 13;
 pub const INPUT_SERVICE: u8 = 14;
-
-pub const NAMCO_GALAGA_INPUT_MAP: &[InputButton] = &[
-    InputButton {
-        id: INPUT_P1_UP,
-        name: "P1 Up",
-    },
-    InputButton {
-        id: INPUT_P1_RIGHT,
-        name: "P1 Right",
-    },
-    InputButton {
-        id: INPUT_P1_DOWN,
-        name: "P1 Down",
-    },
-    InputButton {
-        id: INPUT_P1_LEFT,
-        name: "P1 Left",
-    },
-    InputButton {
-        id: INPUT_P2_UP,
-        name: "P2 Up",
-    },
-    InputButton {
-        id: INPUT_P2_RIGHT,
-        name: "P2 Right",
-    },
-    InputButton {
-        id: INPUT_P2_DOWN,
-        name: "P2 Down",
-    },
-    InputButton {
-        id: INPUT_P2_LEFT,
-        name: "P2 Left",
-    },
-    InputButton {
-        id: INPUT_P1_BUTTON1,
-        name: "P1 Fire",
-    },
-    InputButton {
-        id: INPUT_P2_BUTTON1,
-        name: "P2 Fire",
-    },
-    InputButton {
-        id: INPUT_START1,
-        name: "P1 Start",
-    },
-    InputButton {
-        id: INPUT_START2,
-        name: "P2 Start",
-    },
-    InputButton {
-        id: INPUT_COIN1,
-        name: "Coin 1",
-    },
-    InputButton {
-        id: INPUT_COIN2,
-        name: "Coin 2",
-    },
-    InputButton {
-        id: INPUT_SERVICE,
-        name: "Service",
-    },
-];
 
 /// Typed logical controls shared across the Galaga family (Galaga, Dig Dug).
 /// `InputId`s reuse the `INPUT_*` numbering. Default bindings mirror the legacy

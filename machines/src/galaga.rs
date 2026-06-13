@@ -1,9 +1,7 @@
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::debug::{BusDebug, DebugCpu, Debuggable};
-use phosphor_core::core::machine::{
-    AudioSource, InputReceiver, MachineCore, MachineDebug, Renderable, SaveState,
-};
+use phosphor_core::core::machine::{AudioSource, MachineCore, MachineDebug, Renderable, SaveState};
 use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
 use phosphor_core::gfx;
@@ -894,20 +892,6 @@ impl AudioSource for GalagaSystem {
 
     fn audio_sample_rate(&self) -> u32 {
         44100
-    }
-}
-
-impl InputReceiver for GalagaSystem {
-    fn set_input(&mut self, button: u8, pressed: bool) {
-        use phosphor_core::core::machine::{InputConfigurable, InputEvent, InputId};
-        self.handle_input(InputEvent::Button {
-            id: InputId(button as u16),
-            pressed,
-        });
-    }
-
-    fn input_map(&self) -> &[phosphor_core::core::machine::InputButton] {
-        namco_galaga::NAMCO_GALAGA_INPUT_MAP
     }
 }
 

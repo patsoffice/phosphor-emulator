@@ -1,19 +1,3 @@
-/// Describes a single input button that a machine accepts.
-pub struct InputButton {
-    /// Machine-defined button identifier, passed to `set_input()`.
-    pub id: u8,
-    /// Human-readable name for display/configuration (e.g., "P1 Left", "Coin").
-    pub name: &'static str,
-}
-
-/// Describes an analog axis that a machine accepts (trackball, spinner, etc.).
-pub struct AnalogInput {
-    /// Machine-defined axis identifier, passed to `set_analog()`.
-    pub id: u8,
-    /// Human-readable name for display/configuration (e.g., "Trackball X").
-    pub name: &'static str,
-}
-
 use std::time::Duration;
 
 use crate::device::dvg::VectorLine;
@@ -134,49 +118,20 @@ pub trait AudioSource {
     }
 }
 
-/// Input handling: buttons and analog axes.
-pub trait InputReceiver {
-    /// Handle an input event. `button` is a machine-defined ID from `input_map()`.
-    /// `pressed` is true for key-down, false for key-up.
-    ///
-    /// Called per-event, not per-frame. The frontend may call this multiple times
-    /// between frames as input events arrive. Each call latches the button state
-    /// so that `run_frame()` sees the accumulated input.
-    fn set_input(&mut self, button: u8, pressed: bool);
-
-    /// Get the list of input buttons this machine accepts.
-    /// The frontend uses this to build key mappings and display configuration UI.
-    fn input_map(&self) -> &[InputButton];
-
-    /// Handle an analog input event. `axis` is a machine-defined ID from `analog_map()`.
-    /// `delta` is a signed motion value (e.g., mouse dx/dy in pixels).
-    ///
-    /// Called per-event as motion occurs. The machine accumulates deltas internally.
-    fn set_analog(&mut self, _axis: u8, _delta: i32) {}
-
-    /// Get the list of analog axes this machine accepts.
-    /// The frontend uses this to determine whether to capture mouse/trackball motion.
-    fn analog_map(&self) -> &[AnalogInput] {
-        &[]
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Typed input configuration
 //
-// The successor to the name-matched `InputReceiver` model. Machines expose
-// stable logical controls and consume typed events, so the frontend can
-// persist per-machine bindings by stable name rather than by display text.
-// During migration the `InputConfigurable` default methods bridge to
-// `InputReceiver`; machines are converted one at a time.
+// Machines expose stable logical controls and consume typed events, so the
+// frontend can persist per-machine bindings by stable name rather than by
+// display text.
 // ---------------------------------------------------------------------------
 
 /// Stable identifier for a logical input control within a machine.
 ///
-/// Unlike the `u8` ids used by [`InputReceiver`], an `InputId` is paired with a
-/// stable string name in [`InputControl`], so persistent bindings survive
-/// machine-side renumbering. The frontend keys saved bindings by the control's
-/// `stable_name`, never by this numeric value or by display text.
+/// An `InputId` is paired with a stable string name in [`InputControl`], so
+/// persistent bindings survive machine-side renumbering. The frontend keys
+/// saved bindings by the control's `stable_name`, never by this numeric value
+/// or by display text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct InputId(pub u16);
 

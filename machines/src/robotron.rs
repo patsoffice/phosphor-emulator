@@ -1,8 +1,8 @@
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
-    Direction, InputButton, InputConfigurable, InputControl, InputEvent, InputId, InputKind,
-    InputReceiver, MachineCore, Nvram, Profilable, SaveState,
+    Direction, InputConfigurable, InputControl, InputEvent, InputId, InputKind, MachineCore, Nvram,
+    Profilable, SaveState,
 };
 use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
@@ -143,53 +143,6 @@ pub const INPUT_FIRE_RIGHT: u8 = 9;
 
 // ROM PIA Port A — coin/service inputs (active-high)
 pub const INPUT_COIN: u8 = 10; // bit 4 (Left Coin)
-
-const ROBOTRON_INPUT_MAP: &[InputButton] = &[
-    InputButton {
-        id: INPUT_MOVE_UP,
-        name: "P1 Up",
-    },
-    InputButton {
-        id: INPUT_MOVE_DOWN,
-        name: "P1 Down",
-    },
-    InputButton {
-        id: INPUT_MOVE_LEFT,
-        name: "P1 Left",
-    },
-    InputButton {
-        id: INPUT_MOVE_RIGHT,
-        name: "P1 Right",
-    },
-    InputButton {
-        id: INPUT_P1_START,
-        name: "P1 Start",
-    },
-    InputButton {
-        id: INPUT_P2_START,
-        name: "P2 Start",
-    },
-    InputButton {
-        id: INPUT_FIRE_UP,
-        name: "P1 Fire Up",
-    },
-    InputButton {
-        id: INPUT_FIRE_DOWN,
-        name: "P1 Fire Down",
-    },
-    InputButton {
-        id: INPUT_FIRE_LEFT,
-        name: "P1 Fire Left",
-    },
-    InputButton {
-        id: INPUT_FIRE_RIGHT,
-        name: "P1 Fire Right",
-    },
-    InputButton {
-        id: INPUT_COIN,
-        name: "Coin",
-    },
-];
 
 /// Typed logical controls. `InputId`s reuse the `INPUT_*` numbering; default
 /// bindings mirror the legacy name-matched defaults (move stick = left stick,
@@ -385,20 +338,6 @@ impl Bus for RobotronSystem {
 // ---------------------------------------------------------------------------
 
 crate::impl_board_delegation!(RobotronSystem, board, williams::TIMING, debug_tick_pre);
-
-impl InputReceiver for RobotronSystem {
-    // Legacy shim: forwards to the typed handle_input.
-    fn set_input(&mut self, button: u8, pressed: bool) {
-        self.handle_input(InputEvent::Button {
-            id: InputId(button as u16),
-            pressed,
-        });
-    }
-
-    fn input_map(&self) -> &[InputButton] {
-        ROBOTRON_INPUT_MAP
-    }
-}
 
 impl InputConfigurable for RobotronSystem {
     fn input_controls(&self) -> &'static [InputControl] {

@@ -1,5 +1,5 @@
 use phosphor_core::core::debug_trace::{DebugEvent, DebugEventKind, DebugTraceBuffer};
-use phosphor_core::core::machine::{Direction, InputButton, InputControl, InputId, InputKind};
+use phosphor_core::core::machine::{Direction, InputControl, InputId, InputKind};
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::watchpoint::DebugAccessSource;
 use phosphor_core::core::{AccessKind, AddressSpace16};
@@ -40,53 +40,6 @@ pub const INPUT_P2_UP: u8 = 7;
 pub const INPUT_P2_LEFT: u8 = 8;
 pub const INPUT_P2_RIGHT: u8 = 9;
 pub const INPUT_P2_DOWN: u8 = 10;
-
-pub const NAMCO_PAC_INPUT_MAP: &[InputButton] = &[
-    InputButton {
-        id: INPUT_P1_UP,
-        name: "P1 Up",
-    },
-    InputButton {
-        id: INPUT_P1_LEFT,
-        name: "P1 Left",
-    },
-    InputButton {
-        id: INPUT_P1_RIGHT,
-        name: "P1 Right",
-    },
-    InputButton {
-        id: INPUT_P1_DOWN,
-        name: "P1 Down",
-    },
-    InputButton {
-        id: INPUT_COIN,
-        name: "Coin",
-    },
-    InputButton {
-        id: INPUT_P1_START,
-        name: "P1 Start",
-    },
-    InputButton {
-        id: INPUT_P2_START,
-        name: "P2 Start",
-    },
-    InputButton {
-        id: INPUT_P2_UP,
-        name: "P2 Up",
-    },
-    InputButton {
-        id: INPUT_P2_LEFT,
-        name: "P2 Left",
-    },
-    InputButton {
-        id: INPUT_P2_RIGHT,
-        name: "P2 Right",
-    },
-    InputButton {
-        id: INPUT_P2_DOWN,
-        name: "P2 Down",
-    },
-];
 
 /// Typed logical controls shared by Pac-Man and Ms. Pac-Man. `InputId`s reuse
 /// the `INPUT_*` numbering so `handle_input` and the legacy `set_input` shim
@@ -861,7 +814,7 @@ impl Saveable for NamcoPacBoard {
 
 impl NamcoPacBoard {
     /// Dispatch an input event to the appropriate port bit (active-low).
-    /// Called from game wrapper `InputReceiver` impls.
+    /// Called from game wrapper `InputConfigurable::handle_input` impls.
     pub fn handle_input(&mut self, button: u8, pressed: bool) {
         match button {
             INPUT_P1_UP => crate::set_bit_active_low(&mut self.in0, 0, pressed),

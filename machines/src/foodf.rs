@@ -42,9 +42,9 @@
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
-    AnalogAxisKind, AnalogInput, AudioSource, DefaultBinding, Direction, InputButton,
-    InputConfigurable, InputControl, InputEvent, InputId, InputKind, InputReceiver, KeyId,
-    MachineCore, MachineDebug, MouseControl, Nvram, Profilable, Renderable, SaveState,
+    AnalogAxisKind, AudioSource, DefaultBinding, Direction, InputConfigurable, InputControl,
+    InputEvent, InputId, InputKind, KeyId, MachineCore, MachineDebug, MouseControl, Nvram,
+    Profilable, Renderable, SaveState,
 };
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::{AccessKind, AddressSpace32};
@@ -228,80 +228,10 @@ pub const INPUT_P1_DOWN: u8 = 10;
 /// lives.
 pub const INPUT_SELFTEST: u8 = 11;
 
-const FOODF_INPUT_MAP: &[InputButton] = &[
-    InputButton {
-        id: INPUT_COIN1,
-        name: "Coin",
-    },
-    InputButton {
-        id: INPUT_COIN2,
-        name: "Coin 2",
-    },
-    InputButton {
-        id: INPUT_START1,
-        name: "P1 Start",
-    },
-    InputButton {
-        id: INPUT_START2,
-        name: "P2 Start",
-    },
-    InputButton {
-        id: INPUT_SERVICE,
-        name: "Service",
-    },
-    InputButton {
-        id: INPUT_P1_THROW,
-        name: "P1 Throw",
-    },
-    InputButton {
-        id: INPUT_P2_THROW,
-        name: "P2 Throw",
-    },
-    InputButton {
-        id: INPUT_P1_LEFT,
-        name: "P1 Left",
-    },
-    InputButton {
-        id: INPUT_P1_RIGHT,
-        name: "P1 Right",
-    },
-    InputButton {
-        id: INPUT_P1_UP,
-        name: "P1 Up",
-    },
-    InputButton {
-        id: INPUT_P1_DOWN,
-        name: "P1 Down",
-    },
-    InputButton {
-        id: INPUT_SELFTEST,
-        name: "Self-Test",
-    },
-];
-
 pub const ANALOG_P1_X: u8 = 0;
 pub const ANALOG_P1_Y: u8 = 1;
 pub const ANALOG_P2_X: u8 = 2;
 pub const ANALOG_P2_Y: u8 = 3;
-
-const FOODF_ANALOG_MAP: &[AnalogInput] = &[
-    AnalogInput {
-        id: ANALOG_P1_X,
-        name: "P1 Stick X",
-    },
-    AnalogInput {
-        id: ANALOG_P1_Y,
-        name: "P1 Stick Y",
-    },
-    AnalogInput {
-        id: ANALOG_P2_X,
-        name: "P2 Stick X",
-    },
-    AnalogInput {
-        id: ANALOG_P2_Y,
-        name: "P2 Stick Y",
-    },
-];
 
 // Typed control ids for the analog axes (distinct from the 0..=11 digital ids).
 const CTRL_P1_STICK_X: InputId = InputId(12);
@@ -951,37 +881,6 @@ impl AudioSource for FoodFightSystem {
 
     fn audio_sample_rate(&self) -> u32 {
         44100
-    }
-}
-
-impl InputReceiver for FoodFightSystem {
-    fn set_input(&mut self, button: u8, pressed: bool) {
-        self.handle_input(InputEvent::Button {
-            id: InputId(button as u16),
-            pressed,
-        });
-    }
-
-    fn input_map(&self) -> &[InputButton] {
-        FOODF_INPUT_MAP
-    }
-
-    fn set_analog(&mut self, axis: u8, delta: i32) {
-        let id = match axis {
-            ANALOG_P1_X => CTRL_P1_STICK_X,
-            ANALOG_P1_Y => CTRL_P1_STICK_Y,
-            ANALOG_P2_X => CTRL_P2_STICK_X,
-            ANALOG_P2_Y => CTRL_P2_STICK_Y,
-            _ => return,
-        };
-        self.handle_input(InputEvent::Relative {
-            id,
-            delta: delta as f32,
-        });
-    }
-
-    fn analog_map(&self) -> &[AnalogInput] {
-        FOODF_ANALOG_MAP
     }
 }
 

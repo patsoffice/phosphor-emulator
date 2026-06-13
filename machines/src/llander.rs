@@ -1,8 +1,8 @@
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
-    FrontendMachine, InputButton, InputConfigurable, InputControl, InputEvent, InputId, InputKind,
-    InputReceiver, MachineCore, SaveState,
+    FrontendMachine, InputConfigurable, InputControl, InputEvent, InputId, InputKind, MachineCore,
+    SaveState,
 };
 use phosphor_core::core::{AccessKind, AddressSpace16};
 use phosphor_core::core::{Bus, BusMaster};
@@ -85,37 +85,6 @@ pub const INPUT_ABORT: u8 = 3;
 pub const INPUT_ROT_LEFT: u8 = 4;
 pub const INPUT_ROT_RIGHT: u8 = 5;
 pub const INPUT_THRUST: u8 = 6;
-
-const LLANDER_INPUT_MAP: &[InputButton] = &[
-    InputButton {
-        id: INPUT_COIN,
-        name: "Coin",
-    },
-    InputButton {
-        id: INPUT_START,
-        name: "P1 Start",
-    },
-    InputButton {
-        id: INPUT_SELECT,
-        name: "P1 Select",
-    },
-    InputButton {
-        id: INPUT_ABORT,
-        name: "P1 Fire",
-    },
-    InputButton {
-        id: INPUT_ROT_LEFT,
-        name: "P1 Left",
-    },
-    InputButton {
-        id: INPUT_ROT_RIGHT,
-        name: "P1 Right",
-    },
-    InputButton {
-        id: INPUT_THRUST,
-        name: "P1 Up",
-    },
-];
 
 /// Typed logical controls. `InputId`s reuse the `INPUT_*` numbering; default
 /// bindings mirror the legacy name-matched defaults (abort = "P1 Fire", thrust
@@ -407,19 +376,6 @@ crate::impl_board_delegation!(
     no_audio,
     vectors
 );
-
-impl InputReceiver for LunarLanderSystem {
-    fn set_input(&mut self, button: u8, pressed: bool) {
-        self.handle_input(InputEvent::Button {
-            id: InputId(button as u16),
-            pressed,
-        });
-    }
-
-    fn input_map(&self) -> &[InputButton] {
-        LLANDER_INPUT_MAP
-    }
-}
 
 impl InputConfigurable for LunarLanderSystem {
     fn input_controls(&self) -> &'static [InputControl] {

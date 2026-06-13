@@ -8,9 +8,8 @@ use std::time::Instant;
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
-    DefaultBinding, Direction, FrontendMachine, InputButton, InputConfigurable, InputControl,
-    InputEvent, InputId, InputKind, InputReceiver, KeyId, MachineCore, Nvram, Profilable,
-    ProfileSpan, SaveState,
+    DefaultBinding, Direction, FrontendMachine, InputConfigurable, InputControl, InputEvent,
+    InputId, InputKind, KeyId, MachineCore, Nvram, Profilable, ProfileSpan, SaveState,
 };
 use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
@@ -142,45 +141,6 @@ const INPUT_RIGHT: u8 = 10;
 const INPUT_LEFT: u8 = 11;
 const INPUT_UP: u8 = 12;
 const INPUT_DOWN: u8 = 13;
-
-const QBERT_INPUT_MAP: &[InputButton] = &[
-    InputButton {
-        id: INPUT_COIN1,
-        name: "Coin 1",
-    },
-    InputButton {
-        id: INPUT_COIN2,
-        name: "Coin 2",
-    },
-    InputButton {
-        id: INPUT_START1,
-        name: "P1 Start",
-    },
-    InputButton {
-        id: INPUT_START2,
-        name: "P2 Start",
-    },
-    InputButton {
-        id: INPUT_SERVICE,
-        name: "Service",
-    },
-    InputButton {
-        id: INPUT_RIGHT,
-        name: "P1 Right",
-    },
-    InputButton {
-        id: INPUT_LEFT,
-        name: "P1 Left",
-    },
-    InputButton {
-        id: INPUT_UP,
-        name: "P1 Up",
-    },
-    InputButton {
-        id: INPUT_DOWN,
-        name: "P1 Down",
-    },
-];
 
 /// Typed logical controls. `InputId`s reuse the `INPUT_*` numbering; default
 /// bindings mirror the legacy name-matched defaults.
@@ -439,19 +399,6 @@ impl Bus for QbertSystem {
 // ---------------------------------------------------------------------------
 
 crate::impl_board_delegation!(QbertSystem, board, gottlieb::TIMING, bus_addr: u32);
-
-impl InputReceiver for QbertSystem {
-    fn set_input(&mut self, button: u8, pressed: bool) {
-        self.handle_input(InputEvent::Button {
-            id: InputId(button as u16),
-            pressed,
-        });
-    }
-
-    fn input_map(&self) -> &[InputButton] {
-        QBERT_INPUT_MAP
-    }
-}
 
 impl InputConfigurable for QbertSystem {
     fn input_controls(&self) -> &'static [InputControl] {

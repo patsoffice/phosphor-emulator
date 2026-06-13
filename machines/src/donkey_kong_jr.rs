@@ -1,8 +1,7 @@
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
-    InputButton, InputConfigurable, InputControl, InputEvent, InputId, InputReceiver, MachineCore,
-    SaveState,
+    InputConfigurable, InputControl, InputEvent, InputId, MachineCore, SaveState,
 };
 use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
@@ -147,61 +146,6 @@ pub const INPUT_P2_LEFT: u8 = 9;
 pub const INPUT_P2_UP: u8 = 10;
 pub const INPUT_P2_DOWN: u8 = 11;
 pub const INPUT_P2_JUMP: u8 = 12;
-
-const DKONGJR_INPUT_MAP: &[InputButton] = &[
-    InputButton {
-        id: INPUT_P1_RIGHT,
-        name: "P1 Right",
-    },
-    InputButton {
-        id: INPUT_P1_LEFT,
-        name: "P1 Left",
-    },
-    InputButton {
-        id: INPUT_P1_UP,
-        name: "P1 Up",
-    },
-    InputButton {
-        id: INPUT_P1_DOWN,
-        name: "P1 Down",
-    },
-    InputButton {
-        id: INPUT_P1_JUMP,
-        name: "P1 Jump",
-    },
-    InputButton {
-        id: INPUT_P1_START,
-        name: "P1 Start",
-    },
-    InputButton {
-        id: INPUT_P2_START,
-        name: "P2 Start",
-    },
-    InputButton {
-        id: INPUT_COIN,
-        name: "Coin",
-    },
-    InputButton {
-        id: INPUT_P2_RIGHT,
-        name: "P2 Right",
-    },
-    InputButton {
-        id: INPUT_P2_LEFT,
-        name: "P2 Left",
-    },
-    InputButton {
-        id: INPUT_P2_UP,
-        name: "P2 Up",
-    },
-    InputButton {
-        id: INPUT_P2_DOWN,
-        name: "P2 Down",
-    },
-    InputButton {
-        id: INPUT_P2_JUMP,
-        name: "P2 Jump",
-    },
-];
 
 // ---------------------------------------------------------------------------
 // Donkey Kong Jr game wrapper
@@ -478,19 +422,6 @@ impl Bus for DkongJrSystem {
 // ---------------------------------------------------------------------------
 
 crate::impl_board_delegation!(DkongJrSystem, board, tkg04::TIMING);
-
-impl InputReceiver for DkongJrSystem {
-    fn set_input(&mut self, button: u8, pressed: bool) {
-        self.handle_input(InputEvent::Button {
-            id: InputId(button as u16),
-            pressed,
-        });
-    }
-
-    fn input_map(&self) -> &[InputButton] {
-        DKONGJR_INPUT_MAP
-    }
-}
 
 impl InputConfigurable for DkongJrSystem {
     fn input_controls(&self) -> &'static [InputControl] {

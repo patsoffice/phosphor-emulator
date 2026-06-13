@@ -1,9 +1,8 @@
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
-    DefaultBinding, Direction, FrontendMachine, InputButton, InputConfigurable, InputControl,
-    InputEvent, InputId, InputKind, InputReceiver, KeyId, MachineCore, Nvram, Profilable,
-    SaveState,
+    DefaultBinding, Direction, FrontendMachine, InputConfigurable, InputControl, InputEvent,
+    InputId, InputKind, KeyId, MachineCore, Nvram, Profilable, SaveState,
 };
 use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
@@ -149,49 +148,6 @@ const INPUT_LEFT: u8 = 6;
 const INPUT_RIGHT: u8 = 7;
 const INPUT_SHIELD: u8 = 8;
 const INPUT_FIRE: u8 = 9;
-
-const SHOLLOW_INPUT_MAP: &[InputButton] = &[
-    InputButton {
-        id: INPUT_COIN1,
-        name: "Coin 1",
-    },
-    InputButton {
-        id: INPUT_COIN2,
-        name: "Coin 2",
-    },
-    InputButton {
-        id: INPUT_START1,
-        name: "P1 Start",
-    },
-    InputButton {
-        id: INPUT_START2,
-        name: "P2 Start",
-    },
-    InputButton {
-        id: INPUT_TILT,
-        name: "Tilt",
-    },
-    InputButton {
-        id: INPUT_SERVICE,
-        name: "Service",
-    },
-    InputButton {
-        id: INPUT_LEFT,
-        name: "P1 Left",
-    },
-    InputButton {
-        id: INPUT_RIGHT,
-        name: "P1 Right",
-    },
-    InputButton {
-        id: INPUT_SHIELD,
-        name: "P1 Jump",
-    },
-    InputButton {
-        id: INPUT_FIRE,
-        name: "P1 Fire",
-    },
-];
 
 /// Typed logical controls. `InputId`s reuse the `INPUT_*` numbering; default
 /// bindings mirror the legacy name-matched defaults. P1 Fire is the primary
@@ -447,19 +403,6 @@ impl Bus for SatansHollowSystem {
 // ---------------------------------------------------------------------------
 
 crate::impl_board_delegation!(SatansHollowSystem, board, mcr2::TIMING, overlay_stats);
-
-impl InputReceiver for SatansHollowSystem {
-    fn set_input(&mut self, button: u8, pressed: bool) {
-        self.handle_input(InputEvent::Button {
-            id: InputId(button as u16),
-            pressed,
-        });
-    }
-
-    fn input_map(&self) -> &[InputButton] {
-        SHOLLOW_INPUT_MAP
-    }
-}
 
 impl InputConfigurable for SatansHollowSystem {
     fn input_controls(&self) -> &'static [InputControl] {

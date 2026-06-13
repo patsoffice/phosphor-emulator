@@ -1,6 +1,6 @@
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
-use phosphor_core::core::machine::{InputReceiver, MachineCore, SaveState};
+use phosphor_core::core::machine::{MachineCore, SaveState};
 use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
 use phosphor_macros::Saveable;
@@ -375,20 +375,6 @@ impl Bus for MsPacmanSystem {
 // ---------------------------------------------------------------------------
 
 crate::impl_board_delegation!(MsPacmanSystem, board, namco_pac::TIMING);
-
-impl InputReceiver for MsPacmanSystem {
-    fn set_input(&mut self, button: u8, pressed: bool) {
-        use phosphor_core::core::machine::{InputConfigurable, InputEvent, InputId};
-        self.handle_input(InputEvent::Button {
-            id: InputId(button as u16),
-            pressed,
-        });
-    }
-
-    fn input_map(&self) -> &[phosphor_core::core::machine::InputButton] {
-        namco_pac::NAMCO_PAC_INPUT_MAP
-    }
-}
 
 impl MachineCore for MsPacmanSystem {
     crate::machine_core_metadata!("mspacman", namco_pac::TIMING);

@@ -1,8 +1,8 @@
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
-    DefaultBinding, Direction, InputButton, InputConfigurable, InputControl, InputEvent, InputId,
-    InputKind, InputReceiver, KeyId, MachineCore, SaveState,
+    DefaultBinding, Direction, InputConfigurable, InputControl, InputEvent, InputId, InputKind,
+    KeyId, MachineCore, SaveState,
 };
 use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
@@ -161,61 +161,6 @@ pub const INPUT_P2_LEFT: u8 = 9;
 pub const INPUT_P2_UP: u8 = 10;
 pub const INPUT_P2_DOWN: u8 = 11;
 pub const INPUT_P2_JUMP: u8 = 12;
-
-const DKONG_INPUT_MAP: &[InputButton] = &[
-    InputButton {
-        id: INPUT_P1_RIGHT,
-        name: "P1 Right",
-    },
-    InputButton {
-        id: INPUT_P1_LEFT,
-        name: "P1 Left",
-    },
-    InputButton {
-        id: INPUT_P1_UP,
-        name: "P1 Up",
-    },
-    InputButton {
-        id: INPUT_P1_DOWN,
-        name: "P1 Down",
-    },
-    InputButton {
-        id: INPUT_P1_JUMP,
-        name: "P1 Jump",
-    },
-    InputButton {
-        id: INPUT_P1_START,
-        name: "P1 Start",
-    },
-    InputButton {
-        id: INPUT_P2_START,
-        name: "P2 Start",
-    },
-    InputButton {
-        id: INPUT_COIN,
-        name: "Coin",
-    },
-    InputButton {
-        id: INPUT_P2_RIGHT,
-        name: "P2 Right",
-    },
-    InputButton {
-        id: INPUT_P2_LEFT,
-        name: "P2 Left",
-    },
-    InputButton {
-        id: INPUT_P2_UP,
-        name: "P2 Up",
-    },
-    InputButton {
-        id: INPUT_P2_DOWN,
-        name: "P2 Down",
-    },
-    InputButton {
-        id: INPUT_P2_JUMP,
-        name: "P2 Jump",
-    },
-];
 
 /// Typed logical controls shared by Donkey Kong and Donkey Kong Jr (identical
 /// input layout). `InputId`s reuse the `INPUT_*` numbering; default bindings
@@ -610,19 +555,6 @@ impl Bus for DkongSystem {
 // ---------------------------------------------------------------------------
 
 crate::impl_board_delegation!(DkongSystem, board, tkg04::TIMING);
-
-impl InputReceiver for DkongSystem {
-    fn set_input(&mut self, button: u8, pressed: bool) {
-        self.handle_input(InputEvent::Button {
-            id: InputId(button as u16),
-            pressed,
-        });
-    }
-
-    fn input_map(&self) -> &[InputButton] {
-        DKONG_INPUT_MAP
-    }
-}
 
 impl InputConfigurable for DkongSystem {
     fn input_controls(&self) -> &'static [InputControl] {

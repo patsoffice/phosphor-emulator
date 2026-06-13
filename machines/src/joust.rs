@@ -1,9 +1,8 @@
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
-    AxisSign, DefaultBinding, Direction, InputButton, InputConfigurable, InputControl, InputEvent,
-    InputId, InputKind, InputReceiver, KeyId, MachineCore, Nvram, PadAxis, PadButton, PadControl,
-    Profilable, SaveState,
+    AxisSign, DefaultBinding, Direction, InputConfigurable, InputControl, InputEvent, InputId,
+    InputKind, KeyId, MachineCore, Nvram, PadAxis, PadButton, PadControl, Profilable, SaveState,
 };
 use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
@@ -130,45 +129,6 @@ pub const INPUT_P2_START: u8 = 7; // Port A bit 4 (direct, active-high)
 
 // ROM PIA Port A — coin/service inputs (active-high)
 pub const INPUT_COIN: u8 = 8; // bit 4 (Left Coin)
-
-const JOUST_INPUT_MAP: &[InputButton] = &[
-    InputButton {
-        id: INPUT_P1_LEFT,
-        name: "P1 Left",
-    },
-    InputButton {
-        id: INPUT_P1_RIGHT,
-        name: "P1 Right",
-    },
-    InputButton {
-        id: INPUT_P1_FLAP,
-        name: "P1 Flap",
-    },
-    InputButton {
-        id: INPUT_P2_LEFT,
-        name: "P2 Left",
-    },
-    InputButton {
-        id: INPUT_P2_RIGHT,
-        name: "P2 Right",
-    },
-    InputButton {
-        id: INPUT_P2_FLAP,
-        name: "P2 Flap",
-    },
-    InputButton {
-        id: INPUT_P1_START,
-        name: "P1 Start",
-    },
-    InputButton {
-        id: INPUT_P2_START,
-        name: "P2 Start",
-    },
-    InputButton {
-        id: INPUT_COIN,
-        name: "Coin",
-    },
-];
 
 /// Typed logical controls. The `InputId`s reuse the `INPUT_*` numbering so the
 /// `handle_input` match and the legacy `set_input` shim share one id space.
@@ -391,21 +351,6 @@ impl Bus for JoustSystem {
 
 crate::impl_board_delegation!(JoustSystem, board, williams::TIMING, debug_tick_pre);
 
-impl InputReceiver for JoustSystem {
-    // Legacy shim: forwards to the typed `handle_input`. Removed once
-    // `InputReceiver` is retired.
-    fn set_input(&mut self, button: u8, pressed: bool) {
-        self.handle_input(InputEvent::Button {
-            id: InputId(button as u16),
-            pressed,
-        });
-    }
-
-    fn input_map(&self) -> &[InputButton] {
-        JOUST_INPUT_MAP
-    }
-}
-
 impl MachineCore for JoustSystem {
     crate::machine_core_metadata!("joust", williams::TIMING);
 
@@ -601,7 +546,7 @@ mod tests {
     fn input_controls_exposed_with_stable_names() {
         let sys = JoustSystem::new();
         let controls = sys.input_controls();
-        assert_eq!(controls.len(), JOUST_INPUT_MAP.len());
+        assert_eq!(controls.len(), 9); // 8 player buttons + coin
         assert!(controls.iter().any(|c| c.stable_name == "p1_flap"));
         assert!(controls.iter().any(|c| c.stable_name == "coin"));
     }

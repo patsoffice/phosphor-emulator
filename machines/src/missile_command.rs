@@ -1,9 +1,9 @@
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
-    AnalogAxisKind, AnalogInput, AudioSource, AxisSign, DefaultBinding, Direction, InputButton,
-    InputConfigurable, InputControl, InputEvent, InputId, InputKind, InputReceiver, KeyId,
-    MachineCore, MouseControl, PadAxis, PadButton, PadControl, Renderable, SaveState,
+    AnalogAxisKind, AudioSource, AxisSign, DefaultBinding, Direction, InputConfigurable,
+    InputControl, InputEvent, InputId, InputKind, KeyId, MachineCore, MouseControl, PadAxis,
+    PadButton, PadControl, Renderable, SaveState,
 };
 use phosphor_core::core::save_state::{self, SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::{AccessKind, AddressSpace16};
@@ -88,70 +88,15 @@ pub const INPUT_TRACK_R: u8 = 7;
 pub const INPUT_TRACK_U: u8 = 8;
 pub const INPUT_TRACK_D: u8 = 9;
 
-const MISSILE_INPUT_MAP: &[InputButton] = &[
-    InputButton {
-        id: INPUT_COIN,
-        name: "Coin",
-    },
-    InputButton {
-        id: INPUT_START1,
-        name: "P1 Start",
-    },
-    InputButton {
-        id: INPUT_START2,
-        name: "P2 Start",
-    },
-    InputButton {
-        id: INPUT_FIRE_LEFT,
-        name: "Fire Left",
-    },
-    InputButton {
-        id: INPUT_FIRE_CENTER,
-        name: "Fire Center",
-    },
-    InputButton {
-        id: INPUT_FIRE_RIGHT,
-        name: "Fire Right",
-    },
-    InputButton {
-        id: INPUT_TRACK_L,
-        name: "P1 Left",
-    },
-    InputButton {
-        id: INPUT_TRACK_R,
-        name: "P1 Right",
-    },
-    InputButton {
-        id: INPUT_TRACK_U,
-        name: "P1 Up",
-    },
-    InputButton {
-        id: INPUT_TRACK_D,
-        name: "P1 Down",
-    },
-];
-
 // ---------------------------------------------------------------------------
 // Analog axis IDs (trackball)
 // ---------------------------------------------------------------------------
 pub const ANALOG_TRACKBALL_X: u8 = 0;
 pub const ANALOG_TRACKBALL_Y: u8 = 1;
 
-const MISSILE_ANALOG_MAP: &[AnalogInput] = &[
-    AnalogInput {
-        id: ANALOG_TRACKBALL_X,
-        name: "Trackball X",
-    },
-    AnalogInput {
-        id: ANALOG_TRACKBALL_Y,
-        name: "Trackball Y",
-    },
-];
-
 // Typed control ids for the analog axes. The digital controls reuse the
 // `INPUT_*` numbering (0..=9); the trackball axes need ids distinct from those,
-// since `InputId` is a single namespace (unlike the separate button/analog
-// spaces of the legacy `InputReceiver`).
+// since `InputId` is a single namespace.
 const CTRL_TRACKBALL_X: InputId = InputId(10);
 const CTRL_TRACKBALL_Y: InputId = InputId(11);
 
@@ -937,37 +882,6 @@ impl AudioSource for MissileCommandSystem {
     }
 }
 
-impl InputReceiver for MissileCommandSystem {
-    // Legacy shims: forward to the typed `handle_input`. Removed once
-    // `InputReceiver` is retired.
-    fn set_input(&mut self, button: u8, pressed: bool) {
-        self.handle_input(InputEvent::Button {
-            id: InputId(button as u16),
-            pressed,
-        });
-    }
-
-    fn input_map(&self) -> &[InputButton] {
-        MISSILE_INPUT_MAP
-    }
-
-    fn set_analog(&mut self, axis: u8, delta: i32) {
-        let id = match axis {
-            ANALOG_TRACKBALL_X => CTRL_TRACKBALL_X,
-            ANALOG_TRACKBALL_Y => CTRL_TRACKBALL_Y,
-            _ => return,
-        };
-        self.handle_input(InputEvent::Relative {
-            id,
-            delta: delta as f32,
-        });
-    }
-
-    fn analog_map(&self) -> &[AnalogInput] {
-        MISSILE_ANALOG_MAP
-    }
-}
-
 impl InputConfigurable for MissileCommandSystem {
     fn input_controls(&self) -> &'static [InputControl] {
         MISSILE_CONTROLS
@@ -1324,10 +1238,7 @@ mod tests {
     fn input_controls_include_analog_axes() {
         let sys = MissileCommandSystem::new();
         let controls = sys.input_controls();
-        assert_eq!(
-            controls.len(),
-            MISSILE_INPUT_MAP.len() + MISSILE_ANALOG_MAP.len()
-        );
+        assert_eq!(controls.len(), 12); // 10 digital + 2 analog axes
         assert!(
             controls.iter().any(|c| c.stable_name == "trackball_x"
                 && matches!(c.kind, InputKind::AnalogAxis { .. }))
