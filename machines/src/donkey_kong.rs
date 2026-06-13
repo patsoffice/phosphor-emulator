@@ -1,6 +1,9 @@
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
-use phosphor_core::core::machine::{InputButton, InputReceiver, MachineCore, SaveState};
+use phosphor_core::core::machine::{
+    DefaultBinding, Direction, InputButton, InputConfigurable, InputControl, InputEvent, InputId,
+    InputKind, InputReceiver, KeyId, MachineCore, SaveState,
+};
 use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
 use phosphor_macros::Saveable;
@@ -211,6 +214,133 @@ const DKONG_INPUT_MAP: &[InputButton] = &[
     InputButton {
         id: INPUT_P2_JUMP,
         name: "P2 Jump",
+    },
+];
+
+/// Typed logical controls shared by Donkey Kong and Donkey Kong Jr (identical
+/// input layout). `InputId`s reuse the `INPUT_*` numbering; default bindings
+/// mirror the legacy name-matched defaults. P1 Jump gets gamepad A (the primary
+/// action); P2 Jump keeps its E key only.
+pub const DKONG_CONTROLS: &[InputControl] = &[
+    InputControl {
+        id: InputId(INPUT_P1_RIGHT as u16),
+        stable_name: "p1_right",
+        label: "P1 Right",
+        kind: InputKind::DigitalDirection {
+            direction: Direction::Right,
+        },
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_RIGHT,
+    },
+    InputControl {
+        id: InputId(INPUT_P1_LEFT as u16),
+        stable_name: "p1_left",
+        label: "P1 Left",
+        kind: InputKind::DigitalDirection {
+            direction: Direction::Left,
+        },
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_LEFT,
+    },
+    InputControl {
+        id: InputId(INPUT_P1_UP as u16),
+        stable_name: "p1_up",
+        label: "P1 Up",
+        kind: InputKind::DigitalDirection {
+            direction: Direction::Up,
+        },
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_UP,
+    },
+    InputControl {
+        id: InputId(INPUT_P1_DOWN as u16),
+        stable_name: "p1_down",
+        label: "P1 Down",
+        kind: InputKind::DigitalDirection {
+            direction: Direction::Down,
+        },
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_DOWN,
+    },
+    InputControl {
+        id: InputId(INPUT_P1_JUMP as u16),
+        stable_name: "p1_jump",
+        label: "P1 Jump",
+        kind: InputKind::Button,
+        player: Some(1),
+        default_bindings: crate::input_defaults::JUMP,
+    },
+    InputControl {
+        id: InputId(INPUT_P1_START as u16),
+        stable_name: "p1_start",
+        label: "P1 Start",
+        kind: InputKind::Start,
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_START,
+    },
+    InputControl {
+        id: InputId(INPUT_P2_START as u16),
+        stable_name: "p2_start",
+        label: "P2 Start",
+        kind: InputKind::Start,
+        player: Some(2),
+        default_bindings: crate::input_defaults::P2_START,
+    },
+    InputControl {
+        id: InputId(INPUT_COIN as u16),
+        stable_name: "coin",
+        label: "Coin",
+        kind: InputKind::Coin,
+        player: None,
+        default_bindings: crate::input_defaults::COIN,
+    },
+    InputControl {
+        id: InputId(INPUT_P2_RIGHT as u16),
+        stable_name: "p2_right",
+        label: "P2 Right",
+        kind: InputKind::DigitalDirection {
+            direction: Direction::Right,
+        },
+        player: Some(2),
+        default_bindings: crate::input_defaults::P2_RIGHT,
+    },
+    InputControl {
+        id: InputId(INPUT_P2_LEFT as u16),
+        stable_name: "p2_left",
+        label: "P2 Left",
+        kind: InputKind::DigitalDirection {
+            direction: Direction::Left,
+        },
+        player: Some(2),
+        default_bindings: crate::input_defaults::P2_LEFT,
+    },
+    InputControl {
+        id: InputId(INPUT_P2_UP as u16),
+        stable_name: "p2_up",
+        label: "P2 Up",
+        kind: InputKind::DigitalDirection {
+            direction: Direction::Up,
+        },
+        player: Some(2),
+        default_bindings: crate::input_defaults::P2_UP,
+    },
+    InputControl {
+        id: InputId(INPUT_P2_DOWN as u16),
+        stable_name: "p2_down",
+        label: "P2 Down",
+        kind: InputKind::DigitalDirection {
+            direction: Direction::Down,
+        },
+        player: Some(2),
+        default_bindings: crate::input_defaults::P2_DOWN,
+    },
+    InputControl {
+        id: InputId(INPUT_P2_JUMP as u16),
+        stable_name: "p2_jump",
+        label: "P2 Jump",
+        kind: InputKind::Button,
+        player: Some(2),
+        default_bindings: &[DefaultBinding::Key(KeyId::E)],
     },
 ];
 
@@ -483,7 +613,27 @@ crate::impl_board_delegation!(DkongSystem, board, tkg04::TIMING);
 
 impl InputReceiver for DkongSystem {
     fn set_input(&mut self, button: u8, pressed: bool) {
-        match button {
+        self.handle_input(InputEvent::Button {
+            id: InputId(button as u16),
+            pressed,
+        });
+    }
+
+    fn input_map(&self) -> &[InputButton] {
+        DKONG_INPUT_MAP
+    }
+}
+
+impl InputConfigurable for DkongSystem {
+    fn input_controls(&self) -> &'static [InputControl] {
+        DKONG_CONTROLS
+    }
+
+    fn handle_input(&mut self, event: InputEvent) {
+        let InputEvent::Button { id, pressed } = event else {
+            return;
+        };
+        match id.0 as u8 {
             INPUT_P1_RIGHT => set_bit_active_high(&mut self.board.in0, 0, pressed),
             INPUT_P1_LEFT => set_bit_active_high(&mut self.board.in0, 1, pressed),
             INPUT_P1_UP => set_bit_active_high(&mut self.board.in0, 2, pressed),
@@ -502,10 +652,6 @@ impl InputReceiver for DkongSystem {
 
             _ => {}
         }
-    }
-
-    fn input_map(&self) -> &[InputButton] {
-        DKONG_INPUT_MAP
     }
 }
 
@@ -535,7 +681,6 @@ impl SaveState for DkongSystem {
 }
 
 impl phosphor_core::core::machine::Nvram for DkongSystem {}
-impl phosphor_core::core::machine::InputConfigurable for DkongSystem {}
 impl phosphor_core::core::machine::Profilable for DkongSystem {}
 crate::impl_board_debug_trace!(DkongSystem, board);
 

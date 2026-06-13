@@ -1,6 +1,9 @@
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
-use phosphor_core::core::machine::{InputButton, InputReceiver, MachineCore, SaveState};
+use phosphor_core::core::machine::{
+    InputButton, InputConfigurable, InputControl, InputEvent, InputId, InputReceiver, MachineCore,
+    SaveState,
+};
 use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
 use phosphor_macros::Saveable;
@@ -478,7 +481,28 @@ crate::impl_board_delegation!(DkongJrSystem, board, tkg04::TIMING);
 
 impl InputReceiver for DkongJrSystem {
     fn set_input(&mut self, button: u8, pressed: bool) {
-        match button {
+        self.handle_input(InputEvent::Button {
+            id: InputId(button as u16),
+            pressed,
+        });
+    }
+
+    fn input_map(&self) -> &[InputButton] {
+        DKONGJR_INPUT_MAP
+    }
+}
+
+impl InputConfigurable for DkongJrSystem {
+    fn input_controls(&self) -> &'static [InputControl] {
+        // Identical input layout to Donkey Kong.
+        crate::donkey_kong::DKONG_CONTROLS
+    }
+
+    fn handle_input(&mut self, event: InputEvent) {
+        let InputEvent::Button { id, pressed } = event else {
+            return;
+        };
+        match id.0 as u8 {
             INPUT_P1_RIGHT => set_bit_active_high(&mut self.board.in0, 0, pressed),
             INPUT_P1_LEFT => set_bit_active_high(&mut self.board.in0, 1, pressed),
             INPUT_P1_UP => set_bit_active_high(&mut self.board.in0, 2, pressed),
@@ -497,10 +521,6 @@ impl InputReceiver for DkongJrSystem {
 
             _ => {}
         }
-    }
-
-    fn input_map(&self) -> &[InputButton] {
-        DKONGJR_INPUT_MAP
     }
 }
 
@@ -530,7 +550,6 @@ impl SaveState for DkongJrSystem {
 }
 
 impl phosphor_core::core::machine::Nvram for DkongJrSystem {}
-impl phosphor_core::core::machine::InputConfigurable for DkongJrSystem {}
 impl phosphor_core::core::machine::Profilable for DkongJrSystem {}
 crate::impl_board_debug_trace!(DkongJrSystem, board);
 
