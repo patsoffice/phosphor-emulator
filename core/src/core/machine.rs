@@ -541,6 +541,7 @@ pub trait FrontendMachine:
     + Renderable
     + AudioSource
     + InputReceiver
+    + InputConfigurable
     + MachineDebug
     + DebugTrace
     + SaveState
@@ -554,6 +555,7 @@ impl<T> FrontendMachine for T where
         + Renderable
         + AudioSource
         + InputReceiver
+        + InputConfigurable
         + MachineDebug
         + DebugTrace
         + SaveState
@@ -590,6 +592,7 @@ mod tests {
                 &[]
             }
         }
+        impl InputConfigurable for Dummy {}
         impl MachineDebug for Dummy {}
         impl DebugTrace for Dummy {}
         impl SaveState for Dummy {}
