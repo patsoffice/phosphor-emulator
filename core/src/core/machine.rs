@@ -333,41 +333,20 @@ pub enum InputEvent {
     Relative { id: InputId, delta: f32 },
 }
 
-/// Typed, rebindable input configuration — the successor to [`InputReceiver`].
+/// Typed, rebindable input configuration.
 ///
 /// Machines expose stable logical controls via [`input_controls`](Self::input_controls)
 /// and consume typed events via [`handle_input`](Self::handle_input), letting the
 /// frontend persist per-machine bindings by stable name rather than by display
 /// text.
-///
-/// During migration the default methods *bridge* to [`InputReceiver`]:
-/// `handle_input` forwards to `set_input` / `set_analog`, and `input_controls`
-/// returns empty so the frontend falls back to its legacy name-based key map for
-/// machines that have not yet been converted. A migrated machine overrides both
-/// methods. Once every machine is migrated, `InputReceiver`, this bridge, and the
-/// supertrait bound are removed.
-pub trait InputConfigurable: InputReceiver {
-    /// The logical controls this machine exposes.
-    ///
-    /// Empty (the default) means "not yet migrated": the frontend then builds
-    /// bindings from [`InputReceiver::input_map`] using its legacy matching.
-    fn input_controls(&self) -> &'static [InputControl] {
-        &[]
-    }
+pub trait InputConfigurable {
+    /// The logical controls this machine exposes (stable names, kinds, and
+    /// default physical bindings).
+    fn input_controls(&self) -> &'static [InputControl];
 
-    /// Handle a typed input event.
-    ///
-    /// The default bridges to [`InputReceiver`]: [`InputEvent::Button`] becomes
-    /// `set_input`, [`InputEvent::Relative`] becomes `set_analog`. The legacy
-    /// model has no absolute-axis concept, so [`InputEvent::Absolute`] is
-    /// ignored by the bridge — machines that need it override this method.
-    fn handle_input(&mut self, event: InputEvent) {
-        match event {
-            InputEvent::Button { id, pressed } => self.set_input(id.0 as u8, pressed),
-            InputEvent::Relative { id, delta } => self.set_analog(id.0 as u8, delta as i32),
-            InputEvent::Absolute { .. } => {}
-        }
-    }
+    /// Handle a typed input event, applying it to the machine's hardware input
+    /// state.
+    fn handle_input(&mut self, event: InputEvent);
 }
 
 /// Debug/inspection capabilities for interactive debugging.
@@ -540,7 +519,6 @@ pub trait FrontendMachine:
     MachineCore
     + Renderable
     + AudioSource
-    + InputReceiver
     + InputConfigurable
     + MachineDebug
     + DebugTrace
@@ -554,7 +532,6 @@ impl<T> FrontendMachine for T where
     T: MachineCore
         + Renderable
         + AudioSource
-        + InputReceiver
         + InputConfigurable
         + MachineDebug
         + DebugTrace
@@ -586,13 +563,12 @@ mod tests {
             fn render_frame(&self, _buffer: &mut [u8]) {}
         }
         impl AudioSource for Dummy {}
-        impl InputReceiver for Dummy {
-            fn set_input(&mut self, _button: u8, _pressed: bool) {}
-            fn input_map(&self) -> &[InputButton] {
+        impl InputConfigurable for Dummy {
+            fn input_controls(&self) -> &'static [InputControl] {
                 &[]
             }
+            fn handle_input(&mut self, _event: InputEvent) {}
         }
-        impl InputConfigurable for Dummy {}
         impl MachineDebug for Dummy {}
         impl DebugTrace for Dummy {}
         impl SaveState for Dummy {}
@@ -606,53 +582,5 @@ mod tests {
         assert!(machine.save_state().is_none());
         assert!(machine.save_nvram().is_none());
         assert!(machine.frame_profile_spans().is_empty());
-    }
-
-    /// The `InputConfigurable` bridge default forwards typed events to the
-    /// legacy `InputReceiver` methods and exposes no logical controls until a
-    /// machine is migrated. Also confirms the trait is object-safe.
-    #[test]
-    fn input_configurable_bridges_to_input_receiver() {
-        #[derive(Default)]
-        struct Recv {
-            buttons: Vec<(u8, bool)>,
-            analog: Vec<(u8, i32)>,
-        }
-
-        impl InputReceiver for Recv {
-            fn set_input(&mut self, button: u8, pressed: bool) {
-                self.buttons.push((button, pressed));
-            }
-            fn input_map(&self) -> &[InputButton] {
-                &[]
-            }
-            fn set_analog(&mut self, axis: u8, delta: i32) {
-                self.analog.push((axis, delta));
-            }
-        }
-
-        // Empty impl: relies entirely on the bridge defaults.
-        impl InputConfigurable for Recv {}
-
-        let mut recv = Recv::default();
-        let cfg: &mut dyn InputConfigurable = &mut recv;
-
-        assert!(cfg.input_controls().is_empty());
-        cfg.handle_input(InputEvent::Button {
-            id: InputId(3),
-            pressed: true,
-        });
-        cfg.handle_input(InputEvent::Relative {
-            id: InputId(1),
-            delta: 5.0,
-        });
-        // Absolute has no legacy equivalent and is dropped by the bridge.
-        cfg.handle_input(InputEvent::Absolute {
-            id: InputId(0),
-            value: 0.5,
-        });
-
-        assert_eq!(recv.buttons, vec![(3, true)]);
-        assert_eq!(recv.analog, vec![(1, 5)]);
     }
 }

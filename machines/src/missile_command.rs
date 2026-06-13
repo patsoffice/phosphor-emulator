@@ -1119,7 +1119,7 @@ impl SaveState for MissileCommandSystem {
     }
 }
 
-crate::impl_default_frontend_capabilities!(MissileCommandSystem, no_input);
+crate::impl_default_frontend_capabilities!(MissileCommandSystem);
 
 // ---------------------------------------------------------------------------
 // Machine registry

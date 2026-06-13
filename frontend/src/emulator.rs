@@ -165,11 +165,10 @@ pub fn run(
     let has_typed_controls = !machine.input_controls().is_empty();
 
     // Mouse grab for trackball games (F11 to toggle)
-    let has_analog = !machine.analog_map().is_empty()
-        || machine
-            .input_controls()
-            .iter()
-            .any(|c| matches!(c.kind, InputKind::AnalogAxis { .. }));
+    let has_analog = machine
+        .input_controls()
+        .iter()
+        .any(|c| matches!(c.kind, InputKind::AnalogAxis { .. }));
     let mut mouse_grabbed = false;
     if has_analog && !no_mouse_grab {
         sdl_context.mouse().set_relative_mouse_mode(true);
