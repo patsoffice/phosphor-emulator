@@ -1,7 +1,9 @@
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
-    AnalogInput, AudioSource, InputButton, InputReceiver, MachineCore, Renderable, SaveState,
+    AnalogAxisKind, AnalogInput, AudioSource, AxisSign, DefaultBinding, Direction, InputButton,
+    InputConfigurable, InputControl, InputEvent, InputId, InputKind, InputReceiver, KeyId,
+    MachineCore, MouseControl, PadAxis, PadButton, PadControl, Renderable, SaveState,
 };
 use phosphor_core::core::save_state::{self, SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::{AccessKind, AddressSpace16};
@@ -143,6 +145,160 @@ const MISSILE_ANALOG_MAP: &[AnalogInput] = &[
     AnalogInput {
         id: ANALOG_TRACKBALL_Y,
         name: "Trackball Y",
+    },
+];
+
+// Typed control ids for the analog axes. The digital controls reuse the
+// `INPUT_*` numbering (0..=9); the trackball axes need ids distinct from those,
+// since `InputId` is a single namespace (unlike the separate button/analog
+// spaces of the legacy `InputReceiver`).
+const CTRL_TRACKBALL_X: InputId = InputId(10);
+const CTRL_TRACKBALL_Y: InputId = InputId(11);
+
+/// Typed logical controls. Default bindings reproduce the historical
+/// name-matched keyboard/gamepad/mouse defaults.
+const MISSILE_CONTROLS: &[InputControl] = &[
+    InputControl {
+        id: InputId(INPUT_COIN as u16),
+        stable_name: "coin",
+        label: "Coin",
+        kind: InputKind::Coin,
+        player: None,
+        default_bindings: &[
+            DefaultBinding::Key(KeyId::Num5),
+            DefaultBinding::Pad(PadControl::Button(PadButton::Back)),
+        ],
+    },
+    InputControl {
+        id: InputId(INPUT_START1 as u16),
+        stable_name: "start1",
+        label: "P1 Start",
+        kind: InputKind::Start,
+        player: Some(1),
+        default_bindings: &[
+            DefaultBinding::Key(KeyId::Num1),
+            DefaultBinding::Pad(PadControl::Button(PadButton::Start)),
+        ],
+    },
+    InputControl {
+        id: InputId(INPUT_START2 as u16),
+        stable_name: "start2",
+        label: "P2 Start",
+        kind: InputKind::Start,
+        player: Some(2),
+        default_bindings: &[DefaultBinding::Key(KeyId::Num2)],
+    },
+    InputControl {
+        id: InputId(INPUT_FIRE_LEFT as u16),
+        stable_name: "fire_left",
+        label: "Fire Left",
+        kind: InputKind::Button,
+        player: Some(1),
+        default_bindings: &[
+            DefaultBinding::Key(KeyId::Z),
+            DefaultBinding::Pad(PadControl::Button(PadButton::X)),
+            DefaultBinding::Mouse(MouseControl::Middle),
+        ],
+    },
+    InputControl {
+        id: InputId(INPUT_FIRE_CENTER as u16),
+        stable_name: "fire_center",
+        label: "Fire Center",
+        kind: InputKind::Button,
+        player: Some(1),
+        default_bindings: &[
+            DefaultBinding::Key(KeyId::X),
+            DefaultBinding::Pad(PadControl::Button(PadButton::A)),
+            DefaultBinding::Mouse(MouseControl::Left),
+        ],
+    },
+    InputControl {
+        id: InputId(INPUT_FIRE_RIGHT as u16),
+        stable_name: "fire_right",
+        label: "Fire Right",
+        kind: InputKind::Button,
+        player: Some(1),
+        default_bindings: &[
+            DefaultBinding::Key(KeyId::C),
+            DefaultBinding::Pad(PadControl::Button(PadButton::B)),
+            DefaultBinding::Mouse(MouseControl::Right),
+        ],
+    },
+    InputControl {
+        id: InputId(INPUT_TRACK_L as u16),
+        stable_name: "track_left",
+        label: "P1 Left",
+        kind: InputKind::DigitalDirection {
+            direction: Direction::Left,
+        },
+        player: Some(1),
+        default_bindings: &[
+            DefaultBinding::Key(KeyId::Left),
+            DefaultBinding::Pad(PadControl::Button(PadButton::DPadLeft)),
+            DefaultBinding::Pad(PadControl::Axis(PadAxis::LeftX, AxisSign::Negative)),
+        ],
+    },
+    InputControl {
+        id: InputId(INPUT_TRACK_R as u16),
+        stable_name: "track_right",
+        label: "P1 Right",
+        kind: InputKind::DigitalDirection {
+            direction: Direction::Right,
+        },
+        player: Some(1),
+        default_bindings: &[
+            DefaultBinding::Key(KeyId::Right),
+            DefaultBinding::Pad(PadControl::Button(PadButton::DPadRight)),
+            DefaultBinding::Pad(PadControl::Axis(PadAxis::LeftX, AxisSign::Positive)),
+        ],
+    },
+    InputControl {
+        id: InputId(INPUT_TRACK_U as u16),
+        stable_name: "track_up",
+        label: "P1 Up",
+        kind: InputKind::DigitalDirection {
+            direction: Direction::Up,
+        },
+        player: Some(1),
+        default_bindings: &[
+            DefaultBinding::Key(KeyId::Up),
+            DefaultBinding::Pad(PadControl::Button(PadButton::DPadUp)),
+            DefaultBinding::Pad(PadControl::Axis(PadAxis::LeftY, AxisSign::Negative)),
+        ],
+    },
+    InputControl {
+        id: InputId(INPUT_TRACK_D as u16),
+        stable_name: "track_down",
+        label: "P1 Down",
+        kind: InputKind::DigitalDirection {
+            direction: Direction::Down,
+        },
+        player: Some(1),
+        default_bindings: &[
+            DefaultBinding::Key(KeyId::Down),
+            DefaultBinding::Pad(PadControl::Button(PadButton::DPadDown)),
+            DefaultBinding::Pad(PadControl::Axis(PadAxis::LeftY, AxisSign::Positive)),
+        ],
+    },
+    InputControl {
+        id: CTRL_TRACKBALL_X,
+        stable_name: "trackball_x",
+        label: "Trackball X",
+        kind: InputKind::AnalogAxis {
+            axis: AnalogAxisKind::X,
+        },
+        player: Some(1),
+        default_bindings: &[DefaultBinding::Mouse(MouseControl::AxisX)],
+    },
+    InputControl {
+        id: CTRL_TRACKBALL_Y,
+        stable_name: "trackball_y",
+        label: "Trackball Y",
+        kind: InputKind::AnalogAxis {
+            axis: AnalogAxisKind::Y,
+        },
+        player: Some(1),
+        default_bindings: &[DefaultBinding::Mouse(MouseControl::AxisY)],
     },
 ];
 
@@ -782,25 +938,13 @@ impl AudioSource for MissileCommandSystem {
 }
 
 impl InputReceiver for MissileCommandSystem {
+    // Legacy shims: forward to the typed `handle_input`. Removed once
+    // `InputReceiver` is retired.
     fn set_input(&mut self, button: u8, pressed: bool) {
-        match button {
-            // IN0 switches (active-low: clear bit when pressed, set when released)
-            INPUT_COIN => set_bit_active_low(&mut self.in0, 5, pressed), // Left Coin
-            INPUT_START1 => set_bit_active_low(&mut self.in0, 4, pressed), // 1P Start
-            INPUT_START2 => set_bit_active_low(&mut self.in0, 3, pressed), // 2P Start
-
-            // IN1 fire buttons (active-low: clear bit when pressed, set when released)
-            INPUT_FIRE_LEFT => set_bit_active_low(&mut self.in1, 2, pressed), // Left fire
-            INPUT_FIRE_CENTER => set_bit_active_low(&mut self.in1, 1, pressed), // Center fire
-            INPUT_FIRE_RIGHT => set_bit_active_low(&mut self.in1, 0, pressed), // Right fire
-
-            // Trackball directions
-            INPUT_TRACK_L => self.trackball_l_pressed = pressed,
-            INPUT_TRACK_R => self.trackball_r_pressed = pressed,
-            INPUT_TRACK_U => self.trackball_u_pressed = pressed,
-            INPUT_TRACK_D => self.trackball_d_pressed = pressed,
-            _ => {}
-        }
+        self.handle_input(InputEvent::Button {
+            id: InputId(button as u16),
+            pressed,
+        });
     }
 
     fn input_map(&self) -> &[InputButton] {
@@ -808,17 +952,59 @@ impl InputReceiver for MissileCommandSystem {
     }
 
     fn set_analog(&mut self, axis: u8, delta: i32) {
-        match axis {
-            ANALOG_TRACKBALL_X => self.mouse_accum_x += delta,
-            // Y axis inverted: mouse down (positive delta) moves crosshair down on screen,
-            // but the trackball counter must decrease for downward motion.
-            ANALOG_TRACKBALL_Y => self.mouse_accum_y -= delta,
-            _ => {}
-        }
+        let id = match axis {
+            ANALOG_TRACKBALL_X => CTRL_TRACKBALL_X,
+            ANALOG_TRACKBALL_Y => CTRL_TRACKBALL_Y,
+            _ => return,
+        };
+        self.handle_input(InputEvent::Relative {
+            id,
+            delta: delta as f32,
+        });
     }
 
     fn analog_map(&self) -> &[AnalogInput] {
         MISSILE_ANALOG_MAP
+    }
+}
+
+impl InputConfigurable for MissileCommandSystem {
+    fn input_controls(&self) -> &'static [InputControl] {
+        MISSILE_CONTROLS
+    }
+
+    fn handle_input(&mut self, event: InputEvent) {
+        match event {
+            InputEvent::Button { id, pressed } => match id.0 as u8 {
+                // IN0 switches (active-low: clear bit when pressed, set when released)
+                INPUT_COIN => set_bit_active_low(&mut self.in0, 5, pressed), // Left Coin
+                INPUT_START1 => set_bit_active_low(&mut self.in0, 4, pressed), // 1P Start
+                INPUT_START2 => set_bit_active_low(&mut self.in0, 3, pressed), // 2P Start
+
+                // IN1 fire buttons (active-low: clear bit when pressed, set when released)
+                INPUT_FIRE_LEFT => set_bit_active_low(&mut self.in1, 2, pressed), // Left fire
+                INPUT_FIRE_CENTER => set_bit_active_low(&mut self.in1, 1, pressed), // Center fire
+                INPUT_FIRE_RIGHT => set_bit_active_low(&mut self.in1, 0, pressed), // Right fire
+
+                // Trackball directions
+                INPUT_TRACK_L => self.trackball_l_pressed = pressed,
+                INPUT_TRACK_R => self.trackball_r_pressed = pressed,
+                INPUT_TRACK_U => self.trackball_u_pressed = pressed,
+                INPUT_TRACK_D => self.trackball_d_pressed = pressed,
+                _ => {}
+            },
+            InputEvent::Relative { id, delta } => {
+                let delta = delta as i32;
+                if id == CTRL_TRACKBALL_X {
+                    self.mouse_accum_x += delta;
+                } else if id == CTRL_TRACKBALL_Y {
+                    // Y axis inverted: mouse down (positive delta) moves the crosshair
+                    // down on screen, but the trackball counter must decrease.
+                    self.mouse_accum_y -= delta;
+                }
+            }
+            InputEvent::Absolute { .. } => {}
+        }
     }
 }
 
@@ -933,7 +1119,7 @@ impl SaveState for MissileCommandSystem {
     }
 }
 
-crate::impl_default_frontend_capabilities!(MissileCommandSystem);
+crate::impl_default_frontend_capabilities!(MissileCommandSystem, no_input);
 
 // ---------------------------------------------------------------------------
 // Machine registry
@@ -1088,5 +1274,50 @@ mod tests {
         assert_eq!(sys.analog_map().len(), 2);
         assert_eq!(sys.analog_map()[0].name, "Trackball X");
         assert_eq!(sys.analog_map()[1].name, "Trackball Y");
+    }
+
+    #[test]
+    fn handle_input_relative_accumulates_like_set_analog() {
+        // Typed Relative events feed the same accumulators as set_analog,
+        // including the Y inversion.
+        let mut sys = MissileCommandSystem::new();
+        sys.handle_input(InputEvent::Relative {
+            id: CTRL_TRACKBALL_X,
+            delta: 3.0,
+        });
+        sys.handle_input(InputEvent::Relative {
+            id: CTRL_TRACKBALL_Y,
+            delta: -5.0,
+        });
+        assert_eq!(sys.mouse_accum_x, 3);
+        assert_eq!(sys.mouse_accum_y, 5);
+    }
+
+    #[test]
+    fn handle_input_button_matches_set_input() {
+        let mut typed = MissileCommandSystem::new();
+        typed.handle_input(InputEvent::Button {
+            id: InputId(INPUT_FIRE_CENTER as u16),
+            pressed: true,
+        });
+        let mut legacy = MissileCommandSystem::new();
+        legacy.set_input(INPUT_FIRE_CENTER, true);
+        // Active-low: pressing clears IN1 bit 1.
+        assert_eq!(typed.in1 & 0b10, 0);
+        assert_eq!(typed.in1, legacy.in1);
+    }
+
+    #[test]
+    fn input_controls_include_analog_axes() {
+        let sys = MissileCommandSystem::new();
+        let controls = sys.input_controls();
+        assert_eq!(
+            controls.len(),
+            MISSILE_INPUT_MAP.len() + MISSILE_ANALOG_MAP.len()
+        );
+        assert!(
+            controls.iter().any(|c| c.stable_name == "trackball_x"
+                && matches!(c.kind, InputKind::AnalogAxis { .. }))
+        );
     }
 }
