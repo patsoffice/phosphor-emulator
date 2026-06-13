@@ -619,15 +619,24 @@ mod tests {
         assert_eq!(sys.board.input_ports[3], 0x00);
 
         // Press right
-        sys.set_input(INPUT_RIGHT, true);
+        sys.handle_input(InputEvent::Button {
+            id: InputId((INPUT_RIGHT) as u16),
+            pressed: true,
+        });
         assert_eq!(sys.board.input_ports[3], 0x01); // bit 0 set
 
         // Release right
-        sys.set_input(INPUT_RIGHT, false);
+        sys.handle_input(InputEvent::Button {
+            id: InputId((INPUT_RIGHT) as u16),
+            pressed: false,
+        });
         assert_eq!(sys.board.input_ports[3], 0x00);
 
         // Press up
-        sys.set_input(INPUT_UP, true);
+        sys.handle_input(InputEvent::Button {
+            id: InputId((INPUT_UP) as u16),
+            pressed: true,
+        });
         assert_eq!(sys.board.input_ports[3], 0x04); // bit 2 set
     }
 
@@ -639,15 +648,24 @@ mod tests {
         assert_eq!(sys.board.input_ports[0], 0x40);
 
         // Press coin 1 (active-high, bit 2)
-        sys.set_input(INPUT_COIN1, true);
+        sys.handle_input(InputEvent::Button {
+            id: InputId((INPUT_COIN1) as u16),
+            pressed: true,
+        });
         assert_eq!(sys.board.input_ports[0], 0x44);
 
         // Press service (active-low, bit 6 → clear)
-        sys.set_input(INPUT_SERVICE, true);
+        sys.handle_input(InputEvent::Button {
+            id: InputId((INPUT_SERVICE) as u16),
+            pressed: true,
+        });
         assert_eq!(sys.board.input_ports[0], 0x04); // bit 6 cleared
 
         // Release service (bit 6 → set)
-        sys.set_input(INPUT_SERVICE, false);
+        sys.handle_input(InputEvent::Button {
+            id: InputId((INPUT_SERVICE) as u16),
+            pressed: false,
+        });
         assert_eq!(sys.board.input_ports[0], 0x44);
     }
 

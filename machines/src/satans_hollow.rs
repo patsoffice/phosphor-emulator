@@ -687,15 +687,24 @@ mod tests {
         assert_eq!(sys.board.ssio.input_port(1), 0xFF);
 
         // Press coin
-        sys.set_input(INPUT_COIN1, true);
+        sys.handle_input(InputEvent::Button {
+            id: InputId((INPUT_COIN1) as u16),
+            pressed: true,
+        });
         assert_eq!(sys.board.ssio.input_port(0), 0xFE); // bit 0 cleared
 
         // Release coin
-        sys.set_input(INPUT_COIN1, false);
+        sys.handle_input(InputEvent::Button {
+            id: InputId((INPUT_COIN1) as u16),
+            pressed: false,
+        });
         assert_eq!(sys.board.ssio.input_port(0), 0xFF); // bit 0 set again
 
         // Press fire
-        sys.set_input(INPUT_FIRE, true);
+        sys.handle_input(InputEvent::Button {
+            id: InputId((INPUT_FIRE) as u16),
+            pressed: true,
+        });
         assert_eq!(sys.board.ssio.input_port(1), 0xF7); // bit 3 cleared
     }
 

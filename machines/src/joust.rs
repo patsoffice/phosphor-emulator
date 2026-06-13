@@ -581,7 +581,10 @@ mod tests {
         });
 
         let mut legacy = JoustSystem::new();
-        legacy.set_input(INPUT_P1_FLAP, true);
+        legacy.handle_input(InputEvent::Button {
+            id: InputId((INPUT_P1_FLAP) as u16),
+            pressed: true,
+        });
 
         assert_eq!(typed.p1_controls, 0b100);
         assert_eq!(typed.p1_controls, legacy.p1_controls);

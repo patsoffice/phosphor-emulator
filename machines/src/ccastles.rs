@@ -1500,20 +1500,31 @@ mod tests {
         let mut sys = CrystalCastlesSystem::new();
         // Default: all active-low bits set (released)
         assert_eq!(sys.in0 & 0x02, 0x02, "Coin L should be released");
-        sys.set_input(INPUT_COIN_L, true);
+        sys.handle_input(InputEvent::Button {
+            id: InputId((INPUT_COIN_L) as u16),
+            pressed: true,
+        });
         assert_eq!(
             sys.in0 & 0x02,
             0x00,
             "Coin L should be pressed (active-low)"
         );
-        sys.set_input(INPUT_COIN_L, false);
+        sys.handle_input(InputEvent::Button {
+            id: InputId((INPUT_COIN_L) as u16),
+            pressed: false,
+        });
         assert_eq!(sys.in0 & 0x02, 0x02, "Coin L should be released again");
     }
 
     #[test]
-    fn analog_map_returns_two_axes() {
+    fn exposes_two_analog_axes() {
         let sys = CrystalCastlesSystem::new();
-        assert_eq!(sys.analog_map().len(), 2);
+        let analog = sys
+            .input_controls()
+            .iter()
+            .filter(|c| matches!(c.kind, InputKind::AnalogAxis { .. }))
+            .count();
+        assert_eq!(analog, 2);
     }
 
     #[test]

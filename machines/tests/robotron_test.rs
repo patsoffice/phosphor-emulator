@@ -1,4 +1,6 @@
-use phosphor_core::core::machine::{InputReceiver, MachineCore, Renderable};
+use phosphor_core::core::machine::{
+    InputConfigurable, InputEvent, InputId, MachineCore, Renderable,
+};
 use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::m6809::CcFlag;
 use phosphor_machines::robotron::RobotronSystem;
@@ -16,10 +18,10 @@ fn test_display_size() {
 #[test]
 fn test_input_map_has_all_buttons() {
     let sys = RobotronSystem::new();
-    let map = sys.input_map();
-    assert_eq!(map.len(), 11); // 4 move + 4 fire + 2 start + coin
-    for button in map {
-        assert!(!button.name.is_empty());
+    let controls = sys.input_controls();
+    assert_eq!(controls.len(), 11); // 4 move + 4 fire + 2 start + coin
+    for control in controls {
+        assert!(!control.label.is_empty());
     }
 }
 
@@ -49,30 +51,54 @@ fn test_move_stick_wiring() {
     assert_eq!(val, 0x00, "All released should be 0x00 (active-high)");
 
     // Press Move Up → bit 0
-    sys.set_input(INPUT_MOVE_UP, true);
+    sys.handle_input(InputEvent::Button {
+        id: InputId((INPUT_MOVE_UP) as u16),
+        pressed: true,
+    });
     let val = sys.read(BusMaster::Cpu(0), 0xC804);
     assert_eq!(val & 0x01, 0x01, "Move Up should set bit 0");
 
     // Press Move Down → bit 1
-    sys.set_input(INPUT_MOVE_DOWN, true);
+    sys.handle_input(InputEvent::Button {
+        id: InputId((INPUT_MOVE_DOWN) as u16),
+        pressed: true,
+    });
     let val = sys.read(BusMaster::Cpu(0), 0xC804);
     assert_eq!(val & 0x03, 0x03, "Move Up+Down should set bits 0-1");
 
     // Press Move Left → bit 2
-    sys.set_input(INPUT_MOVE_LEFT, true);
+    sys.handle_input(InputEvent::Button {
+        id: InputId((INPUT_MOVE_LEFT) as u16),
+        pressed: true,
+    });
     let val = sys.read(BusMaster::Cpu(0), 0xC804);
     assert_eq!(val & 0x07, 0x07, "Move Up+Down+Left should set bits 0-2");
 
     // Press Move Right → bit 3
-    sys.set_input(INPUT_MOVE_RIGHT, true);
+    sys.handle_input(InputEvent::Button {
+        id: InputId((INPUT_MOVE_RIGHT) as u16),
+        pressed: true,
+    });
     let val = sys.read(BusMaster::Cpu(0), 0xC804);
     assert_eq!(val & 0x0F, 0x0F, "All directions should set bits 0-3");
 
     // Release all
-    sys.set_input(INPUT_MOVE_UP, false);
-    sys.set_input(INPUT_MOVE_DOWN, false);
-    sys.set_input(INPUT_MOVE_LEFT, false);
-    sys.set_input(INPUT_MOVE_RIGHT, false);
+    sys.handle_input(InputEvent::Button {
+        id: InputId((INPUT_MOVE_UP) as u16),
+        pressed: false,
+    });
+    sys.handle_input(InputEvent::Button {
+        id: InputId((INPUT_MOVE_DOWN) as u16),
+        pressed: false,
+    });
+    sys.handle_input(InputEvent::Button {
+        id: InputId((INPUT_MOVE_LEFT) as u16),
+        pressed: false,
+    });
+    sys.handle_input(InputEvent::Button {
+        id: InputId((INPUT_MOVE_RIGHT) as u16),
+        pressed: false,
+    });
     let val = sys.read(BusMaster::Cpu(0), 0xC804);
     assert_eq!(val & 0x0F, 0x00, "All released should clear bits 0-3");
 }
@@ -91,17 +117,29 @@ fn test_fire_stick_port_a_wiring() {
     sys.write(BusMaster::Cpu(0), 0xC805, 0x04); // CRA data select
 
     // Fire Up → Port A bit 6
-    sys.set_input(INPUT_FIRE_UP, true);
+    sys.handle_input(InputEvent::Button {
+        id: InputId((INPUT_FIRE_UP) as u16),
+        pressed: true,
+    });
     let val = sys.read(BusMaster::Cpu(0), 0xC804);
     assert_eq!(val & 0x40, 0x40, "Fire Up should set Port A bit 6");
 
     // Fire Down → Port A bit 7
-    sys.set_input(INPUT_FIRE_DOWN, true);
+    sys.handle_input(InputEvent::Button {
+        id: InputId((INPUT_FIRE_DOWN) as u16),
+        pressed: true,
+    });
     let val = sys.read(BusMaster::Cpu(0), 0xC804);
     assert_eq!(val & 0xC0, 0xC0, "Fire Up+Down should set Port A bits 6-7");
 
-    sys.set_input(INPUT_FIRE_UP, false);
-    sys.set_input(INPUT_FIRE_DOWN, false);
+    sys.handle_input(InputEvent::Button {
+        id: InputId((INPUT_FIRE_UP) as u16),
+        pressed: false,
+    });
+    sys.handle_input(InputEvent::Button {
+        id: InputId((INPUT_FIRE_DOWN) as u16),
+        pressed: false,
+    });
     let val = sys.read(BusMaster::Cpu(0), 0xC804);
     assert_eq!(val & 0xC0, 0x00, "Released should clear bits 6-7");
 }
@@ -116,12 +154,18 @@ fn test_fire_stick_port_b_wiring() {
     sys.write(BusMaster::Cpu(0), 0xC807, 0x04); // CRB data select
 
     // Fire Left → Port B bit 0
-    sys.set_input(INPUT_FIRE_LEFT, true);
+    sys.handle_input(InputEvent::Button {
+        id: InputId((INPUT_FIRE_LEFT) as u16),
+        pressed: true,
+    });
     let val = sys.read(BusMaster::Cpu(0), 0xC806);
     assert_eq!(val & 0x01, 0x01, "Fire Left should set Port B bit 0");
 
     // Fire Right → Port B bit 1
-    sys.set_input(INPUT_FIRE_RIGHT, true);
+    sys.handle_input(InputEvent::Button {
+        id: InputId((INPUT_FIRE_RIGHT) as u16),
+        pressed: true,
+    });
     let val = sys.read(BusMaster::Cpu(0), 0xC806);
     assert_eq!(
         val & 0x03,
@@ -129,8 +173,14 @@ fn test_fire_stick_port_b_wiring() {
         "Fire Left+Right should set Port B bits 0-1"
     );
 
-    sys.set_input(INPUT_FIRE_LEFT, false);
-    sys.set_input(INPUT_FIRE_RIGHT, false);
+    sys.handle_input(InputEvent::Button {
+        id: InputId((INPUT_FIRE_LEFT) as u16),
+        pressed: false,
+    });
+    sys.handle_input(InputEvent::Button {
+        id: InputId((INPUT_FIRE_RIGHT) as u16),
+        pressed: false,
+    });
     let val = sys.read(BusMaster::Cpu(0), 0xC806);
     assert_eq!(val & 0x03, 0x00, "Released should clear bits 0-1");
 }
@@ -149,17 +199,29 @@ fn test_start_buttons_wiring() {
     sys.write(BusMaster::Cpu(0), 0xC805, 0x04);
 
     // P1 Start → bit 4 (note: swapped from Joust where P1=bit5)
-    sys.set_input(INPUT_P1_START, true);
+    sys.handle_input(InputEvent::Button {
+        id: InputId((INPUT_P1_START) as u16),
+        pressed: true,
+    });
     let val = sys.read(BusMaster::Cpu(0), 0xC804);
     assert_eq!(val & 0x10, 0x10, "P1 Start should set bit 4");
 
     // P2 Start → bit 5 (note: swapped from Joust where P2=bit4)
-    sys.set_input(INPUT_P2_START, true);
+    sys.handle_input(InputEvent::Button {
+        id: InputId((INPUT_P2_START) as u16),
+        pressed: true,
+    });
     let val = sys.read(BusMaster::Cpu(0), 0xC804);
     assert_eq!(val & 0x30, 0x30, "P1+P2 Start should set bits 4-5");
 
-    sys.set_input(INPUT_P1_START, false);
-    sys.set_input(INPUT_P2_START, false);
+    sys.handle_input(InputEvent::Button {
+        id: InputId((INPUT_P1_START) as u16),
+        pressed: false,
+    });
+    sys.handle_input(InputEvent::Button {
+        id: InputId((INPUT_P2_START) as u16),
+        pressed: false,
+    });
     let val = sys.read(BusMaster::Cpu(0), 0xC804);
     assert_eq!(val & 0x30, 0x00, "Released should clear bits 4-5");
 }
@@ -178,11 +240,17 @@ fn test_coin_wiring() {
     sys.write(BusMaster::Cpu(0), 0xC80D, 0x04); // CRA data select
 
     // Coin → ROM PIA Port A bit 4
-    sys.set_input(INPUT_COIN, true);
+    sys.handle_input(InputEvent::Button {
+        id: InputId((INPUT_COIN) as u16),
+        pressed: true,
+    });
     let val = sys.read(BusMaster::Cpu(0), 0xC80C);
     assert_eq!(val & 0x10, 0x10, "Coin pressed should set bit 4");
 
-    sys.set_input(INPUT_COIN, false);
+    sys.handle_input(InputEvent::Button {
+        id: InputId((INPUT_COIN) as u16),
+        pressed: false,
+    });
     let val = sys.read(BusMaster::Cpu(0), 0xC80C);
     assert_eq!(val & 0x10, 0x00, "Coin released should clear bit 4");
 }
@@ -323,8 +391,14 @@ fn test_reset_clears_input_state() {
     sys.write(BusMaster::Cpu(0), 0xC807, 0x04);
 
     // Set some inputs
-    sys.set_input(INPUT_MOVE_UP, true);
-    sys.set_input(INPUT_FIRE_LEFT, true);
+    sys.handle_input(InputEvent::Button {
+        id: InputId((INPUT_MOVE_UP) as u16),
+        pressed: true,
+    });
+    sys.handle_input(InputEvent::Button {
+        id: InputId((INPUT_FIRE_LEFT) as u16),
+        pressed: true,
+    });
 
     sys.board.load_program_rom(0x2FFE, &[0xD0, 0x00]);
     sys.reset();
@@ -471,10 +545,22 @@ fn test_twin_stick_simultaneous_input() {
     sys.write(BusMaster::Cpu(0), 0xC807, 0x04);
 
     // Move up-right + fire down-left simultaneously
-    sys.set_input(INPUT_MOVE_UP, true);
-    sys.set_input(INPUT_MOVE_RIGHT, true);
-    sys.set_input(INPUT_FIRE_DOWN, true);
-    sys.set_input(INPUT_FIRE_LEFT, true);
+    sys.handle_input(InputEvent::Button {
+        id: InputId((INPUT_MOVE_UP) as u16),
+        pressed: true,
+    });
+    sys.handle_input(InputEvent::Button {
+        id: InputId((INPUT_MOVE_RIGHT) as u16),
+        pressed: true,
+    });
+    sys.handle_input(InputEvent::Button {
+        id: InputId((INPUT_FIRE_DOWN) as u16),
+        pressed: true,
+    });
+    sys.handle_input(InputEvent::Button {
+        id: InputId((INPUT_FIRE_LEFT) as u16),
+        pressed: true,
+    });
 
     let port_a = sys.read(BusMaster::Cpu(0), 0xC804);
     let port_b = sys.read(BusMaster::Cpu(0), 0xC806);
@@ -486,10 +572,22 @@ fn test_twin_stick_simultaneous_input() {
     // Port B: fire left (bit 0)
     assert_eq!(port_b & 0x01, 0x01, "Fire Left on bit 0");
 
-    sys.set_input(INPUT_MOVE_UP, false);
-    sys.set_input(INPUT_MOVE_RIGHT, false);
-    sys.set_input(INPUT_FIRE_DOWN, false);
-    sys.set_input(INPUT_FIRE_LEFT, false);
+    sys.handle_input(InputEvent::Button {
+        id: InputId((INPUT_MOVE_UP) as u16),
+        pressed: false,
+    });
+    sys.handle_input(InputEvent::Button {
+        id: InputId((INPUT_MOVE_RIGHT) as u16),
+        pressed: false,
+    });
+    sys.handle_input(InputEvent::Button {
+        id: InputId((INPUT_FIRE_DOWN) as u16),
+        pressed: false,
+    });
+    sys.handle_input(InputEvent::Button {
+        id: InputId((INPUT_FIRE_LEFT) as u16),
+        pressed: false,
+    });
 }
 
 // =================================================================
@@ -506,7 +604,10 @@ fn test_no_mux_required() {
     sys.write(BusMaster::Cpu(0), 0xC805, 0x04);
 
     // Robotron inputs should appear regardless of CB2 state (no mux)
-    sys.set_input(INPUT_MOVE_UP, true);
+    sys.handle_input(InputEvent::Button {
+        id: InputId((INPUT_MOVE_UP) as u16),
+        pressed: true,
+    });
 
     // CB2 = 0 (default) — inputs still visible
     let val = sys.read(BusMaster::Cpu(0), 0xC804);
@@ -517,5 +618,8 @@ fn test_no_mux_required() {
     let val = sys.read(BusMaster::Cpu(0), 0xC804);
     assert_eq!(val & 0x01, 0x01, "Input visible with CB2=1 (no mux)");
 
-    sys.set_input(INPUT_MOVE_UP, false);
+    sys.handle_input(InputEvent::Button {
+        id: InputId((INPUT_MOVE_UP) as u16),
+        pressed: false,
+    });
 }

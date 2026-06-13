@@ -1215,7 +1215,10 @@ mod tests {
     #[test]
     fn set_analog_accumulates_x() {
         let mut sys = MissileCommandSystem::new();
-        sys.set_analog(ANALOG_TRACKBALL_X, 3);
+        sys.handle_input(InputEvent::Relative {
+            id: CTRL_TRACKBALL_X,
+            delta: (3) as f32,
+        });
         assert_eq!(sys.mouse_accum_x, 3);
         // Counter unchanged until tick() drains
         assert_eq!(sys.trackball_x, 0);
@@ -1224,7 +1227,10 @@ mod tests {
     #[test]
     fn set_analog_accumulates_y_inverted() {
         let mut sys = MissileCommandSystem::new();
-        sys.set_analog(ANALOG_TRACKBALL_Y, -5);
+        sys.handle_input(InputEvent::Relative {
+            id: CTRL_TRACKBALL_Y,
+            delta: (-5) as f32,
+        });
         // Y axis is inverted: negative mouse delta → positive accumulator
         assert_eq!(sys.mouse_accum_y, 5);
     }
@@ -1269,11 +1275,15 @@ mod tests {
     }
 
     #[test]
-    fn analog_map_returns_two_axes() {
+    fn exposes_two_analog_axes() {
         let sys = MissileCommandSystem::new();
-        assert_eq!(sys.analog_map().len(), 2);
-        assert_eq!(sys.analog_map()[0].name, "Trackball X");
-        assert_eq!(sys.analog_map()[1].name, "Trackball Y");
+        let axes: Vec<&str> = sys
+            .input_controls()
+            .iter()
+            .filter(|c| matches!(c.kind, InputKind::AnalogAxis { .. }))
+            .map(|c| c.label)
+            .collect();
+        assert_eq!(axes, vec!["Trackball X", "Trackball Y"]);
     }
 
     #[test]
@@ -1301,7 +1311,10 @@ mod tests {
             pressed: true,
         });
         let mut legacy = MissileCommandSystem::new();
-        legacy.set_input(INPUT_FIRE_CENTER, true);
+        legacy.handle_input(InputEvent::Button {
+            id: InputId((INPUT_FIRE_CENTER) as u16),
+            pressed: true,
+        });
         // Active-low: pressing clears IN1 bit 1.
         assert_eq!(typed.in1 & 0b10, 0);
         assert_eq!(typed.in1, legacy.in1);

@@ -1517,10 +1517,16 @@ mod tests {
         // Default: bit 0 high (not pressed)
         assert_eq!(sys.fire_buttons & 0x01, 0x01);
         // Press: bit 0 goes low
-        sys.set_input(INPUT_P1_FIRE, true);
+        sys.handle_input(InputEvent::Button {
+            id: InputId((INPUT_P1_FIRE) as u16),
+            pressed: true,
+        });
         assert_eq!(sys.fire_buttons & 0x01, 0x00);
         // Release: bit 0 goes high again
-        sys.set_input(INPUT_P1_FIRE, false);
+        sys.handle_input(InputEvent::Button {
+            id: InputId((INPUT_P1_FIRE) as u16),
+            pressed: false,
+        });
         assert_eq!(sys.fire_buttons & 0x01, 0x01);
     }
 
@@ -1530,13 +1536,22 @@ mod tests {
         // Default: bits 0-3 and 6-7 all high (nothing pressed, unknown bits active-low)
         assert_eq!(sys.coin_start, 0xCF);
         // Coin press: bit 0 goes low
-        sys.set_input(INPUT_COIN, true);
+        sys.handle_input(InputEvent::Button {
+            id: InputId((INPUT_COIN) as u16),
+            pressed: true,
+        });
         assert_eq!(sys.coin_start & 0x01, 0x00);
         // Start1 press: bit 2 goes low
-        sys.set_input(INPUT_START1, true);
+        sys.handle_input(InputEvent::Button {
+            id: InputId((INPUT_START1) as u16),
+            pressed: true,
+        });
         assert_eq!(sys.coin_start & 0x04, 0x00);
         // Start2 press: bit 3 goes low
-        sys.set_input(INPUT_START2, true);
+        sys.handle_input(InputEvent::Button {
+            id: InputId((INPUT_START2) as u16),
+            pressed: true,
+        });
         assert_eq!(sys.coin_start & 0x08, 0x00);
     }
 
@@ -1835,14 +1850,20 @@ mod tests {
     #[test]
     fn set_analog_y_updates_trackball() {
         let mut sys = make_system();
-        sys.set_analog(ANALOG_TRACKBALL_Y, 6); // 6 / 3 = 2
+        sys.handle_input(InputEvent::Relative {
+            id: CTRL_TRACKBALL_Y,
+            delta: (6) as f32,
+        }); // 6 / 3 = 2
         assert_eq!(sys.trackball_pos[0], 2);
     }
 
     #[test]
     fn set_analog_x_reversed() {
         let mut sys = make_system();
-        sys.set_analog(ANALOG_TRACKBALL_X, 9); // 9 / 3 = 3
+        sys.handle_input(InputEvent::Relative {
+            id: CTRL_TRACKBALL_X,
+            delta: (9) as f32,
+        }); // 9 / 3 = 3
         // X axis is reversed: positive mouse motion (right) subtracts
         assert_eq!(sys.trackball_pos[1], 253); // 0u8.wrapping_sub(3)
     }
@@ -1850,16 +1871,23 @@ mod tests {
     #[test]
     fn set_analog_negative_x() {
         let mut sys = make_system();
-        sys.set_analog(ANALOG_TRACKBALL_X, -9); // -9 / 3 = -3
+        sys.handle_input(InputEvent::Relative {
+            id: CTRL_TRACKBALL_X,
+            delta: (-9) as f32,
+        }); // -9 / 3 = -3
         // Negative delta (left) → adds 3 due to reversal
         assert_eq!(sys.trackball_pos[1], 3); // 0u8.wrapping_sub(-3 as u8) = wrapping_sub(253) = 3
     }
 
     #[test]
-    fn analog_map_returns_two_axes() {
+    fn exposes_two_analog_axes() {
         let sys = make_system();
-        assert_eq!(sys.analog_map().len(), 2);
-        assert_eq!(sys.analog_map()[0].name, "Trackball X");
-        assert_eq!(sys.analog_map()[1].name, "Trackball Y");
+        let axes: Vec<&str> = sys
+            .input_controls()
+            .iter()
+            .filter(|c| matches!(c.kind, InputKind::AnalogAxis { .. }))
+            .map(|c| c.label)
+            .collect();
+        assert_eq!(axes, vec!["Trackball X", "Trackball Y"]);
     }
 }

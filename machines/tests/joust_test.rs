@@ -1,4 +1,6 @@
-use phosphor_core::core::machine::{InputReceiver, MachineCore, Renderable};
+use phosphor_core::core::machine::{
+    InputConfigurable, InputEvent, InputId, MachineCore, Renderable,
+};
 use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::m6809::CcFlag;
 use phosphor_machines::joust::JoustSystem;
@@ -16,10 +18,10 @@ fn test_display_size() {
 #[test]
 fn test_input_map_has_all_buttons() {
     let sys = JoustSystem::new();
-    let map = sys.input_map();
-    assert_eq!(map.len(), 9); // 8 player buttons + coin
-    for button in map {
-        assert!(!button.name.is_empty());
+    let controls = sys.input_controls();
+    assert_eq!(controls.len(), 9); // 8 player buttons + coin
+    for control in controls {
+        assert!(!control.label.is_empty());
     }
 }
 
@@ -128,11 +130,17 @@ fn test_set_input_active_high() {
     // Press P1 Left (button 0 → mux bit 0) — mux defaults to P2 (CB2=0),
     // so P1 controls don't appear until CB2=1. Set CB2 output high first.
     sys.write(BusMaster::Cpu(0), 0xC807, 0x3C); // CRB: bits 5:4:3 = 111 → CB2 output high
-    sys.set_input(INPUT_P1_LEFT, true);
+    sys.handle_input(InputEvent::Button {
+        id: InputId((INPUT_P1_LEFT) as u16),
+        pressed: true,
+    });
     let val = sys.read(BusMaster::Cpu(0), 0xC804);
     assert_eq!(val & 0x01, 0x01, "P1 Left pressed should set bit 0");
 
-    sys.set_input(INPUT_P1_LEFT, false);
+    sys.handle_input(InputEvent::Button {
+        id: InputId((INPUT_P1_LEFT) as u16),
+        pressed: false,
+    });
     let val = sys.read(BusMaster::Cpu(0), 0xC804);
     assert_eq!(val & 0x01, 0x00, "P1 Left released should clear bit 0");
 }
@@ -148,17 +156,29 @@ fn test_set_input_multiple_buttons() {
     sys.write(BusMaster::Cpu(0), 0xC807, 0x3C); // CRB: CB2 output high (P1)
 
     // Press P1 Left and P1 Flap simultaneously
-    sys.set_input(INPUT_P1_LEFT, true);
-    sys.set_input(INPUT_P1_FLAP, true);
+    sys.handle_input(InputEvent::Button {
+        id: InputId((INPUT_P1_LEFT) as u16),
+        pressed: true,
+    });
+    sys.handle_input(InputEvent::Button {
+        id: InputId((INPUT_P1_FLAP) as u16),
+        pressed: true,
+    });
     let val = sys.read(BusMaster::Cpu(0), 0xC804);
     assert_eq!(val & 0x05, 0x05, "Left (bit 0) and Flap (bit 2) both set");
 
     // Release P1 Left, P1 Flap still held
-    sys.set_input(INPUT_P1_LEFT, false);
+    sys.handle_input(InputEvent::Button {
+        id: InputId((INPUT_P1_LEFT) as u16),
+        pressed: false,
+    });
     let val = sys.read(BusMaster::Cpu(0), 0xC804);
     assert_eq!(val & 0x05, 0x04, "Only Flap (bit 2) should remain");
 
-    sys.set_input(INPUT_P1_FLAP, false);
+    sys.handle_input(InputEvent::Button {
+        id: InputId((INPUT_P1_FLAP) as u16),
+        pressed: false,
+    });
     let val = sys.read(BusMaster::Cpu(0), 0xC804);
     assert_eq!(val & 0x07, 0x00, "All released");
 }
@@ -173,11 +193,17 @@ fn test_set_input_coin() {
     sys.write(BusMaster::Cpu(0), 0xC80D, 0x04); // CRA data select
 
     // Coin triggers ROM PIA Port A bit 4 (active-high)
-    sys.set_input(INPUT_COIN, true);
+    sys.handle_input(InputEvent::Button {
+        id: InputId((INPUT_COIN) as u16),
+        pressed: true,
+    });
     let val = sys.read(BusMaster::Cpu(0), 0xC80C);
     assert_eq!(val & 0x10, 0x10, "Coin pressed should set bit 4");
 
-    sys.set_input(INPUT_COIN, false);
+    sys.handle_input(InputEvent::Button {
+        id: InputId((INPUT_COIN) as u16),
+        pressed: false,
+    });
     let val = sys.read(BusMaster::Cpu(0), 0xC80C);
     assert_eq!(val & 0x10, 0x00, "Coin released should clear bit 4");
 }
@@ -192,8 +218,14 @@ fn test_input_muxing() {
     sys.write(BusMaster::Cpu(0), 0xC805, 0x04); // CRA data select
 
     // Press both P1 Right and P2 Left
-    sys.set_input(INPUT_P1_RIGHT, true);
-    sys.set_input(INPUT_P2_LEFT, true);
+    sys.handle_input(InputEvent::Button {
+        id: InputId((INPUT_P1_RIGHT) as u16),
+        pressed: true,
+    });
+    sys.handle_input(InputEvent::Button {
+        id: InputId((INPUT_P2_LEFT) as u16),
+        pressed: true,
+    });
 
     // CB2=0 (default) selects P2: should see P2 Left (bit 0)
     let val = sys.read(BusMaster::Cpu(0), 0xC804);
@@ -204,8 +236,14 @@ fn test_input_muxing() {
     let val = sys.read(BusMaster::Cpu(0), 0xC804);
     assert_eq!(val & 0x03, 0x02, "CB2=1 → P1 selected, P1 Right on bit 1");
 
-    sys.set_input(INPUT_P1_RIGHT, false);
-    sys.set_input(INPUT_P2_LEFT, false);
+    sys.handle_input(InputEvent::Button {
+        id: InputId((INPUT_P1_RIGHT) as u16),
+        pressed: false,
+    });
+    sys.handle_input(InputEvent::Button {
+        id: InputId((INPUT_P2_LEFT) as u16),
+        pressed: false,
+    });
 }
 
 // =================================================================

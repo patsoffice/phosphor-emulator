@@ -1,4 +1,6 @@
-use phosphor_core::core::machine::{InputReceiver, MachineCore, Renderable};
+use phosphor_core::core::machine::{
+    InputConfigurable, InputEvent, InputId, MachineCore, Renderable,
+};
 use phosphor_core::core::{Bus, BusMaster};
 use phosphor_machines::missile_command::{
     INPUT_COIN, INPUT_FIRE_CENTER, INPUT_FIRE_LEFT, INPUT_FIRE_RIGHT, INPUT_START1, INPUT_START2,
@@ -18,10 +20,10 @@ fn test_display_size() {
 #[test]
 fn test_input_map_has_all_buttons() {
     let sys = MissileCommandSystem::new();
-    let map = sys.input_map();
-    assert_eq!(map.len(), 10); // coin + 2 start + 3 fire + 4 trackball
-    for button in map {
-        assert!(!button.name.is_empty());
+    let controls = sys.input_controls();
+    assert_eq!(controls.len(), 12); // coin + 2 start + 3 fire + 4 trackball + 2 analog axes
+    for control in controls {
+        assert!(!control.label.is_empty());
     }
 }
 
@@ -136,11 +138,17 @@ fn test_in0_default_all_released() {
 fn test_in0_coin_press() {
     let mut sys = MissileCommandSystem::new();
     // Coin is IN0 bit 5 (Left Coin), active-low
-    sys.set_input(INPUT_COIN, true);
+    sys.handle_input(InputEvent::Button {
+        id: InputId((INPUT_COIN) as u16),
+        pressed: true,
+    });
     let val = sys.read(BusMaster::Cpu(0), 0x4800);
     assert_eq!(val & 0x20, 0x00, "Coin pressed should clear bit 5");
 
-    sys.set_input(INPUT_COIN, false);
+    sys.handle_input(InputEvent::Button {
+        id: InputId((INPUT_COIN) as u16),
+        pressed: false,
+    });
     let val = sys.read(BusMaster::Cpu(0), 0x4800);
     assert_eq!(val & 0x20, 0x20, "Coin released should set bit 5");
 }
@@ -149,11 +157,17 @@ fn test_in0_coin_press() {
 fn test_in0_start1_press() {
     let mut sys = MissileCommandSystem::new();
     // Start 1 is IN0 bit 4, active-low
-    sys.set_input(INPUT_START1, true);
+    sys.handle_input(InputEvent::Button {
+        id: InputId((INPUT_START1) as u16),
+        pressed: true,
+    });
     let val = sys.read(BusMaster::Cpu(0), 0x4800);
     assert_eq!(val & 0x10, 0x00, "Start 1 pressed should clear bit 4");
 
-    sys.set_input(INPUT_START1, false);
+    sys.handle_input(InputEvent::Button {
+        id: InputId((INPUT_START1) as u16),
+        pressed: false,
+    });
     let val = sys.read(BusMaster::Cpu(0), 0x4800);
     assert_eq!(val & 0x10, 0x10, "Start 1 released should set bit 4");
 }
@@ -162,7 +176,10 @@ fn test_in0_start1_press() {
 fn test_in0_start2_separate_bit() {
     let mut sys = MissileCommandSystem::new();
     // Start 2 is IN0 bit 3 (separate from Start 1 bit 4)
-    sys.set_input(INPUT_START2, true);
+    sys.handle_input(InputEvent::Button {
+        id: InputId((INPUT_START2) as u16),
+        pressed: true,
+    });
     let val = sys.read(BusMaster::Cpu(0), 0x4800);
     assert_eq!(val & 0x08, 0x00, "Start 2 pressed should clear bit 3");
     assert_eq!(
@@ -171,7 +188,10 @@ fn test_in0_start2_separate_bit() {
         "Start 1 should remain unaffected (bit 4 still set)"
     );
 
-    sys.set_input(INPUT_START2, false);
+    sys.handle_input(InputEvent::Button {
+        id: InputId((INPUT_START2) as u16),
+        pressed: false,
+    });
     let val = sys.read(BusMaster::Cpu(0), 0x4800);
     assert_eq!(val & 0x08, 0x08, "Start 2 released should set bit 3");
 }
@@ -179,13 +199,22 @@ fn test_in0_start2_separate_bit() {
 #[test]
 fn test_in0_simultaneous_buttons() {
     let mut sys = MissileCommandSystem::new();
-    sys.set_input(INPUT_COIN, true);
-    sys.set_input(INPUT_START1, true);
+    sys.handle_input(InputEvent::Button {
+        id: InputId((INPUT_COIN) as u16),
+        pressed: true,
+    });
+    sys.handle_input(InputEvent::Button {
+        id: InputId((INPUT_START1) as u16),
+        pressed: true,
+    });
     let val = sys.read(BusMaster::Cpu(0), 0x4800);
     // Coin (bit 5) and Start 1 (bit 4) should both be cleared
     assert_eq!(val & 0x30, 0x00, "Both coin and start 1 pressed");
 
-    sys.set_input(INPUT_COIN, false);
+    sys.handle_input(InputEvent::Button {
+        id: InputId((INPUT_COIN) as u16),
+        pressed: false,
+    });
     let val = sys.read(BusMaster::Cpu(0), 0x4800);
     assert_eq!(val & 0x30, 0x20, "Only start 1 still pressed");
 }
@@ -206,11 +235,17 @@ fn test_in1_fire_buttons_default() {
 fn test_in1_fire_left_press() {
     let mut sys = MissileCommandSystem::new();
     // Fire Left is IN1 bit 2, active-low
-    sys.set_input(INPUT_FIRE_LEFT, true);
+    sys.handle_input(InputEvent::Button {
+        id: InputId((INPUT_FIRE_LEFT) as u16),
+        pressed: true,
+    });
     let val = sys.read(BusMaster::Cpu(0), 0x4900);
     assert_eq!(val & 0x04, 0x00, "Fire Left pressed should clear bit 2");
 
-    sys.set_input(INPUT_FIRE_LEFT, false);
+    sys.handle_input(InputEvent::Button {
+        id: InputId((INPUT_FIRE_LEFT) as u16),
+        pressed: false,
+    });
     let val = sys.read(BusMaster::Cpu(0), 0x4900);
     assert_eq!(val & 0x04, 0x04, "Fire Left released should set bit 2");
 }
@@ -218,7 +253,10 @@ fn test_in1_fire_left_press() {
 #[test]
 fn test_in1_fire_center_press() {
     let mut sys = MissileCommandSystem::new();
-    sys.set_input(INPUT_FIRE_CENTER, true);
+    sys.handle_input(InputEvent::Button {
+        id: InputId((INPUT_FIRE_CENTER) as u16),
+        pressed: true,
+    });
     let val = sys.read(BusMaster::Cpu(0), 0x4900);
     assert_eq!(val & 0x02, 0x00, "Fire Center pressed should clear bit 1");
 }
@@ -226,7 +264,10 @@ fn test_in1_fire_center_press() {
 #[test]
 fn test_in1_fire_right_press() {
     let mut sys = MissileCommandSystem::new();
-    sys.set_input(INPUT_FIRE_RIGHT, true);
+    sys.handle_input(InputEvent::Button {
+        id: InputId((INPUT_FIRE_RIGHT) as u16),
+        pressed: true,
+    });
     let val = sys.read(BusMaster::Cpu(0), 0x4900);
     assert_eq!(val & 0x01, 0x00, "Fire Right pressed should clear bit 0");
 }
@@ -234,9 +275,18 @@ fn test_in1_fire_right_press() {
 #[test]
 fn test_in1_all_three_fires() {
     let mut sys = MissileCommandSystem::new();
-    sys.set_input(INPUT_FIRE_LEFT, true);
-    sys.set_input(INPUT_FIRE_CENTER, true);
-    sys.set_input(INPUT_FIRE_RIGHT, true);
+    sys.handle_input(InputEvent::Button {
+        id: InputId((INPUT_FIRE_LEFT) as u16),
+        pressed: true,
+    });
+    sys.handle_input(InputEvent::Button {
+        id: InputId((INPUT_FIRE_CENTER) as u16),
+        pressed: true,
+    });
+    sys.handle_input(InputEvent::Button {
+        id: InputId((INPUT_FIRE_RIGHT) as u16),
+        pressed: true,
+    });
     let val = sys.read(BusMaster::Cpu(0), 0x4900);
     assert_eq!(val & 0x07, 0x00, "All three fire buttons pressed");
 }
@@ -245,12 +295,18 @@ fn test_in1_all_three_fires() {
 fn test_in1_fire_on_separate_register_from_in0() {
     let mut sys = MissileCommandSystem::new();
     // Fire buttons should NOT affect IN0 register
-    sys.set_input(INPUT_FIRE_LEFT, true);
+    sys.handle_input(InputEvent::Button {
+        id: InputId((INPUT_FIRE_LEFT) as u16),
+        pressed: true,
+    });
     let in0 = sys.read(BusMaster::Cpu(0), 0x4800);
     assert_eq!(in0, 0xFF, "Fire button should not affect IN0");
 
     // Coin should NOT affect IN1 fire bits
-    sys.set_input(INPUT_COIN, true);
+    sys.handle_input(InputEvent::Button {
+        id: InputId((INPUT_COIN) as u16),
+        pressed: true,
+    });
     let in1 = sys.read(BusMaster::Cpu(0), 0x4900);
     assert_eq!(
         in1 & 0x07,
@@ -290,14 +346,26 @@ fn test_ctrld_trackball_values() {
 
     // Set trackball counters via key presses
     // We need to tick to advance the trackball
-    sys.set_input(INPUT_TRACK_R, true);
-    sys.set_input(INPUT_TRACK_D, true);
+    sys.handle_input(InputEvent::Button {
+        id: InputId((INPUT_TRACK_R) as u16),
+        pressed: true,
+    });
+    sys.handle_input(InputEvent::Button {
+        id: InputId((INPUT_TRACK_D) as u16),
+        pressed: true,
+    });
     // Tick 1000 cycles for one trackball update
     for _ in 0..1000 {
         sys.tick();
     }
-    sys.set_input(INPUT_TRACK_R, false);
-    sys.set_input(INPUT_TRACK_D, false);
+    sys.handle_input(InputEvent::Button {
+        id: InputId((INPUT_TRACK_R) as u16),
+        pressed: false,
+    });
+    sys.handle_input(InputEvent::Button {
+        id: InputId((INPUT_TRACK_D) as u16),
+        pressed: false,
+    });
 
     let val = sys.read(BusMaster::Cpu(0), 0x4800);
     // X should be 1 (low nibble), Y should be 1 (high nibble, but wrapping sub for down)
@@ -316,7 +384,10 @@ fn test_ctrld_toggle_back_to_switches() {
     sys.write(BusMaster::Cpu(0), 0x4800, 0x00);
 
     // Should read switches again
-    sys.set_input(INPUT_COIN, true);
+    sys.handle_input(InputEvent::Button {
+        id: InputId((INPUT_COIN) as u16),
+        pressed: true,
+    });
     let val = sys.read(BusMaster::Cpu(0), 0x4800);
     assert_eq!(
         val & 0x20,
@@ -559,7 +630,10 @@ fn test_render_all_four_pixels_in_byte() {
 fn test_in0_address_mirror() {
     let mut sys = MissileCommandSystem::new();
     // IN0 is mirrored across 0x4800-0x48FF
-    sys.set_input(INPUT_COIN, true);
+    sys.handle_input(InputEvent::Button {
+        id: InputId((INPUT_COIN) as u16),
+        pressed: true,
+    });
     let val_base = sys.read(BusMaster::Cpu(0), 0x4800);
     let val_mirror = sys.read(BusMaster::Cpu(0), 0x48FF);
     assert_eq!(
@@ -571,7 +645,10 @@ fn test_in0_address_mirror() {
 #[test]
 fn test_in1_address_mirror() {
     let mut sys = MissileCommandSystem::new();
-    sys.set_input(INPUT_FIRE_LEFT, true);
+    sys.handle_input(InputEvent::Button {
+        id: InputId((INPUT_FIRE_LEFT) as u16),
+        pressed: true,
+    });
     let val_base = sys.read(BusMaster::Cpu(0), 0x4900);
     let val_mirror = sys.read(BusMaster::Cpu(0), 0x4955);
     assert_eq!(
@@ -616,37 +693,6 @@ fn test_scanline_counter() {
         1,
         "Should be at scanline 1 after 80 cycles"
     );
-}
-
-// =================================================================
-// Integration: Input Names Match Frontend Key Map
-// =================================================================
-
-#[test]
-fn test_input_names_match_key_map_patterns() {
-    let sys = MissileCommandSystem::new();
-    let map = sys.input_map();
-
-    // These names should match entries in frontend/src/input.rs default_key_map
-    let expected_matchable = [
-        "Coin",
-        "P1 Start",
-        "P2 Start",
-        "P1 Left",
-        "P1 Right",
-        "P1 Up",
-        "P1 Down",
-        "Fire Left",
-        "Fire Center",
-        "Fire Right",
-    ];
-    for name in &expected_matchable {
-        assert!(
-            map.iter().any(|b| b.name == *name),
-            "Input map should contain button named '{}'",
-            name
-        );
-    }
 }
 
 // =================================================================

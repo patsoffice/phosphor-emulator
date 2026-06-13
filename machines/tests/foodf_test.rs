@@ -5,7 +5,7 @@
 //! containing the `foodf` chips to run it; otherwise it skips cleanly.
 
 use phosphor_core::core::machine::{
-    AudioSource, InputReceiver, MachineCore, Nvram, Renderable, SaveState,
+    AudioSource, InputConfigurable, InputEvent, InputId, MachineCore, Nvram, Renderable, SaveState,
 };
 use phosphor_core::core::{Bus, BusMaster};
 use phosphor_machines::foodf::{
@@ -30,10 +30,10 @@ fn render_frame_does_not_panic() {
 #[test]
 fn input_map_is_complete() {
     let sys = FoodFightSystem::new();
-    assert_eq!(sys.input_map().len(), 12);
-    assert_eq!(sys.analog_map().len(), 4);
-    for b in sys.input_map() {
-        assert!(!b.name.is_empty());
+    // 12 digital controls + 4 analog stick axes.
+    assert_eq!(sys.input_controls().len(), 16);
+    for c in sys.input_controls() {
+        assert!(!c.label.is_empty());
     }
 }
 
@@ -43,13 +43,25 @@ fn digital_inputs_are_active_low() {
     // Idle: SYSTEM reads all-high (nothing pressed).
     assert_eq!(sys.read(BusMaster::Cpu(0), 0x94_8000) & 0xFF, 0xFF);
 
-    sys.set_input(INPUT_COIN1, true); // bit 0
-    sys.set_input(INPUT_START1, true); // bit 2
-    sys.set_input(INPUT_P1_THROW, true); // bit 5
+    sys.handle_input(InputEvent::Button {
+        id: InputId((INPUT_COIN1) as u16),
+        pressed: true,
+    }); // bit 0
+    sys.handle_input(InputEvent::Button {
+        id: InputId((INPUT_START1) as u16),
+        pressed: true,
+    }); // bit 2
+    sys.handle_input(InputEvent::Button {
+        id: InputId((INPUT_P1_THROW) as u16),
+        pressed: true,
+    }); // bit 5
     let v = sys.read(BusMaster::Cpu(0), 0x94_8000) & 0xFF;
     assert_eq!(v, 0xFF & !0x01 & !0x04 & !0x20);
 
-    sys.set_input(INPUT_COIN1, false);
+    sys.handle_input(InputEvent::Button {
+        id: InputId((INPUT_COIN1) as u16),
+        pressed: false,
+    });
     let v = sys.read(BusMaster::Cpu(0), 0x94_8000) & 0xFF;
     assert_eq!(v & 0x01, 0x01); // released
 }
@@ -60,7 +72,10 @@ fn p1_stick_keys_drive_the_adc() {
     // Select ADC channel 3 (P1 X) and confirm it centers at 0x7F, swings on key.
     sys.write(BusMaster::Cpu(0), 0x94_4006, 0); // channel = (0x944006>>1)&7 = 3
     assert_eq!(sys.read(BusMaster::Cpu(0), 0x94_0001) & 0xFF, 0x7F);
-    sys.set_input(INPUT_P1_LEFT, true);
+    sys.handle_input(InputEvent::Button {
+        id: InputId((INPUT_P1_LEFT) as u16),
+        pressed: true,
+    });
     assert_eq!(sys.read(BusMaster::Cpu(0), 0x94_0001) & 0xFF, 0x00);
 }
 
