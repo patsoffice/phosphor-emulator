@@ -46,5 +46,11 @@ pub const P2_DOWN: &[D] = &[D::Key(K::S)];
 
 // System buttons.
 pub const COIN: &[D] = &[D::Key(K::Num5), D::Pad(P::Button(PB::Back))];
+pub const SERVICE: &[D] = &[D::Key(K::Num6)];
 pub const P1_START: &[D] = &[D::Key(K::Num1), D::Pad(P::Button(PB::Start))];
 pub const P2_START: &[D] = &[D::Key(K::Num2)];
+
+// Primary action button: keyboard key plus gamepad A. The legacy map gives
+// gamepad A to the first present of P1 Fire / P1 Flap / P1 Jump / Fire Center,
+// so use this for a machine's single primary fire action.
+pub const FIRE: &[D] = &[D::Key(K::Space), D::Pad(P::Button(PB::A))];

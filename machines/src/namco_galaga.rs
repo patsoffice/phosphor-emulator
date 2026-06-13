@@ -1,5 +1,7 @@
 use phosphor_core::core::debug_trace::{DebugEvent, DebugEventKind, DebugTraceBuffer};
-use phosphor_core::core::machine::{InputButton, TimingConfig};
+use phosphor_core::core::machine::{
+    DefaultBinding, Direction, InputButton, InputControl, InputId, InputKind, KeyId, TimingConfig,
+};
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::watchpoint::Watchpoints;
 use phosphor_core::core::{Bus, BusMaster, ClockDivider};
@@ -91,6 +93,150 @@ pub const NAMCO_GALAGA_INPUT_MAP: &[InputButton] = &[
     InputButton {
         id: INPUT_SERVICE,
         name: "Service",
+    },
+];
+
+/// Typed logical controls shared across the Galaga family (Galaga, Dig Dug).
+/// `InputId`s reuse the `INPUT_*` numbering. Default bindings mirror the legacy
+/// name-matched defaults.
+pub const NAMCO_GALAGA_CONTROLS: &[InputControl] = &[
+    InputControl {
+        id: InputId(INPUT_P1_UP as u16),
+        stable_name: "p1_up",
+        label: "P1 Up",
+        kind: InputKind::DigitalDirection {
+            direction: Direction::Up,
+        },
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_UP,
+    },
+    InputControl {
+        id: InputId(INPUT_P1_RIGHT as u16),
+        stable_name: "p1_right",
+        label: "P1 Right",
+        kind: InputKind::DigitalDirection {
+            direction: Direction::Right,
+        },
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_RIGHT,
+    },
+    InputControl {
+        id: InputId(INPUT_P1_DOWN as u16),
+        stable_name: "p1_down",
+        label: "P1 Down",
+        kind: InputKind::DigitalDirection {
+            direction: Direction::Down,
+        },
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_DOWN,
+    },
+    InputControl {
+        id: InputId(INPUT_P1_LEFT as u16),
+        stable_name: "p1_left",
+        label: "P1 Left",
+        kind: InputKind::DigitalDirection {
+            direction: Direction::Left,
+        },
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_LEFT,
+    },
+    InputControl {
+        id: InputId(INPUT_P2_UP as u16),
+        stable_name: "p2_up",
+        label: "P2 Up",
+        kind: InputKind::DigitalDirection {
+            direction: Direction::Up,
+        },
+        player: Some(2),
+        default_bindings: crate::input_defaults::P2_UP,
+    },
+    InputControl {
+        id: InputId(INPUT_P2_RIGHT as u16),
+        stable_name: "p2_right",
+        label: "P2 Right",
+        kind: InputKind::DigitalDirection {
+            direction: Direction::Right,
+        },
+        player: Some(2),
+        default_bindings: crate::input_defaults::P2_RIGHT,
+    },
+    InputControl {
+        id: InputId(INPUT_P2_DOWN as u16),
+        stable_name: "p2_down",
+        label: "P2 Down",
+        kind: InputKind::DigitalDirection {
+            direction: Direction::Down,
+        },
+        player: Some(2),
+        default_bindings: crate::input_defaults::P2_DOWN,
+    },
+    InputControl {
+        id: InputId(INPUT_P2_LEFT as u16),
+        stable_name: "p2_left",
+        label: "P2 Left",
+        kind: InputKind::DigitalDirection {
+            direction: Direction::Left,
+        },
+        player: Some(2),
+        default_bindings: crate::input_defaults::P2_LEFT,
+    },
+    InputControl {
+        id: InputId(INPUT_P1_BUTTON1 as u16),
+        stable_name: "p1_fire",
+        label: "P1 Fire",
+        kind: InputKind::Button,
+        player: Some(1),
+        default_bindings: crate::input_defaults::FIRE,
+    },
+    InputControl {
+        id: InputId(INPUT_P2_BUTTON1 as u16),
+        stable_name: "p2_fire",
+        label: "P2 Fire",
+        kind: InputKind::Button,
+        player: Some(2),
+        default_bindings: &[DefaultBinding::Key(KeyId::E)],
+    },
+    InputControl {
+        id: InputId(INPUT_START1 as u16),
+        stable_name: "p1_start",
+        label: "P1 Start",
+        kind: InputKind::Start,
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_START,
+    },
+    InputControl {
+        id: InputId(INPUT_START2 as u16),
+        stable_name: "p2_start",
+        label: "P2 Start",
+        kind: InputKind::Start,
+        player: Some(2),
+        default_bindings: crate::input_defaults::P2_START,
+    },
+    InputControl {
+        id: InputId(INPUT_COIN1 as u16),
+        stable_name: "coin1",
+        label: "Coin 1",
+        kind: InputKind::Coin,
+        player: None,
+        default_bindings: crate::input_defaults::COIN,
+    },
+    InputControl {
+        id: InputId(INPUT_COIN2 as u16),
+        stable_name: "coin2",
+        label: "Coin 2",
+        kind: InputKind::Coin,
+        player: None,
+        // Legacy bound every "Coin*" name to the 5 key; only the first also
+        // got gamepad Back (handled by Coin 1 above).
+        default_bindings: &[DefaultBinding::Key(KeyId::Num5)],
+    },
+    InputControl {
+        id: InputId(INPUT_SERVICE as u16),
+        stable_name: "service",
+        label: "Service",
+        kind: InputKind::Service,
+        player: None,
+        default_bindings: crate::input_defaults::SERVICE,
     },
 ];
 

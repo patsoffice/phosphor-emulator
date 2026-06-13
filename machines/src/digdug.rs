@@ -1003,7 +1003,11 @@ impl AudioSource for DigDugSystem {
 
 impl InputReceiver for DigDugSystem {
     fn set_input(&mut self, button: u8, pressed: bool) {
-        self.board.handle_input(button, pressed);
+        use phosphor_core::core::machine::{InputConfigurable, InputEvent, InputId};
+        self.handle_input(InputEvent::Button {
+            id: InputId(button as u16),
+            pressed,
+        });
     }
 
     fn input_map(&self) -> &[phosphor_core::core::machine::InputButton] {
@@ -1169,7 +1173,17 @@ impl Nvram for DigDugSystem {
     }
 }
 
-impl phosphor_core::core::machine::InputConfigurable for DigDugSystem {}
+impl phosphor_core::core::machine::InputConfigurable for DigDugSystem {
+    fn input_controls(&self) -> &'static [phosphor_core::core::machine::InputControl] {
+        namco_galaga::NAMCO_GALAGA_CONTROLS
+    }
+
+    fn handle_input(&mut self, event: phosphor_core::core::machine::InputEvent) {
+        if let phosphor_core::core::machine::InputEvent::Button { id, pressed } = event {
+            self.board.handle_input(id.0 as u8, pressed);
+        }
+    }
+}
 impl Profilable for DigDugSystem {}
 crate::impl_board_debug_trace!(DigDugSystem, board);
 
