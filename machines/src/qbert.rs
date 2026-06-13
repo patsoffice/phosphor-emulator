@@ -8,8 +8,9 @@ use std::time::Instant;
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
-    DefaultBinding, Direction, FrontendMachine, InputConfigurable, InputControl, InputEvent,
-    InputId, InputKind, KeyId, MachineCore, Nvram, Profilable, ProfileSpan, SaveState,
+    DefaultBinding, DipApplyTiming, DipChoice, DipOption, DipSwitchBank, DipSwitches, Direction,
+    FrontendMachine, InputConfigurable, InputControl, InputEvent, InputId, InputKind, KeyId,
+    MachineCore, Nvram, Profilable, ProfileSpan, SaveState,
 };
 use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
@@ -492,7 +493,107 @@ impl Profilable for QbertSystem {
         &self.board.profile_spans
     }
 }
-impl phosphor_core::core::machine::DipSwitches for QbertSystem {}
+/// DIP switch metadata for Q*bert's DSW byte (read flat at 0x5800, which the
+/// Gottlieb board exposes as I/O port 0 -> `board.dsw`). Choice bits and labels
+/// follow MAME's `qbert` layout; option defaults OR to the historical 0x00 the
+/// board powers on with (note: this leaves Kicker Off, where MAME's factory
+/// default is On). Bits 0x20/0x40/0x80 are unused.
+const QBERT_DIP_BANKS: &[DipSwitchBank] = &[DipSwitchBank {
+    name: "DSW",
+    options: &[
+        DipOption {
+            name: "Demo Sounds",
+            mask: 0x01,
+            apply: DipApplyTiming::Immediate,
+            choices: &[
+                DipChoice {
+                    label: "On",
+                    value: 0x00,
+                },
+                DipChoice {
+                    label: "Off",
+                    value: 0x01,
+                },
+            ],
+        },
+        DipOption {
+            name: "Kicker",
+            mask: 0x02,
+            apply: DipApplyTiming::Immediate,
+            choices: &[
+                DipChoice {
+                    label: "Off",
+                    value: 0x00,
+                },
+                DipChoice {
+                    label: "On",
+                    value: 0x02,
+                },
+            ],
+        },
+        DipOption {
+            name: "Cabinet",
+            mask: 0x04,
+            apply: DipApplyTiming::Immediate,
+            choices: &[
+                DipChoice {
+                    label: "Upright",
+                    value: 0x00,
+                },
+                DipChoice {
+                    label: "Cocktail",
+                    value: 0x04,
+                },
+            ],
+        },
+        DipOption {
+            name: "Demo Mode (Cheat)",
+            mask: 0x08,
+            apply: DipApplyTiming::Immediate,
+            choices: &[
+                DipChoice {
+                    label: "Off",
+                    value: 0x00,
+                },
+                DipChoice {
+                    label: "On",
+                    value: 0x08,
+                },
+            ],
+        },
+        DipOption {
+            name: "Free Play",
+            mask: 0x10,
+            apply: DipApplyTiming::Immediate,
+            choices: &[
+                DipChoice {
+                    label: "Off",
+                    value: 0x00,
+                },
+                DipChoice {
+                    label: "On",
+                    value: 0x10,
+                },
+            ],
+        },
+    ],
+}];
+
+impl DipSwitches for QbertSystem {
+    fn dip_banks(&self) -> &'static [DipSwitchBank] {
+        QBERT_DIP_BANKS
+    }
+
+    fn dip_bank_value(&self, bank: usize) -> u8 {
+        if bank == 0 { self.board.dsw } else { 0 }
+    }
+
+    fn set_dip_bank_value(&mut self, bank: usize, value: u8) {
+        if bank == 0 {
+            self.board.dsw = value;
+        }
+    }
+}
 
 impl phosphor_core::core::debug_trace::DebugTrace for QbertSystem {}
 
@@ -517,6 +618,24 @@ inventory::submit! {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dip_default_and_metadata() {
+        let sys = QbertSystem::new();
+        assert_eq!(sys.dip_bank_value(0), 0x00);
+        crate::assert_dip_banks_valid(sys.dip_banks(), &[sys.dip_bank_value(0)]);
+    }
+
+    #[test]
+    fn set_dip_option_masks_only_its_bits() {
+        let mut sys = QbertSystem::new();
+        // Kicker is option 1 (mask 0x02); pick "On" (0x02).
+        sys.set_dip_option(0, 1, 0x02);
+        assert_eq!(sys.dip_bank_value(0), 0x02);
+        // Free Play is option 4 (mask 0x10); enabling it preserves Kicker.
+        sys.set_dip_option(0, 4, 0x10);
+        assert_eq!(sys.dip_bank_value(0), 0x12);
+    }
 
     #[test]
     fn save_load_round_trip() {

@@ -1,9 +1,10 @@
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
-    AnalogAxisKind, AudioSource, DefaultBinding, Direction, InputConfigurable, InputControl,
-    InputEvent, InputId, InputKind, KeyId, MachineCore, MouseControl, Nvram, PadButton, PadControl,
-    Profilable, Renderable, SaveState,
+    AnalogAxisKind, AudioSource, DefaultBinding, DipApplyTiming, DipChoice, DipOption,
+    DipSwitchBank, DipSwitches, Direction, InputConfigurable, InputControl, InputEvent, InputId,
+    InputKind, KeyId, MachineCore, MouseControl, Nvram, PadButton, PadControl, Profilable,
+    Renderable, SaveState,
 };
 use phosphor_core::core::save_state::{self, SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::{AccessKind, AddressSpace16};
@@ -1258,7 +1259,46 @@ impl Nvram for CrystalCastlesSystem {
 }
 
 impl Profilable for CrystalCastlesSystem {}
-impl phosphor_core::core::machine::DipSwitches for CrystalCastlesSystem {}
+/// DIP switch metadata for Crystal Castles. The option byte is read back
+/// through POKEY2's ALLPOT input (MAME wires `pokey2.allpot_r` to its "IN1"
+/// port); of that port, Cabinet is the only documented option switch — the
+/// other bits are start buttons and undocumented switches. Gameplay options
+/// (difficulty, bonus, etc.) are configured via the in-game service menu stored
+/// in the EAROM, not hardware DIPs. Default 0x00 = upright.
+const CCASTLES_DIP_BANKS: &[DipSwitchBank] = &[DipSwitchBank {
+    name: "Options",
+    options: &[DipOption {
+        name: "Cabinet",
+        mask: 0x20,
+        apply: DipApplyTiming::Immediate,
+        choices: &[
+            DipChoice {
+                label: "Upright",
+                value: 0x00,
+            },
+            DipChoice {
+                label: "Cocktail",
+                value: 0x20,
+            },
+        ],
+    }],
+}];
+
+impl DipSwitches for CrystalCastlesSystem {
+    fn dip_banks(&self) -> &'static [DipSwitchBank] {
+        CCASTLES_DIP_BANKS
+    }
+
+    fn dip_bank_value(&self, bank: usize) -> u8 {
+        if bank == 0 { self.dip_switches } else { 0 }
+    }
+
+    fn set_dip_bank_value(&mut self, bank: usize, value: u8) {
+        if bank == 0 {
+            self.dip_switches = value;
+        }
+    }
+}
 impl phosphor_core::core::debug_trace::DebugTrace for CrystalCastlesSystem {}
 
 // ---------------------------------------------------------------------------
@@ -1281,6 +1321,22 @@ inventory::submit! {
 mod tests {
     use super::*;
     use phosphor_core::cpu::CpuStateTrait;
+
+    #[test]
+    fn dip_default_and_metadata() {
+        let sys = CrystalCastlesSystem::new();
+        assert_eq!(sys.dip_bank_value(0), 0x00); // upright
+        crate::assert_dip_banks_valid(sys.dip_banks(), &[sys.dip_bank_value(0)]);
+    }
+
+    #[test]
+    fn set_dip_option_masks_only_its_bits() {
+        let mut sys = CrystalCastlesSystem::new();
+        sys.dip_switches = 0x05; // stray bits outside the Cabinet mask
+        // Cabinet is option 0 (mask 0x20); pick "Cocktail" (0x20).
+        sys.set_dip_option(0, 0, 0x20);
+        assert_eq!(sys.dip_bank_value(0), 0x25); // 0x05 preserved + cabinet bit
+    }
 
     #[test]
     fn save_load_round_trip() {
