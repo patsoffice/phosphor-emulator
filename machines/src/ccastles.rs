@@ -1,8 +1,9 @@
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
-    AnalogInput, AudioSource, InputButton, InputReceiver, MachineCore, Nvram, Profilable,
-    Renderable, SaveState,
+    AnalogAxisKind, AnalogInput, AudioSource, DefaultBinding, Direction, InputButton,
+    InputConfigurable, InputControl, InputEvent, InputId, InputKind, InputReceiver, KeyId,
+    MachineCore, MouseControl, Nvram, PadButton, PadControl, Profilable, Renderable, SaveState,
 };
 use phosphor_core::core::save_state::{self, SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::{AccessKind, AddressSpace16};
@@ -223,6 +224,119 @@ const CCASTLES_ANALOG_MAP: &[AnalogInput] = &[
     AnalogInput {
         id: ANALOG_TRACKBALL_Y,
         name: "Trackball Y",
+    },
+];
+
+// Typed control ids for the analog axes (distinct from the 0..=7 digital ids).
+const CTRL_TRACKBALL_X: InputId = InputId(8);
+const CTRL_TRACKBALL_Y: InputId = InputId(9);
+
+/// Typed logical controls. `InputId`s reuse the `INPUT_*` numbering for digital
+/// controls. Default bindings mirror the legacy name-matched defaults — the
+/// combo jump buttons keep their dual key bindings (start + action key), the
+/// gamepad Start / mouse-button bindings, and the trackball maps to the mouse
+/// (Y inverted in `handle_input`).
+const CCASTLES_CONTROLS: &[InputControl] = &[
+    InputControl {
+        id: InputId(INPUT_COIN_L as u16),
+        stable_name: "coin",
+        label: "Coin",
+        kind: InputKind::Coin,
+        player: None,
+        default_bindings: crate::input_defaults::COIN,
+    },
+    InputControl {
+        id: InputId(INPUT_COIN_R as u16),
+        stable_name: "coin2",
+        label: "Coin 2",
+        kind: InputKind::Coin,
+        player: None,
+        default_bindings: &[DefaultBinding::Key(KeyId::Num5)],
+    },
+    InputControl {
+        id: InputId(INPUT_JUMP_LEFT as u16),
+        stable_name: "jump_left",
+        label: "Jump L / P1 Start",
+        kind: InputKind::Button,
+        player: Some(1),
+        default_bindings: &[
+            DefaultBinding::Key(KeyId::Num1),
+            DefaultBinding::Key(KeyId::Space),
+            DefaultBinding::Pad(PadControl::Button(PadButton::Start)),
+            DefaultBinding::Mouse(MouseControl::Left),
+        ],
+    },
+    InputControl {
+        id: InputId(INPUT_JUMP_RIGHT as u16),
+        stable_name: "jump_right",
+        label: "Jump R / P2 Start",
+        kind: InputKind::Button,
+        player: Some(2),
+        default_bindings: &[
+            DefaultBinding::Key(KeyId::Num2),
+            DefaultBinding::Key(KeyId::LShift),
+            DefaultBinding::Mouse(MouseControl::Right),
+        ],
+    },
+    InputControl {
+        id: InputId(INPUT_TRACK_L as u16),
+        stable_name: "p1_left",
+        label: "P1 Left",
+        kind: InputKind::DigitalDirection {
+            direction: Direction::Left,
+        },
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_LEFT,
+    },
+    InputControl {
+        id: InputId(INPUT_TRACK_R as u16),
+        stable_name: "p1_right",
+        label: "P1 Right",
+        kind: InputKind::DigitalDirection {
+            direction: Direction::Right,
+        },
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_RIGHT,
+    },
+    InputControl {
+        id: InputId(INPUT_TRACK_U as u16),
+        stable_name: "p1_up",
+        label: "P1 Up",
+        kind: InputKind::DigitalDirection {
+            direction: Direction::Up,
+        },
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_UP,
+    },
+    InputControl {
+        id: InputId(INPUT_TRACK_D as u16),
+        stable_name: "p1_down",
+        label: "P1 Down",
+        kind: InputKind::DigitalDirection {
+            direction: Direction::Down,
+        },
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_DOWN,
+    },
+    InputControl {
+        id: CTRL_TRACKBALL_X,
+        stable_name: "trackball_x",
+        label: "Trackball X",
+        kind: InputKind::AnalogAxis {
+            axis: AnalogAxisKind::X,
+        },
+        player: Some(1),
+        default_bindings: &[DefaultBinding::Mouse(MouseControl::AxisX)],
+    },
+    InputControl {
+        id: CTRL_TRACKBALL_Y,
+        stable_name: "trackball_y",
+        label: "Trackball Y",
+        kind: InputKind::AnalogAxis {
+            axis: AnalogAxisKind::Y,
+        },
+        player: Some(1),
+        default_bindings: &[DefaultBinding::Mouse(MouseControl::AxisY)],
     },
 ];
 
@@ -1016,17 +1130,10 @@ impl AudioSource for CrystalCastlesSystem {
 
 impl InputReceiver for CrystalCastlesSystem {
     fn set_input(&mut self, button: u8, pressed: bool) {
-        match button {
-            INPUT_COIN_L => set_bit_active_low(&mut self.in0, 1, pressed),
-            INPUT_COIN_R => set_bit_active_low(&mut self.in0, 0, pressed),
-            INPUT_JUMP_LEFT => set_bit_active_low(&mut self.in0, 6, pressed),
-            INPUT_JUMP_RIGHT => set_bit_active_low(&mut self.in0, 7, pressed),
-            INPUT_TRACK_L => self.trackball_l_pressed = pressed,
-            INPUT_TRACK_R => self.trackball_r_pressed = pressed,
-            INPUT_TRACK_U => self.trackball_u_pressed = pressed,
-            INPUT_TRACK_D => self.trackball_d_pressed = pressed,
-            _ => {}
-        }
+        self.handle_input(InputEvent::Button {
+            id: InputId(button as u16),
+            pressed,
+        });
     }
 
     fn input_map(&self) -> &[InputButton] {
@@ -1034,16 +1141,51 @@ impl InputReceiver for CrystalCastlesSystem {
     }
 
     fn set_analog(&mut self, axis: u8, delta: i32) {
-        match axis {
-            ANALOG_TRACKBALL_X => self.mouse_accum_x += delta,
-            // Y inverted: mouse down → trackball counter increases (moves down)
-            ANALOG_TRACKBALL_Y => self.mouse_accum_y -= delta,
-            _ => {}
-        }
+        let id = match axis {
+            ANALOG_TRACKBALL_X => CTRL_TRACKBALL_X,
+            ANALOG_TRACKBALL_Y => CTRL_TRACKBALL_Y,
+            _ => return,
+        };
+        self.handle_input(InputEvent::Relative {
+            id,
+            delta: delta as f32,
+        });
     }
 
     fn analog_map(&self) -> &[AnalogInput] {
         CCASTLES_ANALOG_MAP
+    }
+}
+
+impl InputConfigurable for CrystalCastlesSystem {
+    fn input_controls(&self) -> &'static [InputControl] {
+        CCASTLES_CONTROLS
+    }
+
+    fn handle_input(&mut self, event: InputEvent) {
+        match event {
+            InputEvent::Button { id, pressed } => match id.0 as u8 {
+                INPUT_COIN_L => set_bit_active_low(&mut self.in0, 1, pressed),
+                INPUT_COIN_R => set_bit_active_low(&mut self.in0, 0, pressed),
+                INPUT_JUMP_LEFT => set_bit_active_low(&mut self.in0, 6, pressed),
+                INPUT_JUMP_RIGHT => set_bit_active_low(&mut self.in0, 7, pressed),
+                INPUT_TRACK_L => self.trackball_l_pressed = pressed,
+                INPUT_TRACK_R => self.trackball_r_pressed = pressed,
+                INPUT_TRACK_U => self.trackball_u_pressed = pressed,
+                INPUT_TRACK_D => self.trackball_d_pressed = pressed,
+                _ => {}
+            },
+            InputEvent::Relative { id, delta } => {
+                let delta = delta as i32;
+                if id == CTRL_TRACKBALL_X {
+                    self.mouse_accum_x += delta;
+                } else if id == CTRL_TRACKBALL_Y {
+                    // Y inverted: mouse down → trackball counter increases (moves down)
+                    self.mouse_accum_y -= delta;
+                }
+            }
+            InputEvent::Absolute { .. } => {}
+        }
     }
 }
 
@@ -1190,7 +1332,6 @@ impl Nvram for CrystalCastlesSystem {
     }
 }
 
-impl phosphor_core::core::machine::InputConfigurable for CrystalCastlesSystem {}
 impl Profilable for CrystalCastlesSystem {}
 impl phosphor_core::core::debug_trace::DebugTrace for CrystalCastlesSystem {}
 
