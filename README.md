@@ -72,8 +72,9 @@ ROMs are matched by CRC32 checksum, so any MAME ROM naming convention works. All
 | F9               | Toggle Throttle                               |
 | F10              | Toggle Debug Overlay                          |
 | F11              | Toggle Mouse Grab                             |
-| F12              | Toggle Input Bindings Panel                   |
-| Backtick         | Toggle DIP Switches Panel                     |
+| F12              | Screenshot                                    |
+| Tab              | Toggle Input Bindings Panel                   |
+| \`               | Toggle DIP Switches Panel                     |
 | Escape           | Quit                                          |
 
 Game controllers are auto-mapped (D-pad, left stick, face buttons, right stick for twin-stick games). Place a [gamecontrollerdb.txt](https://github.com/mdqinc/SDL_GameControllerDB) in the working directory or `~/.config/phosphor/` for broader controller support.

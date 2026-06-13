@@ -156,12 +156,12 @@ pub fn run(
     // Profiler state (F8 to toggle)
     let mut profile_state = crate::profile::ProfileState::new();
 
-    // Input settings panel (F12 to toggle); only meaningful for machines with
+    // Input settings panel (Tab to toggle); only meaningful for machines with
     // typed controls.
     let mut settings_state = SettingsState::default();
     let has_typed_controls = !machine.input_controls().is_empty();
 
-    // DIP switch panel (backtick to toggle); only for machines with DIP banks.
+    // DIP switch panel (` to toggle); only for machines with DIP banks.
     let has_dip = !machine.dip_banks().is_empty();
 
     // Mouse grab for trackball games (F11 to toggle)
@@ -338,9 +338,9 @@ pub fn run(
                     );
                 }
 
-                // F12: Toggle input settings panel (machines with typed controls)
+                // Tab: Toggle input settings panel (machines with typed controls)
                 Event::KeyDown {
-                    scancode: Some(Scancode::F12),
+                    scancode: Some(Scancode::Tab),
                     repeat: false,
                     ..
                 } if has_typed_controls => {
