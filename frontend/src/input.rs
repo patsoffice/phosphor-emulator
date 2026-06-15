@@ -56,9 +56,9 @@ impl PhysicalInput {
     /// Encode as a stable, human-readable token for persistence
     /// (e.g. `"key:4"`, `"pad:a"`, `"padaxis:leftx:-"`, `"mouse:left"`,
     /// `"mouseaxis:y"`). The token is independent of `InputId` numbering.
-    pub fn to_token(&self) -> String {
+    pub fn to_token(self) -> String {
         match self {
-            PhysicalInput::Key(sc) => format!("key:{}", *sc as i32),
+            PhysicalInput::Key(sc) => format!("key:{}", sc as i32),
             PhysicalInput::PadButton(b) => format!("pad:{}", b.string()),
             PhysicalInput::PadAxis(axis, dir) => format!(
                 "padaxis:{}:{}",

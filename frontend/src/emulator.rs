@@ -420,21 +420,17 @@ pub fn run(
                     scancode: Some(sc),
                     repeat: false,
                     ..
-                } => {
-                    if !video.wants_keyboard() {
-                        for id in bindings.digital_targets(PhysicalInput::Key(sc)) {
-                            machine.handle_input(InputEvent::Button { id, pressed: true });
-                        }
+                } if !video.wants_keyboard() => {
+                    for id in bindings.digital_targets(PhysicalInput::Key(sc)) {
+                        machine.handle_input(InputEvent::Button { id, pressed: true });
                     }
                 }
 
                 Event::KeyUp {
                     scancode: Some(sc), ..
-                } => {
-                    if !video.wants_keyboard() {
-                        for id in bindings.digital_targets(PhysicalInput::Key(sc)) {
-                            machine.handle_input(InputEvent::Button { id, pressed: false });
-                        }
+                } if !video.wants_keyboard() => {
+                    for id in bindings.digital_targets(PhysicalInput::Key(sc)) {
+                        machine.handle_input(InputEvent::Button { id, pressed: false });
                     }
                 }
 
@@ -491,23 +487,19 @@ pub fn run(
                 }
 
                 // Mouse buttons → fire (trackball games)
-                Event::MouseButtonDown { mouse_btn, .. } => {
-                    if !video.wants_pointer() && mouse_grabbed {
-                        for id in
-                            bindings.digital_targets(PhysicalInput::MouseButtonInput(mouse_btn))
-                        {
-                            machine.handle_input(InputEvent::Button { id, pressed: true });
-                        }
+                Event::MouseButtonDown { mouse_btn, .. }
+                    if !video.wants_pointer() && mouse_grabbed =>
+                {
+                    for id in bindings.digital_targets(PhysicalInput::MouseButtonInput(mouse_btn)) {
+                        machine.handle_input(InputEvent::Button { id, pressed: true });
                     }
                 }
 
-                Event::MouseButtonUp { mouse_btn, .. } => {
-                    if !video.wants_pointer() && mouse_grabbed {
-                        for id in
-                            bindings.digital_targets(PhysicalInput::MouseButtonInput(mouse_btn))
-                        {
-                            machine.handle_input(InputEvent::Button { id, pressed: false });
-                        }
+                Event::MouseButtonUp { mouse_btn, .. }
+                    if !video.wants_pointer() && mouse_grabbed =>
+                {
+                    for id in bindings.digital_targets(PhysicalInput::MouseButtonInput(mouse_btn)) {
+                        machine.handle_input(InputEvent::Button { id, pressed: false });
                     }
                 }
 
