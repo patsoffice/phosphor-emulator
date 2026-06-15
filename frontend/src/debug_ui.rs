@@ -72,6 +72,10 @@ pub enum DeviceAction {
 pub struct DebugState {
     pub active: bool,
     pub run_mode: RunMode,
+    /// Global pause toggled by the P key, independent of the debug UI. When the
+    /// debug UI is inactive this gates emulation in [`execute_frame`]; while the
+    /// debug UI is active it is ignored and `run_mode` governs instead.
+    pub global_paused: bool,
     pub cpu_panels: Vec<CpuPanel>,
     pub device_panels: Vec<DevicePanel>,
     pub step_cpu: usize,
@@ -140,6 +144,7 @@ impl DebugState {
         Self {
             active: false,
             run_mode: RunMode::Running,
+            global_paused: false,
             cpu_panels: Vec::new(),
             device_panels: Vec::new(),
             step_cpu: 0,
@@ -239,6 +244,12 @@ impl DebugState {
 /// Returns true if a full frame was executed (caller should drain audio).
 pub fn execute_frame(machine: &mut dyn FrontendMachine, state: &mut DebugState) -> bool {
     if !state.active {
+        // Global pause (P key): hold the machine without running a frame, so no
+        // audio is drained. The audio callback repeats its last sample, so the
+        // output stays silent rather than buzzing.
+        if state.global_paused {
+            return false;
+        }
         machine.run_frame();
         return true;
     }
