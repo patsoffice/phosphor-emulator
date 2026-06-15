@@ -150,8 +150,8 @@ impl PhysicalInput {
 }
 
 /// A persisted binding: a control referenced by its stable name plus a physical
-/// input token. Stored per machine (keyed by `machine_id`) so saved configs
-/// survive `InputId` renumbering.
+/// input token. Stored per machine (under that machine's `MachineSettings`) so
+/// saved configs survive `InputId` renumbering.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SerializedBinding {
     pub control: String,

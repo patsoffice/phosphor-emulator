@@ -12,7 +12,7 @@ SDL2-based display, audio, and input handling. This is the only crate with exter
 - `overlay.rs` - FPS counter, debug overlay
 - `debug_ui.rs` - CPU debug panels, breakpoints, disassembly, memory viewer (egui)
 - `settings_ui.rs` - egui settings panels (F12); input rebinding panel with click-to-capture, persisted per machine in `state.toml`
-- `state.rs` - Auto-saved session state (`state.toml`): window position + per-machine input bindings
+- `state.rs` - Auto-saved session state (`state.toml`): window position + a unified per-machine `[machines.<name>]` section (`MachineSettings`: per-game config overrides for scale/ROM/NVRAM/save paths, plus diff-only DIP + input-binding state). Keyed by registry/CLI name; migrates legacy top-level `input_bindings`/`dip_switches` maps on load
 - `vector_gl.rs` - OpenGL vector display renderer (for DVG machines)
 - `rom_path.rs` - ROM file discovery, path resolution, ZIP archive extraction
 

@@ -5,6 +5,11 @@
 //! - `nvram_path` — directory for battery-backed NVRAM files
 //! - `save_path` — directory for save state files
 //! - `scale` — default window scale factor
+//!
+//! These are the *global* defaults. Each field can be overridden per game via a
+//! machine's `MachineSettings` in `state.toml`; the resolution order applied in
+//! `main.rs` is CLI arg > per-game override > this global config > built-in
+//! default.
 
 use serde::Deserialize;
 use std::path::PathBuf;
