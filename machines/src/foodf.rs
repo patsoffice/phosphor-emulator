@@ -188,18 +188,23 @@ pub static FOODF_NVRAM: RomRegion = RomRegion {
 // Gfx layouts (translated from MAME charlayout / spritelayout)
 // ---------------------------------------------------------------------------
 
-/// 8×8 tiles, 2bpp, planes at bit offsets {0,4}, 512 tiles in 0x2000.
+/// 8×8 tiles, 2bpp, 512 tiles in 0x2000. MAME's charlayout planes are
+/// `{ 0, 4 }`; `decode_gfx` orders `plane_offsets` LSB-first (entry 0 = pen
+/// bit 0), the reverse of MAME's MSB-first `planeoffset`, so the list is
+/// reversed to `{4, 0}`. (Getting this wrong swaps pen 1 ↔ pen 2.)
 const FOODF_TILE_LAYOUT: GfxLayout<'static> = GfxLayout {
-    plane_offsets: &[0, 4],
+    plane_offsets: &[4, 0],
     x_offsets: &[64, 65, 66, 67, 0, 1, 2, 3],
     y_offsets: &[0, 8, 16, 24, 32, 40, 48, 56],
     char_increment: 128,
 };
 
-/// 16×16 sprites, 2bpp. RGN_FRAC(1,2) ⇒ plane 0 lives 0x10000 bits into the
-/// 0x4000-byte region; plane 1 at bit 0.
+/// 16×16 sprites, 2bpp. RGN_FRAC(1,2) ⇒ one plane lives 0x10000 bits into the
+/// 0x4000-byte region, the other at bit 0. MAME's spritelayout planes are
+/// `{ RGN_FRAC(1,2), 0 } = { 0x10000, 0 }`; reversed here for `decode_gfx`'s
+/// LSB-first convention (entry 0 = pen bit 0).
 const FOODF_SPRITE_LAYOUT: GfxLayout<'static> = GfxLayout {
-    plane_offsets: &[0x10000, 0],
+    plane_offsets: &[0, 0x10000],
     x_offsets: &[
         128, 129, 130, 131, 132, 133, 134, 135, 0, 1, 2, 3, 4, 5, 6, 7,
     ],
@@ -611,8 +616,9 @@ impl FoodFightSystem {
 
     /// Drive the P1 ADC stick from held direction keys (center = 0x7F).
     fn update_p1_stick(&mut self) {
-        // stick[3] = P1 X, stick[1] = P1 Y. PORT_REVERSE on the real sticks may
-        // require flipping these signs — verify during manual play.
+        // stick[3] = P1 X, stick[1] = P1 Y. These store the raw stick position
+        // (left/up = 0x00, right/down = 0xFF); the PORT_REVERSE mirroring is
+        // applied when the ADC is read, so both axes end up flipped in-game.
         self.stick[3] = if self.p1_left {
             0x00
         } else if self.p1_right {
@@ -728,8 +734,15 @@ impl FoodFightSystem {
             }
         }
 
-        // Sprites: MAME iterates motion-object words 0x20..0x80 step 2, high to
-        // low, so lower indices draw on top.
+        // Sprites: MAME draws motion-object words 0x20..0x80 front-to-back
+        // (offs 0x7E down to 0x20) with `prio_transpen`, whose priority bitmap
+        // makes the *first* opaque pixel written win — a later (lower-offset)
+        // sprite cannot overwrite a pixel an earlier (higher-offset) one already
+        // claimed. So higher offsets sit on top. We replicate that with a
+        // per-pixel "claimed" mask rather than plain painter's overwrite, which
+        // would otherwise invert the layering of overlapping objects (e.g. it
+        // drew Charley's blue head over his yellow hair).
+        let mut claimed = vec![false; w * h];
         let sprites = self.map.region_data(Region::SpriteRam);
         let read_word = |i: usize| -> u16 {
             if i * 2 + 1 < sprites.len() {
@@ -766,14 +779,23 @@ impl FoodFightSystem {
                     if dx >= w || dy >= h {
                         continue;
                     }
-                    // Priority: pri=1 draws over the playfield; pri=0 only shows
-                    // where the playfield pixel is transparent (pen 0).
-                    if !pri && pf_pen[dy * w + dx] != 0 {
+                    let i = dy * w + dx;
+                    // First opaque sprite pixel claims the location (MAME's
+                    // prio_transpen first-wins); later sprites cannot overwrite.
+                    if claimed[i] {
+                        continue;
+                    }
+                    claimed[i] = true;
+                    // Priority (MAME prio_transpen, pmask = pri*2): pri=0 always
+                    // draws over the playfield; pri=1 is hidden behind non-
+                    // transparent playfield pixels (pen != 0). A blocked pri=1
+                    // pixel still claims the location, matching MAME.
+                    if pri && pf_pen[i] != 0 {
                         continue;
                     }
                     let pal = (color * 4 + pen as usize) & 0xFF;
                     let (r, g, b) = self.palette_rgb[pal];
-                    let o = (dy * w + dx) * 3;
+                    let o = i * 3;
                     buffer[o] = r;
                     buffer[o + 1] = g;
                     buffer[o + 2] = b;
@@ -808,8 +830,11 @@ impl Bus for FoodFightSystem {
             | 0x01_C000..=0x01_C0FF
             | 0x80_0000..=0x80_07FF => self.map.read_bus_word_be(addr),
             0x90_0000..=0x90_01FF => self.nvram[((addr >> 1) & 0xFF) as usize] as u16,
-            0x94_0000..=0x94_01FF => self.stick[self.adc_channel] as u16, // ADC data (0x940001)
-            0x94_8000..=0x94_81FF => self.system_input as u16,            // SYSTEM
+            // ADC data (0x940001). The real sticks read reversed (MAME applies
+            // PORT_REVERSE on both axes), so mirror the value here — this flips
+            // both the digital-direction and analog-mouse input paths at once.
+            0x94_0000..=0x94_01FF => 0xFF - self.stick[self.adc_channel] as u16,
+            0x94_8000..=0x94_81FF => self.system_input as u16, // SYSTEM
             0x95_8000..=0x95_81FF => {
                 self.watchdog_count = 0; // watchdog also resets on read
                 0xFFFF
