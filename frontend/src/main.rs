@@ -68,19 +68,31 @@ fn main() {
         std::process::exit(1);
     });
 
-    let rom_path = cli.rom_path.or(config.rom_path.clone()).unwrap_or_else(|| {
-        eprintln!("ROM path required. Either:");
-        eprintln!("  phosphor {machine_name} /path/to/roms");
-        if let Some(dir) = config::config_dir() {
-            eprintln!("  or set rom_path in {}", dir.join("config.toml").display());
-        }
-        std::process::exit(1);
-    });
+    // Load persisted state up front so per-game config overrides can feed into
+    // resolution. Per-game settings are keyed by the machine's registry/CLI
+    // name; clone the resolved entry so later mutable use of `state` is clear.
+    let mut state = state::load();
+    let per_game = state.machine(&machine_name).cloned().unwrap_or_default();
+
+    // Resolution order for every config field: CLI arg > per-game override >
+    // global config.toml > built-in default.
+    let rom_path = cli
+        .rom_path
+        .or(per_game.rom_path.clone())
+        .or(config.rom_path.clone())
+        .unwrap_or_else(|| {
+            eprintln!("ROM path required. Either:");
+            eprintln!("  phosphor {machine_name} /path/to/roms");
+            if let Some(dir) = config::config_dir() {
+                eprintln!("  or set rom_path in {}", dir.join("config.toml").display());
+            }
+            std::process::exit(1);
+        });
 
     let mut machine = create_from_first_rom_set(entry, &rom_path);
 
     // Load battery-backed NVRAM from disk (if available)
-    let nvram_path = nvram_path_for(&config, &machine_name);
+    let nvram_path = nvram_path_for(&config, per_game.nvram_path.as_deref(), &machine_name);
     if let Ok(data) = std::fs::read(&nvram_path) {
         machine.load_nvram(&data);
     }
@@ -88,20 +100,19 @@ fn main() {
     let (native_w, native_h) = machine.display_size();
     let scale = cli
         .scale
+        .or(per_game.scale)
         .or(config.scale)
         .unwrap_or_else(|| auto_scale(native_w, native_h));
 
-    let save_path = save_path_for(&config, &machine_name);
+    let save_path = save_path_for(&config, per_game.save_path.as_deref(), &machine_name);
     let screenshot_dir = screenshot_dir();
-    let mut state = state::load();
 
     // Build input bindings from machine defaults, then overlay any persisted
     // per-machine overrides (only machines with typed controls participate).
     let mut bindings = input::build_bindings(machine.as_ref());
-    let machine_id = machine.machine_id().to_string();
     let has_typed_controls = !machine.input_controls().is_empty();
-    if has_typed_controls && let Some(saved) = state.input_bindings.get(&machine_id) {
-        bindings.apply_overrides(machine.input_controls(), saved);
+    if has_typed_controls && !per_game.input_bindings.is_empty() {
+        bindings.apply_overrides(machine.input_controls(), &per_game.input_bindings);
     }
 
     // Snapshot the machine's power-on DIP bytes, then overlay any persisted
@@ -111,8 +122,8 @@ fn main() {
     let dip_defaults: Vec<u8> = (0..machine.dip_banks().len())
         .map(|i| machine.dip_bank_value(i))
         .collect();
-    if has_dip && let Some(saved) = state.dip_switches.get(&machine_id) {
-        for (bank, &byte) in saved.iter().enumerate() {
+    if has_dip && !per_game.dip_switches.is_empty() {
+        for (bank, &byte) in per_game.dip_switches.iter().enumerate() {
             machine.set_dip_bank_value(bank, byte);
         }
     }
@@ -131,31 +142,38 @@ fn main() {
         &mut state,
     );
 
-    // Persist input bindings, but only when they differ from the machine
-    // defaults (keeps state.toml free of redundant default entries).
+    // Rebuild this machine's settings entry. Start from the loaded overrides so
+    // any per-game config overrides (scale/paths) are preserved, then refresh
+    // the runtime-mutated DIP/binding diffs.
+    let mut settings = per_game;
+
+    // Persist input bindings only when they differ from the machine defaults
+    // (keeps state.toml free of redundant default entries).
     if has_typed_controls {
         let controls = machine.input_controls();
         let current = bindings.to_serialized(controls);
         let default = input::build_bindings(machine.as_ref()).to_serialized(controls);
-        if input::bindings_eq(&current, &default) {
-            state.input_bindings.remove(&machine_id);
+        settings.input_bindings = if input::bindings_eq(&current, &default) {
+            Vec::new()
         } else {
-            state.input_bindings.insert(machine_id.clone(), current);
-        }
+            current
+        };
     }
 
-    // Persist DIP bytes, dropping the entry when it matches the machine's
-    // power-on defaults (keeps state.toml free of redundant entries).
+    // Persist DIP bytes, dropping them when they match the machine's power-on
+    // defaults (keeps state.toml free of redundant entries).
     if has_dip {
         let current: Vec<u8> = (0..machine.dip_banks().len())
             .map(|i| machine.dip_bank_value(i))
             .collect();
-        if current == dip_defaults {
-            state.dip_switches.remove(&machine_id);
+        settings.dip_switches = if current == dip_defaults {
+            Vec::new()
         } else {
-            state.dip_switches.insert(machine_id.clone(), current);
-        }
+            current
+        };
     }
+
+    state.set_machine(&machine_name, settings);
     state::save(&state);
 
     // Save battery-backed NVRAM to disk on exit
@@ -176,21 +194,29 @@ fn ensure_dir(dir: &std::path::Path) {
     std::fs::create_dir_all(dir).ok();
 }
 
-fn save_path_for(config: &config::Config, machine_name: &str) -> std::path::PathBuf {
-    let dir = config
-        .save_path
-        .as_ref()
+/// Resolve the save-state directory: per-game override > global config > default.
+fn save_path_for(
+    config: &config::Config,
+    per_game: Option<&str>,
+    machine_name: &str,
+) -> std::path::PathBuf {
+    let dir = per_game
         .map(std::path::PathBuf::from)
+        .or_else(|| config.save_path.as_ref().map(std::path::PathBuf::from))
         .unwrap_or_else(|| default_data_dir("save"));
     ensure_dir(&dir);
     dir.join(format!("{machine_name}.sav"))
 }
 
-fn nvram_path_for(config: &config::Config, machine_name: &str) -> std::path::PathBuf {
-    let dir = config
-        .nvram_path
-        .as_ref()
+/// Resolve the NVRAM directory: per-game override > global config > default.
+fn nvram_path_for(
+    config: &config::Config,
+    per_game: Option<&str>,
+    machine_name: &str,
+) -> std::path::PathBuf {
+    let dir = per_game
         .map(std::path::PathBuf::from)
+        .or_else(|| config.nvram_path.as_ref().map(std::path::PathBuf::from))
         .unwrap_or_else(|| default_data_dir("nvram"));
     ensure_dir(&dir);
     dir.join(format!("{machine_name}.nvram"))
