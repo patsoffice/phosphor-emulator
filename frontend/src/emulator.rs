@@ -396,6 +396,23 @@ pub fn run(
                     sdl_context.mouse().set_relative_mouse_mode(mouse_grabbed);
                 }
 
+                // P: Toggle global pause (frontend-level control, not a game input)
+                Event::KeyDown {
+                    scancode: Some(Scancode::P),
+                    repeat: false,
+                    ..
+                } => {
+                    debug_state.global_paused = !debug_state.global_paused;
+                    eprintln!(
+                        "{}",
+                        if debug_state.global_paused {
+                            "Paused"
+                        } else {
+                            "Resumed"
+                        }
+                    );
+                }
+
                 // Screenshot (F12)
                 Event::KeyDown {
                     scancode: Some(Scancode::F12),
@@ -688,8 +705,10 @@ pub fn run(
         }
 
         // Frame throttling
-        if debug_state.run_mode == RunMode::Paused {
-            // When paused, sleep to keep UI responsive without burning CPU
+        if debug_state.run_mode == RunMode::Paused || debug_state.global_paused {
+            // When paused (debug step-mode or the global P pause), sleep to keep
+            // the UI responsive without burning CPU, regardless of the throttle
+            // setting.
             std::thread::sleep(Duration::from_millis(16));
         } else if throttle {
             let now = Instant::now();
