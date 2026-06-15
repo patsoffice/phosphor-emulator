@@ -160,7 +160,6 @@ pub struct VotraxSc01 {
     #[save_skip]
     rom: Vec<u8>,
     #[save_skip]
-    #[allow(dead_code)]
     main_clock_hz: u64,
     #[save_skip]
     sclock: f64,
@@ -253,6 +252,27 @@ impl VotraxSc01 {
             cclock: main_clock_hz as f64 / 36.0,
             resampler: AudioResampler::new(sclock as u64, OUTPUT_SAMPLE_RATE),
         }
+    }
+
+    /// Retune the master clock frequency.
+    ///
+    /// On the Gottlieb sound/speech board the SC-01's clock is a VCO driven
+    /// by the speech-clock DAC, so the host retunes it at runtime. Phoneme
+    /// durations are paced by the rate at which [`tick`](Self::tick) is called
+    /// (the host's responsibility), while this updates the derived sample
+    /// (`sclock`) and capacitor (`cclock`) clocks, the resampler input rate,
+    /// and the switched-capacitor filters so formant pitch tracks the clock.
+    pub fn set_clock(&mut self, main_clock_hz: u64) {
+        if main_clock_hz == 0 || main_clock_hz == self.main_clock_hz {
+            return;
+        }
+        self.main_clock_hz = main_clock_hz;
+        self.sclock = main_clock_hz as f64 / 18.0;
+        self.cclock = main_clock_hz as f64 / 36.0;
+        self.resampler.set_input_rate(self.sclock as u64);
+        // Rebuild every filter so the new cclock is reflected in the
+        // switched-capacitor coefficients.
+        self.filters_commit(true);
     }
 
     /// Load the phoneme ROM (512 bytes, 64 entries × 8 bytes, little-endian).
@@ -1091,6 +1111,24 @@ mod tests {
         assert!(v.ar_output());
         assert_eq!(v.sclock, TEST_CLOCK as f64 / 18.0);
         assert_eq!(v.cclock, TEST_CLOCK as f64 / 36.0);
+    }
+
+    #[test]
+    fn set_clock_recomputes_derived_clocks() {
+        let mut v = VotraxSc01::new(TEST_CLOCK);
+        let new_clock = TEST_CLOCK + 200_000;
+        v.set_clock(new_clock);
+        assert_eq!(v.main_clock_hz, new_clock);
+        assert_eq!(v.sclock, new_clock as f64 / 18.0);
+        assert_eq!(v.cclock, new_clock as f64 / 36.0);
+
+        // Idempotent: re-applying the same clock is a no-op.
+        v.set_clock(new_clock);
+        assert_eq!(v.sclock, new_clock as f64 / 18.0);
+
+        // A zero clock is ignored (guards against divide-by-zero downstream).
+        v.set_clock(0);
+        assert_eq!(v.main_clock_hz, new_clock);
     }
 
     #[test]

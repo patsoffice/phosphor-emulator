@@ -88,11 +88,21 @@ const SOUND_CLOCK_DEN: u32 = 1000;
 // Sound CPU clock (for audio resampler)
 const SOUND_CLOCK_HZ: u64 = 894_886;
 
-// Votrax SC-01 master clock: 720 kHz (VCO nominal, adjustable via speech clock DAC)
-const VOTRAX_CLOCK_HZ: u64 = 720_000;
-// Votrax clock ratio: 720,000 / 5,000,000 = 18/125
-const VOTRAX_CLOCK_NUM: u32 = 18;
-const VOTRAX_CLOCK_DEN: u32 = 125;
+// I8088 main CPU clock; the Votrax tick divider is derived against this.
+const I8088_CLOCK_HZ: u64 = 5_000_000;
+
+// Votrax SC-01 VCO frequency at the speech-clock DAC center (data = 0xA0).
+// The VCO is driven by the speech-clock DAC at 0x3000, so the actual clock is
+// set at runtime via `convert_speech_clock`; this is only the power-on default.
+const VOTRAX_NOMINAL_CLOCK_HZ: u64 = 950_000;
+
+/// Convert a speech-clock DAC value to the Votrax SC-01 VCO frequency (Hz).
+///
+/// Matches MAME's `gottlieb_sound_speech_r1_device::convert_speech_clock`:
+/// 950 kHz nominal at the DAC center (0xA0), ±5.5 kHz per step.
+fn convert_speech_clock(data: u8) -> u64 {
+    (950_000 + (data as i32 - 0xA0) * 5_500).max(1) as u64
+}
 
 /// 4-bit resistor-weighted DAC lookup table.
 ///
@@ -119,7 +129,7 @@ const RESISTOR_DAC: [u8; 16] = [
 /// sound CPU address space. Its A/R (articulate/request) output is
 /// wired to RIOT Port B bit 7. A/R rising edge triggers sound CPU NMI.
 #[derive(Saveable)]
-#[save_version(2)]
+#[save_version(3)]
 pub(crate) struct GottliebSoundBoard {
     cpu: M6502,
     riot: Riot6532,
@@ -133,6 +143,10 @@ pub(crate) struct GottliebSoundBoard {
     votrax_ar_prev: bool,
     /// NMI pending from Votrax A/R rising edge.
     votrax_nmi: bool,
+    /// Votrax VCO frequency (Hz) last requested by the speech-clock DAC.
+    /// The board reads this to retune both the Votrax tick rate and the
+    /// device's internal sample/capacitor clocks.
+    speech_clock_hz: u64,
 }
 
 impl GottliebSoundBoard {
@@ -141,13 +155,19 @@ impl GottliebSoundBoard {
             cpu: M6502::new(),
             riot: Riot6532::new(),
             dac: Mc1408Dac::new(),
-            votrax: VotraxSc01::new(VOTRAX_CLOCK_HZ),
+            votrax: VotraxSc01::new(VOTRAX_NOMINAL_CLOCK_HZ),
             resampler: AudioResampler::new(SOUND_CLOCK_HZ, OUTPUT_SAMPLE_RATE),
             sound_rom: vec![0xFF; 0x2000],
             clock: 0,
             votrax_ar_prev: true,
             votrax_nmi: false,
+            speech_clock_hz: VOTRAX_NOMINAL_CLOCK_HZ,
         }
+    }
+
+    /// Apply a new Votrax VCO frequency to the speech device.
+    fn set_votrax_clock(&mut self, clock_hz: u64) {
+        self.votrax.set_clock(clock_hz);
     }
 
     /// Load sound ROM data (up to 8KB, mapped at 0x6000-0x7FFF).
@@ -287,8 +307,9 @@ impl Bus for GottliebSoundBoard {
                 self.votrax.write_phoneme(!data);
             }
 
-            // Speech clock DAC: 0x3000-0x3FFF (stub — adjusts Votrax VCO)
-            0x3000..=0x3FFF => {}
+            // Speech clock DAC: 0x3000-0x3FFF retunes the Votrax VCO frequency.
+            // The board picks this up on its next tick to retune the device.
+            0x3000..=0x3FFF => self.speech_clock_hz = convert_speech_clock(data),
 
             _ => {}
         }
@@ -404,6 +425,10 @@ pub struct GottliebBoard {
     pub(crate) clock: u64,
     pub(crate) sound_clock: ClockDivider,
     pub(crate) votrax_clock: ClockDivider,
+    /// Votrax VCO frequency currently applied to `votrax_clock` and the
+    /// speech device. Transient (not saved): reset to 0 on construction/load
+    /// so the next tick re-derives the divider from `sound.speech_clock_hz`.
+    pub(crate) votrax_clock_applied: u64,
     pub(crate) watchdog_counter: u16,
 
     // Profiling (not saved)
@@ -431,7 +456,8 @@ impl GottliebBoard {
             dsw: 0,
             clock: 0,
             sound_clock: ClockDivider::new(SOUND_CLOCK_NUM, SOUND_CLOCK_DEN),
-            votrax_clock: ClockDivider::new(VOTRAX_CLOCK_NUM, VOTRAX_CLOCK_DEN),
+            votrax_clock: ClockDivider::new(VOTRAX_NOMINAL_CLOCK_HZ as u32, I8088_CLOCK_HZ as u32),
+            votrax_clock_applied: 0,
             watchdog_counter: 0,
             profiling: false,
             profile_spans: Vec::new(),
@@ -627,12 +653,24 @@ impl GottliebBoard {
         // Execute main CPU cycle
         self.cpu.execute_cycle(bus, BusMaster::Cpu(0));
 
+        // The speech-clock DAC (sound CPU 0x3000) retunes the Votrax VCO. When
+        // it changes — or after a state load, where votrax_clock_applied is 0 —
+        // re-derive the tick divider and the device's internal sample clock so
+        // both phoneme rate and pitch track the requested frequency.
+        let speech_hz = self.sound.speech_clock_hz;
+        if speech_hz != self.votrax_clock_applied {
+            self.votrax_clock_applied = speech_hz;
+            self.votrax_clock
+                .set_ratio(speech_hz as u32, I8088_CLOCK_HZ as u32);
+            self.sound.set_votrax_clock(speech_hz);
+        }
+
         // Tick sound board at fractional rate (~895 kHz)
         if self.sound_clock.tick() {
             self.sound.tick();
         }
 
-        // Tick Votrax SC-01 at its own clock rate (720 kHz)
+        // Tick Votrax SC-01 at its VCO rate (nominally 950 kHz, DAC-tunable)
         if self.votrax_clock.tick() {
             self.sound.tick_votrax();
         }
@@ -885,15 +923,31 @@ mod tests {
 
     #[test]
     fn votrax_clock_divider_ratio() {
-        // Verify 18/125 gives ~720 kHz from 5 MHz
-        let mut divider = ClockDivider::new(VOTRAX_CLOCK_NUM, VOTRAX_CLOCK_DEN);
+        // The Votrax VCO divider is derived from its frequency against the
+        // 5 MHz I8088 clock; at the nominal 950 kHz it fires 950k times/sec.
+        let mut divider = ClockDivider::new(VOTRAX_NOMINAL_CLOCK_HZ as u32, I8088_CLOCK_HZ as u32);
         let mut ticks = 0u32;
-        for _ in 0..5_000_000 {
+        for _ in 0..I8088_CLOCK_HZ {
             if divider.tick() {
                 ticks += 1;
             }
         }
-        assert_eq!(ticks, 720_000);
+        assert_eq!(ticks, VOTRAX_NOMINAL_CLOCK_HZ as u32);
+    }
+
+    #[test]
+    fn speech_clock_dac_retunes_votrax() {
+        // DAC center (0xA0) → nominal; the original hardcoded 720 kHz was the
+        // bug. Higher/lower DAC values scale ±5.5 kHz per step.
+        assert_eq!(convert_speech_clock(0xA0), 950_000);
+        assert_eq!(convert_speech_clock(0xA0 + 10), 950_000 + 10 * 5_500);
+        assert_eq!(convert_speech_clock(0xA0 - 10), 950_000 - 10 * 5_500);
+
+        // A write to the speech-clock DAC region updates the requested clock.
+        let mut snd = GottliebSoundBoard::new();
+        assert_eq!(snd.speech_clock_hz, VOTRAX_NOMINAL_CLOCK_HZ);
+        Bus::write(&mut snd, BusMaster::Cpu(1), 0x3000, 0xC0);
+        assert_eq!(snd.speech_clock_hz, convert_speech_clock(0xC0));
     }
 
     #[test]

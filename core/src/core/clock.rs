@@ -53,6 +53,19 @@ impl ClockDivider {
         }
     }
 
+    /// Change the divider ratio in place, preserving the phase accumulator.
+    ///
+    /// Used when a clock is retuned at runtime (e.g. a VCO driven by a DAC).
+    /// The accumulator is folded back into the new period so a stale value
+    /// from a larger previous denominator can't stall the divider.
+    pub fn set_ratio(&mut self, numerator: u32, denominator: u32) {
+        self.numerator = numerator;
+        self.denominator = denominator;
+        if denominator != 0 && self.phase_accum >= denominator {
+            self.phase_accum %= denominator;
+        }
+    }
+
     /// Return the current phase accumulator value.
     pub fn phase(&self) -> u32 {
         self.phase_accum

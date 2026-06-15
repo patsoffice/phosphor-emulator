@@ -156,6 +156,13 @@ impl<T: Sample> AudioResampler<T> {
         self.buffer.push(sample);
     }
 
+    /// Change the input (source) sample rate, e.g. when the driving clock is
+    /// retuned at runtime. Buffered output and the resampling phase are left
+    /// intact; the phase self-corrects against the new rate on the next tick.
+    pub fn set_input_rate(&mut self, input_rate: u64) {
+        self.input_rate = input_rate;
+    }
+
     /// Drain audio samples into the provided buffer. Returns the number
     /// of samples written.
     pub fn fill_audio(&mut self, buffer: &mut [T]) -> usize {
