@@ -1,6 +1,6 @@
 use phosphor_core::core::debug_trace::{DebugEvent, DebugEventKind, DebugTraceBuffer};
 use phosphor_core::core::machine::{
-    DefaultBinding, Direction, InputControl, InputId, InputKind, KeyId, TimingConfig,
+    ActionRole, DefaultBinding, Direction, InputControl, InputId, InputKind, KeyId, TimingConfig,
 };
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::watchpoint::Watchpoints;
@@ -121,17 +121,17 @@ pub const NAMCO_GALAGA_CONTROLS: &[InputControl] = &[
         id: InputId(INPUT_P1_BUTTON1 as u16),
         stable_name: "p1_fire",
         label: "P1 Fire",
-        kind: InputKind::Button,
+        kind: InputKind::Action(ActionRole::Primary),
         player: Some(1),
-        default_bindings: crate::input_defaults::FIRE,
+        default_bindings: &[],
     },
     InputControl {
         id: InputId(INPUT_P2_BUTTON1 as u16),
         stable_name: "p2_fire",
         label: "P2 Fire",
-        kind: InputKind::Button,
+        kind: InputKind::Action(ActionRole::Primary),
         player: Some(2),
-        default_bindings: &[DefaultBinding::Key(KeyId::E)],
+        default_bindings: &[],
     },
     InputControl {
         id: InputId(INPUT_START1 as u16),

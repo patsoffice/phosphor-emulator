@@ -42,7 +42,7 @@
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
-    AnalogAxisKind, AudioSource, DefaultBinding, DipApplyTiming, DipChoice, DipOption,
+    ActionRole, AnalogAxisKind, AudioSource, DefaultBinding, DipApplyTiming, DipChoice, DipOption,
     DipSwitchBank, DipSwitches, Direction, InputConfigurable, InputControl, InputEvent, InputId,
     InputKind, KeyId, MachineCore, MachineDebug, MouseControl, Nvram, Profilable, Renderable,
     SaveState,
@@ -288,17 +288,17 @@ const FOODF_CONTROLS: &[InputControl] = &[
         id: InputId(INPUT_P1_THROW as u16),
         stable_name: "p1_throw",
         label: "P1 Throw",
-        kind: InputKind::Button,
+        kind: InputKind::Action(ActionRole::Primary),
         player: Some(1),
-        default_bindings: &[DefaultBinding::Key(KeyId::Space)],
+        default_bindings: &[],
     },
     InputControl {
         id: InputId(INPUT_P2_THROW as u16),
         stable_name: "p2_throw",
         label: "P2 Throw",
-        kind: InputKind::Button,
+        kind: InputKind::Action(ActionRole::Primary),
         player: Some(2),
-        default_bindings: &[DefaultBinding::Key(KeyId::RShift)],
+        default_bindings: &[],
     },
     InputControl {
         id: InputId(INPUT_P1_LEFT as u16),

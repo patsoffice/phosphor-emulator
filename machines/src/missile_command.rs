@@ -1,10 +1,10 @@
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
-    AnalogAxisKind, AudioSource, AxisSign, DefaultBinding, DipApplyTiming, DipChoice, DipOption,
-    DipSwitchBank, DipSwitches, Direction, InputConfigurable, InputControl, InputEvent, InputId,
-    InputKind, KeyId, MachineCore, MouseControl, PadAxis, PadButton, PadControl, Renderable,
-    SaveState,
+    ActionRole, AnalogAxisKind, AudioSource, AxisSign, DefaultBinding, DipApplyTiming, DipChoice,
+    DipOption, DipSwitchBank, DipSwitches, Direction, InputConfigurable, InputControl, InputEvent,
+    InputId, InputKind, KeyId, MachineCore, MouseControl, PadAxis, PadButton, PadControl,
+    Renderable, SaveState,
 };
 use phosphor_core::core::save_state::{self, SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::{AccessKind, AddressSpace16};
@@ -138,37 +138,27 @@ const MISSILE_CONTROLS: &[InputControl] = &[
         id: InputId(INPUT_FIRE_LEFT as u16),
         stable_name: "fire_left",
         label: "Fire Left",
-        kind: InputKind::Button,
+        kind: InputKind::Action(ActionRole::Primary),
         player: Some(1),
-        default_bindings: &[
-            DefaultBinding::Key(KeyId::Z),
-            DefaultBinding::Pad(PadControl::Button(PadButton::X)),
-            DefaultBinding::Mouse(MouseControl::Middle),
-        ],
+        // Primary role plus the middle mouse button (the three-trackball cabinet
+        // maps left/center/right fire to a mouse button each).
+        default_bindings: &[DefaultBinding::Mouse(MouseControl::Middle)],
     },
     InputControl {
         id: InputId(INPUT_FIRE_CENTER as u16),
         stable_name: "fire_center",
         label: "Fire Center",
-        kind: InputKind::Button,
+        kind: InputKind::Action(ActionRole::Secondary),
         player: Some(1),
-        default_bindings: &[
-            DefaultBinding::Key(KeyId::X),
-            DefaultBinding::Pad(PadControl::Button(PadButton::A)),
-            DefaultBinding::Mouse(MouseControl::Left),
-        ],
+        default_bindings: &[DefaultBinding::Mouse(MouseControl::Left)],
     },
     InputControl {
         id: InputId(INPUT_FIRE_RIGHT as u16),
         stable_name: "fire_right",
         label: "Fire Right",
-        kind: InputKind::Button,
+        kind: InputKind::Action(ActionRole::Tertiary),
         player: Some(1),
-        default_bindings: &[
-            DefaultBinding::Key(KeyId::C),
-            DefaultBinding::Pad(PadControl::Button(PadButton::B)),
-            DefaultBinding::Mouse(MouseControl::Right),
-        ],
+        default_bindings: &[DefaultBinding::Mouse(MouseControl::Right)],
     },
     InputControl {
         id: InputId(INPUT_TRACK_L as u16),

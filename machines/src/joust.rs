@@ -1,8 +1,9 @@
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
-    AxisSign, DefaultBinding, Direction, InputConfigurable, InputControl, InputEvent, InputId,
-    InputKind, KeyId, MachineCore, Nvram, PadAxis, PadButton, PadControl, Profilable, SaveState,
+    ActionRole, AxisSign, DefaultBinding, Direction, InputConfigurable, InputControl, InputEvent,
+    InputId, InputKind, KeyId, MachineCore, Nvram, PadAxis, PadButton, PadControl, Profilable,
+    SaveState,
 };
 use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
@@ -166,12 +167,9 @@ const JOUST_CONTROLS: &[InputControl] = &[
         id: InputId(INPUT_P1_FLAP as u16),
         stable_name: "p1_flap",
         label: "P1 Flap",
-        kind: InputKind::Button,
+        kind: InputKind::Action(ActionRole::Primary),
         player: Some(1),
-        default_bindings: &[
-            DefaultBinding::Key(KeyId::LCtrl),
-            DefaultBinding::Pad(PadControl::Button(PadButton::A)),
-        ],
+        default_bindings: &[],
     },
     InputControl {
         id: InputId(INPUT_P2_LEFT as u16),
@@ -197,9 +195,9 @@ const JOUST_CONTROLS: &[InputControl] = &[
         id: InputId(INPUT_P2_FLAP as u16),
         stable_name: "p2_flap",
         label: "P2 Flap",
-        kind: InputKind::Button,
+        kind: InputKind::Action(ActionRole::Primary),
         player: Some(2),
-        default_bindings: &[DefaultBinding::Key(KeyId::W)],
+        default_bindings: &[],
     },
     InputControl {
         id: InputId(INPUT_P1_START as u16),

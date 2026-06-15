@@ -154,11 +154,61 @@ pub enum AnalogAxisKind {
     Y,
 }
 
+/// Rank of an action button within a machine, used to assign a canonical
+/// physical default and to group the rebinding UI.
+///
+/// The roles form a ladder shared across every machine so muscle memory carries
+/// between games: the most-used action is always [`Primary`](ActionRole::Primary),
+/// the next [`Secondary`](ActionRole::Secondary), and so on. Game-flavored labels
+/// (Flap, Jump, Fire, Throw…) stay on the [`InputControl`]; only the role decides
+/// the default key/pad binding via [`ActionRole::default_bindings`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ActionRole {
+    /// The main action (fire / flap / jump / throw). Default: LShift + gamepad A
+    /// (RShift for player 2, who shares the keyboard but not the pad).
+    Primary,
+    /// A secondary action (shield / hyperspace / superzapper / select).
+    /// Default: Space + gamepad B.
+    Secondary,
+    /// A third action (e.g. a third fire battery). Default: LCtrl + gamepad X.
+    Tertiary,
+}
+
+impl ActionRole {
+    /// The canonical default physical bindings for this role on the given player.
+    ///
+    /// Player 2 actions are keyboard-only (the single gamepad belongs to player
+    /// 1), so [`Primary`](ActionRole::Primary) yields RShift instead of
+    /// LShift + pad. Machines union these with any control-specific extras (e.g. a
+    /// trackball cabinet's mouse button) declared in
+    /// [`InputControl::default_bindings`].
+    pub fn default_bindings(self, player: Option<u8>) -> &'static [DefaultBinding] {
+        use DefaultBinding::{Key, Pad};
+        match (self, player) {
+            (ActionRole::Primary, Some(2)) => &[Key(KeyId::RShift)],
+            (ActionRole::Primary, _) => {
+                &[Key(KeyId::LShift), Pad(PadControl::Button(PadButton::A))]
+            }
+            (ActionRole::Secondary, _) => {
+                &[Key(KeyId::Space), Pad(PadControl::Button(PadButton::B))]
+            }
+            (ActionRole::Tertiary, _) => {
+                &[Key(KeyId::LCtrl), Pad(PadControl::Button(PadButton::X))]
+            }
+        }
+    }
+}
+
 /// The semantic role of a logical control, used by the frontend to pick
 /// sensible default physical bindings and to group the rebinding UI.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InputKind {
-    /// A generic action button (fire, flap, jump, throw…).
+    /// A ranked action button whose default binding comes from the shared
+    /// [`ActionRole`] ladder (Primary/Secondary/Tertiary).
+    Action(ActionRole),
+    /// A generic action button whose default binding is bespoke to one machine
+    /// (twin-stick fire, combined jump+start, tilt…), declared inline rather than
+    /// drawn from the role ladder.
     Button,
     /// Coin / credit insert.
     Coin,

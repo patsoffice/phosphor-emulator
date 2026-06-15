@@ -1,10 +1,9 @@
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
-    AnalogAxisKind, AudioSource, DefaultBinding, DipApplyTiming, DipChoice, DipOption,
+    ActionRole, AnalogAxisKind, AudioSource, DefaultBinding, DipApplyTiming, DipChoice, DipOption,
     DipSwitchBank, DipSwitches, Direction, InputConfigurable, InputControl, InputEvent, InputId,
-    InputKind, KeyId, MachineCore, MouseControl, Nvram, PadButton, PadControl, Profilable,
-    Renderable, SaveState,
+    InputKind, MachineCore, MouseControl, Nvram, Profilable, Renderable, SaveState,
 };
 use phosphor_core::core::save_state::{self, SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::{AccessKind, AddressSpace16};
@@ -200,14 +199,11 @@ const GRIDLEE_CONTROLS: &[InputControl] = &[
         id: InputId(INPUT_P1_FIRE as u16),
         stable_name: "p1_fire",
         label: "P1 Fire",
-        kind: InputKind::Button,
+        kind: InputKind::Action(ActionRole::Primary),
         player: Some(1),
-        // FIRE (Space + gamepad A) plus the left mouse button (trackball cabinet).
-        default_bindings: &[
-            DefaultBinding::Key(KeyId::Space),
-            DefaultBinding::Pad(PadControl::Button(PadButton::A)),
-            DefaultBinding::Mouse(MouseControl::Left),
-        ],
+        // Primary role (LShift + gamepad A) plus the left mouse button
+        // (trackball cabinet) as a machine-specific extra.
+        default_bindings: &[DefaultBinding::Mouse(MouseControl::Left)],
     },
     InputControl {
         id: InputId(INPUT_COIN as u16),

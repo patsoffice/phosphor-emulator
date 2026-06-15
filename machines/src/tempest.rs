@@ -1,7 +1,7 @@
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
-    AnalogAxisKind, AudioSource, DefaultBinding, DipApplyTiming, DipChoice, DipOption,
+    ActionRole, AnalogAxisKind, AudioSource, DefaultBinding, DipApplyTiming, DipChoice, DipOption,
     DipSwitchBank, DipSwitches, FrontendMachine, InputConfigurable, InputControl, InputEvent,
     InputId, InputKind, KeyId, MachineCore, MouseControl, Nvram, Profilable, SaveState,
 };
@@ -120,18 +120,17 @@ const TEMPEST_CONTROLS: &[InputControl] = &[
         id: InputId(INPUT_FIRE as u16),
         stable_name: "fire",
         label: "Fire",
-        kind: InputKind::Button,
+        kind: InputKind::Action(ActionRole::Primary),
         player: Some(1),
-        default_bindings: crate::input_defaults::FIRE,
+        default_bindings: &[],
     },
     InputControl {
         id: InputId(INPUT_ZAP as u16),
         stable_name: "superzapper",
         label: "Superzapper",
-        kind: InputKind::Button,
+        kind: InputKind::Action(ActionRole::Secondary),
         player: Some(1),
-        // Fire takes gamepad A, so the superzapper is key-only (LShift).
-        default_bindings: &[DefaultBinding::Key(KeyId::LShift)],
+        default_bindings: &[],
     },
     InputControl {
         id: InputId(INPUT_START1 as u16),

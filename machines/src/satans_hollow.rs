@@ -1,8 +1,8 @@
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
-    DefaultBinding, Direction, FrontendMachine, InputConfigurable, InputControl, InputEvent,
-    InputId, InputKind, KeyId, MachineCore, Nvram, Profilable, SaveState,
+    ActionRole, DefaultBinding, Direction, FrontendMachine, InputConfigurable, InputControl,
+    InputEvent, InputId, InputKind, KeyId, MachineCore, Nvram, Profilable, SaveState,
 };
 use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
@@ -225,18 +225,17 @@ const SHOLLOW_CONTROLS: &[InputControl] = &[
         id: InputId(INPUT_SHIELD as u16),
         stable_name: "p1_shield",
         label: "P1 Shield",
-        kind: InputKind::Button,
+        kind: InputKind::Action(ActionRole::Secondary),
         player: Some(1),
-        // P1 Fire takes gamepad A, so the shield button is key-only (LShift).
-        default_bindings: &[DefaultBinding::Key(KeyId::LShift)],
+        default_bindings: &[],
     },
     InputControl {
         id: InputId(INPUT_FIRE as u16),
         stable_name: "p1_fire",
         label: "P1 Fire",
-        kind: InputKind::Button,
+        kind: InputKind::Action(ActionRole::Primary),
         player: Some(1),
-        default_bindings: crate::input_defaults::FIRE,
+        default_bindings: &[],
     },
 ];
 

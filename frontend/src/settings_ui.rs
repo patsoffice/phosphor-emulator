@@ -1,7 +1,7 @@
 //! egui settings panels: the input-rebinding panel and the DIP switch panel.
 
 use phosphor_core::core::machine::{
-    DipApplyTiming, DipSwitchBank, InputControl, InputId, InputKind,
+    ActionRole, DipApplyTiming, DipSwitchBank, InputControl, InputId, InputKind,
 };
 
 use crate::input::BindingSet;
@@ -67,7 +67,8 @@ pub fn draw_input_panel(
                     .num_columns(2)
                     .striped(true)
                     .show(ui, |ui| {
-                        for control in controls {
+                        for &idx in &display_order(controls) {
+                            let control = &controls[idx];
                             ui.label(control.label);
 
                             let bound: Vec<String> = bindings
@@ -101,6 +102,27 @@ pub fn draw_input_panel(
                     });
             });
         });
+}
+
+/// Display order for the rebinding grid: group controls by player, and within a
+/// player push the ranked action buttons (Primary, Secondary, Tertiary) after
+/// the directions/start so the action ladder reads top-to-bottom. Stable, so
+/// controls sharing a key keep their machine-declared order. Shared/system
+/// controls (no player, e.g. coin) sort last.
+fn display_order(controls: &[InputControl]) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..controls.len()).collect();
+    order.sort_by_key(|&i| {
+        let c = &controls[i];
+        let player = c.player.map_or(u16::MAX, u16::from);
+        let role_rank = match c.kind {
+            InputKind::Action(ActionRole::Primary) => 1,
+            InputKind::Action(ActionRole::Secondary) => 2,
+            InputKind::Action(ActionRole::Tertiary) => 3,
+            _ => 0,
+        };
+        (player, role_rank)
+    });
+    order
 }
 
 /// Draw the DIP switch side panel.

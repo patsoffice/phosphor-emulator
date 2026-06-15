@@ -1,9 +1,8 @@
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
-    DefaultBinding, DipApplyTiming, DipChoice, DipOption, DipSwitchBank, DipSwitches,
-    FrontendMachine, InputConfigurable, InputControl, InputEvent, InputId, InputKind, KeyId,
-    MachineCore, SaveState,
+    ActionRole, DipApplyTiming, DipChoice, DipOption, DipSwitchBank, DipSwitches, FrontendMachine,
+    InputConfigurable, InputControl, InputEvent, InputId, InputKind, MachineCore, SaveState,
 };
 use phosphor_core::core::{AccessKind, AddressSpace16};
 use phosphor_core::core::{Bus, BusMaster};
@@ -109,18 +108,17 @@ const ASTEROIDS_CONTROLS: &[InputControl] = &[
         id: InputId(INPUT_FIRE as u16),
         stable_name: "fire",
         label: "Fire",
-        kind: InputKind::Button,
+        kind: InputKind::Action(ActionRole::Primary),
         player: Some(1),
-        default_bindings: crate::input_defaults::FIRE,
+        default_bindings: &[],
     },
     InputControl {
         id: InputId(INPUT_HYPERSPACE as u16),
         stable_name: "hyperspace",
         label: "Hyperspace",
-        kind: InputKind::Button,
+        kind: InputKind::Action(ActionRole::Secondary),
         player: Some(1),
-        // Fire takes gamepad A, so hyperspace is key-only (LShift).
-        default_bindings: &[DefaultBinding::Key(KeyId::LShift)],
+        default_bindings: &[],
     },
     InputControl {
         id: InputId(INPUT_ROT_LEFT as u16),

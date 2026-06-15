@@ -8,8 +8,8 @@
 use std::collections::HashMap;
 
 use phosphor_core::core::machine::{
-    AxisSign, DefaultBinding, FrontendMachine, InputControl, InputId, KeyId, MouseControl,
-    PadAxis as CorePadAxis, PadButton as CorePadButton, PadControl,
+    AxisSign, DefaultBinding, FrontendMachine, InputControl, InputId, InputKind, KeyId,
+    MouseControl, PadAxis as CorePadAxis, PadButton as CorePadButton, PadControl,
 };
 use sdl2::controller::{Axis, Button};
 use sdl2::keyboard::Scancode;
@@ -215,7 +215,14 @@ impl BindingSet {
     pub fn from_controls(controls: &[InputControl]) -> Self {
         let mut set = BindingSet::new();
         for control in controls {
-            for binding in control.default_bindings {
+            // Action controls draw their physical defaults from the shared role
+            // ladder; `default_bindings` then carries only machine-specific extras
+            // (e.g. a trackball cabinet's mouse button), unioned on top.
+            let role_defaults = match control.kind {
+                InputKind::Action(role) => role.default_bindings(control.player),
+                _ => &[][..],
+            };
+            for binding in role_defaults.iter().chain(control.default_bindings) {
                 let physical = match *binding {
                     DefaultBinding::Key(key) => PhysicalInput::Key(key_to_scancode(key)),
                     DefaultBinding::Pad(pad) => pad_to_physical(pad),
@@ -423,7 +430,7 @@ fn key_to_scancode(key: KeyId) -> Scancode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use phosphor_core::core::machine::InputKind;
+    use phosphor_core::core::machine::{ActionRole, InputKind, MouseControl};
 
     fn ids(it: impl Iterator<Item = InputId>) -> Vec<u16> {
         it.map(|i| i.0).collect()
@@ -560,5 +567,56 @@ mod tests {
             ids(set.digital_targets(PhysicalInput::PadButton(Button::A))),
             vec![5]
         );
+    }
+
+    #[test]
+    fn action_role_resolves_to_role_defaults_plus_extras() {
+        // A Primary P1 action with a machine-specific extra (a trackball
+        // cabinet's left mouse button, like Gridlee fire).
+        const CONTROLS: &[InputControl] = &[InputControl {
+            id: InputId(7),
+            stable_name: "p1_fire",
+            label: "P1 Fire",
+            kind: InputKind::Action(ActionRole::Primary),
+            player: Some(1),
+            default_bindings: &[DefaultBinding::Mouse(MouseControl::Left)],
+        }];
+        let set = BindingSet::from_controls(CONTROLS);
+
+        // Role defaults: LShift + gamepad A.
+        assert_eq!(
+            ids(set.digital_targets(PhysicalInput::Key(Scancode::LShift))),
+            vec![7]
+        );
+        assert_eq!(
+            ids(set.digital_targets(PhysicalInput::PadButton(Button::A))),
+            vec![7]
+        );
+        // Primary moves Fire off Space — the legacy default must be gone.
+        assert!(ids(set.digital_targets(PhysicalInput::Key(Scancode::Space))).is_empty());
+        // The machine-specific extra unions in on top of the role defaults.
+        assert_eq!(
+            ids(set.digital_targets(PhysicalInput::MouseButtonInput(MouseButton::Left))),
+            vec![7]
+        );
+    }
+
+    #[test]
+    fn action_role_player_two_is_keyboard_only() {
+        // Player 2 shares the keyboard but not the pad: Primary → RShift, no pad.
+        const CONTROLS: &[InputControl] = &[InputControl {
+            id: InputId(8),
+            stable_name: "p2_fire",
+            label: "P2 Fire",
+            kind: InputKind::Action(ActionRole::Primary),
+            player: Some(2),
+            default_bindings: &[],
+        }];
+        let set = BindingSet::from_controls(CONTROLS);
+        assert_eq!(
+            ids(set.digital_targets(PhysicalInput::Key(Scancode::RShift))),
+            vec![8]
+        );
+        assert!(ids(set.digital_targets(PhysicalInput::PadButton(Button::A))).is_empty());
     }
 }

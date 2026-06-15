@@ -1,7 +1,7 @@
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
-    DipApplyTiming, DipChoice, DipOption, DipSwitchBank, DipSwitches, FrontendMachine,
+    ActionRole, DipApplyTiming, DipChoice, DipOption, DipSwitchBank, DipSwitches, FrontendMachine,
     InputConfigurable, InputControl, InputEvent, InputId, InputKind, MachineCore, SaveState,
 };
 use phosphor_core::core::{AccessKind, AddressSpace16};
@@ -111,7 +111,7 @@ const LLANDER_CONTROLS: &[InputControl] = &[
         id: InputId(INPUT_SELECT as u16),
         stable_name: "select",
         label: "Select",
-        kind: InputKind::Button,
+        kind: InputKind::Action(ActionRole::Secondary),
         player: Some(1),
         default_bindings: &[],
     },
@@ -119,9 +119,9 @@ const LLANDER_CONTROLS: &[InputControl] = &[
         id: InputId(INPUT_ABORT as u16),
         stable_name: "abort",
         label: "Abort / Fire",
-        kind: InputKind::Button,
+        kind: InputKind::Action(ActionRole::Primary),
         player: Some(1),
-        default_bindings: crate::input_defaults::FIRE,
+        default_bindings: &[],
     },
     InputControl {
         id: InputId(INPUT_ROT_LEFT as u16),
