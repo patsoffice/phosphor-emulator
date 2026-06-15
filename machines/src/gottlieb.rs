@@ -504,10 +504,15 @@ impl GottliebBoard {
         let tile_count = tile_rom.len() / 32;
         self.tile_rom_cache = decode_gfx(tile_rom, 0, tile_count, &GOTTLIEB_TILE_LAYOUT);
 
-        // Sprites: 4bpp planar, 16x16, 4 equal ROM regions
+        // Sprites: 4bpp planar, 16x16, 4 equal ROM regions. MAME's spr_layout
+        // planeoffset is { RGN_FRAC(0,4), 1/4, 2/4, 3/4 } and MAME is MSB-first
+        // (planeoffset[0] = pen bit 3); decode_gfx is LSB-first (entry 0 = pen
+        // bit 0), so reverse the list — bit 0 comes from the last ROM quarter.
+        // (Same convention as GOTTLIEB_TILE_LAYOUT above; getting it wrong
+        // bit-reverses every pen and scrambles MOB colors.)
         let sprite_count = sprite_rom.len() / 128;
         let quarter = sprite_rom.len() / 4;
-        let planes: [usize; 4] = std::array::from_fn(|p| p * quarter * 8);
+        let planes: [usize; 4] = std::array::from_fn(|p| (3 - p) * quarter * 8);
         let y_offsets: [usize; 16] = std::array::from_fn(|py| py * 16);
         self.sprite_cache = decode_gfx(
             sprite_rom,
