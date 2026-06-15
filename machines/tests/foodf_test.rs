@@ -69,14 +69,16 @@ fn digital_inputs_are_active_low() {
 #[test]
 fn p1_stick_keys_drive_the_adc() {
     let mut sys = FoodFightSystem::new();
-    // Select ADC channel 3 (P1 X) and confirm it centers at 0x7F, swings on key.
+    // Select ADC channel 3 (P1 X). The sticks read reversed (MAME PORT_REVERSE
+    // on all four ADC ports), so the value is mirrored at the read: the 0x7F
+    // neutral reads as 0x80, and pressing LEFT (raw 0x00) reads as 0xFF.
     sys.write(BusMaster::Cpu(0), 0x94_4006, 0); // channel = (0x944006>>1)&7 = 3
-    assert_eq!(sys.read(BusMaster::Cpu(0), 0x94_0001) & 0xFF, 0x7F);
+    assert_eq!(sys.read(BusMaster::Cpu(0), 0x94_0001) & 0xFF, 0x80);
     sys.handle_input(InputEvent::Button {
         id: InputId((INPUT_P1_LEFT) as u16),
         pressed: true,
     });
-    assert_eq!(sys.read(BusMaster::Cpu(0), 0x94_0001) & 0xFF, 0x00);
+    assert_eq!(sys.read(BusMaster::Cpu(0), 0x94_0001) & 0xFF, 0xFF);
 }
 
 #[test]
