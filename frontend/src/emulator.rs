@@ -571,10 +571,23 @@ pub fn run(
                     phosphor_core::core::machine::ScreenRotation::Rot270 => 270,
                     _ => 0,
                 };
-                if show_fps {
-                    let fps = fps_text.clone();
-                    let stats = machine.overlay_stats();
+                let paused = debug_state.global_paused;
+                if show_fps || paused {
+                    let fps = show_fps.then(|| fps_text.clone());
+                    let stats = if show_fps {
+                        machine.overlay_stats()
+                    } else {
+                        None
+                    };
                     video.present_vectors_with_overlay(renderer, lines, ds, rot, |ctx| {
+                        let label = |ui: &mut egui::Ui, text: &str| {
+                            ui.label(
+                                egui::RichText::new(text)
+                                    .color(egui::Color32::WHITE)
+                                    .background_color(egui::Color32::from_black_alpha(160))
+                                    .monospace(),
+                            );
+                        };
                         egui::Window::new("fps_overlay")
                             .title_bar(false)
                             .resizable(false)
@@ -582,19 +595,14 @@ pub fn run(
                             .frame(egui::Frame::NONE)
                             .show(ctx, |ui| {
                                 ui.set_min_width(120.0);
-                                ui.label(
-                                    egui::RichText::new(&fps)
-                                        .color(egui::Color32::WHITE)
-                                        .background_color(egui::Color32::from_black_alpha(160))
-                                        .monospace(),
-                                );
+                                if let Some(ref f) = fps {
+                                    label(ui, f);
+                                }
                                 if let Some(ref s) = stats {
-                                    ui.label(
-                                        egui::RichText::new(s)
-                                            .color(egui::Color32::WHITE)
-                                            .background_color(egui::Color32::from_black_alpha(160))
-                                            .monospace(),
-                                    );
+                                    label(ui, s);
+                                }
+                                if paused {
+                                    label(ui, "PAUSED");
                                 }
                             });
                     });
@@ -607,14 +615,23 @@ pub fn run(
                 // Raster machine (or debug/profiler mode): CPU framebuffer path.
                 machine.render_frame(&mut framebuffer);
 
-                // FPS overlay onto framebuffer (only when no side panels are active)
-                if show_fps && !debug_state.active && !profile_state.active {
-                    let stats = machine.overlay_stats();
+                // FPS / PAUSED overlay onto framebuffer (only when no side panels
+                // are active). PAUSED shows independent of the FPS toggle.
+                if (show_fps || debug_state.global_paused)
+                    && !debug_state.active
+                    && !profile_state.active
+                {
+                    let stats = if show_fps {
+                        machine.overlay_stats()
+                    } else {
+                        None
+                    };
                     crate::overlay::draw_overlay(
                         &mut framebuffer,
                         width as usize,
-                        &fps_text,
+                        show_fps.then_some(fps_text.as_str()),
                         stats.as_deref(),
+                        debug_state.global_paused,
                     );
                 }
 

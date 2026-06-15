@@ -84,14 +84,70 @@ fn draw_text(buffer: &mut [u8], width: usize, x0: usize, y0: usize, text: &str) 
     }
 }
 
-/// Draw the overlay: FPS line and optional stats line below it.
-pub fn draw_overlay(buffer: &mut [u8], width: usize, fps_text: &str, stats: Option<&str>) {
+/// Draw the overlay: an optional FPS line, an optional stats line, and an
+/// optional PAUSED line, stacked top-to-bottom. Only the lines that are present
+/// are drawn (and consume vertical space), so a PAUSED-only overlay sits at the
+/// top regardless of whether the FPS readout is enabled.
+pub fn draw_overlay(
+    buffer: &mut [u8],
+    width: usize,
+    fps_text: Option<&str>,
+    stats: Option<&str>,
+    paused: bool,
+) {
     let x0: usize = 2;
-    let y0: usize = 2;
+    let mut y: usize = 2;
+    let line_step = GLYPH_H + LINE_SPACING;
 
-    draw_text(buffer, width, x0, y0, fps_text);
+    for text in [fps_text, stats, paused.then_some("PAUSED")]
+        .into_iter()
+        .flatten()
+    {
+        draw_text(buffer, width, x0, y, text);
+        y += line_step;
+    }
+}
 
-    if let Some(text) = stats {
-        draw_text(buffer, width, x0, y0 + GLYPH_H + LINE_SPACING, text);
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lit_pixels(buffer: &[u8]) -> usize {
+        buffer
+            .chunks(3)
+            .filter(|p| p.iter().any(|&b| b != 0))
+            .count()
+    }
+
+    #[test]
+    fn paused_renders_with_fps_off() {
+        let (w, h) = (64usize, 16usize);
+        let mut buf = vec![0u8; w * h * 3];
+        draw_overlay(&mut buf, w, None, None, true);
+        assert!(
+            lit_pixels(&buf) > 0,
+            "PAUSED must render even when FPS is off"
+        );
+    }
+
+    #[test]
+    fn empty_overlay_draws_nothing() {
+        let (w, h) = (64usize, 16usize);
+        let mut buf = vec![0u8; w * h * 3];
+        draw_overlay(&mut buf, w, None, None, false);
+        assert_eq!(lit_pixels(&buf), 0);
+    }
+
+    #[test]
+    fn paused_only_sits_at_top_line() {
+        // A PAUSED-only overlay must occupy the first line, not be pushed down by
+        // the absent FPS/stats lines — so it's identical to drawing "PAUSED" as
+        // the top line.
+        let (w, h) = (64usize, 16usize);
+        let mut top = vec![0u8; w * h * 3];
+        let mut paused_only = vec![0u8; w * h * 3];
+        draw_overlay(&mut top, w, Some("PAUSED"), None, false);
+        draw_overlay(&mut paused_only, w, None, None, true);
+        assert_eq!(top, paused_only);
     }
 }
