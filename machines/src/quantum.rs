@@ -724,12 +724,18 @@ impl Renderable for QuantumSystem {
     }
 
     fn render_frame(&self, buffer: &mut [u8]) {
+        // flip_y = true: Quantum is unrotated (screen_rotation None), so the GL
+        // path maps vector Y=0 to the bottom of the screen (vector_gl.rs). The
+        // CPU rasterizer must match, or the picture is vertically mirrored when
+        // the debug/profiler panel forces this fallback path. (Tempest's AVG
+        // board uses flip_y=false because its GL path applies a 270° rotation
+        // that already negates Y.)
         rasterize_vectors(
             &self.display_list,
             buffer,
             TIMING.display_width,
             TIMING.display_height,
-            false,
+            true,
         );
     }
 
@@ -1151,6 +1157,38 @@ mod tests {
         ));
         assert!(matches!(bus.peek(0, 0x80_0000), DebugRead::Backed { .. }));
         assert_eq!(bus.peek(0, 0x50_0000), DebugRead::Unmapped);
+    }
+
+    #[test]
+    fn render_frame_places_vector_y0_at_bottom() {
+        // The GL renderer maps vector Y=0 to the bottom of the screen; the CPU
+        // rasterizer (used while the debug/profiler panel is open) must agree,
+        // or the image is vertically mirrored. A bright segment at Y=0 must
+        // light pixels in the bottom rows, never the top half.
+        use phosphor_core::device::dvg::VectorLine;
+
+        let mut sys = QuantumSystem::new();
+        sys.display_list = vec![VectorLine {
+            x0: 280,
+            y0: 0,
+            x1: 320,
+            y1: 0,
+            intensity: 0xF,
+            r: 255,
+            g: 255,
+            b: 255,
+        }];
+
+        let (w, h) = (
+            TIMING.display_width as usize,
+            TIMING.display_height as usize,
+        );
+        let mut buf = vec![0u8; w * h * 3];
+        sys.render_frame(&mut buf);
+
+        let row_lit = |row: usize| buf[row * w * 3..(row + 1) * w * 3].iter().any(|&b| b != 0);
+        assert!((h - 10..h).any(row_lit), "Y=0 should light the bottom rows");
+        assert!(!(0..h / 2).any(row_lit), "top half should be dark");
     }
 
     #[test]
