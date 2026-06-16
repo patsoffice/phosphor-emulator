@@ -396,6 +396,7 @@ pub mod simple_system;
 pub mod tempest;
 pub mod tkg04;
 pub mod williams;
+pub mod z80dma;
 
 pub use astdelux::AsteroidsDeluxeSystem;
 pub use asteroids::AsteroidsSystem;
