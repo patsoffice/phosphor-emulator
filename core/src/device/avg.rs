@@ -594,8 +594,12 @@ impl Avg {
             int_latch
         };
 
-        // Apply flipping in beam space, then swap X/Y on output (the Quantum AVG
-        // emits points with the axes exchanged about the beam center).
+        // Emit the point in beam/screen space (with flipping), matching the
+        // Tempest path. MAME's quantum_strobe3 also transposes X/Y here, but
+        // that compensates for MAME's true-rotation screen pipeline; this
+        // engine's vector renderer applies only a Y-flip for portrait monitors,
+        // so the portrait orientation comes from the portrait display buffer
+        // instead (see the Quantum machine's TIMING).
         let mut x = self.xpos;
         let mut y = self.ypos;
         if self.flip_x {
@@ -604,9 +608,11 @@ impl Avg {
         if self.flip_y {
             y += (self.ycenter - y) << 1;
         }
-        let out_x = y - self.ycenter + self.xcenter;
-        let out_y = x - self.xcenter + self.ycenter;
-        self.add_point(out_x, out_y, eff_intensity, [r, g, b]);
+        // Emit directly in screen space. The Quantum machine presents this as a
+        // pre-rotated portrait display (display_size already portrait,
+        // ScreenRotation::None), so no transpose/flip is applied here — unlike
+        // MAME, whose AVG transposes X/Y to feed a true-rotation screen.
+        self.add_point(x, y, eff_intensity, [r, g, b]);
     }
 
     /// Add a point to the display list, creating a line from the previous point.

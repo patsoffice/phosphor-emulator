@@ -42,7 +42,6 @@ use phosphor_core::core::machine::{
     AnalogAxisKind, AudioSource, DefaultBinding, DipApplyTiming, DipChoice, DipOption,
     DipSwitchBank, DipSwitches, InputConfigurable, InputControl, InputEvent, InputId, InputKind,
     KeyId, MachineCore, MachineDebug, MouseControl, Nvram, Profilable, Renderable, SaveState,
-    ScreenRotation,
 };
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::{AccessKind, AddressSpace32};
@@ -379,10 +378,12 @@ const TIMING: TimingConfig = TimingConfig {
     cpu_clock_hz: 6_048_000,
     cycles_per_scanline: 100_800,
     total_scanlines: 1,
-    // AVG visible area (MAME visarea 0..900 x 0..600). The beam center is half
-    // of each; the Quantum AVG swaps X/Y about this center.
-    display_width: 900,
-    display_height: 600,
+    // Portrait display buffer (the cabinet is ROT270). MAME's vector space is
+    // 0..900 × 0..600 with the AVG transposing X/Y; this engine emits the beam
+    // untransposed and rotates by using a portrait buffer, so the dimensions
+    // (and the AVG beam center, derived from them) are swapped to 600 × 900.
+    display_width: 600,
+    display_height: 900,
 };
 
 /// Periodic IRQ1: MASTER/4096/12 = 246.094 Hz → every 24576 CPU cycles.
@@ -391,6 +392,10 @@ const IRQ_PERIOD_CYCLES: u64 = 24_576;
 /// POKEY runs at 600 kHz; CPU at 6.048 MHz → ~10 CPU cycles per POKEY clock.
 const POKEY_CLOCK_HZ: u32 = 600_000;
 const CPU_PER_POKEY: u64 = 10;
+
+/// Watchdog timeout in frames (~1 s at 60 Hz). Long enough to survive the
+/// boot-time delay loops, short enough to recover from a genuine hang.
+const WATCHDOG_FRAMES: u8 = 64;
 
 /// De-interleave the five `ROM_LOAD16_BYTE` pairs into the big-endian program
 /// image. The input concatenates the ten 0x2000 chips as
@@ -727,9 +732,10 @@ impl Renderable for QuantumSystem {
         Some(&self.display_list)
     }
 
-    fn screen_rotation(&self) -> ScreenRotation {
-        ScreenRotation::Rot270
-    }
+    // No screen_rotation override: the cabinet is a vertical (portrait) monitor,
+    // but this engine's vector "rotation" only Y-flips and swaps the window to
+    // landscape. Instead the display_size is already portrait (600×900) and the
+    // AVG emits screen-space coordinates, so the default (no rotation) is right.
 }
 
 impl AudioSource for QuantumSystem {
@@ -787,9 +793,12 @@ impl MachineCore for QuantumSystem {
             self.tick();
         }
 
-        // Watchdog: reboot if the game stops strobing the reset register.
+        // Watchdog: reboot if the game stops strobing the reset register. The
+        // timeout must outlast Quantum's boot-time delay loops (which busy-wait
+        // for ~0.3 s ≈ 18 frames while only *reading* the watchdog), so this is
+        // far longer than Food Fight's 8-frame timeout.
         self.watchdog_count = self.watchdog_count.saturating_add(1);
-        if self.watchdog_count >= 8 {
+        if self.watchdog_count >= WATCHDOG_FRAMES {
             self.reset();
         }
 
