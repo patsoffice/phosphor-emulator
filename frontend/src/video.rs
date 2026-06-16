@@ -167,11 +167,6 @@ impl Video {
             .process_input(&self.window, event, &mut self.painter);
     }
 
-    /// True if egui wants pointer events (mouse is over an egui area).
-    pub fn wants_pointer(&self) -> bool {
-        self.egui_ctx.is_pointer_over_area()
-    }
-
     /// True if egui wants keyboard events (a text field is focused).
     pub fn wants_keyboard(&self) -> bool {
         self.egui_ctx.wants_keyboard_input()

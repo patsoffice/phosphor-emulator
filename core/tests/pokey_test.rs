@@ -124,7 +124,13 @@ fn test_pot_scan() {
     pokey.set_pot_input(5, 20);
 
     pokey.write(0x0B, 0); // POTGO
-    assert_eq!(pokey.read(0x08), 0xFF);
+    // Pots 2 and 5 have nonzero targets, so they read "still scanning" right
+    // after POTGO. Every other pot defaults to input 0 and completes instantly
+    // (no capacitor connected) — matches MAME's pokey_potgo().
+    let allpot0 = pokey.read(0x08);
+    assert_eq!(allpot0 & 0x04, 0x04); // pot 2 still scanning
+    assert_eq!(allpot0 & 0x20, 0x20); // pot 5 still scanning
+    assert_eq!(allpot0 & !0x24, 0, "zero-input pots complete immediately");
 
     for _ in 0..1200 {
         pokey.tick();

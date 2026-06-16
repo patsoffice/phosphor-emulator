@@ -61,6 +61,15 @@ pub fn run(
     sdl2::hint::set("SDL_JOYSTICK_HIDAPI_XBOX", "1");
     sdl2::hint::set("SDL_JOYSTICK_MFI", "1");
 
+    // Implement relative mouse mode via cursor warping rather than raw input.
+    // On macOS the default raw-input path does not reliably deliver motion
+    // deltas from a trackpad (the trackpad is an absolute device, so the locked
+    // cursor never reports movement), which breaks trackball/spinner games
+    // (Crystal Castles, Missile Command, Tempest, ...). Warp-based relative mode
+    // synthesizes deltas uniformly for both mice and trackpads. See
+    // https://github.com/libsdl-org/SDL/issues/5340.
+    sdl2::hint::set("SDL_MOUSE_RELATIVE_MODE_WARP", "1");
+
     let sdl_context = sdl2::init().expect("Failed to initialize SDL2");
     let sdl_video = sdl_context.video().expect("Failed to init SDL video");
     let sdl_audio = sdl_context.audio().expect("Failed to init SDL audio");
@@ -489,9 +498,13 @@ pub fn run(
                     eprintln!("Controller disconnected");
                 }
 
-                // Mouse motion → analog axes (trackball games)
-                Event::MouseMotion { xrel, yrel, .. }
-                    if !video.wants_pointer() && mouse_grabbed =>
+                // Mouse motion → analog axes (trackball games). When the mouse is
+                // grabbed the cursor belongs to the game (it is captured and
+                // warped to window center), so route motion unconditionally —
+                // egui's `wants_pointer()` would otherwise report the warped
+                // cursor as "over an area" and swallow every delta. Press F11 to
+                // ungrab (clears `mouse_grabbed`) and interact with egui panels.
+                Event::MouseMotion { xrel, yrel, .. } if mouse_grabbed =>
                 {
                     for (id, scale) in bindings.mouse_axis_targets(MouseAxis::X) {
                         let delta = xrel as f32 * scale;
@@ -504,16 +517,14 @@ pub fn run(
                 }
 
                 // Mouse buttons → fire (trackball games)
-                Event::MouseButtonDown { mouse_btn, .. }
-                    if !video.wants_pointer() && mouse_grabbed =>
+                Event::MouseButtonDown { mouse_btn, .. } if mouse_grabbed =>
                 {
                     for id in bindings.digital_targets(PhysicalInput::MouseButtonInput(mouse_btn)) {
                         machine.handle_input(InputEvent::Button { id, pressed: true });
                     }
                 }
 
-                Event::MouseButtonUp { mouse_btn, .. }
-                    if !video.wants_pointer() && mouse_grabbed =>
+                Event::MouseButtonUp { mouse_btn, .. } if mouse_grabbed =>
                 {
                     for id in bindings.digital_targets(PhysicalInput::MouseButtonInput(mouse_btn)) {
                         machine.handle_input(InputEvent::Button { id, pressed: false });

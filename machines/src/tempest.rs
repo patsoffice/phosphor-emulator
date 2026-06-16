@@ -333,8 +333,16 @@ impl TempestSystem {
             self.spinner_accum += DIGITAL_SPINNER_SPEED;
         }
 
-        // Drain spinner accumulator into 4-bit counter
-        let spinner_delta = self.spinner_accum;
+        // Drain spinner accumulator into the 4-bit counter. The game reads the
+        // counter as a *signed* per-frame delta, so a single frame may advance
+        // it by at most ±7; a larger step aliases in 4 bits and reads as a stall
+        // (multiples of 16) or a reversal (8..15). Trackball/trackpad motion can
+        // produce far larger deltas, so clamp the per-frame step. Slow, precise
+        // motion (≤7) passes through unchanged; fast motion is capped at full
+        // spinner speed rather than aliasing. Excess is dropped (not carried) so
+        // the player doesn't keep drifting after the mouse stops.
+        const MAX_SPINNER_STEP: i32 = 7;
+        let spinner_delta = self.spinner_accum.clamp(-MAX_SPINNER_STEP, MAX_SPINNER_STEP);
         self.spinner_accum = 0;
         self.spinner_counter = self.spinner_counter.wrapping_add(spinner_delta as u8) & 0x0F;
 

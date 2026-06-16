@@ -298,13 +298,23 @@ impl Pokey {
                 self.skstat |= SKSTAT_RESET_MASK;
             }
             0x0B => {
-                // POTGO: Start pot scan. All ALLPOT bits read as "still
-                // scanning" (0xFF) until each pot's counter reaches its input
-                // value during the scan; nothing completes instantly.
+                // POTGO: Start pot scan. A pot whose input reads 0 completes
+                // immediately (no capacitor connected): MAME's pokey_potgo()
+                // asserts that pot's ALLPOT ready bit at once. Games that read
+                // ALLPOT right after POTGO — e.g. Tempest's fire/zap/start
+                // buttons and Food Fight's DIP lines — depend on this; without
+                // it ALLPOT stays 0xFF and every switch reads identical. Pots
+                // with a nonzero target stay "scanning" until their counter
+                // reaches it during the scan ticks below.
                 self.pot_scanning = true;
                 self.pot_scan_count = 0;
                 self.pot_counter = [0; 8];
                 self.pot_done = 0xFF;
+                for i in 0..8 {
+                    if self.pot_input[i] == 0 {
+                        self.pot_done &= !(1 << i);
+                    }
+                }
             }
             0x0D => self.serout = data, // SEROUT
             0x0E => {
