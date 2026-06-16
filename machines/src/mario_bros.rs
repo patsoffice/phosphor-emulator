@@ -1294,3 +1294,288 @@ fn create_machine(
 inventory::submit! {
     MachineEntry::new("mariobros", &["mario", "mariobros"], create_machine)
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use phosphor_core::cpu::CpuStateTrait;
+
+    /// Program the on-board Z80 DMA for a memory-to-memory copy via the I/O bus,
+    /// exactly as the game would (writes to port 0x00), then leave it armed.
+    fn program_dma(sys: &mut MarioBrosSystem, src: u16, dst: u16, len_minus_1: u16) {
+        let io = |sys: &mut MarioBrosSystem, b: u8| sys.io_write(BusMaster::Cpu(0), 0x00, b);
+        // WR0: transfer, port A source, follow port-A addr L/H + block-len L/H.
+        io(sys, 0b0111_1101);
+        io(sys, (src & 0xFF) as u8);
+        io(sys, (src >> 8) as u8);
+        io(sys, (len_minus_1 & 0xFF) as u8);
+        io(sys, (len_minus_1 >> 8) as u8);
+        io(sys, 0b0001_0100); // WR1: port A memory, increment
+        io(sys, 0b0001_0000); // WR2: port B memory, increment
+        io(sys, 0b1010_1101); // WR4: continuous, follow port-B addr L/H
+        io(sys, (dst & 0xFF) as u8);
+        io(sys, (dst >> 8) as u8);
+        io(sys, 0b1000_1010); // WR5: ready active-high
+        io(sys, 0xCF); // LOAD
+        io(sys, 0x87); // ENABLE
+    }
+
+    #[test]
+    fn boots_and_runs_frames_without_panicking() {
+        let mut sys = MarioBrosSystem::new();
+        // Size the GFX caches (load_rom_set normally does this); ROMs stay zeroed.
+        sys.board.decode_gfx_roms();
+        sys.reset();
+        assert_eq!(sys.board.sound_cpu.ram_mask, 0x7F, "I8039 has 128B RAM");
+        for _ in 0..3 {
+            sys.run_frame();
+        }
+        // Render the visible frame (256×224 RGB24); must match display size.
+        let (w, h) = TIMING.display_size();
+        assert_eq!((w, h), (256, 224));
+        let mut buf = vec![0u8; (w * h * 3) as usize];
+        sys.board.render_frame(&mut buf);
+    }
+
+    #[test]
+    fn bus_decodes_ram_nvram_video_sprite() {
+        let mut sys = MarioBrosSystem::new();
+        // Work RAM, NVRAM, video and sprite RAM are CPU read/write.
+        for (addr, val) in [
+            (0x6000u16, 0x11u8),
+            (0x6800, 0x22),
+            (0x7400, 0x33),
+            (0x7000, 0x44),
+        ] {
+            sys.write(BusMaster::Cpu(0), addr, val);
+            assert_eq!(sys.read(BusMaster::Cpu(0), addr), val, "addr {addr:#06x}");
+        }
+        // Program ROM is read-only: writes are ignored.
+        sys.board.main_map.region_data_mut(MainRegion::Rom)[0] = 0xAB;
+        sys.write(BusMaster::Cpu(0), 0x0000, 0x00);
+        assert_eq!(sys.read(BusMaster::Cpu(0), 0x0000), 0xAB);
+    }
+
+    #[test]
+    fn bus_decodes_inputs_and_control_latches() {
+        let mut sys = MarioBrosSystem::new();
+        sys.board.in0 = 0x55;
+        sys.board.in1 = 0xAA;
+        sys.board.dsw = 0x3C;
+        assert_eq!(sys.read(BusMaster::Cpu(0), 0x7C00), 0x55);
+        assert_eq!(sys.read(BusMaster::Cpu(0), 0x7C80), 0xAA);
+        assert_eq!(sys.read(BusMaster::Cpu(0), 0x7F80), 0x3C);
+
+        // Scroll + sound command latches.
+        sys.write(BusMaster::Cpu(0), 0x7D00, 0x42);
+        assert_eq!(sys.board.scroll_y, 0x42);
+        sys.write(BusMaster::Cpu(0), 0x7E00, 0x99);
+        assert_eq!(sys.board.sound_latch, 0x99);
+
+        // LS259: gfx bank (Q0), flip (Q2), palette bank (Q3), NMI mask (Q4).
+        sys.write(BusMaster::Cpu(0), 0x7E80, 0x01);
+        sys.write(BusMaster::Cpu(0), 0x7E82, 0x01);
+        sys.write(BusMaster::Cpu(0), 0x7E83, 0x01);
+        sys.write(BusMaster::Cpu(0), 0x7E84, 0x01);
+        assert_eq!(sys.board.gfx_bank, 1);
+        assert!(sys.board.flip_screen);
+        assert_eq!(sys.board.palette_bank, 1);
+        assert!(sys.board.nmi_mask);
+    }
+
+    #[test]
+    fn sample_triggers_route_to_sound_latches() {
+        let mut sys = MarioBrosSystem::new();
+        // 0x7F00: death → sound CPU IRQ.
+        sys.write(BusMaster::Cpu(0), 0x7F00, 0x01);
+        assert!(sys.board.sound_irq_pending);
+        sys.write(BusMaster::Cpu(0), 0x7F00, 0x00);
+        assert!(!sys.board.sound_irq_pending);
+
+        // 0x7F01/0x7F02 → soundlatch3 bits 0/1 (T0/T1).
+        sys.write(BusMaster::Cpu(0), 0x7F01, 0x01);
+        sys.write(BusMaster::Cpu(0), 0x7F02, 0x01);
+        assert_eq!(sys.board.sound_latch3 & 0x03, 0x03);
+
+        // 0x7F03..0x7F06 → soundlatch1 bits 0..3 (P1 input).
+        sys.write(BusMaster::Cpu(0), 0x7F05, 0x01); // crab/.. bit 2
+        assert_eq!(sys.board.sound_latch1, 0x04);
+    }
+
+    #[test]
+    fn dma_copies_work_ram_to_sprite_ram() {
+        let mut sys = MarioBrosSystem::new();
+        // Seed the source block in work RAM.
+        let ram = sys.board.main_map.region_data_mut(MainRegion::Ram);
+        ram[0..5].copy_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF, 0x42]);
+
+        program_dma(&mut sys, 0x6000, 0x7000, 0x0004); // 5 bytes
+        // Trigger via LS259 Q5 (DMA SET → RDY).
+        sys.write(BusMaster::Cpu(0), 0x7E85, 0x01);
+
+        let spr = sys.board.main_map.region_data(MainRegion::SpriteRam);
+        assert_eq!(&spr[0..5], &[0xDE, 0xAD, 0xBE, 0xEF, 0x42]);
+    }
+
+    #[test]
+    fn input_maps_to_correct_port_bits() {
+        let mut sys = MarioBrosSystem::new();
+        let press = |sys: &mut MarioBrosSystem, id: u8| {
+            sys.handle_input(InputEvent::Button {
+                id: InputId(id as u16),
+                pressed: true,
+            });
+        };
+        press(&mut sys, INPUT_P1_RIGHT); // in0 bit 0
+        press(&mut sys, INPUT_P1_JUMP); // in0 bit 4
+        press(&mut sys, INPUT_P1_START); // in0 bit 5
+        press(&mut sys, INPUT_SERVICE); // in0 bit 7
+        assert_eq!(sys.board.in0, 0b1011_0001);
+
+        press(&mut sys, INPUT_P2_LEFT); // in1 bit 1
+        press(&mut sys, INPUT_COIN); // in1 bit 5
+        press(&mut sys, INPUT_COIN2); // in1 bit 6
+        assert_eq!(sys.board.in1, 0b0110_0010);
+    }
+
+    #[test]
+    fn gfx_decode_has_expected_dimensions() {
+        let mut sys = MarioBrosSystem::new();
+        // Set the first plane-0 bit of tile 0 and sprite 0 (MSB of byte 0).
+        sys.board.tile_rom[0] = 0x80;
+        sys.board.sprite_rom[0] = 0x80;
+        sys.board.decode_gfx_roms();
+
+        assert_eq!(sys.board.tile_cache.count(), 512);
+        assert_eq!(
+            (sys.board.tile_cache.width(), sys.board.tile_cache.height()),
+            (8, 8)
+        );
+        assert_eq!(sys.board.sprite_cache.count(), 256);
+        assert_eq!(
+            (
+                sys.board.sprite_cache.width(),
+                sys.board.sprite_cache.height()
+            ),
+            (16, 16)
+        );
+        // Plane 0 maps to pixel bit 0.
+        assert_eq!(sys.board.tile_cache.pixel(0, 0, 0) & 1, 1);
+        assert_eq!(sys.board.sprite_cache.pixel(0, 0, 0) & 1, 1);
+    }
+
+    #[test]
+    fn nvram_save_and_load() {
+        let mut sys = MarioBrosSystem::new();
+        sys.board.main_map.region_data_mut(MainRegion::Nvram)[0x10] = 0x7E;
+        let saved = sys.save_nvram().unwrap().to_vec();
+        assert_eq!(saved.len(), 0x800);
+        assert_eq!(saved[0x10], 0x7E);
+
+        let mut sys2 = MarioBrosSystem::new();
+        sys2.load_nvram(&saved);
+        assert_eq!(
+            sys2.board.main_map.region_data(MainRegion::Nvram)[0x10],
+            0x7E
+        );
+    }
+
+    #[test]
+    fn save_load_round_trip() {
+        let mut sys = MarioBrosSystem::new();
+        sys.board.main_map.region_data_mut(MainRegion::Ram)[0x100] = 0xAA;
+        sys.board.main_map.region_data_mut(MainRegion::Nvram)[0x40] = 0xBB;
+        sys.board.main_map.region_data_mut(MainRegion::SpriteRam)[0x50] = 0xCC;
+        sys.board.main_map.region_data_mut(MainRegion::VideoRam)[0x60] = 0xDD;
+        sys.board.in0 = 0x1F;
+        sys.board.in1 = 0x0E;
+        sys.board.sound_latch = 0x42;
+        sys.board.sound_latch1 = 0x07;
+        sys.board.sound_latch3 = 0x02;
+        sys.board.flip_screen = true;
+        sys.board.gfx_bank = 1;
+        sys.board.palette_bank = 1;
+        sys.board.nmi_mask = true;
+        sys.board.scroll_y = 0x21;
+        sys.board.sound_irq_pending = true;
+        sys.board.clock = 123_456;
+        sys.board.vblank_nmi_pending = true;
+
+        let data = SaveState::save_state(&sys).expect("save_state");
+        let cpu_snap = sys.board.cpu.snapshot();
+        let snd_snap = sys.board.sound_cpu.snapshot();
+
+        let mut sys2 = MarioBrosSystem::new();
+        sys2.board.clock = 999;
+        SaveState::load_state(&mut sys2, &data).unwrap();
+
+        assert_eq!(sys2.board.cpu.snapshot(), cpu_snap);
+        assert_eq!(sys2.board.sound_cpu.snapshot(), snd_snap);
+        assert_eq!(
+            sys2.board.main_map.region_data(MainRegion::Ram)[0x100],
+            0xAA
+        );
+        assert_eq!(
+            sys2.board.main_map.region_data(MainRegion::Nvram)[0x40],
+            0xBB
+        );
+        assert_eq!(
+            sys2.board.main_map.region_data(MainRegion::SpriteRam)[0x50],
+            0xCC
+        );
+        assert_eq!(
+            sys2.board.main_map.region_data(MainRegion::VideoRam)[0x60],
+            0xDD
+        );
+        assert_eq!(sys2.board.in0, 0x1F);
+        assert_eq!(sys2.board.sound_latch, 0x42);
+        assert_eq!(sys2.board.sound_latch1, 0x07);
+        assert_eq!(sys2.board.sound_latch3, 0x02);
+        assert!(sys2.board.flip_screen);
+        assert_eq!(sys2.board.gfx_bank, 1);
+        assert_eq!(sys2.board.palette_bank, 1);
+        assert!(sys2.board.nmi_mask);
+        assert_eq!(sys2.board.scroll_y, 0x21);
+        assert!(sys2.board.sound_irq_pending);
+        assert_eq!(sys2.board.clock, 123_456);
+        assert!(sys2.board.vblank_nmi_pending);
+    }
+
+    #[test]
+    fn save_does_not_include_rom() {
+        let mut sys = MarioBrosSystem::new();
+        sys.board.main_map.region_data_mut(MainRegion::Rom)[0] = 0xDE;
+        sys.board.sound_map.region_data_mut(SoundRegion::Rom)[0] = 0xAD;
+        sys.board.tile_rom[0] = 0xBE;
+        sys.board.sprite_rom[0] = 0xEF;
+
+        let data = SaveState::save_state(&sys).unwrap();
+        let mut sys2 = MarioBrosSystem::new();
+        SaveState::load_state(&mut sys2, &data).unwrap();
+
+        assert_eq!(sys2.board.main_map.region_data(MainRegion::Rom)[0], 0x00);
+        assert_eq!(sys2.board.sound_map.region_data(SoundRegion::Rom)[0], 0x00);
+        assert_eq!(sys2.board.tile_rom[0], 0x00);
+        assert_eq!(sys2.board.sprite_rom[0], 0x00);
+    }
+
+    #[test]
+    fn dip_default_and_metadata() {
+        let sys = MarioBrosSystem::new();
+        assert_eq!(sys.dip_bank_value(0), 0x00); // 3 lives, 1C/1C, 20k, easy
+        crate::assert_dip_banks_valid(sys.dip_banks(), &[sys.dip_bank_value(0)]);
+    }
+
+    #[test]
+    fn set_dip_option_masks_only_its_bits() {
+        let mut sys = MarioBrosSystem::new();
+        sys.set_dip_option(0, 0, 0x03); // Lives → "6"
+        assert_eq!(sys.dip_bank_value(0), 0x03);
+        sys.set_dip_option(0, 3, 0xC0); // Difficulty → "Hardest"
+        assert_eq!(sys.dip_bank_value(0), 0xC3);
+    }
+}
