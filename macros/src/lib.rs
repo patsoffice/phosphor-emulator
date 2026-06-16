@@ -7,16 +7,21 @@ use syn::{DeriveInput, Expr, Fields, Type, parse_macro_input};
 ///
 /// Annotate fields with:
 /// - `#[debug_device("Name")]` — field implements `Device`, listed in `devices()`.
-///   Also generates `write_device_register()` and `reset_device()` dispatch.
+///   Also generates `write_device_register()` and `reset_device()` dispatch. On
+///   an array field `[T; N]` (literal `N`) it expands to N entries named
+///   `"Name 1".."Name N"`, one per element.
 /// - `#[debug_cpu("Name")]` — field implements `DebugCpu`, listed in both `devices()`
 ///   AND `cpus()`. Debug reads/writes are auto-routed through the matching
-///   `#[debug_map(cpu = N)]` field's `AddressSpace16::debug_read`/`debug_write`.
+///   `#[debug_map(cpu = N)]` field's `debug_read`/`debug_write`.
 /// - `#[debug_cpu("Name", read = "method", write = "method")]` — explicit version:
 ///   names `&self` / `&mut self` methods on the struct for side-effect-free memory access.
-/// - `#[debug_map(cpu = N)]` — field is an `AddressSpace16` linked to CPU index N.
-///   Generates watchpoint routing, `peek` (backed/I/O/unmapped semantics via
-///   `AddressSpace16::debug_peek`), and (when linked to a `#[debug_cpu]`)
-///   debug memory access.
+/// - `#[debug_map(cpu = N)]` — field is an `AddressSpace16` or `AddressSpace32`
+///   linked to CPU index N. Generates watchpoint routing, `peek`
+///   (backed/I/O/unmapped semantics via `debug_peek`), and (when linked to a
+///   `#[debug_cpu]`) debug memory access. The address width is inferred from the
+///   field type: `AddressSpace16` maps clamp debug addresses to 16 bits, while
+///   `AddressSpace32` maps (24/32-bit M68000 buses) route them untruncated.
+///   `memory_map()` exposes 16-bit maps only (its return type is `&AddressSpace16`).
 ///
 /// CPU index assignment is positional: first `#[debug_cpu]` is index 0, etc.
 /// Device indices for `write_device_register` / `reset_device` match `devices()` order.
@@ -33,47 +38,62 @@ pub fn derive_bus_debug(input: TokenStream) -> TokenStream {
         _ => panic!("BusDebug can only be derived on structs"),
     };
 
-    let mut device_entries = Vec::new(); // (name, field_ident, is_device) for all annotated fields
+    // (name, accessor-expr, is_device) for all annotated fields, in field
+    // order. `accessor` is the `self.field` (or `self.field[i]` for array
+    // device fields) token stream, so device indices match `devices()` order.
+    let mut device_entries: Vec<(syn::LitStr, TokenStream2, bool)> = Vec::new();
     let mut cpu_entries: Vec<(
         syn::LitStr,
         syn::Ident,
         Option<syn::LitStr>,
         Option<syn::LitStr>,
     )> = Vec::new(); // (name, field_ident, read_method?, write_method?)
-    let mut map_entries: Vec<MapEntry> = Vec::new(); // (cpu_index, field_ident) for AddressSpace16 fields
+    let mut map_entries: Vec<MapEntry> = Vec::new(); // (cpu_index, field_ident, is_32) for AddressSpace fields
 
     for field in fields {
         let field_ident = field.ident.as_ref().expect("named field");
 
         for attr in &field.attrs {
             if attr.path().is_ident("debug_device") {
-                // #[debug_device("Name")] — field implements Device
+                // #[debug_device("Name")] — field implements Device. On an
+                // array field `[T; N]`, expands to N entries "Name 1".."Name N".
                 let name: syn::LitStr = attr
                     .parse_args()
                     .expect("debug_device expects a string literal: #[debug_device(\"Name\")]");
-                device_entries.push((name, field_ident.clone(), true));
+                if let Some(len) = array_len(&field.ty) {
+                    for i in 0..len {
+                        let elem_name =
+                            syn::LitStr::new(&format!("{} {}", name.value(), i + 1), name.span());
+                        device_entries.push((elem_name, quote! { self.#field_ident[#i] }, true));
+                    }
+                } else {
+                    device_entries.push((name, quote! { self.#field_ident }, true));
+                }
             } else if attr.path().is_ident("debug_cpu") {
                 // #[debug_cpu("Name")] or #[debug_cpu("Name", read = "method", write = "method")]
                 let args: CpuArgs = attr
                     .parse_args()
                     .expect("debug_cpu expects: (\"Name\") or (\"Name\", read = \"method\", write = \"method\")");
                 // CPUs appear in both devices() and cpus()
-                device_entries.push((args.name.clone(), field_ident.clone(), false));
+                device_entries.push((args.name.clone(), quote! { self.#field_ident }, false));
                 cpu_entries.push((args.name, field_ident.clone(), args.read, args.write));
             } else if attr.path().is_ident("debug_map") {
-                // #[debug_map(cpu = N)] — field is an AddressSpace16 linked to CPU index N
+                // #[debug_map(cpu = N)] — field is an AddressSpace{16,32} linked
+                // to CPU index N. The address width is inferred from the field
+                // type so 24/32-bit (M68000) buses route addresses untruncated.
                 let args: MapArgs = attr.parse_args().expect("debug_map expects: (cpu = N)");
                 map_entries.push(MapEntry {
                     cpu_index: args.cpu_index,
                     field_ident: field_ident.clone(),
+                    is_32: type_is(&field.ty, "AddressSpace32"),
                 });
             }
         }
     }
 
     // Generate devices() body
-    let device_items = device_entries.iter().map(|(name, ident, _)| {
-        quote! { (#name, &self.#ident as &dyn phosphor_core::core::debug::Debuggable) }
+    let device_items = device_entries.iter().map(|(name, accessor, _)| {
+        quote! { (#name, &#accessor as &dyn phosphor_core::core::debug::Debuggable) }
     });
 
     // Generate cpus() body
@@ -88,12 +108,13 @@ pub fn derive_bus_debug(input: TokenStream) -> TokenStream {
         .map(|(i, (_, _, read_method, _))| {
             let idx = i;
             if let Some(read_method) = read_method {
-                // Explicit method: self.method(addr)
+                // Explicit method: self.method(addr) — 16-bit addressed.
                 let read_ident =
                     syn::Ident::new(read_method.value().as_str(), read_method.span());
-                quote! { #idx => self.#read_ident(addr) }
+                quote! { #idx => u16::try_from(addr).ok().and_then(|addr| self.#read_ident(addr)) }
             } else {
-                // Auto-route through matching #[debug_map(cpu = N)]
+                // Auto-route through matching #[debug_map(cpu = N)]. 32-bit maps
+                // take the address untruncated; 16-bit maps clamp to their space.
                 let map_field = map_entries
                     .iter()
                     .find(|m| m.cpu_index == i)
@@ -103,7 +124,11 @@ pub fn derive_bus_debug(input: TokenStream) -> TokenStream {
                         )
                     });
                 let map_ident = &map_field.field_ident;
-                quote! { #idx => self.#map_ident.debug_read(addr) }
+                if map_field.is_32 {
+                    quote! { #idx => self.#map_ident.debug_read(addr) }
+                } else {
+                    quote! { #idx => u16::try_from(addr).ok().and_then(|addr| self.#map_ident.debug_read(addr)) }
+                }
             }
         })
         .collect();
@@ -115,12 +140,12 @@ pub fn derive_bus_debug(input: TokenStream) -> TokenStream {
         .map(|(i, (_, _, _, write_method))| {
             let idx = i;
             if let Some(write_method) = write_method {
-                // Explicit method: self.method(addr, data)
+                // Explicit method: self.method(addr, data) — 16-bit addressed.
                 let write_ident =
                     syn::Ident::new(write_method.value().as_str(), write_method.span());
-                quote! { #idx => self.#write_ident(addr, data) }
+                quote! { #idx => { if let Ok(addr) = u16::try_from(addr) { self.#write_ident(addr, data); } } }
             } else {
-                // Auto-route through matching #[debug_map(cpu = N)]
+                // Auto-route through matching #[debug_map(cpu = N)].
                 let map_field = map_entries
                     .iter()
                     .find(|m| m.cpu_index == i)
@@ -130,7 +155,11 @@ pub fn derive_bus_debug(input: TokenStream) -> TokenStream {
                         )
                     });
                 let map_ident = &map_field.field_ident;
-                quote! { #idx => self.#map_ident.debug_write(addr, data) }
+                if map_field.is_32 {
+                    quote! { #idx => self.#map_ident.debug_write(addr, data) }
+                } else {
+                    quote! { #idx => { if let Ok(addr) = u16::try_from(addr) { self.#map_ident.debug_write(addr, data); } } }
+                }
             }
         })
         .collect();
@@ -140,11 +169,11 @@ pub fn derive_bus_debug(input: TokenStream) -> TokenStream {
         device_entries
             .iter()
             .enumerate()
-            .filter_map(|(i, (_, ident, is_device))| {
+            .filter_map(|(i, (_, accessor, is_device))| {
                 if *is_device {
                     let idx = i;
                     Some(quote! {
-                        #idx => phosphor_core::device::Device::write(&mut self.#ident, offset, data)
+                        #idx => phosphor_core::device::Device::write(&mut #accessor, offset, data)
                     })
                 } else {
                     None
@@ -156,11 +185,11 @@ pub fn derive_bus_debug(input: TokenStream) -> TokenStream {
         device_entries
             .iter()
             .enumerate()
-            .filter_map(|(i, (_, ident, is_device))| {
+            .filter_map(|(i, (_, accessor, is_device))| {
                 if *is_device {
                     let idx = i;
                     Some(quote! {
-                        #idx => phosphor_core::device::Device::reset(&mut self.#ident)
+                        #idx => phosphor_core::device::Device::reset(&mut #accessor)
                     })
                 } else {
                     None
@@ -176,16 +205,25 @@ pub fn derive_bus_debug(input: TokenStream) -> TokenStream {
         });
 
         // set_watchpoint / clear_watchpoint: match on cpu_index, passing it
-        // through so hits record which CPU's address space fired
+        // through so hits record which CPU's address space fired. 16-bit maps
+        // clamp the address (>0xFFFF can never fire); 32-bit maps take it whole.
         let set_arms = map_entries.iter().map(|entry| {
             let idx = entry.cpu_index;
             let ident = &entry.field_ident;
-            quote! { #idx => self.#ident.set_watchpoint(cpu_index, addr, kind) }
+            if entry.is_32 {
+                quote! { #idx => self.#ident.set_watchpoint(cpu_index, addr, kind) }
+            } else {
+                quote! { #idx => { if let Ok(addr) = u16::try_from(addr) { self.#ident.set_watchpoint(cpu_index, addr, kind); } } }
+            }
         });
         let clear_arms = map_entries.iter().map(|entry| {
             let idx = entry.cpu_index;
             let ident = &entry.field_ident;
-            quote! { #idx => self.#ident.clear_watchpoint(cpu_index, addr, kind) }
+            if entry.is_32 {
+                quote! { #idx => self.#ident.clear_watchpoint(cpu_index, addr, kind) }
+            } else {
+                quote! { #idx => { if let Ok(addr) = u16::try_from(addr) { self.#ident.clear_watchpoint(cpu_index, addr, kind); } } }
+            }
         });
 
         // clear_all_watchpoints: call on every map
@@ -194,26 +232,48 @@ pub fn derive_bus_debug(input: TokenStream) -> TokenStream {
             quote! { self.#ident.clear_all_watchpoints(); }
         });
 
-        // memory_map: match on cpu_index
-        let map_arms = map_entries.iter().map(|entry| {
-            let idx = entry.cpu_index;
-            let ident = &entry.field_ident;
-            quote! { #idx => Some(&self.#ident) }
-        });
+        // memory_map: 16-bit maps only — the trait returns `&AddressSpace16`,
+        // so 32-bit maps are omitted (the debugger reads them via `peek`).
+        let map_arms: Vec<_> = map_entries
+            .iter()
+            .filter(|entry| !entry.is_32)
+            .map(|entry| {
+                let idx = entry.cpu_index;
+                let ident = &entry.field_ident;
+                quote! { #idx => Some(&self.#ident) }
+            })
+            .collect();
+        let memory_map_body = if map_arms.is_empty() {
+            quote! { let _ = cpu_index; None }
+        } else {
+            quote! {
+                match cpu_index {
+                    #(#map_arms,)*
+                    _ => None,
+                }
+            }
+        };
 
         // peek: per-map backed/io/unmapped semantics; CPUs without a map
-        // fall back to the read()-based default semantics
+        // fall back to the read()-based default semantics. 16-bit maps report
+        // addresses above their space as unmapped.
         let peek_arms = map_entries.iter().map(|entry| {
             let idx = entry.cpu_index;
             let ident = &entry.field_ident;
-            quote! { #idx => self.#ident.debug_peek(addr as u16) }
+            if entry.is_32 {
+                quote! { #idx => self.#ident.debug_peek(addr) }
+            } else {
+                quote! {
+                    #idx => match u16::try_from(addr) {
+                        Ok(addr) => self.#ident.debug_peek(addr),
+                        Err(_) => phosphor_core::core::DebugRead::Unmapped,
+                    }
+                }
+            }
         });
 
         quote! {
             fn peek(&self, cpu_index: usize, addr: u32) -> phosphor_core::core::DebugRead {
-                if addr > 0xFFFF {
-                    return phosphor_core::core::DebugRead::Unmapped;
-                }
                 match cpu_index {
                     #(#peek_arms,)*
                     _ => match self.read(cpu_index, addr) {
@@ -232,10 +292,6 @@ pub fn derive_bus_debug(input: TokenStream) -> TokenStream {
             }
 
             fn set_watchpoint(&mut self, cpu_index: usize, addr: u32, kind: phosphor_core::core::WatchpointKind) {
-                // 16-bit maps: addresses above 0xFFFF can never fire.
-                let Ok(addr) = u16::try_from(addr) else {
-                    return;
-                };
                 match cpu_index {
                     #(#set_arms,)*
                     _ => {}
@@ -243,9 +299,6 @@ pub fn derive_bus_debug(input: TokenStream) -> TokenStream {
             }
 
             fn clear_watchpoint(&mut self, cpu_index: usize, addr: u32, kind: phosphor_core::core::WatchpointKind) {
-                let Ok(addr) = u16::try_from(addr) else {
-                    return;
-                };
                 match cpu_index {
                     #(#clear_arms,)*
                     _ => {}
@@ -257,10 +310,7 @@ pub fn derive_bus_debug(input: TokenStream) -> TokenStream {
             }
 
             fn memory_map(&self, cpu_index: usize) -> Option<&phosphor_core::core::AddressSpace16> {
-                match cpu_index {
-                    #(#map_arms,)*
-                    _ => None,
-                }
+                #memory_map_body
             }
         }
     } else {
@@ -278,9 +328,8 @@ pub fn derive_bus_debug(input: TokenStream) -> TokenStream {
             }
 
             fn read(&self, cpu_index: usize, addr: u32) -> Option<u8> {
-                // Board maps and read methods are 16-bit; higher addresses
-                // are unmapped.
-                let addr = u16::try_from(addr).ok()?;
+                // Address width is handled per-CPU arm: 16-bit maps/methods
+                // clamp to their space, 32-bit maps take the address whole.
                 match cpu_index {
                     #(#read_arms,)*
                     _ => None,
@@ -288,9 +337,6 @@ pub fn derive_bus_debug(input: TokenStream) -> TokenStream {
             }
 
             fn write(&mut self, cpu_index: usize, addr: u32, data: u8) {
-                let Ok(addr) = u16::try_from(addr) else {
-                    return;
-                };
                 match cpu_index {
                     #(#write_arms,)*
                     _ => {}
@@ -377,6 +423,30 @@ impl syn::parse::Parse for CpuArgs {
 struct MapEntry {
     cpu_index: usize,
     field_ident: syn::Ident,
+    /// True for `AddressSpace32` maps (24/32-bit buses); false for
+    /// `AddressSpace16`. Controls whether debug addresses are truncated.
+    is_32: bool,
+}
+
+/// True if `ty`'s final path segment is the identifier `name`
+/// (e.g. `phosphor_core::core::AddressSpace32` matches `"AddressSpace32"`).
+fn type_is(ty: &Type, name: &str) -> bool {
+    matches!(ty, Type::Path(p) if p.path.segments.last().is_some_and(|s| s.ident == name))
+}
+
+/// Length of a fixed-size array type `[T; N]` when `N` is an integer literal;
+/// `None` for non-array types (or non-literal lengths, which the derive does
+/// not support for `#[debug_device]` arrays).
+fn array_len(ty: &Type) -> Option<usize> {
+    if let Type::Array(arr) = ty
+        && let Expr::Lit(syn::ExprLit {
+            lit: syn::Lit::Int(n),
+            ..
+        }) = &arr.len
+    {
+        return n.base10_parse::<usize>().ok();
+    }
+    None
 }
 
 /// Parsed arguments for `#[debug_map(cpu = N)]`.
