@@ -53,7 +53,7 @@ pub mod votrax_sc01;
 pub mod williams_blitter;
 pub mod z80ctc;
 
-pub use avg::Avg;
+pub use avg::{Avg, AvgVariant};
 pub use ay8910::Ay8910;
 pub use cmos_ram::CmosRam;
 pub use dac::Mc1408Dac;

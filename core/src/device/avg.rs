@@ -48,12 +48,31 @@ use super::dvg::VectorLine;
 use crate::core::debug::{DebugRegister, Debuggable};
 use crate::core::save_state::{SaveError, Saveable};
 
-/// Atari AVG (Tempest variant).
+/// Which game's AVG decode/color/coordinate rules to apply.
+///
+/// The Analog Vector Generator was customised per game in its instruction
+/// encoding, normalization precision, color decode, and coordinate handling.
+/// This selects between the variants implemented here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum AvgVariant {
+    /// Tempest (1981): byte-addressed (XOR-1) decode, 13-bit normalization,
+    /// Tempest color weights, no coordinate swap.
+    #[default]
+    Tempest,
+    /// Quantum (1982): word-addressed decode (`op = word >> 13`), 12-bit
+    /// normalization, Quantum color weights, X/Y swap in the vector generator.
+    Quantum,
+}
+
+/// Atari AVG (Tempest / Quantum variants).
 ///
 /// The AVG runs continuously (not halt-based like DVG). Each frame is
 /// delineated by a jump to address 0, which flushes the accumulated
 /// display list. The caller triggers execution via [`Avg::go`] + [`Avg::execute`].
 pub struct Avg {
+    /// Selected game variant (decode, color, coordinate rules).
+    variant: AvgVariant,
+
     /// Program counter (byte address into vector memory).
     pc: u16,
     /// 4-entry return address stack (byte addresses).
@@ -99,6 +118,22 @@ pub struct Avg {
     display_list: Vec<VectorLine>,
 }
 
+/// One decoded AVG instruction (fields common to both variants).
+struct Instr {
+    /// 3-bit opcode (0 VCTR, 1 HALT, 2 SVEC, 3 STAT, 4 CNTR, 5 JSR, 6 RTS, 7 JMP).
+    op: u8,
+    /// Y delta / operand (13-bit).
+    dvy: u16,
+    /// X delta (13-bit Tempest, 12-bit Quantum).
+    dvx: u16,
+    /// Intensity latch (4-bit).
+    int_latch: u8,
+    /// DVY bit 12 (selects scale vs color/intensity in STAT).
+    dvy12: u8,
+    /// True for Tempest SVEC (8-bit timer path); always false for Quantum.
+    is_short: bool,
+}
+
 impl Avg {
     /// Create a new AVG with beam center derived from visible area dimensions.
     ///
@@ -106,9 +141,19 @@ impl Avg {
     ///              `ycenter = (visible_height / 2) << 16`.
     /// For Tempest (visible area 0..580 x 0..570): xcenter=290<<16, ycenter=285<<16.
     pub fn new(visible_width: i32, visible_height: i32) -> Self {
+        Self::with_variant(AvgVariant::Tempest, visible_width, visible_height)
+    }
+
+    /// Create a new AVG for a specific game variant.
+    ///
+    /// See [`Avg::new`] for the beam-center derivation; the variant selects the
+    /// instruction decode, normalization precision, color decode, and
+    /// coordinate handling.
+    pub fn with_variant(variant: AvgVariant, visible_width: i32, visible_height: i32) -> Self {
         let xcenter = (visible_width / 2) << 16;
         let ycenter = (visible_height / 2) << 16;
         Self {
+            variant,
             pc: 0,
             stack: [0; 4],
             sp: 0,
@@ -184,53 +229,35 @@ impl Avg {
         const MAX_INSTRUCTIONS: u32 = 50_000;
 
         while !self.halted && instructions < MAX_INSTRUCTIONS {
-            // --- Decode ---
-            // The AVG PROM state machine reads bytes in handler order 1,0
-            // (high byte first via XOR-1), then 3,2 for 4-byte instructions.
-            // Only VCTR (op=0) is 4-byte; all others are 2-byte.
-            let hi0 = Self::read_byte(vmem, self.pc);
-            let lo0 = Self::read_byte(vmem, self.pc.wrapping_add(1));
-            let dvy12 = (hi0 >> 4) & 1;
-            let op = hi0 >> 5;
-
-            let (dvy, dvx, int_latch) = if op == 0 {
-                // VCTR: 4-byte instruction (two 16-bit words)
-                // Word 0 (handlers 1,0): DVY
-                // Word 1 (handlers 3,2): int_latch + DVX
-                let dvy = (u16::from(dvy12) << 12) | (u16::from(hi0 & 0xF) << 8) | u16::from(lo0);
-                let hi1 = Self::read_byte(vmem, self.pc.wrapping_add(2));
-                let lo1 = Self::read_byte(vmem, self.pc.wrapping_add(3));
-                self.pc = self.pc.wrapping_add(4);
-                let il = hi1 >> 4;
-                let dx = (u16::from(il & 1) << 12) | (u16::from(hi1 & 0xF) << 8) | u16::from(lo1);
-                (dvy, dx, il)
-            } else if op == 2 {
-                // SVEC: 2-byte instruction (one 16-bit word)
-                // High byte (handler 1): opcode + dvy12 + dvy[11:8]
-                // Low byte (handler 3): int_latch[3:0] + dvx[11:8]
-                // DVY and DVX lower 8 bits are zero (4-bit precision).
-                let dvy = (u16::from(dvy12) << 12) | (u16::from(hi0 & 0xF) << 8);
-                let il = lo0 >> 4;
-                let dx = (u16::from(il & 1) << 12) | (u16::from(lo0 & 0xF) << 8);
-                self.pc = self.pc.wrapping_add(2);
-                (dvy, dx, il)
-            } else {
-                // All other ops: 2-byte instruction
-                // DVY from high byte only (handler 1); lo0 used by handler 0
-                // for dvy lower bits in STAT/HALT/CNTR/JSR/RTS/JMP.
-                let dvy = (u16::from(dvy12) << 12) | (u16::from(hi0 & 0xF) << 8) | u16::from(lo0);
-                self.pc = self.pc.wrapping_add(2);
-                (dvy, 0u16, 0u8)
+            // --- Decode (variant-specific) ---
+            let Instr {
+                op,
+                dvy,
+                dvx,
+                int_latch,
+                dvy12,
+                is_short,
+            } = match self.variant {
+                AvgVariant::Tempest => self.decode_tempest(vmem),
+                AvgVariant::Quantum => self.decode_quantum(vmem),
             };
 
-            // --- Execute ---
+            // --- Execute. Op meanings (0/2 VCTR/SVEC, 1 HALT, 3 STAT, 4 CNTR,
+            // 5 JSR, 6 RTS, 7 JMP) are shared across variants; only the vector
+            // draw math, normalization, and STAT color latch differ. ---
             match op {
-                0 | 2 => {
-                    let is_short = op == 2;
-                    let (norm_dvx, norm_dvy, timer) = self.normalize(dvx, dvy, is_short);
-                    let timer = self.apply_bin_scale(timer, is_short);
-                    self.draw_vector(norm_dvx, norm_dvy, timer, is_short, int_latch, color_ram);
-                }
+                0 | 2 => match self.variant {
+                    AvgVariant::Tempest => {
+                        let (norm_dvx, norm_dvy, timer) = self.normalize(dvx, dvy, is_short);
+                        let timer = self.apply_bin_scale(timer, is_short);
+                        self.draw_vector(norm_dvx, norm_dvy, timer, is_short, int_latch, color_ram);
+                    }
+                    AvgVariant::Quantum => {
+                        let (norm_dvx, norm_dvy, timer) = self.normalize_quantum(dvx, dvy);
+                        let timer = self.apply_bin_scale_quantum(timer);
+                        self.draw_quantum(norm_dvx, norm_dvy, timer, int_latch, color_ram);
+                    }
+                },
                 1 => self.halted = true,
                 3 => {
                     if dvy12 != 0 {
@@ -238,7 +265,12 @@ impl Avg {
                         self.bin_scale = ((dvy >> 8) & 7) as u8;
                     } else if dvy & 0x800 != 0 {
                         self.color = (dvy & 0xF) as u8;
-                    } else {
+                        // Quantum latches color and intensity together (its
+                        // strobe2); Tempest latches only color here.
+                        if self.variant == AvgVariant::Quantum {
+                            self.intensity = ((dvy >> 4) & 0xF) as u8;
+                        }
+                    } else if self.variant == AvgVariant::Tempest {
                         self.intensity = ((dvy >> 4) & 0xF) as u8;
                     }
                 }
@@ -293,6 +325,89 @@ impl Avg {
     fn read_byte(vmem: &[u8], addr: u16) -> u8 {
         let idx = (addr as usize) ^ 1;
         if idx < vmem.len() { vmem[idx] } else { 0 }
+    }
+
+    /// Read one big-endian 16-bit word at byte address `addr` (Quantum decode).
+    ///
+    /// Quantum's 68000 writes vector RAM as big-endian words, and the AVG reads
+    /// whole words (no XOR-1 byte swap), so the word at even PC is `[hi, lo]`.
+    fn read_word_be(vmem: &[u8], addr: u16) -> u16 {
+        let i = addr as usize;
+        let hi = vmem.get(i).copied().unwrap_or(0);
+        let lo = vmem.get(i + 1).copied().unwrap_or(0);
+        u16::from_be_bytes([hi, lo])
+    }
+
+    /// Decode one Tempest instruction at the current PC, advancing PC.
+    ///
+    /// The PROM state machine reads bytes in handler order 1,0 (high byte first
+    /// via XOR-1), then 3,2 for the 4-byte VCTR. VCTR (op 0) is 4 bytes, SVEC
+    /// (op 2) packs DVX/int_latch into its single word, all others are 2 bytes.
+    fn decode_tempest(&mut self, vmem: &[u8]) -> Instr {
+        let hi0 = Self::read_byte(vmem, self.pc);
+        let lo0 = Self::read_byte(vmem, self.pc.wrapping_add(1));
+        let dvy12 = (hi0 >> 4) & 1;
+        let op = hi0 >> 5;
+
+        let (dvy, dvx, int_latch) = if op == 0 {
+            let dvy = (u16::from(dvy12) << 12) | (u16::from(hi0 & 0xF) << 8) | u16::from(lo0);
+            let hi1 = Self::read_byte(vmem, self.pc.wrapping_add(2));
+            let lo1 = Self::read_byte(vmem, self.pc.wrapping_add(3));
+            self.pc = self.pc.wrapping_add(4);
+            let il = hi1 >> 4;
+            let dx = (u16::from(il & 1) << 12) | (u16::from(hi1 & 0xF) << 8) | u16::from(lo1);
+            (dvy, dx, il)
+        } else if op == 2 {
+            let dvy = (u16::from(dvy12) << 12) | (u16::from(hi0 & 0xF) << 8);
+            let il = lo0 >> 4;
+            let dx = (u16::from(il & 1) << 12) | (u16::from(lo0 & 0xF) << 8);
+            self.pc = self.pc.wrapping_add(2);
+            (dvy, dx, il)
+        } else {
+            let dvy = (u16::from(dvy12) << 12) | (u16::from(hi0 & 0xF) << 8) | u16::from(lo0);
+            self.pc = self.pc.wrapping_add(2);
+            (dvy, 0u16, 0u8)
+        };
+
+        Instr {
+            op,
+            dvy,
+            dvx,
+            int_latch,
+            dvy12,
+            is_short: op == 2,
+        }
+    }
+
+    /// Decode one Quantum instruction at the current PC, advancing PC.
+    ///
+    /// Quantum reads whole 16-bit words: `op = word >> 13`, `dvy12 = bit 12`,
+    /// `dvy = word & 0x1FFF`. VCTR (op 0) reads a second word for
+    /// `int_latch = word >> 12` and `dvx = word & 0xFFF`; all others are one
+    /// word. There is no SVEC, so `is_short` is always false.
+    fn decode_quantum(&mut self, vmem: &[u8]) -> Instr {
+        let word0 = Self::read_word_be(vmem, self.pc);
+        let op = (word0 >> 13) as u8;
+        let dvy12 = ((word0 >> 12) & 1) as u8;
+        let dvy = word0 & 0x1FFF;
+
+        let (dvx, int_latch) = if op == 0 {
+            let word1 = Self::read_word_be(vmem, self.pc.wrapping_add(2));
+            self.pc = self.pc.wrapping_add(4);
+            (word1 & 0x0FFF, (word1 >> 12) as u8)
+        } else {
+            self.pc = self.pc.wrapping_add(2);
+            (0u16, 0u8)
+        };
+
+        Instr {
+            op,
+            dvy,
+            dvx,
+            int_latch,
+            dvy12,
+            is_short: false,
+        }
     }
 
     /// Normalize DVX/DVY (strobe0) — shift both axes together until EITHER
@@ -404,6 +519,91 @@ impl Avg {
         }
 
         self.add_point(x, y, eff_intensity, [r, g, b]);
+    }
+
+    /// Normalize DVX/DVY for Quantum (`quantum_strobe0`): 12-bit precision
+    /// (sign at bit 11), shifting both axes together until either normalizes.
+    fn normalize_quantum(&self, mut dvx: u16, mut dvy: u16) -> (u16, u16, u16) {
+        let mut timer: u16 = 0;
+        let mut i = 0;
+        while (((dvy ^ (dvy << 1)) & 0x800) == 0) && (((dvx ^ (dvx << 1)) & 0x800) == 0) && (i < 16)
+        {
+            dvy = (dvy << 1) & 0xFFF;
+            dvx = (dvx << 1) & 0xFFF;
+            timer >>= 1;
+            timer |= 0x2000;
+            i += 1;
+        }
+        (dvx, dvy, timer)
+    }
+
+    /// Apply binary scale to the Quantum timer (`quantum_strobe1`).
+    fn apply_bin_scale_quantum(&self, mut timer: u16) -> u16 {
+        for _ in 0..self.bin_scale {
+            timer >>= 1;
+            timer |= 0x2000;
+        }
+        timer
+    }
+
+    /// Draw a vector for Quantum (`quantum_strobe3`): 12-bit DAC, Quantum color
+    /// weights, and the vector generator's X/Y coordinate swap.
+    fn draw_quantum(
+        &mut self,
+        dvx: u16,
+        dvy: u16,
+        timer: u16,
+        int_latch: u8,
+        color_ram: &[u8; 16],
+    ) {
+        let cycles: i32 = 0x4000_i32 - i32::from(timer);
+        let scale_factor: i32 = i32::from(self.scale) ^ 0xFF;
+
+        // 12-bit DAC: upper 10 bits of the 12-bit value (>> 2), XOR for sign.
+        let dx = ((i32::from((dvx & 0xFFF) >> 2) ^ i32::from(self.xdac_xor)) - 0x200)
+            .wrapping_mul(cycles)
+            .wrapping_mul(scale_factor)
+            >> 4;
+        let dy = ((i32::from((dvy & 0xFFF) >> 2) ^ i32::from(self.ydac_xor)) - 0x200)
+            .wrapping_mul(cycles)
+            .wrapping_mul(scale_factor)
+            >> 4;
+        self.xpos = self.xpos.wrapping_add(dx);
+        self.ypos = self.ypos.wrapping_sub(dy);
+
+        // Quantum color: 16-entry color RAM (low byte holds the 4 active bits,
+        // inverted). r = bit3·0xCE, g = bit1·0xAA + bit0·0x54, b = bit2·0xCE.
+        let data = color_ram[(self.color & 0xF) as usize];
+        let bit3 = (!data >> 3) & 1;
+        let bit2 = (!data >> 2) & 1;
+        let bit1 = (!data >> 1) & 1;
+        let bit0 = !data & 1;
+        let r = bit3.wrapping_mul(0xCE);
+        let g = bit1
+            .wrapping_mul(0xAA)
+            .wrapping_add(bit0.wrapping_mul(0x54));
+        let b = bit2.wrapping_mul(0xCE);
+
+        // Intensity: int_latch==2 (DATEA) selects the stored STAT intensity.
+        let eff_intensity = if int_latch == 2 {
+            self.intensity
+        } else {
+            int_latch
+        };
+
+        // Apply flipping in beam space, then swap X/Y on output (the Quantum AVG
+        // emits points with the axes exchanged about the beam center).
+        let mut x = self.xpos;
+        let mut y = self.ypos;
+        if self.flip_x {
+            x += (self.xcenter - x) << 1;
+        }
+        if self.flip_y {
+            y += (self.ycenter - y) << 1;
+        }
+        let out_x = y - self.ycenter + self.xcenter;
+        let out_y = x - self.xcenter + self.ycenter;
+        self.add_point(out_x, out_y, eff_intensity, [r, g, b]);
     }
 
     /// Add a point to the display list, creating a line from the previous point.
@@ -743,6 +943,90 @@ mod tests {
             !display_list.is_empty(),
             "display list should contain vectors drawn before HALT"
         );
+    }
+
+    // --- Quantum variant -------------------------------------------------
+
+    /// Build Quantum vector memory from 16-bit words stored big-endian
+    /// (`[hi, lo]`), matching how the 68000 writes vector RAM.
+    fn build_vmem_be(words: &[u16]) -> Vec<u8> {
+        let mut vmem = vec![0u8; 8192];
+        for (i, &w) in words.iter().enumerate() {
+            vmem[i * 2] = (w >> 8) as u8;
+            vmem[i * 2 + 1] = (w & 0xFF) as u8;
+        }
+        vmem
+    }
+
+    #[test]
+    fn quantum_halt_decodes_op_from_high_bits() {
+        // HALT is op 1: word >> 13 == 1 → 0x2000.
+        let vmem = build_vmem_be(&[0x2000]);
+        let mut avg = Avg::with_variant(AvgVariant::Quantum, 900, 600);
+        avg.go();
+        avg.execute(&vmem, &[0u8; 16]);
+        assert!(avg.is_halted());
+    }
+
+    #[test]
+    fn quantum_jmp_to_zero_is_frame_boundary() {
+        // JMP is op 7: word >> 13 == 7 → 0xE000, dvy = 0 → target 0.
+        let vmem = build_vmem_be(&[0xE000]);
+        let mut avg = Avg::with_variant(AvgVariant::Quantum, 900, 600);
+        avg.go();
+        assert!(avg.execute(&vmem, &[0u8; 16]));
+    }
+
+    #[test]
+    fn quantum_stat_sets_scale_and_color() {
+        // STAT is op 3 (0x6000). With dvy12 (bit 12) set: scale = dvy & 0xFF,
+        // bin_scale = (dvy >> 8) & 7.
+        //   word = 0x6000 | (1<<12) | (3<<8) | 0x80 = 0x7380
+        // Then STAT with bit 11 set latches color (dvy & 0xF) and intensity.
+        //   word = 0x6000 | 0x800 | (0xA<<4) | 0x5 = 0x68A5
+        let vmem = build_vmem_be(&[0x7380, 0x68A5, 0x2000]);
+        let mut avg = Avg::with_variant(AvgVariant::Quantum, 900, 600);
+        avg.go();
+        avg.execute(&vmem, &[0u8; 16]);
+        assert!(avg.is_halted());
+        assert_eq!(avg.scale, 0x80);
+        assert_eq!(avg.bin_scale, 3);
+        assert_eq!(avg.color, 0x5);
+        assert_eq!(avg.intensity, 0xA);
+    }
+
+    #[test]
+    fn quantum_vctr_reads_two_words_and_draws() {
+        // VCTR (op 0): word0 carries dvy, word1 carries int_latch + dvx.
+        // word0 = dvy = 0x0400; word1 = (int_latch=0x8 << 12) | dvx(0x400) = 0x8400.
+        let vmem = build_vmem_be(&[0x0400, 0x8400, 0x2000]);
+        let mut avg = Avg::with_variant(AvgVariant::Quantum, 900, 600);
+        avg.go();
+        let frame = avg.execute(&vmem, &[0u8; 16]);
+        assert!(!frame);
+        assert!(avg.is_halted());
+        let list = avg.take_display_list();
+        assert!(!list.is_empty(), "VCTR should have produced a line");
+    }
+
+    #[test]
+    fn quantum_color_decode_weights() {
+        // Quantum: r = bit3·0xCE, g = bit1·0xAA + bit0·0x54, b = bit2·0xCE,
+        // where bitN is the inverted low nibble of the color RAM entry.
+        // color_ram[0] = 0x0A (~0x0A = ...0101): bit0=1, bit1=0, bit2=1, bit3=0.
+        //   r = 0, g = 0x54, b = 0xCE.
+        let mut color_ram = [0u8; 16];
+        color_ram[0] = 0x0A;
+        // The first draw point only seeds the beam (intensity forced to 0), so
+        // emit two VCTRs: the second produces the first lit line.
+        // word0 dvy=0x0400, word1 int_latch=0x8, dvx=0x400.
+        let vmem = build_vmem_be(&[0x0400, 0x8400, 0x0400, 0x8400, 0x2000]);
+        let mut avg = Avg::with_variant(AvgVariant::Quantum, 900, 600);
+        avg.go();
+        avg.execute(&vmem, &color_ram);
+        let list = avg.take_display_list();
+        let drawn = list.iter().find(|l| l.intensity != 0).expect("a lit line");
+        assert_eq!((drawn.r, drawn.g, drawn.b), (0x00, 0x54, 0xCE));
     }
 
     #[test]
