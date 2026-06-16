@@ -114,6 +114,7 @@ Complete system implementations that wire core components together:
 - **CrystalCastlesSystem** — Atari arcade (M6502 + 2×POKEY + bitmap video + sprites + trackball)
 - **FoodFightSystem** — Atari arcade (MC68000 + 3×POKEY + tilemap/sprite video + analog sticks + X2212 NVRAM)
 - **TempestSystem** — Atari color vector arcade (M6502 + AVG vector generator + Mathbox coprocessor + 2×POKEY + ER2055 EAROM + spinner)
+- **QuantumSystem** — Atari color vector arcade (MC68000 + Quantum-variant AVG + 2×POKEY + X2212 NVRAM + trackball)
 - **MissileCommandSystem** — Atari raster arcade (M6502 + POKEY + bitmap video)
 - **PacmanSystem** — Pac-Man on shared Namco Pac board (Z80 + WSG + tile/sprite video)
 - **MsPacmanSystem** — Ms. Pac-Man on shared Namco Pac board (auxiliary decode latch + ROM encryption)
@@ -237,7 +238,6 @@ assert_eq!(bus.memory[0x10], 0x42);
 
 - Radar Scope (Nintendo TKG-04)
 - Star Wars (Atari: 2×M6809 + AVG + Mathbox)
-- Quantum (Atari: 68000 + AVG + trackball)
 - Mario Bros. (Nintendo: Z80 + I8039 sound CPU + 2×AY-8910)
 - Reactor (Gottlieb System 80: I8088 + M6502 sound + RIOT + trackball)
 - Mad Planets (Gottlieb System 80: I8088 + M6502 sound + RIOT + spinner)

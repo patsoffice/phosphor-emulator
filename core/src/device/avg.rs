@@ -1,11 +1,14 @@
-//! Atari Analog Vector Generator (AVG) — Tempest variant
+//! Atari Analog Vector Generator (AVG) — Tempest and Quantum variants
 //!
-//! A state-machine coprocessor that reads byte-addressed instructions from
-//! shared vector RAM/ROM and generates a display list of colored line segments
-//! for rendering on a color vector CRT.
+//! A state-machine coprocessor that reads instructions from shared vector
+//! RAM/ROM and generates a display list of colored line segments for rendering
+//! on a color vector CRT.
 //!
-//! Used in Tempest (1981). Other AVG variants (Battle Zone, Star Wars, Major
-//! Havoc, Quantum) differ in color decoding and coordinate handling.
+//! Two variants are implemented (selected by [`AvgVariant`]): Tempest (1981,
+//! byte-addressed decode) and Quantum (1982, word-addressed decode with 12-bit
+//! normalization, Quantum color weights, and an X/Y coordinate swap). Other
+//! variants (Battle Zone, Star Wars, Major Havoc) differ further in color
+//! decoding and coordinate handling.
 //!
 //! # Architecture
 //!
