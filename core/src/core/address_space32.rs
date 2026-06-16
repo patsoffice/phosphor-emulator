@@ -462,6 +462,17 @@ impl AddressSpace32 {
         }
     }
 
+    /// Side-effect-free debug write, discarding the [`DebugWrite`] outcome.
+    ///
+    /// Parity wrapper over [`debug_poke`](Self::debug_poke) so generic debug
+    /// plumbing (the `#[derive(BusDebug)]` macro) can call the same
+    /// `debug_write` name on both [`AddressSpace16`](crate::core::address_space16::AddressSpace16)
+    /// and [`AddressSpace32`]. Use `debug_poke` directly when the outcome
+    /// matters (ROM-patched vs RAM-edited vs ignored).
+    pub fn debug_write(&mut self, addr: u32, data: u8) {
+        self.debug_poke(addr, data);
+    }
+
     // -----------------------------------------------------------------------
     // Bus access helpers (big-endian, for 68000-class board bus code)
     // -----------------------------------------------------------------------
@@ -1160,6 +1171,18 @@ mod address_space32_tests {
             }
         );
         assert_eq!(space.debug_read(0x0000_0010), Some(0x4E));
+    }
+
+    #[test]
+    fn debug_write_wrapper_edits_backing() {
+        let mut space = test_space();
+        space.debug_write(0x00FF_0042, 0x7E);
+        assert_eq!(space.debug_read(0x00FF_0042), Some(0x7E));
+        // I/O and unmapped writes are silently dropped, like debug_poke.
+        space.debug_write(0x00A0_0000, 0xFF);
+        space.debug_write(0x0050_0000, 0xFF);
+        assert_eq!(space.debug_read(0x00A0_0000), None);
+        assert_eq!(space.debug_read(0x0050_0000), None);
     }
 
     #[test]
