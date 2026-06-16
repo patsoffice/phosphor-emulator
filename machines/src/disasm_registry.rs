@@ -44,15 +44,24 @@ impl DisasmCpu {
 }
 
 /// A disassemblable code region of a machine.
+///
+/// Bank-switched ROM is modelled as one region per bank: each bank that maps
+/// into the same CPU window is registered separately, with the same `org` but a
+/// `load` closure that slices out that bank's bytes (see the Crystal Castles
+/// entries in `ccastles.rs`). The tool has no runtime state, so it can't know
+/// which bank is live — naming them individually keeps each one addressable.
 pub struct DisasmRegion {
     /// Machine CLI name, matching [`crate::registry::MachineEntry::name`].
     pub machine: &'static str,
-    /// Region name (e.g. `"main"`, `"sound"`).
+    /// Region name (e.g. `"main"`, `"sound"`, `"bank0"`).
     pub region: &'static str,
     /// CPU that executes this region.
     pub cpu: DisasmCpu,
     /// Load/origin address of the first byte (for relative branch targets).
     pub org: u32,
+    /// Region size in bytes. Must equal the length of [`Self::load`]'s output;
+    /// used for the region listing without needing the ROM files on disk.
+    pub size: u32,
     /// Assemble the region's bytes from a loaded ROM set.
     pub load: fn(&RomSet) -> Result<Vec<u8>, RomLoadError>,
 }
@@ -92,9 +101,32 @@ mod tests {
         let sound = find("mariobros", "sound").expect("sound region registered");
         assert_eq!(sound.cpu, DisasmCpu::I8035);
         assert_eq!(sound.org, 0);
+        assert_eq!(sound.size, 0x1000);
 
         let main = find("mariobros", "main").expect("main region registered");
         assert_eq!(main.cpu, DisasmCpu::Z80);
+    }
+
+    #[test]
+    fn ccastles_banks_registered_per_bank() {
+        // Banked program ROM: two banks at the same org, plus the fixed ROM.
+        let regions = regions_for("ccastles");
+        assert_eq!(
+            regions.iter().map(|r| r.region).collect::<Vec<_>>(),
+            vec!["bank0", "bank1", "fixed"],
+        );
+
+        let b0 = find("ccastles", "bank0").unwrap();
+        let b1 = find("ccastles", "bank1").unwrap();
+        assert_eq!((b0.org, b0.size), (0xA000, 0x4000));
+        assert_eq!(
+            (b1.org, b1.size),
+            (0xA000, 0x4000),
+            "both banks map to the same window"
+        );
+
+        let fixed = find("ccastles", "fixed").unwrap();
+        assert_eq!((fixed.org, fixed.size), (0xE000, 0x2000));
     }
 
     #[test]

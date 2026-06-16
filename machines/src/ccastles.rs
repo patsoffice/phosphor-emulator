@@ -17,6 +17,7 @@ use phosphor_core::device::pokey::Pokey;
 use phosphor_core::gfx::decode::{GfxCache, GfxLayout, decode_gfx};
 use phosphor_macros::{BusDebug, MemoryRegion};
 
+use crate::disasm_registry::{DisasmCpu, DisasmRegion};
 use crate::registry::MachineEntry;
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
 use crate::set_bit_active_low;
@@ -110,6 +111,42 @@ pub static CCASTLES_PROGRAM_ROM: RomRegion = RomRegion {
         },
     ],
 };
+
+// Disassemblable code regions for the standalone `disasm` tool. The M6502
+// program ROM is bank-switched: banks 0 and 1 both map to 0xA000-0xDFFF, so
+// each is registered separately (region-per-bank) with the same org but a
+// loader that slices its 16KB out of the flat 40KB image. The fixed ROM at
+// 0xE000-0xFFFF (which holds the reset/IRQ vectors) is always mapped.
+inventory::submit! {
+    DisasmRegion {
+        machine: "ccastles",
+        region: "bank0",
+        cpu: DisasmCpu::M6502,
+        org: 0xA000,
+        size: 0x4000,
+        load: |rs| Ok(CCASTLES_PROGRAM_ROM.load(rs)?[0x0000..0x4000].to_vec()),
+    }
+}
+inventory::submit! {
+    DisasmRegion {
+        machine: "ccastles",
+        region: "bank1",
+        cpu: DisasmCpu::M6502,
+        org: 0xA000,
+        size: 0x4000,
+        load: |rs| Ok(CCASTLES_PROGRAM_ROM.load(rs)?[0x6000..0xA000].to_vec()),
+    }
+}
+inventory::submit! {
+    DisasmRegion {
+        machine: "ccastles",
+        region: "fixed",
+        cpu: DisasmCpu::M6502,
+        org: 0xE000,
+        size: 0x2000,
+        load: |rs| Ok(CCASTLES_PROGRAM_ROM.load(rs)?[0x4000..0x6000].to_vec()),
+    }
+}
 
 /// Sprite graphics ROM: 16KB (two 8KB chips, 3bpp sprites 8x16 pixels).
 pub static CCASTLES_GFX_ROM: RomRegion = RomRegion {

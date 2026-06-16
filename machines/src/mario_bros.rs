@@ -163,6 +163,7 @@ inventory::submit! {
         region: "main",
         cpu: DisasmCpu::Z80,
         org: 0,
+        size: MARIO_PROGRAM_ROM.size as u32,
         load: |rs| MARIO_PROGRAM_ROM.load(rs),
     }
 }
@@ -172,6 +173,7 @@ inventory::submit! {
         region: "sound",
         cpu: DisasmCpu::I8035,
         org: 0,
+        size: MARIO_SOUND_ROM.size as u32,
         load: |rs| MARIO_SOUND_ROM.load(rs),
     }
 }
