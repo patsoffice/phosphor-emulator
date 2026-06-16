@@ -777,6 +777,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "phosphor-disasm"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "phosphor-core",
+ "phosphor-machines",
+ "zip",
+]
+
+[[package]]
 name = "phosphor-frontend"
 version = "0.1.0"
 dependencies = [

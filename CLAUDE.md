@@ -54,6 +54,7 @@ cargo clippy --all-features --all-targets                      # Check code qual
 cargo clippy --all-features --all-targets --allow-dirty --fix  # Auto-fix clippy warnings
 cargo fmt                                                      # Format code
 cargo run --package phosphor-frontend -- joust /path/to/roms --scale 3
+cargo run -p phosphor-disasm --bin disasm -- machine --machine mariobros --region sound /path/to/roms  # Disassemble a ROM
 ```
 
 - Test the crate you changed; also test downstream crates when changing `phosphor-core` or `phosphor-macros`
@@ -69,6 +70,7 @@ cargo run --package phosphor-frontend -- joust /path/to/roms --scale 3
 | `phosphor-machines`        | Arcade/system board implementations     | phosphor-core, phosphor-macros, inventory             |
 | `phosphor-frontend`        | SDL2 display, audio, input, debug UI    | phosphor-core, phosphor-machines, sdl2, egui, gl, zip |
 | `phosphor-cpu-validation`  | Test vector generation & validation     | phosphor-core, serde, serde_json, rand, flate2        |
+| `phosphor-disasm`          | Standalone ROM disassembler CLI         | phosphor-core, phosphor-machines, clap, zip           |
 | `cross-validation`         | C++ cross-validate against ref emulators| (non-Cargo, uses Makefile)                            |
 
 - Never create circular dependencies between crates

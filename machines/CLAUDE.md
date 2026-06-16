@@ -8,6 +8,7 @@ Arcade and system board implementations. Each machine implements the `Bus` trait
 - Use the borrow-splitting `unsafe` pattern for `tick()` (CPU and bus access disjoint memory)
 - ROM loading goes through `rom_loader.rs` utilities (ZIP extraction is handled by the frontend's `rom_path.rs`)
 - Video rendering is per-scanline during `run_frame()`
+- Optional: to make the machine's code ROMs disassemblable by the `disasm` tool, add one `inventory::submit! { DisasmRegion { ... } }` per code region (see `disasm_registry.rs` and the entries in `mario_bros.rs`) — maps a region name to its CPU, origin, and a `RomRegion` loader. Purely additive; doesn't touch `MachineEntry`/`FrontendMachine`.
 
 ## Machine Traits
 

@@ -83,6 +83,20 @@ Game controllers are auto-mapped (D-pad, left stick, face buttons, right stick f
 
 > `.cargo/config.toml` sets the Homebrew library path for aarch64-apple-darwin automatically, so no manual `LIBRARY_PATH` is needed.
 
+### Disassembling ROMs
+
+The `disasm` tool dumps a ROM through any of the per-CPU disassemblers without launching the emulator — handy for inspecting sound/CPU ROMs while debugging.
+
+```bash
+# Disassemble a known machine's code region (CPU + origin auto-resolved)
+cargo run -p phosphor-disasm --bin disasm -- machine --machine mariobros --region sound /path/to/roms
+
+# A raw, extracted ROM file with an explicit CPU
+cargo run -p phosphor-disasm --bin disasm -- raw --cpu z80 --org 0 program.bin
+```
+
+See [docs/disassembler.md](docs/disassembler.md) for all three modes (`raw`, `rom`, `machine`) and a debugging workflow.
+
 ## Workspace Architecture
 
 This project uses a **workspace structure** to separate reusable components from system implementations:
@@ -163,6 +177,12 @@ C++ harnesses that validate phosphor-core's test vectors against independent ref
 - **I8035** — 221,000/225,000 tests pass (98.2%) vs mame4all (4 ANLD opcodes excluded due to known MAME bug)
 - **I8088** — 2,577,000/2,577,000 tests pass (100%) — via SingleStepTests/8088 reference vectors
 
+### Tools (`tools/`)
+
+Standalone command-line utilities built on the core crates.
+
+- **`phosphor-disasm`** (`tools/disasm`) — disassembles a ROM with any per-CPU disassembler, in three modes: a raw file, a member of a `.zip`/directory ROM set, or a machine's named code region (CPU + origin auto-resolved from the disasm registry). Depends only on `phosphor-core`/`phosphor-machines` (no SDL2). See [docs/disassembler.md](docs/disassembler.md).
+
 ## Project Structure
 
 ```text
@@ -184,6 +204,8 @@ phosphor-emulator/
 │   ├── src/bin/                 #   Test generators (M6809, M6800, I8035)
 │   ├── tests/                   #   Single-step validators (M6809, M6800, M6502, Z80, I8088)
 │   └── test_data/               #   Generated vectors + SingleStepTests submodules
+├── tools/                       # standalone CLIs built on the core crates
+│   └── disasm/                  #   phosphor-disasm — per-CPU ROM disassembler
 └── cross-validation/            # C++ harnesses validating against reference emulators
 ```
 
