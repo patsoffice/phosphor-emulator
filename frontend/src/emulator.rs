@@ -504,8 +504,7 @@ pub fn run(
                 // egui's `wants_pointer()` would otherwise report the warped
                 // cursor as "over an area" and swallow every delta. Press F11 to
                 // ungrab (clears `mouse_grabbed`) and interact with egui panels.
-                Event::MouseMotion { xrel, yrel, .. } if mouse_grabbed =>
-                {
+                Event::MouseMotion { xrel, yrel, .. } if mouse_grabbed => {
                     for (id, scale) in bindings.mouse_axis_targets(MouseAxis::X) {
                         let delta = xrel as f32 * scale;
                         machine.handle_input(InputEvent::Relative { id, delta });
@@ -517,15 +516,13 @@ pub fn run(
                 }
 
                 // Mouse buttons → fire (trackball games)
-                Event::MouseButtonDown { mouse_btn, .. } if mouse_grabbed =>
-                {
+                Event::MouseButtonDown { mouse_btn, .. } if mouse_grabbed => {
                     for id in bindings.digital_targets(PhysicalInput::MouseButtonInput(mouse_btn)) {
                         machine.handle_input(InputEvent::Button { id, pressed: true });
                     }
                 }
 
-                Event::MouseButtonUp { mouse_btn, .. } if mouse_grabbed =>
-                {
+                Event::MouseButtonUp { mouse_btn, .. } if mouse_grabbed => {
                     for id in bindings.digital_targets(PhysicalInput::MouseButtonInput(mouse_btn)) {
                         machine.handle_input(InputEvent::Button { id, pressed: false });
                     }

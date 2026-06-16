@@ -342,7 +342,9 @@ impl TempestSystem {
         // spinner speed rather than aliasing. Excess is dropped (not carried) so
         // the player doesn't keep drifting after the mouse stops.
         const MAX_SPINNER_STEP: i32 = 7;
-        let spinner_delta = self.spinner_accum.clamp(-MAX_SPINNER_STEP, MAX_SPINNER_STEP);
+        let spinner_delta = self
+            .spinner_accum
+            .clamp(-MAX_SPINNER_STEP, MAX_SPINNER_STEP);
         self.spinner_accum = 0;
         self.spinner_counter = self.spinner_counter.wrapping_add(spinner_delta as u8) & 0x0F;
 
