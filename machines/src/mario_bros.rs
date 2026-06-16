@@ -38,6 +38,7 @@ use phosphor_core::gfx;
 use phosphor_core::gfx::decode::{GfxLayout, decode_gfx};
 use phosphor_macros::{BusDebug, DebugTrace, MemoryRegion, Saveable};
 
+use crate::disasm_registry::{DisasmCpu, DisasmRegion};
 use crate::registry::MachineEntry;
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
 use crate::set_bit_active_high;
@@ -152,6 +153,28 @@ pub static MARIO_SOUND_ROM: RomRegion = RomRegion {
         crc32: &[0x06b9ff85],
     }],
 };
+
+// Disassemblable code regions for the standalone `disasm` tool.
+// `main`  — the Z80 game program (0x0000-0x5FFF).
+// `sound` — the I8035 (M58715) external sound program (0x0000-0x0FFF).
+inventory::submit! {
+    DisasmRegion {
+        machine: "mariobros",
+        region: "main",
+        cpu: DisasmCpu::Z80,
+        org: 0,
+        load: |rs| MARIO_PROGRAM_ROM.load(rs),
+    }
+}
+inventory::submit! {
+    DisasmRegion {
+        machine: "mariobros",
+        region: "sound",
+        cpu: DisasmCpu::I8035,
+        org: 0,
+        load: |rs| MARIO_SOUND_ROM.load(rs),
+    }
+}
 
 /// Tile GFX (gfx1): 8KB, two 4KB ROMs (one per bitplane).
 pub static MARIO_TILE_ROM: RomRegion = RomRegion {
