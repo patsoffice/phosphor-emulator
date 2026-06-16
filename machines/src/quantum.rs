@@ -75,8 +75,9 @@ enum Region {
 // ---------------------------------------------------------------------------
 // ROM definitions (three revisions; matched by CRC32 so modern and 0.148
 // filenames both resolve). Each is five even/odd `ROM_LOAD16_BYTE` pairs.
-// Concatenation order in the loaded buffer: chip pairs back-to-back, already
-// at their final even/odd byte offsets — load() places each at its `offset`.
+// The entries here just concatenate the ten 8 KB chips back-to-back
+// ([even0][odd0][even1][odd1]…); `load_program` then de-interleaves each pair
+// into the big-endian 0x14000 image (even chip = high byte).
 // ---------------------------------------------------------------------------
 
 /// Quantum (rev 2) — the parent set.
@@ -391,6 +392,25 @@ const IRQ_PERIOD_CYCLES: u64 = 24_576;
 const POKEY_CLOCK_HZ: u32 = 600_000;
 const CPU_PER_POKEY: u64 = 10;
 
+/// De-interleave the five `ROM_LOAD16_BYTE` pairs into the big-endian program
+/// image. The input concatenates the ten 0x2000 chips as
+/// `[even0][odd0][even1][odd1]…[even4][odd4]`; each pair fills a 0x4000 region
+/// with the even chip at even (high) byte addresses and the odd chip at odd
+/// (low) ones.
+fn deinterleave_program(chips: &[u8]) -> Vec<u8> {
+    let mut image = vec![0u8; 0x1_4000];
+    for pair in 0..5 {
+        let dst = pair * 0x4000;
+        let even = pair * 0x4000; // even-byte chip
+        let odd = pair * 0x4000 + 0x2000; // odd-byte chip
+        for i in 0..0x2000 {
+            image[dst + 2 * i] = chips[even + i]; // even address = high byte
+            image[dst + 2 * i + 1] = chips[odd + i]; // odd address = low byte
+        }
+    }
+    image
+}
+
 // ---------------------------------------------------------------------------
 // QuantumSystem
 // ---------------------------------------------------------------------------
@@ -501,10 +521,13 @@ impl QuantumSystem {
     }
 
     fn load_program(&mut self, region: &RomRegion, rom_set: &RomSet) -> Result<(), RomLoadError> {
-        // The chips already carry final even/odd byte offsets, so the loaded
-        // buffer IS the big-endian program image — load it directly.
-        let image = region.load(rom_set)?;
-        self.map.load_region(Region::Rom, &image);
+        // The region concatenates the ten chips as [even0][odd0]…[even4][odd4]
+        // (each 0x2000). They are `ROM_LOAD16_BYTE` pairs, so de-interleave each
+        // pair into the big-endian image: even chip → even byte (high), odd chip
+        // → odd byte (low). Without this the 68000 runs scrambled code.
+        let chips = region.load(rom_set)?;
+        self.map
+            .load_region(Region::Rom, &deinterleave_program(&chips));
         Ok(())
     }
 
@@ -1061,6 +1084,35 @@ mod tests {
         // Coinage is option 3 (mask 0xC0); pick "Free Play" (0x40).
         sys.set_dip_option(0, 3, 0x40);
         assert_eq!(sys.dip_bank_value(0), 0x40);
+    }
+
+    #[test]
+    fn deinterleave_places_even_chip_in_high_bytes() {
+        // Two distinct chips per pair: even chip filled with 0xAA, odd with 0x55.
+        let mut chips = vec![0u8; 0x1_4000];
+        for pair in 0..5 {
+            for i in 0..0x2000 {
+                chips[pair * 0x4000 + i] = 0xAA; // even chip
+                chips[pair * 0x4000 + 0x2000 + i] = 0x55; // odd chip
+            }
+        }
+        let image = deinterleave_program(&chips);
+        assert_eq!(image.len(), 0x1_4000);
+        // Even byte addresses (high) come from the even chip, odd from the odd.
+        assert!(image.iter().step_by(2).all(|&b| b == 0xAA));
+        assert!(image.iter().skip(1).step_by(2).all(|&b| b == 0x55));
+    }
+
+    #[test]
+    fn deinterleave_reconstructs_word_at_pair_boundary() {
+        // A recognizable byte at the start of pair 1's even chip lands at the
+        // high byte of the first word of pair 1's region (image offset 0x4000).
+        let mut chips = vec![0u8; 0x1_4000];
+        chips[0x4000] = 0x12; // even chip of pair 1, byte 0
+        chips[0x6000] = 0x34; // odd chip of pair 1, byte 0
+        let image = deinterleave_program(&chips);
+        assert_eq!(image[0x4000], 0x12); // high byte
+        assert_eq!(image[0x4001], 0x34); // low byte
     }
 
     #[test]
