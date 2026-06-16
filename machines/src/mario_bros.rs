@@ -118,7 +118,8 @@ pub static MARIO_PROGRAM_ROM: RomRegion = RomRegion {
             name: "tma1-c-7e_e-3.7e",
             size: 0x2000,
             offset: 0x2000,
-            crc32: &[0xb09ab857],
+            // mario (E) | mariog (G)
+            crc32: &[0xb09ab857, 0x116b3856],
         },
         RomEntry {
             name: "tma1-c-7d_e-1.7d",
@@ -136,7 +137,8 @@ pub static MARIO_PROGRAM_ROM_HIGH: RomRegion = RomRegion {
         name: "tma1-c-7c_e-3.7c",
         size: 0x1000,
         offset: 0x0000,
-        crc32: &[0x0d31bd1c],
+        // mario (E) | mariog/mariof (G/F)
+        crc32: &[0x0d31bd1c, 0x4a63d96b],
     }],
 };
 
@@ -178,7 +180,8 @@ pub static MARIO_SPRITE_ROM: RomRegion = RomRegion {
             name: "tma1-v.7m.7m",
             size: 0x1000,
             offset: 0x0000,
-            crc32: &[0xd01c0e2c],
+            // mario (E) | mariog (G)
+            crc32: &[0xd01c0e2c, 0x22b7372e],
         },
         RomEntry {
             name: "tma1-v-7n.7n",
@@ -196,7 +199,8 @@ pub static MARIO_SPRITE_ROM: RomRegion = RomRegion {
             name: "tma1-v.7s.7s",
             size: 0x1000,
             offset: 0x3000,
-            crc32: &[0xff856e6f],
+            // mario (E) | mariog (G)
+            crc32: &[0xff856e6f, 0x56f1d613],
         },
         RomEntry {
             name: "tma1-v-7t.7t",
@@ -208,7 +212,8 @@ pub static MARIO_SPRITE_ROM: RomRegion = RomRegion {
             name: "tma1-v.7u.7u",
             size: 0x1000,
             offset: 0x5000,
-            crc32: &[0xd2dbeb75],
+            // mario (E) | mariog (G)
+            crc32: &[0xd2dbeb75, 0x7baf5309],
         },
     ],
 };

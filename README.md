@@ -238,7 +238,6 @@ assert_eq!(bus.memory[0x10], 0x42);
 
 - Radar Scope (Nintendo TKG-04)
 - Star Wars (Atari: 2×M6809 + AVG + Mathbox)
-- Mario Bros. (Nintendo: Z80 + I8039 sound CPU + 2×AY-8910)
 - Reactor (Gottlieb System 80: I8088 + M6502 sound + RIOT + trackball)
 - Mad Planets (Gottlieb System 80: I8088 + M6502 sound + RIOT + spinner)
 - Battlezone (Atari: M6502 + DVG + Mathbox + POKEY)
