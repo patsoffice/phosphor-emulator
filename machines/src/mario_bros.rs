@@ -1145,7 +1145,21 @@ impl MachineCore for MarioBrosSystem {
             self.board.cpu.reset(bus, BusMaster::Cpu(0));
             self.board.sound_cpu.reset(bus, BusMaster::Cpu(1));
         });
-        self.board.sound_cpu.ram_mask = 0x7F;
+        self.board.sound_cpu.ram_mask = 0x7F; // 8049: 128 bytes internal RAM
+
+        // The M58715 sound CPU has an internal-ROM bootstrap (undumped) that
+        // runs before the external program. Per MAME's audiocpu trace it is:
+        //   ANL P2,#$DF   ; clear P2 bit5 → EA high → execute external ROM
+        //   SEL MB0
+        //   CALL $101     ; enter the external program at 0x101 (STRT T)
+        // Without it, execution starts at external 0x000, whose first bytes
+        // decode so that the STRT T at 0x101 is consumed as an operand — the
+        // sound engine's duration timer never starts and every effect hangs in
+        // its playback loop (silent DAC). Replicate the bootstrap's net effect.
+        self.board.sound_cpu.p2 = 0xDF;
+        self.board.sound_cpu.a11 = false;
+        self.board.sound_cpu.a11_pending = false;
+        self.board.sound_cpu.pc = 0x101;
     }
 }
 
@@ -1344,6 +1358,19 @@ mod tests {
         assert_eq!((w, h), (256, 224));
         let mut buf = vec![0u8; (w * h * 3) as usize];
         sys.board.render_frame(&mut buf);
+    }
+
+    #[test]
+    fn sound_cpu_bootstraps_to_external_0x101() {
+        // The M58715 internal-ROM bootstrap must leave the sound CPU about to
+        // execute external 0x101 (STRT T) with P2 bit5 cleared and MB0 selected;
+        // otherwise the sound engine's timer never starts and the DAC is silent.
+        let mut sys = MarioBrosSystem::new();
+        sys.reset();
+        assert_eq!(sys.board.sound_cpu.pc, 0x101);
+        assert_eq!(sys.board.sound_cpu.p2, 0xDF);
+        assert!(!sys.board.sound_cpu.a11);
+        assert!(!sys.board.sound_cpu.a11_pending);
     }
 
     #[test]
