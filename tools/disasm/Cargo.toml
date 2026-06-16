@@ -1,0 +1,14 @@
+[package]
+name = "phosphor-disasm"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "disasm"
+path = "src/main.rs"
+
+[dependencies]
+phosphor-core = { path = "../../core" }
+phosphor-machines = { path = "../../machines" }
+clap = { version = "4", features = ["derive"] }
+zip = "2"
