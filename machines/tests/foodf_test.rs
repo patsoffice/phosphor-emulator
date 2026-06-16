@@ -114,6 +114,43 @@ fn audio_drains_after_a_frame() {
     assert!(sys.fill_audio(&mut buf) > 0);
 }
 
+/// The debug bus exposes the 24-bit `AddressSpace32` and the POKEY array, so
+/// the egui debug panel works on this MC68000 machine (see the
+/// `debug-panel-24bit-bus` issue). A 16-bit debug path would have dropped every
+/// address above `0xFFFF`.
+#[test]
+fn debug_bus_exposes_24bit_memory_and_pokey_array() {
+    use phosphor_core::core::DebugRead;
+    use phosphor_core::core::machine::MachineDebug;
+
+    let mut sys = FoodFightSystem::new();
+
+    // CPU and device discovery: the `[Pokey; 3]` field expands to three
+    // 1-based "POKEY N" entries via #[debug_device("POKEY")].
+    {
+        let bus = sys.debug_bus().expect("Food Fight exposes a debug bus");
+        let cpus: Vec<&str> = bus.cpus().iter().map(|(n, _)| *n).collect();
+        assert_eq!(cpus, vec!["M68000"]);
+        let devices: Vec<&str> = bus.devices().iter().map(|(n, _)| *n).collect();
+        assert_eq!(devices, vec!["M68000", "POKEY 1", "POKEY 2", "POKEY 3"]);
+    }
+
+    // Work RAM at 0x01_4100 is above 0xFFFF: write/read/peek must round-trip
+    // through the full 24-bit address, not a truncated 16-bit one.
+    sys.debug_bus_mut().unwrap().write(0, 0x01_4100, 0x5A);
+    let bus = sys.debug_bus().unwrap();
+    assert_eq!(bus.read(0, 0x01_4100), Some(0x5A));
+    assert!(matches!(
+        bus.peek(0, 0x01_4100),
+        DebugRead::Backed { value: 0x5A, .. }
+    ));
+
+    // High playfield RAM at 0x80_0000 is reachable and backed; a hole between
+    // mapped windows reads as unmapped (not a fake bus value).
+    assert!(matches!(bus.peek(0, 0x80_0000), DebugRead::Backed { .. }));
+    assert_eq!(bus.peek(0, 0x50_0000), DebugRead::Unmapped);
+}
+
 /// Real-ROM boot test, gated on `FOODF_ROMS` pointing at a directory of the
 /// extracted `foodf` chips. Runs the game for a number of frames and asserts
 /// the 68000 is executing in ROM with attract-mode activity in RAM.

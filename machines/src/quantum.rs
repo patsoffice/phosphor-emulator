@@ -41,7 +41,7 @@ use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
     AnalogAxisKind, AudioSource, DefaultBinding, DipApplyTiming, DipChoice, DipOption,
     DipSwitchBank, DipSwitches, InputConfigurable, InputControl, InputEvent, InputId, InputKind,
-    KeyId, MachineCore, MachineDebug, MouseControl, Nvram, Profilable, Renderable, SaveState,
+    KeyId, MachineCore, MouseControl, Nvram, Profilable, Renderable, SaveState,
 };
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::{AccessKind, AddressSpace32};
@@ -52,7 +52,7 @@ use phosphor_core::cpu::{Cpu, CpuStateTrait};
 use phosphor_core::device::avg::{Avg, AvgVariant};
 use phosphor_core::device::dvg::VectorLine;
 use phosphor_core::device::pokey::Pokey;
-use phosphor_macros::MemoryRegion;
+use phosphor_macros::{BusDebug, MemoryRegion};
 
 use crate::atari_dvg::rasterize_vectors;
 use crate::registry::MachineEntry;
@@ -421,11 +421,16 @@ fn deinterleave_program(chips: &[u8]) -> Vec<u8> {
 // ---------------------------------------------------------------------------
 
 /// Atari Quantum arcade system.
+#[derive(BusDebug)]
 pub struct QuantumSystem {
+    #[debug_cpu("M68000")]
     cpu: M68000,
+    #[debug_map(cpu = 0)]
     map: AddressSpace32,
+    #[debug_device("AVG")]
     avg: Avg,
     /// POKEY 1 (0x840000) and POKEY 2 (0x840020).
+    #[debug_device("POKEY")]
     pokey: [Pokey; 2],
 
     /// Color RAM: 16 entries; only the low byte (4 active bits) is used.
@@ -836,23 +841,9 @@ impl MachineCore for QuantumSystem {
     }
 }
 
-impl MachineDebug for QuantumSystem {
-    // No BusDebug: the debugger's memory inspector is 16-bit addressed and
-    // cannot represent Quantum's 24-bit bus (same as Food Fight). Cycle
-    // stepping still works via debug_tick.
-    fn cycles_per_frame(&self) -> u64 {
-        TIMING.cycles_per_frame()
-    }
-
-    fn debug_tick(&mut self) -> u32 {
-        self.tick();
-        if self.cpu.at_instruction_boundary() {
-            1
-        } else {
-            0
-        }
-    }
-}
+// `MachineDebug` (debug_bus + cycle stepping) via the standalone-debug macro;
+// `BusDebug` is `#[derive]`d on the struct above (24-bit `AddressSpace32` bus).
+crate::impl_standalone_debug!(QuantumSystem);
 
 impl Saveable for QuantumSystem {
     fn save_state(&self, w: &mut StateWriter) {
@@ -1133,6 +1124,33 @@ mod tests {
             sys.map.region_at(0x80_0000).unwrap().id,
             Region::VectorRam.into()
         );
+    }
+
+    #[test]
+    fn debug_bus_lists_devices_and_reaches_24bit_ram() {
+        use phosphor_core::core::DebugRead;
+        use phosphor_core::core::machine::MachineDebug;
+
+        let mut sys = QuantumSystem::new();
+
+        // devices() order follows field order: CPU, scalar AVG, then the
+        // expanded [Pokey; 2] as "POKEY 1"/"POKEY 2".
+        {
+            let bus = sys.debug_bus().expect("Quantum exposes a debug bus");
+            let devices: Vec<&str> = bus.devices().iter().map(|(n, _)| *n).collect();
+            assert_eq!(devices, vec!["M68000", "AVG", "POKEY 1", "POKEY 2"]);
+        }
+
+        // Work RAM at 0x01_8100 sits above 0xFFFF — round-trips through the
+        // full 24-bit debug address.
+        sys.debug_bus_mut().unwrap().write(0, 0x01_8100, 0xA5);
+        let bus = sys.debug_bus().unwrap();
+        assert!(matches!(
+            bus.peek(0, 0x01_8100),
+            DebugRead::Backed { value: 0xA5, .. }
+        ));
+        assert!(matches!(bus.peek(0, 0x80_0000), DebugRead::Backed { .. }));
+        assert_eq!(bus.peek(0, 0x50_0000), DebugRead::Unmapped);
     }
 
     #[test]

@@ -44,8 +44,7 @@ use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
     ActionRole, AnalogAxisKind, AudioSource, DefaultBinding, DipApplyTiming, DipChoice, DipOption,
     DipSwitchBank, DipSwitches, Direction, InputConfigurable, InputControl, InputEvent, InputId,
-    InputKind, KeyId, MachineCore, MachineDebug, MouseControl, Nvram, Profilable, Renderable,
-    SaveState,
+    InputKind, KeyId, MachineCore, MouseControl, Nvram, Profilable, Renderable, SaveState,
 };
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::{AccessKind, AddressSpace32};
@@ -56,7 +55,7 @@ use phosphor_core::cpu::{Cpu, CpuStateTrait};
 use phosphor_core::device::pokey::Pokey;
 use phosphor_core::gfx::decode::{GfxCache, GfxLayout, decode_gfx};
 use phosphor_core::gfx::{combine_weights, compute_resistor_weights};
-use phosphor_macros::MemoryRegion;
+use phosphor_macros::{BusDebug, MemoryRegion};
 
 use crate::registry::MachineEntry;
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
@@ -422,10 +421,14 @@ const PLAYFIELD_ROWS: usize = 32;
 // ---------------------------------------------------------------------------
 
 /// Atari Food Fight arcade system.
+#[derive(BusDebug)]
 pub struct FoodFightSystem {
+    #[debug_cpu("M68000")]
     cpu: M68000,
+    #[debug_map(cpu = 0)]
     map: AddressSpace32,
     /// POKEY 1, 2, 3 (index 0 = chip "pokey1" at 0xA80000).
+    #[debug_device("POKEY")]
     pokey: [Pokey; 3],
 
     // Graphics (not CPU-addressable)
@@ -1007,23 +1010,9 @@ impl MachineCore for FoodFightSystem {
     }
 }
 
-impl MachineDebug for FoodFightSystem {
-    // No BusDebug: the derive and the debugger's memory inspector are 16-bit
-    // addressed and cannot represent Food Fight's 24-bit bus. Cycle stepping
-    // still works via debug_tick.
-    fn cycles_per_frame(&self) -> u64 {
-        TIMING.cycles_per_frame()
-    }
-
-    fn debug_tick(&mut self) -> u32 {
-        self.tick();
-        if self.cpu.at_instruction_boundary() {
-            1
-        } else {
-            0
-        }
-    }
-}
+// `MachineDebug` (debug_bus + cycle stepping) via the standalone-debug macro;
+// `BusDebug` is `#[derive]`d on the struct above (24-bit `AddressSpace32` bus).
+crate::impl_standalone_debug!(FoodFightSystem);
 
 impl Saveable for FoodFightSystem {
     fn save_state(&self, w: &mut StateWriter) {
