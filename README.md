@@ -8,6 +8,8 @@
 
 A modular emulator framework for retro CPUs, designed for extensibility and educational purposes. Features a trait-based architecture that allows easy addition of new CPUs, peripherals, and complete systems.
 
+This is purely a project for fun and experimentation as a cycle-accurate emulator. It is not intended to be a replacement for [MAME](https://www.mamedev.org/), and it relies heavily on the hard work the MAME team has put in over the years (their documentation, source, and decades of preservation work are an invaluable reference).
+
 ## Quick Start
 
 ### Prerequisites
@@ -99,7 +101,7 @@ Contains all reusable components — zero external dependencies:
 - ClockDivider (Bresenham fractional clock divider for cross-domain ticking)
 - DirtyBitset (fixed-capacity dirty-tracking bitset with O(1) bulk invalidation for tile/scanline change tracking)
 - GFX utilities (GfxCache pre-decoded tile/sprite pixels, ROM decoders for Pac-Man/DK/MCR families, cache-friendly blocked rotation, sprite clipping, tilemap rendering)
-- Peripheral devices (MC6821 PIA, AY-8910, POKEY, Namco WSG, Z80 CTC, Williams SC1/SC2 blitter, DVG, I8257 DMA, MC1408 DAC, 74LS259 latch, SSIO sound board, CMOS RAM, MOS 6532 RIOT)
+- Peripheral devices (MC6821 PIA, AY-8910, POKEY, Namco WSG, Z80 CTC, Williams SC1/SC2 blitter, DVG, Atari AVG vector generator, Mathbox coprocessor, I8257 DMA, MC1408 DAC, 74LS259 latch, SSIO sound board, CMOS RAM, MOS 6532 RIOT, GI ER2055 EAROM)
 
 ### Machines Crate (`phosphor-machines`)
 
@@ -111,6 +113,7 @@ Complete system implementations that wire core components together:
 - **JoustSystem** — Williams arcade board (M6809 + 48KB video RAM + two PIAs + blitter + CMOS + 12KB ROM)
 - **CrystalCastlesSystem** — Atari arcade (M6502 + 2×POKEY + bitmap video + sprites + trackball)
 - **FoodFightSystem** — Atari arcade (MC68000 + 3×POKEY + tilemap/sprite video + analog sticks + X2212 NVRAM)
+- **TempestSystem** — Atari color vector arcade (M6502 + AVG vector generator + Mathbox coprocessor + 2×POKEY + ER2055 EAROM + spinner)
 - **MissileCommandSystem** — Atari raster arcade (M6502 + POKEY + bitmap video)
 - **PacmanSystem** — Pac-Man on shared Namco Pac board (Z80 + WSG + tile/sprite video)
 - **MsPacmanSystem** — Ms. Pac-Man on shared Namco Pac board (auxiliary decode latch + ROM encryption)
@@ -226,22 +229,27 @@ assert_eq!(bus.memory[0x10], 0x42);
 
 ## Future
 
-### CPUs
-
-- Motorola 68000 (32-bit registers, 16-bit data bus) — **instruction set and validation complete**: full instruction set incl. TAS/MOVEP, all exceptions/interrupts/privilege with hardware-exact address-error aborts, 1,000,058 SingleStepTests vectors passing across every suite file; remaining milestone M6 (disassembler)
-
 ### Peripherals
 
-- Atari AVG vector generator (Tempest, Star Wars)
-- Math box (Tempest, Star Wars)
 - TMS5220 speech synthesizer (Star Wars)
 
 ### Games
 
 - Radar Scope (Nintendo TKG-04)
-- Food Fight (Atari: 68000 + 3×POKEY)
-- Tempest (Atari: M6502 + AVG + math box)
-- Star Wars (Atari: 2×M6809 + AVG + math box)
+- Star Wars (Atari: 2×M6809 + AVG + Mathbox)
+- Quantum (Atari: 68000 + AVG + trackball)
+- Mario Bros. (Nintendo: Z80 + I8039 sound CPU + 2×AY-8910)
+- Reactor (Gottlieb System 80: I8088 + M6502 sound + RIOT + trackball)
+- Mad Planets (Gottlieb System 80: I8088 + M6502 sound + RIOT + spinner)
+- Battlezone (Atari: M6502 + DVG + Mathbox + POKEY)
+- Space Duel (Atari: M6502 + AVG + POKEY)
+- Space Fury (Sega G80: Z80 + vector generator)
+- Zaxxon (Sega G80: Z80 + tilemap/sprite video)
+- Congo Bongo (Sega G80: Z80 + tilemap/sprite video)
+
+### Frontend
+
+- Migrate from SDL2 to SDL3
 
 ## License
 
