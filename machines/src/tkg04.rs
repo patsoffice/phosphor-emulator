@@ -76,10 +76,13 @@ pub const VBLANK_END: usize = 16; // first visible scanline
 // Signal chain: PROM → resistor DAC → Darlington/emitter amp → SANYO EZV20 monitor.
 // Darlington amplifier (R and G): 1kΩ/470Ω/220Ω DAC with 470Ω pullup bias to VCC.
 // Emitter follower (B): 470Ω/220Ω DAC with 680Ω pullup bias to VCC.
-const DARLINGTON_RESISTORS: [f64; 3] = [1000.0, 470.0, 220.0];
-const DARLINGTON_BIAS_R: f64 = 470.0;
-const EMITTER_RESISTORS: [f64; 2] = [470.0, 220.0];
-const EMITTER_BIAS_R: f64 = 680.0;
+// These are `pub(crate)` because Mario Bros. (machines/src/mario_bros.rs) shares
+// the same Nintendo monitor/amplifier model (Sanyo EZV20, Darlington/emitter
+// stages) — only its PROM bit layout differs.
+pub(crate) const DARLINGTON_RESISTORS: [f64; 3] = [1000.0, 470.0, 220.0];
+pub(crate) const DARLINGTON_BIAS_R: f64 = 470.0;
+pub(crate) const EMITTER_RESISTORS: [f64; 2] = [470.0, 220.0];
+pub(crate) const EMITTER_BIAS_R: f64 = 680.0;
 
 /// Compute a single color channel using the TKG-04 hardware signal chain.
 ///
@@ -91,7 +94,7 @@ const EMITTER_BIAS_R: f64 = 680.0;
 /// `raw_bits` contains non-inverted PROM bit values (0.0 = TTL low/active,
 /// 1.0 = TTL high/inactive).  The function returns a raw floating-point
 /// intensity (not yet clamped to 0–255) suitable for palette normalization.
-fn compute_tkg04_channel(
+pub(crate) fn compute_tkg04_channel(
     raw_bits: &[f64],
     resistors: &[f64],
     bias_r: f64,
