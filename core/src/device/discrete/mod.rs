@@ -1,0 +1,628 @@
+//! Reusable runtime for discrete / board-level analog sound circuits.
+//!
+//! A board describes its sound circuit once, in typed Rust, with a
+//! [`DiscreteCircuitBuilder`]: it allocates named inputs and primitive nodes and
+//! wires them by typed handle. [`DiscreteCircuitBuilder::build`] freezes the
+//! topology into a [`DiscreteCircuit`] that the board drives with
+//! [`DiscreteCircuit::tick`] and drains with [`DiscreteCircuit::fill_audio`].
+//!
+//! # Evaluation model
+//!
+//! Nodes live in a contiguous `Vec`, each owning one slot in a parallel `values`
+//! array. At build time the graph is topologically sorted into an `eval_order`:
+//! a node always evaluates after the nodes it reads from. Each step iterates
+//! `eval_order` once, reading inputs from `values` and writing the node's own
+//! slot in place. Because of the order, a **forward edge** reads this step's
+//! freshly computed value while a **back-edge** (an input that sorts *later*,
+//! i.e. part of a feedback cycle) reads last step's value still held in its slot.
+//! The same held-slot behavior gives cross-clock-domain sample-and-hold: a node
+//! that is not due this step simply keeps its previous slot value.
+//!
+//! Cycles are detected during the sort (DFS); the edges that close a cycle are
+//! left as back-edges rather than rejected, so feedback loops resolve with a
+//! one-step delay.
+
+mod node;
+
+use node::{Node, NodeKind};
+
+use crate::core::save_state::{SaveError, StateReader, StateWriter};
+
+// ---------------------------------------------------------------------------
+// Typed handles
+// ---------------------------------------------------------------------------
+
+/// Handle to a node in a circuit. Returned by builder methods and accepted as a
+/// wiring input. Indexes both the node list and its value slot.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct NodeId(u16);
+
+impl NodeId {
+    pub(crate) fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
+/// Handle to a logic (0/1) input line. Set with [`DiscreteCircuit::set_logic`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct LogicInputId(NodeId);
+/// Handle to a scalar data input. Set with [`DiscreteCircuit::set_data`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct DataInputId(NodeId);
+/// Handle to a one-shot pulse input. Fired with [`DiscreteCircuit::pulse`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct PulseInputId(NodeId);
+/// Handle to an external sample-stream input. Fed with
+/// [`DiscreteCircuit::set_external`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ExternalSourceId(NodeId);
+
+macro_rules! into_node_id {
+    ($($t:ty),*) => {$(
+        impl From<$t> for NodeId {
+            fn from(v: $t) -> NodeId { v.0 }
+        }
+    )*};
+}
+into_node_id!(LogicInputId, DataInputId, PulseInputId, ExternalSourceId);
+
+// ---------------------------------------------------------------------------
+// Clock domains, gain, LFSR spec, custom escape hatch
+// ---------------------------------------------------------------------------
+
+/// When a node re-evaluates. Nodes that are not due hold their previous output.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum ClockDomain {
+    /// Evaluate every simulation step (the base rate). The default.
+    BoardCycle,
+    /// Evaluate at a component-specific frequency in Hz.
+    FixedFrequency(f64),
+    /// Evaluate once per produced output sample.
+    OutputSample,
+    /// Evaluate only when an input changed since the last evaluation.
+    EventOnly,
+}
+
+/// Final output scaling applied before the signal enters the resampler.
+#[derive(Clone, Copy, Debug)]
+pub struct OutputGain(f64);
+
+impl OutputGain {
+    /// Unity gain.
+    pub fn unity() -> Self {
+        OutputGain(1.0)
+    }
+    /// Linear gain factor.
+    pub fn linear(g: f64) -> Self {
+        OutputGain(g)
+    }
+}
+
+/// Configuration for an [`DiscreteCircuitBuilder::lfsr_noise`] generator.
+#[derive(Clone, Copy, Debug)]
+pub struct LfsrSpec {
+    /// Register width in bits (1..=32).
+    pub width: u8,
+    /// The two XOR tap bit positions.
+    pub taps: (u8, u8),
+    /// Non-zero seed loaded at reset.
+    pub seed: u32,
+}
+
+/// Escape hatch for circuit-specific behavior that does not justify a shared
+/// primitive. Held by a `Custom` node — the only dynamically dispatched kind.
+pub trait CustomComponent {
+    /// Restore power-on state, preserving static configuration.
+    fn reset(&mut self);
+    /// Compute one output from the current input values and elapsed time.
+    fn step(&mut self, inputs: &[f64], dt: f64) -> f64;
+    /// Serialize mutable runtime state.
+    fn save_state(&self, w: &mut StateWriter);
+    /// Restore mutable runtime state.
+    fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError>;
+}
+
+// ---------------------------------------------------------------------------
+// Builder
+// ---------------------------------------------------------------------------
+
+/// Builds an immutable circuit topology and allocates typed handles.
+pub struct DiscreteCircuitBuilder {
+    board_clock_hz: u64,
+    output_sample_rate: u64,
+    sim_rate: u64,
+    nodes: Vec<Node>,
+    names: Vec<String>,
+    output: Option<(NodeId, OutputGain)>,
+}
+
+impl DiscreteCircuitBuilder {
+    /// Start a circuit driven by a `board_clock_hz` board clock and producing
+    /// `output_sample_rate` audio. The simulation runs at `output_sample_rate`
+    /// by default; raise it with [`with_sim_rate`](Self::with_sim_rate).
+    pub fn new(board_clock_hz: u64, output_sample_rate: u64) -> Self {
+        Self {
+            board_clock_hz,
+            output_sample_rate,
+            sim_rate: output_sample_rate,
+            nodes: Vec::new(),
+            names: Vec::new(),
+            output: None,
+        }
+    }
+
+    /// Override the internal simulation step rate (Hz). Must be high enough to
+    /// represent the fastest node; the output is resampled down to the audio
+    /// rate. Components that model analog state see `dt = 1 / sim_rate`.
+    pub fn with_sim_rate(mut self, sim_rate: u64) -> Self {
+        self.sim_rate = sim_rate;
+        self
+    }
+
+    /// The handle the next created node will receive. Use this to wire a
+    /// feedback edge: reference the id before creating the node that owns it
+    /// (the self/forward reference becomes a back-edge with a one-step delay).
+    pub fn next_id(&self) -> NodeId {
+        NodeId(self.nodes.len() as u16)
+    }
+
+    fn push_node(&mut self, name: &str, kind: NodeKind, domain: ClockDomain) -> NodeId {
+        let id = NodeId(self.nodes.len() as u16);
+        self.nodes.push(Node::new(kind, domain));
+        self.names.push(name.to_string());
+        id
+    }
+
+    /// Allocate a 0/1 logic input line.
+    pub fn logic_input(&mut self, name: &str) -> LogicInputId {
+        LogicInputId(self.push_node(
+            name,
+            NodeKind::LogicInput {
+                value: 0.0,
+                inverted: false,
+            },
+            ClockDomain::BoardCycle,
+        ))
+    }
+
+    /// Allocate an inverted 0/1 logic input line.
+    pub fn inverted_logic_input(&mut self, name: &str) -> LogicInputId {
+        LogicInputId(self.push_node(
+            name,
+            NodeKind::LogicInput {
+                value: 0.0,
+                inverted: true,
+            },
+            ClockDomain::BoardCycle,
+        ))
+    }
+
+    /// Allocate a scalar data input emitting `value * scale`.
+    pub fn data_input(&mut self, name: &str, scale: f64) -> DataInputId {
+        DataInputId(self.push_node(
+            name,
+            NodeKind::DataInput { value: 0.0, scale },
+            ClockDomain::BoardCycle,
+        ))
+    }
+
+    /// Allocate a one-shot pulse input.
+    pub fn pulse_input(&mut self, name: &str) -> PulseInputId {
+        PulseInputId(self.push_node(
+            name,
+            NodeKind::PulseInput { pending: false },
+            ClockDomain::BoardCycle,
+        ))
+    }
+
+    /// Allocate an external sample-stream input (e.g. a chip or DAC output).
+    pub fn external_source(&mut self, name: &str) -> ExternalSourceId {
+        ExternalSourceId(self.push_node(
+            name,
+            NodeKind::ExternalSource { value: 0.0 },
+            ClockDomain::BoardCycle,
+        ))
+    }
+
+    /// A fixed value.
+    pub fn constant(&mut self, name: &str, value: f64) -> NodeId {
+        self.push_node(name, NodeKind::Constant { value }, ClockDomain::BoardCycle)
+    }
+
+    /// Rising-edge detector over `src`.
+    pub fn edge_detector(&mut self, name: &str, src: impl Into<NodeId>) -> NodeId {
+        self.push_node(
+            name,
+            NodeKind::EdgeDetector {
+                src: src.into(),
+                last: 0.0,
+            },
+            ClockDomain::BoardCycle,
+        )
+    }
+
+    /// Square wave at a fixed frequency (Hz).
+    pub fn fixed_square(&mut self, name: &str, freq: f64) -> NodeId {
+        self.push_node(
+            name,
+            NodeKind::FixedSquare { freq, phase: 0.0 },
+            ClockDomain::BoardCycle,
+        )
+    }
+
+    /// Square wave whose frequency (Hz) is read from `freq_src`.
+    pub fn variable_square(&mut self, name: &str, freq_src: impl Into<NodeId>) -> NodeId {
+        self.push_node(
+            name,
+            NodeKind::VariableSquare {
+                freq_src: freq_src.into(),
+                phase: 0.0,
+            },
+            ClockDomain::BoardCycle,
+        )
+    }
+
+    /// LFSR noise generator clocked internally at `freq` (Hz).
+    pub fn lfsr_noise(&mut self, name: &str, freq: f64, spec: LfsrSpec) -> NodeId {
+        assert!(
+            spec.width >= 1 && spec.width <= 32,
+            "LFSR width out of range"
+        );
+        assert!(spec.seed != 0, "LFSR seed must be non-zero");
+        self.push_node(
+            name,
+            NodeKind::LfsrNoise {
+                lfsr: spec.seed,
+                seed: spec.seed,
+                tap_a: spec.taps.0,
+                tap_b: spec.taps.1,
+                width: spec.width,
+                freq,
+                clock_acc: 0.0,
+            },
+            ClockDomain::BoardCycle,
+        )
+    }
+
+    /// `src * gain`.
+    pub fn gain(&mut self, name: &str, src: impl Into<NodeId>, gain: f64) -> NodeId {
+        self.push_node(
+            name,
+            NodeKind::Gain {
+                src: src.into(),
+                gain,
+            },
+            ClockDomain::BoardCycle,
+        )
+    }
+
+    /// Sum of `srcs`.
+    pub fn add(&mut self, name: &str, srcs: &[NodeId]) -> NodeId {
+        self.push_node(
+            name,
+            NodeKind::Add {
+                srcs: srcs.to_vec(),
+            },
+            ClockDomain::BoardCycle,
+        )
+    }
+
+    /// `a * b`.
+    pub fn multiply(&mut self, name: &str, a: impl Into<NodeId>, b: impl Into<NodeId>) -> NodeId {
+        self.push_node(
+            name,
+            NodeKind::Multiply {
+                a: a.into(),
+                b: b.into(),
+            },
+            ClockDomain::BoardCycle,
+        )
+    }
+
+    /// `src` clamped to `[lo, hi]`.
+    pub fn clamp(&mut self, name: &str, src: impl Into<NodeId>, lo: f64, hi: f64) -> NodeId {
+        self.push_node(
+            name,
+            NodeKind::Clamp {
+                src: src.into(),
+                lo,
+                hi,
+            },
+            ClockDomain::BoardCycle,
+        )
+    }
+
+    /// A circuit-specific custom component reading `inputs`.
+    pub fn custom(
+        &mut self,
+        name: &str,
+        inputs: Vec<NodeId>,
+        comp: Box<dyn CustomComponent>,
+    ) -> NodeId {
+        self.push_node(
+            name,
+            NodeKind::Custom {
+                inputs,
+                comp,
+                scratch: Vec::new(),
+            },
+            ClockDomain::BoardCycle,
+        )
+    }
+
+    /// Override a node's clock domain (default [`ClockDomain::BoardCycle`]).
+    pub fn set_domain(&mut self, node: impl Into<NodeId>, domain: ClockDomain) {
+        let id = node.into();
+        self.nodes[id.index()].domain = domain;
+    }
+
+    /// Designate the circuit's output node and final gain.
+    pub fn output(&mut self, node: impl Into<NodeId>, gain: OutputGain) {
+        self.output = Some((node.into(), gain));
+    }
+
+    /// Freeze the topology, computing the evaluation order.
+    pub fn build(self) -> DiscreteCircuit {
+        let n = self.nodes.len();
+        let eval_order = topo_order(&self.nodes);
+        DiscreteCircuit {
+            nodes: self.nodes,
+            names: self.names,
+            values: vec![0.0; n],
+            eval_order,
+            output: self.output,
+            board_clock_hz: self.board_clock_hz,
+            output_sample_rate: self.output_sample_rate,
+            sim_rate: self.sim_rate,
+            sim_phase: 0,
+            input_generation: 1,
+            resampler: crate::audio::AudioResampler::new(self.sim_rate, self.output_sample_rate),
+        }
+    }
+}
+
+/// Depth-first topological sort. Edges that close a cycle (a dependency still on
+/// the recursion stack) are left as back-edges and skipped, so the result is a
+/// valid order for the acyclic remainder. Post-order places dependencies before
+/// dependents.
+fn topo_order(nodes: &[Node]) -> Vec<usize> {
+    #[derive(Clone, Copy, PartialEq)]
+    enum Mark {
+        White,
+        Gray,
+        Black,
+    }
+    let mut marks = vec![Mark::White; nodes.len()];
+    let mut order = Vec::with_capacity(nodes.len());
+    let mut deps = Vec::new();
+
+    // Explicit stack to avoid deep recursion: (node, next-dep-cursor).
+    let mut stack: Vec<(usize, usize)> = Vec::new();
+    for start in 0..nodes.len() {
+        if marks[start] != Mark::White {
+            continue;
+        }
+        marks[start] = Mark::Gray;
+        stack.push((start, 0));
+        while let Some(&(node, cursor)) = stack.last() {
+            deps.clear();
+            nodes[node].kind.deps(&mut deps);
+            if cursor < deps.len() {
+                stack.last_mut().unwrap().1 += 1;
+                let d = deps[cursor];
+                match marks[d] {
+                    Mark::White => {
+                        marks[d] = Mark::Gray;
+                        stack.push((d, 0));
+                    }
+                    // Gray: back-edge (feedback) — skip. Black: already ordered.
+                    Mark::Gray | Mark::Black => {}
+                }
+            } else {
+                marks[node] = Mark::Black;
+                order.push(node);
+                stack.pop();
+            }
+        }
+    }
+    order
+}
+
+// ---------------------------------------------------------------------------
+// Circuit runtime
+// ---------------------------------------------------------------------------
+
+/// A built discrete sound circuit. Owns node runtime state, the value slots, the
+/// evaluation schedule, and the output resampler.
+pub struct DiscreteCircuit {
+    nodes: Vec<Node>,
+    names: Vec<String>,
+    values: Vec<f64>,
+    eval_order: Vec<usize>,
+    output: Option<(NodeId, OutputGain)>,
+    board_clock_hz: u64,
+    output_sample_rate: u64,
+    sim_rate: u64,
+    sim_phase: u64,
+    input_generation: u64,
+    resampler: crate::audio::AudioResampler<i16>,
+}
+
+impl DiscreteCircuit {
+    /// Advance the circuit by `board_cycles` of board-clock time, producing
+    /// `sim_rate / board_clock_hz * board_cycles` simulation steps (Bresenham).
+    pub fn tick(&mut self, board_cycles: u64) {
+        self.sim_phase += board_cycles.saturating_mul(self.sim_rate);
+        while self.sim_phase >= self.board_clock_hz {
+            self.sim_phase -= self.board_clock_hz;
+            self.step();
+        }
+    }
+
+    /// Run one simulation step: evaluate every due node in topological order,
+    /// then feed the output node's value to the resampler.
+    fn step(&mut self) {
+        let dt = 1.0 / self.sim_rate as f64;
+        let generation = self.input_generation;
+        // Borrow the schedule out so the loop can mutate `nodes`/`values`
+        // freely; the order never changes, so we put it straight back.
+        let order = std::mem::take(&mut self.eval_order);
+        for &i in &order {
+            if scheduled(
+                &mut self.nodes[i],
+                self.sim_rate,
+                self.output_sample_rate,
+                generation,
+            ) {
+                let v = self.nodes[i].kind.eval(&self.values, dt);
+                self.values[i] = v;
+            }
+        }
+        self.eval_order = order;
+
+        let sample = match self.output {
+            Some((id, OutputGain(g))) => {
+                let v = (self.values[id.index()] * g).clamp(-1.0, 1.0);
+                (v * 32767.0) as i16
+            }
+            None => 0,
+        };
+        self.resampler.tick(sample);
+    }
+
+    /// Drain produced mono `i16` samples. Returns the number written.
+    pub fn fill_audio(&mut self, out: &mut [i16]) -> usize {
+        self.resampler.fill_audio(out)
+    }
+
+    /// The audio output rate in Hz.
+    pub fn sample_rate(&self) -> u32 {
+        self.output_sample_rate as u32
+    }
+
+    /// Set a logic input on/off.
+    pub fn set_logic(&mut self, id: LogicInputId, on: bool) {
+        if let NodeKind::LogicInput { value, .. } = &mut self.nodes[id.0.index()].kind {
+            *value = if on { 1.0 } else { 0.0 };
+        }
+        self.input_generation += 1;
+    }
+
+    /// Set a data input's raw value.
+    pub fn set_data(&mut self, id: DataInputId, value: f64) {
+        if let NodeKind::DataInput { value: v, .. } = &mut self.nodes[id.0.index()].kind {
+            *v = value;
+        }
+        self.input_generation += 1;
+    }
+
+    /// Fire a one-shot pulse input.
+    pub fn pulse(&mut self, id: PulseInputId) {
+        if let NodeKind::PulseInput { pending } = &mut self.nodes[id.0.index()].kind {
+            *pending = true;
+        }
+        self.input_generation += 1;
+    }
+
+    /// Push a sample into an external-source input.
+    pub fn set_external(&mut self, id: ExternalSourceId, value: f64) {
+        if let NodeKind::ExternalSource { value: v } = &mut self.nodes[id.0.index()].kind {
+            *v = value;
+        }
+        self.input_generation += 1;
+    }
+
+    /// Current held value of a node's output slot (for tests and debug views).
+    pub fn value(&self, node: impl Into<NodeId>) -> f64 {
+        self.values[node.into().index()]
+    }
+
+    /// Look up a node's builder-assigned name (for debug views).
+    pub fn name(&self, node: impl Into<NodeId>) -> &str {
+        &self.names[node.into().index()]
+    }
+
+    /// Clear all runtime state, preserving topology and static configuration.
+    pub fn reset(&mut self) {
+        for node in &mut self.nodes {
+            node.kind.reset_runtime();
+            node.phase_acc = 0.0;
+            node.last_gen = 0;
+        }
+        for v in &mut self.values {
+            *v = 0.0;
+        }
+        self.sim_phase = 0;
+        self.input_generation = 1;
+        self.resampler.reset();
+    }
+}
+
+/// Decide whether a node evaluates this step, advancing its per-node scheduler
+/// state. Nodes that return `false` hold their previous slot value.
+fn scheduled(node: &mut Node, sim_rate: u64, output_rate: u64, generation: u64) -> bool {
+    match node.domain {
+        ClockDomain::BoardCycle => true,
+        ClockDomain::FixedFrequency(hz) => bresenham(&mut node.phase_acc, hz, sim_rate as f64),
+        ClockDomain::OutputSample => {
+            bresenham(&mut node.phase_acc, output_rate as f64, sim_rate as f64)
+        }
+        ClockDomain::EventOnly => {
+            let due = node.last_gen != generation;
+            node.last_gen = generation;
+            due
+        }
+    }
+}
+
+#[inline]
+fn bresenham(acc: &mut f64, hz: f64, sim_rate: f64) -> bool {
+    *acc += hz / sim_rate;
+    if *acc >= 1.0 {
+        while *acc >= 1.0 {
+            *acc -= 1.0;
+        }
+        true
+    } else {
+        false
+    }
+}
+
+/// Save format: version + scheduler accumulators + per-node runtime + value
+/// slots (held / back-edge state) + resampler. Topology is reconstructed by the
+/// board's circuit constructor, not serialized.
+impl crate::core::save_state::Saveable for DiscreteCircuit {
+    fn save_state(&self, w: &mut StateWriter) {
+        w.write_version(1);
+        w.write_u64_le(self.sim_phase);
+        w.write_u64_le(self.input_generation);
+        for node in &self.nodes {
+            w.write_f64_le(node.phase_acc);
+            w.write_u64_le(node.last_gen);
+            node.kind.save_runtime(w);
+        }
+        for v in &self.values {
+            w.write_f64_le(*v);
+        }
+        self.resampler.save_state(w);
+    }
+
+    fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
+        r.read_version(1)?;
+        self.sim_phase = r.read_u64_le()?;
+        self.input_generation = r.read_u64_le()?;
+        for node in &mut self.nodes {
+            node.phase_acc = r.read_f64_le()?;
+            node.last_gen = r.read_u64_le()?;
+            node.kind.load_runtime(r)?;
+        }
+        for v in &mut self.values {
+            *v = r.read_f64_le()?;
+        }
+        self.resampler.load_state(r)?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests;
