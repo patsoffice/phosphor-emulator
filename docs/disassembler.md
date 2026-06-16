@@ -42,7 +42,8 @@ disasm raw --cpu z80 --org 0x0000 --count 40 program.bin
 
 - `--org <addr>` — address of the first byte (hex `0x..` or decimal; default `0`).
   Used for branch/jump target resolution.
-- `--count <n>` — stop after `n` instructions.
+
+All modes also accept the range options below.
 
 ### `rom` — a member file of a ROM set
 
@@ -62,11 +63,11 @@ resolved automatically from the machine's registered disasm regions. Point at th
 same rompath/zip you'd pass to the emulator.
 
 ```bash
-# List the regions a machine exposes
-disasm machine --machine mariobros ~/mame/roms
+# List the regions a machine exposes (no ROM path needed)
+disasm machine --machine mariobros
 #   disasm regions for 'mariobros':
-#     main     z80    org 0x0000
-#     sound    i8035  org 0x0000
+#     main     z80    org 0x0000  24576 bytes (0x6000)
+#     sound    i8035  org 0x0000  4096 bytes (0x1000)
 
 # Disassemble the I8035 sound program
 disasm machine --machine mariobros --region sound ~/mame/roms --count 20
@@ -75,8 +76,55 @@ disasm machine --machine mariobros --region sound ~/mame/roms --count 20
 disasm machine --machine mariobros --region main ~/mame/roms
 ```
 
-`<path>` resolves the same way the frontend does: a `.zip` file directly, a
-directory containing `<machine>.zip`, or a directory of loose ROM files.
+Listing the regions (omit `--region`) needs no ROM files; a `<path>` is only
+required to disassemble a region. `<path>` resolves the same way the frontend
+does: a `.zip` file directly, a directory containing `<machine>.zip`, or a
+directory of loose ROM files.
+
+## Selecting a range
+
+By default the whole region is disassembled. These options (available in every
+mode) narrow the output and compose with each other:
+
+- `--start <addr>` — begin at this address instead of the origin.
+- `--end <addr>` — stop at this address (exclusive). An instruction straddling
+  the boundary is still printed.
+- `--count <n>` — stop after `n` instructions.
+
+Addresses are absolute — the same space as `--org` / the region origin.
+
+```bash
+# Just the routine at 0x0146-0x01FF of the Mario sound ROM
+disasm machine --machine mariobros --region sound ~/mame/roms --start 0x0146 --end 0x0200
+
+# 40 instructions from a fixed point
+disasm raw --cpu z80 --org 0 program.bin --start 0x0130 --count 40
+```
+
+## Banked ROM
+
+Bank switching (e.g. Crystal Castles' and Williams' program ROM) is a *runtime*
+operation: the game writes a bank register to repoint an address window at a
+different ROM. The standalone tool has no runtime state, so it can't know which
+bank is live — the live debug UI is the bank-aware option there, since it reads
+through the bus.
+
+Instead, each bank is registered as its own region. Crystal Castles, for
+example, exposes both banks (which share the `0xA000-0xDFFF` window) plus the
+fixed ROM:
+
+```bash
+disasm machine --machine ccastles
+#   disasm regions for 'ccastles':
+#     bank0    m6502  org 0xA000  16384 bytes (0x4000)
+#     bank1    m6502  org 0xA000  16384 bytes (0x4000)
+#     fixed    m6502  org 0xE000  8192 bytes (0x2000)
+
+disasm machine --machine ccastles --region bank1 ~/mame/roms
+```
+
+For a `raw`/`rom` dump of a banked image, use `--org` to set the window base and
+`--start`/`--end` to carve out a single bank's bytes.
 
 ## Output format
 
@@ -117,9 +165,13 @@ read here is what the emulator decodes at runtime.
 
 `machine` mode is backed by the disasm registry in
 [`machines/src/disasm_registry.rs`](../machines/src/disasm_registry.rs). Only
-machines that register regions appear there (Mario Bros is seeded). To expose a
-new machine's code ROMs, add one `inventory::submit!` per region next to the
-machine's ROM definitions — see the `DisasmRegion` entries in
-[`machines/src/mario_bros.rs`](../machines/src/mario_bros.rs) and the note in
-[`machines/CLAUDE.md`](../machines/CLAUDE.md). Until then, `raw` and `rom` modes
-still work for any ROM with an explicit `--cpu`.
+machines that register regions appear there (Mario Bros and Crystal Castles are
+seeded). To expose a new machine's code ROMs, add one `inventory::submit!` per
+region next to the machine's ROM definitions — see the flat `DisasmRegion`
+entries in [`machines/src/mario_bros.rs`](../machines/src/mario_bros.rs), the
+region-per-bank entries in
+[`machines/src/ccastles.rs`](../machines/src/ccastles.rs), and the note in
+[`machines/CLAUDE.md`](../machines/CLAUDE.md). For banked ROM, register one
+region per bank (same `org`, a `load` closure that slices that bank, and a
+distinct name). Until a machine is registered, `raw` and `rom` modes still work
+for any ROM with an explicit `--cpu`.
