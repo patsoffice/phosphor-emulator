@@ -344,3 +344,237 @@ fn audio_drains_after_running() {
     // A second drain yields nothing (buffer emptied).
     assert_eq!(c.fill_audio(&mut out), 0);
 }
+
+// ===========================================================================
+// Phase 2: mixers and filters
+// ===========================================================================
+
+fn step_n(c: &mut DiscreteCircuit, n: usize) {
+    for _ in 0..n {
+        c.tick(1);
+    }
+}
+
+// -- RC filters -------------------------------------------------------------
+
+#[test]
+fn rc_low_pass_approaches_target() {
+    // tau = 1 ms; alpha per step at 48 kHz.
+    let mut b = builder_1to1(RATE);
+    let one = b.constant("ONE", 1.0);
+    let lp = b.rc_low_pass("LP", one, 1_000.0, 1e-6); // R*C = 1 ms
+    let mut c = b.build();
+
+    step_n(&mut c, 48); // ~1 tau
+    let at_tau = c.value(lp);
+    assert!(
+        (0.55..0.72).contains(&at_tau),
+        "expected ~63% after one tau, got {at_tau}"
+    );
+    step_n(&mut c, 48_000); // ~1 s -> fully settled
+    assert!((c.value(lp) - 1.0).abs() < 0.01, "should settle to target");
+}
+
+#[test]
+fn rc_high_pass_blocks_dc_passes_transient() {
+    let mut b = builder_1to1(RATE);
+    let one = b.constant("ONE", 1.0);
+    let hp = b.rc_high_pass("HP", one, 1_000.0, 1e-6);
+    let mut c = b.build();
+
+    c.tick(1); // the input step is a transient -> passes through
+    assert!(c.value(hp) > 0.9, "step transient passes");
+    step_n(&mut c, 48_000); // steady DC -> blocked
+    assert!(c.value(hp).abs() < 0.01, "DC blocked");
+}
+
+#[test]
+fn rc_envelope_charges_fast_discharges_slow() {
+    let mut b = builder_1to1(RATE);
+    let gate = b.logic_input("GATE");
+    let env = b.rc_envelope("ENV", gate, 0.0005, 0.01); // 0.5 ms up, 10 ms down
+    let mut c = b.build();
+
+    c.set_logic(gate, true);
+    step_n(&mut c, 240); // ~10 charge taus -> fully charged
+    assert!(c.value(env) > 0.99, "charged: {}", c.value(env));
+
+    c.set_logic(gate, false);
+    step_n(&mut c, 240); // ~0.5 discharge tau -> still well above zero
+    let v = c.value(env);
+    assert!(
+        (0.5..0.72).contains(&v),
+        "slow discharge should leave ~e^-0.5, got {v}"
+    );
+}
+
+// -- Second-order filter ----------------------------------------------------
+
+#[test]
+fn second_order_dc_response() {
+    let mut b = builder_1to1(RATE);
+    let one = b.constant("ONE", 1.0);
+    let lp = b.second_order("LP", one, FilterMode::LowPass, 1_000.0, 0.707);
+    let bp = b.band_pass("BP", one, 1_000.0, 0.707);
+    let hp = b.second_order("HP", one, FilterMode::HighPass, 1_000.0, 0.707);
+    let mut c = b.build();
+
+    step_n(&mut c, 48_000);
+    assert!((c.value(lp) - 1.0).abs() < 0.02, "LP passes DC");
+    assert!(c.value(bp).abs() < 0.02, "BP blocks DC");
+    assert!(c.value(hp).abs() < 0.02, "HP blocks DC");
+}
+
+#[test]
+fn band_pass_is_frequency_selective() {
+    fn energy_at(freq_hz: f64) -> f64 {
+        let mut b = builder_1to1(RATE);
+        let sq = b.fixed_square("SQ", freq_hz);
+        let bp = b.band_pass("BP", sq, 2_000.0, 4.0);
+        let mut c = b.build();
+        step_n(&mut c, 2_000); // warm up
+        let mut e = 0.0;
+        for _ in 0..4_000 {
+            c.tick(1);
+            let v = c.value(bp);
+            e += v * v;
+        }
+        e
+    }
+    let centered = energy_at(2_000.0);
+    let far = energy_at(200.0);
+    assert!(
+        centered > far * 2.0,
+        "centered energy {centered} should dominate off-band {far}"
+    );
+}
+
+// -- Mixers -----------------------------------------------------------------
+
+#[test]
+fn resistor_mixer_weights_by_conductance() {
+    let mut b = builder_1to1(RATE);
+    let hi = b.constant("HI", 1.0);
+    let lo = b.constant("LO", 0.0);
+    // Equal resistors -> simple average.
+    let avg = b.resistor_mixer("AVG", &[(hi, 1_000.0), (lo, 1_000.0)], None);
+    // 1k vs 3k -> hi weighted 3:1 -> 0.75.
+    let weighted = b.resistor_mixer("W", &[(hi, 1_000.0), (lo, 3_000.0)], None);
+    // Same taps plus a 1k load to ground pulls the result down.
+    let loaded = b.resistor_mixer("L", &[(hi, 1_000.0), (lo, 3_000.0)], Some(1_000.0));
+    let mut c = b.build();
+
+    c.tick(1);
+    assert!((c.value(avg) - 0.5).abs() < 1e-9);
+    assert!((c.value(weighted) - 0.75).abs() < 1e-9);
+    assert!((c.value(loaded) - 0.428_571).abs() < 1e-4);
+}
+
+#[test]
+fn diode_mixer_takes_max_minus_drop() {
+    let mut b = builder_1to1(RATE);
+    let a = b.constant("A", 0.3);
+    let d = b.constant("D", 0.8);
+    let neg = b.constant("N", -0.2);
+    let pos_mix = b.diode_mixer("POS", &[a, d], 0.1);
+    let neg_mix = b.diode_mixer("NEG", &[a, neg], 0.1);
+    let mut c = b.build();
+
+    c.tick(1);
+    assert!((c.value(pos_mix) - 0.7).abs() < 1e-9, "max 0.8 - drop 0.1");
+    assert!((c.value(neg_mix) - 0.2).abs() < 1e-9, "max 0.3 - drop 0.1");
+}
+
+// -- DAC ladder -------------------------------------------------------------
+
+#[test]
+fn dac_ladder_is_monotonic_with_correct_endpoints() {
+    let mut b = builder_1to1(RATE);
+    let code = b.data_input("CODE", 1.0);
+    let dac = b.dac_r2r("DAC", code, 8, 5.0);
+    let mut c = b.build();
+
+    let sample = |c: &mut DiscreteCircuit, v: f64| {
+        c.set_data(code, v);
+        c.tick(1);
+        c.value(dac)
+    };
+    assert!((sample(&mut c, 0.0)).abs() < 1e-9, "code 0 -> 0 V");
+    assert!(
+        (sample(&mut c, 255.0) - 5.0).abs() < 1e-9,
+        "full scale -> vref"
+    );
+
+    let mut prev = f64::NEG_INFINITY;
+    for code_val in [0.0, 1.0, 64.0, 100.0, 200.0, 255.0] {
+        let out = sample(&mut c, code_val);
+        assert!(out > prev, "monotonic at code {code_val}: {out} > {prev}");
+        prev = out;
+    }
+}
+
+// -- External source feeding an analog stage --------------------------------
+
+#[test]
+fn external_source_feeds_filter() {
+    let mut b = builder_1to1(RATE);
+    let ext = b.external_source("CHIP");
+    let lp = b.rc_low_pass("LP", ext, 1_000.0, 1e-7); // fast: tau = 0.1 ms
+    let mut c = b.build();
+
+    c.set_external(ext, 0.8);
+    step_n(&mut c, 4_800); // ~48 taus
+    assert!(
+        (c.value(lp) - 0.8).abs() < 0.01,
+        "tracks the external stream"
+    );
+    c.set_external(ext, -0.4);
+    step_n(&mut c, 4_800);
+    assert!(
+        (c.value(lp) + 0.4).abs() < 0.01,
+        "follows a new sample value"
+    );
+}
+
+// -- Save / load of analog state --------------------------------------------
+
+fn filter_circuit() -> DiscreteCircuit {
+    let mut b = DiscreteCircuitBuilder::new(RATE, RATE);
+    let sq = b.fixed_square("SQ", 1_500.0);
+    let lp = b.rc_low_pass("LP", sq, 2_200.0, 1e-7);
+    let hp = b.rc_high_pass("HP", lp, 2_200.0, 1e-7);
+    let bp = b.band_pass("BP", sq, 1_500.0, 3.0);
+    let env = b.rc_envelope("ENV", lp, 0.001, 0.01);
+    let mix = b.resistor_mixer("MIX", &[(hp, 1_000.0), (bp, 1_000.0), (env, 2_000.0)], None);
+    b.output(mix, OutputGain::unity());
+    b.build()
+}
+
+#[test]
+fn save_load_preserves_filter_state() {
+    let mut c1 = filter_circuit();
+    step_n(&mut c1, 500);
+    let mut discard = vec![0i16; 8192];
+    while c1.fill_audio(&mut discard) > 0 {}
+
+    let mut w = StateWriter::new();
+    c1.save_state(&mut w);
+    let data = w.into_vec();
+
+    let mut c2 = filter_circuit();
+    let mut r = StateReader::new(&data);
+    c2.load_state(&mut r).unwrap();
+
+    for i in 0..6u16 {
+        assert_eq!(c1.value(NodeId(i)), c2.value(NodeId(i)), "node {i}");
+    }
+
+    step_n(&mut c1, 200);
+    step_n(&mut c2, 200);
+    let mut a = vec![0i16; 4096];
+    let mut bb = vec![0i16; 4096];
+    let na = c1.fill_audio(&mut a);
+    let nb = c2.fill_audio(&mut bb);
+    assert_eq!(na, nb);
+    assert_eq!(a[..na], bb[..nb]);
+}

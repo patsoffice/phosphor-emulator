@@ -83,6 +83,17 @@ pub enum ClockDomain {
     EventOnly,
 }
 
+/// Output tap of a second-order filter.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum FilterMode {
+    /// Low-pass.
+    LowPass,
+    /// Band-pass.
+    BandPass,
+    /// High-pass.
+    HighPass,
+}
+
 /// Final output scaling applied before the signal enters the resampler.
 #[derive(Clone, Copy, Debug)]
 pub struct OutputGain(f64);
@@ -330,6 +341,167 @@ impl DiscreteCircuitBuilder {
             },
             ClockDomain::BoardCycle,
         )
+    }
+
+    /// One-pole RC low-pass over `src` with the given resistance (ohms) and
+    /// capacitance (farads); time constant `tau = R * C`.
+    pub fn rc_low_pass(
+        &mut self,
+        name: &str,
+        src: impl Into<NodeId>,
+        ohms: f64,
+        farads: f64,
+    ) -> NodeId {
+        self.push_node(
+            name,
+            NodeKind::RcLowPass {
+                src: src.into(),
+                tau: ohms * farads,
+                y: 0.0,
+            },
+            ClockDomain::BoardCycle,
+        )
+    }
+
+    /// First-order low-pass specified by cutoff frequency (Hz).
+    pub fn low_pass_hz(&mut self, name: &str, src: impl Into<NodeId>, cutoff_hz: f64) -> NodeId {
+        let tau = 1.0 / (std::f64::consts::TAU * cutoff_hz);
+        self.push_node(
+            name,
+            NodeKind::RcLowPass {
+                src: src.into(),
+                tau,
+                y: 0.0,
+            },
+            ClockDomain::BoardCycle,
+        )
+    }
+
+    /// One-pole RC high-pass / coupling capacitor over `src`; `tau = R * C`.
+    pub fn rc_high_pass(
+        &mut self,
+        name: &str,
+        src: impl Into<NodeId>,
+        ohms: f64,
+        farads: f64,
+    ) -> NodeId {
+        self.push_node(
+            name,
+            NodeKind::RcHighPass {
+                src: src.into(),
+                tau: ohms * farads,
+                x_prev: 0.0,
+                y: 0.0,
+            },
+            ClockDomain::BoardCycle,
+        )
+    }
+
+    /// Asymmetric RC envelope charging toward `src` with separate rise and fall
+    /// time constants (seconds) — capacitor charge/discharge behavior.
+    pub fn rc_envelope(
+        &mut self,
+        name: &str,
+        src: impl Into<NodeId>,
+        tau_charge: f64,
+        tau_discharge: f64,
+    ) -> NodeId {
+        self.push_node(
+            name,
+            NodeKind::RcEnvelope {
+                src: src.into(),
+                tau_charge,
+                tau_discharge,
+                v: 0.0,
+            },
+            ClockDomain::BoardCycle,
+        )
+    }
+
+    /// Second-order state-variable filter at center/cutoff `f0` (Hz) and `q`.
+    pub fn second_order(
+        &mut self,
+        name: &str,
+        src: impl Into<NodeId>,
+        mode: FilterMode,
+        f0: f64,
+        q: f64,
+    ) -> NodeId {
+        self.push_node(
+            name,
+            NodeKind::SecondOrder {
+                src: src.into(),
+                mode,
+                f0,
+                q,
+                low: 0.0,
+                band: 0.0,
+            },
+            ClockDomain::BoardCycle,
+        )
+    }
+
+    /// Band-pass convenience for [`second_order`](Self::second_order).
+    pub fn band_pass(
+        &mut self,
+        name: &str,
+        src: impl Into<NodeId>,
+        center_hz: f64,
+        q: f64,
+    ) -> NodeId {
+        self.second_order(name, src, FilterMode::BandPass, center_hz, q)
+    }
+
+    /// Passive resistor mixer: weighted average of `(node, ohms)` taps, with an
+    /// optional load resistor (ohms) to the reference. Output is
+    /// `Σ(Vi / Ri) / (Σ(1 / Ri) + 1 / load)`.
+    pub fn resistor_mixer(
+        &mut self,
+        name: &str,
+        taps: &[(NodeId, f64)],
+        load_ohms: Option<f64>,
+    ) -> NodeId {
+        let srcs: Vec<(NodeId, f64)> = taps.iter().map(|(n, r)| (*n, 1.0 / r)).collect();
+        let total_g = srcs.iter().map(|(_, g)| g).sum::<f64>() + load_ohms.map_or(0.0, |r| 1.0 / r);
+        self.push_node(
+            name,
+            NodeKind::ResistorMixer { srcs, total_g },
+            ClockDomain::BoardCycle,
+        )
+    }
+
+    /// Diode-OR mixer: the highest input wins, less a forward drop (volts).
+    pub fn diode_mixer(&mut self, name: &str, srcs: &[NodeId], drop: f64) -> NodeId {
+        self.push_node(
+            name,
+            NodeKind::DiodeMixer {
+                srcs: srcs.to_vec(),
+                drop,
+            },
+            ClockDomain::BoardCycle,
+        )
+    }
+
+    /// DAC with explicit per-bit weights (bit 0 first). Output sums the weights
+    /// of the set bits of the integer code carried by `src`.
+    pub fn dac_weighted(&mut self, name: &str, src: impl Into<NodeId>, weights: &[f64]) -> NodeId {
+        self.push_node(
+            name,
+            NodeKind::DacLadder {
+                src: src.into(),
+                weights: weights.to_vec(),
+            },
+            ClockDomain::BoardCycle,
+        )
+    }
+
+    /// Linear `bits`-wide R-2R DAC: full-scale code maps to `vref`.
+    pub fn dac_r2r(&mut self, name: &str, src: impl Into<NodeId>, bits: u8, vref: f64) -> NodeId {
+        let full = ((1u64 << bits) - 1) as f64;
+        let weights: Vec<f64> = (0..bits)
+            .map(|b| vref * (1u64 << b) as f64 / full)
+            .collect();
+        self.dac_weighted(name, src, &weights)
     }
 
     /// A circuit-specific custom component reading `inputs`.

@@ -5,7 +5,7 @@
 //! in the `NodeId` references inside each kind and is fixed once the circuit is
 //! built; everything mutated at runtime is serialized by `save_runtime`.
 
-use super::{ClockDomain, CustomComponent, NodeId};
+use super::{ClockDomain, CustomComponent, FilterMode, NodeId};
 use crate::core::save_state::{SaveError, StateReader, StateWriter};
 
 /// One node in the circuit graph: a primitive kind plus per-node scheduler
@@ -74,6 +74,45 @@ pub(crate) enum NodeKind {
     /// `src` clamped to `[lo, hi]`.
     Clamp { src: NodeId, lo: f64, hi: f64 },
 
+    // --- Analog approximations ---
+    /// One-pole RC low-pass tracking `src`, time constant `tau` (seconds).
+    RcLowPass { src: NodeId, tau: f64, y: f64 },
+    /// One-pole RC high-pass / coupling cap: passes transients, blocks DC.
+    RcHighPass {
+        src: NodeId,
+        tau: f64,
+        x_prev: f64,
+        y: f64,
+    },
+    /// Asymmetric RC envelope charging toward `src` with separate rise/fall
+    /// time constants (seconds) — capacitor charge/discharge behavior.
+    RcEnvelope {
+        src: NodeId,
+        tau_charge: f64,
+        tau_discharge: f64,
+        v: f64,
+    },
+    /// Chamberlin state-variable 2nd-order filter (low/band/high-pass).
+    SecondOrder {
+        src: NodeId,
+        mode: FilterMode,
+        f0: f64,
+        q: f64,
+        low: f64,
+        band: f64,
+    },
+    /// Passive resistor (weighted-average) mixer. `srcs` holds `(node,
+    /// conductance)`; `total_g` is the precomputed denominator including any load.
+    ResistorMixer {
+        srcs: Vec<(NodeId, f64)>,
+        total_g: f64,
+    },
+    /// Diode-OR mixer: the highest input wins, less a forward drop.
+    DiodeMixer { srcs: Vec<NodeId>, drop: f64 },
+    /// DAC / resistor ladder: sums per-bit `weights` for each set bit of the
+    /// integer code carried by `src`.
+    DacLadder { src: NodeId, weights: Vec<f64> },
+
     // --- Escape hatch ---
     /// Circuit-specific behavior. The only dynamically dispatched variant.
     Custom {
@@ -91,13 +130,20 @@ impl NodeKind {
         match self {
             NodeKind::EdgeDetector { src, .. }
             | NodeKind::Gain { src, .. }
-            | NodeKind::Clamp { src, .. } => out.push(src.index()),
+            | NodeKind::Clamp { src, .. }
+            | NodeKind::RcLowPass { src, .. }
+            | NodeKind::RcHighPass { src, .. }
+            | NodeKind::RcEnvelope { src, .. }
+            | NodeKind::SecondOrder { src, .. }
+            | NodeKind::DacLadder { src, .. } => out.push(src.index()),
             NodeKind::VariableSquare { freq_src, .. } => out.push(freq_src.index()),
             NodeKind::Multiply { a, b } => {
                 out.push(a.index());
                 out.push(b.index());
             }
             NodeKind::Add { srcs } => out.extend(srcs.iter().map(|s| s.index())),
+            NodeKind::DiodeMixer { srcs, .. } => out.extend(srcs.iter().map(|s| s.index())),
+            NodeKind::ResistorMixer { srcs, .. } => out.extend(srcs.iter().map(|(s, _)| s.index())),
             NodeKind::Custom { inputs, .. } => out.extend(inputs.iter().map(|s| s.index())),
             _ => {}
         }
@@ -167,6 +213,90 @@ impl NodeKind {
             NodeKind::Multiply { a, b } => values[a.index()] * values[b.index()],
             NodeKind::Clamp { src, lo, hi } => values[src.index()].clamp(*lo, *hi),
 
+            NodeKind::RcLowPass { src, tau, y } => {
+                let x = values[src.index()];
+                let alpha = dt / (*tau + dt);
+                *y += alpha * (x - *y);
+                *y
+            }
+            NodeKind::RcHighPass {
+                src,
+                tau,
+                x_prev,
+                y,
+            } => {
+                let x = values[src.index()];
+                let alpha = *tau / (*tau + dt);
+                *y = alpha * (*y + x - *x_prev);
+                *x_prev = x;
+                *y
+            }
+            NodeKind::RcEnvelope {
+                src,
+                tau_charge,
+                tau_discharge,
+                v,
+            } => {
+                let target = values[src.index()];
+                let tau = if target > *v {
+                    *tau_charge
+                } else {
+                    *tau_discharge
+                };
+                let alpha = if tau <= 0.0 { 1.0 } else { dt / (tau + dt) };
+                *v += alpha * (target - *v);
+                *v
+            }
+            NodeKind::SecondOrder {
+                src,
+                mode,
+                f0,
+                q,
+                low,
+                band,
+            } => {
+                // Chamberlin state-variable filter; stable for f0 < sim_rate/6.
+                let input = values[src.index()];
+                let f = 2.0 * (std::f64::consts::PI * *f0 * dt).sin();
+                let q1 = 1.0 / *q;
+                *low += f * *band;
+                let high = input - *low - q1 * *band;
+                *band += f * high;
+                match mode {
+                    FilterMode::LowPass => *low,
+                    FilterMode::BandPass => *band,
+                    FilterMode::HighPass => high,
+                }
+            }
+            NodeKind::ResistorMixer { srcs, total_g } => {
+                if *total_g == 0.0 {
+                    0.0
+                } else {
+                    let sum: f64 = srcs.iter().map(|(s, g)| values[s.index()] * g).sum();
+                    sum / *total_g
+                }
+            }
+            NodeKind::DiodeMixer { srcs, drop } => {
+                let max_v = srcs
+                    .iter()
+                    .map(|s| values[s.index()])
+                    .fold(f64::NEG_INFINITY, f64::max);
+                if max_v.is_finite() {
+                    max_v - *drop
+                } else {
+                    0.0
+                }
+            }
+            NodeKind::DacLadder { src, weights } => {
+                let code = values[src.index()].round().max(0.0) as u32;
+                weights
+                    .iter()
+                    .enumerate()
+                    .filter(|(b, _)| (code >> b) & 1 == 1)
+                    .map(|(_, w)| *w)
+                    .sum()
+            }
+
             NodeKind::Custom {
                 inputs,
                 comp,
@@ -199,12 +329,25 @@ impl NodeKind {
                 *clock_acc = 0.0;
             }
             NodeKind::EdgeDetector { last, .. } => *last = 0.0,
+            NodeKind::RcLowPass { y, .. } => *y = 0.0,
+            NodeKind::RcHighPass { x_prev, y, .. } => {
+                *x_prev = 0.0;
+                *y = 0.0;
+            }
+            NodeKind::RcEnvelope { v, .. } => *v = 0.0,
+            NodeKind::SecondOrder { low, band, .. } => {
+                *low = 0.0;
+                *band = 0.0;
+            }
             NodeKind::Custom { comp, .. } => comp.reset(),
             NodeKind::Constant { .. }
             | NodeKind::Gain { .. }
             | NodeKind::Add { .. }
             | NodeKind::Multiply { .. }
-            | NodeKind::Clamp { .. } => {}
+            | NodeKind::Clamp { .. }
+            | NodeKind::ResistorMixer { .. }
+            | NodeKind::DiodeMixer { .. }
+            | NodeKind::DacLadder { .. } => {}
         }
     }
 
@@ -225,12 +368,25 @@ impl NodeKind {
                 w.write_f64_le(*clock_acc);
             }
             NodeKind::EdgeDetector { last, .. } => w.write_f64_le(*last),
+            NodeKind::RcLowPass { y, .. } => w.write_f64_le(*y),
+            NodeKind::RcHighPass { x_prev, y, .. } => {
+                w.write_f64_le(*x_prev);
+                w.write_f64_le(*y);
+            }
+            NodeKind::RcEnvelope { v, .. } => w.write_f64_le(*v),
+            NodeKind::SecondOrder { low, band, .. } => {
+                w.write_f64_le(*low);
+                w.write_f64_le(*band);
+            }
             NodeKind::Custom { comp, .. } => comp.save_state(w),
             NodeKind::Constant { .. }
             | NodeKind::Gain { .. }
             | NodeKind::Add { .. }
             | NodeKind::Multiply { .. }
-            | NodeKind::Clamp { .. } => {}
+            | NodeKind::Clamp { .. }
+            | NodeKind::ResistorMixer { .. }
+            | NodeKind::DiodeMixer { .. }
+            | NodeKind::DacLadder { .. } => {}
         }
     }
 
@@ -251,12 +407,25 @@ impl NodeKind {
                 *clock_acc = r.read_f64_le()?;
             }
             NodeKind::EdgeDetector { last, .. } => *last = r.read_f64_le()?,
+            NodeKind::RcLowPass { y, .. } => *y = r.read_f64_le()?,
+            NodeKind::RcHighPass { x_prev, y, .. } => {
+                *x_prev = r.read_f64_le()?;
+                *y = r.read_f64_le()?;
+            }
+            NodeKind::RcEnvelope { v, .. } => *v = r.read_f64_le()?,
+            NodeKind::SecondOrder { low, band, .. } => {
+                *low = r.read_f64_le()?;
+                *band = r.read_f64_le()?;
+            }
             NodeKind::Custom { comp, .. } => comp.load_state(r)?,
             NodeKind::Constant { .. }
             | NodeKind::Gain { .. }
             | NodeKind::Add { .. }
             | NodeKind::Multiply { .. }
-            | NodeKind::Clamp { .. } => {}
+            | NodeKind::Clamp { .. }
+            | NodeKind::ResistorMixer { .. }
+            | NodeKind::DiodeMixer { .. }
+            | NodeKind::DacLadder { .. } => {}
         }
         Ok(())
     }
