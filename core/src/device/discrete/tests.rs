@@ -111,6 +111,25 @@ fn fixed_square_phase_and_frequency() {
 }
 
 #[test]
+fn fixed_triangle_shape() {
+    // freq = rate/4 -> phase advances 0.25/step: peak at phase 0.5, troughs at 0/1.
+    let mut b = builder_1to1(RATE);
+    let tri = b.triangle("TRI", RATE as f64 / 4.0);
+    let mut c = b.build();
+
+    let mut seq = Vec::new();
+    for _ in 0..4 {
+        c.tick(1);
+        seq.push(c.value(tri));
+    }
+    // phases 0.25, 0.50, 0.75, 1.00 -> 0.0, +1.0, 0.0, -1.0
+    assert!((seq[0] - 0.0).abs() < 1e-9, "{seq:?}");
+    assert!((seq[1] - 1.0).abs() < 1e-9, "{seq:?}");
+    assert!((seq[2] - 0.0).abs() < 1e-9, "{seq:?}");
+    assert!((seq[3] + 1.0).abs() < 1e-9, "{seq:?}");
+}
+
+#[test]
 fn variable_square_tracks_frequency_input() {
     let mut b = builder_1to1(RATE);
     let freq = b.data_input("FREQ", 1.0);

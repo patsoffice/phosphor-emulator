@@ -49,6 +49,10 @@ pub(crate) enum NodeKind {
     FixedSquare { freq: f64, phase: f64 },
     /// Square wave whose frequency (Hz) comes from another node.
     VariableSquare { freq_src: NodeId, phase: f64 },
+    /// Triangle wave at a fixed frequency (Hz).
+    FixedTriangle { freq: f64, phase: f64 },
+    /// Triangle wave whose frequency (Hz) comes from another node.
+    VariableTriangle { freq_src: NodeId, phase: f64 },
     /// Linear-feedback-shift-register noise, internally clocked at `freq` (Hz).
     LfsrNoise {
         lfsr: u32,
@@ -136,7 +140,8 @@ impl NodeKind {
             | NodeKind::RcEnvelope { src, .. }
             | NodeKind::SecondOrder { src, .. }
             | NodeKind::DacLadder { src, .. } => out.push(src.index()),
-            NodeKind::VariableSquare { freq_src, .. } => out.push(freq_src.index()),
+            NodeKind::VariableSquare { freq_src, .. }
+            | NodeKind::VariableTriangle { freq_src, .. } => out.push(freq_src.index()),
             NodeKind::Multiply { a, b } => {
                 out.push(a.index());
                 out.push(b.index());
@@ -183,6 +188,17 @@ impl NodeKind {
                 *phase += freq * dt;
                 *phase -= phase.floor();
                 if *phase < 0.5 { 1.0 } else { -1.0 }
+            }
+            NodeKind::FixedTriangle { freq, phase } => {
+                *phase += *freq * dt;
+                *phase -= phase.floor();
+                1.0 - 4.0 * (*phase - 0.5).abs()
+            }
+            NodeKind::VariableTriangle { freq_src, phase } => {
+                let freq = values[freq_src.index()];
+                *phase += freq * dt;
+                *phase -= phase.floor();
+                1.0 - 4.0 * (*phase - 0.5).abs()
             }
             NodeKind::LfsrNoise {
                 lfsr,
@@ -316,9 +332,10 @@ impl NodeKind {
             | NodeKind::DataInput { value, .. }
             | NodeKind::ExternalSource { value } => *value = 0.0,
             NodeKind::PulseInput { pending } => *pending = false,
-            NodeKind::FixedSquare { phase, .. } | NodeKind::VariableSquare { phase, .. } => {
-                *phase = 0.0
-            }
+            NodeKind::FixedSquare { phase, .. }
+            | NodeKind::VariableSquare { phase, .. }
+            | NodeKind::FixedTriangle { phase, .. }
+            | NodeKind::VariableTriangle { phase, .. } => *phase = 0.0,
             NodeKind::LfsrNoise {
                 lfsr,
                 seed,
@@ -358,9 +375,10 @@ impl NodeKind {
             | NodeKind::DataInput { value, .. }
             | NodeKind::ExternalSource { value } => w.write_f64_le(*value),
             NodeKind::PulseInput { pending } => w.write_bool(*pending),
-            NodeKind::FixedSquare { phase, .. } | NodeKind::VariableSquare { phase, .. } => {
-                w.write_f64_le(*phase)
-            }
+            NodeKind::FixedSquare { phase, .. }
+            | NodeKind::VariableSquare { phase, .. }
+            | NodeKind::FixedTriangle { phase, .. }
+            | NodeKind::VariableTriangle { phase, .. } => w.write_f64_le(*phase),
             NodeKind::LfsrNoise {
                 lfsr, clock_acc, ..
             } => {
@@ -397,9 +415,10 @@ impl NodeKind {
             | NodeKind::DataInput { value, .. }
             | NodeKind::ExternalSource { value } => *value = r.read_f64_le()?,
             NodeKind::PulseInput { pending } => *pending = r.read_bool()?,
-            NodeKind::FixedSquare { phase, .. } | NodeKind::VariableSquare { phase, .. } => {
-                *phase = r.read_f64_le()?
-            }
+            NodeKind::FixedSquare { phase, .. }
+            | NodeKind::VariableSquare { phase, .. }
+            | NodeKind::FixedTriangle { phase, .. }
+            | NodeKind::VariableTriangle { phase, .. } => *phase = r.read_f64_le()?,
             NodeKind::LfsrNoise {
                 lfsr, clock_acc, ..
             } => {

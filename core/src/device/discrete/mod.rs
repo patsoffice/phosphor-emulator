@@ -273,6 +273,27 @@ impl DiscreteCircuitBuilder {
         )
     }
 
+    /// Triangle wave at a fixed frequency (Hz).
+    pub fn triangle(&mut self, name: &str, freq: f64) -> NodeId {
+        self.push_node(
+            name,
+            NodeKind::FixedTriangle { freq, phase: 0.0 },
+            ClockDomain::BoardCycle,
+        )
+    }
+
+    /// Triangle wave whose frequency (Hz) is read from `freq_src`.
+    pub fn variable_triangle(&mut self, name: &str, freq_src: impl Into<NodeId>) -> NodeId {
+        self.push_node(
+            name,
+            NodeKind::VariableTriangle {
+                freq_src: freq_src.into(),
+                phase: 0.0,
+            },
+            ClockDomain::BoardCycle,
+        )
+    }
+
     /// LFSR noise generator clocked internally at `freq` (Hz).
     pub fn lfsr_noise(&mut self, name: &str, freq: f64, spec: LfsrSpec) -> NodeId {
         assert!(
