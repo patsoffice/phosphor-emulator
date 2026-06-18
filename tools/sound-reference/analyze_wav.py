@@ -32,6 +32,13 @@ LLANDER_SEGMENTS = [
     (9, 11, "explosion"),
 ]
 
+# matches drive_dkong_sound.lua / dkong_capture.rs.
+DKONG_SEGMENTS = [
+    (1, 3, "walk"),
+    (3, 5, "jump"),
+    (5, 7, "stomp"),
+]
+
 SEGMENTS = ASTEROID_SEGMENTS  # default; override with --llander or --segments
 
 def parse_segments(spec):
@@ -81,6 +88,8 @@ if __name__ == "__main__":
     for a in args:
         if a == "--llander":
             segments = LLANDER_SEGMENTS
+        elif a == "--dkong":
+            segments = DKONG_SEGMENTS
         elif a.startswith("--segments="):
             segments = parse_segments(a.split("=", 1)[1])
         else:

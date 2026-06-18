@@ -35,7 +35,6 @@ pub mod ay8910;
 pub mod cmos_ram;
 pub mod dac;
 pub mod discrete;
-pub mod dkong_discrete;
 pub mod dvg;
 pub mod er2055;
 pub mod i8257;
@@ -62,7 +61,6 @@ pub use discrete::{
     ClockDomain, CustomComponent, DataInputId, DiscreteCircuit, DiscreteCircuitBuilder,
     ExternalSourceId, FilterMode, LfsrSpec, LogicInputId, NodeId, OutputGain, PulseInputId,
 };
-pub use dkong_discrete::DkongDiscrete;
 pub use dvg::Dvg;
 pub use er2055::Er2055;
 pub use i8257::I8257;

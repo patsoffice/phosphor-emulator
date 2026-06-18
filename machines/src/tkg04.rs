@@ -1,3 +1,4 @@
+use crate::dkong_sound::DkongDiscreteSound;
 use phosphor_core::audio::AudioResampler;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::debug_trace::{DebugEvent, DebugEventKind, DebugTraceBuffer};
@@ -8,7 +9,6 @@ use phosphor_core::core::{Bus, BusMaster, ClockDivider, TimingConfig};
 use phosphor_core::cpu::i8035::I8035;
 use phosphor_core::cpu::z80::Z80;
 use phosphor_core::device::dac::Mc1408Dac;
-use phosphor_core::device::dkong_discrete::DkongDiscrete;
 use phosphor_core::device::i8257::I8257;
 use phosphor_core::device::output_latch::OutputLatch;
 use phosphor_core::gfx;
@@ -233,9 +233,9 @@ pub struct Tkg04Board {
     pub(crate) sound_clock: ClockDivider,
     pub(crate) vblank_nmi_pending: bool,
 
-    // Discrete sound effects (walk, jump, stomp)
+    // Discrete sound: DAC stream + walk/jump/stomp effects, mixed in-circuit.
     #[debug_device("Discrete")]
-    pub(crate) discrete: DkongDiscrete,
+    pub(crate) sound: DkongDiscreteSound,
 
     // Debug event ring (observer state — never saved in save states)
     #[debug_events]
@@ -282,7 +282,7 @@ impl Tkg04Board {
             clock: 0,
             sound_clock: ClockDivider::new(SOUND_TICK_NUM, SOUND_TICK_DEN),
             vblank_nmi_pending: false,
-            discrete: DkongDiscrete::new(),
+            sound: DkongDiscreteSound::new(),
             debug_trace: DebugTraceBuffer::new(),
         }
     }
@@ -573,11 +573,10 @@ impl Tkg04Board {
             self.sound_cpu.execute_cycle(bus, BusMaster::Cpu(1));
         }
 
-        // Audio accumulation (Bresenham downsample: 3.072 MHz → 44.1 kHz)
+        // Box-filter the DAC (3.072 MHz → 44.1 kHz); each produced sample drives
+        // one step of the discrete circuit, which sums it with the effects.
         if let Some(dac_avg) = self.resampler.tick_sample(self.dac.sample_i16()) {
-            let discrete_sample = self.discrete.generate_sample() as i32;
-            let mixed = (dac_avg as i32 + discrete_sample).clamp(-32767, 32767) as i16;
-            self.resampler.push_sample(mixed);
+            self.sound.feed_dac(dac_avg);
         }
 
         self.clock += 1;
@@ -603,7 +602,7 @@ impl Tkg04Board {
     // -----------------------------------------------------------------------
 
     pub fn fill_audio(&mut self, buffer: &mut [i16]) -> usize {
-        self.resampler.fill_audio(buffer)
+        self.sound.fill_audio(buffer)
     }
 
     // -----------------------------------------------------------------------
@@ -629,6 +628,7 @@ impl Tkg04Board {
         self.sound_clock.reset();
         self.resampler.reset();
         self.dac.reset();
+        self.sound.reset();
 
         self.in0 = 0x00;
         self.in1 = 0x00;
@@ -638,8 +638,6 @@ impl Tkg04Board {
         self.main_map.region_data_mut(MainRegion::Ram).fill(0);
         self.main_map.region_data_mut(MainRegion::SpriteRam).fill(0);
         self.scanline_buffer.fill(0);
-
-        self.discrete.reset();
     }
 
     // -----------------------------------------------------------------------
@@ -673,9 +671,9 @@ impl Tkg04Board {
     /// Write a single bit to the 74LS259 sound control latch (0x7D00-0x7D07).
     pub fn write_sound_control_bit(&mut self, bit: u8, value: bool) {
         self.sound_control_latch.write(bit, value);
-        // Forward bits 0-2 to discrete sound device
+        // Forward bits 0-2 to the discrete sound device (walk/jump/stomp).
         if bit < 3 {
-            self.discrete.write_latch(bit, value);
+            self.sound.write_sound_bit(bit, value);
         }
     }
 
@@ -795,7 +793,7 @@ impl Saveable for Tkg04Board {
         self.sound_control_latch_4h.save_state(w);
         self.dma.save_state(w);
         self.dac.save_state(w);
-        self.discrete.save_state(w);
+        self.sound.save_state(w);
         w.write_bool(self.sound_irq_pending);
         self.resampler.save_state(w);
         w.write_u64_le(self.clock);
@@ -822,7 +820,7 @@ impl Saveable for Tkg04Board {
         self.sound_control_latch_4h.load_state(r)?;
         self.dma.load_state(r)?;
         self.dac.load_state(r)?;
-        self.discrete.load_state(r)?;
+        self.sound.load_state(r)?;
         self.sound_irq_pending = r.read_bool()?;
         self.resampler.load_state(r)?;
         self.clock = r.read_u64_le()?;

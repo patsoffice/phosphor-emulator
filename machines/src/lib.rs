@@ -373,6 +373,7 @@ pub mod atari_dvg;
 pub mod ccastles;
 pub mod digdug;
 pub mod disasm_registry;
+pub mod dkong_sound;
 pub mod donkey_kong;
 pub mod donkey_kong_jr;
 pub mod foodf;

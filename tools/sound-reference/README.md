@@ -7,17 +7,20 @@ Born out of the Asteroids migration — see the case study in
 
 ## Contents
 
-- `drive_asteroid_sound.lua` / `drive_llander_sound.lua` — MAME autoboot Lua that
-  pokes a board's sound registers on a timeline (one effect per window). Attract
-  mode is silent, so they just drive the registers; no CPU halting needed.
+- `drive_asteroid_sound.lua` / `drive_llander_sound.lua` / `drive_dkong_sound.lua`
+  — MAME autoboot Lua that pokes a board's sound registers on a timeline (one
+  effect per window). The Atari boards have silent attract modes so they just
+  drive the registers; the DK driver parks the main Z80 in a spin loop to isolate
+  the discrete walk/jump/stomp from the DAC music.
 - `analyze_wav.py` — segments a capture by time and prints, per effect, the
   dominant FFT peak and the spectral centroid (DC removed). Reads WAVs with the
-  stdlib `wave` module; needs only `numpy`. Pass `--llander` (or
+  stdlib `wave` module; needs only `numpy`. Pass `--llander` / `--dkong` (or
   `--segments=a:b:label,...`) to select a board's timeline.
 - The Phosphor side lives in the `machines/examples/` capture binaries
   ([`asteroid_capture.rs`](../../machines/examples/asteroid_capture.rs),
-  [`llander_capture.rs`](../../machines/examples/llander_capture.rs)), which drive
-  the device through the same timeline.
+  [`llander_capture.rs`](../../machines/examples/llander_capture.rs),
+  [`dkong_capture.rs`](../../machines/examples/dkong_capture.rs)), which drive the
+  device through the same timeline.
 
 ## Usage
 
