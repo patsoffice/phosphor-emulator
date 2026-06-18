@@ -12,7 +12,7 @@ import wave
 import numpy as np
 
 # (start_s, end_s, label) — matches drive_asteroid_sound.lua / asteroid_capture.rs.
-SEGMENTS = [
+ASTEROID_SEGMENTS = [
     (1, 3, "thrust"),
     (3, 5, "saucer_small"),
     (5, 7, "saucer_large"),
@@ -22,6 +22,24 @@ SEGMENTS = [
     (13, 15, "ship_fire"),
     (15, 17, "saucer_fire"),
 ]
+
+# matches drive_llander_sound.lua / llander_capture.rs.
+LLANDER_SEGMENTS = [
+    (1, 3, "thrust_full"),
+    (3, 5, "thrust_low"),
+    (5, 7, "tone3k"),
+    (7, 9, "tone6k"),
+    (9, 11, "explosion"),
+]
+
+SEGMENTS = ASTEROID_SEGMENTS  # default; override with --llander or --segments
+
+def parse_segments(spec):
+    out = []
+    for part in spec.split(","):
+        a, b, label = part.split(":")
+        out.append((float(a), float(b), label))
+    return out
 
 
 def wavfile_read(path):
@@ -35,12 +53,12 @@ def wavfile_read(path):
     return sr, data
 
 
-def analyze(path):
+def analyze(path, segments):
     sr, data = wavfile_read(path)
     data = data.astype(float)
     print(f"{path}  ({sr} Hz, {len(data) / sr:.1f}s)")
     print(f"{'effect':14s} {'peak Hz':>9s} {'centroid Hz':>12s} {'rms':>8s}")
-    for a, b, name in SEGMENTS:
+    for a, b, name in segments:
         s, e = int((a + 0.4) * sr), int((b - 0.4) * sr)
         x = data[s:e]
         if len(x) < sr // 4:
@@ -57,5 +75,15 @@ def analyze(path):
 
 
 if __name__ == "__main__":
-    for p in sys.argv[1:] or ["/tmp/asteroid_ref.wav"]:
-        analyze(p)
+    args = sys.argv[1:]
+    segments = ASTEROID_SEGMENTS
+    paths = []
+    for a in args:
+        if a == "--llander":
+            segments = LLANDER_SEGMENTS
+        elif a.startswith("--segments="):
+            segments = parse_segments(a.split("=", 1)[1])
+        else:
+            paths.append(a)
+    for p in paths or ["/tmp/asteroid_ref.wav"]:
+        analyze(p, segments)

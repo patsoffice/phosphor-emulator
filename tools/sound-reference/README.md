@@ -7,15 +7,17 @@ Born out of the Asteroids migration — see the case study in
 
 ## Contents
 
-- `drive_asteroid_sound.lua` — MAME autoboot Lua that pokes the Asteroids sound
-  registers on a timeline (one effect per 2 s window). Attract mode is silent, so
-  it just drives the latches; no CPU halting needed.
+- `drive_asteroid_sound.lua` / `drive_llander_sound.lua` — MAME autoboot Lua that
+  pokes a board's sound registers on a timeline (one effect per window). Attract
+  mode is silent, so they just drive the registers; no CPU halting needed.
 - `analyze_wav.py` — segments a capture by time and prints, per effect, the
   dominant FFT peak and the spectral centroid (DC removed). Reads WAVs with the
-  stdlib `wave` module; needs only `numpy`.
-- The Phosphor side lives in
-  [`machines/examples/asteroid_capture.rs`](../../machines/examples/asteroid_capture.rs),
-  which drives `AsteroidsDiscreteSound` through the same timeline.
+  stdlib `wave` module; needs only `numpy`. Pass `--llander` (or
+  `--segments=a:b:label,...`) to select a board's timeline.
+- The Phosphor side lives in the `machines/examples/` capture binaries
+  ([`asteroid_capture.rs`](../../machines/examples/asteroid_capture.rs),
+  [`llander_capture.rs`](../../machines/examples/llander_capture.rs)), which drive
+  the device through the same timeline.
 
 ## Usage
 
@@ -32,6 +34,17 @@ cargo run -p phosphor-machines --example asteroid_capture
 python3 -m venv /tmp/sndvenv && /tmp/sndvenv/bin/pip install -q numpy
 /tmp/sndvenv/bin/python tools/sound-reference/analyze_wav.py \
     /tmp/asteroid_ref.wav /tmp/phosphor_asteroid.wav
+```
+
+Lunar Lander is the same flow with the `llander` driver/example and `--llander`:
+
+```bash
+mame llander -nothrottle -seconds_to_run 12 -video none \
+     -autoboot_script $(pwd)/tools/sound-reference/drive_llander_sound.lua \
+     -wavwrite /tmp/llander_ref.wav
+cargo run -p phosphor-machines --example llander_capture
+/tmp/sndvenv/bin/python tools/sound-reference/analyze_wav.py --llander \
+    /tmp/llander_ref.wav /tmp/llander_phosphor.wav
 ```
 
 The two tables should line up per effect (compare the centroid column; the single

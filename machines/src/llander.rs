@@ -10,6 +10,7 @@ use phosphor_core::cpu::Cpu;
 use phosphor_macros::Saveable;
 
 use crate::atari_dvg::{self, AtariDvgBoard, Region};
+use crate::llander_sound::LunarLanderDiscreteSound;
 use crate::registry::MachineEntry;
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
 use crate::{set_bit_active_high, set_bit_active_low};
@@ -177,6 +178,9 @@ const LLANDER_CONTROLS: &[InputControl] = &[
 pub struct LunarLanderSystem {
     pub board: AtariDvgBoard,
 
+    /// Discrete analog sound (thrust/explosion/3 KHz + 6 KHz tones).
+    sound: LunarLanderDiscreteSound,
+
     // I/O — Lunar Lander uses mixed active-HIGH/LOW inputs.
     // in0: active-LOW bits 1,2,3,4,5,7 idle HIGH; bits 0,6 are dynamic.
     in0: u8,
@@ -226,6 +230,7 @@ impl LunarLanderSystem {
         Self {
             // Lunar Lander: VROM at DVG 0x0800, size 0x1800
             board: AtariDvgBoard::new(Self::build_map(), 0x0800, 0x1800),
+            sound: LunarLanderDiscreteSound::new(),
             // Active-LOW bits idle HIGH: IN0 bits 1,2,3,4,5,7
             in0: 0xBE,
             // Active-LOW bits idle HIGH: IN1 bits 1,3
@@ -345,8 +350,8 @@ impl Bus for LunarLanderSystem {
                 0x3400 => self.board.watchdog_frame_count = 0,
                 // Sound register: bits 0-2 thrust volume, bit 3 explosion,
                 // bit 4 3KHz tone, bit 5 6KHz tone
-                0x3C00 => { /* sound stub */ }
-                0x3E00 => { /* noise reset stub */ }
+                0x3C00 => self.sound.write_sound_register(data),
+                0x3E00 => self.sound.pulse_noise_reset(),
                 _ => {}
             },
 
@@ -369,13 +374,19 @@ impl Bus for LunarLanderSystem {
 // Machine traits (MachineCore + capabilities)
 // ---------------------------------------------------------------------------
 
-crate::impl_board_delegation!(
-    LunarLanderSystem,
-    board,
-    atari_dvg::TIMING,
-    no_audio,
-    vectors
-);
+// Renderable + MachineDebug delegate to the shared board; audio is owned by the
+// game wrapper's discrete sound device, so AudioSource is hand-written.
+crate::impl_board_renderable!(LunarLanderSystem, board, atari_dvg::TIMING, vectors);
+crate::impl_board_debug!(LunarLanderSystem, board, atari_dvg::TIMING);
+
+impl phosphor_core::core::machine::AudioSource for LunarLanderSystem {
+    fn fill_audio(&mut self, buffer: &mut [i16]) -> usize {
+        self.sound.fill_audio(buffer)
+    }
+    fn audio_sample_rate(&self) -> u32 {
+        self.sound.sample_rate()
+    }
+}
 
 impl InputConfigurable for LunarLanderSystem {
     fn input_controls(&self) -> &'static [InputControl] {
@@ -415,6 +426,9 @@ impl MachineCore for LunarLanderSystem {
             }
         });
 
+        // Advance the discrete sound circuit for the frame's worth of CPU cycles.
+        self.sound.tick(atari_dvg::TIMING.cycles_per_frame());
+
         // Clear NMI at frame boundary to avoid stale edges.
         self.board.nmi_pending = false;
 
@@ -427,6 +441,7 @@ impl MachineCore for LunarLanderSystem {
 
     fn reset(&mut self) {
         self.board.reset();
+        self.sound.reset();
         bus_split!(self, bus => {
             self.board.cpu.reset(bus, BusMaster::Cpu(0));
         });

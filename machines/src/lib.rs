@@ -382,6 +382,7 @@ pub mod gridlee;
 pub(crate) mod input_defaults;
 pub mod joust;
 pub mod llander;
+pub mod llander_sound;
 pub mod mario_bros;
 pub mod mcr2;
 pub mod missile_command;
