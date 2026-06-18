@@ -367,6 +367,7 @@ pub(crate) use machine_save_state;
 
 pub mod astdelux;
 pub mod asteroids;
+pub mod asteroids_sound;
 pub mod atari_avg;
 pub mod atari_dvg;
 pub mod ccastles;

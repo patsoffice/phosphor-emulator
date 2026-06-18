@@ -9,6 +9,7 @@ use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
 use phosphor_macros::Saveable;
 
+use crate::asteroids_sound::AsteroidsDiscreteSound;
 use crate::atari_dvg::{self, AtariDvgBoard, Region};
 use crate::registry::MachineEntry;
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
@@ -163,6 +164,9 @@ const ASTEROIDS_CONTROLS: &[InputControl] = &[
 pub struct AsteroidsSystem {
     pub board: AtariDvgBoard,
 
+    /// Discrete analog sound (explosion/thump/saucer/fire/thrust/life).
+    sound: AsteroidsDiscreteSound,
+
     // I/O — active-HIGH inputs (default 0x00 = all released)
     in0: u8,
     in1: u8,
@@ -205,6 +209,7 @@ impl AsteroidsSystem {
         Self {
             // Asteroids: VROM at DVG 0x1000, size 0x0800
             board: AtariDvgBoard::new(Self::build_map(), 0x1000, 0x0800),
+            sound: AsteroidsDiscreteSound::new(),
             in0: 0x00,
             in1: 0x00,
             dip_switches: 0x84, // English, 3 lives, 1C/1C
@@ -312,10 +317,14 @@ impl Bus for AsteroidsSystem {
                 0x3000 => self.board.trigger_dvg(),
                 0x3200 => { /* output latch stub */ }
                 0x3400 => self.board.watchdog_frame_count = 0,
-                0x3600 => { /* audio stub */ }
-                0x3A00 => { /* audio stub */ }
-                0x3C00..=0x3C07 => { /* audio stub */ }
-                0x3E00 => { /* audio stub */ }
+                0x3600 => self.sound.write_explosion(data),
+                0x3A00 => self.sound.write_thump(data),
+                // 74LS259 addressable latch (write_d7): A0-A2 select the line,
+                // the latched value comes from D7.
+                0x3C00..=0x3C07 => self
+                    .sound
+                    .write_audio_latch_bit((addr & 7) as u8, data & 0x80 != 0),
+                0x3E00 => self.sound.pulse_noise_reset(),
                 _ => {}
             },
 
@@ -338,7 +347,20 @@ impl Bus for AsteroidsSystem {
 // Machine traits (MachineCore + capabilities)
 // ---------------------------------------------------------------------------
 
-crate::impl_board_delegation!(AsteroidsSystem, board, atari_dvg::TIMING, no_audio, vectors);
+// Renderable + MachineDebug delegate to the shared board; audio is owned by the
+// game wrapper's discrete sound device, so AudioSource is implemented by hand
+// (the board has no sound hardware to delegate to).
+crate::impl_board_renderable!(AsteroidsSystem, board, atari_dvg::TIMING, vectors);
+crate::impl_board_debug!(AsteroidsSystem, board, atari_dvg::TIMING);
+
+impl phosphor_core::core::machine::AudioSource for AsteroidsSystem {
+    fn fill_audio(&mut self, buffer: &mut [i16]) -> usize {
+        self.sound.fill_audio(buffer)
+    }
+    fn audio_sample_rate(&self) -> u32 {
+        self.sound.sample_rate()
+    }
+}
 
 impl InputConfigurable for AsteroidsSystem {
     fn input_controls(&self) -> &'static [InputControl] {
@@ -377,6 +399,10 @@ impl MachineCore for AsteroidsSystem {
             }
         });
 
+        // Advance the discrete sound circuit for the frame's worth of CPU
+        // cycles (register writes during the frame have already landed).
+        self.sound.tick(atari_dvg::TIMING.cycles_per_frame());
+
         // Clear NMI at frame boundary to avoid stale edges.
         self.board.nmi_pending = false;
 
@@ -389,6 +415,7 @@ impl MachineCore for AsteroidsSystem {
 
     fn reset(&mut self) {
         self.board.reset();
+        self.sound.reset();
         bus_split!(self, bus => {
             self.board.cpu.reset(bus, BusMaster::Cpu(0));
         });
