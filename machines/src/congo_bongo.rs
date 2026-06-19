@@ -484,9 +484,9 @@ impl CongoBongoBoard {
         }
     }
 
-    /// Write one bit of main latch 2 (0xC020-0xC027, LS259 `write_d0`).
-    /// Bit 3 = CREF3 (bg color), bit 6 = BS (fg bank), bit 7 = CBS (color bank);
-    /// decoded by the render issues from `latch2`.
+    /// Write one bit of main latch 2 (0xC020-0xC027, U53, LS259 `write_d0`).
+    /// Bit 1 = CREF1 (fg color), bit 3 = CREF3 (bg color), bit 6 = BS (fg bank),
+    /// bit 7 = CBS (color bank); decoded by the render issues from `latch2`.
     pub fn write_latch2(&mut self, bit: u8, value: bool) {
         if value {
             self.latch2 |= 1 << bit;
@@ -532,10 +532,65 @@ impl CongoBongoBoard {
         self.clock += 1;
     }
 
-    /// Render one screen scanline. The layers (foreground tilemap, scrolling
-    /// background, sprites) are filled in by issues .5/.6/.7; for now the frame
-    /// stays cleared.
-    pub fn render_scanline(&mut self, _abs_y: usize) {}
+    /// Render one native screen scanline (`abs_y` = bitmap row 0-239).
+    ///
+    /// Layer order matches `screen_update_congo`: background, then sprites, then
+    /// the foreground tilemap on top (transparent pen 0). The background and
+    /// sprite passes arrive in issues .6/.7; until then the row is cleared to
+    /// black before the foreground is drawn.
+    pub fn render_scanline(&mut self, abs_y: usize) {
+        let row_offset = abs_y * NATIVE_WIDTH * 3;
+        self.scanline_buffer[row_offset..row_offset + NATIVE_WIDTH * 3].fill(0);
+        // TODO(.6): draw_background(abs_y); TODO(.7): draw_sprites(abs_y);
+        self.render_fg_scanline(abs_y);
+    }
+
+    /// Draw the foreground/text tilemap for one scanline (32×32 of 8×8 2bpp
+    /// tiles, transparent pen 0). Per `congo_get_fg_tile_info`: tile code =
+    /// `videoram + (fg_bank << 8)`, color = `colorram & 0x1f`, and the gfx pen
+    /// (granularity 8) is offset by `fg_color (CREF1) + (color_bank << 8)`.
+    fn render_fg_scanline(&mut self, abs_y: usize) {
+        let tile_count = self.tx_cache.count();
+        if tile_count == 0 {
+            return; // GFX ROMs not loaded yet
+        }
+        let video_ram = self.main_map.region_data(MainRegion::VideoRam);
+        let color_ram = self.main_map.region_data(MainRegion::ColorRam);
+        let tiles = &self.tx_cache;
+        let palette = &self.palette_rgb;
+
+        // Latch-2 control lines: bit1 = fg_color (CREF1), bit6 = fg bank (BS),
+        // bit7 = color bank (CBS).
+        let fg_bank = ((self.latch2 >> 6) & 1) as usize;
+        let pal_offset =
+            ((self.latch2 >> 1) & 1) as usize * 0x80 + ((self.latch2 >> 7) & 1) as usize * 0x100;
+
+        let row = abs_y / 8;
+        let py = abs_y % 8;
+        let buf_start = abs_y * NATIVE_WIDTH * 3;
+        let buf = &mut self.scanline_buffer[buf_start..buf_start + NATIVE_WIDTH * 3];
+
+        for col in 0..32 {
+            let idx = row * 32 + col;
+            // The 0x1000 fg ROM only decodes 256 tiles; the fg-bank high bit has
+            // no ROM behind it on this set, so wrap rather than index past it.
+            let code = (video_ram[idx] as usize + (fg_bank << 8)) % tile_count;
+            let color = (color_ram[idx] & 0x1f) as usize;
+            let base = color * 8 + pal_offset;
+            let screen_x = col * 8;
+            for px in 0..8 {
+                let pen = tiles.pixel(code, px, py);
+                if pen == 0 {
+                    continue; // transparent — lower layers show through
+                }
+                let (r, g, b) = palette[(base + pen as usize) & 0x1FF];
+                let off = (screen_x + px) * 3;
+                buf[off] = r;
+                buf[off + 1] = g;
+                buf[off + 2] = b;
+            }
+        }
+    }
 
     // -----------------------------------------------------------------------
     // Frame output (ROT90)
@@ -970,6 +1025,46 @@ mod tests {
         board.palette_prom[0x100] = 0xFF;
         board.build_palette();
         assert_eq!(board.palette_color(0x100), (255, 255, 255));
+    }
+
+    #[test]
+    fn foreground_tilemap_renders_with_transparency() {
+        let mut board = CongoBongoBoard::new();
+        // Tile 1, row 0: col 0 → plane-0 set (pen 1, opaque); col 1 → pen 0.
+        board.tx_rom[8] = 0b1000_0000;
+        board.decode_gfx_roms();
+        // color 2 → pen base 2*8 = 16; pen 1 lands at palette[17].
+        board.palette_prom[17] = 0xFF; // white
+        board.build_palette();
+        board.main_map.region_data_mut(MainRegion::VideoRam)[0] = 1; // tile code
+        board.main_map.region_data_mut(MainRegion::ColorRam)[0] = 2; // color
+
+        board.render_scanline(0);
+        let buf = &board.scanline_buffer;
+        assert_eq!((buf[0], buf[1], buf[2]), (255, 255, 255), "opaque pen 1");
+        assert_eq!(
+            (buf[3], buf[4], buf[5]),
+            (0, 0, 0),
+            "pen 0 transparent → black"
+        );
+    }
+
+    #[test]
+    fn foreground_fg_color_offsets_palette() {
+        let mut board = CongoBongoBoard::new();
+        board.tx_rom[8] = 0b1000_0000; // tile 1, pen 1 at (0,0)
+        board.decode_gfx_roms();
+        // fg_color (CREF1) adds 0x80, so color 0 pen 1 resolves at palette[0x81].
+        board.palette_prom[0x81] = 0xFF;
+        board.build_palette();
+        // fg_bank=1 → code 0x101 wraps to tile 1 (256-tile ROM); fg_color set.
+        board.main_map.region_data_mut(MainRegion::VideoRam)[0] = 0x01;
+        board.main_map.region_data_mut(MainRegion::ColorRam)[0] = 0x00;
+        board.latch2 = (1 << 6) | (1 << 1); // fg bank (BS) + fg color (CREF1)
+
+        board.render_scanline(0);
+        let buf = &board.scanline_buffer;
+        assert_eq!((buf[0], buf[1], buf[2]), (255, 255, 255));
     }
 
     #[test]
