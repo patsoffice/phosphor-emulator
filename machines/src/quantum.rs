@@ -80,6 +80,14 @@ enum Region {
 // ---------------------------------------------------------------------------
 
 /// Quantum (rev 2) — the parent set.
+/// Quantum program ROMs — ten 0x2000 chips loaded as `ROM_LOAD16_BYTE` pairs
+/// and de-interleaved into the 68000 big-endian image (see `load_program`).
+///
+/// A single region covers all three released ROM sets (rev 2, rev 1, and the
+/// prototype). The loader matches each chip by CRC32 first, so whichever set is
+/// present loads correctly; the `name` fallbacks use the rev 2 (parent
+/// "quantum") filenames. Per-chip CRC order is rev 2, rev 1, prototype, deduped
+/// where a chip is shared between revisions.
 static QUANTUM_PROGRAM_ROM: RomRegion = RomRegion {
     size: 0x14000,
     entries: &[
@@ -87,195 +95,61 @@ static QUANTUM_PROGRAM_ROM: RomRegion = RomRegion {
             name: "136016-201.2e",
             size: 0x2000,
             offset: 0x00000,
-            crc32: &[0x7e7be63a],
+            crc32: &[0x7e7be63a, 0x5af0bd5b, 0x176d73d3], // rev2, rev1, proto
         },
         RomEntry {
             name: "136016-206.3e",
             size: 0x2000,
             offset: 0x02000,
-            crc32: &[0x2d8f5759],
+            crc32: &[0x2d8f5759, 0xf9724666, 0x12fc631f], // rev2, rev1, proto
         },
         RomEntry {
             name: "136016-102.2f",
             size: 0x2000,
             offset: 0x04000,
-            crc32: &[0x408d34f4],
+            crc32: &[0x408d34f4, 0xb64fab48], // rev2+rev1, proto
         },
         RomEntry {
             name: "136016-107.3f",
             size: 0x2000,
             offset: 0x06000,
-            crc32: &[0x63154484],
+            crc32: &[0x63154484, 0xa52a9433], // rev2+rev1, proto
         },
         RomEntry {
             name: "136016-203.2hj",
             size: 0x2000,
             offset: 0x08000,
-            crc32: &[0xbdc52fad],
+            crc32: &[0xbdc52fad, 0x948f228b, 0x5b29cba3], // rev2, rev1, proto
         },
         RomEntry {
             name: "136016-208.3hj",
             size: 0x2000,
             offset: 0x0A000,
-            crc32: &[0xdab4066b],
+            crc32: &[0xdab4066b, 0xe4c48e4e, 0xc64fc03a], // rev2, rev1, proto
         },
         RomEntry {
             name: "136016-104.2k",
             size: 0x2000,
             offset: 0x0C000,
-            crc32: &[0xbf271e5c],
+            crc32: &[0xbf271e5c, 0x854f9c09], // rev2+rev1, proto
         },
         RomEntry {
             name: "136016-109.3k",
             size: 0x2000,
             offset: 0x0E000,
-            crc32: &[0xd2894424],
+            crc32: &[0xd2894424, 0x1aac576c], // rev2+rev1, proto
         },
         RomEntry {
             name: "136016-105.2l",
             size: 0x2000,
             offset: 0x10000,
-            crc32: &[0x13ec512c],
+            crc32: &[0x13ec512c, 0x1285b5e7], // rev2+rev1, proto
         },
         RomEntry {
             name: "136016-110.3l",
             size: 0x2000,
             offset: 0x12000,
-            crc32: &[0xacb50363],
-        },
-    ],
-};
-
-/// Quantum (rev 1) — differs from rev 2 in four program ROMs.
-static QUANTUM1_PROGRAM_ROM: RomRegion = RomRegion {
-    size: 0x14000,
-    entries: &[
-        RomEntry {
-            name: "136016-101.2e",
-            size: 0x2000,
-            offset: 0x00000,
-            crc32: &[0x5af0bd5b],
-        },
-        RomEntry {
-            name: "136016-106.3e",
-            size: 0x2000,
-            offset: 0x02000,
-            crc32: &[0xf9724666],
-        },
-        RomEntry {
-            name: "136016-102.2f",
-            size: 0x2000,
-            offset: 0x04000,
-            crc32: &[0x408d34f4],
-        },
-        RomEntry {
-            name: "136016-107.3f",
-            size: 0x2000,
-            offset: 0x06000,
-            crc32: &[0x63154484],
-        },
-        RomEntry {
-            name: "136016-103.2hj",
-            size: 0x2000,
-            offset: 0x08000,
-            crc32: &[0x948f228b],
-        },
-        RomEntry {
-            name: "136016-108.3hj",
-            size: 0x2000,
-            offset: 0x0A000,
-            crc32: &[0xe4c48e4e],
-        },
-        RomEntry {
-            name: "136016-104.2k",
-            size: 0x2000,
-            offset: 0x0C000,
-            crc32: &[0xbf271e5c],
-        },
-        RomEntry {
-            name: "136016-109.3k",
-            size: 0x2000,
-            offset: 0x0E000,
-            crc32: &[0xd2894424],
-        },
-        RomEntry {
-            name: "136016-105.2l",
-            size: 0x2000,
-            offset: 0x10000,
-            crc32: &[0x13ec512c],
-        },
-        RomEntry {
-            name: "136016-110.3l",
-            size: 0x2000,
-            offset: 0x12000,
-            crc32: &[0xacb50363],
-        },
-    ],
-};
-
-/// Quantum (prototype).
-static QUANTUMP_PROGRAM_ROM: RomRegion = RomRegion {
-    size: 0x14000,
-    entries: &[
-        RomEntry {
-            name: "quantump.2e",
-            size: 0x2000,
-            offset: 0x00000,
-            crc32: &[0x176d73d3],
-        },
-        RomEntry {
-            name: "quantump.3e",
-            size: 0x2000,
-            offset: 0x02000,
-            crc32: &[0x12fc631f],
-        },
-        RomEntry {
-            name: "quantump.2f",
-            size: 0x2000,
-            offset: 0x04000,
-            crc32: &[0xb64fab48],
-        },
-        RomEntry {
-            name: "quantump.3f",
-            size: 0x2000,
-            offset: 0x06000,
-            crc32: &[0xa52a9433],
-        },
-        RomEntry {
-            name: "quantump.2hj",
-            size: 0x2000,
-            offset: 0x08000,
-            crc32: &[0x5b29cba3],
-        },
-        RomEntry {
-            name: "quantump.3hj",
-            size: 0x2000,
-            offset: 0x0A000,
-            crc32: &[0xc64fc03a],
-        },
-        RomEntry {
-            name: "quantump.2k",
-            size: 0x2000,
-            offset: 0x0C000,
-            crc32: &[0x854f9c09],
-        },
-        RomEntry {
-            name: "quantump.3k",
-            size: 0x2000,
-            offset: 0x0E000,
-            crc32: &[0x1aac576c],
-        },
-        RomEntry {
-            name: "quantump.2l",
-            size: 0x2000,
-            offset: 0x10000,
-            crc32: &[0x1285b5e7],
-        },
-        RomEntry {
-            name: "quantump.3l",
-            size: 0x2000,
-            offset: 0x12000,
-            crc32: &[0xe19de844],
+            crc32: &[0xacb50363, 0xe19de844], // rev2+rev1, proto
         },
     ],
 };
@@ -1036,41 +910,18 @@ impl phosphor_core::core::debug_trace::DebugTrace for QuantumSystem {}
 // Registry
 // ---------------------------------------------------------------------------
 
-fn make(
-    region: &'static RomRegion,
-    rom_set: &RomSet,
-) -> Result<Box<dyn phosphor_core::core::machine::FrontendMachine>, RomLoadError> {
-    let mut sys = QuantumSystem::new();
-    sys.load_program(region, rom_set)?;
-    Ok(Box::new(sys))
-}
-
 fn create_quantum(
     rom_set: &RomSet,
 ) -> Result<Box<dyn phosphor_core::core::machine::FrontendMachine>, RomLoadError> {
-    make(&QUANTUM_PROGRAM_ROM, rom_set)
+    let mut sys = QuantumSystem::new();
+    sys.load_program(&QUANTUM_PROGRAM_ROM, rom_set)?;
+    Ok(Box::new(sys))
 }
 
-fn create_quantum1(
-    rom_set: &RomSet,
-) -> Result<Box<dyn phosphor_core::core::machine::FrontendMachine>, RomLoadError> {
-    make(&QUANTUM1_PROGRAM_ROM, rom_set)
-}
-
-fn create_quantump(
-    rom_set: &RomSet,
-) -> Result<Box<dyn phosphor_core::core::machine::FrontendMachine>, RomLoadError> {
-    make(&QUANTUMP_PROGRAM_ROM, rom_set)
-}
-
+// One registration covers all three ROM sets: the loader tries each ZIP in turn
+// and CRC-matches whichever chips are present (see `QUANTUM_PROGRAM_ROM`).
 inventory::submit! {
-    MachineEntry::new("quantum", &["quantum"], create_quantum)
-}
-inventory::submit! {
-    MachineEntry::new("quantum1", &["quantum1", "quantum"], create_quantum1)
-}
-inventory::submit! {
-    MachineEntry::new("quantump", &["quantump", "quantum"], create_quantump)
+    MachineEntry::new("quantum", &["quantum", "quantum1", "quantump"], create_quantum)
 }
 
 #[cfg(test)]
