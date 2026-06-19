@@ -30,6 +30,8 @@ use phosphor_core::core::{Bus, BusMaster, TimingConfig};
 use phosphor_core::cpu::Cpu;
 use phosphor_core::cpu::z80::Z80;
 use phosphor_core::gfx;
+use phosphor_core::gfx::decode::{GfxLayout, decode_gfx};
+use phosphor_core::gfx::resistor::{combine_weights, compute_resistor_weights};
 use phosphor_macros::{BusDebug, DebugTrace, MemoryRegion, Saveable};
 
 use crate::disasm_registry::{DisasmCpu, DisasmRegion};
@@ -259,14 +261,18 @@ pub struct CongoBongoBoard {
     #[debug_map(cpu = 1)]
     pub(crate) sound_map: AddressSpace16,
 
-    // GFX ROMs (decoded into caches by issue .4).
+    // GFX ROMs + their decoded pixel caches.
     pub(crate) tx_rom: [u8; 0x1000],
     pub(crate) bg_rom: [u8; 0x6000],
     pub(crate) spr_rom: [u8; 0xc000],
     pub(crate) tilemap_dat: [u8; 0x4000],
+    pub(crate) tx_cache: gfx::GfxCache, // 256 × 8×8 2bpp foreground tiles
+    pub(crate) bg_cache: gfx::GfxCache, // 1024 × 8×8 3bpp background tiles
+    pub(crate) sprite_cache: gfx::GfxCache, // 128 × 32×32 3bpp sprites
 
-    // Color PROM (decoded into an RGB palette by issue .4).
+    // Color PROM + the 512-entry RGB palette decoded from it.
     pub(crate) palette_prom: [u8; 0x0200],
+    pub(crate) palette_rgb: [(u8, u8, u8); 512],
 
     // Scanline-rendered framebuffer (256 × 240 × RGB24, pre-rotation).
     pub(crate) scanline_buffer: Vec<u8>,
@@ -320,7 +326,11 @@ impl CongoBongoBoard {
             bg_rom: [0; 0x6000],
             spr_rom: [0; 0xc000],
             tilemap_dat: [0; 0x4000],
+            tx_cache: gfx::GfxCache::new(0, 8, 8),
+            bg_cache: gfx::GfxCache::new(0, 8, 8),
+            sprite_cache: gfx::GfxCache::new(0, 32, 32),
             palette_prom: [0; 0x0200],
+            palette_rgb: [(0, 0, 0); 512],
             scanline_buffer: vec![0u8; NATIVE_WIDTH * NATIVE_HEIGHT * 3],
             in0: 0x00,
             in1: 0x00,
@@ -357,6 +367,95 @@ impl CongoBongoBoard {
         map.region(Rom, "Sound ROM", 0x0000, 0x2000, AccessKind::ReadOnly)
             .region(Ram, "Sound RAM", 0x4000, 0x0800, AccessKind::ReadWrite);
         map
+    }
+
+    // -----------------------------------------------------------------------
+    // GFX decode + palette (call after loading ROMs)
+    // -----------------------------------------------------------------------
+
+    /// Decode the three Zaxxon-family GFX regions into pixel caches.
+    ///
+    /// All three are MAME `*_planar` layouts; phosphor's [`decode_gfx`] takes
+    /// `plane_offsets` LSB-first, i.e. MAME's `planeoffset` array reversed (see
+    /// `gfx_8x8x2_planar`/`gfx_8x8x3_planar`/`zaxxon_spritelayout` in
+    /// `sega/zaxxon.cpp`).
+    pub fn decode_gfx_roms(&mut self) {
+        // Foreground: 256 chars, 8×8 2bpp. Planes split at the ROM midpoint.
+        self.tx_cache = decode_gfx(
+            &self.tx_rom,
+            0,
+            256,
+            &GfxLayout {
+                plane_offsets: &[0, 0x0800 * 8],
+                x_offsets: &[0, 1, 2, 3, 4, 5, 6, 7],
+                y_offsets: &[0, 8, 16, 24, 32, 40, 48, 56],
+                char_increment: 8 * 8,
+            },
+        );
+
+        // Background: 1024 chars, 8×8 3bpp. Planes at thirds of the region.
+        self.bg_cache = decode_gfx(
+            &self.bg_rom,
+            0,
+            1024,
+            &GfxLayout {
+                plane_offsets: &[0, 0x2000 * 8, 2 * 0x2000 * 8],
+                x_offsets: &[0, 1, 2, 3, 4, 5, 6, 7],
+                y_offsets: &[0, 8, 16, 24, 32, 40, 48, 56],
+                char_increment: 8 * 8,
+            },
+        );
+
+        // Sprites: 128 sprites, 32×32 3bpp. Planes at thirds; each 8×8 sub-cell is
+        // 8 consecutive bytes, laid out left-to-right then top-to-bottom.
+        let x_offsets: [usize; 32] = std::array::from_fn(|px| (px / 8) * 64 + (px % 8));
+        let y_offsets: [usize; 32] = std::array::from_fn(|py| (py / 8) * 256 + (py % 8) * 8);
+        self.sprite_cache = decode_gfx(
+            &self.spr_rom,
+            0,
+            128,
+            &GfxLayout {
+                plane_offsets: &[0, 0x4000 * 8, 2 * 0x4000 * 8],
+                x_offsets: &x_offsets,
+                y_offsets: &y_offsets,
+                char_increment: 128 * 8,
+            },
+        );
+    }
+
+    /// Build the 512-entry RGB palette from the `mr019` color PROM.
+    ///
+    /// 3-3-2 resistor DAC (per `zaxxon_palette` in `sega/zaxxon_v.cpp`): R = PROM
+    /// bits 0-2 and G = bits 3-5 (1k/470/220 Ω), B = bits 6-7 (470/220 Ω), all
+    /// with a 470 Ω pulldown. The PROM is 256 bytes mirrored into 512, so the
+    /// upper half (selected by the CBS color-bank latch) duplicates the lower.
+    pub fn build_palette(&mut self) {
+        let rgweights = compute_resistor_weights(&[1000.0, 470.0, 220.0], Some(470.0));
+        let bweights = compute_resistor_weights(&[470.0, 220.0], Some(470.0));
+        for (i, entry) in self.palette_rgb.iter_mut().enumerate() {
+            let v = self.palette_prom[i];
+            let r = combine_weights(&rgweights, &[v & 1, (v >> 1) & 1, (v >> 2) & 1]);
+            let g = combine_weights(&rgweights, &[(v >> 3) & 1, (v >> 4) & 1, (v >> 5) & 1]);
+            let b = combine_weights(&bweights, &[(v >> 6) & 1, (v >> 7) & 1]);
+            *entry = (r, g, b);
+        }
+    }
+
+    /// Decoded foreground / background / sprite pixel caches (consumed by the
+    /// scanline renderer in the follow-up issues, and by debug tooling).
+    pub fn tx_cache(&self) -> &gfx::GfxCache {
+        &self.tx_cache
+    }
+    pub fn bg_cache(&self) -> &gfx::GfxCache {
+        &self.bg_cache
+    }
+    pub fn sprite_cache(&self) -> &gfx::GfxCache {
+        &self.sprite_cache
+    }
+
+    /// One entry of the decoded 512-color RGB palette.
+    pub fn palette_color(&self, index: usize) -> (u8, u8, u8) {
+        self.palette_rgb[index & 0x1FF]
     }
 
     // -----------------------------------------------------------------------
@@ -595,7 +694,8 @@ impl CongoBongoSystem {
             .palette_prom
             .copy_from_slice(&CONGO_PALETTE_PROM.load(rom_set)?);
 
-        // GFX decode + palette build land in issue .4.
+        self.board.decode_gfx_roms();
+        self.board.build_palette();
         Ok(())
     }
 
@@ -819,7 +919,57 @@ mod tests {
         let main = crate::disasm_registry::find("congobongo", "main").unwrap();
         assert_eq!((main.cpu, main.org, main.size), (DisasmCpu::Z80, 0, 0x8000));
         let sound = crate::disasm_registry::find("congobongo", "sound").unwrap();
-        assert_eq!((sound.cpu, sound.org, sound.size), (DisasmCpu::Z80, 0, 0x2000));
+        assert_eq!(
+            (sound.cpu, sound.org, sound.size),
+            (DisasmCpu::Z80, 0, 0x2000)
+        );
+    }
+
+    #[test]
+    fn gfx_decode_sizes_and_planes() {
+        let mut board = CongoBongoBoard::new();
+        // Plant a known bit pattern and confirm the planar decode reads it.
+        // tx plane 0 (LSB) lives in the first half, plane 1 (MSB) at +0x800.
+        board.tx_rom[0] = 0b1000_0000; // tile 0, row 0, col 0 → plane-0 bit set
+        board.tx_rom[0x800] = 0b0100_0000; // tile 0, row 0, col 1 → plane-1 bit set
+        board.decode_gfx_roms();
+
+        assert_eq!(board.tx_cache().count(), 256);
+        assert_eq!(
+            (board.tx_cache().width(), board.tx_cache().height()),
+            (8, 8)
+        );
+        assert_eq!(board.bg_cache().count(), 1024);
+        assert_eq!(board.sprite_cache().count(), 128);
+        assert_eq!(
+            (board.sprite_cache().width(), board.sprite_cache().height()),
+            (32, 32)
+        );
+
+        // Pixel (0,0) gets only plane 0 → value 1; pixel (1,0) only plane 1 → 2.
+        assert_eq!(board.tx_cache().pixel(0, 0, 0), 1);
+        assert_eq!(board.tx_cache().pixel(0, 1, 0), 2);
+    }
+
+    #[test]
+    fn palette_3_3_2_resistor_dac() {
+        let mut board = CongoBongoBoard::new();
+        // All bits set in entry 1 → white; entry 2 = red only (bits 0-2).
+        board.palette_prom[0] = 0x00;
+        board.palette_prom[1] = 0xFF;
+        board.palette_prom[2] = 0x07;
+        board.build_palette();
+
+        assert_eq!(board.palette_color(0), (0, 0, 0));
+        assert_eq!(board.palette_color(1), (255, 255, 255));
+        let (r, g, b) = board.palette_color(2);
+        assert_eq!((g, b), (0, 0));
+        assert_eq!(r, 255, "all three red bits on → full red");
+
+        // The PROM is mirrored into the upper half (CBS color bank).
+        board.palette_prom[0x100] = 0xFF;
+        board.build_palette();
+        assert_eq!(board.palette_color(0x100), (255, 255, 255));
     }
 
     #[test]
