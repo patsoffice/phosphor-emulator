@@ -19,8 +19,8 @@ use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::debug_trace::DebugTraceBuffer;
 use phosphor_core::core::machine::{
-    DipSwitchBank, DipSwitches, InputConfigurable, InputControl, InputEvent, MachineCore, Nvram,
-    SaveState,
+    ActionRole, DipApplyTiming, DipChoice, DipOption, DipSwitchBank, DipSwitches, Direction,
+    InputConfigurable, InputControl, InputEvent, InputId, InputKind, MachineCore, Nvram, SaveState,
 };
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::{AccessKind, AddressSpace16};
@@ -36,6 +36,7 @@ use phosphor_macros::{BusDebug, DebugTrace, MemoryRegion, Saveable};
 use crate::disasm_registry::{DisasmCpu, DisasmRegion};
 use crate::registry::MachineEntry;
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
+use crate::set_bit_active_high;
 
 // ---------------------------------------------------------------------------
 // Memory map region IDs
@@ -280,12 +281,15 @@ pub struct CongoBongoBoard {
     // Scanline-rendered framebuffer (256 × 240 × RGB24, pre-rotation).
     pub(crate) scanline_buffer: Vec<u8>,
 
-    // Inputs (active-high here; bus inverts as needed) + DIP banks.
+    // Inputs (active-high) + DIP banks. `in2` holds the start buttons; the coin
+    // bits (SW100 5/6/7) come from `coin_status`, which the game latches and
+    // clears via the coin-enable latch lines.
     pub(crate) in0: u8,
     pub(crate) in1: u8,
     pub(crate) in2: u8,
     pub(crate) dsw2: u8,
     pub(crate) dsw3: u8,
+    pub(crate) coin_status: [bool; 3], // coin A, coin B, service
 
     // 74LS259 addressable latches (raw bytes; individual lines decoded by the
     // render/input issues). `int_enabled`/`bg_enabled` are broken out because the
@@ -341,8 +345,9 @@ impl CongoBongoBoard {
             in0: 0x00,
             in1: 0x00,
             in2: 0x00,
-            dsw2: 0x00,
-            dsw3: 0x00,
+            dsw2: DSW2_DEFAULT,
+            dsw3: DSW3_DEFAULT,
+            coin_status: [false; 3],
             latch1: 0x00,
             latch2: 0x00,
             int_enabled: false,
@@ -645,15 +650,23 @@ impl CongoBongoBoard {
     // 74LS259 control latches
     // -----------------------------------------------------------------------
 
-    /// Write one bit of main latch 1 (0xC018-0xC01F, LS259 `write_d0`).
-    /// Bit 5 = BEN (background enable), bit 7 = INTON (VBlank IRQ enable); the
-    /// remaining lines (coin counters / flip screen) are kept in `latch1` for the
-    /// render/input issues.
+    /// Write one bit of main latch 1 (0xC018-0xC01F, U52, LS259 `write_d0`).
+    /// Bits 0-2 arm coin inputs 1/2/service; bit 2 = coin-enable; bit 5 = BEN
+    /// (background enable); bit 6 = flip; bit 7 = INTON (VBlank IRQ enable).
     pub fn write_latch1(&mut self, bit: u8, value: bool) {
         if value {
             self.latch1 |= 1 << bit;
         } else {
             self.latch1 &= !(1 << bit);
+        }
+        // Each coin latch is async-cleared while its enable line (bits 0-2) is
+        // low. The game acknowledges a credit by pulsing that line low→high (see
+        // the per-coin pulses at 0x0B73 in the program ROM), so the clear must
+        // run on every latch write, not only on the shared coin-enable bit.
+        for n in 0..3 {
+            if (self.latch1 >> n) & 1 == 0 {
+                self.coin_status[n] = false;
+            }
         }
         match bit {
             5 => self.bg_enabled = value,
@@ -665,6 +678,22 @@ impl CongoBongoBoard {
             }
             _ => {}
         }
+    }
+
+    /// Latch a coin insert (`zaxxon_coin_inserted`): the coin registers only
+    /// while its arming line (latch-1 bit `n`) is high.
+    pub fn coin_inserted(&mut self, n: usize) {
+        if (self.latch1 >> n) & 1 == 1 {
+            self.coin_status[n] = true;
+        }
+    }
+
+    /// SW100 (0xC008) input: start buttons plus the three latched coin bits.
+    pub fn read_sw100(&self) -> u8 {
+        self.in2
+            | (self.coin_status[0] as u8) << 5
+            | (self.coin_status[1] as u8) << 6
+            | (self.coin_status[2] as u8) << 7
     }
 
     /// Write one bit of main latch 2 (0xC020-0xC027, U53, LS259 `write_d0`).
@@ -827,6 +856,7 @@ impl CongoBongoBoard {
         self.bg_position = [0; 2];
         self.sprite_dma = [0; 4];
         self.sprite_ram = [0; 0x100];
+        self.coin_status = [false; 3];
         self.sound_latch = 0;
         self.clock = 0;
 
@@ -873,6 +903,9 @@ impl Saveable for CongoBongoBoard {
         w.write_u8(self.in2);
         w.write_u8(self.dsw2);
         w.write_u8(self.dsw3);
+        for &c in &self.coin_status {
+            w.write_bool(c);
+        }
         w.write_u8(self.latch1);
         w.write_u8(self.latch2);
         w.write_bool(self.int_enabled);
@@ -897,6 +930,9 @@ impl Saveable for CongoBongoBoard {
         self.in2 = r.read_u8()?;
         self.dsw2 = r.read_u8()?;
         self.dsw3 = r.read_u8()?;
+        for c in &mut self.coin_status {
+            *c = r.read_bool()?;
+        }
         self.latch1 = r.read_u8()?;
         self.latch2 = r.read_u8()?;
         self.int_enabled = r.read_bool()?;
@@ -990,7 +1026,7 @@ impl Bus for CongoBongoSystem {
                         0x01 => self.board.in1,
                         0x02 => self.board.dsw2,
                         0x03 => self.board.dsw3,
-                        0x08 => self.board.in2,
+                        0x08 => self.board.read_sw100(),
                         _ => 0xFF,
                     },
                     _ => 0xFF,
@@ -1081,24 +1117,388 @@ impl SaveState for CongoBongoSystem {
     crate::machine_save_state!();
 }
 
-// Input controls and DIP-switch options are fleshed out by issue .8; the skeleton
-// exposes the empty/raw shells so the machine satisfies `FrontendMachine`.
+// ---------------------------------------------------------------------------
+// Input
+// ---------------------------------------------------------------------------
+// Stable input IDs. SW00 = P1 joystick + button, SW01 = P2 (cocktail), SW100 =
+// start + coin status. Coins go through the latch/ack path in `coin_inserted`.
+const INPUT_P1_RIGHT: u16 = 0;
+const INPUT_P1_LEFT: u16 = 1;
+const INPUT_P1_UP: u16 = 2;
+const INPUT_P1_DOWN: u16 = 3;
+const INPUT_P1_BUTTON: u16 = 4;
+const INPUT_P2_RIGHT: u16 = 5;
+const INPUT_P2_LEFT: u16 = 6;
+const INPUT_P2_UP: u16 = 7;
+const INPUT_P2_DOWN: u16 = 8;
+const INPUT_P2_BUTTON: u16 = 9;
+const INPUT_P1_START: u16 = 10;
+const INPUT_P2_START: u16 = 11;
+const INPUT_COIN1: u16 = 12;
+const INPUT_COIN2: u16 = 13;
+const INPUT_SERVICE: u16 = 14;
+
+#[allow(clippy::too_many_arguments)]
+const fn dir(
+    id: u16,
+    name: &'static str,
+    label: &'static str,
+    direction: Direction,
+    player: u8,
+    bindings: &'static [phosphor_core::core::machine::DefaultBinding],
+) -> InputControl {
+    InputControl {
+        id: InputId(id),
+        stable_name: name,
+        label,
+        kind: InputKind::DigitalDirection { direction },
+        player: Some(player),
+        default_bindings: bindings,
+    }
+}
+
+const fn button(id: u16, name: &'static str, label: &'static str, player: u8) -> InputControl {
+    InputControl {
+        id: InputId(id),
+        stable_name: name,
+        label,
+        kind: InputKind::Action(ActionRole::Primary),
+        player: Some(player),
+        default_bindings: &[],
+    }
+}
+
+use crate::input_defaults as ind;
+
+const CONGO_CONTROLS: &[InputControl] = &[
+    dir(
+        INPUT_P1_RIGHT,
+        "p1_right",
+        "P1 Right",
+        Direction::Right,
+        1,
+        ind::P1_RIGHT,
+    ),
+    dir(
+        INPUT_P1_LEFT,
+        "p1_left",
+        "P1 Left",
+        Direction::Left,
+        1,
+        ind::P1_LEFT,
+    ),
+    dir(INPUT_P1_UP, "p1_up", "P1 Up", Direction::Up, 1, ind::P1_UP),
+    dir(
+        INPUT_P1_DOWN,
+        "p1_down",
+        "P1 Down",
+        Direction::Down,
+        1,
+        ind::P1_DOWN,
+    ),
+    button(INPUT_P1_BUTTON, "p1_button", "P1 Button", 1),
+    dir(
+        INPUT_P2_RIGHT,
+        "p2_right",
+        "P2 Right",
+        Direction::Right,
+        2,
+        ind::P2_RIGHT,
+    ),
+    dir(
+        INPUT_P2_LEFT,
+        "p2_left",
+        "P2 Left",
+        Direction::Left,
+        2,
+        ind::P2_LEFT,
+    ),
+    dir(INPUT_P2_UP, "p2_up", "P2 Up", Direction::Up, 2, ind::P2_UP),
+    dir(
+        INPUT_P2_DOWN,
+        "p2_down",
+        "P2 Down",
+        Direction::Down,
+        2,
+        ind::P2_DOWN,
+    ),
+    button(INPUT_P2_BUTTON, "p2_button", "P2 Button", 2),
+    InputControl {
+        id: InputId(INPUT_P1_START),
+        stable_name: "p1_start",
+        label: "P1 Start",
+        kind: InputKind::Start,
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_START,
+    },
+    InputControl {
+        id: InputId(INPUT_P2_START),
+        stable_name: "p2_start",
+        label: "P2 Start",
+        kind: InputKind::Start,
+        player: Some(2),
+        default_bindings: crate::input_defaults::P2_START,
+    },
+    InputControl {
+        id: InputId(INPUT_COIN1),
+        stable_name: "coin1",
+        label: "Coin 1",
+        kind: InputKind::Coin,
+        player: None,
+        default_bindings: crate::input_defaults::COIN,
+    },
+    InputControl {
+        id: InputId(INPUT_COIN2),
+        stable_name: "coin2",
+        label: "Coin 2",
+        kind: InputKind::Coin,
+        player: None,
+        default_bindings: &[],
+    },
+    InputControl {
+        id: InputId(INPUT_SERVICE),
+        stable_name: "service",
+        label: "Service",
+        kind: InputKind::Service,
+        player: None,
+        default_bindings: crate::input_defaults::SERVICE,
+    },
+];
+
 impl InputConfigurable for CongoBongoSystem {
     fn input_controls(&self) -> &'static [InputControl] {
-        &[]
+        CONGO_CONTROLS
     }
 
-    fn handle_input(&mut self, _event: InputEvent) {}
+    fn handle_input(&mut self, event: InputEvent) {
+        let InputEvent::Button { id, pressed } = event else {
+            return;
+        };
+        let b = &mut self.board;
+        match id.0 {
+            INPUT_P1_RIGHT => set_bit_active_high(&mut b.in0, 0, pressed),
+            INPUT_P1_LEFT => set_bit_active_high(&mut b.in0, 1, pressed),
+            INPUT_P1_UP => set_bit_active_high(&mut b.in0, 2, pressed),
+            INPUT_P1_DOWN => set_bit_active_high(&mut b.in0, 3, pressed),
+            INPUT_P1_BUTTON => set_bit_active_high(&mut b.in0, 4, pressed),
+            INPUT_P2_RIGHT => set_bit_active_high(&mut b.in1, 0, pressed),
+            INPUT_P2_LEFT => set_bit_active_high(&mut b.in1, 1, pressed),
+            INPUT_P2_UP => set_bit_active_high(&mut b.in1, 2, pressed),
+            INPUT_P2_DOWN => set_bit_active_high(&mut b.in1, 3, pressed),
+            INPUT_P2_BUTTON => set_bit_active_high(&mut b.in1, 4, pressed),
+            INPUT_P1_START => set_bit_active_high(&mut b.in2, 2, pressed),
+            INPUT_P2_START => set_bit_active_high(&mut b.in2, 3, pressed),
+            // Coins latch on the press edge (and only while armed).
+            INPUT_COIN1 if pressed => b.coin_inserted(0),
+            INPUT_COIN2 if pressed => b.coin_inserted(1),
+            INPUT_SERVICE if pressed => b.coin_inserted(2),
+            _ => {}
+        }
+    }
 }
+
+// ---------------------------------------------------------------------------
+// DIP switches (per INPUT_PORTS(congo) in sega/zaxxon.cpp)
+// ---------------------------------------------------------------------------
+
+const DSW2_DEFAULT: u8 = 0x77; // 10000 bonus, Medium, 3 lives, sound on, upright
+const DSW3_DEFAULT: u8 = 0x33; // 1C/1C both slots
+
+/// Coinage choices shared by Coin A (bits 4-7) and Coin B (bits 0-3); `shift`
+/// places them in the right nibble.
+const fn coinage(shift: u8) -> [DipChoice; 16] {
+    [
+        DipChoice {
+            label: "4 Coins/1 Credit",
+            value: 0x0f << shift,
+        },
+        DipChoice {
+            label: "3 Coins/1 Credit",
+            value: 0x07 << shift,
+        },
+        DipChoice {
+            label: "2 Coins/1 Credit",
+            value: 0x0b << shift,
+        },
+        DipChoice {
+            label: "2C/1C 5C/3C 6C/4C",
+            value: 0x06 << shift,
+        },
+        DipChoice {
+            label: "2C/1C 3C/2C 4C/3C",
+            value: 0x0a << shift,
+        },
+        DipChoice {
+            label: "1 Coin/1 Credit",
+            value: 0x03 << shift,
+        },
+        DipChoice {
+            label: "1C/1C 5C/6C",
+            value: 0x02 << shift,
+        },
+        DipChoice {
+            label: "1C/1C 4C/5C",
+            value: 0x0c << shift,
+        },
+        DipChoice {
+            label: "1C/1C 2C/3C",
+            value: 0x04 << shift,
+        },
+        DipChoice {
+            label: "1 Coin/2 Credits",
+            value: 0x0d << shift,
+        },
+        DipChoice {
+            label: "1C/2C 5C/11C",
+            value: 0x08 << shift,
+        },
+        DipChoice {
+            label: "1C/2C 4C/9C",
+            value: 0x00 << shift,
+        },
+        DipChoice {
+            label: "1 Coin/3 Credits",
+            value: 0x05 << shift,
+        },
+        DipChoice {
+            label: "1 Coin/4 Credits",
+            value: 0x09 << shift,
+        },
+        DipChoice {
+            label: "1 Coin/5 Credits",
+            value: 0x01 << shift,
+        },
+        DipChoice {
+            label: "1 Coin/6 Credits",
+            value: 0x0e << shift,
+        },
+    ]
+}
+
+const COIN_B_CHOICES: [DipChoice; 16] = coinage(0);
+const COIN_A_CHOICES: [DipChoice; 16] = coinage(4);
 
 const CONGO_DIP_BANKS: &[DipSwitchBank] = &[
     DipSwitchBank {
         name: "DSW02",
-        options: &[],
+        options: &[
+            DipOption {
+                name: "Bonus Life",
+                mask: 0x03,
+                apply: DipApplyTiming::Immediate,
+                choices: &[
+                    DipChoice {
+                        label: "10000",
+                        value: 0x03,
+                    },
+                    DipChoice {
+                        label: "20000",
+                        value: 0x01,
+                    },
+                    DipChoice {
+                        label: "30000",
+                        value: 0x02,
+                    },
+                    DipChoice {
+                        label: "40000",
+                        value: 0x00,
+                    },
+                ],
+            },
+            DipOption {
+                name: "Difficulty",
+                mask: 0x0c,
+                apply: DipApplyTiming::Immediate,
+                choices: &[
+                    DipChoice {
+                        label: "Easy",
+                        value: 0x0c,
+                    },
+                    DipChoice {
+                        label: "Medium",
+                        value: 0x04,
+                    },
+                    DipChoice {
+                        label: "Hard",
+                        value: 0x08,
+                    },
+                    DipChoice {
+                        label: "Hardest",
+                        value: 0x00,
+                    },
+                ],
+            },
+            DipOption {
+                name: "Lives",
+                mask: 0x30,
+                apply: DipApplyTiming::Immediate,
+                choices: &[
+                    DipChoice {
+                        label: "3",
+                        value: 0x30,
+                    },
+                    DipChoice {
+                        label: "4",
+                        value: 0x10,
+                    },
+                    DipChoice {
+                        label: "5",
+                        value: 0x20,
+                    },
+                    DipChoice {
+                        label: "Free Play",
+                        value: 0x00,
+                    },
+                ],
+            },
+            DipOption {
+                name: "Sound",
+                mask: 0x40,
+                apply: DipApplyTiming::Immediate,
+                choices: &[
+                    DipChoice {
+                        label: "Off",
+                        value: 0x00,
+                    },
+                    DipChoice {
+                        label: "On",
+                        value: 0x40,
+                    },
+                ],
+            },
+            DipOption {
+                name: "Cabinet",
+                mask: 0x80,
+                apply: DipApplyTiming::Immediate,
+                choices: &[
+                    DipChoice {
+                        label: "Upright",
+                        value: 0x00,
+                    },
+                    DipChoice {
+                        label: "Cocktail",
+                        value: 0x80,
+                    },
+                ],
+            },
+        ],
     },
     DipSwitchBank {
         name: "DSW03",
-        options: &[],
+        options: &[
+            DipOption {
+                name: "Coin B",
+                mask: 0x0f,
+                apply: DipApplyTiming::Immediate,
+                choices: &COIN_B_CHOICES,
+            },
+            DipOption {
+                name: "Coin A",
+                mask: 0xf0,
+                apply: DipApplyTiming::Immediate,
+                choices: &COIN_A_CHOICES,
+            },
+        ],
     },
 ];
 
@@ -1391,6 +1791,78 @@ mod tests {
             (255, 255, 255),
             "sprite pen 1 drawn at column 0"
         );
+    }
+
+    fn press(sys: &mut CongoBongoSystem, id: u16, pressed: bool) {
+        sys.handle_input(InputEvent::Button {
+            id: InputId(id),
+            pressed,
+        });
+    }
+
+    #[test]
+    fn input_maps_to_port_bits() {
+        let mut sys = CongoBongoSystem::new();
+        press(&mut sys, INPUT_P1_RIGHT, true);
+        press(&mut sys, INPUT_P1_UP, true);
+        press(&mut sys, INPUT_P1_BUTTON, true);
+        assert_eq!(sys.read(BusMaster::Cpu(0), 0xC000), 0b0001_0101);
+
+        press(&mut sys, INPUT_P2_LEFT, true);
+        assert_eq!(sys.read(BusMaster::Cpu(0), 0xC001), 0b0000_0010);
+
+        press(&mut sys, INPUT_P1_START, true);
+        press(&mut sys, INPUT_P2_START, true);
+        // SW100 start bits (2,3); no coins armed yet.
+        assert_eq!(sys.read(BusMaster::Cpu(0), 0xC008) & 0x0C, 0x0C);
+
+        // Releasing clears the bit.
+        press(&mut sys, INPUT_P1_RIGHT, false);
+        assert_eq!(sys.read(BusMaster::Cpu(0), 0xC000) & 0x01, 0);
+    }
+
+    #[test]
+    fn coin_latches_only_when_armed_and_clears_on_ack() {
+        let mut sys = CongoBongoSystem::new();
+        // Not armed → coin ignored (SW100 bit5 stays low).
+        press(&mut sys, INPUT_COIN1, true);
+        assert_eq!(sys.read(BusMaster::Cpu(0), 0xC008) & 0x20, 0);
+
+        // Arm coin 1 (latch1 bit0 high), then insert → latches into SW100 bit5.
+        sys.write(BusMaster::Cpu(0), 0xC018, 0x01);
+        press(&mut sys, INPUT_COIN1, true);
+        assert_eq!(
+            sys.read(BusMaster::Cpu(0), 0xC008) & 0x20,
+            0x20,
+            "coin latched"
+        );
+
+        // Acknowledge as the game does (0x0B73): pulse the coin's own enable line
+        // low → the latch async-clears immediately, without touching bit 2.
+        sys.write(BusMaster::Cpu(0), 0xC018, 0x00);
+        assert_eq!(
+            sys.read(BusMaster::Cpu(0), 0xC008) & 0x20,
+            0,
+            "coin cleared"
+        );
+        sys.write(BusMaster::Cpu(0), 0xC018, 0x01); // re-arm for the next coin
+    }
+
+    #[test]
+    fn dip_banks_valid_and_defaults() {
+        crate::assert_dip_banks_valid(CONGO_DIP_BANKS, &[DSW2_DEFAULT, DSW3_DEFAULT]);
+        let mut sys = CongoBongoSystem::new();
+        assert_eq!(sys.read(BusMaster::Cpu(0), 0xC002), DSW2_DEFAULT);
+        assert_eq!(sys.read(BusMaster::Cpu(0), 0xC003), DSW3_DEFAULT);
+    }
+
+    #[test]
+    fn input_controls_have_stable_names() {
+        let sys = CongoBongoSystem::new();
+        let names: Vec<_> = sys.input_controls().iter().map(|c| c.stable_name).collect();
+        for expected in ["p1_right", "p1_button", "p2_down", "coin1", "service"] {
+            assert!(names.contains(&expected), "missing {expected}");
+        }
     }
 
     #[test]
