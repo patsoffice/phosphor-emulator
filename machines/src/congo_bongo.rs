@@ -270,6 +270,10 @@ pub struct CongoBongoBoard {
     pub(crate) bg_cache: gfx::GfxCache, // 1024 × 8×8 3bpp background tiles
     pub(crate) sprite_cache: gfx::GfxCache, // 128 × 32×32 3bpp sprites
 
+    // Pre-rendered background tilemap pixmap (256×4096 palette-pen indices). The
+    // bg map is fixed in `tilemap_dat` ROM, so it is built once at load.
+    pub(crate) bg_pixmap: Vec<u8>,
+
     // Color PROM + the 512-entry RGB palette decoded from it.
     pub(crate) palette_prom: [u8; 0x0200],
     pub(crate) palette_rgb: [(u8, u8, u8); 512],
@@ -329,6 +333,7 @@ impl CongoBongoBoard {
             tx_cache: gfx::GfxCache::new(0, 8, 8),
             bg_cache: gfx::GfxCache::new(0, 8, 8),
             sprite_cache: gfx::GfxCache::new(0, 32, 32),
+            bg_pixmap: Vec::new(),
             palette_prom: [0; 0x0200],
             palette_rgb: [(0, 0, 0); 512],
             scanline_buffer: vec![0u8; NATIVE_WIDTH * NATIVE_HEIGHT * 3],
@@ -441,6 +446,53 @@ impl CongoBongoBoard {
         }
     }
 
+    /// Pre-render the background tilemap into a 256×4096 pixmap of palette pen
+    /// indices (`color * 8 + pen`, before the runtime color base is added).
+    ///
+    /// Per `get_bg_tile_info` (`sega/zaxxon_v.cpp`): the 32×512 tilemap is filled
+    /// from `tilemap_dat` — first half = low 8 code bits, second half = high 2
+    /// code bits (`& 3`) + 4 color bits (`>> 4`). The tile index wraps at
+    /// `bytes/2` (0x2000), so the bottom half of the map mirrors the top.
+    pub fn build_bg_pixmap(&mut self) {
+        if self.bg_cache.count() == 0 {
+            return;
+        }
+        const W: usize = 256; // 32 tiles × 8
+        const H: usize = 4096; // 512 tiles × 8
+        const SIZE: usize = 0x2000; // tilemap_dat bytes / 2
+        let mut pixmap = vec![0u8; W * H];
+        for tile_index in 0..(32 * 512) {
+            let col = tile_index % 32;
+            let row = tile_index / 32;
+            let eff = tile_index & (SIZE - 1);
+            let attr = self.tilemap_dat[eff + SIZE];
+            let code = self.tilemap_dat[eff] as usize + 256 * (attr as usize & 3);
+            let base_pen = (attr >> 4) as usize * 8;
+            for py in 0..8 {
+                for px in 0..8 {
+                    let pen = self.bg_cache.pixel(code, px, py) as usize;
+                    pixmap[(row * 8 + py) * W + col * 8 + px] = (base_pen + pen) as u8;
+                }
+            }
+        }
+        self.bg_pixmap = pixmap;
+    }
+
+    /// Source pixmap row for screen row `abs_y`, per the U56/U74/U75 adders:
+    /// `VF + ((bg_position << 1) ^ 0xfff) + 1`, masked to the pixmap height.
+    /// (Upright only; flip-screen VF inversion is deferred.)
+    fn bg_src_y(&self, abs_y: usize) -> usize {
+        let bgpos = ((self.bg_position[1] as usize & 0x07) << 8) | self.bg_position[0] as usize;
+        (abs_y + ((bgpos << 1) ^ 0xfff) + 1) & 0xFFF
+    }
+
+    /// Source pixmap column for screen pixel `(x, abs_y)` with the isometric
+    /// skew (U53/U54 adders): `HF + ((VF >> 1) ^ 0xff) + 1 + 0x3F`, masked to the
+    /// pixmap width. The 0x3F constant is the non-flipped `flipoffs` (0x40 − 1).
+    fn bg_src_x(abs_y: usize, x: usize) -> usize {
+        (x + ((abs_y >> 1) ^ 0xff) + 1 + 0x3F) & 0xFF
+    }
+
     /// Decoded foreground / background / sprite pixel caches (consumed by the
     /// scanline renderer in the follow-up issues, and by debug tooling).
     pub fn tx_cache(&self) -> &gfx::GfxCache {
@@ -541,8 +593,35 @@ impl CongoBongoBoard {
     pub fn render_scanline(&mut self, abs_y: usize) {
         let row_offset = abs_y * NATIVE_WIDTH * 3;
         self.scanline_buffer[row_offset..row_offset + NATIVE_WIDTH * 3].fill(0);
-        // TODO(.6): draw_background(abs_y); TODO(.7): draw_sprites(abs_y);
+        self.render_bg_scanline(abs_y);
+        // TODO(.7): draw_sprites(abs_y);
         self.render_fg_scanline(abs_y);
+    }
+
+    /// Draw the pseudo-3D scrolling background for one scanline.
+    ///
+    /// Samples the pre-built pixmap with the isometric skew (`draw_background`
+    /// with `skew = true`) and adds the runtime color base `bg_color (CREF3) +
+    /// (color_bank << 8)`. When the layer is disabled the row stays black.
+    fn render_bg_scanline(&mut self, abs_y: usize) {
+        if !self.bg_enabled || self.bg_pixmap.is_empty() {
+            return;
+        }
+        let colorbase =
+            ((self.latch2 >> 3) & 1) as usize * 0x80 + ((self.latch2 >> 7) & 1) as usize * 0x100;
+        let row_base = self.bg_src_y(abs_y) * 256;
+        let pixmap = &self.bg_pixmap;
+        let palette = &self.palette_rgb;
+        let buf_start = abs_y * NATIVE_WIDTH * 3;
+        let buf = &mut self.scanline_buffer[buf_start..buf_start + NATIVE_WIDTH * 3];
+        for x in 0..NATIVE_WIDTH {
+            let val = pixmap[row_base + Self::bg_src_x(abs_y, x)] as usize;
+            let (r, g, b) = palette[(val + colorbase) & 0x1FF];
+            let off = x * 3;
+            buf[off] = r;
+            buf[off + 1] = g;
+            buf[off + 2] = b;
+        }
     }
 
     /// Draw the foreground/text tilemap for one scanline (32×32 of 8×8 2bpp
@@ -751,6 +830,7 @@ impl CongoBongoSystem {
 
         self.board.decode_gfx_roms();
         self.board.build_palette();
+        self.board.build_bg_pixmap();
         Ok(())
     }
 
@@ -1065,6 +1145,58 @@ mod tests {
         board.render_scanline(0);
         let buf = &board.scanline_buffer;
         assert_eq!((buf[0], buf[1], buf[2]), (255, 255, 255));
+    }
+
+    #[test]
+    fn background_skew_source_coords() {
+        let mut board = CongoBongoBoard::new();
+        // No scroll: srcy = ((0<<1)^0xfff)+1 = 0x1000 & 0xfff = 0; srcx(0) = 0x3f.
+        assert_eq!(board.bg_src_y(0), 0);
+        assert_eq!(CongoBongoBoard::bg_src_x(0, 0), 0x3F);
+        // Successive rows step the skew column left by one every two lines.
+        assert_eq!(CongoBongoBoard::bg_src_x(0, 1), 0x40);
+        assert_eq!(CongoBongoBoard::bg_src_x(2, 0), 0x3E);
+
+        // 11-bit scroll split across the two position bytes (0xC028/0xC029).
+        board.bg_position = [0x10, 0x01]; // bgpos = 0x110
+        assert_eq!(board.bg_src_y(0), 0xDE0);
+    }
+
+    #[test]
+    fn background_pixmap_and_render() {
+        let mut board = CongoBongoBoard::new();
+        // Every bg cell: code 0, color 1 (attr 0x10) → pixmap pen = 1*8 + 0 = 8.
+        for b in board.tilemap_dat[0x2000..0x4000].iter_mut() {
+            *b = 0x10;
+        }
+        board.decode_gfx_roms();
+        board.build_bg_pixmap();
+        assert_eq!(board.bg_pixmap.len(), 256 * 4096);
+        assert_eq!(board.bg_pixmap[0], 8, "color 1, pen 0");
+
+        board.palette_prom[8] = 0xFF; // palette[8] = white
+        board.build_palette();
+
+        // Disabled → row stays black.
+        board.bg_enabled = false;
+        board.render_scanline(100);
+        let off = 100 * NATIVE_WIDTH * 3;
+        assert_eq!(
+            (board.scanline_buffer[off], board.scanline_buffer[off + 2]),
+            (0, 0)
+        );
+
+        // Enabled, uniform map → every pixel resolves to palette[8] = white.
+        board.bg_enabled = true;
+        board.render_scanline(100);
+        assert_eq!(
+            (
+                board.scanline_buffer[off],
+                board.scanline_buffer[off + 1],
+                board.scanline_buffer[off + 2]
+            ),
+            (255, 255, 255)
+        );
     }
 
     #[test]
