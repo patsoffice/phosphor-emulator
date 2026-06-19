@@ -9,13 +9,11 @@
 //! - Sprites: 32×32 3bpp, moved into a 256-byte sprite RAM by a custom DMA engine
 //! - Sound: 2× SN76489A + i8255 PPI driving 5 synthesized percussion voices
 //!
-//! This is the **skeleton** (issue `phosphor-emulator-5tf.3`): ROM regions, the
-//! dual-Z80 memory maps, the board/system structs, registry + disasm regions, and
-//! a main-CPU run loop with the VBlank IRQ. It boots and renders a (black) frame
-//! of the correct size. Graphics decode/palette, the three render layers, input,
-//! DIP switches, and the entire sound path are added by the follow-up issues
-//! (`.4`–`.10`); the relevant fields and maps are wired here so those changes are
-//! additive.
+//! Status: the main CPU, memory maps, GFX decode/palette, and the full video
+//! pipeline (scrolling background → sprites → foreground tilemap) are
+//! implemented. Still to come: refined input + DIP options (issue `.8`) and the
+//! entire sound path — sound Z80, 2× SN76489A, i8255 PPI, and discrete
+//! percussion (issues `.9`–`.10`).
 
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
@@ -32,6 +30,7 @@ use phosphor_core::cpu::z80::Z80;
 use phosphor_core::gfx;
 use phosphor_core::gfx::decode::{GfxLayout, decode_gfx};
 use phosphor_core::gfx::resistor::{combine_weights, compute_resistor_weights};
+use phosphor_core::gfx::sprite::{SpriteClip, draw_sprite_row};
 use phosphor_macros::{BusDebug, DebugTrace, MemoryRegion, Saveable};
 
 use crate::disasm_registry::{DisasmCpu, DisasmRegion};
@@ -299,8 +298,10 @@ pub struct CongoBongoBoard {
     // Background scroll position (two raw bytes; decoded by issue .6).
     pub(crate) bg_position: [u8; 2],
 
-    // Custom sprite-DMA registers (src lo/hi, count, trigger; issue .7).
+    // Custom sprite-DMA registers (src lo/hi, count, trigger) and the 256-byte
+    // sprite RAM the DMA engine fills (not in the CPU address map).
     pub(crate) sprite_dma: [u8; 4],
+    pub(crate) sprite_ram: [u8; 0x100],
 
     // Sound command latch (main CPU → PPI port A; issue .9).
     pub(crate) sound_latch: u8,
@@ -348,6 +349,7 @@ impl CongoBongoBoard {
             bg_enabled: false,
             bg_position: [0; 2],
             sprite_dma: [0; 4],
+            sprite_ram: [0; 0x100],
             sound_latch: 0,
             clock: 0,
             vblank_irq_pending: false,
@@ -493,6 +495,135 @@ impl CongoBongoBoard {
         (x + ((abs_y >> 1) ^ 0xff) + 1 + 0x3F) & 0xFF
     }
 
+    // -----------------------------------------------------------------------
+    // Custom sprite DMA
+    // -----------------------------------------------------------------------
+
+    /// Read one byte of the main CPU address space (for the sprite DMA source).
+    fn read_main(&self, addr: u16) -> u8 {
+        match addr {
+            0x0000..=0x8FFF => self.main_map.read_backing(addr),
+            0xA000..=0xBFFF => self.main_map.read_backing(0xA000 | (addr & 0x07FF)),
+            _ => 0xFF,
+        }
+    }
+
+    /// Write a Congo custom sprite-DMA register (0xC030-0xC033).
+    ///
+    /// A write of 0x01 to register 3 triggers the transfer (`congo_sprite_custom_w`):
+    /// for `count + 1` descriptors starting at `[reg0|reg1<<8]`, the first source
+    /// byte is the destination sprite slot (`*4`) and the next four bytes are
+    /// copied into sprite RAM; the source advances by 0x20 each descriptor.
+    pub fn write_sprite_dma(&mut self, offset: usize, data: u8) {
+        self.sprite_dma[offset] = data;
+        if offset != 3 || data != 0x01 {
+            return;
+        }
+        let mut saddr = (self.sprite_dma[0] as u16) | ((self.sprite_dma[1] as u16) << 8);
+        let mut count = self.sprite_dma[2] as i32; // loops count + 1 times
+        while count >= 0 {
+            let daddr = self.read_main(saddr) as usize * 4;
+            for i in 0..4 {
+                self.sprite_ram[(daddr + i) & 0xff] =
+                    self.read_main(saddr.wrapping_add(i as u16 + 1));
+            }
+            saddr = saddr.wrapping_add(0x20);
+            count -= 1;
+        }
+    }
+
+    /// Sprite top scanline from its Y byte (`find_minimum_y`): the first line
+    /// where `(Y + 0xf2 + VF) & 0xe0 == 0xe0`, scanned to its minimum, +1.
+    /// (Upright only; the flip path is kept for a later flip-screen pass.)
+    fn find_minimum_y(value: u8, flip: bool) -> i32 {
+        let flipmask = if flip { 0xff } else { 0x00 };
+        let flipconst = if flip { 0xef } else { 0xf1 };
+        let mut y: i32 = 0;
+        while y < 256 {
+            let sum = (value as i32 + flipconst + 1) + (y ^ flipmask);
+            if sum & 0xe0 == 0xe0 {
+                break;
+            }
+            y += 16;
+        }
+        loop {
+            let sum = (value as i32 + flipconst + 1) + ((y - 1) ^ flipmask);
+            if sum & 0xe0 != 0xe0 {
+                break;
+            }
+            y -= 1;
+        }
+        (y + 1) & 0xff
+    }
+
+    /// Sprite left column from its X byte (`find_minimum_x`).
+    fn find_minimum_x(value: u8, flip: bool) -> i32 {
+        let flipmask = if flip { 0xff } else { 0x00 };
+        let mut x = (value as i32 + 0xef + 1) ^ flipmask;
+        if flipmask != 0 {
+            x -= 31;
+        }
+        x & 0xff
+    }
+
+    /// Draw the sprites covering one scanline (32×32 3bpp, transparent pen 0).
+    ///
+    /// Only the lower half of sprite RAM is scanned, back-to-front (offs 0x7C →
+    /// 0) so lower-indexed sprites land on top. Each sprite is positioned via
+    /// `find_minimum_x/y` and drawn with 256-pixel X and Y wrap (`draw_sprites`
+    /// with flip masks 0x280/0x180). Per-sprite color = `(byte & 0x1f) +
+    /// (color_bank << 5)`, palette pen = `color * 8 + pen`.
+    fn render_sprites_scanline(&mut self, abs_y: usize) {
+        if self.sprite_cache.count() == 0 {
+            return;
+        }
+        let color_bank = ((self.latch2 >> 7) & 1) as usize;
+        let sprites = &self.sprite_cache;
+        let palette = &self.palette_rgb;
+        let ram = &self.sprite_ram;
+        let buf_start = abs_y * NATIVE_WIDTH * 3;
+        let buf = &mut self.scanline_buffer[buf_start..buf_start + NATIVE_WIDTH * 3];
+        let clip = SpriteClip {
+            x_min: 0,
+            x_max: NATIVE_WIDTH as i32,
+            wrap_offset: Some(-0x100),
+        };
+
+        let mut offs = 0x7c;
+        loop {
+            let sy = Self::find_minimum_y(ram[offs], false);
+            let code = (ram[offs + 1] & 0x7f) as u16; // bit 7 = flip Y
+            let flip_y = ram[offs + 1] & 0x80 != 0;
+            let color = (ram[offs + 2] & 0x1f) as usize + (color_bank << 5);
+            let flip_x = ram[offs + 2] & 0x80 != 0;
+            let sx = Self::find_minimum_x(ram[offs + 3], false);
+
+            // Sprite covers `abs_y` from its primary anchor or the −256 Y wrap.
+            for sy_anchor in [sy, sy - 0x100] {
+                let row = abs_y as i32 - sy_anchor;
+                if (0..32).contains(&row) {
+                    let src_py = if flip_y { 31 - row } else { row } as usize;
+                    draw_sprite_row(
+                        sprites,
+                        code,
+                        src_py,
+                        sx,
+                        flip_x,
+                        |pv| pv == 0,
+                        |pv| palette[(color * 8 + pv as usize) & 0x1FF],
+                        buf,
+                        &clip,
+                    );
+                }
+            }
+
+            if offs == 0 {
+                break;
+            }
+            offs -= 4;
+        }
+    }
+
     /// Decoded foreground / background / sprite pixel caches (consumed by the
     /// scanline renderer in the follow-up issues, and by debug tooling).
     pub fn tx_cache(&self) -> &gfx::GfxCache {
@@ -586,15 +717,14 @@ impl CongoBongoBoard {
 
     /// Render one native screen scanline (`abs_y` = bitmap row 0-239).
     ///
-    /// Layer order matches `screen_update_congo`: background, then sprites, then
-    /// the foreground tilemap on top (transparent pen 0). The background and
-    /// sprite passes arrive in issues .6/.7; until then the row is cleared to
-    /// black before the foreground is drawn.
+    /// Layer order matches `screen_update_congo`: the row is cleared, then the
+    /// scrolling background, sprites, and the foreground tilemap (transparent
+    /// pen 0) are drawn on top of one another.
     pub fn render_scanline(&mut self, abs_y: usize) {
         let row_offset = abs_y * NATIVE_WIDTH * 3;
         self.scanline_buffer[row_offset..row_offset + NATIVE_WIDTH * 3].fill(0);
         self.render_bg_scanline(abs_y);
-        // TODO(.7): draw_sprites(abs_y);
+        self.render_sprites_scanline(abs_y);
         self.render_fg_scanline(abs_y);
     }
 
@@ -696,6 +826,7 @@ impl CongoBongoBoard {
         self.latch2 = 0;
         self.bg_position = [0; 2];
         self.sprite_dma = [0; 4];
+        self.sprite_ram = [0; 0x100];
         self.sound_latch = 0;
         self.clock = 0;
 
@@ -748,6 +879,7 @@ impl Saveable for CongoBongoBoard {
         w.write_bool(self.bg_enabled);
         w.write_bytes(&self.bg_position);
         w.write_bytes(&self.sprite_dma);
+        w.write_bytes(&self.sprite_ram);
         w.write_u8(self.sound_latch);
         w.write_u64_le(self.clock);
         w.write_bool(self.vblank_irq_pending);
@@ -771,6 +903,7 @@ impl Saveable for CongoBongoBoard {
         self.bg_enabled = r.read_bool()?;
         r.read_bytes_into(&mut self.bg_position)?;
         r.read_bytes_into(&mut self.sprite_dma)?;
+        r.read_bytes_into(&mut self.sprite_ram)?;
         self.sound_latch = r.read_u8()?;
         self.clock = r.read_u64_le()?;
         self.vblank_irq_pending = r.read_bool()?;
@@ -891,7 +1024,7 @@ impl Bus for CongoBongoSystem {
                         0x18..=0x1F => self.board.write_latch1((addr & 0x07) as u8, data & 1 != 0),
                         0x20..=0x27 => self.board.write_latch2((addr & 0x07) as u8, data & 1 != 0),
                         0x28..=0x29 => self.board.bg_position[(addr & 0x01) as usize] = data,
-                        0x30..=0x33 => self.board.sprite_dma[(addr & 0x03) as usize] = data,
+                        0x30..=0x33 => self.board.write_sprite_dma((addr & 0x03) as usize, data),
                         0x38..=0x3F => self.board.sound_latch = data,
                         _ => {}
                     },
@@ -1196,6 +1329,67 @@ mod tests {
                 board.scanline_buffer[off + 2]
             ),
             (255, 255, 255)
+        );
+    }
+
+    #[test]
+    fn sprite_dma_copies_descriptors_into_sprite_ram() {
+        let mut sys = CongoBongoSystem::new();
+        // Build one sprite descriptor in work RAM at 0x8100: slot byte then the
+        // four sprite bytes (Y, code, color, X).
+        let desc = [0x03u8, 0xAA, 0xBB, 0xCC, 0xDD]; // slot 3 → sprite_ram[12..16]
+        for (i, b) in desc.iter().enumerate() {
+            sys.write(BusMaster::Cpu(0), 0x8100 + i as u16, *b);
+        }
+        // Program the DMA: source 0x8100, count 0 (one descriptor), then trigger.
+        sys.write(BusMaster::Cpu(0), 0xC030, 0x00);
+        sys.write(BusMaster::Cpu(0), 0xC031, 0x81);
+        sys.write(BusMaster::Cpu(0), 0xC032, 0x00);
+        sys.write(BusMaster::Cpu(0), 0xC033, 0x01); // go
+
+        assert_eq!(&sys.board.sprite_ram[12..16], &[0xAA, 0xBB, 0xCC, 0xDD]);
+    }
+
+    #[test]
+    fn sprite_positioning_helpers_match_mame() {
+        // find_minimum_x (upright) = value + 0xf0, wrapped to 8 bits.
+        assert_eq!(CongoBongoBoard::find_minimum_x(0x10, false), 0x00);
+        assert_eq!(CongoBongoBoard::find_minimum_x(0x00, false), 0xF0);
+        // find_minimum_y returns a value in 0..=0x100 (top scanline + 1).
+        let y = CongoBongoBoard::find_minimum_y(0x20, false);
+        assert!((0..=0x100).contains(&y));
+    }
+
+    #[test]
+    fn sprite_renders_into_scanline() {
+        let mut board = CongoBongoBoard::new();
+        // Sprite 0, row 0, col 0 → plane-0 set (pen 1). Sprite plane 0 is at the
+        // top third of the ROM; byte 0 bit 7 is sub-cell (0,0) row 0 col 0.
+        board.spr_rom[0] = 0b1000_0000;
+        board.decode_gfx_roms();
+        assert_eq!(board.sprite_cache.pixel(0, 0, 0), 1);
+        // color 0, pen 1 → palette[1].
+        board.palette_prom[1] = 0xFF;
+        board.build_palette();
+
+        // One sprite, slot 0: Y, code 0, color 0, X. Pick X so the left column
+        // lands at screen x 0: find_minimum_x(value) = value + 0xf0 = 0 → 0x10.
+        board.sprite_ram[0] = 0x80; // Y (places the sprite somewhere on screen)
+        board.sprite_ram[1] = 0x00; // code 0, no flip
+        board.sprite_ram[2] = 0x00; // color 0, no flip
+        board.sprite_ram[3] = 0x10; // X → screen column 0
+
+        let sy = CongoBongoBoard::find_minimum_y(0x80, false) as usize;
+        board.render_scanline(sy); // top row of the sprite
+        let off = sy * NATIVE_WIDTH * 3;
+        assert_eq!(
+            (
+                board.scanline_buffer[off],
+                board.scanline_buffer[off + 1],
+                board.scanline_buffer[off + 2]
+            ),
+            (255, 255, 255),
+            "sprite pen 1 drawn at column 0"
         );
     }
 
