@@ -32,6 +32,7 @@ use phosphor_core::cpu::Cpu;
 use phosphor_core::cpu::m6809::M6809;
 use phosphor_core::device::adc0809::Adc0809;
 use phosphor_core::device::irobot_mathbox::IrobotMathbox;
+use phosphor_core::device::pokey::Pokey;
 use phosphor_core::device::x2212::X2212;
 use phosphor_core::gfx::decode::{GfxCache, GfxLayout, decode_gfx};
 use phosphor_macros::{BusDebug, MemoryRegion};
@@ -77,6 +78,10 @@ const VBLANK_LINE: u64 = 224; // status VBLANK flag set at line 224, cleared at 
 // (MAME `BITMAP_WIDTH` × screen height); only the top 232 rows are displayed.
 const BITMAP_W: usize = 256;
 const BITMAP_H: usize = 256;
+
+// Sound: four POKEYs clocked at the 6809 rate; mixed to mono at 44.1 kHz.
+const POKEY_CLOCK: u32 = 1_512_000;
+const SAMPLE_RATE: u32 = 44_100;
 
 // ---------------------------------------------------------------------------
 // ROM definitions ("irobot" parent set)
@@ -449,6 +454,10 @@ pub struct IrobotSystem {
     adc: Adc0809,
     stick: [u8; 2],
 
+    // Sound: four POKEYs @ 1.512 MHz, all outputs summed to mono.
+    pokeys: [Pokey; 4],
+    audio_buffer: Vec<i16>,
+
     // Interrupts / timing.
     irq_pending: bool,
     firq_pending: bool,
@@ -487,6 +496,8 @@ impl IrobotSystem {
             novram: X2212::new(),
             adc: Adc0809::new(),
             stick: [STICK_CENTER as u8; 2],
+            pokeys: std::array::from_fn(|_| Pokey::with_clock(POKEY_CLOCK, SAMPLE_RATE)),
+            audio_buffer: Vec::with_capacity(2048),
             irq_pending: false,
             firq_pending: false,
             prev_v32: false,
@@ -677,17 +688,30 @@ impl IrobotSystem {
         self.update_adc_inputs();
     }
 
-    /// Quad-POKEY read (`quad_pokeyn_r`). POKEY sound is stubbed; the one read
-    /// the boot path needs is POKEY 0's ALLPOT register, wired to DSW2.
-    fn quad_pokey_r(&self, offset: u16) -> u8 {
-        let pokey_num = (offset >> 3) & !0x04;
-        let control = (offset & 0x20) >> 2;
-        let reg = (offset & 7) | control;
-        if pokey_num == 0 && reg == 8 {
+    /// Decode a quad-POKEY access (`quad_pokeyn_r/w`): which POKEY (0-3) and
+    /// register (0-15) the window offset selects.
+    fn quad_pokey_decode(offset: u16) -> (usize, u16) {
+        let pokey_num = ((offset >> 3) & !0x04) as usize;
+        let reg = (offset & 7) | ((offset & 0x20) >> 2);
+        (pokey_num, reg)
+    }
+
+    /// Quad-POKEY read. POKEY 0's ALLPOT register is wired directly to DSW2
+    /// (MAME `allpot_r().set_ioport("DSW2")`); everything else comes from the
+    /// POKEY register file.
+    fn quad_pokey_r(&mut self, offset: u16) -> u8 {
+        let (num, reg) = Self::quad_pokey_decode(offset);
+        if num == 0 && reg == 8 {
             self.dsw2
         } else {
-            0x00
+            self.pokeys[num].read(reg)
         }
+    }
+
+    /// Quad-POKEY write.
+    fn quad_pokey_w(&mut self, offset: u16, data: u8) {
+        let (num, reg) = Self::quad_pokey_decode(offset);
+        self.pokeys[num].write(reg, data);
     }
 
     pub fn tick(&mut self) {
@@ -716,7 +740,23 @@ impl IrobotSystem {
             self.cpu.execute_cycle(bus, BusMaster::Cpu(0));
         });
 
+        // The four POKEYs run at the CPU clock (1:1).
+        for p in &mut self.pokeys {
+            p.tick();
+        }
+
         self.clock += 1;
+    }
+
+    /// Drain the four POKEYs' resampled output and mix it to mono (0.25 each,
+    /// matching MAME's routing). Called once per frame.
+    fn mix_audio(&mut self) {
+        let chans: [Vec<f32>; 4] = std::array::from_fn(|k| self.pokeys[k].drain_audio());
+        let [c0, c1, c2, c3] = &chans;
+        for (((a, b), c), d) in c0.iter().zip(c1).zip(c2).zip(c3) {
+            let sum = a + b + c + d;
+            self.audio_buffer.push((sum * 0.25 * 32767.0) as i16);
+        }
     }
 
     /// Clear a polygon draw buffer to the background pen.
@@ -972,7 +1012,7 @@ impl Bus for IrobotSystem {
             0x1180..=0x11bf => self.out0_w(data),
             0x11c0..=0x11ff => self.rom_banksel_w(data),
             0x1200..=0x12ff => self.novram.write(addr & 0xff, data),
-            0x1400..=0x143f => {} // quad POKEY (stub)
+            0x1400..=0x143f => self.quad_pokey_w(addr & 0x3f, data),
             0x1800..=0x18ff => self.paletteram_w(addr & 0xff, data),
             0x1900..=0x19ff => {}                         // watchdog (stub)
             0x1a00..=0x1a3f => self.firq_pending = false, // clear FIRQ
@@ -1007,13 +1047,24 @@ impl Renderable for IrobotSystem {
     }
 }
 
-impl AudioSource for IrobotSystem {}
+impl AudioSource for IrobotSystem {
+    fn fill_audio(&mut self, buffer: &mut [i16]) -> usize {
+        let n = buffer.len().min(self.audio_buffer.len());
+        buffer[..n].copy_from_slice(&self.audio_buffer[..n]);
+        self.audio_buffer.drain(..n);
+        n
+    }
+    fn audio_sample_rate(&self) -> u32 {
+        SAMPLE_RATE
+    }
+}
 
 impl MachineCore for IrobotSystem {
     fn run_frame(&mut self) {
         for _ in 0..TIMING.cycles_per_frame() {
             self.tick();
         }
+        self.mix_audio();
     }
 
     fn reset(&mut self) {
@@ -1029,6 +1080,10 @@ impl MachineCore for IrobotSystem {
         self.adc.reset();
         self.stick = [STICK_CENTER as u8; 2];
         self.update_adc_inputs();
+        for p in &mut self.pokeys {
+            p.reset();
+        }
+        self.audio_buffer.clear();
         self.bufsel = 0;
         self.vg_clear = false;
         self.commbank = 0;
@@ -1063,6 +1118,9 @@ impl Saveable for IrobotSystem {
         self.mathbox.save_state(w);
         self.adc.save_state(w);
         w.write_bytes(&self.stick);
+        for p in &self.pokeys {
+            p.save_state(w);
+        }
         w.write_bytes(&self.polybitmap[0]);
         w.write_bytes(&self.polybitmap[1]);
         w.write_u8(self.bufsel);
@@ -1091,6 +1149,9 @@ impl Saveable for IrobotSystem {
         self.mathbox.load_state(r)?;
         self.adc.load_state(r)?;
         r.read_bytes_into(&mut self.stick)?;
+        for p in &mut self.pokeys {
+            p.load_state(r)?;
+        }
         r.read_bytes_into(&mut self.polybitmap[0])?;
         r.read_bytes_into(&mut self.polybitmap[1])?;
         self.bufsel = r.read_u8()?;
@@ -1707,6 +1768,24 @@ mod tests {
             Bus::read(&mut sys, BusMaster::Cpu(0), 0x1300) as i32,
             STICK_Y_MIN
         );
+    }
+
+    #[test]
+    fn pokey_audio_pipeline_produces_samples() {
+        let mut sys = IrobotSystem::new();
+        MachineCore::reset(&mut sys);
+        // A POKEY register write must route without panicking (AUDC1 on POKEY 2).
+        Bus::write(&mut sys, BusMaster::Cpu(0), 0x1410 | 0x01, 0xAF);
+        sys.run_frame();
+        assert_eq!(sys.audio_sample_rate(), SAMPLE_RATE);
+        assert!(
+            !sys.audio_buffer.is_empty(),
+            "a frame should mix POKEY output"
+        );
+        let mut buf = vec![0i16; 4096];
+        let n = sys.fill_audio(&mut buf);
+        assert!(n > 0);
+        assert!(sys.audio_buffer.is_empty(), "fill_audio drains the buffer");
     }
 
     #[test]
