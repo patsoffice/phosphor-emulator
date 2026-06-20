@@ -30,6 +30,7 @@ pub trait Device: Debuggable + Saveable {
     fn tick(&mut self) {}
 }
 
+pub mod adc0809;
 pub mod avg;
 pub mod ay8910;
 pub mod cmos_ram;
@@ -57,6 +58,7 @@ pub mod williams_blitter;
 pub mod x2212;
 pub mod z80ctc;
 
+pub use adc0809::Adc0809;
 pub use avg::{Avg, AvgVariant};
 pub use ay8910::Ay8910;
 pub use cmos_ram::CmosRam;

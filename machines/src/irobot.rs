@@ -21,15 +21,16 @@
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
-    ActionRole, AudioSource, DipApplyTiming, DipChoice, DipOption, DipSwitchBank, DipSwitches,
-    InputConfigurable, InputControl, InputEvent, InputId, InputKind, MachineCore, Nvram,
-    Profilable, Renderable, SaveState,
+    ActionRole, AnalogAxisKind, AudioSource, DefaultBinding, DipApplyTiming, DipChoice, DipOption,
+    DipSwitchBank, DipSwitches, InputConfigurable, InputControl, InputEvent, InputId, InputKind,
+    MachineCore, MouseControl, Nvram, Profilable, Renderable, SaveState,
 };
 use phosphor_core::core::save_state::{self, SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::{AccessKind, AddressSpace16};
 use phosphor_core::core::{Bus, BusMaster, TimingConfig};
 use phosphor_core::cpu::Cpu;
 use phosphor_core::cpu::m6809::M6809;
+use phosphor_core::device::adc0809::Adc0809;
 use phosphor_core::device::irobot_mathbox::IrobotMathbox;
 use phosphor_core::device::x2212::X2212;
 use phosphor_core::gfx::decode::{GfxCache, GfxLayout, decode_gfx};
@@ -298,6 +299,16 @@ const INPUT_START1: u16 = 4;
 const INPUT_START2: u16 = 5;
 const INPUT_FIRE: u16 = 6;
 const INPUT_BUTTON2: u16 = 7;
+// Analog flight-stick axes (distinct InputId space from the digital controls).
+const INPUT_STICK_X: u16 = 8;
+const INPUT_STICK_Y: u16 = 9;
+
+// Analog stick channel ranges (MAME AN0/AN1 PORT_MINMAX), centered at 0x80.
+const STICK_CENTER: i32 = 0x80;
+const STICK_X_MIN: i32 = 96;
+const STICK_X_MAX: i32 = 159;
+const STICK_Y_MIN: i32 = 96;
+const STICK_Y_MAX: i32 = 163;
 
 const IROBOT_CONTROLS: &[InputControl] = &[
     InputControl {
@@ -366,6 +377,26 @@ const IROBOT_CONTROLS: &[InputControl] = &[
         player: None,
         default_bindings: crate::input_defaults::SERVICE,
     },
+    InputControl {
+        id: InputId(INPUT_STICK_X),
+        stable_name: "stick_x",
+        label: "Stick X",
+        kind: InputKind::AnalogAxis {
+            axis: AnalogAxisKind::X,
+        },
+        player: Some(1),
+        default_bindings: &[DefaultBinding::Mouse(MouseControl::AxisX)],
+    },
+    InputControl {
+        id: InputId(INPUT_STICK_Y),
+        stable_name: "stick_y",
+        label: "Stick Y",
+        kind: InputKind::AnalogAxis {
+            axis: AnalogAxisKind::Y,
+        },
+        player: Some(1),
+        default_bindings: &[DefaultBinding::Mouse(MouseControl::AxisY)],
+    },
 ];
 
 // ---------------------------------------------------------------------------
@@ -413,6 +444,11 @@ pub struct IrobotSystem {
     // NVRAM.
     novram: X2212,
 
+    // Analog flight stick: ADC0809 (channel 0 = Y, channel 1 = X) and the
+    // current [X, Y] stick positions feeding it.
+    adc: Adc0809,
+    stick: [u8; 2],
+
     // Interrupts / timing.
     irq_pending: bool,
     firq_pending: bool,
@@ -449,6 +485,8 @@ impl IrobotSystem {
             dsw1: DSW1_DEFAULT,
             dsw2: DSW2_DEFAULT,
             novram: X2212::new(),
+            adc: Adc0809::new(),
+            stick: [STICK_CENTER as u8; 2],
             irq_pending: false,
             firq_pending: false,
             prev_v32: false,
@@ -610,6 +648,33 @@ impl IrobotSystem {
         };
         self.map
             .remap_pages(0x40, 0x20, Region::BankedRom, rom_bank * 0x2000);
+    }
+
+    /// Push the current stick positions onto the ADC inputs (channel 0 = Y on
+    /// AN0, channel 1 = X on AN1). `stick` is `[X, Y]`.
+    fn update_adc_inputs(&mut self) {
+        self.adc.set_input(0, self.stick[1]);
+        self.adc.set_input(1, self.stick[0]);
+    }
+
+    /// Absolute deflection in `-1.0..=1.0` mapped to the channel range (centered
+    /// at 0x80). `axis` is 0 = X, 1 = Y.
+    fn set_stick_abs(&mut self, axis: usize, value: f32, min: i32, max: i32) {
+        let span = if value >= 0.0 {
+            (max - STICK_CENTER) as f32
+        } else {
+            (STICK_CENTER - min) as f32
+        };
+        let v = (STICK_CENTER as f32 + value.clamp(-1.0, 1.0) * span).round() as i32;
+        self.stick[axis] = v.clamp(min, max) as u8;
+        self.update_adc_inputs();
+    }
+
+    /// Relative (mouse) motion accumulated into the stick position and clamped.
+    fn move_stick_rel(&mut self, axis: usize, delta: f32, min: i32, max: i32) {
+        let v = self.stick[axis] as i32 + delta.round() as i32;
+        self.stick[axis] = v.clamp(min, max) as u8;
+        self.update_adc_inputs();
     }
 
     /// Quad-POKEY read (`quad_pokeyn_r`). POKEY sound is stubbed; the one read
@@ -887,7 +952,7 @@ impl Bus for IrobotSystem {
             0x1080..=0x10bf => self.status_r(),
             0x10c0..=0x10ff => self.dsw1,
             0x1200..=0x12ff => self.novram.read(addr & 0xff),
-            0x1300..=0x13ff => 0x80, // ADC data (stub: centered stick)
+            0x1300..=0x13ff => self.adc.data_r(), // analog-stick ADC result
             0x1400..=0x143f => self.quad_pokey_r(addr & 0x3f),
             0x1c00..=0x1fff => self.map.read_backing(addr), // video RAM
             0x2000..=0x3fff => self.mathbox.sharedmem_r(addr - 0x2000), // paged mathbox window
@@ -911,7 +976,7 @@ impl Bus for IrobotSystem {
             0x1800..=0x18ff => self.paletteram_w(addr & 0xff, data),
             0x1900..=0x19ff => {}                         // watchdog (stub)
             0x1a00..=0x1a3f => self.firq_pending = false, // clear FIRQ
-            0x1b00..=0x1bff => {}                         // ADC channel select / start (stub)
+            0x1b00..=0x1bff => self.adc.address_offset_start_w(addr & 0x03), // ADC start
             0x1c00..=0x1fff => self.map.write_backing(addr, data), // video RAM
             0x2000..=0x3fff => self.mathbox.sharedmem_w(addr - 0x2000, data), // paged mathbox window
             _ => {}                                                           // ROM / unmapped
@@ -961,6 +1026,9 @@ impl MachineCore for IrobotSystem {
         self.clock = 0;
         self.novram.reset();
         self.mathbox.reset();
+        self.adc.reset();
+        self.stick = [STICK_CENTER as u8; 2];
+        self.update_adc_inputs();
         self.bufsel = 0;
         self.vg_clear = false;
         self.commbank = 0;
@@ -993,6 +1061,8 @@ impl Saveable for IrobotSystem {
         w.write_bytes(self.map.region_data(Region::VideoRam));
         self.novram.save_state(w);
         self.mathbox.save_state(w);
+        self.adc.save_state(w);
+        w.write_bytes(&self.stick);
         w.write_bytes(&self.polybitmap[0]);
         w.write_bytes(&self.polybitmap[1]);
         w.write_u8(self.bufsel);
@@ -1019,6 +1089,8 @@ impl Saveable for IrobotSystem {
         r.read_bytes_into(self.map.region_data_mut(Region::VideoRam))?;
         self.novram.load_state(r)?;
         self.mathbox.load_state(r)?;
+        self.adc.load_state(r)?;
+        r.read_bytes_into(&mut self.stick)?;
         r.read_bytes_into(&mut self.polybitmap[0])?;
         r.read_bytes_into(&mut self.polybitmap[1])?;
         self.bufsel = r.read_u8()?;
@@ -1066,27 +1138,40 @@ impl InputConfigurable for IrobotSystem {
     }
 
     fn handle_input(&mut self, event: InputEvent) {
-        let InputEvent::Button { id, pressed } = event else {
-            return;
-        };
-        // All inputs are active low: clear the bit on press, set it on release.
-        let apply = |reg: &mut u8, bit: u8| {
-            if pressed {
-                *reg &= !(1 << bit);
-            } else {
-                *reg |= 1 << bit;
+        match event {
+            InputEvent::Button { id, pressed } => {
+                // All buttons are active low: clear on press, set on release.
+                let apply = |reg: &mut u8, bit: u8| {
+                    if pressed {
+                        *reg &= !(1 << bit);
+                    } else {
+                        *reg |= 1 << bit;
+                    }
+                };
+                match id.0 {
+                    INPUT_SERVICE => apply(&mut self.in0, 4),
+                    INPUT_COIN3 => apply(&mut self.in0, 5),
+                    INPUT_COIN1 => apply(&mut self.in0, 6),
+                    INPUT_COIN2 => apply(&mut self.in0, 7),
+                    INPUT_FIRE => apply(&mut self.in1, 4),
+                    INPUT_BUTTON2 => apply(&mut self.in1, 5),
+                    INPUT_START2 => apply(&mut self.in1, 6),
+                    INPUT_START1 => apply(&mut self.in1, 7),
+                    _ => {}
+                }
             }
-        };
-        match id.0 {
-            INPUT_SERVICE => apply(&mut self.in0, 4),
-            INPUT_COIN3 => apply(&mut self.in0, 5),
-            INPUT_COIN1 => apply(&mut self.in0, 6),
-            INPUT_COIN2 => apply(&mut self.in0, 7),
-            INPUT_FIRE => apply(&mut self.in1, 4),
-            INPUT_BUTTON2 => apply(&mut self.in1, 5),
-            INPUT_START2 => apply(&mut self.in1, 6),
-            INPUT_START1 => apply(&mut self.in1, 7),
-            _ => {}
+            // Analog stick: an absolute deflection (-1.0..=1.0) maps straight to
+            // the channel range; relative motion (mouse) accumulates and clamps.
+            InputEvent::Absolute { id, value } => match id.0 {
+                INPUT_STICK_X => self.set_stick_abs(0, value, STICK_X_MIN, STICK_X_MAX),
+                INPUT_STICK_Y => self.set_stick_abs(1, value, STICK_Y_MIN, STICK_Y_MAX),
+                _ => {}
+            },
+            InputEvent::Relative { id, delta } => match id.0 {
+                INPUT_STICK_X => self.move_stick_rel(0, delta, STICK_X_MIN, STICK_X_MAX),
+                INPUT_STICK_Y => self.move_stick_rel(1, delta, STICK_Y_MIN, STICK_Y_MAX),
+                _ => {}
+            },
         }
     }
 }
@@ -1597,6 +1682,31 @@ mod tests {
             pressed: false,
         });
         assert_eq!(sys.in0 & 0x40, 0x40);
+    }
+
+    #[test]
+    fn analog_stick_converts_through_adc() {
+        let mut sys = IrobotSystem::new();
+        // Full +X deflection → channel 1 (AN1) reads the X max.
+        sys.handle_input(InputEvent::Absolute {
+            id: InputId(INPUT_STICK_X),
+            value: 1.0,
+        });
+        Bus::write(&mut sys, BusMaster::Cpu(0), 0x1b01, 0); // start, channel 1
+        assert_eq!(
+            Bus::read(&mut sys, BusMaster::Cpu(0), 0x1300) as i32,
+            STICK_X_MAX
+        );
+        // Full -Y deflection → channel 0 (AN0) reads the Y min.
+        sys.handle_input(InputEvent::Absolute {
+            id: InputId(INPUT_STICK_Y),
+            value: -1.0,
+        });
+        Bus::write(&mut sys, BusMaster::Cpu(0), 0x1b00, 0); // start, channel 0
+        assert_eq!(
+            Bus::read(&mut sys, BusMaster::Cpu(0), 0x1300) as i32,
+            STICK_Y_MIN
+        );
     }
 
     #[test]
