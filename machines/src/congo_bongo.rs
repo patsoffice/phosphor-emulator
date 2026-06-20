@@ -15,6 +15,7 @@
 //! entire sound path — sound Z80, 2× SN76489A, i8255 PPI, and discrete
 //! percussion (issues `.9`–`.10`).
 
+use phosphor_core::audio::AudioResampler;
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::debug_trace::DebugTraceBuffer;
@@ -24,9 +25,11 @@ use phosphor_core::core::machine::{
 };
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::{AccessKind, AddressSpace16};
-use phosphor_core::core::{Bus, BusMaster, TimingConfig};
+use phosphor_core::core::{Bus, BusMaster, ClockDivider, TimingConfig};
 use phosphor_core::cpu::Cpu;
 use phosphor_core::cpu::z80::Z80;
+use phosphor_core::device::i8255::I8255;
+use phosphor_core::device::sn76489::Sn76489a;
 use phosphor_core::gfx;
 use phosphor_core::gfx::decode::{GfxLayout, decode_gfx};
 use phosphor_core::gfx::resistor::{combine_weights, compute_resistor_weights};
@@ -81,6 +84,14 @@ pub const NATIVE_WIDTH: usize = 256;
 pub const NATIVE_HEIGHT: usize = 240;
 pub const VBLANK_END: usize = 16; // first visible scanline
 pub const VISIBLE_LINES: u64 = 240; // lines rendered (top VBLANK_END clipped on output)
+
+// Sound section: a second Z80 @ 4 MHz with two SN76489A PSGs (4 MHz and 1 MHz)
+// and an i8255 PPI. The sound CPU takes a periodic IRQ at SOUND_CLOCK/16/16/16/4
+// ≈ 244 Hz (one IRQ every 16384 sound cycles).
+pub const SOUND_CLOCK: u64 = 4_000_000;
+pub const SOUND_PSG2_CLOCK: u32 = 1_000_000;
+pub const SOUND_IRQ_PERIOD: u64 = 16 * 16 * 16 * 4; // 16384 sound cycles
+pub const OUTPUT_SAMPLE_RATE: u64 = 44_100;
 
 // ---------------------------------------------------------------------------
 // ROM definitions ("congo" parent set — 2-board stack, Sega ID 834-5180)
@@ -307,8 +318,27 @@ pub struct CongoBongoBoard {
     pub(crate) sprite_dma: [u8; 4],
     pub(crate) sprite_ram: [u8; 0x100],
 
-    // Sound command latch (main CPU → PPI port A; issue .9).
+    // Sound command latch (main CPU → PPI port A).
     pub(crate) sound_latch: u8,
+
+    // Sound section devices.
+    #[debug_device("SN76489A #1")]
+    pub(crate) sn1: Sn76489a,
+    #[debug_device("SN76489A #2")]
+    pub(crate) sn2: Sn76489a,
+    #[debug_device("PPI")]
+    pub(crate) ppi: I8255,
+
+    // Sound-CPU clocking (4 MHz from the 3.041 MHz main loop ⇒ fractional, may
+    // step more than once per main cycle) + the ~244 Hz periodic IRQ.
+    pub(crate) sound_cycle_accum: u64,
+    pub(crate) sound_irq_counter: u64,
+    pub(crate) sound_irq_pending: bool,
+
+    // PSG generator clocks (chip_clock / 16) and the mixed audio resampler.
+    pub(crate) sn1_clock: ClockDivider,
+    pub(crate) sn2_clock: ClockDivider,
+    pub(crate) audio: AudioResampler<i16>,
 
     // Timing / interrupts.
     pub(crate) clock: u64,
@@ -356,6 +386,15 @@ impl CongoBongoBoard {
             sprite_dma: [0; 4],
             sprite_ram: [0; 0x100],
             sound_latch: 0,
+            sn1: Sn76489a::new(SOUND_CLOCK as u32),
+            sn2: Sn76489a::new(SOUND_PSG2_CLOCK),
+            ppi: I8255::new(),
+            sound_cycle_accum: 0,
+            sound_irq_counter: 0,
+            sound_irq_pending: false,
+            sn1_clock: ClockDivider::new((SOUND_CLOCK / 16) as u32, TIMING.cpu_clock_hz as u32),
+            sn2_clock: ClockDivider::new(SOUND_PSG2_CLOCK / 16, TIMING.cpu_clock_hz as u32),
+            audio: AudioResampler::new(TIMING.cpu_clock_hz, OUTPUT_SAMPLE_RATE),
             clock: 0,
             vblank_irq_pending: false,
             debug_trace: DebugTraceBuffer::new(),
@@ -708,10 +747,11 @@ impl CongoBongoBoard {
     }
 
     // -----------------------------------------------------------------------
-    // Core tick (main CPU only; sound CPU + audio wired by issue .9)
+    // Core tick
     // -----------------------------------------------------------------------
 
-    /// Execute one main-CPU clock cycle (≈3.041 MHz).
+    /// Execute one main-CPU clock cycle (≈3.041 MHz), advancing the sound CPU,
+    /// PSGs, and audio resampler alongside it.
     pub fn tick(&mut self, bus: &mut dyn Bus<Address = u16, Data = u8>) {
         let frame_cycle = self.clock % TIMING.cycles_per_frame();
 
@@ -741,7 +781,54 @@ impl CongoBongoBoard {
 
         self.cpu.execute_cycle(bus, BusMaster::Cpu(0));
 
+        self.tick_sound(bus);
+
         self.clock += 1;
+    }
+
+    /// Advance the sound CPU, its periodic IRQ, the two PSGs, and the audio
+    /// resampler by one main-CPU cycle's worth of time.
+    fn tick_sound(&mut self, bus: &mut dyn Bus<Address = u16, Data = u8>) {
+        // Sound Z80 runs at 4 MHz against the 3.041 MHz main loop, so it may take
+        // more than one step per main cycle (a fractional Bresenham accumulator).
+        self.sound_cycle_accum += SOUND_CLOCK;
+        while self.sound_cycle_accum >= TIMING.cpu_clock_hz {
+            self.sound_cycle_accum -= TIMING.cpu_clock_hz;
+
+            // Periodic ~244 Hz IRQ (irq0_line_hold).
+            self.sound_irq_counter += 1;
+            if self.sound_irq_counter >= SOUND_IRQ_PERIOD {
+                self.sound_irq_counter = 0;
+                self.sound_irq_pending = true;
+            }
+
+            // HOLD_LINE auto-clear: the line drops when the CPU acknowledges the
+            // interrupt, which it does at an instruction boundary while IFF1 is
+            // set — observed here as IFF1 going 1→0 with the IRQ pending. (A DI
+            // with the IRQ pending could also clear it a cycle early; harmless.)
+            let iff1_before = self.sound_cpu.iff1;
+            self.sound_cpu.execute_cycle(bus, BusMaster::Cpu(1));
+            if self.sound_irq_pending && iff1_before && !self.sound_cpu.iff1 {
+                self.sound_irq_pending = false;
+            }
+        }
+
+        // PSG generators run at chip_clock/16; sample the summed output each main
+        // cycle and box-filter it down to the audio rate.
+        if self.sn1_clock.tick() {
+            self.sn1.tick();
+        }
+        if self.sn2_clock.tick() {
+            self.sn2.tick();
+        }
+        let mix = (self.sn1.output() as i32 + self.sn2.output() as i32)
+            .clamp(i16::MIN as i32, i16::MAX as i32);
+        self.audio.tick(mix as i16);
+    }
+
+    /// Drain mixed audio into the output buffer.
+    pub fn fill_audio(&mut self, buffer: &mut [i16]) -> usize {
+        self.audio.fill_audio(buffer)
     }
 
     /// Render one native screen scanline (`abs_y` = bitmap row 0-239).
@@ -860,6 +947,16 @@ impl CongoBongoBoard {
         self.sound_latch = 0;
         self.clock = 0;
 
+        self.sn1.reset();
+        self.sn2.reset();
+        self.ppi.reset();
+        self.sound_cycle_accum = 0;
+        self.sound_irq_counter = 0;
+        self.sound_irq_pending = false;
+        self.sn1_clock.reset();
+        self.sn2_clock.reset();
+        self.audio.reset();
+
         self.main_map.region_data_mut(MainRegion::Ram).fill(0);
         self.main_map.region_data_mut(MainRegion::VideoRam).fill(0);
         self.main_map.region_data_mut(MainRegion::ColorRam).fill(0);
@@ -873,7 +970,10 @@ impl CongoBongoBoard {
                 irq: self.vblank_irq_pending && self.int_enabled,
                 ..Default::default()
             },
-            // Sound CPU interrupts are wired by issue .9.
+            BusMaster::Cpu(1) => InterruptState {
+                irq: self.sound_irq_pending,
+                ..Default::default()
+            },
             _ => InterruptState::default(),
         }
     }
@@ -914,6 +1014,15 @@ impl Saveable for CongoBongoBoard {
         w.write_bytes(&self.sprite_dma);
         w.write_bytes(&self.sprite_ram);
         w.write_u8(self.sound_latch);
+        self.sn1.save_state(w);
+        self.sn2.save_state(w);
+        self.ppi.save_state(w);
+        w.write_u64_le(self.sound_cycle_accum);
+        w.write_u64_le(self.sound_irq_counter);
+        w.write_bool(self.sound_irq_pending);
+        self.sn1_clock.save_state(w);
+        self.sn2_clock.save_state(w);
+        self.audio.save_state(w);
         w.write_u64_le(self.clock);
         w.write_bool(self.vblank_irq_pending);
     }
@@ -941,6 +1050,15 @@ impl Saveable for CongoBongoBoard {
         r.read_bytes_into(&mut self.sprite_dma)?;
         r.read_bytes_into(&mut self.sprite_ram)?;
         self.sound_latch = r.read_u8()?;
+        self.sn1.load_state(r)?;
+        self.sn2.load_state(r)?;
+        self.ppi.load_state(r)?;
+        self.sound_cycle_accum = r.read_u64_le()?;
+        self.sound_irq_counter = r.read_u64_le()?;
+        self.sound_irq_pending = r.read_bool()?;
+        self.sn1_clock.load_state(r)?;
+        self.sn2_clock.load_state(r)?;
+        self.audio.load_state(r)?;
         self.clock = r.read_u64_le()?;
         self.vblank_irq_pending = r.read_bool()?;
         Ok(())
@@ -1035,10 +1153,12 @@ impl Bus for CongoBongoSystem {
                 data
             }
 
-            // Sound CPU program ROM / work RAM (devices wired by issue .9).
+            // Sound CPU: program ROM, work RAM, and the i8255 PPI (the SN76489As
+            // are write-only). The PSGs and PPI are heavily mirrored across 0x2000.
             BusMaster::Cpu(1) => match addr {
                 0x0000..=0x1FFF => self.board.sound_map.read_backing(addr),
                 0x4000..=0x4FFF => self.board.sound_map.read_backing(0x4000 | (addr & 0x07FF)),
+                0x8000..=0x9FFF => self.board.ppi.read(addr & 0x03),
                 _ => 0xFF,
             },
 
@@ -1061,18 +1181,29 @@ impl Bus for CongoBongoSystem {
                         0x20..=0x27 => self.board.write_latch2((addr & 0x07) as u8, data & 1 != 0),
                         0x28..=0x29 => self.board.bg_position[(addr & 0x01) as usize] = data,
                         0x30..=0x33 => self.board.write_sprite_dma((addr & 0x03) as usize, data),
-                        0x38..=0x3F => self.board.sound_latch = data,
+                        0x38..=0x3F => {
+                            // Latch the sound command and drive it onto PPI port A
+                            // (the sound CPU reads it there).
+                            self.board.sound_latch = data;
+                            self.board.ppi.set_port_a_input(data);
+                        }
                         _ => {}
                     },
                     _ => {} // ROM / unmapped
                 }
             }
-            // Sound CPU work RAM; SN76489 / PPI writes are wired by issue .9.
-            BusMaster::Cpu(1) if (0x4000..=0x4FFF).contains(&addr) => {
-                self.board
+            // Sound CPU: work RAM, SN76489A #1 (0x6000), i8255 PPI (0x8000), and
+            // SN76489A #2 (0xA000), each mirrored across its 0x2000 block.
+            BusMaster::Cpu(1) => match addr {
+                0x4000..=0x4FFF => self
+                    .board
                     .sound_map
-                    .write_backing(0x4000 | (addr & 0x07FF), data);
-            }
+                    .write_backing(0x4000 | (addr & 0x07FF), data),
+                0x6000..=0x7FFF => self.board.sn1.write(data),
+                0x8000..=0x9FFF => self.board.ppi.write(addr & 0x03, data),
+                0xA000..=0xBFFF => self.board.sn2.write(data),
+                _ => {}
+            },
             _ => {}
         }
     }
@@ -1086,12 +1217,7 @@ impl Bus for CongoBongoSystem {
     }
 }
 
-crate::impl_board_delegation!(
-    CongoBongoSystem,
-    board,
-    crate::congo_bongo::TIMING,
-    no_audio
-);
+crate::impl_board_delegation!(CongoBongoSystem, board, crate::congo_bongo::TIMING);
 
 impl MachineCore for CongoBongoSystem {
     crate::machine_core_metadata!("congobongo", crate::congo_bongo::TIMING);
@@ -1573,6 +1699,7 @@ inventory::submit! {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use phosphor_core::core::debug::Debuggable;
 
     #[test]
     fn registered_in_machine_and_disasm_registries() {
@@ -1758,6 +1885,52 @@ mod tests {
         // find_minimum_y returns a value in 0..=0x100 (top scanline + 1).
         let y = CongoBongoBoard::find_minimum_y(0x20, false);
         assert!((0..=0x100).contains(&y));
+    }
+
+    #[test]
+    fn sound_command_reaches_ppi_port_a() {
+        let mut sys = CongoBongoSystem::new();
+        // Main CPU writes the sound command (0xC038); the sound CPU reads it back
+        // through PPI port A (configured as input by control word 0x90 at 0x8003).
+        sys.write(BusMaster::Cpu(0), 0xC038, 0x7e);
+        sys.write(BusMaster::Cpu(1), 0x8003, 0x90); // PPI: A in, B/C out
+        assert_eq!(sys.read(BusMaster::Cpu(1), 0x8000), 0x7e);
+    }
+
+    #[test]
+    fn sound_writes_route_to_psgs_and_ppi() {
+        let mut sys = CongoBongoSystem::new();
+        sys.write(BusMaster::Cpu(1), 0x8003, 0x90); // PPI mode
+        // Port B/C outputs (percussion lines) latch and read back.
+        sys.write(BusMaster::Cpu(1), 0x8001, 0x02); // port B
+        sys.write(BusMaster::Cpu(1), 0x8002, 0x0d); // port C
+        assert_eq!(sys.board.ppi.read_output_b(), 0x02);
+        assert_eq!(sys.board.ppi.read_output_c(), 0x0d);
+        // PSG #1 (0x6000) and #2 (0xA000) accept register writes (set a tone period).
+        sys.write(BusMaster::Cpu(1), 0x6000, 0x80 | 0x04); // sn1 tone0 low nibble
+        sys.write(BusMaster::Cpu(1), 0xA000, 0x80 | 0x04); // sn2 tone0 low nibble
+        assert_eq!(sys.board.sn1.debug_registers()[0].value, 0x04);
+        assert_eq!(sys.board.sn2.debug_registers()[0].value, 0x04);
+    }
+
+    #[test]
+    fn sound_irq_fires_periodically() {
+        let mut sys = CongoBongoSystem::new();
+        sys.reset();
+        // Run a couple of frames; the ~244 Hz timer must assert the sound IRQ at
+        // least once (and the audio buffer must fill).
+        // One frame is ~66k sound cycles ⇒ several 16384-cycle IRQ periods.
+        let mut fired = false;
+        for _ in 0..TIMING.cycles_per_frame() {
+            bus_split!(&mut sys, bus => { sys.board.tick(bus); });
+            if sys.board.sound_irq_pending {
+                fired = true;
+            }
+        }
+        assert!(fired, "sound CPU periodic IRQ asserted");
+
+        let mut audio = vec![0i16; 64];
+        let _ = sys.board.fill_audio(&mut audio);
     }
 
     #[test]
