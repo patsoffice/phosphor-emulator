@@ -115,7 +115,7 @@ impl IrobotMathbox {
     fn decode_microcode(&mut self, mb: &[u8]) {
         let g = |off: usize| -> u32 { *mb.get(off).unwrap_or(&0) as u32 };
         for i in 0..NUM_OPS {
-            let mut func = (g(0x0000 + i) & 0x0f) << 5;
+            let mut func = (g(0x0800 + i) & 0x0f) << 5;
             func |= (g(0x0c00 + i) & 0x0f) << 1;
             func |= (g(0x1000 + i) & 0x08) >> 3;
             let time = g(0x1000 + i) & 0x03;
