@@ -37,6 +37,7 @@ pub mod dac;
 pub mod discrete;
 pub mod dvg;
 pub mod er2055;
+pub mod i8255;
 pub mod i8257;
 pub mod mathbox;
 pub mod namco06;
@@ -64,6 +65,7 @@ pub use discrete::{
 };
 pub use dvg::Dvg;
 pub use er2055::Er2055;
+pub use i8255::I8255;
 pub use i8257::I8257;
 pub use mathbox::Mathbox;
 pub use namco_wsg::NamcoWsg;
