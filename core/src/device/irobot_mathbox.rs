@@ -320,8 +320,16 @@ impl IrobotMathbox {
         let mut cflag: u32 = 0;
         let mut sp = 0usize;
 
-        // Terminate when the last-executed op asserts both DPSEL and CARRY.
+        // Terminate when the last-executed op asserts both DPSEL and CARRY. A
+        // generous iteration cap guards against malformed/undecoded microcode
+        // (e.g. an all-zero op table) hanging the emulator; real runs are at
+        // most a few thousand instructions.
+        let mut guard = 0u32;
         while self.ops[prev].flags & (FL_DPSEL | FL_CARRY) != (FL_DPSEL | FL_CARRY) {
+            guard += 1;
+            if guard > 1_000_000 {
+                break;
+            }
             let cur_op = self.ops[cur];
             let prev_flags = self.ops[prev].flags;
             icount += cur_op.cycles;
