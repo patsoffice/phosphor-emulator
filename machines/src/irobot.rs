@@ -13,10 +13,10 @@
 //!
 //! Status: the 6809, full memory map with ROM/RAM bank switching, the 32V
 //! scanline IRQ, inputs, DIP switches, X2212 NVRAM, the alphanumeric text layer
-//! (Phase 0), and the AM2901 microcoded mathbox with its paged 0x2000-0x3FFF
-//! window and completion FIRQ (Phase 1) are implemented. The polygon rasterizer,
-//! POKEY sound, and ADC analog stick are still stubbed; they arrive in later
-//! phases.
+//! (Phase 0), the AM2901 microcoded mathbox with its paged 0x2000-0x3FFF window
+//! and completion FIRQ (Phase 1), and the double-buffered polygon rasterizer
+//! composited under the text layer (Phase 2) are implemented. POKEY sound and
+//! the ADC analog stick are still stubbed; they arrive in Phase 3.
 
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
@@ -71,6 +71,11 @@ pub const TIMING: TimingConfig = TimingConfig {
 };
 
 const VBLANK_LINE: u64 = 224; // status VBLANK flag set at line 224, cleared at 0
+
+// Polygon bitmap geometry. The generator draws into a 256×256 8-bit buffer
+// (MAME `BITMAP_WIDTH` × screen height); only the top 232 rows are displayed.
+const BITMAP_W: usize = 256;
+const BITMAP_H: usize = 256;
 
 // ---------------------------------------------------------------------------
 // ROM definitions ("irobot" parent set)
@@ -387,6 +392,13 @@ pub struct IrobotSystem {
     // AM2901 microcoded mathbox (owns the paged 0x2000-0x3FFF window memories).
     mathbox: IrobotMathbox,
 
+    // Polygon video: two 256×256 8-bit (palette-index) buffers, double-buffered.
+    polybitmap: [Vec<u8>; 2],
+    bufsel: u8,         // current draw buffer (statwr bit 1); displayed = bufsel^1
+    vg_clear: bool,     // polygon-clear latch (statwr bit 0)
+    commbank: u8,       // comm-RAM bank read by the polygon generator (statwr bit 7)
+    irvg_running: bool, // polygon generator busy flag (status bit 6)
+
     // Control registers / bank latches.
     out0: u8,       // 0x1180: RAM bank, mathbox page/bank, alphamap (bit 7)
     statwr: u8,     // 0x1140: polygon/mathbox control (edge-detected)
@@ -424,6 +436,11 @@ impl IrobotSystem {
             poly_palette: [(0, 0, 0); 64],
             proms: Vec::new(),
             mathbox: IrobotMathbox::new(),
+            polybitmap: [vec![0; BITMAP_W * BITMAP_H], vec![0; BITMAP_W * BITMAP_H]],
+            bufsel: 0,
+            vg_clear: false,
+            commbank: 0,
+            irvg_running: false,
             out0: 0,
             statwr: 0,
             rombanksel: 0,
@@ -509,26 +526,42 @@ impl IrobotSystem {
 
     /// Status register at 0x1080: bit 5 = mathbox done, bit 6 = polygon
     /// generator running, bit 7 = VBLANK. Like MAME's non-timing build, reading
-    /// the mathbox-done bit clears the running flip-flop (so a started run reads
-    /// busy exactly once). The polygon generator arrives in Phase 2.
+    /// the mathbox-done and generator-running bits clears their flip-flops (so a
+    /// started run reads busy exactly once).
     fn status_r(&mut self) -> u8 {
         let mut d = 0;
         if !self.mathbox.running() {
             d |= 0x20;
         }
         self.mathbox.clear_running();
+        if self.irvg_running {
+            d |= 0x40;
+        }
+        self.irvg_running = false;
         if self.scanline() >= VBLANK_LINE {
             d |= 0x80;
         }
         d
     }
 
-    /// 0x1140 polygon/mathbox control. A rising edge on bit 4 runs the mathbox
-    /// microcode to completion and raises the completion FIRQ; bit 7 selects the
-    /// comm-RAM bank; bit 6 drives the NOVRAM RECALL line (active low). (Polygon
-    /// generator control on bits 0-2 arrives in Phase 2.)
+    /// 0x1140 polygon/mathbox control (MAME `statwr_w`): bit 7 selects the
+    /// comm-RAM bank; bit 1 selects the polygon draw buffer; bit 0 is the
+    /// polygon-clear latch (rising edge clears the current draw buffer); a rising
+    /// edge on bit 2 runs the polygon generator; a rising edge on bit 4 runs the
+    /// mathbox + raises the completion FIRQ; bit 6 drives NOVRAM RECALL (active
+    /// low).
     fn statwr_w(&mut self, data: u8) {
-        self.mathbox.set_commbank((data >> 7) & 1);
+        self.commbank = (data >> 7) & 1;
+        self.mathbox.set_commbank(self.commbank);
+        self.bufsel = (data >> 1) & 1;
+        if data & 0x01 != 0 && !self.vg_clear {
+            self.poly_clear(self.bufsel as usize);
+        }
+        self.vg_clear = data & 0x01 != 0;
+        if data & 0x04 != 0 && self.statwr & 0x04 == 0 {
+            self.run_video();
+            self.irvg_running = true;
+        }
         if data & 0x10 != 0 && self.statwr & 0x10 == 0 {
             self.mathbox.run();
             self.firq_pending = true;
@@ -621,13 +654,192 @@ impl IrobotSystem {
         self.clock += 1;
     }
 
-    /// Render the alphanumeric tile layer over the (Phase 0: black) polygon
-    /// bitmap. Tile color = `((data & 0xC0) >> 6) | (alphamap >> 4)`; the gfx is
-    /// 1bpp with pen 0 transparent.
+    /// Clear a polygon draw buffer to the background pen.
+    fn poly_clear(&mut self, buf: usize) {
+        self.polybitmap[buf].fill(0);
+    }
+
+    /// Bresenham line into the polygon bitmap, clipped to the 256×256 window
+    /// (MAME `draw_line`).
+    fn draw_line(bitmap: &mut [u8], x1: i32, y1: i32, x2: i32, y2: i32, col: u8) {
+        let dx = (x1 - x2).abs();
+        let dy = (y1 - y2).abs();
+        let sx = if x1 <= x2 { 1 } else { -1 };
+        let sy = if y1 <= y2 { 1 } else { -1 };
+        let (mut x, mut y) = (x1, y1);
+        let mut cx = dx / 2;
+        let mut cy = dy / 2;
+        let plot = |bitmap: &mut [u8], x: i32, y: i32| {
+            if (0..BITMAP_W as i32).contains(&x) && (0..BITMAP_H as i32).contains(&y) {
+                bitmap[((y << 8) + x) as usize] = col;
+            }
+        };
+        if dx >= dy {
+            loop {
+                plot(bitmap, x, y);
+                if x == x2 {
+                    break;
+                }
+                x += sx;
+                cx -= dy;
+                if cx < 0 {
+                    y += sy;
+                    cx += dx;
+                }
+            }
+        } else {
+            loop {
+                plot(bitmap, x, y);
+                if y == y2 {
+                    break;
+                }
+                y += sy;
+                cy -= dx;
+                if cy < 0 {
+                    x += sx;
+                    cy += dy;
+                }
+            }
+        }
+    }
+
+    /// Run the polygon generator (MAME `run_video`): walk the mathbox-built
+    /// display list in comm RAM `commbank` and rasterize points / vectors /
+    /// filled polygons into the current draw buffer `bufsel`.
+    fn run_video(&mut self) {
+        const XMAX: i32 = BITMAP_W as i32;
+        const YMAX: i32 = BITMAP_H as i32;
+        let round = |x: i32| (x >> 7) - 128;
+        let sext = |v: i32| if v >= 0x8000 { v - 0x10000 } else { v };
+
+        // Disjoint field borrows: the draw buffer (mut) and the comm RAM (shared).
+        let bitmap = &mut self.polybitmap[self.bufsel as usize];
+        let comram = self.mathbox.comram(self.commbank as usize);
+        // 11-bit (0x800-word) comm-RAM address space wraps, matching the hardware.
+        let cw = |i: i32| comram[i as usize & 0x7ff] as i32;
+
+        let mut lpnt: i32 = 0;
+        while lpnt < 0x7ff {
+            let d1 = cw(lpnt);
+            lpnt += 1;
+            if d1 == 0xffff {
+                break;
+            }
+            let mut spnt = d1 & 0x07ff;
+            match (d1 & 0xf000) >> 12 {
+                // Point objects.
+                0x8 => {
+                    while spnt < 0x7ff {
+                        let raw_x = cw(spnt);
+                        if raw_x == 0xffff {
+                            break;
+                        }
+                        let raw_y = cw(spnt + 1);
+                        let color = (raw_y & 0x3f) as u8;
+                        let (x, y) = (round(raw_x), round(raw_y));
+                        if (0..XMAX).contains(&x) && (0..YMAX).contains(&y) {
+                            bitmap[((y << 8) + x) as usize] = color;
+                        }
+                        spnt += 2;
+                    }
+                }
+                // Vector (line) objects.
+                0xc => {
+                    while spnt < 0x7ff {
+                        let raw_ey = cw(spnt);
+                        if raw_ey == 0xffff {
+                            break;
+                        }
+                        let ey = round(raw_ey);
+                        let raw_sy = cw(spnt + 1);
+                        let color = (raw_sy & 0x3f) as u8;
+                        let sy = round(raw_sy);
+                        let sx = cw(spnt + 3);
+                        let word1 = sext(cw(spnt + 2));
+                        let ex = sx + word1 * (ey - sy + 1);
+                        Self::draw_line(bitmap, round(sx), sy, round(ex), ey, color);
+                        spnt += 4;
+                    }
+                }
+                // Filled polygon: two slope lists advanced in lockstep, the span
+                // between the left/right edges filled on each scanline.
+                0x4 => {
+                    let mut spnt2 = cw(spnt) & 0x7ff;
+                    let mut sx = cw(spnt + 1);
+                    let mut sx2 = cw(spnt + 2);
+                    let raw_sy = cw(spnt + 3);
+                    let color = (raw_sy & 0x3f) as u8;
+                    let mut sy = round(raw_sy);
+                    spnt += 4;
+
+                    let mut word1 = sext(cw(spnt));
+                    let mut ey = cw(spnt + 1);
+                    if word1 != -1 || ey != 0xffff {
+                        ey = round(ey);
+                        spnt += 2;
+                        let mut word2 = sext(cw(spnt2));
+                        let mut ey2 = round(cw(spnt2 + 1));
+                        spnt2 += 2;
+                        loop {
+                            if (0..YMAX).contains(&sy) {
+                                let mut x1 = round(sx);
+                                let mut x2 = round(sx2);
+                                if x1 > x2 {
+                                    std::mem::swap(&mut x1, &mut x2);
+                                }
+                                x1 = x1.max(0);
+                                x2 = x2.min(XMAX - 1);
+                                if x1 < x2 {
+                                    let start = ((sy << 8) + x1 + 1) as usize;
+                                    bitmap[start..start + (x2 - x1) as usize].fill(color);
+                                }
+                            }
+                            sy += 1;
+                            if sy > ey {
+                                word1 = sext(cw(spnt));
+                                ey = cw(spnt + 1);
+                                if word1 == -1 && ey == 0xffff {
+                                    break;
+                                }
+                                ey = round(ey);
+                                spnt += 2;
+                            } else {
+                                sx += word1;
+                            }
+                            if sy > ey2 {
+                                word2 = sext(cw(spnt2));
+                                ey2 = round(cw(spnt2 + 1));
+                                spnt2 += 2;
+                            } else {
+                                sx2 += word2;
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Render the displayed polygon buffer through the polygon palette, then
+    /// composite the alphanumeric tile layer (transparent pen 0) on top. Tile
+    /// color = `((data & 0xC0) >> 6) | (alphamap >> 4)`; the char gfx is 1bpp.
     fn render(&self, buffer: &mut [u8]) {
         let w = TIMING.display_width as usize;
         let h = TIMING.display_height as usize;
-        buffer[..w * h * 3].fill(0);
+
+        // Displayed polygon buffer is the one not currently being drawn into.
+        let poly = &self.polybitmap[(self.bufsel ^ 1) as usize];
+        for y in 0..h {
+            for x in 0..w {
+                let (r, g, b) = self.poly_palette[poly[(y << 8) + x] as usize & 0x3f];
+                let off = (y * w + x) * 3;
+                buffer[off] = r;
+                buffer[off + 1] = g;
+                buffer[off + 2] = b;
+            }
+        }
+
         if self.char_cache.count() == 0 {
             return;
         }
@@ -749,6 +961,12 @@ impl MachineCore for IrobotSystem {
         self.clock = 0;
         self.novram.reset();
         self.mathbox.reset();
+        self.bufsel = 0;
+        self.vg_clear = false;
+        self.commbank = 0;
+        self.irvg_running = false;
+        self.polybitmap[0].fill(0);
+        self.polybitmap[1].fill(0);
         self.map.region_data_mut(Region::Ram).fill(0);
         self.map.region_data_mut(Region::BankedRam).fill(0);
         self.map.region_data_mut(Region::VideoRam).fill(0);
@@ -775,6 +993,12 @@ impl Saveable for IrobotSystem {
         w.write_bytes(self.map.region_data(Region::VideoRam));
         self.novram.save_state(w);
         self.mathbox.save_state(w);
+        w.write_bytes(&self.polybitmap[0]);
+        w.write_bytes(&self.polybitmap[1]);
+        w.write_u8(self.bufsel);
+        w.write_bool(self.vg_clear);
+        w.write_u8(self.commbank);
+        w.write_bool(self.irvg_running);
         w.write_u8(self.out0);
         w.write_u8(self.statwr);
         w.write_u8(self.rombanksel);
@@ -795,6 +1019,12 @@ impl Saveable for IrobotSystem {
         r.read_bytes_into(self.map.region_data_mut(Region::VideoRam))?;
         self.novram.load_state(r)?;
         self.mathbox.load_state(r)?;
+        r.read_bytes_into(&mut self.polybitmap[0])?;
+        r.read_bytes_into(&mut self.polybitmap[1])?;
+        self.bufsel = r.read_u8()?;
+        self.vg_clear = r.read_bool()?;
+        self.commbank = r.read_u8()?;
+        self.irvg_running = r.read_bool()?;
         self.out0 = r.read_u8()?;
         self.statwr = r.read_u8()?;
         self.rombanksel = r.read_u8()?;
@@ -1156,6 +1386,99 @@ mod tests {
     #[test]
     fn dip_tables_are_valid() {
         crate::assert_dip_banks_valid(IROBOT_DIP_BANKS, &[DSW1_DEFAULT, DSW2_DEFAULT]);
+    }
+
+    /// A raw value whose `ROUND_TO_PIXEL` ((v>>7)-128) maps to `px`, with the
+    /// low 6 bits set to `color`.
+    fn pixel_word(px: i32, color: u16) -> u16 {
+        (((px + 128) as u16) << 7) | (color & 0x3f)
+    }
+
+    /// Write a 16-bit big-endian comm-RAM word (bank 0) through the CPU's paged
+    /// window (out0 selects outx=2 = comm RAM).
+    fn write_comram(sys: &mut IrobotSystem, word: u16, val: u16) {
+        sys.out0_w(0x10); // outx = 2 (comm RAM), bank 0
+        let off = 0x2000 + word * 2;
+        Bus::write(sys, BusMaster::Cpu(0), off, (val >> 8) as u8);
+        Bus::write(sys, BusMaster::Cpu(0), off + 1, (val & 0xff) as u8);
+    }
+
+    #[test]
+    fn draw_line_plots_clipped_run() {
+        let mut bm = vec![0u8; BITMAP_W * BITMAP_H];
+        IrobotSystem::draw_line(&mut bm, 2, 5, 6, 5, 9); // horizontal run y=5
+        for x in 2..=6 {
+            assert_eq!(bm[(5 << 8) + x], 9, "x={x} on the line");
+        }
+        assert_eq!(bm[(5 << 8) + 7], 0, "past the end");
+        // Off-screen endpoints are clipped, not panicking.
+        IrobotSystem::draw_line(&mut bm, -50, -50, 300, 300, 1);
+    }
+
+    #[test]
+    fn run_video_rasterizes_a_point() {
+        let mut sys = IrobotSystem::new();
+        // Object table: one point object whose data starts at word 2.
+        write_comram(&mut sys, 0, 0x8000 | 2);
+        write_comram(&mut sys, 1, 0xffff); // end of object table
+        write_comram(&mut sys, 2, pixel_word(10, 0)); // X = 10
+        write_comram(&mut sys, 3, pixel_word(20, 5)); // Y = 20, color 5
+        write_comram(&mut sys, 4, 0xffff); // end of point list
+        sys.statwr_w(0x04); // bit 2 rising → run the polygon generator (bufsel 0)
+        assert_eq!(sys.polybitmap[0][(20 << 8) + 10], 5);
+    }
+
+    #[test]
+    fn run_video_fills_a_polygon() {
+        let mut sys = IrobotSystem::new();
+        // Object table → polygon data at word 6.
+        write_comram(&mut sys, 0, 0x4000 | 6);
+        write_comram(&mut sys, 1, 0xffff);
+        write_comram(&mut sys, 6, 20); // pointer to second slope list (word 20)
+        write_comram(&mut sys, 7, pixel_word(20, 0)); // left edge start X = 20
+        write_comram(&mut sys, 8, pixel_word(40, 0)); // right edge start X = 40
+        write_comram(&mut sys, 9, pixel_word(10, 3)); // start Y = 10, color 3
+        write_comram(&mut sys, 10, 0); // slope 1 = 0 (vertical edge)
+        write_comram(&mut sys, 11, pixel_word(15, 0)); // edge 1 ends at Y = 15
+        write_comram(&mut sys, 12, 0xffff); // slope-list 1 terminator (word1 = -1)
+        write_comram(&mut sys, 13, 0xffff); // ...and ey = 0xffff
+        write_comram(&mut sys, 20, 0); // slope 2 = 0
+        write_comram(&mut sys, 21, pixel_word(15, 0)); // edge 2 ends at Y = 15
+        sys.statwr_w(0x04);
+        // Spans fill x in [21, 40] for rows 10..=15.
+        assert_eq!(sys.polybitmap[0][(12 << 8) + 30], 3, "inside the polygon");
+        assert_eq!(sys.polybitmap[0][(12 << 8) + 20], 0, "left edge excluded");
+        assert_eq!(sys.polybitmap[0][(9 << 8) + 30], 0, "above the polygon");
+        assert_eq!(sys.polybitmap[0][(16 << 8) + 30], 0, "below the polygon");
+    }
+
+    #[test]
+    fn render_draws_polygon_through_palette() {
+        let mut sys = IrobotSystem::new();
+        sys.poly_palette[7] = (10, 20, 30);
+        // bufsel 0 ⇒ the displayed buffer is index 1.
+        sys.polybitmap[1][(50 << 8) + 60] = 7;
+        let (w, h) = sys.display_size();
+        let mut buf = vec![0u8; (w * h * 3) as usize];
+        sys.render_frame(&mut buf);
+        let off = (50 * w as usize + 60) * 3;
+        assert_eq!(&buf[off..off + 3], &[10, 20, 30]);
+    }
+
+    #[test]
+    fn render_composites_text_over_polygon() {
+        let mut sys = IrobotSystem::new();
+        // All-ones char data ⇒ every char pixel is opaque (pen 1).
+        sys.char_cache = decode_gfx(&[0xFFu8; 0x800], 0, 64, &CHAR_LAYOUT);
+        sys.text_palette[1] = (200, 10, 20); // tile data 0 → color 0 → pen 1
+        // A non-zero polygon background that the text must cover.
+        sys.poly_palette[4] = (1, 2, 3);
+        sys.polybitmap[1].fill(4);
+        let (w, h) = sys.display_size();
+        let mut buf = vec![0u8; (w * h * 3) as usize];
+        sys.render_frame(&mut buf);
+        // Tile (0,0) is opaque text everywhere → text color wins over polygon.
+        assert_eq!(&buf[0..3], &[200, 10, 20]);
     }
 
     #[test]
