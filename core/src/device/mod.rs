@@ -53,6 +53,7 @@ pub mod sn76489;
 pub mod ssio;
 pub mod votrax_sc01;
 pub mod williams_blitter;
+pub mod x2212;
 pub mod z80ctc;
 
 pub use avg::{Avg, AvgVariant};
@@ -81,4 +82,5 @@ pub use sn76489::Sn76489a;
 pub use ssio::SsioBoard;
 pub use votrax_sc01::VotraxSc01;
 pub use williams_blitter::WilliamsBlitter;
+pub use x2212::X2212;
 pub use z80ctc::Z80Ctc;
