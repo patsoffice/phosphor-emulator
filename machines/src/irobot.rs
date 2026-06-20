@@ -11,11 +11,12 @@
 //! - ADC0809 8-channel ADC for the analog flight stick; X2212 NOVRAM for scores
 //! - Heavy ROM / RAM / mathbox / comm-RAM bank switching
 //!
-//! Status (Phase 0 — boot skeleton): the 6809, full memory map with ROM/RAM
-//! bank switching, the 32V scanline IRQ + mathbox FIRQ wiring, inputs, DIP
-//! switches, X2212 NVRAM, and the alphanumeric text layer are implemented. The
-//! mathbox, polygon rasterizer, POKEY sound, and ADC analog stick are stubbed
-//! so the program boots and renders text; they arrive in later phases.
+//! Status: the 6809, full memory map with ROM/RAM bank switching, the 32V
+//! scanline IRQ, inputs, DIP switches, X2212 NVRAM, the alphanumeric text layer
+//! (Phase 0), and the AM2901 microcoded mathbox with its paged 0x2000-0x3FFF
+//! window and completion FIRQ (Phase 1) are implemented. The polygon rasterizer,
+//! POKEY sound, and ADC analog stick are still stubbed; they arrive in later
+//! phases.
 
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
@@ -29,6 +30,7 @@ use phosphor_core::core::{AccessKind, AddressSpace16};
 use phosphor_core::core::{Bus, BusMaster, TimingConfig};
 use phosphor_core::cpu::Cpu;
 use phosphor_core::cpu::m6809::M6809;
+use phosphor_core::device::irobot_mathbox::IrobotMathbox;
 use phosphor_core::device::x2212::X2212;
 use phosphor_core::gfx::decode::{GfxCache, GfxLayout, decode_gfx};
 use phosphor_macros::{BusDebug, MemoryRegion};
@@ -47,9 +49,9 @@ enum Region {
     Ram = 1,       // 0x0000-0x07FF  fixed 2K work RAM
     BankedRam = 2, // 0x0800-0x0FFF  3 × 2K banked RAM (backing 0x1800)
     VideoRam = 3,  // 0x1C00-0x1FFF  32×32 alphanumeric RAM
-    SharedRam = 4, // 0x2000-0x3FFF  8K mathbox shared RAM
     BankedRom = 5, // 0x4000-0x5FFF  6 × 8K banked ROM (backing 0xC000)
     Rom = 6,       // 0x6000-0xFFFF  40K fixed program ROM
+                   // 0x2000-0x3FFF is a paged window into the mathbox (not a region).
 }
 
 // ---------------------------------------------------------------------------
@@ -221,6 +223,56 @@ pub static IROBOT_PROMS: RomRegion = RomRegion {
     ],
 };
 
+// Mathbox ROM: four chips interleaved big-endian (`ROM_LOAD16_BYTE`). 104/103
+// are the high/low bytes of words 0x0000-0x1FFF; 102/101 the high/low bytes of
+// words 0x2000-0x5FFF. Assembled into 0x6000 16-bit words by `load_mathbox_rom`.
+static IROBOT_MB_HI_LO: RomRegion = RomRegion {
+    size: 0xc000,
+    entries: &[
+        RomEntry {
+            name: "136029-104.bin",
+            size: 0x2000,
+            offset: 0x0000,
+            crc32: &[0x0a6cdcca],
+        },
+        RomEntry {
+            name: "136029-103.bin",
+            size: 0x2000,
+            offset: 0x2000,
+            crc32: &[0x0c83296d],
+        },
+        RomEntry {
+            name: "136029-102.bin",
+            size: 0x4000,
+            offset: 0x4000,
+            crc32: &[0x9d588f22],
+        },
+        RomEntry {
+            name: "136029-101.bin",
+            size: 0x4000,
+            offset: 0x8000,
+            crc32: &[0x62a38c08],
+        },
+    ],
+};
+
+/// Assemble the mathbox ROM into 0x6000 big-endian 16-bit words. The four files
+/// are loaded contiguously (104,103,102,101) then interleaved: words
+/// 0x0000-0x1FFF from 104(hi)/103(lo), words 0x2000-0x5FFF from 102(hi)/101(lo).
+fn load_mathbox_rom(rom_set: &RomSet) -> Result<Vec<u16>, RomLoadError> {
+    let raw = IROBOT_MB_HI_LO.load(rom_set)?;
+    let (hi0, lo0) = (&raw[0x0000..0x2000], &raw[0x2000..0x4000]);
+    let (hi1, lo1) = (&raw[0x4000..0x8000], &raw[0x8000..0xc000]);
+    let mut words = vec![0u16; 0x6000];
+    for i in 0..0x2000 {
+        words[i] = ((hi0[i] as u16) << 8) | lo0[i] as u16;
+    }
+    for i in 0..0x4000 {
+        words[0x2000 + i] = ((hi1[i] as u16) << 8) | lo1[i] as u16;
+    }
+    Ok(words)
+}
+
 /// 8×8 1bpp character layout (MAME `charlayout`): each row is two bytes, the
 /// pixels come from bits 4..7 of each byte; 16 bytes per character.
 const CHAR_LAYOUT: GfxLayout<'static> = GfxLayout {
@@ -332,12 +384,13 @@ pub struct IrobotSystem {
     // PROMs retained for later phases (text-color PROM + mathbox microcode).
     proms: Vec<u8>, // 0x3420
 
+    // AM2901 microcoded mathbox (owns the paged 0x2000-0x3FFF window memories).
+    mathbox: IrobotMathbox,
+
     // Control registers / bank latches.
     out0: u8,       // 0x1180: RAM bank, mathbox page/bank, alphamap (bit 7)
     statwr: u8,     // 0x1140: polygon/mathbox control (edge-detected)
     rombanksel: u8, // 0x11C0: ROM bank select
-    mb_outx: u8,    // mathbox memory select (Phase 1)
-    mb_mpage: u8,   // mathbox bank select (Phase 1)
 
     // Inputs (active low: 1 = released) + DIP banks.
     in0: u8,
@@ -370,11 +423,10 @@ impl IrobotSystem {
             text_palette: [(0, 0, 0); 32],
             poly_palette: [(0, 0, 0); 64],
             proms: Vec::new(),
+            mathbox: IrobotMathbox::new(),
             out0: 0,
             statwr: 0,
             rombanksel: 0,
-            mb_outx: 0,
-            mb_mpage: 0,
             in0: 0xFF,
             in1: 0xFF,
             dsw1: DSW1_DEFAULT,
@@ -393,13 +445,6 @@ impl IrobotSystem {
         map.region(Ram, "Fixed RAM", 0x0000, 0x0800, AccessKind::ReadWrite)
             .backing_region(BankedRam, "Banked RAM", 0x1800)
             .region(VideoRam, "Video RAM", 0x1c00, 0x0400, AccessKind::ReadWrite)
-            .region(
-                SharedRam,
-                "Mathbox Shared RAM",
-                0x2000,
-                0x2000,
-                AccessKind::ReadWrite,
-            )
             .backing_region(BankedRom, "Banked ROM", 0xc000)
             .region(Rom, "Program ROM", 0x6000, 0xa000, AccessKind::ReadOnly);
         // Point the banked windows at bank 0.
@@ -419,6 +464,11 @@ impl IrobotSystem {
 
         self.proms = IROBOT_PROMS.load(rom_set)?;
         self.build_text_palette();
+
+        // Mathbox: assembled big-endian ROM + the microcode PROMs (the bytes
+        // after the 32-byte text-color PROM).
+        let mathbox_rom = load_mathbox_rom(rom_set)?;
+        self.mathbox.load(&self.proms[0x20..], &mathbox_rom);
 
         Ok(())
     }
@@ -458,30 +508,37 @@ impl IrobotSystem {
     }
 
     /// Status register at 0x1080: bit 5 = mathbox done, bit 6 = polygon
-    /// generator running, bit 7 = VBLANK. The mathbox/polygon engines are
-    /// stubbed (instantaneous), so report "mathbox done, generator idle".
-    fn status_r(&self) -> u8 {
-        let mut d = 0x20; // mathbox done (never busy in Phase 0)
+    /// generator running, bit 7 = VBLANK. Like MAME's non-timing build, reading
+    /// the mathbox-done bit clears the running flip-flop (so a started run reads
+    /// busy exactly once). The polygon generator arrives in Phase 2.
+    fn status_r(&mut self) -> u8 {
+        let mut d = 0;
+        if !self.mathbox.running() {
+            d |= 0x20;
+        }
+        self.mathbox.clear_running();
         if self.scanline() >= VBLANK_LINE {
             d |= 0x80;
         }
         d
     }
 
-    /// 0x1140 polygon/mathbox control. Stubbed: a rising edge on bit 4 starts
-    /// the mathbox, which signals completion via FIRQ; bit 6 drives the NOVRAM
-    /// RECALL line (active low).
+    /// 0x1140 polygon/mathbox control. A rising edge on bit 4 runs the mathbox
+    /// microcode to completion and raises the completion FIRQ; bit 7 selects the
+    /// comm-RAM bank; bit 6 drives the NOVRAM RECALL line (active low). (Polygon
+    /// generator control on bits 0-2 arrives in Phase 2.)
     fn statwr_w(&mut self, data: u8) {
+        self.mathbox.set_commbank((data >> 7) & 1);
         if data & 0x10 != 0 && self.statwr & 0x10 == 0 {
-            // Mathbox start → (stub) instantaneous completion raises FIRQ.
+            self.mathbox.run();
             self.firq_pending = true;
         }
         self.novram.recall(data & 0x40 == 0);
         self.statwr = data;
     }
 
-    /// 0x1180 output latch: RAM bank (bits 6-5), mathbox memory/bank (bits 4-1),
-    /// alphamap (bit 7).
+    /// 0x1180 output latch: RAM bank (bits 6-5), mathbox memory select (bits
+    /// 4-3) and bank (bits 2-1), alphamap (bit 7).
     fn out0_w(&mut self, data: u8) {
         self.out0 = data;
         if data & 0x60 != 0x60 {
@@ -489,8 +546,8 @@ impl IrobotSystem {
             self.map
                 .remap_pages(0x08, 8, Region::BankedRam, bank * 0x800);
         }
-        self.mb_outx = (data & 0x18) >> 3;
-        self.mb_mpage = (data & 0x06) >> 1;
+        self.mathbox.set_outx((data & 0x18) >> 3);
+        self.mathbox.set_mpage((data & 0x06) >> 1);
     }
 
     /// 0x11C0 ROM bank select (bits 3-1 select one of six 8K banks).
@@ -620,7 +677,8 @@ impl Bus for IrobotSystem {
             0x1200..=0x12ff => self.novram.read(addr & 0xff),
             0x1300..=0x13ff => 0x80, // ADC data (stub: centered stick)
             0x1400..=0x143f => self.quad_pokey_r(addr & 0x3f),
-            0x1c00..=0x3fff => self.map.read_backing(addr), // video + shared RAM
+            0x1c00..=0x1fff => self.map.read_backing(addr), // video RAM
+            0x2000..=0x3fff => self.mathbox.sharedmem_r(addr - 0x2000), // paged mathbox window
             0x4000..=0xffff => self.map.read_backing(addr), // banked + fixed ROM
             _ => 0xff,
         };
@@ -643,8 +701,8 @@ impl Bus for IrobotSystem {
             0x1a00..=0x1a3f => self.firq_pending = false, // clear FIRQ
             0x1b00..=0x1bff => {}                         // ADC channel select / start (stub)
             0x1c00..=0x1fff => self.map.write_backing(addr, data), // video RAM
-            0x2000..=0x3fff => self.map.write_backing(addr, data), // shared RAM
-            _ => {}                                       // ROM / unmapped
+            0x2000..=0x3fff => self.mathbox.sharedmem_w(addr - 0x2000, data), // paged mathbox window
+            _ => {}                                                           // ROM / unmapped
         }
     }
 
@@ -685,17 +743,15 @@ impl MachineCore for IrobotSystem {
         self.out0 = 0;
         self.statwr = 0;
         self.rombanksel = 0;
-        self.mb_outx = 0;
-        self.mb_mpage = 0;
         self.irq_pending = false;
         self.firq_pending = false;
         self.prev_v32 = false;
         self.clock = 0;
         self.novram.reset();
+        self.mathbox.reset();
         self.map.region_data_mut(Region::Ram).fill(0);
         self.map.region_data_mut(Region::BankedRam).fill(0);
         self.map.region_data_mut(Region::VideoRam).fill(0);
-        self.map.region_data_mut(Region::SharedRam).fill(0);
         self.apply_banking();
         bus_split!(self, bus => {
             self.cpu.reset(bus, BusMaster::Cpu(0));
@@ -717,13 +773,11 @@ impl Saveable for IrobotSystem {
         w.write_bytes(self.map.region_data(Region::Ram));
         w.write_bytes(self.map.region_data(Region::BankedRam));
         w.write_bytes(self.map.region_data(Region::VideoRam));
-        w.write_bytes(self.map.region_data(Region::SharedRam));
         self.novram.save_state(w);
+        self.mathbox.save_state(w);
         w.write_u8(self.out0);
         w.write_u8(self.statwr);
         w.write_u8(self.rombanksel);
-        w.write_u8(self.mb_outx);
-        w.write_u8(self.mb_mpage);
         w.write_u8(self.in0);
         w.write_u8(self.in1);
         w.write_u8(self.dsw1);
@@ -739,13 +793,11 @@ impl Saveable for IrobotSystem {
         r.read_bytes_into(self.map.region_data_mut(Region::Ram))?;
         r.read_bytes_into(self.map.region_data_mut(Region::BankedRam))?;
         r.read_bytes_into(self.map.region_data_mut(Region::VideoRam))?;
-        r.read_bytes_into(self.map.region_data_mut(Region::SharedRam))?;
         self.novram.load_state(r)?;
+        self.mathbox.load_state(r)?;
         self.out0 = r.read_u8()?;
         self.statwr = r.read_u8()?;
         self.rombanksel = r.read_u8()?;
-        self.mb_outx = r.read_u8()?;
-        self.mb_mpage = r.read_u8()?;
         self.in0 = r.read_u8()?;
         self.in1 = r.read_u8()?;
         self.dsw1 = r.read_u8()?;
@@ -1144,6 +1196,18 @@ mod tests {
     }
 
     #[test]
+    fn mathbox_window_routes_scratch_ram_through_bus() {
+        let mut sys = IrobotSystem::new();
+        // out0 bits 4-3 = 11 selects the mathbox scratch RAM page (outx = 3),
+        // with RAM bank 0 (bits 6-5 = 00) and mathbox page 0 (bits 2-1 = 00).
+        sys.out0_w(0x18);
+        Bus::write(&mut sys, BusMaster::Cpu(0), 0x2000, 0x12);
+        Bus::write(&mut sys, BusMaster::Cpu(0), 0x2001, 0x34);
+        assert_eq!(Bus::read(&mut sys, BusMaster::Cpu(0), 0x2000), 0x12);
+        assert_eq!(Bus::read(&mut sys, BusMaster::Cpu(0), 0x2001), 0x34);
+    }
+
+    #[test]
     fn dsw_read_paths() {
         let mut sys = IrobotSystem::new();
         sys.dsw1 = 0x5A;
@@ -1218,6 +1282,10 @@ mod tests {
         sys.out0_w(0x20);
         sys.rom_banksel_w(0x02);
         Bus::write(&mut sys, BusMaster::Cpu(0), 0x0042, 0x7E);
+        // Mathbox scratch RAM (via the paged window) is part of the snapshot.
+        sys.out0_w(0x18); // outx = 3 (scratch RAM)
+        Bus::write(&mut sys, BusMaster::Cpu(0), 0x2002, 0x5C);
+        sys.out0_w(0x20); // restore RAM bank 1 selection
         sys.clock = 1234;
         let blob = SaveState::save_state(&sys).unwrap();
 
@@ -1226,6 +1294,9 @@ mod tests {
         assert_eq!(sys2.out0, 0x20);
         assert_eq!(sys2.rombanksel, 0x02);
         assert_eq!(sys2.clock, 1234);
+        sys2.out0_w(0x18); // outx = 3 to read scratch RAM back
+        assert_eq!(Bus::read(&mut sys2, BusMaster::Cpu(0), 0x2002), 0x5C);
+        sys2.out0_w(0x20);
         assert_eq!(Bus::read(&mut sys2, BusMaster::Cpu(0), 0x0042), 0x7E);
     }
 
