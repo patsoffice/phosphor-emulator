@@ -372,6 +372,7 @@ pub mod atari_avg;
 pub mod atari_dvg;
 pub mod ccastles;
 pub mod congo_bongo;
+pub mod congo_sound;
 pub mod digdug;
 pub mod disasm_registry;
 pub mod dkong_sound;

@@ -36,6 +36,7 @@ use phosphor_core::gfx::resistor::{combine_weights, compute_resistor_weights};
 use phosphor_core::gfx::sprite::{SpriteClip, draw_sprite_row};
 use phosphor_macros::{BusDebug, DebugTrace, MemoryRegion, Saveable};
 
+use crate::congo_sound::CongoSound;
 use crate::disasm_registry::{DisasmCpu, DisasmRegion};
 use crate::registry::MachineEntry;
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
@@ -335,10 +336,14 @@ pub struct CongoBongoBoard {
     pub(crate) sound_irq_counter: u64,
     pub(crate) sound_irq_pending: bool,
 
-    // PSG generator clocks (chip_clock / 16) and the mixed audio resampler.
+    // PSG generator clocks (chip_clock / 16). `audio` box-filters the summed PSG
+    // output to 44.1 kHz, which feeds the discrete percussion circuit; the
+    // circuit mixes the PSGs with the five synthesized voices and is drained for
+    // the final output.
     pub(crate) sn1_clock: ClockDivider,
     pub(crate) sn2_clock: ClockDivider,
     pub(crate) audio: AudioResampler<i16>,
+    pub(crate) congo_sound: CongoSound,
 
     // Timing / interrupts.
     pub(crate) clock: u64,
@@ -395,6 +400,7 @@ impl CongoBongoBoard {
             sn1_clock: ClockDivider::new((SOUND_CLOCK / 16) as u32, TIMING.cpu_clock_hz as u32),
             sn2_clock: ClockDivider::new(SOUND_PSG2_CLOCK / 16, TIMING.cpu_clock_hz as u32),
             audio: AudioResampler::new(TIMING.cpu_clock_hz, OUTPUT_SAMPLE_RATE),
+            congo_sound: CongoSound::new(),
             clock: 0,
             vblank_irq_pending: false,
             debug_trace: DebugTraceBuffer::new(),
@@ -814,7 +820,8 @@ impl CongoBongoBoard {
         }
 
         // PSG generators run at chip_clock/16; sample the summed output each main
-        // cycle and box-filter it down to the audio rate.
+        // cycle, box-filter it to the audio rate, and feed each resulting sample
+        // into the percussion circuit (which mixes PSGs + voices).
         if self.sn1_clock.tick() {
             self.sn1.tick();
         }
@@ -823,12 +830,21 @@ impl CongoBongoBoard {
         }
         let mix = (self.sn1.output() as i32 + self.sn2.output() as i32)
             .clamp(i16::MIN as i32, i16::MAX as i32);
-        self.audio.tick(mix as i16);
+        if let Some(avg) = self.audio.tick_sample(mix as i16) {
+            self.congo_sound.feed_psg(avg);
+        }
     }
 
-    /// Drain mixed audio into the output buffer.
+    /// Drain the mixed PSG + percussion audio into the output buffer.
     pub fn fill_audio(&mut self, buffer: &mut [i16]) -> usize {
-        self.audio.fill_audio(buffer)
+        self.congo_sound.fill_audio(buffer)
+    }
+
+    /// Push the current PPI port B/C latches to the percussion gates.
+    pub fn sync_percussion(&mut self) {
+        let port_b = self.ppi.read_output_b();
+        let port_c = self.ppi.read_output_c();
+        self.congo_sound.set_triggers(port_b, port_c);
     }
 
     /// Render one native screen scanline (`abs_y` = bitmap row 0-239).
@@ -956,6 +972,7 @@ impl CongoBongoBoard {
         self.sn1_clock.reset();
         self.sn2_clock.reset();
         self.audio.reset();
+        self.congo_sound.reset();
 
         self.main_map.region_data_mut(MainRegion::Ram).fill(0);
         self.main_map.region_data_mut(MainRegion::VideoRam).fill(0);
@@ -1023,6 +1040,7 @@ impl Saveable for CongoBongoBoard {
         self.sn1_clock.save_state(w);
         self.sn2_clock.save_state(w);
         self.audio.save_state(w);
+        self.congo_sound.save_state(w);
         w.write_u64_le(self.clock);
         w.write_bool(self.vblank_irq_pending);
     }
@@ -1059,6 +1077,7 @@ impl Saveable for CongoBongoBoard {
         self.sn1_clock.load_state(r)?;
         self.sn2_clock.load_state(r)?;
         self.audio.load_state(r)?;
+        self.congo_sound.load_state(r)?;
         self.clock = r.read_u64_le()?;
         self.vblank_irq_pending = r.read_bool()?;
         Ok(())
@@ -1200,7 +1219,11 @@ impl Bus for CongoBongoSystem {
                     .sound_map
                     .write_backing(0x4000 | (addr & 0x07FF), data),
                 0x6000..=0x7FFF => self.board.sn1.write(data),
-                0x8000..=0x9FFF => self.board.ppi.write(addr & 0x03, data),
+                0x8000..=0x9FFF => {
+                    self.board.ppi.write(addr & 0x03, data);
+                    // The PPI port B/C outputs drive the percussion triggers.
+                    self.board.sync_percussion();
+                }
                 0xA000..=0xBFFF => self.board.sn2.write(data),
                 _ => {}
             },
