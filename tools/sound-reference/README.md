@@ -14,13 +14,28 @@ Born out of the Asteroids migration — see the case study in
   the discrete walk/jump/stomp from the DAC music.
 - `analyze_wav.py` — segments a capture by time and prints, per effect, the
   dominant FFT peak and the spectral centroid (DC removed). Reads WAVs with the
-  stdlib `wave` module; needs only `numpy`. Pass `--llander` / `--dkong` (or
-  `--segments=a:b:label,...`) to select a board's timeline.
+  stdlib `wave` module; needs only `numpy`. Pass `--llander` / `--dkong` /
+  `--galaxian` (or `--segments=a:b:label,...`) to select a board's timeline.
 - The Phosphor side lives in the `machines/examples/` capture binaries
   ([`asteroid_capture.rs`](../../machines/examples/asteroid_capture.rs),
   [`llander_capture.rs`](../../machines/examples/llander_capture.rs),
   [`dkong_capture.rs`](../../machines/examples/dkong_capture.rs)), which drive the
   device through the same timeline.
+
+## Running the analyzer (numpy)
+
+The analyzer needs numpy. On **NixOS** a `pip`-installed wheel fails at import
+(its bundled C extensions can't find `libstdc++.so.6` / `libz.so.1`), so use the
+nix-provided, properly-linked Python. Drop into a shell that has numpy and then
+run the `python3 …` commands below as-is:
+
+```bash
+# NixOS (preferred): a nixpkgs python with numpy already wired up.
+nix-shell -p 'python3.withPackages(ps: [ps.numpy])'
+
+# Elsewhere: a venv works — then prefix the python3 calls with /tmp/sndvenv/bin/.
+python3 -m venv /tmp/sndvenv && /tmp/sndvenv/bin/pip install -q numpy
+```
 
 ## Usage
 
@@ -33,9 +48,8 @@ mame asteroid -nothrottle -seconds_to_run 18 -video none \
 # 2. Phosphor capture (writes /tmp/phosphor_asteroid.wav)
 cargo run -p phosphor-machines --example asteroid_capture
 
-# 3. Compare (numpy in a venv)
-python3 -m venv /tmp/sndvenv && /tmp/sndvenv/bin/pip install -q numpy
-/tmp/sndvenv/bin/python tools/sound-reference/analyze_wav.py \
+# 3. Compare (from a numpy-capable shell — see above)
+python3 tools/sound-reference/analyze_wav.py \
     /tmp/asteroid_ref.wav /tmp/phosphor_asteroid.wav
 ```
 
@@ -46,7 +60,7 @@ mame llander -nothrottle -seconds_to_run 12 -video none \
      -autoboot_script $(pwd)/tools/sound-reference/drive_llander_sound.lua \
      -wavwrite /tmp/llander_ref.wav
 cargo run -p phosphor-machines --example llander_capture
-/tmp/sndvenv/bin/python tools/sound-reference/analyze_wav.py --llander \
+python3 tools/sound-reference/analyze_wav.py --llander \
     /tmp/llander_ref.wav /tmp/llander_phosphor.wav
 ```
 
@@ -61,7 +75,7 @@ mame galaxian -nothrottle -seconds_to_run 10 -video none \
      -autoboot_script $(pwd)/tools/sound-reference/drive_galaxian_sound.lua \
      -wavwrite /tmp/galaxian_ref.wav
 cargo run -p phosphor-machines --example galaxian_capture
-/tmp/sndvenv/bin/python tools/sound-reference/analyze_wav.py --galaxian \
+python3 tools/sound-reference/analyze_wav.py --galaxian \
     /tmp/galaxian_ref.wav /tmp/galaxian_phosphor.wav
 ```
 
