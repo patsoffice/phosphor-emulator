@@ -268,7 +268,11 @@ impl GalaxianSound {
         // The band-pass output sits on the op-amp's vRef rail; the downstream
         // output coupling (cAmp) removes the DC, so strip it here for mixing.
         let hit_vref_off = b.constant("hit_vref_off", -hit_vref);
-        let hit = b.add("hit", &[hit_bp, hit_vref_off]);
+        let hit_ac = b.add("hit_ac", &[hit_bp, hit_vref_off]);
+        // Calibration trim: MAME's own netlist flags the hit as too quiet ("op-amp
+        // band filter" note, R40 0.6 trim); the capture confirms our band-pass
+        // output runs ~1.25x low, so lift it to match the explosion's punch.
+        let hit = b.gain("hit", hit_ac, 1.25);
 
         // --- FIRE (NODE_170..182): noise-jittered 555 VCO gating an RC -------
         let fire4 = b.gain("fire4", fire_in, v_on); // NODE_171 = TTL_OUT·fire
@@ -301,13 +305,17 @@ impl GalaxianSound {
         // The CD4066 VOL switches add parallel melody resistors (R49/R52). With
         // the combined TuneVoice we model this as a melody-level gain rather
         // than per-tap conductance switching.
-        let vol_base = b.constant("vol_base", 0.4);
+        let vol_base = b.constant("vol_base", 0.25);
         let vol1_g = b.gain("vol1_g", vol_in[0], 0.3);
         let vol2_g = b.gain("vol2_g", vol_in[1], 0.3);
         let vol_gain = b.add("vol_gain", &[vol_base, vol1_g, vol2_g]);
         let tune_vol = b.multiply("tune_vol", tune, vol_gain);
-        // Melody through R51, background through R34 (galaxian_mixerpre_desc).
-        let pre = b.resistor_mixer("pre", &[(tune_vol, 33.0e3), (bg, 5.1e3)], None);
+        // The melody mixes through R51 (QA) and R50 (QC), plus R49 (QC) and R52
+        // (QD) switched in by VOL1/VOL2 — both on gives ~4.1k in parallel. Using
+        // that parallel value (with vol_gain modelling the switch level) keeps
+        // the melody-vs-background balance MAME has; a lone R51 buries the tune.
+        let r_melody = 1.0 / (1.0 / 33.0e3 + 1.0 / 22.0e3 + 1.0 / 10.0e3 + 1.0 / 15.0e3);
+        let pre = b.resistor_mixer("pre", &[(tune_vol, r_melody), (bg, 5.1e3)], None);
 
         // --- Final mix (NODE_280): R34/R40/R43 into the R91 load -------------
         let (r34, r40, r43, r91) = (5.1e3, 2.2e3 * 0.6, 2.2e3, 10.0e3); // R40 has a 0.6 volume trim
@@ -319,7 +327,7 @@ impl GalaxianSound {
         // against a 100 k final-stage impedance.
         let out = b.rc_high_pass("out", mix, 100.0e3, 0.1e-6); // C46
         // Calibrated to MAME's 32767/5 output scale.
-        b.output(out, OutputGain::linear(3.0));
+        b.output(out, OutputGain::linear(0.8));
 
         Self {
             circuit: b.build(),
