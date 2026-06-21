@@ -236,6 +236,26 @@ fn create_from_first_rom_set(
     entry: &phosphor_machines::registry::MachineEntry,
     path: &str,
 ) -> Box<dyn phosphor_core::core::machine::FrontendMachine> {
+    // Surface the most common failure — a ROM path that doesn't exist on disk —
+    // with a clear, dedicated message before we even try each ROM name. Without
+    // this, a missing directory only shows up as a generic "I/O error: ROM path
+    // not found" buried under cargo's own output, which is easy to miss.
+    if !std::path::Path::new(path).exists() {
+        eprintln!("ROM path not found: {path}");
+        eprintln!(
+            "  Expected a ROM directory or .zip for '{}' here.",
+            entry.name
+        );
+        eprintln!(
+            "  Pass a path explicitly:  phosphor {} /path/to/roms",
+            entry.name
+        );
+        if let Some(dir) = config::config_dir() {
+            eprintln!("  or fix rom_path in {}", dir.join("config.toml").display());
+        }
+        std::process::exit(1);
+    }
+
     let mut last_err = None;
     for name in entry.rom_names {
         let rom_set = match rom_path::load_rom_set(name, path) {
@@ -256,8 +276,11 @@ fn create_from_first_rom_set(
             "no ROM names configured",
         ))
     });
-    eprintln!("Failed to load ROMs: {err}");
-    eprintln!("Tried: {}", entry.rom_names.join(", "));
+    eprintln!(
+        "Failed to load ROMs for '{}' from {path}: {err}",
+        entry.name
+    );
+    eprintln!("  Tried ROM set names: {}", entry.rom_names.join(", "));
     std::process::exit(1);
 }
 
