@@ -597,3 +597,337 @@ fn save_load_preserves_filter_state() {
     assert_eq!(na, nb);
     assert_eq!(a[..na], bb[..nb]);
 }
+
+// ===========================================================================
+// Phase 3: NE555 / op-amp analog primitives
+// ===========================================================================
+
+/// Higher sim rate so the per-step 555 charge/discharge faithfully tracks
+/// oscillators in the low-kHz range (the documented simplification).
+const SIM: u64 = 192_000;
+
+// -- NE555 astable ----------------------------------------------------------
+
+/// Drive an astable square output and recover its frequency from rising edges.
+fn astable_freq(r1: f64, r2: f64, c: f64) -> f64 {
+    let mut b = builder_1to1(SIM);
+    let osc = b.ne555_astable("OSC", None, r1, r2, c, 5.0, Output555::Square);
+    let mut c_ = b.build();
+    step_n(&mut c_, 1_000); // settle into steady oscillation
+
+    let steps = 192_000usize; // 1 s of simulation
+    let mut prev = c_.value(osc);
+    let mut edges = 0u32;
+    for _ in 0..steps {
+        c_.tick(1);
+        let cur = c_.value(osc);
+        if prev < 1.0 && cur >= 1.0 {
+            edges += 1;
+        }
+        prev = cur;
+    }
+    edges as f64 / (steps as f64 / SIM as f64)
+}
+
+#[test]
+fn ne555_astable_oscillates_near_freq_of_555() {
+    let (r1, r2, c) = (1_000.0, 1_000.0, 0.1e-6);
+    // MAME's FREQ_OF_555 estimate for the classic astable.
+    let expected = 1.49 / ((r1 + 2.0 * r2) * c);
+    let measured = astable_freq(r1, r2, c);
+    assert!(
+        (measured - expected).abs() < 0.1 * expected,
+        "555 astable freq {measured:.1} Hz should be within 10% of {expected:.1} Hz"
+    );
+}
+
+#[test]
+fn ne555_astable_frequency_scales_with_components() {
+    // Doubling C (slower RC) roughly halves the frequency.
+    let fast = astable_freq(1_000.0, 1_000.0, 0.1e-6);
+    let slow = astable_freq(1_000.0, 1_000.0, 0.2e-6);
+    let ratio = fast / slow;
+    assert!(
+        (1.8..2.2).contains(&ratio),
+        "doubling C should roughly halve freq, got ratio {ratio:.3}"
+    );
+}
+
+#[test]
+fn ne555_astable_control_voltage_shifts_frequency() {
+    // A lower control voltage lowers the threshold, so the cap reaches it
+    // sooner each cycle -> a higher oscillation frequency.
+    fn cv_freq(cv: f64) -> f64 {
+        let mut b = builder_1to1(SIM);
+        let cv_in = b.constant("CV", cv);
+        let osc = b.ne555_astable(
+            "OSC",
+            Some(cv_in),
+            1_000.0,
+            1_000.0,
+            0.1e-6,
+            5.0,
+            Output555::Square,
+        );
+        let mut c = b.build();
+        step_n(&mut c, 1_000);
+        let mut prev = c.value(osc);
+        let mut edges = 0u32;
+        let steps = 192_000usize;
+        for _ in 0..steps {
+            c.tick(1);
+            let cur = c.value(osc);
+            if prev < 1.0 && cur >= 1.0 {
+                edges += 1;
+            }
+            prev = cur;
+        }
+        edges as f64 / (steps as f64 / SIM as f64)
+    }
+    let low = cv_freq(2.0);
+    let high = cv_freq(3.5);
+    assert!(
+        low > high * 1.1,
+        "lower CV {low:.1} Hz should oscillate faster than higher CV {high:.1} Hz"
+    );
+}
+
+// -- NE555 constant-current VCO ---------------------------------------------
+
+/// Frequency of the CC VCO's capacitor sawtooth at a given control voltage,
+/// recovered by counting the sharp resets.
+fn cc_freq(vin: f64) -> f64 {
+    let mut b = builder_1to1(SIM);
+    let vin_in = b.data_input("VIN", 1.0);
+    let cc = b.ne555_cc(
+        "CC",
+        vin_in,
+        100e3,
+        0.01e-6,
+        5.0,
+        5.0,
+        0.7,
+        Output555::Capacitor,
+    );
+    let mut c = b.build();
+    c.set_data(vin_in, vin);
+    step_n(&mut c, 2_000);
+
+    let steps = 192_000usize;
+    let mut prev = c.value(cc);
+    let mut resets = 0u32;
+    for _ in 0..steps {
+        c.tick(1);
+        let cur = c.value(cc);
+        if prev - cur > 0.5 {
+            resets += 1;
+        }
+        prev = cur;
+    }
+    resets as f64 / (steps as f64 / SIM as f64)
+}
+
+#[test]
+fn ne555_cc_frequency_scales_with_control_voltage() {
+    // The control voltage sets both the charging current and the cap's voltage
+    // ceiling (vin + junction); it must clear the 2/3·Vcc threshold to run.
+    // Within the oscillating band a higher vin means a smaller current, a
+    // slower ramp, and a lower frequency.
+    let fast = cc_freq(3.0);
+    let slow = cc_freq(4.0);
+    assert!(fast > 100.0, "expected an audible CC VCO, got {fast:.1} Hz");
+    assert!(
+        fast > slow * 1.2,
+        "raising vin should lower the CC VCO freq: {fast:.1} Hz vs {slow:.1} Hz"
+    );
+}
+
+#[test]
+fn ne555_cc_capacitor_stays_between_trigger_and_threshold() {
+    let mut b = builder_1to1(SIM);
+    let vin_in = b.constant("VIN", 3.5);
+    let cc = b.ne555_cc(
+        "CC",
+        vin_in,
+        100e3,
+        0.01e-6,
+        5.0,
+        5.0,
+        0.7,
+        Output555::Capacitor,
+    );
+    let mut c = b.build();
+    step_n(&mut c, 2_000);
+    let mut lo = f64::INFINITY;
+    let mut hi = f64::NEG_INFINITY;
+    for _ in 0..20_000 {
+        c.tick(1);
+        let v = c.value(cc);
+        lo = lo.min(v);
+        hi = hi.max(v);
+    }
+    // Oscillates within the 1/3..2/3 Vcc band (1.667 V .. 3.333 V).
+    assert!(
+        lo >= 1.6 && hi <= 3.4,
+        "cap swing {lo:.3}..{hi:.3} V out of band"
+    );
+    assert!(
+        hi - lo > 1.0,
+        "cap should actually swing, got {:.3} V",
+        hi - lo
+    );
+}
+
+// -- Op-amp band-pass -------------------------------------------------------
+
+/// Output energy of the band-pass when driven by a unit sine at `freq_hz`.
+fn bandpass_energy_at(freq_hz: f64) -> f64 {
+    let mut b = builder_1to1(SIM);
+    let drive = b.external_source("DRIVE");
+    // Galaxian HIT band-pass values (fc ~ 168 Hz).
+    let bp = b.op_amp_band_pass("BP", drive, &[150e3, 22e3], 470e3, 0.01e-6, 0.01e-6, 0.0);
+    let mut c = b.build();
+
+    let dt = 1.0 / SIM as f64;
+    let w = std::f64::consts::TAU * freq_hz;
+    let mut t = 0.0;
+    let drive_sine = |c: &mut DiscreteCircuit, t: f64| {
+        c.set_external(drive, (w * t).sin());
+        c.tick(1);
+    };
+    for _ in 0..SIM as usize / 4 {
+        drive_sine(&mut c, t); // warm up ~0.25 s
+        t += dt;
+    }
+    let mut e = 0.0;
+    for _ in 0..SIM as usize / 4 {
+        drive_sine(&mut c, t);
+        t += dt;
+        let v = c.value(bp);
+        e += v * v;
+    }
+    e
+}
+
+#[test]
+fn op_amp_band_pass_peaks_near_center_frequency() {
+    // fc = 1/(2*pi*sqrt(rTotal*rF*c1*c2)); rTotal = 150k||22k.
+    let r_total = 1.0 / (1.0 / 150e3 + 1.0 / 22e3);
+    let fc = 1.0 / (std::f64::consts::TAU * (r_total * 470e3 * 0.01e-6_f64 * 0.01e-6).sqrt());
+    assert!((150.0..190.0).contains(&fc), "fc sanity {fc:.1} Hz");
+
+    let at_center = bandpass_energy_at(fc);
+    let below = bandpass_energy_at(fc / 8.0);
+    let above = bandpass_energy_at(fc * 8.0);
+    assert!(
+        at_center > below * 3.0 && at_center > above * 3.0,
+        "band-pass center energy {at_center:.3} should dominate {below:.3}/{above:.3}"
+    );
+}
+
+// -- Gated RC discharge -----------------------------------------------------
+
+#[test]
+fn rc_disc5_decays_with_rc_after_input_drops() {
+    let (r, c_val) = (1_000.0, 1e-6); // tau = 1 ms = 192 steps at 192 kHz
+    let mut b = builder_1to1(SIM);
+    let input = b.data_input("IN", 1.0);
+    let gate = b.logic_input("GATE");
+    let rc = b.rc_disc5("RC", input, gate, r, c_val);
+    let mut c = b.build();
+
+    // Gate enabled, input high -> cap jumps to (5 - 0.7 diode drop).
+    c.set_logic(gate, true);
+    c.set_data(input, 5.0);
+    step_n(&mut c, 50);
+    let charged = c.value(rc);
+    assert!(
+        (charged - 4.3).abs() < 0.05,
+        "diode-dropped charge {charged:.3} V"
+    );
+
+    // Drop the input: the cap decays toward 0 with tau = R*C.
+    c.set_data(input, 0.0);
+    let tau_steps = (r * c_val * SIM as f64).round() as usize; // ~192
+    step_n(&mut c, tau_steps);
+    let after_tau = c.value(rc) / charged;
+    assert!(
+        (0.30..0.42).contains(&after_tau),
+        "after one tau the cap should be ~e^-1 of its peak, got {after_tau:.3}"
+    );
+}
+
+#[test]
+fn rc_disc5_mutes_output_when_gate_low() {
+    let mut b = builder_1to1(SIM);
+    let input = b.data_input("IN", 1.0);
+    let gate = b.logic_input("GATE");
+    let rc = b.rc_disc5("RC", input, gate, 1_000.0, 1e-6);
+    let mut c = b.build();
+
+    c.set_data(input, 5.0); // gate left low
+    step_n(&mut c, 100);
+    assert_eq!(c.value(rc), 0.0, "output muted while the gate is low");
+}
+
+// -- Save / load of the new primitive state ---------------------------------
+
+fn analog_555_circuit() -> DiscreteCircuit {
+    let mut b = DiscreteCircuitBuilder::new(SIM, SIM);
+    let cv = b.constant("CV", 3.0);
+    let ast = b.ne555_astable(
+        "AST",
+        Some(cv),
+        1_000.0,
+        1_000.0,
+        0.1e-6,
+        5.0,
+        Output555::Square,
+    );
+    let vin = b.constant("VIN", 1.0);
+    let cc = b.ne555_cc(
+        "CC",
+        vin,
+        100e3,
+        0.01e-6,
+        5.0,
+        5.0,
+        0.7,
+        Output555::Capacitor,
+    );
+    let gate = b.fixed_square("GATE", 400.0);
+    let rc = b.rc_disc5("RC", ast, gate, 1_000.0, 1e-6);
+    let bp = b.op_amp_band_pass("BP", cc, &[150e3, 22e3], 470e3, 0.01e-6, 0.01e-6, 0.0);
+    let mix = b.add("MIX", &[rc, bp]);
+    b.output(mix, OutputGain::linear(0.1));
+    b.build()
+}
+
+#[test]
+fn save_load_preserves_analog_555_state() {
+    let mut c1 = analog_555_circuit();
+    step_n(&mut c1, 3_000);
+    let mut discard = vec![0i16; 8192];
+    while c1.fill_audio(&mut discard) > 0 {}
+
+    let mut w = StateWriter::new();
+    c1.save_state(&mut w);
+    let data = w.into_vec();
+
+    let mut c2 = analog_555_circuit();
+    let mut r = StateReader::new(&data);
+    c2.load_state(&mut r).unwrap();
+
+    for i in 0..8u16 {
+        assert_eq!(c1.value(NodeId(i)), c2.value(NodeId(i)), "node {i}");
+    }
+
+    step_n(&mut c1, 500);
+    step_n(&mut c2, 500);
+    let mut a = vec![0i16; 4096];
+    let mut bb = vec![0i16; 4096];
+    let na = c1.fill_audio(&mut a);
+    let nb = c2.fill_audio(&mut bb);
+    assert_eq!(na, nb);
+    assert_eq!(a[..na], bb[..nb]);
+}

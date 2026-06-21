@@ -94,6 +94,15 @@ pub enum FilterMode {
     HighPass,
 }
 
+/// Output tap of an NE555 oscillator primitive.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Output555 {
+    /// The logic square wave (`out_high` while charging, 0 V while discharging).
+    Square,
+    /// The capacitor voltage (a ramp/triangle between the trigger and threshold).
+    Capacitor,
+}
+
 /// Final output scaling applied before the signal enters the resampler.
 #[derive(Clone, Copy, Debug)]
 pub struct OutputGain(f64);
@@ -523,6 +532,158 @@ impl DiscreteCircuitBuilder {
             .map(|b| vref * (1u64 << b) as f64 / full)
             .collect();
         self.dac_weighted(name, src, &weights)
+    }
+
+    /// NE555 astable oscillator (port of MAME `dsd_555_astable`) from real
+    /// component values: charge resistor `r1` (ohms), discharge resistor `r2`,
+    /// timing cap `c` (farads), and supply `vcc` (volts). With `cv_src = None`
+    /// it free-runs near `1.49 / ((r1 + 2·r2)·c)` Hz; with a control-voltage
+    /// source it modulates around that. `output` selects the square wave or the
+    /// capacitor voltage. The charge/discharge exponents are precomputed here
+    /// from `sim_rate`; the sub-sample threshold-crossing loop is dropped, which
+    /// is faithful while `sim_rate` is well above the oscillator frequency.
+    #[allow(clippy::too_many_arguments)]
+    pub fn ne555_astable(
+        &mut self,
+        name: &str,
+        cv_src: Option<NodeId>,
+        r1: f64,
+        r2: f64,
+        c: f64,
+        vcc: f64,
+        output: Output555,
+    ) -> NodeId {
+        let dt = 1.0 / self.sim_rate as f64;
+        self.push_node(
+            name,
+            NodeKind::Ne555Astable {
+                cv_src,
+                exp_charge: 1.0 - (-dt / ((r1 + r2) * c)).exp(),
+                exp_discharge: 1.0 - (-dt / (r2 * c)).exp(),
+                v_charge: vcc,
+                threshold_fixed: vcc * 2.0 / 3.0,
+                trigger_fixed: vcc / 3.0,
+                out_high: vcc - 1.2,
+                output,
+                cap_v: 0.0,
+                flip_flop: true,
+            },
+            ClockDomain::BoardCycle,
+        )
+    }
+
+    /// NE555 constant-current VCO, simple type (port of `dsd_555_cc`). A
+    /// transistor current source `i = (v_cc_source − (vin + junction)) / r`
+    /// (clamped ≥ 0) ramps cap `c` from 1/3·`vcc` to 2/3·`vcc`, then it snaps
+    /// back; the control voltage at `vin_src` sets the slope, so higher `vin`
+    /// means a slower ramp and a lower frequency. `output` selects the cap
+    /// voltage (the usual VCO tap) or the square wave.
+    #[allow(clippy::too_many_arguments)]
+    pub fn ne555_cc(
+        &mut self,
+        name: &str,
+        vin_src: impl Into<NodeId>,
+        r: f64,
+        c: f64,
+        vcc: f64,
+        v_cc_source: f64,
+        junction: f64,
+        output: Output555,
+    ) -> NodeId {
+        self.push_node(
+            name,
+            NodeKind::Ne555Cc {
+                vin_src: vin_src.into(),
+                r,
+                c,
+                v_cc_source,
+                junction,
+                threshold: vcc * 2.0 / 3.0,
+                trigger: vcc / 3.0,
+                out_high: vcc - 1.2,
+                output,
+                cap_v: 0.0,
+                flip_flop: true,
+            },
+            ClockDomain::BoardCycle,
+        )
+    }
+
+    /// Op-amp multiple-feedback band-pass (port of `dst_op_amp_filt`
+    /// `IS_BAND_PASS_1M`). `src` enters through the first of the `r_in` input
+    /// resistors (any further entries are reference resistors to `v_ref`); `rf`
+    /// is the feedback resistor and `c1`/`c2` the feedback caps. The center
+    /// frequency `1/(2π·√(rTotal·rf·c1·c2))`, damping, and gain set a biquad
+    /// whose coefficients are precomputed here via a pre-warped bilinear
+    /// transform at `sim_rate`. Unlike [`band_pass`](Self::band_pass) (a
+    /// Chamberlin filter parameterised by center/Q) this matches the op-amp's
+    /// actual R/C response.
+    #[allow(clippy::too_many_arguments)]
+    pub fn op_amp_band_pass(
+        &mut self,
+        name: &str,
+        src: impl Into<NodeId>,
+        r_in: &[f64],
+        rf: f64,
+        c1: f64,
+        c2: f64,
+        v_ref: f64,
+    ) -> NodeId {
+        assert!(!r_in.is_empty(), "op_amp_band_pass needs an input resistor");
+        let sr = self.sim_rate as f64;
+        let r_total = 1.0 / r_in.iter().map(|r| 1.0 / r).sum::<f64>();
+        let fc = 1.0 / (std::f64::consts::TAU * (r_total * rf * c1 * c2).sqrt());
+        let d = (c1 + c2) / (rf / r_total * c1 * c2).sqrt();
+        let gain = -rf / r_total * c2 / (c1 + c2);
+        // Pre-warped bilinear transform (MAME `calculate_filter2_coefficients`).
+        let two_over_t = 2.0 * sr;
+        let two_over_t2 = two_over_t * two_over_t;
+        let wc = sr * 2.0 * (std::f64::consts::PI * fc / sr).tan();
+        let wc2 = wc * wc;
+        let den = two_over_t2 + d * wc * two_over_t + wc2;
+        let b0 = gain * (d * wc * two_over_t / den);
+        self.push_node(
+            name,
+            NodeKind::OpAmpBandPass {
+                src: src.into(),
+                a1: 2.0 * (-two_over_t2 + wc2) / den,
+                a2: (two_over_t2 - d * wc * two_over_t + wc2) / den,
+                b0,
+                b2: -b0,
+                in_gain: r_total / r_in[0],
+                v_ref,
+                x1: 0.0,
+                x2: 0.0,
+                y1: 0.0,
+                y2: 0.0,
+            },
+            ClockDomain::BoardCycle,
+        )
+    }
+
+    /// Gated diode + R//C discharge (port of `dst_rcdisc5`). A 0.7 V diode feeds
+    /// the parallel `r` (ohms) / `c` (farads): while `enable_src` is high the cap
+    /// follows the input upward instantly and decays downward with `τ = r·c`;
+    /// while low it holds charge and outputs 0. Used to gate noise bursts.
+    pub fn rc_disc5(
+        &mut self,
+        name: &str,
+        in_src: impl Into<NodeId>,
+        enable_src: impl Into<NodeId>,
+        r: f64,
+        c: f64,
+    ) -> NodeId {
+        let dt = 1.0 / self.sim_rate as f64;
+        self.push_node(
+            name,
+            NodeKind::RcDisc5 {
+                in_src: in_src.into(),
+                enable_src: enable_src.into(),
+                charge_exp: 1.0 - (-dt / (r * c)).exp(),
+                cap_v: 0.0,
+            },
+            ClockDomain::BoardCycle,
+        )
     }
 
     /// A circuit-specific custom component reading `inputs`.
