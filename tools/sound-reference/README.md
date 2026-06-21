@@ -50,6 +50,21 @@ cargo run -p phosphor-machines --example llander_capture
     /tmp/llander_ref.wav /tmp/llander_phosphor.wav
 ```
 
+Galaxian uses the `galaxian` driver/example and `--galaxian`. The Lua parks the
+main Z80 (so the running game stops writing its own sound registers) and pets the
+watchdog, then drives the discrete board's registers (pitch 0x7800, LFO
+0x6004-7, sound latch 0x6800-7) one voice per window: tune, wolf-whistle, fire,
+hit:
+
+```bash
+mame galaxian -nothrottle -seconds_to_run 10 -video none \
+     -autoboot_script $(pwd)/tools/sound-reference/drive_galaxian_sound.lua \
+     -wavwrite /tmp/galaxian_ref.wav
+cargo run -p phosphor-machines --example galaxian_capture
+/tmp/sndvenv/bin/python tools/sound-reference/analyze_wav.py --galaxian \
+    /tmp/galaxian_ref.wav /tmp/galaxian_phosphor.wav
+```
+
 The two tables should line up per effect (compare the centroid column; the single
 peak bin is unstable for swept tones).
 

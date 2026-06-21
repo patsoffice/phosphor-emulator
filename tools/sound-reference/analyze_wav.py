@@ -39,6 +39,14 @@ DKONG_SEGMENTS = [
     (5, 7, "stomp"),
 ]
 
+# matches drive_galaxian_sound.lua / galaxian_capture.rs.
+GALAXIAN_SEGMENTS = [
+    (1, 3, "tune"),
+    (3, 5, "whistle"),
+    (5, 7, "fire"),
+    (7, 9, "hit"),
+]
+
 SEGMENTS = ASTEROID_SEGMENTS  # default; override with --llander or --segments
 
 def parse_segments(spec):
@@ -90,6 +98,8 @@ if __name__ == "__main__":
             segments = LLANDER_SEGMENTS
         elif a == "--dkong":
             segments = DKONG_SEGMENTS
+        elif a == "--galaxian":
+            segments = GALAXIAN_SEGMENTS
         elif a.startswith("--segments="):
             segments = parse_segments(a.split("=", 1)[1])
         else:
