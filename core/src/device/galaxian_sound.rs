@@ -24,13 +24,12 @@
 //! op-amp band-pass, and CD4066 switch impedances component-by-component. The
 //! discrete framework has no 555/op-amp primitives, so the oscillators and
 //! envelopes here are framework primitives (square/triangle + RC envelope +
-//! state-variable band-pass + 1-pole RC filters) whose levels and filter
-//! cutoffs were calibrated against a MAME `galaxian` capture using the
-//! `tools/sound-reference` rig (`analyze_wav.py --galaxian`). Per-voice
-//! spectral centroids and RMS levels track MAME closely for the tune and
-//! wolf-whistle; the fire and hit are close but a touch less bright / less dark
-//! respectively, the residual limit of 1-pole filters versus the real op-amp
-//! network. The register *interface* and voice *structure* are faithful.
+//! 1-pole RC filters). Their levels, decays, and filter cutoffs were tuned with
+//! the `tools/sound-reference` rig: the tune/wolf-whistle against a MAME
+//! `galaxian` capture, and the fire and hit (shoot / explosion) against the
+//! original recorded MAME samples `shot.wav` / `death.wav` — a bright ~0.6 s
+//! noise burst and a dark (~630 Hz), ~2.5 s noise rumble. The register
+//! *interface* and voice *structure* are faithful.
 
 use crate::core::debug::{DebugRegister, Debuggable};
 use crate::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
@@ -51,26 +50,61 @@ const SIM_RATE: u64 = 192_000;
 const NOISE_RATE: f64 = 60.0 * 264.0 / 2.0; // 7920 Hz
 
 // ---------------------------------------------------------------------------
-// pitch → note-clock frequency (no divide primitive in the framework)
+// Background-melody voice (the pitched 74393 tap chord)
 // ---------------------------------------------------------------------------
 
-/// Converts the 8-bit pitch latch into the 74393 note-clock frequency
-/// `SOUND_CLOCK / (256 - pitch)`, clamped to keep the derived square tones
-/// below the simulation Nyquist.
-struct PitchToFreq;
+/// Frequencies above this (Hz) are inaudible (and would alias if synthesized at
+/// the sim rate), so taps above it are muted rather than capped. This matters at
+/// power-on / attract: the game parks the pitch latch near 0xFF, which makes the
+/// note clock ~MHz and every tap ultrasonic — silent on real hardware. Capping
+/// the clock instead would fold that into a constant audible tone.
+const AUDIBLE_CEILING: f64 = 16_000.0;
 
-impl CustomComponent for PitchToFreq {
-    fn reset(&mut self) {}
+/// The background melody: a note clock `SOUND_CLOCK / (256 - pitch)` feeding a
+/// 74393 counter whose QA(/2), QC(/8), QD(/16) taps are summed (QC weighted
+/// twice, matching MAME's mixer). Synthesized directly so ultrasonic taps can be
+/// muted (see [`AUDIBLE_CEILING`]) instead of aliased.
+#[derive(Default)]
+struct TuneVoice {
+    phase: [f64; 3],
+}
 
-    fn step(&mut self, inputs: &[f64], _dt: f64) -> f64 {
-        let pitch = inputs[0].round().clamp(0.0, 255.0);
-        let freq = SOUND_CLOCK / (256.0 - pitch);
-        // Cap so even the /2 tap stays well under SIM_RATE/2.
-        freq.min(40_000.0)
+impl TuneVoice {
+    const TAPS: [f64; 3] = [0.5, 0.125, 0.0625]; // QA, QC, QD divisors
+    const WEIGHTS: [f64; 3] = [1.0, 2.0, 1.0]; // QC mixed twice
+}
+
+impl CustomComponent for TuneVoice {
+    fn reset(&mut self) {
+        self.phase = [0.0; 3];
     }
 
-    fn save_state(&self, _w: &mut StateWriter) {}
-    fn load_state(&mut self, _r: &mut StateReader) -> Result<(), SaveError> {
+    fn step(&mut self, inputs: &[f64], dt: f64) -> f64 {
+        let pitch = inputs[0].round().clamp(0.0, 255.0);
+        let f_count = SOUND_CLOCK / (256.0 - pitch);
+        let mut out = 0.0;
+        for i in 0..3 {
+            let f = f_count * Self::TAPS[i];
+            if f <= AUDIBLE_CEILING {
+                self.phase[i] = (self.phase[i] + f * dt).fract();
+                let square = if self.phase[i] < 0.5 { 1.0 } else { -1.0 };
+                out += square * Self::WEIGHTS[i];
+            }
+            // else: ultrasonic tap is inaudible — contributes nothing.
+        }
+        out
+    }
+
+    fn save_state(&self, w: &mut StateWriter) {
+        for p in self.phase {
+            w.write_f64_le(p);
+        }
+    }
+
+    fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
+        for p in self.phase.iter_mut() {
+            *p = r.read_f64_le()?;
+        }
         Ok(())
     }
 }
@@ -118,27 +152,25 @@ impl GalaxianSound {
         let vol_in = [b.logic_input("vol1"), b.logic_input("vol2")];
 
         // --- Shared noise source (17-bit LFSR sampled by the 2V flip-flop) --
+        // taps (11, 0) give the full maximal 2^17-1 period for this Fibonacci
+        // structure — true white noise. (Many "obvious" 17-bit pairs, e.g.
+        // (16, 13), collapse to a tiny cycle here and buzz like a tone.)
         let noise = b.lfsr_noise(
             "noise",
             NOISE_RATE,
             LfsrSpec {
                 width: 17,
-                taps: (16, 13),
+                taps: (11, 0),
                 seed: 0x1_FFFF,
             },
         );
 
         // --- Background tone: pitched 74393 tap chord ------------------------
-        // Note clock, then the QA(/2), QC(/8), QD(/16) decoded square taps.
-        let note_clk = b.custom("note_clk", vec![pitch_in.into()], Box::new(PitchToFreq));
-        let f_qa = b.gain("f_qa", note_clk, 0.5);
-        let f_qc = b.gain("f_qc", note_clk, 0.125);
-        let f_qd = b.gain("f_qd", note_clk, 0.0625);
-        let qa = b.variable_square("qa", f_qa);
-        let qc = b.variable_square("qc", f_qc);
-        let qd = b.variable_square("qd", f_qd);
-        // MAME mixes QA, QC, QC, QD (QC weighted twice).
-        let tune = b.add("tune", &[qa, qc, qc, qd]);
+        let tune = b.custom(
+            "tune",
+            vec![pitch_in.into()],
+            Box::new(TuneVoice::default()),
+        );
         let tune_lvl = b.gain("tune_lvl", tune, 0.16);
 
         // --- Wolf-whistle: three background oscillators swept by the DAC -----
@@ -171,36 +203,51 @@ impl GalaxianSound {
         let vol_gain = b.add("vol_gain", &[vol_base, vol1_g, vol2_g]);
         let pre_vol = b.multiply("pre_vol", pre, vol_gain);
 
-        // --- HIT / explosion: enveloped noise, band-pass then low-pass -------
-        // MAME's hit is a loud, dark (~1.5 kHz centroid) rumble; the op-amp band
-        // filter + mixer caps roll off the noise hiss, so we band-pass the
-        // enveloped noise and low-pass the result.
-        // A soft (~4 ms) attack avoids click transients that would brighten the
-        // rumble; ~0.3 s decay.
-        let hit_env = b.rc_envelope("hit_env", hit_in, 0.004, 0.30);
+        // --- HIT / explosion: a dark broadband noise burst ------------------
+        // MAME's hit is a loud, dark (~1 kHz centroid) but *noisy* rumble. A
+        // resonant band-pass would ring like a bell, so instead we shape the
+        // enveloped noise with two gentle 1-pole filters: a low-pass to darken
+        // the hiss and a high-pass to drop the sub-bass, leaving a broad,
+        // explosive band rather than a single tone. Soft (~4 ms) attack avoids
+        // click transients; ~0.3 s decay.
+        // The recorded explosion (death.wav) is a long (~2.5 s) dark
+        // (centroid ~630 Hz) broadband-noise rumble, so use a slow decay and
+        // heavy low-passing.
+        let hit_env = b.rc_envelope("hit_env", hit_in, 0.008, 0.95);
         let hit_noise = b.multiply("hit_noise", noise, hit_env);
-        let hit_bp = b.band_pass("hit_bp", hit_noise, 160.0, 1.2);
-        let hit_lp = b.low_pass_hz("hit_lp", hit_bp, 520.0);
-        let hit_out = b.gain("hit_lvl", hit_lp, 5.4);
+        // Three cascaded 1-pole low-passes (-18 dB/oct) darken the hiss into a
+        // deep boom matching the sample's ~630 Hz centroid.
+        let hit_lp1 = b.low_pass_hz("hit_lp1", hit_noise, 520.0);
+        let hit_lp2 = b.low_pass_hz("hit_lp2", hit_lp1, 520.0);
+        let hit_lp3 = b.low_pass_hz("hit_lp3", hit_lp2, 520.0);
+        // High-pass ~120 Hz (tau = R·C) to remove the rumble's sub-bass.
+        let hit_hp = b.rc_high_pass("hit_hp", hit_lp3, 13_000.0, 1e-7);
+        let hit_out = b.gain("hit_lvl", hit_hp, 3.4);
 
-        // --- FIRE / shoot: bright noise-FM zap -------------------------------
-        // MAME's fire is a very bright (~12 kHz centroid) noise burst: a 555 VCO
-        // (~2.6 kHz) whose control voltage is driven by the LFSR noise, so the
-        // pitch jumps around and spreads energy high. We mirror that with a
-        // high VCO heavily frequency-modulated by noise, plus raw noise, then
-        // high-pass to keep it bright, enveloped with a ~80 ms decay.
-        let fire_env = b.rc_envelope("fire_env", fire_in, 0.0005, 0.08);
-        let fire_base = b.constant("fire_base", 3400.0);
+        // --- FIRE / shoot: bright noise burst -------------------------------
+        // MAME's fire is a bright (~5.5 kHz centroid), very *noisy* (high
+        // spectral flatness) burst: a 555 VCO whose control voltage is driven by
+        // the LFSR noise. We make it noise-dominated (a high-passed raw-noise
+        // bed plus a lighter noise-FM'd VCO for the descending zap character),
+        // enveloped with a ~80 ms decay.
+        // The recorded shot (shot.wav) is a ~0.6 s bright (centroid ~4.9 kHz)
+        // broadband-noise burst with a smooth attack, so use a softer attack and
+        // a longer decay than a quick blip.
+        let fire_env = b.rc_envelope("fire_env", fire_in, 0.010, 0.18);
+        let fire_base = b.constant("fire_base", 2400.0);
         let fire_sweep = b.gain("fire_sweep", fire_env, 1400.0);
-        let fire_fm = b.gain("fire_fm", noise, 5000.0);
+        // Heavy noise FM makes the VCO jump pitch every noise clock, which is
+        // what gives the shot its broadband, noise-like character (the raw LFSR
+        // noise is band-limited too low to survive the high-pass).
+        let fire_fm = b.gain("fire_fm", noise, 3200.0);
         let fire_freq_raw = b.add("fire_freq_raw", &[fire_base, fire_sweep, fire_fm]);
         let fire_freq = b.clamp("fire_freq", fire_freq_raw, 300.0, 18000.0);
         let fire_osc = b.variable_square("fire_osc", fire_freq);
-        let fire_tone = b.gain("fire_tone", fire_osc, 0.46);
-        let fire_grit = b.gain("fire_grit", noise, 0.46);
+        let fire_tone = b.gain("fire_tone", fire_osc, 0.52);
+        let fire_grit = b.gain("fire_grit", noise, 0.13);
         let fire_src = b.add("fire_src", &[fire_tone, fire_grit]);
-        // High-pass (~8 kHz) to brighten toward MAME's ~12 kHz centroid.
-        let fire_hp = b.rc_high_pass("fire_hp", fire_src, 2_000.0, 1e-8);
+        // High-pass (~4.4 kHz) for the bright noisy "pew" (sample centroid ~4.9 kHz).
+        let fire_hp = b.rc_high_pass("fire_hp", fire_src, 3_600.0, 1e-8);
         let fire_out = b.multiply("fire_out", fire_hp, fire_env);
 
         // --- Final passive resistor mix (schematic R34/R40/R43, load R91) ----
@@ -381,6 +428,34 @@ mod tests {
         }
         let sum: f64 = samples.iter().map(|&s| (s as f64).powi(2)).sum();
         (sum / samples.len() as f64).sqrt()
+    }
+
+    #[test]
+    fn ultrasonic_pitch_is_silent() {
+        // At power-on / attract the game parks the pitch latch high (256-pitch
+        // ≈ 1), making every note tap ultrasonic — silent on real hardware.
+        // Capping the note clock instead would alias it into a constant audible
+        // tone, which is the regression this guards.
+        let mut hi = GalaxianSound::new(RATE);
+        hi.pitch_w(0xFF);
+        hi.sound_w(6, 1); // VOL1
+        hi.sound_w(7, 1); // VOL2
+        let silent = rms(&render(&mut hi, 80));
+        assert!(
+            silent < 50.0,
+            "ultrasonic pitch should be silent, rms={silent:.0}"
+        );
+
+        // An audible pitch at the same volume produces real output.
+        let mut lo = GalaxianSound::new(RATE);
+        lo.pitch_w(0xB0);
+        lo.sound_w(6, 1);
+        lo.sound_w(7, 1);
+        let audible = rms(&render(&mut lo, 80));
+        assert!(
+            audible > 300.0,
+            "audible pitch should sound, rms={audible:.0}"
+        );
     }
 
     #[test]
