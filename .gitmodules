@@ -1,12 +1,16 @@
 [submodule "cpu-validation/test_data/65x02"]
 	path = cpu-validation/test_data/65x02
 	url = https://github.com/SingleStepTests/65x02.git
+	ignore = dirty
 [submodule "cpu-validation/test_data/z80"]
 	path = cpu-validation/test_data/z80
 	url = https://github.com/SingleStepTests/z80.git
+	ignore = dirty
 [submodule "cpu-validation/test_data/8088"]
 	path = cpu-validation/test_data/8088
 	url = https://github.com/SingleStepTests/8088
+	ignore = dirty
 [submodule "cpu-validation/test_data/680x0"]
 	path = cpu-validation/test_data/680x0
 	url = https://github.com/SingleStepTests/680x0.git
+	ignore = dirty
