@@ -22,8 +22,8 @@ use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
     ActionRole, AnalogAxisKind, AudioSource, DefaultBinding, DipApplyTiming, DipChoice, DipOption,
-    DipSwitchBank, DipSwitches, InputConfigurable, InputControl, InputEvent, InputId, InputKind,
-    MachineCore, MouseControl, Nvram, Profilable, Renderable, SaveState,
+    DipSwitchBank, DipSwitches, Direction, InputConfigurable, InputControl, InputEvent, InputId,
+    InputKind, MachineCore, MouseControl, Nvram, Profilable, Renderable, SaveState,
 };
 use phosphor_core::core::save_state::{self, SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::{AccessKind, AddressSpace16};
@@ -307,6 +307,11 @@ const INPUT_BUTTON2: u16 = 7;
 // Analog flight-stick axes (distinct InputId space from the digital controls).
 const INPUT_STICK_X: u16 = 8;
 const INPUT_STICK_Y: u16 = 9;
+// Digital direction keys that drive the self-centering stick.
+const INPUT_STICK_LEFT: u16 = 10;
+const INPUT_STICK_RIGHT: u16 = 11;
+const INPUT_STICK_UP: u16 = 12;
+const INPUT_STICK_DOWN: u16 = 13;
 
 // Analog stick channel ranges (MAME AN0/AN1 PORT_MINMAX), centered at 0x80.
 const STICK_CENTER: i32 = 0x80;
@@ -402,6 +407,48 @@ const IROBOT_CONTROLS: &[InputControl] = &[
         player: Some(1),
         default_bindings: &[DefaultBinding::Mouse(MouseControl::AxisY)],
     },
+    // Digital direction keys (arrow keys / D-pad) drive the self-centering
+    // stick: holding one deflects the axis; releasing returns it to center.
+    InputControl {
+        id: InputId(INPUT_STICK_LEFT),
+        stable_name: "stick_left",
+        label: "Stick Left",
+        kind: InputKind::DigitalDirection {
+            direction: Direction::Left,
+        },
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_LEFT,
+    },
+    InputControl {
+        id: InputId(INPUT_STICK_RIGHT),
+        stable_name: "stick_right",
+        label: "Stick Right",
+        kind: InputKind::DigitalDirection {
+            direction: Direction::Right,
+        },
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_RIGHT,
+    },
+    InputControl {
+        id: InputId(INPUT_STICK_UP),
+        stable_name: "stick_up",
+        label: "Stick Up",
+        kind: InputKind::DigitalDirection {
+            direction: Direction::Up,
+        },
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_UP,
+    },
+    InputControl {
+        id: InputId(INPUT_STICK_DOWN),
+        stable_name: "stick_down",
+        label: "Stick Down",
+        kind: InputKind::DigitalDirection {
+            direction: Direction::Down,
+        },
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_DOWN,
+    },
 ];
 
 // ---------------------------------------------------------------------------
@@ -450,9 +497,11 @@ pub struct IrobotSystem {
     novram: X2212,
 
     // Analog flight stick: ADC0809 (channel 0 = Y, channel 1 = X) and the
-    // current [X, Y] stick positions feeding it.
+    // current [X, Y] raw stick positions feeding it. `dir_held` tracks the four
+    // digital direction keys [left, right, up, down] for self-centering.
     adc: Adc0809,
     stick: [u8; 2],
+    dir_held: [bool; 4],
 
     // Sound: four POKEYs @ 1.512 MHz, all outputs summed to mono.
     pokeys: [Pokey; 4],
@@ -473,7 +522,7 @@ impl Default for IrobotSystem {
 
 impl IrobotSystem {
     pub fn new() -> Self {
-        Self {
+        let mut sys = Self {
             cpu: M6809::new(),
             map: Self::build_map(),
             char_cache: GfxCache::new(0, 8, 8),
@@ -496,13 +545,18 @@ impl IrobotSystem {
             novram: X2212::new(),
             adc: Adc0809::new(),
             stick: [STICK_CENTER as u8; 2],
+            dir_held: [false; 4],
             pokeys: std::array::from_fn(|_| Pokey::with_clock(POKEY_CLOCK, SAMPLE_RATE)),
             audio_buffer: Vec::with_capacity(2048),
             irq_pending: false,
             firq_pending: false,
             prev_v32: false,
             clock: 0,
-        }
+        };
+        // Seed the ADC with the centered stick so the analog axes read neutral
+        // before any input even if the host never calls reset().
+        sys.update_adc_inputs();
+        sys
     }
 
     fn build_map() -> AddressSpace16 {
@@ -661,11 +715,35 @@ impl IrobotSystem {
             .remap_pages(0x40, 0x20, Region::BankedRom, rom_bank * 0x2000);
     }
 
-    /// Push the current stick positions onto the ADC inputs (channel 0 = Y on
-    /// AN0, channel 1 = X on AN1). `stick` is `[X, Y]`.
+    /// Drive the self-centering stick from the held direction keys: a held
+    /// direction deflects the axis to its range limit; releasing returns it to
+    /// center. `dir_held` is `[left, right, up, down]`.
+    fn update_stick(&mut self) {
+        let [left, right, up, down] = self.dir_held;
+        self.stick[0] = if left {
+            STICK_X_MIN as u8
+        } else if right {
+            STICK_X_MAX as u8
+        } else {
+            STICK_CENTER as u8
+        };
+        self.stick[1] = if up {
+            STICK_Y_MIN as u8
+        } else if down {
+            STICK_Y_MAX as u8
+        } else {
+            STICK_CENTER as u8
+        };
+        self.update_adc_inputs();
+    }
+
+    /// Push the raw stick positions onto the ADC inputs. Channel 0 = Y (AN0,
+    /// direct); channel 1 = X (AN1), which MAME drives PORT_REVERSE — reflect it
+    /// around the 0x80 center. `stick` is `[X, Y]`.
     fn update_adc_inputs(&mut self) {
         self.adc.set_input(0, self.stick[1]);
-        self.adc.set_input(1, self.stick[0]);
+        self.adc
+            .set_input(1, (2 * STICK_CENTER - self.stick[0] as i32) as u8);
     }
 
     /// Absolute deflection in `-1.0..=1.0` mapped to the channel range (centered
@@ -1079,6 +1157,7 @@ impl MachineCore for IrobotSystem {
         self.mathbox.reset();
         self.adc.reset();
         self.stick = [STICK_CENTER as u8; 2];
+        self.dir_held = [false; 4];
         self.update_adc_inputs();
         for p in &mut self.pokeys {
             p.reset();
@@ -1218,6 +1297,23 @@ impl InputConfigurable for IrobotSystem {
                     INPUT_BUTTON2 => apply(&mut self.in1, 5),
                     INPUT_START2 => apply(&mut self.in1, 6),
                     INPUT_START1 => apply(&mut self.in1, 7),
+                    // Digital stick directions feed the self-centering stick.
+                    INPUT_STICK_LEFT => {
+                        self.dir_held[0] = pressed;
+                        self.update_stick();
+                    }
+                    INPUT_STICK_RIGHT => {
+                        self.dir_held[1] = pressed;
+                        self.update_stick();
+                    }
+                    INPUT_STICK_UP => {
+                        self.dir_held[2] = pressed;
+                        self.update_stick();
+                    }
+                    INPUT_STICK_DOWN => {
+                        self.dir_held[3] = pressed;
+                        self.update_stick();
+                    }
                     _ => {}
                 }
             }
@@ -1748,7 +1844,8 @@ mod tests {
     #[test]
     fn analog_stick_converts_through_adc() {
         let mut sys = IrobotSystem::new();
-        // Full +X deflection → channel 1 (AN1) reads the X max.
+        // The X channel (AN1) is PORT_REVERSE'd: +X deflection (raw STICK_X_MAX)
+        // is reflected around the 0x80 center before the game reads it.
         sys.handle_input(InputEvent::Absolute {
             id: InputId(INPUT_STICK_X),
             value: 1.0,
@@ -1756,9 +1853,9 @@ mod tests {
         Bus::write(&mut sys, BusMaster::Cpu(0), 0x1b01, 0); // start, channel 1
         assert_eq!(
             Bus::read(&mut sys, BusMaster::Cpu(0), 0x1300) as i32,
-            STICK_X_MAX
+            2 * STICK_CENTER - STICK_X_MAX
         );
-        // Full -Y deflection → channel 0 (AN0) reads the Y min.
+        // Y (AN0) is not reversed: full -Y deflection reads the Y min directly.
         sys.handle_input(InputEvent::Absolute {
             id: InputId(INPUT_STICK_Y),
             value: -1.0,
@@ -1768,6 +1865,29 @@ mod tests {
             Bus::read(&mut sys, BusMaster::Cpu(0), 0x1300) as i32,
             STICK_Y_MIN
         );
+    }
+
+    #[test]
+    fn digital_stick_self_centers() {
+        let mut sys = IrobotSystem::new();
+        let read_ch = |sys: &mut IrobotSystem, ch: u16| {
+            Bus::write(sys, BusMaster::Cpu(0), 0x1b00 | ch, 0);
+            Bus::read(sys, BusMaster::Cpu(0), 0x1300) as i32
+        };
+        // At rest both axes read center (X reversed around 0x80 stays 0x80).
+        assert_eq!(read_ch(&mut sys, 0), STICK_CENTER); // Y
+        assert_eq!(read_ch(&mut sys, 1), STICK_CENTER); // X
+        // Hold left: X deflects; releasing returns it to center.
+        sys.handle_input(InputEvent::Button {
+            id: InputId(INPUT_STICK_LEFT),
+            pressed: true,
+        });
+        assert_ne!(read_ch(&mut sys, 1), STICK_CENTER, "held key deflects X");
+        sys.handle_input(InputEvent::Button {
+            id: InputId(INPUT_STICK_LEFT),
+            pressed: false,
+        });
+        assert_eq!(read_ch(&mut sys, 1), STICK_CENTER, "release recenters X");
     }
 
     #[test]
