@@ -611,7 +611,7 @@ const SIM: u64 = 192_000;
 /// Drive an astable square output and recover its frequency from rising edges.
 fn astable_freq(r1: f64, r2: f64, c: f64) -> f64 {
     let mut b = builder_1to1(SIM);
-    let osc = b.ne555_astable("OSC", None, r1, r2, c, 5.0, Output555::Square);
+    let osc = b.ne555_astable("OSC", None, r1, r2, c, 5.0, 3.8, Output555::Square);
     let mut c_ = b.build();
     step_n(&mut c_, 1_000); // settle into steady oscillation
 
@@ -667,6 +667,7 @@ fn ne555_astable_control_voltage_shifts_frequency() {
             1_000.0,
             0.1e-6,
             5.0,
+            3.8,
             Output555::Square,
         );
         let mut c = b.build();
@@ -785,7 +786,18 @@ fn bandpass_energy_at(freq_hz: f64) -> f64 {
     let mut b = builder_1to1(SIM);
     let drive = b.external_source("DRIVE");
     // Galaxian HIT band-pass values (fc ~ 168 Hz).
-    let bp = b.op_amp_band_pass("BP", drive, &[150e3, 22e3], 470e3, 0.01e-6, 0.01e-6, 0.0);
+    // Wide rails so the swept-sine response isn't clipped (we measure shape).
+    let bp = b.op_amp_band_pass(
+        "BP",
+        drive,
+        &[150e3, 22e3],
+        470e3,
+        0.01e-6,
+        0.01e-6,
+        0.0,
+        -100.0,
+        100.0,
+    );
     let mut c = b.build();
 
     let dt = 1.0 / SIM as f64;
@@ -882,6 +894,7 @@ fn analog_555_circuit() -> DiscreteCircuit {
         1_000.0,
         0.1e-6,
         5.0,
+        3.8,
         Output555::Square,
     );
     let vin = b.constant("VIN", 1.0);
@@ -897,7 +910,17 @@ fn analog_555_circuit() -> DiscreteCircuit {
     );
     let gate = b.fixed_square("GATE", 400.0);
     let rc = b.rc_disc5("RC", ast, gate, 1_000.0, 1e-6);
-    let bp = b.op_amp_band_pass("BP", cc, &[150e3, 22e3], 470e3, 0.01e-6, 0.01e-6, 0.0);
+    let bp = b.op_amp_band_pass(
+        "BP",
+        cc,
+        &[150e3, 22e3],
+        470e3,
+        0.01e-6,
+        0.01e-6,
+        0.0,
+        -100.0,
+        100.0,
+    );
     let mix = b.add("MIX", &[rc, bp]);
     b.output(mix, OutputGain::linear(0.1));
     b.build()

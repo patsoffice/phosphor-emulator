@@ -538,10 +538,12 @@ impl DiscreteCircuitBuilder {
     /// component values: charge resistor `r1` (ohms), discharge resistor `r2`,
     /// timing cap `c` (farads), and supply `vcc` (volts). With `cv_src = None`
     /// it free-runs near `1.49 / ((r1 + 2·r2)·c)` Hz; with a control-voltage
-    /// source it modulates around that. `output` selects the square wave or the
-    /// capacitor voltage. The charge/discharge exponents are precomputed here
-    /// from `sim_rate`; the sub-sample threshold-crossing loop is dropped, which
-    /// is faithful while `sim_rate` is well above the oscillator frequency.
+    /// source it modulates around that. `out_high` is the square-wave high level
+    /// (MAME's desc `v_out_high`; pass `vcc - 1.2` for the chip default).
+    /// `output` selects the square wave or the capacitor voltage. The
+    /// charge/discharge exponents are precomputed here from `sim_rate`; the
+    /// sub-sample threshold-crossing loop is dropped, which is faithful while
+    /// `sim_rate` is well above the oscillator frequency.
     #[allow(clippy::too_many_arguments)]
     pub fn ne555_astable(
         &mut self,
@@ -551,6 +553,7 @@ impl DiscreteCircuitBuilder {
         r2: f64,
         c: f64,
         vcc: f64,
+        out_high: f64,
         output: Output555,
     ) -> NodeId {
         let dt = 1.0 / self.sim_rate as f64;
@@ -563,7 +566,7 @@ impl DiscreteCircuitBuilder {
                 v_charge: vcc,
                 threshold_fixed: vcc * 2.0 / 3.0,
                 trigger_fixed: vcc / 3.0,
-                out_high: vcc - 1.2,
+                out_high,
                 output,
                 cap_v: 0.0,
                 flip_flop: true,
@@ -615,9 +618,11 @@ impl DiscreteCircuitBuilder {
     /// is the feedback resistor and `c1`/`c2` the feedback caps. The center
     /// frequency `1/(2π·√(rTotal·rf·c1·c2))`, damping, and gain set a biquad
     /// whose coefficients are precomputed here via a pre-warped bilinear
-    /// transform at `sim_rate`. Unlike [`band_pass`](Self::band_pass) (a
-    /// Chamberlin filter parameterised by center/Q) this matches the op-amp's
-    /// actual R/C response.
+    /// transform at `sim_rate`. The output is clamped to the op-amp rails
+    /// (`v_neg .. v_pos − 1.5 V`, MAME's `OP_AMP_VP_RAIL_OFFSET`), preserving
+    /// overdrive distortion. Unlike [`band_pass`](Self::band_pass) (a Chamberlin
+    /// filter parameterised by center/Q) this matches the op-amp's actual R/C
+    /// response.
     #[allow(clippy::too_many_arguments)]
     pub fn op_amp_band_pass(
         &mut self,
@@ -628,6 +633,8 @@ impl DiscreteCircuitBuilder {
         c1: f64,
         c2: f64,
         v_ref: f64,
+        v_neg: f64,
+        v_pos: f64,
     ) -> NodeId {
         assert!(!r_in.is_empty(), "op_amp_band_pass needs an input resistor");
         let sr = self.sim_rate as f64;
@@ -652,8 +659,11 @@ impl DiscreteCircuitBuilder {
                 b2: -b0,
                 in_gain: r_total / r_in[0],
                 v_ref,
-                x1: 0.0,
-                x2: 0.0,
+                clip_lo: v_neg,
+                clip_hi: v_pos - 1.5,
+                // Steady state for zero input (v = −v_ref), so no power-on ring.
+                x1: -v_ref,
+                x2: -v_ref,
                 y1: 0.0,
                 y2: 0.0,
             },

@@ -136,7 +136,8 @@ pub(crate) enum NodeKind {
         /// Threshold/trigger used when `cv_src` is `None` (2/3·Vcc, 1/3·Vcc).
         threshold_fixed: f64,
         trigger_fixed: f64,
-        /// Square-wave high level (Vcc − 1.2 V).
+        /// Square-wave high level (the MAME desc's `v_out_high`, e.g. Vcc − 1.2 V
+        /// for the default, or a circuit-specific value such as 4.5 V).
         out_high: f64,
         output: Output555,
         cap_v: f64,
@@ -176,6 +177,11 @@ pub(crate) enum NodeKind {
         /// Input scale from `src` to the op-amp summing node (`rTotal/r_in[0]`).
         in_gain: f64,
         v_ref: f64,
+        /// Output clamped to the op-amp rails `[clip_lo, clip_hi]` (MAME clips to
+        /// `vN .. vP − 1.5`), which preserves overdrive distortion and bounds
+        /// the power-on transient.
+        clip_lo: f64,
+        clip_hi: f64,
         x1: f64,
         x2: f64,
         y1: f64,
@@ -514,6 +520,8 @@ impl NodeKind {
                 b2,
                 in_gain,
                 v_ref,
+                clip_lo,
+                clip_hi,
                 x1,
                 x2,
                 y1,
@@ -521,10 +529,12 @@ impl NodeKind {
             } => {
                 // Op-amp summing node, relative to the reference rail.
                 let v = *in_gain * values[src.index()] - *v_ref;
-                let out = -*a1 * *y1 - *a2 * *y2 + *b0 * v + *b2 * *x2 + *v_ref;
+                let mut out = -*a1 * *y1 - *a2 * *y2 + *b0 * v + *b2 * *x2 + *v_ref;
                 *x2 = *x1;
                 *x1 = v;
                 *y2 = *y1;
+                // Clip to the op-amp rails, then feed back the clipped output.
+                out = out.clamp(*clip_lo, *clip_hi);
                 *y1 = out - *v_ref;
                 out
             }
@@ -604,9 +614,18 @@ impl NodeKind {
                 *cap_v = 0.0;
                 *flip_flop = true;
             }
-            NodeKind::OpAmpBandPass { x1, x2, y1, y2, .. } => {
-                *x1 = 0.0;
-                *x2 = 0.0;
+            NodeKind::OpAmpBandPass {
+                v_ref,
+                x1,
+                x2,
+                y1,
+                y2,
+                ..
+            } => {
+                // Start in the steady state for zero input (v = −v_ref), so the
+                // filter doesn't ring on power-on before any signal arrives.
+                *x1 = -*v_ref;
+                *x2 = -*v_ref;
                 *y1 = 0.0;
                 *y2 = 0.0;
             }

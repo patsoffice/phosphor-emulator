@@ -20,23 +20,27 @@
 //! The four audible voices the issue calls out — background tone, shoot/noise,
 //! hit, and the wolf-whistle LFO — are each a small sub-graph below.
 //!
-//! APPROXIMATION (flagged per the issue): MAME models the exact NE555 VCOs,
-//! op-amp band-pass, and CD4066 switch impedances component-by-component. The
-//! discrete framework has no 555/op-amp primitives, so the oscillators and
-//! envelopes here are framework primitives (square/triangle + RC envelope +
-//! 1-pole RC filters). Their levels, decays, and filter cutoffs were tuned with
-//! the `tools/sound-reference` rig: the tune/wolf-whistle against a MAME
-//! `galaxian` capture, and the fire and hit (shoot / explosion) against the
-//! original recorded MAME samples `shot.wav` / `death.wav` — a bright ~0.6 s
-//! noise burst and a dark (~630 Hz), ~2.5 s noise rumble. The register
-//! *interface* and voice *structure* are faithful.
+//! This is a component-level port of MAME's `galaxian_discrete` netlist
+//! (`mame/src/mame/galaxian/galaxian_a.cpp`) built on the framework's NE555 and
+//! op-amp primitives with the real `GAL_R*`/`GAL_C*` schematic values, so the
+//! oscillator waveforms and filter responses match the hardware rather than
+//! approximating them. The wolf-whistle is a 555 constant-current VCO driving
+//! three CV-modulated 555 astables; the HIT is a noise-gated op-amp
+//! multiple-feedback band-pass; the FIRE is a noise-jittered 555 VCO gating an
+//! RC discharge. Documented simplifications vs. MAME: the 555 sub-sample
+//! threshold-crossing loop is dropped (faithful at the 192 kHz sim rate); the
+//! per-tap pitch counter keeps the validated [`TuneVoice`] custom component
+//! rather than a discrete `DISCRETE_NOTE`; and the VOL1/VOL2 switched-resistor
+//! melody mix is modelled as a melody-level gain (the combined `TuneVoice`
+//! output cannot be split per QC/QD tap). The output level is calibrated to
+//! MAME's `32767/5` scale.
 
 use crate::core::debug::{DebugRegister, Debuggable};
 use crate::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use crate::device::Device;
 use crate::device::discrete::{
-    ClockDomain, CustomComponent, DataInputId, DiscreteCircuit, DiscreteCircuitBuilder, LfsrSpec,
-    LogicInputId, OutputGain,
+    CustomComponent, DataInputId, DiscreteCircuit, DiscreteCircuitBuilder, LfsrSpec, LogicInputId,
+    Output555, OutputGain,
 };
 
 /// Galaxian master clock is 18.432 MHz; the sound section runs at /6/2.
@@ -155,7 +159,8 @@ impl GalaxianSound {
         // taps (11, 0) give the full maximal 2^17-1 period for this Fibonacci
         // structure — true white noise. (Many "obvious" 17-bit pairs, e.g.
         // (16, 13), collapse to a tiny cycle here and buzz like a tone.)
-        let noise = b.lfsr_noise(
+        // MAME's NODE_150/152: the LFSR latched by the 2V D-flip-flop.
+        let noise_pm = b.lfsr_noise(
             "noise",
             NOISE_RATE,
             LfsrSpec {
@@ -164,107 +169,157 @@ impl GalaxianSound {
                 seed: 0x1_FFFF,
             },
         );
+        // The HIT/FIRE stages gate on the noise as a logic level, so map the
+        // ±1 LFSR to the 0/1 line the D-flip-flop (NODE_152) presents.
+        let noise_half = b.gain("noise_half", noise_pm, 0.5);
+        let noise_bias = b.constant("noise_bias", 0.5);
+        let noise = b.add("noise01", &[noise_half, noise_bias]);
 
-        // --- Background tone: pitched 74393 tap chord ------------------------
+        // --- Background / wolf-whistle (NODE_100..120) ----------------------
+        // R-1 ladder DAC (galaxian_bck_dac): each bit switches its resistor
+        // between TTL_OUT and ground; a bias branch and a ground branch fix the
+        // operating point. Every resistor is always connected, so the Millman
+        // denominator is constant and the node voltage is affine in the code:
+        // V = offset + Σ bit_i·w_i.
+        let r_dac = [1.0e6, 470.0e3, 220.0e3, 100.0e3]; // R18,R17,R16,R15 (bit0..3)
+        let r_bias = 15.0e3; // R20
+        let r_gnd = 330.0e3; // R19
+        let v_bias = 4.4;
+        let v_on = 4.0; // TTL_OUT
+        let dac_denom = r_dac.iter().map(|r| 1.0 / r).sum::<f64>() + 1.0 / r_bias + 1.0 / r_gnd;
+        let dac_weights: Vec<f64> = r_dac.iter().map(|r| v_on / (r * dac_denom)).collect();
+        let dac_bits = b.dac_weighted("bg_dac_bits", bg_dac_in, &dac_weights);
+        let dac_off = b.constant("bg_dac_off", v_bias / (r_bias * dac_denom));
+        let bg_dac_v = b.add("bg_dac_v", &[dac_bits, dac_off]); // NODE_100
+
+        // 555 constant-current VCO (galaxian_bck_vco): a slow (<10 Hz) sawtooth
+        // on C15, the wolf-whistle's sweep source. Output is the cap voltage.
+        let bg_vco = b.ne555_cc(
+            "bg_vco",
+            bg_dac_v,
+            100.0e3, // R21
+            1.0e-6,  // C15
+            5.0,
+            5.0,
+            0.7, // vcc, v_cc_source, Q2 junction
+            Output555::Capacitor,
+        ); // NODE_105
+
+        // Op-amp mult/add (NODE_110): v·gain + offset, derived from R31/R32/R33.
+        let (r31, r32, r33) = (47.0e3, 47.0e3, 10.0e3);
+        let r3par = 1.0 / (1.0 / r31 + 1.0 / r32 + 1.0 / r33);
+        let bg_ma_gain = b.gain("bg_ma_gain", bg_vco, r33 / r3par);
+        let bg_ma_off = b.constant("bg_ma_off", -5.0 * r33 / r31);
+        let bg_ma = b.add("bg_ma", &[bg_ma_gain, bg_ma_off]);
+        let bg_cv = b.clamp("bg_cv", bg_ma, 0.0, 5.0); // NODE_111, the FS control voltage
+
+        // Three CV-modulated 555 astables (galaxian_555_vco_desc, energy output
+        // ≡ square once the sub-sample x_time is dropped; v_out_high = 4.5 V).
+        // Frequencies set by (R22/R23/C17), (R25/R26/C18), (R28/R29/C19).
+        let fs_rc = [
+            (100.0e3, 470.0e3, 0.01e-6), // FS1
+            (100.0e3, 330.0e3, 0.01e-6), // FS2
+            (100.0e3, 220.0e3, 0.01e-6), // FS3
+        ];
+        let mut fs_taps = Vec::with_capacity(3);
+        for (i, &(ra, rb, c)) in fs_rc.iter().enumerate() {
+            let osc = b.ne555_astable(
+                "fs_osc",
+                Some(bg_cv),
+                ra,
+                rb,
+                c,
+                5.0,
+                4.5,
+                Output555::Square,
+            );
+            // The astable's enable input (FSi) gates its contribution.
+            let gated = b.multiply("fs_gated", osc, fs_in[i]);
+            fs_taps.push((gated, 10.0e3)); // R24/R27/R30 mixer resistors
+        }
+        // bck mixer (R24/R27/R30) with the C20 output cap low-passing the stack.
+        let bg_mix = b.resistor_mixer("bg_mix", &fs_taps, None);
+        let bg = b.rc_low_pass("bg", bg_mix, 10.0e3 / 3.0, 0.1e-6); // NODE_120
+
+        // --- Pitch / melody (NODE_132/133): the validated TuneVoice ---------
         let tune = b.custom(
             "tune",
             vec![pitch_in.into()],
             Box::new(TuneVoice::default()),
         );
-        let tune_lvl = b.gain("tune_lvl", tune, 0.16);
 
-        // --- Wolf-whistle: three background oscillators swept by the DAC -----
-        // Each FS oscillator's frequency rises with the 0..15 DAC value; the
-        // game ramps the DAC to produce the rising/falling whistle. Bases follow
-        // the FS1<FS2<FS3 ordering of the schematic's astable resistors. The
-        // schematic's 555 astables are heavily filtered by the bck mixer cap, so
-        // we use triangle waves (few harmonics) + a low-pass to match MAME's
-        // dark (~2 kHz centroid) whistle rather than a harsh square stack.
-        let bg_bases = [150.0, 190.0, 270.0];
-        let mut bg_taps = Vec::with_capacity(3);
-        for i in 0..3 {
-            let base = b.constant("fs_base", bg_bases[i]);
-            // freq = base * (1 + dac/5)  →  up to ~4× at dac=15.
-            let swept = b.gain("fs_swept", bg_dac_in, bg_bases[i] / 5.0);
-            let freq = b.add("fs_freq", &[base, swept]);
-            let osc = b.variable_triangle("fs_osc", freq);
-            let gated = b.multiply("fs_gated", osc, fs_in[i]);
-            bg_taps.push(gated);
-        }
-        let bg = b.add("bg", &bg_taps);
-        let bg_filt = b.low_pass_hz("bg_lp", bg, 2000.0);
-        let bg_lvl = b.gain("bg_lvl", bg_filt, 0.27);
+        // --- HIT (NODE_155/157): noise-gated op-amp band-pass ----------------
+        // RCDISC5 gated by the noise (enable) with the HIT TTL level as input,
+        // then the op-amp multiple-feedback band-pass (~168 Hz).
+        let hit4 = b.gain("hit4", hit_in, v_on); // GAL_INP_HIT = TTL_OUT·hit
+        let hit_rc = b.rc_disc5("hit_rc", hit4, noise, 150.0e3 + 22.0e3, 2.2e-6); // R35+R36, C21
+        let hit_vref = 5.0 * 22.0e3 / (33.0e3 + 22.0e3); // 5·R39/(R38+R39) = 2.0
+        let hit_bp = b.op_amp_band_pass(
+            "hit_bp",
+            hit_rc,
+            &[150.0e3, 22.0e3], // R35, R36
+            470.0e3,            // R37
+            0.01e-6,
+            0.01e-6, // C22, C23
+            hit_vref,
+            0.0,
+            5.0, // vRef, vN, vP (galaxian_bandpass_desc)
+        ); // NODE_157
+        // The band-pass output sits on the op-amp's vRef rail; the downstream
+        // output coupling (cAmp) removes the DC, so strip it here for mixing.
+        let hit_vref_off = b.constant("hit_vref_off", -hit_vref);
+        let hit = b.add("hit", &[hit_bp, hit_vref_off]);
 
-        // Pre-mix of melody + background, scaled by the VOL1/VOL2 switches.
-        let pre = b.add("pre", &[tune_lvl, bg_lvl]);
+        // --- FIRE (NODE_170..182): noise-jittered 555 VCO gating an RC -------
+        let fire4 = b.gain("fire4", fire_in, v_on); // NODE_171 = TTL_OUT·fire
+        // NODE_172 = TTL_OUT·(1-fire), low-passed by R47/C28 -> NODE_173 bias.
+        let fire_inv_g = b.gain("fire_inv_g", fire_in, -v_on);
+        let fire_inv_b = b.constant("fire_inv_b", v_on);
+        let fire_inv = b.add("fire_inv", &[fire_inv_g, fire_inv_b]);
+        let fire_bias = b.rc_low_pass("fire_bias", fire_inv, 2.2e3, 47.0e-6); // R47, C28
+        // NODE_178 control voltage: noise·c1 + bias·c2 (the R46/R48 summing net).
+        let (r46, r48) = (10.0e3, 2.2e3);
+        let r2par_fire = 1.0 / (1.0 / r46 + 1.0 / r48);
+        let fire_cv_n = b.gain("fire_cv_n", noise, r2par_fire * v_on / r46);
+        let fire_cv_b = b.gain("fire_cv_b", fire_bias, r2par_fire / r48);
+        let fire_cv = b.add("fire_cv", &[fire_cv_n, fire_cv_b]); // NODE_178
+        // 555 fire VCO (galaxian_555_fire_vco_desc, v_out_high = 1.0 logic).
+        let fire_vco = b.ne555_astable(
+            "fire_vco",
+            Some(fire_cv),
+            10.0e3,
+            22.0e3,
+            0.01e-6, // R44, R45, C27
+            5.0,
+            1.0,
+            Output555::Square,
+        ); // NODE_181
+        // The VCO square gates the fire envelope through RCDISC5 (R41/C25).
+        let fire = b.rc_disc5("fire", fire4, fire_vco, 100.0e3, 1.0e-6); // NODE_182
+
+        // --- Pre-mix: melody + background, VOL1/VOL2 switched gain (NODE_279) -
+        // The CD4066 VOL switches add parallel melody resistors (R49/R52). With
+        // the combined TuneVoice we model this as a melody-level gain rather
+        // than per-tap conductance switching.
         let vol_base = b.constant("vol_base", 0.4);
         let vol1_g = b.gain("vol1_g", vol_in[0], 0.3);
         let vol2_g = b.gain("vol2_g", vol_in[1], 0.3);
         let vol_gain = b.add("vol_gain", &[vol_base, vol1_g, vol2_g]);
-        let pre_vol = b.multiply("pre_vol", pre, vol_gain);
+        let tune_vol = b.multiply("tune_vol", tune, vol_gain);
+        // Melody through R51, background through R34 (galaxian_mixerpre_desc).
+        let pre = b.resistor_mixer("pre", &[(tune_vol, 33.0e3), (bg, 5.1e3)], None);
 
-        // --- HIT / explosion: a dark broadband noise burst ------------------
-        // MAME's hit is a loud, dark (~1 kHz centroid) but *noisy* rumble. A
-        // resonant band-pass would ring like a bell, so instead we shape the
-        // enveloped noise with two gentle 1-pole filters: a low-pass to darken
-        // the hiss and a high-pass to drop the sub-bass, leaving a broad,
-        // explosive band rather than a single tone. Soft (~4 ms) attack avoids
-        // click transients; ~0.3 s decay.
-        // The recorded explosion (death.wav) is a long (~2.5 s) dark
-        // (centroid ~630 Hz) broadband-noise rumble, so use a slow decay and
-        // heavy low-passing.
-        let hit_env = b.rc_envelope("hit_env", hit_in, 0.008, 0.95);
-        let hit_noise = b.multiply("hit_noise", noise, hit_env);
-        // Three cascaded 1-pole low-passes (-18 dB/oct) darken the hiss into a
-        // deep boom matching the sample's ~630 Hz centroid.
-        let hit_lp1 = b.low_pass_hz("hit_lp1", hit_noise, 520.0);
-        let hit_lp2 = b.low_pass_hz("hit_lp2", hit_lp1, 520.0);
-        let hit_lp3 = b.low_pass_hz("hit_lp3", hit_lp2, 520.0);
-        // High-pass ~120 Hz (tau = R·C) to remove the rumble's sub-bass.
-        let hit_hp = b.rc_high_pass("hit_hp", hit_lp3, 13_000.0, 1e-7);
-        let hit_out = b.gain("hit_lvl", hit_hp, 3.4);
-
-        // --- FIRE / shoot: bright noise burst -------------------------------
-        // MAME's fire is a bright (~5.5 kHz centroid), very *noisy* (high
-        // spectral flatness) burst: a 555 VCO whose control voltage is driven by
-        // the LFSR noise. We make it noise-dominated (a high-passed raw-noise
-        // bed plus a lighter noise-FM'd VCO for the descending zap character),
-        // enveloped with a ~80 ms decay.
-        // The recorded shot (shot.wav) is a ~0.6 s bright (centroid ~4.9 kHz)
-        // broadband-noise burst with a smooth attack, so use a softer attack and
-        // a longer decay than a quick blip.
-        let fire_env = b.rc_envelope("fire_env", fire_in, 0.010, 0.18);
-        let fire_base = b.constant("fire_base", 2400.0);
-        let fire_sweep = b.gain("fire_sweep", fire_env, 1400.0);
-        // Heavy noise FM makes the VCO jump pitch every noise clock, which is
-        // what gives the shot its broadband, noise-like character (the raw LFSR
-        // noise is band-limited too low to survive the high-pass).
-        let fire_fm = b.gain("fire_fm", noise, 3200.0);
-        let fire_freq_raw = b.add("fire_freq_raw", &[fire_base, fire_sweep, fire_fm]);
-        let fire_freq = b.clamp("fire_freq", fire_freq_raw, 300.0, 18000.0);
-        let fire_osc = b.variable_square("fire_osc", fire_freq);
-        let fire_tone = b.gain("fire_tone", fire_osc, 0.52);
-        let fire_grit = b.gain("fire_grit", noise, 0.13);
-        let fire_src = b.add("fire_src", &[fire_tone, fire_grit]);
-        // High-pass (~4.4 kHz) for the bright noisy "pew" (sample centroid ~4.9 kHz).
-        let fire_hp = b.rc_high_pass("fire_hp", fire_src, 3_600.0, 1e-8);
-        let fire_out = b.multiply("fire_out", fire_hp, fire_env);
-
-        // --- Final passive resistor mix (schematic R34/R40/R43, load R91) ----
-        let mix = b.resistor_mixer(
-            "mix",
-            &[
-                (pre_vol, 5_100.0),  // R34 background/melody
-                (hit_out, 2_200.0),  // R40 hit
-                (fire_out, 2_200.0), // R43 fire
-            ],
-            Some(10_000.0), // R91 load
-        );
-        b.output(mix, OutputGain::linear(1.6));
-
-        // The oscillators/filters run at the simulation rate; the resampler
-        // tap is per output sample.
-        b.set_domain(mix, ClockDomain::BoardCycle);
+        // --- Final mix (NODE_280): R34/R40/R43 into the R91 load -------------
+        let (r34, r40, r43, r91) = (5.1e3, 2.2e3 * 0.6, 2.2e3, 10.0e3); // R40 has a 0.6 volume trim
+        // Fire channel is AC-coupled by C26 (≈8.8 kHz with R43‖R91) before mixing.
+        let fire_couple_r = 1.0 / (1.0 / r43 + 1.0 / r91);
+        let fire_ac = b.rc_high_pass("fire_ac", fire, fire_couple_r, 0.01e-6); // C26
+        let mix = b.resistor_mixer("mix", &[(pre, r34), (hit, r40), (fire_ac, r43)], Some(r91));
+        // Output coupling cap (cAmp = C46) — MAME models it as a ≈16 Hz DC block
+        // against a 100 k final-stage impedance.
+        let out = b.rc_high_pass("out", mix, 100.0e3, 0.1e-6); // C46
+        // Calibrated to MAME's 32767/5 output scale.
+        b.output(out, OutputGain::linear(3.0));
 
         Self {
             circuit: b.build(),
