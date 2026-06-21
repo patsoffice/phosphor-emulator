@@ -24,10 +24,13 @@
 //! op-amp band-pass, and CD4066 switch impedances component-by-component. The
 //! discrete framework has no 555/op-amp primitives, so the oscillators and
 //! envelopes here are framework primitives (square/triangle + RC envelope +
-//! state-variable band-pass) tuned to the schematic's resistor/cap values.
-//! The register *interface* and voice *structure* are faithful; absolute
-//! voicing is an approximation and should be A/B'd against a recording when the
-//! Galaxian machine anchor (355.3) lands.
+//! state-variable band-pass + 1-pole RC filters) whose levels and filter
+//! cutoffs were calibrated against a MAME `galaxian` capture using the
+//! `tools/sound-reference` rig (`analyze_wav.py --galaxian`). Per-voice
+//! spectral centroids and RMS levels track MAME closely for the tune and
+//! wolf-whistle; the fire and hit are close but a touch less bright / less dark
+//! respectively, the residual limit of 1-pole filters versus the real op-amp
+//! network. The register *interface* and voice *structure* are faithful.
 
 use crate::core::debug::{DebugRegister, Debuggable};
 use crate::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
@@ -136,12 +139,15 @@ impl GalaxianSound {
         let qd = b.variable_square("qd", f_qd);
         // MAME mixes QA, QC, QC, QD (QC weighted twice).
         let tune = b.add("tune", &[qa, qc, qc, qd]);
-        let tune_lvl = b.gain("tune_lvl", tune, 0.15);
+        let tune_lvl = b.gain("tune_lvl", tune, 0.16);
 
         // --- Wolf-whistle: three background oscillators swept by the DAC -----
         // Each FS oscillator's frequency rises with the 0..15 DAC value; the
         // game ramps the DAC to produce the rising/falling whistle. Bases follow
-        // the FS1<FS2<FS3 ordering of the schematic's astable resistors.
+        // the FS1<FS2<FS3 ordering of the schematic's astable resistors. The
+        // schematic's 555 astables are heavily filtered by the bck mixer cap, so
+        // we use triangle waves (few harmonics) + a low-pass to match MAME's
+        // dark (~2 kHz centroid) whistle rather than a harsh square stack.
         let bg_bases = [150.0, 190.0, 270.0];
         let mut bg_taps = Vec::with_capacity(3);
         for i in 0..3 {
@@ -149,12 +155,13 @@ impl GalaxianSound {
             // freq = base * (1 + dac/5)  →  up to ~4× at dac=15.
             let swept = b.gain("fs_swept", bg_dac_in, bg_bases[i] / 5.0);
             let freq = b.add("fs_freq", &[base, swept]);
-            let osc = b.variable_square("fs_osc", freq);
+            let osc = b.variable_triangle("fs_osc", freq);
             let gated = b.multiply("fs_gated", osc, fs_in[i]);
             bg_taps.push(gated);
         }
         let bg = b.add("bg", &bg_taps);
-        let bg_lvl = b.gain("bg_lvl", bg, 0.15);
+        let bg_filt = b.low_pass_hz("bg_lp", bg, 2000.0);
+        let bg_lvl = b.gain("bg_lvl", bg_filt, 0.27);
 
         // Pre-mix of melody + background, scaled by the VOL1/VOL2 switches.
         let pre = b.add("pre", &[tune_lvl, bg_lvl]);
@@ -164,34 +171,49 @@ impl GalaxianSound {
         let vol_gain = b.add("vol_gain", &[vol_base, vol1_g, vol2_g]);
         let pre_vol = b.multiply("pre_vol", pre, vol_gain);
 
-        // --- HIT / explosion: enveloped noise through a band-pass ------------
-        let hit_env = b.rc_envelope("hit_env", hit_in, 0.0005, 0.30);
+        // --- HIT / explosion: enveloped noise, band-pass then low-pass -------
+        // MAME's hit is a loud, dark (~1.5 kHz centroid) rumble; the op-amp band
+        // filter + mixer caps roll off the noise hiss, so we band-pass the
+        // enveloped noise and low-pass the result.
+        // A soft (~4 ms) attack avoids click transients that would brighten the
+        // rumble; ~0.3 s decay.
+        let hit_env = b.rc_envelope("hit_env", hit_in, 0.004, 0.30);
         let hit_noise = b.multiply("hit_noise", noise, hit_env);
-        let hit_out = b.band_pass("hit_bp", hit_noise, 180.0, 1.0);
+        let hit_bp = b.band_pass("hit_bp", hit_noise, 160.0, 1.2);
+        let hit_lp = b.low_pass_hz("hit_lp", hit_bp, 520.0);
+        let hit_out = b.gain("hit_lvl", hit_lp, 5.4);
 
-        // --- FIRE / shoot: descending noisy zap ------------------------------
+        // --- FIRE / shoot: bright noise-FM zap -------------------------------
+        // MAME's fire is a very bright (~12 kHz centroid) noise burst: a 555 VCO
+        // (~2.6 kHz) whose control voltage is driven by the LFSR noise, so the
+        // pitch jumps around and spreads energy high. We mirror that with a
+        // high VCO heavily frequency-modulated by noise, plus raw noise, then
+        // high-pass to keep it bright, enveloped with a ~80 ms decay.
         let fire_env = b.rc_envelope("fire_env", fire_in, 0.0005, 0.08);
-        // Frequency falls from ~1700 Hz to ~200 Hz as the envelope decays.
-        let fire_lo = b.constant("fire_lo", 200.0);
-        let fire_sweep = b.gain("fire_sweep", fire_env, 1500.0);
-        let fire_freq = b.add("fire_freq", &[fire_lo, fire_sweep]);
+        let fire_base = b.constant("fire_base", 3400.0);
+        let fire_sweep = b.gain("fire_sweep", fire_env, 1400.0);
+        let fire_fm = b.gain("fire_fm", noise, 5000.0);
+        let fire_freq_raw = b.add("fire_freq_raw", &[fire_base, fire_sweep, fire_fm]);
+        let fire_freq = b.clamp("fire_freq", fire_freq_raw, 300.0, 18000.0);
         let fire_osc = b.variable_square("fire_osc", fire_freq);
-        let fire_tone = b.gain("fire_tone", fire_osc, 0.7);
-        let fire_grit = b.gain("fire_grit", noise, 0.3);
+        let fire_tone = b.gain("fire_tone", fire_osc, 0.46);
+        let fire_grit = b.gain("fire_grit", noise, 0.46);
         let fire_src = b.add("fire_src", &[fire_tone, fire_grit]);
-        let fire_out = b.multiply("fire_out", fire_src, fire_env);
+        // High-pass (~8 kHz) to brighten toward MAME's ~12 kHz centroid.
+        let fire_hp = b.rc_high_pass("fire_hp", fire_src, 2_000.0, 1e-8);
+        let fire_out = b.multiply("fire_out", fire_hp, fire_env);
 
         // --- Final passive resistor mix (schematic R34/R40/R43, load R91) ----
         let mix = b.resistor_mixer(
             "mix",
             &[
-                (pre_vol, 5_100.0),       // R34 background/melody
-                (hit_out, 2_200.0 * 0.6), // R40 hit (volume-adjusted)
-                (fire_out, 2_200.0),      // R43 fire
+                (pre_vol, 5_100.0),  // R34 background/melody
+                (hit_out, 2_200.0),  // R40 hit
+                (fire_out, 2_200.0), // R43 fire
             ],
             Some(10_000.0), // R91 load
         );
-        b.output(mix, OutputGain::linear(1.0));
+        b.output(mix, OutputGain::linear(1.6));
 
         // The oscillators/filters run at the simulation rate; the resampler
         // tap is per output sample.
