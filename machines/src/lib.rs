@@ -416,6 +416,7 @@ pub use digdug::DigDugSystem;
 pub use donkey_kong::DkongSystem;
 pub use donkey_kong_jr::DkongJrSystem;
 pub use foodf::FoodFightSystem;
+pub use galaxian::GalaxianSystem;
 pub use gridlee::GridleeSystem;
 pub use irobot::IrobotSystem;
 pub use joust::JoustSystem;

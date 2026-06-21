@@ -23,19 +23,27 @@
 //!   0x7800-0x7fff  watchdog (r) / sound pitch (w)
 //! ```
 
+use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::debug_trace::{DebugEvent, DebugEventKind, DebugTraceBuffer};
+use phosphor_core::core::machine::{
+    ActionRole, DipApplyTiming, DipChoice, DipOption, DipSwitchBank, DipSwitches, Direction,
+    InputConfigurable, InputControl, InputEvent, InputId, InputKind, MachineCore, Nvram,
+    Profilable, SaveState,
+};
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::watchpoint::DebugAccessSource;
 use phosphor_core::core::{AccessKind, AddressSpace16};
 use phosphor_core::core::{Bus, BusMaster, TimingConfig};
-use phosphor_core::cpu::CpuStateTrait;
 use phosphor_core::cpu::state::Z80State;
 use phosphor_core::cpu::z80::Z80;
+use phosphor_core::cpu::{Cpu, CpuStateTrait};
 use phosphor_core::device::GalaxianSound;
 use phosphor_macros::{BusDebug, DebugTrace, MemoryRegion};
 
 use crate::galaxian_video::{self, GalaxianVideo};
+use crate::registry::MachineEntry;
+use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
 
 /// Audio output rate produced by [`GalaxianBoard::fill_audio`]; matches the
 /// frontend's `audio_sample_rate`.
@@ -452,14 +460,12 @@ impl GalaxianBoard {
     // Reset
     // -----------------------------------------------------------------------
 
-    /// Reset all board state except ROMs, GFX caches, and palette. The caller
-    /// resets the CPU separately (requires `bus_split`).
+    /// Reset all board state except ROMs, GFX/palette, and the input/DIP ports
+    /// (those are external switches that a reset signal does not move). The
+    /// caller resets the CPU separately (requires `bus_split`).
     pub fn reset_board(&mut self) {
         self.video.reset();
         phosphor_core::device::Device::reset(&mut self.sound);
-        self.in0 = 0x00;
-        self.in1 = 0x00;
-        self.in2 = 0x00;
         self.irq_enabled = false;
         self.vblank_nmi_pending = false;
         self.clock = 0;
@@ -515,6 +521,437 @@ impl Saveable for GalaxianBoard {
         self.watchdog_counter = r.read_u32_le()?;
         Ok(())
     }
+}
+
+// ===========================================================================
+// Galaxian game (Namco/Midway, 1979) — wrapper around GalaxianBoard
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// ROM definitions ("galaxian" Namco/Midway set)
+// ---------------------------------------------------------------------------
+
+/// Program ROM: 0x0000-0x27FF (five 2 KB chips); the rest of the 16 KB region
+/// is unmapped.
+pub static GALAXIAN_PROGRAM_ROM: RomRegion = RomRegion {
+    size: 0x4000,
+    entries: &[
+        RomEntry {
+            name: "galmidw.u",
+            size: 0x0800,
+            offset: 0x0000,
+            crc32: &[0x745e2d61],
+        },
+        RomEntry {
+            name: "galmidw.v",
+            size: 0x0800,
+            offset: 0x0800,
+            crc32: &[0x9c999a40],
+        },
+        RomEntry {
+            name: "galmidw.w",
+            size: 0x0800,
+            offset: 0x1000,
+            crc32: &[0xb5894925],
+        },
+        RomEntry {
+            name: "galmidw.y",
+            size: 0x0800,
+            offset: 0x1800,
+            crc32: &[0x6b3ca10b],
+        },
+        RomEntry {
+            name: "7l",
+            size: 0x0800,
+            offset: 0x2000,
+            crc32: &[0x1b933207],
+        },
+    ],
+};
+
+/// GFX ROM: 4 KB (two 2 KB bitplane halves shared by tiles and sprites).
+pub static GALAXIAN_GFX_ROM: RomRegion = RomRegion {
+    size: 0x1000,
+    entries: &[
+        RomEntry {
+            name: "1h.bin",
+            size: 0x0800,
+            offset: 0x0000,
+            crc32: &[0x39fb43a4],
+        },
+        RomEntry {
+            name: "1k.bin",
+            size: 0x0800,
+            offset: 0x0800,
+            crc32: &[0x7e3f56a2],
+        },
+    ],
+};
+
+/// Palette PROM (32 bytes).
+pub static GALAXIAN_COLOR_PROM: RomRegion = RomRegion {
+    size: 0x0020,
+    entries: &[RomEntry {
+        name: "6l.bpr",
+        size: 0x0020,
+        offset: 0x0000,
+        crc32: &[0xc3ac9467],
+    }],
+};
+
+// ---------------------------------------------------------------------------
+// DIP switches
+// ---------------------------------------------------------------------------
+//
+// Galaxian's DIPs are not a dedicated DSW byte; they share the IN0/IN1/IN2
+// input ports at fixed bit positions (the live input bits occupy the rest).
+// Each bank below maps to one port and exposes only its DIP bits; the masks
+// keep `set_dip_bank_value` from disturbing the input bits in the same byte.
+
+const DIP0_MASK: u8 = 0x20; // IN0: Cabinet
+const DIP1_MASK: u8 = 0xc0; // IN1: Coinage
+const DIP2_MASK: u8 = 0x07; // IN2: Bonus Life + Lives
+/// Factory default DIP bits: IN0/IN1 = 0, IN2 = 7000 bonus + 3 lives (0x04).
+const DIP2_DEFAULT: u8 = 0x04;
+
+pub(crate) const GALAXIAN_DIP_BANKS: &[DipSwitchBank] = &[
+    DipSwitchBank {
+        name: "IN0",
+        options: &[DipOption {
+            name: "Cabinet",
+            mask: DIP0_MASK,
+            apply: DipApplyTiming::Immediate,
+            choices: &[
+                DipChoice {
+                    label: "Upright",
+                    value: 0x00,
+                },
+                DipChoice {
+                    label: "Cocktail",
+                    value: 0x20,
+                },
+            ],
+        }],
+    },
+    DipSwitchBank {
+        name: "IN1",
+        options: &[DipOption {
+            name: "Coinage",
+            mask: DIP1_MASK,
+            apply: DipApplyTiming::Immediate,
+            choices: &[
+                DipChoice {
+                    label: "1 Coin/1 Credit",
+                    value: 0x00,
+                },
+                DipChoice {
+                    label: "2 Coins/1 Credit",
+                    value: 0x40,
+                },
+                DipChoice {
+                    label: "1 Coin/2 Credits",
+                    value: 0x80,
+                },
+                DipChoice {
+                    label: "Free Play",
+                    value: 0xc0,
+                },
+            ],
+        }],
+    },
+    DipSwitchBank {
+        name: "IN2",
+        options: &[
+            DipOption {
+                name: "Bonus Life",
+                mask: 0x03,
+                apply: DipApplyTiming::Immediate,
+                choices: &[
+                    DipChoice {
+                        label: "7000",
+                        value: 0x00,
+                    },
+                    DipChoice {
+                        label: "10000",
+                        value: 0x01,
+                    },
+                    DipChoice {
+                        label: "12000",
+                        value: 0x02,
+                    },
+                    DipChoice {
+                        label: "20000",
+                        value: 0x03,
+                    },
+                ],
+            },
+            DipOption {
+                name: "Lives",
+                mask: 0x04,
+                apply: DipApplyTiming::Immediate,
+                choices: &[
+                    DipChoice {
+                        label: "2",
+                        value: 0x00,
+                    },
+                    DipChoice {
+                        label: "3",
+                        value: 0x04,
+                    },
+                ],
+            },
+        ],
+    },
+];
+
+// ---------------------------------------------------------------------------
+// Input controls
+// ---------------------------------------------------------------------------
+
+/// Galaxian is a 2-way (left/right) shooter with one fire button; player 2 uses
+/// the same controls on a cocktail cabinet. `InputId`s reuse the board's
+/// `INPUT_*` numbering so `handle_input` shares one id space.
+pub const GALAXIAN_CONTROLS: &[InputControl] = &[
+    InputControl {
+        id: InputId(INPUT_P1_LEFT as u16),
+        stable_name: "p1_left",
+        label: "P1 Left",
+        kind: InputKind::DigitalDirection {
+            direction: Direction::Left,
+        },
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_LEFT,
+    },
+    InputControl {
+        id: InputId(INPUT_P1_RIGHT as u16),
+        stable_name: "p1_right",
+        label: "P1 Right",
+        kind: InputKind::DigitalDirection {
+            direction: Direction::Right,
+        },
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_RIGHT,
+    },
+    InputControl {
+        id: InputId(INPUT_P1_FIRE as u16),
+        stable_name: "p1_fire",
+        label: "P1 Fire",
+        kind: InputKind::Action(ActionRole::Primary),
+        player: Some(1),
+        default_bindings: &[],
+    },
+    InputControl {
+        id: InputId(INPUT_COIN as u16),
+        stable_name: "coin",
+        label: "Coin",
+        kind: InputKind::Coin,
+        player: None,
+        default_bindings: crate::input_defaults::COIN,
+    },
+    InputControl {
+        id: InputId(INPUT_P1_START as u16),
+        stable_name: "p1_start",
+        label: "P1 Start",
+        kind: InputKind::Start,
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_START,
+    },
+    InputControl {
+        id: InputId(INPUT_P2_START as u16),
+        stable_name: "p2_start",
+        label: "P2 Start",
+        kind: InputKind::Start,
+        player: Some(2),
+        default_bindings: crate::input_defaults::P2_START,
+    },
+    InputControl {
+        id: InputId(INPUT_P2_LEFT as u16),
+        stable_name: "p2_left",
+        label: "P2 Left",
+        kind: InputKind::DigitalDirection {
+            direction: Direction::Left,
+        },
+        player: Some(2),
+        default_bindings: crate::input_defaults::P2_LEFT,
+    },
+    InputControl {
+        id: InputId(INPUT_P2_RIGHT as u16),
+        stable_name: "p2_right",
+        label: "P2 Right",
+        kind: InputKind::DigitalDirection {
+            direction: Direction::Right,
+        },
+        player: Some(2),
+        default_bindings: crate::input_defaults::P2_RIGHT,
+    },
+    InputControl {
+        id: InputId(INPUT_P2_FIRE as u16),
+        stable_name: "p2_fire",
+        label: "P2 Fire",
+        kind: InputKind::Action(ActionRole::Primary),
+        player: Some(2),
+        default_bindings: &[],
+    },
+];
+
+// ---------------------------------------------------------------------------
+// GalaxianSystem — the Galaxian game wrapped around GalaxianBoard
+// ---------------------------------------------------------------------------
+
+/// Galaxian (Namco/Midway, 1979): Z80 @ 3.072 MHz, tilemap + sprites +
+/// hardware starfield, discrete sound. Vertical monitor, 224×256 display.
+#[derive(phosphor_macros::Saveable)]
+pub struct GalaxianSystem {
+    pub board: GalaxianBoard,
+}
+
+impl GalaxianSystem {
+    pub fn new() -> Self {
+        let mut board = GalaxianBoard::new();
+        // Apply factory-default DIP positions (IN0/IN1 = 0).
+        board.in2 = DIP2_DEFAULT;
+        Self { board }
+    }
+
+    pub fn load_rom_set(&mut self, rom_set: &RomSet) -> Result<(), RomLoadError> {
+        self.board
+            .load_program_rom(&GALAXIAN_PROGRAM_ROM.load(rom_set)?);
+        self.board.load_gfx_rom(&GALAXIAN_GFX_ROM.load(rom_set)?);
+        self.board
+            .load_color_prom(&GALAXIAN_COLOR_PROM.load(rom_set)?);
+        Ok(())
+    }
+
+    pub fn get_cpu_state(&self) -> Z80State {
+        self.board.get_cpu_state()
+    }
+
+    pub fn clock(&self) -> u64 {
+        self.board.clock()
+    }
+}
+
+impl Default for GalaxianSystem {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Bus implementation
+// ---------------------------------------------------------------------------
+
+impl Bus for GalaxianSystem {
+    type Address = u16;
+    type Data = u8;
+
+    fn read(&mut self, _master: BusMaster, addr: u16) -> u8 {
+        self.board.bus_read_common(addr)
+    }
+
+    fn write(&mut self, _master: BusMaster, addr: u16, data: u8) {
+        self.board.bus_write_common(addr, data);
+    }
+
+    fn io_read(&mut self, _master: BusMaster, _addr: u16) -> u8 {
+        0xFF // Galaxian uses no Z80 I/O ports (all I/O is memory-mapped)
+    }
+
+    fn io_write(&mut self, _master: BusMaster, _addr: u16, _data: u8) {}
+
+    fn is_halted_for(&self, _master: BusMaster) -> bool {
+        false // No DMA hardware
+    }
+
+    fn check_interrupts(&mut self, target: BusMaster) -> InterruptState {
+        self.board.check_interrupts(target)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Trait implementations
+// ---------------------------------------------------------------------------
+
+crate::impl_board_delegation!(GalaxianSystem, board, TIMING);
+
+impl MachineCore for GalaxianSystem {
+    crate::machine_core_metadata!("galaxian", TIMING);
+
+    fn run_frame(&mut self) {
+        bus_split!(self, bus => {
+            for _ in 0..TIMING.cycles_per_frame() {
+                self.board.tick(bus);
+            }
+        });
+    }
+
+    fn reset(&mut self) {
+        self.board.reset_board();
+        bus_split!(self, bus => {
+            self.board.cpu.reset(bus, BusMaster::Cpu(0));
+        });
+    }
+}
+
+impl SaveState for GalaxianSystem {
+    crate::machine_save_state!();
+}
+
+impl Nvram for GalaxianSystem {}
+impl Profilable for GalaxianSystem {}
+
+impl InputConfigurable for GalaxianSystem {
+    fn input_controls(&self) -> &'static [InputControl] {
+        GALAXIAN_CONTROLS
+    }
+
+    fn handle_input(&mut self, event: InputEvent) {
+        if let InputEvent::Button { id, pressed } = event {
+            self.board.handle_input(id.0 as u8, pressed);
+        }
+    }
+}
+
+impl DipSwitches for GalaxianSystem {
+    fn dip_banks(&self) -> &'static [DipSwitchBank] {
+        GALAXIAN_DIP_BANKS
+    }
+
+    fn dip_bank_value(&self, bank: usize) -> u8 {
+        match bank {
+            0 => self.board.in0 & DIP0_MASK,
+            1 => self.board.in1 & DIP1_MASK,
+            2 => self.board.in2 & DIP2_MASK,
+            _ => 0,
+        }
+    }
+
+    fn set_dip_bank_value(&mut self, bank: usize, value: u8) {
+        match bank {
+            0 => self.board.in0 = (self.board.in0 & !DIP0_MASK) | (value & DIP0_MASK),
+            1 => self.board.in1 = (self.board.in1 & !DIP1_MASK) | (value & DIP1_MASK),
+            2 => self.board.in2 = (self.board.in2 & !DIP2_MASK) | (value & DIP2_MASK),
+            _ => {}
+        }
+    }
+}
+
+crate::impl_board_debug_trace!(GalaxianSystem, board);
+
+// ---------------------------------------------------------------------------
+// Machine registry
+// ---------------------------------------------------------------------------
+
+fn create_machine(
+    rom_set: &RomSet,
+) -> Result<Box<dyn phosphor_core::core::machine::FrontendMachine>, RomLoadError> {
+    let mut sys = GalaxianSystem::new();
+    sys.load_rom_set(rom_set)?;
+    Ok(Box::new(sys))
+}
+
+inventory::submit! {
+    MachineEntry::new("galaxian", &["galaxian"], create_machine)
 }
 
 // ---------------------------------------------------------------------------
@@ -717,5 +1154,113 @@ mod tests {
         assert_eq!(events[0].detail, Some("stars enable"));
         assert_eq!(events[1].kind, DebugEventKind::DeviceRead);
         assert_eq!(events[1].addr, Some(0x7000));
+    }
+
+    // -----------------------------------------------------------------------
+    // GalaxianSystem wrapper
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn machine_is_registered() {
+        let entry = crate::registry::find("galaxian").expect("galaxian registered");
+        assert_eq!(entry.name, "galaxian");
+        assert_eq!(entry.rom_names, &["galaxian"]);
+    }
+
+    #[test]
+    fn metadata_and_display_size() {
+        use phosphor_core::core::machine::{MachineCore, Renderable};
+        let sys = GalaxianSystem::new();
+        assert_eq!(sys.machine_id(), "galaxian");
+        assert!((sys.frame_rate_hz() - 60.606).abs() < 0.01);
+        // Rotated 90° CCW from native 256×224.
+        assert_eq!(sys.display_size(), (224, 256));
+    }
+
+    #[test]
+    fn dip_metadata_is_well_formed_and_defaults_decompose() {
+        // Disjoint masks per bank, every choice fits its mask, and the live
+        // power-on bytes decompose into defined choices.
+        crate::assert_dip_banks_valid(GALAXIAN_DIP_BANKS, &[0x00, 0x00, DIP2_DEFAULT]);
+    }
+
+    #[test]
+    fn dip_defaults_match_historical() {
+        let sys = GalaxianSystem::new();
+        assert_eq!(sys.dip_bank_value(0), 0x00); // Upright
+        assert_eq!(sys.dip_bank_value(1), 0x00); // 1C/1C
+        assert_eq!(sys.dip_bank_value(2), 0x04); // 7000 bonus, 3 lives
+        assert_eq!(sys.dip_banks().len(), 3);
+        assert_eq!(sys.dip_bank_value(9), 0); // out of range
+    }
+
+    #[test]
+    fn dip_set_touches_only_its_bits_not_inputs() {
+        let mut sys = GalaxianSystem::new();
+        // A held P2-start input lives in IN1 bit1 — must survive a coinage change.
+        sys.board.handle_input(INPUT_P2_START, true);
+        assert_eq!(sys.board.in1 & 0x02, 0x02);
+
+        sys.set_dip_bank_value(1, 0xc0); // Free Play
+        assert_eq!(sys.dip_bank_value(1), 0xc0);
+        assert_eq!(sys.board.in1 & 0x02, 0x02, "input bit preserved");
+
+        // Stray bits outside the mask are filtered out.
+        sys.set_dip_bank_value(0, 0xff);
+        assert_eq!(sys.board.in0, 0x20);
+    }
+
+    #[test]
+    fn input_controls_cover_two_players() {
+        let sys = GalaxianSystem::new();
+        let controls = sys.input_controls();
+        // Stable names are unique and include both players' fire buttons.
+        let mut names: Vec<_> = controls.iter().map(|c| c.stable_name).collect();
+        let count = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), count, "stable names must be unique");
+        assert!(controls.iter().any(|c| c.stable_name == "p1_fire"));
+        assert!(controls.iter().any(|c| c.stable_name == "p2_fire"));
+    }
+
+    #[test]
+    fn handle_input_routes_to_board_ports() {
+        let mut sys = GalaxianSystem::new();
+        sys.handle_input(InputEvent::Button {
+            id: InputId(INPUT_P1_FIRE as u16),
+            pressed: true,
+        });
+        assert_eq!(sys.board.in0 & 0x10, 0x10); // IN0 bit4 = P1 fire
+    }
+
+    #[test]
+    fn system_save_load_round_trip() {
+        let mut sys = GalaxianSystem::new();
+        sys.board.map.region_data_mut(Region::VideoRam)[0x40] = 0x99;
+        sys.board.handle_input(INPUT_COIN, true);
+        sys.set_dip_bank_value(1, 0xc0); // Free Play
+        sys.board.bus_write_common(0x7800, 0x77); // sound pitch
+
+        let data = SaveState::save_state(&sys).expect("save_state returns Some");
+
+        let mut sys2 = GalaxianSystem::new();
+        SaveState::load_state(&mut sys2, &data).unwrap();
+        assert_eq!(sys2.board.map.region_data(Region::VideoRam)[0x40], 0x99);
+        assert_eq!(sys2.board.in0 & 0x01, 0x01); // coin held
+        assert_eq!(sys2.dip_bank_value(1), 0xc0); // Free Play
+    }
+
+    #[test]
+    fn reset_preserves_dips_but_clears_ram() {
+        let mut sys = GalaxianSystem::new();
+        sys.set_dip_bank_value(0, 0x20); // Cocktail
+        sys.board.map.region_data_mut(Region::Ram)[0] = 0xEE;
+        sys.board.clock = 5000;
+
+        sys.reset();
+        assert_eq!(sys.dip_bank_value(0), 0x20, "DIP switch survives reset");
+        assert_eq!(sys.board.map.region_data(Region::Ram)[0], 0x00);
+        assert_eq!(sys.board.clock, 0);
     }
 }
