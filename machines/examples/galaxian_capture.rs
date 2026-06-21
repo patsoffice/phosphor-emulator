@@ -23,8 +23,9 @@ fn set_lfo(s: &mut GalaxianSound, v: u8) {
 /// Drive the sound registers for time `t` (seconds), matching the MAME Lua
 /// driver exactly: one voice per 2 s window.
 fn drive(s: &mut GalaxianSound, t: f64) {
-    // Baseline: everything off.
-    s.pitch_w(0);
+    // Baseline: everything off. Pitch parked high (0xFF) so the always-on
+    // melody is ultrasonic (silent) and doesn't bleed into the other windows.
+    s.pitch_w(0xFF);
     set_lfo(s, 0);
     for line in 0..8 {
         s.sound_w(line, 0);

@@ -40,8 +40,10 @@ local function on_frame()
 
   local t = manager.machine.time.seconds
 
-  -- Baseline: everything off.
-  set_pitch(0)
+  -- Baseline: everything off. Pitch is parked high (0xFF) so the always-on
+  -- melody note clock is ultrasonic (silent) and doesn't bleed into the other
+  -- voices' windows.
+  set_pitch(0xff)
   set_lfo(0)
   for line = 0, 7 do set_latch(line, false) end
 

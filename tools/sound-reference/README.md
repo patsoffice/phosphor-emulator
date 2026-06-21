@@ -82,6 +82,45 @@ python3 tools/sound-reference/analyze_wav.py --galaxian \
 The two tables should line up per effect (compare the centroid column; the single
 peak bin is unstable for swept tones).
 
+## When the per-effect table isn't enough
+
+The centroid/RMS table is a fast first pass, but it averages over a window and so
+misses two things that the ear hears immediately: **decay length** and
+**tonal-vs-noisy character**. The Galaxian pass needed all of the following.
+
+- **Spectrograms — look, don't just measure.** When a sound is "wrong" but the
+  centroids match, render a spectrogram and *view it*. A bell/ring shows as a few
+  steady horizontal lines; an explosion as a broadband vertical wash; a melody as
+  stepped/swept lines. `matplotlib`'s `specgram` plus the `Read` of the PNG is the
+  single most useful tool here. (NixOS: `nix-shell -p
+  'python3.withPackages(ps: [ps.numpy ps.matplotlib])'`.)
+
+- **Spectral flatness** separates a tone from noise where the centroid can't:
+  `flatness = geomean(power) / mean(power)` over the band — ~0 for a pure tone,
+  toward 1 for white noise. An explosion that reads as a low centroid but a near-0
+  flatness is ringing like a bell, not rumbling like noise.
+
+- **Verify the noise is actually white.** A wrongly-tapped LFSR can collapse to a
+  tiny period and buzz like a pitched tone instead of hissing. Check the period
+  before trusting it as a noise source — e.g. for the framework's
+  `lfsr_noise(width, (tap_a, tap_b), seed)`, taps `(16, 13)` give a period of
+  **28** (a ~280 Hz buzz) while `(11, 0)` give the full 2^17-1 white sequence.
+
+- **Recorded reference samples.** Some effects are better judged against the
+  original recorded MAME *samples* (the `samples/<game>.zip` WAVs MAME shipped
+  before discrete emulation) than against a discrete capture. Galaxian's
+  `shot.wav` / `death.wav` pinned the shoot as a ~0.6 s bright noise burst and the
+  explosion as a ~2.5 s dark (~630 Hz) noise rumble — durations the windowed table
+  never showed. Compare the WAV length and the RMS *envelope over time*, not just
+  the steady-state spectrum.
+
+- **Isolate an always-on voice.** Galaxian's melody note generator is always
+  running, so at idle the game parks its pitch latch high enough that the note
+  clock is ultrasonic (silent). Reproduce that in the timeline (park the pitch at
+  `0xFF`) so a constant background voice doesn't bleed into the other windows — and
+  make sure the emulated device treats that ultrasonic case as silent rather than
+  aliasing it down into an audible tone.
+
 ## Adapting to another board
 
 For Lunar Lander, Donkey Kong, etc.: copy the Lua driver and swap the register
