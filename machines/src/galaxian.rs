@@ -1,15 +1,15 @@
-//! Galaxian hardware board skeleton (Namco, 1979).
+//! Galaxian hardware board (Namco, 1979).
 //!
 //! Shared base for the Galaxian → Scramble → Frogger lineage's simplest tier:
-//! a single Zilog Z80 @ 3.072 MHz driving the [`crate::galaxian_video`] engine,
-//! with a 74LS259-style addressable latch for IRQ-enable, starfield-enable, and
-//! cocktail flip. Sound is intentionally absent at this stage (the discrete
-//! Galaxian sound board lands in a later epic child).
+//! a single Zilog Z80 @ 3.072 MHz driving the [`crate::galaxian_video`] engine
+//! and the [`GalaxianSound`] discrete sound board, with a 74LS259-style
+//! addressable latch for IRQ-enable, starfield-enable, and cocktail flip.
 //!
 //! Modeled on [`crate::namco_pac::NamcoPacBoard`]: the board owns the CPU,
-//! address space, and video engine and exposes inherent `tick`/`render_frame`/
-//! bus-dispatch helpers. A game wrapper (added separately) implements [`Bus`]
-//! and the frontend capability traits on top of it.
+//! address space, video engine, and sound device and exposes inherent
+//! `tick`/`render_frame`/`fill_audio`/bus-dispatch helpers. A game wrapper
+//! (added separately) implements [`Bus`] and the frontend capability traits on
+//! top of it.
 //!
 //! Memory map (MAME `galaxian_map`):
 //! ```text
@@ -17,10 +17,10 @@
 //!   0x4000-0x47ff  Work RAM        (1 KB, mirrored)
 //!   0x5000-0x57ff  Video RAM       (tile codes, mirrored)
 //!   0x5800-0x5fff  Object RAM      (scroll/color, sprites, bullets; mirrored)
-//!   0x6000-0x67ff  IN0 (r) / lamps + coin latch (w)
-//!   0x6800-0x6fff  IN1 (r)
+//!   0x6000-0x67ff  IN0 (r) / lamps+coin (w 0-3) / sound LFO freq (w 4-7)
+//!   0x6800-0x6fff  IN1 (r) / sound 74LS259 latch (w)
 //!   0x7000-0x77ff  IN2 (r) / 74LS259 latch (w)
-//!   0x7800-0x7fff  watchdog
+//!   0x7800-0x7fff  watchdog (r) / sound pitch (w)
 //! ```
 
 use phosphor_core::core::bus::InterruptState;
@@ -32,9 +32,14 @@ use phosphor_core::core::{Bus, BusMaster, TimingConfig};
 use phosphor_core::cpu::CpuStateTrait;
 use phosphor_core::cpu::state::Z80State;
 use phosphor_core::cpu::z80::Z80;
+use phosphor_core::device::GalaxianSound;
 use phosphor_macros::{BusDebug, DebugTrace, MemoryRegion};
 
 use crate::galaxian_video::{self, GalaxianVideo};
+
+/// Audio output rate produced by [`GalaxianBoard::fill_audio`]; matches the
+/// frontend's `audio_sample_rate`.
+pub const SAMPLE_RATE: u32 = 44_100;
 
 // ---------------------------------------------------------------------------
 // Memory map regions
@@ -87,10 +92,11 @@ pub const VISIBLE_LINES: u64 = galaxian_video::NATIVE_HEIGHT as u64;
 // GalaxianBoard
 // ---------------------------------------------------------------------------
 
-/// Galaxian hardware base (Z80 @ 3.072 MHz, tilemap + sprites + starfield).
+/// Galaxian hardware base (Z80 @ 3.072 MHz, tilemap + sprites + starfield +
+/// discrete sound).
 ///
 /// Game wrappers compose this struct and implement [`Bus`] to route memory
-/// accesses. No sound hardware is modeled at this stage.
+/// accesses.
 #[derive(BusDebug, DebugTrace)]
 pub struct GalaxianBoard {
     #[debug_cpu("Z80")]
@@ -100,6 +106,9 @@ pub struct GalaxianBoard {
     pub(crate) map: AddressSpace16,
 
     pub(crate) video: GalaxianVideo,
+
+    #[debug_device("Galaxian Sound")]
+    pub(crate) sound: GalaxianSound,
 
     // Input ports (active-high: 0x00 = nothing pressed). IN2 is DIP-only.
     pub(crate) in0: u8,
@@ -133,6 +142,7 @@ impl GalaxianBoard {
             cpu: Z80::new(),
             map: Self::build_map(),
             video: GalaxianVideo::new(),
+            sound: GalaxianSound::new(SAMPLE_RATE),
             in0: 0x00,
             in1: 0x00,
             in2: 0x00,
@@ -241,6 +251,7 @@ impl GalaxianBoard {
         }
 
         self.cpu.execute_cycle(bus, BusMaster::Cpu(0));
+        self.sound.tick(1);
 
         self.clock += 1;
         self.watchdog_counter += 1;
@@ -313,6 +324,16 @@ impl GalaxianBoard {
 
         if self.debug_trace.enabled() {
             let (kind, device, detail) = match addr {
+                0x6000..=0x67ff if addr & 7 >= 4 => (
+                    DebugEventKind::DeviceWrite,
+                    Some("Galaxian Sound"),
+                    Some("LFO freq"),
+                ),
+                0x6800..=0x6fff => (
+                    DebugEventKind::DeviceWrite,
+                    Some("Galaxian Sound"),
+                    Some("sound latch"),
+                ),
                 0x7000..=0x77ff => (
                     DebugEventKind::DeviceWrite,
                     Some("I/O latch"),
@@ -324,7 +345,11 @@ impl GalaxianBoard {
                         _ => "latch bit",
                     }),
                 ),
-                0x7800..=0x7fff => (DebugEventKind::Watchdog, None, Some("watchdog cleared")),
+                0x7800..=0x7fff => (
+                    DebugEventKind::DeviceWrite,
+                    Some("Galaxian Sound"),
+                    Some("pitch"),
+                ),
                 0x5000..=0x5fff => (DebugEventKind::MemoryWrite, None, None),
                 _ => (DebugEventKind::IoWrite, None, None),
             };
@@ -335,8 +360,17 @@ impl GalaxianBoard {
             // Work RAM, Video RAM, Object RAM
             0x4000..=0x5fff => self.map.write_backing(addr, data),
 
-            // 0x6000 block: lamps / coin counter / coin lockout (not modeled).
-            0x6000..=0x67ff => {}
+            // 0x6000 block: lines 0-3 are lamps / coin counter / coin lockout
+            // (not modeled); lines 4-7 are the sound LFO ("wolf-whistle") DAC.
+            0x6000..=0x67ff => {
+                let line = (addr & 7) as u8;
+                if line >= 4 {
+                    self.sound.lfo_freq_w(line - 4, data);
+                }
+            }
+
+            // 0x6800 block: the sound 74LS259 latch (FS1-3 / HIT / FIRE / VOL).
+            0x6800..=0x6fff => self.sound.sound_w((addr & 7) as u8, data),
 
             // 0x7000 block: 74LS259 addressable latch (line = addr & 7).
             0x7000..=0x77ff => match addr & 7 {
@@ -352,8 +386,8 @@ impl GalaxianBoard {
                 _ => {}
             },
 
-            // Watchdog reset
-            0x7800..=0x7fff => self.watchdog_counter = 0,
+            // 0x7800 block: background pitch latch (watchdog reset is on read).
+            0x7800..=0x7fff => self.sound.pitch_w(data),
 
             _ => { /* ROM or unmapped: ignored */ }
         }
@@ -391,6 +425,10 @@ impl GalaxianBoard {
         self.video.render_frame(buffer);
     }
 
+    pub fn fill_audio(&mut self, buffer: &mut [i16]) -> usize {
+        self.sound.fill_audio(buffer)
+    }
+
     // -----------------------------------------------------------------------
     // Input — dispatched to active-high port bits by a game wrapper.
     // -----------------------------------------------------------------------
@@ -418,6 +456,7 @@ impl GalaxianBoard {
     /// resets the CPU separately (requires `bus_split`).
     pub fn reset_board(&mut self) {
         self.video.reset();
+        phosphor_core::device::Device::reset(&mut self.sound);
         self.in0 = 0x00;
         self.in1 = 0x00;
         self.in2 = 0x00;
@@ -450,6 +489,7 @@ impl Saveable for GalaxianBoard {
         w.write_bytes(self.map.region_data(Region::VideoRam));
         w.write_bytes(self.map.region_data(Region::ObjRam));
         self.video.save_state(w);
+        self.sound.save_state(w);
         w.write_u8(self.in0);
         w.write_u8(self.in1);
         w.write_u8(self.in2);
@@ -465,6 +505,7 @@ impl Saveable for GalaxianBoard {
         r.read_bytes_into(self.map.region_data_mut(Region::VideoRam))?;
         r.read_bytes_into(self.map.region_data_mut(Region::ObjRam))?;
         self.video.load_state(r)?;
+        self.sound.load_state(r)?;
         self.in0 = r.read_u8()?;
         self.in1 = r.read_u8()?;
         self.in2 = r.read_u8()?;
@@ -564,14 +605,37 @@ mod tests {
     }
 
     #[test]
-    fn watchdog_reset_on_access() {
+    fn watchdog_reset_on_read_only() {
         let mut board = GalaxianBoard::new();
-        board.watchdog_counter = 999;
-        board.bus_write_common(0x7800, 0x00);
-        assert_eq!(board.watchdog_counter, 0);
+        // Reading 0x7800 resets the watchdog.
         board.watchdog_counter = 999;
         let _ = board.bus_read_common(0x7800);
         assert_eq!(board.watchdog_counter, 0);
+        // Writing 0x7800 is the sound pitch latch, not a watchdog reset.
+        board.watchdog_counter = 999;
+        board.bus_write_common(0x7800, 0x80);
+        assert_eq!(board.watchdog_counter, 999);
+    }
+
+    #[test]
+    fn sound_register_writes_dispatch_and_produce_audio() {
+        use phosphor_core::core::debug::Debuggable;
+        let mut board = GalaxianBoard::new();
+        // pitch (0x7800), LFO line 2 (0x6006), sound latch FIRE (0x6805).
+        board.bus_write_common(0x7800, 0xC4);
+        board.bus_write_common(0x6006, 0x01);
+        board.bus_write_common(0x6805, 0x01);
+        let regs = board.sound.debug_registers();
+        let by = |name: &str| regs.iter().find(|r| r.name == name).unwrap().value;
+        assert_eq!(by("PITCH"), 0xC4);
+        assert_eq!(by("LFO"), 0b0100); // line 2 set
+        assert_eq!(by("LATCH"), 0b0010_0000); // FIRE = line 5
+
+        // Advancing the sound circuit yields samples (the board's tick() calls
+        // sound.tick(1) per CPU cycle; here we drive it directly).
+        board.sound.tick(4000);
+        let mut buf = [0i16; 64];
+        assert!(board.fill_audio(&mut buf) > 0);
     }
 
     #[test]
@@ -586,6 +650,7 @@ mod tests {
         board.irq_enabled = true;
         board.vblank_nmi_pending = true;
         board.video.set_stars_enabled(true);
+        board.bus_write_common(0x7800, 0x9A); // sound pitch latch
         board.clock = 100_000;
         board.watchdog_counter = 99;
 
@@ -612,6 +677,16 @@ mod tests {
         assert!(board2.video.stars_enabled());
         assert_eq!(board2.clock, 100_000);
         assert_eq!(board2.watchdog_counter, 99);
+        // Sound device state survives too (PITCH register restored).
+        use phosphor_core::core::debug::Debuggable;
+        let pitch = board2
+            .sound
+            .debug_registers()
+            .iter()
+            .find(|r| r.name == "PITCH")
+            .unwrap()
+            .value;
+        assert_eq!(pitch, 0x9A);
     }
 
     #[test]
