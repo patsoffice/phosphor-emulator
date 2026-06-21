@@ -48,7 +48,7 @@ impl CustomComponent for LanderNoise {
         while self.clock_acc >= 1.0 {
             self.clock_acc -= 1.0;
             let fb = !(((self.lfsr >> 6) ^ (self.lfsr >> 14)) & 1) & 1;
-            self.lfsr = ((self.lfsr << 1) | fb) & 0xFFFF;
+            self.lfsr = (self.lfsr << 1) | fb;
         }
         if (self.lfsr >> 14) & 1 != 0 {
             1.0
