@@ -72,13 +72,36 @@ const RGB_MAXIMUM: f64 = 224.0;
 // GalaxianVideo
 // ---------------------------------------------------------------------------
 
+/// GFX bank-switching scheme. Base Galaxian has none; later board variants add
+/// a 74LS259 latch (at 0x6000-0x6002) whose bits extend the tile/sprite code
+/// into a second 4 KB GFX bank, with a game-specific bit mapping (MAME's
+/// `*_extend_tile_info` / `*_extend_sprite_info`).
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
+pub enum GfxBankMode {
+    /// No banking (base Galaxian); codes are 8-bit tiles / 6-bit sprites.
+    #[default]
+    None,
+    /// Pisces / UniWar S: `gfxbank[0]` is the high code bit (tile bit 8,
+    /// sprite bit 6), selecting between two full 256-tile / 64-sprite banks.
+    Pisces,
+    /// Moon Cresta: when `gfxbank[2]` is set, codes whose top bits are `0b10`
+    /// are remapped into the second bank, with `gfxbank[0]`/`gfxbank[1]` as the
+    /// low bank-select bits.
+    Mooncrst,
+}
+
 /// Galaxian-family video engine: decoded GFX, PROM palettes, starfield, and a
 /// native-orientation scanline framebuffer.
 pub struct GalaxianVideo {
     // Pre-decoded GFX (chars and sprites share the same GFX ROM; sprites are
-    // 2×2 groups of chars decoded as 16×16 elements).
-    tile_cache: GfxCache,   // 256 × 8×8 × 2bpp
-    sprite_cache: GfxCache, // 64 × 16×16 × 2bpp
+    // 2×2 groups of chars decoded as 16×16 elements). Sized from the ROM:
+    // 256/64 for a 4 KB ROM, 512/128 for an 8 KB banked ROM.
+    tile_cache: GfxCache,
+    sprite_cache: GfxCache,
+
+    // GFX bank-switching scheme and the 74LS259 latch bits that drive it.
+    gfx_mode: GfxBankMode,
+    gfxbank: [u8; 3],
 
     // PROM + derived colors.
     palette_prom: [u8; 32],
@@ -112,6 +135,8 @@ impl GalaxianVideo {
         let mut video = Self {
             tile_cache: GfxCache::new(256, 8, 8),
             sprite_cache: GfxCache::new(64, 16, 16),
+            gfx_mode: GfxBankMode::None,
+            gfxbank: [0; 3],
             palette_prom: [0; 32],
             palette_rgb: [(0, 0, 0); 32],
             star_color: [(0, 0, 0); 64],
@@ -143,6 +168,58 @@ impl GalaxianVideo {
 
     pub fn set_flip_y(&mut self, flip: bool) {
         self.flip_y = flip;
+    }
+
+    /// Select the GFX bank-switching scheme (set once at construction by the
+    /// game wrapper; base Galaxian leaves it [`GfxBankMode::None`]).
+    pub fn set_gfx_mode(&mut self, mode: GfxBankMode) {
+        self.gfx_mode = mode;
+    }
+
+    /// Drive one bit (`offset` 0..=2) of the GFX-bank latch (74LS259 at
+    /// 0x6000-0x6002). Inert unless a banking [`GfxBankMode`] is selected.
+    pub fn set_gfxbank(&mut self, offset: u8, data: u8) {
+        if let Some(slot) = self.gfxbank.get_mut(offset as usize) {
+            *slot = data & 1;
+        }
+    }
+
+    /// Extend a raw tile code with the active GFX bank (MAME's
+    /// `*_extend_tile_info`).
+    fn extend_tile_code(&self, code: usize) -> usize {
+        match self.gfx_mode {
+            GfxBankMode::None => code,
+            GfxBankMode::Pisces => code | ((self.gfxbank[0] as usize) << 8),
+            GfxBankMode::Mooncrst => {
+                if self.gfxbank[2] != 0 && (code & 0xc0) == 0x80 {
+                    (code & 0x3f)
+                        | ((self.gfxbank[0] as usize) << 6)
+                        | ((self.gfxbank[1] as usize) << 7)
+                        | 0x100
+                } else {
+                    code
+                }
+            }
+        }
+    }
+
+    /// Extend a raw sprite code with the active GFX bank (MAME's
+    /// `*_extend_sprite_info`).
+    fn extend_sprite_code(&self, code: usize) -> usize {
+        match self.gfx_mode {
+            GfxBankMode::None => code,
+            GfxBankMode::Pisces => code | ((self.gfxbank[0] as usize) << 6),
+            GfxBankMode::Mooncrst => {
+                if self.gfxbank[2] != 0 && (code & 0x30) == 0x20 {
+                    (code & 0x0f)
+                        | ((self.gfxbank[0] as usize) << 4)
+                        | ((self.gfxbank[1] as usize) << 5)
+                        | 0x40
+                } else {
+                    code
+                }
+            }
+        }
     }
 
     pub fn stars_enabled(&self) -> bool {
@@ -184,8 +261,11 @@ impl GalaxianVideo {
             char_increment: 16 * 16,
         };
 
-        self.tile_cache = decode_gfx(gfx_data, 0, 256, &tile_layout);
-        self.sprite_cache = decode_gfx(gfx_data, 0, 64, &sprite_layout);
+        // 4 KB → 256 tiles / 64 sprites; an 8 KB banked ROM → 512 / 128.
+        let num_tiles = gfx_data.len() / 16;
+        let num_sprites = gfx_data.len() / 64;
+        self.tile_cache = decode_gfx(gfx_data, 0, num_tiles, &tile_layout);
+        self.sprite_cache = decode_gfx(gfx_data, 0, num_sprites, &sprite_layout);
     }
 
     /// Load the 32-byte color PROM and rebuild the tilemap/sprite palette.
@@ -366,7 +446,7 @@ impl GalaxianVideo {
             let eff_y = ((mame_y + scroll) & 0xff) as usize;
             let tile_row = eff_y >> 3;
             let py = eff_y & 7;
-            let code = vram[tile_row * TILE_COLS + col] as usize;
+            let code = self.extend_tile_code(vram[tile_row * TILE_COLS + col] as usize);
             let base_x = col * 8;
             for px in 0..8 {
                 let pv = self.tile_cache.pixel(code, px, py);
@@ -437,7 +517,7 @@ impl GalaxianVideo {
         if mame_y < sy || mame_y >= sy + 16 {
             return;
         }
-        let code = (objram[base + 1] & 0x3f) as usize;
+        let code = self.extend_sprite_code((objram[base + 1] & 0x3f) as usize);
         let flipx = objram[base + 1] & 0x40 != 0;
         let flipy = objram[base + 1] & 0x80 != 0;
         let color = objram[base + 2] & 7;
@@ -551,6 +631,7 @@ impl GalaxianVideo {
         self.stars_enabled = false;
         self.flip_x = false;
         self.flip_y = false;
+        self.gfxbank = [0; 3]; // gfx_mode is static config, not reset
         self.scanline_buffer.fill(0);
     }
 }
@@ -565,6 +646,7 @@ impl Saveable for GalaxianVideo {
         w.write_bool(self.stars_enabled);
         w.write_bool(self.flip_x);
         w.write_bool(self.flip_y);
+        w.write_bytes(&self.gfxbank);
     }
 
     fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
@@ -572,6 +654,7 @@ impl Saveable for GalaxianVideo {
         self.stars_enabled = r.read_bool()?;
         self.flip_x = r.read_bool()?;
         self.flip_y = r.read_bool()?;
+        r.read_bytes_into(&mut self.gfxbank)?;
         Ok(())
     }
 }
@@ -583,6 +666,67 @@ impl Saveable for GalaxianVideo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gfx_rom_size_selects_tile_and_sprite_count() {
+        // A 4 KB ROM → 256 tiles / 64 sprites; an 8 KB banked ROM → 512 / 128.
+        let mut v = GalaxianVideo::new();
+        v.load_gfx_rom(&vec![0u8; 0x1000]);
+        assert_eq!(v.tile_cache.count(), 256);
+        assert_eq!(v.sprite_cache.count(), 64);
+        v.load_gfx_rom(&vec![0u8; 0x2000]);
+        assert_eq!(v.tile_cache.count(), 512);
+        assert_eq!(v.sprite_cache.count(), 128);
+    }
+
+    #[test]
+    fn pisces_gfxbank_extends_high_code_bit() {
+        let mut v = GalaxianVideo::new();
+        v.set_gfx_mode(GfxBankMode::Pisces);
+        // Bank 0: codes unchanged.
+        assert_eq!(v.extend_tile_code(0x12), 0x12);
+        assert_eq!(v.extend_sprite_code(0x05), 0x05);
+        // Bank 1 (gfxbank[0]) adds tile bit 8 / sprite bit 6.
+        v.set_gfxbank(0, 1);
+        assert_eq!(v.extend_tile_code(0x12), 0x112);
+        assert_eq!(v.extend_sprite_code(0x05), 0x45);
+        // Only base mode none leaves everything alone.
+        v.set_gfx_mode(GfxBankMode::None);
+        assert_eq!(v.extend_tile_code(0x12), 0x12);
+    }
+
+    #[test]
+    fn mooncrst_gfxbank_remaps_top_tile_quarter() {
+        let mut v = GalaxianVideo::new();
+        v.set_gfx_mode(GfxBankMode::Mooncrst);
+        // Inert until gfxbank[2] (the enable) is set.
+        assert_eq!(v.extend_tile_code(0x80), 0x80);
+        v.set_gfxbank(2, 1);
+        // Codes outside the 0x80-0xbf window are untouched.
+        assert_eq!(v.extend_tile_code(0x40), 0x40);
+        assert_eq!(v.extend_tile_code(0xc0), 0xc0);
+        // 0x80-0xbf remap into the second bank; gfxbank[0]/[1] are the low bits.
+        assert_eq!(v.extend_tile_code(0x85), 0x105);
+        v.set_gfxbank(0, 1);
+        assert_eq!(v.extend_tile_code(0x85), 0x145);
+        v.set_gfxbank(1, 1);
+        assert_eq!(v.extend_tile_code(0x85), 0x1c5);
+        // Sprites use the 0x20-0x2f window with a 0x40 bank offset.
+        assert_eq!(v.extend_sprite_code(0x25), 0x40 | 0x05 | 0x10 | 0x20);
+    }
+
+    #[test]
+    fn gfxbank_clears_on_reset_but_mode_persists() {
+        let mut v = GalaxianVideo::new();
+        v.set_gfx_mode(GfxBankMode::Pisces);
+        v.set_gfxbank(0, 1);
+        assert_eq!(v.extend_tile_code(0x12), 0x112);
+        v.reset();
+        assert_eq!(v.extend_tile_code(0x12), 0x12, "bank cleared");
+        // Mode survives reset (it's static config), so banking still works.
+        v.set_gfxbank(0, 1);
+        assert_eq!(v.extend_tile_code(0x12), 0x112);
+    }
 
     #[test]
     fn star_table_has_expected_period_and_sparse_enables() {

@@ -41,7 +41,7 @@ use phosphor_core::cpu::{Cpu, CpuStateTrait};
 use phosphor_core::device::GalaxianSound;
 use phosphor_macros::{BusDebug, DebugTrace, MemoryRegion};
 
-use crate::galaxian_video::{self, GalaxianVideo};
+use crate::galaxian_video::{self, GalaxianVideo, GfxBankMode};
 use crate::registry::MachineEntry;
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
 
@@ -369,10 +369,16 @@ impl GalaxianBoard {
             0x4000..=0x5fff => self.map.write_backing(addr, data),
 
             // 0x6000 block: lines 0-3 are lamps / coin counter / coin lockout
-            // (not modeled); lines 4-7 are the sound LFO ("wolf-whistle") DAC.
+            // (not modeled) on base Galaxian; on banked variants (Moon Cresta,
+            // Pisces) lines 0-2 instead drive the GFX-bank latch. Lines 4-7 are
+            // the sound LFO ("wolf-whistle") DAC. The video ignores bank writes
+            // unless a banking GfxBankMode is selected, so this is inert on
+            // base Galaxian.
             0x6000..=0x67ff => {
                 let line = (addr & 7) as u8;
-                if line >= 4 {
+                if line < 3 {
+                    self.video.set_gfxbank(line, data);
+                } else if line >= 4 {
                     self.sound.lfo_freq_w(line - 4, data);
                 }
             }
@@ -415,6 +421,12 @@ impl GalaxianBoard {
 
     pub fn load_color_prom(&mut self, prom: &[u8]) {
         self.video.load_color_prom(prom);
+    }
+
+    /// Select the video GFX bank-switching scheme (banked board variants set
+    /// this at construction; base Galaxian leaves it [`GfxBankMode::None`]).
+    pub fn set_gfx_mode(&mut self, mode: GfxBankMode) {
+        self.video.set_gfx_mode(mode);
     }
 
     // -----------------------------------------------------------------------
