@@ -11,12 +11,12 @@
 //! - ADC0809 8-channel ADC for the analog flight stick; X2212 NOVRAM for scores
 //! - Heavy ROM / RAM / mathbox / comm-RAM bank switching
 //!
-//! Status: the 6809, full memory map with ROM/RAM bank switching, the 32V
-//! scanline IRQ, inputs, DIP switches, X2212 NVRAM, the alphanumeric text layer
-//! (Phase 0), the AM2901 microcoded mathbox with its paged 0x2000-0x3FFF window
-//! and completion FIRQ (Phase 1), and the double-buffered polygon rasterizer
-//! composited under the text layer (Phase 2) are implemented. POKEY sound and
-//! the ADC analog stick are still stubbed; they arrive in Phase 3.
+//! Status: complete and playable. The 6809 with full ROM/RAM bank switching,
+//! the 32V scanline IRQ, inputs, DIP switches, and X2212 NVRAM; the alphanumeric
+//! text layer; the AM2901 microcoded mathbox with its paged 0x2000-0x3FFF window
+//! and completion FIRQ; the double-buffered polygon rasterizer composited under
+//! the text layer; four POKEYs mixed to mono; and the self-centering analog
+//! flight stick via the ADC0809 are all implemented and verified on the real ROM.
 
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
@@ -143,7 +143,7 @@ pub static IROBOT_ALPHA_ROM: RomRegion = RomRegion {
 };
 
 /// PROMs: a 32-byte text-color PROM at offset 0, followed by the 13 mathbox
-/// microcode PROMs (used from Phase 1 onward).
+/// microcode PROMs.
 pub static IROBOT_PROMS: RomRegion = RomRegion {
     size: 0x3420,
     entries: &[
@@ -612,7 +612,7 @@ impl IrobotSystem {
 
     /// Write the polygon color RAM (`paletteram_w`): 9-bit value (8 data bits +
     /// address LSB), inverted, decoded as 3×2-bit RGB scaled by a 3-bit
-    /// intensity. Only the polygon layer (Phase 2) consumes this.
+    /// intensity. Consumed by the polygon layer in `render`.
     fn paletteram_w(&mut self, offset: u16, data: u8) {
         let color = (((data as u32) << 1) | (offset as u32 & 0x01)) ^ 0x1ff;
         let intensity = color & 0x07;
@@ -1092,7 +1092,7 @@ impl Bus for IrobotSystem {
             0x1200..=0x12ff => self.novram.write(addr & 0xff, data),
             0x1400..=0x143f => self.quad_pokey_w(addr & 0x3f, data),
             0x1800..=0x18ff => self.paletteram_w(addr & 0xff, data),
-            0x1900..=0x19ff => {}                         // watchdog (stub)
+            0x1900..=0x19ff => {} // watchdog reset (not modelled)
             0x1a00..=0x1a3f => self.firq_pending = false, // clear FIRQ
             0x1b00..=0x1bff => self.adc.address_offset_start_w(addr & 0x03), // ADC start
             0x1c00..=0x1fff => self.map.write_backing(addr, data), // video RAM
@@ -1628,6 +1628,42 @@ mod tests {
     #[test]
     fn dip_tables_are_valid() {
         crate::assert_dip_banks_valid(IROBOT_DIP_BANKS, &[DSW1_DEFAULT, DSW2_DEFAULT]);
+    }
+
+    #[test]
+    fn disasm_region_registered() {
+        let main = crate::disasm_registry::find("irobot", "main").expect("main region");
+        assert_eq!(main.cpu, crate::disasm_registry::DisasmCpu::M6809);
+        assert_eq!((main.org, main.size), (0x6000, 0xa000));
+    }
+
+    /// End-to-end check on the real ROM set. Opt-in: set `IROBOT_ROM_DIR` to a
+    /// directory of extracted I, Robot ROM files. Skipped (passes) when unset so
+    /// CI without ROMs is unaffected.
+    #[test]
+    fn real_rom_renders_and_sounds() {
+        let Ok(dir) = std::env::var("IROBOT_ROM_DIR") else {
+            return;
+        };
+        let rom_set = RomSet::from_directory(std::path::Path::new(&dir)).unwrap();
+        let mut sys = IrobotSystem::new();
+        sys.load_rom_set(&rom_set).unwrap();
+        MachineCore::reset(&mut sys);
+        for _ in 0..600 {
+            sys.run_frame();
+        }
+        // The mathbox built a display list that the rasterizer drew.
+        let poly_pixels = sys.polybitmap[0]
+            .iter()
+            .chain(&sys.polybitmap[1])
+            .filter(|&&b| b != 0)
+            .count();
+        assert!(poly_pixels > 0, "polygons should be rasterized");
+        // The sound pipeline produced audio.
+        let mut buf = vec![0i16; 8192];
+        assert!(sys.fill_audio(&mut buf) > 0, "audio should be produced");
+        // The CPU is running in ROM, not crashed into unmapped space.
+        assert!(sys.cpu.pc >= 0x4000);
     }
 
     /// A raw value whose `ROUND_TO_PIXEL` ((v>>7)-128) maps to `px`, with the

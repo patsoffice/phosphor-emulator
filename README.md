@@ -122,6 +122,7 @@ Contains all reusable components — zero external dependencies:
 Complete system implementations that wire core components together:
 
 - **AsteroidsSystem** — Atari vector arcade (M6502 + DVG + 1024×1024 vector display)
+- **IrobotSystem** — Atari I, Robot, the first 3D-polygon arcade game (M6809 + AM2901 microcoded mathbox + TTL polygon rasterizer + alphanumeric overlay + 4×POKEY + ADC0809 analog stick + X2212 NVRAM)
 - **DkongSystem** — Donkey Kong on shared TKG-04 board (Z80 + I8035 + I8257 DMA + tile/sprite video)
 - **DkongJrSystem** — Donkey Kong Junior on shared TKG-04 board (24KB ROM, gfx bank, different sound I/O)
 - **JoustSystem** — Williams arcade board (M6809 + 48KB video RAM + two PIAs + blitter + CMOS + 12KB ROM)
