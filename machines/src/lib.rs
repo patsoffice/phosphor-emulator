@@ -380,6 +380,7 @@ pub mod donkey_kong;
 pub mod donkey_kong_jr;
 pub mod foodf;
 pub mod galaga;
+pub mod galaxian;
 pub mod galaxian_video;
 pub mod gottlieb;
 pub mod gridlee;
