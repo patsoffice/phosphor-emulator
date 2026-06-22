@@ -25,8 +25,10 @@ use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
 // ROM definitions
 // ---------------------------------------------------------------------------
 
+// Padded to the full 0x4000 program region (Pisces only populates 0x0000-0x2fff;
+// the board's ROM region is 16 KB and load_region requires an exact-size fill).
 static PISCES_PROGRAM_ROM: RomRegion = RomRegion {
-    size: 0x3000,
+    size: 0x4000,
     entries: &[
         RomEntry {
             name: "p1.bin",
@@ -479,6 +481,11 @@ impl Bus for PiscesSystem {
     }
 
     fn write(&mut self, _master: BusMaster, addr: u16, data: u8) {
+        // pisces_map: the 0x6002 coin-lockout line is replaced by the GFX-bank
+        // bit (gfxbank[0], mirror 0x07f8). Everything else is the Galaxian map.
+        if (0x6000..=0x67ff).contains(&addr) && addr & 7 == 2 {
+            self.board.set_gfxbank(0, data);
+        }
         self.board.bus_write_common(addr, data);
     }
 

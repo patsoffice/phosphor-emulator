@@ -369,16 +369,12 @@ impl GalaxianBoard {
             0x4000..=0x5fff => self.map.write_backing(addr, data),
 
             // 0x6000 block: lines 0-3 are lamps / coin counter / coin lockout
-            // (not modeled) on base Galaxian; on banked variants (Moon Cresta,
-            // Pisces) lines 0-2 instead drive the GFX-bank latch. Lines 4-7 are
-            // the sound LFO ("wolf-whistle") DAC. The video ignores bank writes
-            // unless a banking GfxBankMode is selected, so this is inert on
-            // base Galaxian.
+            // (not modeled); lines 4-7 are the sound LFO ("wolf-whistle") DAC.
+            // Banked variants drive the GFX-bank latch from their own wrapper
+            // (the bank address/index is game-specific), via set_gfxbank.
             0x6000..=0x67ff => {
                 let line = (addr & 7) as u8;
-                if line < 3 {
-                    self.video.set_gfxbank(line, data);
-                } else if line >= 4 {
+                if line >= 4 {
                     self.sound.lfo_freq_w(line - 4, data);
                 }
             }
@@ -427,6 +423,12 @@ impl GalaxianBoard {
     /// this at construction; base Galaxian leaves it [`GfxBankMode::None`]).
     pub fn set_gfx_mode(&mut self, mode: GfxBankMode) {
         self.video.set_gfx_mode(mode);
+    }
+
+    /// Drive one bit of the GFX-bank latch. Called by banked game wrappers from
+    /// their own bus decode (the bank address/index varies per game).
+    pub fn set_gfxbank(&mut self, index: u8, data: u8) {
+        self.video.set_gfxbank(index, data);
     }
 
     // -----------------------------------------------------------------------
