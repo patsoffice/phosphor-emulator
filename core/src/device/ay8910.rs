@@ -182,6 +182,13 @@ impl Ay8910 {
         self.port_b_in = data;
     }
 
+    /// The currently latched register address (0–15). Lets a host board tell
+    /// which register a `data_read`/`data_write` will target (e.g. to ack an
+    /// IRQ when the command-latch port is read).
+    pub fn latched_register(&self) -> u8 {
+        self.address_latch
+    }
+
     /// Read the current Port A output register value.
     pub fn port_a_read(&self) -> u8 {
         self.registers[14]
