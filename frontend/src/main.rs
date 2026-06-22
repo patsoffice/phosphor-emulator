@@ -5,6 +5,7 @@ mod audio;
 mod config;
 mod debug_ui;
 mod emulator;
+mod headless;
 mod input;
 mod overlay;
 mod profile;
@@ -43,6 +44,19 @@ struct Cli {
     /// List available machines and exit
     #[arg(long, short)]
     list: bool,
+
+    /// Run with no window: capture <out>.png (final frame) + <out>.wav (audio),
+    /// then exit. For screenshots, audio capture, and machine bring-up.
+    #[arg(long)]
+    headless: bool,
+
+    /// Frames to run in --headless mode (default 600 ≈ 10 s).
+    #[arg(long, default_value_t = 600)]
+    frames: u32,
+
+    /// Output path prefix for --headless captures (writes <out>.png/.wav).
+    #[arg(long, default_value = "/tmp/phosphor_capture")]
+    out: String,
 }
 
 fn main() {
@@ -129,6 +143,13 @@ fn main() {
     }
 
     machine.reset();
+
+    // Headless capture short-circuits the SDL main loop entirely.
+    if cli.headless {
+        headless::run(machine.as_mut(), cli.frames, &cli.out);
+        return;
+    }
+
     emulator::run(
         machine.as_mut(),
         &mut bindings,
