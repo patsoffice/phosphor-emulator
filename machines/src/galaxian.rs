@@ -129,6 +129,11 @@ pub struct GalaxianBoard {
     // VBLANK NMI latch (edge-triggered, gated by irq_enabled).
     pub(crate) vblank_nmi_pending: bool,
 
+    // Memory-map layout: base Galaxian (false) puts RAM/I/O at 0x4000-0x7fff;
+    // the Moon Cresta layout (true) shifts them to 0x8000-0xbfff and moves a
+    // couple of I/O lines (GFX bank latch + IRQ-enable).
+    pub(crate) mooncrst_map: bool,
+
     // Timing
     pub(crate) clock: u64,
     pub(crate) watchdog_counter: u32,
@@ -156,6 +161,7 @@ impl GalaxianBoard {
             in2: 0x00,
             irq_enabled: false,
             vblank_nmi_pending: false,
+            mooncrst_map: false,
             clock: 0,
             watchdog_counter: 0,
             debug_trace: DebugTraceBuffer::new(),
@@ -306,6 +312,7 @@ impl GalaxianBoard {
 
     /// Shared memory read for all Galaxian hardware.
     pub fn bus_read_common(&mut self, addr: u16) -> u8 {
+        let addr = self.norm(addr);
         let data = match addr {
             0x0000..=0x5fff => self.map.read_backing(addr),
             0x6000..=0x67ff => self.in0,
@@ -329,6 +336,7 @@ impl GalaxianBoard {
     /// Shared memory write for all Galaxian hardware.
     pub fn bus_write_common(&mut self, addr: u16, data: u8) {
         self.map.watch_write(0, BusMaster::Cpu(0), addr, data);
+        let addr = self.norm(addr);
 
         if self.debug_trace.enabled() {
             let (kind, device, detail) = match addr {
@@ -368,13 +376,14 @@ impl GalaxianBoard {
             // Work RAM, Video RAM, Object RAM
             0x4000..=0x5fff => self.map.write_backing(addr, data),
 
-            // 0x6000 block: lines 0-3 are lamps / coin counter / coin lockout
-            // (not modeled); lines 4-7 are the sound LFO ("wolf-whistle") DAC.
-            // Banked variants drive the GFX-bank latch from their own wrapper
-            // (the bank address/index is game-specific), via set_gfxbank.
+            // 0x6000 block: lines 4-7 are the sound LFO ("wolf-whistle") DAC.
+            // On base Galaxian lines 0-3 are lamps / coin (not modeled); on the
+            // Moon Cresta map lines 0-2 instead drive the GFX-bank latch.
             0x6000..=0x67ff => {
                 let line = (addr & 7) as u8;
-                if line >= 4 {
+                if self.mooncrst_map && line < 3 {
+                    self.video.set_gfxbank(line, data);
+                } else if line >= 4 {
                     self.sound.lfo_freq_w(line - 4, data);
                 }
             }
@@ -382,19 +391,23 @@ impl GalaxianBoard {
             // 0x6800 block: the sound 74LS259 latch (FS1-3 / HIT / FIRE / VOL).
             0x6800..=0x6fff => self.sound.sound_w((addr & 7) as u8, data),
 
-            // 0x7000 block: 74LS259 addressable latch (line = addr & 7).
-            0x7000..=0x77ff => match addr & 7 {
-                1 => {
-                    self.irq_enabled = data & 1 != 0;
-                    if !self.irq_enabled {
-                        self.vblank_nmi_pending = false;
+            // 0x7000 block: 74LS259 addressable latch (line = addr & 7). IRQ
+            // enable is line 1 on Galaxian, line 0 on the Moon Cresta map.
+            0x7000..=0x77ff => {
+                let irq_line = if self.mooncrst_map { 0 } else { 1 };
+                match addr & 7 {
+                    l if l == irq_line => {
+                        self.irq_enabled = data & 1 != 0;
+                        if !self.irq_enabled {
+                            self.vblank_nmi_pending = false;
+                        }
                     }
+                    4 => self.video.set_stars_enabled(data & 1 != 0),
+                    6 => self.video.set_flip_x(data & 1 != 0),
+                    7 => self.video.set_flip_y(data & 1 != 0),
+                    _ => {}
                 }
-                4 => self.video.set_stars_enabled(data & 1 != 0),
-                6 => self.video.set_flip_x(data & 1 != 0),
-                7 => self.video.set_flip_y(data & 1 != 0),
-                _ => {}
-            },
+            }
 
             // 0x7800 block: background pitch latch (watchdog reset is on read).
             0x7800..=0x7fff => self.sound.pitch_w(data),
@@ -429,6 +442,24 @@ impl GalaxianBoard {
     /// their own bus decode (the bank address/index varies per game).
     pub fn set_gfxbank(&mut self, index: u8, data: u8) {
         self.video.set_gfxbank(index, data);
+    }
+
+    /// Switch to the Moon Cresta memory map (RAM/I/O at 0x8000-0xbfff, with the
+    /// GFX-bank latch + IRQ-enable moved). Set once at construction.
+    pub fn set_mooncrst_map(&mut self, on: bool) {
+        self.mooncrst_map = on;
+    }
+
+    /// Normalize a CPU address into the board's internal (Galaxian) address
+    /// space. The Moon Cresta layout is the Galaxian map shifted up 0x4000 for
+    /// everything above ROM, so map storage stays at the Galaxian positions and
+    /// only the decode shifts.
+    fn norm(&self, addr: u16) -> u16 {
+        if self.mooncrst_map && addr >= 0x8000 {
+            addr - 0x4000
+        } else {
+            addr
+        }
     }
 
     // -----------------------------------------------------------------------

@@ -282,6 +282,7 @@ impl MoonCrestaSystem {
     pub fn new() -> Self {
         let mut board = GalaxianBoard::new();
         board.set_gfx_mode(GfxBankMode::Mooncrst);
+        board.set_mooncrst_map(true);
         board.in1 = MC_DIP1_DEFAULT;
         Self { board }
     }
@@ -439,6 +440,25 @@ mod tests {
         let mut d = [0x02u8, 0x02, 0x20, 0x00];
         decode_mooncrst(&mut d);
         assert_eq!(d, [0x06, 0x42, 0x60, 0x00]);
+    }
+
+    #[test]
+    fn mooncrst_map_shifts_ram_vram_and_io() {
+        let mut sys = MoonCrestaSystem::new();
+        // Work RAM at 0x8000 (Galaxian 0x4000) round-trips.
+        sys.board.bus_write_common(0x8000, 0xab);
+        assert_eq!(sys.board.bus_read_common(0x8000), 0xab);
+        // Video RAM at 0x9000 (Galaxian 0x5000) round-trips.
+        sys.board.bus_write_common(0x9123, 0x42);
+        assert_eq!(sys.board.bus_read_common(0x9123), 0x42);
+        // IN0 is read at 0xa000 (Galaxian 0x6000).
+        sys.board.handle_input(crate::galaxian::INPUT_COIN, true);
+        assert_eq!(sys.board.bus_read_common(0xa000) & 0x01, 0x01);
+        // The 0xa000 block drives the GFX-bank latch (line 2 → gfxbank[2]).
+        sys.board.bus_write_common(0xa002, 0x01);
+        // IRQ enable is line 0 of the 0xb000 block on this map.
+        sys.board.bus_write_common(0xb000, 0x01);
+        assert!(sys.board.irq_enabled);
     }
 
     #[test]
