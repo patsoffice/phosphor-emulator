@@ -392,6 +392,7 @@ pub mod llander_sound;
 pub mod mario_bros;
 pub mod mcr2;
 pub mod missile_command;
+pub mod mooncresta;
 pub mod mspacman;
 pub mod namco_galaga;
 pub mod namco_pac;
