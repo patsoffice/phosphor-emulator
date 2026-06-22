@@ -397,6 +397,7 @@ pub mod mspacman;
 pub mod namco_galaga;
 pub mod namco_pac;
 pub mod pacman;
+pub mod pisces;
 pub mod qbert;
 pub mod quantum;
 pub mod registry;
