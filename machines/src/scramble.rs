@@ -168,6 +168,7 @@ impl ScrambleBoard {
     pub fn new(hw: Hw) -> Self {
         let mut video = GalaxianVideo::new();
         video.set_scramble_stars(true);
+        video.set_scramble_bullets(true);
         let _ = GfxBankMode::None; // base Scramble has no GFX banking
         Self {
             cpu: Z80::new(),

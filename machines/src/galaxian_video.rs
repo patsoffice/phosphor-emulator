@@ -127,6 +127,11 @@ pub struct GalaxianVideo {
     background_enable: bool,
     stars_blink: u8,
 
+    // Scramble-style shells: a shorter 2-pixel, all-yellow bullet (MAME
+    // `scramble_draw_bullet`) instead of Galaxian's 4-pixel white shell +
+    // yellow missile (`galaxian_draw_bullet`).
+    scramble_bullets: bool,
+
     // Native-orientation RGB24 framebuffer (256 × 224), filled per scanline.
     scanline_buffer: Vec<u8>,
 }
@@ -151,6 +156,7 @@ impl GalaxianVideo {
             scramble_stars: false,
             background_enable: false,
             stars_blink: 0,
+            scramble_bullets: false,
             stars: Vec::new(),
             star_rng_origin: 0,
             stars_enabled: false,
@@ -183,6 +189,12 @@ impl GalaxianVideo {
     /// background-enable control line.
     pub fn set_background_enable(&mut self, on: bool) {
         self.background_enable = on;
+    }
+
+    /// Use the Scramble-style 2-pixel all-yellow shell (else Galaxian's
+    /// 4-pixel white shell + yellow missile).
+    pub fn set_scramble_bullets(&mut self, on: bool) {
+        self.scramble_bullets = on;
     }
 
     pub fn set_flip_x(&mut self, flip: bool) {
@@ -625,11 +637,17 @@ impl GalaxianVideo {
         }
     }
 
-    /// A bullet/shell is a 4-px-long horizontal streak ending just before `x`.
+    /// A bullet/shell streak ending just before `x`. Galaxian draws a 4-pixel
+    /// streak (cols `x-4..x-1`) colored white for shells / yellow for the
+    /// missile; Scramble (`scramble_bullets`) draws a shorter 2-pixel streak
+    /// (cols `x-6..x-5`), all yellow.
     fn draw_bullet(&mut self, row_off: usize, offs: usize, x: i32) {
-        let (r, g, b) = self.bullet_color[offs & 7];
-        for dx in 0..4 {
-            let col = x - 4 + dx;
+        let (cols, (r, g, b)) = if self.scramble_bullets {
+            (x - 6..x - 4, (0xff, 0xff, 0x00))
+        } else {
+            (x - 4..x, self.bullet_color[offs & 7])
+        };
+        for col in cols {
             if (0..NATIVE_WIDTH as i32).contains(&col) {
                 let off = row_off + col as usize * 3;
                 self.scanline_buffer[off] = r;
@@ -984,6 +1002,34 @@ mod tests {
         }
         // Column 100 itself is past the streak.
         assert_eq!(v.scanline_buffer[100 * 3], 0);
+    }
+
+    #[test]
+    fn scramble_bullet_draws_two_pixel_yellow_streak() {
+        let mut v = GalaxianVideo::new();
+        v.set_scramble_bullets(true);
+        let mut objram = [0u8; 0x100];
+        // Shell entry 0 (matches Y-1): for row 0, mame_y = 16 → y match at 15.
+        objram[BULLETS_BASE + 1] = (255 - 15) as u8; // y match (mame_y - 1)
+        objram[BULLETS_BASE + 3] = (255 - 100) as u8; // x = 100
+        let vram = [0u8; 0x400];
+        v.render_scanline(0, &vram, &objram);
+        // Scramble shell is 2 px (cols x-6..=x-5 = 94..=95), all yellow.
+        for col in 94..96 {
+            let off = col * 3;
+            assert_eq!(
+                (
+                    v.scanline_buffer[off],
+                    v.scanline_buffer[off + 1],
+                    v.scanline_buffer[off + 2]
+                ),
+                (0xff, 0xff, 0x00),
+                "scramble shell pixel at {col}"
+            );
+        }
+        // Galaxian's columns 96..=99 must NOT be lit (shorter streak).
+        assert_eq!(v.scanline_buffer[96 * 3], 0);
+        assert_eq!(v.scanline_buffer[99 * 3], 0);
     }
 
     #[test]
