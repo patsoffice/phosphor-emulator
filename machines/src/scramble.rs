@@ -79,6 +79,44 @@ pub const INPUT_P1_START: u8 = 7;
 pub const INPUT_P2_START: u8 = 8;
 
 // ---------------------------------------------------------------------------
+// Hardware layout
+// ---------------------------------------------------------------------------
+
+/// The two Scramble-family memory maps. Both share the video engine, Konami
+/// sound, and 8255s; they differ in region/I-O base addresses, ROM size, and
+/// whether the "The End" protection sits on PPI #1 port C.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Hw {
+    /// `theend_map`: ROM 16 KB, RAM/IO at 0x4000-0x7fff, PPIs at 0x8000-0xffff,
+    /// protection on PPI #1 port C.
+    Scramble,
+    /// `scobra_map`: ROM 32 KB, RAM at 0x8000, PPIs at 0x9800/0xa000, I/O at
+    /// 0xa8xx, no protection.
+    Scobra,
+}
+
+impl Hw {
+    /// Program ROM region size.
+    fn rom_size(self) -> u32 {
+        match self {
+            Hw::Scramble => 0x4000,
+            Hw::Scobra => 0x8000,
+        }
+    }
+    /// Base of the Work RAM (Video RAM is +0x800, Object RAM +0x1000).
+    fn ram_base(self) -> u16 {
+        match self {
+            Hw::Scramble => 0x4000,
+            Hw::Scobra => 0x8000,
+        }
+    }
+    /// Last address served from the memory backing (ROM + RAM/VRAM/ObjRAM).
+    fn backing_end(self) -> u16 {
+        self.ram_base() + 0x10ff
+    }
+}
+
+// ---------------------------------------------------------------------------
 // ScrambleBoard
 // ---------------------------------------------------------------------------
 
@@ -102,6 +140,7 @@ pub struct ScrambleBoard {
     pub(crate) in2: u8,
     ppi0: I8255, // routes IN0/IN1/IN2 to the CPU
 
+    pub(crate) hw: Hw,
     pub(crate) nmi_enabled: bool,
     pub(crate) vblank_nmi_pending: bool,
 
@@ -121,24 +160,25 @@ pub struct ScrambleBoard {
 
 impl Default for ScrambleBoard {
     fn default() -> Self {
-        Self::new()
+        Self::new(Hw::Scramble)
     }
 }
 
 impl ScrambleBoard {
-    pub fn new() -> Self {
+    pub fn new(hw: Hw) -> Self {
         let mut video = GalaxianVideo::new();
         video.set_scramble_stars(true);
         let _ = GfxBankMode::None; // base Scramble has no GFX banking
         Self {
             cpu: Z80::new(),
-            map: Self::build_map(),
+            map: Self::build_map(hw),
             video,
             sound: KonamiSound::new(2),
             in0: 0xFF,
             in1: 0xFF,
             in2: 0xFF,
             ppi0: I8255::new(),
+            hw,
             nmi_enabled: false,
             vblank_nmi_pending: false,
             protection_state: 0,
@@ -150,38 +190,33 @@ impl ScrambleBoard {
         }
     }
 
-    fn build_map() -> AddressSpace16 {
+    fn build_map(hw: Hw) -> AddressSpace16 {
+        let rb = hw.ram_base();
         let mut map = AddressSpace16::new();
         map.region(
             Region::Rom,
             "Program ROM",
             0x0000,
-            0x4000,
+            hw.rom_size(),
             AccessKind::ReadOnly,
         )
-        .region(
-            Region::Ram,
-            "Work RAM",
-            0x4000,
-            0x0800,
-            AccessKind::ReadWrite,
-        )
+        .region(Region::Ram, "Work RAM", rb, 0x0800, AccessKind::ReadWrite)
         .region(
             Region::VideoRam,
             "Video RAM",
-            0x4800,
+            rb + 0x0800,
             0x0400,
             AccessKind::ReadWrite,
         )
         .region(
             Region::ObjRam,
             "Object RAM",
-            0x5000,
+            rb + 0x1000,
             0x0100,
             AccessKind::ReadWrite,
         );
-        // VRAM mirror at 0x4c00.
-        map.mirror(0x4c00, 0x4800, 0x0400);
+        // Video RAM mirror at +0x400.
+        map.mirror(rb + 0x0c00, rb + 0x0800, 0x0400);
         map
     }
 
@@ -300,41 +335,73 @@ impl ScrambleBoard {
     // Bus dispatch
     // -----------------------------------------------------------------------
 
+    /// Read PPI #0 (the input port 8255), injecting the protection's high bit
+    /// into IN2 bits 5/7 (Scramble only).
+    fn read_ppi0(&mut self, off: u16) -> u8 {
+        let prot = if self.protection_result & 0x80 != 0 {
+            0xa0
+        } else {
+            0x00
+        };
+        self.ppi0.set_port_a_input(self.in0);
+        self.ppi0.set_port_b_input(self.in1);
+        self.ppi0.set_port_c_input((self.in2 & !0xa0) | prot);
+        self.ppi0.read(off)
+    }
+
+    /// Read PPI #1: port C is the protection on Scramble, else the Konami sound
+    /// board's command 8255 (port C reads IN3 there).
+    fn read_ppi1(&mut self, off: u16) -> u8 {
+        if off == 2 && self.hw == Hw::Scramble {
+            self.protection_result
+        } else {
+            self.sound.ppi_read(off)
+        }
+    }
+
+    /// Write PPI #1: port C drives the protection on Scramble, else the sound
+    /// command/control 8255.
+    fn write_ppi1(&mut self, off: u16, data: u8) {
+        if off == 2 && self.hw == Hw::Scramble {
+            self.protection_w(data);
+        } else {
+            self.sound.ppi_write(off, data);
+        }
+    }
+
     pub fn bus_read_common(&mut self, addr: u16) -> u8 {
-        let data = match addr {
-            0x0000..=0x50ff => self.map.read_backing(addr),
-            0x7000..=0x7000 | 0x7800..=0x7800 => {
-                self.watchdog_counter = 0;
-                0xff
+        let data = if addr <= self.hw.backing_end() {
+            self.map.read_backing(addr)
+        } else {
+            match self.hw {
+                Hw::Scramble => match addr {
+                    0x7000 | 0x7800 => {
+                        self.watchdog_counter = 0;
+                        0xff
+                    }
+                    // PPIs at 0x8000-0xffff: bit 8 = PPI0, bit 9 = PPI1.
+                    0x8000..=0xffff => {
+                        let mut r = 0xff;
+                        if addr & 0x0100 != 0 {
+                            r &= self.read_ppi0(addr & 3);
+                        }
+                        if addr & 0x0200 != 0 {
+                            r &= self.read_ppi1(addr & 3);
+                        }
+                        r
+                    }
+                    _ => 0xff,
+                },
+                Hw::Scobra => match addr {
+                    0x9800..=0x9803 => self.read_ppi0(addr & 3),
+                    0xa000..=0xa003 => self.read_ppi1(addr & 3),
+                    0xb000 => {
+                        self.watchdog_counter = 0;
+                        0xff
+                    }
+                    _ => 0xff,
+                },
             }
-            // 8255 PPIs at 0x8000-0xffff: bit 8 selects PPI0 (inputs), bit 9
-            // PPI1 (sound + protection on port C).
-            0x8000..=0xffff => {
-                let mut result = 0xff;
-                if addr & 0x0100 != 0 {
-                    // IN2 bits 5 and 7 read the protection's high bit.
-                    let prot = if self.protection_result & 0x80 != 0 {
-                        0xa0
-                    } else {
-                        0x00
-                    };
-                    self.ppi0.set_port_a_input(self.in0);
-                    self.ppi0.set_port_b_input(self.in1);
-                    self.ppi0.set_port_c_input((self.in2 & !0xa0) | prot);
-                    result &= self.ppi0.read(addr & 0x03);
-                }
-                if addr & 0x0200 != 0 {
-                    // PPI1: port C (offset 2) is the protection; A/B/control go
-                    // to the Konami sound board's command 8255.
-                    result &= if addr & 0x03 == 2 {
-                        self.protection_result
-                    } else {
-                        self.sound.ppi_read(addr & 0x03)
-                    };
-                }
-                result
-            }
-            _ => 0xff,
         };
         self.map.watch_read(0, BusMaster::Cpu(0), addr, data);
         data
@@ -342,32 +409,48 @@ impl ScrambleBoard {
 
     pub fn bus_write_common(&mut self, addr: u16, data: u8) {
         self.map.watch_write(0, BusMaster::Cpu(0), addr, data);
-        match addr {
-            0x4000..=0x50ff => self.map.write_backing(addr, data),
-            0x6801 => {
-                self.nmi_enabled = data & 1 != 0;
-                if !self.nmi_enabled {
-                    self.vblank_nmi_pending = false;
-                }
-            }
-            0x6802 => {} // coin counter (not modeled)
-            0x6803 => self.video.set_background_enable(data & 1 != 0),
-            0x6804 => self.video.set_stars_enabled(data & 1 != 0),
-            0x6806 => self.video.set_flip_x(data & 1 != 0),
-            0x6807 => self.video.set_flip_y(data & 1 != 0),
-            0x8000..=0xffff => {
-                if addr & 0x0100 != 0 {
-                    self.ppi0.write(addr & 0x03, data);
-                }
-                if addr & 0x0200 != 0 {
-                    if addr & 0x03 == 2 {
-                        self.protection_w(data);
-                    } else {
-                        self.sound.ppi_write(addr & 0x03, data);
+        let rb = self.hw.ram_base();
+        // Work RAM / Video RAM / Object RAM (writable backing).
+        if (rb..=rb + 0x10ff).contains(&addr) {
+            self.map.write_backing(addr, data);
+            return;
+        }
+        // The latch block (NMI/coin/background/stars/flip) is at 0x6800 on
+        // Scramble, 0xa800 on Super Cobra.
+        let latch_base = match self.hw {
+            Hw::Scramble => 0x6800,
+            Hw::Scobra => 0xa800,
+        };
+        if addr & 0xfff8 == latch_base {
+            match addr & 7 {
+                1 => {
+                    self.nmi_enabled = data & 1 != 0;
+                    if !self.nmi_enabled {
+                        self.vblank_nmi_pending = false;
                     }
                 }
+                3 => self.video.set_background_enable(data & 1 != 0),
+                4 => self.video.set_stars_enabled(data & 1 != 0),
+                6 => self.video.set_flip_x(data & 1 != 0),
+                7 => self.video.set_flip_y(data & 1 != 0),
+                _ => {} // 2 = coin, 5 = POUT2 (not modeled)
             }
-            _ => {}
+            return;
+        }
+        match self.hw {
+            Hw::Scramble => {
+                if addr & 0x0100 != 0 {
+                    self.ppi0.write(addr & 3, data);
+                }
+                if addr & 0x0200 != 0 {
+                    self.write_ppi1(addr & 3, data);
+                }
+            }
+            Hw::Scobra => match addr {
+                0x9800..=0x9803 => self.ppi0.write(addr & 3, data),
+                0xa000..=0xa003 => self.write_ppi1(addr & 3, data),
+                _ => {}
+            },
         }
     }
 
@@ -714,7 +797,7 @@ pub struct ScrambleSystem {
 
 impl ScrambleSystem {
     pub fn new() -> Self {
-        let mut board = ScrambleBoard::new();
+        let mut board = ScrambleBoard::new(Hw::Scramble);
         // Apply factory-default DIPs (active-low: clear the configured bits).
         board.in1 &= !SC_DIP1_MASK;
         board.in2 &= !SC_DIP2_MASK;
@@ -833,6 +916,317 @@ inventory::submit! {
     MachineEntry::new("scramble", &["scramble"], create_machine)
 }
 
+// ===========================================================================
+// Super Cobra (Konami, 1981) — same hardware family, different memory map.
+// ===========================================================================
+
+// Padded to the full 0x8000 ROM region (the program populates only 0x0000-0x5fff).
+pub static SCOBRA_PROGRAM_ROM: RomRegion = RomRegion {
+    size: 0x8000,
+    entries: &[
+        RomEntry {
+            name: "epr1265.2c",
+            size: 0x1000,
+            offset: 0x0000,
+            crc32: &[0xa0744b3f],
+        },
+        RomEntry {
+            name: "2e",
+            size: 0x1000,
+            offset: 0x1000,
+            crc32: &[0x8e7245cd],
+        },
+        RomEntry {
+            name: "epr1267.2f",
+            size: 0x1000,
+            offset: 0x2000,
+            crc32: &[0x47a4e6fb],
+        },
+        RomEntry {
+            name: "2h",
+            size: 0x1000,
+            offset: 0x3000,
+            crc32: &[0x7244f21c],
+        },
+        RomEntry {
+            name: "epr1269.2j",
+            size: 0x1000,
+            offset: 0x4000,
+            crc32: &[0xe1f8a801],
+        },
+        RomEntry {
+            name: "2l",
+            size: 0x1000,
+            offset: 0x5000,
+            crc32: &[0xd52affde],
+        },
+    ],
+};
+
+pub static SCOBRA_SOUND_ROM: RomRegion = RomRegion {
+    size: 0x1800,
+    entries: &[
+        RomEntry {
+            name: "5c",
+            size: 0x0800,
+            offset: 0x0000,
+            crc32: &[0xd4346959],
+        },
+        RomEntry {
+            name: "5d",
+            size: 0x0800,
+            offset: 0x0800,
+            crc32: &[0xcc025d95],
+        },
+        RomEntry {
+            name: "5e",
+            size: 0x0800,
+            offset: 0x1000,
+            crc32: &[0x1628c53f],
+        },
+    ],
+};
+
+// GFX plane order is reversed relative to Scramble (5h is plane 0 here).
+pub static SCOBRA_GFX_ROM: RomRegion = RomRegion {
+    size: 0x1000,
+    entries: &[
+        RomEntry {
+            name: "epr1274.5h",
+            size: 0x0800,
+            offset: 0x0000,
+            crc32: &[0x64d113b4],
+        },
+        RomEntry {
+            name: "epr1273.5f",
+            size: 0x0800,
+            offset: 0x0800,
+            crc32: &[0xa96316d3],
+        },
+    ],
+};
+
+pub static SCOBRA_COLOR_PROM: RomRegion = RomRegion {
+    size: 0x0020,
+    entries: &[RomEntry {
+        name: "82s123.6e",
+        size: 0x0020,
+        offset: 0x0000,
+        crc32: &[0x9b87f90d],
+    }],
+};
+
+const SCB_DIP1_MASK: u8 = 0x03; // IN1: Allow Continue + Lives
+const SCB_DIP2_MASK: u8 = 0x0e; // IN2: Coinage + Cabinet
+
+pub(crate) const SCOBRA_DIP_BANKS: &[DipSwitchBank] = &[
+    DipSwitchBank {
+        name: "IN1",
+        options: &[
+            DipOption {
+                name: "Allow Continue",
+                mask: 0x01,
+                apply: DipApplyTiming::Immediate,
+                choices: &[
+                    DipChoice {
+                        label: "No",
+                        value: 0x00,
+                    },
+                    DipChoice {
+                        label: "4 Times",
+                        value: 0x01,
+                    },
+                ],
+            },
+            DipOption {
+                name: "Lives",
+                mask: 0x02,
+                apply: DipApplyTiming::Immediate,
+                choices: &[
+                    DipChoice {
+                        label: "3",
+                        value: 0x00,
+                    },
+                    DipChoice {
+                        label: "4",
+                        value: 0x02,
+                    },
+                ],
+            },
+        ],
+    },
+    DipSwitchBank {
+        name: "IN2",
+        options: &[
+            DipOption {
+                name: "Coinage",
+                mask: 0x06,
+                apply: DipApplyTiming::Immediate,
+                choices: &[
+                    DipChoice {
+                        label: "99 Credits",
+                        value: 0x00,
+                    },
+                    DipChoice {
+                        label: "1 Coin/1 Credit",
+                        value: 0x02,
+                    },
+                    DipChoice {
+                        label: "2 Coins/1 Credit",
+                        value: 0x04,
+                    },
+                    DipChoice {
+                        label: "4 Coins/3 Credits",
+                        value: 0x06,
+                    },
+                ],
+            },
+            DipOption {
+                name: "Cabinet",
+                mask: 0x08,
+                apply: DipApplyTiming::Immediate,
+                choices: &[
+                    DipChoice {
+                        label: "Upright",
+                        value: 0x00,
+                    },
+                    DipChoice {
+                        label: "Cocktail",
+                        value: 0x08,
+                    },
+                ],
+            },
+        ],
+    },
+];
+
+/// Super Cobra (Konami, 1981) on the Scramble board with the `scobra_map`.
+#[derive(phosphor_macros::Saveable)]
+pub struct ScobraSystem {
+    pub board: ScrambleBoard,
+}
+
+impl ScobraSystem {
+    pub fn new() -> Self {
+        let mut board = ScrambleBoard::new(Hw::Scobra);
+        // Factory-default DIPs (active-low): IN1 = continue on + 3 lives (0x01),
+        // IN2 = 1C/1C + upright (0x02).
+        board.in1 = (board.in1 & !SCB_DIP1_MASK) | 0x01;
+        board.in2 = (board.in2 & !SCB_DIP2_MASK) | 0x02;
+        Self { board }
+    }
+
+    pub fn load_rom_set(&mut self, rom_set: &RomSet) -> Result<(), RomLoadError> {
+        self.board
+            .load_program_rom(&SCOBRA_PROGRAM_ROM.load(rom_set)?);
+        self.board.load_sound_rom(&SCOBRA_SOUND_ROM.load(rom_set)?);
+        self.board.load_gfx_rom(&SCOBRA_GFX_ROM.load(rom_set)?);
+        self.board
+            .load_color_prom(&SCOBRA_COLOR_PROM.load(rom_set)?);
+        Ok(())
+    }
+}
+
+impl Default for ScobraSystem {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Bus for ScobraSystem {
+    type Address = u16;
+    type Data = u8;
+    fn read(&mut self, _m: BusMaster, addr: u16) -> u8 {
+        self.board.bus_read_common(addr)
+    }
+    fn write(&mut self, _m: BusMaster, addr: u16, data: u8) {
+        self.board.bus_write_common(addr, data);
+    }
+    fn io_read(&mut self, _m: BusMaster, _addr: u16) -> u8 {
+        0xFF
+    }
+    fn io_write(&mut self, _m: BusMaster, _addr: u16, _data: u8) {}
+    fn is_halted_for(&self, _m: BusMaster) -> bool {
+        false
+    }
+    fn check_interrupts(&mut self, target: BusMaster) -> InterruptState {
+        self.board.check_interrupts(target)
+    }
+}
+
+crate::impl_board_delegation!(ScobraSystem, board, TIMING);
+
+impl MachineCore for ScobraSystem {
+    crate::machine_core_metadata!("scobra", TIMING);
+
+    fn run_frame(&mut self) {
+        bus_split!(self, bus => {
+            for _ in 0..TIMING.cycles_per_frame() {
+                self.board.tick(bus);
+            }
+        });
+    }
+
+    fn reset(&mut self) {
+        self.board.reset_board();
+        bus_split!(self, bus => {
+            self.board.cpu.reset(bus, BusMaster::Cpu(0));
+        });
+    }
+}
+
+impl SaveState for ScobraSystem {
+    crate::machine_save_state!();
+}
+
+impl Nvram for ScobraSystem {}
+impl Profilable for ScobraSystem {}
+
+impl InputConfigurable for ScobraSystem {
+    fn input_controls(&self) -> &'static [InputControl] {
+        SCRAMBLE_CONTROLS // same controls (2-button shooter)
+    }
+    fn handle_input(&mut self, event: InputEvent) {
+        if let InputEvent::Button { id, pressed } = event {
+            self.board.handle_input(id.0 as u8, pressed);
+        }
+    }
+}
+
+impl DipSwitches for ScobraSystem {
+    fn dip_banks(&self) -> &'static [DipSwitchBank] {
+        SCOBRA_DIP_BANKS
+    }
+    fn dip_bank_value(&self, bank: usize) -> u8 {
+        match bank {
+            0 => self.board.in1 & SCB_DIP1_MASK,
+            1 => self.board.in2 & SCB_DIP2_MASK,
+            _ => 0,
+        }
+    }
+    fn set_dip_bank_value(&mut self, bank: usize, value: u8) {
+        match bank {
+            0 => self.board.in1 = (self.board.in1 & !SCB_DIP1_MASK) | (value & SCB_DIP1_MASK),
+            1 => self.board.in2 = (self.board.in2 & !SCB_DIP2_MASK) | (value & SCB_DIP2_MASK),
+            _ => {}
+        }
+    }
+}
+
+crate::impl_board_debug_trace!(ScobraSystem, board);
+
+fn create_scobra(
+    rom_set: &RomSet,
+) -> Result<Box<dyn phosphor_core::core::machine::FrontendMachine>, RomLoadError> {
+    let mut sys = ScobraSystem::new();
+    sys.load_rom_set(rom_set)?;
+    Ok(Box::new(sys))
+}
+
+inventory::submit! {
+    MachineEntry::new("scobra", &["scobra"], create_scobra)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -861,10 +1255,29 @@ mod tests {
     }
 
     #[test]
+    fn scobra_layout_maps_ram_and_io() {
+        let sys = ScobraSystem::new();
+        assert_eq!(sys.machine_id(), "scobra");
+        assert_eq!(sys.board.hw, Hw::Scobra);
+        // Default DIPs (active-low): IN1 continue+3 lives, IN2 1C/1C upright.
+        assert_eq!(sys.board.in1 & SCB_DIP1_MASK, 0x01);
+        assert_eq!(sys.board.in2 & SCB_DIP2_MASK, 0x02);
+    }
+
+    #[test]
+    fn scobra_ram_round_trips_at_0x8000() {
+        let mut b = ScrambleBoard::new(Hw::Scobra);
+        b.bus_write_common(0x8000, 0xab);
+        assert_eq!(b.bus_read_common(0x8000), 0xab);
+        b.bus_write_common(0x8801, 0x42); // video RAM
+        assert_eq!(b.bus_read_common(0x8801), 0x42);
+    }
+
+    #[test]
     fn theend_protection_scramble_op() {
         // The boot self-test writes 0x0A, 0x04, 0x09 to ppi1 port C and expects
         // 0xB0 back (op 0x9 = min(num1+1,0xf)<<4 with num1=0xA -> 0xB0).
-        let mut b = ScrambleBoard::new();
+        let mut b = ScrambleBoard::new(Hw::Scramble);
         for v in [0x0a, 0x04, 0x09] {
             b.protection_w(v);
         }
