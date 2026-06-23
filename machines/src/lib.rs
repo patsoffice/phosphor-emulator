@@ -404,6 +404,7 @@ pub mod registry;
 pub mod robotron;
 pub mod rom_loader;
 pub mod satans_hollow;
+pub mod scramble;
 pub mod simple_system;
 pub mod tempest;
 pub mod tkg04;
