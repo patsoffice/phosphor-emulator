@@ -120,6 +120,13 @@ pub struct GalaxianVideo {
     flip_x: bool,
     flip_y: bool,
 
+    // Scramble video extras (layered on the shared engine): a blue background
+    // fill and the blinking-star variant — a non-scrolling, color-masked
+    // starfield whose mask cycles through `stars_blink`.
+    scramble_stars: bool,
+    background_enable: bool,
+    stars_blink: u8,
+
     // Native-orientation RGB24 framebuffer (256 × 224), filled per scanline.
     scanline_buffer: Vec<u8>,
 }
@@ -141,6 +148,9 @@ impl GalaxianVideo {
             palette_rgb: [(0, 0, 0); 32],
             star_color: [(0, 0, 0); 64],
             bullet_color: [(0, 0, 0); 8],
+            scramble_stars: false,
+            background_enable: false,
+            stars_blink: 0,
             stars: Vec::new(),
             star_rng_origin: 0,
             stars_enabled: false,
@@ -160,6 +170,19 @@ impl GalaxianVideo {
 
     pub fn set_stars_enabled(&mut self, enabled: bool) {
         self.stars_enabled = enabled;
+    }
+
+    /// Select the Scramble starfield variant (non-scrolling, color-masked blink)
+    /// plus the blue background fill. Set once at construction by Scramble-family
+    /// boards; base Galaxian leaves it off.
+    pub fn set_scramble_stars(&mut self, on: bool) {
+        self.scramble_stars = on;
+    }
+
+    /// Enable the Scramble blue background (else black). Driven by the board's
+    /// background-enable control line.
+    pub fn set_background_enable(&mut self, on: bool) {
+        self.background_enable = on;
     }
 
     pub fn set_flip_x(&mut self, flip: bool) {
@@ -412,6 +435,11 @@ impl GalaxianVideo {
     pub fn begin_frame(&mut self) {
         let delta = if self.flip_x { 1 } else { STAR_RNG_PERIOD - 1 };
         self.star_rng_origin = (self.star_rng_origin + delta) % STAR_RNG_PERIOD;
+        // Scramble's stars twinkle: the 2-bit blink state advances over time
+        // (modeled per frame). It is unused outside the Scramble starfield.
+        if self.scramble_stars {
+            self.stars_blink = self.stars_blink.wrapping_add(1) & 3;
+        }
     }
 
     /// Resolve a tile/sprite pixel through the palette: `color` is the 3-bit
@@ -430,10 +458,17 @@ impl GalaxianVideo {
         let mame_y = (row + Y_OFFSET) as i32;
         let row_off = row * NATIVE_WIDTH * 3;
 
-        // 1) Background: black, then stars.
+        // 1) Background: black (or Scramble's blue when enabled), then stars.
         {
             let buf = &mut self.scanline_buffer[row_off..row_off + NATIVE_WIDTH * 3];
-            buf.fill(0);
+            if self.background_enable {
+                // Blue background (390 Ω resistor → ~0x56), per MAME.
+                for px in buf.chunks_exact_mut(3) {
+                    px.copy_from_slice(&[0, 0, 0x56]);
+                }
+            } else {
+                buf.fill(0);
+            }
         }
         if self.stars_enabled {
             self.draw_star_row(row_off, mame_y);
@@ -470,9 +505,20 @@ impl GalaxianVideo {
     }
 
     fn draw_star_row(&mut self, row_off: usize, mame_y: i32) {
+        // Galaxian: scrolling field, no color mask. Scramble: a static field
+        // (no scroll origin) with a blink color mask, suppressed entirely on
+        // even 2V lines in blink state 2 (MAME scramble_draw_stars).
+        let (base, starmask) = if self.scramble_stars {
+            let blink = (self.stars_blink & 3) as usize;
+            if blink == 2 && (mame_y & 2) == 0 {
+                return;
+            }
+            ((mame_y as u64) * 512, [0x20u8, 0x08, 0xff, 0xff][blink])
+        } else {
+            (self.star_rng_origin as u64 + (mame_y as u64) * 512, 0xff)
+        };
         // RNG offset for this scanline; two clocks advance per native column.
-        let mut offs =
-            ((self.star_rng_origin as u64 + (mame_y as u64) * 512) % STAR_RNG_PERIOD as u64) as u32;
+        let mut offs = (base % STAR_RNG_PERIOD as u64) as u32;
         let period = STAR_RNG_PERIOD;
         for x in 0..NATIVE_WIDTH {
             let enable = ((mame_y ^ (x as i32 >> 3)) & 1) != 0;
@@ -490,9 +536,11 @@ impl GalaxianVideo {
             // B across the 3× horizontal supersample; collapsing to 1× here, the
             // wider clock-B star dominates the native pixel.
             if enable {
-                let idx = if star_b & 0x80 != 0 {
+                // A star shows only if present (bit 7) and it passes the blink
+                // color mask (always 0xff for Galaxian).
+                let idx = if star_b & 0x80 != 0 && star_b & starmask != 0 {
                     Some(star_b & 0x3f)
-                } else if star_a & 0x80 != 0 {
+                } else if star_a & 0x80 != 0 && star_a & starmask != 0 {
                     Some(star_a & 0x3f)
                 } else {
                     None
@@ -632,6 +680,8 @@ impl GalaxianVideo {
         self.flip_x = false;
         self.flip_y = false;
         self.gfxbank = [0; 3]; // gfx_mode is static config, not reset
+        self.background_enable = false;
+        self.stars_blink = 0; // scramble_stars is static config, not reset
         self.scanline_buffer.fill(0);
     }
 }
@@ -647,6 +697,8 @@ impl Saveable for GalaxianVideo {
         w.write_bool(self.flip_x);
         w.write_bool(self.flip_y);
         w.write_bytes(&self.gfxbank);
+        w.write_bool(self.background_enable);
+        w.write_u8(self.stars_blink);
     }
 
     fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
@@ -655,6 +707,8 @@ impl Saveable for GalaxianVideo {
         self.flip_x = r.read_bool()?;
         self.flip_y = r.read_bool()?;
         r.read_bytes_into(&mut self.gfxbank)?;
+        self.background_enable = r.read_bool()?;
+        self.stars_blink = r.read_u8()?;
         Ok(())
     }
 }
@@ -726,6 +780,40 @@ mod tests {
         // Mode survives reset (it's static config), so banking still works.
         v.set_gfxbank(0, 1);
         assert_eq!(v.extend_tile_code(0x12), 0x112);
+    }
+
+    #[test]
+    fn scramble_background_fills_blue_when_enabled() {
+        let mut v = GalaxianVideo::new();
+        let vram = [0u8; 0x400]; // tile 0 = blank, so nothing overdraws
+        let objram = [0u8; 0x100];
+
+        // Default (Galaxian): background is black.
+        v.render_scanline(0, &vram, &objram);
+        assert_eq!(&v.scanline_buffer[0..3], &[0, 0, 0]);
+
+        // Scramble blue background (RGB 0,0,0x56) once enabled.
+        v.set_background_enable(true);
+        v.render_scanline(0, &vram, &objram);
+        assert_eq!(&v.scanline_buffer[0..3], &[0, 0, 0x56]);
+
+        // reset() clears the enable (it's a control line, not config).
+        v.reset();
+        v.render_scanline(0, &vram, &objram);
+        assert_eq!(&v.scanline_buffer[0..3], &[0, 0, 0]);
+    }
+
+    #[test]
+    fn scramble_star_blink_advances_per_frame() {
+        let mut v = GalaxianVideo::new();
+        v.set_scramble_stars(true);
+        let b0 = v.stars_blink;
+        v.begin_frame();
+        assert_eq!(v.stars_blink, (b0 + 1) & 3, "blink advances each frame");
+        // Galaxian mode leaves it put.
+        let mut g = GalaxianVideo::new();
+        g.begin_frame();
+        assert_eq!(g.stars_blink, 0);
     }
 
     #[test]
