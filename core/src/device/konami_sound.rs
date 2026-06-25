@@ -36,6 +36,14 @@
 //! | 0x80      | R/W | AY0 data              |
 //!
 //! AY0 port A (input) = the command latch; AY0 port B (input) = the timer.
+//!
+//! # Frogger variant
+//!
+//! Frogger uses the same board with a single AY-8910 and three rewired details
+//! ([`KonamiSound::new_frogger`]): RAM lives at 0x4000–0x43FF and the filter
+//! latch at 0x6000–0x6FFF (instead of 0x8000/0x9000); the AY0 address/data I/O
+//! ports are swapped (data on `A&0x40`, address on `A&0x80`); and the timer read
+//! has its B3/B5 bits swapped (`frogger_sound_timer_r`).
 
 use crate::audio::AudioResampler;
 use crate::bus_split;
@@ -87,6 +95,10 @@ pub struct KonamiSound {
     // Discrete output-filter control word (latched, not modeled as audio).
     filter: u16,
 
+    // Frogger-board wiring (single AY, relocated RAM/filter, swapped AY ports,
+    // and a B3/B5-swapped timer). Static config; not reset or saved.
+    frogger: bool,
+
     // Audio resampler (mixes the AY outputs)
     resampler: AudioResampler<i16>,
 
@@ -110,9 +122,19 @@ impl KonamiSound {
             irq_pending: false,
             mute: false,
             filter: 0,
+            frogger: false,
             resampler: AudioResampler::new(KONAMI_CPU_CLOCK, OUTPUT_SAMPLE_RATE),
             clock: 0,
         }
+    }
+
+    /// Create a Frogger-wired board: a single AY-8910 with RAM at 0x4000, the
+    /// filter latch at 0x6000, swapped AY0 address/data I/O ports, and a
+    /// B3/B5-swapped sound timer.
+    pub fn new_frogger() -> Self {
+        let mut board = Self::new(1);
+        board.frogger = true;
+        board
     }
 
     /// Load sound ROM data (up to 8 KB).
@@ -167,11 +189,17 @@ impl KonamiSound {
         } else {
             0
         };
-        (hibit << 7)
+        let t = (hibit << 7)
             | (((cycles >> 14) & 1) as u8) << 6
             | (((cycles >> 13) & 1) as u8) << 5
             | (((cycles >> 11) & 1) as u8) << 4
-            | 0x0e
+            | 0x0e;
+        if self.frogger {
+            // frogger_sound_timer_r: bitswap<8>(t, 7,6,3,4,5,2,1,0) — swap B3/B5.
+            (t & !0x28) | ((t & 0x08) << 2) | ((t & 0x20) >> 2)
+        } else {
+            t
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -209,7 +237,7 @@ impl KonamiSound {
             let mixed = if self.mute {
                 0
             } else {
-                ((s0 + s1) / 2).clamp(-32767, 32767) as i16
+                ((s0 + s1) / self.num_ay as i32).clamp(-32767, 32767) as i16
             };
             self.resampler.push_sample(mixed);
         }
@@ -250,20 +278,35 @@ impl Bus for KonamiSound {
     type Data = u8;
 
     fn read(&mut self, _master: BusMaster, addr: u16) -> u8 {
-        match addr {
-            0x0000..=0x1FFF => self.rom[addr as usize],
-            0x8000..=0x8FFF => self.ram[(addr & 0x03FF) as usize],
-            _ => 0xFF,
+        if addr <= 0x1FFF {
+            return self.rom[addr as usize];
         }
+        // Frogger relocates RAM to 0x4000–0x5FFF (0x4000-0x43FF mirror 0x1C00);
+        // the standard board has it at 0x8000–0x8FFF (0x8000-0x83FF mirrored).
+        let ram = if self.frogger {
+            0x4000..=0x5FFF
+        } else {
+            0x8000..=0x8FFF
+        };
+        if ram.contains(&addr) {
+            return self.ram[(addr & 0x03FF) as usize];
+        }
+        0xFF
     }
 
     fn write(&mut self, _master: BusMaster, addr: u16, data: u8) {
-        match addr {
-            0x8000..=0x8FFF => self.ram[(addr & 0x03FF) as usize] = data,
-            // Discrete filter control: the *offset* carries the 12 filter bits
-            // (6 per AY). Not modeled as audio; latched for debug/state.
-            0x9000..=0x9FFF => self.filter = addr & 0x0FFF,
-            _ => {}
+        // RAM and the discrete-filter latch both move on the Frogger board.
+        let (ram, filter) = if self.frogger {
+            (0x4000..=0x5FFF, 0x6000..=0x7FFF)
+        } else {
+            (0x8000..=0x8FFF, 0x9000..=0x9FFF)
+        };
+        if ram.contains(&addr) {
+            self.ram[(addr & 0x03FF) as usize] = data;
+        } else if filter.contains(&addr) {
+            // The *offset* carries the filter bits (6 per AY). Not modeled as
+            // audio; latched for debug/state.
+            self.filter = addr & 0x0FFF;
         }
     }
 
@@ -271,22 +314,34 @@ impl Bus for KonamiSound {
         // The port map is `global_mask(0xff)`, so only the low 8 bits decode.
         let port = addr & 0xFF;
         let mut result = 0xFF;
-        if self.num_ay > 1 && port & 0x20 != 0 {
-            result &= self.ay[1].data_read();
-        }
-        if port & 0x80 != 0 {
-            // Reading AY0 port A (register 14) is the command latch fetch, which
-            // acknowledges and clears the held IRQ.
-            if self.ay[0].latched_register() == 14 {
-                self.irq_pending = false;
+        // Frogger reads AY0 data on A&0x40 (the address/data ports are swapped);
+        // the standard board reads AY0 on A&0x80 and AY1 on A&0x20.
+        if self.frogger {
+            if port & 0x40 != 0 {
+                result &= self.ay0_data_read();
             }
-            result &= self.ay[0].data_read();
+        } else {
+            if self.num_ay > 1 && port & 0x20 != 0 {
+                result &= self.ay[1].data_read();
+            }
+            if port & 0x80 != 0 {
+                result &= self.ay0_data_read();
+            }
         }
         result
     }
 
     fn io_write(&mut self, _master: BusMaster, addr: u16, data: u8) {
         let port = addr & 0xFF;
+        if self.frogger {
+            // frogger_ay8910_w: A&0x40 → AY0 data, A&0x80 → AY0 address.
+            if port & 0x40 != 0 {
+                self.ay[0].data_write(data);
+            } else if port & 0x80 != 0 {
+                self.ay[0].address_write(data);
+            }
+            return;
+        }
         // AV4,5 → AY1; AV6,7 → AY0 (both pairs can be addressed at once).
         if self.num_ay > 1 {
             if port & 0x10 != 0 {
@@ -314,6 +369,17 @@ impl Bus for KonamiSound {
             irq_vector: 0xFF,
             irq_level: 0,
         }
+    }
+}
+
+impl KonamiSound {
+    /// Read AY0's data port. Reading port A (register 14) is the command-latch
+    /// fetch, which acknowledges and clears the held IRQ.
+    fn ay0_data_read(&mut self) -> u8 {
+        if self.ay[0].latched_register() == 14 {
+            self.irq_pending = false;
+        }
+        self.ay[0].data_read()
     }
 }
 
@@ -546,6 +612,54 @@ mod tests {
         assert_ne!(t0, t1, "timer should advance");
         // B0 is grounded, B1-B3 pulled high.
         assert_eq!(b.timer() & 0x0f, 0x0e);
+    }
+
+    #[test]
+    fn frogger_ram_lives_at_0x4000() {
+        let mut b = KonamiSound::new_frogger();
+        bus_write(&mut b, 0x4000, 0x55);
+        assert_eq!(bus_read(&mut b, 0x4000), 0x55);
+        assert_eq!(bus_read(&mut b, 0x4400), 0x55); // 1 KB mirror within 0x4000-0x5fff
+        // The standard 0x8000 window is dead on the Frogger board.
+        assert_eq!(bus_read(&mut b, 0x8000), 0xFF);
+    }
+
+    #[test]
+    fn frogger_swaps_ay_address_and_data_ports() {
+        let mut b = KonamiSound::new_frogger();
+        // Frogger: address on A&0x80, data on A&0x40 (swapped vs standard).
+        io_write(&mut b, 0x80, 8); // AY0 address latch = register 8
+        io_write(&mut b, 0x40, 0x1F); // AY0 data = 0x1F
+        io_write(&mut b, 0x80, 8);
+        assert_eq!(io_read(&mut b, 0x40), 0x1F);
+    }
+
+    #[test]
+    fn frogger_command_latch_acks_irq() {
+        let mut b = KonamiSound::new_frogger();
+        b.irq_pending = true;
+        // Select AY0 port A (register 14) via the (swapped) address port, then
+        // read it through the data port — this acknowledges the IRQ.
+        io_write(&mut b, 0x80, 14);
+        let _ = io_read(&mut b, 0x40);
+        assert!(!b.irq_pending, "reading the command latch acks the IRQ");
+    }
+
+    #[test]
+    fn frogger_timer_swaps_b3_b5() {
+        // At a matching clock, the Frogger timer is the standard Konami timer
+        // with bits B3 and B5 swapped (frogger_sound_timer_r).
+        let mut frog = KonamiSound::new_frogger();
+        let mut std = KonamiSound::new(2);
+        frog.clock = 12_345;
+        std.clock = 12_345;
+        let s = std.timer();
+        let swapped = (s & !0x28) | ((s & 0x08) << 2) | ((s & 0x20) >> 2);
+        assert_eq!(
+            frog.timer(),
+            swapped,
+            "frogger timer swaps B3/B5 of the konami timer"
+        );
     }
 
     #[test]
