@@ -93,24 +93,31 @@ pub enum Hw {
     /// `scobra_map`: ROM 32 KB, RAM at 0x8000, PPIs at 0x9800/0xa000, I/O at
     /// 0xa8xx, no protection.
     Scobra,
+    /// `frogger_map`: ROM 16 KB, RAM at 0x8000, VRAM at 0xa800, ObjRAM at
+    /// 0xb000, 74LS259 latch at 0xb808-0xb81c, PPIs at 0xc000-0xffff. Single-AY
+    /// Frogger sound board and the Frogger video extras; no protection.
+    Frogger,
 }
 
 impl Hw {
     /// Program ROM region size.
     fn rom_size(self) -> u32 {
         match self {
-            Hw::Scramble => 0x4000,
+            Hw::Scramble | Hw::Frogger => 0x4000,
             Hw::Scobra => 0x8000,
         }
     }
-    /// Base of the Work RAM (Video RAM is +0x800, Object RAM +0x1000).
+    /// Base of the Work RAM (Video RAM is +0x800, Object RAM +0x1000). Only the
+    /// contiguous Scramble/Scobra maps use this; Frogger has its own layout.
     fn ram_base(self) -> u16 {
         match self {
             Hw::Scramble => 0x4000,
             Hw::Scobra => 0x8000,
+            Hw::Frogger => 0x8000,
         }
     }
-    /// Last address served from the memory backing (ROM + RAM/VRAM/ObjRAM).
+    /// Last address served from the memory backing (ROM + RAM/VRAM/ObjRAM) on
+    /// the contiguous Scramble/Scobra maps.
     fn backing_end(self) -> u16 {
         self.ram_base() + 0x10ff
     }
@@ -167,14 +174,22 @@ impl Default for ScrambleBoard {
 impl ScrambleBoard {
     pub fn new(hw: Hw) -> Self {
         let mut video = GalaxianVideo::new();
-        video.set_scramble_stars(true);
-        video.set_scramble_bullets(true);
         let _ = GfxBankMode::None; // base Scramble has no GFX banking
+        let sound = if hw == Hw::Frogger {
+            // Frogger: blue color-split background, color/scroll/sprite remaps,
+            // no stars or bullets; single-AY sound board.
+            video.set_frogger(true);
+            KonamiSound::new_frogger()
+        } else {
+            video.set_scramble_stars(true);
+            video.set_scramble_bullets(true);
+            KonamiSound::new(2)
+        };
         Self {
             cpu: Z80::new(),
             map: Self::build_map(hw),
             video,
-            sound: KonamiSound::new(2),
+            sound,
             in0: 0xFF,
             in1: 0xFF,
             in2: 0xFF,
@@ -192,6 +207,9 @@ impl ScrambleBoard {
     }
 
     fn build_map(hw: Hw) -> AddressSpace16 {
+        if hw == Hw::Frogger {
+            return Self::build_frogger_map();
+        }
         let rb = hw.ram_base();
         let mut map = AddressSpace16::new();
         map.region(
@@ -218,6 +236,43 @@ impl ScrambleBoard {
         );
         // Video RAM mirror at +0x400.
         map.mirror(rb + 0x0c00, rb + 0x0800, 0x0400);
+        map
+    }
+
+    /// `frogger_map` backing layout: ROM, Work RAM, Video RAM, Object RAM at
+    /// their (non-contiguous) Frogger addresses.
+    fn build_frogger_map() -> AddressSpace16 {
+        let mut map = AddressSpace16::new();
+        map.region(
+            Region::Rom,
+            "Program ROM",
+            0x0000,
+            0x4000,
+            AccessKind::ReadOnly,
+        )
+        .region(
+            Region::Ram,
+            "Work RAM",
+            0x8000,
+            0x0800,
+            AccessKind::ReadWrite,
+        )
+        .region(
+            Region::VideoRam,
+            "Video RAM",
+            0xa800,
+            0x0400,
+            AccessKind::ReadWrite,
+        )
+        .region(
+            Region::ObjRam,
+            "Object RAM",
+            0xb000,
+            0x0100,
+            AccessKind::ReadWrite,
+        );
+        // Video RAM mirror at 0xac00.
+        map.mirror(0xac00, 0xa800, 0x0400);
         map
     }
 
@@ -337,16 +392,21 @@ impl ScrambleBoard {
     // -----------------------------------------------------------------------
 
     /// Read PPI #0 (the input port 8255), injecting the protection's high bit
-    /// into IN2 bits 5/7 (Scramble only).
+    /// into IN2 bits 5/7 (Scramble only; Scobra/Frogger pass IN2 through).
     fn read_ppi0(&mut self, off: u16) -> u8 {
-        let prot = if self.protection_result & 0x80 != 0 {
-            0xa0
-        } else {
-            0x00
-        };
         self.ppi0.set_port_a_input(self.in0);
         self.ppi0.set_port_b_input(self.in1);
-        self.ppi0.set_port_c_input((self.in2 & !0xa0) | prot);
+        let port_c = if self.hw == Hw::Scramble {
+            let prot = if self.protection_result & 0x80 != 0 {
+                0xa0
+            } else {
+                0x00
+            };
+            (self.in2 & !0xa0) | prot
+        } else {
+            self.in2
+        };
+        self.ppi0.set_port_c_input(port_c);
         self.ppi0.read(off)
     }
 
@@ -371,7 +431,17 @@ impl ScrambleBoard {
     }
 
     pub fn bus_read_common(&mut self, addr: u16) -> u8 {
-        let data = if addr <= self.hw.backing_end() {
+        let data = match self.hw {
+            Hw::Frogger => self.frogger_read(addr),
+            _ => self.scramble_read(addr),
+        };
+        self.map.watch_read(0, BusMaster::Cpu(0), addr, data);
+        data
+    }
+
+    /// Scramble/Super Cobra read path (contiguous backing + range-decoded I/O).
+    fn scramble_read(&mut self, addr: u16) -> u8 {
+        if addr <= self.hw.backing_end() {
             self.map.read_backing(addr)
         } else {
             match self.hw {
@@ -402,14 +472,17 @@ impl ScrambleBoard {
                     }
                     _ => 0xff,
                 },
+                Hw::Frogger => 0xff, // handled by frogger_read
             }
-        };
-        self.map.watch_read(0, BusMaster::Cpu(0), addr, data);
-        data
+        }
     }
 
     pub fn bus_write_common(&mut self, addr: u16, data: u8) {
         self.map.watch_write(0, BusMaster::Cpu(0), addr, data);
+        if self.hw == Hw::Frogger {
+            self.frogger_write(addr, data);
+            return;
+        }
         let rb = self.hw.ram_base();
         // Work RAM / Video RAM / Object RAM (writable backing).
         if (rb..=rb + 0x10ff).contains(&addr) {
@@ -421,6 +494,7 @@ impl ScrambleBoard {
         let latch_base = match self.hw {
             Hw::Scramble => 0x6800,
             Hw::Scobra => 0xa800,
+            Hw::Frogger => unreachable!(),
         };
         if addr & 0xfff8 == latch_base {
             match addr & 7 {
@@ -452,6 +526,82 @@ impl ScrambleBoard {
                 0xa000..=0xa003 => self.write_ppi1(addr & 3, data),
                 _ => {}
             },
+            Hw::Frogger => unreachable!(), // handled above
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Frogger bus dispatch (frogger_map)
+    // -----------------------------------------------------------------------
+
+    fn frogger_read(&mut self, addr: u16) -> u8 {
+        match addr {
+            // ROM, Work RAM.
+            0x0000..=0x3fff | 0x8000..=0x87ff => self.map.read_backing(addr),
+            // Watchdog (0x8800 mirror 0x07ff).
+            0x8800..=0x8fff => {
+                self.watchdog_counter = 0;
+                0xff
+            }
+            // Video RAM (0xa800-0xabff + mirror at 0xac00).
+            0xa800..=0xafff => self.map.read_backing(addr),
+            // Object RAM (0xb000-0xb0ff, mirrored every 0x100 up to 0xb7ff).
+            0xb000..=0xb7ff => self.map.read_backing(0xb000 | (addr & 0x00ff)),
+            // PPIs: bit 12 = sound PPI #1, bit 13 = input PPI #0.
+            0xc000..=0xffff => self.frogger_ppi_read(addr & 0x3fff),
+            _ => 0xff,
+        }
+    }
+
+    fn frogger_write(&mut self, addr: u16, data: u8) {
+        match addr {
+            0x8000..=0x87ff => self.map.write_backing(addr, data), // Work RAM
+            0xa800..=0xafff => self.map.write_backing(addr, data), // Video RAM
+            0xb000..=0xb7ff => self.map.write_backing(0xb000 | (addr & 0x00ff), data), // ObjRAM
+            0xb800..=0xbfff => self.frogger_latch_w(addr, data),   // 74LS259 latch
+            0xc000..=0xffff => self.frogger_ppi_write(addr & 0x3fff, data),
+            _ => {}
+        }
+    }
+
+    /// Frogger PPI decode: A12 selects the sound PPI #1, A13 the input PPI #0;
+    /// the register index is on A1/A2 (`(offset >> 1) & 3`).
+    fn frogger_ppi_read(&mut self, offset: u16) -> u8 {
+        let reg = (offset >> 1) & 3;
+        let mut r = 0xff;
+        if offset & 0x1000 != 0 {
+            r &= self.read_ppi1(reg);
+        }
+        if offset & 0x2000 != 0 {
+            r &= self.read_ppi0(reg);
+        }
+        r
+    }
+
+    fn frogger_ppi_write(&mut self, offset: u16, data: u8) {
+        let reg = (offset >> 1) & 3;
+        if offset & 0x1000 != 0 {
+            self.write_ppi1(reg, data);
+        }
+        if offset & 0x2000 != 0 {
+            self.ppi0.write(reg, data);
+        }
+    }
+
+    /// Frogger 74LS259 at 0xb800-0xbfff: the latch line is `(addr >> 2) & 7`
+    /// (line 2 = NMI enable, 3 = flip Y, 4 = flip X, 6/7 = coin counters). The
+    /// latched bit is D0.
+    fn frogger_latch_w(&mut self, addr: u16, data: u8) {
+        match (addr >> 2) & 7 {
+            2 => {
+                self.nmi_enabled = data & 1 != 0;
+                if !self.nmi_enabled {
+                    self.vblank_nmi_pending = false;
+                }
+            }
+            3 => self.video.set_flip_y(data & 1 != 0),
+            4 => self.video.set_flip_x(data & 1 != 0),
+            _ => {} // 6, 7 = coin counters (not modeled)
         }
     }
 
