@@ -132,6 +132,13 @@ pub struct GalaxianVideo {
     // yellow missile (`galaxian_draw_bullet`).
     scramble_bullets: bool,
 
+    // Frogger video extras (static config, set once by the board): a half-screen
+    // blue color-split background, a 3-bit tile/sprite color-code rotation, and
+    // the "frogger adjust" nibble swap applied to the column-scroll and sprite-Y
+    // bytes entering the adder (MAME `m_frogger_adjust`). Frogger draws no
+    // bullets, so the bullet pass is suppressed when this is set.
+    frogger: bool,
+
     // Native-orientation RGB24 framebuffer (256 × 224), filled per scanline.
     scanline_buffer: Vec<u8>,
 }
@@ -157,6 +164,7 @@ impl GalaxianVideo {
             background_enable: false,
             stars_blink: 0,
             scramble_bullets: false,
+            frogger: false,
             stars: Vec::new(),
             star_rng_origin: 0,
             stars_enabled: false,
@@ -195,6 +203,21 @@ impl GalaxianVideo {
     /// 4-pixel white shell + yellow missile).
     pub fn set_scramble_bullets(&mut self, on: bool) {
         self.scramble_bullets = on;
+    }
+
+    /// Select the Frogger video board: a half-screen blue color-split
+    /// background, the tile/sprite color-code rotation, the column-scroll /
+    /// sprite-Y nibble swap, and no bullet layer. Set once at construction;
+    /// base Galaxian/Scramble leave it off.
+    pub fn set_frogger(&mut self, on: bool) {
+        self.frogger = on;
+    }
+
+    /// Frogger's color-code rotation (MAME `frogger_extend_*_info`): the 3-bit
+    /// attribute `b2 b1 b0` is rewired to `b0 b2 b1`.
+    #[inline]
+    fn frogger_color(color: u8) -> u8 {
+        ((color >> 1) & 0x03) | ((color << 2) & 0x04)
     }
 
     pub fn set_flip_x(&mut self, flip: bool) {
@@ -473,7 +496,15 @@ impl GalaxianVideo {
         // 1) Background: black (or Scramble's blue when enabled), then stars.
         {
             let buf = &mut self.scanline_buffer[row_off..row_off + NATIVE_WIDTH * 3];
-            if self.background_enable {
+            if self.frogger {
+                // Frogger draws a half-screen blue color-split (MAME
+                // `frogger_draw_background`: rgb(0,0,0x47) for native x < 128,
+                // black beyond). The split is symmetric, so flip is handled by
+                // the whole-buffer mirror in render_frame.
+                for (x, px) in buf.chunks_exact_mut(3).enumerate() {
+                    px.copy_from_slice(if x < 128 { &[0, 0, 0x47] } else { &[0, 0, 0] });
+                }
+            } else if self.background_enable {
                 // Blue background (390 Ω resistor → ~0x56), per MAME.
                 for px in buf.chunks_exact_mut(3) {
                     px.copy_from_slice(&[0, 0, 0x56]);
@@ -488,8 +519,15 @@ impl GalaxianVideo {
 
         // 2) Tilemap: 32 columns, each with independent vertical scroll/color.
         for col in 0..TILE_COLS {
-            let scroll = objram[col * 2] as i32;
-            let color = objram[col * 2 + 1] & 7;
+            let mut scroll = objram[col * 2];
+            let mut color = objram[col * 2 + 1] & 7;
+            if self.frogger {
+                // The scroll byte's nibbles are swapped entering the adder, and
+                // the color code is rotated.
+                scroll = scroll.rotate_left(4);
+                color = Self::frogger_color(color);
+            }
+            let scroll = scroll as i32;
             let eff_y = ((mame_y + scroll) & 0xff) as usize;
             let tile_row = eff_y >> 3;
             let py = eff_y & 7;
@@ -512,8 +550,10 @@ impl GalaxianVideo {
             self.draw_sprite_row(row_off, mame_y, objram, sprnum);
         }
 
-        // 4) Bullets/shells over everything.
-        self.draw_bullets_row(row_off, mame_y, objram);
+        // 4) Bullets/shells over everything (Frogger has no bullet layer).
+        if !self.frogger {
+            self.draw_bullets_row(row_off, mame_y, objram);
+        }
     }
 
     fn draw_star_row(&mut self, row_off: usize, mame_y: i32) {
@@ -570,7 +610,12 @@ impl GalaxianVideo {
 
     fn draw_sprite_row(&mut self, row_off: usize, mame_y: i32, objram: &[u8], sprnum: usize) {
         let base = SPRITES_BASE + sprnum * 4;
-        let b0 = objram[base] as i32;
+        // Frogger swaps the Y byte's nibbles entering the adder.
+        let b0 = if self.frogger {
+            objram[base].rotate_left(4)
+        } else {
+            objram[base]
+        } as i32;
         // First three sprites are matched against Y−1 (a +1 Y nudge).
         let adj = if sprnum < 3 { 1 } else { 0 };
         let sy = 240 - (b0 - adj);
@@ -580,7 +625,10 @@ impl GalaxianVideo {
         let code = self.extend_sprite_code((objram[base + 1] & 0x3f) as usize);
         let flipx = objram[base + 1] & 0x40 != 0;
         let flipy = objram[base + 1] & 0x80 != 0;
-        let color = objram[base + 2] & 7;
+        let mut color = objram[base + 2] & 7;
+        if self.frogger {
+            color = Self::frogger_color(color);
+        }
         let sx = objram[base + 3].wrapping_add(1) as i32;
 
         let yrow = mame_y - sy;
@@ -1030,6 +1078,74 @@ mod tests {
         // Galaxian's columns 96..=99 must NOT be lit (shorter streak).
         assert_eq!(v.scanline_buffer[96 * 3], 0);
         assert_eq!(v.scanline_buffer[99 * 3], 0);
+    }
+
+    #[test]
+    fn frogger_background_is_blue_left_black_right() {
+        let mut v = GalaxianVideo::new();
+        v.set_frogger(true);
+        let vram = [0u8; 0x400];
+        let objram = [0u8; 0x100];
+        v.render_scanline(0, &vram, &objram);
+        // Native x < 128 → blue (0,0,0x47); x >= 128 → black.
+        assert_eq!(&v.scanline_buffer[0..3], &[0, 0, 0x47]);
+        assert_eq!(&v.scanline_buffer[127 * 3..127 * 3 + 3], &[0, 0, 0x47]);
+        assert_eq!(&v.scanline_buffer[128 * 3..128 * 3 + 3], &[0, 0, 0]);
+        assert_eq!(&v.scanline_buffer[255 * 3..255 * 3 + 3], &[0, 0, 0]);
+    }
+
+    #[test]
+    fn frogger_color_rotation() {
+        // b2 b1 b0 -> b0 b2 b1
+        assert_eq!(GalaxianVideo::frogger_color(0b000), 0b000);
+        assert_eq!(GalaxianVideo::frogger_color(0b001), 0b100); // b0 -> bit2
+        assert_eq!(GalaxianVideo::frogger_color(0b010), 0b001); // b1 -> bit0
+        assert_eq!(GalaxianVideo::frogger_color(0b100), 0b010); // b2 -> bit1
+        assert_eq!(GalaxianVideo::frogger_color(0b111), 0b111);
+    }
+
+    #[test]
+    fn frogger_suppresses_bullets() {
+        let mut v = GalaxianVideo::new();
+        v.set_frogger(true);
+        let mut objram = [0u8; 0x100];
+        // A missile that would draw on row 0 in non-Frogger mode.
+        objram[BULLETS_BASE + 7 * 4 + 1] = (255 - 16) as u8;
+        objram[BULLETS_BASE + 7 * 4 + 3] = (255 - 100) as u8;
+        let vram = [0u8; 0x400];
+        v.render_scanline(0, &vram, &objram);
+        // No yellow streak — columns near x=100 keep the blue background.
+        assert_eq!(&v.scanline_buffer[97 * 3..97 * 3 + 3], &[0, 0, 0x47]);
+    }
+
+    #[test]
+    fn frogger_adjust_nibble_swaps_sprite_y() {
+        // A sprite whose raw Y byte is 0x1e maps to adder-Y 0xe1 under the
+        // Frogger nibble swap, changing which scanline it lands on.
+        let mut v = GalaxianVideo::new();
+        v.set_frogger(true);
+        let mut rom = vec![0u8; 0x1000];
+        for b in rom.iter_mut().take(0x800) {
+            *b = 0xff; // every sprite pixel LSB set
+        }
+        v.load_gfx_rom(&rom);
+        let mut prom = [0u8; 32];
+        prom[1] = 0b0011_1000; // green for color 0, pen 1
+        v.load_color_prom(&prom);
+
+        let mut objram = [0u8; 0x100];
+        // sprnum 3 (matched against Y, no -1). Raw Y 0x1e -> swapped 0xe1.
+        // sy = 240 - 0xe1 = 15, so it covers mame_y 16 (buffer row 0).
+        objram[SPRITES_BASE + 3 * 4] = 0x1e;
+        objram[SPRITES_BASE + 3 * 4 + 1] = 0; // code 0
+        objram[SPRITES_BASE + 3 * 4 + 2] = 0; // color 0
+        objram[SPRITES_BASE + 3 * 4 + 3] = 100; // sx = 101
+        let vram = [0u8; 0x400];
+        v.render_scanline(0, &vram, &objram);
+        assert!(
+            v.scanline_buffer[101 * 3 + 1] > 0,
+            "sprite should land on row 0 after the nibble swap"
+        );
     }
 
     #[test]
