@@ -54,6 +54,7 @@ pub fn run(
     start_in_debug: bool,
     start_in_profile: bool,
     no_mouse_grab: bool,
+    record_wav: Option<&str>,
     state: &mut crate::state::State,
 ) {
     // Enable controller backends before SDL init — needed for Xbox on macOS
@@ -150,6 +151,9 @@ pub fn run(
     let buffer_size = (width * height * 3) as usize;
     let mut framebuffer = vec![0u8; buffer_size];
     let mut audio_scratch = vec![0i16; 2048];
+    // Optional live-gameplay audio recording: tee every produced sample here and
+    // write the WAV on exit. `Some` only when `--record-wav` was passed.
+    let mut audio_recording: Option<Vec<i16>> = record_wav.map(|_| Vec::new());
 
     let frame_duration = Duration::from_secs_f64(1.0 / machine.frame_rate_hz());
     let mut next_frame_time = Instant::now() + frame_duration;
@@ -542,6 +546,9 @@ pub fn run(
         if frame_executed && let Some((ref device, ref ring, _)) = audio_state {
             let n = machine.fill_audio(&mut audio_scratch);
             if n > 0 {
+                if let Some(rec) = audio_recording.as_mut() {
+                    rec.extend_from_slice(&audio_scratch[..n]);
+                }
                 let mut buf = ring.lock().unwrap();
                 const MAX_RING_SIZE: usize = 8192;
                 while buf.len() + n > MAX_RING_SIZE {
@@ -773,6 +780,15 @@ pub fn run(
         fade_out.store(true, std::sync::atomic::Ordering::Relaxed);
         std::thread::sleep(crate::audio::fade_out_duration());
         device.pause();
+    }
+
+    // Flush any recorded gameplay audio to the requested WAV.
+    if let (Some(path), Some(rec)) = (record_wav, audio_recording) {
+        let rate = machine.audio_sample_rate();
+        match crate::headless::write_wav(&rec, rate, path) {
+            Ok(()) => println!("recorded {} samples @ {rate} Hz to {path}", rec.len()),
+            Err(e) => eprintln!("failed to write {path}: {e}"),
+        }
     }
 }
 

@@ -57,6 +57,11 @@ struct Cli {
     /// Output path prefix for --headless captures (writes <out>.png/.wav).
     #[arg(long, default_value = "/tmp/phosphor_capture")]
     out: String,
+
+    /// Record live gameplay audio to this WAV file (mono 16-bit PCM), written on
+    /// exit. Works during normal interactive play, unlike --headless.
+    #[arg(long, value_name = "PATH")]
+    record_wav: Option<String>,
 }
 
 fn main() {
@@ -160,6 +165,7 @@ fn main() {
         cli.debug,
         cli.profile,
         cli.no_mouse_grab,
+        cli.record_wav.as_deref(),
         &mut state,
     );
 

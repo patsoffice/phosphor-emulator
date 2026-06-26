@@ -64,7 +64,7 @@ fn write_png(rgb24: &[u8], width: u32, height: u32, path: &str) -> io::Result<()
 }
 
 /// Write mono 16-bit PCM as a canonical 44-byte-header WAV.
-fn write_wav(samples: &[i16], rate: u32, path: &str) -> io::Result<()> {
+pub(crate) fn write_wav(samples: &[i16], rate: u32, path: &str) -> io::Result<()> {
     let mut f = BufWriter::new(File::create(Path::new(path))?);
     let data_bytes = (samples.len() * 2) as u32;
     f.write_all(b"RIFF")?;
