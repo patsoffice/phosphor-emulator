@@ -456,9 +456,16 @@ pub fn run(
                     }
                 }
 
+                // Releases are dispatched unconditionally — even if egui now
+                // wants the keyboard. The key-down above is gated on
+                // `!wants_keyboard()`, so if egui grabs focus while a game key is
+                // held (e.g. held arrow keys move egui's widget focus, flipping
+                // `wants_keyboard()` true), a guarded key-up would be dropped and
+                // the button would stick "on". An extra release for a key the
+                // game never saw pressed is harmless (idempotent).
                 Event::KeyUp {
                     scancode: Some(sc), ..
-                } if !video.wants_keyboard() => {
+                } => {
                     for id in bindings.digital_targets(PhysicalInput::Key(sc)) {
                         machine.handle_input(InputEvent::Button { id, pressed: false });
                     }
