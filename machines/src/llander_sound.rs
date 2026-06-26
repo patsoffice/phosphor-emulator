@@ -93,12 +93,13 @@ const LVL_TONE: f64 = 9.2;
 const LVL_THRUST: f64 = 600.0;
 const LVL_EXPLOSION: f64 = 1000.0;
 
-// Gains tuned to MAME llander captures (tools/sound-reference) for the
-// thrust/explosion/tone RMS balance and overall level. The resonant ~90 Hz
-// band-pass amplifies thrust ~Q, which would dwarf the unfiltered explosion, so
-// thrust gets its own post-band-pass attenuation.
-const THRUST_IN_GAIN: f64 = 2400.0; // noise * throttle base amplitude
-const THRUST_OUT_GAIN: f64 = 0.12; // applied after the band-pass
+// Gains tuned to captured llander references (tools/sound-reference) for the
+// thrust/explosion/tone RMS balance and overall level. THRUST_IN_GAIN sets the
+// noise·throttle amplitude feeding the unfiltered explosion path; the thrust
+// band-pass instead takes the normalized throttle·noise, and THRUST_OUT_GAIN
+// supplies its post-filter make-up + trim.
+const THRUST_IN_GAIN: f64 = 2400.0; // explosion noise * throttle amplitude
+const THRUST_OUT_GAIN: f64 = 18.7; // post-band-pass make-up + trim
 const OUTPUT_GAIN: f64 = 1.0 / 14347.0;
 
 fn build_circuit() -> (DiscreteCircuit, LunarLanderInputs) {
@@ -122,13 +123,28 @@ fn build_circuit() -> (DiscreteCircuit, LunarLanderInputs) {
     );
     let noise_rc = b.rc_low_pass("NOISE_RC", noise, 2_247.0, 1e-6);
 
-    // --- Thrust: noise scaled by the 3-bit throttle, band-passed ~90 Hz ---
-    let thrust_in = b.gain("THRUST_IN", thrust_data, THRUST_IN_GAIN);
-    let thrust_amp = b.multiply("THRUST_AMP", noise_rc, thrust_in);
-    let thrust_bp = b.band_pass("THRUST_BP", thrust_amp, 89.5, 7.6);
+    // --- Thrust: noise scaled by the 3-bit throttle, through a resonant op-amp
+    // multiple-feedback band-pass (R_in 1.17k / R_f 270k / C 0.1uF -> fc ~89.5 Hz,
+    // Q ~7.6). The band-pass's component-set gain (center Rf/2·Rin ≈ 115) provides
+    // the resonant make-up, so it takes the *normalized* throttle·noise — the
+    // amplified `thrust_amp` below would slam the op-amp into its rails. ---
+    let thrust_throttle = b.multiply("THRUST_THROTTLE", noise_rc, thrust_data);
+    let thrust_bp = b.op_amp_band_pass(
+        "THRUST_BP",
+        thrust_throttle,
+        &[1_170.0],
+        270_000.0,
+        0.1e-6,
+        0.1e-6,
+        0.0,
+        -12.0,
+        12.0,
+    );
     let thrust_path = b.gain("THRUST_PATH", thrust_bp, THRUST_OUT_GAIN);
 
     // --- Explosion: the same noise*throttle, scaled up (unfiltered) and gated ---
+    let thrust_in = b.gain("THRUST_IN", thrust_data, THRUST_IN_GAIN);
+    let thrust_amp = b.multiply("THRUST_AMP", noise_rc, thrust_in);
     let explod_scaled = b.gain("EXPLOD_SCALED", thrust_amp, LVL_EXPLOSION / LVL_THRUST);
     let explod_gated = b.multiply("EXPLOD_GATE", explod_scaled, explod_en);
 
