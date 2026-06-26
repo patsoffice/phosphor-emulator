@@ -12,7 +12,7 @@ use phosphor_core::core::debug::{DebugRegister, Debuggable};
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::device::{
     CustomComponent, DataInputId, DiscreteCircuit, DiscreteCircuitBuilder, FilterMode, LfsrSpec,
-    LogicInputId, NodeId, OutputGain, PulseInputId,
+    LogicInputId, NodeId, Output555, OutputGain, PulseInputId,
 };
 
 use crate::atari_dvg::TIMING;
@@ -85,76 +85,92 @@ impl CustomComponent for ExplosionNoise {
 }
 
 // ---------------------------------------------------------------------------
-// Fire chirp generator (custom escape-hatch component)
+// Fire chirp envelope (custom escape-hatch component)
 // ---------------------------------------------------------------------------
 
-/// 555-VCO "pew": while the enable input is held high, the frequency ramps
-/// linearly from `f_hi` to `f_lo` over `ramp_time` seconds and the amplitude
-/// decays exponentially (`amp_tau`). The ramp restarts on each rising edge of
-/// the enable. The framework has no triggered frequency ramp, so this rides the
-/// `Custom` escape hatch. Input: `[enable 0/1]`.
-struct FireChirp {
-    f_hi: f64,
-    f_lo: f64,
-    ramp_time: f64,
-    amp_tau: f64,
+/// Triggered envelope for the fire "pew". On each rising edge of the enable it
+/// restarts a timer and, while the enable is held, outputs one of two shapes:
+///
+/// - **Linear** (`exponential = false`): the sweep position `min(elapsed/span, 1)`,
+///   rising 0→1 over `span` seconds. It drives the [`ne555_cc`] control voltage;
+///   because that VCO's frequency is *linear* in its CV, a linear CV ramp yields
+///   a linear frequency sweep (the descending "pew").
+/// - **Exponential** (`exponential = true`): the amplitude decay `exp(-elapsed/span)`,
+///   which multiplies the oscillator output.
+///
+/// The oscillator itself is the `ne555_cc` node, so this component carries no
+/// phase — only the envelopes the framework can't express as a triggered ramp.
+/// Input: `[enable 0/1]`.
+///
+/// [`ne555_cc`]: phosphor_core::device::DiscreteCircuitBuilder::ne555_cc
+struct FireEnvelope {
+    span: f64,
+    exponential: bool,
     active: bool,
     elapsed: f64,
-    phase: f64,
+    last_en: bool,
 }
 
-impl FireChirp {
-    fn new(f_hi: f64, f_lo: f64, ramp_time: f64, amp_tau: f64) -> Self {
+impl FireEnvelope {
+    fn linear(span: f64) -> Self {
         Self {
-            f_hi,
-            f_lo,
-            ramp_time,
-            amp_tau,
+            span,
+            exponential: false,
             active: false,
             elapsed: 0.0,
-            phase: 0.0,
+            last_en: false,
+        }
+    }
+    fn exp(span: f64) -> Self {
+        Self {
+            span,
+            exponential: true,
+            active: false,
+            elapsed: 0.0,
+            last_en: false,
         }
     }
 }
 
-impl CustomComponent for FireChirp {
+impl CustomComponent for FireEnvelope {
     fn reset(&mut self) {
         self.active = false;
         self.elapsed = 0.0;
-        self.phase = 0.0;
+        self.last_en = false;
     }
 
     fn step(&mut self, inputs: &[f64], dt: f64) -> f64 {
-        if inputs[0] < 0.5 {
+        let en = inputs[0] > 0.5;
+        if !en {
+            // Silent while released; the sweep restarts on the next rising edge.
             self.active = false;
+            self.last_en = false;
             return 0.0;
         }
-        if !self.active {
-            // Rising edge: (re)start the ramp.
+        if !self.last_en {
             self.active = true;
             self.elapsed = 0.0;
-            self.phase = 0.0;
         }
-        let frac = (self.elapsed / self.ramp_time).min(1.0);
-        let freq = self.f_hi - (self.f_hi - self.f_lo) * frac;
-        let amp = (-self.elapsed / self.amp_tau).exp();
-        self.phase += freq * dt;
-        self.phase -= self.phase.floor();
-        let square = if self.phase < 0.5 { 1.0 } else { -1.0 };
+        self.last_en = true;
+        let e = self.elapsed;
         self.elapsed += dt;
-        square * amp
+        if self.exponential {
+            (-e / self.span).exp()
+        } else {
+            (e / self.span).min(1.0)
+        }
     }
 
     fn save_state(&self, w: &mut StateWriter) {
         w.write_bool(self.active);
         w.write_f64_le(self.elapsed);
-        w.write_f64_le(self.phase);
+        w.write_bool(self.last_en);
     }
 
     fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
         self.active = r.read_bool()?;
         self.elapsed = r.read_f64_le()?;
-        self.phase = r.read_f64_le()?;
+        self.last_en = r.read_bool()?;
         Ok(())
     }
 }
@@ -199,11 +215,78 @@ const LVL_TOTAL: f64 = LVL_EXPLOSION
     + LVL_SHIP_FIRE
     + LVL_SAUCER_FIRE;
 
-/// Make-up gain ahead of the thrust mix. The ~90 Hz band-pass passes only a
-/// sliver of the noise's energy, so (as MAME does with its `600*7.6` pre-gain)
-/// the path needs a boost — but only enough to reach full scale, not to slam
-/// the resonant filter into hard clipping.
-const THRUST_MAKEUP: f64 = 12.0;
+/// Output gain after the thrust band-pass. The multiple-feedback band-pass
+/// already provides the resonant make-up (its center gain is `Rf / 2·Rin`), so
+/// this only trims the path to its mix level — calibrated against the reference
+/// thrust rumble rather than the hand-tuned pre-gain it replaces.
+const THRUST_GAIN: f64 = 0.12;
+
+/// Output gain after the thump 555/RC chain, calibrated to the reference thump
+/// level (replaces the old `LVL_THUMP / LVL_TOTAL` weight on the square VCO).
+const THUMP_GAIN: f64 = 0.135;
+
+// Fire chirp constant-current 555 VCO. The frequency is linear in the control
+// voltage, `f = (Vcc_src − Vbe − Vcv) / ((Vcc/3)·C·R)`, so a linear CV ramp gives
+// a linear frequency sweep. R·C is sized so the stall edge (cap just reaches the
+// ⅔·Vcc threshold) sits above the top of the sweep (~910 Hz), leaving the
+// 110–830 Hz pew range comfortably oscillating.
+const FIRE_C: f64 = 0.01e-6;
+const FIRE_R: f64 = 110e3;
+const FIRE_VCC: f64 = 5.0;
+const FIRE_VCC_SRC: f64 = 5.0;
+const FIRE_JUNCTION: f64 = 0.7;
+/// Per-fire output gains, calibrated to the reference pew levels.
+const SHIP_FIRE_GAIN: f64 = 0.104;
+const SAUCER_FIRE_GAIN: f64 = 0.064;
+
+/// Control voltage that makes the fire 555 oscillate at `freq` Hz (inverse of the
+/// linear CC-VCO frequency law above).
+fn fire_cv(freq: f64) -> f64 {
+    FIRE_VCC_SRC - FIRE_JUNCTION - freq * (FIRE_VCC / 3.0) * FIRE_C * FIRE_R
+}
+
+/// Build one fire "pew": a linear CV ramp (`f_hi`→`f_lo` over `ramp` s) sweeps a
+/// constant-current 555 VCO, AC-coupled and shaped by an exponential amplitude
+/// envelope (`amp_tau`). Returns the leveled output node.
+#[allow(clippy::too_many_arguments)]
+fn build_fire(
+    b: &mut DiscreteCircuitBuilder,
+    enable: LogicInputId,
+    name: &str,
+    f_hi: f64,
+    f_lo: f64,
+    ramp: f64,
+    amp_tau: f64,
+    gain: f64,
+) -> NodeId {
+    let sweep = b.custom(
+        &format!("{name}_SWEEP"),
+        vec![enable.into()],
+        Box::new(FireEnvelope::linear(ramp)),
+    );
+    let (v0, v1) = (fire_cv(f_hi), fire_cv(f_lo));
+    let vin_g = b.gain(&format!("{name}_VIN_G"), sweep, v1 - v0);
+    let vin_b = b.constant(&format!("{name}_VIN0"), v0);
+    let vin = b.add(&format!("{name}_VIN"), &[vin_g, vin_b]);
+    let osc = b.ne555_cc(
+        &format!("{name}_555"),
+        vin,
+        FIRE_R,
+        FIRE_C,
+        FIRE_VCC,
+        FIRE_VCC_SRC,
+        FIRE_JUNCTION,
+        Output555::Capacitor,
+    );
+    let ac = b.rc_high_pass(&format!("{name}_AC"), osc, 16e3, 1e-6);
+    let amp = b.custom(
+        &format!("{name}_AMP"),
+        vec![enable.into()],
+        Box::new(FireEnvelope::exp(amp_tau)),
+    );
+    let env = b.multiply(&format!("{name}_ENV"), ac, amp);
+    b.gain(&format!("{name}_FIRE_OUT"), env, gain)
+}
 
 fn build_circuit() -> (DiscreteCircuit, AsteroidsDiscreteInputs) {
     let mut b = DiscreteCircuitBuilder::new(TIMING.cpu_clock_hz, 44_100);
@@ -237,8 +320,11 @@ fn build_circuit() -> (DiscreteCircuit, AsteroidsDiscreteInputs) {
     let expl_lp = b.rc_low_pass("EXPLODE_LP", expl_noise, 3_042.0, 1e-6);
     let expl = b.gain("EXPLODE", expl_lp, LVL_EXPLOSION / LVL_TOTAL);
 
-    // --- Thrust: 12 kHz LFSR noise -> RC LP -> gate -> band-pass -> low-pass,
-    // with a large make-up gain to compensate the narrow band-pass loss ---
+    // --- Thrust: 12 kHz noise -> RC pre-filter (~72 Hz) -> gate -> resonant
+    // op-amp multiple-feedback band-pass (~89.5 Hz, Q ~7.6) -> 160 Hz output
+    // low-pass. The band-pass R/C set fc, Q and the make-up gain together
+    // (center gain Rf/2·Rin ≈ 115), so the path no longer needs a hand-tuned
+    // pre-gain. Deep rumble, no high-frequency hiss. ---
     let thrust_noise = b.lfsr_noise(
         "THRUST_NOISE",
         12_000.0,
@@ -248,25 +334,62 @@ fn build_circuit() -> (DiscreteCircuit, AsteroidsDiscreteInputs) {
             seed: 0xACE1,
         },
     );
-    // Pre-filter the noise (RC ~72 Hz as in MAME), resonate the ~82 Hz band
-    // (MAME's measured thrust pitch), then a steep 2nd-order low-pass keeps it a
-    // deep rumble with no high-frequency hiss.
     let thrust_rc = b.rc_low_pass("THRUST_RC", thrust_noise, 2_200.0, 1e-6);
     let thrust_gated = b.multiply("THRUST_GATE", thrust_rc, thrust_en);
-    let thrust_bp = b.band_pass("THRUST_BP", thrust_gated, 82.0, 4.0);
-    let thrust_lp = b.second_order("THRUST_LP", thrust_bp, FilterMode::LowPass, 130.0, 0.707);
-    let thrust = b.gain("THRUST", thrust_lp, THRUST_MAKEUP * LVL_THRUST / LVL_TOTAL);
+    // R_in 1.17 kΩ / R_f 270 kΩ / C 0.1 µF give fc ≈ 89.5 Hz, Q ≈ 7.6 (matching
+    // the reference). Rails wide enough to stay linear over the noise drive.
+    let thrust_bp = b.op_amp_band_pass(
+        "THRUST_BP",
+        thrust_gated,
+        &[1_170.0],
+        270_000.0,
+        0.1e-6,
+        0.1e-6,
+        0.0,
+        -12.0,
+        12.0,
+    );
+    // Steep 2nd-order output low-pass to keep it a deep rumble (the resonant
+    // band-pass skirts otherwise leave audible upper noise).
+    let thrust_lp = b.second_order("THRUST_LP", thrust_bp, FilterMode::LowPass, 120.0, 0.707);
+    let thrust = b.gain("THRUST", thrust_lp, THRUST_GAIN);
 
-    // --- Thump: 4-bit DAC sets a low VCO (~20-55 Hz, MAME peaks ~53 Hz at max
-    // data), smoothed, gated ---
-    let thump_dac = b.dac_r2r("THUMP_DAC", thump_data, 4, 1.0); // 0..1
-    let thump_sweep = b.gain("THUMP_SWEEP", thump_dac, 35.0);
-    let thump_base = b.constant("THUMP_BASE", 20.0);
-    let thump_freq = b.add("THUMP_FREQ", &[thump_sweep, thump_base]);
-    let thump_vco = b.variable_square("THUMP_VCO", thump_freq);
-    let thump_lp = b.low_pass_hz("THUMP_LP", thump_vco, 480.0);
-    let thump_gated = b.multiply("THUMP_G", thump_lp, thump_en);
-    let thump = b.gain("THUMP", thump_gated, LVL_THUMP / LVL_TOTAL);
+    // --- Thump: a 4-bit R-1 DAC sets the control voltage of a constant-current
+    // 555 VCO (the cap sawtooth), AC-coupled, RC-smoothed and gated. Higher data
+    // raises the CV, lowering the charge current and the pitch (~200 Hz at data 0
+    // down to ~55 Hz at full data). ---
+    // DAC node voltage = (Σ bit·Von/R + Vbias/Rbias) / (Σ1/R + 1/Rbias + 1/Rgnd),
+    // with R = 220k/100k/47k/22k (bits 0-3), Von 3.5, Vbias 4.3, Rbias 6.8k,
+    // Rgnd 47k.
+    let thump_denom =
+        1.0 / 220e3 + 1.0 / 100e3 + 1.0 / 47e3 + 1.0 / 22e3 + 1.0 / 6.8e3 + 1.0 / 47e3;
+    let thump_weights: Vec<f64> = [220e3, 100e3, 47e3, 22e3]
+        .iter()
+        .map(|r| 3.5 / (r * thump_denom))
+        .collect();
+    let thump_dac_bits = b.dac_weighted("THUMP_DAC", thump_data, &thump_weights);
+    let thump_dac_off = b.constant("THUMP_DAC_OFF", 4.3 / (6.8e3 * thump_denom));
+    let thump_cv_raw = b.add("THUMP_CV_RAW", &[thump_dac_bits, thump_dac_off]);
+    // The constant-current VCO's frequency is steep near the charge limit (a few
+    // % of CV moves the pitch ~20 %), so trim the modeled DAC voltage slightly to
+    // land the reference pitch (~53 Hz at full data).
+    let thump_cv = b.gain("THUMP_CV", thump_cv_raw, 1.027);
+    let thump_555 = b.ne555_cc(
+        "THUMP_555",
+        thump_cv,
+        22e3,
+        0.22e-6, // R, C
+        5.0,
+        5.0,
+        0.8, // vcc, v_cc_source, 2N3906 junction
+        // The cap sawtooth is the audible tap; the framework's CC square is a
+        // near-100 %-duty pulse (instant discharge) that doesn't model this VCO.
+        Output555::Capacitor,
+    );
+    let thump_ac = b.rc_high_pass("THUMP_AC", thump_555, 16e3, 1e-6); // strip the cap-voltage DC
+    let thump_rc = b.rc_low_pass("THUMP_RC", thump_ac, 3.3e3, 0.1e-6); // ~482 Hz coupling filter
+    let thump_gated = b.multiply("THUMP_G", thump_rc, thump_en);
+    let thump = b.gain("THUMP", thump_gated, THUMP_GAIN);
 
     // --- Saucer (MAME asteroid_a.cpp): a triangle warble LFO (8.25 Hz small /
     // 5.75 Hz large) sweeps a triangle tone VCO. SAUCER_SEL shifts both the
@@ -284,20 +407,30 @@ fn build_circuit() -> (DiscreteCircuit, AsteroidsDiscreteInputs) {
     let saucer_gated = b.multiply("SAUCER_G", saucer_tone, saucer_en);
     let saucer = b.gain("SAUCER", saucer_gated, LVL_SAUCER / LVL_TOTAL);
 
-    // --- Fire paths: descending-frequency "pew" while the enable is held ---
-    let ship = b.custom(
-        "SHIP_FIRE",
-        vec![ship_fire.into()],
-        Box::new(FireChirp::new(820.0, 110.0, 0.28, 0.081)),
+    // --- Fire paths: a constant-current 555 VCO swept by a linear CV ramp gives
+    // the descending-frequency "pew"; an exponential envelope sets the amplitude.
+    // Ship: 820 -> 110 Hz over 0.28 s, fast decay (τ 81 ms). ---
+    let ship_out = build_fire(
+        &mut b,
+        ship_fire,
+        "SHIP",
+        820.0,
+        110.0,
+        0.28,
+        0.081,
+        SHIP_FIRE_GAIN,
     );
-    let ship_out = b.gain("SHIP_FIRE_OUT", ship, LVL_SHIP_FIRE / LVL_TOTAL);
-
-    let sfire = b.custom(
-        "SAUCER_FIRE",
-        vec![saucer_fire.into()],
-        Box::new(FireChirp::new(830.0, 630.0, 0.28, 0.3)),
+    // Saucer: a higher, narrower 830 -> 630 Hz sweep with a slower decay (τ 0.3 s).
+    let sfire_out = build_fire(
+        &mut b,
+        saucer_fire,
+        "SAUCER",
+        830.0,
+        630.0,
+        0.28,
+        0.3,
+        SAUCER_FIRE_GAIN,
     );
-    let sfire_out = b.gain("SAUCER_FIRE_OUT", sfire, LVL_SAUCER_FIRE / LVL_TOTAL);
 
     // --- Life: fixed 3 kHz tone, gated ---
     let life_tone = b.fixed_square("LIFE_TONE", 3_000.0);
