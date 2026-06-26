@@ -5,16 +5,23 @@
 //! as finished PCM" path. This puts the DAC + effects mixing inside the
 //! framework so the shared analog stages (mixer, filters, discharge) have a home.
 //!
-//! The walk/jump/stomp models are ported from the previous `DkongDiscrete`
-//! (closed-form 555 VCO + RC envelopes + LFSR noise); fidelity is unchanged. The
-//! board talks to it with hardware intent (`write_sound_bit`, `feed_dac`,
-//! `set_discharge`).
+//! Walk and jump are voltage-controlled 555 astables (R1 = 47 kΩ / R2 = 27 kΩ,
+//! C = 33 nF walk / 47 nF jump), built on the framework's [`ne555_astable`]
+//! primitive driven by a control-voltage node — a slow LFO for the walk wobble,
+//! an exponential pitch-sweep envelope for the jump. This replaces the old
+//! closed-form `vco_freq()` + phase-accumulator squares, so the cap integration
+//! (and its ~73 % duty, harmonics) comes from the real 555 model. Stomp stays on
+//! its LFSR-noise model — on hardware it is an LS164 noise source + LS161
+//! counter, not a 555. The board talks to the device with hardware intent
+//! (`write_sound_bit`, `feed_dac`, `set_discharge`).
+//!
+//! [`ne555_astable`]: phosphor_core::device::DiscreteCircuitBuilder::ne555_astable
 
 use phosphor_core::core::debug::{DebugRegister, Debuggable};
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::device::{
     CustomComponent, DiscreteCircuit, DiscreteCircuitBuilder, ExternalSourceId, FilterMode,
-    LogicInputId, NodeId, OutputGain,
+    LogicInputId, NodeId, Output555, OutputGain,
 };
 
 /// Output sample rate. The circuit is built board = sim = output = this rate, so
@@ -22,93 +29,71 @@ use phosphor_core::device::{
 /// box-filtered DAC sample.
 const SAMPLE_RATE: u64 = 44_100;
 
-// Per-effect output low-pass cutoffs (Hz) and gains, calibrated against MAME
-// dkong captures (tools/sound-reference). MAME runs each effect through RC
-// integrators and a coupling filter, so the raw squares/noise are darkened by
-// the low-passes and balanced relative to each other as MAME does (walk subtle,
-// jump moderate, stomp prominent). The absolute gains are then scaled up from
-// MAME's levels because Phosphor's DAC plays at full scale while MAME's music
-// sits ~5x lower (VR2 + mixer): matching MAME's effect/music *ratio* keeps the
-// effects audible over the music rather than buried under it.
+// Per-effect output low-pass cutoffs (Hz) and gains, calibrated against captured
+// hardware references (tools/sound-reference). On the board each effect passes
+// through RC integrators and a coupling filter, so the raw squares/noise are
+// darkened by the low-passes and balanced against each other (walk subtle, jump
+// moderate, stomp prominent). The absolute gains are scaled up relative to the
+// reference because Phosphor's DAC plays at full scale while the board's music
+// sits ~5x lower (the VR2 volume pot + mixer): matching the effect/music *ratio*
+// keeps the effects audible over the music rather than buried under it.
 // The DAC (music) is attenuated to leave output headroom for the effects, the
-// way MAME's VR2 volume pot + mixer do. At full scale the music consumed the
-// entire range, so any effect loud enough to hear over it clipped against the
-// output clamp. With headroom, the effects sit clearly above the music.
+// way the VR2 volume pot + mixer do on hardware. At full scale the music
+// consumed the entire range, so any effect loud enough to hear over it clipped
+// against the output clamp. With headroom, the effects sit clearly above.
 const DAC_GAIN: f64 = 0.55;
-const WALK_LP_HZ: f64 = 900.0;
-const WALK_GAIN: f64 = 1.0;
+// I8035 DAC reconstruction filter: a Sallen-Key low-pass on the board (R = 5.6 kΩ
+// ×2, C = 22 nF / 10 nF) gives f ≈ 1916 Hz, Q ≈ 0.74. It rolls off the DAC step
+// edges and sample brightness so the music/effects sit warm rather than hashy.
+const DAC_LP_HZ: f64 = 1_916.0;
+const DAC_LP_Q: f64 = 0.74;
+const WALK_LP_HZ: f64 = 700.0;
+const WALK_GAIN: f64 = 0.14;
 const JUMP_LP_HZ: f64 = 1_400.0;
-const JUMP_GAIN: f64 = 1.1;
+const JUMP_GAIN: f64 = 0.25;
 const STOMP_LP_HZ: f64 = 340.0;
 const STOMP_GAIN: f64 = 7.0;
 
-/// 555 astable frequency with external control voltage (DK sound board):
-/// R1 = 47 kΩ (charge), R2 = 27 kΩ (discharge), Vcc = 5 V.
-fn vco_freq(cap_nf: f64, cv: f64) -> f64 {
-    const VCC: f64 = 5.0;
-    const R1: f64 = 47_000.0;
-    const R2: f64 = 27_000.0;
-    let c = cap_nf * 1e-9;
-    let t_charge = (R1 + R2) * c * ((VCC - cv * 0.5) / (VCC - cv)).ln();
-    let t_discharge = R2 * c * 2.0_f64.ln();
-    1.0 / (t_charge + t_discharge)
-}
+// Shared 555 astable values for the walk/jump VCOs: R1 charges through 47 kΩ,
+// R2 discharges through 27 kΩ, Vcc = 5 V. The control voltage on pin 5 sets
+// threshold = CV, trigger = CV/2, so a higher CV is a slower charge and a lower
+// frequency.
+const VCC: f64 = 5.0;
+const R1: f64 = 47_000.0;
+const R2: f64 = 27_000.0;
+const WALK_C: f64 = 33e-9;
+const JUMP_C: f64 = 47e-9;
+/// 555 output-high level. The absolute value is folded into the per-effect
+/// gains; 1.0 keeps the post-DC-block square at ±~0.5 before calibration.
+const OUT_HIGH: f64 = 1.0;
+/// DC-blocking high-pass matching the walk path's coupling network (11.2 kΩ,
+/// 4.7 µF, ≈3 Hz). The 555 square's duty (and so its DC offset) shifts with CV,
+/// so AC-couple before filtering rather than subtracting a fixed mean.
+const AC_R: f64 = 11_200.0;
+const AC_C: f64 = 4.7e-6;
+/// Jump pitch-sweep / amplitude decay time constant (seconds).
+const JUMP_TAU: f64 = 0.36;
 
 // ---------------------------------------------------------------------------
 // Effect components (custom escape hatch)
 // ---------------------------------------------------------------------------
 
-/// Walk: a ~1 Hz inverter-oscillator LFO modulates a 555 VCO (~430 Hz) while the
-/// enable is held. Input: `[walk_en]`.
-struct DkongWalk {
-    lfo_phase: f64,
-    vco_phase: f64,
-}
-
-impl CustomComponent for DkongWalk {
-    fn reset(&mut self) {
-        self.lfo_phase = 0.0;
-        self.vco_phase = 0.0;
-    }
-    fn step(&mut self, inputs: &[f64], dt: f64) -> f64 {
-        if inputs[0] < 0.5 {
-            return 0.0;
-        }
-        self.lfo_phase += dt; // ~1 Hz LFO
-        self.lfo_phase -= self.lfo_phase.floor();
-        let lfo = (self.lfo_phase * std::f64::consts::TAU).sin();
-        let cv = 3.15 + 0.65 * lfo;
-        let freq = vco_freq(33.0, cv);
-        self.vco_phase += freq * dt;
-        self.vco_phase -= self.vco_phase.floor();
-        let wave = if self.vco_phase < 0.5 { 1.0 } else { -1.0 };
-        wave * 0.12
-    }
-    fn save_state(&self, w: &mut StateWriter) {
-        w.write_f64_le(self.lfo_phase);
-        w.write_f64_le(self.vco_phase);
-    }
-    fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
-        self.lfo_phase = r.read_f64_le()?;
-        self.vco_phase = r.read_f64_le()?;
-        Ok(())
-    }
-}
-
-/// Jump: a one-shot 555 VCO sweep (220→700 Hz, τ ≈ 360 ms) triggered on the
-/// rising edge of the enable. Input: `[jump_en]`.
-struct DkongJump {
+/// Jump amplitude/pitch envelope: a one-shot exponential decay (τ = [`JUMP_TAU`])
+/// triggered on the rising edge of the enable and held for 0.5 s. Drives both the
+/// 555 control voltage (`1 + 3·env`, so the pitch sweeps up as it decays) and the
+/// output amplitude. This is envelope shaping only — the oscillator itself is the
+/// [`ne555_astable`](phosphor_core::device::DiscreteCircuitBuilder::ne555_astable)
+/// node. Input: `[jump_en]`.
+struct DkongJumpEnv {
     active: bool,
     timer: f64,
-    vco_phase: f64,
     last_en: bool,
 }
 
-impl CustomComponent for DkongJump {
+impl CustomComponent for DkongJumpEnv {
     fn reset(&mut self) {
         self.active = false;
         self.timer = 0.0;
-        self.vco_phase = 0.0;
         self.last_en = false;
     }
     fn step(&mut self, inputs: &[f64], dt: f64) -> f64 {
@@ -116,7 +101,6 @@ impl CustomComponent for DkongJump {
         if en && !self.last_en {
             self.active = true;
             self.timer = 0.0;
-            self.vco_phase = 0.0;
         }
         self.last_en = en;
         if !self.active {
@@ -127,25 +111,16 @@ impl CustomComponent for DkongJump {
             self.active = false;
             return 0.0;
         }
-        let t = self.timer;
-        let cv = 1.0 + 3.0 * (-t / 0.36).exp();
-        let freq = vco_freq(47.0, cv);
-        let amp = (-t / 0.36).exp();
-        self.vco_phase += freq * dt;
-        self.vco_phase -= self.vco_phase.floor();
-        let wave = if self.vco_phase < 0.5 { 1.0 } else { -1.0 };
-        wave * amp * 0.15
+        (-self.timer / JUMP_TAU).exp()
     }
     fn save_state(&self, w: &mut StateWriter) {
         w.write_bool(self.active);
         w.write_f64_le(self.timer);
-        w.write_f64_le(self.vco_phase);
         w.write_bool(self.last_en);
     }
     fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
         self.active = r.read_bool()?;
         self.timer = r.read_f64_le()?;
-        self.vco_phase = r.read_f64_le()?;
         self.last_en = r.read_bool()?;
         Ok(())
     }
@@ -239,30 +214,62 @@ fn build_circuit() -> (DiscreteCircuit, DkongInputs) {
     // currently inert (the TKG-04 model does not drive it yet).
     let discharge = b.logic_input("DISCHARGE");
 
-    // Each effect: raw oscillator/noise -> output low-pass (darken, as MAME's RC
-    // integrators do) -> level gain.
-    let walk_raw = b.custom(
-        "WALK",
-        vec![walk_en.into()],
-        Box::new(DkongWalk {
-            lfo_phase: 0.0,
-            vco_phase: 0.0,
-        }),
+    // Walk: a ~1 Hz LFO wobbles the 555 control voltage around 3.15 ±0.65 V; the
+    // 555 oscillates near ~430 Hz. AC-couple to drop the duty-dependent DC, gate
+    // by the enable, then darken with the output low-pass and level it.
+    let walk_lfo = b.triangle("WALK_LFO", 1.0); // ±1
+    let walk_lfo_s = b.gain("WALK_LFO_S", walk_lfo, 0.65);
+    let walk_cv_off = b.constant("WALK_CV_OFF", 3.15);
+    let walk_cv = b.add("WALK_CV", &[walk_lfo_s, walk_cv_off]);
+    let walk_555 = b.ne555_astable(
+        "WALK_555",
+        Some(walk_cv),
+        R1,
+        R2,
+        WALK_C,
+        VCC,
+        OUT_HIGH,
+        Output555::Square,
     );
-    let walk_lp = b.second_order("WALK_LP", walk_raw, FilterMode::LowPass, WALK_LP_HZ, 0.707);
+    let walk_ac = b.rc_high_pass("WALK_AC", walk_555, AC_R, AC_C);
+    let walk_gated = b.multiply("WALK_GATED", walk_ac, walk_en);
+    let walk_lp = b.second_order(
+        "WALK_LP",
+        walk_gated,
+        FilterMode::LowPass,
+        WALK_LP_HZ,
+        0.707,
+    );
     let walk = b.gain("WALK_OUT", walk_lp, WALK_GAIN);
 
-    let jump_raw = b.custom(
-        "JUMP",
+    // Jump: a one-shot exponential envelope drives both the 555 control voltage
+    // (CV = 1 + 3·env, so the pitch sweeps up as it decays) and the output
+    // amplitude. AC-couple the square, apply the amplitude envelope, then filter.
+    let jump_env = b.custom(
+        "JUMP_ENV",
         vec![jump_en.into()],
-        Box::new(DkongJump {
+        Box::new(DkongJumpEnv {
             active: false,
             timer: 0.0,
-            vco_phase: 0.0,
             last_en: false,
         }),
     );
-    let jump_lp = b.second_order("JUMP_LP", jump_raw, FilterMode::LowPass, JUMP_LP_HZ, 0.707);
+    let jump_cv_s = b.gain("JUMP_CV_S", jump_env, 3.0);
+    let jump_cv_off = b.constant("JUMP_CV_OFF", 1.0);
+    let jump_cv = b.add("JUMP_CV", &[jump_cv_s, jump_cv_off]);
+    let jump_555 = b.ne555_astable(
+        "JUMP_555",
+        Some(jump_cv),
+        R1,
+        R2,
+        JUMP_C,
+        VCC,
+        OUT_HIGH,
+        Output555::Square,
+    );
+    let jump_ac = b.rc_high_pass("JUMP_AC", jump_555, AC_R, AC_C);
+    let jump_amp = b.multiply("JUMP_AMP", jump_ac, jump_env);
+    let jump_lp = b.second_order("JUMP_LP", jump_amp, FilterMode::LowPass, JUMP_LP_HZ, 0.707);
     let jump = b.gain("JUMP_OUT", jump_lp, JUMP_GAIN);
 
     let stomp_raw = b.custom(
@@ -285,8 +292,12 @@ fn build_circuit() -> (DiscreteCircuit, DkongInputs) {
     );
     let stomp = b.gain("STOMP_OUT", stomp_lp, STOMP_GAIN);
 
-    // Op-amp summing mixer: the DAC (full scale) plus the three filtered effects.
-    let mix = b.add("MIX", &[dac.into(), walk, jump, stomp]);
+    // DAC reconstruction: a Sallen-Key low-pass darkens the raw DAC steps before
+    // the mix, matching the board's filter so the sampled music isn't hashy.
+    let dac_lp = b.second_order("DAC_LP", dac, FilterMode::LowPass, DAC_LP_HZ, DAC_LP_Q);
+
+    // Op-amp summing mixer: the filtered DAC plus the three filtered effects.
+    let mix = b.add("MIX", &[dac_lp, walk, jump, stomp]);
     b.output(mix, OutputGain::unity());
 
     let circuit = b.build();
@@ -465,13 +476,20 @@ mod tests {
     #[test]
     fn dac_passes_through_the_mix() {
         let mut s = DkongDiscreteSound::new();
-        run(&mut s, 10_000, 100);
-        let mut buf = vec![0i16; 256];
+        run(&mut s, 10_000, 400);
+        let mut buf = vec![0i16; 1024];
         let n = s.fill_audio(&mut buf);
         assert!(n > 0);
-        // With no effects active, the output is the (attenuated) DAC value.
+        // With no effects active the output is the (attenuated) DAC value, but it
+        // now passes through the Sallen-Key reconstruction low-pass: a held DAC
+        // settles to the same value (unity DC gain) after the filter's rise, so
+        // check the converged tail rather than every sample.
         let expected = (10_000.0 * DAC_GAIN) as i16;
-        assert!(buf[..n].iter().all(|&v| v == expected));
+        assert!(
+            buf[n - 50..n].iter().all(|&v| (v - expected).abs() <= 1),
+            "held DAC should settle to {expected}, got tail {:?}",
+            &buf[n - 5..n]
+        );
     }
 
     #[test]
