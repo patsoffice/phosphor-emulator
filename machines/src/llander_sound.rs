@@ -326,6 +326,37 @@ mod tests {
     }
 
     #[test]
+    fn thrust_turns_off_when_data_clears() {
+        // Regression: the resonant thrust band-pass must not latch "on". Drive
+        // full thrust, then clear it, and confirm the output decays to silence.
+        let mut s = LunarLanderDiscreteSound::new();
+        let mut discard = vec![0i16; 16384];
+        s.write_sound_register(0x07); // full thrust
+        for _ in 0..30 {
+            run_frame(&mut s);
+        }
+        let on = ac_rms(&mut s);
+        assert!(on > 100.0, "thrust should be audible while on, rms={on:.0}");
+
+        // Release, let the resonant filter ring down, then measure the steady
+        // state ~0.5 s later.
+        while s.fill_audio(&mut discard) > 0 {}
+        s.write_sound_register(0x00);
+        for _ in 0..30 {
+            run_frame(&mut s);
+        }
+        while s.fill_audio(&mut discard) > 0 {} // discard the ring-down transient
+        for _ in 0..30 {
+            run_frame(&mut s);
+        }
+        let off = ac_rms(&mut s);
+        assert!(
+            off < 20.0,
+            "thrust should be ~silent after release, rms={off:.0} (was {on:.0})"
+        );
+    }
+
+    #[test]
     fn tone_only_is_deterministic_and_non_silent() {
         let mut a = LunarLanderDiscreteSound::new();
         let mut b = LunarLanderDiscreteSound::new();

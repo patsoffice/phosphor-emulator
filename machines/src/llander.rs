@@ -190,10 +190,19 @@ pub struct LunarLanderSystem {
     #[save_skip]
     dip_switches: u8,
 
-    // Thrust pedal: analog value 0x00–0xFE.
-    // Digital button maps to 0xFE (full thrust) when pressed, 0x00 when released.
+    // Thrust pedal: analog value 0x00–0xFE, read by the game at 0x2C00.
     thrust_value: u8,
+    // Target the pedal ramps toward: 0xFE while the thrust key is held, 0x00 when
+    // released. Live input, re-derived from key state, so it isn't saved.
+    #[save_skip]
+    thrust_target: u8,
 }
+
+/// Per-frame step the thrust pedal ramps toward its target. The game reads the
+/// pedal through a self-centering DAC/counter and mis-tracks an instant
+/// 0x00↔0xFE step (leaving thrust stuck "on"), so the digital key is smoothed
+/// into a gradual pedal sweep, mirroring the real analog control.
+const THRUST_RAMP: u8 = 12;
 
 impl LunarLanderSystem {
     fn build_map() -> AddressSpace16 {
@@ -237,6 +246,7 @@ impl LunarLanderSystem {
             in1: 0x0A,
             dip_switches: 0x80,
             thrust_value: 0x00,
+            thrust_target: 0x00,
         }
     }
 
@@ -406,9 +416,10 @@ impl InputConfigurable for LunarLanderSystem {
             INPUT_ROT_RIGHT => set_bit_active_high(&mut self.in1, 6, pressed),
             INPUT_ROT_LEFT => set_bit_active_high(&mut self.in1, 7, pressed),
 
-            // Thrust pedal: digital approximation
+            // Thrust pedal: set the ramp target; run_frame sweeps thrust_value
+            // toward it so the game's analog read sees a gradual pedal, not a step.
             INPUT_THRUST => {
-                self.thrust_value = if pressed { 0xFE } else { 0x00 };
+                self.thrust_target = if pressed { 0xFE } else { 0x00 };
             }
 
             _ => {}
@@ -420,6 +431,18 @@ impl MachineCore for LunarLanderSystem {
     crate::machine_core_metadata!("llander", atari_dvg::TIMING);
 
     fn run_frame(&mut self) {
+        // Sweep the thrust pedal toward its target before the CPU reads it, so a
+        // held/released key presents as a gradual analog ramp (see THRUST_RAMP).
+        self.thrust_value = if self.thrust_value < self.thrust_target {
+            self.thrust_value
+                .saturating_add(THRUST_RAMP)
+                .min(self.thrust_target)
+        } else {
+            self.thrust_value
+                .saturating_sub(THRUST_RAMP)
+                .max(self.thrust_target)
+        };
+
         bus_split!(self, bus => {
             for _ in 0..atari_dvg::TIMING.cycles_per_frame() {
                 self.board.tick(bus);
