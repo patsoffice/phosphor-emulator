@@ -9,9 +9,9 @@
 //!
 //! This module is built in phases (see the `marble-madness` beads epic). The
 //! 68010 boot loop, memory map, control/IRQ registers, the **Slapstic** bank
-//! switching of the protected ROM window, and the **2804 EEPROM** are in place.
-//! The System 1 video pipeline (Phase 3), the sound CPU (Phase 4), and trackball
-//! input (Phase 5) are still stubbed and filled in by their own issues.
+//! switching, the **2804 EEPROM**, and the **playfield + alpha** video layers
+//! are in place. Motion objects (Phase 3c), the sound CPU (Phase 4), and
+//! trackball input (Phase 5) are still stubbed and filled in by their own issues.
 //!
 //! Closest existing template: [`crate::foodf`] (68000 + `AddressSpace32` + raster
 //! IRQs + watchdog). This adds the BIOS/cartridge split and the richer I/O map.
@@ -46,6 +46,8 @@
 //! base, so the board sees a word access at `860000` with the value in the low
 //! byte — we decode on the even base and take `data & 0xFF`, exactly like
 //! [`crate::foodf`].
+
+use std::collections::HashMap;
 
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
@@ -202,6 +204,117 @@ const MARBLE_ALPHA_LAYOUT: GfxLayout<'static> = GfxLayout {
 /// Number of 8×8 alpha tiles in the font ROM (0x2000 / 16 bytes per tile).
 const ALPHA_TILE_COUNT: usize = 512;
 
+/// Playfield / motion-object tile ROM ("tiles" region, 0x100000). Two 0x80000
+/// banks; bank 1 holds five bitplanes, bank 2 three. The region is
+/// `ROMREGION_INVERT | ROMREGION_ERASEFF`: load zero-filled, then invert the
+/// whole buffer (gaps 0x00→0xFF = erase, data → inverted), see `load_rom_set`.
+pub static MARBLE_TILE_ROM: RomRegion = RomRegion {
+    size: 0x100000,
+    entries: &[
+        // Bank 1: planes 0-4, each plane two 0x4000 ROMs, planes 0x10000 apart.
+        RomEntry {
+            name: "136033.137",
+            size: 0x4000,
+            offset: 0x00000,
+            crc32: &[0x7a45f5c1],
+        },
+        RomEntry {
+            name: "136033.138",
+            size: 0x4000,
+            offset: 0x04000,
+            crc32: &[0x7e954a88],
+        },
+        RomEntry {
+            name: "136033.139",
+            size: 0x4000,
+            offset: 0x10000,
+            crc32: &[0x1eb1bb5f],
+        },
+        RomEntry {
+            name: "136033.140",
+            size: 0x4000,
+            offset: 0x14000,
+            crc32: &[0x8a82467b],
+        },
+        RomEntry {
+            name: "136033.141",
+            size: 0x4000,
+            offset: 0x20000,
+            crc32: &[0x52448965],
+        },
+        RomEntry {
+            name: "136033.142",
+            size: 0x4000,
+            offset: 0x24000,
+            crc32: &[0xb4a70e4f],
+        },
+        RomEntry {
+            name: "136033.143",
+            size: 0x4000,
+            offset: 0x30000,
+            crc32: &[0x7156e449],
+        },
+        RomEntry {
+            name: "136033.144",
+            size: 0x4000,
+            offset: 0x34000,
+            crc32: &[0x4c3e4c79],
+        },
+        RomEntry {
+            name: "136033.145",
+            size: 0x4000,
+            offset: 0x40000,
+            crc32: &[0x9062be7f],
+        },
+        RomEntry {
+            name: "136033.146",
+            size: 0x4000,
+            offset: 0x44000,
+            crc32: &[0x14566dca],
+        },
+        // Bank 2: planes 0-2, data 0x4000 into each plane slot (tiles 2048+).
+        RomEntry {
+            name: "136033.149",
+            size: 0x4000,
+            offset: 0x84000,
+            crc32: &[0xb6658f06],
+        },
+        RomEntry {
+            name: "136033.151",
+            size: 0x4000,
+            offset: 0x94000,
+            crc32: &[0x84ee1c80],
+        },
+        RomEntry {
+            name: "136033.153",
+            size: 0x4000,
+            offset: 0xa4000,
+            crc32: &[0xdaa02926],
+        },
+    ],
+};
+
+/// Graphics-mapping PROMs ("proms" region, 0x400). `prom1` (136033.118) at 0x000
+/// and `prom2` (136033.119) at 0x200 drive the per-tile bank / bpp / colour /
+/// offset lookup. Entries 0-255 are the playfield, 256-511 the motion objects.
+pub static MARBLE_PROM: RomRegion = RomRegion {
+    size: 0x400,
+    entries: &[
+        RomEntry {
+            name: "136033.118",
+            size: 0x200,
+            offset: 0x000,
+            crc32: &[0x2101b0ed],
+        },
+        RomEntry {
+            name: "136033.119",
+            size: 0x200,
+            offset: 0x200,
+            crc32: &[0x19f6e767],
+        },
+    ],
+};
+
 /// M6502 sound program (Phase 4). 64 KB region with ROM at 0x8000-0xFFFF.
 pub static MARBLE_SOUND_ROM: RomRegion = RomRegion {
     size: 0x10000,
@@ -243,6 +356,158 @@ fn load_maincpu_image(rom_set: &RomSet) -> Result<Vec<u8>, RomLoadError> {
         }
     }
     Ok(image)
+}
+
+// ---------------------------------------------------------------------------
+// Playfield / motion-object GFX decode (PROM-driven bank + bpp selection)
+// ---------------------------------------------------------------------------
+//
+// Ported from MAME `atarisy1_v.cpp` (decode_gfx / get_bank). Each of the 256
+// playfield lookup entries is keyed by a remap PROM pair that yields a tile
+// bank (1-7, only 1-2 populated on marble), a bit depth (4/5/6), a colour, and
+// a code offset. The same machinery feeds the motion objects (Phase 3c).
+
+// PROM1 / PROM2 bit assignments (MAME `atarisy1_v.cpp`).
+const PROM1_BANK_4: u8 = 0x80; // active low
+const PROM1_BANK_3: u8 = 0x40;
+const PROM1_BANK_2: u8 = 0x20;
+const PROM1_BANK_1: u8 = 0x10;
+const PROM1_OFFSET_MASK: u8 = 0x0F; // positive logic
+const PROM2_BANK_6_OR_7: u8 = 0x80; // active low
+const PROM2_BANK_5: u8 = 0x40;
+const PROM2_PLANE_5_ENABLE: u8 = 0x20; // active high
+const PROM2_PLANE_4_ENABLE: u8 = 0x10;
+const PROM2_PF_COLOR_MASK: u8 = 0x0F; // negative logic
+const PROM2_BANK_7: u8 = 0x08;
+
+/// 8×8 tiles, `char_increment` 64 bits (8 bytes). Planes sit 0x10000 bytes apart
+/// (`0x80000` bits); MAME lists them MSB-first, so reverse for `decode_gfx`'s
+/// LSB-first convention (plane 0 = pen bit 0).
+const TILE_X_OFFSETS: [usize; 8] = [0, 1, 2, 3, 4, 5, 6, 7];
+const TILE_Y_OFFSETS: [usize; 8] = [0, 8, 16, 24, 32, 40, 48, 56];
+const TILE_PLANES_4: [usize; 4] = [0, 0x80000, 0x100000, 0x180000];
+const TILE_PLANES_5: [usize; 5] = [0, 0x80000, 0x100000, 0x180000, 0x200000];
+const TILE_PLANES_6: [usize; 6] = [0, 0x80000, 0x100000, 0x180000, 0x200000, 0x280000];
+
+/// 4096 8×8 tiles per gfx bank.
+const TILES_PER_BANK: usize = 4096;
+
+fn tile_layout(bpp: u8) -> GfxLayout<'static> {
+    let plane_offsets: &'static [usize] = match bpp {
+        4 => &TILE_PLANES_4,
+        5 => &TILE_PLANES_5,
+        _ => &TILE_PLANES_6,
+    };
+    GfxLayout {
+        plane_offsets,
+        x_offsets: &TILE_X_OFFSETS,
+        y_offsets: &TILE_Y_OFFSETS,
+        char_increment: 64,
+    }
+}
+
+/// One decoded tile gfx bank: a 4096-tile cache and its bit depth.
+struct GfxBank {
+    cache: GfxCache,
+    bpp: u8,
+}
+
+impl GfxBank {
+    fn blank() -> Self {
+        Self {
+            cache: GfxCache::new(1, 8, 8),
+            bpp: 4,
+        }
+    }
+}
+
+/// The decoded playfield graphics: the 256-entry remap lookup plus the tile
+/// banks it references. `banks[0]` is a blank placeholder so real banks are
+/// 1-indexed (matching the lookup's gfx field and MAME reserving gfx slot 0).
+struct PlayfieldGfx {
+    lookup: [u16; 256],
+    banks: Vec<GfxBank>,
+}
+
+impl PlayfieldGfx {
+    fn empty() -> Self {
+        Self {
+            lookup: [0; 256],
+            banks: vec![GfxBank::blank()],
+        }
+    }
+}
+
+/// Resolve the tile bank for a PROM pair (MAME `get_bank`), decoding it on first
+/// use. Returns a `banks` index (≥1), or 0 when the bank is unmapped.
+fn get_pf_bank(
+    prom1: u8,
+    prom2: u8,
+    bpp: u8,
+    tiles: &[u8],
+    banks: &mut Vec<GfxBank>,
+    bank_gfx: &mut HashMap<(u8, u8), u8>,
+) -> u8 {
+    let bank_index = if prom1 & PROM1_BANK_1 == 0 {
+        1
+    } else if prom1 & PROM1_BANK_2 == 0 {
+        2
+    } else if prom1 & PROM1_BANK_3 == 0 {
+        3
+    } else if prom1 & PROM1_BANK_4 == 0 {
+        4
+    } else if prom2 & PROM2_BANK_5 == 0 {
+        5
+    } else if prom2 & PROM2_BANK_6_OR_7 == 0 {
+        if prom2 & PROM2_BANK_7 == 0 { 7 } else { 6 }
+    } else {
+        return 0;
+    };
+
+    if let Some(&id) = bank_gfx.get(&(bpp, bank_index)) {
+        return id;
+    }
+
+    // Out of range for the populated tile ROM → treat as unmapped.
+    let bank_base = 0x80000 * (bank_index as usize - 1);
+    if bank_base >= tiles.len() {
+        return 0;
+    }
+
+    let cache = decode_gfx(&tiles[bank_base..], 0, TILES_PER_BANK, &tile_layout(bpp));
+    let id = banks.len() as u8;
+    banks.push(GfxBank { cache, bpp });
+    bank_gfx.insert((bpp, bank_index), id);
+    id
+}
+
+/// Build the playfield remap lookup and decode its tile banks from the PROMs and
+/// the (already inverted) tile ROM. Mirrors MAME `decode_gfx`, playfield half.
+fn build_playfield_gfx(prom: &[u8], tiles: &[u8]) -> PlayfieldGfx {
+    let mut gfx = PlayfieldGfx::empty();
+    let mut bank_gfx: HashMap<(u8, u8), u8> = HashMap::new();
+    // prom1 = proms[0x000..], prom2 = proms[0x200..]; entries 0-255 = playfield.
+    for i in 0..256 {
+        let p1 = prom[i];
+        let p2 = prom[0x200 + i];
+
+        let bpp = if p2 & PROM2_PLANE_4_ENABLE != 0 {
+            if p2 & PROM2_PLANE_5_ENABLE != 0 { 6 } else { 5 }
+        } else {
+            4
+        };
+        let mut offset = (p1 & PROM1_OFFSET_MASK) as u16;
+        let mut color = (((!p2) & PROM2_PF_COLOR_MASK) >> (bpp - 4)) as u16;
+        let mut bank = get_pf_bank(p1, p2, bpp, tiles, &mut gfx.banks, &mut bank_gfx);
+        // Unmapped bank → fall back to the first real bank, blank tile.
+        if bank == 0 {
+            bank = 1;
+            offset = 0;
+            color = 0;
+        }
+        gfx.lookup[i] = offset | ((bank as u16) << 8) | (color << 12);
+    }
+    gfx
 }
 
 /// Convert one IRGB-4444 palette word to RGB24, matching MAME's
@@ -336,6 +601,8 @@ pub struct MarbleSystem {
 
     /// Decoded 8×8 2bpp alpha (text/HUD) font tiles. Not CPU-addressable.
     alpha_cache: GfxCache,
+    /// Decoded playfield tile banks + the PROM remap lookup. Not CPU-addressable.
+    playfield: PlayfieldGfx,
 
     // Video control latches (consumed by the Phase 3 video pipeline).
     xscroll: u16,
@@ -423,6 +690,7 @@ impl MarbleSystem {
             slapstic_rom: vec![0; 0x8000],
             eeprom: [0xFF; 512], // 2804 reads 0xFF erased; game checksums + reinits
             alpha_cache: GfxCache::new(ALPHA_TILE_COUNT, 8, 8),
+            playfield: PlayfieldGfx::empty(),
             xscroll: 0,
             yscroll: 0,
             priority_pens: 0,
@@ -442,10 +710,21 @@ impl MarbleSystem {
         // access via the slapstic state machine (see `slapstic_read`).
         self.slapstic_rom.copy_from_slice(&image[0x80000..0x88000]);
 
-        // Alpha (text/HUD) font tiles. Playfield/MO GFX + PROMs are Phase 3b/3c;
-        // the sound program is Phase 4.
+        // Alpha (text/HUD) font tiles.
         let alpha = MARBLE_ALPHA_ROM.load(rom_set)?;
         self.alpha_cache = decode_gfx(&alpha, 0, ALPHA_TILE_COUNT, &MARBLE_ALPHA_LAYOUT);
+
+        // Playfield tile banks + PROM remap. The tiles region is
+        // ROMREGION_INVERT | ROMREGION_ERASEFF: RomRegion zero-fills the gaps, so
+        // inverting the whole buffer yields erase-FF gaps and inverted tile data
+        // in one pass. The motion objects (Phase 3c) reuse this same gfx.
+        let mut tiles = MARBLE_TILE_ROM.load(rom_set)?;
+        for b in tiles.iter_mut() {
+            *b = !*b;
+        }
+        let prom = MARBLE_PROM.load(rom_set)?;
+        self.playfield = build_playfield_gfx(&prom, &tiles);
+        // The sound program is Phase 4.
         Ok(())
     }
 
@@ -511,10 +790,11 @@ impl MarbleSystem {
     // Rendering (full-frame compositor)
     // -----------------------------------------------------------------------
 
-    /// Render the current frame. Phase 3a draws only the 64×32 alpha (text/HUD)
-    /// tilemap over a black background; the playfield and motion objects merge
-    /// in behind it in Phases 3b/3c. The alpha map is drawn 1:1 from the screen
-    /// origin with no scroll (MAME `alpha_tilemap->draw(..., 0, 0)`).
+    /// Render the current frame: the 64×64 playfield tilemap as the opaque
+    /// background, then the 64×32 alpha (text/HUD) tilemap on top (transparent
+    /// pen 0 unless the cell forces layer 0). Motion objects merge between them
+    /// in Phase 3c. Both tilemaps and the IRGB-4444 palette follow MAME
+    /// `atarisy1_v.cpp::screen_update`.
     fn render(&self, buffer: &mut [u8]) {
         let w = TIMING.display_width as usize;
         let h = TIMING.display_height as usize;
@@ -527,24 +807,48 @@ impl MarbleSystem {
             *slot = irgb4444_to_rgb(raw);
         }
 
+        let pf_ram = self.map.region_data(Region::Playfield);
         let alpha = self.map.region_data(Region::Alpha);
+        // Playfield tile bank from the 0x860001 control latch (bit 2), and the
+        // scroll origin (the 64×64 map is 512×512, wrapping).
+        let tile_bank = ((self.bankselect >> 2) & 1) as usize;
+        let xscroll = self.xscroll as usize;
+        let yscroll = self.yscroll as usize;
+
         for sy in 0..h {
             for sx in 0..w {
-                // 64×32 tilemap, TILEMAP_SCAN_ROWS: index = row * 64 + col.
-                let tile_index = (sy / 8) * 64 + (sx / 8);
-                let data = u16::from_be_bytes([alpha[tile_index * 2], alpha[tile_index * 2 + 1]]);
-                let code = (data & 0x3FF) as usize;
-                let color = ((data >> 10) & 0x07) as usize;
-                let opaque = data & 0x2000 != 0;
+                // --- Playfield (opaque background) ---
+                let src_x = (sx + xscroll) & 0x1FF;
+                let src_y = (sy + yscroll) & 0x1FF;
+                let pf_index = (src_y / 8) * 64 + (src_x / 8);
+                let pf_data = u16::from_be_bytes([pf_ram[pf_index * 2], pf_ram[pf_index * 2 + 1]]);
+                let lookup =
+                    self.playfield.lookup[(pf_data >> 8) as usize & 0x7F | (tile_bank << 7)];
+                let bank_id = ((lookup >> 8) & 0x0F) as usize;
+                let code = (((lookup & 0xFF) as usize) << 8) | (pf_data & 0xFF) as usize;
+                let palcolor = ((lookup >> 12) & 0x0F) as usize;
 
-                let pen = self.alpha_cache.pixel(code & 0x1FF, sx % 8, sy % 8);
-                // Pen 0 is transparent unless the tile forces layer 0; behind the
-                // alpha is black until the playfield lands in Phase 3b.
-                let (r, g, b) = if pen == 0 && !opaque {
-                    (0, 0, 0)
-                } else {
-                    palette_rgb[color * 4 + pen as usize]
-                };
+                let (mut r, mut g, mut b) = (0u8, 0u8, 0u8);
+                if let Some(bank) = self.playfield.banks.get(bank_id) {
+                    let pen = bank
+                        .cache
+                        .pixel(code % bank.cache.count(), src_x % 8, src_y % 8);
+                    // palette = 0x100 + palcolor*2^bpp + pen (the granularity-8
+                    // gfx plus the bpp-dependent colour shift collapse to this).
+                    let color = 0x20 + (palcolor << (bank.bpp - 3));
+                    (r, g, b) = palette_rgb[(color * 8 + pen as usize) & 0x3FF];
+                }
+
+                // --- Alpha (text/HUD) on top, drawn 1:1 from the origin ---
+                let a_index = (sy / 8) * 64 + (sx / 8);
+                let a_data = u16::from_be_bytes([alpha[a_index * 2], alpha[a_index * 2 + 1]]);
+                let a_code = (a_data & 0x3FF) as usize;
+                let a_color = ((a_data >> 10) & 0x07) as usize;
+                let a_opaque = a_data & 0x2000 != 0;
+                let a_pen = self.alpha_cache.pixel(a_code & 0x1FF, sx % 8, sy % 8);
+                if a_pen != 0 || a_opaque {
+                    (r, g, b) = palette_rgb[a_color * 4 + a_pen as usize];
+                }
 
                 let o = (sy * w + sx) * 3;
                 buffer[o] = r;
@@ -1085,6 +1389,60 @@ mod tests {
         let mut buf = vec![0u8; (w * h * 3) as usize];
         sys.render_frame(&mut buf);
         assert_eq!(&buf[0..3], &[0, 0, 0], "transparent pen 0 shows background");
+    }
+
+    #[test]
+    fn playfield_prom_lookup_decodes_bank_offset_color() {
+        let mut prom = vec![0u8; 0x400];
+        // Entry 0 → bank 1 (PROM1 bit4 clear), offset 5; 4bpp (PROM2 bit4 clear),
+        // colour 0xA (negative-logic low nibble: ~0xC5 & 0xF = 0xA).
+        prom[0x000] = 0xE5;
+        prom[0x200] = 0xC5;
+        let tiles = vec![0u8; 0x100000];
+        let gfx = build_playfield_gfx(&prom, &tiles);
+
+        // offset 5 | bank-id 1 (first decoded) | colour 0xA.
+        assert_eq!(gfx.lookup[0], 0x0005 | (1 << 8) | (0xA << 12));
+        assert_eq!(gfx.banks.len(), 2, "blank placeholder + one decoded bank");
+        assert_eq!(gfx.banks[1].bpp, 4);
+    }
+
+    #[test]
+    fn playfield_prom_selects_bpp_and_remaps_unmapped() {
+        let mut prom = vec![0u8; 0x400];
+        // Entry 0: 6bpp (PROM2 planes 4+5 enabled), bank 1.
+        prom[0x000] = 0xE0; // bank 1
+        prom[0x200] = 0xF0; // bit4|bit5 set → 6bpp; low nibble 0 → colour 0
+        // Entry 1: no bank bits clear anywhere → unmapped → remapped to bank 1.
+        prom[0x001] = 0xF0; // all PROM1 bank bits set
+        prom[0x201] = 0xC0; // PROM2 bank bits set, planes off (4bpp)
+        let tiles = vec![0u8; 0x100000];
+        let gfx = build_playfield_gfx(&prom, &tiles);
+
+        assert_eq!(gfx.banks[1].bpp, 6, "plane 4+5 enable → 6bpp");
+        // Unmapped entry falls back to bank 1 with offset/colour zeroed.
+        assert_eq!(gfx.lookup[1], 1 << 8);
+    }
+
+    #[test]
+    fn playfield_pixel_composites_below_alpha() {
+        let mut sys = MarbleSystem::new();
+        // One synthetic 4bpp bank: tile 0, pixel (0,0) = pen 3.
+        let mut cache = GfxCache::new(1, 8, 8);
+        cache.set_pixel(0, 0, 0, 3);
+        sys.playfield.banks.push(GfxBank { cache, bpp: 4 });
+        // Playfield cell (0,0) → lookup[0]: bank id 1, offset 0, colour 0.
+        sys.playfield.lookup[0] = 1 << 8;
+        // Palette entry 0x103 (= (0x20<<3) + pen 3) = IRGB pure green.
+        let palette = sys.map.region_data_mut(Region::Palette);
+        palette[0x103 * 2] = 0xF0;
+        palette[0x103 * 2 + 1] = 0xF0;
+
+        let (w, h) = sys.display_size();
+        let mut buf = vec![0u8; (w * h * 3) as usize];
+        sys.render_frame(&mut buf);
+        // Alpha cell 0 is transparent, so the playfield pixel shows through.
+        assert_eq!(&buf[0..3], &[0, 254, 0]);
     }
 
     #[test]
