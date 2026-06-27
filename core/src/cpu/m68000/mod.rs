@@ -159,12 +159,20 @@ impl M68000 {
         }
     }
 
+    /// Whether this variant is a 68010 or later. Gates the handful of
+    /// post-68000 behaviors this core models (the longer exception frame,
+    /// `MOVE from SR` becoming privileged).
+    #[inline]
+    pub(crate) fn is_68010_plus(&self) -> bool {
+        !matches!(self.variant, M68kVariant::M68000)
+    }
+
     /// Whether this variant stacks the 68010+ four-word exception frame: a
     /// format/vector-offset word above the 68000 SR+PC short frame. The
     /// 68000 has no such word; RTE on the 68010+ pops and discards it.
     #[inline]
     pub(crate) fn uses_long_exception_frame(&self) -> bool {
-        !matches!(self.variant, M68kVariant::M68000)
+        self.is_68010_plus()
     }
 
     /// Execute one bus cycle.

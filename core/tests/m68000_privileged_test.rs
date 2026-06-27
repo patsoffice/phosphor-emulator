@@ -10,7 +10,7 @@ mod common;
 use common::TestBus68k;
 use phosphor_core::core::{BusMaster, BusMasterComponent};
 use phosphor_core::cpu::Cpu;
-use phosphor_core::cpu::m68000::{M68000, SrFlag};
+use phosphor_core::cpu::m68000::{M68kVariant, M68000, SrFlag};
 
 const M: BusMaster = BusMaster::Cpu(0);
 
@@ -50,6 +50,30 @@ fn move_from_sr_is_unprivileged_on_68000() {
     step(&mut cpu, &mut bus);
     assert_eq!(cpu.d[0] & 0xFFFF, 0x0701, "user-mode SR readable (68000)");
     assert_eq!(cpu.pc, 0x1002, "no privilege violation");
+}
+
+#[test]
+fn move_from_sr_is_privileged_on_68010() {
+    // From user mode the 68010 vectors to the privilege handler instead of
+    // exposing SR (the 68000 reads it freely — see the test above).
+    let (mut cpu, mut bus) = setup(&[0x40C0]); // MOVE SR,D0
+    cpu.variant = M68kVariant::M68010;
+    bus.load(8 * 4, &0x4000u32.to_be_bytes()); // vector 8 handler
+    enter_user_mode(&mut cpu);
+    cpu.d[0] = 0xDEAD;
+    step(&mut cpu, &mut bus);
+    assert_eq!(cpu.pc, 0x4000, "privilege violation vectored");
+    assert_eq!(cpu.d[0], 0xDEAD, "SR not written to the destination");
+}
+
+#[test]
+fn move_from_sr_in_supervisor_mode_still_works_on_68010() {
+    let (mut cpu, mut bus) = setup(&[0x40C0]); // MOVE SR,D0 (supervisor)
+    cpu.variant = M68kVariant::M68010;
+    cpu.set_flag(SrFlag::C, true);
+    step(&mut cpu, &mut bus);
+    assert_eq!(cpu.d[0] & 0xFFFF, 0x2701, "supervisor reads SR normally");
+    assert_eq!(cpu.pc, 0x1002, "no violation in supervisor mode");
 }
 
 #[test]

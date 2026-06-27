@@ -202,6 +202,12 @@ impl M68000 {
         bus: &mut B,
         master: BusMaster,
     ) -> AccessResult<()> {
+        // Unprivileged on the 68000; privileged on the 68010+ (where MOVE
+        // from CCR became the user-mode way to read the flags). On the
+        // 68010 a user-mode attempt vectors to the privilege handler.
+        if self.is_68010_plus() && !self.privilege_check(bus, master)? {
+            return Ok(());
+        }
         let ea_mode = ((opcode >> 3) & 7) as u8;
         let ea_reg = (opcode & 7) as u8;
         if ea_mode == 1 || (ea_mode == 7 && ea_reg >= 2) {
