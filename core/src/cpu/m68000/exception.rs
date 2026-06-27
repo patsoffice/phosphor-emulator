@@ -36,8 +36,14 @@ impl M68000 {
         self.set_supervisor(true);
         self.set_flag(SrFlag::T, false);
         // 68000 short frame — PC pushed first, SR at the lowest address.
-        // 68010+ add a format/vector word; gate on `self.variant` here when
-        // those frames are implemented.
+        // The 68010+ add a format/vector-offset word above it (highest
+        // address, so pushed first): format nibble 0 = the short format
+        // these group-1/2 exceptions use, the low 12 bits the vector
+        // number × 4. RTE consumes it. (The 68010 group-0 bus/address-error
+        // frame is the larger format $8 and is not modeled — see README.)
+        if self.uses_long_exception_frame() {
+            self.push_word(bus, master, vector as u16 * 4)?;
+        }
         self.push_long(bus, master, pushed_pc)?;
         self.push_word(bus, master, old_sr)?;
         self.pc = self.read_long_at(bus, master, vector as u32 * 4)?;
@@ -150,8 +156,10 @@ impl M68000 {
     }
 
     /// RTE (0x4E73, privileged): pop SR then PC from the supervisor stack
-    /// and resume the interrupted context. The 68000 frame has no format
-    /// word (68010+ gate here when implemented).
+    /// and resume the interrupted context. The 68010+ frame carries an
+    /// extra format/vector-offset word above the PC; we only ever stack the
+    /// format $0 short frame, so it is popped and discarded with no
+    /// format-error (vector 14) check.
     ///
     /// Flags: the whole SR is restored from the frame. 20 cycles.
     pub(crate) fn op_rte<B: Bus<Address = u32, Data = u16> + ?Sized>(
@@ -164,6 +172,9 @@ impl M68000 {
         }
         let sr = self.pop_word(bus, master)?;
         let pc = self.pop_long(bus, master)?;
+        if self.uses_long_exception_frame() {
+            let _format = self.pop_word(bus, master)?;
+        }
         self.write_sr(sr);
         self.set_pc_checked(pc)?;
         self.finish(20);

@@ -159,6 +159,14 @@ impl M68000 {
         }
     }
 
+    /// Whether this variant stacks the 68010+ four-word exception frame: a
+    /// format/vector-offset word above the 68000 SR+PC short frame. The
+    /// 68000 has no such word; RTE on the 68010+ pops and discards it.
+    #[inline]
+    pub(crate) fn uses_long_exception_frame(&self) -> bool {
+        !matches!(self.variant, M68kVariant::M68000)
+    }
+
     /// Execute one bus cycle.
     pub fn execute_cycle<B: Bus<Address = u32, Data = u16> + ?Sized>(
         &mut self,

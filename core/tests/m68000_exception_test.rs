@@ -10,7 +10,7 @@ mod common;
 
 use common::TestBus68k;
 use phosphor_core::core::{BusMaster, BusMasterComponent};
-use phosphor_core::cpu::m68000::{M68000, SrFlag};
+use phosphor_core::cpu::m68000::{M68kVariant, M68000, SrFlag};
 
 const M: BusMaster = BusMaster::Cpu(0);
 
@@ -174,4 +174,45 @@ fn chk_traps_on_both_bounds() {
     cpu.d[1] = 0x0100;
     step(&mut cpu, &mut bus);
     assert_eq!(cpu.pc, 0x1002, "in-bounds CHK falls through");
+}
+
+// ---------------------------------------------------------------------------
+// 68010 exception frame (the format $0 vector-offset word)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn m68010_trap_stacks_format_vector_offset_word() {
+    let (mut cpu, mut bus) = setup(&[0x4E40], 32, 0x4000); // TRAP #0
+    cpu.variant = M68kVariant::M68010;
+    step(&mut cpu, &mut bus);
+    assert_eq!(cpu.pc, 0x4000, "vector 32 handler entered");
+    // The 68010 frame is two bytes larger than the 68000 short frame.
+    assert_eq!(cpu.a[7], 0x1FF8, "word + long + format word pushed");
+    // SR and PC sit exactly where the 68000 puts them...
+    assert_frame(&bus, 0x1FF8, 0x2700, 0x1002, "68010 TRAP #0");
+    // ...with the format/vector-offset word on top: format $0 (short
+    // frame) in the high nibble, vector number × 4 in the low 12 bits.
+    let fmt = u16::from_be_bytes([bus.memory[0x1FFE], bus.memory[0x1FFF]]);
+    assert_eq!(fmt, 32 * 4, "format $0, vector offset 0x80");
+}
+
+#[test]
+fn m68010_rte_consumes_format_word_and_resumes() {
+    let (mut cpu, mut bus) = setup(&[0x4E40], 32, 0x4000); // TRAP #0
+    cpu.variant = M68kVariant::M68010;
+    bus.load(0x4000, &0x4E73u16.to_be_bytes()); // RTE at the handler
+    step(&mut cpu, &mut bus); // TRAP: enter handler, stack the 8-byte frame
+    assert_eq!(cpu.a[7], 0x1FF8, "68010 frame stacked");
+    step(&mut cpu, &mut bus); // RTE: pop SR, PC, and the format word
+    assert_eq!(cpu.pc, 0x1002, "resumed at the instruction after TRAP");
+    assert_eq!(cpu.a[7], 0x2000, "all eight frame bytes reclaimed");
+    assert_eq!(cpu.sr, 0x2700, "SR restored from the frame");
+}
+
+#[test]
+fn m68000_frame_is_unaffected_by_the_gate() {
+    // The default variant keeps the 6-byte short frame: no extra word.
+    let (mut cpu, mut bus) = setup(&[0x4E40], 32, 0x4000); // TRAP #0
+    step(&mut cpu, &mut bus);
+    assert_eq!(cpu.a[7], 0x1FFA, "68000 stacks only SR + PC");
 }

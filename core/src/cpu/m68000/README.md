@@ -154,9 +154,13 @@ its clearing of N/Z/V/C before stacking).
   descending long writes of MOVE.l/-(An), ADDX/SUBX, and MOVEM) are
   modeled exactly as the hardware vectors record them. An address error
   while pushing the frame is a double bus fault: the processor halts.
-- Trace (T bit) exceptions and the 68010+ frame formats are not
-  implemented — the suite contains no trace vectors; revisit if a machine
-  needs the T bit.
+- Trace (T bit) exceptions are not implemented — the suite contains no
+  trace vectors; revisit if a machine needs the T bit.
+- On the 68010+ (`M68kVariant::M68010`), group-1/2 exceptions stack the
+  four-word format $0 frame: a vector-offset word (`vector × 4`, format
+  nibble 0) above the SR+PC short frame, which RTE pops back off. The
+  68000 short frame is unchanged. The 68010 group-0 bus/address-error
+  frame (the larger format $8) is *not* modeled — see "68010 support".
 
 ## File Structure
 
