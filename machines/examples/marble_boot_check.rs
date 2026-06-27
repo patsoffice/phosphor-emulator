@@ -1,9 +1,10 @@
-//! Headless boot check for Marble Madness (Atari System 1, Phase 1 skeleton).
+//! Headless boot check for Marble Madness (Atari System 1).
 //!
 //! Loads the ROM set, runs a few seconds of frames, and reports that the 68010
-//! left the reset vector plus coarse framebuffer stats. Video is Phase 3, so the
-//! frame is expected to stay black for now — this exists to prove the main CPU
-//! boots the motherboard BIOS and runs without panicking.
+//! left the reset vector plus framebuffer stats (lit pixels, distinct colours)
+//! and a coarse ASCII thumbnail. As of Phase 3a only the alpha (text/HUD) layer
+//! renders — the playfield and motion objects land in Phases 3b/3c — so expect
+//! the attract-mode HUD text on an otherwise black frame.
 //!
 //!   cargo run -p phosphor-machines --example marble_boot_check -- <roms-dir>
 //! where <roms-dir> holds the extracted `marble` ROM files (136032.*, 136033.*).
@@ -52,9 +53,45 @@ fn main() {
     let (w, h) = sys.display_size();
     let mut buf = vec![0u8; (w * h * 3) as usize];
     sys.render_frame(&mut buf);
+
     let lit = buf.chunks(3).filter(|p| p != &[0, 0, 0]).count();
+    let total = (w * h) as usize;
+    let mut colors = std::collections::HashSet::new();
+    for p in buf.chunks(3) {
+        colors.insert((p[0], p[1], p[2]));
+    }
     println!(
-        "{w}x{h}  lit {lit}/{} pixels (video lands in Phase 3)",
-        w * h
+        "{w}x{h}  lit {lit}/{total} ({:.1}%)  distinct colors {}",
+        100.0 * lit as f64 / total as f64,
+        colors.len()
     );
+    thumbnail(&buf, w as usize, h as usize);
+}
+
+/// 64-wide ASCII brightness thumbnail.
+fn thumbnail(buf: &[u8], w: usize, h: usize) {
+    const CW: usize = 64;
+    let ch = (CW * h / w).max(1);
+    let ramp = b" .:-=+*#%@";
+    for cy in 0..ch {
+        let mut line = String::new();
+        for cx in 0..CW {
+            let mut sum = 0u32;
+            let mut n = 0u32;
+            for dy in 0..(h / ch).max(1) {
+                for dx in 0..(w / CW).max(1) {
+                    let x = cx * w / CW + dx;
+                    let y = cy * h / ch + dy;
+                    if x < w && y < h {
+                        let i = (y * w + x) * 3;
+                        sum += buf[i] as u32 + buf[i + 1] as u32 + buf[i + 2] as u32;
+                        n += 1;
+                    }
+                }
+            }
+            let b = if n > 0 { sum / (n * 3) } else { 0 };
+            line.push(ramp[(b as usize * (ramp.len() - 1) / 255).min(ramp.len() - 1)] as char);
+        }
+        println!("  {line}");
+    }
 }
