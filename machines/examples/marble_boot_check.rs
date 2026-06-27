@@ -19,6 +19,10 @@ fn main() {
     let dir = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "/tmp/marble".to_string());
+    let frames: u32 = std::env::args()
+        .nth(2)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(600);
     let rom_set = match RomSet::from_directory(Path::new(&dir)) {
         Ok(rs) => rs,
         Err(e) => {
@@ -36,13 +40,12 @@ fn main() {
     let reset_pc = sys.get_cpu_state().pc;
     println!("reset PC = {reset_pc:#08X}");
 
-    // Run ~3 seconds of frames; the BIOS should get well past the reset vector.
-    for _ in 0..180 {
+    for _ in 0..frames {
         sys.run_frame();
     }
     let pc = sys.get_cpu_state().pc;
     println!(
-        "PC after 180 frames = {pc:#08X}  (clock {} cycles)",
+        "PC after {frames} frames = {pc:#08X}  (clock {} cycles)",
         sys.clock()
     );
     println!(
@@ -51,6 +54,12 @@ fn main() {
     );
     let (pal, alpha, pf) = sys.video_ram_stats();
     println!("video RAM non-zero bytes: palette {pal}  alpha {alpha}  playfield {pf}");
+    let (held, snd_clk, cmd_pend, resp_pend) = sys.sound_debug();
+    println!(
+        "sound: held_reset {held}  cycles {snd_clk}  cmd_pending {cmd_pend}  resp_pending {resp_pend}"
+    );
+    let (ee_nonff, ee_writes) = sys.eeprom_debug();
+    println!("eeprom: non-0xFF bytes {ee_nonff}  byte writes accepted {ee_writes}");
 
     let (w, h) = sys.display_size();
     let mut buf = vec![0u8; (w * h * 3) as usize];

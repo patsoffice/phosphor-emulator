@@ -55,7 +55,7 @@ use phosphor_core::core::machine::{
 };
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::{AccessKind, AddressSpace32};
-use phosphor_core::core::{Bus, BusMaster, TimingConfig};
+use phosphor_core::core::{Bus, BusMaster, ClockDivider, TimingConfig};
 use phosphor_core::cpu::m68000::{M68kVariant, M68000};
 use phosphor_core::cpu::state::M68000State;
 use phosphor_core::cpu::{Cpu, CpuStateTrait};
@@ -64,6 +64,7 @@ use phosphor_core::gfx::decode::{GfxCache, GfxLayout, decode_gfx};
 use phosphor_macros::{BusDebug, MemoryRegion};
 
 use crate::disasm_registry::{DisasmCpu, DisasmRegion};
+use crate::marble_sound::MarbleSound;
 use crate::registry::MachineEntry;
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
 use crate::set_bit_active_low;
@@ -613,6 +614,8 @@ pub struct MarbleSystem {
     bankselect: u8,
     /// 0x8C0001 EEPROM unlock latch. The 2804 re-locks after each write.
     eeprom_unlocked: bool,
+    /// Count of accepted EEPROM byte writes (bring-up diagnostic; not saved).
+    eeprom_writes: u64,
 
     // F60000 switch port low byte (active-low; bits 0/1 = start, bit 6 = service).
     // Bits 4 (VBLANK) and 7 (sound buffer) are computed live in `read_f60000`.
@@ -620,6 +623,13 @@ pub struct MarbleSystem {
 
     // VBLANK interrupt latch (IRQ4), held until acked via 0x8A0001.
     video_int: bool,
+
+    /// M6502 sound board (POKEY + YM2151 stub + inter-CPU latches).
+    #[debug_device("Sound")]
+    sound: MarbleSound,
+    /// Sound CPU runs at 1/4 the main CPU rate.
+    sound_clock: ClockDivider,
+    audio_buffer: Vec<i16>,
 
     clock: u64,
     watchdog_count: u8,
@@ -696,8 +706,12 @@ impl MarbleSystem {
             priority_pens: 0,
             bankselect: 0,
             eeprom_unlocked: false,
+            eeprom_writes: 0,
             f60000_buttons: 0xFF,
             video_int: false,
+            sound: MarbleSound::new(),
+            sound_clock: ClockDivider::new(1, 4),
+            audio_buffer: Vec::with_capacity(2048),
             clock: 0,
             watchdog_count: 0,
         }
@@ -724,7 +738,10 @@ impl MarbleSystem {
         }
         let prom = MARBLE_PROM.load(rom_set)?;
         self.playfield = build_playfield_gfx(&prom, &tiles);
-        // The sound program is Phase 4.
+
+        // M6502 sound program.
+        let sound_image = MARBLE_SOUND_ROM.load(rom_set)?;
+        self.sound.load_rom(&sound_image);
         Ok(())
     }
 
@@ -734,6 +751,17 @@ impl MarbleSystem {
 
     pub fn clock(&self) -> u64 {
         self.clock
+    }
+
+    /// Sound board state (held_reset, cycles, command_pending, response_pending).
+    pub fn sound_debug(&self) -> (bool, u64, bool, bool) {
+        self.sound.debug_state()
+    }
+
+    /// (EEPROM bytes != 0xFF, total EEPROM byte writes accepted) — bring-up.
+    pub fn eeprom_debug(&self) -> (usize, u64) {
+        let nonff = self.eeprom.iter().filter(|&&b| b != 0xFF).count();
+        (nonff, self.eeprom_writes)
     }
 
     /// Non-zero byte counts in (palette, alpha, playfield) RAM — for headless
@@ -747,10 +775,12 @@ impl MarbleSystem {
         )
     }
 
-    /// 0x860001 audio/video control latch. Phase 1 only stashes the value; the
-    /// sound-reset (bit 7) and bank bits (5-3 / 2) are decoded in later phases.
+    /// 0x860001 audio/video control latch. Bit 7 drives the sound-CPU reset line
+    /// (1 = run, 0 = hold); bit 2 selects the playfield tile bank; bits 5-3
+    /// select the motion-object bank (Phase 3c).
     fn bankselect_w(&mut self, data: u8) {
         self.bankselect = data;
+        self.sound.set_reset(data & 0x80 == 0);
     }
 
     /// True while the beam is in vertical blank (scanline ≥ `VBLANK_SCANLINE`).
@@ -761,8 +791,8 @@ impl MarbleSystem {
     }
 
     /// F60000 switch port (word). Active-low: idle bits read 1. Bit 4 is the
-    /// live VBLANK line (0 during blank); bit 7 is the sound-buffer-pending flag
-    /// (active-high, always 0 until the sound CPU exists in Phase 4).
+    /// live VBLANK line (0 during blank); bit 7 (68KBUF, active-high) is set
+    /// while a sound command is latched but unread by the sound CPU.
     fn read_f60000(&self) -> u16 {
         let mut low = self.f60000_buttons;
         if self.in_vblank() {
@@ -770,7 +800,11 @@ impl MarbleSystem {
         } else {
             low |= 0x10;
         }
-        low &= !0x80; // sound buffer not pending
+        if self.sound.command_pending() {
+            low |= 0x80;
+        } else {
+            low &= !0x80;
+        }
         0xFF00 | low as u16
     }
 
@@ -791,10 +825,17 @@ impl MarbleSystem {
         u16::from_be_bytes([self.slapstic_rom[base], self.slapstic_rom[base + 1]])
     }
 
-    /// Effective autovector interrupt level. Phase 1 wires only IRQ4 (VBLANK);
-    /// IRQ3 (SLIP), IRQ6 (sound), and IRQ2 (ADC) arrive in later phases.
+    /// Effective autovector interrupt level (the 68000 takes the highest
+    /// pending). IRQ6 = sound response, IRQ4 = VBLANK. IRQ3 (SLIP) and IRQ2
+    /// (ADC) arrive in later phases.
     fn interrupt_level(&self) -> u8 {
-        if self.video_int { 4 } else { 0 }
+        if self.sound.response_pending() {
+            6
+        } else if self.video_int {
+            4
+        } else {
+            0
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -889,6 +930,11 @@ impl MarbleSystem {
             self.cpu.execute_cycle(bus, BusMaster::Cpu(0));
         });
 
+        // The sound board runs at 1/4 the main CPU rate.
+        if self.sound_clock.tick() {
+            self.sound.tick();
+        }
+
         self.clock += 1;
     }
 }
@@ -925,7 +971,7 @@ impl Bus for MarbleSystem {
             0xF2_0000..=0xF2_0007 => 0x0000, // Trackballs (Phase 5)
             0xF4_0000..=0xF4_001F => 0x00FF, // Joystick/ADC (unused by marble)
             0xF6_0000..=0xF6_0003 => self.read_f60000(),
-            0xFC_0000..=0xFC_0001 => 0x0000, // Sound response (Phase 4)
+            0xFC_0000..=0xFC_0001 => self.sound.read_response() as u16,
             _ => 0xFFFF,
         };
         self.map.watch_read(0, master, addr, val as u32, 2);
@@ -953,11 +999,12 @@ impl Bus for MarbleSystem {
                 if self.eeprom_unlocked {
                     self.eeprom[((addr >> 1) & 0x1FF) as usize] = byte;
                     self.eeprom_unlocked = false;
+                    self.eeprom_writes += 1;
                 }
             }
             0xF4_0000..=0xF4_001F => {} // ADC channel select (Phase 5)
             0xF8_0000..=0xF8_0001 => {} // Sound latch (RoadBlasters only)
-            0xFE_0000..=0xFE_0001 => {} // Sound command (Phase 4)
+            0xFE_0000..=0xFE_0001 => self.sound.write_command(byte),
             _ => {}
         }
     }
@@ -987,8 +1034,11 @@ impl Renderable for MarbleSystem {
 }
 
 impl AudioSource for MarbleSystem {
-    fn fill_audio(&mut self, _buffer: &mut [i16]) -> usize {
-        0 // Sound CPU + POKEY arrive in Phase 4.
+    fn fill_audio(&mut self, buffer: &mut [i16]) -> usize {
+        let n = buffer.len().min(self.audio_buffer.len());
+        buffer[..n].copy_from_slice(&self.audio_buffer[..n]);
+        self.audio_buffer.drain(..n);
+        n
     }
 
     fn audio_sample_rate(&self) -> u32 {
@@ -1028,10 +1078,19 @@ impl MachineCore for MarbleSystem {
         if self.watchdog_count >= 8 {
             self.reset();
         }
+
+        // Drain the sound board's POKEY output (mono) into the audio queue.
+        // Samples are [0, 1]; centre and scale to signed 16-bit.
+        let samples = self.sound.drain_audio();
+        self.audio_buffer
+            .extend(samples.iter().map(|&s| ((s - 0.5) * 2.0 * 32767.0) as i16));
     }
 
     fn reset(&mut self) {
         self.slapstic.reset();
+        self.sound.reset();
+        self.sound_clock.reset();
+        self.audio_buffer.clear();
         self.xscroll = 0;
         self.yscroll = 0;
         self.priority_pens = 0;
@@ -1056,6 +1115,8 @@ impl Saveable for MarbleSystem {
     fn save_state(&self, w: &mut StateWriter) {
         self.cpu.save_state(w);
         self.slapstic.save_state(w);
+        self.sound.save_state(w);
+        self.sound_clock.save_state(w);
         w.write_bytes(self.map.region_data(Region::Ram));
         w.write_bytes(self.map.region_data(Region::CartRam));
         w.write_bytes(self.map.region_data(Region::Playfield));
@@ -1077,6 +1138,8 @@ impl Saveable for MarbleSystem {
     fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
         self.cpu.load_state(r)?;
         self.slapstic.load_state(r)?;
+        self.sound.load_state(r)?;
+        self.sound_clock.load_state(r)?;
         r.read_bytes_into(self.map.region_data_mut(Region::Ram))?;
         r.read_bytes_into(self.map.region_data_mut(Region::CartRam))?;
         r.read_bytes_into(self.map.region_data_mut(Region::Playfield))?;

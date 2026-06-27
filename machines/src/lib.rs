@@ -391,6 +391,7 @@ pub mod joust;
 pub mod llander;
 pub mod llander_sound;
 pub mod marble;
+pub mod marble_sound;
 pub mod mario_bros;
 pub mod mcr2;
 pub mod missile_command;
