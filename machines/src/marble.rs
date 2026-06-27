@@ -60,6 +60,7 @@ use phosphor_core::cpu::m68000::{M68kVariant, M68000};
 use phosphor_core::cpu::state::M68000State;
 use phosphor_core::cpu::{Cpu, CpuStateTrait};
 use phosphor_core::device::slapstic::Slapstic;
+use phosphor_core::gfx::decode::{GfxCache, GfxLayout, decode_gfx};
 use phosphor_macros::{BusDebug, MemoryRegion};
 
 use crate::disasm_registry::{DisasmCpu, DisasmRegion};
@@ -177,6 +178,30 @@ pub static MARBLE_PROGRAM_ROM: RomRegion = RomRegion {
     ],
 };
 
+/// Alphanumerics character ROM (the shared motherboard font, 136032.104.f5):
+/// 512 tiles, 8×8, 2bpp.
+pub static MARBLE_ALPHA_ROM: RomRegion = RomRegion {
+    size: 0x2000,
+    entries: &[RomEntry {
+        name: "136032.104.f5",
+        size: 0x2000,
+        offset: 0x0000,
+        crc32: &[0x7a29dc07],
+    }],
+};
+
+/// 8×8 2bpp alpha tiles (MAME `anlayout`). MAME's planes are `{0, 4}` MSB-first;
+/// `decode_gfx` wants LSB-first (entry 0 = pen bit 0), so the list is reversed.
+const MARBLE_ALPHA_LAYOUT: GfxLayout<'static> = GfxLayout {
+    plane_offsets: &[4, 0],
+    x_offsets: &[0, 1, 2, 3, 8, 9, 10, 11],
+    y_offsets: &[0, 16, 32, 48, 64, 80, 96, 112],
+    char_increment: 128,
+};
+
+/// Number of 8×8 alpha tiles in the font ROM (0x2000 / 16 bytes per tile).
+const ALPHA_TILE_COUNT: usize = 512;
+
 /// M6502 sound program (Phase 4). 64 KB region with ROM at 0x8000-0xFFFF.
 pub static MARBLE_SOUND_ROM: RomRegion = RomRegion {
     size: 0x10000,
@@ -218,6 +243,22 @@ fn load_maincpu_image(rom_set: &RomSet) -> Result<Vec<u8>, RomLoadError> {
         }
     }
     Ok(image)
+}
+
+/// Convert one IRGB-4444 palette word to RGB24, matching MAME's
+/// `palette_device::IRGB_4444` (`standard_irgb_decoder<4,4,4,4, 12,8,4,0>`):
+/// the 4-bit intensity scales each 4-bit colour component. Each nibble is first
+/// expanded to 8 bits by replication (`n*0x11`), then `c = (i * comp) >> 8`.
+fn irgb4444_to_rgb(raw: u16) -> (u8, u8, u8) {
+    let expand4 = |n: u16| -> u32 {
+        let n = (n & 0x0F) as u32;
+        (n << 4) | n
+    };
+    let i = expand4(raw >> 12);
+    let r = (i * expand4(raw >> 8)) >> 8;
+    let g = (i * expand4(raw >> 4)) >> 8;
+    let b = (i * expand4(raw)) >> 8;
+    (r as u8, g as u8, b as u8)
 }
 
 // ---------------------------------------------------------------------------
@@ -292,6 +333,9 @@ pub struct MarbleSystem {
 
     /// EEPROM 2804 (512 bytes, low byte at F00000-F003FF), gated by `eeprom_unlocked`.
     eeprom: [u8; 512],
+
+    /// Decoded 8×8 2bpp alpha (text/HUD) font tiles. Not CPU-addressable.
+    alpha_cache: GfxCache,
 
     // Video control latches (consumed by the Phase 3 video pipeline).
     xscroll: u16,
@@ -378,6 +422,7 @@ impl MarbleSystem {
             slapstic: Slapstic::new(),
             slapstic_rom: vec![0; 0x8000],
             eeprom: [0xFF; 512], // 2804 reads 0xFF erased; game checksums + reinits
+            alpha_cache: GfxCache::new(ALPHA_TILE_COUNT, 8, 8),
             xscroll: 0,
             yscroll: 0,
             priority_pens: 0,
@@ -396,7 +441,11 @@ impl MarbleSystem {
         // The slapstic ROM is held outside the map: the bus picks a bank per
         // access via the slapstic state machine (see `slapstic_read`).
         self.slapstic_rom.copy_from_slice(&image[0x80000..0x88000]);
-        // GFX/PROM decode is Phase 3; the sound program is Phase 4.
+
+        // Alpha (text/HUD) font tiles. Playfield/MO GFX + PROMs are Phase 3b/3c;
+        // the sound program is Phase 4.
+        let alpha = MARBLE_ALPHA_ROM.load(rom_set)?;
+        self.alpha_cache = decode_gfx(&alpha, 0, ALPHA_TILE_COUNT, &MARBLE_ALPHA_LAYOUT);
         Ok(())
     }
 
@@ -456,6 +505,53 @@ impl MarbleSystem {
     /// IRQ3 (SLIP), IRQ6 (sound), and IRQ2 (ADC) arrive in later phases.
     fn interrupt_level(&self) -> u8 {
         if self.video_int { 4 } else { 0 }
+    }
+
+    // -----------------------------------------------------------------------
+    // Rendering (full-frame compositor)
+    // -----------------------------------------------------------------------
+
+    /// Render the current frame. Phase 3a draws only the 64×32 alpha (text/HUD)
+    /// tilemap over a black background; the playfield and motion objects merge
+    /// in behind it in Phases 3b/3c. The alpha map is drawn 1:1 from the screen
+    /// origin with no scroll (MAME `alpha_tilemap->draw(..., 0, 0)`).
+    fn render(&self, buffer: &mut [u8]) {
+        let w = TIMING.display_width as usize;
+        let h = TIMING.display_height as usize;
+
+        // Decode the IRGB-4444 palette (1024 entries) for this frame.
+        let pal = self.map.region_data(Region::Palette);
+        let mut palette_rgb = [(0u8, 0u8, 0u8); 1024];
+        for (i, slot) in palette_rgb.iter_mut().enumerate() {
+            let raw = u16::from_be_bytes([pal[i * 2], pal[i * 2 + 1]]);
+            *slot = irgb4444_to_rgb(raw);
+        }
+
+        let alpha = self.map.region_data(Region::Alpha);
+        for sy in 0..h {
+            for sx in 0..w {
+                // 64×32 tilemap, TILEMAP_SCAN_ROWS: index = row * 64 + col.
+                let tile_index = (sy / 8) * 64 + (sx / 8);
+                let data = u16::from_be_bytes([alpha[tile_index * 2], alpha[tile_index * 2 + 1]]);
+                let code = (data & 0x3FF) as usize;
+                let color = ((data >> 10) & 0x07) as usize;
+                let opaque = data & 0x2000 != 0;
+
+                let pen = self.alpha_cache.pixel(code & 0x1FF, sx % 8, sy % 8);
+                // Pen 0 is transparent unless the tile forces layer 0; behind the
+                // alpha is black until the playfield lands in Phase 3b.
+                let (r, g, b) = if pen == 0 && !opaque {
+                    (0, 0, 0)
+                } else {
+                    palette_rgb[color * 4 + pen as usize]
+                };
+
+                let o = (sy * w + sx) * 3;
+                buffer[o] = r;
+                buffer[o + 1] = g;
+                buffer[o + 2] = b;
+            }
+        }
     }
 
     pub fn tick(&mut self) {
@@ -572,8 +668,7 @@ impl Renderable for MarbleSystem {
     }
 
     fn render_frame(&self, buffer: &mut [u8]) {
-        // Video is Phase 3; emit a black frame until the compositor exists.
-        buffer.fill(0);
+        self.render(buffer);
     }
 }
 
@@ -940,6 +1035,56 @@ mod tests {
         let sound = find("marble", "sound").expect("sound region");
         assert_eq!(sound.cpu, DisasmCpu::M6502);
         assert_eq!((sound.org, sound.size), (0x8000, 0x8000));
+    }
+
+    #[test]
+    fn irgb4444_decodes_like_mame() {
+        // Black: all nibbles 0.
+        assert_eq!(irgb4444_to_rgb(0x0000), (0, 0, 0));
+        // Zero intensity forces black regardless of RGB.
+        assert_eq!(irgb4444_to_rgb(0x0FFF), (0, 0, 0));
+        // Full intensity + full white: (0xFF * 0xFF) >> 8 = 254.
+        assert_eq!(irgb4444_to_rgb(0xFFFF), (254, 254, 254));
+        // Full intensity, pure red.
+        assert_eq!(irgb4444_to_rgb(0xFF00), (254, 0, 0));
+        // Half intensity (0x8→0x88), full green: (0x88 * 0xFF) >> 8 = 135.
+        assert_eq!(irgb4444_to_rgb(0x80F0), (0, 135, 0));
+    }
+
+    #[test]
+    fn alpha_layer_composites_palette_through_the_cell() {
+        let mut sys = MarbleSystem::new();
+        // Palette entry 0 (color 0, pen 0) = IRGB full-intensity red.
+        let palette = sys.map.region_data_mut(Region::Palette);
+        palette[0] = 0xFF;
+        palette[1] = 0x00;
+        // Top-left alpha cell: code 0, color 0, opaque (bit 13) so pen 0 draws.
+        // (The default font cache is all pen 0, so the opaque flag is what makes
+        // the cell visible — this exercises the cell decode + palette path.)
+        let alpha = sys.map.region_data_mut(Region::Alpha);
+        alpha[0] = 0x20;
+        alpha[1] = 0x00;
+
+        let (w, h) = sys.display_size();
+        let mut buf = vec![0u8; (w * h * 3) as usize];
+        sys.render_frame(&mut buf);
+        assert_eq!(&buf[0..3], &[254, 0, 0], "opaque pen 0 → palette entry 0");
+    }
+
+    #[test]
+    fn alpha_transparent_pen0_stays_black() {
+        let mut sys = MarbleSystem::new();
+        // Paint palette entry 0 red, but leave the alpha cell transparent
+        // (no opaque bit): pen 0 must NOT draw — background stays black.
+        let palette = sys.map.region_data_mut(Region::Palette);
+        palette[0] = 0xFF;
+        palette[1] = 0x00;
+        // Alpha cell defaults to 0 (code 0, color 0, not opaque).
+
+        let (w, h) = sys.display_size();
+        let mut buf = vec![0u8; (w * h * 3) as usize];
+        sys.render_frame(&mut buf);
+        assert_eq!(&buf[0..3], &[0, 0, 0], "transparent pen 0 shows background");
     }
 
     #[test]
