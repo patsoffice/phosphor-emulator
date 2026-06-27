@@ -59,6 +59,7 @@ pub mod ssio;
 pub mod votrax_sc01;
 pub mod williams_blitter;
 pub mod x2212;
+pub mod ym2151;
 pub mod z80ctc;
 
 pub use adc0809::Adc0809;
@@ -94,4 +95,5 @@ pub use ssio::SsioBoard;
 pub use votrax_sc01::VotraxSc01;
 pub use williams_blitter::WilliamsBlitter;
 pub use x2212::X2212;
+pub use ym2151::Ym2151;
 pub use z80ctc::Z80Ctc;
