@@ -736,6 +736,17 @@ impl MarbleSystem {
         self.clock
     }
 
+    /// Non-zero byte counts in (palette, alpha, playfield) RAM — for headless
+    /// bring-up diagnostics.
+    pub fn video_ram_stats(&self) -> (usize, usize, usize) {
+        let nz = |r| self.map.region_data(r).iter().filter(|&&b| b != 0).count();
+        (
+            nz(Region::Palette),
+            nz(Region::Alpha),
+            nz(Region::Playfield),
+        )
+    }
+
     /// 0x860001 audio/video control latch. Phase 1 only stashes the value; the
     /// sound-reset (bit 7) and bank bits (5-3 / 2) are decoded in later phases.
     fn bankselect_w(&mut self, data: u8) {

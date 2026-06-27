@@ -49,6 +49,8 @@ fn main() {
         "CPU left the reset vector: {}",
         if pc != reset_pc { "yes" } else { "NO" }
     );
+    let (pal, alpha, pf) = sys.video_ram_stats();
+    println!("video RAM non-zero bytes: palette {pal}  alpha {alpha}  playfield {pf}");
 
     let (w, h) = sys.display_size();
     let mut buf = vec![0u8; (w * h * 3) as usize];
