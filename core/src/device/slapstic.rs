@@ -9,15 +9,14 @@
 //! is what frustrates ROM-dumping bootleggers.
 //!
 //! This models the address-sequence state machine for the **137412-103** chip
-//! used by Marble Madness (and the rest of the 103-110 family share this state
+//! used by Marble Madness (the rest of the 103-110 family share this state
 //! graph). It is driven by [`Slapstic::tweak`], which the bus calls with the
 //! *word offset* within the window on every access and which returns the bank to
-//! read from. The data tables and transitions are a direct port of MAME
-//! `src/mame/atari/slapstic.cpp` (chip 103, the 103-110 state set), expressed in
-//! in-window word-offset space rather than full bus addresses — the chip decodes
-//! 14 address lines (A1-A14), so the offset is masked to `0x3FFF`.
+//! read from. The chip decodes 14 address lines (A1-A14), so the offset is
+//! masked to `0x3FFF`; the secret mask/value constants below are the chip's
+//! programmed bank/alt/bit recognition patterns.
 //!
-//! Reference: MAME `atari/slapstic.cpp`; <http://www.aarongiles.com/slapstic.html>.
+//! Reference: <http://www.aarongiles.com/slapstic.html>.
 
 use crate::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 
@@ -39,7 +38,7 @@ impl MaskValue {
 }
 
 // ---------------------------------------------------------------------------
-// Chip 137412-103 parameters (MAME slapstic103)
+// Chip 137412-103 parameters
 // ---------------------------------------------------------------------------
 
 /// Power-on / reset bank.

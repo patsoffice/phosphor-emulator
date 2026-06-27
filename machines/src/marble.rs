@@ -16,8 +16,6 @@
 //! Closest existing template: [`crate::foodf`] (68000 + `AddressSpace32` + raster
 //! IRQs + watchdog). This adds the BIOS/cartridge split and the richer I/O map.
 //!
-//! Hardware reference: MAME `src/mame/atari/atarisy1.cpp` / `atarisy1_v.cpp`.
-//!
 //! ## Main-CPU memory map (word bus, big-endian; base windows only)
 //! ```text
 //!   000000-07FFFF  Program ROM (BIOS @ 0, cartridge banks @ 0x10000+)
@@ -98,7 +96,7 @@ enum Region {
 ///
 /// Order: BIOS even/odd, then the four cartridge banks (even/odd each), then the
 /// two slapstic chips (even/odd). Each chip is 0x4000 bytes; even chip = high
-/// byte of the 68k word, odd chip = low byte (MAME `ROM_LOAD16_BYTE`).
+/// byte of the 68k word, odd chip = low byte (standard 16-bit ROM interleave).
 pub static MARBLE_PROGRAM_ROM: RomRegion = RomRegion {
     size: 0x30000,
     entries: &[
@@ -192,8 +190,9 @@ pub static MARBLE_ALPHA_ROM: RomRegion = RomRegion {
     }],
 };
 
-/// 8×8 2bpp alpha tiles (MAME `anlayout`). MAME's planes are `{0, 4}` MSB-first;
-/// `decode_gfx` wants LSB-first (entry 0 = pen bit 0), so the list is reversed.
+/// 8×8 2bpp alpha tiles. The two bitplanes sit at bit offsets 0 and 4 within
+/// each 16-bit row, MSB-first; `decode_gfx` wants LSB-first (entry 0 = pen bit
+/// 0), so the plane list is reversed to `{4, 0}`.
 const MARBLE_ALPHA_LAYOUT: GfxLayout<'static> = GfxLayout {
     plane_offsets: &[4, 0],
     x_offsets: &[0, 1, 2, 3, 8, 9, 10, 11],
@@ -362,12 +361,12 @@ fn load_maincpu_image(rom_set: &RomSet) -> Result<Vec<u8>, RomLoadError> {
 // Playfield / motion-object GFX decode (PROM-driven bank + bpp selection)
 // ---------------------------------------------------------------------------
 //
-// Ported from MAME `atarisy1_v.cpp` (decode_gfx / get_bank). Each of the 256
-// playfield lookup entries is keyed by a remap PROM pair that yields a tile
-// bank (1-7, only 1-2 populated on marble), a bit depth (4/5/6), a colour, and
-// a code offset. The same machinery feeds the motion objects (Phase 3c).
+// Each of the 256 playfield lookup entries is keyed by a remap PROM pair that
+// yields a tile bank (1-7, only 1-2 populated on marble), a bit depth (4/5/6),
+// a colour, and a code offset. The same machinery feeds the motion objects
+// (Phase 3c).
 
-// PROM1 / PROM2 bit assignments (MAME `atarisy1_v.cpp`).
+// PROM1 / PROM2 bit assignments (the two graphics-mapping PROMs, 136033.118/119).
 const PROM1_BANK_4: u8 = 0x80; // active low
 const PROM1_BANK_3: u8 = 0x40;
 const PROM1_BANK_2: u8 = 0x20;
@@ -381,8 +380,8 @@ const PROM2_PF_COLOR_MASK: u8 = 0x0F; // negative logic
 const PROM2_BANK_7: u8 = 0x08;
 
 /// 8×8 tiles, `char_increment` 64 bits (8 bytes). Planes sit 0x10000 bytes apart
-/// (`0x80000` bits); MAME lists them MSB-first, so reverse for `decode_gfx`'s
-/// LSB-first convention (plane 0 = pen bit 0).
+/// (`0x80000` bits) and are stored MSB-first, so the plane list is reversed for
+/// `decode_gfx`'s LSB-first convention (plane 0 = pen bit 0).
 const TILE_X_OFFSETS: [usize; 8] = [0, 1, 2, 3, 4, 5, 6, 7];
 const TILE_Y_OFFSETS: [usize; 8] = [0, 8, 16, 24, 32, 40, 48, 56];
 const TILE_PLANES_4: [usize; 4] = [0, 0x80000, 0x100000, 0x180000];
@@ -423,7 +422,7 @@ impl GfxBank {
 
 /// The decoded playfield graphics: the 256-entry remap lookup plus the tile
 /// banks it references. `banks[0]` is a blank placeholder so real banks are
-/// 1-indexed (matching the lookup's gfx field and MAME reserving gfx slot 0).
+/// 1-indexed (matching the lookup's gfx field; the 0 slot is reserved).
 struct PlayfieldGfx {
     lookup: [u16; 256],
     banks: Vec<GfxBank>,
@@ -438,8 +437,9 @@ impl PlayfieldGfx {
     }
 }
 
-/// Resolve the tile bank for a PROM pair (MAME `get_bank`), decoding it on first
-/// use. Returns a `banks` index (≥1), or 0 when the bank is unmapped.
+/// Resolve the tile bank for a PROM pair, decoding it on first use. The bank
+/// index comes from the active-low bank-select bits across both PROMs. Returns a
+/// `banks` index (≥1), or 0 when the bank is unmapped.
 fn get_pf_bank(
     prom1: u8,
     prom2: u8,
@@ -482,7 +482,8 @@ fn get_pf_bank(
 }
 
 /// Build the playfield remap lookup and decode its tile banks from the PROMs and
-/// the (already inverted) tile ROM. Mirrors MAME `decode_gfx`, playfield half.
+/// the (already inverted) tile ROM. This is the playfield half of the remap;
+/// entries 256-511 of the PROMs drive the motion objects (Phase 3c).
 fn build_playfield_gfx(prom: &[u8], tiles: &[u8]) -> PlayfieldGfx {
     let mut gfx = PlayfieldGfx::empty();
     let mut bank_gfx: HashMap<(u8, u8), u8> = HashMap::new();
@@ -510,10 +511,9 @@ fn build_playfield_gfx(prom: &[u8], tiles: &[u8]) -> PlayfieldGfx {
     gfx
 }
 
-/// Convert one IRGB-4444 palette word to RGB24, matching MAME's
-/// `palette_device::IRGB_4444` (`standard_irgb_decoder<4,4,4,4, 12,8,4,0>`):
-/// the 4-bit intensity scales each 4-bit colour component. Each nibble is first
-/// expanded to 8 bits by replication (`n*0x11`), then `c = (i * comp) >> 8`.
+/// Convert one IRGB-4444 palette word to RGB24. The word is `IIII RRRR GGGG
+/// BBBB`: a 4-bit intensity scales each 4-bit colour component. Each nibble is
+/// first expanded to 8 bits by replication (`n*0x11`), then `c = (i * comp) >> 8`.
 fn irgb4444_to_rgb(raw: u16) -> (u8, u8, u8) {
     let expand4 = |n: u16| -> u32 {
         let n = (n & 0x0F) as u32;
@@ -567,7 +567,7 @@ const MARBLE_CONTROLS: &[InputControl] = &[
 // ---------------------------------------------------------------------------
 // Master clock 14.318181 MHz. Main CPU = pixel clock = master/2 = 7.15909 MHz,
 // so CPU cycles map 1:1 to pixel clocks: HTOTAL 456, VTOTAL 262 → ~59.92 Hz.
-// Visible area 336×240 (MAME `set_raw(.../2, 456, 0, 336, 262, 0, 240)`).
+// Visible area 336×240 (H total 456, V total 262).
 const TIMING: TimingConfig = TimingConfig {
     cpu_clock_hz: 7_159_090,
     cycles_per_scanline: 456,
@@ -804,8 +804,7 @@ impl MarbleSystem {
     /// Render the current frame: the 64×64 playfield tilemap as the opaque
     /// background, then the 64×32 alpha (text/HUD) tilemap on top (transparent
     /// pen 0 unless the cell forces layer 0). Motion objects merge between them
-    /// in Phase 3c. Both tilemaps and the IRGB-4444 palette follow MAME
-    /// `atarisy1_v.cpp::screen_update`.
+    /// in Phase 3c.
     fn render(&self, buffer: &mut [u8]) {
         let w = TIMING.display_width as usize;
         let h = TIMING.display_height as usize;
