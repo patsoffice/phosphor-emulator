@@ -7,11 +7,11 @@
 //! banked program ROMs. The board's protection is a **Slapstic** that
 //! bank-switches the `0x080000-0x087FFF` ROM window (Phase 2).
 //!
-//! This module is built in phases (see the `marble-madness` beads epic). This
-//! first cut is the **skeleton**: memory map, ROM manifest, the 68010 boot loop,
-//! the control/IRQ registers, and registration. Slapstic banking and the EEPROM
-//! (Phase 2), the System 1 video pipeline (Phase 3), the sound CPU (Phase 4), and
-//! trackball input (Phase 5) are stubbed here and filled in by their own issues.
+//! This module is built in phases (see the `marble-madness` beads epic). The
+//! 68010 boot loop, memory map, control/IRQ registers, the **Slapstic** bank
+//! switching of the protected ROM window, and the **2804 EEPROM** are in place.
+//! The System 1 video pipeline (Phase 3), the sound CPU (Phase 4), and trackball
+//! input (Phase 5) are still stubbed and filled in by their own issues.
 //!
 //! Closest existing template: [`crate::foodf`] (68000 + `AddressSpace32` + raster
 //! IRQs + watchdog). This adds the BIOS/cartridge split and the richer I/O map.
@@ -21,19 +21,19 @@
 //! ## Main-CPU memory map (word bus, big-endian; base windows only)
 //! ```text
 //!   000000-07FFFF  Program ROM (BIOS @ 0, cartridge banks @ 0x10000+)
-//!   080000-087FFF  Slapstic-banked ROM window (plain ROM until Phase 2)
+//!   080000-087FFF  Slapstic-banked ROM window (4 × 8 KB banks)
 //!   2E0000         R  Sprite/MO scanline-interrupt state (bit 7)   [Phase 3d]
 //!   400000-401FFF  R/W Work RAM
 //!   800000         W  Playfield X scroll      820000  W  Playfield Y scroll
 //!   840000         W  Playfield priority color mask
 //!   860001         W  Audio/video control latch (sound reset, MO/PF banks)
 //!   880001         W  Watchdog reset          8A0001  W  VBLANK IRQ ack
-//!   8C0001         W  EEPROM unlock           [Phase 2]
+//!   8C0001         W  EEPROM unlock
 //!   900000-9FFFFF  R/W Cartridge external RAM (unused by marble)
 //!   A00000-A01FFF  R/W Playfield RAM    A02000-A02FFF  R/W Motion-object RAM
 //!   A03000-A03FFF  R/W Alphanumerics RAM
 //!   B00000-B007FF  R/W Palette RAM
-//!   F00000-F003FF  R/W EEPROM (low byte)       [Phase 2]
+//!   F00000-F003FF  R/W EEPROM 2804 (512 bytes, low byte)
 //!   F20000-F20007  R  Trackballs               [Phase 5]
 //!   F40000-F4001F  R/W Joystick/ADC (unused by marble)
 //!   F60000         R  Switch inputs (start/service/VBLANK/sound-buffer)
@@ -51,7 +51,7 @@ use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
     AudioSource, InputConfigurable, InputControl, InputEvent, InputId, InputKind, MachineCore,
-    Renderable, SaveState,
+    Nvram, Profilable, Renderable, SaveState,
 };
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::{AccessKind, AddressSpace32};
@@ -59,6 +59,7 @@ use phosphor_core::core::{Bus, BusMaster, TimingConfig};
 use phosphor_core::cpu::m68000::{M68kVariant, M68000};
 use phosphor_core::cpu::state::M68000State;
 use phosphor_core::cpu::{Cpu, CpuStateTrait};
+use phosphor_core::device::slapstic::Slapstic;
 use phosphor_macros::{BusDebug, MemoryRegion};
 
 use crate::disasm_registry::{DisasmCpu, DisasmRegion};
@@ -75,8 +76,6 @@ use crate::set_bit_active_low;
 enum Region {
     /// Program ROM: BIOS @ 0, cartridge banks @ 0x10000+ (covers 000000-07FFFF).
     Rom = 1,
-    /// Slapstic-banked ROM window (080000-087FFF). Plain ROM until Phase 2.
-    SlapsticRom = 2,
     Ram = 3,
     /// Cartridge external RAM (900000-9FFFFF). Unused by marble, but mapped so
     /// stray accesses are backed rather than faulting.
@@ -286,6 +285,14 @@ pub struct MarbleSystem {
     #[debug_map(cpu = 0)]
     map: AddressSpace32,
 
+    /// Slapstic 137412-103 protection PAL gating the 080000-087FFF ROM window.
+    slapstic: Slapstic,
+    /// The 32 KB (4 × 8 KB bank) slapstic ROM the window selects between.
+    slapstic_rom: Vec<u8>,
+
+    /// EEPROM 2804 (512 bytes, low byte at F00000-F003FF), gated by `eeprom_unlocked`.
+    eeprom: [u8; 512],
+
     // Video control latches (consumed by the Phase 3 video pipeline).
     xscroll: u16,
     yscroll: u16,
@@ -293,7 +300,7 @@ pub struct MarbleSystem {
     /// 0x860001 audio/video control: bit 7 = sound-CPU reset (Phase 4), bits
     /// 5-3 = motion-object bank, bit 2 = playfield tile bank (Phase 3).
     bankselect: u8,
-    /// 0x8C0001 EEPROM unlock latch (Phase 2 gates EEPROM writes on this).
+    /// 0x8C0001 EEPROM unlock latch. The 2804 re-locks after each write.
     eeprom_unlocked: bool,
 
     // F60000 switch port low byte (active-low; bits 0/1 = start, bit 6 = service).
@@ -315,13 +322,6 @@ impl MarbleSystem {
             "Program ROM",
             0x00_0000,
             0x8_0000,
-            AccessKind::ReadOnly,
-        )
-        .region(
-            Region::SlapsticRom,
-            "Slapstic ROM",
-            0x08_0000,
-            0x8000,
             AccessKind::ReadOnly,
         )
         .region(
@@ -375,6 +375,9 @@ impl MarbleSystem {
         Self {
             cpu,
             map: Self::build_map(),
+            slapstic: Slapstic::new(),
+            slapstic_rom: vec![0; 0x8000],
+            eeprom: [0xFF; 512], // 2804 reads 0xFF erased; game checksums + reinits
             xscroll: 0,
             yscroll: 0,
             priority_pens: 0,
@@ -390,8 +393,9 @@ impl MarbleSystem {
     pub fn load_rom_set(&mut self, rom_set: &RomSet) -> Result<(), RomLoadError> {
         let image = load_maincpu_image(rom_set)?;
         self.map.load_region(Region::Rom, &image[0x00000..0x80000]);
-        self.map
-            .load_region(Region::SlapsticRom, &image[0x80000..0x88000]);
+        // The slapstic ROM is held outside the map: the bus picks a bank per
+        // access via the slapstic state machine (see `slapstic_read`).
+        self.slapstic_rom.copy_from_slice(&image[0x80000..0x88000]);
         // GFX/PROM decode is Phase 3; the sound program is Phase 4.
         Ok(())
     }
@@ -435,6 +439,17 @@ impl MarbleSystem {
     /// SLIP/IRQ3 timer arrives in Phase 3d.
     fn int3_state(&self) -> u16 {
         0x0000
+    }
+
+    /// Read a word from the slapstic-banked window (080000-087FFF). Each access
+    /// feeds its word offset to the slapstic, which may change the live bank;
+    /// the word is then read from that 8 KB bank. The window is mirrored ×4, so
+    /// the bank offset is just the low 13 bits of the address.
+    fn slapstic_read(&mut self, addr: u32) -> u16 {
+        let word_offset = (((addr - 0x08_0000) >> 1) & 0x3FFF) as u16;
+        let bank = self.slapstic.tweak(word_offset) as usize;
+        let base = bank * 0x2000 + (addr as usize & 0x1FFE);
+        u16::from_be_bytes([self.slapstic_rom[base], self.slapstic_rom[base + 1]])
     }
 
     /// Effective autovector interrupt level. Phase 1 wires only IRQ4 (VBLANK);
@@ -489,13 +504,14 @@ impl Bus for MarbleSystem {
     fn read(&mut self, master: BusMaster, addr: u32) -> u16 {
         let val = match addr {
             // Backed ROM / RAM windows.
-            0x00_0000..=0x08_7FFF
+            0x00_0000..=0x07_FFFF
             | 0x40_0000..=0x40_1FFF
             | 0x90_0000..=0x9F_FFFF
             | 0xA0_0000..=0xA0_3FFF
             | 0xB0_0000..=0xB0_07FF => self.map.read_bus_word_be(addr),
+            0x08_0000..=0x08_7FFF => self.slapstic_read(addr),
             0x2E_0000..=0x2E_0001 => self.int3_state(),
-            0xF0_0000..=0xF0_03FF => 0x00FF, // EEPROM stub (Phase 2)
+            0xF0_0000..=0xF0_03FF => self.eeprom[((addr >> 1) & 0x1FF) as usize] as u16,
             0xF2_0000..=0xF2_0007 => 0x0000, // Trackballs (Phase 5)
             0xF4_0000..=0xF4_001F => 0x00FF, // Joystick/ADC (unused by marble)
             0xF6_0000..=0xF6_0003 => self.read_f60000(),
@@ -521,10 +537,17 @@ impl Bus for MarbleSystem {
             0x86_0000..=0x86_0001 => self.bankselect_w(byte),
             0x88_0000..=0x88_0001 => self.watchdog_count = 0, // watchdog reset
             0x8A_0000..=0x8A_0001 => self.video_int = false,  // VBLANK IRQ4 ack
-            0x8C_0000..=0x8C_0001 => self.eeprom_unlocked = true, // EEPROM unlock (Phase 2)
-            0xF4_0000..=0xF4_001F => {}                       // ADC channel select (Phase 5)
-            0xF8_0000..=0xF8_0001 => {}                       // Sound latch (RoadBlasters only)
-            0xFE_0000..=0xFE_0001 => {}                       // Sound command (Phase 4)
+            0x8C_0000..=0x8C_0001 => self.eeprom_unlocked = true, // EEPROM unlock
+            0xF0_0000..=0xF0_03FF => {
+                // 2804 writes are gated by the unlock latch and re-lock after one byte.
+                if self.eeprom_unlocked {
+                    self.eeprom[((addr >> 1) & 0x1FF) as usize] = byte;
+                    self.eeprom_unlocked = false;
+                }
+            }
+            0xF4_0000..=0xF4_001F => {} // ADC channel select (Phase 5)
+            0xF8_0000..=0xF8_0001 => {} // Sound latch (RoadBlasters only)
+            0xFE_0000..=0xFE_0001 => {} // Sound command (Phase 4)
             _ => {}
         }
     }
@@ -599,6 +622,7 @@ impl MachineCore for MarbleSystem {
     }
 
     fn reset(&mut self) {
+        self.slapstic.reset();
         self.xscroll = 0;
         self.yscroll = 0;
         self.priority_pens = 0;
@@ -607,6 +631,7 @@ impl MachineCore for MarbleSystem {
         self.f60000_buttons = 0xFF;
         self.video_int = false;
         self.watchdog_count = 0;
+        // EEPROM contents are non-volatile and survive reset.
 
         bus_split!(self, bus: u32 word => {
             self.cpu.reset(bus, BusMaster::Cpu(0));
@@ -621,12 +646,14 @@ crate::impl_standalone_debug!(MarbleSystem);
 impl Saveable for MarbleSystem {
     fn save_state(&self, w: &mut StateWriter) {
         self.cpu.save_state(w);
+        self.slapstic.save_state(w);
         w.write_bytes(self.map.region_data(Region::Ram));
         w.write_bytes(self.map.region_data(Region::CartRam));
         w.write_bytes(self.map.region_data(Region::Playfield));
         w.write_bytes(self.map.region_data(Region::Mob));
         w.write_bytes(self.map.region_data(Region::Alpha));
         w.write_bytes(self.map.region_data(Region::Palette));
+        w.write_bytes(&self.eeprom);
         w.write_u16_le(self.xscroll);
         w.write_u16_le(self.yscroll);
         w.write_u16_le(self.priority_pens);
@@ -640,12 +667,14 @@ impl Saveable for MarbleSystem {
 
     fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
         self.cpu.load_state(r)?;
+        self.slapstic.load_state(r)?;
         r.read_bytes_into(self.map.region_data_mut(Region::Ram))?;
         r.read_bytes_into(self.map.region_data_mut(Region::CartRam))?;
         r.read_bytes_into(self.map.region_data_mut(Region::Playfield))?;
         r.read_bytes_into(self.map.region_data_mut(Region::Mob))?;
         r.read_bytes_into(self.map.region_data_mut(Region::Alpha))?;
         r.read_bytes_into(self.map.region_data_mut(Region::Palette))?;
+        r.read_bytes_into(&mut self.eeprom)?;
         self.xscroll = r.read_u16_le()?;
         self.yscroll = r.read_u16_le()?;
         self.priority_pens = r.read_u16_le()?;
@@ -663,12 +692,25 @@ impl SaveState for MarbleSystem {
     crate::machine_save_state!();
 }
 
-// No battery RAM yet (EEPROM is Phase 2), no sub-span profiling, no tracing.
-crate::impl_default_frontend_capabilities!(MarbleSystem);
+// The 2804 EEPROM is the machine's battery-backed store; the frontend persists
+// it through the Nvram trait (high scores, config, the boot game-id byte).
+impl Nvram for MarbleSystem {
+    fn save_nvram(&self) -> Option<&[u8]> {
+        Some(&self.eeprom)
+    }
+
+    fn load_nvram(&mut self, data: &[u8]) {
+        let len = data.len().min(self.eeprom.len());
+        self.eeprom[..len].copy_from_slice(&data[..len]);
+    }
+}
+
+// No sub-span profiling, no event tracing.
+impl Profilable for MarbleSystem {}
+impl phosphor_core::core::debug_trace::DebugTrace for MarbleSystem {}
 
 // Marble Madness has no operator DIP switches — coinage and game options live
-// in the EEPROM (Phase 2) and the sound-board config. The all-default trait
-// exposes no banks.
+// in the EEPROM and the sound-board config. The all-default trait exposes no banks.
 impl phosphor_core::core::machine::DipSwitches for MarbleSystem {}
 
 // ---------------------------------------------------------------------------
@@ -719,10 +761,9 @@ mod tests {
     fn map_decodes_documented_windows() {
         let sys = MarbleSystem::new();
         assert_eq!(sys.map.region_at(0x00_0000).unwrap().id, Region::Rom.into());
-        assert_eq!(
-            sys.map.region_at(0x08_0000).unwrap().id,
-            Region::SlapsticRom.into()
-        );
+        // The slapstic window (080000-087FFF) is not a map region — it is decoded
+        // in the bus and banked by the slapstic.
+        assert!(sys.map.region_at(0x08_0000).is_none());
         assert_eq!(sys.map.region_at(0x40_0000).unwrap().id, Region::Ram.into());
         assert_eq!(
             sys.map.region_at(0x90_0000).unwrap().id,
@@ -902,11 +943,67 @@ mod tests {
     }
 
     #[test]
+    fn slapstic_banks_the_window_through_the_bus() {
+        let mut sys = MarbleSystem::new();
+        // Distinct marker word at offset 0 of each 8 KB bank.
+        for b in 0..4u8 {
+            sys.slapstic_rom[b as usize * 0x2000] = 0x10 + b;
+        }
+        let read = |sys: &mut MarbleSystem, a| Bus::read(sys, BusMaster::Cpu(0), a);
+
+        // Power-on bank is 3; the arming read (offset 0) returns its marker.
+        assert_eq!(read(&mut sys, 0x08_0000), 0x1300);
+        // Direct-select bank 0 (offset 0x40 → byte 0x80), then read its marker.
+        read(&mut sys, 0x08_0080);
+        assert_eq!(read(&mut sys, 0x08_0000), 0x1000);
+        assert_eq!(sys.slapstic.current_bank(), 0);
+    }
+
+    #[test]
+    fn eeprom_writes_gated_by_unlock_and_relock() {
+        let mut sys = MarbleSystem::new();
+        let w = |sys: &mut MarbleSystem, a, d| Bus::write(sys, BusMaster::Cpu(0), a, d);
+        let r = |sys: &mut MarbleSystem, a| Bus::read(sys, BusMaster::Cpu(0), a);
+
+        // Locked: the write is dropped (still reads the erased 0xFF).
+        w(&mut sys, 0xF0_0000, 0x0042);
+        assert_eq!(r(&mut sys, 0xF0_0000), 0x00FF);
+
+        // Unlock (8C0001), then one write sticks...
+        w(&mut sys, 0x8C_0001, 0x0001);
+        w(&mut sys, 0xF0_0000, 0x0042);
+        assert_eq!(r(&mut sys, 0xF0_0000), 0x0042);
+
+        // ...and the 2804 re-locked, so the next write without an unlock is dropped.
+        w(&mut sys, 0xF0_0002, 0x0099);
+        assert_eq!(r(&mut sys, 0xF0_0002), 0x00FF);
+        assert!(!sys.eeprom_unlocked);
+    }
+
+    #[test]
+    fn nvram_exposes_the_eeprom() {
+        let mut sys = MarbleSystem::new();
+        sys.eeprom[0x6E] = 0x42; // the boot game-id byte lives around here
+        assert_eq!(Nvram::save_nvram(&sys).unwrap()[0x6E], 0x42);
+
+        let mut sys2 = MarbleSystem::new();
+        let snapshot = Nvram::save_nvram(&sys).unwrap().to_vec();
+        Nvram::load_nvram(&mut sys2, &snapshot);
+        assert_eq!(sys2.eeprom[0x6E], 0x42);
+    }
+
+    #[test]
     fn save_load_round_trip() {
         let mut sys = MarbleSystem::new();
         sys.map.region_data_mut(Region::Ram)[0x100] = 0xAB;
         sys.map.region_data_mut(Region::Playfield)[0x10] = 0xCD;
         sys.map.region_data_mut(Region::Alpha)[0x20] = 0xEF;
+        sys.eeprom[0x30] = 0x99;
+        // Drive the slapstic to a non-default bank so its state is exercised.
+        // Bank 1's select offset is 0x50 (word) → byte address 0x0800A0.
+        Bus::read(&mut sys, BusMaster::Cpu(0), 0x08_0000); // arm
+        Bus::read(&mut sys, BusMaster::Cpu(0), 0x08_00A0); // select bank 1
+        assert_eq!(sys.slapstic.current_bank(), 1);
         sys.xscroll = 0x1234;
         sys.bankselect = 0x5A;
         sys.video_int = true;
@@ -923,6 +1020,8 @@ mod tests {
         assert_eq!(sys2.map.region_data(Region::Ram)[0x100], 0xAB);
         assert_eq!(sys2.map.region_data(Region::Playfield)[0x10], 0xCD);
         assert_eq!(sys2.map.region_data(Region::Alpha)[0x20], 0xEF);
+        assert_eq!(sys2.eeprom[0x30], 0x99);
+        assert_eq!(sys2.slapstic.current_bank(), 1);
         assert_eq!(sys2.xscroll, 0x1234);
         assert_eq!(sys2.bankselect, 0x5A);
         assert!(sys2.video_int);
