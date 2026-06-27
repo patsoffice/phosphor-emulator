@@ -17,7 +17,7 @@ disassembler (M6) covers the full instruction set in Motorola syntax.
 |------------------|--------------------------------------------------------|
 | Instructions     | complete (74 mnemonics)                                |
 | Addressing modes | 12 of 12                                               |
-| Integration tests| 254 (+ 48 unit tests)                                  |
+| Integration tests| 259 (+ 48 unit tests)                                  |
 | Validation       | 1,000,058/1,000,060 SingleStepTests vectors (124 files)|
 | Timing           | Approximate documented cycle counts (state-accurate)   |
 
@@ -161,6 +161,34 @@ its clearing of N/Z/V/C before stacking).
   nibble 0) above the SR+PC short frame, which RTE pops back off. The
   68000 short frame is unchanged. The 68010 group-0 bus/address-error
   frame (the larger format $8) is *not* modeled — see "68010 support".
+
+### 68010 support
+
+`M68kVariant::M68010` selects the 68010 used by Atari System 1 (Marble
+Madness et al.). The variant gate (`is_68010_plus`) currently covers the
+two 68010 behaviors that matter for a System 1 board running supervisor
+code from a vector table at address 0:
+
+- **Exception stack frame** — the format $0 vector-offset word (above);
+  exception entry and RTE stay self-consistent.
+- **`MOVE from SR` privileged** — vectors to the privilege handler from
+  user mode (the 68000 leaves it unprivileged).
+
+Everything else is byte-for-byte the 68000. The following 68010 additions
+are **not** implemented; none are exercised by a supervisor-mode game that
+leaves VBR at 0, but Phase 1 boot bring-up should watch for them and split
+out a follow-up if the ROM hits one:
+
+- **VBR (vector base register)** — fixed at 0. Vectors are fetched from
+  `vector × 4` with no VBR offset.
+- **`MOVEC` / `MOVES` / `RTD`** — decode to bounded NOPs (the 68000
+  illegal-encoding behavior), not the real 68010 instructions. `MOVEC` is
+  the usual way a program would change VBR/SFC/DFC.
+- **`MOVE from CCR`** (0x42C0) — still decoded as the 68000 CLR size-11
+  hole, not the 68010 instruction.
+- **Group-0 (bus/address-error) format $8 frame** — faults still push the
+  68000 seven-word frame. Only matters when the CPU actually faults, which
+  a working game avoids.
 
 ## File Structure
 
