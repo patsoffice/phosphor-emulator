@@ -842,10 +842,15 @@ impl MarbleSystem {
     // Rendering (full-frame compositor)
     // -----------------------------------------------------------------------
 
-    /// Render the current frame: the 64×64 playfield tilemap as the opaque
-    /// background, then the 64×32 alpha (text/HUD) tilemap on top (transparent
-    /// pen 0 unless the cell forces layer 0). Motion objects merge between them
-    /// in Phase 3c.
+    /// Render the current frame as palette indices, then resolve to RGB. The
+    /// layers composite the way the hardware merges them: the 64×64 playfield
+    /// tilemap is the opaque background, motion objects merge over it with
+    /// priority/translucency, and the 64×32 alpha (text/HUD) tilemap draws on
+    /// top (transparent pen 0 unless the cell forces layer 0). Working in the
+    /// shared 1024-entry palette-index space (alpha 0x000 / motion 0x100 /
+    /// playfield 0x200 / translucent 0x300) is what lets the priority merge
+    /// inspect playfield pens — so the compositor builds an index buffer and
+    /// only converts to RGB at the end.
     fn render(&self, buffer: &mut [u8]) {
         let w = TIMING.display_width as usize;
         let h = TIMING.display_height as usize;
@@ -858,58 +863,67 @@ impl MarbleSystem {
             *slot = irgb4444_to_rgb(raw);
         }
 
-        let pf_ram = self.map.region_data(Region::Playfield);
+        // Layer 1: playfield → a per-pixel palette-index buffer.
+        let mut index = vec![0u16; w * h];
+        self.render_playfield(&mut index, w, h);
+
+        // Layer 3: alpha on top, then resolve every pixel to RGB.
         let alpha = self.map.region_data(Region::Alpha);
-        // Playfield tile bank from the 0x860001 control latch (bit 2), and the
-        // scroll origin (the 64×64 map is 512×512, wrapping).
+        for sy in 0..h {
+            for sx in 0..w {
+                let mut idx = index[sy * w + sx];
+
+                // Alpha (text/HUD), drawn 1:1 from the origin.
+                let a_cell = (sy / 8) * 64 + (sx / 8);
+                let a_data = u16::from_be_bytes([alpha[a_cell * 2], alpha[a_cell * 2 + 1]]);
+                let a_code = (a_data & 0x3FF) as usize;
+                let a_color = ((a_data >> 10) & 0x07) as usize;
+                let a_opaque = a_data & 0x2000 != 0;
+                let a_pen = self.alpha_cache.pixel(a_code & 0x1FF, sx % 8, sy % 8);
+                if a_pen != 0 || a_opaque {
+                    idx = (a_color * 4 + a_pen as usize) as u16;
+                }
+
+                let (r, g, b) = palette_rgb[idx as usize & 0x3FF];
+                let o = (sy * w + sx) * 3;
+                buffer[o] = r;
+                buffer[o + 1] = g;
+                buffer[o + 2] = b;
+            }
+        }
+    }
+
+    /// Rasterise the 64×64 playfield tilemap into a palette-index buffer. Each
+    /// 8×8 cell carries a flip/tile-select word; the PROM remap yields the gfx
+    /// bank, tile code, and colour. The map is 512×512 and wraps; the visible
+    /// origin is the X/Y scroll. The index is `0x200 + colour*8 + pen` — the
+    /// playfield palette bank (see [`render`]).
+    fn render_playfield(&self, index: &mut [u16], w: usize, h: usize) {
+        let pf_ram = self.map.region_data(Region::Playfield);
+        // Playfield tile bank from the 0x860001 control latch (bit 2).
         let tile_bank = ((self.bankselect >> 2) & 1) as usize;
         let xscroll = self.xscroll as usize;
         let yscroll = self.yscroll as usize;
 
         for sy in 0..h {
             for sx in 0..w {
-                // --- Playfield (opaque background) ---
                 let src_x = (sx + xscroll) & 0x1FF;
                 let src_y = (sy + yscroll) & 0x1FF;
-                let pf_index = (src_y / 8) * 64 + (src_x / 8);
-                let pf_data = u16::from_be_bytes([pf_ram[pf_index * 2], pf_ram[pf_index * 2 + 1]]);
+                let pf_cell = (src_y / 8) * 64 + (src_x / 8);
+                let pf_data = u16::from_be_bytes([pf_ram[pf_cell * 2], pf_ram[pf_cell * 2 + 1]]);
                 let lookup =
                     self.playfield.lookup[(pf_data >> 8) as usize & 0x7F | (tile_bank << 7)];
                 let bank_id = ((lookup >> 8) & 0x0F) as usize;
                 let code = (((lookup & 0xFF) as usize) << 8) | (pf_data & 0xFF) as usize;
                 let palcolor = ((lookup >> 12) & 0x0F) as usize;
 
-                let (mut r, mut g, mut b) = (0u8, 0u8, 0u8);
                 if let Some(bank) = self.playfield.banks.get(bank_id) {
                     let pen = bank
                         .cache
                         .pixel(code % bank.cache.count(), src_x % 8, src_y % 8);
-                    // Playfield palette bank base is 0x200 (the third of four
-                    // 256-entry banks: alpha / motion / playfield / translucent).
-                    // The gfx contributes a 0x100 colour base, and the per-tile
-                    // colour 0x20 + (palcolor << bpp-3) scaled by the granularity-8
-                    // gfx adds the other 0x100 — together landing in the playfield
-                    // bank. Dropping either base lands in the motion (sprite) bank
-                    // and tints the floor with sprite colours.
                     let color = 0x20 + (palcolor << (bank.bpp - 3));
-                    (r, g, b) = palette_rgb[(0x100 + color * 8 + pen as usize) & 0x3FF];
+                    index[sy * w + sx] = ((0x100 + color * 8 + pen as usize) & 0x3FF) as u16;
                 }
-
-                // --- Alpha (text/HUD) on top, drawn 1:1 from the origin ---
-                let a_index = (sy / 8) * 64 + (sx / 8);
-                let a_data = u16::from_be_bytes([alpha[a_index * 2], alpha[a_index * 2 + 1]]);
-                let a_code = (a_data & 0x3FF) as usize;
-                let a_color = ((a_data >> 10) & 0x07) as usize;
-                let a_opaque = a_data & 0x2000 != 0;
-                let a_pen = self.alpha_cache.pixel(a_code & 0x1FF, sx % 8, sy % 8);
-                if a_pen != 0 || a_opaque {
-                    (r, g, b) = palette_rgb[a_color * 4 + a_pen as usize];
-                }
-
-                let o = (sy * w + sx) * 3;
-                buffer[o] = r;
-                buffer[o + 1] = g;
-                buffer[o + 2] = b;
             }
         }
     }
