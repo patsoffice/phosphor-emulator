@@ -168,7 +168,9 @@ impl M68000 {
         if addr & 1 != 0 {
             return Err(self.operand_fault(addr, false));
         }
-        Ok(bus.read(master, self.mask_addr(addr)))
+        let a = self.mask_addr(addr);
+        bus.observe_data_access(master, a, false);
+        Ok(bus.read(master, a))
     }
 
     /// Write one word at `addr`; odd addresses raise the address error.
@@ -182,7 +184,9 @@ impl M68000 {
         if addr & 1 != 0 {
             return Err(self.operand_fault(addr, true));
         }
-        bus.write(master, self.mask_addr(addr), data);
+        let a = self.mask_addr(addr);
+        bus.observe_data_access(master, a, true);
+        bus.write(master, a, data);
         Ok(())
     }
 
@@ -218,6 +222,9 @@ impl M68000 {
         master: BusMaster,
         addr: u32,
     ) -> u8 {
+        // The chip's address pins see the exact (possibly odd) byte address,
+        // even though our 16-bit backing store is read word-aligned.
+        bus.observe_data_access(master, self.mask_addr(addr), false);
         let word = bus.read(master, self.mask_addr(addr & !1));
         if addr & 1 == 0 {
             (word >> 8) as u8
@@ -236,6 +243,11 @@ impl M68000 {
         data: u8,
     ) {
         let word_addr = self.mask_addr(addr & !1);
+        // The real 68010 performs a byte write as a single bus cycle, so the
+        // chip sees exactly one access at the byte address. The word read below
+        // is an emulation artifact of merging into our 16-bit store and is NOT
+        // observed; only the byte write itself is.
+        bus.observe_data_access(master, self.mask_addr(addr), true);
         let word = bus.read(master, word_addr);
         let merged = if addr & 1 == 0 {
             (word & 0x00FF) | ((data as u16) << 8)
@@ -301,6 +313,16 @@ impl M68000 {
         debug_assert!(self.pc & 1 == 0, "instruction stream PC must be even");
         let word = bus.read(master, self.mask_addr(self.pc));
         self.pc = self.pc.wrapping_add(2);
+        // Run the prefetch one word ahead of the consumption pointer, presenting
+        // each upcoming instruction-stream address to the bus observer. This is
+        // what lets an address-bus snoop (Slapstic) see a prefetched fetch
+        // *before* this instruction's data operands — the hardware ordering the
+        // copy protection relies on. Only the address matters to the observer,
+        // so no second memory read is performed.
+        while self.prefetch_pc < self.pc.wrapping_add(2) {
+            bus.observe_data_access(master, self.mask_addr(self.prefetch_pc), false);
+            self.prefetch_pc = self.prefetch_pc.wrapping_add(2);
+        }
         word
     }
 

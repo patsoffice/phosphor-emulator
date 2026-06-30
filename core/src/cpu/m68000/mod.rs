@@ -116,6 +116,14 @@ pub struct M68000 {
     /// that point at the faulting instruction push this value.
     #[save_skip(default)]
     pub(crate) instr_pc: u32,
+    /// Address the instruction-prefetch has presented to the bus observer so
+    /// far. Held one word ahead of the consumption pointer (`pc`) so that
+    /// address-bus snoops — e.g. an Atari Slapstic, which the game arms by
+    /// *prefetching* an instruction at a magic address — see prefetch fetches
+    /// in hardware order, ahead of the current instruction's data operands.
+    /// Resynced to `pc` whenever the queue is flushed (branch/jump/exception).
+    #[save_skip(default)]
+    pub(crate) prefetch_pc: u32,
 }
 
 impl Default for M68000 {
@@ -141,6 +149,7 @@ impl M68000 {
             state: ExecState::Fetch,
             opcode: 0,
             instr_pc: 0,
+            prefetch_pc: 0,
         }
     }
 
@@ -211,6 +220,14 @@ impl M68000 {
                     };
                     self.enter_address_error(bus, master, fault);
                     return;
+                }
+                // Resync the prefetch tracker after any non-sequential PC
+                // change (branch/jump/RTS/exception) or at first fetch: the
+                // real prefetch queue is flushed and refills from the new PC.
+                // After a straight-line instruction the tracker is left exactly
+                // one word ahead, so this is a no-op then.
+                if self.prefetch_pc != self.pc.wrapping_add(2) {
+                    self.prefetch_pc = self.pc;
                 }
                 // Fetch the opcode word and execute the instruction
                 // atomically; an odd word/long access aborts the

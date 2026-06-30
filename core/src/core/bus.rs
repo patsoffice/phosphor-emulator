@@ -28,6 +28,15 @@ pub trait Bus {
         self.write(master, addr, data)
     }
 
+    /// Observe a *data* bus access (read or write) at its exact address before
+    /// it is resolved. Opcode prefetches are excluded. The default is a no-op;
+    /// machines with address-sequence-sensitive hardware on the bus (e.g. an
+    /// Atari Slapstic, which snoops every address line) override this to drive
+    /// that hardware's state machine. `addr` is the precise byte address — for
+    /// a byte access this is the unaligned address, matching what the chip's
+    /// address pins actually see.
+    fn observe_data_access(&mut self, _master: BusMaster, _addr: Self::Address, _is_write: bool) {}
+
     /// Check if the bus is halted for this master (TSC/RDY/BUSREQ).
     /// Returns true if the master must pause before the next bus cycle.
     fn is_halted_for(&self, master: BusMaster) -> bool;
