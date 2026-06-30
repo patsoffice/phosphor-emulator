@@ -814,13 +814,13 @@ impl MarbleSystem {
         0x0000
     }
 
-    /// Read a word from the slapstic-banked window (080000-087FFF). Each access
-    /// feeds its word offset to the slapstic, which may change the live bank;
-    /// the word is then read from that 8 KB bank. The window is mirrored ×4, so
-    /// the bank offset is just the low 13 bits of the address.
-    fn slapstic_read(&mut self, addr: u32) -> u16 {
-        let word_offset = (((addr - 0x08_0000) >> 1) & 0x3FFF) as u16;
-        let bank = self.slapstic.tweak(word_offset) as usize;
+    /// Read a word from the slapstic-banked window (080000-087FFF) using the
+    /// bank the slapstic currently presents. The state machine is driven
+    /// separately by [`Slapstic::test`] on every *data* access (see the `Bus`
+    /// impl); opcode prefetches read through without perturbing it. The window
+    /// is mirrored ×4, so the bank offset is just the low 13 bits of the address.
+    fn slapstic_read(&self, addr: u32) -> u16 {
+        let bank = self.slapstic.current_bank() as usize;
         let base = bank * 0x2000 + (addr as usize & 0x1FFE);
         u16::from_be_bytes([self.slapstic_rom[base], self.slapstic_rom[base + 1]])
     }
@@ -957,7 +957,21 @@ impl Bus for MarbleSystem {
         false
     }
 
+    fn observe_data_access(&mut self, _master: BusMaster, addr: u32, _is_write: bool) {
+        // The slapstic snoops the address bus of every access the CPU drives —
+        // data reads/writes *and* instruction prefetches (the protection arms
+        // itself by prefetching code at magic addresses) — anywhere in the map,
+        // since its `test_any` patterns can land in RAM, and at the exact byte
+        // address (so consecutive byte accesses present distinct odd/even
+        // addresses, like the real chip's pins). Read/write is irrelevant: the
+        // PAL only decodes address lines.
+        self.slapstic.test(addr);
+    }
+
     fn read(&mut self, master: BusMaster, addr: u32) -> u16 {
+        // The slapstic state machine is driven by `observe_data_access` (called
+        // by the CPU for data accesses only); a read here just returns the bank
+        // it currently presents.
         let val = match addr {
             // Backed ROM / RAM windows.
             0x00_0000..=0x07_FFFF
@@ -982,7 +996,8 @@ impl Bus for MarbleSystem {
         self.map.watch_write(0, master, addr, data as u32, 2);
         let byte = (data & 0xFF) as u8;
         match addr {
-            0x00_0000..=0x08_7FFF => {} // ROM, ignore
+            0x00_0000..=0x07_FFFF => {} // fixed ROM, ignore
+            0x08_0000..=0x08_7FFF => {} // slapstic window: ROM, bank state driven by observe
             0x40_0000..=0x40_1FFF
             | 0x90_0000..=0x9F_FFFF
             | 0xA0_0000..=0xA0_3FFF
@@ -1525,7 +1540,12 @@ mod tests {
         for b in 0..4u8 {
             sys.slapstic_rom[b as usize * 0x2000] = 0x10 + b;
         }
-        let read = |sys: &mut MarbleSystem, a| Bus::read(sys, BusMaster::Cpu(0), a);
+        // The CPU snoops each data access onto the slapstic via
+        // `observe_data_access`, then performs the read; reproduce that pairing.
+        let read = |sys: &mut MarbleSystem, a| {
+            Bus::observe_data_access(sys, BusMaster::Cpu(0), a, false);
+            Bus::read(sys, BusMaster::Cpu(0), a)
+        };
 
         // Power-on bank is 3; the arming read (offset 0) returns its marker.
         assert_eq!(read(&mut sys, 0x08_0000), 0x1300);
@@ -1576,9 +1596,10 @@ mod tests {
         sys.map.region_data_mut(Region::Alpha)[0x20] = 0xEF;
         sys.eeprom[0x30] = 0x99;
         // Drive the slapstic to a non-default bank so its state is exercised.
-        // Bank 1's select offset is 0x50 (word) → byte address 0x0800A0.
-        Bus::read(&mut sys, BusMaster::Cpu(0), 0x08_0000); // arm
-        Bus::read(&mut sys, BusMaster::Cpu(0), 0x08_00A0); // select bank 1
+        // Bank 1's select offset is 0x50 (word) → byte address 0x0800A0. The
+        // CPU snoops accesses onto the chip via `observe_data_access`.
+        Bus::observe_data_access(&mut sys, BusMaster::Cpu(0), 0x08_0000, false); // arm
+        Bus::observe_data_access(&mut sys, BusMaster::Cpu(0), 0x08_00A0, false); // select bank 1
         assert_eq!(sys.slapstic.current_bank(), 1);
         sys.xscroll = 0x1234;
         sys.bankselect = 0x5A;
