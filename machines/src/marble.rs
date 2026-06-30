@@ -646,6 +646,11 @@ pub struct MarbleSystem {
     // VBLANK interrupt latch (IRQ4), held until acked via 0x8A0001.
     video_int: bool,
 
+    /// Scanline motion-object interrupt (IRQ3 / "SLIP"). Asserted for the one
+    /// scanline a motion-object timer entry targets; also read back at 0x2E0000
+    /// bit 7. Recomputed at every scanline boundary from the active sprite bank.
+    scanline_int: bool,
+
     /// M6502 sound board (POKEY + YM2151 stub + inter-CPU latches).
     #[debug_device("Sound")]
     sound: MarbleSound,
@@ -731,6 +736,7 @@ impl MarbleSystem {
             eeprom_writes: 0,
             f60000_buttons: 0xFF,
             video_int: false,
+            scanline_int: false,
             sound: MarbleSound::new(),
             sound_clock: ClockDivider::new(1, 4),
             audio_buffer: Vec::with_capacity(2048),
@@ -833,10 +839,39 @@ impl MarbleSystem {
         0xFF00 | low as u16
     }
 
-    /// Scanline-interrupt state read at 0x2E0000 (bit 7). Always clear until the
-    /// SLIP/IRQ3 timer arrives in Phase 3d.
+    /// Scanline-interrupt state read at 0x2E0000 (bit 7): set while a
+    /// motion-object scanline interrupt (IRQ3) is asserted.
     fn int3_state(&self) -> u16 {
-        0x0000
+        if self.scanline_int { 0x0080 } else { 0x0000 }
+    }
+
+    /// Whether any motion-object timer entry in the active sprite bank targets
+    /// `scanline` — i.e. IRQ3 should be asserted there. Timer entries are flagged
+    /// by 0xFFFF in word[1]; word[0] gives the height and Y, and the interrupt
+    /// fires at the top of that sprite's band: `256 - (word0>>5) - vsize*8 - 1`.
+    fn timer_irq_at_scanline(&self, scanline: u16) -> bool {
+        let mob = self.map.region_data(Region::Mob);
+        let bank_base = ((self.bankselect >> 3) & 7) as usize * 256; // words
+        let word = |wi: usize| u16::from_be_bytes([mob[wi * 2], mob[wi * 2 + 1]]);
+
+        let mut visited = [false; 64];
+        let mut link = 0usize;
+        for _ in 0..64 {
+            if visited[link] {
+                break;
+            }
+            visited[link] = true;
+            if word(bank_base + 0x40 + link) == 0xFFFF {
+                let w0 = word(bank_base + link);
+                let vsize = (w0 & 0x0F) as i32 + 1;
+                let ypos = (256 - (w0 >> 5) as i32 - vsize * 8 - 1) & 0x1FF;
+                if ypos == scanline as i32 {
+                    return true;
+                }
+            }
+            link = (word(bank_base + 0xC0 + link) & 0x3F) as usize;
+        }
+        false
     }
 
     /// Read a word from the slapstic-banked window (080000-087FFF) using the
@@ -851,13 +886,15 @@ impl MarbleSystem {
     }
 
     /// Effective autovector interrupt level (the 68000 takes the highest
-    /// pending). IRQ6 = sound response, IRQ4 = VBLANK. IRQ3 (SLIP) and IRQ2
-    /// (ADC) arrive in later phases.
+    /// pending). IRQ6 = sound response, IRQ4 = VBLANK, IRQ3 = motion-object
+    /// scanline (SLIP). IRQ2 (ADC/joystick) arrives in a later phase.
     fn interrupt_level(&self) -> u8 {
         if self.sound.response_pending() {
             6
         } else if self.video_int {
             4
+        } else if self.scanline_int {
+            3
         } else {
             0
         }
@@ -1075,12 +1112,15 @@ impl MarbleSystem {
     pub fn tick(&mut self) {
         let frame_cycle = self.clock % TIMING.cycles_per_frame();
 
-        // VBLANK raises IRQ4 at the start of the first blanked scanline.
+        // At each scanline boundary: VBLANK raises IRQ4 on the first blanked
+        // line, and IRQ3 tracks whether a motion-object timer targets this line
+        // (a one-scanline pulse, like MAME's int3/int3off timer pair).
         if frame_cycle.is_multiple_of(TIMING.cycles_per_scanline) {
             let scanline = (frame_cycle / TIMING.cycles_per_scanline) as u16;
             if scanline == VBLANK_SCANLINE {
                 self.video_int = true;
             }
+            self.scanline_int = self.timer_irq_at_scanline(scanline);
         }
 
         // Latch watchpoint attribution context before CPU execution.
@@ -1276,6 +1316,7 @@ impl MachineCore for MarbleSystem {
         self.eeprom_unlocked = false;
         self.f60000_buttons = 0xFF;
         self.video_int = false;
+        self.scanline_int = false;
         self.watchdog_count = 0;
         // EEPROM contents are non-volatile and survive reset.
 
@@ -1309,6 +1350,7 @@ impl Saveable for MarbleSystem {
         w.write_bool(self.eeprom_unlocked);
         w.write_u8(self.f60000_buttons);
         w.write_bool(self.video_int);
+        w.write_bool(self.scanline_int);
         w.write_u64_le(self.clock);
         w.write_u8(self.watchdog_count);
     }
@@ -1332,6 +1374,7 @@ impl Saveable for MarbleSystem {
         self.eeprom_unlocked = r.read_bool()?;
         self.f60000_buttons = r.read_u8()?;
         self.video_int = r.read_bool()?;
+        self.scanline_int = r.read_bool()?;
         self.clock = r.read_u64_le()?;
         self.watchdog_count = r.read_u8()?;
         Ok(())
@@ -1747,6 +1790,36 @@ mod tests {
         let mut buf = vec![0u8; (w * h * 3) as usize];
         sys.render_frame(&mut buf);
         assert_eq!(&buf[0..3], &[0, 254, 0], "high-priority sprite uses the translucent bank");
+    }
+
+    #[test]
+    fn slip_interrupt_fires_at_timer_scanline() {
+        let mut sys = MarbleSystem::new();
+        // Active bank 0, entry 0: a timer entry (word[1] = 0xFFFF), word[0]
+        // chosen so the interrupt lands on scanline 100:
+        // ypos = 256 - (0x1260>>5) - 1*8 - 1 = 256 - 147 - 8 - 1 = 100.
+        let mob = sys.map.region_data_mut(Region::Mob);
+        mob[0] = 0x12; // word[0] = 0x1260 (height 1, Y field 147)
+        mob[1] = 0x60;
+        mob[0x80] = 0xFF; // word[1] = 0xFFFF marks a timer
+        mob[0x81] = 0xFF;
+
+        assert!(sys.timer_irq_at_scanline(100), "fires on the target scanline");
+        assert!(!sys.timer_irq_at_scanline(99), "not on adjacent scanlines");
+        assert!(!sys.timer_irq_at_scanline(101));
+
+        // A non-timer sprite at the same entry must not arm the interrupt.
+        let mob = sys.map.region_data_mut(Region::Mob);
+        mob[0x80] = 0x01; // word[1] no longer 0xFFFF
+        mob[0x81] = 0x23;
+        assert!(!sys.timer_irq_at_scanline(100), "ordinary sprites don't fire IRQ3");
+
+        // The state bit drives IRQ3 and the 0x2E0000 status read together.
+        sys.scanline_int = true;
+        assert_eq!(sys.interrupt_level(), 3);
+        assert_eq!(sys.int3_state(), 0x0080);
+        sys.scanline_int = false;
+        assert_eq!(sys.int3_state(), 0x0000);
     }
 
     #[test]
