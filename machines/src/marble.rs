@@ -50,8 +50,8 @@ use std::collections::HashMap;
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
-    AudioSource, InputConfigurable, InputControl, InputEvent, InputId, InputKind, MachineCore,
-    Nvram, Profilable, Renderable, SaveState,
+    AnalogAxisKind, AudioSource, DefaultBinding, InputConfigurable, InputControl, InputEvent,
+    InputId, InputKind, MachineCore, MouseControl, Nvram, Profilable, Renderable, SaveState,
 };
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::{AccessKind, AddressSpace32};
@@ -558,6 +558,13 @@ pub const INPUT_START2: u8 = 1;
 /// Service / self-test switch (F60000 bit 6, active-low `PORT_SERVICE`).
 pub const INPUT_SERVICE: u8 = 2;
 
+/// Typed control ids for the analog trackball axes — a separate `InputId`
+/// namespace from the digital buttons above.
+const CTRL_P1_TRACK_X: InputId = InputId(10);
+const CTRL_P1_TRACK_Y: InputId = InputId(11);
+const CTRL_P2_TRACK_X: InputId = InputId(12);
+const CTRL_P2_TRACK_Y: InputId = InputId(13);
+
 const MARBLE_CONTROLS: &[InputControl] = &[
     InputControl {
         id: InputId(INPUT_START1 as u16),
@@ -582,6 +589,47 @@ const MARBLE_CONTROLS: &[InputControl] = &[
         kind: InputKind::Service,
         player: None,
         default_bindings: crate::input_defaults::SERVICE,
+    },
+    // Trackballs: P1 drives the mouse; P2 is rebindable (no mouse default).
+    InputControl {
+        id: CTRL_P1_TRACK_X,
+        stable_name: "p1_trackball_x",
+        label: "P1 Trackball X",
+        kind: InputKind::AnalogAxis {
+            axis: AnalogAxisKind::X,
+        },
+        player: Some(1),
+        default_bindings: &[DefaultBinding::Mouse(MouseControl::AxisX)],
+    },
+    InputControl {
+        id: CTRL_P1_TRACK_Y,
+        stable_name: "p1_trackball_y",
+        label: "P1 Trackball Y",
+        kind: InputKind::AnalogAxis {
+            axis: AnalogAxisKind::Y,
+        },
+        player: Some(1),
+        default_bindings: &[DefaultBinding::Mouse(MouseControl::AxisY)],
+    },
+    InputControl {
+        id: CTRL_P2_TRACK_X,
+        stable_name: "p2_trackball_x",
+        label: "P2 Trackball X",
+        kind: InputKind::AnalogAxis {
+            axis: AnalogAxisKind::X,
+        },
+        player: Some(2),
+        default_bindings: &[],
+    },
+    InputControl {
+        id: CTRL_P2_TRACK_Y,
+        stable_name: "p2_trackball_y",
+        label: "P2 Trackball Y",
+        kind: InputKind::AnalogAxis {
+            axis: AnalogAxisKind::Y,
+        },
+        player: Some(2),
+        default_bindings: &[],
     },
 ];
 
@@ -642,6 +690,13 @@ pub struct MarbleSystem {
     // F60000 switch port low byte (active-low; bits 0/1 = start, bit 6 = service).
     // Bits 4 (VBLANK) and 7 (sound buffer) are computed live in `read_f60000`.
     f60000_buttons: u8,
+
+    /// Trackball counters [p1x, p1y, p2x, p2y] — free-running 8-bit relative
+    /// accumulators, the trackball motion the game samples at 0xF20000.
+    trackball: [u8; 4],
+    /// Per-player 45°-rotated counter pair, latched on the even (X) read so the
+    /// paired odd (Y) read sees the same snapshot — see [`trackball_read`].
+    trackball_cur: [[u8; 2]; 2],
 
     // VBLANK interrupt latch (IRQ4), held until acked via 0x8A0001.
     video_int: bool,
@@ -737,6 +792,8 @@ impl MarbleSystem {
             f60000_buttons: 0xFF,
             video_int: false,
             scanline_int: false,
+            trackball: [0; 4],
+            trackball_cur: [[0; 2]; 2],
             sound: MarbleSound::new(),
             sound_clock: ClockDivider::new(1, 4),
             audio_buffer: Vec::with_capacity(2048),
@@ -843,6 +900,22 @@ impl MarbleSystem {
     /// motion-object scanline interrupt (IRQ3) is asserted.
     fn int3_state(&self) -> u16 {
         if self.scanline_int { 0x0080 } else { 0x0000 }
+    }
+
+    /// Trackball read (0xF20000-0xF20007: four byte ports). Marble's trackballs
+    /// are mounted at 45°, so the hardware returns rotated counter pairs: the X
+    /// port yields `x + y`, the paired Y port `x - y`. The even (X) read latches
+    /// both from the live counters so the odd (Y) read sees the same snapshot.
+    fn trackball_read(&mut self, addr: u32) -> u16 {
+        let offset = ((addr >> 1) & 3) as usize;
+        let player = (offset >> 1) & 1;
+        let which = offset & 1;
+        if which == 0 {
+            let (x, y) = (self.trackball[player * 2], self.trackball[player * 2 + 1]);
+            self.trackball_cur[player][0] = x.wrapping_add(y);
+            self.trackball_cur[player][1] = x.wrapping_sub(y);
+        }
+        self.trackball_cur[player][which] as u16
     }
 
     /// Whether any motion-object timer entry in the active sprite bank targets
@@ -1061,7 +1134,16 @@ impl MarbleSystem {
     /// pen 0. The palette index is `0x100 + palcolor*16 + pen`, with the priority
     /// flag OR'd in for the merge step.
     #[allow(clippy::too_many_arguments)]
-    fn draw_mo_entry(&self, mo: &mut [u16], w: usize, h: usize, w0: u16, w1: u16, w2: u16, prio: u16) {
+    fn draw_mo_entry(
+        &self,
+        mo: &mut [u16],
+        w: usize,
+        h: usize,
+        w0: u16,
+        w1: u16,
+        w2: u16,
+        prio: u16,
+    ) {
         let ml = self.playfield.mo_lookup[(w1 >> 8) as usize];
         let bank_id = ((ml >> 8) & 0x0F) as usize;
         let Some(bank) = self.playfield.banks.get(bank_id) else {
@@ -1185,7 +1267,7 @@ impl Bus for MarbleSystem {
             0x08_0000..=0x08_7FFF => self.slapstic_read(addr),
             0x2E_0000..=0x2E_0001 => self.int3_state(),
             0xF0_0000..=0xF0_03FF => self.eeprom[((addr >> 1) & 0x1FF) as usize] as u16,
-            0xF2_0000..=0xF2_0007 => 0x0000, // Trackballs (Phase 5)
+            0xF2_0000..=0xF2_0007 => self.trackball_read(addr),
             0xF4_0000..=0xF4_001F => 0x00FF, // Joystick/ADC (unused by marble)
             0xF6_0000..=0xF6_0003 => self.read_f60000(),
             0xFC_0000..=0xFC_0001 => self.sound.read_response() as u16,
@@ -1270,15 +1352,30 @@ impl InputConfigurable for MarbleSystem {
     }
 
     fn handle_input(&mut self, event: InputEvent) {
-        if let InputEvent::Button { id, pressed } = event {
-            match id.0 as u8 {
+        match event {
+            InputEvent::Button { id, pressed } => match id.0 as u8 {
                 INPUT_START1 => set_bit_active_low(&mut self.f60000_buttons, 0, pressed),
                 INPUT_START2 => set_bit_active_low(&mut self.f60000_buttons, 1, pressed),
                 INPUT_SERVICE => set_bit_active_low(&mut self.f60000_buttons, 6, pressed),
                 _ => {}
+            },
+            InputEvent::Relative { id, delta } => {
+                // Free-running 8-bit counters. The X axes are reversed to match
+                // the cabinet's PORT_REVERSE wiring.
+                let acc = |c: &mut u8, d: i32| *c = (*c as i32).wrapping_add(d) as u8;
+                let d = delta as i32;
+                if id == CTRL_P1_TRACK_X {
+                    acc(&mut self.trackball[0], -d);
+                } else if id == CTRL_P1_TRACK_Y {
+                    acc(&mut self.trackball[1], d);
+                } else if id == CTRL_P2_TRACK_X {
+                    acc(&mut self.trackball[2], -d);
+                } else if id == CTRL_P2_TRACK_Y {
+                    acc(&mut self.trackball[3], d);
+                }
             }
+            InputEvent::Absolute { .. } => {}
         }
-        // Trackballs (F20000) and coins (sound port 1820) are Phases 5 and 4.
     }
 }
 
@@ -1317,6 +1414,8 @@ impl MachineCore for MarbleSystem {
         self.f60000_buttons = 0xFF;
         self.video_int = false;
         self.scanline_int = false;
+        self.trackball = [0; 4];
+        self.trackball_cur = [[0; 2]; 2];
         self.watchdog_count = 0;
         // EEPROM contents are non-volatile and survive reset.
 
@@ -1351,6 +1450,9 @@ impl Saveable for MarbleSystem {
         w.write_u8(self.f60000_buttons);
         w.write_bool(self.video_int);
         w.write_bool(self.scanline_int);
+        w.write_bytes(&self.trackball);
+        w.write_bytes(&self.trackball_cur[0]);
+        w.write_bytes(&self.trackball_cur[1]);
         w.write_u64_le(self.clock);
         w.write_u8(self.watchdog_count);
     }
@@ -1375,6 +1477,9 @@ impl Saveable for MarbleSystem {
         self.f60000_buttons = r.read_u8()?;
         self.video_int = r.read_bool()?;
         self.scanline_int = r.read_bool()?;
+        r.read_bytes_into(&mut self.trackball)?;
+        r.read_bytes_into(&mut self.trackball_cur[0])?;
+        r.read_bytes_into(&mut self.trackball_cur[1])?;
         self.clock = r.read_u64_le()?;
         self.watchdog_count = r.read_u8()?;
         Ok(())
@@ -1556,6 +1661,32 @@ mod tests {
             pressed: true,
         });
         assert_eq!(sys.read_f60000() & 0x0001, 0x0000);
+    }
+
+    #[test]
+    fn trackball_reads_rotated_counters() {
+        let mut sys = MarbleSystem::new();
+        // Move P1's trackball: X +10 (reversed → counter −10 = 246), Y +3.
+        sys.handle_input(InputEvent::Relative {
+            id: CTRL_P1_TRACK_X,
+            delta: 10.0,
+        });
+        sys.handle_input(InputEvent::Relative {
+            id: CTRL_P1_TRACK_Y,
+            delta: 3.0,
+        });
+        assert_eq!(sys.trackball, [246, 3, 0, 0]);
+
+        // The 45° rotation: X port = x+y, Y port = x-y. The even read latches
+        // both, so the odd read sees the same snapshot.
+        let xport = sys.trackball_read(0xF2_0000); // P1 X
+        let yport = sys.trackball_read(0xF2_0002); // P1 Y
+        assert_eq!(xport, 246u16.wrapping_add(3) & 0xFF);
+        assert_eq!(yport, 246u16.wrapping_sub(3) & 0xFF);
+
+        // P2 ports are independent and idle at zero.
+        assert_eq!(sys.trackball_read(0xF2_0004), 0);
+        assert_eq!(sys.trackball_read(0xF2_0006), 0);
     }
 
     /// Boot a hand-assembled 68010 program on the full board and prove the core
@@ -1771,7 +1902,11 @@ mod tests {
         let (w, h) = sys.display_size();
         let mut buf = vec![0u8; (w * h * 3) as usize];
         sys.render_frame(&mut buf);
-        assert_eq!(&buf[0..3], &[0, 254, 0], "low-priority sprite drawn opaquely");
+        assert_eq!(
+            &buf[0..3],
+            &[0, 254, 0],
+            "low-priority sprite drawn opaquely"
+        );
     }
 
     #[test]
@@ -1789,7 +1924,11 @@ mod tests {
         let (w, h) = sys.display_size();
         let mut buf = vec![0u8; (w * h * 3) as usize];
         sys.render_frame(&mut buf);
-        assert_eq!(&buf[0..3], &[0, 254, 0], "high-priority sprite uses the translucent bank");
+        assert_eq!(
+            &buf[0..3],
+            &[0, 254, 0],
+            "high-priority sprite uses the translucent bank"
+        );
     }
 
     #[test]
@@ -1804,7 +1943,10 @@ mod tests {
         mob[0x80] = 0xFF; // word[1] = 0xFFFF marks a timer
         mob[0x81] = 0xFF;
 
-        assert!(sys.timer_irq_at_scanline(100), "fires on the target scanline");
+        assert!(
+            sys.timer_irq_at_scanline(100),
+            "fires on the target scanline"
+        );
         assert!(!sys.timer_irq_at_scanline(99), "not on adjacent scanlines");
         assert!(!sys.timer_irq_at_scanline(101));
 
@@ -1812,7 +1954,10 @@ mod tests {
         let mob = sys.map.region_data_mut(Region::Mob);
         mob[0x80] = 0x01; // word[1] no longer 0xFFFF
         mob[0x81] = 0x23;
-        assert!(!sys.timer_irq_at_scanline(100), "ordinary sprites don't fire IRQ3");
+        assert!(
+            !sys.timer_irq_at_scanline(100),
+            "ordinary sprites don't fire IRQ3"
+        );
 
         // The state bit drives IRQ3 and the 0x2E0000 status read together.
         sys.scanline_int = true;
