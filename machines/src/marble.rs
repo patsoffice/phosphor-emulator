@@ -557,6 +557,8 @@ pub const INPUT_START1: u8 = 0;
 pub const INPUT_START2: u8 = 1;
 /// Service / self-test switch (F60000 bit 6, active-low `PORT_SERVICE`).
 pub const INPUT_SERVICE: u8 = 2;
+/// Coin insert (sound port 0x1820 bit 0, active-low).
+pub const INPUT_COIN: u8 = 3;
 
 /// Typed control ids for the analog trackball axes — a separate `InputId`
 /// namespace from the digital buttons above.
@@ -566,6 +568,14 @@ const CTRL_P2_TRACK_X: InputId = InputId(12);
 const CTRL_P2_TRACK_Y: InputId = InputId(13);
 
 const MARBLE_CONTROLS: &[InputControl] = &[
+    InputControl {
+        id: InputId(INPUT_COIN as u16),
+        stable_name: "coin",
+        label: "Coin",
+        kind: InputKind::Coin,
+        player: None,
+        default_bindings: crate::input_defaults::COIN,
+    },
     InputControl {
         id: InputId(INPUT_START1 as u16),
         stable_name: "p1_start",
@@ -1357,6 +1367,8 @@ impl InputConfigurable for MarbleSystem {
                 INPUT_START1 => set_bit_active_low(&mut self.f60000_buttons, 0, pressed),
                 INPUT_START2 => set_bit_active_low(&mut self.f60000_buttons, 1, pressed),
                 INPUT_SERVICE => set_bit_active_low(&mut self.f60000_buttons, 6, pressed),
+                // Coins are read on the sound board's 0x1820 port.
+                INPUT_COIN => self.sound.set_coin(0, pressed),
                 _ => {}
             },
             InputEvent::Relative { id, delta } => {

@@ -45,6 +45,9 @@ pub struct MarbleSound {
     /// Addressable output latch (LS259): bit 0 = YM reset (ignored by the stub),
     /// bits 6-7 = coin counters (Phase 5).
     outlatch: u8,
+    /// Coin switches read at 0x1820 (active-low, bits 0-2): a set bit here means
+    /// that coin mech is currently pressed, so its 0x1820 bit reads 0.
+    coin_inputs: u8,
 
     // Inter-CPU latches.
     /// Command from the main CPU; `command_pending` is the 68KBUF flag.
@@ -73,6 +76,7 @@ impl MarbleSound {
             pokey: Pokey::with_clock(SOUND_CLOCK_HZ, AUDIO_SAMPLE_RATE),
             ym: Ym2151::new(),
             outlatch: 0,
+            coin_inputs: 0,
             soundlatch: 0,
             command_pending: false,
             mainlatch: 0,
@@ -94,6 +98,7 @@ impl MarbleSound {
         self.pokey.reset();
         self.ym.reset();
         self.outlatch = 0;
+        self.coin_inputs = 0;
         self.soundlatch = 0;
         self.command_pending = false;
         self.mainlatch = 0;
@@ -135,6 +140,16 @@ impl MarbleSound {
     /// SNDBUF: a response is latched for the main CPU — drives main IRQ6.
     pub fn response_pending(&self) -> bool {
         self.response_pending
+    }
+
+    /// Press/release a coin switch (`bit` 0-2 → coin 1-3), read back at 0x1820.
+    pub fn set_coin(&mut self, bit: u8, pressed: bool) {
+        let mask = 1u8 << (bit & 0x07);
+        if pressed {
+            self.coin_inputs |= mask;
+        } else {
+            self.coin_inputs &= !mask;
+        }
     }
 
     /// Drive the sound CPU's reset line (bankselect bit 7: 1 = run, 0 = hold).
@@ -185,12 +200,13 @@ impl MarbleSound {
         )
     }
 
-    /// The 0x1820 status port: coin inputs (idle), plus the buffer-full flags.
+    /// The 0x1820 status port: coin inputs, plus the buffer-full flags.
     fn read_1820(&self) -> u8 {
-        // Coins (bits 0-2, active-low) idle high and bit 7 idle high; bit 3 =
-        // command pending (68KBUF), bit 4 = response pending (SNDBUF). Real coin
-        // inputs and the self-test (bit 7) toggle land in Phase 5.
-        let mut v = 0x87;
+        // Coins (bits 0-2, active-low) and bit 7 idle high; a pressed coin mech
+        // pulls its bit low. Bit 3 = command pending (68KBUF), bit 4 = response
+        // pending (SNDBUF). The self-test bit (7) toggle lands with the operator
+        // service switch.
+        let mut v = 0x87 & !(self.coin_inputs & 0x07);
         if self.command_pending {
             v |= 0x08;
         }
@@ -316,6 +332,7 @@ impl Saveable for MarbleSound {
         self.ym.save_state(w);
         w.write_bytes(self.sound_ram.as_ref());
         w.write_u8(self.outlatch);
+        w.write_u8(self.coin_inputs);
         w.write_u8(self.soundlatch);
         w.write_bool(self.command_pending);
         w.write_u8(self.mainlatch);
@@ -332,6 +349,7 @@ impl Saveable for MarbleSound {
         self.ym.load_state(r)?;
         r.read_bytes_into(self.sound_ram.as_mut())?;
         self.outlatch = r.read_u8()?;
+        self.coin_inputs = r.read_u8()?;
         self.soundlatch = r.read_u8()?;
         self.command_pending = r.read_bool()?;
         self.mainlatch = r.read_u8()?;
@@ -383,6 +401,19 @@ mod tests {
         for _ in 0..cycles {
             snd.tick();
         }
+    }
+
+    #[test]
+    fn coin_switch_pulls_1820_bit_low() {
+        let mut snd = board_with_echo_program();
+        // Coins idle high (active-low).
+        assert_eq!(snd.read_1820() & 0x07, 0x07);
+        // Pressing coin 1 clears bit 0; the other coin bits stay high.
+        snd.set_coin(0, true);
+        assert_eq!(snd.read_1820() & 0x07, 0x06);
+        // Releasing restores it.
+        snd.set_coin(0, false);
+        assert_eq!(snd.read_1820() & 0x07, 0x07);
     }
 
     #[test]
