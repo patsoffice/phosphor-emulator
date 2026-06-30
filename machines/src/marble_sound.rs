@@ -111,7 +111,14 @@ impl MarbleSound {
     pub fn write_command(&mut self, data: u8) {
         self.soundlatch = data;
         self.command_pending = true;
-        self.sound_nmi = true;
+        // The NMI is a falling edge on /NMI. While the sound CPU is held in
+        // reset its edge detector is cleared, so a command latched during reset
+        // raises 68KBUF but generates no NMI — the CPU picks it up by polling
+        // 0x1820 once it has booted. Only a command latched while the CPU is
+        // running produces an edge.
+        if !self.held_reset {
+            self.sound_nmi = true;
+        }
     }
 
     /// Main CPU reads the sound response (0xFC0000), clearing the pending flag.
@@ -407,6 +414,28 @@ mod tests {
         // Main reads the response (command + 1) and clears SNDBUF.
         assert_eq!(snd.read_response(), 0x43);
         assert!(!snd.response_pending());
+    }
+
+    #[test]
+    fn command_latched_during_reset_raises_no_nmi() {
+        // The main CPU latches a command while the sound CPU is still held in
+        // reset (this is exactly the boot handshake: command written, then the
+        // reset line released a cycle later). The reset holds the 6502's /NMI
+        // edge detector clear, so no NMI edge is produced — the freshly booted
+        // CPU must pick the command up by polling 0x1820 (68KBUF), not service a
+        // spurious NMI before it has run its init. See the boot desync this
+        // guards against: an early NMI corrupts the first command/response.
+        let mut snd = board_with_echo_program();
+        assert!(snd.held_reset, "starts held in reset");
+        snd.write_command(0x00);
+        assert!(snd.command_pending(), "68KBUF set for the poll path");
+        assert!(!snd.sound_nmi, "no NMI edge while held in reset");
+
+        // A command latched once the CPU is running does produce an NMI edge.
+        snd.set_reset(false);
+        run(&mut snd, 20);
+        snd.write_command(0x10);
+        assert!(snd.sound_nmi, "running CPU sees the NMI edge");
     }
 
     #[test]
