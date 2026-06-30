@@ -365,7 +365,11 @@ mod tests {
     fn direct_switch_selects_each_bank() {
         for (i, &sel) in DIRECT.iter().enumerate() {
             let mut sl = Slapstic::new();
-            assert_eq!(run(&mut sl, &[ARM, sel]), i as u8, "bank {i} via {sel:#08X}");
+            assert_eq!(
+                run(&mut sl, &[ARM, sel]),
+                i as u8,
+                "bank {i} via {sel:#08X}"
+            );
         }
     }
 
@@ -388,7 +392,13 @@ mod tests {
             let mut sl = Slapstic::new();
             let final_bank = run(
                 &mut sl,
-                &[ARM, ALT_START_IN, ALT_VALID_AT, alt_select_at(bank), ALT_COMMIT_AT],
+                &[
+                    ARM,
+                    ALT_START_IN,
+                    ALT_VALID_AT,
+                    alt_select_at(bank),
+                    ALT_COMMIT_AT,
+                ],
             );
             assert_eq!(final_bank, bank as u8, "alt bank {bank}");
         }
@@ -401,7 +411,13 @@ mod tests {
         let mut sl = Slapstic::new();
         let final_bank = run(
             &mut sl,
-            &[ARM, 0x0040_005A, ALT_VALID_AT, alt_select_at(2), ALT_COMMIT_AT],
+            &[
+                ARM,
+                0x0040_005A,
+                ALT_VALID_AT,
+                alt_select_at(2),
+                ALT_COMMIT_AT,
+            ],
         );
         assert_eq!(final_bank, 2, "off-window alt start must still bank-switch");
     }
@@ -421,7 +437,14 @@ mod tests {
         let mut sl = Slapstic::new();
         let final_bank = run(
             &mut sl,
-            &[ARM, 0x0008_6980, 0x0008_0080, 0x0008_6980, 0x0008_6980, 0x0008_69A0],
+            &[
+                ARM,
+                0x0008_6980,
+                0x0008_0080,
+                0x0008_6980,
+                0x0008_6980,
+                0x0008_69A0,
+            ],
         );
         // odd clear0 = 0x34C0 clears bit0 (3→2); on the even phase the same
         // access maps to set1 (|=2), so the result stays 2 — documenting the
@@ -454,7 +477,10 @@ mod tests {
     fn save_load_round_trips_state() {
         let mut sl = Slapstic::new();
         // Drive partway into an alt sequence so state + loaded_bank are non-trivial.
-        run(&mut sl, &[ARM, ALT_START_IN, ALT_VALID_AT, alt_select_at(2)]);
+        run(
+            &mut sl,
+            &[ARM, ALT_START_IN, ALT_VALID_AT, alt_select_at(2)],
+        );
         assert_eq!(sl.state, State::AltCommit);
         assert_eq!(sl.loaded_bank, 2);
 
