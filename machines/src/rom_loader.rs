@@ -227,9 +227,17 @@ pub struct RomRegion {
 
 impl RomRegion {
     /// Load all ROM files into a contiguous byte array, validating sizes
-    /// and CRC32 checksums.
+    /// and CRC32 checksums. Gaps not covered by any entry are left as `0x00`.
     pub fn load(&self, rom_set: &RomSet) -> Result<Vec<u8>, RomLoadError> {
-        self.load_inner(rom_set, true)
+        self.load_inner(rom_set, true, 0x00)
+    }
+
+    /// Like [`load`](Self::load), but pre-fills the region with `erase` before
+    /// placing entries, so gaps read back as `erase`. This mirrors MAME's
+    /// `ROMREGION_ERASEFF` (use `0xFF`); pair it with a whole-region invert to
+    /// reproduce `ROMREGION_INVERT | ROMREGION_ERASEFF` (gaps become `0x00`).
+    pub fn load_erased(&self, rom_set: &RomSet, erase: u8) -> Result<Vec<u8>, RomLoadError> {
+        self.load_inner(rom_set, true, erase)
     }
 
     /// Load all ROM files into a contiguous byte array, validating sizes
@@ -237,15 +245,16 @@ impl RomRegion {
     ///
     /// Useful for modified/hacked ROMs or development builds.
     pub fn load_skip_checksums(&self, rom_set: &RomSet) -> Result<Vec<u8>, RomLoadError> {
-        self.load_inner(rom_set, false)
+        self.load_inner(rom_set, false, 0x00)
     }
 
     fn load_inner(
         &self,
         rom_set: &RomSet,
         verify_checksums: bool,
+        erase: u8,
     ) -> Result<Vec<u8>, RomLoadError> {
-        let mut region = vec![0u8; self.size];
+        let mut region = vec![erase; self.size];
 
         for entry in self.entries {
             debug_assert!(
@@ -500,6 +509,30 @@ mod tests {
         assert!(loaded[..8].iter().all(|&b| b == 0x11));
         assert!(loaded[8..16].iter().all(|&b| b == 0x22));
         assert!(loaded[16..24].iter().all(|&b| b == 0x33));
+    }
+
+    #[test]
+    fn load_erased_fills_gaps_with_erase_value() {
+        // One 4-byte chip at offset 4 of a 12-byte region; the bytes before and
+        // after are gaps that should read back as the erase value, not 0x00.
+        static ENTRIES: [RomEntry; 1] = [RomEntry {
+            name: "chip.bin",
+            size: 4,
+            offset: 4,
+            crc32: &[],
+        }];
+        let region = RomRegion {
+            size: 12,
+            entries: &ENTRIES,
+        };
+        let rom_set = RomSet::from_slices(&[("chip.bin", &[0xAA; 4])]);
+        let loaded = region.load_erased(&rom_set, 0xFF).unwrap();
+        assert_eq!(&loaded[0..4], &[0xFF; 4], "leading gap = erase value");
+        assert_eq!(&loaded[4..8], &[0xAA; 4], "chip data placed verbatim");
+        assert_eq!(&loaded[8..12], &[0xFF; 4], "trailing gap = erase value");
+        // Plain load still zero-fills gaps.
+        let zero = region.load(&rom_set).unwrap();
+        assert_eq!(&zero[0..4], &[0x00; 4]);
     }
 
     #[test]
