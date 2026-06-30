@@ -1,4 +1,4 @@
-//! Marble Madness sound board: an M6502 with a YM2151 (stubbed) and a POKEY,
+//! Marble Madness sound board: an M6502 with a YM2151 (OPM FM) and a POKEY,
 //! talking to the 68010 main CPU through a pair of one-byte latches.
 //!
 //! The board owns the M6502 and implements [`Bus`] for it (a 16-bit space), in
@@ -42,7 +42,7 @@ pub struct MarbleSound {
     sound_rom: Box<[u8; 0xC000]>,
     pokey: Pokey,
     ym: Ym2151,
-    /// Addressable output latch (LS259): bit 0 = YM reset (ignored by the stub),
+    /// Addressable output latch (LS259): bit 0 = YM reset (unused here),
     /// bits 6-7 = coin counters (Phase 5).
     outlatch: u8,
     /// Coin switches read at 0x1820 (active-low, bits 0-2): a set bit here means
@@ -183,10 +183,25 @@ impl MarbleSound {
         self.clock += 1;
     }
 
-    /// Drain accumulated audio (POKEY only; the YM2151 stub is silent).
+    /// Drain and mix the sound board's audio: the POKEY (unipolar `[0, 1]`, 0 at
+    /// silence) plus the YM2151 FM voices (bipolar). Both streams resample to the
+    /// same host rate, so they line up sample-for-sample. The result still
+    /// carries the POKEY's DC; the machine removes it before output.
     pub fn drain_audio(&mut self) -> Vec<f32> {
-        let _ = self.ym.drain_audio();
-        self.pokey.drain_audio()
+        /// FM mix gain. The YM core normalises its eight-channel sum to full
+        /// scale, so typical music sits well below 1.0; lift it to a healthy
+        /// level in the mix. Tunable by ear.
+        const YM_MIX: f32 = 3.0;
+
+        let ym = self.ym.drain_audio();
+        let pokey = self.pokey.drain_audio();
+        let n = pokey.len().max(ym.len());
+        let mut out = vec![0.0f32; n];
+        for (i, slot) in out.iter_mut().enumerate() {
+            *slot =
+                pokey.get(i).copied().unwrap_or(0.0) + ym.get(i).copied().unwrap_or(0.0) * YM_MIX;
+        }
+        out
     }
 
     /// (held_reset, sound-CPU cycles run, command_pending, response_pending) —

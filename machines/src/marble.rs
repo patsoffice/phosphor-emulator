@@ -780,6 +780,11 @@ pub struct MarbleSystem {
     /// bit 7. Recomputed at every scanline boundary from the active sprite bank.
     scanline_int: bool,
 
+    /// One-pole DC-blocker state (prev input, prev output) for the audio mix —
+    /// removes the POKEY's unipolar DC so the FM music gets full headroom, the
+    /// way the cabinet's AC-coupled amplifier does.
+    audio_dc: (f32, f32),
+
     /// M6502 sound board (POKEY + YM2151 stub + inter-CPU latches).
     #[debug_device("Sound")]
     sound: MarbleSound,
@@ -866,6 +871,7 @@ impl MarbleSystem {
             f60000_buttons: 0xFF,
             video_int: false,
             scanline_int: false,
+            audio_dc: (0.0, 0.0),
             trackball: [0; 4],
             trackball_cur: [[0; 2]; 2],
             track_accum: [0; 4],
@@ -1504,11 +1510,18 @@ impl MachineCore for MarbleSystem {
             self.reset();
         }
 
-        // Drain the sound board's POKEY output (mono) into the audio queue.
-        // Samples are [0, 1]; centre and scale to signed 16-bit.
+        // Drain the sound board's mixed audio (POKEY + YM2151 FM, mono), strip
+        // the DC with a one-pole high-pass (cutoff ≈ 35 Hz), then scale and clamp
+        // to signed 16-bit.
+        let (mut x1, mut y1) = self.audio_dc;
         let samples = self.sound.drain_audio();
-        self.audio_buffer
-            .extend(samples.iter().map(|&s| ((s - 0.5) * 2.0 * 32767.0) as i16));
+        self.audio_buffer.extend(samples.iter().map(|&x| {
+            let y = x - x1 + 0.995 * y1;
+            x1 = x;
+            y1 = y;
+            (y * 2.0 * 32767.0).clamp(-32767.0, 32767.0) as i16
+        }));
+        self.audio_dc = (x1, y1);
     }
 
     fn reset(&mut self) {
@@ -1524,6 +1537,7 @@ impl MachineCore for MarbleSystem {
         self.f60000_buttons = 0xFF;
         self.video_int = false;
         self.scanline_int = false;
+        self.audio_dc = (0.0, 0.0);
         self.trackball = [0; 4];
         self.trackball_cur = [[0; 2]; 2];
         self.track_accum = [0; 4];

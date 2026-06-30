@@ -759,8 +759,9 @@ impl Ym2151 {
         while self.clock_acc >= CLOCKS_PER_SAMPLE {
             self.clock_acc -= CLOCKS_PER_SAMPLE;
             let sample = self.generate_sample();
-            // Eight channels of ±13-bit volume → roughly [-1, 1].
-            self.native.push(sample as f32 / 32768.0);
+            // Eight channels each clipped to ±32767; normalise that full-scale
+            // sum to [-1, 1].
+            self.native.push(sample as f32 / 262_144.0);
         }
     }
 
