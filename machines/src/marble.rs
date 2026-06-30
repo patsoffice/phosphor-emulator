@@ -206,8 +206,10 @@ const ALPHA_TILE_COUNT: usize = 512;
 
 /// Playfield / motion-object tile ROM ("tiles" region, 0x100000). Two 0x80000
 /// banks; bank 1 holds five bitplanes, bank 2 three. The region is
-/// `ROMREGION_INVERT | ROMREGION_ERASEFF`: load zero-filled, then invert the
-/// whole buffer (gaps 0x00→0xFF = erase, data → inverted), see `load_rom_set`.
+/// `ROMREGION_INVERT | ROMREGION_ERASEFF`: erase to 0xFF, place the chips, then
+/// invert the whole buffer (gaps 0xFF→0x00 = erase, data → inverted), see
+/// `load_rom_set`. Bank 2's absent plane 3 thus reads 0, keeping sprite pens in
+/// 0-7 rather than forcing pen bit 3.
 pub static MARBLE_TILE_ROM: RomRegion = RomRegion {
     size: 0x100000,
     entries: &[
@@ -379,6 +381,7 @@ const PROM2_PLANE_5_ENABLE: u8 = 0x20; // active high
 const PROM2_PLANE_4_ENABLE: u8 = 0x10;
 const PROM2_PF_COLOR_MASK: u8 = 0x0F; // negative logic
 const PROM2_BANK_7: u8 = 0x08;
+const PROM2_MO_COLOR_MASK: u8 = 0x07; // negative logic (motion objects)
 
 /// 8×8 tiles, `char_increment` 64 bits (8 bytes). Planes sit 0x10000 bytes apart
 /// (`0x80000` bits) and are stored MSB-first, so the plane list is reversed for
@@ -421,11 +424,14 @@ impl GfxBank {
     }
 }
 
-/// The decoded playfield graphics: the 256-entry remap lookup plus the tile
-/// banks it references. `banks[0]` is a blank placeholder so real banks are
-/// 1-indexed (matching the lookup's gfx field; the 0 slot is reserved).
+/// The decoded tile graphics: the playfield and motion-object remap lookups
+/// (256 entries each) plus the tile banks they share. `banks[0]` is a blank
+/// placeholder so real banks are 1-indexed (matching the lookups' gfx field;
+/// the 0 slot is reserved — and is what an unmapped motion-object bank resolves
+/// to, i.e. an invisible sprite).
 struct PlayfieldGfx {
     lookup: [u16; 256],
+    mo_lookup: [u16; 256],
     banks: Vec<GfxBank>,
 }
 
@@ -433,6 +439,7 @@ impl PlayfieldGfx {
     fn empty() -> Self {
         Self {
             lookup: [0; 256],
+            mo_lookup: [0; 256],
             banks: vec![GfxBank::blank()],
         }
     }
@@ -482,17 +489,18 @@ fn get_pf_bank(
     id
 }
 
-/// Build the playfield remap lookup and decode its tile banks from the PROMs and
-/// the (already inverted) tile ROM. This is the playfield half of the remap;
-/// entries 256-511 of the PROMs drive the motion objects (Phase 3c).
-fn build_playfield_gfx(prom: &[u8], tiles: &[u8]) -> PlayfieldGfx {
+/// Build the playfield and motion-object remap lookups and decode the tile banks
+/// they share, from the PROMs and the (already inverted) tile ROM. The two PROMs
+/// hold two parallel halves: entries 0-255 drive the playfield, 256-511 the
+/// motion objects (each with its own colour mask), keyed by prom1 at +0x000/
+/// +0x100 and prom2 at +0x200/+0x300.
+fn build_tile_gfx(prom: &[u8], tiles: &[u8]) -> PlayfieldGfx {
     let mut gfx = PlayfieldGfx::empty();
     let mut bank_gfx: HashMap<(u8, u8), u8> = HashMap::new();
-    // prom1 = proms[0x000..], prom2 = proms[0x200..]; entries 0-255 = playfield.
     for i in 0..256 {
+        // --- Playfield half (prom1 @ 0x000, prom2 @ 0x200) ---
         let p1 = prom[i];
         let p2 = prom[0x200 + i];
-
         let bpp = if p2 & PROM2_PLANE_4_ENABLE != 0 {
             if p2 & PROM2_PLANE_5_ENABLE != 0 { 6 } else { 5 }
         } else {
@@ -508,6 +516,20 @@ fn build_playfield_gfx(prom: &[u8], tiles: &[u8]) -> PlayfieldGfx {
             color = 0;
         }
         gfx.lookup[i] = offset | ((bank as u16) << 8) | (color << 12);
+
+        // --- Motion-object half (prom1 @ 0x100, prom2 @ 0x300) ---
+        let m1 = prom[0x100 + i];
+        let m2 = prom[0x300 + i];
+        let mbpp = if m2 & PROM2_PLANE_4_ENABLE != 0 {
+            if m2 & PROM2_PLANE_5_ENABLE != 0 { 6 } else { 5 }
+        } else {
+            4
+        };
+        let mo_offset = (m1 & PROM1_OFFSET_MASK) as u16;
+        let mo_color = (((!m2) & PROM2_MO_COLOR_MASK) >> (mbpp - 4)) as u16;
+        // No bank-0 remap for sprites — an unmapped bank stays 0 (invisible).
+        let mo_bank = get_pf_bank(m1, m2, mbpp, tiles, &mut gfx.banks, &mut bank_gfx);
+        gfx.mo_lookup[i] = mo_offset | ((mo_bank as u16) << 8) | (mo_color << 12);
     }
     gfx
 }
@@ -728,16 +750,19 @@ impl MarbleSystem {
         let alpha = MARBLE_ALPHA_ROM.load(rom_set)?;
         self.alpha_cache = decode_gfx(&alpha, 0, ALPHA_TILE_COUNT, &MARBLE_ALPHA_LAYOUT);
 
-        // Playfield tile banks + PROM remap. The tiles region is
-        // ROMREGION_INVERT | ROMREGION_ERASEFF: RomRegion zero-fills the gaps, so
-        // inverting the whole buffer yields erase-FF gaps and inverted tile data
-        // in one pass. The motion objects (Phase 3c) reuse this same gfx.
-        let mut tiles = MARBLE_TILE_ROM.load(rom_set)?;
+        // Playfield + motion-object tile banks and PROM remap. The tiles region
+        // is ROMREGION_INVERT | ROMREGION_ERASEFF: erase to 0xFF, place the
+        // chips, then invert the whole buffer — so gaps become 0x00 and chip
+        // data is inverted, exactly as MAME's region_post_process does. (Gaps
+        // matter: bank 2 has no plane-3 chip, and a 0x00 plane 3 keeps its
+        // sprite pens in 0-7 — an 0xFF gap would force pen bit 3 and render the
+        // marble black.)
+        let mut tiles = MARBLE_TILE_ROM.load_erased(rom_set, 0xFF)?;
         for b in tiles.iter_mut() {
             *b = !*b;
         }
         let prom = MARBLE_PROM.load(rom_set)?;
-        self.playfield = build_playfield_gfx(&prom, &tiles);
+        self.playfield = build_tile_gfx(&prom, &tiles);
 
         // M6502 sound program.
         let sound_image = MARBLE_SOUND_ROM.load(rom_set)?;
@@ -867,6 +892,9 @@ impl MarbleSystem {
         let mut index = vec![0u16; w * h];
         self.render_playfield(&mut index, w, h);
 
+        // Layer 2: motion objects, merged over the playfield.
+        self.render_motion_objects(&mut index, w, h);
+
         // Layer 3: alpha on top, then resolve every pixel to RGB.
         let alpha = self.map.region_data(Region::Alpha);
         for sy in 0..h {
@@ -923,6 +951,122 @@ impl MarbleSystem {
                         .pixel(code % bank.cache.count(), src_x % 8, src_y % 8);
                     let color = 0x20 + (palcolor << (bank.bpp - 3));
                     index[sy * w + sx] = ((0x100 + color * 8 + pen as usize) & 0x3FF) as u16;
+                }
+            }
+        }
+    }
+
+    /// Walk the active motion-object bank's linked list, rasterise each sprite,
+    /// and merge it over the playfield index buffer.
+    ///
+    /// A bank is 64 entries of 4 words in *split* layout: entry N's four words
+    /// sit 0x40 words apart at base+N, base+0x40+N, base+0x80+N, base+0xC0+N.
+    /// Word[0] = X-flip / Y-pos / height-1, word[1] = colour:code (0xFFFF marks a
+    /// timer entry, not a sprite), word[2] = priority / X-pos, word[3] = link to
+    /// the next entry. The list is followed from entry 0 until it loops or 56
+    /// entries are visited. The sprite layer has a fixed yscroll of 256 and no
+    /// xscroll; positions wrap in a 512×512 space.
+    ///
+    /// Merge (matching the hardware's screen_update): a high-priority sprite pen
+    /// blends through the translucent bank (0x300 + pf_pen<<4 + mo_pen) unless its
+    /// pen is 1; a low-priority sprite draws over the playfield unless that pixel
+    /// is one of colour 0's priority pens (the 0x840000 mask), which lets the
+    /// playfield stand in front of sprites.
+    fn render_motion_objects(&self, index: &mut [u16], w: usize, h: usize) {
+        const TRANSPARENT: u16 = 0xFFFF;
+        const PRIORITY_BIT: u16 = 0x1000; // mobitmap priority flag (shift 12)
+
+        let mut mo = vec![TRANSPARENT; w * h];
+        let mob = self.map.region_data(Region::Mob);
+        let bank_base = ((self.bankselect >> 3) & 7) as usize * 256; // words
+        let word = |wi: usize| u16::from_be_bytes([mob[wi * 2], mob[wi * 2 + 1]]);
+
+        let mut visited = [false; 64];
+        let mut link = 0usize;
+        for _ in 0..56 {
+            if visited[link] {
+                break;
+            }
+            visited[link] = true;
+            let w0 = word(bank_base + link);
+            let w1 = word(bank_base + 0x40 + link);
+            let w2 = word(bank_base + 0x80 + link);
+            let w3 = word(bank_base + 0xC0 + link);
+            // 0xFFFF in word[1] is a scanline timer, not a sprite.
+            if w1 != 0xFFFF {
+                self.draw_mo_entry(&mut mo, w, h, w0, w1, w2, PRIORITY_BIT);
+            }
+            link = (w3 & 0x3F) as usize;
+        }
+
+        // Merge the sprite bitmap over the playfield.
+        let priority_pens = self.priority_pens;
+        for (dst, &m) in index.iter_mut().zip(mo.iter()) {
+            if m == TRANSPARENT {
+                continue;
+            }
+            let pf = *dst;
+            if m & PRIORITY_BIT != 0 {
+                // High priority → translucent blend, unless the sprite pen is 1.
+                if m & 0x0F != 1 {
+                    *dst = 0x300 + ((pf & 0x0F) << 4) + (m & 0x0F);
+                }
+            } else if pf & 0xF8 != 0 || priority_pens & (1 << (pf & 0x07)) == 0 {
+                // Low priority → draw unless the playfield pixel is a colour-0
+                // priority pen.
+                *dst = m;
+            }
+        }
+    }
+
+    /// Rasterise one motion object (1 tile wide, `height` tiles tall) into the
+    /// sprite index buffer `mo`, honouring horizontal flip and the transparent
+    /// pen 0. The palette index is `0x100 + palcolor*16 + pen`, with the priority
+    /// flag OR'd in for the merge step.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_mo_entry(&self, mo: &mut [u16], w: usize, h: usize, w0: u16, w1: u16, w2: u16, prio: u16) {
+        let ml = self.playfield.mo_lookup[(w1 >> 8) as usize];
+        let bank_id = ((ml >> 8) & 0x0F) as usize;
+        let Some(bank) = self.playfield.banks.get(bank_id) else {
+            return;
+        };
+        let base_code = (((ml & 0xFF) as usize) << 8) | (w1 & 0xFF) as usize;
+        let pal_base = 0x100 + ((ml >> 12) & 0x0F) * 16;
+        let prio_flag = if w2 & 0x8000 != 0 { prio } else { 0 };
+
+        let height = ((w0 & 0x000F) as usize) + 1;
+        let hflip = w0 & 0x8000 != 0;
+        // Sprite layer: xscroll 0, yscroll 256; positions wrap in 512×512.
+        let mut xpos = ((w2 >> 5) & 0x1FF) as i32;
+        let mut ypos = -(((w0 >> 5) & 0x1FF) as i32) - 256 - (height as i32) * 8;
+        xpos &= 0x1FF;
+        ypos &= 0x1FF;
+        if xpos >= w as i32 {
+            xpos -= 512;
+        }
+        if ypos >= h as i32 {
+            ypos -= 512;
+        }
+
+        let count = bank.cache.count();
+        for ty in 0..height {
+            let code = (base_code + ty) % count;
+            for py in 0..8usize {
+                let dy = ypos + (ty * 8 + py) as i32;
+                if dy < 0 || dy >= h as i32 {
+                    continue;
+                }
+                for px in 0..8usize {
+                    let dx = xpos + px as i32;
+                    if dx < 0 || dx >= w as i32 {
+                        continue;
+                    }
+                    let tx = if hflip { 7 - px } else { px };
+                    let pen = bank.cache.pixel(code, tx, py);
+                    if pen == 0 {
+                        continue; // transparent pen
+                    }
+                    mo[dy as usize * w + dx as usize] = (pal_base + pen as u16) | prio_flag;
                 }
             }
         }
@@ -1506,7 +1650,7 @@ mod tests {
         prom[0x000] = 0xE5;
         prom[0x200] = 0xC5;
         let tiles = vec![0u8; 0x100000];
-        let gfx = build_playfield_gfx(&prom, &tiles);
+        let gfx = build_tile_gfx(&prom, &tiles);
 
         // offset 5 | bank-id 1 (first decoded) | colour 0xA.
         assert_eq!(gfx.lookup[0], 0x0005 | (1 << 8) | (0xA << 12));
@@ -1524,7 +1668,7 @@ mod tests {
         prom[0x001] = 0xF0; // all PROM1 bank bits set
         prom[0x201] = 0xC0; // PROM2 bank bits set, planes off (4bpp)
         let tiles = vec![0u8; 0x100000];
-        let gfx = build_playfield_gfx(&prom, &tiles);
+        let gfx = build_tile_gfx(&prom, &tiles);
 
         assert_eq!(gfx.banks[1].bpp, 6, "plane 4+5 enable → 6bpp");
         // Unmapped entry falls back to bank 1 with offset/colour zeroed.
@@ -1551,6 +1695,58 @@ mod tests {
         sys.render_frame(&mut buf);
         // Alpha cell 0 is transparent, so the playfield pixel shows through.
         assert_eq!(&buf[0..3], &[0, 254, 0]);
+    }
+
+    /// Place one synthetic sprite at screen (0,0) and check it composites over
+    /// the playfield in the motion-object palette bank.
+    fn sprite_test_system(pen: u8) -> MarbleSystem {
+        let mut sys = MarbleSystem::new();
+        // Sprite gfx bank 1: tile 0, pixel (0,0) = `pen`.
+        let mut cache = GfxCache::new(1, 8, 8);
+        cache.set_pixel(0, 0, 0, pen);
+        sys.playfield.banks.push(GfxBank { cache, bpp: 4 });
+        // Colour byte 0 → bank 1, offset 0, palcolor 0.
+        sys.playfield.mo_lookup[0] = 1 << 8;
+        // Active bank 0, entry 0 (split layout): word[0] positions the sprite at
+        // screen (0,0) — xpos 0, and ypos_raw 248 cancels the −256 yscroll and
+        // the −8 height to land at y=0. words 1-3 stay 0 (colour:code 0, no
+        // priority, link 0 → list ends after this entry).
+        let mob = sys.map.region_data_mut(Region::Mob);
+        mob[0] = 0x1F; // word[0] = 0x1F00
+        mob[1] = 0x00;
+        sys
+    }
+
+    #[test]
+    fn motion_object_composites_over_playfield() {
+        let mut sys = sprite_test_system(5);
+        // Sprite pen 5, palcolor 0 → motion bank index 0x105 = pure green.
+        let palette = sys.map.region_data_mut(Region::Palette);
+        palette[0x105 * 2] = 0xF0;
+        palette[0x105 * 2 + 1] = 0xF0;
+
+        let (w, h) = sys.display_size();
+        let mut buf = vec![0u8; (w * h * 3) as usize];
+        sys.render_frame(&mut buf);
+        assert_eq!(&buf[0..3], &[0, 254, 0], "low-priority sprite drawn opaquely");
+    }
+
+    #[test]
+    fn high_priority_sprite_blends_through_translucent_bank() {
+        let mut sys = sprite_test_system(5);
+        // Mark the sprite high priority (word[2] bit 15).
+        let mob = sys.map.region_data_mut(Region::Mob);
+        mob[0x100] = 0x80; // word[2] = 0x8000
+        // The playfield pen under it is 0 (blank bank), so the blend index is
+        // 0x300 + (0<<4) + 5 = 0x305. Colour it pure green.
+        let palette = sys.map.region_data_mut(Region::Palette);
+        palette[0x305 * 2] = 0xF0;
+        palette[0x305 * 2 + 1] = 0xF0;
+
+        let (w, h) = sys.display_size();
+        let mut buf = vec![0u8; (w * h * 3) as usize];
+        sys.render_frame(&mut buf);
+        assert_eq!(&buf[0..3], &[0, 254, 0], "high-priority sprite uses the translucent bank");
     }
 
     #[test]
