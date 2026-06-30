@@ -884,10 +884,15 @@ impl MarbleSystem {
                     let pen = bank
                         .cache
                         .pixel(code % bank.cache.count(), src_x % 8, src_y % 8);
-                    // palette = 0x100 + palcolor*2^bpp + pen (the granularity-8
-                    // gfx plus the bpp-dependent colour shift collapse to this).
+                    // Playfield palette bank base is 0x200 (the third of four
+                    // 256-entry banks: alpha / motion / playfield / translucent).
+                    // The gfx contributes a 0x100 colour base, and the per-tile
+                    // colour 0x20 + (palcolor << bpp-3) scaled by the granularity-8
+                    // gfx adds the other 0x100 — together landing in the playfield
+                    // bank. Dropping either base lands in the motion (sprite) bank
+                    // and tints the floor with sprite colours.
                     let color = 0x20 + (palcolor << (bank.bpp - 3));
-                    (r, g, b) = palette_rgb[(color * 8 + pen as usize) & 0x3FF];
+                    (r, g, b) = palette_rgb[(0x100 + color * 8 + pen as usize) & 0x3FF];
                 }
 
                 // --- Alpha (text/HUD) on top, drawn 1:1 from the origin ---
@@ -1521,10 +1526,11 @@ mod tests {
         sys.playfield.banks.push(GfxBank { cache, bpp: 4 });
         // Playfield cell (0,0) → lookup[0]: bank id 1, offset 0, colour 0.
         sys.playfield.lookup[0] = 1 << 8;
-        // Palette entry 0x103 (= (0x20<<3) + pen 3) = IRGB pure green.
+        // Palette entry 0x203 (= 0x100 gfx base + (0x20<<3) + pen 3, landing in
+        // the playfield bank at 0x200) = IRGB pure green.
         let palette = sys.map.region_data_mut(Region::Palette);
-        palette[0x103 * 2] = 0xF0;
-        palette[0x103 * 2 + 1] = 0xF0;
+        palette[0x203 * 2] = 0xF0;
+        palette[0x203 * 2 + 1] = 0xF0;
 
         let (w, h) = sys.display_size();
         let mut buf = vec![0u8; (w * h * 3) as usize];
