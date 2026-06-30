@@ -50,8 +50,9 @@ use std::collections::HashMap;
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
-    AnalogAxisKind, AudioSource, DefaultBinding, InputConfigurable, InputControl, InputEvent,
-    InputId, InputKind, MachineCore, MouseControl, Nvram, Profilable, Renderable, SaveState,
+    AnalogAxisKind, AudioSource, DefaultBinding, Direction, InputConfigurable, InputControl,
+    InputEvent, InputId, InputKind, MachineCore, MouseControl, Nvram, Profilable, Renderable,
+    SaveState,
 };
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::{AccessKind, AddressSpace32};
@@ -559,6 +560,19 @@ pub const INPUT_START2: u8 = 1;
 pub const INPUT_SERVICE: u8 = 2;
 /// Coin insert (sound port 0x1820 bit 0, active-low).
 pub const INPUT_COIN: u8 = 3;
+/// P1 trackball direction keys (the keyboard way to roll the ball).
+pub const INPUT_P1_TRACK_LEFT: u8 = 4;
+pub const INPUT_P1_TRACK_RIGHT: u8 = 5;
+pub const INPUT_P1_TRACK_UP: u8 = 6;
+pub const INPUT_P1_TRACK_DOWN: u8 = 7;
+
+/// Counter step per frame for a held trackball direction key — a gentle roll
+/// in the range of a normal mouse motion (the marble accelerates from sustained
+/// input, so a small constant is plenty).
+const TRACK_KEY_STEP: i32 = 6;
+/// Max counter change applied per frame, so a fast flick can't alias the 8-bit
+/// counter (the game reads the delta as a signed byte, valid to ±127).
+const TRACK_MAX_STEP: i32 = 100;
 
 /// Typed control ids for the analog trackball axes — a separate `InputId`
 /// namespace from the digital buttons above.
@@ -599,6 +613,48 @@ const MARBLE_CONTROLS: &[InputControl] = &[
         kind: InputKind::Service,
         player: None,
         default_bindings: crate::input_defaults::SERVICE,
+    },
+    // P1 trackball roll via the keyboard / D-pad (digital fallback for the
+    // analog axes below), bound to the standard P1 direction defaults.
+    InputControl {
+        id: InputId(INPUT_P1_TRACK_LEFT as u16),
+        stable_name: "p1_track_left",
+        label: "P1 Roll Left",
+        kind: InputKind::DigitalDirection {
+            direction: Direction::Left,
+        },
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_LEFT,
+    },
+    InputControl {
+        id: InputId(INPUT_P1_TRACK_RIGHT as u16),
+        stable_name: "p1_track_right",
+        label: "P1 Roll Right",
+        kind: InputKind::DigitalDirection {
+            direction: Direction::Right,
+        },
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_RIGHT,
+    },
+    InputControl {
+        id: InputId(INPUT_P1_TRACK_UP as u16),
+        stable_name: "p1_track_up",
+        label: "P1 Roll Up",
+        kind: InputKind::DigitalDirection {
+            direction: Direction::Up,
+        },
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_UP,
+    },
+    InputControl {
+        id: InputId(INPUT_P1_TRACK_DOWN as u16),
+        stable_name: "p1_track_down",
+        label: "P1 Roll Down",
+        kind: InputKind::DigitalDirection {
+            direction: Direction::Down,
+        },
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_DOWN,
     },
     // Trackballs: P1 drives the mouse; P2 is rebindable (no mouse default).
     InputControl {
@@ -701,12 +757,20 @@ pub struct MarbleSystem {
     // Bits 4 (VBLANK) and 7 (sound buffer) are computed live in `read_f60000`.
     f60000_buttons: u8,
 
-    /// Trackball counters [p1x, p1y, p2x, p2y] — free-running 8-bit relative
-    /// accumulators, the trackball motion the game samples at 0xF20000.
+    /// Trackball counters [p1x, p1y, p2x, p2y] — free-running 8-bit counters,
+    /// the trackball motion the game samples at 0xF20000.
     trackball: [u8; 4],
     /// Per-player 45°-rotated counter pair, latched on the even (X) read so the
     /// paired odd (Y) read sees the same snapshot — see [`trackball_read`].
     trackball_cur: [[u8; 2]; 2],
+    /// Pending sub-counter motion per axis (mouse deltas + held keys), drained a
+    /// capped step at a time each frame so a fast flick can't alias the 8-bit
+    /// counter (a >127 jump would read as motion the wrong way). See
+    /// [`update_trackball`].
+    track_accum: [i32; 4],
+    /// P1 trackball direction keys held [left, right, up, down] — the keyboard
+    /// way to roll the ball; each contributes a fixed step per frame.
+    track_keys: [bool; 4],
 
     // VBLANK interrupt latch (IRQ4), held until acked via 0x8A0001.
     video_int: bool,
@@ -804,6 +868,8 @@ impl MarbleSystem {
             scanline_int: false,
             trackball: [0; 4],
             trackball_cur: [[0; 2]; 2],
+            track_accum: [0; 4],
+            track_keys: [false; 4],
             sound: MarbleSound::new(),
             sound_clock: ClockDivider::new(1, 4),
             audio_buffer: Vec::with_capacity(2048),
@@ -926,6 +992,32 @@ impl MarbleSystem {
             self.trackball_cur[player][1] = x.wrapping_sub(y);
         }
         self.trackball_cur[player][which] as u16
+    }
+
+    /// Advance the trackball counters once per frame from pending input: held P1
+    /// direction keys add a fixed step, then each axis drains a capped amount of
+    /// its accumulator (mouse + keys) into the 8-bit counter. The X axes are
+    /// reversed to match the cabinet's PORT_REVERSE wiring.
+    fn update_trackball(&mut self) {
+        if self.track_keys[1] {
+            self.track_accum[0] += TRACK_KEY_STEP;
+        }
+        if self.track_keys[0] {
+            self.track_accum[0] -= TRACK_KEY_STEP;
+        }
+        if self.track_keys[3] {
+            self.track_accum[1] += TRACK_KEY_STEP;
+        }
+        if self.track_keys[2] {
+            self.track_accum[1] -= TRACK_KEY_STEP;
+        }
+
+        for axis in 0..4 {
+            let step = self.track_accum[axis].clamp(-TRACK_MAX_STEP, TRACK_MAX_STEP);
+            self.track_accum[axis] -= step;
+            let applied = if axis % 2 == 0 { -step } else { step };
+            self.trackball[axis] = (self.trackball[axis] as i32).wrapping_add(applied) as u8;
+        }
     }
 
     /// Whether any motion-object timer entry in the active sprite bank targets
@@ -1369,21 +1461,24 @@ impl InputConfigurable for MarbleSystem {
                 INPUT_SERVICE => set_bit_active_low(&mut self.f60000_buttons, 6, pressed),
                 // Coins are read on the sound board's 0x1820 port.
                 INPUT_COIN => self.sound.set_coin(0, pressed),
+                // P1 keyboard trackball roll — held direction keys.
+                INPUT_P1_TRACK_LEFT => self.track_keys[0] = pressed,
+                INPUT_P1_TRACK_RIGHT => self.track_keys[1] = pressed,
+                INPUT_P1_TRACK_UP => self.track_keys[2] = pressed,
+                INPUT_P1_TRACK_DOWN => self.track_keys[3] = pressed,
                 _ => {}
             },
             InputEvent::Relative { id, delta } => {
-                // Free-running 8-bit counters. The X axes are reversed to match
-                // the cabinet's PORT_REVERSE wiring.
-                let acc = |c: &mut u8, d: i32| *c = (*c as i32).wrapping_add(d) as u8;
+                // Mouse motion → pending sub-counter movement, drained per frame.
                 let d = delta as i32;
                 if id == CTRL_P1_TRACK_X {
-                    acc(&mut self.trackball[0], -d);
+                    self.track_accum[0] += d;
                 } else if id == CTRL_P1_TRACK_Y {
-                    acc(&mut self.trackball[1], d);
+                    self.track_accum[1] += d;
                 } else if id == CTRL_P2_TRACK_X {
-                    acc(&mut self.trackball[2], -d);
+                    self.track_accum[2] += d;
                 } else if id == CTRL_P2_TRACK_Y {
-                    acc(&mut self.trackball[3], d);
+                    self.track_accum[3] += d;
                 }
             }
             InputEvent::Absolute { .. } => {}
@@ -1395,6 +1490,9 @@ impl MachineCore for MarbleSystem {
     crate::machine_core_metadata!("marble", TIMING);
 
     fn run_frame(&mut self) {
+        // Fold this frame's trackball input into the counters the game samples.
+        self.update_trackball();
+
         for _ in 0..TIMING.cycles_per_frame() {
             self.tick();
         }
@@ -1428,6 +1526,8 @@ impl MachineCore for MarbleSystem {
         self.scanline_int = false;
         self.trackball = [0; 4];
         self.trackball_cur = [[0; 2]; 2];
+        self.track_accum = [0; 4];
+        self.track_keys = [false; 4];
         self.watchdog_count = 0;
         // EEPROM contents are non-volatile and survive reset.
 
@@ -1678,7 +1778,8 @@ mod tests {
     #[test]
     fn trackball_reads_rotated_counters() {
         let mut sys = MarbleSystem::new();
-        // Move P1's trackball: X +10 (reversed → counter −10 = 246), Y +3.
+        // Move P1's trackball: X +10 (reversed → counter −10 = 246), Y +3. The
+        // pending motion is drained into the counters once per frame.
         sys.handle_input(InputEvent::Relative {
             id: CTRL_P1_TRACK_X,
             delta: 10.0,
@@ -1687,6 +1788,7 @@ mod tests {
             id: CTRL_P1_TRACK_Y,
             delta: 3.0,
         });
+        sys.update_trackball();
         assert_eq!(sys.trackball, [246, 3, 0, 0]);
 
         // The 45° rotation: X port = x+y, Y port = x-y. The even read latches
@@ -1699,6 +1801,43 @@ mod tests {
         // P2 ports are independent and idle at zero.
         assert_eq!(sys.trackball_read(0xF2_0004), 0);
         assert_eq!(sys.trackball_read(0xF2_0006), 0);
+    }
+
+    #[test]
+    fn keyboard_rolls_the_trackball() {
+        let mut sys = MarbleSystem::new();
+        // Holding "roll right" steps the (reversed) X counter each frame.
+        sys.handle_input(InputEvent::Button {
+            id: InputId(INPUT_P1_TRACK_RIGHT as u16),
+            pressed: true,
+        });
+        sys.update_trackball();
+        assert_eq!(sys.trackball[0], (256 - TRACK_KEY_STEP) as u8);
+        sys.update_trackball();
+        assert_eq!(sys.trackball[0], (256 - 2 * TRACK_KEY_STEP) as u8);
+        // Releasing stops the roll.
+        sys.handle_input(InputEvent::Button {
+            id: InputId(INPUT_P1_TRACK_RIGHT as u16),
+            pressed: false,
+        });
+        let held = sys.trackball[0];
+        sys.update_trackball();
+        assert_eq!(sys.trackball[0], held, "no motion once released");
+    }
+
+    #[test]
+    fn fast_trackball_flick_is_capped_to_avoid_aliasing() {
+        let mut sys = MarbleSystem::new();
+        // A huge one-frame delta is applied a capped step at a time so the 8-bit
+        // counter never jumps more than ±127 (which the game would misread).
+        sys.handle_input(InputEvent::Relative {
+            id: CTRL_P1_TRACK_Y,
+            delta: 500.0,
+        });
+        sys.update_trackball();
+        assert_eq!(sys.trackball[1], TRACK_MAX_STEP as u8);
+        sys.update_trackball();
+        assert_eq!(sys.trackball[1], (2 * TRACK_MAX_STEP) as u8);
     }
 
     /// Boot a hand-assembled 68010 program on the full board and prove the core
