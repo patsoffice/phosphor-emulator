@@ -453,6 +453,7 @@ pub mod pisces;
 pub mod qbert;
 pub mod quantum;
 pub mod registry;
+pub mod roadrunner;
 pub mod robotron;
 pub mod rom_loader;
 pub mod satans_hollow;
@@ -484,6 +485,7 @@ pub use mspacman::MsPacmanSystem;
 pub use pacman::PacmanSystem;
 pub use qbert::QbertSystem;
 pub use quantum::QuantumSystem;
+pub use roadrunner::RoadRunnerSystem;
 pub use robotron::RobotronSystem;
 pub use satans_hollow::SatansHollowSystem;
 pub use simple_system::{
