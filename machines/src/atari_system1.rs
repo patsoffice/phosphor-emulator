@@ -346,6 +346,10 @@ pub struct AtariSystem1Board {
     /// scanline a motion-object timer entry targets; also read back at 0x2E0000
     /// bit 7. Recomputed at every scanline boundary from the active sprite bank.
     pub(crate) scanline_int: bool,
+    /// Analog-joystick interrupt (IRQ2). Games with an ADC0809 (Road Runner et
+    /// al.) drive this from the converter's end-of-conversion line, gated by the
+    /// joystick-IRQ enable; games without one (Marble) leave it false.
+    pub(crate) int2: bool,
 
     /// One-pole DC-blocker state (prev input, prev output) for the audio mix —
     /// removes the POKEY's unipolar DC so the FM music gets full headroom, the
@@ -440,6 +444,7 @@ impl AtariSystem1Board {
             f60000_buttons: 0xFF,
             video_int: false,
             scanline_int: false,
+            int2: false,
             audio_dc: (0.0, 0.0),
             sound: AtariSystem1Sound::new(speech),
             sound_clock: ClockDivider::new(1, 4),
@@ -601,9 +606,15 @@ impl AtariSystem1Board {
         u16::from_be_bytes([self.slapstic_rom[base], self.slapstic_rom[base + 1]])
     }
 
+    /// Set the analog-joystick interrupt (IRQ2) line. Driven by the game wrapper
+    /// from its ADC0809 (end-of-conversion gated by the joystick-IRQ enable).
+    pub(crate) fn set_int2(&mut self, asserted: bool) {
+        self.int2 = asserted;
+    }
+
     /// Effective autovector interrupt level (the 68000 takes the highest
     /// pending). IRQ6 = sound response, IRQ4 = VBLANK, IRQ3 = motion-object
-    /// scanline (SLIP). IRQ2 (ADC/joystick) arrives with the analog-input games.
+    /// scanline (SLIP), IRQ2 = ADC/analog joystick.
     pub(crate) fn interrupt_level(&self) -> u8 {
         if self.sound.response_pending() {
             6
@@ -611,6 +622,8 @@ impl AtariSystem1Board {
             4
         } else if self.scanline_int {
             3
+        } else if self.int2 {
+            2
         } else {
             0
         }
@@ -935,6 +948,7 @@ impl AtariSystem1Board {
         self.f60000_buttons = 0xFF;
         self.video_int = false;
         self.scanline_int = false;
+        self.int2 = false;
         self.audio_dc = (0.0, 0.0);
         self.watchdog_count = 0;
     }
@@ -1054,6 +1068,7 @@ impl Saveable for AtariSystem1Board {
         w.write_u8(self.f60000_buttons);
         w.write_bool(self.video_int);
         w.write_bool(self.scanline_int);
+        w.write_bool(self.int2);
         w.write_u64_le(self.clock);
         w.write_u8(self.watchdog_count);
     }
@@ -1078,6 +1093,7 @@ impl Saveable for AtariSystem1Board {
         self.f60000_buttons = r.read_u8()?;
         self.video_int = r.read_bool()?;
         self.scanline_int = r.read_bool()?;
+        self.int2 = r.read_bool()?;
         self.clock = r.read_u64_le()?;
         self.watchdog_count = r.read_u8()?;
         Ok(())
