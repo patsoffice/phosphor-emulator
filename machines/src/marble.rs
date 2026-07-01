@@ -65,7 +65,7 @@ use phosphor_core::gfx::decode::{GfxCache, GfxLayout, decode_gfx};
 use phosphor_macros::{BusDebug, MemoryRegion};
 
 use crate::disasm_registry::{DisasmCpu, DisasmRegion};
-use crate::marble_sound::MarbleSound;
+use crate::atari_system1_sound::AtariSystem1Sound;
 use crate::registry::MachineEntry;
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
 use crate::set_bit_active_low;
@@ -785,9 +785,9 @@ pub struct MarbleSystem {
     /// way the cabinet's AC-coupled amplifier does.
     audio_dc: (f32, f32),
 
-    /// M6502 sound board (POKEY + YM2151 stub + inter-CPU latches).
+    /// M6502 sound board (POKEY + YM2151 + inter-CPU latches).
     #[debug_device("Sound")]
-    sound: MarbleSound,
+    sound: AtariSystem1Sound,
     /// Sound CPU runs at 1/4 the main CPU rate.
     sound_clock: ClockDivider,
     audio_buffer: Vec<i16>,
@@ -876,7 +876,7 @@ impl MarbleSystem {
             trackball_cur: [[0; 2]; 2],
             track_accum: [0; 4],
             track_keys: [false; 4],
-            sound: MarbleSound::new(),
+            sound: AtariSystem1Sound::new(false),
             sound_clock: ClockDivider::new(1, 4),
             audio_buffer: Vec::with_capacity(2048),
             clock: 0,

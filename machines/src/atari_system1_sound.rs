@@ -1,5 +1,8 @@
-//! Marble Madness sound board: an M6502 with a YM2151 (OPM FM) and a POKEY,
-//! talking to the 68010 main CPU through a pair of one-byte latches.
+//! Atari System 1 sound board: an M6502 with a YM2151 (OPM FM) and a POKEY,
+//! talking to the 68010 main CPU through a pair of one-byte latches. The board
+//! is shared unchanged across the System 1 catalog (Marble Madness, Road
+//! Runner, …); games that carry speech add a TMS5220 behind a VIA6522 at
+//! `0x1000-0x100F`, enabled by the `speech` construction flag.
 //!
 //! The board owns the M6502 and implements [`Bus`] for it (a 16-bit space), in
 //! the same shape as the Gottlieb sound board. The main CPU reaches it only
@@ -9,6 +12,7 @@
 //! ## Sound-CPU memory map (mirrors folded out)
 //! ```text
 //!   0000-0FFF  RAM (mirror 2000)
+//!   1000-100F  VIA6522 + TMS5220 speech (only when `speech` is set)
 //!   1800-1801  YM2151 (address / data; reads return status)
 //!   1810       R command latch (from main, clears the pending flag)
 //!              W response latch (to main, raises main IRQ6)
@@ -35,13 +39,17 @@ const YM_CLOCKS_PER_TICK: u32 = 2;
 
 const AUDIO_SAMPLE_RATE: u32 = 44_100;
 
-pub struct MarbleSound {
+pub struct AtariSystem1Sound {
     cpu: M6502,
     sound_ram: Box<[u8; 0x1000]>,
     /// ROM mapped at 0x4000-0xFFFF (0x4000-0x7FFF is empty on marble).
     sound_rom: Box<[u8; 0xC000]>,
     pokey: Pokey,
     ym: Ym2151,
+    /// Whether the game carries a TMS5220 speech chip (behind a VIA6522 at
+    /// `0x1000-0x100F`). Off for Marble; on for speech games like Road Runner.
+    /// The device itself is a follow-up; today the window still reads back idle.
+    speech: bool,
     /// Addressable output latch (LS259): bit 0 = YM reset (unused here),
     /// bits 6-7 = coin counters (Phase 5).
     outlatch: u8,
@@ -67,14 +75,17 @@ pub struct MarbleSound {
     clock: u64,
 }
 
-impl MarbleSound {
-    pub fn new() -> Self {
+impl AtariSystem1Sound {
+    /// Build the sound board. `speech` maps the VIA6522 + TMS5220 speech window
+    /// at `0x1000-0x100F` (Road Runner et al.); leave it off for Marble.
+    pub fn new(speech: bool) -> Self {
         Self {
             cpu: M6502::new(),
             sound_ram: Box::new([0; 0x1000]),
             sound_rom: Box::new([0xFF; 0xC000]),
             pokey: Pokey::with_clock(SOUND_CLOCK_HZ, AUDIO_SAMPLE_RATE),
             ym: Ym2151::new(),
+            speech,
             outlatch: 0,
             coin_inputs: 0,
             soundlatch: 0,
@@ -232,13 +243,14 @@ impl MarbleSound {
     }
 }
 
-impl Default for MarbleSound {
+impl Default for AtariSystem1Sound {
+    /// Marble-style board: no speech.
     fn default() -> Self {
-        Self::new()
+        Self::new(false)
     }
 }
 
-impl Bus for MarbleSound {
+impl Bus for AtariSystem1Sound {
     type Address = u16;
     type Data = u8;
 
@@ -249,6 +261,11 @@ impl Bus for MarbleSound {
     fn read(&mut self, _master: BusMaster, addr: u16) -> u8 {
         if addr >= 0x4000 {
             return self.sound_rom[(addr - 0x4000) as usize];
+        }
+        // Speech window (VIA6522 + TMS5220). The device is a follow-up; for now
+        // it reads back idle, so speech vs. no-speech is behavior-identical here.
+        if self.speech && (0x1000..=0x100F).contains(&addr) {
+            return 0xFF;
         }
         if addr & 0x1800 == 0x1800 {
             match addr & 0x70 {
@@ -271,6 +288,10 @@ impl Bus for MarbleSound {
     fn write(&mut self, _master: BusMaster, addr: u16, data: u8) {
         if addr >= 0x4000 {
             return; // ROM
+        }
+        // Speech window (VIA6522 + TMS5220) — swallowed until the device lands.
+        if self.speech && (0x1000..=0x100F).contains(&addr) {
+            return;
         }
         if addr & 0x1800 == 0x1800 {
             match addr & 0x70 {
@@ -302,7 +323,7 @@ impl Bus for MarbleSound {
     }
 }
 
-impl phosphor_core::core::debug::Debuggable for MarbleSound {
+impl phosphor_core::core::debug::Debuggable for AtariSystem1Sound {
     fn debug_registers(&self) -> Vec<phosphor_core::core::debug::DebugRegister> {
         use phosphor_core::core::debug::DebugRegister;
         vec![
@@ -330,9 +351,9 @@ impl phosphor_core::core::debug::Debuggable for MarbleSound {
     }
 }
 
-impl phosphor_core::device::Device for MarbleSound {
+impl phosphor_core::device::Device for AtariSystem1Sound {
     fn name(&self) -> &'static str {
-        "Marble Sound (M6502)"
+        "Atari System 1 Sound (M6502)"
     }
 
     fn reset(&mut self) {
@@ -340,7 +361,7 @@ impl phosphor_core::device::Device for MarbleSound {
     }
 }
 
-impl Saveable for MarbleSound {
+impl Saveable for AtariSystem1Sound {
     fn save_state(&self, w: &mut StateWriter) {
         self.cpu.save_state(w);
         self.pokey.save_state(w);
@@ -385,7 +406,7 @@ mod tests {
 
     /// Build a sound board with a tiny hand-assembled 6502 program that, on NMI,
     /// reads the command latch and echoes (command + 1) back to the main CPU.
-    fn board_with_echo_program() -> MarbleSound {
+    fn board_with_echo_program() -> AtariSystem1Sound {
         let mut image = vec![0xFFu8; 0x10000];
         // Main program @ 0x8000: CLI; loop forever (the work happens in the NMI).
         let main = [0x58u8, 0x4C, 0x00, 0x80]; // CLI ; JMP $8000
@@ -407,12 +428,12 @@ mod tests {
         image[0xFFFA] = 0x00;
         image[0xFFFB] = 0x90;
 
-        let mut snd = MarbleSound::new();
+        let mut snd = AtariSystem1Sound::new(false);
         snd.load_rom(&image);
         snd
     }
 
-    fn run(snd: &mut MarbleSound, cycles: usize) {
+    fn run(snd: &mut AtariSystem1Sound, cycles: usize) {
         for _ in 0..cycles {
             snd.tick();
         }
