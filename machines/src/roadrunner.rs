@@ -6,20 +6,23 @@
 //! chip (137412-108), and the fact that its sound board carries speech (a
 //! TMS5220 behind a VIA6522, currently stubbed).
 //!
-//! Its analog "Hall-effect" joystick (an ADC0809 at `0xF40000` driving IRQ2) is
-//! a follow-up; here the wrapper is a straight pass-through to the board plus the
-//! digital switch/coin inputs, which is enough to boot and render attract mode.
+//! Its analog "Hall-effect" joystick is an ADC0809 mapped at `0xF40000`: the
+//! wrapper feeds the X/Y channels from input and raises IRQ2 on each conversion
+//! (gated by the joystick-IRQ enable), which is also what drives the attract
+//! demo. Otherwise the wrapper forwards the bus to the shared board and handles
+//! the digital coin/start/service switches.
 
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
-    InputConfigurable, InputControl, InputEvent, InputId, InputKind, MachineCore, Nvram,
-    Profilable, SaveState,
+    AnalogAxisKind, DefaultBinding, Direction, InputConfigurable, InputControl, InputEvent,
+    InputId, InputKind, MachineCore, MouseControl, Nvram, Profilable, SaveState,
 };
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
 use phosphor_core::cpu::state::M68000State;
+use phosphor_core::device::adc0809::Adc0809;
 
 use crate::atari_system1::{self, AtariSystem1Board};
 use crate::disasm_registry::{DisasmCpu, DisasmRegion};
@@ -381,6 +384,27 @@ pub const INPUT_START2: u8 = 1;
 pub const INPUT_SERVICE: u8 = 2;
 /// Coin insert (sound port 0x1820 bit 0, active-low).
 pub const INPUT_COIN: u8 = 3;
+/// Analog-joystick direction keys (keyboard fallback for the Hall-effect stick).
+pub const INPUT_JOY_UP: u8 = 4;
+pub const INPUT_JOY_DOWN: u8 = 5;
+pub const INPUT_JOY_LEFT: u8 = 6;
+pub const INPUT_JOY_RIGHT: u8 = 7;
+
+/// Typed control ids for the analog stick axes — a separate `InputId` namespace
+/// from the digital buttons above.
+const CTRL_STICK_X: InputId = InputId(10);
+const CTRL_STICK_Y: InputId = InputId(11);
+
+// ADC channel assignments (MAME atarisy1 roadrunn): Y on channel 6, X on 7.
+const ADC_Y_CH: u16 = 6;
+const ADC_X_CH: u16 = 7;
+/// Full-scale stick endpoints and center (MAME `AD_STICK` `MINMAX(0x10,0xf0)`).
+const STICK_MIN: i32 = 0x10;
+const STICK_MAX: i32 = 0xF0;
+const STICK_CENTER: i32 = 0x80;
+/// Conversion time: 64 ADC clocks at master/16 = 8 main-CPU cycles each → the
+/// end-of-conversion (and thus IRQ2) lands ~512 CPU cycles after a start.
+const ADC_CONVERSION_CYCLES: u64 = 512;
 
 const ROADRUNNER_CONTROLS: &[InputControl] = &[
     InputControl {
@@ -415,22 +439,150 @@ const ROADRUNNER_CONTROLS: &[InputControl] = &[
         player: None,
         default_bindings: crate::input_defaults::SERVICE,
     },
+    // Analog joystick: the mouse drives it; the D-pad / arrow keys are the
+    // digital fallback that deflects the stick fully.
+    InputControl {
+        id: InputId(INPUT_JOY_UP as u16),
+        stable_name: "p1_up",
+        label: "P1 Up",
+        kind: InputKind::DigitalDirection {
+            direction: Direction::Up,
+        },
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_UP,
+    },
+    InputControl {
+        id: InputId(INPUT_JOY_DOWN as u16),
+        stable_name: "p1_down",
+        label: "P1 Down",
+        kind: InputKind::DigitalDirection {
+            direction: Direction::Down,
+        },
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_DOWN,
+    },
+    InputControl {
+        id: InputId(INPUT_JOY_LEFT as u16),
+        stable_name: "p1_left",
+        label: "P1 Left",
+        kind: InputKind::DigitalDirection {
+            direction: Direction::Left,
+        },
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_LEFT,
+    },
+    InputControl {
+        id: InputId(INPUT_JOY_RIGHT as u16),
+        stable_name: "p1_right",
+        label: "P1 Right",
+        kind: InputKind::DigitalDirection {
+            direction: Direction::Right,
+        },
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_RIGHT,
+    },
+    InputControl {
+        id: CTRL_STICK_X,
+        stable_name: "p1_stick_x",
+        label: "P1 Joystick X",
+        kind: InputKind::AnalogAxis {
+            axis: AnalogAxisKind::X,
+        },
+        player: Some(1),
+        default_bindings: &[DefaultBinding::Mouse(MouseControl::AxisX)],
+    },
+    InputControl {
+        id: CTRL_STICK_Y,
+        stable_name: "p1_stick_y",
+        label: "P1 Joystick Y",
+        kind: InputKind::AnalogAxis {
+            axis: AnalogAxisKind::Y,
+        },
+        player: Some(1),
+        default_bindings: &[DefaultBinding::Mouse(MouseControl::AxisY)],
+    },
 ];
 
 // ---------------------------------------------------------------------------
 // RoadRunnerSystem — Atari System 1 board configured for Road Runner
 // ---------------------------------------------------------------------------
 
-/// Atari Road Runner (System 1). Slapstic 108, speech-equipped sound board.
+/// Atari Road Runner (System 1). Slapstic 108, speech-equipped sound board,
+/// Hall-effect analog joystick on an ADC0809 (IRQ2).
 pub struct RoadRunnerSystem {
     pub board: AtariSystem1Board,
+
+    /// The joystick ADC (channels 6 = Y, 7 = X, X reversed like the cabinet).
+    adc: Adc0809,
+    /// Joystick-interrupt enable (the ADC address A4 bit): true once the game
+    /// arms IRQ2 by starting a conversion with A4 low.
+    adc_irq_enabled: bool,
+    /// Main-CPU clock at the last conversion start; end-of-conversion (and thus
+    /// IRQ2) is asserted `ADC_CONVERSION_CYCLES` later.
+    adc_start_clock: u64,
+
+    /// Current stick position [x, y] (STICK_MIN..=STICK_MAX, center STICK_CENTER)
+    /// fed to the ADC channels. Driven by the mouse axes or the direction keys.
+    stick: [i32; 2],
+    /// Held direction keys [up, down, left, right] for the digital fallback.
+    dir_keys: [bool; 4],
 }
 
 impl RoadRunnerSystem {
     pub fn new() -> Self {
-        Self {
+        let mut sys = Self {
             board: AtariSystem1Board::new(108, true),
-        }
+            adc: Adc0809::new(),
+            adc_irq_enabled: false,
+            adc_start_clock: 0,
+            stick: [STICK_CENTER, STICK_CENTER],
+            dir_keys: [false; 4],
+        };
+        sys.push_stick();
+        sys
+    }
+
+    /// Feed the current stick position to the ADC channels. Y (channel 6) is
+    /// direct; X (channel 7) is reversed, matching the cabinet's `PORT_REVERSE`.
+    fn push_stick(&mut self) {
+        self.adc.set_input(ADC_Y_CH as usize, self.stick[1] as u8);
+        self.adc
+            .set_input(ADC_X_CH as usize, (0xFF - self.stick[0]) as u8);
+    }
+
+    /// Recompute the stick from the held direction keys (full deflection while
+    /// held, spring-centered when released), then push it to the ADC.
+    fn update_dir_keys(&mut self) {
+        let axis = |neg: bool, pos: bool| {
+            if neg {
+                STICK_MIN
+            } else if pos {
+                STICK_MAX
+            } else {
+                STICK_CENTER
+            }
+        };
+        self.stick[0] = axis(self.dir_keys[2], self.dir_keys[3]); // left / right
+        self.stick[1] = axis(self.dir_keys[0], self.dir_keys[1]); // up / down
+        self.push_stick();
+    }
+
+    /// Select the ADC channel + start a conversion, latching the joystick-IRQ
+    /// enable from the address A4 bit (mirrors MAME `adc_w`). `offset` is the
+    /// word offset within 0xF40000-0xF4001F.
+    fn adc_start(&mut self, offset: u16) {
+        self.adc.address_offset_start_w(offset & 0x07);
+        self.adc_start_clock = self.board.clock();
+        // A4 (offset bit 3) low enables the analog-joystick interrupt.
+        self.adc_irq_enabled = offset & 0x08 == 0;
+    }
+
+    /// IRQ2 line: asserted while joystick interrupts are enabled and a conversion
+    /// has completed (end-of-conversion). Reading the ADC restarts a conversion,
+    /// which drops EOC and clears IRQ2 until the next one finishes.
+    fn adc_irq(&self) -> bool {
+        self.adc_irq_enabled
+            && self.board.clock().wrapping_sub(self.adc_start_clock) >= ADC_CONVERSION_CYCLES
     }
 
     pub fn load_rom_set(&mut self, rom_set: &RomSet) -> Result<(), RomLoadError> {
@@ -487,7 +639,7 @@ impl Default for RoadRunnerSystem {
 }
 
 // ---------------------------------------------------------------------------
-// Bus — a straight pass-through to the board (no game-specific ports yet)
+// Bus — the analog-joystick ADC at 0xF40000, everything else to the board
 // ---------------------------------------------------------------------------
 
 impl Bus for RoadRunnerSystem {
@@ -503,14 +655,31 @@ impl Bus for RoadRunnerSystem {
     }
 
     fn read(&mut self, master: BusMaster, addr: u32) -> u16 {
+        // ADC data read (0xF40000-0xF4001F, low byte). Reading also restarts a
+        // conversion on the same channel (mirrors MAME `adc_r`), which drops EOC
+        // and so clears IRQ2 until the next conversion completes.
+        if (0xF4_0000..=0xF4_001F).contains(&addr) {
+            let value = self.adc.data_r();
+            self.adc_start(((addr >> 1) & 0x0F) as u16);
+            let v = 0xFF00 | value as u16;
+            self.board.note_read(master, addr, v);
+            return v;
+        }
         self.board.bus_read(master, addr)
     }
 
     fn write(&mut self, master: BusMaster, addr: u32, data: u16) {
+        // ADC channel select + conversion start (also latches the IRQ enable).
+        if (0xF4_0000..=0xF4_001F).contains(&addr) {
+            self.adc_start(((addr >> 1) & 0x0F) as u16);
+        }
+        // Forward for the watchpoint hook; the board treats F40000 as a no-op.
         self.board.bus_write(master, addr, data);
     }
 
     fn check_interrupts(&mut self, target: BusMaster) -> InterruptState {
+        // Drive the board's IRQ2 line from the ADC before it resolves priority.
+        self.board.set_int2(self.adc_irq());
         self.board.bus_check_interrupts(target)
     }
 }
@@ -542,6 +711,12 @@ impl MachineCore for RoadRunnerSystem {
 
     fn reset(&mut self) {
         self.board.reset();
+        self.adc.reset();
+        self.adc_irq_enabled = false;
+        self.adc_start_clock = 0;
+        self.stick = [STICK_CENTER, STICK_CENTER];
+        self.dir_keys = [false; 4];
+        self.push_stick();
         bus_split!(self, bus: u32 word => {
             self.board.cpu.reset(bus, BusMaster::Cpu(0));
         });
@@ -554,16 +729,46 @@ impl InputConfigurable for RoadRunnerSystem {
     }
 
     fn handle_input(&mut self, event: InputEvent) {
-        let InputEvent::Button { id, pressed } = event else {
-            return;
-        };
-        match id.0 as u8 {
-            INPUT_START1 => set_bit_active_low(&mut self.board.f60000_buttons, 0, pressed),
-            INPUT_START2 => set_bit_active_low(&mut self.board.f60000_buttons, 1, pressed),
-            INPUT_SERVICE => set_bit_active_low(&mut self.board.f60000_buttons, 6, pressed),
-            // Coins are read on the sound board's 0x1820 port.
-            INPUT_COIN => self.board.sound.set_coin(0, pressed),
-            _ => {}
+        match event {
+            InputEvent::Button { id, pressed } => match id.0 as u8 {
+                // Bits 0/1 double as "Left/Right Hop" in-game and P1/P2 Start.
+                INPUT_START1 => set_bit_active_low(&mut self.board.f60000_buttons, 0, pressed),
+                INPUT_START2 => set_bit_active_low(&mut self.board.f60000_buttons, 1, pressed),
+                INPUT_SERVICE => set_bit_active_low(&mut self.board.f60000_buttons, 6, pressed),
+                // Coins are read on the sound board's 0x1820 port.
+                INPUT_COIN => self.board.sound.set_coin(0, pressed),
+                // Digital joystick fallback → full stick deflection.
+                INPUT_JOY_UP => {
+                    self.dir_keys[0] = pressed;
+                    self.update_dir_keys();
+                }
+                INPUT_JOY_DOWN => {
+                    self.dir_keys[1] = pressed;
+                    self.update_dir_keys();
+                }
+                INPUT_JOY_LEFT => {
+                    self.dir_keys[2] = pressed;
+                    self.update_dir_keys();
+                }
+                INPUT_JOY_RIGHT => {
+                    self.dir_keys[3] = pressed;
+                    self.update_dir_keys();
+                }
+                _ => {}
+            },
+            // Mouse motion accumulates into the stick position (clamped to the
+            // stick's electrical range).
+            InputEvent::Relative { id, delta } => {
+                let d = delta as i32;
+                if id == CTRL_STICK_X {
+                    self.stick[0] = (self.stick[0] + d).clamp(STICK_MIN, STICK_MAX);
+                    self.push_stick();
+                } else if id == CTRL_STICK_Y {
+                    self.stick[1] = (self.stick[1] + d).clamp(STICK_MIN, STICK_MAX);
+                    self.push_stick();
+                }
+            }
+            InputEvent::Absolute { .. } => {}
         }
     }
 }
@@ -575,10 +780,17 @@ impl SaveState for RoadRunnerSystem {
 impl Saveable for RoadRunnerSystem {
     fn save_state(&self, w: &mut StateWriter) {
         self.board.save_state(w);
+        self.adc.save_state(w);
+        w.write_bool(self.adc_irq_enabled);
+        w.write_u64_le(self.adc_start_clock);
     }
 
     fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
-        self.board.load_state(r)
+        self.board.load_state(r)?;
+        self.adc.load_state(r)?;
+        self.adc_irq_enabled = r.read_bool()?;
+        self.adc_start_clock = r.read_u64_le()?;
+        Ok(())
     }
 }
 
@@ -726,5 +938,58 @@ mod tests {
         );
         let main = find("roadrunner", "main").expect("main region");
         assert_eq!((main.org, main.size), (0, 0x80000));
+    }
+
+    const M: BusMaster = BusMaster::Cpu(0);
+
+    #[test]
+    fn adc_selects_channel_and_reads_the_stick() {
+        let mut sys = RoadRunnerSystem::new();
+        // Deflect the stick right; Y stays centered.
+        sys.handle_input(InputEvent::Button {
+            id: InputId(INPUT_JOY_RIGHT as u16),
+            pressed: true,
+        });
+        // Channel 7 (X) select+start at word offset 7 (byte 0xF4000E); read data
+        // on the low byte. X is reversed: 0xFF - STICK_MAX(0xF0) = 0x0F.
+        Bus::write(&mut sys, M, 0xF4_000E, 0);
+        assert_eq!(Bus::read(&mut sys, M, 0xF4_000F) & 0xFF, 0x0F);
+        // Channel 6 (Y) is centered → 0x80.
+        Bus::write(&mut sys, M, 0xF4_000C, 0);
+        assert_eq!(Bus::read(&mut sys, M, 0xF4_000D) & 0xFF, 0x80);
+    }
+
+    #[test]
+    fn adc_irq2_gated_by_enable_and_conversion_time() {
+        let mut sys = RoadRunnerSystem::new();
+        assert!(!sys.adc_irq(), "disabled out of reset");
+        // A conversion start with A4 low (word offset 6, byte 0xF4000C) enables
+        // the joystick interrupt.
+        Bus::write(&mut sys, M, 0xF4_000C, 0);
+        assert!(sys.adc_irq_enabled);
+        // Just started: end-of-conversion not reached (clock hasn't advanced).
+        assert!(!sys.adc_irq(), "no IRQ2 before the conversion completes");
+        // Simulate the conversion time elapsing.
+        sys.adc_start_clock = sys.board.clock().wrapping_sub(ADC_CONVERSION_CYCLES);
+        assert!(sys.adc_irq(), "IRQ2 asserts after end-of-conversion");
+        // check_interrupts drives the board's IRQ2 line (nothing higher pending).
+        assert_eq!(sys.check_interrupts(M).irq_level, 2);
+        // A start with A4 high (word offset 0xE, byte 0xF4001C) disables it.
+        Bus::write(&mut sys, M, 0xF4_001C, 0);
+        assert!(!sys.adc_irq_enabled);
+        assert!(!sys.adc_irq());
+    }
+
+    #[test]
+    fn adc_state_round_trips_through_save_load() {
+        let mut sys = RoadRunnerSystem::new();
+        Bus::write(&mut sys, M, 0xF4_000C, 0); // enable + start channel 6
+        sys.board.map.region_data_mut(Region::Ram)[0x40] = 0x5A;
+
+        let data = SaveState::save_state(&sys).expect("save");
+        let mut sys2 = RoadRunnerSystem::new();
+        SaveState::load_state(&mut sys2, &data).unwrap();
+        assert!(sys2.adc_irq_enabled, "ADC enable survives save/load");
+        assert_eq!(sys2.board.map.region_data(Region::Ram)[0x40], 0x5A);
     }
 }
