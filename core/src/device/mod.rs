@@ -56,6 +56,7 @@ pub mod riot6532;
 pub mod slapstic;
 pub mod sn76489;
 pub mod ssio;
+pub mod tms5220;
 pub mod votrax_sc01;
 pub mod williams_blitter;
 pub mod x2212;
