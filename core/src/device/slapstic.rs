@@ -145,6 +145,33 @@ pub const SLAPSTIC_103: SlapsticConfig = SlapsticConfig {
     bit_commit: test_in(0x3FF8, 0x34D0),
 };
 
+/// Chip **137412-108** (Road Runner). Same state graph and window as the 103;
+/// only the secret matcher values differ.
+pub const SLAPSTIC_108: SlapsticConfig = SlapsticConfig {
+    bankstart: 3,
+    reset: Matcher {
+        mask: RANGE_MASK | INPUT_MASK,
+        value: RANGE_VALUE,
+    },
+    bank: [
+        test_bank(0x0028),
+        test_bank(0x002A),
+        test_bank(0x002C),
+        test_bank(0x002E),
+    ],
+    alt_start: test_any(0x007F, 0x001F),
+    alt_valid: test_in(0x3FFF, 0x3772),
+    alt_select: test_in(0x3FFC, 0x3764),
+    alt_commit: test_in(0x3FF9, 0x0028),
+    bit_start: test_in(0x3FF0, 0x0060),
+    bit_load: test_in(0x3FF9, 0x0028),
+    bit3c0: test_in(0x3FF3, 0x0060),
+    bit3s0: test_in(0x3FF3, 0x0061),
+    bit3c1: test_in(0x3FF3, 0x0062),
+    bit3s1: test_in(0x3FF3, 0x0063),
+    bit_commit: test_in(0x3FF8, 0x0070),
+};
+
 // ---------------------------------------------------------------------------
 // State machine
 // ---------------------------------------------------------------------------
@@ -214,10 +241,11 @@ impl Slapstic {
     }
 
     /// Create a Slapstic for a chip by its `137412-NNN` number (e.g. `103` for
-    /// Marble Madness). Panics on an unsupported chip number.
+    /// Marble Madness, `108` for Road Runner). Panics on an unsupported chip.
     pub fn for_chip(chip: u16) -> Self {
         let config = match chip {
             103 => &SLAPSTIC_103,
+            108 => &SLAPSTIC_108,
             _ => panic!("unsupported slapstic chip 137412-{chip}"),
         };
         Self::new(config)
@@ -384,6 +412,37 @@ mod tests {
             sl.test(a);
         }
         sl.current_bank()
+    }
+
+    #[test]
+    fn chip_108_direct_and_alt_banking() {
+        // Road Runner's 108 shares the 103 state graph with different matchers.
+        // Direct bank-select byte addresses: 0x80000 | (bankval << 1) for
+        // bankval 0x28/0x2A/0x2C/0x2E.
+        const DIRECT_108: [u32; 4] = [0x0008_0050, 0x0008_0054, 0x0008_0058, 0x0008_005C];
+        for (i, &sel) in DIRECT_108.iter().enumerate() {
+            let mut sl = Slapstic::for_chip(108);
+            assert_eq!(sl.current_bank(), 3, "powers on to bank 3");
+            assert_eq!(run(&mut sl, &[ARM, sel]), i as u8, "108 direct bank {i}");
+        }
+
+        // Alternate sequence: start (test_any 0x1F) → valid (0x3772) → select
+        // (0x3764, bank in bits 1-2) → commit (0x28). ALT3 carries the bank as
+        // 0x86EC8 + 2*bank.
+        for bank in 0u32..4 {
+            let mut sl = Slapstic::for_chip(108);
+            let final_bank = run(
+                &mut sl,
+                &[
+                    ARM,
+                    0x0008_003E,            // alt-start (0x1F) in-window
+                    0x0008_6EE4,            // alt-valid (0x3772)
+                    0x0008_6EC8 + 2 * bank, // alt-select (0x3764 | bank)
+                    0x0008_0050,            // alt-commit (0x28)
+                ],
+            );
+            assert_eq!(final_bank, bank as u8, "108 alt bank {bank}");
+        }
     }
 
     #[test]
