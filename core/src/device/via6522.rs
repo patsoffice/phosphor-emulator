@@ -162,7 +162,10 @@ mod tests {
         let mut via = Via6522::new();
         assert!(!via.take_port_b_written());
         via.write(ORB as u16, 0x42);
-        assert!(via.take_port_b_written(), "ORB write flags a Port B command");
+        assert!(
+            via.take_port_b_written(),
+            "ORB write flags a Port B command"
+        );
         assert!(!via.take_port_b_written(), "flag is one-shot");
     }
 
@@ -191,7 +194,11 @@ mod tests {
         let mut via = Via6522::new();
         for off in [0x4u16, 0x5, 0x6, 0x7, 0x8, 0x9, 0xA, 0xB, 0xC] {
             via.write(off, 0x30 + off as u8);
-            assert_eq!(via.read(off), 0x30 + off as u8, "offset {off:#x} round-trips");
+            assert_eq!(
+                via.read(off),
+                0x30 + off as u8,
+                "offset {off:#x} round-trips"
+            );
         }
     }
 

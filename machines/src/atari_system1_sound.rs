@@ -29,6 +29,8 @@ use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
 use phosphor_core::cpu::m6502::M6502;
 use phosphor_core::device::pokey::Pokey;
+use phosphor_core::device::tms5220::Tms5220;
+use phosphor_core::device::via6522::Via6522;
 use phosphor_core::device::ym2151::Ym2151;
 
 /// Sound CPU clock: 14.318181 MHz / 8 = 1.789772 MHz. POKEY runs at the same
@@ -39,6 +41,76 @@ const YM_CLOCKS_PER_TICK: u32 = 2;
 
 const AUDIO_SAMPLE_RATE: u32 = 44_100;
 
+/// The optional speech hardware: a TMS5220 reached through a VIA6522 mapped at
+/// sound `0x1000-0x100F` (the SNDEXT window). Present only on speech games (Road
+/// Runner et al.); absent on Marble. The wiring follows the System 1 board:
+/// Port A is the TMS data / status byte, and Port B carries the `/WS` (D0) and
+/// `/RS` (D1) strobes plus the TMS `/READY` (D2) and `/INT` (D3) status the
+/// sound CPU polls.
+struct Speech {
+    via: Via6522,
+    tms: Tms5220,
+}
+
+impl Speech {
+    fn new() -> Self {
+        Self {
+            via: Via6522::new(),
+            tms: Tms5220::new(),
+        }
+    }
+
+    fn reset(&mut self) {
+        self.via.reset();
+        self.tms.reset();
+    }
+
+    /// Read a VIA register (offset 0-15). Reading Port A/B first refreshes the
+    /// input pins the TMS drives, so the CPU sees live status.
+    fn read(&mut self, offset: u16) -> u8 {
+        match offset & 0x0F {
+            // Port B: D2 = TMS /READY, D3 = TMS /INT (both active-low, so a low
+            // bit means "ready" / "interrupting").
+            0x0 => {
+                let ready = if self.tms.ready() { 0 } else { 1 << 2 };
+                let intr = if self.tms.int_asserted() { 0 } else { 1 << 3 };
+                self.via.set_pb_input(ready | intr);
+                self.via.read(0)
+            }
+            // Port A: the TMS status register (read on the /RS strobe).
+            0x1 | 0x0F => {
+                self.via.set_pa_input(self.tms.status_r());
+                self.via.read(offset)
+            }
+            _ => self.via.read(offset),
+        }
+    }
+
+    /// Write a VIA register. A Port A write presents a speech-data byte to the
+    /// TMS (latched on /WS on real hardware; the stub discards it either way).
+    fn write(&mut self, offset: u16, data: u8) {
+        self.via.write(offset, data);
+        if matches!(offset & 0x0F, 0x1 | 0x0F) {
+            self.tms.data_w(data);
+        }
+    }
+
+    fn irq(&self) -> bool {
+        self.via.irq()
+    }
+
+    fn save_state(&self, w: &mut StateWriter) {
+        self.via.save_state(w);
+        self.tms.save_state(w);
+    }
+
+    fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
+        self.via.load_state(r)?;
+        self.tms.load_state(r)?;
+        Ok(())
+    }
+}
+
 pub struct AtariSystem1Sound {
     cpu: M6502,
     sound_ram: Box<[u8; 0x1000]>,
@@ -46,10 +118,9 @@ pub struct AtariSystem1Sound {
     sound_rom: Box<[u8; 0xC000]>,
     pokey: Pokey,
     ym: Ym2151,
-    /// Whether the game carries a TMS5220 speech chip (behind a VIA6522 at
-    /// `0x1000-0x100F`). Off for Marble; on for speech games like Road Runner.
-    /// The device itself is a follow-up; today the window still reads back idle.
-    speech: bool,
+    /// TMS5220 speech behind a VIA6522 at `0x1000-0x100F` — present only on
+    /// speech games (Road Runner et al.), `None` on Marble.
+    speech: Option<Speech>,
     /// Addressable output latch (LS259): bit 0 = YM reset (unused here),
     /// bits 6-7 = coin counters (Phase 5).
     outlatch: u8,
@@ -85,7 +156,7 @@ impl AtariSystem1Sound {
             sound_rom: Box::new([0xFF; 0xC000]),
             pokey: Pokey::with_clock(SOUND_CLOCK_HZ, AUDIO_SAMPLE_RATE),
             ym: Ym2151::new(),
-            speech,
+            speech: speech.then(Speech::new),
             outlatch: 0,
             coin_inputs: 0,
             soundlatch: 0,
@@ -108,6 +179,9 @@ impl AtariSystem1Sound {
     pub fn reset(&mut self) {
         self.pokey.reset();
         self.ym.reset();
+        if let Some(speech) = &mut self.speech {
+            speech.reset();
+        }
         self.outlatch = 0;
         self.coin_inputs = 0;
         self.soundlatch = 0;
@@ -262,10 +336,12 @@ impl Bus for AtariSystem1Sound {
         if addr >= 0x4000 {
             return self.sound_rom[(addr - 0x4000) as usize];
         }
-        // Speech window (VIA6522 + TMS5220). The device is a follow-up; for now
-        // it reads back idle, so speech vs. no-speech is behavior-identical here.
-        if self.speech && (0x1000..=0x100F).contains(&addr) {
-            return 0xFF;
+        // Speech window (VIA6522 bridge to the TMS5220), present only on speech
+        // games. The board wires the TMS status onto the VIA's port pins.
+        if let Some(speech) = &mut self.speech
+            && (0x1000..=0x100F).contains(&addr)
+        {
+            return speech.read(addr & 0x0F);
         }
         if addr & 0x1800 == 0x1800 {
             match addr & 0x70 {
@@ -289,8 +365,12 @@ impl Bus for AtariSystem1Sound {
         if addr >= 0x4000 {
             return; // ROM
         }
-        // Speech window (VIA6522 + TMS5220) — swallowed until the device lands.
-        if self.speech && (0x1000..=0x100F).contains(&addr) {
+        // Speech window (VIA6522 bridge to the TMS5220), present only on speech
+        // games.
+        if let Some(speech) = &mut self.speech
+            && (0x1000..=0x100F).contains(&addr)
+        {
+            speech.write(addr & 0x0F, data);
             return;
         }
         if addr & 0x1800 == 0x1800 {
@@ -317,7 +397,7 @@ impl Bus for AtariSystem1Sound {
         self.sound_nmi = false;
         InterruptState {
             nmi,
-            irq: self.ym.irq() || self.pokey.irq(),
+            irq: self.ym.irq() || self.pokey.irq() || self.speech.as_ref().is_some_and(|s| s.irq()),
             ..Default::default()
         }
     }
@@ -377,6 +457,12 @@ impl Saveable for AtariSystem1Sound {
         w.write_bool(self.held_reset);
         w.write_bool(self.reset_pending);
         w.write_u64_le(self.clock);
+        // Speech state only exists on speech games; its presence is fixed by the
+        // board config, so no discriminant is written (a Marble save is
+        // unchanged, and a Road Runner save always has it).
+        if let Some(speech) = &self.speech {
+            speech.save_state(w);
+        }
     }
 
     fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
@@ -394,6 +480,9 @@ impl Saveable for AtariSystem1Sound {
         self.held_reset = r.read_bool()?;
         self.reset_pending = r.read_bool()?;
         self.clock = r.read_u64_le()?;
+        if let Some(speech) = &mut self.speech {
+            speech.load_state(r)?;
+        }
         Ok(())
     }
 }
@@ -531,5 +620,68 @@ mod tests {
         assert_eq!(snd2.sound_ram[0x100], 0x77);
         assert_eq!(snd2.soundlatch, 0x12);
         assert!(snd2.command_pending);
+    }
+
+    const M: BusMaster = BusMaster::Cpu(1);
+
+    #[test]
+    fn no_speech_window_when_speech_disabled() {
+        // Marble (speech=false): the 0x1000-0x100F window is not decoded and
+        // reads back the open-bus 0xFF, exactly as before the speech wiring.
+        let mut snd = AtariSystem1Sound::new(false);
+        assert!(snd.speech.is_none());
+        assert_eq!(Bus::read(&mut snd, M, 0x1000), 0xFF);
+        assert_eq!(Bus::read(&mut snd, M, 0x100F), 0xFF);
+    }
+
+    #[test]
+    fn speech_port_b_reports_tms_ready() {
+        // Road Runner-style board (speech=true): reading VIA Port B (offset 0)
+        // returns the TMS status lines — D2 = /READY (low = ready), D3 = /INT
+        // (high = idle). The stub is always ready and never interrupts, and DDRB
+        // powers up as all-input, so the port reads 0x08.
+        let mut snd = AtariSystem1Sound::new(true);
+        assert!(snd.speech.is_some());
+        let pb = Bus::read(&mut snd, M, 0x1000);
+        assert_eq!(pb & (1 << 2), 0, "TMS /READY low → ready");
+        assert_eq!(pb & (1 << 3), 1 << 3, "TMS /INT high → idle");
+    }
+
+    #[test]
+    fn speech_streams_data_without_stalling() {
+        // Drive the VIA the way a speech routine would: set Port A to output,
+        // write a data byte, pulse /WS on Port B. The TMS stub stays ready
+        // throughout, so a byte-streaming loop never blocks.
+        let mut snd = AtariSystem1Sound::new(true);
+        Bus::write(&mut snd, M, 0x1003, 0xFF); // DDRA = all output
+        for byte in 0..32u16 {
+            Bus::write(&mut snd, M, 0x1001, byte as u8); // ORA = data
+            Bus::write(&mut snd, M, 0x1000, 0x00); // /WS low (strobe)
+            Bus::write(&mut snd, M, 0x1000, 0x01); // /WS high
+            assert_eq!(Bus::read(&mut snd, M, 0x1000) & (1 << 2), 0, "still ready");
+        }
+        // The stub VIA emulates no interrupt sources, so it never raises the
+        // sound CPU's IRQ.
+        assert!(!snd.speech.as_ref().unwrap().irq());
+    }
+
+    #[test]
+    fn speech_state_round_trips_through_save_load() {
+        let mut snd = AtariSystem1Sound::new(true);
+        // Latch some VIA register state through the speech path.
+        Bus::write(&mut snd, M, 0x1002, 0xFF); // DDRB
+        Bus::write(&mut snd, M, 0x1000, 0x5A); // ORB
+        Bus::write(&mut snd, M, 0x100B, 0x40); // ACR (raw register file)
+
+        let mut w = StateWriter::new();
+        snd.save_state(&mut w);
+        let bytes = w.into_vec();
+
+        let mut snd2 = AtariSystem1Sound::new(true);
+        let mut r = StateReader::new(&bytes);
+        snd2.load_state(&mut r).unwrap();
+        // ORB drives all 8 pins (DDRB=0xFF), so Port B reads back 0x5A.
+        assert_eq!(Bus::read(&mut snd2, M, 0x1000), 0x5A);
+        assert_eq!(Bus::read(&mut snd2, M, 0x100B), 0x40);
     }
 }
