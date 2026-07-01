@@ -857,7 +857,7 @@ impl MarbleSystem {
         Self {
             cpu,
             map: Self::build_map(),
-            slapstic: Slapstic::new(),
+            slapstic: Slapstic::for_chip(103),
             slapstic_rom: vec![0; 0x8000],
             eeprom: [0xFF; 512], // 2804 reads 0xFF erased; game checksums + reinits
             alpha_cache: GfxCache::new(ALPHA_TILE_COUNT, 8, 8),

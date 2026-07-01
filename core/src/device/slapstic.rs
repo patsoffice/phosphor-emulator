@@ -10,7 +10,8 @@
 //!
 //! This models the address-sequence state machine for the **137412-103** chip
 //! used by Marble Madness (the rest of the 103-110 family share this state
-//! graph). It is driven by [`Slapstic::test`], which the bus calls with the
+//! graph, differing only in the secret matcher values — see [`SlapsticConfig`]
+//! and [`SLAPSTIC_103`]). It is driven by [`Slapstic::test`], which the bus calls with the
 //! **full byte address** of every access the CPU drives onto the bus — data
 //! reads/writes *and* instruction prefetches, anywhere in the address map, not
 //! just the window — because the chip only decodes address lines and some
@@ -45,18 +46,20 @@ impl Matcher {
 }
 
 // ---------------------------------------------------------------------------
-// Chip 137412-103 parameters (Marble Madness)
+// Per-chip configuration
 // ---------------------------------------------------------------------------
 //
-// The chip watches the 0x80000-0x87FFF window and decodes 14 address lines.
-// The raw `(mask, value)` chip constants are given in window word-offset terms;
-// `test_in`/`test_any`/`test_bank` lift them onto the full byte address the bus
-// presents, following MAME's `atari_slapstic_device::checker`.
+// Every Atari System 1 slapstic watches the 0x80000-0x87FFF window and decodes
+// 14 address lines; the chips differ only in the *secret matcher values* baked
+// into the PAL. The raw `(mask, value)` chip constants are given in window
+// word-offset terms; `test_in`/`test_any`/`test_bank` lift them onto the full
+// byte address the bus presents, following MAME's `atari_slapstic_device`.
+// [`SlapsticConfig`] captures a whole chip's matchers so [`Slapstic::test`] can
+// drive the shared state machine against any of them.
 
-/// Power-on / reset bank.
-const BANKSTART: u8 = 3;
-
-/// Window base byte address and the masks that pin an access into it.
+/// Window base byte address and the masks that pin an access into it. These are
+/// common to the whole 103-110 family (all share the 0x80000-byte ROM window),
+/// so the chip-specific configs only vary the `(mask, value)` pairs below.
 const RANGE_VALUE: u32 = 0x0008_0000;
 /// `!((end - start) | mirror)` for a 0x8000-byte, un-mirrored window.
 const RANGE_MASK: u32 = !0x7FFF;
@@ -88,35 +91,59 @@ const fn test_bank(b: u16) -> Matcher {
     }
 }
 
-/// Re-arm: an access to the window base offset resets any sequence to active.
-const RESET: Matcher = Matcher {
-    mask: RANGE_MASK | INPUT_MASK,
-    value: RANGE_VALUE,
+/// All the parameters that distinguish one slapstic chip from another: the
+/// power-on bank, the re-arm matcher, and the direct/alt/bitwise sequence
+/// matchers. The state machine in [`Slapstic::test`] is identical across chips
+/// and reads every matcher from here, so adding a new chip (e.g. Road Runner's
+/// 137412-108) is just another `const` of this type.
+pub struct SlapsticConfig {
+    /// Power-on / reset bank.
+    bankstart: u8,
+    /// Re-arm: an access to the window base offset resets any sequence to active.
+    reset: Matcher,
+    /// Direct bank-select matchers for bank values 0..3.
+    bank: [Matcher; 4],
+    // Alternate-banking sequence (active → valid → select → commit). `alt_start`
+    // matches *anywhere* (test_any); the remaining steps are in-window.
+    alt_start: Matcher,
+    alt_valid: Matcher,
+    alt_select: Matcher,
+    alt_commit: Matcher,
+    // Bitwise-banking sequence (active → load → set/clear bits → commit).
+    bit_start: Matcher,
+    bit_load: Matcher,
+    bit3c0: Matcher,
+    bit3s0: Matcher,
+    bit3c1: Matcher,
+    bit3s1: Matcher,
+    bit_commit: Matcher,
+}
+
+/// Chip **137412-103** (Marble Madness).
+pub const SLAPSTIC_103: SlapsticConfig = SlapsticConfig {
+    bankstart: 3,
+    reset: Matcher {
+        mask: RANGE_MASK | INPUT_MASK,
+        value: RANGE_VALUE,
+    },
+    bank: [
+        test_bank(0x0040),
+        test_bank(0x0050),
+        test_bank(0x0060),
+        test_bank(0x0070),
+    ],
+    alt_start: test_any(0x007F, 0x002D),
+    alt_valid: test_in(0x3FFF, 0x3D14),
+    alt_select: test_in(0x3FFC, 0x3D24),
+    alt_commit: test_in(0x3FCF, 0x0040),
+    bit_start: test_in(0x3FF0, 0x34C0),
+    bit_load: test_in(0x3FCF, 0x0040),
+    bit3c0: test_in(0x3FF3, 0x34C0),
+    bit3s0: test_in(0x3FF3, 0x34C1),
+    bit3c1: test_in(0x3FF3, 0x34C2),
+    bit3s1: test_in(0x3FF3, 0x34C3),
+    bit_commit: test_in(0x3FF8, 0x34D0),
 };
-
-/// Direct bank-select values 0..3.
-const BANK: [Matcher; 4] = [
-    test_bank(0x0040),
-    test_bank(0x0050),
-    test_bank(0x0060),
-    test_bank(0x0070),
-];
-
-// Alternate-banking sequence (active → valid → select → commit). ALT_START
-// matches *anywhere* (test_any); the remaining steps are in-window.
-const ALT_START: Matcher = test_any(0x007F, 0x002D);
-const ALT_VALID: Matcher = test_in(0x3FFF, 0x3D14);
-const ALT_SELECT: Matcher = test_in(0x3FFC, 0x3D24);
-const ALT_COMMIT: Matcher = test_in(0x3FCF, 0x0040);
-
-// Bitwise-banking sequence (active → load → set/clear bits → commit).
-const BIT_START: Matcher = test_in(0x3FF0, 0x34C0);
-const BIT_LOAD: Matcher = test_in(0x3FCF, 0x0040);
-const BIT3C0: Matcher = test_in(0x3FF3, 0x34C0);
-const BIT3S0: Matcher = test_in(0x3FF3, 0x34C1);
-const BIT3C1: Matcher = test_in(0x3FF3, 0x34C2);
-const BIT3S1: Matcher = test_in(0x3FF3, 0x34C3);
-const BIT_COMMIT: Matcher = test_in(0x3FF8, 0x34D0);
 
 // ---------------------------------------------------------------------------
 // State machine
@@ -164,8 +191,10 @@ impl State {
     }
 }
 
-/// Atari Slapstic 137412-103 address-sequence bank selector.
+/// Atari Slapstic address-sequence bank selector, parameterized by chip.
 pub struct Slapstic {
+    /// The chip's matcher constants; the state machine reads every pattern here.
+    config: &'static SlapsticConfig,
     state: State,
     current_bank: u8,
     /// Bank assembled by an in-progress alt/bitwise sequence, committed at the end.
@@ -173,20 +202,32 @@ pub struct Slapstic {
 }
 
 impl Slapstic {
-    /// Create a chip-103 Slapstic in its power-on state (idle, bank 3).
-    pub fn new() -> Self {
+    /// Create a Slapstic for the given chip config in its power-on state
+    /// (idle, on the config's start bank).
+    pub fn new(config: &'static SlapsticConfig) -> Self {
         Self {
+            config,
             state: State::Idle,
-            current_bank: BANKSTART,
-            loaded_bank: BANKSTART,
+            current_bank: config.bankstart,
+            loaded_bank: config.bankstart,
         }
+    }
+
+    /// Create a Slapstic for a chip by its `137412-NNN` number (e.g. `103` for
+    /// Marble Madness). Panics on an unsupported chip number.
+    pub fn for_chip(chip: u16) -> Self {
+        let config = match chip {
+            103 => &SLAPSTIC_103,
+            _ => panic!("unsupported slapstic chip 137412-{chip}"),
+        };
+        Self::new(config)
     }
 
     /// Reset to power-on: idle, back on the start bank.
     pub fn reset(&mut self) {
         self.state = State::Idle;
-        self.current_bank = BANKSTART;
-        self.loaded_bank = BANKSTART;
+        self.current_bank = self.config.bankstart;
+        self.loaded_bank = self.config.bankstart;
     }
 
     /// The bank the window currently presents (0-3).
@@ -203,39 +244,40 @@ impl Slapstic {
     ///
     /// Mirrors `atari_slapstic_device::*::test()` for chip 103.
     pub fn test(&mut self, addr: u32) {
+        let cfg = self.config;
         match self.state {
             // Idle until the window base re-arms the chip.
             State::Idle => {
-                if RESET.matches(addr) {
+                if cfg.reset.matches(addr) {
                     self.state = State::Active;
                 }
             }
             // Direct switch, or the first step of an alt/bitwise sequence.
             State::Active => {
-                if let Some(bank) = BANK.iter().position(|m| m.matches(addr)) {
+                if let Some(bank) = cfg.bank.iter().position(|m| m.matches(addr)) {
                     self.current_bank = bank as u8;
                     self.state = State::Idle;
-                } else if ALT_START.matches(addr) {
+                } else if cfg.alt_start.matches(addr) {
                     self.state = State::AltValid;
-                } else if BIT_START.matches(addr) {
+                } else if cfg.bit_start.matches(addr) {
                     self.state = State::BitLoad;
                 }
             }
             // Alt sequence: reset re-arms, the matching step advances, anything
             // else breaks back to active.
             State::AltValid => {
-                self.state = if RESET.matches(addr) {
+                self.state = if cfg.reset.matches(addr) {
                     State::Active
-                } else if ALT_VALID.matches(addr) {
+                } else if cfg.alt_valid.matches(addr) {
                     State::AltSelect
                 } else {
                     State::Active
                 };
             }
             State::AltSelect => {
-                if RESET.matches(addr) {
+                if cfg.reset.matches(addr) {
                     self.state = State::Active;
-                } else if ALT_SELECT.matches(addr) {
+                } else if cfg.alt_select.matches(addr) {
                     // The bank rides in address bits 1-2 (data-shift + altshift 0).
                     self.loaded_bank = ((addr >> 1) & 3) as u8;
                     self.state = State::AltCommit;
@@ -245,9 +287,9 @@ impl Slapstic {
             }
             // Commit is patient: only a reset or the commit access act on it.
             State::AltCommit => {
-                if RESET.matches(addr) {
+                if cfg.reset.matches(addr) {
                     self.state = State::Active;
-                } else if ALT_COMMIT.matches(addr) {
+                } else if cfg.alt_commit.matches(addr) {
                     self.current_bank = self.loaded_bank;
                     self.state = State::Idle;
                 }
@@ -255,9 +297,9 @@ impl Slapstic {
             // Bitwise sequence: load the current bank, then set/clear one bit at a
             // time, alternating phase, until the commit access.
             State::BitLoad => {
-                if RESET.matches(addr) {
+                if cfg.reset.matches(addr) {
                     self.state = State::Active;
-                } else if BIT_LOAD.matches(addr) {
+                } else if cfg.bit_load.matches(addr) {
                     self.loaded_bank = self.current_bank;
                     self.state = State::BitSetOdd;
                 }
@@ -266,16 +308,16 @@ impl Slapstic {
                 let odd = self.state == State::BitSetOdd;
                 // The odd and even phases swap which access clears vs. sets each bit.
                 let (clear0, set0, clear1, set1) = if odd {
-                    (BIT3C0, BIT3S0, BIT3C1, BIT3S1)
+                    (cfg.bit3c0, cfg.bit3s0, cfg.bit3c1, cfg.bit3s1)
                 } else {
-                    (BIT3S1, BIT3C1, BIT3S0, BIT3C0)
+                    (cfg.bit3s1, cfg.bit3c1, cfg.bit3s0, cfg.bit3c0)
                 };
                 let next_phase = if odd {
                     State::BitSetEven
                 } else {
                     State::BitSetOdd
                 };
-                if RESET.matches(addr) {
+                if cfg.reset.matches(addr) {
                     self.state = State::Active;
                 } else if clear0.matches(addr) {
                     self.loaded_bank &= !1;
@@ -289,7 +331,7 @@ impl Slapstic {
                 } else if set1.matches(addr) {
                     self.loaded_bank |= 2;
                     self.state = next_phase;
-                } else if BIT_COMMIT.matches(addr) {
+                } else if cfg.bit_commit.matches(addr) {
                     self.current_bank = self.loaded_bank;
                     self.state = State::Idle;
                 }
@@ -299,8 +341,9 @@ impl Slapstic {
 }
 
 impl Default for Slapstic {
+    /// Defaults to chip 137412-103 (Marble Madness).
     fn default() -> Self {
-        Self::new()
+        Self::new(&SLAPSTIC_103)
     }
 }
 
@@ -345,13 +388,13 @@ mod tests {
 
     #[test]
     fn powers_on_to_start_bank() {
-        let sl = Slapstic::new();
+        let sl = Slapstic::for_chip(103);
         assert_eq!(sl.current_bank(), 3);
     }
 
     #[test]
     fn arming_requires_the_base_offset() {
-        let mut sl = Slapstic::new();
+        let mut sl = Slapstic::for_chip(103);
         // Touching a bank-select address while idle does nothing.
         sl.test(DIRECT[0]);
         assert_eq!(sl.current_bank(), 3);
@@ -364,7 +407,7 @@ mod tests {
     #[test]
     fn direct_switch_selects_each_bank() {
         for (i, &sel) in DIRECT.iter().enumerate() {
-            let mut sl = Slapstic::new();
+            let mut sl = Slapstic::for_chip(103);
             assert_eq!(
                 run(&mut sl, &[ARM, sel]),
                 i as u8,
@@ -375,7 +418,7 @@ mod tests {
 
     #[test]
     fn direct_switch_returns_to_idle() {
-        let mut sl = Slapstic::new();
+        let mut sl = Slapstic::for_chip(103);
         run(&mut sl, &[ARM, DIRECT[2]]);
         assert_eq!(sl.current_bank(), 2);
         // After a switch the chip is idle again: a bare bank access is ignored
@@ -389,7 +432,7 @@ mod tests {
     #[test]
     fn alt_sequence_selects_the_encoded_bank() {
         for bank in 0u32..4 {
-            let mut sl = Slapstic::new();
+            let mut sl = Slapstic::for_chip(103);
             let final_bank = run(
                 &mut sl,
                 &[
@@ -408,7 +451,7 @@ mod tests {
     fn alt_start_fires_outside_the_window() {
         // The real chip only sees address lines: an ALT-start pattern in RAM
         // (here a stack-like 0x40005A) must arm the sequence just the same.
-        let mut sl = Slapstic::new();
+        let mut sl = Slapstic::for_chip(103);
         let final_bank = run(
             &mut sl,
             &[
@@ -424,7 +467,7 @@ mod tests {
 
     #[test]
     fn alt_sequence_break_aborts_without_changing_bank() {
-        let mut sl = Slapstic::new();
+        let mut sl = Slapstic::for_chip(103);
         // Break the sequence at the select step (before a bank is loaded); the
         // bank must stay at the power-on value.
         run(&mut sl, &[ARM, ALT_START_IN, ALT_VALID_AT, 0x0008_1234]);
@@ -434,7 +477,7 @@ mod tests {
     #[test]
     fn bitwise_sequence_sets_bank_bits() {
         // arm, bit-start, bit-load, then two phases of the 0x34C0 access, commit.
-        let mut sl = Slapstic::new();
+        let mut sl = Slapstic::for_chip(103);
         let final_bank = run(
             &mut sl,
             &[
@@ -455,7 +498,7 @@ mod tests {
     #[test]
     fn bitwise_commit_after_one_bit() {
         // Arm, bit-start, load, set bit0 on the odd phase (0x34C1), then commit.
-        let mut sl = Slapstic::new();
+        let mut sl = Slapstic::for_chip(103);
         let final_bank = run(
             &mut sl,
             &[ARM, 0x0008_6980, 0x0008_0080, 0x0008_6982, 0x0008_69A0],
@@ -465,7 +508,7 @@ mod tests {
 
     #[test]
     fn reset_returns_to_start_bank() {
-        let mut sl = Slapstic::new();
+        let mut sl = Slapstic::for_chip(103);
         run(&mut sl, &[ARM, DIRECT[1]]);
         assert_eq!(sl.current_bank(), 1);
         sl.reset();
@@ -475,7 +518,7 @@ mod tests {
 
     #[test]
     fn save_load_round_trips_state() {
-        let mut sl = Slapstic::new();
+        let mut sl = Slapstic::for_chip(103);
         // Drive partway into an alt sequence so state + loaded_bank are non-trivial.
         run(
             &mut sl,
@@ -488,7 +531,7 @@ mod tests {
         sl.save_state(&mut w);
         let bytes = w.into_vec();
 
-        let mut sl2 = Slapstic::new();
+        let mut sl2 = Slapstic::for_chip(103);
         let mut r = StateReader::new(&bytes);
         sl2.load_state(&mut r).unwrap();
         assert_eq!(sl2.state, State::AltCommit);
