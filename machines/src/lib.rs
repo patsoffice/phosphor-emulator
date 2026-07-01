@@ -102,6 +102,15 @@ macro_rules! impl_board_delegation {
     (@debug $type:ty, $board:ident, $timing:expr, debug_tick_pre $($rest:tt)*) => {
         $crate::impl_board_debug!($type, $board, $timing, debug_tick_pre);
     };
+    // 32-bit address / 16-bit data bus (Atari System 1). Matched literally and
+    // before the single-token `bus_addr: $addr:tt` arms, since `u32 word` is two
+    // tokens the generic arm can't capture.
+    (@debug $type:ty, $board:ident, $timing:expr, bus_addr: u32 word, debug_tick_pre $($rest:tt)*) => {
+        $crate::impl_board_debug!($type, $board, $timing, bus_addr: u32 word, debug_tick_pre);
+    };
+    (@debug $type:ty, $board:ident, $timing:expr, bus_addr: u32 word $(,)?) => {
+        $crate::impl_board_debug!($type, $board, $timing, bus_addr: u32 word);
+    };
     (@debug $type:ty, $board:ident, $timing:expr, bus_addr: $addr:tt, debug_tick_pre $($rest:tt)*) => {
         $crate::impl_board_debug!($type, $board, $timing, bus_addr: $addr, debug_tick_pre);
     };
@@ -220,6 +229,45 @@ macro_rules! impl_board_debug {
             fn debug_tick(&mut self) -> u32 {
                 self.debug_pre_tick();
                 phosphor_core::bus_split!(self, bus => {
+                    self.$board.tick(bus);
+                });
+                self.$board.debug_tick_boundaries()
+            }
+        }
+    };
+    ($type:ty, $board:ident, $timing:expr, bus_addr: u32 word) => {
+        impl phosphor_core::core::machine::MachineDebug for $type {
+            fn debug_bus(&self) -> Option<&dyn phosphor_core::core::debug::BusDebug> {
+                Some(&self.$board)
+            }
+            fn debug_bus_mut(&mut self) -> Option<&mut dyn phosphor_core::core::debug::BusDebug> {
+                Some(&mut self.$board)
+            }
+            fn cycles_per_frame(&self) -> u64 {
+                $timing.cycles_per_frame()
+            }
+            fn debug_tick(&mut self) -> u32 {
+                phosphor_core::bus_split!(self, bus : u32 word => {
+                    self.$board.tick(bus);
+                });
+                self.$board.debug_tick_boundaries()
+            }
+        }
+    };
+    ($type:ty, $board:ident, $timing:expr, bus_addr: u32 word, debug_tick_pre) => {
+        impl phosphor_core::core::machine::MachineDebug for $type {
+            fn debug_bus(&self) -> Option<&dyn phosphor_core::core::debug::BusDebug> {
+                Some(&self.$board)
+            }
+            fn debug_bus_mut(&mut self) -> Option<&mut dyn phosphor_core::core::debug::BusDebug> {
+                Some(&mut self.$board)
+            }
+            fn cycles_per_frame(&self) -> u64 {
+                $timing.cycles_per_frame()
+            }
+            fn debug_tick(&mut self) -> u32 {
+                self.debug_pre_tick();
+                phosphor_core::bus_split!(self, bus : u32 word => {
                     self.$board.tick(bus);
                 });
                 self.$board.debug_tick_boundaries()
@@ -370,6 +418,7 @@ pub mod asteroids;
 pub mod asteroids_sound;
 pub mod atari_avg;
 pub mod atari_dvg;
+pub mod atari_system1;
 pub mod atari_system1_sound;
 pub mod ccastles;
 pub mod congo_bongo;
@@ -417,6 +466,7 @@ pub mod z80dma;
 pub use astdelux::AsteroidsDeluxeSystem;
 pub use asteroids::AsteroidsSystem;
 pub use atari_dvg::AtariDvgBoard;
+pub use atari_system1::AtariSystem1Board;
 pub use ccastles::CrystalCastlesSystem;
 pub use digdug::DigDugSystem;
 pub use donkey_kong::DkongSystem;

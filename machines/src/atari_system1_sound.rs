@@ -402,8 +402,6 @@ impl Saveable for AtariSystem1Sound {
 mod tests {
     use super::*;
 
-    const M: BusMaster = BusMaster::Cpu(1);
-
     /// Build a sound board with a tiny hand-assembled 6502 program that, on NMI,
     /// reads the command latch and echoes (command + 1) back to the main CPU.
     fn board_with_echo_program() -> AtariSystem1Sound {
