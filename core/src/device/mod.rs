@@ -57,6 +57,7 @@ pub mod slapstic;
 pub mod sn76489;
 pub mod ssio;
 pub mod tms5220;
+mod tms5220_tables;
 pub mod via6522;
 pub mod votrax_sc01;
 pub mod williams_blitter;
