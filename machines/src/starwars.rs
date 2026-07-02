@@ -19,13 +19,15 @@ use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::debug_trace::DebugTraceBuffer;
 use phosphor_core::core::machine::{
-    ActionRole, DipSwitches, FrontendMachine, InputConfigurable, InputControl, InputEvent, InputId,
-    InputKind, MachineCore, SaveState,
+    ActionRole, AnalogAxisKind, DefaultBinding, DipSwitches, Direction, FrontendMachine,
+    InputConfigurable, InputControl, InputEvent, InputId, InputKind, MachineCore, MouseControl,
+    SaveState,
 };
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::{AccessKind, AddressSpace16, Bus, BusMaster, TimingConfig};
 use phosphor_core::cpu::Cpu;
 use phosphor_core::cpu::m6809::M6809;
+use phosphor_core::device::adc0809::Adc0809;
 use phosphor_core::device::avg::{Avg, AvgVariant};
 use phosphor_core::device::dvg::VectorLine;
 use phosphor_core::device::pokey::Pokey;
@@ -52,6 +54,23 @@ const INPUT_FIRE1: u8 = 3; // top-left trigger (BUTTON1)
 const INPUT_FIRE2: u8 = 4; // top-right trigger (BUTTON2)
 const INPUT_FIRE3: u8 = 5; // bottom-left thumb (BUTTON3)
 const INPUT_FIRE4: u8 = 6; // bottom-right thumb (BUTTON4)
+// Digital yoke deflection (keyboard); indices into `yoke_keys`.
+const INPUT_YOKE_UP: u8 = 7;
+const INPUT_YOKE_DOWN: u8 = 8;
+const INPUT_YOKE_LEFT: u8 = 9;
+const INPUT_YOKE_RIGHT: u8 = 10;
+// Analog yoke axes (mouse / pad).
+const CTRL_YOKE_X: InputId = InputId(20); // yaw
+const CTRL_YOKE_Y: InputId = InputId(21); // pitch
+
+// AD_STICK electrical range: full 8-bit, spring-centered.
+const STICK_MIN: i32 = 0x00;
+const STICK_MAX: i32 = 0xFF;
+const STICK_CENTER: i32 = 0x80;
+
+// ADC channels (MAME: channel 0 = STICKY pitch, channel 1 = STICKX yaw).
+const ADC_PITCH_CH: usize = 0;
+const ADC_YAW_CH: usize = 1;
 
 const STARWARS_CONTROLS: &[InputControl] = &[
     InputControl {
@@ -109,6 +128,67 @@ const STARWARS_CONTROLS: &[InputControl] = &[
         kind: InputKind::Button,
         player: Some(1),
         default_bindings: &[],
+    },
+    // Flight yoke — digital deflection (keyboard) and analog axes (mouse).
+    InputControl {
+        id: InputId(INPUT_YOKE_UP as u16),
+        stable_name: "yoke_up",
+        label: "Yoke Up (climb)",
+        kind: InputKind::DigitalDirection {
+            direction: Direction::Up,
+        },
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_UP,
+    },
+    InputControl {
+        id: InputId(INPUT_YOKE_DOWN as u16),
+        stable_name: "yoke_down",
+        label: "Yoke Down (dive)",
+        kind: InputKind::DigitalDirection {
+            direction: Direction::Down,
+        },
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_DOWN,
+    },
+    InputControl {
+        id: InputId(INPUT_YOKE_LEFT as u16),
+        stable_name: "yoke_left",
+        label: "Yoke Left",
+        kind: InputKind::DigitalDirection {
+            direction: Direction::Left,
+        },
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_LEFT,
+    },
+    InputControl {
+        id: InputId(INPUT_YOKE_RIGHT as u16),
+        stable_name: "yoke_right",
+        label: "Yoke Right",
+        kind: InputKind::DigitalDirection {
+            direction: Direction::Right,
+        },
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_RIGHT,
+    },
+    InputControl {
+        id: CTRL_YOKE_X,
+        stable_name: "yoke_x",
+        label: "Yoke X (yaw)",
+        kind: InputKind::AnalogAxis {
+            axis: AnalogAxisKind::X,
+        },
+        player: Some(1),
+        default_bindings: &[DefaultBinding::Mouse(MouseControl::AxisX)],
+    },
+    InputControl {
+        id: CTRL_YOKE_Y,
+        stable_name: "yoke_y",
+        label: "Yoke Y (pitch)",
+        kind: InputKind::AnalogAxis {
+            axis: AnalogAxisKind::Y,
+        },
+        player: Some(1),
+        default_bindings: &[DefaultBinding::Mouse(MouseControl::AxisY)],
     },
 ];
 
@@ -434,6 +514,12 @@ pub(crate) struct StarWarsBoard {
     pub(crate) in0: u8,
     pub(crate) in1_buttons: u8,
 
+    // Flight yoke: ADC0809 + current stick position [x=yaw, y=pitch] and the
+    // held digital-deflection keys [up, down, left, right].
+    pub(crate) adc: Adc0809,
+    pub(crate) stick: [i32; 2],
+    pub(crate) yoke_keys: [bool; 4],
+
     // Operator DIP switches (defaults; full DIP support added later).
     pub(crate) dsw0: u8,
     pub(crate) dsw1: u8,
@@ -482,6 +568,9 @@ impl StarWarsBoard {
             watchdog_tripped: false,
             in0: 0xFF,
             in1_buttons: 0xFF,
+            adc: Adc0809::new(),
+            stick: [STICK_CENTER, STICK_CENTER],
+            yoke_keys: [false; 4],
             dsw0: 0x00,
             dsw1: 0x02, // coinage default: 1 coin / 1 credit
             clock: 0,
@@ -536,7 +625,7 @@ impl StarWarsBoard {
             0x4320..=0x433F => self.in1(),
             0x4340..=0x435F => self.dsw0,
             0x4360..=0x437F => self.dsw1,
-            0x4380..=0x439F => 0x80, // ADC (centered); real input added later
+            0x4380..=0x439F => self.adc.data_r(), // analog yoke conversion result
             0x4400 => {
                 self.mainlatch_pending = false;
                 self.mainlatch
@@ -570,6 +659,12 @@ impl StarWarsBoard {
                 self.novram.store(false);
                 self.novram.store(true);
                 self.novram.store(false);
+            }
+            0x46C0..=0x46C3 => {
+                // Select an ADC channel and start a conversion; feed the current
+                // yoke position so the read returns a fresh value.
+                self.push_stick();
+                self.adc.address_offset_start_w(addr & 0x03);
             }
             0x46E0 => self.sound_reset(),
             0x4700..=0x4707 => {
@@ -627,6 +722,44 @@ impl StarWarsBoard {
 
     fn pet_watchdog(&mut self) {
         self.watchdog_counter = 0;
+    }
+
+    /// Feed the current yoke position to the ADC channels.
+    fn push_stick(&mut self) {
+        self.adc.set_input(ADC_PITCH_CH, self.stick[1] as u8);
+        self.adc.set_input(ADC_YAW_CH, self.stick[0] as u8);
+        self.adc.set_input(2, 0); // thrust (unused)
+    }
+
+    /// Recompute the yoke from the held keys (full deflection while held,
+    /// spring-centered when released).
+    pub(crate) fn update_yoke_keys(&mut self) {
+        let axis = |neg: bool, pos: bool| {
+            if neg {
+                STICK_MIN
+            } else if pos {
+                STICK_MAX
+            } else {
+                STICK_CENTER
+            }
+        };
+        // yoke_keys = [up, down, left, right]; X = yaw (left/right), Y = pitch.
+        self.stick[0] = axis(self.yoke_keys[2], self.yoke_keys[3]);
+        self.stick[1] = axis(self.yoke_keys[1], self.yoke_keys[0]);
+        self.push_stick();
+    }
+
+    /// Nudge an analog yoke axis by a relative (mouse) delta.
+    pub(crate) fn move_stick(&mut self, axis: usize, delta: i32) {
+        self.stick[axis] = (self.stick[axis] + delta).clamp(STICK_MIN, STICK_MAX);
+        self.push_stick();
+    }
+
+    /// Set an analog yoke axis to an absolute position (pad stick, −1.0..=1.0).
+    pub(crate) fn set_stick(&mut self, axis: usize, value: f32) {
+        let v = STICK_CENTER + (value.clamp(-1.0, 1.0) * (STICK_MAX - STICK_CENTER) as f32) as i32;
+        self.stick[axis] = v.clamp(STICK_MIN, STICK_MAX);
+        self.push_stick();
     }
 
     fn sound_reset(&mut self) {
@@ -814,6 +947,10 @@ impl StarWarsBoard {
         self.riot.reset();
         self.tms.reset();
         self.tms_clock_acc = 0;
+        self.adc.reset();
+        self.stick = [STICK_CENTER, STICK_CENTER];
+        self.yoke_keys = [false; 4];
+        self.push_stick();
         self.audio_buffer.clear();
         self.audio_dc = (0.0, 0.0);
         self.bank = 0;
@@ -907,6 +1044,9 @@ impl Saveable for StarWarsBoard {
         self.riot.save_state(w);
         self.tms.save_state(w);
         w.write_u64_le(self.tms_clock_acc);
+        self.adc.save_state(w);
+        w.write_u32_le(self.stick[0] as u32);
+        w.write_u32_le(self.stick[1] as u32);
         w.write_bytes(self.novram.nvram());
         w.write_bytes(self.main_map.region_data(MainRegion::Ram));
         w.write_bytes(self.main_map.region_data(MainRegion::MathRamLo));
@@ -936,6 +1076,9 @@ impl Saveable for StarWarsBoard {
         self.tms_clock_acc = r.read_u64_le()?;
         // Re-sync the TMS resampler to its (configuration) clock.
         self.tms.set_clock(TMS_CLOCK_HZ);
+        self.adc.load_state(r)?;
+        self.stick[0] = r.read_u32_le()? as i32;
+        self.stick[1] = r.read_u32_le()? as i32;
         let mut nvram = vec![0u8; self.novram.nvram().len()];
         r.read_bytes_into(&mut nvram)?;
         self.novram.load_nvram(&nvram);
@@ -1052,21 +1195,53 @@ impl InputConfigurable for StarWarsSystem {
     }
 
     fn handle_input(&mut self, event: InputEvent) {
-        let InputEvent::Button { id, pressed } = event else {
-            return;
-        };
         let b = &mut self.board;
-        match id.0 as u8 {
-            // IN0 (active-low)
-            INPUT_COIN2 => set_bit_active_low(&mut b.in0, 0, pressed),
-            INPUT_COIN1 => set_bit_active_low(&mut b.in0, 1, pressed),
-            INPUT_SERVICE => set_bit_active_low(&mut b.in0, 4, pressed),
-            INPUT_FIRE4 => set_bit_active_low(&mut b.in0, 6, pressed), // BUTTON4
-            INPUT_FIRE1 => set_bit_active_low(&mut b.in0, 7, pressed), // BUTTON1
-            // IN1 button bits (active-low)
-            INPUT_FIRE3 => set_bit_active_low(&mut b.in1_buttons, 4, pressed), // BUTTON3
-            INPUT_FIRE2 => set_bit_active_low(&mut b.in1_buttons, 5, pressed), // BUTTON2
-            _ => {}
+        match event {
+            InputEvent::Button { id, pressed } => match id.0 as u8 {
+                // IN0 (active-low)
+                INPUT_COIN2 => set_bit_active_low(&mut b.in0, 0, pressed),
+                INPUT_COIN1 => set_bit_active_low(&mut b.in0, 1, pressed),
+                INPUT_SERVICE => set_bit_active_low(&mut b.in0, 4, pressed),
+                INPUT_FIRE4 => set_bit_active_low(&mut b.in0, 6, pressed), // BUTTON4
+                INPUT_FIRE1 => set_bit_active_low(&mut b.in0, 7, pressed), // BUTTON1
+                // IN1 button bits (active-low)
+                INPUT_FIRE3 => set_bit_active_low(&mut b.in1_buttons, 4, pressed), // BUTTON3
+                INPUT_FIRE2 => set_bit_active_low(&mut b.in1_buttons, 5, pressed), // BUTTON2
+                // Digital yoke deflection [up, down, left, right].
+                INPUT_YOKE_UP => {
+                    b.yoke_keys[0] = pressed;
+                    b.update_yoke_keys();
+                }
+                INPUT_YOKE_DOWN => {
+                    b.yoke_keys[1] = pressed;
+                    b.update_yoke_keys();
+                }
+                INPUT_YOKE_LEFT => {
+                    b.yoke_keys[2] = pressed;
+                    b.update_yoke_keys();
+                }
+                INPUT_YOKE_RIGHT => {
+                    b.yoke_keys[3] = pressed;
+                    b.update_yoke_keys();
+                }
+                _ => {}
+            },
+            // Mouse motion nudges the analog yoke.
+            InputEvent::Relative { id, delta } => {
+                if id == CTRL_YOKE_X {
+                    b.move_stick(0, delta as i32);
+                } else if id == CTRL_YOKE_Y {
+                    b.move_stick(1, delta as i32);
+                }
+            }
+            // Pad stick sets an absolute yoke position.
+            InputEvent::Absolute { id, value } => {
+                if id == CTRL_YOKE_X {
+                    b.set_stick(0, value);
+                } else if id == CTRL_YOKE_Y {
+                    b.set_stick(1, value);
+                }
+            }
         }
     }
 }
@@ -1328,6 +1503,39 @@ mod tests {
         assert_eq!(shi[0], 0x00); // gap
         assert_eq!(shi[0x1000], 0x77); // 107 at $C000
         assert_eq!(shi[0x4FFE], 0xEE); // 208 near $FFFE
+    }
+
+    #[test]
+    fn analog_yoke_feeds_adc_channels() {
+        let mut sys = StarWarsSystem::new();
+
+        // Keyboard: full pitch-up. Select channel 0 (pitch), start, read.
+        sys.handle_input(InputEvent::Button {
+            id: InputId(INPUT_YOKE_UP as u16),
+            pressed: true,
+        });
+        sys.board.bus_write(BusMaster::Cpu(0), 0x46C0, 0x00);
+        assert_eq!(sys.board.bus_read(BusMaster::Cpu(0), 0x4380), 0xFF);
+
+        // Yaw channel (1) has no input yet → spring-centered.
+        sys.board.bus_write(BusMaster::Cpu(0), 0x46C1, 0x00);
+        assert_eq!(sys.board.bus_read(BusMaster::Cpu(0), 0x4380), 0x80);
+
+        // Pad stick: absolute full-right yaw.
+        sys.handle_input(InputEvent::Absolute {
+            id: CTRL_YOKE_X,
+            value: 1.0,
+        });
+        sys.board.bus_write(BusMaster::Cpu(0), 0x46C1, 0x00);
+        assert_eq!(sys.board.bus_read(BusMaster::Cpu(0), 0x4380), 0xFF);
+
+        // Releasing the pitch key re-centers.
+        sys.handle_input(InputEvent::Button {
+            id: InputId(INPUT_YOKE_UP as u16),
+            pressed: false,
+        });
+        sys.board.bus_write(BusMaster::Cpu(0), 0x46C0, 0x00);
+        assert_eq!(sys.board.bus_read(BusMaster::Cpu(0), 0x4380), 0x80);
     }
 
     #[test]
