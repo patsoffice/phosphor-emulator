@@ -9,11 +9,8 @@
 //!
 //! This module implements the board (both CPUs, their 64 KB address spaces, ROM
 //! banking, the watchdog, the periodic IRQ, the main/sound mailbox latches, the
-//! AVG/matrix wiring, and the POKEY/RIOT/TMS5220 sound), loads the ROM set, and
-//! registers the machine.
-//!
-//! The analog flight-yoke input (via the ADC) and NVRAM persistence are added in
-//! a follow-on step; for now only the digital buttons and coins are wired.
+//! AVG/matrix wiring, the POKEY/RIOT/TMS5220 sound, the ADC0809 flight yoke, and
+//! the X2212 NVRAM), loads the ROM set, and registers the machine.
 
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
@@ -21,7 +18,7 @@ use phosphor_core::core::debug_trace::DebugTraceBuffer;
 use phosphor_core::core::machine::{
     ActionRole, AnalogAxisKind, DefaultBinding, DipSwitches, Direction, FrontendMachine,
     InputConfigurable, InputControl, InputEvent, InputId, InputKind, MachineCore, MouseControl,
-    SaveState,
+    Nvram, Profilable, SaveState,
 };
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::{AccessKind, AddressSpace16, Bus, BusMaster, TimingConfig};
@@ -1250,7 +1247,19 @@ impl InputConfigurable for StarWarsSystem {
 // current values (defaults) in the meantime.
 impl DipSwitches for StarWarsSystem {}
 
-crate::impl_default_frontend_capabilities!(StarWarsSystem);
+impl Nvram for StarWarsSystem {
+    fn save_nvram(&self) -> Option<&[u8]> {
+        Some(self.board.novram.nvram())
+    }
+
+    fn load_nvram(&mut self, data: &[u8]) {
+        self.board.novram.load_nvram(data);
+    }
+}
+
+impl Profilable for StarWarsSystem {}
+
+crate::impl_board_debug_trace!(StarWarsSystem, board);
 
 // ---------------------------------------------------------------------------
 // Registry
@@ -1536,6 +1545,17 @@ mod tests {
         });
         sys.board.bus_write(BusMaster::Cpu(0), 0x46C0, 0x00);
         assert_eq!(sys.board.bus_read(BusMaster::Cpu(0), 0x4380), 0x80);
+    }
+
+    #[test]
+    fn nvram_round_trips_through_the_x2212() {
+        let mut sys = StarWarsSystem::new();
+        let len = sys.save_nvram().expect("nvram present").len();
+        assert!(len > 0);
+        // X2212 cells are 4-bit; mask to the storable nibble.
+        let data: Vec<u8> = (0..len).map(|i| (i as u8) & 0x0F).collect();
+        sys.load_nvram(&data);
+        assert_eq!(sys.save_nvram().unwrap(), &data[..]);
     }
 
     #[test]
