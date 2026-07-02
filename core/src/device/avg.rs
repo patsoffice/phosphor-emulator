@@ -673,7 +673,10 @@ impl Avg {
             .wrapping_mul(scale_factor)
             >> 4;
         self.xpos = self.xpos.wrapping_add(dx);
-        self.ypos = self.ypos.wrapping_sub(dy);
+        // Star Wars is a normal (ROT0) monitor, so the display list uses the
+        // Y-up convention (higher Y = higher on screen) the renderers expect for
+        // unrotated games — the opposite of Tempest's `ypos -= dy`.
+        self.ypos = self.ypos.wrapping_add(dy);
 
         // color111: low 3 bits index one-bit-per-channel RGB (bit2=R, 1=G, 0=B).
         let c = self.color;

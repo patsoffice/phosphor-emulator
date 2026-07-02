@@ -123,8 +123,10 @@ pub const TIMING: TimingConfig = TimingConfig {
     cpu_clock_hz: 1_512_000,
     cycles_per_scanline: 36_864, // whole frame (vector display has no scanlines)
     total_scanlines: 1,
-    display_width: 1024,
-    display_height: 768,
+    // The Star Wars beam coordinate space is ~250×290 (MAME visarea 251×281);
+    // size the display to contain it with margin at a landscape-ish window.
+    display_width: 440,
+    display_height: 360,
 };
 
 /// Periodic IRQ: 3 kHz / 12 ≈ 246.09 Hz → every 6144 CPU cycles.
@@ -832,12 +834,14 @@ impl StarWarsBoard {
     // --- Frontend hooks ----------------------------------------------------
 
     pub(crate) fn render_frame(&self, buffer: &mut [u8]) {
+        // flip_y: the AVG emits a Y-up display list; a normal (ROT0) monitor maps
+        // that to screen Y-down.
         rasterize_vectors(
             &self.display_list,
             buffer,
             TIMING.display_width,
             TIMING.display_height,
-            false,
+            true,
         );
     }
 
