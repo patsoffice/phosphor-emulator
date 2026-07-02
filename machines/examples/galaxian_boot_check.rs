@@ -70,7 +70,7 @@ fn check(root: &str, id: &str) {
 /// 56-wide ASCII brightness thumbnail.
 fn thumbnail(buf: &[u8], w: usize, h: usize) {
     const CW: usize = 56;
-    let ch = (CW * h / w).max(1) * 1;
+    let ch = (CW * h / w).max(1);
     let ramp = b" .:-=+*#%@";
     for cy in 0..ch {
         let mut line = String::new();
