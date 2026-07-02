@@ -112,12 +112,33 @@ impl<T: Sample> AudioResampler<T> {
         }
     }
 
-    /// Accumulate one input sample. If this tick completes an output sample,
-    /// the box-filtered average is automatically pushed to the internal buffer.
+    /// Accumulate one input sample, pushing any completed output samples to the
+    /// internal buffer.
+    ///
+    /// Handles both directions: when downsampling (`input_rate > output_rate`)
+    /// each input completes at most one box-filtered output; when upsampling
+    /// (`output_rate > input_rate`) one input can complete several output
+    /// samples, which are sample-and-held from the same average. (The single-emit
+    /// [`tick_sample`] only supports downsampling.)
     #[inline]
     pub fn tick(&mut self, sample: T) {
-        if let Some(avg) = self.tick_sample(sample) {
+        T::accum_add(&mut self.sample_accum, sample);
+        self.sample_count += 1;
+        self.sample_phase += self.output_rate;
+        if self.sample_phase < self.input_rate {
+            return;
+        }
+        let avg = T::accum_avg(self.sample_accum, self.sample_count);
+        self.sample_accum = T::Accum::default();
+        self.sample_count = 0;
+        // Emit one output per input period consumed: exactly one when
+        // downsampling, several (sample-and-hold) when upsampling.
+        loop {
+            self.sample_phase -= self.input_rate;
             self.buffer.push(avg);
+            if self.sample_phase < self.input_rate {
+                break;
+            }
         }
     }
 
@@ -226,6 +247,32 @@ mod tests {
             (44_099..=44_101).contains(&n),
             "expected ~44100 samples, got {n}"
         );
+    }
+
+    #[test]
+    fn resampler_upsamples_to_full_output_count() {
+        // Upsampling (input 8135 Hz < output 44100 Hz): one second of input must
+        // yield ~44100 output samples. A downsample-only resampler would emit
+        // only ~8135 here (the TMS5220 "slow/choppy speech" bug).
+        let mut r = AudioResampler::<i16>::new(8_135, 44_100);
+        for _ in 0..8_135 {
+            r.tick(1000);
+        }
+        let n = r.drain_audio().len();
+        assert!(
+            (44_090..=44_110).contains(&n),
+            "expected ~44100 upsampled samples, got {n}"
+        );
+    }
+
+    #[test]
+    fn resampler_upsample_holds_sample_value() {
+        // A single input at 3x upsampling holds its value across three outputs.
+        let mut r = AudioResampler::<i16>::new(1, 3);
+        r.tick(500);
+        let out = r.drain_audio();
+        assert_eq!(out.len(), 3);
+        assert!(out.iter().all(|&s| s == 500));
     }
 
     #[test]
