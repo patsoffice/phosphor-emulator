@@ -34,6 +34,7 @@ use phosphor_core::device::x2212::X2212;
 use phosphor_macros::{BusDebug, DebugTrace, MemoryRegion};
 
 use crate::atari_dvg::rasterize_vectors;
+use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
 
 // ---------------------------------------------------------------------------
 // Timing
@@ -171,6 +172,135 @@ fn build_sound_map() -> AddressSpace16 {
 }
 
 // ---------------------------------------------------------------------------
+// ROM manifest (MAME `starwars` parent set)
+// ---------------------------------------------------------------------------
+
+/// Fixed program ROM at CPU $8000–$FFFF (four contiguous 8 KB ROMs).
+static SW_PROGRAM_ROM: RomRegion = RomRegion {
+    size: 0x8000,
+    entries: &[
+        RomEntry {
+            name: "136021.102.1hj",
+            size: 0x2000,
+            offset: 0x0000,
+            crc32: &[0xf725e344],
+        },
+        RomEntry {
+            name: "136021.203.1jk",
+            size: 0x2000,
+            offset: 0x2000,
+            crc32: &[0xf6da0a00],
+        },
+        RomEntry {
+            name: "136021.104.1kl",
+            size: 0x2000,
+            offset: 0x4000,
+            crc32: &[0x7e406703],
+        },
+        RomEntry {
+            name: "136021.206.1m",
+            size: 0x2000,
+            offset: 0x6000,
+            crc32: &[0xc7e51237],
+        },
+    ],
+};
+
+/// Banked ROM: one 16 KB ROM whose first 8 KB is bank 0 ($6000–$7FFF, LS259
+/// bit 4 = 0) and second 8 KB is bank 1 — loaded whole here and split by
+/// [`StarWarsBoard::load_rom_set`].
+static SW_BANK_ROM: RomRegion = RomRegion {
+    size: 0x4000,
+    entries: &[RomEntry {
+        name: "136021.214.1f",
+        size: 0x4000,
+        offset: 0x0000,
+        crc32: &[0x04f1876e],
+    }],
+};
+
+/// Vector ROM at CPU $3000–$3FFF (the upper 4 KB of the AVG address space).
+static SW_VECTOR_ROM: RomRegion = RomRegion {
+    size: 0x1000,
+    entries: &[RomEntry {
+        name: "136021-105.1l",
+        size: 0x1000,
+        offset: 0x0000,
+        crc32: &[0x538e7d2f],
+    }],
+};
+
+/// Sound ROMs at sound $4000–$7FFF (two 8 KB ROMs).
+static SW_SOUND_LO: RomRegion = RomRegion {
+    size: 0x4000,
+    entries: &[
+        RomEntry {
+            name: "136021-107.1jk",
+            size: 0x2000,
+            offset: 0x0000,
+            crc32: &[0xdbf3aea2],
+        },
+        RomEntry {
+            name: "136021-208.1h",
+            size: 0x2000,
+            offset: 0x2000,
+            crc32: &[0xe38070a8],
+        },
+    ],
+};
+
+/// Sound ROMs mirrored at sound $B000–$FFFF (the two sound ROMs reloaded above a
+/// 4 KB gap; the reset vector lives in the second one at $FFFE).
+static SW_SOUND_HI: RomRegion = RomRegion {
+    size: 0x5000,
+    entries: &[
+        RomEntry {
+            name: "136021-107.1jk",
+            size: 0x2000,
+            offset: 0x1000,
+            crc32: &[0xdbf3aea2],
+        },
+        RomEntry {
+            name: "136021-208.1h",
+            size: 0x2000,
+            offset: 0x3000,
+            crc32: &[0xe38070a8],
+        },
+    ],
+};
+
+/// Matrix Processor microcode PROMs (four 1 K×4 PROMs → the 4 KB `user2` image).
+static SW_MATHBOX_PROM: RomRegion = RomRegion {
+    size: 0x1000,
+    entries: &[
+        RomEntry {
+            name: "136021-110.7h",
+            size: 0x400,
+            offset: 0x0000,
+            crc32: &[0x810e040e],
+        },
+        RomEntry {
+            name: "136021-111.7j",
+            size: 0x400,
+            offset: 0x0400,
+            crc32: &[0xae69881c],
+        },
+        RomEntry {
+            name: "136021-112.7k",
+            size: 0x400,
+            offset: 0x0800,
+            crc32: &[0xecf22628],
+        },
+        RomEntry {
+            name: "136021-113.7l",
+            size: 0x400,
+            offset: 0x0C00,
+            crc32: &[0x83febfde],
+        },
+    ],
+};
+
+// ---------------------------------------------------------------------------
 // Board
 // ---------------------------------------------------------------------------
 
@@ -275,6 +405,32 @@ impl StarWarsBoard {
             audio_dc: (0.0, 0.0),
             debug_trace: DebugTraceBuffer::new(),
         }
+    }
+
+    /// Load a Star Wars ROM set into the board's memory regions and the Matrix
+    /// Processor PROMs.
+    pub(crate) fn load_rom_set(&mut self, rom_set: &RomSet) -> Result<(), RomLoadError> {
+        let prog = SW_PROGRAM_ROM.load(rom_set)?;
+        self.main_map.load_region(MainRegion::ProgramRom, &prog);
+
+        // The 16 KB bank ROM splits into two 8 KB banks for the $6000 window.
+        let bank = SW_BANK_ROM.load(rom_set)?;
+        self.main_map
+            .load_region(MainRegion::BankLow, &bank[..0x2000]);
+        self.main_map
+            .load_region(MainRegion::BankHigh, &bank[0x2000..]);
+
+        let vrom = SW_VECTOR_ROM.load(rom_set)?;
+        self.main_map.load_region(MainRegion::VectorRom, &vrom);
+
+        let sound_lo = SW_SOUND_LO.load(rom_set)?;
+        self.sound_map.load_region(SoundRegion::RomLo, &sound_lo);
+        let sound_hi = SW_SOUND_HI.load(rom_set)?;
+        self.sound_map.load_region(SoundRegion::RomHi, &sound_hi);
+
+        let proms = SW_MATHBOX_PROM.load(rom_set)?;
+        self.math.load_proms(&proms);
+        Ok(())
     }
 
     /// Decode the four-POKEY address scramble at $1800–$183F into
@@ -988,6 +1144,59 @@ mod tests {
             board.bus_check_interrupts(BusMaster::Cpu(1)).irq,
             "RIOT timer underflow should raise the sound-CPU IRQ"
         );
+    }
+
+    #[test]
+    fn rom_manifest_places_regions_and_splits_bank() {
+        use crate::rom_loader::RomSet;
+
+        // Synthetic ROM set: each file sized correctly, with sentinel bytes we
+        // can trace to their region offsets. CRCs are skipped here (the real
+        // CRC-validated load is exercised by the boot-check example).
+        let mut f214 = vec![0u8; 0x4000];
+        f214[0] = 0xA0; // start of bank 0
+        f214[0x2000] = 0xB1; // start of bank 1
+        let mut f107 = vec![0u8; 0x2000];
+        f107[0] = 0x77;
+        let mut f208 = vec![0u8; 0x2000];
+        f208[0x1FFE] = 0xEE; // near the reset vector
+        let f2000 = vec![0u8; 0x2000];
+        let f1000 = vec![0u8; 0x1000];
+        let f400 = vec![0u8; 0x400];
+        let rs = RomSet::from_slices(&[
+            ("136021.102.1hj", &f2000),
+            ("136021.203.1jk", &f2000),
+            ("136021.104.1kl", &f2000),
+            ("136021.206.1m", &f2000),
+            ("136021.214.1f", &f214),
+            ("136021-105.1l", &f1000),
+            ("136021-107.1jk", &f107),
+            ("136021-208.1h", &f208),
+            ("136021-110.7h", &f400),
+            ("136021-111.7j", &f400),
+            ("136021-112.7k", &f400),
+            ("136021-113.7l", &f400),
+        ]);
+
+        // Bank ROM splits into two 8 KB banks.
+        let bank = SW_BANK_ROM.load_skip_checksums(&rs).unwrap();
+        assert_eq!(bank.len(), 0x4000);
+        assert_eq!(bank[0], 0xA0);
+        assert_eq!(bank[0x2000], 0xB1);
+
+        // Program ROM is the four 8 KB ROMs, contiguous.
+        assert_eq!(
+            SW_PROGRAM_ROM.load_skip_checksums(&rs).unwrap().len(),
+            0x8000
+        );
+
+        // Sound-hi region has a 4 KB leading gap, then the two ROMs; the reset
+        // vector byte lands at $FFFE = region offset 0x4FFE ($FFFE − $B000).
+        let shi = SW_SOUND_HI.load_skip_checksums(&rs).unwrap();
+        assert_eq!(shi.len(), 0x5000);
+        assert_eq!(shi[0], 0x00); // gap
+        assert_eq!(shi[0x1000], 0x77); // 107 at $C000
+        assert_eq!(shi[0x4FFE], 0xEE); // 208 near $FFFE
     }
 
     #[test]
