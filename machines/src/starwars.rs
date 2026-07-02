@@ -7,19 +7,21 @@
 //! - 3D math: the [`StarWarsMath`] Matrix Processor + divider + PRNG
 //! - Sound: 4× POKEY + TMS5220 speech via a MOS6532 RIOT (wired in a later step)
 //!
-//! This module implements the board scaffolding: both CPUs, their 64 KB address
-//! spaces, ROM banking, the watchdog, the periodic IRQ, the main/sound mailbox
-//! latches, and the AVG/matrix wiring.
+//! This module implements the board (both CPUs, their 64 KB address spaces, ROM
+//! banking, the watchdog, the periodic IRQ, the main/sound mailbox latches, the
+//! AVG/matrix wiring, and the POKEY/RIOT/TMS5220 sound), loads the ROM set, and
+//! registers the machine.
 //!
-//! Follow-on steps add the sound devices (RIOT/POKEY/TMS5220) and audio mixing,
-//! the full ROM manifest + registry entry, and the analog-stick input + NVRAM
-//! persistence. Until the machine is registered, the module carries
-//! `#[allow(dead_code)]` (see `lib.rs`).
+//! The analog flight-yoke input (via the ADC) and NVRAM persistence are added in
+//! a follow-on step; for now only the digital buttons and coins are wired.
 
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::debug_trace::DebugTraceBuffer;
-use phosphor_core::core::machine::{MachineCore, SaveState};
+use phosphor_core::core::machine::{
+    ActionRole, DipSwitches, FrontendMachine, InputConfigurable, InputControl, InputEvent, InputId,
+    InputKind, MachineCore, SaveState,
+};
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::{AccessKind, AddressSpace16, Bus, BusMaster, TimingConfig};
 use phosphor_core::cpu::Cpu;
@@ -34,7 +36,81 @@ use phosphor_core::device::x2212::X2212;
 use phosphor_macros::{BusDebug, DebugTrace, MemoryRegion};
 
 use crate::atari_dvg::rasterize_vectors;
+use crate::registry::MachineEntry;
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
+use crate::set_bit_active_low;
+
+// ---------------------------------------------------------------------------
+// Input controls (digital buttons + coins; the analog flight yoke is added
+// with the ADC in a follow-on step)
+// ---------------------------------------------------------------------------
+
+const INPUT_COIN1: u8 = 0;
+const INPUT_COIN2: u8 = 1;
+const INPUT_SERVICE: u8 = 2;
+const INPUT_FIRE1: u8 = 3; // top-left trigger (BUTTON1)
+const INPUT_FIRE2: u8 = 4; // top-right trigger (BUTTON2)
+const INPUT_FIRE3: u8 = 5; // bottom-left thumb (BUTTON3)
+const INPUT_FIRE4: u8 = 6; // bottom-right thumb (BUTTON4)
+
+const STARWARS_CONTROLS: &[InputControl] = &[
+    InputControl {
+        id: InputId(INPUT_COIN1 as u16),
+        stable_name: "coin",
+        label: "Coin",
+        kind: InputKind::Coin,
+        player: None,
+        default_bindings: crate::input_defaults::COIN,
+    },
+    InputControl {
+        id: InputId(INPUT_COIN2 as u16),
+        stable_name: "coin2",
+        label: "Coin 2",
+        kind: InputKind::Coin,
+        player: Some(2),
+        default_bindings: crate::input_defaults::P2_START,
+    },
+    InputControl {
+        id: InputId(INPUT_SERVICE as u16),
+        stable_name: "service",
+        label: "Service",
+        kind: InputKind::Service,
+        player: None,
+        default_bindings: crate::input_defaults::SERVICE,
+    },
+    InputControl {
+        id: InputId(INPUT_FIRE1 as u16),
+        stable_name: "fire1",
+        label: "Fire (top-left)",
+        kind: InputKind::Action(ActionRole::Primary),
+        player: Some(1),
+        default_bindings: &[],
+    },
+    InputControl {
+        id: InputId(INPUT_FIRE2 as u16),
+        stable_name: "fire2",
+        label: "Fire (top-right)",
+        kind: InputKind::Action(ActionRole::Secondary),
+        player: Some(1),
+        default_bindings: &[],
+    },
+    InputControl {
+        id: InputId(INPUT_FIRE3 as u16),
+        stable_name: "fire3",
+        label: "Fire (bottom-left)",
+        kind: InputKind::Button,
+        player: Some(1),
+        default_bindings: &[],
+    },
+    InputControl {
+        id: InputId(INPUT_FIRE4 as u16),
+        stable_name: "fire4",
+        label: "Fire (bottom-right)",
+        kind: InputKind::Button,
+        player: Some(1),
+        default_bindings: &[],
+    },
+];
 
 // ---------------------------------------------------------------------------
 // Timing
@@ -351,6 +427,11 @@ pub(crate) struct StarWarsBoard {
     pub(crate) watchdog_counter: u64,
     pub(crate) watchdog_tripped: bool,
 
+    // Digital inputs (active-low: a released control reads 1). IN0 is the full
+    // port byte; IN1 holds only its button bits (2,4,5) — bits 6/7 are computed.
+    pub(crate) in0: u8,
+    pub(crate) in1_buttons: u8,
+
     // Operator DIP switches (defaults; full DIP support added later).
     pub(crate) dsw0: u8,
     pub(crate) dsw1: u8,
@@ -397,6 +478,8 @@ impl StarWarsBoard {
             irq_counter: 0,
             watchdog_counter: 0,
             watchdog_tripped: false,
+            in0: 0xFF,
+            in1_buttons: 0xFF,
             dsw0: 0x00,
             dsw1: 0x02, // coinage default: 1 coin / 1 credit
             clock: 0,
@@ -523,14 +606,14 @@ impl StarWarsBoard {
     }
 
     fn in0(&self) -> u8 {
-        // Coin/service/tilt/test/fire, all active-low → released reads 1.
-        0xFF
+        // Coin/service/button1/button4, all active-low.
+        self.in0
     }
 
     fn in1(&self) -> u8 {
-        // Active-low buttons (bits 2,4,5) released; bit 6 = AVG done (VG_HALT,
-        // active high), bit 7 = MATH_RUN (active high).
-        let mut v = 0x34;
+        // Active-low button bits (2,4,5); bit 6 = AVG done (VG_HALT, active
+        // high), bit 7 = MATH_RUN (active high).
+        let mut v = self.in1_buttons & 0x34;
         if self.avg.is_halted() {
             v |= 0x40;
         }
@@ -959,7 +1042,51 @@ impl SaveState for StarWarsSystem {
     crate::machine_save_state!();
 }
 
+impl InputConfigurable for StarWarsSystem {
+    fn input_controls(&self) -> &'static [InputControl] {
+        STARWARS_CONTROLS
+    }
+
+    fn handle_input(&mut self, event: InputEvent) {
+        let InputEvent::Button { id, pressed } = event else {
+            return;
+        };
+        let b = &mut self.board;
+        match id.0 as u8 {
+            // IN0 (active-low)
+            INPUT_COIN2 => set_bit_active_low(&mut b.in0, 0, pressed),
+            INPUT_COIN1 => set_bit_active_low(&mut b.in0, 1, pressed),
+            INPUT_SERVICE => set_bit_active_low(&mut b.in0, 4, pressed),
+            INPUT_FIRE4 => set_bit_active_low(&mut b.in0, 6, pressed), // BUTTON4
+            INPUT_FIRE1 => set_bit_active_low(&mut b.in0, 7, pressed), // BUTTON1
+            // IN1 button bits (active-low)
+            INPUT_FIRE3 => set_bit_active_low(&mut b.in1_buttons, 4, pressed), // BUTTON3
+            INPUT_FIRE2 => set_bit_active_low(&mut b.in1_buttons, 5, pressed), // BUTTON2
+            _ => {}
+        }
+    }
+}
+
+// Operator DIP banks are exposed in a follow-on step; the board holds the
+// current values (defaults) in the meantime.
+impl DipSwitches for StarWarsSystem {}
+
 crate::impl_default_frontend_capabilities!(StarWarsSystem);
+
+// ---------------------------------------------------------------------------
+// Registry
+// ---------------------------------------------------------------------------
+
+fn create_machine(rom_set: &RomSet) -> Result<Box<dyn FrontendMachine>, RomLoadError> {
+    let mut sys = StarWarsSystem::new();
+    sys.board.load_rom_set(rom_set)?;
+    sys.reset();
+    Ok(Box::new(sys))
+}
+
+inventory::submit! {
+    MachineEntry::new("starwars", &["starwars", "starwars1", "starwarso"], create_machine)
+}
 
 // ---------------------------------------------------------------------------
 // Tests

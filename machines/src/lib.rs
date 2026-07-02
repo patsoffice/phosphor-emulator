@@ -459,9 +459,6 @@ pub mod rom_loader;
 pub mod satans_hollow;
 pub mod scramble;
 pub mod simple_system;
-// Board scaffolding; wired into the registry (with the full ROM manifest) in a
-// follow-on step, which is when the dead-code allowance comes off.
-#[allow(dead_code)]
 pub mod starwars;
 pub mod tempest;
 pub mod tkg04;
