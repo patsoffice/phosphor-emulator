@@ -568,7 +568,9 @@ impl StarWarsBoard {
             adc: Adc0809::new(),
             stick: [STICK_CENTER, STICK_CENTER],
             yoke_keys: [false; 4],
-            dsw0: 0x00,
+            // DSW0 factory defaults: 6 shields, Hard, 1 bonus, demo sounds on,
+            // and Freeze OFF (bit 7 = 1 — a clear bit 7 freezes the game).
+            dsw0: 0x98,
             dsw1: 0x02, // coinage default: 1 coin / 1 credit
             clock: 0,
             display_list: Vec::with_capacity(2048),
