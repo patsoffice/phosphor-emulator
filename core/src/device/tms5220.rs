@@ -1,11 +1,10 @@
 //! TMS5220 / TMS5220C voice synthesis processor — host interface and FIFO.
 //!
-//! This models the chip's parallel host interface and its 16-byte FIFO: the
-//! command decode, the `speak-external` data path, and the `/READY` / `/INT` /
-//! status handshake a host CPU polls while streaming speech. The LPC synthesis
-//! that turns FIFO data into audio (frame parse, interpolation, the 10-pole
-//! lattice filter) is a separate follow-up; until it lands the chip runs the
-//! handshake correctly but is silent.
+//! This models the chip's parallel host interface and its 16-byte FIFO (command
+//! decode, the `speak-external` data path, and the `/READY` / `/INT` / status
+//! handshake a host CPU polls) plus the LPC synthesizer that turns FIFO data
+//! into audio: frame parsing, 8-step interpolation, chirp/noise excitation, and
+//! the 10-pole lattice filter, resampled to the host rate.
 //!
 //! # Host-agnostic
 //!
@@ -32,7 +31,9 @@
 //! VSM-only commands (`LOAD ADDRESS`, `SPEAK`, `READ BYTE`, `READ AND BRANCH`)
 //! are decoded but have no effect.
 
-use super::tms5220_tables::{ENERGY_BITS, K_BITS, NUM_K, PITCH_BITS};
+use super::tms5220_tables::{
+    CHIRP, ENERGY, ENERGY_BITS, INTERP_SHIFT, K, K_BITS, NUM_K, PITCH, PITCH_BITS,
+};
 use crate::audio::AudioResampler;
 use crate::core::debug::{DebugRegister, Debuggable};
 use crate::device::Device;
@@ -52,9 +53,42 @@ const TMS5220C_NOMINAL_HZ: u32 = 650_826;
 /// (reload 0); the 5220C SET RATE command can select the others.
 const RELOAD_TABLE: [u8; 4] = [0, 2, 4, 6];
 
+/// Subcycle reload for normal speech (the slower SPKSLOW mode is not modeled):
+/// each parameter counter step is one "A" cycle (calc) then one "B" cycle (write).
+const SUBC_RELOAD: u8 = 1;
+
 /// The chip synthesizes one sample every 80 master clocks.
 fn sample_rate(clock_hz: u32) -> u64 {
     (clock_hz / 80).max(1) as u64
+}
+
+/// One reflection-coefficient multiply: clamp `a` to 10 bits and `b` to 14 bits
+/// (modular, as the chip does), multiply and shift right by 9.
+fn matrix_multiply(mut a: i32, mut b: i32) -> i32 {
+    while a > 511 {
+        a -= 1024;
+    }
+    while a < -512 {
+        a += 1024;
+    }
+    while b > 16383 {
+        b -= 32768;
+    }
+    while b < -16384 {
+        b += 32768;
+    }
+    (a * b) >> 9
+}
+
+/// Interpolate one parameter toward its target: `current + ((target-current) >>
+/// shift)`, with the delta suppressed when interpolation is inhibited and the
+/// whole result zeroed while the zero-parameter latch is set.
+fn interp_step(current: i32, target: i32, inhibit: bool, shift: u8, zpar: bool) -> i32 {
+    if zpar {
+        return 0;
+    }
+    let delta = if inhibit { 0 } else { target - current };
+    current + (delta >> shift)
 }
 
 /// TMS52xx family variant. Selects the handful of variant-gated behaviors; the
@@ -399,16 +433,24 @@ impl Tms5220 {
         self.resampler.set_input_rate(sample_rate(clock_hz));
     }
 
-    /// Drain synthesized audio at the host sample rate. Silent (empty) until the
-    /// LPC synthesizer lands.
+    /// Drain synthesized audio at the host sample rate.
     pub fn drain_audio(&mut self) -> Vec<f32> {
         self.resampler.drain_audio()
     }
+
+    /// Advance one master clock. The chip produces one synthesis sample every 80
+    /// clocks, which is fed to the internal resampler.
+    pub fn tick(&mut self) {
+        self.clock_div += 1;
+        if self.clock_div >= 80 {
+            self.clock_div = 0;
+            let sample = self.process_one_sample();
+            self.resampler.tick(sample);
+        }
+    }
 }
 
-// Frame parsing. These are driven by the synthesis engine, which lands in a
-// follow-up; until then they are exercised only by the unit tests.
-#[allow(dead_code)]
+// Frame parsing and LPC synthesis.
 impl Tms5220 {
     /// `P == 0`: the parsed frame is unvoiced (K5-K10 are zeroed).
     fn new_frame_unvoiced_flag(&self) -> bool {
@@ -500,6 +542,178 @@ impl Tms5220 {
             }
         }
     }
+
+    /// `E == 15`: the parsed frame is a stop frame (ends speech).
+    fn new_frame_stop_flag(&self) -> bool {
+        self.new_frame_energy_idx == 0x0F
+    }
+
+    /// `E == 0`: the parsed frame is silence.
+    fn new_frame_silence_flag(&self) -> bool {
+        self.new_frame_energy_idx == 0
+    }
+
+    /// Run the 10-pole lattice filter for one sample and return its 14-bit
+    /// output. Uses the current reflection coefficients and excitation.
+    fn lattice_filter(&mut self) -> i32 {
+        let k = &self.current_k;
+        let u = &mut self.lat_u;
+        let x = &mut self.lat_x;
+
+        u[10] = matrix_multiply(self.previous_energy, self.excitation_data << 6);
+        u[9] = u[10] - matrix_multiply(k[9], x[9]);
+        u[8] = u[9] - matrix_multiply(k[8], x[8]);
+        u[7] = u[8] - matrix_multiply(k[7], x[7]);
+        u[6] = u[7] - matrix_multiply(k[6], x[6]);
+        u[5] = u[6] - matrix_multiply(k[5], x[5]);
+        u[4] = u[5] - matrix_multiply(k[4], x[4]);
+        u[3] = u[4] - matrix_multiply(k[3], x[3]);
+        u[2] = u[3] - matrix_multiply(k[2], x[2]);
+        u[1] = u[2] - matrix_multiply(k[1], x[1]);
+        u[0] = u[1] - matrix_multiply(k[0], x[0]);
+
+        x[9] = x[8] + matrix_multiply(k[8], u[8]);
+        x[8] = x[7] + matrix_multiply(k[7], u[7]);
+        x[7] = x[6] + matrix_multiply(k[6], u[6]);
+        x[6] = x[5] + matrix_multiply(k[5], u[5]);
+        x[5] = x[4] + matrix_multiply(k[4], u[4]);
+        x[4] = x[3] + matrix_multiply(k[3], u[3]);
+        x[3] = x[2] + matrix_multiply(k[2], u[2]);
+        x[2] = x[1] + matrix_multiply(k[1], u[1]);
+        x[1] = x[0] + matrix_multiply(k[0], u[0]);
+        x[0] = u[0];
+
+        self.previous_energy = self.current_energy;
+        u[0]
+    }
+
+    /// Clip the 14-bit lattice output to the chip's ~10-bit analog range and
+    /// range-extend it back to a signed 16-bit sample.
+    fn clip_analog(&self, cliptemp: i32) -> i16 {
+        let mut c = cliptemp.clamp(-2048, 2047);
+        c &= !0xF;
+        ((c << 4) | ((c & 0x7F0) >> 3) | ((c & 0x400) >> 10)) as i16
+    }
+
+    /// Produce one synthesis sample (the chip's per-sample step) as a normalized
+    /// `f32`. Idle (not talking) outputs the chip's constant -1 LSB.
+    fn process_one_sample(&mut self) -> f32 {
+        if !self.talkd {
+            self.advance_counters(false);
+            return -1.0 / 32768.0;
+        }
+
+        // At the start of a new interpolation cycle, parse the next frame and
+        // decide whether interpolation is inhibited.
+        if self.ip == 0 && self.pc == 12 && self.subcycle == 1 {
+            self.ip = RELOAD_TABLE[(self.c_variant_rate & 0x3) as usize];
+            self.parse_frame();
+            if self.new_frame_stop_flag() {
+                self.talk = false;
+                self.spen = false;
+                self.update_fifo_status_and_ints();
+            }
+            let new_unvoiced = self.new_frame_unvoiced_flag();
+            let new_silence = self.new_frame_silence_flag();
+            self.inhibit = (!self.oldp && new_unvoiced)
+                || (self.oldp && !new_unvoiced)
+                || (self.olde && !new_silence)
+                || (self.oldp && new_silence);
+        } else if self.subcycle == 2 {
+            // Interpolate one parameter toward the target on each B cycle.
+            let inhibit_state = self.inhibit && (self.ip != 0);
+            let shift = INTERP_SHIFT[self.ip as usize];
+            match self.pc {
+                0 => {
+                    if self.ip == 0 {
+                        self.pitch_zero = false;
+                    }
+                    let target = ENERGY[self.new_frame_energy_idx as usize] as i32;
+                    self.current_energy =
+                        interp_step(self.current_energy, target, inhibit_state, shift, self.zpar);
+                }
+                1 => {
+                    let target = PITCH[self.new_frame_pitch_idx as usize] as i32;
+                    self.current_pitch =
+                        interp_step(self.current_pitch, target, inhibit_state, shift, self.zpar);
+                }
+                2..=11 => {
+                    let idx = (self.pc - 2) as usize;
+                    let target = K[idx][self.new_frame_k_idx[idx] as usize] as i32;
+                    let zpar = if idx < 4 { self.zpar } else { self.uv_zpar };
+                    self.current_k[idx] =
+                        interp_step(self.current_k[idx], target, inhibit_state, shift, zpar);
+                }
+                _ => {}
+            }
+        }
+
+        // Excitation: chirp for voiced frames, noise for unvoiced.
+        if self.oldp {
+            self.excitation_data = if self.rng & 1 != 0 { !0x3F } else { 0x40 };
+        } else {
+            let idx = (self.pitch_count.min(51)) as usize;
+            self.excitation_data = CHIRP[idx] as i32;
+        }
+
+        // Advance the noise LFSR 20 times per sample (once per T cycle).
+        for _ in 0..20 {
+            let bitout = ((self.rng >> 12) & 1)
+                ^ ((self.rng >> 3) & 1)
+                ^ ((self.rng >> 2) & 1)
+                ^ (self.rng & 1);
+            self.rng = (self.rng << 1) | bitout;
+        }
+
+        let mut this_sample = self.lattice_filter();
+        // Fold to 14 bits (the final k1 addition can overflow).
+        while this_sample > 16383 {
+            this_sample -= 32768;
+        }
+        while this_sample < -16384 {
+            this_sample += 32768;
+        }
+        let out = self.clip_analog(this_sample);
+
+        self.advance_counters(true);
+        out as f32 / 32768.0
+    }
+
+    /// Advance the subcycle / PC / IP counters (and the pitch counter, when
+    /// talking) one sample, latching TALKD and OLDE/OLDP at cycle end.
+    fn advance_counters(&mut self, talking: bool) {
+        self.subcycle += 1;
+        if self.subcycle == 2 && self.pc == 12 {
+            if talking && self.ip == 7 && self.inhibit {
+                self.pitch_zero = true;
+            }
+            if self.ip == 7 {
+                if talking {
+                    self.olde = self.new_frame_silence_flag();
+                    self.oldp = self.new_frame_unvoiced_flag();
+                }
+                self.talkd = self.talk; // TALKD latches from TALK
+                self.update_fifo_status_and_ints();
+                if !self.talk && self.spen {
+                    self.talk = true;
+                }
+            }
+            self.subcycle = SUBC_RELOAD;
+            self.pc = 0;
+            self.ip = (self.ip + 1) & 0x7;
+        } else if self.subcycle == 3 {
+            self.subcycle = SUBC_RELOAD;
+            self.pc += 1;
+        }
+
+        if talking {
+            self.pitch_count += 1;
+            if self.pitch_count as i32 >= self.current_pitch || self.pitch_zero {
+                self.pitch_count = 0;
+            }
+            self.pitch_count &= 0x1FF;
+        }
+    }
 }
 
 impl Default for Tms5220 {
@@ -521,7 +735,10 @@ impl Device for Tms5220 {
         self.reset();
     }
 
-    // `tick` is a no-op until the LPC synthesizer lands.
+    fn tick(&mut self) {
+        // Inherent method takes priority; this is not recursive.
+        self.tick();
+    }
 }
 
 impl Debuggable for Tms5220 {
@@ -793,6 +1010,61 @@ mod tests {
         }
         tms.parse_frame();
         assert_eq!(tms.new_frame_energy_idx, 15, "stop frame is energy 0xF");
+    }
+
+    #[test]
+    fn idle_chip_outputs_effective_silence() {
+        let mut tms = Tms5220::new();
+        let mut out = Vec::new();
+        for _ in 0..100_000 {
+            tms.tick();
+            out.extend(tms.drain_audio());
+        }
+        assert!(!out.is_empty(), "resampler should emit samples");
+        // An idle chip outputs its constant -1 LSB (~ -3e-5), i.e. silence.
+        assert!(
+            out.iter().all(|&s| s.abs() < 1e-3),
+            "idle output should be silent"
+        );
+    }
+
+    #[test]
+    fn voiced_speech_produces_audible_varying_audio() {
+        let mut tms = Tms5220::new();
+        tms.data_w(CMD_SPEAK_EXTERNAL);
+        // A voiced frame (energy, rep=0, voiced pitch, K1-K10). Streamed
+        // continuously so speech keeps running.
+        let frame = packed_frame(&[
+            (10, 4),
+            (0, 1),
+            (0x20, 6),
+            (0x11, 5),
+            (0x0A, 5),
+            (0x8, 4),
+            (0x8, 4),
+            (0x8, 4),
+            (0x8, 4),
+            (0x8, 4),
+            (0x4, 3),
+            (0x4, 3),
+            (0x4, 3),
+        ]);
+        let mut src = frame.iter().cycle();
+        let mut out = Vec::new();
+        for _ in 0..400_000 {
+            if tms.ready() {
+                tms.data_w(*src.next().unwrap());
+            }
+            tms.tick();
+            out.extend(tms.drain_audio());
+        }
+        assert!(!out.is_empty());
+        let min = out.iter().copied().fold(f32::INFINITY, f32::min);
+        let max = out.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        assert!(
+            max - min > 0.01,
+            "expected audible waveform variation, got {min}..={max}"
+        );
     }
 
     /// Pack `(value, width)` fields into FIFO bytes in the exact order
