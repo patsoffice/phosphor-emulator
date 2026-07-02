@@ -32,6 +32,7 @@
 //! VSM-only commands (`LOAD ADDRESS`, `SPEAK`, `READ BYTE`, `READ AND BRANCH`)
 //! are decoded but have no effect.
 
+use super::tms5220_tables::{ENERGY_BITS, K_BITS, NUM_K, PITCH_BITS};
 use crate::audio::AudioResampler;
 use crate::core::debug::{DebugRegister, Debuggable};
 use crate::device::Device;
@@ -46,6 +47,10 @@ const OUTPUT_SAMPLE_RATE: u64 = 44_100;
 /// TMS5220C nominal master clock on Atari System 1: 14.318181 MHz / 2 / 11.
 /// The board re-selects the exact rate at runtime via [`Tms5220::set_clock`].
 const TMS5220C_NOMINAL_HZ: u32 = 650_826;
+
+/// Interpolation-period reload by rate. The base TMS5220 always uses rate 0
+/// (reload 0); the 5220C SET RATE command can select the others.
+const RELOAD_TABLE: [u8; 4] = [0, 2, 4, 6];
 
 /// The chip synthesizes one sample every 80 master clocks.
 fn sample_rate(clock_hz: u32) -> u64 {
@@ -67,19 +72,23 @@ pub enum Tms52xxVariant {
 /// Runtime state (FIFO + handshake flags) is serialized; the variant, clock,
 /// and resampler are configuration preserved across reset.
 #[derive(Saveable)]
-#[save_version(1)]
+#[save_version(2)]
 pub struct Tms5220 {
     /// Speak-external FIFO (ring buffer).
     fifo: [u8; FIFO_SIZE],
     fifo_head: u8,
     fifo_tail: u8,
     fifo_count: u8,
+    /// Bits already consumed from the FIFO head byte by the frame parser.
+    fifo_bits_taken: u8,
 
     /// SPEN: synthesizer enabled (set by a speak command / FIFO passing
     /// half-full; cleared by reset or buffer-empty in speak-external mode).
     spen: bool,
-    /// TALKD: synthesis actively producing samples. Always false until the LPC
-    /// synthesizer lands; kept here so `talk_status` is already faithful.
+    /// TALK: latched "should be speaking"; TALKD follows it a frame later.
+    talk: bool,
+    /// TALKD: synthesis actively producing samples (latched from TALK at the
+    /// end of each interpolation cycle).
     talkd: bool,
     /// DDIS: speak-external (FIFO) mode, entered by the SPEAK EXTERNAL command.
     ddis: bool,
@@ -95,6 +104,43 @@ pub struct Tms5220 {
 
     /// 5220C SET RATE value (low nibble of the last set-rate command).
     c_variant_rate: u8,
+
+    // --- Synthesizer state ---
+    /// Newly parsed frame's target indices (energy, pitch, K1..K10).
+    new_frame_energy_idx: u8,
+    new_frame_pitch_idx: u8,
+    new_frame_k_idx: [u8; NUM_K],
+    /// Interpolated current parameter values fed to the lattice filter.
+    current_energy: i32,
+    current_pitch: i32,
+    current_k: [i32; NUM_K],
+    /// Energy applied on the previous sample (lattice excitation scale).
+    previous_energy: i32,
+    /// Lattice filter delay lines.
+    lat_u: [i32; 11],
+    lat_x: [i32; NUM_K],
+    /// Unvoiced-excitation noise LFSR.
+    rng: u16,
+    /// Current excitation sample (chirp or noise).
+    excitation_data: i32,
+    /// Pitch (chirp) counter.
+    pitch_count: u16,
+    /// Interpolation period (0..7), parameter counter (0..12), subcycle (0..2).
+    ip: u8,
+    pc: u8,
+    subcycle: u8,
+    /// Master-clock divider toward the per-sample synthesis step (0..79).
+    clock_div: u8,
+    /// Interpolation-inhibit flag (voiced/unvoiced or silence transitions).
+    inhibit: bool,
+    /// Pitch-counter zeroing latch (circuit 412).
+    pitch_zero: bool,
+    /// OLDE / OLDP: previous frame's "energy == 0" / "unvoiced" latches.
+    olde: bool,
+    oldp: bool,
+    /// Zero-parameter latches while (re)starting speech.
+    zpar: bool,
+    uv_zpar: bool,
 
     #[save_skip]
     variant: Tms52xxVariant,
@@ -120,7 +166,9 @@ impl Tms5220 {
             fifo_head: 0,
             fifo_tail: 0,
             fifo_count: 0,
+            fifo_bits_taken: 0,
             spen: false,
+            talk: false,
             talkd: false,
             ddis: false,
             buffer_low: true,
@@ -128,6 +176,28 @@ impl Tms5220 {
             previous_talk_status: false,
             irq_pin: false,
             c_variant_rate: 0,
+            new_frame_energy_idx: 0,
+            new_frame_pitch_idx: 0,
+            new_frame_k_idx: [0; NUM_K],
+            current_energy: 0,
+            current_pitch: 0,
+            current_k: [0; NUM_K],
+            previous_energy: 0,
+            lat_u: [0; 11],
+            lat_x: [0; NUM_K],
+            rng: 0x1FFF,
+            excitation_data: 0,
+            pitch_count: 0,
+            ip: 0,
+            pc: 0,
+            subcycle: 0,
+            clock_div: 0,
+            inhibit: true,
+            pitch_zero: false,
+            olde: true,
+            oldp: true,
+            zpar: false,
+            uv_zpar: false,
             variant,
             clock_hz,
             resampler: AudioResampler::new(sample_rate(clock_hz), OUTPUT_SAMPLE_RATE),
@@ -144,7 +214,9 @@ impl Tms5220 {
         self.fifo_head = 0;
         self.fifo_tail = 0;
         self.fifo_count = 0;
+        self.fifo_bits_taken = 0;
         self.spen = false;
+        self.talk = false;
         self.talkd = false;
         self.ddis = false;
         self.buffer_low = true;
@@ -152,6 +224,30 @@ impl Tms5220 {
         self.previous_talk_status = false;
         self.irq_pin = false;
         self.c_variant_rate = 0;
+
+        self.new_frame_energy_idx = 0;
+        self.new_frame_pitch_idx = 0;
+        self.new_frame_k_idx = [0; NUM_K];
+        self.current_energy = 0;
+        self.current_pitch = 0;
+        self.current_k = [0; NUM_K];
+        self.previous_energy = 0;
+        self.lat_u = [0; 11];
+        self.lat_x = [0; NUM_K];
+        self.rng = 0x1FFF;
+        self.excitation_data = 0;
+        self.pitch_count = 0;
+        self.ip = RELOAD_TABLE[(self.c_variant_rate & 0x3) as usize];
+        self.pc = 0;
+        self.subcycle = 0;
+        self.clock_div = 0;
+        self.inhibit = true;
+        self.pitch_zero = false;
+        self.olde = true;
+        self.oldp = true;
+        self.zpar = false;
+        self.uv_zpar = false;
+
         self.resampler.reset();
     }
 
@@ -170,7 +266,13 @@ impl Tms5220 {
                 // Once the FIFO fills past half (BL falls) and we were not yet
                 // speaking, SPEN goes active and synthesis begins.
                 if !self.spen && old_buffer_low && !self.buffer_low {
+                    self.zpar = true;
+                    self.uv_zpar = true;
+                    self.olde = true;
+                    self.oldp = true;
                     self.spen = true;
+                    self.talk = true; // fast start: begin talking immediately
+                    self.load_idle_frame();
                 }
             }
             // FIFO full: byte is dropped; `ready()` already reports not-ready.
@@ -197,7 +299,13 @@ impl Tms5220 {
                 self.fifo_head = 0;
                 self.fifo_tail = 0;
                 self.fifo_count = 0;
+                self.fifo_bits_taken = 0;
                 self.ddis = true;
+                self.zpar = true;
+                self.uv_zpar = true;
+                self.olde = true;
+                self.oldp = true;
+                self.load_idle_frame();
             }
             0x70 => self.reset(),
             _ => unreachable!("cmd & 0x70 is always one of the above"),
@@ -219,14 +327,15 @@ impl Tms5220 {
         }
 
         // BE: buffer empty at zero bytes; interrupt on its rising edge. In
-        // speak-external mode an empty buffer ends speech (clears TALKD/SPEN).
+        // speak-external mode an empty buffer ends speech: TALK and SPEN clear
+        // now, and TALKD follows when the current interpolation cycle latches.
         if self.fifo_count == 0 {
             if !self.buffer_empty {
                 self.buffer_empty = true;
                 self.irq_pin = true;
             }
             if self.ddis {
-                self.talkd = false;
+                self.talk = false;
                 self.spen = false;
             }
         } else {
@@ -246,6 +355,16 @@ impl Tms5220 {
     /// Talk status (status bit 7): speaking or enabled to speak.
     fn talk_status(&self) -> bool {
         self.spen || self.talkd
+    }
+
+    /// Load the idle "silence" target frame observed on the real chip at the
+    /// start of speech (energy 0, pitch 0, K1-K4 = 0, K5-K7 = 0xF, K8-K10 = 0x7).
+    fn load_idle_frame(&mut self) {
+        self.new_frame_energy_idx = 0;
+        self.new_frame_pitch_idx = 0;
+        self.new_frame_k_idx[..4].fill(0);
+        self.new_frame_k_idx[4..7].fill(0xF);
+        self.new_frame_k_idx[7..NUM_K].fill(0x7);
     }
 
     /// Read the status register (Port A on the `/RS` strobe). Reading status
@@ -284,6 +403,102 @@ impl Tms5220 {
     /// LPC synthesizer lands.
     pub fn drain_audio(&mut self) -> Vec<f32> {
         self.resampler.drain_audio()
+    }
+}
+
+// Frame parsing. These are driven by the synthesis engine, which lands in a
+// follow-up; until then they are exercised only by the unit tests.
+#[allow(dead_code)]
+impl Tms5220 {
+    /// `P == 0`: the parsed frame is unvoiced (K5-K10 are zeroed).
+    fn new_frame_unvoiced_flag(&self) -> bool {
+        self.new_frame_pitch_idx == 0
+    }
+
+    /// Read `count` bits from the FIFO, most-significant bit first (bits leave
+    /// each FIFO byte LSB-first). Bits read past an empty FIFO come back as 0.
+    fn read_bits(&mut self, count: u8) -> u32 {
+        let mut val = 0u32;
+        for _ in 0..count {
+            let bit = (self.fifo[self.fifo_head as usize] >> self.fifo_bits_taken) & 1;
+            val = (val << 1) | bit as u32;
+            self.fifo_bits_taken += 1;
+            if self.fifo_bits_taken >= 8 {
+                if self.fifo_count > 0 {
+                    self.fifo_count -= 1;
+                }
+                self.fifo[self.fifo_head as usize] = 0;
+                self.fifo_head = (self.fifo_head + 1) % FIFO_SIZE as u8;
+                self.fifo_bits_taken = 0;
+                self.update_fifo_status_and_ints();
+            }
+        }
+        val
+    }
+
+    /// Parse one frame from the FIFO into the `new_frame_*` target indices.
+    ///
+    /// Layout: [2-bit rate (5220C per-frame mode only)], 4-bit energy, and — for
+    /// a non-stop, non-silence frame — a repeat bit, 6-bit pitch, K1-K4, and (if
+    /// voiced) K5-K10. Energy 0 (silence) or 15 (stop) ends the frame early, as
+    /// does the FIFO running empty mid-parse in speak-external mode.
+    fn parse_frame(&mut self) {
+        self.uv_zpar = false;
+        self.zpar = false;
+
+        if self.variant == Tms52xxVariant::Tms5220C && (self.c_variant_rate & 0x04) != 0 {
+            let i = self.read_bits(2);
+            self.ip = RELOAD_TABLE[(i & 0x3) as usize];
+        } else {
+            self.ip = RELOAD_TABLE[(self.c_variant_rate & 0x3) as usize];
+        }
+
+        self.update_fifo_status_and_ints();
+        if self.ddis && self.buffer_empty {
+            return;
+        }
+
+        self.new_frame_energy_idx = self.read_bits(ENERGY_BITS) as u8;
+        self.update_fifo_status_and_ints();
+        if self.ddis && self.buffer_empty {
+            return;
+        }
+        // Energy 0 (silence) or 15 (stop) is a complete frame on its own.
+        if self.new_frame_energy_idx == 0 || self.new_frame_energy_idx == 15 {
+            return;
+        }
+
+        let rep_flag = self.read_bits(1);
+        self.new_frame_pitch_idx = self.read_bits(PITCH_BITS) as u8;
+        self.uv_zpar = self.new_frame_unvoiced_flag();
+        self.update_fifo_status_and_ints();
+        if self.ddis && self.buffer_empty {
+            return;
+        }
+        // A repeat frame reuses the previous coefficients.
+        if rep_flag != 0 {
+            return;
+        }
+
+        for (i, &bits) in K_BITS.iter().enumerate().take(4) {
+            self.new_frame_k_idx[i] = self.read_bits(bits) as u8;
+            self.update_fifo_status_and_ints();
+            if self.ddis && self.buffer_empty {
+                return;
+            }
+        }
+        // Unvoiced frames stop after K4; K5-K10 keep their prior indices but are
+        // zeroed at synthesis time via `uv_zpar`.
+        if self.new_frame_pitch_idx == 0 {
+            return;
+        }
+        for (i, &bits) in K_BITS.iter().enumerate().skip(4) {
+            self.new_frame_k_idx[i] = self.read_bits(bits) as u8;
+            self.update_fifo_status_and_ints();
+            if self.ddis && self.buffer_empty {
+                return;
+            }
+        }
     }
 }
 
@@ -493,6 +708,110 @@ mod tests {
         assert_eq!(restored.status_r() & 0x80, talking);
         assert_eq!(restored.ready(), ready);
         assert_eq!(rate_reg(&restored), 0);
+    }
+
+    #[test]
+    fn read_bits_consumes_fifo_lsb_first() {
+        let mut tms = Tms5220::new();
+        tms.data_w(CMD_SPEAK_EXTERNAL);
+        tms.data_w(0b0000_0011); // FIFO byte 0: bits 0 and 1 set
+        tms.data_w(0x00);
+        // Bits leave the byte LSB-first and pack MSB-first into the value: the
+        // first two bits (1, 1) read as 0b11.
+        assert_eq!(tms.read_bits(2), 0b11);
+        // The remaining six bits of that byte are zero.
+        assert_eq!(tms.read_bits(6), 0);
+    }
+
+    #[test]
+    fn parse_frame_round_trips_a_voiced_frame() {
+        let mut tms = Tms5220::new(); // 5220C, rate 0 → no per-frame rate bits
+        tms.data_w(CMD_SPEAK_EXTERNAL);
+        // energy, rep, pitch, K1-K4 (5,5,4,4), K5-K10 (4,4,4,3,3,3).
+        let fields = [
+            (5, 4),
+            (0, 1),
+            (0x12, 6),
+            (0x11, 5),
+            (0x0A, 5),
+            (0x3, 4),
+            (0xC, 4),
+            (0x5, 4),
+            (0x6, 4),
+            (0x7, 4),
+            (0x2, 3),
+            (0x3, 3),
+            (0x4, 3),
+        ];
+        for b in packed_frame(&fields) {
+            tms.data_w(b);
+        }
+        tms.parse_frame();
+        assert_eq!(tms.new_frame_energy_idx, 5);
+        assert_eq!(tms.new_frame_pitch_idx, 0x12);
+        assert_eq!(
+            tms.new_frame_k_idx,
+            [0x11, 0x0A, 0x3, 0xC, 0x5, 0x6, 0x7, 0x2, 0x3, 0x4]
+        );
+    }
+
+    #[test]
+    fn parse_unvoiced_frame_reads_only_four_ks() {
+        let mut tms = Tms5220::new();
+        tms.data_w(CMD_SPEAK_EXTERNAL);
+        // pitch index 0 = unvoiced → only K1-K4 follow.
+        let fields = [
+            (6, 4),
+            (0, 1),
+            (0, 6),
+            (0x1, 5),
+            (0x2, 5),
+            (0x3, 4),
+            (0x4, 4),
+        ];
+        for b in packed_frame(&fields) {
+            tms.data_w(b);
+        }
+        tms.parse_frame();
+        assert_eq!(tms.new_frame_energy_idx, 6);
+        assert_eq!(tms.new_frame_pitch_idx, 0);
+        assert!(tms.new_frame_unvoiced_flag());
+        // Only K1-K4 are read; K5-K10 keep the idle-frame indices SPEAK EXTERNAL
+        // loaded (0xF/0x7) and are zeroed at synthesis time via uv_zpar.
+        assert_eq!(
+            tms.new_frame_k_idx,
+            [0x1, 0x2, 0x3, 0x4, 0xF, 0xF, 0xF, 0x7, 0x7, 0x7]
+        );
+    }
+
+    #[test]
+    fn parse_stop_frame_reads_only_energy() {
+        let mut tms = Tms5220::new();
+        tms.data_w(CMD_SPEAK_EXTERNAL);
+        for b in packed_frame(&[(15, 4)]) {
+            tms.data_w(b);
+        }
+        tms.parse_frame();
+        assert_eq!(tms.new_frame_energy_idx, 15, "stop frame is energy 0xF");
+    }
+
+    /// Pack `(value, width)` fields into FIFO bytes in the exact order
+    /// [`Tms5220::read_bits`] consumes them (MSB-first per field, LSB-first per
+    /// byte), padded so a full frame parse never runs the FIFO empty.
+    fn packed_frame(fields: &[(u32, u32)]) -> Vec<u8> {
+        let mut bits: Vec<u8> = Vec::new();
+        for &(value, width) in fields {
+            for i in (0..width).rev() {
+                bits.push(((value >> i) & 1) as u8);
+            }
+        }
+        let mut bytes = vec![0u8; bits.len().div_ceil(8) + 2];
+        for (i, &b) in bits.iter().enumerate() {
+            if b == 1 {
+                bytes[i / 8] |= 1 << (i % 8);
+            }
+        }
+        bytes
     }
 
     /// Read the RATE debug register value.
