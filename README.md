@@ -129,7 +129,7 @@ Complete system implementations that wire core components together:
 - **CrystalCastlesSystem** — Atari arcade (M6502 + 2×POKEY + bitmap video + sprites + trackball)
 - **FoodFightSystem** — Atari arcade (MC68000 + 3×POKEY + tilemap/sprite video + analog sticks + X2212 NVRAM)
 - **MarbleSystem** — Marble Madness on the shared Atari System 1 board (MC68010 + M6502 sound + Slapstic protection + POKEY + YM2151 OPM FM synthesis + playfield/motion-object video with priority/translucency + dual trackballs + 2804 EEPROM)
-- **RoadRunnerSystem** — Road Runner on the shared Atari System 1 board (slapstic 108 + speech-equipped sound board [VIA6522 + TMS5220 stub] + ADC0809 analog joystick with IRQ2 + per-band motion-object banking)
+- **RoadRunnerSystem** — Road Runner on the shared Atari System 1 board (slapstic 108 + speech-equipped sound board [VIA6522 + TMS5220 LPC speech] + ADC0809 analog joystick with IRQ2 + per-band motion-object banking)
 - **TempestSystem** — Atari color vector arcade (M6502 + AVG vector generator + Mathbox coprocessor + 2×POKEY + ER2055 EAROM + spinner)
 - **QuantumSystem** — Atari color vector arcade (MC68000 + Quantum-variant AVG + 2×POKEY + X2212 NVRAM + trackball)
 - **MissileCommandSystem** — Atari raster arcade (M6502 + POKEY + bitmap video)
