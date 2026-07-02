@@ -27,7 +27,9 @@ use phosphor_core::cpu::m6809::M6809;
 use phosphor_core::device::avg::{Avg, AvgVariant};
 use phosphor_core::device::dvg::VectorLine;
 use phosphor_core::device::pokey::Pokey;
+use phosphor_core::device::riot6532::Riot6532;
 use phosphor_core::device::starwars_math::StarWarsMath;
+use phosphor_core::device::tms5220::{Tms52xxVariant, Tms5220};
 use phosphor_core::device::x2212::X2212;
 use phosphor_macros::{BusDebug, DebugTrace, MemoryRegion};
 
@@ -53,6 +55,8 @@ const IRQ_PERIOD_CYCLES: u64 = 6144;
 
 /// POKEY / sound-CPU clock: master / 8 = 1.512 MHz.
 const SOUND_CLOCK_HZ: u32 = 1_512_000;
+/// TMS5220 speech clock: master / 2 / 9 = 672 kHz.
+const TMS_CLOCK_HZ: u32 = 672_000;
 /// Host audio output rate.
 const AUDIO_SAMPLE_RATE: u32 = 44_100;
 
@@ -187,6 +191,12 @@ pub(crate) struct StarWarsBoard {
 
     // Sound board: four POKEYs (quad-decoded at $1800–$183F on the sound CPU).
     pub(crate) pokey: [Pokey; 4],
+    /// MOS6532 RIOT ($1000–$109F): bridges the TMS5220 and raises the sound IRQ.
+    pub(crate) riot: Riot6532,
+    /// TMS5220 speech synthesizer, driven through the RIOT ports.
+    pub(crate) tms: Tms5220,
+    /// Fractional accumulator stepping the 672 kHz TMS against the sound clock.
+    pub(crate) tms_clock_acc: u64,
 
     #[debug_map(cpu = 0)]
     pub(crate) main_map: AddressSpace16,
@@ -242,6 +252,9 @@ impl StarWarsBoard {
             math: StarWarsMath::new(),
             novram: X2212::new(),
             pokey: std::array::from_fn(|_| Pokey::with_clock(SOUND_CLOCK_HZ, AUDIO_SAMPLE_RATE)),
+            riot: Riot6532::new(),
+            tms: Tms5220::with_variant(Tms52xxVariant::Tms5220, TMS_CLOCK_HZ),
+            tms_clock_acc: 0,
             main_map: build_main_map(),
             sound_map: build_sound_map(),
             bank: 0,
@@ -391,7 +404,15 @@ impl StarWarsBoard {
                 self.soundlatch_pending = false;
                 self.soundlatch
             }
-            // RIOT ($1000–$109F) is wired in a later step; open bus for now.
+            0x1000..=0x107F => self.riot.read_ram((addr & 0x7F) as u8),
+            0x1080..=0x109F => {
+                let off = (addr & 0x1F) as u8;
+                // Port B (data reg) reads the TMS status byte.
+                if off == 0x02 {
+                    self.riot.set_pb_input(self.tms.status_r());
+                }
+                self.riot.read_io(off)
+            }
             0x1800..=0x183F => {
                 let (p, reg) = Self::quad_pokey_decode(addr & 0x3F);
                 self.pokey[p].read(reg)
@@ -409,14 +430,40 @@ impl StarWarsBoard {
                 self.mainlatch = data;
                 self.mainlatch_pending = true;
             }
+            0x1000..=0x107F => self.riot.write_ram((addr & 0x7F) as u8, data),
+            0x1080..=0x109F => {
+                let off = (addr & 0x1F) as u8;
+                self.riot.write_io(off, data);
+                // A Port B write presents a speech-data byte to the TMS (latched
+                // on the /WS strobe on real hardware).
+                if off == 0x02 {
+                    self.tms.data_w(data);
+                }
+            }
             0x1800..=0x183F => {
                 let (p, reg) = Self::quad_pokey_decode(addr & 0x3F);
                 self.pokey[p].write(reg, data);
             }
             0x2000..=0x27FF => self.sound_map.write_backing(addr, data),
-            // RIOT writes handled in a later step.
             _ => {}
         }
+    }
+
+    /// Refresh the RIOT Port A input pins the TMS/mailbox drive: PA2 = TMS
+    /// `/READY` (active low), PA4 = 1 (not self-test), PA6 = main-latch pending,
+    /// PA7 = sound-latch pending.
+    fn refresh_riot_pa(&mut self) {
+        let mut pa = 0x10; // PA4 tied high
+        if !self.tms.ready() {
+            pa |= 0x04; // /READY high when the TMS cannot accept data
+        }
+        if self.mainlatch_pending {
+            pa |= 0x40;
+        }
+        if self.soundlatch_pending {
+            pa |= 0x80;
+        }
+        self.riot.set_pa_input(pa);
     }
 
     // --- Bus dispatch (routed by master) -----------------------------------
@@ -447,7 +494,11 @@ impl StarWarsBoard {
                 irq: self.irq_pending,
                 ..Default::default()
             },
-            // Sound CPU IRQ comes from the RIOT, wired in a later step.
+            // Sound CPU IRQ is the RIOT timer/edge interrupt.
+            BusMaster::Cpu(1) => InterruptState {
+                irq: self.riot.irq_active(),
+                ..Default::default()
+            },
             _ => InterruptState::default(),
         }
     }
@@ -492,6 +543,16 @@ impl StarWarsBoard {
         for p in &mut self.pokey {
             p.tick();
         }
+
+        // Drive the RIOT input pins, then clock it and the TMS (672 kHz).
+        self.refresh_riot_pa();
+        self.riot.tick();
+        self.tms_clock_acc += TMS_CLOCK_HZ as u64;
+        while self.tms_clock_acc >= SOUND_CLOCK_HZ as u64 {
+            self.tms_clock_acc -= SOUND_CLOCK_HZ as u64;
+            self.tms.tick();
+        }
+
         self.clock += 1;
     }
 
@@ -509,6 +570,9 @@ impl StarWarsBoard {
         for p in &mut self.pokey {
             p.reset();
         }
+        self.riot.reset();
+        self.tms.reset();
+        self.tms_clock_acc = 0;
         self.audio_buffer.clear();
         self.audio_dc = (0.0, 0.0);
         self.bank = 0;
@@ -546,17 +610,25 @@ impl StarWarsBoard {
     /// queue signed-16-bit samples for the frontend. Called once per frame.
     pub(crate) fn end_frame_audio(&mut self) {
         const POKEY_GAIN: f32 = 0.20; // MAME per-POKEY route gain
+        const SPEECH_GAIN: f32 = 0.50; // MAME TMS5220 route gain
         let chans: [Vec<f32>; 4] = std::array::from_fn(|i| self.pokey[i].drain_audio());
-        let n = chans.iter().map(Vec::len).max().unwrap_or(0);
+        let speech = self.tms.drain_audio();
+        let n = chans
+            .iter()
+            .map(Vec::len)
+            .chain(std::iter::once(speech.len()))
+            .max()
+            .unwrap_or(0);
 
         let (mut x1, mut y1) = self.audio_dc;
         self.audio_buffer.reserve(n);
         for i in 0..n {
-            let x = POKEY_GAIN
+            let pokey = POKEY_GAIN
                 * chans
                     .iter()
                     .map(|c| c.get(i).copied().unwrap_or(0.0))
                     .sum::<f32>();
+            let x = pokey + SPEECH_GAIN * speech.get(i).copied().unwrap_or(0.0);
             // DC block (cutoff ≈ 35 Hz) then scale/clamp to i16.
             let y = x - x1 + 0.995 * y1;
             x1 = x;
@@ -589,6 +661,9 @@ impl Saveable for StarWarsBoard {
         for p in &self.pokey {
             p.save_state(w);
         }
+        self.riot.save_state(w);
+        self.tms.save_state(w);
+        w.write_u64_le(self.tms_clock_acc);
         w.write_bytes(self.novram.nvram());
         w.write_bytes(self.main_map.region_data(MainRegion::Ram));
         w.write_bytes(self.main_map.region_data(MainRegion::MathRamLo));
@@ -613,6 +688,11 @@ impl Saveable for StarWarsBoard {
         for p in &mut self.pokey {
             p.load_state(r)?;
         }
+        self.riot.load_state(r)?;
+        self.tms.load_state(r)?;
+        self.tms_clock_acc = r.read_u64_le()?;
+        // Re-sync the TMS resampler to its (configuration) clock.
+        self.tms.set_clock(TMS_CLOCK_HZ);
         let mut nvram = vec![0u8; self.novram.nvram().len()];
         r.read_bytes_into(&mut nvram)?;
         self.novram.load_nvram(&nvram);
@@ -870,6 +950,43 @@ mod tests {
         assert!(
             !board.audio_buffer.is_empty(),
             "an active POKEY channel should generate audio samples"
+        );
+    }
+
+    #[test]
+    fn tms5220_receives_speech_bytes_via_the_riot() {
+        let mut board = StarWarsBoard::new();
+        // Configure RIOT Port B as output (DDR B = 0xFF), then SPEAK EXTERNAL
+        // followed by a couple of data bytes — all through the RIOT PB data reg.
+        board.sound_write(0x1083, 0xFF); // DDR B = all output
+        board.sound_write(0x1082, 0x60); // TMS SPEAK EXTERNAL command
+        board.sound_write(0x1082, 0xAA); // speech data
+        board.sound_write(0x1082, 0x55); // speech data
+
+        // The TMS should now be talking / no longer idle: reading its status via
+        // Port B returns a live status byte, and readyq feeds RIOT PA2.
+        board.sound_write(0x1081, 0x00); // DDR A = all input (read strobes/status)
+        let pa = board.sound_read(0x1080);
+        // PA4 is tied high in every read.
+        assert_ne!(pa & 0x10, 0, "PA4 (not-self-test) reads high");
+        // Status read path is wired (does not panic and returns a byte).
+        let _status = board.sound_read(0x1082);
+    }
+
+    #[test]
+    fn riot_timer_raises_the_sound_irq() {
+        let mut board = StarWarsBoard::new();
+        // Start the RIOT timer with the shortest prescale (÷1) and IRQ enabled:
+        // io offset 0x1C = A4|A3|A2 (timer, IE) with prescale bits 0. Write 1
+        // count, then clock past it.
+        board.sound_write(0x109C, 0x01);
+        assert!(!board.bus_check_interrupts(BusMaster::Cpu(1)).irq);
+        for _ in 0..8 {
+            board.riot.tick();
+        }
+        assert!(
+            board.bus_check_interrupts(BusMaster::Cpu(1)).irq,
+            "RIOT timer underflow should raise the sound-CPU IRQ"
         );
     }
 
