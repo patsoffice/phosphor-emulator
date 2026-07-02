@@ -26,6 +26,7 @@ use phosphor_core::cpu::Cpu;
 use phosphor_core::cpu::m6809::M6809;
 use phosphor_core::device::avg::{Avg, AvgVariant};
 use phosphor_core::device::dvg::VectorLine;
+use phosphor_core::device::pokey::Pokey;
 use phosphor_core::device::starwars_math::StarWarsMath;
 use phosphor_core::device::x2212::X2212;
 use phosphor_macros::{BusDebug, DebugTrace, MemoryRegion};
@@ -49,6 +50,11 @@ pub const TIMING: TimingConfig = TimingConfig {
 
 /// Periodic IRQ: 3 kHz / 12 ≈ 246.09 Hz → every 6144 CPU cycles.
 const IRQ_PERIOD_CYCLES: u64 = 6144;
+
+/// POKEY / sound-CPU clock: master / 8 = 1.512 MHz.
+const SOUND_CLOCK_HZ: u32 = 1_512_000;
+/// Host audio output rate.
+const AUDIO_SAMPLE_RATE: u32 = 44_100;
 
 /// Watchdog timeout ≈ 3 kHz / 128 ≈ 23 Hz. Reset if not pet within this many
 /// CPU cycles (1.512 MHz / 23 ≈ 65_700).
@@ -179,6 +185,9 @@ pub(crate) struct StarWarsBoard {
     pub(crate) math: StarWarsMath,
     pub(crate) novram: X2212,
 
+    // Sound board: four POKEYs (quad-decoded at $1800–$183F on the sound CPU).
+    pub(crate) pokey: [Pokey; 4],
+
     #[debug_map(cpu = 0)]
     pub(crate) main_map: AddressSpace16,
     #[debug_map(cpu = 1)]
@@ -211,6 +220,10 @@ pub(crate) struct StarWarsBoard {
     // Vector display list (AVG output, refreshed on each GO).
     pub(crate) display_list: Vec<VectorLine>,
 
+    // Mixed audio for the current frame, plus DC-block filter state.
+    pub(crate) audio_buffer: Vec<i16>,
+    pub(crate) audio_dc: (f32, f32),
+
     // Debug event ring (observer state — never saved in save states).
     #[debug_events]
     pub(crate) debug_trace: DebugTraceBuffer,
@@ -228,6 +241,7 @@ impl StarWarsBoard {
             ),
             math: StarWarsMath::new(),
             novram: X2212::new(),
+            pokey: std::array::from_fn(|_| Pokey::with_clock(SOUND_CLOCK_HZ, AUDIO_SAMPLE_RATE)),
             main_map: build_main_map(),
             sound_map: build_sound_map(),
             bank: 0,
@@ -244,8 +258,19 @@ impl StarWarsBoard {
             dsw1: 0x02, // coinage default: 1 coin / 1 credit
             clock: 0,
             display_list: Vec::with_capacity(2048),
+            audio_buffer: Vec::new(),
+            audio_dc: (0.0, 0.0),
             debug_trace: DebugTraceBuffer::new(),
         }
+    }
+
+    /// Decode the four-POKEY address scramble at $1800–$183F into
+    /// `(pokey_index, register)`. Matches MAME `quad_pokeyn_w`.
+    fn quad_pokey_decode(offset: u16) -> (usize, u16) {
+        let pokey = ((offset >> 3) & !0x04) as usize;
+        let control = (offset & 0x20) >> 2;
+        let reg = (offset % 8) | control;
+        (pokey, reg)
     }
 
     // --- Main CPU bus ------------------------------------------------------
@@ -366,8 +391,11 @@ impl StarWarsBoard {
                 self.soundlatch_pending = false;
                 self.soundlatch
             }
-            // RIOT ($1000–$109F) and POKEY ($1800–$183F) are wired in a later
-            // step; open bus for now.
+            // RIOT ($1000–$109F) is wired in a later step; open bus for now.
+            0x1800..=0x183F => {
+                let (p, reg) = Self::quad_pokey_decode(addr & 0x3F);
+                self.pokey[p].read(reg)
+            }
             0x2000..=0x27FF | 0x4000..=0x7FFF | 0xB000..=0xFFFF => {
                 self.sound_map.read_backing(addr)
             }
@@ -381,8 +409,12 @@ impl StarWarsBoard {
                 self.mainlatch = data;
                 self.mainlatch_pending = true;
             }
+            0x1800..=0x183F => {
+                let (p, reg) = Self::quad_pokey_decode(addr & 0x3F);
+                self.pokey[p].write(reg, data);
+            }
             0x2000..=0x27FF => self.sound_map.write_backing(addr, data),
-            // RIOT / POKEY writes handled in a later step.
+            // RIOT writes handled in a later step.
             _ => {}
         }
     }
@@ -457,6 +489,9 @@ impl StarWarsBoard {
         self.cpu.execute_cycle(bus, BusMaster::Cpu(0));
         self.sound_cpu.execute_cycle(bus, BusMaster::Cpu(1));
         self.math.tick();
+        for p in &mut self.pokey {
+            p.tick();
+        }
         self.clock += 1;
     }
 
@@ -471,6 +506,11 @@ impl StarWarsBoard {
         self.avg.reset();
         self.math.reset();
         self.novram.reset();
+        for p in &mut self.pokey {
+            p.reset();
+        }
+        self.audio_buffer.clear();
+        self.audio_dc = (0.0, 0.0);
         self.bank = 0;
         self.main_map
             .remap_pages(0x60, 0x20, MainRegion::BankLow, 0);
@@ -502,9 +542,37 @@ impl StarWarsBoard {
         Some(&self.display_list)
     }
 
-    /// Audio is mixed in a later step (no sound hardware wired yet).
-    pub(crate) fn fill_audio(&mut self, _buffer: &mut [i16]) -> usize {
-        0
+    /// Drain the four POKEYs, mix (with a one-pole DC-blocking high-pass), and
+    /// queue signed-16-bit samples for the frontend. Called once per frame.
+    pub(crate) fn end_frame_audio(&mut self) {
+        const POKEY_GAIN: f32 = 0.20; // MAME per-POKEY route gain
+        let chans: [Vec<f32>; 4] = std::array::from_fn(|i| self.pokey[i].drain_audio());
+        let n = chans.iter().map(Vec::len).max().unwrap_or(0);
+
+        let (mut x1, mut y1) = self.audio_dc;
+        self.audio_buffer.reserve(n);
+        for i in 0..n {
+            let x = POKEY_GAIN
+                * chans
+                    .iter()
+                    .map(|c| c.get(i).copied().unwrap_or(0.0))
+                    .sum::<f32>();
+            // DC block (cutoff ≈ 35 Hz) then scale/clamp to i16.
+            let y = x - x1 + 0.995 * y1;
+            x1 = x;
+            y1 = y;
+            self.audio_buffer
+                .push((y * 2.0 * 32767.0).clamp(-32767.0, 32767.0) as i16);
+        }
+        self.audio_dc = (x1, y1);
+    }
+
+    /// Copy pending audio into the frontend's buffer.
+    pub(crate) fn fill_audio(&mut self, buffer: &mut [i16]) -> usize {
+        let n = buffer.len().min(self.audio_buffer.len());
+        buffer[..n].copy_from_slice(&self.audio_buffer[..n]);
+        self.audio_buffer.drain(..n);
+        n
     }
 
     pub(crate) fn debug_tick_boundaries(&self) -> u32 {
@@ -518,6 +586,9 @@ impl Saveable for StarWarsBoard {
         self.sound_cpu.save_state(w);
         self.avg.save_state(w);
         self.math.save_state(w);
+        for p in &self.pokey {
+            p.save_state(w);
+        }
         w.write_bytes(self.novram.nvram());
         w.write_bytes(self.main_map.region_data(MainRegion::Ram));
         w.write_bytes(self.main_map.region_data(MainRegion::MathRamLo));
@@ -539,6 +610,9 @@ impl Saveable for StarWarsBoard {
         self.sound_cpu.load_state(r)?;
         self.avg.load_state(r)?;
         self.math.load_state(r)?;
+        for p in &mut self.pokey {
+            p.load_state(r)?;
+        }
         let mut nvram = vec![0u8; self.novram.nvram().len()];
         r.read_bytes_into(&mut nvram)?;
         self.novram.load_nvram(&nvram);
@@ -630,6 +704,7 @@ impl MachineCore for StarWarsSystem {
                 self.board.tick(bus);
             }
         });
+        self.board.end_frame_audio();
         if self.board.take_watchdog_trip() {
             self.reset();
         }
@@ -766,6 +841,36 @@ mod tests {
         assert_ne!(board.main_read(0x4401) & 0x40, 0);
         assert_eq!(board.main_read(0x4400), 0x3C);
         assert_eq!(board.main_read(0x4401) & 0x40, 0);
+    }
+
+    #[test]
+    fn quad_pokey_decode_selects_chip_and_register() {
+        // pokey_num = (off>>3) & ~4; reg = (off%8) | ((off&0x20)>>2).
+        assert_eq!(StarWarsBoard::quad_pokey_decode(0x00), (0, 0));
+        assert_eq!(StarWarsBoard::quad_pokey_decode(0x08), (1, 0));
+        assert_eq!(StarWarsBoard::quad_pokey_decode(0x18), (3, 0));
+        assert_eq!(StarWarsBoard::quad_pokey_decode(0x07), (0, 7));
+        // Bit 5 of the offset adds 8 to the register (control lines).
+        assert_eq!(StarWarsBoard::quad_pokey_decode(0x28), (1, 8));
+    }
+
+    #[test]
+    fn pokey_writes_produce_audio() {
+        let mut board = StarWarsBoard::new();
+        // Program POKEY 0 channel 1: a mid frequency at full volume/tone.
+        board.sound_write(0x1800, 0x40); // AUDF1
+        board.sound_write(0x1801, 0xAF); // AUDC1: volume 0xF, pure tone
+        // Tick a frame's worth of sound cycles, then drain.
+        for _ in 0..TIMING.cycles_per_frame() {
+            for p in &mut board.pokey {
+                p.tick();
+            }
+        }
+        board.end_frame_audio();
+        assert!(
+            !board.audio_buffer.is_empty(),
+            "an active POKEY channel should generate audio samples"
+        );
     }
 
     #[test]
