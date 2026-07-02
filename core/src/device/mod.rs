@@ -95,6 +95,7 @@ pub use riot6532::Riot6532;
 pub use slapstic::Slapstic;
 pub use sn76489::Sn76489a;
 pub use ssio::SsioBoard;
+pub use tms5220::{Tms52xxVariant, Tms5220};
 pub use votrax_sc01::VotraxSc01;
 pub use williams_blitter::WilliamsBlitter;
 pub use x2212::X2212;
