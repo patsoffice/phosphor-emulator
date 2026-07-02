@@ -365,6 +365,13 @@ pub struct AtariSystem1Board {
 
     pub(crate) clock: u64,
     pub(crate) watchdog_count: u8,
+
+    /// Per-frame log of motion-object bank switches as `(scanline, mo_bank)`,
+    /// sorted by scanline with the frame's starting bank at scanline 0. The game
+    /// reprograms the MO bank mid-frame (e.g. Road Runner), so the compositor
+    /// renders each scanline band with the bank that was live there — mirroring
+    /// the hardware's beam-time bank select. Rebuilt every frame; not saved.
+    mo_bank_changes: Vec<(u16, u8)>,
 }
 
 impl AtariSystem1Board {
@@ -451,6 +458,7 @@ impl AtariSystem1Board {
             audio_buffer: Vec::with_capacity(2048),
             clock: 0,
             watchdog_count: 0,
+            mo_bank_changes: Vec::with_capacity(16),
         }
     }
 
@@ -530,8 +538,23 @@ impl AtariSystem1Board {
     /// (1 = run, 0 = hold); bit 2 selects the playfield tile bank; bits 5-3
     /// select the motion-object bank.
     fn bankselect_w(&mut self, data: u8) {
+        let old_mo = (self.bankselect >> 3) & 7;
         self.bankselect = data;
         self.sound.set_reset(data & 0x80 == 0);
+
+        // Record a mid-frame motion-object bank change so the compositor renders
+        // each scanline band with its live bank. The change takes effect on the
+        // next scanline (the beam has already drawn the current one), matching
+        // the hardware's partial-render-then-switch behavior.
+        let new_mo = (self.bankselect >> 3) & 7;
+        if new_mo != old_mo {
+            let frame_cycle = self.clock % TIMING.cycles_per_frame();
+            let line = (frame_cycle / TIMING.cycles_per_scanline) as u16 + 1;
+            match self.mo_bank_changes.last_mut() {
+                Some(last) if last.0 == line => last.1 = new_mo,
+                _ => self.mo_bank_changes.push((line, new_mo)),
+            }
+        }
     }
 
     /// True while the beam is in vertical blank (scanline ≥ `VBLANK_SCANLINE`).
@@ -744,25 +767,46 @@ impl AtariSystem1Board {
 
         let mut mo = vec![TRANSPARENT; w * h];
         let mob = self.map.region_data(Region::Mob);
-        let bank_base = ((self.bankselect >> 3) & 7) as usize * 256; // words
         let word = |wi: usize| u16::from_be_bytes([mob[wi * 2], mob[wi * 2 + 1]]);
 
-        let mut visited = [false; 64];
-        let mut link = 0usize;
-        for _ in 0..56 {
-            if visited[link] {
-                break;
+        // Render each scanline band with the motion-object bank that was live
+        // there this frame (mo_bank_changes). When the log is empty — e.g. a
+        // direct render without stepping the board (unit tests) — fall back to
+        // the current bank for the whole frame.
+        let fallback = [(0u16, (self.bankselect >> 3) & 7)];
+        let bands: &[(u16, u8)] = if self.mo_bank_changes.is_empty() {
+            &fallback
+        } else {
+            &self.mo_bank_changes
+        };
+
+        for (bi, &(start_line, bank)) in bands.iter().enumerate() {
+            let y_start = start_line as usize;
+            let y_end = bands
+                .get(bi + 1)
+                .map_or(h, |&(next, _)| (next as usize).min(h));
+            if y_start >= y_end {
+                continue; // zero-height or off-screen (vblank) band
             }
-            visited[link] = true;
-            let w0 = word(bank_base + link);
-            let w1 = word(bank_base + 0x40 + link);
-            let w2 = word(bank_base + 0x80 + link);
-            let w3 = word(bank_base + 0xC0 + link);
-            // 0xFFFF in word[1] is a scanline timer, not a sprite.
-            if w1 != 0xFFFF {
-                self.draw_mo_entry(&mut mo, w, h, w0, w1, w2, PRIORITY_BIT);
+            let bank_base = bank as usize * 256; // words
+
+            let mut visited = [false; 64];
+            let mut link = 0usize;
+            for _ in 0..56 {
+                if visited[link] {
+                    break;
+                }
+                visited[link] = true;
+                let w0 = word(bank_base + link);
+                let w1 = word(bank_base + 0x40 + link);
+                let w2 = word(bank_base + 0x80 + link);
+                let w3 = word(bank_base + 0xC0 + link);
+                // 0xFFFF in word[1] is a scanline timer, not a sprite.
+                if w1 != 0xFFFF {
+                    self.draw_mo_entry(&mut mo, w, h, y_start, y_end, w0, w1, w2, PRIORITY_BIT);
+                }
+                link = (w3 & 0x3F) as usize;
             }
-            link = (w3 & 0x3F) as usize;
         }
 
         // Merge the sprite bitmap over the playfield.
@@ -787,14 +831,18 @@ impl AtariSystem1Board {
 
     /// Rasterise one motion object (1 tile wide, `height` tiles tall) into the
     /// sprite index buffer `mo`, honouring horizontal flip and the transparent
-    /// pen 0. The palette index is `0x100 + palcolor*16 + pen`, with the priority
-    /// flag OR'd in for the merge step.
+    /// pen 0. Only rows within the scanline band `[y_start, y_end)` are written,
+    /// so a sprite that straddles a mid-frame bank switch is cut at the boundary
+    /// like the real beam. The palette index is `0x100 + palcolor*16 + pen`, with
+    /// the priority flag OR'd in for the merge step.
     #[allow(clippy::too_many_arguments)]
     fn draw_mo_entry(
         &self,
         mo: &mut [u16],
         w: usize,
         h: usize,
+        y_start: usize,
+        y_end: usize,
         w0: u16,
         w1: u16,
         w2: u16,
@@ -828,7 +876,8 @@ impl AtariSystem1Board {
             let code = (base_code + ty) % count;
             for py in 0..8usize {
                 let dy = ypos + (ty * 8 + py) as i32;
-                if dy < 0 || dy >= h as i32 {
+                // Clip to the screen and to this band's scanline range.
+                if dy < y_start as i32 || dy >= y_end as i32 {
                     continue;
                 }
                 for px in 0..8usize {
@@ -862,6 +911,13 @@ impl AtariSystem1Board {
     /// [`bus_read`](Self::bus_read)/[`bus_write`](Self::bus_write).
     pub fn tick(&mut self, bus: &mut dyn Bus<Address = u32, Data = u16>) {
         let frame_cycle = self.clock % TIMING.cycles_per_frame();
+
+        // Start a fresh motion-object bank log for the new frame, seeded with the
+        // bank in effect at scanline 0 (carried over from the previous frame).
+        if frame_cycle == 0 {
+            self.mo_bank_changes.clear();
+            self.mo_bank_changes.push((0, (self.bankselect >> 3) & 7));
+        }
 
         // At each scanline boundary: VBLANK raises IRQ4 on the first blanked
         // line, and IRQ3 tracks whether a motion-object timer targets this line
@@ -951,6 +1007,7 @@ impl AtariSystem1Board {
         self.int2 = false;
         self.audio_dc = (0.0, 0.0);
         self.watchdog_count = 0;
+        self.mo_bank_changes.clear();
     }
 
     // -----------------------------------------------------------------------
@@ -1097,5 +1154,78 @@ impl Saveable for AtariSystem1Board {
         self.clock = r.read_u64_le()?;
         self.watchdog_count = r.read_u8()?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bankselect_logs_midframe_mo_bank_changes() {
+        let mut board = AtariSystem1Board::new(103, false);
+        // Frame start seeds the log with the current MO bank at scanline 0.
+        board.mo_bank_changes = vec![(0, 0)];
+
+        // Move the beam to ~scanline 100 and switch the MO bank (bits 5-3):
+        // 0x10 → MO bank 2. The change takes effect on the next line (101).
+        board.clock = 100 * TIMING.cycles_per_scanline;
+        board.bankselect_w(0x10);
+        assert_eq!(board.mo_bank_changes, vec![(0, 0), (101, 2)]);
+
+        // A second switch on the same line replaces rather than appends.
+        board.bankselect_w(0x18); // MO bank 3
+        assert_eq!(board.mo_bank_changes, vec![(0, 0), (101, 3)]);
+
+        // A write that leaves the MO bank unchanged (only the playfield bank bit
+        // toggles) is not logged.
+        board.bankselect_w(0x18 | 0x04);
+        assert_eq!(board.mo_bank_changes, vec![(0, 0), (101, 3)]);
+    }
+
+    #[test]
+    fn motion_objects_follow_midframe_bank_switch() {
+        let mut board = AtariSystem1Board::new(103, false);
+        let w = TIMING.display_width as usize;
+
+        // One gfx bank (id 1) with a pen-5 top-left pixel; MO colour byte 0 maps
+        // entries to it.
+        let mut cache = GfxCache::new(1, 8, 8);
+        cache.set_pixel(0, 0, 0, 5);
+        board.playfield.banks.push(GfxBank { cache, bpp: 4 });
+        board.playfield.mo_lookup[0] = 1 << 8;
+
+        // Sprite pen 5, palcolor 0 → motion palette index 0x105 = pure green.
+        let palette = board.map.region_data_mut(Region::Palette);
+        palette[0x105 * 2] = 0xF0;
+        palette[0x105 * 2 + 1] = 0xF0;
+
+        // A sprite in MO bank 0 at screen y=0, and one in MO bank 1 at y=200
+        // (word[0] encodes Y; words 1-3 = 0 → colour/code 0, no prio, link 0).
+        let mob = board.map.region_data_mut(Region::Mob);
+        mob[0] = 0x1F; // bank 0 entry 0 word[0] = 0x1F00 → y 0
+        mob[1] = 0x00;
+        mob[0x200] = 0x06; // bank 1 entry 0 word[0] = 0x0600 → y 200
+        mob[0x201] = 0x00;
+
+        // The frame showed bank 0 up top, then switched to bank 1 at line 120.
+        board.mo_bank_changes = vec![(0, 0), (120, 1)];
+
+        let (dw, dh) = TIMING.display_size();
+        let mut buf = vec![0u8; (dw * dh * 3) as usize];
+        board.render_frame(&mut buf);
+
+        let px = |x: usize, y: usize| {
+            let o = (y * w + x) * 3;
+            (buf[o], buf[o + 1], buf[o + 2])
+        };
+        // Both sprites appear — each in the band whose bank holds it. (Before the
+        // per-band fix, only the final bank rendered, dropping the top sprite.)
+        assert_eq!(px(0, 0), (0, 254, 0), "bank-0 sprite shows in the top band");
+        assert_eq!(
+            px(0, 200),
+            (0, 254, 0),
+            "bank-1 sprite shows in the bottom band"
+        );
     }
 }
