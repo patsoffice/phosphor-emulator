@@ -1,14 +1,15 @@
-//! Atari Analog Vector Generator (AVG) — Tempest and Quantum variants
+//! Atari Analog Vector Generator (AVG) — Tempest, Quantum, and Star Wars variants
 //!
 //! A state-machine coprocessor that reads instructions from shared vector
 //! RAM/ROM and generates a display list of colored line segments for rendering
 //! on a color vector CRT.
 //!
-//! Two variants are implemented (selected by [`AvgVariant`]): Tempest (1981,
-//! byte-addressed decode) and Quantum (1982, word-addressed decode with 12-bit
-//! normalization, Quantum color weights, and an X/Y coordinate swap). Other
-//! variants (Battle Zone, Star Wars, Major Havoc) differ further in color
-//! decoding and coordinate handling.
+//! Three variants are implemented (selected by [`AvgVariant`]): Tempest (1981,
+//! byte-addressed decode), Quantum (1982, word-addressed decode with 12-bit
+//! normalization, Quantum color weights, and an X/Y coordinate swap), and Star
+//! Wars (1983, byte-addressed like Tempest but with no XOR-1 swap and a simple
+//! `color111`/8-bit-intensity color path). Other variants (Battle Zone, Major
+//! Havoc) differ further in color decoding and coordinate handling.
 //!
 //! # Architecture
 //!
@@ -22,9 +23,11 @@
 //!
 //! # Byte addressing
 //!
-//! The AVG byte-addresses vector memory with an XOR-1 swap, reading the high
-//! byte of each 16-bit word first (at even PC), then the low byte (at odd PC).
-//! The AVG addresses bytes as `(pc ^ 1)`, swapping bytes within each word.
+//! Tempest byte-addresses vector memory with an XOR-1 swap, reading the high
+//! byte of each 16-bit word first (at even PC), then the low byte (at odd PC),
+//! i.e. it addresses bytes as `(pc ^ 1)`. Star Wars uses the same byte-addressed
+//! decode but *without* the swap (it reads bytes in native order). Quantum reads
+//! whole big-endian words instead.
 //!
 //! # Instruction sizes
 //!
@@ -65,9 +68,14 @@ pub enum AvgVariant {
     /// Quantum (1982): word-addressed decode (`op = word >> 13`), 12-bit
     /// normalization, Quantum color weights, X/Y swap in the vector generator.
     Quantum,
+    /// Star Wars (1983): byte-addressed decode like Tempest but with **no**
+    /// XOR-1 byte swap, 13-bit normalization, and a simpler color path — the
+    /// STAT strobe latches an 8-bit intensity plus a 3-bit `color111` index
+    /// (no color RAM lookup).
+    StarWars,
 }
 
-/// Atari AVG (Tempest / Quantum variants).
+/// Atari AVG (Tempest / Quantum / Star Wars variants).
 ///
 /// The AVG runs continuously (not halt-based like DVG). Each frame is
 /// delineated by a jump to address 0, which flushes the accumulated
@@ -121,7 +129,7 @@ pub struct Avg {
     display_list: Vec<VectorLine>,
 }
 
-/// One decoded AVG instruction (fields common to both variants).
+/// One decoded AVG instruction (fields common to all variants).
 struct Instr {
     /// 3-bit opcode (0 VCTR, 1 HALT, 2 SVEC, 3 STAT, 4 CNTR, 5 JSR, 6 RTS, 7 JMP).
     op: u8,
@@ -243,6 +251,7 @@ impl Avg {
             } = match self.variant {
                 AvgVariant::Tempest => self.decode_tempest(vmem),
                 AvgVariant::Quantum => self.decode_quantum(vmem),
+                AvgVariant::StarWars => self.decode_starwars(vmem),
             };
 
             // --- Execute. Op meanings (0/2 VCTR/SVEC, 1 HALT, 3 STAT, 4 CNTR,
@@ -260,12 +269,24 @@ impl Avg {
                         let timer = self.apply_bin_scale_quantum(timer);
                         self.draw_quantum(norm_dvx, norm_dvy, timer, int_latch, color_ram);
                     }
+                    AvgVariant::StarWars => {
+                        // Star Wars shares Tempest's 13-bit normalization and
+                        // strobe3 position math; only color/intensity differ.
+                        let (norm_dvx, norm_dvy, timer) = self.normalize(dvx, dvy, is_short);
+                        let timer = self.apply_bin_scale(timer, is_short);
+                        self.draw_starwars(norm_dvx, norm_dvy, timer, is_short, int_latch);
+                    }
                 },
                 1 => self.halted = true,
                 3 => {
                     if dvy12 != 0 {
                         self.scale = (dvy & 0xFF) as u8;
                         self.bin_scale = ((dvy >> 8) & 7) as u8;
+                    } else if self.variant == AvgVariant::StarWars {
+                        // Star Wars strobe2 latches an 8-bit intensity and a
+                        // 4-bit color index together, ungated (no 0x800 select).
+                        self.intensity = (dvy & 0xFF) as u8;
+                        self.color = ((dvy >> 8) & 0xF) as u8;
                     } else if dvy & 0x800 != 0 {
                         self.color = (dvy & 0xF) as u8;
                         // Quantum latches color and intensity together (its
@@ -320,16 +341,6 @@ impl Avg {
     // Instruction decode and execute
     // -----------------------------------------------------------------------
 
-    /// Read one byte from vector memory with AVG XOR-1 byte swap.
-    ///
-    /// The AVG addresses bytes with `addr ^ 1`, which swaps the two bytes
-    /// within each 16-bit word. This means reading at even PC gives the
-    /// high byte, and odd PC gives the low byte.
-    fn read_byte(vmem: &[u8], addr: u16) -> u8 {
-        let idx = (addr as usize) ^ 1;
-        if idx < vmem.len() { vmem[idx] } else { 0 }
-    }
-
     /// Read one big-endian 16-bit word at byte address `addr` (Quantum decode).
     ///
     /// Quantum's 68000 writes vector RAM as big-endian words, and the AVG reads
@@ -347,15 +358,42 @@ impl Avg {
     /// via XOR-1), then 3,2 for the 4-byte VCTR. VCTR (op 0) is 4 bytes, SVEC
     /// (op 2) packs DVX/int_latch into its single word, all others are 2 bytes.
     fn decode_tempest(&mut self, vmem: &[u8]) -> Instr {
-        let hi0 = Self::read_byte(vmem, self.pc);
-        let lo0 = Self::read_byte(vmem, self.pc.wrapping_add(1));
+        self.decode_byte_addressed(vmem, true)
+    }
+
+    /// Decode one Star Wars instruction at the current PC, advancing PC.
+    ///
+    /// Star Wars uses the same byte-addressed 13-bit layout as Tempest, but the
+    /// AVG reads vector memory *without* the XOR-1 byte swap (`starwars_data`),
+    /// so the bytes are consumed in native order.
+    fn decode_starwars(&mut self, vmem: &[u8]) -> Instr {
+        self.decode_byte_addressed(vmem, false)
+    }
+
+    /// Shared byte-addressed decode for Tempest (`swap = true`, XOR-1 addressing)
+    /// and Star Wars (`swap = false`, native addressing).
+    ///
+    /// The PROM state machine reads bytes in handler order 1,0 (op/high byte
+    /// first), then 3,2 for the 4-byte VCTR. VCTR (op 0) is 4 bytes, SVEC (op 2)
+    /// packs DVX/int_latch into its single word, all others are 2 bytes.
+    fn decode_byte_addressed(&mut self, vmem: &[u8], swap: bool) -> Instr {
+        let rd = |addr: u16| -> u8 {
+            let idx = if swap {
+                (addr as usize) ^ 1
+            } else {
+                addr as usize
+            };
+            vmem.get(idx).copied().unwrap_or(0)
+        };
+        let hi0 = rd(self.pc);
+        let lo0 = rd(self.pc.wrapping_add(1));
         let dvy12 = (hi0 >> 4) & 1;
         let op = hi0 >> 5;
 
         let (dvy, dvx, int_latch) = if op == 0 {
             let dvy = (u16::from(dvy12) << 12) | (u16::from(hi0 & 0xF) << 8) | u16::from(lo0);
-            let hi1 = Self::read_byte(vmem, self.pc.wrapping_add(2));
-            let lo1 = Self::read_byte(vmem, self.pc.wrapping_add(3));
+            let hi1 = rd(self.pc.wrapping_add(2));
+            let lo1 = rd(self.pc.wrapping_add(3));
             self.pc = self.pc.wrapping_add(4);
             let il = hi1 >> 4;
             let dx = (u16::from(il & 1) << 12) | (u16::from(hi1 & 0xF) << 8) | u16::from(lo1);
@@ -615,6 +653,44 @@ impl Avg {
         self.add_point(x, y, eff_intensity, [r, g, b]);
     }
 
+    /// Draw a vector for Star Wars (`starwars_strobe3`): the same 13-bit strobe3
+    /// position math as Tempest, but a `color111` color (no color RAM) and a
+    /// combined intensity of `(int_latch >> 1) * intensity`.
+    fn draw_starwars(&mut self, dvx: u16, dvy: u16, timer: u16, is_short: bool, int_latch: u8) {
+        let cycles: i32 = if is_short {
+            0x100_i32 - i32::from(timer & 0xFF)
+        } else {
+            0x8000_i32 - i32::from(timer)
+        };
+        let scale_factor: i32 = i32::from(self.scale) ^ 0xFF;
+
+        let dx = ((i32::from(dvx >> 3) ^ i32::from(self.xdac_xor)) - 0x200)
+            .wrapping_mul(cycles)
+            .wrapping_mul(scale_factor)
+            >> 4;
+        let dy = ((i32::from(dvy >> 3) ^ i32::from(self.ydac_xor)) - 0x200)
+            .wrapping_mul(cycles)
+            .wrapping_mul(scale_factor)
+            >> 4;
+        self.xpos = self.xpos.wrapping_add(dx);
+        self.ypos = self.ypos.wrapping_sub(dy);
+
+        // color111: low 3 bits index one-bit-per-channel RGB (bit2=R, 1=G, 0=B).
+        let c = self.color;
+        let r = if (c >> 2) & 1 != 0 { 0xFF } else { 0 };
+        let g = if (c >> 1) & 1 != 0 { 0xFF } else { 0 };
+        let b = if c & 1 != 0 { 0xFF } else { 0 };
+
+        // MAME's strobe3 intensity is `((int_latch >> 1) * intensity) >> 3`, an
+        // 8-bit brightness. The renderer's LUT is 4-bit, so shift down by a
+        // further 4 (total >> 7) and clamp — preserving relative brightness.
+        let brightness = (u32::from(int_latch >> 1) * u32::from(self.intensity)) >> 3;
+        let eff_intensity = ((brightness >> 4).min(15)) as u8;
+
+        // Star Wars does not flip the beam (its strobe3 emits xpos/ypos directly).
+        self.add_point(self.xpos, self.ypos, eff_intensity, [r, g, b]);
+    }
+
     /// Add a point to the display list, creating a line from the previous point.
     ///
     /// Coordinates are stored unclamped — the rasterizer handles clipping.
@@ -771,10 +847,9 @@ mod tests {
 
     /// Build vector memory from 16-bit words stored as little-endian byte pairs.
     ///
-    /// Each pair of bytes represents one 16-bit word: `[low_byte, high_byte]`.
-    /// The bytes are stored directly at their physical addresses (matching how
-    /// the 6502 CPU writes to vector RAM). The AVG's `read_byte` handles the
-    /// XOR-1 byte swap to read high byte first, then low byte.
+    /// Bytes are stored directly at their physical addresses. For the Tempest
+    /// decode the AVG applies the XOR-1 byte swap (reading high byte first);
+    /// the Star Wars decode reads them in native order.
     fn build_vmem(bytes: &[u8]) -> Vec<u8> {
         let mut vmem = vec![0u8; 8192]; // 8KB
         for (i, &b) in bytes.iter().enumerate() {
@@ -1062,5 +1137,90 @@ mod tests {
         assert!(avg.is_halted());
         assert_eq!(avg.scale, 0x80);
         assert_eq!(avg.bin_scale, 3);
+    }
+
+    // --- Star Wars variant -----------------------------------------------
+    //
+    // Star Wars is byte-addressed like Tempest but reads vector memory WITHOUT
+    // the XOR-1 swap, so the op/high byte sits at the even address. In these
+    // tests each word is laid out high-byte-first.
+
+    #[test]
+    fn starwars_no_xor_byte_order() {
+        // A Star Wars HALT is [0x20, 0x00] (op byte first). Decoded as Tempest
+        // the same physical bytes read the high byte from the odd address
+        // (0x00) → op 0 (VCTR), so it does not halt.
+        let mut sw = Avg::with_variant(AvgVariant::StarWars, 1024, 1024);
+        sw.go();
+        sw.execute(&build_vmem(&[0x20, 0x00]), &default_color_ram());
+        assert!(sw.is_halted(), "Star Wars decodes [0x20,0x00] as HALT");
+
+        let mut tempest = Avg::new(1024, 1024);
+        tempest.go();
+        tempest.execute(&build_vmem(&[0x20, 0x00]), &default_color_ram());
+        assert!(
+            !tempest.is_halted(),
+            "Tempest reads the swapped byte order and never reaches HALT"
+        );
+    }
+
+    #[test]
+    fn starwars_stat_latches_intensity_and_color() {
+        // STAT (op 3), dvy = 0x01F0 → intensity = 0xF0, color = 1.
+        //   hi0 = op<<5 | (dvy>>8 & 0xF) = 0x60 | 0x01 = 0x61, lo0 = 0xF0.
+        let vmem = build_vmem(&[0x61, 0xF0, 0x20, 0x00]); // STAT, HALT
+        let mut sw = Avg::with_variant(AvgVariant::StarWars, 1024, 1024);
+        sw.go();
+        sw.execute(&vmem, &default_color_ram());
+        assert!(sw.is_halted());
+        assert_eq!(sw.intensity, 0xF0);
+        assert_eq!(sw.color, 1);
+    }
+
+    #[test]
+    fn starwars_vctr_draws_color111_line() {
+        // STAT sets intensity=0xF0, color=1 (blue via color111); CNTR seeds the
+        // beam at center; VCTR draws the first lit line; HALT stops.
+        //   STAT: [0x61, 0xF0]
+        //   CNTR: op 4 -> [0x80, 0x00]
+        //   VCTR: word0 dvy=0x100 -> [0x01, 0x00];
+        //         word1 int_latch=2, dvx=0x100 -> [0x21, 0x00]
+        //   HALT: [0x20, 0x00]
+        let vmem = build_vmem(&[
+            0x61, 0xF0, // STAT
+            0x80, 0x00, // CNTR
+            0x01, 0x00, 0x21, 0x00, // VCTR
+            0x20, 0x00, // HALT
+        ]);
+        let mut sw = Avg::with_variant(AvgVariant::StarWars, 1024, 1024);
+        sw.go();
+        sw.execute(&vmem, &default_color_ram());
+        assert!(sw.is_halted());
+
+        let list = sw.take_display_list();
+        let drawn = list
+            .iter()
+            .find(|l| l.intensity != 0)
+            .expect("a lit line from the VCTR");
+        // color111(1): r = bit2 = 0, g = bit1 = 0, b = bit0 = 0xFF.
+        assert_eq!((drawn.r, drawn.g, drawn.b), (0x00, 0x00, 0xFF));
+    }
+
+    #[test]
+    fn starwars_color111_selects_rgb_channels() {
+        // color = 4 -> color111 red (bit2 set). Verify via a lit VCTR.
+        //   STAT: dvy = 0x04F0 -> hi0 = 0x60 | 0x04 = 0x64, lo0 = 0xF0.
+        let vmem = build_vmem(&[
+            0x64, 0xF0, // STAT: intensity=0xF0, color=4
+            0x80, 0x00, // CNTR
+            0x01, 0x00, 0x21, 0x00, // VCTR
+            0x20, 0x00, // HALT
+        ]);
+        let mut sw = Avg::with_variant(AvgVariant::StarWars, 1024, 1024);
+        sw.go();
+        sw.execute(&vmem, &default_color_ram());
+        let list = sw.take_display_list();
+        let drawn = list.iter().find(|l| l.intensity != 0).expect("a lit line");
+        assert_eq!((drawn.r, drawn.g, drawn.b), (0xFF, 0x00, 0x00));
     }
 }
