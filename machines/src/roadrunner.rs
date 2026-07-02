@@ -980,6 +980,39 @@ mod tests {
         assert!(!sys.adc_irq());
     }
 
+    /// End-to-end check on the real ROM set. Opt-in: set `ROADRUNNER_ROM_DIR` to
+    /// a directory of extracted `roadrunn` ROM files. Skipped (passes) when unset
+    /// so CI without ROMs is unaffected.
+    #[test]
+    fn real_rom_boots_renders_and_sounds() {
+        let Ok(dir) = std::env::var("ROADRUNNER_ROM_DIR") else {
+            return;
+        };
+        let rom_set = RomSet::from_directory(std::path::Path::new(&dir)).unwrap();
+        let mut sys = RoadRunnerSystem::new();
+        sys.load_rom_set(&rom_set).unwrap();
+        MachineCore::reset(&mut sys);
+        let reset_pc = sys.get_cpu_state().pc;
+        // Boot past the blank-EEPROM self-init and into attract.
+        for _ in 0..2500 {
+            sys.run_frame();
+        }
+        let pc = sys.get_cpu_state().pc;
+        assert_ne!(pc, reset_pc, "CPU left the reset vector");
+        assert!(pc < 0x0100_0000, "CPU running in ROM/RAM, not crashed away");
+        // The EEPROM self-initialized (no protection/config lockout).
+        assert!(sys.eeprom_debug().0 > 0, "EEPROM self-initialized");
+        // Video renders content (palette + playfield populated).
+        let (pal, _alpha, pf) = sys.video_ram_stats();
+        assert!(pal > 0 && pf > 0, "palette + playfield populated");
+        // The sound pipeline produced audio.
+        let mut buf = vec![0i16; 8192];
+        assert!(
+            phosphor_core::core::machine::AudioSource::fill_audio(&mut sys, &mut buf) > 0,
+            "audio should be produced",
+        );
+    }
+
     #[test]
     fn adc_state_round_trips_through_save_load() {
         let mut sys = RoadRunnerSystem::new();
