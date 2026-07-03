@@ -202,8 +202,8 @@ pub const TIMING: TimingConfig = TimingConfig {
     total_scanlines: 1,
     // The Star Wars beam field is ~250×290; the real cabinet stretches it
     // horizontally onto a 4:3 monitor (see STRETCH_X_NUM/DEN in trigger_avg).
-    display_width: 480,
-    display_height: 360,
+    display_width: 400,
+    display_height: 330,
 };
 
 /// Horizontal stretch (×5/4) applied to the vector field so it fills the 4:3

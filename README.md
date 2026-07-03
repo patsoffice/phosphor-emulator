@@ -115,7 +115,7 @@ Contains all reusable components — zero external dependencies:
 - ClockDivider (Bresenham fractional clock divider for cross-domain ticking)
 - DirtyBitset (fixed-capacity dirty-tracking bitset with O(1) bulk invalidation for tile/scanline change tracking)
 - GFX utilities (GfxCache pre-decoded tile/sprite pixels, ROM decoders for Pac-Man/DK/MCR families, cache-friendly blocked rotation, sprite clipping, tilemap rendering)
-- Peripheral devices (MC6821 PIA, AY-8910, POKEY, Namco WSG, Z80 CTC, Williams SC1/SC2 blitter, DVG, Atari AVG vector generator, Mathbox coprocessor, I8257 DMA, MC1408 DAC, 74LS259 latch, SSIO sound board, CMOS RAM, MOS 6532 RIOT, GI ER2055 EAROM)
+- Peripheral devices (MC6821 PIA, AY-8910, POKEY, TMS5220 LPC speech, Namco WSG, Z80 CTC, Williams SC1/SC2 blitter, DVG, Atari AVG vector generator, Mathbox coprocessor, Star Wars Matrix Processor, I8257 DMA, MC1408 DAC, 74LS259 latch, SSIO sound board, CMOS RAM, MOS 6532 RIOT, GI ER2055 EAROM, X2212 NOVRAM, ADC0809)
 
 ### Machines Crate (`phosphor-machines`)
 
@@ -132,6 +132,7 @@ Complete system implementations that wire core components together:
 - **RoadRunnerSystem** — Road Runner on the shared Atari System 1 board (slapstic 108 + speech-equipped sound board [VIA6522 + TMS5220 LPC speech] + ADC0809 analog joystick with IRQ2 + per-band motion-object banking)
 - **TempestSystem** — Atari color vector arcade (M6502 + AVG vector generator + Mathbox coprocessor + 2×POKEY + ER2055 EAROM + spinner)
 - **QuantumSystem** — Atari color vector arcade (MC68000 + Quantum-variant AVG + 2×POKEY + X2212 NVRAM + trackball)
+- **StarWarsSystem** — Atari Star Wars color vector cockpit game (dual MC6809E + Star Wars-variant AVG + Matrix Processor 3D-math coprocessor with hardware divider & PRNG + 4×POKEY + TMS5220 LPC speech via MOS 6532 RIOT + ADC0809 flight yoke + X2212 NVRAM)
 - **MissileCommandSystem** — Atari raster arcade (M6502 + POKEY + bitmap video)
 - **PacmanSystem** — Pac-Man on shared Namco Pac board (Z80 + WSG + tile/sprite video)
 - **MsPacmanSystem** — Ms. Pac-Man on shared Namco Pac board (auxiliary decode latch + ROM encryption)
