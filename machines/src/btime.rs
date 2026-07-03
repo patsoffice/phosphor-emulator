@@ -203,8 +203,8 @@ pub struct BtimeBoard {
     pub(crate) p1: u8,
     pub(crate) p2: u8,
     pub(crate) system: u8,
-    dsw1: u8,
-    dsw2: u8,
+    pub(crate) dsw1: u8, // bits 0-6 are DIPs; bit 7 is the live VBLANK (injected on read)
+    pub(crate) dsw2: u8,
 
     // Per-game configuration (identity + future variation points).
     config: BtimeConfig,
@@ -255,11 +255,11 @@ impl BtimeBoard {
             p2: 0xFF,
             // Start/tilt idle high (bits 0-2), coin bits (6-7) low.
             system: 0x07,
-            // DSW defaults refined with the full bank tables in `.5`.
-            // dsw1 bit4 ("Leave Off") must be set or boot locks; bit7 excluded
-            // (live VBLANK, injected on read).
-            dsw1: 0x10,
-            dsw2: 0x00,
+            // DSW1: Coin A/B 1C/1C (0x03|0x0c), "Leave Off" bit4 set (required or
+            // boot locks), Upright. Bit 7 excluded (live VBLANK, injected on read).
+            dsw1: 0x1F,
+            // DSW2: 3 lives, 20000 bonus, 4 enemies, end-of-level pepper on.
+            dsw2: 0x0B,
             config,
             clock: 0,
         };
@@ -347,6 +347,13 @@ impl BtimeBoard {
         self.main_irq = false;
         self.clock = 0;
         // CPU reset is driven by the wrapper via `bus_split!` (Bus lives there).
+    }
+
+    /// True during vertical blanking — the current scanline is outside the
+    /// visible [8, 248) window. The game polls this on the 0x4003 read.
+    fn in_vblank(&self) -> bool {
+        let scanline = (self.clock % TIMING.cycles_per_frame()) / TIMING.cycles_per_scanline;
+        !(8..248).contains(&scanline)
     }
 
     /// Returns a bitmask of CPUs at instruction boundaries. Bit 0 = main CPU.
@@ -543,12 +550,19 @@ impl BtimeBoard {
             0x4000 => self.p1,
             0x4001 => self.p2,
             0x4002 => self.system,
-            // 0x4003 bit7 is a live VBLANK bit injected on read in `.5`.
-            0x4003 => self.dsw1 & 0x7F,
+            // Bit 7 is the live VBLANK line (active-high), not a DIP.
+            0x4003 => (self.dsw1 & 0x7F) | if self.in_vblank() { 0x80 } else { 0 },
             0x4004 => self.dsw2,
             0xB000..=0xFFFF => self.main_map.read_backing(addr),
             _ => 0,
         };
+
+        // The coin IRQ is HOLD_LINE: the CPU vectoring through 0xFFFE (IRQ/BRK
+        // vector low byte) acknowledges it, so exactly one IRQ fires per coin
+        // edge even while the coin button is held.
+        if addr == 0xFFFE {
+            self.main_irq = false;
+        }
 
         // DECO CPU-7: on an opcode fetch (is_sync) that follows any main-CPU
         // write, consume the "had written" flag and deobfuscate the fetched
@@ -692,6 +706,42 @@ mod tests {
         assert!(!b.bus_check_interrupts(BusMaster::Cpu(0)).irq);
         b.main_irq = true;
         assert!(b.bus_check_interrupts(BusMaster::Cpu(0)).irq);
+    }
+
+    #[test]
+    fn irq_vector_fetch_acknowledges_coin_irq() {
+        let mut b = board();
+        b.main_irq = true;
+        // A normal read does not clear it.
+        b.bus_read(BusMaster::Cpu(0), 0x0000);
+        assert!(b.main_irq);
+        // Vectoring through 0xFFFE (IRQ/BRK vector) acknowledges it.
+        b.bus_read(BusMaster::Cpu(0), 0xFFFE);
+        assert!(!b.main_irq);
+    }
+
+    // --- DIP defaults + live VBLANK bit ---
+
+    #[test]
+    fn dsw_power_on_defaults() {
+        let b = board();
+        assert_eq!(b.dsw1, 0x1F); // Coin A/B 1C1C, Leave-Off set, Upright
+        assert_eq!(b.dsw2, 0x0B); // 3 lives, 20000 bonus, 4 enemies, pepper on
+    }
+
+    #[test]
+    fn vblank_bit_injected_on_dsw1_read() {
+        let mut b = board();
+        // Visible scanline 100 -> VBLANK bit clear; DIP bits still read.
+        b.clock = 100 * 96;
+        let v = b.bus_read(BusMaster::Cpu(0), 0x4003);
+        assert_eq!(v & 0x80, 0, "not in vblank");
+        assert_eq!(v & 0x7F, 0x1F, "dsw1 bits present");
+        // Scanline 0 and 260 are outside the visible [8,248) window -> bit set.
+        b.clock = 0;
+        assert_ne!(b.bus_read(BusMaster::Cpu(0), 0x4003) & 0x80, 0);
+        b.clock = 260 * 96;
+        assert_ne!(b.bus_read(BusMaster::Cpu(0), 0x4003) & 0x80, 0);
     }
 
     // --- X/Y-swap sprite-RAM mirror ---
