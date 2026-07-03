@@ -39,6 +39,7 @@ use phosphor_core::gfx::decode::{GfxLayout, decode_gfx};
 use phosphor_macros::{BusDebug, DebugTrace, MemoryRegion, Saveable};
 
 use crate::disasm_registry::{DisasmCpu, DisasmRegion};
+use crate::gfx_registry::GfxRegion;
 use crate::registry::MachineEntry;
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
 use crate::set_bit_active_high;
@@ -253,6 +254,125 @@ pub static MARIO_PALETTE_PROM: RomRegion = RomRegion {
         crc32: &[0xafc9bd41],
     }],
 };
+
+// GFX bit-plane layouts, promoted to `'static` so both the runtime decode
+// (`decode_gfx_roms`) and the gfxview `GfxRegion`s can borrow the same tables.
+
+/// Tiles: 512 chars, 8×8, 2bpp; the two bitplanes are separated by 512*8*8 bits.
+pub static MARIO_TILE_GFX_LAYOUT: GfxLayout<'static> = GfxLayout {
+    plane_offsets: &[0, 512 * 8 * 8],
+    x_offsets: &[0, 1, 2, 3, 4, 5, 6, 7],
+    y_offsets: &[0, 8, 16, 24, 32, 40, 48, 56],
+    char_increment: 8 * 8,
+};
+
+/// Bit distance between the two 8-pixel halves of a sprite row (256*16*8).
+const MARIO_SPRITE_HALF: usize = 256 * 16 * 8;
+
+/// Sprites: 256 chars, 16×16, 3bpp. Planes separated by 256*16*16 bits; the
+/// two 8-pixel halves of each row are separated by [`MARIO_SPRITE_HALF`] bits.
+pub static MARIO_SPRITE_GFX_LAYOUT: GfxLayout<'static> = GfxLayout {
+    plane_offsets: &[0, 256 * 16 * 16, 2 * 256 * 16 * 16],
+    x_offsets: &[
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        MARIO_SPRITE_HALF,
+        MARIO_SPRITE_HALF + 1,
+        MARIO_SPRITE_HALF + 2,
+        MARIO_SPRITE_HALF + 3,
+        MARIO_SPRITE_HALF + 4,
+        MARIO_SPRITE_HALF + 5,
+        MARIO_SPRITE_HALF + 6,
+        MARIO_SPRITE_HALF + 7,
+    ],
+    y_offsets: &[
+        0, 8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120,
+    ],
+    char_increment: 16 * 8,
+};
+
+// gfxview GFX regions: the DK-family reference charset/sprite sheets. Both share
+// the 256-entry PROM palette via `mario_palette_rgb` (see `build_palette`).
+inventory::submit! {
+    GfxRegion {
+        machine: "mariobros",
+        region: "tiles",
+        count: 512,
+        width: 8,
+        height: 8,
+        layout: &MARIO_TILE_GFX_LAYOUT,
+        load: |rs| MARIO_TILE_ROM.load(rs),
+        palette: Some(mario_gfx_palette),
+    }
+}
+inventory::submit! {
+    GfxRegion {
+        machine: "mariobros",
+        region: "sprites",
+        count: 256,
+        width: 16,
+        height: 16,
+        layout: &MARIO_SPRITE_GFX_LAYOUT,
+        load: |rs| MARIO_SPRITE_ROM.load(rs),
+        palette: Some(mario_gfx_palette),
+    }
+}
+
+/// gfxview palette hook: load the color PROM and build the RGB palette with the
+/// same resistor-net math as the runtime path.
+fn mario_gfx_palette(rom_set: &RomSet) -> Result<Vec<(u8, u8, u8)>, RomLoadError> {
+    let prom = MARIO_PALETTE_PROM.load(rom_set)?;
+    Ok(mario_palette_rgb(&prom).to_vec())
+}
+
+/// Build the 256-entry RGB palette from the 512-byte PROM's inverted half
+/// (bytes 0-255) using the shared Nintendo resistor-network / monitor model.
+/// R = PROM bits 7-5, G = bits 4-2, B = bits 1-0 (LSB-first within each field).
+///
+/// Shared by [`MarioBrosBoard::build_palette`] and [`mario_gfx_palette`] so the
+/// runtime renderer and the offline viewer never diverge.
+fn mario_palette_rgb(palette_prom: &[u8]) -> [(u8, u8, u8); 256] {
+    let mut raw: [(f64, f64, f64); 256] = [(0.0, 0.0, 0.0); 256];
+    for (i, entry) in raw.iter_mut().enumerate() {
+        let v = palette_prom[i];
+        let r_bits = [
+            ((v >> 5) & 1) as f64,
+            ((v >> 6) & 1) as f64,
+            ((v >> 7) & 1) as f64,
+        ];
+        let g_bits = [
+            ((v >> 2) & 1) as f64,
+            ((v >> 3) & 1) as f64,
+            ((v >> 4) & 1) as f64,
+        ];
+        let b_bits = [(v & 1) as f64, ((v >> 1) & 1) as f64];
+        let r = compute_tkg04_channel(&r_bits, &DARLINGTON_RESISTORS, DARLINGTON_BIAS_R, true);
+        let g = compute_tkg04_channel(&g_bits, &DARLINGTON_RESISTORS, DARLINGTON_BIAS_R, true);
+        let b = compute_tkg04_channel(&b_bits, &EMITTER_RESISTORS, EMITTER_BIAS_R, false);
+        *entry = (r, g, b);
+    }
+
+    let max_val = raw
+        .iter()
+        .flat_map(|&(r, g, b)| [r, g, b])
+        .fold(0.0f64, f64::max);
+    let scale = if max_val > 0.0 { 255.0 / max_val } else { 1.0 };
+    let mut out = [(0u8, 0u8, 0u8); 256];
+    for (o, &(r, g, b)) in out.iter_mut().zip(raw.iter()) {
+        *o = (
+            (r * scale).round().min(255.0) as u8,
+            (g * scale).round().min(255.0) as u8,
+            (b * scale).round().min(255.0) as u8,
+        );
+    }
+    out
+}
 
 // ---------------------------------------------------------------------------
 // Input button IDs (active-high: 0x00 = all released)
@@ -514,75 +634,21 @@ impl MarioBrosBoard {
     }
 
     /// Pre-decode tile and sprite ROMs into GFX caches. Call after loading ROMs.
+    ///
+    /// Uses the same `'static` [`MARIO_TILE_GFX_LAYOUT`] / [`MARIO_SPRITE_GFX_LAYOUT`]
+    /// tables the gfxview `GfxRegion`s reference, so the offline sheet export
+    /// and the runtime renderer decode identically.
     pub fn decode_gfx_roms(&mut self) {
-        // Tiles: 512 chars, 8×8, 2bpp; planes separated by 512*8*8 bits.
-        self.tile_cache = decode_gfx(
-            &self.tile_rom,
-            0,
-            512,
-            &GfxLayout {
-                plane_offsets: &[0, 512 * 8 * 8],
-                x_offsets: &[0, 1, 2, 3, 4, 5, 6, 7],
-                y_offsets: &[0, 8, 16, 24, 32, 40, 48, 56],
-                char_increment: 8 * 8,
-            },
-        );
-
-        // Sprites: 256 chars, 16×16, 3bpp. Planes separated by 256*16*16 bits;
-        // the two 8-pixel halves of each row are separated by 256*16*8 bits.
-        const HALF: usize = 256 * 16 * 8; // 32768
-        let x_offsets: [usize; 16] =
-            std::array::from_fn(|px| if px < 8 { px } else { HALF + (px - 8) });
-        let y_offsets: [usize; 16] = std::array::from_fn(|py| py * 8);
-        self.sprite_cache = decode_gfx(
-            &self.sprite_rom,
-            0,
-            256,
-            &GfxLayout {
-                plane_offsets: &[0, 256 * 16 * 16, 2 * 256 * 16 * 16],
-                x_offsets: &x_offsets,
-                y_offsets: &y_offsets,
-                char_increment: 16 * 8,
-            },
-        );
+        self.tile_cache = decode_gfx(&self.tile_rom, 0, 512, &MARIO_TILE_GFX_LAYOUT);
+        self.sprite_cache = decode_gfx(&self.sprite_rom, 0, 256, &MARIO_SPRITE_GFX_LAYOUT);
     }
 
-    /// Pre-compute the 256-entry RGB palette from the inverted PROM half using
-    /// the shared Nintendo resistor-network/monitor model. R = PROM bits 7-5,
-    /// G = bits 4-2, B = bits 1-0 (LSB-first within each field).
+    /// Pre-compute the 256-entry RGB palette from the inverted PROM half.
+    ///
+    /// Delegates to the shared [`mario_palette_rgb`] so the runtime renderer and
+    /// the gfxview export apply identical resistor-net math.
     pub fn build_palette(&mut self) {
-        let mut raw: [(f64, f64, f64); 256] = [(0.0, 0.0, 0.0); 256];
-        for (i, entry) in raw.iter_mut().enumerate() {
-            let v = self.palette_prom[i];
-            let r_bits = [
-                ((v >> 5) & 1) as f64,
-                ((v >> 6) & 1) as f64,
-                ((v >> 7) & 1) as f64,
-            ];
-            let g_bits = [
-                ((v >> 2) & 1) as f64,
-                ((v >> 3) & 1) as f64,
-                ((v >> 4) & 1) as f64,
-            ];
-            let b_bits = [(v & 1) as f64, ((v >> 1) & 1) as f64];
-            let r = compute_tkg04_channel(&r_bits, &DARLINGTON_RESISTORS, DARLINGTON_BIAS_R, true);
-            let g = compute_tkg04_channel(&g_bits, &DARLINGTON_RESISTORS, DARLINGTON_BIAS_R, true);
-            let b = compute_tkg04_channel(&b_bits, &EMITTER_RESISTORS, EMITTER_BIAS_R, false);
-            *entry = (r, g, b);
-        }
-
-        let max_val = raw
-            .iter()
-            .flat_map(|&(r, g, b)| [r, g, b])
-            .fold(0.0f64, f64::max);
-        let scale = if max_val > 0.0 { 255.0 / max_val } else { 1.0 };
-        for (i, &(r, g, b)) in raw.iter().enumerate() {
-            self.palette_rgb[i] = (
-                (r * scale).round().min(255.0) as u8,
-                (g * scale).round().min(255.0) as u8,
-                (b * scale).round().min(255.0) as u8,
-            );
-        }
+        self.palette_rgb = mario_palette_rgb(&self.palette_prom);
     }
 
     // -----------------------------------------------------------------------
@@ -1634,5 +1700,72 @@ mod tests {
         assert_eq!(sys.dip_bank_value(0), 0x03);
         sys.set_dip_option(0, 3, 0xC0); // Difficulty → "Hardest"
         assert_eq!(sys.dip_bank_value(0), 0xC3);
+    }
+
+    #[test]
+    fn gfx_regions_registered_with_expected_geometry() {
+        let regions = crate::gfx_registry::regions_for("mariobros");
+        assert_eq!(
+            regions.iter().map(|r| r.region).collect::<Vec<_>>(),
+            vec!["sprites", "tiles"],
+        );
+
+        let tiles = crate::gfx_registry::find("mariobros", "tiles").unwrap();
+        assert_eq!((tiles.count, tiles.width, tiles.height), (512, 8, 8));
+        assert!(tiles.palette.is_some(), "tiles carry the PROM palette");
+
+        let sprites = crate::gfx_registry::find("mariobros", "sprites").unwrap();
+        assert_eq!(
+            (sprites.count, sprites.width, sprites.height),
+            (256, 16, 16)
+        );
+        assert!(sprites.palette.is_some());
+    }
+
+    /// The gfxview `GfxRegion` layouts must decode byte-for-byte identically to
+    /// the runtime `decode_gfx_roms()` — they share the same `'static` tables,
+    /// and this pins that invariant against future drift of the region geometry.
+    #[test]
+    fn gfx_region_layout_matches_runtime_decode() {
+        // Deterministic pseudo-ROM bytes (no real ROM / CRC needed here).
+        let mut sys = MarioBrosSystem::new();
+        for (i, b) in sys.board.tile_rom.iter_mut().enumerate() {
+            *b = (i as u8).wrapping_mul(31).wrapping_add(7);
+        }
+        for (i, b) in sys.board.sprite_rom.iter_mut().enumerate() {
+            *b = (i as u8).wrapping_mul(17).wrapping_add(3);
+        }
+        sys.board.decode_gfx_roms();
+
+        let tiles = crate::gfx_registry::find("mariobros", "tiles").unwrap();
+        let via_region = decode_gfx(&sys.board.tile_rom, 0, tiles.count as usize, tiles.layout);
+        assert_caches_eq(&via_region, &sys.board.tile_cache);
+
+        let sprites = crate::gfx_registry::find("mariobros", "sprites").unwrap();
+        let via_region = decode_gfx(
+            &sys.board.sprite_rom,
+            0,
+            sprites.count as usize,
+            sprites.layout,
+        );
+        assert_caches_eq(&via_region, &sys.board.sprite_cache);
+    }
+
+    fn assert_caches_eq(a: &gfx::GfxCache, b: &gfx::GfxCache) {
+        assert_eq!(
+            (a.count(), a.width(), a.height()),
+            (b.count(), b.width(), b.height())
+        );
+        for code in 0..a.count() {
+            for py in 0..a.height() {
+                for px in 0..a.width() {
+                    assert_eq!(
+                        a.pixel(code, px, py),
+                        b.pixel(code, px, py),
+                        "pixel mismatch at code {code} ({px},{py})"
+                    );
+                }
+            }
+        }
     }
 }
