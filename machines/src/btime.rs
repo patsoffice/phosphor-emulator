@@ -11,9 +11,9 @@
 //! live here. The sound M6502 + 2× AY-3-8910 are deferred (see the Burgertime
 //! epic §10); the sound-latch write is stored but otherwise inert.
 //!
-//! This file is the initial scaffold (issue `burgertime-z6c.1`). The DECO CPU-7
-//! opcode decryption and X/Y-swap sprite-RAM mirror land in `.2`, GFX decode and
-//! the `BGR_233_inverted` palette in `.3`, and the full renderer in `.4`.
+//! Pass 1 progress: the memory map, DECO CPU-7 opcode decryption, and X/Y-swap
+//! sprite-RAM mirror are implemented (`.1`/`.2`). GFX decode and the
+//! `BGR_233_inverted` palette land in `.3`, and the full renderer in `.4`.
 
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
@@ -28,6 +28,23 @@ enum Region {
     /// Main-CPU program ROM at 0xB000-0xFFFF (0xB000-0xBFFF is an unused gap;
     /// the physical ROMs sit at 0xC000-0xFFFF with the vectors at 0xFFFA-0xFFFF).
     Main = 1,
+}
+
+/// DECO CPU-7 opcode deobfuscation (decocpu7.cpp:33 `bitswap<8>(v,6,5,3,4,2,7,1,0)`).
+///
+/// Only bits 7↔2 and 5↔3 are swapped; the rest pass through. Applied to an
+/// opcode fetch that (a) follows a main-CPU write and (b) sits at an address
+/// where `(addr & 0x0104) == 0x0104`.
+#[inline]
+fn deco_cpu7_decrypt(v: u8) -> u8 {
+    ((v >> 6) & 1) << 7
+        | ((v >> 5) & 1) << 6
+        | ((v >> 3) & 1) << 5
+        | ((v >> 4) & 1) << 4
+        | ((v >> 2) & 1) << 3
+        | ((v >> 7) & 1) << 2
+        | ((v >> 1) & 1) << 1
+        | (v & 1)
 }
 
 // ---------------------------------------------------------------------------
@@ -71,8 +88,8 @@ pub struct BtimeConfig {
 ///   0x0C00-0x0C0F  Palette RAM (16 entries)
 ///   0x1000-0x13FF  Video RAM (char codes; sprite RAM aliased into column 0)
 ///   0x1400-0x17FF  Color RAM
-///   0x1800-0x1BFF  Video RAM via X/Y-swap mirror (added in `.2`)
-///   0x1C00-0x1FFF  Color RAM via X/Y-swap mirror (added in `.2`)
+///   0x1800-0x1BFF  Video RAM via X/Y-swap mirror
+///   0x1C00-0x1FFF  Color RAM via X/Y-swap mirror
 ///   0x4000         IN0 (P1)      0x4001  IN1 (P2)      0x4002  system
 ///   0x4003         DSW1 (bit7 = live VBLANK)           0x4004  DSW2
 ///   0xB000-0xFFFF  Program ROM
@@ -93,7 +110,7 @@ pub struct BtimeBoard {
     palette_rgb: [(u8, u8, u8); 16],
 
     // DECO CPU-7 decryption state: any main-CPU write arms decryption of the
-    // next opcode fetch. The decrypt itself is wired in `.2`.
+    // next opcode fetch (consumed in `bus_read`).
     main_had_written: bool,
 
     // I/O latches
@@ -118,6 +135,16 @@ pub struct BtimeBoard {
 }
 
 impl BtimeBoard {
+    /// X/Y address swap over the 32×32 video/color window (btime.cpp:534).
+    /// An involution: `off = 32*y + x  ->  32*x + y`. Backs the 0x1800/0x1C00
+    /// sprite-RAM mirror (the game reaches column-0 sprite RAM through it).
+    #[inline]
+    pub(crate) fn swap(off: usize) -> usize {
+        let x = off / 32;
+        let y = off % 32;
+        32 * y + x
+    }
+
     pub fn new(config: BtimeConfig) -> Self {
         let mut main_map = AddressSpace16::new();
         main_map.region(
@@ -215,12 +242,13 @@ impl BtimeBoard {
 
     pub(crate) fn bus_read(&mut self, master: BusMaster, addr: u16) -> u8 {
         let a = addr as usize;
-        let data = match addr {
+        let mut data = match addr {
             0x0000..=0x07FF => self.ram[a & 0x07FF],
             0x0C00..=0x0C0F => self.palette_ram[a & 0x0F],
             0x1000..=0x13FF => self.videoram[a & 0x03FF],
             0x1400..=0x17FF => self.colorram[a & 0x03FF],
-            // 0x1800/0x1C00 X/Y-swap mirrors: wired in `.2`.
+            0x1800..=0x1BFF => self.videoram[Self::swap(a & 0x03FF)],
+            0x1C00..=0x1FFF => self.colorram[Self::swap(a & 0x03FF)],
             0x4000 => self.p1,
             0x4001 => self.p2,
             0x4002 => self.system,
@@ -230,7 +258,19 @@ impl BtimeBoard {
             0xB000..=0xFFFF => self.main_map.read_backing(addr),
             _ => 0,
         };
-        // DECO CPU-7 opcode decryption hook is added in `.2`.
+
+        // DECO CPU-7: on an opcode fetch (is_sync) that follows any main-CPU
+        // write, consume the "had written" flag and deobfuscate the fetched
+        // byte when (addr & 0x0104) == 0x0104 (decocpu7.cpp read_sync). The flag
+        // clears on every sync fetch regardless of address; only matching
+        // addresses are decrypted.
+        if self.cpu.is_sync() && self.main_had_written {
+            self.main_had_written = false;
+            if (addr & 0x0104) == 0x0104 {
+                data = deco_cpu7_decrypt(data);
+            }
+        }
+
         self.main_map.watch_read(0, master, addr, data);
         data
     }
@@ -246,7 +286,8 @@ impl BtimeBoard {
             0x0C00..=0x0C0F => self.palette_ram[a & 0x0F] = data,
             0x1000..=0x13FF => self.videoram[a & 0x03FF] = data,
             0x1400..=0x17FF => self.colorram[a & 0x03FF] = data,
-            // 0x1800/0x1C00 X/Y-swap mirrors: wired in `.2`.
+            0x1800..=0x1BFF => self.videoram[Self::swap(a & 0x03FF)] = data,
+            0x1C00..=0x1FFF => self.colorram[Self::swap(a & 0x03FF)] = data,
             0x4002 => self.flip_screen = data & 1 != 0,
             0x4003 => self.sound_latch = data, // sound CPU/IRQ deferred (§10)
             0x4004 => self.bnj_scroll0 = data,
@@ -356,5 +397,95 @@ mod tests {
         assert!(!b.bus_check_interrupts(BusMaster::Cpu(0)).irq);
         b.main_irq = true;
         assert!(b.bus_check_interrupts(BusMaster::Cpu(0)).irq);
+    }
+
+    // --- X/Y-swap sprite-RAM mirror (btime.cpp:534) ---
+
+    #[test]
+    fn xy_swap_is_an_involution() {
+        for off in 0..0x400usize {
+            assert_eq!(BtimeBoard::swap(BtimeBoard::swap(off)), off);
+        }
+    }
+
+    #[test]
+    fn mirror_videoram_swaps_x_and_y() {
+        let mut b = board();
+        // A direct write to video RAM offset 5 is reachable through the 0x1800
+        // mirror at the swapped address.
+        b.bus_write(BusMaster::Cpu(0), 0x1000 + 5, 0x7E);
+        let mirror = 0x1800 + BtimeBoard::swap(5) as u16;
+        assert_eq!(b.bus_read(BusMaster::Cpu(0), mirror), 0x7E);
+
+        // A write through the mirror lands at the swapped video-RAM offset.
+        b.bus_write(BusMaster::Cpu(0), 0x1801, 0x3C); // off 1 -> videoram[swap(1)=32]
+        assert_eq!(b.bus_read(BusMaster::Cpu(0), 0x1000 + 32), 0x3C);
+    }
+
+    #[test]
+    fn mirror_colorram_swaps_x_and_y() {
+        let mut b = board();
+        b.bus_write(BusMaster::Cpu(0), 0x1400 + 5, 0x11);
+        let mirror = 0x1C00 + BtimeBoard::swap(5) as u16;
+        assert_eq!(b.bus_read(BusMaster::Cpu(0), mirror), 0x11);
+    }
+
+    // --- DECO CPU-7 opcode decryption (decocpu7.cpp) ---
+    //
+    // A fresh M6502 sits in the Fetch state, so `is_sync()` is true and every
+    // test `bus_read` behaves as an opcode fetch.
+
+    #[test]
+    fn deco_decrypt_pure_fn_known_vectors() {
+        // bitswap(v,6,5,3,4,2,7,1,0): out7<-in6, out6<-in5, out5<-in3,
+        // out4<-in4, out3<-in2, out2<-in7, out1<-in1, out0<-in0.
+        assert_eq!(deco_cpu7_decrypt(0x84), 0x0C); // in7|in2 -> out2|out3
+        assert_eq!(deco_cpu7_decrypt(0x00), 0x00);
+        assert_eq!(deco_cpu7_decrypt(0xFF), 0xFF);
+        assert_eq!(deco_cpu7_decrypt(0x01), 0x01); // bit0 fixed
+        assert_eq!(deco_cpu7_decrypt(0x02), 0x02); // bit1 fixed
+        assert_eq!(deco_cpu7_decrypt(0x10), 0x10); // bit4 fixed
+        // The moving bits form one 5-cycle (2->3->5->6->7->2); applying the
+        // swap five times is the identity.
+        let mut v = 0xA5;
+        for _ in 0..5 {
+            v = deco_cpu7_decrypt(v);
+        }
+        assert_eq!(v, 0xA5);
+    }
+
+    #[test]
+    fn deco_decrypts_matching_address_fetch_after_write() {
+        let mut b = board();
+        let mut rom = vec![0u8; 0x5000];
+        rom[0x1104] = 0x84; // -> 0xC104, and 0xC104 & 0x0104 == 0x0104
+        b.load_main_rom(&rom);
+
+        b.main_had_written = true; // as a prior write would set it
+        let got = b.bus_read(BusMaster::Cpu(0), 0xC104);
+        assert_eq!(got, 0x0C, "fetched byte deobfuscated");
+        assert!(!b.main_had_written, "sync fetch consumes the flag");
+    }
+
+    #[test]
+    fn deco_leaves_nonmatching_address_raw_but_still_clears_flag() {
+        let mut b = board();
+        let mut rom = vec![0u8; 0x5000];
+        rom[0x1000] = 0x84; // -> 0xC000, and 0xC000 & 0x0104 == 0
+        b.load_main_rom(&rom);
+
+        b.main_had_written = true;
+        assert_eq!(b.bus_read(BusMaster::Cpu(0), 0xC000), 0x84, "raw byte");
+        assert!(!b.main_had_written, "flag clears on any sync fetch");
+    }
+
+    #[test]
+    fn deco_no_decrypt_without_a_prior_write() {
+        let mut b = board();
+        let mut rom = vec![0u8; 0x5000];
+        rom[0x1104] = 0x84;
+        b.load_main_rom(&rom);
+        // main_had_written stays false: a matching address is left untouched.
+        assert_eq!(b.bus_read(BusMaster::Cpu(0), 0xC104), 0x84);
     }
 }
