@@ -96,6 +96,33 @@ cargo run -p phosphor-disasm --bin disasm -- raw --cpu z80 --org 0 program.bin
 
 See [docs/disassembler.md](docs/disassembler.md) for all three modes (`raw`, `rom`, `machine`) and a debugging workflow.
 
+### Viewing GFX ROMs
+
+Decode a machine's charset/sprite tile ROMs into a picture — the color-PROM palette applied, no running machine — to check bit-plane layout and colors during bring-up, or to diff against a MAME GFX dump. Two front-ends share one decoder:
+
+**Interactive viewer** (a window, in the frontend):
+
+```bash
+# Browse a machine's GFX regions; ←/→ cycle, +/- zoom, 0 refit, Esc quits
+cargo run -p phosphor-frontend -- congobongo /path/to/roms --gfxview
+
+# Open on a specific region (default: the first registered one)
+cargo run -p phosphor-frontend -- dkong /path/to/roms --gfxview --gfx-region sprites
+```
+
+**PNG sheet export** (offline, in the `disasm` tool — no window, CI-friendly):
+
+```bash
+# List a machine's GFX regions (no ROMs needed)
+cargo run -p phosphor-disasm --bin disasm -- gfxview --machine congobongo
+
+# Export a region to a PNG tile/sprite sheet
+cargo run -p phosphor-disasm --bin disasm -- gfxview --machine congobongo --region sprites \
+    /path/to/roms --scale 2 --cols 8 -o congo_sprites.png
+```
+
+Colors come from the machine's color PROM where it has one (else a grayscale ramp), indexed at pen group 0 — per-tile color attributes aren't known without live video RAM. Registered machines include Donkey Kong, Mario Bros., and Congo Bongo.
+
 ## Workspace Architecture
 
 This project uses a **workspace structure** to separate reusable components from system implementations:
@@ -265,7 +292,7 @@ assert_eq!(bus.memory[0x10], 0x42);
 - Space Duel (Atari: M6502 + AVG + POKEY)
 - Space Fury (Sega G80: Z80 + vector generator)
 - Zaxxon (Sega G80: Z80 + tilemap/sprite video)
-
+ 
 ### Frontend
 
 - Migrate from SDL2 to SDL3
