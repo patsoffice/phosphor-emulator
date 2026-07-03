@@ -162,21 +162,21 @@ const BURGERTIME_CONFIG: BtimeConfig = BtimeConfig { name: "burgertime" };
 //                    active-high (bits 6-7), each coin's rising edge pulses IRQ.
 // ---------------------------------------------------------------------------
 
-const INPUT_P1_RIGHT: u8 = 0;
-const INPUT_P1_LEFT: u8 = 1;
-const INPUT_P1_UP: u8 = 2;
-const INPUT_P1_DOWN: u8 = 3;
-const INPUT_P1_BUTTON1: u8 = 4;
-const INPUT_P2_RIGHT: u8 = 5;
-const INPUT_P2_LEFT: u8 = 6;
-const INPUT_P2_UP: u8 = 7;
-const INPUT_P2_DOWN: u8 = 8;
-const INPUT_P2_BUTTON1: u8 = 9;
-const INPUT_COIN1: u8 = 10;
-const INPUT_START1: u8 = 11;
-const INPUT_START2: u8 = 12;
-const INPUT_COIN2: u8 = 13;
-const INPUT_TILT: u8 = 14;
+pub const INPUT_P1_RIGHT: u8 = 0;
+pub const INPUT_P1_LEFT: u8 = 1;
+pub const INPUT_P1_UP: u8 = 2;
+pub const INPUT_P1_DOWN: u8 = 3;
+pub const INPUT_P1_BUTTON1: u8 = 4;
+pub const INPUT_P2_RIGHT: u8 = 5;
+pub const INPUT_P2_LEFT: u8 = 6;
+pub const INPUT_P2_UP: u8 = 7;
+pub const INPUT_P2_DOWN: u8 = 8;
+pub const INPUT_P2_BUTTON1: u8 = 9;
+pub const INPUT_COIN1: u8 = 10;
+pub const INPUT_START1: u8 = 11;
+pub const INPUT_START2: u8 = 12;
+pub const INPUT_COIN2: u8 = 13;
+pub const INPUT_TILT: u8 = 14;
 
 const BURGERTIME_CONTROLS: &[InputControl] = &[
     InputControl {

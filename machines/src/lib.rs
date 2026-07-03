@@ -471,6 +471,7 @@ pub use astdelux::AsteroidsDeluxeSystem;
 pub use asteroids::AsteroidsSystem;
 pub use atari_dvg::AtariDvgBoard;
 pub use atari_system1::AtariSystem1Board;
+pub use burgertime::BurgertimeSystem;
 pub use ccastles::CrystalCastlesSystem;
 pub use digdug::DigDugSystem;
 pub use donkey_kong::DkongSystem;

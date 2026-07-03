@@ -86,6 +86,9 @@ save_state_tests!(llander, phosphor_machines::LunarLanderSystem::new());
 // Namco Galaga board machines
 save_state_tests!(digdug, phosphor_machines::DigDugSystem::new());
 
+// Data East btime board machines
+save_state_tests!(burgertime, phosphor_machines::BurgertimeSystem::new());
+
 // Standalone machines
 save_state_tests!(
     missile_command,
