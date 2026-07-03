@@ -313,17 +313,19 @@ impl BurgertimeSystem {
         }
     }
 
-    /// Load and validate the Burgertime ROM set. The main program ROM is placed
-    /// into the board; GFX/bg_map presence is validated here and decoded in
-    /// `.3`. The sound ROM is validated too but not yet wired (`.8`).
+    /// Load the Burgertime ROM set: main program ROM into the board, and decode
+    /// the char/sprite/background graphics + copy the bg_map. The sound ROM is
+    /// validated but not yet wired (`.8`).
     pub fn load_rom_set(&mut self, rom_set: &RomSet) -> Result<(), RomLoadError> {
         let main = BURGERTIME_MAIN_ROM.load(rom_set)?;
         self.board.load_main_rom(&main);
 
-        // Validate the graphics ROMs are present (decoded in `.3`).
-        BURGERTIME_GFX1_ROM.load(rom_set)?;
-        BURGERTIME_GFX2_ROM.load(rom_set)?;
-        BURGERTIME_BG_MAP_ROM.load(rom_set)?;
+        let gfx1 = BURGERTIME_GFX1_ROM.load(rom_set)?;
+        self.board.load_gfx1(&gfx1);
+        let gfx2 = BURGERTIME_GFX2_ROM.load(rom_set)?;
+        self.board.load_gfx2(&gfx2);
+        let bg_map = BURGERTIME_BG_MAP_ROM.load(rom_set)?;
+        self.board.load_bg_map(&bg_map);
 
         Ok(())
     }

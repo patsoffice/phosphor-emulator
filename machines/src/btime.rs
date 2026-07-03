@@ -11,15 +11,17 @@
 //! live here. The sound M6502 + 2× AY-3-8910 are deferred (see the Burgertime
 //! epic §10); the sound-latch write is stored but otherwise inert.
 //!
-//! Pass 1 progress: the memory map, DECO CPU-7 opcode decryption, and X/Y-swap
-//! sprite-RAM mirror are implemented (`.1`/`.2`). GFX decode and the
-//! `BGR_233_inverted` palette land in `.3`, and the full renderer in `.4`.
+//! Pass 1 progress: the memory map, DECO CPU-7 opcode decryption, X/Y-swap
+//! sprite-RAM mirror, GFX decode, and the `BGR_233_inverted` palette are
+//! implemented (`.1`-`.3`). The full char/sprite/background renderer with
+//! ROT270 lands in `.4`.
 
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::{AccessKind, AddressSpace16};
 use phosphor_core::core::{Bus, BusMaster, TimingConfig};
 use phosphor_core::cpu::m6502::M6502;
+use phosphor_core::gfx::decode::{GfxCache, GfxLayout, decode_gfx};
 use phosphor_macros::{BusDebug, MemoryRegion};
 
 #[repr(u8)]
@@ -32,9 +34,9 @@ enum Region {
 
 /// DECO CPU-7 opcode deobfuscation (decocpu7.cpp:33 `bitswap<8>(v,6,5,3,4,2,7,1,0)`).
 ///
-/// Only bits 7↔2 and 5↔3 are swapped; the rest pass through. Applied to an
-/// opcode fetch that (a) follows a main-CPU write and (b) sits at an address
-/// where `(addr & 0x0104) == 0x0104`.
+/// The moving bits form one 5-cycle (2→3→5→6→7→2); bits 0/1/4 pass through.
+/// Applied to an opcode fetch that (a) follows a main-CPU write and (b) sits at
+/// an address where `(addr & 0x0104) == 0x0104`.
 #[inline]
 fn deco_cpu7_decrypt(v: u8) -> u8 {
     ((v >> 6) & 1) << 7
@@ -45,6 +47,64 @@ fn deco_cpu7_decrypt(v: u8) -> u8 {
         | ((v >> 7) & 1) << 2
         | ((v >> 1) & 1) << 1
         | (v & 1)
+}
+
+// ---------------------------------------------------------------------------
+// GFX layouts (btime.cpp:2099-2135). MAME lists planes MSB-first; phosphor's
+// GfxLayout is LSB-first (plane_offsets[0] -> pixel bit 0), so the three plane
+// offsets are reversed relative to MAME's gfx_8x8x3_planar / tile16layout.
+// ---------------------------------------------------------------------------
+
+/// Characters: gfx1, 8×8, 3bpp planar, 1024 tiles (`gfx_8x8x3_planar`).
+const CHAR_LAYOUT: GfxLayout<'static> = GfxLayout {
+    plane_offsets: &[0, 0x2000 * 8, 0x4000 * 8],
+    x_offsets: &[0, 1, 2, 3, 4, 5, 6, 7],
+    y_offsets: &[0, 8, 16, 24, 32, 40, 48, 56],
+    char_increment: 8 * 8,
+};
+
+/// Sprites: gfx1, 16×16, 3bpp planar, 256 tiles (`tile16layout`). The two 8-pixel
+/// halves of each row are stored 16 bytes apart (x offsets 128..135 then 0..7).
+const SPRITE_LAYOUT: GfxLayout<'static> = GfxLayout {
+    plane_offsets: &[0, 0x2000 * 8, 0x4000 * 8],
+    x_offsets: &[
+        128, 129, 130, 131, 132, 133, 134, 135, 0, 1, 2, 3, 4, 5, 6, 7,
+    ],
+    y_offsets: &[
+        0, 8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120,
+    ],
+    char_increment: 32 * 8,
+};
+
+/// Background tiles: gfx2 (0x1800), 16×16, 3bpp planar, 64 tiles (`tile16layout`
+/// over the smaller region, so the plane thirds are 0/0x0800/0x1000).
+const BG_LAYOUT: GfxLayout<'static> = GfxLayout {
+    plane_offsets: &[0, 0x0800 * 8, 0x1000 * 8],
+    x_offsets: &[
+        128, 129, 130, 131, 132, 133, 134, 135, 0, 1, 2, 3, 4, 5, 6, 7,
+    ],
+    y_offsets: &[
+        0, 8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120,
+    ],
+    char_increment: 32 * 8,
+};
+
+const NUM_CHARS: usize = 1024;
+const NUM_SPRITES: usize = 256;
+const NUM_BG_TILES: usize = 64;
+
+/// Expand a 3-bit color component to 8 bits (MAME `pal3bit`).
+#[inline]
+fn pal3bit(x: u8) -> u8 {
+    let x = x & 7;
+    (x << 5) | (x << 2) | (x >> 1)
+}
+
+/// Expand a 2-bit color component to 8 bits (MAME `pal2bit`).
+#[inline]
+fn pal2bit(x: u8) -> u8 {
+    let x = x & 3;
+    (x << 6) | (x << 4) | (x << 2) | x
 }
 
 // ---------------------------------------------------------------------------
@@ -106,8 +166,16 @@ pub struct BtimeBoard {
     videoram: [u8; 0x0400],
     colorram: [u8; 0x0400],
     palette_ram: [u8; 16],
-    /// RGB expansion of `palette_ram` (rebuilt on palette writes in `.3`).
+    /// RGB expansion of `palette_ram` (rebuilt on every palette write and after
+    /// load_state; not itself part of the save state).
     palette_rgb: [(u8, u8, u8); 16],
+
+    // Decoded graphics (derived from ROM at load; not saved). Consumed by the
+    // renderer in `.4`.
+    chars: GfxCache,      // 8×8×3, 1024 tiles (gfx1)
+    sprites: GfxCache,    // 16×16×3, 256 tiles (gfx1)
+    bg_tiles: GfxCache,   // 16×16×3, 64 tiles (gfx2)
+    bg_map: [u8; 0x0800], // background tilemap selector ROM
 
     // DECO CPU-7 decryption state: any main-CPU write arms decryption of the
     // next opcode fetch (consumed in `bus_read`).
@@ -155,7 +223,7 @@ impl BtimeBoard {
             AccessKind::ReadOnly,
         );
 
-        Self {
+        let mut board = Self {
             cpu: M6502::new(),
             main_map,
             ram: [0; 0x0800],
@@ -163,6 +231,10 @@ impl BtimeBoard {
             colorram: [0; 0x0400],
             palette_ram: [0; 16],
             palette_rgb: [(0, 0, 0); 16],
+            chars: GfxCache::new(NUM_CHARS, 8, 8),
+            sprites: GfxCache::new(NUM_SPRITES, 16, 16),
+            bg_tiles: GfxCache::new(NUM_BG_TILES, 16, 16),
+            bg_map: [0; 0x0800],
             main_had_written: false,
             main_irq: false,
             flip_screen: false,
@@ -180,7 +252,9 @@ impl BtimeBoard {
             dsw2: 0x00,
             config,
             clock: 0,
-        }
+        };
+        board.rebuild_palette();
+        board
     }
 
     /// Machine id (identity comes from the per-game [`BtimeConfig`]).
@@ -192,6 +266,55 @@ impl BtimeBoard {
     /// ROMs occupy 0xC000-0xFFFF, so `data` is 0x5000 bytes with a 0x1000 gap).
     pub fn load_main_rom(&mut self, data: &[u8]) {
         self.main_map.load_region(Region::Main, data);
+    }
+
+    /// Decode the gfx1 region into the char (8×8) and sprite (16×16) caches.
+    pub fn load_gfx1(&mut self, gfx1: &[u8]) {
+        self.chars = decode_gfx(gfx1, 0, NUM_CHARS, &CHAR_LAYOUT);
+        self.sprites = decode_gfx(gfx1, 0, NUM_SPRITES, &SPRITE_LAYOUT);
+    }
+
+    /// Decode the gfx2 region into the background-tile cache (16×16).
+    pub fn load_gfx2(&mut self, gfx2: &[u8]) {
+        self.bg_tiles = decode_gfx(gfx2, 0, NUM_BG_TILES, &BG_LAYOUT);
+    }
+
+    /// Copy the background tilemap selector ROM (bg_map).
+    pub fn load_bg_map(&mut self, data: &[u8]) {
+        let n = data.len().min(self.bg_map.len());
+        self.bg_map[..n].copy_from_slice(&data[..n]);
+    }
+
+    // --- Decoded-graphics / palette accessors (used by the `.4` renderer) ---
+
+    pub fn chars(&self) -> &GfxCache {
+        &self.chars
+    }
+    pub fn sprites(&self) -> &GfxCache {
+        &self.sprites
+    }
+    pub fn bg_tiles(&self) -> &GfxCache {
+        &self.bg_tiles
+    }
+    pub fn bg_map(&self) -> &[u8] {
+        &self.bg_map
+    }
+
+    /// Recompute one palette entry from `palette_ram` using the DECO
+    /// `BGR_233_inverted` decode (invert, then R=bits0-2, G=bits3-5, B=bits6-7).
+    fn update_palette_entry(&mut self, i: usize) {
+        let v = !self.palette_ram[i & 0x0F];
+        let r = pal3bit(v & 7);
+        let g = pal3bit((v >> 3) & 7);
+        let b = pal2bit((v >> 6) & 3);
+        self.palette_rgb[i & 0x0F] = (r, g, b);
+    }
+
+    /// Recompute all 16 palette entries (after construction / load_state).
+    fn rebuild_palette(&mut self) {
+        for i in 0..16 {
+            self.update_palette_entry(i);
+        }
     }
 
     // --- Core tick ---
@@ -283,7 +406,10 @@ impl BtimeBoard {
         let a = addr as usize;
         match addr {
             0x0000..=0x07FF => self.ram[a & 0x07FF] = data,
-            0x0C00..=0x0C0F => self.palette_ram[a & 0x0F] = data,
+            0x0C00..=0x0C0F => {
+                self.palette_ram[a & 0x0F] = data;
+                self.update_palette_entry(a & 0x0F);
+            }
             0x1000..=0x13FF => self.videoram[a & 0x03FF] = data,
             0x1400..=0x17FF => self.colorram[a & 0x03FF] = data,
             0x1800..=0x1BFF => self.videoram[Self::swap(a & 0x03FF)] = data,
@@ -347,6 +473,8 @@ impl Saveable for BtimeBoard {
         self.dsw1 = r.read_u8()?;
         self.dsw2 = r.read_u8()?;
         self.clock = r.read_u64_le()?;
+        // palette_rgb is derived from palette_ram, not saved — rebuild it.
+        self.rebuild_palette();
         Ok(())
     }
 }
@@ -487,5 +615,113 @@ mod tests {
         b.load_main_rom(&rom);
         // main_had_written stays false: a matching address is left untouched.
         assert_eq!(b.bus_read(BusMaster::Cpu(0), 0xC104), 0x84);
+    }
+
+    // --- Palette (BGR_233_inverted) ---
+
+    #[test]
+    fn pal_bit_expanders() {
+        assert_eq!(pal3bit(0), 0x00);
+        assert_eq!(pal3bit(7), 0xFF);
+        assert_eq!(pal2bit(0), 0x00);
+        assert_eq!(pal2bit(3), 0xFF);
+    }
+
+    #[test]
+    fn palette_zero_ram_is_white_after_invert() {
+        // palette_ram = 0x00 -> inverted 0xFF -> full R/G/B.
+        let b = board();
+        assert_eq!(b.palette_rgb[0], (0xFF, 0xFF, 0xFF));
+    }
+
+    #[test]
+    fn palette_write_decodes_bgr233_inverted() {
+        let mut b = board();
+        // 0xFF -> inverted 0x00 -> black.
+        b.bus_write(BusMaster::Cpu(0), 0x0C00, 0xFF);
+        assert_eq!(b.palette_rgb[0], (0, 0, 0));
+
+        // 0xF8 -> inverted 0x07 -> R=7 only -> pure red.
+        b.bus_write(BusMaster::Cpu(0), 0x0C01, 0xF8);
+        assert_eq!(b.palette_rgb[1], (0xFF, 0, 0));
+
+        // 0xC7 -> inverted 0x38 -> G=7 only -> pure green (bits 3-5).
+        b.bus_write(BusMaster::Cpu(0), 0x0C02, 0xC7);
+        assert_eq!(b.palette_rgb[2], (0, 0xFF, 0));
+
+        // 0x3F -> inverted 0xC0 -> B=3 only -> pure blue (bits 6-7).
+        b.bus_write(BusMaster::Cpu(0), 0x0C03, 0x3F);
+        assert_eq!(b.palette_rgb[3], (0, 0, 0xFF));
+    }
+
+    // --- GFX decode ---
+
+    #[test]
+    fn gfx_cache_dimensions() {
+        let b = board();
+        assert_eq!((b.chars().count(), b.chars().width()), (NUM_CHARS, 8));
+        assert_eq!(
+            (b.sprites().count(), b.sprites().width()),
+            (NUM_SPRITES, 16)
+        );
+        assert_eq!(
+            (b.bg_tiles().count(), b.bg_tiles().height()),
+            (NUM_BG_TILES, 16)
+        );
+        assert_eq!(b.bg_map().len(), 0x0800);
+    }
+
+    #[test]
+    fn char_decode_combines_three_planes() {
+        let mut b = board();
+        // gfx1 region: plane thirds at 0 / 0x2000 / 0x4000. Set pixel (0,0) of
+        // char 0 in planes 0 and 1 (bit 0 and bit 1), leaving plane 2 clear.
+        let mut gfx1 = vec![0u8; 0x6000];
+        gfx1[0x0000] = 0x80; // plane 0 (LSB), row 0, leftmost pixel
+        gfx1[0x2000] = 0x80; // plane 1, same pixel
+        gfx1[0x4000] = 0x00; // plane 2 clear
+        b.load_gfx1(&gfx1);
+        assert_eq!(b.chars().pixel(0, 0, 0), 0b011);
+        assert_eq!(b.chars().pixel(0, 1, 0), 0); // neighbor untouched
+    }
+
+    #[test]
+    fn sprite_decode_uses_split_row_halves() {
+        let mut b = board();
+        // Sprite x offsets are [128..135, 0..7]: column 0 comes from bit offset
+        // 128 (byte 16), column 8 from bit offset 0 (byte 0).
+        let mut gfx1 = vec![0u8; 0x6000];
+        gfx1[16] = 0x80; // plane 0, sprite 0, row 0, column 0 (x offset 128)
+        gfx1[0] = 0x80; // plane 0, sprite 0, row 0, column 8 (x offset 0)
+        b.load_gfx1(&gfx1);
+        assert_eq!(b.sprites().pixel(0, 0, 0), 0b001);
+        assert_eq!(b.sprites().pixel(0, 8, 0), 0b001);
+        assert_eq!(b.sprites().pixel(0, 1, 0), 0);
+    }
+
+    #[test]
+    fn bg_tile_decode_uses_smaller_plane_thirds() {
+        let mut b = board();
+        // gfx2 region (0x1800): plane thirds at 0 / 0x0800 / 0x1000.
+        let mut gfx2 = vec![0u8; 0x1800];
+        gfx2[0x0000] = 0x80; // plane 0
+        gfx2[0x1000] = 0x80; // plane 2 (MSB)
+        b.load_gfx2(&gfx2);
+        assert_eq!(b.bg_tiles().pixel(0, 8, 0), 0b101); // x offset 0 -> column 8
+    }
+
+    #[test]
+    fn palette_survives_save_load() {
+        let mut b = board();
+        b.bus_write(BusMaster::Cpu(0), 0x0C05, 0xF8); // red
+        let mut w = StateWriter::new();
+        b.save_state(&mut w);
+        let bytes = w.into_vec();
+
+        let mut b2 = board();
+        let mut r = StateReader::new(&bytes);
+        b2.load_state(&mut r).unwrap();
+        assert_eq!(b2.palette_ram[5], 0xF8);
+        assert_eq!(b2.palette_rgb[5], (0xFF, 0, 0));
     }
 }
