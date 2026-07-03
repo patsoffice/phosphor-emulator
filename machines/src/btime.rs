@@ -1,7 +1,7 @@
-//! Data East `btime.cpp` board (shared hardware).
+//! Data East btime board (shared hardware).
 //!
 //! `BtimeBoard` models the hardware common to every game on Data East's
-//! `btime.cpp` family (Burgertime, Bump'n'Jump, Lock'n'Chase, Zoar,
+//! btime family (Burgertime, Bump'n'Jump, Lock'n'Chase, Zoar,
 //! Disco No.1, …). Per-game wrappers (see `burgertime.rs`) own a `board`
 //! field plus a [`BtimeConfig`] describing the variation points and forward
 //! the `MachineCore`/capability traits to the board.
@@ -12,9 +12,9 @@
 //! epic §10); the sound-latch write is stored but otherwise inert.
 //!
 //! Pass 1 progress: the memory map, DECO CPU-7 opcode decryption, X/Y-swap
-//! sprite-RAM mirror, GFX decode, and the `BGR_233_inverted` palette are
-//! implemented (`.1`-`.3`). The full char/sprite/background renderer with
-//! ROT270 lands in `.4`.
+//! sprite-RAM mirror, GFX decode, the `BGR_233_inverted` palette, and the
+//! char/sprite/background renderer (ROT270) are implemented (`.1`-`.4`).
+//! Run-frame timing (per-scanline VBLANK, coin-IRQ hold) lands in `.6`.
 
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
@@ -22,6 +22,7 @@ use phosphor_core::core::{AccessKind, AddressSpace16};
 use phosphor_core::core::{Bus, BusMaster, TimingConfig};
 use phosphor_core::cpu::m6502::M6502;
 use phosphor_core::gfx::decode::{GfxCache, GfxLayout, decode_gfx};
+use phosphor_core::gfx::rotate_270_indexed;
 use phosphor_macros::{BusDebug, MemoryRegion};
 
 #[repr(u8)]
@@ -32,7 +33,7 @@ enum Region {
     Main = 1,
 }
 
-/// DECO CPU-7 opcode deobfuscation (decocpu7.cpp:33 `bitswap<8>(v,6,5,3,4,2,7,1,0)`).
+/// DECO CPU-7 opcode deobfuscation: bit-permute the fetched byte.
 ///
 /// The moving bits form one 5-cycle (2→3→5→6→7→2); bits 0/1/4 pass through.
 /// Applied to an opcode fetch that (a) follows a main-CPU write and (b) sits at
@@ -50,12 +51,12 @@ fn deco_cpu7_decrypt(v: u8) -> u8 {
 }
 
 // ---------------------------------------------------------------------------
-// GFX layouts (btime.cpp:2099-2135). MAME lists planes MSB-first; phosphor's
-// GfxLayout is LSB-first (plane_offsets[0] -> pixel bit 0), so the three plane
-// offsets are reversed relative to MAME's gfx_8x8x3_planar / tile16layout.
+// GFX layouts. The 3bpp planar ROM orders its planes so that plane 0 is the
+// most-significant pixel bit; phosphor's GfxLayout is LSB-first
+// (plane_offsets[0] -> pixel bit 0), so the three plane offsets are reversed.
 // ---------------------------------------------------------------------------
 
-/// Characters: gfx1, 8×8, 3bpp planar, 1024 tiles (`gfx_8x8x3_planar`).
+/// Characters: gfx1, 8×8, 3bpp planar, 1024 tiles.
 const CHAR_LAYOUT: GfxLayout<'static> = GfxLayout {
     plane_offsets: &[0, 0x2000 * 8, 0x4000 * 8],
     x_offsets: &[0, 1, 2, 3, 4, 5, 6, 7],
@@ -63,8 +64,8 @@ const CHAR_LAYOUT: GfxLayout<'static> = GfxLayout {
     char_increment: 8 * 8,
 };
 
-/// Sprites: gfx1, 16×16, 3bpp planar, 256 tiles (`tile16layout`). The two 8-pixel
-/// halves of each row are stored 16 bytes apart (x offsets 128..135 then 0..7).
+/// Sprites: gfx1, 16×16, 3bpp planar, 256 tiles. The two 8-pixel halves of each
+/// row are stored 16 bytes apart (x offsets 128..135 then 0..7).
 const SPRITE_LAYOUT: GfxLayout<'static> = GfxLayout {
     plane_offsets: &[0, 0x2000 * 8, 0x4000 * 8],
     x_offsets: &[
@@ -76,8 +77,8 @@ const SPRITE_LAYOUT: GfxLayout<'static> = GfxLayout {
     char_increment: 32 * 8,
 };
 
-/// Background tiles: gfx2 (0x1800), 16×16, 3bpp planar, 64 tiles (`tile16layout`
-/// over the smaller region, so the plane thirds are 0/0x0800/0x1000).
+/// Background tiles: gfx2 (0x1800), 16×16, 3bpp planar, 64 tiles (same layout as
+/// the sprites but over the smaller region, so the plane thirds are 0/0x800/0x1000).
 const BG_LAYOUT: GfxLayout<'static> = GfxLayout {
     plane_offsets: &[0, 0x0800 * 8, 0x1000 * 8],
     x_offsets: &[
@@ -93,14 +94,23 @@ const NUM_CHARS: usize = 1024;
 const NUM_SPRITES: usize = 256;
 const NUM_BG_TILES: usize = 64;
 
-/// Expand a 3-bit color component to 8 bits (MAME `pal3bit`).
+// Video draws into a native 256×256 palette-index buffer; the visible window is
+// the [8,248) square (horizontal and vertical blank end/start = 8/248), cropped
+// to 240×240 and rotated ROT270 for display. Background tiles use palette entries
+// 8..15 (color base 8); chars/sprites use 0..7.
+const NATIVE_DIM: usize = 256;
+const CROP_LO: usize = 8;
+const DISPLAY_DIM: usize = 240;
+const BG_PALETTE_BASE: usize = 8;
+
+/// Expand a 3-bit color component to 8 bits (bit-replicated).
 #[inline]
 fn pal3bit(x: u8) -> u8 {
     let x = x & 7;
     (x << 5) | (x << 2) | (x >> 1)
 }
 
-/// Expand a 2-bit color component to 8 bits (MAME `pal2bit`).
+/// Expand a 2-bit color component to 8 bits (bit-replicated).
 #[inline]
 fn pal2bit(x: u8) -> u8 {
     let x = x & 3;
@@ -111,7 +121,7 @@ fn pal2bit(x: u8) -> u8 {
 // Timing
 // ---------------------------------------------------------------------------
 // Main CPU: 12 MHz / 2 / 2 / 2 = 1.5 MHz.
-// Screen (btime.cpp `set_raw`): pixel clock 6 MHz, HTOTAL 384, VTOTAL 272,
+// Screen: pixel clock 6 MHz, HTOTAL 384, VTOTAL 272,
 // visible 240x240, orientation ROT270. Frame rate: 6e6 / (384 * 272) ≈ 57.44 Hz.
 // CPU cycles per scanline: 1_500_000 / (57.44 * 272) ≈ 96.
 pub const TIMING: TimingConfig = TimingConfig {
@@ -126,7 +136,7 @@ pub const TIMING: TimingConfig = TimingConfig {
 // Per-game configuration
 // ---------------------------------------------------------------------------
 
-/// Per-game configuration for the shared `btime.cpp` board.
+/// Per-game configuration for the shared btime board.
 ///
 /// Only Burgertime's variant is implemented in this pass. Sibling games differ
 /// in their opcode encryption (DECO CPU-7 vs. CPU-6/222 vs. none), palette
@@ -141,7 +151,7 @@ pub struct BtimeConfig {
 // BtimeBoard
 // ---------------------------------------------------------------------------
 
-/// Shared Data East `btime.cpp` hardware (Burgertime configuration in pass 1).
+/// Shared Data East btime hardware (Burgertime configuration in pass 1).
 ///
 /// Memory map (main CPU):
 ///   0x0000-0x07FF  Work RAM
@@ -203,7 +213,7 @@ pub struct BtimeBoard {
 }
 
 impl BtimeBoard {
-    /// X/Y address swap over the 32×32 video/color window (btime.cpp:534).
+    /// X/Y address swap over the 32×32 video/color window.
     /// An involution: `off = 32*y + x  ->  32*x + y`. Backs the 0x1800/0x1C00
     /// sprite-RAM mirror (the game reaches column-0 sprite RAM through it).
     #[inline]
@@ -350,14 +360,172 @@ impl BtimeBoard {
 
     // --- Capability-trait helpers (called by the game wrapper) ---
 
-    /// Render the visible frame. Pass 1 clears to the backdrop color; the full
-    /// char/sprite/background renderer with ROT270 lands in `.4`.
+    /// Render the visible frame: draw the native 256×256 layers into a
+    /// palette-index buffer, crop the visible [8,248)² window, and rotate
+    /// ROT270 into the RGB `buffer` (240×240).
     pub fn render_frame(&self, buffer: &mut [u8]) {
-        let (r, g, b) = self.palette_rgb[0];
-        for px in buffer.chunks_exact_mut(3) {
-            px[0] = r;
-            px[1] = g;
-            px[2] = b;
+        let mut native = vec![0u8; NATIVE_DIM * NATIVE_DIM];
+
+        if self.bnj_scroll0 & 0x10 != 0 {
+            self.draw_background(&mut native);
+            self.draw_chars(&mut native, true);
+        } else {
+            self.draw_chars(&mut native, false);
+        }
+        self.draw_sprites(&mut native);
+
+        // Crop the visible window to a 240×240 index buffer.
+        let mut cropped = vec![0u8; DISPLAY_DIM * DISPLAY_DIM];
+        for y in 0..DISPLAY_DIM {
+            let src = (y + CROP_LO) * NATIVE_DIM + CROP_LO;
+            cropped[y * DISPLAY_DIM..(y + 1) * DISPLAY_DIM]
+                .copy_from_slice(&native[src..src + DISPLAY_DIM]);
+        }
+
+        rotate_270_indexed(
+            &cropped,
+            buffer,
+            DISPLAY_DIM,
+            DISPLAY_DIM,
+            &self.palette_rgb,
+        );
+    }
+
+    /// Blit one tile from `cache` into the native index buffer at (`sx`,`sy`),
+    /// clipping to the 256×256 native area. `transparent` skips pen 0; otherwise
+    /// every pixel (including 0) is written. Final index is `pal_base + pixel`.
+    #[allow(clippy::too_many_arguments)]
+    fn blit_tile(
+        &self,
+        native: &mut [u8],
+        cache: &GfxCache,
+        code: usize,
+        sx: i32,
+        sy: i32,
+        flipx: bool,
+        flipy: bool,
+        pal_base: usize,
+        transparent: bool,
+    ) {
+        if code >= cache.count() {
+            return;
+        }
+        let w = cache.width();
+        let h = cache.height();
+        for ty in 0..h {
+            let dy = sy + ty as i32;
+            if !(0..NATIVE_DIM as i32).contains(&dy) {
+                continue;
+            }
+            let py = if flipy { h - 1 - ty } else { ty };
+            for tx in 0..w {
+                let dx = sx + tx as i32;
+                if !(0..NATIVE_DIM as i32).contains(&dx) {
+                    continue;
+                }
+                let px = if flipx { w - 1 - tx } else { tx };
+                let pixel = cache.pixel(code, px, py);
+                if transparent && pixel == 0 {
+                    continue;
+                }
+                native[dy as usize * NATIVE_DIM + dx as usize] = (pal_base + pixel as usize) as u8;
+            }
+        }
+    }
+
+    /// Chars: 32×32 grid, `code = videoram[off] + 256*(colorram[off] & 3)`,
+    /// transposed `x = 31 - off/32`, `y = off % 32`.
+    fn draw_chars(&self, native: &mut [u8], transparent: bool) {
+        for off in 0..0x400 {
+            let mut x = 31 - (off / 32);
+            let mut y = off % 32;
+            let code = self.videoram[off] as usize + 256 * (self.colorram[off] as usize & 3);
+            if self.flip_screen {
+                x = 31 - x;
+                y = 31 - y;
+            }
+            self.blit_tile(
+                native,
+                &self.chars,
+                code,
+                8 * x as i32,
+                8 * y as i32,
+                self.flip_screen,
+                self.flip_screen,
+                0,
+                transparent,
+            );
+        }
+    }
+
+    /// Sprites: 8 hardware sprites, attributes interleaved 0x20 apart in video
+    /// RAM; drawn twice for ±256 wrap.
+    fn draw_sprites(&self, native: &mut [u8]) {
+        for i in 0..8 {
+            let off = i * 0x80;
+            if self.videoram[off] & 0x01 == 0 {
+                continue;
+            }
+            let mut x = 240 - self.videoram[off + 0x60] as i32;
+            let mut y = 240 - self.videoram[off + 0x40] as i32;
+            let mut flipx = self.videoram[off] & 0x04 != 0;
+            let mut flipy = self.videoram[off] & 0x02 != 0;
+            if self.flip_screen {
+                x = 240 - x;
+                y = 240 - y; // sprite_y_adjust_flip_screen = 0
+                flipx = !flipx;
+                flipy = !flipy;
+            }
+            y -= 1; // sprite_y_adjust = 1
+            let code = self.videoram[off + 0x20] as usize;
+            self.blit_tile(native, &self.sprites, code, x, y, flipx, flipy, 0, true);
+            // Wrap-around copy.
+            let y2 = y + if self.flip_screen { -256 } else { 256 };
+            self.blit_tile(native, &self.sprites, code, x, y2, flipx, flipy, 0, true);
+        }
+    }
+
+    /// Background: up to 4 columns of 16×16 tiles selected from `bg_map`,
+    /// horizontally scrolled by `(bnj_scroll0 & 3) << 8`. The four column tiles
+    /// cycle `start..start+3`, offset by `bnj_scroll0 & 0x04`.
+    fn draw_background(&self, native: &mut [u8]) {
+        let mut start = if self.flip_screen { 0u8 } else { 1u8 };
+        let mut tmap = [0u8; 4];
+        for slot in tmap.iter_mut() {
+            *slot = start | (self.bnj_scroll0 & 0x04);
+            start = (start + 1) & 0x03;
+        }
+
+        // The second scroll register is never written on this game, so it is 0.
+        let mut scroll: i32 = -(((self.bnj_scroll0 & 0x03) as i32) << 8);
+        for i in 0..5 {
+            if scroll > 256 {
+                break;
+            }
+            if scroll >= -256 {
+                let tileoffset = tmap[i & 3] as usize * 0x100;
+                for off in 0..0x100usize {
+                    let mut x = 240 - (16 * (off / 16) as i32 + scroll) - 1;
+                    let mut y = 16 * (off % 16) as i32;
+                    if self.flip_screen {
+                        x = 240 - x;
+                        y = 240 - y;
+                    }
+                    let code = self.bg_map[tileoffset + off] as usize;
+                    self.blit_tile(
+                        native,
+                        &self.bg_tiles,
+                        code,
+                        x,
+                        y,
+                        self.flip_screen,
+                        self.flip_screen,
+                        BG_PALETTE_BASE,
+                        false,
+                    );
+                }
+            }
+            scroll += 256;
         }
     }
 
@@ -384,9 +552,8 @@ impl BtimeBoard {
 
         // DECO CPU-7: on an opcode fetch (is_sync) that follows any main-CPU
         // write, consume the "had written" flag and deobfuscate the fetched
-        // byte when (addr & 0x0104) == 0x0104 (decocpu7.cpp read_sync). The flag
-        // clears on every sync fetch regardless of address; only matching
-        // addresses are decrypted.
+        // byte when (addr & 0x0104) == 0x0104. The flag clears on every sync
+        // fetch regardless of address; only matching addresses are decrypted.
         if self.cpu.is_sync() && self.main_had_written {
             self.main_had_written = false;
             if (addr & 0x0104) == 0x0104 {
@@ -527,7 +694,7 @@ mod tests {
         assert!(b.bus_check_interrupts(BusMaster::Cpu(0)).irq);
     }
 
-    // --- X/Y-swap sprite-RAM mirror (btime.cpp:534) ---
+    // --- X/Y-swap sprite-RAM mirror ---
 
     #[test]
     fn xy_swap_is_an_involution() {
@@ -558,15 +725,15 @@ mod tests {
         assert_eq!(b.bus_read(BusMaster::Cpu(0), mirror), 0x11);
     }
 
-    // --- DECO CPU-7 opcode decryption (decocpu7.cpp) ---
+    // --- DECO CPU-7 opcode decryption ---
     //
     // A fresh M6502 sits in the Fetch state, so `is_sync()` is true and every
     // test `bus_read` behaves as an opcode fetch.
 
     #[test]
     fn deco_decrypt_pure_fn_known_vectors() {
-        // bitswap(v,6,5,3,4,2,7,1,0): out7<-in6, out6<-in5, out5<-in3,
-        // out4<-in4, out3<-in2, out2<-in7, out1<-in1, out0<-in0.
+        // Permutation: out7<-in6, out6<-in5, out5<-in3, out4<-in4,
+        // out3<-in2, out2<-in7, out1<-in1, out0<-in0.
         assert_eq!(deco_cpu7_decrypt(0x84), 0x0C); // in7|in2 -> out2|out3
         assert_eq!(deco_cpu7_decrypt(0x00), 0x00);
         assert_eq!(deco_cpu7_decrypt(0xFF), 0xFF);
@@ -723,5 +890,74 @@ mod tests {
         b2.load_state(&mut r).unwrap();
         assert_eq!(b2.palette_ram[5], 0xF8);
         assert_eq!(b2.palette_rgb[5], (0xFF, 0, 0));
+    }
+
+    // --- Renderer (layers + ROT270) ---
+
+    fn pixel(buffer: &[u8], row: usize, col: usize) -> (u8, u8, u8) {
+        let i = (row * DISPLAY_DIM + col) * 3;
+        (buffer[i], buffer[i + 1], buffer[i + 2])
+    }
+
+    #[test]
+    fn render_default_frame_is_backdrop_white() {
+        // No gfx loaded: every char is code 0 / all-pen-0, drawn opaque (bg
+        // disabled) -> palette entry 0, which decodes to white (ram 0 inverted).
+        let b = board();
+        let mut buffer = vec![0u8; DISPLAY_DIM * DISPLAY_DIM * 3];
+        b.render_frame(&mut buffer);
+        assert!(
+            buffer.iter().all(|&c| c == 0xFF),
+            "frame should be all white"
+        );
+    }
+
+    #[test]
+    fn render_char_lands_at_rot270_position() {
+        let mut b = board();
+        // char 1 = all pen 1 (plane 0 set for its 8 bytes at region offset 8).
+        let mut gfx1 = vec![0u8; 0x6000];
+        for byte in gfx1.iter_mut().skip(8).take(8) {
+            *byte = 0xFF;
+        }
+        b.load_gfx1(&gfx1);
+        // palette entry 1 -> red.
+        b.bus_write(BusMaster::Cpu(0), 0x0C01, 0xF8);
+
+        // Place char 1 at video RAM offset 495 (char cell x=16, y=15).
+        b.videoram[495] = 1;
+
+        let mut buffer = vec![0u8; DISPLAY_DIM * DISPLAY_DIM * 3];
+        b.render_frame(&mut buffer);
+
+        // native (128..135, 120..127) -> crop (120..127, 112..119) -> ROT270
+        // out (row 239-cx, col cy) = rows 112..119, cols 112..119.
+        assert_eq!(pixel(&buffer, 115, 115), (0xFF, 0, 0), "char center is red");
+        assert_eq!(
+            pixel(&buffer, 10, 10),
+            (0xFF, 0xFF, 0xFF),
+            "elsewhere white"
+        );
+    }
+
+    #[test]
+    fn render_background_uses_palette_base_8() {
+        let mut b = board();
+        // Every bg-tile pixel gets plane-0 bit set -> pen 1 -> palette index 9.
+        let mut gfx2 = vec![0u8; 0x1800];
+        for byte in gfx2.iter_mut().take(0x0800) {
+            *byte = 0xFF;
+        }
+        b.load_gfx2(&gfx2);
+        // Enable the background layer; palette entry 9 -> blue.
+        b.bnj_scroll0 = 0x10;
+        b.bus_write(BusMaster::Cpu(0), 0x0C09, 0x3F);
+
+        let mut buffer = vec![0u8; DISPLAY_DIM * DISPLAY_DIM * 3];
+        b.render_frame(&mut buffer);
+
+        // Chars are transparent over the backdrop, so the blue bg shows through.
+        let has_blue = buffer.chunks_exact(3).any(|p| p == [0, 0, 0xFF]);
+        assert!(has_blue, "background (palette base 8) should be visible");
     }
 }

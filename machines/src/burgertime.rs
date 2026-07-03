@@ -1,4 +1,4 @@
-//! Burgertime (Data East, 1982) — the first game on the `btime.cpp` board.
+//! Burgertime (Data East, 1982) — the first game on the btime board.
 //!
 //! Thin wrapper around the shared [`BtimeBoard`] (see `btime.rs`) following the
 //! Board Wrapper Pattern (`joust.rs` / `gridlee.rs`). This is the initial
@@ -26,7 +26,7 @@ use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
 use crate::{set_bit_active_high, set_bit_active_low};
 
 // ---------------------------------------------------------------------------
-// ROM definitions (MAME driver `btime`, btime.cpp:2546-2570)
+// ROM definitions
 // ---------------------------------------------------------------------------
 
 /// Main-CPU program ROM. Region base is 0xB000; the physical ROMs occupy
@@ -140,8 +140,8 @@ pub static BURGERTIME_BG_MAP_ROM: RomRegion = RomRegion {
     }],
 };
 
-/// Sound-CPU program ROM (audiocpu at 0xE000). Defined now; wired with the
-/// sound M6502 + 2× AY-3-8910 in the audio follow-up (`.8`).
+/// Sound-CPU program ROM (mapped at 0xE000 on the sound bus). Defined now;
+/// wired with the sound M6502 + 2× AY-3-8910 in the audio follow-up (`.8`).
 pub static BURGERTIME_SOUND_ROM: RomRegion = RomRegion {
     size: 0x1000,
     entries: &[RomEntry {
@@ -300,7 +300,7 @@ const BURGERTIME_CONTROLS: &[InputControl] = &[
 // BurgertimeSystem
 // ---------------------------------------------------------------------------
 
-/// Data East `btime.cpp` board configured for Burgertime (1982).
+/// Data East btime board configured for Burgertime (1982).
 #[derive(Saveable)]
 pub struct BurgertimeSystem {
     pub board: BtimeBoard,
