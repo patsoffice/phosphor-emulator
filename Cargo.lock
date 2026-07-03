@@ -783,6 +783,7 @@ dependencies = [
  "clap",
  "phosphor-core",
  "phosphor-machines",
+ "png",
  "zip",
 ]
 

@@ -4,11 +4,15 @@
 //! without spinning up the SDL/egui debug UI. Useful for inspecting sound/CPU
 //! ROMs (e.g. the Mario Bros 8049 sound program) from the terminal.
 //!
-//! Three input modes:
+//! Disassembly input modes:
 //! - `raw`     — a raw, already-extracted ROM file + an explicit `--cpu`.
 //! - `rom`     — a `.zip`/directory ROM set + a member filename + `--cpu`.
 //! - `machine` — a machine name + region; CPU and origin are resolved from the
 //!   [`phosphor_machines::disasm_registry`].
+//!
+//! Plus a graphics mode:
+//! - `gfxview` — a machine name + region; decodes a tile/sprite GFX ROM to a
+//!   PNG sheet, resolved from the [`phosphor_machines::gfx_registry`].
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -17,9 +21,14 @@ use std::process::ExitCode;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use phosphor_core::cpu::Disassemble;
 use phosphor_core::cpu::{I8035, M6502, M6800, M6809, M68000, Mb88xx, Z80};
+use phosphor_core::gfx::decode::decode_gfx;
 use phosphor_machines::disasm_registry::{self, DisasmCpu};
+use phosphor_machines::gfx_registry;
 use phosphor_machines::registry;
 use phosphor_machines::rom_loader::{RomLoadError, RomSet};
+
+mod gfxsheet;
+use gfxsheet::SheetConfig;
 
 #[derive(Parser)]
 #[command(
@@ -71,6 +80,27 @@ enum Command {
         region: Option<String>,
         #[command(flatten)]
         range: RangeArgs,
+        /// ROM set: a `.zip` archive or a directory of loose ROM files
+        /// (not needed when listing regions).
+        path: Option<String>,
+    },
+    /// Decode a machine's graphics ROM region to a PNG tile/sprite sheet.
+    Gfxview {
+        /// Machine CLI name (e.g. `congobongo`).
+        #[arg(long)]
+        machine: String,
+        /// Region to decode (e.g. `sprites`). Omit to list available regions.
+        #[arg(long)]
+        region: Option<String>,
+        /// Elements per row in the output sheet.
+        #[arg(long, default_value_t = 16)]
+        cols: usize,
+        /// Integer nearest-neighbor upscale factor.
+        #[arg(long, default_value_t = 1)]
+        scale: usize,
+        /// Output PNG path (default: `<machine>_<region>.png`).
+        #[arg(short = 'o', long)]
+        out: Option<PathBuf>,
         /// ROM set: a `.zip` archive or a directory of loose ROM files
         /// (not needed when listing regions).
         path: Option<String>,
@@ -170,6 +200,21 @@ fn run_command(cmd: Command) -> Result<String, String> {
             range,
             path,
         } => run_machine(&machine, region.as_deref(), &range, path.as_deref()),
+        Command::Gfxview {
+            machine,
+            region,
+            cols,
+            scale,
+            out,
+            path,
+        } => run_gfxview(
+            &machine,
+            region.as_deref(),
+            cols,
+            scale,
+            out.as_deref(),
+            path.as_deref(),
+        ),
     }
 }
 
@@ -226,6 +271,102 @@ fn list_regions(machine: &str) -> String {
             r.org,
             r.size,
             r.size,
+        ));
+    }
+    out
+}
+
+/// Decode a machine's GFX region to a PNG sheet (or list regions with no `--region`).
+///
+/// Mirrors [`run_machine`]: resolve the region via [`gfx_registry`], reuse
+/// [`load_rom_set`] with the machine's registry ROM names, assemble the bytes,
+/// then decode + composite + write. The palette comes from the region's color
+/// PROM when it has one, else a grayscale ramp sized to the layout's bit depth.
+fn run_gfxview(
+    machine: &str,
+    region: Option<&str>,
+    cols: usize,
+    scale: usize,
+    out: Option<&Path>,
+    path: Option<&str>,
+) -> Result<String, String> {
+    // With no --region, list what's available (no ROM files required).
+    let Some(region) = region else {
+        return Ok(list_gfx_regions(machine));
+    };
+
+    let r = gfx_registry::find(machine, region).ok_or_else(|| {
+        let avail: Vec<&str> = gfx_registry::regions_for(machine)
+            .iter()
+            .map(|x| x.region)
+            .collect();
+        if avail.is_empty() {
+            format!("no gfx regions registered for machine '{machine}'")
+        } else {
+            format!(
+                "machine '{machine}' has no gfx region '{region}'; available: {}",
+                avail.join(", ")
+            )
+        }
+    })?;
+
+    let path = path.ok_or("a ROM path is required to decode a region")?;
+
+    // The machine registry knows the MAME ZIP names to look for in a rompath dir.
+    let rom_names: Vec<&str> = registry::find(machine)
+        .map(|e| e.rom_names.to_vec())
+        .unwrap_or_default();
+
+    let set = load_rom_set(path, &rom_names).map_err(|e| format!("loading ROM set {path}: {e}"))?;
+    let bytes = (r.load)(&set).map_err(|e| format!("assembling gfx region '{region}': {e}"))?;
+
+    let cache = decode_gfx(&bytes, 0, r.count as usize, r.layout);
+
+    // Palette from the color PROM where the region has one; otherwise a
+    // grayscale ramp with one level per bit-plane combination (2^planes).
+    let palette = match r.palette {
+        Some(build) => build(&set).map_err(|e| format!("building palette for '{region}': {e}"))?,
+        None => gfxsheet::grayscale_ramp(1 << r.layout.plane_offsets.len()),
+    };
+
+    let sheet = gfxsheet::render_sheet(&cache, &palette, &SheetConfig { cols, scale });
+
+    let out_path = out
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(format!("{machine}_{region}.png")));
+    gfxsheet::write_png(&out_path, &sheet.rgb, sheet.width, sheet.height)
+        .map_err(|e| format!("writing {}: {e}", out_path.display()))?;
+
+    Ok(format!(
+        "wrote {region} sheet: {} tiles ({}×{} each) -> {} ({}×{})\n",
+        r.count,
+        r.width,
+        r.height,
+        out_path.display(),
+        sheet.width,
+        sheet.height,
+    ))
+}
+
+/// Render the available gfx regions for `machine`, with dimensions and palette.
+fn list_gfx_regions(machine: &str) -> String {
+    let regions = gfx_registry::regions_for(machine);
+    if regions.is_empty() {
+        return format!("no gfx regions registered for machine '{machine}'\n");
+    }
+    let mut out = format!("gfx regions for '{machine}':\n");
+    for r in regions {
+        out.push_str(&format!(
+            "  {:<8} {:>3}×{:<3}  {:>4} tiles  {}\n",
+            r.region,
+            r.width,
+            r.height,
+            r.count,
+            if r.palette.is_some() {
+                "PROM palette"
+            } else {
+                "grayscale"
+            },
         ));
     }
     out
@@ -547,5 +688,20 @@ mod tests {
             listed.contains("main") && listed.contains("sound"),
             "{listed}"
         );
+    }
+
+    #[test]
+    fn gfxview_unknown_machine_lists_nothing() {
+        // No --region → listing path; unknown machine has no gfx regions.
+        let out = run_gfxview("does-not-exist", None, 16, 1, None, None).unwrap();
+        assert!(out.contains("no gfx regions registered"), "{out}");
+        assert_eq!(list_gfx_regions("does-not-exist"), out);
+    }
+
+    #[test]
+    fn gfxview_unknown_region_errors_helpfully() {
+        // Decoding an unregistered region fails before any ROM is required.
+        let err = run_gfxview("does-not-exist", Some("sprites"), 16, 1, None, None).unwrap_err();
+        assert!(err.contains("no gfx regions registered"), "{err}");
     }
 }
