@@ -11,11 +11,11 @@
 //! live here. The sound M6502 + 2× AY-3-8910 are deferred (see the Burgertime
 //! epic §10); the sound-latch write is stored but otherwise inert.
 //!
-//! Pass 1 progress: the memory map, DECO CPU-7 opcode decryption, X/Y-swap
+//! Pass 1 is complete: the memory map, DECO CPU-7 opcode decryption, X/Y-swap
 //! sprite-RAM mirror, GFX decode, the `BGR_233_inverted` palette, the
 //! char/sprite/background renderer (ROT270), inputs, DIP banks, the live VBLANK
-//! bit, and the coin IRQ are implemented (`.1`-`.5`). Frame-loop timing and
-//! frontend verification land in `.6`.
+//! bit, the coin IRQ, and the frame loop are all implemented — the game boots
+//! and is playable, silent.
 
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
@@ -108,6 +108,12 @@ const CROP_LO: usize = 8;
 const VISIBLE_DIM: usize = 240;
 const BG_PALETTE_BASE: usize = 8;
 
+/// Size in bytes of the display framebuffer (RGB24 at the presentation size).
+const fn display_bytes() -> usize {
+    let (w, h) = TIMING.display_size();
+    (w * h * 3) as usize
+}
+
 /// Expand a 3-bit color component to 8 bits (bit-replicated).
 #[inline]
 fn pal3bit(x: u8) -> u8 {
@@ -188,11 +194,15 @@ pub struct BtimeBoard {
     palette_rgb: [(u8, u8, u8); 16],
 
     // Decoded graphics (derived from ROM at load; not saved). Consumed by the
-    // renderer in `.4`.
+    // renderer.
     chars: GfxCache,      // 8×8×3, 1024 tiles (gfx1)
     sprites: GfxCache,    // 16×16×3, 256 tiles (gfx1)
     bg_tiles: GfxCache,   // 16×16×3, 64 tiles (gfx2)
     bg_map: [u8; 0x0800], // background tilemap selector ROM
+
+    // Display framebuffer (240×320 RGB), refreshed once per frame at the end of
+    // run_frame. Derived output, not part of the save state.
+    framebuffer: Vec<u8>,
 
     // DECO CPU-7 decryption state: any main-CPU write arms decryption of the
     // next opcode fetch (consumed in `bus_read`).
@@ -252,6 +262,7 @@ impl BtimeBoard {
             sprites: GfxCache::new(NUM_SPRITES, 16, 16),
             bg_tiles: GfxCache::new(NUM_BG_TILES, 16, 16),
             bg_map: [0; 0x0800],
+            framebuffer: vec![0u8; display_bytes()],
             main_had_written: false,
             main_irq: false,
             flip_screen: false,
@@ -271,6 +282,7 @@ impl BtimeBoard {
             clock: 0,
         };
         board.rebuild_palette();
+        board.render();
         board
     }
 
@@ -374,9 +386,10 @@ impl BtimeBoard {
 
     // --- Capability-trait helpers (called by the game wrapper) ---
 
-    /// Render into the display `buffer` (240×320 RGB): draw the visible 240×240
-    /// image, then stretch it vertically to the 3:4 presentation aspect.
-    pub fn render_frame(&self, buffer: &mut [u8]) {
+    /// Refresh the display framebuffer from current video state. Called once per
+    /// frame at the end of `run_frame`. Draws the visible 240×240 image, then
+    /// stretches it vertically to the 3:4 presentation aspect (240×320).
+    pub fn render(&mut self) {
         let mut visible = vec![0u8; VISIBLE_DIM * VISIBLE_DIM * 3];
         self.render_visible(&mut visible);
 
@@ -388,8 +401,13 @@ impl BtimeBoard {
             let sy = oy * VISIBLE_DIM / h;
             let src = sy * row_bytes;
             let dst = oy * row_bytes;
-            buffer[dst..dst + row_bytes].copy_from_slice(&visible[src..src + row_bytes]);
+            self.framebuffer[dst..dst + row_bytes].copy_from_slice(&visible[src..src + row_bytes]);
         }
+    }
+
+    /// Copy the latest framebuffer into the frontend's `buffer`.
+    pub fn render_frame(&self, buffer: &mut [u8]) {
+        buffer.copy_from_slice(&self.framebuffer);
     }
 
     /// Render the visible frame: draw the native 256×256 layers into a
@@ -679,8 +697,10 @@ impl Saveable for BtimeBoard {
         self.dsw1 = r.read_u8()?;
         self.dsw2 = r.read_u8()?;
         self.clock = r.read_u64_le()?;
-        // palette_rgb is derived from palette_ram, not saved — rebuild it.
+        // palette_rgb and the framebuffer are derived, not saved — rebuild them
+        // so a render before the next run_frame reflects the restored state.
         self.rebuild_palette();
+        self.render();
         Ok(())
     }
 }
@@ -1057,6 +1077,7 @@ mod tests {
 
         let mut vis = vec![0u8; VISIBLE_DIM * VISIBLE_DIM * 3];
         b.render_visible(&mut vis);
+        b.render(); // refresh the framebuffer from current state
         let mut disp = vec![0u8; w * h * 3];
         b.render_frame(&mut disp);
 

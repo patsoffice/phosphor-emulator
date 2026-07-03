@@ -397,13 +397,16 @@ crate::impl_board_delegation!(BurgertimeSystem, board, btime::TIMING, no_audio);
 
 impl MachineCore for BurgertimeSystem {
     fn run_frame(&mut self) {
-        // Timing detail (per-scanline VBLANK visibility, coin-IRQ hold) lands
-        // in `.6`; pass 1 just runs a frame's worth of main-CPU cycles.
+        // Run one frame's worth of main-CPU cycles. The live VBLANK bit (read at
+        // 0x4003) is derived from the clock each cycle, so the game's frame sync
+        // works without a periodic interrupt; the coin IRQ is edge-driven.
         bus_split!(self, bus => {
             for _ in 0..btime::TIMING.cycles_per_frame() {
                 self.board.tick(bus);
             }
         });
+        // Render the completed frame once, after the cycle loop.
+        self.board.render();
     }
 
     fn reset(&mut self) {
