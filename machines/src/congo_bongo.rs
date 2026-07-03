@@ -38,6 +38,7 @@ use phosphor_macros::{BusDebug, DebugTrace, MemoryRegion, Saveable};
 
 use crate::congo_sound::CongoSound;
 use crate::disasm_registry::{DisasmCpu, DisasmRegion};
+use crate::gfx_registry::GfxRegion;
 use crate::registry::MachineEntry;
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
 use crate::set_bit_active_high;
@@ -257,6 +258,116 @@ pub static CONGO_PALETTE_PROM: RomRegion = RomRegion {
     ],
 };
 
+// GFX bit-plane layouts, promoted to `'static` so both the runtime decode
+// (`decode_gfx_roms`) and the gfxview `GfxRegion`s borrow the same tables. All
+// three are MAME `*_planar` layouts with `plane_offsets` LSB-first.
+
+/// Foreground/text: 256 chars, 8×8 2bpp; planes split at the ROM midpoint 0x800.
+pub static CONGO_TX_GFX_LAYOUT: GfxLayout<'static> = GfxLayout {
+    plane_offsets: &[0, 0x0800 * 8],
+    x_offsets: &[0, 1, 2, 3, 4, 5, 6, 7],
+    y_offsets: &[0, 8, 16, 24, 32, 40, 48, 56],
+    char_increment: 8 * 8,
+};
+
+/// Background: 1024 chars, 8×8 3bpp; planes at thirds of the 0x6000 region.
+pub static CONGO_BG_GFX_LAYOUT: GfxLayout<'static> = GfxLayout {
+    plane_offsets: &[0, 0x2000 * 8, 2 * 0x2000 * 8],
+    x_offsets: &[0, 1, 2, 3, 4, 5, 6, 7],
+    y_offsets: &[0, 8, 16, 24, 32, 40, 48, 56],
+    char_increment: 8 * 8,
+};
+
+/// Sprites: 128 sprites, 32×32 3bpp; planes at thirds of the 0xC000 region. Each
+/// 8×8 sub-cell is 8 consecutive bytes, laid out left-to-right then top-to-bottom
+/// — `x_offsets[px] = (px/8)*64 + px%8`, `y_offsets[py] = (py/8)*256 + (py%8)*8`.
+pub static CONGO_SPR_GFX_LAYOUT: GfxLayout<'static> = GfxLayout {
+    plane_offsets: &[0, 0x4000 * 8, 2 * 0x4000 * 8],
+    x_offsets: &[
+        0, 1, 2, 3, 4, 5, 6, 7, // sub-cell col 0
+        64, 65, 66, 67, 68, 69, 70, 71, // sub-cell col 1
+        128, 129, 130, 131, 132, 133, 134, 135, // sub-cell col 2
+        192, 193, 194, 195, 196, 197, 198, 199, // sub-cell col 3
+    ],
+    y_offsets: &[
+        0, 8, 16, 24, 32, 40, 48, 56, // sub-cell row 0
+        256, 264, 272, 280, 288, 296, 304, 312, // sub-cell row 1
+        512, 520, 528, 536, 544, 552, 560, 568, // sub-cell row 2
+        768, 776, 784, 792, 800, 808, 816, 824, // sub-cell row 3
+    ],
+    char_increment: 128 * 8,
+};
+
+// gfxview GFX regions. Congo Bongo's scanline renderer is already wired and
+// validated, so the palette decode is settled: each region carries the real
+// mr019 PROM palette via `congo_gfx_palette` (shared with `build_palette`).
+inventory::submit! {
+    GfxRegion {
+        machine: "congobongo",
+        region: "fg",
+        count: 256,
+        width: 8,
+        height: 8,
+        layout: &CONGO_TX_GFX_LAYOUT,
+        load: |rs| CONGO_GFX_TX_ROM.load(rs),
+        palette: Some(congo_gfx_palette),
+    }
+}
+inventory::submit! {
+    GfxRegion {
+        machine: "congobongo",
+        region: "bg",
+        count: 1024,
+        width: 8,
+        height: 8,
+        layout: &CONGO_BG_GFX_LAYOUT,
+        load: |rs| CONGO_GFX_BG_ROM.load(rs),
+        palette: Some(congo_gfx_palette),
+    }
+}
+inventory::submit! {
+    GfxRegion {
+        machine: "congobongo",
+        region: "sprites",
+        count: 128,
+        width: 32,
+        height: 32,
+        layout: &CONGO_SPR_GFX_LAYOUT,
+        load: |rs| CONGO_GFX_SPR_ROM.load(rs),
+        palette: Some(congo_gfx_palette),
+    }
+}
+
+/// gfxview palette hook: load the mr019 color PROM and build the RGB palette
+/// with the same resistor-DAC math as the runtime path.
+fn congo_gfx_palette(rom_set: &RomSet) -> Result<Vec<(u8, u8, u8)>, RomLoadError> {
+    let prom = CONGO_PALETTE_PROM.load(rom_set)?;
+    Ok(congo_palette_rgb(&prom).to_vec())
+}
+
+/// Build the 512-entry RGB palette from the `mr019` color PROM.
+///
+/// 3-3-2 resistor DAC (per `zaxxon_palette` in `sega/zaxxon_v.cpp`): R = PROM
+/// bits 0-2 and G = bits 3-5 (1k/470/220 Ω), B = bits 6-7 (470/220 Ω), all with
+/// a 470 Ω pulldown. The PROM is 256 bytes mirrored into 512, so the upper half
+/// (selected by the CBS color-bank latch) duplicates the lower.
+///
+/// Shared by [`CongoBongoBoard::build_palette`] and [`congo_gfx_palette`] so the
+/// runtime renderer and the offline viewer never diverge.
+fn congo_palette_rgb(palette_prom: &[u8]) -> [(u8, u8, u8); 512] {
+    let rgweights = compute_resistor_weights(&[1000.0, 470.0, 220.0], Some(470.0));
+    let bweights = compute_resistor_weights(&[470.0, 220.0], Some(470.0));
+    let mut out = [(0u8, 0u8, 0u8); 512];
+    for (i, entry) in out.iter_mut().enumerate() {
+        let v = palette_prom[i];
+        let r = combine_weights(&rgweights, &[v & 1, (v >> 1) & 1, (v >> 2) & 1]);
+        let g = combine_weights(&rgweights, &[(v >> 3) & 1, (v >> 4) & 1, (v >> 5) & 1]);
+        let b = combine_weights(&bweights, &[(v >> 6) & 1, (v >> 7) & 1]);
+        *entry = (r, g, b);
+    }
+    out
+}
+
 // ---------------------------------------------------------------------------
 // CongoBongoBoard
 // ---------------------------------------------------------------------------
@@ -437,65 +548,19 @@ impl CongoBongoBoard {
     /// `gfx_8x8x2_planar`/`gfx_8x8x3_planar`/`zaxxon_spritelayout` in
     /// `sega/zaxxon.cpp`).
     pub fn decode_gfx_roms(&mut self) {
-        // Foreground: 256 chars, 8×8 2bpp. Planes split at the ROM midpoint.
-        self.tx_cache = decode_gfx(
-            &self.tx_rom,
-            0,
-            256,
-            &GfxLayout {
-                plane_offsets: &[0, 0x0800 * 8],
-                x_offsets: &[0, 1, 2, 3, 4, 5, 6, 7],
-                y_offsets: &[0, 8, 16, 24, 32, 40, 48, 56],
-                char_increment: 8 * 8,
-            },
-        );
-
-        // Background: 1024 chars, 8×8 3bpp. Planes at thirds of the region.
-        self.bg_cache = decode_gfx(
-            &self.bg_rom,
-            0,
-            1024,
-            &GfxLayout {
-                plane_offsets: &[0, 0x2000 * 8, 2 * 0x2000 * 8],
-                x_offsets: &[0, 1, 2, 3, 4, 5, 6, 7],
-                y_offsets: &[0, 8, 16, 24, 32, 40, 48, 56],
-                char_increment: 8 * 8,
-            },
-        );
-
-        // Sprites: 128 sprites, 32×32 3bpp. Planes at thirds; each 8×8 sub-cell is
-        // 8 consecutive bytes, laid out left-to-right then top-to-bottom.
-        let x_offsets: [usize; 32] = std::array::from_fn(|px| (px / 8) * 64 + (px % 8));
-        let y_offsets: [usize; 32] = std::array::from_fn(|py| (py / 8) * 256 + (py % 8) * 8);
-        self.sprite_cache = decode_gfx(
-            &self.spr_rom,
-            0,
-            128,
-            &GfxLayout {
-                plane_offsets: &[0, 0x4000 * 8, 2 * 0x4000 * 8],
-                x_offsets: &x_offsets,
-                y_offsets: &y_offsets,
-                char_increment: 128 * 8,
-            },
-        );
+        // The same `'static` layouts the gfxview `GfxRegion`s borrow, so the
+        // offline sheet export and the runtime renderer decode identically.
+        self.tx_cache = decode_gfx(&self.tx_rom, 0, 256, &CONGO_TX_GFX_LAYOUT);
+        self.bg_cache = decode_gfx(&self.bg_rom, 0, 1024, &CONGO_BG_GFX_LAYOUT);
+        self.sprite_cache = decode_gfx(&self.spr_rom, 0, 128, &CONGO_SPR_GFX_LAYOUT);
     }
 
     /// Build the 512-entry RGB palette from the `mr019` color PROM.
     ///
-    /// 3-3-2 resistor DAC (per `zaxxon_palette` in `sega/zaxxon_v.cpp`): R = PROM
-    /// bits 0-2 and G = bits 3-5 (1k/470/220 Ω), B = bits 6-7 (470/220 Ω), all
-    /// with a 470 Ω pulldown. The PROM is 256 bytes mirrored into 512, so the
-    /// upper half (selected by the CBS color-bank latch) duplicates the lower.
+    /// Delegates to the shared [`congo_palette_rgb`] so the runtime renderer and
+    /// the gfxview export apply identical resistor-DAC math.
     pub fn build_palette(&mut self) {
-        let rgweights = compute_resistor_weights(&[1000.0, 470.0, 220.0], Some(470.0));
-        let bweights = compute_resistor_weights(&[470.0, 220.0], Some(470.0));
-        for (i, entry) in self.palette_rgb.iter_mut().enumerate() {
-            let v = self.palette_prom[i];
-            let r = combine_weights(&rgweights, &[v & 1, (v >> 1) & 1, (v >> 2) & 1]);
-            let g = combine_weights(&rgweights, &[(v >> 3) & 1, (v >> 4) & 1, (v >> 5) & 1]);
-            let b = combine_weights(&bweights, &[(v >> 6) & 1, (v >> 7) & 1]);
-            *entry = (r, g, b);
-        }
+        self.palette_rgb = congo_palette_rgb(&self.palette_prom);
     }
 
     /// Pre-render the background tilemap into a 256×4096 pixmap of palette pen
@@ -2155,5 +2220,93 @@ mod tests {
         assert_eq!(sys2.board.latch2, 0xC0);
         assert_eq!(sys2.board.sound_latch, 0x7E);
         assert_eq!(sys2.board.clock, 12345);
+    }
+
+    #[test]
+    fn gfx_regions_registered_with_expected_geometry() {
+        let regions = crate::gfx_registry::regions_for("congobongo");
+        assert_eq!(
+            regions.iter().map(|r| r.region).collect::<Vec<_>>(),
+            vec!["bg", "fg", "sprites"],
+        );
+
+        let fg = crate::gfx_registry::find("congobongo", "fg").unwrap();
+        assert_eq!((fg.count, fg.width, fg.height), (256, 8, 8));
+        let bg = crate::gfx_registry::find("congobongo", "bg").unwrap();
+        assert_eq!((bg.count, bg.width, bg.height), (1024, 8, 8));
+        let spr = crate::gfx_registry::find("congobongo", "sprites").unwrap();
+        assert_eq!((spr.count, spr.width, spr.height), (128, 32, 32));
+
+        for r in [fg, bg, spr] {
+            assert!(r.palette.is_some(), "{} carries the PROM palette", r.region);
+        }
+    }
+
+    /// The gfxview `GfxRegion` layouts must decode byte-for-byte identically to
+    /// the runtime `decode_gfx_roms()` (already validated by the working
+    /// scanline renderer), so the offline export matches what the game shows.
+    #[test]
+    fn gfx_region_layouts_match_runtime_decode() {
+        let mut board = CongoBongoBoard::new();
+        for (i, b) in board.tx_rom.iter_mut().enumerate() {
+            *b = (i as u8).wrapping_mul(31).wrapping_add(7);
+        }
+        for (i, b) in board.bg_rom.iter_mut().enumerate() {
+            *b = (i as u8).wrapping_mul(17).wrapping_add(3);
+        }
+        for (i, b) in board.spr_rom.iter_mut().enumerate() {
+            *b = (i as u8).wrapping_mul(13).wrapping_add(5);
+        }
+        board.decode_gfx_roms();
+
+        let fg = crate::gfx_registry::find("congobongo", "fg").unwrap();
+        assert_caches_eq(
+            &decode_gfx(&board.tx_rom, 0, fg.count as usize, fg.layout),
+            &board.tx_cache,
+        );
+        let bg = crate::gfx_registry::find("congobongo", "bg").unwrap();
+        assert_caches_eq(
+            &decode_gfx(&board.bg_rom, 0, bg.count as usize, bg.layout),
+            &board.bg_cache,
+        );
+        let spr = crate::gfx_registry::find("congobongo", "sprites").unwrap();
+        assert_caches_eq(
+            &decode_gfx(&board.spr_rom, 0, spr.count as usize, spr.layout),
+            &board.sprite_cache,
+        );
+    }
+
+    /// The gfxview palette hook must apply the same resistor-DAC math as the
+    /// runtime `build_palette()` — both route through `congo_palette_rgb`.
+    #[test]
+    fn gfx_palette_matches_runtime_build() {
+        let mut prom = [0u8; 0x200];
+        for (i, b) in prom.iter_mut().enumerate() {
+            *b = (i as u8).wrapping_mul(53).wrapping_add(11);
+        }
+
+        let mut board = CongoBongoBoard::new();
+        board.palette_prom.copy_from_slice(&prom);
+        board.build_palette();
+
+        assert_eq!(congo_palette_rgb(&prom), board.palette_rgb);
+    }
+
+    fn assert_caches_eq(a: &gfx::GfxCache, b: &gfx::GfxCache) {
+        assert_eq!(
+            (a.count(), a.width(), a.height()),
+            (b.count(), b.width(), b.height())
+        );
+        for code in 0..a.count() {
+            for py in 0..a.height() {
+                for px in 0..a.width() {
+                    assert_eq!(
+                        a.pixel(code, px, py),
+                        b.pixel(code, px, py),
+                        "pixel mismatch at code {code} ({px},{py})"
+                    );
+                }
+            }
+        }
     }
 }
