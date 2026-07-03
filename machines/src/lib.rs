@@ -420,6 +420,7 @@ pub mod atari_avg;
 pub mod atari_dvg;
 pub mod atari_system1;
 pub mod atari_system1_sound;
+pub mod btime;
 pub mod ccastles;
 pub mod congo_bongo;
 pub mod congo_sound;
