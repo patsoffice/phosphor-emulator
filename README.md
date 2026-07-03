@@ -49,7 +49,7 @@ cargo run --package phosphor-frontend -- joust /path/to/extracted/roms
 cargo run --package phosphor-frontend -- joust /path/to/roms --debug
 ```
 
-ROMs are matched by CRC32 checksum, so any MAME ROM naming convention works. All three Joust label variants are supported: Green (parent), Yellow, and Red.
+ROMs are matched by CRC32 checksum, so any MAME ROM naming convention works.
 
 **Controls:**
 
@@ -60,7 +60,6 @@ ROMs are matched by CRC32 checksum, so any MAME ROM naming convention works. All
 | Left Ctrl        | P1 Flap                                       |
 | Left Shift       | P1 Jump                                       |
 | I / K / J / L    | P1 Fire Up / Down / Left / Right (Robotron)   |
-| Z / X / C        | Fire Left / Center / Right (Missile Command)  |
 | 1                | P1 Start                                      |
 | W / A / S / D    | P2 Move                                       |
 | E                | P2 Fire / Jump                                |
@@ -68,7 +67,7 @@ ROMs are matched by CRC32 checksum, so any MAME ROM naming convention works. All
 | 5                | Insert Coin                                   |
 | Mouse            | Trackball (Crystal Castles, Missile Command)  |
 | F1               | Toggle Debug Panel                            |
-| F2 / F3 / F4     | Step Instruction / Step Cycle / Continue      |
+| 7 / 8 / 9 / 0    | Step Instruction / Cycle / Frame / Continue (Debug Panel) |
 | F5               | Reset Machine                                 |
 | F6 / F7          | Quick Save / Quick Load                       |
 | F9               | Toggle Throttle                               |
@@ -257,21 +256,15 @@ assert_eq!(bus.memory[0x10], 0x42);
 
 ## Future
 
-### Peripherals
-
-- TMS5220 speech synthesizer (Star Wars)
-
 ### Games
 
 - Radar Scope (Nintendo TKG-04)
-- Star Wars (Atari: 2×M6809 + AVG + Mathbox)
 - Reactor (Gottlieb System 80: I8088 + M6502 sound + RIOT + trackball)
 - Mad Planets (Gottlieb System 80: I8088 + M6502 sound + RIOT + spinner)
 - Battlezone (Atari: M6502 + DVG + Mathbox + POKEY)
 - Space Duel (Atari: M6502 + AVG + POKEY)
 - Space Fury (Sega G80: Z80 + vector generator)
 - Zaxxon (Sega G80: Z80 + tilemap/sprite video)
-- Congo Bongo (Sega G80: Z80 + tilemap/sprite video)
 
 ### Frontend
 

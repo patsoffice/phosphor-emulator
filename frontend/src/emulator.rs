@@ -268,27 +268,37 @@ pub fn run(
                     );
                 }
 
-                // F2: Step instruction (debug + paused)
+                // 7: Step instruction (debug + paused)
                 Event::KeyDown {
-                    scancode: Some(Scancode::F2),
+                    scancode: Some(Scancode::Num7),
                     repeat: false,
                     ..
                 } if debug_state.active && debug_state.run_mode == RunMode::Paused => {
                     debug_state.run_mode = RunMode::StepInstruction;
                 }
 
-                // F3: Step cycle (debug + paused)
+                // 8: Step cycle (debug + paused)
                 Event::KeyDown {
-                    scancode: Some(Scancode::F3),
+                    scancode: Some(Scancode::Num8),
                     repeat: false,
                     ..
                 } if debug_state.active && debug_state.run_mode == RunMode::Paused => {
                     debug_state.run_mode = RunMode::StepCycle;
                 }
 
-                // F4: Continue (resume running)
+                // 9: Step frame — run one frame, pause at the next frame start
+                // (debug + paused)
                 Event::KeyDown {
-                    scancode: Some(Scancode::F4),
+                    scancode: Some(Scancode::Num9),
+                    repeat: false,
+                    ..
+                } if debug_state.active && debug_state.run_mode == RunMode::Paused => {
+                    debug_state.run_mode = RunMode::StepFrame;
+                }
+
+                // 0: Continue (resume running)
+                Event::KeyDown {
+                    scancode: Some(Scancode::Num0),
                     repeat: false,
                     ..
                 } if debug_state.active => {
@@ -301,6 +311,7 @@ pub fn run(
                     ..
                 } => {
                     machine.reset();
+                    debug_state.frame_count = 0;
                 }
 
                 // Quick Save (F6)
@@ -739,7 +750,7 @@ pub fn run(
             if dt > 0.0 {
                 let instant_fps = 1.0 / dt;
                 fps_smoothed += 0.05 * (instant_fps - fps_smoothed);
-                fps_text = format!("fps: {fps_smoothed:.1}");
+                fps_text = format!("fps: {fps_smoothed:.1}  frame: {}", debug_state.frame_count);
             }
         }
 

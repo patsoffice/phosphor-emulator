@@ -26,6 +26,8 @@ pub enum RunMode {
     Paused,
     StepInstruction,
     StepCycle,
+    /// Run one full frame, then pause at the start of the next frame.
+    StepFrame,
 }
 
 /// Which tab is shown in the bottom half of a CPU column.
@@ -80,6 +82,8 @@ pub struct DebugState {
     pub device_panels: Vec<DevicePanel>,
     pub step_cpu: usize,
     pub cycle_count: u64,
+    /// Running count of completed frames (also shown on the F10 overlay).
+    pub frame_count: u64,
 
     // Breakpoints
     /// PC breakpoints per CPU (index = cpu_index).
@@ -90,6 +94,10 @@ pub struct DebugState {
     pub cycle_breakpoint: Option<u64>,
     /// Input buffer for cycle breakpoint.
     pub cycle_bp_input: String,
+    /// Break at the start of this frame (when frame_count reaches it).
+    pub frame_breakpoint: Option<u64>,
+    /// Input buffer for the frame breakpoint.
+    pub frame_bp_input: String,
 
     // Watchpoints
     /// Active memory watchpoints: (cpu_index, address, kind).
@@ -149,10 +157,13 @@ impl DebugState {
             device_panels: Vec::new(),
             step_cpu: 0,
             cycle_count: 0,
+            frame_count: 0,
             breakpoints: Vec::new(),
             breakpoint_input: String::new(),
             cycle_breakpoint: None,
             cycle_bp_input: String::new(),
+            frame_breakpoint: None,
+            frame_bp_input: String::new(),
             watchpoints: Vec::new(),
             watchpoint_input: String::new(),
             watchpoint_read: false,
@@ -251,6 +262,7 @@ pub fn execute_frame(machine: &mut dyn FrontendMachine, state: &mut DebugState) 
             return false;
         }
         machine.run_frame();
+        state.frame_count += 1;
         return true;
     }
 
@@ -303,6 +315,19 @@ pub fn execute_frame(machine: &mut dyn FrontendMachine, state: &mut DebugState) 
 
     match state.run_mode {
         RunMode::Running => {
+            // Frame breakpoint: pause at the start of the target frame, before
+            // running any of its cycles.
+            if let Some(target) = state.frame_breakpoint
+                && state.frame_count >= target
+            {
+                state.frame_breakpoint = None;
+                state.run_mode = RunMode::Paused;
+                if let Some(bus) = machine.debug_bus() {
+                    state.refresh(bus);
+                }
+                return false;
+            }
+
             let cpf = machine.cycles_per_frame();
             if cpf > 0 {
                 let check_bp = state.has_any_breakpoints();
@@ -354,6 +379,7 @@ pub fn execute_frame(machine: &mut dyn FrontendMachine, state: &mut DebugState) 
             } else {
                 machine.run_frame();
             }
+            state.frame_count += 1;
             if let Some(bus) = machine.debug_bus() {
                 state.refresh(bus);
             }
@@ -393,6 +419,28 @@ pub fn execute_frame(machine: &mut dyn FrontendMachine, state: &mut DebugState) 
             }
             state.run_mode = RunMode::Paused;
             false
+        }
+        RunMode::StepFrame => {
+            // Run one full frame's worth of cycles, then pause at the next
+            // frame's start. Returns true so the frame's audio is drained.
+            let cpf = machine.cycles_per_frame();
+            if cpf > 0 {
+                for _ in 0..cpf {
+                    machine.debug_tick();
+                    state.cycle_count += 1;
+                    if let Some(hit) = machine.take_watchpoint_hit() {
+                        state.last_watchpoint_hit = Some(hit);
+                    }
+                }
+            } else {
+                machine.run_frame();
+            }
+            state.frame_count += 1;
+            if let Some(bus) = machine.debug_bus() {
+                state.refresh(bus);
+            }
+            state.run_mode = RunMode::Paused;
+            true
         }
     }
 }
@@ -507,7 +555,7 @@ fn draw_controls_column(ui: &mut egui::Ui, state: &mut DebugState, min_top_heigh
             if ui.button("Pause").clicked() {
                 state.run_mode = RunMode::Paused;
             }
-        } else if ui.button("Continue (F4)").clicked() {
+        } else if ui.button("Continue (0)").clicked() {
             state.run_mode = RunMode::Running;
             state.last_watchpoint_hit = None;
         }
@@ -515,16 +563,22 @@ fn draw_controls_column(ui: &mut egui::Ui, state: &mut DebugState, min_top_heigh
 
     ui.horizontal(|ui| {
         if ui
-            .add_enabled(is_paused, egui::Button::new("Step Instr (F2)"))
+            .add_enabled(is_paused, egui::Button::new("Step Instr (7)"))
             .clicked()
         {
             state.run_mode = RunMode::StepInstruction;
         }
         if ui
-            .add_enabled(is_paused, egui::Button::new("Step Cycle (F3)"))
+            .add_enabled(is_paused, egui::Button::new("Step Cycle (8)"))
             .clicked()
         {
             state.run_mode = RunMode::StepCycle;
+        }
+        if ui
+            .add_enabled(is_paused, egui::Button::new("Step Frame (9)"))
+            .clicked()
+        {
+            state.run_mode = RunMode::StepFrame;
         }
     });
 
@@ -757,6 +811,34 @@ fn draw_breakpoints_panel(ui: &mut egui::Ui, state: &mut DebugState) {
                     ui.label(egui::RichText::new(format!("Break @ cycle {}", target)).monospace());
                     if ui.small_button("\u{2715}").clicked() {
                         state.cycle_breakpoint = None;
+                    }
+                });
+            }
+
+            ui.add_space(4.0);
+
+            // Frame breakpoint: pause at the start of the given frame.
+            ui.horizontal(|ui| {
+                ui.label("Frame:");
+                let resp = ui.add(
+                    egui::TextEdit::singleline(&mut state.frame_bp_input)
+                        .desired_width(80.0)
+                        .font(egui::TextStyle::Monospace),
+                );
+                let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                if (ui.button("Set").clicked() || enter)
+                    && let Ok(frame) = state.frame_bp_input.trim().parse::<u64>()
+                {
+                    state.frame_breakpoint = Some(frame);
+                    state.frame_bp_input.clear();
+                }
+            });
+
+            if let Some(target) = state.frame_breakpoint {
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(format!("Break @ frame {}", target)).monospace());
+                    if ui.small_button("\u{2715}").clicked() {
+                        state.frame_breakpoint = None;
                     }
                 });
             }
