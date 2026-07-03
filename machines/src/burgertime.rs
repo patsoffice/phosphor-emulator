@@ -1,14 +1,9 @@
 //! Burgertime (Data East, 1982) — the first game on the btime board.
 //!
 //! Thin wrapper around the shared [`BtimeBoard`] (see `btime.rs`) following the
-//! Board Wrapper Pattern (`joust.rs` / `gridlee.rs`). This is the initial
-//! scaffold (issue `burgertime-z6c.1`): it constructs the board, registers the
-//! machine, and defines the ROM regions. Memory-map/encryption (`.2`), GFX +
-//! palette (`.3`), the renderer (`.4`), inputs/DIPs/VBLANK (`.5`), and the
-//! run-frame timing (`.6`) fill in the behavior.
-//!
-//! Pass 1 is video-first and silent; the sound M6502 + 2× AY-3-8910 are a
-//! follow-up (`.8`).
+//! Board Wrapper Pattern (`joust.rs` / `gridlee.rs`): it constructs the board,
+//! registers the machine, defines the ROM regions, and wires the game-specific
+//! inputs and DIP banks. The board provides the CPUs, video, and sound.
 
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
@@ -344,12 +339,13 @@ impl BurgertimeSystem {
         }
     }
 
-    /// Load the Burgertime ROM set: main program ROM into the board, and decode
-    /// the char/sprite/background graphics + copy the bg_map. The sound ROM is
-    /// validated but not yet wired (`.8`).
+    /// Load the Burgertime ROM set: main + sound program ROMs into the board,
+    /// and decode the char/sprite/background graphics + copy the bg_map.
     pub fn load_rom_set(&mut self, rom_set: &RomSet) -> Result<(), RomLoadError> {
         let main = BURGERTIME_MAIN_ROM.load(rom_set)?;
         self.board.load_main_rom(&main);
+        let sound = BURGERTIME_SOUND_ROM.load(rom_set)?;
+        self.board.load_sound_rom(&sound);
 
         let gfx1 = BURGERTIME_GFX1_ROM.load(rom_set)?;
         self.board.load_gfx1(&gfx1);
@@ -393,7 +389,7 @@ impl Bus for BurgertimeSystem {
     }
 }
 
-crate::impl_board_delegation!(BurgertimeSystem, board, btime::TIMING, no_audio);
+crate::impl_board_delegation!(BurgertimeSystem, board, btime::TIMING);
 
 impl MachineCore for BurgertimeSystem {
     fn run_frame(&mut self) {
@@ -413,6 +409,7 @@ impl MachineCore for BurgertimeSystem {
         self.board.reset();
         bus_split!(self, bus => {
             self.board.cpu.reset(bus, BusMaster::Cpu(0));
+            self.board.sound_cpu.reset(bus, BusMaster::Cpu(1));
         });
     }
 

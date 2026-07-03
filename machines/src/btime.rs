@@ -6,22 +6,19 @@
 //! field plus a [`BtimeConfig`] describing the variation points and forward
 //! the `MachineCore`/capability traits to the board.
 //!
-//! Pass 1 is **video first, audio stubbed**: the main DECO CPU-7 (an NMOS
-//! 6502 with runtime opcode encryption), the memory map, and video/input state
-//! live here. The sound M6502 + 2× AY-3-8910 are deferred (see the Burgertime
-//! epic §10); the sound-latch write is stored but otherwise inert.
-//!
-//! Pass 1 is complete: the memory map, DECO CPU-7 opcode decryption, X/Y-swap
-//! sprite-RAM mirror, GFX decode, the `BGR_233_inverted` palette, the
+//! Fully implemented: the main DECO CPU-7 (an NMOS 6502 with runtime opcode
+//! encryption), the memory map, GFX decode, the `BGR_233_inverted` palette, the
 //! char/sprite/background renderer (ROT270), inputs, DIP banks, the live VBLANK
-//! bit, the coin IRQ, and the frame loop are all implemented — the game boots
-//! and is playable, silent.
+//! bit, the coin IRQ, the frame loop, and the sound subsystem (a second M6502 @
+//! 500 kHz driving two AY-3-8910s @ 1.5 MHz, with the command latch IRQ and the
+//! scanline-gated NMI). The game boots, plays, and has sound.
 
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::{AccessKind, AddressSpace16};
-use phosphor_core::core::{Bus, BusMaster, TimingConfig};
+use phosphor_core::core::{Bus, BusMaster, ClockDivider, TimingConfig};
 use phosphor_core::cpu::m6502::M6502;
+use phosphor_core::device::ay8910::Ay8910;
 use phosphor_core::gfx::decode::{GfxCache, GfxLayout, decode_gfx};
 use phosphor_core::gfx::rotate_270_indexed;
 use phosphor_macros::{BusDebug, MemoryRegion};
@@ -32,6 +29,9 @@ enum Region {
     /// Main-CPU program ROM at 0xB000-0xFFFF (0xB000-0xBFFF is an unused gap;
     /// the physical ROMs sit at 0xC000-0xFFFF with the vectors at 0xFFFA-0xFFFF).
     Main = 1,
+    /// Sound-CPU program ROM at 0xE000-0xEFFF, mirrored to 0xF000-0xFFFF
+    /// (vectors read from 0xFFFA-0xFFFF).
+    SoundRom = 2,
 }
 
 /// DECO CPU-7 opcode deobfuscation: bit-permute the fetched byte.
@@ -114,6 +114,10 @@ const fn display_bytes() -> usize {
     (w * h * 3) as usize
 }
 
+/// AY-3-8910 chip clock: 12 MHz / 2 / 2 / 2 = 1.5 MHz (equal to the main clock,
+/// so each chip is ticked once per main tick).
+const AY_CLOCK_HZ: u64 = 1_500_000;
+
 /// Expand a 3-bit color component to 8 bits (bit-replicated).
 #[inline]
 fn pal3bit(x: u8) -> u8 {
@@ -180,9 +184,23 @@ pub struct BtimeConfig {
 pub struct BtimeBoard {
     #[debug_cpu("M6502 (DECO CPU-7)")]
     pub(crate) cpu: M6502,
+    #[debug_cpu("M6502 Sound")]
+    pub(crate) sound_cpu: M6502,
 
     #[debug_map(cpu = 0)]
     pub(crate) main_map: AddressSpace16,
+    #[debug_map(cpu = 1)]
+    pub(crate) sound_map: AddressSpace16,
+
+    // Sound subsystem (sound CPU @ 500 kHz; two AY-3-8910 @ 1.5 MHz).
+    #[debug_device("AY-3-8910 #1")]
+    ay1: Ay8910,
+    #[debug_device("AY-3-8910 #2")]
+    ay2: Ay8910,
+    sound_ram: [u8; 0x0400],
+    sound_irq: bool,           // set on main write to 0x4003, cleared on 0xA000 read
+    audio_nmi_enable: bool,    // 0xC000 write bit0; ANDs with scanline bit3 -> NMI
+    sound_clock: ClockDivider, // 500 kHz from the 1.5 MHz main tick (1/3)
 
     // Work / video memory (kept as flat arrays, not in the AddressSpace16).
     ram: [u8; 0x0800],
@@ -250,9 +268,28 @@ impl BtimeBoard {
             AccessKind::ReadOnly,
         );
 
+        let mut sound_map = AddressSpace16::new();
+        sound_map
+            .region(
+                Region::SoundRom,
+                "Sound ROM",
+                0xE000,
+                0x1000,
+                AccessKind::ReadOnly,
+            )
+            .mirror(0xF000, 0xE000, 0x1000);
+
         let mut board = Self {
             cpu: M6502::new(),
+            sound_cpu: M6502::new(),
             main_map,
+            sound_map,
+            ay1: Ay8910::new(AY_CLOCK_HZ),
+            ay2: Ay8910::new(AY_CLOCK_HZ),
+            sound_ram: [0; 0x0400],
+            sound_irq: false,
+            audio_nmi_enable: false,
+            sound_clock: ClockDivider::new(1, 3),
             ram: [0; 0x0800],
             videoram: [0; 0x0400],
             colorram: [0; 0x0400],
@@ -314,6 +351,11 @@ impl BtimeBoard {
         self.bg_map[..n].copy_from_slice(&data[..n]);
     }
 
+    /// Load the sound-CPU program ROM (0x1000 bytes at 0xE000, mirrored to 0xF000).
+    pub fn load_sound_rom(&mut self, data: &[u8]) {
+        self.sound_map.load_region(Region::SoundRom, data);
+    }
+
     // --- Decoded-graphics / palette accessors (used by the `.4` renderer) ---
 
     pub fn chars(&self) -> &GfxCache {
@@ -349,6 +391,7 @@ impl BtimeBoard {
     // --- Core tick ---
 
     pub fn tick(&mut self, bus: &mut dyn Bus<Address = u16, Data = u8>) {
+        // Main CPU @ 1.5 MHz.
         if self.main_map.has_any_watchpoints() {
             let pc = self
                 .cpu
@@ -356,32 +399,67 @@ impl BtimeBoard {
                 .then_some(self.cpu.pc as u32);
             self.main_map.latch_access_context(self.clock, pc);
         }
-
         self.cpu.execute_cycle(bus, BusMaster::Cpu(0));
+
+        // Sound CPU @ 500 kHz (main / 3).
+        if self.sound_clock.tick() {
+            if self.sound_map.has_any_watchpoints() {
+                let pc = self
+                    .sound_cpu
+                    .at_instruction_boundary()
+                    .then_some(self.sound_cpu.pc as u32);
+                self.sound_map.latch_access_context(self.clock, pc);
+            }
+            self.sound_cpu.execute_cycle(bus, BusMaster::Cpu(1));
+        }
+
+        // Both AY-3-8910s @ 1.5 MHz (once per main tick).
+        self.ay1.tick();
+        self.ay2.tick();
+
         self.clock += 1;
     }
 
     pub fn reset(&mut self) {
         self.main_had_written = false;
         self.main_irq = false;
+        self.sound_irq = false;
+        self.audio_nmi_enable = false;
+        self.sound_clock.reset();
+        self.ay1.reset();
+        self.ay2.reset();
         self.clock = 0;
-        // CPU reset is driven by the wrapper via `bus_split!` (Bus lives there).
+        // CPU resets are driven by the wrapper via `bus_split!` (Bus lives there).
+    }
+
+    /// Current scanline (0-271) within the frame.
+    fn current_scanline(&self) -> u64 {
+        (self.clock % TIMING.cycles_per_frame()) / TIMING.cycles_per_scanline
     }
 
     /// True during vertical blanking — the current scanline is outside the
     /// visible [8, 248) window. The game polls this on the 0x4003 read.
     fn in_vblank(&self) -> bool {
-        let scanline = (self.clock % TIMING.cycles_per_frame()) / TIMING.cycles_per_scanline;
-        !(8..248).contains(&scanline)
+        !(8..248).contains(&self.current_scanline())
     }
 
-    /// Returns a bitmask of CPUs at instruction boundaries. Bit 0 = main CPU.
+    /// Sound-CPU NMI line: the audio NMI enable ANDed with scanline bit 3 (the
+    /// "8vck" timer). The M6502 edge-detects, so this fires once per rising edge.
+    fn sound_nmi_asserted(&self) -> bool {
+        self.audio_nmi_enable && ((self.current_scanline() >> 3) & 1) != 0
+    }
+
+    /// Returns a bitmask of CPUs at instruction boundaries. Bit 0 = main CPU,
+    /// bit 1 = sound CPU.
     pub fn debug_tick_boundaries(&self) -> u32 {
+        let mut result = 0;
         if self.cpu.at_instruction_boundary() {
-            1
-        } else {
-            0
+            result |= 1;
         }
+        if self.sound_cpu.at_instruction_boundary() {
+            result |= 2;
+        }
+        result
     }
 
     // --- Capability-trait helpers (called by the game wrapper) ---
@@ -408,6 +486,18 @@ impl BtimeBoard {
     /// Copy the latest framebuffer into the frontend's `buffer`.
     pub fn render_frame(&self, buffer: &mut [u8]) {
         buffer.copy_from_slice(&self.framebuffer);
+    }
+
+    /// Drain both AY-3-8910s and mix them into `buffer` (mono, 44.1 kHz). Both
+    /// chips are ticked identically, so they produce the same sample count.
+    pub fn fill_audio(&mut self, buffer: &mut [i16]) -> usize {
+        let n1 = self.ay1.fill_audio(buffer);
+        let mut tmp = vec![0i16; n1];
+        let n2 = self.ay2.fill_audio(&mut tmp);
+        for (out, &s) in buffer.iter_mut().zip(tmp.iter()).take(n1.min(n2)) {
+            *out = out.saturating_add(s);
+        }
+        n1
     }
 
     /// Render the visible frame: draw the native 256×256 layers into a
@@ -579,9 +669,12 @@ impl BtimeBoard {
         }
     }
 
-    // --- Bus (main CPU only in pass 1; sound CPU added in §10) ---
+    // --- Bus (master-dispatched: Cpu(0) = main, Cpu(1) = sound) ---
 
     pub(crate) fn bus_read(&mut self, master: BusMaster, addr: u16) -> u8 {
+        if master == BusMaster::Cpu(1) {
+            return self.sound_read(addr);
+        }
         let a = addr as usize;
         let mut data = match addr {
             0x0000..=0x07FF => self.ram[a & 0x07FF],
@@ -623,6 +716,10 @@ impl BtimeBoard {
     }
 
     pub(crate) fn bus_write(&mut self, master: BusMaster, addr: u16, data: u8) {
+        if master == BusMaster::Cpu(1) {
+            self.sound_write(addr, data);
+            return;
+        }
         self.main_map.watch_write(0, master, addr, data);
         // Any main-CPU write arms DECO CPU-7 decryption of the next opcode fetch.
         self.main_had_written = true;
@@ -639,8 +736,43 @@ impl BtimeBoard {
             0x1800..=0x1BFF => self.videoram[Self::swap(a & 0x03FF)] = data,
             0x1C00..=0x1FFF => self.colorram[Self::swap(a & 0x03FF)] = data,
             0x4002 => self.flip_screen = data & 1 != 0,
-            0x4003 => self.sound_latch = data, // sound CPU/IRQ deferred (§10)
+            // Latch the sound command and raise the sound-CPU IRQ.
+            0x4003 => {
+                self.sound_latch = data;
+                self.sound_irq = true;
+            }
             0x4004 => self.bnj_scroll0 = data,
+            _ => {}
+        }
+    }
+
+    /// Sound-CPU bus read (audio map). RAM is mirrored across 0x0000-0x1FFF;
+    /// reading the command latch at 0xA000 acknowledges the sound IRQ.
+    fn sound_read(&mut self, addr: u16) -> u8 {
+        let data = match addr {
+            0x0000..=0x1FFF => self.sound_ram[(addr & 0x03FF) as usize],
+            0xA000..=0xBFFF => {
+                self.sound_irq = false;
+                self.sound_latch
+            }
+            0xE000..=0xFFFF => self.sound_map.read_backing(addr),
+            _ => 0,
+        };
+        self.sound_map.watch_read(1, BusMaster::Cpu(1), addr, data);
+        data
+    }
+
+    /// Sound-CPU bus write (audio map): RAM, the two AYs (address/data latches),
+    /// and the audio NMI enable at 0xC000.
+    fn sound_write(&mut self, addr: u16, data: u8) {
+        self.sound_map.watch_write(1, BusMaster::Cpu(1), addr, data);
+        match addr {
+            0x0000..=0x1FFF => self.sound_ram[(addr & 0x03FF) as usize] = data,
+            0x2000..=0x3FFF => self.ay1.data_write(data),
+            0x4000..=0x5FFF => self.ay1.address_write(data),
+            0x6000..=0x7FFF => self.ay2.data_write(data),
+            0x8000..=0x9FFF => self.ay2.address_write(data),
+            0xC000..=0xDFFF => self.audio_nmi_enable = data & 1 != 0,
             _ => {}
         }
     }
@@ -649,10 +781,15 @@ impl BtimeBoard {
         false
     }
 
-    pub(crate) fn bus_check_interrupts(&mut self, _target: BusMaster) -> InterruptState {
+    pub(crate) fn bus_check_interrupts(&mut self, target: BusMaster) -> InterruptState {
+        let (nmi, irq) = if target == BusMaster::Cpu(1) {
+            (self.sound_nmi_asserted(), self.sound_irq)
+        } else {
+            (false, self.main_irq)
+        };
         InterruptState {
-            nmi: false,
-            irq: self.main_irq,
+            nmi,
+            irq,
             firq: false,
             irq_vector: 0,
             irq_level: 0,
@@ -663,12 +800,19 @@ impl BtimeBoard {
 impl Saveable for BtimeBoard {
     fn save_state(&self, w: &mut StateWriter) {
         self.cpu.save_state(w);
+        self.sound_cpu.save_state(w);
         w.write_bytes(&self.ram);
         w.write_bytes(&self.videoram);
         w.write_bytes(&self.colorram);
         w.write_bytes(&self.palette_ram);
+        w.write_bytes(&self.sound_ram);
+        self.ay1.save_state(w);
+        self.ay2.save_state(w);
+        self.sound_clock.save_state(w);
         w.write_bool(self.main_had_written);
         w.write_bool(self.main_irq);
+        w.write_bool(self.sound_irq);
+        w.write_bool(self.audio_nmi_enable);
         w.write_bool(self.flip_screen);
         w.write_u8(self.bnj_scroll0);
         w.write_u8(self.sound_latch);
@@ -682,12 +826,19 @@ impl Saveable for BtimeBoard {
 
     fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
         self.cpu.load_state(r)?;
+        self.sound_cpu.load_state(r)?;
         r.read_bytes_into(&mut self.ram)?;
         r.read_bytes_into(&mut self.videoram)?;
         r.read_bytes_into(&mut self.colorram)?;
         r.read_bytes_into(&mut self.palette_ram)?;
+        r.read_bytes_into(&mut self.sound_ram)?;
+        self.ay1.load_state(r)?;
+        self.ay2.load_state(r)?;
+        self.sound_clock.load_state(r)?;
         self.main_had_written = r.read_bool()?;
         self.main_irq = r.read_bool()?;
+        self.sound_irq = r.read_bool()?;
+        self.audio_nmi_enable = r.read_bool()?;
         self.flip_screen = r.read_bool()?;
         self.bnj_scroll0 = r.read_u8()?;
         self.sound_latch = r.read_u8()?;
@@ -763,6 +914,69 @@ mod tests {
         // Vectoring through 0xFFFE (IRQ/BRK vector) acknowledges it.
         b.bus_read(BusMaster::Cpu(0), 0xFFFE);
         assert!(!b.main_irq);
+    }
+
+    // --- Sound subsystem ---
+
+    #[test]
+    fn sound_ram_reads_write_and_mirror() {
+        let mut b = board();
+        b.sound_write(0x0100, 0xAB);
+        assert_eq!(b.sound_read(0x0100), 0xAB);
+        // RAM is mirrored across 0x0000-0x1FFF (mirror mask 0x1C00).
+        assert_eq!(b.sound_read(0x0100 + 0x1C00), 0xAB);
+    }
+
+    #[test]
+    fn sound_latch_raises_and_reading_acks_the_irq() {
+        let mut b = board();
+        assert!(!b.bus_check_interrupts(BusMaster::Cpu(1)).irq);
+
+        // A main-CPU write to 0x4003 latches the command and raises the sound IRQ.
+        b.bus_write(BusMaster::Cpu(0), 0x4003, 0x42);
+        assert!(b.sound_irq);
+        assert!(b.bus_check_interrupts(BusMaster::Cpu(1)).irq);
+
+        // The sound CPU reads the latch at 0xA000: returns the value and acks.
+        assert_eq!(b.sound_read(0xA000), 0x42);
+        assert!(!b.sound_irq);
+        assert!(!b.bus_check_interrupts(BusMaster::Cpu(1)).irq);
+    }
+
+    #[test]
+    fn sound_nmi_is_enable_anded_with_scanline_bit3() {
+        let mut b = board();
+        assert!(!b.sound_nmi_asserted());
+
+        b.sound_write(0xC000, 0x01); // audio NMI enable
+        b.clock = 0; // scanline 0 -> bit3 = 0
+        assert!(!b.sound_nmi_asserted());
+        b.clock = 8 * 96; // scanline 8 -> bit3 = 1
+        assert!(b.sound_nmi_asserted());
+        assert!(b.bus_check_interrupts(BusMaster::Cpu(1)).nmi);
+
+        b.sound_write(0xC000, 0x00); // disable
+        assert!(!b.sound_nmi_asserted());
+    }
+
+    #[test]
+    fn ay_register_write_routes_and_produces_audio() {
+        let mut b = board();
+        // Program AY1 channel A: tone period (R0/R1) + full amplitude (R8), via
+        // the address latch (0x4000) then data (0x2000).
+        b.sound_write(0x4000, 0); // address = R0
+        b.sound_write(0x2000, 0x55); // R0 fine tune
+        b.sound_write(0x4000, 1); // address = R1
+        b.sound_write(0x2000, 0x01); // R1 coarse tune
+        b.sound_write(0x4000, 8); // address = R8 (channel A amplitude)
+        b.sound_write(0x2000, 0x0F); // full volume
+
+        for _ in 0..4000 {
+            b.ay1.tick();
+        }
+        let mut buf = vec![0i16; 512];
+        let n = b.ay1.fill_audio(&mut buf);
+        assert!(buf[..n].iter().any(|&s| s != 0), "AY1 should output a tone");
     }
 
     // --- DIP defaults + live VBLANK bit ---

@@ -141,7 +141,7 @@ Complete system implementations that wire core components together:
 - **QbertSystem** — Q*Bert on shared Gottlieb System 80 board (I8088 + M6502 sound + RIOT + DAC)
 - **GalagaSystem** — Galaga on shared Namco Galaga board (3×Z80 + WSG + 05XX starfield generator)
 - **GridleeSystem** — Videa arcade (M6809 + bitmap video + trackball — freely distributable ROMs)
-- **BurgertimeSystem** — Data East BurgerTime on the shared btime board (DECO CPU-7 encrypted M6502 + 3bpp planar char/sprite/background video with X/Y-swap sprite RAM + inverted BGR palette + ROT270 portrait display; video-first and silent — sound is a follow-up)
+- **BurgertimeSystem** — Data East BurgerTime on the shared btime board (DECO CPU-7 encrypted M6502 + 3bpp planar char/sprite/background video with X/Y-swap sprite RAM + inverted BGR palette + ROT270 portrait display + a second M6502 driving two AY-3-8910 PSGs)
 - Simple6502System, Simple6800System, Simple6809System, SimpleZ80System, Simple68000System (test harnesses)
 
 ### Macros Crate (`phosphor-macros`)
