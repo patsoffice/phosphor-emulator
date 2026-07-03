@@ -8,6 +8,9 @@ use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
 use phosphor_macros::Saveable;
 
+use phosphor_core::gfx::decode::GfxLayout;
+
+use crate::gfx_registry::GfxRegion;
 use crate::registry::MachineEntry;
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
 use crate::set_bit_active_high;
@@ -144,6 +147,89 @@ pub static DKONG_PALETTE_PROMS: RomRegion = RomRegion {
         },
     ],
 };
+
+// ---------------------------------------------------------------------------
+// gfxview GFX regions
+//
+// DK's runtime decode lives on the shared `Tkg04Board` and is parameterized for
+// both DK and DK Jr. These `'static` layouts pin DK's concrete ROM geometry so
+// the standalone viewer can borrow them; `gfx_region_layout_matches_runtime`
+// (below) asserts they stay identical to what the board produces for DK.
+// ---------------------------------------------------------------------------
+
+/// Tiles: 256 chars, 8×8, 2bpp. The two bitplanes sit in separate 2KB ROMs, so
+/// plane 1 starts at byte 0x800 (= 0x800*8 bits).
+static DKONG_TILE_GFX_LAYOUT: GfxLayout<'static> = GfxLayout {
+    plane_offsets: &[0, 0x800 * 8],
+    x_offsets: &[0, 1, 2, 3, 4, 5, 6, 7],
+    y_offsets: &[0, 8, 16, 24, 32, 40, 48, 56],
+    char_increment: 64,
+};
+
+/// Bit distance between the two 8-pixel halves of a sprite row: the 8KB sprite
+/// ROM splits into four quarters, so one quarter = 0x2000/4 = 0x800 bytes.
+const DKONG_SPRITE_Q8: usize = (0x2000 / 4) * 8; // 16384
+
+/// Sprites: 128 chars, 16×16, 2bpp, interleaved across four 2KB ROMs. Planes are
+/// separated by `2 * DKONG_SPRITE_Q8` bits; the two row halves by `DKONG_SPRITE_Q8`.
+static DKONG_SPRITE_GFX_LAYOUT: GfxLayout<'static> = GfxLayout {
+    plane_offsets: &[0, 2 * DKONG_SPRITE_Q8],
+    x_offsets: &[
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        DKONG_SPRITE_Q8,
+        DKONG_SPRITE_Q8 + 1,
+        DKONG_SPRITE_Q8 + 2,
+        DKONG_SPRITE_Q8 + 3,
+        DKONG_SPRITE_Q8 + 4,
+        DKONG_SPRITE_Q8 + 5,
+        DKONG_SPRITE_Q8 + 6,
+        DKONG_SPRITE_Q8 + 7,
+    ],
+    y_offsets: &[
+        0, 8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120,
+    ],
+    char_increment: 128,
+};
+
+inventory::submit! {
+    GfxRegion {
+        machine: "dkong",
+        region: "tiles",
+        count: 256,
+        width: 8,
+        height: 8,
+        layout: &DKONG_TILE_GFX_LAYOUT,
+        load: |rs| DKONG_TILE_ROM.load(rs),
+        palette: Some(dkong_gfx_palette),
+    }
+}
+inventory::submit! {
+    GfxRegion {
+        machine: "dkong",
+        region: "sprites",
+        count: 128,
+        width: 16,
+        height: 16,
+        layout: &DKONG_SPRITE_GFX_LAYOUT,
+        load: |rs| DKONG_SPRITE_ROM.load(rs),
+        palette: Some(dkong_gfx_palette),
+    }
+}
+
+/// gfxview palette hook: load the color PROMs and build the RGB palette with the
+/// same shared resistor-net math as the runtime path. The palette lives in the
+/// first 0x200 bytes (c-2k + c-2j); v-5e (color codes) is not needed here.
+fn dkong_gfx_palette(rom_set: &RomSet) -> Result<Vec<(u8, u8, u8)>, RomLoadError> {
+    let proms = DKONG_PALETTE_PROMS.load(rom_set)?;
+    Ok(tkg04::compute_tkg04_palette(&proms[..0x200]).to_vec())
+}
 
 // ---------------------------------------------------------------------------
 // Input button IDs (active-high: 0x00 = all released)
@@ -873,5 +959,90 @@ mod tests {
         assert_eq!(sys.dip_bank_value(0), 0x83); // 0x80 with low two bits set
         sys.set_dip_bank_value(0, 0x55);
         assert_eq!(sys.dip_bank_value(0), 0x55);
+    }
+
+    #[test]
+    fn gfx_regions_registered_with_expected_geometry() {
+        let regions = crate::gfx_registry::regions_for("dkong");
+        assert_eq!(
+            regions.iter().map(|r| r.region).collect::<Vec<_>>(),
+            vec!["sprites", "tiles"],
+        );
+
+        let tiles = crate::gfx_registry::find("dkong", "tiles").unwrap();
+        assert_eq!((tiles.count, tiles.width, tiles.height), (256, 8, 8));
+        assert!(tiles.palette.is_some(), "tiles carry the PROM palette");
+
+        let sprites = crate::gfx_registry::find("dkong", "sprites").unwrap();
+        assert_eq!(
+            (sprites.count, sprites.width, sprites.height),
+            (128, 16, 16)
+        );
+        assert!(sprites.palette.is_some());
+    }
+
+    /// The DK gfxview layouts must decode byte-for-byte identically to the
+    /// runtime `Tkg04Board::decode_gfx_roms()` for DK's ROM geometry, so the
+    /// offline sheet export matches what the game renders.
+    #[test]
+    fn gfx_region_layout_matches_runtime_decode() {
+        use phosphor_core::gfx::decode::decode_gfx;
+
+        let mut sys = DkongSystem::new();
+        for (i, b) in sys.board.tile_rom.iter_mut().enumerate() {
+            *b = (i as u8).wrapping_mul(31).wrapping_add(7);
+        }
+        for (i, b) in sys.board.sprite_rom.iter_mut().enumerate() {
+            *b = (i as u8).wrapping_mul(17).wrapping_add(3);
+        }
+        sys.board.decode_gfx_roms();
+
+        let tiles = crate::gfx_registry::find("dkong", "tiles").unwrap();
+        let via_region = decode_gfx(&sys.board.tile_rom, 0, tiles.count as usize, tiles.layout);
+        assert_caches_eq(&via_region, &sys.board.tile_cache);
+
+        let sprites = crate::gfx_registry::find("dkong", "sprites").unwrap();
+        let via_region = decode_gfx(
+            &sys.board.sprite_rom,
+            0,
+            sprites.count as usize,
+            sprites.layout,
+        );
+        assert_caches_eq(&via_region, &sys.board.sprite_cache);
+    }
+
+    /// The gfxview palette hook must apply the same resistor-net math as the
+    /// runtime `build_palette()` — both now route through `compute_tkg04_palette`.
+    #[test]
+    fn gfx_palette_matches_runtime_build() {
+        let mut prom = [0u8; 0x200];
+        for (i, b) in prom.iter_mut().enumerate() {
+            *b = (i as u8).wrapping_mul(53).wrapping_add(11);
+        }
+
+        let mut sys = DkongSystem::new();
+        sys.board.palette_prom.copy_from_slice(&prom);
+        sys.board.build_palette();
+
+        let via_hook = tkg04::compute_tkg04_palette(&prom);
+        assert_eq!(via_hook, sys.board.palette_rgb);
+    }
+
+    fn assert_caches_eq(a: &phosphor_core::gfx::GfxCache, b: &phosphor_core::gfx::GfxCache) {
+        assert_eq!(
+            (a.count(), a.width(), a.height()),
+            (b.count(), b.width(), b.height())
+        );
+        for code in 0..a.count() {
+            for py in 0..a.height() {
+                for px in 0..a.width() {
+                    assert_eq!(
+                        a.pixel(code, px, py),
+                        b.pixel(code, px, py),
+                        "pixel mismatch at code {code} ({px},{py})"
+                    );
+                }
+            }
+        }
     }
 }
