@@ -1,8 +1,46 @@
-use phosphor_core::core::{BusMaster, BusMasterComponent};
+use phosphor_core::core::{Bus, BusMaster, BusMasterComponent, bus::InterruptState};
 use phosphor_core::cpu::m6809::CcFlag;
 use phosphor_core::cpu::m6809::M6809;
 mod common;
 use common::TestBus;
+
+/// Bus that records every write address, so a test can assert that an
+/// instruction performed no store (e.g. TST must not write back).
+struct WriteLogBus {
+    memory: [u8; 0x10000],
+    writes: Vec<u16>,
+}
+
+impl WriteLogBus {
+    fn new() -> Self {
+        Self {
+            memory: [0; 0x10000],
+            writes: Vec::new(),
+        }
+    }
+    fn load(&mut self, addr: u16, data: &[u8]) {
+        let s = addr as usize;
+        self.memory[s..s + data.len()].copy_from_slice(data);
+    }
+}
+
+impl Bus for WriteLogBus {
+    type Address = u16;
+    type Data = u8;
+    fn read(&mut self, _m: BusMaster, addr: u16) -> u8 {
+        self.memory[addr as usize]
+    }
+    fn write(&mut self, _m: BusMaster, addr: u16, data: u8) {
+        self.writes.push(addr);
+        self.memory[addr as usize] = data;
+    }
+    fn is_halted_for(&self, _m: BusMaster) -> bool {
+        false
+    }
+    fn check_interrupts(&mut self, _t: BusMaster) -> InterruptState {
+        InterruptState::default()
+    }
+}
 
 #[test]
 fn test_negate() {
@@ -217,4 +255,82 @@ fn test_test_register() {
     );
     assert_eq!(cpu.cc & (CcFlag::N as u8), 0, "Negative should be clear");
     assert_eq!(cpu.cc & (CcFlag::V as u8), 0, "Overflow always clear");
+}
+
+/// TST <memory> must NOT write back. On a real MC6809 the memory TST forms
+/// (direct 0x0D, indexed 0x6D, extended 0x7D) read the operand, set flags, and
+/// spend their remaining cycles on dummy VMA reads — they issue no store. A
+/// spurious write-back is invisible in plain RAM (same value) but corrupts any
+/// address where reads and writes decode differently: on Williams hardware a
+/// banked read returns ROM while the write lands in video RAM, so `TST ,U+`
+/// walking a ROM message table smeared ROM bytes into VRAM (regression: the
+/// Joust boot-test "vertical strip" at frame 447).
+#[test]
+fn test_tst_memory_does_not_write_back() {
+    // Direct: TST $40
+    {
+        let mut cpu = M6809::new();
+        let mut bus = WriteLogBus::new();
+        bus.load(0, &[0x0D, 0x40]);
+        bus.memory[0x0040] = 0x80; // negative, non-zero
+        for _ in 0..6 {
+            cpu.tick_with_bus(&mut bus, BusMaster::Cpu(0));
+        }
+        assert!(
+            bus.writes.is_empty(),
+            "TST direct must not write, got {:?}",
+            bus.writes
+        );
+        assert_eq!(bus.memory[0x0040], 0x80, "operand unchanged");
+        assert_eq!(cpu.cc & (CcFlag::N as u8), CcFlag::N as u8, "N set");
+        assert_eq!(cpu.cc & (CcFlag::Z as u8), 0, "Z clear");
+    }
+    // Extended: TST $1234
+    {
+        let mut cpu = M6809::new();
+        let mut bus = WriteLogBus::new();
+        bus.load(0, &[0x7D, 0x12, 0x34]);
+        bus.memory[0x1234] = 0x00; // zero
+        for _ in 0..7 {
+            cpu.tick_with_bus(&mut bus, BusMaster::Cpu(0));
+        }
+        assert!(
+            bus.writes.is_empty(),
+            "TST extended must not write, got {:?}",
+            bus.writes
+        );
+        assert_eq!(cpu.cc & (CcFlag::Z as u8), CcFlag::Z as u8, "Z set");
+    }
+    // Indexed: LDX #$0050 ; TST ,X
+    {
+        let mut cpu = M6809::new();
+        let mut bus = WriteLogBus::new();
+        bus.load(0, &[0x8E, 0x00, 0x50, 0x6D, 0x84]);
+        bus.memory[0x0050] = 0x01;
+        for _ in 0..9 {
+            cpu.tick_with_bus(&mut bus, BusMaster::Cpu(0));
+        }
+        assert!(
+            bus.writes.is_empty(),
+            "TST indexed must not write, got {:?}",
+            bus.writes
+        );
+        assert_eq!(bus.memory[0x0050], 0x01, "operand unchanged");
+    }
+}
+
+/// Sanity check that `WriteLogBus` actually observes stores: a real RMW op
+/// (INC extended) must record exactly one write to its operand. Guards the
+/// TST test above from silently passing because writes go unrecorded.
+#[test]
+fn test_inc_extended_does_write_back() {
+    let mut cpu = M6809::new();
+    let mut bus = WriteLogBus::new();
+    bus.load(0, &[0x7C, 0x12, 0x34]); // INC $1234
+    bus.memory[0x1234] = 0x0F;
+    for _ in 0..7 {
+        cpu.tick_with_bus(&mut bus, BusMaster::Cpu(0));
+    }
+    assert_eq!(bus.writes, vec![0x1234], "INC must write back exactly once");
+    assert_eq!(bus.memory[0x1234], 0x10, "operand incremented");
 }

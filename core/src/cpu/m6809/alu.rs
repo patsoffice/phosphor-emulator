@@ -590,7 +590,17 @@ impl M6809 {
             }
             51 => {
                 let result = operation(self, self.scratch);
-                bus.write(master, self.temp_addr, result);
+                // TST indexed (0x6D) shares RMW timing but does NOT write back:
+                // on real hardware its final cycle is a dummy VMA read of $FFFF,
+                // not a store (MAME m6809 TST8 microcode: read, set flags,
+                // dummy_vma). Writing back corrupts destinations where reads and
+                // writes decode differently — e.g. Williams banked VRAM, where a
+                // read returns ROM but the write lands in video RAM.
+                if opcode == 0x6D {
+                    let _ = bus.read(master, 0xFFFF);
+                } else {
+                    bus.write(master, self.temp_addr, result);
+                }
                 self.state = ExecState::Fetch;
             }
             _ => {
@@ -639,7 +649,14 @@ impl M6809 {
             }
             4 => {
                 let result = operation(self, self.scratch);
-                bus.write(master, self.temp_addr, result);
+                // TST direct (0x0D) shares RMW timing but does NOT write back —
+                // its final cycle is a dummy VMA read, not a store. See the
+                // rmw_indexed note for why writing back corrupts banked VRAM.
+                if opcode == 0x0D {
+                    let _ = bus.read(master, 0xFFFF);
+                } else {
+                    bus.write(master, self.temp_addr, result);
+                }
                 self.state = ExecState::Fetch;
             }
             _ => {}
@@ -691,7 +708,14 @@ impl M6809 {
             }
             5 => {
                 let result = operation(self, self.scratch);
-                bus.write(master, self.temp_addr, result);
+                // TST extended (0x7D) shares RMW timing but does NOT write back —
+                // its final cycle is a dummy VMA read, not a store. See the
+                // rmw_indexed note for why writing back corrupts banked VRAM.
+                if opcode == 0x7D {
+                    let _ = bus.read(master, 0xFFFF);
+                } else {
+                    bus.write(master, self.temp_addr, result);
+                }
                 self.state = ExecState::Fetch;
             }
             _ => {}

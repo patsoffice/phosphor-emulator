@@ -239,7 +239,8 @@ impl M6809 {
     }
 
     /// TST direct (0x0D): Test memory byte at DP:addr.
-    /// Same timing as RMW instructions (6 cycles) — writes back unchanged value.
+    /// Shares RMW timing (6 cycles) but performs no write-back — the final cycle
+    /// is a dummy VMA read (handled in `rmw_direct`).
     pub(crate) fn op_tst_direct<B: Bus<Address = u16, Data = u8> + ?Sized>(
         &mut self,
         opcode: u8,
@@ -311,7 +312,8 @@ impl M6809 {
     }
 
     /// TST extended (0x7D): Test memory byte at 16-bit address.
-    /// Same timing as RMW instructions (7 cycles) — writes back unchanged value.
+    /// Shares RMW timing (7 cycles) but performs no write-back — the final cycle
+    /// is a dummy VMA read (handled in `rmw_extended`).
     pub(crate) fn op_tst_extended<B: Bus<Address = u16, Data = u8> + ?Sized>(
         &mut self,
         opcode: u8,
@@ -383,7 +385,8 @@ impl M6809 {
     }
 
     /// TST indexed (0x6D): Test memory byte at indexed EA.
-    /// Same timing as RMW instructions — writes back unchanged value.
+    /// Shares RMW timing but performs no write-back — the final cycle is a dummy
+    /// VMA read (handled in `rmw_indexed`).
     pub(crate) fn op_tst_indexed<B: Bus<Address = u16, Data = u8> + ?Sized>(
         &mut self,
         opcode: u8,
