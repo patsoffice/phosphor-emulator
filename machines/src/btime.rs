@@ -12,9 +12,10 @@
 //! epic §10); the sound-latch write is stored but otherwise inert.
 //!
 //! Pass 1 progress: the memory map, DECO CPU-7 opcode decryption, X/Y-swap
-//! sprite-RAM mirror, GFX decode, the `BGR_233_inverted` palette, and the
-//! char/sprite/background renderer (ROT270) are implemented (`.1`-`.4`).
-//! Run-frame timing (per-scanline VBLANK, coin-IRQ hold) lands in `.6`.
+//! sprite-RAM mirror, GFX decode, the `BGR_233_inverted` palette, the
+//! char/sprite/background renderer (ROT270), inputs, DIP banks, the live VBLANK
+//! bit, and the coin IRQ are implemented (`.1`-`.5`). Frame-loop timing and
+//! frontend verification land in `.6`.
 
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
@@ -96,11 +97,15 @@ const NUM_BG_TILES: usize = 64;
 
 // Video draws into a native 256×256 palette-index buffer; the visible window is
 // the [8,248) square (horizontal and vertical blank end/start = 8/248), cropped
-// to 240×240 and rotated ROT270 for display. Background tiles use palette entries
-// 8..15 (color base 8); chars/sprites use 0..7.
+// to 240×240 and rotated ROT270. Background tiles use palette entries 8..15
+// (color base 8); chars/sprites use 0..7.
+//
+// The square raster is displayed on a 4:3 tube rotated to portrait, so the final
+// display is 3:4 — the 240×240 image is stretched vertically to 240×320 to
+// restore the intended aspect (see TIMING.display_*).
 const NATIVE_DIM: usize = 256;
 const CROP_LO: usize = 8;
-const DISPLAY_DIM: usize = 240;
+const VISIBLE_DIM: usize = 240;
 const BG_PALETTE_BASE: usize = 8;
 
 /// Expand a 3-bit color component to 8 bits (bit-replicated).
@@ -128,8 +133,10 @@ pub const TIMING: TimingConfig = TimingConfig {
     cpu_clock_hz: 1_500_000, // 12 MHz / 8
     cycles_per_scanline: 96, // HTOTAL 384 pixel clocks / 4
     total_scanlines: 272,    // VTOTAL
-    display_width: 240,      // visible width (post-ROT270)
-    display_height: 240,     // visible height
+    // Display size is the presentation size, not the raster: the 240×240 visible
+    // square is shown 3:4 (portrait 4:3 tube), so height is stretched to 320.
+    display_width: 240,
+    display_height: 320,
 };
 
 // ---------------------------------------------------------------------------
@@ -367,10 +374,28 @@ impl BtimeBoard {
 
     // --- Capability-trait helpers (called by the game wrapper) ---
 
+    /// Render into the display `buffer` (240×320 RGB): draw the visible 240×240
+    /// image, then stretch it vertically to the 3:4 presentation aspect.
+    pub fn render_frame(&self, buffer: &mut [u8]) {
+        let mut visible = vec![0u8; VISIBLE_DIM * VISIBLE_DIM * 3];
+        self.render_visible(&mut visible);
+
+        // Vertical nearest-neighbor stretch VISIBLE_DIM -> display height.
+        let (w, h) = TIMING.display_size();
+        let (w, h) = (w as usize, h as usize);
+        let row_bytes = w * 3;
+        for oy in 0..h {
+            let sy = oy * VISIBLE_DIM / h;
+            let src = sy * row_bytes;
+            let dst = oy * row_bytes;
+            buffer[dst..dst + row_bytes].copy_from_slice(&visible[src..src + row_bytes]);
+        }
+    }
+
     /// Render the visible frame: draw the native 256×256 layers into a
     /// palette-index buffer, crop the visible [8,248)² window, and rotate
-    /// ROT270 into the RGB `buffer` (240×240).
-    pub fn render_frame(&self, buffer: &mut [u8]) {
+    /// ROT270 into the RGB `buffer` (240×240, square pixels).
+    fn render_visible(&self, buffer: &mut [u8]) {
         let mut native = vec![0u8; NATIVE_DIM * NATIVE_DIM];
 
         if self.bnj_scroll0 & 0x10 != 0 {
@@ -382,18 +407,18 @@ impl BtimeBoard {
         self.draw_sprites(&mut native);
 
         // Crop the visible window to a 240×240 index buffer.
-        let mut cropped = vec![0u8; DISPLAY_DIM * DISPLAY_DIM];
-        for y in 0..DISPLAY_DIM {
+        let mut cropped = vec![0u8; VISIBLE_DIM * VISIBLE_DIM];
+        for y in 0..VISIBLE_DIM {
             let src = (y + CROP_LO) * NATIVE_DIM + CROP_LO;
-            cropped[y * DISPLAY_DIM..(y + 1) * DISPLAY_DIM]
-                .copy_from_slice(&native[src..src + DISPLAY_DIM]);
+            cropped[y * VISIBLE_DIM..(y + 1) * VISIBLE_DIM]
+                .copy_from_slice(&native[src..src + VISIBLE_DIM]);
         }
 
         rotate_270_indexed(
             &cropped,
             buffer,
-            DISPLAY_DIM,
-            DISPLAY_DIM,
+            VISIBLE_DIM,
+            VISIBLE_DIM,
             &self.palette_rgb,
         );
     }
@@ -943,9 +968,12 @@ mod tests {
     }
 
     // --- Renderer (layers + ROT270) ---
+    //
+    // These target the square logical image (render_visible, 240×240); the
+    // display-aspect stretch is covered separately below.
 
     fn pixel(buffer: &[u8], row: usize, col: usize) -> (u8, u8, u8) {
-        let i = (row * DISPLAY_DIM + col) * 3;
+        let i = (row * VISIBLE_DIM + col) * 3;
         (buffer[i], buffer[i + 1], buffer[i + 2])
     }
 
@@ -954,8 +982,8 @@ mod tests {
         // No gfx loaded: every char is code 0 / all-pen-0, drawn opaque (bg
         // disabled) -> palette entry 0, which decodes to white (ram 0 inverted).
         let b = board();
-        let mut buffer = vec![0u8; DISPLAY_DIM * DISPLAY_DIM * 3];
-        b.render_frame(&mut buffer);
+        let mut buffer = vec![0u8; VISIBLE_DIM * VISIBLE_DIM * 3];
+        b.render_visible(&mut buffer);
         assert!(
             buffer.iter().all(|&c| c == 0xFF),
             "frame should be all white"
@@ -977,8 +1005,8 @@ mod tests {
         // Place char 1 at video RAM offset 495 (char cell x=16, y=15).
         b.videoram[495] = 1;
 
-        let mut buffer = vec![0u8; DISPLAY_DIM * DISPLAY_DIM * 3];
-        b.render_frame(&mut buffer);
+        let mut buffer = vec![0u8; VISIBLE_DIM * VISIBLE_DIM * 3];
+        b.render_visible(&mut buffer);
 
         // native (128..135, 120..127) -> crop (120..127, 112..119) -> ROT270
         // out (row 239-cx, col cy) = rows 112..119, cols 112..119.
@@ -1003,11 +1031,41 @@ mod tests {
         b.bnj_scroll0 = 0x10;
         b.bus_write(BusMaster::Cpu(0), 0x0C09, 0x3F);
 
-        let mut buffer = vec![0u8; DISPLAY_DIM * DISPLAY_DIM * 3];
-        b.render_frame(&mut buffer);
+        let mut buffer = vec![0u8; VISIBLE_DIM * VISIBLE_DIM * 3];
+        b.render_visible(&mut buffer);
 
         // Chars are transparent over the backdrop, so the blue bg shows through.
         let has_blue = buffer.chunks_exact(3).any(|p| p == [0, 0, 0xFF]);
         assert!(has_blue, "background (palette base 8) should be visible");
+    }
+
+    #[test]
+    fn render_frame_stretches_visible_to_3x4_display() {
+        let mut b = board();
+        // Some vertical variation: a red char at one cell.
+        let mut gfx1 = vec![0u8; 0x6000];
+        for byte in gfx1.iter_mut().skip(8).take(8) {
+            *byte = 0xFF; // char 1 = pen 1
+        }
+        b.load_gfx1(&gfx1);
+        b.bus_write(BusMaster::Cpu(0), 0x0C01, 0xF8); // entry 1 -> red
+        b.videoram[300] = 1;
+
+        let (w, h) = TIMING.display_size();
+        let (w, h) = (w as usize, h as usize);
+        assert_eq!((w, h), (240, 320), "portrait 3:4 presentation");
+
+        let mut vis = vec![0u8; VISIBLE_DIM * VISIBLE_DIM * 3];
+        b.render_visible(&mut vis);
+        let mut disp = vec![0u8; w * h * 3];
+        b.render_frame(&mut disp);
+
+        // Each display row is exactly the stretched visible row (oy*240/320).
+        for oy in 0..h {
+            let sy = oy * VISIBLE_DIM / h;
+            let d = &disp[oy * w * 3..(oy + 1) * w * 3];
+            let s = &vis[sy * VISIBLE_DIM * 3..(sy + 1) * VISIBLE_DIM * 3];
+            assert_eq!(d, s, "display row {oy} maps to visible row {sy}");
+        }
     }
 }
