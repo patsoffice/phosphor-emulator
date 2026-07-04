@@ -200,17 +200,14 @@ pub const TIMING: TimingConfig = TimingConfig {
     cpu_clock_hz: 1_512_000,
     cycles_per_scanline: 36_864, // whole frame (vector display has no scanlines)
     total_scanlines: 1,
-    // The Star Wars beam field is ~250×290; the real cabinet stretches it
-    // horizontally onto a 4:3 monitor (see STRETCH_X_NUM/DEN in trigger_avg).
-    display_width: 400,
+    // Native beam field: the AVG deflects ±160 from center, so a 320-wide
+    // visible area (xcenter = 160) frames it exactly. The real cabinet stretches
+    // this ~square field horizontally onto its 4:3 tube — done at presentation
+    // time via display_aspect, not baked into the vertices.
+    display_width: 320,
     display_height: 330,
-    display_aspect: None,
+    display_aspect: Some((4, 3)),
 };
-
-/// Horizontal stretch (×5/4) applied to the vector field so it fills the 4:3
-/// monitor, matching MAME's visarea-to-screen mapping.
-const STRETCH_X_NUM: i32 = 5;
-const STRETCH_X_DEN: i32 = 4;
 
 /// Periodic IRQ: 3 kHz / 12 ≈ 246.09 Hz → every 6144 CPU cycles.
 const IRQ_PERIOD_CYCLES: u64 = 6144;
@@ -898,14 +895,6 @@ impl StarWarsBoard {
         self.avg.go();
         self.avg.execute(&vmem, &[0u8; 16]); // Star Wars ignores color RAM
         self.display_list = self.avg.take_display_list();
-
-        // Anamorphic X-stretch around the beam center so the ~250-wide vector
-        // field fills the 4:3 monitor.
-        let xc = (TIMING.display_width / 2) as i32;
-        for v in &mut self.display_list {
-            v.x0 = xc + (v.x0 - xc) * STRETCH_X_NUM / STRETCH_X_DEN;
-            v.x1 = xc + (v.x1 - xc) * STRETCH_X_NUM / STRETCH_X_DEN;
-        }
     }
 
     // --- Frame execution ---------------------------------------------------
