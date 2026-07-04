@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use crate::device::dvg::VectorLine;
+use crate::gfx::GfxCache;
 
 use super::address_space16::AddressSpace16;
 use super::debug::BusDebug;
@@ -15,6 +16,21 @@ use super::watchpoint::{WatchpointHit, WatchpointKind};
 pub struct ProfileSpan {
     pub name: &'static str,
     pub duration: Duration,
+}
+
+/// A decoded tile/sprite sheet a machine exposes for the interactive GFX viewer.
+///
+/// Borrows the machine's already-decoded [`GfxCache`] and RGB palette, so the
+/// viewer reuses the same decode the scanline renderer uses — no re-specifying
+/// bit-plane layouts. `palette` is the machine's full palette; the viewer indexes
+/// it at pen group 0 (per-tile color codes aren't known without live VRAM).
+pub struct GfxSheet<'a> {
+    /// Region label shown in the viewer (e.g. `"tiles"`, `"sprites"`).
+    pub name: &'static str,
+    /// Decoded pixel cache (palette indices).
+    pub cache: &'a GfxCache,
+    /// Full RGB palette the machine built from its color PROM/RAM.
+    pub palette: &'a [(u8, u8, u8)],
 }
 
 // ---------------------------------------------------------------------------
@@ -597,6 +613,21 @@ pub trait MachineCore {
     /// Used to validate save files against the correct machine.
     fn machine_id(&self) -> &str {
         ""
+    }
+
+    /// Decoded tile/sprite GFX sheets for the interactive viewer (`--gfxview`).
+    ///
+    /// Tile-based machines override this to expose the caches they already
+    /// decode from ROM — the viewer reuses that decode directly, so a working
+    /// machine gets GFX viewing "for free" with no separate registration. The
+    /// default (no sheets) suits vector and bitmap-framebuffer machines.
+    ///
+    /// This is distinct from the offline `phosphor_machines::gfx_registry`,
+    /// which decodes without a running machine — that path is for validating a
+    /// machine's GFX during bring-up (diffing against a MAME dump before the
+    /// scanline renderer works), not for everyday viewing.
+    fn gfx_sheets(&self) -> Vec<GfxSheet<'_>> {
+        Vec::new()
     }
 }
 

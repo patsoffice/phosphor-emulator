@@ -1222,6 +1222,22 @@ impl InputConfigurable for MarioBrosSystem {
 impl MachineCore for MarioBrosSystem {
     crate::machine_core_metadata!("mariobros", crate::mario_bros::TIMING);
 
+    fn gfx_sheets(&self) -> Vec<phosphor_core::core::machine::GfxSheet<'_>> {
+        use phosphor_core::core::machine::GfxSheet;
+        vec![
+            GfxSheet {
+                name: "tiles",
+                cache: &self.board.tile_cache,
+                palette: &self.board.palette_rgb,
+            },
+            GfxSheet {
+                name: "sprites",
+                cache: &self.board.sprite_cache,
+                palette: &self.board.palette_rgb,
+            },
+        ]
+    }
+
     fn run_frame(&mut self) {
         bus_split!(self, bus => {
             for _ in 0..crate::mario_bros::TIMING.cycles_per_frame() {

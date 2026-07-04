@@ -1,5 +1,5 @@
 use clap::Parser;
-use phosphor_machines::{gfx_registry, registry};
+use phosphor_machines::registry;
 
 mod audio;
 mod config;
@@ -118,31 +118,17 @@ fn main() {
             std::process::exit(1);
         });
 
-    // GFX viewer: decode the ROM set's charset/sprite regions and display them
-    // interactively, without constructing or running the machine.
+    let mut machine = create_from_first_rom_set(entry, &rom_path);
+
+    // GFX viewer: display the machine's decoded charset/sprite sheets (which it
+    // built from ROM during construction) interactively, without running it.
     if cli.gfxview {
-        // Resolve the ROM set via the machine's registry rom-set names, the same
-        // way the normal loader does (e.g. "congobongo" → congo.zip), preferring
-        // the first name the gfx regions can actually read from.
-        let regions = gfx_registry::regions_for(&machine_name);
-        let rom_set = entry
-            .rom_names
-            .iter()
-            .filter_map(|name| rom_path::load_rom_set(name, &rom_path).ok())
-            .find(|set| regions.first().is_some_and(|r| (r.load)(set).is_ok()))
-            .or_else(|| rom_path::load_rom_set(&machine_name, &rom_path).ok())
-            .unwrap_or_else(|| {
-                eprintln!("Failed to load ROMs for {machine_name} from {rom_path}");
-                std::process::exit(1);
-            });
-        if let Err(e) = gfxview::run(&machine_name, &rom_set, cli.gfx_region.as_deref()) {
+        if let Err(e) = gfxview::run(&machine_name, machine.as_ref(), cli.gfx_region.as_deref()) {
             eprintln!("gfxview: {e}");
             std::process::exit(1);
         }
         return;
     }
-
-    let mut machine = create_from_first_rom_set(entry, &rom_path);
 
     // Load battery-backed NVRAM from disk (if available)
     let nvram_path = nvram_path_for(&config, per_game.nvram_path.as_deref(), &machine_name);

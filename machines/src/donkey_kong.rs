@@ -692,6 +692,10 @@ impl MachineCore for DkongSystem {
             self.board.sound_cpu.reset(bus, BusMaster::Cpu(1));
         });
     }
+
+    fn gfx_sheets(&self) -> Vec<phosphor_core::core::machine::GfxSheet<'_>> {
+        self.board.gfx_sheets()
+    }
 }
 
 impl SaveState for DkongSystem {

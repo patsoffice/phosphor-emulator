@@ -1310,6 +1310,27 @@ crate::impl_board_delegation!(CongoBongoSystem, board, crate::congo_bongo::TIMIN
 impl MachineCore for CongoBongoSystem {
     crate::machine_core_metadata!("congobongo", crate::congo_bongo::TIMING);
 
+    fn gfx_sheets(&self) -> Vec<phosphor_core::core::machine::GfxSheet<'_>> {
+        use phosphor_core::core::machine::GfxSheet;
+        vec![
+            GfxSheet {
+                name: "fg",
+                cache: &self.board.tx_cache,
+                palette: &self.board.palette_rgb,
+            },
+            GfxSheet {
+                name: "bg",
+                cache: &self.board.bg_cache,
+                palette: &self.board.palette_rgb,
+            },
+            GfxSheet {
+                name: "sprites",
+                cache: &self.board.sprite_cache,
+                palette: &self.board.palette_rgb,
+            },
+        ]
+    }
+
     fn run_frame(&mut self) {
         bus_split!(self, bus => {
             for _ in 0..crate::congo_bongo::TIMING.cycles_per_frame() {

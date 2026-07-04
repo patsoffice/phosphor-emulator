@@ -2,6 +2,7 @@ use crate::dkong_sound::DkongDiscreteSound;
 use phosphor_core::audio::AudioResampler;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::debug_trace::{DebugEvent, DebugEventKind, DebugTraceBuffer};
+use phosphor_core::core::machine::GfxSheet;
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::watchpoint::DebugAccessSource;
 use phosphor_core::core::{AccessKind, AddressSpace16};
@@ -428,6 +429,24 @@ impl Tkg04Board {
     /// and each machine's gfxview export apply identical resistor-net math.
     pub fn build_palette(&mut self) {
         self.palette_rgb = compute_tkg04_palette(&self.palette_prom);
+    }
+
+    /// Decoded tile/sprite sheets for the interactive GFX viewer (`--gfxview`).
+    /// Shared by every TKG-04 game (DK, DK Jr); the caches carry each game's
+    /// own decoded geometry.
+    pub(crate) fn gfx_sheets(&self) -> Vec<GfxSheet<'_>> {
+        vec![
+            GfxSheet {
+                name: "tiles",
+                cache: &self.tile_cache,
+                palette: &self.palette_rgb,
+            },
+            GfxSheet {
+                name: "sprites",
+                cache: &self.sprite_cache,
+                palette: &self.palette_rgb,
+            },
+        ]
     }
 
     // -----------------------------------------------------------------------
