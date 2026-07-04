@@ -392,6 +392,10 @@ impl Bus for BurgertimeSystem {
 crate::impl_board_delegation!(BurgertimeSystem, board, btime::TIMING);
 
 impl MachineCore for BurgertimeSystem {
+    fn gfx_sheets(&self) -> Vec<phosphor_core::core::machine::GfxSheet<'_>> {
+        self.board.gfx_sheets()
+    }
+
     fn run_frame(&mut self) {
         // Run one frame's worth of main-CPU cycles. The live VBLANK bit (read at
         // 0x4003) is derived from the clock each cycle, so the game's frame sync

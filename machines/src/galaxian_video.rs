@@ -301,6 +301,19 @@ impl GalaxianVideo {
     /// The two 2bpp bitplanes are stored in the lower and upper halves of the
     /// ROM (`RGN_FRAC(0,2)` / `RGN_FRAC(1,2)`); plane 0 is the pixel LSB. Chars
     /// (256 × 8×8) and sprites (64 × 16×16) are two views of the same data.
+    /// Decoded char tiles, sprites, and the tile/sprite RGB palette, for the
+    /// interactive GFX viewer (`--gfxview`). The starfield/bullet palettes are
+    /// deliberately not exposed here — they don't color the tile/sprite caches.
+    pub(crate) fn tile_cache(&self) -> &GfxCache {
+        &self.tile_cache
+    }
+    pub(crate) fn sprite_cache(&self) -> &GfxCache {
+        &self.sprite_cache
+    }
+    pub(crate) fn palette_rgb(&self) -> &[(u8, u8, u8)] {
+        &self.palette_rgb
+    }
+
     pub fn load_gfx_rom(&mut self, gfx_data: &[u8]) {
         let half_bits = (gfx_data.len() / 2) * 8;
 

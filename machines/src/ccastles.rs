@@ -1221,6 +1221,11 @@ impl Saveable for CrystalCastlesSystem {
 }
 
 impl MachineCore for CrystalCastlesSystem {
+    // No gfx_sheets() override: the playfield is a 4bpp VRAM bitmap (no tile
+    // cache), and the lone sprite cache colors entirely from palette color code
+    // 0, which is black — a pen-group-0 sheet would be an all-black window.
+    // Revisit if/when the viewer gains color-code selection.
+
     fn run_frame(&mut self) {
         for _ in 0..TIMING.cycles_per_frame() {
             self.tick();

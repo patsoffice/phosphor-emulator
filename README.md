@@ -98,22 +98,24 @@ See [docs/disassembler.md](docs/disassembler.md) for all three modes (`raw`, `ro
 
 ### Viewing GFX ROMs
 
-Decode a machine's charset/sprite tile ROMs into a picture — the color-PROM palette applied, no running machine — to check bit-plane layout and colors during bring-up, or to diff against a MAME GFX dump. Two front-ends share one decoder:
+Decode a machine's charset/sprite tile ROMs into a picture — the machine's palette applied — to check bit-plane layout and colors. Two paths share one compositor:
 
-**Interactive viewer** (a window, in the frontend):
+**Interactive viewer** (a window, in the frontend). Works for **any tile/sprite machine** for free — it shows the sheets the running machine already decoded (Pac-Man, Galaxian, Galaga, Dig Dug, Q*bert, BurgerTime, the Namco/Nintendo/Sega/Galaxian families, …):
 
 ```bash
-# Browse a machine's GFX regions; ←/→ cycle, +/- zoom, 0 refit, Esc quits
-cargo run -p phosphor-frontend -- congobongo /path/to/roms --gfxview
+# Browse a machine's GFX sheets; ←/→ cycle, +/- zoom, 0 refit, Esc quits
+cargo run -p phosphor-frontend -- pacman /path/to/roms --gfxview
 
-# Open on a specific region (default: the first registered one)
+# Open on a specific sheet (default: the first one)
 cargo run -p phosphor-frontend -- dkong /path/to/roms --gfxview --gfx-region sprites
 ```
 
-**PNG sheet export** (offline, in the `disasm` tool — no window, CI-friendly):
+The machine is booted for a moment first so palette-RAM-driven colors are populated. Vector/bitmap-framebuffer machines (Asteroids, I, Robot's 3-D, Crystal Castles) have no tile sheets and report so.
+
+**PNG sheet export** (offline, in the `disasm` tool — no running machine, CI-friendly). This is the **bring-up** path: validate a new machine's bit-plane layout + PROM palette by diffing a sheet against a MAME GFX dump *before* the scanline renderer works. It needs a `GfxRegion` registered for the machine (currently Donkey Kong, Mario Bros., Congo Bongo):
 
 ```bash
-# List a machine's GFX regions (no ROMs needed)
+# List a machine's registered GFX regions (no ROMs needed)
 cargo run -p phosphor-disasm --bin disasm -- gfxview --machine congobongo
 
 # Export a region to a PNG tile/sprite sheet
@@ -121,7 +123,7 @@ cargo run -p phosphor-disasm --bin disasm -- gfxview --machine congobongo --regi
     /path/to/roms --scale 2 --cols 8 -o congo_sprites.png
 ```
 
-Colors come from the machine's color PROM where it has one (else a grayscale ramp), indexed at pen group 0 — per-tile color attributes aren't known without live video RAM. Registered machines include Donkey Kong, Mario Bros., and Congo Bongo.
+Both paths color pixels at **pen group 0** — per-tile color codes aren't known without live video RAM, so a machine whose color code 0 is unused (e.g. Crystal Castles) isn't shown.
 
 ## Workspace Architecture
 

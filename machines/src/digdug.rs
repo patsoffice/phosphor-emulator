@@ -1115,6 +1115,27 @@ impl MachineDebug for DigDugSystem {
 impl MachineCore for DigDugSystem {
     crate::machine_core_metadata!("digdug", namco_galaga::TIMING);
 
+    fn gfx_sheets(&self) -> Vec<phosphor_core::core::machine::GfxSheet<'_>> {
+        use phosphor_core::core::machine::GfxSheet;
+        vec![
+            GfxSheet {
+                name: "chars",
+                cache: &self.char_cache,
+                palette: &self.board.palette_rgb,
+            },
+            GfxSheet {
+                name: "bg",
+                cache: &self.bg_tile_cache,
+                palette: &self.board.palette_rgb,
+            },
+            GfxSheet {
+                name: "sprites",
+                cache: &self.sprite_cache,
+                palette: &self.board.palette_rgb,
+            },
+        ]
+    }
+
     fn run_frame(&mut self) {
         bus_split!(self, bus => {
             for _ in 0..namco_galaga::TIMING.cycles_per_frame() {

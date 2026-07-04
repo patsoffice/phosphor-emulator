@@ -120,9 +120,20 @@ fn main() {
 
     let mut machine = create_from_first_rom_set(entry, &rom_path);
 
-    // GFX viewer: display the machine's decoded charset/sprite sheets (which it
-    // built from ROM during construction) interactively, without running it.
+    // GFX viewer: display the machine's decoded charset/sprite sheets.
     if cli.gfxview {
+        // Boot the machine briefly first. Machines with a color-PROM palette are
+        // already colored at ROM-load, but many (DECO BurgerTime, MCR, Gottlieb,
+        // Atari raster) build their palette from palette RAM the game only writes
+        // once running — un-booted, that RAM is at its power-on state (e.g.
+        // BurgerTime's inverted format decodes zeroed RAM to all-white). Running
+        // a couple seconds of attract-mode frames populates it; PROM machines are
+        // unaffected.
+        const GFXVIEW_BOOT_FRAMES: u32 = 180;
+        machine.reset();
+        for _ in 0..GFXVIEW_BOOT_FRAMES {
+            machine.run_frame();
+        }
         if let Err(e) = gfxview::run(&machine_name, machine.as_ref(), cli.gfx_region.as_deref()) {
             eprintln!("gfxview: {e}");
             std::process::exit(1);

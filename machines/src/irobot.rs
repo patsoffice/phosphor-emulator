@@ -1138,6 +1138,17 @@ impl AudioSource for IrobotSystem {
 }
 
 impl MachineCore for IrobotSystem {
+    fn gfx_sheets(&self) -> Vec<phosphor_core::core::machine::GfxSheet<'_>> {
+        use phosphor_core::core::machine::GfxSheet;
+        // I, Robot renders 3-D polygons into a framebuffer; its only decoded
+        // GFX is the alphanumeric overlay font.
+        vec![GfxSheet {
+            name: "chars",
+            cache: &self.char_cache,
+            palette: &self.text_palette,
+        }]
+    }
+
     fn run_frame(&mut self) {
         for _ in 0..TIMING.cycles_per_frame() {
             self.tick();

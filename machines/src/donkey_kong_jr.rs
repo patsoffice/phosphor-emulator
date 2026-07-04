@@ -459,6 +459,10 @@ impl InputConfigurable for DkongJrSystem {
 impl MachineCore for DkongJrSystem {
     crate::machine_core_metadata!("dkongjr", tkg04::TIMING);
 
+    fn gfx_sheets(&self) -> Vec<phosphor_core::core::machine::GfxSheet<'_>> {
+        self.board.gfx_sheets()
+    }
+
     fn run_frame(&mut self) {
         bus_split!(self, bus => {
             for _ in 0..tkg04::TIMING.cycles_per_frame() {

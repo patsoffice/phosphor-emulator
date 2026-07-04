@@ -1020,6 +1020,18 @@ impl Saveable for GridleeSystem {
 }
 
 impl MachineCore for GridleeSystem {
+    fn gfx_sheets(&self) -> Vec<phosphor_core::core::machine::GfxSheet<'_>> {
+        use phosphor_core::core::machine::GfxSheet;
+        // Gridlee's playfield is a VRAM bitmap; only the sprites are a decoded
+        // cache. Its palette is 64 banks × 32 colors selected per-scanline, so
+        // there's no single "the" palette — show bank 0's 32 entries.
+        vec![GfxSheet {
+            name: "sprites",
+            cache: &self.sprite_cache,
+            palette: &self.palette_rgb[..32],
+        }]
+    }
+
     fn run_frame(&mut self) {
         for _ in 0..TIMING.cycles_per_frame() {
             self.tick();

@@ -371,6 +371,29 @@ impl BtimeBoard {
         &self.bg_map
     }
 
+    /// Decoded char/bg/sprite sheets for the interactive GFX viewer
+    /// (`--gfxview`). A board method so it can borrow the private `palette_rgb`.
+    pub(crate) fn gfx_sheets(&self) -> Vec<phosphor_core::core::machine::GfxSheet<'_>> {
+        use phosphor_core::core::machine::GfxSheet;
+        vec![
+            GfxSheet {
+                name: "chars",
+                cache: &self.chars,
+                palette: &self.palette_rgb,
+            },
+            GfxSheet {
+                name: "bg",
+                cache: &self.bg_tiles,
+                palette: &self.palette_rgb,
+            },
+            GfxSheet {
+                name: "sprites",
+                cache: &self.sprites,
+                palette: &self.palette_rgb,
+            },
+        ]
+    }
+
     /// Recompute one palette entry from `palette_ram` using the DECO
     /// `BGR_233_inverted` decode (invert, then R=bits0-2, G=bits3-5, B=bits6-7).
     fn update_palette_entry(&mut self, i: usize) {

@@ -431,6 +431,22 @@ impl InputConfigurable for QbertSystem {
 impl MachineCore for QbertSystem {
     crate::machine_core_metadata!("qbert", gottlieb::TIMING);
 
+    fn gfx_sheets(&self) -> Vec<phosphor_core::core::machine::GfxSheet<'_>> {
+        use phosphor_core::core::machine::GfxSheet;
+        vec![
+            GfxSheet {
+                name: "tiles",
+                cache: &self.board.tile_rom_cache,
+                palette: &self.board.palette_rgb,
+            },
+            GfxSheet {
+                name: "sprites",
+                cache: &self.board.sprite_cache,
+                palette: &self.board.palette_rgb,
+            },
+        ]
+    }
+
     fn run_frame(&mut self) {
         let t0 = self.board.profiling.then(Instant::now);
 

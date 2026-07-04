@@ -199,6 +199,22 @@ crate::impl_board_delegation!(PacmanSystem, board, namco_pac::TIMING);
 impl MachineCore for PacmanSystem {
     crate::machine_core_metadata!("pacman", namco_pac::TIMING);
 
+    fn gfx_sheets(&self) -> Vec<phosphor_core::core::machine::GfxSheet<'_>> {
+        use phosphor_core::core::machine::GfxSheet;
+        vec![
+            GfxSheet {
+                name: "tiles",
+                cache: &self.board.tile_cache,
+                palette: &self.board.palette_rgb,
+            },
+            GfxSheet {
+                name: "sprites",
+                cache: &self.board.sprite_cache,
+                palette: &self.board.palette_rgb,
+            },
+        ]
+    }
+
     fn run_frame(&mut self) {
         bus_split!(self, bus => {
             for _ in 0..namco_pac::TIMING.cycles_per_frame() {

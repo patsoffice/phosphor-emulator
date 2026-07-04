@@ -922,6 +922,23 @@ crate::impl_board_delegation!(GalaxianSystem, board, TIMING);
 impl MachineCore for GalaxianSystem {
     crate::machine_core_metadata!("galaxian", TIMING);
 
+    fn gfx_sheets(&self) -> Vec<phosphor_core::core::machine::GfxSheet<'_>> {
+        use phosphor_core::core::machine::GfxSheet;
+        let v = &self.board.video;
+        vec![
+            GfxSheet {
+                name: "chars",
+                cache: v.tile_cache(),
+                palette: v.palette_rgb(),
+            },
+            GfxSheet {
+                name: "sprites",
+                cache: v.sprite_cache(),
+                palette: v.palette_rgb(),
+            },
+        ]
+    }
+
     fn run_frame(&mut self) {
         bus_split!(self, bus => {
             for _ in 0..TIMING.cycles_per_frame() {

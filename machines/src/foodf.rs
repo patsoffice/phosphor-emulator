@@ -968,6 +968,22 @@ impl InputConfigurable for FoodFightSystem {
 impl MachineCore for FoodFightSystem {
     crate::machine_core_metadata!("foodf", TIMING);
 
+    fn gfx_sheets(&self) -> Vec<phosphor_core::core::machine::GfxSheet<'_>> {
+        use phosphor_core::core::machine::GfxSheet;
+        vec![
+            GfxSheet {
+                name: "tiles",
+                cache: &self.tile_cache,
+                palette: &self.palette_rgb,
+            },
+            GfxSheet {
+                name: "sprites",
+                cache: &self.sprite_cache,
+                palette: &self.palette_rgb,
+            },
+        ]
+    }
+
     fn run_frame(&mut self) {
         for _ in 0..TIMING.cycles_per_frame() {
             self.tick();
