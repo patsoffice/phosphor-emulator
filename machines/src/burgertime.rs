@@ -685,7 +685,8 @@ mod tests {
     fn metadata_matches_board() {
         let sys = BurgertimeSystem::new();
         assert_eq!(sys.machine_id(), "burgertime");
-        assert_eq!(sys.display_size(), (240, 320)); // 3:4 portrait presentation
+        assert_eq!(sys.display_size(), (240, 240)); // native square raster
+        assert_eq!(sys.display_aspect(), Some((3, 4))); // presented 3:4 portrait
     }
 
     #[test]

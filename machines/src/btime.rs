@@ -219,8 +219,8 @@ pub struct BtimeBoard {
     bg_tiles: GfxCache,   // 16×16×3, 64 tiles (gfx2)
     bg_map: [u8; 0x0800], // background tilemap selector ROM
 
-    // Display framebuffer (240×320 RGB), refreshed once per frame at the end of
-    // run_frame. Derived output, not part of the save state.
+    // Display framebuffer (native 240×240 RGB, square pixels), refreshed once per
+    // frame at the end of run_frame. Derived output, not part of the save state.
     framebuffer: Vec<u8>,
 
     // DECO CPU-7 decryption state: any main-CPU write arms decryption of the
