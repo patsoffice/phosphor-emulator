@@ -890,3 +890,56 @@ pub fn fit_aspect(available: egui::Vec2, aspect: f32) -> (egui::Vec2, egui::Vec2
         egui::Vec2::new((available.x - w) / 2.0, (available.y - h) / 2.0),
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn square_pixels_when_no_hint() {
+        // No aspect hint → present at the native ratio (square pixels).
+        let (w, h, a) = presentation(256, 224, None, false);
+        assert_eq!((w, h), (256, 224));
+        assert!((a - 256.0 / 224.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn landscape_hint_widens_deficient_axis() {
+        // 256×224 raster on a 4:3 tube: too narrow → widen, never shrink height.
+        let (w, h, a) = presentation(256, 224, Some((4, 3)), false);
+        assert_eq!(h, 224);
+        assert_eq!(w, (224.0_f32 * 4.0 / 3.0).round() as u32); // 299
+        // Integer rounding leaves the returned aspect near, not exactly, 4:3.
+        assert!((a - 4.0 / 3.0).abs() < 1e-2);
+    }
+
+    #[test]
+    fn portrait_hint_heightens_deficient_axis() {
+        // Burgertime 240×240 square on a rotated 4:3 tube → 3:4, height stretched.
+        let (w, h, a) = presentation(240, 240, Some((3, 4)), false);
+        assert_eq!(w, 240);
+        assert_eq!(h, 320);
+        assert!((a - 3.0 / 4.0).abs() < 1e-4);
+
+        // A pre-rotated raster (baked portrait, screen_rotation None) too.
+        let (w, h, _) = presentation(224, 256, Some((3, 4)), false);
+        assert_eq!((w, h), (224, (224.0_f32 / 0.75).round() as u32)); // 224×299
+    }
+
+    #[test]
+    fn rotation_swaps_axes_before_aspect() {
+        // Tempest: native 580×570 landscape space, screen-rotated to portrait,
+        // presented on a 3:4 tube. Aspect is applied in as-viewed orientation.
+        let (w, h, a) = presentation(580, 570, Some((3, 4)), true);
+        assert!(w < h, "rotated 3:4 must be portrait, got {w}x{h}");
+        assert!((a - 3.0 / 4.0).abs() < 1e-2);
+    }
+
+    #[test]
+    fn fit_aspect_letterboxes_and_centers() {
+        // Wider-than-aspect available area → pillarbox (bars left/right).
+        let (size, offset) = fit_aspect(egui::Vec2::new(400.0, 300.0), 1.0);
+        assert!((size.x - 300.0).abs() < 1e-3 && (size.y - 300.0).abs() < 1e-3);
+        assert!((offset.x - 50.0).abs() < 1e-3 && offset.y.abs() < 1e-3);
+    }
+}
