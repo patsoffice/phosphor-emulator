@@ -30,7 +30,8 @@ fn registered_and_metadata() {
     assert!(phosphor_machines::registry::find("burgertime").is_some());
     let sys = BurgertimeSystem::new();
     assert_eq!(sys.machine_id(), "burgertime");
-    assert_eq!(sys.display_size(), (240, 320)); // 3:4 portrait
+    assert_eq!(sys.display_size(), (240, 240)); // native square raster
+    assert_eq!(sys.display_aspect(), Some((3, 4))); // presented 3:4 portrait
     assert_eq!(sys.input_controls().len(), 15);
     assert!((sys.frame_rate_hz() - 57.44).abs() < 0.5);
 }

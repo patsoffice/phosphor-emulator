@@ -101,8 +101,8 @@ const NUM_BG_TILES: usize = 64;
 // (color base 8); chars/sprites use 0..7.
 //
 // The square raster is displayed on a 4:3 tube rotated to portrait, so the final
-// display is 3:4 — the 240×240 image is stretched vertically to 240×320 to
-// restore the intended aspect (see TIMING.display_*).
+// display is 3:4. The framebuffer stays native 240×240 (square pixels); the
+// frontend stretches it to the 3:4 presentation via TIMING.display_aspect.
 const NATIVE_DIM: usize = 256;
 const CROP_LO: usize = 8;
 const VISIBLE_DIM: usize = 240;
@@ -143,11 +143,11 @@ pub const TIMING: TimingConfig = TimingConfig {
     cpu_clock_hz: 1_500_000, // 12 MHz / 8
     cycles_per_scanline: 96, // HTOTAL 384 pixel clocks / 4
     total_scanlines: 272,    // VTOTAL
-    // Display size is the presentation size, not the raster: the 240×240 visible
-    // square is shown 3:4 (portrait 4:3 tube), so height is stretched to 320.
+    // Native square raster (240×240); the 4:3 tube is rotated to portrait, so
+    // the frontend presents it 3:4 via display_aspect (no baked CPU stretch).
     display_width: 240,
-    display_height: 320,
-    display_aspect: None,
+    display_height: 240,
+    display_aspect: Some((3, 4)),
 };
 
 // ---------------------------------------------------------------------------
@@ -489,22 +489,12 @@ impl BtimeBoard {
     // --- Capability-trait helpers (called by the game wrapper) ---
 
     /// Refresh the display framebuffer from current video state. Called once per
-    /// frame at the end of `run_frame`. Draws the visible 240×240 image, then
-    /// stretches it vertically to the 3:4 presentation aspect (240×320).
+    /// frame at the end of `run_frame`. Draws the visible 240×240 native square
+    /// raster; the frontend applies the 3:4 aspect (see TIMING.display_aspect).
     pub fn render(&mut self) {
-        let mut visible = vec![0u8; VISIBLE_DIM * VISIBLE_DIM * 3];
-        self.render_visible(&mut visible);
-
-        // Vertical nearest-neighbor stretch VISIBLE_DIM -> display height.
-        let (w, h) = TIMING.display_size();
-        let (w, h) = (w as usize, h as usize);
-        let row_bytes = w * 3;
-        for oy in 0..h {
-            let sy = oy * VISIBLE_DIM / h;
-            let src = sy * row_bytes;
-            let dst = oy * row_bytes;
-            self.framebuffer[dst..dst + row_bytes].copy_from_slice(&visible[src..src + row_bytes]);
-        }
+        let mut fb = std::mem::take(&mut self.framebuffer);
+        self.render_visible(&mut fb);
+        self.framebuffer = fb;
     }
 
     /// Copy the latest framebuffer into the frontend's `buffer`.
@@ -1298,7 +1288,7 @@ mod tests {
     }
 
     #[test]
-    fn render_frame_stretches_visible_to_3x4_display() {
+    fn render_frame_is_native_square_with_3x4_aspect_hint() {
         let mut b = board();
         // Some vertical variation: a red char at one cell.
         let mut gfx1 = vec![0u8; 0x6000];
@@ -1309,22 +1299,19 @@ mod tests {
         b.bus_write(BusMaster::Cpu(0), 0x0C01, 0xF8); // entry 1 -> red
         b.videoram[300] = 1;
 
+        // Native raster is the square 240×240; the 3:4 portrait presentation is
+        // a frontend-side aspect hint, not a baked framebuffer stretch.
         let (w, h) = TIMING.display_size();
-        let (w, h) = (w as usize, h as usize);
-        assert_eq!((w, h), (240, 320), "portrait 3:4 presentation");
+        assert_eq!((w, h), (240, 240), "native square raster");
+        assert_eq!(TIMING.display_aspect(), Some((3, 4)), "3:4 portrait hint");
 
         let mut vis = vec![0u8; VISIBLE_DIM * VISIBLE_DIM * 3];
         b.render_visible(&mut vis);
         b.render(); // refresh the framebuffer from current state
-        let mut disp = vec![0u8; w * h * 3];
+        let mut disp = vec![0u8; (w * h * 3) as usize];
         b.render_frame(&mut disp);
 
-        // Each display row is exactly the stretched visible row (oy*240/320).
-        for oy in 0..h {
-            let sy = oy * VISIBLE_DIM / h;
-            let d = &disp[oy * w * 3..(oy + 1) * w * 3];
-            let s = &vis[sy * VISIBLE_DIM * 3..(sy + 1) * VISIBLE_DIM * 3];
-            assert_eq!(d, s, "display row {oy} maps to visible row {sy}");
-        }
+        // render_frame emits the visible square verbatim — no vertical stretch.
+        assert_eq!(disp, vis, "framebuffer is the native 240×240 visible image");
     }
 }
