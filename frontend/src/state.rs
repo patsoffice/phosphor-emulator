@@ -31,6 +31,9 @@ pub struct MachineSettings {
     /// Per-game window scale override.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scale: Option<u32>,
+    /// Per-game fullscreen override. `None` falls back to the global config.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fullscreen: Option<bool>,
     /// Per-game ROM directory/file override.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rom_path: Option<String>,
@@ -54,6 +57,7 @@ impl MachineSettings {
     /// from [`State::machines`] so unchanged games leave no trace in state.toml.
     pub fn is_empty(&self) -> bool {
         self.scale.is_none()
+            && self.fullscreen.is_none()
             && self.rom_path.is_none()
             && self.nvram_path.is_none()
             && self.save_path.is_none()

@@ -48,6 +48,7 @@ pub fn run(
     machine: &mut dyn FrontendMachine,
     bindings: &mut BindingSet,
     scale: u32,
+    fullscreen: bool,
     save_path: &Path,
     screenshot_dir: &Path,
     machine_name: &str,
@@ -138,6 +139,7 @@ pub fn run(
         win_h,
         scale,
         window_pos,
+        fullscreen,
     );
     let mut event_pump = sdl_context.event_pump().expect("Failed to get event pump");
 
@@ -797,10 +799,14 @@ pub fn run(
         }
     }
 
-    // Save window position for next launch
-    let (wx, wy) = video.window_position();
-    state.window_x = Some(wx);
-    state.window_y = Some(wy);
+    // Save window position for next launch (skip in fullscreen, where the
+    // reported position is the desktop origin and would clobber the windowed
+    // placement).
+    if !fullscreen {
+        let (wx, wy) = video.window_position();
+        state.window_x = Some(wx);
+        state.window_y = Some(wy);
+    }
 
     // Flush profiler trace if still recording
     if profile_state.active {

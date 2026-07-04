@@ -30,6 +30,10 @@ struct Cli {
     #[arg(long)]
     scale: Option<u32>,
 
+    /// Start in desktop fullscreen (overrides config; default is windowed)
+    #[arg(long)]
+    fullscreen: bool,
+
     /// Start with debug UI visible
     #[arg(long)]
     debug: bool,
@@ -160,6 +164,10 @@ fn main() {
         .or(config.scale)
         .unwrap_or_else(|| auto_scale(pres_w, pres_h));
 
+    // CLI --fullscreen forces it on; otherwise fall back through per-game then
+    // global config, defaulting to windowed.
+    let fullscreen = cli.fullscreen || per_game.fullscreen.or(config.fullscreen).unwrap_or(false);
+
     let save_path = save_path_for(&config, per_game.save_path.as_deref(), &machine_name);
     let screenshot_dir = screenshot_dir();
 
@@ -196,6 +204,7 @@ fn main() {
         machine.as_mut(),
         &mut bindings,
         scale,
+        fullscreen,
         &save_path,
         &screenshot_dir,
         &machine_name,

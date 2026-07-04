@@ -5,6 +5,7 @@
 //! - `nvram_path` — directory for battery-backed NVRAM files
 //! - `save_path` — directory for save state files
 //! - `scale` — default window scale factor
+//! - `fullscreen` — start in desktop fullscreen (default: windowed)
 //!
 //! These are the *global* defaults. Each field can be overridden per game via a
 //! machine's `MachineSettings` in `state.toml`; the resolution order applied in
@@ -20,6 +21,8 @@ pub struct Config {
     pub nvram_path: Option<String>,
     pub save_path: Option<String>,
     pub scale: Option<u32>,
+    /// Start in desktop fullscreen. Absent (or `false`) keeps windowed mode.
+    pub fullscreen: Option<bool>,
 }
 
 /// Return the platform config directory: `~/.config/phosphor` (macOS/Linux).

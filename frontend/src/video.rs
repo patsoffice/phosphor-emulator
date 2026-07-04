@@ -16,6 +16,7 @@ pub struct Video {
     native_height: u32,
     rgba_buffer: Vec<u8>,
     start_time: Instant,
+    fullscreen: bool,
 }
 
 impl Video {
@@ -34,6 +35,7 @@ impl Video {
         window_height: u32,
         scale: u32,
         position: Option<(i32, i32)>,
+        fullscreen: bool,
     ) -> Self {
         let gl_attr = sdl_video.gl_attr();
         gl_attr.set_context_profile(GLProfile::Core);
@@ -48,6 +50,12 @@ impl Video {
             builder.position(x, y);
         } else {
             builder.position_centered();
+        }
+        // Desktop fullscreen: borderless at the display's native resolution. The
+        // presentation letterbox (egui central panel + fit_aspect) fills it at
+        // the correct aspect with black bars, so no window-size math is needed.
+        if fullscreen {
+            builder.fullscreen_desktop();
         }
         let window = builder.build().expect("Failed to create window");
 
@@ -82,6 +90,7 @@ impl Video {
             native_height,
             rgba_buffer,
             start_time: Instant::now(),
+            fullscreen,
         }
     }
 
@@ -214,8 +223,13 @@ impl Video {
         self.window.position()
     }
 
-    /// Resize the window.
+    /// Resize the window to make room for side panels. No-op in fullscreen,
+    /// where the window stays at the display resolution and panels simply
+    /// subtract from the central game area.
     pub fn resize_window(&mut self, width: u32, height: u32) {
+        if self.fullscreen {
+            return;
+        }
         self.window
             .set_size(width, height)
             .expect("Failed to resize window");
