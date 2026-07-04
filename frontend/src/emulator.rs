@@ -120,13 +120,14 @@ pub fn run(
     }
 
     let (width, height) = machine.display_size();
-    // Swap window dimensions for rotated displays (e.g., Tempest portrait).
-    let (win_w, win_h) =
-        if machine.screen_rotation() != phosphor_core::core::machine::ScreenRotation::None {
-            (height, width)
-        } else {
-            (width, height)
-        };
+    // The native texture stays (width, height); the window is sized to the
+    // machine's target display aspect (4:3 tube, rotated to 3:4 for portrait
+    // cabinets) so the GPU corrects pixel aspect at presentation time. Rotated
+    // displays (e.g. Tempest) additionally swap axes — all handled by
+    // `presentation`. `view_aspect` (as-viewed w/h) drives every letterbox.
+    let rotated = machine.screen_rotation() != phosphor_core::core::machine::ScreenRotation::None;
+    let (win_w, win_h, view_aspect) =
+        presentation(width, height, machine.display_aspect(), rotated);
     let window_pos = state.window_x.zip(state.window_y);
     let mut video = Video::new(
         &sdl_video,
@@ -206,7 +207,7 @@ pub fn run(
     {
         let panels = panels_width(&debug_state, &profile_state, &settings_state);
         if panels > 0 {
-            video.resize_window(width * scale + panels, height * scale);
+            video.resize_window(win_w * scale + panels, win_h * scale);
         }
     }
 
@@ -263,8 +264,8 @@ pub fn run(
                         debug_state.run_mode = RunMode::Running;
                     }
                     video.resize_window(
-                        width * scale + panels_width(&debug_state, &profile_state, &settings_state),
-                        height * scale,
+                        win_w * scale + panels_width(&debug_state, &profile_state, &settings_state),
+                        win_h * scale,
                     );
                 }
 
@@ -357,8 +358,8 @@ pub fn run(
                         profile_state.start();
                     }
                     video.resize_window(
-                        width * scale + panels_width(&debug_state, &profile_state, &settings_state),
-                        height * scale,
+                        win_w * scale + panels_width(&debug_state, &profile_state, &settings_state),
+                        win_h * scale,
                     );
                 }
 
@@ -371,8 +372,8 @@ pub fn run(
                     settings_state.active = !settings_state.active;
                     settings_state.capturing = None;
                     video.resize_window(
-                        width * scale + panels_width(&debug_state, &profile_state, &settings_state),
-                        height * scale,
+                        win_w * scale + panels_width(&debug_state, &profile_state, &settings_state),
+                        win_h * scale,
                     );
                 }
 
@@ -384,8 +385,8 @@ pub fn run(
                 } if has_dip => {
                     settings_state.dip_active = !settings_state.dip_active;
                     video.resize_window(
-                        width * scale + panels_width(&debug_state, &profile_state, &settings_state),
-                        height * scale,
+                        win_w * scale + panels_width(&debug_state, &profile_state, &settings_state),
+                        win_h * scale,
                     );
                 }
 
@@ -612,37 +613,51 @@ pub fn run(
                     } else {
                         None
                     };
-                    video.present_vectors_with_overlay(renderer, lines, ds, rot, |ctx| {
-                        let label = |ui: &mut egui::Ui, text: &str| {
-                            ui.label(
-                                egui::RichText::new(text)
-                                    .color(egui::Color32::WHITE)
-                                    .background_color(egui::Color32::from_black_alpha(160))
-                                    .monospace(),
-                            );
-                        };
-                        egui::Window::new("fps_overlay")
-                            .title_bar(false)
-                            .resizable(false)
-                            .fixed_pos(egui::pos2(4.0, 4.0))
-                            .frame(egui::Frame::NONE)
-                            .show(ctx, |ui| {
-                                ui.set_min_width(120.0);
-                                if let Some(ref f) = fps {
-                                    label(ui, f);
-                                }
-                                if let Some(ref s) = stats {
-                                    label(ui, s);
-                                }
-                                if paused {
-                                    label(ui, "PAUSED");
-                                }
-                            });
-                    });
+                    video.present_vectors_with_overlay(
+                        renderer,
+                        lines,
+                        ds,
+                        view_aspect,
+                        rot,
+                        |ctx| {
+                            let label = |ui: &mut egui::Ui, text: &str| {
+                                ui.label(
+                                    egui::RichText::new(text)
+                                        .color(egui::Color32::WHITE)
+                                        .background_color(egui::Color32::from_black_alpha(160))
+                                        .monospace(),
+                                );
+                            };
+                            egui::Window::new("fps_overlay")
+                                .title_bar(false)
+                                .resizable(false)
+                                .fixed_pos(egui::pos2(4.0, 4.0))
+                                .frame(egui::Frame::NONE)
+                                .show(ctx, |ui| {
+                                    ui.set_min_width(120.0);
+                                    if let Some(ref f) = fps {
+                                        label(ui, f);
+                                    }
+                                    if let Some(ref s) = stats {
+                                        label(ui, s);
+                                    }
+                                    if paused {
+                                        label(ui, "PAUSED");
+                                    }
+                                });
+                        },
+                    );
                 } else {
                     // Still run egui pass to consume input events (prevents stale
                     // state buildup), but render no UI widgets.
-                    video.present_vectors_with_overlay(renderer, lines, ds, rot, |_ctx| {});
+                    video.present_vectors_with_overlay(
+                        renderer,
+                        lines,
+                        ds,
+                        view_aspect,
+                        rot,
+                        |_ctx| {},
+                    );
                 }
             } else {
                 // Raster machine (or debug/profiler mode): CPU framebuffer path.
@@ -687,7 +702,7 @@ pub fn run(
                     let dip_values: Vec<u8> = (0..dip_banks.len())
                         .map(|i| machine.dip_bank_value(i))
                         .collect();
-                    video.present_with_debug(|ctx, tex_id, native_size| {
+                    video.present_with_debug(|ctx, tex_id| {
                         // Profiler side panel (outermost right, drawn first)
                         if profiling {
                             crate::profile::draw_profile_panel(ctx, &profile_state, frame_duration);
@@ -715,13 +730,13 @@ pub fn run(
                             debug_ui::draw_debug_ui(
                                 ctx,
                                 tex_id,
-                                native_size,
+                                view_aspect,
                                 &mut debug_state,
                                 bus_ref,
                             );
                         } else {
                             // Game central panel with aspect ratio preservation
-                            draw_game_panel(ctx, tex_id, native_size);
+                            draw_game_panel(ctx, tex_id, view_aspect);
                         }
                     });
 
@@ -735,7 +750,7 @@ pub fn run(
                         machine.set_dip_option(change.bank, change.option, change.value);
                     }
                 } else {
-                    video.present_game_only();
+                    video.present_game_only(view_aspect);
                 }
             }
             last_render_time = Instant::now();
@@ -810,29 +825,68 @@ pub fn run(
     }
 }
 
-/// Draw the game texture in a central panel with aspect ratio preservation.
-/// Used when a side panel (profiler or debug) is active alongside the game.
-fn draw_game_panel(ctx: &egui::Context, tex_id: egui::TextureId, native_size: (u32, u32)) {
+/// Draw the game texture in a central panel at the target display aspect,
+/// letterboxed with black bars. Used when a side panel (profiler or debug) is
+/// active alongside the game.
+fn draw_game_panel(ctx: &egui::Context, tex_id: egui::TextureId, aspect: f32) {
     egui::CentralPanel::default()
         .frame(egui::Frame::NONE.fill(egui::Color32::BLACK))
         .show(ctx, |ui| {
-            let available = ui.available_size();
-            let (nw, nh) = native_size;
-            let aspect = nw as f32 / nh as f32;
-            let (display_w, display_h) = if available.x / available.y > aspect {
-                (available.y * aspect, available.y)
-            } else {
-                (available.x, available.x / aspect)
-            };
-            let offset_x = (available.x - display_w) / 2.0;
-            let offset_y = (available.y - display_h) / 2.0;
-            ui.add_space(offset_y);
+            let (size, offset) = fit_aspect(ui.available_size(), aspect);
+            ui.add_space(offset.y);
             ui.horizontal(|ui| {
-                ui.add_space(offset_x);
-                ui.image(egui::load::SizedTexture::new(
-                    tex_id,
-                    egui::Vec2::new(display_w, display_h),
-                ));
+                ui.add_space(offset.x);
+                ui.image(egui::load::SizedTexture::new(tex_id, size));
             });
         });
+}
+
+/// On-screen presentation size (before the integer `--scale`) and the as-viewed
+/// aspect ratio (width / height) for a machine's display.
+///
+/// The native texture keeps `(native_w, native_h)`; the GPU stretches it to the
+/// target aspect at presentation time. `display_aspect` is the cabinet monitor
+/// aspect as viewed (e.g. `Some((4, 3))` landscape, `Some((3, 4))` portrait), or
+/// `None` for square pixels. `rotated` applies screen-level rotation (Tempest),
+/// swapping the native axes into viewing orientation before aspect correction.
+/// The deficient axis is stretched (never shrunk) so no rendered detail is lost.
+pub fn presentation(
+    native_w: u32,
+    native_h: u32,
+    display_aspect: Option<(u32, u32)>,
+    rotated: bool,
+) -> (u32, u32, f32) {
+    // Native size as viewed, after any screen rotation.
+    let (vw, vh) = if rotated {
+        (native_h, native_w)
+    } else {
+        (native_w, native_h)
+    };
+    let native_a = vw as f32 / vh as f32;
+    let target = match display_aspect {
+        Some((w, h)) => w as f32 / h as f32,
+        None => native_a,
+    };
+    let (pw, ph) = if native_a < target {
+        // Too narrow for the tube → widen.
+        ((vh as f32 * target).round() as u32, vh)
+    } else {
+        // Too wide → heighten.
+        (vw, (vw as f32 / target).round() as u32)
+    };
+    (pw, ph, pw as f32 / ph as f32)
+}
+
+/// Fit a box of the given aspect ratio inside `available`, centered. Returns the
+/// fitted size and the top-left offset of the letterbox/pillarbox bars.
+pub fn fit_aspect(available: egui::Vec2, aspect: f32) -> (egui::Vec2, egui::Vec2) {
+    let (w, h) = if available.x / available.y > aspect {
+        (available.y * aspect, available.y)
+    } else {
+        (available.x, available.x / aspect)
+    };
+    (
+        egui::Vec2::new(w, h),
+        egui::Vec2::new((available.x - w) / 2.0, (available.y - h) / 2.0),
+    )
 }

@@ -148,11 +148,17 @@ fn main() {
     }
 
     let (native_w, native_h) = machine.display_size();
+    // Size the auto-scale off the on-screen presentation (aspect-corrected,
+    // rotation-swapped), not the raw native raster, so the longest *visible*
+    // axis stays under the cap.
+    let rotated = machine.screen_rotation() != phosphor_core::core::machine::ScreenRotation::None;
+    let (pres_w, pres_h, _) =
+        emulator::presentation(native_w, native_h, machine.display_aspect(), rotated);
     let scale = cli
         .scale
         .or(per_game.scale)
         .or(config.scale)
-        .unwrap_or_else(|| auto_scale(native_w, native_h));
+        .unwrap_or_else(|| auto_scale(pres_w, pres_h));
 
     let save_path = save_path_for(&config, per_game.save_path.as_deref(), &machine_name);
     let screenshot_dir = screenshot_dir();
@@ -343,8 +349,9 @@ fn create_from_first_rom_set(
 }
 
 /// Pick the largest integer scale that keeps the window under 1200 pixels
-/// on its longest axis (fits comfortably on most displays).
-fn auto_scale(native_w: u32, native_h: u32) -> u32 {
-    let longest = native_w.max(native_h);
+/// on its longest axis (fits comfortably on most displays). Takes the on-screen
+/// presentation size (aspect-corrected), not the native raster.
+fn auto_scale(pres_w: u32, pres_h: u32) -> u32 {
+    let longest = pres_w.max(pres_h);
     (1200 / longest).max(1)
 }

@@ -107,14 +107,19 @@ impl VectorRenderer {
 
     /// Render vector lines directly to the current framebuffer.
     ///
-    /// `display_w`/`display_h` are the vector coordinate space dimensions
+    /// `viewport_w`/`viewport_h` are the full window size; the beam field is
+    /// drawn into a centered sub-viewport of `view_aspect` (width / height) so
+    /// pixel aspect is corrected and the field is letterboxed, not stretched to
+    /// fill. `display_w`/`display_h` are the vector coordinate space dimensions
     /// (e.g. 1024×1024 for DVG, 580×570 for Tempest AVG).
     /// `rotation` is the screen-level rotation in degrees (0 or 270).
+    #[allow(clippy::too_many_arguments)]
     pub fn render(
         &mut self,
         lines: &[VectorLine],
         viewport_w: u32,
         viewport_h: u32,
+        view_aspect: f32,
         display_w: u32,
         display_h: u32,
         rotation: i32,
@@ -174,8 +179,19 @@ impl VectorRenderer {
             return;
         }
 
+        // Centered sub-viewport at the target display aspect (letterbox the
+        // beam field rather than stretch it to fill the window).
+        let (win_w, win_h) = (viewport_w as f32, viewport_h as f32);
+        let (vp_w, vp_h) = if win_w / win_h > view_aspect {
+            (win_h * view_aspect, win_h)
+        } else {
+            (win_w, win_w / view_aspect)
+        };
+        let vp_x = ((win_w - vp_w) / 2.0) as i32;
+        let vp_y = ((win_h - vp_h) / 2.0) as i32;
+
         unsafe {
-            gl::Viewport(0, 0, viewport_w as i32, viewport_h as i32);
+            gl::Viewport(vp_x, vp_y, vp_w as i32, vp_h as i32);
             gl::UseProgram(self.program);
             gl::Uniform2f(
                 self.uniform_half_size,

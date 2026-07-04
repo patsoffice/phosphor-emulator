@@ -481,7 +481,7 @@ fn draw_register_grid(ui: &mut egui::Ui, id: &str, registers: &[DebugRegister]) 
 pub fn draw_debug_ui(
     ctx: &egui::Context,
     game_texture_id: egui::TextureId,
-    native_size: (u32, u32),
+    view_aspect: f32,
     state: &mut DebugState,
     bus: Option<&dyn BusDebug>,
 ) {
@@ -509,28 +509,15 @@ pub fn draw_debug_ui(
             }
         });
 
-    // Central panel: game framebuffer with aspect ratio preservation
+    // Central panel: game framebuffer letterboxed to the target display aspect.
     egui::CentralPanel::default()
         .frame(egui::Frame::NONE.fill(egui::Color32::BLACK))
         .show(ctx, |ui| {
-            let available = ui.available_size();
-            let (nw, nh) = native_size;
-            let aspect = nw as f32 / nh as f32;
-            let (display_w, display_h) = if available.x / available.y > aspect {
-                (available.y * aspect, available.y)
-            } else {
-                (available.x, available.x / aspect)
-            };
-
-            let offset_x = (available.x - display_w) / 2.0;
-            let offset_y = (available.y - display_h) / 2.0;
-            ui.add_space(offset_y);
+            let (size, offset) = crate::emulator::fit_aspect(ui.available_size(), view_aspect);
+            ui.add_space(offset.y);
             ui.horizontal(|ui| {
-                ui.add_space(offset_x);
-                ui.image(egui::load::SizedTexture::new(
-                    game_texture_id,
-                    egui::Vec2::new(display_w, display_h),
-                ));
+                ui.add_space(offset.x);
+                ui.image(egui::load::SizedTexture::new(game_texture_id, size));
             });
         });
 }

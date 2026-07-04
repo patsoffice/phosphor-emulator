@@ -101,8 +101,9 @@ impl Video {
             .update_user_texture_rgba8_data(self.game_texture_id, self.rgba_buffer.clone());
     }
 
-    /// Render the game filling the entire window (no debug panels).
-    pub fn present_game_only(&mut self) {
+    /// Render the game at the target display `aspect` (no debug panels),
+    /// letterboxed with black bars when the window doesn't match the aspect.
+    pub fn present_game_only(&mut self, aspect: f32) {
         unsafe {
             gl::ClearColor(0.0, 0.0, 0.0, 1.0);
             gl::Clear(gl::COLOR_BUFFER_BIT);
@@ -113,19 +114,24 @@ impl Video {
 
         let tex_id = self.game_texture_id;
         egui::CentralPanel::default()
-            .frame(egui::Frame::NONE)
+            .frame(egui::Frame::NONE.fill(egui::Color32::BLACK))
             .show(&self.egui_ctx, |ui| {
-                let available = ui.available_size();
-                ui.image(egui::load::SizedTexture::new(tex_id, available));
+                let (size, offset) = crate::emulator::fit_aspect(ui.available_size(), aspect);
+                ui.add_space(offset.y);
+                ui.horizontal(|ui| {
+                    ui.add_space(offset.x);
+                    ui.image(egui::load::SizedTexture::new(tex_id, size));
+                });
             });
 
         self.finish_frame();
     }
 
-    /// Render the game alongside debug panels. The closure builds the debug UI.
+    /// Render the game alongside debug panels. The closure builds the debug UI
+    /// and letterboxes the game texture to the target aspect itself.
     pub fn present_with_debug<F>(&mut self, debug_ui_fn: F)
     where
-        F: FnOnce(&egui::Context, egui::TextureId, (u32, u32)),
+        F: FnOnce(&egui::Context, egui::TextureId),
     {
         unsafe {
             gl::ClearColor(0.1, 0.1, 0.1, 1.0);
@@ -135,11 +141,7 @@ impl Video {
         self.egui_state.input.time = Some(self.start_time.elapsed().as_secs_f64());
         self.egui_ctx.begin_pass(self.egui_state.input.take());
 
-        debug_ui_fn(
-            &self.egui_ctx,
-            self.game_texture_id,
-            (self.native_width, self.native_height),
-        );
+        debug_ui_fn(&self.egui_ctx, self.game_texture_id);
 
         self.finish_frame();
     }
@@ -173,13 +175,15 @@ impl Video {
     }
 
     /// Render vector lines via OpenGL, then run an egui pass for overlays.
-    /// `display_size` is the vector coordinate space dimensions.
-    /// `rotation` is screen-level rotation in degrees (0 or 270).
+    /// `display_size` is the vector coordinate space dimensions. `view_aspect`
+    /// is the as-viewed display aspect ratio (width / height) the beam field is
+    /// letterboxed into. `rotation` is screen-level rotation in degrees (0/270).
     pub fn present_vectors_with_overlay(
         &mut self,
         renderer: &mut crate::vector_gl::VectorRenderer,
         lines: &[phosphor_core::device::dvg::VectorLine],
         display_size: (u32, u32),
+        view_aspect: f32,
         rotation: i32,
         overlay_fn: impl FnOnce(&egui::Context),
     ) {
@@ -188,7 +192,15 @@ impl Video {
             gl::Clear(gl::COLOR_BUFFER_BIT);
         }
         let (w, h) = self.window.size();
-        renderer.render(lines, w, h, display_size.0, display_size.1, rotation);
+        renderer.render(
+            lines,
+            w,
+            h,
+            view_aspect,
+            display_size.0,
+            display_size.1,
+            rotation,
+        );
 
         // Run a minimal egui pass for overlay text on top of the vectors.
         self.egui_state.input.time = Some(self.start_time.elapsed().as_secs_f64());
