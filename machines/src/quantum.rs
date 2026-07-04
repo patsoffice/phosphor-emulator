@@ -258,7 +258,7 @@ const TIMING: TimingConfig = TimingConfig {
     // (and the AVG beam center, derived from them) are swapped to 600 × 900.
     display_width: 600,
     display_height: 900,
-    display_aspect: None,
+    display_aspect: Some((3, 4)),
 };
 
 /// Periodic IRQ1: MASTER/4096/12 = 246.094 Hz → every 24576 CPU cycles.
@@ -596,6 +596,10 @@ impl Bus for QuantumSystem {
 impl Renderable for QuantumSystem {
     fn display_size(&self) -> (u32, u32) {
         TIMING.display_size()
+    }
+
+    fn display_aspect(&self) -> Option<(u32, u32)> {
+        TIMING.display_aspect()
     }
 
     fn render_frame(&self, buffer: &mut [u8]) {

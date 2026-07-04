@@ -348,7 +348,7 @@ const TIMING: TimingConfig = TimingConfig {
     total_scanlines: 256,    // VTOTAL
     display_width: 256,
     display_height: 232, // 256 - 24 vblank lines
-    display_aspect: None,
+    display_aspect: Some((4, 3)),
 };
 
 // Palette resistor values: 22K / 10K / 4.7K with 1K pulldown.
@@ -1096,6 +1096,10 @@ impl Bus for CrystalCastlesSystem {
 impl Renderable for CrystalCastlesSystem {
     fn display_size(&self) -> (u32, u32) {
         TIMING.display_size()
+    }
+
+    fn display_aspect(&self) -> Option<(u32, u32)> {
+        TIMING.display_aspect()
     }
 
     fn render_frame(&self, buffer: &mut [u8]) {

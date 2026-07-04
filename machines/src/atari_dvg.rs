@@ -36,7 +36,7 @@ pub const TIMING: TimingConfig = TimingConfig {
     total_scanlines: 1,
     display_width: 1024, // vector display
     display_height: 1024,
-    display_aspect: None,
+    display_aspect: Some((4, 3)),
 };
 
 pub const NMI_PERIOD_CYCLES: u64 = TIMING.cpu_clock_hz / 250;
@@ -268,6 +268,10 @@ impl Saveable for AtariDvgBoard {
 impl Renderable for AtariDvgBoard {
     fn display_size(&self) -> (u32, u32) {
         TIMING.display_size()
+    }
+
+    fn display_aspect(&self) -> Option<(u32, u32)> {
+        TIMING.display_aspect()
     }
 
     fn render_frame(&self, buffer: &mut [u8]) {

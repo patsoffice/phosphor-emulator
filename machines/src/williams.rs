@@ -54,7 +54,7 @@ pub const TIMING: TimingConfig = TimingConfig {
     total_scanlines: 260,    // 260 lines per frame
     display_width: 292,      // native display width after cropping
     display_height: 240,     // native display height after cropping
-    display_aspect: None,
+    display_aspect: Some((4, 3)),
 };
 
 // ---------------------------------------------------------------------------

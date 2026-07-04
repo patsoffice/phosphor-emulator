@@ -61,7 +61,7 @@ pub const TIMING: TimingConfig = TimingConfig {
     total_scanlines: 256,
     display_width: NATIVE_HEIGHT as u32, // 240 (rotated 270° CW for Q*Bert)
     display_height: NATIVE_WIDTH as u32, // 256
-    display_aspect: None,
+    display_aspect: Some((3, 4)),
 };
 
 pub const VISIBLE_LINES: u64 = 240;

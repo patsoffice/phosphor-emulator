@@ -17,6 +17,8 @@ use phosphor_machines::rom_loader::RomSet;
 fn display_size_is_256x224() {
     let sys = FoodFightSystem::new();
     assert_eq!(sys.display_size(), (256, 224));
+    // Landscape 4:3 tube: the 256×224 raster is presented aspect-corrected.
+    assert_eq!(sys.display_aspect(), Some((4, 3)));
 }
 
 #[test]

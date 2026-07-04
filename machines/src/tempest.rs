@@ -546,6 +546,10 @@ impl phosphor_core::core::machine::Renderable for TempestSystem {
     fn display_size(&self) -> (u32, u32) {
         atari_avg::TIMING.display_size()
     }
+
+    fn display_aspect(&self) -> Option<(u32, u32)> {
+        atari_avg::TIMING.display_aspect()
+    }
     fn render_frame(&self, buffer: &mut [u8]) {
         self.board.render_frame(buffer);
     }
@@ -935,10 +939,13 @@ mod tests {
 
     #[test]
     fn dip_defaults_and_metadata() {
+        use phosphor_core::core::machine::Renderable;
         let sys = TempestSystem::new();
         assert_eq!(sys.dip_bank_value(0), 0x00);
         assert_eq!(sys.dip_bank_value(1), 0x00);
         crate::assert_dip_banks_valid(sys.dip_banks(), &[0x00, 0x00]);
+        // Rotated (ROT270) vector cabinet: 4:3 tube presented portrait as 3:4.
+        assert_eq!(sys.display_aspect(), Some((3, 4)));
     }
 
     #[test]

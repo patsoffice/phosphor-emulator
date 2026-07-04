@@ -36,7 +36,7 @@ pub const TIMING: TimingConfig = TimingConfig {
     total_scanlines: 264,                // VTOTAL
     display_width: NATIVE_HEIGHT as u32, // 480 (rotated 90° CW)
     display_height: NATIVE_WIDTH as u32, // 512
-    display_aspect: None,
+    display_aspect: Some((3, 4)),
 };
 
 pub const VISIBLE_LINES: u64 = 240;

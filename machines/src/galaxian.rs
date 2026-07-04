@@ -91,7 +91,7 @@ pub const TIMING: TimingConfig = TimingConfig {
     total_scanlines: 264,
     display_width: 224, // rotated 90° CCW from native 256×224
     display_height: 256,
-    display_aspect: None,
+    display_aspect: Some((3, 4)),
 };
 
 /// Visible scanlines per frame (native rows rendered into the framebuffer).
@@ -1238,6 +1238,8 @@ mod tests {
         assert!((sys.frame_rate_hz() - 60.606).abs() < 0.01);
         // Rotated 90° CCW from native 256×224.
         assert_eq!(sys.display_size(), (224, 256));
+        // Portrait cabinet (4:3 tube rotated to 3:4).
+        assert_eq!(sys.display_aspect(), Some((3, 4)));
     }
 
     #[test]

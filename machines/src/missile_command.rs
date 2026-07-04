@@ -253,7 +253,7 @@ const TIMING: TimingConfig = TimingConfig {
     total_scanlines: 256,    // VTOTAL
     display_width: 256,
     display_height: 231,
-    display_aspect: None,
+    display_aspect: Some((4, 3)),
 };
 
 /// Missile Command Arcade System (Atari, 1980)
@@ -850,6 +850,10 @@ impl Bus for MissileCommandSystem {
 impl Renderable for MissileCommandSystem {
     fn display_size(&self) -> (u32, u32) {
         TIMING.display_size()
+    }
+
+    fn display_aspect(&self) -> Option<(u32, u32)> {
+        TIMING.display_aspect()
     }
 
     fn render_frame(&self, buffer: &mut [u8]) {

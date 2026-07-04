@@ -41,7 +41,7 @@ pub const TIMING: TimingConfig = TimingConfig {
     total_scanlines: 1,
     display_width: 580,
     display_height: 570,
-    display_aspect: None,
+    display_aspect: Some((3, 4)),
 };
 
 /// IRQ period: master_clock / 4096 / 12 = 246.09375 Hz → 6144 CPU cycles.
@@ -274,6 +274,10 @@ impl Saveable for AtariAvgBoard {
 impl Renderable for AtariAvgBoard {
     fn display_size(&self) -> (u32, u32) {
         TIMING.display_size()
+    }
+
+    fn display_aspect(&self) -> Option<(u32, u32)> {
+        TIMING.display_aspect()
     }
 
     fn render_frame(&self, buffer: &mut [u8]) {

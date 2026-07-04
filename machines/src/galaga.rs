@@ -877,6 +877,10 @@ impl Renderable for GalagaSystem {
         namco_galaga::TIMING.display_size()
     }
 
+    fn display_aspect(&self) -> Option<(u32, u32)> {
+        namco_galaga::TIMING.display_aspect()
+    }
+
     fn render_frame(&self, buffer: &mut [u8]) {
         gfx::rotate_90_ccw_indexed(
             &self.native_buffer,

@@ -267,7 +267,7 @@ const TIMING: TimingConfig = TimingConfig {
     total_scanlines: 264,    // VTOTAL
     display_width: 256,
     display_height: 240,
-    display_aspect: None,
+    display_aspect: Some((4, 3)),
 };
 const VBEND: u64 = 16; // First visible scanline
 const VBSTART: u64 = 256; // First blanking scanline
@@ -878,6 +878,10 @@ impl Bus for GridleeSystem {
 impl Renderable for GridleeSystem {
     fn display_size(&self) -> (u32, u32) {
         TIMING.display_size()
+    }
+
+    fn display_aspect(&self) -> Option<(u32, u32)> {
+        TIMING.display_aspect()
     }
 
     fn render_frame(&self, buffer: &mut [u8]) {

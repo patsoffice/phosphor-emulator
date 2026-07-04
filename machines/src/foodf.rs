@@ -406,7 +406,7 @@ const TIMING: TimingConfig = TimingConfig {
     total_scanlines: 259,
     display_width: 256,
     display_height: 224,
-    display_aspect: None,
+    display_aspect: Some((4, 3)),
 };
 
 /// POKEY runs at master/20 = 604.8 kHz, i.e. one POKEY clock per 10 CPU cycles.
@@ -894,6 +894,10 @@ impl Bus for FoodFightSystem {
 impl Renderable for FoodFightSystem {
     fn display_size(&self) -> (u32, u32) {
         TIMING.display_size()
+    }
+
+    fn display_aspect(&self) -> Option<(u32, u32)> {
+        TIMING.display_aspect()
     }
 
     fn render_frame(&self, buffer: &mut [u8]) {
