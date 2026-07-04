@@ -406,6 +406,7 @@ const TIMING: TimingConfig = TimingConfig {
     total_scanlines: 259,
     display_width: 256,
     display_height: 224,
+    display_aspect: None,
 };
 
 /// POKEY runs at master/20 = 604.8 kHz, i.e. one POKEY clock per 10 CPU cycles.

@@ -204,6 +204,7 @@ pub const TIMING: TimingConfig = TimingConfig {
     // horizontally onto a 4:3 monitor (see STRETCH_X_NUM/DEN in trigger_avg).
     display_width: 400,
     display_height: 330,
+    display_aspect: None,
 };
 
 /// Horizontal stretch (×5/4) applied to the vector field so it fills the 4:3

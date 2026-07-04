@@ -293,6 +293,7 @@ pub const TIMING: TimingConfig = TimingConfig {
     total_scanlines: 262,
     display_width: 336,
     display_height: 240,
+    display_aspect: None,
 };
 
 /// First scanline of vertical blank (`vbstart`); VBLANK asserts IRQ4 here.

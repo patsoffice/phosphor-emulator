@@ -267,6 +267,7 @@ const TIMING: TimingConfig = TimingConfig {
     total_scanlines: 264,    // VTOTAL
     display_width: 256,
     display_height: 240,
+    display_aspect: None,
 };
 const VBEND: u64 = 16; // First visible scanline
 const VBSTART: u64 = 256; // First blanking scanline

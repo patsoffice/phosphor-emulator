@@ -140,6 +140,9 @@ macro_rules! impl_board_renderable {
             fn display_size(&self) -> (u32, u32) {
                 $timing.display_size()
             }
+            fn display_aspect(&self) -> Option<(u32, u32)> {
+                $timing.display_aspect()
+            }
             fn render_frame(&self, buffer: &mut [u8]) {
                 self.$board.render_frame(buffer);
             }
@@ -149,6 +152,9 @@ macro_rules! impl_board_renderable {
         impl phosphor_core::core::machine::Renderable for $type {
             fn display_size(&self) -> (u32, u32) {
                 $timing.display_size()
+            }
+            fn display_aspect(&self) -> Option<(u32, u32)> {
+                $timing.display_aspect()
             }
             fn render_frame(&self, buffer: &mut [u8]) {
                 self.$board.render_frame(buffer);
@@ -162,6 +168,9 @@ macro_rules! impl_board_renderable {
         impl phosphor_core::core::machine::Renderable for $type {
             fn display_size(&self) -> (u32, u32) {
                 $timing.display_size()
+            }
+            fn display_aspect(&self) -> Option<(u32, u32)> {
+                $timing.display_aspect()
             }
             fn render_frame(&self, buffer: &mut [u8]) {
                 self.$board.render_frame(buffer);

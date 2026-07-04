@@ -253,6 +253,7 @@ const TIMING: TimingConfig = TimingConfig {
     total_scanlines: 256,    // VTOTAL
     display_width: 256,
     display_height: 231,
+    display_aspect: None,
 };
 
 /// Missile Command Arcade System (Atari, 1980)

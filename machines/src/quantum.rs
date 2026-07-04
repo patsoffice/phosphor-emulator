@@ -258,6 +258,7 @@ const TIMING: TimingConfig = TimingConfig {
     // (and the AVG beam center, derived from them) are swapped to 600 × 900.
     display_width: 600,
     display_height: 900,
+    display_aspect: None,
 };
 
 /// Periodic IRQ1: MASTER/4096/12 = 246.094 Hz → every 24576 CPU cycles.

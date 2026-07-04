@@ -147,6 +147,7 @@ pub const TIMING: TimingConfig = TimingConfig {
     // square is shown 3:4 (portrait 4:3 tube), so height is stretched to 320.
     display_width: 240,
     display_height: 320,
+    display_aspect: None,
 };
 
 // ---------------------------------------------------------------------------

@@ -88,6 +88,7 @@ pub const TIMING: TimingConfig = TimingConfig {
     total_scanlines: 264,
     display_width: NATIVE_WIDTH as u32, // 256 (no rotation)
     display_height: (NATIVE_HEIGHT - VBLANK_END) as u32, // 224
+    display_aspect: None,
 };
 
 pub const VISIBLE_LINES: u64 = 240; // lines rendered (top VBLANK_END clipped on output)

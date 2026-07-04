@@ -41,6 +41,7 @@ pub const TIMING: TimingConfig = TimingConfig {
     total_scanlines: 1,
     display_width: 580,
     display_height: 570,
+    display_aspect: None,
 };
 
 /// IRQ period: master_clock / 4096 / 12 = 246.09375 Hz → 6144 CPU cycles.

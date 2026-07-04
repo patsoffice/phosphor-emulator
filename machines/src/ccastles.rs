@@ -348,6 +348,7 @@ const TIMING: TimingConfig = TimingConfig {
     total_scanlines: 256,    // VTOTAL
     display_width: 256,
     display_height: 232, // 256 - 24 vblank lines
+    display_aspect: None,
 };
 
 // Palette resistor values: 22K / 10K / 4.7K with 1K pulldown.

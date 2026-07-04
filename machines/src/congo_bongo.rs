@@ -80,6 +80,7 @@ pub const TIMING: TimingConfig = TimingConfig {
     total_scanlines: 264,
     display_width: (NATIVE_HEIGHT - VBLANK_END) as u32, // 224 (rotated)
     display_height: NATIVE_WIDTH as u32,                // 256 (rotated)
+    display_aspect: None,
 };
 
 pub const NATIVE_WIDTH: usize = 256;

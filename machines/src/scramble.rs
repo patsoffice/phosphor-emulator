@@ -51,6 +51,7 @@ pub const TIMING: TimingConfig = TimingConfig {
     total_scanlines: 264,
     display_width: 224,
     display_height: 256,
+    display_aspect: None,
 };
 
 /// Sound CPU clock: 14.318 MHz / 8 ≈ 1.79 MHz.

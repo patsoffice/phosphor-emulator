@@ -36,6 +36,7 @@ pub const TIMING: TimingConfig = TimingConfig {
     total_scanlines: 1,
     display_width: 1024, // vector display
     display_height: 1024,
+    display_aspect: None,
 };
 
 pub const NMI_PERIOD_CYCLES: u64 = TIMING.cpu_clock_hz / 250;

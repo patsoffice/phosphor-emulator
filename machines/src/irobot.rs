@@ -70,6 +70,7 @@ pub const TIMING: TimingConfig = TimingConfig {
     total_scanlines: 262,
     display_width: 256,
     display_height: 232,
+    display_aspect: None,
 };
 
 const VBLANK_LINE: u64 = 224; // status VBLANK flag set at line 224, cleared at 0

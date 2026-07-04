@@ -49,6 +49,14 @@ pub struct TimingConfig {
     pub total_scanlines: u64,
     pub display_width: u32,
     pub display_height: u32,
+    /// Target display aspect ratio (width : height) as the cabinet monitor
+    /// presents it, or `None` for square pixels (present the native raster at
+    /// its own ratio). Every arcade monitor is a 4:3 tube; a game whose native
+    /// raster or vector coordinate space isn't its tube aspect sets this so the
+    /// frontend corrects aspect once at presentation time instead of baking a
+    /// lossy stretch into the framebuffer. Landscape cabinets use `Some((4, 3))`,
+    /// portrait/rotated cabinets `Some((3, 4))`.
+    pub display_aspect: Option<(u32, u32)>,
 }
 
 impl TimingConfig {
@@ -62,6 +70,10 @@ impl TimingConfig {
 
     pub const fn display_size(&self) -> (u32, u32) {
         (self.display_width, self.display_height)
+    }
+
+    pub const fn display_aspect(&self) -> Option<(u32, u32)> {
+        self.display_aspect
     }
 }
 
@@ -84,6 +96,16 @@ pub enum ScreenRotation {
 pub trait Renderable {
     /// Native display resolution as (width, height) in pixels.
     fn display_size(&self) -> (u32, u32);
+
+    /// Target display aspect ratio (width : height) as the cabinet monitor
+    /// presents it, or `None` for square pixels (the default: present the
+    /// native raster at its own ratio). The frontend sizes the window to this
+    /// aspect and lets the GPU stretch the native texture, so machines whose
+    /// raster/vector space isn't its tube aspect need not bake a lossy stretch
+    /// into `render_frame`. See [`TimingConfig::display_aspect`].
+    fn display_aspect(&self) -> Option<(u32, u32)> {
+        None
+    }
 
     /// Render the current video state into an RGB24 pixel buffer.
     ///

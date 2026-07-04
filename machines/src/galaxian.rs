@@ -91,6 +91,7 @@ pub const TIMING: TimingConfig = TimingConfig {
     total_scanlines: 264,
     display_width: 224, // rotated 90° CCW from native 256×224
     display_height: 256,
+    display_aspect: None,
 };
 
 /// Visible scanlines per frame (native rows rendered into the framebuffer).
