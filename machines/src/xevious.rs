@@ -129,17 +129,6 @@ static XEVIOUS_SOUND_PROM: RomRegion = RomRegion {
     }],
 };
 
-/// Namco 50XX MCU firmware ROM (MB8842, 2KB).
-static XEVIOUS_50XX_ROM: RomRegion = RomRegion {
-    size: 0x0800,
-    entries: &[RomEntry {
-        name: "50xx.bin",
-        size: 0x0800,
-        offset: 0x0000,
-        crc32: &[0xa0acbaf7],
-    }],
-};
-
 // ---------------------------------------------------------------------------
 // XeviousSystem
 // ---------------------------------------------------------------------------
@@ -217,9 +206,9 @@ impl XeviousSystem {
         self.board
             .load_sound_prom(&XEVIOUS_SOUND_PROM.load(rom_set)?);
 
-        // The 50XX score/protection MCU is required to clear Xevious's start-up
-        // protection check; attach it and load its firmware.
-        self.board.load_50xx_rom(&XEVIOUS_50XX_ROM.load(rom_set)?);
+        // Fit the 50XX score/protection chip, which Xevious queries with a
+        // periodic protection check.
+        self.board.fit_50xx();
 
         // Factory DIP defaults: both banks read all-ones with switches at their
         // shipped positions and the button-2 lines released.

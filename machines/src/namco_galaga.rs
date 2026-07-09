@@ -302,13 +302,8 @@ pub struct NamcoGalagaBoard {
     // boards that fit it (e.g. Xevious, Bosconian); `None` on Galaga/Dig Dug.
     pub(crate) namco50: Option<Namco50>,
 
-    // Clock dividers for the LLE MCUs (LLE mode only). The MB88xx machine-cycle
-    // rate is 256 kHz = the Z80 clock / 12 (external 1.536 MHz internally
-    // divided by 6). The 50XX's command/response handshake with the 06XX is
-    // timing-sensitive and needs this exact rate; the 51XX (inputs only, level
-    // signals) currently runs faster at /2 and tolerates it.
+    // Clock divider for the 51XX MCU (LLE mode only). MB88xx runs at 256 kHz.
     pub(crate) namco51_divider: ClockDivider,
-    pub(crate) namco50_divider: ClockDivider,
 
     // Input ports (active-low: 0xFF = all released)
     pub(crate) in0: u8,
@@ -375,7 +370,6 @@ impl NamcoGalagaBoard {
             namco50: None,
 
             namco51_divider: ClockDivider::new(1, 2),
-            namco50_divider: ClockDivider::new(1, 12),
 
             in0: 0xFF,
             in1: 0xFF,
@@ -537,13 +531,8 @@ impl NamcoGalagaBoard {
         // Drive the 50XX score/protection MCU (if fitted) the same way: assert
         // its chip-select IRQ and R/W line after the Z80s have run, then step
         // it on its own machine-cycle divider.
-        if let Some(ref mut n50) = self.namco50 {
-            n50.set_chip_select(self.namco06.chip_select_active(2));
-            n50.set_rw(self.namco06.is_read_mode());
-            if self.namco50_divider.tick() {
-                n50.tick();
-            }
-        }
+        // The 50XX HLE responds immediately via the 06XX read/write dispatch and
+        // needs no per-cycle servicing.
 
         self.clock += 1;
         self.watchdog_counter += 1;
@@ -716,7 +705,7 @@ impl NamcoGalagaBoard {
         let data = match chip {
             0 => self.namco51.read(self.in0, self.in1),
             1 => self.namco53.read(self.dswa, self.dswb),
-            2 => self.namco50.as_ref().map_or(0xFF, Namco50::read),
+            2 => self.namco50.as_mut().map_or(0xFF, Namco50::read),
             _ => 0xFF,
         };
         if self.debug_trace.enabled() {
@@ -960,13 +949,11 @@ impl NamcoGalagaBoard {
         self.namco51 = Namco51Wrapper::Lle(lle);
     }
 
-    /// Attach the Namco 50XX score/protection MCU and load its firmware ROM
-    /// (2048 bytes). Only boards that fit the chip (e.g. Xevious) call this;
-    /// otherwise 06XX chip-select 2 reads back the idle bus.
-    pub fn load_50xx_rom(&mut self, data: &[u8]) {
-        let mut n50 = Namco50::new();
-        n50.load_rom(data);
-        self.namco50 = Some(n50);
+    /// Fit the Namco 50XX score/protection chip (06XX chip-select 2). Only
+    /// boards that carry it (e.g. Xevious) call this; otherwise chip-select 2
+    /// reads back the idle bus.
+    pub fn fit_50xx(&mut self) {
+        self.namco50 = Some(Namco50::new());
     }
 
     // -----------------------------------------------------------------------
@@ -1021,7 +1008,6 @@ impl NamcoGalagaBoard {
             n50.reset();
         }
         self.namco51_divider.reset();
-        self.namco50_divider.reset();
 
         self.in0 = 0xFF;
         self.in1 = 0xFF;
@@ -1088,12 +1074,11 @@ impl Saveable for NamcoGalagaBoard {
 
         self.namco53.save_state(w);
 
-        // 50XX: presence flag + (when fitted) MCU state and its divider.
+        // 50XX: presence flag + (when fitted) its score/protection state.
         match &self.namco50 {
             Some(n50) => {
                 w.write_bool(true);
                 n50.save_state(w);
-                self.namco50_divider.save_state(w);
             }
             None => w.write_bool(false),
         }
@@ -1163,16 +1148,13 @@ impl Saveable for NamcoGalagaBoard {
 
         self.namco53.load_state(r)?;
 
-        // 50XX: presence flag; if set, the MCU must already be attached.
+        // 50XX: presence flag; if set, the chip must already be fitted.
         if r.read_bool()? {
             match &mut self.namco50 {
-                Some(n50) => {
-                    n50.load_state(r)?;
-                    self.namco50_divider.load_state(r)?;
-                }
+                Some(n50) => n50.load_state(r)?,
                 None => {
                     return Err(SaveError::InvalidFormat(
-                        "50XX save state but no ROM loaded".to_string(),
+                        "50XX save state but chip not fitted".to_string(),
                     ));
                 }
             }

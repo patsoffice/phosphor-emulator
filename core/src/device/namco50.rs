@@ -1,84 +1,194 @@
 use crate::core::debug::{DebugRegister, Debuggable};
 use crate::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
-use crate::cpu::mb88xx::{Mb88xx, Mb88xxVariant};
 
-/// Namco 50XX custom chip — LLE (low-level emulation) using an MB8842 MCU.
+/// Namco 50XX custom chip — HLE (high-level emulation) of the score /
+/// protection device.
 ///
-/// The 50XX is a Fujitsu MB8842 4-bit microcontroller (2048-byte ROM,
-/// 128-nibble RAM) programmed as a score-keeping / protection device. The
-/// main CPU issues single-byte commands (reset scores, set bonus thresholds,
-/// increment/decrement the current player's score by fixed amounts, select
-/// the active player) and reads back the running BCD score plus status flags.
-/// Xevious drives it only for a start-up protection handshake; Bosconian uses
-/// its full scoring command set.
+/// In hardware this is a Fujitsu MB8842 MCU that keeps each player's running
+/// score in BCD, tracks bonus/high-score thresholds, and returns the score
+/// plus status flags when read. The main CPU drives it through the 06XX with a
+/// small command set (reset, select player, increment/decrement mode, add a
+/// fixed amount, set bonus/high-score thresholds). We model that behaviour
+/// directly rather than running the MB8842 firmware.
 ///
-/// The chip sits behind the 06XX bus arbiter. Communication is nibble-oriented
-/// across the MCU's I/O ports:
-///   K port  ← command bits 7-4 (high nibble of the byte from the Z80)
-///   R0 port ← command bits 3-0 (low nibble)
-///   R2 port ← R/W line (bit 0): 1 = read cycle, 0 = write cycle
-///   O port  → answer byte returned to the Z80
+/// Communication is byte-oriented through the 06XX: each command byte is
+/// written to the data port with the 50XX selected in write mode, and the
+/// response is four bytes read back with the 50XX selected in read mode:
+///   Byte 0: status flags (0x80 high score, 0x40 first bonus, 0x20 interval)
+///   Byte 1: BCD score digits 10^4..10^5
+///   Byte 2: BCD score digits 10^2..10^3
+///   Byte 3: BCD score digits 10^0..10^1
 ///
-/// The 06XX asserts the MCU's /IRQ (via `set_chip_select`) once per transfer;
-/// the firmware services the interrupt, reads the command off K/R0, and either
-/// latches it or drives the answer onto the O port.
+/// Xevious uses it only for a periodic protection check: reset, add 5, read,
+/// and verify the low byte reads back 5.
 pub struct Namco50 {
-    /// The MB8842 MCU running the 50XX firmware.
-    pub mcu: Mb88xx,
+    /// Per-player running score (decimal; converted to BCD on read).
+    score: [u32; 2],
+    /// High-score threshold (decimal) for the status flag / set via command 5x.
+    high_score: u32,
+    /// Currently selected player (0 or 1).
+    player: usize,
+    /// True = add on the increment commands, false = subtract.
+    increment: bool,
+    /// Status flags for first / interval bonus.
+    first_bonus: bool,
+    interval_bonus: bool,
+    /// Read byte position, cycles 0..3 across a four-byte response.
+    read_index: u8,
+    /// Remaining operand bytes for a multi-byte command (2x/3x/5x), and which
+    /// command is collecting them.
+    pending_cmd: u8,
+    pending_bytes: u8,
+    pending_data: [u8; 3],
 }
 
-impl Namco50 {
-    pub fn new() -> Self {
-        Self {
-            mcu: Mb88xx::new(Mb88xxVariant::Mb8842),
-        }
+/// Decimal amount added/subtracted by each 0x80-0xFF increment command.
+fn increment_amount(cmd: u8) -> u32 {
+    // Base tables for the 8x, Bx and Ex command groups; 9x/Ax scale 8x by
+    // 10/100, Cx/Dx scale Bx, and Fx scales Ex by 10.
+    const T8: [u32; 16] = [
+        5, 10, 15, 20, 25, 30, 40, 50, 60, 70, 80, 90, 100, 200, 300, 500,
+    ];
+    const TB: [u32; 16] = [
+        10, 20, 30, 40, 50, 60, 80, 100, 120, 140, 160, 180, 200, 400, 600, 1000,
+    ];
+    const TE: [u32; 16] = [
+        15, 30, 45, 60, 75, 90, 120, 150, 180, 210, 240, 270, 300, 600, 900, 1500,
+    ];
+    let lo = (cmd & 0x0F) as usize;
+    match cmd >> 4 {
+        0x8 => T8[lo],
+        0x9 => T8[lo] * 10,
+        0xA => T8[lo] * 100,
+        0xB => TB[lo],
+        0xC => TB[lo] * 10,
+        0xD => TB[lo] * 100,
+        0xE => TE[lo],
+        0xF => TE[lo] * 10,
+        _ => 0,
     }
+}
 
-    /// Load the 50XX firmware ROM (2048 bytes).
-    pub fn load_rom(&mut self, data: &[u8]) {
-        self.mcu.load_rom(data);
-    }
+/// Pack two decimal digits of `n` (the `place`..`place`*100 pair) into a BCD byte.
+fn bcd_pair(n: u32, place: u32) -> u8 {
+    let pair = (n / place) % 100;
+    (((pair / 10) << 4) | (pair % 10)) as u8
+}
 
-    /// Advance the MCU by one machine cycle (call at the MCU's machine-cycle
-    /// rate: external clock / 6).
-    pub fn tick(&mut self) {
-        self.mcu.execute_cycle();
+/// Decode a 3-byte BCD operand (as sent for set-bonus / set-high-score) to
+/// decimal.
+fn bcd3_to_dec(b: &[u8; 3]) -> u32 {
+    let mut v = 0u32;
+    for &byte in b {
+        v = v * 100 + (byte >> 4) as u32 * 10 + (byte & 0x0F) as u32;
     }
-
-    /// Read the O port output — the answer byte for the Z80 via the 06XX.
-    pub fn read(&self) -> u8 {
-        self.mcu.read_o()
-    }
-
-    /// Latch a command byte from the Z80 (06XX data write with the 50XX
-    /// selected). The high nibble appears on K, the low nibble on R0, matching
-    /// how the firmware samples the two ports when it services the interrupt.
-    pub fn write(&mut self, data: u8) {
-        self.mcu.set_k(data >> 4);
-        self.mcu.set_r_input(0, data & 0x0F);
-    }
-
-    /// Update the R/W line on R2. `read` is true for a read cycle (Z80 fetching
-    /// an answer) and false for a write cycle (Z80 issuing a command).
-    pub fn set_rw(&mut self, read: bool) {
-        self.mcu.set_r_input(2, read as u8);
-    }
-
-    /// Drive the /IRQ (chip-select) line. The 06XX pulses this active for the
-    /// selected chip on each timer toggle; the rising edge starts a transfer.
-    pub fn set_chip_select(&mut self, active: bool) {
-        self.mcu.set_irq(active);
-    }
-
-    /// Reset the MCU to power-on state. ROM content is preserved.
-    pub fn reset(&mut self) {
-        self.mcu.reset();
-    }
+    v
 }
 
 impl Default for Namco50 {
     fn default() -> Self {
-        Self::new()
+        Self {
+            score: [0; 2],
+            high_score: 0,
+            player: 0,
+            // Power-on / post-reset default is increment mode, player 1.
+            increment: true,
+            first_bonus: false,
+            interval_bonus: false,
+            read_index: 0,
+            pending_cmd: 0,
+            pending_bytes: 0,
+            pending_data: [0; 3],
+        }
+    }
+}
+
+impl Namco50 {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Write a command byte (main CPU → 50XX via the 06XX data port).
+    pub fn write(&mut self, cmd: u8) {
+        // Collect the operand bytes for a pending multi-byte command first.
+        if self.pending_bytes > 0 {
+            let idx = 3 - self.pending_bytes as usize;
+            self.pending_data[idx] = cmd;
+            self.pending_bytes -= 1;
+            if self.pending_bytes == 0 {
+                let value = bcd3_to_dec(&self.pending_data);
+                match self.pending_cmd {
+                    0x2 => self.first_bonus = value != 0,
+                    0x3 => self.interval_bonus = value != 0,
+                    0x5 => self.high_score = value,
+                    _ => {}
+                }
+            }
+            return;
+        }
+
+        match cmd >> 4 {
+            0x0 => {} // nop
+            0x1 => {
+                // reset scores (also restores player 1 / increment mode)
+                self.score = [0; 2];
+                self.player = 0;
+                self.increment = true;
+            }
+            0x2 | 0x3 | 0x5 => {
+                // set first bonus / interval bonus / high score (3 more bytes)
+                self.pending_cmd = cmd >> 4;
+                self.pending_bytes = 3;
+            }
+            0x4 => {} // unknown/unused
+            0x6 => self.player = usize::from(cmd == 0x68),
+            0x7 => self.increment = cmd == 0x70,
+            0x8..=0xF => {
+                let amount = increment_amount(cmd);
+                let s = &mut self.score[self.player];
+                if self.increment {
+                    *s = (*s + amount) % 100_000_000;
+                } else {
+                    *s = s.saturating_sub(amount);
+                }
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    /// Read the next response byte (50XX → main CPU via the 06XX data port).
+    /// Cycles through the four-byte score/flags response.
+    pub fn read(&mut self) -> u8 {
+        let b = self.response_byte(self.read_index);
+        self.read_index = (self.read_index + 1) & 0x03;
+        b
+    }
+
+    fn response_byte(&self, index: u8) -> u8 {
+        let score = self.score[self.player];
+        match index & 0x03 {
+            0 => {
+                let mut flags = 0u8;
+                if score >= self.high_score {
+                    flags |= 0x80;
+                }
+                if self.first_bonus {
+                    flags |= 0x40;
+                }
+                if self.interval_bonus {
+                    flags |= 0x20;
+                }
+                flags
+            }
+            1 => bcd_pair(score, 10_000),
+            2 => bcd_pair(score, 100),
+            _ => bcd_pair(score, 1),
+        }
+    }
+
+    /// Reset to power-on state (scores cleared, first player, increment mode).
+    pub fn reset(&mut self) {
+        *self = Self::default();
     }
 }
 
@@ -93,17 +203,42 @@ impl super::Device for Namco50 {
 
 impl Debuggable for Namco50 {
     fn debug_registers(&self) -> Vec<DebugRegister> {
-        self.mcu.debug_registers()
+        Vec::new()
     }
 }
 
 impl Saveable for Namco50 {
     fn save_state(&self, w: &mut StateWriter) {
-        self.mcu.save_state(w);
+        w.write_u32_le(self.score[0]);
+        w.write_u32_le(self.score[1]);
+        w.write_u32_le(self.high_score);
+        w.write_u8(self.player as u8);
+        w.write_bool(self.increment);
+        w.write_bool(self.first_bonus);
+        w.write_bool(self.interval_bonus);
+        w.write_u8(self.read_index);
+        w.write_u8(self.pending_cmd);
+        w.write_u8(self.pending_bytes);
+        for b in self.pending_data {
+            w.write_u8(b);
+        }
     }
 
     fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
-        self.mcu.load_state(r)
+        self.score[0] = r.read_u32_le()?;
+        self.score[1] = r.read_u32_le()?;
+        self.high_score = r.read_u32_le()?;
+        self.player = r.read_u8()? as usize & 1;
+        self.increment = r.read_bool()?;
+        self.first_bonus = r.read_bool()?;
+        self.interval_bonus = r.read_bool()?;
+        self.read_index = r.read_u8()? & 0x03;
+        self.pending_cmd = r.read_u8()?;
+        self.pending_bytes = r.read_u8()?;
+        for b in &mut self.pending_data {
+            *b = r.read_u8()?;
+        }
+        Ok(())
     }
 }
 
@@ -111,38 +246,50 @@ impl Saveable for Namco50 {
 mod tests {
     use super::*;
 
-    #[test]
-    fn uses_mb8842_core() {
-        // The 50XX is a 2048-byte-ROM MB8842.
-        let n50 = Namco50::new();
-        assert_eq!(n50.mcu.variant(), Mb88xxVariant::Mb8842);
-        assert_eq!(n50.mcu.peek_rom(0x7FF), 0); // full 2K address space
+    /// Read the full four-byte response.
+    fn response(n50: &mut Namco50) -> [u8; 4] {
+        n50.read_index = 0;
+        [n50.read(), n50.read(), n50.read(), n50.read()]
     }
 
     #[test]
-    fn command_splits_across_k_and_r0() {
-        // A command byte arrives high-nibble-on-K, low-nibble-on-R0.
+    fn xevious_protection_check() {
+        // The game's periodic check: reset, add 5, expect a low byte of 5.
         let mut n50 = Namco50::new();
-        n50.write(0xAB);
-        assert_eq!(n50.mcu.k_input, 0x0A);
-        assert_eq!(n50.mcu.r_input[0], 0x0B);
+        n50.write(0x10); // reset scores
+        n50.write(0x80); // increment by 5 (default increment mode)
+        assert_eq!(response(&mut n50), [0x80, 0x00, 0x00, 0x05]);
     }
 
     #[test]
-    fn rw_line_drives_r2() {
+    fn increment_amounts_and_bcd() {
         let mut n50 = Namco50::new();
-        n50.set_rw(true);
-        assert_eq!(n50.mcu.r_input[2], 1);
-        n50.set_rw(false);
-        assert_eq!(n50.mcu.r_input[2], 0);
+        n50.write(0x10);
+        n50.write(0x87); // +50
+        n50.write(0x8C); // +100
+        // score = 150 -> BCD bytes 00 01 50
+        assert_eq!(response(&mut n50), [0x80, 0x00, 0x01, 0x50]);
     }
 
     #[test]
-    fn reset_clears_mcu_but_keeps_rom() {
+    fn player_select_is_independent() {
         let mut n50 = Namco50::new();
-        n50.load_rom(&[0x12; 2048]);
-        n50.reset();
-        assert_eq!(n50.mcu.pc, 0);
-        assert_eq!(n50.mcu.peek_rom(0), 0x12); // ROM survives reset
+        n50.write(0x10);
+        n50.write(0x80); // player 1 += 5
+        n50.write(0x68); // select player 2
+        n50.write(0x81); // player 2 += 10
+        assert_eq!(response(&mut n50)[3], 0x10); // player 2 score = 10
+        n50.write(0x60); // back to player 1
+        assert_eq!(response(&mut n50)[3], 0x05); // player 1 score = 5
+    }
+
+    #[test]
+    fn read_cycles_four_bytes() {
+        let mut n50 = Namco50::new();
+        n50.write(0x10);
+        n50.write(0x80);
+        // Four sequential reads then wrap to byte 0 again.
+        let seq = [n50.read(), n50.read(), n50.read(), n50.read(), n50.read()];
+        assert_eq!(seq, [0x80, 0x00, 0x00, 0x05, 0x80]);
     }
 }
