@@ -302,8 +302,11 @@ pub struct NamcoGalagaBoard {
     // boards that fit it (e.g. Xevious, Bosconian); `None` on Galaga/Dig Dug.
     pub(crate) namco50: Option<Namco50>,
 
-    // Clock dividers for the LLE MCUs (LLE mode only).
-    // Each MB88xx runs at 256 kHz = Z80 clock / 12 (3.072 MHz / 12).
+    // Clock dividers for the LLE MCUs (LLE mode only). The MB88xx machine-cycle
+    // rate is 256 kHz = the Z80 clock / 12 (external 1.536 MHz internally
+    // divided by 6). The 50XX's command/response handshake with the 06XX is
+    // timing-sensitive and needs this exact rate; the 51XX (inputs only, level
+    // signals) currently runs faster at /2 and tolerates it.
     pub(crate) namco51_divider: ClockDivider,
     pub(crate) namco50_divider: ClockDivider,
 
@@ -372,7 +375,7 @@ impl NamcoGalagaBoard {
             namco50: None,
 
             namco51_divider: ClockDivider::new(1, 2),
-            namco50_divider: ClockDivider::new(1, 2),
+            namco50_divider: ClockDivider::new(1, 12),
 
             in0: 0xFF,
             in1: 0xFF,
