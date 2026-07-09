@@ -8,6 +8,7 @@ use phosphor_core::core::{Bus, BusMaster, ClockDivider};
 use phosphor_core::cpu::z80::Z80;
 use phosphor_core::device::namco_wsg::NamcoWsg;
 use phosphor_core::device::namco06::Namco06;
+use phosphor_core::device::namco50::Namco50;
 use phosphor_core::device::namco51::Namco51;
 use phosphor_core::device::namco51_lle::Namco51Lle;
 use phosphor_core::device::namco53::Namco53;
@@ -297,9 +298,14 @@ pub struct NamcoGalagaBoard {
     pub(crate) namco51: Namco51Wrapper,
     pub(crate) namco53: Namco53,
 
-    // Clock divider for 51XX MCU (LLE mode only)
-    // MB88xx runs at 256 kHz = Z80 clock / 12 (3.072 MHz / 12)
+    // Optional score/protection MCU (06XX chip-select 2). Present only on the
+    // boards that fit it (e.g. Xevious, Bosconian); `None` on Galaga/Dig Dug.
+    pub(crate) namco50: Option<Namco50>,
+
+    // Clock dividers for the LLE MCUs (LLE mode only).
+    // Each MB88xx runs at 256 kHz = Z80 clock / 12 (3.072 MHz / 12).
     pub(crate) namco51_divider: ClockDivider,
+    pub(crate) namco50_divider: ClockDivider,
 
     // Input ports (active-low: 0xFF = all released)
     pub(crate) in0: u8,
@@ -363,8 +369,10 @@ impl NamcoGalagaBoard {
             namco06: Namco06::new(NAMCO06_BASE_DIVISOR),
             namco51: Namco51Wrapper::Hle(Namco51::new()),
             namco53: Namco53::new(),
+            namco50: None,
 
             namco51_divider: ClockDivider::new(1, 2),
+            namco50_divider: ClockDivider::new(1, 2),
 
             in0: 0xFF,
             in1: 0xFF,
@@ -512,6 +520,17 @@ impl NamcoGalagaBoard {
             if self.namco51_divider.tick() {
                 lle.update_inputs(self.in0, self.in1);
                 lle.tick();
+            }
+        }
+
+        // Drive the 50XX score/protection MCU (if fitted) the same way: assert
+        // its chip-select IRQ and R/W line after the Z80s have run, then step
+        // it on its own machine-cycle divider.
+        if let Some(ref mut n50) = self.namco50 {
+            n50.set_chip_select(self.namco06.chip_select_active(2));
+            n50.set_rw(self.namco06.is_read_mode());
+            if self.namco50_divider.tick() {
+                n50.tick();
             }
         }
 
@@ -678,18 +697,22 @@ impl NamcoGalagaBoard {
             0
         } else if self.namco06.chip_select(1) {
             1
+        } else if self.namco06.chip_select(2) {
+            2
         } else {
             0xFF
         };
         let data = match chip {
             0 => self.namco51.read(self.in0, self.in1),
             1 => self.namco53.read(self.dswa, self.dswb),
+            2 => self.namco50.as_ref().map_or(0xFF, Namco50::read),
             _ => 0xFF,
         };
         if self.debug_trace.enabled() {
             let device = match chip {
                 0 => "Namco 51XX",
                 1 => "Namco 53XX",
+                2 => "Namco 50XX",
                 _ => "Namco 06XX",
             };
             self.trace_custom_io(DebugEventKind::DeviceRead, 0x7000, data, device, None);
@@ -718,6 +741,23 @@ impl NamcoGalagaBoard {
             self.namco51.write(data);
         }
         // 53XX has no write interface
+        if self.namco06.chip_select(2) && self.namco50.is_some() {
+            if self.debug_trace.enabled() {
+                self.trace_custom_io(
+                    DebugEventKind::DeviceWrite,
+                    0x7000,
+                    data,
+                    "Namco 50XX",
+                    Some("command/argument"),
+                );
+            }
+            if let Some(ref mut n50) = self.namco50 {
+                n50.write(data);
+            }
+        }
+        // Chip-select 3 (54XX explosion-sound MCU) is write-only; its discrete
+        // audio network is not yet modelled, so its commands are discarded
+        // (explosions are silent for now).
     }
 
     /// Write the 06XX control register.
@@ -769,12 +809,15 @@ impl NamcoGalagaBoard {
                     self.pending_sub_cpu_reset = true;
                 }
 
-                // Reset custom I/O chips when entering reset (Q3=0),
-                // matching MAME's Dig Dug machine config which wires Q3
-                // to reset both 51XX and 53XX.
+                // Reset the custom I/O MCUs when entering reset (Q3=0): the
+                // latch's reset output is wired to the 51XX/53XX and, where
+                // fitted, the 50XX.
                 if !value {
                     self.namco51.reset();
                     self.namco53.reset();
+                    if let Some(ref mut n50) = self.namco50 {
+                        n50.reset();
+                    }
                 }
             }
             7 => {
@@ -906,6 +949,15 @@ impl NamcoGalagaBoard {
         self.namco51 = Namco51Wrapper::Lle(lle);
     }
 
+    /// Attach the Namco 50XX score/protection MCU and load its firmware ROM
+    /// (2048 bytes). Only boards that fit the chip (e.g. Xevious) call this;
+    /// otherwise 06XX chip-select 2 reads back the idle bus.
+    pub fn load_50xx_rom(&mut self, data: &[u8]) {
+        let mut n50 = Namco50::new();
+        n50.load_rom(data);
+        self.namco50 = Some(n50);
+    }
+
     // -----------------------------------------------------------------------
     // Input handling
     // -----------------------------------------------------------------------
@@ -954,7 +1006,11 @@ impl NamcoGalagaBoard {
         self.namco06.reset();
         self.namco51.reset();
         self.namco53.reset();
+        if let Some(ref mut n50) = self.namco50 {
+            n50.reset();
+        }
         self.namco51_divider.reset();
+        self.namco50_divider.reset();
 
         self.in0 = 0xFF;
         self.in1 = 0xFF;
@@ -1021,6 +1077,16 @@ impl Saveable for NamcoGalagaBoard {
 
         self.namco53.save_state(w);
 
+        // 50XX: presence flag + (when fitted) MCU state and its divider.
+        match &self.namco50 {
+            Some(n50) => {
+                w.write_bool(true);
+                n50.save_state(w);
+                self.namco50_divider.save_state(w);
+            }
+            None => w.write_bool(false),
+        }
+
         // I/O state
         w.write_u8(self.in0);
         w.write_u8(self.in1);
@@ -1085,6 +1151,21 @@ impl Saveable for NamcoGalagaBoard {
         }
 
         self.namco53.load_state(r)?;
+
+        // 50XX: presence flag; if set, the MCU must already be attached.
+        if r.read_bool()? {
+            match &mut self.namco50 {
+                Some(n50) => {
+                    n50.load_state(r)?;
+                    self.namco50_divider.load_state(r)?;
+                }
+                None => {
+                    return Err(SaveError::InvalidFormat(
+                        "50XX save state but no ROM loaded".to_string(),
+                    ));
+                }
+            }
+        }
 
         // I/O state
         self.in0 = r.read_u8()?;
