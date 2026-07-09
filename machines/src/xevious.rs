@@ -24,8 +24,11 @@ use phosphor_core::core::machine::{
 use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
 use phosphor_core::gfx;
+use phosphor_core::gfx::GfxCache;
+use phosphor_core::gfx::decode::{GfxLayout, decode_gfx};
 use phosphor_macros::Saveable;
 
+use crate::gfx_registry::GfxRegion;
 use crate::namco_galaga::{self, NamcoGalagaBoard};
 use crate::registry::MachineEntry;
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
@@ -129,6 +132,229 @@ static XEVIOUS_SOUND_PROM: RomRegion = RomRegion {
     }],
 };
 
+/// Foreground characters (gfx1): 1bpp 8×8, 512 tiles.
+static XEVIOUS_GFX1_ROM: RomRegion = RomRegion {
+    size: 0x1000,
+    entries: &[RomEntry {
+        name: "xvi_12.3b",
+        size: 0x1000,
+        offset: 0x0000,
+        crc32: &[0x088c8b26],
+    }],
+};
+
+/// Background tiles (gfx2): 2bpp 8×8, planes split across the two ROMs, 512 tiles.
+static XEVIOUS_GFX2_ROM: RomRegion = RomRegion {
+    size: 0x2000,
+    entries: &[
+        RomEntry {
+            name: "xvi_13.3c",
+            size: 0x1000,
+            offset: 0x0000,
+            crc32: &[0xde60ba25],
+        },
+        RomEntry {
+            name: "xvi_14.3d",
+            size: 0x1000,
+            offset: 0x1000,
+            crc32: &[0x535cdbbc],
+        },
+    ],
+};
+
+/// Sprites (gfx3): 3bpp 16×16. Planes 1/2 live in the first half (0x0000-0x4FFF,
+/// three sprite sets), plane 0 in the second half. The plane-0 ROM (xvi_18)
+/// packs two nibbles per byte and is unpacked into 0x7000-0x8FFF at load time;
+/// the region is padded to 0xA000 so the RGN_FRAC(1,2) split lands correctly.
+static XEVIOUS_GFX3_ROM: RomRegion = RomRegion {
+    size: 0xA000,
+    entries: &[
+        RomEntry {
+            name: "xvi_15.4m",
+            size: 0x2000,
+            offset: 0x0000,
+            crc32: &[0xdc2c0ecb],
+        },
+        RomEntry {
+            name: "xvi_17.4p",
+            size: 0x2000,
+            offset: 0x2000,
+            crc32: &[0xdfb587ce],
+        },
+        RomEntry {
+            name: "xvi_16.4n",
+            size: 0x1000,
+            offset: 0x4000,
+            crc32: &[0x605ca889],
+        },
+        RomEntry {
+            name: "xvi_18.4r",
+            size: 0x2000,
+            offset: 0x5000,
+            crc32: &[0x02417d19],
+        },
+    ],
+};
+
+/// Color PROMs: three 256×4 RGB palette PROMs then four 512×4 lookup PROMs
+/// (BG low/high, sprite low/high).
+static XEVIOUS_PROMS: RomRegion = RomRegion {
+    size: 0x0B00,
+    entries: &[
+        RomEntry {
+            name: "xvi-8.6a",
+            size: 0x0100,
+            offset: 0x0000,
+            crc32: &[0x5cc2727f],
+        },
+        RomEntry {
+            name: "xvi-9.6d",
+            size: 0x0100,
+            offset: 0x0100,
+            crc32: &[0x5c8796cc],
+        },
+        RomEntry {
+            name: "xvi-10.6e",
+            size: 0x0100,
+            offset: 0x0200,
+            crc32: &[0x3cb60975],
+        },
+        RomEntry {
+            name: "xvi-7.4h",
+            size: 0x0200,
+            offset: 0x0300,
+            crc32: &[0x22d98032],
+        },
+        RomEntry {
+            name: "xvi-6.4f",
+            size: 0x0200,
+            offset: 0x0500,
+            crc32: &[0x3a7599f0],
+        },
+        RomEntry {
+            name: "xvi-4.3l",
+            size: 0x0200,
+            offset: 0x0700,
+            crc32: &[0xfd8b9d91],
+        },
+        RomEntry {
+            name: "xvi-5.3m",
+            size: 0x0200,
+            offset: 0x0900,
+            crc32: &[0xbf906d82],
+        },
+    ],
+};
+
+// ---------------------------------------------------------------------------
+// GFX layouts (bit offsets; plane_offsets are LSB-first, i.e. reversed from
+// MAME's MSB-first plane order).
+// ---------------------------------------------------------------------------
+
+/// Foreground characters: 1bpp 8×8.
+const FG_CHAR_LAYOUT: GfxLayout<'static> = GfxLayout {
+    plane_offsets: &[0],
+    x_offsets: &[0, 1, 2, 3, 4, 5, 6, 7],
+    y_offsets: &[0, 8, 16, 24, 32, 40, 48, 56],
+    char_increment: 64,
+};
+
+/// Background tiles: 2bpp 8×8, planes split at the region half (0x1000 bytes =
+/// 0x8000 bits): pixel bit 0 from the upper half, bit 1 from the lower.
+const BG_TILE_LAYOUT: GfxLayout<'static> = GfxLayout {
+    plane_offsets: &[0x8000, 0],
+    x_offsets: &[0, 1, 2, 3, 4, 5, 6, 7],
+    y_offsets: &[0, 8, 16, 24, 32, 40, 48, 56],
+    char_increment: 64,
+};
+
+/// Sprites: 3bpp 16×16. Planes 1/2 are in the first half of the region; plane 0
+/// (pixel bit 2) is in the second half (RGN_FRAC(1,2) = 0x5000 bytes = 0x28000
+/// bits) offset by 4.
+const SPRITE_LAYOUT: GfxLayout<'static> = GfxLayout {
+    plane_offsets: &[4, 0, 0x28004],
+    x_offsets: &[
+        0, 1, 2, 3, 64, 65, 66, 67, 128, 129, 130, 131, 192, 193, 194, 195,
+    ],
+    y_offsets: &[
+        0, 8, 16, 24, 32, 40, 48, 56, 256, 264, 272, 280, 288, 296, 304, 312,
+    ],
+    char_increment: 512,
+};
+
+/// Number of decoded elements in each sheet.
+const FG_CHAR_COUNT: usize = 512; // 0x1000 / 8 bytes
+const BG_TILE_COUNT: usize = 512; // (0x2000 / 2) / 8 bytes
+const SPRITE_COUNT: usize = 320; // (0xA000 / 2) / 64 bytes
+
+/// Load the sprite ROM region and unpack the plane-0 ROM (xvi_18): its high
+/// nibble at 0x5000-0x6FFF is shifted into 0x7000-0x8FFF so each sprite set's
+/// third bit plane is addressable separately (0x9000-0x9FFF stays zero —
+/// sprite set #3 has no third plane). Shared by the runtime and gfxview paths.
+fn xevious_load_gfx3(rom_set: &RomSet) -> Result<Vec<u8>, RomLoadError> {
+    let mut gfx3 = XEVIOUS_GFX3_ROM.load(rom_set)?;
+    for i in 0..0x2000 {
+        gfx3[0x7000 + i] = gfx3[0x5000 + i] >> 4;
+    }
+    Ok(gfx3)
+}
+
+/// Build the 256-slot indirect RGB palette (colours 0x00-0x7F from the three
+/// 4-bit R/G/B PROMs via the resistor-DAC weights; index 0x80 = transparent
+/// black; the rest black).
+fn xevious_palette_rgb(proms: &[u8]) -> Vec<(u8, u8, u8)> {
+    const W: [u32; 4] = [0x0e, 0x1f, 0x43, 0x8f];
+    let dac = |v: u8| -> u8 { (0..4).map(|b| W[b] * ((v >> b) & 1) as u32).sum::<u32>() as u8 };
+    let mut pal = vec![(0u8, 0u8, 0u8); 256];
+    for i in 0..128 {
+        pal[i] = (dac(proms[i]), dac(proms[0x100 + i]), dac(proms[0x200 + i]));
+    }
+    pal[0x80] = (0, 0, 0);
+    pal
+}
+
+/// gfxview palette hook: build the RGB palette from the colour PROMs.
+fn xevious_gfx_palette(rom_set: &RomSet) -> Result<Vec<(u8, u8, u8)>, RomLoadError> {
+    Ok(xevious_palette_rgb(&XEVIOUS_PROMS.load(rom_set)?))
+}
+
+inventory::submit! {
+    GfxRegion {
+        machine: "xevious",
+        region: "fg_chars",
+        count: FG_CHAR_COUNT as u32,
+        width: 8,
+        height: 8,
+        layout: &FG_CHAR_LAYOUT,
+        load: |rs| XEVIOUS_GFX1_ROM.load(rs),
+        palette: Some(xevious_gfx_palette),
+    }
+}
+inventory::submit! {
+    GfxRegion {
+        machine: "xevious",
+        region: "bg_tiles",
+        count: BG_TILE_COUNT as u32,
+        width: 8,
+        height: 8,
+        layout: &BG_TILE_LAYOUT,
+        load: |rs| XEVIOUS_GFX2_ROM.load(rs),
+        palette: Some(xevious_gfx_palette),
+    }
+}
+inventory::submit! {
+    GfxRegion {
+        machine: "xevious",
+        region: "sprites",
+        count: SPRITE_COUNT as u32,
+        width: 16,
+        height: 16,
+        layout: &SPRITE_LAYOUT,
+        load: xevious_load_gfx3,
+        palette: Some(xevious_gfx_palette),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // XeviousSystem
 // ---------------------------------------------------------------------------
@@ -163,10 +389,26 @@ pub struct XeviousSystem {
     #[save_skip]
     playfield_rom: Vec<u8>,
 
-    // Frame buffer (288 × 224 native, rotated in render_frame). Blank until the
-    // video milestone lands.
+    // Decoded graphics.
+    #[save_skip]
+    char_cache: GfxCache, // FG chars, 1bpp 8×8
+    #[save_skip]
+    bg_tile_cache: GfxCache, // BG tiles, 2bpp 8×8
+    #[save_skip]
+    sprite_cache: GfxCache, // sprites, 3bpp 16×16
+
+    // Colour lookup tables mapping a gfx pen to an indirect palette index
+    // (0x00-0x7F = colour, 0x80 = transparent).
+    #[save_skip]
+    bg_lut: [u8; 512],
+    #[save_skip]
+    sprite_lut: [u8; 512],
+
+    // Frame buffer (288 × 224 native, rotated in render_frame). Holds indirect
+    // palette indices; blank until the renderer lands (later M2 tasks).
     #[save_skip]
     native_buffer: Vec<u8>,
+    // 128 indirect colours (index 0x80 is the transparent black marker).
     #[save_skip]
     palette: Vec<(u8, u8, u8)>,
 }
@@ -189,8 +431,12 @@ impl XeviousSystem {
             fg_scroll_y: 0,
             bs: [0; 2],
             playfield_rom: Vec::new(),
+            char_cache: GfxCache::new(0, 8, 8),
+            bg_tile_cache: GfxCache::new(0, 8, 8),
+            sprite_cache: GfxCache::new(0, 16, 16),
+            bg_lut: [0; 512],
+            sprite_lut: [0; 512],
             native_buffer: vec![0u8; 288 * 224],
-            // Placeholder palette until the indirect-palette build lands.
             palette: vec![(0, 0, 0); 256],
         }
     }
@@ -206,6 +452,20 @@ impl XeviousSystem {
         self.board
             .load_sound_prom(&XEVIOUS_SOUND_PROM.load(rom_set)?);
 
+        // Decode graphics.
+        let gfx1 = XEVIOUS_GFX1_ROM.load(rom_set)?;
+        self.char_cache = decode_gfx(&gfx1, 0, FG_CHAR_COUNT, &FG_CHAR_LAYOUT);
+
+        let gfx2 = XEVIOUS_GFX2_ROM.load(rom_set)?;
+        self.bg_tile_cache = decode_gfx(&gfx2, 0, BG_TILE_COUNT, &BG_TILE_LAYOUT);
+
+        let gfx3 = xevious_load_gfx3(rom_set)?;
+        self.sprite_cache = decode_gfx(&gfx3, 0, SPRITE_COUNT, &SPRITE_LAYOUT);
+
+        // Colour PROMs → indirect palette + lookup tables.
+        let proms = XEVIOUS_PROMS.load(rom_set)?;
+        self.build_palette(&proms);
+
         // Fit the 50XX score/protection chip, which Xevious queries with a
         // periodic protection check.
         self.board.fit_50xx();
@@ -216,6 +476,28 @@ impl XeviousSystem {
         self.board.dswb = 0xFF;
 
         Ok(())
+    }
+
+    /// Build the 128-entry indirect RGB palette and the BG/sprite colour lookup
+    /// tables from the seven colour PROMs.
+    fn build_palette(&mut self, proms: &[u8]) {
+        self.palette = xevious_palette_rgb(proms);
+
+        // Background lookup: BG low (xvi-7) + BG high (xvi-6), 512 pens.
+        let bg_low = &proms[0x300..0x500];
+        let bg_high = &proms[0x500..0x700];
+        for i in 0..512 {
+            self.bg_lut[i] = (bg_low[i] & 0x0F) | ((bg_high[i] & 0x0F) << 4);
+        }
+        // Sprite lookup: sprite low (xvi-4) + sprite high (xvi-5), 512 pens.
+        // Bit 7 of the combined value marks an opaque pixel; otherwise the pen
+        // is transparent (maps to the 0x80 marker).
+        let spr_low = &proms[0x700..0x900];
+        let spr_high = &proms[0x900..0xB00];
+        for i in 0..512 {
+            let c = (spr_low[i] & 0x0F) | ((spr_high[i] & 0x0F) << 4);
+            self.sprite_lut[i] = if c & 0x80 != 0 { c & 0x7F } else { 0x80 };
+        }
     }
 
     /// Main-CPU program counter (for headless boot checks).
@@ -528,6 +810,27 @@ impl MachineDebug for XeviousSystem {
 impl MachineCore for XeviousSystem {
     crate::machine_core_metadata!("xevious", namco_galaga::TIMING);
 
+    fn gfx_sheets(&self) -> Vec<phosphor_core::core::machine::GfxSheet<'_>> {
+        use phosphor_core::core::machine::GfxSheet;
+        vec![
+            GfxSheet {
+                name: "fg_chars",
+                cache: &self.char_cache,
+                palette: &self.palette,
+            },
+            GfxSheet {
+                name: "bg_tiles",
+                cache: &self.bg_tile_cache,
+                palette: &self.palette,
+            },
+            GfxSheet {
+                name: "sprites",
+                cache: &self.sprite_cache,
+                palette: &self.palette,
+            },
+        ]
+    }
+
     fn run_frame(&mut self) {
         bus_split!(self, bus => {
             for _ in 0..namco_galaga::TIMING.cycles_per_frame() {
@@ -777,3 +1080,60 @@ inventory::submit! {
 }
 
 crate::impl_board_debug_trace!(XeviousSystem, board);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn palette_dac_and_luts() {
+        let mut sys = XeviousSystem::new();
+        let mut proms = vec![0u8; 0x0B00];
+        // Palette entry 1: R = bit3 (0x8f), G = bit0 (0x0e), B = all bits (0xff).
+        proms[1] = 0x08;
+        proms[0x100 + 1] = 0x01;
+        proms[0x200 + 1] = 0x0F;
+        // BG pen 0: low nibble 5, high nibble 3 -> 0x35.
+        proms[0x300] = 0x05;
+        proms[0x500] = 0x03;
+        // Sprite pen 0: low 5, high 0xB -> 0xB5, bit7 set -> opaque colour 0x35.
+        proms[0x700] = 0x05;
+        proms[0x900] = 0x0B;
+        // Sprite pen 1: low 1, high 0 -> 0x01, bit7 clear -> transparent 0x80.
+        proms[0x701] = 0x01;
+
+        sys.build_palette(&proms);
+
+        assert_eq!(sys.palette[1], (0x8f, 0x0e, 0xff));
+        assert_eq!(sys.palette[0x80], (0, 0, 0));
+        assert_eq!(sys.bg_lut[0], 0x35);
+        assert_eq!(sys.sprite_lut[0], 0x35);
+        assert_eq!(sys.sprite_lut[1], 0x80);
+    }
+
+    #[test]
+    fn gfx_caches_start_empty() {
+        // Element dimensions are fixed at construction; ROM decode fills them.
+        let sys = XeviousSystem::new();
+        assert_eq!(sys.char_cache.count(), 0);
+        assert_eq!(sys.bg_tile_cache.count(), 0);
+        assert_eq!(sys.sprite_cache.count(), 0);
+    }
+
+    /// A tiny synthetic 3bpp sprite exercises the plane-order + RGN_FRAC(1,2)
+    /// split so a regression in the layout is caught without ROMs. Region is
+    /// 0xA000; plane 0 lives at bit 0x28004, planes 1/2 at bits 4 and 0.
+    #[test]
+    fn sprite_layout_plane_order() {
+        let mut rom = vec![0u8; 0xA000];
+        // Sprite 0, px0/py0. Bits are read MSB-first, so plane offset N of byte
+        // B reads bit (7 - (N & 7)). Plane offsets are [4, 0, 0x28004]:
+        //   pixel bit0 <- byte 0 bit 3   (offset 4)
+        //   pixel bit1 <- byte 0 bit 7   (offset 0)
+        //   pixel bit2 <- byte 0x5000 bit 3 (offset 0x28004, the RGN_FRAC half)
+        rom[0] = 0b1000_1000;
+        rom[0x5000] = 0b0000_1000;
+        let cache = decode_gfx(&rom, 0, 1, &SPRITE_LAYOUT);
+        assert_eq!(cache.pixel(0, 0, 0), 0b111);
+    }
+}
