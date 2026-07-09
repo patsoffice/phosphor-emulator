@@ -6,7 +6,8 @@
 /// | Variant  | Program ROM | Data RAM     | Used in          |
 /// |----------|-------------|--------------|------------------|
 /// | MB8843   | 1024 bytes  | 64 nibbles   | Namco 51XX, 53XX |
-/// | MB8844   | 1024 bytes  | 64 nibbles   | Namco 50XX, 54XX |
+/// | MB8844   | 1024 bytes  | 64 nibbles   | Namco 54XX       |
+/// | MB8842   | 2048 bytes  | 128 nibbles  | Namco 50XX       |
 /// | MB8841   | 2048 bytes  | 128 nibbles  | (larger variant) |
 ///
 /// Architecture:
@@ -38,6 +39,8 @@ pub enum Mb88xxVariant {
     Mb8843,
     /// MB8844: 1024-byte ROM (10-bit address), 64-nibble RAM (6-bit address).
     Mb8844,
+    /// MB8842: 2048-byte ROM (11-bit address), 128-nibble RAM (7-bit address).
+    Mb8842,
     /// MB8841: 2048-byte ROM (11-bit address), 128-nibble RAM (7-bit address).
     Mb8841,
 }
@@ -46,35 +49,35 @@ impl Mb88xxVariant {
     pub const fn rom_size(self) -> usize {
         match self {
             Self::Mb8843 | Self::Mb8844 => 1024,
-            Self::Mb8841 => 2048,
+            Self::Mb8842 | Self::Mb8841 => 2048,
         }
     }
 
     pub const fn rom_mask(self) -> u16 {
         match self {
             Self::Mb8843 | Self::Mb8844 => 0x3FF,
-            Self::Mb8841 => 0x7FF,
+            Self::Mb8842 | Self::Mb8841 => 0x7FF,
         }
     }
 
     pub const fn ram_size(self) -> usize {
         match self {
             Self::Mb8843 | Self::Mb8844 => 64,
-            Self::Mb8841 => 128,
+            Self::Mb8842 | Self::Mb8841 => 128,
         }
     }
 
     pub const fn ram_mask(self) -> u8 {
         match self {
             Self::Mb8843 | Self::Mb8844 => 0x3F,
-            Self::Mb8841 => 0x7F,
+            Self::Mb8842 | Self::Mb8841 => 0x7F,
         }
     }
 
     pub const fn pa_mask(self) -> u8 {
         match self {
             Self::Mb8843 | Self::Mb8844 => 0x0F, // 4-bit PA for 10-bit address space
-            Self::Mb8841 => 0x1F,                // 5-bit PA for 11-bit address space
+            Self::Mb8842 | Self::Mb8841 => 0x1F, // 5-bit PA for 11-bit address space
         }
     }
 }
