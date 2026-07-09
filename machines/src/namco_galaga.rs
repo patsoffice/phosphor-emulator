@@ -425,6 +425,13 @@ impl NamcoGalagaBoard {
             self.pending_sub_cpu_reset = false;
             Self::reset_z80(&mut self.sub_cpu);
             Self::reset_z80(&mut self.sound_cpu);
+            // A CPU coming out of reset must start clean at 0x0000 with no
+            // stale interrupt latched. Clearing these prevents a pending sound
+            // NMI (accumulated while the CPU was held in reset) from firing
+            // before the freshly reset CPU has set up its stack pointer — which
+            // would otherwise push onto the reset SP (0xFFFF) and wreck it.
+            self.sub_irq_pending = false;
+            self.sound_nmi_pending = false;
         }
 
         // VBLANK interrupt: fire at the start of VBLANK (scanline 224).
@@ -463,6 +470,7 @@ impl NamcoGalagaBoard {
         let scanline_b_cycle = SOUND_NMI_SCANLINE_B * TIMING.cycles_per_scanline;
         if (frame_cycle == scanline_a_cycle || frame_cycle == scanline_b_cycle)
             && self.sound_nmi_enabled
+            && !self.sub_reset
         {
             self.sound_nmi_pending = true;
             self.trace_interrupt(2, "sound NMI (scanline timer)");

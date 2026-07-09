@@ -41,12 +41,16 @@ fn main() {
     sys.reset();
     println!("reset PC = {:#06X}", sys.main_pc());
 
-    for f in 1..=frames {
+    let mut released_at = None;
+    for fr in 1..=frames {
         sys.run_frame();
-        if f % 100 == 0 || f == frames {
+        if released_at.is_none() && sys.sub_released() {
+            released_at = Some(fr);
+        }
+        if fr % 200 == 0 || fr == frames {
             let (fg, bg) = sys.video_ram_nonzero();
             println!(
-                "frame {f:>4}: main {:#06X}  sub {:#06X}  snd {:#06X}  released {}  main_irq {}  fg_vram {fg}  bg_vram {bg}",
+                "frame {fr:>4}: main {:#06X}  sub {:#06X}  snd {:#06X}  released {}  main_irq {}  fg_vram {fg}  bg_vram {bg}",
                 sys.main_pc(),
                 sys.sub_pc(),
                 sys.sound_pc(),
@@ -54,5 +58,9 @@ fn main() {
                 sys.main_irq_on()
             );
         }
+    }
+    match released_at {
+        Some(fr) => println!("\nsub/sound CPUs released at frame {fr} (and still running)"),
+        None => println!("\nsub/sound CPUs never released — still in self-test"),
     }
 }

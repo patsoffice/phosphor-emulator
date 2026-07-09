@@ -251,17 +251,6 @@ impl XeviousSystem {
         self.board.main_irq_enabled
     }
 
-    /// Peek a byte of the shared work RAM / sprite-register banks (boot checks).
-    pub fn peek(&self, addr: u16) -> u8 {
-        match addr {
-            0x7800..=0x7FFF => self.work_ram[(addr - 0x7800) as usize],
-            0x8000..=0x87FF => self.sr1[(addr - 0x8000) as usize],
-            0x9000..=0x97FF => self.sr2[(addr - 0x9000) as usize],
-            0xA000..=0xA7FF => self.sr3[(addr - 0xA000) as usize],
-            _ => 0,
-        }
-    }
-
     /// Count of non-zero bytes in the foreground and background video RAM —
     /// a proxy for "the attract screen has been drawn" during boot checks.
     pub fn video_ram_nonzero(&self) -> (usize, usize) {
