@@ -954,7 +954,7 @@ impl Bus for DigDugSystem {
             // ER2055 control: commit write on rising clock edge
             0xB840 => {
                 let clock = data & 0x01 != 0;
-                let c1 = data & 0x02 != 0; // bit 1 direct (Namco wiring)
+                let c1 = data & 0x02 == 0; // bit 1 inverted → C1 (active-low)
                 let c2 = data & 0x04 != 0; // bit 2
                 let cs1 = data & 0x08 != 0;
                 self.earom.write_control(clock, cs1, c1, c2);
@@ -1561,5 +1561,59 @@ mod tests {
         sys.set_dip_bank_value(5, 0xFF);
         assert_eq!(sys.dip_bank_value(0), 0x3C);
         assert_eq!(sys.dip_bank_value(1), 0xC3);
+    }
+
+    // Drive the ER2055 EAROM the way the game ROM does: latch address+data at
+    // 0xB800-0xB83F, then pulse the control latch at 0xB840. The control byte is
+    // bit0=CK, bit1=!C1, bit2=C2, bit3=CS1 (CS2 hardwired). Regression guard for
+    // the C1 inversion: with C1 decoded non-inverted the erase/write modes flip,
+    // the write becomes a no-op, and the stored value stays 0xFF.
+    // `write`/`read` are ambiguous here (both Bus and BusDebug are in scope), so
+    // the helpers pin them to the Bus trait — the CPU-facing memory map.
+    fn cpu_write(sys: &mut DigDugSystem, addr: u16, data: u8) {
+        Bus::write(sys, BusMaster::Cpu(0), addr, data);
+    }
+    fn cpu_read(sys: &mut DigDugSystem, addr: u16) -> u8 {
+        Bus::read(sys, BusMaster::Cpu(0), addr)
+    }
+
+    // Commit the value latched at 0xB800+addr into the EAROM cell: erase (set to
+    // 0xFF) then write (AND). Control byte 0xB840 bits: 0=CK, 1=!C1, 2=C2, 3=CS1.
+    fn earom_commit(sys: &mut DigDugSystem) {
+        cpu_write(sys, 0xB840, 0x0F); // erase, clock high
+        cpu_write(sys, 0xB840, 0x0E); // erase, clock low
+        cpu_write(sys, 0xB840, 0x0B); // write, clock high
+        cpu_write(sys, 0xB840, 0x0A); // write, clock low
+    }
+
+    #[test]
+    fn earom_write_read() {
+        let mut sys = DigDugSystem::new();
+
+        // Latch address 0x05 with data 0xAB, then commit it.
+        cpu_write(&mut sys, 0xB805, 0xAB);
+        earom_commit(&mut sys);
+
+        // The EAROM read port returns the stored value.
+        assert_eq!(cpu_read(&mut sys, 0xB805), 0xAB);
+    }
+
+    // The whole point of the EAROM is that high scores survive a power cycle:
+    // a snapshot taken after a write must reload into a fresh machine.
+    #[test]
+    fn earom_nvram_round_trip() {
+        let mut sys = DigDugSystem::new();
+
+        cpu_write(&mut sys, 0xB800, 0x42);
+        earom_commit(&mut sys);
+        cpu_write(&mut sys, 0xB83F, 0x37);
+        earom_commit(&mut sys);
+
+        let snapshot = Nvram::save_nvram(&sys).expect("digdug has NVRAM").to_vec();
+
+        let mut sys2 = DigDugSystem::new();
+        Nvram::load_nvram(&mut sys2, &snapshot);
+        assert_eq!(cpu_read(&mut sys2, 0xB800), 0x42);
+        assert_eq!(cpu_read(&mut sys2, 0xB83F), 0x37);
     }
 }
