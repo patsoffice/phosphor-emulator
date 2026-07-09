@@ -475,6 +475,7 @@ pub mod starwars;
 pub mod tempest;
 pub mod tkg04;
 pub mod williams;
+pub mod xevious;
 pub mod z80dma;
 
 pub use astdelux::AsteroidsDeluxeSystem;
@@ -507,6 +508,7 @@ pub use simple_system::{
     SimpleSystem, SimpleSystem32, SimpleZ80System,
 };
 pub use tempest::TempestSystem;
+pub use xevious::XeviousSystem;
 
 /// Shared DIP-table validator for machine unit tests.
 ///
