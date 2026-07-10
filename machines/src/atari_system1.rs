@@ -734,11 +734,12 @@ impl AtariSystem1Board {
                 let bank_id = ((lookup >> 8) & 0x0F) as usize;
                 let code = (((lookup & 0xFF) as usize) << 8) | (pf_data & 0xFF) as usize;
                 let palcolor = ((lookup >> 12) & 0x0F) as usize;
+                // Bit 15 of the cell word horizontally mirrors the 8×8 tile.
+                let hflip = pf_data & 0x8000 != 0;
 
                 if let Some(bank) = self.playfield.banks.get(bank_id) {
-                    let pen = bank
-                        .cache
-                        .pixel(code % bank.cache.count(), src_x % 8, src_y % 8);
+                    let tx = if hflip { 7 - src_x % 8 } else { src_x % 8 };
+                    let pen = bank.cache.pixel(code % bank.cache.count(), tx, src_y % 8);
                     let color = 0x20 + (palcolor << (bank.bpp - 3));
                     index[sy * w + sx] = ((0x100 + color * 8 + pen as usize) & 0x3FF) as u16;
                 }
@@ -1228,5 +1229,45 @@ mod tests {
             (0, 254, 0),
             "bank-1 sprite shows in the bottom band"
         );
+    }
+
+    #[test]
+    fn playfield_tile_horizontal_flip() {
+        // Bit 15 of a playfield cell word mirrors its 8×8 tile left-to-right.
+        let mut board = AtariSystem1Board::new(103, false);
+        let w = TIMING.display_width as usize;
+
+        // One real gfx bank (index 1 — banks[0] is the blank placeholder) whose
+        // tile 0 has a single pen-5 pixel at its left edge (x=0, y=0).
+        let mut cache = GfxCache::new(1, 8, 8);
+        cache.set_pixel(0, 0, 0, 5);
+        board.playfield.banks.push(GfxBank { cache, bpp: 4 });
+        // Playfield lookup 0 → gfx bank 1, code 0, palcolor 0.
+        board.playfield.lookup[0] = 1 << 8;
+
+        // Playfield pen 5, palcolor 0 → index 0x100 + 0x20*8 + 5 = 0x205 = green.
+        let palette = board.map.region_data_mut(Region::Palette);
+        palette[0x205 * 2] = 0xF0;
+        palette[0x205 * 2 + 1] = 0xF0;
+
+        // Cell 0 (screen x 0..7): no flip. Cell 1 (screen x 8..15): bit 15 set.
+        let pf = board.map.region_data_mut(Region::Playfield);
+        pf[2] = 0x80; // cell 1 word high byte → hflip
+
+        let (dw, dh) = TIMING.display_size();
+        let mut buf = vec![0u8; (dw * dh * 3) as usize];
+        board.render_frame(&mut buf);
+
+        let px = |x: usize, y: usize| {
+            let o = (y * w + x) * 3;
+            (buf[o], buf[o + 1], buf[o + 2])
+        };
+        const GREEN: (u8, u8, u8) = (0, 254, 0);
+        // Unflipped cell: the pen stays at the tile's left edge.
+        assert_eq!(px(0, 0), GREEN, "unflipped pen at left edge");
+        assert_ne!(px(7, 0), GREEN, "unflipped right edge is blank");
+        // Flipped cell: the same pen moves to the tile's right edge.
+        assert_ne!(px(8, 0), GREEN, "flipped left edge is blank");
+        assert_eq!(px(15, 0), GREEN, "flipped pen at right edge");
     }
 }
