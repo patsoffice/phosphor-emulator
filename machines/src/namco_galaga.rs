@@ -33,6 +33,11 @@ pub const INPUT_START2: u8 = 11;
 pub const INPUT_COIN1: u8 = 12;
 pub const INPUT_COIN2: u8 = 13;
 pub const INPUT_SERVICE: u8 = 14;
+// Second action button (Xevious blaster/bomb). Galaga and Dig Dug have only
+// one button, so these IDs are unused by NAMCO_GALAGA_CONTROLS; Xevious adds
+// them to its own control table and routes them to the DSWB port bits.
+pub const INPUT_P1_BUTTON2: u8 = 15;
+pub const INPUT_P2_BUTTON2: u8 = 16;
 
 /// Typed logical controls shared across the Galaga family (Galaga, Dig Dug).
 /// `InputId`s reuse the `INPUT_*` numbering. Default bindings mirror the legacy

@@ -18,8 +18,9 @@ use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::debug::{BusDebug, DebugCpu, Debuggable};
 use phosphor_core::core::machine::{
-    AudioSource, DipApplyTiming, DipChoice, DipOption, DipSwitchBank, DipSwitches, MachineCore,
-    MachineDebug, Renderable, SaveState,
+    ActionRole, AudioSource, DipApplyTiming, DipChoice, DipOption, DipSwitchBank, DipSwitches,
+    InputConfigurable, InputControl, InputEvent, InputId, InputKind, MachineCore, MachineDebug,
+    Renderable, SaveState,
 };
 use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
@@ -1054,14 +1055,55 @@ impl SaveState for XeviousSystem {
 }
 
 impl phosphor_core::core::machine::Nvram for XeviousSystem {}
-impl phosphor_core::core::machine::InputConfigurable for XeviousSystem {
-    fn input_controls(&self) -> &'static [phosphor_core::core::machine::InputControl] {
-        namco_galaga::NAMCO_GALAGA_CONTROLS
+/// Xevious controls: the shared Galaga-family table plus a second action button
+/// per player. Unlike Galaga's single fire button, Xevious has an air-to-air
+/// zapper (button 1, via the 51XX) and an air-to-ground blaster/bomb (button 2,
+/// wired to the DSWB port).
+const XEVIOUS_CONTROLS: [InputControl; namco_galaga::NAMCO_GALAGA_CONTROLS.len() + 2] = {
+    let base = namco_galaga::NAMCO_GALAGA_CONTROLS;
+    let mut out = [base[0]; namco_galaga::NAMCO_GALAGA_CONTROLS.len() + 2];
+    let mut i = 0;
+    while i < base.len() {
+        out[i] = base[i];
+        i += 1;
+    }
+    out[base.len()] = InputControl {
+        id: InputId(namco_galaga::INPUT_P1_BUTTON2 as u16),
+        stable_name: "p1_bomb",
+        label: "P1 Bomb",
+        kind: InputKind::Action(ActionRole::Secondary),
+        player: Some(1),
+        default_bindings: &[],
+    };
+    out[base.len() + 1] = InputControl {
+        id: InputId(namco_galaga::INPUT_P2_BUTTON2 as u16),
+        stable_name: "p2_bomb",
+        label: "P2 Bomb",
+        kind: InputKind::Action(ActionRole::Secondary),
+        player: Some(2),
+        default_bindings: &[],
+    };
+    out
+};
+
+impl InputConfigurable for XeviousSystem {
+    fn input_controls(&self) -> &'static [InputControl] {
+        &XEVIOUS_CONTROLS
     }
 
-    fn handle_input(&mut self, event: phosphor_core::core::machine::InputEvent) {
-        if let phosphor_core::core::machine::InputEvent::Button { id, pressed } = event {
-            self.board.handle_input(id.0 as u8, pressed);
+    fn handle_input(&mut self, event: InputEvent) {
+        if let InputEvent::Button { id, pressed } = event {
+            // The blaster (button 2) is read through the DSWB port, active low:
+            // P1 on bit 0, P2 on bit 4. Everything else is 51XX I/O.
+            match id.0 as u8 {
+                namco_galaga::INPUT_P1_BUTTON2 => {
+                    crate::set_bit_active_low(&mut self.board.dswb, 0, pressed)
+                }
+                namco_galaga::INPUT_P2_BUTTON2 => {
+                    crate::set_bit_active_low(&mut self.board.dswb, 4, pressed)
+                }
+                other => self.board.handle_input(other, pressed),
+            }
         }
     }
 }
@@ -1373,5 +1415,29 @@ mod tests {
         sys.sr3[0x781] = 0x40;
         sys.render_sprites();
         assert_eq!(sys.native_buffer[100 * 288 + 100], 0);
+    }
+
+    /// The blaster (button 2) is exposed as its own control and drives the
+    /// active-low DSWB port bits (P1 = bit 0, P2 = bit 4).
+    #[test]
+    fn button2_maps_to_dswb_port() {
+        let mut sys = XeviousSystem::new();
+        sys.board.dswb = 0xFF;
+        let press = |sys: &mut XeviousSystem, id: u8, pressed: bool| {
+            sys.handle_input(InputEvent::Button {
+                id: InputId(id as u16),
+                pressed,
+            });
+        };
+        press(&mut sys, namco_galaga::INPUT_P1_BUTTON2, true);
+        assert_eq!(sys.board.dswb & 0x01, 0, "P1 blaster clears DSWB bit 0");
+        press(&mut sys, namco_galaga::INPUT_P1_BUTTON2, false);
+        assert_eq!(sys.board.dswb & 0x01, 0x01, "release restores DSWB bit 0");
+        press(&mut sys, namco_galaga::INPUT_P2_BUTTON2, true);
+        assert_eq!(sys.board.dswb & 0x10, 0, "P2 blaster clears DSWB bit 4");
+
+        // Both blaster controls are advertised to the frontend.
+        let names: Vec<&str> = sys.input_controls().iter().map(|c| c.stable_name).collect();
+        assert!(names.contains(&"p1_bomb") && names.contains(&"p2_bomb"));
     }
 }
