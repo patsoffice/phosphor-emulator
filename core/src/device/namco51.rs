@@ -52,8 +52,14 @@ pub struct Namco51 {
     credit_state: u8,
     /// Command write state machine.
     pub write_state: u8,
-    /// Coinage argument counter (0-3 during command 01).
+    /// Coinage argument counter (0..coinage_total during command 01).
     coinage_arg: u8,
+    /// Number of argument bytes the coinage command (01) consumes. Normally 4;
+    /// Xevious has a firmware quirk where it is 6 (the first two are ignored),
+    /// so a trailing "enter credit mode" (02) command is not swallowed.
+    coinage_total: u8,
+    /// Enables the Xevious 6-argument coinage quirk (set by the machine wrapper).
+    xevious_coinage_kludge: bool,
 }
 
 /// Joystick direction remapping table.
@@ -79,24 +85,35 @@ impl Namco51 {
             credit_state: 1,
             write_state: 0,
             coinage_arg: 0,
+            coinage_total: 4,
+            xevious_coinage_kludge: false,
         }
+    }
+
+    /// Enable/disable the Xevious coinage quirk (6-argument command 01).
+    pub fn set_xevious_coinage_kludge(&mut self, on: bool) {
+        self.xevious_coinage_kludge = on;
     }
 
     /// Write a command or argument byte (from 06xx data write).
     pub fn write(&mut self, data: u8) {
         if self.write_state == 1 {
-            // Receiving coinage arguments for command 01.
-            match self.coinage_arg {
-                0 => self.coins_per_credit[0] = data & 0x0F,
-                1 => self.creds_per_coin[0] = data & 0x0F,
-                2 => self.coins_per_credit[1] = data & 0x0F,
-                3 => {
-                    self.creds_per_coin[1] = data & 0x0F;
-                    self.write_state = 0; // done with args
+            // Receiving coinage arguments for command 01. Only the last four of
+            // `coinage_total` bytes carry values; any leading bytes (Xevious's
+            // 6-argument quirk) are consumed and discarded.
+            let base = self.coinage_total.saturating_sub(4);
+            if self.coinage_arg >= base {
+                match self.coinage_arg - base {
+                    0 => self.coins_per_credit[0] = data & 0x0F,
+                    1 => self.creds_per_coin[0] = data & 0x0F,
+                    2 => self.coins_per_credit[1] = data & 0x0F,
+                    _ => self.creds_per_coin[1] = data & 0x0F,
                 }
-                _ => self.write_state = 0,
             }
             self.coinage_arg += 1;
+            if self.coinage_arg >= self.coinage_total {
+                self.write_state = 0; // done with args
+            }
             return;
         }
 
@@ -104,11 +121,15 @@ impl Namco51 {
         let cmd = data & 0x07;
         match cmd {
             0x01 => {
-                // Set coinage: expect 4 argument nibbles.
+                // Set coinage: normally 4 argument nibbles, 6 for Xevious.
                 self.write_state = 1;
                 self.coinage_arg = 0;
+                self.coinage_total = if self.xevious_coinage_kludge { 6 } else { 4 };
                 self.credits = 0;
                 self.coin_count = [0, 0];
+                if self.xevious_coinage_kludge {
+                    self.remap_joy = true;
+                }
             }
             0x02 => {
                 // Enter credit mode.
@@ -266,6 +287,9 @@ impl Namco51 {
         self.credit_state = 1;
         self.write_state = 0;
         self.coinage_arg = 0;
+        self.coinage_total = 4;
+        // xevious_coinage_kludge is a machine-configuration flag, not runtime
+        // state, so it survives a reset.
     }
 }
 
@@ -305,5 +329,72 @@ impl Debuggable for Namco51 {
                 width: 2,
             },
         ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Standard coinage protocol (Galaga/Dig Dug): command 01 consumes exactly
+    /// four argument bytes, so a following 02 enters credit mode.
+    #[test]
+    fn default_coinage_consumes_four_args() {
+        let mut n = Namco51::new();
+        n.write(0x01); // set coinage
+        for _ in 0..4 {
+            n.write(0x03); // four coinage argument nibbles
+        }
+        assert!(!n.credit_mode, "still switch mode after coinage command");
+        n.write(0x02); // enter credit mode
+        assert!(n.credit_mode, "02 enters credit mode after 4 coinage args");
+        assert_eq!(n.coins_per_credit[0], 3);
+        assert_eq!(n.creds_per_coin[1], 3);
+    }
+
+    /// Xevious drives command 01 with six argument bytes (a firmware quirk).
+    /// Without the kludge the trailing 02 is swallowed as an argument and the
+    /// chip never leaves switch mode; with it, credit mode is entered.
+    #[test]
+    fn xevious_kludge_consumes_six_args() {
+        // Exact command stream Xevious emits: 01 then 6×01 then 02.
+        let stream = [0x01u8, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x02];
+
+        // Without the kludge: the 02 lands mid-arguments, no credit mode.
+        let mut plain = Namco51::new();
+        for &b in &stream {
+            plain.write(b);
+        }
+        assert!(
+            !plain.credit_mode,
+            "without kludge the 02 is swallowed by a re-triggered coinage command"
+        );
+
+        // With the kludge: 01 eats six args, so the 02 is a real command.
+        let mut xev = Namco51::new();
+        xev.set_xevious_coinage_kludge(true);
+        for &b in &stream[..7] {
+            xev.write(b); // command + 6 swallowed arguments
+        }
+        assert!(
+            !xev.credit_mode,
+            "still consuming the six coinage arguments"
+        );
+        xev.write(stream[7]); // 0x02
+        assert!(xev.credit_mode, "kludge: 02 enters credit mode");
+    }
+
+    /// In credit mode with no credits and idle inputs, the first response byte
+    /// is the BCD credit count (0x00), matching the reference hardware.
+    #[test]
+    fn credit_mode_first_byte_is_credit_count() {
+        let mut n = Namco51::new();
+        n.set_xevious_coinage_kludge(true);
+        for b in [0x01u8, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x02] {
+            n.write(b);
+        }
+        assert!(n.credit_mode);
+        // Idle inputs are all-ones (active low); first read = 0 credits (BCD).
+        assert_eq!(n.read(0xFF, 0xFF), 0x00);
     }
 }

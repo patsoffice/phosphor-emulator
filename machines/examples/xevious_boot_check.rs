@@ -50,12 +50,14 @@ fn main() {
         if fr % 200 == 0 || fr == frames {
             let (fg, bg) = sys.video_ram_nonzero();
             println!(
-                "frame {fr:>4}: main {:#06X}  sub {:#06X}  snd {:#06X}  released {}  main_irq {}  fg_vram {fg}  bg_vram {bg}",
+                "frame {fr:>4}: main {:#06X}  sub {:#06X}  snd {:#06X}  released {}  irq(m{} s{}) snmi {}  fg {fg}  bg {bg}",
                 sys.main_pc(),
                 sys.sub_pc(),
                 sys.sound_pc(),
                 sys.sub_released(),
-                sys.main_irq_on()
+                sys.main_irq_on() as u8,
+                sys.sub_irq_on() as u8,
+                sys.sound_nmi_on() as u8,
             );
         }
     }

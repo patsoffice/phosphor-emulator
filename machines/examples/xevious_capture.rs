@@ -32,7 +32,7 @@ fn main() {
     // reaches actual gameplay (scrolling terrain) instead of the attract title.
     let play = std::env::var("XEV_PLAY").is_ok();
     use phosphor_core::core::machine::{InputConfigurable, InputEvent, InputId};
-    let mut press = |sys: &mut XeviousSystem, id: u8, pressed: bool| {
+    let press = |sys: &mut XeviousSystem, id: u8, pressed: bool| {
         sys.handle_input(InputEvent::Button {
             id: InputId(id as u16),
             pressed,

@@ -258,6 +258,14 @@ impl Namco51Wrapper {
             Self::Lle(n) => n.reset(),
         }
     }
+
+    /// Enable the Xevious 6-argument coinage quirk. Only meaningful for the HLE
+    /// path; the LLE MCU reproduces the quirk from its firmware.
+    fn set_xevious_coinage_kludge(&mut self, on: bool) {
+        if let Self::Hle(n) = self {
+            n.set_xevious_coinage_kludge(on);
+        }
+    }
 }
 
 use phosphor_core::core::debug::{DebugRegister, Debuggable};
@@ -954,6 +962,13 @@ impl NamcoGalagaBoard {
     /// reads back the idle bus.
     pub fn fit_50xx(&mut self) {
         self.namco50 = Some(Namco50::new());
+    }
+
+    /// Enable the Xevious 51XX coinage quirk (command 01 consumes 6 arguments
+    /// instead of 4). Without it the HLE 51XX swallows Xevious's trailing
+    /// "enter credit mode" command and never leaves switch mode.
+    pub fn enable_xevious_51xx_kludge(&mut self) {
+        self.namco51.set_xevious_coinage_kludge(true);
     }
 
     // -----------------------------------------------------------------------

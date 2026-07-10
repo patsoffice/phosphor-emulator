@@ -475,6 +475,10 @@ impl XeviousSystem {
         // periodic protection check.
         self.board.fit_50xx();
 
+        // Xevious drives the 51XX coinage command with a 6-argument quirk;
+        // teach the HLE 51XX to expect it so it enters credit mode correctly.
+        self.board.enable_xevious_51xx_kludge();
+
         // Factory DIP defaults: both banks read all-ones with switches at their
         // shipped positions and the button-2 lines released.
         self.board.dswa = 0xFF;
@@ -525,6 +529,12 @@ impl XeviousSystem {
     }
     pub fn main_irq_on(&self) -> bool {
         self.board.main_irq_enabled
+    }
+    pub fn sub_irq_on(&self) -> bool {
+        self.board.sub_irq_enabled
+    }
+    pub fn sound_nmi_on(&self) -> bool {
+        self.board.sound_nmi_enabled
     }
 
     /// Count of non-zero bytes in the foreground and background video RAM —
