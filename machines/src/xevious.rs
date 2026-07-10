@@ -9,10 +9,10 @@
 //! scroll. Background tile data lives in ROM and is fetched through a hardware
 //! lookup at 0xF000-0xFFFF.
 //!
-//! This is the first milestone: board plumbing, the full CPU memory map and the
-//! 50XX start-up protection handshake — enough to boot. Graphics decode and the
-//! three-layer renderer land in a later milestone, so `render_frame` currently
-//! produces a blank field.
+//! The renderer composites the three layers in hardware order: the opaque
+//! scrolling background, then 3bpp 16×16 sprites (double width/height, flip,
+//! pen 0x80 transparent), then the transparent foreground text on top, into a
+//! 288×224 native buffer rotated 90° CCW for the vertical display.
 
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
@@ -550,10 +550,11 @@ impl XeviousSystem {
     }
 
     /// Render one frame into the native (unrotated) 288×224 index buffer.
-    /// Layer order matches the hardware: opaque background, then sprites (a
-    /// later task), then the transparent foreground text on top.
+    /// Layer order matches the hardware: opaque background, then sprites, then
+    /// the transparent foreground text on top.
     fn render_video(&mut self) {
         self.render_background();
+        self.render_sprites();
         self.render_foreground();
     }
 
@@ -609,6 +610,105 @@ impl XeviousSystem {
                     // Opaque pen: colour = ((attr&0x03)<<4) | ((attr&0x3c)>>2).
                     let color = ((attr & 0x03) << 4) | ((attr & 0x3c) >> 2);
                     self.native_buffer[row_off + screen_x] = color as u8;
+                }
+            }
+        }
+    }
+
+    /// Draw the sprite layer (middle, between background and foreground). Each
+    /// of the 64 sprite slots lives in the top 0x80 bytes of the three SR banks:
+    /// SR3 = tile code, SR1 = X/Y position, SR2 = flip/size/bank. Sprites are
+    /// 3bpp 16×16 with optional double width/height and H/V flip; pen 0x80 is
+    /// transparent. Screen origin: X = xpos - 40 (+256 when the high bit is set),
+    /// Y counts up from the bottom of the visible area.
+    fn render_sprites(&mut self) {
+        for offs in (0..0x80usize).step_by(2) {
+            let code_byte = self.sr3[0x780 + offs];
+            let flags = self.sr3[0x780 + offs + 1];
+            if flags & 0x40 != 0 {
+                continue; // slot disabled
+            }
+            let attr = self.sr2[0x780 + offs];
+            let attr_hi = self.sr2[0x780 + offs + 1];
+            let ypos = self.sr1[0x780 + offs];
+            let xpos = self.sr1[0x780 + offs + 1];
+
+            let base = if attr & 0x80 != 0 {
+                (code_byte as u32 & 0x3f) + 0x100
+            } else {
+                code_byte as u32
+            };
+            let color = (flags & 0x7f) as usize;
+            let flipx = attr & 0x04 != 0;
+            let flipy = attr & 0x08 != 0;
+            let sx = xpos as i32 - 40 + 0x100 * (attr_hi & 1) as i32;
+            let sy = 28 * 8 - ypos as i32 - 1;
+
+            match (attr & 0x02 != 0, attr & 0x01 != 0) {
+                (true, true) => {
+                    // Double width and height: a 2×2 block of tiles.
+                    let c = base & !3;
+                    let (l, r) = if flipx { (sx + 16, sx) } else { (sx, sx + 16) };
+                    let (t, b) = if flipy { (sy - 16, sy) } else { (sy, sy - 16) };
+                    self.draw_sprite_tile(c, color, flipx, flipy, l, b);
+                    self.draw_sprite_tile(c + 2, color, flipx, flipy, l, t);
+                    self.draw_sprite_tile(c + 1, color, flipx, flipy, r, b);
+                    self.draw_sprite_tile(c + 3, color, flipx, flipy, r, t);
+                }
+                (true, false) => {
+                    // Double height: two tiles stacked vertically.
+                    let c = base & !2;
+                    let x = if flipx { sx + 16 } else { sx };
+                    let (t, b) = if flipy { (sy - 16, sy) } else { (sy, sy - 16) };
+                    self.draw_sprite_tile(c, color, flipx, flipy, x, b);
+                    self.draw_sprite_tile(c + 2, color, flipx, flipy, x, t);
+                }
+                (false, true) => {
+                    // Double width: two tiles side by side.
+                    let c = base & !1;
+                    let y = if flipy { sy - 16 } else { sy };
+                    let (l, r) = if flipx { (sx + 16, sx) } else { (sx, sx + 16) };
+                    self.draw_sprite_tile(c, color, flipx, flipy, l, y);
+                    self.draw_sprite_tile(c + 1, color, flipx, flipy, r, y);
+                }
+                (false, false) => {
+                    self.draw_sprite_tile(base, color, flipx, flipy, sx, sy);
+                }
+            }
+        }
+    }
+
+    /// Blit one 16×16 sprite tile into the native buffer with H/V flip and
+    /// per-pixel transparency (indirect pen 0x80). `sx`/`sy` are the top-left
+    /// screen coordinates; off-screen pixels are clipped.
+    fn draw_sprite_tile(
+        &mut self,
+        code: u32,
+        color: usize,
+        flipx: bool,
+        flipy: bool,
+        sx: i32,
+        sy: i32,
+    ) {
+        let code = code as usize;
+        let color_base = (color & 0x3f) * 8;
+        for py in 0..16i32 {
+            let dy = sy + py;
+            if !(0..224).contains(&dy) {
+                continue;
+            }
+            let fpy = if flipy { 15 - py } else { py } as usize;
+            let row_off = dy as usize * 288;
+            for px in 0..16i32 {
+                let dx = sx + px;
+                if !(0..288).contains(&dx) {
+                    continue;
+                }
+                let fpx = if flipx { 15 - px } else { px } as usize;
+                let pixel = self.sprite_cache.pixel(code, fpx, fpy) as usize;
+                let pen = self.sprite_lut[color_base + pixel];
+                if pen != 0x80 {
+                    self.native_buffer[row_off + dx as usize] = pen;
                 }
             }
         }
@@ -1243,5 +1343,35 @@ mod tests {
         rom[0x5000] = 0b0000_1000;
         let cache = decode_gfx(&rom, 0, 1, &SPRITE_LAYOUT);
         assert_eq!(cache.pixel(0, 0, 0), 0b111);
+    }
+
+    /// A single enabled sprite slot lands at (xpos-40, 223-ypos) with the LUT
+    /// pen, and transparent/disabled pixels leave the background untouched.
+    #[test]
+    fn sprite_render_position_and_transparency() {
+        let mut sys = XeviousSystem::new();
+        // Tile 5: pen 3 at (0,0); pen 0 (transparent) at (1,0).
+        sys.sprite_cache = GfxCache::new(6, 16, 16);
+        sys.sprite_cache.set_pixel(5, 0, 0, 3);
+        // Colour 2: pen 3 -> palette 0x0C, pen 0 -> transparent (0x80).
+        sys.sprite_lut[2 * 8 + 3] = 0x0C;
+        sys.sprite_lut[2 * 8] = 0x80;
+        // Slot 0: code 5, colour 2, enabled; xpos 140 -> sx 100, ypos 123 -> sy 100.
+        sys.sr3[0x780] = 5; // code
+        sys.sr3[0x781] = 2; // flags: bit6 clear (enabled), colour = 2
+        sys.sr1[0x780] = 123; // ypos
+        sys.sr1[0x781] = 140; // xpos
+        sys.sr2[0x780] = 0; // no flip / size / bank
+        sys.sr2[0x781] = 0; // high X bit clear
+        sys.render_sprites();
+        assert_eq!(sys.native_buffer[100 * 288 + 100], 0x0C);
+        // Neighbour pixel is the transparent pen: background (0) preserved.
+        assert_eq!(sys.native_buffer[100 * 288 + 101], 0);
+
+        // A disabled slot (bit 6 set) draws nothing.
+        sys.native_buffer.fill(0);
+        sys.sr3[0x781] = 0x40;
+        sys.render_sprites();
+        assert_eq!(sys.native_buffer[100 * 288 + 100], 0);
     }
 }
