@@ -287,6 +287,11 @@ const FG_CHAR_COUNT: usize = 512; // 0x1000 / 8 bytes
 const BG_TILE_COUNT: usize = 512; // (0x2000 / 2) / 8 bytes
 const SPRITE_COUNT: usize = 320; // (0xA000 / 2) / 64 bytes
 
+// Screen-space offsets applied to the layer scroll registers (from the
+// hardware's tilemap positioning: bg scrolldx/dy = -20/-16).
+const BG_SCROLL_DX: i32 = -20;
+const BG_SCROLL_DY: i32 = -16;
+
 /// Load the sprite ROM region and unpack the plane-0 ROM (xvi_18): its high
 /// nibble at 0x5000-0x6FFF is shifted into 0x7000-0x8FFF so each sprite set's
 /// third bit plane is addressable separately (0x9000-0x9FFF stays zero —
@@ -528,6 +533,40 @@ impl XeviousSystem {
         let fg = self.fg_videoram.iter().filter(|&&b| b != 0).count();
         let bg = self.bg_videoram.iter().filter(|&&b| b != 0).count();
         (fg, bg)
+    }
+
+    /// Render one frame into the native (unrotated) 288×224 index buffer.
+    fn render_video(&mut self) {
+        self.render_background();
+        // Foreground text and sprites land in the following M2 tasks.
+    }
+
+    /// Draw the scrolling background tilemap (bottom, opaque layer). The 64×32
+    /// tile map (512×256 px) is scrolled into the 288×224 viewport; each tile's
+    /// 9-bit code, 7-bit colour, and flip come from BG video/colour RAM, and the
+    /// 2bpp pen is mapped to an indirect palette index through the BG LUT.
+    fn render_background(&mut self) {
+        let sx0 = self.bg_scroll_x as i32 + BG_SCROLL_DX;
+        let sy0 = self.bg_scroll_y as i32 + BG_SCROLL_DY;
+        for screen_y in 0..224usize {
+            let ty = (screen_y as i32 + sy0).rem_euclid(256) as usize;
+            let tile_row = ty >> 3;
+            let py = ty & 7;
+            let row_off = screen_y * 288;
+            for screen_x in 0..288usize {
+                let tx = (screen_x as i32 + sx0).rem_euclid(512) as usize;
+                let idx = tile_row * 64 + (tx >> 3);
+                let code = self.bg_videoram[idx] as usize;
+                let attr = self.bg_colorram[idx] as usize;
+                let tile = code + ((attr & 0x01) << 8);
+                let color = ((attr & 0x3c) >> 2) | ((code & 0x80) >> 3) | ((attr & 0x03) << 5);
+                let px = tx & 7;
+                let fpx = if attr & 0x40 != 0 { 7 - px } else { px };
+                let fpy = if attr & 0x80 != 0 { 7 - py } else { py };
+                let pixel = self.bg_tile_cache.pixel(tile, fpx, fpy) as usize;
+                self.native_buffer[row_off + screen_x] = self.bg_lut[color * 4 + pixel];
+            }
+        }
     }
 
     /// Read the interleaved DIP switch port at 0x6800-0x6807. Each address
@@ -837,7 +876,7 @@ impl MachineCore for XeviousSystem {
                 self.board.tick(bus);
             }
         });
-        // Video rendering lands in the next milestone; the frame stays blank.
+        self.render_video();
     }
 
     fn reset(&mut self) {
@@ -1118,6 +1157,30 @@ mod tests {
         assert_eq!(sys.char_cache.count(), 0);
         assert_eq!(sys.bg_tile_cache.count(), 0);
         assert_eq!(sys.sprite_cache.count(), 0);
+    }
+
+    #[test]
+    fn background_lookup_and_scroll() {
+        let mut sys = XeviousSystem::new();
+        // Two tiles: tile 0 has pen 1 at (0,0); tile 1 has pen 2 at (0,0).
+        sys.bg_tile_cache = GfxCache::new(2, 8, 8);
+        sys.bg_tile_cache.set_pixel(0, 0, 0, 1);
+        sys.bg_tile_cache.set_pixel(1, 0, 0, 2);
+        // Colour 0: pen 1 -> palette 0x0A, pen 2 -> palette 0x0B.
+        sys.bg_lut[1] = 0x0A;
+        sys.bg_lut[2] = 0x0B;
+        // Tilemap cell (col 1, row 0) selects tile 1.
+        sys.bg_videoram[1] = 1;
+        // Cancel the fixed scroll offset so native (x,y) == tilemap (x,y).
+        sys.bg_scroll_x = (-BG_SCROLL_DX) as u16;
+        sys.bg_scroll_y = (-BG_SCROLL_DY) as u16;
+        sys.render_background();
+        assert_eq!(sys.native_buffer[0], 0x0A); // native (0,0) -> tile 0
+        assert_eq!(sys.native_buffer[8], 0x0B); // native (8,0) -> tile 1
+        // Scrolling +8 in X shows tilemap content 8px to the right: tile 1 at (0,0).
+        sys.bg_scroll_x = (-BG_SCROLL_DX + 8) as u16;
+        sys.render_background();
+        assert_eq!(sys.native_buffer[0], 0x0B);
     }
 
     /// A tiny synthetic 3bpp sprite exercises the plane-order + RGN_FRAC(1,2)

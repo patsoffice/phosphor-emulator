@@ -7,3 +7,6 @@ edition = "2024"
 inventory = "0.3.22"
 phosphor-core = { path = "../core" }
 phosphor-macros = { path = "../macros" }
+
+[dev-dependencies]
+png = "0.17"
