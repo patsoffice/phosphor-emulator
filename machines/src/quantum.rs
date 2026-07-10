@@ -41,7 +41,7 @@ use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
     AnalogAxisKind, AudioSource, DefaultBinding, DipApplyTiming, DipChoice, DipOption,
     DipSwitchBank, DipSwitches, InputConfigurable, InputControl, InputEvent, InputId, InputKind,
-    KeyId, MachineCore, MouseControl, Nvram, Profilable, Renderable, SaveState,
+    MachineCore, MouseControl, Nvram, Profilable, Renderable, SaveState,
 };
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::{AccessKind, AddressSpace32};
@@ -186,7 +186,7 @@ const QUANTUM_CONTROLS: &[InputControl] = &[
         label: "Coin 2",
         kind: InputKind::Coin,
         player: None,
-        default_bindings: &[DefaultBinding::Key(KeyId::Num5)],
+        default_bindings: &[],
     },
     InputControl {
         id: InputId(INPUT_COIN3 as u16),

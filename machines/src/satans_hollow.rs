@@ -1,8 +1,8 @@
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
-    ActionRole, DefaultBinding, Direction, FrontendMachine, InputConfigurable, InputControl,
-    InputEvent, InputId, InputKind, KeyId, MachineCore, Nvram, Profilable, SaveState,
+    ActionRole, Direction, FrontendMachine, InputConfigurable, InputControl, InputEvent, InputId,
+    InputKind, MachineCore, Nvram, Profilable, SaveState,
 };
 use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
@@ -167,7 +167,7 @@ const SHOLLOW_CONTROLS: &[InputControl] = &[
         label: "Coin 2",
         kind: InputKind::Coin,
         player: None,
-        default_bindings: &[DefaultBinding::Key(KeyId::Num5)],
+        default_bindings: &[],
     },
     InputControl {
         id: InputId(INPUT_START1 as u16),

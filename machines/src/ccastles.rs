@@ -243,7 +243,7 @@ const CCASTLES_CONTROLS: &[InputControl] = &[
         label: "Coin 2",
         kind: InputKind::Coin,
         player: None,
-        default_bindings: &[DefaultBinding::Key(KeyId::Num5)],
+        default_bindings: &[],
     },
     InputControl {
         id: InputId(INPUT_JUMP_LEFT as u16),

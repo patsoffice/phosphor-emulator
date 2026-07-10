@@ -3,7 +3,7 @@ use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
     ActionRole, AnalogAxisKind, AudioSource, DefaultBinding, DipApplyTiming, DipChoice, DipOption,
     DipSwitchBank, DipSwitches, FrontendMachine, InputConfigurable, InputControl, InputEvent,
-    InputId, InputKind, KeyId, MachineCore, MouseControl, Nvram, Profilable, SaveState,
+    InputId, InputKind, MachineCore, MouseControl, Nvram, Profilable, SaveState,
 };
 use phosphor_core::core::{AccessKind, AddressSpace16};
 use phosphor_core::core::{Bus, BusMaster};
@@ -106,7 +106,7 @@ const TEMPEST_CONTROLS: &[InputControl] = &[
         label: "Coin 2",
         kind: InputKind::Coin,
         player: None,
-        default_bindings: &[DefaultBinding::Key(KeyId::Num5)],
+        default_bindings: &[],
     },
     InputControl {
         id: InputId(INPUT_COIN3 as u16),
@@ -114,7 +114,7 @@ const TEMPEST_CONTROLS: &[InputControl] = &[
         label: "Coin 3",
         kind: InputKind::Coin,
         player: None,
-        default_bindings: &[DefaultBinding::Key(KeyId::Num5)],
+        default_bindings: &[],
     },
     InputControl {
         id: InputId(INPUT_FIRE as u16),

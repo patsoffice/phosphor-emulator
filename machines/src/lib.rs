@@ -549,3 +549,30 @@ pub(crate) fn assert_dip_banks_valid(
         }
     }
 }
+
+/// Assert that no two coin controls share a default physical binding. Binding a
+/// single coin key to more than one coin slot inserts a coin into each, so one
+/// key press would award several credits.
+#[cfg(test)]
+pub(crate) fn assert_no_coin_binding_collision(
+    controls: &[phosphor_core::core::machine::InputControl],
+) {
+    use phosphor_core::core::machine::InputKind;
+    let coins: Vec<_> = controls
+        .iter()
+        .filter(|c| matches!(c.kind, InputKind::Coin))
+        .collect();
+    for (i, a) in coins.iter().enumerate() {
+        for b in &coins[i + 1..] {
+            for binding in a.default_bindings {
+                assert!(
+                    !b.default_bindings.contains(binding),
+                    "coin controls '{}' and '{}' share default binding {binding:?}: \
+                     one press would award multiple credits",
+                    a.stable_name,
+                    b.stable_name,
+                );
+            }
+        }
+    }
+}

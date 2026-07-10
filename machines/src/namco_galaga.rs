@@ -1,6 +1,6 @@
 use phosphor_core::core::debug_trace::{DebugEvent, DebugEventKind, DebugTraceBuffer};
 use phosphor_core::core::machine::{
-    ActionRole, DefaultBinding, Direction, InputControl, InputId, InputKind, KeyId, TimingConfig,
+    ActionRole, Direction, InputControl, InputId, InputKind, TimingConfig,
 };
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::watchpoint::Watchpoints;
@@ -169,9 +169,9 @@ pub const NAMCO_GALAGA_CONTROLS: &[InputControl] = &[
         label: "Coin 2",
         kind: InputKind::Coin,
         player: None,
-        // Legacy bound every "Coin*" name to the 5 key; only the first also
-        // got gamepad Back (handled by Coin 1 above).
-        default_bindings: &[DefaultBinding::Key(KeyId::Num5)],
+        // Unbound by default: coin slot 2 must not share the coin-1 key, or a
+        // single coin key press would insert into both slots (two credits).
+        default_bindings: &[],
     },
     InputControl {
         id: InputId(INPUT_SERVICE as u16),
@@ -1219,6 +1219,13 @@ impl Default for NamcoGalagaBoard {
 mod tests {
     use super::*;
     use phosphor_core::core::watchpoint::{DebugAccessSource, WatchpointKind, WatchpointPhase};
+
+    // Coin slot 2 must not default to the coin-1 key, or one press awards two
+    // credits (regression: the legacy defaults bound every coin to Num5).
+    #[test]
+    fn coin_keys_do_not_double_credit() {
+        crate::assert_no_coin_binding_collision(NAMCO_GALAGA_CONTROLS);
+    }
 
     mod watchpoints {
         use super::*;

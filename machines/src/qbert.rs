@@ -8,9 +8,9 @@ use std::time::Instant;
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
-    DefaultBinding, DipApplyTiming, DipChoice, DipOption, DipSwitchBank, DipSwitches, Direction,
-    FrontendMachine, InputConfigurable, InputControl, InputEvent, InputId, InputKind, KeyId,
-    MachineCore, Nvram, Profilable, ProfileSpan, SaveState,
+    DipApplyTiming, DipChoice, DipOption, DipSwitchBank, DipSwitches, Direction, FrontendMachine,
+    InputConfigurable, InputControl, InputEvent, InputId, InputKind, MachineCore, Nvram,
+    Profilable, ProfileSpan, SaveState,
 };
 use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
@@ -160,7 +160,7 @@ const QBERT_CONTROLS: &[InputControl] = &[
         label: "Coin 2",
         kind: InputKind::Coin,
         player: None,
-        default_bindings: &[DefaultBinding::Key(KeyId::Num5)],
+        default_bindings: &[],
     },
     InputControl {
         id: InputId(INPUT_START1 as u16),
