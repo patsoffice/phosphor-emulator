@@ -8,10 +8,13 @@
 //! sequence). A stray access that breaks the pattern silently aborts it, which
 //! is what frustrates ROM-dumping bootleggers.
 //!
-//! This models the address-sequence state machine for the **137412-103** chip
-//! used by Marble Madness (the rest of the 103-110 family share this state
-//! graph, differing only in the secret matcher values — see [`SlapsticConfig`]
-//! and [`SLAPSTIC_103`]). It is driven by [`Slapstic::test`], which the bus calls with the
+//! This models the address-sequence state machine shared across the chip family:
+//! **137412-101** (Empire Strikes Back / Tetris — see [`SLAPSTIC_101`]), **-103**
+//! (Marble Madness — [`SLAPSTIC_103`]), and **-108** (Road Runner — [`SLAPSTIC_108`]).
+//! The chips differ only in their secret matcher values and the window geometry
+//! they are wired behind ([`SlapsticConfig`] + the per-game [`Geom`]); the 101/102
+//! generation adds two behavioral quirks (in-window alt start, outside-window alt
+//! valid). It is driven by [`Slapstic::test`], which the bus calls with the
 //! **full byte address** of every access the CPU drives onto the bus — data
 //! reads/writes *and* instruction prefetches, anywhere in the address map, not
 //! just the window — because the chip only decodes address lines and some
@@ -20,7 +23,7 @@
 //! *prefetching* an instruction placed at a magic address, so the CPU must
 //! present prefetch fetches here in hardware order. After feeding an access,
 //! read [`Slapstic::current_bank`] for the bank the window presents. The logic
-//! mirrors `atari_slapstic_device` for chip 103.
+//! mirrors `atari_slapstic_device`.
 //!
 //! Reference: <http://www.aarongiles.com/slapstic.html> and MAME's
 //! `src/mame/atari/slapstic.cpp`.
@@ -49,45 +52,88 @@ impl Matcher {
 // Per-chip configuration
 // ---------------------------------------------------------------------------
 //
-// Every Atari System 1 slapstic watches the 0x80000-0x87FFF window and decodes
-// 14 address lines; the chips differ only in the *secret matcher values* baked
-// into the PAL. The raw `(mask, value)` chip constants are given in window
-// word-offset terms; `test_in`/`test_any`/`test_bank` lift them onto the full
+// The chips differ only in the *secret matcher values* baked into the PAL, plus
+// the geometry of the window they sit behind: an Atari System 1 68000 game wires
+// a slapstic across a 0x80000-byte word window with 14 decoded address lines,
+// while Empire Strikes Back wires chip 101 across the MC6809's 0x8000-0x9FFF
+// window (8-bit bus, 13 decoded lines). The raw `(mask, value)` chip constants
+// are given in window word-offset terms; a [`Geom`] lifts them onto the full
 // byte address the bus presents, following MAME's `atari_slapstic_device`.
-// [`SlapsticConfig`] captures a whole chip's matchers so [`Slapstic::test`] can
-// drive the shared state machine against any of them.
+// [`SlapsticConfig`] captures a whole chip's resolved matchers so
+// [`Slapstic::test`] can drive the shared state machine against any of them.
 
-/// Window base byte address and the masks that pin an access into it. These are
-/// common to the whole 103-110 family (all share the 0x80000-byte ROM window),
-/// so the chip-specific configs only vary the `(mask, value)` pairs below.
-const RANGE_VALUE: u32 = 0x0008_0000;
-/// `!((end - start) | mirror)` for a 0x8000-byte, un-mirrored window.
-const RANGE_MASK: u32 = !0x7FFF;
-/// 14 decoded address lines (A1-A14), shifted up by the 16-bit data shift.
-const INPUT_MASK: u32 = 0x3FFF << 1;
+/// The window geometry a slapstic is wired behind: how an in-window access is
+/// recognized (`range_mask`/`range_value`), which address lines the PAL decodes
+/// (`input_mask`), and the data-bus shift (`shift`, 1 for a 16-bit bus that
+/// drops A0, 0 for an 8-bit bus). This is MAME's `checker`.
+#[derive(Clone, Copy)]
+struct Geom {
+    range_mask: u32,
+    range_value: u32,
+    input_mask: u32,
+    shift: u32,
+}
+
+/// Build a [`Geom`] from the wiring MAME's `set_range` describes: the window
+/// `[start, end]` (plus any `mirror`), whether the bus is 16-bit, and how many
+/// address lines the chip decodes.
+const fn geom(start: u32, end: u32, mirror: u32, width16: bool, addr_lines: u32) -> Geom {
+    let shift = if width16 { 1 } else { 0 };
+    Geom {
+        range_mask: !((end - start) | mirror),
+        range_value: start,
+        input_mask: ((1u32 << addr_lines) - 1) << shift,
+        shift,
+    }
+}
+
+/// Atari System 1 wiring: 0x80000-byte word window, 16-bit bus, 14 lines
+/// (Marble Madness 103, Road Runner 108).
+const SYS1: Geom = geom(0x0008_0000, 0x0008_7FFF, 0, true, 14);
+/// Empire Strikes Back wiring: MC6809 0x8000-0x9FFF window, 8-bit bus, 13 lines.
+const ESB: Geom = geom(0x0000_8000, 0x0000_9FFF, 0, false, 13);
 
 /// In-range matcher: the access must hit the window *and* match `(mask, value)`.
-const fn test_in(mask: u16, value: u16) -> Matcher {
+const fn test_in(g: Geom, mask: u16, value: u16) -> Matcher {
     Matcher {
-        mask: RANGE_MASK | ((mask as u32) << 1),
-        value: RANGE_VALUE | ((value as u32) << 1),
+        mask: g.range_mask | ((mask as u32) << g.shift),
+        value: g.range_value | ((value as u32) << g.shift),
     }
 }
 
 /// Anywhere matcher: matches the pattern regardless of the window (the chip
 /// only sees address lines, so these fire on any access — e.g. RAM/stack).
-const fn test_any(mask: u16, value: u16) -> Matcher {
+const fn test_any(g: Geom, mask: u16, value: u16) -> Matcher {
     Matcher {
-        mask: (mask as u32) << 1,
-        value: (value as u32) << 1,
+        mask: (mask as u32) << g.shift,
+        value: (value as u32) << g.shift,
     }
 }
 
 /// Direct bank-select matcher for bank-select value `b`.
-const fn test_bank(b: u16) -> Matcher {
+const fn test_bank(g: Geom, b: u16) -> Matcher {
     Matcher {
-        mask: RANGE_MASK | INPUT_MASK,
-        value: RANGE_VALUE | ((b as u32) << 1),
+        mask: g.range_mask | g.input_mask,
+        value: g.range_value | ((b as u32) << g.shift),
+    }
+}
+
+/// Bare in-window matcher (any address inside the window, ignoring the decoded
+/// lines) — MAME's `test_inside`. Used by chip 101's alt sequence, whose 2nd
+/// step must land *outside* the window.
+const fn test_inside(g: Geom) -> Matcher {
+    Matcher {
+        mask: g.range_mask,
+        value: g.range_value,
+    }
+}
+
+/// The re-arm matcher: an access to the window base (all decoded lines low)
+/// resets any in-progress sequence to active. MAME's `test_reset`.
+const fn test_reset(g: Geom) -> Matcher {
+    Matcher {
+        mask: g.range_mask | g.input_mask,
+        value: g.range_value,
     }
 }
 
@@ -101,10 +147,19 @@ pub struct SlapsticConfig {
     bankstart: u8,
     /// Re-arm: an access to the window base offset resets any sequence to active.
     reset: Matcher,
+    /// Bare in-window matcher, used by chip 101's `alt_valid_outside` check.
+    inside: Matcher,
+    /// Right-shift applied to the selected access to recover the alt bank number
+    /// (data-bus shift + the chip's altshift): 1 for a 16-bit bus, 0 for ESB.
+    alt_shift: u32,
+    /// Chip 101/102 quirk: the alt sequence's 2nd (valid) access must land
+    /// *outside* the window (in practice a 6809 dummy VMA access).
+    alt_valid_outside: bool,
     /// Direct bank-select matchers for bank values 0..3.
     bank: [Matcher; 4],
     // Alternate-banking sequence (active → valid → select → commit). `alt_start`
-    // matches *anywhere* (test_any); the remaining steps are in-window.
+    // matches *anywhere* (test_any) on 103+, but in-window on 101/102; the
+    // remaining steps are in-window (except the 101/102 outside-window valid).
     alt_start: Matcher,
     alt_valid: Matcher,
     alt_select: Matcher,
@@ -119,57 +174,89 @@ pub struct SlapsticConfig {
     bit_commit: Matcher,
 }
 
+/// Chip **137412-101** (Empire Strikes Back / Tetris). Sits behind the MC6809's
+/// 8-bit 0x8000-0x9FFF window (13 decoded lines). Structurally like the 103 but
+/// for two 101/102-generation quirks: the alt sequence starts *in-window* and
+/// its 2nd (valid) access must land *outside* the window (a 6809 dummy VMA
+/// access in practice). `alt_shift` is 0 — the 8-bit bus doesn't drop A0.
+pub const SLAPSTIC_101: SlapsticConfig = SlapsticConfig {
+    bankstart: 3,
+    reset: test_reset(ESB),
+    inside: test_inside(ESB),
+    alt_shift: 0,
+    alt_valid_outside: true,
+    bank: [
+        test_bank(ESB, 0x0080),
+        test_bank(ESB, 0x0090),
+        test_bank(ESB, 0x00A0),
+        test_bank(ESB, 0x00B0),
+    ],
+    // 101/102: alt starts in-window (test_in), and the valid step is test_any
+    // but constrained to fire outside the window (`alt_valid_outside`).
+    alt_start: test_in(ESB, 0x1F00, 0x1E00),
+    alt_valid: test_any(ESB, 0x1FFF, 0x1FFF),
+    alt_select: test_in(ESB, 0x1FFC, 0x1B5C),
+    alt_commit: test_in(ESB, 0x1FCF, 0x0080),
+    bit_start: test_in(ESB, 0x1FF0, 0x1540),
+    bit_load: test_in(ESB, 0x1FCF, 0x0080),
+    bit3c0: test_in(ESB, 0x1FF3, 0x1540),
+    bit3s0: test_in(ESB, 0x1FF3, 0x1541),
+    bit3c1: test_in(ESB, 0x1FF3, 0x1542),
+    bit3s1: test_in(ESB, 0x1FF3, 0x1543),
+    bit_commit: test_in(ESB, 0x1FF8, 0x1550),
+};
+
 /// Chip **137412-103** (Marble Madness).
 pub const SLAPSTIC_103: SlapsticConfig = SlapsticConfig {
     bankstart: 3,
-    reset: Matcher {
-        mask: RANGE_MASK | INPUT_MASK,
-        value: RANGE_VALUE,
-    },
+    reset: test_reset(SYS1),
+    inside: test_inside(SYS1),
+    alt_shift: 1,
+    alt_valid_outside: false,
     bank: [
-        test_bank(0x0040),
-        test_bank(0x0050),
-        test_bank(0x0060),
-        test_bank(0x0070),
+        test_bank(SYS1, 0x0040),
+        test_bank(SYS1, 0x0050),
+        test_bank(SYS1, 0x0060),
+        test_bank(SYS1, 0x0070),
     ],
-    alt_start: test_any(0x007F, 0x002D),
-    alt_valid: test_in(0x3FFF, 0x3D14),
-    alt_select: test_in(0x3FFC, 0x3D24),
-    alt_commit: test_in(0x3FCF, 0x0040),
-    bit_start: test_in(0x3FF0, 0x34C0),
-    bit_load: test_in(0x3FCF, 0x0040),
-    bit3c0: test_in(0x3FF3, 0x34C0),
-    bit3s0: test_in(0x3FF3, 0x34C1),
-    bit3c1: test_in(0x3FF3, 0x34C2),
-    bit3s1: test_in(0x3FF3, 0x34C3),
-    bit_commit: test_in(0x3FF8, 0x34D0),
+    alt_start: test_any(SYS1, 0x007F, 0x002D),
+    alt_valid: test_in(SYS1, 0x3FFF, 0x3D14),
+    alt_select: test_in(SYS1, 0x3FFC, 0x3D24),
+    alt_commit: test_in(SYS1, 0x3FCF, 0x0040),
+    bit_start: test_in(SYS1, 0x3FF0, 0x34C0),
+    bit_load: test_in(SYS1, 0x3FCF, 0x0040),
+    bit3c0: test_in(SYS1, 0x3FF3, 0x34C0),
+    bit3s0: test_in(SYS1, 0x3FF3, 0x34C1),
+    bit3c1: test_in(SYS1, 0x3FF3, 0x34C2),
+    bit3s1: test_in(SYS1, 0x3FF3, 0x34C3),
+    bit_commit: test_in(SYS1, 0x3FF8, 0x34D0),
 };
 
 /// Chip **137412-108** (Road Runner). Same state graph and window as the 103;
 /// only the secret matcher values differ.
 pub const SLAPSTIC_108: SlapsticConfig = SlapsticConfig {
     bankstart: 3,
-    reset: Matcher {
-        mask: RANGE_MASK | INPUT_MASK,
-        value: RANGE_VALUE,
-    },
+    reset: test_reset(SYS1),
+    inside: test_inside(SYS1),
+    alt_shift: 1,
+    alt_valid_outside: false,
     bank: [
-        test_bank(0x0028),
-        test_bank(0x002A),
-        test_bank(0x002C),
-        test_bank(0x002E),
+        test_bank(SYS1, 0x0028),
+        test_bank(SYS1, 0x002A),
+        test_bank(SYS1, 0x002C),
+        test_bank(SYS1, 0x002E),
     ],
-    alt_start: test_any(0x007F, 0x001F),
-    alt_valid: test_in(0x3FFF, 0x3772),
-    alt_select: test_in(0x3FFC, 0x3764),
-    alt_commit: test_in(0x3FF9, 0x0028),
-    bit_start: test_in(0x3FF0, 0x0060),
-    bit_load: test_in(0x3FF9, 0x0028),
-    bit3c0: test_in(0x3FF3, 0x0060),
-    bit3s0: test_in(0x3FF3, 0x0061),
-    bit3c1: test_in(0x3FF3, 0x0062),
-    bit3s1: test_in(0x3FF3, 0x0063),
-    bit_commit: test_in(0x3FF8, 0x0070),
+    alt_start: test_any(SYS1, 0x007F, 0x001F),
+    alt_valid: test_in(SYS1, 0x3FFF, 0x3772),
+    alt_select: test_in(SYS1, 0x3FFC, 0x3764),
+    alt_commit: test_in(SYS1, 0x3FF9, 0x0028),
+    bit_start: test_in(SYS1, 0x3FF0, 0x0060),
+    bit_load: test_in(SYS1, 0x3FF9, 0x0028),
+    bit3c0: test_in(SYS1, 0x3FF3, 0x0060),
+    bit3s0: test_in(SYS1, 0x3FF3, 0x0061),
+    bit3c1: test_in(SYS1, 0x3FF3, 0x0062),
+    bit3s1: test_in(SYS1, 0x3FF3, 0x0063),
+    bit_commit: test_in(SYS1, 0x3FF8, 0x0070),
 };
 
 // ---------------------------------------------------------------------------
@@ -240,10 +327,12 @@ impl Slapstic {
         }
     }
 
-    /// Create a Slapstic for a chip by its `137412-NNN` number (e.g. `103` for
-    /// Marble Madness, `108` for Road Runner). Panics on an unsupported chip.
+    /// Create a Slapstic for a chip by its `137412-NNN` number (e.g. `101` for
+    /// Empire Strikes Back, `103` for Marble Madness, `108` for Road Runner).
+    /// Panics on an unsupported chip.
     pub fn for_chip(chip: u16) -> Self {
         let config = match chip {
+            101 => &SLAPSTIC_101,
             103 => &SLAPSTIC_103,
             108 => &SLAPSTIC_108,
             _ => panic!("unsupported slapstic chip 137412-{chip}"),
@@ -270,7 +359,8 @@ impl Slapstic {
     /// armed by `test_any` patterns that can land in RAM/stack or in prefetched
     /// code. Read [`current_bank`] afterwards for the bank the window presents.
     ///
-    /// Mirrors `atari_slapstic_device::*::test()` for chip 103.
+    /// Mirrors `atari_slapstic_device::*::test()`, parameterized by the chip's
+    /// [`SlapsticConfig`] (matchers, `alt_shift`, and the 101/102 quirks).
     pub fn test(&mut self, addr: u32) {
         let cfg = self.config;
         match self.state {
@@ -292,11 +382,14 @@ impl Slapstic {
                 }
             }
             // Alt sequence: reset re-arms, the matching step advances, anything
-            // else breaks back to active.
+            // else breaks back to active. On 101/102 the valid access must also
+            // fall *outside* the window (`alt_valid_outside`).
             State::AltValid => {
+                let valid = cfg.alt_valid.matches(addr)
+                    && (!cfg.alt_valid_outside || !cfg.inside.matches(addr));
                 self.state = if cfg.reset.matches(addr) {
                     State::Active
-                } else if cfg.alt_valid.matches(addr) {
+                } else if valid {
                     State::AltSelect
                 } else {
                     State::Active
@@ -306,8 +399,9 @@ impl Slapstic {
                 if cfg.reset.matches(addr) {
                     self.state = State::Active;
                 } else if cfg.alt_select.matches(addr) {
-                    // The bank rides in address bits 1-2 (data-shift + altshift 0).
-                    self.loaded_bank = ((addr >> 1) & 3) as u8;
+                    // The bank rides in the low address bits (data-bus shift +
+                    // the chip's altshift): >>1 on a 16-bit bus, >>0 on ESB.
+                    self.loaded_bank = ((addr >> cfg.alt_shift) & 3) as u8;
                     self.state = State::AltCommit;
                 } else {
                     self.state = State::Active;
@@ -443,6 +537,72 @@ mod tests {
             );
             assert_eq!(final_bank, bank as u8, "108 alt bank {bank}");
         }
+    }
+
+    #[test]
+    fn chip_101_direct_alt_and_bitwise_banking() {
+        // Empire Strikes Back's 101 sits behind the 6809's 0x8000-0x9FFF window
+        // (8-bit bus, 13 lines, no data shift). Window base 0x8000 re-arms it.
+        const ARM_101: u32 = 0x0000_8000;
+
+        // Direct: 0x8000 | bank_value (0x80/0x90/0xa0/0xb0).
+        const DIRECT_101: [u32; 4] = [0x0000_8080, 0x0000_8090, 0x0000_80A0, 0x0000_80B0];
+        for (i, &sel) in DIRECT_101.iter().enumerate() {
+            let mut sl = Slapstic::for_chip(101);
+            assert_eq!(sl.current_bank(), 3, "powers on to bank 3");
+            assert_eq!(
+                run(&mut sl, &[ARM_101, sel]),
+                i as u8,
+                "101 direct bank {i}"
+            );
+        }
+
+        // Alt: start in-window (0x1E00), valid *outside* the window (0x1FFF, here
+        // 0xFFFF — a 6809 dummy VMA access), select (0x1B5C, bank in bits 0-1,
+        // shift 0), commit (0x0080). Bank rides as 0x9B5C + bank.
+        for bank in 0u32..4 {
+            let mut sl = Slapstic::for_chip(101);
+            let final_bank = run(
+                &mut sl,
+                &[
+                    ARM_101,
+                    0x0000_9E00,        // alt-start (0x1E00) in-window
+                    0x0000_FFFF,        // alt-valid (0x1FFF) OUTSIDE the window
+                    0x0000_9B5C + bank, // alt-select (0x1B5C | bank)
+                    0x0000_8080,        // alt-commit (0x0080)
+                ],
+            );
+            assert_eq!(final_bank, bank as u8, "101 alt bank {bank}");
+        }
+
+        // An in-window "valid" access must NOT advance the alt sequence on 101:
+        // 0x9FFF matches 0x1FFF but is inside the window, so the sequence breaks
+        // back to active and the following select access is ignored. (The commit
+        // value 0x8080 doubles as the bank-0 direct select, so it's left off.)
+        let mut sl = Slapstic::for_chip(101);
+        run(&mut sl, &[ARM_101, 0x0000_9E00, 0x0000_9FFF, 0x0000_9B5E]);
+        assert_eq!(
+            sl.current_bank(),
+            3,
+            "in-window valid breaks the 101 alt seq"
+        );
+
+        // Bitwise: start (0x1540), load (0x0080), then the 0x1540 access on both
+        // phases, commit (0x1550) — mirrors the 103 case (3 → clear bit0 → 2,
+        // then the phase-swapped access maps to set-bit1, leaving bank 2).
+        let mut sl = Slapstic::for_chip(101);
+        let final_bank = run(
+            &mut sl,
+            &[
+                ARM_101,
+                0x0000_9540, // bit-start
+                0x0000_8080, // bit-load
+                0x0000_9540, // odd  clear0: 3 -> 2
+                0x0000_9540, // even set1:   stays 2
+                0x0000_9550, // commit
+            ],
+        );
+        assert_eq!(final_bank, 2, "101 bitwise bank");
     }
 
     #[test]
