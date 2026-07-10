@@ -29,6 +29,7 @@ use phosphor_core::device::avg::{Avg, AvgVariant};
 use phosphor_core::device::dvg::VectorLine;
 use phosphor_core::device::pokey::Pokey;
 use phosphor_core::device::riot6532::Riot6532;
+use phosphor_core::device::slapstic::Slapstic;
 use phosphor_core::device::starwars_math::StarWarsMath;
 use phosphor_core::device::tms5220::{Tms52xxVariant, Tms5220};
 use phosphor_core::device::x2212::X2212;
@@ -243,10 +244,17 @@ pub(crate) enum MainRegion {
     MathRam = 5,
     /// $6000–$7FFF banked ROM — active bank 0 (LS259 bit 4 = 0).
     BankLow = 6,
-    /// $8000–$FFFF fixed program ROM.
+    /// $8000–$FFFF fixed program ROM (Star Wars only; Empire Strikes Back
+    /// replaces this window with the slapstic window + bank 2 below).
     ProgramRom = 7,
     /// Banked ROM bank 1 backing (mapped into $6000–$7FFF when bit 4 = 1).
     BankHigh = 8,
+    /// ESB slapstic window backing: four 8 KB banks (32 KB) the Slapstic chip
+    /// selects between at $8000–$9FFF.
+    SlapsticWindow = 9,
+    /// ESB bank 2 backing: two 24 KB entries (48 KB) mapped into $A000–$FFFF,
+    /// switched together with bank 1 by LS259 bit 4.
+    Bank2 = 10,
 }
 
 /// Sound CPU (MC6809E) 64 KB address space.
@@ -304,6 +312,55 @@ fn build_main_map() -> AddressSpace16 {
         AccessKind::ReadOnly,
     )
     .backing_region(BankHigh, "Banked ROM 1", 0x2000);
+    map
+}
+
+/// Empire Strikes Back main map: identical to Star Wars below $8000, but the
+/// fixed program ROM is replaced by the Slapstic-banked window ($8000–$9FFF,
+/// four 8 KB banks) and bank 2 ($A000–$FFFF, two 24 KB entries). Both upper
+/// windows are backing-only regions paged in by [`StarWarsBoard::reset`] and the
+/// banking logic — the slapstic window follows the chip, bank 2 follows LS259
+/// bit 4. The reset vector at $FFFE lives in bank 2.
+fn build_esb_main_map() -> AddressSpace16 {
+    use MainRegion::*;
+    let mut map = AddressSpace16::new();
+    map.region(
+        Ram,
+        "Work/Vector RAM",
+        0x0000,
+        0x3000,
+        AccessKind::ReadWrite,
+    )
+    .region(
+        VectorRom,
+        "Vector ROM",
+        0x3000,
+        0x1000,
+        AccessKind::ReadOnly,
+    )
+    .region(Io, "I/O", 0x4000, 0x0800, AccessKind::Io)
+    .region(
+        MathRamLo,
+        "Math RAM (lo)",
+        0x4800,
+        0x0800,
+        AccessKind::ReadWrite,
+    )
+    .region(MathRam, "Math RAM", 0x5000, 0x1000, AccessKind::ReadWrite)
+    .region(
+        BankLow,
+        "Banked ROM 0",
+        0x6000,
+        0x2000,
+        AccessKind::ReadOnly,
+    )
+    .backing_region(BankHigh, "Banked ROM 1", 0x2000)
+    .backing_region(SlapsticWindow, "Slapstic Window", 0x8000)
+    .backing_region(Bank2, "Bank 2", 0xC000);
+    // Page in the power-on windows: slapstic bank 3 ($6000 into the 32 KB image)
+    // at $8000–$9FFF, bank 2 entry 0 at $A000–$FFFF.
+    map.remap_pages(0x80, 0x20, SlapsticWindow, 3 * 0x2000);
+    map.remap_pages(0xA0, 0x60, Bank2, 0);
     map
 }
 
@@ -459,6 +516,136 @@ static SW_MATHBOX_PROM: RomRegion = RomRegion {
 };
 
 // ---------------------------------------------------------------------------
+// ROM manifest (MAME `esb` set — The Empire Strikes Back)
+// ---------------------------------------------------------------------------
+//
+// ESB reuses the Star Wars board but reshapes the upper 32 KB of the main CPU
+// map: the $6000 window keeps the two-bank ROM, $8000–$9FFF becomes the
+// Slapstic-banked window (four 8 KB banks), and $A000–$FFFF becomes bank 2 (two
+// 24 KB entries switched with bank 1). Each 16 KB ESB ROM is loaded whole here
+// and sliced into banks by [`StarWarsBoard::load_esb_rom_set`].
+
+/// ESB $6000 banked ROM (bank 1): one 16 KB ROM split into two 8 KB banks.
+static ESB_BANK1_ROM: RomRegion = RomRegion {
+    size: 0x4000,
+    entries: &[RomEntry {
+        name: "136031-101.1f",
+        size: 0x4000,
+        offset: 0x0000,
+        crc32: &[0xef1e3ae5],
+    }],
+};
+
+/// ESB bank 2 source: three 16 KB ROMs, concatenated. Their low halves form
+/// bank-2 entry 0 ($A000–$FFFF), their high halves entry 1.
+static ESB_BANK2_ROM: RomRegion = RomRegion {
+    size: 0xC000,
+    entries: &[
+        RomEntry {
+            name: "136031-102.1jk",
+            size: 0x4000,
+            offset: 0x0000,
+            crc32: &[0x62ce5c12],
+        },
+        RomEntry {
+            name: "136031-203.1kl",
+            size: 0x4000,
+            offset: 0x4000,
+            crc32: &[0x27b0889b],
+        },
+        RomEntry {
+            name: "136031-104.1m",
+            size: 0x4000,
+            offset: 0x8000,
+            crc32: &[0xfd5c725e],
+        },
+    ],
+};
+
+/// ESB Slapstic window ROM: two 16 KB ROMs → the 32 KB, four-bank image
+/// (`105.3u` = banks 0/1, `106.2u` = banks 2/3).
+static ESB_SLAPSTIC_ROM: RomRegion = RomRegion {
+    size: 0x8000,
+    entries: &[
+        RomEntry {
+            name: "136031-105.3u",
+            size: 0x4000,
+            offset: 0x0000,
+            crc32: &[0xea9e4dce],
+        },
+        RomEntry {
+            name: "136031-106.2u",
+            size: 0x4000,
+            offset: 0x4000,
+            crc32: &[0x76d07f59],
+        },
+    ],
+};
+
+/// ESB vector ROM at CPU $3000–$3FFF.
+static ESB_VECTOR_ROM: RomRegion = RomRegion {
+    size: 0x1000,
+    entries: &[RomEntry {
+        name: "136031-111.1l",
+        size: 0x1000,
+        offset: 0x0000,
+        crc32: &[0xb1f9bd12],
+    }],
+};
+
+/// ESB sound ROM source: two 16 KB ROMs, concatenated. Their low halves fill
+/// sound $4000–$7FFF, their high halves sound $C000/$E000 (in the $B000 region).
+static ESB_SOUND_ROM: RomRegion = RomRegion {
+    size: 0x8000,
+    entries: &[
+        RomEntry {
+            name: "136031-113.1jk",
+            size: 0x4000,
+            offset: 0x0000,
+            crc32: &[0x24ae3815],
+        },
+        RomEntry {
+            name: "136031-112.1h",
+            size: 0x4000,
+            offset: 0x4000,
+            crc32: &[0xca72d341],
+        },
+    ],
+};
+
+/// ESB Matrix Processor microcode PROMs (four 1 K×4 PROMs → the 4 KB image).
+/// ESB ships its own microcode, distinct from the Star Wars PROMs.
+static ESB_MATHBOX_PROM: RomRegion = RomRegion {
+    size: 0x1000,
+    entries: &[
+        RomEntry {
+            name: "136031-110.7h",
+            size: 0x400,
+            offset: 0x0000,
+            crc32: &[0xb8d0f69d],
+        },
+        RomEntry {
+            name: "136031-109.7j",
+            size: 0x400,
+            offset: 0x0400,
+            crc32: &[0x6a2a4d98],
+        },
+        RomEntry {
+            name: "136031-108.7k",
+            size: 0x400,
+            offset: 0x0800,
+            crc32: &[0x6a76138f],
+        },
+        RomEntry {
+            name: "136031-107.7l",
+            size: 0x400,
+            offset: 0x0C00,
+            crc32: &[0xafbf6e01],
+        },
+    ],
+};
+
+// ---------------------------------------------------------------------------
 // Board
 // ---------------------------------------------------------------------------
 
@@ -476,6 +663,10 @@ pub(crate) struct StarWarsBoard {
     #[debug_device("SW-MATRIX")]
     pub(crate) math: StarWarsMath,
     pub(crate) novram: X2212,
+
+    /// Empire Strikes Back only: the 137412-101 Slapstic banking the $8000–$9FFF
+    /// window. `None` on Star Wars (where that window is fixed program ROM).
+    pub(crate) slapstic: Option<Slapstic>,
 
     // Sound board: four POKEYs (quad-decoded at $1800–$183F on the sound CPU).
     pub(crate) pokey: [Pokey; 4],
@@ -539,7 +730,18 @@ pub(crate) struct StarWarsBoard {
 }
 
 impl StarWarsBoard {
+    /// Star Wars board (fixed program ROM at $8000–$FFFF, no slapstic).
     pub(crate) fn new() -> Self {
+        Self::with_variant(false)
+    }
+
+    /// Empire Strikes Back board: the slapstic-banked $8000 window + bank 2, and
+    /// ESB's operator-DIP defaults.
+    pub(crate) fn new_esb() -> Self {
+        Self::with_variant(true)
+    }
+
+    fn with_variant(esb: bool) -> Self {
         Self {
             cpu: M6809::new(),
             sound_cpu: M6809::new(),
@@ -550,11 +752,16 @@ impl StarWarsBoard {
             ),
             math: StarWarsMath::new(),
             novram: X2212::new(),
+            slapstic: esb.then(|| Slapstic::for_chip(101)),
             pokey: std::array::from_fn(|_| Pokey::with_clock(SOUND_CLOCK_HZ, AUDIO_SAMPLE_RATE)),
             riot: Riot6532::new(),
             tms: Tms5220::with_variant(Tms52xxVariant::Tms5220, TMS_CLOCK_HZ),
             tms_clock_acc: 0,
-            main_map: build_main_map(),
+            main_map: if esb {
+                build_esb_main_map()
+            } else {
+                build_main_map()
+            },
             sound_map: build_sound_map(),
             bank: 0,
             soundlatch: 0,
@@ -571,9 +778,11 @@ impl StarWarsBoard {
             adc: Adc0809::new(),
             stick: [STICK_CENTER, STICK_CENTER],
             yoke_keys: [false; 4],
-            // DSW0 factory defaults: 6 shields, Hard, 1 bonus, demo sounds on,
-            // and Freeze OFF (bit 7 = 1 — a clear bit 7 freezes the game).
-            dsw0: 0x98,
+            // DSW0 factory defaults. Star Wars: 6 shields, Hard, 1 bonus, demo
+            // sounds on, Freeze OFF (bit 7 = 1). Empire Strikes Back reshapes
+            // this bank — 4 shields, Hard, Jedi-letter Increment, music on,
+            // Freeze OFF ($03|$00|$30|$40|$80 = $F3).
+            dsw0: if esb { 0xF3 } else { 0x98 },
             dsw1: 0x02, // coinage default: 1 coin / 1 credit
             clock: 0,
             display_list: Vec::with_capacity(2048),
@@ -609,6 +818,72 @@ impl StarWarsBoard {
         Ok(())
     }
 
+    /// Load an Empire Strikes Back ROM set: the $6000 bank ROM, the 32 KB
+    /// four-bank slapstic window, the interleaved bank 2, the vector ROM, the
+    /// split sound ROMs, and ESB's Matrix Processor PROMs.
+    pub(crate) fn load_esb_rom_set(&mut self, rom_set: &RomSet) -> Result<(), RomLoadError> {
+        // $6000 window: 16 KB ROM split into two 8 KB banks (as on Star Wars).
+        let bank1 = ESB_BANK1_ROM.load(rom_set)?;
+        self.main_map
+            .load_region(MainRegion::BankLow, &bank1[..0x2000]);
+        self.main_map
+            .load_region(MainRegion::BankHigh, &bank1[0x2000..]);
+
+        // Slapstic window: four contiguous 8 KB banks.
+        let slap = ESB_SLAPSTIC_ROM.load(rom_set)?;
+        self.main_map.load_region(MainRegion::SlapsticWindow, &slap);
+
+        // Bank 2: entry 0 = the three ROMs' low halves, entry 1 = their high
+        // halves (the ROM_CONTINUE split in MAME's flat image).
+        let src = ESB_BANK2_ROM.load(rom_set)?; // 102@0, 203@0x4000, 104@0x8000
+        let mut bank2 = vec![0u8; 0xC000];
+        for (i, &off) in [0x0000usize, 0x4000, 0x8000].iter().enumerate() {
+            let lo = i * 0x2000;
+            let hi = 0x6000 + i * 0x2000;
+            bank2[lo..lo + 0x2000].copy_from_slice(&src[off..off + 0x2000]);
+            bank2[hi..hi + 0x2000].copy_from_slice(&src[off + 0x2000..off + 0x4000]);
+        }
+        self.main_map.load_region(MainRegion::Bank2, &bank2);
+
+        let vrom = ESB_VECTOR_ROM.load(rom_set)?;
+        self.main_map.load_region(MainRegion::VectorRom, &vrom);
+
+        // Sound ROMs: low halves fill $4000–$7FFF; high halves land at $C000 and
+        // $E000 within the $B000 region (offsets 0x1000 and 0x3000).
+        let snd = ESB_SOUND_ROM.load(rom_set)?; // 113@0, 112@0x4000
+        let mut lo = vec![0u8; 0x4000];
+        lo[0x0000..0x2000].copy_from_slice(&snd[0x0000..0x2000]); // 113 low
+        lo[0x2000..0x4000].copy_from_slice(&snd[0x4000..0x6000]); // 112 low
+        self.sound_map.load_region(SoundRegion::RomLo, &lo);
+        let mut hi = vec![0u8; 0x5000];
+        hi[0x1000..0x3000].copy_from_slice(&snd[0x2000..0x4000]); // 113 high @ $C000
+        hi[0x3000..0x5000].copy_from_slice(&snd[0x6000..0x8000]); // 112 high @ $E000
+        self.sound_map.load_region(SoundRegion::RomHi, &hi);
+
+        let proms = ESB_MATHBOX_PROM.load(rom_set)?;
+        self.math.load_proms(&proms);
+        Ok(())
+    }
+
+    /// Feed one main-CPU bus access to the Slapstic (ESB only) and re-page the
+    /// $8000–$9FFF window if the chip switched banks. The real PAL snoops every
+    /// address the CPU drives, so this is called from both read and write paths.
+    fn feed_slapstic(&mut self, addr: u16) {
+        if let Some(sl) = self.slapstic.as_mut() {
+            let before = sl.current_bank();
+            sl.test(addr as u32);
+            let after = sl.current_bank();
+            if before != after {
+                self.main_map.remap_pages(
+                    0x80,
+                    0x20,
+                    MainRegion::SlapsticWindow,
+                    after as u32 * 0x2000,
+                );
+            }
+        }
+    }
+
     /// Decode the four-POKEY address scramble at $1800–$183F into
     /// `(pokey_index, register)`. Matches MAME `quad_pokeyn_w`.
     fn quad_pokey_decode(offset: u16) -> (usize, u16) {
@@ -621,6 +896,7 @@ impl StarWarsBoard {
     // --- Main CPU bus ------------------------------------------------------
 
     fn main_read(&mut self, addr: u16) -> u8 {
+        self.feed_slapstic(addr);
         match addr {
             0x0000..=0x3FFF | 0x4800..=0x7FFF | 0x8000..=0xFFFF => self.main_map.read_backing(addr),
             0x4300..=0x431F => self.in0(),
@@ -644,6 +920,7 @@ impl StarWarsBoard {
     }
 
     fn main_write(&mut self, addr: u16, data: u8) {
+        self.feed_slapstic(addr);
         match addr {
             0x0000..=0x2FFF | 0x4800..=0x5FFF => self.main_map.write_backing(addr, data),
             0x4400 => {
@@ -689,7 +966,8 @@ impl StarWarsBoard {
         let val = (data >> 7) & 1;
         match bit {
             4 => {
-                // ROM bank select ($6000–$7FFF).
+                // ROM bank select ($6000–$7FFF). On ESB the same line also
+                // switches bank 2 ($A000–$FFFF) between its two 24 KB entries.
                 self.bank = val;
                 let region = if val == 0 {
                     MainRegion::BankLow
@@ -697,6 +975,10 @@ impl StarWarsBoard {
                     MainRegion::BankHigh
                 };
                 self.main_map.remap_pages(0x60, 0x20, region, 0);
+                if self.slapstic.is_some() {
+                    self.main_map
+                        .remap_pages(0xA0, 0x60, MainRegion::Bank2, val as u32 * 0x6000);
+                }
             }
             7 => self.novram.recall(val == 0), // NVRAM array recall (active low)
             // bits 0/1 coin counters, 2/3/6 LEDs, 5 PRNG reset — no board state.
@@ -958,6 +1240,15 @@ impl StarWarsBoard {
         self.bank = 0;
         self.main_map
             .remap_pages(0x60, 0x20, MainRegion::BankLow, 0);
+        // ESB: power the slapstic back to its start bank and re-page the
+        // slapstic window ($8000) and bank 2 ($A000) to their reset entries.
+        if let Some(sl) = self.slapstic.as_mut() {
+            sl.reset();
+            let bank = sl.current_bank() as u32;
+            self.main_map
+                .remap_pages(0x80, 0x20, MainRegion::SlapsticWindow, bank * 0x2000);
+            self.main_map.remap_pages(0xA0, 0x60, MainRegion::Bank2, 0);
+        }
         self.soundlatch = 0;
         self.soundlatch_pending = false;
         self.mainlatch = 0;
@@ -1040,6 +1331,9 @@ impl Saveable for StarWarsBoard {
         self.sound_cpu.save_state(w);
         self.avg.save_state(w);
         self.math.save_state(w);
+        if let Some(sl) = &self.slapstic {
+            sl.save_state(w);
+        }
         for p in &self.pokey {
             p.save_state(w);
         }
@@ -1070,6 +1364,12 @@ impl Saveable for StarWarsBoard {
         self.sound_cpu.load_state(r)?;
         self.avg.load_state(r)?;
         self.math.load_state(r)?;
+        if let Some(sl) = &mut self.slapstic {
+            sl.load_state(r)?;
+            let bank = sl.current_bank() as u32;
+            self.main_map
+                .remap_pages(0x80, 0x20, MainRegion::SlapsticWindow, bank * 0x2000);
+        }
         for p in &mut self.pokey {
             p.load_state(r)?;
         }
@@ -1099,6 +1399,10 @@ impl Saveable for StarWarsBoard {
             },
             0,
         );
+        if self.slapstic.is_some() {
+            self.main_map
+                .remap_pages(0xA0, 0x60, MainRegion::Bank2, self.bank as u32 * 0x6000);
+        }
         self.soundlatch = r.read_u8()?;
         self.soundlatch_pending = r.read_bool()?;
         self.mainlatch = r.read_u8()?;
@@ -1117,17 +1421,29 @@ impl Saveable for StarWarsBoard {
 // System wrapper
 // ---------------------------------------------------------------------------
 
-/// Star Wars machine: the board plus game-specific glue (analog input and NVRAM
-/// persistence are added in a later step).
+/// Star Wars / Empire Strikes Back machine: the board plus the registry id the
+/// two variants report (`machine_id` distinguishes them for save-state and NVRAM
+/// paths since both share this wrapper type).
 #[derive(phosphor_macros::Saveable)]
 pub(crate) struct StarWarsSystem {
     pub(crate) board: StarWarsBoard,
+    #[save_skip]
+    pub(crate) machine_id: &'static str,
 }
 
 impl StarWarsSystem {
     pub(crate) fn new() -> Self {
         Self {
             board: StarWarsBoard::new(),
+            machine_id: "starwars",
+        }
+    }
+
+    /// The Empire Strikes Back variant (slapstic-banked window + bank 2).
+    pub(crate) fn new_esb() -> Self {
+        Self {
+            board: StarWarsBoard::new_esb(),
+            machine_id: "esb",
         }
     }
 }
@@ -1156,7 +1472,13 @@ impl Bus for StarWarsSystem {
 crate::impl_board_delegation!(StarWarsSystem, board, TIMING, vectors);
 
 impl MachineCore for StarWarsSystem {
-    crate::machine_core_metadata!("starwars", TIMING);
+    fn frame_rate_hz(&self) -> f64 {
+        TIMING.frame_rate_hz()
+    }
+
+    fn machine_id(&self) -> &str {
+        self.machine_id
+    }
 
     fn run_frame(&mut self) {
         // A pending sound-CPU reset ($46E0) is serviced here, where `bus_split!`
@@ -1277,8 +1599,19 @@ fn create_machine(rom_set: &RomSet) -> Result<Box<dyn FrontendMachine>, RomLoadE
     Ok(Box::new(sys))
 }
 
+fn create_esb_machine(rom_set: &RomSet) -> Result<Box<dyn FrontendMachine>, RomLoadError> {
+    let mut sys = StarWarsSystem::new_esb();
+    sys.board.load_esb_rom_set(rom_set)?;
+    sys.reset();
+    Ok(Box::new(sys))
+}
+
 inventory::submit! {
     MachineEntry::new("starwars", &["starwars", "starwars1", "starwarso"], create_machine)
+}
+
+inventory::submit! {
+    MachineEntry::new("esb", &["esb"], create_esb_machine)
 }
 
 // ---------------------------------------------------------------------------
@@ -1573,5 +1906,151 @@ mod tests {
         // run_frame resets on trip; the board should be alive (clock advancing)
         // and the watchdog flag consumed.
         assert!(!system.board.watchdog_tripped);
+    }
+
+    // -- Empire Strikes Back -------------------------------------------------
+
+    #[test]
+    fn esb_map_decodes_slapstic_window_and_bank2() {
+        let board = StarWarsBoard::new_esb();
+        // $8000–$9FFF is the slapstic window, $A000–$FFFF is bank 2 — both
+        // backing regions, not the fixed program ROM the Star Wars map uses.
+        assert_eq!(
+            board.main_map.region_at(0x8000).unwrap().id,
+            MainRegion::SlapsticWindow.into()
+        );
+        assert_eq!(
+            board.main_map.region_at(0xA000).unwrap().id,
+            MainRegion::Bank2.into()
+        );
+        assert_eq!(
+            board.main_map.region_at(0xFFFE).unwrap().id,
+            MainRegion::Bank2.into()
+        );
+        // The $6000 window still banks as on Star Wars.
+        assert_eq!(
+            board.main_map.region_at(0x6000).unwrap().id,
+            MainRegion::BankLow.into()
+        );
+        assert!(board.slapstic.is_some());
+    }
+
+    #[test]
+    fn esb_slapstic_banks_the_8000_window_through_the_bus() {
+        let mut board = StarWarsBoard::new_esb();
+        // Distinct marker at offset 0 of each 8 KB slapstic bank.
+        for b in 0..4u8 {
+            board.main_map.region_data_mut(MainRegion::SlapsticWindow)[b as usize * 0x2000] =
+                0xB0 + b;
+        }
+        // Power-on bank is 3; reading the window base ($8000) arms the chip and
+        // returns bank 3's marker.
+        assert_eq!(board.bus_read(BusMaster::Cpu(0), 0x8000), 0xB3);
+        assert_eq!(board.slapstic.as_ref().unwrap().current_bank(), 3);
+        // Direct-select bank 0 (window offset 0x80), then read its marker.
+        board.bus_read(BusMaster::Cpu(0), 0x8080);
+        assert_eq!(board.slapstic.as_ref().unwrap().current_bank(), 0);
+        assert_eq!(board.bus_read(BusMaster::Cpu(0), 0x8000), 0xB0);
+    }
+
+    #[test]
+    fn esb_bank2_switches_with_ls259_bit4() {
+        let mut board = StarWarsBoard::new_esb();
+        // Marker at the base of each bank-2 entry: entry 0 at region offset 0,
+        // entry 1 at region offset 0x6000.
+        board.main_map.region_data_mut(MainRegion::Bank2)[0x0000] = 0xC0;
+        board.main_map.region_data_mut(MainRegion::Bank2)[0x6000] = 0xC1;
+
+        // Default bit 4 = 0 → entry 0.
+        assert_eq!(board.bus_read(BusMaster::Cpu(0), 0xA000), 0xC0);
+        // LS259 bit 4 = 1 ($4684, D7 = 1) switches bank 1 *and* bank 2.
+        board.bus_write(BusMaster::Cpu(0), 0x4684, 0x80);
+        assert_eq!(board.bank, 1);
+        assert_eq!(board.bus_read(BusMaster::Cpu(0), 0xA000), 0xC1);
+        // Back to entry 0.
+        board.bus_write(BusMaster::Cpu(0), 0x4684, 0x00);
+        assert_eq!(board.bus_read(BusMaster::Cpu(0), 0xA000), 0xC0);
+    }
+
+    #[test]
+    fn esb_rom_manifest_splits_banks_and_interleaves_bank2() {
+        use crate::rom_loader::RomSet;
+
+        // Synthetic ESB ROM set: correct sizes, sentinel bytes we can trace.
+        let mk = |first: u8, second: u8| {
+            let mut v = vec![0u8; 0x4000];
+            v[0] = first;
+            v[0x2000] = second;
+            v
+        };
+        let f101 = mk(0xA0, 0xB1); // bank1 low/high
+        let f102 = mk(0x02, 0x12);
+        let f203 = mk(0x03, 0x13);
+        let f104 = mk(0x04, 0x14);
+        let f105 = mk(0x50, 0x51); // slapstic banks 0,1
+        let f106 = mk(0x62, 0x63); // slapstic banks 2,3
+        let f111 = vec![0u8; 0x1000];
+        let f113 = mk(0x70, 0x71); // sound 0 low/high
+        let f112 = mk(0x80, 0x81); // sound 1 low/high
+        let f400 = vec![0u8; 0x400];
+        let rs = RomSet::from_slices(&[
+            ("136031-101.1f", &f101),
+            ("136031-102.1jk", &f102),
+            ("136031-203.1kl", &f203),
+            ("136031-104.1m", &f104),
+            ("136031-105.3u", &f105),
+            ("136031-106.2u", &f106),
+            ("136031-111.1l", &f111),
+            ("136031-113.1jk", &f113),
+            ("136031-112.1h", &f112),
+            ("136031-110.7h", &f400),
+            ("136031-109.7j", &f400),
+            ("136031-108.7k", &f400),
+            ("136031-107.7l", &f400),
+        ]);
+
+        // Slapstic image: four contiguous 8 KB banks 105.lo/105.hi/106.lo/106.hi.
+        let slap = ESB_SLAPSTIC_ROM.load_skip_checksums(&rs).unwrap();
+        assert_eq!(slap.len(), 0x8000);
+        assert_eq!(
+            [slap[0], slap[0x2000], slap[0x4000], slap[0x6000]],
+            [0x50, 0x51, 0x62, 0x63]
+        );
+
+        // Bank-2 source concatenates the three 16 KB ROMs; the loader interleaves
+        // low halves into entry 0 and high halves into entry 1.
+        let src = ESB_BANK2_ROM.load_skip_checksums(&rs).unwrap();
+        assert_eq!(src.len(), 0xC000);
+        assert_eq!([src[0], src[0x4000], src[0x8000]], [0x02, 0x03, 0x04]);
+        assert_eq!([src[0x2000], src[0x6000], src[0xA000]], [0x12, 0x13, 0x14]);
+    }
+
+    #[test]
+    fn esb_save_state_round_trips_slapstic_and_bank2() {
+        let mut sys = StarWarsSystem::new_esb();
+        // Mark a RAM byte, drive the slapstic to bank 0, and switch bank 2.
+        sys.board.main_map.region_data_mut(MainRegion::Ram)[0x40] = 0x5A;
+        sys.board
+            .main_map
+            .region_data_mut(MainRegion::SlapsticWindow)[0] = 0xB0;
+        sys.board.main_map.region_data_mut(MainRegion::Bank2)[0x6000] = 0xC1;
+        sys.board.bus_read(BusMaster::Cpu(0), 0x8000); // arm
+        sys.board.bus_read(BusMaster::Cpu(0), 0x8080); // direct-select bank 0
+        sys.board.bus_write(BusMaster::Cpu(0), 0x4684, 0x80); // bank 2 → entry 1
+        assert_eq!(sys.board.slapstic.as_ref().unwrap().current_bank(), 0);
+
+        let data = SaveState::save_state(&sys).expect("save");
+        let mut sys2 = StarWarsSystem::new_esb();
+        SaveState::load_state(&mut sys2, &data).unwrap();
+        sys2.board
+            .main_map
+            .region_data_mut(MainRegion::SlapsticWindow)[0] = 0xB0;
+        sys2.board.main_map.region_data_mut(MainRegion::Bank2)[0x6000] = 0xC1;
+
+        assert_eq!(sys2.board.slapstic.as_ref().unwrap().current_bank(), 0);
+        assert_eq!(sys2.board.main_map.region_data(MainRegion::Ram)[0x40], 0x5A);
+        // Restored paging: slapstic window presents bank 0, bank 2 presents entry 1.
+        assert_eq!(sys2.board.main_map.read_backing(0x8000), 0xB0);
+        assert_eq!(sys2.board.main_map.read_backing(0xA000), 0xC1);
     }
 }
