@@ -13,6 +13,13 @@
 //! scrolling background, then 3bpp 16×16 sprites (double width/height, flip,
 //! pen 0x80 transparent), then the transparent foreground text on top, into a
 //! 288×224 native buffer rotated 90° CCW for the vertical display.
+//!
+//! Audio: melodic and effect sound is the shared Namco WSG (3 voices, mapped at
+//! 0x6800-0x681F and driven by the sound Z80), delegated through the board's
+//! `AudioSource`. The 54XX explosion channel — a discrete analog noise network
+//! fed by the write-only 54XX MCU on 06XX chip-select 3 — is not yet modelled,
+//! so explosions are silent; the seam to add it lives at
+//! `namco_galaga.rs` chip-select-3 dispatch (see `write_custom_io`).
 
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
@@ -248,8 +255,8 @@ static XEVIOUS_PROMS: RomRegion = RomRegion {
 };
 
 // ---------------------------------------------------------------------------
-// GFX layouts (bit offsets; plane_offsets are LSB-first, i.e. reversed from
-// MAME's MSB-first plane order).
+// GFX layouts (bit offsets; plane_offsets are listed LSB-first — the low plane
+// bit first — which is the reverse of the ROM's MSB-first pixel bit packing).
 // ---------------------------------------------------------------------------
 
 /// Foreground characters: 1bpp 8×8.
@@ -1375,6 +1382,32 @@ mod dip_tests {
         assert_eq!(sys.dip_bank_value(1) & 0x60, 0x20); // difficulty applied
         assert_eq!(sys.dip_bank_value(1) & 0x01, 0x00); // blaster bit preserved
     }
+
+    #[test]
+    fn dip_bank_values_round_trip() {
+        // Mirrors galaga.rs/digdug.rs: a raw bank value written back reads out
+        // unchanged, and out-of-range bank indices are ignored.
+        let mut sys = XeviousSystem::new();
+        sys.set_dip_bank_value(0, 0x3C);
+        sys.set_dip_bank_value(1, 0xC3);
+        assert_eq!(sys.dip_bank_value(0), 0x3C);
+        assert_eq!(sys.dip_bank_value(1), 0xC3);
+        sys.set_dip_bank_value(5, 0xFF); // no such bank
+        assert_eq!(sys.dip_bank_value(0), 0x3C);
+        assert_eq!(sys.dip_bank_value(1), 0xC3);
+    }
+
+    #[test]
+    fn dsw_port_multiplexes_the_two_banks() {
+        // The DIPs are read one bit-pair at a time at 0x6800-0x6807: bit 0 of the
+        // returned byte is DSWB[offset], bit 1 is DSWA[offset] (active high).
+        let mut sys = XeviousSystem::new();
+        sys.board.dswa = 0b0000_0001; // DSWA bit 0 set
+        sys.board.dswb = 0b0000_0010; // DSWB bit 1 set
+        assert_eq!(sys.dsw_read(0), 0b10); // DSWA bit0 -> result bit1
+        assert_eq!(sys.dsw_read(1), 0b01); // DSWB bit1 -> result bit0
+        assert_eq!(sys.dsw_read(2), 0b00); // neither bank set here
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1527,5 +1560,77 @@ mod tests {
         // Both blaster controls are advertised to the frontend.
         let names: Vec<&str> = sys.input_controls().iter().map(|c| c.stable_name).collect();
         assert!(names.contains(&"p1_bomb") && names.contains(&"p2_bomb"));
+    }
+
+    /// The 50XX score/protection chip answers through the 06XX at 0x7000/0x7100.
+    /// Drive the game's periodic protection check (reset, add 5, read the score)
+    /// end-to-end over the bus to prove the chip is fitted and wired, not just
+    /// exercised in isolation. Selecting a chip: control bit N = chip N, bit 4 =
+    /// read direction; the 50XX is chip 2 (mask 0x04).
+    #[test]
+    fn namco50_protection_response_over_bus() {
+        let mut sys = XeviousSystem::new();
+        sys.board.fit_50xx(); // Xevious carries the 50XX; new() leaves it unfitted.
+
+        let mut send = |sys: &mut XeviousSystem, cmd: u8| {
+            Bus::write(sys, BusMaster::Cpu(0), 0x7100, 0x04); // select 50XX, write mode
+            Bus::write(sys, BusMaster::Cpu(0), 0x7000, cmd);
+        };
+        send(&mut sys, 0x10); // reset scores
+        send(&mut sys, 0x80); // increment player 1 by 5
+
+        Bus::write(&mut sys, BusMaster::Cpu(0), 0x7100, 0x14); // select 50XX, read mode
+        let resp = [
+            Bus::read(&mut sys, BusMaster::Cpu(0), 0x7000),
+            Bus::read(&mut sys, BusMaster::Cpu(0), 0x7000),
+            Bus::read(&mut sys, BusMaster::Cpu(0), 0x7000),
+            Bus::read(&mut sys, BusMaster::Cpu(0), 0x7000),
+        ];
+        // Byte 0 = flags (high-score bit set), bytes 1-3 = BCD score = 000005.
+        assert_eq!(resp, [0x80, 0x00, 0x00, 0x05]);
+    }
+
+    /// The background-map hardware lookup ("schematic 9B") walks the 2A/2B/2C
+    /// data ROMs. With both selector bytes zero the low-nibble path of 2A feeds a
+    /// dat1 of 0x005, giving a 2C index of 0x14; even reads return the tile
+    /// number (with the 6↔7 bit swap), odd reads return the attribute at +0x800.
+    #[test]
+    fn bb_r_walks_2a_2b_2c_lookup() {
+        let mut sys = XeviousSystem::new();
+        let mut rom = vec![0u8; 0x4000];
+        // rom2a base 0x0000, rom2b base 0x1000, rom2c base 0x3000.
+        rom[0x0000] = 0x00; // 2A[0] low nibble 0 -> dat1 high bits clear
+        rom[0x1000] = 0x05; // 2B[0] -> dat1 = 0x005
+        rom[0x3000 + 0x14] = 0x40; // 2C tile byte: bit6 set -> swaps to bit7
+        rom[0x3000 + 0x814] = 0x34; // 2C attribute byte (BB1 lives at +0x800)
+        sys.playfield_rom = rom;
+        sys.bs = [0x00, 0x00];
+
+        assert_eq!(sys.read_bg_map(0xF000), 0x80); // even: tile, 0x40 -> 0x80 swap
+        assert_eq!(sys.read_bg_map(0xF001), 0x34); // odd: attribute byte
+    }
+
+    /// The 0xD000-0xD07F video latch selects a scroll register by address bits
+    /// 4-7 and takes the 9th scroll bit from address bit 0; register 7 is the
+    /// flip-screen latch.
+    #[test]
+    fn scroll_latch_decode() {
+        let mut sys = XeviousSystem::new();
+        sys.write_video_latch(0x00, 0x34); // bg X low
+        assert_eq!(sys.bg_scroll_x, 0x034);
+        sys.write_video_latch(0x01, 0x34); // bg X + 9th bit
+        assert_eq!(sys.bg_scroll_x, 0x134);
+        sys.write_video_latch(0x10, 0x12); // fg X
+        assert_eq!(sys.fg_scroll_x, 0x012);
+        sys.write_video_latch(0x11, 0x00); // fg X = 9th bit only
+        assert_eq!(sys.fg_scroll_x, 0x100);
+        sys.write_video_latch(0x20, 0x56); // bg Y
+        assert_eq!(sys.bg_scroll_y, 0x056);
+        sys.write_video_latch(0x30, 0x78); // fg Y
+        assert_eq!(sys.fg_scroll_y, 0x078);
+        sys.write_video_latch(0x70, 0x01); // flip on
+        assert!(sys.board.flip_screen);
+        sys.write_video_latch(0x70, 0x00); // flip off
+        assert!(!sys.board.flip_screen);
     }
 }
