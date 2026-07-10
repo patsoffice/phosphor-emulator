@@ -1114,9 +1114,9 @@ impl phosphor_core::core::machine::Profilable for XeviousSystem {}
 // ---------------------------------------------------------------------------
 
 /// Xevious DIP banks (DSWA at board byte `dswa`, DSWB at `dswb`). Both banks
-/// default to 0xFF at the factory settings. The DSWB button-2 (bomb) bits and
-/// the conditional bonus-life option are not modelled yet and keep their
-/// power-on value.
+/// default to 0xFF at the factory settings. DSWB bits 0 and 4 are not DIP
+/// switches — they carry the player 1/2 blaster (button 2) inputs — so no
+/// option covers them.
 const XEVIOUS_DIP_BANKS: &[DipSwitchBank] = &[
     DipSwitchBank {
         name: "DSWA",
@@ -1141,6 +1141,50 @@ const XEVIOUS_DIP_BANKS: &[DipSwitchBank] = &[
                     DipChoice {
                         label: "1C/1C",
                         value: 0x03,
+                    },
+                ],
+            },
+            // Bonus-life schedule. On hardware these three bits are interpreted
+            // differently when Lives is set to 5 (the 0x60 slice is 0); we model
+            // the common table used for the 1/2/3-life settings (which includes
+            // the factory default of 3 lives). The DIP bits still reach the game
+            // when 5 lives are selected, only the labels here would differ.
+            DipOption {
+                name: "Bonus Life",
+                mask: 0x1C,
+                apply: DipApplyTiming::Immediate,
+                choices: &[
+                    DipChoice {
+                        label: "10K, 40K, Every 40K",
+                        value: 0x18,
+                    },
+                    DipChoice {
+                        label: "10K, 50K, Every 50K",
+                        value: 0x14,
+                    },
+                    DipChoice {
+                        label: "20K, 50K, Every 50K",
+                        value: 0x10,
+                    },
+                    DipChoice {
+                        label: "20K, 60K, Every 60K",
+                        value: 0x1C,
+                    },
+                    DipChoice {
+                        label: "20K, 70K, Every 70K",
+                        value: 0x0C,
+                    },
+                    DipChoice {
+                        label: "20K, 80K, Every 80K",
+                        value: 0x08,
+                    },
+                    DipChoice {
+                        label: "20K and 60K Only",
+                        value: 0x04,
+                    },
+                    DipChoice {
+                        label: "None",
+                        value: 0x00,
                     },
                 ],
             },
@@ -1286,6 +1330,50 @@ impl DipSwitches for XeviousSystem {
             1 => self.board.dswb = value,
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod dip_tests {
+    use super::*;
+
+    // Factory defaults: both banks read all-ones with the switches at their
+    // shipped positions and the blaster (button 2) lines released.
+    const DSWA_DEFAULT: u8 = 0xFF;
+    const DSWB_DEFAULT: u8 = 0xFF;
+
+    fn xevious_at_defaults() -> XeviousSystem {
+        let mut sys = XeviousSystem::new();
+        sys.set_dip_bank_value(0, DSWA_DEFAULT);
+        sys.set_dip_bank_value(1, DSWB_DEFAULT);
+        sys
+    }
+
+    #[test]
+    fn dip_defaults_and_metadata() {
+        let sys = xevious_at_defaults();
+        crate::assert_dip_banks_valid(sys.dip_banks(), &[DSWA_DEFAULT, DSWB_DEFAULT]);
+    }
+
+    #[test]
+    fn set_dip_option_masks_only_its_bits() {
+        let mut sys = xevious_at_defaults();
+        // DSWA Lives is bank 0, option 2 (mask 0x60); pick "1" (0x40).
+        sys.set_dip_option(0, 2, 0x40);
+        assert_eq!(sys.dip_bank_value(0), 0xDF); // 0xFF with bit 5 cleared
+        assert_eq!(sys.dip_bank_value(1), 0xFF); // other bank untouched
+    }
+
+    #[test]
+    fn dip_change_preserves_blaster_bits() {
+        // Button 2 lives on DSWB bits 0/4; changing a DSWB DIP must not disturb
+        // a blaster that is currently held.
+        let mut sys = xevious_at_defaults();
+        sys.board.dswb = DSWB_DEFAULT & !0x01; // P1 blaster held (bit 0 low)
+        // DSWB Difficulty is bank 1, option 2 (mask 0x60); pick "Hard" (0x20).
+        sys.set_dip_option(1, 2, 0x20);
+        assert_eq!(sys.dip_bank_value(1) & 0x60, 0x20); // difficulty applied
+        assert_eq!(sys.dip_bank_value(1) & 0x01, 0x00); // blaster bit preserved
     }
 }
 
