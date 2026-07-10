@@ -287,10 +287,14 @@ const FG_CHAR_COUNT: usize = 512; // 0x1000 / 8 bytes
 const BG_TILE_COUNT: usize = 512; // (0x2000 / 2) / 8 bytes
 const SPRITE_COUNT: usize = 320; // (0xA000 / 2) / 64 bytes
 
-// Screen-space offsets applied to the layer scroll registers (from the
-// hardware's tilemap positioning: bg scrolldx/dy = -20/-16).
-const BG_SCROLL_DX: i32 = -20;
-const BG_SCROLL_DY: i32 = -16;
+// Screen-space origin of each tilemap within the 288×224 viewport: the source
+// pixel shown at native (x, y) is (x + scroll + DX, y + scroll + DY). These
+// position the background and (12px left / 2px up of it) foreground layers so
+// both align with the visible playfield.
+const BG_SCROLL_DX: i32 = 20;
+const BG_SCROLL_DY: i32 = 16;
+const FG_SCROLL_DX: i32 = 32;
+const FG_SCROLL_DY: i32 = 18;
 
 /// Load the sprite ROM region and unpack the plane-0 ROM (xvi_18): its high
 /// nibble at 0x5000-0x6FFF is shifted into 0x7000-0x8FFF so each sprite set's
@@ -546,9 +550,11 @@ impl XeviousSystem {
     }
 
     /// Render one frame into the native (unrotated) 288×224 index buffer.
+    /// Layer order matches the hardware: opaque background, then sprites (a
+    /// later task), then the transparent foreground text on top.
     fn render_video(&mut self) {
         self.render_background();
-        // Foreground text and sprites land in the following M2 tasks.
+        self.render_foreground();
     }
 
     /// Draw the scrolling background tilemap (bottom, opaque layer). The 64×32
@@ -575,6 +581,35 @@ impl XeviousSystem {
                 let fpy = if attr & 0x80 != 0 { 7 - py } else { py };
                 let pixel = self.bg_tile_cache.pixel(tile, fpx, fpy) as usize;
                 self.native_buffer[row_off + screen_x] = self.bg_lut[color * 4 + pixel];
+            }
+        }
+    }
+
+    /// Draw the foreground text tilemap (top, transparent layer). The 64×32 map
+    /// (512×256 px) uses the FG scroll registers; each 8×8 char is 1bpp with pen
+    /// 0 transparent. The 6-bit colour code maps directly to an indirect palette
+    /// entry (0-63) for the opaque pen — no lookup PROM, unlike the background.
+    fn render_foreground(&mut self) {
+        let sx0 = self.fg_scroll_x as i32 + FG_SCROLL_DX;
+        let sy0 = self.fg_scroll_y as i32 + FG_SCROLL_DY;
+        for screen_y in 0..224usize {
+            let ty = (screen_y as i32 + sy0).rem_euclid(256) as usize;
+            let tile_row = ty >> 3;
+            let py = ty & 7;
+            let row_off = screen_y * 288;
+            for screen_x in 0..288usize {
+                let tx = (screen_x as i32 + sx0).rem_euclid(512) as usize;
+                let idx = tile_row * 64 + (tx >> 3);
+                let code = self.fg_videoram[idx] as usize;
+                let attr = self.fg_colorram[idx] as usize;
+                let px = tx & 7;
+                let fpx = if attr & 0x40 != 0 { 7 - px } else { px };
+                let fpy = if attr & 0x80 != 0 { 7 - py } else { py };
+                if self.char_cache.pixel(code, fpx, fpy) != 0 {
+                    // Opaque pen: colour = ((attr&0x03)<<4) | ((attr&0x3c)>>2).
+                    let color = ((attr & 0x03) << 4) | ((attr & 0x3c) >> 2);
+                    self.native_buffer[row_off + screen_x] = color as u8;
+                }
             }
         }
     }
