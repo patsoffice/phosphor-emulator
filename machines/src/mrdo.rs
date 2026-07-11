@@ -264,6 +264,35 @@ fn mrdo_palette_rgb(prom: &[u8]) -> [(u8, u8, u8); PALETTE_LEN] {
     out
 }
 
+/// Evaluate the Mr. Do! protection PAL16R6 (IC U001) for a written data byte.
+///
+/// The Taito `mrdot` set uses the real jedutil-extracted equations (per
+/// `mrdot_state::protection_w` in MAME `mrdo.cpp`). The 8 data bits drive the
+/// PAL inputs (i2 = bit7 … i9 = bit0; i7/bit2 is unused), four product terms
+/// `t1..t4` feed six registered outputs, and the chip presents the inverted
+/// result — read back by the game at 0x9803. The registered outputs latch on
+/// the write "clock", so a read after a write reflects the last byte written.
+fn mrdo_protection_output(data: u8) -> u8 {
+    let bit = |n: u8| (data >> n) & 1;
+    let not = |x: u8| x ^ 1;
+    let (i9, i8) = (bit(0), bit(1));
+    let (i6, i5, i4, i3, i2) = (bit(3), bit(4), bit(5), bit(6), bit(7));
+
+    let t1 = i2 & not(i3) & i4 & not(i5) & not(i6) & not(i8) & i9;
+    let t2 = not(i2) & not(i3) & i4 & i5 & not(i6) & i8 & not(i9);
+    let t3 = i2 & i3 & not(i4) & not(i5) & i6 & not(i8) & i9;
+    let t4 = not(i2) & i3 & i4 & not(i5) & i6 & i8 & i9;
+
+    // r12 and r19 are always 0.
+    let r13 = t1 << 1;
+    let r14 = (t1 | t2) << 2;
+    let r15 = (t1 | t3) << 3;
+    let r16 = t1 << 4;
+    let r17 = (t1 | t3) << 5;
+    let r18 = (t3 | t4) << 6;
+    !(r18 | r17 | r16 | r15 | r14 | r13)
+}
+
 // ---------------------------------------------------------------------------
 // MrdoBoard
 // ---------------------------------------------------------------------------
@@ -292,6 +321,9 @@ pub struct MrdoBoard {
     pub(crate) bg_scroll_x: u8,
     pub(crate) bg_scroll_y: u8,
     pub(crate) flipscreen: bool,
+
+    // Protection PAL16R6 (IC U001) latched output, read back at 0x9803.
+    pub(crate) pal_u001: u8,
 
     // Inputs (active-low, latched by `handle_input`) + DIP banks.
     pub(crate) in0: u8,
@@ -326,6 +358,7 @@ impl MrdoBoard {
             bg_scroll_x: 0,
             bg_scroll_y: 0,
             flipscreen: false,
+            pal_u001: 0xFF, // PAL registered outputs power up high
             in0: 0xFF,
             in1: 0xFF,
             dsw1: DSW1_DEFAULT,
@@ -529,6 +562,7 @@ impl MrdoBoard {
         self.bg_scroll_x = 0;
         self.bg_scroll_y = 0;
         self.flipscreen = false;
+        self.pal_u001 = 0xFF;
         self.main_map
             .region_data_mut(MainRegion::BgVideoRam)
             .fill(0);
@@ -568,6 +602,7 @@ impl Saveable for MrdoBoard {
         w.write_u8(self.bg_scroll_x);
         w.write_u8(self.bg_scroll_y);
         w.write_bool(self.flipscreen);
+        w.write_u8(self.pal_u001);
         w.write_u64_le(self.clock);
         w.write_bool(self.vblank_irq_pending);
     }
@@ -585,6 +620,7 @@ impl Saveable for MrdoBoard {
         self.bg_scroll_x = r.read_u8()?;
         self.bg_scroll_y = r.read_u8()?;
         self.flipscreen = r.read_bool()?;
+        self.pal_u001 = r.read_u8()?;
         self.clock = r.read_u64_le()?;
         self.vblank_irq_pending = r.read_bool()?;
         Ok(())
@@ -649,8 +685,8 @@ impl Bus for MrdoSystem {
         };
         let data = match addr {
             0x0000..=0x90FF => self.board.main_map.read_backing(addr),
-            // Protection PAL readback — real equations land in issue .8.
-            0x9803 => 0xFF,
+            0x9803 => self.board.pal_u001, // protection PAL16R6 readback
+
             0xA000 => self.board.in0,
             0xA001 => self.board.in1,
             0xA002 => self.board.dsw1,
@@ -668,9 +704,13 @@ impl Bus for MrdoSystem {
         };
         self.board.main_map.watch_write(0, master, addr, data);
         match addr {
-            // Video / sprite RAM. FG writes (0x8800-0x8FFF) also clock the
-            // protection PAL — wired in issue .8.
-            0x8000..=0x90FF => self.board.main_map.write_backing(addr, data),
+            // BG video RAM + sprite RAM: plain backing writes.
+            0x8000..=0x87FF | 0x9000..=0x90FF => self.board.main_map.write_backing(addr, data),
+            // FG video RAM: the PAL16R6 snoops the data bus on every FG write.
+            0x8800..=0x8FFF => {
+                self.board.main_map.write_backing(addr, data);
+                self.board.pal_u001 = mrdo_protection_output(data);
+            }
             // Flipscreen (bit 0); bits 1-3 are playfield priority, unused by Mr. Do!.
             0x9800 => self.board.flipscreen = data & 0x01 != 0,
             0x9801 => {} // SN76489 #1 — issue .7
@@ -1149,6 +1189,28 @@ mod tests {
             .chunks_exact(3)
             .any(|px| px == [0u8, 180, 0].as_slice());
         assert!(any_green, "sprite pixel not found in output");
+    }
+
+    #[test]
+    fn protection_pal_equations() {
+        // No product term active ⇒ all registered outputs 0 ⇒ inverted 0xFF.
+        assert_eq!(mrdo_protection_output(0x00), 0xFF);
+        // t1 active: i2=1,i3=0,i4=1,i5=0,i6=0,i8=0,i9=1 (bits 7,5,0). i7/bit2
+        // is unused, so 0xA1 and 0xA5 give the same output.
+        assert_eq!(mrdo_protection_output(0xA1), 0xC1);
+        assert_eq!(mrdo_protection_output(0xA5), 0xC1);
+    }
+
+    #[test]
+    fn protection_latches_on_fg_write_and_reads_at_9803() {
+        let mut sys = MrdoSystem::new();
+        assert_eq!(sys.read(BusMaster::Cpu(0), 0x9803), 0xFF); // power-up
+        // A write into FG video RAM clocks the PAL with the data byte.
+        sys.write(BusMaster::Cpu(0), 0x8800, 0xA1);
+        assert_eq!(sys.read(BusMaster::Cpu(0), 0x9803), 0xC1);
+        // A BG write must NOT disturb the protection latch.
+        sys.write(BusMaster::Cpu(0), 0x8000, 0x00);
+        assert_eq!(sys.read(BusMaster::Cpu(0), 0x9803), 0xC1);
     }
 
     #[test]
