@@ -1,0 +1,691 @@
+//! Universal "Mr. Do!" (1982) — Universal 8201 single-Z80 board.
+//!
+//! Hardware (per MAME `src/mame/universal/mrdo.cpp`, the Taito `mrdot` set):
+//! - CPU: Z80 @ 8.2 MHz / 2 ≈ 4.1 MHz, one VBLANK IRQ per frame (`irq0_line_hold`)
+//! - Sound: 2× SN76489 @ 4.1 MHz, byte-mapped at 0x9801 / 0x9802
+//! - Video: 240×192 raster, ROT270; two 32×32 8×8 tilemaps (BG scrollable, FG
+//!   fixed) + 16×16 sprites
+//! - Palette: two 32-byte palette PROMs (diode-coupled resistor DAC) + a 32-byte
+//!   sprite-color lookup PROM
+//! - Protection: a PAL16R6 snooped on FG-VRAM writes, read back at 0x9803
+//!
+//! This file is the **scaffold** (issue `.1`): board/system split, memory map,
+//! the CPU run loop with the VBLANK IRQ, input/DIP plumbing, and registry
+//! entries. It boots and runs frames without panicking. Still stubbed, each in
+//! its own follow-up issue:
+//! - ROM regions beyond the main program (`.2`)
+//! - GFX decode (`.3`) + palette DAC (`.4`)
+//! - BG/FG tilemap render (`.5`) + sprites (`.6`)
+//! - 2× SN76489 sound (`.7`)
+//! - PAL16R6 protection (`.8`)
+//! - full DIP tables (`.9`) and tests (`.10`)
+
+use phosphor_core::core::bus::InterruptState;
+use phosphor_core::core::machine::{
+    ActionRole, DipSwitches, Direction, InputConfigurable, InputControl, InputEvent, InputId,
+    InputKind, MachineCore, SaveState,
+};
+use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
+use phosphor_core::core::{AccessKind, AddressSpace16};
+use phosphor_core::core::{Bus, BusMaster, TimingConfig};
+use phosphor_core::cpu::Cpu;
+use phosphor_core::cpu::z80::Z80;
+use phosphor_core::{bus_split, core::machine::DefaultBinding};
+use phosphor_macros::{BusDebug, MemoryRegion, Saveable};
+
+use crate::disasm_registry::{DisasmCpu, DisasmRegion};
+use crate::input_defaults as ind;
+use crate::registry::MachineEntry;
+use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
+use crate::set_bit_active_low;
+
+// ---------------------------------------------------------------------------
+// Memory map region IDs
+// ---------------------------------------------------------------------------
+
+/// Main CPU (Z80) address-space regions. I/O ports (0x9800-0x9803, 0xA000-
+/// 0xA003, scroll at 0xF000/0xF800) are decoded directly in the `Bus` impl.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, MemoryRegion)]
+pub(crate) enum MainRegion {
+    Rom = 1,        // 0x0000-0x7FFF  32 KB program ROM
+    BgVideoRam = 2, // 0x8000-0x87FF  BG tilemap RAM (codes + attrs)
+    FgVideoRam = 3, // 0x8800-0x8FFF  FG tilemap RAM (codes + attrs)
+    SpriteRam = 4,  // 0x9000-0x90FF  sprite RAM (write-only on HW)
+    WorkRam = 5,    // 0xE000-0xEFFF  work RAM
+}
+
+// ---------------------------------------------------------------------------
+// Timing
+// ---------------------------------------------------------------------------
+// XTAL 8.2 MHz; CPU = /2 = 4.1 MHz. Pixel clock 19.6 MHz/4 = 4.9 MHz, HTOTAL
+// 312, VTOTAL 262 → VSYNC ≈ 59.94 Hz. We approximate the frame as 262 scanlines
+// of 261 CPU cycles (68382 cycles/frame ⇒ ≈ 59.96 Hz); the exact per-scanline
+// count is not a clean integer, and MAME itself derives the IRQ from VSYNC.
+
+pub const TIMING: TimingConfig = TimingConfig {
+    cpu_clock_hz: 8_200_000 / 2, // 4_100_000
+    cycles_per_scanline: 261,
+    total_scanlines: 262,
+    display_width: DISPLAY_W as u32,  // 192 (rotated ROT270)
+    display_height: DISPLAY_H as u32, // 240
+    display_aspect: Some((3, 4)),
+};
+
+/// Native (pre-rotation) visible raster: MAME visarea x 8..248, y 32..224.
+pub const VISIBLE_WIDTH: usize = 240;
+pub const VISIBLE_HEIGHT: usize = 192;
+/// Rotated (ROT270) display dimensions reported to the frontend.
+pub const DISPLAY_W: usize = VISIBLE_HEIGHT; // 192
+pub const DISPLAY_H: usize = VISIBLE_WIDTH; // 240
+
+/// Scanline at which the once-per-frame VBLANK IRQ is asserted (start of the
+/// vertical blanking interval, just past the visible area y 32..224).
+const VBLANK_IRQ_LINE: u64 = 224;
+
+// ---------------------------------------------------------------------------
+// ROM definitions ("mrdot" — Taito set, full PAL protection equations)
+// ---------------------------------------------------------------------------
+
+/// Main Z80 program ROM at 0x0000-0x7FFF (four 8 KB chips).
+pub static MRDO_MAIN_ROM: RomRegion = RomRegion {
+    size: 0x8000,
+    entries: &[
+        RomEntry {
+            name: "d1",
+            size: 0x2000,
+            offset: 0x0000,
+            crc32: &[0x3dcd9359],
+        },
+        RomEntry {
+            name: "d2",
+            size: 0x2000,
+            offset: 0x2000,
+            crc32: &[0x710058d8],
+        },
+        RomEntry {
+            name: "d3",
+            size: 0x2000,
+            offset: 0x4000,
+            crc32: &[0x467d12d8],
+        },
+        RomEntry {
+            name: "d4",
+            size: 0x2000,
+            offset: 0x6000,
+            crc32: &[0xfce9afeb],
+        },
+    ],
+};
+
+// ---------------------------------------------------------------------------
+// MrdoBoard
+// ---------------------------------------------------------------------------
+
+#[derive(BusDebug)]
+pub struct MrdoBoard {
+    #[debug_cpu("Z80")]
+    pub(crate) cpu: Z80,
+
+    #[debug_map(cpu = 0)]
+    pub(crate) main_map: AddressSpace16,
+
+    // Inputs (active-low, latched by `handle_input`) + DIP banks.
+    pub(crate) in0: u8,
+    pub(crate) in1: u8,
+    pub(crate) dsw1: u8,
+    pub(crate) dsw2: u8,
+
+    // Timing / interrupts.
+    pub(crate) clock: u64,
+    pub(crate) vblank_irq_pending: bool,
+}
+
+impl Default for MrdoBoard {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MrdoBoard {
+    pub fn new() -> Self {
+        Self {
+            cpu: Z80::new(),
+            main_map: Self::build_main_map(),
+            in0: 0xFF,
+            in1: 0xFF,
+            dsw1: DSW1_DEFAULT,
+            dsw2: DSW2_DEFAULT,
+            clock: 0,
+            vblank_irq_pending: false,
+        }
+    }
+
+    fn build_main_map() -> AddressSpace16 {
+        use MainRegion::*;
+        let mut map = AddressSpace16::new();
+        map.region(Rom, "Program ROM", 0x0000, 0x8000, AccessKind::ReadOnly)
+            .region(
+                BgVideoRam,
+                "BG Video RAM",
+                0x8000,
+                0x0800,
+                AccessKind::ReadWrite,
+            )
+            .region(
+                FgVideoRam,
+                "FG Video RAM",
+                0x8800,
+                0x0800,
+                AccessKind::ReadWrite,
+            )
+            .region(
+                SpriteRam,
+                "Sprite RAM",
+                0x9000,
+                0x0100,
+                AccessKind::ReadWrite,
+            )
+            .region(WorkRam, "Work RAM", 0xE000, 0x1000, AccessKind::ReadWrite);
+        map
+    }
+
+    // -----------------------------------------------------------------------
+    // Core tick
+    // -----------------------------------------------------------------------
+
+    /// Execute one CPU clock cycle (≈4.1 MHz), asserting the VBLANK IRQ once per
+    /// frame at the start of vertical blanking.
+    pub fn tick(&mut self, bus: &mut dyn Bus<Address = u16, Data = u8>) {
+        let frame_cycle = self.clock % TIMING.cycles_per_frame();
+
+        // `irq0_line_hold`: asserted at the top of VBLANK, held until the CPU
+        // acknowledges it (observed below as IFF1 going 1→0 with the IRQ pending).
+        if frame_cycle == VBLANK_IRQ_LINE * TIMING.cycles_per_scanline {
+            self.vblank_irq_pending = true;
+        }
+
+        if self.main_map.has_any_watchpoints() {
+            let pc = self
+                .cpu
+                .at_instruction_boundary()
+                .then_some(self.cpu.pc as u32);
+            self.main_map.latch_access_context(self.clock, pc);
+        }
+
+        let iff1_before = self.cpu.iff1;
+        self.cpu.execute_cycle(bus, BusMaster::Cpu(0));
+        if self.vblank_irq_pending && iff1_before && !self.cpu.iff1 {
+            self.vblank_irq_pending = false;
+        }
+
+        self.clock += 1;
+    }
+
+    /// Drain audio. No sound hardware is wired yet (issue `.7`) — return silence.
+    pub fn fill_audio(&mut self, _buffer: &mut [i16]) -> usize {
+        0
+    }
+
+    /// Render one frame. Real tilemap + sprite rendering and the ROT270 rotate
+    /// land in issues `.5`/`.6`; the scaffold emits a black frame at the rotated
+    /// display size.
+    pub fn render_frame(&self, buffer: &mut [u8]) {
+        buffer.fill(0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Reset / interrupts
+    // -----------------------------------------------------------------------
+
+    pub fn reset(&mut self) {
+        self.vblank_irq_pending = false;
+        self.clock = 0;
+        self.main_map
+            .region_data_mut(MainRegion::BgVideoRam)
+            .fill(0);
+        self.main_map
+            .region_data_mut(MainRegion::FgVideoRam)
+            .fill(0);
+        self.main_map.region_data_mut(MainRegion::SpriteRam).fill(0);
+        self.main_map.region_data_mut(MainRegion::WorkRam).fill(0);
+    }
+
+    pub fn check_interrupts(&self, target: BusMaster) -> InterruptState {
+        match target {
+            BusMaster::Cpu(0) => InterruptState {
+                irq: self.vblank_irq_pending,
+                ..Default::default()
+            },
+            _ => InterruptState::default(),
+        }
+    }
+
+    pub fn debug_tick_boundaries(&self) -> u32 {
+        u32::from(self.cpu.at_instruction_boundary())
+    }
+}
+
+impl Saveable for MrdoBoard {
+    fn save_state(&self, w: &mut StateWriter) {
+        self.cpu.save_state(w);
+        w.write_bytes(self.main_map.region_data(MainRegion::BgVideoRam));
+        w.write_bytes(self.main_map.region_data(MainRegion::FgVideoRam));
+        w.write_bytes(self.main_map.region_data(MainRegion::SpriteRam));
+        w.write_bytes(self.main_map.region_data(MainRegion::WorkRam));
+        w.write_u8(self.in0);
+        w.write_u8(self.in1);
+        w.write_u8(self.dsw1);
+        w.write_u8(self.dsw2);
+        w.write_u64_le(self.clock);
+        w.write_bool(self.vblank_irq_pending);
+    }
+
+    fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
+        self.cpu.load_state(r)?;
+        r.read_bytes_into(self.main_map.region_data_mut(MainRegion::BgVideoRam))?;
+        r.read_bytes_into(self.main_map.region_data_mut(MainRegion::FgVideoRam))?;
+        r.read_bytes_into(self.main_map.region_data_mut(MainRegion::SpriteRam))?;
+        r.read_bytes_into(self.main_map.region_data_mut(MainRegion::WorkRam))?;
+        self.in0 = r.read_u8()?;
+        self.in1 = r.read_u8()?;
+        self.dsw1 = r.read_u8()?;
+        self.dsw2 = r.read_u8()?;
+        self.clock = r.read_u64_le()?;
+        self.vblank_irq_pending = r.read_bool()?;
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MrdoSystem wrapper
+// ---------------------------------------------------------------------------
+
+/// Universal Mr. Do! (1982).
+#[derive(Saveable)]
+pub struct MrdoSystem {
+    pub board: MrdoBoard,
+}
+
+impl Default for MrdoSystem {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MrdoSystem {
+    pub fn new() -> Self {
+        Self {
+            board: MrdoBoard::new(),
+        }
+    }
+
+    pub fn load_rom_set(&mut self, rom_set: &RomSet) -> Result<(), RomLoadError> {
+        let prog = MRDO_MAIN_ROM.load(rom_set)?;
+        self.board
+            .main_map
+            .load_region_at(MainRegion::Rom, 0, &prog);
+        // GFX + PROM regions and their decode/palette land in issues .2-.4.
+        Ok(())
+    }
+}
+
+impl Bus for MrdoSystem {
+    type Address = u16;
+    type Data = u8;
+
+    fn read(&mut self, master: BusMaster, addr: u16) -> u8 {
+        let BusMaster::Cpu(0) = master else {
+            return 0xFF;
+        };
+        let data = match addr {
+            0x0000..=0x90FF => self.board.main_map.read_backing(addr),
+            // Protection PAL readback — real equations land in issue .8.
+            0x9803 => 0xFF,
+            0xA000 => self.board.in0,
+            0xA001 => self.board.in1,
+            0xA002 => self.board.dsw1,
+            0xA003 => self.board.dsw2,
+            0xE000..=0xEFFF => self.board.main_map.read_backing(addr),
+            _ => 0xFF,
+        };
+        self.board.main_map.watch_read(0, master, addr, data);
+        data
+    }
+
+    fn write(&mut self, master: BusMaster, addr: u16, data: u8) {
+        let BusMaster::Cpu(0) = master else {
+            return;
+        };
+        self.board.main_map.watch_write(0, master, addr, data);
+        match addr {
+            // Video / sprite RAM. FG writes (0x8800-0x8FFF) also clock the
+            // protection PAL — wired in issue .8.
+            0x8000..=0x90FF => self.board.main_map.write_backing(addr, data),
+            0x9800 => {} // flipscreen + priority — issue .5
+            0x9801 => {} // SN76489 #1 — issue .7
+            0x9802 => {} // SN76489 #2 — issue .7
+            0xE000..=0xEFFF => self.board.main_map.write_backing(addr, data),
+            0xF000..=0xF7FF => {} // BG scroll-X — issue .5
+            0xF800..=0xFFFF => {} // BG scroll-Y — issue .5
+            _ => {}               // ROM / unmapped
+        }
+    }
+
+    fn is_halted_for(&self, _master: BusMaster) -> bool {
+        false
+    }
+
+    fn check_interrupts(&mut self, target: BusMaster) -> InterruptState {
+        self.board.check_interrupts(target)
+    }
+}
+
+crate::impl_board_delegation!(MrdoSystem, board, crate::mrdo::TIMING);
+
+impl MachineCore for MrdoSystem {
+    crate::machine_core_metadata!("mrdo", crate::mrdo::TIMING);
+
+    fn run_frame(&mut self) {
+        bus_split!(self, bus => {
+            for _ in 0..crate::mrdo::TIMING.cycles_per_frame() {
+                self.board.tick(bus);
+            }
+        });
+    }
+
+    fn reset(&mut self) {
+        self.board.reset();
+        bus_split!(self, bus => {
+            self.board.cpu.reset(bus, BusMaster::Cpu(0));
+        });
+    }
+}
+
+impl SaveState for MrdoSystem {
+    crate::machine_save_state!();
+}
+
+// ---------------------------------------------------------------------------
+// Input
+// ---------------------------------------------------------------------------
+// IN0 (0xA000): b0 L, b1 D, b2 R, b3 U, b4 Button1, b5 Start1, b6 Start2, b7 Tilt.
+// IN1 (0xA001): b0 L, b1 D, b2 R, b3 U, b4 Button1, b6 Coin1, b7 Coin2.
+// All active-low; a pressed control clears its bit.
+
+const INPUT_P1_RIGHT: u16 = 0;
+const INPUT_P1_LEFT: u16 = 1;
+const INPUT_P1_UP: u16 = 2;
+const INPUT_P1_DOWN: u16 = 3;
+const INPUT_P1_BUTTON: u16 = 4;
+const INPUT_P2_RIGHT: u16 = 5;
+const INPUT_P2_LEFT: u16 = 6;
+const INPUT_P2_UP: u16 = 7;
+const INPUT_P2_DOWN: u16 = 8;
+const INPUT_P2_BUTTON: u16 = 9;
+const INPUT_P1_START: u16 = 10;
+const INPUT_P2_START: u16 = 11;
+const INPUT_COIN1: u16 = 12;
+const INPUT_COIN2: u16 = 13;
+
+#[allow(clippy::too_many_arguments)]
+const fn dir(
+    id: u16,
+    name: &'static str,
+    label: &'static str,
+    direction: Direction,
+    player: u8,
+    bindings: &'static [DefaultBinding],
+) -> InputControl {
+    InputControl {
+        id: InputId(id),
+        stable_name: name,
+        label,
+        kind: InputKind::DigitalDirection { direction },
+        player: Some(player),
+        default_bindings: bindings,
+    }
+}
+
+const fn button(id: u16, name: &'static str, label: &'static str, player: u8) -> InputControl {
+    InputControl {
+        id: InputId(id),
+        stable_name: name,
+        label,
+        kind: InputKind::Action(ActionRole::Primary),
+        player: Some(player),
+        default_bindings: &[],
+    }
+}
+
+const fn simple(
+    id: u16,
+    name: &'static str,
+    label: &'static str,
+    kind: InputKind,
+    player: Option<u8>,
+    bindings: &'static [DefaultBinding],
+) -> InputControl {
+    InputControl {
+        id: InputId(id),
+        stable_name: name,
+        label,
+        kind,
+        player,
+        default_bindings: bindings,
+    }
+}
+
+const MRDO_CONTROLS: &[InputControl] = &[
+    dir(
+        INPUT_P1_RIGHT,
+        "p1_right",
+        "P1 Right",
+        Direction::Right,
+        1,
+        ind::P1_RIGHT,
+    ),
+    dir(
+        INPUT_P1_LEFT,
+        "p1_left",
+        "P1 Left",
+        Direction::Left,
+        1,
+        ind::P1_LEFT,
+    ),
+    dir(INPUT_P1_UP, "p1_up", "P1 Up", Direction::Up, 1, ind::P1_UP),
+    dir(
+        INPUT_P1_DOWN,
+        "p1_down",
+        "P1 Down",
+        Direction::Down,
+        1,
+        ind::P1_DOWN,
+    ),
+    button(INPUT_P1_BUTTON, "p1_button", "P1 Dig", 1),
+    dir(
+        INPUT_P2_RIGHT,
+        "p2_right",
+        "P2 Right",
+        Direction::Right,
+        2,
+        ind::P2_RIGHT,
+    ),
+    dir(
+        INPUT_P2_LEFT,
+        "p2_left",
+        "P2 Left",
+        Direction::Left,
+        2,
+        ind::P2_LEFT,
+    ),
+    dir(INPUT_P2_UP, "p2_up", "P2 Up", Direction::Up, 2, ind::P2_UP),
+    dir(
+        INPUT_P2_DOWN,
+        "p2_down",
+        "P2 Down",
+        Direction::Down,
+        2,
+        ind::P2_DOWN,
+    ),
+    button(INPUT_P2_BUTTON, "p2_button", "P2 Dig", 2),
+    simple(
+        INPUT_P1_START,
+        "p1_start",
+        "P1 Start",
+        InputKind::Start,
+        Some(1),
+        ind::P1_START,
+    ),
+    simple(
+        INPUT_P2_START,
+        "p2_start",
+        "P2 Start",
+        InputKind::Start,
+        Some(2),
+        ind::P2_START,
+    ),
+    simple(
+        INPUT_COIN1,
+        "coin1",
+        "Coin 1",
+        InputKind::Coin,
+        None,
+        ind::COIN,
+    ),
+    simple(INPUT_COIN2, "coin2", "Coin 2", InputKind::Coin, None, &[]),
+];
+
+impl InputConfigurable for MrdoSystem {
+    fn input_controls(&self) -> &'static [InputControl] {
+        MRDO_CONTROLS
+    }
+
+    fn handle_input(&mut self, event: InputEvent) {
+        let InputEvent::Button { id, pressed } = event else {
+            return;
+        };
+        let b = &mut self.board;
+        match id.0 {
+            INPUT_P1_LEFT => set_bit_active_low(&mut b.in0, 0, pressed),
+            INPUT_P1_DOWN => set_bit_active_low(&mut b.in0, 1, pressed),
+            INPUT_P1_RIGHT => set_bit_active_low(&mut b.in0, 2, pressed),
+            INPUT_P1_UP => set_bit_active_low(&mut b.in0, 3, pressed),
+            INPUT_P1_BUTTON => set_bit_active_low(&mut b.in0, 4, pressed),
+            INPUT_P1_START => set_bit_active_low(&mut b.in0, 5, pressed),
+            INPUT_P2_START => set_bit_active_low(&mut b.in0, 6, pressed),
+            INPUT_P2_LEFT => set_bit_active_low(&mut b.in1, 0, pressed),
+            INPUT_P2_DOWN => set_bit_active_low(&mut b.in1, 1, pressed),
+            INPUT_P2_RIGHT => set_bit_active_low(&mut b.in1, 2, pressed),
+            INPUT_P2_UP => set_bit_active_low(&mut b.in1, 3, pressed),
+            INPUT_P2_BUTTON => set_bit_active_low(&mut b.in1, 4, pressed),
+            INPUT_COIN1 => set_bit_active_low(&mut b.in1, 6, pressed),
+            INPUT_COIN2 => set_bit_active_low(&mut b.in1, 7, pressed),
+            _ => {}
+        }
+    }
+}
+
+// DIP defaults: DSW1 = 3 lives, upright, easy; DSW2 = 1 Coin/1 Credit both slots.
+// Full DIP option tables land in issue `.9`.
+const DSW1_DEFAULT: u8 = 0xDF;
+const DSW2_DEFAULT: u8 = 0xFF;
+
+// Minimal DIP surface for the scaffold — real option tables land in issue `.9`.
+impl DipSwitches for MrdoSystem {
+    fn dip_bank_value(&self, bank: usize) -> u8 {
+        match bank {
+            0 => self.board.dsw1,
+            1 => self.board.dsw2,
+            _ => 0,
+        }
+    }
+
+    fn set_dip_bank_value(&mut self, bank: usize, value: u8) {
+        match bank {
+            0 => self.board.dsw1 = value,
+            1 => self.board.dsw2 = value,
+            _ => {}
+        }
+    }
+}
+
+crate::impl_default_frontend_capabilities!(MrdoSystem);
+
+// ---------------------------------------------------------------------------
+// Registry
+// ---------------------------------------------------------------------------
+
+fn create_machine(
+    rom_set: &RomSet,
+) -> Result<Box<dyn phosphor_core::core::machine::FrontendMachine>, RomLoadError> {
+    let mut sys = MrdoSystem::new();
+    sys.load_rom_set(rom_set)?;
+    Ok(Box::new(sys))
+}
+
+inventory::submit! {
+    MachineEntry::new("mrdo", &["mrdot", "mrdofix"], create_machine)
+}
+
+inventory::submit! {
+    DisasmRegion {
+        machine: "mrdo",
+        region: "main",
+        cpu: DisasmCpu::Z80,
+        org: 0x0000,
+        size: MRDO_MAIN_ROM.size as u32,
+        load: |rs| MRDO_MAIN_ROM.load(rs),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn machine_is_registered() {
+        assert!(crate::registry::find("mrdo").is_some());
+    }
+
+    #[test]
+    fn disasm_region_registered() {
+        assert!(crate::disasm_registry::find("mrdo", "main").is_some());
+    }
+
+    #[test]
+    fn timing_is_sane() {
+        assert_eq!(TIMING.cpu_clock_hz, 4_100_000);
+        let hz = TIMING.frame_rate_hz();
+        assert!((59.0..61.0).contains(&hz), "frame rate {hz} out of range");
+        assert_eq!(TIMING.display_size(), (192, 240));
+    }
+
+    #[test]
+    fn input_controls_have_stable_names() {
+        let sys = MrdoSystem::new();
+        let controls = sys.input_controls();
+        assert!(controls.iter().any(|c| c.stable_name == "p1_right"));
+        assert!(controls.iter().any(|c| c.stable_name == "coin1"));
+    }
+
+    #[test]
+    fn p1_input_clears_active_low_bits() {
+        let mut sys = MrdoSystem::new();
+        assert_eq!(sys.board.in0, 0xFF);
+        sys.handle_input(InputEvent::Button {
+            id: InputId(INPUT_P1_RIGHT),
+            pressed: true,
+        });
+        assert_eq!(sys.board.in0 & 0x04, 0, "P1 Right should clear bit 2");
+        sys.handle_input(InputEvent::Button {
+            id: InputId(INPUT_P1_RIGHT),
+            pressed: false,
+        });
+        assert_eq!(sys.board.in0, 0xFF);
+    }
+}
