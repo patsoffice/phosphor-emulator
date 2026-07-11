@@ -288,6 +288,11 @@ pub struct MrdoBoard {
     pub(crate) palette_prom: [u8; 0x80],
     pub(crate) palette_rgb: [(u8, u8, u8); PALETTE_LEN],
 
+    // Video registers: BG scroll (only the BG layer scrolls) + flipscreen.
+    pub(crate) bg_scroll_x: u8,
+    pub(crate) bg_scroll_y: u8,
+    pub(crate) flipscreen: bool,
+
     // Inputs (active-low, latched by `handle_input`) + DIP banks.
     pub(crate) in0: u8,
     pub(crate) in1: u8,
@@ -318,6 +323,9 @@ impl MrdoBoard {
             sprite_cache: gfx::GfxCache::new(0, 16, 16),
             palette_prom: [0; 0x80],
             palette_rgb: [(0, 0, 0); PALETTE_LEN],
+            bg_scroll_x: 0,
+            bg_scroll_y: 0,
+            flipscreen: false,
             in0: 0xFF,
             in1: 0xFF,
             dsw1: DSW1_DEFAULT,
@@ -409,11 +417,106 @@ impl MrdoBoard {
         0
     }
 
-    /// Render one frame. Real tilemap + sprite rendering and the ROT270 rotate
-    /// land in issues `.5`/`.6`; the scaffold emits a black frame at the rotated
-    /// display size.
+    /// Render one frame into `buffer` (192×240 RGB24, ROT270).
+    ///
+    /// Composites the native 240×192 visible raster (MAME visarea x 8..248,
+    /// y 32..224) into a pen-index buffer — fill pen 0, then the scrollable BG
+    /// tilemap, the fixed FG tilemap, and sprites, all transparent on pen 0
+    /// (per `screen_update_mrdo`) — then resolves pens through the palette while
+    /// rotating 270°. Mr. Do! takes a single VBLANK IRQ with no mid-frame raster
+    /// effects, so a whole-frame render matches the hardware.
     pub fn render_frame(&self, buffer: &mut [u8]) {
-        buffer.fill(0);
+        let bgram = self.main_map.region_data(MainRegion::BgVideoRam);
+        let fgram = self.main_map.region_data(MainRegion::FgVideoRam);
+        let sprram = self.main_map.region_data(MainRegion::SpriteRam);
+        let flip = self.flipscreen;
+        let sx = self.bg_scroll_x as usize;
+        let sy = self.bg_scroll_y as usize;
+
+        let mut pen = vec![0u16; VISIBLE_WIDTH * VISIBLE_HEIGHT];
+
+        // Tilemaps. `set_flip_all` mirrors both tilemaps 180° in cocktail mode;
+        // we sample the mirrored coordinate. Sprites are NOT flipped by the
+        // hardware (the game writes cocktail-adjusted sprite data itself).
+        for ny in 0..VISIBLE_HEIGHT {
+            for nx in 0..VISIBLE_WIDTH {
+                let ax = nx + 8;
+                let ay = ny + 32;
+                let (ex, ey) = if flip { (255 - ax, 255 - ay) } else { (ax, ay) };
+                let mut p = 0u16;
+
+                // BG tilemap (gfx2), scrolled; source = (screen + scroll) & 0xff.
+                let bx = (ex + sx) & 0xff;
+                let by = (ey + sy) & 0xff;
+                let bidx = (by / 8) * 32 + bx / 8;
+                let battr = bgram[bidx];
+                let bcode = bgram[bidx + 0x400] as usize + ((battr as usize & 0x80) << 1);
+                let bval = self.bg_cache.pixel(bcode, bx & 7, by & 7);
+                if bval != 0 {
+                    p = (battr as u16 & 0x3f) * 4 + bval as u16;
+                }
+
+                // FG tilemap (gfx1), fixed.
+                let fidx = (ey / 8) * 32 + ex / 8;
+                let fattr = fgram[fidx];
+                let fcode = fgram[fidx + 0x400] as usize + ((fattr as usize & 0x80) << 1);
+                let fval = self.fg_cache.pixel(fcode, ex & 7, ey & 7);
+                if fval != 0 {
+                    p = (fattr as u16 & 0x3f) * 4 + fval as u16;
+                }
+
+                pen[ny * VISIBLE_WIDTH + nx] = p;
+            }
+        }
+
+        // Sprites: 64 entries of 4 bytes, drawn high→low, skipped when the raw Y
+        // byte is 0. Screen Y = 256 - rawY; screen X is direct. Sprite pens live
+        // at palette base 0x100 (color 0-15, 2bpp).
+        for offs in (0..0x100).step_by(4).rev() {
+            if sprram[offs + 1] == 0 {
+                continue;
+            }
+            let code = sprram[offs] as usize & 0x7f;
+            let attr = sprram[offs + 2];
+            let color = (attr & 0x0f) as u16;
+            let flipx = attr & 0x10 != 0;
+            let flipy = attr & 0x20 != 0;
+            let sxp = sprram[offs + 3] as i32;
+            let syp = 256 - sprram[offs + 1] as i32;
+            for py in 0..16i32 {
+                let ry = if flipy { 15 - py } else { py };
+                let nyi = syp + py - 32;
+                if !(0..VISIBLE_HEIGHT as i32).contains(&nyi) {
+                    continue;
+                }
+                for px in 0..16i32 {
+                    let rx = if flipx { 15 - px } else { px };
+                    let val = self.sprite_cache.pixel(code, rx as usize, ry as usize);
+                    if val == 0 {
+                        continue;
+                    }
+                    let nxi = sxp + px - 8;
+                    if !(0..VISIBLE_WIDTH as i32).contains(&nxi) {
+                        continue;
+                    }
+                    pen[nyi as usize * VISIBLE_WIDTH + nxi as usize] = 0x100 + color * 4 + val as u16;
+                }
+            }
+        }
+
+        // ROT270 (native `(nx,ny)` → output `(ny, VISIBLE_WIDTH-1-nx)`), resolving
+        // each pen through the RGB palette.
+        for ny in 0..VISIBLE_HEIGHT {
+            for nx in 0..VISIBLE_WIDTH {
+                let (r, g, b) = self.palette_rgb[pen[ny * VISIBLE_WIDTH + nx] as usize];
+                let ox = ny;
+                let oy = VISIBLE_WIDTH - 1 - nx;
+                let di = (oy * DISPLAY_W + ox) * 3;
+                buffer[di] = r;
+                buffer[di + 1] = g;
+                buffer[di + 2] = b;
+            }
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -423,6 +526,9 @@ impl MrdoBoard {
     pub fn reset(&mut self) {
         self.vblank_irq_pending = false;
         self.clock = 0;
+        self.bg_scroll_x = 0;
+        self.bg_scroll_y = 0;
+        self.flipscreen = false;
         self.main_map
             .region_data_mut(MainRegion::BgVideoRam)
             .fill(0);
@@ -459,6 +565,9 @@ impl Saveable for MrdoBoard {
         w.write_u8(self.in1);
         w.write_u8(self.dsw1);
         w.write_u8(self.dsw2);
+        w.write_u8(self.bg_scroll_x);
+        w.write_u8(self.bg_scroll_y);
+        w.write_bool(self.flipscreen);
         w.write_u64_le(self.clock);
         w.write_bool(self.vblank_irq_pending);
     }
@@ -473,6 +582,9 @@ impl Saveable for MrdoBoard {
         self.in1 = r.read_u8()?;
         self.dsw1 = r.read_u8()?;
         self.dsw2 = r.read_u8()?;
+        self.bg_scroll_x = r.read_u8()?;
+        self.bg_scroll_y = r.read_u8()?;
+        self.flipscreen = r.read_bool()?;
         self.clock = r.read_u64_le()?;
         self.vblank_irq_pending = r.read_bool()?;
         Ok(())
@@ -559,13 +671,21 @@ impl Bus for MrdoSystem {
             // Video / sprite RAM. FG writes (0x8800-0x8FFF) also clock the
             // protection PAL — wired in issue .8.
             0x8000..=0x90FF => self.board.main_map.write_backing(addr, data),
-            0x9800 => {} // flipscreen + priority — issue .5
+            // Flipscreen (bit 0); bits 1-3 are playfield priority, unused by Mr. Do!.
+            0x9800 => self.board.flipscreen = data & 0x01 != 0,
             0x9801 => {} // SN76489 #1 — issue .7
             0x9802 => {} // SN76489 #2 — issue .7
             0xE000..=0xEFFF => self.board.main_map.write_backing(addr, data),
-            0xF000..=0xF7FF => {} // BG scroll-X — issue .5
-            0xF800..=0xFFFF => {} // BG scroll-Y — issue .5
-            _ => {}               // ROM / unmapped
+            0xF000..=0xF7FF => self.board.bg_scroll_x = data, // scrollx_w
+            // scrolly_w: NOT affected by flipscreen — compensate when flipped.
+            0xF800..=0xFFFF => {
+                self.board.bg_scroll_y = if self.board.flipscreen {
+                    ((256 - data as u16) & 0xff) as u8
+                } else {
+                    data
+                };
+            }
+            _ => {} // ROM / unmapped
         }
     }
 
@@ -975,6 +1095,75 @@ mod tests {
         prom[0x00] = 0x03;
         let pal = mrdo_palette_rgb(&prom);
         assert_eq!(pal[0], (0xFF, 0, 0));
+    }
+
+    /// Native visible pixel (nx, ny) lands at this offset in the ROT270 output.
+    fn out_offset(nx: usize, ny: usize) -> usize {
+        let ox = ny;
+        let oy = VISIBLE_WIDTH - 1 - nx;
+        (oy * DISPLAY_W + ox) * 3
+    }
+
+    #[test]
+    fn render_frame_draws_fg_tile_through_rotation() {
+        let mut sys = MrdoSystem::new();
+        // Decode a solid FG tile 0 with pixel value 2 (MSB plane set, LSB clear):
+        // first 0x1000 half is the MSB plane for our layout.
+        sys.board.fg_rom[0..8].fill(0xFF); // tile 0, all 8 rows, MSB plane
+        sys.board.decode_gfx_roms();
+        // Give color code 1 → pen 1*4 + 2 = 6 a recognizable red.
+        sys.board.palette_rgb[6] = (200, 0, 0);
+        // Place tile 0, color 1, at FG tile index for the top-left visible cell.
+        // Visible origin is abs (8,32) → tile col 1, row 4 → index 4*32 + 1.
+        let idx = 4 * 32 + 1;
+        {
+            let fg = sys.board.main_map.region_data_mut(MainRegion::FgVideoRam);
+            fg[idx] = 0x01; // attr: color 1, no high code bit
+            fg[idx + 0x400] = 0x00; // code 0
+        }
+        let mut buf = vec![0u8; DISPLAY_W * DISPLAY_H * 3];
+        sys.board.render_frame(&mut buf);
+        // Abs (8,32) is native (0,0); that pixel should be the tile's red pen.
+        let di = out_offset(0, 0);
+        assert_eq!((buf[di], buf[di + 1], buf[di + 2]), (200, 0, 0));
+    }
+
+    #[test]
+    fn render_frame_draws_sprite() {
+        let mut sys = MrdoSystem::new();
+        sys.board.spr_rom[0..64].fill(0xFF); // sprite 0 fully set → every pixel value 3
+        sys.board.decode_gfx_roms();
+        // Sprite pen 0x100 + color 0*4 + 3 = 0x103.
+        sys.board.palette_rgb[0x103] = (0, 180, 0);
+        {
+            let spr = sys.board.main_map.region_data_mut(MainRegion::SpriteRam);
+            spr[0] = 0x00; // code 0
+            spr[1] = 200; // rawY → screenY = 56
+            spr[2] = 0x00; // color 0, no flip
+            spr[3] = 40; // screenX = 40
+        }
+        let mut buf = vec![0u8; DISPLAY_W * DISPLAY_H * 3];
+        sys.board.render_frame(&mut buf);
+        // At least one sprite pixel should be green somewhere in the output.
+        let any_green = buf
+            .chunks_exact(3)
+            .any(|px| px == [0u8, 180, 0].as_slice());
+        assert!(any_green, "sprite pixel not found in output");
+    }
+
+    #[test]
+    fn scroll_and_flip_registers_latch() {
+        let mut sys = MrdoSystem::new();
+        sys.write(BusMaster::Cpu(0), 0xF000, 0x12);
+        assert_eq!(sys.board.bg_scroll_x, 0x12);
+        // Unflipped scroll-Y is stored verbatim.
+        sys.write(BusMaster::Cpu(0), 0xF800, 0x05);
+        assert_eq!(sys.board.bg_scroll_y, 0x05);
+        // Flipscreen on → scroll-Y is compensated: (256 - data) & 0xff.
+        sys.write(BusMaster::Cpu(0), 0x9800, 0x01);
+        assert!(sys.board.flipscreen);
+        sys.write(BusMaster::Cpu(0), 0xF800, 0x05);
+        assert_eq!(sys.board.bg_scroll_y, 0xFB);
     }
 
     #[test]
