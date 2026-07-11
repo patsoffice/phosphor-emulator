@@ -30,10 +30,13 @@ use phosphor_core::core::{AccessKind, AddressSpace16};
 use phosphor_core::core::{Bus, BusMaster, TimingConfig};
 use phosphor_core::cpu::Cpu;
 use phosphor_core::cpu::z80::Z80;
+use phosphor_core::gfx;
+use phosphor_core::gfx::decode::{GfxLayout, decode_gfx};
 use phosphor_core::{bus_split, core::machine::DefaultBinding};
 use phosphor_macros::{BusDebug, MemoryRegion, Saveable};
 
 use crate::disasm_registry::{DisasmCpu, DisasmRegion};
+use crate::gfx_registry::GfxRegion;
 use crate::input_defaults as ind;
 use crate::registry::MachineEntry;
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
@@ -118,6 +121,149 @@ pub static MRDO_MAIN_ROM: RomRegion = RomRegion {
     ],
 };
 
+/// FG (text) tiles, gfx1 — Taito-specific chars (two 4 KB planes). 8×8 2bpp.
+pub static MRDO_GFX_FG_ROM: RomRegion = RomRegion {
+    size: 0x2000,
+    entries: &[
+        RomEntry { name: "d9", size: 0x1000, offset: 0x0000, crc32: &[0xde4cfe66] },
+        RomEntry { name: "d10", size: 0x1000, offset: 0x1000, crc32: &[0xa6c2f38b] },
+    ],
+};
+
+/// BG tiles, gfx2 (two 4 KB planes). 8×8 2bpp.
+pub static MRDO_GFX_BG_ROM: RomRegion = RomRegion {
+    size: 0x2000,
+    entries: &[
+        RomEntry { name: "r8-08.bin", size: 0x1000, offset: 0x0000, crc32: &[0xdbdc9ffa] },
+        RomEntry { name: "n8-07.bin", size: 0x1000, offset: 0x1000, crc32: &[0x4b9973db] },
+    ],
+};
+
+/// Sprites, gfx3 (two 4 KB chips, planes nibble-interleaved). 16×16 2bpp.
+pub static MRDO_GFX_SPR_ROM: RomRegion = RomRegion {
+    size: 0x2000,
+    entries: &[
+        RomEntry { name: "h5-05.bin", size: 0x1000, offset: 0x0000, crc32: &[0xe1218cc5] },
+        RomEntry { name: "k5-06.bin", size: 0x1000, offset: 0x1000, crc32: &[0xb1f68b04] },
+    ],
+};
+
+/// Color PROMs: U2 palette hi-bits (0x00), T2 palette lo-bits (0x20), sprite
+/// color LUT (0x40), timing PROM (0x60, unused by emulation).
+pub static MRDO_PALETTE_PROM: RomRegion = RomRegion {
+    size: 0x80,
+    entries: &[
+        RomEntry { name: "u02--2.bin", size: 0x20, offset: 0x0000, crc32: &[0x238a65d7] },
+        RomEntry { name: "t02--3.bin", size: 0x20, offset: 0x0020, crc32: &[0xae263dc0] },
+        RomEntry { name: "f10--1.bin", size: 0x20, offset: 0x0040, crc32: &[0x16ee4ca2] },
+        RomEntry { name: "j10--4.bin", size: 0x20, offset: 0x0060, crc32: &[0xff7fe284] },
+    ],
+};
+
+// ---------------------------------------------------------------------------
+// GFX bit-plane layouts (per `charlayout`/`spritelayout` in MAME `mrdo.cpp`).
+// `plane_offsets` are LSB-first — MAME's `planeoffset` array reversed.
+// ---------------------------------------------------------------------------
+
+/// 8×8 2bpp tiles, used for both FG (gfx1) and BG (gfx2). The two planes are the
+/// two 0x1000 halves of the region; MAME `{ RGN_FRAC(0,2), RGN_FRAC(1,2) }`
+/// reversed → `[second-half, first-half]`. 512 tiles per region.
+pub static MRDO_CHAR_LAYOUT: GfxLayout<'static> = GfxLayout {
+    plane_offsets: &[0x1000 * 8, 0],
+    x_offsets: &[7, 6, 5, 4, 3, 2, 1, 0],
+    y_offsets: &[0, 8, 16, 24, 32, 40, 48, 56],
+    char_increment: 8 * 8,
+};
+
+/// 16×16 2bpp sprites (gfx3). Planes nibble-interleaved in the same bytes
+/// (MAME `{ 4, 0 }` → `[0, 4]`); each row is four 8-bit columns read high-nibble
+/// first. 128 sprites, 64 bytes each.
+pub static MRDO_SPRITE_LAYOUT: GfxLayout<'static> = GfxLayout {
+    plane_offsets: &[0, 4],
+    x_offsets: &[
+        3, 2, 1, 0, // column group 0 (byte 0, bits 3..0)
+        11, 10, 9, 8, // column group 1 (byte 1)
+        19, 18, 17, 16, // column group 2 (byte 2)
+        27, 26, 25, 24, // column group 3 (byte 3)
+    ],
+    y_offsets: &[
+        0, 32, 64, 96, 128, 160, 192, 224, 256, 288, 320, 352, 384, 416, 448, 480,
+    ],
+    char_increment: 64 * 8,
+};
+
+const FG_TILE_COUNT: usize = 512;
+const BG_TILE_COUNT: usize = 512;
+const SPRITE_COUNT: usize = 128;
+/// Palette pens: 256 char pens (1:1 with indirect colors) + 64 sprite pens.
+const PALETTE_LEN: usize = 0x140;
+
+/// Build Mr. Do!'s RGB palette from the two 32-byte palette PROMs and the
+/// 32-byte sprite-color LUT (per `palette_init` in MAME `mrdo_v.cpp`).
+///
+/// Each of R/G/B is a 4-bit value formed from 2 bits of the T2 PROM (150 Ω /
+/// 120 Ω resistors) and 2 bits of the U2 PROM (100 Ω / 75 Ω), fed through a
+/// diode-coupled pot ladder with a 220 Ω pulldown and a 0.7 V diode drop. The
+/// 256 "indirect" colors map 1:1 to the char pens; the 64 sprite pens resolve
+/// through the LUT. Shared by [`MrdoBoard::build_palette`] and the gfxview hook.
+fn mrdo_palette_rgb(prom: &[u8]) -> [(u8, u8, u8); PALETTE_LEN] {
+    // Resistor-pot weight table: index bits 0-1 = T2 (150/120 Ω), bits 2-3 = U2
+    // (100/75 Ω). weight[i] = 255 * pot[i] / pot[0x0f], clamped at 0.
+    const R: [f32; 4] = [150.0, 120.0, 100.0, 75.0];
+    const PULL: f32 = 220.0;
+    const POTADJUST: f32 = 0.7; // diode voltage drop
+    let mut pot = [0.0f32; 16];
+    for (i, p) in pot.iter_mut().enumerate() {
+        let mut par = 0.0f32;
+        for (bit, &r) in R.iter().enumerate() {
+            if i & (1 << bit) != 0 {
+                par += 1.0 / r;
+            }
+        }
+        *p = if par != 0.0 {
+            PULL / (PULL + 1.0 / par) - POTADJUST
+        } else {
+            0.0
+        };
+    }
+    let mut weight = [0i32; 16];
+    for (i, w) in weight.iter_mut().enumerate() {
+        *w = (255.0 * pot[i] / pot[0x0f]) as i32;
+        if *w < 0 {
+            *w = 0;
+        }
+    }
+    let gun = |a1: usize, a2: usize, shift: u8| -> u8 {
+        let bits0 = (prom[a1] >> shift) & 0x03;
+        let bits2 = (prom[a2] >> shift) & 0x03;
+        weight[(bits0 + (bits2 << 2)) as usize] as u8
+    };
+
+    // 256 indirect colors. a1 addresses the T2 PROM (+0x20), a2 the U2 PROM.
+    let mut indirect = [(0u8, 0u8, 0u8); 256];
+    for (i, c) in indirect.iter_mut().enumerate() {
+        let a1 = ((i >> 3) & 0x1c) + (i & 0x03) + 0x20;
+        let a2 = (i & 0x1c) + (i & 0x03);
+        *c = (gun(a1, a2, 0), gun(a1, a2, 2), gun(a1, a2, 4));
+    }
+
+    let mut out = [(0u8, 0u8, 0u8); PALETTE_LEN];
+    // Char pens 0x000-0x0FF map 1:1 to indirect colors.
+    out[..256].copy_from_slice(&indirect);
+    // Sprite pens 0x100-0x13F resolve through the LUT at PROM offset 0x40.
+    for i in 0..0x40 {
+        let mut ctab = prom[0x40 + (i & 0x1f)];
+        if i & 0x20 != 0 {
+            ctab >>= 4; // high nibble = sprite color n + 8
+        } else {
+            ctab &= 0x0f; // low nibble = sprite color n
+        }
+        let idx = ctab as usize + ((ctab as usize & 0x0c) << 3);
+        out[0x100 + i] = indirect[idx & 0xff];
+    }
+    out
+}
+
 // ---------------------------------------------------------------------------
 // MrdoBoard
 // ---------------------------------------------------------------------------
@@ -129,6 +275,18 @@ pub struct MrdoBoard {
 
     #[debug_map(cpu = 0)]
     pub(crate) main_map: AddressSpace16,
+
+    // GFX ROMs + their decoded pixel caches.
+    pub(crate) fg_rom: [u8; 0x2000],
+    pub(crate) bg_rom: [u8; 0x2000],
+    pub(crate) spr_rom: [u8; 0x2000],
+    pub(crate) fg_cache: gfx::GfxCache, // 512 × 8×8 2bpp FG tiles
+    pub(crate) bg_cache: gfx::GfxCache, // 512 × 8×8 2bpp BG tiles
+    pub(crate) sprite_cache: gfx::GfxCache, // 128 × 16×16 2bpp sprites
+
+    // Color PROMs + the decoded RGB palette (256 char pens + 64 sprite pens).
+    pub(crate) palette_prom: [u8; 0x80],
+    pub(crate) palette_rgb: [(u8, u8, u8); PALETTE_LEN],
 
     // Inputs (active-low, latched by `handle_input`) + DIP banks.
     pub(crate) in0: u8,
@@ -152,6 +310,14 @@ impl MrdoBoard {
         Self {
             cpu: Z80::new(),
             main_map: Self::build_main_map(),
+            fg_rom: [0; 0x2000],
+            bg_rom: [0; 0x2000],
+            spr_rom: [0; 0x2000],
+            fg_cache: gfx::GfxCache::new(0, 8, 8),
+            bg_cache: gfx::GfxCache::new(0, 8, 8),
+            sprite_cache: gfx::GfxCache::new(0, 16, 16),
+            palette_prom: [0; 0x80],
+            palette_rgb: [(0, 0, 0); PALETTE_LEN],
             in0: 0xFF,
             in1: 0xFF,
             dsw1: DSW1_DEFAULT,
@@ -188,6 +354,22 @@ impl MrdoBoard {
             )
             .region(WorkRam, "Work RAM", 0xE000, 0x1000, AccessKind::ReadWrite);
         map
+    }
+
+    // -----------------------------------------------------------------------
+    // GFX decode + palette (call after loading ROMs)
+    // -----------------------------------------------------------------------
+
+    /// Decode the FG/BG tile and sprite ROMs into pixel caches.
+    pub fn decode_gfx_roms(&mut self) {
+        self.fg_cache = decode_gfx(&self.fg_rom, 0, FG_TILE_COUNT, &MRDO_CHAR_LAYOUT);
+        self.bg_cache = decode_gfx(&self.bg_rom, 0, BG_TILE_COUNT, &MRDO_CHAR_LAYOUT);
+        self.sprite_cache = decode_gfx(&self.spr_rom, 0, SPRITE_COUNT, &MRDO_SPRITE_LAYOUT);
+    }
+
+    /// Build the RGB palette from the U2/T2 palette PROMs and sprite-color LUT.
+    pub fn build_palette(&mut self) {
+        self.palette_rgb = mrdo_palette_rgb(&self.palette_prom);
     }
 
     // -----------------------------------------------------------------------
@@ -325,7 +507,22 @@ impl MrdoSystem {
         self.board
             .main_map
             .load_region_at(MainRegion::Rom, 0, &prog);
-        // GFX + PROM regions and their decode/palette land in issues .2-.4.
+
+        self.board
+            .fg_rom
+            .copy_from_slice(&MRDO_GFX_FG_ROM.load(rom_set)?);
+        self.board
+            .bg_rom
+            .copy_from_slice(&MRDO_GFX_BG_ROM.load(rom_set)?);
+        self.board
+            .spr_rom
+            .copy_from_slice(&MRDO_GFX_SPR_ROM.load(rom_set)?);
+        self.board
+            .palette_prom
+            .copy_from_slice(&MRDO_PALETTE_PROM.load(rom_set)?);
+
+        self.board.decode_gfx_roms();
+        self.board.build_palette();
         Ok(())
     }
 }
@@ -385,6 +582,27 @@ crate::impl_board_delegation!(MrdoSystem, board, crate::mrdo::TIMING);
 
 impl MachineCore for MrdoSystem {
     crate::machine_core_metadata!("mrdo", crate::mrdo::TIMING);
+
+    fn gfx_sheets(&self) -> Vec<phosphor_core::core::machine::GfxSheet<'_>> {
+        use phosphor_core::core::machine::GfxSheet;
+        vec![
+            GfxSheet {
+                name: "fg",
+                cache: &self.board.fg_cache,
+                palette: &self.board.palette_rgb,
+            },
+            GfxSheet {
+                name: "bg",
+                cache: &self.board.bg_cache,
+                palette: &self.board.palette_rgb,
+            },
+            GfxSheet {
+                name: "sprites",
+                cache: &self.board.sprite_cache,
+                palette: &self.board.palette_rgb,
+            },
+        ]
+    }
 
     fn run_frame(&mut self) {
         bus_split!(self, bus => {
@@ -640,6 +858,54 @@ inventory::submit! {
 }
 
 // ---------------------------------------------------------------------------
+// GFX viewer regions
+// ---------------------------------------------------------------------------
+
+/// gfxview palette hook: build the RGB palette with the same PROM math as the
+/// runtime path so the offline viewer and scanline renderer never diverge.
+fn mrdo_gfx_palette(rom_set: &RomSet) -> Result<Vec<(u8, u8, u8)>, RomLoadError> {
+    let prom = MRDO_PALETTE_PROM.load(rom_set)?;
+    Ok(mrdo_palette_rgb(&prom).to_vec())
+}
+
+inventory::submit! {
+    GfxRegion {
+        machine: "mrdo",
+        region: "fg",
+        count: FG_TILE_COUNT as u32,
+        width: 8,
+        height: 8,
+        layout: &MRDO_CHAR_LAYOUT,
+        load: |rs| MRDO_GFX_FG_ROM.load(rs),
+        palette: Some(mrdo_gfx_palette),
+    }
+}
+inventory::submit! {
+    GfxRegion {
+        machine: "mrdo",
+        region: "bg",
+        count: BG_TILE_COUNT as u32,
+        width: 8,
+        height: 8,
+        layout: &MRDO_CHAR_LAYOUT,
+        load: |rs| MRDO_GFX_BG_ROM.load(rs),
+        palette: Some(mrdo_gfx_palette),
+    }
+}
+inventory::submit! {
+    GfxRegion {
+        machine: "mrdo",
+        region: "sprites",
+        count: SPRITE_COUNT as u32,
+        width: 16,
+        height: 16,
+        layout: &MRDO_SPRITE_LAYOUT,
+        load: |rs| MRDO_GFX_SPR_ROM.load(rs),
+        palette: Some(mrdo_gfx_palette),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -671,6 +937,44 @@ mod tests {
         let controls = sys.input_controls();
         assert!(controls.iter().any(|c| c.stable_name == "p1_right"));
         assert!(controls.iter().any(|c| c.stable_name == "coin1"));
+    }
+
+    #[test]
+    fn gfx_regions_registered_with_expected_geometry() {
+        let regions = crate::gfx_registry::regions_for("mrdo");
+        assert_eq!(regions.len(), 3);
+        let spr = regions.iter().find(|r| r.region == "sprites").unwrap();
+        assert_eq!((spr.count, spr.width, spr.height), (128, 16, 16));
+        let fg = regions.iter().find(|r| r.region == "fg").unwrap();
+        assert_eq!((fg.count, fg.width, fg.height), (512, 8, 8));
+    }
+
+    #[test]
+    fn gfx_decode_produces_populated_caches() {
+        let mut board = MrdoBoard::new();
+        // Plane 1 (MSB) of tile 0 all-set, plane 0 (LSB) clear ⇒ pixels read as 2.
+        board.fg_rom[0] = 0xFF; // first half = MSB plane, row 0
+        board.decode_gfx_roms();
+        assert_eq!(board.fg_cache.count(), 512);
+        assert_eq!(board.sprite_cache.count(), 128);
+        assert_eq!(board.fg_cache.pixel(0, 0, 0), 2);
+        assert_eq!(board.fg_cache.pixel(0, 7, 0), 2);
+    }
+
+    #[test]
+    fn palette_has_full_pen_range_and_black_zero() {
+        // An all-zero PROM ⇒ every gun weight 0 ⇒ black everywhere.
+        let pal = mrdo_palette_rgb(&[0u8; 0x80]);
+        assert_eq!(pal.len(), 0x140);
+        assert_eq!(pal[0], (0, 0, 0));
+        assert_eq!(pal[0x13F], (0, 0, 0));
+        // A saturated T2+U2 red nibble should light red without green/blue.
+        let mut prom = [0u8; 0x80];
+        // index 0: a1 = 0x20 (T2), a2 = 0x00 (U2); set both low 2 bits (red).
+        prom[0x20] = 0x03;
+        prom[0x00] = 0x03;
+        let pal = mrdo_palette_rgb(&prom);
+        assert_eq!(pal[0], (0xFF, 0, 0));
     }
 
     #[test]
