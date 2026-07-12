@@ -10,9 +10,14 @@
 //! - `machine` — a machine name + region; CPU and origin are resolved from the
 //!   [`phosphor_machines::disasm_registry`].
 //!
-//! Plus a graphics mode:
-//! - `gfxview` — a machine name + region; decodes a tile/sprite GFX ROM to a
+//! Plus graphics/video modes:
+//! - `gfxview`   — a machine name + region; decodes a tile/sprite GFX ROM to a
 //!   PNG sheet, resolved from the [`phosphor_machines::gfx_registry`].
+//! - `frameshot` — boot a registered machine for N frames and dump the rendered
+//!   frame to a PNG (a headless screenshot), optionally diffing it against a
+//!   reference image (e.g. a MAME snapshot).
+//! - `imgdiff`   — compare two RGB PNGs and report the pixel diff percentage,
+//!   optionally writing a red-highlight image of the differing pixels.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -104,6 +109,39 @@ enum Command {
         /// ROM set: a `.zip` archive or a directory of loose ROM files
         /// (not needed when listing regions).
         path: Option<String>,
+    },
+    /// Boot a registered machine for N frames and dump the rendered frame to a
+    /// PNG — a headless equivalent of a frontend screenshot, for validating a
+    /// machine's video output against a reference (e.g. a MAME snapshot).
+    Frameshot {
+        /// Machine CLI name (e.g. `mrdo`).
+        #[arg(long)]
+        machine: String,
+        /// Number of frames to run (from reset) before capturing.
+        #[arg(long, default_value_t = 0)]
+        frames: usize,
+        /// Output PNG path (default: `<machine>_f<frames>.png`).
+        #[arg(short = 'o', long)]
+        out: Option<PathBuf>,
+        /// Optional reference PNG to diff the captured frame against.
+        #[arg(long)]
+        compare: Option<PathBuf>,
+        /// ROM set: a `.zip` archive or a directory of loose ROM files.
+        path: String,
+    },
+    /// Compare two RGB PNGs pixel-by-pixel; print the diff percentage and,
+    /// optionally, write a highlight image (differing pixels in red).
+    Imgdiff {
+        /// First PNG.
+        a: PathBuf,
+        /// Second PNG.
+        b: PathBuf,
+        /// Optional highlight-image output path.
+        #[arg(short = 'o', long)]
+        out: Option<PathBuf>,
+        /// Per-pixel channel-sum threshold above which a pixel counts as different.
+        #[arg(long, default_value_t = 12)]
+        threshold: u32,
     },
 }
 
@@ -215,7 +253,151 @@ fn run_command(cmd: Command) -> Result<String, String> {
             out.as_deref(),
             path.as_deref(),
         ),
+        Command::Frameshot {
+            machine,
+            frames,
+            out,
+            compare,
+            path,
+        } => run_frameshot(&machine, frames, out.as_deref(), compare.as_deref(), &path),
+        Command::Imgdiff {
+            a,
+            b,
+            out,
+            threshold,
+        } => run_imgdiff(&a, &b, out.as_deref(), threshold),
     }
+}
+
+/// Boot a registered machine, run `frames` frames from reset, and write the
+/// rendered frame to a PNG. With `--compare`, also report the pixel diff against
+/// a reference image.
+fn run_frameshot(
+    machine: &str,
+    frames: usize,
+    out: Option<&Path>,
+    compare: Option<&Path>,
+    path: &str,
+) -> Result<String, String> {
+    let entry = registry::find(machine).ok_or_else(|| {
+        let avail: Vec<&str> = registry::all().iter().map(|e| e.name).collect();
+        format!("unknown machine '{machine}'; available: {}", avail.join(", "))
+    })?;
+
+    let set = load_rom_set(path, entry.rom_names)
+        .map_err(|e| format!("loading ROM set {path}: {e}"))?;
+    let mut machine_box =
+        (entry.create)(&set).map_err(|e| format!("creating machine '{machine}': {e}"))?;
+
+    machine_box.reset();
+    for _ in 0..frames {
+        machine_box.run_frame();
+    }
+
+    let (w, h) = machine_box.display_size();
+    let mut buf = vec![0u8; (w * h * 3) as usize];
+    machine_box.render_frame(&mut buf);
+
+    let out_path = out
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(format!("{machine}_f{frames}.png")));
+    gfxsheet::write_png(&out_path, &buf, w, h)
+        .map_err(|e| format!("writing {}: {e}", out_path.display()))?;
+
+    let mut msg = format!(
+        "wrote {machine} frame {frames} -> {} ({w}×{h})\n",
+        out_path.display()
+    );
+    if let Some(reference) = compare {
+        let (rw, rh, rgb) = load_png(reference)?;
+        if (rw, rh) != (w, h) {
+            return Err(format!(
+                "reference {} is {rw}×{rh}, rendered frame is {w}×{h}",
+                reference.display()
+            ));
+        }
+        let (ndiff, total) = count_diff(&buf, &rgb, 12);
+        msg.push_str(&format!(
+            "diff vs {}: {ndiff}/{total} ({:.1}%)\n",
+            reference.display(),
+            100.0 * ndiff as f64 / total as f64
+        ));
+    }
+    Ok(msg)
+}
+
+/// Compare two RGB PNGs and (optionally) write a highlight image.
+fn run_imgdiff(
+    a: &Path,
+    b: &Path,
+    out: Option<&Path>,
+    threshold: u32,
+) -> Result<String, String> {
+    let (aw, ah, ap) = load_png(a)?;
+    let (bw, bh, bp) = load_png(b)?;
+    if (aw, ah) != (bw, bh) {
+        return Err(format!("size mismatch: {aw}×{ah} vs {bw}×{bh}"));
+    }
+    let (ndiff, total) = count_diff(&ap, &bp, threshold);
+
+    if let Some(out_path) = out {
+        // Dim the matching pixels, paint differing pixels solid red.
+        let mut hi = vec![0u8; ap.len()];
+        for (i, (pa, pb)) in ap.chunks_exact(3).zip(bp.chunks_exact(3)).enumerate() {
+            if channel_sum_delta(pa, pb) > threshold {
+                hi[i * 3] = 255;
+            } else {
+                hi[i * 3] = pa[0] / 3;
+                hi[i * 3 + 1] = pa[1] / 3;
+                hi[i * 3 + 2] = pa[2] / 3;
+            }
+        }
+        gfxsheet::write_png(out_path, &hi, aw, ah)
+            .map_err(|e| format!("writing {}: {e}", out_path.display()))?;
+    }
+
+    Ok(format!(
+        "diff: {ndiff}/{total} ({:.2}%)\n",
+        100.0 * ndiff as f64 / total as f64
+    ))
+}
+
+#[inline]
+fn channel_sum_delta(a: &[u8], b: &[u8]) -> u32 {
+    (a[0].abs_diff(b[0]) as u32) + (a[1].abs_diff(b[1]) as u32) + (a[2].abs_diff(b[2]) as u32)
+}
+
+/// Count pixels whose per-channel absolute-difference sum exceeds `threshold`.
+fn count_diff(a: &[u8], b: &[u8], threshold: u32) -> (usize, usize) {
+    let total = a.len() / 3;
+    let ndiff = a
+        .chunks_exact(3)
+        .zip(b.chunks_exact(3))
+        .filter(|(pa, pb)| channel_sum_delta(pa, pb) > threshold)
+        .count();
+    (ndiff, total)
+}
+
+/// Decode an 8-bit RGB/RGBA PNG into a tightly-packed RGB byte buffer.
+fn load_png(path: &Path) -> Result<(u32, u32, Vec<u8>), String> {
+    let file = std::fs::File::open(path).map_err(|e| format!("opening {}: {e}", path.display()))?;
+    let mut reader = png::Decoder::new(file)
+        .read_info()
+        .map_err(|e| format!("reading {}: {e}", path.display()))?;
+    let mut buf = vec![0u8; reader.output_buffer_size()];
+    let info = reader
+        .next_frame(&mut buf)
+        .map_err(|e| format!("decoding {}: {e}", path.display()))?;
+    let channels = match info.color_type {
+        png::ColorType::Rgb => 3,
+        png::ColorType::Rgba => 4,
+        other => return Err(format!("{}: unsupported color type {other:?}", path.display())),
+    };
+    let mut rgb = Vec::with_capacity((info.width * info.height * 3) as usize);
+    for px in buf[..info.buffer_size()].chunks_exact(channels) {
+        rgb.extend_from_slice(&px[..3]);
+    }
+    Ok((info.width, info.height, rgb))
 }
 
 fn run_machine(

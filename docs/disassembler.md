@@ -126,6 +126,76 @@ disasm machine --machine ccastles --region bank1 ~/mame/roms
 For a `raw`/`rom` dump of a banked image, use `--org` to set the window base and
 `--start`/`--end` to carve out a single bank's bytes.
 
+## Graphics: `gfxview`
+
+`gfxview` decodes a machine's tile/sprite GFX ROM region into a PNG sheet, using
+the same bit-plane layout and color PROM the runtime renderer uses (both come
+from the [`gfx_registry`](../machines/src/gfx_registry.rs)), so the sheet is what
+the machine actually draws with — a fast way to confirm a planar decode and
+palette before wiring up rendering.
+
+Omit `--region` to list a machine's registered gfx regions (no ROM path needed):
+
+```bash
+disasm gfxview --machine mrdo
+#   gfx regions for 'mrdo':
+#     bg         8×8     512 tiles  PROM palette
+#     fg         8×8     512 tiles  PROM palette
+#     sprites   16×16    128 tiles  PROM palette
+```
+
+With a region and a ROM path it writes the sheet:
+
+```bash
+# Sprite sheet, 16 per row, 3× upscaled
+disasm gfxview --machine mrdo --region sprites --cols 16 --scale 3 \
+    -o mrdo_sprites.png ~/mame/roms
+```
+
+- `--cols <n>` — elements per row in the sheet (default 16).
+- `--scale <n>` — integer nearest-neighbor upscale (default 1).
+- `-o/--out <path>` — output PNG (default `<machine>_<region>.png`).
+
+Regions with no color PROM (e.g. Williams, which colors from RAM) fall back to a
+grayscale ramp sized to the layout's bit depth.
+
+## Video: `frameshot` and `imgdiff`
+
+`frameshot` boots a registered machine, runs it for N frames from reset, and
+writes the rendered frame to a PNG — a headless screenshot, with no SDL/egui
+window. It's the fastest way to validate a machine's video output against a
+reference (e.g. a MAME snapshot) in a loop.
+
+```bash
+# Boot Mr. Do! for 200 frames, dump the title screen
+disasm frameshot --machine mrdo --frames 200 -o mrdo_200.png ~/mame/roms
+
+# Compare directly against a MAME snapshot while capturing
+disasm frameshot --machine mrdo --frames 3100 --compare mame_3100.png \
+    -o mine_3100.png ~/mame/roms
+#   wrote mrdo frame 3100 -> mine_3100.png (192×240)
+#   diff vs mame_3100.png: 233/46080 (0.5%)
+```
+
+`imgdiff` compares two already-captured RGB PNGs (any size, as long as they
+match), reporting the fraction of differing pixels and — with `-o` — writing a
+highlight image that dims the matching pixels and paints the differences red, so
+you can see *where* they disagree at a glance.
+
+```bash
+disasm imgdiff mine_3100.png mame_3100.png -o diff.png
+#   diff: 233/46080 (0.51%)
+
+# --threshold sets the per-pixel channel-sum delta that counts as "different"
+disasm imgdiff a.png b.png --threshold 24
+```
+
+The `--compare`/`imgdiff` percentage is the workhorse of the render-vs-MAME
+loop: capture a MAME snapshot at frame N (its Lua `emu.register_frame_done` +
+`manager.machine.video:snapshot()`, headless via `SDL_VIDEODRIVER=offscreen mame
+<set> -video soft`), then iterate `frameshot --compare` until the residual is
+just scroll/animation phase.
+
 ## Output format
 
 Each line is:
