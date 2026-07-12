@@ -495,6 +495,13 @@ impl MrdoBoard {
     /// rotating 270°. Mr. Do! takes a single VBLANK IRQ with no mid-frame raster
     /// effects, so a whole-frame render matches the hardware.
     pub fn render_frame(&self, buffer: &mut [u8]) {
+        // GFX ROMs not decoded yet (e.g. a freshly-constructed machine before
+        // `load_rom_set`) — emit a black frame rather than indexing empty caches.
+        if self.fg_cache.count() == 0 {
+            buffer.fill(0);
+            return;
+        }
+
         let bgram = self.main_map.region_data(MainRegion::BgVideoRam);
         let fgram = self.main_map.region_data(MainRegion::FgVideoRam);
         let sprram = self.main_map.region_data(MainRegion::SpriteRam);
@@ -1434,6 +1441,18 @@ mod tests {
         // After reset both PSGs are attenuated to silence.
         assert_eq!(sys.board.sn1.output(), 0);
         assert_eq!(sys.board.sn2.output(), 0);
+    }
+
+    #[test]
+    fn boots_and_runs_frames_without_panicking() {
+        let mut sys = MrdoSystem::new();
+        sys.reset();
+        for _ in 0..3 {
+            sys.run_frame();
+        }
+        assert_eq!(TIMING.display_size(), (DISPLAY_W as u32, DISPLAY_H as u32));
+        let mut buf = vec![0u8; DISPLAY_W * DISPLAY_H * 3];
+        sys.board.render_frame(&mut buf);
     }
 
     #[test]
