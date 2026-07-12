@@ -298,6 +298,13 @@ fn run_frameshot(
     let mut buf = vec![0u8; (w * h * 3) as usize];
     machine_box.render_frame(&mut buf);
 
+    // Drain whatever audio the run buffered and summarize it (peak amplitude +
+    // sample count) — a quick "is this machine making sound?" check.
+    let rate = machine_box.audio_sample_rate();
+    let mut audio = vec![0i16; (rate as usize).max(1)];
+    let n_audio = machine_box.fill_audio(&mut audio);
+    let peak = audio[..n_audio].iter().map(|s| s.unsigned_abs()).max().unwrap_or(0);
+
     let out_path = out
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(format!("{machine}_f{frames}.png")));
@@ -305,7 +312,8 @@ fn run_frameshot(
         .map_err(|e| format!("writing {}: {e}", out_path.display()))?;
 
     let mut msg = format!(
-        "wrote {machine} frame {frames} -> {} ({w}×{h})\n",
+        "wrote {machine} frame {frames} -> {} ({w}×{h})\n\
+         audio: {n_audio} samples @ {rate} Hz, peak {peak}\n",
         out_path.display()
     );
     if let Some(reference) = compare {

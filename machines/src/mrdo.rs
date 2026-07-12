@@ -20,6 +20,7 @@
 //! - PAL16R6 protection (`.8`)
 //! - full DIP tables (`.9`) and tests (`.10`)
 
+use phosphor_core::audio::AudioResampler;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
     ActionRole, DipSwitches, Direction, InputConfigurable, InputControl, InputEvent, InputId,
@@ -27,9 +28,10 @@ use phosphor_core::core::machine::{
 };
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::{AccessKind, AddressSpace16};
-use phosphor_core::core::{Bus, BusMaster, TimingConfig};
+use phosphor_core::core::{Bus, BusMaster, ClockDivider, TimingConfig};
 use phosphor_core::cpu::Cpu;
 use phosphor_core::cpu::z80::Z80;
+use phosphor_core::device::sn76489::Sn76489a;
 use phosphor_core::gfx;
 use phosphor_core::gfx::decode::{GfxLayout, decode_gfx};
 use phosphor_core::{bus_split, core::machine::DefaultBinding};
@@ -85,6 +87,11 @@ pub const DISPLAY_H: usize = VISIBLE_WIDTH; // 240
 /// Scanline at which the once-per-frame VBLANK IRQ is asserted (start of the
 /// vertical blanking interval, just past the visible area y 32..224).
 const VBLANK_IRQ_LINE: u64 = 224;
+
+/// Both SN76489 PSGs and the CPU share the 8.2 MHz/2 clock; the tone/noise
+/// generators advance at chip_clock / 16.
+const SOUND_CLOCK: u32 = TIMING.cpu_clock_hz as u32;
+const OUTPUT_SAMPLE_RATE: u64 = 44_100;
 
 // ---------------------------------------------------------------------------
 // ROM definitions ("mrdot" — Taito set, full PAL protection equations)
@@ -331,6 +338,16 @@ pub struct MrdoBoard {
     pub(crate) dsw1: u8,
     pub(crate) dsw2: u8,
 
+    // Sound: 2× SN76489 (write-only, at 0x9801/0x9802), box-filtered to the
+    // output rate. `snN_clock` gates each chip's generators (chip_clock/16).
+    #[debug_device("SN76489 #1")]
+    pub(crate) sn1: Sn76489a,
+    #[debug_device("SN76489 #2")]
+    pub(crate) sn2: Sn76489a,
+    pub(crate) sn1_clock: ClockDivider,
+    pub(crate) sn2_clock: ClockDivider,
+    pub(crate) audio: AudioResampler<i16>,
+
     // Timing / interrupts.
     pub(crate) clock: u64,
     pub(crate) vblank_irq_pending: bool,
@@ -363,6 +380,11 @@ impl MrdoBoard {
             in1: 0xFF,
             dsw1: DSW1_DEFAULT,
             dsw2: DSW2_DEFAULT,
+            sn1: Sn76489a::new(SOUND_CLOCK),
+            sn2: Sn76489a::new(SOUND_CLOCK),
+            sn1_clock: ClockDivider::new(SOUND_CLOCK / 16, TIMING.cpu_clock_hz as u32),
+            sn2_clock: ClockDivider::new(SOUND_CLOCK / 16, TIMING.cpu_clock_hz as u32),
+            audio: AudioResampler::new(TIMING.cpu_clock_hz, OUTPUT_SAMPLE_RATE),
             clock: 0,
             vblank_irq_pending: false,
         }
@@ -442,12 +464,26 @@ impl MrdoBoard {
             self.vblank_irq_pending = false;
         }
 
+        // Advance both PSG generators (chip_clock/16) and box-filter the summed,
+        // clamped output to the 44.1 kHz audio rate — one input sample per cycle.
+        if self.sn1_clock.tick() {
+            self.sn1.tick();
+        }
+        if self.sn2_clock.tick() {
+            self.sn2.tick();
+        }
+        let mix = (i32::from(self.sn1.output()) + i32::from(self.sn2.output()))
+            .clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+        if let Some(avg) = self.audio.tick_sample(mix) {
+            self.audio.push_sample(avg);
+        }
+
         self.clock += 1;
     }
 
-    /// Drain audio. No sound hardware is wired yet (issue `.7`) — return silence.
-    pub fn fill_audio(&mut self, _buffer: &mut [i16]) -> usize {
-        0
+    /// Drain the resampled PSG mix into the output buffer.
+    pub fn fill_audio(&mut self, buffer: &mut [i16]) -> usize {
+        self.audio.fill_audio(buffer)
     }
 
     /// Render one frame into `buffer` (192×240 RGB24, ROT270).
@@ -575,6 +611,11 @@ impl MrdoBoard {
         self.bg_scroll_y = 0;
         self.flipscreen = false;
         self.pal_u001 = 0xFF;
+        self.sn1.reset();
+        self.sn2.reset();
+        self.sn1_clock.reset();
+        self.sn2_clock.reset();
+        self.audio.reset();
         self.main_map
             .region_data_mut(MainRegion::BgVideoRam)
             .fill(0);
@@ -615,6 +656,11 @@ impl Saveable for MrdoBoard {
         w.write_u8(self.bg_scroll_y);
         w.write_bool(self.flipscreen);
         w.write_u8(self.pal_u001);
+        self.sn1.save_state(w);
+        self.sn2.save_state(w);
+        self.sn1_clock.save_state(w);
+        self.sn2_clock.save_state(w);
+        self.audio.save_state(w);
         w.write_u64_le(self.clock);
         w.write_bool(self.vblank_irq_pending);
     }
@@ -633,6 +679,11 @@ impl Saveable for MrdoBoard {
         self.bg_scroll_y = r.read_u8()?;
         self.flipscreen = r.read_bool()?;
         self.pal_u001 = r.read_u8()?;
+        self.sn1.load_state(r)?;
+        self.sn2.load_state(r)?;
+        self.sn1_clock.load_state(r)?;
+        self.sn2_clock.load_state(r)?;
+        self.audio.load_state(r)?;
         self.clock = r.read_u64_le()?;
         self.vblank_irq_pending = r.read_bool()?;
         Ok(())
@@ -725,8 +776,8 @@ impl Bus for MrdoSystem {
             }
             // Flipscreen (bit 0); bits 1-3 are playfield priority, unused by Mr. Do!.
             0x9800 => self.board.flipscreen = data & 0x01 != 0,
-            0x9801 => {} // SN76489 #1 — issue .7
-            0x9802 => {} // SN76489 #2 — issue .7
+            0x9801 => self.board.sn1.write(data),
+            0x9802 => self.board.sn2.write(data),
             0xE000..=0xEFFF => self.board.main_map.write_backing(addr, data),
             0xF000..=0xF7FF => self.board.bg_scroll_x = data, // scrollx_w
             // scrolly_w: NOT affected by flipscreen — compensate when flipped.
@@ -1254,5 +1305,35 @@ mod tests {
             pressed: false,
         });
         assert_eq!(sys.board.in0, 0xFF);
+    }
+
+    #[test]
+    fn sound_produces_non_silent_audio() {
+        let mut sys = MrdoSystem::new();
+        // Program SN76489 #1 channel 0: a mid tone at full volume (attenuator 0).
+        // With no program ROM the Z80 just NOPs, so it never disturbs the chip.
+        for byte in [0x8Eu8, 0x0F, 0x90] {
+            sys.write(BusMaster::Cpu(0), 0x9801, byte);
+        }
+        sys.run_frame();
+        let mut buf = vec![0i16; 1024];
+        let n = sys.board.fill_audio(&mut buf);
+        assert!(n > 0, "resampler produced no samples for a frame");
+        assert!(
+            buf[..n].iter().any(|&s| s != 0),
+            "a full-volume tone should produce audible output"
+        );
+    }
+
+    #[test]
+    fn reset_silences_sound() {
+        let mut sys = MrdoSystem::new();
+        for byte in [0x8Eu8, 0x0F, 0x90] {
+            sys.write(BusMaster::Cpu(0), 0x9802, byte);
+        }
+        sys.board.reset();
+        // After reset both PSGs are attenuated to silence.
+        assert_eq!(sys.board.sn1.output(), 0);
+        assert_eq!(sys.board.sn2.output(), 0);
     }
 }
