@@ -479,23 +479,35 @@ impl MrdoBoard {
                 let mut p = 0u16;
 
                 // BG tilemap (gfx2), scrolled; source = (screen + scroll) & 0xff.
-                let bx = (ex + sx) & 0xff;
-                let by = (ey + sy) & 0xff;
-                let bidx = (by / 8) * 32 + bx / 8;
-                let battr = bgram[bidx];
-                let bcode = bgram[bidx + 0x400] as usize + ((battr as usize & 0x80) << 1);
-                let bval = self.bg_cache.pixel(bcode, bx & 7, by & 7);
-                if bval != 0 {
-                    p = (battr as u16 & 0x3f) * 4 + bval as u16;
+                // A pixel is opaque when its value is non-zero, OR when the tile
+                // carries the TILE_FORCE_LAYER0 attribute (attr bit 6) — MAME
+                // defines `TILE_FORCE_LAYER0 == TILEMAP_PIXEL_LAYER0`, i.e. "no
+                // transparency", so a forced tile's value-0 pixels draw pen
+                // `color*4` too. This is how the scrolling rainbow band shows all
+                // its colors while ordinary value-0 pixels (dug maze corridors)
+                // stay transparent.
+                {
+                    let bx = (ex + sx) & 0xff;
+                    let by = (ey + sy) & 0xff;
+                    let bidx = (by / 8) * 32 + bx / 8;
+                    let battr = bgram[bidx];
+                    let bcode = bgram[bidx + 0x400] as usize + ((battr as usize & 0x80) << 1);
+                    let bval = self.bg_cache.pixel(bcode, bx & 7, by & 7);
+                    if bval != 0 || battr & 0x40 != 0 {
+                        p = (battr as u16 & 0x3f) * 4 + bval as u16;
+                    }
                 }
 
-                // FG tilemap (gfx1), fixed.
-                let fidx = (ey / 8) * 32 + ex / 8;
-                let fattr = fgram[fidx];
-                let fcode = fgram[fidx + 0x400] as usize + ((fattr as usize & 0x80) << 1);
-                let fval = self.fg_cache.pixel(fcode, ex & 7, ey & 7);
-                if fval != 0 {
-                    p = (fattr as u16 & 0x3f) * 4 + fval as u16;
+                // FG tilemap (gfx1), fixed; same TILE_FORCE_LAYER0 rule. The
+                // priority-flagged tiles around the logo mask off the BG rainbow.
+                {
+                    let fidx = (ey / 8) * 32 + ex / 8;
+                    let fattr = fgram[fidx];
+                    let fcode = fgram[fidx + 0x400] as usize + ((fattr as usize & 0x80) << 1);
+                    let fval = self.fg_cache.pixel(fcode, ex & 7, ey & 7);
+                    if fval != 0 || fattr & 0x40 != 0 {
+                        p = (fattr as u16 & 0x3f) * 4 + fval as u16;
+                    }
                 }
 
                 pen[ny * VISIBLE_WIDTH + nx] = p;
