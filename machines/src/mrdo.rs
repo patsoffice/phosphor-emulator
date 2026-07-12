@@ -23,8 +23,8 @@
 use phosphor_core::audio::AudioResampler;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
-    ActionRole, DipSwitches, Direction, InputConfigurable, InputControl, InputEvent, InputId,
-    InputKind, MachineCore, SaveState,
+    ActionRole, DipApplyTiming, DipChoice, DipOption, DipSwitchBank, DipSwitches, Direction,
+    InputConfigurable, InputControl, InputEvent, InputId, InputKind, MachineCore, SaveState,
 };
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::{AccessKind, AddressSpace16};
@@ -1027,13 +1027,112 @@ impl InputConfigurable for MrdoSystem {
     }
 }
 
-// DIP defaults: DSW1 = 3 lives, upright, easy; DSW2 = 1 Coin/1 Credit both slots.
-// Full DIP option tables land in issue `.9`.
+// DIP defaults (per MAME `INPUT_PORTS(mrdo)`): DSW1 = Easy, Rack Test off,
+// Special/Extra Easy, Upright, 3 lives; DSW2 = 1 Coin/1 Credit both slots.
 const DSW1_DEFAULT: u8 = 0xDF;
 const DSW2_DEFAULT: u8 = 0xFF;
 
-// Minimal DIP surface for the scaffold — real option tables land in issue `.9`.
+/// Coinage choices, shared by Coin B (low nibble, `shift = 0`) and Coin A
+/// (high nibble, `shift = 4`). Values per MAME `DSW2`.
+const fn coinage(shift: u8) -> [DipChoice; 11] {
+    [
+        DipChoice { label: "4 Coins/1 Credit", value: 0x06 << shift },
+        DipChoice { label: "3 Coins/1 Credit", value: 0x08 << shift },
+        DipChoice { label: "2 Coins/1 Credit", value: 0x0a << shift },
+        DipChoice { label: "3 Coins/2 Credits", value: 0x07 << shift },
+        DipChoice { label: "1 Coin/1 Credit", value: 0x0f << shift },
+        DipChoice { label: "2 Coins/3 Credits", value: 0x09 << shift },
+        DipChoice { label: "1 Coin/2 Credits", value: 0x0e << shift },
+        DipChoice { label: "1 Coin/3 Credits", value: 0x0d << shift },
+        DipChoice { label: "1 Coin/4 Credits", value: 0x0c << shift },
+        DipChoice { label: "1 Coin/5 Credits", value: 0x0b << shift },
+        DipChoice { label: "Free Play", value: 0x00 << shift },
+    ]
+}
+
+const COIN_B_CHOICES: [DipChoice; 11] = coinage(0);
+const COIN_A_CHOICES: [DipChoice; 11] = coinage(4);
+
+const fn choice(label: &'static str, value: u8) -> DipChoice {
+    DipChoice { label, value }
+}
+
+const MRDO_DIP_BANKS: &[DipSwitchBank] = &[
+    DipSwitchBank {
+        name: "DSW1",
+        options: &[
+            DipOption {
+                name: "Difficulty",
+                mask: 0x03,
+                apply: DipApplyTiming::Immediate,
+                choices: &[
+                    choice("Easy", 0x03),
+                    choice("Medium", 0x02),
+                    choice("Hard", 0x01),
+                    choice("Hardest", 0x00),
+                ],
+            },
+            DipOption {
+                name: "Rack Test (Cheat)",
+                mask: 0x04,
+                apply: DipApplyTiming::Immediate,
+                choices: &[choice("Off", 0x04), choice("On", 0x00)],
+            },
+            DipOption {
+                name: "Special",
+                mask: 0x08,
+                apply: DipApplyTiming::Immediate,
+                choices: &[choice("Easy", 0x08), choice("Hard", 0x00)],
+            },
+            DipOption {
+                name: "Extra",
+                mask: 0x10,
+                apply: DipApplyTiming::Immediate,
+                choices: &[choice("Easy", 0x10), choice("Hard", 0x00)],
+            },
+            DipOption {
+                name: "Cabinet",
+                mask: 0x20,
+                apply: DipApplyTiming::Immediate,
+                choices: &[choice("Upright", 0x00), choice("Cocktail", 0x20)],
+            },
+            DipOption {
+                name: "Lives",
+                mask: 0xc0,
+                apply: DipApplyTiming::Immediate,
+                choices: &[
+                    choice("2", 0x00),
+                    choice("3", 0xc0),
+                    choice("4", 0x80),
+                    choice("5", 0x40),
+                ],
+            },
+        ],
+    },
+    DipSwitchBank {
+        name: "DSW2",
+        options: &[
+            DipOption {
+                name: "Coin B",
+                mask: 0x0f,
+                apply: DipApplyTiming::Immediate,
+                choices: &COIN_B_CHOICES,
+            },
+            DipOption {
+                name: "Coin A",
+                mask: 0xf0,
+                apply: DipApplyTiming::Immediate,
+                choices: &COIN_A_CHOICES,
+            },
+        ],
+    },
+];
+
 impl DipSwitches for MrdoSystem {
+    fn dip_banks(&self) -> &'static [DipSwitchBank] {
+        MRDO_DIP_BANKS
+    }
+
     fn dip_bank_value(&self, bank: usize) -> u8 {
         match bank {
             0 => self.board.dsw1,
@@ -1335,5 +1434,22 @@ mod tests {
         // After reset both PSGs are attenuated to silence.
         assert_eq!(sys.board.sn1.output(), 0);
         assert_eq!(sys.board.sn2.output(), 0);
+    }
+
+    #[test]
+    fn dip_banks_are_valid() {
+        crate::assert_dip_banks_valid(MRDO_DIP_BANKS, &[DSW1_DEFAULT, DSW2_DEFAULT]);
+    }
+
+    #[test]
+    fn dip_defaults_match_mame() {
+        let sys = MrdoSystem::new();
+        // DSW1: Easy difficulty, upright cabinet, 3 lives.
+        assert_eq!(sys.dip_bank_value(0) & 0x03, 0x03);
+        assert_eq!(sys.dip_bank_value(0) & 0x20, 0x00);
+        assert_eq!(sys.dip_bank_value(0) & 0xc0, 0xc0);
+        // DSW2: 1 Coin / 1 Credit on both slots.
+        assert_eq!(sys.dip_bank_value(1) & 0x0f, 0x0f);
+        assert_eq!(sys.dip_bank_value(1) & 0xf0, 0xf0);
     }
 }
