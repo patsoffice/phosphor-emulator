@@ -125,6 +125,16 @@ impl WilliamsConfig {
             sound_rom_20k: false,
         }
     }
+
+    /// Sinistar (1982): 4KB work RAM at $D000 + 8KB program ROM at $E000, and a
+    /// 20KB sound ROM window (speech + standard). Blitter window-clip and CVSD
+    /// speech are layered on by later issues as those fields are introduced.
+    pub const fn sinistar() -> Self {
+        Self {
+            extra_sram_dxxx: true,
+            sound_rom_20k: true,
+        }
+    }
 }
 
 impl Default for WilliamsConfig {

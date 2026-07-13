@@ -472,6 +472,7 @@ pub mod rom_loader;
 pub mod satans_hollow;
 pub mod scramble;
 pub mod simple_system;
+pub mod sinistar;
 pub mod starwars;
 pub mod tempest;
 pub mod tkg04;
