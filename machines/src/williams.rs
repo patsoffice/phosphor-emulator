@@ -119,6 +119,9 @@ pub struct WilliamsConfig {
     /// Fit an HC55516 CVSD speech decoder, driven by the sound PIA's CA2 (data)
     /// and CB2 (clock) lines and mixed with the DAC. Used by Sinistar.
     pub has_cvsd: bool,
+    /// Build the SC1 blitter with a window-clip address, and let the $C900
+    /// register's bit 2 enable the clip. `Some(0x7400)` for Sinistar.
+    pub blitter_window_clip: Option<u16>,
 }
 
 impl WilliamsConfig {
@@ -128,17 +131,19 @@ impl WilliamsConfig {
             extra_sram_dxxx: false,
             sound_rom_20k: false,
             has_cvsd: false,
+            blitter_window_clip: None,
         }
     }
 
     /// Sinistar (1982): 4KB work RAM at $D000 + 8KB program ROM at $E000, a 20KB
-    /// sound ROM window (speech + standard), and the HC55516 CVSD speech decoder.
-    /// The blitter window-clip is layered on by a later issue.
+    /// sound ROM window (speech + standard), the HC55516 CVSD speech decoder,
+    /// and the SC1 blitter window-clip at 0x7400.
     pub const fn sinistar() -> Self {
         Self {
             extra_sram_dxxx: true,
             sound_rom_20k: true,
             has_cvsd: true,
+            blitter_window_clip: Some(0x7400),
         }
     }
 }
@@ -229,7 +234,10 @@ impl WilliamsBoard {
             sound_cpu: M6800::new(),
             widget_pia: Pia6820::new(),
             rom_pia: Pia6820::new(),
-            blitter: WilliamsBlitter::new(),
+            blitter: match config.blitter_window_clip {
+                Some(clip) => WilliamsBlitter::sc1_with_clip(clip),
+                None => WilliamsBlitter::new(),
+            },
             rom_bank: 0,
             sound_pia: Pia6820::new(),
             dac: Mc1408Dac::new(),
@@ -635,6 +643,11 @@ impl Saveable for WilliamsBoard {
         if let Some(cvsd) = &self.cvsd {
             cvsd.save_state(w);
         }
+        // Blitter window-enable is runtime state but save-skipped by the blitter
+        // (to keep other games' saves byte-identical); persist it here, guarded.
+        if self.config.blitter_window_clip.is_some() {
+            w.write_u8(self.blitter.window_enable() as u8);
+        }
     }
 
     fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
@@ -664,6 +677,9 @@ impl Saveable for WilliamsBoard {
         }
         if let Some(cvsd) = &mut self.cvsd {
             cvsd.load_state(r)?;
+        }
+        if self.config.blitter_window_clip.is_some() {
+            self.blitter.set_window_enable(r.read_u8()? != 0);
         }
         Ok(())
     }
@@ -900,6 +916,10 @@ impl WilliamsBoard {
                     self.main_map
                         .remap_pages(0x00, 0x90, MainRegion::VideoRam, 0);
                 }
+                // Sinistar: $C900 bit 2 also gates the blitter window clip.
+                if self.config.blitter_window_clip.is_some() {
+                    self.blitter.set_window_enable(data & 0x04 != 0);
+                }
             }
             MainRegion::IO_BLITTER if (0xCA00..=0xCA07).contains(&addr) => {
                 self.blitter.write_register(addr - 0xCA00, data);
@@ -1068,6 +1088,7 @@ mod tests {
             extra_sram_dxxx: true,
             sound_rom_20k: true,
             has_cvsd: true,
+            blitter_window_clip: Some(0x7400),
         };
 
         #[test]
@@ -1172,7 +1193,7 @@ mod tests {
                 w.write_bytes(&[0u8; 0x1000]);
                 w.into_vec().len()
             };
-            // Sinistar also appends CVSD device state.
+            // Sinistar also appends CVSD device state and a 1-byte window-enable.
             let cvsd_block = {
                 let mut w = StateWriter::new();
                 Hc55516::new().save_state(&mut w);
@@ -1180,8 +1201,8 @@ mod tests {
             };
             assert_eq!(
                 sinistar - standard,
-                sram_block + cvsd_block,
-                "only the appended SRAM + CVSD blocks should differ"
+                sram_block + cvsd_block + 1,
+                "only the appended SRAM + CVSD + window-enable bytes should differ"
             );
         }
 

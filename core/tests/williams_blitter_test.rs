@@ -1290,3 +1290,70 @@ fn test_cross_validate_full_blit_against_mame() {
         }
     }
 }
+
+// ===== Window Clip (Sinistar) =====
+
+/// Program and run a 1x1 linear copy (control 0x00) from `src` to `dst`.
+fn blit_1x1(blitter: &mut WilliamsBlitter, bus: &mut TestBus, src: u16, dst: u16, value: u8) {
+    bus.mem[src as usize] = value;
+    blitter.write_register(2, (src >> 8) as u8);
+    blitter.write_register(3, src as u8);
+    blitter.write_register(4, (dst >> 8) as u8);
+    blitter.write_register(5, dst as u8);
+    blitter.write_register(6, xor4(1));
+    blitter.write_register(7, xor4(1));
+    blitter.write_register(0, 0x00);
+    run_to_completion(blitter, bus);
+}
+
+#[test]
+fn window_clip_suppresses_blits_inside_clip_region() {
+    let mut blitter = WilliamsBlitter::sc1_with_clip(0x7400);
+    blitter.set_window_enable(true);
+    let mut bus = TestBus::make_vram();
+    // 0x7400 <= dst < 0xC000 is suppressed while the window is enabled.
+    blit_1x1(&mut blitter, &mut bus, 0x0100, 0x8000, 0xAB);
+    assert_eq!(
+        bus.mem[0x8000], 0x00,
+        "blit into clip region must be suppressed"
+    );
+}
+
+#[test]
+fn window_clip_allows_below_clip_and_non_vram() {
+    let mut blitter = WilliamsBlitter::sc1_with_clip(0x7400);
+    blitter.set_window_enable(true);
+    let mut bus = TestBus::make_vram();
+    // Below the clip address -> written.
+    blit_1x1(&mut blitter, &mut bus, 0x0100, 0x0500, 0x11);
+    assert_eq!(bus.mem[0x0500], 0x11);
+    // Non-video RAM (>= 0xC000, e.g. Sinistar's $DXXX SRAM) -> always written.
+    blit_1x1(&mut blitter, &mut bus, 0x0101, 0xD000, 0x22);
+    assert_eq!(bus.mem[0xD000], 0x22);
+}
+
+#[test]
+fn window_clip_disabled_writes_everywhere() {
+    let mut blitter = WilliamsBlitter::sc1_with_clip(0x7400);
+    // window_enable defaults to false.
+    let mut bus = TestBus::make_vram();
+    blit_1x1(&mut blitter, &mut bus, 0x0100, 0x8000, 0x33);
+    assert_eq!(
+        bus.mem[0x8000], 0x33,
+        "disabled clip must write into the region"
+    );
+}
+
+#[test]
+fn reset_clears_window_enable_but_keeps_clip() {
+    let mut blitter = WilliamsBlitter::sc1_with_clip(0x7400);
+    blitter.set_window_enable(true);
+    blitter.reset();
+    assert!(!blitter.window_enable(), "reset clears window_enable");
+    // Clip address is preserved: a blit into the region is still suppressed
+    // once re-enabled.
+    blitter.set_window_enable(true);
+    let mut bus = TestBus::make_vram();
+    blit_1x1(&mut blitter, &mut bus, 0x0100, 0x8000, 0x44);
+    assert_eq!(bus.mem[0x8000], 0x00);
+}

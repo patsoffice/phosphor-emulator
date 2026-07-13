@@ -101,6 +101,17 @@ pub struct WilliamsBlitter {
     // Configuration (set at construction, not via registers)
     size_xor: u8, // 4 for SC1 (VL2001), 0 for SC2 (VL2001A)
 
+    // Window clip (Sinistar). When `window_enable` is set, blits into
+    // [clip_address, 0xC000) are suppressed; writes below the clip or to
+    // non-video RAM ($C000+, e.g. $DXXX SRAM) always proceed. `clip_address` is
+    // construction-time config and `window_enable` is driven at runtime by the
+    // $C900 register — both are save-skipped so other games' blitter saves stay
+    // byte-identical; the board restores `window_enable` (guarded by config).
+    #[save_skip]
+    clip_address: u16,
+    #[save_skip]
+    window_enable: bool,
+
     // Execution state
     active: bool,
     x: u16,         // current column within row (0..w)
@@ -186,6 +197,25 @@ impl WilliamsBlitter {
         Self::sc1()
     }
 
+    /// Create an SC1 blitter with a window-clip address (Sinistar). When the
+    /// window is enabled (via [`set_window_enable`](Self::set_window_enable)),
+    /// blits into `[clip_address, 0xC000)` are suppressed.
+    pub fn sc1_with_clip(clip_address: u16) -> Self {
+        let mut b = Self::with_size_xor(4);
+        b.clip_address = clip_address;
+        b
+    }
+
+    /// Enable or disable the blit window clip (Sinistar $C900 bit 2).
+    pub fn set_window_enable(&mut self, enable: bool) {
+        self.window_enable = enable;
+    }
+
+    /// Current window-clip enable state (for save-state / debug).
+    pub fn window_enable(&self) -> bool {
+        self.window_enable
+    }
+
     fn with_size_xor(size_xor: u8) -> Self {
         Self {
             control: 0,
@@ -195,6 +225,8 @@ impl WilliamsBlitter {
             width: 0,
             height: 0,
             size_xor,
+            clip_address: 0,
+            window_enable: false,
             active: false,
             x: 0,
             w: 0,
@@ -338,7 +370,13 @@ impl WilliamsBlitter {
         };
 
         let result = (dst_byte & keepmask) | (effective_src & !keepmask);
-        bus.write(BusMaster::Dma, self.cur_dst, result);
+        // Window clip (Sinistar): when enabled, suppress the final write into
+        // [clip_address, 0xC000). Writes below the clip or to non-video RAM
+        // ($C000+, e.g. the $DXXX SRAM) always proceed. The address advance
+        // below still happens either way (the pixel is consumed).
+        if !self.window_enable || self.cur_dst < self.clip_address || self.cur_dst >= 0xC000 {
+            bus.write(BusMaster::Dma, self.cur_dst, result);
+        }
 
         // Step 4: Advance addresses.
         // MAME: `source += sxadv; dest += dxadv;` — always, regardless of
@@ -429,7 +467,8 @@ impl WilliamsBlitter {
         self.dst_addr = 0;
         self.width = 0;
         self.height = 0;
-        // size_xor preserved (SC1 vs SC2 configuration)
+        // size_xor and clip_address preserved (construction-time configuration)
+        self.window_enable = false;
         self.active = false;
         self.x = 0;
         self.w = 0;
