@@ -2,7 +2,7 @@ use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
     ActionRole, DefaultBinding, Direction, InputConfigurable, InputControl, InputEvent, InputId,
-    InputKind, KeyId, MachineCore, Nvram, PadButton, PadControl, Profilable, SaveState,
+    InputKind, KeyId, MachineCore, Nvram, PadButton, PadControl, Profilable, Renderable, SaveState,
 };
 use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
@@ -394,7 +394,40 @@ impl Bus for SinistarSystem {
 // Machine traits
 // ---------------------------------------------------------------------------
 
-crate::impl_board_delegation!(SinistarSystem, board, williams::TIMING);
+// Audio and debug delegate to the board; Renderable is hand-written below to
+// apply Sinistar's ROT270 monitor rotation (the shared board renders in the
+// raw landscape raster used by the ROT0 games like Joust).
+crate::impl_board_audio!(SinistarSystem, board);
+crate::impl_board_debug!(SinistarSystem, board, williams::TIMING);
+
+impl Renderable for SinistarSystem {
+    /// Portrait, after the 270-degree rotation (the board raster is landscape).
+    fn display_size(&self) -> (u32, u32) {
+        let (w, h) = williams::TIMING.display_size();
+        (h, w)
+    }
+
+    fn display_aspect(&self) -> Option<(u32, u32)> {
+        Some((3, 4)) // rotated cabinet: portrait 3:4
+    }
+
+    /// Rotate the board's landscape raster 270 degrees clockwise into the
+    /// portrait output buffer: `dst(dx, dy) = src(x = sw-1-dy, y = dx)`.
+    fn render_frame(&self, buffer: &mut [u8]) {
+        let sw = williams::TIMING.display_width as usize; // 292 (raster width)
+        let sh = williams::TIMING.display_height as usize; // 240 (raster height)
+        let dw = sh; // portrait width
+        let src = &self.board.scanline_buffer;
+        for dy in 0..sw {
+            let sx = sw - 1 - dy;
+            for dx in 0..sh {
+                let s = (dx * sw + sx) * 3;
+                let d = (dy * dw + dx) * 3;
+                buffer[d..d + 3].copy_from_slice(&src[s..s + 3]);
+            }
+        }
+    }
+}
 
 impl MachineCore for SinistarSystem {
     crate::machine_core_metadata!("sinistar", williams::TIMING);
@@ -562,6 +595,28 @@ mod tests {
             pressed: true,
         });
         assert_eq!(sys.board.rom_pia_input, 0b0001_0010); // coin (b4) + advance (b1)
+    }
+
+    #[test]
+    fn render_rotates_270_into_portrait() {
+        let mut sys = SinistarSystem::new();
+        let sw = williams::TIMING.display_width as usize; // 292
+        let sh = williams::TIMING.display_height as usize; // 240
+
+        // Display is portrait (raster w/h swapped).
+        assert_eq!(sys.display_size(), (sh as u32, sw as u32));
+
+        // Mark the source top-left pixel (x=0, y=0).
+        sys.board.scanline_buffer[0] = 0x11;
+        sys.board.scanline_buffer[1] = 0x22;
+        sys.board.scanline_buffer[2] = 0x33;
+
+        let mut out = vec![0u8; sh * sw * 3];
+        sys.render_frame(&mut out);
+
+        // ROT270: src(0,0) lands at dst(dx=0, dy=sw-1) — bottom-left of portrait.
+        let d = (sw - 1) * sh * 3;
+        assert_eq!(&out[d..d + 3], &[0x11, 0x22, 0x33]);
     }
 
     #[test]
