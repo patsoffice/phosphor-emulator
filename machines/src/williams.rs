@@ -31,8 +31,9 @@ pub(crate) enum MainRegion {
     IoBlitter = 5,  // 0xCA00-0xCAFF (SC1 blitter registers)
     IoVideo = 6,    // 0xCB00-0xCBFF (video counter + watchdog)
     Cmos = 7,       // 0xCC00-0xCFFF (1KB battery-backed CMOS)
-    ProgramRom = 8, // 0xD000-0xFFFF (12KB program ROM)
+    ProgramRom = 8, // 0xD000-0xFFFF standard (12KB); 0xE000-0xFFFF on extra-RAM boards (8KB)
     BankedRom = 9,  // (36KB, overlays VIDEO_RAM when bank != 0)
+    Sram = 10,      // 0xD000-0xDFFF (4KB work RAM, extra-RAM boards only — e.g. Sinistar)
 }
 
 /// Sound CPU (M6800) address space region IDs.
@@ -92,6 +93,47 @@ pub static WILLIAMS_SOUND_ROM: RomRegion = RomRegion {
 };
 
 // ---------------------------------------------------------------------------
+// Board variant configuration
+// ---------------------------------------------------------------------------
+
+/// Construction-time hardware variant selection for [`WilliamsBoard`].
+///
+/// The shared board covers Williams gen-1 games (Joust, Robotron, …) with the
+/// standard memory map. A few later games on the same board reorganize memory or
+/// add sound hardware; this config selects those deltas at construction. It is a
+/// `Copy` value fixed at build time — **not** part of the save-state byte stream.
+///
+/// Additional fields (blitter window-clip, CVSD speech) are introduced by the
+/// issues that implement those features; this struct grows as they land.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WilliamsConfig {
+    /// Map 0xD000-0xDFFF as 4KB work RAM (blittable) with program ROM shrunk to
+    /// 0xE000-0xFFFF, instead of the standard 12KB program ROM at 0xD000-0xFFFF.
+    /// Used by Sinistar (MAME `williams_extra_ram` map).
+    pub extra_sram_dxxx: bool,
+    /// Populate the sound ROM as a full 20KB window at 0xB000-0xFFFF (five 4KB
+    /// chips, e.g. Sinistar's four speech ROMs + the standard sound ROM), rather
+    /// than a single 4KB ROM at 0xF000 mirrored down to 0xB000.
+    pub sound_rom_20k: bool,
+}
+
+impl WilliamsConfig {
+    /// Standard Williams gen-1 layout (Joust, Robotron, Bubbles, …).
+    pub const fn gen1_standard() -> Self {
+        Self {
+            extra_sram_dxxx: false,
+            sound_rom_20k: false,
+        }
+    }
+}
+
+impl Default for WilliamsConfig {
+    fn default() -> Self {
+        Self::gen1_standard()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // WilliamsBoard
 // ---------------------------------------------------------------------------
 
@@ -138,6 +180,9 @@ pub struct WilliamsBoard {
     #[debug_map(cpu = 1)]
     pub(crate) sound_map: AddressSpace16,
 
+    // Board variant (fixed at construction; not part of save state)
+    pub(crate) config: WilliamsConfig,
+
     // System state
     pub watchdog_counter: u32,
     pub(crate) clock: u64,
@@ -154,7 +199,13 @@ pub struct WilliamsBoard {
 }
 
 impl WilliamsBoard {
+    /// Construct a standard Williams gen-1 board (Joust, Robotron, …).
     pub fn new() -> Self {
+        Self::with_config(WilliamsConfig::gen1_standard())
+    }
+
+    /// Construct a board with a specific hardware variant (see [`WilliamsConfig`]).
+    pub fn with_config(config: WilliamsConfig) -> Self {
         Self {
             cpu: M6809::new(),
             sound_cpu: M6800::new(),
@@ -165,8 +216,9 @@ impl WilliamsBoard {
             sound_pia: Pia6820::new(),
             dac: Mc1408Dac::new(),
             resampler: AudioResampler::new(1_000_000, 44_100),
-            main_map: Self::build_main_map(),
-            sound_map: Self::build_sound_map(),
+            main_map: Self::build_main_map(config),
+            sound_map: Self::build_sound_map(config),
+            config,
             watchdog_counter: 0,
             clock: 0,
             rom_pia_input: 0,
@@ -178,7 +230,7 @@ impl WilliamsBoard {
         }
     }
 
-    fn build_main_map() -> AddressSpace16 {
+    fn build_main_map(config: WilliamsConfig) -> AddressSpace16 {
         use MainRegion::*;
         let mut map = AddressSpace16::new();
         map.region(VideoRam, "Video RAM", 0x0000, 0xC000, AccessKind::ReadWrite)
@@ -187,28 +239,47 @@ impl WilliamsBoard {
             .region(IoBank, "ROM Bank", 0xC900, 0x100, AccessKind::Io)
             .region(IoBlitter, "Blitter", 0xCA00, 0x100, AccessKind::Io)
             .region(IoVideo, "Video Counter", 0xCB00, 0x100, AccessKind::Io)
-            .region(Cmos, "CMOS RAM", 0xCC00, 0x400, AccessKind::ReadWrite)
-            .region(
+            .region(Cmos, "CMOS RAM", 0xCC00, 0x400, AccessKind::ReadWrite);
+        if config.extra_sram_dxxx {
+            // Extra-RAM boards (Sinistar): 4KB work RAM at 0xD000, 8KB ROM at 0xE000.
+            map.region(Sram, "SRAM", 0xD000, 0x1000, AccessKind::ReadWrite)
+                .region(
+                    ProgramRom,
+                    "Program ROM",
+                    0xE000,
+                    0x2000,
+                    AccessKind::ReadOnly,
+                );
+        } else {
+            // Standard layout: 12KB program ROM at 0xD000-0xFFFF.
+            map.region(
                 ProgramRom,
                 "Program ROM",
                 0xD000,
                 0x3000,
                 AccessKind::ReadOnly,
-            )
-            .backing_region(BankedRom, "Banked ROM", 0x9000);
+            );
+        }
+        map.backing_region(BankedRom, "Banked ROM", 0x9000);
         map
     }
 
-    fn build_sound_map() -> AddressSpace16 {
+    fn build_sound_map(config: WilliamsConfig) -> AddressSpace16 {
         use SoundRegion::*;
         let mut map = AddressSpace16::new();
         map.region(Ram, "Sound RAM", 0x0000, 0x100, AccessKind::ReadWrite)
-            .region(IoPia, "Sound PIA", 0x0400, 0x100, AccessKind::Io)
-            .region(Rom, "Sound ROM", 0xF000, 0x1000, AccessKind::ReadOnly)
-            .mirror(0xB000, 0xF000, 0x1000)
-            .mirror(0xC000, 0xF000, 0x1000)
-            .mirror(0xD000, 0xF000, 0x1000)
-            .mirror(0xE000, 0xF000, 0x1000);
+            .region(IoPia, "Sound PIA", 0x0400, 0x100, AccessKind::Io);
+        if config.sound_rom_20k {
+            // 20KB sound ROM window (Sinistar: 4 speech ROMs + standard sound ROM).
+            map.region(Rom, "Sound ROM", 0xB000, 0x5000, AccessKind::ReadOnly);
+        } else {
+            // Single 4KB sound ROM at 0xF000, mirrored down to 0xB000.
+            map.region(Rom, "Sound ROM", 0xF000, 0x1000, AccessKind::ReadOnly)
+                .mirror(0xB000, 0xF000, 0x1000)
+                .mirror(0xC000, 0xF000, 0x1000)
+                .mirror(0xD000, 0xF000, 0x1000)
+                .mirror(0xE000, 0xF000, 0x1000);
+        }
         map
     }
 
@@ -263,7 +334,8 @@ impl WilliamsBoard {
     // --- ROM loading ---
 
     /// Load program ROM from a byte slice at the given offset.
-    /// Offset is relative to the start of the ROM region (0 = address 0xD000).
+    /// Offset is relative to the start of the ROM region: 0 = 0xD000 on the
+    /// standard map, or 0xE000 on extra-RAM boards (`extra_sram_dxxx`).
     pub fn load_program_rom(&mut self, offset: usize, data: &[u8]) {
         self.main_map
             .load_region_at(MainRegion::ProgramRom, offset, data);
@@ -277,7 +349,8 @@ impl WilliamsBoard {
     }
 
     /// Load sound ROM from a byte slice at the given offset.
-    /// Offset is relative to the start of the sound ROM region (0 = address 0xF000).
+    /// Offset is relative to the start of the sound ROM region: 0 = 0xF000 on the
+    /// standard map, or 0xB000 on 20KB-sound boards (`sound_rom_20k`).
     pub fn load_sound_rom(&mut self, offset: usize, data: &[u8]) {
         self.sound_map
             .load_region_at(SoundRegion::Rom, offset, data);
@@ -517,6 +590,11 @@ impl Saveable for WilliamsBoard {
         w.write_u32_le(self.watchdog_counter);
         w.write_u64_le(self.clock);
         w.write_u8(self.rom_pia_input);
+        // Variant state appended last (guarded by construction-time config) so
+        // standard gen-1 saves stay byte-identical to the pre-variant layout.
+        if self.config.extra_sram_dxxx {
+            w.write_bytes(self.main_map.region_data(MainRegion::Sram));
+        }
     }
 
     fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
@@ -540,6 +618,10 @@ impl Saveable for WilliamsBoard {
         self.watchdog_counter = r.read_u32_le()?;
         self.clock = r.read_u64_le()?;
         self.rom_pia_input = r.read_u8()?;
+        // Variant state (see save_state).
+        if self.config.extra_sram_dxxx {
+            r.read_bytes_into(self.main_map.region_data_mut(MainRegion::Sram))?;
+        }
         Ok(())
     }
 }
@@ -677,7 +759,8 @@ impl WilliamsBoard {
             MainRegion::VIDEO_RAM
             | MainRegion::BANKED_ROM
             | MainRegion::CMOS
-            | MainRegion::PROGRAM_ROM => self.main_map.read_backing(addr),
+            | MainRegion::PROGRAM_ROM
+            | MainRegion::SRAM => self.main_map.read_backing(addr),
             _ => 0xFF,
         };
         self.main_map
@@ -783,6 +866,8 @@ impl WilliamsBoard {
             }
             // Only lower 4 bits valid on Williams 5114/6514 SRAM
             MainRegion::CMOS => self.main_map.write_backing(addr, data | 0xF0),
+            // Extra-RAM work RAM at 0xD000-0xDFFF (writable by CPU and blitter DMA)
+            MainRegion::SRAM => self.main_map.write_backing(addr, data),
             _ => {} // ROM or unmapped: ignored
         }
     }
@@ -930,6 +1015,115 @@ mod tests {
             0x33,
             "sound ROM should be untouched"
         );
+    }
+
+    mod variant_config {
+        use super::*;
+
+        /// Sinistar-style variant: 4KB SRAM at 0xD000, 8KB program ROM at 0xE000.
+        const SINISTAR: WilliamsConfig = WilliamsConfig {
+            extra_sram_dxxx: true,
+            sound_rom_20k: true,
+        };
+
+        #[test]
+        fn extra_ram_maps_sram_at_dxxx_and_rom_at_exxx() {
+            let mut board = WilliamsBoard::with_config(SINISTAR);
+
+            // 0xD000-0xDFFF is CPU-writable work RAM.
+            board.bus_write(BusMaster::Cpu(0), 0xD000, 0x5A);
+            board.bus_write(BusMaster::Cpu(0), 0xDFFF, 0xA5);
+            assert_eq!(board.bus_read(BusMaster::Cpu(0), 0xD000), 0x5A);
+            assert_eq!(board.bus_read(BusMaster::Cpu(0), 0xDFFF), 0xA5);
+
+            // Program ROM now lives at 0xE000-0xFFFF and is read-only.
+            board.load_program_rom(0x0000, &[0x7E]); // -> 0xE000
+            board.load_program_rom(0x1000, &[0x3F]); // -> 0xF000
+            assert_eq!(board.bus_read(BusMaster::Cpu(0), 0xE000), 0x7E);
+            assert_eq!(board.bus_read(BusMaster::Cpu(0), 0xF000), 0x3F);
+            board.bus_write(BusMaster::Cpu(0), 0xE000, 0x11); // ignored (ROM)
+            assert_eq!(board.bus_read(BusMaster::Cpu(0), 0xE000), 0x7E);
+        }
+
+        #[test]
+        fn blitter_dma_can_write_dxxx_sram() {
+            // MAME: window-enable never blocks blits to non-video RAM ($DXXX SRAM).
+            let mut board = WilliamsBoard::with_config(SINISTAR);
+            board.bus_write(BusMaster::Dma, 0xD500, 0x3C);
+            assert_eq!(board.bus_read(BusMaster::Cpu(0), 0xD500), 0x3C);
+            assert_eq!(board.main_map.region_data(MainRegion::Sram)[0x500], 0x3C);
+        }
+
+        #[test]
+        fn standard_config_keeps_program_rom_at_dxxx() {
+            let mut board = WilliamsBoard::new();
+            board.load_program_rom(0x0000, &[0x99]); // -> 0xD000
+            assert_eq!(board.bus_read(BusMaster::Cpu(0), 0xD000), 0x99);
+            board.bus_write(BusMaster::Cpu(0), 0xD000, 0x22); // ignored (ROM)
+            assert_eq!(board.bus_read(BusMaster::Cpu(0), 0xD000), 0x99);
+        }
+
+        #[test]
+        fn sound_rom_20k_window_is_not_mirrored() {
+            let mut board = WilliamsBoard::with_config(SINISTAR);
+            board.load_sound_rom(0x0000, &[0xB0]); // -> 0xB000 (speech)
+            board.load_sound_rom(0x4000, &[0xF0]); // -> 0xF000 (standard sound ROM)
+            assert_eq!(board.bus_read(BusMaster::Cpu(1), 0xB000), 0xB0);
+            assert_eq!(board.bus_read(BusMaster::Cpu(1), 0xF000), 0xF0);
+        }
+
+        #[test]
+        fn standard_sound_rom_mirrors_f000_down_to_b000() {
+            let mut board = WilliamsBoard::new();
+            board.load_sound_rom(0x0000, &[0x77]); // -> 0xF000, mirrored
+            assert_eq!(board.bus_read(BusMaster::Cpu(1), 0xF000), 0x77);
+            assert_eq!(board.bus_read(BusMaster::Cpu(1), 0xB000), 0x77);
+        }
+
+        #[test]
+        fn sinistar_sram_round_trips_through_save_state() {
+            let mut board = WilliamsBoard::with_config(SINISTAR);
+            board.main_map.region_data_mut(MainRegion::Sram)[0x000] = 0xDE;
+            board.main_map.region_data_mut(MainRegion::Sram)[0xFFF] = 0xAD;
+
+            let mut w = StateWriter::new();
+            board.save_state(&mut w);
+            let data = w.into_vec();
+
+            let mut board2 = WilliamsBoard::with_config(SINISTAR);
+            let mut r = StateReader::new(&data);
+            board2.load_state(&mut r).unwrap();
+
+            assert_eq!(board2.main_map.region_data(MainRegion::Sram)[0x000], 0xDE);
+            assert_eq!(board2.main_map.region_data(MainRegion::Sram)[0xFFF], 0xAD);
+        }
+
+        #[test]
+        fn standard_save_appends_no_variant_bytes() {
+            // Regression guard: the standard gen-1 save layout is unchanged — the
+            // only difference for an extra-RAM board is exactly the 4KB SRAM
+            // appended at the end, so pre-variant Joust/Robotron saves stay valid.
+            let save_len = |cfg| {
+                let board = WilliamsBoard::with_config(cfg);
+                let mut w = StateWriter::new();
+                board.save_state(&mut w);
+                w.into_vec().len()
+            };
+            let standard = save_len(WilliamsConfig::gen1_standard());
+            let sinistar = save_len(SINISTAR);
+            // Serialized size of one 4KB region write (data + framing), so the
+            // check is robust to the writer's length-prefix format.
+            let sram_block = {
+                let mut w = StateWriter::new();
+                w.write_bytes(&[0u8; 0x1000]);
+                w.into_vec().len()
+            };
+            assert_eq!(
+                sinistar - standard,
+                sram_block,
+                "only the appended 4KB SRAM block should differ"
+            );
+        }
     }
 
     mod watchpoint_metadata {
