@@ -10,6 +10,7 @@ use phosphor_core::cpu::m6800::M6800;
 use phosphor_core::cpu::m6809::M6809;
 use phosphor_core::cpu::state::{M6800State, M6809State};
 use phosphor_core::device::dac::Mc1408Dac;
+use phosphor_core::device::hc55516::Hc55516;
 use phosphor_core::device::pia6820::Pia6820;
 use phosphor_core::device::williams_blitter::WilliamsBlitter;
 use phosphor_macros::{BusDebug, DebugTrace, MemoryRegion};
@@ -115,6 +116,9 @@ pub struct WilliamsConfig {
     /// chips, e.g. Sinistar's four speech ROMs + the standard sound ROM), rather
     /// than a single 4KB ROM at 0xF000 mirrored down to 0xB000.
     pub sound_rom_20k: bool,
+    /// Fit an HC55516 CVSD speech decoder, driven by the sound PIA's CA2 (data)
+    /// and CB2 (clock) lines and mixed with the DAC. Used by Sinistar.
+    pub has_cvsd: bool,
 }
 
 impl WilliamsConfig {
@@ -123,16 +127,18 @@ impl WilliamsConfig {
         Self {
             extra_sram_dxxx: false,
             sound_rom_20k: false,
+            has_cvsd: false,
         }
     }
 
-    /// Sinistar (1982): 4KB work RAM at $D000 + 8KB program ROM at $E000, and a
-    /// 20KB sound ROM window (speech + standard). Blitter window-clip and CVSD
-    /// speech are layered on by later issues as those fields are introduced.
+    /// Sinistar (1982): 4KB work RAM at $D000 + 8KB program ROM at $E000, a 20KB
+    /// sound ROM window (speech + standard), and the HC55516 CVSD speech decoder.
+    /// The blitter window-clip is layered on by a later issue.
     pub const fn sinistar() -> Self {
         Self {
             extra_sram_dxxx: true,
             sound_rom_20k: true,
+            has_cvsd: true,
         }
     }
 }
@@ -181,6 +187,8 @@ pub struct WilliamsBoard {
     // Audio output
     #[debug_device("DAC")]
     pub(crate) dac: Mc1408Dac,
+    /// HC55516 CVSD speech decoder (extra-sound boards only, e.g. Sinistar).
+    pub(crate) cvsd: Option<Hc55516>,
     pub(crate) resampler: AudioResampler<i16>,
 
     // Memory maps (page-table dispatch + watchpoints + backing memory)
@@ -225,6 +233,7 @@ impl WilliamsBoard {
             rom_bank: 0,
             sound_pia: Pia6820::new(),
             dac: Mc1408Dac::new(),
+            cvsd: config.has_cvsd.then(Hc55516::new),
             resampler: AudioResampler::new(1_000_000, 44_100),
             main_map: Self::build_main_map(config),
             sound_map: Self::build_sound_map(config),
@@ -522,9 +531,24 @@ impl WilliamsBoard {
         // DAC is continuously connected to sound PIA Port A output pins
         let dac_byte = self.sound_pia.read_output_a();
         self.dac.write(dac_byte);
+        let mut sample = self.dac.sample_i16();
+
+        // CVSD speech (Sinistar): the sound CPU bit-bangs the stream on the
+        // sound PIA's CA2 (data) and CB2 (clock) lines. clock_w is edge-
+        // triggered internally, so sampling both every cycle is faithful.
+        if self.cvsd.is_some() {
+            let digit = self.sound_pia.ca2_output();
+            let clock = self.sound_pia.cb2_output();
+            let cvsd = self.cvsd.as_mut().unwrap();
+            cvsd.digit_w(digit);
+            cvsd.clock_w(clock);
+            // DAC and CVSD share the mono speaker; CVSD is routed at ~0.8.
+            let cvsd_scaled = (cvsd.sample_i16() as i32 * 4) / 5;
+            sample = (sample as i32 + cvsd_scaled).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+        }
 
         // Bresenham downsample: 1 MHz CPU clock -> 44.1 kHz output
-        self.resampler.tick(self.dac.sample_i16());
+        self.resampler.tick(sample);
 
         self.clock += 1;
         self.watchdog_counter += 1;
@@ -543,6 +567,9 @@ impl WilliamsBoard {
         self.main_map
             .remap_pages(0x00, 0x90, MainRegion::VideoRam, 0);
         self.dac.reset();
+        if let Some(cvsd) = &mut self.cvsd {
+            cvsd.reset();
+        }
         self.resampler.reset();
         self.watchdog_counter = 0;
         self.clock = 0;
@@ -605,6 +632,9 @@ impl Saveable for WilliamsBoard {
         if self.config.extra_sram_dxxx {
             w.write_bytes(self.main_map.region_data(MainRegion::Sram));
         }
+        if let Some(cvsd) = &self.cvsd {
+            cvsd.save_state(w);
+        }
     }
 
     fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
@@ -631,6 +661,9 @@ impl Saveable for WilliamsBoard {
         // Variant state (see save_state).
         if self.config.extra_sram_dxxx {
             r.read_bytes_into(self.main_map.region_data_mut(MainRegion::Sram))?;
+        }
+        if let Some(cvsd) = &mut self.cvsd {
+            cvsd.load_state(r)?;
         }
         Ok(())
     }
@@ -1034,6 +1067,7 @@ mod tests {
         const SINISTAR: WilliamsConfig = WilliamsConfig {
             extra_sram_dxxx: true,
             sound_rom_20k: true,
+            has_cvsd: true,
         };
 
         #[test]
@@ -1091,10 +1125,19 @@ mod tests {
         }
 
         #[test]
-        fn sinistar_sram_round_trips_through_save_state() {
+        fn sinistar_sram_and_cvsd_round_trip_through_save_state() {
             let mut board = WilliamsBoard::with_config(SINISTAR);
             board.main_map.region_data_mut(MainRegion::Sram)[0x000] = 0xDE;
             board.main_map.region_data_mut(MainRegion::Sram)[0xFFF] = 0xAD;
+            // Drive the CVSD to a non-trivial internal state.
+            let cvsd = board.cvsd.as_mut().unwrap();
+            cvsd.reset();
+            for i in 0..24 {
+                cvsd.digit_w(i % 3 == 0);
+                cvsd.clock_w(true);
+                cvsd.clock_w(false);
+            }
+            let cvsd_sample = board.cvsd.as_ref().unwrap().sample_i16();
 
             let mut w = StateWriter::new();
             board.save_state(&mut w);
@@ -1106,6 +1149,7 @@ mod tests {
 
             assert_eq!(board2.main_map.region_data(MainRegion::Sram)[0x000], 0xDE);
             assert_eq!(board2.main_map.region_data(MainRegion::Sram)[0xFFF], 0xAD);
+            assert_eq!(board2.cvsd.as_ref().unwrap().sample_i16(), cvsd_sample);
         }
 
         #[test]
@@ -1128,11 +1172,23 @@ mod tests {
                 w.write_bytes(&[0u8; 0x1000]);
                 w.into_vec().len()
             };
+            // Sinistar also appends CVSD device state.
+            let cvsd_block = {
+                let mut w = StateWriter::new();
+                Hc55516::new().save_state(&mut w);
+                w.into_vec().len()
+            };
             assert_eq!(
                 sinistar - standard,
-                sram_block,
-                "only the appended 4KB SRAM block should differ"
+                sram_block + cvsd_block,
+                "only the appended SRAM + CVSD blocks should differ"
             );
+        }
+
+        #[test]
+        fn cvsd_present_only_for_configured_boards() {
+            assert!(WilliamsBoard::new().cvsd.is_none());
+            assert!(WilliamsBoard::with_config(SINISTAR).cvsd.is_some());
         }
     }
 

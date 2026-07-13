@@ -272,6 +272,26 @@ impl Pia6820 {
         self.output_b & self.ddr_b
     }
 
+    /// Read CA2 output state (when configured as output by CRA bits 5:4:3).
+    ///
+    /// Mirrors [`cb2_output`](Self::cb2_output) for the Port A control line:
+    /// - CRA bits 5:4 = 11: direct control, output = CRA bit 3
+    /// - CRA bits 5:4 = 10: handshake/pulse mode, returns stored state
+    ///
+    /// Returns false if CA2 is configured as input (CRA bit 5 = 0).
+    pub fn ca2_output(&self) -> bool {
+        if (self.ctrl_a & 0x20) == 0 {
+            return false; // CA2 is input
+        }
+        if (self.ctrl_a & 0x10) != 0 {
+            // Direct output mode: output = bit 3
+            (self.ctrl_a & 0x08) != 0
+        } else {
+            // Handshake/pulse mode: return stored state
+            self.ca2
+        }
+    }
+
     /// Read CB2 output state (when configured as output by CRB bits 5:4:3).
     ///
     /// Returns the driven level when CB2 is in output mode:
