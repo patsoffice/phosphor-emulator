@@ -509,6 +509,7 @@ pub use simple_system::{
     Simple6502System, Simple6800System, Simple6809System, SimpleI8035System, SimpleI8088System,
     SimpleSystem, SimpleSystem32, SimpleZ80System,
 };
+pub use sinistar::SinistarSystem;
 pub use tempest::TempestSystem;
 pub use xevious::XeviousSystem;
 

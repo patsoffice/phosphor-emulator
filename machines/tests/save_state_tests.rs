@@ -63,6 +63,7 @@ macro_rules! save_state_tests {
 // Williams board machines
 save_state_tests!(joust, phosphor_machines::JoustSystem::new());
 save_state_tests!(robotron, phosphor_machines::RobotronSystem::new());
+save_state_tests!(sinistar, phosphor_machines::SinistarSystem::new());
 
 // Namco Pac board machines
 save_state_tests!(pacman, phosphor_machines::PacmanSystem::new());
