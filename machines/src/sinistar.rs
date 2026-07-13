@@ -14,9 +14,9 @@ use crate::set_bit_active_high;
 use crate::williams::{self, WilliamsBoard, WilliamsConfig};
 
 // ---------------------------------------------------------------------------
-// Sinistar ROM definitions (parent set "sinistar", rev 3, from MAME
-// williams.cpp). ROMs are matched by CRC32; the `name` is a fallback for
-// name-based lookup. Sinistar uses the extra-RAM memory map: 9 banked 4KB
+// Sinistar ROM definitions (parent set "sinistar", rev 3). ROMs are matched by
+// CRC32; the `name` is a fallback for name-based lookup. Sinistar uses the
+// extra-RAM memory map: 9 banked 4KB
 // program ROMs at 0x0000-0x8FFF, two fixed 4KB ROMs at 0xE000-0xFFFF, and a
 // 20KB sound ROM (four speech ROMs + the standard sound ROM) at 0xB000-0xFFFF.
 // ---------------------------------------------------------------------------

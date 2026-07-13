@@ -39,6 +39,7 @@ pub mod discrete;
 pub mod dvg;
 pub mod er2055;
 pub mod galaxian_sound;
+pub mod hc55516;
 pub mod i8255;
 pub mod i8257;
 pub mod irobot_mathbox;

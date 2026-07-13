@@ -109,7 +109,7 @@ pub static WILLIAMS_SOUND_ROM: RomRegion = RomRegion {
 pub struct WilliamsConfig {
     /// Map 0xD000-0xDFFF as 4KB work RAM (blittable) with program ROM shrunk to
     /// 0xE000-0xFFFF, instead of the standard 12KB program ROM at 0xD000-0xFFFF.
-    /// Used by Sinistar (MAME `williams_extra_ram` map).
+    /// Used by Sinistar (the extra work-RAM memory layout).
     pub extra_sram_dxxx: bool,
     /// Populate the sound ROM as a full 20KB window at 0xB000-0xFFFF (five 4KB
     /// chips, e.g. Sinistar's four speech ROMs + the standard sound ROM), rather
@@ -1057,7 +1057,7 @@ mod tests {
 
         #[test]
         fn blitter_dma_can_write_dxxx_sram() {
-            // MAME: window-enable never blocks blits to non-video RAM ($DXXX SRAM).
+            // Window-enable never blocks blits to non-video RAM ($DXXX SRAM).
             let mut board = WilliamsBoard::with_config(SINISTAR);
             board.bus_write(BusMaster::Dma, 0xD500, 0x3C);
             assert_eq!(board.bus_read(BusMaster::Cpu(0), 0xD500), 0x3C);
