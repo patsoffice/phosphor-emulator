@@ -4,7 +4,7 @@
 
 [![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-2674%20passing-brightgreen.svg)](core/tests/)
+[![Tests](https://img.shields.io/badge/tests-3076%20passing-brightgreen.svg)](core/tests/)
 
 A modular emulator framework for retro CPUs, designed for extensibility and educational purposes. Features a trait-based architecture that allows easy addition of new CPUs, peripherals, and complete systems.
 
@@ -56,9 +56,9 @@ ROMs are matched by CRC32 checksum, so any MAME ROM naming convention works.
 | Key              | Action                                        |
 | ---------------- | --------------------------------------------- |
 | Arrows           | P1 Move                                       |
-| Space            | P1 Fire / Flap                                |
+| Space            | P1 Fire / Flap / Bomb (Sinistar)              |
 | Left Ctrl        | P1 Flap                                       |
-| Left Shift       | P1 Jump                                       |
+| Left Shift       | P1 Jump / Fire (Sinistar)                     |
 | I / K / J / L    | P1 Fire Up / Down / Left / Right (Robotron)   |
 | 1                | P1 Start                                      |
 | W / A / S / D    | P2 Move                                       |
@@ -143,7 +143,7 @@ Contains all reusable components — zero external dependencies:
 - ClockDivider (Bresenham fractional clock divider for cross-domain ticking)
 - DirtyBitset (fixed-capacity dirty-tracking bitset with O(1) bulk invalidation for tile/scanline change tracking)
 - GFX utilities (GfxCache pre-decoded tile/sprite pixels, ROM decoders for Pac-Man/DK/MCR families, cache-friendly blocked rotation, sprite clipping, tilemap rendering)
-- Peripheral devices (MC6821 PIA, AY-8910, POKEY, TMS5220 LPC speech, Namco WSG, Z80 CTC, Williams SC1/SC2 blitter, DVG, Atari AVG vector generator, Mathbox coprocessor, Star Wars Matrix Processor, I8257 DMA, MC1408 DAC, 74LS259 latch, SSIO sound board, CMOS RAM, MOS 6532 RIOT, GI ER2055 EAROM, X2212 NOVRAM, ADC0809)
+- Peripheral devices (MC6821 PIA, AY-8910, POKEY, TMS5220 LPC speech, HC55516 CVSD speech, Namco WSG, Z80 CTC, Williams SC1/SC2 blitter, DVG, Atari AVG vector generator, Mathbox coprocessor, Star Wars Matrix Processor, I8257 DMA, MC1408 DAC, 74LS259 latch, SSIO sound board, CMOS RAM, MOS 6532 RIOT, GI ER2055 EAROM, X2212 NOVRAM, ADC0809)
 
 ### Machines Crate (`phosphor-machines`)
 
@@ -165,6 +165,7 @@ Complete system implementations that wire core components together:
 - **PacmanSystem** — Pac-Man on shared Namco Pac board (Z80 + WSG + tile/sprite video)
 - **MsPacmanSystem** — Ms. Pac-Man on shared Namco Pac board (auxiliary decode latch + ROM encryption)
 - **RobotronSystem** — Williams twin-stick arcade (M6809 + blitter + PIAs)
+- **SinistarSystem** — Sinistar on the shared Williams board (M6809 + M6800 sound + blitter with window-clip + HC55516 CVSD speech for the "sini-scream"/"I hunger" + 49-way joystick + 4KB work RAM + ROT270 portrait display)
 - **SatansHollowSystem** — Satan's Hollow on shared MCR II board (Z80 + SSIO + CTC + tile dirty tracking)
 - **QbertSystem** — Q*Bert on shared Gottlieb System 80 board (I8088 + M6502 sound + RIOT + DAC)
 - **GalagaSystem** — Galaga on shared Namco Galaga board (3×Z80 + WSG + 05XX starfield generator)
