@@ -196,6 +196,41 @@ loop: capture a MAME snapshot at frame N (its Lua `emu.register_frame_done` +
 <set> -video soft`), then iterate `frameshot --compare` until the residual is
 just scroll/animation phase.
 
+### Reaching attract mode: `--nvram`, `--dump-nvram`, `--coin-at`
+
+Some games run a lengthy self-test / factory-restore before attract mode. To get
+there quickly, capture a factory-initialized NVRAM once and reload it:
+
+```bash
+# 1. Run past the self-test once and dump the (now factory-valid) NVRAM.
+disasm frameshot --machine sinistar --frames 800 \
+    --dump-nvram sinistar.nv -o /dev/null ~/mame/roms
+
+# 2. Reload it to skip straight to attract, and pulse the coin to add a credit
+#    (Sinistar: the coin-up "I hunger" speech). --coin-at N presses the machine's
+#    `coin` control at frame N (held briefly, then released). --audio-out dumps
+#    the whole run's audio as a 16-bit mono WAV.
+disasm frameshot --machine sinistar --nvram sinistar.nv \
+    --frames 900 --coin-at 820 --audio-out coin.wav -o attract.png ~/mame/roms
+```
+
+`--nvram` loads after reset (before the run); `--coin-at` pulses the control
+whose `stable_name` is `coin`; `--audio-out` writes the run's audio for offline
+comparison against a MAME `-wavwrite` capture.
+
+Audio note: many Williams games are silent until a credit is inserted (Joust),
+so a flat capture is often just silence — verify with a game that has power-on
+sound (Robotron) or by inserting a coin. Sinistar's coin plays the CVSD "I
+hunger": with `--coin-at`, `--audio-out` shows a ~1 s speech burst a few frames
+after the coin.
+
+For matched game states, Sinistar renders **pixel-identical to MAME** — e.g. the
+self-test at frame 400 and the attract high-score table (reached via `--nvram`)
+both `imgdiff` at `0/70080 (0.00%)`. A frame-number mismatch between a fresh
+boot and MAME just means the two are at different points in the boot sequence
+(our fresh boot is still on "FACTORY SETTINGS RESTORED" while MAME has advanced),
+which is why the NVRAM shortcut is used to align states before diffing.
+
 ## Output format
 
 Each line is:

@@ -24,6 +24,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use phosphor_core::core::machine::InputEvent;
 use phosphor_core::cpu::Disassemble;
 use phosphor_core::cpu::{I8035, M6502, M6800, M6809, M68000, Mb88xx, Z80};
 use phosphor_core::gfx::decode::decode_gfx;
@@ -126,6 +127,21 @@ enum Command {
         /// Optional reference PNG to diff the captured frame against.
         #[arg(long)]
         compare: Option<PathBuf>,
+        /// Load a factory-initialized NVRAM before running (skips the on-boot
+        /// self-test / factory-restore so attract mode is reached sooner).
+        #[arg(long)]
+        nvram: Option<PathBuf>,
+        /// Write the machine's NVRAM to this path after the run (to capture a
+        /// factory-initialized fixture for `--nvram`).
+        #[arg(long)]
+        dump_nvram: Option<PathBuf>,
+        /// Pulse the machine's coin input at this frame (to add a credit and
+        /// trigger coin-insert speech/SFX).
+        #[arg(long)]
+        coin_at: Option<usize>,
+        /// Write the full run's audio to this path as a 16-bit mono WAV.
+        #[arg(long)]
+        audio_out: Option<PathBuf>,
         /// ROM set: a `.zip` archive or a directory of loose ROM files.
         path: String,
     },
@@ -258,8 +274,22 @@ fn run_command(cmd: Command) -> Result<String, String> {
             frames,
             out,
             compare,
+            nvram,
+            dump_nvram,
+            coin_at,
+            audio_out,
             path,
-        } => run_frameshot(&machine, frames, out.as_deref(), compare.as_deref(), &path),
+        } => run_frameshot(
+            &machine,
+            frames,
+            out.as_deref(),
+            compare.as_deref(),
+            nvram.as_deref(),
+            dump_nvram.as_deref(),
+            coin_at,
+            audio_out.as_deref(),
+            &path,
+        ),
         Command::Imgdiff {
             a,
             b,
@@ -272,25 +302,58 @@ fn run_command(cmd: Command) -> Result<String, String> {
 /// Boot a registered machine, run `frames` frames from reset, and write the
 /// rendered frame to a PNG. With `--compare`, also report the pixel diff against
 /// a reference image.
+#[allow(clippy::too_many_arguments)]
 fn run_frameshot(
     machine: &str,
     frames: usize,
     out: Option<&Path>,
     compare: Option<&Path>,
+    nvram: Option<&Path>,
+    dump_nvram: Option<&Path>,
+    coin_at: Option<usize>,
+    audio_out: Option<&Path>,
     path: &str,
 ) -> Result<String, String> {
     let entry = registry::find(machine).ok_or_else(|| {
         let avail: Vec<&str> = registry::all().iter().map(|e| e.name).collect();
-        format!("unknown machine '{machine}'; available: {}", avail.join(", "))
+        format!(
+            "unknown machine '{machine}'; available: {}",
+            avail.join(", ")
+        )
     })?;
 
-    let set = load_rom_set(path, entry.rom_names)
-        .map_err(|e| format!("loading ROM set {path}: {e}"))?;
+    let set =
+        load_rom_set(path, entry.rom_names).map_err(|e| format!("loading ROM set {path}: {e}"))?;
     let mut machine_box =
         (entry.create)(&set).map_err(|e| format!("creating machine '{machine}': {e}"))?;
 
     machine_box.reset();
-    for _ in 0..frames {
+
+    // Load a factory-initialized NVRAM so the game skips its self-test.
+    if let Some(nv) = nvram {
+        let data = std::fs::read(nv).map_err(|e| format!("reading nvram {}: {e}", nv.display()))?;
+        machine_box.load_nvram(&data);
+    }
+
+    // Resolve the coin control (by stable name) for --coin-at.
+    let coin_id = machine_box
+        .input_controls()
+        .iter()
+        .find(|c| c.stable_name == "coin")
+        .map(|c| c.id);
+    if coin_at.is_some() && coin_id.is_none() {
+        return Err(format!("machine '{machine}' has no 'coin' input control"));
+    }
+    const COIN_HOLD: usize = 8; // frames to hold the coin input
+
+    for f in 0..frames {
+        if let (Some(ca), Some(id)) = (coin_at, coin_id) {
+            if f == ca {
+                machine_box.handle_input(InputEvent::Button { id, pressed: true });
+            } else if f == ca + COIN_HOLD {
+                machine_box.handle_input(InputEvent::Button { id, pressed: false });
+            }
+        }
         machine_box.run_frame();
     }
 
@@ -298,12 +361,20 @@ fn run_frameshot(
     let mut buf = vec![0u8; (w * h * 3) as usize];
     machine_box.render_frame(&mut buf);
 
-    // Drain whatever audio the run buffered and summarize it (peak amplitude +
-    // sample count) — a quick "is this machine making sound?" check.
+    // Drain ALL buffered audio. The resampler is a FIFO, so a single fill only
+    // returns the oldest samples — loop until empty to cover the whole run.
     let rate = machine_box.audio_sample_rate();
-    let mut audio = vec![0i16; (rate as usize).max(1)];
-    let n_audio = machine_box.fill_audio(&mut audio);
-    let peak = audio[..n_audio].iter().map(|s| s.unsigned_abs()).max().unwrap_or(0);
+    let mut audio: Vec<i16> = Vec::new();
+    let mut chunk = vec![0i16; (rate as usize).max(1)];
+    loop {
+        let n = machine_box.fill_audio(&mut chunk);
+        if n == 0 {
+            break;
+        }
+        audio.extend_from_slice(&chunk[..n]);
+    }
+    let n_audio = audio.len();
+    let peak = audio.iter().map(|s| s.unsigned_abs()).max().unwrap_or(0);
 
     let out_path = out
         .map(PathBuf::from)
@@ -316,6 +387,33 @@ fn run_frameshot(
          audio: {n_audio} samples @ {rate} Hz, peak {peak}\n",
         out_path.display()
     );
+
+    // Optionally write the whole run's audio as a WAV (for offline analysis /
+    // comparison against a MAME `-wavwrite` capture).
+    if let Some(ap) = audio_out {
+        write_wav(ap, &audio, rate).map_err(|e| format!("writing audio {}: {e}", ap.display()))?;
+        msg.push_str(&format!(
+            "audio: wrote {n_audio} samples -> {}\n",
+            ap.display()
+        ));
+    }
+
+    // Optionally dump the machine's NVRAM (e.g. to capture a factory fixture).
+    if let Some(dnv) = dump_nvram {
+        match machine_box.save_nvram() {
+            Some(data) => {
+                std::fs::write(dnv, data)
+                    .map_err(|e| format!("writing nvram {}: {e}", dnv.display()))?;
+                msg.push_str(&format!(
+                    "nvram: wrote {} bytes -> {}\n",
+                    data.len(),
+                    dnv.display()
+                ));
+            }
+            None => msg.push_str("nvram: machine has no NVRAM to dump\n"),
+        }
+    }
+
     if let Some(reference) = compare {
         let (rw, rh, rgb) = load_png(reference)?;
         if (rw, rh) != (w, h) {
@@ -334,13 +432,32 @@ fn run_frameshot(
     Ok(msg)
 }
 
+/// Write 16-bit mono PCM samples as a WAV file.
+fn write_wav(path: &Path, samples: &[i16], rate: u32) -> std::io::Result<()> {
+    use std::io::Write;
+    let data_len = (samples.len() * 2) as u32;
+    let mut f = std::io::BufWriter::new(std::fs::File::create(path)?);
+    f.write_all(b"RIFF")?;
+    f.write_all(&(36 + data_len).to_le_bytes())?;
+    f.write_all(b"WAVE")?;
+    f.write_all(b"fmt ")?;
+    f.write_all(&16u32.to_le_bytes())?; // PCM fmt chunk size
+    f.write_all(&1u16.to_le_bytes())?; // audio format: PCM
+    f.write_all(&1u16.to_le_bytes())?; // channels: mono
+    f.write_all(&rate.to_le_bytes())?; // sample rate
+    f.write_all(&(rate * 2).to_le_bytes())?; // byte rate
+    f.write_all(&2u16.to_le_bytes())?; // block align
+    f.write_all(&16u16.to_le_bytes())?; // bits per sample
+    f.write_all(b"data")?;
+    f.write_all(&data_len.to_le_bytes())?;
+    for s in samples {
+        f.write_all(&s.to_le_bytes())?;
+    }
+    f.flush()
+}
+
 /// Compare two RGB PNGs and (optionally) write a highlight image.
-fn run_imgdiff(
-    a: &Path,
-    b: &Path,
-    out: Option<&Path>,
-    threshold: u32,
-) -> Result<String, String> {
+fn run_imgdiff(a: &Path, b: &Path, out: Option<&Path>, threshold: u32) -> Result<String, String> {
     let (aw, ah, ap) = load_png(a)?;
     let (bw, bh, bp) = load_png(b)?;
     if (aw, ah) != (bw, bh) {
@@ -399,7 +516,12 @@ fn load_png(path: &Path) -> Result<(u32, u32, Vec<u8>), String> {
     let channels = match info.color_type {
         png::ColorType::Rgb => 3,
         png::ColorType::Rgba => 4,
-        other => return Err(format!("{}: unsupported color type {other:?}", path.display())),
+        other => {
+            return Err(format!(
+                "{}: unsupported color type {other:?}",
+                path.display()
+            ));
+        }
     };
     let mut rgb = Vec::with_capacity((info.width * info.height * 3) as usize);
     for px in buf[..info.buffer_size()].chunks_exact(channels) {
