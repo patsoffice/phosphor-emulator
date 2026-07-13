@@ -1,8 +1,8 @@
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
-    ActionRole, DefaultBinding, InputConfigurable, InputControl, InputEvent, InputId, InputKind,
-    KeyId, MachineCore, Nvram, PadButton, PadControl, Profilable, SaveState,
+    ActionRole, DefaultBinding, Direction, InputConfigurable, InputControl, InputEvent, InputId,
+    InputKind, KeyId, MachineCore, Nvram, PadButton, PadControl, Profilable, SaveState,
 };
 use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
@@ -154,12 +154,28 @@ const INPUT_P2_START: u8 = 3; // bit 5
 const INPUT_COIN: u8 = 4; // bit 4 (Coin 1)
 const INPUT_ADVANCE: u8 = 5; // bit 1 (operator "Advance")
 const INPUT_AUTO_UP: u8 = 6; // bit 0 (operator "Auto Up / Manual Down")
+// 49-way joystick directions (Widget PIA Port A, analog-encoded).
+const INPUT_UP: u8 = 7;
+const INPUT_DOWN: u8 = 8;
+const INPUT_LEFT: u8 = 9;
+const INPUT_RIGHT: u8 = 10;
 
-/// Neutral 49-way joystick encoding on Widget PIA Port A. The stick is read as
-/// `(translate49[x] << 4) | translate49[y])`; centered (x=y=0x38, index 3)
-/// gives `translate49[3] = 0x7` in both nibbles. Dynamic mapping arrives with
-/// the 49-way input issue; until then the stick reads centered.
-const NEUTRAL_49WAY: u8 = 0x77;
+// Held-direction bit positions in `SinistarSystem::dir`.
+const BIT_UP: u8 = 0;
+const BIT_DOWN: u8 = 1;
+const BIT_LEFT: u8 = 2;
+const BIT_RIGHT: u8 = 3;
+
+/// The 49-way stick reports a stepped analog position per axis. The hardware
+/// read translates each axis's top nibble (raw `>> 4`, range 0..6) through this
+/// table; a centered stick (index 3) reads `0x7` in both nibbles, i.e. `0x77`.
+const TRANSLATE49: [u8; 7] = [0x0, 0x4, 0x6, 0x7, 0xb, 0x9, 0x8];
+
+// Per-axis raw positions (0x00-0x6f). A digital control only reaches the
+// extremes or center. Flip LOW/HIGH per axis if a direction reads inverted.
+const AXIS_CENTER: u8 = 0x38; // index 3 -> 0x7
+const AXIS_LOW: u8 = 0x00; // index 0 -> 0x0
+const AXIS_HIGH: u8 = 0x6f; // index 6 -> 0x8
 
 const SINISTAR_CONTROLS: &[InputControl] = &[
     InputControl {
@@ -224,6 +240,46 @@ const SINISTAR_CONTROLS: &[InputControl] = &[
         player: None,
         default_bindings: &[DefaultBinding::Key(KeyId::Num7)],
     },
+    InputControl {
+        id: InputId(INPUT_UP as u16),
+        stable_name: "up",
+        label: "Up",
+        kind: InputKind::DigitalDirection {
+            direction: Direction::Up,
+        },
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_UP,
+    },
+    InputControl {
+        id: InputId(INPUT_DOWN as u16),
+        stable_name: "down",
+        label: "Down",
+        kind: InputKind::DigitalDirection {
+            direction: Direction::Down,
+        },
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_DOWN,
+    },
+    InputControl {
+        id: InputId(INPUT_LEFT as u16),
+        stable_name: "left",
+        label: "Left",
+        kind: InputKind::DigitalDirection {
+            direction: Direction::Left,
+        },
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_LEFT,
+    },
+    InputControl {
+        id: InputId(INPUT_RIGHT as u16),
+        stable_name: "right",
+        label: "Right",
+        kind: InputKind::DigitalDirection {
+            direction: Direction::Right,
+        },
+        player: Some(1),
+        default_bindings: crate::input_defaults::P1_RIGHT,
+    },
 ];
 
 // ---------------------------------------------------------------------------
@@ -241,6 +297,9 @@ pub struct SinistarSystem {
 
     /// Widget PIA Port B (IN1): fire (b0), bomb (b1), P1 start (b4), P2 start (b5).
     port_b: u8,
+
+    /// Held 49-way directions (bits: up/down/left/right per `BIT_*`).
+    dir: u8,
 }
 
 impl SinistarSystem {
@@ -248,15 +307,32 @@ impl SinistarSystem {
         let mut sys = Self {
             board: WilliamsBoard::with_config(WilliamsConfig::sinistar()),
             port_b: 0,
+            dir: 0,
         };
         sys.apply_inputs();
         sys
     }
 
+    /// Encode the held directions into the Widget PIA Port A byte the 49-way
+    /// hardware reports: `(translate49[x>>4] << 4) | translate49[y>>4]`.
+    fn port_a_49way(&self) -> u8 {
+        let axis = |neg: u8, pos: u8| -> u8 {
+            match (self.dir & (1 << neg) != 0, self.dir & (1 << pos) != 0) {
+                (true, false) => AXIS_LOW,
+                (false, true) => AXIS_HIGH,
+                _ => AXIS_CENTER, // neither or both held
+            }
+        };
+        let x = axis(BIT_LEFT, BIT_RIGHT);
+        // Y is reversed: pushing up (forward) drives the axis high.
+        let y = axis(BIT_DOWN, BIT_UP);
+        (TRANSLATE49[(x >> 4) as usize] << 4) | TRANSLATE49[(y >> 4) as usize]
+    }
+
     /// Push the current input state onto the PIA input registers.
     fn apply_inputs(&mut self) {
         self.board.widget_pia.set_port_b_input(self.port_b);
-        self.board.widget_pia.set_port_a_input(NEUTRAL_49WAY);
+        self.board.widget_pia.set_port_a_input(self.port_a_49way());
         self.board
             .rom_pia
             .set_port_a_input(self.board.rom_pia_input);
@@ -335,6 +411,7 @@ impl MachineCore for SinistarSystem {
     fn reset(&mut self) {
         self.board.reset();
         self.port_b = 0;
+        self.dir = 0;
         self.apply_inputs();
         bus_split!(self, bus => {
             self.board.cpu.reset(bus, BusMaster::Cpu(0));
@@ -376,6 +453,11 @@ impl InputConfigurable for SinistarSystem {
             INPUT_AUTO_UP => set_bit_active_high(&mut self.board.rom_pia_input, 0, pressed),
             INPUT_ADVANCE => set_bit_active_high(&mut self.board.rom_pia_input, 1, pressed),
             INPUT_COIN => set_bit_active_high(&mut self.board.rom_pia_input, 4, pressed),
+            // 49-way joystick directions -> Widget PIA Port A (analog-encoded)
+            INPUT_UP => set_bit_active_high(&mut self.dir, BIT_UP, pressed),
+            INPUT_DOWN => set_bit_active_high(&mut self.dir, BIT_DOWN, pressed),
+            INPUT_LEFT => set_bit_active_high(&mut self.dir, BIT_LEFT, pressed),
+            INPUT_RIGHT => set_bit_active_high(&mut self.dir, BIT_RIGHT, pressed),
             _ => {}
         }
         self.apply_inputs();
@@ -431,6 +513,44 @@ mod tests {
     }
 
     #[test]
+    fn stick_encodes_49way_directions() {
+        let mut sys = SinistarSystem::new();
+        let mut press = |sys: &mut SinistarSystem, id: u8, on: bool| {
+            sys.handle_input(InputEvent::Button {
+                id: InputId(id as u16),
+                pressed: on,
+            });
+        };
+
+        assert_eq!(sys.port_a_49way(), 0x77, "idle stick reads centered");
+
+        press(&mut sys, INPUT_LEFT, true);
+        assert_eq!(
+            sys.port_a_49way(),
+            0x07,
+            "left: x index 0 (0x0), y centered"
+        );
+        press(&mut sys, INPUT_LEFT, false);
+
+        press(&mut sys, INPUT_RIGHT, true);
+        assert_eq!(sys.port_a_49way(), 0x87, "right: x index 6 (0x8)");
+        press(&mut sys, INPUT_RIGHT, false);
+
+        press(&mut sys, INPUT_UP, true);
+        assert_eq!(
+            sys.port_a_49way(),
+            0x78,
+            "up (forward): y index 6 (0x8), x centered"
+        );
+        press(&mut sys, INPUT_UP, false);
+
+        // Opposing directions on an axis cancel back to center.
+        press(&mut sys, INPUT_LEFT, true);
+        press(&mut sys, INPUT_RIGHT, true);
+        assert_eq!(sys.port_a_49way() >> 4, 0x7, "left+right cancels to center");
+    }
+
+    #[test]
     fn coin_and_service_map_to_rom_pia() {
         let mut sys = SinistarSystem::new();
         sys.handle_input(InputEvent::Button {
@@ -461,6 +581,7 @@ mod tests {
             .main_map
             .region_data_mut(williams::MainRegion::Sram)[0x10] = 0x9E;
         sys.port_b = 0b0010_0011;
+        sys.dir = 0b0000_0101; // up + left held
 
         let data = sys.save_state().expect("save_state should return Some");
 
@@ -473,5 +594,6 @@ mod tests {
             0x9E
         );
         assert_eq!(sys2.port_b, 0b0010_0011);
+        assert_eq!(sys2.dir, 0b0000_0101);
     }
 }
