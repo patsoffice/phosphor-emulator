@@ -103,6 +103,9 @@ fn run_test_case(tc: &M68000TestCase, cpu: &mut M68000, bus: &mut TracingBus68k)
     outcome
 }
 
+// Parallel-indexed register arrays (cpu.d[i] vs d[i]) read clearer as index
+// loops than zipped iterators; keep them explicit.
+#[allow(clippy::needless_range_loop)]
 fn compare_final(tc: &M68000TestCase, cpu: &M68000, bus: &TracingBus68k) -> Outcome {
     let fin = &tc.final_state;
 

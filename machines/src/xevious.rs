@@ -1572,7 +1572,7 @@ mod tests {
         let mut sys = XeviousSystem::new();
         sys.board.fit_50xx(); // Xevious carries the 50XX; new() leaves it unfitted.
 
-        let mut send = |sys: &mut XeviousSystem, cmd: u8| {
+        let send = |sys: &mut XeviousSystem, cmd: u8| {
             Bus::write(sys, BusMaster::Cpu(0), 0x7100, 0x04); // select 50XX, write mode
             Bus::write(sys, BusMaster::Cpu(0), 0x7000, cmd);
         };

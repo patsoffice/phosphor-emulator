@@ -152,7 +152,7 @@ fn test_all_z80_opcodes() {
     let mut entries: Vec<_> = std::fs::read_dir(test_dir)
         .expect("Failed to read test directory")
         .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().map_or(false, |ext| ext == "json"))
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "json"))
         .collect();
     entries.sort_by_key(|e| e.file_name());
 

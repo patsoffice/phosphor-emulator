@@ -369,18 +369,16 @@ impl I8088Metadata {
     /// Returns 0xFFFF if no mask is specified (all flags defined).
     pub fn flags_mask_for(&self, file_stem: &str) -> u16 {
         // File stems like "D0.4" → opcode "D0", sub "4"
-        if let Some((opcode, sub)) = file_stem.split_once('.') {
-            if let Some(meta) = self.opcodes.get(opcode) {
+        if let Some((opcode, sub)) = file_stem.split_once('.')
+            && let Some(meta) = self.opcodes.get(opcode) {
                 // Check nested reg metadata first
-                if let Some(reg_map) = &meta.reg {
-                    if let Some(sub_meta) = reg_map.get(sub) {
+                if let Some(reg_map) = &meta.reg
+                    && let Some(sub_meta) = reg_map.get(sub) {
                         return sub_meta.flags_mask.unwrap_or(0xFFFF);
                     }
-                }
                 // Fall back to parent flags_mask
                 return meta.flags_mask.unwrap_or(0xFFFF);
             }
-        }
         // Simple opcode like "00"
         if let Some(meta) = self.opcodes.get(file_stem) {
             return meta.flags_mask.unwrap_or(0xFFFF);
