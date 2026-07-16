@@ -34,8 +34,10 @@ use phosphor_machines::rom_loader::{RomLoadError, RomSet};
 
 mod gfxsheet;
 mod harness;
+mod trace;
 use gfxsheet::SheetConfig;
 use harness::Harness;
+use trace::TraceFormat;
 
 #[derive(Parser)]
 #[command(
@@ -143,6 +145,44 @@ enum Command {
         /// Write the full run's audio to this path as a 16-bit mono WAV.
         #[arg(long)]
         audio_out: Option<PathBuf>,
+        /// ROM set: a `.zip` archive or a directory of loose ROM files.
+        path: String,
+    },
+    /// Boot a registered machine, run N frames, and observe CPU/bus state
+    /// headlessly: the board's event ring (`--events`) and memory watchpoints
+    /// (`--watch`), correlated by cycle. The headless counterpart of the
+    /// interactive debugger's event/watchpoint panels, in text or JSONL.
+    Trace {
+        /// Machine CLI name (e.g. `joust`).
+        #[arg(long)]
+        machine: String,
+        /// Number of frames to run (from reset).
+        #[arg(long, default_value_t = 0)]
+        frames: usize,
+        /// Start emitting output only at/after this frame (run fast to N with
+        /// observers off, then observe — a cheap "seek").
+        #[arg(long, default_value_t = 0)]
+        from_frame: usize,
+        /// Pulse the machine's coin input at this frame.
+        #[arg(long)]
+        coin_at: Option<usize>,
+        /// Load a factory-initialized NVRAM before running.
+        #[arg(long)]
+        nvram: Option<PathBuf>,
+        /// Enable event tracing and include these event kinds: a comma-separated
+        /// list (e.g. `devwrite,bank,watchdog`) or `all`.
+        #[arg(long)]
+        events: Option<String>,
+        /// Set memory watchpoint(s): comma-separated `cpu:addr:kind` specs,
+        /// kind = `r`/`w`/`rw` (e.g. `0:0x87cf:w`). Every hit is logged.
+        #[arg(long)]
+        watch: Option<String>,
+        /// Output format.
+        #[arg(long, value_enum, default_value_t = TraceFormat::Text)]
+        format: TraceFormat,
+        /// Output file (default: stdout).
+        #[arg(short = 'o', long)]
+        out: Option<PathBuf>,
         /// ROM set: a `.zip` archive or a directory of loose ROM files.
         path: String,
     },
@@ -289,6 +329,29 @@ fn run_command(cmd: Command) -> Result<String, String> {
             dump_nvram.as_deref(),
             coin_at,
             audio_out.as_deref(),
+            &path,
+        ),
+        Command::Trace {
+            machine,
+            frames,
+            from_frame,
+            coin_at,
+            nvram,
+            events,
+            watch,
+            format,
+            out,
+            path,
+        } => trace::run_trace(
+            &machine,
+            frames,
+            from_frame,
+            coin_at,
+            nvram.as_deref(),
+            events.as_deref(),
+            watch.as_deref(),
+            format,
+            out.as_deref(),
             &path,
         ),
         Command::Imgdiff {
