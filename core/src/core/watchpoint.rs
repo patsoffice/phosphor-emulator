@@ -29,6 +29,41 @@ pub enum WatchpointKind {
     Write,
 }
 
+/// An extra predicate on a watchpoint's accessed value.
+///
+/// [`Always`](Self::Always) preserves the plain "fire on any access"
+/// behavior; the other variants let a watchpoint fire only on a specific
+/// value, a bit pattern, or a change — so a headless hunt can say "break when
+/// `0x4E5F` is written" or "break when this variable changes" without
+/// wading through every access. The comparison uses the low `width * 8` bits
+/// of the accessed value (see [`Watchpoint::evaluate`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WatchpointCondition {
+    /// Fire on every access (the default; matches unconditional watchpoints).
+    Always,
+    /// Fire when `(value & width_mask) == v`.
+    Equals(u32),
+    /// Fire when `(value & mask) == expected` (bit tests / any-of ranges).
+    Bits { mask: u32, expected: u32 },
+    /// Fire when the value differs from the last one observed at this
+    /// address/kind (the first observation counts as a change).
+    Changed,
+}
+
+/// Mask selecting the low `width` bytes of an accessed value.
+///
+/// Watchpoint values carry the low `width * 8` significant bits; width 0 (no
+/// value) and widths ≥ 4 use the full 32-bit value.
+#[inline]
+fn width_mask(width: u8) -> u32 {
+    match width {
+        1 => 0xFF,
+        2 => 0xFFFF,
+        3 => 0x00FF_FFFF,
+        _ => 0xFFFF_FFFF,
+    }
+}
+
 /// Whether a hit was recorded before or after the access took effect.
 ///
 /// Write hits are recorded `Before` the side effect is applied: boards
@@ -70,8 +105,9 @@ impl From<BusMaster> for DebugAccessSource {
     }
 }
 
-/// A single watchpoint: an exact address in one CPU's address space.
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// A single watchpoint: an exact address in one CPU's address space,
+/// optionally gated by a value [`condition`](WatchpointCondition).
+#[derive(Clone, Copy, Debug)]
 pub struct Watchpoint {
     /// Index of the CPU whose address space is watched.
     pub cpu_index: usize,
@@ -79,6 +115,43 @@ pub struct Watchpoint {
     pub addr: u32,
     /// Trigger on reads or writes.
     pub kind: WatchpointKind,
+    /// Extra value predicate; [`WatchpointCondition::Always`] fires on any access.
+    pub condition: WatchpointCondition,
+    /// Last value observed at this address/kind (state for
+    /// [`WatchpointCondition::Changed`]). Not part of identity.
+    last_value: Option<u32>,
+}
+
+/// Identity ignores `last_value` (runtime state), so a watchpoint's set/clear
+/// identity is stable as its `Changed` history accumulates. The condition *is*
+/// part of identity, so the same address can carry distinct conditions.
+impl PartialEq for Watchpoint {
+    fn eq(&self, other: &Self) -> bool {
+        self.cpu_index == other.cpu_index
+            && self.addr == other.addr
+            && self.kind == other.kind
+            && self.condition == other.condition
+    }
+}
+
+impl Watchpoint {
+    /// Evaluate this watchpoint's condition against an access `value` of
+    /// `width` bytes, returning whether it should fire. Updates the `Changed`
+    /// history as a side effect, so it must be called on every matching
+    /// access (not short-circuited away).
+    fn evaluate(&mut self, value: u32, width: u8) -> bool {
+        let v = value & width_mask(width);
+        match self.condition {
+            WatchpointCondition::Always => true,
+            WatchpointCondition::Equals(target) => v == target,
+            WatchpointCondition::Bits { mask, expected } => (value & mask) == expected,
+            WatchpointCondition::Changed => {
+                let changed = self.last_value != Some(v);
+                self.last_value = Some(v);
+                changed
+            }
+        }
+    }
 }
 
 /// Details of a watchpoint hit, consumed by the debugger.
@@ -150,21 +223,39 @@ impl Watchpoints {
         &self.watched
     }
 
-    /// Set a watchpoint on the exact address `addr` in `cpu_index`'s
-    /// address space. Duplicates are ignored.
+    /// Set an unconditional watchpoint on the exact address `addr` in
+    /// `cpu_index`'s address space. Duplicates are ignored.
+    ///
+    /// Shim for [`set_cond`](Self::set_cond) with
+    /// [`WatchpointCondition::Always`], so unconditional callers are untouched.
     pub fn set(&mut self, cpu_index: usize, addr: u32, kind: WatchpointKind) {
+        self.set_cond(cpu_index, addr, kind, WatchpointCondition::Always);
+    }
+
+    /// Set a watchpoint gated by `condition` on the exact address `addr` in
+    /// `cpu_index`'s address space. Duplicates (same cpu/addr/kind/condition)
+    /// are ignored.
+    pub fn set_cond(
+        &mut self,
+        cpu_index: usize,
+        addr: u32,
+        kind: WatchpointKind,
+        condition: WatchpointCondition,
+    ) {
         let wp = Watchpoint {
             cpu_index,
             addr,
             kind,
+            condition,
+            last_value: None,
         };
         if !self.watched.contains(&wp) {
             self.watched.push(wp);
         }
     }
 
-    /// Clear a watchpoint on the exact address `addr` in `cpu_index`'s
-    /// address space.
+    /// Clear all watchpoints on the exact address `addr`/`kind` in
+    /// `cpu_index`'s address space (regardless of condition).
     pub fn clear(&mut self, cpu_index: usize, addr: u32, kind: WatchpointKind) {
         self.watched
             .retain(|w| !(w.cpu_index == cpu_index && w.addr == addr && w.kind == kind));
@@ -238,15 +329,45 @@ impl Watchpoints {
     }
 
     /// True if the exact address is watched for `kind` in `cpu_index`'s
-    /// address space. Does not queue a hit — callers that populate richer
-    /// metadata (e.g. region names) match first and then [`push_hit`].
-    ///
-    /// [`push_hit`]: Self::push_hit
+    /// address space, ignoring any value condition. A pure existence
+    /// predicate; use [`fires`](Self::fires) to also evaluate conditions.
     #[inline]
     pub fn matches(&self, cpu_index: usize, addr: u32, kind: WatchpointKind) -> bool {
         self.watched
             .iter()
             .any(|w| w.cpu_index == cpu_index && w.addr == addr && w.kind == kind)
+    }
+
+    /// True if any watchpoint on `(cpu_index, addr, kind)` fires for this
+    /// access, evaluating each one's [`WatchpointCondition`]. Does not queue a
+    /// hit — callers that populate richer metadata (e.g. region names) call
+    /// this, then build the hit and [`push_hit`] it.
+    ///
+    /// Takes `&mut self` because [`WatchpointCondition::Changed`] tracks the
+    /// last observed value. Every matching watchpoint is evaluated (not
+    /// short-circuited) so `Changed` history stays consistent.
+    ///
+    /// [`push_hit`]: Self::push_hit
+    #[inline]
+    pub fn fires(
+        &mut self,
+        cpu_index: usize,
+        addr: u32,
+        kind: WatchpointKind,
+        value: u32,
+        width: u8,
+    ) -> bool {
+        let mut any = false;
+        for w in self.watched.iter_mut() {
+            if w.cpu_index == cpu_index
+                && w.addr == addr
+                && w.kind == kind
+                && w.evaluate(value, width)
+            {
+                any = true;
+            }
+        }
+        any
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -261,7 +382,7 @@ impl Watchpoints {
         value: u32,
         width: u8,
     ) -> bool {
-        if !self.matches(cpu_index, addr, kind) {
+        if !self.fires(cpu_index, addr, kind, value, width) {
             return false;
         }
         self.push_hit(WatchpointHit {
@@ -514,5 +635,119 @@ mod tests {
             DebugAccessSource::from(BusMaster::DmaVram),
             DebugAccessSource::Dma
         );
+    }
+
+    // ---- Conditional watchpoints -------------------------------------------
+
+    /// A bare `set` remains unconditional (`Always`): every access fires.
+    #[test]
+    fn always_condition_is_the_plain_default() {
+        let mut wp = Watchpoints::new();
+        wp.set(0, 0x1000, WatchpointKind::Write);
+        assert_eq!(wp.watched()[0].condition, WatchpointCondition::Always);
+        assert!(wp.check_write(0, DebugAccessSource::Unknown, 0, None, 0x1000, 0x11, 1));
+        assert!(wp.check_write(0, DebugAccessSource::Unknown, 0, None, 0x1000, 0x22, 1));
+    }
+
+    #[test]
+    fn equals_fires_only_on_matching_value() {
+        let mut wp = Watchpoints::new();
+        wp.set_cond(
+            0,
+            0x1000,
+            WatchpointKind::Write,
+            WatchpointCondition::Equals(0x4E5F),
+        );
+        // Word write of the target value fires.
+        assert!(wp.check_write(0, DebugAccessSource::Unknown, 0, None, 0x1000, 0x4E5F, 2));
+        // Any other value does not.
+        assert!(!wp.check_write(0, DebugAccessSource::Unknown, 0, None, 0x1000, 0x4E60, 2));
+        // Width-masking: a byte access can never equal a 16-bit target.
+        assert!(!wp.check_write(0, DebugAccessSource::Unknown, 0, None, 0x1000, 0x5F, 1));
+    }
+
+    #[test]
+    fn bits_fires_on_masked_pattern() {
+        let mut wp = Watchpoints::new();
+        wp.set_cond(
+            0,
+            0x2000,
+            WatchpointKind::Write,
+            WatchpointCondition::Bits {
+                mask: 0xF0,
+                expected: 0x50,
+            },
+        );
+        assert!(wp.check_write(0, DebugAccessSource::Unknown, 0, None, 0x2000, 0x5A, 1)); // 0x5A & F0 = 50
+        assert!(wp.check_write(0, DebugAccessSource::Unknown, 0, None, 0x2000, 0x51, 1)); // 0x51 & F0 = 50
+        assert!(!wp.check_write(0, DebugAccessSource::Unknown, 0, None, 0x2000, 0x60, 1)); // 60 & F0 = 60
+    }
+
+    #[test]
+    fn changed_fires_on_first_and_on_change_only() {
+        let mut wp = Watchpoints::new();
+        wp.set_cond(
+            0,
+            0x3000,
+            WatchpointKind::Write,
+            WatchpointCondition::Changed,
+        );
+        // First observation counts as a change.
+        assert!(wp.check_write(0, DebugAccessSource::Unknown, 0, None, 0x3000, 0x10, 1));
+        // Same value again: no change.
+        assert!(!wp.check_write(0, DebugAccessSource::Unknown, 0, None, 0x3000, 0x10, 1));
+        // Different value: fires, and updates the baseline.
+        assert!(wp.check_write(0, DebugAccessSource::Unknown, 0, None, 0x3000, 0x20, 1));
+        assert!(!wp.check_write(0, DebugAccessSource::Unknown, 0, None, 0x3000, 0x20, 1));
+    }
+
+    #[test]
+    fn condition_is_part_of_identity_for_dedup() {
+        let mut wp = Watchpoints::new();
+        wp.set_cond(
+            0,
+            0x1000,
+            WatchpointKind::Write,
+            WatchpointCondition::Equals(1),
+        );
+        wp.set_cond(
+            0,
+            0x1000,
+            WatchpointKind::Write,
+            WatchpointCondition::Equals(1),
+        ); // dup
+        wp.set_cond(
+            0,
+            0x1000,
+            WatchpointKind::Write,
+            WatchpointCondition::Equals(2),
+        ); // distinct
+        assert_eq!(wp.watched().len(), 2);
+        // clear() removes every condition at that addr/kind.
+        wp.clear(0, 0x1000, WatchpointKind::Write);
+        assert!(wp.is_empty());
+    }
+
+    #[test]
+    fn fires_evaluates_every_matching_changed_watchpoint() {
+        // Two Changed watchpoints on the same addr/kind: both must have their
+        // baseline updated on every access, or one would fire spuriously.
+        let mut wp = Watchpoints::new();
+        wp.set_cond(
+            0,
+            0x1000,
+            WatchpointKind::Write,
+            WatchpointCondition::Changed,
+        );
+        // A second, distinct condition on the same address keeps its own state.
+        wp.set_cond(
+            0,
+            0x1000,
+            WatchpointKind::Write,
+            WatchpointCondition::Equals(0x99),
+        );
+        assert!(wp.fires(0, 0x1000, WatchpointKind::Write, 0x10, 1)); // Changed: first-touch
+        assert!(!wp.fires(0, 0x1000, WatchpointKind::Write, 0x10, 1)); // Changed baseline held
+        assert!(wp.fires(0, 0x1000, WatchpointKind::Write, 0x99, 1)); // Equals(0x99) fires
     }
 }

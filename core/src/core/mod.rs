@@ -26,5 +26,6 @@ pub use machine::{
 };
 pub use save_state::{SaveError, Saveable, StateReader, StateWriter, load_machine, save_machine};
 pub use watchpoint::{
-    DebugAccessSource, Watchpoint, WatchpointHit, WatchpointKind, WatchpointPhase, Watchpoints,
+    DebugAccessSource, Watchpoint, WatchpointCondition, WatchpointHit, WatchpointKind,
+    WatchpointPhase, Watchpoints,
 };
