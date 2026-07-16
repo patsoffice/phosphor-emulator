@@ -7,7 +7,7 @@
 
 use crate::core::address_space::DebugRead;
 use crate::core::address_space16::AddressSpace16;
-use crate::core::watchpoint::{WatchpointHit, WatchpointKind};
+use crate::core::watchpoint::{WatchpointCondition, WatchpointHit, WatchpointKind};
 use crate::cpu::disasm::DisassembledInstruction;
 
 /// A single CPU register for display in the debug panel.
@@ -124,6 +124,18 @@ pub trait BusDebug {
 
     /// Set a memory watchpoint in the address space of `cpu_index`.
     fn set_watchpoint(&mut self, _cpu_index: usize, _addr: u32, _kind: WatchpointKind) {}
+
+    /// Set a value-conditioned memory watchpoint in the address space of
+    /// `cpu_index`. Default no-op; `#[derive(BusDebug)]` and manual impls
+    /// route it to the owning address space's `set_watchpoint_cond`.
+    fn set_watchpoint_cond(
+        &mut self,
+        _cpu_index: usize,
+        _addr: u32,
+        _kind: WatchpointKind,
+        _condition: WatchpointCondition,
+    ) {
+    }
 
     /// Clear a memory watchpoint in the address space of `cpu_index`.
     fn clear_watchpoint(&mut self, _cpu_index: usize, _addr: u32, _kind: WatchpointKind) {}

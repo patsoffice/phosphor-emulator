@@ -216,6 +216,16 @@ pub fn derive_bus_debug(input: TokenStream) -> TokenStream {
                 quote! { #idx => { if let Ok(addr) = u16::try_from(addr) { self.#ident.set_watchpoint(cpu_index, addr, kind); } } }
             }
         });
+        // set_watchpoint_cond: mirrors set_watchpoint, threading the condition.
+        let set_cond_arms = map_entries.iter().map(|entry| {
+            let idx = entry.cpu_index;
+            let ident = &entry.field_ident;
+            if entry.is_32 {
+                quote! { #idx => self.#ident.set_watchpoint_cond(cpu_index, addr, kind, condition) }
+            } else {
+                quote! { #idx => { if let Ok(addr) = u16::try_from(addr) { self.#ident.set_watchpoint_cond(cpu_index, addr, kind, condition); } } }
+            }
+        });
         let clear_arms = map_entries.iter().map(|entry| {
             let idx = entry.cpu_index;
             let ident = &entry.field_ident;
@@ -294,6 +304,13 @@ pub fn derive_bus_debug(input: TokenStream) -> TokenStream {
             fn set_watchpoint(&mut self, cpu_index: usize, addr: u32, kind: phosphor_core::core::WatchpointKind) {
                 match cpu_index {
                     #(#set_arms,)*
+                    _ => {}
+                }
+            }
+
+            fn set_watchpoint_cond(&mut self, cpu_index: usize, addr: u32, kind: phosphor_core::core::WatchpointKind, condition: phosphor_core::core::WatchpointCondition) {
+                match cpu_index {
+                    #(#set_cond_arms,)*
                     _ => {}
                 }
             }

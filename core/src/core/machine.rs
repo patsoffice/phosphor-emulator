@@ -7,7 +7,7 @@ use super::address_space16::AddressSpace16;
 use super::debug::BusDebug;
 use super::debug_trace::DebugTrace;
 use super::save_state::SaveError;
-use super::watchpoint::{WatchpointHit, WatchpointKind};
+use super::watchpoint::{WatchpointCondition, WatchpointHit, WatchpointKind};
 
 /// A named timing span from machine-level profiling.
 ///
@@ -435,6 +435,23 @@ pub trait MachineDebug {
     fn set_watchpoint(&mut self, cpu_index: usize, addr: u32, kind: WatchpointKind) {
         if let Some(bus) = self.debug_bus_mut() {
             bus.set_watchpoint(cpu_index, addr, kind);
+        }
+    }
+
+    /// Set a value-conditioned memory watchpoint in the address space of
+    /// `cpu_index`.
+    ///
+    /// Default: delegates to `BusDebug::set_watchpoint_cond()` via
+    /// `debug_bus_mut()`.
+    fn set_watchpoint_cond(
+        &mut self,
+        cpu_index: usize,
+        addr: u32,
+        kind: WatchpointKind,
+        condition: WatchpointCondition,
+    ) {
+        if let Some(bus) = self.debug_bus_mut() {
+            bus.set_watchpoint_cond(cpu_index, addr, kind, condition);
         }
     }
 

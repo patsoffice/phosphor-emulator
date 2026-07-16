@@ -20,7 +20,8 @@
 use crate::core::address_space::{AccessKind, DebugRead, DebugWrite, MemoryBacking, RegionId};
 use crate::core::bus::BusMaster;
 use crate::core::watchpoint::{
-    DebugAccessSource, WatchpointHit, WatchpointKind, WatchpointPhase, Watchpoints,
+    DebugAccessSource, WatchpointCondition, WatchpointHit, WatchpointKind, WatchpointPhase,
+    Watchpoints,
 };
 
 /// Where accesses to an [`AddressRegion32`] land.
@@ -660,7 +661,7 @@ impl AddressSpace32 {
         }
         if self
             .watchpoints
-            .matches(cpu_index, addr, WatchpointKind::Read)
+            .fires(cpu_index, addr, WatchpointKind::Read, value, width)
         {
             let hit = self.make_hit(
                 cpu_index,
@@ -711,7 +712,7 @@ impl AddressSpace32 {
         }
         if self
             .watchpoints
-            .matches(cpu_index, addr, WatchpointKind::Write)
+            .fires(cpu_index, addr, WatchpointKind::Write, value, width)
         {
             let hit = self.make_hit(
                 cpu_index,
@@ -775,10 +776,21 @@ impl AddressSpace32 {
         !self.watchpoints.is_empty()
     }
 
-    /// Set a watchpoint on the exact address `addr` for the CPU that owns
-    /// this address space.
+    /// Set an unconditional watchpoint on the exact address `addr` for the CPU
+    /// that owns this address space.
     pub fn set_watchpoint(&mut self, cpu_index: usize, addr: u32, kind: WatchpointKind) {
         self.watchpoints.set(cpu_index, addr, kind);
+    }
+
+    /// Set a watchpoint gated by `condition` on the exact address `addr`.
+    pub fn set_watchpoint_cond(
+        &mut self,
+        cpu_index: usize,
+        addr: u32,
+        kind: WatchpointKind,
+        condition: WatchpointCondition,
+    ) {
+        self.watchpoints.set_cond(cpu_index, addr, kind, condition);
     }
 
     /// Clear a watchpoint on the exact address `addr`.

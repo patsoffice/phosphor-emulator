@@ -964,6 +964,18 @@ impl BusDebug for XeviousSystem {
         self.board.watchpoints.set(cpu_index, addr, kind);
     }
 
+    fn set_watchpoint_cond(
+        &mut self,
+        cpu_index: usize,
+        addr: u32,
+        kind: phosphor_core::core::watchpoint::WatchpointKind,
+        condition: phosphor_core::core::watchpoint::WatchpointCondition,
+    ) {
+        self.board
+            .watchpoints
+            .set_cond(cpu_index, addr, kind, condition);
+    }
+
     fn clear_watchpoint(
         &mut self,
         cpu_index: usize,

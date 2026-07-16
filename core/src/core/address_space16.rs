@@ -22,7 +22,8 @@
 use crate::core::address_space::{AccessKind, DebugRead, MemoryBacking, RegionId, UNMAPPED};
 use crate::core::bus::BusMaster;
 use crate::core::watchpoint::{
-    DebugAccessSource, WatchpointHit, WatchpointKind, WatchpointPhase, Watchpoints,
+    DebugAccessSource, WatchpointCondition, WatchpointHit, WatchpointKind, WatchpointPhase,
+    Watchpoints,
 };
 
 /// A single entry in the 256-page table.
@@ -537,7 +538,7 @@ impl AddressSpace16 {
         if page.watch_read
             && self
                 .watchpoints
-                .matches(cpu_index, addr as u32, WatchpointKind::Read)
+                .fires(cpu_index, addr as u32, WatchpointKind::Read, data as u32, 1)
         {
             let hit = self.make_hit(cpu_index, master, addr, WatchpointKind::Read, data, device);
             self.watchpoints.push_hit(hit);
@@ -581,9 +582,13 @@ impl AddressSpace16 {
         }
         let page = &self.map.pages[(addr >> 8) as usize];
         if page.watch_write
-            && self
-                .watchpoints
-                .matches(cpu_index, addr as u32, WatchpointKind::Write)
+            && self.watchpoints.fires(
+                cpu_index,
+                addr as u32,
+                WatchpointKind::Write,
+                data as u32,
+                1,
+            )
         {
             let hit = self.make_hit(cpu_index, master, addr, WatchpointKind::Write, data, device);
             self.watchpoints.push_hit(hit);
@@ -641,13 +646,27 @@ impl AddressSpace16 {
         self.active_watch_count > 0
     }
 
-    /// Set a watchpoint on the exact address `addr` for the CPU that owns
-    /// this address space.
+    /// Set an unconditional watchpoint on the exact address `addr` for the CPU
+    /// that owns this address space.
     ///
     /// The page-level flag is set as a fast filter; the exact address is
     /// recorded in the watchpoint set so only that address fires.
     pub fn set_watchpoint(&mut self, cpu_index: usize, addr: u16, kind: WatchpointKind) {
-        self.watchpoints.set(cpu_index, addr as u32, kind);
+        self.set_watchpoint_cond(cpu_index, addr, kind, WatchpointCondition::Always);
+    }
+
+    /// Set a watchpoint gated by `condition` on the exact address `addr`.
+    /// The page-level fast-filter flag is set the same as for an
+    /// unconditional watchpoint (conditions are evaluated when a hit fires).
+    pub fn set_watchpoint_cond(
+        &mut self,
+        cpu_index: usize,
+        addr: u16,
+        kind: WatchpointKind,
+        condition: WatchpointCondition,
+    ) {
+        self.watchpoints
+            .set_cond(cpu_index, addr as u32, kind, condition);
         let page = &mut self.map.pages[(addr >> 8) as usize];
         let was_active = page.watch_read || page.watch_write;
         match kind {
