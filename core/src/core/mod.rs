@@ -5,6 +5,7 @@ pub mod bus;
 pub mod clock;
 pub mod component;
 pub mod debug;
+pub mod debug_hang;
 pub mod debug_trace;
 pub mod machine;
 pub mod save_state;
@@ -17,6 +18,7 @@ pub use bus::{Bus, BusMaster, InterruptState};
 pub use clock::ClockDivider;
 pub use component::BusMasterComponent;
 pub use debug::{BusDebug, DebugCpu, DebugDisassembly, DebugRegister, Debuggable};
+pub use debug_hang::{HangDetector, HangReport};
 pub use debug_trace::{DebugEvent, DebugEventKind, DebugTrace, DebugTraceBuffer};
 pub use machine::{
     AnalogAxisKind, AudioSource, AxisSign, DefaultBinding, DipApplyTiming, DipChoice, DipOption,
