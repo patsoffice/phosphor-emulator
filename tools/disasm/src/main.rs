@@ -24,7 +24,6 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use phosphor_core::core::machine::InputEvent;
 use phosphor_core::cpu::Disassemble;
 use phosphor_core::cpu::{I8035, M6502, M6800, M6809, M68000, Mb88xx, Z80};
 use phosphor_core::gfx::decode::decode_gfx;
@@ -34,7 +33,9 @@ use phosphor_machines::registry;
 use phosphor_machines::rom_loader::{RomLoadError, RomSet};
 
 mod gfxsheet;
+mod harness;
 use gfxsheet::SheetConfig;
+use harness::Harness;
 
 #[derive(Parser)]
 #[command(
@@ -314,48 +315,11 @@ fn run_frameshot(
     audio_out: Option<&Path>,
     path: &str,
 ) -> Result<String, String> {
-    let entry = registry::find(machine).ok_or_else(|| {
-        let avail: Vec<&str> = registry::all().iter().map(|e| e.name).collect();
-        format!(
-            "unknown machine '{machine}'; available: {}",
-            avail.join(", ")
-        )
-    })?;
-
-    let set =
-        load_rom_set(path, entry.rom_names).map_err(|e| format!("loading ROM set {path}: {e}"))?;
-    let mut machine_box =
-        (entry.create)(&set).map_err(|e| format!("creating machine '{machine}': {e}"))?;
-
-    machine_box.reset();
-
-    // Load a factory-initialized NVRAM so the game skips its self-test.
-    if let Some(nv) = nvram {
-        let data = std::fs::read(nv).map_err(|e| format!("reading nvram {}: {e}", nv.display()))?;
-        machine_box.load_nvram(&data);
+    let mut harness = Harness::build(machine, path, nvram, coin_at)?;
+    for _ in 0..frames {
+        harness.run_frame();
     }
-
-    // Resolve the coin control (by stable name) for --coin-at.
-    let coin_id = machine_box
-        .input_controls()
-        .iter()
-        .find(|c| c.stable_name == "coin")
-        .map(|c| c.id);
-    if coin_at.is_some() && coin_id.is_none() {
-        return Err(format!("machine '{machine}' has no 'coin' input control"));
-    }
-    const COIN_HOLD: usize = 8; // frames to hold the coin input
-
-    for f in 0..frames {
-        if let (Some(ca), Some(id)) = (coin_at, coin_id) {
-            if f == ca {
-                machine_box.handle_input(InputEvent::Button { id, pressed: true });
-            } else if f == ca + COIN_HOLD {
-                machine_box.handle_input(InputEvent::Button { id, pressed: false });
-            }
-        }
-        machine_box.run_frame();
-    }
+    let machine_box = harness.machine_mut();
 
     let (w, h) = machine_box.display_size();
     let mut buf = vec![0u8; (w * h * 3) as usize];
