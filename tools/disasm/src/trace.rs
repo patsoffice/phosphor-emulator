@@ -22,12 +22,15 @@
 //! N` seeks cheaply (runs fast to N with the observers off, then arms them) so
 //! long runs need not emit from frame 0.
 
+use std::collections::VecDeque;
 use std::io::{BufWriter, Write};
 use std::path::Path;
 
 use clap::ValueEnum;
 use phosphor_core::core::debug::DebugRegister;
+use phosphor_core::core::debug_hang::{HangDetector, HangReport};
 use phosphor_core::core::debug_trace::{DebugEvent, DebugEventKind};
+use phosphor_core::core::machine::FrontendMachine;
 use phosphor_core::core::watchpoint::{
     DebugAccessSource, WatchpointCondition, WatchpointHit, WatchpointKind,
 };
@@ -72,6 +75,108 @@ impl Record {
     }
 }
 
+/// How many recent event bodies to carry as a hang report's context tail.
+const HANG_CONTEXT: usize = 6;
+
+/// Per-run hang detection: the [`HangDetector`] plus a rolling buffer of recent
+/// event bodies (the "immediate causal context" the Dig Dug hunt relied on).
+struct HangWatch {
+    detector: HangDetector,
+    recent: VecDeque<String>,
+    format: TraceFormat,
+}
+
+impl HangWatch {
+    fn new(format: TraceFormat) -> Self {
+        Self {
+            detector: HangDetector::new(),
+            recent: VecDeque::new(),
+            format,
+        }
+    }
+
+    /// Record a recently-traced event body for the context tail (only called
+    /// when `--events` is on).
+    fn note_event(&mut self, body: String) {
+        if self.recent.len() >= HANG_CONTEXT {
+            self.recent.pop_front();
+        }
+        self.recent.push_back(body);
+    }
+
+    /// Sample every CPU's PC for `frame` and return a formatted line for each
+    /// CPU that just crossed the hang threshold (usually none).
+    fn observe_frame(&mut self, machine: &mut dyn FrontendMachine, frame: u64) -> Vec<String> {
+        let snaps: Vec<(usize, u32)> = match machine.debug_bus() {
+            Some(bus) => bus
+                .cpus()
+                .iter()
+                .enumerate()
+                .map(|(i, (_, cpu))| (i, cpu.debug_pc()))
+                .collect(),
+            None => return Vec::new(),
+        };
+        let mut lines = Vec::new();
+        for (i, pc) in snaps {
+            if let Some(report) = self.detector.observe(i, pc) {
+                let regs = machine
+                    .debug_bus()
+                    .map(|bus| bus.cpus()[i].1.debug_registers())
+                    .unwrap_or_default();
+                let ctx: Vec<&str> = self.recent.iter().map(String::as_str).collect();
+                lines.push(render_hang(&report, &regs, &ctx, frame, self.format));
+            }
+        }
+        lines
+    }
+}
+
+/// Format a hang report as a text banner or a jsonl object.
+fn render_hang(
+    report: &HangReport,
+    regs: &[DebugRegister],
+    context: &[&str],
+    frame: u64,
+    format: TraceFormat,
+) -> String {
+    match format {
+        TraceFormat::Text => {
+            let regcols = fmt_regs_text(regs);
+            let mut s = format!(
+                "=== HANG: cpu{} stuck in ${:04X}..${:04X} for {} frames \
+                 (frame {frame}, pc={:04X} {regcols}) ===",
+                report.cpu_index,
+                report.window_lo,
+                report.window_hi,
+                report.frames_stuck,
+                report.pc,
+            );
+            if !context.is_empty() {
+                s.push_str(&format!("\n    context: {}", context.join(" | ")));
+            }
+            s
+        }
+        TraceFormat::Jsonl => {
+            let ctx = context
+                .iter()
+                .map(|b| json_str(b))
+                .collect::<Vec<_>>()
+                .join(",");
+            format!(
+                "{{\"stream\":\"hang\",\"frame\":{frame},\"cpu\":{},\"pc\":\"{:X}\",\
+                 \"window_lo\":\"{:X}\",\"window_hi\":\"{:X}\",\"frames_stuck\":{},\
+                 \"regs\":{},\"context\":[{ctx}]}}",
+                report.cpu_index,
+                report.pc,
+                report.window_lo,
+                report.window_hi,
+                report.frames_stuck,
+                fmt_regs_json(regs),
+            )
+        }
+    }
+}
+
 /// Boot `machine`, run `frames` frames, and emit the requested trace.
 ///
 /// Two loops, chosen by the requested observers (they need different
@@ -99,14 +204,16 @@ pub fn run_trace(
     cpu: Option<&str>,
     break_pc: Option<&str>,
     stop_on_watch: bool,
+    hang: bool,
+    stop_on_hang: bool,
     format: TraceFormat,
     out: Option<&Path>,
     path: &str,
 ) -> Result<String, String> {
     let cycle_mode = cpu.is_some() || break_pc.is_some();
-    if events.is_none() && watch.is_none() && !cycle_mode {
+    if events.is_none() && watch.is_none() && !cycle_mode && !hang {
         return Err(
-            "trace needs at least one observer: --cpu, --break-pc, --events, or --watch"
+            "trace needs at least one observer: --cpu, --break-pc, --events, --watch, or --hang"
                 .to_string(),
         );
     }
@@ -166,6 +273,8 @@ pub fn run_trace(
         }
     }
 
+    let hang_watch = hang.then(|| HangWatch::new(format));
+
     if cycle_mode {
         run_cycle_loop(CycleLoop {
             harness: &mut harness,
@@ -175,39 +284,62 @@ pub fn run_trace(
             traced: &traced,
             breaks: &breaks,
             stop_on_watch,
+            hang: hang_watch,
+            stop_on_hang,
             event_filter: &event_filter,
             format,
             out,
         })
     } else {
-        run_frame_loop(
-            &mut harness,
+        run_frame_loop(FrameLoop {
+            harness: &mut harness,
             from_frame,
             frames,
             cycles_per_frame,
-            &event_filter,
+            event_filter: &event_filter,
+            hang: hang_watch,
+            stop_on_hang,
             format,
             out,
-        )
+        })
     }
 }
 
-/// The frame loop: run whole frames and collect the event ring + watchpoint
-/// hits, emitting them cycle-sorted. Bounded memory.
-fn run_frame_loop(
-    harness: &mut Harness,
+/// Parameters for [`run_frame_loop`] (grouped to keep the arg list sane).
+struct FrameLoop<'a> {
+    harness: &'a mut Harness,
     from_frame: usize,
     frames: usize,
     cycles_per_frame: u64,
-    event_filter: &Option<EventFilter>,
+    event_filter: &'a Option<EventFilter>,
+    hang: Option<HangWatch>,
+    stop_on_hang: bool,
     format: TraceFormat,
-    out: Option<&Path>,
-) -> Result<String, String> {
+    out: Option<&'a Path>,
+}
+
+/// The frame loop: run whole frames and collect the event ring + watchpoint
+/// hits, emitting them cycle-sorted. Bounded memory. Hang detection (if on)
+/// samples each CPU's PC per frame; reports are appended after the trace.
+fn run_frame_loop(fl: FrameLoop) -> Result<String, String> {
+    let FrameLoop {
+        harness,
+        from_frame,
+        frames,
+        cycles_per_frame,
+        event_filter,
+        mut hang,
+        stop_on_hang,
+        format,
+        out,
+    } = fl;
+
     // Watchpoint hits are drained every frame (the pending queue is shallow);
     // trace events are drained and cleared every frame so a run longer than the
     // ring capacity does not silently lose early events.
     let mut records: Vec<Record> = Vec::new();
-    for _ in from_frame..frames {
+    let mut hang_lines: Vec<String> = Vec::new();
+    for frame_idx in from_frame..frames {
         harness.run_frame();
 
         while let Some(hit) = harness.machine_mut().take_watchpoint_hit() {
@@ -218,10 +350,22 @@ fn run_frame_loop(
             let machine = harness.machine_mut();
             for &e in machine.trace_events() {
                 if filter.accepts(e.kind) {
+                    if let Some(h) = hang.as_mut() {
+                        h.note_event(event_body(&e));
+                    }
                     records.push(Record::Event(e));
                 }
             }
             machine.clear_trace_events();
+        }
+
+        if let Some(h) = hang.as_mut() {
+            let lines = h.observe_frame(harness.machine_mut(), frame_idx as u64);
+            let hit = !lines.is_empty();
+            hang_lines.extend(lines);
+            if hit && stop_on_hang {
+                break;
+            }
         }
     }
 
@@ -229,13 +373,19 @@ fn run_frame_loop(
     // hits recorded in the same cycle stay in the order the board produced).
     records.sort_by_key(|r| r.cycle());
 
-    let body = render(&records, cycles_per_frame, format);
+    let mut body = render(&records, cycles_per_frame, format);
+    for line in &hang_lines {
+        body.push_str(line);
+        body.push('\n');
+    }
+
     match out {
         Some(p) => {
             std::fs::write(p, &body).map_err(|e| format!("writing {}: {e}", p.display()))?;
             Ok(format!(
-                "trace: {} record(s) over frames {from_frame}..{frames} -> {}\n",
+                "trace: {} record(s), {} hang report(s) over frames {from_frame}..{frames} -> {}\n",
                 records.len(),
+                hang_lines.len(),
                 p.display()
             ))
         }
@@ -262,6 +412,8 @@ struct CycleLoop<'a> {
     traced: &'a [TracedCpu],
     breaks: &'a [(usize, u32)],
     stop_on_watch: bool,
+    hang: Option<HangWatch>,
+    stop_on_hang: bool,
     event_filter: &'a Option<EventFilter>,
     format: TraceFormat,
     out: Option<&'a Path>,
@@ -283,6 +435,8 @@ fn run_cycle_loop(cl: CycleLoop) -> Result<String, String> {
         traced,
         breaks,
         stop_on_watch,
+        mut hang,
+        stop_on_hang,
         event_filter,
         format,
         out,
@@ -366,14 +520,23 @@ fn run_cycle_loop(cl: CycleLoop) -> Result<String, String> {
         if let Some(filter) = event_filter {
             let machine = harness.machine_mut();
             let mut evlines: Vec<String> = Vec::new();
+            let mut ev_bodies: Vec<String> = Vec::new();
             for &e in machine.trace_events() {
                 if filter.accepts(e.kind) {
                     let f = e.cycle / cycles_per_frame;
+                    if hang.is_some() {
+                        ev_bodies.push(event_body(&e));
+                    }
                     evlines.push(render_record(&Record::Event(e), f, format));
                 }
             }
             machine.clear_trace_events();
             lines.extend(evlines);
+            if let Some(h) = hang.as_mut() {
+                for body in ev_bodies {
+                    h.note_event(body);
+                }
+            }
         }
 
         for line in &lines {
@@ -381,7 +544,21 @@ fn run_cycle_loop(cl: CycleLoop) -> Result<String, String> {
         }
         emitted += lines.len();
 
-        if hit_break || (stop_on_watch && watch_fired) {
+        // Hang detection samples per-CPU PC at frame boundaries (last cycle of
+        // a frame). The completed frame index is `cycle / cpf`.
+        let mut hang_fired = false;
+        if (cycle + 1).is_multiple_of(cycles_per_frame)
+            && let Some(h) = hang.as_mut()
+        {
+            let frame_done = cycle / cycles_per_frame;
+            for line in h.observe_frame(harness.machine_mut(), frame_done) {
+                writeln!(sink, "{line}").map_err(|e| format!("writing trace: {e}"))?;
+                emitted += 1;
+                hang_fired = true;
+            }
+        }
+
+        if hit_break || (stop_on_watch && watch_fired) || (stop_on_hang && hang_fired) {
             break;
         }
     }
@@ -1094,6 +1271,8 @@ mod tests {
                 None,
                 None,
                 false,
+                false,
+                false,
                 TraceFormat::Text,
                 None,
                 "."
@@ -1112,6 +1291,8 @@ mod tests {
                 None,
                 None,
                 None,
+                false,
+                false,
                 false,
                 TraceFormat::Text,
                 None,
@@ -1201,6 +1382,42 @@ mod tests {
         assert!(json.starts_with('{') && json.ends_with('}'), "{json}");
     }
 
+    #[test]
+    fn hang_render_text_and_jsonl() {
+        // Mirrors the Dig Dug report: cpu0 stuck at 0x1BCC (B=08), $1BC8..$1BD0.
+        let report = HangReport {
+            cpu_index: 0,
+            pc: 0x1BCC,
+            window_lo: 0x1BC8,
+            window_hi: 0x1BD0,
+            frames_stuck: 120,
+        };
+        let regs = [DebugRegister {
+            name: "B",
+            value: 0x08,
+            width: 8,
+        }];
+        let ctx = ["wdog", "bank $C900=$01 [ROM Bank]"];
+
+        let text = render_hang(&report, &regs, &ctx, 3100, TraceFormat::Text);
+        assert!(text.contains("HANG: cpu0"), "{text}");
+        assert!(text.contains("$1BC8..$1BD0"), "{text}");
+        assert!(text.contains("for 120 frames"), "{text}");
+        assert!(text.contains("pc=1BCC"), "{text}");
+        assert!(text.contains("B=08"), "{text}");
+        assert!(text.contains("context: wdog | bank $C900=$01"), "{text}");
+
+        let json = render_hang(&report, &regs, &ctx, 3100, TraceFormat::Jsonl);
+        assert!(json.contains("\"stream\":\"hang\""), "{json}");
+        assert!(json.contains("\"cpu\":0"), "{json}");
+        assert!(json.contains("\"pc\":\"1BCC\""), "{json}");
+        assert!(json.contains("\"window_lo\":\"1BC8\""), "{json}");
+        assert!(json.contains("\"window_hi\":\"1BD0\""), "{json}");
+        assert!(json.contains("\"frames_stuck\":120"), "{json}");
+        assert!(json.contains("\"context\":["), "{json}");
+        assert!(json.starts_with('{') && json.ends_with('}'), "{json}");
+    }
+
     // ---- ROM-gated end-to-end boot test (skips when ROMs are absent) --------
 
     /// Locate a ROM directory for the gated integration test: `PHOSPHOR_ROMS`
@@ -1241,6 +1458,8 @@ mod tests {
             None,
             None,
             None,
+            false,
+            false,
             false,
             TraceFormat::Jsonl,
             None,
@@ -1291,6 +1510,8 @@ mod tests {
             None,
             None,
             false,
+            false,
+            false,
             TraceFormat::Text,
             None,
             path,
@@ -1324,6 +1545,8 @@ mod tests {
             None,
             None,
             false,
+            false,
+            false,
             TraceFormat::Text,
             None,
             path,
@@ -1336,6 +1559,46 @@ mod tests {
             hits.iter().all(|l| l.contains("$C900=$01")),
             "only the =01 write may fire, not =00:\n{out}"
         );
+    }
+
+    #[test]
+    fn joust_hang_detection_flags_idle_sound_cpu() {
+        let Some(roms) = roms_dir() else {
+            return;
+        };
+        let path = roms.to_str().unwrap();
+
+        // End-to-end: joust's M6800 sound CPU (cpu1) sits in a tight wait loop
+        // at $F7F8 from boot, so the 120-frame detector reports it — a real,
+        // deterministic detection (and a demonstration of the PC-sampling
+        // limitation: an idle wait loop reads the same as a hang). --hang
+        // alone is a valid observer, and --stop-on-hang halts at the report.
+        let out = run_trace(
+            "joust",
+            200,
+            0,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            true, // --hang
+            true, // --stop-on-hang
+            TraceFormat::Text,
+            None,
+            path,
+        )
+        .expect("trace run");
+
+        let hang: Vec<&str> = out.lines().filter(|l| l.contains("=== HANG")).collect();
+        assert_eq!(hang.len(), 1, "expected exactly one hang report:\n{out}");
+        let line = hang[0];
+        assert!(line.contains("cpu1"), "sound CPU should be flagged: {line}");
+        assert!(line.contains("pc=F7F8"), "idle loop PC: {line}");
+        assert!(line.contains("for 120 frames"), "threshold: {line}");
+        assert!(line.contains("SP="), "register columns present: {line}");
     }
 
     #[test]
@@ -1357,6 +1620,8 @@ mod tests {
             None,
             None,
             None,
+            false,
+            false,
             false,
             TraceFormat::Jsonl,
             None,
@@ -1401,6 +1666,8 @@ mod tests {
             None,
             cpu,
             break_pc,
+            false,
+            false,
             false,
             format,
             Some(&p),

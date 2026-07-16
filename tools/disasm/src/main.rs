@@ -192,6 +192,13 @@ enum Command {
         /// Stop at the first watchpoint hit (per-cycle loop).
         #[arg(long)]
         stop_on_watch: bool,
+        /// Detect hangs: report a CPU whose PC stays in a small window for
+        /// ~120 frames (a stuck loop), with its registers and recent events.
+        #[arg(long)]
+        hang: bool,
+        /// Stop when a hang is detected.
+        #[arg(long)]
+        stop_on_hang: bool,
         /// Output format.
         #[arg(long, value_enum, default_value_t = TraceFormat::Text)]
         format: TraceFormat,
@@ -357,6 +364,8 @@ fn run_command(cmd: Command) -> Result<String, String> {
             cpu,
             break_pc,
             stop_on_watch,
+            hang,
+            stop_on_hang,
             format,
             out,
             path,
@@ -371,6 +380,8 @@ fn run_command(cmd: Command) -> Result<String, String> {
             cpu.as_deref(),
             break_pc.as_deref(),
             stop_on_watch,
+            hang,
+            stop_on_hang,
             format,
             out.as_deref(),
             &path,
