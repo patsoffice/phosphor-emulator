@@ -166,6 +166,11 @@ enum Command {
         /// Pulse the machine's coin input at this frame.
         #[arg(long)]
         coin_at: Option<usize>,
+        /// Script input presses to reach gameplay: comma-separated
+        /// `<control>@<frame>[:<hold>]` (e.g. `fire1@120`, `coin@60:8`).
+        /// `control` is a stable input name from the machine's control table.
+        #[arg(long)]
+        press: Option<String>,
         /// Load a factory-initialized NVRAM before running.
         #[arg(long)]
         nvram: Option<PathBuf>,
@@ -358,6 +363,7 @@ fn run_command(cmd: Command) -> Result<String, String> {
             frames,
             from_frame,
             coin_at,
+            press,
             nvram,
             events,
             watch,
@@ -374,6 +380,7 @@ fn run_command(cmd: Command) -> Result<String, String> {
             frames,
             from_frame,
             coin_at,
+            press.as_deref(),
             nvram.as_deref(),
             events.as_deref(),
             watch.as_deref(),
@@ -410,7 +417,7 @@ fn run_frameshot(
     audio_out: Option<&Path>,
     path: &str,
 ) -> Result<String, String> {
-    let mut harness = Harness::build(machine, path, nvram, coin_at)?;
+    let mut harness = Harness::build(machine, path, nvram, coin_at, &[])?;
     for _ in 0..frames {
         harness.run_frame();
     }

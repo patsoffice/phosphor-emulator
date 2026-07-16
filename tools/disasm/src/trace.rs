@@ -36,7 +36,7 @@ use phosphor_core::core::watchpoint::{
 };
 use phosphor_core::cpu::disasm::DisassembledInstruction;
 
-use crate::harness::Harness;
+use crate::harness::{Harness, PressSpec};
 
 /// Output serialization for a trace run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -198,6 +198,7 @@ pub fn run_trace(
     frames: usize,
     from_frame: usize,
     coin_at: Option<usize>,
+    press: Option<&str>,
     nvram: Option<&Path>,
     events: Option<&str>,
     watch: Option<&str>,
@@ -237,8 +238,12 @@ pub fn run_trace(
         Some(spec) => parse_break_specs(spec)?,
         None => Vec::new(),
     };
+    let press_specs = match press {
+        Some(spec) => parse_press_specs(spec)?,
+        None => Vec::new(),
+    };
 
-    let mut harness = Harness::build(machine, path, nvram, coin_at)?;
+    let mut harness = Harness::build(machine, path, nvram, coin_at, &press_specs)?;
     let cycles_per_frame = harness.machine_mut().cycles_per_frame();
 
     // Resolve CPU names/indices against the booted machine's bus (cycle mode).
@@ -771,6 +776,48 @@ fn parse_cpu_specs(spec: &str) -> Result<Vec<CpuSpec>, String> {
     Ok(specs)
 }
 
+/// Parse a `--press` value: comma-separated `<control>@<frame>[:<hold>]`
+/// entries (e.g. `fire1@120`, `coin@60:8`). `control` is a machine's stable
+/// input name; `hold` frames defaults to the harness default.
+fn parse_press_specs(spec: &str) -> Result<Vec<PressSpec>, String> {
+    let mut specs = Vec::new();
+    for part in spec.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        let (control, rest) = part
+            .split_once('@')
+            .ok_or_else(|| format!("bad --press entry '{part}'; expected control@frame[:hold]"))?;
+        let (at_str, hold) = match rest.split_once(':') {
+            Some((a, h)) => (
+                a,
+                h.trim()
+                    .parse::<usize>()
+                    .map_err(|_| format!("bad hold '{h}' in --press entry '{part}'"))?,
+            ),
+            None => (rest, 8),
+        };
+        let at = at_str
+            .trim()
+            .parse::<usize>()
+            .map_err(|_| format!("bad frame '{at_str}' in --press entry '{part}'"))?;
+        let control = control.trim();
+        if control.is_empty() {
+            return Err(format!("bad --press entry '{part}'; empty control name"));
+        }
+        specs.push(PressSpec {
+            control: control.to_string(),
+            at,
+            hold,
+        });
+    }
+    if specs.is_empty() {
+        return Err("--press was empty; give one or more control@frame[:hold] entries".to_string());
+    }
+    Ok(specs)
+}
+
 /// Parse a `--break-pc` value: comma-separated `<cpu>:<addr>` entries.
 fn parse_break_specs(spec: &str) -> Result<Vec<(String, u32)>, String> {
     let mut specs = Vec::new();
@@ -1270,6 +1317,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
                 false,
                 false,
                 false,
@@ -1285,6 +1333,7 @@ mod tests {
                 "joust",
                 10,
                 20,
+                None,
                 None,
                 None,
                 Some("all"),
@@ -1326,6 +1375,23 @@ mod tests {
         assert!(parse_break_specs("0xF000").is_err()); // no colon
         assert!(parse_break_specs("0:zz").is_err()); // bad addr
         assert!(parse_break_specs("").is_err());
+    }
+
+    #[test]
+    fn press_specs_parse_control_frame_hold() {
+        let s = parse_press_specs("fire1@120, coin@60:16").unwrap();
+        assert_eq!(s[0].control, "fire1");
+        assert_eq!(s[0].at, 120);
+        assert_eq!(s[0].hold, 8); // default hold
+        assert_eq!(s[1].control, "coin");
+        assert_eq!(s[1].at, 60);
+        assert_eq!(s[1].hold, 16);
+
+        assert!(parse_press_specs("fire1").is_err()); // no @frame
+        assert!(parse_press_specs("fire1@zz").is_err()); // bad frame
+        assert!(parse_press_specs("fire1@10:zz").is_err()); // bad hold
+        assert!(parse_press_specs("@10").is_err()); // empty control
+        assert!(parse_press_specs("").is_err());
     }
 
     #[test]
@@ -1454,6 +1520,7 @@ mod tests {
             0,
             None,
             None,
+            None,
             Some("bank,devwrite"),
             None,
             None,
@@ -1506,6 +1573,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             Some("0:0xC900:w"),
             None,
             None,
@@ -1538,6 +1606,7 @@ mod tests {
             "joust",
             30,
             0,
+            None,
             None,
             None,
             None,
@@ -1583,6 +1652,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             false,
             true, // --hang
             true, // --stop-on-hang
@@ -1614,6 +1684,7 @@ mod tests {
             "joust",
             111,
             110,
+            None,
             None,
             None,
             Some("all"),
@@ -1660,6 +1731,7 @@ mod tests {
             "joust",
             frames,
             from_frame,
+            None,
             None,
             None,
             None,
