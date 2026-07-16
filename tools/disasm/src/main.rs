@@ -173,8 +173,10 @@ enum Command {
         /// list (e.g. `devwrite,bank,watchdog`) or `all`.
         #[arg(long)]
         events: Option<String>,
-        /// Set memory watchpoint(s): comma-separated `cpu:addr:kind` specs,
-        /// kind = `r`/`w`/`rw` (e.g. `0:0x87cf:w`). Every hit is logged.
+        /// Set memory watchpoint(s): comma-separated `cpu:addr:kind[:cond]`
+        /// specs, kind = `r`/`w`/`rw`. Optional `cond` gates on the value:
+        /// `=HEX` equals, `&MASK=HEX` bit test, `chg` changed (hex operands).
+        /// E.g. `0:0x87cf:w`, `0:0x4000:w:=4E5F`, `1:0x20:w:chg`.
         #[arg(long)]
         watch: Option<String>,
         /// Instruction-trace these CPU(s): comma-separated `<name|idx>[:regs]`

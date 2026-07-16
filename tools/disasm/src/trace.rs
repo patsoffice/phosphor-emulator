@@ -28,7 +28,9 @@ use std::path::Path;
 use clap::ValueEnum;
 use phosphor_core::core::debug::DebugRegister;
 use phosphor_core::core::debug_trace::{DebugEvent, DebugEventKind};
-use phosphor_core::core::watchpoint::{DebugAccessSource, WatchpointHit, WatchpointKind};
+use phosphor_core::core::watchpoint::{
+    DebugAccessSource, WatchpointCondition, WatchpointHit, WatchpointKind,
+};
 use phosphor_core::cpu::disasm::DisassembledInstruction;
 
 use crate::harness::Harness;
@@ -43,12 +45,14 @@ pub enum TraceFormat {
     Jsonl,
 }
 
-/// A parsed `--watch cpu:addr:kind` request (may set two watchpoints for `rw`).
+/// A parsed `--watch cpu:addr:kind[:cond]` request (may set two watchpoints
+/// for `rw`; both share the condition).
 struct WatchSpec {
     cpu: usize,
     addr: u32,
     read: bool,
     write: bool,
+    condition: WatchpointCondition,
 }
 
 /// One observed record, tagged by which stream produced it.
@@ -145,14 +149,20 @@ pub fn run_trace(
     }
     for w in &watch_specs {
         if w.read {
-            harness
-                .machine_mut()
-                .set_watchpoint(w.cpu, w.addr, WatchpointKind::Read);
+            harness.machine_mut().set_watchpoint_cond(
+                w.cpu,
+                w.addr,
+                WatchpointKind::Read,
+                w.condition,
+            );
         }
         if w.write {
-            harness
-                .machine_mut()
-                .set_watchpoint(w.cpu, w.addr, WatchpointKind::Write);
+            harness.machine_mut().set_watchpoint_cond(
+                w.cpu,
+                w.addr,
+                WatchpointKind::Write,
+                w.condition,
+            );
         }
     }
 
@@ -475,12 +485,15 @@ fn parse_watch_specs(spec: &str) -> Result<Vec<WatchSpec>, String> {
     Ok(specs)
 }
 
-/// Parse one `cpu:addr:kind` spec (kind = `r`, `w`, or `rw`).
+/// Parse one `cpu:addr:kind[:cond]` spec (kind = `r`, `w`, or `rw`).
+///
+/// The optional 4th field is a value condition: `=HEX` (equals), `&MASK=HEX`
+/// (bit test), or `chg` (changed); absent means fire on any access.
 fn parse_watch_spec(part: &str) -> Result<WatchSpec, String> {
     let fields: Vec<&str> = part.split(':').collect();
-    if fields.len() != 3 {
+    if fields.len() < 3 || fields.len() > 4 {
         return Err(format!(
-            "bad watch spec '{part}'; expected cpu:addr:kind (e.g. 0:0x87cf:w)"
+            "bad watch spec '{part}'; expected cpu:addr:kind[:cond] (e.g. 0:0x87cf:w or 0:0x4000:w:=4E5F)"
         ));
     }
     let cpu = fields[0]
@@ -499,12 +512,52 @@ fn parse_watch_spec(part: &str) -> Result<WatchSpec, String> {
             ));
         }
     };
+    let condition = match fields.get(3) {
+        Some(cond) => parse_condition(cond)
+            .map_err(|e| format!("bad condition in watch spec '{part}': {e}"))?,
+        None => WatchpointCondition::Always,
+    };
     Ok(WatchSpec {
         cpu,
         addr,
         read,
         write,
+        condition,
     })
+}
+
+/// Hex-only parse (optional `0x`) for condition operands, which are always hex.
+fn parse_cond_hex(s: &str) -> Result<u32, String> {
+    let t = s.trim();
+    let digits = t
+        .strip_prefix("0x")
+        .or_else(|| t.strip_prefix("0X"))
+        .unwrap_or(t);
+    u32::from_str_radix(digits, 16).map_err(|_| format!("invalid hex '{s}'"))
+}
+
+/// Parse a watchpoint condition: `=HEX` equals, `&MASK=HEX` bit test, `chg`
+/// changed. Operands are hex (with or without a `0x` prefix).
+fn parse_condition(spec: &str) -> Result<WatchpointCondition, String> {
+    let s = spec.trim();
+    if s.eq_ignore_ascii_case("chg") || s.eq_ignore_ascii_case("changed") {
+        return Ok(WatchpointCondition::Changed);
+    }
+    if let Some(rest) = s.strip_prefix('=') {
+        return Ok(WatchpointCondition::Equals(parse_cond_hex(rest)?));
+    }
+    if let Some(rest) = s.strip_prefix('&') {
+        let (mask, expected) = rest
+            .split_once('=')
+            .ok_or_else(|| format!("bad bits condition '{s}'; expected &MASK=HEX"))?;
+        return Ok(WatchpointCondition::Bits {
+            mask: parse_cond_hex(mask)?,
+            expected: parse_cond_hex(expected)?,
+        });
+    }
+    Err(format!(
+        "bad condition '{s}'; expected =HEX, &MASK=HEX, or chg"
+    ))
 }
 
 /// A `--cpu` entry before name resolution: a CPU token plus a `:regs` flag.
@@ -897,10 +950,43 @@ mod tests {
         // Bare numbers parse as decimal (matching the rest of the CLI).
         assert_eq!(parse_watch_spec("0:4000:r").unwrap().addr, 4000);
 
+        // No condition field defaults to Always.
+        assert_eq!(r.condition, WatchpointCondition::Always);
+
         assert!(parse_watch_spec("0:0x10").is_err()); // too few fields
         assert!(parse_watch_spec("x:0x10:r").is_err()); // bad cpu
         assert!(parse_watch_spec("0:zz:r").is_err()); // bad addr
         assert!(parse_watch_spec("0:0x10:x").is_err()); // bad kind
+        assert!(parse_watch_spec("0:0x10:w:junk").is_err()); // bad condition
+        assert!(parse_watch_spec("0:0x10:w:=1:extra").is_err()); // too many fields
+    }
+
+    #[test]
+    fn watch_spec_conditions() {
+        // Condition operands are hex (no 0x needed).
+        assert_eq!(
+            parse_watch_spec("0:0x4000:w:=4E5F").unwrap().condition,
+            WatchpointCondition::Equals(0x4E5F)
+        );
+        assert_eq!(
+            parse_watch_spec("0:0x20:w:&F0=50").unwrap().condition,
+            WatchpointCondition::Bits {
+                mask: 0xF0,
+                expected: 0x50
+            }
+        );
+        assert_eq!(
+            parse_watch_spec("1:0x20:w:chg").unwrap().condition,
+            WatchpointCondition::Changed
+        );
+        // Direct parse_condition coverage.
+        assert_eq!(
+            parse_condition("=0x1f").unwrap(),
+            WatchpointCondition::Equals(0x1F)
+        );
+        assert!(parse_condition("&F0").is_err()); // missing =EXPECTED
+        assert!(parse_condition("=zz").is_err()); // bad hex
+        assert!(parse_condition("nope").is_err());
     }
 
     #[test]
@@ -1215,6 +1301,40 @@ mod tests {
             out.lines()
                 .any(|l| l.contains("$C900") && l.trim_end().ends_with("; watch")),
             "expected a watchpoint hit on $C900:\n{out}"
+        );
+    }
+
+    #[test]
+    fn joust_conditional_watch_fires_only_on_matching_value() {
+        let Some(roms) = roms_dir() else {
+            return;
+        };
+        let path = roms.to_str().unwrap();
+
+        // During boot the C900 bank latch takes 0x01 then 0x00. An Equals(0x01)
+        // condition must fire on the 0x01 write and NOT on the 0x00 write.
+        let out = run_trace(
+            "joust",
+            30,
+            0,
+            None,
+            None,
+            None,
+            Some("0:0xC900:w:=01"),
+            None,
+            None,
+            false,
+            TraceFormat::Text,
+            None,
+            path,
+        )
+        .expect("trace run");
+
+        let hits: Vec<&str> = out.lines().filter(|l| l.contains("$C900")).collect();
+        assert!(!hits.is_empty(), "the =01 write should fire:\n{out}");
+        assert!(
+            hits.iter().all(|l| l.contains("$C900=$01")),
+            "only the =01 write may fire, not =00:\n{out}"
         );
     }
 
