@@ -177,6 +177,19 @@ enum Command {
         /// kind = `r`/`w`/`rw` (e.g. `0:0x87cf:w`). Every hit is logged.
         #[arg(long)]
         watch: Option<String>,
+        /// Instruction-trace these CPU(s): comma-separated `<name|idx>[:regs]`
+        /// (e.g. `main`, `0:regs`, `0,1`). `:regs` appends a register snapshot.
+        /// Switches to the per-cycle loop; large traces — bound with
+        /// `--from-frame`/`--frames`.
+        #[arg(long)]
+        cpu: Option<String>,
+        /// Stop when a CPU reaches an address: comma-separated `<cpu>:<addr>`
+        /// (e.g. `0:0xF000`). Also switches to the per-cycle loop.
+        #[arg(long)]
+        break_pc: Option<String>,
+        /// Stop at the first watchpoint hit (per-cycle loop).
+        #[arg(long)]
+        stop_on_watch: bool,
         /// Output format.
         #[arg(long, value_enum, default_value_t = TraceFormat::Text)]
         format: TraceFormat,
@@ -339,6 +352,9 @@ fn run_command(cmd: Command) -> Result<String, String> {
             nvram,
             events,
             watch,
+            cpu,
+            break_pc,
+            stop_on_watch,
             format,
             out,
             path,
@@ -350,6 +366,9 @@ fn run_command(cmd: Command) -> Result<String, String> {
             nvram.as_deref(),
             events.as_deref(),
             watch.as_deref(),
+            cpu.as_deref(),
+            break_pc.as_deref(),
+            stop_on_watch,
             format,
             out.as_deref(),
             &path,

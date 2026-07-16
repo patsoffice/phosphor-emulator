@@ -1,29 +1,35 @@
-//! Headless CPU/bus trace — the frame-loop half of `disasm trace`.
+//! Headless CPU/bus trace — the `disasm trace` subcommand.
 //!
 //! Boots a registered machine (via [`Harness`]), runs it for a frame window,
-//! and observes two correlated-by-cycle streams the interactive debugger
-//! already produces but that were previously reachable only from the SDL
-//! frontend:
+//! and observes the state streams the interactive debugger produces but that
+//! were previously reachable only from the SDL frontend. Two loops, chosen by
+//! the requested observers:
 //!
-//! - `--events <kinds|all>` enables the board's [`DebugTrace`] ring and
-//!   collects the recorded hardware events (device writes, bank switches,
-//!   interrupt edges, watchdog kicks, …).
-//! - `--watch <cpu:addr:kind>` sets memory watchpoints and logs every hit.
+//! **Frame loop** (`--events`/`--watch` only) — runs whole frames and drains,
+//! per frame, the board's [`DebugTrace`] event ring (`--events <kinds|all>`:
+//! device writes, bank switches, interrupt edges, watchdog kicks, …) and the
+//! watchpoint hit queue (`--watch <cpu:addr:kind>`). Records are merged and
+//! emitted cycle-sorted. Bounded memory.
 //!
-//! Both streams carry a machine `cycle`, so the collected records are merged
-//! and emitted cycle-sorted in either human `text` or machine-diffable
-//! `jsonl` form. `--from-frame N` seeks cheaply (runs fast to N with the
-//! observers off, then turns them on) so long runs need not emit from frame 0.
+//! **Cycle loop** (`--cpu` instruction trace or `--break-pc`) — drives
+//! `debug_tick()` per cycle, disassembles at each traced CPU's instruction
+//! boundaries (optional `:regs` register columns), correlates any watchpoint
+//! hits/events by cycle, and honors `--break-pc`/`--stop-on-watch`. It streams
+//! straight to the output writer, so an instruction trace is unbounded by
+//! design (never materialized in memory).
 //!
-//! This module is the frame loop only. The cycle-granular instruction trace
-//! and `--break-pc`/stop conditions (driven by `debug_tick`) are a separate
-//! feature and will share the same [`Harness`] and record/output model.
+//! Both loops emit human `text` or machine-diffable `jsonl`, and `--from-frame
+//! N` seeks cheaply (runs fast to N with the observers off, then arms them) so
+//! long runs need not emit from frame 0.
 
+use std::io::{BufWriter, Write};
 use std::path::Path;
 
 use clap::ValueEnum;
+use phosphor_core::core::debug::DebugRegister;
 use phosphor_core::core::debug_trace::{DebugEvent, DebugEventKind};
 use phosphor_core::core::watchpoint::{DebugAccessSource, WatchpointHit, WatchpointKind};
+use phosphor_core::cpu::disasm::DisassembledInstruction;
 
 use crate::harness::Harness;
 
@@ -64,9 +70,19 @@ impl Record {
 
 /// Boot `machine`, run `frames` frames, and emit the requested trace.
 ///
-/// At least one observer (`--events` or `--watch`) must be requested — the
-/// cycle-loop observers (`--cpu`/`--break-pc`) are a separate feature, so a
-/// bare `trace` run would have nothing to report.
+/// Two loops, chosen by the requested observers (they need different
+/// granularity):
+///
+/// - **Frame loop** — `--events`/`--watch` only. Runs `run_frame()` per frame
+///   and drains the event ring + watchpoint queue; records are merged and
+///   emitted cycle-sorted. Bounded memory, cheap.
+/// - **Cycle loop** — whenever `--cpu` (instruction trace) or `--break-pc` is
+///   requested. Drives `debug_tick()` per cycle, disassembles at instruction
+///   boundaries, and honors `--break-pc`/`--stop-on-watch`. Streams straight
+///   to the output writer, so an instruction trace is unbounded by design.
+///
+/// At least one observer must be requested (`--cpu`, `--break-pc`, `--events`,
+/// or `--watch`), else there is nothing to report.
 #[allow(clippy::too_many_arguments)]
 pub fn run_trace(
     machine: &str,
@@ -76,13 +92,17 @@ pub fn run_trace(
     nvram: Option<&Path>,
     events: Option<&str>,
     watch: Option<&str>,
+    cpu: Option<&str>,
+    break_pc: Option<&str>,
+    stop_on_watch: bool,
     format: TraceFormat,
     out: Option<&Path>,
     path: &str,
 ) -> Result<String, String> {
-    if events.is_none() && watch.is_none() {
+    let cycle_mode = cpu.is_some() || break_pc.is_some();
+    if events.is_none() && watch.is_none() && !cycle_mode {
         return Err(
-            "trace needs at least one observer: --events <kinds|all> and/or --watch <cpu:addr:kind>"
+            "trace needs at least one observer: --cpu, --break-pc, --events, or --watch"
                 .to_string(),
         );
     }
@@ -92,15 +112,27 @@ pub fn run_trace(
         ));
     }
 
-    // Parse observer specs up front so bad grammar fails before booting.
+    // Parse every spec up front so bad grammar fails before booting.
     let event_filter = events.map(parse_event_kinds).transpose()?;
     let watch_specs = match watch {
         Some(spec) => parse_watch_specs(spec)?,
         None => Vec::new(),
     };
+    let cpu_specs = match cpu {
+        Some(spec) => parse_cpu_specs(spec)?,
+        None => Vec::new(),
+    };
+    let break_specs = match break_pc {
+        Some(spec) => parse_break_specs(spec)?,
+        None => Vec::new(),
+    };
 
     let mut harness = Harness::build(machine, path, nvram, coin_at)?;
     let cycles_per_frame = harness.machine_mut().cycles_per_frame();
+
+    // Resolve CPU names/indices against the booted machine's bus (cycle mode).
+    let traced = resolve_cpu_specs(&mut harness, &cpu_specs)?;
+    let breaks = resolve_break_specs(&mut harness, &break_specs)?;
 
     // Seek: run fast to the observation window with observers still off.
     for _ in 0..from_frame {
@@ -124,9 +156,46 @@ pub fn run_trace(
         }
     }
 
-    // Observe the window. Watchpoint hits are drained every frame (the pending
-    // queue is shallow); trace events are drained and cleared every frame so a
-    // run longer than the ring capacity does not silently lose early events.
+    if cycle_mode {
+        run_cycle_loop(CycleLoop {
+            harness: &mut harness,
+            from_frame,
+            frames,
+            cycles_per_frame,
+            traced: &traced,
+            breaks: &breaks,
+            stop_on_watch,
+            event_filter: &event_filter,
+            format,
+            out,
+        })
+    } else {
+        run_frame_loop(
+            &mut harness,
+            from_frame,
+            frames,
+            cycles_per_frame,
+            &event_filter,
+            format,
+            out,
+        )
+    }
+}
+
+/// The frame loop: run whole frames and collect the event ring + watchpoint
+/// hits, emitting them cycle-sorted. Bounded memory.
+fn run_frame_loop(
+    harness: &mut Harness,
+    from_frame: usize,
+    frames: usize,
+    cycles_per_frame: u64,
+    event_filter: &Option<EventFilter>,
+    format: TraceFormat,
+    out: Option<&Path>,
+) -> Result<String, String> {
+    // Watchpoint hits are drained every frame (the pending queue is shallow);
+    // trace events are drained and cleared every frame so a run longer than the
+    // ring capacity does not silently lose early events.
     let mut records: Vec<Record> = Vec::new();
     for _ in from_frame..frames {
         harness.run_frame();
@@ -135,7 +204,7 @@ pub fn run_trace(
             records.push(Record::Watch(hit));
         }
 
-        if let Some(filter) = &event_filter {
+        if let Some(filter) = event_filter {
             let machine = harness.machine_mut();
             for &e in machine.trace_events() {
                 if filter.accepts(e.kind) {
@@ -162,6 +231,159 @@ pub fn run_trace(
         }
         None => Ok(body),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Cycle loop (instruction trace + break-pc)
+// ---------------------------------------------------------------------------
+
+/// A CPU selected for instruction tracing, with whether to append registers.
+struct TracedCpu {
+    index: usize,
+    regs: bool,
+}
+
+/// Parameters for [`run_cycle_loop`] (grouped to keep the arg list sane).
+struct CycleLoop<'a> {
+    harness: &'a mut Harness,
+    from_frame: usize,
+    frames: usize,
+    cycles_per_frame: u64,
+    traced: &'a [TracedCpu],
+    breaks: &'a [(usize, u32)],
+    stop_on_watch: bool,
+    event_filter: &'a Option<EventFilter>,
+    format: TraceFormat,
+    out: Option<&'a Path>,
+}
+
+/// Max instruction length across all supported CPUs (M68000 `MOVE.L #,abs.l`).
+const MAX_INSN: usize = 10;
+
+/// The cycle loop: drive `debug_tick()` per cycle, disassemble at instruction
+/// boundaries for traced CPUs, log watchpoint hits and (optionally) events, and
+/// honor `--break-pc`/`--stop-on-watch`. Streams line-by-line to `out` (or
+/// stdout), so an instruction trace is never materialized in memory.
+fn run_cycle_loop(cl: CycleLoop) -> Result<String, String> {
+    let CycleLoop {
+        harness,
+        from_frame,
+        frames,
+        cycles_per_frame,
+        traced,
+        breaks,
+        stop_on_watch,
+        event_filter,
+        format,
+        out,
+    } = cl;
+
+    if cycles_per_frame == 0 {
+        return Err(
+            "machine reports 0 cycles/frame; the cycle loop (--cpu/--break-pc) is unavailable"
+                .to_string(),
+        );
+    }
+
+    // Stream to a file or stdout; BufWriter keeps per-line writes cheap.
+    let mut sink: Box<dyn Write> = match out {
+        Some(p) => Box::new(BufWriter::new(
+            std::fs::File::create(p).map_err(|e| format!("creating {}: {e}", p.display()))?,
+        )),
+        None => Box::new(BufWriter::new(std::io::stdout())),
+    };
+
+    // The machine clock after seeking `from_frame` whole frames. Each
+    // `debug_tick()` advances it by one; frames derive from it via /cpf.
+    let start_cycle = from_frame as u64 * cycles_per_frame;
+    let total_ticks = (frames - from_frame) as u64 * cycles_per_frame;
+    let mut emitted = 0usize;
+
+    for tick in 0..total_ticks {
+        let cycle = start_cycle + tick;
+        let boundaries = harness.machine_mut().debug_tick();
+        let frame = cycle / cycles_per_frame;
+
+        // Lines produced this cycle, in a stable sub-cycle order: instruction
+        // boundaries first, then watchpoint hits, then events.
+        let mut lines: Vec<String> = Vec::new();
+        let mut hit_break = false;
+
+        // Instruction trace + break-pc need the (immutable) debug bus; scope
+        // that borrow so the mutable `take_watchpoint_hit()` below is free.
+        if boundaries != 0
+            && let Some(bus) = harness.machine_mut().debug_bus()
+        {
+            let cpus = bus.cpus();
+            for t in traced {
+                if t.index < cpus.len() && (boundaries >> t.index) & 1 != 0 {
+                    let cpu = cpus[t.index].1;
+                    let pc = cpu.debug_pc();
+                    let mut bytes = [0u8; MAX_INSN];
+                    for (i, b) in bytes.iter_mut().enumerate() {
+                        *b = bus.read(t.index, pc.wrapping_add(i as u32)).unwrap_or(0);
+                    }
+                    let insn = cpu.debug_disassemble(pc, &bytes);
+                    let regs = t.regs.then(|| cpu.debug_registers());
+                    lines.push(render_instr(
+                        format,
+                        frame,
+                        cycle,
+                        t.index,
+                        pc,
+                        &insn,
+                        regs.as_deref(),
+                    ));
+                }
+            }
+            for &(bi, baddr) in breaks {
+                if bi < cpus.len() && (boundaries >> bi) & 1 != 0 && cpus[bi].1.debug_pc() == baddr
+                {
+                    hit_break = true;
+                }
+            }
+        }
+
+        // Watchpoint hits queued during this tick.
+        let mut watch_fired = false;
+        while let Some(hit) = harness.machine_mut().take_watchpoint_hit() {
+            watch_fired = true;
+            let f = hit.cycle / cycles_per_frame;
+            lines.push(render_record(&Record::Watch(hit), f, format));
+        }
+
+        // Events recorded during this tick (drain + clear the ring).
+        if let Some(filter) = event_filter {
+            let machine = harness.machine_mut();
+            let mut evlines: Vec<String> = Vec::new();
+            for &e in machine.trace_events() {
+                if filter.accepts(e.kind) {
+                    let f = e.cycle / cycles_per_frame;
+                    evlines.push(render_record(&Record::Event(e), f, format));
+                }
+            }
+            machine.clear_trace_events();
+            lines.extend(evlines);
+        }
+
+        for line in &lines {
+            writeln!(sink, "{line}").map_err(|e| format!("writing trace: {e}"))?;
+        }
+        emitted += lines.len();
+
+        if hit_break || (stop_on_watch && watch_fired) {
+            break;
+        }
+    }
+
+    sink.flush().map_err(|e| format!("flushing trace: {e}"))?;
+
+    let dest = out
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "stdout".to_string());
+    Ok(format!(
+        "trace: {emitted} line(s) over frames {from_frame}..{frames} -> {dest}\n"
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -285,6 +507,118 @@ fn parse_watch_spec(part: &str) -> Result<WatchSpec, String> {
     })
 }
 
+/// A `--cpu` entry before name resolution: a CPU token plus a `:regs` flag.
+struct CpuSpec {
+    token: String,
+    regs: bool,
+}
+
+/// Parse a `--cpu` value: comma-separated `<name|idx>[:regs]` entries.
+fn parse_cpu_specs(spec: &str) -> Result<Vec<CpuSpec>, String> {
+    let mut specs = Vec::new();
+    for part in spec.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        let (token, regs) = match part.rsplit_once(':') {
+            Some((head, tail)) if tail.eq_ignore_ascii_case("regs") => (head.trim(), true),
+            _ => (part, false),
+        };
+        if token.is_empty() {
+            return Err(format!(
+                "bad --cpu entry '{part}'; expected <name|idx>[:regs]"
+            ));
+        }
+        specs.push(CpuSpec {
+            token: token.to_string(),
+            regs,
+        });
+    }
+    if specs.is_empty() {
+        return Err("--cpu was empty; give one or more <name|idx>[:regs] entries".to_string());
+    }
+    Ok(specs)
+}
+
+/// Parse a `--break-pc` value: comma-separated `<cpu>:<addr>` entries.
+fn parse_break_specs(spec: &str) -> Result<Vec<(String, u32)>, String> {
+    let mut specs = Vec::new();
+    for part in spec.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        let (cpu, addr) = part
+            .split_once(':')
+            .ok_or_else(|| format!("bad --break-pc entry '{part}'; expected cpu:addr"))?;
+        let addr = crate::parse_u32_auto(addr)
+            .map_err(|e| format!("bad address in --break-pc entry '{part}': {e}"))?;
+        specs.push((cpu.trim().to_string(), addr));
+    }
+    if specs.is_empty() {
+        return Err("--break-pc was empty; give one or more cpu:addr entries".to_string());
+    }
+    Ok(specs)
+}
+
+/// Snapshot the booted machine's CPU names (owned, so the bus borrow ends).
+fn cpu_names(harness: &mut Harness) -> Result<Vec<String>, String> {
+    let bus = harness
+        .machine_mut()
+        .debug_bus()
+        .ok_or("machine exposes no debug bus (cannot resolve --cpu/--break-pc)")?;
+    Ok(bus.cpus().iter().map(|(n, _)| n.to_string()).collect())
+}
+
+/// Resolve a CPU token (decimal index or case-insensitive name) to an index.
+fn resolve_cpu_token(token: &str, names: &[String]) -> Result<usize, String> {
+    if let Ok(idx) = token.parse::<usize>() {
+        return if idx < names.len() {
+            Ok(idx)
+        } else {
+            Err(format!(
+                "cpu index {idx} out of range (machine has {} CPU(s))",
+                names.len()
+            ))
+        };
+    }
+    names
+        .iter()
+        .position(|n| n.eq_ignore_ascii_case(token))
+        .ok_or_else(|| format!("unknown cpu '{token}'; available: {}", names.join(", ")))
+}
+
+fn resolve_cpu_specs(harness: &mut Harness, specs: &[CpuSpec]) -> Result<Vec<TracedCpu>, String> {
+    if specs.is_empty() {
+        return Ok(Vec::new());
+    }
+    let names = cpu_names(harness)?;
+    specs
+        .iter()
+        .map(|s| {
+            resolve_cpu_token(&s.token, &names).map(|index| TracedCpu {
+                index,
+                regs: s.regs,
+            })
+        })
+        .collect()
+}
+
+fn resolve_break_specs(
+    harness: &mut Harness,
+    specs: &[(String, u32)],
+) -> Result<Vec<(usize, u32)>, String> {
+    if specs.is_empty() {
+        return Ok(Vec::new());
+    }
+    let names = cpu_names(harness)?;
+    specs
+        .iter()
+        .map(|(tok, addr)| resolve_cpu_token(tok, &names).map(|idx| (idx, *addr)))
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // Rendering
 // ---------------------------------------------------------------------------
@@ -305,6 +639,80 @@ fn render(records: &[Record], cycles_per_frame: u64, format: TraceFormat) -> Str
 /// Frame index containing `cycle` (0 when the machine reports no frame length).
 fn frame_of(cycle: u64, cycles_per_frame: u64) -> u64 {
     cycle.checked_div(cycles_per_frame).unwrap_or(0)
+}
+
+/// Render one event/watch record in the requested format (no trailing newline).
+fn render_record(record: &Record, frame: u64, format: TraceFormat) -> String {
+    match format {
+        TraceFormat::Text => render_text(record, frame),
+        TraceFormat::Jsonl => render_jsonl(record, frame),
+    }
+}
+
+/// Register columns for an instruction line, e.g. `A=42 X=1BCC`.
+fn fmt_regs_text(regs: &[DebugRegister]) -> String {
+    regs.iter()
+        .map(|r| {
+            let digits = (r.width.max(4) as usize).div_ceil(4);
+            format!("{}={:0digits$X}", r.name, r.value)
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Registers as a JSON object, e.g. `{"A":"42","X":"1BCC"}`.
+fn fmt_regs_json(regs: &[DebugRegister]) -> String {
+    let fields: Vec<String> = regs
+        .iter()
+        .map(|r| {
+            let digits = (r.width.max(4) as usize).div_ceil(4);
+            format!("{}:\"{:0digits$X}\"", json_str(r.name), r.value)
+        })
+        .collect();
+    format!("{{{}}}", fields.join(","))
+}
+
+/// An instruction-trace line for a CPU at an instruction boundary.
+fn render_instr(
+    format: TraceFormat,
+    frame: u64,
+    cycle: u64,
+    cpu_index: usize,
+    pc: u32,
+    insn: &DisassembledInstruction,
+    regs: Option<&[DebugRegister]>,
+) -> String {
+    let raw = &insn.bytes[..insn.byte_len.min(insn.bytes.len() as u8) as usize];
+    let hex = raw
+        .iter()
+        .map(|b| format!("{b:02X}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let disasm = format!("{insn}");
+    match format {
+        TraceFormat::Text => {
+            let mut line = format!(
+                "frame {frame:<5} cyc {cycle:<10} cpu{cpu_index} pc={pc:04X}  {hex:<14} {disasm}"
+            );
+            if let Some(regs) = regs {
+                line.push_str(&format!("  {}", fmt_regs_text(regs)));
+            }
+            line.push_str("  ; instr");
+            line
+        }
+        TraceFormat::Jsonl => {
+            let regs_json = match regs {
+                Some(regs) => fmt_regs_json(regs),
+                None => "null".to_string(),
+            };
+            format!(
+                "{{\"frame\":{frame},\"cycle\":{cycle},\"cpu\":{cpu_index},\"pc\":\"{pc:X}\",\
+                 \"stream\":\"instr\",\"bytes\":{},\"text\":{},\"regs\":{regs_json}}}",
+                json_str(&hex.replace(' ', "")),
+                json_str(&disasm),
+            )
+        }
+    }
 }
 
 /// `cpuN` label for a source/cpu-index pair.
@@ -597,6 +1005,9 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
+                None,
+                false,
                 TraceFormat::Text,
                 None,
                 "."
@@ -613,12 +1024,95 @@ mod tests {
                 None,
                 Some("all"),
                 None,
+                None,
+                None,
+                false,
                 TraceFormat::Text,
                 None,
                 "."
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn cpu_specs_parse_tokens_and_regs() {
+        let s = parse_cpu_specs("0, main:regs ,1").unwrap();
+        assert_eq!(s.len(), 3);
+        assert_eq!(s[0].token, "0");
+        assert!(!s[0].regs);
+        assert_eq!(s[1].token, "main");
+        assert!(s[1].regs);
+        assert_eq!(s[2].token, "1");
+        assert!(!s[2].regs);
+
+        assert!(parse_cpu_specs("").is_err());
+        assert!(parse_cpu_specs(":regs").is_err()); // empty token
+    }
+
+    #[test]
+    fn break_specs_parse_cpu_and_addr() {
+        let s = parse_break_specs("0:0xF000, main:4096").unwrap();
+        assert_eq!(s[0], ("0".to_string(), 0xF000));
+        assert_eq!(s[1], ("main".to_string(), 4096)); // bare = decimal
+
+        assert!(parse_break_specs("0xF000").is_err()); // no colon
+        assert!(parse_break_specs("0:zz").is_err()); // bad addr
+        assert!(parse_break_specs("").is_err());
+    }
+
+    #[test]
+    fn resolve_cpu_token_by_index_and_name() {
+        let names = vec!["M6809 Main".to_string(), "M6800 Sound".to_string()];
+        assert_eq!(resolve_cpu_token("0", &names).unwrap(), 0);
+        assert_eq!(resolve_cpu_token("1", &names).unwrap(), 1);
+        // Case-insensitive name match.
+        assert_eq!(resolve_cpu_token("m6800 sound", &names).unwrap(), 1);
+        assert!(resolve_cpu_token("2", &names).is_err()); // out of range
+        assert!(resolve_cpu_token("nope", &names).is_err()); // unknown name
+    }
+
+    #[test]
+    fn instr_render_text_and_jsonl() {
+        let mut bytes = [0u8; 10];
+        bytes[0] = 0x86;
+        bytes[1] = 0x42;
+        let insn = DisassembledInstruction {
+            mnemonic: "LDA",
+            operands: "#$42".to_string(),
+            byte_len: 2,
+            bytes,
+            target_addr: None,
+        };
+        let regs = [
+            DebugRegister {
+                name: "A",
+                value: 0x42,
+                width: 8,
+            },
+            DebugRegister {
+                name: "X",
+                value: 0x1BCC,
+                width: 16,
+            },
+        ];
+
+        let text = render_instr(TraceFormat::Text, 5, 100, 0, 0x1000, &insn, Some(&regs));
+        assert!(text.contains("frame 5"), "{text}");
+        assert!(text.contains("cpu0 pc=1000"), "{text}");
+        assert!(text.contains("86 42"), "{text}");
+        assert!(text.contains("LDA"), "{text}");
+        assert!(text.contains("#$42"), "{text}");
+        assert!(text.contains("A=42"), "{text}");
+        assert!(text.contains("X=1BCC"), "{text}");
+        assert!(text.trim_end().ends_with("; instr"), "{text}");
+
+        let json = render_instr(TraceFormat::Jsonl, 5, 100, 0, 0x1000, &insn, None);
+        assert!(json.contains("\"stream\":\"instr\""), "{json}");
+        assert!(json.contains("\"pc\":\"1000\""), "{json}");
+        assert!(json.contains("\"bytes\":\"8642\""), "{json}");
+        assert!(json.contains("\"regs\":null"), "{json}");
+        assert!(json.starts_with('{') && json.ends_with('}'), "{json}");
     }
 
     // ---- ROM-gated end-to-end boot test (skips when ROMs are absent) --------
@@ -659,6 +1153,9 @@ mod tests {
             None,
             Some("bank,devwrite"),
             None,
+            None,
+            None,
+            false,
             TraceFormat::Jsonl,
             None,
             path,
@@ -705,6 +1202,9 @@ mod tests {
             None,
             None,
             Some("0:0xC900:w"),
+            None,
+            None,
+            false,
             TraceFormat::Text,
             None,
             path,
@@ -735,6 +1235,9 @@ mod tests {
             None,
             Some("all"),
             None,
+            None,
+            None,
+            false,
             TraceFormat::Jsonl,
             None,
             path,
@@ -750,6 +1253,182 @@ mod tests {
                 .parse()
                 .unwrap();
             assert!(f >= 110, "frame {f} leaked before the seek point:\n{line}");
+        }
+    }
+
+    // ---- ROM-gated cycle-loop (instruction trace) tests ---------------------
+
+    /// Run a cycle-loop trace to a temp file and return its contents (the cycle
+    /// loop streams to a writer, so tests read the file it wrote).
+    #[allow(clippy::too_many_arguments)]
+    fn cycle_trace_to_string(
+        tag: &str,
+        frames: usize,
+        from_frame: usize,
+        cpu: Option<&str>,
+        break_pc: Option<&str>,
+        format: TraceFormat,
+        roms: &str,
+    ) -> String {
+        let p = std::env::temp_dir().join(format!("phosphor_trace_{tag}.txt"));
+        run_trace(
+            "joust",
+            frames,
+            from_frame,
+            None,
+            None,
+            None,
+            None,
+            cpu,
+            break_pc,
+            false,
+            format,
+            Some(&p),
+            roms,
+        )
+        .expect("cycle trace run");
+        let s = std::fs::read_to_string(&p).expect("read trace file");
+        let _ = std::fs::remove_file(&p);
+        s
+    }
+
+    /// Parse `pc=XXXX` out of a text instruction line.
+    fn instr_pc(line: &str) -> u32 {
+        let after = line.split("pc=").nth(1).expect("pc field");
+        let hex: String = after
+            .chars()
+            .take_while(|c| c.is_ascii_hexdigit())
+            .collect();
+        u32::from_str_radix(&hex, 16).expect("pc hex")
+    }
+
+    #[test]
+    fn joust_instruction_trace_pc_monotonic_over_reset_block() {
+        let Some(roms) = roms_dir() else {
+            eprintln!("skipping: no ROM dir");
+            return;
+        };
+        let out = cycle_trace_to_string(
+            "mono",
+            1,
+            0,
+            Some("0"),
+            None,
+            TraceFormat::Text,
+            roms.to_str().unwrap(),
+        );
+
+        let lines: Vec<&str> = out.lines().collect();
+        assert!(lines.len() > 6, "expected an instruction stream:\n{out}");
+        for l in &lines {
+            assert!(l.trim_end().ends_with("; instr"), "not an instr line: {l}");
+        }
+        // The 6809 reset sequence is straight-line: PC strictly increases over
+        // the first handful of instructions (before the first branch/loop).
+        let pcs: Vec<u32> = lines.iter().take(6).map(|l| instr_pc(l)).collect();
+        assert!(
+            pcs.windows(2).all(|w| w[0] < w[1]),
+            "reset block PCs must strictly increase: {pcs:04X?}"
+        );
+    }
+
+    #[test]
+    fn joust_break_pc_stops_on_target() {
+        let Some(roms) = roms_dir() else {
+            return;
+        };
+        let out = cycle_trace_to_string(
+            "brk",
+            1,
+            0,
+            Some("0"),
+            Some("0:0xF02B"),
+            TraceFormat::Text,
+            roms.to_str().unwrap(),
+        );
+        let last = out.lines().last().expect("at least one line");
+        assert_eq!(
+            instr_pc(last),
+            0xF02B,
+            "run must stop on the break PC:\n{out}"
+        );
+        // The target appears exactly once (we stop the first time we reach it).
+        assert_eq!(
+            out.lines().filter(|l| instr_pc(l) == 0xF02B).count(),
+            1,
+            "break target should appear once:\n{out}"
+        );
+    }
+
+    #[test]
+    fn joust_regs_columns_present_with_regs_suffix() {
+        let Some(roms) = roms_dir() else {
+            return;
+        };
+        let out = cycle_trace_to_string(
+            "regs",
+            1,
+            0,
+            Some("0:regs"),
+            Some("0:0xF031"),
+            TraceFormat::Text,
+            roms.to_str().unwrap(),
+        );
+        assert!(
+            out.lines().all(|l| l.contains("A=") && l.contains("CC=")),
+            "every :regs line carries register columns:\n{out}"
+        );
+    }
+
+    #[test]
+    fn joust_multi_cpu_trace_labels_both_cpus() {
+        let Some(roms) = roms_dir() else {
+            return;
+        };
+        let out = cycle_trace_to_string(
+            "multi",
+            1,
+            0,
+            Some("0,1"),
+            None,
+            TraceFormat::Text,
+            roms.to_str().unwrap(),
+        );
+        assert!(
+            out.lines().any(|l| l.contains("cpu0")),
+            "expected cpu0 lines"
+        );
+        assert!(
+            out.lines().any(|l| l.contains("cpu1")),
+            "expected cpu1 lines"
+        );
+    }
+
+    #[test]
+    fn joust_cycle_loop_from_frame_suppresses_pre_seek() {
+        let Some(roms) = roms_dir() else {
+            return;
+        };
+        // Instruction trace over frames [2, 3): every line's frame must be >= 2.
+        let out = cycle_trace_to_string(
+            "seek",
+            3,
+            2,
+            Some("0"),
+            None,
+            TraceFormat::Jsonl,
+            roms.to_str().unwrap(),
+        );
+        assert!(!out.is_empty(), "expected instructions in the window");
+        for line in out.lines() {
+            let after = line.split("\"frame\":").nth(1).expect("frame field");
+            let f: u64 = after
+                .chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect::<String>()
+                .parse()
+                .unwrap();
+            assert!(f >= 2, "frame {f} leaked before the seek point:\n{line}");
         }
     }
 }
