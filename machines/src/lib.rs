@@ -80,14 +80,30 @@ macro_rules! impl_board_delegation {
     };
 
     // --- Renderable dispatch ---
-    (@render $type:ty, $board:ident, $timing:expr, vectors $($rest:tt)*) => {
-        $crate::impl_board_renderable!($type, $board, $timing, vectors);
+    // Walk the full option list, gathering the render-relevant flags (and
+    // ignoring audio/debug flags like `no_audio`, `debug_tick_pre`,
+    // `bus_addr: T`), then emit a single accumulating `impl_board_renderable!`.
+    (@render $type:ty, $board:ident, $timing:expr, $($opt:tt)*) => {
+        $crate::impl_board_delegation!(@render_gather [$type, $board, $timing] [] $($opt)*);
     };
-    (@render $type:ty, $board:ident, $timing:expr, overlay_stats $($rest:tt)*) => {
-        $crate::impl_board_renderable!($type, $board, $timing, overlay_stats);
+    // Done: emit the impl with the gathered render flags.
+    (@render_gather [$type:ty, $board:ident, $timing:expr] [$($flag:ident)*]) => {
+        $crate::impl_board_renderable!($type, $board, $timing $(, $flag)*);
     };
-    (@render $type:ty, $board:ident, $timing:expr, $($rest:tt)*) => {
-        $crate::impl_board_renderable!($type, $board, $timing);
+    // Render flags: keep.
+    (@render_gather $ctx:tt [$($flag:ident)*] vectors $($rest:tt)*) => {
+        $crate::impl_board_delegation!(@render_gather $ctx [$($flag)* vectors] $($rest)*);
+    };
+    (@render_gather $ctx:tt [$($flag:ident)*] overlay_stats $($rest:tt)*) => {
+        $crate::impl_board_delegation!(@render_gather $ctx [$($flag)* overlay_stats] $($rest)*);
+    };
+    (@render_gather $ctx:tt [$($flag:ident)*] orientation $($rest:tt)*) => {
+        $crate::impl_board_delegation!(@render_gather $ctx [$($flag)* orientation] $($rest)*);
+    };
+    // Anything else (commas, `no_audio`, `debug_tick_pre`, `bus_addr`, `:`,
+    // type tokens, ...): drop one token and continue.
+    (@render_gather $ctx:tt $flags:tt $skip:tt $($rest:tt)*) => {
+        $crate::impl_board_delegation!(@render_gather $ctx $flags $($rest)*);
     };
 
     // --- AudioSource dispatch ---
@@ -133,9 +149,18 @@ macro_rules! impl_board_delegation {
 }
 pub(crate) use impl_board_delegation;
 
-/// Implements `Renderable` delegating to board.
+/// Implements `Renderable` delegating to `board`.
+///
+/// Accepts zero or more optional-method flags after the timing path and
+/// accumulates one delegated method per flag, so options compose without
+/// enumerating every combination:
+/// - `vectors` — delegate `vector_display_list()` to the board
+/// - `overlay_stats` — call `self.overlay_stats_impl()`
+/// - `orientation` — delegate `orientation()` to the board (rotating boards
+///   provide an inherent `orientation()` reading their DIP/state)
 macro_rules! impl_board_renderable {
-    ($type:ty, $board:ident, $timing:expr) => {
+    // Entry: the always-present methods plus one accumulated method per flag.
+    ($type:ty, $board:ident, $timing:expr $(, $opt:ident)* $(,)?) => {
         impl phosphor_core::core::machine::Renderable for $type {
             fn display_size(&self) -> (u32, u32) {
                 $timing.display_size()
@@ -146,38 +171,25 @@ macro_rules! impl_board_renderable {
             fn render_frame(&self, buffer: &mut [u8]) {
                 self.$board.render_frame(buffer);
             }
+            $(
+                $crate::impl_board_renderable!(@method $board, $opt);
+            )*
         }
     };
-    ($type:ty, $board:ident, $timing:expr, vectors) => {
-        impl phosphor_core::core::machine::Renderable for $type {
-            fn display_size(&self) -> (u32, u32) {
-                $timing.display_size()
-            }
-            fn display_aspect(&self) -> Option<(u32, u32)> {
-                $timing.display_aspect()
-            }
-            fn render_frame(&self, buffer: &mut [u8]) {
-                self.$board.render_frame(buffer);
-            }
-            fn vector_display_list(&self) -> Option<&[phosphor_core::device::dvg::VectorLine]> {
-                self.$board.vector_display_list()
-            }
+    // Optional method fragments, one per flag.
+    (@method $board:ident, vectors) => {
+        fn vector_display_list(&self) -> Option<&[phosphor_core::device::dvg::VectorLine]> {
+            self.$board.vector_display_list()
         }
     };
-    ($type:ty, $board:ident, $timing:expr, overlay_stats) => {
-        impl phosphor_core::core::machine::Renderable for $type {
-            fn display_size(&self) -> (u32, u32) {
-                $timing.display_size()
-            }
-            fn display_aspect(&self) -> Option<(u32, u32)> {
-                $timing.display_aspect()
-            }
-            fn render_frame(&self, buffer: &mut [u8]) {
-                self.$board.render_frame(buffer);
-            }
-            fn overlay_stats(&self) -> Option<String> {
-                self.overlay_stats_impl()
-            }
+    (@method $board:ident, overlay_stats) => {
+        fn overlay_stats(&self) -> Option<String> {
+            self.overlay_stats_impl()
+        }
+    };
+    (@method $board:ident, orientation) => {
+        fn orientation(&self) -> phosphor_core::core::machine::Orientation {
+            self.$board.orientation()
         }
     };
 }
