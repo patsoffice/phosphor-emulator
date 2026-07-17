@@ -78,9 +78,11 @@ pub const TIMING: TimingConfig = TimingConfig {
     cpu_clock_hz: 48_660_000 / 16, // 3_041_250
     cycles_per_scanline: 192,
     total_scanlines: 264,
-    display_width: (NATIVE_HEIGHT - VBLANK_END) as u32, // 224 (rotated)
-    display_height: NATIVE_WIDTH as u32,                // 256 (rotated)
-    display_aspect: Some((3, 4)),
+    // Native (pre-orientation) framebuffer: Congo Bongo declares ROT90 and the
+    // frontend rotates centrally, so these are the unrotated dimensions.
+    display_width: NATIVE_WIDTH as u32,                  // 256
+    display_height: (NATIVE_HEIGHT - VBLANK_END) as u32, // 224
+    display_aspect: Some((3, 4)),                        // portrait tube as viewed (after ROT90)
 };
 
 pub const NATIVE_WIDTH: usize = 256;
@@ -1000,16 +1002,26 @@ impl CongoBongoBoard {
     }
 
     // -----------------------------------------------------------------------
-    // Frame output (ROT90)
+    // Frame output (native; ROT90 applied centrally by the frontend)
     // -----------------------------------------------------------------------
 
-    /// Rotate the visible raster (rows 16..240, 256×224) 90° CCW into the
-    /// portrait 224×256 RGB24 output buffer.
+    /// Copy the visible raster (rows 16..240, native 256×224 RGB24) into the
+    /// output buffer in native row-major order.
+    ///
+    /// The 90° rotation Congo Bongo's cabinet needs is declared via
+    /// [`orientation`](Self::orientation) and applied centrally by the frontend,
+    /// so this emits pixels unrotated.
     pub fn render_frame(&self, buffer: &mut [u8]) {
         let start = VBLANK_END * NATIVE_WIDTH * 3;
         let visible =
             &self.scanline_buffer[start..start + (NATIVE_HEIGHT - VBLANK_END) * NATIVE_WIDTH * 3];
-        gfx::rotate_90_ccw(visible, buffer, NATIVE_WIDTH, NATIVE_HEIGHT - VBLANK_END);
+        buffer.copy_from_slice(visible);
+    }
+
+    /// Congo Bongo's monitor is mounted rotated 90°. The orientation is
+    /// declarative — the frontend rotates `render_frame`'s native output.
+    pub fn orientation(&self) -> phosphor_core::core::machine::Orientation {
+        phosphor_core::core::machine::Orientation::ROT90
     }
 
     // -----------------------------------------------------------------------
@@ -1306,7 +1318,12 @@ impl Bus for CongoBongoSystem {
     }
 }
 
-crate::impl_board_delegation!(CongoBongoSystem, board, crate::congo_bongo::TIMING);
+crate::impl_board_delegation!(
+    CongoBongoSystem,
+    board,
+    crate::congo_bongo::TIMING,
+    orientation
+);
 
 impl MachineCore for CongoBongoSystem {
     crate::machine_core_metadata!("congobongo", crate::congo_bongo::TIMING);
@@ -2155,8 +2172,14 @@ mod tests {
         for _ in 0..3 {
             sys.run_frame();
         }
+        // Native (unrotated) framebuffer; the frontend applies ROT90 to present
+        // the portrait 224×256 image.
         let (w, h) = TIMING.display_size();
-        assert_eq!((w, h), (224, 256));
+        assert_eq!((w, h), (256, 224));
+        assert_eq!(
+            sys.board.orientation(),
+            phosphor_core::core::machine::Orientation::ROT90
+        );
         let mut buf = vec![0u8; (w * h * 3) as usize];
         sys.board.render_frame(&mut buf);
     }
