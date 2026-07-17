@@ -949,6 +949,16 @@ mod tests {
     }
 
     #[test]
+    fn declares_rot270_orientation() {
+        use phosphor_core::core::machine::{Orientation, Renderable};
+        // Tempest's portrait vector monitor is declared, not baked: the frontend
+        // rotates the AVG output via the GL shader driven by these flags.
+        let sys = TempestSystem::new();
+        assert_eq!(sys.orientation(), Orientation::ROT270);
+        assert!(sys.orientation().swaps_axes());
+    }
+
+    #[test]
     fn set_dip_option_masks_only_its_bits() {
         let mut sys = TempestSystem::new();
         // DSW2 Lives is bank 1, option 3 (mask 0xC0); pick "5" (0x80).
