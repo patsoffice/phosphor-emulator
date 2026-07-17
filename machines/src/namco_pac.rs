@@ -769,9 +769,10 @@ impl NamcoPacBoard {
                     0
                 };
                 let attribute = if offset < 0x400 { color_ram[offset] } else { 0 };
-                (tile_code, attribute)
+                gfx::TileInfo::new(tile_code, attribute)
             },
-            resolve,
+            // Pac-Man's tilemap is opaque — every pixel writes.
+            |attr, pv| Some(resolve(attr, pv)),
             buf,
             0,
         );

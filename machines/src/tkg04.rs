@@ -490,9 +490,10 @@ impl Tkg04Board {
                 let vram_offset = row * 32 + col;
                 let tile_code = video_ram[vram_offset] as u16 + 256 * gfx_bank as u16;
                 let attribute = (color_prom[col + 32 * (row / 4)] & 0x0F) + 0x10 * palette_bank;
-                (tile_code, attribute)
+                gfx::TileInfo::new(tile_code, attribute)
             },
-            resolve,
+            // Background tilemap is opaque — every pixel writes.
+            |attr, pv| Some(resolve(attr, pv)),
             buf,
             0,
         );

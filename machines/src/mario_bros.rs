@@ -692,9 +692,10 @@ impl MarioBrosBoard {
                 let v = video_ram[row * 32 + col];
                 let tile_code = v as u16 + 256 * gfx_bank as u16;
                 let color = 8 + (v >> 5) + 16 * palette_bank;
-                (tile_code, color)
+                gfx::TileInfo::new(tile_code, color)
             },
-            resolve,
+            // Opaque background tilemap — every pixel writes.
+            |attr, pv| Some(resolve(attr, pv)),
             buf,
             0,
         );

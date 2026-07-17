@@ -10,7 +10,7 @@ pub use resistor::{
     pal_nbit,
 };
 pub use sheet::{Sheet, SheetConfig, grayscale_ramp, render_sheet};
-pub use tilemap::TilemapConfig;
+pub use tilemap::{TileInfo, TilemapConfig};
 
 /// MAME-style screen orientation as a composable bitfield.
 ///
