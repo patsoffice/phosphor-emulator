@@ -194,7 +194,7 @@ impl Bus for PacmanSystem {
 // Trait implementations
 // ---------------------------------------------------------------------------
 
-crate::impl_board_delegation!(PacmanSystem, board, namco_pac::TIMING);
+crate::impl_board_delegation!(PacmanSystem, board, namco_pac::TIMING, orientation);
 
 impl MachineCore for PacmanSystem {
     crate::machine_core_metadata!("pacman", namco_pac::TIMING);

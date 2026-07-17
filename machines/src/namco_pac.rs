@@ -170,8 +170,10 @@ pub const TIMING: TimingConfig = TimingConfig {
     cpu_clock_hz: 3_072_000,  // 18.432 MHz / 6
     cycles_per_scanline: 192, // 384 pixels / 2
     total_scanlines: 264,     // VTOTAL
-    display_width: 224,       // rotated 90° CCW from native 288×224
-    display_height: 288,
+    // Native (pre-orientation) framebuffer: the board declares ROT90 and the
+    // frontend rotates centrally, so these are the unrotated dimensions.
+    display_width: 288,
+    display_height: 224,
     display_aspect: Some((3, 4)),
 };
 
@@ -825,10 +827,20 @@ impl NamcoPacBoard {
         }
     }
 
-    /// Rotate 90° CCW from native scanline_buffer (288w × 224h)
-    /// to output buffer (224w × 288h).
+    /// Copy the native scanline buffer (288w × 224h RGB24) into the output
+    /// buffer in native row-major order.
+    ///
+    /// The 90° rotation the cabinet needs is declared via
+    /// [`orientation`](Self::orientation) and applied centrally by the frontend,
+    /// so this emits pixels unrotated.
     pub fn render_frame(&self, buffer: &mut [u8]) {
-        gfx::rotate_90_ccw(&self.scanline_buffer, buffer, 288, 224);
+        buffer.copy_from_slice(&self.scanline_buffer);
+    }
+
+    /// The Namco Pac-Man monitor is mounted rotated 90°. The orientation is
+    /// declarative — the frontend rotates `render_frame`'s native output.
+    pub fn orientation(&self) -> phosphor_core::core::machine::Orientation {
+        phosphor_core::core::machine::Orientation::ROT90
     }
 
     // -----------------------------------------------------------------------
