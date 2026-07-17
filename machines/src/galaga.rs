@@ -876,10 +876,10 @@ impl Bus for GalagaSystem {
 
 impl Renderable for GalagaSystem {
     fn display_size(&self) -> (u32, u32) {
-        // Native (unrotated) 288×224 framebuffer. `namco_galaga::TIMING` reports
-        // the pre-swapped portrait size (224×288) still used by the baked-rotation
-        // Dig Dug / Xevious on the same hardware; Galaga declares ROT90 and lets
-        // the frontend rotate centrally, so it reports the native landscape size.
+        // Native (unrotated) 288×224 framebuffer. Galaga (like Dig Dug and
+        // Xevious on the same Namco board) declares ROT90 and lets the frontend
+        // rotate centrally, so it reports the native landscape size rather than
+        // `namco_galaga::TIMING`'s pre-swapped portrait size (224×288).
         (288, 224)
     }
 
