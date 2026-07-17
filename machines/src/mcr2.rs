@@ -31,12 +31,14 @@ pub(crate) enum Region {
 // Frame: 256 × 264 = 67584 CPU cycles per field
 
 pub const TIMING: TimingConfig = TimingConfig {
-    cpu_clock_hz: 2_496_000,             // 19.968 MHz / 8
-    cycles_per_scanline: 256,            // 512 pixel clocks / 2
-    total_scanlines: 264,                // VTOTAL
-    display_width: NATIVE_HEIGHT as u32, // 480 (rotated 90° CW)
-    display_height: NATIVE_WIDTH as u32, // 512
-    display_aspect: Some((3, 4)),
+    cpu_clock_hz: 2_496_000,  // 19.968 MHz / 8
+    cycles_per_scanline: 256, // 512 pixel clocks / 2
+    total_scanlines: 264,     // VTOTAL
+    // Native (pre-orientation) framebuffer: the board declares ROT90 and the
+    // frontend rotates centrally, so these are the unrotated dimensions.
+    display_width: NATIVE_WIDTH as u32,   // 512
+    display_height: NATIVE_HEIGHT as u32, // 480
+    display_aspect: Some((3, 4)),         // portrait tube as viewed (after ROT90)
 };
 
 pub const VISIBLE_LINES: u64 = 240;
@@ -455,15 +457,25 @@ impl Mcr2Board {
         }
     }
 
+    /// Convert the indexed pixel buffer to native (unrotated) RGB24.
+    ///
+    /// The 90° rotation the cabinet needs is declared via
+    /// [`orientation`](Self::orientation) and applied centrally by the frontend,
+    /// so this emits pixels in native row-major order.
     pub fn render_frame(&self, buffer: &mut [u8]) {
-        gfx::rotate_90_ccw_indexed_blocked(
-            &self.pixel_buffer,
-            buffer,
-            NATIVE_WIDTH,
-            NATIVE_HEIGHT,
-            &self.palette_rgb,
-            16,
-        );
+        let mask = self.palette_rgb.len() - 1;
+        for (i, &idx) in self.pixel_buffer.iter().enumerate() {
+            let (r, g, b) = self.palette_rgb[idx as usize & mask];
+            buffer[i * 3] = r;
+            buffer[i * 3 + 1] = g;
+            buffer[i * 3 + 2] = b;
+        }
+    }
+
+    /// The MCR II monitor is mounted rotated 90°. The orientation is
+    /// declarative — the frontend rotates `render_frame`'s native output.
+    pub fn orientation(&self) -> phosphor_core::core::machine::Orientation {
+        phosphor_core::core::machine::Orientation::ROT90
     }
 
     // -----------------------------------------------------------------------

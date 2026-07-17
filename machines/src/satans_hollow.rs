@@ -401,7 +401,13 @@ impl Bus for SatansHollowSystem {
 // Machine traits (MachineCore + capabilities)
 // ---------------------------------------------------------------------------
 
-crate::impl_board_delegation!(SatansHollowSystem, board, mcr2::TIMING, overlay_stats);
+crate::impl_board_delegation!(
+    SatansHollowSystem,
+    board,
+    mcr2::TIMING,
+    overlay_stats,
+    orientation
+);
 
 impl InputConfigurable for SatansHollowSystem {
     fn input_controls(&self) -> &'static [InputControl] {
