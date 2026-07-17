@@ -299,13 +299,18 @@ pub fn run(
                     debug_state.run_mode = RunMode::StepFrame;
                 }
 
-                // 0: Continue (resume running)
+                // 0: Toggle run <-> pause (running -> paused, otherwise continue)
                 Event::KeyDown {
                     scancode: Some(Scancode::Num0),
                     repeat: false,
                     ..
                 } if debug_state.active => {
-                    debug_state.run_mode = RunMode::Running;
+                    if debug_state.run_mode == RunMode::Running {
+                        debug_state.run_mode = RunMode::Paused;
+                    } else {
+                        debug_state.run_mode = RunMode::Running;
+                        debug_state.last_watchpoint_hit = None;
+                    }
                 }
 
                 Event::KeyDown {

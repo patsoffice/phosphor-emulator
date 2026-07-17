@@ -538,8 +538,9 @@ fn draw_controls_column(ui: &mut egui::Ui, state: &mut DebugState, min_top_heigh
     let is_paused = state.run_mode == RunMode::Paused;
 
     ui.horizontal(|ui| {
+        // Key `0` toggles run <-> pause (see emulator.rs).
         if state.run_mode == RunMode::Running {
-            if ui.button("Pause").clicked() {
+            if ui.button("Pause (0)").clicked() {
                 state.run_mode = RunMode::Paused;
             }
         } else if ui.button("Continue (0)").clicked() {
@@ -727,9 +728,36 @@ fn draw_cpu_column(
 // Breakpoints panel (controls column)
 // ---------------------------------------------------------------------------
 
+/// Color for an "invalid input" hint shown next to a debug text field.
+const INVALID_HINT: egui::Color32 = egui::Color32::from_rgb(220, 90, 90);
+
+/// True if a `$`-prefixed hex address field's text is acceptable: empty
+/// (nothing typed yet) or a valid hex `u32`. `!hex_input_ok` therefore means
+/// "the user typed something that isn't a valid address", which drives the
+/// inline "hex?" hint so parse failures aren't silent.
+fn hex_input_ok(s: &str) -> bool {
+    let t = s.trim().trim_start_matches('$');
+    t.is_empty() || u32::from_str_radix(t, 16).is_ok()
+}
+
+/// The active step-CPU's name as a header suffix (" — <cpu>"), shown only on
+/// multi-CPU machines so it's clear which CPU's space breakpoints/watchpoints
+/// target (they follow the "Step target" radio via `step_cpu`).
+fn active_cpu_suffix(state: &DebugState) -> String {
+    if state.cpu_panels.len() > 1 {
+        state
+            .cpu_panels
+            .get(state.step_cpu)
+            .map(|p| format!(" — {}", p.name))
+            .unwrap_or_default()
+    } else {
+        String::new()
+    }
+}
+
 fn draw_breakpoints_panel(ui: &mut egui::Ui, state: &mut DebugState) {
     ui.separator();
-    egui::CollapsingHeader::new("Breakpoints")
+    egui::CollapsingHeader::new(format!("Breakpoints{}", active_cpu_suffix(state)))
         .default_open(true)
         .show(ui, |ui| {
             // PC breakpoint entry (scoped to step_cpu)
@@ -749,6 +777,9 @@ fn draw_breakpoints_panel(ui: &mut egui::Ui, state: &mut DebugState) {
                         bp_set.insert(addr);
                     }
                     state.breakpoint_input.clear();
+                }
+                if !hex_input_ok(&state.breakpoint_input) {
+                    ui.colored_label(INVALID_HINT, "hex?");
                 }
             });
 
@@ -837,7 +868,7 @@ fn draw_breakpoints_panel(ui: &mut egui::Ui, state: &mut DebugState) {
 // ---------------------------------------------------------------------------
 
 fn draw_watchpoints_panel(ui: &mut egui::Ui, state: &mut DebugState) {
-    egui::CollapsingHeader::new("Watchpoints")
+    egui::CollapsingHeader::new(format!("Watchpoints{}", active_cpu_suffix(state)))
         .default_open(true)
         .show(ui, |ui| {
             // Watchpoint entry: address + R/W checkboxes + Add button
@@ -851,7 +882,11 @@ fn draw_watchpoints_panel(ui: &mut egui::Ui, state: &mut DebugState) {
                 ui.checkbox(&mut state.watchpoint_read, "R");
                 ui.checkbox(&mut state.watchpoint_write, "W");
                 let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                if (ui.button("Add").clicked() || enter)
+                // Guard the silent no-op: adding with neither R nor W selected
+                // would collect an empty kind set and do nothing.
+                let has_kind = state.watchpoint_read || state.watchpoint_write;
+                let add = ui.add_enabled(has_kind, egui::Button::new("Add")).clicked();
+                if (add || (enter && has_kind))
                     && let Ok(addr) =
                         u32::from_str_radix(state.watchpoint_input.trim_start_matches('$'), 16)
                 {
@@ -870,6 +905,9 @@ fn draw_watchpoints_panel(ui: &mut egui::Ui, state: &mut DebugState) {
                         }
                     }
                     state.watchpoint_input.clear();
+                }
+                if !hex_input_ok(&state.watchpoint_input) {
+                    ui.colored_label(INVALID_HINT, "hex?");
                 }
             });
 
@@ -1248,4 +1286,47 @@ fn draw_memory_panel(
             ui.label(egui::RichText::new(line).monospace());
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hex_input_ok_flags_only_nonempty_garbage() {
+        // Empty / whitespace: no hint (nothing typed yet).
+        assert!(hex_input_ok(""));
+        assert!(hex_input_ok("   "));
+        // Valid hex, with or without the `$` prefix the field trims.
+        assert!(hex_input_ok("1BCC"));
+        assert!(hex_input_ok("$87cf"));
+        assert!(hex_input_ok("ffff"));
+        // Non-empty and not hex → not ok → the "hex?" hint shows.
+        assert!(!hex_input_ok("xyz"));
+        assert!(!hex_input_ok("$zz"));
+        assert!(!hex_input_ok("12g4"));
+    }
+
+    fn panel(name: &str) -> CpuPanel {
+        CpuPanel {
+            name: name.to_string(),
+            registers: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn active_cpu_suffix_only_labels_multicpu() {
+        let mut s = DebugState::new();
+        // Single CPU: no suffix (which CPU is unambiguous).
+        s.cpu_panels.push(panel("M6809"));
+        assert_eq!(active_cpu_suffix(&s), "");
+
+        // Multi-CPU: the panels name the active step-CPU, so it's clear which
+        // CPU's address space breakpoints/watchpoints target.
+        s.cpu_panels.push(panel("Z80 Sound"));
+        s.step_cpu = 0;
+        assert_eq!(active_cpu_suffix(&s), " — M6809");
+        s.step_cpu = 1;
+        assert_eq!(active_cpu_suffix(&s), " — Z80 Sound");
+    }
 }
