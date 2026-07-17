@@ -59,9 +59,11 @@ pub const TIMING: TimingConfig = TimingConfig {
     cpu_clock_hz: 5_000_000,
     cycles_per_scanline: 318,
     total_scanlines: 256,
-    display_width: NATIVE_HEIGHT as u32, // 240 (rotated 270° CW for Q*Bert)
-    display_height: NATIVE_WIDTH as u32, // 256
-    display_aspect: Some((3, 4)),
+    // Native (pre-orientation) framebuffer: Q*Bert declares ROT270 and the
+    // frontend rotates centrally, so these are the unrotated dimensions.
+    display_width: NATIVE_WIDTH as u32,   // 256
+    display_height: NATIVE_HEIGHT as u32, // 240
+    display_aspect: Some((3, 4)),         // portrait tube as viewed (after ROT270)
 };
 
 pub const VISIBLE_LINES: u64 = 240;
@@ -785,15 +787,25 @@ impl GottliebBoard {
         }
     }
 
-    /// Convert the indexed pixel buffer to RGB24 with 270° CW rotation.
+    /// Convert the indexed pixel buffer to native (unrotated) RGB24.
+    ///
+    /// The 270° CW rotation Q*Bert's cabinet needs is declared via
+    /// [`orientation`](Self::orientation) and applied centrally by the frontend,
+    /// so this emits pixels in native row-major order.
     pub fn render_frame(&self, buffer: &mut [u8]) {
-        gfx::rotate_270_indexed(
-            &self.pixel_buffer,
-            buffer,
-            NATIVE_WIDTH,
-            NATIVE_HEIGHT,
-            &self.palette_rgb,
-        );
+        let mask = self.palette_rgb.len() - 1;
+        for (i, &idx) in self.pixel_buffer.iter().enumerate() {
+            let (r, g, b) = self.palette_rgb[idx as usize & mask];
+            buffer[i * 3] = r;
+            buffer[i * 3 + 1] = g;
+            buffer[i * 3 + 2] = b;
+        }
+    }
+
+    /// Q*Bert's monitor is mounted rotated 270° clockwise. The orientation is
+    /// declarative — the frontend rotates `render_frame`'s native output.
+    pub fn orientation(&self) -> phosphor_core::core::machine::Orientation {
+        phosphor_core::core::machine::Orientation::ROT270
     }
 
     // -----------------------------------------------------------------------

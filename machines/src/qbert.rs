@@ -399,7 +399,7 @@ impl Bus for QbertSystem {
 // Machine traits (MachineCore + capabilities)
 // ---------------------------------------------------------------------------
 
-crate::impl_board_delegation!(QbertSystem, board, gottlieb::TIMING, bus_addr: u32);
+crate::impl_board_delegation!(QbertSystem, board, gottlieb::TIMING, bus_addr: u32, orientation);
 
 impl InputConfigurable for QbertSystem {
     fn input_controls(&self) -> &'static [InputControl] {
@@ -640,6 +640,33 @@ mod tests {
         let sys = QbertSystem::new();
         assert_eq!(sys.dip_bank_value(0), 0x00);
         crate::assert_dip_banks_valid(sys.dip_banks(), &[sys.dip_bank_value(0)]);
+    }
+
+    #[test]
+    fn declares_native_dims_and_rot270() {
+        use phosphor_core::core::machine::{Orientation, Renderable};
+        let sys = QbertSystem::new();
+        // display_size() is the NATIVE (unrotated) framebuffer; the frontend
+        // applies the declared ROT270 to present it portrait.
+        assert_eq!(sys.display_size(), (256, 240));
+        assert_eq!(sys.orientation(), Orientation::ROT270);
+        assert!(sys.orientation().swaps_axes());
+        assert_eq!(sys.display_aspect(), Some((3, 4)));
+    }
+
+    #[test]
+    fn render_frame_emits_native_unrotated_rgb() {
+        use phosphor_core::core::machine::Renderable;
+        let mut sys = QbertSystem::new();
+        // Tag a known native pixel and a palette entry, then confirm render_frame
+        // writes it at the native row-major position (no baked rotation).
+        sys.board.palette_rgb[1] = (10, 20, 30);
+        let (nx, ny) = (5usize, 7usize);
+        sys.board.pixel_buffer[ny * 256 + nx] = 1;
+        let mut buf = vec![0u8; 256 * 240 * 3];
+        sys.render_frame(&mut buf);
+        let i = (ny * 256 + nx) * 3;
+        assert_eq!(&buf[i..i + 3], &[10, 20, 30]);
     }
 
     #[test]
