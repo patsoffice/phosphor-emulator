@@ -389,7 +389,7 @@ impl Bus for BurgertimeSystem {
     }
 }
 
-crate::impl_board_delegation!(BurgertimeSystem, board, btime::TIMING);
+crate::impl_board_delegation!(BurgertimeSystem, board, btime::TIMING, orientation);
 
 impl MachineCore for BurgertimeSystem {
     fn gfx_sheets(&self) -> Vec<phosphor_core::core::machine::GfxSheet<'_>> {

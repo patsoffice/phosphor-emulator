@@ -21,7 +21,6 @@ use phosphor_core::cpu::m6502::M6502;
 use phosphor_core::device::ay8910::Ay8910;
 use phosphor_core::gfx::decode::{GfxCache, GfxLayout, decode_gfx};
 use phosphor_core::gfx::pal_nbit;
-use phosphor_core::gfx::rotate_270_indexed;
 use phosphor_macros::{BusDebug, MemoryRegion};
 
 #[repr(u8)]
@@ -502,8 +501,12 @@ impl BtimeBoard {
     }
 
     /// Render the visible frame: draw the native 256×256 layers into a
-    /// palette-index buffer, crop the visible [8,248)² window, and rotate
-    /// ROT270 into the RGB `buffer` (240×240, square pixels).
+    /// palette-index buffer, crop the visible [8,248)² window, and convert it to
+    /// native (unrotated) RGB24 in `buffer` (240×240, square pixels).
+    ///
+    /// The ROT270 the cabinet needs is declared via
+    /// [`orientation`](Self::orientation) and applied centrally by the frontend,
+    /// so this emits pixels in native row-major order.
     fn render_visible(&self, buffer: &mut [u8]) {
         let mut native = vec![0u8; NATIVE_DIM * NATIVE_DIM];
 
@@ -515,21 +518,24 @@ impl BtimeBoard {
         }
         self.draw_sprites(&mut native);
 
-        // Crop the visible window to a 240×240 index buffer.
-        let mut cropped = vec![0u8; VISIBLE_DIM * VISIBLE_DIM];
+        // Crop the visible window and convert to native RGB24 (no rotation).
+        let mask = self.palette_rgb.len() - 1;
         for y in 0..VISIBLE_DIM {
             let src = (y + CROP_LO) * NATIVE_DIM + CROP_LO;
-            cropped[y * VISIBLE_DIM..(y + 1) * VISIBLE_DIM]
-                .copy_from_slice(&native[src..src + VISIBLE_DIM]);
+            for x in 0..VISIBLE_DIM {
+                let (r, g, b) = self.palette_rgb[native[src + x] as usize & mask];
+                let di = (y * VISIBLE_DIM + x) * 3;
+                buffer[di] = r;
+                buffer[di + 1] = g;
+                buffer[di + 2] = b;
+            }
         }
+    }
 
-        rotate_270_indexed(
-            &cropped,
-            buffer,
-            VISIBLE_DIM,
-            VISIBLE_DIM,
-            &self.palette_rgb,
-        );
+    /// BurgerTime's monitor is mounted rotated 270° clockwise. The orientation
+    /// is declarative — the frontend rotates `render_frame`'s native output.
+    pub fn orientation(&self) -> phosphor_core::core::machine::Orientation {
+        phosphor_core::core::machine::Orientation::ROT270
     }
 
     /// Blit one tile from `cache` into the native index buffer at (`sx`,`sy`),
@@ -1218,7 +1224,7 @@ mod tests {
     }
 
     #[test]
-    fn render_char_lands_at_rot270_position() {
+    fn render_char_lands_at_native_position() {
         let mut b = board();
         // char 1 = all pen 1 (plane 0 set for its 8 bytes at region offset 8).
         let mut gfx1 = vec![0u8; 0x6000];
@@ -1235,9 +1241,10 @@ mod tests {
         let mut buffer = vec![0u8; VISIBLE_DIM * VISIBLE_DIM * 3];
         b.render_visible(&mut buffer);
 
-        // native (128..135, 120..127) -> crop (120..127, 112..119) -> ROT270
-        // out (row 239-cx, col cy) = rows 112..119, cols 112..119.
-        assert_eq!(pixel(&buffer, 115, 115), (0xFF, 0, 0), "char center is red");
+        // render_visible now emits native (unrotated) pixels: the char occupies
+        // native cols 128..135 × rows 120..127, i.e. crop rows 112..119 ×
+        // cols 120..127 after subtracting CROP_LO=8. ROT270 is applied centrally.
+        assert_eq!(pixel(&buffer, 115, 123), (0xFF, 0, 0), "char center is red");
         assert_eq!(
             pixel(&buffer, 10, 10),
             (0xFF, 0xFF, 0xFF),
@@ -1278,10 +1285,14 @@ mod tests {
         b.bus_write(BusMaster::Cpu(0), 0x0C01, 0xF8); // entry 1 -> red
         b.videoram[300] = 1;
 
-        // Native raster is the square 240×240; the 3:4 portrait presentation is
-        // a frontend-side aspect hint, not a baked framebuffer stretch.
+        // Native raster is the square 240×240; the ROT270 rotation and 3:4
+        // portrait presentation are declared and applied centrally, not baked.
         let (w, h) = TIMING.display_size();
         assert_eq!((w, h), (240, 240), "native square raster");
+        assert_eq!(
+            b.orientation(),
+            phosphor_core::core::machine::Orientation::ROT270
+        );
         assert_eq!(TIMING.display_aspect(), Some((3, 4)), "3:4 portrait hint");
 
         let mut vis = vec![0u8; VISIBLE_DIM * VISIBLE_DIM * 3];
