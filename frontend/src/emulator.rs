@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use phosphor_core::core::machine::{FrontendMachine, InputEvent, InputKind};
+use phosphor_core::core::machine::{FrontendMachine, InputEvent, InputKind, Orientation};
 use sdl2::event::Event;
 use sdl2::keyboard::Scancode;
 
@@ -120,21 +120,29 @@ pub fn run(
         }
     }
 
+    // `render_frame` fills a native (pre-orientation) framebuffer; the frontend
+    // applies the machine's declared orientation centrally (see the raster path
+    // below). For a machine declaring a 90°/270° rotation the *displayed* texture
+    // swaps axes; the window is then sized to the machine's target display aspect
+    // (4:3 tube, rotated to 3:4 for portrait cabinets) so the GPU corrects pixel
+    // aspect at presentation time. `view_aspect` (as-viewed w/h) drives every
+    // letterbox. Machines that still bake rotation report already-rotated dims
+    // and return NORMAL, so the displayed size equals the native size for them.
     let (width, height) = machine.display_size();
-    // The native texture stays (width, height); the window is sized to the
-    // machine's target display aspect (4:3 tube, rotated to 3:4 for portrait
-    // cabinets) so the GPU corrects pixel aspect at presentation time. Rotated
-    // displays (e.g. Tempest) additionally swap axes — all handled by
-    // `presentation`. `view_aspect` (as-viewed w/h) drives every letterbox.
     let rotated = machine.orientation().swaps_axes();
+    let (disp_w, disp_h) = if rotated {
+        (height, width)
+    } else {
+        (width, height)
+    };
     let (win_w, win_h, view_aspect) =
         presentation(width, height, machine.display_aspect(), rotated);
     let window_pos = state.window_x.zip(state.window_y);
     let mut video = Video::new(
         &sdl_video,
         "Phosphor Emulator",
-        width,
-        height,
+        disp_w,
+        disp_h,
         win_w,
         win_h,
         scale,
@@ -152,7 +160,12 @@ pub fn run(
     let mut audio_started = false;
 
     let buffer_size = (width * height * 3) as usize;
+    // Native buffer that `render_frame` fills, plus a second buffer for the
+    // post-orientation image (same pixel count, axes possibly swapped). The
+    // second buffer is only touched when the machine declares a non-NORMAL
+    // orientation, keeping the common path zero-copy.
     let mut framebuffer = vec![0u8; buffer_size];
+    let mut oriented = vec![0u8; buffer_size];
     let mut audio_scratch = vec![0i16; 2048];
     // Optional live-gameplay audio recording: tee every produced sample here and
     // write the WAV on exit. `Some` only when `--record-wav` was passed.
@@ -608,12 +621,10 @@ pub fn run(
                 && !settings_state.active
             {
                 let ds = machine.display_size();
-                let rot =
-                    if machine.orientation() == phosphor_core::core::machine::Orientation::ROT270 {
-                        270
-                    } else {
-                        0
-                    };
+                // Drive the GL shader's rotation uniform from the declared
+                // orientation flags. Only ROT270 (portrait vector monitors, e.g.
+                // Tempest) is exercised today; the shader special-cases it.
+                let rot = orientation_degrees(machine.orientation());
                 let paused = debug_state.global_paused;
                 if show_fps || paused {
                     let fps = show_fps.then(|| fps_text.clone());
@@ -672,8 +683,27 @@ pub fn run(
                 // Raster machine (or debug/profiler mode): CPU framebuffer path.
                 machine.render_frame(&mut framebuffer);
 
-                // FPS / PAUSED overlay onto framebuffer (only when no side panels
-                // are active). PAUSED shows independent of the FPS toggle.
+                // Apply the machine's declared orientation centrally. NORMAL is
+                // the zero-copy common path: unmigrated machines bake rotation
+                // into render_frame and return NORMAL, so `framebuffer` is already
+                // the displayed image. Migrated machines render native and let
+                // `apply_orientation` produce the displayed (post-rotation) buffer.
+                let orient = machine.orientation();
+                let display_fb: &mut [u8] = if orient == Orientation::NORMAL {
+                    &mut framebuffer
+                } else {
+                    phosphor_core::gfx::apply_orientation(
+                        &framebuffer,
+                        &mut oriented,
+                        width as usize,
+                        height as usize,
+                        orient,
+                    );
+                    &mut oriented
+                };
+
+                // FPS / PAUSED overlay onto the displayed buffer (only when no
+                // side panels are active). PAUSED shows independent of FPS.
                 if (show_fps || debug_state.global_paused)
                     && !debug_state.active
                     && !profile_state.active
@@ -684,15 +714,15 @@ pub fn run(
                         None
                     };
                     crate::overlay::draw_overlay(
-                        &mut framebuffer,
-                        width as usize,
+                        display_fb,
+                        disp_w as usize,
                         show_fps.then_some(fps_text.as_str()),
                         stats.as_deref(),
                         debug_state.global_paused,
                     );
                 }
 
-                video.update_game_texture(&framebuffer);
+                video.update_game_texture(display_fb);
 
                 if debug_state.active
                     || profile_state.active
@@ -852,6 +882,18 @@ fn draw_game_panel(ctx: &egui::Context, tex_id: egui::TextureId, aspect: f32) {
                 ui.image(egui::load::SizedTexture::new(tex_id, size));
             });
         });
+}
+
+/// Clockwise screen rotation in degrees for the pure `ROT*` orientations, used
+/// to drive the vector shader's rotation uniform. Non-rotation flag combinations
+/// (bare mirrors) fall back to `0` — the vector path only rotates.
+fn orientation_degrees(o: Orientation) -> i32 {
+    match (o.swap_xy(), o.flip_x(), o.flip_y()) {
+        (true, true, false) => 90,
+        (false, true, true) => 180,
+        (true, false, true) => 270,
+        _ => 0,
+    }
 }
 
 /// On-screen presentation size (before the integer `--scale`) and the as-viewed
