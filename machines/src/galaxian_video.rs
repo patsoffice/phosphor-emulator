@@ -590,9 +590,9 @@ impl GalaxianVideo {
     }
 
     /// Draw one 16-pixel-wide row of galaxian sprite object `sprnum` onto the
-    /// current scanline. Named distinctly to avoid shadowing the core
-    /// `gfx::sprite::draw_sprite_row` helper (a full migration onto it belongs
-    /// with the indexed/priority work).
+    /// current scanline. Parses the object's attributes/position and delegates
+    /// the clipped, flipped, transparent blit to the core `gfx::draw_sprite_row`
+    /// helper (a precomputed colour LUT provides the pens).
     fn draw_object_sprite_row(
         &mut self,
         row_off: usize,
@@ -625,22 +625,33 @@ impl GalaxianVideo {
         let yrow = mame_y - sy;
         let src_py = if flipy { 15 - yrow } else { yrow } as usize;
 
-        for px in 0..16i32 {
-            let draw_x = sx + px;
-            if draw_x < SPRITE_CLIP_MIN || draw_x >= NATIVE_WIDTH as i32 {
-                continue;
-            }
-            let src_px = if flipx { 15 - px } else { px } as usize;
-            let pv = self.sprite_cache.pixel(code, src_px, src_py);
-            if pv == 0 {
-                continue;
-            }
-            let (r, g, b) = self.resolve(color, pv);
-            let off = row_off + draw_x as usize * 3;
-            self.scanline_buffer[off] = r;
-            self.scanline_buffer[off + 1] = g;
-            self.scanline_buffer[off + 2] = b;
-        }
+        // Precompute the 4-entry (2bpp) colour LUT so the resolve closure doesn't
+        // borrow &self while the framebuffer row is borrowed mutably. Pen 0 is
+        // transparent; the leftmost SPRITE_CLIP_MIN columns are clipped.
+        let lut = [
+            self.resolve(color, 0),
+            self.resolve(color, 1),
+            self.resolve(color, 2),
+            self.resolve(color, 3),
+        ];
+        let clip = gfx::SpriteClip {
+            x_min: SPRITE_CLIP_MIN,
+            x_max: NATIVE_WIDTH as i32,
+            wrap_offset: None,
+        };
+        let sprite_cache = &self.sprite_cache;
+        let buf = &mut self.scanline_buffer[row_off..row_off + NATIVE_WIDTH * 3];
+        gfx::draw_sprite_row(
+            sprite_cache,
+            code as u16,
+            src_py,
+            sx,
+            flipx,
+            |pv| pv == 0,
+            |pv| lut[pv as usize],
+            buf,
+            &clip,
+        );
     }
 
     fn draw_bullets_row(&mut self, row_off: usize, mame_y: i32, objram: &[u8]) {
