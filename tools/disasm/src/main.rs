@@ -227,6 +227,9 @@ enum Command {
         #[arg(long, default_value_t = 12)]
         threshold: u32,
     },
+    /// List the registered machines (the `--machine` values accepted by
+    /// `frameshot`/`trace`/`machine`/`gfxview`), with their ROM-set names.
+    Machines,
 }
 
 /// Address-range / instruction-count limits shared by every mode.
@@ -399,7 +402,25 @@ fn run_command(cmd: Command) -> Result<String, String> {
             out,
             threshold,
         } => run_imgdiff(&a, &b, out.as_deref(), threshold),
+        Command::Machines => Ok(list_machines()),
     }
+}
+
+/// Render the registered machines (name + ROM-set names), one per line,
+/// alphabetically. This is the discoverable counterpart to the machine list
+/// that an unknown `--machine` error prints.
+fn list_machines() -> String {
+    let mut entries = registry::all();
+    entries.sort_by_key(|e| e.name);
+    let mut out = format!("{} registered machines:\n", entries.len());
+    for e in entries {
+        out.push_str(&format!(
+            "  {:<12} roms: {}\n",
+            e.name,
+            e.rom_names.join(", ")
+        ));
+    }
+    out
 }
 
 /// Boot a registered machine, run `frames` frames from reset, and write the
@@ -1037,6 +1058,26 @@ mod tests {
         // Registry wiring smoke test — no ROM files needed.
         let r = disasm_registry::find("mariobros", "sound").expect("region registered");
         assert_eq!(CpuArg::from(r.cpu), CpuArg::I8035);
+    }
+
+    #[test]
+    fn machines_command_lists_registered_names_and_roms() {
+        let out = list_machines();
+        // A few known machines and their ROM-set names appear, sorted.
+        assert!(out.contains("joust"), "{out}");
+        assert!(out.contains("mariobros"), "{out}");
+        assert!(out.contains("esb"), "{out}");
+        assert!(out.contains("registered machines"), "{out}");
+        // Names are alphabetized.
+        let names: Vec<&str> = out
+            .lines()
+            .skip(1)
+            .filter_map(|l| l.split_whitespace().next())
+            .collect();
+        assert!(
+            names.windows(2).all(|w| w[0] <= w[1]),
+            "machines must be sorted: {names:?}"
+        );
     }
 
     #[test]
