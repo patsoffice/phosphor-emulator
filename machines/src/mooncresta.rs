@@ -331,7 +331,7 @@ impl Bus for MoonCrestaSystem {
     }
 }
 
-crate::impl_board_delegation!(MoonCrestaSystem, board, TIMING);
+crate::impl_board_delegation!(MoonCrestaSystem, board, TIMING, orientation);
 
 impl MachineCore for MoonCrestaSystem {
     crate::machine_core_metadata!("mooncrst", TIMING);

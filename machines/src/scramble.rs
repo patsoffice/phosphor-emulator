@@ -49,9 +49,12 @@ pub const TIMING: TimingConfig = TimingConfig {
     cpu_clock_hz: 3_072_000,
     cycles_per_scanline: 192,
     total_scanlines: 264,
-    display_width: 224,
-    display_height: 256,
-    display_aspect: Some((3, 4)),
+    // Native (pre-orientation) framebuffer: the board declares ROT90 (plus any
+    // cocktail flip) and the frontend rotates centrally, so these are the
+    // unrotated dimensions.
+    display_width: galaxian_video::NATIVE_WIDTH as u32, // 256
+    display_height: galaxian_video::NATIVE_HEIGHT as u32, // 224
+    display_aspect: Some((3, 4)),                       // portrait tube as viewed (after ROT90)
 };
 
 /// Sound CPU clock: 14.318 MHz / 8 ≈ 1.79 MHz.
@@ -348,6 +351,13 @@ impl ScrambleBoard {
     pub fn render_frame(&self, buffer: &mut [u8]) {
         self.video.render_frame(buffer);
     }
+
+    /// Declarative orientation (base ROT90 composed with the live cocktail
+    /// flip); applied centrally by the frontend.
+    pub fn orientation(&self) -> phosphor_core::core::machine::Orientation {
+        self.video.orientation()
+    }
+
     pub fn fill_audio(&mut self, out: &mut [i16]) -> usize {
         self.sound.fill_audio(out)
     }
@@ -995,7 +1005,7 @@ impl Bus for ScrambleSystem {
     }
 }
 
-crate::impl_board_delegation!(ScrambleSystem, board, TIMING);
+crate::impl_board_delegation!(ScrambleSystem, board, TIMING, orientation);
 
 impl MachineCore for ScrambleSystem {
     crate::machine_core_metadata!("scramble", TIMING);

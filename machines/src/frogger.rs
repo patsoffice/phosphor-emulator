@@ -367,7 +367,7 @@ impl Bus for FroggerSystem {
     }
 }
 
-crate::impl_board_delegation!(FroggerSystem, board, TIMING);
+crate::impl_board_delegation!(FroggerSystem, board, TIMING, orientation);
 
 impl MachineCore for FroggerSystem {
     crate::machine_core_metadata!("frogger", TIMING);

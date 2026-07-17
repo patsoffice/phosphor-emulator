@@ -504,7 +504,7 @@ impl Bus for PiscesSystem {
     }
 }
 
-crate::impl_board_delegation!(PiscesSystem, board, TIMING);
+crate::impl_board_delegation!(PiscesSystem, board, TIMING, orientation);
 
 impl MachineCore for PiscesSystem {
     // Hand-written (not machine_core_metadata!) because the id is per-instance

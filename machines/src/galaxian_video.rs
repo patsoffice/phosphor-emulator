@@ -711,34 +711,35 @@ impl GalaxianVideo {
     // Frame output
     // -----------------------------------------------------------------------
 
-    /// Rotate the native 256×224 framebuffer 90° CCW into the 224×256 display
-    /// buffer. Cocktail flip (rare; player-2 on a flippable cabinet) is applied
-    /// as a whole-frame mirror — the upright path is bit-faithful.
+    /// Copy the native 256×224 framebuffer into the output buffer in native
+    /// row-major order.
+    ///
+    /// The 90° cabinet rotation and any cocktail flip are declared via
+    /// [`orientation`](Self::orientation) and applied centrally by the frontend,
+    /// so this emits pixels unrotated and unmirrored.
     pub fn render_frame(&self, out: &mut [u8]) {
-        if !self.flip_x && !self.flip_y {
-            gfx::rotate_90_ccw(&self.scanline_buffer, out, NATIVE_WIDTH, NATIVE_HEIGHT);
-            return;
+        out.copy_from_slice(&self.scanline_buffer);
+    }
+
+    /// Declarative screen orientation: base ROT90 composed with the live
+    /// cocktail flip.
+    ///
+    /// The cabinet is mounted rotated 90°. A cocktail flip mirrors the *native*
+    /// (pre-rotation) framebuffer, which — because the rotation transposes the
+    /// axes — appears swapped in the rotated output: a native X-mirror becomes
+    /// an output Y-mirror and vice-versa. Composing with [`Orientation::ROT90`]
+    /// (`SWAP_XY | FLIP_X`) therefore XORs `FLIP_Y` for `flip_x` and `FLIP_X`
+    /// for `flip_y`. Both flips set ⇒ `ROT270` (ROT90 + 180° cocktail).
+    pub fn orientation(&self) -> phosphor_core::core::machine::Orientation {
+        use phosphor_core::core::machine::Orientation;
+        let mut o = Orientation::ROT90;
+        if self.flip_x {
+            o = o.compose(Orientation::from_bits(Orientation::FLIP_Y));
         }
-        // Mirror the requested axes of the native buffer, then rotate.
-        let mut flipped = vec![0u8; self.scanline_buffer.len()];
-        for ny in 0..NATIVE_HEIGHT {
-            let sy = if self.flip_y {
-                NATIVE_HEIGHT - 1 - ny
-            } else {
-                ny
-            };
-            for nx in 0..NATIVE_WIDTH {
-                let sx = if self.flip_x {
-                    NATIVE_WIDTH - 1 - nx
-                } else {
-                    nx
-                };
-                let si = (sy * NATIVE_WIDTH + sx) * 3;
-                let di = (ny * NATIVE_WIDTH + nx) * 3;
-                flipped[di..di + 3].copy_from_slice(&self.scanline_buffer[si..si + 3]);
-            }
+        if self.flip_y {
+            o = o.compose(Orientation::from_bits(Orientation::FLIP_X));
         }
-        gfx::rotate_90_ccw(&flipped, out, NATIVE_WIDTH, NATIVE_HEIGHT);
+        o
     }
 
     /// Reset dynamic state (not the ROM-derived caches/palettes/star table).
@@ -1162,12 +1163,76 @@ mod tests {
     }
 
     #[test]
-    fn render_frame_rotates_dimensions() {
+    fn render_frame_emits_native_unrotated() {
+        use phosphor_core::core::machine::Orientation;
         let v = GalaxianVideo::new();
-        // Output buffer must be 224×256 RGB24.
-        let mut out = vec![0u8; 224 * 256 * 3];
+        // Native (unrotated) 256×224 RGB24 output; ROT90 declared, not baked.
+        let mut out = vec![0u8; NATIVE_WIDTH * NATIVE_HEIGHT * 3];
         v.render_frame(&mut out); // all-black native → all-black output, no panic
         assert!(out.iter().all(|&b| b == 0));
+        assert_eq!(v.orientation(), Orientation::ROT90);
+    }
+
+    /// The declarative (native render + central `apply_orientation`) path must
+    /// be pixel-identical to the legacy baked mirror-then-rotate-90-CCW path for
+    /// every combination of the cocktail flip axes.
+    #[test]
+    fn declarative_orientation_matches_legacy_bake() {
+        // Fill the native buffer with a position-dependent gradient so any
+        // axis error shows up as a mismatch.
+        let mut v = GalaxianVideo::new();
+        for ny in 0..NATIVE_HEIGHT {
+            for nx in 0..NATIVE_WIDTH {
+                let off = (ny * NATIVE_WIDTH + nx) * 3;
+                v.scanline_buffer[off] = (nx & 0xFF) as u8;
+                v.scanline_buffer[off + 1] = (ny & 0xFF) as u8;
+                v.scanline_buffer[off + 2] = ((nx ^ ny) & 0xFF) as u8;
+            }
+        }
+
+        // Snapshot the native buffer so the legacy closure doesn't hold a
+        // borrow of `v` while we toggle its flip latches below.
+        let src = v.scanline_buffer.clone();
+
+        // Legacy bake: mirror the requested axes of the native buffer, then
+        // rotate 90° CCW into the 224×256 display buffer.
+        let legacy_bake = |flip_x: bool, flip_y: bool| -> Vec<u8> {
+            let src = &src;
+            let mut flipped = vec![0u8; src.len()];
+            for ny in 0..NATIVE_HEIGHT {
+                let sy = if flip_y { NATIVE_HEIGHT - 1 - ny } else { ny };
+                for nx in 0..NATIVE_WIDTH {
+                    let sx = if flip_x { NATIVE_WIDTH - 1 - nx } else { nx };
+                    let si = (sy * NATIVE_WIDTH + sx) * 3;
+                    let di = (ny * NATIVE_WIDTH + nx) * 3;
+                    flipped[di..di + 3].copy_from_slice(&src[si..si + 3]);
+                }
+            }
+            let mut out = vec![0u8; src.len()];
+            phosphor_core::gfx::rotate_90_ccw(&flipped, &mut out, NATIVE_WIDTH, NATIVE_HEIGHT);
+            out
+        };
+
+        for (flip_x, flip_y) in [(false, false), (true, false), (false, true), (true, true)] {
+            v.set_flip_x(flip_x);
+            v.set_flip_y(flip_y);
+            let mut native = vec![0u8; v.scanline_buffer.len()];
+            v.render_frame(&mut native);
+            let mut declarative = vec![0u8; native.len()];
+            phosphor_core::gfx::apply_orientation(
+                &native,
+                &mut declarative,
+                NATIVE_WIDTH,
+                NATIVE_HEIGHT,
+                v.orientation(),
+            );
+            assert_eq!(
+                declarative,
+                legacy_bake(flip_x, flip_y),
+                "mismatch for flip_x={flip_x} flip_y={flip_y} (orientation={:?})",
+                v.orientation()
+            );
+        }
     }
 
     #[test]

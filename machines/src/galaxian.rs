@@ -89,9 +89,12 @@ pub const TIMING: TimingConfig = TimingConfig {
     cpu_clock_hz: 3_072_000,
     cycles_per_scanline: 192,
     total_scanlines: 264,
-    display_width: 224, // rotated 90° CCW from native 256×224
-    display_height: 256,
-    display_aspect: Some((3, 4)),
+    // Native (pre-orientation) framebuffer: the board declares ROT90 (plus any
+    // cocktail flip) and the frontend rotates centrally, so these are the
+    // unrotated dimensions.
+    display_width: galaxian_video::NATIVE_WIDTH as u32, // 256
+    display_height: galaxian_video::NATIVE_HEIGHT as u32, // 224
+    display_aspect: Some((3, 4)),                       // portrait tube as viewed (after ROT90)
 };
 
 /// Visible scanlines per frame (native rows rendered into the framebuffer).
@@ -477,6 +480,12 @@ impl GalaxianBoard {
 
     pub fn render_frame(&self, buffer: &mut [u8]) {
         self.video.render_frame(buffer);
+    }
+
+    /// Declarative orientation (base ROT90 composed with the live cocktail
+    /// flip); applied centrally by the frontend.
+    pub fn orientation(&self) -> phosphor_core::core::machine::Orientation {
+        self.video.orientation()
     }
 
     pub fn fill_audio(&mut self, buffer: &mut [i16]) -> usize {
@@ -918,7 +927,7 @@ impl Bus for GalaxianSystem {
 // Trait implementations
 // ---------------------------------------------------------------------------
 
-crate::impl_board_delegation!(GalaxianSystem, board, TIMING);
+crate::impl_board_delegation!(GalaxianSystem, board, TIMING, orientation);
 
 impl MachineCore for GalaxianSystem {
     crate::machine_core_metadata!("galaxian", TIMING);
@@ -1232,12 +1241,13 @@ mod tests {
 
     #[test]
     fn metadata_and_display_size() {
-        use phosphor_core::core::machine::{MachineCore, Renderable};
+        use phosphor_core::core::machine::{MachineCore, Orientation, Renderable};
         let sys = GalaxianSystem::new();
         assert_eq!(sys.machine_id(), "galaxian");
         assert!((sys.frame_rate_hz() - 60.606).abs() < 0.01);
-        // Rotated 90° CCW from native 256×224.
-        assert_eq!(sys.display_size(), (224, 256));
+        // Native (unrotated) 256×224 framebuffer; the frontend applies ROT90.
+        assert_eq!(sys.display_size(), (256, 224));
+        assert_eq!(sys.orientation(), Orientation::ROT90);
         // Portrait cabinet (4:3 tube rotated to 3:4).
         assert_eq!(sys.display_aspect(), Some((3, 4)));
     }
