@@ -544,10 +544,9 @@ impl WilliamsBoard {
         // CVSD speech (Sinistar): the sound CPU bit-bangs the stream on the
         // sound PIA's CA2 (data) and CB2 (clock) lines. clock_w is edge-
         // triggered internally, so sampling both every cycle is faithful.
-        if self.cvsd.is_some() {
+        if let Some(cvsd) = &mut self.cvsd {
             let digit = self.sound_pia.ca2_output();
             let clock = self.sound_pia.cb2_output();
-            let cvsd = self.cvsd.as_mut().unwrap();
             cvsd.digit_w(digit);
             cvsd.clock_w(clock);
             // DAC and CVSD share the mono speaker; CVSD is routed at ~0.8.

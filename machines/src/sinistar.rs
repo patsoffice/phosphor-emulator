@@ -548,7 +548,7 @@ mod tests {
     #[test]
     fn stick_encodes_49way_directions() {
         let mut sys = SinistarSystem::new();
-        let mut press = |sys: &mut SinistarSystem, id: u8, on: bool| {
+        let press = |sys: &mut SinistarSystem, id: u8, on: bool| {
             sys.handle_input(InputEvent::Button {
                 id: InputId(id as u16),
                 pressed: on,

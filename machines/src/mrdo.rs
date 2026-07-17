@@ -132,8 +132,18 @@ pub static MRDO_MAIN_ROM: RomRegion = RomRegion {
 pub static MRDO_GFX_FG_ROM: RomRegion = RomRegion {
     size: 0x2000,
     entries: &[
-        RomEntry { name: "d9", size: 0x1000, offset: 0x0000, crc32: &[0xde4cfe66] },
-        RomEntry { name: "d10", size: 0x1000, offset: 0x1000, crc32: &[0xa6c2f38b] },
+        RomEntry {
+            name: "d9",
+            size: 0x1000,
+            offset: 0x0000,
+            crc32: &[0xde4cfe66],
+        },
+        RomEntry {
+            name: "d10",
+            size: 0x1000,
+            offset: 0x1000,
+            crc32: &[0xa6c2f38b],
+        },
     ],
 };
 
@@ -141,8 +151,18 @@ pub static MRDO_GFX_FG_ROM: RomRegion = RomRegion {
 pub static MRDO_GFX_BG_ROM: RomRegion = RomRegion {
     size: 0x2000,
     entries: &[
-        RomEntry { name: "r8-08.bin", size: 0x1000, offset: 0x0000, crc32: &[0xdbdc9ffa] },
-        RomEntry { name: "n8-07.bin", size: 0x1000, offset: 0x1000, crc32: &[0x4b9973db] },
+        RomEntry {
+            name: "r8-08.bin",
+            size: 0x1000,
+            offset: 0x0000,
+            crc32: &[0xdbdc9ffa],
+        },
+        RomEntry {
+            name: "n8-07.bin",
+            size: 0x1000,
+            offset: 0x1000,
+            crc32: &[0x4b9973db],
+        },
     ],
 };
 
@@ -150,8 +170,18 @@ pub static MRDO_GFX_BG_ROM: RomRegion = RomRegion {
 pub static MRDO_GFX_SPR_ROM: RomRegion = RomRegion {
     size: 0x2000,
     entries: &[
-        RomEntry { name: "h5-05.bin", size: 0x1000, offset: 0x0000, crc32: &[0xe1218cc5] },
-        RomEntry { name: "k5-06.bin", size: 0x1000, offset: 0x1000, crc32: &[0xb1f68b04] },
+        RomEntry {
+            name: "h5-05.bin",
+            size: 0x1000,
+            offset: 0x0000,
+            crc32: &[0xe1218cc5],
+        },
+        RomEntry {
+            name: "k5-06.bin",
+            size: 0x1000,
+            offset: 0x1000,
+            crc32: &[0xb1f68b04],
+        },
     ],
 };
 
@@ -160,10 +190,30 @@ pub static MRDO_GFX_SPR_ROM: RomRegion = RomRegion {
 pub static MRDO_PALETTE_PROM: RomRegion = RomRegion {
     size: 0x80,
     entries: &[
-        RomEntry { name: "u02--2.bin", size: 0x20, offset: 0x0000, crc32: &[0x238a65d7] },
-        RomEntry { name: "t02--3.bin", size: 0x20, offset: 0x0020, crc32: &[0xae263dc0] },
-        RomEntry { name: "f10--1.bin", size: 0x20, offset: 0x0040, crc32: &[0x16ee4ca2] },
-        RomEntry { name: "j10--4.bin", size: 0x20, offset: 0x0060, crc32: &[0xff7fe284] },
+        RomEntry {
+            name: "u02--2.bin",
+            size: 0x20,
+            offset: 0x0000,
+            crc32: &[0x238a65d7],
+        },
+        RomEntry {
+            name: "t02--3.bin",
+            size: 0x20,
+            offset: 0x0020,
+            crc32: &[0xae263dc0],
+        },
+        RomEntry {
+            name: "f10--1.bin",
+            size: 0x20,
+            offset: 0x0040,
+            crc32: &[0x16ee4ca2],
+        },
+        RomEntry {
+            name: "j10--4.bin",
+            size: 0x20,
+            offset: 0x0060,
+            crc32: &[0xff7fe284],
+        },
     ],
 };
 
@@ -587,7 +637,8 @@ impl MrdoBoard {
                     if !(0..VISIBLE_WIDTH as i32).contains(&nxi) {
                         continue;
                     }
-                    pen[nyi as usize * VISIBLE_WIDTH + nxi as usize] = 0x100 + color * 4 + val as u16;
+                    pen[nyi as usize * VISIBLE_WIDTH + nxi as usize] =
+                        0x100 + color * 4 + val as u16;
                 }
             }
         }
@@ -1043,17 +1094,50 @@ const DSW2_DEFAULT: u8 = 0xFF;
 /// (high nibble, `shift = 4`). Values per MAME `DSW2`.
 const fn coinage(shift: u8) -> [DipChoice; 11] {
     [
-        DipChoice { label: "4 Coins/1 Credit", value: 0x06 << shift },
-        DipChoice { label: "3 Coins/1 Credit", value: 0x08 << shift },
-        DipChoice { label: "2 Coins/1 Credit", value: 0x0a << shift },
-        DipChoice { label: "3 Coins/2 Credits", value: 0x07 << shift },
-        DipChoice { label: "1 Coin/1 Credit", value: 0x0f << shift },
-        DipChoice { label: "2 Coins/3 Credits", value: 0x09 << shift },
-        DipChoice { label: "1 Coin/2 Credits", value: 0x0e << shift },
-        DipChoice { label: "1 Coin/3 Credits", value: 0x0d << shift },
-        DipChoice { label: "1 Coin/4 Credits", value: 0x0c << shift },
-        DipChoice { label: "1 Coin/5 Credits", value: 0x0b << shift },
-        DipChoice { label: "Free Play", value: 0x00 << shift },
+        DipChoice {
+            label: "4 Coins/1 Credit",
+            value: 0x06 << shift,
+        },
+        DipChoice {
+            label: "3 Coins/1 Credit",
+            value: 0x08 << shift,
+        },
+        DipChoice {
+            label: "2 Coins/1 Credit",
+            value: 0x0a << shift,
+        },
+        DipChoice {
+            label: "3 Coins/2 Credits",
+            value: 0x07 << shift,
+        },
+        DipChoice {
+            label: "1 Coin/1 Credit",
+            value: 0x0f << shift,
+        },
+        DipChoice {
+            label: "2 Coins/3 Credits",
+            value: 0x09 << shift,
+        },
+        DipChoice {
+            label: "1 Coin/2 Credits",
+            value: 0x0e << shift,
+        },
+        DipChoice {
+            label: "1 Coin/3 Credits",
+            value: 0x0d << shift,
+        },
+        DipChoice {
+            label: "1 Coin/4 Credits",
+            value: 0x0c << shift,
+        },
+        DipChoice {
+            label: "1 Coin/5 Credits",
+            value: 0x0b << shift,
+        },
+        DipChoice {
+            label: "Free Play",
+            value: 0x00 << shift,
+        },
     ]
 }
 
@@ -1354,9 +1438,7 @@ mod tests {
         let mut buf = vec![0u8; DISPLAY_W * DISPLAY_H * 3];
         sys.board.render_frame(&mut buf);
         // At least one sprite pixel should be green somewhere in the output.
-        let any_green = buf
-            .chunks_exact(3)
-            .any(|px| px == [0u8, 180, 0].as_slice());
+        let any_green = buf.chunks_exact(3).any(|px| px == [0u8, 180, 0].as_slice());
         assert!(any_green, "sprite pixel not found in output");
     }
 
