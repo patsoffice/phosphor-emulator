@@ -72,17 +72,16 @@ pub const TIMING: TimingConfig = TimingConfig {
     cpu_clock_hz: 8_200_000 / 2, // 4_100_000
     cycles_per_scanline: 261,
     total_scanlines: 262,
-    display_width: DISPLAY_W as u32,  // 192 (rotated ROT270)
-    display_height: DISPLAY_H as u32, // 240
-    display_aspect: Some((3, 4)),
+    // Native (pre-orientation) framebuffer: Mr. Do! declares ROT270 and the
+    // frontend rotates centrally, so these are the unrotated dimensions.
+    display_width: VISIBLE_WIDTH as u32,   // 240
+    display_height: VISIBLE_HEIGHT as u32, // 192
+    display_aspect: Some((3, 4)),          // portrait tube as viewed (after ROT270)
 };
 
 /// Native (pre-rotation) visible raster: MAME visarea x 8..248, y 32..224.
 pub const VISIBLE_WIDTH: usize = 240;
 pub const VISIBLE_HEIGHT: usize = 192;
-/// Rotated (ROT270) display dimensions reported to the frontend.
-pub const DISPLAY_W: usize = VISIBLE_HEIGHT; // 192
-pub const DISPLAY_H: usize = VISIBLE_WIDTH; // 240
 
 /// Scanline at which the once-per-frame VBLANK IRQ is asserted (start of the
 /// vertical blanking interval, just past the visible area y 32..224).
@@ -643,19 +642,21 @@ impl MrdoBoard {
             }
         }
 
-        // ROT270 (native `(nx,ny)` → output `(ny, VISIBLE_WIDTH-1-nx)`), resolving
-        // each pen through the RGB palette.
-        for ny in 0..VISIBLE_HEIGHT {
-            for nx in 0..VISIBLE_WIDTH {
-                let (r, g, b) = self.palette_rgb[pen[ny * VISIBLE_WIDTH + nx] as usize];
-                let ox = ny;
-                let oy = VISIBLE_WIDTH - 1 - nx;
-                let di = (oy * DISPLAY_W + ox) * 3;
-                buffer[di] = r;
-                buffer[di + 1] = g;
-                buffer[di + 2] = b;
-            }
+        // Resolve each pen through the RGB palette into native row-major order.
+        // The ROT270 the cabinet needs is declared via `orientation` and applied
+        // centrally by the frontend, not baked here.
+        for (i, &p) in pen.iter().enumerate() {
+            let (r, g, b) = self.palette_rgb[p as usize];
+            buffer[i * 3] = r;
+            buffer[i * 3 + 1] = g;
+            buffer[i * 3 + 2] = b;
         }
+    }
+
+    /// Mr. Do!'s monitor is mounted rotated 270° clockwise. The orientation is
+    /// declarative — the frontend rotates `render_frame`'s native output.
+    pub fn orientation(&self) -> phosphor_core::core::machine::Orientation {
+        phosphor_core::core::machine::Orientation::ROT270
     }
 
     // -----------------------------------------------------------------------
@@ -859,7 +860,7 @@ impl Bus for MrdoSystem {
     }
 }
 
-crate::impl_board_delegation!(MrdoSystem, board, crate::mrdo::TIMING);
+crate::impl_board_delegation!(MrdoSystem, board, crate::mrdo::TIMING, orientation);
 
 impl MachineCore for MrdoSystem {
     crate::machine_core_metadata!("mrdo", crate::mrdo::TIMING);
@@ -1341,7 +1342,9 @@ mod tests {
         assert_eq!(TIMING.cpu_clock_hz, 4_100_000);
         let hz = TIMING.frame_rate_hz();
         assert!((59.0..61.0).contains(&hz), "frame rate {hz} out of range");
-        assert_eq!(TIMING.display_size(), (192, 240));
+        // Native (unrotated) 240×192; the frontend applies ROT270 to present
+        // the 192×240 portrait image.
+        assert_eq!(TIMING.display_size(), (240, 192));
     }
 
     #[test]
@@ -1390,15 +1393,14 @@ mod tests {
         assert_eq!(pal[0], (0xFF, 0, 0));
     }
 
-    /// Native visible pixel (nx, ny) lands at this offset in the ROT270 output.
+    /// Native visible pixel (nx, ny) lands at this offset in the native
+    /// (unrotated) output; ROT270 is applied centrally by the frontend.
     fn out_offset(nx: usize, ny: usize) -> usize {
-        let ox = ny;
-        let oy = VISIBLE_WIDTH - 1 - nx;
-        (oy * DISPLAY_W + ox) * 3
+        (ny * VISIBLE_WIDTH + nx) * 3
     }
 
     #[test]
-    fn render_frame_draws_fg_tile_through_rotation() {
+    fn render_frame_draws_fg_tile_native() {
         let mut sys = MrdoSystem::new();
         // Decode a solid FG tile 0 with pixel value 2 (MSB plane set, LSB clear):
         // first 0x1000 half is the MSB plane for our layout.
@@ -1414,7 +1416,7 @@ mod tests {
             fg[idx] = 0x01; // attr: color 1, no high code bit
             fg[idx + 0x400] = 0x00; // code 0
         }
-        let mut buf = vec![0u8; DISPLAY_W * DISPLAY_H * 3];
+        let mut buf = vec![0u8; VISIBLE_WIDTH * VISIBLE_HEIGHT * 3];
         sys.board.render_frame(&mut buf);
         // Abs (8,32) is native (0,0); that pixel should be the tile's red pen.
         let di = out_offset(0, 0);
@@ -1435,7 +1437,7 @@ mod tests {
             spr[2] = 0x00; // color 0, no flip
             spr[3] = 40; // screenX = 40
         }
-        let mut buf = vec![0u8; DISPLAY_W * DISPLAY_H * 3];
+        let mut buf = vec![0u8; VISIBLE_WIDTH * VISIBLE_HEIGHT * 3];
         sys.board.render_frame(&mut buf);
         // At least one sprite pixel should be green somewhere in the output.
         let any_green = buf.chunks_exact(3).any(|px| px == [0u8, 180, 0].as_slice());
@@ -1532,8 +1534,16 @@ mod tests {
         for _ in 0..3 {
             sys.run_frame();
         }
-        assert_eq!(TIMING.display_size(), (DISPLAY_W as u32, DISPLAY_H as u32));
-        let mut buf = vec![0u8; DISPLAY_W * DISPLAY_H * 3];
+        // Native (unrotated) framebuffer; the frontend applies ROT270.
+        assert_eq!(
+            TIMING.display_size(),
+            (VISIBLE_WIDTH as u32, VISIBLE_HEIGHT as u32)
+        );
+        assert_eq!(
+            sys.board.orientation(),
+            phosphor_core::core::machine::Orientation::ROT270
+        );
+        let mut buf = vec![0u8; VISIBLE_WIDTH * VISIBLE_HEIGHT * 3];
         sys.board.render_frame(&mut buf);
     }
 
