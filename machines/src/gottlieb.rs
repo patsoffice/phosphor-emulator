@@ -704,58 +704,92 @@ impl GottliebBoard {
         }
     }
 
-    /// Render tiles from video RAM.
+    /// Render tiles from video RAM into the indexed pixel buffer.
+    ///
+    /// Each tile selects one of two 8×8 caches (ROM vs char-RAM) by its code and
+    /// the gfxchar latches. `render_tilemap_scanline_indexed` renders from a
+    /// single cache, so this runs one pass per cache: a tile belonging to the
+    /// other cache resolves to `None` (attr 0 = skip). Tiles tile the screen
+    /// without overlap, so the two passes are independent and pixel-identical to
+    /// the original single-pass select. The decoded pixel is the palette index
+    /// directly (pen 0 transparent); there is no colour attribute.
     fn render_tiles(&mut self) {
+        self.render_tile_layer(true); // ROM-char tiles
+        self.render_tile_layer(false); // char-RAM tiles
+    }
+
+    fn render_tile_layer(&mut self, is_rom: bool) {
+        let config = gfx::TilemapConfig {
+            cols: TILE_COLS,
+            rows: TILE_ROWS,
+            tile_width: 8,
+            tile_height: 8,
+        };
         let video_ram = self.map.region_data(Region::VideoRam);
-
-        for tile_row in 0..TILE_ROWS {
-            for tile_col in 0..TILE_COLS {
-                let tile_index = tile_row * TILE_COLS + tile_col;
-                let code = video_ram[tile_index & 0x3FF] as usize;
-
-                // Select tile source: bit 7 selects gfxcharhi/gfxcharlo
-                let use_rom = if code & 0x80 != 0 {
-                    self.gfxcharhi
-                } else {
-                    self.gfxcharlo
-                };
-                let cache = if use_rom {
-                    &self.tile_rom_cache
-                } else {
-                    &self.charram_cache
-                };
-
-                // ROM tiles use the full code; charram tiles use code & 0x7F
-                let cache_code = if use_rom {
-                    code % cache.count().max(1)
-                } else {
-                    (code & 0x7F) % cache.count().max(1)
-                };
-
-                let screen_x = tile_col * 8;
-                let screen_y = tile_row * 8;
-
-                for py in 0..8usize {
-                    let sy = screen_y + py;
-                    if sy >= NATIVE_HEIGHT {
-                        break;
+        let gfxcharhi = self.gfxcharhi;
+        let gfxcharlo = self.gfxcharlo;
+        let cache = if is_rom {
+            &self.tile_rom_cache
+        } else {
+            &self.charram_cache
+        };
+        let count = cache.count().max(1);
+        let pixel_buffer = &mut self.pixel_buffer;
+        let mut prio = [0u8; NATIVE_WIDTH];
+        for scanline in 0..NATIVE_HEIGHT {
+            let row_off = scanline * NATIVE_WIDTH;
+            let row = &mut pixel_buffer[row_off..row_off + NATIVE_WIDTH];
+            gfx::render_tilemap_scanline_indexed(
+                &config,
+                cache,
+                scanline,
+                |col, trow| {
+                    let tile_index = trow * TILE_COLS + col;
+                    let code = video_ram[tile_index & 0x3FF] as usize;
+                    let use_rom = if code & 0x80 != 0 {
+                        gfxcharhi
+                    } else {
+                        gfxcharlo
+                    };
+                    if use_rom == is_rom {
+                        let cache_code = if is_rom {
+                            code % count
+                        } else {
+                            (code & 0x7F) % count
+                        };
+                        gfx::TileInfo::new(cache_code as u16, 1) // attr 1 = this cache
+                    } else {
+                        gfx::TileInfo::new(0, 0) // attr 0 = skip (other cache)
                     }
-                    let row = cache.row_slice(cache_code, py);
-                    let row_base = sy * NATIVE_WIDTH + screen_x;
-                    for (px, &pixel) in row.iter().enumerate().take(8) {
-                        if pixel != 0 {
-                            self.pixel_buffer[row_base + px] = pixel;
-                        }
-                    }
-                }
-            }
+                },
+                // Skip tiles owned by the other cache; pen 0 is transparent. The
+                // decoded pixel value is the palette index.
+                |attr, pixel| (attr != 0 && pixel != 0).then_some((pixel, 0)),
+                row,
+                &mut prio,
+                0,
+            );
         }
     }
 
-    /// Render sprites from sprite RAM.
+    /// Render sprites from sprite RAM into the indexed pixel buffer.
+    ///
+    /// 16×16 sprites, no flip; the decoded pixel is the palette index (pen 0
+    /// transparent). Composited by draw order (render_frame_internal picks the
+    /// tiles/sprites order from the background-priority bit), so no priority
+    /// buffer is used.
     fn render_sprites(&mut self) {
         let sprite_ram = self.map.region_data(Region::SpriteRam);
-        let sprite_count = self.sprite_cache.count().max(1);
+        let sprite_cache = &self.sprite_cache;
+        let sprite_count = sprite_cache.count().max(1);
+        let sprite_bank = self.sprite_bank;
+        let pixel_buffer = &mut self.pixel_buffer;
+        let clip = gfx::SpriteClip {
+            x_min: 0,
+            x_max: NATIVE_WIDTH as i32,
+            wrap_offset: None,
+        };
+        let mut prio = [0u8; NATIVE_WIDTH];
 
         for entry in 0..64usize {
             let offs = entry * 4;
@@ -765,24 +799,27 @@ impl GottliebBoard {
 
             let sx = sx_raw as i32 - 4;
             let sy = sy_raw as i32 - 13;
-            let code = ((255 ^ code_raw) as usize + 256 * self.sprite_bank as usize) % sprite_count;
+            let code = ((255 ^ code_raw) as usize + 256 * sprite_bank as usize) % sprite_count;
 
             for py in 0..16usize {
                 let screen_y = sy + py as i32;
                 if screen_y < 0 || screen_y >= NATIVE_HEIGHT as i32 {
                     continue;
                 }
-                for px in 0..16usize {
-                    let screen_x = sx + px as i32;
-                    if screen_x < 0 || screen_x >= NATIVE_WIDTH as i32 {
-                        continue;
-                    }
-                    let pixel = self.sprite_cache.pixel(code, px, py);
-                    if pixel != 0 {
-                        let buf_idx = screen_y as usize * NATIVE_WIDTH + screen_x as usize;
-                        self.pixel_buffer[buf_idx] = pixel;
-                    }
-                }
+                let row_off = screen_y as usize * NATIVE_WIDTH;
+                let row = &mut pixel_buffer[row_off..row_off + NATIVE_WIDTH];
+                gfx::draw_sprite_row_indexed(
+                    sprite_cache,
+                    code as u16,
+                    py,
+                    sx,
+                    false,
+                    |pixel| pixel == 0,
+                    |pixel| (pixel, 0u8),
+                    row,
+                    &mut prio,
+                    &clip,
+                );
             }
         }
     }
