@@ -13,6 +13,7 @@ use phosphor_core::device::dac::Mc1408Dac;
 use phosphor_core::device::hc55516::Hc55516;
 use phosphor_core::device::pia6820::Pia6820;
 use phosphor_core::device::williams_blitter::WilliamsBlitter;
+use phosphor_core::gfx::render_bitmap_scanline;
 use phosphor_macros::{BusDebug, DebugTrace, MemoryRegion};
 
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
@@ -438,29 +439,21 @@ impl WilliamsBoard {
         let screen_y = scanline - CROP_Y;
         let row_offset = screen_y * WIDTH * 3;
 
-        for screen_x in 0..WIDTH {
-            let pixel_x = screen_x + CROP_X;
-            let byte_column = pixel_x / 2;
-            let vram_addr = byte_column * 256 + scanline;
-
-            let byte = if vram_addr < vram.len() {
-                vram[vram_addr]
-            } else {
-                0
-            };
-
-            let color_index = if pixel_x & 1 == 0 {
-                (byte >> 4) & 0x0F
-            } else {
-                byte & 0x0F
-            };
-
-            let (r, g, b) = palette_rgb[color_index as usize];
-            let pixel_offset = row_offset + screen_x * 3;
-            self.scanline_buffer[pixel_offset] = r;
-            self.scanline_buffer[pixel_offset + 1] = g;
-            self.scanline_buffer[pixel_offset + 2] = b;
+        // VRAM is column-major (addr = byte_column*256 + scanline), so gather this
+        // row's packed bytes into a contiguous buffer, then unpack. CROP_X is even,
+        // so screen_x 0 is the high nibble of byte column CROP_X/2; each byte is
+        // 2 pixels, high nibble first.
+        const FIRST_COL: usize = CROP_X / 2;
+        const ROW_BYTES: usize = WIDTH / 2;
+        let mut packed = [0u8; ROW_BYTES];
+        for (j, b) in packed.iter_mut().enumerate() {
+            let vram_addr = (FIRST_COL + j) * 256 + scanline;
+            if vram_addr < vram.len() {
+                *b = vram[vram_addr];
+            }
         }
+        let row = &mut self.scanline_buffer[row_offset..row_offset + WIDTH * 3];
+        render_bitmap_scanline(&packed, 2, true, |idx| palette_rgb[idx as usize], row, 0);
     }
 
     // --- Core tick ---

@@ -1,9 +1,11 @@
+pub mod bitmap;
 pub mod decode;
 pub mod resistor;
 pub mod sheet;
 pub mod sprite;
 pub mod tilemap;
 
+pub use bitmap::render_bitmap_scanline;
 pub use decode::{GfxCache, GfxLayout, decode_gfx};
 pub use resistor::{
     combine_weights, compute_resistor_net, compute_resistor_weights, compute_resnet_weights,

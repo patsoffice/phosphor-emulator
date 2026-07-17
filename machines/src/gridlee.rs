@@ -12,6 +12,7 @@ use phosphor_core::cpu::m6809::M6809;
 use phosphor_core::cpu::state::M6809State;
 use phosphor_core::cpu::{Cpu, CpuStateTrait};
 use phosphor_core::gfx::decode::{GfxCache, GfxLayout, decode_gfx};
+use phosphor_core::gfx::render_bitmap_scanline;
 use phosphor_macros::{BusDebug, MemoryRegion};
 
 use crate::registry::MachineEntry;
@@ -629,49 +630,39 @@ impl GridleeSystem {
         let palette_bank = self.palette_bank_per_scanline[scanline];
         let row_offset = screen_y * TIMING.display_width as usize * 3;
 
-        // Background: read VRAM row. Each byte = 2 pixels (upper nibble = left).
+        // Background: each VRAM byte packs 2 pixels (background pens 16..31).
+        // Precompute this scanline's pen->RGB table so the unpack closure doesn't
+        // borrow &self while the framebuffer row is borrowed mutably.
+        let bg_lut: [(u8, u8, u8); 16] =
+            std::array::from_fn(|i| self.resolve_color(palette_bank, i as u8 + 16));
+        let w = TIMING.display_width as usize;
+        // Gather the 128-byte packed row (copied out so the VRAM borrow ends
+        // before the framebuffer is borrowed mutably). Cocktail flip reverses the
+        // byte order (and swaps the nibble order via `high_first = false`).
+        let mut packed = [0u8; 128];
         if self.cocktail_flip {
-            // Flipped: reverse both X and Y
             let src_y = (VBSTART as usize - 1 - scanline) - VBEND as usize;
             let vram_row_start = src_y * 128;
-            for x_pair in 0..128 {
-                let vram_idx = vram_row_start + (127 - x_pair);
-                let vram_byte = if vram_idx < self.map.region_data(Region::VideoRam).len() {
-                    self.map.region_data(Region::VideoRam)[vram_idx]
-                } else {
-                    0
-                };
-                // When flipped, right pixel goes left and vice versa
-                let left_idx = vram_byte & 0x0F;
-                let right_idx = (vram_byte >> 4) & 0x0F;
-
-                let left_color = self.resolve_color(palette_bank, left_idx + 16);
-                let right_color = self.resolve_color(palette_bank, right_idx + 16);
-
-                let px = x_pair * 2;
-                self.write_pixel(row_offset, px, left_color);
-                self.write_pixel(row_offset, px + 1, right_color);
+            let vram = self.map.region_data(Region::VideoRam);
+            for (k, b) in packed.iter_mut().enumerate() {
+                let idx = vram_row_start + (127 - k);
+                if idx < vram.len() {
+                    *b = vram[idx];
+                }
             }
+            let row = &mut self.scanline_buffer[row_offset..row_offset + w * 3];
+            render_bitmap_scanline(&packed, 2, false, |v| bg_lut[v as usize], row, 0);
         } else {
-            // Normal: VRAM address = (scanline - VBEND) * 128
             let vram_row_start = screen_y * 128;
-            for x_pair in 0..128 {
-                let vram_idx = vram_row_start + x_pair;
-                let vram_byte = if vram_idx < self.map.region_data(Region::VideoRam).len() {
-                    self.map.region_data(Region::VideoRam)[vram_idx]
-                } else {
-                    0
-                };
-                let left_idx = (vram_byte >> 4) & 0x0F;
-                let right_idx = vram_byte & 0x0F;
-
-                let left_color = self.resolve_color(palette_bank, left_idx + 16);
-                let right_color = self.resolve_color(palette_bank, right_idx + 16);
-
-                let px = x_pair * 2;
-                self.write_pixel(row_offset, px, left_color);
-                self.write_pixel(row_offset, px + 1, right_color);
+            let vram = self.map.region_data(Region::VideoRam);
+            for (k, b) in packed.iter_mut().enumerate() {
+                let idx = vram_row_start + k;
+                if idx < vram.len() {
+                    *b = vram[idx];
+                }
             }
+            let row = &mut self.scanline_buffer[row_offset..row_offset + w * 3];
+            render_bitmap_scanline(&packed, 2, true, |v| bg_lut[v as usize], row, 0);
         }
 
         // Sprites: 32 sprites from RAM at 0x0000 (4 bytes each).
