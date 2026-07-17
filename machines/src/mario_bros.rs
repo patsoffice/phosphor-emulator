@@ -807,24 +807,26 @@ impl MarioBrosBoard {
     // Frame output (no rotation)
     // -----------------------------------------------------------------------
 
-    /// Copy the visible region (lines 16..240, full width) to the RGB24 output.
+    /// Copy the visible region (lines 16..240, full width) to the native RGB24
+    /// output. The cocktail flip is declared via [`orientation`](Self::orientation)
+    /// and applied centrally by the frontend, so this always emits the upright
+    /// (unflipped) image.
     pub fn render_frame(&self, buffer: &mut [u8]) {
         let start = VBLANK_END * NATIVE_WIDTH * 3;
         let visible =
             &self.scanline_buffer[start..start + (NATIVE_HEIGHT - VBLANK_END) * NATIVE_WIDTH * 3];
+        buffer.copy_from_slice(visible);
+    }
+
+    /// Live screen orientation. The cocktail DIP flips the picture 180° for the
+    /// seated second player; this is queried every frame so the flip tracks the
+    /// DIP state (`COCKTAIL` == a 180° rotation, i.e. the former hand-rolled
+    /// reverse). The upright cabinet returns `NORMAL`.
+    pub fn orientation(&self) -> phosphor_core::core::machine::Orientation {
         if self.flip_screen {
-            // Approximate cocktail flip as a 180° rotation (exact per-pixel
-            // offsets deferred; unused on the upright cabinet).
-            let n = visible.len() / 3;
-            for i in 0..n {
-                let s = (n - 1 - i) * 3;
-                let d = i * 3;
-                buffer[d] = visible[s];
-                buffer[d + 1] = visible[s + 1];
-                buffer[d + 2] = visible[s + 2];
-            }
+            phosphor_core::core::machine::Orientation::COCKTAIL
         } else {
-            buffer.copy_from_slice(visible);
+            phosphor_core::core::machine::Orientation::NORMAL
         }
     }
 
@@ -1190,7 +1192,12 @@ impl Bus for MarioBrosSystem {
     }
 }
 
-crate::impl_board_delegation!(MarioBrosSystem, board, crate::mario_bros::TIMING);
+crate::impl_board_delegation!(
+    MarioBrosSystem,
+    board,
+    crate::mario_bros::TIMING,
+    orientation
+);
 
 impl InputConfigurable for MarioBrosSystem {
     fn input_controls(&self) -> &'static [InputControl] {
@@ -1449,6 +1456,41 @@ mod tests {
         io(sys, 0b1000_1010); // WR5: ready active-high
         io(sys, 0xCF); // LOAD
         io(sys, 0x87); // ENABLE
+    }
+
+    #[test]
+    fn cocktail_dip_flips_orientation_live() {
+        use phosphor_core::core::machine::{Orientation, Renderable};
+        let mut sys = MarioBrosSystem::new();
+        // Upright cabinet: no flip. display_size is native (no axis swap for 180°).
+        assert_eq!(sys.orientation(), Orientation::NORMAL);
+        assert_eq!(sys.display_size(), (256, 224));
+        // Cocktail flip DIP engaged → orientation flips to COCKTAIL (180°) live,
+        // queried per frame. COCKTAIL does not swap axes.
+        sys.board.flip_screen = true;
+        assert_eq!(sys.orientation(), Orientation::COCKTAIL);
+        assert_eq!(sys.orientation(), Orientation::ROT180);
+        assert!(!sys.orientation().swaps_axes());
+        // Toggling back restores upright.
+        sys.board.flip_screen = false;
+        assert_eq!(sys.orientation(), Orientation::NORMAL);
+    }
+
+    #[test]
+    fn render_frame_is_native_unflipped() {
+        use phosphor_core::core::machine::Renderable;
+        let mut sys = MarioBrosSystem::new();
+        // Tag a pixel in the visible region of the scanline buffer; render_frame
+        // must emit it at the native position even when the cocktail DIP is set
+        // (the flip is applied centrally, not baked here).
+        let start = VBLANK_END * NATIVE_WIDTH * 3;
+        sys.board.scanline_buffer[start] = 0x42;
+        sys.board.scanline_buffer[start + 1] = 0x43;
+        sys.board.scanline_buffer[start + 2] = 0x44;
+        sys.board.flip_screen = true;
+        let mut buf = vec![0u8; 256 * 224 * 3];
+        sys.render_frame(&mut buf);
+        assert_eq!(&buf[0..3], &[0x42, 0x43, 0x44]);
     }
 
     #[test]
