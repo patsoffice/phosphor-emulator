@@ -571,26 +571,49 @@ impl XeviousSystem {
     /// 9-bit code, 7-bit colour, and flip come from BG video/colour RAM, and the
     /// 2bpp pen is mapped to an indirect palette index through the BG LUT.
     fn render_background(&mut self) {
+        // Opaque 64×32 scrolled tilemap (512×256 px) into the 288-wide viewport,
+        // via the shared scroll-aware index-writing helper. Pens map through the
+        // background LUT; per-tile H/V flip from colour-RAM bits 6/7.
         let sx0 = self.bg_scroll_x as i32 + BG_SCROLL_DX;
         let sy0 = self.bg_scroll_y as i32 + BG_SCROLL_DY;
+        let bg_videoram = &self.bg_videoram;
+        let bg_colorram = &self.bg_colorram;
+        let bg_lut = &self.bg_lut;
+        let bg_tile_cache = &self.bg_tile_cache;
+        let native = &mut self.native_buffer;
+        let mut prio = [0u8; 288];
         for screen_y in 0..224usize {
-            let ty = (screen_y as i32 + sy0).rem_euclid(256) as usize;
-            let tile_row = ty >> 3;
-            let py = ty & 7;
             let row_off = screen_y * 288;
-            for screen_x in 0..288usize {
-                let tx = (screen_x as i32 + sx0).rem_euclid(512) as usize;
-                let idx = tile_row * 64 + (tx >> 3);
-                let code = self.bg_videoram[idx] as usize;
-                let attr = self.bg_colorram[idx] as usize;
-                let tile = code + ((attr & 0x01) << 8);
-                let color = ((attr & 0x3c) >> 2) | ((code & 0x80) >> 3) | ((attr & 0x03) << 5);
-                let px = tx & 7;
-                let fpx = if attr & 0x40 != 0 { 7 - px } else { px };
-                let fpy = if attr & 0x80 != 0 { 7 - py } else { py };
-                let pixel = self.bg_tile_cache.pixel(tile, fpx, fpy) as usize;
-                self.native_buffer[row_off + screen_x] = self.bg_lut[color * 4 + pixel];
-            }
+            let row = &mut native[row_off..row_off + 288];
+            gfx::render_scrolled_tilemap_scanline_indexed(
+                bg_tile_cache,
+                64,
+                32,
+                8,
+                8,
+                sx0,
+                sy0,
+                288,
+                screen_y,
+                |col, mrow| {
+                    let idx = mrow * 64 + col;
+                    let code = bg_videoram[idx] as usize;
+                    let attr = bg_colorram[idx] as usize;
+                    let tile = code + ((attr & 0x01) << 8);
+                    let color = ((attr & 0x3c) >> 2) | ((code & 0x80) >> 3) | ((attr & 0x03) << 5);
+                    gfx::TileInfo {
+                        code: tile as u16,
+                        attr: color as u8,
+                        flip_x: attr & 0x40 != 0,
+                        flip_y: attr & 0x80 != 0,
+                    }
+                },
+                // Opaque: the background LUT gives the indirect palette index.
+                |color, pixel| Some((bg_lut[color as usize * 4 + pixel as usize], 0)),
+                row,
+                &mut prio,
+                0,
+            );
         }
     }
 
@@ -599,27 +622,47 @@ impl XeviousSystem {
     /// 0 transparent. The 6-bit colour code maps directly to an indirect palette
     /// entry (0-63) for the opaque pen — no lookup PROM, unlike the background.
     fn render_foreground(&mut self) {
+        // Transparent 64×32 scrolled text tilemap (1bpp, pen 0 transparent) into
+        // the 288-wide viewport; the 6-bit colour maps directly to an indirect
+        // palette entry. Same scroll-aware helper as the background.
         let sx0 = self.fg_scroll_x as i32 + FG_SCROLL_DX;
         let sy0 = self.fg_scroll_y as i32 + FG_SCROLL_DY;
+        let fg_videoram = &self.fg_videoram;
+        let fg_colorram = &self.fg_colorram;
+        let char_cache = &self.char_cache;
+        let native = &mut self.native_buffer;
+        let mut prio = [0u8; 288];
         for screen_y in 0..224usize {
-            let ty = (screen_y as i32 + sy0).rem_euclid(256) as usize;
-            let tile_row = ty >> 3;
-            let py = ty & 7;
             let row_off = screen_y * 288;
-            for screen_x in 0..288usize {
-                let tx = (screen_x as i32 + sx0).rem_euclid(512) as usize;
-                let idx = tile_row * 64 + (tx >> 3);
-                let code = self.fg_videoram[idx] as usize;
-                let attr = self.fg_colorram[idx] as usize;
-                let px = tx & 7;
-                let fpx = if attr & 0x40 != 0 { 7 - px } else { px };
-                let fpy = if attr & 0x80 != 0 { 7 - py } else { py };
-                if self.char_cache.pixel(code, fpx, fpy) != 0 {
-                    // Opaque pen: colour = ((attr&0x03)<<4) | ((attr&0x3c)>>2).
+            let row = &mut native[row_off..row_off + 288];
+            gfx::render_scrolled_tilemap_scanline_indexed(
+                char_cache,
+                64,
+                32,
+                8,
+                8,
+                sx0,
+                sy0,
+                288,
+                screen_y,
+                |col, mrow| {
+                    let idx = mrow * 64 + col;
+                    let code = fg_videoram[idx] as usize;
+                    let attr = fg_colorram[idx] as usize;
                     let color = ((attr & 0x03) << 4) | ((attr & 0x3c) >> 2);
-                    self.native_buffer[row_off + screen_x] = color as u8;
-                }
-            }
+                    gfx::TileInfo {
+                        code: code as u16,
+                        attr: color as u8,
+                        flip_x: attr & 0x40 != 0,
+                        flip_y: attr & 0x80 != 0,
+                    }
+                },
+                // Pen 0 transparent; the colour is the indirect palette index.
+                |color, pixel| (pixel != 0).then_some((color, 0)),
+                row,
+                &mut prio,
+                0,
+            );
         }
     }
 

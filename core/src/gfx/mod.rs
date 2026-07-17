@@ -14,7 +14,9 @@ pub use resistor::{
 pub use sheet::{Sheet, SheetConfig, grayscale_ramp, render_sheet};
 pub use sprite::{SpriteClip, draw_sprite_row, draw_sprite_row_indexed};
 pub use tilemap::{
-    TileInfo, TilemapConfig, render_tilemap_scanline, render_tilemap_scanline_indexed,
+    TileInfo, TilemapConfig, render_scrolled_tilemap_scanline,
+    render_scrolled_tilemap_scanline_indexed, render_tilemap_scanline,
+    render_tilemap_scanline_indexed,
 };
 
 /// MAME-style screen orientation as a composable bitfield.
