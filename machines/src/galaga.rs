@@ -7,7 +7,6 @@ use phosphor_core::core::machine::{
 };
 use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
-use phosphor_core::gfx;
 use phosphor_core::gfx::GfxCache;
 use phosphor_core::gfx::decode::{GfxLayout, decode_gfx};
 use phosphor_macros::Saveable;
@@ -874,7 +873,11 @@ impl Bus for GalagaSystem {
 
 impl Renderable for GalagaSystem {
     fn display_size(&self) -> (u32, u32) {
-        namco_galaga::TIMING.display_size()
+        // Native (unrotated) 288×224 framebuffer. `namco_galaga::TIMING` reports
+        // the pre-swapped portrait size (224×288) still used by the baked-rotation
+        // Dig Dug / Xevious on the same hardware; Galaga declares ROT90 and lets
+        // the frontend rotate centrally, so it reports the native landscape size.
+        (288, 224)
     }
 
     fn display_aspect(&self) -> Option<(u32, u32)> {
@@ -882,13 +885,20 @@ impl Renderable for GalagaSystem {
     }
 
     fn render_frame(&self, buffer: &mut [u8]) {
-        gfx::rotate_90_ccw_indexed(
-            &self.native_buffer,
-            buffer,
-            288,
-            224,
-            &self.combined_palette,
-        );
+        // Native RGB24 in row-major order; the ROT90 the cabinet needs is applied
+        // centrally by the frontend (see `orientation`), not baked here.
+        let mask = self.combined_palette.len() - 1;
+        for (i, &idx) in self.native_buffer.iter().enumerate() {
+            let (r, g, b) = self.combined_palette[idx as usize & mask];
+            buffer[i * 3] = r;
+            buffer[i * 3 + 1] = g;
+            buffer[i * 3 + 2] = b;
+        }
+    }
+
+    fn orientation(&self) -> phosphor_core::core::machine::Orientation {
+        // Galaga's monitor is mounted rotated 90°; declared, not baked.
+        phosphor_core::core::machine::Orientation::ROT90
     }
 }
 
@@ -1342,6 +1352,33 @@ mod dip_tests {
         sys.set_dip_option(1, 2, 0xC0);
         assert_eq!(sys.dip_bank_value(1), 0xD7); // 0x97 with bits 6-7 set
         assert_eq!(sys.dip_bank_value(0), 0xF7); // other bank untouched
+    }
+
+    #[test]
+    fn declares_native_dims_and_rot90() {
+        use phosphor_core::core::machine::{Orientation, Renderable};
+        let sys = GalagaSystem::new();
+        // Native landscape framebuffer; the frontend applies ROT90 to present
+        // portrait. (Dig Dug / Xevious share the board but stay baked.)
+        assert_eq!(sys.display_size(), (288, 224));
+        assert_eq!(sys.orientation(), Orientation::ROT90);
+        assert!(sys.orientation().swaps_axes());
+        assert_eq!(sys.display_aspect(), Some((3, 4)));
+    }
+
+    #[test]
+    fn render_frame_emits_native_unrotated_rgb() {
+        use phosphor_core::core::machine::Renderable;
+        let mut sys = GalagaSystem::new();
+        // Tag a native pixel + palette entry; confirm it lands at the native
+        // row-major position (288 wide), i.e. no baked rotation.
+        sys.combined_palette[7] = (11, 22, 33);
+        let (nx, ny) = (9usize, 3usize);
+        sys.native_buffer[ny * 288 + nx] = 7;
+        let mut buf = vec![0u8; 288 * 224 * 3];
+        sys.render_frame(&mut buf);
+        let i = (ny * 288 + nx) * 3;
+        assert_eq!(&buf[i..i + 3], &[11, 22, 33]);
     }
 }
 crate::impl_board_debug_trace!(GalagaSystem, board);
