@@ -928,7 +928,10 @@ impl Bus for XeviousSystem {
 
 impl Renderable for XeviousSystem {
     fn display_size(&self) -> (u32, u32) {
-        namco_galaga::TIMING.display_size()
+        // Native (unrotated) landscape framebuffer. `namco_galaga::TIMING` reports
+        // the pre-swapped portrait size (224×288); Xevious declares ROT90 and lets
+        // the frontend rotate centrally, so it reports the native landscape size.
+        (288, 224)
     }
 
     fn display_aspect(&self) -> Option<(u32, u32)> {
@@ -936,7 +939,20 @@ impl Renderable for XeviousSystem {
     }
 
     fn render_frame(&self, buffer: &mut [u8]) {
-        gfx::rotate_90_ccw_indexed(&self.native_buffer, buffer, 288, 224, &self.palette);
+        // Native RGB24 in row-major order; the ROT90 the cabinet needs is applied
+        // centrally by the frontend (see `orientation`), not baked here.
+        let mask = self.palette.len() - 1;
+        for (i, &idx) in self.native_buffer.iter().enumerate() {
+            let (r, g, b) = self.palette[idx as usize & mask];
+            buffer[i * 3] = r;
+            buffer[i * 3 + 1] = g;
+            buffer[i * 3 + 2] = b;
+        }
+    }
+
+    fn orientation(&self) -> phosphor_core::core::machine::Orientation {
+        // Xevious's monitor is mounted rotated 90°; declared, not baked.
+        phosphor_core::core::machine::Orientation::ROT90
     }
 }
 
@@ -1704,5 +1720,32 @@ mod tests {
         assert!(sys.board.flip_screen);
         sys.write_video_latch(0x70, 0x00); // flip off
         assert!(!sys.board.flip_screen);
+    }
+
+    #[test]
+    fn declares_native_dims_and_rot90() {
+        use phosphor_core::core::machine::{Orientation, Renderable};
+        let sys = XeviousSystem::new();
+        // Native landscape framebuffer; the frontend applies ROT90 to present
+        // portrait.
+        assert_eq!(sys.display_size(), (288, 224));
+        assert_eq!(sys.orientation(), Orientation::ROT90);
+        assert!(sys.orientation().swaps_axes());
+        assert_eq!(sys.display_aspect(), Some((3, 4)));
+    }
+
+    #[test]
+    fn render_frame_emits_native_unrotated_rgb() {
+        use phosphor_core::core::machine::Renderable;
+        let mut sys = XeviousSystem::new();
+        // Tag a native pixel + palette entry; confirm it lands at the native
+        // row-major position (288 wide), i.e. no baked rotation.
+        sys.palette[7] = (11, 22, 33);
+        let (nx, ny) = (9usize, 3usize);
+        sys.native_buffer[ny * 288 + nx] = 7;
+        let mut buf = vec![0u8; 288 * 224 * 3];
+        sys.render_frame(&mut buf);
+        let i = (ny * 288 + nx) * 3;
+        assert_eq!(&buf[i..i + 3], &[11, 22, 33]);
     }
 }
