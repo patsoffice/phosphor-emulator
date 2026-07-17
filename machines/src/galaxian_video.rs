@@ -528,7 +528,7 @@ impl GalaxianVideo {
 
         // 3) Sprites: 7 → 0 so lower-numbered sprites win (drawn last, on top).
         for sprnum in (0..8).rev() {
-            self.draw_sprite_row(row_off, mame_y, objram, sprnum);
+            self.draw_object_sprite_row(row_off, mame_y, objram, sprnum);
         }
 
         // 4) Bullets/shells over everything (Frogger has no bullet layer).
@@ -589,7 +589,17 @@ impl GalaxianVideo {
         }
     }
 
-    fn draw_sprite_row(&mut self, row_off: usize, mame_y: i32, objram: &[u8], sprnum: usize) {
+    /// Draw one 16-pixel-wide row of galaxian sprite object `sprnum` onto the
+    /// current scanline. Named distinctly to avoid shadowing the core
+    /// `gfx::sprite::draw_sprite_row` helper (a full migration onto it belongs
+    /// with the indexed/priority work).
+    fn draw_object_sprite_row(
+        &mut self,
+        row_off: usize,
+        mame_y: i32,
+        objram: &[u8],
+        sprnum: usize,
+    ) {
         let base = SPRITES_BASE + sprnum * 4;
         // Frogger swaps the Y byte's nibbles entering the adder.
         let b0 = if self.frogger {
