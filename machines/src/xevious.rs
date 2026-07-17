@@ -700,6 +700,22 @@ impl XeviousSystem {
     ) {
         let code = code as usize;
         let color_base = (color & 0x3f) * 8;
+        // Full-width clip (0..288), no tunnel wrap. 3bpp pens map through the
+        // sprite LUT; an indirect pen of 0x80 is transparent. Composited by draw
+        // order, so no priority buffer.
+        let clip = gfx::SpriteClip {
+            x_min: 0,
+            x_max: 288,
+            wrap_offset: None,
+        };
+        // Split borrows: closures read the LUT, the helper writes native_buffer.
+        let sprite_lut = &self.sprite_lut;
+        let sprite_cache = &self.sprite_cache;
+        let native = &mut self.native_buffer;
+        let is_transparent = |pixel: u8| sprite_lut[color_base + pixel as usize] == 0x80;
+        let resolve = |pixel: u8| (sprite_lut[color_base + pixel as usize], 0u8);
+        let mut prio = [0u8; 288];
+
         for py in 0..16i32 {
             let dy = sy + py;
             if !(0..224).contains(&dy) {
@@ -707,18 +723,19 @@ impl XeviousSystem {
             }
             let fpy = if flipy { 15 - py } else { py } as usize;
             let row_off = dy as usize * 288;
-            for px in 0..16i32 {
-                let dx = sx + px;
-                if !(0..288).contains(&dx) {
-                    continue;
-                }
-                let fpx = if flipx { 15 - px } else { px } as usize;
-                let pixel = self.sprite_cache.pixel(code, fpx, fpy) as usize;
-                let pen = self.sprite_lut[color_base + pixel];
-                if pen != 0x80 {
-                    self.native_buffer[row_off + dx as usize] = pen;
-                }
-            }
+            let row = &mut native[row_off..row_off + 288];
+            gfx::draw_sprite_row_indexed(
+                sprite_cache,
+                code as u16,
+                fpy,
+                sx,
+                flipx,
+                is_transparent,
+                resolve,
+                row,
+                &mut prio,
+                &clip,
+            );
         }
     }
 
