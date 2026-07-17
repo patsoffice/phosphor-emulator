@@ -699,22 +699,6 @@ impl NamcoPacBoard {
     // Video rendering
     // -----------------------------------------------------------------------
 
-    /// Map a tile index in the 36×28 tilemap to a VRAM offset.
-    ///
-    /// The Pac-Man tilemap uses a non-linear address mapping:
-    ///   row += 2; col -= 2;
-    ///   if (col & 0x20) return row + ((col & 0x1f) << 5);
-    ///   else return col + (row << 5);
-    fn tilemap_offset(col: i32, row: i32) -> usize {
-        let r = row + 2;
-        let c = col - 2;
-        if c & 0x20 != 0 {
-            (r + ((c & 0x1F) << 5)) as usize
-        } else {
-            (c + (r << 5)) as usize
-        }
-    }
-
     /// Render a single scanline from current VRAM/sprite state into the scanline buffer.
     /// Composites tiles then sprites for native scanline Y (0-223).
     fn render_scanline(&mut self, scanline: usize) {
@@ -762,7 +746,7 @@ impl NamcoPacBoard {
             tile_cache,
             scanline,
             |col, row| {
-                let offset = Self::tilemap_offset(col as i32, row as i32);
+                let offset = crate::namco_video::namco_tilemap_offset(col as i32, row as i32);
                 let tile_code = if offset < 0x400 {
                     video_ram[offset] as u16
                 } else {

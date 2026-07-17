@@ -546,16 +546,6 @@ impl GalagaSystem {
     // Tilemap addressing (same as Pac-Man / Dig Dug)
     // -----------------------------------------------------------------------
 
-    fn tilemap_offset(col: i32, row: i32) -> usize {
-        let r = row + 2;
-        let c = col - 2;
-        if c & 0x20 != 0 {
-            (r + ((c & 0x1F) << 5)) as usize
-        } else {
-            (c + (r << 5)) as usize
-        }
-    }
-
     // -----------------------------------------------------------------------
     // Starfield LFSR
     // -----------------------------------------------------------------------
@@ -643,7 +633,8 @@ impl GalagaSystem {
     fn render_tilemap(&mut self) {
         for tile_row in 0..28 {
             for tile_col in 0..36 {
-                let offset = Self::tilemap_offset(tile_col as i32, tile_row as i32);
+                let offset =
+                    crate::namco_video::namco_tilemap_offset(tile_col as i32, tile_row as i32);
                 if offset >= 0x400 {
                     continue;
                 }

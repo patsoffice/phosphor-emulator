@@ -670,16 +670,6 @@ impl DigDugSystem {
     // Tilemap addressing (same as Pac-Man)
     // -----------------------------------------------------------------------
 
-    fn tilemap_offset(col: i32, row: i32) -> usize {
-        let r = row + 2;
-        let c = col - 2;
-        if c & 0x20 != 0 {
-            (r + ((c & 0x1F) << 5)) as usize
-        } else {
-            (c + (r << 5)) as usize
-        }
-    }
-
     // -----------------------------------------------------------------------
     // Full-frame video rendering (no raster effects in Dig Dug)
     // -----------------------------------------------------------------------
@@ -698,7 +688,8 @@ impl DigDugSystem {
     fn render_background(&mut self) {
         for tile_row in 0..28 {
             for tile_col in 0..36 {
-                let offset = Self::tilemap_offset(tile_col as i32, tile_row as i32);
+                let offset =
+                    crate::namco_video::namco_tilemap_offset(tile_col as i32, tile_row as i32);
                 let code = if offset < self.playfield_rom.len() {
                     self.playfield_rom[offset | ((self.bg_select as usize) << 10)] as usize
                 } else {
@@ -738,7 +729,8 @@ impl DigDugSystem {
     fn render_foreground(&mut self) {
         for tile_row in 0..28 {
             for tile_col in 0..36 {
-                let offset = Self::tilemap_offset(tile_col as i32, tile_row as i32);
+                let offset =
+                    crate::namco_video::namco_tilemap_offset(tile_col as i32, tile_row as i32);
                 if offset >= 0x400 {
                     continue;
                 }
