@@ -93,9 +93,127 @@ pub fn render_tilemap_scanline<F, G>(
     }
 }
 
+/// Render one scanline of a tilemap into a persistent **indexed** buffer plus a
+/// parallel priority buffer.
+///
+/// The index/priority-buffer sibling of [`render_tilemap_scanline`]: instead of
+/// writing RGB, `resolve_index_fn(attr, pixel)` returns `Some((index, priority))`
+/// for an opaque pixel — writing the palette index into `index_buf` and the
+/// priority into `prio_buf` — or `None` to leave both buffers untouched
+/// (transparency). The machine composites the two buffers into RGB in a later
+/// pass, applying its own priority rules. Per-tile flip is applied exactly as in
+/// [`render_tilemap_scanline`].
+#[allow(clippy::too_many_arguments)]
+pub fn render_tilemap_scanline_indexed<F, G>(
+    config: &TilemapConfig,
+    tiles: &GfxCache,
+    scanline: usize,
+    tile_info_fn: F,
+    resolve_index_fn: G,
+    index_buf: &mut [u8],
+    prio_buf: &mut [u8],
+    x_offset: usize,
+) where
+    F: Fn(usize, usize) -> TileInfo,
+    G: Fn(u8, u8) -> Option<(u8, u8)>,
+{
+    let tile_row = scanline / config.tile_height;
+    let py = scanline % config.tile_height;
+
+    for tile_col in 0..config.cols {
+        let info = tile_info_fn(tile_col, tile_row);
+        let screen_x = x_offset + tile_col * config.tile_width;
+        let src_py = if info.flip_y {
+            config.tile_height - 1 - py
+        } else {
+            py
+        };
+
+        for px in 0..config.tile_width {
+            let src_px = if info.flip_x {
+                config.tile_width - 1 - px
+            } else {
+                px
+            };
+            let pixel_value = tiles.pixel(info.code as usize, src_px, src_py);
+            if let Some((index, priority)) = resolve_index_fn(info.attr, pixel_value) {
+                let x = screen_x + px;
+                index_buf[x] = index;
+                prio_buf[x] = priority;
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn indexed_writes_index_priority_with_transparency() {
+        // 2x1 tile: left pixel 0 (transparent), right pixel 1.
+        let config = TilemapConfig {
+            cols: 1,
+            rows: 1,
+            tile_width: 2,
+            tile_height: 1,
+        };
+        let mut cache = GfxCache::new(1, 2, 1);
+        cache.set_pixel(0, 0, 0, 0);
+        cache.set_pixel(0, 1, 0, 1);
+
+        let mut index_buf = vec![9u8; 2]; // sentinel
+        let mut prio_buf = vec![0u8; 2];
+        render_tilemap_scanline_indexed(
+            &config,
+            &cache,
+            0,
+            |_c, _r| TileInfo::new(0, 5),
+            |attr, pv| (pv != 0).then_some((0x20 + pv, attr)), // priority = attr
+            &mut index_buf,
+            &mut prio_buf,
+            0,
+        );
+        // Transparent left pixel untouched.
+        assert_eq!(index_buf[0], 9);
+        assert_eq!(prio_buf[0], 0);
+        // Opaque right pixel: index 0x21, priority = attr (5).
+        assert_eq!(index_buf[1], 0x21);
+        assert_eq!(prio_buf[1], 5);
+    }
+
+    #[test]
+    fn indexed_applies_flip() {
+        let config = TilemapConfig {
+            cols: 1,
+            rows: 1,
+            tile_width: 4,
+            tile_height: 1,
+        };
+        let mut cache = GfxCache::new(1, 4, 1);
+        for px in 0..4 {
+            cache.set_pixel(0, px, 0, (px + 1) as u8);
+        }
+        let mut index_buf = vec![0u8; 4];
+        let mut prio_buf = vec![0u8; 4];
+        render_tilemap_scanline_indexed(
+            &config,
+            &cache,
+            0,
+            |_c, _r| TileInfo {
+                code: 0,
+                attr: 0,
+                flip_x: true,
+                flip_y: false,
+            },
+            |_a, pv| Some((pv, 0)),
+            &mut index_buf,
+            &mut prio_buf,
+            0,
+        );
+        // flip_x reverses: 4,3,2,1.
+        assert_eq!(index_buf, vec![4, 3, 2, 1]);
+    }
 
     #[test]
     fn render_single_tile_scanline() {

@@ -12,7 +12,10 @@ pub use resistor::{
     pal_nbit,
 };
 pub use sheet::{Sheet, SheetConfig, grayscale_ramp, render_sheet};
-pub use tilemap::{TileInfo, TilemapConfig};
+pub use sprite::{SpriteClip, draw_sprite_row, draw_sprite_row_indexed};
+pub use tilemap::{
+    TileInfo, TilemapConfig, render_tilemap_scanline, render_tilemap_scanline_indexed,
+};
 
 /// MAME-style screen orientation as a composable bitfield.
 ///

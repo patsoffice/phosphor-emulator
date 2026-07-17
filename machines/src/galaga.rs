@@ -631,44 +631,48 @@ impl GalagaSystem {
     }
 
     fn render_tilemap(&mut self) {
-        for tile_row in 0..28 {
-            for tile_col in 0..36 {
-                let offset =
-                    crate::namco_video::namco_tilemap_offset(tile_col as i32, tile_row as i32);
-                if offset >= 0x400 {
-                    continue;
-                }
-
-                let code = (self.video_ram[offset] & 0x7F) as usize;
-                let color = (self.video_ram[offset + 0x400] & 0x3F) as usize;
-
-                let px_base = tile_col * 8;
-                let py_base = tile_row * 8;
-
-                for py in 0..8 {
-                    let screen_y = py_base + py;
-                    if screen_y >= 224 {
-                        continue;
+        // 36×28 foreground tilemap of 8×8 chars, composited on top of the star +
+        // sprite layers via the shared index-writing scanline helper. The Namco
+        // offset never reaches 0x400 within the visible grid, and this tilemap has
+        // no per-tile flip. Character pens land in palette entries 0x10-0x1F; a
+        // LUT low-nibble of 0x0F is transparent.
+        let config = phosphor_core::gfx::TilemapConfig {
+            cols: 36,
+            rows: 28,
+            tile_width: 8,
+            tile_height: 8,
+        };
+        // Split borrows: closures read VRAM + LUT, the helper writes native_buffer.
+        let video_ram = &self.video_ram;
+        let char_lut = &self.char_lut;
+        let char_cache = &self.char_cache;
+        let native = &mut self.native_buffer;
+        let mut prio = [0u8; 288];
+        for scanline in 0..224 {
+            let row_off = scanline * 288;
+            let row = &mut native[row_off..row_off + 288];
+            phosphor_core::gfx::render_tilemap_scanline_indexed(
+                &config,
+                char_cache,
+                scanline,
+                |col, row| {
+                    let offset = crate::namco_video::namco_tilemap_offset(col as i32, row as i32);
+                    let code = (video_ram[offset] & 0x7F) as u16;
+                    let color = video_ram[offset + 0x400] & 0x3F;
+                    phosphor_core::gfx::TileInfo::new(code, color)
+                },
+                |color, pixel| {
+                    let lut_val = char_lut[(color as usize * 4 + pixel as usize) & 0xFF];
+                    if lut_val & 0x0F == 0x0F {
+                        None
+                    } else {
+                        Some(((lut_val & 0x0F) | 0x10, 0))
                     }
-                    let row_off = screen_y * 288;
-                    for px in 0..8 {
-                        let screen_x = px_base + px;
-                        if screen_x >= 288 {
-                            continue;
-                        }
-                        let pixel = self.char_cache.pixel(code, px, py);
-                        let lut_idx = (color * 4 + pixel as usize) & 0xFF;
-                        let lut_val = self.char_lut[lut_idx];
-                        // Transparent when low nibble == 0x0F
-                        if lut_val & 0x0F == 0x0F {
-                            continue;
-                        }
-                        // Character palette uses entries 0x10-0x1F
-                        let palette_idx = (lut_val & 0x0F) | 0x10;
-                        self.native_buffer[row_off + screen_x] = palette_idx;
-                    }
-                }
-            }
+                },
+                row,
+                &mut prio,
+                0,
+            );
         }
     }
 
@@ -722,8 +726,24 @@ impl GalagaSystem {
             return;
         }
 
-        let tile_h = 16;
-        let tile_w = 16;
+        let tile_h = 16usize;
+        // Clip to the visible area (columns 16..272), no tunnel wrap.
+        let clip = phosphor_core::gfx::SpriteClip {
+            x_min: 16,
+            x_max: 272,
+            wrap_offset: None,
+        };
+        // Split borrows so the LUT closures don't hold &self while the index
+        // buffer (native_buffer) is borrowed mutably. Sprite pens are 0x00-0x0F;
+        // a LUT low-nibble of 0x0F is transparent. Galaga composites by draw
+        // order (no priority buffer), so priority is a scratch value.
+        let sprite_lut = &self.sprite_lut;
+        let sprite_cache = &self.sprite_cache;
+        let native = &mut self.native_buffer;
+        let is_transparent =
+            |pixel: u8| sprite_lut[(color * 4 + pixel as usize) & 0xFF] & 0x0F == 0x0F;
+        let resolve = |pixel: u8| (sprite_lut[(color * 4 + pixel as usize) & 0xFF] & 0x0F, 0u8);
+        let mut prio = [0u8; 288];
 
         for py in 0..tile_h {
             let screen_y = sy + py as i32;
@@ -732,27 +752,19 @@ impl GalagaSystem {
             }
             let src_py = if flipy { tile_h - 1 - py } else { py };
             let row_off = screen_y as usize * 288;
-
-            for px in 0..tile_w {
-                let screen_x = sx + px as i32;
-                // Clip to visible area (columns 16-271)
-                if !(16..272).contains(&screen_x) {
-                    continue;
-                }
-
-                let src_px = if flipx { tile_w - 1 - px } else { px };
-                let pixel = self.sprite_cache.pixel(code, src_px, src_py);
-
-                let lut_idx = (color * 4 + pixel as usize) & 0xFF;
-                let lut_val = self.sprite_lut[lut_idx];
-                // Transparent when low nibble == 0x0F
-                if lut_val & 0x0F == 0x0F {
-                    continue;
-                }
-                // Sprite palette uses entries 0x00-0x0F
-                let palette_idx = lut_val & 0x0F;
-                self.native_buffer[row_off + screen_x as usize] = palette_idx;
-            }
+            let row = &mut native[row_off..row_off + 288];
+            phosphor_core::gfx::draw_sprite_row_indexed(
+                sprite_cache,
+                code as u16,
+                src_py,
+                sx,
+                flipx,
+                is_transparent,
+                resolve,
+                row,
+                &mut prio,
+                &clip,
+            );
         }
     }
 
