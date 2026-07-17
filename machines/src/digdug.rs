@@ -686,86 +686,98 @@ impl DigDugSystem {
     }
 
     fn render_background(&mut self) {
-        for tile_row in 0..28 {
-            for tile_col in 0..36 {
-                let offset =
-                    crate::namco_video::namco_tilemap_offset(tile_col as i32, tile_row as i32);
-                let code = if offset < self.playfield_rom.len() {
-                    self.playfield_rom[offset | ((self.bg_select as usize) << 10)] as usize
-                } else {
-                    0
-                };
-
-                let color = if self.bg_disable {
-                    0x0F_usize
-                } else {
-                    ((code >> 4) | self.bg_color_bank as usize) & 0x3F
-                };
-
-                let px_base = tile_col * 8;
-                let py_base = tile_row * 8;
-
-                for py in 0..8 {
-                    let screen_y = py_base + py;
-                    if screen_y >= 224 {
-                        continue;
-                    }
-                    let row_off = screen_y * 288;
-                    for px in 0..8 {
-                        let screen_x = px_base + px;
-                        if screen_x >= 288 {
-                            continue;
-                        }
-                        let pixel = self.bg_tile_cache.pixel(code, px, py);
-                        let lut_idx = color * 4 + pixel as usize;
-                        let palette_idx = (self.bg_lut[lut_idx & 0xFF] & 0x0F) as usize;
-                        self.native_buffer[row_off + screen_x] = palette_idx as u8;
-                    }
-                }
-            }
+        // Opaque 36×28 background tilemap of 8×8 tiles, codes read from the
+        // playfield ROM, pens looked up through bg_lut. Rendered per-scanline via
+        // the shared index-writing helper (native indexed buffer, no priority).
+        let config = gfx::TilemapConfig {
+            cols: 36,
+            rows: 28,
+            tile_width: 8,
+            tile_height: 8,
+        };
+        // Split borrows: closures read the ROM/LUT, the helper writes native_buffer.
+        let playfield_rom = &self.playfield_rom;
+        let bg_lut = &self.bg_lut;
+        let bg_tile_cache = &self.bg_tile_cache;
+        let bg_select = self.bg_select;
+        let bg_disable = self.bg_disable;
+        let bg_color_bank = self.bg_color_bank;
+        let native = &mut self.native_buffer;
+        let mut prio = [0u8; 288];
+        for scanline in 0..224 {
+            let row_off = scanline * 288;
+            let row = &mut native[row_off..row_off + 288];
+            gfx::render_tilemap_scanline_indexed(
+                &config,
+                bg_tile_cache,
+                scanline,
+                |col, trow| {
+                    let offset = crate::namco_video::namco_tilemap_offset(col as i32, trow as i32);
+                    let code = if offset < playfield_rom.len() {
+                        playfield_rom[offset | ((bg_select as usize) << 10)] as usize
+                    } else {
+                        0
+                    };
+                    let color = if bg_disable {
+                        0x0F
+                    } else {
+                        ((code >> 4) | bg_color_bank as usize) & 0x3F
+                    };
+                    gfx::TileInfo::new(code as u16, color as u8)
+                },
+                // Opaque: every pixel writes bg_lut's low nibble.
+                |color, pixel| {
+                    Some((
+                        bg_lut[(color as usize * 4 + pixel as usize) & 0xFF] & 0x0F,
+                        0,
+                    ))
+                },
+                row,
+                &mut prio,
+                0,
+            );
         }
     }
 
     fn render_foreground(&mut self) {
-        for tile_row in 0..28 {
-            for tile_col in 0..36 {
-                let offset =
-                    crate::namco_video::namco_tilemap_offset(tile_col as i32, tile_row as i32);
-                if offset >= 0x400 {
-                    continue;
-                }
-                let code = self.video_ram[offset] as usize;
-
-                let color = if self.tx_color_mode {
-                    code & 0x0F
-                } else {
-                    ((code >> 4) & 0x0E) | ((code >> 3) & 2)
-                };
-
-                let px_base = tile_col * 8;
-                let py_base = tile_row * 8;
-
-                for py in 0..8 {
-                    let screen_y = py_base + py;
-                    if screen_y >= 224 {
-                        continue;
-                    }
-                    let row_off = screen_y * 288;
-                    for px in 0..8 {
-                        let screen_x = px_base + px;
-                        if screen_x >= 288 {
-                            continue;
-                        }
-                        let pixel = self.char_cache.pixel(code & 0x7F, px, py);
-                        if pixel == 0 {
-                            continue; // transparent
-                        }
-                        // 1bpp: pen 1 → palette color = color group number (0-15)
-                        let palette_idx = color as u8;
-                        self.native_buffer[row_off + screen_x] = palette_idx;
-                    }
-                }
-            }
+        // 1bpp text tilemap: pen 0 transparent, pen 1 -> the tile's color group.
+        // The Namco offset never reaches 0x400 within the visible grid, so no
+        // per-tile skip is needed. Rendered per-scanline via the shared helper.
+        let config = gfx::TilemapConfig {
+            cols: 36,
+            rows: 28,
+            tile_width: 8,
+            tile_height: 8,
+        };
+        let video_ram = &self.video_ram;
+        let char_cache = &self.char_cache;
+        let tx_color_mode = self.tx_color_mode;
+        let native = &mut self.native_buffer;
+        let mut prio = [0u8; 288];
+        for scanline in 0..224 {
+            let row_off = scanline * 288;
+            let row = &mut native[row_off..row_off + 288];
+            gfx::render_tilemap_scanline_indexed(
+                &config,
+                char_cache,
+                scanline,
+                |col, trow| {
+                    let offset = crate::namco_video::namco_tilemap_offset(col as i32, trow as i32);
+                    let code = video_ram[offset] as usize;
+                    let color = if tx_color_mode {
+                        code & 0x0F
+                    } else {
+                        ((code >> 4) & 0x0E) | ((code >> 3) & 2)
+                    };
+                    // Cache lookup uses code & 0x7F; the color group rides in attr.
+                    gfx::TileInfo::new((code & 0x7F) as u16, color as u8)
+                },
+                // Pen 0 transparent; pen 1 -> color group as the palette index.
+                |color, pixel| (pixel != 0).then_some((color, 0)),
+                row,
+                &mut prio,
+                0,
+            );
         }
     }
 
@@ -844,33 +856,49 @@ impl DigDugSystem {
             return;
         }
 
-        for py in 0..16 {
+        // Clip to the visible area (columns 2..34, i.e. pixels 16..272); no tunnel
+        // wrap (render_sprites handles the +0x100 second copy itself). Sprite pens
+        // land in palette entries 0x10-0x1F; a LUT low-nibble of 0x0F is transparent.
+        let clip = gfx::SpriteClip {
+            x_min: 16,
+            x_max: 272,
+            wrap_offset: None,
+        };
+        // Split borrows so the LUT closures don't hold &self while native_buffer
+        // is borrowed mutably. No priority buffer (composite by draw order).
+        let sprite_lut = &self.sprite_lut;
+        let sprite_cache = &self.sprite_cache;
+        let native = &mut self.native_buffer;
+        let is_transparent =
+            |pixel: u8| sprite_lut[(color * 4 + pixel as usize) & 0xFF] & 0x0F == 0x0F;
+        let resolve = |pixel: u8| {
+            (
+                (sprite_lut[(color * 4 + pixel as usize) & 0xFF] & 0x0F) | 0x10,
+                0u8,
+            )
+        };
+        let mut prio = [0u8; 288];
+
+        for py in 0..16usize {
             let screen_y = sy + py as i32;
             if !(0..224).contains(&screen_y) {
                 continue;
             }
             let src_py = if flipy { 15 - py } else { py };
             let row_off = screen_y as usize * 288;
-
-            for px in 0..16 {
-                let screen_x = sx + px as i32;
-                // Clip to visible area (columns 2-33, i.e. pixels 16-271)
-                if !(16..272).contains(&screen_x) {
-                    continue;
-                }
-
-                let src_px = if flipx { 15 - px } else { px };
-                let pixel = self.sprite_cache.pixel(code, src_px, src_py);
-
-                // Look up through sprite color LUT
-                let lut_idx = (color * 4 + pixel as usize) & 0xFF;
-                let pal_lo = self.sprite_lut[lut_idx] & 0x0F;
-                if pal_lo == 0x0F {
-                    continue; // transparent
-                }
-                let palette_idx = pal_lo | 0x10;
-                self.native_buffer[row_off + screen_x as usize] = palette_idx;
-            }
+            let row = &mut native[row_off..row_off + 288];
+            gfx::draw_sprite_row_indexed(
+                sprite_cache,
+                code as u16,
+                src_py,
+                sx,
+                flipx,
+                is_transparent,
+                resolve,
+                row,
+                &mut prio,
+                &clip,
+            );
         }
     }
 }
