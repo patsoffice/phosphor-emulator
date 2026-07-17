@@ -350,48 +350,16 @@ impl GalaxianVideo {
     // Palette construction (MAME resnet)
     // -----------------------------------------------------------------------
 
-    /// Compute MAME-`resnet` per-bit weights for one resistor network, scaled to
-    /// `max` (i.e. `Vout = max · R0/(R1+R0)` per bit, with every other bit
-    /// resistor sharing the pulldown/ground path). Returns the unscaled-by-
-    /// network weights; the caller applies the shared cross-network scale.
-    fn resnet_raw_weights(resistances: &[f64], pulldown: f64, max: f64) -> Vec<f64> {
-        // Open connection ≈ 1e12 Ω conductance floor, matching MAME.
-        let pd_g = if pulldown == 0.0 {
-            1e-12
-        } else {
-            1.0 / pulldown
-        };
-        resistances
-            .iter()
-            .enumerate()
-            .map(|(bit, _)| {
-                // Conductance to ground: pulldown plus every *other* bit.
-                let mut g0 = pd_g;
-                let mut g1 = 1e-12; // no pullup
-                for (j, &r) in resistances.iter().enumerate() {
-                    if r != 0.0 {
-                        if j == bit {
-                            g1 += 1.0 / r;
-                        } else {
-                            g0 += 1.0 / r;
-                        }
-                    }
-                }
-                let r0 = 1.0 / g0;
-                let r1 = 1.0 / g1;
-                max * r0 / (r1 + r0)
-            })
-            .collect()
-    }
-
     fn build_palette(&mut self) {
-        // R/G: 1K/470/220 Ω; B: 470/220 Ω; all with a 470 Ω pulldown.
+        // R/G: 1K/470/220 Ω; B: 470/220 Ω; all with a 470 Ω pulldown. Each bit's
+        // weight is the Thevenin divider with the other bits grounded (shared
+        // `compute_resnet_weights`); the caller applies the cross-network scale.
         let rg_res = [1000.0, 470.0, 220.0];
         let b_res = [470.0, 220.0];
 
-        let r_raw = Self::resnet_raw_weights(&rg_res, 470.0, RGB_MAXIMUM);
+        let r_raw = gfx::compute_resnet_weights(&rg_res, 470.0, RGB_MAXIMUM);
         let g_raw = r_raw.clone(); // identical network
-        let b_raw = Self::resnet_raw_weights(&b_res, 470.0, RGB_MAXIMUM);
+        let b_raw = gfx::compute_resnet_weights(&b_res, 470.0, RGB_MAXIMUM);
 
         // Shared autoscale: the network with the greatest summed output maps to
         // RGB_MAXIMUM; the weaker (2-bit blue) network ends up below it.

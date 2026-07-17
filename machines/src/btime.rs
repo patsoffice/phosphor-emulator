@@ -20,6 +20,7 @@ use phosphor_core::core::{Bus, BusMaster, ClockDivider, TimingConfig};
 use phosphor_core::cpu::m6502::M6502;
 use phosphor_core::device::ay8910::Ay8910;
 use phosphor_core::gfx::decode::{GfxCache, GfxLayout, decode_gfx};
+use phosphor_core::gfx::pal_nbit;
 use phosphor_core::gfx::rotate_270_indexed;
 use phosphor_macros::{BusDebug, MemoryRegion};
 
@@ -117,20 +118,6 @@ const fn display_bytes() -> usize {
 /// AY-3-8910 chip clock: 12 MHz / 2 / 2 / 2 = 1.5 MHz (equal to the main clock,
 /// so each chip is ticked once per main tick).
 const AY_CLOCK_HZ: u64 = 1_500_000;
-
-/// Expand a 3-bit color component to 8 bits (bit-replicated).
-#[inline]
-fn pal3bit(x: u8) -> u8 {
-    let x = x & 7;
-    (x << 5) | (x << 2) | (x >> 1)
-}
-
-/// Expand a 2-bit color component to 8 bits (bit-replicated).
-#[inline]
-fn pal2bit(x: u8) -> u8 {
-    let x = x & 3;
-    (x << 6) | (x << 4) | (x << 2) | x
-}
 
 // ---------------------------------------------------------------------------
 // Timing
@@ -399,9 +386,9 @@ impl BtimeBoard {
     /// `BGR_233_inverted` decode (invert, then R=bits0-2, G=bits3-5, B=bits6-7).
     fn update_palette_entry(&mut self, i: usize) {
         let v = !self.palette_ram[i & 0x0F];
-        let r = pal3bit(v & 7);
-        let g = pal3bit((v >> 3) & 7);
-        let b = pal2bit((v >> 6) & 3);
+        let r = pal_nbit(v & 7, 3);
+        let g = pal_nbit((v >> 3) & 7, 3);
+        let b = pal_nbit((v >> 6) & 3, 2);
         self.palette_rgb[i & 0x0F] = (r, g, b);
     }
 
@@ -1108,14 +1095,6 @@ mod tests {
     }
 
     // --- Palette (BGR_233_inverted) ---
-
-    #[test]
-    fn pal_bit_expanders() {
-        assert_eq!(pal3bit(0), 0x00);
-        assert_eq!(pal3bit(7), 0xFF);
-        assert_eq!(pal2bit(0), 0x00);
-        assert_eq!(pal2bit(3), 0xFF);
-    }
 
     #[test]
     fn palette_zero_ram_is_white_after_invert() {

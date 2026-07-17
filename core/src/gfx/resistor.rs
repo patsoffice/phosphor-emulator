@@ -5,9 +5,8 @@
 //!
 //! - **Linear weights** ([`compute_resistor_weights`] + [`combine_weights`]):
 //!   Pre-compute per-bit weights auto-scaled so all-bits-on = 255, then combine
-//!   via linear sum. Matches MAME's `compute_resistor_weights` convention. Works
-//!   well when the pulldown resistance is large relative to the DAC resistors
-//!   (e.g., Namco Pac-Man, Crystal Castles).
+//!   via linear sum. Works well when the pulldown resistance is large relative to
+//!   the DAC resistors (e.g., Namco Pac-Man, Crystal Castles).
 //!
 //! - **Exact voltage divider** ([`compute_resistor_net`]): Computes the actual
 //!   conductance ratio for each combination of bits, including the pulldown.
@@ -68,9 +67,121 @@ pub fn compute_resistor_net(bits: &[f64], resistors: &[f64], pulldown: f64) -> u
     (voltage * 255.0).round().min(255.0) as u8
 }
 
+/// Compute resistor-network per-bit weights, treating each bit as a Thevenin
+/// voltage divider with every *other* bit grounded.
+///
+/// When only bit `i` is driven high, its output is `max · R0/(R1+R0)`, where
+/// `R1` is bit `i`'s resistor to the supply and `R0` is the parallel combination
+/// of the pulldown and every *other* bit's resistor to ground. Returns one weight
+/// per resistor; callers linearly combine the weights of the active bits
+/// (optionally applying a shared cross-network autoscale). A resistance of `0.0`
+/// marks an absent/open connection (treated as a `1e12 Ω` conductance floor).
+///
+/// This differs from the two simpler models:
+/// - [`compute_resistor_weights`] approximates each bit independently against
+///   only the pulldown, ignoring the loading of the other bits.
+/// - [`compute_resistor_net`] returns a single value for a fixed bit vector,
+///   not per-bit weights for linear combination.
+pub fn compute_resnet_weights(resistors: &[f64], pulldown: f64, max: f64) -> Vec<f64> {
+    // Open connection => 1e12 Ω conductance floor.
+    let pd_g = if pulldown == 0.0 {
+        1e-12
+    } else {
+        1.0 / pulldown
+    };
+    resistors
+        .iter()
+        .enumerate()
+        .map(|(bit, _)| {
+            // Conductance to ground: pulldown plus every *other* bit.
+            let mut g0 = pd_g;
+            let mut g1 = 1e-12; // no pullup
+            for (j, &r) in resistors.iter().enumerate() {
+                if r != 0.0 {
+                    if j == bit {
+                        g1 += 1.0 / r;
+                    } else {
+                        g0 += 1.0 / r;
+                    }
+                }
+            }
+            let r0 = 1.0 / g0;
+            let r1 = 1.0 / g1;
+            max * r0 / (r1 + r0)
+        })
+        .collect()
+}
+
+/// Expand a `bits`-bit color component to a full 8-bit value by replicating the
+/// bit pattern into the high bits. For example a 3-bit value `abc` becomes
+/// `abcabcab`, and a 2-bit value `ab` becomes `abababab`, so the minimum maps to
+/// `0x00` and the maximum to `0xFF`.
+///
+/// `bits` must be in `1..=8`; upper bits of `value` outside the field are masked.
+pub fn pal_nbit(value: u8, bits: u32) -> u8 {
+    debug_assert!((1..=8).contains(&bits), "pal_nbit: bits must be 1..=8");
+    let mask = ((1u16 << bits) - 1) as u8;
+    let value = value & mask;
+    let mut result: u8 = 0;
+    let mut shift = 8_i32 - bits as i32;
+    while shift > -(bits as i32) {
+        if shift >= 0 {
+            result |= value << shift;
+        } else {
+            result |= value >> (-shift);
+        }
+        shift -= bits as i32;
+    }
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pal_nbit_matches_bit_replication() {
+        // 3-bit: 0 -> 0x00, 7 -> 0xFF, and the classic (x<<5)|(x<<2)|(x>>1).
+        for x in 0..=7u8 {
+            assert_eq!(pal_nbit(x, 3), (x << 5) | (x << 2) | (x >> 1));
+        }
+        // 2-bit: (x<<6)|(x<<4)|(x<<2)|x.
+        for x in 0..=3u8 {
+            assert_eq!(pal_nbit(x, 2), (x << 6) | (x << 4) | (x << 2) | x);
+        }
+        // Endpoints and out-of-field bits masked.
+        assert_eq!(pal_nbit(0, 3), 0x00);
+        assert_eq!(pal_nbit(7, 3), 0xFF);
+        assert_eq!(pal_nbit(0, 2), 0x00);
+        assert_eq!(pal_nbit(3, 2), 0xFF);
+        assert_eq!(pal_nbit(0xF8 | 0x05, 3), pal_nbit(0x05, 3)); // high bits ignored
+        // 1-bit and 4-bit sanity.
+        assert_eq!(pal_nbit(1, 1), 0xFF);
+        assert_eq!(pal_nbit(0, 1), 0x00);
+        assert_eq!(pal_nbit(0xF, 4), 0xFF);
+        assert_eq!(pal_nbit(0x9, 4), 0x99);
+    }
+
+    #[test]
+    fn resnet_weights_single_resistor_divider() {
+        // One bit, R=PD=470, max=224: weight = 224·PD/(R+PD) = 224·470/940 = 112.
+        let w = compute_resnet_weights(&[470.0], 470.0, 224.0);
+        assert_eq!(w.len(), 1);
+        assert!((w[0] - 112.0).abs() < 1e-6, "got {}", w[0]);
+    }
+
+    #[test]
+    fn resnet_weights_account_for_other_bits() {
+        // Two bits [470, 220] Ω, 470 Ω pulldown, max 224. Bit 0 sees the 220 Ω
+        // bit grounded in parallel with the pulldown: R0 = 1/(1/470+1/220),
+        // weight0 = 224·R0/(470+R0).
+        let w = compute_resnet_weights(&[470.0, 220.0], 470.0, 224.0);
+        let r0 = 1.0 / (1.0 / 470.0 + 1.0 / 220.0);
+        let expect0 = 224.0 * r0 / (470.0 + r0);
+        assert!((w[0] - expect0).abs() < 1e-6, "got {}", w[0]);
+        // Distinct per-bit weights (220 Ω bit is stronger than the 470 Ω bit).
+        assert!(w[1] > w[0]);
+    }
 
     #[test]
     fn namco_weights_match_original() {

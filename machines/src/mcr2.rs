@@ -57,15 +57,6 @@ pub(crate) const TILE_COLS: usize = 32;
 pub(crate) const TILE_ROWS: usize = 30;
 
 // ---------------------------------------------------------------------------
-// 9-bit palette helpers
-// ---------------------------------------------------------------------------
-
-/// Expand 3-bit color to 8-bit (standard 3-to-8 expansion).
-fn pal3bit(x: u8) -> u8 {
-    let v = x & 7;
-    (v << 5) | (v << 2) | (v >> 1)
-}
-
 // ---------------------------------------------------------------------------
 // Mcr2Board — shared Bally Midway MCR II arcade hardware
 // ---------------------------------------------------------------------------
@@ -247,9 +238,9 @@ impl Mcr2Board {
         // Cache canonical bytes for save state (rebuild_palette reads these)
         self.palette_ram[entry * 2] = val9 as u8;
         self.palette_ram[entry * 2 + 1] = (val9 >> 8) as u8;
-        let r = pal3bit((val9 >> 6) as u8);
-        let g = pal3bit(val9 as u8);
-        let b = pal3bit((val9 >> 3) as u8);
+        let r = gfx::pal_nbit((val9 >> 6) as u8, 3);
+        let g = gfx::pal_nbit(val9 as u8, 3);
+        let b = gfx::pal_nbit((val9 >> 3) as u8, 3);
         self.palette_rgb[entry] = (r, g, b);
     }
 
@@ -259,9 +250,9 @@ impl Mcr2Board {
             let low = self.palette_ram[entry * 2] as u16;
             let high = self.palette_ram[entry * 2 + 1] as u16;
             let val9 = low | ((high & 1) << 8);
-            let r = pal3bit((val9 >> 6) as u8);
-            let g = pal3bit(val9 as u8);
-            let b = pal3bit((val9 >> 3) as u8);
+            let r = gfx::pal_nbit((val9 >> 6) as u8, 3);
+            let g = gfx::pal_nbit(val9 as u8, 3);
+            let b = gfx::pal_nbit((val9 >> 3) as u8, 3);
             self.palette_rgb[entry] = (r, g, b);
         }
     }
