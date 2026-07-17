@@ -1128,16 +1128,22 @@ impl StarWarsBoard {
 
     pub(crate) fn bus_read(&mut self, master: BusMaster, addr: u16) -> u8 {
         if master == BusMaster::Cpu(1) {
-            self.sound_read(addr)
+            let data = self.sound_read(addr);
+            self.sound_map.watch_read(1, master, addr, data);
+            data
         } else {
-            self.main_read(addr)
+            let data = self.main_read(addr);
+            self.main_map.watch_read(0, master, addr, data);
+            data
         }
     }
 
     pub(crate) fn bus_write(&mut self, master: BusMaster, addr: u16, data: u8) {
         if master == BusMaster::Cpu(1) {
+            self.sound_map.watch_write(1, master, addr, data);
             self.sound_write(addr, data);
         } else {
+            self.main_map.watch_write(0, master, addr, data);
             self.main_write(addr, data);
         }
     }
@@ -1195,7 +1201,18 @@ impl StarWarsBoard {
             self.watchdog_tripped = true;
         }
 
+        // Latch the executing CPU's PC + cycle so any watchpoint hit taken via
+        // bus_read/bus_write this cycle carries usable debugger metadata. Only
+        // when a watchpoint is armed, so normal runs pay nothing.
+        if self.main_map.has_any_watchpoints() {
+            self.main_map
+                .latch_access_context(self.clock, Some(self.cpu.pc as u32));
+        }
         self.cpu.execute_cycle(bus, BusMaster::Cpu(0));
+        if self.sound_map.has_any_watchpoints() {
+            self.sound_map
+                .latch_access_context(self.clock, Some(self.sound_cpu.pc as u32));
+        }
         self.sound_cpu.execute_cycle(bus, BusMaster::Cpu(1));
         self.math.tick();
         for p in &mut self.pokey {
