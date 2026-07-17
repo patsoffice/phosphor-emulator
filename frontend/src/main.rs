@@ -155,7 +155,7 @@ fn main() {
     // Size the auto-scale off the on-screen presentation (aspect-corrected,
     // rotation-swapped), not the raw native raster, so the longest *visible*
     // axis stays under the cap.
-    let rotated = machine.screen_rotation() != phosphor_core::core::machine::ScreenRotation::None;
+    let rotated = machine.orientation().swaps_axes();
     let (pres_w, pres_h, _) =
         emulator::presentation(native_w, native_h, machine.display_aspect(), rotated);
     let scale = cli

@@ -2,6 +2,7 @@ use std::time::Duration;
 
 use crate::device::dvg::VectorLine;
 use crate::gfx::GfxCache;
+pub use crate::gfx::Orientation;
 
 use super::address_space16::AddressSpace16;
 use super::debug::BusDebug;
@@ -77,17 +78,6 @@ impl TimingConfig {
     }
 }
 
-/// Screen rotation applied at the display level (after vector generation).
-///
-/// Matches MAME's screen orientation flags. The rotation is applied by the
-/// rendering layer, not by the game hardware.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum ScreenRotation {
-    #[default]
-    None,
-    Rot270,
-}
-
 // ---------------------------------------------------------------------------
 // Sub-traits
 // ---------------------------------------------------------------------------
@@ -95,6 +85,14 @@ pub enum ScreenRotation {
 /// Video output capabilities: display size and frame rendering.
 pub trait Renderable {
     /// Native display resolution as (width, height) in pixels.
+    ///
+    /// This is the *native* (pre-orientation) framebuffer size: the dimensions
+    /// of the buffer `render_frame` fills. For a machine that declares a
+    /// non-`NORMAL` [`orientation`](Self::orientation), the frontend applies the
+    /// transform centrally, so the *displayed* size is these dimensions with the
+    /// axes swapped when [`Orientation::swaps_axes`] is set. Machines that still
+    /// bake rotation into `render_frame` report their already-rotated size and
+    /// return `Orientation::NORMAL`.
     fn display_size(&self) -> (u32, u32);
 
     /// Target display aspect ratio (width : height) as the cabinet monitor
@@ -130,12 +128,15 @@ pub trait Renderable {
         None
     }
 
-    /// Screen rotation applied at the display level.
+    /// Declarative screen orientation, applied centrally by the frontend.
     ///
-    /// Vector machines like Tempest use ROT270 to rotate the AVG output
-    /// for portrait display. Default is no rotation.
-    fn screen_rotation(&self) -> ScreenRotation {
-        ScreenRotation::None
+    /// Queried **every frame**, so machines with a dynamic (DIP-driven) cocktail
+    /// flip can return a different value live. The default `NORMAL` means the
+    /// native framebuffer is presented as-is — unmigrated machines that bake
+    /// rotation into `render_frame` keep this default and are unaffected. See
+    /// [`Orientation`] and [`crate::gfx::apply_orientation`].
+    fn orientation(&self) -> Orientation {
+        Orientation::NORMAL
     }
 }
 

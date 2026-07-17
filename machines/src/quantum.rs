@@ -603,7 +603,7 @@ impl Renderable for QuantumSystem {
     }
 
     fn render_frame(&self, buffer: &mut [u8]) {
-        // flip_y = true: Quantum is unrotated (screen_rotation None), so the GL
+        // flip_y = true: Quantum is unrotated (orientation NORMAL), so the GL
         // path maps vector Y=0 to the bottom of the screen (vector_gl.rs). The
         // CPU rasterizer must match, or the picture is vertically mirrored when
         // the debug/profiler panel forces this fallback path. (Tempest's AVG
@@ -622,7 +622,7 @@ impl Renderable for QuantumSystem {
         Some(&self.display_list)
     }
 
-    // No screen_rotation override: the cabinet is a vertical (portrait) monitor,
+    // No orientation override: the cabinet is a vertical (portrait) monitor,
     // but this engine's vector "rotation" only Y-flips and swaps the window to
     // landscape. Instead the display_size is already portrait (600×900) and the
     // AVG emits screen-space coordinates, so the default (no rotation) is right.

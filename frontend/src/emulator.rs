@@ -126,7 +126,7 @@ pub fn run(
     // cabinets) so the GPU corrects pixel aspect at presentation time. Rotated
     // displays (e.g. Tempest) additionally swap axes — all handled by
     // `presentation`. `view_aspect` (as-viewed w/h) drives every letterbox.
-    let rotated = machine.screen_rotation() != phosphor_core::core::machine::ScreenRotation::None;
+    let rotated = machine.orientation().swaps_axes();
     let (win_w, win_h, view_aspect) =
         presentation(width, height, machine.display_aspect(), rotated);
     let window_pos = state.window_x.zip(state.window_y);
@@ -608,10 +608,12 @@ pub fn run(
                 && !settings_state.active
             {
                 let ds = machine.display_size();
-                let rot = match machine.screen_rotation() {
-                    phosphor_core::core::machine::ScreenRotation::Rot270 => 270,
-                    _ => 0,
-                };
+                let rot =
+                    if machine.orientation() == phosphor_core::core::machine::Orientation::ROT270 {
+                        270
+                    } else {
+                        0
+                    };
                 let paused = debug_state.global_paused;
                 if show_fps || paused {
                     let fps = show_fps.then(|| fps_text.clone());

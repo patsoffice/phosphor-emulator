@@ -648,7 +648,7 @@ impl Avg {
         }
         // Emit directly in screen space. The Quantum machine presents this as a
         // pre-rotated portrait display (display_size already portrait,
-        // ScreenRotation::None), so no transpose/flip is applied here — unlike
+        // Orientation::NORMAL), so no transpose/flip is applied here — unlike
         // MAME, whose AVG transposes X/Y to feed a true-rotation screen.
         self.add_point(x, y, eff_intensity, [r, g, b]);
     }

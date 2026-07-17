@@ -556,8 +556,8 @@ impl phosphor_core::core::machine::Renderable for TempestSystem {
     fn vector_display_list(&self) -> Option<&[phosphor_core::device::dvg::VectorLine]> {
         self.board.vector_display_list()
     }
-    fn screen_rotation(&self) -> phosphor_core::core::machine::ScreenRotation {
-        phosphor_core::core::machine::ScreenRotation::Rot270
+    fn orientation(&self) -> phosphor_core::core::machine::Orientation {
+        phosphor_core::core::machine::Orientation::ROT270
     }
 }
 
