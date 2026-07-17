@@ -422,7 +422,7 @@ impl Bus for DkongJrSystem {
 // Machine traits (MachineCore + capabilities)
 // ---------------------------------------------------------------------------
 
-crate::impl_board_delegation!(DkongJrSystem, board, tkg04::TIMING);
+crate::impl_board_delegation!(DkongJrSystem, board, tkg04::TIMING, orientation);
 
 impl InputConfigurable for DkongJrSystem {
     fn input_controls(&self) -> &'static [InputControl] {

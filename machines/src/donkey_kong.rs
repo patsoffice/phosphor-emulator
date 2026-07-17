@@ -640,7 +640,7 @@ impl Bus for DkongSystem {
 // Machine traits (MachineCore + capabilities)
 // ---------------------------------------------------------------------------
 
-crate::impl_board_delegation!(DkongSystem, board, tkg04::TIMING);
+crate::impl_board_delegation!(DkongSystem, board, tkg04::TIMING, orientation);
 
 impl InputConfigurable for DkongSystem {
     fn input_controls(&self) -> &'static [InputControl] {
