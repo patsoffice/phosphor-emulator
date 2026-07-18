@@ -373,6 +373,17 @@ pub struct AtariSystem1Board {
     /// renders each scanline band with the bank that was live there — mirroring
     /// the hardware's beam-time bank select. Rebuilt every frame; not saved.
     mo_bank_changes: Vec<(u16, u8)>,
+
+    /// Motion-object state as it stood when the beam finished the visible area,
+    /// captured at the start of vblank: a copy of the sprite RAM plus the band
+    /// log for those scanlines. Both games double-buffer the display list —
+    /// they rebuild it during vblank and publish it with a bank swap — so the
+    /// live sprite RAM at the frame boundary already holds the *next* scanout's
+    /// list. Rendering from this snapshot keeps the sprite RAM and the bands
+    /// paired with the frame they actually describe. Empty until the first
+    /// vblank (a direct render without stepping falls back to live state).
+    mo_shadow: Vec<u8>,
+    mo_shadow_bands: Vec<(u16, u8)>,
 }
 
 impl AtariSystem1Board {
@@ -460,6 +471,8 @@ impl AtariSystem1Board {
             clock: 0,
             watchdog_count: 0,
             mo_bank_changes: Vec::with_capacity(16),
+            mo_shadow: Vec::new(),
+            mo_shadow_bands: Vec::with_capacity(16),
         }
     }
 
@@ -768,19 +781,27 @@ impl AtariSystem1Board {
         const PRIORITY_BIT: u16 = 0x1000; // mobitmap priority flag (shift 12)
 
         let mut mo = vec![TRANSPARENT; w * h];
-        let mob = self.map.region_data(Region::Mob);
+
+        // Draw from the vblank snapshot: the sprite RAM and band log as they
+        // stood when the beam finished the visible area, before the game
+        // rebuilt the list for the next frame. Without a snapshot — a direct
+        // render that never stepped the board (unit tests) — fall back to live
+        // state, and to the current bank when no bands were logged either.
+        let live = self.map.region_data(Region::Mob);
+        let mob: &[u8] = if self.mo_shadow.is_empty() {
+            live
+        } else {
+            &self.mo_shadow
+        };
         let word = |wi: usize| u16::from_be_bytes([mob[wi * 2], mob[wi * 2 + 1]]);
 
-        // Render each scanline band with the motion-object bank that was live
-        // there this frame (mo_bank_changes). When the log is empty — e.g. a
-        // direct render without stepping the board (unit tests) — fall back to
-        // the current bank for the whole frame.
         let fallback = [(0u16, (self.bankselect >> 3) & 7)];
-        let bands: &[(u16, u8)] = if self.mo_bank_changes.is_empty() {
-            &fallback
-        } else {
+        let logged = if self.mo_shadow.is_empty() {
             &self.mo_bank_changes
+        } else {
+            &self.mo_shadow_bands
         };
+        let bands: &[(u16, u8)] = if logged.is_empty() { &fallback } else { logged };
 
         for (bi, &(start_line, bank)) in bands.iter().enumerate() {
             let y_start = start_line as usize;
@@ -928,6 +949,7 @@ impl AtariSystem1Board {
             let scanline = (frame_cycle / TIMING.cycles_per_scanline) as u16;
             if scanline == VBLANK_SCANLINE {
                 self.video_int = true;
+                self.snapshot_motion_objects();
             }
             self.scanline_int = self.timer_irq_at_scanline(scanline);
         }
@@ -946,6 +968,23 @@ impl AtariSystem1Board {
         }
 
         self.clock += 1;
+    }
+
+    /// Latch the motion-object state the beam just scanned out, at the moment
+    /// vblank begins. The game spends vblank rebuilding the display list into
+    /// the back bank and then swaps banks to publish it, so by the time the
+    /// frame boundary comes round the live sprite RAM and bank describe the
+    /// *next* frame. See [`mo_shadow`](Self::mo_shadow).
+    fn snapshot_motion_objects(&mut self) {
+        let mob = self.map.region_data(Region::Mob);
+        if self.mo_shadow.len() == mob.len() {
+            self.mo_shadow.copy_from_slice(mob);
+        } else {
+            self.mo_shadow = mob.to_vec();
+        }
+        self.mo_shadow_bands.clear();
+        self.mo_shadow_bands
+            .extend_from_slice(&self.mo_bank_changes);
     }
 
     /// Report the number of main-CPU instruction boundaries this tick (0 or 1)
@@ -1010,6 +1049,8 @@ impl AtariSystem1Board {
         self.audio_dc = (0.0, 0.0);
         self.watchdog_count = 0;
         self.mo_bank_changes.clear();
+        self.mo_shadow.clear();
+        self.mo_shadow_bands.clear();
     }
 
     // -----------------------------------------------------------------------
@@ -1228,6 +1269,66 @@ mod tests {
             px(0, 200),
             (0, 254, 0),
             "bank-1 sprite shows in the bottom band"
+        );
+    }
+
+    #[test]
+    fn motion_objects_render_from_the_vblank_snapshot() {
+        // Both System 1 games double-buffer the display list: they rebuild it
+        // during vblank and publish it by swapping the MO bank. Rendering at the
+        // frame boundary therefore sees sprite RAM that already describes the
+        // *next* scanout, so the compositor must draw from the state latched
+        // when vblank began — otherwise it draws the half-built back buffer with
+        // the pre-publish bank and the sprites vanish.
+        let mut board = AtariSystem1Board::new(103, false);
+        let w = TIMING.display_width as usize;
+
+        let mut cache = GfxCache::new(1, 8, 8);
+        cache.set_pixel(0, 0, 0, 5);
+        board.playfield.banks.push(GfxBank { cache, bpp: 4 });
+        board.playfield.mo_lookup[0] = 1 << 8;
+
+        // Sprite pen 5, palcolor 0 → motion palette index 0x105 = pure green.
+        let palette = board.map.region_data_mut(Region::Palette);
+        palette[0x105 * 2] = 0xF0;
+        palette[0x105 * 2 + 1] = 0xF0;
+
+        // The list the beam actually scanned out: one sprite at y=0 in bank 0.
+        let mob = board.map.region_data_mut(Region::Mob);
+        mob[0] = 0x1F; // bank 0 entry 0 word[0] = 0x1F00 → y 0
+        mob[1] = 0x00;
+        board.mo_bank_changes = vec![(0, 0)];
+
+        // Vblank begins: latch that state.
+        board.snapshot_motion_objects();
+
+        // Now the game rebuilds the list for the next frame — it tears down
+        // bank 0's entry and stages a new sprite in bank 1 at y=200 — and
+        // publishes it by swapping the live MO bank to 1.
+        let mob = board.map.region_data_mut(Region::Mob);
+        mob[0] = 0x00;
+        mob[1] = 0x00;
+        mob[0x200] = 0x06; // bank 1 entry 0 word[0] = 0x0600 → y 200
+        mob[0x201] = 0x00;
+        board.bankselect_w(0x08); // MO bank 1
+
+        let (dw, dh) = TIMING.display_size();
+        let mut buf = vec![0u8; (dw * dh * 3) as usize];
+        board.render_frame(&mut buf);
+
+        let px = |x: usize, y: usize| {
+            let o = (y * w + x) * 3;
+            (buf[o], buf[o + 1], buf[o + 2])
+        };
+        assert_eq!(
+            px(0, 0),
+            (0, 254, 0),
+            "the scanned-out sprite draws from the vblank snapshot"
+        );
+        assert_eq!(
+            px(0, 200),
+            (0, 0, 0),
+            "the list staged during vblank belongs to the next frame, not this one"
         );
     }
 
