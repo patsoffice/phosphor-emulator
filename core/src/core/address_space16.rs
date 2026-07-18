@@ -592,6 +592,32 @@ impl AddressSpace16 {
         self.debug_pc
     }
 
+    /// The cycle latched by the last
+    /// [`latch_access_context`](Self::latch_access_context), for boards
+    /// stamping their own events onto this space's timeline.
+    #[inline]
+    pub fn debug_cycle(&self) -> u64 {
+        self.debug_cycle
+    }
+
+    /// Record a board-built event into this space's trace ring.
+    ///
+    /// Some events cannot be synthesized from a bus access alone — an
+    /// interrupt assertion has no address, and a read routed through an I/O
+    /// coprocessor is attributed to the chip rather than to the address it
+    /// arrived on. Boards build those events themselves and hand them over
+    /// here, so a board needs no trace ring of its own. Stamp them with
+    /// [`debug_cycle`](Self::debug_cycle) and [`latched_pc`](Self::latched_pc)
+    /// to keep them on the same timeline as the space's own events.
+    ///
+    /// No-op unless tracing is enabled.
+    #[inline]
+    pub fn trace_record(&mut self, event: DebugEvent) {
+        if self.trace.enabled() {
+            self.trace.record(event);
+        }
+    }
+
     /// Check a read access against this space's watchpoints. Returns true
     /// if the exact address is read-watched, queueing a hit.
     ///
@@ -1814,6 +1840,43 @@ mod tests {
         assert_eq!(events[2].kind, DebugEventKind::Watchdog);
         assert_eq!(events[2].detail, Some("watchdog cleared"));
         assert_eq!(events[2].device, None);
+    }
+
+    #[test]
+    fn trace_record_puts_board_events_on_the_space_timeline() {
+        // Interrupts have no address and I/O-coprocessor reads are attributed
+        // to the chip, so boards build those events and hand them over.
+        let mut map = AddressSpace16::new();
+        map.region(RAM, "Work RAM", 0x8000, 0x0100, AccessKind::ReadWrite);
+
+        // Gated like every other trace path.
+        map.trace_record(DebugEvent::new(
+            1,
+            DebugAccessSource::Cpu(0),
+            DebugEventKind::InterruptAssert,
+        ));
+        assert!(map.trace_events().is_empty());
+
+        map.set_trace_enabled(true);
+        map.latch_access_context(4_242, Some(0x0300));
+        map.watch_write(0, BusMaster::Cpu(0), 0x8000, 0x01);
+        map.trace_record(DebugEvent {
+            cpu_index: Some(2),
+            detail: Some("sound NMI (scanline timer)"),
+            ..DebugEvent::new(
+                map.debug_cycle(),
+                DebugAccessSource::Cpu(2),
+                DebugEventKind::InterruptAssert,
+            )
+        });
+
+        let events = map.trace_events();
+        assert_eq!(events.len(), 2, "board events share the space's ring");
+        assert_eq!(events[0].kind, DebugEventKind::MemoryWrite);
+        assert_eq!(events[1].kind, DebugEventKind::InterruptAssert);
+        assert_eq!(events[1].detail, Some("sound NMI (scanline timer)"));
+        // Same timeline: the board stamped its event from debug_cycle().
+        assert_eq!(events[0].cycle, events[1].cycle);
     }
 
     #[test]
