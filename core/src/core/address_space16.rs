@@ -21,6 +21,7 @@
 
 use crate::core::address_space::{AccessKind, DebugRead, MemoryBacking, RegionId, UNMAPPED};
 use crate::core::bus::BusMaster;
+use crate::core::debug_trace::{DebugEvent, DebugEventKind, DebugTraceBuffer};
 use crate::core::watchpoint::{
     DebugAccessSource, WatchpointCondition, WatchpointHit, WatchpointKind, WatchpointPhase,
     Watchpoints,
@@ -263,6 +264,12 @@ pub struct AddressSpace16 {
     /// Address of the instruction currently executing on the owning CPU
     /// (latched at instruction boundaries), when known.
     debug_pc: Option<u32>,
+
+    /// Optional write-event ring. When enabled, every bus write through this
+    /// space is recorded as a region-tagged [`DebugEventKind::MemoryWrite`],
+    /// giving the headless `trace` tool CPU-agnostic, mirror-resolved capture
+    /// without the board hand-rolling a `trace_bus_write` path.
+    trace: DebugTraceBuffer,
 }
 
 impl AddressSpace16 {
@@ -275,6 +282,10 @@ impl AddressSpace16 {
             watchpoints: Watchpoints::new(),
             debug_cycle: 0,
             debug_pc: None,
+            // Large ring: the trace tool drains per frame, but a busy frame can
+            // write many thousands of times; a small ring would drop the early
+            // (often vblank-handler) video-register writes we care about.
+            trace: DebugTraceBuffer::with_capacity(1 << 16),
         }
     }
 
@@ -577,6 +588,9 @@ impl AddressSpace16 {
         data: u8,
         device: Option<&'static str>,
     ) -> bool {
+        if self.trace.enabled() {
+            self.record_write_event(cpu_index, master, addr, data, device);
+        }
         if self.active_watch_count == 0 {
             return false;
         }
@@ -644,6 +658,102 @@ impl AddressSpace16 {
     #[inline]
     pub fn has_any_watchpoints(&self) -> bool {
         self.active_watch_count > 0
+    }
+
+    /// True if any debug observer (watchpoints or the write-event trace) is
+    /// active. Boards gate `latch_access_context` on this so the cycle/PC
+    /// context is available to both watchpoint hits and trace events.
+    #[inline]
+    pub fn debug_active(&self) -> bool {
+        self.active_watch_count > 0 || self.trace.enabled()
+    }
+
+    // -- Write-event trace (headless `trace --events`) ----------------------
+
+    /// Enable/disable the write-event ring. When enabled, every bus write
+    /// through this space is recorded (see [`watch_write`](Self::watch_write)).
+    pub fn set_trace_enabled(&mut self, enabled: bool) {
+        self.trace.set_enabled(enabled);
+    }
+
+    /// Whether the write-event ring is currently recording.
+    pub fn trace_enabled(&self) -> bool {
+        self.trace.enabled()
+    }
+
+    /// Borrow the recorded write events (drained per frame by the trace tool).
+    pub fn trace_events(&mut self) -> &[DebugEvent] {
+        self.trace.events()
+    }
+
+    /// Clear the recorded write events.
+    pub fn clear_trace_events(&mut self) {
+        self.trace.clear();
+    }
+
+    /// Record one I/O-port write as a device-tagged [`DebugEventKind::IoWrite`].
+    /// Boards call this explicitly from `Bus::io_write`, because the separate
+    /// I/O space never flows through the memory map / [`watch_write`]. No-op
+    /// unless tracing is enabled.
+    ///
+    /// [`watch_write`]: Self::watch_write
+    pub fn trace_bus_io_write(
+        &mut self,
+        master: BusMaster,
+        port: u16,
+        data: u8,
+        device: Option<&'static str>,
+    ) {
+        if !self.trace.enabled() {
+            return;
+        }
+        let cpu = match master {
+            BusMaster::Cpu(i) => Some(i),
+            _ => None,
+        };
+        self.trace.record(DebugEvent {
+            cpu_index: cpu,
+            pc: self.debug_pc,
+            addr: Some(port as u32),
+            value: Some(data as u32),
+            width: 1,
+            region: None,
+            device,
+            ..DebugEvent::new(self.debug_cycle, master.into(), DebugEventKind::IoWrite)
+        });
+    }
+
+    /// Record one bus write as a region-tagged [`DebugEventKind::MemoryWrite`].
+    /// Attribution mirrors [`make_hit`](Self::make_hit): the latched PC belongs
+    /// to the owning CPU, so it is attached only when that CPU wrote.
+    #[cold]
+    fn record_write_event(
+        &mut self,
+        cpu_index: usize,
+        master: BusMaster,
+        addr: u16,
+        data: u8,
+        device: Option<&'static str>,
+    ) {
+        let region = self.region_at(addr).map(|r| r.name);
+        let pc = match master {
+            BusMaster::Cpu(i) if i == cpu_index => self.debug_pc,
+            _ => None,
+        };
+        let cpu = match master {
+            BusMaster::Cpu(i) => Some(i),
+            _ => None,
+        };
+        self.trace.record(DebugEvent {
+            cpu_index: cpu,
+            pc,
+            addr: Some(addr as u32),
+            value: Some(data as u32),
+            width: 1,
+            region,
+            device,
+            ..DebugEvent::new(self.debug_cycle, master.into(), DebugEventKind::MemoryWrite)
+        });
     }
 
     /// Set an unconditional watchpoint on the exact address `addr` for the CPU
@@ -1502,5 +1612,49 @@ mod tests {
 
         assert_eq!(map.debug_read(0x0000), Some(0x11));
         assert_eq!(map.debug_read(0xD000), Some(0x22));
+    }
+
+    #[test]
+    fn trace_records_region_tagged_writes_only_when_enabled() {
+        let mut map = AddressSpace16::new();
+        map.region(RAM, "Video RAM", 0x8000, 0x0800, AccessKind::ReadWrite);
+
+        // Disabled by default: watch_write records nothing, and debug_active is
+        // false (so boards skip latching the access context).
+        assert!(!map.trace_enabled());
+        assert!(!map.debug_active());
+        map.watch_write(0, BusMaster::Cpu(0), 0x8000, 0x11);
+        assert!(map.trace_events().is_empty());
+
+        // Enable: writes are recorded with the region name resolved.
+        map.set_trace_enabled(true);
+        assert!(map.debug_active());
+        map.latch_access_context(12_345, Some(0x0100));
+        map.watch_write(0, BusMaster::Cpu(0), 0x8010, 0xAB); // mapped → region set
+        map.watch_write(0, BusMaster::Cpu(0), 0x0000, 0xCD); // unmapped → region None
+
+        let events = map.trace_events();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].kind, DebugEventKind::MemoryWrite);
+        assert_eq!(events[0].addr, Some(0x8010));
+        assert_eq!(events[0].value, Some(0xAB));
+        assert_eq!(events[0].cycle, 12_345);
+        assert_eq!(events[0].pc, Some(0x0100));
+        assert_eq!(events[0].region, Some("Video RAM"));
+        assert_eq!(events[1].region, None); // unmapped address still recorded
+
+        // I/O writes are captured via the explicit io hook, device-tagged.
+        map.trace_bus_io_write(BusMaster::Cpu(0), 0x00E0, 0x01, Some("watchdog"));
+        assert_eq!(map.trace_events().len(), 3);
+        let io = &map.trace_events()[2];
+        assert_eq!(io.kind, DebugEventKind::IoWrite);
+        assert_eq!(io.device, Some("watchdog"));
+
+        // Clearing empties the ring; disabling stops recording.
+        map.clear_trace_events();
+        assert!(map.trace_events().is_empty());
+        map.set_trace_enabled(false);
+        map.watch_write(0, BusMaster::Cpu(0), 0x8000, 0x22);
+        assert!(map.trace_events().is_empty());
     }
 }

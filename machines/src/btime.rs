@@ -402,7 +402,7 @@ impl BtimeBoard {
 
     pub fn tick(&mut self, bus: &mut dyn Bus<Address = u16, Data = u8>) {
         // Main CPU @ 1.5 MHz.
-        if self.main_map.has_any_watchpoints() {
+        if self.main_map.debug_active() {
             let pc = self
                 .cpu
                 .at_instruction_boundary()
@@ -413,7 +413,7 @@ impl BtimeBoard {
 
         // Sound CPU @ 500 kHz (main / 3).
         if self.sound_clock.tick() {
-            if self.sound_map.has_any_watchpoints() {
+            if self.sound_map.debug_active() {
                 let pc = self
                     .sound_cpu
                     .at_instruction_boundary()

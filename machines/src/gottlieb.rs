@@ -645,7 +645,7 @@ impl GottliebBoard {
         // Latch watchpoint attribution context (cycle + instruction PC)
         // before CPU execution — bus dispatch cannot read CPU state mid-tick.
         // The I8088 debug surface uses IP as its PC (matching debug_pc).
-        if self.map.has_any_watchpoints() {
+        if self.map.debug_active() {
             let pc = self
                 .cpu
                 .at_instruction_boundary()

@@ -649,7 +649,11 @@ impl DipSwitches for BurgertimeSystem {
     }
 }
 
-crate::impl_default_frontend_capabilities!(BurgertimeSystem);
+impl phosphor_core::core::machine::Nvram for BurgertimeSystem {}
+impl phosphor_core::core::machine::Profilable for BurgertimeSystem {}
+// DebugTrace routes to the board's main-CPU map (write-event ring) rather than
+// the default no-op, so `disasm trace --events` sees this board's bus writes.
+crate::impl_map_debug_trace!(BurgertimeSystem, board.main_map);
 
 // ---------------------------------------------------------------------------
 // Machine registry

@@ -611,7 +611,7 @@ impl DipSwitches for QbertSystem {
     }
 }
 
-impl phosphor_core::core::debug_trace::DebugTrace for QbertSystem {}
+crate::impl_map_debug_trace!(QbertSystem, board.map);
 
 // ---------------------------------------------------------------------------
 // Machine registry

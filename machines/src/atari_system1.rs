@@ -933,7 +933,7 @@ impl AtariSystem1Board {
         }
 
         // Latch watchpoint attribution context before CPU execution.
-        if self.map.has_any_watchpoints() {
+        if self.map.debug_active() {
             let pc = self.cpu.at_instruction_boundary().then_some(self.cpu.pc);
             self.map.latch_access_context(self.clock, pc);
         }

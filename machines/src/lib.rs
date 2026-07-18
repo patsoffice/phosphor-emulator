@@ -378,6 +378,32 @@ macro_rules! impl_default_frontend_capabilities {
 }
 pub(crate) use impl_default_frontend_capabilities;
 
+/// Implements `DebugTrace` by routing to an `AddressSpace16`/`AddressSpace32`
+/// field's write-event ring. The field path is given as dot-separated idents
+/// (e.g. `map` or `board.map` or `board.main_map`). Use this for boards whose
+/// bus writes flow through an `AddressSpace` (the map records region-tagged
+/// write events); pair it with `map.trace_bus_io_write` calls in any
+/// `Bus::io_write` so the separate I/O space is captured too.
+macro_rules! impl_map_debug_trace {
+    ($type:ty, $($map:tt).+) => {
+        impl phosphor_core::core::debug_trace::DebugTrace for $type {
+            fn set_trace_enabled(&mut self, enabled: bool) {
+                self.$($map).+.set_trace_enabled(enabled);
+            }
+            fn trace_enabled(&self) -> bool {
+                self.$($map).+.trace_enabled()
+            }
+            fn trace_events(&mut self) -> &[phosphor_core::core::debug_trace::DebugEvent] {
+                self.$($map).+.trace_events()
+            }
+            fn clear_trace_events(&mut self) {
+                self.$($map).+.clear_trace_events();
+            }
+        }
+    };
+}
+pub(crate) use impl_map_debug_trace;
+
 /// Implements `DebugTrace` delegating to a board field, for board-wrapper
 /// machines whose board embeds a `DebugTraceBuffer` (via `#[derive(DebugTrace)]`).
 macro_rules! impl_board_debug_trace {

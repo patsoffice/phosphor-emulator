@@ -303,7 +303,7 @@ impl Mcr2Board {
 
         // Latch watchpoint attribution context (cycle + instruction PC)
         // before CPU execution — bus dispatch cannot read CPU state mid-tick.
-        if self.map.has_any_watchpoints() {
+        if self.map.debug_active() {
             let pc = self
                 .cpu
                 .at_instruction_boundary()

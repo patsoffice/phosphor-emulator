@@ -727,7 +727,7 @@ impl Nvram for MarbleSystem {
 
 // No sub-span profiling, no event tracing.
 impl Profilable for MarbleSystem {}
-impl phosphor_core::core::debug_trace::DebugTrace for MarbleSystem {}
+crate::impl_map_debug_trace!(MarbleSystem, board.map);
 
 // Marble Madness has no operator DIP switches — coinage and game options live
 // in the EEPROM and the sound-board config. The all-default trait exposes no banks.

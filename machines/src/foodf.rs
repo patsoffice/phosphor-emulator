@@ -673,7 +673,7 @@ impl FoodFightSystem {
         }
 
         // Latch watchpoint attribution context before CPU execution.
-        if self.map.has_any_watchpoints() {
+        if self.map.debug_active() {
             let pc = self.cpu.at_instruction_boundary().then_some(self.cpu.pc);
             self.map.latch_access_context(self.clock, pc);
         }
@@ -1215,7 +1215,7 @@ impl DipSwitches for FoodFightSystem {
         }
     }
 }
-impl phosphor_core::core::debug_trace::DebugTrace for FoodFightSystem {}
+crate::impl_map_debug_trace!(FoodFightSystem, map);
 
 // ---------------------------------------------------------------------------
 // Registry

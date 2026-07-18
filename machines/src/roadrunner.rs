@@ -806,7 +806,7 @@ impl Nvram for RoadRunnerSystem {
 }
 
 impl Profilable for RoadRunnerSystem {}
-impl phosphor_core::core::debug_trace::DebugTrace for RoadRunnerSystem {}
+crate::impl_map_debug_trace!(RoadRunnerSystem, board.map);
 
 // Road Runner has no operator DIP switches — coinage and game options live in
 // the EEPROM and the sound-board config.

@@ -499,7 +499,7 @@ impl MrdoBoard {
             self.vblank_irq_pending = true;
         }
 
-        if self.main_map.has_any_watchpoints() {
+        if self.main_map.debug_active() {
             let pc = self
                 .cpu
                 .at_instruction_boundary()
@@ -1242,7 +1242,11 @@ impl DipSwitches for MrdoSystem {
     }
 }
 
-crate::impl_default_frontend_capabilities!(MrdoSystem);
+impl phosphor_core::core::machine::Nvram for MrdoSystem {}
+impl phosphor_core::core::machine::Profilable for MrdoSystem {}
+// DebugTrace routes to the board's main-CPU map (write-event ring) rather than
+// the default no-op, so `disasm trace --events` sees this board's bus writes.
+crate::impl_map_debug_trace!(MrdoSystem, board.main_map);
 
 // ---------------------------------------------------------------------------
 // Registry

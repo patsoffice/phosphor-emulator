@@ -354,7 +354,8 @@ impl Bus for SatansHollowSystem {
         }
     }
 
-    fn io_write(&mut self, _master: BusMaster, addr: u16, data: u8) {
+    fn io_write(&mut self, master: BusMaster, addr: u16, data: u8) {
+        self.board.map.trace_bus_io_write(master, addr, data, None);
         let port = addr as u8;
         match port {
             // SSIO output ports (no custom outputs for Satan's Hollow)
@@ -504,7 +505,7 @@ impl Profilable for SatansHollowSystem {}
 // persisted DIP byte. Exposing this would require reverse-engineering the SSIO
 // coinage routine; left for follow-up rather than guessed.
 impl phosphor_core::core::machine::DipSwitches for SatansHollowSystem {}
-impl phosphor_core::core::debug_trace::DebugTrace for SatansHollowSystem {}
+crate::impl_map_debug_trace!(SatansHollowSystem, board.map);
 
 // ---------------------------------------------------------------------------
 // Machine registry
