@@ -27,6 +27,82 @@ use crate::core::watchpoint::{
     Watchpoints,
 };
 
+/// How one bus write should appear in the event trace.
+///
+/// Regions are page-granular — a region starts on a 256-byte boundary and is a
+/// whole number of pages long — so the region map alone cannot label hardware
+/// that decodes finer than that: an 8-byte latch, a single watchdog address, a
+/// 32-byte sound-chip window. This is what a board passes to
+/// [`watch_write_annotated`](AddressSpace16::watch_write_annotated) to name
+/// such a write without inventing a fake region for it.
+///
+/// [`MEMORY`](Self::MEMORY) is the plain-RAM default; [`device`](Self::device)
+/// and [`detail`](Self::detail) build the common device-write shapes:
+///
+/// ```
+/// # use phosphor_core::core::address_space16::WriteAnnotation;
+/// # use phosphor_core::core::debug_trace::DebugEventKind;
+/// let wsg = WriteAnnotation::device("Namco WSG");
+/// let latch = WriteAnnotation::detail("Misc latch", "main IRQ enable");
+/// let wdog = WriteAnnotation {
+///     kind: DebugEventKind::Watchdog,
+///     detail: Some("watchdog cleared"),
+///     ..WriteAnnotation::MEMORY
+/// };
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WriteAnnotation {
+    /// Event kind to record. Defaults to [`DebugEventKind::MemoryWrite`].
+    pub kind: DebugEventKind,
+    /// Device that owns the address, when the board can attribute it.
+    pub device: Option<&'static str>,
+    /// Short static annotation, e.g. which latch bit the address selects.
+    pub detail: Option<&'static str>,
+    /// Check watchpoints but record no trace event. For addresses whose
+    /// events a dedicated device path already records, so the write is not
+    /// counted twice.
+    pub suppress_trace: bool,
+}
+
+impl WriteAnnotation {
+    /// A plain, unattributed memory write — what an untagged RAM store records.
+    pub const MEMORY: Self = Self {
+        kind: DebugEventKind::MemoryWrite,
+        device: None,
+        detail: None,
+        suppress_trace: false,
+    };
+
+    /// A device write attributed to `device`.
+    pub const fn device(device: &'static str) -> Self {
+        Self {
+            kind: DebugEventKind::DeviceWrite,
+            device: Some(device),
+            ..Self::MEMORY
+        }
+    }
+
+    /// A device write attributed to `device` and annotated with `detail`.
+    pub const fn detail(device: &'static str, detail: &'static str) -> Self {
+        Self {
+            detail: Some(detail),
+            ..Self::device(device)
+        }
+    }
+
+    /// Watchpoints still fire, but nothing is written to the trace.
+    pub const SUPPRESSED: Self = Self {
+        suppress_trace: true,
+        ..Self::MEMORY
+    };
+}
+
+impl Default for WriteAnnotation {
+    fn default() -> Self {
+        Self::MEMORY
+    }
+}
+
 /// A single entry in the 256-page table.
 #[derive(Clone, Copy, Debug)]
 pub struct PageEntry {
@@ -588,8 +664,34 @@ impl AddressSpace16 {
         data: u8,
         device: Option<&'static str>,
     ) -> bool {
-        if self.trace.enabled() {
-            self.record_write_event(cpu_index, master, addr, data, device);
+        self.watch_write_annotated(
+            cpu_index,
+            master,
+            addr,
+            data,
+            WriteAnnotation {
+                device,
+                ..WriteAnnotation::MEMORY
+            },
+        )
+    }
+
+    /// [`watch_write`](Self::watch_write) carrying a full [`WriteAnnotation`],
+    /// for boards whose address decode is finer than the page-granular region
+    /// map — an 8-byte latch or a single watchdog address cannot be a region,
+    /// but it can still be labelled per write.
+    #[inline(always)]
+    pub fn watch_write_annotated(
+        &mut self,
+        cpu_index: usize,
+        master: BusMaster,
+        addr: u16,
+        data: u8,
+        annotation: WriteAnnotation,
+    ) -> bool {
+        let device = annotation.device;
+        if self.trace.enabled() && !annotation.suppress_trace {
+            self.record_write_event(cpu_index, master, addr, data, annotation);
         }
         if self.active_watch_count == 0 {
             return false;
@@ -723,9 +825,10 @@ impl AddressSpace16 {
         });
     }
 
-    /// Record one bus write as a region-tagged [`DebugEventKind::MemoryWrite`].
-    /// Attribution mirrors [`make_hit`](Self::make_hit): the latched PC belongs
-    /// to the owning CPU, so it is attached only when that CPU wrote.
+    /// Record one bus write as a region-tagged event — [`DebugEventKind::MemoryWrite`]
+    /// unless the annotation names another kind. Attribution mirrors
+    /// [`make_hit`](Self::make_hit): the latched PC belongs to the owning CPU,
+    /// so it is attached only when that CPU wrote.
     #[cold]
     fn record_write_event(
         &mut self,
@@ -733,7 +836,7 @@ impl AddressSpace16 {
         master: BusMaster,
         addr: u16,
         data: u8,
-        device: Option<&'static str>,
+        annotation: WriteAnnotation,
     ) {
         let region = self.region_at(addr).map(|r| r.name);
         let pc = match master {
@@ -751,8 +854,9 @@ impl AddressSpace16 {
             value: Some(data as u32),
             width: 1,
             region,
-            device,
-            ..DebugEvent::new(self.debug_cycle, master.into(), DebugEventKind::MemoryWrite)
+            device: annotation.device,
+            detail: annotation.detail,
+            ..DebugEvent::new(self.debug_cycle, master.into(), annotation.kind)
         });
     }
 
@@ -1656,5 +1760,105 @@ mod tests {
         map.set_trace_enabled(false);
         map.watch_write(0, BusMaster::Cpu(0), 0x8000, 0x22);
         assert!(map.trace_events().is_empty());
+    }
+
+    #[test]
+    fn write_annotation_labels_decode_finer_than_a_region() {
+        // Regions are page-granular, so hardware that decodes finer than a page
+        // — an 8-byte latch, a single watchdog address — is labelled per write.
+        let mut map = AddressSpace16::new();
+        map.region(RAM, "I/O", 0x6800, 0x0100, AccessKind::ReadWrite);
+        map.set_trace_enabled(true);
+        map.latch_access_context(7, Some(0x0200));
+
+        map.watch_write_annotated(
+            0,
+            BusMaster::Cpu(0),
+            0x6805,
+            0x0F,
+            WriteAnnotation::device("Namco WSG"),
+        );
+        map.watch_write_annotated(
+            0,
+            BusMaster::Cpu(0),
+            0x6823,
+            0x01,
+            WriteAnnotation::detail("Misc latch", "sub/sound reset"),
+        );
+        map.watch_write_annotated(
+            0,
+            BusMaster::Cpu(0),
+            0x6830,
+            0x00,
+            WriteAnnotation {
+                kind: DebugEventKind::Watchdog,
+                detail: Some("watchdog cleared"),
+                ..WriteAnnotation::MEMORY
+            },
+        );
+
+        let events = map.trace_events();
+        assert_eq!(events.len(), 3);
+
+        // Device name and the region the address falls in are independent: the
+        // region still resolves, so the debugger can show both.
+        assert_eq!(events[0].kind, DebugEventKind::DeviceWrite);
+        assert_eq!(events[0].device, Some("Namco WSG"));
+        assert_eq!(events[0].detail, None);
+        assert_eq!(events[0].region, Some("I/O"));
+
+        assert_eq!(events[1].device, Some("Misc latch"));
+        assert_eq!(events[1].detail, Some("sub/sound reset"));
+
+        // The kind is the board's to choose — a watchdog strobe is not a store.
+        assert_eq!(events[2].kind, DebugEventKind::Watchdog);
+        assert_eq!(events[2].detail, Some("watchdog cleared"));
+        assert_eq!(events[2].device, None);
+    }
+
+    #[test]
+    fn suppressed_annotation_still_fires_watchpoints() {
+        // Addresses whose events a dedicated device path already records must
+        // not be double-counted, but must still trip a watchpoint.
+        let mut map = AddressSpace16::new();
+        map.region(RAM, "I/O", 0x7000, 0x0100, AccessKind::ReadWrite);
+        map.set_trace_enabled(true);
+        map.set_watchpoint(0, 0x7000, WatchpointKind::Write);
+
+        let fired = map.watch_write_annotated(
+            0,
+            BusMaster::Cpu(0),
+            0x7000,
+            0x42,
+            WriteAnnotation::SUPPRESSED,
+        );
+
+        assert!(fired, "watchpoint fires even with tracing suppressed");
+        assert!(
+            map.trace_events().is_empty(),
+            "suppressed write records no event"
+        );
+        assert_eq!(map.take_hit().map(|h| h.addr), Some(0x7000));
+    }
+
+    #[test]
+    fn watch_write_defaults_match_the_plain_memory_annotation() {
+        // watch_write/watch_write_with are the annotated call with MEMORY, so
+        // the pre-existing callers keep recording exactly what they did before.
+        let mut map = AddressSpace16::new();
+        map.region(RAM, "Work RAM", 0x8000, 0x0100, AccessKind::ReadWrite);
+        map.set_trace_enabled(true);
+
+        map.watch_write(0, BusMaster::Cpu(0), 0x8000, 0x01);
+        map.watch_write_with(0, BusMaster::Cpu(0), 0x8001, 0x02, Some("PIA"));
+
+        let events = map.trace_events();
+        assert_eq!(events[0].kind, DebugEventKind::MemoryWrite);
+        assert_eq!(events[0].device, None);
+        assert_eq!(events[0].detail, None);
+        // watch_write_with keeps recording a MemoryWrite, only device-tagged.
+        assert_eq!(events[1].kind, DebugEventKind::MemoryWrite);
+        assert_eq!(events[1].device, Some("PIA"));
+        assert_eq!(WriteAnnotation::default(), WriteAnnotation::MEMORY);
     }
 }
