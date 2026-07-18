@@ -84,8 +84,11 @@ save_state_tests!(asteroids, phosphor_machines::AsteroidsSystem::new());
 save_state_tests!(astdelux, phosphor_machines::AsteroidsDeluxeSystem::new());
 save_state_tests!(llander, phosphor_machines::LunarLanderSystem::new());
 
-// Namco Galaga board machines
+// Namco Galaga board machines. Their RAM lives in the shared board map's
+// regions, which the board serializes generically, so a round trip here is
+// what catches a save/load region-order mismatch.
 save_state_tests!(digdug, phosphor_machines::DigDugSystem::new());
+save_state_tests!(galaga, phosphor_machines::galaga::GalagaSystem::new());
 
 // Data East btime board machines
 save_state_tests!(burgertime, phosphor_machines::BurgertimeSystem::new());

@@ -1,4 +1,5 @@
 use phosphor_core::bus_split;
+use phosphor_core::core::address_space::AccessKind;
 use phosphor_core::core::address_space16::WriteAnnotation;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::debug::{BusDebug, DebugCpu, Debuggable};
@@ -11,7 +12,7 @@ use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
 use phosphor_core::gfx::GfxCache;
 use phosphor_core::gfx::decode::{GfxLayout, decode_gfx};
-use phosphor_macros::Saveable;
+use phosphor_macros::{MemoryRegion, Saveable};
 
 use crate::namco_galaga::{self, GALAGA_SPRITE_LAYOUT, NamcoGalagaBoard};
 use crate::registry::MachineEntry;
@@ -346,15 +347,23 @@ static GALAGAMW_CONFIG: GalagaRomConfig = GalagaRomConfig {
 /// custom I/O, Namco 05XX starfield generator.
 /// Video: 36×28 tilemap (2bpp), 64 sprites (variable size), scrolling starfield.
 /// Screen: 288×224 rotated 90° CCW.
+/// Galaga's RAM windows, declared on the shared board's address map.
+///
+/// Ids start at 4: 0 is the core's unmapped sentinel and 1-3 are the board's
+/// per-CPU ROMs ([`namco_galaga::Region`]). The names given here are what the
+/// debugger shows against every write and watchpoint hit in these windows.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, MemoryRegion)]
+pub(crate) enum Region {
+    VideoRam = 4,
+    Ram1 = 5,
+    Ram2 = 6,
+    Ram3 = 7,
+}
+
 #[derive(Saveable)]
 pub struct GalagaSystem {
     pub board: NamcoGalagaBoard,
-
-    // RAM regions (shared by all 3 CPUs)
-    video_ram: [u8; 0x800], // 0x8000-0x87FF (tile codes + tile colors)
-    ram1: [u8; 0x400],      // 0x8800-0x8BFF (work RAM + sprite attribs)
-    ram2: [u8; 0x400],      // 0x9000-0x93FF (work RAM + sprite positions)
-    ram3: [u8; 0x400],      // 0x9800-0x9BFF (work RAM + sprite flip/size)
 
     // Video latch state (0xA000-0xA007 LS259)
     starfield_scroll_x: u8,  // Q0-Q2: X scroll speed index
@@ -392,13 +401,43 @@ pub struct GalagaSystem {
 
 impl GalagaSystem {
     pub fn new() -> Self {
-        Self {
-            board: NamcoGalagaBoard::new(),
+        let mut board = NamcoGalagaBoard::new();
+        // The three CPUs share these windows; the split into four chips is the
+        // sprite hardware's, which reads attributes, positions and flip/size
+        // bits from three separate RAMs at a fixed 0x380 offset.
+        board
+            .map
+            .region(
+                Region::VideoRam,
+                "Video RAM",
+                0x8000,
+                0x800,
+                AccessKind::ReadWrite,
+            )
+            .region(
+                Region::Ram1,
+                "Work RAM / Sprite Attributes",
+                0x8800,
+                0x400,
+                AccessKind::ReadWrite,
+            )
+            .region(
+                Region::Ram2,
+                "Work RAM / Sprite Positions",
+                0x9000,
+                0x400,
+                AccessKind::ReadWrite,
+            )
+            .region(
+                Region::Ram3,
+                "Work RAM / Sprite Flip+Size",
+                0x9800,
+                0x400,
+                AccessKind::ReadWrite,
+            );
 
-            video_ram: [0; 0x800],
-            ram1: [0; 0x400],
-            ram2: [0; 0x400],
-            ram3: [0; 0x400],
+        Self {
+            board,
 
             starfield_scroll_x: 0,
             star_set_a: 0,
@@ -645,7 +684,7 @@ impl GalagaSystem {
             tile_height: 8,
         };
         // Split borrows: closures read VRAM + LUT, the helper writes native_buffer.
-        let video_ram = &self.video_ram;
+        let video_ram = self.board.map.region_data(Region::VideoRam);
         let char_lut = &self.char_lut;
         let char_cache = &self.char_cache;
         let native = &mut self.native_buffer;
@@ -688,15 +727,22 @@ impl GalagaSystem {
                 continue;
             }
 
-            let sprite = (self.ram1[attr_addr] & 0x7F) as usize;
-            let color = (self.ram1[attr_addr + 1] & 0x3F) as usize;
-            let sx = self.ram2[attr_addr + 1] as i32 - 40
-                + 0x100 * (self.ram3[attr_addr + 1] & 3) as i32;
-            let raw_sy = 256i32 - self.ram2[attr_addr] as i32 + 1;
-            let flipx = (self.ram3[attr_addr] & 0x01) != 0;
-            let flipy = (self.ram3[attr_addr] & 0x02) != 0;
-            let sizex = ((self.ram3[attr_addr] >> 2) & 1) as usize;
-            let sizey = ((self.ram3[attr_addr] >> 3) & 1) as usize;
+            // The sprite hardware reads one attribute pair from each of the
+            // three RAMs at the same offset; copy the six bytes out before
+            // touching the frame buffer so the map stays immutably borrowed.
+            let (ram1, ram2, ram3) = (
+                self.board.map.region_data(Region::Ram1),
+                self.board.map.region_data(Region::Ram2),
+                self.board.map.region_data(Region::Ram3),
+            );
+            let sprite = (ram1[attr_addr] & 0x7F) as usize;
+            let color = (ram1[attr_addr + 1] & 0x3F) as usize;
+            let sx = ram2[attr_addr + 1] as i32 - 40 + 0x100 * (ram3[attr_addr + 1] & 3) as i32;
+            let raw_sy = 256i32 - ram2[attr_addr] as i32 + 1;
+            let flipx = (ram3[attr_addr] & 0x01) != 0;
+            let flipy = (ram3[attr_addr] & 0x02) != 0;
+            let sizex = ((ram3[attr_addr] >> 2) & 1) as usize;
+            let sizey = ((ram3[attr_addr] >> 3) & 1) as usize;
 
             let sy = (raw_sy - 16 * sizey as i32) & 0xFF;
             let sy = sy - 32; // fix wraparound (same as MAME)
@@ -862,10 +908,11 @@ impl Bus for GalagaSystem {
             }
             0x7000..=0x70FF => self.board.read_custom_io(),
             0x7100 => self.board.namco06.ctrl_read(),
-            0x8000..=0x87FF => self.video_ram[(addr - 0x8000) as usize],
-            0x8800..=0x8BFF => self.ram1[(addr - 0x8800) as usize],
-            0x9000..=0x93FF => self.ram2[(addr - 0x9000) as usize],
-            0x9800..=0x9BFF => self.ram3[(addr - 0x9800) as usize],
+            // RAM windows resolve through the map, which turns the address into
+            // the right region and offset (see the Region declarations in new).
+            0x8000..=0x87FF | 0x8800..=0x8BFF | 0x9000..=0x93FF | 0x9800..=0x9BFF => {
+                self.board.map.read_backing(addr)
+            }
             0xA000..=0xA007 => 0, // video latch (write-only)
             _ => 0xFF,
         };
@@ -897,17 +944,8 @@ impl Bus for GalagaSystem {
             0x7100 => {
                 self.board.write_custom_io_ctrl(data);
             }
-            0x8000..=0x87FF => {
-                self.video_ram[(addr - 0x8000) as usize] = data;
-            }
-            0x8800..=0x8BFF => {
-                self.ram1[(addr - 0x8800) as usize] = data;
-            }
-            0x9000..=0x93FF => {
-                self.ram2[(addr - 0x9000) as usize] = data;
-            }
-            0x9800..=0x9BFF => {
-                self.ram3[(addr - 0x9800) as usize] = data;
+            0x8000..=0x87FF | 0x8800..=0x8BFF | 0x9000..=0x93FF | 0x9800..=0x9BFF => {
+                self.board.map.write_backing(addr, data);
             }
             0xA000..=0xA007 => {
                 let bit = (addr & 7) as u8;
@@ -1004,10 +1042,9 @@ impl BusDebug for GalagaSystem {
                 }
                 Some(self.board.read_rom(BusMaster::Cpu(cpu_index), addr))
             }
-            0x8000..=0x87FF => Some(self.video_ram[(addr - 0x8000) as usize]),
-            0x8800..=0x8BFF => Some(self.ram1[(addr - 0x8800) as usize]),
-            0x9000..=0x93FF => Some(self.ram2[(addr - 0x9000) as usize]),
-            0x9800..=0x9BFF => Some(self.ram3[(addr - 0x9800) as usize]),
+            0x8000..=0x87FF | 0x8800..=0x8BFF | 0x9000..=0x93FF | 0x9800..=0x9BFF => {
+                Some(self.board.map.read_backing(addr))
+            }
             _ => None,
         }
     }
@@ -1017,10 +1054,9 @@ impl BusDebug for GalagaSystem {
             return;
         };
         match addr {
-            0x8000..=0x87FF => self.video_ram[(addr - 0x8000) as usize] = data,
-            0x8800..=0x8BFF => self.ram1[(addr - 0x8800) as usize] = data,
-            0x9000..=0x93FF => self.ram2[(addr - 0x9000) as usize] = data,
-            0x9800..=0x9BFF => self.ram3[(addr - 0x9800) as usize] = data,
+            0x8000..=0x87FF | 0x8800..=0x8BFF | 0x9000..=0x93FF | 0x9800..=0x9BFF => {
+                self.board.map.write_backing(addr, data)
+            }
             _ => {}
         }
     }
@@ -1122,10 +1158,9 @@ impl MachineCore for GalagaSystem {
 
     fn reset(&mut self) {
         self.board.reset_board();
-        self.video_ram.fill(0);
-        self.ram1.fill(0);
-        self.ram2.fill(0);
-        self.ram3.fill(0);
+        for region in [Region::VideoRam, Region::Ram1, Region::Ram2, Region::Ram3] {
+            self.board.map.region_data_mut(region).fill(0);
+        }
         self.starfield_scroll_x = 0;
         self.star_set_a = 0;
         self.star_set_b = 0;

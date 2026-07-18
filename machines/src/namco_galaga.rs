@@ -1,3 +1,4 @@
+use phosphor_core::core::address_space::{AccessKind, RegionId};
 use phosphor_core::core::address_space16::{AddressSpace16, WriteAnnotation};
 use phosphor_core::core::debug_trace::{DebugEvent, DebugEventKind};
 use phosphor_core::core::machine::{
@@ -19,9 +20,10 @@ use phosphor_macros::MemoryRegion;
 // Memory map region IDs
 // ---------------------------------------------------------------------------
 
-/// Regions declared on the board's address space. Only the three program ROMs
-/// live here for now; the game wrappers still own their own RAM arrays.
+/// Regions the board itself declares: the three program ROMs, one per CPU.
 ///
+/// Each game wrapper declares its own RAM windows on the same map with ids
+/// from 4 up, naming them for the debugger (see e.g. [`crate::galaga::Region`]).
 /// Region id 0 is reserved by the core for "unmapped", so ids start at 1.
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, MemoryRegion)]
@@ -1061,8 +1063,27 @@ impl NamcoGalagaBoard {
     }
 }
 
+/// Ids of the writable map regions, in declaration order.
+///
+/// Game RAM lives in regions the game wrapper declares on the board's map, so
+/// the board serializes them here rather than each wrapper hand-listing its
+/// own. Writable is the discriminator: the three CPU ROMs are `ReadOnly` and,
+/// like every other board, are reloaded from files rather than saved.
+fn saved_region_ids(map: &AddressSpace16) -> Vec<RegionId> {
+    map.regions()
+        .iter()
+        .filter(|r| r.access == AccessKind::ReadWrite)
+        .map(|r| r.id)
+        .collect()
+}
+
 impl Saveable for NamcoGalagaBoard {
     fn save_state(&self, w: &mut StateWriter) {
+        // Game RAM, in map declaration order (load reads it back the same way).
+        for id in saved_region_ids(&self.map) {
+            w.write_bytes(self.map.region_data(id));
+        }
+
         // CPUs
         self.main_cpu.save_state(w);
         self.sub_cpu.save_state(w);
@@ -1119,6 +1140,11 @@ impl Saveable for NamcoGalagaBoard {
     }
 
     fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
+        // Game RAM, in the same order save_state wrote it.
+        for id in saved_region_ids(&self.map) {
+            r.read_bytes_into(self.map.region_data_mut(id))?;
+        }
+
         // CPUs
         self.main_cpu.load_state(r)?;
         self.sub_cpu.load_state(r)?;
