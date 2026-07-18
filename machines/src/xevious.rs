@@ -22,6 +22,7 @@
 //! `namco_galaga.rs` chip-select-3 dispatch (see `write_custom_io`).
 
 use phosphor_core::bus_split;
+use phosphor_core::core::address_space::AccessKind;
 use phosphor_core::core::address_space16::WriteAnnotation;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::debug::{BusDebug, DebugCpu, Debuggable};
@@ -36,7 +37,7 @@ use phosphor_core::cpu::Cpu;
 use phosphor_core::gfx;
 use phosphor_core::gfx::GfxCache;
 use phosphor_core::gfx::decode::{GfxLayout, decode_gfx};
-use phosphor_macros::Saveable;
+use phosphor_macros::{MemoryRegion, Saveable};
 
 use crate::gfx_registry::GfxRegion;
 use crate::namco_galaga::{self, NamcoGalagaBoard};
@@ -378,22 +379,30 @@ inventory::submit! {
 // XeviousSystem
 // ---------------------------------------------------------------------------
 
+/// Xevious's RAM windows, declared on the shared board's address map.
+///
+/// Ids start at 4: 0 is the core's unmapped sentinel and 1-3 are the board's
+/// per-CPU ROMs ([`namco_galaga::Region`]). The names given here are what the
+/// debugger shows against every write and watchpoint hit in these windows.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, MemoryRegion)]
+pub(crate) enum Region {
+    WorkRam = 4,
+    Sr1 = 5,
+    Sr2 = 6,
+    Sr3 = 7,
+    FgColorRam = 8,
+    BgColorRam = 9,
+    FgVideoRam = 10,
+    BgVideoRam = 11,
+}
+
 /// Xevious Arcade System (Namco, 1983).
 ///
 /// Screen: 288×224, rotated 90° CCW for a vertical display.
 #[derive(Saveable)]
 pub struct XeviousSystem {
     pub board: NamcoGalagaBoard,
-
-    // RAM regions (shared by all three CPUs), 2KB each.
-    work_ram: [u8; 0x800],    // 0x7800-0x7FFF
-    sr1: [u8; 0x800],         // 0x8000-0x87FF (work RAM + sprite X/Y regs)
-    sr2: [u8; 0x800],         // 0x9000-0x97FF (work RAM + sprite flip/size regs)
-    sr3: [u8; 0x800],         // 0xA000-0xA7FF (work RAM + sprite tile/color regs)
-    fg_colorram: [u8; 0x800], // 0xB000-0xB7FF
-    bg_colorram: [u8; 0x800], // 0xB800-0xBFFF
-    fg_videoram: [u8; 0x800], // 0xC000-0xC7FF
-    bg_videoram: [u8; 0x800], // 0xC800-0xCFFF
 
     // Scroll latch (0xD000-0xD07F): 9-bit scroll per layer, plus flip.
     bg_scroll_x: u16,
@@ -434,16 +443,72 @@ pub struct XeviousSystem {
 
 impl XeviousSystem {
     pub fn new() -> Self {
+        let mut board = NamcoGalagaBoard::new();
+        // All three CPUs share these eight 2KB windows. The SR trio is general
+        // work RAM whose top 0x80 bytes are the sprite registers: the sprite
+        // hardware reads position from SR1, flip/size/bank from SR2 and
+        // tile/colour from SR3 at the same offset in each.
+        board
+            .map
+            .region(
+                Region::WorkRam,
+                "Work RAM",
+                0x7800,
+                0x800,
+                AccessKind::ReadWrite,
+            )
+            .region(
+                Region::Sr1,
+                "Work RAM / Sprite Positions",
+                0x8000,
+                0x800,
+                AccessKind::ReadWrite,
+            )
+            .region(
+                Region::Sr2,
+                "Work RAM / Sprite Flip+Size",
+                0x9000,
+                0x800,
+                AccessKind::ReadWrite,
+            )
+            .region(
+                Region::Sr3,
+                "Work RAM / Sprite Tile+Color",
+                0xA000,
+                0x800,
+                AccessKind::ReadWrite,
+            )
+            .region(
+                Region::FgColorRam,
+                "FG Colour RAM",
+                0xB000,
+                0x800,
+                AccessKind::ReadWrite,
+            )
+            .region(
+                Region::BgColorRam,
+                "BG Colour RAM",
+                0xB800,
+                0x800,
+                AccessKind::ReadWrite,
+            )
+            .region(
+                Region::FgVideoRam,
+                "FG Video RAM",
+                0xC000,
+                0x800,
+                AccessKind::ReadWrite,
+            )
+            .region(
+                Region::BgVideoRam,
+                "BG Video RAM",
+                0xC800,
+                0x800,
+                AccessKind::ReadWrite,
+            );
+
         Self {
-            board: NamcoGalagaBoard::new(),
-            work_ram: [0; 0x800],
-            sr1: [0; 0x800],
-            sr2: [0; 0x800],
-            sr3: [0; 0x800],
-            fg_colorram: [0; 0x800],
-            bg_colorram: [0; 0x800],
-            fg_videoram: [0; 0x800],
-            bg_videoram: [0; 0x800],
+            board,
             bg_scroll_x: 0,
             fg_scroll_x: 0,
             bg_scroll_y: 0,
@@ -554,8 +619,20 @@ impl XeviousSystem {
     /// Count of non-zero bytes in the foreground and background video RAM —
     /// a proxy for "the attract screen has been drawn" during boot checks.
     pub fn video_ram_nonzero(&self) -> (usize, usize) {
-        let fg = self.fg_videoram.iter().filter(|&&b| b != 0).count();
-        let bg = self.bg_videoram.iter().filter(|&&b| b != 0).count();
+        let fg = self
+            .board
+            .map
+            .region_data(Region::FgVideoRam)
+            .iter()
+            .filter(|&&b| b != 0)
+            .count();
+        let bg = self
+            .board
+            .map
+            .region_data(Region::BgVideoRam)
+            .iter()
+            .filter(|&&b| b != 0)
+            .count();
         (fg, bg)
     }
 
@@ -602,8 +679,8 @@ impl XeviousSystem {
         // background LUT; per-tile H/V flip from colour-RAM bits 6/7.
         let sx0 = self.bg_scroll_x as i32 + BG_SCROLL_DX;
         let sy0 = self.bg_scroll_y as i32 + BG_SCROLL_DY;
-        let bg_videoram = &self.bg_videoram;
-        let bg_colorram = &self.bg_colorram;
+        let bg_videoram = self.board.map.region_data(Region::BgVideoRam);
+        let bg_colorram = self.board.map.region_data(Region::BgColorRam);
         let bg_lut = &self.bg_lut;
         let bg_tile_cache = &self.bg_tile_cache;
         let native = &mut self.native_buffer;
@@ -653,8 +730,8 @@ impl XeviousSystem {
         // palette entry. Same scroll-aware helper as the background.
         let sx0 = self.fg_scroll_x as i32 + FG_SCROLL_DX;
         let sy0 = self.fg_scroll_y as i32 + FG_SCROLL_DY;
-        let fg_videoram = &self.fg_videoram;
-        let fg_colorram = &self.fg_colorram;
+        let fg_videoram = self.board.map.region_data(Region::FgVideoRam);
+        let fg_colorram = self.board.map.region_data(Region::FgColorRam);
         let char_cache = &self.char_cache;
         let native = &mut self.native_buffer;
         let mut prio = [0u8; 288];
@@ -700,15 +777,23 @@ impl XeviousSystem {
     /// Y counts up from the bottom of the visible area.
     fn render_sprites(&mut self) {
         for offs in (0..0x80usize).step_by(2) {
-            let code_byte = self.sr3[0x780 + offs];
-            let flags = self.sr3[0x780 + offs + 1];
+            // The sprite hardware reads one register pair from each of the three
+            // SR banks at the same offset; copy the six bytes out before calling
+            // the (mutably borrowing) blitter below.
+            let (sr1, sr2, sr3) = (
+                self.board.map.region_data(Region::Sr1),
+                self.board.map.region_data(Region::Sr2),
+                self.board.map.region_data(Region::Sr3),
+            );
+            let code_byte = sr3[0x780 + offs];
+            let flags = sr3[0x780 + offs + 1];
             if flags & 0x40 != 0 {
                 continue; // slot disabled
             }
-            let attr = self.sr2[0x780 + offs];
-            let attr_hi = self.sr2[0x780 + offs + 1];
-            let ypos = self.sr1[0x780 + offs];
-            let xpos = self.sr1[0x780 + offs + 1];
+            let attr = sr2[0x780 + offs];
+            let attr_hi = sr2[0x780 + offs + 1];
+            let ypos = sr1[0x780 + offs];
+            let xpos = sr1[0x780 + offs + 1];
 
             let base = if attr & 0x80 != 0 {
                 (code_byte as u32 & 0x3f) + 0x100
@@ -931,14 +1016,14 @@ impl Bus for XeviousSystem {
             0x6800..=0x6807 => self.dsw_read((addr & 0x07) as u8),
             0x7000..=0x70FF => self.board.read_custom_io(),
             0x7100 => self.board.namco06.ctrl_read(),
-            0x7800..=0x7FFF => self.work_ram[(addr - 0x7800) as usize],
-            0x8000..=0x87FF => self.sr1[(addr - 0x8000) as usize],
-            0x9000..=0x97FF => self.sr2[(addr - 0x9000) as usize],
-            0xA000..=0xA7FF => self.sr3[(addr - 0xA000) as usize],
-            0xB000..=0xB7FF => self.fg_colorram[(addr - 0xB000) as usize],
-            0xB800..=0xBFFF => self.bg_colorram[(addr - 0xB800) as usize],
-            0xC000..=0xC7FF => self.fg_videoram[(addr - 0xC000) as usize],
-            0xC800..=0xCFFF => self.bg_videoram[(addr - 0xC800) as usize],
+            // RAM windows resolve through the map, which turns the address into
+            // the right region and offset (see the Region declarations in new).
+            0x7800..=0x7FFF
+            | 0x8000..=0x87FF
+            | 0x9000..=0x97FF
+            | 0xA000..=0xA7FF
+            | 0xB000..=0xBFFF
+            | 0xC000..=0xCFFF => self.board.map.read_backing(addr),
             0xF000..=0xFFFF => self.read_bg_map(addr),
             _ => 0xFF,
         };
@@ -959,14 +1044,12 @@ impl Bus for XeviousSystem {
             0x6830 => self.board.watchdog_counter = 0,
             0x7000..=0x70FF => self.board.write_custom_io(data),
             0x7100 => self.board.write_custom_io_ctrl(data),
-            0x7800..=0x7FFF => self.work_ram[(addr - 0x7800) as usize] = data,
-            0x8000..=0x87FF => self.sr1[(addr - 0x8000) as usize] = data,
-            0x9000..=0x97FF => self.sr2[(addr - 0x9000) as usize] = data,
-            0xA000..=0xA7FF => self.sr3[(addr - 0xA000) as usize] = data,
-            0xB000..=0xB7FF => self.fg_colorram[(addr - 0xB000) as usize] = data,
-            0xB800..=0xBFFF => self.bg_colorram[(addr - 0xB800) as usize] = data,
-            0xC000..=0xC7FF => self.fg_videoram[(addr - 0xC000) as usize] = data,
-            0xC800..=0xCFFF => self.bg_videoram[(addr - 0xC800) as usize] = data,
+            0x7800..=0x7FFF
+            | 0x8000..=0x87FF
+            | 0x9000..=0x97FF
+            | 0xA000..=0xA7FF
+            | 0xB000..=0xBFFF
+            | 0xC000..=0xCFFF => self.board.map.write_backing(addr, data),
             0xD000..=0xD07F => self.write_video_latch((addr & 0x7F) as u8, data),
             0xF000..=0xFFFF => self.write_bg_select(addr, data),
             _ => {}
@@ -1052,14 +1135,12 @@ impl BusDebug for XeviousSystem {
                 }
                 Some(self.board.read_rom(BusMaster::Cpu(cpu_index), addr))
             }
-            0x7800..=0x7FFF => Some(self.work_ram[(addr - 0x7800) as usize]),
-            0x8000..=0x87FF => Some(self.sr1[(addr - 0x8000) as usize]),
-            0x9000..=0x97FF => Some(self.sr2[(addr - 0x9000) as usize]),
-            0xA000..=0xA7FF => Some(self.sr3[(addr - 0xA000) as usize]),
-            0xB000..=0xB7FF => Some(self.fg_colorram[(addr - 0xB000) as usize]),
-            0xB800..=0xBFFF => Some(self.bg_colorram[(addr - 0xB800) as usize]),
-            0xC000..=0xC7FF => Some(self.fg_videoram[(addr - 0xC000) as usize]),
-            0xC800..=0xCFFF => Some(self.bg_videoram[(addr - 0xC800) as usize]),
+            0x7800..=0x7FFF
+            | 0x8000..=0x87FF
+            | 0x9000..=0x97FF
+            | 0xA000..=0xA7FF
+            | 0xB000..=0xBFFF
+            | 0xC000..=0xCFFF => Some(self.board.map.read_backing(addr)),
             _ => None,
         }
     }
@@ -1069,14 +1150,12 @@ impl BusDebug for XeviousSystem {
             return;
         };
         match addr {
-            0x7800..=0x7FFF => self.work_ram[(addr - 0x7800) as usize] = data,
-            0x8000..=0x87FF => self.sr1[(addr - 0x8000) as usize] = data,
-            0x9000..=0x97FF => self.sr2[(addr - 0x9000) as usize] = data,
-            0xA000..=0xA7FF => self.sr3[(addr - 0xA000) as usize] = data,
-            0xB000..=0xB7FF => self.fg_colorram[(addr - 0xB000) as usize] = data,
-            0xB800..=0xBFFF => self.bg_colorram[(addr - 0xB800) as usize] = data,
-            0xC000..=0xC7FF => self.fg_videoram[(addr - 0xC000) as usize] = data,
-            0xC800..=0xCFFF => self.bg_videoram[(addr - 0xC800) as usize] = data,
+            0x7800..=0x7FFF
+            | 0x8000..=0x87FF
+            | 0x9000..=0x97FF
+            | 0xA000..=0xA7FF
+            | 0xB000..=0xBFFF
+            | 0xC000..=0xCFFF => self.board.map.write_backing(addr, data),
             _ => {}
         }
     }
@@ -1183,14 +1262,18 @@ impl MachineCore for XeviousSystem {
 
     fn reset(&mut self) {
         self.board.reset_board();
-        self.work_ram.fill(0);
-        self.sr1.fill(0);
-        self.sr2.fill(0);
-        self.sr3.fill(0);
-        self.fg_colorram.fill(0);
-        self.bg_colorram.fill(0);
-        self.fg_videoram.fill(0);
-        self.bg_videoram.fill(0);
+        for region in [
+            Region::WorkRam,
+            Region::Sr1,
+            Region::Sr2,
+            Region::Sr3,
+            Region::FgColorRam,
+            Region::BgColorRam,
+            Region::FgVideoRam,
+            Region::BgVideoRam,
+        ] {
+            self.board.map.region_data_mut(region).fill(0);
+        }
         self.bg_scroll_x = 0;
         self.fg_scroll_x = 0;
         self.bg_scroll_y = 0;
@@ -1627,7 +1710,7 @@ mod tests {
         sys.bg_lut[1] = 0x0A;
         sys.bg_lut[2] = 0x0B;
         // Tilemap cell (col 1, row 0) selects tile 1.
-        sys.bg_videoram[1] = 1;
+        sys.board.map.region_data_mut(Region::BgVideoRam)[1] = 1;
         // Cancel the fixed scroll offset so native (x,y) == tilemap (x,y).
         sys.bg_scroll_x = (-BG_SCROLL_DX) as u16;
         sys.bg_scroll_y = (-BG_SCROLL_DY) as u16;
@@ -1669,12 +1752,15 @@ mod tests {
         sys.sprite_lut[2 * 8 + 3] = 0x0C;
         sys.sprite_lut[2 * 8] = 0x80;
         // Slot 0: code 5, colour 2, enabled; xpos 140 -> sx 100, ypos 123 -> sy 100.
-        sys.sr3[0x780] = 5; // code
-        sys.sr3[0x781] = 2; // flags: bit6 clear (enabled), colour = 2
-        sys.sr1[0x780] = 123; // ypos
-        sys.sr1[0x781] = 140; // xpos
-        sys.sr2[0x780] = 0; // no flip / size / bank
-        sys.sr2[0x781] = 0; // high X bit clear
+        let sr3 = sys.board.map.region_data_mut(Region::Sr3);
+        sr3[0x780] = 5; // code
+        sr3[0x781] = 2; // flags: bit6 clear (enabled), colour = 2
+        let sr1 = sys.board.map.region_data_mut(Region::Sr1);
+        sr1[0x780] = 123; // ypos
+        sr1[0x781] = 140; // xpos
+        let sr2 = sys.board.map.region_data_mut(Region::Sr2);
+        sr2[0x780] = 0; // no flip / size / bank
+        sr2[0x781] = 0; // high X bit clear
         sys.render_sprites();
         assert_eq!(sys.native_buffer[100 * 288 + 100], 0x0C);
         // Neighbour pixel is the transparent pen: background (0) preserved.
@@ -1682,7 +1768,7 @@ mod tests {
 
         // A disabled slot (bit 6 set) draws nothing.
         sys.native_buffer.fill(0);
-        sys.sr3[0x781] = 0x40;
+        sys.board.map.region_data_mut(Region::Sr3)[0x781] = 0x40;
         sys.render_sprites();
         assert_eq!(sys.native_buffer[100 * 288 + 100], 0);
     }
