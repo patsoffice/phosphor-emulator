@@ -1602,7 +1602,13 @@ mod address_space32_tests {
     #[test]
     fn trace_records_region_tagged_writes_only_when_enabled() {
         let mut space = AddressSpace32::new();
-        space.region(RAM, "Palette RAM", 0x0095_0000, 0x0200, AccessKind::ReadWrite);
+        space.region(
+            RAM,
+            "Palette RAM",
+            0x0095_0000,
+            0x0200,
+            AccessKind::ReadWrite,
+        );
 
         // Disabled by default.
         assert!(!space.trace_enabled());

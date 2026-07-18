@@ -1942,7 +1942,8 @@ mod tests {
             // Guard the guard: if the picture never changes over the span, the
             // comparison below would pass even with the bug present.
             assert_ne!(
-                before, after,
+                before,
+                after,
                 "{machine}: picture is static over frames {warmup}..{}; pick an \
                  animated span so this test can detect a frozen image",
                 warmup + ADVANCE
