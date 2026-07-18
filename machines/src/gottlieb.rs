@@ -437,6 +437,10 @@ pub struct GottliebBoard {
     // Profiling (not saved)
     pub(crate) profiling: bool,
     pub(crate) profile_spans: Vec<ProfileSpan>,
+    /// Time spent in the most recent frame-boundary render. The render now runs
+    /// inside `tick`, so the wrapper subtracts this to keep its "cpu" vs "gfx"
+    /// spans meaningful. Only populated while `profiling` is on.
+    pub(crate) last_render: std::time::Duration,
 }
 
 impl GottliebBoard {
@@ -464,6 +468,7 @@ impl GottliebBoard {
             watchdog_counter: 0,
             profiling: false,
             profile_spans: Vec::new(),
+            last_render: std::time::Duration::ZERO,
         }
     }
 
@@ -680,6 +685,21 @@ impl GottliebBoard {
 
         self.clock += 1;
         self.watchdog_counter = self.watchdog_counter.wrapping_add(1);
+
+        // Refresh the cached framebuffer whenever this cycle completed a frame.
+        // Rendering here rather than after `run_frame`'s loop means the
+        // debugger's `debug_tick()` path (which never calls `run_frame`) also
+        // refreshes the picture. Firing on the frame's *last* cycle samples the
+        // same video state the old end-of-loop render saw, so output is
+        // byte-identical — note this board writes palette during vblank, so
+        // rendering at the vblank boundary instead would change the picture.
+        if self.clock.is_multiple_of(TIMING.cycles_per_frame()) {
+            let started = self.profiling.then(std::time::Instant::now);
+            self.render_frame_internal();
+            if let Some(started) = started {
+                self.last_render = started.elapsed();
+            }
+        }
     }
 
     // -----------------------------------------------------------------------

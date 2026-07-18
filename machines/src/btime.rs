@@ -207,7 +207,7 @@ pub struct BtimeBoard {
 
     // Display framebuffer (native 240×240 RGB, square pixels), refreshed once per
     // frame at the end of run_frame. Derived output, not part of the save state.
-    framebuffer: Vec<u8>,
+    pub(crate) framebuffer: Vec<u8>,
 
     // DECO CPU-7 decryption state: any main-CPU write arms decryption of the
     // next opcode fetch (consumed in `bus_read`).
@@ -428,6 +428,17 @@ impl BtimeBoard {
         self.ay2.tick();
 
         self.clock += 1;
+
+        // Refresh the cached framebuffer whenever this cycle completed a frame.
+        // Rendering here rather than after `run_frame`'s loop means the
+        // debugger's `debug_tick()` path (which never calls `run_frame`) also
+        // refreshes the picture. Firing on the frame's *last* cycle samples the
+        // same video state the old end-of-loop render saw, so output is
+        // byte-identical — note this board writes video state during vblank, so
+        // rendering at the vblank boundary instead would change the picture.
+        if self.clock.is_multiple_of(TIMING.cycles_per_frame()) {
+            self.render();
+        }
     }
 
     pub fn reset(&mut self) {

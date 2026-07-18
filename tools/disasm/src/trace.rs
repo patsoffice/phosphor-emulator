@@ -1890,4 +1890,81 @@ mod tests {
             assert!(f >= 2, "frame {f} leaked before the seek point:\n{line}");
         }
     }
+
+    // ---- Render-once machines: the debugger's frozen-picture guard ---------
+
+    /// Render the machine's current picture as RGB24 (what the frontend shows).
+    fn snapshot(machine: &mut dyn FrontendMachine) -> Vec<u8> {
+        let (w, h) = machine.display_size();
+        let mut buf = vec![0u8; w as usize * h as usize * 3];
+        machine.render_frame(&mut buf);
+        buf
+    }
+
+    /// Machines that render once per frame used to repaint only inside
+    /// `run_frame`. The debugger advances a machine with `debug_tick()` and
+    /// never calls `run_frame`, so it showed a frozen picture. Driving one
+    /// frame purely with `debug_tick` must reach the same image `run_frame`
+    /// produces.
+    #[test]
+    fn debug_tick_advances_picture_like_run_frame() {
+        let Some(roms) = roms_dir() else {
+            eprintln!("skipping: no ROM dir (set PHOSPHOR_ROMS or ~/ws/mame-runtime/roms)");
+            return;
+        };
+        let path = roms.to_str().unwrap();
+        // Compare across a span rather than a single frame: attract screens hold
+        // a still image for long stretches, and a static comparison would pass
+        // even with the bug present. The per-machine warmup is the earliest
+        // frame each game's attract sequence is actually animating (measured
+        // with `frameshot` + `imgdiff`), keeping the run short.
+        const ADVANCE: usize = 30;
+        let cases = [
+            ("galaga", 60usize),
+            ("xevious", 60),
+            ("digdug", 60),
+            ("burgertime", 800),
+            ("qbert", 200),
+            ("shollow", 200),
+        ];
+
+        for (machine, warmup) in cases {
+            let mut reference = Harness::build(machine, path, None, None, &[]).expect("boot");
+            for _ in 0..warmup {
+                reference.run_frame();
+            }
+            let before = snapshot(reference.machine_mut());
+            for _ in 0..ADVANCE {
+                reference.run_frame();
+            }
+            let after = snapshot(reference.machine_mut());
+
+            // Guard the guard: if the picture never changes over the span, the
+            // comparison below would pass even with the bug present.
+            assert_ne!(
+                before, after,
+                "{machine}: picture is static over frames {warmup}..{}; pick an \
+                 animated span so this test can detect a frozen image",
+                warmup + ADVANCE
+            );
+
+            let mut subject = Harness::build(machine, path, None, None, &[]).expect("boot");
+            for _ in 0..warmup {
+                subject.run_frame();
+            }
+            // Advance the same span using only the debugger's path.
+            let cycles = subject.machine_mut().cycles_per_frame();
+            for _ in 0..ADVANCE {
+                for _ in 0..cycles {
+                    subject.machine_mut().debug_tick();
+                }
+            }
+
+            assert_eq!(
+                snapshot(subject.machine_mut()),
+                after,
+                "{machine}: debug_tick must refresh the displayed picture like run_frame"
+            );
+        }
+    }
 }

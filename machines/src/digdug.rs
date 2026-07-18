@@ -674,6 +674,30 @@ impl DigDugSystem {
     // Full-frame video rendering (no raster effects in Dig Dug)
     // -----------------------------------------------------------------------
 
+    /// Advance one CPU cycle, refreshing the cached framebuffer whenever that
+    /// cycle completes a frame.
+    ///
+    /// The render lives here rather than after `run_frame`'s loop so that the
+    /// debugger's `debug_tick()` path refreshes the picture too (it never calls
+    /// `run_frame`, which is why render-once machines showed a frozen image).
+    ///
+    /// The hook fires on the *last* cycle of the frame — the same video state
+    /// the old end-of-loop render sampled — so output is byte-identical. It
+    /// deliberately does **not** fire at the start of vblank: this board writes
+    /// video state during vblank, so sampling earlier would change the picture.
+    fn tick_frame_boundary(&mut self) {
+        bus_split!(self, bus => {
+            self.board.tick(bus);
+        });
+        if self
+            .board
+            .clock
+            .is_multiple_of(namco_galaga::TIMING.cycles_per_frame())
+        {
+            self.render_video();
+        }
+    }
+
     fn render_video(&mut self) {
         // Layer 1: Background tilemap
         self.render_background();
@@ -1152,9 +1176,7 @@ impl MachineDebug for DigDugSystem {
     }
 
     fn debug_tick(&mut self) -> u32 {
-        bus_split!(self, bus => {
-            self.board.tick(bus);
-        });
+        self.tick_frame_boundary();
         self.board.debug_tick_boundaries()
     }
 }
@@ -1184,12 +1206,11 @@ impl MachineCore for DigDugSystem {
     }
 
     fn run_frame(&mut self) {
-        bus_split!(self, bus => {
-            for _ in 0..namco_galaga::TIMING.cycles_per_frame() {
-                self.board.tick(bus);
-            }
-        });
-        self.render_video();
+        // The render happens in `tick_frame_boundary` on the frame's last cycle
+        // (single render site, shared with `debug_tick`).
+        for _ in 0..namco_galaga::TIMING.cycles_per_frame() {
+            self.tick_frame_boundary();
+        }
     }
 
     fn reset(&mut self) {

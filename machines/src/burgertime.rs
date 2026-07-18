@@ -405,8 +405,8 @@ impl MachineCore for BurgertimeSystem {
                 self.board.tick(bus);
             }
         });
-        // Render the completed frame once, after the cycle loop.
-        self.board.render();
+        // The board renders on the frame's last cycle inside `tick`, so the
+        // single render site is shared with the debugger's `debug_tick` path.
     }
 
     fn reset(&mut self) {

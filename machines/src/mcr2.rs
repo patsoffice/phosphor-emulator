@@ -328,6 +328,17 @@ impl Mcr2Board {
 
         self.clock += 1;
         self.watchdog_counter = self.watchdog_counter.wrapping_add(1);
+
+        // Refresh the cached framebuffer whenever this cycle completed a frame.
+        // Rendering here rather than after `run_frame`'s loop means the
+        // debugger's `debug_tick()` path (which never calls `run_frame`) also
+        // refreshes the picture. Firing on the frame's *last* cycle samples the
+        // same video state the old end-of-loop render saw, so output is
+        // byte-identical — note this board's palette lives in video RAM and is
+        // written during vblank, so an earlier sample would change the picture.
+        if self.clock.is_multiple_of(TIMING.cycles_per_frame()) {
+            self.render_frame_internal();
+        }
     }
 
     // -----------------------------------------------------------------------

@@ -450,26 +450,27 @@ impl MachineCore for QbertSystem {
     fn run_frame(&mut self) {
         let t0 = self.board.profiling.then(Instant::now);
 
+        // The board renders on the frame's last cycle inside `tick`, so the
+        // single render site is shared with the debugger's `debug_tick` path.
         bus_split!(self, bus : u32 => {
             for _ in 0..gottlieb::TIMING.cycles_per_frame() {
                 self.board.tick(bus);
             }
         });
 
-        let t1 = self.board.profiling.then(Instant::now);
-
-        self.board.render_frame_internal();
-
-        if let (Some(t0), Some(t1)) = (t0, t1) {
-            let t2 = Instant::now();
+        if let Some(t0) = t0 {
+            // The render now runs inside the loop, so split it back out of the
+            // total using the duration the board recorded.
+            let total = t0.elapsed();
+            let gfx = self.board.last_render;
             self.board.profile_spans.clear();
             self.board.profile_spans.push(ProfileSpan {
                 name: "cpu",
-                duration: t1 - t0,
+                duration: total.saturating_sub(gfx),
             });
             self.board.profile_spans.push(ProfileSpan {
                 name: "gfx",
-                duration: t2 - t1,
+                duration: gfx,
             });
         }
     }

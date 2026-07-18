@@ -460,12 +460,13 @@ impl MachineCore for SatansHollowSystem {
     }
 
     fn run_frame(&mut self) {
+        // The board renders on the frame's last cycle inside `tick`, so the
+        // single render site is shared with the debugger's `debug_tick` path.
         bus_split!(self, bus => {
             for _ in 0..mcr2::TIMING.cycles_per_frame() {
                 self.board.tick(bus);
             }
         });
-        self.board.render_frame_internal();
     }
 
     fn reset(&mut self) {
