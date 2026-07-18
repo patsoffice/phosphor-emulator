@@ -1,9 +1,9 @@
-use phosphor_core::core::debug_trace::{DebugEvent, DebugEventKind, DebugTraceBuffer};
+use phosphor_core::core::address_space16::{AddressSpace16, WriteAnnotation};
+use phosphor_core::core::debug_trace::{DebugEvent, DebugEventKind};
 use phosphor_core::core::machine::{
     ActionRole, Direction, InputControl, InputId, InputKind, TimingConfig,
 };
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
-use phosphor_core::core::watchpoint::Watchpoints;
 use phosphor_core::core::{Bus, BusMaster, ClockDivider};
 use phosphor_core::cpu::z80::Z80;
 use phosphor_core::device::namco_wsg::NamcoWsg;
@@ -13,7 +13,23 @@ use phosphor_core::device::namco51::Namco51;
 use phosphor_core::device::namco51_lle::Namco51Lle;
 use phosphor_core::device::namco53::Namco53;
 use phosphor_core::gfx::decode::GfxLayout;
-use phosphor_macros::DebugTrace;
+use phosphor_macros::MemoryRegion;
+
+// ---------------------------------------------------------------------------
+// Memory map region IDs
+// ---------------------------------------------------------------------------
+
+/// Regions declared on the board's address space. Only the three program ROMs
+/// live here for now; the game wrappers still own their own RAM arrays.
+///
+/// Region id 0 is reserved by the core for "unmapped", so ids start at 1.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, MemoryRegion)]
+pub enum Region {
+    MainRom = 1,
+    SubRom = 2,
+    SoundRom = 3,
+}
 
 // ---------------------------------------------------------------------------
 // Input button IDs (shared across Galaga family)
@@ -293,17 +309,15 @@ impl Debuggable for Namco51Wrapper {
 /// Shared by Galaga, Dig Dug, Bosconian, and other games on the same PCB.
 /// Game wrappers compose this struct, own their RAM arrays, and implement
 /// Bus to route memory accesses.
-#[derive(DebugTrace)]
 pub struct NamcoGalagaBoard {
     // CPUs
     pub(crate) main_cpu: Z80,
     pub(crate) sub_cpu: Z80,
     pub(crate) sound_cpu: Z80,
 
-    // Per-CPU ROM (each CPU sees different ROM at 0x0000-0x3FFF)
-    pub(crate) main_rom: Vec<u8>,
-    pub(crate) sub_rom: Vec<u8>,
-    pub(crate) sound_rom: Vec<u8>,
+    /// Address space owning the three program ROMs and all debug observability
+    /// (watchpoints, the write-event trace, and the access-context latch).
+    pub(crate) map: AddressSpace16,
 
     // Devices
     pub(crate) wsg: NamcoWsg,
@@ -349,13 +363,10 @@ pub struct NamcoGalagaBoard {
     pending_sub_cpu_reset: bool,
 
     // Debug observability (observer state — never saved in save states).
-    // This board has no AddressSpace16, so it carries a raw watchpoint set
-    // and latches per-CPU instruction PCs itself.
-    pub(crate) watchpoints: Watchpoints,
-    #[debug_events]
-    pub(crate) debug_trace: DebugTraceBuffer,
     /// Instruction PC per CPU (main/sub/sound), latched at instruction
-    /// boundaries each tick for hit/event attribution.
+    /// boundaries each tick for hit/event attribution. The map has a single
+    /// PC latch, but three CPUs share this bus, so the board remembers all
+    /// three and feeds the map the relevant one before each CPU runs.
     pub(crate) debug_pc: [Option<u32>; 3],
 }
 
@@ -366,9 +377,7 @@ impl NamcoGalagaBoard {
             sub_cpu: Z80::new(),
             sound_cpu: Z80::new(),
 
-            main_rom: Vec::new(),
-            sub_rom: Vec::new(),
-            sound_rom: Vec::new(),
+            map: Self::build_map(),
 
             wsg: {
                 let mut wsg = NamcoWsg::new(TIMING.cpu_clock_hz);
@@ -411,10 +420,30 @@ impl NamcoGalagaBoard {
 
             pending_sub_cpu_reset: false,
 
-            watchpoints: Watchpoints::new(),
-            debug_trace: DebugTraceBuffer::new(),
             debug_pc: [None; 3],
         }
+    }
+
+    /// Build the board's address space.
+    ///
+    /// The three ROMs are declared as *backing* regions with no page mapping:
+    /// 0x0000-0x3FFF decodes to a different ROM depending on which CPU is the
+    /// bus master, and a single page table cannot map three regions over the
+    /// same addresses. The regions still give the debugger named, enumerable
+    /// ROM storage, and `read_rom` selects between them by bus master.
+    fn build_map() -> AddressSpace16 {
+        let mut map = AddressSpace16::new();
+        map.backing_region(Region::MainRom, "Main CPU ROM", 0x4000)
+            .backing_region(Region::SubRom, "Sub CPU ROM", 0x4000)
+            .backing_region(Region::SoundRom, "Sound CPU ROM", 0x4000);
+        // Backing allocates zeroed, but an unpopulated ROM socket floats high:
+        // addresses past the loaded image must read 0xFF. The sub and sound
+        // ROMs are typically only 0x1000 bytes and do NOT mirror, so most of
+        // their 16 KB window is this fill.
+        map.region_data_mut(Region::MainRom).fill(0xFF);
+        map.region_data_mut(Region::SubRom).fill(0xFF);
+        map.region_data_mut(Region::SoundRom).fill(0xFF);
+        map
     }
 
     // -----------------------------------------------------------------------
@@ -500,10 +529,10 @@ impl NamcoGalagaBoard {
         // WSG tick (runs at CPU clock rate)
         self.wsg.tick();
 
-        // Latch debug attribution context (per-CPU instruction PCs) before
-        // CPU execution — bus dispatch cannot read CPU state mid-tick. This
-        // board has no AddressSpace16, so the latch lives on the board.
-        if !self.watchpoints.is_empty() || self.debug_trace.enabled() {
+        // Sample debug attribution context (per-CPU instruction PCs) before
+        // CPU execution — bus dispatch cannot read CPU state mid-tick.
+        let debug = self.map.debug_active();
+        if debug {
             if self.main_cpu.at_instruction_boundary() {
                 self.debug_pc[0] = Some(self.main_cpu.pc as u32);
             }
@@ -517,9 +546,22 @@ impl NamcoGalagaBoard {
 
         // Execute all 3 CPUs BEFORE MCU so Z80 writes reach o_latch
         // before the MCU reads K (K is a hardware wire, not latched).
+        //
+        // The map has one PC latch but three CPUs drive this bus, so hand it
+        // the about-to-run CPU's PC immediately before that CPU steps; every
+        // access it then makes is attributed to its own instruction.
+        if debug {
+            self.map.latch_access_context(self.clock, self.debug_pc[0]);
+        }
         self.main_cpu.execute_cycle(bus, BusMaster::Cpu(0));
         if !self.sub_reset {
+            if debug {
+                self.map.latch_access_context(self.clock, self.debug_pc[1]);
+            }
             self.sub_cpu.execute_cycle(bus, BusMaster::Cpu(1));
+            if debug {
+                self.map.latch_access_context(self.clock, self.debug_pc[2]);
+            }
             self.sound_cpu.execute_cycle(bus, BusMaster::Cpu(2));
         }
 
@@ -555,56 +597,43 @@ impl NamcoGalagaBoard {
     // Debug observability helpers
     // -----------------------------------------------------------------------
 
-    /// Check a read against the watchpoint set. The 3 CPUs share one bus,
-    /// so the accessing CPU's index scopes the watch.
+    /// Check a read against the map's watchpoints. The 3 CPUs share one bus,
+    /// so the accessing CPU's index is what scopes the watch.
     #[inline]
     pub(crate) fn watch_read(&mut self, master: BusMaster, addr: u16, data: u8) {
-        if self.watchpoints.is_empty() {
-            return;
-        }
         if let BusMaster::Cpu(i) = master {
-            let pc = self.debug_pc.get(i).copied().flatten();
-            self.watchpoints.check_read(
-                i,
-                master.into(),
-                self.clock,
-                pc,
-                addr as u32,
-                data as u32,
-                1,
-            );
+            self.map.watch_read(i, master, addr, data);
         }
     }
 
-    /// Check a write against the watchpoint set. Call before applying the
-    /// side effect (hits record `WatchpointPhase::Before`).
+    /// Check a write against the map's watchpoints and record its trace event.
+    /// Call before applying the side effect (hits record
+    /// `WatchpointPhase::Before`).
+    ///
+    /// Address decode below page granularity (the misc latch, the watchdog
+    /// address) is game-specific, so the wrapper supplies the annotation.
     #[inline]
-    pub(crate) fn watch_write(&mut self, master: BusMaster, addr: u16, data: u8) {
-        if self.watchpoints.is_empty() {
-            return;
-        }
+    pub(crate) fn watch_write_annotated(
+        &mut self,
+        master: BusMaster,
+        addr: u16,
+        data: u8,
+        annotation: WriteAnnotation,
+    ) {
         if let BusMaster::Cpu(i) = master {
-            let pc = self.debug_pc.get(i).copied().flatten();
-            self.watchpoints.check_write(
-                i,
-                master.into(),
-                self.clock,
-                pc,
-                addr as u32,
-                data as u32,
-                1,
-            );
+            self.map
+                .watch_write_annotated(i, master, addr, data, annotation);
         }
     }
 
     /// Record an interrupt assertion against `cpu_index` (gated internally).
     fn trace_interrupt(&mut self, cpu_index: usize, detail: &'static str) {
-        if !self.debug_trace.enabled() {
-            return;
-        }
-        self.debug_trace.record(DebugEvent {
+        self.map.trace_record(DebugEvent {
             cpu_index: Some(cpu_index),
             detail: Some(detail),
+            // Interrupts are raised at the top of `tick`, before the map's
+            // access context is latched for this cycle, so stamp them from the
+            // board clock directly rather than the (still previous-cycle) latch.
             ..DebugEvent::new(
                 self.clock,
                 phosphor_core::core::watchpoint::DebugAccessSource::Unknown,
@@ -623,7 +652,7 @@ impl NamcoGalagaBoard {
         device: &'static str,
         detail: Option<&'static str>,
     ) {
-        self.debug_trace.record(DebugEvent {
+        self.map.trace_record(DebugEvent {
             cpu_index: Some(0),
             pc: self.debug_pc[0],
             addr: Some(addr as u32),
@@ -632,53 +661,10 @@ impl NamcoGalagaBoard {
             device: Some(device),
             detail,
             ..DebugEvent::new(
-                self.clock,
+                self.map.debug_cycle(),
                 phosphor_core::core::watchpoint::DebugAccessSource::Cpu(0),
                 kind,
             )
-        });
-    }
-
-    /// Record a shared-bus write event from a game wrapper's `Bus::write`.
-    /// Maps the common Galaga-platform layout; cheap no-op while tracing
-    /// is disabled.
-    pub(crate) fn trace_bus_write(&mut self, master: BusMaster, addr: u16, data: u8) {
-        if !self.debug_trace.enabled() {
-            return;
-        }
-        let (kind, device, detail) = match addr {
-            0x6800..=0x681F => (DebugEventKind::DeviceWrite, Some("Namco WSG"), None),
-            0x6820..=0x6827 => (
-                DebugEventKind::DeviceWrite,
-                Some("Misc latch"),
-                Some(match addr & 7 {
-                    0 => "main IRQ enable",
-                    1 => "sub IRQ enable",
-                    2 => "sound NMI enable",
-                    3 => "sub/sound reset",
-                    _ => "latch bit",
-                }),
-            ),
-            0x6830..=0x683F => (DebugEventKind::Watchdog, None, Some("watchdog cleared")),
-            // Custom I/O data/ctrl are recorded by the dedicated helpers.
-            0x7000..=0x71FF => return,
-            0xA000..=0xA007 => (DebugEventKind::DeviceWrite, Some("Video latch"), None),
-            0xB800..=0xB840 => (DebugEventKind::DeviceWrite, Some("EAROM"), None),
-            _ => (DebugEventKind::MemoryWrite, None, None),
-        };
-        let (cpu_index, pc) = match master {
-            BusMaster::Cpu(i) if i < 3 => (Some(i), self.debug_pc[i]),
-            _ => (None, None),
-        };
-        self.debug_trace.record(DebugEvent {
-            cpu_index,
-            pc,
-            addr: Some(addr as u32),
-            value: Some(data as u32),
-            width: 1,
-            device,
-            detail,
-            ..DebugEvent::new(self.clock, master.into(), kind)
         });
     }
 
@@ -686,15 +672,22 @@ impl NamcoGalagaBoard {
     // Bus dispatch helpers — called from game wrapper Bus impls
     // -----------------------------------------------------------------------
 
-    /// Read ROM for the requesting CPU.
+    /// Read ROM for the requesting CPU. Each CPU sees a different ROM at the
+    /// same addresses, so the bus master picks the region.
     pub fn read_rom(&self, master: BusMaster, addr: u16) -> u8 {
-        let offset = addr as usize;
-        match master {
-            BusMaster::Cpu(0) => self.main_rom.get(offset).copied().unwrap_or(0xFF),
-            BusMaster::Cpu(1) => self.sub_rom.get(offset).copied().unwrap_or(0xFF),
-            BusMaster::Cpu(2) => self.sound_rom.get(offset).copied().unwrap_or(0xFF),
-            _ => 0xFF,
-        }
+        let region = match master {
+            BusMaster::Cpu(0) => Region::MainRom,
+            BusMaster::Cpu(1) => Region::SubRom,
+            BusMaster::Cpu(2) => Region::SoundRom,
+            _ => return 0xFF,
+        };
+        // Past the region (addresses above 0x3FFF) the socket is not selected
+        // at all; unloaded space inside it already reads 0xFF from the fill.
+        self.map
+            .region_data(region)
+            .get(addr as usize)
+            .copied()
+            .unwrap_or(0xFF)
     }
 
     /// Read the 06XX custom I/O data port. Dispatches to the selected chip
@@ -721,15 +714,13 @@ impl NamcoGalagaBoard {
             2 => self.namco50.as_mut().map_or(0xFF, Namco50::read),
             _ => 0xFF,
         };
-        if self.debug_trace.enabled() {
-            let device = match chip {
-                0 => "Namco 51XX",
-                1 => "Namco 53XX",
-                2 => "Namco 50XX",
-                _ => "Namco 06XX",
-            };
-            self.trace_custom_io(DebugEventKind::DeviceRead, 0x7000, data, device, None);
-        }
+        let device = match chip {
+            0 => "Namco 51XX",
+            1 => "Namco 53XX",
+            2 => "Namco 50XX",
+            _ => "Namco 06XX",
+        };
+        self.trace_custom_io(DebugEventKind::DeviceRead, 0x7000, data, device, None);
         data
     }
 
@@ -742,28 +733,24 @@ impl NamcoGalagaBoard {
             return;
         }
         if self.namco06.chip_select(0) {
-            if self.debug_trace.enabled() {
-                self.trace_custom_io(
-                    DebugEventKind::DeviceWrite,
-                    0x7000,
-                    data,
-                    "Namco 51XX",
-                    Some("command/argument"),
-                );
-            }
+            self.trace_custom_io(
+                DebugEventKind::DeviceWrite,
+                0x7000,
+                data,
+                "Namco 51XX",
+                Some("command/argument"),
+            );
             self.namco51.write(data);
         }
         // 53XX has no write interface
         if self.namco06.chip_select(2) && self.namco50.is_some() {
-            if self.debug_trace.enabled() {
-                self.trace_custom_io(
-                    DebugEventKind::DeviceWrite,
-                    0x7000,
-                    data,
-                    "Namco 50XX",
-                    Some("command/argument"),
-                );
-            }
+            self.trace_custom_io(
+                DebugEventKind::DeviceWrite,
+                0x7000,
+                data,
+                "Namco 50XX",
+                Some("command/argument"),
+            );
             if let Some(ref mut n50) = self.namco50 {
                 n50.write(data);
             }
@@ -779,15 +766,13 @@ impl NamcoGalagaBoard {
     /// across transactions. The 53XX cycles through 2 reads (DSWA, DSWB).
     /// Do NOT reset read indices here.
     pub fn write_custom_io_ctrl(&mut self, data: u8) {
-        if self.debug_trace.enabled() {
-            self.trace_custom_io(
-                DebugEventKind::DeviceWrite,
-                0x7100,
-                data,
-                "Namco 06XX",
-                Some("control (mode + chip select + timer)"),
-            );
-        }
+        self.trace_custom_io(
+            DebugEventKind::DeviceWrite,
+            0x7100,
+            data,
+            "Namco 06XX",
+            Some("control (mode + chip select + timer)"),
+        );
         self.namco06.ctrl_write(data, self.clock);
     }
 
@@ -927,16 +912,24 @@ impl NamcoGalagaBoard {
     // ROM loading helpers
     // -----------------------------------------------------------------------
 
+    /// Copy a ROM image to offset 0 of `region`, truncating anything past the
+    /// 16 KB window the CPU can address rather than rejecting the load.
+    fn load_rom_region(&mut self, region: Region, data: &[u8]) {
+        let dest = self.map.region_data_mut(region);
+        let len = data.len().min(dest.len());
+        dest[..len].copy_from_slice(&data[..len]);
+    }
+
     pub fn load_main_rom(&mut self, data: &[u8]) {
-        self.main_rom = data.to_vec();
+        self.load_rom_region(Region::MainRom, data);
     }
 
     pub fn load_sub_rom(&mut self, data: &[u8]) {
-        self.sub_rom = data.to_vec();
+        self.load_rom_region(Region::SubRom, data);
     }
 
     pub fn load_sound_rom(&mut self, data: &[u8]) {
-        self.sound_rom = data.to_vec();
+        self.load_rom_region(Region::SoundRom, data);
     }
 
     pub fn load_palette_prom(&mut self, data: &[u8]) {
@@ -1211,6 +1204,10 @@ impl Default for NamcoGalagaBoard {
     }
 }
 
+// All board events — bus writes, interrupts, custom-I/O transactions — land in
+// the map's ring, so the trace capability is just the map's.
+crate::impl_map_debug_trace!(NamcoGalagaBoard, map);
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -1227,6 +1224,13 @@ mod tests {
         crate::assert_no_coin_binding_collision(NAMCO_GALAGA_CONTROLS);
     }
 
+    /// Stand in for the per-CPU latching `tick()` does before stepping CPU
+    /// `cpu`, so a bare helper call is attributed like a real bus access.
+    fn latch_for(board: &mut NamcoGalagaBoard, cpu: usize) {
+        let (clock, pc) = (board.clock, board.debug_pc[cpu]);
+        board.map.latch_access_context(clock, pc);
+    }
+
     mod watchpoints {
         use super::*;
 
@@ -1235,15 +1239,17 @@ mod tests {
             let mut board = NamcoGalagaBoard::new();
             board.clock = 1234;
             board.debug_pc = [Some(0x0100), Some(0x0200), None];
-            board.watchpoints.set(1, 0x8800, WatchpointKind::Write);
+            board.map.set_watchpoint(1, 0x8800, WatchpointKind::Write);
 
             // Main CPU access: watch is scoped to the sub CPU → no hit.
-            board.watch_write(BusMaster::Cpu(0), 0x8800, 0x11);
-            assert!(board.watchpoints.take_hit().is_none());
+            latch_for(&mut board, 0);
+            board.watch_write_annotated(BusMaster::Cpu(0), 0x8800, 0x11, WriteAnnotation::MEMORY);
+            assert!(board.map.take_hit().is_none());
 
             // Sub CPU access fires with sub-CPU PC attribution.
-            board.watch_write(BusMaster::Cpu(1), 0x8800, 0x22);
-            let hit = board.watchpoints.take_hit().unwrap();
+            latch_for(&mut board, 1);
+            board.watch_write_annotated(BusMaster::Cpu(1), 0x8800, 0x22, WriteAnnotation::MEMORY);
+            let hit = board.map.take_hit().unwrap();
             assert_eq!(hit.cpu_index, 1);
             assert_eq!(hit.source, DebugAccessSource::Cpu(1));
             assert_eq!(hit.cycle, 1234);
@@ -1255,10 +1261,10 @@ mod tests {
         #[test]
         fn read_watch_fires_after_value_known() {
             let mut board = NamcoGalagaBoard::new();
-            board.watchpoints.set(0, 0x9000, WatchpointKind::Read);
+            board.map.set_watchpoint(0, 0x9000, WatchpointKind::Read);
 
             board.watch_read(BusMaster::Cpu(0), 0x9000, 0xAB);
-            let hit = board.watchpoints.take_hit().unwrap();
+            let hit = board.map.take_hit().unwrap();
             assert_eq!(hit.kind, WatchpointKind::Read);
             assert_eq!(hit.phase, WatchpointPhase::After);
             assert_eq!(hit.value, 0xAB);
@@ -1267,19 +1273,22 @@ mod tests {
 
     mod debug_events {
         use super::*;
+        // The write-annotation table is per-game (address decode differs);
+        // exercise the board through Galaga's.
+        use crate::galaga::write_annotation;
 
         #[test]
         fn tracing_disabled_records_nothing() {
             let mut board = NamcoGalagaBoard::new();
-            board.trace_bus_write(BusMaster::Cpu(0), 0x6800, 0x01);
+            board.watch_write_annotated(BusMaster::Cpu(0), 0x6800, 0x01, write_annotation(0x6800));
             board.write_custom_io_ctrl(0xA1);
-            assert!(board.debug_trace.is_empty());
+            assert!(board.map.trace_events().is_empty());
         }
 
         #[test]
         fn custom_io_transactions_attribute_chips() {
             let mut board = NamcoGalagaBoard::new();
-            board.debug_trace.set_enabled(true);
+            board.map.set_trace_enabled(true);
             board.debug_pc[0] = Some(0x1BCC);
 
             // 06XX control: write mode, chip select 0 (51XX)
@@ -1287,7 +1296,7 @@ mod tests {
             // Data write routed to the 51XX
             board.write_custom_io(0xA8);
 
-            let events = board.debug_trace.events();
+            let events = board.map.trace_events();
             assert_eq!(events.len(), 2);
             assert_eq!(events[0].kind, DebugEventKind::DeviceWrite);
             assert_eq!(events[0].device, Some("Namco 06XX"));
@@ -1301,16 +1310,25 @@ mod tests {
         #[test]
         fn bus_writes_map_to_kinds_with_multi_cpu_attribution() {
             let mut board = NamcoGalagaBoard::new();
-            board.debug_trace.set_enabled(true);
+            board.map.set_trace_enabled(true);
             board.debug_pc = [Some(0x0100), Some(0x0200), Some(0x0300)];
 
-            board.trace_bus_write(BusMaster::Cpu(0), 0x6805, 0x07); // WSG
-            board.trace_bus_write(BusMaster::Cpu(0), 0x6823, 0x01); // misc latch bit 3
-            board.trace_bus_write(BusMaster::Cpu(0), 0x6830, 0x00); // watchdog
-            board.trace_bus_write(BusMaster::Cpu(1), 0x8900, 0x42); // memory, sub CPU
-            board.trace_bus_write(BusMaster::Cpu(0), 0x7100, 0x01); // custom io: skipped here
+            let write = |board: &mut NamcoGalagaBoard, cpu: usize, addr: u16, data: u8| {
+                latch_for(board, cpu);
+                board.watch_write_annotated(
+                    BusMaster::Cpu(cpu),
+                    addr,
+                    data,
+                    write_annotation(addr),
+                );
+            };
+            write(&mut board, 0, 0x6805, 0x07); // WSG
+            write(&mut board, 0, 0x6823, 0x01); // misc latch bit 3
+            write(&mut board, 0, 0x6830, 0x00); // watchdog
+            write(&mut board, 1, 0x8900, 0x42); // memory, sub CPU
+            write(&mut board, 0, 0x7100, 0x01); // custom io: suppressed here
 
-            let events = board.debug_trace.events();
+            let events = board.map.trace_events();
             assert_eq!(events.len(), 4);
             assert_eq!(events[0].device, Some("Namco WSG"));
             assert_eq!(events[1].detail, Some("sub/sound reset"));

@@ -22,8 +22,10 @@
 //! `namco_galaga.rs` chip-select-3 dispatch (see `write_custom_io`).
 
 use phosphor_core::bus_split;
+use phosphor_core::core::address_space16::WriteAnnotation;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::debug::{BusDebug, DebugCpu, Debuggable};
+use phosphor_core::core::debug_trace::DebugEventKind;
 use phosphor_core::core::machine::{
     ActionRole, AudioSource, DipApplyTiming, DipChoice, DipOption, DipSwitchBank, DipSwitches,
     InputConfigurable, InputControl, InputEvent, InputId, InputKind, MachineCore, MachineDebug,
@@ -889,6 +891,36 @@ impl Default for XeviousSystem {
     }
 }
 
+/// Label a bus write for the event trace. Only the platform-common latches and
+/// the custom-I/O window are shared; Xevious's video/scroll latch sits at
+/// 0xD000-0xD07F, and 0xA000-0xBFFF — a video latch and EAROM on other games
+/// of this family — is plain sr3 and colour RAM here, so it stays untagged.
+pub(crate) fn write_annotation(addr: u16) -> WriteAnnotation {
+    match addr {
+        0x6800..=0x681F => WriteAnnotation::device("Namco WSG"),
+        0x6820..=0x6827 => WriteAnnotation::detail(
+            "Misc latch",
+            match addr & 7 {
+                0 => "main IRQ enable",
+                1 => "sub IRQ enable",
+                2 => "sound NMI enable",
+                3 => "sub/sound reset",
+                _ => "latch bit",
+            },
+        ),
+        0x6830..=0x683F => WriteAnnotation {
+            kind: DebugEventKind::Watchdog,
+            detail: Some("watchdog cleared"),
+            ..WriteAnnotation::MEMORY
+        },
+        // The custom-I/O helpers record these transactions themselves, tagged
+        // with the 06XX-selected chip; suppress the duplicate bus event.
+        0x7000..=0x71FF => WriteAnnotation::SUPPRESSED,
+        0xD000..=0xD07F => WriteAnnotation::device("Video latch"),
+        _ => WriteAnnotation::MEMORY,
+    }
+}
+
 impl Bus for XeviousSystem {
     type Address = u16;
     type Data = u8;
@@ -915,8 +947,8 @@ impl Bus for XeviousSystem {
     }
 
     fn write(&mut self, master: BusMaster, addr: u16, data: u8) {
-        self.board.watch_write(master, addr, data);
-        self.board.trace_bus_write(master, addr, data);
+        self.board
+            .watch_write_annotated(master, addr, data, write_annotation(addr));
         match addr {
             0x0000..=0x3FFF => {} // ROM (nopw)
             0x6800..=0x681F => self.board.wsg.write(addr - 0x6800, data),
@@ -1014,13 +1046,11 @@ impl BusDebug for XeviousSystem {
         let addr = u16::try_from(addr).ok()?;
         match addr {
             0x0000..=0x3FFF => {
-                let rom = match cpu_index {
-                    0 => &self.board.main_rom,
-                    1 => &self.board.sub_rom,
-                    2 => &self.board.sound_rom,
-                    _ => return None,
-                };
-                Some(rom.get(addr as usize).copied().unwrap_or(0xFF))
+                // Each CPU sees its own ROM here; the board selects by master.
+                if cpu_index > 2 {
+                    return None;
+                }
+                Some(self.board.read_rom(BusMaster::Cpu(cpu_index), addr))
             }
             0x7800..=0x7FFF => Some(self.work_ram[(addr - 0x7800) as usize]),
             0x8000..=0x87FF => Some(self.sr1[(addr - 0x8000) as usize]),
@@ -1051,8 +1081,12 @@ impl BusDebug for XeviousSystem {
         }
     }
 
+    // --- Watchpoints (owned by the board's shared address space) ---
+    // The debugger addresses in u32; anything outside the Z80's 16-bit space
+    // cannot be watched, so it is dropped rather than truncated.
+
     fn take_watchpoint_hit(&mut self) -> Option<phosphor_core::core::watchpoint::WatchpointHit> {
-        self.board.watchpoints.take_hit()
+        self.board.map.take_hit()
     }
 
     fn set_watchpoint(
@@ -1061,7 +1095,9 @@ impl BusDebug for XeviousSystem {
         addr: u32,
         kind: phosphor_core::core::watchpoint::WatchpointKind,
     ) {
-        self.board.watchpoints.set(cpu_index, addr, kind);
+        if let Ok(addr) = u16::try_from(addr) {
+            self.board.map.set_watchpoint(cpu_index, addr, kind);
+        }
     }
 
     fn set_watchpoint_cond(
@@ -1071,9 +1107,11 @@ impl BusDebug for XeviousSystem {
         kind: phosphor_core::core::watchpoint::WatchpointKind,
         condition: phosphor_core::core::watchpoint::WatchpointCondition,
     ) {
-        self.board
-            .watchpoints
-            .set_cond(cpu_index, addr, kind, condition);
+        if let Ok(addr) = u16::try_from(addr) {
+            self.board
+                .map
+                .set_watchpoint_cond(cpu_index, addr, kind, condition);
+        }
     }
 
     fn clear_watchpoint(
@@ -1082,11 +1120,13 @@ impl BusDebug for XeviousSystem {
         addr: u32,
         kind: phosphor_core::core::watchpoint::WatchpointKind,
     ) {
-        self.board.watchpoints.clear(cpu_index, addr, kind);
+        if let Ok(addr) = u16::try_from(addr) {
+            self.board.map.clear_watchpoint(cpu_index, addr, kind);
+        }
     }
 
     fn clear_all_watchpoints(&mut self) {
-        self.board.watchpoints.clear_all();
+        self.board.map.clear_all_watchpoints();
     }
 }
 
