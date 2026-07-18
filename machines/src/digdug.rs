@@ -1,4 +1,5 @@
 use phosphor_core::bus_split;
+use phosphor_core::core::address_space::AccessKind;
 use phosphor_core::core::address_space16::WriteAnnotation;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::debug::{BusDebug, DebugCpu, Debuggable};
@@ -13,7 +14,7 @@ use phosphor_core::device::Er2055;
 use phosphor_core::gfx;
 use phosphor_core::gfx::GfxCache;
 use phosphor_core::gfx::decode::{GfxLayout, decode_gfx};
-use phosphor_macros::Saveable;
+use phosphor_macros::{MemoryRegion, Saveable};
 
 use crate::namco_galaga::{self, GALAGA_SPRITE_LAYOUT, NamcoGalagaBoard};
 use crate::namco_pac::PACMAN_TILE_LAYOUT;
@@ -503,16 +504,25 @@ static DIGDUGAT1_CONFIG: DigDugRomConfig = DigDugRomConfig {
 /// Hardware: 3×Z80 @ 3.072 MHz, Namco WSG 3-voice, Namco 06XX/51XX/53XX
 /// custom I/O. Video: 36×28 tilemap foreground, ROM-based background,
 /// 64 sprites (16×16 or 32×32). Screen: 288×224 rotated 90° CCW.
+/// Dig Dug's RAM windows, declared on the shared board's address map.
+///
+/// Ids start at 4: 0 is the core's unmapped sentinel and 1-3 are the board's
+/// per-CPU ROMs ([`namco_galaga::Region`]). The names given here are what the
+/// debugger shows against every write and watchpoint hit in these windows.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, MemoryRegion)]
+pub(crate) enum Region {
+    VideoRam = 4,
+    WorkRam = 5,
+    SpriteAttrs = 6,
+    SpritePos = 7,
+    SpriteFlip = 8,
+}
+
 #[derive(Saveable)]
 pub struct DigDugSystem {
     pub board: NamcoGalagaBoard,
 
-    // RAM regions (shared by all 3 CPUs)
-    video_ram: [u8; 0x400], // 0x8000-0x83FF (foreground tilemap)
-    work_ram: [u8; 0x400],  // 0x8400-0x87FF (shared work RAM)
-    obj_ram: [u8; 0x400],   // 0x8800-0x8BFF (sprite attribs + work)
-    pos_ram: [u8; 0x400],   // 0x9000-0x93FF (sprite positions)
-    flp_ram: [u8; 0x400],   // 0x9800-0x9BFF (sprite flip/size)
     #[save_skip]
     earom: Er2055, // 0xB800-0xB83F (ER2055 64×4-bit EAROM for high scores)
 
@@ -545,14 +555,52 @@ pub struct DigDugSystem {
 
 impl DigDugSystem {
     pub fn new() -> Self {
-        Self {
-            board: NamcoGalagaBoard::new(),
+        let mut board = NamcoGalagaBoard::new();
+        // All three CPUs share these windows. The split into five chips is the
+        // video hardware's: the tilemap has its own RAM, and the sprite hardware
+        // reads attributes, positions and flip/size bits from three separate
+        // RAMs at a fixed 0x380 offset.
+        board
+            .map
+            .region(
+                Region::VideoRam,
+                "Video RAM (Foreground Tilemap)",
+                0x8000,
+                0x400,
+                AccessKind::ReadWrite,
+            )
+            .region(
+                Region::WorkRam,
+                "Work RAM",
+                0x8400,
+                0x400,
+                AccessKind::ReadWrite,
+            )
+            .region(
+                Region::SpriteAttrs,
+                "Work RAM / Sprite Attributes",
+                0x8800,
+                0x400,
+                AccessKind::ReadWrite,
+            )
+            .region(
+                Region::SpritePos,
+                "Work RAM / Sprite Positions",
+                0x9000,
+                0x400,
+                AccessKind::ReadWrite,
+            )
+            .region(
+                Region::SpriteFlip,
+                "Work RAM / Sprite Flip+Size",
+                0x9800,
+                0x400,
+                AccessKind::ReadWrite,
+            );
 
-            video_ram: [0; 0x400],
-            work_ram: [0; 0x400],
-            obj_ram: [0; 0x400],
-            pos_ram: [0; 0x400],
-            flp_ram: [0; 0x400],
+        Self {
+            board,
+
             earom: Er2055::new(),
 
             bg_select: 0,
@@ -775,7 +823,7 @@ impl DigDugSystem {
             tile_width: 8,
             tile_height: 8,
         };
-        let video_ram = &self.video_ram;
+        let video_ram = self.board.map.region_data(Region::VideoRam);
         let char_cache = &self.char_cache;
         let tx_color_mode = self.tx_color_mode;
         let native = &mut self.native_buffer;
@@ -818,12 +866,21 @@ impl DigDugSystem {
                 continue;
             }
 
-            let sprite_byte = self.obj_ram[attr_addr];
-            let color = (self.obj_ram[attr_addr + 1] & 0x3F) as usize;
-            let sx = self.pos_ram[attr_addr + 1] as i32 - 40 + 1;
-            let raw_sy = 256i32 - self.pos_ram[attr_addr] as i32 + 1;
-            let flipx = self.flp_ram[attr_addr] & 0x01 != 0;
-            let flipy = self.flp_ram[attr_addr] & 0x02 != 0;
+            // The sprite hardware reads one attribute pair from each of the
+            // three RAMs at the same offset; copy the six bytes out before
+            // draw_sprite_tile takes &mut self, so the map stays immutably
+            // borrowed only for this read.
+            let (obj_ram, pos_ram, flp_ram) = (
+                self.board.map.region_data(Region::SpriteAttrs),
+                self.board.map.region_data(Region::SpritePos),
+                self.board.map.region_data(Region::SpriteFlip),
+            );
+            let sprite_byte = obj_ram[attr_addr];
+            let color = (obj_ram[attr_addr + 1] & 0x3F) as usize;
+            let sx = pos_ram[attr_addr + 1] as i32 - 40 + 1;
+            let raw_sy = 256i32 - pos_ram[attr_addr] as i32 + 1;
+            let flipx = flp_ram[attr_addr] & 0x01 != 0;
+            let flipy = flp_ram[attr_addr] & 0x02 != 0;
             let size = (sprite_byte & 0x80) != 0; // true = 32×32
 
             // Sprite code transformation: only for 32×32 sprites.
@@ -984,11 +1041,11 @@ impl Bus for DigDugSystem {
             }
             0x7000..=0x70FF => self.board.read_custom_io(),
             0x7100 => self.board.namco06.ctrl_read(),
-            0x8000..=0x83FF => self.video_ram[(addr - 0x8000) as usize],
-            0x8400..=0x87FF => self.work_ram[(addr - 0x8400) as usize],
-            0x8800..=0x8BFF => self.obj_ram[(addr - 0x8800) as usize],
-            0x9000..=0x93FF => self.pos_ram[(addr - 0x9000) as usize],
-            0x9800..=0x9BFF => self.flp_ram[(addr - 0x9800) as usize],
+            // RAM windows resolve through the map, which turns the address into
+            // the right region and offset (see the Region declarations in new).
+            0x8000..=0x87FF | 0x8800..=0x8BFF | 0x9000..=0x93FF | 0x9800..=0x9BFF => {
+                self.board.map.read_backing(addr)
+            }
             0xA000..=0xA007 => 0, // video latch (write-only)
             0xB800..=0xB83F => self.earom.read(addr - 0xB800),
             _ => 0xFF,
@@ -1016,11 +1073,9 @@ impl Bus for DigDugSystem {
             }
             0x7000..=0x70FF => self.board.write_custom_io(data),
             0x7100 => self.board.write_custom_io_ctrl(data),
-            0x8000..=0x83FF => self.video_ram[(addr - 0x8000) as usize] = data,
-            0x8400..=0x87FF => self.work_ram[(addr - 0x8400) as usize] = data,
-            0x8800..=0x8BFF => self.obj_ram[(addr - 0x8800) as usize] = data,
-            0x9000..=0x93FF => self.pos_ram[(addr - 0x9000) as usize] = data,
-            0x9800..=0x9BFF => self.flp_ram[(addr - 0x9800) as usize] = data,
+            0x8000..=0x87FF | 0x8800..=0x8BFF | 0x9000..=0x93FF | 0x9800..=0x9BFF => {
+                self.board.map.write_backing(addr, data)
+            }
             0xA000..=0xA007 => {
                 let bit = (addr & 7) as u8;
                 let value = (data & 1) != 0;
@@ -1126,11 +1181,9 @@ impl BusDebug for DigDugSystem {
                 }
                 Some(self.board.read_rom(BusMaster::Cpu(cpu_index), addr))
             }
-            0x8000..=0x83FF => Some(self.video_ram[(addr - 0x8000) as usize]),
-            0x8400..=0x87FF => Some(self.work_ram[(addr - 0x8400) as usize]),
-            0x8800..=0x8BFF => Some(self.obj_ram[(addr - 0x8800) as usize]),
-            0x9000..=0x93FF => Some(self.pos_ram[(addr - 0x9000) as usize]),
-            0x9800..=0x9BFF => Some(self.flp_ram[(addr - 0x9800) as usize]),
+            0x8000..=0x87FF | 0x8800..=0x8BFF | 0x9000..=0x93FF | 0x9800..=0x9BFF => {
+                Some(self.board.map.read_backing(addr))
+            }
             0xB800..=0xB83F => Some(self.earom.read(addr - 0xB800)),
             _ => None,
         }
@@ -1141,11 +1194,9 @@ impl BusDebug for DigDugSystem {
             return;
         };
         match addr {
-            0x8000..=0x83FF => self.video_ram[(addr - 0x8000) as usize] = data,
-            0x8400..=0x87FF => self.work_ram[(addr - 0x8400) as usize] = data,
-            0x8800..=0x8BFF => self.obj_ram[(addr - 0x8800) as usize] = data,
-            0x9000..=0x93FF => self.pos_ram[(addr - 0x9000) as usize] = data,
-            0x9800..=0x9BFF => self.flp_ram[(addr - 0x9800) as usize] = data,
+            0x8000..=0x87FF | 0x8800..=0x8BFF | 0x9000..=0x93FF | 0x9800..=0x9BFF => {
+                self.board.map.write_backing(addr, data)
+            }
             0xB800..=0xB83F => self.earom.latch(addr - 0xB800, data),
             _ => {}
         }
@@ -1253,11 +1304,15 @@ impl MachineCore for DigDugSystem {
 
     fn reset(&mut self) {
         self.board.reset_board();
-        self.video_ram.fill(0);
-        self.work_ram.fill(0);
-        self.obj_ram.fill(0);
-        self.pos_ram.fill(0);
-        self.flp_ram.fill(0);
+        for region in [
+            Region::VideoRam,
+            Region::WorkRam,
+            Region::SpriteAttrs,
+            Region::SpritePos,
+            Region::SpriteFlip,
+        ] {
+            self.board.map.region_data_mut(region).fill(0);
+        }
         self.bg_select = 0;
         self.tx_color_mode = false;
         self.bg_disable = false;
