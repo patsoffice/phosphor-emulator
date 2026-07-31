@@ -16,6 +16,8 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use phosphor_core::core::debug_hang::{HangDetector, HangReport};
+use phosphor_core::core::debug_trace::DebugEvent;
 use phosphor_core::core::machine::{InputEvent, InputId, Orientation};
 use phosphor_core::core::watchpoint::{WatchpointCondition, WatchpointHit, WatchpointKind};
 use phosphor_harness::Harness;
@@ -32,6 +34,13 @@ pub struct DebugSession {
     /// Watchpoint hits drained from the machine after each frame/step, kept
     /// here so a whole run's worth survives the 64-entry machine-side queue.
     hits: Vec<WatchpointHit>,
+    /// Bus events drained from the machine's trace ring after each frame/step,
+    /// so a whole run survives the ring's finite capacity.
+    events: Vec<DebugEvent>,
+    /// Per-frame PC-sampling hang detector, `Some` once a script enables it.
+    hang: Option<HangDetector>,
+    /// Hang reports collected while running frames.
+    hang_reports: Vec<HangReport>,
 }
 
 impl DebugSession {
@@ -55,25 +64,34 @@ impl DebugSession {
             input_ids,
             fb: Vec::new(),
             hits: Vec::new(),
+            events: Vec::new(),
+            hang: None,
+            hang_reports: Vec::new(),
         }
     }
 
     /// Advance `n` whole frames through the harness, draining watchpoint hits
-    /// after each so a hot address doesn't overflow the machine's 64-entry
-    /// queue across the run.
+    /// and trace events after each (so neither overflows the machine's finite
+    /// queues across the run) and sampling the hang detector once per frame.
     pub fn run_frames(&mut self, n: u64) {
         for _ in 0..n {
             self.harness.run_frame();
             self.drain_watchpoint_hits();
+            self.drain_trace_events();
+            self.sample_hang();
         }
     }
 
     /// Advance a single clock cycle via `debug_tick()`, returning the bitmask of
     /// CPUs that reached an instruction boundary (bit 0 = CPU 0, …). Machines
     /// without debug support (`cycles_per_frame == 0`) return `0`.
+    ///
+    /// Drains watchpoint hits and trace events, but does not sample the hang
+    /// detector — hang detection is frame-granular (one PC sample per frame).
     pub fn step(&mut self) -> u32 {
         let mask = self.harness.machine_mut().debug_tick();
         self.drain_watchpoint_hits();
+        self.drain_trace_events();
         mask
     }
 
@@ -82,6 +100,39 @@ impl DebugSession {
         let machine = self.harness.machine_mut();
         while let Some(hit) = machine.take_watchpoint_hit() {
             self.hits.push(hit);
+        }
+    }
+
+    /// Copy any recorded trace events out of the machine's ring into
+    /// `self.events` and clear the ring. No-op when tracing is disabled.
+    fn drain_trace_events(&mut self) {
+        let machine = self.harness.machine_mut();
+        if machine.trace_enabled() {
+            let batch = machine.trace_events().to_vec();
+            machine.clear_trace_events();
+            self.events.extend(batch);
+        }
+    }
+
+    /// Sample each CPU's PC once and feed the hang detector, collecting reports.
+    fn sample_hang(&mut self) {
+        if self.hang.is_none() {
+            return;
+        }
+        let snaps: Vec<(usize, u32)> = match self.harness.machine_mut().debug_bus() {
+            Some(bus) => bus
+                .cpus()
+                .iter()
+                .enumerate()
+                .map(|(i, (_, cpu))| (i, cpu.debug_pc()))
+                .collect(),
+            None => return,
+        };
+        let detector = self.hang.as_mut().unwrap();
+        for (i, pc) in snaps {
+            if let Some(report) = detector.observe(i, pc) {
+                self.hang_reports.push(report);
+            }
         }
     }
 
@@ -199,6 +250,45 @@ impl DebugSession {
     pub fn take_hits(&mut self) -> Vec<WatchpointHit> {
         self.drain_watchpoint_hits();
         std::mem::take(&mut self.hits)
+    }
+
+    /// Enable or disable bus-event recording. Enabling starts from a clean
+    /// slate (any stale ring contents and the accumulator are dropped).
+    ///
+    /// Event trace is CPU-agnostic and region-tagged, and resolves mirrors —
+    /// making it a better instrument than watchpoints for "which registers are
+    /// written, and when within a frame". Note: bus-event tracing is wired for
+    /// `AddressSpace16/32` boards; a machine without it records nothing.
+    pub fn set_trace(&mut self, enabled: bool) {
+        let machine = self.harness.machine_mut();
+        machine.set_trace_enabled(enabled);
+        machine.clear_trace_events();
+        self.events.clear();
+    }
+
+    /// Whether bus-event recording is enabled.
+    pub fn trace_enabled(&mut self) -> bool {
+        self.harness.machine_mut().trace_enabled()
+    }
+
+    /// Drain and return every trace event collected so far (also sweeps the
+    /// machine's current ring). Leaves the accumulator empty.
+    pub fn take_events(&mut self) -> Vec<DebugEvent> {
+        self.drain_trace_events();
+        std::mem::take(&mut self.events)
+    }
+
+    /// Enable per-frame hang detection with the given PC `window` (bytes) and
+    /// frame `threshold`. `run_frames` then samples each CPU's PC per frame; a
+    /// CPU stuck within `window` for `threshold` frames produces a report.
+    pub fn detect_hangs(&mut self, window: u32, threshold: u32) {
+        self.hang = Some(HangDetector::with_params(window, threshold));
+        self.hang_reports.clear();
+    }
+
+    /// Drain and return every hang report collected so far.
+    pub fn take_hangs(&mut self) -> Vec<HangReport> {
+        std::mem::take(&mut self.hang_reports)
     }
 
     /// Apply an *immediate* button edge to the control named `name`. Unknown
@@ -356,6 +446,43 @@ mod tests {
         assert_eq!(s.cpu_count(), 1);
         let (mut nod, _) = session(false);
         assert_eq!(nod.cpu_count(), 0);
+    }
+
+    #[test]
+    fn trace_events_collected_across_frames() {
+        let (mut s, _) = session(true);
+        s.set_trace(true);
+        assert!(s.trace_enabled());
+        s.run_frames(3); // the stub records one bus event per frame while tracing
+        let events = s.take_events();
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[0].addr, Some(0x1234));
+        assert_eq!(events[0].value, Some(0x99));
+        assert_eq!(events[0].region, Some("test-ram"));
+        // Draining leaves the accumulator empty.
+        assert!(s.take_events().is_empty());
+    }
+
+    #[test]
+    fn trace_disabled_records_nothing() {
+        let (mut s, _) = session(true);
+        s.run_frames(3);
+        assert!(!s.trace_enabled());
+        assert!(s.take_events().is_empty());
+    }
+
+    #[test]
+    fn hang_detector_reports_stuck_cpu() {
+        // The stub CPU's PC is fixed at 0x1234 → a perpetual hang.
+        let (mut s, _) = session(true);
+        s.detect_hangs(8, 3);
+        s.run_frames(5);
+        let hangs = s.take_hangs();
+        assert_eq!(hangs.len(), 1); // reports once at threshold, then stays quiet
+        assert_eq!(hangs[0].cpu_index, 0);
+        assert_eq!(hangs[0].pc, 0x1234);
+        assert!(hangs[0].frames_stuck >= 3);
+        assert!(s.take_hangs().is_empty());
     }
 
     #[test]

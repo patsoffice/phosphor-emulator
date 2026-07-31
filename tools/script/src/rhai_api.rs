@@ -15,6 +15,8 @@ use std::rc::Rc;
 
 use rhai::{Array, Dynamic, Engine, EvalAltResult, Map};
 
+use phosphor_core::core::debug_hang::HangReport;
+use phosphor_core::core::debug_trace::DebugEvent;
 use phosphor_core::core::watchpoint::{
     DebugAccessSource, WatchpointCondition, WatchpointHit, WatchpointKind,
 };
@@ -174,6 +176,42 @@ fn register_machine(engine: &mut Engine) {
         m.borrow_mut().take_hits().iter().map(hit_to_map).collect()
     });
 
+    // --- Event trace ---
+    // CPU-agnostic, region-tagged, mirror-resolving bus events; `events()`
+    // drains the collected events as an array of maps.
+    engine.register_fn("trace", |m: &mut Machine, on: bool| {
+        m.borrow_mut().set_trace(on);
+    });
+    engine.register_fn("trace_enabled", |m: &mut Machine| -> bool {
+        m.borrow_mut().trace_enabled()
+    });
+    engine.register_fn("events", |m: &mut Machine| -> Array {
+        m.borrow_mut()
+            .take_events()
+            .iter()
+            .map(event_to_map)
+            .collect()
+    });
+
+    // --- Hang detection (per-frame PC sampling) ---
+    engine.register_fn("detect_hangs", |m: &mut Machine| {
+        m.borrow_mut().detect_hangs(8, 120); // Dig Dug defaults
+    });
+    engine.register_fn(
+        "detect_hangs",
+        |m: &mut Machine, window: i64, threshold: i64| {
+            m.borrow_mut()
+                .detect_hangs(window.max(0) as u32, threshold.max(0) as u32);
+        },
+    );
+    engine.register_fn("hangs", |m: &mut Machine| -> Array {
+        m.borrow_mut()
+            .take_hangs()
+            .iter()
+            .map(hang_to_map)
+            .collect()
+    });
+
     // --- Capture ---
     engine.register_fn(
         "screenshot",
@@ -253,6 +291,44 @@ fn hit_to_map(hit: &WatchpointHit) -> Dynamic {
     map.insert("cycle".into(), (hit.cycle as i64).into());
     map.insert("source".into(), source_str(hit.source).into());
     map.insert("region".into(), hit.region.unwrap_or("").into());
+    Dynamic::from_map(map)
+}
+
+/// Convert a bus trace event into a script-visible map. Absent optional fields
+/// become `-1` (numbers) or `""` (strings).
+fn event_to_map(event: &DebugEvent) -> Dynamic {
+    let mut map = Map::new();
+    map.insert("cycle".into(), (event.cycle as i64).into());
+    map.insert("kind".into(), event.kind.label().into());
+    map.insert("source".into(), source_str(event.source).into());
+    map.insert(
+        "cpu".into(),
+        event.cpu_index.map_or(-1i64, |c| c as i64).into(),
+    );
+    map.insert("pc".into(), event.pc.map_or(-1i64, |p| p as i64).into());
+    map.insert("addr".into(), event.addr.map_or(-1i64, |a| a as i64).into());
+    map.insert(
+        "value".into(),
+        event.value.map_or(-1i64, |v| v as i64).into(),
+    );
+    map.insert("width".into(), (i64::from(event.width)).into());
+    map.insert("region".into(), event.region.unwrap_or("").into());
+    map.insert("device".into(), event.device.unwrap_or("").into());
+    map.insert("detail".into(), event.detail.unwrap_or("").into());
+    Dynamic::from_map(map)
+}
+
+/// Convert a hang report into a script-visible map.
+fn hang_to_map(report: &HangReport) -> Dynamic {
+    let mut map = Map::new();
+    map.insert("cpu".into(), (report.cpu_index as i64).into());
+    map.insert("pc".into(), (report.pc as i64).into());
+    map.insert("window_lo".into(), (report.window_lo as i64).into());
+    map.insert("window_hi".into(), (report.window_hi as i64).into());
+    map.insert(
+        "frames_stuck".into(),
+        (i64::from(report.frames_stuck)).into(),
+    );
     Dynamic::from_map(map)
 }
 
@@ -364,6 +440,45 @@ mod tests {
             .eval_with_scope::<i64>(&mut scope, r#"m.watch(0x40, "bogus")"#)
             .unwrap_err();
         assert!(matches!(*err, EvalAltResult::ErrorRuntime(..)));
+    }
+
+    #[test]
+    fn event_trace_via_script() {
+        let (engine, mut scope, _m) = engine_with_m(true);
+        engine
+            .run_with_scope(&mut scope, "m.trace(true); m.run_frames(2);")
+            .unwrap();
+        let events = engine
+            .eval_with_scope::<Array>(&mut scope, "m.events()")
+            .unwrap();
+        assert_eq!(events.len(), 2);
+        let e = events[0].clone().cast::<Map>();
+        assert_eq!(e["addr"].as_int().unwrap(), 0x1234);
+        assert_eq!(e["kind"].clone().into_string().unwrap(), "mem wr");
+        assert_eq!(e["region"].clone().into_string().unwrap(), "test-ram");
+        // events() drains — a second call is empty.
+        assert!(
+            engine
+                .eval_with_scope::<Array>(&mut scope, "m.events()")
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn hang_detection_via_script() {
+        let (engine, mut scope, _m) = engine_with_m(true);
+        engine
+            .run_with_scope(&mut scope, "m.detect_hangs(8, 3); m.run_frames(5);")
+            .unwrap();
+        let hangs = engine
+            .eval_with_scope::<Array>(&mut scope, "m.hangs()")
+            .unwrap();
+        assert_eq!(hangs.len(), 1);
+        let h = hangs[0].clone().cast::<Map>();
+        assert_eq!(h["cpu"].as_int().unwrap(), 0);
+        assert_eq!(h["pc"].as_int().unwrap(), 0x1234);
+        assert!(h["frames_stuck"].as_int().unwrap() >= 3);
     }
 
     #[test]

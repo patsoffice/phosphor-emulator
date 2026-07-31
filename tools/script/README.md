@@ -113,6 +113,50 @@ print(hits.len() + " writes");            // assert on the count to fail loudly 
 for h in hits { print("cpu" + h.cpu + " wrote " + h.value); }
 ```
 
+### Event trace
+
+The bus event trace is **CPU-agnostic**, **region-tagged**, and **mirror-resolving**
+— strictly better than watchpoints for "which registers are written, and when
+within a frame". (Satan's Hollow writes its palette through a VRAM mirror; an
+address-exact watchpoint on the un-mirrored base would miss it, but the trace
+records it against the resolved region.)
+
+| Rhai | Returns |
+|---|---|
+| `m.trace(on)` | `()` — enable/disable recording (enabling starts clean) |
+| `m.trace_enabled()` | `bool` |
+| `m.events()` | `[Map]` — drains the collected events |
+
+Each event is a map: `cycle`, `kind` (`"mem wr"`, `"io wr"`, `"dev wr"`, …),
+`source`, `cpu` (`-1` if n/a), `pc`, `addr`, `value`, `width`, `region`,
+`device`, `detail`. Like `hits()`, events accumulate across a run (drained after
+each frame/step) and `events()` drains them. Bus-event tracing is wired for
+`AddressSpace16/32` boards; a machine without it records nothing.
+
+```rhai
+m.run_frames(400);
+m.trace(true);
+m.run_frames(1);                          // capture exactly one frame's writes
+for e in m.events() {
+    if e.kind == "mem wr" { print(e.region + " <- " + e.value + " @cycle " + e.cycle); }
+}
+```
+
+### Hang detection
+
+Per-frame PC sampling that flags a CPU stuck in a tight loop (an idle/boot
+hang). `detect_hangs()` uses the Dig Dug defaults (8-byte window, 120-frame
+threshold); `detect_hangs(window, threshold)` overrides them.
+
+| Rhai | Returns |
+|---|---|
+| `m.detect_hangs()` / `m.detect_hangs(window, threshold)` | `()` — enable |
+| `m.hangs()` | `[Map]` — drains reports (`cpu`, `pc`, `window_lo`, `window_hi`, `frames_stuck`) |
+
+`run_frames` samples every CPU once per frame; a CPU whose PC stays within
+`window` bytes for `threshold` frames reports once, then stays quiet until it
+moves on.
+
 ### Determinism & safety
 
 - No ambient time or RNG — Rhai's default engine exposes neither, and the

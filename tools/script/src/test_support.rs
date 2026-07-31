@@ -12,7 +12,7 @@ use std::collections::VecDeque;
 use std::rc::Rc;
 
 use phosphor_core::core::debug::{BusDebug, DebugCpu, DebugRegister, Debuggable};
-use phosphor_core::core::debug_trace::DebugTrace;
+use phosphor_core::core::debug_trace::{DebugEvent, DebugEventKind, DebugTrace};
 use phosphor_core::core::machine::{
     AudioSource, DipSwitches, FrontendMachine, InputConfigurable, InputControl, InputEvent,
     InputId, InputKind, MachineCore, MachineDebug, Nvram, Profilable, Renderable, SaveState,
@@ -137,11 +137,14 @@ impl BusDebug for StubBus {
 }
 
 /// A minimal `FrontendMachine`: bumps a frame counter, records inputs, paints a
-/// solid framebuffer, and optionally exposes the debug bus.
+/// solid framebuffer, optionally exposes the debug bus, and (when tracing is on)
+/// records one bus event per frame.
 struct StubMachine {
     rec: Rc<RefCell<Recorder>>,
     bus: StubBus,
     has_debug: bool,
+    trace_on: bool,
+    events: Vec<DebugEvent>,
 }
 
 const CONTROLS: &[InputControl] = &[InputControl {
@@ -155,7 +158,25 @@ const CONTROLS: &[InputControl] = &[InputControl {
 
 impl MachineCore for StubMachine {
     fn run_frame(&mut self) {
-        self.rec.borrow_mut().frames += 1;
+        let frame = {
+            let mut rec = self.rec.borrow_mut();
+            rec.frames += 1;
+            u64::from(rec.frames)
+        };
+        if self.trace_on {
+            self.events.push(DebugEvent {
+                cpu_index: Some(0),
+                addr: Some(0x1234),
+                value: Some(0x99),
+                width: 1,
+                region: Some("test-ram"),
+                ..DebugEvent::new(
+                    frame,
+                    DebugAccessSource::Cpu(0),
+                    DebugEventKind::MemoryWrite,
+                )
+            });
+        }
     }
     fn reset(&mut self) {}
     fn machine_id(&self) -> &str {
@@ -193,7 +214,20 @@ impl MachineDebug for StubMachine {
         if self.has_debug { 0b1 } else { 0 }
     }
 }
-impl DebugTrace for StubMachine {}
+impl DebugTrace for StubMachine {
+    fn set_trace_enabled(&mut self, enabled: bool) {
+        self.trace_on = enabled;
+    }
+    fn trace_enabled(&self) -> bool {
+        self.trace_on
+    }
+    fn trace_events(&mut self) -> &[DebugEvent] {
+        &self.events
+    }
+    fn clear_trace_events(&mut self) {
+        self.events.clear();
+    }
+}
 impl DipSwitches for StubMachine {}
 impl SaveState for StubMachine {}
 impl Nvram for StubMachine {}
@@ -211,6 +245,8 @@ pub fn stub_machine(has_debug: bool) -> (Box<dyn FrontendMachine>, Rc<RefCell<Re
             hits: VecDeque::new(),
         },
         has_debug,
+        trace_on: false,
+        events: Vec::new(),
     };
     (Box::new(machine), rec)
 }
