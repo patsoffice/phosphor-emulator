@@ -39,7 +39,7 @@ impl DebugSession {
     }
 
     /// Wrap a booted [`Harness`], building the stable-name → `InputId` index.
-    fn wrap(mut harness: Harness) -> Self {
+    pub(crate) fn wrap(mut harness: Harness) -> Self {
         let input_ids = harness
             .machine_mut()
             .input_controls()
@@ -205,150 +205,7 @@ fn write_png(path: &Path, rgb24: &[u8], width: u32, height: u32) -> std::io::Res
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::RefCell;
-    use std::rc::Rc;
-
-    use phosphor_core::core::debug::{BusDebug, DebugCpu, DebugRegister, Debuggable};
-    use phosphor_core::core::debug_trace::DebugTrace;
-    use phosphor_core::core::machine::{
-        AudioSource, DipSwitches, InputConfigurable, InputControl, InputKind, MachineCore,
-        MachineDebug, Nvram, Profilable, Renderable, SaveState,
-    };
-    use phosphor_core::cpu::disasm::DisassembledInstruction;
-
-    /// What the stub records so a test can prove a call reached the machine.
-    #[derive(Default)]
-    struct Recorder {
-        frames: u32,
-        inputs: Vec<InputEvent>,
-    }
-
-    /// A tiny CPU: fixed PC, two registers, and a one-byte `NOP` disassembly.
-    struct StubCpu;
-
-    impl Debuggable for StubCpu {
-        fn debug_registers(&self) -> Vec<DebugRegister> {
-            vec![
-                DebugRegister {
-                    name: "A",
-                    value: 0x42,
-                    width: 8,
-                },
-                DebugRegister {
-                    name: "PC",
-                    value: 0x1234,
-                    width: 16,
-                },
-            ]
-        }
-    }
-
-    impl DebugCpu for StubCpu {
-        fn debug_pc(&self) -> u32 {
-            0x1234
-        }
-        fn debug_at_instruction_boundary(&self) -> bool {
-            true
-        }
-        fn debug_disassemble(&self, _addr: u32, _bytes: &[u8]) -> DisassembledInstruction {
-            DisassembledInstruction {
-                mnemonic: "NOP",
-                operands: String::new(),
-                byte_len: 1,
-                bytes: [0; 10],
-                target_addr: None,
-            }
-        }
-    }
-
-    /// A tiny bus: one CPU and a seeded read (`addr` low byte + 1).
-    struct StubBus {
-        cpu: StubCpu,
-    }
-
-    impl BusDebug for StubBus {
-        fn devices(&self) -> Vec<(&str, &dyn Debuggable)> {
-            Vec::new()
-        }
-        fn cpus(&self) -> Vec<(&str, &dyn DebugCpu)> {
-            vec![("cpu0", &self.cpu)]
-        }
-        fn read(&self, _cpu_index: usize, addr: u32) -> Option<u8> {
-            Some((addr as u8).wrapping_add(1))
-        }
-        fn write(&mut self, _cpu_index: usize, _addr: u32, _data: u8) {}
-    }
-
-    /// A minimal `FrontendMachine`: bumps a frame counter, records inputs,
-    /// paints a solid framebuffer, and optionally exposes the debug bus.
-    struct StubMachine {
-        rec: Rc<RefCell<Recorder>>,
-        bus: StubBus,
-        has_debug: bool,
-    }
-
-    const CONTROLS: &[InputControl] = &[InputControl {
-        id: InputId(7),
-        stable_name: "coin",
-        label: "Coin",
-        kind: InputKind::Button,
-        player: None,
-        default_bindings: &[],
-    }];
-
-    impl MachineCore for StubMachine {
-        fn run_frame(&mut self) {
-            self.rec.borrow_mut().frames += 1;
-        }
-        fn reset(&mut self) {}
-        fn machine_id(&self) -> &str {
-            "stub"
-        }
-    }
-    impl Renderable for StubMachine {
-        fn display_size(&self) -> (u32, u32) {
-            (4, 3)
-        }
-        fn render_frame(&self, buffer: &mut [u8]) {
-            buffer.fill(0xAB);
-        }
-    }
-    impl AudioSource for StubMachine {}
-    impl InputConfigurable for StubMachine {
-        fn input_controls(&self) -> &'static [InputControl] {
-            CONTROLS
-        }
-        fn handle_input(&mut self, event: InputEvent) {
-            self.rec.borrow_mut().inputs.push(event);
-        }
-    }
-    impl MachineDebug for StubMachine {
-        fn debug_bus(&self) -> Option<&dyn BusDebug> {
-            self.has_debug.then_some(&self.bus as &dyn BusDebug)
-        }
-        fn cycles_per_frame(&self) -> u64 {
-            if self.has_debug { 100 } else { 0 }
-        }
-        fn debug_tick(&mut self) -> u32 {
-            if self.has_debug { 0b1 } else { 0 }
-        }
-    }
-    impl DebugTrace for StubMachine {}
-    impl DipSwitches for StubMachine {}
-    impl SaveState for StubMachine {}
-    impl Nvram for StubMachine {}
-    impl Profilable for StubMachine {}
-
-    fn session(has_debug: bool) -> (DebugSession, Rc<RefCell<Recorder>>) {
-        let rec = Rc::new(RefCell::new(Recorder::default()));
-        let machine = StubMachine {
-            rec: Rc::clone(&rec),
-            bus: StubBus { cpu: StubCpu },
-            has_debug,
-        };
-        let session = DebugSession::wrap(Harness::from_machine(Box::new(machine)));
-        (session, rec)
-    }
+    use crate::test_support::{COIN_ID, stub_session as session};
 
     #[test]
     fn run_frames_advances_machine_and_frame_count() {
@@ -388,15 +245,15 @@ mod tests {
             rec.borrow().inputs,
             vec![
                 InputEvent::Button {
-                    id: InputId(7),
+                    id: COIN_ID,
                     pressed: true
                 },
                 InputEvent::Button {
-                    id: InputId(7),
+                    id: COIN_ID,
                     pressed: false
                 },
                 InputEvent::Absolute {
-                    id: InputId(7),
+                    id: COIN_ID,
                     value: 0.5
                 },
             ]
