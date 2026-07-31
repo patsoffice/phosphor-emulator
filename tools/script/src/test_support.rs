@@ -14,9 +14,11 @@ use std::rc::Rc;
 use phosphor_core::core::debug::{BusDebug, DebugCpu, DebugRegister, Debuggable};
 use phosphor_core::core::debug_trace::{DebugEvent, DebugEventKind, DebugTrace};
 use phosphor_core::core::machine::{
-    AudioSource, DipSwitches, FrontendMachine, InputConfigurable, InputControl, InputEvent,
-    InputId, InputKind, MachineCore, MachineDebug, Nvram, Profilable, Renderable, SaveState,
+    AudioSource, DipApplyTiming, DipChoice, DipOption, DipSwitchBank, DipSwitches, FrontendMachine,
+    InputConfigurable, InputControl, InputEvent, InputId, InputKind, MachineCore, MachineDebug,
+    Nvram, Profilable, Renderable, SaveState,
 };
+use phosphor_core::core::save_state::SaveError;
 use phosphor_core::core::watchpoint::{
     DebugAccessSource, WatchpointHit, WatchpointKind, WatchpointPhase,
 };
@@ -145,7 +147,45 @@ struct StubMachine {
     has_debug: bool,
     trace_on: bool,
     events: Vec<DebugEvent>,
+    dip: u8,
 }
+
+/// A tiny DIP bank so the DIP-editing binding can be exercised.
+const STUB_DIP_BANKS: &[DipSwitchBank] = &[DipSwitchBank {
+    name: "TEST",
+    options: &[
+        DipOption {
+            name: "Lives",
+            mask: 0x03,
+            apply: DipApplyTiming::Immediate,
+            choices: &[
+                DipChoice {
+                    label: "3",
+                    value: 0x00,
+                },
+                DipChoice {
+                    label: "5",
+                    value: 0x01,
+                },
+            ],
+        },
+        DipOption {
+            name: "Bonus",
+            mask: 0x0C,
+            apply: DipApplyTiming::OnReset,
+            choices: &[
+                DipChoice {
+                    label: "Low",
+                    value: 0x00,
+                },
+                DipChoice {
+                    label: "High",
+                    value: 0x04,
+                },
+            ],
+        },
+    ],
+}];
 
 const CONTROLS: &[InputControl] = &[InputControl {
     id: COIN_ID,
@@ -228,8 +268,44 @@ impl DebugTrace for StubMachine {
         self.events.clear();
     }
 }
-impl DipSwitches for StubMachine {}
-impl SaveState for StubMachine {}
+impl DipSwitches for StubMachine {
+    fn dip_banks(&self) -> &'static [DipSwitchBank] {
+        STUB_DIP_BANKS
+    }
+    fn dip_bank_value(&self, bank: usize) -> u8 {
+        if bank == 0 { self.dip } else { 0 }
+    }
+    fn set_dip_bank_value(&mut self, bank: usize, value: u8) {
+        if bank == 0 {
+            self.dip = value;
+        }
+    }
+    // set_dip_option uses the default (mask-merge) impl.
+}
+impl SaveState for StubMachine {
+    /// Snapshot is the poke store, encoded as 5-byte (addr LE + value) records.
+    fn save_state(&self) -> Option<Vec<u8>> {
+        let mut out = Vec::with_capacity(self.bus.poked.len() * 5);
+        for (addr, value) in &self.bus.poked {
+            out.extend_from_slice(&addr.to_le_bytes());
+            out.push(*value);
+        }
+        Some(out)
+    }
+    fn load_state(&mut self, data: &[u8]) -> Result<(), SaveError> {
+        if !data.len().is_multiple_of(5) {
+            return Err(SaveError::InvalidFormat(
+                "stub state must be 5-byte records".into(),
+            ));
+        }
+        self.bus.poked.clear();
+        for chunk in data.chunks_exact(5) {
+            let addr = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+            self.bus.poked.insert(addr, chunk[4]);
+        }
+        Ok(())
+    }
+}
 impl Nvram for StubMachine {}
 impl Profilable for StubMachine {}
 
@@ -247,6 +323,7 @@ pub fn stub_machine(has_debug: bool) -> (Box<dyn FrontendMachine>, Rc<RefCell<Re
         has_debug,
         trace_on: false,
         events: Vec::new(),
+        dip: 0,
     };
     (Box::new(machine), rec)
 }

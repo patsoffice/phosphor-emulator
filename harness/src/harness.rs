@@ -157,6 +157,13 @@ impl Harness {
         self.frame
     }
 
+    /// Reset the machine to its power-on state and zero the frame counter.
+    /// Scheduled presses are left intact (they fire relative to frame 0 again).
+    pub fn reset(&mut self) {
+        self.machine.reset();
+        self.frame = 0;
+    }
+
     /// Wrap an already-constructed machine, with no scheduled presses.
     ///
     /// [`build`](Self::build) is the normal entry point (registry → ROM load →

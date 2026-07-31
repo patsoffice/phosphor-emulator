@@ -18,7 +18,7 @@ use std::path::Path;
 
 use phosphor_core::core::debug_hang::{HangDetector, HangReport};
 use phosphor_core::core::debug_trace::DebugEvent;
-use phosphor_core::core::machine::{InputEvent, InputId, Orientation};
+use phosphor_core::core::machine::{DipSwitchBank, InputEvent, InputId, Orientation};
 use phosphor_core::core::watchpoint::{WatchpointCondition, WatchpointHit, WatchpointKind};
 use phosphor_harness::Harness;
 
@@ -291,6 +291,75 @@ impl DebugSession {
         std::mem::take(&mut self.hang_reports)
     }
 
+    /// Snapshot complete machine state, or `None` if unsupported. Pair with
+    /// [`load_state`](Self::load_state) to branch a run and restore.
+    pub fn save_state(&self) -> Option<Vec<u8>> {
+        self.harness.machine().save_state()
+    }
+
+    /// Restore a snapshot taken by [`save_state`](Self::save_state).
+    pub fn load_state(&mut self, data: &[u8]) -> Result<(), String> {
+        self.harness
+            .machine_mut()
+            .load_state(data)
+            .map_err(|e| e.to_string())
+    }
+
+    /// Reset the machine to power-on and zero the frame counter, clearing the
+    /// watchpoint/event/hang accumulators (stale after a reset).
+    pub fn reset(&mut self) {
+        self.harness.reset();
+        self.hits.clear();
+        self.events.clear();
+        self.hang_reports.clear();
+        if let Some(detector) = self.hang.as_mut() {
+            detector.reset();
+        }
+    }
+
+    /// Static DIP-switch bank metadata (names, options, choices) — how a script
+    /// discovers what it can set. Empty for a machine without DIP switches.
+    pub fn dip_banks(&self) -> &'static [DipSwitchBank] {
+        self.harness.machine().dip_banks()
+    }
+
+    /// Live byte value of DIP bank `bank` (0 if out of range).
+    pub fn dip_bank_value(&self, bank: usize) -> u8 {
+        self.harness.machine().dip_bank_value(bank)
+    }
+
+    /// Replace the whole live byte of DIP bank `bank`.
+    pub fn set_dip_bank_value(&mut self, bank: usize, value: u8) {
+        self.harness.machine_mut().set_dip_bank_value(bank, value);
+    }
+
+    /// Set one option within a bank, masking `value` into the bank byte.
+    pub fn set_dip_option(&mut self, bank: usize, option: usize, value: u8) {
+        self.harness
+            .machine_mut()
+            .set_dip_option(bank, option, value);
+    }
+
+    /// Set a DIP option by its name to the choice with the given label. Returns
+    /// `false` if no such option/choice exists — the ergonomic path for sweeping
+    /// configs (`set_dip("Difficulty", "Hard")`). Note: an option whose `apply`
+    /// timing is `OnReset` only takes effect after [`reset`](Self::reset).
+    pub fn set_dip_by_name(&mut self, option: &str, choice: &str) -> bool {
+        let banks = self.harness.machine().dip_banks();
+        for (bi, bank) in banks.iter().enumerate() {
+            for (oi, opt) in bank.options.iter().enumerate() {
+                if opt.name == option
+                    && let Some(ch) = opt.choices.iter().find(|c| c.label == choice)
+                {
+                    let value = ch.value;
+                    self.harness.machine_mut().set_dip_option(bi, oi, value);
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     /// Apply an *immediate* button edge to the control named `name`. Unknown
     /// names are ignored. Distinct from the harness's *scheduled* presses: this
     /// fires now, letting a script drive a timeline imperatively
@@ -483,6 +552,59 @@ mod tests {
         assert_eq!(hangs[0].pc, 0x1234);
         assert!(hangs[0].frames_stuck >= 3);
         assert!(s.take_hangs().is_empty());
+    }
+
+    #[test]
+    fn save_and_load_state_round_trip() {
+        let (mut s, _) = session(true);
+        s.poke(0, 0x50, 0xAA);
+        assert_eq!(s.read(0, 0x50), Some(0xAA));
+        let snap = s.save_state().expect("stub supports save state");
+        s.poke(0, 0x50, 0xBB);
+        assert_eq!(s.read(0, 0x50), Some(0xBB));
+        s.load_state(&snap).unwrap();
+        assert_eq!(s.read(0, 0x50), Some(0xAA)); // restored to the snapshot
+    }
+
+    #[test]
+    fn load_state_rejects_bad_data() {
+        let (mut s, _) = session(true);
+        assert!(s.load_state(&[1, 2, 3]).is_err()); // not a whole number of records
+    }
+
+    #[test]
+    fn reset_zeroes_frames_and_clears_accumulators() {
+        let (mut s, _) = session(true);
+        s.set_trace(true);
+        s.run_frames(3);
+        assert_eq!(s.frame_count(), 3);
+        s.reset();
+        assert_eq!(s.frame_count(), 0);
+        assert!(s.take_events().is_empty());
+    }
+
+    #[test]
+    fn dip_editing() {
+        let (mut s, _) = session(true);
+
+        let banks = s.dip_banks();
+        assert_eq!(banks.len(), 1);
+        assert_eq!(banks[0].name, "TEST");
+        assert_eq!(banks[0].options[0].name, "Lives");
+
+        s.set_dip_bank_value(0, 0x05);
+        assert_eq!(s.dip_bank_value(0), 0x05);
+
+        // Masked option write: Bonus (mask 0x0C) := 0x04 leaves the Lives bits.
+        s.set_dip_option(0, 1, 0x04);
+        assert_eq!(s.dip_bank_value(0) & 0x0C, 0x04);
+        assert_eq!(s.dip_bank_value(0) & 0x03, 0x01);
+
+        // By-name setter.
+        assert!(s.set_dip_by_name("Lives", "5"));
+        assert_eq!(s.dip_bank_value(0) & 0x03, 0x01);
+        assert!(!s.set_dip_by_name("Nonexistent", "x"));
+        assert!(!s.set_dip_by_name("Lives", "99")); // unknown choice label
     }
 
     #[test]

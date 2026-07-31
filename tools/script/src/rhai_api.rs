@@ -13,10 +13,11 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use rhai::{Array, Dynamic, Engine, EvalAltResult, Map};
+use rhai::{Array, Blob, Dynamic, Engine, EvalAltResult, Map};
 
 use phosphor_core::core::debug_hang::HangReport;
 use phosphor_core::core::debug_trace::DebugEvent;
+use phosphor_core::core::machine::{DipApplyTiming, DipOption, DipSwitchBank};
 use phosphor_core::core::watchpoint::{
     DebugAccessSource, WatchpointCondition, WatchpointHit, WatchpointKind,
 };
@@ -212,6 +213,52 @@ fn register_machine(engine: &mut Engine) {
             .collect()
     });
 
+    // --- Save state / reset ---
+    engine.register_fn(
+        "save_state",
+        |m: &mut Machine| -> Result<Blob, Box<EvalAltResult>> {
+            m.borrow()
+                .save_state()
+                .ok_or_else(|| "machine does not support save states".into())
+        },
+    );
+    engine.register_fn(
+        "load_state",
+        |m: &mut Machine, data: Blob| -> Result<(), Box<EvalAltResult>> {
+            m.borrow_mut().load_state(&data).map_err(|e| e.into())
+        },
+    );
+    engine.register_fn("reset", |m: &mut Machine| {
+        m.borrow_mut().reset();
+    });
+
+    // --- DIP switches ---
+    // `dip_banks()` exposes the metadata a script needs to find an option;
+    // `set_dip(option, choice)` is the ergonomic by-name setter for sweeps.
+    engine.register_fn("dip_banks", |m: &mut Machine| -> Array {
+        m.borrow().dip_banks().iter().map(dip_bank_to_map).collect()
+    });
+    engine.register_fn("dip_bank", |m: &mut Machine, bank: i64| -> i64 {
+        i64::from(m.borrow().dip_bank_value(bank as usize))
+    });
+    engine.register_fn("set_dip_bank", |m: &mut Machine, bank: i64, value: i64| {
+        m.borrow_mut()
+            .set_dip_bank_value(bank as usize, value as u8);
+    });
+    engine.register_fn(
+        "set_dip_option",
+        |m: &mut Machine, bank: i64, option: i64, value: i64| {
+            m.borrow_mut()
+                .set_dip_option(bank as usize, option as usize, value as u8);
+        },
+    );
+    engine.register_fn(
+        "set_dip",
+        |m: &mut Machine, option: &str, choice: &str| -> bool {
+            m.borrow_mut().set_dip_by_name(option, choice)
+        },
+    );
+
     // --- Capture ---
     engine.register_fn(
         "screenshot",
@@ -315,6 +362,39 @@ fn event_to_map(event: &DebugEvent) -> Dynamic {
     map.insert("region".into(), event.region.unwrap_or("").into());
     map.insert("device".into(), event.device.unwrap_or("").into());
     map.insert("detail".into(), event.detail.unwrap_or("").into());
+    Dynamic::from_map(map)
+}
+
+/// Convert a DIP bank's static metadata into a script-visible map:
+/// `{ name, options: [{ name, mask, apply, choices: [{ label, value }] }] }`.
+fn dip_bank_to_map(bank: &DipSwitchBank) -> Dynamic {
+    let mut map = Map::new();
+    map.insert("name".into(), bank.name.into());
+    let options: Array = bank.options.iter().map(dip_option_to_map).collect();
+    map.insert("options".into(), Dynamic::from_array(options));
+    Dynamic::from_map(map)
+}
+
+fn dip_option_to_map(option: &DipOption) -> Dynamic {
+    let mut map = Map::new();
+    map.insert("name".into(), option.name.into());
+    map.insert("mask".into(), i64::from(option.mask).into());
+    let apply = match option.apply {
+        DipApplyTiming::Immediate => "immediate",
+        DipApplyTiming::OnReset => "on_reset",
+    };
+    map.insert("apply".into(), apply.into());
+    let choices: Array = option
+        .choices
+        .iter()
+        .map(|c| {
+            let mut cm = Map::new();
+            cm.insert("label".into(), c.label.into());
+            cm.insert("value".into(), i64::from(c.value).into());
+            Dynamic::from_map(cm)
+        })
+        .collect();
+    map.insert("choices".into(), Dynamic::from_array(choices));
     Dynamic::from_map(map)
 }
 
@@ -479,6 +559,48 @@ mod tests {
         assert_eq!(h["cpu"].as_int().unwrap(), 0);
         assert_eq!(h["pc"].as_int().unwrap(), 0x1234);
         assert!(h["frames_stuck"].as_int().unwrap() >= 3);
+    }
+
+    #[test]
+    fn save_load_state_via_script() {
+        let (engine, mut scope, _m) = engine_with_m(true);
+        let restored = engine
+            .eval_with_scope::<i64>(
+                &mut scope,
+                r#"
+                    m.poke(0, 0x50, 0xAA);
+                    let snap = m.save_state();
+                    m.poke(0, 0x50, 0xBB);
+                    m.load_state(snap);
+                    m.read(0, 0x50)
+                "#,
+            )
+            .unwrap();
+        assert_eq!(restored, 0xAA);
+    }
+
+    #[test]
+    fn dip_editing_via_script() {
+        let (engine, mut scope, _m) = engine_with_m(true);
+
+        let banks = engine
+            .eval_with_scope::<Array>(&mut scope, "m.dip_banks()")
+            .unwrap();
+        assert_eq!(banks.len(), 1);
+        let bank = banks[0].clone().cast::<Map>();
+        assert_eq!(bank["name"].clone().into_string().unwrap(), "TEST");
+
+        assert!(
+            engine
+                .eval_with_scope::<bool>(&mut scope, r#"m.set_dip("Lives", "5")"#)
+                .unwrap()
+        );
+        assert_eq!(
+            engine
+                .eval_with_scope::<i64>(&mut scope, "m.dip_bank(0) & 0x03")
+                .unwrap(),
+            0x01
+        );
     }
 
     #[test]

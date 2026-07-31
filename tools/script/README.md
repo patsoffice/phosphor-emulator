@@ -157,16 +157,56 @@ threshold); `detect_hangs(window, threshold)` overrides them.
 `window` bytes for `threshold` frames reports once, then stays quiet until it
 moves on.
 
+### Save state & reset
+
+Snapshot machine state and restore it later — branch a run, or make a long
+scripted run cheap to re-enter without replaying from reset. The snapshot is a
+`Blob` the script holds in a variable.
+
+| Rhai | Returns |
+|---|---|
+| `m.save_state()` | `Blob` — a snapshot (throws if the machine has no save-state support) |
+| `m.load_state(blob)` | `()` — restore a snapshot (throws on a bad/incompatible blob) |
+| `m.reset()` | `()` — power-on reset; zeroes the frame counter and clears the watchpoint/event/hang accumulators |
+
+```rhai
+m.run_frames(3100);
+let checkpoint = m.save_state();
+m.input("coin1", true); m.run_frames(8); m.input("coin1", false);
+m.run_frames(600);
+m.load_state(checkpoint);        // back to the attract screen, no replay
+```
+
+### DIP switches
+
+Read and edit DIP configuration — sweep coinage, lives, difficulty, or bonus
+thresholds without recompiling or hand-editing NVRAM.
+
+| Rhai | Returns |
+|---|---|
+| `m.dip_banks()` | `[Map]` — bank metadata (see below) |
+| `m.dip_bank(bank)` | `int` — live byte of a bank |
+| `m.set_dip_bank(bank, value)` | `()` — replace a bank's whole byte |
+| `m.set_dip_option(bank, option, value)` | `()` — set one option (masked into the byte) |
+| `m.set_dip(option_name, choice_label)` | `bool` — set by name; `false` if not found |
+
+`dip_banks()` returns `{ name, options: [{ name, mask, apply, choices:
+[{ label, value }] }] }`; `apply` is `"immediate"` or `"on_reset"` (an
+`on_reset` option only takes effect after `m.reset()`). `set_dip` is the
+ergonomic path — `m.set_dip("Difficulty", "Hard")` — resolving the option and
+choice from that metadata.
+
 ### Determinism & safety
 
 - No ambient time or RNG — Rhai's default engine exposes neither, and the
   bindings add none.
 - Runaway guards: the engine caps total operations and call-nesting depth, so an
   infinite loop or unbounded recursion always terminates.
-- Mostly read-first: apart from `poke`, a script only observes and drives
-  legitimate inputs. A poke is an explicit debug write (not disguised hardware
-  state); the `DebugAccessSource::Frontend` trace-tagging that makes that
-  explicit in a recorded trace is a tracked follow-up.
+- Read-first at heart: most of the surface observes and drives legitimate
+  inputs. The writes it does allow — `poke`, DIP edits, `load_state`, `reset` —
+  are explicit debug operations, not disguised hardware state. (A `poke` does
+  not yet emit a `DebugAccessSource::Frontend` trace event; that tagging is a
+  tracked follow-up.)
 
 ## Examples
 
