@@ -69,9 +69,11 @@ impl DebugCpu for StubCpu {
     }
 }
 
-/// A tiny bus: one CPU and a seeded read (`addr` low byte + 1).
+/// A tiny bus: one CPU, a seeded read (`addr` low byte + 1), and a poke store
+/// so a poked byte reads back (a poke overrides the seed at that address).
 struct StubBus {
     cpu: StubCpu,
+    poked: std::collections::HashMap<u32, u8>,
 }
 
 impl BusDebug for StubBus {
@@ -82,9 +84,16 @@ impl BusDebug for StubBus {
         vec![("cpu0", &self.cpu)]
     }
     fn read(&self, _cpu_index: usize, addr: u32) -> Option<u8> {
-        Some((addr as u8).wrapping_add(1))
+        Some(
+            self.poked
+                .get(&addr)
+                .copied()
+                .unwrap_or((addr as u8).wrapping_add(1)),
+        )
     }
-    fn write(&mut self, _cpu_index: usize, _addr: u32, _data: u8) {}
+    fn write(&mut self, _cpu_index: usize, addr: u32, data: u8) {
+        self.poked.insert(addr, data);
+    }
 }
 
 /// A minimal `FrontendMachine`: bumps a frame counter, records inputs, paints a
@@ -134,6 +143,9 @@ impl MachineDebug for StubMachine {
     fn debug_bus(&self) -> Option<&dyn BusDebug> {
         self.has_debug.then_some(&self.bus as &dyn BusDebug)
     }
+    fn debug_bus_mut(&mut self) -> Option<&mut dyn BusDebug> {
+        self.has_debug.then_some(&mut self.bus as &mut dyn BusDebug)
+    }
     fn cycles_per_frame(&self) -> u64 {
         if self.has_debug { 100 } else { 0 }
     }
@@ -152,7 +164,10 @@ pub fn stub_machine(has_debug: bool) -> (Box<dyn FrontendMachine>, Rc<RefCell<Re
     let rec = Rc::new(RefCell::new(Recorder::default()));
     let machine = StubMachine {
         rec: Rc::clone(&rec),
-        bus: StubBus { cpu: StubCpu },
+        bus: StubBus {
+            cpu: StubCpu,
+            poked: std::collections::HashMap::new(),
+        },
         has_debug,
     };
     (Box::new(machine), rec)

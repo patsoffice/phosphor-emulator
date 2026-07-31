@@ -74,6 +74,12 @@ fn register_machine(engine: &mut Engine) {
     engine.register_fn("step", |m: &mut Machine| -> i64 {
         i64::from(m.borrow_mut().step())
     });
+    engine.register_fn(
+        "poke",
+        |m: &mut Machine, cpu: i64, addr: i64, data: i64| -> bool {
+            m.borrow_mut().poke(cpu as usize, addr as u32, data as u8)
+        },
+    );
     engine.register_fn("input", |m: &mut Machine, name: &str, on: bool| {
         m.borrow_mut().input(name, on);
     });
@@ -168,6 +174,31 @@ mod tests {
             .eval_with_scope::<i64>(&mut scope, "m.read(0, 0x10)")
             .unwrap();
         assert_eq!(v, -1);
+    }
+
+    #[test]
+    fn poke_then_read_via_script() {
+        let (engine, mut scope, _m) = engine_with_m(true);
+        let v = engine
+            .eval_with_scope::<i64>(&mut scope, "m.poke(0, 0x20, 0xEE); m.read(0, 0x20)")
+            .unwrap();
+        assert_eq!(v, 0xEE);
+        // poke reports whether the machine has a debug bus.
+        assert!(
+            engine
+                .eval_with_scope::<bool>(&mut scope, "m.poke(0, 0x21, 1)")
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn poke_without_debug_returns_false_via_script() {
+        let (engine, mut scope, _m) = engine_with_m(false);
+        assert!(
+            !engine
+                .eval_with_scope::<bool>(&mut scope, "m.poke(0, 0x20, 0xEE)")
+                .unwrap()
+        );
     }
 
     #[test]

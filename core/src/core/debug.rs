@@ -87,6 +87,20 @@ pub trait BusDebug {
     /// writes above `0xFFFF`.
     fn write(&mut self, cpu_index: usize, addr: u32, data: u8);
 
+    /// Poke a byte as a *debugger* write — a frontend/script poke, as opposed
+    /// to a machine-driven store.
+    ///
+    /// The default forwards to [`write`](Self::write); it exists as a distinct
+    /// seam so a later revision can record a
+    /// [`DebugAccessSource::Frontend`](crate::core::watchpoint::DebugAccessSource::Frontend)
+    /// event here — letting pokes surface in the event trace instead of
+    /// masquerading as hardware state — without changing `write`'s contract.
+    /// (Tracked as a follow-up; not observable until a script/console can
+    /// record a trace.)
+    fn poke(&mut self, cpu_index: usize, addr: u32, data: u8) {
+        self.write(cpu_index, addr, data);
+    }
+
     /// Side-effect-free memory read with full address semantics: backed
     /// memory (value returned), mapped I/O (reading the live device would
     /// have side effects), or unmapped.

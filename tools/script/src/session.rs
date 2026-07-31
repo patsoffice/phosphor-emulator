@@ -113,6 +113,24 @@ impl DebugSession {
         Some(format!("{}", c.debug_disassemble(addr, &bytes)))
     }
 
+    /// Poke `data` into `cpu`'s address space (a debugger write). Returns
+    /// `false` for a machine without debug support (nothing written). Backed
+    /// RAM takes the value; I/O and unmapped addresses are ignored by the
+    /// board's write, exactly as a memory-viewer poke would be.
+    ///
+    /// This is the one write in the otherwise read-first surface: a poke is an
+    /// explicit debug operation, distinct from the legitimate machine inputs
+    /// [`input`](Self::input) drives.
+    pub fn poke(&mut self, cpu: usize, addr: u32, data: u8) -> bool {
+        match self.harness.machine_mut().debug_bus_mut() {
+            Some(bus) => {
+                bus.poke(cpu, addr, data);
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Apply an *immediate* button edge to the control named `name`. Unknown
     /// names are ignored. Distinct from the harness's *scheduled* presses: this
     /// fires now, letting a script drive a timeline imperatively
@@ -221,6 +239,20 @@ mod tests {
         let (mut s, _) = session(true);
         assert_eq!(s.read(0, 0x10), Some(0x11));
         assert_eq!(s.read(0, 0x00), Some(0x01));
+    }
+
+    #[test]
+    fn poke_writes_back_and_read_reflects_it() {
+        let (mut s, _) = session(true);
+        assert_eq!(s.read(0, 0x20), Some(0x21)); // seed before poke
+        assert!(s.poke(0, 0x20, 0xEE));
+        assert_eq!(s.read(0, 0x20), Some(0xEE)); // poked value overrides seed
+    }
+
+    #[test]
+    fn poke_without_debug_support_returns_false() {
+        let (mut s, _) = session(false);
+        assert!(!s.poke(0, 0x20, 0xEE));
     }
 
     #[test]

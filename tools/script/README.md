@@ -37,10 +37,10 @@ stderr and the process exits non-zero.
 
 ## API
 
-v1 is **read-first**: a script can observe machine state and drive inputs, but
-not poke memory/registers (pokes, watchpoints, event-trace, save-state, and DIP
-editing are deferred to v2). Every method maps 1:1 onto a `DebugSession`
-accessor.
+The surface is **read-first plus a memory poke**: a script observes machine
+state, drives inputs, and can poke bytes into memory. Register pokes,
+watchpoints, event-trace, save-state, and DIP editing are deferred to v2. Every
+method maps 1:1 onto a `DebugSession` accessor.
 
 ### Global functions
 
@@ -58,6 +58,7 @@ accessor.
 | `m.pc(cpu)` | `pc` | `int` — program counter, or `-1` if none |
 | `m.regs(cpu)` | `regs` | `Map` — register name → value |
 | `m.disasm(cpu, addr)` | `disasm` | `String` — one instruction (empty if no debug support) |
+| `m.poke(cpu, addr, value)` | `poke` | `bool` — write a debug byte; `false` if the machine has no debug support |
 | `m.input(name, on)` | `input` | `()` — immediate button edge, by stable control name |
 | `m.input_axis(name, v)` | `input_axis` | `()` — immediate analog value (`-1.0..=1.0`) |
 | `m.screenshot(path)` | `screenshot` | `()` — render current frame to an RGB PNG. Throws on error |
@@ -69,14 +70,22 @@ accessor.
 `coin1`, `p1_start`); see a machine's `input_controls()` for the list. Unknown
 names are ignored.
 
+`poke` writes to backed RAM; I/O and unmapped addresses are ignored (as a
+memory-viewer poke would be). It is an explicit *debug* write, distinct from the
+legitimate machine inputs `input` drives. A poke does not yet emit a
+`DebugAccessSource::Frontend` event in the event trace — that tagging is a
+follow-up, and is unobservable until a script/console can record a trace.
+
 ### Determinism & safety
 
 - No ambient time or RNG — Rhai's default engine exposes neither, and the
   bindings add none.
 - Runaway guards: the engine caps total operations and call-nesting depth, so an
   infinite loop or unbounded recursion always terminates.
-- Read-first ⇒ replay-honest by construction: a script can only observe and
-  drive legitimate inputs.
+- Mostly read-first: apart from `poke`, a script only observes and drives
+  legitimate inputs. A poke is an explicit debug write (not disguised hardware
+  state); the `DebugAccessSource::Frontend` trace-tagging that makes that
+  explicit in a recorded trace is a tracked follow-up.
 
 ## Examples
 
