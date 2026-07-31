@@ -144,4 +144,30 @@ impl Harness {
     pub fn machine_mut(&mut self) -> &mut dyn FrontendMachine {
         &mut *self.machine
     }
+
+    /// Shared access to the booted machine (for the `&self` inspection
+    /// accessors — `display_size`, `machine_id`, and other side-effect-free
+    /// reads).
+    pub fn machine(&self) -> &dyn FrontendMachine {
+        &*self.machine
+    }
+
+    /// Number of frames run so far via [`run_frame`](Self::run_frame).
+    pub fn frame_count(&self) -> usize {
+        self.frame
+    }
+
+    /// Wrap an already-constructed machine, with no scheduled presses.
+    ///
+    /// [`build`](Self::build) is the normal entry point (registry → ROM load →
+    /// create → reset). This constructor is for callers that already hold a
+    /// booted machine: unit tests that inject a stub, and the deferred
+    /// in-frontend console that binds the *live* machine.
+    pub fn from_machine(machine: Box<dyn FrontendMachine>) -> Self {
+        Self {
+            machine,
+            presses: Vec::new(),
+            frame: 0,
+        }
+    }
 }

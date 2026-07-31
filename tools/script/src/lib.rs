@@ -16,3 +16,5 @@
 
 pub mod rhai_api;
 pub mod session;
+
+pub use session::DebugSession;
