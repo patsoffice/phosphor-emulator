@@ -2,78 +2,70 @@
 //! a direct ZIP file, or a directory of loose ROM files.
 
 use phosphor_machines::rom_loader::{RomLoadError, RomSet};
-use std::fs::File;
-use std::io::BufReader;
 use std::path::Path;
 
-/// Resolve a ROM path and load all ROM files into a [`RomSet`].
+/// Resolve a ROM-set path into a [`RomSet`].
 ///
 /// Resolution order:
-/// 1. If `path` ends with `.zip` → load directly as a ZIP archive.
-/// 2. If `path` is a directory containing `{machine_name}.zip` → load that ZIP.
-/// 3. If `path` is a directory of loose files → load via [`RomSet::from_directory`].
-pub fn load_rom_set(machine_name: &str, path: &str) -> Result<RomSet, RomLoadError> {
-    let path = Path::new(path);
+/// 1. `path` ends with `.zip` → load that archive.
+/// 2. `path` is a directory containing `{rom_name}.zip` (any provided name) → load it.
+/// 3. `path` is a directory of loose files → [`RomSet::from_directory`].
+pub fn load_rom_set(path: &str, rom_names: &[&str]) -> Result<RomSet, RomLoadError> {
+    let p = Path::new(path);
 
-    // Direct ZIP file
-    if path
-        .extension()
+    if p.extension()
         .is_some_and(|ext| ext.eq_ignore_ascii_case("zip"))
     {
-        return load_from_zip(path);
+        return load_from_zip(p);
     }
 
-    // MAME-style rompath: directory containing {machine}.zip
-    if path.is_dir() {
-        let zip_path = path.join(format!("{machine_name}.zip"));
-        if zip_path.exists() {
-            return load_from_zip(&zip_path);
+    if p.is_dir() {
+        for name in rom_names {
+            let zip_path = p.join(format!("{name}.zip"));
+            if zip_path.exists() {
+                return load_from_zip(&zip_path);
+            }
         }
-
-        // Fallback: directory of loose ROM files
-        return RomSet::from_directory(path);
+        return RomSet::from_directory(p);
     }
 
     Err(RomLoadError::Io(std::io::Error::new(
         std::io::ErrorKind::NotFound,
-        format!("ROM path not found: {}", path.display()),
+        format!("ROM path not found: {}", p.display()),
     )))
 }
 
-/// Extract all files from a ZIP archive into a [`RomSet`].
+/// Extract every file from a ZIP archive into a [`RomSet`].
 fn load_from_zip(path: &Path) -> Result<RomSet, RomLoadError> {
-    let file = File::open(path)?;
-    let reader = BufReader::new(file);
-    let mut archive = zip::ZipArchive::new(reader).map_err(|e| {
-        std::io::Error::new(std::io::ErrorKind::InvalidData, format!("invalid ZIP: {e}"))
-    })?;
+    let file = std::fs::File::open(path)?;
+    let reader = std::io::BufReader::new(file);
+    let mut archive = zip::ZipArchive::new(reader).map_err(zip_err)?;
 
     let mut entries = Vec::with_capacity(archive.len());
     for i in 0..archive.len() {
-        let mut entry = archive.by_index(i).map_err(|e| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("ZIP entry error: {e}"),
-            )
-        })?;
-
-        // Skip directories
+        let mut entry = archive.by_index(i).map_err(zip_err)?;
         if entry.is_dir() {
             continue;
         }
-
         let name = entry.name().to_string();
         let mut data = Vec::with_capacity(entry.size() as usize);
         std::io::Read::read_to_end(&mut entry, &mut data)?;
         entries.push((name, data));
     }
-
     Ok(RomSet::from_entries(entries))
+}
+
+fn zip_err(e: zip::result::ZipError) -> RomLoadError {
+    RomLoadError::Io(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        format!("ZIP error: {e}"),
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs::File;
     use std::io::Write;
 
     fn create_test_zip(dir: &Path, name: &str, files: &[(&str, &[u8])]) -> std::path::PathBuf {
@@ -98,7 +90,7 @@ mod tests {
 
         let zip_path = create_test_zip(&dir, "joust.zip", &[("rom.bin", &[0xAA; 16])]);
 
-        let rom_set = load_rom_set("joust", zip_path.to_str().unwrap()).unwrap();
+        let rom_set = load_rom_set(zip_path.to_str().unwrap(), &["joust"]).unwrap();
         assert_eq!(rom_set.get("rom.bin"), Some(&[0xAA; 16][..]));
 
         std::fs::remove_dir_all(&dir).unwrap();
@@ -112,7 +104,7 @@ mod tests {
 
         create_test_zip(&dir, "joust.zip", &[("rom.bin", &[0xBB; 8])]);
 
-        let rom_set = load_rom_set("joust", dir.to_str().unwrap()).unwrap();
+        let rom_set = load_rom_set(dir.to_str().unwrap(), &["joust"]).unwrap();
         assert_eq!(rom_set.get("rom.bin"), Some(&[0xBB; 8][..]));
 
         std::fs::remove_dir_all(&dir).unwrap();
@@ -126,7 +118,7 @@ mod tests {
 
         std::fs::write(dir.join("test.rom"), [0xCC; 4]).unwrap();
 
-        let rom_set = load_rom_set("joust", dir.to_str().unwrap()).unwrap();
+        let rom_set = load_rom_set(dir.to_str().unwrap(), &["joust"]).unwrap();
         assert_eq!(rom_set.get("test.rom"), Some(&[0xCC; 4][..]));
 
         std::fs::remove_dir_all(&dir).unwrap();

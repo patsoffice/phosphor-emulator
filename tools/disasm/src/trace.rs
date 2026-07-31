@@ -36,7 +36,7 @@ use phosphor_core::core::watchpoint::{
 };
 use phosphor_core::cpu::disasm::DisassembledInstruction;
 
-use crate::harness::{Harness, PressSpec};
+use phosphor_harness::{Harness, PressSpec};
 
 /// Output serialization for a trace run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]

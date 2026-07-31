@@ -1,0 +1,9 @@
+[package]
+name = "phosphor-harness"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+phosphor-core = { path = "../core" }
+phosphor-machines = { path = "../machines" }
+zip = "2"

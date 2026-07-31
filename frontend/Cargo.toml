@@ -10,8 +10,8 @@ path = "src/main.rs"
 [dependencies]
 phosphor-core = { path = "../core" }
 phosphor-machines = { path = "../machines" }
+phosphor-harness = { path = "../harness" }
 sdl2 = "0.38"
-zip = "2"
 egui_sdl2_gl = { version = "0.33", default-features = false }
 egui = "0.33"
 gl = "0.14"

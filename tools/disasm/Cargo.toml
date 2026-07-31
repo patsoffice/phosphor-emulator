@@ -10,6 +10,6 @@ path = "src/main.rs"
 [dependencies]
 phosphor-core = { path = "../../core" }
 phosphor-machines = { path = "../../machines" }
+phosphor-harness = { path = "../../harness" }
 clap = { version = "4", features = ["derive"] }
-zip = "2"
 png = "0.17"

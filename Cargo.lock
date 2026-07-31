@@ -782,9 +782,9 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "phosphor-core",
+ "phosphor-harness",
  "phosphor-machines",
  "png",
- "zip",
 ]
 
 [[package]]
@@ -797,11 +797,20 @@ dependencies = [
  "egui_sdl2_gl",
  "gl",
  "phosphor-core",
+ "phosphor-harness",
  "phosphor-machines",
  "png",
  "sdl2",
  "serde",
  "toml",
+]
+
+[[package]]
+name = "phosphor-harness"
+version = "0.1.0"
+dependencies = [
+ "phosphor-core",
+ "phosphor-machines",
  "zip",
 ]
 

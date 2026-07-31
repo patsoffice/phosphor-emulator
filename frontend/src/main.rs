@@ -10,7 +10,6 @@ mod headless;
 mod input;
 mod overlay;
 mod profile;
-mod rom_path;
 mod screenshot;
 mod settings_ui;
 mod state;
@@ -331,7 +330,7 @@ fn create_from_first_rom_set(
 
     let mut last_err = None;
     for name in entry.rom_names {
-        let rom_set = match rom_path::load_rom_set(name, path) {
+        let rom_set = match phosphor_harness::load_rom_set(path, &[name]) {
             Ok(set) => set,
             Err(e) => {
                 last_err = Some(e);

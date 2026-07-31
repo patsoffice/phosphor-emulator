@@ -14,11 +14,12 @@ SDL2-based display, audio, and input handling. This is the only crate with exter
 - `settings_ui.rs` - egui settings panels (F12); input rebinding panel with click-to-capture, persisted per machine in `state.toml`
 - `state.rs` - Auto-saved session state (`state.toml`): window position + a unified per-machine `[machines.<name>]` section (`MachineSettings`: per-game config overrides for scale/ROM/NVRAM/save paths, plus diff-only DIP + input-binding state). Keyed by registry/CLI name; migrates legacy top-level `input_bindings`/`dip_switches` maps on load
 - `vector_gl.rs` - OpenGL vector display renderer (for DVG machines)
-- `rom_path.rs` - ROM file discovery, path resolution, ZIP archive extraction
+
+ROM path resolution (directory / ZIP / loose files) lives in the shared `phosphor-harness` crate (`load_rom_set`), used here and by the disasm tools.
 
 ## Dependencies
 
 - Requires SDL2: `brew install sdl2`
 - `.cargo/config.toml` configures the Homebrew library path for aarch64-apple-darwin
 - Uses egui/GL for debug UI panels and vector display rendering
-- Uses zip crate for ROM archive loading
+- ROM archive (ZIP) loading is handled by `phosphor-harness`

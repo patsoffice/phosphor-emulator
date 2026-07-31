@@ -63,15 +63,16 @@ cargo run -p phosphor-disasm --bin disasm -- machine --machine mariobros --regio
 
 ### Workspace Crates
 
-| Crate                      | Purpose                                 | Dependencies                                          |
-|----------------------------|-----------------------------------------|-------------------------------------------------------|
-| `phosphor-core`            | CPU implementations, Bus trait, devices | phosphor-macros                                       |
-| `phosphor-macros`          | Proc macros                             | syn, quote, proc-macro2                               |
-| `phosphor-machines`        | Arcade/system board implementations     | phosphor-core, phosphor-macros, inventory             |
-| `phosphor-frontend`        | SDL2 display, audio, input, debug UI    | phosphor-core, phosphor-machines, sdl2, egui, gl, zip |
-| `phosphor-cpu-validation`  | Test vector generation & validation     | phosphor-core, serde, serde_json, rand, flate2        |
-| `phosphor-disasm`          | Standalone ROM disassembler CLI         | phosphor-core, phosphor-machines, clap, zip           |
-| `cross-validation`         | C++ cross-validate against ref emulators| (non-Cargo, uses Makefile)                            |
+| Crate                      | Purpose                                   | Dependencies                                          |
+|----------------------------|-------------------------------------------|-------------------------------------------------------|
+| `phosphor-core`            | CPU implementations, Bus trait, devices   | phosphor-macros                                       |
+| `phosphor-macros`          | Proc macros                               | syn, quote, proc-macro2                               |
+| `phosphor-machines`        | Arcade/system board implementations       | phosphor-core, phosphor-macros, inventory             |
+| `phosphor-harness`         | Headless boot harness + ROM-path resolver | phosphor-core, phosphor-machines, zip                 |
+| `phosphor-frontend`        | SDL2 display, audio, input, debug UI      | phosphor-core, phosphor-machines, phosphor-harness, sdl2, egui, gl |
+| `phosphor-cpu-validation`  | Test vector generation & validation       | phosphor-core, serde, serde_json, rand, flate2        |
+| `phosphor-disasm`          | Standalone ROM disassembler CLI           | phosphor-core, phosphor-machines, phosphor-harness, clap |
+| `cross-validation`         | C++ cross-validate against ref emulators  | (non-Cargo, uses Makefile)                            |
 
 - Never create circular dependencies between crates
 

@@ -19,7 +19,6 @@
 //! - `imgdiff`   — compare two RGB PNGs and report the pixel diff percentage,
 //!   optionally writing a red-highlight image of the differing pixels.
 
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -30,13 +29,12 @@ use phosphor_core::gfx::decode::decode_gfx;
 use phosphor_machines::disasm_registry::{self, DisasmCpu};
 use phosphor_machines::gfx_registry;
 use phosphor_machines::registry;
-use phosphor_machines::rom_loader::{RomLoadError, RomSet};
+
+use phosphor_harness::{Harness, load_rom_set};
 
 mod gfxsheet;
-mod harness;
 mod trace;
 use gfxsheet::SheetConfig;
-use harness::Harness;
 use trace::TraceFormat;
 
 #[derive(Parser)]
@@ -887,64 +885,6 @@ fn parse_u32_auto(s: &str) -> Result<u32, String> {
         None => (10, t),
     };
     u32::from_str_radix(digits, radix).map_err(|e| format!("invalid number '{s}': {e}"))
-}
-
-/// Resolve a ROM-set path into a [`RomSet`].
-///
-/// Adapted from the frontend's `rom_path::load_rom_set`. Resolution order:
-/// 1. `path` ends with `.zip` → load that archive.
-/// 2. `path` is a directory containing `{rom_name}.zip` (any provided name) → load it.
-/// 3. `path` is a directory of loose files → [`RomSet::from_directory`].
-fn load_rom_set(path: &str, rom_names: &[&str]) -> Result<RomSet, RomLoadError> {
-    let p = Path::new(path);
-
-    if p.extension()
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("zip"))
-    {
-        return load_from_zip(p);
-    }
-
-    if p.is_dir() {
-        for name in rom_names {
-            let zip_path = p.join(format!("{name}.zip"));
-            if zip_path.exists() {
-                return load_from_zip(&zip_path);
-            }
-        }
-        return RomSet::from_directory(p);
-    }
-
-    Err(RomLoadError::Io(std::io::Error::new(
-        std::io::ErrorKind::NotFound,
-        format!("ROM path not found: {}", p.display()),
-    )))
-}
-
-/// Extract every file from a ZIP archive into a [`RomSet`].
-fn load_from_zip(path: &Path) -> Result<RomSet, RomLoadError> {
-    let file = std::fs::File::open(path)?;
-    let reader = std::io::BufReader::new(file);
-    let mut archive = zip::ZipArchive::new(reader).map_err(zip_err)?;
-
-    let mut entries = Vec::with_capacity(archive.len());
-    for i in 0..archive.len() {
-        let mut entry = archive.by_index(i).map_err(zip_err)?;
-        if entry.is_dir() {
-            continue;
-        }
-        let name = entry.name().to_string();
-        let mut data = Vec::with_capacity(entry.size() as usize);
-        entry.read_to_end(&mut data)?;
-        entries.push((name, data));
-    }
-    Ok(RomSet::from_entries(entries))
-}
-
-fn zip_err(e: zip::result::ZipError) -> RomLoadError {
-    RomLoadError::Io(std::io::Error::new(
-        std::io::ErrorKind::InvalidData,
-        format!("ZIP error: {e}"),
-    ))
 }
 
 #[cfg(test)]
