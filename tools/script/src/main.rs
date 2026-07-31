@@ -1,13 +1,18 @@
 //! `phosphor-script` CLI — a headless Rhai script runner for phosphor machines.
 //!
-//! Skeleton only: the `run` subcommand is wired for argument parsing but not yet
-//! implemented. The engine, bindings, and `run` body land in follow-ups
-//! (`phosphor-emulator-rhai-scripting-yrwn.4` / `.5`).
+//! Reads a `.rhai` script, builds the engine (see [`phosphor_script::rhai_api`]),
+//! optionally pre-binds a machine handle `m` when `--machine` + a rompath are
+//! given, evaluates the script, and returns an [`ExitCode`]. Output convention
+//! mirrors `disasm`: the script's own `print`/`debug` and any result go to
+//! stdout; errors go to stderr and exit non-zero.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
+use rhai::Scope;
+
+use phosphor_script::{build_engine, open_machine};
 
 #[derive(Parser)]
 #[command(
@@ -36,10 +41,58 @@ enum Command {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    match cli.command {
-        Command::Run { .. } => {
-            eprintln!("phosphor-script: `run` is not yet implemented");
+    match run_command(cli.command) {
+        Ok(out) => {
+            print!("{out}");
+            ExitCode::SUCCESS
+        }
+        Err(msg) => {
+            eprintln!("phosphor-script: {msg}");
             ExitCode::FAILURE
         }
     }
+}
+
+fn run_command(cmd: Command) -> Result<String, String> {
+    match cmd {
+        Command::Run {
+            script,
+            machine,
+            rompath,
+        } => run_script(&script, machine.as_deref(), rompath.as_deref()),
+    }
+}
+
+/// Evaluate `script`, pre-binding `m` when both `machine` and `rompath` are
+/// supplied. Returns whatever should be written to stdout (empty here — the
+/// script drives its own `print` output).
+fn run_script(
+    script: &Path,
+    machine: Option<&str>,
+    rompath: Option<&str>,
+) -> Result<String, String> {
+    let source = std::fs::read_to_string(script)
+        .map_err(|e| format!("reading script {}: {e}", script.display()))?;
+
+    let engine = build_engine();
+    let mut scope = Scope::new();
+
+    match (machine, rompath) {
+        (Some(name), Some(path)) => {
+            scope.push("m", open_machine(name, path)?);
+        }
+        (None, None) => {}
+        _ => {
+            return Err(
+                "both --machine <name> and <rompath> are required to pre-bind `m` \
+                 (or pass neither and let the script call open())"
+                    .to_string(),
+            );
+        }
+    }
+
+    engine
+        .run_with_scope(&mut scope, &source)
+        .map_err(|e| format!("{}: {e}", script.display()))?;
+    Ok(String::new())
 }
