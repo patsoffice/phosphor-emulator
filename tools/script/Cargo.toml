@@ -1,0 +1,22 @@
+[package]
+name = "phosphor-script"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "phosphor-script"
+path = "src/main.rs"
+
+[lib]
+name = "phosphor_script"
+path = "src/lib.rs"
+
+[dependencies]
+phosphor-core = { path = "../../core" }
+phosphor-machines = { path = "../../machines" }
+phosphor-harness = { path = "../../harness" }
+# rhai WITHOUT the `sync` feature: the engine is single-threaded, so `Machine`
+# handles may use Rc/RefCell rather than Arc/Mutex.
+rhai = "1"
+clap = { version = "4", features = ["derive"] }
+png = "0.17"

@@ -1,5 +1,5 @@
 [workspace]
-members = ["core", "macros", "machines", "cpu-validation", "frontend", "harness", "tools/disasm"]
+members = ["core", "macros", "machines", "cpu-validation", "frontend", "harness", "tools/disasm", "tools/script"]
 default-members = ["core", "machines", "frontend"]
 resolver = "2"
 
