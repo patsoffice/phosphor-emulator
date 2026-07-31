@@ -1486,18 +1486,9 @@ mod tests {
 
     // ---- ROM-gated end-to-end boot test (skips when ROMs are absent) --------
 
-    /// Locate a ROM directory for the gated integration test: `PHOSPHOR_ROMS`
-    /// if set, else the conventional `~/ws/mame-runtime/roms`. Returns `None`
-    /// (test skips) when neither is present, so CI without ROMs stays green.
-    fn roms_dir() -> Option<std::path::PathBuf> {
-        if let Ok(dir) = std::env::var("PHOSPHOR_ROMS") {
-            let p = std::path::PathBuf::from(dir);
-            return p.is_dir().then_some(p);
-        }
-        let home = std::env::var("HOME").ok()?;
-        let p = std::path::PathBuf::from(home).join("ws/mame-runtime/roms");
-        p.is_dir().then_some(p)
-    }
+    // The ROM-dir convention lives in phosphor-harness so this and the
+    // phosphor-script end-to-end test share one copy.
+    use phosphor_harness::roms_dir;
 
     /// Extract the `"cycle":N` from a jsonl line (test helper).
     fn cycle_of(line: &str) -> u64 {

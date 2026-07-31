@@ -9,9 +9,9 @@
 //
 //   phosphor-script run examples/coin_start.rhai --machine galaga <rompath>
 
-// A pre-bound machine boots cold — `open()` loads no factory NVRAM — so galaga
-// runs its ~3000-frame power-on self-test before it reaches the coin-ready
-// attract screen. Warm up past it, then drive the timeline.
+// A pre-bound machine boots cold, and galaga runs a ~3000-frame power-on
+// self-test before it reaches the coin-ready attract screen. Warm up past it,
+// then drive the timeline.
 m.run_frames(3100);
 
 m.input("coin1", true);    m.run_frames(8); m.input("coin1", false);
