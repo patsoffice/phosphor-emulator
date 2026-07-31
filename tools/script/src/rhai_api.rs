@@ -15,6 +15,10 @@ use std::rc::Rc;
 
 use rhai::{Array, Dynamic, Engine, EvalAltResult, Map};
 
+use phosphor_core::core::watchpoint::{
+    DebugAccessSource, WatchpointCondition, WatchpointHit, WatchpointKind,
+};
+
 use crate::session::DebugSession;
 
 /// A script-visible machine handle.
@@ -109,6 +113,67 @@ fn register_machine(engine: &mut Engine) {
             .unwrap_or_default()
     });
 
+    // --- Watchpoints ---
+    // `watch*` set on every CPU (see DebugSession::watch for why) and return the
+    // CPU count; `hits()` drains the accumulated hits as an array of maps.
+    engine.register_fn("cpu_count", |m: &mut Machine| -> i64 {
+        m.borrow_mut().cpu_count() as i64
+    });
+    engine.register_fn(
+        "watch",
+        |m: &mut Machine, addr: i64, kind: &str| -> Result<i64, Box<EvalAltResult>> {
+            watch_all(m, addr, kind, WatchpointCondition::Always)
+        },
+    );
+    engine.register_fn(
+        "watch_value",
+        |m: &mut Machine, addr: i64, kind: &str, value: i64| -> Result<i64, Box<EvalAltResult>> {
+            watch_all(m, addr, kind, WatchpointCondition::Equals(value as u32))
+        },
+    );
+    engine.register_fn(
+        "watch_changed",
+        |m: &mut Machine, addr: i64, kind: &str| -> Result<i64, Box<EvalAltResult>> {
+            watch_all(m, addr, kind, WatchpointCondition::Changed)
+        },
+    );
+    engine.register_fn(
+        "watch_bits",
+        |m: &mut Machine,
+         addr: i64,
+         kind: &str,
+         mask: i64,
+         expected: i64|
+         -> Result<i64, Box<EvalAltResult>> {
+            watch_all(
+                m,
+                addr,
+                kind,
+                WatchpointCondition::Bits {
+                    mask: mask as u32,
+                    expected: expected as u32,
+                },
+            )
+        },
+    );
+    engine.register_fn(
+        "watch_cpu",
+        |m: &mut Machine, cpu: i64, addr: i64, kind: &str| -> Result<(), Box<EvalAltResult>> {
+            let k = parse_kind(kind)?;
+            let mut s = m.borrow_mut();
+            for kind in k {
+                s.watch_cpu(cpu as usize, addr as u32, kind, WatchpointCondition::Always);
+            }
+            Ok(())
+        },
+    );
+    engine.register_fn("clear_watchpoints", |m: &mut Machine| {
+        m.borrow_mut().clear_watchpoints();
+    });
+    engine.register_fn("hits", |m: &mut Machine| -> Array {
+        m.borrow_mut().take_hits().iter().map(hit_to_map).collect()
+    });
+
     // --- Capture ---
     engine.register_fn(
         "screenshot",
@@ -128,6 +193,67 @@ fn register_machine(engine: &mut Engine) {
         let (w, h) = m.borrow().display_size();
         vec![Dynamic::from(i64::from(w)), Dynamic::from(i64::from(h))]
     });
+}
+
+/// Parse a watch-kind string into the address-space kind(s) to set. `"access"`
+/// expands to both a read and a write watchpoint.
+fn parse_kind(s: &str) -> Result<Vec<WatchpointKind>, Box<EvalAltResult>> {
+    match s.to_ascii_lowercase().as_str() {
+        "read" | "r" => Ok(vec![WatchpointKind::Read]),
+        "write" | "w" => Ok(vec![WatchpointKind::Write]),
+        "access" | "rw" | "both" => Ok(vec![WatchpointKind::Read, WatchpointKind::Write]),
+        other => Err(format!(
+            "unknown watch kind {other:?}; use \"read\", \"write\", or \"access\""
+        )
+        .into()),
+    }
+}
+
+/// Shared body for the `watch*` bindings: set the condition on every CPU for
+/// each requested kind, returning the CPU count.
+fn watch_all(
+    m: &mut Machine,
+    addr: i64,
+    kind: &str,
+    cond: WatchpointCondition,
+) -> Result<i64, Box<EvalAltResult>> {
+    let kinds = parse_kind(kind)?;
+    let mut session = m.borrow_mut();
+    let mut count = 0;
+    for k in kinds {
+        count = session.watch(addr as u32, k, cond);
+    }
+    Ok(count as i64)
+}
+
+/// Human-readable form of a hit's access source.
+fn source_str(source: DebugAccessSource) -> String {
+    match source {
+        DebugAccessSource::Cpu(i) => format!("cpu:{i}"),
+        DebugAccessSource::Dma => "dma".to_string(),
+        DebugAccessSource::Device(name) => format!("device:{name}"),
+        DebugAccessSource::Frontend => "frontend".to_string(),
+        DebugAccessSource::Unknown => "unknown".to_string(),
+    }
+}
+
+/// Convert a watchpoint hit into a script-visible map.
+fn hit_to_map(hit: &WatchpointHit) -> Dynamic {
+    let mut map = Map::new();
+    map.insert("cpu".into(), (hit.cpu_index as i64).into());
+    map.insert("addr".into(), (hit.addr as i64).into());
+    let kind = match hit.kind {
+        WatchpointKind::Read => "read",
+        WatchpointKind::Write => "write",
+    };
+    map.insert("kind".into(), kind.into());
+    map.insert("value".into(), (hit.value as i64).into());
+    map.insert("width".into(), (i64::from(hit.width)).into());
+    map.insert("pc".into(), hit.pc.map_or(-1i64, |p| p as i64).into());
+    map.insert("cycle".into(), (hit.cycle as i64).into());
+    map.insert("source".into(), source_str(hit.source).into());
+    map.insert("region".into(), hit.region.unwrap_or("").into());
+    Dynamic::from_map(map)
 }
 
 #[cfg(test)]
@@ -199,6 +325,45 @@ mod tests {
                 .eval_with_scope::<bool>(&mut scope, "m.poke(0, 0x20, 0xEE)")
                 .unwrap()
         );
+    }
+
+    #[test]
+    fn watchpoint_via_script() {
+        let (engine, mut scope, _m) = engine_with_m(true);
+        let n = engine
+            .eval_with_scope::<i64>(&mut scope, r#"m.watch(0x40, "write")"#)
+            .unwrap();
+        assert_eq!(n, 1); // stub exposes one CPU
+        engine
+            .run_with_scope(&mut scope, "m.poke(0, 0x40, 0x99);")
+            .unwrap();
+
+        let hits = engine
+            .eval_with_scope::<Array>(&mut scope, "m.hits()")
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        let hit = hits[0].clone().cast::<Map>();
+        assert_eq!(hit["addr"].as_int().unwrap(), 0x40);
+        assert_eq!(hit["value"].as_int().unwrap(), 0x99);
+        assert_eq!(hit["cpu"].as_int().unwrap(), 0);
+        assert_eq!(hit["kind"].clone().into_string().unwrap(), "write");
+
+        // hits() drains — a second call is empty.
+        assert!(
+            engine
+                .eval_with_scope::<Array>(&mut scope, "m.hits()")
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn watch_bad_kind_throws() {
+        let (engine, mut scope, _m) = engine_with_m(true);
+        let err = engine
+            .eval_with_scope::<i64>(&mut scope, r#"m.watch(0x40, "bogus")"#)
+            .unwrap_err();
+        assert!(matches!(*err, EvalAltResult::ErrorRuntime(..)));
     }
 
     #[test]

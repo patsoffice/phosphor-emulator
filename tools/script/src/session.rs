@@ -17,6 +17,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use phosphor_core::core::machine::{InputEvent, InputId, Orientation};
+use phosphor_core::core::watchpoint::{WatchpointCondition, WatchpointHit, WatchpointKind};
 use phosphor_harness::Harness;
 
 /// A booted machine plus the read-first inspection state layered on top of it.
@@ -28,6 +29,9 @@ pub struct DebugSession {
     /// Reused RGB24 render buffer (`w * h * 3`), so repeated `screenshot`s
     /// don't reallocate.
     fb: Vec<u8>,
+    /// Watchpoint hits drained from the machine after each frame/step, kept
+    /// here so a whole run's worth survives the 64-entry machine-side queue.
+    hits: Vec<WatchpointHit>,
 }
 
 impl DebugSession {
@@ -50,13 +54,17 @@ impl DebugSession {
             harness,
             input_ids,
             fb: Vec::new(),
+            hits: Vec::new(),
         }
     }
 
-    /// Advance `n` whole frames through the harness.
+    /// Advance `n` whole frames through the harness, draining watchpoint hits
+    /// after each so a hot address doesn't overflow the machine's 64-entry
+    /// queue across the run.
     pub fn run_frames(&mut self, n: u64) {
         for _ in 0..n {
             self.harness.run_frame();
+            self.drain_watchpoint_hits();
         }
     }
 
@@ -64,7 +72,17 @@ impl DebugSession {
     /// CPUs that reached an instruction boundary (bit 0 = CPU 0, …). Machines
     /// without debug support (`cycles_per_frame == 0`) return `0`.
     pub fn step(&mut self) -> u32 {
-        self.harness.machine_mut().debug_tick()
+        let mask = self.harness.machine_mut().debug_tick();
+        self.drain_watchpoint_hits();
+        mask
+    }
+
+    /// Move any queued watchpoint hits out of the machine and into `self.hits`.
+    fn drain_watchpoint_hits(&mut self) {
+        let machine = self.harness.machine_mut();
+        while let Some(hit) = machine.take_watchpoint_hit() {
+            self.hits.push(hit);
+        }
     }
 
     /// Side-effect-free memory read from `cpu`'s address space. `None` for an
@@ -129,6 +147,58 @@ impl DebugSession {
             }
             None => false,
         }
+    }
+
+    /// Number of CPUs exposed by the machine's debug bus (0 if none).
+    pub fn cpu_count(&mut self) -> usize {
+        self.harness
+            .machine_mut()
+            .debug_bus()
+            .map_or(0, |bus| bus.cpus().len())
+    }
+
+    /// Set a watchpoint at `addr` on **every** CPU, returning the number of CPUs
+    /// watched.
+    ///
+    /// Watching all CPUs is the deliberate default: watchpoints are scoped per
+    /// CPU, and on multi-CPU boards a video/scroll register is often written by
+    /// a sub-CPU, not the main one — so a single-CPU watch silently catches
+    /// nothing. Each [`WatchpointHit`] carries its `cpu_index` so a script can
+    /// still tell which CPU fired. Use [`watch_cpu`](Self::watch_cpu) to target
+    /// one CPU deliberately.
+    pub fn watch(&mut self, addr: u32, kind: WatchpointKind, cond: WatchpointCondition) -> usize {
+        let n = self.cpu_count();
+        for cpu in 0..n {
+            self.harness
+                .machine_mut()
+                .set_watchpoint_cond(cpu, addr, kind, cond);
+        }
+        n
+    }
+
+    /// Set a watchpoint at `addr` on a single CPU's address space.
+    pub fn watch_cpu(
+        &mut self,
+        cpu: usize,
+        addr: u32,
+        kind: WatchpointKind,
+        cond: WatchpointCondition,
+    ) {
+        self.harness
+            .machine_mut()
+            .set_watchpoint_cond(cpu, addr, kind, cond);
+    }
+
+    /// Clear every watchpoint across all CPUs. Already-collected hits are kept.
+    pub fn clear_watchpoints(&mut self) {
+        self.harness.machine_mut().clear_all_watchpoints();
+    }
+
+    /// Drain and return every watchpoint hit collected so far (also sweeps any
+    /// still queued in the machine). Leaves the accumulator empty.
+    pub fn take_hits(&mut self) -> Vec<WatchpointHit> {
+        self.drain_watchpoint_hits();
+        std::mem::take(&mut self.hits)
     }
 
     /// Apply an *immediate* button edge to the control named `name`. Unknown
@@ -253,6 +323,39 @@ mod tests {
     fn poke_without_debug_support_returns_false() {
         let (mut s, _) = session(false);
         assert!(!s.poke(0, 0x20, 0xEE));
+    }
+
+    #[test]
+    fn watchpoint_hit_collected_on_write() {
+        let (mut s, _) = session(true);
+        let n = s.watch(0x40, WatchpointKind::Write, WatchpointCondition::Always);
+        assert_eq!(n, 1); // the stub exposes one CPU
+        s.poke(0, 0x40, 0x99); // write to the watched address queues a hit
+        let hits = s.take_hits();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].addr, 0x40);
+        assert_eq!(hits[0].value, 0x99);
+        assert_eq!(hits[0].cpu_index, 0);
+        assert_eq!(hits[0].kind, WatchpointKind::Write);
+        // Draining leaves the accumulator empty.
+        assert!(s.take_hits().is_empty());
+    }
+
+    #[test]
+    fn clear_watchpoints_stops_hits() {
+        let (mut s, _) = session(true);
+        s.watch(0x40, WatchpointKind::Write, WatchpointCondition::Always);
+        s.clear_watchpoints();
+        s.poke(0, 0x40, 0x99);
+        assert!(s.take_hits().is_empty());
+    }
+
+    #[test]
+    fn cpu_count_reflects_debug_support() {
+        let (mut s, _) = session(true);
+        assert_eq!(s.cpu_count(), 1);
+        let (mut nod, _) = session(false);
+        assert_eq!(nod.cpu_count(), 0);
     }
 
     #[test]

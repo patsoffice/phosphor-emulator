@@ -8,6 +8,7 @@
 //! "no debug support → None/empty" paths.
 
 use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::rc::Rc;
 
 use phosphor_core::core::debug::{BusDebug, DebugCpu, DebugRegister, Debuggable};
@@ -15,6 +16,9 @@ use phosphor_core::core::debug_trace::DebugTrace;
 use phosphor_core::core::machine::{
     AudioSource, DipSwitches, FrontendMachine, InputConfigurable, InputControl, InputEvent,
     InputId, InputKind, MachineCore, MachineDebug, Nvram, Profilable, Renderable, SaveState,
+};
+use phosphor_core::core::watchpoint::{
+    DebugAccessSource, WatchpointHit, WatchpointKind, WatchpointPhase,
 };
 use phosphor_core::cpu::disasm::DisassembledInstruction;
 use phosphor_harness::Harness;
@@ -69,11 +73,15 @@ impl DebugCpu for StubCpu {
     }
 }
 
-/// A tiny bus: one CPU, a seeded read (`addr` low byte + 1), and a poke store
-/// so a poked byte reads back (a poke overrides the seed at that address).
+/// A tiny bus: one CPU, a seeded read (`addr` low byte + 1), a poke store so a
+/// poked byte reads back, and a minimal write-watchpoint so the watchpoint
+/// binding can be exercised. The value condition is ignored (its evaluation is
+/// core's job, tested there) — any write to a watched address queues a hit.
 struct StubBus {
     cpu: StubCpu,
     poked: std::collections::HashMap<u32, u8>,
+    watched_writes: Vec<u32>,
+    hits: VecDeque<WatchpointHit>,
 }
 
 impl BusDebug for StubBus {
@@ -91,8 +99,40 @@ impl BusDebug for StubBus {
                 .unwrap_or((addr as u8).wrapping_add(1)),
         )
     }
-    fn write(&mut self, _cpu_index: usize, addr: u32, data: u8) {
+    fn write(&mut self, cpu_index: usize, addr: u32, data: u8) {
         self.poked.insert(addr, data);
+        if self.watched_writes.contains(&addr) {
+            self.hits.push_back(WatchpointHit {
+                cpu_index,
+                source: DebugAccessSource::Frontend,
+                cycle: 0,
+                pc: None,
+                addr,
+                kind: WatchpointKind::Write,
+                phase: WatchpointPhase::Before,
+                value: u32::from(data),
+                width: 1,
+                region: None,
+                device: None,
+            });
+        }
+    }
+    fn set_watchpoint_cond(
+        &mut self,
+        _cpu_index: usize,
+        addr: u32,
+        kind: WatchpointKind,
+        _condition: phosphor_core::core::watchpoint::WatchpointCondition,
+    ) {
+        if kind == WatchpointKind::Write {
+            self.watched_writes.push(addr);
+        }
+    }
+    fn take_watchpoint_hit(&mut self) -> Option<WatchpointHit> {
+        self.hits.pop_front()
+    }
+    fn clear_all_watchpoints(&mut self) {
+        self.watched_writes.clear();
     }
 }
 
@@ -167,6 +207,8 @@ pub fn stub_machine(has_debug: bool) -> (Box<dyn FrontendMachine>, Rc<RefCell<Re
         bus: StubBus {
             cpu: StubCpu,
             poked: std::collections::HashMap::new(),
+            watched_writes: Vec::new(),
+            hits: VecDeque::new(),
         },
         has_debug,
     };

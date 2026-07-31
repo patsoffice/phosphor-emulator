@@ -65,6 +65,7 @@ method maps 1:1 onto a `DebugSession` accessor.
 | `m.frame_count()` | `frame_count` | `int` — frames run so far |
 | `m.id()` | `machine_id` | `String` — machine's short id |
 | `m.display_size()` | `display_size` | `[int; 2]` — native `[width, height]` |
+| `m.cpu_count()` | `cpu_count` | `int` — number of CPUs on the debug bus |
 
 `input`/`input_axis` take a machine's **stable control name** (e.g. galaga's
 `coin1`, `p1_start`); see a machine's `input_controls()` for the list. Unknown
@@ -75,6 +76,42 @@ memory-viewer poke would be). It is an explicit *debug* write, distinct from the
 legitimate machine inputs `input` drives. A poke does not yet emit a
 `DebugAccessSource::Frontend` event in the event trace — that tagging is a
 follow-up, and is unobservable until a script/console can record a trace.
+
+### Watchpoints
+
+Set a watchpoint on an address, run frames or step, then drain the hits. The
+`kind` is `"read"`, `"write"`, or `"access"` (both).
+
+| Rhai | Fires when | Returns |
+|---|---|---|
+| `m.watch(addr, kind)` | any matching access | `int` — CPUs watched |
+| `m.watch_value(addr, kind, v)` | accessed value `== v` | `int` |
+| `m.watch_changed(addr, kind)` | value differs from last | `int` |
+| `m.watch_bits(addr, kind, mask, expected)` | `(value & mask) == expected` | `int` |
+| `m.watch_cpu(cpu, addr, kind)` | any matching access, one CPU | `()` |
+| `m.clear_watchpoints()` | — | `()` |
+| `m.hits()` | — | `[Map]` — drains the collected hits |
+
+Each hit is a map: `cpu`, `addr`, `kind`, `value`, `width`, `pc` (`-1` if
+unknown), `cycle`, `source`, `region`.
+
+**Watch all CPUs by default.** `watch*` set on *every* CPU, because watchpoints
+are scoped per CPU and on multi-CPU boards a video/scroll register is often
+written by a *sub*-CPU, not the main one — a single-CPU watch would silently
+catch nothing. (On galaga, `0x9100` is written mostly by CPU 1, not CPU 0.) Each
+hit's `cpu` field says which CPU fired; use `watch_cpu` to target one
+deliberately. `hits()` accumulates across a whole run (hits are drained after
+each frame/step so a hot address doesn't overflow the machine's 64-entry queue);
+a single frame can still drop hits past 64, so `step()` gives exact capture.
+
+```rhai
+m.run_frames(3100);
+m.watch(0x9100, "write");
+m.run_frames(600);
+let hits = m.hits();
+print(hits.len() + " writes");            // assert on the count to fail loudly on zero
+for h in hits { print("cpu" + h.cpu + " wrote " + h.value); }
+```
 
 ### Determinism & safety
 
