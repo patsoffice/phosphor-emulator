@@ -3,6 +3,7 @@ use phosphor_machines::registry;
 
 mod audio;
 mod config;
+mod console_ui;
 mod debug_ui;
 mod emulator;
 mod gfxview;
@@ -199,8 +200,8 @@ fn main() {
         return;
     }
 
-    emulator::run(
-        machine.as_mut(),
+    machine = emulator::run(
+        machine,
         &mut bindings,
         scale,
         fullscreen,

@@ -18,7 +18,9 @@ use std::path::Path;
 
 use phosphor_core::core::debug_hang::{HangDetector, HangReport};
 use phosphor_core::core::debug_trace::DebugEvent;
-use phosphor_core::core::machine::{DipSwitchBank, InputEvent, InputId, Orientation};
+use phosphor_core::core::machine::{
+    DipSwitchBank, FrontendMachine, InputEvent, InputId, Orientation,
+};
 use phosphor_core::core::watchpoint::{WatchpointCondition, WatchpointHit, WatchpointKind};
 use phosphor_harness::Harness;
 
@@ -68,6 +70,29 @@ impl DebugSession {
             hang: None,
             hang_reports: Vec::new(),
         }
+    }
+
+    /// Wrap an already-booted machine (the in-frontend console binds its *live*
+    /// machine this way, then drives it through the session).
+    pub fn from_machine(machine: Box<dyn FrontendMachine>) -> Self {
+        Self::wrap(Harness::from_machine(machine))
+    }
+
+    /// Consume the session and hand the machine back — how the frontend reclaims
+    /// its machine after the run loop ends.
+    pub fn into_machine(self) -> Box<dyn FrontendMachine> {
+        self.harness.into_machine()
+    }
+
+    /// Shared access to the wrapped machine, for a host driving it directly
+    /// (rendering, audio, input) alongside the scripted surface.
+    pub fn machine(&self) -> &dyn FrontendMachine {
+        self.harness.machine()
+    }
+
+    /// Mutable access to the wrapped machine, for a host driving it directly.
+    pub fn machine_mut(&mut self) -> &mut dyn FrontendMachine {
+        self.harness.machine_mut()
     }
 
     /// Advance `n` whole frames through the harness, draining watchpoint hits

@@ -11,6 +11,8 @@ path = "src/main.rs"
 phosphor-core = { path = "../core" }
 phosphor-machines = { path = "../machines" }
 phosphor-harness = { path = "../harness" }
+phosphor-script = { path = "../tools/script" }
+rhai = "1"
 sdl2 = "0.38"
 egui_sdl2_gl = { version = "0.33", default-features = false }
 egui = "0.33"

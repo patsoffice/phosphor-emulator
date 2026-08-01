@@ -168,13 +168,19 @@ impl Harness {
     ///
     /// [`build`](Self::build) is the normal entry point (registry → ROM load →
     /// create → reset). This constructor is for callers that already hold a
-    /// booted machine: unit tests that inject a stub, and the deferred
-    /// in-frontend console that binds the *live* machine.
+    /// booted machine: unit tests that inject a stub, and the in-frontend
+    /// console that binds the *live* machine.
     pub fn from_machine(machine: Box<dyn FrontendMachine>) -> Self {
         Self {
             machine,
             presses: Vec::new(),
             frame: 0,
         }
+    }
+
+    /// Consume the harness and return the wrapped machine — the seam the
+    /// frontend uses to reclaim its machine after driving it through a session.
+    pub fn into_machine(self) -> Box<dyn FrontendMachine> {
+        self.machine
     }
 }

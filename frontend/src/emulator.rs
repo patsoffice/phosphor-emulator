@@ -1,10 +1,14 @@
+use std::cell::RefCell;
 use std::path::Path;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use phosphor_core::core::machine::{FrontendMachine, InputEvent, InputKind, Orientation};
+use phosphor_script::{DebugSession, Machine};
 use sdl2::event::Event;
-use sdl2::keyboard::Scancode;
+use sdl2::keyboard::{Mod, Scancode};
 
+use crate::console_ui::{self, ConsoleState};
 use crate::debug_ui::{self, DebugState, RunMode};
 use crate::input::{AxisDir, BindingSet, MouseAxis, PhysicalInput};
 use crate::profile::ProfileState;
@@ -12,7 +16,12 @@ use crate::settings_ui::{self, SettingsState};
 use crate::video::Video;
 
 /// Combined width of all active right-side panels, used when resizing the window.
-fn panels_width(debug: &DebugState, profile: &ProfileState, settings: &SettingsState) -> u32 {
+fn panels_width(
+    debug: &DebugState,
+    profile: &ProfileState,
+    settings: &SettingsState,
+    console: &ConsoleState,
+) -> u32 {
     let dw = if debug.active {
         debug.debug_panel_width()
     } else {
@@ -25,7 +34,7 @@ fn panels_width(debug: &DebugState, profile: &ProfileState, settings: &SettingsS
     };
     // The input and DIP panels are independent side panels that stack.
     let sw = (settings.active as u32 + settings.dip_active as u32) * settings_ui::PANEL_WIDTH;
-    dw + pw + sw
+    dw + pw + sw + console.visible as u32 * settings_ui::PANEL_WIDTH
 }
 
 /// Translate an SDL event into a physical input for rebind capture, if it is a
@@ -45,7 +54,7 @@ fn capture_physical(event: &Event) -> Option<PhysicalInput> {
 
 #[allow(clippy::too_many_arguments)]
 pub fn run(
-    machine: &mut dyn FrontendMachine,
+    mut machine: Box<dyn FrontendMachine>,
     bindings: &mut BindingSet,
     scale: u32,
     fullscreen: bool,
@@ -57,7 +66,7 @@ pub fn run(
     no_mouse_grab: bool,
     record_wav: Option<&str>,
     state: &mut crate::state::State,
-) {
+) -> Box<dyn FrontendMachine> {
     // Enable controller backends before SDL init — needed for Xbox on macOS
     sdl2::hint::set("SDL_JOYSTICK_HIDAPI", "1");
     sdl2::hint::set("SDL_JOYSTICK_HIDAPI_XBOX", "1");
@@ -190,6 +199,9 @@ pub fn run(
     let mut settings_state = SettingsState::default();
     let has_typed_controls = !machine.input_controls().is_empty();
 
+    // Interactive Rhai console panel (Ctrl+` to toggle).
+    let mut console_state = ConsoleState::default();
+
     // DIP switch panel (` to toggle); only for machines with DIP banks.
     let has_dip = !machine.dip_banks().is_empty();
 
@@ -220,14 +232,40 @@ pub fn run(
     }
     // Resize window if any side panels are active at startup
     {
-        let panels = panels_width(&debug_state, &profile_state, &settings_state);
+        let panels = panels_width(
+            &debug_state,
+            &profile_state,
+            &settings_state,
+            &console_state,
+        );
         if panels > 0 {
             video.resize_window(win_w * scale + panels, win_h * scale);
         }
     }
 
+    // Move the machine into a session so the console can drive the *live*
+    // machine through the same bindings the headless runner uses. The emulator
+    // reaches the machine via `sess.machine_mut()` each frame; the console holds
+    // a clone of the same `Rc` and evaluates scripts after the frame.
+    let session: Machine = Rc::new(RefCell::new(DebugSession::from_machine(machine)));
+
+    // Console engine: reuse the script crate's engine builder, but route its
+    // print/debug output into the console scrollback instead of stdout.
+    let console_output: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+    let mut console_engine = phosphor_script::build_engine();
+    {
+        let out = console_output.clone();
+        console_engine.on_print(move |text| out.borrow_mut().push(text.to_string()));
+        let out = console_output.clone();
+        console_engine.on_debug(move |text, _src, _pos| out.borrow_mut().push(text.to_string()));
+    }
+    let mut console_scope = rhai::Scope::new();
+    console_scope.push("m", Rc::clone(&session));
+
     'main: loop {
         let t0 = Instant::now();
+        let mut sess = session.borrow_mut();
+        let machine: &mut dyn FrontendMachine = sess.machine_mut();
 
         // Poll all pending SDL events, translate to machine input
         for event in event_pump.poll_iter() {
@@ -255,6 +293,52 @@ pub fn run(
                 }
             }
 
+            // While the console is open, keyboard goes to it (egui already
+            // received the event above). Suppress game input and other hotkeys,
+            // but still allow closing the console and quitting.
+            if console_state.visible {
+                match &event {
+                    Event::Quit { .. } => break 'main,
+                    Event::KeyDown {
+                        scancode: Some(Scancode::Grave),
+                        keymod,
+                        repeat: false,
+                        ..
+                    } if keymod.intersects(Mod::LCTRLMOD | Mod::RCTRLMOD) => {
+                        console_state.toggle();
+                        video.resize_window(
+                            win_w * scale
+                                + panels_width(
+                                    &debug_state,
+                                    &profile_state,
+                                    &settings_state,
+                                    &console_state,
+                                ),
+                            win_h * scale,
+                        );
+                    }
+                    Event::KeyDown {
+                        scancode: Some(Scancode::Escape),
+                        repeat: false,
+                        ..
+                    } => {
+                        console_state.toggle();
+                        video.resize_window(
+                            win_w * scale
+                                + panels_width(
+                                    &debug_state,
+                                    &profile_state,
+                                    &settings_state,
+                                    &console_state,
+                                ),
+                            win_h * scale,
+                        );
+                    }
+                    _ => {}
+                }
+                continue;
+            }
+
             match event {
                 Event::Quit { .. } => break 'main,
 
@@ -279,7 +363,13 @@ pub fn run(
                         debug_state.run_mode = RunMode::Running;
                     }
                     video.resize_window(
-                        win_w * scale + panels_width(&debug_state, &profile_state, &settings_state),
+                        win_w * scale
+                            + panels_width(
+                                &debug_state,
+                                &profile_state,
+                                &settings_state,
+                                &console_state,
+                            ),
                         win_h * scale,
                     );
                 }
@@ -378,7 +468,13 @@ pub fn run(
                         profile_state.start();
                     }
                     video.resize_window(
-                        win_w * scale + panels_width(&debug_state, &profile_state, &settings_state),
+                        win_w * scale
+                            + panels_width(
+                                &debug_state,
+                                &profile_state,
+                                &settings_state,
+                                &console_state,
+                            ),
                         win_h * scale,
                     );
                 }
@@ -392,7 +488,33 @@ pub fn run(
                     settings_state.active = !settings_state.active;
                     settings_state.capturing = None;
                     video.resize_window(
-                        win_w * scale + panels_width(&debug_state, &profile_state, &settings_state),
+                        win_w * scale
+                            + panels_width(
+                                &debug_state,
+                                &profile_state,
+                                &settings_state,
+                                &console_state,
+                            ),
+                        win_h * scale,
+                    );
+                }
+
+                // Ctrl+` : Toggle the interactive Rhai console.
+                Event::KeyDown {
+                    scancode: Some(Scancode::Grave),
+                    keymod,
+                    repeat: false,
+                    ..
+                } if keymod.intersects(Mod::LCTRLMOD | Mod::RCTRLMOD) => {
+                    console_state.toggle();
+                    video.resize_window(
+                        win_w * scale
+                            + panels_width(
+                                &debug_state,
+                                &profile_state,
+                                &settings_state,
+                                &console_state,
+                            ),
                         win_h * scale,
                     );
                 }
@@ -405,7 +527,13 @@ pub fn run(
                 } if has_dip => {
                     settings_state.dip_active = !settings_state.dip_active;
                     video.resize_window(
-                        win_w * scale + panels_width(&debug_state, &profile_state, &settings_state),
+                        win_w * scale
+                            + panels_width(
+                                &debug_state,
+                                &profile_state,
+                                &settings_state,
+                                &console_state,
+                            ),
                         win_h * scale,
                     );
                 }
@@ -728,6 +856,7 @@ pub fn run(
                     || profile_state.active
                     || settings_state.active
                     || settings_state.dip_active
+                    || console_state.visible
                 {
                     let bus_ref = machine.debug_bus();
                     let profiling = profile_state.active;
@@ -737,6 +866,7 @@ pub fn run(
                     // Snapshot DIP metadata + live bank bytes before the egui
                     // closure (which must not hold `&mut machine`).
                     let show_dip = settings_state.dip_active;
+                    let show_console = console_state.visible;
                     let dip_banks = machine.dip_banks();
                     let dip_values: Vec<u8> = (0..dip_banks.len())
                         .map(|i| machine.dip_bank_value(i))
@@ -763,6 +893,9 @@ pub fn run(
                                 &dip_values,
                                 &mut settings_state,
                             );
+                        }
+                        if show_console {
+                            console_ui::draw_console_panel(ctx, &mut console_state);
                         }
                         if debug_state.active {
                             // Debug panels + game central panel
@@ -834,7 +967,31 @@ pub fn run(
             let sub_spans = machine.frame_profile_spans();
             profile_state.record_frame(t1 - t0, t2 - t1, t3 - t2, t4 - t3, t5 - t4, sub_spans);
         }
+
+        // Release the machine borrow, then evaluate any console command against
+        // the now-free session. Its output shows on the next frame's panel draw.
+        drop(sess);
+        if let Some(cmd) = console_state.take_pending() {
+            let result = console_engine.eval_with_scope::<rhai::Dynamic>(&mut console_scope, &cmd);
+            for line in console_output.borrow_mut().drain(..) {
+                console_state.push_output(&line);
+            }
+            match result {
+                Ok(value) if !value.is_unit() => console_state.push_output(&value.to_string()),
+                Ok(_) => {}
+                Err(err) => console_state.push_output(&format!("error: {err}")),
+            }
+        }
     }
+
+    // Reclaim the machine from the session (drop the console handle so the Rc is
+    // unique) for shutdown bookkeeping and to hand back to the caller.
+    drop(console_scope);
+    let mut machine = Rc::try_unwrap(session)
+        .ok()
+        .expect("session still referenced at shutdown")
+        .into_inner()
+        .into_machine();
 
     // Save window position for next launch (skip in fullscreen, where the
     // reported position is the desktop origin and would clobber the windowed
@@ -866,6 +1023,8 @@ pub fn run(
             Err(e) => eprintln!("failed to write {path}: {e}"),
         }
     }
+
+    machine
 }
 
 /// Draw the game texture in a central panel at the target display aspect,
