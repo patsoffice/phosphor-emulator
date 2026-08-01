@@ -729,6 +729,7 @@ pub struct DocastleBoard {
     pub(crate) main_wait: bool,
     pub(crate) main_wait_toggle: bool,
     pub(crate) main_retry: bool,
+    pub(crate) main_read_stalled: bool,
     pub(crate) sub_nmi_pending: bool,
 
     // Video.
@@ -773,6 +774,7 @@ impl DocastleBoard {
             main_wait: false,
             main_wait_toggle: false,
             main_retry: false,
+            main_read_stalled: false,
             sub_nmi_pending: false,
             flipscreen: false,
             inputs,
@@ -918,6 +920,24 @@ impl DocastleBoard {
     // Core tick
     // -----------------------------------------------------------------------
 
+    /// Run one main-CPU T-state, rewinding it if the access hit the latch and
+    /// asserted WAIT.
+    fn step_main(&mut self, bus: &mut dyn Bus<Address = u16, Data = u8>) {
+        let snapshot = self.main_cpu.clone();
+        self.main_retry = false;
+        let iff1_before = self.main_cpu.iff1;
+        self.main_cpu.execute_cycle(bus, BusMaster::Cpu(0));
+        if self.main_retry {
+            self.main_cpu = snapshot;
+            self.main_retry = false;
+            self.main_read_stalled = true;
+        } else if self.main_irq_pending && iff1_before && !self.main_cpu.iff1 {
+            // HOLD_LINE auto-clear: the CPU acknowledged, observed as IFF1
+            // dropping at an instruction boundary with the IRQ asserted.
+            self.main_irq_pending = false;
+        }
+    }
+
     /// Advance the board by one 4 MHz cycle, stepping both Z80s in lockstep.
     ///
     /// Both CPUs are clocked 1:1 and both bus accesses resolve inside the same
@@ -956,18 +976,7 @@ impl DocastleBoard {
         // again once the sub CPU releases WAIT — the chip holds the address on
         // the bus and latches data only after WAIT goes away.
         if !self.main_wait {
-            let snapshot = self.main_cpu.clone();
-            self.main_retry = false;
-            let iff1_before = self.main_cpu.iff1;
-            self.main_cpu.execute_cycle(bus, BusMaster::Cpu(0));
-            if self.main_retry {
-                self.main_cpu = snapshot;
-                self.main_retry = false;
-            } else if self.main_irq_pending && iff1_before && !self.main_cpu.iff1 {
-                // HOLD_LINE auto-clear: the CPU acknowledged, observed as IFF1
-                // dropping at an instruction boundary with the IRQ asserted.
-                self.main_irq_pending = false;
-            }
+            self.step_main(bus);
         }
 
         // Sub CPU, stalled while any PSG holds READY low.
@@ -978,6 +987,17 @@ impl DocastleBoard {
                 self.sub_irq_pending = false;
             }
         }
+
+        // A read that stalled cost the main CPU the cycle it was rewound out
+        // of; if the sub CPU released WAIT during this same cycle, hand it
+        // straight back by running the retry now. Without that the two `LDIR`s
+        // drift a cycle apart per byte and the main CPU starts sampling the
+        // latch one sub-write too late.
+        if self.main_read_stalled && !self.main_wait {
+            self.main_read_stalled = false;
+            self.step_main(bus);
+        }
+
         for chip in &mut self.sn {
             chip.tick_ready();
         }
@@ -1143,6 +1163,7 @@ impl DocastleBoard {
         self.main_wait = false;
         self.main_wait_toggle = false;
         self.main_retry = false;
+        self.main_read_stalled = false;
         self.flipscreen = false;
         // The select latch is cleared by the same LS273 reset that clears
         // flipscreen.
@@ -1247,6 +1268,7 @@ impl Saveable for DocastleBoard {
         self.main_irq_pending = r.read_bool()?;
         self.sub_irq_pending = r.read_bool()?;
         self.main_retry = false;
+        self.main_read_stalled = false;
         Ok(())
     }
 }
