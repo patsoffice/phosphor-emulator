@@ -8,8 +8,8 @@ Rhai is pure Rust (no C dependency), deterministic, and sandboxed (no ambient
 time/RNG, built-in operation limits), which keeps the emulator's replay honesty
 intact. The trade-off — no MAME-script portability — is accepted.
 
-The crate is split into a **library** (the engine builder + bindings, reusable
-by a future in-frontend console) and this **binary**.
+The crate is split into a **library** (the engine builder + bindings, also
+embedded by the in-frontend console) and this **binary**.
 
 ## Usage
 
@@ -37,10 +37,11 @@ stderr and the process exits non-zero.
 
 ## API
 
-The surface is **read-first plus a memory poke**: a script observes machine
-state, drives inputs, and can poke bytes into memory. Register pokes,
-watchpoints, event-trace, save-state, and DIP editing are deferred to v2. Every
-method maps 1:1 onto a `DebugSession` accessor.
+The surface observes and drives a machine: memory read/poke, CPU pc/regs,
+disassemble, run/step, inputs by stable name, screenshot, watchpoints, event
+trace, hang detection, save/load state, and DIP editing (all below). Every
+method maps 1:1 onto a `DebugSession` accessor. The one remaining gap is
+**register** pokes (memory pokes exist); see the source crate's issues.
 
 ### Global functions
 
@@ -216,4 +217,38 @@ choice from that metadata.
 - [`examples/coin_start.rhai`](examples/coin_start.rhai) — an imperative input
   timeline that generalizes the hard-coded
   `machines/examples/asteroid_capture.rs`.
-</content>
+
+## Packaging
+
+`phosphor-script` ships as its **own binary** rather than as a subcommand of the
+`disasm` tool (e.g. `disasm script run …`). Both were viable — the engine lives
+in this crate's **library**, so either binary is a thin shell over it — and the
+choice is deliberately reversible (epic decision deferred to build time).
+
+Kept separate because:
+
+- Scripting is a distinct capability — programmatically *driving* a machine —
+  versus what `disasm` does: disassembly plus one-shot *analysis/capture*
+  (`frameshot`, `trace`, `imgdiff`, `gfxview`, `rom`). A tool named for what it
+  does is more discoverable than a ninth subcommand under `disasm`.
+- `disasm` already carries eight subcommands; folding scripting in would grow an
+  already-broad CLI.
+- The real reuse point is the **library**, not this binary: the in-frontend
+  console (`frontend/src/console_ui.rs`) embeds the engine builder directly, and
+  a second binary entry point adds no leverage there.
+
+To reverse this later (if usage shows people want scripting where they already
+run `trace`/`frameshot`), add a `script` subcommand to `tools/disasm` that
+delegates to the library — the whole body is roughly:
+
+```rust
+// disasm script run <script.rhai> [--machine <name> <rompath>]
+let engine = phosphor_script::build_engine();
+let mut scope = rhai::Scope::new();
+if let (Some(name), Some(path)) = (machine, rompath) {
+    scope.push("m", phosphor_script::open_machine(name, path)?);
+}
+engine.run_with_scope(&mut scope, &std::fs::read_to_string(script)?)?;
+```
+
+The standalone binary can stay or be retired at that point.
