@@ -2483,6 +2483,88 @@ mod tests {
         assert_eq!(sys.board.main_cpu.a, 0x7E);
     }
 
+    /// The real boot handshake: the main CPU pulses the sub CPU's NMI, then
+    /// `LDIR`s nine bytes into the latch and nine back out, while the sub CPU's
+    /// NMI handler `LDIR`s nine out and nine in. Every byte has to survive in
+    /// both directions — the two block copies only stay paired if each CPU
+    /// spends exactly 21 cycles per byte, so a single cycle of drift on either
+    /// side drops half the transfer.
+    #[test]
+    fn dual_ldir_block_transfer_survives_in_both_directions() {
+        const SENT: [u8; 9] = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99];
+        const REPLY: [u8; 9] = [0xA1, 0xB2, 0xC3, 0xD4, 0xE5, 0xF6, 0x07, 0x18, 0x29];
+
+        let mut sys = DocastleSystem::new(DocastleVariant::Docastle);
+
+        #[rustfmt::skip]
+        let main_prog = [
+            0x3E, 0x00,             // LD   A,$00
+            0x32, 0x00, 0xE0,       // LD   ($E000),A   ; pulse the sub CPU's NMI
+            0x21, 0x00, 0x90,       // LD   HL,$9000
+            0x11, 0x00, 0xA0,       // LD   DE,$A000
+            0x01, 0x09, 0x00,       // LD   BC,$0009
+            0xED, 0xB0,             // LDIR             ; main -> latch
+            0x21, 0x00, 0xA0,       // LD   HL,$A000
+            0x11, 0x10, 0x90,       // LD   DE,$9010
+            0x01, 0x09, 0x00,       // LD   BC,$0009
+            0xED, 0xB0,             // LDIR             ; latch -> main
+            0x76,                   // HALT
+        ];
+        sys.board
+            .main_map
+            .load_region_at(MainRegion::RomLow, 0, &main_prog);
+
+        #[rustfmt::skip]
+        let sub_reset = [
+            0x31, 0x00, 0x88,       // LD   SP,$8800
+            0xC3, 0x00, 0x01,       // JP   $0100
+        ];
+        #[rustfmt::skip]
+        let sub_nmi = [
+            0x21, 0x00, 0xA0,       // LD   HL,$A000
+            0x11, 0x00, 0x80,       // LD   DE,$8000
+            0x01, 0x09, 0x00,       // LD   BC,$0009
+            0xED, 0xB0,             // LDIR             ; latch -> sub
+            0x21, 0x00, 0x81,       // LD   HL,$8100
+            0x11, 0x00, 0xA0,       // LD   DE,$A000
+            0x01, 0x09, 0x00,       // LD   BC,$0009
+            0xED, 0xB0,             // LDIR             ; sub -> latch
+            0xED, 0x45,             // RETN
+        ];
+        sys.board
+            .sub_map
+            .load_region_at(SubRegion::Rom, 0, &sub_reset);
+        sys.board
+            .sub_map
+            .load_region_at(SubRegion::Rom, 0x66, &sub_nmi);
+        sys.board
+            .sub_map
+            .load_region_at(SubRegion::Rom, 0x100, &[0x18, 0xFE]); // JR $ (spin)
+
+        sys.reset();
+        sys.board.main_map.region_data_mut(MainRegion::WorkRam)[0x1000..0x1009]
+            .copy_from_slice(&SENT); // 0x9000
+        sys.board.sub_map.region_data_mut(SubRegion::Ram)[0x100..0x109].copy_from_slice(&REPLY);
+
+        bus_split!(&mut sys, bus => {
+            for _ in 0..4000 {
+                sys.board.tick(bus);
+            }
+        });
+
+        assert!(sys.board.main_cpu.halted, "main CPU never finished");
+        assert_eq!(
+            &sys.board.sub_map.region_data(SubRegion::Ram)[..9],
+            &SENT,
+            "main -> sub bytes"
+        );
+        assert_eq!(
+            &sys.board.main_map.region_data(MainRegion::WorkRam)[0x1010..0x1019],
+            &REPLY,
+            "sub -> main bytes"
+        );
+    }
+
     #[test]
     fn nmi_trigger_address_pulses_the_sub_cpu() {
         for (variant, addr) in [
