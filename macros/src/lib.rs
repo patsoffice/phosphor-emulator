@@ -164,6 +164,38 @@ pub fn derive_bus_debug(input: TokenStream) -> TokenStream {
         })
         .collect();
 
+    // Generate poke() match arms — a *debugger* write that records a Frontend
+    // trace event. Mirrors write(), but the map path routes to `poke` (tagged)
+    // instead of `debug_write` (untagged). No board uses explicit write methods
+    // today, so that branch just falls back to the (untagged) method.
+    let poke_arms: Vec<_> = cpu_entries
+        .iter()
+        .enumerate()
+        .map(|(i, (_, _, _, write_method))| {
+            let idx = i;
+            if let Some(write_method) = write_method {
+                let write_ident =
+                    syn::Ident::new(write_method.value().as_str(), write_method.span());
+                quote! { #idx => { if let Ok(addr) = u16::try_from(addr) { self.#write_ident(addr, data); } } }
+            } else {
+                let map_field = map_entries
+                    .iter()
+                    .find(|m| m.cpu_index == i)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "debug_cpu at index {i} has no write method and no matching #[debug_map(cpu = {i})]"
+                        )
+                    });
+                let map_ident = &map_field.field_ident;
+                if map_field.is_32 {
+                    quote! { #idx => self.#map_ident.poke(addr, data) }
+                } else {
+                    quote! { #idx => { if let Ok(addr) = u16::try_from(addr) { self.#map_ident.poke(addr, data); } } }
+                }
+            }
+        })
+        .collect();
+
     // Generate write_device_register() match arms (only #[debug_device] fields)
     let device_write_arms =
         device_entries
@@ -356,6 +388,13 @@ pub fn derive_bus_debug(input: TokenStream) -> TokenStream {
             fn write(&mut self, cpu_index: usize, addr: u32, data: u8) {
                 match cpu_index {
                     #(#write_arms,)*
+                    _ => {}
+                }
+            }
+
+            fn poke(&mut self, cpu_index: usize, addr: u32, data: u8) {
+                match cpu_index {
+                    #(#poke_arms,)*
                     _ => {}
                 }
             }

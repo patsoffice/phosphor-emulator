@@ -1061,6 +1061,21 @@ impl BusDebug for GalagaSystem {
         }
     }
 
+    /// Tagged debugger poke: routes RAM writes through the map's `poke` so a
+    /// script/console poke records a `DebugAccessSource::Frontend` event in the
+    /// trace (the board's DebugTrace surfaces the same map ring).
+    fn poke(&mut self, _cpu_index: usize, addr: u32, data: u8) {
+        let Ok(addr) = u16::try_from(addr) else {
+            return;
+        };
+        match addr {
+            0x8000..=0x87FF | 0x8800..=0x8BFF | 0x9000..=0x93FF | 0x9800..=0x9BFF => {
+                self.board.map.poke(addr, data)
+            }
+            _ => {}
+        }
+    }
+
     // --- Watchpoints (owned by the board's shared address space) ---
     // The debugger addresses in u32; anything outside the Z80's 16-bit space
     // cannot be watched, so it is dropped rather than truncated.

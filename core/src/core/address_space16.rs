@@ -512,6 +512,30 @@ impl AddressSpace16 {
             .write_region_offset(page.region_id, self.map.region_offset(addr), data);
     }
 
+    /// A *debugger* poke: like [`debug_write`](Self::debug_write), but records a
+    /// [`DebugAccessSource::Frontend`] event in the trace ring (when tracing is
+    /// on) so a script/console poke surfaces in the event trace instead of
+    /// masquerading as a hardware store. Watchpoints are intentionally not
+    /// checked — a poke is a debugger action, not machine execution.
+    pub fn poke(&mut self, addr: u16, data: u8) {
+        if self.trace.enabled() {
+            let region = self.region_at(addr).map(|r| r.name);
+            self.trace.record(DebugEvent {
+                addr: Some(addr as u32),
+                value: Some(data as u32),
+                width: 1,
+                region,
+                detail: Some("frontend poke"),
+                ..DebugEvent::new(
+                    self.debug_cycle,
+                    DebugAccessSource::Frontend,
+                    DebugEventKind::MemoryWrite,
+                )
+            });
+        }
+        self.debug_write(addr, data);
+    }
+
     /// Read a byte from backing memory (hot-path version).
     ///
     /// Only call on addresses mapped to regions with backing (RAM/ROM).

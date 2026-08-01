@@ -90,13 +90,14 @@ pub trait BusDebug {
     /// Poke a byte as a *debugger* write — a frontend/script poke, as opposed
     /// to a machine-driven store.
     ///
-    /// The default forwards to [`write`](Self::write); it exists as a distinct
-    /// seam so a later revision can record a
+    /// A poke records a
     /// [`DebugAccessSource::Frontend`](crate::core::watchpoint::DebugAccessSource::Frontend)
-    /// event here — letting pokes surface in the event trace instead of
-    /// masquerading as hardware state — without changing `write`'s contract.
-    /// (Tracked as a follow-up; not observable until a script/console can
-    /// record a trace.)
+    /// event in the trace (when tracing is on) so it surfaces in the event trace
+    /// instead of masquerading as hardware state. `#[derive(BusDebug)]` routes
+    /// this to the address space's tagged `poke`, and the hand-written Namco
+    /// boards override it likewise. The default here forwards to
+    /// [`write`](Self::write) untagged — used only by machines with no address
+    /// space to record into (e.g. minimal test rigs).
     fn poke(&mut self, cpu_index: usize, addr: u32, data: u8) {
         self.write(cpu_index, addr, data);
     }

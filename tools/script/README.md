@@ -74,9 +74,9 @@ names are ignored.
 
 `poke` writes to backed RAM; I/O and unmapped addresses are ignored (as a
 memory-viewer poke would be). It is an explicit *debug* write, distinct from the
-legitimate machine inputs `input` drives. A poke does not yet emit a
-`DebugAccessSource::Frontend` event in the event trace — that tagging is a
-follow-up, and is unobservable until a script/console can record a trace.
+legitimate machine inputs `input` drives — and it records a
+`DebugAccessSource::Frontend` event, so with tracing on a poke shows up in
+`events()` tagged `frontend`, never masquerading as a hardware store.
 
 ### Watchpoints
 
@@ -205,9 +205,9 @@ choice from that metadata.
   infinite loop or unbounded recursion always terminates.
 - Read-first at heart: most of the surface observes and drives legitimate
   inputs. The writes it does allow — `poke`, DIP edits, `load_state`, `reset` —
-  are explicit debug operations, not disguised hardware state. (A `poke` does
-  not yet emit a `DebugAccessSource::Frontend` trace event; that tagging is a
-  tracked follow-up.)
+  are explicit debug operations, not disguised hardware state. A `poke` is
+  tagged `DebugAccessSource::Frontend` in the event trace, so it stays
+  distinguishable from a hardware write.
 
 ## Examples
 

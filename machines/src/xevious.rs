@@ -1160,6 +1160,23 @@ impl BusDebug for XeviousSystem {
         }
     }
 
+    /// Tagged debugger poke: routes RAM writes through the map's `poke` so a
+    /// script/console poke records a `DebugAccessSource::Frontend` trace event.
+    fn poke(&mut self, _cpu_index: usize, addr: u32, data: u8) {
+        let Ok(addr) = u16::try_from(addr) else {
+            return;
+        };
+        match addr {
+            0x7800..=0x7FFF
+            | 0x8000..=0x87FF
+            | 0x9000..=0x97FF
+            | 0xA000..=0xA7FF
+            | 0xB000..=0xBFFF
+            | 0xC000..=0xCFFF => self.board.map.poke(addr, data),
+            _ => {}
+        }
+    }
+
     // --- Watchpoints (owned by the board's shared address space) ---
     // The debugger addresses in u32; anything outside the Z80's 16-bit space
     // cannot be watched, so it is dropped rather than truncated.
