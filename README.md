@@ -172,6 +172,7 @@ Complete system implementations that wire core components together:
 - **XeviousSystem** — Xevious on the shared Namco Galaga board (3×Z80 + WSG melodic/effect sound, 54XX explosion channel stubbed; 06XX/51XX I/O + HLE 50XX score/protection; three-layer scrolling video — ROM-lookup background, foreground text, 3bpp sprites — with direct DIP reads)
 - **GridleeSystem** — Videa arcade (M6809 + bitmap video + trackball — freely distributable ROMs)
 - **BurgertimeSystem** — Data East BurgerTime on the shared btime board (DECO CPU-7 encrypted M6502 + 3bpp planar char/sprite/background video with X/Y-swap sprite RAM + inverted BGR palette + ROT270 portrait display + a second M6502 driving two AY-3-8910 PSGs)
+- **DocastleSystem** — Universal Mr. Do's Castle / Do! Run Run / Mr. Do's Wild Ride on the shared docastle board (two Z80s in cycle-accurate lockstep through a WAIT-gated bidirectional latch + NMI handshake, 4×SN76489A with READY-driven WAIT stalls, 2×TMS1025 input mux with a one-read select pipeline, 4bpp tilemap/sprite video with pen-15 sprite masking, per-variant memory maps and DIP tables)
 - Simple6502System, Simple6800System, Simple6809System, SimpleZ80System, Simple68000System (test harnesses)
 
 ### Macros Crate (`phosphor-macros`)
