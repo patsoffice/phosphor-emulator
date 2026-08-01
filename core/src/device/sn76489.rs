@@ -33,6 +33,11 @@ const NOISE_TAP2: u32 = 0x08;
 /// internal clock). Tone frequency works out to `chip_clock / (32 * period)`.
 const GENERATOR_DIVISOR: u32 = 16;
 
+/// A write pulls the chip's `READY` output low while the byte is transferred
+/// into the register file, for 32 chip-clock cycles. Boards that wire `READY`
+/// to their CPU's `WAIT` input stall the CPU for that long after each write.
+const READY_BUSY_CLOCKS: u16 = 32;
+
 /// SN76489A programmable sound generator.
 #[derive(Saveable)]
 pub struct Sn76489a {
@@ -56,6 +61,12 @@ pub struct Sn76489a {
 
     /// Noise linear-feedback shift register.
     rng: u32,
+
+    /// Chip clocks remaining before `READY` returns high after a write. Not
+    /// saved: it spans at most 32 chip clocks, so a restore that lands inside
+    /// the window simply comes back ready.
+    #[save_skip(default)]
+    ready_countdown: u16,
 
     /// Precomputed 2 dB/step attenuation table (index 15 = silence). Config only.
     #[save_skip]
@@ -84,6 +95,7 @@ impl Sn76489a {
             output_bit: [0; 4],
             volume: [0; 4],
             rng: FEEDBACK_MASK,
+            ready_countdown: 0,
             vol_table,
         };
         chip.reset_state();
@@ -108,6 +120,7 @@ impl Sn76489a {
         }
         self.rng = FEEDBACK_MASK;
         self.output_bit[3] = (self.rng & 1) as u8;
+        self.ready_countdown = 0;
     }
 
     /// Reset to power-on state (configuration preserved).
@@ -115,8 +128,27 @@ impl Sn76489a {
         self.reset_state();
     }
 
+    /// Is `READY` high, i.e. is the chip willing to accept another write?
+    ///
+    /// Boards that tie `READY` to a CPU `WAIT` input stall that CPU while this
+    /// is false. Boards that ignore `READY` can ignore this entirely.
+    pub fn is_ready(&self) -> bool {
+        self.ready_countdown == 0
+    }
+
+    /// Advance the `READY` busy countdown by one chip clock.
+    ///
+    /// Separate from [`tick`](Self::tick), which runs at `chip_clock / 16`:
+    /// the busy window is short enough that it needs full chip-clock
+    /// resolution.
+    pub fn tick_ready(&mut self) {
+        self.ready_countdown = self.ready_countdown.saturating_sub(1);
+    }
+
     /// Write a byte to the chip's single data port.
     pub fn write(&mut self, data: u8) {
+        self.ready_countdown = READY_BUSY_CLOCKS;
+
         let r = if data & 0x80 != 0 {
             // Latch/data byte: select register and load its low 4 bits.
             let r = ((data >> 4) & 0x07) as usize;
@@ -368,6 +400,25 @@ mod tests {
     fn generator_clock_is_chip_clock_over_16() {
         assert_eq!(Sn76489a::new(4_000_000).generator_clock_hz(), 250_000);
         assert_eq!(Sn76489a::new(1_000_000).generator_clock_hz(), 62_500);
+    }
+
+    #[test]
+    fn ready_goes_low_for_32_chip_clocks_after_a_write() {
+        let mut chip = Sn76489a::new(4_000_000);
+        assert!(chip.is_ready(), "idle chip is ready");
+
+        chip.write(0x80 | 0x05);
+        assert!(!chip.is_ready(), "a write pulls READY low");
+        for _ in 0..31 {
+            chip.tick_ready();
+            assert!(!chip.is_ready());
+        }
+        chip.tick_ready();
+        assert!(chip.is_ready(), "READY returns high after 32 chip clocks");
+
+        // Further clocking must not underflow back into the busy state.
+        chip.tick_ready();
+        assert!(chip.is_ready());
     }
 
     #[test]

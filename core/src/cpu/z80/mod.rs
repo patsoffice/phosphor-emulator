@@ -26,7 +26,13 @@ pub enum Flag {
     S = 0x80,  // Sign
 }
 
-#[derive(Saveable)]
+/// `Clone` snapshots the complete T-state-level machine state, including the
+/// mid-instruction temporaries. Boards that model the WAIT input use this to
+/// re-run a stalled bus cycle: snapshot before `execute_cycle`, restore if the
+/// bus asserted WAIT during the access, and step again once WAIT releases —
+/// which is what the real chip does when it holds the address on the bus and
+/// latches the data only after WAIT goes away.
+#[derive(Clone, Saveable)]
 #[save_version(1)]
 pub struct Z80 {
     // Registers
