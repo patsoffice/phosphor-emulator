@@ -1332,6 +1332,60 @@ mod tests {
         );
     }
 
+    /// Companion to [`motion_objects_render_from_the_vblank_snapshot`], which
+    /// latches the snapshot by hand and so only covers the compositor half of
+    /// the double-buffer fix. This one drives the beam across the start of
+    /// vblank and checks `tick` takes the snapshot itself — drop that call and
+    /// the shadow stays empty, the compositor falls back to live state, and the
+    /// sprites vanish exactly as they did originally.
+    #[test]
+    fn vblank_tick_latches_the_motion_object_snapshot() {
+        let mut sys = crate::marble::MarbleSystem::new();
+
+        let mut cache = GfxCache::new(1, 8, 8);
+        cache.set_pixel(0, 0, 0, 5);
+        sys.board.playfield.banks.push(GfxBank { cache, bpp: 4 });
+        sys.board.playfield.mo_lookup[0] = 1 << 8;
+
+        let palette = sys.board.map.region_data_mut(Region::Palette);
+        palette[0x105 * 2] = 0xF0;
+        palette[0x105 * 2 + 1] = 0xF0;
+
+        // The list the beam is scanning out: one sprite at y=0 in bank 0.
+        let mob = sys.board.map.region_data_mut(Region::Mob);
+        mob[0] = 0x1F;
+        mob[1] = 0x00;
+        sys.board.mo_bank_changes = vec![(0, 0)];
+
+        // Park the beam one cycle short of vblank, then step across it so the
+        // scanline boundary that latches the snapshot actually runs.
+        sys.board.clock = VBLANK_SCANLINE as u64 * TIMING.cycles_per_scanline - 1;
+        phosphor_core::bus_split!(&mut sys, bus: u32 word => {
+            for _ in 0..2 {
+                sys.board.tick(bus);
+            }
+        });
+        assert!(
+            !sys.board.mo_shadow.is_empty(),
+            "entering vblank must latch the motion-object state"
+        );
+
+        // The game now tears down bank 0 and publishes a rebuilt list in bank 1.
+        let mob = sys.board.map.region_data_mut(Region::Mob);
+        mob[0] = 0x00;
+        mob[1] = 0x00;
+        sys.board.bankselect_w(0x08);
+
+        let (dw, dh) = TIMING.display_size();
+        let mut buf = vec![0u8; (dw * dh * 3) as usize];
+        sys.board.render_frame(&mut buf);
+        assert_eq!(
+            &buf[0..3],
+            &[0, 254, 0],
+            "the sprite the beam scanned out still draws after the bank swap"
+        );
+    }
+
     #[test]
     fn playfield_tile_horizontal_flip() {
         // Bit 15 of a playfield cell word mirrors its 8×8 tile left-to-right.
