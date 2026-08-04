@@ -23,7 +23,8 @@ use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
     ActionRole, AnalogAxisKind, AudioSource, DefaultBinding, DipApplyTiming, DipChoice, DipOption,
     DipSwitchBank, DipSwitches, Direction, InputConfigurable, InputControl, InputEvent, InputId,
-    InputKind, MachineCore, MouseControl, Nvram, Profilable, Renderable, SaveState,
+    InputKind, MachineCore, MouseControl, Nvram, PadAxis, PadControl, Profilable, Renderable,
+    SaveState,
 };
 use phosphor_core::core::save_state::{self, SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::{AccessKind, AddressSpace16};
@@ -396,7 +397,13 @@ const IROBOT_CONTROLS: &[InputControl] = &[
             axis: AnalogAxisKind::X,
         },
         player: Some(1),
-        default_bindings: &[DefaultBinding::Mouse(MouseControl::AxisX)],
+        // Right stick, not left: the shared direction defaults (P1_LEFT/RIGHT)
+        // already bind LeftX as signed digital, and `update_stick` assigns the
+        // axis absolutely — one stick driving both would fight itself.
+        default_bindings: &[
+            DefaultBinding::Mouse(MouseControl::AxisX),
+            DefaultBinding::Pad(PadControl::FullAxis(PadAxis::RightX)),
+        ],
     },
     InputControl {
         id: InputId(INPUT_STICK_Y),
@@ -406,7 +413,10 @@ const IROBOT_CONTROLS: &[InputControl] = &[
             axis: AnalogAxisKind::Y,
         },
         player: Some(1),
-        default_bindings: &[DefaultBinding::Mouse(MouseControl::AxisY)],
+        default_bindings: &[
+            DefaultBinding::Mouse(MouseControl::AxisY),
+            DefaultBinding::Pad(PadControl::FullAxis(PadAxis::RightY)),
+        ],
     },
     // Digital direction keys (arrow keys / D-pad) drive the self-centering
     // stick: holding one deflects the axis; releasing returns it to center.

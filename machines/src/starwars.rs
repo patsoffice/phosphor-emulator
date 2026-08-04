@@ -18,7 +18,7 @@ use phosphor_core::core::debug_trace::DebugTraceBuffer;
 use phosphor_core::core::machine::{
     ActionRole, AnalogAxisKind, DefaultBinding, DipSwitches, Direction, FrontendMachine,
     InputConfigurable, InputControl, InputEvent, InputId, InputKind, MachineCore, MouseControl,
-    Nvram, Profilable, SaveState,
+    Nvram, PadAxis, PadControl, Profilable, SaveState,
 };
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::{AccessKind, AddressSpace16, Bus, BusMaster, TimingConfig};
@@ -176,7 +176,13 @@ const STARWARS_CONTROLS: &[InputControl] = &[
             axis: AnalogAxisKind::X,
         },
         player: Some(1),
-        default_bindings: &[DefaultBinding::Mouse(MouseControl::AxisX)],
+        // Right stick, not left: the shared direction defaults (P1_LEFT/RIGHT)
+        // already bind LeftX as signed digital, and those assign the yoke
+        // absolutely — one stick driving both would fight itself.
+        default_bindings: &[
+            DefaultBinding::Mouse(MouseControl::AxisX),
+            DefaultBinding::Pad(PadControl::FullAxis(PadAxis::RightX)),
+        ],
     },
     InputControl {
         id: CTRL_YOKE_Y,
@@ -186,7 +192,10 @@ const STARWARS_CONTROLS: &[InputControl] = &[
             axis: AnalogAxisKind::Y,
         },
         player: Some(1),
-        default_bindings: &[DefaultBinding::Mouse(MouseControl::AxisY)],
+        default_bindings: &[
+            DefaultBinding::Mouse(MouseControl::AxisY),
+            DefaultBinding::Pad(PadControl::FullAxis(PadAxis::RightY)),
+        ],
     },
 ];
 
