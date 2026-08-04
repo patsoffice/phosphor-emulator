@@ -11,7 +11,7 @@ use std::path::PathBuf;
 mod harness;
 mod rom_path;
 
-pub use harness::{Harness, PressSpec};
+pub use harness::{Harness, MotionSpec, PressSpec};
 pub use rom_path::load_rom_set;
 
 /// Locate a ROM directory for ROM-gated integration tests: `PHOSPHOR_ROMS` if

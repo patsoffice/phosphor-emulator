@@ -49,7 +49,7 @@ impl DebugSession {
     /// Boot `machine_name` from the ROM set at `rom_path` (via the shared
     /// [`Harness`]) and index its input controls.
     pub fn open(machine_name: &str, rom_path: &str) -> Result<Self, String> {
-        let harness = Harness::build(machine_name, rom_path, None, None, &[])?;
+        let harness = Harness::build(machine_name, rom_path, None, None, &[], &[])?;
         Ok(Self::wrap(harness))
     }
 
@@ -688,6 +688,29 @@ mod tests {
                     id: COIN_ID,
                     delta: -3.0
                 },
+            ]
+        );
+    }
+
+    /// Scheduled motion is a `phosphor-harness` feature, but the only stub
+    /// `FrontendMachine` in the workspace lives here — duplicating 300 lines of
+    /// double into `harness` for one test would cost more than it buys.
+    #[test]
+    fn scheduled_motion_feeds_one_delta_per_frame() {
+        let (machine, rec) = crate::test_support::stub_machine(true);
+        let mut harness = phosphor_harness::Harness::from_machine(machine);
+        harness.schedule_motion(COIN_ID, 2, 3, -1.5);
+        for _ in 0..6 {
+            harness.run_frame();
+        }
+        assert_eq!(
+            rec.borrow().inputs,
+            vec![
+                InputEvent::Relative {
+                    id: COIN_ID,
+                    delta: -1.5
+                };
+                3
             ]
         );
     }

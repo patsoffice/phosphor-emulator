@@ -243,7 +243,7 @@ pub fn run_trace(
         None => Vec::new(),
     };
 
-    let mut harness = Harness::build(machine, path, nvram, coin_at, &press_specs)?;
+    let mut harness = Harness::build(machine, path, nvram, coin_at, &press_specs, &[])?;
     let cycles_per_frame = harness.machine_mut().cycles_per_frame();
 
     // Resolve CPU names/indices against the booted machine's bus (cycle mode).
@@ -1920,7 +1920,7 @@ mod tests {
         ];
 
         for (machine, warmup) in cases {
-            let mut reference = Harness::build(machine, path, None, None, &[]).expect("boot");
+            let mut reference = Harness::build(machine, path, None, None, &[], &[]).expect("boot");
             for _ in 0..warmup {
                 reference.run_frame();
             }
@@ -1940,7 +1940,7 @@ mod tests {
                 warmup + ADVANCE
             );
 
-            let mut subject = Harness::build(machine, path, None, None, &[]).expect("boot");
+            let mut subject = Harness::build(machine, path, None, None, &[], &[]).expect("boot");
             for _ in 0..warmup {
                 subject.run_frame();
             }

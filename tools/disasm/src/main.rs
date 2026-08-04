@@ -436,7 +436,7 @@ fn run_frameshot(
     audio_out: Option<&Path>,
     path: &str,
 ) -> Result<String, String> {
-    let mut harness = Harness::build(machine, path, nvram, coin_at, &[])?;
+    let mut harness = Harness::build(machine, path, nvram, coin_at, &[], &[])?;
     for _ in 0..frames {
         harness.run_frame();
     }

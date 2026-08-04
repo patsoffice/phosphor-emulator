@@ -30,6 +30,21 @@ pub struct PressSpec {
     pub hold: usize,
 }
 
+/// A requested sustained motion: feed `delta` to `control` (by stable name)
+/// once per frame for `frames` frames starting at frame `at`.
+///
+/// The per-frame shape is deliberate. Trackball and spinner machines drain a
+/// bounded amount of accumulated motion per frame (or per cycle-divider tick),
+/// so one large delta is not equivalent to the same total spread over several
+/// frames — the machine clamps, and depending on the game either carries the
+/// remainder or discards it.
+pub struct MotionSpec {
+    pub control: String,
+    pub at: usize,
+    pub frames: usize,
+    pub delta: f32,
+}
+
 /// A booted machine plus its input-scripting and frame-accounting state.
 ///
 /// Construct with [`Harness::build`], advance with [`Harness::run_frame`],
@@ -38,6 +53,7 @@ pub struct PressSpec {
 pub struct Harness {
     machine: Box<dyn FrontendMachine>,
     presses: Vec<ScheduledPress>,
+    motions: Vec<ScheduledMotion>,
     /// Number of frames run so far (also the index of the next frame).
     frame: usize,
 }
@@ -47,6 +63,24 @@ struct ScheduledPress {
     id: InputId,
     at: usize,
     release: usize,
+}
+
+/// A resolved sustained motion: feed `delta` to `id` on every frame in
+/// `at..until`.
+struct ScheduledMotion {
+    id: InputId,
+    at: usize,
+    until: usize,
+    delta: f32,
+}
+
+impl ScheduledMotion {
+    /// Whether this motion feeds a delta on `frame`. Half-open: the motion
+    /// fires on `at` and not on `until`, so `frames` in the spec is exactly the
+    /// number of deltas emitted.
+    fn active_on(&self, frame: usize) -> bool {
+        frame >= self.at && frame < self.until
+    }
 }
 
 impl Harness {
@@ -62,6 +96,7 @@ impl Harness {
         nvram: Option<&Path>,
         coin_at: Option<usize>,
         presses: &[PressSpec],
+        motions: &[MotionSpec],
     ) -> Result<Self, String> {
         let entry = registry::find(machine).ok_or_else(|| {
             let avail: Vec<&str> = registry::all().iter().map(|e| e.name).collect();
@@ -112,11 +147,37 @@ impl Harness {
             });
         }
 
+        let mut scheduled_motions = Vec::new();
+        for m in motions {
+            scheduled_motions.push(ScheduledMotion {
+                id: resolve(&m.control)?,
+                at: m.at,
+                until: m.at + m.frames,
+                delta: m.delta,
+            });
+        }
+
         Ok(Self {
             machine: machine_box,
             presses: scheduled,
+            motions: scheduled_motions,
             frame: 0,
         })
+    }
+
+    /// Schedule sustained relative motion on an already-resolved control.
+    ///
+    /// [`build`](Self::build) is the normal path (it resolves stable names for
+    /// you); this is the seam for callers holding a machine constructed via
+    /// [`from_machine`](Self::from_machine), which has no control table to
+    /// resolve against at construction time.
+    pub fn schedule_motion(&mut self, id: InputId, at: usize, frames: usize, delta: f32) {
+        self.motions.push(ScheduledMotion {
+            id,
+            at,
+            until: at + frames,
+            delta,
+        });
     }
 
     /// Advance the machine by one frame, applying any scripted input edges for
@@ -132,6 +193,14 @@ impl Harness {
                 self.machine.handle_input(InputEvent::Button {
                     id: p.id,
                     pressed: false,
+                });
+            }
+        }
+        for m in &self.motions {
+            if m.active_on(self.frame) {
+                self.machine.handle_input(InputEvent::Relative {
+                    id: m.id,
+                    delta: m.delta,
                 });
             }
         }
@@ -158,13 +227,14 @@ impl Harness {
     }
 
     /// Reset the machine to its power-on state and zero the frame counter.
-    /// Scheduled presses are left intact (they fire relative to frame 0 again).
+    /// Scheduled presses and motions are left intact (they fire relative to
+    /// frame 0 again).
     pub fn reset(&mut self) {
         self.machine.reset();
         self.frame = 0;
     }
 
-    /// Wrap an already-constructed machine, with no scheduled presses.
+    /// Wrap an already-constructed machine, with no scheduled input.
     ///
     /// [`build`](Self::build) is the normal entry point (registry → ROM load →
     /// create → reset). This constructor is for callers that already hold a
@@ -174,6 +244,7 @@ impl Harness {
         Self {
             machine,
             presses: Vec::new(),
+            motions: Vec::new(),
             frame: 0,
         }
     }
@@ -182,5 +253,32 @@ impl Harness {
     /// frontend uses to reclaim its machine after driving it through a session.
     pub fn into_machine(self) -> Box<dyn FrontendMachine> {
         self.machine
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn motion(at: usize, frames: usize) -> ScheduledMotion {
+        ScheduledMotion {
+            id: InputId(0),
+            at,
+            until: at + frames,
+            delta: 1.0,
+        }
+    }
+
+    #[test]
+    fn motion_is_active_for_exactly_frames_starting_at_at() {
+        let m = motion(2, 3);
+        let active: Vec<usize> = (0..8).filter(|&f| m.active_on(f)).collect();
+        assert_eq!(active, vec![2, 3, 4]);
+    }
+
+    #[test]
+    fn zero_frame_motion_never_fires() {
+        let m = motion(2, 0);
+        assert!((0..8).all(|f| !m.active_on(f)));
     }
 }
