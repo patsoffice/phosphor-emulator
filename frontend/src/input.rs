@@ -365,6 +365,50 @@ pub fn build_bindings(machine: &dyn FrontendMachine) -> BindingSet {
     BindingSet::from_controls(machine.input_controls())
 }
 
+/// What [`dispatch`] remembers between events.
+///
+/// Gamepad axes stream `ControllerAxisMotion` continuously — a worn stick that
+/// rests a little off-center emits events forever without ever leaving the
+/// deadzone. Re-deriving a control's state from each of those events and
+/// dispatching it unconditionally means the axis re-asserts "released" many
+/// times a second, silently overriding a key the player is holding for the
+/// same control (every direction is bound to both a key and a stick axis by
+/// default). Latching the last value and dispatching only on a *change* keeps
+/// a resting axis silent.
+#[derive(Default)]
+pub struct DispatchState {
+    /// Last digital state sent for a (axis, direction, target) triple.
+    pad_axis: Vec<((Axis, AxisDir, InputId), bool)>,
+    /// Last analog value sent for an (axis, target) pair.
+    pad_analog: Vec<((Axis, InputId), f32)>,
+}
+
+impl DispatchState {
+    /// Record `pressed` for this axis direction, returning true if it changed.
+    fn digital_changed(&mut self, key: (Axis, AxisDir, InputId), pressed: bool) -> bool {
+        match self.pad_axis.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, last)) => std::mem::replace(last, pressed) != pressed,
+            // An axis first seen at rest has nothing to announce; only a
+            // deflection is news.
+            None => {
+                self.pad_axis.push((key, pressed));
+                pressed
+            }
+        }
+    }
+
+    /// Record `value` for this analog axis, returning true if it changed.
+    fn analog_changed(&mut self, key: (Axis, InputId), value: f32) -> bool {
+        match self.pad_analog.iter_mut().find(|(k, _)| *k == key) {
+            Some((_, last)) => std::mem::replace(last, value) != value,
+            None => {
+                self.pad_analog.push((key, value));
+                value != 0.0
+            }
+        }
+    }
+}
+
 /// Everything [`dispatch`] needs from the frontend besides the bindings.
 #[derive(Clone, Copy)]
 pub struct DispatchCtx {
@@ -386,6 +430,7 @@ pub fn dispatch<M: InputConfigurable + ?Sized>(
     bindings: &BindingSet,
     machine: &mut M,
     ctx: DispatchCtx,
+    state: &mut DispatchState,
 ) -> bool {
     let mut press = |physical, pressed| {
         for id in bindings.digital_targets(physical) {
@@ -430,13 +475,16 @@ pub fn dispatch<M: InputConfigurable + ?Sized>(
         Event::ControllerAxisMotion { axis, value, .. } => {
             let normalized = f32::from(*value) / 32_768.0;
 
-            // Analog stick standing in for digital directions.
+            // Analog stick standing in for digital directions. Only a change
+            // is dispatched — see `DispatchState`.
             for (id, dir, deadzone) in bindings.pad_axis_targets(*axis) {
                 let pressed = match dir {
                     AxisDir::Positive => normalized > deadzone,
                     AxisDir::Negative => normalized < -deadzone,
                 };
-                machine.handle_input(InputEvent::Button { id, pressed });
+                if state.digital_changed((*axis, dir, id), pressed) {
+                    machine.handle_input(InputEvent::Button { id, pressed });
+                }
             }
 
             // Whole axis driving an analog control. The magnitude is rescaled
@@ -444,10 +492,14 @@ pub fn dispatch<M: InputConfigurable + ?Sized>(
             // ramps from 0.0 as the stick leaves the deadzone instead of
             // jumping to the deadzone fraction the moment it is crossed.
             for (id, scale, deadzone) in bindings.pad_analog_targets(*axis) {
-                machine.handle_input(InputEvent::Absolute {
-                    id,
-                    value: analog_value(normalized, deadzone, scale),
-                });
+                let value = analog_value(normalized, deadzone, scale);
+                // Same latch, for the same reason: a resting stick would
+                // otherwise pin the axis at 0.0 forever, and on machines where
+                // the mouse drives the same control (starwars, irobot) that
+                // would fight every mouse motion.
+                if state.analog_changed((*axis, id), value) {
+                    machine.handle_input(InputEvent::Absolute { id, value });
+                }
             }
             true
         }
@@ -776,6 +828,7 @@ mod tests {
             &bindings,
             &mut rec,
             ctx(true, false),
+            &mut DispatchState::default(),
         );
         assert!(!consumed);
         assert!(rec.seen.is_empty());
@@ -794,6 +847,7 @@ mod tests {
             &bindings,
             &mut rec,
             ctx(true, false),
+            &mut DispatchState::default(),
         );
         assert!(consumed);
         assert_eq!(rec.seen, vec![(1, false)]);
@@ -815,6 +869,7 @@ mod tests {
                 &bindings,
                 &mut rec,
                 ctx(false, grabbed),
+                &mut DispatchState::default(),
             );
             assert!(consumed, "grabbed={grabbed}");
             assert_eq!(rec.seen, vec![(1, false)], "grabbed={grabbed}");
@@ -835,13 +890,28 @@ mod tests {
         };
 
         let mut rec = Recorder::default();
-        dispatch(&event(-30_000), &bindings, &mut rec, ctx(false, false));
-        assert_eq!(rec.seen, vec![(1, true), (2, false)]);
+        dispatch(
+            &event(-30_000),
+            &bindings,
+            &mut rec,
+            ctx(false, false),
+            &mut DispatchState::default(),
+        );
+        // Only the crossed direction is announced. The opposite direction was
+        // already at rest, and re-sending its "released" state on every motion
+        // event is what used to stomp on a held key.
+        assert_eq!(rec.seen, vec![(1, true)]);
 
-        // Inside the deadzone both read released.
+        // Inside the deadzone nothing is dispatched at all.
         let mut rec = Recorder::default();
-        dispatch(&event(-1_000), &bindings, &mut rec, ctx(false, false));
-        assert_eq!(rec.seen, vec![(1, false), (2, false)]);
+        dispatch(
+            &event(-1_000),
+            &bindings,
+            &mut rec,
+            ctx(false, false),
+            &mut DispatchState::default(),
+        );
+        assert_eq!(rec.seen, vec![]);
     }
 
     #[test]
@@ -860,13 +930,25 @@ mod tests {
         };
 
         let mut rec = Recorder::default();
-        let consumed = dispatch(&event, &bindings, &mut rec, ctx(false, true));
+        let consumed = dispatch(
+            &event,
+            &bindings,
+            &mut rec,
+            ctx(false, true),
+            &mut DispatchState::default(),
+        );
         assert!(consumed);
         assert_eq!(rec.relative, vec![(1, 10.0)]);
 
         // Ungrabbed, the cursor belongs to the UI and motion is not game input.
         let mut rec = Recorder::default();
-        let consumed = dispatch(&event, &bindings, &mut rec, ctx(false, false));
+        let consumed = dispatch(
+            &event,
+            &bindings,
+            &mut rec,
+            ctx(false, false),
+            &mut DispatchState::default(),
+        );
         assert!(!consumed);
         assert!(rec.relative.is_empty());
     }
@@ -882,23 +964,54 @@ mod tests {
         };
 
         // Exactly at the deadzone edge the value is 0.0, not the deadzone
-        // fraction — that ramp is the point of the rescale.
+        // fraction — that ramp is the point of the rescale. 0.0 is also
+        // indistinguishable from rest, so the latch stays silent; stepping past
+        // the edge is what produces the first event.
         let mut rec = Recorder::default();
+        let mut state = DispatchState::default();
         let edge = (STICK_DEADZONE_NORM * 32_768.0) as i16;
-        dispatch(&event(edge), &bindings, &mut rec, ctx(false, false));
+        dispatch(
+            &event(edge),
+            &bindings,
+            &mut rec,
+            ctx(false, false),
+            &mut state,
+        );
+        assert_eq!(rec.absolute, vec![]);
+
+        dispatch(
+            &event(edge + 4_000),
+            &bindings,
+            &mut rec,
+            ctx(false, false),
+            &mut state,
+        );
         assert_eq!(rec.absolute.len(), 1);
-        assert!(rec.absolute[0].1.abs() < 1e-6, "{:?}", rec.absolute);
+        assert!(rec.absolute[0].1 > 0.0, "{:?}", rec.absolute);
 
         // Fully deflected reaches 1.0, and the sign follows the stick.
         let mut rec = Recorder::default();
-        dispatch(&event(-32_768), &bindings, &mut rec, ctx(false, false));
+        dispatch(
+            &event(-32_768),
+            &bindings,
+            &mut rec,
+            ctx(false, false),
+            &mut DispatchState::default(),
+        );
         assert_eq!(rec.absolute.len(), 1);
         assert!((rec.absolute[0].1 + 1.0).abs() < 1e-6, "{:?}", rec.absolute);
 
-        // Inside the deadzone it stays at rest.
+        // Inside the deadzone it stays at rest, and says nothing — a drifting
+        // stick must not keep pinning the axis to 0.0 over the mouse.
         let mut rec = Recorder::default();
-        dispatch(&event(1_000), &bindings, &mut rec, ctx(false, false));
-        assert_eq!(rec.absolute, vec![(1, 0.0)]);
+        dispatch(
+            &event(1_000),
+            &bindings,
+            &mut rec,
+            ctx(false, false),
+            &mut DispatchState::default(),
+        );
+        assert_eq!(rec.absolute, vec![]);
     }
 
     #[test]
@@ -921,6 +1034,7 @@ mod tests {
             &bindings,
             &mut rec,
             ctx(false, false),
+            &mut DispatchState::default(),
         );
         assert_eq!(rec.seen, vec![(1, true)]);
         assert_eq!(rec.absolute.len(), 1);
@@ -1031,12 +1145,120 @@ mod tests {
         }
     }
 
+    /// A stick resting inside its deadzone must not override a held key.
+    ///
+    /// Regression: gamepad axes stream motion events continuously, and each one
+    /// re-derived every bound control's state and dispatched it. A worn stick
+    /// resting slightly off-center therefore re-sent "released" many times a
+    /// second for `p1_left`/`p1_right`, cancelling the arrow keys — every game
+    /// lost left/right while up/down kept working, because only the X axis was
+    /// drifting. Reported from the field.
+    #[test]
+    fn a_resting_pad_axis_does_not_cancel_held_keys() {
+        let bindings = set(vec![
+            binding(PhysicalInput::Key(Scancode::Left), 1),
+            binding(PhysicalInput::PadAxis(Axis::LeftX, AxisDir::Negative), 1),
+            binding(PhysicalInput::PadAxis(Axis::LeftX, AxisDir::Positive), 2),
+        ]);
+        let mut state = DispatchState::default();
+        let mut rec = Recorder::default();
+
+        // Key down: p1_left is held.
+        dispatch(
+            &key_down(Scancode::Left),
+            &bindings,
+            &mut rec,
+            ctx(false, false),
+            &mut state,
+        );
+        assert_eq!(rec.seen, vec![(1, true)]);
+
+        // Now the stick jitters around center, well inside the deadzone.
+        for value in [80, -140, 200, -60, 15] {
+            dispatch(
+                &Event::ControllerAxisMotion {
+                    timestamp: 0,
+                    which: 0,
+                    axis: Axis::LeftX,
+                    value,
+                },
+                &bindings,
+                &mut rec,
+                ctx(false, false),
+                &mut state,
+            );
+        }
+
+        // Nothing further was dispatched — the key is still held.
+        assert_eq!(
+            rec.seen,
+            vec![(1, true)],
+            "a resting axis dispatched over the held key"
+        );
+    }
+
+    /// The latch must not swallow a genuine deflection or its release.
+    #[test]
+    fn pad_axis_still_reports_crossings_in_both_directions() {
+        let bindings = set(vec![binding(
+            PhysicalInput::PadAxis(Axis::LeftX, AxisDir::Negative),
+            1,
+        )]);
+        let mut state = DispatchState::default();
+        let mut rec = Recorder::default();
+        let event = |value| Event::ControllerAxisMotion {
+            timestamp: 0,
+            which: 0,
+            axis: Axis::LeftX,
+            value,
+        };
+
+        dispatch(
+            &event(-30_000),
+            &bindings,
+            &mut rec,
+            ctx(false, false),
+            &mut state,
+        );
+        // Still deflected — no repeat.
+        dispatch(
+            &event(-31_000),
+            &bindings,
+            &mut rec,
+            ctx(false, false),
+            &mut state,
+        );
+        // Back to center — one release.
+        dispatch(
+            &event(0),
+            &bindings,
+            &mut rec,
+            ctx(false, false),
+            &mut state,
+        );
+        dispatch(
+            &event(10),
+            &bindings,
+            &mut rec,
+            ctx(false, false),
+            &mut state,
+        );
+
+        assert_eq!(rec.seen, vec![(1, true), (1, false)]);
+    }
+
     #[test]
     fn unrelated_events_are_not_consumed() {
         let bindings = set(vec![binding(PhysicalInput::Key(Scancode::Left), 1)]);
         let mut rec = Recorder::default();
         let quit = Event::Quit { timestamp: 0 };
-        assert!(!dispatch(&quit, &bindings, &mut rec, ctx(false, true)));
+        assert!(!dispatch(
+            &quit,
+            &bindings,
+            &mut rec,
+            ctx(false, true),
+            &mut DispatchState::default()
+        ));
         assert!(rec.seen.is_empty());
     }
 

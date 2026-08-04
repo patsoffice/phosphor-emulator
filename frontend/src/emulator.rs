@@ -195,6 +195,9 @@ pub fn run(
         fullscreen,
     );
     let mut event_pump = sdl_context.event_pump().expect("Failed to get event pump");
+    // Latched pad-axis state, so a stick resting inside its deadzone stops
+    // re-asserting "released" over whatever the player is holding.
+    let mut dispatch_state = input::DispatchState::default();
 
     // Detect vector display machines and create GL renderer.
     let mut vector_renderer = machine
@@ -702,6 +705,7 @@ pub fn run(
                             egui_wants_keyboard: video.wants_keyboard(),
                             mouse_grabbed,
                         },
+                        &mut dispatch_state,
                     );
                 }
             }
