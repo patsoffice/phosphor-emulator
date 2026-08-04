@@ -520,6 +520,13 @@ pub fn resync<M: InputConfigurable + ?Sized>(
     machine: &mut M,
     devices: &dyn DeviceState,
 ) {
+    // A control usually has several bindings — a key, a D-pad button and a
+    // stick direction all drive `p1_left`. Its held state is the OR across
+    // them, so they must be combined before dispatching. Emitting one event
+    // per binding lets an unpressed pad button overwrite a genuinely held key,
+    // which is exactly the desync resync exists to repair.
+    let mut digital: Vec<(InputId, bool)> = Vec::new();
+
     for binding in bindings.all() {
         let pressed = match binding.physical {
             PhysicalInput::Key(sc) => devices.key_pressed(sc),
@@ -545,10 +552,15 @@ pub fn resync<M: InputConfigurable + ?Sized>(
             // Relative motion has no "current value" to re-assert.
             PhysicalInput::MouseAxis(_) => continue,
         };
-        machine.handle_input(InputEvent::Button {
-            id: binding.target,
-            pressed,
-        });
+
+        match digital.iter_mut().find(|(id, _)| *id == binding.target) {
+            Some((_, held)) => *held |= pressed,
+            None => digital.push((binding.target, pressed)),
+        }
+    }
+
+    for (id, pressed) in digital {
+        machine.handle_input(InputEvent::Button { id, pressed });
     }
 }
 
@@ -1048,6 +1060,58 @@ mod tests {
         // Held inputs are re-asserted as pressed, everything else as released —
         // that is the difference from a plain release-all.
         assert_eq!(rec.seen, vec![(1, true), (2, false), (3, true), (4, false)]);
+    }
+
+    /// A held key must survive resync even though the same control is also
+    /// bound to pad inputs that are not pressed.
+    ///
+    /// Regression: resync used to emit one event per *binding*, so `p1_left`
+    /// (Key(Left) + DPadLeft + LeftX-) received `true, false, false` and the
+    /// absent gamepad won. Any resync trigger — reset, state load, focus
+    /// regain, controller unplug — dropped whatever the player was holding,
+    /// the exact desync resync exists to repair.
+    #[test]
+    fn resync_ors_a_controls_bindings_rather_than_letting_the_last_win() {
+        let entry =
+            phosphor_machines::registry::find("roadrunner").expect("roadrunner is registered");
+        let bindings = BindingSet::from_controls(entry.controls);
+        let id_of = |name: &str| {
+            entry
+                .controls
+                .iter()
+                .find(|c| c.stable_name == name)
+                .unwrap()
+                .id
+                .0
+        };
+
+        // Left and Up held on the keyboard; no gamepad connected.
+        let devices = FakeDevices {
+            keys: vec![Scancode::Left, Scancode::Up],
+            ..Default::default()
+        };
+        let mut rec = Recorder::default();
+        resync(&bindings, &mut rec, &devices);
+
+        // Exactly one event per control, and the held keys stay held.
+        for (name, expected) in [
+            ("p1_left", true),
+            ("p1_up", true),
+            ("p1_right", false),
+            ("p1_down", false),
+        ] {
+            let events: Vec<_> = rec
+                .seen
+                .iter()
+                .filter(|(id, _)| *id == id_of(name))
+                .collect();
+            assert_eq!(
+                events.len(),
+                1,
+                "{name}: expected one event, got {events:?}"
+            );
+            assert_eq!(events[0].1, expected, "{name} resynced to the wrong state");
+        }
     }
 
     #[test]
