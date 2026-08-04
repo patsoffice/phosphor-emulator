@@ -5,12 +5,12 @@ use std::time::{Duration, Instant};
 
 use phosphor_core::core::machine::{FrontendMachine, InputEvent, InputKind, Orientation};
 use phosphor_script::{DebugSession, Machine};
-use sdl2::event::Event;
+use sdl2::event::{Event, WindowEvent};
 use sdl2::keyboard::{Mod, Scancode};
 
 use crate::console_ui::{self, ConsoleState};
 use crate::debug_ui::{self, DebugState, RunMode};
-use crate::input::{AxisDir, BindingSet, MouseAxis, PhysicalInput};
+use crate::input::{self, AxisDir, BindingSet, MouseAxis, PhysicalInput};
 use crate::profile::ProfileState;
 use crate::settings_ui::{self, SettingsState};
 use crate::video::Video;
@@ -49,6 +49,42 @@ fn capture_physical(event: &Event) -> Option<PhysicalInput> {
             Some(PhysicalInput::MouseButtonInput(*mouse_btn))
         }
         _ => None,
+    }
+}
+
+/// Live SDL device state, for [`input::resync`].
+///
+/// `mouse` is `None` while the mouse is ungrabbed, which reports every mouse
+/// button as released — ungrabbed means the cursor belongs to the UI.
+struct SdlDevices<'a> {
+    keyboard: sdl2::keyboard::KeyboardState<'a>,
+    controllers: &'a [sdl2::controller::GameController],
+    mouse: Option<sdl2::mouse::MouseState>,
+}
+
+impl input::DeviceState for SdlDevices<'_> {
+    fn key_pressed(&self, scancode: Scancode) -> bool {
+        self.keyboard.is_scancode_pressed(scancode)
+    }
+
+    fn pad_button_pressed(&self, button: sdl2::controller::Button) -> bool {
+        self.controllers.iter().any(|c| c.button(button))
+    }
+
+    fn pad_axis(&self, axis: sdl2::controller::Axis) -> f32 {
+        // Whichever pad is pushing hardest wins, matching the "any pad drives
+        // player 1" behavior the dispatch path already has.
+        self.controllers
+            .iter()
+            .map(|c| f32::from(c.axis(axis)) / 32_768.0)
+            .max_by(|a, b| a.abs().total_cmp(&b.abs()))
+            .unwrap_or(0.0)
+    }
+
+    fn mouse_button_pressed(&self, button: sdl2::mouse::MouseButton) -> bool {
+        self.mouse
+            .as_ref()
+            .is_some_and(|m| m.is_mouse_button_pressed(button))
     }
 }
 
@@ -267,6 +303,12 @@ pub fn run(
         let mut sess = session.borrow_mut();
         let machine: &mut dyn FrontendMachine = sess.machine_mut();
 
+        // Set when something invalidates the machine's idea of held input
+        // (reset, state load, focus regain, controller unplug). Reconciled once
+        // after the event batch, because reading live device state needs
+        // `event_pump` back from `poll_iter`'s borrow.
+        let mut needs_resync = false;
+
         // Poll all pending SDL events, translate to machine input
         for event in event_pump.poll_iter() {
             // Forward every event to egui first
@@ -423,6 +465,10 @@ pub fn run(
                 } => {
                     machine.reset();
                     debug_state.frame_count = 0;
+                    // reset() clears the machine's port bits, but a key held
+                    // across it produces no new KeyDown — without this the
+                    // input is dead until the user releases and re-presses.
+                    needs_resync = true;
                 }
 
                 // Quick Save (F6)
@@ -448,7 +494,13 @@ pub fn run(
                     ..
                 } => match std::fs::read(save_path) {
                     Ok(data) => match machine.load_state(&data) {
-                        Ok(()) => eprintln!("Save state loaded"),
+                        Ok(()) => {
+                            eprintln!("Save state loaded");
+                            // Port bits live inside the snapshot, so the
+                            // restored state can contradict what is physically
+                            // held right now.
+                            needs_resync = true;
+                        }
                         Err(e) => eprintln!("Load state failed: {e}"),
                     },
                     Err(e) => eprintln!("No save file found: {e}"),
@@ -567,6 +619,11 @@ pub fn run(
                 } => {
                     mouse_grabbed = !mouse_grabbed;
                     sdl_context.mouse().set_relative_mouse_mode(mouse_grabbed);
+                    // Ungrabbing stops mouse events reaching the game, so a
+                    // button held at that moment would never see its release.
+                    if !mouse_grabbed {
+                        machine.release_all_inputs();
+                    }
                 }
 
                 // P: Toggle global pause (frontend-level control, not a game input)
@@ -667,6 +724,11 @@ pub fn run(
                 Event::ControllerDeviceRemoved { which, .. } => {
                     controllers.retain(|c| c.instance_id() != which);
                     eprintln!("Controller disconnected");
+                    // An unplugged pad sends no button-up for whatever it was
+                    // holding. Clear everything, then re-assert from the pads
+                    // that are still connected.
+                    machine.release_all_inputs();
+                    needs_resync = true;
                 }
 
                 // Mouse motion → analog axes (trackball games). When the mouse is
@@ -693,14 +755,41 @@ pub fn run(
                     }
                 }
 
-                Event::MouseButtonUp { mouse_btn, .. } if mouse_grabbed => {
+                // Releases dispatch unconditionally, for the same reason KeyUp
+                // does above: F11 can clear `mouse_grabbed` while a mouse
+                // button is held, and a guarded release would leave the button
+                // stuck "on". An extra release is idempotent.
+                Event::MouseButtonUp { mouse_btn, .. } => {
                     for id in bindings.digital_targets(PhysicalInput::MouseButtonInput(mouse_btn)) {
                         machine.handle_input(InputEvent::Button { id, pressed: false });
                     }
                 }
 
+                // Focus loss strands every held input — the window stops
+                // receiving key/button releases entirely.
+                Event::Window {
+                    win_event: WindowEvent::FocusLost,
+                    ..
+                } => machine.release_all_inputs(),
+
+                Event::Window {
+                    win_event: WindowEvent::FocusGained,
+                    ..
+                } => needs_resync = true,
+
                 _ => {}
             }
+        }
+
+        // Reconcile the machine with the physical devices, now that
+        // `event_pump` is free to be queried for their live state.
+        if needs_resync {
+            let devices = SdlDevices {
+                mouse: mouse_grabbed.then(|| event_pump.mouse_state()),
+                keyboard: event_pump.keyboard_state(),
+                controllers: &controllers,
+            };
+            input::resync(bindings, machine, &devices);
         }
 
         let t1 = Instant::now();

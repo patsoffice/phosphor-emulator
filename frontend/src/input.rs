@@ -8,8 +8,9 @@
 use std::collections::HashMap;
 
 use phosphor_core::core::machine::{
-    AxisSign, DefaultBinding, FrontendMachine, InputControl, InputId, InputKind, KeyId,
-    MouseControl, PadAxis as CorePadAxis, PadButton as CorePadButton, PadControl,
+    AxisSign, DefaultBinding, FrontendMachine, InputConfigurable, InputControl, InputEvent,
+    InputId, InputKind, KeyId, MouseControl, PadAxis as CorePadAxis, PadButton as CorePadButton,
+    PadControl,
 };
 use sdl2::controller::{Axis, Button};
 use sdl2::keyboard::Scancode;
@@ -211,6 +212,11 @@ impl BindingSet {
         })
     }
 
+    /// Every binding, for callers that must walk the whole set (see [`resync`]).
+    fn all(&self) -> impl Iterator<Item = &InputBinding> + '_ {
+        self.bindings.iter()
+    }
+
     /// Build a binding set from a machine's typed controls' default bindings.
     pub fn from_controls(controls: &[InputControl]) -> Self {
         let mut set = BindingSet::new();
@@ -342,6 +348,63 @@ pub fn build_bindings(machine: &dyn FrontendMachine) -> BindingSet {
     BindingSet::from_controls(machine.input_controls())
 }
 
+/// Live state of the physical devices, as [`resync`] needs to see it.
+///
+/// A trait rather than the SDL types directly so the reconciliation logic is
+/// exercisable without an SDL context — `KeyboardState` and `GameController`
+/// can only be obtained from a live event pump.
+pub trait DeviceState {
+    fn key_pressed(&self, scancode: Scancode) -> bool;
+    /// Any connected pad holding `button`.
+    fn pad_button_pressed(&self, button: Button) -> bool;
+    /// Deflection of `axis` on whichever pad is pushing it hardest, normalized
+    /// to `-1.0..=1.0`.
+    fn pad_axis(&self, axis: Axis) -> f32;
+    /// `false` whenever the mouse is ungrabbed — the cursor belongs to the UI
+    /// then, so from the game's point of view no mouse button is down.
+    fn mouse_button_pressed(&self, button: MouseButton) -> bool;
+}
+
+/// Re-assert the true current state of every binding.
+///
+/// Used where the machine's idea of what is held and the physical devices' can
+/// diverge: after a reset or a state load (which rewrite the machine's port bits
+/// with no corresponding key event), and on regaining window focus. Stronger
+/// than `release_all_inputs`, which only clears — this restores, so a direction
+/// held across a reset keeps working instead of going dead until the user
+/// releases and re-presses it.
+///
+/// Mouse *axes* are relative and carry no re-assertable state, so they are
+/// skipped; every other binding is driven to its live value.
+///
+/// Must run *after* the mutation it reconciles, never before.
+pub fn resync<M: InputConfigurable + ?Sized>(
+    bindings: &BindingSet,
+    machine: &mut M,
+    devices: &dyn DeviceState,
+) {
+    for binding in bindings.all() {
+        let pressed = match binding.physical {
+            PhysicalInput::Key(sc) => devices.key_pressed(sc),
+            PhysicalInput::PadButton(b) => devices.pad_button_pressed(b),
+            PhysicalInput::PadAxis(axis, dir) => {
+                let deflection = devices.pad_axis(axis);
+                match dir {
+                    AxisDir::Positive => deflection > binding.deadzone,
+                    AxisDir::Negative => deflection < -binding.deadzone,
+                }
+            }
+            PhysicalInput::MouseButtonInput(mb) => devices.mouse_button_pressed(mb),
+            // Relative motion has no "current value" to re-assert.
+            PhysicalInput::MouseAxis(_) => continue,
+        };
+        machine.handle_input(InputEvent::Button {
+            id: binding.target,
+            pressed,
+        });
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Core descriptor → SDL translation
 // ---------------------------------------------------------------------------
@@ -434,6 +497,143 @@ mod tests {
 
     fn ids(it: impl Iterator<Item = InputId>) -> Vec<u16> {
         it.map(|i| i.0).collect()
+    }
+
+    /// Minimal `InputConfigurable` that just records what it is handed —
+    /// `resync` needs nothing more, which is why it takes that bound rather
+    /// than the full `FrontendMachine`.
+    #[derive(Default)]
+    struct Recorder {
+        seen: Vec<(u16, bool)>,
+    }
+
+    impl InputConfigurable for Recorder {
+        fn input_controls(&self) -> &'static [InputControl] {
+            &[]
+        }
+        fn handle_input(&mut self, event: InputEvent) {
+            if let InputEvent::Button { id, pressed } = event {
+                self.seen.push((id.0, pressed));
+            }
+        }
+    }
+
+    /// Device state driven entirely by the test.
+    #[derive(Default)]
+    struct FakeDevices {
+        keys: Vec<Scancode>,
+        pad_buttons: Vec<Button>,
+        axes: Vec<(Axis, f32)>,
+        mouse_buttons: Vec<MouseButton>,
+    }
+
+    impl DeviceState for FakeDevices {
+        fn key_pressed(&self, scancode: Scancode) -> bool {
+            self.keys.contains(&scancode)
+        }
+        fn pad_button_pressed(&self, button: Button) -> bool {
+            self.pad_buttons.contains(&button)
+        }
+        fn pad_axis(&self, axis: Axis) -> f32 {
+            self.axes
+                .iter()
+                .find(|(a, _)| *a == axis)
+                .map_or(0.0, |(_, v)| *v)
+        }
+        fn mouse_button_pressed(&self, button: MouseButton) -> bool {
+            self.mouse_buttons.contains(&button)
+        }
+    }
+
+    fn binding(physical: PhysicalInput, target: u16) -> InputBinding {
+        InputBinding {
+            physical,
+            target: InputId(target),
+            scale: 1.0,
+            deadzone: STICK_DEADZONE_NORM,
+        }
+    }
+
+    fn set(bindings: Vec<InputBinding>) -> BindingSet {
+        BindingSet { bindings }
+    }
+
+    #[test]
+    fn resync_drives_each_binding_to_its_live_value() {
+        let bindings = set(vec![
+            binding(PhysicalInput::Key(Scancode::Left), 1),
+            binding(PhysicalInput::Key(Scancode::Right), 2),
+            binding(PhysicalInput::PadButton(Button::A), 3),
+            binding(PhysicalInput::MouseButtonInput(MouseButton::Left), 4),
+        ]);
+        let devices = FakeDevices {
+            keys: vec![Scancode::Left],
+            pad_buttons: vec![Button::A],
+            ..Default::default()
+        };
+
+        let mut rec = Recorder::default();
+        resync(&bindings, &mut rec, &devices);
+
+        // Held inputs are re-asserted as pressed, everything else as released —
+        // that is the difference from a plain release-all.
+        assert_eq!(rec.seen, vec![(1, true), (2, false), (3, true), (4, false)]);
+    }
+
+    #[test]
+    fn resync_skips_mouse_axes() {
+        let bindings = set(vec![
+            binding(PhysicalInput::MouseAxis(MouseAxis::X), 1),
+            binding(PhysicalInput::Key(Scancode::Left), 2),
+        ]);
+
+        let mut rec = Recorder::default();
+        resync(&bindings, &mut rec, &FakeDevices::default());
+
+        // Relative motion has no current value to re-assert; sending a release
+        // would be meaningless for a trackball axis.
+        assert_eq!(rec.seen, vec![(2, false)]);
+    }
+
+    #[test]
+    fn resync_applies_the_deadzone_per_direction() {
+        let bindings = set(vec![
+            binding(PhysicalInput::PadAxis(Axis::LeftX, AxisDir::Negative), 1),
+            binding(PhysicalInput::PadAxis(Axis::LeftX, AxisDir::Positive), 2),
+        ]);
+
+        // Deflected hard negative: only the negative binding is pressed.
+        let mut rec = Recorder::default();
+        let devices = FakeDevices {
+            axes: vec![(Axis::LeftX, -0.9)],
+            ..Default::default()
+        };
+        resync(&bindings, &mut rec, &devices);
+        assert_eq!(rec.seen, vec![(1, true), (2, false)]);
+
+        // Resting inside the deadzone: neither.
+        let mut rec = Recorder::default();
+        let devices = FakeDevices {
+            axes: vec![(Axis::LeftX, -0.1)],
+            ..Default::default()
+        };
+        resync(&bindings, &mut rec, &devices);
+        assert_eq!(rec.seen, vec![(1, false), (2, false)]);
+    }
+
+    #[test]
+    fn resync_releases_mouse_buttons_when_ungrabbed() {
+        // The ungrabbed case is modeled by the device state reporting nothing
+        // pressed, which is what `SdlDevices` does with `mouse: None`. This is
+        // the F11-while-firing bug: the release has to come from somewhere.
+        let bindings = set(vec![binding(
+            PhysicalInput::MouseButtonInput(MouseButton::Left),
+            1,
+        )]);
+
+        let mut rec = Recorder::default();
+        resync(&bindings, &mut rec, &FakeDevices::default());
+        assert_eq!(rec.seen, vec![(1, false)]);
     }
 
     #[test]
