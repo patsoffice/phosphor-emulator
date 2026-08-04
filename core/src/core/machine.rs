@@ -314,12 +314,18 @@ pub enum AxisSign {
     Negative,
 }
 
-/// A gamepad control referenced by a default binding: either a button or a
-/// signed axis deflection.
+/// A gamepad control referenced by a default binding.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PadControl {
     Button(PadButton),
+    /// One signed deflection of an axis, standing in for a digital direction —
+    /// "push the stick left" acting as a left button. Twin-stick fire uses this
+    /// legitimately, so it is not superseded by [`FullAxis`](Self::FullAxis).
     Axis(PadAxis, AxisSign),
+    /// A whole axis driving an analog control, deflection preserved. The sign
+    /// is meaningless here: the control wants the axis's continuous value, not
+    /// a threshold crossing.
+    FullAxis(PadAxis),
 }
 
 /// A mouse control referenced by a default binding.

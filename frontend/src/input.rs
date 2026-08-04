@@ -50,6 +50,9 @@ pub enum PhysicalInput {
     Key(Scancode),
     PadButton(Button),
     PadAxis(Axis, AxisDir),
+    /// A whole gamepad axis driving an analog control, deflection preserved
+    /// (distinct from `PadAxis`, which thresholds one direction into a button).
+    PadFullAxis(Axis),
     MouseButtonInput(MouseButton),
     MouseAxis(MouseAxis),
 }
@@ -70,6 +73,7 @@ impl PhysicalInput {
                     AxisDir::Negative => "-",
                 }
             ),
+            PhysicalInput::PadFullAxis(axis) => format!("padfullaxis:{}", axis.string()),
             PhysicalInput::MouseButtonInput(mb) => format!(
                 "mouse:{}",
                 match mb {
@@ -101,6 +105,7 @@ impl PhysicalInput {
                     AxisDir::Negative => "-",
                 }
             ),
+            PhysicalInput::PadFullAxis(axis) => format!("Pad {axis:?}"),
             PhysicalInput::MouseButtonInput(mb) => format!("Mouse {mb:?}"),
             PhysicalInput::MouseAxis(axis) => format!("Mouse {axis:?}"),
         }
@@ -111,7 +116,9 @@ impl PhysicalInput {
     fn category(&self) -> PhysicalCategory {
         match self {
             PhysicalInput::Key(_) => PhysicalCategory::Keyboard,
-            PhysicalInput::PadButton(_) | PhysicalInput::PadAxis(..) => PhysicalCategory::Pad,
+            PhysicalInput::PadButton(_)
+            | PhysicalInput::PadAxis(..)
+            | PhysicalInput::PadFullAxis(_) => PhysicalCategory::Pad,
             PhysicalInput::MouseButtonInput(_) | PhysicalInput::MouseAxis(_) => {
                 PhysicalCategory::Mouse
             }
@@ -135,6 +142,7 @@ impl PhysicalInput {
                 };
                 Some(PhysicalInput::PadAxis(Axis::from_string(axis)?, dir))
             }
+            "padfullaxis" => Axis::from_string(rest).map(PhysicalInput::PadFullAxis),
             "mouse" => Some(PhysicalInput::MouseButtonInput(match rest {
                 "left" => MouseButton::Left,
                 "right" => MouseButton::Right,
@@ -171,6 +179,29 @@ pub struct InputBinding {
     pub deadzone: f32,
 }
 
+/// Rescale a raw axis deflection (`-1.0..=1.0`) from the deadzone edge and
+/// apply `scale`, so the value ramps from 0.0 as the stick leaves the deadzone
+/// instead of jumping to the deadzone fraction the moment it is crossed.
+fn analog_value(raw: f32, deadzone: f32, scale: f32) -> f32 {
+    let magnitude = ((raw.abs() - deadzone) / (1.0 - deadzone)).clamp(0.0, 1.0) * scale;
+    magnitude.copysign(raw)
+}
+
+/// Build a binding, deriving the deadzone from the physical input's kind.
+/// Gamepad axes rest noisily around center; nothing else needs a deadzone.
+fn make_binding(physical: PhysicalInput, target: InputId) -> InputBinding {
+    let deadzone = match physical {
+        PhysicalInput::PadAxis(..) | PhysicalInput::PadFullAxis(_) => STICK_DEADZONE_NORM,
+        _ => 0.0,
+    };
+    InputBinding {
+        physical,
+        target,
+        scale: 1.0,
+        deadzone,
+    }
+}
+
 /// All physical→logical bindings active for the current machine.
 ///
 /// Lookups are linear scans; binding counts are tiny (tens at most), so this is
@@ -205,6 +236,18 @@ impl BindingSet {
         })
     }
 
+    /// Full-axis analog targets for `axis`, as (control, scale, deadzone).
+    ///
+    /// Distinct from [`pad_axis_targets`](Self::pad_axis_targets): those
+    /// threshold one signed direction into a button, these want the axis's
+    /// continuous deflection.
+    pub fn pad_analog_targets(&self, axis: Axis) -> impl Iterator<Item = (InputId, f32, f32)> + '_ {
+        self.bindings.iter().filter_map(move |b| match b.physical {
+            PhysicalInput::PadFullAxis(a) if a == axis => Some((b.target, b.scale, b.deadzone)),
+            _ => None,
+        })
+    }
+
     /// Relative-mouse-axis targets for `axis`, as (control, scale).
     pub fn mouse_axis_targets(&self, axis: MouseAxis) -> impl Iterator<Item = (InputId, f32)> + '_ {
         self.bindings.iter().filter_map(move |b| match b.physical {
@@ -235,16 +278,7 @@ impl BindingSet {
                     DefaultBinding::Pad(pad) => pad_to_physical(pad),
                     DefaultBinding::Mouse(mouse) => mouse_to_physical(mouse),
                 };
-                let deadzone = match physical {
-                    PhysicalInput::PadAxis(..) => STICK_DEADZONE_NORM,
-                    _ => 0.0,
-                };
-                set.bindings.push(InputBinding {
-                    physical,
-                    target: control.id,
-                    scale: 1.0,
-                    deadzone,
-                });
+                set.bindings.push(make_binding(physical, control.id));
             }
         }
         set
@@ -287,16 +321,7 @@ impl BindingSet {
                 name_to_id.get(s.control.as_str()),
                 PhysicalInput::from_token(&s.input),
             ) {
-                let deadzone = match physical {
-                    PhysicalInput::PadAxis(..) => STICK_DEADZONE_NORM,
-                    _ => 0.0,
-                };
-                self.bindings.push(InputBinding {
-                    physical,
-                    target,
-                    scale: 1.0,
-                    deadzone,
-                });
+                self.bindings.push(make_binding(physical, target));
             }
         }
     }
@@ -316,16 +341,7 @@ impl BindingSet {
         let category = physical.category();
         self.bindings
             .retain(|b| b.target != target || b.physical.category() != category);
-        let deadzone = match physical {
-            PhysicalInput::PadAxis(..) => STICK_DEADZONE_NORM,
-            _ => 0.0,
-        };
-        self.bindings.push(InputBinding {
-            physical,
-            target,
-            scale: 1.0,
-            deadzone,
-        });
+        self.bindings.push(make_binding(physical, target));
     }
 }
 
@@ -410,15 +426,28 @@ pub fn dispatch<M: InputConfigurable + ?Sized>(
             true
         }
 
-        // Analog stick standing in for digital directions.
+        // One axis can drive both digital and analog targets, so both loops run.
         Event::ControllerAxisMotion { axis, value, .. } => {
             let normalized = f32::from(*value) / 32_768.0;
+
+            // Analog stick standing in for digital directions.
             for (id, dir, deadzone) in bindings.pad_axis_targets(*axis) {
                 let pressed = match dir {
                     AxisDir::Positive => normalized > deadzone,
                     AxisDir::Negative => normalized < -deadzone,
                 };
                 machine.handle_input(InputEvent::Button { id, pressed });
+            }
+
+            // Whole axis driving an analog control. The magnitude is rescaled
+            // from the deadzone edge rather than passed through, so the value
+            // ramps from 0.0 as the stick leaves the deadzone instead of
+            // jumping to the deadzone fraction the moment it is crossed.
+            for (id, scale, deadzone) in bindings.pad_analog_targets(*axis) {
+                machine.handle_input(InputEvent::Absolute {
+                    id,
+                    value: analog_value(normalized, deadzone, scale),
+                });
             }
             true
         }
@@ -503,6 +532,16 @@ pub fn resync<M: InputConfigurable + ?Sized>(
                 }
             }
             PhysicalInput::MouseButtonInput(mb) => devices.mouse_button_pressed(mb),
+            // A stick held off-center across a reset or state load should stay
+            // deflected, so this re-asserts a value rather than a press.
+            PhysicalInput::PadFullAxis(axis) => {
+                let raw = devices.pad_axis(axis);
+                machine.handle_input(InputEvent::Absolute {
+                    id: binding.target,
+                    value: analog_value(raw, binding.deadzone, binding.scale),
+                });
+                continue;
+            }
             // Relative motion has no "current value" to re-assert.
             PhysicalInput::MouseAxis(_) => continue,
         };
@@ -520,6 +559,7 @@ pub fn resync<M: InputConfigurable + ?Sized>(
 fn pad_to_physical(pad: PadControl) -> PhysicalInput {
     match pad {
         PadControl::Button(button) => PhysicalInput::PadButton(pad_button(button)),
+        PadControl::FullAxis(axis) => PhysicalInput::PadFullAxis(pad_axis(axis)),
         PadControl::Axis(axis, sign) => PhysicalInput::PadAxis(
             pad_axis(axis),
             match sign {
@@ -616,6 +656,8 @@ mod tests {
         seen: Vec<(u16, bool)>,
         /// `Relative` events, as (id, delta).
         relative: Vec<(u16, f32)>,
+        /// `Absolute` events, as (id, value).
+        absolute: Vec<(u16, f32)>,
     }
 
     impl InputConfigurable for Recorder {
@@ -626,7 +668,7 @@ mod tests {
             match event {
                 InputEvent::Button { id, pressed } => self.seen.push((id.0, pressed)),
                 InputEvent::Relative { id, delta } => self.relative.push((id.0, delta)),
-                InputEvent::Absolute { .. } => {}
+                InputEvent::Absolute { id, value } => self.absolute.push((id.0, value)),
             }
         }
     }
@@ -815,6 +857,116 @@ mod tests {
         let consumed = dispatch(&event, &bindings, &mut rec, ctx(false, false));
         assert!(!consumed);
         assert!(rec.relative.is_empty());
+    }
+
+    #[test]
+    fn pad_full_axis_produces_absolute_ramping_from_the_deadzone_edge() {
+        let bindings = set(vec![binding(PhysicalInput::PadFullAxis(Axis::LeftX), 1)]);
+        let event = |value| Event::ControllerAxisMotion {
+            timestamp: 0,
+            which: 0,
+            axis: Axis::LeftX,
+            value,
+        };
+
+        // Exactly at the deadzone edge the value is 0.0, not the deadzone
+        // fraction — that ramp is the point of the rescale.
+        let mut rec = Recorder::default();
+        let edge = (STICK_DEADZONE_NORM * 32_768.0) as i16;
+        dispatch(&event(edge), &bindings, &mut rec, ctx(false, false));
+        assert_eq!(rec.absolute.len(), 1);
+        assert!(rec.absolute[0].1.abs() < 1e-6, "{:?}", rec.absolute);
+
+        // Fully deflected reaches 1.0, and the sign follows the stick.
+        let mut rec = Recorder::default();
+        dispatch(&event(-32_768), &bindings, &mut rec, ctx(false, false));
+        assert_eq!(rec.absolute.len(), 1);
+        assert!((rec.absolute[0].1 + 1.0).abs() < 1e-6, "{:?}", rec.absolute);
+
+        // Inside the deadzone it stays at rest.
+        let mut rec = Recorder::default();
+        dispatch(&event(1_000), &bindings, &mut rec, ctx(false, false));
+        assert_eq!(rec.absolute, vec![(1, 0.0)]);
+    }
+
+    #[test]
+    fn one_axis_drives_digital_and_analog_targets_together() {
+        // A pad axis may legitimately be bound to both a digital direction and
+        // an analog control; neither loop may shadow the other.
+        let bindings = set(vec![
+            binding(PhysicalInput::PadAxis(Axis::LeftX, AxisDir::Negative), 1),
+            binding(PhysicalInput::PadFullAxis(Axis::LeftX), 2),
+        ]);
+
+        let mut rec = Recorder::default();
+        dispatch(
+            &Event::ControllerAxisMotion {
+                timestamp: 0,
+                which: 0,
+                axis: Axis::LeftX,
+                value: -32_768,
+            },
+            &bindings,
+            &mut rec,
+            ctx(false, false),
+        );
+        assert_eq!(rec.seen, vec![(1, true)]);
+        assert_eq!(rec.absolute.len(), 1);
+        assert_eq!(rec.absolute[0].0, 2);
+    }
+
+    #[test]
+    fn analog_value_scales_and_clamps() {
+        // Deadzone 0.5: half deflection is the edge, three-quarters is halfway.
+        assert!((analog_value(0.5, 0.5, 1.0) - 0.0).abs() < 1e-6);
+        assert!((analog_value(0.75, 0.5, 1.0) - 0.5).abs() < 1e-6);
+        assert!((analog_value(1.0, 0.5, 1.0) - 1.0).abs() < 1e-6);
+        // Scale multiplies the ramped magnitude, sign is preserved.
+        assert!((analog_value(-1.0, 0.5, 2.0) + 2.0).abs() < 1e-6);
+        // Beyond full deflection the magnitude clamps before scaling.
+        assert!((analog_value(2.0, 0.0, 1.0) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn full_axis_defaults_reach_only_the_analog_lookup() {
+        let controls = &[
+            InputControl {
+                id: InputId(1),
+                stable_name: "fire",
+                label: "Fire",
+                // Plain Button, not Action: an Action would also pull bindings
+                // from the shared role ladder and clutter the assertion.
+                kind: InputKind::Button,
+                player: Some(1),
+                default_bindings: &[DefaultBinding::Pad(PadControl::Button(
+                    phosphor_core::core::machine::PadButton::A,
+                ))],
+            },
+            InputControl {
+                id: InputId(2),
+                stable_name: "yoke_x",
+                label: "Yoke X",
+                kind: InputKind::AnalogAxis {
+                    axis: phosphor_core::core::machine::AnalogAxisKind::X,
+                },
+                player: Some(1),
+                default_bindings: &[DefaultBinding::Pad(PadControl::FullAxis(
+                    CorePadAxis::LeftX,
+                ))],
+            },
+        ];
+
+        let set = BindingSet::from_controls(controls);
+
+        // The full-axis binding is reachable through the analog lookup only.
+        assert_eq!(
+            ids(set.pad_axis_targets(Axis::LeftX).map(|(id, ..)| id)),
+            []
+        );
+        assert_eq!(
+            ids(set.pad_analog_targets(Axis::LeftX).map(|(id, ..)| id)),
+            [2]
+        );
     }
 
     #[test]
