@@ -13,6 +13,18 @@
 use phosphor_core::core::machine::{DefaultBinding, InputKind, MouseControl, PadControl};
 use phosphor_machines::registry;
 
+/// Guard against a vacuous suite: every test here iterates `registry::all()`,
+/// so an empty registry would make all of them pass while checking nothing.
+#[test]
+fn the_registry_is_not_empty() {
+    assert!(
+        registry::all().len() > 20,
+        "registry has {} machines — the contract tests below iterate it, so \
+         they would pass vacuously",
+        registry::all().len()
+    );
+}
+
 #[test]
 fn every_machine_declares_input_controls() {
     for entry in registry::all() {

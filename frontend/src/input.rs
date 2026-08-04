@@ -969,6 +969,56 @@ mod tests {
         );
     }
 
+    /// Every registered machine's defaults must survive being written to
+    /// `state.toml` and read back.
+    ///
+    /// This is the persistence contract for real control tables rather than
+    /// hand-built ones: a physical input whose token does not round-trip would
+    /// silently drop that binding on the next launch, and the user would find
+    /// a control dead with nothing logged. Reachable without ROMs because
+    /// `MachineEntry` carries the control table.
+    #[test]
+    fn every_machine_default_binding_survives_a_state_toml_round_trip() {
+        let entries = phosphor_machines::registry::all();
+        assert!(
+            entries.len() > 20,
+            "registry looks empty; test would be vacuous"
+        );
+        for entry in entries {
+            let defaults = BindingSet::from_controls(entry.controls);
+            let serialized = defaults.to_serialized(entry.controls);
+
+            let mut restored = BindingSet::from_controls(entry.controls);
+            restored.apply_overrides(entry.controls, &serialized);
+
+            assert!(
+                bindings_eq(&serialized, &restored.to_serialized(entry.controls)),
+                "{}: bindings changed across a serialize/restore cycle",
+                entry.name
+            );
+        }
+    }
+
+    /// Every default binding's token must survive `to_token` → `from_token`.
+    ///
+    /// `apply_overrides` silently skips tokens it cannot parse (deliberately —
+    /// a stale binding should not fail the load), so a broken token would not
+    /// show up as an error anywhere. This catches it at the source.
+    #[test]
+    fn every_machine_default_binding_token_parses_back() {
+        for entry in phosphor_machines::registry::all() {
+            for binding in BindingSet::from_controls(entry.controls).all() {
+                let token = binding.physical.to_token();
+                assert_eq!(
+                    PhysicalInput::from_token(&token),
+                    Some(binding.physical),
+                    "{}: token '{token}' does not parse back to itself",
+                    entry.name
+                );
+            }
+        }
+    }
+
     #[test]
     fn unrelated_events_are_not_consumed() {
         let bindings = set(vec![binding(PhysicalInput::Key(Scancode::Left), 1)]);
