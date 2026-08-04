@@ -3,14 +3,14 @@ use std::path::Path;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use phosphor_core::core::machine::{FrontendMachine, InputEvent, InputKind, Orientation};
+use phosphor_core::core::machine::{FrontendMachine, InputKind, Orientation};
 use phosphor_script::{DebugSession, Machine};
 use sdl2::event::{Event, WindowEvent};
 use sdl2::keyboard::{Mod, Scancode};
 
 use crate::console_ui::{self, ConsoleState};
 use crate::debug_ui::{self, DebugState, RunMode};
-use crate::input::{self, AxisDir, BindingSet, MouseAxis, PhysicalInput};
+use crate::input::{self, BindingSet, PhysicalInput};
 use crate::profile::ProfileState;
 use crate::settings_ui::{self, SettingsState};
 use crate::video::Video;
@@ -662,57 +662,6 @@ pub fn run(
                     }
                 }
 
-                // Keyboard input — only pass to game if egui doesn't want it
-                Event::KeyDown {
-                    scancode: Some(sc),
-                    repeat: false,
-                    ..
-                } if !video.wants_keyboard() => {
-                    for id in bindings.digital_targets(PhysicalInput::Key(sc)) {
-                        machine.handle_input(InputEvent::Button { id, pressed: true });
-                    }
-                }
-
-                // Releases are dispatched unconditionally — even if egui now
-                // wants the keyboard. The key-down above is gated on
-                // `!wants_keyboard()`, so if egui grabs focus while a game key is
-                // held (e.g. held arrow keys move egui's widget focus, flipping
-                // `wants_keyboard()` true), a guarded key-up would be dropped and
-                // the button would stick "on". An extra release for a key the
-                // game never saw pressed is harmless (idempotent).
-                Event::KeyUp {
-                    scancode: Some(sc), ..
-                } => {
-                    for id in bindings.digital_targets(PhysicalInput::Key(sc)) {
-                        machine.handle_input(InputEvent::Button { id, pressed: false });
-                    }
-                }
-
-                // Game controller button press/release (egui never intercepts these)
-                Event::ControllerButtonDown { button, .. } => {
-                    for id in bindings.digital_targets(PhysicalInput::PadButton(button)) {
-                        machine.handle_input(InputEvent::Button { id, pressed: true });
-                    }
-                }
-
-                Event::ControllerButtonUp { button, .. } => {
-                    for id in bindings.digital_targets(PhysicalInput::PadButton(button)) {
-                        machine.handle_input(InputEvent::Button { id, pressed: false });
-                    }
-                }
-
-                // Game controller analog stick → digital directions
-                Event::ControllerAxisMotion { axis, value, .. } => {
-                    let normalized = value as f32 / 32_768.0;
-                    for (id, dir, deadzone) in bindings.pad_axis_targets(axis) {
-                        let pressed = match dir {
-                            AxisDir::Positive => normalized > deadzone,
-                            AxisDir::Negative => normalized < -deadzone,
-                        };
-                        machine.handle_input(InputEvent::Button { id, pressed });
-                    }
-                }
-
                 // Controller hotplug
                 Event::ControllerDeviceAdded { which, .. } => {
                     if let Ok(gc) = controller_subsystem.open(which) {
@@ -731,40 +680,6 @@ pub fn run(
                     needs_resync = true;
                 }
 
-                // Mouse motion → analog axes (trackball games). When the mouse is
-                // grabbed the cursor belongs to the game (it is captured and
-                // warped to window center), so route motion unconditionally —
-                // egui's `wants_pointer()` would otherwise report the warped
-                // cursor as "over an area" and swallow every delta. Press F11 to
-                // ungrab (clears `mouse_grabbed`) and interact with egui panels.
-                Event::MouseMotion { xrel, yrel, .. } if mouse_grabbed => {
-                    for (id, scale) in bindings.mouse_axis_targets(MouseAxis::X) {
-                        let delta = xrel as f32 * scale;
-                        machine.handle_input(InputEvent::Relative { id, delta });
-                    }
-                    for (id, scale) in bindings.mouse_axis_targets(MouseAxis::Y) {
-                        let delta = yrel as f32 * scale;
-                        machine.handle_input(InputEvent::Relative { id, delta });
-                    }
-                }
-
-                // Mouse buttons → fire (trackball games)
-                Event::MouseButtonDown { mouse_btn, .. } if mouse_grabbed => {
-                    for id in bindings.digital_targets(PhysicalInput::MouseButtonInput(mouse_btn)) {
-                        machine.handle_input(InputEvent::Button { id, pressed: true });
-                    }
-                }
-
-                // Releases dispatch unconditionally, for the same reason KeyUp
-                // does above: F11 can clear `mouse_grabbed` while a mouse
-                // button is held, and a guarded release would leave the button
-                // stuck "on". An extra release is idempotent.
-                Event::MouseButtonUp { mouse_btn, .. } => {
-                    for id in bindings.digital_targets(PhysicalInput::MouseButtonInput(mouse_btn)) {
-                        machine.handle_input(InputEvent::Button { id, pressed: false });
-                    }
-                }
-
                 // Focus loss strands every held input — the window stops
                 // receiving key/button releases entirely.
                 Event::Window {
@@ -777,7 +692,18 @@ pub fn run(
                     ..
                 } => needs_resync = true,
 
-                _ => {}
+                // Game input — last, so every hotkey above keeps precedence.
+                other => {
+                    input::dispatch(
+                        &other,
+                        bindings,
+                        machine,
+                        input::DispatchCtx {
+                            egui_wants_keyboard: video.wants_keyboard(),
+                            mouse_grabbed,
+                        },
+                    );
+                }
             }
         }
 

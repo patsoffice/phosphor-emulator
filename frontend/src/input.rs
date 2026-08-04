@@ -13,6 +13,7 @@ use phosphor_core::core::machine::{
     PadControl,
 };
 use sdl2::controller::{Axis, Button};
+use sdl2::event::Event;
 use sdl2::keyboard::Scancode;
 use sdl2::mouse::MouseButton;
 use serde::{Deserialize, Serialize};
@@ -348,6 +349,113 @@ pub fn build_bindings(machine: &dyn FrontendMachine) -> BindingSet {
     BindingSet::from_controls(machine.input_controls())
 }
 
+/// Everything [`dispatch`] needs from the frontend besides the bindings.
+#[derive(Clone, Copy)]
+pub struct DispatchCtx {
+    /// egui holds keyboard focus. Suppresses key *presses* but never releases.
+    pub egui_wants_keyboard: bool,
+    /// The cursor is captured for the game rather than the UI.
+    pub mouse_grabbed: bool,
+}
+
+/// Translate one SDL event into machine input, returning `true` when the event
+/// was consumed as game input.
+///
+/// Hotkeys, hotplug and window events are deliberately *not* handled here —
+/// they mutate frontend state (the controller list, resync flags) rather than
+/// the machine, and they must keep matching before this in the caller so hotkey
+/// precedence is unchanged.
+pub fn dispatch<M: InputConfigurable + ?Sized>(
+    event: &Event,
+    bindings: &BindingSet,
+    machine: &mut M,
+    ctx: DispatchCtx,
+) -> bool {
+    let mut press = |physical, pressed| {
+        for id in bindings.digital_targets(physical) {
+            machine.handle_input(InputEvent::Button { id, pressed });
+        }
+    };
+
+    match event {
+        // Keyboard presses only reach the game when egui does not want them.
+        Event::KeyDown {
+            scancode: Some(sc),
+            repeat: false,
+            ..
+        } if !ctx.egui_wants_keyboard => {
+            press(PhysicalInput::Key(*sc), true);
+            true
+        }
+
+        // Releases dispatch unconditionally, even if egui now wants the
+        // keyboard. The press above is gated, so if egui grabs focus while a
+        // game key is held (held arrows move egui's widget focus, flipping
+        // `wants_keyboard` true), a guarded release would be dropped and the
+        // button would stick "on". An extra release is idempotent.
+        Event::KeyUp {
+            scancode: Some(sc), ..
+        } => {
+            press(PhysicalInput::Key(*sc), false);
+            true
+        }
+
+        // Pad buttons — egui never intercepts these.
+        Event::ControllerButtonDown { button, .. } => {
+            press(PhysicalInput::PadButton(*button), true);
+            true
+        }
+        Event::ControllerButtonUp { button, .. } => {
+            press(PhysicalInput::PadButton(*button), false);
+            true
+        }
+
+        // Analog stick standing in for digital directions.
+        Event::ControllerAxisMotion { axis, value, .. } => {
+            let normalized = f32::from(*value) / 32_768.0;
+            for (id, dir, deadzone) in bindings.pad_axis_targets(*axis) {
+                let pressed = match dir {
+                    AxisDir::Positive => normalized > deadzone,
+                    AxisDir::Negative => normalized < -deadzone,
+                };
+                machine.handle_input(InputEvent::Button { id, pressed });
+            }
+            true
+        }
+
+        // Mouse motion → analog axes (trackball games). When grabbed, the
+        // cursor belongs to the game (captured and warped to window center), so
+        // route motion unconditionally — egui's `wants_pointer` would otherwise
+        // report the warped cursor as "over an area" and swallow every delta.
+        Event::MouseMotion { xrel, yrel, .. } if ctx.mouse_grabbed => {
+            for (id, scale) in bindings.mouse_axis_targets(MouseAxis::X) {
+                let delta = *xrel as f32 * scale;
+                machine.handle_input(InputEvent::Relative { id, delta });
+            }
+            for (id, scale) in bindings.mouse_axis_targets(MouseAxis::Y) {
+                let delta = *yrel as f32 * scale;
+                machine.handle_input(InputEvent::Relative { id, delta });
+            }
+            true
+        }
+
+        Event::MouseButtonDown { mouse_btn, .. } if ctx.mouse_grabbed => {
+            press(PhysicalInput::MouseButtonInput(*mouse_btn), true);
+            true
+        }
+
+        // Unconditional for the same reason as `KeyUp`: F11 can clear
+        // `mouse_grabbed` while a button is held, and a guarded release would
+        // strand it down.
+        Event::MouseButtonUp { mouse_btn, .. } => {
+            press(PhysicalInput::MouseButtonInput(*mouse_btn), false);
+            true
+        }
+
+        _ => false,
+    }
+}
+
 /// Live state of the physical devices, as [`resync`] needs to see it.
 ///
 /// A trait rather than the SDL types directly so the reconciliation logic is
@@ -504,7 +612,10 @@ mod tests {
     /// than the full `FrontendMachine`.
     #[derive(Default)]
     struct Recorder {
+        /// `Button` events, as (id, pressed).
         seen: Vec<(u16, bool)>,
+        /// `Relative` events, as (id, delta).
+        relative: Vec<(u16, f32)>,
     }
 
     impl InputConfigurable for Recorder {
@@ -512,8 +623,10 @@ mod tests {
             &[]
         }
         fn handle_input(&mut self, event: InputEvent) {
-            if let InputEvent::Button { id, pressed } = event {
-                self.seen.push((id.0, pressed));
+            match event {
+                InputEvent::Button { id, pressed } => self.seen.push((id.0, pressed)),
+                InputEvent::Relative { id, delta } => self.relative.push((id.0, delta)),
+                InputEvent::Absolute { .. } => {}
             }
         }
     }
@@ -556,6 +669,161 @@ mod tests {
 
     fn set(bindings: Vec<InputBinding>) -> BindingSet {
         BindingSet { bindings }
+    }
+
+    fn ctx(egui_wants_keyboard: bool, mouse_grabbed: bool) -> DispatchCtx {
+        DispatchCtx {
+            egui_wants_keyboard,
+            mouse_grabbed,
+        }
+    }
+
+    fn key_down(sc: Scancode) -> Event {
+        Event::KeyDown {
+            timestamp: 0,
+            window_id: 0,
+            keycode: None,
+            scancode: Some(sc),
+            keymod: sdl2::keyboard::Mod::empty(),
+            repeat: false,
+        }
+    }
+
+    fn key_up(sc: Scancode) -> Event {
+        Event::KeyUp {
+            timestamp: 0,
+            window_id: 0,
+            keycode: None,
+            scancode: Some(sc),
+            keymod: sdl2::keyboard::Mod::empty(),
+            repeat: false,
+        }
+    }
+
+    fn mouse_up(btn: MouseButton) -> Event {
+        Event::MouseButtonUp {
+            timestamp: 0,
+            window_id: 0,
+            which: 0,
+            mouse_btn: btn,
+            clicks: 1,
+            x: 0,
+            y: 0,
+        }
+    }
+
+    #[test]
+    fn key_press_is_suppressed_while_egui_wants_the_keyboard() {
+        let bindings = set(vec![binding(PhysicalInput::Key(Scancode::Left), 1)]);
+        let mut rec = Recorder::default();
+
+        let consumed = dispatch(
+            &key_down(Scancode::Left),
+            &bindings,
+            &mut rec,
+            ctx(true, false),
+        );
+        assert!(!consumed);
+        assert!(rec.seen.is_empty());
+    }
+
+    #[test]
+    fn key_release_dispatches_even_while_egui_wants_the_keyboard() {
+        // The asymmetry is deliberate: egui can grab focus *while* a game key is
+        // held (held arrows move its widget focus), and a guarded release would
+        // strand the button down.
+        let bindings = set(vec![binding(PhysicalInput::Key(Scancode::Left), 1)]);
+        let mut rec = Recorder::default();
+
+        let consumed = dispatch(
+            &key_up(Scancode::Left),
+            &bindings,
+            &mut rec,
+            ctx(true, false),
+        );
+        assert!(consumed);
+        assert_eq!(rec.seen, vec![(1, false)]);
+    }
+
+    #[test]
+    fn mouse_release_dispatches_regardless_of_grab() {
+        // Regression pin: this arm used to be gated on `mouse_grabbed`, so
+        // pressing mouse-fire then hitting F11 to ungrab stranded fire "on".
+        let bindings = set(vec![binding(
+            PhysicalInput::MouseButtonInput(MouseButton::Left),
+            1,
+        )]);
+
+        for grabbed in [true, false] {
+            let mut rec = Recorder::default();
+            let consumed = dispatch(
+                &mouse_up(MouseButton::Left),
+                &bindings,
+                &mut rec,
+                ctx(false, grabbed),
+            );
+            assert!(consumed, "grabbed={grabbed}");
+            assert_eq!(rec.seen, vec![(1, false)], "grabbed={grabbed}");
+        }
+    }
+
+    #[test]
+    fn pad_axis_crossing_the_deadzone_presses_only_that_direction() {
+        let bindings = set(vec![
+            binding(PhysicalInput::PadAxis(Axis::LeftX, AxisDir::Negative), 1),
+            binding(PhysicalInput::PadAxis(Axis::LeftX, AxisDir::Positive), 2),
+        ]);
+        let event = |value| Event::ControllerAxisMotion {
+            timestamp: 0,
+            which: 0,
+            axis: Axis::LeftX,
+            value,
+        };
+
+        let mut rec = Recorder::default();
+        dispatch(&event(-30_000), &bindings, &mut rec, ctx(false, false));
+        assert_eq!(rec.seen, vec![(1, true), (2, false)]);
+
+        // Inside the deadzone both read released.
+        let mut rec = Recorder::default();
+        dispatch(&event(-1_000), &bindings, &mut rec, ctx(false, false));
+        assert_eq!(rec.seen, vec![(1, false), (2, false)]);
+    }
+
+    #[test]
+    fn mouse_motion_applies_scale_and_needs_the_grab() {
+        let mut bindings = set(vec![binding(PhysicalInput::MouseAxis(MouseAxis::X), 1)]);
+        bindings.bindings[0].scale = 2.5;
+        let event = Event::MouseMotion {
+            timestamp: 0,
+            window_id: 0,
+            which: 0,
+            mousestate: sdl2::mouse::MouseState::from_sdl_state(0),
+            x: 0,
+            y: 0,
+            xrel: 4,
+            yrel: 0,
+        };
+
+        let mut rec = Recorder::default();
+        let consumed = dispatch(&event, &bindings, &mut rec, ctx(false, true));
+        assert!(consumed);
+        assert_eq!(rec.relative, vec![(1, 10.0)]);
+
+        // Ungrabbed, the cursor belongs to the UI and motion is not game input.
+        let mut rec = Recorder::default();
+        let consumed = dispatch(&event, &bindings, &mut rec, ctx(false, false));
+        assert!(!consumed);
+        assert!(rec.relative.is_empty());
+    }
+
+    #[test]
+    fn unrelated_events_are_not_consumed() {
+        let bindings = set(vec![binding(PhysicalInput::Key(Scancode::Left), 1)]);
+        let mut rec = Recorder::default();
+        let quit = Event::Quit { timestamp: 0 };
+        assert!(!dispatch(&quit, &bindings, &mut rec, ctx(false, true)));
+        assert!(rec.seen.is_empty());
     }
 
     #[test]
