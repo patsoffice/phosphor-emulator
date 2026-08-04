@@ -391,6 +391,33 @@ pub trait InputConfigurable {
     /// Handle a typed input event, applying it to the machine's hardware input
     /// state.
     fn handle_input(&mut self, event: InputEvent);
+
+    /// Release every logical control.
+    ///
+    /// The frontend calls this wherever its idea of "held" can diverge from the
+    /// physical devices' — losing window focus, ungrabbing the mouse, a
+    /// controller being unplugged mid-deflection. Without it those transitions
+    /// strand a button in the down state until the user presses and releases it
+    /// again.
+    ///
+    /// The default sends `Button { pressed: false }` for every declared
+    /// control, which is idempotent: a release for a control the machine never
+    /// saw pressed is a no-op, the same property the frontend's unconditional
+    /// key-up dispatch already relies on.
+    ///
+    /// Analog controls are deliberately *not* sent a synthetic
+    /// `Absolute { value: 0.0 }`. A trackball has no center to return to, and a
+    /// self-centering stick is already driven back by the release of its
+    /// digital direction controls. Machines holding conditioned analog state
+    /// (accumulated trackball motion) override this to clear it as well.
+    fn release_all_inputs(&mut self) {
+        for control in self.input_controls() {
+            self.handle_input(InputEvent::Button {
+                id: control.id,
+                pressed: false,
+            });
+        }
+    }
 }
 
 /// Debug/inspection capabilities for interactive debugging.
@@ -754,5 +781,95 @@ mod tests {
         assert!(machine.save_state().is_none());
         assert!(machine.save_nvram().is_none());
         assert!(machine.frame_profile_spans().is_empty());
+    }
+
+    /// A machine whose controls span every `InputKind`, recording what it sees.
+    struct Recorder {
+        seen: Vec<InputEvent>,
+    }
+
+    const REC_FIRE: InputId = InputId(1);
+    const REC_LEFT: InputId = InputId(2);
+    const REC_BALL: InputId = InputId(3);
+
+    static REC_CONTROLS: &[InputControl] = &[
+        InputControl {
+            id: REC_FIRE,
+            stable_name: "fire",
+            label: "Fire",
+            kind: InputKind::Action(ActionRole::Primary),
+            player: Some(1),
+            default_bindings: &[],
+        },
+        InputControl {
+            id: REC_LEFT,
+            stable_name: "left",
+            label: "Left",
+            kind: InputKind::DigitalDirection {
+                direction: Direction::Left,
+            },
+            player: Some(1),
+            default_bindings: &[],
+        },
+        InputControl {
+            id: REC_BALL,
+            stable_name: "ball_x",
+            label: "Trackball X",
+            kind: InputKind::AnalogAxis {
+                axis: AnalogAxisKind::X,
+            },
+            player: Some(1),
+            default_bindings: &[],
+        },
+    ];
+
+    impl InputConfigurable for Recorder {
+        fn input_controls(&self) -> &'static [InputControl] {
+            REC_CONTROLS
+        }
+        fn handle_input(&mut self, event: InputEvent) {
+            self.seen.push(event);
+        }
+    }
+
+    #[test]
+    fn release_all_inputs_releases_every_control_and_nothing_else() {
+        let mut rec = Recorder { seen: Vec::new() };
+        rec.release_all_inputs();
+
+        // One release per declared control, in table order — including the
+        // analog axis, which gets a Button release rather than a synthetic
+        // Absolute(0.0): a trackball has no center to snap to.
+        assert_eq!(
+            rec.seen,
+            vec![
+                InputEvent::Button {
+                    id: REC_FIRE,
+                    pressed: false
+                },
+                InputEvent::Button {
+                    id: REC_LEFT,
+                    pressed: false
+                },
+                InputEvent::Button {
+                    id: REC_BALL,
+                    pressed: false
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn release_all_inputs_is_idempotent() {
+        let mut rec = Recorder { seen: Vec::new() };
+        rec.release_all_inputs();
+        let first = rec.seen.len();
+        rec.release_all_inputs();
+        assert_eq!(rec.seen.len(), first * 2);
+        assert!(
+            rec.seen
+                .iter()
+                .all(|e| matches!(e, InputEvent::Button { pressed: false, .. }))
+        );
     }
 }
