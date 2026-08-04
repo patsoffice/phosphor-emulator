@@ -436,8 +436,7 @@ fn create_machine(
 }
 
 inventory::submit! {
-    MachineEntry::new("robotron", &["robotron"], create_machine)
-}
+MachineEntry::new("robotron", &["robotron"], create_machine, ROBOTRON_CONTROLS) }
 
 #[cfg(test)]
 mod tests {

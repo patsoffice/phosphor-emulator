@@ -746,8 +746,7 @@ fn create_machine(
 }
 
 inventory::submit! {
-    MachineEntry::new("marble", &["marble"], create_machine)
-}
+MachineEntry::new("marble", &["marble"], create_machine, MARBLE_CONTROLS) }
 
 // Disassemblable code regions for the standalone `disasm` tool.
 // `main`  — the MC68010 program image (000000-07FFFF, de-interleaved).

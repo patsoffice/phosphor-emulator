@@ -1672,8 +1672,7 @@ fn create_machine(
 }
 
 inventory::submit! {
-    MachineEntry::new("xevious", &["xevious"], create_machine)
-}
+MachineEntry::new("xevious", &["xevious"], create_machine, &XEVIOUS_CONTROLS) }
 
 crate::impl_board_debug_trace!(XeviousSystem, board);
 

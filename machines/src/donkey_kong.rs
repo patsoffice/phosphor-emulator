@@ -844,8 +844,7 @@ fn create_machine(
 }
 
 inventory::submit! {
-    MachineEntry::new("dkong", &["dkong"], create_machine)
-}
+MachineEntry::new("dkong", &["dkong"], create_machine, DKONG_CONTROLS) }
 
 // ---------------------------------------------------------------------------
 // Tests

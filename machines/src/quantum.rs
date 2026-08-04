@@ -926,8 +926,7 @@ fn create_quantum(
 // One registration covers all three ROM sets: the loader tries each ZIP in turn
 // and CRC-matches whichever chips are present (see `QUANTUM_PROGRAM_ROM`).
 inventory::submit! {
-    MachineEntry::new("quantum", &["quantum", "quantum1", "quantump"], create_quantum)
-}
+MachineEntry::new("quantum", &["quantum", "quantum1", "quantump"], create_quantum, QUANTUM_CONTROLS) }
 
 #[cfg(test)]
 mod tests {

@@ -1261,8 +1261,7 @@ fn create_machine(
 }
 
 inventory::submit! {
-    MachineEntry::new("mrdo", &["mrdot", "mrdofix"], create_machine)
-}
+MachineEntry::new("mrdo", &["mrdot", "mrdofix"], create_machine, MRDO_CONTROLS) }
 
 inventory::submit! {
     DisasmRegion {

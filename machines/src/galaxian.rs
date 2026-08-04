@@ -1023,8 +1023,7 @@ fn create_machine(
 }
 
 inventory::submit! {
-    MachineEntry::new("galaxian", &["galaxian"], create_machine)
-}
+MachineEntry::new("galaxian", &["galaxian"], create_machine, GALAXIAN_CONTROLS) }
 
 // ---------------------------------------------------------------------------
 // Tests

@@ -1234,8 +1234,7 @@ fn create_machine(
 }
 
 inventory::submit! {
-    MachineEntry::new("gridlee", &["gridlee"], create_machine)
-}
+MachineEntry::new("gridlee", &["gridlee"], create_machine, GRIDLEE_CONTROLS) }
 
 #[cfg(test)]
 mod tests {

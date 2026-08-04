@@ -1427,8 +1427,7 @@ fn create_machine(
 }
 
 inventory::submit! {
-    MachineEntry::new("mariobros", &["mario", "mariobros"], create_machine)
-}
+MachineEntry::new("mariobros", &["mario", "mariobros"], create_machine, MARIO_CONTROLS) }
 
 // ---------------------------------------------------------------------------
 // Tests

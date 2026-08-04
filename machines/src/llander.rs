@@ -615,8 +615,7 @@ fn create_machine(rom_set: &RomSet) -> Result<Box<dyn FrontendMachine>, RomLoadE
 }
 
 inventory::submit! {
-    MachineEntry::new("llander", &["llander"], create_machine)
-}
+MachineEntry::new("llander", &["llander"], create_machine, LLANDER_CONTROLS) }
 
 #[cfg(test)]
 mod tests {

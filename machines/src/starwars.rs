@@ -1633,12 +1633,10 @@ fn create_esb_machine(rom_set: &RomSet) -> Result<Box<dyn FrontendMachine>, RomL
 }
 
 inventory::submit! {
-    MachineEntry::new("starwars", &["starwars", "starwars1", "starwarso"], create_machine)
-}
+MachineEntry::new("starwars", &["starwars", "starwars1", "starwarso"], create_machine, STARWARS_CONTROLS) }
 
 inventory::submit! {
-    MachineEntry::new("esb", &["esb"], create_esb_machine)
-}
+MachineEntry::new("esb", &["esb"], create_esb_machine, STARWARS_CONTROLS) }
 
 // ---------------------------------------------------------------------------
 // Tests

@@ -5,7 +5,7 @@
 //! factory function. The front-end discovers available machines at runtime
 //! without any central list.
 
-use phosphor_core::core::machine::FrontendMachine;
+use phosphor_core::core::machine::{FrontendMachine, InputControl};
 
 use crate::rom_loader::{RomLoadError, RomSet};
 
@@ -17,6 +17,13 @@ pub struct MachineEntry {
     pub rom_names: &'static [&'static str],
     /// Factory: construct a FrontendMachine from a loaded ROM set.
     pub create: fn(&RomSet) -> Result<Box<dyn FrontendMachine>, RomLoadError>,
+    /// The machine's logical control table — the same slice its
+    /// `input_controls()` returns.
+    ///
+    /// Held here so the registry can be validated without ROMs: `create`
+    /// needs a [`RomSet`], which CI does not have, so this is the only way to
+    /// check every machine's controls in a test.
+    pub controls: &'static [InputControl],
 }
 
 impl MachineEntry {
@@ -24,11 +31,13 @@ impl MachineEntry {
         name: &'static str,
         rom_names: &'static [&'static str],
         create: fn(&RomSet) -> Result<Box<dyn FrontendMachine>, RomLoadError>,
+        controls: &'static [InputControl],
     ) -> Self {
         Self {
             name,
             rom_names,
             create,
+            controls,
         }
     }
 }

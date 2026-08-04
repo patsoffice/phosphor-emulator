@@ -1988,14 +1988,11 @@ fn create_variant(
 }
 
 inventory::submit! {
-    MachineEntry::new("docastle", &["docastle"], |rs| create_variant(DocastleVariant::Docastle, rs))
-}
+MachineEntry::new("docastle", &["docastle"], |rs| create_variant(DocastleVariant::Docastle, rs), DOCASTLE_CONTROLS) }
 inventory::submit! {
-    MachineEntry::new("dorunrun", &["dorunrun"], |rs| create_variant(DocastleVariant::Dorunrun, rs))
-}
+MachineEntry::new("dorunrun", &["dorunrun"], |rs| create_variant(DocastleVariant::Dorunrun, rs), DOCASTLE_CONTROLS) }
 inventory::submit! {
-    MachineEntry::new("dowild", &["dowild"], |rs| create_variant(DocastleVariant::Dowild, rs))
-}
+MachineEntry::new("dowild", &["dowild"], |rs| create_variant(DocastleVariant::Dowild, rs), DOCASTLE_CONTROLS) }
 
 inventory::submit! {
     DisasmRegion {

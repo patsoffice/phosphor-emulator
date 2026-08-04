@@ -1230,8 +1230,7 @@ fn create_machine(
 }
 
 inventory::submit! {
-    MachineEntry::new("foodf", &["foodf"], create_machine)
-}
+MachineEntry::new("foodf", &["foodf"], create_machine, FOODF_CONTROLS) }
 
 #[cfg(test)]
 mod tests {

@@ -282,8 +282,7 @@ fn create_machine(
 }
 
 inventory::submit! {
-    MachineEntry::new("pacman", &["pacman"], create_machine)
-}
+MachineEntry::new("pacman", &["pacman"], create_machine, namco_pac::NAMCO_PAC_CONTROLS) }
 
 #[cfg(test)]
 mod tests {

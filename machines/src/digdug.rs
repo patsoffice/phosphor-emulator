@@ -1648,6 +1648,7 @@ inventory::submit! {
         "digdug",
         &["digdug", "digdug1", "digdugat", "digdugat1"],
         create_machine,
+        namco_galaga::NAMCO_GALAGA_CONTROLS,
     )
 }
 

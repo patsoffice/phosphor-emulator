@@ -454,8 +454,7 @@ fn create_frogger(
 }
 
 inventory::submit! {
-    MachineEntry::new("frogger", &["frogger"], create_frogger)
-}
+MachineEntry::new("frogger", &["frogger"], create_frogger, FROGGER_CONTROLS) }
 
 #[cfg(test)]
 mod tests {

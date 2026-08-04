@@ -677,5 +677,4 @@ fn create_machine(
 }
 
 inventory::submit! {
-    MachineEntry::new("dkongjr", &["dkongjr", "dkongjr2"], create_machine)
-}
+MachineEntry::new("dkongjr", &["dkongjr", "dkongjr2"], create_machine, crate::donkey_kong::DKONG_CONTROLS) }

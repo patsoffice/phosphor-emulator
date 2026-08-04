@@ -565,8 +565,7 @@ fn create_machine(rom_set: &RomSet) -> Result<Box<dyn FrontendMachine>, RomLoadE
 }
 
 inventory::submit! {
-    MachineEntry::new("asteroid", &["asteroid"], create_machine)
-}
+MachineEntry::new("asteroid", &["asteroid"], create_machine, ASTEROIDS_CONTROLS) }
 
 #[cfg(test)]
 mod tests {

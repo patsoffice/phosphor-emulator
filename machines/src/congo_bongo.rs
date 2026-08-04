@@ -1794,8 +1794,7 @@ fn create_machine(
 }
 
 inventory::submit! {
-    MachineEntry::new("congobongo", &["congo", "congobongo"], create_machine)
-}
+MachineEntry::new("congobongo", &["congo", "congobongo"], create_machine, CONGO_CONTROLS) }
 
 inventory::submit! {
     DisasmRegion {

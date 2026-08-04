@@ -1619,8 +1619,7 @@ fn create_machine(
 }
 
 inventory::submit! {
-    MachineEntry::new("irobot", &["irobot"], create_machine)
-}
+MachineEntry::new("irobot", &["irobot"], create_machine, IROBOT_CONTROLS) }
 
 inventory::submit! {
     DisasmRegion {

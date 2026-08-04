@@ -1519,5 +1519,6 @@ inventory::submit! {
         "galaga",
         &["galaga", "galagao", "galagamw"],
         create_machine,
+        namco_galaga::NAMCO_GALAGA_CONTROLS,
     )
 }

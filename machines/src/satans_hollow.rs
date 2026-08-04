@@ -519,8 +519,7 @@ fn create_machine(rom_set: &RomSet) -> Result<Box<dyn FrontendMachine>, RomLoadE
 }
 
 inventory::submit! {
-    MachineEntry::new("shollow", &["shollow"], create_machine)
-}
+MachineEntry::new("shollow", &["shollow"], create_machine, SHOLLOW_CONTROLS) }
 
 // ---------------------------------------------------------------------------
 // Tests

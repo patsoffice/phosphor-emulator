@@ -825,8 +825,7 @@ fn create_machine(
 }
 
 inventory::submit! {
-    MachineEntry::new("roadrunner", &["roadrunn"], create_machine)
-}
+MachineEntry::new("roadrunner", &["roadrunn"], create_machine, ROADRUNNER_CONTROLS) }
 
 inventory::submit! {
     DisasmRegion {

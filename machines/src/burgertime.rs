@@ -668,8 +668,7 @@ fn create_machine(
 }
 
 inventory::submit! {
-    MachineEntry::new("burgertime", &["btime"], create_machine)
-}
+MachineEntry::new("burgertime", &["btime"], create_machine, BURGERTIME_CONTROLS) }
 
 // ---------------------------------------------------------------------------
 // Tests

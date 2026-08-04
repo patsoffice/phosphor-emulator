@@ -620,12 +620,10 @@ fn create_uniwars(
 }
 
 inventory::submit! {
-    MachineEntry::new("pisces", &["pisces"], create_pisces)
-}
+MachineEntry::new("pisces", &["pisces"], create_pisces, GALAXIAN_CONTROLS) }
 
 inventory::submit! {
-    MachineEntry::new("uniwars", &["uniwars"], create_uniwars)
-}
+MachineEntry::new("uniwars", &["uniwars"], create_uniwars, GALAXIAN_CONTROLS) }
 
 // ---------------------------------------------------------------------------
 // Tests

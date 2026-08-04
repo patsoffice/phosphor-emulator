@@ -626,8 +626,7 @@ fn create_machine(rom_set: &RomSet) -> Result<Box<dyn FrontendMachine>, RomLoadE
 }
 
 inventory::submit! {
-    MachineEntry::new("astdelux", &["astdelux"], create_machine)
-}
+MachineEntry::new("astdelux", &["astdelux"], create_machine, ASTDELUX_CONTROLS) }
 
 #[cfg(test)]
 mod tests {

@@ -625,8 +625,7 @@ fn create_machine(rom_set: &RomSet) -> Result<Box<dyn FrontendMachine>, RomLoadE
 }
 
 inventory::submit! {
-    MachineEntry::new("qbert", &["qbert"], create_machine)
-}
+MachineEntry::new("qbert", &["qbert"], create_machine, QBERT_CONTROLS) }
 
 // ---------------------------------------------------------------------------
 // Tests

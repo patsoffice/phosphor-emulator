@@ -929,8 +929,7 @@ fn create_machine(rom_set: &RomSet) -> Result<Box<dyn FrontendMachine>, RomLoadE
 }
 
 inventory::submit! {
-    MachineEntry::new("tempest", &["tempest"], create_machine)
-}
+MachineEntry::new("tempest", &["tempest"], create_machine, TEMPEST_CONTROLS) }
 
 #[cfg(test)]
 mod tests {

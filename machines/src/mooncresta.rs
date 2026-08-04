@@ -427,8 +427,7 @@ fn create_machine(
 }
 
 inventory::submit! {
-    MachineEntry::new("mooncrst", &["mooncrst"], create_machine)
-}
+MachineEntry::new("mooncrst", &["mooncrst"], create_machine, GALAXIAN_CONTROLS) }
 
 // ---------------------------------------------------------------------------
 // Tests

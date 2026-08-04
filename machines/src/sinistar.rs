@@ -514,8 +514,7 @@ fn create_machine(
 }
 
 inventory::submit! {
-    MachineEntry::new("sinistar", &["sinistar"], create_machine)
-}
+MachineEntry::new("sinistar", &["sinistar"], create_machine, SINISTAR_CONTROLS) }
 
 // ---------------------------------------------------------------------------
 // Tests

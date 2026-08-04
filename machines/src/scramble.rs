@@ -1092,8 +1092,7 @@ fn create_machine(
 }
 
 inventory::submit! {
-    MachineEntry::new("scramble", &["scramble"], create_machine)
-}
+MachineEntry::new("scramble", &["scramble"], create_machine, SCRAMBLE_CONTROLS) }
 
 // ===========================================================================
 // Super Cobra (Konami, 1981) — same hardware family, different memory map.
@@ -1420,8 +1419,7 @@ fn create_scobra(
 }
 
 inventory::submit! {
-    MachineEntry::new("scobra", &["scobra"], create_scobra)
-}
+MachineEntry::new("scobra", &["scobra"], create_scobra, SCRAMBLE_CONTROLS) }
 
 #[cfg(test)]
 mod tests {

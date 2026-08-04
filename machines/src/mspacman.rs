@@ -445,8 +445,7 @@ fn create_machine(
 }
 
 inventory::submit! {
-    MachineEntry::new("mspacman", &["mspacman"], create_machine)
-}
+MachineEntry::new("mspacman", &["mspacman"], create_machine, namco_pac::NAMCO_PAC_CONTROLS) }
 
 // ---------------------------------------------------------------------------
 // Bitswap helpers for ROM decryption

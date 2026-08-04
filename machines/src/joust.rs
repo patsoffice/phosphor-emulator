@@ -441,8 +441,7 @@ fn create_machine(
 }
 
 inventory::submit! {
-    MachineEntry::new("joust", &["joust"], create_machine)
-}
+MachineEntry::new("joust", &["joust"], create_machine, JOUST_CONTROLS) }
 
 // ---------------------------------------------------------------------------
 // Tests
