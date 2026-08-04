@@ -169,6 +169,12 @@ enum Command {
         /// `control` is a stable input name from the machine's control table.
         #[arg(long)]
         press: Option<String>,
+        /// Script trackball/spinner motion: comma-separated
+        /// `<control>@<frame>[:<frames>][=<delta>]` (e.g.
+        /// `p1_trackball_x@120:60=3.0`). One delta is fed per frame; `frames`
+        /// defaults to 1 and `delta` to 1.0.
+        #[arg(long = "move")]
+        motion: Option<String>,
         /// Load a factory-initialized NVRAM before running.
         #[arg(long)]
         nvram: Option<PathBuf>,
@@ -365,6 +371,7 @@ fn run_command(cmd: Command) -> Result<String, String> {
             from_frame,
             coin_at,
             press,
+            motion,
             nvram,
             events,
             watch,
@@ -382,6 +389,7 @@ fn run_command(cmd: Command) -> Result<String, String> {
             from_frame,
             coin_at,
             press.as_deref(),
+            motion.as_deref(),
             nvram.as_deref(),
             events.as_deref(),
             watch.as_deref(),

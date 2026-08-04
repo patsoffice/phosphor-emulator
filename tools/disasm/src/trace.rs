@@ -36,7 +36,7 @@ use phosphor_core::core::watchpoint::{
 };
 use phosphor_core::cpu::disasm::DisassembledInstruction;
 
-use phosphor_harness::{Harness, PressSpec};
+use phosphor_harness::{Harness, MotionSpec, PressSpec};
 
 /// Output serialization for a trace run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -199,6 +199,7 @@ pub fn run_trace(
     from_frame: usize,
     coin_at: Option<usize>,
     press: Option<&str>,
+    motion: Option<&str>,
     nvram: Option<&Path>,
     events: Option<&str>,
     watch: Option<&str>,
@@ -242,8 +243,12 @@ pub fn run_trace(
         Some(spec) => parse_press_specs(spec)?,
         None => Vec::new(),
     };
+    let motion_specs = match motion {
+        Some(spec) => parse_motion_specs(spec)?,
+        None => Vec::new(),
+    };
 
-    let mut harness = Harness::build(machine, path, nvram, coin_at, &press_specs, &[])?;
+    let mut harness = Harness::build(machine, path, nvram, coin_at, &press_specs, &motion_specs)?;
     let cycles_per_frame = harness.machine_mut().cycles_per_frame();
 
     // Resolve CPU names/indices against the booted machine's bus (cycle mode).
@@ -818,6 +823,64 @@ fn parse_press_specs(spec: &str) -> Result<Vec<PressSpec>, String> {
     Ok(specs)
 }
 
+/// Parse a `--move` value: comma-separated `<control>@<frame>[:<frames>][=<delta>]`
+/// entries (e.g. `p1_trackball_x@120:60=3.0`). `control` is a machine's stable
+/// input name; `frames` defaults to 1 and `delta` to `1.0`.
+///
+/// One delta is fed per frame, which is what a trackball or spinner expects —
+/// they drain a bounded amount per frame, so `:60=3.0` is not the same input as
+/// `:1=180.0`.
+fn parse_motion_specs(spec: &str) -> Result<Vec<MotionSpec>, String> {
+    let mut specs = Vec::new();
+    for part in spec.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        let (control, rest) = part.split_once('@').ok_or_else(|| {
+            format!("bad --move entry '{part}'; expected control@frame[:frames][=delta]")
+        })?;
+        let (timing, delta) = match rest.split_once('=') {
+            Some((t, d)) => (
+                t,
+                d.trim()
+                    .parse::<f32>()
+                    .map_err(|_| format!("bad delta '{d}' in --move entry '{part}'"))?,
+            ),
+            None => (rest, 1.0),
+        };
+        let (at_str, frames) = match timing.split_once(':') {
+            Some((a, f)) => (
+                a,
+                f.trim()
+                    .parse::<usize>()
+                    .map_err(|_| format!("bad frames '{f}' in --move entry '{part}'"))?,
+            ),
+            None => (timing, 1),
+        };
+        let at = at_str
+            .trim()
+            .parse::<usize>()
+            .map_err(|_| format!("bad frame '{at_str}' in --move entry '{part}'"))?;
+        let control = control.trim();
+        if control.is_empty() {
+            return Err(format!("bad --move entry '{part}'; empty control name"));
+        }
+        specs.push(MotionSpec {
+            control: control.to_string(),
+            at,
+            frames,
+            delta,
+        });
+    }
+    if specs.is_empty() {
+        return Err(
+            "--move was empty; give one or more control@frame[:frames][=delta] entries".to_string(),
+        );
+    }
+    Ok(specs)
+}
+
 /// Parse a `--break-pc` value: comma-separated `<cpu>:<addr>` entries.
 fn parse_break_specs(spec: &str) -> Result<Vec<(String, u32)>, String> {
     let mut specs = Vec::new();
@@ -1318,6 +1381,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
                 false,
                 false,
                 false,
@@ -1333,6 +1397,7 @@ mod tests {
                 "joust",
                 10,
                 20,
+                None,
                 None,
                 None,
                 None,
@@ -1392,6 +1457,22 @@ mod tests {
         assert!(parse_press_specs("fire1@10:zz").is_err()); // bad hold
         assert!(parse_press_specs("@10").is_err()); // empty control
         assert!(parse_press_specs("").is_err());
+    }
+
+    #[test]
+    fn motion_specs_parse_control_frame_span_and_delta() {
+        let s = parse_motion_specs("p1_trackball_x@120, spinner@60:30, ball@10:5=-2.5").unwrap();
+        assert_eq!(s[0].control, "p1_trackball_x");
+        assert_eq!((s[0].at, s[0].frames, s[0].delta), (120, 1, 1.0)); // defaults
+        assert_eq!((s[1].at, s[1].frames, s[1].delta), (60, 30, 1.0));
+        assert_eq!((s[2].at, s[2].frames, s[2].delta), (10, 5, -2.5)); // negative delta
+
+        assert!(parse_motion_specs("ball").is_err()); // no @frame
+        assert!(parse_motion_specs("ball@zz").is_err()); // bad frame
+        assert!(parse_motion_specs("ball@10:zz").is_err()); // bad frames
+        assert!(parse_motion_specs("ball@10:5=zz").is_err()); // bad delta
+        assert!(parse_motion_specs("@10").is_err()); // empty control
+        assert!(parse_motion_specs("").is_err());
     }
 
     #[test]
@@ -1512,6 +1593,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             Some("bank,devwrite"),
             None,
             None,
@@ -1565,6 +1647,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             Some("0:0xC900:w"),
             None,
             None,
@@ -1597,6 +1680,7 @@ mod tests {
             "joust",
             30,
             0,
+            None,
             None,
             None,
             None,
@@ -1644,6 +1728,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             false,
             true, // --hang
             true, // --stop-on-hang
@@ -1675,6 +1760,7 @@ mod tests {
             "joust",
             111,
             110,
+            None,
             None,
             None,
             None,
@@ -1722,6 +1808,7 @@ mod tests {
             "joust",
             frames,
             from_frame,
+            None,
             None,
             None,
             None,
