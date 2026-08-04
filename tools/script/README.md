@@ -62,15 +62,27 @@ method maps 1:1 onto a `DebugSession` accessor. The one remaining gap is
 | `m.poke(cpu, addr, value)` | `poke` | `bool` — write a debug byte; `false` if the machine has no debug support |
 | `m.input(name, on)` | `input` | `()` — immediate button edge, by stable control name |
 | `m.input_axis(name, v)` | `input_axis` | `()` — immediate analog value (`-1.0..=1.0`) |
+| `m.input_relative(name, d)` | `input_relative` | `()` — immediate relative motion delta (trackball / spinner) |
 | `m.screenshot(path)` | `screenshot` | `()` — render current frame to an RGB PNG. Throws on error |
 | `m.frame_count()` | `frame_count` | `int` — frames run so far |
 | `m.id()` | `machine_id` | `String` — machine's short id |
 | `m.display_size()` | `display_size` | `[int; 2]` — native `[width, height]` |
 | `m.cpu_count()` | `cpu_count` | `int` — number of CPUs on the debug bus |
 
-`input`/`input_axis` take a machine's **stable control name** (e.g. galaga's
-`coin1`, `p1_start`); see a machine's `input_controls()` for the list. Unknown
-names are ignored.
+`input`/`input_axis`/`input_relative` take a machine's **stable control name**
+(e.g. galaga's `coin1`, `p1_start`); see a machine's `input_controls()` for the
+list. Unknown names are ignored.
+
+Pick the one the machine actually consumes. Trackball and spinner games (Marble
+Madness, Crystal Castles, Missile Command, Quantum, Tempest) accumulate
+`input_relative` deltas into a wrapping counter and ignore `input_axis`
+entirely; self-centering sticks and yokes (Star Wars, I Robot) take
+`input_axis`. Relative deltas accumulate until the machine drains them, so
+sustained motion is one call per frame:
+
+```rhai
+for i in 0..60 { m.input_relative("p1_trackball_x", 3.0); m.run_frames(1); }
+```
 
 `poke` writes to backed RAM; I/O and unmapped addresses are ignored (as a
 memory-viewer poke would be). It is an explicit *debug* write, distinct from the

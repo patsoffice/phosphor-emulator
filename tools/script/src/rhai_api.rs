@@ -93,6 +93,9 @@ fn register_machine(engine: &mut Engine) {
     engine.register_fn("input_axis", |m: &mut Machine, name: &str, v: f64| {
         m.borrow_mut().input_axis(name, v as f32);
     });
+    engine.register_fn("input_relative", |m: &mut Machine, name: &str, d: f64| {
+        m.borrow_mut().input_relative(name, d as f32);
+    });
 
     // --- Inspect (unmapped / missing → -1, matching the read-first contract) ---
     engine.register_fn("read", |m: &mut Machine, cpu: i64, addr: i64| -> i64 {
@@ -630,6 +633,34 @@ mod tests {
             ]
         );
         assert_eq!(m.borrow().frame_count(), 1);
+    }
+
+    #[test]
+    fn analog_input_bindings_reach_handle_input() {
+        let (session, rec) = stub_session(true);
+        let m: Machine = Rc::new(RefCell::new(session));
+        let mut scope = Scope::new();
+        scope.push("m", m.clone());
+        build_engine()
+            .run_with_scope(
+                &mut scope,
+                r#"m.input_axis("coin", 0.5); m.input_relative("coin", -3.0);"#,
+            )
+            .unwrap();
+
+        assert_eq!(
+            rec.borrow().inputs,
+            vec![
+                InputEvent::Absolute {
+                    id: COIN_ID,
+                    value: 0.5
+                },
+                InputEvent::Relative {
+                    id: COIN_ID,
+                    delta: -3.0
+                },
+            ]
+        );
     }
 
     #[test]

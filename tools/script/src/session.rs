@@ -407,6 +407,23 @@ impl DebugSession {
         }
     }
 
+    /// Apply an *immediate* relative motion delta (pointing-device units) to
+    /// the control named `name`. Unknown names are ignored.
+    ///
+    /// This is the only way to drive a trackball or spinner from a script.
+    /// Those machines accumulate `Relative` deltas into a wrapping counter and
+    /// ignore `Absolute` entirely, so a script that reaches for
+    /// [`input_axis`](Self::input_axis) on Marble Madness or Crystal Castles
+    /// silently does nothing. Deltas accumulate until the machine drains them,
+    /// so sustained motion means one call per frame, not one large call.
+    pub fn input_relative(&mut self, name: &str, delta: f32) {
+        if let Some(&id) = self.input_ids.get(name) {
+            self.harness
+                .machine_mut()
+                .handle_input(InputEvent::Relative { id, delta });
+        }
+    }
+
     /// Render the current frame and write it to `path` as an 8-bit RGB PNG.
     ///
     /// Mirrors `disasm frameshot`: render the native buffer, then apply the
@@ -650,6 +667,8 @@ mod tests {
         s.input("coin", false);
         s.input("nonexistent", true); // ignored, no panic
         s.input_axis("coin", 0.5);
+        s.input_relative("coin", -3.0);
+        s.input_relative("nonexistent", 1.0); // ignored, no panic
         assert_eq!(
             rec.borrow().inputs,
             vec![
@@ -664,6 +683,10 @@ mod tests {
                 InputEvent::Absolute {
                     id: COIN_ID,
                     value: 0.5
+                },
+                InputEvent::Relative {
+                    id: COIN_ID,
+                    delta: -3.0
                 },
             ]
         );
