@@ -7,6 +7,7 @@ pub mod component;
 pub mod debug;
 pub mod debug_hang;
 pub mod debug_trace;
+pub mod input;
 pub mod machine;
 pub mod save_state;
 pub mod watchpoint;
