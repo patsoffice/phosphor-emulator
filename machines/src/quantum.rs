@@ -38,6 +38,7 @@
 
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
+use phosphor_core::core::input::{DrainPolicy, RelativeCounter};
 use phosphor_core::core::machine::{
     AnalogAxisKind, AudioSource, DefaultBinding, DipApplyTiming, DipChoice, DipOption,
     DipSwitchBank, DipSwitches, InputConfigurable, InputControl, InputEvent, InputId, InputKind,
@@ -319,10 +320,8 @@ pub struct QuantumSystem {
 
     // Trackball: two 4-bit up/down counters read at 0x940000. Mouse motion
     // accumulates into the *_accum fields, drained per-frame into the counters.
-    track_x: u8,
-    track_y: u8,
-    track_x_accum: i32,
-    track_y_accum: i32,
+    track_x: RelativeCounter,
+    track_y: RelativeCounter,
 
     /// SYSTEM port (948000), active-low except bit0 (AVG halt, supplied live).
     system_input: u8,
@@ -338,6 +337,14 @@ pub struct QuantumSystem {
     watchdog_count: u8,
 
     audio_buffer: Vec<i16>,
+}
+
+/// Quantum reads each trackball counter as a small signed 4-bit per-frame
+/// delta, so a step larger than +-7 aliases into a stall or a reversal. The
+/// excess is dropped rather than carried, so the ball stops when the pointing
+/// device does.
+fn new_track_counter() -> RelativeCounter {
+    RelativeCounter::new(0x0F, 0, false, DrainPolicy::ClampDrop { max_step: 7 })
 }
 
 impl QuantumSystem {
@@ -383,10 +390,8 @@ impl QuantumSystem {
             color_ram: [0; 16],
             nvram: [0xFF; 256], // X2212 powers up 1-filled
             display_list: Vec::with_capacity(2048),
-            track_x: 0,
-            track_y: 0,
-            track_x_accum: 0,
-            track_y_accum: 0,
+            track_x: new_track_counter(),
+            track_y: new_track_counter(),
             system_input: 0xFF,
             dsw0: 0x00,
             dsw1: 0x00,
@@ -465,13 +470,8 @@ impl QuantumSystem {
     /// spinner, the game reads each counter as a small signed per-frame delta,
     /// so clamp to ±7 to avoid 4-bit aliasing on fast motion.
     fn update_trackball(&mut self) {
-        const MAX_STEP: i32 = 7;
-        let sx = self.track_x_accum.clamp(-MAX_STEP, MAX_STEP);
-        let sy = self.track_y_accum.clamp(-MAX_STEP, MAX_STEP);
-        self.track_x_accum = 0;
-        self.track_y_accum = 0;
-        self.track_x = self.track_x.wrapping_add(sx as u8) & 0x0F;
-        self.track_y = self.track_y.wrapping_add(sy as u8) & 0x0F;
+        self.track_x.update();
+        self.track_y.update();
     }
 
     pub fn tick(&mut self) {
@@ -541,7 +541,7 @@ impl Bus for QuantumSystem {
             0x90_0000..=0x90_01FF => self.nvram[((addr >> 1) & 0xFF) as usize] as u16,
             // Trackball: (TRACKY << 4) | TRACKX.
             0x94_0000..=0x94_0001 => {
-                (((self.track_y & 0x0F) as u16) << 4) | (self.track_x & 0x0F) as u16
+                ((self.track_y.counter() as u16) << 4) | self.track_x.counter() as u16
             }
             // SYSTEM: bit0 = AVG halt (active-HIGH), the rest active-low inputs.
             0x94_8000..=0x94_8001 => {
@@ -663,9 +663,9 @@ impl InputConfigurable for QuantumSystem {
                 // reads horizontal. Mouse X drives TRACKY, mouse Y drives
                 // TRACKX (negated for the PORT_REVERSE).
                 if id == CTRL_TRACK_X {
-                    self.track_y_accum += delta as i32;
+                    self.track_y.add_delta(delta);
                 } else if id == CTRL_TRACK_Y {
-                    self.track_x_accum -= delta as i32;
+                    self.track_x.add_delta(-delta);
                 }
             }
             InputEvent::Absolute { .. } => {}
@@ -710,10 +710,8 @@ impl MachineCore for QuantumSystem {
         self.prev_irq_taken = false;
         self.watchdog_count = 0;
         self.system_input = 0xFF;
-        self.track_x = 0;
-        self.track_y = 0;
-        self.track_x_accum = 0;
-        self.track_y_accum = 0;
+        self.track_x = new_track_counter();
+        self.track_y = new_track_counter();
         self.audio_buffer.clear();
         for p in &mut self.pokey {
             p.reset();
@@ -741,8 +739,8 @@ impl Saveable for QuantumSystem {
         w.write_bytes(self.map.region_data(Region::VectorRam));
         w.write_bytes(&self.color_ram);
         w.write_bytes(&self.nvram);
-        w.write_u8(self.track_x);
-        w.write_u8(self.track_y);
+        w.write_u8(self.track_x.counter());
+        w.write_u8(self.track_y.counter());
         w.write_u8(self.system_input);
         w.write_u8(self.dsw0);
         w.write_u8(self.dsw1);
@@ -762,8 +760,8 @@ impl Saveable for QuantumSystem {
         r.read_bytes_into(self.map.region_data_mut(Region::VectorRam))?;
         r.read_bytes_into(&mut self.color_ram)?;
         r.read_bytes_into(&mut self.nvram)?;
-        self.track_x = r.read_u8()?;
-        self.track_y = r.read_u8()?;
+        self.track_x.set_counter(r.read_u8()?);
+        self.track_y.set_counter(r.read_u8()?);
         self.system_input = r.read_u8()?;
         self.dsw0 = r.read_u8()?;
         self.dsw1 = r.read_u8()?;
@@ -1065,8 +1063,8 @@ mod tests {
     #[test]
     fn trackball_packs_two_nibbles() {
         let mut sys = QuantumSystem::new();
-        sys.track_x = 0x3;
-        sys.track_y = 0x5;
+        sys.track_x.set_counter(0x3);
+        sys.track_y.set_counter(0x5);
         assert_eq!(Bus::read(&mut sys, BusMaster::Cpu(0), 0x94_0000), 0x0053);
     }
 
@@ -1142,7 +1140,7 @@ mod tests {
         sys.color_ram[5] = 0x0A;
         sys.nvram[0x20] = 0x42;
         sys.system_input = 0xF0;
-        sys.track_x = 0x7;
+        sys.track_x.set_counter(0x7);
         sys.irq_pending = true;
         sys.clock = 12_345;
         sys.watchdog_count = 3;
@@ -1159,7 +1157,7 @@ mod tests {
         assert_eq!(sys2.color_ram[5], 0x0A);
         assert_eq!(sys2.nvram[0x20], 0x42);
         assert_eq!(sys2.system_input, 0xF0);
-        assert_eq!(sys2.track_x, 0x7);
+        assert_eq!(sys2.track_x.counter(), 0x7);
         assert!(sys2.irq_pending);
         assert_eq!(sys2.clock, 12_345);
         assert_eq!(sys2.watchdog_count, 3);
