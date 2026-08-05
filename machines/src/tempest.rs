@@ -1,5 +1,6 @@
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
+use phosphor_core::core::input::{DrainPolicy, RelativeCounter};
 use phosphor_core::core::machine::{
     ActionRole, AnalogAxisKind, AudioSource, DefaultBinding, DipApplyTiming, DipChoice, DipOption,
     DipSwitchBank, DipSwitches, FrontendMachine, InputConfigurable, InputControl, InputEvent,
@@ -209,6 +210,7 @@ const TEMPEST_CONTROLS: &[InputControl] = &[
 ///   $9000–$DFFF  Program ROM (20 KB)
 ///   $F000–$FFFF  Program ROM mirror (for vectors)
 #[derive(Saveable)]
+#[save_version(2)]
 pub struct TempestSystem {
     pub board: AtariAvgBoard,
 
@@ -246,15 +248,23 @@ pub struct TempestSystem {
     outlatch: u8,
 
     // Spinner accumulator (from set_analog or keyboard, drained into 4-bit counter)
-    spinner_accum: i32,
-    // Digital spinner: track left/right key state
-    spinner_left: bool,
-    spinner_right: bool,
-    spinner_counter: u8,
+    /// Spinner conditioning: relative motion and the left/right keys feed a
+    /// wrapping 4-bit counter the game samples as a signed per-frame delta.
+    spinner: RelativeCounter,
 
     // Audio buffer from dual POKEYs
     #[save_skip(default)]
     audio_buffer: Vec<i16>,
+}
+
+/// The spinner counter is read as a signed 4-bit per-frame delta, so a step
+/// beyond +-7 aliases into a stall (multiples of 16) or a reversal (8..15).
+/// Trackball motion can produce far larger deltas, so the step is clamped and
+/// the excess dropped rather than carried — otherwise the player keeps drifting
+/// after the pointing device stops. Held keys contribute a fixed 3 per frame,
+/// full spinner speed.
+fn new_spinner() -> RelativeCounter {
+    RelativeCounter::new(0x0F, 3, false, DrainPolicy::ClampDrop { max_step: 7 })
 }
 
 impl TempestSystem {
@@ -307,10 +317,7 @@ impl TempestSystem {
             dsw2: 0x00, // 1 credit min, English, 20K bonus, 3 lives
             player_select: false,
             outlatch: 0,
-            spinner_accum: 0,
-            spinner_left: false,
-            spinner_right: false,
-            spinner_counter: 0,
+            spinner: new_spinner(),
             audio_buffer: Vec::with_capacity(2048),
         }
     }
@@ -324,32 +331,10 @@ impl TempestSystem {
     ///
     /// Each IN1/IN2 bit maps to a POKEY pot: 0 if set (fires immediately), 228 if clear.
     fn update_pot_inputs(&mut self) {
-        // Digital spinner: left/right keys add to accumulator each frame
-        const DIGITAL_SPINNER_SPEED: i32 = 3;
-        if self.spinner_left {
-            self.spinner_accum -= DIGITAL_SPINNER_SPEED;
-        }
-        if self.spinner_right {
-            self.spinner_accum += DIGITAL_SPINNER_SPEED;
-        }
-
-        // Drain spinner accumulator into the 4-bit counter. The game reads the
-        // counter as a *signed* per-frame delta, so a single frame may advance
-        // it by at most ±7; a larger step aliases in 4 bits and reads as a stall
-        // (multiples of 16) or a reversal (8..15). Trackball/trackpad motion can
-        // produce far larger deltas, so clamp the per-frame step. Slow, precise
-        // motion (≤7) passes through unchanged; fast motion is capped at full
-        // spinner speed rather than aliasing. Excess is dropped (not carried) so
-        // the player doesn't keep drifting after the mouse stops.
-        const MAX_SPINNER_STEP: i32 = 7;
-        let spinner_delta = self
-            .spinner_accum
-            .clamp(-MAX_SPINNER_STEP, MAX_SPINNER_STEP);
-        self.spinner_accum = 0;
-        self.spinner_counter = self.spinner_counter.wrapping_add(spinner_delta as u8) & 0x0F;
+        self.spinner.update();
 
         // Build IN1: spinner bits 0-3 + cabinet bit 4
-        self.in1 = (self.in1 & 0xF0) | (self.spinner_counter & 0x0F);
+        self.in1 = (self.in1 & 0xF0) | self.spinner.counter();
 
         // POKEY1: each POT reads one bit from IN1
         for i in 0..8u8 {
@@ -598,14 +583,14 @@ impl InputConfigurable for TempestSystem {
                 INPUT_START2 => set_bit_active_low(&mut self.in2, 6, pressed),
 
                 // Digital spinner via left/right keys
-                INPUT_LEFT => self.spinner_left = pressed,
-                INPUT_RIGHT => self.spinner_right = pressed,
+                INPUT_LEFT => self.spinner.set_held(false, pressed),
+                INPUT_RIGHT => self.spinner.set_held(true, pressed),
 
                 _ => {}
             },
             InputEvent::Relative { id, delta } => {
                 if id == CTRL_SPINNER {
-                    self.spinner_accum += delta as i32;
+                    self.spinner.add_delta(delta);
                 }
             }
             InputEvent::Absolute { .. } => {}
@@ -653,10 +638,7 @@ impl MachineCore for TempestSystem {
         self.earom.reset();
         self.player_select = false;
         self.outlatch = 0;
-        self.spinner_accum = 0;
-        self.spinner_left = false;
-        self.spinner_right = false;
-        self.spinner_counter = 0;
+        self.spinner = new_spinner();
         bus_split!(self, bus => {
             self.board.cpu.reset(bus, BusMaster::Cpu(0));
         });
@@ -981,7 +963,7 @@ mod tests {
         sys.board.irq_pending = true;
         sys.board.watchdog_frame_count = 5;
         sys.player_select = true;
-        sys.spinner_counter = 7;
+        sys.spinner.set_counter(7);
         sys.earom.load_from(&{
             let mut d = [0u8; 64];
             d[0] = 0x42;
@@ -1018,7 +1000,7 @@ mod tests {
         assert!(sys2.board.irq_pending);
         assert_eq!(sys2.board.watchdog_frame_count, 5);
         assert!(sys2.player_select);
-        assert_eq!(sys2.spinner_counter, 7);
+        assert_eq!(sys2.spinner.counter(), 7);
 
         // Verify EAROM
         assert_eq!(sys2.earom.read(0), 0x42);
