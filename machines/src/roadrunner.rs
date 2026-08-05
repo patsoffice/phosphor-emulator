@@ -14,6 +14,7 @@
 
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
+use phosphor_core::core::input::{AnalogAxis, AxisRange};
 use phosphor_core::core::machine::{
     AnalogAxisKind, DefaultBinding, Direction, InputConfigurable, InputControl, InputEvent,
     InputId, InputKind, MachineCore, MouseControl, Nvram, Profilable, SaveState,
@@ -521,11 +522,15 @@ pub struct RoadRunnerSystem {
     /// IRQ2) is asserted `ADC_CONVERSION_CYCLES` later.
     adc_start_clock: u64,
 
-    /// Current stick position [x, y] (STICK_MIN..=STICK_MAX, center STICK_CENTER)
-    /// fed to the ADC channels. Driven by the mouse axes or the direction keys.
-    stick: [i32; 2],
-    /// Held direction keys [up, down, left, right] for the digital fallback.
-    dir_keys: [bool; 4],
+    /// Self-centering analog stick [x, y] fed to the ADC channels: held
+    /// direction keys deflect fully, mouse motion nudges within the range.
+    stick: [AnalogAxis; 2],
+}
+
+/// The stick's electrical range. Held keys drive it to an extreme and release
+/// springs it back to center; the ADC digitizes whatever position it lands on.
+fn new_stick() -> [AnalogAxis; 2] {
+    std::array::from_fn(|_| AnalogAxis::new(AxisRange::new(STICK_MIN, STICK_CENTER, STICK_MAX)))
 }
 
 impl RoadRunnerSystem {
@@ -535,8 +540,7 @@ impl RoadRunnerSystem {
             adc: Adc0809::new(),
             adc_irq_enabled: false,
             adc_start_clock: 0,
-            stick: [STICK_CENTER, STICK_CENTER],
-            dir_keys: [false; 4],
+            stick: new_stick(),
         };
         sys.push_stick();
         sys
@@ -545,25 +549,15 @@ impl RoadRunnerSystem {
     /// Feed the current stick position to the ADC channels. Y (channel 6) is
     /// direct; X (channel 7) is reversed, matching the cabinet's `PORT_REVERSE`.
     fn push_stick(&mut self) {
-        self.adc.set_input(ADC_Y_CH as usize, self.stick[1] as u8);
         self.adc
-            .set_input(ADC_X_CH as usize, (0xFF - self.stick[0]) as u8);
+            .set_input(ADC_Y_CH as usize, self.stick[1].position() as u8);
+        self.adc
+            .set_input(ADC_X_CH as usize, (0xFF - self.stick[0].position()) as u8);
     }
 
     /// Recompute the stick from the held direction keys (full deflection while
     /// held, spring-centered when released), then push it to the ADC.
     fn update_dir_keys(&mut self) {
-        let axis = |neg: bool, pos: bool| {
-            if neg {
-                STICK_MIN
-            } else if pos {
-                STICK_MAX
-            } else {
-                STICK_CENTER
-            }
-        };
-        self.stick[0] = axis(self.dir_keys[2], self.dir_keys[3]); // left / right
-        self.stick[1] = axis(self.dir_keys[0], self.dir_keys[1]); // up / down
         self.push_stick();
     }
 
@@ -714,8 +708,7 @@ impl MachineCore for RoadRunnerSystem {
         self.adc.reset();
         self.adc_irq_enabled = false;
         self.adc_start_clock = 0;
-        self.stick = [STICK_CENTER, STICK_CENTER];
-        self.dir_keys = [false; 4];
+        self.stick = new_stick();
         self.push_stick();
         bus_split!(self, bus: u32 word => {
             self.board.cpu.reset(bus, BusMaster::Cpu(0));
@@ -739,19 +732,19 @@ impl InputConfigurable for RoadRunnerSystem {
                 INPUT_COIN => self.board.sound.set_coin(0, pressed),
                 // Digital joystick fallback → full stick deflection.
                 INPUT_JOY_UP => {
-                    self.dir_keys[0] = pressed;
+                    self.stick[1].set_held(false, pressed);
                     self.update_dir_keys();
                 }
                 INPUT_JOY_DOWN => {
-                    self.dir_keys[1] = pressed;
+                    self.stick[1].set_held(true, pressed);
                     self.update_dir_keys();
                 }
                 INPUT_JOY_LEFT => {
-                    self.dir_keys[2] = pressed;
+                    self.stick[0].set_held(false, pressed);
                     self.update_dir_keys();
                 }
                 INPUT_JOY_RIGHT => {
-                    self.dir_keys[3] = pressed;
+                    self.stick[0].set_held(true, pressed);
                     self.update_dir_keys();
                 }
                 _ => {}
@@ -761,10 +754,10 @@ impl InputConfigurable for RoadRunnerSystem {
             InputEvent::Relative { id, delta } => {
                 let d = delta as i32;
                 if id == CTRL_STICK_X {
-                    self.stick[0] = (self.stick[0] + d).clamp(STICK_MIN, STICK_MAX);
+                    self.stick[0].move_relative(d as f32);
                     self.push_stick();
                 } else if id == CTRL_STICK_Y {
-                    self.stick[1] = (self.stick[1] + d).clamp(STICK_MIN, STICK_MAX);
+                    self.stick[1].move_relative(d as f32);
                     self.push_stick();
                 }
             }
