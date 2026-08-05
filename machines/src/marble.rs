@@ -12,6 +12,7 @@
 
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
+use phosphor_core::core::input::{DrainPolicy, RelativeCounter};
 use phosphor_core::core::machine::{
     AnalogAxisKind, DefaultBinding, Direction, InputConfigurable, InputControl, InputEvent,
     InputId, InputKind, MachineCore, MouseControl, Nvram, Profilable, SaveState,
@@ -445,28 +446,36 @@ pub struct MarbleSystem {
 
     /// Trackball counters [p1x, p1y, p2x, p2y] — free-running 8-bit counters,
     /// the trackball motion the game samples at 0xF20000.
-    trackball: [u8; 4],
+    trackball: [RelativeCounter; 4],
     /// Per-player 45°-rotated counter pair, latched on the even (X) read so the
     /// paired odd (Y) read sees the same snapshot — see [`Self::trackball_read`].
     trackball_cur: [[u8; 2]; 2],
-    /// Pending sub-counter motion per axis (mouse deltas + held keys), drained a
-    /// capped step at a time each frame so a fast flick can't alias the 8-bit
-    /// counter (a >127 jump would read as motion the wrong way). See
-    /// [`Self::update_trackball`].
-    track_accum: [i32; 4],
-    /// P1 trackball direction keys held [left, right, up, down] — the keyboard
-    /// way to roll the ball; each contributes a fixed step per frame.
-    track_keys: [bool; 4],
+}
+
+/// The four trackball counters (P1 X, P1 Y, P2 X, P2 Y). Motion is rate-limited
+/// but never discarded, so a fast flick keeps rolling after the input stops —
+/// the ball has momentum, which is what distinguishes ClampCarry from the
+/// ClampDrop spinners. The X axes negate at apply time to match the cabinet's
+/// PORT_REVERSE wiring.
+fn new_trackball() -> [RelativeCounter; 4] {
+    std::array::from_fn(|axis| {
+        RelativeCounter::new(
+            0xFF,
+            TRACK_KEY_STEP,
+            axis % 2 == 0,
+            DrainPolicy::ClampCarry {
+                max_step: TRACK_MAX_STEP,
+            },
+        )
+    })
 }
 
 impl MarbleSystem {
     pub fn new() -> Self {
         Self {
             board: AtariSystem1Board::new(103, false),
-            trackball: [0; 4],
+            trackball: new_trackball(),
             trackball_cur: [[0; 2]; 2],
-            track_accum: [0; 4],
-            track_keys: [false; 4],
         }
     }
 
@@ -530,7 +539,10 @@ impl MarbleSystem {
         let player = (offset >> 1) & 1;
         let which = offset & 1;
         if which == 0 {
-            let (x, y) = (self.trackball[player * 2], self.trackball[player * 2 + 1]);
+            let (x, y) = (
+                self.trackball[player * 2].counter(),
+                self.trackball[player * 2 + 1].counter(),
+            );
             self.trackball_cur[player][0] = x.wrapping_add(y);
             self.trackball_cur[player][1] = x.wrapping_sub(y);
         }
@@ -542,24 +554,8 @@ impl MarbleSystem {
     /// its accumulator (mouse + keys) into the 8-bit counter. The X axes are
     /// reversed to match the cabinet's PORT_REVERSE wiring.
     fn update_trackball(&mut self) {
-        if self.track_keys[1] {
-            self.track_accum[0] += TRACK_KEY_STEP;
-        }
-        if self.track_keys[0] {
-            self.track_accum[0] -= TRACK_KEY_STEP;
-        }
-        if self.track_keys[3] {
-            self.track_accum[1] += TRACK_KEY_STEP;
-        }
-        if self.track_keys[2] {
-            self.track_accum[1] -= TRACK_KEY_STEP;
-        }
-
-        for axis in 0..4 {
-            let step = self.track_accum[axis].clamp(-TRACK_MAX_STEP, TRACK_MAX_STEP);
-            self.track_accum[axis] -= step;
-            let applied = if axis % 2 == 0 { -step } else { step };
-            self.trackball[axis] = (self.trackball[axis] as i32).wrapping_add(applied) as u8;
+        for counter in &mut self.trackball {
+            counter.update();
         }
     }
 }
@@ -643,10 +639,8 @@ impl MachineCore for MarbleSystem {
 
     fn reset(&mut self) {
         self.board.reset();
-        self.trackball = [0; 4];
+        self.trackball = new_trackball();
         self.trackball_cur = [[0; 2]; 2];
-        self.track_accum = [0; 4];
-        self.track_keys = [false; 4];
 
         bus_split!(self, bus: u32 word => {
             self.board.cpu.reset(bus, BusMaster::Cpu(0));
@@ -668,23 +662,23 @@ impl InputConfigurable for MarbleSystem {
                 // Coins are read on the sound board's 0x1820 port.
                 INPUT_COIN => self.board.sound.set_coin(0, pressed),
                 // P1 keyboard trackball roll — held direction keys.
-                INPUT_P1_TRACK_LEFT => self.track_keys[0] = pressed,
-                INPUT_P1_TRACK_RIGHT => self.track_keys[1] = pressed,
-                INPUT_P1_TRACK_UP => self.track_keys[2] = pressed,
-                INPUT_P1_TRACK_DOWN => self.track_keys[3] = pressed,
+                INPUT_P1_TRACK_LEFT => self.trackball[0].set_held(false, pressed),
+                INPUT_P1_TRACK_RIGHT => self.trackball[0].set_held(true, pressed),
+                INPUT_P1_TRACK_UP => self.trackball[1].set_held(false, pressed),
+                INPUT_P1_TRACK_DOWN => self.trackball[1].set_held(true, pressed),
                 _ => {}
             },
             InputEvent::Relative { id, delta } => {
                 // Mouse motion → pending sub-counter movement, drained per frame.
                 let d = delta as i32;
                 if id == CTRL_P1_TRACK_X {
-                    self.track_accum[0] += d;
+                    self.trackball[0].add_delta(d as f32);
                 } else if id == CTRL_P1_TRACK_Y {
-                    self.track_accum[1] += d;
+                    self.trackball[1].add_delta(d as f32);
                 } else if id == CTRL_P2_TRACK_X {
-                    self.track_accum[2] += d;
+                    self.trackball[2].add_delta(d as f32);
                 } else if id == CTRL_P2_TRACK_Y {
-                    self.track_accum[3] += d;
+                    self.trackball[3].add_delta(d as f32);
                 }
             }
             InputEvent::Absolute { .. } => {}
@@ -699,14 +693,18 @@ impl SaveState for MarbleSystem {
 impl Saveable for MarbleSystem {
     fn save_state(&self, w: &mut StateWriter) {
         self.board.save_state(w);
-        w.write_bytes(&self.trackball);
+        for counter in &self.trackball {
+            w.write_u8(counter.counter());
+        }
         w.write_bytes(&self.trackball_cur[0]);
         w.write_bytes(&self.trackball_cur[1]);
     }
 
     fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
         self.board.load_state(r)?;
-        r.read_bytes_into(&mut self.trackball)?;
+        for counter in &mut self.trackball {
+            counter.set_counter(r.read_u8()?);
+        }
         r.read_bytes_into(&mut self.trackball_cur[0])?;
         r.read_bytes_into(&mut self.trackball_cur[1])?;
         Ok(())
@@ -896,7 +894,10 @@ mod tests {
             delta: 3.0,
         });
         sys.update_trackball();
-        assert_eq!(sys.trackball, [246, 3, 0, 0]);
+        assert_eq!(
+            sys.trackball.each_ref().map(|c| c.counter()),
+            [246, 3, 0, 0]
+        );
 
         // The 45° rotation: X port = x+y, Y port = x-y. The even read latches
         // both, so the odd read sees the same snapshot.
@@ -919,17 +920,17 @@ mod tests {
             pressed: true,
         });
         sys.update_trackball();
-        assert_eq!(sys.trackball[0], (256 - TRACK_KEY_STEP) as u8);
+        assert_eq!(sys.trackball[0].counter(), (256 - TRACK_KEY_STEP) as u8);
         sys.update_trackball();
-        assert_eq!(sys.trackball[0], (256 - 2 * TRACK_KEY_STEP) as u8);
+        assert_eq!(sys.trackball[0].counter(), (256 - 2 * TRACK_KEY_STEP) as u8);
         // Releasing stops the roll.
         sys.handle_input(InputEvent::Button {
             id: InputId(INPUT_P1_TRACK_RIGHT as u16),
             pressed: false,
         });
-        let held = sys.trackball[0];
+        let held = sys.trackball[0].counter();
         sys.update_trackball();
-        assert_eq!(sys.trackball[0], held, "no motion once released");
+        assert_eq!(sys.trackball[0].counter(), held, "no motion once released");
     }
 
     #[test]
@@ -942,9 +943,9 @@ mod tests {
             delta: 500.0,
         });
         sys.update_trackball();
-        assert_eq!(sys.trackball[1], TRACK_MAX_STEP as u8);
+        assert_eq!(sys.trackball[1].counter(), TRACK_MAX_STEP as u8);
         sys.update_trackball();
-        assert_eq!(sys.trackball[1], (2 * TRACK_MAX_STEP) as u8);
+        assert_eq!(sys.trackball[1].counter(), (2 * TRACK_MAX_STEP) as u8);
     }
 
     /// Boot a hand-assembled 68010 program on the full board and prove the core
