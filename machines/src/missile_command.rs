@@ -1,5 +1,6 @@
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
+use phosphor_core::core::input::{DrainPolicy, RelativeCounter};
 use phosphor_core::core::machine::{
     ActionRole, AnalogAxisKind, AudioSource, AxisSign, DefaultBinding, DipApplyTiming, DipChoice,
     DipOption, DipSwitchBank, DipSwitches, Direction, InputConfigurable, InputControl, InputEvent,
@@ -307,16 +308,10 @@ pub struct MissileCommandSystem {
     palette: [u8; 8],
 
     // Trackball counters (4-bit each, combined into one byte when CTRLD=1)
-    trackball_x: u8,
-    trackball_y: u8,
-    trackball_l_pressed: bool,
-    trackball_r_pressed: bool,
-    trackball_u_pressed: bool,
-    trackball_d_pressed: bool,
+    trackball_x: RelativeCounter,
+    trackball_y: RelativeCounter,
     // Mouse accumulator: set_analog() adds here; tick() drains ±1 per tick
     // so the 4-bit counters never skip values and the game reads correct deltas.
-    mouse_accum_x: i32,
-    mouse_accum_y: i32,
 
     // IRQ state — based on /32V signal (inverted bit 5 of V counter)
     // Asserted at scanlines where 32V=0 (scanlines 0-31, 64-95, 128-159, 192-223)
@@ -341,6 +336,14 @@ pub struct MissileCommandSystem {
     audio_buffer: Vec<i16>,
 }
 
+/// Missile Command reads two 4-bit trackball counters. `tick` drains them from
+/// a 1000-cycle divider (~20 ticks/frame) rather than once per frame, so the
+/// per-call step is a single unit and the divider rate is what sets the
+/// crosshair speed; the remainder stays pending for the next tick.
+fn new_track_counter() -> RelativeCounter {
+    RelativeCounter::new(0x0F, 1, false, DrainPolicy::Unit)
+}
+
 impl MissileCommandSystem {
     pub fn new() -> Self {
         Self {
@@ -352,14 +355,8 @@ impl MissileCommandSystem {
             dip_switches: 0x00, // Default DIP: 1 coin/1 play, English, standard options
             ctrld: false,
             palette: [0; 8],
-            trackball_x: 0,
-            trackball_y: 0,
-            trackball_l_pressed: false,
-            trackball_r_pressed: false,
-            trackball_u_pressed: false,
-            trackball_d_pressed: false,
-            mouse_accum_x: 0,
-            mouse_accum_y: 0,
+            trackball_x: new_track_counter(),
+            trackball_y: new_track_counter(),
             irq_state: false,
             madsel_lastcycles: 0,
             stall_cycles: 0,
@@ -399,33 +396,8 @@ impl MissileCommandSystem {
         // Rate: every 1000 cycles ≈ 20 ticks/frame — enough for smooth crosshair tracking
         // while keeping deltas small enough for the 4-bit counter.
         if self.clock.is_multiple_of(1000) {
-            if self.trackball_l_pressed {
-                self.trackball_x = self.trackball_x.wrapping_sub(1) & 0x0F;
-            }
-            if self.trackball_r_pressed {
-                self.trackball_x = self.trackball_x.wrapping_add(1) & 0x0F;
-            }
-            if self.trackball_u_pressed {
-                self.trackball_y = self.trackball_y.wrapping_sub(1) & 0x0F;
-            }
-            if self.trackball_d_pressed {
-                self.trackball_y = self.trackball_y.wrapping_add(1) & 0x0F;
-            }
-            // Drain mouse accumulator ±1 per tick
-            if self.mouse_accum_x > 0 {
-                self.trackball_x = self.trackball_x.wrapping_add(1) & 0x0F;
-                self.mouse_accum_x -= 1;
-            } else if self.mouse_accum_x < 0 {
-                self.trackball_x = self.trackball_x.wrapping_sub(1) & 0x0F;
-                self.mouse_accum_x += 1;
-            }
-            if self.mouse_accum_y > 0 {
-                self.trackball_y = self.trackball_y.wrapping_add(1) & 0x0F;
-                self.mouse_accum_y -= 1;
-            } else if self.mouse_accum_y < 0 {
-                self.trackball_y = self.trackball_y.wrapping_sub(1) & 0x0F;
-                self.mouse_accum_y += 1;
-            }
+            self.trackball_x.update();
+            self.trackball_y.update();
         }
 
         // Per-scanline rendering: at each scanline boundary, render the current
@@ -777,7 +749,7 @@ impl Bus for MissileCommandSystem {
                 0x4000..=0x47FF => self.pokey.read(addr & 0x0F),
                 0x4800..=0x48FF => {
                     if self.ctrld {
-                        (self.trackball_y << 4) | (self.trackball_x & 0x0F)
+                        (self.trackball_y.counter() << 4) | self.trackball_x.counter()
                     } else {
                         self.in0
                     }
@@ -897,20 +869,20 @@ impl InputConfigurable for MissileCommandSystem {
                 INPUT_FIRE_RIGHT => set_bit_active_low(&mut self.in1, 0, pressed), // Right fire
 
                 // Trackball directions
-                INPUT_TRACK_L => self.trackball_l_pressed = pressed,
-                INPUT_TRACK_R => self.trackball_r_pressed = pressed,
-                INPUT_TRACK_U => self.trackball_u_pressed = pressed,
-                INPUT_TRACK_D => self.trackball_d_pressed = pressed,
+                INPUT_TRACK_L => self.trackball_x.set_held(false, pressed),
+                INPUT_TRACK_R => self.trackball_x.set_held(true, pressed),
+                INPUT_TRACK_U => self.trackball_y.set_held(false, pressed),
+                INPUT_TRACK_D => self.trackball_y.set_held(true, pressed),
                 _ => {}
             },
             InputEvent::Relative { id, delta } => {
                 let delta = delta as i32;
                 if id == CTRL_TRACKBALL_X {
-                    self.mouse_accum_x += delta;
+                    self.trackball_x.add_delta(delta as f32);
                 } else if id == CTRL_TRACKBALL_Y {
                     // Y axis inverted: mouse down (positive delta) moves the crosshair
                     // down on screen, but the trackball counter must decrease.
-                    self.mouse_accum_y -= delta;
+                    self.trackball_y.add_delta(-delta as f32);
                 }
             }
             InputEvent::Absolute { .. } => {}
@@ -929,14 +901,8 @@ impl Saveable for MissileCommandSystem {
         w.write_u8(self.in1);
         w.write_bool(self.ctrld);
         w.write_bytes(&self.palette);
-        w.write_u8(self.trackball_x);
-        w.write_u8(self.trackball_y);
-        w.write_bool(self.trackball_l_pressed);
-        w.write_bool(self.trackball_r_pressed);
-        w.write_bool(self.trackball_u_pressed);
-        w.write_bool(self.trackball_d_pressed);
-        w.write_i32_le(self.mouse_accum_x);
-        w.write_i32_le(self.mouse_accum_y);
+        self.trackball_x.save_state(w);
+        self.trackball_y.save_state(w);
         w.write_bool(self.irq_state);
         w.write_u64_le(self.madsel_lastcycles);
         w.write_u8(self.stall_cycles);
@@ -953,14 +919,8 @@ impl Saveable for MissileCommandSystem {
         self.in1 = r.read_u8()?;
         self.ctrld = r.read_bool()?;
         r.read_bytes_into(&mut self.palette)?;
-        self.trackball_x = r.read_u8()?;
-        self.trackball_y = r.read_u8()?;
-        self.trackball_l_pressed = r.read_bool()?;
-        self.trackball_r_pressed = r.read_bool()?;
-        self.trackball_u_pressed = r.read_bool()?;
-        self.trackball_d_pressed = r.read_bool()?;
-        self.mouse_accum_x = r.read_i32_le()?;
-        self.mouse_accum_y = r.read_i32_le()?;
+        self.trackball_x.load_state(r)?;
+        self.trackball_y.load_state(r)?;
         self.irq_state = r.read_bool()?;
         self.madsel_lastcycles = r.read_u64_le()?;
         self.stall_cycles = r.read_u8()?;
@@ -1203,12 +1163,12 @@ mod tests {
         sys.in1 = 0x77;
         sys.ctrld = true;
         sys.palette[3] = 0x0E;
-        sys.trackball_x = 7;
-        sys.trackball_y = 12;
-        sys.trackball_l_pressed = true;
-        sys.trackball_d_pressed = true;
-        sys.mouse_accum_x = -7;
-        sys.mouse_accum_y = 12;
+        sys.trackball_x.set_counter(7);
+        sys.trackball_y.set_counter(12);
+        sys.trackball_x.set_held(false, true);
+        sys.trackball_y.set_held(true, true);
+        sys.trackball_x.add_delta(-7.0);
+        sys.trackball_y.add_delta(12.0);
         sys.irq_state = true;
         sys.madsel_lastcycles = 42;
         sys.stall_cycles = 1;
@@ -1235,12 +1195,14 @@ mod tests {
         assert_eq!(sys2.in1, 0x77);
         assert!(sys2.ctrld);
         assert_eq!(sys2.palette[3], 0x0E);
-        assert_eq!(sys2.trackball_x, 7);
-        assert_eq!(sys2.trackball_y, 12);
-        assert!(sys2.trackball_l_pressed);
-        assert!(sys2.trackball_d_pressed);
-        assert_eq!(sys2.mouse_accum_x, -7);
-        assert_eq!(sys2.mouse_accum_y, 12);
+        assert_eq!(sys2.trackball_x.counter(), 7);
+        assert_eq!(sys2.trackball_y.counter(), 12);
+        // Held keys and pending motion round-trip too: one tick of each
+        // reproduces the pre-save step (key -1 plus drained -1 on X).
+        sys2.trackball_x.update();
+        sys2.trackball_y.update();
+        assert_eq!(sys2.trackball_x.counter(), 5);
+        assert_eq!(sys2.trackball_y.counter(), 14);
         assert!(sys2.irq_state);
         assert_eq!(sys2.madsel_lastcycles, 42);
         assert_eq!(sys2.stall_cycles, 1);
@@ -1270,9 +1232,13 @@ mod tests {
             id: CTRL_TRACKBALL_X,
             delta: (3) as f32,
         });
-        assert_eq!(sys.mouse_accum_x, 3);
-        // Counter unchanged until tick() drains
-        assert_eq!(sys.trackball_x, 0);
+        // Counter unchanged until tick() drains the pending motion.
+        assert_eq!(sys.trackball_x.counter(), 0);
+        for _ in 0..3000 {
+            sys.tick();
+            sys.clock += 1;
+        }
+        assert_eq!(sys.trackball_x.counter(), 3);
     }
 
     #[test]
@@ -1282,47 +1248,54 @@ mod tests {
             id: CTRL_TRACKBALL_Y,
             delta: (-5) as f32,
         });
-        // Y axis is inverted: negative mouse delta → positive accumulator
-        assert_eq!(sys.mouse_accum_y, 5);
+        // Y axis is inverted: a negative mouse delta drives the counter up.
+        for _ in 0..5000 {
+            sys.tick();
+            sys.clock += 1;
+        }
+        assert_eq!(sys.trackball_y.counter(), 5);
     }
 
     #[test]
     fn tick_drains_mouse_accum_positive() {
         let mut sys = MissileCommandSystem::new();
-        sys.mouse_accum_x = 3;
+        sys.trackball_x.add_delta(3.0);
         // Run enough ticks to drain (tick fires every 1000 cycles)
         for _ in 0..3000 {
             sys.tick();
             sys.clock += 1;
         }
-        assert_eq!(sys.trackball_x, 3);
-        assert_eq!(sys.mouse_accum_x, 0);
+        assert_eq!(sys.trackball_x.counter(), 3);
+        // Drained: further ticks do not move it.
+        for _ in 0..3000 {
+            sys.tick();
+            sys.clock += 1;
+        }
+        assert_eq!(sys.trackball_x.counter(), 3);
     }
 
     #[test]
     fn tick_drains_mouse_accum_negative() {
         let mut sys = MissileCommandSystem::new();
-        sys.trackball_y = 5;
-        sys.mouse_accum_y = -3;
+        sys.trackball_y.set_counter(5);
+        sys.trackball_y.add_delta(-3.0);
         for _ in 0..3000 {
             sys.tick();
             sys.clock += 1;
         }
-        assert_eq!(sys.trackball_y, 2);
-        assert_eq!(sys.mouse_accum_y, 0);
+        assert_eq!(sys.trackball_y.counter(), 2);
     }
 
     #[test]
     fn tick_drains_mouse_accum_wraps_4_bit() {
         let mut sys = MissileCommandSystem::new();
-        sys.trackball_x = 14;
-        sys.mouse_accum_x = 5;
+        sys.trackball_x.set_counter(14);
+        sys.trackball_x.add_delta(5.0);
         for _ in 0..5000 {
             sys.tick();
             sys.clock += 1;
         }
-        assert_eq!(sys.trackball_x, 3); // (14 + 5) & 0x0F = 3
-        assert_eq!(sys.mouse_accum_x, 0);
+        assert_eq!(sys.trackball_x.counter(), 3); // (14 + 5) & 0x0F = 3
     }
 
     #[test]
@@ -1350,8 +1323,12 @@ mod tests {
             id: CTRL_TRACKBALL_Y,
             delta: -5.0,
         });
-        assert_eq!(sys.mouse_accum_x, 3);
-        assert_eq!(sys.mouse_accum_y, 5);
+        for _ in 0..6000 {
+            sys.tick();
+            sys.clock += 1;
+        }
+        assert_eq!(sys.trackball_x.counter(), 3);
+        assert_eq!(sys.trackball_y.counter(), 5);
     }
 
     #[test]
