@@ -1,5 +1,6 @@
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
+use phosphor_core::core::input::{DrainPolicy, RelativeCounter};
 use phosphor_core::core::machine::{
     AnalogAxisKind, AudioSource, DefaultBinding, DipApplyTiming, DipChoice, DipOption,
     DipSwitchBank, DipSwitches, Direction, InputConfigurable, InputControl, InputEvent, InputId,
@@ -440,14 +441,10 @@ pub struct CrystalCastlesSystem {
     //   Bit 3: Tilt         Bit 4: Self-test     Bit 5: VBLANK (active-high)
     //   Bit 6: Jump Left    Bit 7: Jump Right
     in0: u8,
-    dip_switches: u8,   // Read via POKEY2 ALLPOT (0x9A08)
-    trackball: [u8; 4], // LETA0-3 (8-bit counters: Y1, X1, Y2, X2)
-    trackball_l_pressed: bool,
-    trackball_r_pressed: bool,
-    trackball_u_pressed: bool,
-    trackball_d_pressed: bool,
-    mouse_accum_x: i32,
-    mouse_accum_y: i32,
+    dip_switches: u8, // Read via POKEY2 ALLPOT (0x9A08)
+    /// LETA0-3 (Y1, X1, Y2, X2). Only player 1's pair is driven; the player 2
+    /// counters exist so the 0x9400 read can index all four uniformly.
+    trackball: [RelativeCounter; 4],
 
     // IRQ state — driven by sync PROM bit 3 rising edges (V=0,64,128,192)
     irq_state: bool,
@@ -463,6 +460,13 @@ pub struct CrystalCastlesSystem {
     sprite_buffer: Vec<u8>, // 256 × 256 temporary sprite layer (5-bit index)
 
     audio_buffer: Vec<i16>,
+}
+
+/// Crystal Castles reads full 8-bit trackball counters. `tick` drains them from
+/// a 200-cycle divider (~100 ticks/frame), so each call moves a single unit and
+/// the divider rate sets the responsiveness; the remainder stays pending.
+fn new_track_counter() -> RelativeCounter {
+    RelativeCounter::new(0xFF, 1, false, DrainPolicy::Unit)
 }
 
 impl CrystalCastlesSystem {
@@ -546,13 +550,12 @@ impl CrystalCastlesSystem {
             // All active-low bits released (1), VBLANK off (bit 5 = 0)
             in0: 0xDF,
             dip_switches: 0x00,
-            trackball: [0; 4],
-            trackball_l_pressed: false,
-            trackball_r_pressed: false,
-            trackball_u_pressed: false,
-            trackball_d_pressed: false,
-            mouse_accum_x: 0,
-            mouse_accum_y: 0,
+            trackball: [
+                new_track_counter(),
+                new_track_counter(),
+                new_track_counter(),
+                new_track_counter(),
+            ],
 
             irq_state: false,
             clock: 0,
@@ -881,31 +884,8 @@ impl CrystalCastlesSystem {
         // Trackball movement: drain mouse accumulator / apply keyboard input.
         // Rate: every 200 cycles (~100 ticks/frame) for responsive 8-bit counters.
         if self.clock.is_multiple_of(200) {
-            if self.trackball_l_pressed {
-                self.trackball[1] = self.trackball[1].wrapping_sub(1);
-            }
-            if self.trackball_r_pressed {
-                self.trackball[1] = self.trackball[1].wrapping_add(1);
-            }
-            if self.trackball_u_pressed {
-                self.trackball[0] = self.trackball[0].wrapping_sub(1);
-            }
-            if self.trackball_d_pressed {
-                self.trackball[0] = self.trackball[0].wrapping_add(1);
-            }
-            if self.mouse_accum_x > 0 {
-                self.trackball[1] = self.trackball[1].wrapping_add(1);
-                self.mouse_accum_x -= 1;
-            } else if self.mouse_accum_x < 0 {
-                self.trackball[1] = self.trackball[1].wrapping_sub(1);
-                self.mouse_accum_x += 1;
-            }
-            if self.mouse_accum_y > 0 {
-                self.trackball[0] = self.trackball[0].wrapping_add(1);
-                self.mouse_accum_y -= 1;
-            } else if self.mouse_accum_y < 0 {
-                self.trackball[0] = self.trackball[0].wrapping_sub(1);
-                self.mouse_accum_y += 1;
+            for counter in &mut self.trackball {
+                counter.update();
             }
         }
 
@@ -1000,7 +980,7 @@ impl Bus for CrystalCastlesSystem {
 
             Region::IO => match addr {
                 // Trackball LETA0-3 (mirrored: 0x9400-0x95FF)
-                0x9400..=0x95FF => self.trackball[(addr & 0x03) as usize],
+                0x9400..=0x95FF => self.trackball[(addr & 0x03) as usize].counter(),
                 // IN0 — digital inputs + VBLANK (0x9600-0x97FF)
                 0x9600..=0x97FF => self.in0,
                 // POKEY 1 (mirrored: 0x9800-0x99FF)
@@ -1137,19 +1117,19 @@ impl InputConfigurable for CrystalCastlesSystem {
                 INPUT_COIN_R => set_bit_active_low(&mut self.in0, 0, pressed),
                 INPUT_JUMP_LEFT => set_bit_active_low(&mut self.in0, 6, pressed),
                 INPUT_JUMP_RIGHT => set_bit_active_low(&mut self.in0, 7, pressed),
-                INPUT_TRACK_L => self.trackball_l_pressed = pressed,
-                INPUT_TRACK_R => self.trackball_r_pressed = pressed,
-                INPUT_TRACK_U => self.trackball_u_pressed = pressed,
-                INPUT_TRACK_D => self.trackball_d_pressed = pressed,
+                INPUT_TRACK_L => self.trackball[1].set_held(false, pressed),
+                INPUT_TRACK_R => self.trackball[1].set_held(true, pressed),
+                INPUT_TRACK_U => self.trackball[0].set_held(false, pressed),
+                INPUT_TRACK_D => self.trackball[0].set_held(true, pressed),
                 _ => {}
             },
             InputEvent::Relative { id, delta } => {
                 let delta = delta as i32;
                 if id == CTRL_TRACKBALL_X {
-                    self.mouse_accum_x += delta;
+                    self.trackball[1].add_delta(delta as f32);
                 } else if id == CTRL_TRACKBALL_Y {
                     // Y inverted: mouse down → trackball counter increases (moves down)
-                    self.mouse_accum_y -= delta;
+                    self.trackball[0].add_delta(-delta as f32);
                 }
             }
             InputEvent::Absolute { .. } => {}
@@ -1175,13 +1155,9 @@ impl Saveable for CrystalCastlesSystem {
         self.outlatch0.save_state(w);
         self.outlatch1.save_state(w);
         w.write_u8(self.in0);
-        w.write_bytes(&self.trackball);
-        w.write_bool(self.trackball_l_pressed);
-        w.write_bool(self.trackball_r_pressed);
-        w.write_bool(self.trackball_u_pressed);
-        w.write_bool(self.trackball_d_pressed);
-        w.write_i32_le(self.mouse_accum_x);
-        w.write_i32_le(self.mouse_accum_y);
+        for counter in &self.trackball {
+            counter.save_state(w);
+        }
         w.write_bool(self.irq_state);
         w.write_u64_le(self.clock);
         w.write_u8(self.watchdog_frame_count);
@@ -1203,13 +1179,9 @@ impl Saveable for CrystalCastlesSystem {
         self.outlatch0.load_state(r)?;
         self.outlatch1.load_state(r)?;
         self.in0 = r.read_u8()?;
-        r.read_bytes_into(&mut self.trackball)?;
-        self.trackball_l_pressed = r.read_bool()?;
-        self.trackball_r_pressed = r.read_bool()?;
-        self.trackball_u_pressed = r.read_bool()?;
-        self.trackball_d_pressed = r.read_bool()?;
-        self.mouse_accum_x = r.read_i32_le()?;
-        self.mouse_accum_y = r.read_i32_le()?;
+        for counter in &mut self.trackball {
+            counter.load_state(r)?;
+        }
         self.irq_state = r.read_bool()?;
         self.clock = r.read_u64_le()?;
         self.watchdog_frame_count = r.read_u8()?;
@@ -1400,8 +1372,8 @@ mod tests {
             sys.outlatch1.write(b, true);
         }
         sys.in0 = 0xBF;
-        sys.trackball[1] = 0x55;
-        sys.mouse_accum_x = -10;
+        sys.trackball[1].set_counter(0x55);
+        sys.trackball[1].add_delta(-10.0);
         sys.irq_state = true;
         sys.clock = 50_000;
         sys.watchdog_frame_count = 3;
@@ -1423,8 +1395,10 @@ mod tests {
         assert_eq!(sys2.outlatch0.value(), 0x80);
         assert_eq!(sys2.outlatch1.value(), 0x0F);
         assert_eq!(sys2.in0, 0xBF);
-        assert_eq!(sys2.trackball[1], 0x55);
-        assert_eq!(sys2.mouse_accum_x, -10);
+        assert_eq!(sys2.trackball[1].counter(), 0x55);
+        // Pending motion survives the round-trip: one drain step moves it.
+        sys2.trackball[1].update();
+        assert_eq!(sys2.trackball[1].counter(), 0x54);
         assert!(sys2.irq_state);
         assert_eq!(sys2.clock, 50_000);
         assert_eq!(sys2.watchdog_frame_count, 3);
