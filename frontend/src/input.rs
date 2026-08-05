@@ -22,6 +22,9 @@ use serde::{Deserialize, Serialize};
 /// (±10000 of the ±32768 axis range, ~30%), expressed as a normalized fraction.
 const STICK_DEADZONE_NORM: f32 = 10_000.0 / 32_768.0;
 
+/// Analog sensitivity multiplier when the user has not chosen one.
+const DEFAULT_SCALE: f32 = 1.0;
+
 /// Coarse class of a physical input, used to scope rebinding.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PhysicalCategory {
@@ -162,10 +165,19 @@ impl PhysicalInput {
 /// A persisted binding: a control referenced by its stable name plus a physical
 /// input token. Stored per machine (under that machine's `MachineSettings`) so
 /// saved configs survive `InputId` renumbering.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SerializedBinding {
     pub control: String,
     pub input: String,
+    /// Analog sensitivity, omitted when it is the 1.0 default. `Option` plus
+    /// `serde(default)` so existing `state.toml` files load unchanged and
+    /// untouched bindings stay a two-key table.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scale: Option<f32>,
+    /// Axis deadzone, omitted when it is the built-in default for the input's
+    /// kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadzone: Option<f32>,
 }
 
 /// One physical input bound to one logical control.
@@ -187,18 +199,22 @@ fn analog_value(raw: f32, deadzone: f32, scale: f32) -> f32 {
     magnitude.copysign(raw)
 }
 
-/// Build a binding, deriving the deadzone from the physical input's kind.
+/// The deadzone a physical input gets when the user has not chosen one.
 /// Gamepad axes rest noisily around center; nothing else needs a deadzone.
-fn make_binding(physical: PhysicalInput, target: InputId) -> InputBinding {
-    let deadzone = match physical {
+fn default_deadzone(physical: PhysicalInput) -> f32 {
+    match physical {
         PhysicalInput::PadAxis(..) | PhysicalInput::PadFullAxis(_) => STICK_DEADZONE_NORM,
         _ => 0.0,
-    };
+    }
+}
+
+/// Build a binding with default sensitivity and deadzone.
+fn make_binding(physical: PhysicalInput, target: InputId) -> InputBinding {
     InputBinding {
         physical,
         target,
-        scale: 1.0,
-        deadzone,
+        scale: DEFAULT_SCALE,
+        deadzone: default_deadzone(physical),
     }
 }
 
@@ -296,6 +312,10 @@ impl BindingSet {
                 id_to_name.get(&b.target).map(|name| SerializedBinding {
                     control: (*name).to_string(),
                     input: b.physical.to_token(),
+                    // Diff-only, matching what `MachineSettings::is_empty`
+                    // enforces for the file as a whole.
+                    scale: (b.scale != DEFAULT_SCALE).then_some(b.scale),
+                    deadzone: (b.deadzone != default_deadzone(b.physical)).then_some(b.deadzone),
                 })
             })
             .collect()
@@ -321,7 +341,10 @@ impl BindingSet {
                 name_to_id.get(s.control.as_str()),
                 PhysicalInput::from_token(&s.input),
             ) {
-                self.bindings.push(make_binding(physical, target));
+                let mut binding = make_binding(physical, target);
+                binding.scale = s.scale.unwrap_or(DEFAULT_SCALE);
+                binding.deadzone = s.deadzone.unwrap_or_else(|| default_deadzone(physical));
+                self.bindings.push(binding);
             }
         }
     }
@@ -343,6 +366,52 @@ impl BindingSet {
             .retain(|b| b.target != target || b.physical.category() != category);
         self.bindings.push(make_binding(physical, target));
     }
+
+    /// Set the analog sensitivity of every binding driving `target`.
+    pub fn set_scale(&mut self, target: InputId, scale: f32) {
+        for b in self.bindings.iter_mut().filter(|b| b.target == target) {
+            b.scale = scale;
+        }
+    }
+
+    /// Set the deadzone of every gamepad-axis binding driving `target`.
+    ///
+    /// Scoped to axis bindings because nothing else has a deadzone — applying
+    /// it to a key would make the stored value diverge from its default and be
+    /// persisted for no reason.
+    pub fn set_deadzone(&mut self, target: InputId, deadzone: f32) {
+        for b in self.bindings.iter_mut().filter(|b| {
+            b.target == target
+                && matches!(
+                    b.physical,
+                    PhysicalInput::PadAxis(..) | PhysicalInput::PadFullAxis(_)
+                )
+        }) {
+            b.deadzone = deadzone;
+        }
+    }
+
+    /// Current sensitivity for `target`, or the default when unbound.
+    pub fn scale_of(&self, target: InputId) -> f32 {
+        self.bindings
+            .iter()
+            .find(|b| b.target == target)
+            .map_or(DEFAULT_SCALE, |b| b.scale)
+    }
+
+    /// Current deadzone for `target`'s axis bindings, if it has any.
+    pub fn deadzone_of(&self, target: InputId) -> Option<f32> {
+        self.bindings
+            .iter()
+            .find(|b| {
+                b.target == target
+                    && matches!(
+                        b.physical,
+                        PhysicalInput::PadAxis(..) | PhysicalInput::PadFullAxis(_)
+                    )
+            })
+            .map(|b| b.deadzone)
+    }
 }
 
 /// Order-insensitive equality of two serialized binding lists, used to decide
@@ -351,7 +420,17 @@ pub fn bindings_eq(a: &[SerializedBinding], b: &[SerializedBinding]) -> bool {
     if a.len() != b.len() {
         return false;
     }
-    let key = |s: &SerializedBinding| (s.control.clone(), s.input.clone());
+    // Sorting by (control, input) alone would let a sensitivity-only change
+    // compare equal to the defaults and never be written; the tuning is part of
+    // the identity here.
+    let key = |s: &SerializedBinding| {
+        (
+            s.control.clone(),
+            s.input.clone(),
+            s.scale.map(f32::to_bits),
+            s.deadzone.map(f32::to_bits),
+        )
+    };
     let mut a = a.to_vec();
     let mut b = b.to_vec();
     a.sort_by_key(key);
@@ -1248,6 +1327,108 @@ mod tests {
     }
 
     #[test]
+    fn tuning_is_omitted_at_defaults_and_round_trips_when_changed() {
+        let controls = &[InputControl {
+            id: InputId(1),
+            stable_name: "ball_x",
+            label: "Trackball X",
+            kind: InputKind::AnalogAxis {
+                axis: phosphor_core::core::machine::AnalogAxisKind::X,
+            },
+            player: Some(1),
+            default_bindings: &[DefaultBinding::Mouse(MouseControl::AxisX)],
+        }];
+
+        // At defaults the table stays two keys, so an untouched state.toml is
+        // not churned by this feature existing.
+        let defaults = BindingSet::from_controls(controls);
+        let ser = defaults.to_serialized(controls);
+        assert_eq!(ser.len(), 1);
+        assert_eq!((ser[0].scale, ser[0].deadzone), (None, None));
+
+        // A sensitivity change is emitted and restored.
+        let mut tuned = BindingSet::from_controls(controls);
+        tuned.set_scale(InputId(1), 2.5);
+        let ser = tuned.to_serialized(controls);
+        assert_eq!(ser[0].scale, Some(2.5));
+
+        let mut restored = BindingSet::from_controls(controls);
+        restored.apply_overrides(controls, &ser);
+        assert_eq!(restored.scale_of(InputId(1)), 2.5);
+    }
+
+    #[test]
+    fn a_tuning_only_change_is_detected_as_differing_from_defaults() {
+        // bindings_eq decides whether anything gets written at all, so if it
+        // ignored the tuning a sensitivity change would be silently discarded.
+        let controls = &[InputControl {
+            id: InputId(1),
+            stable_name: "ball_x",
+            label: "Trackball X",
+            kind: InputKind::AnalogAxis {
+                axis: phosphor_core::core::machine::AnalogAxisKind::X,
+            },
+            player: Some(1),
+            default_bindings: &[DefaultBinding::Mouse(MouseControl::AxisX)],
+        }];
+
+        let defaults = BindingSet::from_controls(controls).to_serialized(controls);
+        let mut tuned = BindingSet::from_controls(controls);
+        tuned.set_scale(InputId(1), 0.5);
+
+        assert!(!bindings_eq(&tuned.to_serialized(controls), &defaults));
+    }
+
+    #[test]
+    fn deadzone_is_tunable_on_digital_direction_axis_bindings() {
+        // The reported failure was a resting stick holding a *digital*
+        // direction, so the knob has to reach PadAxis bindings, not just the
+        // full-axis analog ones.
+        let controls = &[InputControl {
+            id: InputId(1),
+            stable_name: "p1_left",
+            label: "P1 Left",
+            kind: InputKind::DigitalDirection {
+                direction: phosphor_core::core::machine::Direction::Left,
+            },
+            player: Some(1),
+            default_bindings: &[
+                DefaultBinding::Key(KeyId::Left),
+                DefaultBinding::Pad(PadControl::Axis(CorePadAxis::LeftX, AxisSign::Negative)),
+            ],
+        }];
+
+        let mut set = BindingSet::from_controls(controls);
+        assert_eq!(set.deadzone_of(InputId(1)), Some(STICK_DEADZONE_NORM));
+        set.set_deadzone(InputId(1), 0.6);
+        assert_eq!(set.deadzone_of(InputId(1)), Some(0.6));
+
+        // Only the axis binding carries it; the key must stay at its default so
+        // it is not needlessly persisted.
+        let ser = set.to_serialized(controls);
+        let key_entry = ser.iter().find(|s| s.input.starts_with("key:")).unwrap();
+        assert_eq!(key_entry.deadzone, None);
+        let axis_entry = ser
+            .iter()
+            .find(|s| s.input.starts_with("padaxis:"))
+            .unwrap();
+        assert_eq!(axis_entry.deadzone, Some(0.6));
+    }
+
+    #[test]
+    fn a_state_toml_without_tuning_keys_still_loads() {
+        // Backward compatibility: every existing state.toml predates these
+        // fields, and serde(default) must fill them in rather than fail.
+        let toml = r#"
+            control = "p1_left"
+            input = "key:80"
+        "#;
+        let parsed: SerializedBinding = toml::from_str(toml).expect("legacy entry parses");
+        assert_eq!(parsed.control, "p1_left");
+        assert_eq!((parsed.scale, parsed.deadzone), (None, None));
+    }
+
+    #[test]
     fn unrelated_events_are_not_consumed() {
         let bindings = set(vec![binding(PhysicalInput::Key(Scancode::Left), 1)]);
         let mut rec = Recorder::default();
@@ -1441,10 +1622,14 @@ mod tests {
         assert!(ser.contains(&SerializedBinding {
             control: "fire".to_string(),
             input: PhysicalInput::Key(Scancode::Space).to_token(),
+            scale: None,
+            deadzone: None,
         }));
         assert!(ser.contains(&SerializedBinding {
             control: "coin".to_string(),
             input: PhysicalInput::Key(Scancode::Num5).to_token(),
+            scale: None,
+            deadzone: None,
         }));
     }
 
@@ -1455,6 +1640,8 @@ mod tests {
         let saved = vec![SerializedBinding {
             control: "fire".to_string(),
             input: PhysicalInput::Key(Scancode::Return).to_token(),
+            scale: None,
+            deadzone: None,
         }];
         set.apply_overrides(TEST_CONTROLS, &saved);
 
@@ -1477,26 +1664,36 @@ mod tests {
             SerializedBinding {
                 control: "fire".into(),
                 input: "key:1".into(),
+                scale: None,
+                deadzone: None,
             },
             SerializedBinding {
                 control: "coin".into(),
                 input: "key:2".into(),
+                scale: None,
+                deadzone: None,
             },
         ];
         let b = vec![
             SerializedBinding {
                 control: "coin".into(),
                 input: "key:2".into(),
+                scale: None,
+                deadzone: None,
             },
             SerializedBinding {
                 control: "fire".into(),
                 input: "key:1".into(),
+                scale: None,
+                deadzone: None,
             },
         ];
         assert!(bindings_eq(&a, &b));
         let c = vec![SerializedBinding {
             control: "fire".into(),
             input: "key:9".into(),
+            scale: None,
+            deadzone: None,
         }];
         assert!(!bindings_eq(&a, &c));
     }

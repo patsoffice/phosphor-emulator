@@ -21,6 +21,17 @@ pub struct PendingDipChange {
     pub value: u8,
 }
 
+/// A sensitivity/deadzone edit recorded by the input panel and applied to the
+/// binding set after the egui frame — the panel never holds `&mut BindingSet`.
+#[derive(Clone, Copy)]
+pub struct PendingTuning {
+    pub target: InputId,
+    /// New analog sensitivity, when the sensitivity slider moved.
+    pub scale: Option<f32>,
+    /// New axis deadzone, when the deadzone slider moved.
+    pub deadzone: Option<f32>,
+}
+
 /// UI state for the settings panels, owned by the emulator loop.
 #[derive(Default)]
 pub struct SettingsState {
@@ -36,6 +47,9 @@ pub struct SettingsState {
     /// DIP option edits recorded this frame; the emulator loop applies them via
     /// `set_dip_option` after the UI frame and clears the buffer.
     pub pending_dip_changes: Vec<PendingDipChange>,
+    /// Analog tuning edits recorded this frame, applied and cleared the same
+    /// way as `pending_dip_changes`.
+    pub pending_tuning: Vec<PendingTuning>,
 }
 
 /// Draw the input-rebinding side panel.
@@ -76,27 +90,69 @@ pub fn draw_input_panel(
                                 .map(|p| p.display_name())
                                 .collect();
 
-                            if matches!(control.kind, InputKind::AnalogAxis { .. }) {
-                                // Analog axes (trackball / spinner) are not rebindable here.
-                                ui.label(if bound.is_empty() {
-                                    "—".to_string()
+                            ui.vertical(|ui| {
+                                if matches!(control.kind, InputKind::AnalogAxis { .. }) {
+                                    // Analog axes are driven by relative motion
+                                    // rather than a discrete press, so they show
+                                    // their bindings plus a sensitivity knob
+                                    // instead of a rebind button.
+                                    ui.label(if bound.is_empty() {
+                                        "—".to_string()
+                                    } else {
+                                        bound.join(", ")
+                                    });
+
+                                    let mut scale = bindings.scale_of(control.id);
+                                    if ui
+                                        .add(
+                                            egui::Slider::new(&mut scale, 0.1..=5.0)
+                                                .logarithmic(true)
+                                                .text("sensitivity"),
+                                        )
+                                        .changed()
+                                    {
+                                        state.pending_tuning.push(PendingTuning {
+                                            target: control.id,
+                                            scale: Some(scale),
+                                            deadzone: None,
+                                        });
+                                    }
                                 } else {
-                                    bound.join(", ")
-                                });
-                            } else {
-                                let capturing = state.capturing == Some(control.id);
-                                let text = if capturing {
-                                    "press input…".to_string()
-                                } else if bound.is_empty() {
-                                    "(unbound)".to_string()
-                                } else {
-                                    bound.join(", ")
-                                };
-                                if ui.button(text).clicked() {
-                                    state.capturing =
-                                        if capturing { None } else { Some(control.id) };
+                                    let capturing = state.capturing == Some(control.id);
+                                    let text = if capturing {
+                                        "press input…".to_string()
+                                    } else if bound.is_empty() {
+                                        "(unbound)".to_string()
+                                    } else {
+                                        bound.join(", ")
+                                    };
+                                    if ui.button(text).clicked() {
+                                        state.capturing =
+                                            if capturing { None } else { Some(control.id) };
+                                    }
                                 }
-                            }
+
+                                // Any control bound to a gamepad axis gets a
+                                // deadzone, digital directions included — a
+                                // stick that rests outside the deadzone reads as
+                                // permanently deflected and holds that direction.
+                                if let Some(current) = bindings.deadzone_of(control.id) {
+                                    let mut deadzone = current;
+                                    if ui
+                                        .add(
+                                            egui::Slider::new(&mut deadzone, 0.0..=0.9)
+                                                .text("deadzone"),
+                                        )
+                                        .changed()
+                                    {
+                                        state.pending_tuning.push(PendingTuning {
+                                            target: control.id,
+                                            scale: None,
+                                            deadzone: Some(deadzone),
+                                        });
+                                    }
+                                }
+                            });
                             ui.end_row();
                         }
                     });

@@ -157,6 +157,8 @@ mod tests {
         SerializedBinding {
             control: control.to_string(),
             input: input.to_string(),
+            scale: None,
+            deadzone: None,
         }
     }
 

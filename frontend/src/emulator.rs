@@ -10,7 +10,7 @@ use sdl2::keyboard::{Mod, Scancode};
 
 use crate::console_ui::{self, ConsoleState};
 use crate::debug_ui::{self, DebugState, RunMode};
-use crate::input::{self, BindingSet, PhysicalInput};
+use crate::input::{self, AxisDir, BindingSet, MouseAxis, PhysicalInput};
 use crate::profile::ProfileState;
 use crate::settings_ui::{self, SettingsState};
 use crate::video::Video;
@@ -39,7 +39,15 @@ fn panels_width(
 
 /// Translate an SDL event into a physical input for rebind capture, if it is a
 /// bindable press (key, gamepad button, or mouse button).
-fn capture_physical(event: &Event) -> Option<PhysicalInput> {
+/// `analog_target` selects what an axis deflection means: a whole axis for an
+/// analog control, or one signed direction standing in for a button.
+/// `mouse_grabbed` gates mouse-motion capture — ungrabbed, the cursor is
+/// travelling toward the Rebind button and would capture itself.
+fn capture_physical(
+    event: &Event,
+    analog_target: bool,
+    mouse_grabbed: bool,
+) -> Option<PhysicalInput> {
     match event {
         Event::KeyDown {
             scancode: Some(sc), ..
@@ -47,6 +55,32 @@ fn capture_physical(event: &Event) -> Option<PhysicalInput> {
         Event::ControllerButtonDown { button, .. } => Some(PhysicalInput::PadButton(*button)),
         Event::MouseButtonDown { mouse_btn, .. } => {
             Some(PhysicalInput::MouseButtonInput(*mouse_btn))
+        }
+        // A decisive deflection binds the axis. The threshold sits far above
+        // the digital deadzone so a resting — or drifting — stick can never
+        // capture itself.
+        Event::ControllerAxisMotion { axis, value, .. } if value.unsigned_abs() > 24_000 => {
+            Some(if analog_target {
+                PhysicalInput::PadFullAxis(*axis)
+            } else {
+                PhysicalInput::PadAxis(
+                    *axis,
+                    if *value > 0 {
+                        AxisDir::Positive
+                    } else {
+                        AxisDir::Negative
+                    },
+                )
+            })
+        }
+        Event::MouseMotion { xrel, yrel, .. }
+            if analog_target && mouse_grabbed && (xrel.abs() > 8 || yrel.abs() > 8) =>
+        {
+            Some(PhysicalInput::MouseAxis(if xrel.abs() > yrel.abs() {
+                MouseAxis::X
+            } else {
+                MouseAxis::Y
+            }))
         }
         _ => None,
     }
@@ -329,7 +363,12 @@ pub fn run(
                         continue;
                     }
                     _ => {
-                        if let Some(physical) = capture_physical(&event) {
+                        let analog_target = machine.input_controls().iter().any(|c| {
+                            c.id == target && matches!(c.kind, InputKind::AnalogAxis { .. })
+                        });
+                        if let Some(physical) =
+                            capture_physical(&event, analog_target, mouse_grabbed)
+                        {
                             bindings.rebind(target, physical);
                             settings_state.capturing = None;
                             continue;
@@ -939,6 +978,15 @@ pub fn run(
                     // Apply DIP edits recorded by the panel this frame.
                     for change in settings_state.pending_dip_changes.drain(..) {
                         machine.set_dip_option(change.bank, change.option, change.value);
+                    }
+                    // Same for analog sensitivity / deadzone edits.
+                    for change in settings_state.pending_tuning.drain(..) {
+                        if let Some(scale) = change.scale {
+                            bindings.set_scale(change.target, scale);
+                        }
+                        if let Some(deadzone) = change.deadzone {
+                            bindings.set_deadzone(change.target, deadzone);
+                        }
                     }
                 } else {
                     video.present_game_only(view_aspect);
