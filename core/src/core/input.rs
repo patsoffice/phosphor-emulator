@@ -273,6 +273,17 @@ impl AnalogAxis {
         self.position
     }
 
+    /// Place the axis at an exact position, clamped to the range.
+    ///
+    /// For restoring a saved position, and for machines whose absolute mapping
+    /// is not [`set_absolute`](Self::set_absolute)'s — Star Wars scales both
+    /// directions by its *upper* half-span even though its center is not the
+    /// midpoint, so it computes its own value and assigns it here.
+    pub fn set_position(&mut self, position: i32) {
+        self.position = position;
+        self.clamp();
+    }
+
     /// `min + max - position`, for cabinets wired to read the axis reversed.
     pub fn reversed(&self) -> i32 {
         self.range.min + self.range.max - self.position
