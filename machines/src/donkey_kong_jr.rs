@@ -1,8 +1,8 @@
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
-    DipApplyTiming, DipChoice, DipOption, DipSwitchBank, DipSwitches, InputConfigurable,
-    InputControl, InputEvent, MachineCore, SaveState,
+    DipApplyTiming, DipChoice, DipOption, DipSwitchBank, InputConfigurable, InputControl,
+    InputEvent, MachineCore, SaveState,
 };
 use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
@@ -595,25 +595,12 @@ const DKONGJR_DIP_BANKS: &[DipSwitchBank] = &[DipSwitchBank {
     ],
 }];
 
-impl DipSwitches for DkongJrSystem {
-    fn dip_banks(&self) -> &'static [DipSwitchBank] {
-        DKONGJR_DIP_BANKS
-    }
-
-    fn dip_bank_value(&self, bank: usize) -> u8 {
-        if bank == 0 { self.board.dsw0 } else { 0 }
-    }
-
-    fn set_dip_bank_value(&mut self, bank: usize, value: u8) {
-        if bank == 0 {
-            self.board.dsw0 = value;
-        }
-    }
-}
+crate::impl_dip_switches!(DkongJrSystem, DKONGJR_DIP_BANKS, board.dsw0);
 
 #[cfg(test)]
 mod dip_tests {
     use super::*;
+    use phosphor_core::core::machine::DipSwitches;
 
     #[test]
     fn dip_default_and_metadata() {

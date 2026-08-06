@@ -8,7 +8,7 @@ use std::time::Instant;
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
-    DipApplyTiming, DipChoice, DipOption, DipSwitchBank, DipSwitches, Direction, InputConfigurable,
+    DipApplyTiming, DipChoice, DipOption, DipSwitchBank, Direction, InputConfigurable,
     InputControl, InputEvent, InputId, InputKind, MachineCore, Nvram, Profilable, ProfileSpan,
     SaveState,
 };
@@ -595,21 +595,7 @@ const QBERT_DIP_BANKS: &[DipSwitchBank] = &[DipSwitchBank {
     ],
 }];
 
-impl DipSwitches for QbertSystem {
-    fn dip_banks(&self) -> &'static [DipSwitchBank] {
-        QBERT_DIP_BANKS
-    }
-
-    fn dip_bank_value(&self, bank: usize) -> u8 {
-        if bank == 0 { self.board.dsw } else { 0 }
-    }
-
-    fn set_dip_bank_value(&mut self, bank: usize, value: u8) {
-        if bank == 0 {
-            self.board.dsw = value;
-        }
-    }
-}
+crate::impl_dip_switches!(QbertSystem, QBERT_DIP_BANKS, board.dsw);
 
 crate::impl_map_debug_trace!(QbertSystem, board.map);
 
@@ -626,6 +612,7 @@ crate::register_machine!(QbertSystem, "qbert", &["qbert"], QBERT_CONTROLS);
 #[cfg(test)]
 mod tests {
     use super::*;
+    use phosphor_core::core::machine::DipSwitches;
 
     #[test]
     fn dip_default_and_metadata() {

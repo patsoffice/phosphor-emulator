@@ -20,8 +20,8 @@ use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::debug_trace::DebugTraceBuffer;
 use phosphor_core::core::machine::{
-    ActionRole, DipApplyTiming, DipChoice, DipOption, DipSwitchBank, DipSwitches, Direction,
-    InputConfigurable, InputControl, InputEvent, InputId, InputKind, MachineCore, Nvram, SaveState,
+    ActionRole, DipApplyTiming, DipChoice, DipOption, DipSwitchBank, Direction, InputConfigurable,
+    InputControl, InputEvent, InputId, InputKind, MachineCore, Nvram, SaveState,
 };
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::{AccessKind, AddressSpace16};
@@ -1754,27 +1754,7 @@ const CONGO_DIP_BANKS: &[DipSwitchBank] = &[
     },
 ];
 
-impl DipSwitches for CongoBongoSystem {
-    fn dip_banks(&self) -> &'static [DipSwitchBank] {
-        CONGO_DIP_BANKS
-    }
-
-    fn dip_bank_value(&self, bank: usize) -> u8 {
-        match bank {
-            0 => self.board.dsw2,
-            1 => self.board.dsw3,
-            _ => 0,
-        }
-    }
-
-    fn set_dip_bank_value(&mut self, bank: usize, value: u8) {
-        match bank {
-            0 => self.board.dsw2 = value,
-            1 => self.board.dsw3 = value,
-            _ => {}
-        }
-    }
-}
+crate::impl_dip_switches!(CongoBongoSystem, CONGO_DIP_BANKS, board.dsw2, board.dsw3);
 
 impl Nvram for CongoBongoSystem {}
 impl phosphor_core::core::machine::Profilable for CongoBongoSystem {}

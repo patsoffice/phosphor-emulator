@@ -1,7 +1,7 @@
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
-    ActionRole, AudioSource, DipApplyTiming, DipChoice, DipOption, DipSwitchBank, DipSwitches,
+    ActionRole, AudioSource, DipApplyTiming, DipChoice, DipOption, DipSwitchBank,
     InputConfigurable, InputControl, InputEvent, InputId, InputKind, MachineCore, Nvram,
     Profilable, SaveState,
 };
@@ -597,21 +597,7 @@ const ASTDELUX_DIP_BANKS: &[DipSwitchBank] = &[DipSwitchBank {
     ],
 }];
 
-impl DipSwitches for AsteroidsDeluxeSystem {
-    fn dip_banks(&self) -> &'static [DipSwitchBank] {
-        ASTDELUX_DIP_BANKS
-    }
-
-    fn dip_bank_value(&self, bank: usize) -> u8 {
-        if bank == 0 { self.dip_switches } else { 0 }
-    }
-
-    fn set_dip_bank_value(&mut self, bank: usize, value: u8) {
-        if bank == 0 {
-            self.dip_switches = value;
-        }
-    }
-}
+crate::impl_dip_switches!(AsteroidsDeluxeSystem, ASTDELUX_DIP_BANKS, dip_switches);
 crate::impl_board_debug_trace!(AsteroidsDeluxeSystem, board);
 
 // ---------------------------------------------------------------------------
@@ -629,6 +615,7 @@ crate::register_machine!(
 mod tests {
     use super::*;
     use crate::atari_dvg::Region;
+    use phosphor_core::core::machine::DipSwitches;
     use phosphor_core::cpu::CpuStateTrait;
 
     #[test]

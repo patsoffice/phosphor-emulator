@@ -460,6 +460,133 @@ macro_rules! machine_save_state {
 }
 pub(crate) use machine_save_state;
 
+/// Implements `DipSwitches` from the bank table plus the field each bank lives
+/// in. The `DipSwitchBank`/`DipOption`/`DipChoice` table itself is per-game
+/// hardware data and stays hand-written in the machine file — only the
+/// three-method accessor triple is generated.
+///
+/// # Usage
+/// ```ignore
+/// // One bank, held in a plain field or a board field.
+/// crate::impl_dip_switches!(DkongSystem, DKONG_DIP_BANKS, board.dsw0);
+/// // Two banks.
+/// crate::impl_dip_switches!(DigDugSystem, DIGDUG_DIP_BANKS, board.dswa, board.dswb);
+/// // Banks sharing an input port with live signals: reads mask, writes merge
+/// // so the non-DIP bits of the port survive.
+/// crate::impl_dip_switches!(
+///     GalaxianSystem, GALAXIAN_DIP_BANKS,
+///     board.in0 & DIP0_MASK, board.in1 & DIP1_MASK, board.in2 & DIP2_MASK
+/// );
+/// ```
+///
+/// A machine whose accessors do anything else keeps its hand-written impl:
+/// `quantum.rs` recomputes pot values on write, `pisces.rs` looks the port up
+/// per hardware config, `burgertime.rs` masks a live VBLANK bit out of one bank
+/// but clobbers rather than merges on write.
+macro_rules! impl_dip_switches {
+    // One bank.
+    ($type:ty, $banks:expr, $($f0:ident).+ $(,)?) => {
+        impl phosphor_core::core::machine::DipSwitches for $type {
+            fn dip_banks(&self) -> &'static [phosphor_core::core::machine::DipSwitchBank] {
+                $banks
+            }
+
+            fn dip_bank_value(&self, bank: usize) -> u8 {
+                if bank == 0 { self.$($f0).+ } else { 0 }
+            }
+
+            fn set_dip_bank_value(&mut self, bank: usize, value: u8) {
+                if bank == 0 {
+                    self.$($f0).+ = value;
+                }
+            }
+        }
+    };
+
+    // Two banks.
+    ($type:ty, $banks:expr, $($f0:ident).+, $($f1:ident).+ $(,)?) => {
+        impl phosphor_core::core::machine::DipSwitches for $type {
+            fn dip_banks(&self) -> &'static [phosphor_core::core::machine::DipSwitchBank] {
+                $banks
+            }
+
+            fn dip_bank_value(&self, bank: usize) -> u8 {
+                match bank {
+                    0 => self.$($f0).+,
+                    1 => self.$($f1).+,
+                    _ => 0,
+                }
+            }
+
+            fn set_dip_bank_value(&mut self, bank: usize, value: u8) {
+                match bank {
+                    0 => self.$($f0).+ = value,
+                    1 => self.$($f1).+ = value,
+                    _ => {}
+                }
+            }
+        }
+    };
+
+    // Two banks sharing input ports with live signals.
+    ($type:ty, $banks:expr, $($f0:ident).+ & $m0:expr, $($f1:ident).+ & $m1:expr $(,)?) => {
+        impl phosphor_core::core::machine::DipSwitches for $type {
+            fn dip_banks(&self) -> &'static [phosphor_core::core::machine::DipSwitchBank] {
+                $banks
+            }
+
+            fn dip_bank_value(&self, bank: usize) -> u8 {
+                match bank {
+                    0 => self.$($f0).+ & $m0,
+                    1 => self.$($f1).+ & $m1,
+                    _ => 0,
+                }
+            }
+
+            fn set_dip_bank_value(&mut self, bank: usize, value: u8) {
+                match bank {
+                    0 => self.$($f0).+ = (self.$($f0).+ & !$m0) | (value & $m0),
+                    1 => self.$($f1).+ = (self.$($f1).+ & !$m1) | (value & $m1),
+                    _ => {}
+                }
+            }
+        }
+    };
+
+    // Three banks sharing input ports with live signals.
+    (
+        $type:ty, $banks:expr,
+        $($f0:ident).+ & $m0:expr,
+        $($f1:ident).+ & $m1:expr,
+        $($f2:ident).+ & $m2:expr $(,)?
+    ) => {
+        impl phosphor_core::core::machine::DipSwitches for $type {
+            fn dip_banks(&self) -> &'static [phosphor_core::core::machine::DipSwitchBank] {
+                $banks
+            }
+
+            fn dip_bank_value(&self, bank: usize) -> u8 {
+                match bank {
+                    0 => self.$($f0).+ & $m0,
+                    1 => self.$($f1).+ & $m1,
+                    2 => self.$($f2).+ & $m2,
+                    _ => 0,
+                }
+            }
+
+            fn set_dip_bank_value(&mut self, bank: usize, value: u8) {
+                match bank {
+                    0 => self.$($f0).+ = (self.$($f0).+ & !$m0) | (value & $m0),
+                    1 => self.$($f1).+ = (self.$($f1).+ & !$m1) | (value & $m1),
+                    2 => self.$($f2).+ = (self.$($f2).+ & !$m2) | (value & $m2),
+                    _ => {}
+                }
+            }
+        }
+    };
+}
+pub(crate) use impl_dip_switches;
+
 /// Registers a machine with the front-end registry: builds the ROM-set factory
 /// and submits the [`registry::MachineEntry`] in one line.
 ///

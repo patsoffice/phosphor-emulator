@@ -23,8 +23,8 @@
 use phosphor_core::audio::AudioResampler;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
-    ActionRole, DipApplyTiming, DipChoice, DipOption, DipSwitchBank, DipSwitches, Direction,
-    InputConfigurable, InputControl, InputEvent, InputId, InputKind, MachineCore, SaveState,
+    ActionRole, DipApplyTiming, DipChoice, DipOption, DipSwitchBank, Direction, InputConfigurable,
+    InputControl, InputEvent, InputId, InputKind, MachineCore, SaveState,
 };
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::{AccessKind, AddressSpace16};
@@ -1219,27 +1219,7 @@ const MRDO_DIP_BANKS: &[DipSwitchBank] = &[
     },
 ];
 
-impl DipSwitches for MrdoSystem {
-    fn dip_banks(&self) -> &'static [DipSwitchBank] {
-        MRDO_DIP_BANKS
-    }
-
-    fn dip_bank_value(&self, bank: usize) -> u8 {
-        match bank {
-            0 => self.board.dsw1,
-            1 => self.board.dsw2,
-            _ => 0,
-        }
-    }
-
-    fn set_dip_bank_value(&mut self, bank: usize, value: u8) {
-        match bank {
-            0 => self.board.dsw1 = value,
-            1 => self.board.dsw2 = value,
-            _ => {}
-        }
-    }
-}
+crate::impl_dip_switches!(MrdoSystem, MRDO_DIP_BANKS, board.dsw1, board.dsw2);
 
 impl phosphor_core::core::machine::Nvram for MrdoSystem {}
 impl phosphor_core::core::machine::Profilable for MrdoSystem {}
@@ -1319,6 +1299,7 @@ inventory::submit! {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use phosphor_core::core::machine::DipSwitches;
 
     #[test]
     fn machine_is_registered() {

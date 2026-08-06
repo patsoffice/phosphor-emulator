@@ -23,8 +23,8 @@ use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::debug_trace::{DebugEvent, DebugEventKind, DebugTraceBuffer};
 use phosphor_core::core::machine::{
-    ActionRole, DipApplyTiming, DipChoice, DipOption, DipSwitchBank, DipSwitches, Direction,
-    InputConfigurable, InputControl, InputEvent, InputId, InputKind, MachineCore, Nvram, SaveState,
+    ActionRole, DipApplyTiming, DipChoice, DipOption, DipSwitchBank, Direction, InputConfigurable,
+    InputControl, InputEvent, InputId, InputKind, MachineCore, Nvram, SaveState,
 };
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::watchpoint::DebugAccessSource;
@@ -1395,21 +1395,7 @@ const MARIO_DIP_BANKS: &[DipSwitchBank] = &[DipSwitchBank {
     ],
 }];
 
-impl DipSwitches for MarioBrosSystem {
-    fn dip_banks(&self) -> &'static [DipSwitchBank] {
-        MARIO_DIP_BANKS
-    }
-
-    fn dip_bank_value(&self, bank: usize) -> u8 {
-        if bank == 0 { self.board.dsw } else { 0 }
-    }
-
-    fn set_dip_bank_value(&mut self, bank: usize, value: u8) {
-        if bank == 0 {
-            self.board.dsw = value;
-        }
-    }
-}
+crate::impl_dip_switches!(MarioBrosSystem, MARIO_DIP_BANKS, board.dsw);
 
 crate::impl_board_debug_trace!(MarioBrosSystem, board);
 
@@ -1431,6 +1417,7 @@ crate::register_machine!(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use phosphor_core::core::machine::DipSwitches;
     use phosphor_core::cpu::CpuStateTrait;
 
     /// Program the on-board Z80 DMA for a memory-to-memory copy via the I/O bus,

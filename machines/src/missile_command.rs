@@ -3,9 +3,9 @@ use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::input::{DrainPolicy, RelativeCounter};
 use phosphor_core::core::machine::{
     ActionRole, AnalogAxisKind, AudioSource, AxisSign, DefaultBinding, DipApplyTiming, DipChoice,
-    DipOption, DipSwitchBank, DipSwitches, Direction, InputConfigurable, InputControl, InputEvent,
-    InputId, InputKind, KeyId, MachineCore, MouseControl, PadAxis, PadButton, PadControl,
-    Renderable, SaveState,
+    DipOption, DipSwitchBank, Direction, InputConfigurable, InputControl, InputEvent, InputId,
+    InputKind, KeyId, MachineCore, MouseControl, PadAxis, PadButton, PadControl, Renderable,
+    SaveState,
 };
 use phosphor_core::core::save_state::{self, SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::{AccessKind, AddressSpace16};
@@ -1109,21 +1109,7 @@ const MISSILE_DIP_BANKS: &[DipSwitchBank] = &[DipSwitchBank {
     ],
 }];
 
-impl DipSwitches for MissileCommandSystem {
-    fn dip_banks(&self) -> &'static [DipSwitchBank] {
-        MISSILE_DIP_BANKS
-    }
-
-    fn dip_bank_value(&self, bank: usize) -> u8 {
-        if bank == 0 { self.dip_switches } else { 0 }
-    }
-
-    fn set_dip_bank_value(&mut self, bank: usize, value: u8) {
-        if bank == 0 {
-            self.dip_switches = value;
-        }
-    }
-}
+crate::impl_dip_switches!(MissileCommandSystem, MISSILE_DIP_BANKS, dip_switches);
 
 // ---------------------------------------------------------------------------
 // Machine registry
@@ -1139,6 +1125,7 @@ crate::register_machine!(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use phosphor_core::core::machine::DipSwitches;
     use phosphor_core::cpu::CpuStateTrait;
 
     #[test]

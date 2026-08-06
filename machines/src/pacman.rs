@@ -1,6 +1,6 @@
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
-use phosphor_core::core::machine::{DipSwitchBank, DipSwitches, MachineCore, SaveState};
+use phosphor_core::core::machine::{MachineCore, SaveState};
 use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
 use phosphor_macros::Saveable;
@@ -247,25 +247,7 @@ impl phosphor_core::core::machine::InputConfigurable for PacmanSystem {
     }
 }
 impl phosphor_core::core::machine::Profilable for PacmanSystem {}
-impl DipSwitches for PacmanSystem {
-    fn dip_banks(&self) -> &'static [DipSwitchBank] {
-        namco_pac::DIP_BANKS
-    }
-
-    fn dip_bank_value(&self, bank: usize) -> u8 {
-        if bank == 0 {
-            self.board.dip_switches
-        } else {
-            0
-        }
-    }
-
-    fn set_dip_bank_value(&mut self, bank: usize, value: u8) {
-        if bank == 0 {
-            self.board.dip_switches = value;
-        }
-    }
-}
+crate::impl_dip_switches!(PacmanSystem, namco_pac::DIP_BANKS, board.dip_switches);
 crate::impl_board_debug_trace!(PacmanSystem, board);
 
 // ---------------------------------------------------------------------------
@@ -283,6 +265,7 @@ crate::register_machine!(
 mod tests {
     use super::*;
     use crate::namco_pac::Region;
+    use phosphor_core::core::machine::{DipSwitchBank, DipSwitches};
     use phosphor_core::cpu::CpuStateTrait;
 
     #[test]

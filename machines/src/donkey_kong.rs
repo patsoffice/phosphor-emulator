@@ -1,8 +1,8 @@
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
-    ActionRole, DipApplyTiming, DipChoice, DipOption, DipSwitchBank, DipSwitches, Direction,
-    InputConfigurable, InputControl, InputEvent, InputId, InputKind, MachineCore, SaveState,
+    ActionRole, DipApplyTiming, DipChoice, DipOption, DipSwitchBank, Direction, InputConfigurable,
+    InputControl, InputEvent, InputId, InputKind, MachineCore, SaveState,
 };
 use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
@@ -813,21 +813,7 @@ const DKONG_DIP_BANKS: &[DipSwitchBank] = &[DipSwitchBank {
     ],
 }];
 
-impl DipSwitches for DkongSystem {
-    fn dip_banks(&self) -> &'static [DipSwitchBank] {
-        DKONG_DIP_BANKS
-    }
-
-    fn dip_bank_value(&self, bank: usize) -> u8 {
-        if bank == 0 { self.board.dsw0 } else { 0 }
-    }
-
-    fn set_dip_bank_value(&mut self, bank: usize, value: u8) {
-        if bank == 0 {
-            self.board.dsw0 = value;
-        }
-    }
-}
+crate::impl_dip_switches!(DkongSystem, DKONG_DIP_BANKS, board.dsw0);
 crate::impl_board_debug_trace!(DkongSystem, board);
 
 // ---------------------------------------------------------------------------
@@ -843,6 +829,7 @@ crate::register_machine!(DkongSystem, "dkong", &["dkong"], DKONG_CONTROLS);
 #[cfg(test)]
 mod tests {
     use super::*;
+    use phosphor_core::core::machine::DipSwitches;
     use phosphor_core::cpu::CpuStateTrait;
 
     #[test]

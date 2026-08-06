@@ -3,8 +3,8 @@ use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::input::{DrainPolicy, RelativeCounter};
 use phosphor_core::core::machine::{
     ActionRole, AnalogAxisKind, AudioSource, DefaultBinding, DipApplyTiming, DipChoice, DipOption,
-    DipSwitchBank, DipSwitches, InputConfigurable, InputControl, InputEvent, InputId, InputKind,
-    MachineCore, MouseControl, Nvram, Profilable, SaveState,
+    DipSwitchBank, InputConfigurable, InputControl, InputEvent, InputId, InputKind, MachineCore,
+    MouseControl, Nvram, Profilable, SaveState,
 };
 use phosphor_core::core::{AccessKind, AddressSpace16};
 use phosphor_core::core::{Bus, BusMaster};
@@ -883,27 +883,7 @@ const TEMPEST_DIP_BANKS: &[DipSwitchBank] = &[
     },
 ];
 
-impl DipSwitches for TempestSystem {
-    fn dip_banks(&self) -> &'static [DipSwitchBank] {
-        TEMPEST_DIP_BANKS
-    }
-
-    fn dip_bank_value(&self, bank: usize) -> u8 {
-        match bank {
-            0 => self.dsw1,
-            1 => self.dsw2,
-            _ => 0,
-        }
-    }
-
-    fn set_dip_bank_value(&mut self, bank: usize, value: u8) {
-        match bank {
-            0 => self.dsw1 = value,
-            1 => self.dsw2 = value,
-            _ => {}
-        }
-    }
-}
+crate::impl_dip_switches!(TempestSystem, TEMPEST_DIP_BANKS, dsw1, dsw2);
 crate::impl_board_debug_trace!(TempestSystem, board);
 
 // ---------------------------------------------------------------------------
@@ -915,6 +895,7 @@ crate::register_machine!(TempestSystem, "tempest", &["tempest"], TEMPEST_CONTROL
 #[cfg(test)]
 mod tests {
     use super::*;
+    use phosphor_core::core::machine::DipSwitches;
     use phosphor_core::cpu::CpuStateTrait;
 
     #[test]

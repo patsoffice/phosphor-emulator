@@ -1951,6 +1951,9 @@ const DOWILD_DIP_BANKS: &[DipSwitchBank] = &[
     COINAGE_BANK,
 ];
 
+// Hand-written: the bank table is per-variant, and a `self.…` expression cannot
+// be passed into `impl_dip_switches!` — macro hygiene gives the generated
+// method its own `self`, so a `self` from the call site does not resolve.
 impl DipSwitches for DocastleSystem {
     fn dip_banks(&self) -> &'static [DipSwitchBank] {
         self.variant().dip_banks()

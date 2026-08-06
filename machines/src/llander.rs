@@ -1,8 +1,8 @@
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
-    ActionRole, DipApplyTiming, DipChoice, DipOption, DipSwitchBank, DipSwitches,
-    InputConfigurable, InputControl, InputEvent, InputId, InputKind, MachineCore, SaveState,
+    ActionRole, DipApplyTiming, DipChoice, DipOption, DipSwitchBank, InputConfigurable,
+    InputControl, InputEvent, InputId, InputKind, MachineCore, SaveState,
 };
 use phosphor_core::core::{AccessKind, AddressSpace16};
 use phosphor_core::core::{Bus, BusMaster};
@@ -586,21 +586,7 @@ const LLANDER_DIP_BANKS: &[DipSwitchBank] = &[DipSwitchBank {
     ],
 }];
 
-impl DipSwitches for LunarLanderSystem {
-    fn dip_banks(&self) -> &'static [DipSwitchBank] {
-        LLANDER_DIP_BANKS
-    }
-
-    fn dip_bank_value(&self, bank: usize) -> u8 {
-        if bank == 0 { self.dip_switches } else { 0 }
-    }
-
-    fn set_dip_bank_value(&mut self, bank: usize, value: u8) {
-        if bank == 0 {
-            self.dip_switches = value;
-        }
-    }
-}
+crate::impl_dip_switches!(LunarLanderSystem, LLANDER_DIP_BANKS, dip_switches);
 crate::impl_board_debug_trace!(LunarLanderSystem, board);
 
 // ---------------------------------------------------------------------------
@@ -613,6 +599,7 @@ crate::register_machine!(LunarLanderSystem, "llander", &["llander"], LLANDER_CON
 mod tests {
     use super::*;
     use crate::atari_dvg::Region;
+    use phosphor_core::core::machine::DipSwitches;
     use phosphor_core::cpu::CpuStateTrait;
 
     #[test]

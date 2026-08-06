@@ -23,9 +23,8 @@ use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::input::{AnalogAxis, AxisRange};
 use phosphor_core::core::machine::{
     ActionRole, AnalogAxisKind, AudioSource, DefaultBinding, DipApplyTiming, DipChoice, DipOption,
-    DipSwitchBank, DipSwitches, Direction, InputConfigurable, InputControl, InputEvent, InputId,
-    InputKind, MachineCore, MouseControl, Nvram, PadAxis, PadControl, Profilable, Renderable,
-    SaveState,
+    DipSwitchBank, Direction, InputConfigurable, InputControl, InputEvent, InputId, InputKind,
+    MachineCore, MouseControl, Nvram, PadAxis, PadControl, Profilable, Renderable, SaveState,
 };
 use phosphor_core::core::save_state::{self, SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::{AccessKind, AddressSpace16};
@@ -1581,25 +1580,7 @@ const IROBOT_DIP_BANKS: &[DipSwitchBank] = &[
     },
 ];
 
-impl DipSwitches for IrobotSystem {
-    fn dip_banks(&self) -> &'static [DipSwitchBank] {
-        IROBOT_DIP_BANKS
-    }
-    fn dip_bank_value(&self, bank: usize) -> u8 {
-        match bank {
-            0 => self.dsw1,
-            1 => self.dsw2,
-            _ => 0,
-        }
-    }
-    fn set_dip_bank_value(&mut self, bank: usize, value: u8) {
-        match bank {
-            0 => self.dsw1 = value,
-            1 => self.dsw2 = value,
-            _ => {}
-        }
-    }
-}
+crate::impl_dip_switches!(IrobotSystem, IROBOT_DIP_BANKS, dsw1, dsw2);
 
 crate::impl_standalone_debug!(IrobotSystem);
 impl Profilable for IrobotSystem {}

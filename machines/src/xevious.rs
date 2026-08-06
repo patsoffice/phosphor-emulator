@@ -28,7 +28,7 @@ use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::debug::{BusDebug, DebugCpu, Debuggable};
 use phosphor_core::core::debug_trace::DebugEventKind;
 use phosphor_core::core::machine::{
-    ActionRole, AudioSource, DipApplyTiming, DipChoice, DipOption, DipSwitchBank, DipSwitches,
+    ActionRole, AudioSource, DipApplyTiming, DipChoice, DipOption, DipSwitchBank,
     InputConfigurable, InputControl, InputEvent, InputId, InputKind, MachineCore, MachineDebug,
     Renderable, SaveState,
 };
@@ -1566,31 +1566,12 @@ const XEVIOUS_DIP_BANKS: &[DipSwitchBank] = &[
     },
 ];
 
-impl DipSwitches for XeviousSystem {
-    fn dip_banks(&self) -> &'static [DipSwitchBank] {
-        XEVIOUS_DIP_BANKS
-    }
-
-    fn dip_bank_value(&self, bank: usize) -> u8 {
-        match bank {
-            0 => self.board.dswa,
-            1 => self.board.dswb,
-            _ => 0,
-        }
-    }
-
-    fn set_dip_bank_value(&mut self, bank: usize, value: u8) {
-        match bank {
-            0 => self.board.dswa = value,
-            1 => self.board.dswb = value,
-            _ => {}
-        }
-    }
-}
+crate::impl_dip_switches!(XeviousSystem, XEVIOUS_DIP_BANKS, board.dswa, board.dswb);
 
 #[cfg(test)]
 mod dip_tests {
     use super::*;
+    use phosphor_core::core::machine::DipSwitches;
 
     // Factory defaults: both banks read all-ones with the switches at their
     // shipped positions and the blaster (button 2) lines released.

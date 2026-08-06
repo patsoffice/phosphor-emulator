@@ -5,8 +5,8 @@ use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::debug::{BusDebug, DebugCpu, Debuggable};
 use phosphor_core::core::debug_trace::DebugEventKind;
 use phosphor_core::core::machine::{
-    AudioSource, DipApplyTiming, DipChoice, DipOption, DipSwitchBank, DipSwitches, MachineCore,
-    MachineDebug, Renderable, SaveState,
+    AudioSource, DipApplyTiming, DipChoice, DipOption, DipSwitchBank, MachineCore, MachineDebug,
+    Renderable, SaveState,
 };
 use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
@@ -1410,31 +1410,12 @@ const GALAGA_DIP_BANKS: &[DipSwitchBank] = &[
     },
 ];
 
-impl DipSwitches for GalagaSystem {
-    fn dip_banks(&self) -> &'static [DipSwitchBank] {
-        GALAGA_DIP_BANKS
-    }
-
-    fn dip_bank_value(&self, bank: usize) -> u8 {
-        match bank {
-            0 => self.board.dswa,
-            1 => self.board.dswb,
-            _ => 0,
-        }
-    }
-
-    fn set_dip_bank_value(&mut self, bank: usize, value: u8) {
-        match bank {
-            0 => self.board.dswa = value,
-            1 => self.board.dswb = value,
-            _ => {}
-        }
-    }
-}
+crate::impl_dip_switches!(GalagaSystem, GALAGA_DIP_BANKS, board.dswa, board.dswb);
 
 #[cfg(test)]
 mod dip_tests {
     use super::*;
+    use phosphor_core::core::machine::DipSwitches;
 
     // Galaga's DIP defaults are applied in load_roms() (which a ROM-free unit
     // test can't run — new() leaves the shared board byte at 0x99/0x24), so set

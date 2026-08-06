@@ -43,8 +43,8 @@ use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
     ActionRole, AnalogAxisKind, AudioSource, DefaultBinding, DipApplyTiming, DipChoice, DipOption,
-    DipSwitchBank, DipSwitches, Direction, InputConfigurable, InputControl, InputEvent, InputId,
-    InputKind, KeyId, MachineCore, MouseControl, Nvram, Profilable, Renderable, SaveState,
+    DipSwitchBank, Direction, InputConfigurable, InputControl, InputEvent, InputId, InputKind,
+    KeyId, MachineCore, MouseControl, Nvram, Profilable, Renderable, SaveState,
 };
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::{AccessKind, AddressSpace32};
@@ -1199,21 +1199,7 @@ const FOODF_DIP_BANKS: &[DipSwitchBank] = &[DipSwitchBank {
     ],
 }];
 
-impl DipSwitches for FoodFightSystem {
-    fn dip_banks(&self) -> &'static [DipSwitchBank] {
-        FOODF_DIP_BANKS
-    }
-
-    fn dip_bank_value(&self, bank: usize) -> u8 {
-        if bank == 0 { self.dip_switches } else { 0 }
-    }
-
-    fn set_dip_bank_value(&mut self, bank: usize, value: u8) {
-        if bank == 0 {
-            self.dip_switches = value;
-        }
-    }
-}
+crate::impl_dip_switches!(FoodFightSystem, FOODF_DIP_BANKS, dip_switches);
 crate::impl_map_debug_trace!(FoodFightSystem, map);
 
 // ---------------------------------------------------------------------------
@@ -1225,6 +1211,7 @@ crate::register_machine!(FoodFightSystem, "foodf", &["foodf"], FOODF_CONTROLS);
 #[cfg(test)]
 mod tests {
     use super::*;
+    use phosphor_core::core::machine::DipSwitches;
 
     #[test]
     fn dip_default_and_metadata() {
