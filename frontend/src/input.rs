@@ -1908,8 +1908,9 @@ mod tests {
     }
 
     #[test]
-    fn action_role_player_two_is_keyboard_only() {
-        // Player 2 shares the keyboard but not the pad: Primary → RShift, no pad.
+    fn action_role_gives_player_two_its_own_keyboard_half_and_a_slot_scoped_pad() {
+        // Player 2 takes RShift rather than LShift so two players can share a
+        // keyboard, and the same pad button as player 1 — routed to slot 2.
         const CONTROLS: &[InputControl] = &[InputControl {
             id: InputId(8),
             stable_name: "p2_fire",
@@ -1923,6 +1924,16 @@ mod tests {
             ids(set.digital_targets(PhysicalInput::Key(Scancode::RShift), None)),
             vec![8]
         );
-        assert!(ids(set.digital_targets(PhysicalInput::PadButton(Button::A), None)).is_empty());
+
+        // Pad A reaches this control from slot 2 only; slot 1 is player 1's.
+        let a = PhysicalInput::PadButton(Button::A);
+        assert_eq!(ids(set.digital_targets(a, Some(2))), vec![8]);
+        assert!(ids(set.digital_targets(a, Some(1))).is_empty());
+
+        // The keyboard half stays unscoped — a key is a key.
+        assert_eq!(
+            ids(set.digital_targets(PhysicalInput::Key(Scancode::RShift), Some(1))),
+            vec![8]
+        );
     }
 }

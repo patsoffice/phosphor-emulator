@@ -216,15 +216,18 @@ pub enum ActionRole {
 impl ActionRole {
     /// The canonical default physical bindings for this role on the given player.
     ///
-    /// Player 2 actions are keyboard-only (the single gamepad belongs to player
-    /// 1), so [`Primary`](ActionRole::Primary) yields RShift instead of
-    /// LShift + pad. Machines union these with any control-specific extras (e.g. a
+    /// Player 2's [`Primary`](ActionRole::Primary) uses RShift rather than
+    /// LShift so two players can share a keyboard; both players get the same
+    /// gamepad button, routed to their own pad by the frontend's player-slot
+    /// scoping. Machines union these with any control-specific extras (e.g. a
     /// trackball cabinet's mouse button) declared in
     /// [`InputControl::default_bindings`].
     pub fn default_bindings(self, player: Option<u8>) -> &'static [DefaultBinding] {
         use DefaultBinding::{Key, Pad};
         match (self, player) {
-            (ActionRole::Primary, Some(2)) => &[Key(KeyId::RShift)],
+            (ActionRole::Primary, Some(2)) => {
+                &[Key(KeyId::RShift), Pad(PadControl::Button(PadButton::A))]
+            }
             (ActionRole::Primary, _) => {
                 &[Key(KeyId::LShift), Pad(PadControl::Button(PadButton::A))]
             }

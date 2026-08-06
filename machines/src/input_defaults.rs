@@ -38,11 +38,29 @@ pub const P1_DOWN: &[D] = &[
     D::Pad(P::Axis(PA::LeftY, AxisSign::Positive)),
 ];
 
-// Player 2 joystick directions: WASD-style keys (no gamepad in the legacy map).
-pub const P2_LEFT: &[D] = &[D::Key(K::A)];
-pub const P2_RIGHT: &[D] = &[D::Key(K::D)];
-pub const P2_UP: &[D] = &[D::Key(K::W)];
-pub const P2_DOWN: &[D] = &[D::Key(K::S)];
+// Player 2 joystick directions: WASD-style keys, plus the same pad controls
+// player 1 gets. The frontend scopes pad bindings to the owning player's slot,
+// so these reach player 2's controller rather than fighting player 1's.
+pub const P2_LEFT: &[D] = &[
+    D::Key(K::A),
+    D::Pad(P::Button(PB::DPadLeft)),
+    D::Pad(P::Axis(PA::LeftX, AxisSign::Negative)),
+];
+pub const P2_RIGHT: &[D] = &[
+    D::Key(K::D),
+    D::Pad(P::Button(PB::DPadRight)),
+    D::Pad(P::Axis(PA::LeftX, AxisSign::Positive)),
+];
+pub const P2_UP: &[D] = &[
+    D::Key(K::W),
+    D::Pad(P::Button(PB::DPadUp)),
+    D::Pad(P::Axis(PA::LeftY, AxisSign::Negative)),
+];
+pub const P2_DOWN: &[D] = &[
+    D::Key(K::S),
+    D::Pad(P::Button(PB::DPadDown)),
+    D::Pad(P::Axis(PA::LeftY, AxisSign::Positive)),
+];
 
 // System buttons.
 pub const COIN: &[D] = &[D::Key(K::Num5), D::Pad(P::Button(PB::Back))];
