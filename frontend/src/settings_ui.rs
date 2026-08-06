@@ -50,6 +50,12 @@ pub struct SettingsState {
     /// Analog tuning edits recorded this frame, applied and cleared the same
     /// way as `pending_dip_changes`.
     pub pending_tuning: Vec<PendingTuning>,
+    /// Host action awaiting a captured key (hotkey rebind in progress).
+    pub capturing_host: Option<crate::host_keys::HostAction>,
+    /// Hotkey rebinds recorded this frame.
+    pub pending_host_rebind: Vec<(crate::host_keys::HostAction, sdl2::keyboard::Scancode)>,
+    /// Set when the user asks to restore factory hotkeys.
+    pub host_reset_requested: bool,
 }
 
 /// Draw the input-rebinding side panel.
@@ -61,6 +67,7 @@ pub fn draw_input_panel(
     ctx: &egui::Context,
     controls: &[InputControl],
     bindings: &BindingSet,
+    host: &crate::host_keys::HostBindings,
     state: &mut SettingsState,
 ) {
     egui::SidePanel::right("input_settings_panel")
@@ -153,6 +160,35 @@ pub fn draw_input_panel(
                                     }
                                 }
                             });
+                            ui.end_row();
+                        }
+                    });
+
+                ui.separator();
+                ui.heading("Frontend hotkeys");
+                ui.label("Emulator actions. Rebinding one frees its old key for the game.");
+                if ui.button("Reset hotkeys to defaults").clicked() {
+                    state.host_reset_requested = true;
+                    state.capturing_host = None;
+                }
+                egui::Grid::new("host_keys_grid")
+                    .num_columns(2)
+                    .striped(true)
+                    .show(ui, |ui| {
+                        for (action, _) in crate::host_keys::DEFAULTS {
+                            ui.label(action.label());
+                            let capturing = state.capturing_host == Some(*action);
+                            let text = if capturing {
+                                "press key…".to_string()
+                            } else {
+                                match host.key_for(*action) {
+                                    Some(sc) => format!("{sc:?}"),
+                                    None => "(unbound)".to_string(),
+                                }
+                            };
+                            if ui.button(text).clicked() {
+                                state.capturing_host = if capturing { None } else { Some(*action) };
+                            }
                             ui.end_row();
                         }
                     });

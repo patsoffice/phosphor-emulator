@@ -10,6 +10,7 @@ use sdl2::keyboard::{Mod, Scancode};
 
 use crate::console_ui::{self, ConsoleState};
 use crate::debug_ui::{self, DebugState, RunMode};
+use crate::host_keys::{HostAction, HostBindings};
 use crate::input::{self, AxisDir, BindingSet, MouseAxis, PhysicalInput};
 use crate::profile::ProfileState;
 use crate::settings_ui::{self, SettingsState};
@@ -270,6 +271,26 @@ pub fn run(
     // Latched pad-axis state, so a stick resting inside its deadzone stops
     // re-asserting "released" over whatever the player is holding.
     let mut dispatch_state = input::DispatchState::default();
+    let mut host_bindings: HostBindings = state.host_bindings.clone();
+
+    // Warn about machine controls a hotkey shadows. The frontend arms match
+    // first, so without this the control is simply dead with nothing logged.
+    {
+        let machine_keys: Vec<Scancode> = bindings
+            .all_physical()
+            .filter_map(|p| match p {
+                PhysicalInput::Key(sc) => Some(sc),
+                _ => None,
+            })
+            .collect();
+        for (action, key) in crate::host_keys::conflicts(&host_bindings, &machine_keys) {
+            eprintln!(
+                "Note: {key:?} is the '{}' hotkey, so {machine_name} cannot see it. \
+                 Rebind either side in the settings panel (F12).",
+                action.label()
+            );
+        }
+    }
 
     // Detect vector display machines and create GL renderer.
     let mut vector_renderer = machine
@@ -389,6 +410,31 @@ pub fn run(
             // Forward every event to egui first
             video.process_event(event.clone());
 
+            // Hotkey capture: claim the next key press for the host action the
+            // settings panel is waiting on. Must precede the hotkey arms, or
+            // pressing e.g. F5 would reset instead of binding.
+            if let Some(action) = settings_state.capturing_host {
+                match &event {
+                    Event::KeyDown {
+                        scancode: Some(Scancode::Escape),
+                        ..
+                    } => {
+                        settings_state.capturing_host = None;
+                        continue;
+                    }
+                    Event::KeyDown {
+                        scancode: Some(sc),
+                        repeat: false,
+                        ..
+                    } => {
+                        settings_state.pending_host_rebind.push((action, *sc));
+                        settings_state.capturing_host = None;
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
+
             // Rebind capture: while awaiting an input for a control, consume the
             // next bindable press (Esc cancels) instead of routing it to the game.
             if let Some(target) = settings_state.capturing {
@@ -465,16 +511,17 @@ pub fn run(
                 Event::Quit { .. } => break 'main,
 
                 Event::KeyDown {
-                    scancode: Some(Scancode::Escape),
-                    ..
-                } => break 'main,
+                    scancode: Some(sc), ..
+                } if host_bindings.action_for(sc) == Some(HostAction::Quit) => break 'main,
 
                 // F1: Toggle debug mode
                 Event::KeyDown {
-                    scancode: Some(Scancode::F1),
+                    scancode: Some(sc),
                     repeat: false,
                     ..
-                } if has_debug => {
+                } if has_debug
+                    && host_bindings.action_for(sc) == Some(HostAction::ToggleDebugPanel) =>
+                {
                     debug_state.active = !debug_state.active;
                     if debug_state.active {
                         if let Some(bus) = machine.debug_bus() {
@@ -498,38 +545,49 @@ pub fn run(
 
                 // 7: Step instruction (debug + paused)
                 Event::KeyDown {
-                    scancode: Some(Scancode::Num7),
+                    scancode: Some(sc),
                     repeat: false,
                     ..
-                } if debug_state.active && debug_state.run_mode == RunMode::Paused => {
+                } if debug_state.active
+                    && debug_state.run_mode == RunMode::Paused
+                    && host_bindings.action_for(sc) == Some(HostAction::StepInstruction) =>
+                {
                     debug_state.run_mode = RunMode::StepInstruction;
                 }
 
                 // 8: Step cycle (debug + paused)
                 Event::KeyDown {
-                    scancode: Some(Scancode::Num8),
+                    scancode: Some(sc),
                     repeat: false,
                     ..
-                } if debug_state.active && debug_state.run_mode == RunMode::Paused => {
+                } if debug_state.active
+                    && debug_state.run_mode == RunMode::Paused
+                    && host_bindings.action_for(sc) == Some(HostAction::StepCycle) =>
+                {
                     debug_state.run_mode = RunMode::StepCycle;
                 }
 
                 // 9: Step frame — run one frame, pause at the next frame start
                 // (debug + paused)
                 Event::KeyDown {
-                    scancode: Some(Scancode::Num9),
+                    scancode: Some(sc),
                     repeat: false,
                     ..
-                } if debug_state.active && debug_state.run_mode == RunMode::Paused => {
+                } if debug_state.active
+                    && debug_state.run_mode == RunMode::Paused
+                    && host_bindings.action_for(sc) == Some(HostAction::StepFrame) =>
+                {
                     debug_state.run_mode = RunMode::StepFrame;
                 }
 
                 // 0: Toggle run <-> pause (running -> paused, otherwise continue)
                 Event::KeyDown {
-                    scancode: Some(Scancode::Num0),
+                    scancode: Some(sc),
                     repeat: false,
                     ..
-                } if debug_state.active => {
+                } if debug_state.active
+                    && host_bindings.action_for(sc) == Some(HostAction::ToggleDebugPause) =>
+                {
                     if debug_state.run_mode == RunMode::Running {
                         debug_state.run_mode = RunMode::Paused;
                     } else {
@@ -539,10 +597,10 @@ pub fn run(
                 }
 
                 Event::KeyDown {
-                    scancode: Some(Scancode::F5),
+                    scancode: Some(sc),
                     repeat: false,
                     ..
-                } => {
+                } if host_bindings.action_for(sc) == Some(HostAction::Reset) => {
                     machine.reset();
                     debug_state.frame_count = 0;
                     // reset() clears the machine's port bits, but a key held
@@ -553,10 +611,10 @@ pub fn run(
 
                 // Quick Save (F6)
                 Event::KeyDown {
-                    scancode: Some(Scancode::F6),
+                    scancode: Some(sc),
                     repeat: false,
                     ..
-                } => {
+                } if host_bindings.action_for(sc) == Some(HostAction::QuickSave) => {
                     if let Some(data) = machine.save_state() {
                         match std::fs::write(save_path, &data) {
                             Ok(()) => eprintln!("Save state written ({} bytes)", data.len()),
@@ -569,29 +627,31 @@ pub fn run(
 
                 // Quick Load (F7)
                 Event::KeyDown {
-                    scancode: Some(Scancode::F7),
+                    scancode: Some(sc),
                     repeat: false,
                     ..
-                } => match std::fs::read(save_path) {
-                    Ok(data) => match machine.load_state(&data) {
-                        Ok(()) => {
-                            eprintln!("Save state loaded");
-                            // Port bits live inside the snapshot, so the
-                            // restored state can contradict what is physically
-                            // held right now.
-                            needs_resync = true;
-                        }
-                        Err(e) => eprintln!("Load state failed: {e}"),
-                    },
-                    Err(e) => eprintln!("No save file found: {e}"),
-                },
+                } if host_bindings.action_for(sc) == Some(HostAction::QuickLoad) => {
+                    match std::fs::read(save_path) {
+                        Ok(data) => match machine.load_state(&data) {
+                            Ok(()) => {
+                                eprintln!("Save state loaded");
+                                // Port bits live inside the snapshot, so the
+                                // restored state can contradict what is physically
+                                // held right now.
+                                needs_resync = true;
+                            }
+                            Err(e) => eprintln!("Load state failed: {e}"),
+                        },
+                        Err(e) => eprintln!("No save file found: {e}"),
+                    }
+                }
 
                 // F8: Toggle profiler
                 Event::KeyDown {
-                    scancode: Some(Scancode::F8),
+                    scancode: Some(sc),
                     repeat: false,
                     ..
-                } => {
+                } if host_bindings.action_for(sc) == Some(HostAction::ToggleProfiler) => {
                     if profile_state.active {
                         machine.set_profiling(false);
                         profile_state.stop();
@@ -613,10 +673,12 @@ pub fn run(
 
                 // Tab: Toggle input settings panel (machines with typed controls)
                 Event::KeyDown {
-                    scancode: Some(Scancode::Tab),
+                    scancode: Some(sc),
                     repeat: false,
                     ..
-                } if has_typed_controls => {
+                } if has_typed_controls
+                    && host_bindings.action_for(sc) == Some(HostAction::ToggleSettingsPanel) =>
+                {
                     settings_state.active = !settings_state.active;
                     settings_state.capturing = None;
                     video.resize_window(
@@ -653,10 +715,12 @@ pub fn run(
 
                 // Backtick (`): Toggle DIP switch panel (machines with DIP banks)
                 Event::KeyDown {
-                    scancode: Some(Scancode::Grave),
+                    scancode: Some(sc),
                     repeat: false,
                     ..
-                } if has_dip => {
+                } if has_dip
+                    && host_bindings.action_for(sc) == Some(HostAction::ToggleDipPanel) =>
+                {
                     settings_state.dip_active = !settings_state.dip_active;
                     video.resize_window(
                         win_w * scale
@@ -671,10 +735,10 @@ pub fn run(
                 }
 
                 Event::KeyDown {
-                    scancode: Some(Scancode::F9),
+                    scancode: Some(sc),
                     repeat: false,
                     ..
-                } => {
+                } if host_bindings.action_for(sc) == Some(HostAction::ToggleThrottle) => {
                     throttle = !throttle;
                     if throttle {
                         next_frame_time = Instant::now() + frame_duration;
@@ -682,10 +746,10 @@ pub fn run(
                 }
 
                 Event::KeyDown {
-                    scancode: Some(Scancode::F10),
+                    scancode: Some(sc),
                     repeat: false,
                     ..
-                } => {
+                } if host_bindings.action_for(sc) == Some(HostAction::ToggleFps) => {
                     show_fps = !show_fps;
                     fps_smoothed = machine.frame_rate_hz();
                     fps_last_instant = Instant::now();
@@ -693,10 +757,10 @@ pub fn run(
 
                 // Mouse grab toggle (F11)
                 Event::KeyDown {
-                    scancode: Some(Scancode::F11),
+                    scancode: Some(sc),
                     repeat: false,
                     ..
-                } => {
+                } if host_bindings.action_for(sc) == Some(HostAction::ToggleMouseGrab) => {
                     mouse_grabbed = !mouse_grabbed;
                     sdl_context.mouse().set_relative_mouse_mode(mouse_grabbed);
                     // Ungrabbing stops mouse events reaching the game, so a
@@ -708,10 +772,10 @@ pub fn run(
 
                 // P: Toggle global pause (frontend-level control, not a game input)
                 Event::KeyDown {
-                    scancode: Some(Scancode::P),
+                    scancode: Some(sc),
                     repeat: false,
                     ..
-                } => {
+                } if host_bindings.action_for(sc) == Some(HostAction::TogglePause) => {
                     debug_state.global_paused = !debug_state.global_paused;
                     eprintln!(
                         "{}",
@@ -725,10 +789,10 @@ pub fn run(
 
                 // Screenshot (F12)
                 Event::KeyDown {
-                    scancode: Some(Scancode::F12),
+                    scancode: Some(sc),
                     repeat: false,
                     ..
-                } => {
+                } if host_bindings.action_for(sc) == Some(HostAction::Screenshot) => {
                     machine.render_frame(&mut framebuffer);
                     match crate::screenshot::save_screenshot(
                         &framebuffer,
@@ -960,6 +1024,7 @@ pub fn run(
                     let show_settings = settings_state.active;
                     let controls = machine.input_controls();
                     let bindings_ref: &BindingSet = bindings;
+                    let host_bindings_ref = &host_bindings;
                     // Snapshot DIP metadata + live bank bytes before the egui
                     // closure (which must not hold `&mut machine`).
                     let show_dip = settings_state.dip_active;
@@ -979,6 +1044,7 @@ pub fn run(
                                 ctx,
                                 controls,
                                 bindings_ref,
+                                host_bindings_ref,
                                 &mut settings_state,
                             );
                         }
@@ -1017,6 +1083,14 @@ pub fn run(
                     // Apply DIP edits recorded by the panel this frame.
                     for change in settings_state.pending_dip_changes.drain(..) {
                         machine.set_dip_option(change.bank, change.option, change.value);
+                    }
+                    // Hotkey rebinds and resets recorded by the panel.
+                    if settings_state.host_reset_requested {
+                        host_bindings.reset();
+                        settings_state.host_reset_requested = false;
+                    }
+                    for (action, sc) in settings_state.pending_host_rebind.drain(..) {
+                        host_bindings.rebind(action, sc);
                     }
                     // Same for analog sensitivity / deadzone edits.
                     for change in settings_state.pending_tuning.drain(..) {
@@ -1106,6 +1180,11 @@ pub fn run(
         let (wx, wy) = video.window_position();
         state.window_x = Some(wx);
         state.window_y = Some(wy);
+    }
+    // Hotkey overrides are global, so they persist here rather than in the
+    // per-machine section main.rs writes.
+    {
+        state.host_bindings = host_bindings.clone();
     }
 
     // Flush profiler trace if still recording

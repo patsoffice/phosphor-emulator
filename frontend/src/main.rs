@@ -8,6 +8,7 @@ mod debug_ui;
 mod emulator;
 mod gfxview;
 mod headless;
+mod host_keys;
 mod input;
 mod overlay;
 mod profile;

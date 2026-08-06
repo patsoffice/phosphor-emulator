@@ -68,6 +68,13 @@ impl MachineSettings {
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct State {
+    /// Frontend hotkey overrides. Global rather than per machine: these are
+    /// properties of the emulator, not the cabinet.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::host_keys::HostBindings::is_empty"
+    )]
+    pub host_bindings: crate::host_keys::HostBindings,
     pub window_x: Option<i32>,
     pub window_y: Option<i32>,
     /// Per-machine settings, keyed by the machine's registry/CLI name. Absent

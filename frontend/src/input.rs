@@ -396,6 +396,11 @@ impl BindingSet {
         }
     }
 
+    /// Every physical input bound to anything, for host-hotkey conflict checks.
+    pub fn all_physical(&self) -> impl Iterator<Item = PhysicalInput> + '_ {
+        self.bindings.iter().map(|b| b.physical)
+    }
+
     /// Physical inputs currently bound to a control (for the rebinding UI).
     pub fn physical_for(&self, target: InputId) -> impl Iterator<Item = PhysicalInput> + '_ {
         self.bindings
