@@ -39,6 +39,19 @@ crate::impl_default_frontend_capabilities!(PacmanSystem);
 
 Machines with battery-backed RAM write `impl Nvram` by hand (plus `impl Profilable for X {}`); machines with sub-span profiling write `impl Profilable` by hand (see `qbert.rs`).
 
+### DIP switches
+
+The `DipSwitchBank` table is per-game hardware data and stays hand-written; the accessor triple around it is generated:
+
+```rust
+crate::impl_dip_switches!(DkongSystem, DKONG_DIP_BANKS, board.dsw0);              // one bank
+crate::impl_dip_switches!(DigDugSystem, DIGDUG_DIP_BANKS, board.dswa, board.dswb); // two
+// DIPs sharing an input port with live signals: reads mask, writes merge
+crate::impl_dip_switches!(GalaxianSystem, GALAXIAN_DIP_BANKS, board.in0 & DIP0_MASK, board.in1 & DIP1_MASK, board.in2 & DIP2_MASK);
+```
+
+Anything else keeps a hand-written impl — a side effect on write (`quantum.rs`), a port looked up per hardware config (`pisces.rs`), a per-variant bank table (`docastle.rs`). Note that a `self.…` expression cannot be passed as a macro argument: the generated method's `self` is a different hygiene context from the call site's.
+
 ### Input
 
 Input is fully typed (the old name-matched `InputReceiver` / `InputButton` model is gone). Each machine defines a `&'static [InputControl]` table — stable name, label, `InputKind`, owning player, and `default_bindings` — and implements `InputConfigurable::handle_input(InputEvent)` to apply events to its hardware input state (port bits, trackball accumulators, etc.). Reuse the shared default-binding constants in `input_defaults.rs` (P1/P2 directions, coin/start, fire, …) so defaults stay consistent; give analog axes `InputId`s distinct from the digital controls (a single `InputId` namespace). The frontend builds key/pad/mouse bindings from `default_bindings`; nothing keys off display text.
