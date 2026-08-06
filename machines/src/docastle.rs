@@ -50,7 +50,6 @@ use phosphor_macros::{BusDebug, MemoryRegion};
 use crate::disasm_registry::{DisasmCpu, DisasmRegion};
 use crate::gfx_registry::GfxRegion;
 use crate::input_defaults as ind;
-use crate::registry::MachineEntry;
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
 use crate::set_bit_active_low;
 
@@ -1978,21 +1977,24 @@ impl DipSwitches for DocastleSystem {
 // Registry
 // ---------------------------------------------------------------------------
 
-fn create_variant(
-    variant: DocastleVariant,
-    rom_set: &RomSet,
-) -> Result<Box<dyn phosphor_core::core::machine::FrontendMachine>, RomLoadError> {
-    let mut sys = DocastleSystem::new(variant);
-    sys.load_rom_set(rom_set)?;
-    Ok(Box::new(sys))
-}
-
-inventory::submit! {
-MachineEntry::new("docastle", &["docastle"], |rs| create_variant(DocastleVariant::Docastle, rs), DOCASTLE_CONTROLS) }
-inventory::submit! {
-MachineEntry::new("dorunrun", &["dorunrun"], |rs| create_variant(DocastleVariant::Dorunrun, rs), DOCASTLE_CONTROLS) }
-inventory::submit! {
-MachineEntry::new("dowild", &["dowild"], |rs| create_variant(DocastleVariant::Dowild, rs), DOCASTLE_CONTROLS) }
+crate::register_machine!(
+    new = DocastleSystem::new(DocastleVariant::Docastle),
+    "docastle",
+    &["docastle"],
+    DOCASTLE_CONTROLS
+);
+crate::register_machine!(
+    new = DocastleSystem::new(DocastleVariant::Dorunrun),
+    "dorunrun",
+    &["dorunrun"],
+    DOCASTLE_CONTROLS
+);
+crate::register_machine!(
+    new = DocastleSystem::new(DocastleVariant::Dowild),
+    "dowild",
+    &["dowild"],
+    DOCASTLE_CONTROLS
+);
 
 inventory::submit! {
     DisasmRegion {

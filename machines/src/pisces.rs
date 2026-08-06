@@ -18,7 +18,6 @@ use phosphor_core::cpu::Cpu;
 
 use crate::galaxian::{GALAXIAN_CONTROLS, GalaxianBoard, TIMING};
 use crate::galaxian_video::GfxBankMode;
-use crate::registry::MachineEntry;
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
 
 // ---------------------------------------------------------------------------
@@ -603,27 +602,18 @@ crate::impl_board_debug_trace!(PiscesSystem, board);
 // Machine registry
 // ---------------------------------------------------------------------------
 
-fn create_pisces(
-    rom_set: &RomSet,
-) -> Result<Box<dyn phosphor_core::core::machine::FrontendMachine>, RomLoadError> {
-    let mut sys = PiscesSystem::new(&PISCES);
-    sys.load_rom_set(rom_set)?;
-    Ok(Box::new(sys))
-}
-
-fn create_uniwars(
-    rom_set: &RomSet,
-) -> Result<Box<dyn phosphor_core::core::machine::FrontendMachine>, RomLoadError> {
-    let mut sys = PiscesSystem::new(&UNIWARS);
-    sys.load_rom_set(rom_set)?;
-    Ok(Box::new(sys))
-}
-
-inventory::submit! {
-MachineEntry::new("pisces", &["pisces"], create_pisces, GALAXIAN_CONTROLS) }
-
-inventory::submit! {
-MachineEntry::new("uniwars", &["uniwars"], create_uniwars, GALAXIAN_CONTROLS) }
+crate::register_machine!(
+    new = PiscesSystem::new(&PISCES),
+    "pisces",
+    &["pisces"],
+    GALAXIAN_CONTROLS
+);
+crate::register_machine!(
+    new = PiscesSystem::new(&UNIWARS),
+    "uniwars",
+    &["uniwars"],
+    GALAXIAN_CONTROLS
+);
 
 // ---------------------------------------------------------------------------
 // Tests

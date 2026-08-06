@@ -18,7 +18,6 @@ use phosphor_macros::{MemoryRegion, Saveable};
 
 use crate::namco_galaga::{self, GALAGA_SPRITE_LAYOUT, NamcoGalagaBoard};
 use crate::namco_pac::PACMAN_TILE_LAYOUT;
-use crate::registry::MachineEntry;
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
 
 // ---------------------------------------------------------------------------
@@ -1629,28 +1628,13 @@ const ALL_CONFIGS: &[&DigDugRomConfig] = &[
     &DIGDUGAT1_CONFIG,
 ];
 
-fn create_machine(
-    rom_set: &RomSet,
-) -> Result<Box<dyn phosphor_core::core::machine::FrontendMachine>, RomLoadError> {
-    let mut last_err = None;
-    for config in ALL_CONFIGS {
-        let mut sys = DigDugSystem::new();
-        match sys.load_roms(rom_set, config) {
-            Ok(()) => return Ok(Box::new(sys)),
-            Err(e) => last_err = Some(e),
-        }
-    }
-    Err(last_err.unwrap())
-}
-
-inventory::submit! {
-    MachineEntry::new(
-        "digdug",
-        &["digdug", "digdug1", "digdugat", "digdugat1"],
-        create_machine,
-        namco_galaga::NAMCO_GALAGA_CONTROLS,
-    )
-}
+crate::register_machine!(
+    DigDugSystem,
+    "digdug",
+    &["digdug", "digdug1", "digdugat", "digdugat1"],
+    namco_galaga::NAMCO_GALAGA_CONTROLS,
+    configs = ALL_CONFIGS
+);
 
 #[cfg(test)]
 mod tests {

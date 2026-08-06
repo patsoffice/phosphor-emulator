@@ -15,7 +15,6 @@ use phosphor_core::gfx::decode::{GfxLayout, decode_gfx};
 use phosphor_macros::{MemoryRegion, Saveable};
 
 use crate::namco_galaga::{self, GALAGA_SPRITE_LAYOUT, NamcoGalagaBoard};
-use crate::registry::MachineEntry;
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
 
 // ---------------------------------------------------------------------------
@@ -1500,25 +1499,10 @@ crate::impl_board_debug_trace!(GalagaSystem, board);
 
 const ALL_CONFIGS: &[&GalagaRomConfig] = &[&GALAGA_CONFIG, &GALAGAO_CONFIG, &GALAGAMW_CONFIG];
 
-fn create_machine(
-    rom_set: &RomSet,
-) -> Result<Box<dyn phosphor_core::core::machine::FrontendMachine>, RomLoadError> {
-    let mut last_err = None;
-    for config in ALL_CONFIGS {
-        let mut sys = GalagaSystem::new();
-        match sys.load_roms(rom_set, config) {
-            Ok(()) => return Ok(Box::new(sys)),
-            Err(e) => last_err = Some(e),
-        }
-    }
-    Err(last_err.unwrap())
-}
-
-inventory::submit! {
-    MachineEntry::new(
-        "galaga",
-        &["galaga", "galagao", "galagamw"],
-        create_machine,
-        namco_galaga::NAMCO_GALAGA_CONTROLS,
-    )
-}
+crate::register_machine!(
+    GalagaSystem,
+    "galaga",
+    &["galaga", "galagao", "galagamw"],
+    namco_galaga::NAMCO_GALAGA_CONTROLS,
+    configs = ALL_CONFIGS
+);
