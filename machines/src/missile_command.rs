@@ -888,6 +888,14 @@ impl InputConfigurable for MissileCommandSystem {
             InputEvent::Absolute { .. } => {}
         }
     }
+
+    /// Also clears conditioned analog state: the digital releases above cannot
+    /// reach accumulated motion or a held deflection.
+    fn release_all_inputs(&mut self) {
+        phosphor_core::core::machine::release_all_controls(self);
+        self.trackball_x.release_all();
+        self.trackball_y.release_all();
+    }
 }
 
 crate::impl_standalone_debug!(MissileCommandSystem);

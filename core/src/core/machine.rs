@@ -417,12 +417,22 @@ pub trait InputConfigurable {
     /// digital direction controls. Machines holding conditioned analog state
     /// (accumulated trackball motion) override this to clear it as well.
     fn release_all_inputs(&mut self) {
-        for control in self.input_controls() {
-            self.handle_input(InputEvent::Button {
-                id: control.id,
-                pressed: false,
-            });
-        }
+        release_all_controls(self);
+    }
+}
+
+/// Send a release for every control a machine declares.
+///
+/// A free function rather than only the trait default, so a machine that
+/// overrides [`InputConfigurable::release_all_inputs`] to also clear conditioned
+/// analog state can still get the digital half without restating the loop —
+/// Rust has no way to call a trait's default body from an override.
+pub fn release_all_controls<M: InputConfigurable + ?Sized>(machine: &mut M) {
+    for control in machine.input_controls() {
+        machine.handle_input(InputEvent::Button {
+            id: control.id,
+            pressed: false,
+        });
     }
 }
 

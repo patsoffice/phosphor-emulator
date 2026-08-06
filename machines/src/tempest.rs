@@ -596,6 +596,13 @@ impl InputConfigurable for TempestSystem {
             InputEvent::Absolute { .. } => {}
         }
     }
+
+    /// Also clears conditioned analog state: the digital releases above cannot
+    /// reach accumulated motion or a held deflection.
+    fn release_all_inputs(&mut self) {
+        phosphor_core::core::machine::release_all_controls(self);
+        self.spinner.release_all();
+    }
 }
 
 crate::impl_board_debug!(TempestSystem, board, atari_avg::TIMING, debug_tick_pre);

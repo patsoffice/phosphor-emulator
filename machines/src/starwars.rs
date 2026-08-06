@@ -1591,6 +1591,16 @@ impl InputConfigurable for StarWarsSystem {
             }
         }
     }
+
+    /// Also clears the conditioned yoke: the digital releases above cannot
+    /// reach a deflection the mouse or pad set.
+    fn release_all_inputs(&mut self) {
+        phosphor_core::core::machine::release_all_controls(self);
+        for axis in &mut self.board.stick {
+            axis.release_all();
+        }
+        self.board.push_stick();
+    }
 }
 
 // Operator DIP banks are exposed in a follow-on step; the board holds the

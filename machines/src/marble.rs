@@ -684,6 +684,15 @@ impl InputConfigurable for MarbleSystem {
             InputEvent::Absolute { .. } => {}
         }
     }
+
+    /// Also clears conditioned analog state: the digital releases above cannot
+    /// reach accumulated motion or a held deflection.
+    fn release_all_inputs(&mut self) {
+        phosphor_core::core::machine::release_all_controls(self);
+        for c in &mut self.trackball {
+            c.release_all();
+        }
+    }
 }
 
 impl SaveState for MarbleSystem {
