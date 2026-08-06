@@ -7,6 +7,7 @@ Arcade and system board implementations. Each machine implements the `Bus` trait
 - Implement the `Bus` trait for your system struct
 - Use the borrow-splitting `unsafe` pattern for `tick()` (CPU and bus access disjoint memory)
 - ROM loading goes through `rom_loader.rs` utilities (ZIP extraction is handled by the frontend's `rom_path.rs`)
+- Register it with one `crate::register_machine!(JoustSystem, "joust", &["joust"], JOUST_CONTROLS);` — wrapper type, CLI name, ROM set names, control table. The macro emits the factory and the `inventory::submit!`; don't hand-write either. Two extra arms: `new = Type::new(arg)` when the constructor takes a hardware variant, and `configs = ALL_CONFIGS` when several ROM revisions are tried in turn. A factory that does anything more (a reset after load, a non-standard loader) stays hand-written — see `starwars.rs` and `quantum.rs`
 - Video rendering is per-scanline during `run_frame()`
 - Optional: to make the machine's code ROMs disassemblable by the `disasm` tool, add one `inventory::submit! { DisasmRegion { ... } }` per code region (see `disasm_registry.rs` and the entries in `mario_bros.rs`) — maps a region name to its CPU, origin, and a `RomRegion` loader. Purely additive; doesn't touch `MachineEntry`/`FrontendMachine`.
 
