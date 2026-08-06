@@ -24,7 +24,6 @@ use phosphor_core::cpu::state::M68000State;
 
 use crate::atari_system1::{self, AtariSystem1Board};
 use crate::disasm_registry::{DisasmCpu, DisasmRegion};
-use crate::registry::MachineEntry;
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
 use crate::set_bit_active_low;
 
@@ -744,16 +743,7 @@ impl phosphor_core::core::machine::DipSwitches for MarbleSystem {}
 // Registry + disassembly
 // ---------------------------------------------------------------------------
 
-fn create_machine(
-    rom_set: &RomSet,
-) -> Result<Box<dyn phosphor_core::core::machine::FrontendMachine>, RomLoadError> {
-    let mut sys = MarbleSystem::new();
-    sys.load_rom_set(rom_set)?;
-    Ok(Box::new(sys))
-}
-
-inventory::submit! {
-MachineEntry::new("marble", &["marble"], create_machine, MARBLE_CONTROLS) }
+crate::register_machine!(MarbleSystem, "marble", &["marble"], MARBLE_CONTROLS);
 
 // Disassemblable code regions for the standalone `disasm` tool.
 // `main`  — the MC68010 program image (000000-07FFFF, de-interleaved).

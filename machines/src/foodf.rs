@@ -57,7 +57,6 @@ use phosphor_core::gfx::decode::{GfxCache, GfxLayout, decode_gfx};
 use phosphor_core::gfx::{combine_weights, compute_resistor_weights};
 use phosphor_macros::{BusDebug, MemoryRegion};
 
-use crate::registry::MachineEntry;
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
 use crate::set_bit_active_low;
 
@@ -1221,16 +1220,7 @@ crate::impl_map_debug_trace!(FoodFightSystem, map);
 // Registry
 // ---------------------------------------------------------------------------
 
-fn create_machine(
-    rom_set: &RomSet,
-) -> Result<Box<dyn phosphor_core::core::machine::FrontendMachine>, RomLoadError> {
-    let mut sys = FoodFightSystem::new();
-    sys.load_rom_set(rom_set)?;
-    Ok(Box::new(sys))
-}
-
-inventory::submit! {
-MachineEntry::new("foodf", &["foodf"], create_machine, FOODF_CONTROLS) }
+crate::register_machine!(FoodFightSystem, "foodf", &["foodf"], FOODF_CONTROLS);
 
 #[cfg(test)]
 mod tests {

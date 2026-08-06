@@ -2,8 +2,8 @@ use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
     ActionRole, AudioSource, DipApplyTiming, DipChoice, DipOption, DipSwitchBank, DipSwitches,
-    FrontendMachine, InputConfigurable, InputControl, InputEvent, InputId, InputKind, MachineCore,
-    Nvram, Profilable, SaveState,
+    InputConfigurable, InputControl, InputEvent, InputId, InputKind, MachineCore, Nvram,
+    Profilable, SaveState,
 };
 use phosphor_core::core::{AccessKind, AddressSpace16};
 use phosphor_core::core::{Bus, BusMaster};
@@ -13,7 +13,6 @@ use phosphor_core::device::pokey::Pokey;
 use phosphor_macros::Saveable;
 
 use crate::atari_dvg::{self, AtariDvgBoard, Region};
-use crate::registry::MachineEntry;
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
 use crate::set_bit_active_high;
 
@@ -619,14 +618,12 @@ crate::impl_board_debug_trace!(AsteroidsDeluxeSystem, board);
 // Machine registry
 // ---------------------------------------------------------------------------
 
-fn create_machine(rom_set: &RomSet) -> Result<Box<dyn FrontendMachine>, RomLoadError> {
-    let mut sys = AsteroidsDeluxeSystem::new();
-    sys.load_rom_set(rom_set)?;
-    Ok(Box::new(sys))
-}
-
-inventory::submit! {
-MachineEntry::new("astdelux", &["astdelux"], create_machine, ASTDELUX_CONTROLS) }
+crate::register_machine!(
+    AsteroidsDeluxeSystem,
+    "astdelux",
+    &["astdelux"],
+    ASTDELUX_CONTROLS
+);
 
 #[cfg(test)]
 mod tests {

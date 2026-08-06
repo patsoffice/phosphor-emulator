@@ -8,7 +8,6 @@ use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
 use phosphor_macros::Saveable;
 
-use crate::registry::MachineEntry;
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
 use crate::set_bit_active_high;
 use crate::tkg04::{self, MainRegion, SoundRegion, Tkg04Board};
@@ -668,13 +667,9 @@ fn load_parent_program_rom(rom_set: &RomSet) -> Result<Vec<u8>, RomLoadError> {
 // Machine registry
 // ---------------------------------------------------------------------------
 
-fn create_machine(
-    rom_set: &RomSet,
-) -> Result<Box<dyn phosphor_core::core::machine::FrontendMachine>, RomLoadError> {
-    let mut sys = DkongJrSystem::new();
-    sys.load_rom_set(rom_set)?;
-    Ok(Box::new(sys))
-}
-
-inventory::submit! {
-MachineEntry::new("dkongjr", &["dkongjr", "dkongjr2"], create_machine, crate::donkey_kong::DKONG_CONTROLS) }
+crate::register_machine!(
+    DkongJrSystem,
+    "dkongjr",
+    &["dkongjr", "dkongjr2"],
+    crate::donkey_kong::DKONG_CONTROLS
+);

@@ -39,7 +39,6 @@ use phosphor_core::device::{I8255, KonamiSound};
 use phosphor_macros::{BusDebug, DebugTrace, MemoryRegion};
 
 use crate::galaxian_video::{self, GalaxianVideo, GfxBankMode};
-use crate::registry::MachineEntry;
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
 
 pub const SAMPLE_RATE: u32 = 44_100;
@@ -1083,16 +1082,7 @@ impl DipSwitches for ScrambleSystem {
 
 crate::impl_board_debug_trace!(ScrambleSystem, board);
 
-fn create_machine(
-    rom_set: &RomSet,
-) -> Result<Box<dyn phosphor_core::core::machine::FrontendMachine>, RomLoadError> {
-    let mut sys = ScrambleSystem::new();
-    sys.load_rom_set(rom_set)?;
-    Ok(Box::new(sys))
-}
-
-inventory::submit! {
-MachineEntry::new("scramble", &["scramble"], create_machine, SCRAMBLE_CONTROLS) }
+crate::register_machine!(ScrambleSystem, "scramble", &["scramble"], SCRAMBLE_CONTROLS);
 
 // ===========================================================================
 // Super Cobra (Konami, 1981) — same hardware family, different memory map.
@@ -1410,16 +1400,7 @@ impl DipSwitches for ScobraSystem {
 
 crate::impl_board_debug_trace!(ScobraSystem, board);
 
-fn create_scobra(
-    rom_set: &RomSet,
-) -> Result<Box<dyn phosphor_core::core::machine::FrontendMachine>, RomLoadError> {
-    let mut sys = ScobraSystem::new();
-    sys.load_rom_set(rom_set)?;
-    Ok(Box::new(sys))
-}
-
-inventory::submit! {
-MachineEntry::new("scobra", &["scobra"], create_scobra, SCRAMBLE_CONTROLS) }
+crate::register_machine!(ScobraSystem, "scobra", &["scobra"], SCRAMBLE_CONTROLS);
 
 #[cfg(test)]
 mod tests {

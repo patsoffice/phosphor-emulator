@@ -40,7 +40,6 @@ use phosphor_core::gfx::decode::{GfxCache, GfxLayout, decode_gfx};
 use phosphor_macros::{BusDebug, MemoryRegion};
 
 use crate::disasm_registry::{DisasmCpu, DisasmRegion};
-use crate::registry::MachineEntry;
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
 
 // ---------------------------------------------------------------------------
@@ -1610,16 +1609,7 @@ impl phosphor_core::core::debug_trace::DebugTrace for IrobotSystem {}
 // Registry
 // ---------------------------------------------------------------------------
 
-fn create_machine(
-    rom_set: &RomSet,
-) -> Result<Box<dyn phosphor_core::core::machine::FrontendMachine>, RomLoadError> {
-    let mut sys = IrobotSystem::new();
-    sys.load_rom_set(rom_set)?;
-    Ok(Box::new(sys))
-}
-
-inventory::submit! {
-MachineEntry::new("irobot", &["irobot"], create_machine, IROBOT_CONTROLS) }
+crate::register_machine!(IrobotSystem, "irobot", &["irobot"], IROBOT_CONTROLS);
 
 inventory::submit! {
     DisasmRegion {

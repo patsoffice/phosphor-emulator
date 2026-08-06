@@ -6,7 +6,6 @@ use phosphor_core::cpu::Cpu;
 use phosphor_macros::Saveable;
 
 use crate::namco_pac::{self, NamcoPacBoard};
-use crate::registry::MachineEntry;
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
 
 // ---------------------------------------------------------------------------
@@ -273,16 +272,12 @@ crate::impl_board_debug_trace!(PacmanSystem, board);
 // Machine registry
 // ---------------------------------------------------------------------------
 
-fn create_machine(
-    rom_set: &RomSet,
-) -> Result<Box<dyn phosphor_core::core::machine::FrontendMachine>, RomLoadError> {
-    let mut sys = PacmanSystem::new();
-    sys.load_rom_set(rom_set)?;
-    Ok(Box::new(sys))
-}
-
-inventory::submit! {
-MachineEntry::new("pacman", &["pacman"], create_machine, namco_pac::NAMCO_PAC_CONTROLS) }
+crate::register_machine!(
+    PacmanSystem,
+    "pacman",
+    &["pacman"],
+    namco_pac::NAMCO_PAC_CONTROLS
+);
 
 #[cfg(test)]
 mod tests {

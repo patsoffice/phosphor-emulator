@@ -31,7 +31,6 @@ use phosphor_core::core::machine::{
 use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
 
-use crate::registry::MachineEntry;
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
 use crate::scramble::{Hw, ScrambleBoard, TIMING};
 
@@ -445,16 +444,7 @@ impl DipSwitches for FroggerSystem {
 
 crate::impl_board_debug_trace!(FroggerSystem, board);
 
-fn create_frogger(
-    rom_set: &RomSet,
-) -> Result<Box<dyn phosphor_core::core::machine::FrontendMachine>, RomLoadError> {
-    let mut sys = FroggerSystem::new();
-    sys.load_rom_set(rom_set)?;
-    Ok(Box::new(sys))
-}
-
-inventory::submit! {
-MachineEntry::new("frogger", &["frogger"], create_frogger, FROGGER_CONTROLS) }
+crate::register_machine!(FroggerSystem, "frogger", &["frogger"], FROGGER_CONTROLS);
 
 #[cfg(test)]
 mod tests {

@@ -9,8 +9,7 @@ use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
 use phosphor_macros::Saveable;
 
-use crate::registry::MachineEntry;
-use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
+use crate::rom_loader::{RomEntry, RomRegion};
 use crate::set_bit_active_high;
 use crate::williams::{self, WILLIAMS_SOUND_ROM, WilliamsBoard};
 
@@ -432,16 +431,7 @@ crate::impl_board_debug_trace!(JoustSystem, board);
 // Machine registry
 // ---------------------------------------------------------------------------
 
-fn create_machine(
-    rom_set: &RomSet,
-) -> Result<Box<dyn phosphor_core::core::machine::FrontendMachine>, RomLoadError> {
-    let mut sys = JoustSystem::new();
-    sys.load_rom_set(rom_set)?;
-    Ok(Box::new(sys))
-}
-
-inventory::submit! {
-MachineEntry::new("joust", &["joust"], create_machine, JOUST_CONTROLS) }
+crate::register_machine!(JoustSystem, "joust", &["joust"], JOUST_CONTROLS);
 
 // ---------------------------------------------------------------------------
 // Tests

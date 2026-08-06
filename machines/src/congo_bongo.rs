@@ -39,7 +39,6 @@ use phosphor_macros::{BusDebug, DebugTrace, MemoryRegion, Saveable};
 use crate::congo_sound::CongoSound;
 use crate::disasm_registry::{DisasmCpu, DisasmRegion};
 use crate::gfx_registry::GfxRegion;
-use crate::registry::MachineEntry;
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
 use crate::set_bit_active_high;
 
@@ -1785,16 +1784,12 @@ crate::impl_board_debug_trace!(CongoBongoSystem, board);
 // Registry
 // ---------------------------------------------------------------------------
 
-fn create_machine(
-    rom_set: &RomSet,
-) -> Result<Box<dyn phosphor_core::core::machine::FrontendMachine>, RomLoadError> {
-    let mut sys = CongoBongoSystem::new();
-    sys.load_rom_set(rom_set)?;
-    Ok(Box::new(sys))
-}
-
-inventory::submit! {
-MachineEntry::new("congobongo", &["congo", "congobongo"], create_machine, CONGO_CONTROLS) }
+crate::register_machine!(
+    CongoBongoSystem,
+    "congobongo",
+    &["congo", "congobongo"],
+    CONGO_CONTROLS
+);
 
 inventory::submit! {
     DisasmRegion {

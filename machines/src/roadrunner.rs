@@ -27,7 +27,6 @@ use phosphor_core::device::adc0809::Adc0809;
 
 use crate::atari_system1::{self, AtariSystem1Board};
 use crate::disasm_registry::{DisasmCpu, DisasmRegion};
-use crate::registry::MachineEntry;
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
 use crate::set_bit_active_low;
 
@@ -818,16 +817,12 @@ impl phosphor_core::core::machine::DipSwitches for RoadRunnerSystem {}
 // Registry + disassembly
 // ---------------------------------------------------------------------------
 
-fn create_machine(
-    rom_set: &RomSet,
-) -> Result<Box<dyn phosphor_core::core::machine::FrontendMachine>, RomLoadError> {
-    let mut sys = RoadRunnerSystem::new();
-    sys.load_rom_set(rom_set)?;
-    Ok(Box::new(sys))
-}
-
-inventory::submit! {
-MachineEntry::new("roadrunner", &["roadrunn"], create_machine, ROADRUNNER_CONTROLS) }
+crate::register_machine!(
+    RoadRunnerSystem,
+    "roadrunner",
+    &["roadrunn"],
+    ROADRUNNER_CONTROLS
+);
 
 inventory::submit! {
     DisasmRegion {

@@ -15,7 +15,6 @@ use phosphor_core::gfx::decode::{GfxCache, GfxLayout, decode_gfx};
 use phosphor_core::gfx::render_bitmap_scanline;
 use phosphor_macros::{BusDebug, MemoryRegion};
 
-use crate::registry::MachineEntry;
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
 
 #[repr(u8)]
@@ -1225,16 +1224,7 @@ impl phosphor_core::core::debug_trace::DebugTrace for GridleeSystem {}
 // Machine registry
 // ---------------------------------------------------------------------------
 
-fn create_machine(
-    rom_set: &RomSet,
-) -> Result<Box<dyn phosphor_core::core::machine::FrontendMachine>, RomLoadError> {
-    let mut sys = GridleeSystem::new();
-    sys.load_rom_set(rom_set)?;
-    Ok(Box::new(sys))
-}
-
-inventory::submit! {
-MachineEntry::new("gridlee", &["gridlee"], create_machine, GRIDLEE_CONTROLS) }
+crate::register_machine!(GridleeSystem, "gridlee", &["gridlee"], GRIDLEE_CONTROLS);
 
 #[cfg(test)]
 mod tests {

@@ -42,7 +42,6 @@ use phosphor_core::device::GalaxianSound;
 use phosphor_macros::{BusDebug, DebugTrace, MemoryRegion};
 
 use crate::galaxian_video::{self, GalaxianVideo, GfxBankMode};
-use crate::registry::MachineEntry;
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
 
 /// Audio output rate produced by [`GalaxianBoard::fill_audio`]; matches the
@@ -1014,16 +1013,7 @@ crate::impl_board_debug_trace!(GalaxianSystem, board);
 // Machine registry
 // ---------------------------------------------------------------------------
 
-fn create_machine(
-    rom_set: &RomSet,
-) -> Result<Box<dyn phosphor_core::core::machine::FrontendMachine>, RomLoadError> {
-    let mut sys = GalaxianSystem::new();
-    sys.load_rom_set(rom_set)?;
-    Ok(Box::new(sys))
-}
-
-inventory::submit! {
-MachineEntry::new("galaxian", &["galaxian"], create_machine, GALAXIAN_CONTROLS) }
+crate::register_machine!(GalaxianSystem, "galaxian", &["galaxian"], GALAXIAN_CONTROLS);
 
 // ---------------------------------------------------------------------------
 // Tests

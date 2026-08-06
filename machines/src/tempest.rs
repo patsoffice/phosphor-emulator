@@ -3,8 +3,8 @@ use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::input::{DrainPolicy, RelativeCounter};
 use phosphor_core::core::machine::{
     ActionRole, AnalogAxisKind, AudioSource, DefaultBinding, DipApplyTiming, DipChoice, DipOption,
-    DipSwitchBank, DipSwitches, FrontendMachine, InputConfigurable, InputControl, InputEvent,
-    InputId, InputKind, MachineCore, MouseControl, Nvram, Profilable, SaveState,
+    DipSwitchBank, DipSwitches, InputConfigurable, InputControl, InputEvent, InputId, InputKind,
+    MachineCore, MouseControl, Nvram, Profilable, SaveState,
 };
 use phosphor_core::core::{AccessKind, AddressSpace16};
 use phosphor_core::core::{Bus, BusMaster};
@@ -15,7 +15,6 @@ use phosphor_core::device::pokey::Pokey;
 use phosphor_macros::Saveable;
 
 use crate::atari_avg::{self, AtariAvgBoard, Region};
-use crate::registry::MachineEntry;
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
 use crate::set_bit_active_low;
 
@@ -911,14 +910,7 @@ crate::impl_board_debug_trace!(TempestSystem, board);
 // Machine registry
 // ---------------------------------------------------------------------------
 
-fn create_machine(rom_set: &RomSet) -> Result<Box<dyn FrontendMachine>, RomLoadError> {
-    let mut sys = TempestSystem::new();
-    sys.load_rom_set(rom_set)?;
-    Ok(Box::new(sys))
-}
-
-inventory::submit! {
-MachineEntry::new("tempest", &["tempest"], create_machine, TEMPEST_CONTROLS) }
+crate::register_machine!(TempestSystem, "tempest", &["tempest"], TEMPEST_CONTROLS);
 
 #[cfg(test)]
 mod tests {

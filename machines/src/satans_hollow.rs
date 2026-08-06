@@ -1,15 +1,14 @@
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
-    ActionRole, Direction, FrontendMachine, InputConfigurable, InputControl, InputEvent, InputId,
-    InputKind, MachineCore, Nvram, Profilable, SaveState,
+    ActionRole, Direction, InputConfigurable, InputControl, InputEvent, InputId, InputKind,
+    MachineCore, Nvram, Profilable, SaveState,
 };
 use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
 use phosphor_macros::Saveable;
 
 use crate::mcr2::{self, Mcr2Board};
-use crate::registry::MachineEntry;
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
 use crate::set_bit_active_low;
 
@@ -512,14 +511,12 @@ crate::impl_map_debug_trace!(SatansHollowSystem, board.map);
 // Machine registry
 // ---------------------------------------------------------------------------
 
-fn create_machine(rom_set: &RomSet) -> Result<Box<dyn FrontendMachine>, RomLoadError> {
-    let mut sys = SatansHollowSystem::new();
-    sys.load_rom_set(rom_set)?;
-    Ok(Box::new(sys))
-}
-
-inventory::submit! {
-MachineEntry::new("shollow", &["shollow"], create_machine, SHOLLOW_CONTROLS) }
+crate::register_machine!(
+    SatansHollowSystem,
+    "shollow",
+    &["shollow"],
+    SHOLLOW_CONTROLS
+);
 
 // ---------------------------------------------------------------------------
 // Tests

@@ -1,7 +1,7 @@
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
-    ActionRole, DipApplyTiming, DipChoice, DipOption, DipSwitchBank, DipSwitches, FrontendMachine,
+    ActionRole, DipApplyTiming, DipChoice, DipOption, DipSwitchBank, DipSwitches,
     InputConfigurable, InputControl, InputEvent, InputId, InputKind, MachineCore, SaveState,
 };
 use phosphor_core::core::{AccessKind, AddressSpace16};
@@ -11,7 +11,6 @@ use phosphor_macros::Saveable;
 
 use crate::asteroids_sound::AsteroidsDiscreteSound;
 use crate::atari_dvg::{self, AtariDvgBoard, Region};
-use crate::registry::MachineEntry;
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
 use crate::set_bit_active_high;
 
@@ -558,14 +557,12 @@ crate::impl_board_debug_trace!(AsteroidsSystem, board);
 // Machine registry
 // ---------------------------------------------------------------------------
 
-fn create_machine(rom_set: &RomSet) -> Result<Box<dyn FrontendMachine>, RomLoadError> {
-    let mut sys = AsteroidsSystem::new();
-    sys.load_rom_set(rom_set)?;
-    Ok(Box::new(sys))
-}
-
-inventory::submit! {
-MachineEntry::new("asteroid", &["asteroid"], create_machine, ASTEROIDS_CONTROLS) }
+crate::register_machine!(
+    AsteroidsSystem,
+    "asteroid",
+    &["asteroid"],
+    ASTEROIDS_CONTROLS
+);
 
 #[cfg(test)]
 mod tests {

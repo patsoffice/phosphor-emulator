@@ -40,7 +40,6 @@ use phosphor_macros::{BusDebug, DebugTrace, MemoryRegion, Saveable};
 
 use crate::disasm_registry::{DisasmCpu, DisasmRegion};
 use crate::gfx_registry::GfxRegion;
-use crate::registry::MachineEntry;
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
 use crate::set_bit_active_high;
 use crate::tkg04::{
@@ -1418,16 +1417,12 @@ crate::impl_board_debug_trace!(MarioBrosSystem, board);
 // Registry
 // ---------------------------------------------------------------------------
 
-fn create_machine(
-    rom_set: &RomSet,
-) -> Result<Box<dyn phosphor_core::core::machine::FrontendMachine>, RomLoadError> {
-    let mut sys = MarioBrosSystem::new();
-    sys.load_rom_set(rom_set)?;
-    Ok(Box::new(sys))
-}
-
-inventory::submit! {
-MachineEntry::new("mariobros", &["mario", "mariobros"], create_machine, MARIO_CONTROLS) }
+crate::register_machine!(
+    MarioBrosSystem,
+    "mariobros",
+    &["mario", "mariobros"],
+    MARIO_CONTROLS
+);
 
 // ---------------------------------------------------------------------------
 // Tests

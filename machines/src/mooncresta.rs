@@ -18,7 +18,6 @@ use phosphor_core::cpu::Cpu;
 
 use crate::galaxian::{GALAXIAN_CONTROLS, GalaxianBoard, TIMING};
 use crate::galaxian_video::GfxBankMode;
-use crate::registry::MachineEntry;
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
 
 // ---------------------------------------------------------------------------
@@ -418,16 +417,12 @@ crate::impl_board_debug_trace!(MoonCrestaSystem, board);
 // Machine registry
 // ---------------------------------------------------------------------------
 
-fn create_machine(
-    rom_set: &RomSet,
-) -> Result<Box<dyn phosphor_core::core::machine::FrontendMachine>, RomLoadError> {
-    let mut sys = MoonCrestaSystem::new();
-    sys.load_rom_set(rom_set)?;
-    Ok(Box::new(sys))
-}
-
-inventory::submit! {
-MachineEntry::new("mooncrst", &["mooncrst"], create_machine, GALAXIAN_CONTROLS) }
+crate::register_machine!(
+    MoonCrestaSystem,
+    "mooncrst",
+    &["mooncrst"],
+    GALAXIAN_CONTROLS
+);
 
 // ---------------------------------------------------------------------------
 // Tests

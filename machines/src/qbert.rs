@@ -8,16 +8,15 @@ use std::time::Instant;
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
-    DipApplyTiming, DipChoice, DipOption, DipSwitchBank, DipSwitches, Direction, FrontendMachine,
-    InputConfigurable, InputControl, InputEvent, InputId, InputKind, MachineCore, Nvram,
-    Profilable, ProfileSpan, SaveState,
+    DipApplyTiming, DipChoice, DipOption, DipSwitchBank, DipSwitches, Direction, InputConfigurable,
+    InputControl, InputEvent, InputId, InputKind, MachineCore, Nvram, Profilable, ProfileSpan,
+    SaveState,
 };
 use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
 use phosphor_macros::Saveable;
 
 use crate::gottlieb::{self, GottliebBoard};
-use crate::registry::MachineEntry;
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
 use crate::set_bit_active_high;
 
@@ -618,14 +617,7 @@ crate::impl_map_debug_trace!(QbertSystem, board.map);
 // Machine registry
 // ---------------------------------------------------------------------------
 
-fn create_machine(rom_set: &RomSet) -> Result<Box<dyn FrontendMachine>, RomLoadError> {
-    let mut sys = QbertSystem::new();
-    sys.load_rom_set(rom_set)?;
-    Ok(Box::new(sys))
-}
-
-inventory::submit! {
-MachineEntry::new("qbert", &["qbert"], create_machine, QBERT_CONTROLS) }
+crate::register_machine!(QbertSystem, "qbert", &["qbert"], QBERT_CONTROLS);
 
 // ---------------------------------------------------------------------------
 // Tests

@@ -8,8 +8,7 @@ use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
 use phosphor_macros::Saveable;
 
-use crate::registry::MachineEntry;
-use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
+use crate::rom_loader::{RomEntry, RomRegion};
 use crate::set_bit_active_high;
 use crate::williams::{self, WilliamsBoard};
 
@@ -427,16 +426,7 @@ crate::impl_board_debug_trace!(RobotronSystem, board);
 // Machine registry
 // ---------------------------------------------------------------------------
 
-fn create_machine(
-    rom_set: &RomSet,
-) -> Result<Box<dyn phosphor_core::core::machine::FrontendMachine>, RomLoadError> {
-    let mut sys = RobotronSystem::new();
-    sys.load_rom_set(rom_set)?;
-    Ok(Box::new(sys))
-}
-
-inventory::submit! {
-MachineEntry::new("robotron", &["robotron"], create_machine, ROBOTRON_CONTROLS) }
+crate::register_machine!(RobotronSystem, "robotron", &["robotron"], ROBOTRON_CONTROLS);
 
 #[cfg(test)]
 mod tests {

@@ -460,6 +460,104 @@ macro_rules! machine_save_state {
 }
 pub(crate) use machine_save_state;
 
+/// Registers a machine with the front-end registry: builds the ROM-set factory
+/// and submits the [`registry::MachineEntry`] in one line.
+///
+/// The four arguments are the wrapper type, the CLI name, the ROM set names to
+/// try for ZIP lookup, and the machine's static control table. The control
+/// table has to be named explicitly — it is a separate const whose name tracks
+/// neither the type nor the CLI name (`CONGO_CONTROLS`, `DKONG_CONTROLS`), and
+/// it cannot be an associated const because `InputConfigurable` is a supertrait
+/// of the `dyn FrontendMachine` the registry stores.
+///
+/// # Usage
+/// ```ignore
+/// crate::register_machine!(JoustSystem, "joust", &["joust"], JOUST_CONTROLS);
+///
+/// // Constructor takes an argument (a hardware variant, say):
+/// crate::register_machine!(
+///     new = PiscesSystem::new(&PISCES), "pisces", &["pisces"], GALAXIAN_CONTROLS
+/// );
+///
+/// // Machines whose ROM set varies by revision: each config is tried in turn
+/// // and the first that loads wins.
+/// crate::register_machine!(
+///     GalagaSystem, "galaga", &["galaga", "galagao", "galagamw"],
+///     namco_galaga::NAMCO_GALAGA_CONTROLS, configs = ALL_CONFIGS
+/// );
+/// ```
+///
+/// Machines whose factory does anything else — a constructor argument, a reset
+/// after load, a non-standard loader — keep their hand-written factory and
+/// `inventory::submit!`. Per `machines/CLAUDE.md`, macros generate obvious
+/// delegation only; machine-specific behavior stays visible in the machine file.
+macro_rules! register_machine {
+    // Constructor takes an argument (hardware variant, ROM config); still just
+    // construct-then-`load_rom_set`.
+    (new = $ctor:expr, $name:expr, $rom_names:expr, $controls:expr) => {
+        ::inventory::submit! {
+            $crate::registry::MachineEntry::new($name, $rom_names, {
+                fn create(
+                    rom_set: &$crate::rom_loader::RomSet,
+                ) -> Result<
+                    Box<dyn phosphor_core::core::machine::FrontendMachine>,
+                    $crate::rom_loader::RomLoadError,
+                > {
+                    let mut sys = $ctor;
+                    sys.load_rom_set(rom_set)?;
+                    Ok(Box::new(sys))
+                }
+                create
+            }, $controls)
+        }
+    };
+
+    // Standard: `Type::new()`, then `load_rom_set`.
+    ($type:ty, $name:expr, $rom_names:expr, $controls:expr) => {
+        ::inventory::submit! {
+            $crate::registry::MachineEntry::new($name, $rom_names, {
+                fn create(
+                    rom_set: &$crate::rom_loader::RomSet,
+                ) -> Result<
+                    Box<dyn phosphor_core::core::machine::FrontendMachine>,
+                    $crate::rom_loader::RomLoadError,
+                > {
+                    let mut sys = <$type>::new();
+                    sys.load_rom_set(rom_set)?;
+                    Ok(Box::new(sys))
+                }
+                create
+            }, $controls)
+        }
+    };
+
+    // ROM set varies by revision: try each config, first one that loads wins.
+    ($type:ty, $name:expr, $rom_names:expr, $controls:expr, configs = $configs:expr) => {
+        ::inventory::submit! {
+            $crate::registry::MachineEntry::new($name, $rom_names, {
+                fn create(
+                    rom_set: &$crate::rom_loader::RomSet,
+                ) -> Result<
+                    Box<dyn phosphor_core::core::machine::FrontendMachine>,
+                    $crate::rom_loader::RomLoadError,
+                > {
+                    let mut last_err = None;
+                    for config in $configs {
+                        let mut sys = <$type>::new();
+                        match sys.load_roms(rom_set, config) {
+                            Ok(()) => return Ok(Box::new(sys)),
+                            Err(e) => last_err = Some(e),
+                        }
+                    }
+                    Err(last_err.unwrap())
+                }
+                create
+            }, $controls)
+        }
+    };
+}
+pub(crate) use register_machine;
+
 pub mod astdelux;
 pub mod asteroids;
 pub mod asteroids_sound;

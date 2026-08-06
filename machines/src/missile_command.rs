@@ -16,8 +16,7 @@ use phosphor_core::cpu::{Cpu, CpuStateTrait};
 use phosphor_core::device::pokey::Pokey;
 use phosphor_macros::{BusDebug, MemoryRegion};
 
-use crate::registry::MachineEntry;
-use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
+use crate::rom_loader::{RomEntry, RomRegion};
 use crate::set_bit_active_low;
 
 #[repr(u8)]
@@ -1130,16 +1129,12 @@ impl DipSwitches for MissileCommandSystem {
 // Machine registry
 // ---------------------------------------------------------------------------
 
-fn create_machine(
-    rom_set: &RomSet,
-) -> Result<Box<dyn phosphor_core::core::machine::FrontendMachine>, RomLoadError> {
-    let mut sys = MissileCommandSystem::new();
-    sys.load_rom_set(rom_set)?;
-    Ok(Box::new(sys))
-}
-
-inventory::submit! {
-MachineEntry::new("missile", &["missile"], create_machine, MISSILE_CONTROLS) }
+crate::register_machine!(
+    MissileCommandSystem,
+    "missile",
+    &["missile"],
+    MISSILE_CONTROLS
+);
 
 #[cfg(test)]
 mod tests {

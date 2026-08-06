@@ -41,7 +41,6 @@ use phosphor_macros::{MemoryRegion, Saveable};
 
 use crate::gfx_registry::GfxRegion;
 use crate::namco_galaga::{self, NamcoGalagaBoard};
-use crate::registry::MachineEntry;
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
 
 // ---------------------------------------------------------------------------
@@ -1663,16 +1662,7 @@ mod dip_tests {
 // Machine registry
 // ---------------------------------------------------------------------------
 
-fn create_machine(
-    rom_set: &RomSet,
-) -> Result<Box<dyn phosphor_core::core::machine::FrontendMachine>, RomLoadError> {
-    let mut sys = XeviousSystem::new();
-    sys.load_rom_set(rom_set)?;
-    Ok(Box::new(sys))
-}
-
-inventory::submit! {
-MachineEntry::new("xevious", &["xevious"], create_machine, &XEVIOUS_CONTROLS) }
+crate::register_machine!(XeviousSystem, "xevious", &["xevious"], &XEVIOUS_CONTROLS);
 
 crate::impl_board_debug_trace!(XeviousSystem, board);
 

@@ -40,7 +40,6 @@ use phosphor_macros::{BusDebug, MemoryRegion, Saveable};
 use crate::disasm_registry::{DisasmCpu, DisasmRegion};
 use crate::gfx_registry::GfxRegion;
 use crate::input_defaults as ind;
-use crate::registry::MachineEntry;
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
 use crate::set_bit_active_low;
 
@@ -1252,16 +1251,7 @@ crate::impl_map_debug_trace!(MrdoSystem, board.main_map);
 // Registry
 // ---------------------------------------------------------------------------
 
-fn create_machine(
-    rom_set: &RomSet,
-) -> Result<Box<dyn phosphor_core::core::machine::FrontendMachine>, RomLoadError> {
-    let mut sys = MrdoSystem::new();
-    sys.load_rom_set(rom_set)?;
-    Ok(Box::new(sys))
-}
-
-inventory::submit! {
-MachineEntry::new("mrdo", &["mrdot", "mrdofix"], create_machine, MRDO_CONTROLS) }
+crate::register_machine!(MrdoSystem, "mrdo", &["mrdot", "mrdofix"], MRDO_CONTROLS);
 
 inventory::submit! {
     DisasmRegion {

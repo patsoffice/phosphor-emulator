@@ -8,7 +8,6 @@ use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
 use phosphor_macros::Saveable;
 
-use crate::registry::MachineEntry;
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
 use crate::set_bit_active_high;
 use crate::williams::{self, WilliamsBoard, WilliamsConfig};
@@ -505,16 +504,7 @@ crate::impl_board_debug_trace!(SinistarSystem, board);
 // Machine registry
 // ---------------------------------------------------------------------------
 
-fn create_machine(
-    rom_set: &RomSet,
-) -> Result<Box<dyn phosphor_core::core::machine::FrontendMachine>, RomLoadError> {
-    let mut sys = SinistarSystem::new();
-    sys.load_rom_set(rom_set)?;
-    Ok(Box::new(sys))
-}
-
-inventory::submit! {
-MachineEntry::new("sinistar", &["sinistar"], create_machine, SINISTAR_CONTROLS) }
+crate::register_machine!(SinistarSystem, "sinistar", &["sinistar"], SINISTAR_CONTROLS);
 
 // ---------------------------------------------------------------------------
 // Tests
