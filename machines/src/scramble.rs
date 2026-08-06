@@ -25,9 +25,8 @@ use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::debug_trace::DebugTraceBuffer;
 use phosphor_core::core::machine::{
-    ActionRole, DipApplyTiming, DipChoice, DipOption, DipSwitchBank, DipSwitches, Direction,
-    InputConfigurable, InputControl, InputEvent, InputId, InputKind, MachineCore, Nvram,
-    Profilable, SaveState,
+    ActionRole, DipApplyTiming, DipChoice, DipOption, DipSwitchBank, Direction, InputConfigurable,
+    InputControl, InputEvent, InputId, InputKind, MachineCore, Nvram, Profilable, SaveState,
 };
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::{AccessKind, AddressSpace16};
@@ -1060,25 +1059,12 @@ impl InputConfigurable for ScrambleSystem {
     }
 }
 
-impl DipSwitches for ScrambleSystem {
-    fn dip_banks(&self) -> &'static [DipSwitchBank] {
-        SCRAMBLE_DIP_BANKS
-    }
-    fn dip_bank_value(&self, bank: usize) -> u8 {
-        match bank {
-            0 => self.board.in1 & SC_DIP1_MASK,
-            1 => self.board.in2 & SC_DIP2_MASK,
-            _ => 0,
-        }
-    }
-    fn set_dip_bank_value(&mut self, bank: usize, value: u8) {
-        match bank {
-            0 => self.board.in1 = (self.board.in1 & !SC_DIP1_MASK) | (value & SC_DIP1_MASK),
-            1 => self.board.in2 = (self.board.in2 & !SC_DIP2_MASK) | (value & SC_DIP2_MASK),
-            _ => {}
-        }
-    }
-}
+crate::impl_dip_switches!(
+    ScrambleSystem,
+    SCRAMBLE_DIP_BANKS,
+    board.in1 & SC_DIP1_MASK,
+    board.in2 & SC_DIP2_MASK
+);
 
 crate::impl_board_debug_trace!(ScrambleSystem, board);
 
@@ -1378,25 +1364,12 @@ impl InputConfigurable for ScobraSystem {
     }
 }
 
-impl DipSwitches for ScobraSystem {
-    fn dip_banks(&self) -> &'static [DipSwitchBank] {
-        SCOBRA_DIP_BANKS
-    }
-    fn dip_bank_value(&self, bank: usize) -> u8 {
-        match bank {
-            0 => self.board.in1 & SCB_DIP1_MASK,
-            1 => self.board.in2 & SCB_DIP2_MASK,
-            _ => 0,
-        }
-    }
-    fn set_dip_bank_value(&mut self, bank: usize, value: u8) {
-        match bank {
-            0 => self.board.in1 = (self.board.in1 & !SCB_DIP1_MASK) | (value & SCB_DIP1_MASK),
-            1 => self.board.in2 = (self.board.in2 & !SCB_DIP2_MASK) | (value & SCB_DIP2_MASK),
-            _ => {}
-        }
-    }
-}
+crate::impl_dip_switches!(
+    ScobraSystem,
+    SCOBRA_DIP_BANKS,
+    board.in1 & SCB_DIP1_MASK,
+    board.in2 & SCB_DIP2_MASK
+);
 
 crate::impl_board_debug_trace!(ScobraSystem, board);
 
@@ -1405,6 +1378,7 @@ crate::register_machine!(ScobraSystem, "scobra", &["scobra"], SCRAMBLE_CONTROLS)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use phosphor_core::core::machine::DipSwitches;
 
     #[test]
     fn machine_id_and_defaults() {

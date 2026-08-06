@@ -10,8 +10,8 @@
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
-    DipApplyTiming, DipChoice, DipOption, DipSwitchBank, DipSwitches, InputConfigurable,
-    InputControl, InputEvent, MachineCore, Nvram, Profilable, SaveState,
+    DipApplyTiming, DipChoice, DipOption, DipSwitchBank, InputConfigurable, InputControl,
+    InputEvent, MachineCore, Nvram, Profilable, SaveState,
 };
 use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
@@ -387,29 +387,13 @@ impl InputConfigurable for MoonCrestaSystem {
     }
 }
 
-impl DipSwitches for MoonCrestaSystem {
-    fn dip_banks(&self) -> &'static [DipSwitchBank] {
-        MOONCRST_DIP_BANKS
-    }
-
-    fn dip_bank_value(&self, bank: usize) -> u8 {
-        match bank {
-            0 => self.board.in0 & MC_DIP0_MASK,
-            1 => self.board.in1 & MC_DIP1_MASK,
-            2 => self.board.in2 & MC_DIP2_MASK,
-            _ => 0,
-        }
-    }
-
-    fn set_dip_bank_value(&mut self, bank: usize, value: u8) {
-        match bank {
-            0 => self.board.in0 = (self.board.in0 & !MC_DIP0_MASK) | (value & MC_DIP0_MASK),
-            1 => self.board.in1 = (self.board.in1 & !MC_DIP1_MASK) | (value & MC_DIP1_MASK),
-            2 => self.board.in2 = (self.board.in2 & !MC_DIP2_MASK) | (value & MC_DIP2_MASK),
-            _ => {}
-        }
-    }
-}
+crate::impl_dip_switches!(
+    MoonCrestaSystem,
+    MOONCRST_DIP_BANKS,
+    board.in0 & MC_DIP0_MASK,
+    board.in1 & MC_DIP1_MASK,
+    board.in2 & MC_DIP2_MASK
+);
 
 crate::impl_board_debug_trace!(MoonCrestaSystem, board);
 
@@ -431,6 +415,7 @@ crate::register_machine!(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use phosphor_core::core::machine::DipSwitches;
     use phosphor_core::core::save_state::{Saveable, StateReader, StateWriter};
 
     #[test]

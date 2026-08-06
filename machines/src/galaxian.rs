@@ -27,9 +27,8 @@ use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::debug_trace::{DebugEvent, DebugEventKind, DebugTraceBuffer};
 use phosphor_core::core::machine::{
-    ActionRole, DipApplyTiming, DipChoice, DipOption, DipSwitchBank, DipSwitches, Direction,
-    InputConfigurable, InputControl, InputEvent, InputId, InputKind, MachineCore, Nvram,
-    Profilable, SaveState,
+    ActionRole, DipApplyTiming, DipChoice, DipOption, DipSwitchBank, Direction, InputConfigurable,
+    InputControl, InputEvent, InputId, InputKind, MachineCore, Nvram, Profilable, SaveState,
 };
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::watchpoint::DebugAccessSource;
@@ -983,29 +982,13 @@ impl InputConfigurable for GalaxianSystem {
     }
 }
 
-impl DipSwitches for GalaxianSystem {
-    fn dip_banks(&self) -> &'static [DipSwitchBank] {
-        GALAXIAN_DIP_BANKS
-    }
-
-    fn dip_bank_value(&self, bank: usize) -> u8 {
-        match bank {
-            0 => self.board.in0 & DIP0_MASK,
-            1 => self.board.in1 & DIP1_MASK,
-            2 => self.board.in2 & DIP2_MASK,
-            _ => 0,
-        }
-    }
-
-    fn set_dip_bank_value(&mut self, bank: usize, value: u8) {
-        match bank {
-            0 => self.board.in0 = (self.board.in0 & !DIP0_MASK) | (value & DIP0_MASK),
-            1 => self.board.in1 = (self.board.in1 & !DIP1_MASK) | (value & DIP1_MASK),
-            2 => self.board.in2 = (self.board.in2 & !DIP2_MASK) | (value & DIP2_MASK),
-            _ => {}
-        }
-    }
-}
+crate::impl_dip_switches!(
+    GalaxianSystem,
+    GALAXIAN_DIP_BANKS,
+    board.in0 & DIP0_MASK,
+    board.in1 & DIP1_MASK,
+    board.in2 & DIP2_MASK
+);
 
 crate::impl_board_debug_trace!(GalaxianSystem, board);
 
@@ -1022,6 +1005,7 @@ crate::register_machine!(GalaxianSystem, "galaxian", &["galaxian"], GALAXIAN_CON
 #[cfg(test)]
 mod tests {
     use super::*;
+    use phosphor_core::core::machine::DipSwitches;
 
     #[test]
     fn memory_map_mirrors_fold_to_one_backing() {
