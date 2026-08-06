@@ -234,13 +234,13 @@ impl AnalogAxis {
         } else {
             (self.range.center - self.range.min) as f32
         };
-        self.position = self.range.center + (value * span) as i32;
+        self.position = self.range.center + (value * span).round() as i32;
         self.clamp();
     }
 
     /// Relative nudge, clamped to the range.
     pub fn move_relative(&mut self, delta: f32) {
-        self.position += delta as i32;
+        self.position += delta.round() as i32;
         self.clamp();
     }
 
@@ -421,10 +421,11 @@ mod tests {
         assert_eq!(a.position(), 0xFF);
         a.set_absolute(-1.0);
         assert_eq!(a.position(), 0x00);
+        // Rounded, not truncated: half of the 0xBF upper span is 95.5.
         a.set_absolute(0.5);
-        assert_eq!(a.position(), 0x40 + (0xFF - 0x40) / 2);
+        assert_eq!(a.position(), 0x40 + 96);
         a.set_absolute(-0.5);
-        assert_eq!(a.position(), 0x40 - 0x40 / 2);
+        assert_eq!(a.position(), 0x40 - 32);
     }
 
     #[test]

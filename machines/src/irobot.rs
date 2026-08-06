@@ -20,6 +20,7 @@
 
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
+use phosphor_core::core::input::{AnalogAxis, AxisRange};
 use phosphor_core::core::machine::{
     ActionRole, AnalogAxisKind, AudioSource, DefaultBinding, DipApplyTiming, DipChoice, DipOption,
     DipSwitchBank, DipSwitches, Direction, InputConfigurable, InputControl, InputEvent, InputId,
@@ -511,8 +512,7 @@ pub struct IrobotSystem {
     // current [X, Y] raw stick positions feeding it. `dir_held` tracks the four
     // digital direction keys [left, right, up, down] for self-centering.
     adc: Adc0809,
-    stick: [u8; 2],
-    dir_held: [bool; 4],
+    stick: [AnalogAxis; 2],
 
     // Sound: four POKEYs @ 1.512 MHz, all outputs summed to mono.
     pokeys: [Pokey; 4],
@@ -523,6 +523,17 @@ pub struct IrobotSystem {
     firq_pending: bool,
     prev_v32: bool,
     clock: u64,
+}
+
+/// I, Robot's two stick channels. Their electrical ranges are genuinely
+/// asymmetric about the 0x80 rest position — X spans 96..159, Y 96..163 — so an
+/// absolute deflection scales by whichever side it is heading toward, which is
+/// exactly AnalogAxis::set_absolute's contract.
+fn new_stick() -> [AnalogAxis; 2] {
+    [
+        AnalogAxis::new(AxisRange::new(STICK_X_MIN, STICK_CENTER, STICK_X_MAX)),
+        AnalogAxis::new(AxisRange::new(STICK_Y_MIN, STICK_CENTER, STICK_Y_MAX)),
+    ]
 }
 
 impl Default for IrobotSystem {
@@ -555,8 +566,7 @@ impl IrobotSystem {
             dsw2: DSW2_DEFAULT,
             novram: X2212::new(),
             adc: Adc0809::new(),
-            stick: [STICK_CENTER as u8; 2],
-            dir_held: [false; 4],
+            stick: new_stick(),
             pokeys: std::array::from_fn(|_| Pokey::with_clock(POKEY_CLOCK, SAMPLE_RATE)),
             audio_buffer: Vec::with_capacity(2048),
             irq_pending: false,
@@ -730,21 +740,6 @@ impl IrobotSystem {
     /// direction deflects the axis to its range limit; releasing returns it to
     /// center. `dir_held` is `[left, right, up, down]`.
     fn update_stick(&mut self) {
-        let [left, right, up, down] = self.dir_held;
-        self.stick[0] = if left {
-            STICK_X_MIN as u8
-        } else if right {
-            STICK_X_MAX as u8
-        } else {
-            STICK_CENTER as u8
-        };
-        self.stick[1] = if up {
-            STICK_Y_MIN as u8
-        } else if down {
-            STICK_Y_MAX as u8
-        } else {
-            STICK_CENTER as u8
-        };
         self.update_adc_inputs();
     }
 
@@ -752,28 +747,21 @@ impl IrobotSystem {
     /// direct); channel 1 = X (AN1), which MAME drives PORT_REVERSE — reflect it
     /// around the 0x80 center. `stick` is `[X, Y]`.
     fn update_adc_inputs(&mut self) {
-        self.adc.set_input(0, self.stick[1]);
+        self.adc.set_input(0, self.stick[1].position() as u8);
         self.adc
-            .set_input(1, (2 * STICK_CENTER - self.stick[0] as i32) as u8);
+            .set_input(1, (2 * STICK_CENTER - self.stick[0].position()) as u8);
     }
 
     /// Absolute deflection in `-1.0..=1.0` mapped to the channel range (centered
     /// at 0x80). `axis` is 0 = X, 1 = Y.
-    fn set_stick_abs(&mut self, axis: usize, value: f32, min: i32, max: i32) {
-        let span = if value >= 0.0 {
-            (max - STICK_CENTER) as f32
-        } else {
-            (STICK_CENTER - min) as f32
-        };
-        let v = (STICK_CENTER as f32 + value.clamp(-1.0, 1.0) * span).round() as i32;
-        self.stick[axis] = v.clamp(min, max) as u8;
+    fn set_stick_abs(&mut self, axis: usize, value: f32, _min: i32, _max: i32) {
+        self.stick[axis].set_absolute(value);
         self.update_adc_inputs();
     }
 
     /// Relative (mouse) motion accumulated into the stick position and clamped.
-    fn move_stick_rel(&mut self, axis: usize, delta: f32, min: i32, max: i32) {
-        let v = self.stick[axis] as i32 + delta.round() as i32;
-        self.stick[axis] = v.clamp(min, max) as u8;
+    fn move_stick_rel(&mut self, axis: usize, delta: f32, _min: i32, _max: i32) {
+        self.stick[axis].move_relative(delta);
         self.update_adc_inputs();
     }
 
@@ -1182,8 +1170,7 @@ impl MachineCore for IrobotSystem {
         self.novram.reset();
         self.mathbox.reset();
         self.adc.reset();
-        self.stick = [STICK_CENTER as u8; 2];
-        self.dir_held = [false; 4];
+        self.stick = new_stick();
         self.update_adc_inputs();
         for p in &mut self.pokeys {
             p.reset();
@@ -1222,7 +1209,9 @@ impl Saveable for IrobotSystem {
         self.novram.save_state(w);
         self.mathbox.save_state(w);
         self.adc.save_state(w);
-        w.write_bytes(&self.stick);
+        for axis in &self.stick {
+            w.write_u8(axis.position() as u8);
+        }
         for p in &self.pokeys {
             p.save_state(w);
         }
@@ -1253,7 +1242,9 @@ impl Saveable for IrobotSystem {
         self.novram.load_state(r)?;
         self.mathbox.load_state(r)?;
         self.adc.load_state(r)?;
-        r.read_bytes_into(&mut self.stick)?;
+        for axis in &mut self.stick {
+            axis.set_position(r.read_u8()? as i32);
+        }
         for p in &mut self.pokeys {
             p.load_state(r)?;
         }
@@ -1325,19 +1316,19 @@ impl InputConfigurable for IrobotSystem {
                     INPUT_START1 => apply(&mut self.in1, 7),
                     // Digital stick directions feed the self-centering stick.
                     INPUT_STICK_LEFT => {
-                        self.dir_held[0] = pressed;
+                        self.stick[0].set_held(false, pressed);
                         self.update_stick();
                     }
                     INPUT_STICK_RIGHT => {
-                        self.dir_held[1] = pressed;
+                        self.stick[0].set_held(true, pressed);
                         self.update_stick();
                     }
                     INPUT_STICK_UP => {
-                        self.dir_held[2] = pressed;
+                        self.stick[1].set_held(false, pressed);
                         self.update_stick();
                     }
                     INPUT_STICK_DOWN => {
-                        self.dir_held[3] = pressed;
+                        self.stick[1].set_held(true, pressed);
                         self.update_stick();
                     }
                     _ => {}
