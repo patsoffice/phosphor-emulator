@@ -96,20 +96,40 @@ struct SdlDevices<'a> {
     mouse: Option<sdl2::mouse::MouseState>,
 }
 
+impl SdlDevices<'_> {
+    /// Pads a binding restricted to `slot` may read; every pad when it is not
+    /// restricted.
+    fn pads_for(
+        &self,
+        slot: Option<u8>,
+    ) -> impl Iterator<Item = &sdl2::controller::GameController> {
+        self.controllers
+            .iter()
+            .enumerate()
+            .filter(move |(i, _)| slot.is_none_or(|want| pad_slot_of(*i) == want))
+            .map(|(_, c)| c)
+    }
+}
+
+/// Slot number for the pad at `index` in connection order. 1-based, matching
+/// `InputControl::player`.
+fn pad_slot_of(index: usize) -> u8 {
+    index as u8 + 1
+}
+
 impl input::DeviceState for SdlDevices<'_> {
     fn key_pressed(&self, scancode: Scancode) -> bool {
         self.keyboard.is_scancode_pressed(scancode)
     }
 
-    fn pad_button_pressed(&self, button: sdl2::controller::Button) -> bool {
-        self.controllers.iter().any(|c| c.button(button))
+    fn pad_button_pressed(&self, button: sdl2::controller::Button, slot: Option<u8>) -> bool {
+        self.pads_for(slot).any(|c| c.button(button))
     }
 
-    fn pad_axis(&self, axis: sdl2::controller::Axis) -> f32 {
-        // Whichever pad is pushing hardest wins, matching the "any pad drives
-        // player 1" behavior the dispatch path already has.
-        self.controllers
-            .iter()
+    fn pad_axis(&self, axis: sdl2::controller::Axis, slot: Option<u8>) -> f32 {
+        // Among the pads allowed to drive this binding, whichever is pushing
+        // hardest wins.
+        self.pads_for(slot)
             .map(|c| f32::from(c.axis(axis)) / 32_768.0)
             .max_by(|a, b| a.abs().total_cmp(&b.abs()))
             .unwrap_or(0.0)
@@ -120,6 +140,24 @@ impl input::DeviceState for SdlDevices<'_> {
             .as_ref()
             .is_some_and(|m| m.is_mouse_button_pressed(button))
     }
+}
+
+/// Slot of the pad that produced `event`, if it came from one.
+///
+/// Slots follow connection order and are stable while a pad stays plugged in:
+/// unplugging one shifts the pads after it down, which is the same renumbering
+/// a player would expect from the cabinet's point of view.
+fn event_pad_slot(event: &Event, controllers: &[sdl2::controller::GameController]) -> Option<u8> {
+    let which = match event {
+        Event::ControllerButtonDown { which, .. }
+        | Event::ControllerButtonUp { which, .. }
+        | Event::ControllerAxisMotion { which, .. } => *which,
+        _ => return None,
+    };
+    controllers
+        .iter()
+        .position(|c| c.instance_id() == which)
+        .map(pad_slot_of)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -369,7 +407,7 @@ pub fn run(
                         if let Some(physical) =
                             capture_physical(&event, analog_target, mouse_grabbed)
                         {
-                            bindings.rebind(target, physical);
+                            bindings.rebind(machine.input_controls(), target, physical);
                             settings_state.capturing = None;
                             continue;
                         }
@@ -743,6 +781,7 @@ pub fn run(
                         input::DispatchCtx {
                             egui_wants_keyboard: video.wants_keyboard(),
                             mouse_grabbed,
+                            pad_slot: event_pad_slot(&other, &controllers),
                         },
                         &mut dispatch_state,
                     );

@@ -185,6 +185,13 @@ pub struct SerializedBinding {
 pub struct InputBinding {
     pub physical: PhysicalInput,
     pub target: InputId,
+    /// Which pad slot may drive this binding, for gamepad inputs only.
+    ///
+    /// `None` means any pad (and is always the case for keyboard and mouse
+    /// bindings, which have no slot). `Some(n)` restricts the binding to the
+    /// n-th connected pad, so two plugged-in controllers drive their own
+    /// players instead of both driving player 1.
+    pub player_slot: Option<u8>,
     /// Multiplier applied to analog motion (relative axes). Unused for digital.
     pub scale: f32,
     /// Normalized deflection (0..1) past which a gamepad axis counts as pressed.
@@ -209,10 +216,19 @@ fn default_deadzone(physical: PhysicalInput) -> f32 {
 }
 
 /// Build a binding with default sensitivity and deadzone.
-fn make_binding(physical: PhysicalInput, target: InputId) -> InputBinding {
+fn make_binding(physical: PhysicalInput, target: InputId, player: Option<u8>) -> InputBinding {
+    // Only pad bindings are slot-scoped: a keyboard binding for player 2 is
+    // still just a key, and constraining it would make it unreachable.
+    let player_slot = match physical {
+        PhysicalInput::PadButton(_)
+        | PhysicalInput::PadAxis(..)
+        | PhysicalInput::PadFullAxis(_) => player,
+        _ => None,
+    };
     InputBinding {
         physical,
         target,
+        player_slot,
         scale: DEFAULT_SCALE,
         deadzone: default_deadzone(physical),
     }
@@ -226,6 +242,18 @@ pub struct BindingSet {
     bindings: Vec<InputBinding>,
 }
 
+/// Whether an event originating from `slot` may drive `binding`.
+///
+/// `slot` is `None` for "any slot" — keyboard and mouse events, and callers
+/// that want every binding regardless of routing (the settings UI). A binding
+/// with no `player_slot` is likewise unrestricted.
+fn slot_matches(binding: &InputBinding, slot: Option<u8>) -> bool {
+    match (slot, binding.player_slot) {
+        (None, _) | (_, None) => true,
+        (Some(from), Some(want)) => from == want,
+    }
+}
+
 impl BindingSet {
     fn new() -> Self {
         Self {
@@ -233,11 +261,16 @@ impl BindingSet {
         }
     }
 
-    /// Logical controls bound to an exact digital physical input.
-    pub fn digital_targets(&self, physical: PhysicalInput) -> impl Iterator<Item = InputId> + '_ {
+    /// Logical controls bound to an exact digital physical input, restricted to
+    /// those a `slot` event may drive (`None` for any).
+    pub fn digital_targets(
+        &self,
+        physical: PhysicalInput,
+        slot: Option<u8>,
+    ) -> impl Iterator<Item = InputId> + '_ {
         self.bindings
             .iter()
-            .filter(move |b| b.physical == physical)
+            .filter(move |b| b.physical == physical && slot_matches(b, slot))
             .map(|b| b.target)
     }
 
@@ -245,9 +278,12 @@ impl BindingSet {
     pub fn pad_axis_targets(
         &self,
         axis: Axis,
+        slot: Option<u8>,
     ) -> impl Iterator<Item = (InputId, AxisDir, f32)> + '_ {
         self.bindings.iter().filter_map(move |b| match b.physical {
-            PhysicalInput::PadAxis(a, dir) if a == axis => Some((b.target, dir, b.deadzone)),
+            PhysicalInput::PadAxis(a, dir) if a == axis && slot_matches(b, slot) => {
+                Some((b.target, dir, b.deadzone))
+            }
             _ => None,
         })
     }
@@ -257,9 +293,15 @@ impl BindingSet {
     /// Distinct from [`pad_axis_targets`](Self::pad_axis_targets): those
     /// threshold one signed direction into a button, these want the axis's
     /// continuous deflection.
-    pub fn pad_analog_targets(&self, axis: Axis) -> impl Iterator<Item = (InputId, f32, f32)> + '_ {
+    pub fn pad_analog_targets(
+        &self,
+        axis: Axis,
+        slot: Option<u8>,
+    ) -> impl Iterator<Item = (InputId, f32, f32)> + '_ {
         self.bindings.iter().filter_map(move |b| match b.physical {
-            PhysicalInput::PadFullAxis(a) if a == axis => Some((b.target, b.scale, b.deadzone)),
+            PhysicalInput::PadFullAxis(a) if a == axis && slot_matches(b, slot) => {
+                Some((b.target, b.scale, b.deadzone))
+            }
             _ => None,
         })
     }
@@ -294,7 +336,8 @@ impl BindingSet {
                     DefaultBinding::Pad(pad) => pad_to_physical(pad),
                     DefaultBinding::Mouse(mouse) => mouse_to_physical(mouse),
                 };
-                set.bindings.push(make_binding(physical, control.id));
+                set.bindings
+                    .push(make_binding(physical, control.id, control.player));
             }
         }
         set
@@ -341,7 +384,11 @@ impl BindingSet {
                 name_to_id.get(s.control.as_str()),
                 PhysicalInput::from_token(&s.input),
             ) {
-                let mut binding = make_binding(physical, target);
+                let player = controls
+                    .iter()
+                    .find(|c| c.id == target)
+                    .and_then(|c| c.player);
+                let mut binding = make_binding(physical, target, player);
                 binding.scale = s.scale.unwrap_or(DEFAULT_SCALE);
                 binding.deadzone = s.deadzone.unwrap_or_else(|| default_deadzone(physical));
                 self.bindings.push(binding);
@@ -360,11 +407,15 @@ impl BindingSet {
     /// Rebind a control to a captured physical input, replacing only the
     /// control's existing bindings of the same category (keyboard / pad /
     /// mouse), so rebinding a key keeps the gamepad binding and vice versa.
-    pub fn rebind(&mut self, target: InputId, physical: PhysicalInput) {
+    pub fn rebind(&mut self, controls: &[InputControl], target: InputId, physical: PhysicalInput) {
         let category = physical.category();
         self.bindings
             .retain(|b| b.target != target || b.physical.category() != category);
-        self.bindings.push(make_binding(physical, target));
+        let player = controls
+            .iter()
+            .find(|c| c.id == target)
+            .and_then(|c| c.player);
+        self.bindings.push(make_binding(physical, target, player));
     }
 
     /// Set the analog sensitivity of every binding driving `target`.
@@ -495,6 +546,12 @@ pub struct DispatchCtx {
     pub egui_wants_keyboard: bool,
     /// The cursor is captured for the game rather than the UI.
     pub mouse_grabbed: bool,
+    /// Slot of the pad that produced this event, when it came from one.
+    ///
+    /// Resolved by the caller from the SDL instance id, because slot
+    /// assignment is connection-order bookkeeping the dispatch layer does not
+    /// own. `None` for keyboard and mouse events, which have no slot.
+    pub pad_slot: Option<u8>,
 }
 
 /// Translate one SDL event into machine input, returning `true` when the event
@@ -512,7 +569,7 @@ pub fn dispatch<M: InputConfigurable + ?Sized>(
     state: &mut DispatchState,
 ) -> bool {
     let mut press = |physical, pressed| {
-        for id in bindings.digital_targets(physical) {
+        for id in bindings.digital_targets(physical, ctx.pad_slot) {
             machine.handle_input(InputEvent::Button { id, pressed });
         }
     };
@@ -556,7 +613,7 @@ pub fn dispatch<M: InputConfigurable + ?Sized>(
 
             // Analog stick standing in for digital directions. Only a change
             // is dispatched — see `DispatchState`.
-            for (id, dir, deadzone) in bindings.pad_axis_targets(*axis) {
+            for (id, dir, deadzone) in bindings.pad_axis_targets(*axis, ctx.pad_slot) {
                 let pressed = match dir {
                     AxisDir::Positive => normalized > deadzone,
                     AxisDir::Negative => normalized < -deadzone,
@@ -570,7 +627,7 @@ pub fn dispatch<M: InputConfigurable + ?Sized>(
             // from the deadzone edge rather than passed through, so the value
             // ramps from 0.0 as the stick leaves the deadzone instead of
             // jumping to the deadzone fraction the moment it is crossed.
-            for (id, scale, deadzone) in bindings.pad_analog_targets(*axis) {
+            for (id, scale, deadzone) in bindings.pad_analog_targets(*axis, ctx.pad_slot) {
                 let value = analog_value(normalized, deadzone, scale);
                 // Same latch, for the same reason: a resting stick would
                 // otherwise pin the axis at 0.0 forever, and on machines where
@@ -624,10 +681,10 @@ pub fn dispatch<M: InputConfigurable + ?Sized>(
 pub trait DeviceState {
     fn key_pressed(&self, scancode: Scancode) -> bool;
     /// Any connected pad holding `button`.
-    fn pad_button_pressed(&self, button: Button) -> bool;
+    fn pad_button_pressed(&self, button: Button, slot: Option<u8>) -> bool;
     /// Deflection of `axis` on whichever pad is pushing it hardest, normalized
     /// to `-1.0..=1.0`.
-    fn pad_axis(&self, axis: Axis) -> f32;
+    fn pad_axis(&self, axis: Axis, slot: Option<u8>) -> f32;
     /// `false` whenever the mouse is ungrabbed — the cursor belongs to the UI
     /// then, so from the game's point of view no mouse button is down.
     fn mouse_button_pressed(&self, button: MouseButton) -> bool;
@@ -661,9 +718,9 @@ pub fn resync<M: InputConfigurable + ?Sized>(
     for binding in bindings.all() {
         let pressed = match binding.physical {
             PhysicalInput::Key(sc) => devices.key_pressed(sc),
-            PhysicalInput::PadButton(b) => devices.pad_button_pressed(b),
+            PhysicalInput::PadButton(b) => devices.pad_button_pressed(b, binding.player_slot),
             PhysicalInput::PadAxis(axis, dir) => {
-                let deflection = devices.pad_axis(axis);
+                let deflection = devices.pad_axis(axis, binding.player_slot);
                 match dir {
                     AxisDir::Positive => deflection > binding.deadzone,
                     AxisDir::Negative => deflection < -binding.deadzone,
@@ -673,7 +730,7 @@ pub fn resync<M: InputConfigurable + ?Sized>(
             // A stick held off-center across a reset or state load should stay
             // deflected, so this re-asserts a value rather than a press.
             PhysicalInput::PadFullAxis(axis) => {
-                let raw = devices.pad_axis(axis);
+                let raw = devices.pad_axis(axis, binding.player_slot);
                 machine.handle_input(InputEvent::Absolute {
                     id: binding.target,
                     value: analog_value(raw, binding.deadzone, binding.scale),
@@ -829,10 +886,10 @@ mod tests {
         fn key_pressed(&self, scancode: Scancode) -> bool {
             self.keys.contains(&scancode)
         }
-        fn pad_button_pressed(&self, button: Button) -> bool {
+        fn pad_button_pressed(&self, button: Button, _slot: Option<u8>) -> bool {
             self.pad_buttons.contains(&button)
         }
-        fn pad_axis(&self, axis: Axis) -> f32 {
+        fn pad_axis(&self, axis: Axis, _slot: Option<u8>) -> f32 {
             self.axes
                 .iter()
                 .find(|(a, _)| *a == axis)
@@ -847,6 +904,7 @@ mod tests {
         InputBinding {
             physical,
             target: InputId(target),
+            player_slot: None,
             scale: 1.0,
             deadzone: STICK_DEADZONE_NORM,
         }
@@ -856,10 +914,11 @@ mod tests {
         BindingSet { bindings }
     }
 
-    fn ctx(egui_wants_keyboard: bool, mouse_grabbed: bool) -> DispatchCtx {
+    fn ctx(egui_wants_keyboard: bool, mouse_grabbed: bool, pad_slot: Option<u8>) -> DispatchCtx {
         DispatchCtx {
             egui_wants_keyboard,
             mouse_grabbed,
+            pad_slot,
         }
     }
 
@@ -906,7 +965,7 @@ mod tests {
             &key_down(Scancode::Left),
             &bindings,
             &mut rec,
-            ctx(true, false),
+            ctx(true, false, None),
             &mut DispatchState::default(),
         );
         assert!(!consumed);
@@ -925,7 +984,7 @@ mod tests {
             &key_up(Scancode::Left),
             &bindings,
             &mut rec,
-            ctx(true, false),
+            ctx(true, false, None),
             &mut DispatchState::default(),
         );
         assert!(consumed);
@@ -947,7 +1006,7 @@ mod tests {
                 &mouse_up(MouseButton::Left),
                 &bindings,
                 &mut rec,
-                ctx(false, grabbed),
+                ctx(false, grabbed, None),
                 &mut DispatchState::default(),
             );
             assert!(consumed, "grabbed={grabbed}");
@@ -973,7 +1032,7 @@ mod tests {
             &event(-30_000),
             &bindings,
             &mut rec,
-            ctx(false, false),
+            ctx(false, false, None),
             &mut DispatchState::default(),
         );
         // Only the crossed direction is announced. The opposite direction was
@@ -987,7 +1046,7 @@ mod tests {
             &event(-1_000),
             &bindings,
             &mut rec,
-            ctx(false, false),
+            ctx(false, false, None),
             &mut DispatchState::default(),
         );
         assert_eq!(rec.seen, vec![]);
@@ -1013,7 +1072,7 @@ mod tests {
             &event,
             &bindings,
             &mut rec,
-            ctx(false, true),
+            ctx(false, true, None),
             &mut DispatchState::default(),
         );
         assert!(consumed);
@@ -1025,7 +1084,7 @@ mod tests {
             &event,
             &bindings,
             &mut rec,
-            ctx(false, false),
+            ctx(false, false, None),
             &mut DispatchState::default(),
         );
         assert!(!consumed);
@@ -1053,7 +1112,7 @@ mod tests {
             &event(edge),
             &bindings,
             &mut rec,
-            ctx(false, false),
+            ctx(false, false, None),
             &mut state,
         );
         assert_eq!(rec.absolute, vec![]);
@@ -1062,7 +1121,7 @@ mod tests {
             &event(edge + 4_000),
             &bindings,
             &mut rec,
-            ctx(false, false),
+            ctx(false, false, None),
             &mut state,
         );
         assert_eq!(rec.absolute.len(), 1);
@@ -1074,7 +1133,7 @@ mod tests {
             &event(-32_768),
             &bindings,
             &mut rec,
-            ctx(false, false),
+            ctx(false, false, None),
             &mut DispatchState::default(),
         );
         assert_eq!(rec.absolute.len(), 1);
@@ -1087,7 +1146,7 @@ mod tests {
             &event(1_000),
             &bindings,
             &mut rec,
-            ctx(false, false),
+            ctx(false, false, None),
             &mut DispatchState::default(),
         );
         assert_eq!(rec.absolute, vec![]);
@@ -1112,7 +1171,7 @@ mod tests {
             },
             &bindings,
             &mut rec,
-            ctx(false, false),
+            ctx(false, false, None),
             &mut DispatchState::default(),
         );
         assert_eq!(rec.seen, vec![(1, true)]);
@@ -1165,11 +1224,11 @@ mod tests {
 
         // The full-axis binding is reachable through the analog lookup only.
         assert_eq!(
-            ids(set.pad_axis_targets(Axis::LeftX).map(|(id, ..)| id)),
+            ids(set.pad_axis_targets(Axis::LeftX, None).map(|(id, ..)| id)),
             []
         );
         assert_eq!(
-            ids(set.pad_analog_targets(Axis::LeftX).map(|(id, ..)| id)),
+            ids(set.pad_analog_targets(Axis::LeftX, None).map(|(id, ..)| id)),
             [2]
         );
     }
@@ -1247,7 +1306,7 @@ mod tests {
             &key_down(Scancode::Left),
             &bindings,
             &mut rec,
-            ctx(false, false),
+            ctx(false, false, None),
             &mut state,
         );
         assert_eq!(rec.seen, vec![(1, true)]);
@@ -1263,7 +1322,7 @@ mod tests {
                 },
                 &bindings,
                 &mut rec,
-                ctx(false, false),
+                ctx(false, false, None),
                 &mut state,
             );
         }
@@ -1296,7 +1355,7 @@ mod tests {
             &event(-30_000),
             &bindings,
             &mut rec,
-            ctx(false, false),
+            ctx(false, false, None),
             &mut state,
         );
         // Still deflected — no repeat.
@@ -1304,7 +1363,7 @@ mod tests {
             &event(-31_000),
             &bindings,
             &mut rec,
-            ctx(false, false),
+            ctx(false, false, None),
             &mut state,
         );
         // Back to center — one release.
@@ -1312,14 +1371,14 @@ mod tests {
             &event(0),
             &bindings,
             &mut rec,
-            ctx(false, false),
+            ctx(false, false, None),
             &mut state,
         );
         dispatch(
             &event(10),
             &bindings,
             &mut rec,
-            ctx(false, false),
+            ctx(false, false, None),
             &mut state,
         );
 
@@ -1428,6 +1487,100 @@ mod tests {
         assert_eq!((parsed.scale, parsed.deadzone), (None, None));
     }
 
+    /// Two plugged-in pads must drive their own players, not both player 1.
+    #[test]
+    fn pad_bindings_are_scoped_to_their_player_slot() {
+        let controls = &[
+            InputControl {
+                id: InputId(1),
+                stable_name: "p1_fire",
+                label: "P1 Fire",
+                kind: InputKind::Button,
+                player: Some(1),
+                default_bindings: &[
+                    DefaultBinding::Key(KeyId::LShift),
+                    DefaultBinding::Pad(PadControl::Button(
+                        phosphor_core::core::machine::PadButton::A,
+                    )),
+                ],
+            },
+            InputControl {
+                id: InputId(2),
+                stable_name: "p2_fire",
+                label: "P2 Fire",
+                kind: InputKind::Button,
+                player: Some(2),
+                default_bindings: &[DefaultBinding::Pad(PadControl::Button(
+                    phosphor_core::core::machine::PadButton::A,
+                ))],
+            },
+            InputControl {
+                id: InputId(3),
+                stable_name: "coin",
+                label: "Coin",
+                kind: InputKind::Coin,
+                player: None,
+                default_bindings: &[DefaultBinding::Pad(PadControl::Button(
+                    phosphor_core::core::machine::PadButton::Back,
+                ))],
+            },
+        ];
+        let set = BindingSet::from_controls(controls);
+        let a = PhysicalInput::PadButton(Button::A);
+
+        // Pad A on slot 1 reaches only player 1; on slot 2 only player 2.
+        assert_eq!(ids(set.digital_targets(a, Some(1))), [1]);
+        assert_eq!(ids(set.digital_targets(a, Some(2))), [2]);
+
+        // A control with no owning player stays slot-agnostic — coin works from
+        // whichever pad is nearest.
+        let back = PhysicalInput::PadButton(Button::Back);
+        assert_eq!(ids(set.digital_targets(back, Some(1))), [3]);
+        assert_eq!(ids(set.digital_targets(back, Some(2))), [3]);
+
+        // Keyboard bindings are never slot-scoped, even for an owned control.
+        let shift = PhysicalInput::Key(Scancode::LShift);
+        assert_eq!(ids(set.digital_targets(shift, Some(2))), [1]);
+
+        // `None` means "any slot", for the settings UI and non-pad events.
+        assert_eq!(ids(set.digital_targets(a, None)), [1, 2]);
+    }
+
+    #[test]
+    fn dispatch_routes_a_pad_button_to_the_owning_player_only() {
+        let bindings = set(vec![
+            InputBinding {
+                physical: PhysicalInput::PadButton(Button::A),
+                target: InputId(1),
+                player_slot: Some(1),
+                scale: 1.0,
+                deadzone: 0.0,
+            },
+            InputBinding {
+                physical: PhysicalInput::PadButton(Button::A),
+                target: InputId(2),
+                player_slot: Some(2),
+                scale: 1.0,
+                deadzone: 0.0,
+            },
+        ]);
+        let event = sdl2::event::Event::ControllerButtonDown {
+            timestamp: 0,
+            which: 0,
+            button: Button::A,
+        };
+
+        let mut rec = Recorder::default();
+        dispatch(
+            &event,
+            &bindings,
+            &mut rec,
+            ctx(false, false, Some(2)),
+            &mut DispatchState::default(),
+        );
+        assert_eq!(rec.seen, vec![(2, true)], "slot 2's pad drove player 1");
+    }
+
     #[test]
     fn unrelated_events_are_not_consumed() {
         let bindings = set(vec![binding(PhysicalInput::Key(Scancode::Left), 1)]);
@@ -1437,7 +1590,7 @@ mod tests {
             &quit,
             &bindings,
             &mut rec,
-            ctx(false, true),
+            ctx(false, true, None),
             &mut DispatchState::default()
         ));
         assert!(rec.seen.is_empty());
@@ -1647,13 +1800,13 @@ mod tests {
 
         // fire now responds to Enter, not Space.
         assert_eq!(
-            ids(set.digital_targets(PhysicalInput::Key(Scancode::Return))),
+            ids(set.digital_targets(PhysicalInput::Key(Scancode::Return), None)),
             vec![0]
         );
-        assert!(ids(set.digital_targets(PhysicalInput::Key(Scancode::Space))).is_empty());
+        assert!(ids(set.digital_targets(PhysicalInput::Key(Scancode::Space), None)).is_empty());
         // coin default preserved.
         assert_eq!(
-            ids(set.digital_targets(PhysicalInput::Key(Scancode::Num5))),
+            ids(set.digital_targets(PhysicalInput::Key(Scancode::Num5), None)),
             vec![1]
         );
     }
@@ -1713,11 +1866,11 @@ mod tests {
         }];
         let set = BindingSet::from_controls(CONTROLS);
         assert_eq!(
-            ids(set.digital_targets(PhysicalInput::Key(Scancode::Space))),
+            ids(set.digital_targets(PhysicalInput::Key(Scancode::Space), None)),
             vec![5]
         );
         assert_eq!(
-            ids(set.digital_targets(PhysicalInput::PadButton(Button::A))),
+            ids(set.digital_targets(PhysicalInput::PadButton(Button::A), None)),
             vec![5]
         );
     }
@@ -1738,18 +1891,18 @@ mod tests {
 
         // Role defaults: LShift + gamepad A.
         assert_eq!(
-            ids(set.digital_targets(PhysicalInput::Key(Scancode::LShift))),
+            ids(set.digital_targets(PhysicalInput::Key(Scancode::LShift), None)),
             vec![7]
         );
         assert_eq!(
-            ids(set.digital_targets(PhysicalInput::PadButton(Button::A))),
+            ids(set.digital_targets(PhysicalInput::PadButton(Button::A), None)),
             vec![7]
         );
         // Primary moves Fire off Space — the legacy default must be gone.
-        assert!(ids(set.digital_targets(PhysicalInput::Key(Scancode::Space))).is_empty());
+        assert!(ids(set.digital_targets(PhysicalInput::Key(Scancode::Space), None)).is_empty());
         // The machine-specific extra unions in on top of the role defaults.
         assert_eq!(
-            ids(set.digital_targets(PhysicalInput::MouseButtonInput(MouseButton::Left))),
+            ids(set.digital_targets(PhysicalInput::MouseButtonInput(MouseButton::Left), None)),
             vec![7]
         );
     }
@@ -1767,9 +1920,9 @@ mod tests {
         }];
         let set = BindingSet::from_controls(CONTROLS);
         assert_eq!(
-            ids(set.digital_targets(PhysicalInput::Key(Scancode::RShift))),
+            ids(set.digital_targets(PhysicalInput::Key(Scancode::RShift), None)),
             vec![8]
         );
-        assert!(ids(set.digital_targets(PhysicalInput::PadButton(Button::A))).is_empty());
+        assert!(ids(set.digital_targets(PhysicalInput::PadButton(Button::A), None)).is_empty());
     }
 }
