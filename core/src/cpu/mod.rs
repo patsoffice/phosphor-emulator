@@ -30,6 +30,9 @@ pub mod flags;
 // Shared M68xx ALU trait
 pub mod m68xx;
 
+// Declarative generators for the M68xx ALU opcode wrappers
+mod m68xx_alu_macros;
+
 // Re-export specific CPUs
 pub mod m6800;
 pub use m6800::M6800;
