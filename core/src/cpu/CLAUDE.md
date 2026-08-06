@@ -32,6 +32,25 @@ All CPUs have:
 
 - `flags.rs` - `set_flag()`, `flag_is_set()`, `detect_rising_edge()` — shared by all CPUs
 - `m68xx.rs` - `M68xxAlu` trait — shared ALU operations for M6800/M6809 family
+- `m68xx_alu_macros.rs` - `m68xx_alu_acc!` / `m68xx_alu_rmw!` / `m68xx_alu_inherent!` — table
+  generators for the M6800/M6809 ALU opcode wrappers
+
+## M68xx ALU Opcode Tables
+
+The M6800/M6809 `alu/{binary,unary,shift}.rs` files are macro tables, one row per opcode:
+
+```rust
+m68xx_alu_acc! { @opcode
+    /// SUBA direct (0x90): ... N, Z, V, C affected.
+    op_suba_direct => alu_direct, perform_sub, A;
+}
+```
+
+- Add an opcode by adding a row, not a function — the macro emits the same name `mod.rs` dispatches to
+- The doc comment is part of the row and is required (see the flag conventions in `core/CLAUDE.md`)
+- `@opcode` selects the M6809 helper signature (opcode byte ahead of the cycle counter); M6800 omits it
+- `m68xx_alu_inherent!` takes `@no_operand` (CLR) and `@flags_only` (TST) markers
+- Anything with its own cycle state machine (MUL, DAA, ABX, all of M6809 `alu/word.rs`) stays hand-written
 
 ## Adding a New Instruction
 
