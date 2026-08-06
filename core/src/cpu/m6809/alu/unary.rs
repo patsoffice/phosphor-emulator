@@ -1,128 +1,77 @@
 use crate::core::{Bus, BusMaster};
 use crate::cpu::m68xx::M68xxAlu;
+use crate::cpu::m68xx_alu_macros::{m68xx_alu_inherent, m68xx_alu_rmw};
 use crate::cpu::m6809::{CcFlag, ExecState, M6809};
 
 impl M6809 {
-    /// NEGA inherent (0x40): Negate A (A = 0 - A, two's complement).
-    /// N set if result bit 7 is set. Z set if result is zero.
-    /// V set if A was 0x80 (-128), since -(-128) overflows signed 8-bit range.
-    /// C set if A was non-zero (borrow occurred from 0).
-    pub(crate) fn op_nega(&mut self, cycle: u8) {
-        if cycle == 0 {
-            self.a = self.perform_neg(self.a);
-            self.state = ExecState::Fetch;
-        }
+    m68xx_alu_inherent! {
+        /// NEGA inherent (0x40): Negate A (A = 0 - A, two's complement).
+        /// N set if result bit 7 is set. Z set if result is zero.
+        /// V set if A was 0x80 (-128), since -(-128) overflows signed 8-bit range.
+        /// C set if A was non-zero (borrow occurred from 0).
+        op_nega => a, perform_neg;
+
+        /// NEGB inherent (0x50): Negate B (B = 0 - B, two's complement).
+        /// N set if result bit 7 is set. Z set if result is zero.
+        /// V set if B was 0x80 (-128), since -(-128) overflows signed 8-bit range.
+        /// C set if B was non-zero (borrow occurred from 0).
+        op_negb => b, perform_neg;
+
+        /// COMA inherent (0x43): Complement A (A = ~A, one's complement / bitwise NOT).
+        /// N set if result bit 7 is set. Z set if result is zero.
+        /// V always cleared. C always set.
+        op_coma => a, perform_com;
+
+        /// COMB inherent (0x53): Complement B (B = ~B, one's complement / bitwise NOT).
+        /// N set if result bit 7 is set. Z set if result is zero.
+        /// V always cleared. C always set.
+        op_comb => b, perform_com;
     }
 
-    /// NEGB inherent (0x50): Negate B (B = 0 - B, two's complement).
-    /// N set if result bit 7 is set. Z set if result is zero.
-    /// V set if B was 0x80 (-128), since -(-128) overflows signed 8-bit range.
-    /// C set if B was non-zero (borrow occurred from 0).
-    pub(crate) fn op_negb(&mut self, cycle: u8) {
-        if cycle == 0 {
-            self.b = self.perform_neg(self.b);
-            self.state = ExecState::Fetch;
-        }
+    m68xx_alu_inherent! { @no_operand
+        /// CLRA inherent (0x4F): Clear A (A = 0).
+        /// Flags are always set to fixed values: N=0, Z=1, V=0, C=0.
+        op_clra => a, perform_clr;
+
+        /// CLRB inherent (0x5F): Clear B (B = 0).
+        /// Flags are always set to fixed values: N=0, Z=1, V=0, C=0.
+        op_clrb => b, perform_clr;
     }
 
-    /// COMA inherent (0x43): Complement A (A = ~A, one's complement / bitwise NOT).
-    /// N set if result bit 7 is set. Z set if result is zero.
-    /// V always cleared. C always set.
-    pub(crate) fn op_coma(&mut self, cycle: u8) {
-        if cycle == 0 {
-            self.a = self.perform_com(self.a);
-            self.state = ExecState::Fetch;
-        }
+    m68xx_alu_inherent! {
+        /// INCA inherent (0x4C): Increment A (A = A + 1).
+        /// N set if result bit 7 is set. Z set if result is zero.
+        /// V set if A was 0x7F before increment (positive-to-negative signed overflow).
+        /// C is not affected.
+        op_inca => a, perform_inc;
+
+        /// INCB inherent (0x5C): Increment B (B = B + 1).
+        /// N set if result bit 7 is set. Z set if result is zero.
+        /// V set if B was 0x7F before increment (positive-to-negative signed overflow).
+        /// C is not affected.
+        op_incb => b, perform_inc;
+
+        /// DECA inherent (0x4A): Decrement A (A = A - 1).
+        /// N set if result bit 7 is set. Z set if result is zero.
+        /// V set if A was 0x80 before decrement (negative-to-positive signed overflow).
+        /// C is not affected.
+        op_deca => a, perform_dec;
+
+        /// DECB inherent (0x5A): Decrement B (B = B - 1).
+        /// N set if result bit 7 is set. Z set if result is zero.
+        /// V set if B was 0x80 before decrement (negative-to-positive signed overflow).
+        /// C is not affected.
+        op_decb => b, perform_dec;
     }
 
-    /// COMB inherent (0x53): Complement B (B = ~B, one's complement / bitwise NOT).
-    /// N set if result bit 7 is set. Z set if result is zero.
-    /// V always cleared. C always set.
-    pub(crate) fn op_comb(&mut self, cycle: u8) {
-        if cycle == 0 {
-            self.b = self.perform_com(self.b);
-            self.state = ExecState::Fetch;
-        }
-    }
+    m68xx_alu_inherent! { @flags_only
+        /// TSTA inherent (0x4D): Test A (set flags based on A, no modification).
+        /// N set if A bit 7 is set. Z set if A is zero. V always cleared.
+        op_tsta => a, perform_tst;
 
-    /// CLRA inherent (0x4F): Clear A (A = 0).
-    /// Flags are always set to fixed values: N=0, Z=1, V=0, C=0.
-    pub(crate) fn op_clra(&mut self, cycle: u8) {
-        if cycle == 0 {
-            self.a = self.perform_clr();
-            self.state = ExecState::Fetch;
-        }
-    }
-
-    /// CLRB inherent (0x5F): Clear B (B = 0).
-    /// Flags are always set to fixed values: N=0, Z=1, V=0, C=0.
-    pub(crate) fn op_clrb(&mut self, cycle: u8) {
-        if cycle == 0 {
-            self.b = self.perform_clr();
-            self.state = ExecState::Fetch;
-        }
-    }
-
-    /// INCA inherent (0x4C): Increment A (A = A + 1).
-    /// N set if result bit 7 is set. Z set if result is zero.
-    /// V set if A was 0x7F before increment (positive-to-negative signed overflow).
-    /// C is not affected.
-    pub(crate) fn op_inca(&mut self, cycle: u8) {
-        if cycle == 0 {
-            self.a = self.perform_inc(self.a);
-            self.state = ExecState::Fetch;
-        }
-    }
-
-    /// INCB inherent (0x5C): Increment B (B = B + 1).
-    /// N set if result bit 7 is set. Z set if result is zero.
-    /// V set if B was 0x7F before increment (positive-to-negative signed overflow).
-    /// C is not affected.
-    pub(crate) fn op_incb(&mut self, cycle: u8) {
-        if cycle == 0 {
-            self.b = self.perform_inc(self.b);
-            self.state = ExecState::Fetch;
-        }
-    }
-
-    /// DECA inherent (0x4A): Decrement A (A = A - 1).
-    /// N set if result bit 7 is set. Z set if result is zero.
-    /// V set if A was 0x80 before decrement (negative-to-positive signed overflow).
-    /// C is not affected.
-    pub(crate) fn op_deca(&mut self, cycle: u8) {
-        if cycle == 0 {
-            self.a = self.perform_dec(self.a);
-            self.state = ExecState::Fetch;
-        }
-    }
-
-    /// DECB inherent (0x5A): Decrement B (B = B - 1).
-    /// N set if result bit 7 is set. Z set if result is zero.
-    /// V set if B was 0x80 before decrement (negative-to-positive signed overflow).
-    /// C is not affected.
-    pub(crate) fn op_decb(&mut self, cycle: u8) {
-        if cycle == 0 {
-            self.b = self.perform_dec(self.b);
-            self.state = ExecState::Fetch;
-        }
-    }
-
-    /// TSTA inherent (0x4D): Test A (set flags based on A, no modification).
-    /// N set if A bit 7 is set. Z set if A is zero. V always cleared.
-    pub(crate) fn op_tsta(&mut self, cycle: u8) {
-        if cycle == 0 {
-            self.perform_tst(self.a);
-            self.state = ExecState::Fetch;
-        }
-    }
-
-    /// TSTB inherent (0x5D): Test B (set flags based on B, no modification).
-    /// N set if B bit 7 is set. Z set if B is zero. V always cleared.
-    pub(crate) fn op_tstb(&mut self, cycle: u8) {
-        if cycle == 0 {
-            self.perform_tst(self.b);
-            self.state = ExecState::Fetch;
-        }
+        /// TSTB inherent (0x5D): Test B (set flags based on B, no modification).
+        /// N set if B bit 7 is set. Z set if B is zero. V always cleared.
+        op_tstb => b, perform_tst;
     }
 
     /// NOP inherent (0x12): No operation.
@@ -194,220 +143,73 @@ impl M6809 {
 
     // --- Direct addressing mode (memory unary ops, 0x00-0x0F) ---
 
-    /// NEG direct (0x00): Negate memory byte at DP:addr.
-    pub(crate) fn op_neg_direct<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.rmw_direct(opcode, cycle, bus, master, |cpu, val| cpu.perform_neg(val));
-    }
+    m68xx_alu_rmw! { @opcode
+        /// NEG direct (0x00): Negate memory byte at DP:addr.
+        op_neg_direct => rmw_direct, |cpu, val| cpu.perform_neg(val);
 
-    /// COM direct (0x03): Complement memory byte at DP:addr.
-    pub(crate) fn op_com_direct<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.rmw_direct(opcode, cycle, bus, master, |cpu, val| cpu.perform_com(val));
-    }
+        /// COM direct (0x03): Complement memory byte at DP:addr.
+        op_com_direct => rmw_direct, |cpu, val| cpu.perform_com(val);
 
-    /// DEC direct (0x0A): Decrement memory byte at DP:addr.
-    pub(crate) fn op_dec_direct<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.rmw_direct(opcode, cycle, bus, master, |cpu, val| cpu.perform_dec(val));
-    }
+        /// DEC direct (0x0A): Decrement memory byte at DP:addr.
+        op_dec_direct => rmw_direct, |cpu, val| cpu.perform_dec(val);
 
-    /// INC direct (0x0C): Increment memory byte at DP:addr.
-    pub(crate) fn op_inc_direct<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.rmw_direct(opcode, cycle, bus, master, |cpu, val| cpu.perform_inc(val));
-    }
+        /// INC direct (0x0C): Increment memory byte at DP:addr.
+        op_inc_direct => rmw_direct, |cpu, val| cpu.perform_inc(val);
 
-    /// TST direct (0x0D): Test memory byte at DP:addr.
-    /// Shares RMW timing (6 cycles) but performs no write-back — the final cycle
-    /// is a dummy VMA read (handled in `rmw_direct`).
-    pub(crate) fn op_tst_direct<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.rmw_direct(opcode, cycle, bus, master, |cpu, val| {
-            cpu.perform_tst(val);
-            val
-        });
-    }
+        /// TST direct (0x0D): Test memory byte at DP:addr.
+        /// Shares RMW timing (6 cycles) but performs no write-back — the final cycle
+        /// is a dummy VMA read (handled in `rmw_direct`).
+        op_tst_direct => rmw_direct, |cpu, val| { cpu.perform_tst(val); val };
 
-    /// CLR direct (0x0F): Clear memory byte at DP:addr.
-    pub(crate) fn op_clr_direct<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.rmw_direct(opcode, cycle, bus, master, |cpu, _val| cpu.perform_clr());
+        /// CLR direct (0x0F): Clear memory byte at DP:addr.
+        op_clr_direct => rmw_direct, |cpu, _val| cpu.perform_clr();
     }
 
     // --- Extended addressing mode (memory unary ops, 0x70-0x7F) ---
 
-    /// NEG extended (0x70): Negate memory byte at 16-bit address.
-    pub(crate) fn op_neg_extended<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.rmw_extended(opcode, cycle, bus, master, |cpu, val| cpu.perform_neg(val));
-    }
+    m68xx_alu_rmw! { @opcode
+        /// NEG extended (0x70): Negate memory byte at 16-bit address.
+        op_neg_extended => rmw_extended, |cpu, val| cpu.perform_neg(val);
 
-    /// COM extended (0x73): Complement memory byte at 16-bit address.
-    pub(crate) fn op_com_extended<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.rmw_extended(opcode, cycle, bus, master, |cpu, val| cpu.perform_com(val));
-    }
+        /// COM extended (0x73): Complement memory byte at 16-bit address.
+        op_com_extended => rmw_extended, |cpu, val| cpu.perform_com(val);
 
-    /// DEC extended (0x7A): Decrement memory byte at 16-bit address.
-    pub(crate) fn op_dec_extended<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.rmw_extended(opcode, cycle, bus, master, |cpu, val| cpu.perform_dec(val));
-    }
+        /// DEC extended (0x7A): Decrement memory byte at 16-bit address.
+        op_dec_extended => rmw_extended, |cpu, val| cpu.perform_dec(val);
 
-    /// INC extended (0x7C): Increment memory byte at 16-bit address.
-    pub(crate) fn op_inc_extended<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.rmw_extended(opcode, cycle, bus, master, |cpu, val| cpu.perform_inc(val));
-    }
+        /// INC extended (0x7C): Increment memory byte at 16-bit address.
+        op_inc_extended => rmw_extended, |cpu, val| cpu.perform_inc(val);
 
-    /// TST extended (0x7D): Test memory byte at 16-bit address.
-    /// Shares RMW timing (7 cycles) but performs no write-back — the final cycle
-    /// is a dummy VMA read (handled in `rmw_extended`).
-    pub(crate) fn op_tst_extended<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.rmw_extended(opcode, cycle, bus, master, |cpu, val| {
-            cpu.perform_tst(val);
-            val
-        });
-    }
+        /// TST extended (0x7D): Test memory byte at 16-bit address.
+        /// Shares RMW timing (7 cycles) but performs no write-back — the final cycle
+        /// is a dummy VMA read (handled in `rmw_extended`).
+        op_tst_extended => rmw_extended, |cpu, val| { cpu.perform_tst(val); val };
 
-    /// CLR extended (0x7F): Clear memory byte at 16-bit address.
-    pub(crate) fn op_clr_extended<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.rmw_extended(opcode, cycle, bus, master, |cpu, _val| cpu.perform_clr());
+        /// CLR extended (0x7F): Clear memory byte at 16-bit address.
+        op_clr_extended => rmw_extended, |cpu, _val| cpu.perform_clr();
     }
 
     // --- Indexed addressing mode (memory unary ops, 0x60-0x6F) ---
 
-    /// NEG indexed (0x60): Negate memory byte at indexed EA.
-    pub(crate) fn op_neg_indexed<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.rmw_indexed(opcode, cycle, bus, master, |cpu, val| cpu.perform_neg(val));
-    }
+    m68xx_alu_rmw! { @opcode
+        /// NEG indexed (0x60): Negate memory byte at indexed EA.
+        op_neg_indexed => rmw_indexed, |cpu, val| cpu.perform_neg(val);
 
-    /// COM indexed (0x63): Complement memory byte at indexed EA.
-    pub(crate) fn op_com_indexed<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.rmw_indexed(opcode, cycle, bus, master, |cpu, val| cpu.perform_com(val));
-    }
+        /// COM indexed (0x63): Complement memory byte at indexed EA.
+        op_com_indexed => rmw_indexed, |cpu, val| cpu.perform_com(val);
 
-    /// DEC indexed (0x6A): Decrement memory byte at indexed EA.
-    pub(crate) fn op_dec_indexed<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.rmw_indexed(opcode, cycle, bus, master, |cpu, val| cpu.perform_dec(val));
-    }
+        /// DEC indexed (0x6A): Decrement memory byte at indexed EA.
+        op_dec_indexed => rmw_indexed, |cpu, val| cpu.perform_dec(val);
 
-    /// INC indexed (0x6C): Increment memory byte at indexed EA.
-    pub(crate) fn op_inc_indexed<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.rmw_indexed(opcode, cycle, bus, master, |cpu, val| cpu.perform_inc(val));
-    }
+        /// INC indexed (0x6C): Increment memory byte at indexed EA.
+        op_inc_indexed => rmw_indexed, |cpu, val| cpu.perform_inc(val);
 
-    /// TST indexed (0x6D): Test memory byte at indexed EA.
-    /// Shares RMW timing but performs no write-back — the final cycle is a dummy
-    /// VMA read (handled in `rmw_indexed`).
-    pub(crate) fn op_tst_indexed<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.rmw_indexed(opcode, cycle, bus, master, |cpu, val| {
-            cpu.perform_tst(val);
-            val
-        });
-    }
+        /// TST indexed (0x6D): Test memory byte at indexed EA.
+        /// Shares RMW timing but performs no write-back — the final cycle is a dummy
+        /// VMA read (handled in `rmw_indexed`).
+        op_tst_indexed => rmw_indexed, |cpu, val| { cpu.perform_tst(val); val };
 
-    /// CLR indexed (0x6F): Clear memory byte at indexed EA.
-    pub(crate) fn op_clr_indexed<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.rmw_indexed(opcode, cycle, bus, master, |cpu, _val| cpu.perform_clr());
+        /// CLR indexed (0x6F): Clear memory byte at indexed EA.
+        op_clr_indexed => rmw_indexed, |cpu, _val| cpu.perform_clr();
     }
 }

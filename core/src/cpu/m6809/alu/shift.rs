@@ -1,288 +1,127 @@
 use crate::core::{Bus, BusMaster};
 use crate::cpu::m68xx::M68xxAlu;
+use crate::cpu::m68xx_alu_macros::{m68xx_alu_inherent, m68xx_alu_rmw};
 use crate::cpu::m6809::{ExecState, M6809};
 
 impl M6809 {
-    /// ASLA/LSLA inherent (0x48): Arithmetic/Logical Shift Left A.
-    /// Shifts all bits left one position. Bit 7 goes to C, 0 enters bit 0.
-    /// N set if result bit 7 is set. Z set if result is zero.
-    /// V = N XOR C (post-shift). C set to old bit 7.
-    pub(crate) fn op_asla(&mut self, cycle: u8) {
-        if cycle == 0 {
-            self.a = self.perform_asl(self.a);
-            self.state = ExecState::Fetch;
-        }
-    }
+    m68xx_alu_inherent! {
+        /// ASLA/LSLA inherent (0x48): Arithmetic/Logical Shift Left A.
+        /// Shifts all bits left one position. Bit 7 goes to C, 0 enters bit 0.
+        /// N set if result bit 7 is set. Z set if result is zero.
+        /// V = N XOR C (post-shift). C set to old bit 7.
+        op_asla => a, perform_asl;
 
-    /// ASLB/LSLB inherent (0x58): Arithmetic/Logical Shift Left B.
-    /// Shifts all bits left one position. Bit 7 goes to C, 0 enters bit 0.
-    /// N set if result bit 7 is set. Z set if result is zero.
-    /// V = N XOR C (post-shift). C set to old bit 7.
-    pub(crate) fn op_aslb(&mut self, cycle: u8) {
-        if cycle == 0 {
-            self.b = self.perform_asl(self.b);
-            self.state = ExecState::Fetch;
-        }
-    }
+        /// ASLB/LSLB inherent (0x58): Arithmetic/Logical Shift Left B.
+        /// Shifts all bits left one position. Bit 7 goes to C, 0 enters bit 0.
+        /// N set if result bit 7 is set. Z set if result is zero.
+        /// V = N XOR C (post-shift). C set to old bit 7.
+        op_aslb => b, perform_asl;
 
-    /// ASRA inherent (0x47): Arithmetic Shift Right A.
-    /// Shifts all bits right one position. Bit 7 is preserved (sign extension).
-    /// Bit 0 goes to C.
-    /// N set if result bit 7 is set. Z set if result is zero.
-    /// V = N XOR C (post-shift). C set to old bit 0.
-    pub(crate) fn op_asra(&mut self, cycle: u8) {
-        if cycle == 0 {
-            self.a = self.perform_asr(self.a);
-            self.state = ExecState::Fetch;
-        }
-    }
+        /// ASRA inherent (0x47): Arithmetic Shift Right A.
+        /// Shifts all bits right one position. Bit 7 is preserved (sign extension).
+        /// Bit 0 goes to C.
+        /// N set if result bit 7 is set. Z set if result is zero.
+        /// V = N XOR C (post-shift). C set to old bit 0.
+        op_asra => a, perform_asr;
 
-    /// ASRB inherent (0x57): Arithmetic Shift Right B.
-    /// Shifts all bits right one position. Bit 7 is preserved (sign extension).
-    /// Bit 0 goes to C.
-    /// N set if result bit 7 is set. Z set if result is zero.
-    /// V = N XOR C (post-shift). C set to old bit 0.
-    pub(crate) fn op_asrb(&mut self, cycle: u8) {
-        if cycle == 0 {
-            self.b = self.perform_asr(self.b);
-            self.state = ExecState::Fetch;
-        }
-    }
+        /// ASRB inherent (0x57): Arithmetic Shift Right B.
+        /// Shifts all bits right one position. Bit 7 is preserved (sign extension).
+        /// Bit 0 goes to C.
+        /// N set if result bit 7 is set. Z set if result is zero.
+        /// V = N XOR C (post-shift). C set to old bit 0.
+        op_asrb => b, perform_asr;
 
-    /// LSRA inherent (0x44): Logical Shift Right A.
-    /// Shifts all bits right one position. 0 enters bit 7, bit 0 goes to C.
-    /// N always cleared. Z set if result is zero.
-    /// V = N XOR C = C (since N=0). C set to old bit 0.
-    pub(crate) fn op_lsra(&mut self, cycle: u8) {
-        if cycle == 0 {
-            self.a = self.perform_lsr(self.a);
-            self.state = ExecState::Fetch;
-        }
-    }
+        /// LSRA inherent (0x44): Logical Shift Right A.
+        /// Shifts all bits right one position. 0 enters bit 7, bit 0 goes to C.
+        /// N always cleared. Z set if result is zero.
+        /// V = N XOR C = C (since N=0). C set to old bit 0.
+        op_lsra => a, perform_lsr;
 
-    /// LSRB inherent (0x54): Logical Shift Right B.
-    /// Shifts all bits right one position. 0 enters bit 7, bit 0 goes to C.
-    /// N always cleared. Z set if result is zero.
-    /// V = N XOR C = C (since N=0). C set to old bit 0.
-    pub(crate) fn op_lsrb(&mut self, cycle: u8) {
-        if cycle == 0 {
-            self.b = self.perform_lsr(self.b);
-            self.state = ExecState::Fetch;
-        }
-    }
+        /// LSRB inherent (0x54): Logical Shift Right B.
+        /// Shifts all bits right one position. 0 enters bit 7, bit 0 goes to C.
+        /// N always cleared. Z set if result is zero.
+        /// V = N XOR C = C (since N=0). C set to old bit 0.
+        op_lsrb => b, perform_lsr;
 
-    /// ROLA inherent (0x49): Rotate Left A through Carry.
-    /// Old bit 7 goes to C, old C enters bit 0, other bits shift left.
-    /// N set if result bit 7 is set. Z set if result is zero.
-    /// V = N XOR C (post-rotate). C set to old bit 7.
-    pub(crate) fn op_rola(&mut self, cycle: u8) {
-        if cycle == 0 {
-            self.a = self.perform_rol(self.a);
-            self.state = ExecState::Fetch;
-        }
-    }
+        /// ROLA inherent (0x49): Rotate Left A through Carry.
+        /// Old bit 7 goes to C, old C enters bit 0, other bits shift left.
+        /// N set if result bit 7 is set. Z set if result is zero.
+        /// V = N XOR C (post-rotate). C set to old bit 7.
+        op_rola => a, perform_rol;
 
-    /// ROLB inherent (0x59): Rotate Left B through Carry.
-    /// Old bit 7 goes to C, old C enters bit 0, other bits shift left.
-    /// N set if result bit 7 is set. Z set if result is zero.
-    /// V = N XOR C (post-rotate). C set to old bit 7.
-    pub(crate) fn op_rolb(&mut self, cycle: u8) {
-        if cycle == 0 {
-            self.b = self.perform_rol(self.b);
-            self.state = ExecState::Fetch;
-        }
-    }
+        /// ROLB inherent (0x59): Rotate Left B through Carry.
+        /// Old bit 7 goes to C, old C enters bit 0, other bits shift left.
+        /// N set if result bit 7 is set. Z set if result is zero.
+        /// V = N XOR C (post-rotate). C set to old bit 7.
+        op_rolb => b, perform_rol;
 
-    /// RORA inherent (0x46): Rotate Right A through Carry.
-    /// Old bit 0 goes to C, old C enters bit 7, other bits shift right.
-    /// N set if result bit 7 is set (i.e., old C was set). Z set if result is zero.
-    /// V = N XOR C (post-rotate). C set to old bit 0.
-    pub(crate) fn op_rora(&mut self, cycle: u8) {
-        if cycle == 0 {
-            self.a = self.perform_ror(self.a);
-            self.state = ExecState::Fetch;
-        }
-    }
+        /// RORA inherent (0x46): Rotate Right A through Carry.
+        /// Old bit 0 goes to C, old C enters bit 7, other bits shift right.
+        /// N set if result bit 7 is set (i.e., old C was set). Z set if result is zero.
+        /// V = N XOR C (post-rotate). C set to old bit 0.
+        op_rora => a, perform_ror;
 
-    /// RORB inherent (0x56): Rotate Right B through Carry.
-    /// Old bit 0 goes to C, old C enters bit 7, other bits shift right.
-    /// N set if result bit 7 is set (i.e., old C was set). Z set if result is zero.
-    /// V = N XOR C (post-rotate). C set to old bit 0.
-    pub(crate) fn op_rorb(&mut self, cycle: u8) {
-        if cycle == 0 {
-            self.b = self.perform_ror(self.b);
-            self.state = ExecState::Fetch;
-        }
+        /// RORB inherent (0x56): Rotate Right B through Carry.
+        /// Old bit 0 goes to C, old C enters bit 7, other bits shift right.
+        /// N set if result bit 7 is set (i.e., old C was set). Z set if result is zero.
+        /// V = N XOR C (post-rotate). C set to old bit 0.
+        op_rorb => b, perform_ror;
     }
 
     // --- Direct addressing mode (memory shift ops, 0x04-0x09) ---
 
-    /// LSR direct (0x04): Logical Shift Right memory byte at DP:addr.
-    pub(crate) fn op_lsr_direct<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.rmw_direct(opcode, cycle, bus, master, |cpu, val| cpu.perform_lsr(val));
-    }
+    m68xx_alu_rmw! { @opcode
+        /// LSR direct (0x04): Logical Shift Right memory byte at DP:addr.
+        op_lsr_direct => rmw_direct, |cpu, val| cpu.perform_lsr(val);
 
-    /// ROR direct (0x06): Rotate Right memory byte at DP:addr through Carry.
-    pub(crate) fn op_ror_direct<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.rmw_direct(opcode, cycle, bus, master, |cpu, val| cpu.perform_ror(val));
-    }
+        /// ROR direct (0x06): Rotate Right memory byte at DP:addr through Carry.
+        op_ror_direct => rmw_direct, |cpu, val| cpu.perform_ror(val);
 
-    /// ASR direct (0x07): Arithmetic Shift Right memory byte at DP:addr.
-    pub(crate) fn op_asr_direct<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.rmw_direct(opcode, cycle, bus, master, |cpu, val| cpu.perform_asr(val));
-    }
+        /// ASR direct (0x07): Arithmetic Shift Right memory byte at DP:addr.
+        op_asr_direct => rmw_direct, |cpu, val| cpu.perform_asr(val);
 
-    /// ASL direct (0x08): Arithmetic Shift Left memory byte at DP:addr.
-    pub(crate) fn op_asl_direct<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.rmw_direct(opcode, cycle, bus, master, |cpu, val| cpu.perform_asl(val));
-    }
+        /// ASL direct (0x08): Arithmetic Shift Left memory byte at DP:addr.
+        op_asl_direct => rmw_direct, |cpu, val| cpu.perform_asl(val);
 
-    /// ROL direct (0x09): Rotate Left memory byte at DP:addr through Carry.
-    pub(crate) fn op_rol_direct<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.rmw_direct(opcode, cycle, bus, master, |cpu, val| cpu.perform_rol(val));
+        /// ROL direct (0x09): Rotate Left memory byte at DP:addr through Carry.
+        op_rol_direct => rmw_direct, |cpu, val| cpu.perform_rol(val);
     }
 
     // --- Extended addressing mode (memory shift ops, 0x74-0x79) ---
 
-    /// LSR extended (0x74): Logical Shift Right memory byte at 16-bit address.
-    pub(crate) fn op_lsr_extended<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.rmw_extended(opcode, cycle, bus, master, |cpu, val| cpu.perform_lsr(val));
-    }
+    m68xx_alu_rmw! { @opcode
+        /// LSR extended (0x74): Logical Shift Right memory byte at 16-bit address.
+        op_lsr_extended => rmw_extended, |cpu, val| cpu.perform_lsr(val);
 
-    /// ROR extended (0x76): Rotate Right memory byte at 16-bit address through Carry.
-    pub(crate) fn op_ror_extended<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.rmw_extended(opcode, cycle, bus, master, |cpu, val| cpu.perform_ror(val));
-    }
+        /// ROR extended (0x76): Rotate Right memory byte at 16-bit address through Carry.
+        op_ror_extended => rmw_extended, |cpu, val| cpu.perform_ror(val);
 
-    /// ASR extended (0x77): Arithmetic Shift Right memory byte at 16-bit address.
-    pub(crate) fn op_asr_extended<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.rmw_extended(opcode, cycle, bus, master, |cpu, val| cpu.perform_asr(val));
-    }
+        /// ASR extended (0x77): Arithmetic Shift Right memory byte at 16-bit address.
+        op_asr_extended => rmw_extended, |cpu, val| cpu.perform_asr(val);
 
-    /// ASL extended (0x78): Arithmetic Shift Left memory byte at 16-bit address.
-    pub(crate) fn op_asl_extended<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.rmw_extended(opcode, cycle, bus, master, |cpu, val| cpu.perform_asl(val));
-    }
+        /// ASL extended (0x78): Arithmetic Shift Left memory byte at 16-bit address.
+        op_asl_extended => rmw_extended, |cpu, val| cpu.perform_asl(val);
 
-    /// ROL extended (0x79): Rotate Left memory byte at 16-bit address through Carry.
-    pub(crate) fn op_rol_extended<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.rmw_extended(opcode, cycle, bus, master, |cpu, val| cpu.perform_rol(val));
+        /// ROL extended (0x79): Rotate Left memory byte at 16-bit address through Carry.
+        op_rol_extended => rmw_extended, |cpu, val| cpu.perform_rol(val);
     }
 
     // --- Indexed addressing mode (memory shift ops, 0x64-0x69) ---
 
-    /// LSR indexed (0x64): Logical Shift Right memory byte at indexed EA.
-    pub(crate) fn op_lsr_indexed<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.rmw_indexed(opcode, cycle, bus, master, |cpu, val| cpu.perform_lsr(val));
-    }
+    m68xx_alu_rmw! { @opcode
+        /// LSR indexed (0x64): Logical Shift Right memory byte at indexed EA.
+        op_lsr_indexed => rmw_indexed, |cpu, val| cpu.perform_lsr(val);
 
-    /// ROR indexed (0x66): Rotate Right memory byte at indexed EA through Carry.
-    pub(crate) fn op_ror_indexed<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.rmw_indexed(opcode, cycle, bus, master, |cpu, val| cpu.perform_ror(val));
-    }
+        /// ROR indexed (0x66): Rotate Right memory byte at indexed EA through Carry.
+        op_ror_indexed => rmw_indexed, |cpu, val| cpu.perform_ror(val);
 
-    /// ASR indexed (0x67): Arithmetic Shift Right memory byte at indexed EA.
-    pub(crate) fn op_asr_indexed<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.rmw_indexed(opcode, cycle, bus, master, |cpu, val| cpu.perform_asr(val));
-    }
+        /// ASR indexed (0x67): Arithmetic Shift Right memory byte at indexed EA.
+        op_asr_indexed => rmw_indexed, |cpu, val| cpu.perform_asr(val);
 
-    /// ASL indexed (0x68): Arithmetic Shift Left memory byte at indexed EA.
-    pub(crate) fn op_asl_indexed<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.rmw_indexed(opcode, cycle, bus, master, |cpu, val| cpu.perform_asl(val));
-    }
+        /// ASL indexed (0x68): Arithmetic Shift Left memory byte at indexed EA.
+        op_asl_indexed => rmw_indexed, |cpu, val| cpu.perform_asl(val);
 
-    /// ROL indexed (0x69): Rotate Left memory byte at indexed EA through Carry.
-    pub(crate) fn op_rol_indexed<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.rmw_indexed(opcode, cycle, bus, master, |cpu, val| cpu.perform_rol(val));
+        /// ROL indexed (0x69): Rotate Left memory byte at indexed EA through Carry.
+        op_rol_indexed => rmw_indexed, |cpu, val| cpu.perform_rol(val);
     }
 }

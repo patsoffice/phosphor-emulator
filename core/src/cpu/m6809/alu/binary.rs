@@ -1,36 +1,103 @@
 use crate::core::{Bus, BusMaster};
 use crate::cpu::m68xx::{Acc, M68xxAlu};
+use crate::cpu::m68xx_alu_macros::m68xx_alu_acc;
 use crate::cpu::m6809::{CcFlag, ExecState, M6809};
 
 impl M6809 {
-    /// SUBA immediate (0x80): Subtracts the immediate operand from accumulator A.
-    /// N set if result bit 7 is set. Z set if result is zero.
-    /// V set if signed overflow occurred (operands had different signs and result sign differs from A).
-    /// C set if unsigned borrow occurred (operand > A). H set if borrow from bit 4.
-    pub(crate) fn op_suba_imm<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.alu_imm(cycle, bus, master, |cpu, operand| {
-            cpu.perform_sub(Acc::A, operand);
-        });
-    }
+    m68xx_alu_acc! {
+        /// SUBA immediate (0x80): Subtracts the immediate operand from accumulator A.
+        /// N set if result bit 7 is set. Z set if result is zero.
+        /// V set if signed overflow occurred (operands had different signs and result sign differs from A).
+        /// C set if unsigned borrow occurred (operand > A). H set if borrow from bit 4.
+        op_suba_imm => alu_imm, perform_sub, A;
 
-    /// ADDA immediate (0x8B): Adds the immediate operand to accumulator A.
-    /// N set if result bit 7 is set. Z set if result is zero.
-    /// V set if signed overflow occurred (operands had same sign and result sign differs).
-    /// C set if unsigned carry out of bit 7. H set if carry from bit 3 to bit 4.
-    pub(crate) fn op_adda_imm<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.alu_imm(cycle, bus, master, |cpu, operand| {
-            cpu.perform_add(Acc::A, operand);
-        });
+        /// ADDA immediate (0x8B): Adds the immediate operand to accumulator A.
+        /// N set if result bit 7 is set. Z set if result is zero.
+        /// V set if signed overflow occurred (operands had same sign and result sign differs).
+        /// C set if unsigned carry out of bit 7. H set if carry from bit 3 to bit 4.
+        op_adda_imm => alu_imm, perform_add, A;
+
+        /// CMPA immediate (0x81): Compares accumulator A with the immediate operand (A - M).
+        /// Performs subtraction but discards the result; only flags are updated.
+        /// N set if result bit 7 is set. Z set if A == operand.
+        /// V set if signed overflow occurred. C set if unsigned borrow occurred (operand > A).
+        op_cmpa_imm => alu_imm, perform_cmp, A;
+
+        /// SBCA immediate (0x82): Subtracts the immediate operand and carry from accumulator A.
+        /// A = A - M - C. Used for multi-byte subtraction chains.
+        /// N set if result bit 7 is set. Z set if result is zero.
+        /// V set if signed overflow occurred. C set if unsigned borrow occurred.
+        op_sbca_imm => alu_imm, perform_sbc, A;
+
+        /// ANDA immediate (0x84): Performs bitwise AND of accumulator A with the immediate operand.
+        /// N set if result bit 7 is set. Z set if result is zero. V always cleared.
+        op_anda_imm => alu_imm, perform_and, A;
+
+        /// BITA immediate (0x85): Bit test A -- performs A AND operand, updates flags but discards result.
+        /// N set if result bit 7 is set. Z set if result is zero. V always cleared.
+        op_bita_imm => alu_imm, perform_bit, A;
+
+        /// EORA immediate (0x88): Performs bitwise Exclusive OR of accumulator A with the immediate operand.
+        /// N set if result bit 7 is set. Z set if result is zero. V always cleared.
+        op_eora_imm => alu_imm, perform_eor, A;
+
+        /// ADCA immediate (0x89): Adds the immediate operand and carry to accumulator A.
+        /// A = A + M + C. Used for multi-byte addition chains.
+        /// N set if result bit 7 is set. Z set if result is zero.
+        /// V set if signed overflow occurred. C set if unsigned carry out of bit 7.
+        /// H set if carry from bit 3 to bit 4.
+        op_adca_imm => alu_imm, perform_adc, A;
+
+        /// ORA immediate (0x8A): Performs bitwise OR of accumulator A with the immediate operand.
+        /// N set if result bit 7 is set. Z set if result is zero. V always cleared.
+        op_ora_imm => alu_imm, perform_or, A;
+
+        /// SUBB immediate (0xC0): Subtracts the immediate operand from accumulator B.
+        /// N set if result bit 7 is set. Z set if result is zero.
+        /// V set if signed overflow occurred (operands had different signs and result sign differs from B).
+        /// C set if unsigned borrow occurred (operand > B).
+        op_subb_imm => alu_imm, perform_sub, B;
+
+        /// CMPB immediate (0xC1): Compares accumulator B with the immediate operand (B - M).
+        /// Performs subtraction but discards the result; only flags are updated.
+        /// N set if result bit 7 is set. Z set if B == operand.
+        /// V set if signed overflow occurred. C set if unsigned borrow occurred (operand > B).
+        op_cmpb_imm => alu_imm, perform_cmp, B;
+
+        /// SBCB immediate (0xC2): Subtracts the immediate operand and carry from accumulator B.
+        /// B = B - M - C. Used for multi-byte subtraction chains.
+        /// N set if result bit 7 is set. Z set if result is zero.
+        /// V set if signed overflow occurred. C set if unsigned borrow occurred.
+        op_sbcb_imm => alu_imm, perform_sbc, B;
+
+        /// ANDB immediate (0xC4): Performs bitwise AND of accumulator B with the immediate operand.
+        /// N set if result bit 7 is set. Z set if result is zero. V always cleared.
+        op_andb_imm => alu_imm, perform_and, B;
+
+        /// BITB immediate (0xC5): Bit test B -- performs B AND operand, updates flags but discards result.
+        /// N set if result bit 7 is set. Z set if result is zero. V always cleared.
+        op_bitb_imm => alu_imm, perform_bit, B;
+
+        /// EORB immediate (0xC8): Performs bitwise Exclusive OR of accumulator B with the immediate operand.
+        /// N set if result bit 7 is set. Z set if result is zero. V always cleared.
+        op_eorb_imm => alu_imm, perform_eor, B;
+
+        /// ADCB immediate (0xC9): Adds the immediate operand and carry to accumulator B.
+        /// B = B + M + C. Used for multi-byte addition chains.
+        /// N set if result bit 7 is set. Z set if result is zero.
+        /// V set if signed overflow occurred. C set if unsigned carry out of bit 7.
+        /// H set if carry from bit 3 to bit 4.
+        op_adcb_imm => alu_imm, perform_adc, B;
+
+        /// ORB immediate (0xCA): Performs bitwise OR of accumulator B with the immediate operand.
+        /// N set if result bit 7 is set. Z set if result is zero. V always cleared.
+        op_orb_imm => alu_imm, perform_or, B;
+
+        /// ADDB immediate (0xCB): Adds the immediate operand to accumulator B.
+        /// N set if result bit 7 is set. Z set if result is zero.
+        /// V set if signed overflow occurred (operands had same sign and result sign differs).
+        /// C set if unsigned carry out of bit 7. H set if carry from bit 3 to bit 4.
+        op_addb_imm => alu_imm, perform_add, B;
     }
 
     /// MUL inherent (0x3D): Multiplies A and B (unsigned), result in D (A=high, B=low).
@@ -54,980 +121,226 @@ impl M6809 {
         }
     }
 
-    /// CMPA immediate (0x81): Compares accumulator A with the immediate operand (A - M).
-    /// Performs subtraction but discards the result; only flags are updated.
-    /// N set if result bit 7 is set. Z set if A == operand.
-    /// V set if signed overflow occurred. C set if unsigned borrow occurred (operand > A).
-    pub(crate) fn op_cmpa_imm<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.alu_imm(cycle, bus, master, |cpu, operand| {
-            cpu.perform_cmp(Acc::A, operand);
-        });
-    }
-
-    /// SBCA immediate (0x82): Subtracts the immediate operand and carry from accumulator A.
-    /// A = A - M - C. Used for multi-byte subtraction chains.
-    /// N set if result bit 7 is set. Z set if result is zero.
-    /// V set if signed overflow occurred. C set if unsigned borrow occurred.
-    pub(crate) fn op_sbca_imm<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.alu_imm(cycle, bus, master, |cpu, operand| {
-            cpu.perform_sbc(Acc::A, operand);
-        });
-    }
-
-    /// ANDA immediate (0x84): Performs bitwise AND of accumulator A with the immediate operand.
-    /// N set if result bit 7 is set. Z set if result is zero. V always cleared.
-    pub(crate) fn op_anda_imm<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.alu_imm(cycle, bus, master, |cpu, operand| {
-            cpu.perform_and(Acc::A, operand);
-        });
-    }
-
-    /// BITA immediate (0x85): Bit test A -- performs A AND operand, updates flags but discards result.
-    /// N set if result bit 7 is set. Z set if result is zero. V always cleared.
-    pub(crate) fn op_bita_imm<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.alu_imm(cycle, bus, master, |cpu, operand| {
-            cpu.perform_bit(Acc::A, operand);
-        });
-    }
-
-    /// EORA immediate (0x88): Performs bitwise Exclusive OR of accumulator A with the immediate operand.
-    /// N set if result bit 7 is set. Z set if result is zero. V always cleared.
-    pub(crate) fn op_eora_imm<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.alu_imm(cycle, bus, master, |cpu, operand| {
-            cpu.perform_eor(Acc::A, operand);
-        });
-    }
-
-    /// ADCA immediate (0x89): Adds the immediate operand and carry to accumulator A.
-    /// A = A + M + C. Used for multi-byte addition chains.
-    /// N set if result bit 7 is set. Z set if result is zero.
-    /// V set if signed overflow occurred. C set if unsigned carry out of bit 7.
-    /// H set if carry from bit 3 to bit 4.
-    pub(crate) fn op_adca_imm<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.alu_imm(cycle, bus, master, |cpu, operand| {
-            cpu.perform_adc(Acc::A, operand);
-        });
-    }
-
-    /// ORA immediate (0x8A): Performs bitwise OR of accumulator A with the immediate operand.
-    /// N set if result bit 7 is set. Z set if result is zero. V always cleared.
-    pub(crate) fn op_ora_imm<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.alu_imm(cycle, bus, master, |cpu, operand| {
-            cpu.perform_or(Acc::A, operand);
-        });
-    }
-
-    /// SUBB immediate (0xC0): Subtracts the immediate operand from accumulator B.
-    /// N set if result bit 7 is set. Z set if result is zero.
-    /// V set if signed overflow occurred (operands had different signs and result sign differs from B).
-    /// C set if unsigned borrow occurred (operand > B).
-    pub(crate) fn op_subb_imm<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.alu_imm(cycle, bus, master, |cpu, operand| {
-            cpu.perform_sub(Acc::B, operand);
-        });
-    }
-
-    /// CMPB immediate (0xC1): Compares accumulator B with the immediate operand (B - M).
-    /// Performs subtraction but discards the result; only flags are updated.
-    /// N set if result bit 7 is set. Z set if B == operand.
-    /// V set if signed overflow occurred. C set if unsigned borrow occurred (operand > B).
-    pub(crate) fn op_cmpb_imm<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.alu_imm(cycle, bus, master, |cpu, operand| {
-            cpu.perform_cmp(Acc::B, operand);
-        });
-    }
-
-    /// SBCB immediate (0xC2): Subtracts the immediate operand and carry from accumulator B.
-    /// B = B - M - C. Used for multi-byte subtraction chains.
-    /// N set if result bit 7 is set. Z set if result is zero.
-    /// V set if signed overflow occurred. C set if unsigned borrow occurred.
-    pub(crate) fn op_sbcb_imm<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.alu_imm(cycle, bus, master, |cpu, operand| {
-            cpu.perform_sbc(Acc::B, operand);
-        });
-    }
-
-    /// ANDB immediate (0xC4): Performs bitwise AND of accumulator B with the immediate operand.
-    /// N set if result bit 7 is set. Z set if result is zero. V always cleared.
-    pub(crate) fn op_andb_imm<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.alu_imm(cycle, bus, master, |cpu, operand| {
-            cpu.perform_and(Acc::B, operand);
-        });
-    }
-
-    /// BITB immediate (0xC5): Bit test B -- performs B AND operand, updates flags but discards result.
-    /// N set if result bit 7 is set. Z set if result is zero. V always cleared.
-    pub(crate) fn op_bitb_imm<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.alu_imm(cycle, bus, master, |cpu, operand| {
-            cpu.perform_bit(Acc::B, operand);
-        });
-    }
-
-    /// EORB immediate (0xC8): Performs bitwise Exclusive OR of accumulator B with the immediate operand.
-    /// N set if result bit 7 is set. Z set if result is zero. V always cleared.
-    pub(crate) fn op_eorb_imm<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.alu_imm(cycle, bus, master, |cpu, operand| {
-            cpu.perform_eor(Acc::B, operand);
-        });
-    }
-
-    /// ADCB immediate (0xC9): Adds the immediate operand and carry to accumulator B.
-    /// B = B + M + C. Used for multi-byte addition chains.
-    /// N set if result bit 7 is set. Z set if result is zero.
-    /// V set if signed overflow occurred. C set if unsigned carry out of bit 7.
-    /// H set if carry from bit 3 to bit 4.
-    pub(crate) fn op_adcb_imm<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.alu_imm(cycle, bus, master, |cpu, operand| {
-            cpu.perform_adc(Acc::B, operand);
-        });
-    }
-
-    /// ORB immediate (0xCA): Performs bitwise OR of accumulator B with the immediate operand.
-    /// N set if result bit 7 is set. Z set if result is zero. V always cleared.
-    pub(crate) fn op_orb_imm<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.alu_imm(cycle, bus, master, |cpu, operand| {
-            cpu.perform_or(Acc::B, operand);
-        });
-    }
-
-    /// ADDB immediate (0xCB): Adds the immediate operand to accumulator B.
-    /// N set if result bit 7 is set. Z set if result is zero.
-    /// V set if signed overflow occurred (operands had same sign and result sign differs).
-    /// C set if unsigned carry out of bit 7. H set if carry from bit 3 to bit 4.
-    pub(crate) fn op_addb_imm<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.alu_imm(cycle, bus, master, |cpu, operand| {
-            cpu.perform_add(Acc::B, operand);
-        });
-    }
-
     // --- Direct addressing mode (A register) ---
 
-    /// SUBA direct (0x90): Subtracts the memory operand at DP:addr from accumulator A.
-    /// N set if result bit 7 is set. Z set if result is zero.
-    /// V set if signed overflow occurred. C set if unsigned borrow occurred. H set if borrow from bit 4.
-    pub(crate) fn op_suba_direct<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.alu_direct(opcode, cycle, bus, master, |cpu, operand| {
-            cpu.perform_sub(Acc::A, operand);
-        });
-    }
+    m68xx_alu_acc! { @opcode
+        /// SUBA direct (0x90): Subtracts the memory operand at DP:addr from accumulator A.
+        /// N set if result bit 7 is set. Z set if result is zero.
+        /// V set if signed overflow occurred. C set if unsigned borrow occurred. H set if borrow from bit 4.
+        op_suba_direct => alu_direct, perform_sub, A;
 
-    /// CMPA direct (0x91): Compares accumulator A with the memory operand at DP:addr.
-    /// Performs subtraction but discards the result; only flags are updated.
-    /// N set if result bit 7 is set. Z set if A == operand.
-    /// V set if signed overflow occurred. C set if unsigned borrow occurred.
-    pub(crate) fn op_cmpa_direct<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.alu_direct(opcode, cycle, bus, master, |cpu, operand| {
-            cpu.perform_cmp(Acc::A, operand);
-        });
-    }
+        /// CMPA direct (0x91): Compares accumulator A with the memory operand at DP:addr.
+        /// Performs subtraction but discards the result; only flags are updated.
+        /// N set if result bit 7 is set. Z set if A == operand.
+        /// V set if signed overflow occurred. C set if unsigned borrow occurred.
+        op_cmpa_direct => alu_direct, perform_cmp, A;
 
-    /// SBCA direct (0x92): Subtracts the memory operand and carry from accumulator A.
-    /// A = A - M - C. N set if result bit 7 is set. Z set if result is zero.
-    /// V set if signed overflow occurred. C set if unsigned borrow occurred.
-    pub(crate) fn op_sbca_direct<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.alu_direct(opcode, cycle, bus, master, |cpu, operand| {
-            cpu.perform_sbc(Acc::A, operand);
-        });
-    }
+        /// SBCA direct (0x92): Subtracts the memory operand and carry from accumulator A.
+        /// A = A - M - C. N set if result bit 7 is set. Z set if result is zero.
+        /// V set if signed overflow occurred. C set if unsigned borrow occurred.
+        op_sbca_direct => alu_direct, perform_sbc, A;
 
-    /// ANDA direct (0x94): Performs bitwise AND of accumulator A with the memory operand at DP:addr.
-    /// N set if result bit 7 is set. Z set if result is zero. V always cleared.
-    pub(crate) fn op_anda_direct<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.alu_direct(opcode, cycle, bus, master, |cpu, operand| {
-            cpu.perform_and(Acc::A, operand);
-        });
-    }
+        /// ANDA direct (0x94): Performs bitwise AND of accumulator A with the memory operand at DP:addr.
+        /// N set if result bit 7 is set. Z set if result is zero. V always cleared.
+        op_anda_direct => alu_direct, perform_and, A;
 
-    /// BITA direct (0x95): Bit test A -- performs A AND operand at DP:addr, updates flags but discards result.
-    /// N set if result bit 7 is set. Z set if result is zero. V always cleared.
-    pub(crate) fn op_bita_direct<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.alu_direct(opcode, cycle, bus, master, |cpu, operand| {
-            cpu.perform_bit(Acc::A, operand);
-        });
-    }
+        /// BITA direct (0x95): Bit test A -- performs A AND operand at DP:addr, updates flags but discards result.
+        /// N set if result bit 7 is set. Z set if result is zero. V always cleared.
+        op_bita_direct => alu_direct, perform_bit, A;
 
-    /// EORA direct (0x98): Performs bitwise Exclusive OR of accumulator A with the memory operand at DP:addr.
-    /// N set if result bit 7 is set. Z set if result is zero. V always cleared.
-    pub(crate) fn op_eora_direct<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.alu_direct(opcode, cycle, bus, master, |cpu, operand| {
-            cpu.perform_eor(Acc::A, operand);
-        });
-    }
+        /// EORA direct (0x98): Performs bitwise Exclusive OR of accumulator A with the memory operand at DP:addr.
+        /// N set if result bit 7 is set. Z set if result is zero. V always cleared.
+        op_eora_direct => alu_direct, perform_eor, A;
 
-    /// ADCA direct (0x99): Adds the memory operand and carry to accumulator A.
-    /// A = A + M + C. N set if result bit 7 is set. Z set if result is zero.
-    /// V set if signed overflow occurred. C set if unsigned carry out of bit 7.
-    /// H set if carry from bit 3 to bit 4.
-    pub(crate) fn op_adca_direct<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.alu_direct(opcode, cycle, bus, master, |cpu, operand| {
-            cpu.perform_adc(Acc::A, operand);
-        });
-    }
+        /// ADCA direct (0x99): Adds the memory operand and carry to accumulator A.
+        /// A = A + M + C. N set if result bit 7 is set. Z set if result is zero.
+        /// V set if signed overflow occurred. C set if unsigned carry out of bit 7.
+        /// H set if carry from bit 3 to bit 4.
+        op_adca_direct => alu_direct, perform_adc, A;
 
-    /// ORA direct (0x9A): Performs bitwise OR of accumulator A with the memory operand at DP:addr.
-    /// N set if result bit 7 is set. Z set if result is zero. V always cleared.
-    pub(crate) fn op_ora_direct<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.alu_direct(opcode, cycle, bus, master, |cpu, operand| {
-            cpu.perform_or(Acc::A, operand);
-        });
-    }
+        /// ORA direct (0x9A): Performs bitwise OR of accumulator A with the memory operand at DP:addr.
+        /// N set if result bit 7 is set. Z set if result is zero. V always cleared.
+        op_ora_direct => alu_direct, perform_or, A;
 
-    /// ADDA direct (0x9B): Adds the memory operand at DP:addr to accumulator A.
-    /// N set if result bit 7 is set. Z set if result is zero.
-    /// V set if signed overflow occurred. C set if unsigned carry out of bit 7.
-    /// H set if carry from bit 3 to bit 4.
-    pub(crate) fn op_adda_direct<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.alu_direct(opcode, cycle, bus, master, |cpu, operand| {
-            cpu.perform_add(Acc::A, operand);
-        });
+        /// ADDA direct (0x9B): Adds the memory operand at DP:addr to accumulator A.
+        /// N set if result bit 7 is set. Z set if result is zero.
+        /// V set if signed overflow occurred. C set if unsigned carry out of bit 7.
+        /// H set if carry from bit 3 to bit 4.
+        op_adda_direct => alu_direct, perform_add, A;
     }
 
     // --- Direct addressing mode (B register) ---
 
-    /// SUBB direct (0xD0): Subtracts the memory operand at DP:addr from accumulator B.
-    /// N set if result bit 7 is set. Z set if result is zero.
-    /// V set if signed overflow occurred. C set if unsigned borrow occurred.
-    pub(crate) fn op_subb_direct<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.alu_direct(opcode, cycle, bus, master, |cpu, operand| {
-            cpu.perform_sub(Acc::B, operand);
-        });
-    }
+    m68xx_alu_acc! { @opcode
+        /// SUBB direct (0xD0): Subtracts the memory operand at DP:addr from accumulator B.
+        /// N set if result bit 7 is set. Z set if result is zero.
+        /// V set if signed overflow occurred. C set if unsigned borrow occurred.
+        op_subb_direct => alu_direct, perform_sub, B;
 
-    /// CMPB direct (0xD1): Compares accumulator B with the memory operand at DP:addr.
-    /// Performs subtraction but discards the result; only flags are updated.
-    /// N set if result bit 7 is set. Z set if B == operand.
-    /// V set if signed overflow occurred. C set if unsigned borrow occurred.
-    pub(crate) fn op_cmpb_direct<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.alu_direct(opcode, cycle, bus, master, |cpu, operand| {
-            cpu.perform_cmp(Acc::B, operand);
-        });
-    }
+        /// CMPB direct (0xD1): Compares accumulator B with the memory operand at DP:addr.
+        /// Performs subtraction but discards the result; only flags are updated.
+        /// N set if result bit 7 is set. Z set if B == operand.
+        /// V set if signed overflow occurred. C set if unsigned borrow occurred.
+        op_cmpb_direct => alu_direct, perform_cmp, B;
 
-    /// SBCB direct (0xD2): Subtracts the memory operand and carry from accumulator B.
-    /// B = B - M - C. N set if result bit 7 is set. Z set if result is zero.
-    /// V set if signed overflow occurred. C set if unsigned borrow occurred.
-    pub(crate) fn op_sbcb_direct<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.alu_direct(opcode, cycle, bus, master, |cpu, operand| {
-            cpu.perform_sbc(Acc::B, operand);
-        });
-    }
+        /// SBCB direct (0xD2): Subtracts the memory operand and carry from accumulator B.
+        /// B = B - M - C. N set if result bit 7 is set. Z set if result is zero.
+        /// V set if signed overflow occurred. C set if unsigned borrow occurred.
+        op_sbcb_direct => alu_direct, perform_sbc, B;
 
-    /// ANDB direct (0xD4): Performs bitwise AND of accumulator B with the memory operand at DP:addr.
-    /// N set if result bit 7 is set. Z set if result is zero. V always cleared.
-    pub(crate) fn op_andb_direct<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.alu_direct(opcode, cycle, bus, master, |cpu, operand| {
-            cpu.perform_and(Acc::B, operand);
-        });
-    }
+        /// ANDB direct (0xD4): Performs bitwise AND of accumulator B with the memory operand at DP:addr.
+        /// N set if result bit 7 is set. Z set if result is zero. V always cleared.
+        op_andb_direct => alu_direct, perform_and, B;
 
-    /// BITB direct (0xD5): Bit test B -- performs B AND operand at DP:addr, updates flags but discards result.
-    /// N set if result bit 7 is set. Z set if result is zero. V always cleared.
-    pub(crate) fn op_bitb_direct<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.alu_direct(opcode, cycle, bus, master, |cpu, operand| {
-            cpu.perform_bit(Acc::B, operand);
-        });
-    }
+        /// BITB direct (0xD5): Bit test B -- performs B AND operand at DP:addr, updates flags but discards result.
+        /// N set if result bit 7 is set. Z set if result is zero. V always cleared.
+        op_bitb_direct => alu_direct, perform_bit, B;
 
-    /// EORB direct (0xD8): Performs bitwise Exclusive OR of accumulator B with the memory operand at DP:addr.
-    /// N set if result bit 7 is set. Z set if result is zero. V always cleared.
-    pub(crate) fn op_eorb_direct<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.alu_direct(opcode, cycle, bus, master, |cpu, operand| {
-            cpu.perform_eor(Acc::B, operand);
-        });
-    }
+        /// EORB direct (0xD8): Performs bitwise Exclusive OR of accumulator B with the memory operand at DP:addr.
+        /// N set if result bit 7 is set. Z set if result is zero. V always cleared.
+        op_eorb_direct => alu_direct, perform_eor, B;
 
-    /// ADCB direct (0xD9): Adds the memory operand and carry to accumulator B.
-    /// B = B + M + C. N set if result bit 7 is set. Z set if result is zero.
-    /// V set if signed overflow occurred. C set if unsigned carry out of bit 7.
-    /// H set if carry from bit 3 to bit 4.
-    pub(crate) fn op_adcb_direct<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.alu_direct(opcode, cycle, bus, master, |cpu, operand| {
-            cpu.perform_adc(Acc::B, operand);
-        });
-    }
+        /// ADCB direct (0xD9): Adds the memory operand and carry to accumulator B.
+        /// B = B + M + C. N set if result bit 7 is set. Z set if result is zero.
+        /// V set if signed overflow occurred. C set if unsigned carry out of bit 7.
+        /// H set if carry from bit 3 to bit 4.
+        op_adcb_direct => alu_direct, perform_adc, B;
 
-    /// ORB direct (0xDA): Performs bitwise OR of accumulator B with the memory operand at DP:addr.
-    /// N set if result bit 7 is set. Z set if result is zero. V always cleared.
-    pub(crate) fn op_orb_direct<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.alu_direct(opcode, cycle, bus, master, |cpu, operand| {
-            cpu.perform_or(Acc::B, operand);
-        });
-    }
+        /// ORB direct (0xDA): Performs bitwise OR of accumulator B with the memory operand at DP:addr.
+        /// N set if result bit 7 is set. Z set if result is zero. V always cleared.
+        op_orb_direct => alu_direct, perform_or, B;
 
-    /// ADDB direct (0xDB): Adds the memory operand at DP:addr to accumulator B.
-    /// N set if result bit 7 is set. Z set if result is zero.
-    /// V set if signed overflow occurred. C set if unsigned carry out of bit 7.
-    /// H set if carry from bit 3 to bit 4.
-    pub(crate) fn op_addb_direct<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.alu_direct(opcode, cycle, bus, master, |cpu, operand| {
-            cpu.perform_add(Acc::B, operand);
-        });
+        /// ADDB direct (0xDB): Adds the memory operand at DP:addr to accumulator B.
+        /// N set if result bit 7 is set. Z set if result is zero.
+        /// V set if signed overflow occurred. C set if unsigned carry out of bit 7.
+        /// H set if carry from bit 3 to bit 4.
+        op_addb_direct => alu_direct, perform_add, B;
     }
 
     // --- Extended addressing mode (A register) ---
 
-    /// SUBA extended (0xB0)
-    pub(crate) fn op_suba_extended<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.alu_extended(opcode, cycle, bus, master, |cpu, operand| {
-            cpu.perform_sub(Acc::A, operand);
-        });
-    }
+    m68xx_alu_acc! { @opcode
+        /// SUBA extended (0xB0)
+        op_suba_extended => alu_extended, perform_sub, A;
 
-    /// CMPA extended (0xB1)
-    pub(crate) fn op_cmpa_extended<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.alu_extended(opcode, cycle, bus, master, |cpu, operand| {
-            cpu.perform_cmp(Acc::A, operand);
-        });
-    }
+        /// CMPA extended (0xB1)
+        op_cmpa_extended => alu_extended, perform_cmp, A;
 
-    /// SBCA extended (0xB2)
-    pub(crate) fn op_sbca_extended<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.alu_extended(opcode, cycle, bus, master, |cpu, operand| {
-            cpu.perform_sbc(Acc::A, operand);
-        });
-    }
+        /// SBCA extended (0xB2)
+        op_sbca_extended => alu_extended, perform_sbc, A;
 
-    /// ANDA extended (0xB4)
-    pub(crate) fn op_anda_extended<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.alu_extended(opcode, cycle, bus, master, |cpu, operand| {
-            cpu.perform_and(Acc::A, operand);
-        });
-    }
+        /// ANDA extended (0xB4)
+        op_anda_extended => alu_extended, perform_and, A;
 
-    /// BITA extended (0xB5)
-    pub(crate) fn op_bita_extended<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.alu_extended(opcode, cycle, bus, master, |cpu, operand| {
-            cpu.perform_bit(Acc::A, operand);
-        });
-    }
+        /// BITA extended (0xB5)
+        op_bita_extended => alu_extended, perform_bit, A;
 
-    /// EORA extended (0xB8)
-    pub(crate) fn op_eora_extended<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.alu_extended(opcode, cycle, bus, master, |cpu, operand| {
-            cpu.perform_eor(Acc::A, operand);
-        });
-    }
+        /// EORA extended (0xB8)
+        op_eora_extended => alu_extended, perform_eor, A;
 
-    /// ADCA extended (0xB9)
-    pub(crate) fn op_adca_extended<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.alu_extended(opcode, cycle, bus, master, |cpu, operand| {
-            cpu.perform_adc(Acc::A, operand);
-        });
-    }
+        /// ADCA extended (0xB9)
+        op_adca_extended => alu_extended, perform_adc, A;
 
-    /// ORA extended (0xBA)
-    pub(crate) fn op_ora_extended<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.alu_extended(opcode, cycle, bus, master, |cpu, operand| {
-            cpu.perform_or(Acc::A, operand);
-        });
-    }
+        /// ORA extended (0xBA)
+        op_ora_extended => alu_extended, perform_or, A;
 
-    /// ADDA extended (0xBB): Adds the memory operand at the 16-bit address to accumulator A.
-    /// N set if result bit 7 is set. Z set if result is zero.
-    /// V set if signed overflow occurred. C set if unsigned carry out of bit 7.
-    /// H set if carry from bit 3 to bit 4.
-    pub(crate) fn op_adda_extended<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.alu_extended(opcode, cycle, bus, master, |cpu, operand| {
-            cpu.perform_add(Acc::A, operand);
-        });
+        /// ADDA extended (0xBB): Adds the memory operand at the 16-bit address to accumulator A.
+        /// N set if result bit 7 is set. Z set if result is zero.
+        /// V set if signed overflow occurred. C set if unsigned carry out of bit 7.
+        /// H set if carry from bit 3 to bit 4.
+        op_adda_extended => alu_extended, perform_add, A;
     }
 
     // --- Extended addressing mode (B register) ---
 
-    /// SUBB extended (0xF0)
-    pub(crate) fn op_subb_extended<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.alu_extended(opcode, cycle, bus, master, |cpu, operand| {
-            cpu.perform_sub(Acc::B, operand);
-        });
-    }
+    m68xx_alu_acc! { @opcode
+        /// SUBB extended (0xF0)
+        op_subb_extended => alu_extended, perform_sub, B;
 
-    /// CMPB extended (0xF1)
-    pub(crate) fn op_cmpb_extended<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.alu_extended(opcode, cycle, bus, master, |cpu, operand| {
-            cpu.perform_cmp(Acc::B, operand);
-        });
-    }
+        /// CMPB extended (0xF1)
+        op_cmpb_extended => alu_extended, perform_cmp, B;
 
-    /// SBCB extended (0xF2)
-    pub(crate) fn op_sbcb_extended<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.alu_extended(opcode, cycle, bus, master, |cpu, operand| {
-            cpu.perform_sbc(Acc::B, operand);
-        });
-    }
+        /// SBCB extended (0xF2)
+        op_sbcb_extended => alu_extended, perform_sbc, B;
 
-    /// ANDB extended (0xF4)
-    pub(crate) fn op_andb_extended<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.alu_extended(opcode, cycle, bus, master, |cpu, operand| {
-            cpu.perform_and(Acc::B, operand);
-        });
-    }
+        /// ANDB extended (0xF4)
+        op_andb_extended => alu_extended, perform_and, B;
 
-    /// BITB extended (0xF5)
-    pub(crate) fn op_bitb_extended<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.alu_extended(opcode, cycle, bus, master, |cpu, operand| {
-            cpu.perform_bit(Acc::B, operand);
-        });
-    }
+        /// BITB extended (0xF5)
+        op_bitb_extended => alu_extended, perform_bit, B;
 
-    /// EORB extended (0xF8)
-    pub(crate) fn op_eorb_extended<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.alu_extended(opcode, cycle, bus, master, |cpu, operand| {
-            cpu.perform_eor(Acc::B, operand);
-        });
-    }
+        /// EORB extended (0xF8)
+        op_eorb_extended => alu_extended, perform_eor, B;
 
-    /// ADCB extended (0xF9)
-    pub(crate) fn op_adcb_extended<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.alu_extended(opcode, cycle, bus, master, |cpu, operand| {
-            cpu.perform_adc(Acc::B, operand);
-        });
-    }
+        /// ADCB extended (0xF9)
+        op_adcb_extended => alu_extended, perform_adc, B;
 
-    /// ORB extended (0xFA)
-    pub(crate) fn op_orb_extended<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.alu_extended(opcode, cycle, bus, master, |cpu, operand| {
-            cpu.perform_or(Acc::B, operand);
-        });
-    }
+        /// ORB extended (0xFA)
+        op_orb_extended => alu_extended, perform_or, B;
 
-    /// ADDB extended (0xFB)
-    pub(crate) fn op_addb_extended<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.alu_extended(opcode, cycle, bus, master, |cpu, operand| {
-            cpu.perform_add(Acc::B, operand);
-        });
+        /// ADDB extended (0xFB)
+        op_addb_extended => alu_extended, perform_add, B;
     }
 
     // --- Indexed addressing mode (A register) ---
 
-    /// SUBA indexed (0xA0)
-    pub(crate) fn op_suba_indexed<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.alu_indexed(opcode, cycle, bus, master, |cpu, op| {
-            cpu.perform_sub(Acc::A, op)
-        });
-    }
+    m68xx_alu_acc! { @opcode
+        /// SUBA indexed (0xA0)
+        op_suba_indexed => alu_indexed, perform_sub, A;
 
-    /// CMPA indexed (0xA1)
-    pub(crate) fn op_cmpa_indexed<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.alu_indexed(opcode, cycle, bus, master, |cpu, op| {
-            cpu.perform_cmp(Acc::A, op)
-        });
-    }
+        /// CMPA indexed (0xA1)
+        op_cmpa_indexed => alu_indexed, perform_cmp, A;
 
-    /// SBCA indexed (0xA2)
-    pub(crate) fn op_sbca_indexed<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.alu_indexed(opcode, cycle, bus, master, |cpu, op| {
-            cpu.perform_sbc(Acc::A, op)
-        });
-    }
+        /// SBCA indexed (0xA2)
+        op_sbca_indexed => alu_indexed, perform_sbc, A;
 
-    /// ANDA indexed (0xA4)
-    pub(crate) fn op_anda_indexed<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.alu_indexed(opcode, cycle, bus, master, |cpu, op| {
-            cpu.perform_and(Acc::A, op)
-        });
-    }
+        /// ANDA indexed (0xA4)
+        op_anda_indexed => alu_indexed, perform_and, A;
 
-    /// BITA indexed (0xA5)
-    pub(crate) fn op_bita_indexed<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.alu_indexed(opcode, cycle, bus, master, |cpu, op| {
-            cpu.perform_bit(Acc::A, op)
-        });
-    }
+        /// BITA indexed (0xA5)
+        op_bita_indexed => alu_indexed, perform_bit, A;
 
-    /// EORA indexed (0xA8)
-    pub(crate) fn op_eora_indexed<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.alu_indexed(opcode, cycle, bus, master, |cpu, op| {
-            cpu.perform_eor(Acc::A, op)
-        });
-    }
+        /// EORA indexed (0xA8)
+        op_eora_indexed => alu_indexed, perform_eor, A;
 
-    /// ADCA indexed (0xA9)
-    pub(crate) fn op_adca_indexed<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.alu_indexed(opcode, cycle, bus, master, |cpu, op| {
-            cpu.perform_adc(Acc::A, op)
-        });
-    }
+        /// ADCA indexed (0xA9)
+        op_adca_indexed => alu_indexed, perform_adc, A;
 
-    /// ORA indexed (0xAA)
-    pub(crate) fn op_ora_indexed<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.alu_indexed(opcode, cycle, bus, master, |cpu, op| {
-            cpu.perform_or(Acc::A, op)
-        });
-    }
+        /// ORA indexed (0xAA)
+        op_ora_indexed => alu_indexed, perform_or, A;
 
-    /// ADDA indexed (0xAB)
-    pub(crate) fn op_adda_indexed<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.alu_indexed(opcode, cycle, bus, master, |cpu, op| {
-            cpu.perform_add(Acc::A, op)
-        });
+        /// ADDA indexed (0xAB)
+        op_adda_indexed => alu_indexed, perform_add, A;
     }
 
     // --- Indexed addressing mode (B register) ---
 
-    /// SUBB indexed (0xE0)
-    pub(crate) fn op_subb_indexed<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.alu_indexed(opcode, cycle, bus, master, |cpu, op| {
-            cpu.perform_sub(Acc::B, op)
-        });
-    }
+    m68xx_alu_acc! { @opcode
+        /// SUBB indexed (0xE0)
+        op_subb_indexed => alu_indexed, perform_sub, B;
 
-    /// CMPB indexed (0xE1)
-    pub(crate) fn op_cmpb_indexed<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.alu_indexed(opcode, cycle, bus, master, |cpu, op| {
-            cpu.perform_cmp(Acc::B, op)
-        });
-    }
+        /// CMPB indexed (0xE1)
+        op_cmpb_indexed => alu_indexed, perform_cmp, B;
 
-    /// SBCB indexed (0xE2)
-    pub(crate) fn op_sbcb_indexed<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.alu_indexed(opcode, cycle, bus, master, |cpu, op| {
-            cpu.perform_sbc(Acc::B, op)
-        });
-    }
+        /// SBCB indexed (0xE2)
+        op_sbcb_indexed => alu_indexed, perform_sbc, B;
 
-    /// ANDB indexed (0xE4)
-    pub(crate) fn op_andb_indexed<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.alu_indexed(opcode, cycle, bus, master, |cpu, op| {
-            cpu.perform_and(Acc::B, op)
-        });
-    }
+        /// ANDB indexed (0xE4)
+        op_andb_indexed => alu_indexed, perform_and, B;
 
-    /// BITB indexed (0xE5)
-    pub(crate) fn op_bitb_indexed<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.alu_indexed(opcode, cycle, bus, master, |cpu, op| {
-            cpu.perform_bit(Acc::B, op)
-        });
-    }
+        /// BITB indexed (0xE5)
+        op_bitb_indexed => alu_indexed, perform_bit, B;
 
-    /// EORB indexed (0xE8)
-    pub(crate) fn op_eorb_indexed<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.alu_indexed(opcode, cycle, bus, master, |cpu, op| {
-            cpu.perform_eor(Acc::B, op)
-        });
-    }
+        /// EORB indexed (0xE8)
+        op_eorb_indexed => alu_indexed, perform_eor, B;
 
-    /// ADCB indexed (0xE9)
-    pub(crate) fn op_adcb_indexed<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.alu_indexed(opcode, cycle, bus, master, |cpu, op| {
-            cpu.perform_adc(Acc::B, op)
-        });
-    }
+        /// ADCB indexed (0xE9)
+        op_adcb_indexed => alu_indexed, perform_adc, B;
 
-    /// ORB indexed (0xEA)
-    pub(crate) fn op_orb_indexed<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.alu_indexed(opcode, cycle, bus, master, |cpu, op| {
-            cpu.perform_or(Acc::B, op)
-        });
-    }
+        /// ORB indexed (0xEA)
+        op_orb_indexed => alu_indexed, perform_or, B;
 
-    /// ADDB indexed (0xEB)
-    pub(crate) fn op_addb_indexed<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        opcode: u8,
-        cycle: u8,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
-        self.alu_indexed(opcode, cycle, bus, master, |cpu, op| {
-            cpu.perform_add(Acc::B, op)
-        });
+        /// ADDB indexed (0xEB)
+        op_addb_indexed => alu_indexed, perform_add, B;
     }
 }
