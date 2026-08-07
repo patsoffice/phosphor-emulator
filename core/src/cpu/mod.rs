@@ -15,7 +15,7 @@ pub trait Cpu: BusMasterComponent + CpuStateTrait {
 
 // Disassembly support
 pub mod disasm;
-pub use disasm::{Disassemble, DisassembledInstruction};
+pub use disasm::{Disassemble, DisassembledInstruction, hex_bytes};
 
 // Re-export state types
 pub mod state;

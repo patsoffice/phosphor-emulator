@@ -5,6 +5,7 @@ use phosphor_core::core::debug_trace::DebugEvent;
 use phosphor_core::core::machine::FrontendMachine;
 use phosphor_core::core::watchpoint::{DebugAccessSource, WatchpointPhase};
 use phosphor_core::core::{DebugRead, WatchpointHit, WatchpointKind};
+use phosphor_core::cpu::hex_bytes;
 
 /// Format an address at its natural width: 4 hex digits within the 16-bit
 /// range, 6 within 24-bit (M68000), 8 beyond. Keeps 16-bit machines'
@@ -1172,13 +1173,8 @@ fn draw_disassembly_panel(
                     .is_some_and(|bp| bp.contains(addr));
 
                 let bp_marker = if is_bp { "\u{25CF} " } else { "  " };
-                let hex_bytes: String = raw_bytes
-                    .iter()
-                    .map(|b| format!("{:02X}", b))
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                let line_text =
-                    format!("{bp_marker}{}  {:<12} {}", fmt_addr(*addr), hex_bytes, text);
+                let hex = hex_bytes(raw_bytes);
+                let line_text = format!("{bp_marker}{}  {hex:<12} {text}", fmt_addr(*addr));
 
                 let mut label = egui::RichText::new(line_text).monospace();
                 if is_pc {

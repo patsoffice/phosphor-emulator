@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use phosphor_core::cpu::Disassemble;
+use phosphor_core::cpu::{Disassemble, hex_bytes};
 use phosphor_core::cpu::{I8035, M6502, M6800, M6809, M68000, Mb88xx, Z80};
 use phosphor_core::gfx::decode::decode_gfx;
 use phosphor_machines::disasm_registry::{self, DisasmCpu};
@@ -874,11 +874,8 @@ fn run<T: Disassemble>(
         let insn = T::disassemble(addr, &data[offset..]);
         let len = (insn.byte_len.max(1)) as usize;
         let stop = (offset + len).min(data.len());
-        let hex: Vec<String> = data[offset..stop]
-            .iter()
-            .map(|b| format!("{b:02X}"))
-            .collect();
-        out.push_str(&format!("{addr:06X}  {:<23} {insn}\n", hex.join(" ")));
+        let hex = hex_bytes(&data[offset..stop]);
+        out.push_str(&format!("{addr:06X}  {hex:<23} {insn}\n"));
         offset += len;
         emitted += 1;
     }

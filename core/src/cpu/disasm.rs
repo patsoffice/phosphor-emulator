@@ -54,6 +54,21 @@ impl DisassembledInstruction {
     }
 }
 
+/// Space-separated uppercase hex of a byte slice, as shown in the raw-bytes
+/// column of a disassembly line: `[0x8E, 0x01]` renders as `"8E 01"`.
+///
+/// Only the join is shared. The full line differs between the callers — the
+/// CLI pads the column to 23 and prefixes a 6-digit address, the debug UI pads
+/// to 12 and prefixes a breakpoint marker — so they format their own lines
+/// around this.
+pub fn hex_bytes(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|b| format!("{b:02X}"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Mnemonic column width: 6 for the classic short mnemonics, one space
 /// past the mnemonic for the longer sized forms ("MOVEA.W").
 fn mnemonic_pad(mnemonic: &str) -> usize {
