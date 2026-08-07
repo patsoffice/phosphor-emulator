@@ -522,19 +522,12 @@ impl Z80 {
         match cycle {
             0 => {
                 self.a = self.i;
-                let mut f = self.f & Flag::C as u8;
-                if self.a == 0 {
-                    f |= Flag::Z as u8;
-                }
-                if (self.a & 0x80) != 0 {
-                    f |= Flag::S as u8;
-                }
+                let mut f = (self.f & Flag::C as u8) | Self::sz_flags(self.a);
                 if self.iff2 {
                     f |= Flag::PV as u8;
                 }
-                f |= self.a & (Flag::X as u8 | Flag::Y as u8);
-                self.f = f;
-                self.q = self.f;
+                f |= Self::xy_flags(self.a);
+                self.commit_flags(f);
                 self.p = true;
                 self.state = ExecState::ExecuteED(opcode, 1);
             }
@@ -549,19 +542,12 @@ impl Z80 {
         match cycle {
             0 => {
                 self.a = self.r;
-                let mut f = self.f & Flag::C as u8;
-                if self.a == 0 {
-                    f |= Flag::Z as u8;
-                }
-                if (self.a & 0x80) != 0 {
-                    f |= Flag::S as u8;
-                }
+                let mut f = (self.f & Flag::C as u8) | Self::sz_flags(self.a);
                 if self.iff2 {
                     f |= Flag::PV as u8;
                 }
-                f |= self.a & (Flag::X as u8 | Flag::Y as u8);
-                self.f = f;
-                self.q = self.f;
+                f |= Self::xy_flags(self.a);
+                self.commit_flags(f);
                 self.p = true;
                 self.state = ExecState::ExecuteED(opcode, 1);
             }
@@ -674,19 +660,12 @@ impl Z80 {
                     self.set_reg8(r, val);
                 }
                 // Set flags from input value
-                let mut f = self.f & Flag::C as u8;
-                if val == 0 {
-                    f |= Flag::Z as u8;
-                }
-                if (val & 0x80) != 0 {
-                    f |= Flag::S as u8;
-                }
+                let mut f = (self.f & Flag::C as u8) | Self::sz_flags(val);
                 if parity(val) {
                     f |= Flag::PV as u8;
                 }
-                f |= val & (Flag::X as u8 | Flag::Y as u8);
-                self.f = f;
-                self.q = self.f;
+                f |= Self::xy_flags(val);
+                self.commit_flags(f);
                 self.memptr = port.wrapping_add(1);
                 self.state = ExecState::Fetch;
             }

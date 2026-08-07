@@ -57,21 +57,16 @@ impl Z80 {
             _ => unreachable!(),
         };
 
-        let mut f = 0;
-        if result == 0 {
-            f |= Flag::Z as u8;
-        }
-        if (result & 0x80) != 0 {
-            f |= Flag::S as u8;
-        }
+        let mut f = Self::sz_flags(result);
         if parity(result) {
             f |= Flag::PV as u8;
         }
         if carry != 0 {
             f |= Flag::C as u8;
         }
-        // H = 0, N = 0
-        f |= result & (Flag::X as u8 | Flag::Y as u8);
+        // H = 0, N = 0. X/Y come from the result here, unlike BIT below which
+        // takes them from the operand.
+        f |= Self::xy_flags(result);
 
         (result, f)
     }
@@ -108,8 +103,7 @@ impl Z80 {
                 0 => {
                     // Rotate/shift r
                     let (result, f) = self.do_cb_rotate_shift(yyy, val);
-                    self.f = f;
-                    self.q = self.f;
+                    self.commit_flags(f);
                     self.set_reg8(zzz, result);
                 }
                 1 => {
@@ -125,9 +119,8 @@ impl Z80 {
                         f |= Flag::S as u8;
                     }
                     // X/Y from the operand register value
-                    f |= val & (Flag::X as u8 | Flag::Y as u8);
-                    self.f = f;
-                    self.q = self.f;
+                    f |= Self::xy_flags(val);
+                    self.commit_flags(f);
                 }
                 2 => {
                     // RES b,r — no flag changes
@@ -170,9 +163,8 @@ impl Z80 {
                     f |= Flag::S as u8;
                 }
                 // X/Y from high byte of MEMPTR for BIT (HL)
-                f |= ((self.memptr >> 8) as u8) & (Flag::X as u8 | Flag::Y as u8);
-                self.f = f;
-                self.q = self.f;
+                f |= Self::xy_flags((self.memptr >> 8) as u8);
+                self.commit_flags(f);
                 self.state = ExecState::ExecuteCB(op, 2);
             }
             4 => self.state = ExecState::Fetch,
@@ -204,8 +196,7 @@ impl Z80 {
                 self.temp_data = match xx {
                     0 => {
                         let (r, f) = self.do_cb_rotate_shift(yyy, self.temp_data);
-                        self.f = f;
-                        self.q = self.f;
+                        self.commit_flags(f);
                         r
                     }
                     2 => self.temp_data & !(1 << yyy), // RES — no flag changes
@@ -263,9 +254,8 @@ impl Z80 {
                         f |= Flag::S as u8;
                     }
                     // X/Y from high byte of address for indexed BIT
-                    f |= ((self.temp_addr >> 8) as u8) & (Flag::X as u8 | Flag::Y as u8);
-                    self.f = f;
-                    self.q = self.f;
+                    f |= Self::xy_flags((self.temp_addr >> 8) as u8);
+                    self.commit_flags(f);
                     self.state = ExecState::ExecuteIndexCB(op, 2);
                 }
                 3 => self.state = ExecState::Fetch,
