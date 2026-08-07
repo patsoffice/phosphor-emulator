@@ -1622,53 +1622,26 @@ mod tests {
     use phosphor_core::core::machine::DipSwitches;
 
     #[test]
-    fn dip_defaults_match_historical_bytes() {
+    fn dip_defaults_and_metadata() {
         let sys = DigDugSystem::new();
         // DSWA: 1C/1C coin B, 20K/60K bonus, 3 lives. DSWB: freeze off,
         // upright cabinet, everything else at factory default.
         assert_eq!(sys.dip_bank_value(0), 0x99);
         assert_eq!(sys.dip_bank_value(1), 0x24);
-        // Two banks; out-of-range reads 0.
-        assert_eq!(sys.dip_banks().len(), 2);
+        // Disjoint masks, choices inside their mask, and both default bytes
+        // decomposing into defined choices. The defaults slice length also
+        // pins the bank count at 2.
+        crate::assert_dip_banks_valid(
+            sys.dip_banks(),
+            &[sys.dip_bank_value(0), sys.dip_bank_value(1)],
+        );
+        // Out-of-range reads 0.
         assert_eq!(sys.dip_bank_value(2), 0);
-    }
-
-    #[test]
-    fn dip_metadata_is_well_formed() {
-        for bank in DigDugSystem::new().dip_banks() {
-            let mut covered = 0u8;
-            for opt in bank.options {
-                assert_eq!(covered & opt.mask, 0, "overlapping masks in {}", bank.name);
-                covered |= opt.mask;
-                for choice in opt.choices {
-                    assert_eq!(
-                        choice.value & !opt.mask,
-                        0,
-                        "choice {} escapes mask of {}",
-                        choice.label,
-                        opt.name
-                    );
-                }
-            }
-            // Both Dig Dug banks fully populate their byte.
+        // Stronger than the shared validator, which only requires the masks to
+        // be disjoint: both Dig Dug banks map every bit of their byte.
+        for bank in sys.dip_banks() {
+            let covered = bank.options.iter().fold(0u8, |acc, opt| acc | opt.mask);
             assert_eq!(covered, 0xFF, "{} leaves bits unmapped", bank.name);
-        }
-    }
-
-    #[test]
-    fn dip_defaults_decompose_into_known_choices() {
-        let sys = DigDugSystem::new();
-        for (bank_idx, bank) in sys.dip_banks().iter().enumerate() {
-            let default = sys.dip_bank_value(bank_idx);
-            for opt in bank.options {
-                let selected = default & opt.mask;
-                assert!(
-                    opt.choices.iter().any(|c| c.value == selected),
-                    "{} default 0x{default:02X} has no choice for {} (slice 0x{selected:02X})",
-                    bank.name,
-                    opt.name
-                );
-            }
         }
     }
 

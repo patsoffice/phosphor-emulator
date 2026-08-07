@@ -265,7 +265,7 @@ crate::register_machine!(
 mod tests {
     use super::*;
     use crate::namco_pac::Region;
-    use phosphor_core::core::machine::{DipSwitchBank, DipSwitches};
+    use phosphor_core::core::machine::DipSwitches;
     use phosphor_core::cpu::CpuStateTrait;
 
     #[test]
@@ -343,50 +343,17 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn dip_default_matches_historical_byte() {
+    fn dip_default_and_metadata() {
         let sys = PacmanSystem::new();
         // Historical default: 1C/1C, 3 lives, 10000 bonus, normal difficulty,
         // normal ghosts — the byte the board powers on with.
         assert_eq!(sys.dip_bank_value(0), 0xC9);
-        // Only one bank, out-of-range reads 0.
-        assert_eq!(sys.dip_banks().len(), 1);
+        // Disjoint masks, choices inside their mask, and the default byte
+        // decomposing into defined choices. The defaults slice length also
+        // pins the bank count at 1.
+        crate::assert_dip_banks_valid(sys.dip_banks(), &[sys.dip_bank_value(0)]);
+        // Out-of-range reads 0.
         assert_eq!(sys.dip_bank_value(1), 0);
-    }
-
-    #[test]
-    fn dip_metadata_is_well_formed() {
-        for bank in sys_dip_banks() {
-            // Options within a bank occupy disjoint bits and every choice fits
-            // its option's mask.
-            let mut covered = 0u8;
-            for opt in bank.options {
-                assert_eq!(covered & opt.mask, 0, "overlapping masks in {}", bank.name);
-                covered |= opt.mask;
-                for choice in opt.choices {
-                    assert_eq!(
-                        choice.value & !opt.mask,
-                        0,
-                        "choice {} escapes mask of {}",
-                        choice.label,
-                        opt.name
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn dip_default_decomposes_into_known_choices() {
-        // Each option's slice of the default byte must be a defined choice.
-        let default = PacmanSystem::new().dip_bank_value(0);
-        for opt in sys_dip_banks()[0].options {
-            let selected = default & opt.mask;
-            assert!(
-                opt.choices.iter().any(|c| c.value == selected),
-                "default 0x{default:02X} has no choice for {} (slice 0x{selected:02X})",
-                opt.name
-            );
-        }
     }
 
     #[test]
@@ -411,9 +378,5 @@ mod tests {
         // Out-of-range writes are ignored (no panic, bank 0 untouched).
         sys.set_dip_bank_value(9, 0xAA);
         assert_eq!(sys.dip_bank_value(0), 0x55);
-    }
-
-    fn sys_dip_banks() -> &'static [DipSwitchBank] {
-        PacmanSystem::new().dip_banks()
     }
 }
