@@ -8,7 +8,9 @@ impl Z80 {
         val.count_ones().is_multiple_of(2)
     }
 
-    fn update_flags_logic(&mut self, result: u8, is_and: bool) {
+    /// S and Z for an 8-bit result.
+    #[inline]
+    pub(super) fn sz_flags(result: u8) -> u8 {
         let mut f = 0;
         if result == 0 {
             f |= Flag::Z as u8;
@@ -16,6 +18,46 @@ impl Z80 {
         if (result & 0x80) != 0 {
             f |= Flag::S as u8;
         }
+        f
+    }
+
+    /// S and Z for a 16-bit result (`ADC HL,rr` / `SBC HL,rr`).
+    #[inline]
+    pub(super) fn sz_flags16(result: u16) -> u8 {
+        let mut f = 0;
+        if result == 0 {
+            f |= Flag::Z as u8;
+        }
+        if (result & 0x8000) != 0 {
+            f |= Flag::S as u8;
+        }
+        f
+    }
+
+    /// The undocumented X/Y bits, copied from `source`.
+    ///
+    /// `source` is a parameter rather than "the result" because it genuinely
+    /// varies: CP takes X/Y from the *operand*, the 16-bit adds from the high
+    /// byte of the result, and SCF/CCF from A or A|F depending on the previous
+    /// instruction's Q. Every caller states its source for that reason.
+    #[inline]
+    pub(super) fn xy_flags(source: u8) -> u8 {
+        source & (Flag::X as u8 | Flag::Y as u8)
+    }
+
+    /// Commit a built flag byte, keeping Q in step.
+    ///
+    /// Q latches "this instruction wrote the flags", which is what the SCF/CCF
+    /// X/Y quirk reads via `prev_q`; writing `self.f` without updating it would
+    /// silently break those two opcodes.
+    #[inline]
+    pub(super) fn commit_flags(&mut self, f: u8) {
+        self.f = f;
+        self.q = self.f;
+    }
+
+    fn update_flags_logic(&mut self, result: u8, is_and: bool) {
+        let mut f = Self::sz_flags(result);
         if Self::get_parity(result) {
             f |= Flag::PV as u8;
         }
@@ -24,10 +66,8 @@ impl Z80 {
         } // AND sets H, others clear it
         // N is 0, C is 0
 
-        // Undocumented X/Y
-        f |= result & (Flag::X as u8 | Flag::Y as u8);
-        self.f = f;
-        self.q = self.f;
+        f |= Self::xy_flags(result);
+        self.commit_flags(f);
     }
 
     fn do_add(&mut self, val: u8, carry_in: bool) {
@@ -40,13 +80,7 @@ impl Z80 {
         let result_u16 = (a as u16) + (val as u16) + (c_val as u16);
         let result = result_u16 as u8;
 
-        let mut f = 0;
-        if result == 0 {
-            f |= Flag::Z as u8;
-        }
-        if (result & 0x80) != 0 {
-            f |= Flag::S as u8;
-        }
+        let mut f = Self::sz_flags(result);
         if ((a & 0xF) + (val & 0xF) + (c_val as u8)) > 0xF {
             f |= Flag::H as u8;
         }
@@ -57,10 +91,9 @@ impl Z80 {
             f |= Flag::C as u8;
         }
 
-        f |= result & (Flag::X as u8 | Flag::Y as u8);
+        f |= Self::xy_flags(result);
         self.a = result;
-        self.f = f;
-        self.q = self.f;
+        self.commit_flags(f);
     }
 
     fn do_sub(&mut self, val: u8, carry_in: bool) {
@@ -75,13 +108,7 @@ impl Z80 {
             .wrapping_sub(c_val as u16);
         let result = result_u16 as u8;
 
-        let mut f = Flag::N as u8;
-        if result == 0 {
-            f |= Flag::Z as u8;
-        }
-        if (result & 0x80) != 0 {
-            f |= Flag::S as u8;
-        }
+        let mut f = Flag::N as u8 | Self::sz_flags(result);
         if (a & 0xF) < ((val & 0xF) + (c_val as u8)) {
             f |= Flag::H as u8;
         }
@@ -92,10 +119,9 @@ impl Z80 {
             f |= Flag::C as u8;
         }
 
-        f |= result & (Flag::X as u8 | Flag::Y as u8);
+        f |= Self::xy_flags(result);
         self.a = result;
-        self.f = f;
-        self.q = self.f;
+        self.commit_flags(f);
     }
 
     fn do_cp(&mut self, val: u8) {
@@ -103,13 +129,7 @@ impl Z80 {
         let result_u16 = (a as u16).wrapping_sub(val as u16);
         let result = result_u16 as u8;
 
-        let mut f = Flag::N as u8;
-        if result == 0 {
-            f |= Flag::Z as u8;
-        }
-        if (result & 0x80) != 0 {
-            f |= Flag::S as u8;
-        }
+        let mut f = Flag::N as u8 | Self::sz_flags(result);
         if (a & 0xF) < (val & 0xF) {
             f |= Flag::H as u8;
         }
@@ -121,9 +141,8 @@ impl Z80 {
         }
 
         // X/Y come from the operand for CP, not the result
-        f |= val & (Flag::X as u8 | Flag::Y as u8);
-        self.f = f;
-        self.q = self.f;
+        f |= Self::xy_flags(val);
+        self.commit_flags(f);
     }
 
     fn perform_alu_op(&mut self, op: u8, val: u8) {
@@ -349,13 +368,7 @@ impl Z80 {
 
     fn calc_inc_flags(&mut self, val: u8) -> u8 {
         let result = val.wrapping_add(1);
-        let mut f = self.f & Flag::C as u8; // Preserve C
-        if result == 0 {
-            f |= Flag::Z as u8;
-        }
-        if (result & 0x80) != 0 {
-            f |= Flag::S as u8;
-        }
+        let mut f = (self.f & Flag::C as u8) | Self::sz_flags(result); // Preserve C
         if (val & 0xF) == 0xF {
             f |= Flag::H as u8;
         }
@@ -363,30 +376,23 @@ impl Z80 {
             f |= Flag::PV as u8;
         } // Overflow 7F -> 80
         // N is 0
-        f |= result & (Flag::X as u8 | Flag::Y as u8);
-        self.f = f;
-        self.q = self.f;
+        f |= Self::xy_flags(result);
+        self.commit_flags(f);
         result
     }
 
     fn calc_dec_flags(&mut self, val: u8) -> u8 {
         let result = val.wrapping_sub(1);
-        let mut f = (self.f & Flag::C as u8) | Flag::N as u8; // Preserve C, Set N
-        if result == 0 {
-            f |= Flag::Z as u8;
-        }
-        if (result & 0x80) != 0 {
-            f |= Flag::S as u8;
-        }
+        // Preserve C, Set N
+        let mut f = (self.f & Flag::C as u8) | Flag::N as u8 | Self::sz_flags(result);
         if (val & 0xF) == 0x0 {
             f |= Flag::H as u8;
         } // Borrow from bit 4
         if val == 0x80 {
             f |= Flag::PV as u8;
         } // Overflow 80 -> 7F
-        f |= result & (Flag::X as u8 | Flag::Y as u8);
-        self.f = f;
-        self.q = self.f;
+        f |= Self::xy_flags(result);
+        self.commit_flags(f);
         result
     }
 
@@ -413,9 +419,8 @@ impl Z80 {
                 if result > 0xFFFF {
                     f |= Flag::C as u8;
                 }
-                f |= ((result >> 8) as u8) & (Flag::X as u8 | Flag::Y as u8);
-                self.f = f;
-                self.q = self.f;
+                f |= Self::xy_flags((result >> 8) as u8);
+                self.commit_flags(f);
                 self.set_rp(2, result as u16);
 
                 self.state = ExecState::Execute(opcode, 2);
@@ -560,7 +565,7 @@ impl Z80 {
         };
 
         self.a = result;
-        let mut f = 0;
+        let mut f = Self::sz_flags(result);
         if new_c {
             f |= Flag::C as u8;
         }
@@ -570,18 +575,11 @@ impl Z80 {
         if new_h {
             f |= Flag::H as u8;
         }
-        if result == 0 {
-            f |= Flag::Z as u8;
-        }
-        if (result & 0x80) != 0 {
-            f |= Flag::S as u8;
-        }
         if Self::get_parity(result) {
             f |= Flag::PV as u8;
         }
-        f |= result & (Flag::X as u8 | Flag::Y as u8);
-        self.f = f;
-        self.q = self.f;
+        f |= Self::xy_flags(result);
+        self.commit_flags(f);
         self.state = ExecState::Fetch;
     }
 
@@ -591,9 +589,8 @@ impl Z80 {
         self.a = !self.a;
         let mut f = self.f & (Flag::S as u8 | Flag::Z as u8 | Flag::PV as u8 | Flag::C as u8);
         f |= Flag::H as u8 | Flag::N as u8;
-        f |= self.a & (Flag::X as u8 | Flag::Y as u8);
-        self.f = f;
-        self.q = self.f;
+        f |= Self::xy_flags(self.a);
+        self.commit_flags(f);
         self.state = ExecState::Fetch;
     }
 
@@ -608,9 +605,8 @@ impl Z80 {
         };
         let mut f = self.f & (Flag::S as u8 | Flag::Z as u8 | Flag::PV as u8);
         f |= Flag::C as u8;
-        f |= xy_source & (Flag::X as u8 | Flag::Y as u8);
-        self.f = f;
-        self.q = self.f;
+        f |= Self::xy_flags(xy_source);
+        self.commit_flags(f);
         self.state = ExecState::Fetch;
     }
 
@@ -631,9 +627,8 @@ impl Z80 {
         if old_c == 0 {
             f |= Flag::C as u8;
         }
-        f |= xy_source & (Flag::X as u8 | Flag::Y as u8);
-        self.f = f;
-        self.q = self.f;
+        f |= Self::xy_flags(xy_source);
+        self.commit_flags(f);
         self.state = ExecState::Fetch;
     }
 
@@ -644,13 +639,7 @@ impl Z80 {
     pub fn op_neg(&mut self) {
         let a = self.a;
         let result = 0u8.wrapping_sub(a);
-        let mut f = Flag::N as u8;
-        if result == 0 {
-            f |= Flag::Z as u8;
-        }
-        if (result & 0x80) != 0 {
-            f |= Flag::S as u8;
-        }
+        let mut f = Flag::N as u8 | Self::sz_flags(result);
         if (a & 0x0F) != 0 {
             f |= Flag::H as u8;
         }
@@ -660,10 +649,9 @@ impl Z80 {
         if a != 0 {
             f |= Flag::C as u8;
         }
-        f |= result & (Flag::X as u8 | Flag::Y as u8);
+        f |= Self::xy_flags(result);
         self.a = result;
-        self.f = f;
-        self.q = self.f;
+        self.commit_flags(f);
         self.state = ExecState::Fetch;
     }
 
@@ -685,13 +673,7 @@ impl Z80 {
                 let result16 = result as u16;
                 self.memptr = hl.wrapping_add(1);
 
-                let mut f = 0u8;
-                if result16 == 0 {
-                    f |= Flag::Z as u8;
-                }
-                if (result16 & 0x8000) != 0 {
-                    f |= Flag::S as u8;
-                }
+                let mut f = Self::sz_flags16(result16);
                 if ((hl & 0x0FFF) + (rr & 0x0FFF) + (c_val as u16)) > 0x0FFF {
                     f |= Flag::H as u8;
                 }
@@ -703,9 +685,8 @@ impl Z80 {
                 if result > 0xFFFF {
                     f |= Flag::C as u8;
                 }
-                f |= ((result16 >> 8) as u8) & (Flag::X as u8 | Flag::Y as u8);
-                self.f = f;
-                self.q = self.f;
+                f |= Self::xy_flags((result16 >> 8) as u8);
+                self.commit_flags(f);
                 self.set_hl(result16);
 
                 self.state = ExecState::ExecuteED(opcode, 1);
@@ -734,13 +715,7 @@ impl Z80 {
                 let result16 = result as u16;
                 self.memptr = hl.wrapping_add(1);
 
-                let mut f = Flag::N as u8;
-                if result16 == 0 {
-                    f |= Flag::Z as u8;
-                }
-                if (result16 & 0x8000) != 0 {
-                    f |= Flag::S as u8;
-                }
+                let mut f = Flag::N as u8 | Self::sz_flags16(result16);
                 if (hl & 0x0FFF) < ((rr & 0x0FFF) + (c_val as u16)) {
                     f |= Flag::H as u8;
                 }
@@ -751,9 +726,8 @@ impl Z80 {
                 if result > 0xFFFF {
                     f |= Flag::C as u8;
                 }
-                f |= ((result16 >> 8) as u8) & (Flag::X as u8 | Flag::Y as u8);
-                self.f = f;
-                self.q = self.f;
+                f |= Self::xy_flags((result16 >> 8) as u8);
+                self.commit_flags(f);
                 self.set_hl(result16);
 
                 self.state = ExecState::ExecuteED(opcode, 1);
@@ -792,19 +766,12 @@ impl Z80 {
                 self.memptr = self.temp_addr.wrapping_add(1);
 
                 // Flags from A: S, Z, PV(parity), H=0, N=0, C preserved, X/Y from A
-                let mut f = self.f & Flag::C as u8;
-                if self.a == 0 {
-                    f |= Flag::Z as u8;
-                }
-                if (self.a & 0x80) != 0 {
-                    f |= Flag::S as u8;
-                }
+                let mut f = (self.f & Flag::C as u8) | Self::sz_flags(self.a);
                 if Self::get_parity(self.a) {
                     f |= Flag::PV as u8;
                 }
-                f |= self.a & (Flag::X as u8 | Flag::Y as u8);
-                self.f = f;
-                self.q = self.f;
+                f |= Self::xy_flags(self.a);
+                self.commit_flags(f);
                 self.state = ExecState::ExecuteED(opcode, 4);
             }
             7 => {
@@ -842,19 +809,12 @@ impl Z80 {
                 self.temp_data = new_mem;
                 self.memptr = self.temp_addr.wrapping_add(1);
 
-                let mut f = self.f & Flag::C as u8;
-                if self.a == 0 {
-                    f |= Flag::Z as u8;
-                }
-                if (self.a & 0x80) != 0 {
-                    f |= Flag::S as u8;
-                }
+                let mut f = (self.f & Flag::C as u8) | Self::sz_flags(self.a);
                 if Self::get_parity(self.a) {
                     f |= Flag::PV as u8;
                 }
-                f |= self.a & (Flag::X as u8 | Flag::Y as u8);
-                self.f = f;
-                self.q = self.f;
+                f |= Self::xy_flags(self.a);
+                self.commit_flags(f);
                 self.state = ExecState::ExecuteED(opcode, 4);
             }
             7 => {
