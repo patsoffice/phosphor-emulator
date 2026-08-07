@@ -19,6 +19,21 @@ fn fmt_addr(addr: u32) -> String {
     }
 }
 
+/// Format a value as zero-padded hex sized to its access width in **bytes**:
+/// 1 byte → 2 digits, 2 → 4, 4 → 8. No `$` prefix; callers add one.
+///
+/// Note the unit: `WatchpointHit::width` and `DebugEvent::width` are byte
+/// counts, while `DebugRegister::width` is a *bit* count and must be divided
+/// before being passed here.
+fn fmt_hex_value(value: impl Into<u64>, byte_width: u8) -> String {
+    let value = value.into();
+    match byte_width {
+        2 => format!("{value:04X}"),
+        4 => format!("{value:08X}"),
+        _ => format!("{value:02X}"),
+    }
+}
+
 /// Execution modes for the debug interface.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum RunMode {
@@ -962,11 +977,7 @@ fn draw_watchpoints_panel(ui: &mut egui::Ui, state: &mut DebugState) {
                     WatchpointPhase::Before => "pre",
                     WatchpointPhase::After => "post",
                 };
-                let value = match hit.width {
-                    2 => format!("{:04X}", hit.value),
-                    4 => format!("{:08X}", hit.value),
-                    _ => format!("{:02X}", hit.value),
-                };
+                let value = fmt_hex_value(hit.value, hit.width);
 
                 let hit_color = egui::Color32::from_rgb(255, 200, 80);
                 ui.add_space(4.0);
@@ -1030,11 +1041,7 @@ fn format_trace_event(e: &DebugEvent) -> String {
         line.push_str(&format!(" ${}", fmt_addr(addr)));
     }
     if let Some(value) = e.value {
-        match e.width {
-            2 => line.push_str(&format!("=${value:04X}")),
-            4 => line.push_str(&format!("=${value:08X}")),
-            _ => line.push_str(&format!("=${value:02X}")),
-        }
+        line.push_str(&format!("=${}", fmt_hex_value(value, e.width)));
     }
     if let Some(pc) = e.pc {
         line.push_str(&format!(" PC ${}", fmt_addr(pc)));
@@ -1298,6 +1305,22 @@ fn draw_memory_panel(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fmt_hex_value_pads_to_the_access_width() {
+        // Width is in BYTES: 1 -> 2 digits, 2 -> 4, 4 -> 8.
+        assert_eq!(fmt_hex_value(0x5u32, 1), "05");
+        assert_eq!(fmt_hex_value(0x5u32, 2), "0005");
+        assert_eq!(fmt_hex_value(0x5u32, 4), "00000005");
+        assert_eq!(fmt_hex_value(0xDEADBEEFu32, 4), "DEADBEEF");
+        // A value wider than its stated width is never truncated, only
+        // under-padded — the format width is a minimum.
+        assert_eq!(fmt_hex_value(0x1234u32, 1), "1234");
+        // Unexpected widths (0, 3, 8) fall back to the byte form rather than
+        // to a bare {:X}, so a column never loses its leading zeroes.
+        assert_eq!(fmt_hex_value(0x7u32, 0), "07");
+        assert_eq!(fmt_hex_value(0x7u32, 3), "07");
+    }
 
     #[test]
     fn hex_input_ok_flags_only_nonempty_garbage() {
