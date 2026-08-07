@@ -637,19 +637,10 @@ fn draw_device_controls(ui: &mut egui::Ui, state: &mut DebugState, panel_index: 
         else {
             return;
         };
-        ui.label("+$");
-        ui.add(
-            egui::TextEdit::singleline(offset_input)
-                .desired_width(28.0)
-                .font(egui::TextStyle::Monospace),
-        );
-        ui.label("=$");
-        let value_resp = ui.add(
-            egui::TextEdit::singleline(value_input)
-                .desired_width(22.0)
-                .font(egui::TextStyle::Monospace),
-        );
-        let enter = value_resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+        // Enter commits from the value field only, matching the pre-existing
+        // behaviour — Enter in the offset field does not write.
+        let _ = entry_field(ui, "+$", offset_input, 28.0);
+        let enter = entry_field(ui, "=$", value_input, 22.0);
         if (ui.button("Write").clicked() || enter)
             && let (Ok(offset), Ok(value)) = (
                 u16::from_str_radix(offset_input.trim_start_matches('$'), 16),
@@ -731,6 +722,47 @@ fn draw_cpu_column(
 /// Color for an "invalid input" hint shown next to a debug text field.
 const INVALID_HINT: egui::Color32 = egui::Color32::from_rgb(220, 90, 90);
 
+/// A labelled monospace entry field. Returns true on the frame the user
+/// commits it by pressing Enter in the field.
+///
+/// This stops short of the commit button because its placement varies: the
+/// watchpoint row puts its R/W checkboxes between field and button, and the
+/// device-write row has one button serving two fields. Rows where the button
+/// does follow the field use [`entry_commit`] instead.
+fn entry_field(ui: &mut egui::Ui, label: &str, buf: &mut String, width: f32) -> bool {
+    ui.label(label);
+    let resp = ui.add(
+        egui::TextEdit::singleline(buf)
+            .desired_width(width)
+            .font(egui::TextStyle::Monospace),
+    );
+    resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))
+}
+
+/// [`entry_field`] plus a commit button beside it. Returns the parsed value on
+/// the frame the user commits, by button or by Enter.
+///
+/// `parse` is supplied per call site rather than fixed to hex because two of
+/// these fields (the cycle and frame breakpoints) take decimal counts, and
+/// because the hex ones differ in whether they tolerate surrounding
+/// whitespace. Clearing the field on success is left to the caller — the
+/// memory "Go" field deliberately keeps its text.
+fn entry_commit<T>(
+    ui: &mut egui::Ui,
+    label: &str,
+    buf: &mut String,
+    width: f32,
+    button: &str,
+    parse: impl Fn(&str) -> Option<T>,
+) -> Option<T> {
+    let enter = entry_field(ui, label, buf, width);
+    if ui.button(button).clicked() || enter {
+        parse(buf)
+    } else {
+        None
+    }
+}
+
 /// True if a `$`-prefixed hex address field's text is acceptable: empty
 /// (nothing typed yet) or a valid hex `u32`. `!hex_input_ok` therefore means
 /// "the user typed something that isn't a valid address", which drives the
@@ -762,16 +794,10 @@ fn draw_breakpoints_panel(ui: &mut egui::Ui, state: &mut DebugState) {
         .show(ui, |ui| {
             // PC breakpoint entry (scoped to step_cpu)
             ui.horizontal(|ui| {
-                ui.label("PC $");
-                let resp = ui.add(
-                    egui::TextEdit::singleline(&mut state.breakpoint_input)
-                        .desired_width(48.0)
-                        .font(egui::TextStyle::Monospace),
-                );
-                let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                if (ui.button("Add").clicked() || enter)
-                    && let Ok(addr) =
-                        u32::from_str_radix(state.breakpoint_input.trim_start_matches('$'), 16)
+                if let Some(addr) =
+                    entry_commit(ui, "PC $", &mut state.breakpoint_input, 48.0, "Add", |s| {
+                        u32::from_str_radix(s.trim_start_matches('$'), 16).ok()
+                    })
                 {
                     if let Some(bp_set) = state.breakpoints.get_mut(state.step_cpu) {
                         bp_set.insert(addr);
@@ -809,15 +835,10 @@ fn draw_breakpoints_panel(ui: &mut egui::Ui, state: &mut DebugState) {
 
             // Cycle breakpoint
             ui.horizontal(|ui| {
-                ui.label("Cycle:");
-                let resp = ui.add(
-                    egui::TextEdit::singleline(&mut state.cycle_bp_input)
-                        .desired_width(80.0)
-                        .font(egui::TextStyle::Monospace),
-                );
-                let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                if (ui.button("Set").clicked() || enter)
-                    && let Ok(cycle) = state.cycle_bp_input.trim().parse::<u64>()
+                if let Some(cycle) =
+                    entry_commit(ui, "Cycle:", &mut state.cycle_bp_input, 80.0, "Set", |s| {
+                        s.trim().parse::<u64>().ok()
+                    })
                 {
                     state.cycle_breakpoint = Some(cycle);
                     state.cycle_bp_input.clear();
@@ -837,15 +858,10 @@ fn draw_breakpoints_panel(ui: &mut egui::Ui, state: &mut DebugState) {
 
             // Frame breakpoint: pause at the start of the given frame.
             ui.horizontal(|ui| {
-                ui.label("Frame:");
-                let resp = ui.add(
-                    egui::TextEdit::singleline(&mut state.frame_bp_input)
-                        .desired_width(80.0)
-                        .font(egui::TextStyle::Monospace),
-                );
-                let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                if (ui.button("Set").clicked() || enter)
-                    && let Ok(frame) = state.frame_bp_input.trim().parse::<u64>()
+                if let Some(frame) =
+                    entry_commit(ui, "Frame:", &mut state.frame_bp_input, 80.0, "Set", |s| {
+                        s.trim().parse::<u64>().ok()
+                    })
                 {
                     state.frame_breakpoint = Some(frame);
                     state.frame_bp_input.clear();
@@ -873,15 +889,9 @@ fn draw_watchpoints_panel(ui: &mut egui::Ui, state: &mut DebugState) {
         .show(ui, |ui| {
             // Watchpoint entry: address + R/W checkboxes + Add button
             ui.horizontal(|ui| {
-                ui.label("$");
-                let resp = ui.add(
-                    egui::TextEdit::singleline(&mut state.watchpoint_input)
-                        .desired_width(48.0)
-                        .font(egui::TextStyle::Monospace),
-                );
+                let enter = entry_field(ui, "$", &mut state.watchpoint_input, 48.0);
                 ui.checkbox(&mut state.watchpoint_read, "R");
                 ui.checkbox(&mut state.watchpoint_write, "W");
-                let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                 // Guard the silent no-op: adding with neither R nor W selected
                 // would collect an empty kind set and do nothing.
                 let has_kind = state.watchpoint_read || state.watchpoint_write;
@@ -1205,19 +1215,16 @@ fn draw_memory_panel(
     // Navigation bar
     if cpu_idx < state.memory_addr_inputs.len() {
         ui.horizontal(|ui| {
-            ui.label("$");
-            let resp = ui.add(
-                egui::TextEdit::singleline(&mut state.memory_addr_inputs[cpu_idx])
-                    .desired_width(48.0)
-                    .font(egui::TextStyle::Monospace),
-            );
-            let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            if (ui.button("Go").clicked() || enter)
-                && let Ok(addr) = u32::from_str_radix(
-                    state.memory_addr_inputs[cpu_idx].trim_start_matches('$'),
-                    16,
-                )
-            {
+            // Unlike the breakpoint/watchpoint fields, this one keeps its text
+            // after a jump so the address stays visible.
+            if let Some(addr) = entry_commit(
+                ui,
+                "$",
+                &mut state.memory_addr_inputs[cpu_idx],
+                48.0,
+                "Go",
+                |s| u32::from_str_radix(s.trim_start_matches('$'), 16).ok(),
+            ) {
                 // Retarget the 64 KB window to the address's high bits and
                 // scroll to its row within the window.
                 state.memory_view_base[cpu_idx] = addr & 0xFFFF_0000;
