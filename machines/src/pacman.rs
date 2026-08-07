@@ -343,40 +343,18 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn dip_default_and_metadata() {
-        let sys = PacmanSystem::new();
-        // Historical default: 1C/1C, 3 lives, 10000 bonus, normal difficulty,
-        // normal ghosts — the byte the board powers on with.
-        assert_eq!(sys.dip_bank_value(0), 0xC9);
-        // Disjoint masks, choices inside their mask, and the default byte
-        // decomposing into defined choices. The defaults slice length also
-        // pins the bank count at 1.
-        crate::assert_dip_banks_valid(sys.dip_banks(), &[sys.dip_bank_value(0)]);
-        // Out-of-range reads 0.
-        assert_eq!(sys.dip_bank_value(1), 0);
-    }
-
-    #[test]
-    fn set_dip_option_mutates_only_masked_bits() {
+    fn set_dip_option_stray_bits_are_filtered_to_the_mask() {
+        // The generated suite covers every defined choice; this pins the
+        // behaviour for a value that is not one — Lives is option index 1
+        // (mask 0x0C), and 0xFF must land as 0x0C, not 0xFF.
         let mut sys = PacmanSystem::new();
-        // Lives is option index 1 (mask 0x0C); pick "5" (0x0C).
-        sys.set_dip_option(0, 1, 0x0C);
-        // 0xC9 with bits 2-3 set -> 0xCD; all other bits unchanged.
-        assert_eq!(sys.dip_bank_value(0), 0xCD);
-
-        // A value with stray bits outside the mask is filtered to the mask.
         sys.set_dip_option(0, 1, 0xFF);
-        assert_eq!(sys.dip_bank_value(0) & !0x0C, 0xCD & !0x0C);
         assert_eq!(sys.dip_bank_value(0) & 0x0C, 0x0C);
-    }
-
-    #[test]
-    fn dip_bank_value_round_trips() {
-        let mut sys = PacmanSystem::new();
-        sys.set_dip_bank_value(0, 0x55);
-        assert_eq!(sys.dip_bank_value(0), 0x55);
-        // Out-of-range writes are ignored (no panic, bank 0 untouched).
-        sys.set_dip_bank_value(9, 0xAA);
-        assert_eq!(sys.dip_bank_value(0), 0x55);
+        assert_eq!(sys.dip_bank_value(0) & !0x0C, 0xC9 & !0x0C);
     }
 }
+
+// Historical power-on byte: 1C/1C, 3 lives, 10000 bonus, normal difficulty,
+// normal ghosts.
+#[cfg(test)]
+crate::dip_test_suite!(PacmanSystem, &[0xC9]);

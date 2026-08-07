@@ -818,6 +818,147 @@ pub(crate) fn assert_dip_banks_valid(
     }
 }
 
+/// Generates a machine's standard DIP test suite from its expected power-on
+/// bytes, one per bank.
+///
+/// ```ignore
+/// crate::dip_test_suite!(PacmanSystem, &[0xC9]);
+/// crate::dip_test_suite!(DigDugSystem, &[0x99, 0x24]);
+/// ```
+///
+/// Expands to a private `#[cfg(test)]` module with three tests:
+///
+/// * `dip_defaults_and_metadata` — the power-on bytes match, the table passes
+///   [`assert_dip_banks_valid`], and an out-of-range bank reads 0. The length
+///   of the expected slice pins the bank count.
+/// * `set_dip_option_masks_only_its_bits` — data-driven over the table: every
+///   choice of every option is selectable, reads back as itself, and leaves
+///   every other option's bits alone. This is where the suite earns its keep;
+///   the hand-written version of this test picks one option and one choice.
+/// * `dip_bank_values_round_trip` — every bit the bank's options claim
+///   survives a write, no bit the caller didn't ask for is set, and an
+///   out-of-range write disturbs nothing.
+///
+/// The round-trip check is scoped to the union of the bank's option masks
+/// rather than the whole byte, so a machine whose DIPs share an input port
+/// with live signals (reads mask, writes merge) satisfies it too — while a
+/// machine that silently dropped a write would still fail.
+///
+/// Machine-specific DIP facts stay hand-written next to the invocation — see
+/// `digdug.rs`, which additionally asserts that its banks map all 8 bits.
+#[cfg(test)]
+macro_rules! dip_test_suite {
+    ($type:ty, $expected:expr) => {
+        #[cfg(test)]
+        mod generated_dip_tests {
+            use super::*;
+            use phosphor_core::core::machine::DipSwitches;
+
+            #[test]
+            fn dip_defaults_and_metadata() {
+                let sys = <$type>::new();
+                let expected: &[u8] = $expected;
+                for (bank, &want) in expected.iter().enumerate() {
+                    assert_eq!(sys.dip_bank_value(bank), want, "bank {bank} power-on byte");
+                }
+                $crate::assert_dip_banks_valid(sys.dip_banks(), expected);
+                assert_eq!(
+                    sys.dip_bank_value(expected.len()),
+                    0,
+                    "out-of-range bank must read 0"
+                );
+            }
+
+            #[test]
+            fn set_dip_option_masks_only_its_bits() {
+                let banks = <$type>::new().dip_banks();
+                for (bank_idx, bank) in banks.iter().enumerate() {
+                    for (opt_idx, opt) in bank.options.iter().enumerate() {
+                        for choice in opt.choices {
+                            let mut sys = <$type>::new();
+                            let before = sys.dip_bank_value(bank_idx);
+                            sys.set_dip_option(bank_idx, opt_idx, choice.value);
+                            let after = sys.dip_bank_value(bank_idx);
+                            assert_eq!(
+                                after & opt.mask,
+                                choice.value,
+                                "{}: {} = {} did not take",
+                                bank.name,
+                                opt.name,
+                                choice.label
+                            );
+                            assert_eq!(
+                                after & !opt.mask,
+                                before & !opt.mask,
+                                "{}: {} = {} disturbed bits outside its mask",
+                                bank.name,
+                                opt.name,
+                                choice.label
+                            );
+                            // Other banks are untouched by an edit to this one.
+                            for other in (0..banks.len()).filter(|&b| b != bank_idx) {
+                                assert_eq!(
+                                    sys.dip_bank_value(other),
+                                    <$type>::new().dip_bank_value(other),
+                                    "{}: {} = {} disturbed bank {other}",
+                                    bank.name,
+                                    opt.name,
+                                    choice.label
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+
+            #[test]
+            fn dip_bank_values_round_trip() {
+                let banks = <$type>::new().dip_banks();
+                for (bank, table) in banks.iter().enumerate() {
+                    // Every bit the table claims as an option must survive a
+                    // write; bits it does not claim may belong to live inputs
+                    // sharing the port, so they are not asserted on.
+                    let owned = table.options.iter().fold(0u8, |acc, opt| acc | opt.mask);
+                    for probe in [0x00u8, 0xFF, 0x55, 0xAA] {
+                        let mut sys = <$type>::new();
+                        sys.set_dip_bank_value(bank, probe);
+                        let got = sys.dip_bank_value(bank);
+                        assert_eq!(
+                            got & owned,
+                            probe & owned,
+                            "bank {bank}: writing 0x{probe:02X} did not round-trip \
+                             (read 0x{got:02X}, table owns 0x{owned:02X})"
+                        );
+                        assert_eq!(
+                            got & !probe,
+                            0,
+                            "bank {bank}: writing 0x{probe:02X} set bits that were not asked for \
+                             (read 0x{got:02X})"
+                        );
+                        // Other banks keep their power-on bytes.
+                        for other in (0..banks.len()).filter(|&b| b != bank) {
+                            assert_eq!(
+                                sys.dip_bank_value(other),
+                                <$type>::new().dip_bank_value(other),
+                                "bank {bank} write disturbed bank {other}"
+                            );
+                        }
+                        // An out-of-range write disturbs nothing.
+                        sys.set_dip_bank_value(banks.len() + 4, 0xFF);
+                        assert_eq!(
+                            sys.dip_bank_value(bank),
+                            got,
+                            "bank {bank} disturbed by an out-of-range write"
+                        );
+                    }
+                }
+            }
+        }
+    };
+}
+#[cfg(test)]
+pub(crate) use dip_test_suite;
+
 /// Assert that no two coin controls share a default physical binding. Binding a
 /// single coin key to more than one coin slot inserts a coin into each, so one
 /// key press would award several credits.

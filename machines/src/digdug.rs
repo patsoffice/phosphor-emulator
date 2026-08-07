@@ -1622,56 +1622,24 @@ mod tests {
     use phosphor_core::core::machine::DipSwitches;
 
     #[test]
-    fn dip_defaults_and_metadata() {
-        let sys = DigDugSystem::new();
-        // DSWA: 1C/1C coin B, 20K/60K bonus, 3 lives. DSWB: freeze off,
-        // upright cabinet, everything else at factory default.
-        assert_eq!(sys.dip_bank_value(0), 0x99);
-        assert_eq!(sys.dip_bank_value(1), 0x24);
-        // Disjoint masks, choices inside their mask, and both default bytes
-        // decomposing into defined choices. The defaults slice length also
-        // pins the bank count at 2.
-        crate::assert_dip_banks_valid(
-            sys.dip_banks(),
-            &[sys.dip_bank_value(0), sys.dip_bank_value(1)],
-        );
-        // Out-of-range reads 0.
-        assert_eq!(sys.dip_bank_value(2), 0);
+    fn dip_banks_map_every_bit() {
         // Stronger than the shared validator, which only requires the masks to
         // be disjoint: both Dig Dug banks map every bit of their byte.
-        for bank in sys.dip_banks() {
+        for bank in DigDugSystem::new().dip_banks() {
             let covered = bank.options.iter().fold(0u8, |acc, opt| acc | opt.mask);
             assert_eq!(covered, 0xFF, "{} leaves bits unmapped", bank.name);
         }
     }
 
     #[test]
-    fn set_dip_option_mutates_only_masked_bits() {
+    fn set_dip_option_stray_bits_are_filtered_to_the_mask() {
+        // The generated suite covers every defined choice; this pins the
+        // behaviour for a value that is not one — DSWA Lives is option index 2
+        // (mask 0xC0), and 0xFF must land as 0xC0, leaving 0x99's low bits.
         let mut sys = DigDugSystem::new();
-        // DSWA Lives is option index 2 (mask 0xC0); pick "5" (0xC0).
-        sys.set_dip_option(0, 2, 0xC0);
-        // 0x99 with bits 6-7 set -> 0xD9; lower bits unchanged.
-        assert_eq!(sys.dip_bank_value(0), 0xD9);
-        // DSWB untouched by a DSWA edit.
-        assert_eq!(sys.dip_bank_value(1), 0x24);
-
-        // Stray bits outside the mask are filtered out.
         sys.set_dip_option(0, 2, 0xFF);
         assert_eq!(sys.dip_bank_value(0) & 0xC0, 0xC0);
         assert_eq!(sys.dip_bank_value(0) & !0xC0, 0x19);
-    }
-
-    #[test]
-    fn dip_bank_values_round_trip() {
-        let mut sys = DigDugSystem::new();
-        sys.set_dip_bank_value(0, 0x3C);
-        sys.set_dip_bank_value(1, 0xC3);
-        assert_eq!(sys.dip_bank_value(0), 0x3C);
-        assert_eq!(sys.dip_bank_value(1), 0xC3);
-        // Out-of-range writes are ignored.
-        sys.set_dip_bank_value(5, 0xFF);
-        assert_eq!(sys.dip_bank_value(0), 0x3C);
-        assert_eq!(sys.dip_bank_value(1), 0xC3);
     }
 
     // Drive the ER2055 EAROM the way the game ROM does: latch address+data at
@@ -1755,3 +1723,8 @@ mod tests {
         assert_eq!(&buf[i..i + 3], &[11, 22, 33]);
     }
 }
+
+// Historical power-on bytes — DSWA: 1C/1C coin B, 20K/60K bonus, 3 lives.
+// DSWB: freeze off, upright cabinet, everything else at factory default.
+#[cfg(test)]
+crate::dip_test_suite!(DigDugSystem, &[0x99, 0x24]);
