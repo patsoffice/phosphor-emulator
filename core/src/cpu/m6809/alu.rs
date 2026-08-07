@@ -564,7 +564,8 @@ impl M6809 {
 
     /// Generic helper for Indexed Addressing Mode read-modify-write instructions.
     /// Used by memory-modify ops in the 0x60-0x6F range (NEG, COM, LSR, etc.).
-    /// Cycles 39-40: base internal. Cycle 50: read value from EA. Cycle 51: modify and write back.
+    /// Cycles 39-40: base internal. Cycle 50: read value from EA. Cycle 51: modify and write back
+    /// (internal instead of a write for TST — see the note on cycle 51).
     pub(crate) fn rmw_indexed<B: Bus<Address = u16, Data = u8> + ?Sized, F>(
         &mut self,
         opcode: u8,
@@ -590,15 +591,18 @@ impl M6809 {
             }
             51 => {
                 let result = operation(self, self.scratch);
-                // TST indexed (0x6D) shares RMW timing but does NOT write back:
-                // on real hardware its final cycle is a dummy VMA read of $FFFF,
-                // not a store (MAME m6809 TST8 microcode: read, set flags,
-                // dummy_vma). Writing back corrupts destinations where reads and
-                // writes decode differently — e.g. Williams banked VRAM, where a
-                // read returns ROM but the write lands in video RAM.
-                if opcode == 0x6D {
-                    let _ = bus.read(master, 0xFFFF);
-                } else {
+                // TST indexed (0x6D) shares RMW timing but does NOT write back.
+                // The cycle-by-cycle chart gives the RMW group `data(EA) /
+                // don't-care($FFFF) / write(EA)` and TST `data(EA) /
+                // don't-care($FFFF) / don't-care($FFFF)`, so the final cycle is a
+                // /VMA cycle, not a store. Writing back would corrupt destinations
+                // where reads and writes decode differently — e.g. banked VRAM
+                // where a read returns ROM but the write lands in video RAM.
+                //
+                // Like every other don't-care cycle here it is modelled as an
+                // internal cycle with no bus access, rather than as the $FFFF read
+                // real silicon drives, so it cannot disturb memory-mapped I/O.
+                if opcode != 0x6D {
                     bus.write(master, self.temp_addr, result);
                 }
                 self.state = ExecState::Fetch;
@@ -617,7 +621,7 @@ impl M6809 {
     /// Cycle 1: internal cycle.
     /// Cycle 2: read value from EA.
     /// Cycle 3: internal cycle (modify).
-    /// Cycle 4: write result back.
+    /// Cycle 4: write result back (internal instead for TST — see the note on cycle 4).
     pub(crate) fn rmw_direct<B: Bus<Address = u16, Data = u8> + ?Sized, F>(
         &mut self,
         opcode: u8,
@@ -649,12 +653,10 @@ impl M6809 {
             }
             4 => {
                 let result = operation(self, self.scratch);
-                // TST direct (0x0D) shares RMW timing but does NOT write back —
-                // its final cycle is a dummy VMA read, not a store. See the
-                // rmw_indexed note for why writing back corrupts banked VRAM.
-                if opcode == 0x0D {
-                    let _ = bus.read(master, 0xFFFF);
-                } else {
+                // TST direct (0x0D) shares RMW timing but does NOT write back — its
+                // final cycle is a don't-care /VMA cycle, not a store. Modelled as
+                // an internal cycle; see the rmw_indexed note.
+                if opcode != 0x0D {
                     bus.write(master, self.temp_addr, result);
                 }
                 self.state = ExecState::Fetch;
@@ -670,7 +672,7 @@ impl M6809 {
     /// Cycle 2: internal cycle.
     /// Cycle 3: read value from EA.
     /// Cycle 4: internal cycle (modify).
-    /// Cycle 5: write result back.
+    /// Cycle 5: write result back (internal instead for TST — see the note on cycle 5).
     pub(crate) fn rmw_extended<B: Bus<Address = u16, Data = u8> + ?Sized, F>(
         &mut self,
         opcode: u8,
@@ -709,11 +711,9 @@ impl M6809 {
             5 => {
                 let result = operation(self, self.scratch);
                 // TST extended (0x7D) shares RMW timing but does NOT write back —
-                // its final cycle is a dummy VMA read, not a store. See the
-                // rmw_indexed note for why writing back corrupts banked VRAM.
-                if opcode == 0x7D {
-                    let _ = bus.read(master, 0xFFFF);
-                } else {
+                // its final cycle is a don't-care /VMA cycle, not a store. Modelled
+                // as an internal cycle; see the rmw_indexed note.
+                if opcode != 0x7D {
                     bus.write(master, self.temp_addr, result);
                 }
                 self.state = ExecState::Fetch;

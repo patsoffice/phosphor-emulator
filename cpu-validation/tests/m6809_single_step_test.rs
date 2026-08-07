@@ -4,7 +4,22 @@ use phosphor_core::core::{BusMaster, BusMasterComponent};
 use phosphor_core::cpu::m6809::M6809;
 use phosphor_cpu_validation::{BusOp, TestCase, TracingBus};
 
-fn run_test_case(tc: &TestCase) {
+/// Compare one field, recording a message instead of panicking so a single bad
+/// opcode cannot hide every opcode that sorts after it.
+fn check<T: PartialEq + std::fmt::Debug>(
+    failures: &mut Vec<String>,
+    actual: T,
+    expected: T,
+    what: std::fmt::Arguments<'_>,
+) {
+    if actual != expected {
+        failures.push(format!("{what}: got {actual:?} expected {expected:?}"));
+    }
+}
+
+/// Replay one test case, returning a description of the first mismatch (if any).
+fn run_test_case(tc: &TestCase) -> Option<String> {
+    let mut failures = Vec::new();
     let mut cpu = M6809::new();
     let mut bus = TracingBus::new();
 
@@ -31,37 +46,37 @@ fn run_test_case(tc: &TestCase) {
         }
     }
 
-    // Assert registers
-    assert_eq!(cpu.pc, tc.final_state.pc, "{}: PC", tc.name);
-    assert_eq!(cpu.a, tc.final_state.a, "{}: A", tc.name);
-    assert_eq!(cpu.b, tc.final_state.b, "{}: B", tc.name);
-    assert_eq!(cpu.dp, tc.final_state.dp, "{}: DP", tc.name);
-    assert_eq!(cpu.x, tc.final_state.x, "{}: X", tc.name);
-    assert_eq!(cpu.y, tc.final_state.y, "{}: Y", tc.name);
-    assert_eq!(cpu.u, tc.final_state.u, "{}: U", tc.name);
-    assert_eq!(cpu.s, tc.final_state.s, "{}: S", tc.name);
-    assert_eq!(cpu.cc, tc.final_state.cc, "{}: CC", tc.name);
+    // Check registers
+    let f = &mut failures;
+    check(f, cpu.pc, tc.final_state.pc, format_args!("PC"));
+    check(f, cpu.a, tc.final_state.a, format_args!("A"));
+    check(f, cpu.b, tc.final_state.b, format_args!("B"));
+    check(f, cpu.dp, tc.final_state.dp, format_args!("DP"));
+    check(f, cpu.x, tc.final_state.x, format_args!("X"));
+    check(f, cpu.y, tc.final_state.y, format_args!("Y"));
+    check(f, cpu.u, tc.final_state.u, format_args!("U"));
+    check(f, cpu.s, tc.final_state.s, format_args!("S"));
+    check(f, cpu.cc, tc.final_state.cc, format_args!("CC"));
 
-    // Assert memory
+    // Check memory
     for &(addr, expected) in &tc.final_state.ram {
-        assert_eq!(
-            bus.memory[addr as usize], expected,
-            "{}: RAM[0x{:04X}]",
-            tc.name, addr
+        check(
+            f,
+            bus.memory[addr as usize],
+            expected,
+            format_args!("RAM[0x{addr:04X}]"),
         );
     }
 
-    // Assert total cycle count (internal + bus cycles)
-    assert_eq!(
+    // Check total cycle count (internal + bus cycles)
+    check(
+        f,
         total_ticks,
         tc.cycles.len(),
-        "{}: total cycle count (got {} expected {})",
-        tc.name,
-        total_ticks,
-        tc.cycles.len()
+        format_args!("total cycle count"),
     );
 
-    // Assert bus cycle details (skip internal cycles)
+    // Check bus cycle details (skip internal cycles)
     let expected_bus: Vec<_> = tc
         .cycles
         .iter()
@@ -69,40 +84,32 @@ fn run_test_case(tc: &TestCase) {
         .filter(|(_, (_, _, op))| op != "internal")
         .collect();
 
-    assert_eq!(
+    check(
+        f,
         bus.cycles.len(),
         expected_bus.len(),
-        "{}: bus cycle count (got {} expected {})",
-        tc.name,
-        bus.cycles.len(),
-        expected_bus.len()
+        format_args!("bus cycle count"),
     );
 
     for (bus_idx, (exp_idx, (exp_addr, exp_data, exp_op))) in expected_bus.iter().enumerate() {
-        let actual = &bus.cycles[bus_idx];
-        assert_eq!(
-            actual.addr, *exp_addr,
-            "{}: cycle {} (bus {}) addr",
-            tc.name, exp_idx, bus_idx
-        );
-        assert_eq!(
-            actual.data, *exp_data,
-            "{}: cycle {} (bus {}) data",
-            tc.name, exp_idx, bus_idx
-        );
+        let Some(actual) = bus.cycles.get(bus_idx) else {
+            break;
+        };
+        let at = format_args!("cycle {exp_idx} (bus {bus_idx})");
+        check(f, actual.addr, *exp_addr, format_args!("{at} addr"));
+        check(f, actual.data, *exp_data, format_args!("{at} data"));
         let actual_op = match actual.op {
             BusOp::Read => "read",
             BusOp::Write => "write",
             BusOp::Internal => "internal",
         };
-        assert_eq!(
-            actual_op,
-            exp_op.as_str(),
-            "{}: cycle {} (bus {}) op",
-            tc.name,
-            exp_idx,
-            bus_idx
-        );
+        check(f, actual_op, exp_op.as_str(), format_args!("{at} op"));
+    }
+
+    if failures.is_empty() {
+        None
+    } else {
+        Some(format!("{}: {}", tc.name, failures.join("; ")))
     }
 }
 
@@ -135,8 +142,13 @@ fn test_all_opcodes() {
         "No JSON test files found. Run: cargo run -p phosphor-cpu-validation --bin gen_m6809_tests -- all"
     );
 
+    /// Failing cases reported per opcode before truncating the rest.
+    const EXAMPLES_PER_OPCODE: usize = 3;
+
     let mut total_tests = 0;
     let mut total_files = 0;
+    // (opcode, failed, total, first few failure descriptions)
+    let mut failing_opcodes: Vec<(String, usize, usize, Vec<String>)> = Vec::new();
 
     for json_path in &json_files {
         let json = std::fs::read_to_string(json_path)
@@ -147,12 +159,48 @@ fn test_all_opcodes() {
         let file_name = json_path.file_name().unwrap().to_string_lossy();
         assert!(!tests.is_empty(), "Test file {} is empty", file_name);
 
+        let mut failed = 0;
+        let mut examples = Vec::new();
         for tc in &tests {
-            run_test_case(tc);
+            if let Some(msg) = run_test_case(tc) {
+                failed += 1;
+                if examples.len() < EXAMPLES_PER_OPCODE {
+                    examples.push(msg);
+                }
+            }
+        }
+        if failed > 0 {
+            let opcode = json_path
+                .file_stem()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned();
+            failing_opcodes.push((opcode, failed, tests.len(), examples));
         }
 
         total_tests += tests.len();
         total_files += 1;
+    }
+
+    if !failing_opcodes.is_empty() {
+        let failed_cases: usize = failing_opcodes.iter().map(|(_, n, _, _)| n).sum();
+        let mut report = format!(
+            "{} of {} opcode files failed ({} of {} cases):\n",
+            failing_opcodes.len(),
+            total_files,
+            failed_cases,
+            total_tests
+        );
+        for (opcode, failed, total, examples) in &failing_opcodes {
+            report.push_str(&format!("\n  {opcode}: {failed}/{total} failed\n"));
+            for example in examples {
+                report.push_str(&format!("    {example}\n"));
+            }
+            if failed > &examples.len() {
+                report.push_str(&format!("    ... and {} more\n", failed - examples.len()));
+            }
+        }
+        panic!("{report}");
     }
 
     eprintln!(

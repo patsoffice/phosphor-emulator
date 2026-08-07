@@ -1,13 +1,46 @@
 # M6809 Cross-Validation
 
-Validates phosphor-core's M6809 test vectors against
-[elmerucr/MC6809](https://github.com/elmerucr/MC6809), an independent
-cycle-accurate 6809 emulator.
+Validates phosphor-core's M6809 test vectors against an independent reference
+6809 core (`cross-validation/mame0148/src/emu/cpu/m6809/m6809.c`).
 
 ## Results
 
 266 opcodes validated, 266,000 test vectors (1,000 per opcode):
-**266,000/266,000 tests pass (100%)** across all three opcode pages.
+**264,090/266,000 tests pass (99.3%)**.
+
+All 1,910 mismatches are the same known divergence, described below. Any
+*other* failure is a regression.
+
+### Known divergence: `[n]` extended indirect costs 3 cycles too many
+
+53 indexed opcodes report a handful of cycle-count mismatches each, always with
+the reference 3 cycles higher than phosphor. Every one of those cases uses
+indexed postbyte `0x9F` — `[n]`, extended indirect.
+
+Table 2 (Indexed Addressing Mode) of the MC6809E datasheet lists extended
+indirect, postbyte `10011111`, as **+5 cycles / +2 bytes**. Phosphor charges 5;
+the reference core charges 8. Per the project rule that the datasheet wins over
+the reference on timings, phosphor is correct here and the vectors are not
+regenerated to match.
+
+The divergence scales with how often a random postbyte lands on `0x9F`
+(~4/1,000 per indexed opcode), so the exact per-opcode counts shift each time
+vectors are regenerated.
+
+### Note: TST memory forms are not bus-trace-validated
+
+`TST` direct/indexed/extended (`0x0D`/`0x6D`/`0x7D`) share read-modify-write
+timing but perform no write-back: Figure 17 (Cycle-by-Cycle Performance, sheet
+5) gives the RMW group `data(EA) / don't-care($FFFF) / write(EA)` and `TST`
+`data(EA) / don't-care($FFFF) / don't-care($FFFF)`. Phosphor models that final
+don't-care as an internal cycle with no bus access, the same as every other
+/VMA cycle in the core, so the vectors record it as `"internal"`.
+
+The reference core instead re-reads the effective address on that cycle. This
+does not show up in cross-validation — bus traces are not compared (see below)
+and the cycle *count* is identical — but it is why the self-validation vectors
+for these three opcodes must be regenerated from phosphor rather than taken
+from the reference.
 
 ## Prerequisites
 
@@ -47,7 +80,8 @@ For each test case, the harness:
 5. Compares total cycle count
 
 Bus-level cycle traces (per-cycle address/data/direction) are not validated
-since elmerucr/MC6809 does not expose per-cycle bus activity.
+since the reference core does not expose per-cycle bus activity. Only
+`m6809_single_step_test.rs` checks those.
 
 ## Test Vector Format
 
@@ -131,4 +165,5 @@ cargo test -p phosphor-cpu-validation
 
 This runs `m6809_single_step_test.rs`, which loads every JSON file and replays
 each test case against phosphor-core, asserting registers, memory, cycle count,
-and per-cycle bus traces.
+and per-cycle bus traces. It collects every mismatch and reports a per-opcode
+summary, so one bad opcode does not hide the rest.
