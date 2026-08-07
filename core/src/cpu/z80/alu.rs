@@ -456,78 +456,64 @@ impl Z80 {
 
     // --- Accumulator Rotates ---
 
+    /// The four accumulator rotates, which differ only in direction and in
+    /// where the bit shifted in comes from.
+    ///
+    /// `through_carry` selects RLA/RRA (the bit shifted in is the old carry)
+    /// over RLCA/RRCA (it is the bit shifted out, i.e. a circular rotate). The
+    /// carry always receives the bit shifted out either way.
+    ///
+    /// Flags in every case: H = 0, N = 0, C = the bit shifted out, X/Y from
+    /// the rotated A, and S/Z/PV preserved. Note X/Y come from A *after* the
+    /// rotate — these are the accumulator rotates, not the CB-prefixed ones.
+    fn rotate_a(&mut self, left: bool, through_carry: bool) {
+        let carry_in = (self.f & Flag::C as u8) != 0;
+        let (result, carry_out) = if left {
+            let carry_out = (self.a & 0x80) != 0;
+            let shifted_in = if through_carry { carry_in } else { carry_out };
+            ((self.a << 1) | shifted_in as u8, carry_out)
+        } else {
+            let carry_out = (self.a & 0x01) != 0;
+            let shifted_in = if through_carry { carry_in } else { carry_out };
+            ((self.a >> 1) | ((shifted_in as u8) << 7), carry_out)
+        };
+        self.a = result;
+
+        let mut f = self.f & (Flag::S as u8 | Flag::Z as u8 | Flag::PV as u8);
+        if carry_out {
+            f |= Flag::C as u8;
+        }
+        f |= Self::xy_flags(self.a);
+        self.commit_flags(f);
+        self.state = ExecState::Fetch;
+    }
+
     /// RLCA — 4 T: M1 only.
     /// Rotate A left circular. Old bit 7 to carry and bit 0.
     /// H = 0, N = 0, C = old bit 7. X/Y from A. S, Z, PV preserved.
     pub fn op_rlca(&mut self) {
-        let bit7 = (self.a >> 7) & 1;
-        self.a = (self.a << 1) | bit7;
-        let mut f = self.f & (Flag::S as u8 | Flag::Z as u8 | Flag::PV as u8);
-        if bit7 != 0 {
-            f |= Flag::C as u8;
-        }
-        f |= self.a & (Flag::X as u8 | Flag::Y as u8);
-        self.f = f;
-        self.q = self.f;
-        self.state = ExecState::Fetch;
+        self.rotate_a(true, false);
     }
 
     /// RRCA — 4 T: M1 only.
     /// Rotate A right circular. Old bit 0 to carry and bit 7.
     /// H = 0, N = 0, C = old bit 0. X/Y from A. S, Z, PV preserved.
     pub fn op_rrca(&mut self) {
-        let bit0 = self.a & 1;
-        self.a = (self.a >> 1) | (bit0 << 7);
-        let mut f = self.f & (Flag::S as u8 | Flag::Z as u8 | Flag::PV as u8);
-        if bit0 != 0 {
-            f |= Flag::C as u8;
-        }
-        f |= self.a & (Flag::X as u8 | Flag::Y as u8);
-        self.f = f;
-        self.q = self.f;
-        self.state = ExecState::Fetch;
+        self.rotate_a(false, false);
     }
 
     /// RLA — 4 T: M1 only.
     /// Rotate A left through carry. Old bit 7 to C, old C to bit 0.
     /// H = 0, N = 0, C = old bit 7. X/Y from A. S, Z, PV preserved.
     pub fn op_rla(&mut self) {
-        let old_carry = if (self.f & Flag::C as u8) != 0 {
-            1u8
-        } else {
-            0
-        };
-        let bit7 = (self.a >> 7) & 1;
-        self.a = (self.a << 1) | old_carry;
-        let mut f = self.f & (Flag::S as u8 | Flag::Z as u8 | Flag::PV as u8);
-        if bit7 != 0 {
-            f |= Flag::C as u8;
-        }
-        f |= self.a & (Flag::X as u8 | Flag::Y as u8);
-        self.f = f;
-        self.q = self.f;
-        self.state = ExecState::Fetch;
+        self.rotate_a(true, true);
     }
 
     /// RRA — 4 T: M1 only.
     /// Rotate A right through carry. Old bit 0 to C, old C to bit 7.
     /// H = 0, N = 0, C = old bit 0. X/Y from A. S, Z, PV preserved.
     pub fn op_rra(&mut self) {
-        let old_carry = if (self.f & Flag::C as u8) != 0 {
-            0x80u8
-        } else {
-            0
-        };
-        let bit0 = self.a & 1;
-        self.a = (self.a >> 1) | old_carry;
-        let mut f = self.f & (Flag::S as u8 | Flag::Z as u8 | Flag::PV as u8);
-        if bit0 != 0 {
-            f |= Flag::C as u8;
-        }
-        f |= self.a & (Flag::X as u8 | Flag::Y as u8);
-        self.f = f;
-        self.q = self.f;
-        self.state = ExecState::Fetch;
+        self.rotate_a(false, true);
     }
 
     // --- Misc ALU ---
