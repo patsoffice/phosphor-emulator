@@ -274,8 +274,7 @@ impl Z80 {
                     self.temp_data = match xx {
                         0 => {
                             let (r, f) = self.do_cb_rotate_shift(yyy, self.temp_data);
-                            self.f = f;
-                            self.q = self.f;
+                            self.commit_flags(f);
                             r
                         }
                         2 => self.temp_data & !(1 << yyy),

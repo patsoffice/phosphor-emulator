@@ -3,6 +3,24 @@ use crate::cpu::flags::parity;
 use crate::cpu::z80::{ExecState, Flag, Z80};
 
 impl Z80 {
+    /// X/Y for the block transfer and compare groups, which do **not** use the
+    /// usual bit-3/bit-5 copy: X is bit 3 of `n`, but Y is bit **1**.
+    ///
+    /// `n` is also a derived value rather than the result — LDI/LDD use
+    /// `(HL) + A`, CPI/CPD use `result - H`. Deliberately separate from
+    /// [`Z80::xy_flags`], which masks bits 3 and 5: substituting one for the
+    /// other compiles fine and silently corrupts Y.
+    fn block_xy_flags(n: u8) -> u8 {
+        let mut f = 0;
+        if (n & 0x08) != 0 {
+            f |= Flag::X as u8;
+        }
+        if (n & 0x02) != 0 {
+            f |= Flag::Y as u8;
+        }
+        f
+    }
+
     // --- Block Transfer ---
 
     /// LDI/LDD — 16T: Main M1(4) + ED M1(4) + MR(3) + MW(3) + internal(2)
@@ -41,14 +59,8 @@ impl Z80 {
                     f |= Flag::PV as u8;
                 }
                 // Undocumented: X = bit 3 of (val+A), Y = bit 1 of (val+A)
-                if (n & 0x08) != 0 {
-                    f |= Flag::X as u8;
-                }
-                if (n & 0x02) != 0 {
-                    f |= Flag::Y as u8;
-                }
-                self.f = f;
-                self.q = self.f;
+                f |= Self::block_xy_flags(n);
+                self.commit_flags(f);
                 self.state = ExecState::ExecuteED(opcode, 7);
             }
             8 => self.state = ExecState::Fetch,
@@ -89,14 +101,8 @@ impl Z80 {
                 if self.get_bc() != 0 {
                     f |= Flag::PV as u8;
                 }
-                if (n & 0x08) != 0 {
-                    f |= Flag::X as u8;
-                }
-                if (n & 0x02) != 0 {
-                    f |= Flag::Y as u8;
-                }
-                self.f = f;
-                self.q = self.f;
+                f |= Self::block_xy_flags(n);
+                self.commit_flags(f);
                 self.state = ExecState::ExecuteED(opcode, 7);
             }
             8 => {
@@ -105,11 +111,11 @@ impl Z80 {
                 } else {
                     self.pc = self.pc.wrapping_sub(2);
                     self.memptr = self.pc.wrapping_add(1);
-                    // When repeating, X/Y flags come from high byte of rewound PC
+                    // When repeating, X/Y flags come from high byte of rewound
+                    // PC — the ordinary bit-3/bit-5 copy, not the block rule.
                     let pc_h = (self.pc >> 8) as u8;
-                    self.f = (self.f & !(Flag::X as u8 | Flag::Y as u8))
-                        | (pc_h & (Flag::X as u8 | Flag::Y as u8));
-                    self.q = self.f;
+                    let f = (self.f & !(Flag::X as u8 | Flag::Y as u8)) | Self::xy_flags(pc_h);
+                    self.commit_flags(f);
                     self.state = ExecState::ExecuteED(opcode, 9);
                 }
             }
@@ -155,14 +161,8 @@ impl Z80 {
                     self.memptr = self.memptr.wrapping_add(1);
                 }
 
-                let mut f = self.f & Flag::C as u8; // preserve C
-                f |= Flag::N as u8;
-                if result == 0 {
-                    f |= Flag::Z as u8;
-                }
-                if (result & 0x80) != 0 {
-                    f |= Flag::S as u8;
-                }
+                // C preserved, N set
+                let mut f = (self.f & Flag::C as u8) | Flag::N as u8 | Self::sz_flags(result);
                 if h {
                     f |= Flag::H as u8;
                 }
@@ -171,14 +171,8 @@ impl Z80 {
                 }
                 // Undocumented X/Y: n = result - H_flag
                 let n = result.wrapping_sub(if h { 1 } else { 0 });
-                if (n & 0x08) != 0 {
-                    f |= Flag::X as u8;
-                }
-                if (n & 0x02) != 0 {
-                    f |= Flag::Y as u8;
-                }
-                self.f = f;
-                self.q = self.f;
+                f |= Self::block_xy_flags(n);
+                self.commit_flags(f);
                 self.state = ExecState::ExecuteED(opcode, 4);
             }
             8 => self.state = ExecState::Fetch,
@@ -217,14 +211,7 @@ impl Z80 {
                     self.memptr = self.memptr.wrapping_add(1);
                 }
 
-                let mut f = self.f & Flag::C as u8;
-                f |= Flag::N as u8;
-                if result == 0 {
-                    f |= Flag::Z as u8;
-                }
-                if (result & 0x80) != 0 {
-                    f |= Flag::S as u8;
-                }
+                let mut f = (self.f & Flag::C as u8) | Flag::N as u8 | Self::sz_flags(result);
                 if h {
                     f |= Flag::H as u8;
                 }
@@ -232,14 +219,8 @@ impl Z80 {
                     f |= Flag::PV as u8;
                 }
                 let n = result.wrapping_sub(if h { 1 } else { 0 });
-                if (n & 0x08) != 0 {
-                    f |= Flag::X as u8;
-                }
-                if (n & 0x02) != 0 {
-                    f |= Flag::Y as u8;
-                }
-                self.f = f;
-                self.q = self.f;
+                f |= Self::block_xy_flags(n);
+                self.commit_flags(f);
                 self.state = ExecState::ExecuteED(opcode, 4);
             }
             8 => {
@@ -249,11 +230,11 @@ impl Z80 {
                 } else {
                     self.pc = self.pc.wrapping_sub(2);
                     self.memptr = self.pc.wrapping_add(1);
-                    // When repeating, X/Y flags come from high byte of rewound PC
+                    // When repeating, X/Y flags come from high byte of rewound
+                    // PC — the ordinary bit-3/bit-5 copy, not the block rule.
                     let pc_h = (self.pc >> 8) as u8;
-                    self.f = (self.f & !(Flag::X as u8 | Flag::Y as u8))
-                        | (pc_h & (Flag::X as u8 | Flag::Y as u8));
-                    self.q = self.f;
+                    let f = (self.f & !(Flag::X as u8 | Flag::Y as u8)) | Self::xy_flags(pc_h);
+                    self.commit_flags(f);
                     self.state = ExecState::ExecuteED(opcode, 9);
                 }
             }
@@ -311,14 +292,8 @@ impl Z80 {
                     self.c.wrapping_add(1)
                 };
                 let k = val as u16 + c_adj as u16;
-                let mut f = 0u8;
-                if (self.b & 0x80) != 0 {
-                    f |= Flag::S as u8;
-                }
-                if self.b == 0 {
-                    f |= Flag::Z as u8;
-                }
-                f |= self.b & (Flag::X as u8 | Flag::Y as u8);
+                // S, Z and X/Y all come from B for the I/O block group.
+                let mut f = Self::sz_flags(self.b) | Self::xy_flags(self.b);
                 if k > 255 {
                     f |= Flag::H as u8 | Flag::C as u8;
                 }
@@ -328,8 +303,7 @@ impl Z80 {
                 if (val & 0x80) != 0 {
                     f |= Flag::N as u8;
                 }
-                self.f = f;
-                self.q = self.f;
+                self.commit_flags(f);
                 self.state = ExecState::ExecuteED(opcode, 6);
             }
             6 | 7 => self.state = ExecState::ExecuteED(opcode, cycle + 1),
@@ -399,7 +373,10 @@ impl Z80 {
                     }
 
                     self.memptr = self.pc.wrapping_add(1);
-                    self.q = self.f;
+                    // The H and PV fix-ups above read `self.f` back between
+                    // steps, so they stay in place rather than building a
+                    // local; this just latches Q against the final value.
+                    self.commit_flags(self.f);
                     self.state = ExecState::ExecuteED(opcode, 9);
                 }
             }
@@ -450,14 +427,8 @@ impl Z80 {
                 // H = C = (k > 255), PV = parity of ((k & 7) ^ B)
                 let l_after = self.l; // HL already updated in cycle 2
                 let k = val as u16 + l_after as u16;
-                let mut f = 0u8;
-                if (self.b & 0x80) != 0 {
-                    f |= Flag::S as u8;
-                }
-                if self.b == 0 {
-                    f |= Flag::Z as u8;
-                }
-                f |= self.b & (Flag::X as u8 | Flag::Y as u8);
+                // S, Z and X/Y all come from B for the I/O block group.
+                let mut f = Self::sz_flags(self.b) | Self::xy_flags(self.b);
                 if k > 255 {
                     f |= Flag::H as u8 | Flag::C as u8;
                 }
@@ -467,8 +438,7 @@ impl Z80 {
                 if (val & 0x80) != 0 {
                     f |= Flag::N as u8;
                 }
-                self.f = f;
-                self.q = self.f;
+                self.commit_flags(f);
                 self.state = ExecState::ExecuteED(opcode, 5);
             }
             8 => self.state = ExecState::Fetch,
@@ -534,7 +504,10 @@ impl Z80 {
                     }
 
                     self.memptr = self.pc.wrapping_add(1);
-                    self.q = self.f;
+                    // The H and PV fix-ups above read `self.f` back between
+                    // steps, so they stay in place rather than building a
+                    // local; this just latches Q against the final value.
+                    self.commit_flags(self.f);
                     self.state = ExecState::ExecuteED(opcode, 9);
                 }
             }
