@@ -4,6 +4,10 @@
 //! undefined bits read as 1 on an 8088 (bits 12-15 are always 1, bit 1 is
 //! always 1). We store the full 16-bit value and provide per-flag accessors.
 
+/// PF uses the same even-parity rule as the Z80's P/V, so it comes from the
+/// shared helper rather than a private table.
+pub use crate::cpu::flags::parity;
+
 /// Individual flag bits within the 16-bit FLAGS register.
 #[repr(u16)]
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -51,30 +55,6 @@ pub fn set(flags: &mut u16, flag: Flag, value: bool) {
 #[inline]
 pub fn normalize(flags: u16) -> u16 {
     (flags & DEFINED_MASK) | ALWAYS_ONE
-}
-
-// ---------------------------------------------------------------------------
-// Parity lookup table
-// ---------------------------------------------------------------------------
-
-/// Pre-computed parity table for bytes 0x00-0xFF.
-/// `true` means even parity (PF should be set).
-static PARITY_TABLE: [bool; 256] = {
-    let mut table = [false; 256];
-    let mut i: u16 = 0;
-    while i < 256 {
-        // Count set bits — even count → true (PF set)
-        table[i as usize] = (i as u8).count_ones().is_multiple_of(2);
-        i += 1;
-    }
-    table
-};
-
-/// Return the parity flag value for the low 8 bits of a result.
-/// Returns `true` when the byte has even parity (PF should be set).
-#[inline]
-pub fn parity(value: u8) -> bool {
-    PARITY_TABLE[value as usize]
 }
 
 // ---------------------------------------------------------------------------
@@ -130,7 +110,7 @@ mod tests {
     }
 
     #[test]
-    fn parity_table_spot_checks() {
+    fn parity_spot_checks() {
         assert!(parity(0x00)); // 0 bits set → even
         assert!(!parity(0x01)); // 1 bit set → odd
         assert!(parity(0x03)); // 2 bits set → even

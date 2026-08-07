@@ -1,4 +1,5 @@
 use crate::core::{Bus, BusMaster};
+use crate::cpu::flags::parity;
 use crate::cpu::z80::{ExecState, Flag, Z80};
 
 impl Z80 {
@@ -321,7 +322,7 @@ impl Z80 {
                 if k > 255 {
                     f |= Flag::H as u8 | Flag::C as u8;
                 }
-                if Self::get_parity(((k & 7) as u8) ^ self.b) {
+                if parity(((k & 7) as u8) ^ self.b) {
                     f |= Flag::PV as u8;
                 }
                 if (val & 0x80) != 0 {
@@ -390,7 +391,7 @@ impl Z80 {
                     } else {
                         self.b & 7
                     };
-                    let adj_pv = Self::get_parity(adj_b);
+                    let adj_pv = parity(adj_b);
                     if base_pv == adj_pv {
                         self.f |= Flag::PV as u8;
                     } else {
@@ -460,7 +461,7 @@ impl Z80 {
                 if k > 255 {
                     f |= Flag::H as u8 | Flag::C as u8;
                 }
-                if Self::get_parity(((k & 7) as u8) ^ self.b) {
+                if parity(((k & 7) as u8) ^ self.b) {
                     f |= Flag::PV as u8;
                 }
                 if (val & 0x80) != 0 {
@@ -525,7 +526,7 @@ impl Z80 {
                     } else {
                         self.b & 7
                     };
-                    let adj_pv = Self::get_parity(adj_b);
+                    let adj_pv = parity(adj_b);
                     if base_pv == adj_pv {
                         self.f |= Flag::PV as u8;
                     } else {

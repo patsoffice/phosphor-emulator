@@ -1,12 +1,9 @@
 use crate::core::{Bus, BusMaster};
+use crate::cpu::flags::parity;
 use crate::cpu::z80::{ExecState, Flag, IndexMode, Z80};
 
 impl Z80 {
     // --- Flag Helpers ---
-
-    pub(super) fn get_parity(val: u8) -> bool {
-        val.count_ones().is_multiple_of(2)
-    }
 
     /// S and Z for an 8-bit result.
     #[inline]
@@ -58,7 +55,7 @@ impl Z80 {
 
     fn update_flags_logic(&mut self, result: u8, is_and: bool) {
         let mut f = Self::sz_flags(result);
-        if Self::get_parity(result) {
+        if parity(result) {
             f |= Flag::PV as u8;
         }
         if is_and {
@@ -561,7 +558,7 @@ impl Z80 {
         if new_h {
             f |= Flag::H as u8;
         }
-        if Self::get_parity(result) {
+        if parity(result) {
             f |= Flag::PV as u8;
         }
         f |= Self::xy_flags(result);
@@ -753,7 +750,7 @@ impl Z80 {
 
                 // Flags from A: S, Z, PV(parity), H=0, N=0, C preserved, X/Y from A
                 let mut f = (self.f & Flag::C as u8) | Self::sz_flags(self.a);
-                if Self::get_parity(self.a) {
+                if parity(self.a) {
                     f |= Flag::PV as u8;
                 }
                 f |= Self::xy_flags(self.a);
@@ -796,7 +793,7 @@ impl Z80 {
                 self.memptr = self.temp_addr.wrapping_add(1);
 
                 let mut f = (self.f & Flag::C as u8) | Self::sz_flags(self.a);
-                if Self::get_parity(self.a) {
+                if parity(self.a) {
                     f |= Flag::PV as u8;
                 }
                 f |= Self::xy_flags(self.a);

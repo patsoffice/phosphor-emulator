@@ -1,4 +1,5 @@
 use crate::core::{Bus, BusMaster};
+use crate::cpu::flags::parity;
 use crate::cpu::z80::{ExecState, Flag, IndexMode, Z80};
 
 impl Z80 {
@@ -680,7 +681,7 @@ impl Z80 {
                 if (val & 0x80) != 0 {
                     f |= Flag::S as u8;
                 }
-                if Self::get_parity(val) {
+                if parity(val) {
                     f |= Flag::PV as u8;
                 }
                 f |= val & (Flag::X as u8 | Flag::Y as u8);
