@@ -471,11 +471,8 @@ fn draw_register_grid(ui: &mut egui::Ui, id: &str, registers: &[DebugRegister]) 
         .show(ui, |ui| {
             for reg in registers {
                 ui.label(egui::RichText::new(reg.name).monospace());
-                let value_text = match reg.width {
-                    8 => format!("${:02X}", reg.value),
-                    16 => format!("${:04X}", reg.value),
-                    _ => format!("${:X}", reg.value),
-                };
+                // reg.width is in BITS; fmt_hex_value takes BYTES.
+                let value_text = format!("${}", fmt_hex_value(reg.value, reg.width / 8));
                 ui.label(egui::RichText::new(value_text).monospace());
                 ui.end_row();
             }
@@ -1320,6 +1317,19 @@ mod tests {
         // to a bare {:X}, so a column never loses its leading zeroes.
         assert_eq!(fmt_hex_value(0x7u32, 0), "07");
         assert_eq!(fmt_hex_value(0x7u32, 3), "07");
+    }
+
+    /// The register grid keys on a *bit* width and divides by 8 before
+    /// formatting. 32-bit registers (M68000 PC/D/A/USP/SSP, i8088 CS:IP) used
+    /// to fall through to a bare `{:X}` and render unpadded; they are now
+    /// zero-padded to 8 digits like every other width.
+    #[test]
+    fn register_bit_width_maps_to_a_padded_byte_width() {
+        let render = |value: u64, bit_width: u8| fmt_hex_value(value, bit_width / 8);
+        assert_eq!(render(0x5, 8), "05");
+        assert_eq!(render(0x5, 16), "0005");
+        assert_eq!(render(0x5, 32), "00000005");
+        assert_eq!(render(0x1A2B3C, 32), "001A2B3C");
     }
 
     #[test]
