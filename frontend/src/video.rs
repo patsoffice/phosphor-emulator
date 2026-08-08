@@ -223,6 +223,18 @@ impl Video {
         self.window.position()
     }
 
+    /// Usable width of the display the window is on, if SDL can report it.
+    ///
+    /// Used to cap panel-driven window growth: a window wider than the screen
+    /// puts the extra columns somewhere the user cannot reach, which is worse
+    /// than letting the panel's own scrollbars handle the overflow.
+    pub fn display_width(&self) -> Option<u32> {
+        let subsystem = self.window.subsystem();
+        let index = self.window.display_index().ok()?;
+        let bounds = subsystem.display_usable_bounds(index).ok()?;
+        Some(bounds.width())
+    }
+
     /// Resize the window to make room for side panels. No-op in fullscreen,
     /// where the window stays at the display resolution and panels simply
     /// subtract from the central game area.

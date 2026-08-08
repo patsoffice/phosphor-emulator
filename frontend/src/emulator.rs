@@ -16,6 +16,10 @@ use crate::profile::ProfileState;
 use crate::settings_ui::{self, SettingsState};
 use crate::video::Video;
 
+/// Slack left between a panel-driven window and the edge of the display, so a
+/// grown window still shows its own borders rather than running off screen.
+const WINDOW_MARGIN: u32 = 64;
+
 /// Combined width of all active right-side panels, used when resizing the window.
 fn panels_width(
     debug: &DebugState,
@@ -36,6 +40,21 @@ fn panels_width(
     // The input and DIP panels are independent side panels that stack.
     let sw = (settings.active as u32 + settings.dip_active as u32) * settings_ui::PANEL_WIDTH;
     dw + pw + sw + console.visible as u32 * settings_ui::PANEL_WIDTH
+}
+
+/// Key captions for the debugger's run/step buttons, read from the live host
+/// bindings so a rebound key relabels its button.
+fn step_key_hints(host: &HostBindings) -> debug_ui::StepKeyHints {
+    let key = |action| match host.key_for(action) {
+        Some(sc) => crate::host_keys::key_label(sc),
+        None => "\u{2014}".to_string(),
+    };
+    debug_ui::StepKeyHints {
+        pause: key(HostAction::ToggleDebugPause),
+        step_cycle: key(HostAction::StepCycle),
+        step_instruction: key(HostAction::StepInstruction),
+        step_frame: key(HostAction::StepFrame),
+    }
 }
 
 /// Translate an SDL event into a physical input for rebind capture, if it is a
@@ -316,6 +335,10 @@ pub fn run(
     let mut next_frame_time = Instant::now() + frame_duration;
     let mut throttle = true;
     let mut last_render_time = Instant::now();
+    // Combined panel width the window was last sized for. The debug panel's
+    // columns size themselves to their content, so this changes when a tab
+    // does — not only when a panel opens or closes.
+    let mut last_panels_width: u32 = 0;
 
     // FPS overlay state (F10 to toggle)
     let mut show_fps = false;
@@ -591,9 +614,20 @@ pub fn run(
                     if debug_state.run_mode == RunMode::Running {
                         debug_state.run_mode = RunMode::Paused;
                     } else {
+                        // The watchpoint hit history survives a resume so a
+                        // sequence of hits accumulates across breaks; the
+                        // panel's Clear button empties it.
                         debug_state.run_mode = RunMode::Running;
-                        debug_state.last_watchpoint_hit = None;
                     }
+                }
+
+                // ?: Toggle the key legend (works with no other panel open)
+                Event::KeyDown {
+                    scancode: Some(sc),
+                    repeat: false,
+                    ..
+                } if host_bindings.action_for(sc) == Some(HostAction::ToggleKeyLegend) => {
+                    settings_state.legend_visible = !settings_state.legend_visible;
                 }
 
                 Event::KeyDown {
@@ -1017,11 +1051,13 @@ pub fn run(
                     || profile_state.active
                     || settings_state.active
                     || settings_state.dip_active
+                    || settings_state.legend_visible
                     || console_state.visible
                 {
                     let bus_ref = machine.debug_bus();
                     let profiling = profile_state.active;
                     let show_settings = settings_state.active;
+                    let show_legend = settings_state.legend_visible;
                     let controls = machine.input_controls();
                     let bindings_ref: &BindingSet = bindings;
                     let host_bindings_ref = &host_bindings;
@@ -1033,6 +1069,9 @@ pub fn run(
                     let dip_values: Vec<u8> = (0..dip_banks.len())
                         .map(|i| machine.dip_bank_value(i))
                         .collect();
+                    // Relabel the run/step buttons from the live bindings, so a
+                    // rebound step key is what the button advertises.
+                    debug_state.key_hints = step_key_hints(&host_bindings);
                     video.present_with_debug(|ctx, tex_id| {
                         // Profiler side panel (outermost right, drawn first)
                         if profiling {
@@ -1060,6 +1099,17 @@ pub fn run(
                         if show_console {
                             console_ui::draw_console_panel(ctx, &mut console_state);
                         }
+                        // Floating legend, drawn after the side panels so it
+                        // lays over them rather than being clipped by one.
+                        if show_legend {
+                            settings_ui::draw_key_legend(
+                                ctx,
+                                controls,
+                                bindings_ref,
+                                host_bindings_ref,
+                                &mut settings_state,
+                            );
+                        }
                         if debug_state.active {
                             // Debug panels + game central panel
                             debug_ui::draw_debug_ui(
@@ -1074,6 +1124,29 @@ pub fn run(
                             draw_game_panel(ctx, tex_id, view_aspect);
                         }
                     });
+
+                    // The debug panel sizes its columns to what they drew, so
+                    // switching a column to the Memory tab (a ~74-column hex
+                    // row) changes how much room the panel needs. Grow the
+                    // window to match instead of making the user scroll — but
+                    // never past the display, where the extra width would be
+                    // unreachable and the listings' own scrollbars take over.
+                    if debug_state.active {
+                        let wanted = panels_width(
+                            &debug_state,
+                            &profile_state,
+                            &settings_state,
+                            &console_state,
+                        );
+                        if wanted != last_panels_width {
+                            last_panels_width = wanted;
+                            let max_w = video
+                                .display_width()
+                                .unwrap_or(u32::MAX)
+                                .saturating_sub(WINDOW_MARGIN);
+                            video.resize_window((win_w * scale + wanted).min(max_w), win_h * scale);
+                        }
+                    }
 
                     // Apply a requested reset-to-defaults after the UI frame.
                     if settings_state.reset_requested {
