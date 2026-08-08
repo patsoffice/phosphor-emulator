@@ -37,10 +37,47 @@ mod trace;
 use gfxsheet::SheetConfig;
 use trace::TraceFormat;
 
+/// Shown by `disasm --help`, above the subcommand list.
+///
+/// The positional/flag split is not arbitrary and is easy to trip over when
+/// moving between `raw`/`rom` and the machine-driven subcommands, so it is
+/// stated once here rather than left to be inferred from seven usage lines.
+const CLI_LONG_ABOUT: &str = "\
+Disassemble a ROM with a chosen CPU (phosphor-core disassemblers), and inspect \
+registered machines headlessly.
+
+Argument convention, uniform across subcommands:
+
+  positional   WHERE the bytes come from — a raw file, or a ROM set (`.zip` or a
+               directory of loose files), plus a member name where one file must
+               be picked out of the set. Positional because it is the argument
+               that varies per invocation and benefits from shell completion.
+
+  --flag       WHAT to look at and how to read it — `--cpu`, `--machine`,
+               `--region`, `--org`, output and range options.
+
+So the two families read:
+
+  raw/rom      you supply the CPU and origin, because a bare ROM says nothing
+               about them:
+                 disasm raw --cpu z80 --org 0x8000 sound.bin
+                 disasm rom --cpu m6809 roms.zip cpu.6e
+
+  machine/…    you name a registered machine and the CPU, origin, and mapping
+               come from its registry entry:
+                 disasm machine --machine mariobros --region sound roms/
+                 disasm trace   --machine joust --frames 60 --events bank roms/
+
+`--machine` is a flag rather than a positional on purpose: it selects a
+registry entry, not a path, and keeps the ROM set in the same positional slot
+it occupies everywhere else. Subcommands that only list what is available
+(`machine` and `gfxview` with no `--region`) take no ROM set at all.";
+
 #[derive(Parser)]
 #[command(
     name = "disasm",
-    about = "Disassemble a ROM with a chosen CPU (phosphor-core disassemblers)"
+    about = "Disassemble a ROM with a chosen CPU (phosphor-core disassemblers)",
+    long_about = CLI_LONG_ABOUT
 )]
 struct Cli {
     #[command(subcommand)]
