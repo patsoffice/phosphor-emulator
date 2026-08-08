@@ -15,7 +15,9 @@ embedded by the in-frontend console) and this **binary**.
 
 ```
 phosphor-script run <script.rhai> --machine <name> <rompath>
-phosphor-script run <script.rhai>          # no pre-bound m; the script calls open(...) itself
+phosphor-script run -e '<source>' --machine <name> <rompath>  # inline, no temp file
+phosphor-script run -             --machine <name> <rompath>  # source from stdin
+phosphor-script run <script.rhai>       # no pre-bound m; the script calls open(...) itself
 ```
 
 With `--machine <name> <rompath>`, a machine is booted and pre-bound as the
@@ -34,6 +36,40 @@ cargo run -p phosphor-script -- run tools/script/examples/coin_start.rhai \
 
 The script's `print`/`debug` output and any result go to stdout; errors go to
 stderr and the process exits non-zero.
+
+### Source forms
+
+Exactly one of the three must be given. A one-off — take a screenshot, poke an
+address, check a PC — should not cost a temp file:
+
+```bash
+# Inline: nudge marble's trackball and report the PC
+cargo run -p phosphor-script -- run \
+    -e 'm.run_frames(300); m.input_relative("p1_trackball_x", 4.0); print(m.pc(0));' \
+    --machine marble ~/ws/mame-runtime/roms
+
+# Stdin: composes with heredocs and pipes
+cargo run -p phosphor-script -- run - --machine galaga ~/ws/mame-runtime/roms <<'EOF'
+m.run_frames(3100);
+m.screenshot("attract.png");
+EOF
+```
+
+**Positionals are read differently in the inline/stdin forms.** `run` could not
+grow a second positional slot without breaking `run <script> [rompath]`, so what
+the positionals mean depends on whether `-e` was given: without it the first is
+the script and the second the rompath; with it, the sole positional *is* the
+rompath. `--rompath <path>` names it explicitly in either form, and supplying it
+both ways is an error rather than a silent winner:
+
+```
+run capture.rhai ~/roms                 # script = capture.rhai, rompath = ~/roms
+run -e 'print(1);' ~/roms               # rompath = ~/roms
+run -e 'print(1);' --rompath ~/roms     # same, spelled out
+```
+
+Errors name the source: a script file by path, inline source as `<inline>`,
+stdin as `<stdin>` — e.g. `phosphor-script: <inline>: Syntax error: …`.
 
 ## API
 
