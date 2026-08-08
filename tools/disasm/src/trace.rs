@@ -29,7 +29,7 @@ use std::path::Path;
 use clap::ValueEnum;
 use phosphor_core::core::debug::DebugRegister;
 use phosphor_core::core::debug_hang::{HangDetector, HangReport};
-use phosphor_core::core::debug_trace::{DebugEvent, DebugEventKind};
+use phosphor_core::core::debug_trace::{DebugEvent, DebugEventKind, EventFilter};
 use phosphor_core::core::machine::FrontendMachine;
 use phosphor_core::core::watchpoint::{
     DebugAccessSource, WatchpointCondition, WatchpointHit, WatchpointKind,
@@ -359,7 +359,7 @@ fn run_frame_loop(fl: FrameLoop) -> Result<String, String> {
         if let Some(filter) = event_filter {
             let machine = harness.machine_mut();
             for &e in machine.trace_events() {
-                if filter.accepts(e.kind) {
+                if filter.accepts(&e) {
                     if let Some(h) = hang.as_mut() {
                         h.note_event(event_body(&e));
                     }
@@ -532,7 +532,7 @@ fn run_cycle_loop(cl: CycleLoop) -> Result<String, String> {
             let mut evlines: Vec<String> = Vec::new();
             let mut ev_bodies: Vec<String> = Vec::new();
             for &e in machine.trace_events() {
-                if filter.accepts(e.kind) {
+                if filter.accepts(&e) {
                     let f = e.cycle / cycles_per_frame;
                     if hang.is_some() {
                         ev_bodies.push(event_body(&e));
@@ -587,73 +587,15 @@ fn run_cycle_loop(cl: CycleLoop) -> Result<String, String> {
 // Observer-spec parsing
 // ---------------------------------------------------------------------------
 
-/// Which event kinds to keep (`All`, or an explicit set).
-enum EventFilter {
-    All,
-    Some(Vec<DebugEventKind>),
-}
-
-impl EventFilter {
-    fn accepts(&self, kind: DebugEventKind) -> bool {
-        match self {
-            EventFilter::All => true,
-            EventFilter::Some(kinds) => kinds.contains(&kind),
-        }
-    }
-}
-
-/// Parse a `--events` value: `all`, or a comma-separated list of kind tokens.
+/// Parse a `--events` value into the shared [`EventFilter`].
+///
+/// The grammar and the kind tokens live in `phosphor-core` alongside
+/// [`DebugEventKind`], so `--events devwrite,bank` and the debugger panel's
+/// filter checkboxes agree on what a kind is called. This wrapper only
+/// re-labels the "empty list" error with the flag that produced it.
 fn parse_event_kinds(spec: &str) -> Result<EventFilter, String> {
-    let spec = spec.trim();
-    if spec.eq_ignore_ascii_case("all") {
-        return Ok(EventFilter::All);
-    }
-    let mut kinds = Vec::new();
-    for tok in spec.split(',') {
-        let tok = tok.trim();
-        if tok.is_empty() {
-            continue;
-        }
-        kinds.push(parse_event_kind(tok).ok_or_else(|| {
-            format!(
-                "unknown event kind '{tok}'; valid: {}, or 'all'",
-                EVENT_TOKENS
-            )
-        })?);
-    }
-    if kinds.is_empty() {
-        return Err("--events was empty; give kind tokens or 'all'".to_string());
-    }
-    Ok(EventFilter::Some(kinds))
-}
-
-/// Space-free CLI tokens for each [`DebugEventKind`] (the enum's `label()` has
-/// spaces, so it isn't usable as a CLI token).
-const EVENT_TOKENS: &str = "memread, memwrite, ioread, iowrite, devread, devwrite, \
-irqassert, irqclear, irqack, dmaread, dmawrite, bank, watchdog, scanline, halt, resume, message";
-
-fn parse_event_kind(tok: &str) -> Option<DebugEventKind> {
-    use DebugEventKind::*;
-    Some(match tok.to_ascii_lowercase().as_str() {
-        "memread" => MemoryRead,
-        "memwrite" => MemoryWrite,
-        "ioread" => IoRead,
-        "iowrite" => IoWrite,
-        "devread" => DeviceRead,
-        "devwrite" => DeviceWrite,
-        "irqassert" => InterruptAssert,
-        "irqclear" => InterruptClear,
-        "irqack" => InterruptAck,
-        "dmaread" => DmaRead,
-        "dmawrite" => DmaWrite,
-        "bank" => BankSwitch,
-        "watchdog" => Watchdog,
-        "scanline" => Scanline,
-        "halt" => CpuHalt,
-        "resume" => CpuResume,
-        "message" => Message,
-        _ => return None,
-    })
+    EventFilter::parse_kinds(spec)
+        .map_err(|e| e.replace("no event kinds given", "--events was empty"))
 }
 
 /// Parse a `--watch` value: comma-separated `cpu:addr:kind` specs.
@@ -1278,16 +1220,15 @@ mod tests {
 
     #[test]
     fn event_kinds_all_and_list() {
-        assert!(matches!(
-            parse_event_kinds("all").unwrap(),
-            EventFilter::All
-        ));
+        assert!(parse_event_kinds("all").unwrap().is_unfiltered());
         let f = parse_event_kinds("devwrite, bank ,watchdog").unwrap();
-        assert!(f.accepts(DebugEventKind::DeviceWrite));
-        assert!(f.accepts(DebugEventKind::BankSwitch));
-        assert!(!f.accepts(DebugEventKind::MemoryRead));
+        assert!(f.accepts_kind(DebugEventKind::DeviceWrite));
+        assert!(f.accepts_kind(DebugEventKind::BankSwitch));
+        assert!(!f.accepts_kind(DebugEventKind::MemoryRead));
         assert!(parse_event_kinds("nope").is_err());
-        assert!(parse_event_kinds("").is_err());
+        // The empty-list error names the flag the user actually typed.
+        let err = parse_event_kinds("").unwrap_err();
+        assert!(err.contains("--events was empty"), "{err}");
     }
 
     #[test]
