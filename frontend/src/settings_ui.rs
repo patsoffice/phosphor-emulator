@@ -56,6 +56,8 @@ pub struct SettingsState {
     pub pending_host_rebind: Vec<(crate::host_keys::HostAction, sdl2::keyboard::Scancode)>,
     /// Set when the user asks to restore factory hotkeys.
     pub host_reset_requested: bool,
+    /// Whether the key legend (`?`) is visible.
+    pub legend_visible: bool,
 }
 
 /// Draw the input-rebinding side panel.
@@ -182,7 +184,7 @@ pub fn draw_input_panel(
                                 "press key…".to_string()
                             } else {
                                 match host.key_for(*action) {
-                                    Some(sc) => format!("{sc:?}"),
+                                    Some(sc) => crate::host_keys::key_label(sc),
                                     None => "(unbound)".to_string(),
                                 }
                             };
@@ -194,6 +196,105 @@ pub fn draw_input_panel(
                     });
             });
         });
+}
+
+/// Draw the key legend: a floating "what do I press" card.
+///
+/// The debugger's step keys are the reason this exists — 7/8/9/0 are not
+/// self-describing and the panel buttons only name them while the debug panel is
+/// open. The legend answers that from anywhere, and reads the *live*
+/// [`HostBindings`](crate::host_keys::HostBindings), so a rebound key shows its
+/// new value rather than the factory default.
+///
+/// A floating [`egui::Window`] rather than a side panel: it is a momentary
+/// lookup, and a panel would shove the game image sideways to show it.
+pub fn draw_key_legend(
+    ctx: &egui::Context,
+    controls: &[InputControl],
+    bindings: &BindingSet,
+    host: &crate::host_keys::HostBindings,
+    state: &mut SettingsState,
+) {
+    use crate::host_keys::{DEFAULTS, key_label};
+
+    let mut open = state.legend_visible;
+    egui::Window::new("Keys")
+        .open(&mut open)
+        .resizable(true)
+        .default_width(360.0)
+        .show(ctx, |ui| {
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                let key_rows = |ui: &mut egui::Ui, id: &str, debugger: bool| {
+                    egui::Grid::new(id)
+                        .num_columns(2)
+                        .striped(true)
+                        .show(ui, |ui| {
+                            for (action, _) in DEFAULTS {
+                                if action.is_debugger_modal() != debugger {
+                                    continue;
+                                }
+                                let key = match host.key_for(*action) {
+                                    Some(sc) => key_label(sc),
+                                    None => "(unbound)".to_string(),
+                                };
+                                ui.label(egui::RichText::new(key).monospace().strong());
+                                ui.label(action.label());
+                                ui.end_row();
+                            }
+                        });
+                };
+
+                ui.heading("Emulator");
+                key_rows(ui, "legend_host", false);
+
+                ui.add_space(6.0);
+                ui.heading("Debugger");
+                ui.label(
+                    egui::RichText::new(
+                        "Only while the debug panel (F1) is open, so the game keeps \
+                         these keys otherwise.",
+                    )
+                    .small()
+                    .weak(),
+                );
+                key_rows(ui, "legend_debug", true);
+
+                ui.add_space(6.0);
+                ui.heading("Game");
+                egui::Grid::new("legend_game")
+                    .num_columns(2)
+                    .striped(true)
+                    .show(ui, |ui| {
+                        for &idx in &display_order(controls) {
+                            let control = &controls[idx];
+                            let bound: Vec<String> = bindings
+                                .physical_for(control.id)
+                                .map(|p| p.display_name())
+                                .collect();
+                            ui.label(
+                                egui::RichText::new(if bound.is_empty() {
+                                    "—".to_string()
+                                } else {
+                                    bound.join(", ")
+                                })
+                                .monospace()
+                                .strong(),
+                            );
+                            ui.label(control.label);
+                            ui.end_row();
+                        }
+                    });
+
+                ui.add_space(6.0);
+                ui.separator();
+                ui.label(
+                    egui::RichText::new("Every key here is rebindable in the settings panel.")
+                        .small()
+                        .weak(),
+                );
+            });
+        });
+    state.legend_visible = open;
 }
 
 /// Display order for the rebinding grid: group controls by player, and within a

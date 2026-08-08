@@ -32,6 +32,7 @@ pub enum HostAction {
     ToggleThrottle,
     ToggleFps,
     ToggleMouseGrab,
+    ToggleKeyLegend,
     StepInstruction,
     StepCycle,
     StepFrame,
@@ -55,6 +56,7 @@ impl HostAction {
             HostAction::ToggleThrottle => "Frame throttle",
             HostAction::ToggleFps => "FPS overlay",
             HostAction::ToggleMouseGrab => "Grab mouse",
+            HostAction::ToggleKeyLegend => "Key legend",
             HostAction::StepInstruction => "Debugger: step instruction",
             HostAction::StepCycle => "Debugger: step cycle",
             HostAction::StepFrame => "Debugger: step frame",
@@ -78,6 +80,16 @@ impl HostAction {
 }
 
 /// Every action with its factory-default key, in settings-panel order.
+///
+/// The step keys sit on the number row rather than on function keys or letters:
+/// F1 and F5-F12 are all taken, and letters/Space collide with game input. They
+/// run 7/8/9 in order of **increasing granularity** — cycle, instruction, frame
+/// — so the row reads left-to-right as "step a little / a bit more / a lot",
+/// with 0 (run/pause) beside them. Modifier combos were considered and rejected:
+/// [`HostBindings`] maps one bare scancode per action, and a chord would need a
+/// modifier in the binding model for four keys' benefit. Discoverability comes
+/// from [`HostAction::ToggleKeyLegend`] (`?`) instead, and every key here is
+/// rebindable.
 pub const DEFAULTS: &[(HostAction, Scancode)] = &[
     (HostAction::Quit, Scancode::Escape),
     (HostAction::Reset, Scancode::F5),
@@ -92,11 +104,35 @@ pub const DEFAULTS: &[(HostAction, Scancode)] = &[
     (HostAction::ToggleThrottle, Scancode::F9),
     (HostAction::ToggleFps, Scancode::F10),
     (HostAction::ToggleMouseGrab, Scancode::F11),
-    (HostAction::StepInstruction, Scancode::Num7),
-    (HostAction::StepCycle, Scancode::Num8),
+    (HostAction::ToggleKeyLegend, Scancode::Slash),
+    (HostAction::StepCycle, Scancode::Num7),
+    (HostAction::StepInstruction, Scancode::Num8),
     (HostAction::StepFrame, Scancode::Num9),
     (HostAction::ToggleDebugPause, Scancode::Num0),
 ];
+
+/// Human label for a key in the legend and the rebinding panel.
+///
+/// `{Scancode:?}` alone reads badly for the punctuation keys — the legend key
+/// prints as `Slash`, not the `?` printed on it — so the ones this frontend
+/// binds by default get a printable name.
+pub fn key_label(scancode: Scancode) -> String {
+    match scancode {
+        Scancode::Slash => "? /".to_string(),
+        Scancode::Grave => "`".to_string(),
+        Scancode::Num0 => "0".to_string(),
+        Scancode::Num1 => "1".to_string(),
+        Scancode::Num2 => "2".to_string(),
+        Scancode::Num3 => "3".to_string(),
+        Scancode::Num4 => "4".to_string(),
+        Scancode::Num5 => "5".to_string(),
+        Scancode::Num6 => "6".to_string(),
+        Scancode::Num7 => "7".to_string(),
+        Scancode::Num8 => "8".to_string(),
+        Scancode::Num9 => "9".to_string(),
+        other => format!("{other:?}"),
+    }
+}
 
 /// Which key triggers each host action.
 ///
@@ -226,6 +262,41 @@ mod tests {
         assert!(actions.contains(&HostAction::TogglePause));
         // Num7 only steps while the debugger is open, so it is not a conflict.
         assert!(!actions.contains(&HostAction::StepInstruction));
+    }
+
+    #[test]
+    fn step_keys_run_in_order_of_increasing_granularity() {
+        // 7/8/9 should read left-to-right as "step a little / a bit more / a
+        // lot"; the pause toggle sits beside them on 0.
+        let b = HostBindings::default();
+        assert_eq!(b.key_for(HostAction::StepCycle), Some(Scancode::Num7));
+        assert_eq!(b.key_for(HostAction::StepInstruction), Some(Scancode::Num8));
+        assert_eq!(b.key_for(HostAction::StepFrame), Some(Scancode::Num9));
+        assert_eq!(
+            b.key_for(HostAction::ToggleDebugPause),
+            Some(Scancode::Num0)
+        );
+    }
+
+    #[test]
+    fn key_legend_is_bound_and_not_debugger_modal() {
+        let b = HostBindings::default();
+        // `?` is the legend key, and it works whether or not the debugger is up.
+        assert_eq!(
+            b.key_for(HostAction::ToggleKeyLegend),
+            Some(Scancode::Slash)
+        );
+        assert!(!HostAction::ToggleKeyLegend.is_debugger_modal());
+    }
+
+    #[test]
+    fn key_labels_print_the_key_cap_not_the_scancode_name() {
+        assert_eq!(key_label(Scancode::Slash), "? /");
+        assert_eq!(key_label(Scancode::Grave), "`");
+        assert_eq!(key_label(Scancode::Num7), "7");
+        // Keys with a readable Debug name pass through unchanged.
+        assert_eq!(key_label(Scancode::F5), "F5");
+        assert_eq!(key_label(Scancode::Tab), "Tab");
     }
 
     #[test]
