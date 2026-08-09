@@ -494,7 +494,44 @@ fn write_png(path: &Path, rgb24: &[u8], width: u32, height: u32) -> std::io::Res
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{COIN_ID, stub_session as session};
+    use crate::test_support::{COIN_ID, stub_machine, stub_session as session};
+
+    /// `Harness::run_frame` applies scheduled input and advances the frame
+    /// counter itself, so a caller that drives the machine cycle-by-cycle
+    /// (`debug_tick` — the debugger and `disasm trace --cpu`/`--break-pc`)
+    /// bypasses both and used to silently drop every scheduled edge. The two
+    /// halves are public for exactly that caller; this pins that using them
+    /// delivers the same edges, on the same frames, as `run_frame`.
+    #[test]
+    fn cycle_stepped_driving_applies_the_same_scheduled_input_as_run_frame() {
+        let deliveries = |cycle_stepped: bool| {
+            let (machine, rec) = stub_machine(true);
+            let mut h = Harness::from_machine(machine);
+            h.schedule_motion(InputId(7), 2, 3, 1.5);
+            for _ in 0..6 {
+                if cycle_stepped {
+                    // What the cycle loop does in place of `run_frame`.
+                    h.apply_scheduled_input();
+                    h.machine_mut().debug_tick();
+                    h.advance_frame();
+                } else {
+                    h.run_frame();
+                }
+            }
+            let frame = h.frame_count();
+            let motions = rec
+                .borrow()
+                .inputs
+                .iter()
+                .filter(|e| matches!(e, InputEvent::Relative { .. }))
+                .count();
+            (frame, motions)
+        };
+
+        // The motion is scheduled for frames 2, 3 and 4.
+        assert_eq!(deliveries(false), (6, 3), "frame-loop baseline");
+        assert_eq!(deliveries(true), (6, 3), "cycle-stepped driving");
+    }
 
     #[test]
     fn run_frames_advances_machine_and_frame_count() {

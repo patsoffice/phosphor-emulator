@@ -183,6 +183,23 @@ impl Harness {
     /// Advance the machine by one frame, applying any scripted input edges for
     /// the frame that is about to run.
     pub fn run_frame(&mut self) {
+        self.apply_scheduled_input();
+        self.machine.run_frame();
+        self.advance_frame();
+    }
+
+    /// Apply the scripted input edges scheduled for the frame that is about to
+    /// run.
+    ///
+    /// [`run_frame`](Self::run_frame) calls this and [`advance_frame`] for you.
+    /// The pair is public for callers that drive the machine cycle-by-cycle
+    /// (`debug_tick`) rather than frame-by-frame, and so cannot use
+    /// `run_frame`: without them a scripted press silently stops firing the
+    /// moment such a caller takes over, which reads as "the input did nothing"
+    /// rather than as a loop mismatch.
+    ///
+    /// [`advance_frame`]: Self::advance_frame
+    pub fn apply_scheduled_input(&mut self) {
         for p in &self.presses {
             if self.frame == p.at {
                 self.machine.handle_input(InputEvent::Button {
@@ -204,7 +221,11 @@ impl Harness {
                 });
             }
         }
-        self.machine.run_frame();
+    }
+
+    /// Record that the frame just run is complete, advancing the frame number
+    /// the scheduled input is measured against.
+    pub fn advance_frame(&mut self) {
         self.frame += 1;
     }
 
