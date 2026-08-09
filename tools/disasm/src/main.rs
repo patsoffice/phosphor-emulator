@@ -215,6 +215,13 @@ enum Command {
         /// Load a factory-initialized NVRAM before running.
         #[arg(long)]
         nvram: Option<PathBuf>,
+        /// Set operator DIP switches before running: comma-separated
+        /// `<option>=<choice>` entries using the machine's published names
+        /// (e.g. `Coinage=Free Play`, `Lives=5`). `bank<N>=<value>` sets a
+        /// whole bank byte. An unknown name is an error listing what is
+        /// available.
+        #[arg(long)]
+        dip: Option<String>,
         /// Enable event tracing and include these event kinds: a comma-separated
         /// list (e.g. `devwrite,bank,watchdog`) or `all`.
         #[arg(long)]
@@ -410,6 +417,7 @@ fn run_command(cmd: Command) -> Result<String, String> {
             press,
             motion,
             nvram,
+            dip,
             events,
             watch,
             cpu,
@@ -428,6 +436,7 @@ fn run_command(cmd: Command) -> Result<String, String> {
             press.as_deref(),
             motion.as_deref(),
             nvram.as_deref(),
+            dip.as_deref(),
             events.as_deref(),
             watch.as_deref(),
             cpu.as_deref(),

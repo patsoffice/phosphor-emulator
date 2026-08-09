@@ -29,7 +29,7 @@ use std::path::Path;
 use clap::ValueEnum;
 use phosphor_core::core::debug::DebugRegister;
 use phosphor_core::core::debug_hang::{HangDetector, HangReport};
-use phosphor_core::core::debug_trace::{DebugEvent, DebugEventKind, EventFilter};
+use phosphor_core::core::debug_trace::{DebugEvent, EventFilter};
 use phosphor_core::core::machine::FrontendMachine;
 use phosphor_core::core::watchpoint::{
     DebugAccessSource, WatchpointCondition, WatchpointHit, WatchpointKind,
@@ -201,6 +201,7 @@ pub fn run_trace(
     press: Option<&str>,
     motion: Option<&str>,
     nvram: Option<&Path>,
+    dip: Option<&str>,
     events: Option<&str>,
     watch: Option<&str>,
     cpu: Option<&str>,
@@ -247,8 +248,13 @@ pub fn run_trace(
         Some(spec) => parse_motion_specs(spec)?,
         None => Vec::new(),
     };
+    let dip_specs = match dip {
+        Some(spec) => parse_dip_specs(spec)?,
+        None => Vec::new(),
+    };
 
     let mut harness = Harness::build(machine, path, nvram, coin_at, &press_specs, &motion_specs)?;
+    apply_dip_specs(&mut harness, &dip_specs)?;
     let cycles_per_frame = harness.machine_mut().cycles_per_frame();
 
     // Resolve CPU names/indices against the booted machine's bus (cycle mode).
@@ -349,6 +355,8 @@ fn run_frame_loop(fl: FrameLoop) -> Result<String, String> {
     // ring capacity does not silently lose early events.
     let mut records: Vec<Record> = Vec::new();
     let mut hang_lines: Vec<String> = Vec::new();
+    // `Some(frame)` once `--stop-on-hang` ends the run early.
+    let mut stopped: Option<usize> = None;
     for frame_idx in from_frame..frames {
         harness.run_frame();
 
@@ -374,6 +382,7 @@ fn run_frame_loop(fl: FrameLoop) -> Result<String, String> {
             let hit = !lines.is_empty();
             hang_lines.extend(lines);
             if hit && stop_on_hang {
+                stopped = Some(frame_idx);
                 break;
             }
         }
@@ -389,11 +398,16 @@ fn run_frame_loop(fl: FrameLoop) -> Result<String, String> {
         body.push('\n');
     }
 
+    let span = match stopped {
+        Some(frame) => format!("frames {from_frame}..{frame} (stopped on --stop-on-hang)"),
+        None => format!("frames {from_frame}..{frames}"),
+    };
+
     match out {
         Some(p) => {
             std::fs::write(p, &body).map_err(|e| format!("writing {}: {e}", p.display()))?;
             Ok(format!(
-                "trace: {} record(s), {} hang report(s) over frames {from_frame}..{frames} -> {}\n",
+                "trace: {} record(s), {} hang report(s) over {span} -> {}\n",
                 records.len(),
                 hang_lines.len(),
                 p.display()
@@ -472,9 +486,18 @@ fn run_cycle_loop(cl: CycleLoop) -> Result<String, String> {
     let start_cycle = from_frame as u64 * cycles_per_frame;
     let total_ticks = (frames - from_frame) as u64 * cycles_per_frame;
     let mut emitted = 0usize;
+    // `Some((flag, frame, cycle))` once a stop condition ends the run early.
+    let mut stopped: Option<(&str, u64, u64)> = None;
 
     for tick in 0..total_ticks {
         let cycle = start_cycle + tick;
+        // Scripted `--press`/`--move` edges are applied per frame by
+        // `Harness::run_frame`, which this loop replaces. Drive the same
+        // schedule from the frame boundaries here, or a press aimed past
+        // `--from-frame` would never fire.
+        if cycle.is_multiple_of(cycles_per_frame) {
+            harness.apply_scheduled_input();
+        }
         let boundaries = harness.machine_mut().debug_tick();
         let frame = cycle / cycles_per_frame;
 
@@ -557,18 +580,27 @@ fn run_cycle_loop(cl: CycleLoop) -> Result<String, String> {
         // Hang detection samples per-CPU PC at frame boundaries (last cycle of
         // a frame). The completed frame index is `cycle / cpf`.
         let mut hang_fired = false;
-        if (cycle + 1).is_multiple_of(cycles_per_frame)
-            && let Some(h) = hang.as_mut()
-        {
-            let frame_done = cycle / cycles_per_frame;
-            for line in h.observe_frame(harness.machine_mut(), frame_done) {
-                writeln!(sink, "{line}").map_err(|e| format!("writing trace: {e}"))?;
-                emitted += 1;
-                hang_fired = true;
+        if (cycle + 1).is_multiple_of(cycles_per_frame) {
+            harness.advance_frame();
+            if let Some(h) = hang.as_mut() {
+                let frame_done = cycle / cycles_per_frame;
+                for line in h.observe_frame(harness.machine_mut(), frame_done) {
+                    writeln!(sink, "{line}").map_err(|e| format!("writing trace: {e}"))?;
+                    emitted += 1;
+                    hang_fired = true;
+                }
             }
         }
 
         if hit_break || (stop_on_watch && watch_fired) || (stop_on_hang && hang_fired) {
+            let reason = if hit_break {
+                "--break-pc"
+            } else if watch_fired {
+                "--stop-on-watch"
+            } else {
+                "--stop-on-hang"
+            };
+            stopped = Some((reason, frame, cycle));
             break;
         }
     }
@@ -578,9 +610,17 @@ fn run_cycle_loop(cl: CycleLoop) -> Result<String, String> {
     let dest = out
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| "stdout".to_string());
-    Ok(format!(
-        "trace: {emitted} line(s) over frames {from_frame}..{frames} -> {dest}\n"
-    ))
+    // Say where the run actually ended. A stop condition that fired silently
+    // while the summary still advertised the requested range reads exactly like
+    // a condition that never fired — and with `--break-pc` alone there are no
+    // trace lines to tell the two apart.
+    let span = match stopped {
+        Some((reason, frame, cycle)) => {
+            format!("frames {from_frame}..{frame} (stopped on {reason} at cycle {cycle})")
+        }
+        None => format!("frames {from_frame}..{frames}"),
+    };
+    Ok(format!("trace: {emitted} line(s) over {span} -> {dest}\n"))
 }
 
 // ---------------------------------------------------------------------------
@@ -721,6 +761,130 @@ fn parse_cpu_specs(spec: &str) -> Result<Vec<CpuSpec>, String> {
         return Err("--cpu was empty; give one or more <name|idx>[:regs] entries".to_string());
     }
     Ok(specs)
+}
+
+/// One `--dip` entry: a named option set to a named choice, or a whole bank
+/// byte set numerically.
+#[derive(Debug, PartialEq, Eq)]
+enum DipSpec {
+    Option { name: String, choice: String },
+    Bank { bank: usize, value: u8 },
+}
+
+/// Parse a `--dip` value: comma-separated `<option>=<choice>` entries, plus a
+/// `bank<N>=<value>` escape for a bank byte the table has no label for.
+///
+/// The option/choice names are the ones the machine's DIP table publishes —
+/// the same strings the debugger's DIP panel and the Rhai `set_dip` show — so
+/// `--dip 'Coinage=Free Play'` reads the way an operator would say it. The
+/// `bank<N>=` form is deliberately a distinct prefix rather than a bare index:
+/// an option is named, a bank is numbered, and a bare number would be
+/// ambiguous the day some machine names an option "1".
+///
+/// A choice label may contain spaces (`Free Play`) but never a comma, which is
+/// what lets the entry separator stay a comma.
+fn parse_dip_specs(spec: &str) -> Result<Vec<DipSpec>, String> {
+    let mut specs = Vec::new();
+    for part in spec.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+        let (lhs, rhs) = part
+            .split_once('=')
+            .ok_or_else(|| format!("bad --dip entry '{part}'; expected option=choice"))?;
+        let (lhs, rhs) = (lhs.trim(), rhs.trim());
+        if lhs.is_empty() {
+            return Err(format!("bad --dip entry '{part}'; empty option name"));
+        }
+        if rhs.is_empty() {
+            return Err(format!("bad --dip entry '{part}'; empty choice"));
+        }
+        // `bank` followed by digits *and nothing else* is the numeric form; an
+        // option merely named "bank something" stays an option name.
+        if let Some(idx) = lhs
+            .strip_prefix("bank")
+            .filter(|i| !i.is_empty() && i.bytes().all(|b| b.is_ascii_digit()))
+        {
+            let bank = idx
+                .parse::<usize>()
+                .map_err(|_| format!("bad bank index '{idx}' in --dip entry '{part}'"))?;
+            let value = crate::parse_u32_auto(rhs)
+                .map_err(|e| format!("bad bank value '{rhs}' in --dip entry '{part}': {e}"))?;
+            let value = u8::try_from(value).map_err(|_| {
+                format!("bank value '{rhs}' in --dip entry '{part}' exceeds a byte")
+            })?;
+            specs.push(DipSpec::Bank { bank, value });
+        } else {
+            specs.push(DipSpec::Option {
+                name: lhs.to_string(),
+                choice: rhs.to_string(),
+            });
+        }
+    }
+    if specs.is_empty() {
+        return Err("--dip was empty; give one or more option=choice entries".to_string());
+    }
+    Ok(specs)
+}
+
+/// Apply parsed `--dip` entries to the booted machine.
+///
+/// Runs after boot because the DIP table is a property of the machine (Star
+/// Wars and Empire Strikes Back publish different DSW0 tables from the same
+/// code), and fails loudly with the available names rather than silently
+/// leaving a misspelled option at its default — a silently-ignored DIP would
+/// make a whole trace quietly answer the wrong question.
+fn apply_dip_specs(harness: &mut Harness, specs: &[DipSpec]) -> Result<(), String> {
+    for spec in specs {
+        match spec {
+            DipSpec::Bank { bank, value } => {
+                let banks = harness.machine().dip_banks();
+                if *bank >= banks.len() {
+                    return Err(format!(
+                        "--dip bank{bank}: machine has {} DIP bank(s)",
+                        banks.len()
+                    ));
+                }
+                harness.machine_mut().set_dip_bank_value(*bank, *value);
+            }
+            DipSpec::Option { name, choice } => {
+                let banks = harness.machine().dip_banks();
+                let found = banks.iter().enumerate().find_map(|(bi, bank)| {
+                    bank.options
+                        .iter()
+                        .enumerate()
+                        .find(|(_, o)| o.name == name)
+                        .map(|(oi, o)| (bi, oi, o))
+                });
+                let Some((bi, oi, option)) = found else {
+                    let names: Vec<&str> = banks
+                        .iter()
+                        .flat_map(|b| b.options.iter().map(|o| o.name))
+                        .collect();
+                    return Err(if names.is_empty() {
+                        format!("--dip '{name}': this machine exposes no DIP switches")
+                    } else {
+                        format!("--dip '{name}': no such option; try {}", names.join(", "))
+                    });
+                };
+                let Some(value) = option
+                    .choices
+                    .iter()
+                    .find(|c| c.label == choice)
+                    .map(|c| c.value)
+                else {
+                    let labels: Vec<&str> = option.choices.iter().map(|c| c.label).collect();
+                    return Err(format!(
+                        "--dip '{name}={choice}': no such choice; try {}",
+                        labels.join(", ")
+                    ));
+                };
+                harness.machine_mut().set_dip_option(bi, oi, value);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Parse a `--press` value: comma-separated `<control>@<frame>[:<hold>]`
@@ -1162,6 +1326,7 @@ fn json_cpu(cpu_index: Option<usize>, source: DebugAccessSource) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use phosphor_core::core::debug_trace::DebugEventKind;
     use phosphor_core::core::watchpoint::WatchpointPhase;
 
     #[test]
@@ -1323,6 +1488,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
                 false,
                 false,
                 false,
@@ -1338,6 +1504,7 @@ mod tests {
                 "joust",
                 10,
                 20,
+                None,
                 None,
                 None,
                 None,
@@ -1381,6 +1548,61 @@ mod tests {
         assert!(parse_break_specs("0xF000").is_err()); // no colon
         assert!(parse_break_specs("0:zz").is_err()); // bad addr
         assert!(parse_break_specs("").is_err());
+    }
+
+    #[test]
+    fn dip_specs_parse_named_options_and_bank_bytes() {
+        let s = parse_dip_specs("Coinage=Free Play, Lives=5").unwrap();
+        assert_eq!(
+            s[0],
+            DipSpec::Option {
+                name: "Coinage".into(),
+                choice: "Free Play".into(), // a choice label may contain spaces
+            }
+        );
+        assert_eq!(
+            s[1],
+            DipSpec::Option {
+                name: "Lives".into(),
+                choice: "5".into(),
+            }
+        );
+
+        // `bank<N>=` is the numeric escape; the value parses hex or decimal.
+        assert_eq!(
+            parse_dip_specs("bank1=0x00").unwrap(),
+            vec![DipSpec::Bank { bank: 1, value: 0 }]
+        );
+        assert_eq!(
+            parse_dip_specs("bank0=243").unwrap(),
+            vec![DipSpec::Bank {
+                bank: 0,
+                value: 0xF3
+            }]
+        );
+
+        // An option whose name merely starts with "bank" is still an option:
+        // only `bank` + digits takes the numeric path.
+        assert!(matches!(
+            parse_dip_specs("bank switching=On").unwrap()[0],
+            DipSpec::Option { .. }
+        ));
+    }
+
+    #[test]
+    fn dip_specs_reject_malformed_entries() {
+        assert!(parse_dip_specs("Coinage").is_err()); // no =choice
+        assert!(parse_dip_specs("=Free Play").is_err()); // empty option
+        assert!(parse_dip_specs("Coinage=").is_err()); // empty choice
+        // `bank9x` is not `bank`+digits, so it is read as an option name and
+        // fails later, at lookup — not here.
+        assert!(matches!(
+            parse_dip_specs("bank9x=1").unwrap()[0],
+            DipSpec::Option { .. }
+        ));
+        assert!(parse_dip_specs("bank0=0x100").is_err()); // wider than a byte
+        assert!(parse_dip_specs("bank0=zz").is_err()); // bad value
+        assert!(parse_dip_specs("").is_err());
     }
 
     #[test]
@@ -1535,6 +1757,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             Some("bank,devwrite"),
             None,
             None,
@@ -1589,6 +1812,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             Some("0:0xC900:w"),
             None,
             None,
@@ -1621,6 +1845,7 @@ mod tests {
             "joust",
             30,
             0,
+            None,
             None,
             None,
             None,
@@ -1670,6 +1895,7 @@ mod tests {
             None,
             None,
             None,
+            None,
             false,
             true, // --hang
             true, // --stop-on-hang
@@ -1701,6 +1927,7 @@ mod tests {
             "joust",
             111,
             110,
+            None,
             None,
             None,
             None,
@@ -1749,6 +1976,7 @@ mod tests {
             "joust",
             frames,
             from_frame,
+            None,
             None,
             None,
             None,
@@ -1909,6 +2137,14 @@ mod tests {
             assert!(f >= 2, "frame {f} leaked before the seek point:\n{line}");
         }
     }
+
+    // The cycle loop's half of the scheduled-input fix (it must drive
+    // `apply_scheduled_input`/`advance_frame` itself, since it never calls
+    // `Harness::run_frame`) is pinned on the harness API in
+    // `phosphor-script`'s `cycle_stepped_driving_applies_the_same_scheduled_input_as_run_frame`.
+    // It is not asserted here: joust does not react to a coin inside a short
+    // observed window even through the working frame-loop path, so a test
+    // built on it would pass whether or not the loop applies the press.
 
     // ---- Render-once machines: the debugger's frozen-picture guard ---------
 
