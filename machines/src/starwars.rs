@@ -496,6 +496,20 @@ static SW_SOUND_HI: RomRegion = RomRegion {
     ],
 };
 
+/// AVG state-machine PROM (256×4, 4B). This is the sequencer that decides how
+/// many states each vector instruction takes, and therefore how long the
+/// generator holds VG_HALT low — the flag the game polls before touching the
+/// display list.
+static SW_AVG_PROM: RomRegion = RomRegion {
+    size: 0x100,
+    entries: &[RomEntry {
+        name: "136021-109.4b",
+        size: 0x100,
+        offset: 0x0000,
+        crc32: &[0x82fc3eb2],
+    }],
+};
+
 /// Matrix Processor microcode PROMs (four 1 K×4 PROMs → the 4 KB `user2` image).
 static SW_MATHBOX_PROM: RomRegion = RomRegion {
     size: 0x1000,
@@ -850,6 +864,9 @@ impl StarWarsBoard {
 
         let proms = SW_MATHBOX_PROM.load(rom_set)?;
         self.math.load_proms(&proms);
+
+        let avg_prom = SW_AVG_PROM.load(rom_set)?;
+        self.avg.load_state_prom(&avg_prom);
         Ok(())
     }
 

@@ -133,14 +133,24 @@ pub struct Avg {
     /// clock and reports "busy" for that long.
     run_cycles: u32,
 
+    /// The 256×4 state PROM (low nibbles), and the sequencer's current state.
+    /// Empty when the machine has not wired one up.
+    state_prom: Vec<u8>,
+    state_latch: u8,
+
     /// Accumulated display list for the current frame.
     display_list: Vec<VectorLine>,
 }
 
-/// Cycles the state machine spends per instruction word, independent of any
-/// drawing: MAME's `run_state_machine` charges 8 per state iteration, and a
-/// vector word is fetched and latched across two of them.
-const AVG_CYCLES_PER_WORD: u32 = 16;
+/// Master-clock cycles per state-machine iteration, independent of drawing.
+/// The sequencer is clocked at a fixed rate and every state costs the same;
+/// only the *number* of states varies, and that comes from the state PROM.
+const AVG_CYCLES_PER_STATE: u32 = 8;
+
+/// Fallback state count per instruction when no state PROM has been loaded,
+/// so a machine that has not wired one up keeps working (with approximate
+/// timing) rather than reporting the generator instantly done.
+const AVG_FALLBACK_STATES: u32 = 2;
 
 /// One decoded AVG instruction (fields common to all variants).
 struct Instr {
@@ -198,6 +208,8 @@ impl Avg {
             flip_y: false,
             halted: true,
             run_cycles: 0,
+            state_prom: Vec::new(),
+            state_latch: 0,
             display_list: Vec::with_capacity(2048),
         }
     }
@@ -219,6 +231,43 @@ impl Avg {
     /// taken on hardware. See [`run_cycles`](Self::run_cycles).
     pub fn run_cycles(&self) -> u32 {
         self.run_cycles
+    }
+
+    /// Load the 256×4 AVG state PROM (the sequencer that decides how many
+    /// states each instruction takes). Only the low nibble of each byte is
+    /// the next-state field.
+    pub fn load_state_prom(&mut self, data: &[u8]) {
+        self.state_prom = data.iter().map(|b| b & 0x0F).collect();
+    }
+
+    /// Count the state-machine iterations one instruction with opcode `op`
+    /// takes, by walking the real state PROM exactly as the hardware
+    /// sequencer does.
+    ///
+    /// The PROM is addressed by `(halt^1) << 7 | op << 4 | state`, and each
+    /// lookup yields the next state. An instruction runs until the sequence
+    /// returns to a state it has already visited (the sequencer is a small
+    /// cycle per opcode), which is what bounds the walk.
+    ///
+    /// Returns `None` when no PROM is loaded, so the caller can fall back
+    /// rather than silently reporting zero-length runs.
+    fn states_for_op(&self, op: u8) -> Option<u32> {
+        let prom = self.state_prom.as_slice();
+        if prom.len() < 0x100 {
+            return None;
+        }
+        let mut seen = [false; 16];
+        let mut state = self.state_latch & 0x0F;
+        let mut states = 0u32;
+        // 16 possible states, so a cycle must close within 16 steps.
+        while !seen[usize::from(state)] && states < 16 {
+            seen[usize::from(state)] = true;
+            // halt is 0 while the instruction runs, so (halt ^ 1) = 1.
+            let addr = 0x80 | (usize::from(op & 7) << 4) | usize::from(state);
+            state = prom[addr];
+            states += 1;
+        }
+        Some(states)
     }
 
     /// Cycles the beam spends drawing one vector, from the normalized timer
@@ -272,10 +321,6 @@ impl Avg {
         const MAX_INSTRUCTIONS: u32 = 50_000;
 
         while !self.halted && instructions < MAX_INSTRUCTIONS {
-            // Every instruction costs state-machine time whether or not it
-            // draws; a two-word instruction costs twice a one-word one.
-            self.run_cycles += AVG_CYCLES_PER_WORD;
-
             // --- Decode (variant-specific) ---
             let Instr {
                 op,
@@ -289,6 +334,12 @@ impl Avg {
                 AvgVariant::Quantum => self.decode_quantum(vmem),
                 AvgVariant::StarWars => self.decode_starwars(vmem),
             };
+
+            // Every instruction costs state-machine time whether or not it
+            // draws, and how much is a property of the opcode's state
+            // sequence — read from the real PROM rather than assumed.
+            let states = self.states_for_op(op).unwrap_or(AVG_FALLBACK_STATES);
+            self.run_cycles += states * AVG_CYCLES_PER_STATE;
 
             // --- Execute. Op meanings (0/2 VCTR/SVEC, 1 HALT, 3 STAT, 4 CNTR,
             // 5 JSR, 6 RTS, 7 JMP) are shared across variants; only the vector
