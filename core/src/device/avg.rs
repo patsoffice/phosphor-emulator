@@ -125,9 +125,22 @@ pub struct Avg {
     /// True when the AVG has halted.
     halted: bool,
 
+    /// Master-clock cycles the last run would have taken on the real state
+    /// machine. We walk the vector list in one go, but the hardware takes
+    /// real time to do it and holds VG_HALT low meanwhile — games poll that
+    /// flag, so a generator that is instantly done lets them do more work per
+    /// frame than the hardware would. The board converts this to its own
+    /// clock and reports "busy" for that long.
+    run_cycles: u32,
+
     /// Accumulated display list for the current frame.
     display_list: Vec<VectorLine>,
 }
+
+/// Cycles the state machine spends per instruction word, independent of any
+/// drawing: MAME's `run_state_machine` charges 8 per state iteration, and a
+/// vector word is fetched and latched across two of them.
+const AVG_CYCLES_PER_WORD: u32 = 16;
 
 /// One decoded AVG instruction (fields common to all variants).
 struct Instr {
@@ -184,6 +197,7 @@ impl Avg {
             flip_x: false,
             flip_y: false,
             halted: true,
+            run_cycles: 0,
             display_list: Vec::with_capacity(2048),
         }
     }
@@ -193,11 +207,29 @@ impl Avg {
         self.pc = 0;
         self.sp = 0;
         self.halted = false;
+        self.run_cycles = 0;
     }
 
     /// Returns true if the AVG has halted.
     pub fn is_halted(&self) -> bool {
         self.halted
+    }
+
+    /// Master-clock cycles the last [`execute`](Self::execute) would have
+    /// taken on hardware. See [`run_cycles`](Self::run_cycles).
+    pub fn run_cycles(&self) -> u32 {
+        self.run_cycles
+    }
+
+    /// Cycles the beam spends drawing one vector, from the normalized timer
+    /// value — the same derivation MAME makes in `avg_common_strobe3`. A
+    /// short vector counts in the low byte only.
+    fn draw_cycles(timer: u16, is_short: bool) -> u32 {
+        if is_short {
+            0x100 - u32::from(timer & 0xFF)
+        } else {
+            0x8000 - u32::from(timer)
+        }
     }
 
     /// Debug: return (scale, bin_scale, color, intensity).
@@ -240,6 +272,10 @@ impl Avg {
         const MAX_INSTRUCTIONS: u32 = 50_000;
 
         while !self.halted && instructions < MAX_INSTRUCTIONS {
+            // Every instruction costs state-machine time whether or not it
+            // draws; a two-word instruction costs twice a one-word one.
+            self.run_cycles += AVG_CYCLES_PER_WORD;
+
             // --- Decode (variant-specific) ---
             let Instr {
                 op,
@@ -274,6 +310,7 @@ impl Avg {
                         // strobe3 position math; only color/intensity differ.
                         let (norm_dvx, norm_dvy, timer) = self.normalize(dvx, dvy, is_short);
                         let timer = self.apply_bin_scale(timer, is_short);
+                        self.run_cycles += Self::draw_cycles(timer, is_short);
                         self.draw_starwars(norm_dvx, norm_dvy, timer, is_short, int_latch);
                     }
                 },

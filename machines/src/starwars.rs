@@ -726,6 +726,10 @@ pub(crate) struct StarWarsBoard {
     pub(crate) dsw0: u8,
     pub(crate) dsw1: u8,
 
+    /// CPU cycles remaining before the vector generator finishes its run and
+    /// VG_HALT (IN1 bit 6) reads set again.
+    pub(crate) avg_busy_cycles: u64,
+
     pub(crate) clock: u64,
 
     // Vector display list (AVG output, refreshed on each GO).
@@ -814,6 +818,7 @@ impl StarWarsBoard {
             // Freeze OFF ($03|$00|$30|$40|$80 = $F3).
             dsw0: if esb { 0xF3 } else { 0x98 },
             dsw1: 0x02, // coinage default: 1 coin / 1 credit
+            avg_busy_cycles: 0,
             clock: 0,
             display_list: Vec::with_capacity(2048),
             audio_buffer: Vec::new(),
@@ -1089,7 +1094,7 @@ impl StarWarsBoard {
         // Active-low button bits (2,4,5); bit 6 = AVG done (VG_HALT, active
         // high), bit 7 = MATH_RUN (active high).
         let mut v = self.in1_buttons & 0x34;
-        if self.avg.is_halted() {
+        if self.avg.is_halted() && self.avg_busy_cycles == 0 {
             v |= 0x40;
         }
         if self.math.math_run() {
@@ -1283,6 +1288,13 @@ impl StarWarsBoard {
         self.avg.go();
         self.avg.execute(&vmem, &[0u8; 16]); // Star Wars ignores color RAM
         self.display_list = self.avg.take_display_list();
+
+        // We drew the whole list synchronously, but the hardware takes real
+        // time and holds VG_HALT (IN1 bit 6) low until it finishes. The game
+        // polls that flag, so reporting "done" immediately lets it run more
+        // per frame than the real board does. The AVG counts in master
+        // clocks; the board's cycle is master/8.
+        self.avg_busy_cycles = u64::from(self.avg.run_cycles()) / 8;
     }
 
     // --- Frame execution ---------------------------------------------------
@@ -1301,6 +1313,9 @@ impl StarWarsBoard {
             self.irq_pending = true;
         }
         self.irq_counter += 1;
+
+        // The vector generator is still running for this long after a GO.
+        self.avg_busy_cycles = self.avg_busy_cycles.saturating_sub(1);
 
         if self.watchdog_counter >= WATCHDOG_CYCLES {
             // Record the edge, not the level: the flag stays set until
