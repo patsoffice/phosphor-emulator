@@ -914,6 +914,9 @@ impl StarWarsBoard {
 
         let proms = ESB_MATHBOX_PROM.load(rom_set)?;
         self.math.load_proms(&proms);
+
+        let avg_prom = SW_AVG_PROM.load(rom_set)?;
+        self.avg.load_state_prom(&avg_prom);
         Ok(())
     }
 
@@ -923,8 +926,28 @@ impl StarWarsBoard {
     fn feed_slapstic(&mut self, addr: u16) {
         if let Some(sl) = self.slapstic.as_mut() {
             let before = sl.current_bank();
+            let state_before = sl.state_label();
             sl.test(addr as u32);
             let after = sl.current_bank();
+            let state_after = sl.state_label();
+            // A bank-select address only switches from `active`; from `idle`
+            // it is ignored. So a switch that should not have happened (or one
+            // that should have) is only explicable from the state, never from
+            // the committed bank.
+            if !std::ptr::eq(state_before, state_after) && self.debug_trace.enabled() {
+                self.debug_trace.record(DebugEvent {
+                    cpu_index: Some(0),
+                    pc: self.main_map.latched_pc(),
+                    addr: Some(addr as u32),
+                    region: Some("Slapstic window"),
+                    detail: Some(state_after),
+                    ..DebugEvent::new(
+                        self.clock,
+                        DebugAccessSource::Cpu(0),
+                        DebugEventKind::Message,
+                    )
+                });
+            }
             if before != after {
                 self.main_map.remap_pages(
                     0x80,

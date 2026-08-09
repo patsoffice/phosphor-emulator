@@ -352,6 +352,27 @@ impl Slapstic {
         self.current_bank
     }
 
+    /// Diagnostic: the sequence detector's current state.
+    ///
+    /// Whether an access switches banks depends entirely on this — a
+    /// bank-select address is only honoured from `active`, and is ignored
+    /// from `idle`. Tracing the state is therefore the only way to explain a
+    /// switch that should not have happened (or one that should have),
+    /// because the committed bank alone cannot distinguish "the chip was
+    /// armed" from "the chip was not looking".
+    pub fn state_label(&self) -> &'static str {
+        match self.state {
+            State::Idle => "idle",
+            State::Active => "active",
+            State::AltValid => "alt-valid",
+            State::AltSelect => "alt-select",
+            State::AltCommit => "alt-commit",
+            State::BitLoad => "bit-load",
+            State::BitSetOdd => "bit-set-odd",
+            State::BitSetEven => "bit-set-even",
+        }
+    }
+
     /// Feed one bus access (the full byte address) to the state machine. The
     /// real chip only sees address lines, so this must be called for every
     /// access the CPU drives — data reads/writes *and* instruction prefetches —
