@@ -519,6 +519,13 @@ impl M6809 {
             }
             // Internal cycle countdown for indexed mode overhead
             20 => {
+                // Don't-care cycles are not silent on a real MC6809E: it keeps
+                // driving the address bus, and address-snooping hardware sees
+                // what it drives. The postbyte-resolution don't-cares re-read
+                // at PC (MAME's `dummy_read_opcode_arg(0)`); the /VMA cycle
+                // just before the operand access drives $FFFF and is charged
+                // in `alu_indexed`'s cycle 40.
+                let _ = bus.read(master, self.pc);
                 self.indexed_internal -= 1;
                 if self.indexed_internal == 0 {
                     true
@@ -546,7 +553,11 @@ impl M6809 {
     {
         match cycle {
             40 => {
-                // Base internal cycle
+                // Base internal cycle: the /VMA cycle before the operand
+                // access, which drives $FFFF on a real MC6809E. Empire Strikes
+                // Back's slapstic watches for exactly this address to validate
+                // its alternate-banking sequence.
+                let _ = bus.read(master, 0xFFFF);
                 self.state = ExecState::Execute(opcode, 50);
             }
             50 => {

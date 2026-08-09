@@ -160,7 +160,7 @@ Complete system implementations that wire core components together:
 - **RoadRunnerSystem** — Road Runner on the shared Atari System 1 board (slapstic 108 + speech-equipped sound board [VIA6522 + TMS5220 LPC speech] + ADC0809 analog joystick with IRQ2 + per-band motion-object banking)
 - **TempestSystem** — Atari color vector arcade (M6502 + AVG vector generator + Mathbox coprocessor + 2×POKEY + ER2055 EAROM + spinner)
 - **QuantumSystem** — Atari color vector arcade (MC68000 + Quantum-variant AVG + 2×POKEY + X2212 NVRAM + trackball)
-- **StarWarsSystem** — Atari Star Wars color vector cockpit game (dual MC6809E + Star Wars-variant AVG + Matrix Processor 3D-math coprocessor with hardware divider & PRNG + 4×POKEY + TMS5220 LPC speech via MOS 6532 RIOT + ADC0809 flight yoke + X2212 NVRAM)
+- **StarWarsSystem** — Atari Star Wars color vector cockpit game (dual MC6809E + Star Wars-variant AVG + Matrix Processor 3D-math coprocessor with hardware divider & PRNG + 4×POKEY + TMS5220 LPC speech via MOS 6532 RIOT + ADC0809 flight yoke + X2212 NVRAM), and The Empire Strikes Back on the same board (Slapstic-101 address-sequence bank switching + interleaved bank 2)
 - **MissileCommandSystem** — Atari raster arcade (M6502 + POKEY + bitmap video)
 - **PacmanSystem** — Pac-Man on shared Namco Pac board (Z80 + WSG + tile/sprite video)
 - **MsPacmanSystem** — Ms. Pac-Man on shared Namco Pac board (auxiliary decode latch + ROM encryption)
