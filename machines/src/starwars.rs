@@ -14,14 +14,16 @@
 
 use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
-use phosphor_core::core::debug_trace::DebugTraceBuffer;
+use phosphor_core::core::debug_trace::{DebugEvent, DebugEventKind, DebugTraceBuffer};
 use phosphor_core::core::input::{AnalogAxis, AxisRange};
 use phosphor_core::core::machine::{
-    ActionRole, AnalogAxisKind, DefaultBinding, DipSwitches, Direction, FrontendMachine,
-    InputConfigurable, InputControl, InputEvent, InputId, InputKind, MachineCore, MouseControl,
-    Nvram, PadAxis, PadControl, Profilable, SaveState,
+    ActionRole, AnalogAxisKind, DefaultBinding, DipApplyTiming, DipChoice, DipOption,
+    DipSwitchBank, DipSwitches, Direction, FrontendMachine, InputConfigurable, InputControl,
+    InputEvent, InputId, InputKind, MachineCore, MouseControl, Nvram, PadAxis, PadControl,
+    Profilable, SaveState,
 };
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
+use phosphor_core::core::watchpoint::DebugAccessSource;
 use phosphor_core::core::{AccessKind, AddressSpace16, Bus, BusMaster, TimingConfig};
 use phosphor_core::cpu::Cpu;
 use phosphor_core::cpu::m6809::M6809;
@@ -738,6 +740,15 @@ pub(crate) struct StarWarsBoard {
     pub(crate) debug_trace: DebugTraceBuffer,
 }
 
+/// `BankSwitch` event details for the four slapstic banks, indexed by the new
+/// bank. Static strings because `DebugEvent::detail` holds one.
+const SLAPSTIC_BANK_DETAIL: [&str; 4] = [
+    "slapstic bank 0 at $8000-$9FFF",
+    "slapstic bank 1 at $8000-$9FFF",
+    "slapstic bank 2 at $8000-$9FFF",
+    "slapstic bank 3 at $8000-$9FFF",
+];
+
 /// The yoke's electrical range [yaw, pitch]. Held keys deflect fully and
 /// release springs back to center; the ADC digitizes the resulting position.
 fn new_yoke() -> [AnalogAxis; 2] {
@@ -894,8 +905,36 @@ impl StarWarsBoard {
                     MainRegion::SlapsticWindow,
                     after as u32 * 0x2000,
                 );
+                // The chip is driven by a *sequence* of addresses, so the access
+                // that completes a switch is rarely the one a reader would guess
+                // from the disassembly. Recording the address that tipped it,
+                // and the bank either side, is what makes a wrong-bank return
+                // traceable at all.
+                self.trace_bank_switch(addr, after);
             }
         }
+    }
+
+    /// Record a slapstic bank change as a `BankSwitch` event. `value` and
+    /// `detail` both carry the *new* bank; the old one is the previous event's.
+    fn trace_bank_switch(&mut self, addr: u16, after: u8) {
+        if !self.debug_trace.enabled() {
+            return;
+        }
+        self.debug_trace.record(DebugEvent {
+            cpu_index: Some(0),
+            pc: self.main_map.latched_pc(),
+            addr: Some(addr as u32),
+            value: Some(after as u32),
+            width: 1,
+            region: Some("Slapstic window"),
+            detail: Some(SLAPSTIC_BANK_DETAIL[after as usize & 3]),
+            ..DebugEvent::new(
+                self.clock,
+                DebugAccessSource::Cpu(0),
+                DebugEventKind::BankSwitch,
+            )
+        });
     }
 
     /// Decode the four-POKEY address scramble at $1800–$183F into
@@ -993,6 +1032,26 @@ impl StarWarsBoard {
                     self.main_map
                         .remap_pages(0xA0, 0x60, MainRegion::Bank2, val as u32 * 0x6000);
                 }
+                if self.debug_trace.enabled() {
+                    self.debug_trace.record(DebugEvent {
+                        cpu_index: Some(0),
+                        pc: self.main_map.latched_pc(),
+                        addr: Some(addr as u32),
+                        value: Some(val as u32),
+                        width: 1,
+                        region: Some("ROM Bank"),
+                        detail: Some(if val == 0 {
+                            "LS259 bit 4 = 0: bank low at $6000 (ESB: bank 2 entry 0)"
+                        } else {
+                            "LS259 bit 4 = 1: bank high at $6000 (ESB: bank 2 entry 1)"
+                        }),
+                        ..DebugEvent::new(
+                            self.clock,
+                            DebugAccessSource::Cpu(0),
+                            DebugEventKind::BankSwitch,
+                        )
+                    });
+                }
             }
             7 => self.novram.recall(val == 0), // NVRAM array recall (active low)
             // bits 0/1 coin counters, 2/3/6 LEDs, 5 PRNG reset — no board state.
@@ -1020,6 +1079,19 @@ impl StarWarsBoard {
 
     fn pet_watchdog(&mut self) {
         self.watchdog_counter = 0;
+        if self.debug_trace.enabled() {
+            self.debug_trace.record(DebugEvent {
+                cpu_index: Some(0),
+                pc: self.main_map.latched_pc(),
+                addr: Some(0x4640),
+                detail: Some("watchdog cleared"),
+                ..DebugEvent::new(
+                    self.clock,
+                    DebugAccessSource::Cpu(0),
+                    DebugEventKind::Watchdog,
+                )
+            });
+        }
     }
 
     /// Feed the current yoke position to the ADC channels.
@@ -1205,13 +1277,30 @@ impl StarWarsBoard {
 
         self.watchdog_counter += 1;
         if self.watchdog_counter >= WATCHDOG_CYCLES {
+            // Record the edge, not the level: the flag stays set until
+            // `take_watchdog_trip` clears it, and one event per cycle until
+            // then would bury the trip that matters.
+            if !self.watchdog_tripped && self.debug_trace.enabled() {
+                self.debug_trace.record(DebugEvent {
+                    cpu_index: Some(0),
+                    pc: Some(self.cpu.pc as u32),
+                    detail: Some("watchdog expired — board reset"),
+                    ..DebugEvent::new(
+                        self.clock,
+                        DebugAccessSource::Cpu(0),
+                        DebugEventKind::Watchdog,
+                    )
+                });
+            }
             self.watchdog_tripped = true;
         }
 
         // Latch the executing CPU's PC + cycle so any watchpoint hit taken via
-        // bus_read/bus_write this cycle carries usable debugger metadata. Only
-        // when a watchpoint is armed, so normal runs pay nothing.
-        if self.main_map.has_any_watchpoints() {
+        // bus_read/bus_write this cycle carries usable debugger metadata, and
+        // so bus-driven trace events (the slapstic bank switch) can name the
+        // instruction that caused them. Only when an observer is armed, so
+        // normal runs pay nothing.
+        if self.main_map.has_any_watchpoints() || self.debug_trace.enabled() {
             self.main_map
                 .latch_access_context(self.clock, Some(self.cpu.pc as u32));
         }
@@ -1469,6 +1558,31 @@ impl StarWarsSystem {
             machine_id: "esb",
         }
     }
+
+    /// Which game this system is running. The board's ESB-specific state (the
+    /// slapstic) is the variant flag — `machine_id` is `#[save_skip]` and so is
+    /// not restored by a save state, while the slapstic is.
+    fn is_esb(&self) -> bool {
+        self.board.slapstic.is_some()
+    }
+
+    /// Service a pending sound-CPU reset ($46E0) before a cycle-stepped tick.
+    ///
+    /// `run_frame` does this once per frame because that is where `bus_split!`
+    /// yields a bus for the reset-vector fetch. The debugger and the headless
+    /// `trace --cpu`/`--break-pc` loops call `debug_tick` instead and never go
+    /// through `run_frame`, so without this the request would sit pending
+    /// forever and the sound CPU would keep running the pre-reset code — the
+    /// machine would behave differently under the debugger than at full speed,
+    /// which is the one thing a debugger must not do.
+    fn debug_pre_tick(&mut self) {
+        if self.board.sound_reset_pending {
+            self.board.sound_reset_pending = false;
+            bus_split!(self, bus => {
+                self.board.sound_cpu.reset(bus, BusMaster::Cpu(1));
+            });
+        }
+    }
 }
 
 impl Bus for StarWarsSystem {
@@ -1492,7 +1606,7 @@ impl Bus for StarWarsSystem {
     }
 }
 
-crate::impl_board_delegation!(StarWarsSystem, board, TIMING, vectors);
+crate::impl_board_delegation!(StarWarsSystem, board, TIMING, vectors, debug_tick_pre);
 
 impl MachineCore for StarWarsSystem {
     fn frame_rate_hz(&self) -> f64 {
@@ -1505,13 +1619,9 @@ impl MachineCore for StarWarsSystem {
 
     fn run_frame(&mut self) {
         // A pending sound-CPU reset ($46E0) is serviced here, where `bus_split!`
-        // yields a bus for the reset-vector fetch.
-        if self.board.sound_reset_pending {
-            self.board.sound_reset_pending = false;
-            bus_split!(self, bus => {
-                self.board.sound_cpu.reset(bus, BusMaster::Cpu(1));
-            });
-        }
+        // yields a bus for the reset-vector fetch. `debug_pre_tick` does the
+        // same for the cycle-stepped paths, which never reach this function.
+        self.debug_pre_tick();
         bus_split!(self, bus => {
             for _ in 0..TIMING.cycles_per_frame() {
                 self.board.tick(bus);
@@ -1603,9 +1713,367 @@ impl InputConfigurable for StarWarsSystem {
     }
 }
 
-// Operator DIP banks are exposed in a follow-on step; the board holds the
-// current values (defaults) in the meantime.
-impl DipSwitches for StarWarsSystem {}
+// ---------------------------------------------------------------------------
+// Operator DIP switches
+// ---------------------------------------------------------------------------
+//
+// Two banks on the main board: DSW0 at 10D (read at $4340-$435F) and DSW1 at
+// 10EF (read at $4360-$437F). Both are read live on every access, so every
+// option applies immediately.
+//
+// DSW1 is identical on both games; DSW0 is reshaped by Empire Strikes Back,
+// which keeps only the bit-7 Freeze switch in place. That is why this impl is
+// hand-written rather than `impl_dip_switches!`: the macro returns one static
+// bank table, and the correct table here depends on which game is running.
+
+/// Freeze (10D:8) — the same switch on both games, so both DSW0 tables end
+/// with it.
+const DSW0_FREEZE: DipOption = DipOption {
+    name: "Freeze",
+    mask: 0x80,
+    apply: DipApplyTiming::Immediate,
+    choices: &[
+        DipChoice {
+            label: "Off",
+            value: 0x80,
+        },
+        DipChoice {
+            label: "On",
+            value: 0x00,
+        },
+    ],
+};
+
+/// Star Wars DSW0 (10D): shields, difficulty, bonus shields, demo sounds.
+const SW_DSW0_OPTIONS: &[DipOption] = &[
+    DipOption {
+        name: "Starting Shields",
+        mask: 0x03,
+        apply: DipApplyTiming::Immediate,
+        choices: &[
+            DipChoice {
+                label: "6",
+                value: 0x00,
+            },
+            DipChoice {
+                label: "7",
+                value: 0x01,
+            },
+            DipChoice {
+                label: "8",
+                value: 0x02,
+            },
+            DipChoice {
+                label: "9",
+                value: 0x03,
+            },
+        ],
+    },
+    DipOption {
+        name: "Difficulty",
+        mask: 0x0C,
+        apply: DipApplyTiming::Immediate,
+        choices: &[
+            DipChoice {
+                label: "Easy",
+                value: 0x00,
+            },
+            DipChoice {
+                label: "Moderate",
+                value: 0x04,
+            },
+            DipChoice {
+                label: "Hard",
+                value: 0x08,
+            },
+            DipChoice {
+                label: "Hardest",
+                value: 0x0C,
+            },
+        ],
+    },
+    DipOption {
+        name: "Bonus Shields",
+        mask: 0x30,
+        apply: DipApplyTiming::Immediate,
+        choices: &[
+            DipChoice {
+                label: "0",
+                value: 0x00,
+            },
+            DipChoice {
+                label: "1",
+                value: 0x10,
+            },
+            DipChoice {
+                label: "2",
+                value: 0x20,
+            },
+            DipChoice {
+                label: "3",
+                value: 0x30,
+            },
+        ],
+    },
+    DipOption {
+        name: "Demo Sounds",
+        mask: 0x40,
+        apply: DipApplyTiming::Immediate,
+        choices: &[
+            DipChoice {
+                label: "On",
+                value: 0x00,
+            },
+            DipChoice {
+                label: "Off",
+                value: 0x40,
+            },
+        ],
+    },
+    DSW0_FREEZE,
+];
+
+/// Empire Strikes Back DSW0 (10D). The shield and difficulty encodings are not
+/// merely relabelled — the bit patterns are permuted (shields count *up* as
+/// 3,2,5,4 across 0..3), so the tables cannot be shared.
+const ESB_DSW0_OPTIONS: &[DipOption] = &[
+    DipOption {
+        name: "Starting Shields",
+        mask: 0x03,
+        apply: DipApplyTiming::Immediate,
+        choices: &[
+            DipChoice {
+                label: "3",
+                value: 0x00,
+            },
+            DipChoice {
+                label: "2",
+                value: 0x01,
+            },
+            DipChoice {
+                label: "5",
+                value: 0x02,
+            },
+            DipChoice {
+                label: "4",
+                value: 0x03,
+            },
+        ],
+    },
+    DipOption {
+        name: "Difficulty",
+        mask: 0x0C,
+        apply: DipApplyTiming::Immediate,
+        choices: &[
+            DipChoice {
+                label: "Hard",
+                value: 0x00,
+            },
+            DipChoice {
+                label: "Hardest",
+                value: 0x04,
+            },
+            DipChoice {
+                label: "Easy",
+                value: 0x08,
+            },
+            DipChoice {
+                label: "Moderate",
+                value: 0x0C,
+            },
+        ],
+    },
+    DipOption {
+        name: "Jedi-Letter Mode",
+        mask: 0x30,
+        apply: DipApplyTiming::Immediate,
+        choices: &[
+            DipChoice {
+                label: "Level Only",
+                value: 0x00,
+            },
+            DipChoice {
+                label: "Level",
+                value: 0x10,
+            },
+            DipChoice {
+                label: "Increment Only",
+                value: 0x20,
+            },
+            DipChoice {
+                label: "Increment",
+                value: 0x30,
+            },
+        ],
+    },
+    DipOption {
+        name: "Demo Sounds",
+        mask: 0x40,
+        apply: DipApplyTiming::Immediate,
+        choices: &[
+            // Inverted relative to Star Wars: on ESB the switch is labelled
+            // "Music In Attract Mode", and *off* (bit set) is the on state.
+            DipChoice {
+                label: "Off",
+                value: 0x00,
+            },
+            DipChoice {
+                label: "On",
+                value: 0x40,
+            },
+        ],
+    },
+    DSW0_FREEZE,
+];
+
+/// DSW1 (10EF), shared by both games: coinage, the two coin multipliers, and
+/// the bonus-coin adder.
+///
+/// The adder leaves 0xC0 and 0xE0 undefined — the manual lists six settings for
+/// three switches — so those two patterns have no label and are simply not
+/// offered.
+const DSW1_OPTIONS: &[DipOption] = &[
+    DipOption {
+        name: "Coinage",
+        mask: 0x03,
+        apply: DipApplyTiming::Immediate,
+        choices: &[
+            DipChoice {
+                label: "Free Play",
+                value: 0x00,
+            },
+            DipChoice {
+                label: "1 Coin/2 Credits",
+                value: 0x01,
+            },
+            DipChoice {
+                label: "1 Coin/1 Credit",
+                value: 0x02,
+            },
+            DipChoice {
+                label: "2 Coins/1 Credit",
+                value: 0x03,
+            },
+        ],
+    },
+    DipOption {
+        name: "Right Coin Mechanism",
+        mask: 0x0C,
+        apply: DipApplyTiming::Immediate,
+        choices: &[
+            DipChoice {
+                label: "×1",
+                value: 0x00,
+            },
+            DipChoice {
+                label: "×4",
+                value: 0x04,
+            },
+            DipChoice {
+                label: "×5",
+                value: 0x08,
+            },
+            DipChoice {
+                label: "×6",
+                value: 0x0C,
+            },
+        ],
+    },
+    DipOption {
+        name: "Left Coin Mechanism",
+        mask: 0x10,
+        apply: DipApplyTiming::Immediate,
+        choices: &[
+            DipChoice {
+                label: "×1",
+                value: 0x00,
+            },
+            DipChoice {
+                label: "×2",
+                value: 0x10,
+            },
+        ],
+    },
+    DipOption {
+        name: "Bonus Coin Adder",
+        mask: 0xE0,
+        apply: DipApplyTiming::Immediate,
+        choices: &[
+            DipChoice {
+                label: "None",
+                value: 0x00,
+            },
+            DipChoice {
+                label: "2 gives 1",
+                value: 0x20,
+            },
+            DipChoice {
+                label: "4 gives 1",
+                value: 0x40,
+            },
+            DipChoice {
+                label: "4 gives 2",
+                value: 0x60,
+            },
+            DipChoice {
+                label: "5 gives 1",
+                value: 0x80,
+            },
+            DipChoice {
+                label: "3 gives 1",
+                value: 0xA0,
+            },
+        ],
+    },
+];
+
+const STARWARS_DIP_BANKS: &[DipSwitchBank] = &[
+    DipSwitchBank {
+        name: "DSW0",
+        options: SW_DSW0_OPTIONS,
+    },
+    DipSwitchBank {
+        name: "DSW1",
+        options: DSW1_OPTIONS,
+    },
+];
+
+const ESB_DIP_BANKS: &[DipSwitchBank] = &[
+    DipSwitchBank {
+        name: "DSW0",
+        options: ESB_DSW0_OPTIONS,
+    },
+    DipSwitchBank {
+        name: "DSW1",
+        options: DSW1_OPTIONS,
+    },
+];
+
+impl DipSwitches for StarWarsSystem {
+    fn dip_banks(&self) -> &'static [DipSwitchBank] {
+        if self.is_esb() {
+            ESB_DIP_BANKS
+        } else {
+            STARWARS_DIP_BANKS
+        }
+    }
+
+    fn dip_bank_value(&self, bank: usize) -> u8 {
+        match bank {
+            0 => self.board.dsw0,
+            1 => self.board.dsw1,
+            _ => 0,
+        }
+    }
+
+    fn set_dip_bank_value(&mut self, bank: usize, value: u8) {
+        match bank {
+            0 => self.board.dsw0 = value,
+            1 => self.board.dsw1 = value,
+            _ => {}
+        }
+    }
+}
 
 impl Nvram for StarWarsSystem {
     fn save_nvram(&self) -> Option<&[u8]> {
@@ -2084,4 +2552,53 @@ mod tests {
         assert_eq!(sys2.board.main_map.read_backing(0x8000), 0xB0);
         assert_eq!(sys2.board.main_map.read_backing(0xA000), 0xC1);
     }
+
+    // -- DIP switches ------------------------------------------------------
+    //
+    // `dip_test_suite!` below covers the Star Wars tables (it builds the
+    // machine with `new()`); these cover what is variant-specific.
+
+    #[test]
+    fn esb_dip_defaults_and_metadata() {
+        let sys = StarWarsSystem::new_esb();
+        assert_eq!(sys.dip_bank_value(0), 0xF3, "ESB DSW0 power-on byte");
+        assert_eq!(sys.dip_bank_value(1), 0x02, "DSW1 power-on byte");
+        crate::assert_dip_banks_valid(sys.dip_banks(), &[0xF3, 0x02]);
+        assert_eq!(sys.dip_bank_value(2), 0, "out-of-range bank must read 0");
+    }
+
+    /// The two games present different DSW0 tables from the same byte, and the
+    /// choice is driven by the board, not by `machine_id` (which a save state
+    /// does not restore).
+    #[test]
+    fn dsw0_table_follows_the_variant() {
+        let sw = StarWarsSystem::new();
+        let esb = StarWarsSystem::new_esb();
+        assert_eq!(sw.dip_banks()[0].options[2].name, "Bonus Shields");
+        assert_eq!(esb.dip_banks()[0].options[2].name, "Jedi-Letter Mode");
+        // DSW1 is the same bank on both.
+        assert_eq!(sw.dip_banks()[1].options[0].name, "Coinage");
+        assert_eq!(esb.dip_banks()[1].options[0].name, "Coinage");
+
+        // Shields 0x03 means 9 on Star Wars and 4 on ESB — the same bits, a
+        // different meaning, which is the whole reason for two tables.
+        assert_eq!(sw.dip_banks()[0].options[0].choices[3].label, "9");
+        assert_eq!(esb.dip_banks()[0].options[0].choices[3].label, "4");
+    }
+
+    /// Free Play is what makes the headless ESB repro scriptable, so pin that
+    /// the option reaches the byte the game reads at $4360.
+    #[test]
+    fn free_play_reaches_the_dsw1_port() {
+        let mut sys = StarWarsSystem::new_esb();
+        assert_eq!(sys.board.bus_read(BusMaster::Cpu(0), 0x4360), 0x02);
+        sys.set_dip_option(1, 0, 0x00);
+        assert_eq!(sys.dip_bank_value(1) & 0x03, 0x00);
+        assert_eq!(sys.board.bus_read(BusMaster::Cpu(0), 0x4360), 0x00);
+    }
 }
+
+// Star Wars power-on bytes — DSW0: 6 shields, Hard, 1 bonus shield, demo
+// sounds on, Freeze off. DSW1: 1 coin/1 credit, both mechanisms ×1, no adder.
+#[cfg(test)]
+crate::dip_test_suite!(StarWarsSystem, &[0x98, 0x02]);
