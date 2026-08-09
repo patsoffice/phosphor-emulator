@@ -15,6 +15,17 @@ use phosphor_macros::Saveable;
 pub use super::m68xx::CcFlag;
 use super::m68xx::{Acc, M68xxAlu};
 
+/// Cycles the reset sequence occupies before the first opcode fetch: an
+/// internal cycle, the two vector-byte reads at $FFFE/$FFFF, and a final
+/// internal cycle.
+///
+/// The CPU is not free to start executing the moment `reset()` produces a PC —
+/// on the real part the vector fetch takes bus cycles like anything else, and
+/// a CPU that skips them runs early relative to every other device on the
+/// board. That is invisible in a single-CPU test and very visible on a board
+/// whose interrupt divider is clocked independently.
+const RESET_SEQUENCE_CYCLES: u8 = 4;
+
 /// Interrupt type being processed by the M6809 interrupt state machine.
 /// SWI/SWI2/SWI3 have their own handlers and do not use this enum.
 #[repr(u8)]
@@ -60,6 +71,9 @@ pub struct M6809 {
     /// Interrupt type being processed
     #[save_skip(default = InterruptType::None)]
     pub(crate) interrupt_type: InterruptType,
+    /// Cycles remaining in the reset sequence before the first opcode fetch.
+    #[save_skip(default)]
+    pub(crate) reset_cycles: u8,
     /// Countdown for internal cycles during indexed addressing
     #[save_skip(default)]
     pub(crate) indexed_internal: u8,
@@ -108,6 +122,7 @@ impl M6809 {
             temp_addr: 0,
             interrupt_type: InterruptType::None,
             indexed_internal: 0,
+            reset_cycles: 0,
             resume_delay: 0,
         }
     }
@@ -153,6 +168,18 @@ impl M6809 {
         // TSC released — one dead cycle for re-sync
         if self.halted {
             self.halted = false;
+            return;
+        }
+
+        // The reset sequence occupies the bus before the first opcode fetch.
+        // `reset()` has already produced the PC (so a debugger or a test sees
+        // it immediately), but the cycles it costs are spent here, where the
+        // machine clock is running — otherwise the CPU starts executing early
+        // relative to every other device on the board, which shifts the phase
+        // of anything clocked independently of it (a periodic IRQ divider,
+        // most visibly).
+        if self.reset_cycles > 0 {
+            self.reset_cycles -= 1;
             return;
         }
 
@@ -618,6 +645,7 @@ impl Cpu for M6809 {
         let hi = bus.read(master, 0xFFFE);
         let lo = bus.read(master, 0xFFFF);
         self.pc = u16::from_be_bytes([hi, lo]);
+        self.reset_cycles = RESET_SEQUENCE_CYCLES;
     }
 
     fn signal_interrupt(&mut self, _int: InterruptState) {
@@ -663,7 +691,12 @@ impl M6809 {
     /// Returns true when the CPU is ready to fetch the next opcode.
     /// Used by the debugger for instruction-level stepping.
     pub fn at_instruction_boundary(&self) -> bool {
-        matches!(self.state, ExecState::Fetch)
+        // Not while the reset sequence is still running: the state is `Fetch`
+        // from the moment `reset()` sets the PC, but the CPU is occupied with
+        // the vector fetch and is not ready to fetch an opcode. Reporting a
+        // boundary here makes an observer log the same first instruction once
+        // per reset cycle.
+        matches!(self.state, ExecState::Fetch) && self.reset_cycles == 0
     }
 }
 

@@ -1999,8 +1999,16 @@ mod tests {
         for _ in 0..120 {
             sys.run_frame();
         }
-        // The CPU should be parked in the loop at 0x6000.
-        assert_eq!(sys.cpu.pc, 0x6000);
+        // The CPU should be parked in the `BRA *` loop at 0x6000. Assert that
+        // it is *in* the loop rather than at one exact PC: the frame boundary
+        // can land mid-instruction, where the PC has advanced past the opcode
+        // and offset bytes (0x6002) and has not yet been rewritten by the
+        // branch. Pinning 0x6000 pinned the cycle phase, not the behaviour.
+        assert!(
+            (0x6000..=0x6002).contains(&sys.cpu.pc),
+            "CPU left the busy loop: pc = {:#06X}",
+            sys.cpu.pc
+        );
 
         // Rendering into a correctly-sized buffer must not panic.
         let (w, h) = sys.display_size();

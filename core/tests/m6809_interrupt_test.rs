@@ -841,3 +841,43 @@ fn boundary_is_confirmed_when_no_interrupt_is_taken() {
         "masked IRQ must not vector, so the boundary is real"
     );
 }
+
+/// The reset sequence occupies the bus before the first opcode fetch: an
+/// internal cycle, the two vector reads, and a final internal cycle. A CPU
+/// that skips them starts executing early relative to every other device on
+/// the board — which is invisible on its own but shifts the phase of anything
+/// clocked independently, such as a periodic interrupt divider.
+///
+/// phosphor-emulator-cjra. Measured against MAME's cycle-stepped core, whose
+/// INTERRUPT_VECTOR sequence (base6x09.lst) is these same four cycles.
+#[test]
+fn reset_sequence_costs_four_cycles_before_the_first_opcode() {
+    use phosphor_core::core::debug::DebugCpu;
+
+    let mut cpu = M6809::new();
+    let mut bus = InterruptBus::new();
+    bus.memory[0xFFFE] = 0x30; // reset vector -> 0x3000
+    bus.memory[0xFFFF] = 0x00;
+    bus.load(0x3000, &[0x12]); // NOP
+
+    cpu.reset(&mut bus, BusMaster::Cpu(0));
+    assert_eq!(cpu.pc, 0x3000, "reset() still yields the PC immediately");
+
+    // Four cycles in which the CPU must not be ready to fetch.
+    for i in 0..4 {
+        assert!(
+            !cpu.debug_at_instruction_boundary(),
+            "still in the reset sequence at cycle {i}, so not a boundary"
+        );
+        tick(&mut cpu, &mut bus, 1);
+    }
+
+    assert!(
+        cpu.debug_at_instruction_boundary(),
+        "reset sequence complete — ready to fetch the first opcode"
+    );
+    assert_eq!(cpu.pc, 0x3000, "and it has not executed anything yet");
+
+    tick(&mut cpu, &mut bus, 1); // fetch the NOP
+    assert_eq!(cpu.pc, 0x3001);
+}
