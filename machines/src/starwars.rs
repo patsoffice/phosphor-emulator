@@ -949,7 +949,21 @@ impl StarWarsBoard {
     // --- Main CPU bus ------------------------------------------------------
 
     fn main_read(&mut self, addr: u16) -> u8 {
+        let value = self.main_read_value(addr);
+        // The slapstic snoops the access *after* the byte has been fetched, so
+        // a read that switches banks still returns the OLD bank's byte and the
+        // new window takes effect from the next access. MAME's read tap has
+        // this order (`m_next->read()` then the tap, emumem_het.cpp), and it is
+        // load-bearing on ESB, whose bank-select stubs live inside the switched
+        // window: feeding the chip first flips the window one access early, so
+        // a cross-bank `JSR` returns into the wrong bank's copy of a routine.
+        // The write path keeps feeding first, which is the order MAME's write
+        // tap uses.
         self.feed_slapstic(addr);
+        value
+    }
+
+    fn main_read_value(&mut self, addr: u16) -> u8 {
         match addr {
             0x0000..=0x3FFF | 0x4800..=0x7FFF | 0x8000..=0xFFFF => self.main_map.read_backing(addr),
             0x4300..=0x431F => self.in0(),
