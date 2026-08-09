@@ -1283,13 +1283,18 @@ impl StarWarsBoard {
     /// One CPU cycle: periodic IRQ, watchdog, both CPUs, and the matrix busy
     /// countdown. `bus` aliases the owning wrapper (via `bus_split!`).
     pub(crate) fn tick(&mut self, bus: &mut dyn Bus<Address = u16, Data = u8>) {
-        self.irq_counter += 1;
+        // Compare before incrementing, so the divider fires on cycle
+        // `IRQ_PERIOD_CYCLES` rather than one earlier. Incrementing first makes
+        // the counter reach the period on cycle N-1, and an interrupt asserted
+        // one cycle early is invisible until an instruction boundary happens to
+        // fall in that one-cycle window — whereupon the CPU takes the interrupt
+        // an instruction sooner than the hardware would.
         if self.irq_counter >= IRQ_PERIOD_CYCLES {
             self.irq_counter = 0;
             self.irq_pending = true;
         }
+        self.irq_counter += 1;
 
-        self.watchdog_counter += 1;
         if self.watchdog_counter >= WATCHDOG_CYCLES {
             // Record the edge, not the level: the flag stays set until
             // `take_watchdog_trip` clears it, and one event per cycle until
@@ -1308,6 +1313,7 @@ impl StarWarsBoard {
             }
             self.watchdog_tripped = true;
         }
+        self.watchdog_counter += 1;
 
         // Latch the executing CPU's PC + cycle so any watchpoint hit taken via
         // bus_read/bus_write this cycle carries usable debugger metadata, and
