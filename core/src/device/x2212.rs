@@ -54,8 +54,16 @@ impl X2212 {
     }
 
     /// CPU read: low nibble from SRAM, high nibble floats to open bus (0xF).
+    /// The X2212 is a 256x**4** device: it drives D0-D3 only, and D4-D7 are
+    /// left to whatever the bus floats to. That is modelled as 0, matching
+    /// MAME's `(m_sram[offset] & 0x0f) | (space.unmap() & 0xf0)` with the
+    /// default unmap value the Atari drivers use.
+    ///
+    /// The upper nibble is not cosmetic: Star Wars reads the NVRAM and shifts
+    /// the value left, so forcing D4-D7 high (as this used to) changes the
+    /// result the game computes rather than being masked away.
     pub fn read(&self, offset: u16) -> u8 {
-        (self.sram[(offset & 0xFF) as usize] & 0x0F) | 0xF0
+        self.sram[(offset & 0xFF) as usize] & 0x0F
     }
 
     /// CPU write: only the low nibble is stored.
@@ -97,11 +105,16 @@ impl X2212 {
 mod tests {
     use super::*;
 
+    /// The device is 256x4: a write keeps only D0-D3, and a read drives only
+    /// D0-D3, leaving D4-D7 to the bus. This used to assert `0xF5` — the
+    /// upper nibble forced high — which is not what the part does and which
+    /// changed what Star Wars computed from its NVRAM (it shifts the value
+    /// left rather than masking it).
     #[test]
-    fn write_keeps_only_low_nibble_and_read_floats_high() {
+    fn write_keeps_only_low_nibble_and_read_drives_only_low_nibble() {
         let mut nv = X2212::new();
         nv.write(0x10, 0xA5);
-        assert_eq!(nv.read(0x10), 0xF5);
+        assert_eq!(nv.read(0x10), 0x05);
     }
 
     #[test]

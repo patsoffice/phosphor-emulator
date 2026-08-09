@@ -740,6 +740,11 @@ pub(crate) struct StarWarsBoard {
     pub(crate) debug_trace: DebugTraceBuffer,
 }
 
+/// IN0 bit 5: unused, and wired active-high rather than active-low like the
+/// rest of the port, so it reads 0 at rest. Every other bit is a control that
+/// reads 1 when released.
+const IN0_UNUSED_BIT: u8 = 0x20;
+
 /// `BankSwitch` event details for the four slapstic banks, indexed by the new
 /// bank. Static strings because `DebugEvent::detail` holds one.
 const SLAPSTIC_BANK_DETAIL: [&str; 4] = [
@@ -1074,8 +1079,10 @@ impl StarWarsBoard {
     }
 
     fn in0(&self) -> u8 {
-        // Coin/service/button1/button4, all active-low.
-        self.in0
+        // Coin/service/tilt/button1/button4, all active-low, so an unpressed
+        // control reads 1. Bit 5 is the exception: it is unused and wired
+        // active-*high*, so it reads 0 at rest rather than 1.
+        self.in0 & !IN0_UNUSED_BIT
     }
 
     fn in1(&self) -> u8 {
