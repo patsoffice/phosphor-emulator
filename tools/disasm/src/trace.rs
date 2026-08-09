@@ -446,6 +446,28 @@ struct CycleLoop<'a> {
 /// Max instruction length across all supported CPUs (M68000 `MOVE.L #,abs.l`).
 const MAX_INSN: usize = 10;
 
+/// An instruction boundary observed last cycle, held back until we know the
+/// CPU executed the instruction instead of vectoring to an interrupt.
+///
+/// Being at a boundary only means the CPU is *about* to fetch: it samples its
+/// interrupt lines first and may take an interrupt, leaving the instruction at
+/// the PC unexecuted. Reporting it anyway makes the trace claim an instruction
+/// ran that never did — harmless-looking on its own, but it shifts every later
+/// instruction index, which silently corrupts any diff against another
+/// emulator's trace.
+struct Provisional {
+    cpu: usize,
+    /// The rendered instruction line, if this CPU is being instruction-traced.
+    line: Option<String>,
+    /// Whether a `--break-pc` address matched at this boundary.
+    breaks: bool,
+    /// The frame/cycle the boundary was observed on, so a confirmed
+    /// `--break-pc` still reports where it actually hit rather than the
+    /// cycle it happened to be confirmed on.
+    frame: u64,
+    cycle: u64,
+}
+
 /// The cycle loop: drive `debug_tick()` per cycle, disassemble at instruction
 /// boundaries for traced CPUs, log watchpoint hits and (optionally) events, and
 /// honor `--break-pc`/`--stop-on-watch`. Streams line-by-line to `out` (or
@@ -488,6 +510,9 @@ fn run_cycle_loop(cl: CycleLoop) -> Result<String, String> {
     let mut emitted = 0usize;
     // `Some((flag, frame, cycle))` once a stop condition ends the run early.
     let mut stopped: Option<(&str, u64, u64)> = None;
+    // Boundaries seen last cycle, awaiting confirmation that the CPU actually
+    // executed rather than vectoring. See `Provisional`.
+    let mut provisional: Vec<Provisional> = Vec::new();
 
     for tick in 0..total_ticks {
         let cycle = start_cycle + tick;
@@ -505,6 +530,33 @@ fn run_cycle_loop(cl: CycleLoop) -> Result<String, String> {
         // boundaries first, then watchpoint hits, then events.
         let mut lines: Vec<String> = Vec::new();
         let mut hit_break = false;
+        let mut break_at: Option<(u64, u64)> = None;
+
+        // Confirm last cycle's provisional boundaries. A CPU sitting at a
+        // boundary samples its interrupt lines before fetching, so it may
+        // vector instead of running the instruction at its PC; that is only
+        // observable on the following cycle. Anything that vectored is dropped
+        // rather than reported as executed.
+        if !provisional.is_empty()
+            && let Some(bus) = harness.machine_mut().debug_bus()
+        {
+            let cpus = bus.cpus();
+            for p in provisional.drain(..) {
+                if cpus
+                    .get(p.cpu)
+                    .is_some_and(|c| c.1.debug_servicing_interrupt())
+                {
+                    continue; // vectored — the instruction never ran
+                }
+                if let Some(line) = p.line {
+                    lines.push(line);
+                }
+                if p.breaks {
+                    hit_break = true;
+                    break_at = Some((p.frame, p.cycle));
+                }
+            }
+        }
 
         // Instruction trace + break-pc need the (immutable) debug bus; scope
         // that borrow so the mutable `take_watchpoint_hit()` below is free.
@@ -522,21 +574,38 @@ fn run_cycle_loop(cl: CycleLoop) -> Result<String, String> {
                     }
                     let insn = cpu.debug_disassemble(pc, &bytes);
                     let regs = t.regs.then(|| cpu.debug_registers());
-                    lines.push(render_instr(
-                        format,
+                    provisional.push(Provisional {
+                        cpu: t.index,
+                        line: Some(render_instr(
+                            format,
+                            frame,
+                            cycle,
+                            t.index,
+                            pc,
+                            &insn,
+                            regs.as_deref(),
+                        )),
+                        breaks: false,
                         frame,
                         cycle,
-                        t.index,
-                        pc,
-                        &insn,
-                        regs.as_deref(),
-                    ));
+                    });
                 }
             }
             for &(bi, baddr) in breaks {
                 if bi < cpus.len() && (boundaries >> bi) & 1 != 0 && cpus[bi].1.debug_pc() == baddr
                 {
-                    hit_break = true;
+                    // Also provisional: a break-pc on an address the CPU
+                    // vectors away from never actually executed there.
+                    match provisional.iter_mut().find(|p| p.cpu == bi) {
+                        Some(p) => p.breaks = true,
+                        None => provisional.push(Provisional {
+                            cpu: bi,
+                            line: None,
+                            breaks: true,
+                            frame,
+                            cycle,
+                        }),
+                    }
                 }
             }
         }
@@ -600,7 +669,8 @@ fn run_cycle_loop(cl: CycleLoop) -> Result<String, String> {
             } else {
                 "--stop-on-hang"
             };
-            stopped = Some((reason, frame, cycle));
+            let (sf, sc) = break_at.unwrap_or((frame, cycle));
+            stopped = Some((reason, sf, sc));
             break;
         }
     }

@@ -55,6 +55,24 @@ pub trait DebugCpu: Debuggable {
     /// True if the CPU is at an instruction boundary (ready to fetch next opcode).
     fn debug_at_instruction_boundary(&self) -> bool;
 
+    /// True while the CPU is running a hardware-interrupt entry sequence
+    /// (stacking registers and fetching the vector) rather than executing an
+    /// instruction.
+    ///
+    /// Needed because "at an instruction boundary" does not mean the
+    /// instruction at the PC will run: the CPU samples the interrupt lines at
+    /// that boundary and may vector instead. A tracer that logs on the
+    /// boundary alone reports an instruction that never executed, which is
+    /// invisible in a single trace but silently shifts every later index when
+    /// one trace is diffed against another. Observers should therefore treat a
+    /// boundary as provisional and confirm it on the following cycle.
+    ///
+    /// Defaults to `false`, which reproduces the pre-existing behaviour for
+    /// CPUs that have not modelled this yet.
+    fn debug_servicing_interrupt(&self) -> bool {
+        false
+    }
+
     /// Disassemble one instruction from raw bytes at the given address.
     ///
     /// 16-bit CPUs decode `addr` modulo their 64 KB space; their debuggers

@@ -761,3 +761,83 @@ fn test_sync_wakes_on_firq() {
     assert_eq!(cpu.pc, 0x5000, "FIRQ should fire from SYNC");
     assert_eq!(cpu.s, 0x0100 - 3, "FIRQ pushes CC+PC only");
 }
+
+/// A CPU sitting at an instruction boundary has not committed to running the
+/// instruction at its PC: it samples the interrupt lines first and may vector
+/// instead. `debug_servicing_interrupt` is what lets an observer tell the two
+/// apart, one cycle later.
+///
+/// Regression test for phosphor-emulator-rk20, where `disasm trace --cpu`
+/// logged the un-executed instruction and so shifted every later instruction
+/// index — invisible in one trace, but it corrupts a diff against another
+/// emulator.
+#[test]
+fn boundary_is_provisional_until_the_interrupt_decision() {
+    use phosphor_core::core::debug::DebugCpu;
+
+    let mut cpu = M6809::new();
+    let mut bus = InterruptBus::new();
+
+    cpu.pc = 0x0000;
+    cpu.cc = 0x00; // IRQ enabled
+    cpu.s = 0x0100;
+
+    // NOP (12) at 0x0000, then the instruction that must NOT run.
+    bus.load(0x0000, &[0x12, 0x12]);
+    bus.memory[0xFFF8] = 0x40; // IRQ vector -> 0x4000
+    bus.memory[0xFFF9] = 0x00;
+
+    tick(&mut cpu, &mut bus, 2); // execute the first NOP
+
+    // At the boundary the CPU is ready to fetch 0x0001 and is not yet
+    // servicing anything — this is exactly the state a tracer would log.
+    assert!(cpu.debug_at_instruction_boundary());
+    assert!(!cpu.debug_servicing_interrupt());
+    assert_eq!(cpu.debug_pc(), 0x0001);
+
+    // Assert IRQ. The very next cycle is the boundary's fetch cycle, where the
+    // CPU samples the line and vectors instead of executing 0x0001.
+    bus.irq = true;
+    tick(&mut cpu, &mut bus, 1);
+
+    assert!(
+        cpu.debug_servicing_interrupt(),
+        "CPU vectored, so the instruction at the boundary never ran"
+    );
+    assert_eq!(
+        cpu.debug_pc(),
+        0x0001,
+        "PC is still the un-executed address"
+    );
+
+    // Finish the 19-cycle IRQ sequence and land in the handler.
+    tick(&mut cpu, &mut bus, 18);
+    assert_eq!(cpu.pc, 0x4000);
+    assert!(!cpu.debug_servicing_interrupt(), "sequence complete");
+}
+
+/// The counterpart: with no interrupt pending, the boundary is confirmed and
+/// the instruction really does execute. Without this, suppressing on
+/// `debug_servicing_interrupt` could silently drop every instruction.
+#[test]
+fn boundary_is_confirmed_when_no_interrupt_is_taken() {
+    use phosphor_core::core::debug::DebugCpu;
+
+    let mut cpu = M6809::new();
+    let mut bus = InterruptBus::new();
+
+    cpu.pc = 0x0000;
+    cpu.cc = CcFlag::I as u8; // IRQ masked
+    cpu.s = 0x0100;
+    bus.load(0x0000, &[0x12, 0x12]);
+    bus.irq = true; // asserted but masked
+
+    tick(&mut cpu, &mut bus, 2);
+    assert!(cpu.debug_at_instruction_boundary());
+
+    tick(&mut cpu, &mut bus, 1);
+    assert!(
+        !cpu.debug_servicing_interrupt(),
+        "masked IRQ must not vector, so the boundary is real"
+    );
+}

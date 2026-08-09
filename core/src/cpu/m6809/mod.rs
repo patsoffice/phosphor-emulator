@@ -685,6 +685,10 @@ impl DebugCpu for M6809 {
         self.at_instruction_boundary()
     }
 
+    fn debug_servicing_interrupt(&self) -> bool {
+        matches!(self.state, ExecState::Interrupt(_))
+    }
+
     fn debug_disassemble(&self, addr: u32, bytes: &[u8]) -> DisassembledInstruction {
         <Self as crate::cpu::Disassemble>::disassemble(addr, bytes)
     }
