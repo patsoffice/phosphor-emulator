@@ -71,6 +71,18 @@ pub struct StarWarsMath {
 
     /// True while the matrix processor is "running" (IN1 bit 7).
     math_run: bool,
+
+    /// Diagnostic only: a recorded PRNG sequence to hand out from `$4703`
+    /// instead of the LFSR, and how far through it we are.
+    ///
+    /// This exists to make a run reproducible against a *reference emulator*
+    /// whose PRNG we cannot predict — MAME returns `machine().rand()` here,
+    /// a machine-wide LCG that other code also draws from, so its sequence
+    /// can be recorded but not recomputed. Replaying the recording puts both
+    /// emulators on identical values and restores instruction-level lockstep.
+    /// Never populated during normal emulation; not saved in save states.
+    prng_replay: Vec<u8>,
+    prng_replay_pos: usize,
     /// Remaining CPU cycles before `math_run` clears (mptime / 8).
     busy_cycles: u32,
 
@@ -103,6 +115,8 @@ impl StarWarsMath {
             c: 0,
             acc: 0,
             math_run: false,
+            prng_replay: Vec::new(),
+            prng_replay_pos: 0,
             busy_cycles: 0,
             divisor: 0,
             dividend: 0,
@@ -150,10 +164,32 @@ impl StarWarsMath {
     /// Pseudo-random number read ($4703). Advances the 23-bit LFSR one byte's
     /// worth and returns bits 15:8 (the only bits wired to the CPU data bus).
     pub fn prng_r(&mut self) -> u8 {
+        // Diagnostic replay takes precedence while it lasts; once exhausted
+        // the real LFSR resumes, so a short recording degrades into normal
+        // behaviour rather than repeating or stalling.
+        if let Some(&v) = self.prng_replay.get(self.prng_replay_pos) {
+            self.prng_replay_pos += 1;
+            return v;
+        }
         for _ in 0..8 {
             self.clock_prng();
         }
         ((self.prng >> 8) & 0xff) as u8
+    }
+
+    /// Install a recorded `$4703` sequence for comparison runs. See
+    /// [`prng_replay`](Self::prng_replay). Returns the number of values
+    /// installed; an empty slice clears any replay.
+    pub fn set_prng_replay(&mut self, values: &[u8]) -> usize {
+        self.prng_replay = values.to_vec();
+        self.prng_replay_pos = 0;
+        self.prng_replay.len()
+    }
+
+    /// How many replayed values have been consumed, so a caller can report
+    /// when a recording ran out mid-run rather than silently drifting.
+    pub fn prng_replay_consumed(&self) -> (usize, usize) {
+        (self.prng_replay_pos, self.prng_replay.len())
     }
 
     /// Clock the 23-bit LFSR once. Polynomial x^23 + x^5 + 1 (taps at bits 22 and

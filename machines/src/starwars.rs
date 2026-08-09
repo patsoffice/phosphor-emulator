@@ -1633,7 +1633,38 @@ impl Bus for StarWarsSystem {
     }
 }
 
-crate::impl_board_delegation!(StarWarsSystem, board, TIMING, vectors, debug_tick_pre);
+crate::impl_board_renderable!(StarWarsSystem, board, TIMING, vectors);
+crate::impl_board_audio!(StarWarsSystem, board);
+
+// `MachineDebug` is hand-written rather than macro-generated because this
+// board overrides `set_debug_entropy`, which the delegation macro has no arm
+// for. Everything else is the same delegation the macro emits.
+impl phosphor_core::core::machine::MachineDebug for StarWarsSystem {
+    fn debug_bus(&self) -> Option<&dyn phosphor_core::core::debug::BusDebug> {
+        Some(&self.board)
+    }
+
+    fn debug_bus_mut(&mut self) -> Option<&mut dyn phosphor_core::core::debug::BusDebug> {
+        Some(&mut self.board)
+    }
+
+    fn cycles_per_frame(&self) -> u64 {
+        TIMING.cycles_per_frame()
+    }
+
+    fn debug_tick(&mut self) -> u32 {
+        self.debug_pre_tick();
+        bus_split!(self, bus => {
+            self.board.tick(bus);
+        });
+        self.board.debug_tick_boundaries()
+    }
+
+    /// The board's only entropy source is the Matrix Processor PRNG at $4703.
+    fn set_debug_entropy(&mut self, values: &[u8]) -> usize {
+        self.board.math.set_prng_replay(values)
+    }
+}
 
 impl MachineCore for StarWarsSystem {
     fn frame_rate_hz(&self) -> f64 {

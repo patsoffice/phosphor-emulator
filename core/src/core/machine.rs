@@ -465,6 +465,24 @@ pub trait MachineDebug {
         0
     }
 
+    /// Diagnostic: replace the machine's hardware entropy source with a fixed
+    /// recorded sequence, returning how many values were installed (0 if this
+    /// machine has no such source).
+    ///
+    /// This exists for lockstep comparison against a reference emulator. A
+    /// machine with a free-running noise source or PRNG cannot be diffed
+    /// instruction-by-instruction against another implementation unless both
+    /// see the same values, and the reference's sequence is often recordable
+    /// but not recomputable — MAME's Star Wars PRNG, for instance, returns a
+    /// machine-wide LCG that other devices also draw from. Feeding the
+    /// recording to both sides restores lockstep.
+    ///
+    /// Never used by normal emulation; the default ignores the request so
+    /// that a caller can tell "unsupported" from "installed" by the count.
+    fn set_debug_entropy(&mut self, _values: &[u8]) -> usize {
+        0
+    }
+
     /// Consume a pending watchpoint hit from the last tick, if any.
     ///
     /// The debugger polls this after each `debug_tick()`. When `Some` is

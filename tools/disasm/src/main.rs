@@ -215,6 +215,12 @@ enum Command {
         /// Load a factory-initialized NVRAM before running.
         #[arg(long)]
         nvram: Option<PathBuf>,
+        /// Diagnostic: replay a recorded entropy sequence (whitespace- or
+        /// comma-separated hex bytes) in place of the machine's PRNG, so a
+        /// run can be diffed instruction-for-instruction against a reference
+        /// emulator whose PRNG cannot be recomputed.
+        #[arg(long)]
+        entropy_file: Option<PathBuf>,
         /// Set operator DIP switches before running: comma-separated
         /// `<option>=<choice>` entries using the machine's published names
         /// (e.g. `Coinage=Free Play`, `Lives=5`). `bank<N>=<value>` sets a
@@ -417,6 +423,7 @@ fn run_command(cmd: Command) -> Result<String, String> {
             press,
             motion,
             nvram,
+            entropy_file,
             dip,
             events,
             watch,
@@ -436,6 +443,7 @@ fn run_command(cmd: Command) -> Result<String, String> {
             press.as_deref(),
             motion.as_deref(),
             nvram.as_deref(),
+            entropy_file.as_deref(),
             dip.as_deref(),
             events.as_deref(),
             watch.as_deref(),

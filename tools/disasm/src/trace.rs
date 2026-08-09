@@ -201,6 +201,7 @@ pub fn run_trace(
     press: Option<&str>,
     motion: Option<&str>,
     nvram: Option<&Path>,
+    entropy_file: Option<&Path>,
     dip: Option<&str>,
     events: Option<&str>,
     watch: Option<&str>,
@@ -255,6 +256,15 @@ pub fn run_trace(
 
     let mut harness = Harness::build(machine, path, nvram, coin_at, &press_specs, &motion_specs)?;
     apply_dip_specs(&mut harness, &dip_specs)?;
+    if let Some(p) = entropy_file {
+        let values = parse_entropy_file(p)?;
+        let n = harness.machine_mut().set_debug_entropy(&values);
+        if n == 0 {
+            return Err(format!(
+                "--entropy-file: machine '{machine}' has no entropy source to override"
+            ));
+        }
+    }
     let cycles_per_frame = harness.machine_mut().cycles_per_frame();
 
     // Resolve CPU names/indices against the booted machine's bus (cycle mode).
@@ -831,6 +841,32 @@ fn parse_cpu_specs(spec: &str) -> Result<Vec<CpuSpec>, String> {
         return Err("--cpu was empty; give one or more <name|idx>[:regs] entries".to_string());
     }
     Ok(specs)
+}
+
+/// Read a recorded entropy sequence: whitespace- or comma-separated hex
+/// bytes, `#` to end of line ignored so a recording can carry a provenance
+/// comment.
+fn parse_entropy_file(path: &Path) -> Result<Vec<u8>, String> {
+    let text =
+        std::fs::read_to_string(path).map_err(|e| format!("reading {}: {e}", path.display()))?;
+    let mut out = Vec::new();
+    for (lineno, line) in text.lines().enumerate() {
+        let line = line.split('#').next().unwrap_or("");
+        for tok in line.split([',', ' ', '\t']).filter(|t| !t.is_empty()) {
+            let v = u8::from_str_radix(tok.trim_start_matches("0x"), 16).map_err(|_| {
+                format!(
+                    "{}:{}: '{tok}' is not a hex byte",
+                    path.display(),
+                    lineno + 1
+                )
+            })?;
+            out.push(v);
+        }
+    }
+    if out.is_empty() {
+        return Err(format!("{}: no values found", path.display()));
+    }
+    Ok(out)
 }
 
 /// One `--dip` entry: a named option set to a named choice, or a whole bank
