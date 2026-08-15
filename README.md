@@ -196,7 +196,7 @@ SDL2 + egui windowed frontend — external dependencies: SDL2, zip, egui:
 - **ROM path resolution** — loads from MAME ZIP files, rompath directories, or extracted loose files
 - SDL2 window with GPU-scaled texture rendering (VSync frame timing)
 - **Debug panel** (F1 or `--debug`) — egui side panel showing all CPU and device registers, step/cycle/continue controls (works on both 16-bit and 24-bit-bus machines, including the MC68000 games Food Fight and Quantum)
-- Keyboard, game controller, and mouse input bound from each machine's typed `InputConfigurable` controls; rebindable in the settings panel (F12) and persisted per machine
+- Keyboard, game controller, and mouse input bound from each machine's typed `InputConfigurable` controls; rebindable in the settings panel (Tab) and persisted per machine
 - Quick save/load (F6/F7), debug overlay with FPS and machine stats (F10), mouse grab for trackball games (F11)
 
 ### CPU Validation Crate (`phosphor-cpu-validation`)
