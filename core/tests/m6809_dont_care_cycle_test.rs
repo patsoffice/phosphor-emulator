@@ -272,6 +272,209 @@ fn indexed_16bit_offset_drives_ffff_only() {
 }
 
 // ============================================================
+// Indexed indirect: don't-cares first, pointer read, one /VMA
+// ============================================================
+//
+// An indirect postbyte forms its base address, spends that mode's don't-care
+// cycles, *then* reads the two pointer bytes, then holds $FFFF for one final
+// cycle. The don't-cares never trail the pointer read — a slapstic watching the
+// address bus decides on exactly that ordering (phosphor-emulator-5dgc).
+
+#[test]
+fn indexed_indirect_no_offset_reads_pointer_after_its_dont_care() {
+    // LDA [,X] (postbyte $94): one don't-care at PC, the pointer, one /VMA.
+    let t = trace(&[0xA6, 0x94], |cpu, bus| {
+        cpu.x = 0x2000;
+        bus.load(0x2000, &[0x30, 0x00]);
+        bus.memory[0x3000] = 0x42;
+    });
+    assert_eq!(
+        t,
+        vec![
+            R(0x0000),
+            R(0x0001),
+            R(0x0002), // the mode's don't-care, ahead of the pointer
+            R(0x2000), // pointer high
+            R(0x2001), // pointer low
+            R(0xFFFF), // the single trailing /VMA
+            R(0x3000),
+        ]
+    );
+}
+
+#[test]
+fn indexed_indirect_accumulator_offset_spends_both_dont_cares_first() {
+    // LDA [B,X] (postbyte $95): B,R's two don't-cares both precede the pointer.
+    let t = trace(&[0xA6, 0x95], |cpu, bus| {
+        cpu.x = 0x2000;
+        cpu.b = 0x10;
+        bus.load(0x2010, &[0x30, 0x00]);
+        bus.memory[0x3000] = 0x42;
+    });
+    assert_eq!(
+        t,
+        vec![
+            R(0x0000),
+            R(0x0001),
+            R(0x0002),
+            R(0xFFFF),
+            R(0x2010),
+            R(0x2011),
+            R(0xFFFF),
+            R(0x3000),
+        ]
+    );
+}
+
+#[test]
+fn indexed_indirect_d_offset_keeps_both_pc_dont_cares_ahead_of_the_pointer() {
+    // LDA [D,X] (postbyte $9B) — the mode with two PC don't-cares. Both land
+    // before the pointer read, which is where the old ordering differed most.
+    let t = trace(&[0xA6, 0x9B], |cpu, bus| {
+        cpu.x = 0x2000;
+        cpu.a = 0x00;
+        cpu.b = 0x10;
+        bus.load(0x2010, &[0x30, 0x00]);
+        bus.memory[0x3000] = 0x42;
+    });
+    assert_eq!(
+        t,
+        vec![
+            R(0x0000),
+            R(0x0001),
+            R(0x0002), // PC+0
+            R(0x0003), // PC+1
+            R(0xFFFF),
+            R(0xFFFF),
+            R(0xFFFF),
+            R(0x2010),
+            R(0x2011),
+            R(0xFFFF),
+            R(0x3000),
+        ]
+    );
+}
+
+#[test]
+fn indexed_indirect_auto_increment_spends_four_dont_cares_first() {
+    // LDA [,X++] (postbyte $91): four don't-cares, then the pointer, then /VMA.
+    let t = trace(&[0xA6, 0x91], |cpu, bus| {
+        cpu.x = 0x2000;
+        bus.load(0x2000, &[0x30, 0x00]);
+        bus.memory[0x3000] = 0x42;
+    });
+    assert_eq!(
+        t,
+        vec![
+            R(0x0000),
+            R(0x0001),
+            R(0x0002),
+            R(0xFFFF),
+            R(0xFFFF),
+            R(0xFFFF),
+            R(0x2000),
+            R(0x2001),
+            R(0xFFFF),
+            R(0x3000),
+        ]
+    );
+}
+
+#[test]
+fn indexed_indirect_16bit_offset_drives_ffff_only() {
+    // LDA [$0010,X] (postbyte $99): the offset came from the instruction
+    // stream, so none of the three leading don't-cares re-drive PC.
+    let t = trace(&[0xA6, 0x99, 0x00, 0x10], |cpu, bus| {
+        cpu.x = 0x2000;
+        bus.load(0x2010, &[0x30, 0x00]);
+        bus.memory[0x3000] = 0x42;
+    });
+    assert_eq!(
+        t,
+        vec![
+            R(0x0000),
+            R(0x0001),
+            R(0x0002),
+            R(0x0003),
+            R(0xFFFF),
+            R(0xFFFF),
+            R(0xFFFF),
+            R(0x2010),
+            R(0x2011),
+            R(0xFFFF),
+            R(0x3000),
+        ]
+    );
+}
+
+#[test]
+fn extended_indirect_brackets_its_pointer_read_with_one_ffff_each_side() {
+    // LDA [$2000] (postbyte $9F).
+    let t = trace(&[0xA6, 0x9F, 0x20, 0x00], |_, bus| {
+        bus.load(0x2000, &[0x30, 0x00]);
+        bus.memory[0x3000] = 0x42;
+    });
+    assert_eq!(
+        t,
+        vec![
+            R(0x0000),
+            R(0x0001),
+            R(0x0002),
+            R(0x0003),
+            R(0xFFFF),
+            R(0x2000),
+            R(0x2001),
+            R(0xFFFF),
+            R(0x3000),
+        ]
+    );
+}
+
+#[test]
+fn jmp_indirect_lands_on_the_trailing_ffff() {
+    // JMP [,X] (0x6E $94) — JMP has no execute cycle of its own, so the last
+    // cycle of the whole instruction is the address formation's final /VMA.
+    let t = trace(&[0x6E, 0x94], |cpu, bus| {
+        cpu.x = 0x2000;
+        bus.load(0x2000, &[0x30, 0x00]);
+    });
+    assert_eq!(
+        t,
+        vec![
+            R(0x0000),
+            R(0x0001),
+            R(0x0002),
+            R(0x2000),
+            R(0x2001),
+            R(0xFFFF),
+        ]
+    );
+}
+
+#[test]
+fn store_indirect_holds_ffff_between_the_pointer_and_the_write() {
+    // STA [,X] (0xA7 $94) — the trailing /VMA sits between the pointer read and
+    // the store, not after it.
+    let t = trace(&[0xA7, 0x94], |cpu, bus| {
+        cpu.x = 0x2000;
+        cpu.a = 0x42;
+        bus.load(0x2000, &[0x30, 0x00]);
+    });
+    assert_eq!(
+        t,
+        vec![
+            R(0x0000),
+            R(0x0001),
+            R(0x0002),
+            R(0x2000),
+            R(0x2001),
+            R(0xFFFF),
+            W(0x3000, 0x42),
+        ]
+    );
+}
+
+// ============================================================
 // Branches, subroutine calls, stack
 // ============================================================
 
