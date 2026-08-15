@@ -39,13 +39,84 @@ use phosphor_core::cpu::disasm::DisassembledInstruction;
 use phosphor_harness::{Harness, MotionSpec, PressSpec};
 
 /// Output serialization for a trace run.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
 #[value(rename_all = "lower")]
 pub enum TraceFormat {
     /// One human-readable, columnar line per record.
+    #[default]
     Text,
     /// One JSON object per line (greppable / diffable).
     Jsonl,
+}
+
+/// Everything [`run_trace`] needs: one field per `disasm trace` flag.
+///
+/// Named fields rather than a positional argument list. Two thirds of these
+/// are `Option<&str>`/`Option<&Path>`, so a positional call is a row of
+/// interchangeable `None`s in which a shifted or omitted argument still type
+/// checks — `--events` silently arriving as `--dip`, say. Build with
+/// [`TraceOptions::new`] plus struct-update syntax, which names every value
+/// that isn't a default and leaves later fields undisturbed when one is added.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TraceOptions<'a> {
+    /// Machine CLI name (e.g. `joust`).
+    pub machine: &'a str,
+    /// ROM set: a `.zip` archive or a directory of loose ROM files.
+    pub path: &'a str,
+
+    /// Number of frames to run, from reset.
+    pub frames: usize,
+    /// Emit only at/after this frame; earlier frames run with observers off.
+    pub from_frame: usize,
+
+    /// Pulse the coin input at this frame.
+    pub coin_at: Option<usize>,
+    /// `--press`: `<control>@<frame>[:<hold>]` input script.
+    pub press: Option<&'a str>,
+    /// `--move`: `<control>@<frame>[:<frames>][=<delta>]` motion script.
+    pub motion: Option<&'a str>,
+
+    /// Factory-initialized NVRAM to load before running.
+    pub nvram: Option<&'a Path>,
+    /// Recorded entropy sequence to replay in place of the machine's PRNG.
+    pub entropy_file: Option<&'a Path>,
+    /// `--dip`: `<option>=<choice>` / `bank<N>=<value>` switch settings.
+    pub dip: Option<&'a str>,
+
+    // Observers — at least one is required.
+    /// `--events`: event kinds to report, or `all`.
+    pub events: Option<&'a str>,
+    /// `--watch`: `cpu:addr:kind[:cond]` watchpoint specs.
+    pub watch: Option<&'a str>,
+    /// `--cpu`: `<name|idx>[:regs]` instruction-trace targets (cycle loop).
+    pub cpu: Option<&'a str>,
+    /// `--break-pc`: `<cpu>:<addr>` stop addresses (cycle loop).
+    pub break_pc: Option<&'a str>,
+    /// Report a CPU whose PC stalls in a small window for ~120 frames.
+    pub hang: bool,
+
+    // Stop conditions.
+    /// Stop at the first watchpoint hit.
+    pub stop_on_watch: bool,
+    /// Stop when a hang is detected.
+    pub stop_on_hang: bool,
+
+    /// Output serialization.
+    pub format: TraceFormat,
+    /// Output file; `None` returns the trace as a string instead.
+    pub out: Option<&'a Path>,
+}
+
+impl<'a> TraceOptions<'a> {
+    /// The two settings with no sensible default — which machine, and where
+    /// its ROMs are. Everything else starts off/empty.
+    pub fn new(machine: &'a str, path: &'a str) -> Self {
+        Self {
+            machine,
+            path,
+            ..Self::default()
+        }
+    }
 }
 
 /// A parsed `--watch cpu:addr:kind[:cond]` request (may set two watchpoints
@@ -192,28 +263,29 @@ fn render_hang(
 ///
 /// At least one observer must be requested (`--cpu`, `--break-pc`, `--events`,
 /// or `--watch`), else there is nothing to report.
-#[allow(clippy::too_many_arguments)]
-pub fn run_trace(
-    machine: &str,
-    frames: usize,
-    from_frame: usize,
-    coin_at: Option<usize>,
-    press: Option<&str>,
-    motion: Option<&str>,
-    nvram: Option<&Path>,
-    entropy_file: Option<&Path>,
-    dip: Option<&str>,
-    events: Option<&str>,
-    watch: Option<&str>,
-    cpu: Option<&str>,
-    break_pc: Option<&str>,
-    stop_on_watch: bool,
-    hang: bool,
-    stop_on_hang: bool,
-    format: TraceFormat,
-    out: Option<&Path>,
-    path: &str,
-) -> Result<String, String> {
+pub fn run_trace(opts: TraceOptions<'_>) -> Result<String, String> {
+    let TraceOptions {
+        machine,
+        path,
+        frames,
+        from_frame,
+        coin_at,
+        press,
+        motion,
+        nvram,
+        entropy_file,
+        dip,
+        events,
+        watch,
+        cpu,
+        break_pc,
+        hang,
+        stop_on_watch,
+        stop_on_hang,
+        format,
+        out,
+    } = opts;
+
     let cycle_mode = cpu.is_some() || break_pc.is_some();
     if events.is_none() && watch.is_none() && !cycle_mode && !hang {
         return Err(
@@ -1582,52 +1654,20 @@ mod tests {
     fn bad_observer_and_range_args_rejected() {
         // No observer requested.
         assert!(
-            run_trace(
-                "joust",
-                1,
-                0,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                false,
-                false,
-                false,
-                TraceFormat::Text,
-                None,
-                "."
-            )
+            run_trace(TraceOptions {
+                frames: 1,
+                ..TraceOptions::new("joust", ".")
+            })
             .is_err()
         );
         // from-frame past frames (fails before any boot / ROM load).
         assert!(
-            run_trace(
-                "joust",
-                10,
-                20,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-                Some("all"),
-                None,
-                None,
-                None,
-                false,
-                false,
-                false,
-                TraceFormat::Text,
-                None,
-                "."
-            )
+            run_trace(TraceOptions {
+                frames: 10,
+                from_frame: 20,
+                events: Some("all"),
+                ..TraceOptions::new("joust", ".")
+            })
             .is_err()
         );
     }
@@ -1857,27 +1897,12 @@ mod tests {
         };
         let path = roms.to_str().unwrap();
 
-        let out = run_trace(
-            "joust",
-            120,
-            0,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some("bank,devwrite"),
-            None,
-            None,
-            None,
-            false,
-            false,
-            false,
-            TraceFormat::Jsonl,
-            None,
-            path,
-        )
+        let out = run_trace(TraceOptions {
+            frames: 120,
+            events: Some("bank,devwrite"),
+            format: TraceFormat::Jsonl,
+            ..TraceOptions::new("joust", path)
+        })
         .expect("trace run");
 
         let lines: Vec<&str> = out.lines().collect();
@@ -1912,27 +1937,11 @@ mod tests {
 
         // The 0xC900 bank latch is written during boot; a write watchpoint on
         // it must fire at least once.
-        let out = run_trace(
-            "joust",
-            30,
-            0,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some("0:0xC900:w"),
-            None,
-            None,
-            false,
-            false,
-            false,
-            TraceFormat::Text,
-            None,
-            path,
-        )
+        let out = run_trace(TraceOptions {
+            frames: 30,
+            watch: Some("0:0xC900:w"),
+            ..TraceOptions::new("joust", path)
+        })
         .expect("trace run");
 
         assert!(
@@ -1951,27 +1960,11 @@ mod tests {
 
         // During boot the C900 bank latch takes 0x01 then 0x00. An Equals(0x01)
         // condition must fire on the 0x01 write and NOT on the 0x00 write.
-        let out = run_trace(
-            "joust",
-            30,
-            0,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some("0:0xC900:w:=01"),
-            None,
-            None,
-            false,
-            false,
-            false,
-            TraceFormat::Text,
-            None,
-            path,
-        )
+        let out = run_trace(TraceOptions {
+            frames: 30,
+            watch: Some("0:0xC900:w:=01"),
+            ..TraceOptions::new("joust", path)
+        })
         .expect("trace run");
 
         let hits: Vec<&str> = out.lines().filter(|l| l.contains("$C900")).collect();
@@ -1994,27 +1987,12 @@ mod tests {
         // deterministic detection (and a demonstration of the PC-sampling
         // limitation: an idle wait loop reads the same as a hang). --hang
         // alone is a valid observer, and --stop-on-hang halts at the report.
-        let out = run_trace(
-            "joust",
-            200,
-            0,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            false,
-            true, // --hang
-            true, // --stop-on-hang
-            TraceFormat::Text,
-            None,
-            path,
-        )
+        let out = run_trace(TraceOptions {
+            frames: 200,
+            hang: true,
+            stop_on_hang: true,
+            ..TraceOptions::new("joust", path)
+        })
         .expect("trace run");
 
         let hang: Vec<&str> = out.lines().filter(|l| l.contains("=== HANG")).collect();
@@ -2035,27 +2013,13 @@ mod tests {
 
         // Watching the bank latch, restricting to frames [110, 111): the boot
         // writes at frame 0 must be suppressed, so no record has frame < 110.
-        let out = run_trace(
-            "joust",
-            111,
-            110,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            Some("all"),
-            None,
-            None,
-            None,
-            false,
-            false,
-            false,
-            TraceFormat::Jsonl,
-            None,
-            path,
-        )
+        let out = run_trace(TraceOptions {
+            frames: 111,
+            from_frame: 110,
+            events: Some("all"),
+            format: TraceFormat::Jsonl,
+            ..TraceOptions::new("joust", path)
+        })
         .expect("trace run");
 
         for line in out.lines() {
@@ -2074,38 +2038,12 @@ mod tests {
 
     /// Run a cycle-loop trace to a temp file and return its contents (the cycle
     /// loop streams to a writer, so tests read the file it wrote).
-    #[allow(clippy::too_many_arguments)]
-    fn cycle_trace_to_string(
-        tag: &str,
-        frames: usize,
-        from_frame: usize,
-        cpu: Option<&str>,
-        break_pc: Option<&str>,
-        format: TraceFormat,
-        roms: &str,
-    ) -> String {
+    fn cycle_trace_to_string(tag: &str, opts: TraceOptions<'_>) -> String {
         let p = std::env::temp_dir().join(format!("phosphor_trace_{tag}.txt"));
-        run_trace(
-            "joust",
-            frames,
-            from_frame,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            cpu,
-            break_pc,
-            false,
-            false,
-            false,
-            format,
-            Some(&p),
-            roms,
-        )
+        run_trace(TraceOptions {
+            out: Some(&p),
+            ..opts
+        })
         .expect("cycle trace run");
         let s = std::fs::read_to_string(&p).expect("read trace file");
         let _ = std::fs::remove_file(&p);
@@ -2130,12 +2068,11 @@ mod tests {
         };
         let out = cycle_trace_to_string(
             "mono",
-            1,
-            0,
-            Some("0"),
-            None,
-            TraceFormat::Text,
-            roms.to_str().unwrap(),
+            TraceOptions {
+                frames: 1,
+                cpu: Some("0"),
+                ..TraceOptions::new("joust", roms.to_str().unwrap())
+            },
         );
 
         let lines: Vec<&str> = out.lines().collect();
@@ -2159,12 +2096,12 @@ mod tests {
         };
         let out = cycle_trace_to_string(
             "brk",
-            1,
-            0,
-            Some("0"),
-            Some("0:0xF02B"),
-            TraceFormat::Text,
-            roms.to_str().unwrap(),
+            TraceOptions {
+                frames: 1,
+                cpu: Some("0"),
+                break_pc: Some("0:0xF02B"),
+                ..TraceOptions::new("joust", roms.to_str().unwrap())
+            },
         );
         let last = out.lines().last().expect("at least one line");
         assert_eq!(
@@ -2187,12 +2124,12 @@ mod tests {
         };
         let out = cycle_trace_to_string(
             "regs",
-            1,
-            0,
-            Some("0:regs"),
-            Some("0:0xF031"),
-            TraceFormat::Text,
-            roms.to_str().unwrap(),
+            TraceOptions {
+                frames: 1,
+                cpu: Some("0:regs"),
+                break_pc: Some("0:0xF031"),
+                ..TraceOptions::new("joust", roms.to_str().unwrap())
+            },
         );
         assert!(
             out.lines().all(|l| l.contains("A=") && l.contains("CC=")),
@@ -2207,12 +2144,11 @@ mod tests {
         };
         let out = cycle_trace_to_string(
             "multi",
-            1,
-            0,
-            Some("0,1"),
-            None,
-            TraceFormat::Text,
-            roms.to_str().unwrap(),
+            TraceOptions {
+                frames: 1,
+                cpu: Some("0,1"),
+                ..TraceOptions::new("joust", roms.to_str().unwrap())
+            },
         );
         assert!(
             out.lines().any(|l| l.contains("cpu0")),
@@ -2232,12 +2168,13 @@ mod tests {
         // Instruction trace over frames [2, 3): every line's frame must be >= 2.
         let out = cycle_trace_to_string(
             "seek",
-            3,
-            2,
-            Some("0"),
-            None,
-            TraceFormat::Jsonl,
-            roms.to_str().unwrap(),
+            TraceOptions {
+                frames: 3,
+                from_frame: 2,
+                cpu: Some("0"),
+                format: TraceFormat::Jsonl,
+                ..TraceOptions::new("joust", roms.to_str().unwrap())
+            },
         );
         assert!(!out.is_empty(), "expected instructions in the window");
         for line in out.lines() {
