@@ -1,12 +1,20 @@
 name: CI
 
-# Two jobs with deliberately different responsibilities.
+# Three jobs with deliberately different responsibilities.
 #
-# `check` runs on every push and pull request and must stay fast, so it does
-# NOT fetch the SingleStepTests submodules. Without them the six single-step
-# validators skip (see `require_test_data` in cpu-validation/src/lib.rs) — they
-# report success while validating nothing, which is fine here and is exactly
-# why `validate` exists.
+# `check` is the gate. It runs on every push and pull request, must stay fast,
+# and is pinned to the same rustc the Nix dev shell provides so that "clippy is
+# clean locally" and "clippy is clean in CI" mean the same thing. It does NOT
+# fetch the SingleStepTests submodules; without them the six single-step
+# validators skip (see `require_test_data` in cpu-validation/src/lib.rs),
+# reporting success while validating nothing — which is fine here, and is
+# exactly why `validate` exists.
+#
+# `future` is an early-warning signal, not a gate. It runs the same lints on
+# current stable and is allowed to fail: a newer rustc regularly adds
+# future-compatibility lints that will become hard errors later, and we would
+# rather see those on a schedule than discover them the day the pin moves.
+# When it goes red, fix the code — do not silence the job.
 #
 # `validate` fetches the submodules, generates the M6800/M6809 vectors, and
 # runs all 7.1M of them. It is scheduled rather than per-push because the
@@ -44,7 +52,11 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             libsdl2-dev libgl1-mesa-dev pkg-config
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.95.0
+        # Pinned to the rustc the flake provides, so a clean local clippy run
+        # means a clean CI one. Keep in sync when `nix flake update` moves it:
+        #   nix develop -c rustc --version
+        # The `future` job below is what watches newer toolchains.
         with:
           components: rustfmt, clippy
 
@@ -61,6 +73,42 @@ jobs:
         # skip cleanly with PHOSPHOR_ROMS unset — arcade ROMs are not
         # redistributable, so CI can never run them.
         run: cargo test --workspace --locked
+
+  future:
+    name: stable toolchain (early warning)
+    runs-on: ubuntu-latest
+    # Advisory only. A red run here means current stable has started rejecting
+    # something the pinned toolchain still accepts — usually a
+    # future-compatibility lint on its way to becoming a hard error. It must
+    # never block a merge, and it must never be "fixed" by relaxing the lint.
+    continue-on-error: true
+    # Skipped on pull requests: PR feedback should stay fast, and this signal is
+    # about the passage of time rather than about any one change.
+    if: github.event_name != 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install SDL2 and GL headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libsdl2-dev libgl1-mesa-dev pkg-config
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Its own cache: sharing one with `check` would thrash, since the two
+          # jobs compile the same crates with different compilers.
+          key: stable
+
+      - name: Report the toolchain under test
+        run: rustc --version
+
+      - name: Clippy on current stable
+        run: cargo clippy --workspace --all-features --all-targets --locked -- -D warnings
 
   validate:
     name: CPU validation (7.1M vectors)
