@@ -10,3 +10,14 @@ opt-level = 2
 
 [profile.dev]
 opt-level = 2
+
+# The hot loop calls across three crate boundaries on every emulated cycle
+# (machines board tick -> core CPU execute_cycle -> core device tick), so
+# cross-crate inlining is worth more here than in a typical workspace. Measured
+# with `cargo run --release -p phosphor-bench`; see the commit that added this.
+#
+# Cost is build time, and only for release builds — CI's gating job runs the
+# test suite under the dev profile, so it is unaffected.
+[profile.release]
+lto = "fat"
+codegen-units = 1
