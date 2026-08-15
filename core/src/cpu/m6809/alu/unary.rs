@@ -133,7 +133,10 @@ impl M6809 {
     /// DAA inherent (0x19): Decimal Adjust A after BCD addition.
     /// Adjusts A to produce valid BCD result after ADDA/ADCA.
     /// N set if result bit 7 is set. Z set if result is zero.
-    /// C set if addition of A + correction overflows byte. V undefined (left unchanged).
+    /// C set if adding the correction carries out of bit 7, *or* if C was
+    /// already set going in — DAA never clears it, since the carry it reports
+    /// is the carry of the whole BCD add, not just of the adjustment step.
+    /// H and V are documented undefined; V is cleared, H is left alone.
     pub(crate) fn op_daa<B: Bus<Address = u16, Data = u8> + ?Sized>(
         &mut self,
         cycle: u8,
@@ -160,7 +163,13 @@ impl M6809 {
             self.a = result as u8;
             self.set_flag(CcFlag::N, self.a & 0x80 != 0);
             self.set_flag(CcFlag::Z, self.a == 0);
-            self.set_flag(CcFlag::C, result & 0x0100 != 0);
+            // V is undefined here, so the value is a free choice; clearing it
+            // is the convention the reference core uses, and no program can
+            // depend on an undefined bit either way.
+            self.set_flag(CcFlag::V, false);
+            if result & 0x0100 != 0 {
+                self.set_flag(CcFlag::C, true);
+            }
             self.state = ExecState::Fetch;
         }
     }

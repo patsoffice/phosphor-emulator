@@ -334,3 +334,77 @@ fn test_inc_extended_does_write_back() {
     assert_eq!(bus.writes, vec![0x1234], "INC must write back exactly once");
     assert_eq!(bus.memory[0x1234], 0x10, "operand incremented");
 }
+
+/// DAA must report the carry of the whole BCD addition, not just of its own
+/// adjustment step: 99 + 99 = 198, and the hundreds digit lives in C.
+///
+/// `ADDA #$99` on A=$99 leaves A=$32 with H and C set. The adjustment then
+/// adds $66, giving $98 with no carry out of bit 7 — so if DAA recomputed C
+/// from its own addition it would wrongly clear it and lose the hundreds
+/// digit. The datasheet defines C as "set if a carry is generated *or* if the
+/// carry bit was set before the operation".
+#[test]
+fn test_daa_keeps_incoming_carry() {
+    let mut cpu = M6809::new();
+    let mut bus = TestBus::new();
+    // LDA #$99 ; ADDA #$99 ; DAA
+    bus.load(0, &[0x86, 0x99, 0x8B, 0x99, 0x19]);
+
+    for _ in 0..4 {
+        cpu.tick_with_bus(&mut bus, BusMaster::Cpu(0));
+    }
+    assert_eq!(cpu.a, 0x32, "binary sum before adjustment");
+    assert_eq!(cpu.cc & (CcFlag::H as u8), CcFlag::H as u8, "H set by ADDA");
+    assert_eq!(cpu.cc & (CcFlag::C as u8), CcFlag::C as u8, "C set by ADDA");
+    assert_eq!(cpu.cc & (CcFlag::V as u8), CcFlag::V as u8, "V set by ADDA");
+
+    for _ in 0..2 {
+        cpu.tick_with_bus(&mut bus, BusMaster::Cpu(0));
+    }
+    assert_eq!(cpu.a, 0x98, "BCD 98");
+    assert_eq!(
+        cpu.cc & (CcFlag::C as u8),
+        CcFlag::C as u8,
+        "C stays set — it is the hundreds digit of 198"
+    );
+    assert_eq!(
+        cpu.cc & (CcFlag::V as u8),
+        0,
+        "V cleared (documented undefined)"
+    );
+}
+
+/// DAA sets C when the adjustment itself carries out of bit 7.
+#[test]
+fn test_daa_sets_carry_from_adjustment() {
+    let mut cpu = M6809::new();
+    let mut bus = TestBus::new();
+    bus.load(0, &[0x19]); // DAA
+    cpu.a = 0xAA; // both nibbles > 9, so the correction is $66
+    cpu.cc = 0;
+
+    for _ in 0..2 {
+        cpu.tick_with_bus(&mut bus, BusMaster::Cpu(0));
+    }
+    assert_eq!(cpu.a, 0x10, "$AA + $66 = $110, truncated to $10");
+    assert_eq!(cpu.cc & (CcFlag::C as u8), CcFlag::C as u8, "C set");
+    assert_eq!(cpu.cc & (CcFlag::N as u8), 0, "N clear");
+    assert_eq!(cpu.cc & (CcFlag::Z as u8), 0, "Z clear");
+}
+
+/// DAA with nothing to adjust and no carry in leaves C clear — the sticky
+/// carry above must not degrade into an unconditional set.
+#[test]
+fn test_daa_valid_bcd_leaves_carry_clear() {
+    let mut cpu = M6809::new();
+    let mut bus = TestBus::new();
+    bus.load(0, &[0x19]); // DAA
+    cpu.a = 0x12;
+    cpu.cc = 0;
+
+    for _ in 0..2 {
+        cpu.tick_with_bus(&mut bus, BusMaster::Cpu(0));
+    }
+    assert_eq!(cpu.a, 0x12, "already valid BCD, unchanged");
+    assert_eq!(cpu.cc & (CcFlag::C as u8), 0, "C clear");
+}
