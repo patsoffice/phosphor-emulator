@@ -70,6 +70,20 @@ static VECTOR_ROM: RomRegion = RomRegion {
     }],
 };
 
+/// AVG state PROM (256×4). This is the vector generator's next-state table:
+/// it sequences every vector instruction, so it decides how long the generator
+/// takes and therefore how long it holds VG_HALT low. Without it the AVG has
+/// no sequencer and draws nothing.
+static AVG_PROM: RomRegion = RomRegion {
+    size: 0x100,
+    entries: &[RomEntry {
+        name: "136002-125.d7",
+        size: 0x100,
+        offset: 0x0000,
+        crc32: &[0x5903af03],
+    }],
+};
+
 // ---------------------------------------------------------------------------
 // Input button IDs
 // ---------------------------------------------------------------------------
@@ -353,6 +367,8 @@ impl TempestSystem {
         self.board.map.load_region(Region::ProgramRom, &prog);
         let vrom = VECTOR_ROM.load(rom_set)?;
         self.board.map.load_region(Region::VectorRom, &vrom);
+        let avg_prom = AVG_PROM.load(rom_set)?;
+        self.board.avg.load_state_prom(&avg_prom);
         Ok(())
     }
 }

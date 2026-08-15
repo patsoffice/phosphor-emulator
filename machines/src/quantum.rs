@@ -155,6 +155,19 @@ static QUANTUM_PROGRAM_ROM: RomRegion = RomRegion {
     ],
 };
 
+/// AVG state PROM (256×4) — the same part Tempest uses. It is the vector
+/// generator's next-state table: it sequences every vector instruction and so
+/// decides how long the generator takes. Without it the AVG draws nothing.
+static QUANTUM_AVG_PROM: RomRegion = RomRegion {
+    size: 0x100,
+    entries: &[RomEntry {
+        name: "136002-125.6h",
+        size: 0x100,
+        offset: 0x0000,
+        crc32: &[0x5903af03],
+    }],
+};
+
 // ---------------------------------------------------------------------------
 // Input IDs
 // ---------------------------------------------------------------------------
@@ -407,7 +420,10 @@ impl QuantumSystem {
     }
 
     pub fn load_rom_set(&mut self, rom_set: &RomSet) -> Result<(), RomLoadError> {
-        self.load_program(&QUANTUM_PROGRAM_ROM, rom_set)
+        self.load_program(&QUANTUM_PROGRAM_ROM, rom_set)?;
+        let avg_prom = QUANTUM_AVG_PROM.load(rom_set)?;
+        self.avg.load_state_prom(&avg_prom);
+        Ok(())
     }
 
     fn load_program(&mut self, region: &RomRegion, rom_set: &RomSet) -> Result<(), RomLoadError> {
@@ -925,7 +941,7 @@ fn create_quantum(
     rom_set: &RomSet,
 ) -> Result<Box<dyn phosphor_core::core::machine::FrontendMachine>, RomLoadError> {
     let mut sys = QuantumSystem::new();
-    sys.load_program(&QUANTUM_PROGRAM_ROM, rom_set)?;
+    sys.load_rom_set(rom_set)?;
     Ok(Box::new(sys))
 }
 
