@@ -100,6 +100,17 @@ epic is fixing.
 Rejected — ROM layouts are per-machine, so this is the hand-maintained list
 again, wearing a hat.
 
+*Alternative considered:* fill the blank ROM with a per-CPU tight loop
+(`18 FE` on Z80, `20 FE` on M68xx, `EB FE` on 8088, …) so the machine
+idles cleanly instead of executing garbage. Rejected on both counts it
+was meant to improve. The churn from garbage execution — RAM and device
+registers being scribbled — is precisely what lets the save-state
+exerciser tell two histories apart; a parked CPU leaves the test with
+only device counters. And emitting the right loop means teaching
+`RomRegion` which CPU executes each region, a field ~200 region literals
+across 37 files would have to grow, each judged individually because GFX
+and PROM regions execute on nothing.
+
 ### Registry-driven contract tests
 
 `machines/tests/machine_contract_test.rs` iterates `registry::all()` and
@@ -187,10 +198,22 @@ Promoted verdicts:
 
 | Machine | Assertion |
 |---|---|
-| `starwars`, `esb` | AVG display list non-empty on every frame of a tail window; vectors within the coordinate space |
-| `xevious` | sub and sound CPUs released from reset (the 50XX handshake), video RAM populated |
-| `marble`, `roadrunner` | 68010 left the reset vector, stayed in mapped space, populated video RAM |
-| `galaxian`, `mooncrst`, `pisces`, `uniwars` | framebuffer non-blank after the attract intro |
+| `starwars`, `esb` | AVG display list non-empty on every frame of a 60-frame tail window, with at least one lit vector |
+| `xevious` | sub and sound CPUs released from reset (the 50XX handshake) and still running; video RAM populated |
+| `marble`, `roadrunner` | 68010 left the reset vector, stayed inside mapped space, clock advanced, video RAM populated |
+| `galaxian`, `mooncrst`, `pisces`, `uniwars` | framebuffer neither all-black nor all-lit after the attract intro |
+
+Alongside them, one registry-driven test boots *every* machine whose ROM
+set the collection can supply — 39 of the 40 registered here — and
+requires it to draw something and move at least one CPU off its reset PC
+within a 3000-frame budget, exiting early as soon as it draws. That is the
+half a new machine gets for free.
+
+Skipping is per machine and by reason: every `RomLoadError` variant means
+"this collection does not hold that dump" (a `dkongjr.zip` next to the
+`dkongjr2` set the machine's ROM table names, say), so it is a reported
+skip. Anything after the ROM load is the machine's own behavior and fails
+normally.
 
 The five capture programs (`asteroid_capture`, `dkong_capture`,
 `llander_capture`, `xevious_capture`, `galaxian_capture`) are not promoted.
@@ -198,16 +221,46 @@ They dump a WAV or PNG for an external analyzer and have no pass/fail
 verdict to move; asserting on their pixel content is the golden-frame
 epic's job.
 
+### The save-state exerciser, again, on a booted machine
+
+`harness/tests/save_state_rom_test.rs` runs the protocol above against
+machines that have had 300 frames of real attract mode. This is not
+redundant with the ROM-less version: a blank-ROM machine never executes
+its game, so video latches, bank registers, protection handshakes and
+sound commands all sit at their power-on values and omitting them from a
+`Saveable` impl is undetectable there. Deleting `GalaxianVideo`'s
+serialization is invisible to the ROM-less test and fails this one.
+
+The protocol is duplicated rather than shared, because `phosphor-machines`
+cannot depend on `phosphor-harness`.
+
 ## Validation
 
 Beyond "the tests pass", each fix was checked against the failure it is
-supposed to catch, by hand-breaking the code and confirming a red test:
+supposed to catch, by hand-breaking the code and confirming a red test.
 
-- Removed one field from a device's `Saveable` impl → the save-state
-  exerciser fails; the old round trip stays green.
-- Made a machine report a `display_size` one row short → the render
-  contract test fails.
-- Pointed a boot check at a machine held in reset → the boot test fails.
+- Dropped `GalaxianSound` from `GalaxianBoard`'s `Saveable` impl → the
+  ROM-less exerciser fails on the audio comparison.
+- Dropped `GalaxianVideo` instead → invisible ROM-less (those latches are
+  never written under a blank ROM) and caught by the ROM-gated version, on
+  Moon Cresta's rendered frame.
+- Dropped `watchdog_counter` → **not** caught. Its only effect is a reset
+  some seconds later, well past the replay window. The bound is honest and
+  documented in the test: the exerciser sees unsaved state that changes
+  observable behavior within a few frames, not state whose consequence is
+  minutes away.
+
+What the new tests caught on first run, before any of that:
+
+- Three crashes on garbage execution (MB88xx PA overflow, a Galaxian
+  unmapped-decode hole, a Crystal Castles scanline underflow). Two also
+  crash in release, where the `debug_assert` is compiled out and the bogus
+  index reaches the `Vec`.
+- Two save-state omissions in the Gottlieb board that changed how many
+  audio samples Q*bert emitted per frame: `VotraxSc01`'s output resampler
+  was `#[save_skip]` despite its phase deciding when the next sample
+  falls, and `votrax_clock_applied` was documented as reset-on-load in two
+  places but never actually reset.
 
 ## Non-goals
 

@@ -104,6 +104,15 @@ The repo ships a `flake.nix` that pins the toolchain (cargo, rustc, clang, SDL2,
 - Include edge cases: zero, overflow, sign boundary (0x7F/0x80), carry propagation
 - Use each CPU's flag enum in assertions (e.g. `CcFlag::X as u8` for M68xx), never raw hex values
 
+#### Registry-driven suites
+
+Some tests iterate `registry::all()`, so a newly registered machine is covered without editing them — don't add a per-machine row where one of these already applies. Each carries a `the_registry_is_not_empty` guard so the file can't pass vacuously.
+
+- `machines/tests/input_contract_test.rs` — the static control table on `MachineEntry`
+- `machines/tests/machine_contract_test.rs` — identity, display geometry, frame rate, DIP tables, and that `run_frame`/`reset` don't panic, on a live machine built with `MachineEntry::create_bare` (no ROMs; see `RomSet::blank`)
+- `machines/tests/save_state_tests.rs` — save/load round trip, ROM-less
+- `harness/tests/boot_check_test.rs`, `harness/tests/save_state_rom_test.rs` — the same ground on machines booted from real ROMs. ROM-gated: they skip without `PHOSPHOR_ROMS` (or `~/ws/mame-runtime/roms`), and skip per machine for a ROM set the collection can't supply. Run them after any change that could affect boot; CI cannot.
+
 ### CPU Validation
 
 ```bash

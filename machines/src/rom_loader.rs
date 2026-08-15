@@ -180,6 +180,14 @@ impl RomSet {
     /// all zero, so the machine cannot run its game, but it is a complete,
     /// tickable machine, which is what registry-driven tests need.
     ///
+    /// The fill is zeroes rather than a per-CPU idle loop, deliberately. A
+    /// CPU turned loose on zeroes scribbles RAM and device registers, and that
+    /// churn is what lets the save-state exerciser tell two histories apart; a
+    /// CPU parked in a two-byte branch-to-self leaves RAM untouched and the
+    /// test with only device counters to work from. Emitting the right idle
+    /// loop would also mean teaching [`RomRegion`] which CPU executes it,
+    /// which it has no reason to know otherwise.
+    ///
     /// Only [`require_sized`](Self::require_sized) is answerable: the other
     /// accessors are content or name lookups, and a blank set has neither.
     /// [`RomRegion::load`] and its variants go through `require_sized` alone,
