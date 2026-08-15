@@ -66,17 +66,26 @@ ROMs are matched by CRC32 checksum, so any MAME ROM naming convention works.
 | 2                | P2 Start                                      |
 | 5                | Insert Coin                                   |
 | Mouse            | Trackball (Crystal Castles, Missile Command)  |
+| P                | Pause / Resume                                |
 | F1               | Toggle Debug Panel                            |
-| 7 / 8 / 9 / 0    | Step Instruction / Cycle / Frame / Continue (Debug Panel) |
+| 7 / 8 / 9        | Step Cycle / Instruction / Frame (Debug Panel) |
+| 0                | Pause / Run toggle (Debug Panel)              |
 | F5               | Reset Machine                                 |
 | F6 / F7          | Quick Save / Quick Load                       |
+| F8               | Toggle Profiler                               |
 | F9               | Toggle Throttle                               |
 | F10              | Toggle Debug Overlay                          |
 | F11              | Toggle Mouse Grab                             |
 | F12              | Screenshot                                    |
 | Tab              | Toggle Input Bindings Panel                   |
 | \`               | Toggle DIP Switches Panel                     |
+| Ctrl + \`        | Toggle Script Console                         |
+| ?                | Toggle Key Legend                             |
 | Escape           | Quit                                          |
+
+Every key above is rebindable in the settings panel (Tab), and `?` lists the
+live bindings — emulator, debugger, and game — so the table is a starting
+point rather than the authority.
 
 Game controllers are auto-mapped (D-pad, left stick, face buttons, right stick for twin-stick games). Place a [gamecontrollerdb.txt](https://github.com/mdqinc/SDL_GameControllerDB) in the working directory or `~/.config/phosphor/` for broader controller support.
 

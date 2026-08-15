@@ -566,7 +566,10 @@ pub fn run(
                     );
                 }
 
-                // 7: Step instruction (debug + paused)
+                // Step one instruction (debug + paused). Default key: 8 —
+                // the step keys are ordered by granularity (7 cycle, 8
+                // instruction, 9 frame), and all of them are rebindable, so
+                // `host_keys::DEFAULTS` is the authority, not this comment.
                 Event::KeyDown {
                     scancode: Some(sc),
                     repeat: false,
@@ -578,7 +581,7 @@ pub fn run(
                     debug_state.run_mode = RunMode::StepInstruction;
                 }
 
-                // 8: Step cycle (debug + paused)
+                // Step one cycle (debug + paused). Default key: 7.
                 Event::KeyDown {
                     scancode: Some(sc),
                     repeat: false,
