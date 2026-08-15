@@ -106,9 +106,19 @@ impl From<std::io::Error> for RomLoadError {
 // RomSet
 // ---------------------------------------------------------------------------
 
+/// Largest single [`RomEntry`] a blank set can satisfy. Comfortably above any
+/// arcade mask ROM of this era; a request past it is a bug, not a big chip.
+const BLANK_ROM_LIMIT: usize = 4 << 20;
+
+/// Shared zero backing for [`RomSet::blank`], allocated on first use so
+/// nothing pays for it unless a blank set is actually built.
+static BLANK_ROM: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+
 /// A collection of ROM files loaded from disk or provided programmatically.
 pub struct RomSet {
     files: HashMap<String, Vec<u8>>,
+    /// Whether this is the synthetic set from [`RomSet::blank`].
+    blank: bool,
 }
 
 impl RomSet {
@@ -131,7 +141,10 @@ impl RomSet {
                 files.insert(name, data);
             }
         }
-        Ok(Self { files })
+        Ok(Self {
+            files,
+            blank: false,
+        })
     }
 
     /// Create a RomSet from programmatic byte slices (for testing).
@@ -142,17 +155,53 @@ impl RomSet {
         for (name, data) in entries {
             files.insert(name.to_string(), data.to_vec());
         }
-        Self { files }
+        Self {
+            files,
+            blank: false,
+        }
     }
 
     /// Create a RomSet from owned entries (e.g. extracted from a ZIP file).
     pub fn from_entries(entries: Vec<(String, Vec<u8>)>) -> Self {
         Self {
             files: entries.into_iter().collect(),
+            blank: false,
         }
     }
 
+    /// A synthetic set that satisfies every *sized* request with zeroes.
+    ///
+    /// This is how [`registry::MachineEntry::create_bare`] builds a machine
+    /// with no ROMs on disk. Running a machine's real `load_rom_set` against
+    /// it matters: the machine ends up with correctly *shaped* ROM-derived
+    /// state — address-map regions backed, GFX caches decoded at their true
+    /// element counts, PROM tables the right length — instead of the
+    /// zero-length placeholders a constructor leaves behind. The contents are
+    /// all zero, so the machine cannot run its game, but it is a complete,
+    /// tickable machine, which is what registry-driven tests need.
+    ///
+    /// Only [`require_sized`](Self::require_sized) is answerable: the other
+    /// accessors are content or name lookups, and a blank set has neither.
+    /// [`RomRegion::load`] and its variants go through `require_sized` alone,
+    /// and skip checksum verification against a blank set (all-zero data
+    /// matches no real CRC).
+    ///
+    /// [`registry::MachineEntry::create_bare`]: crate::registry::MachineEntry::create_bare
+    pub fn blank() -> Self {
+        Self {
+            files: HashMap::new(),
+            blank: true,
+        }
+    }
+
+    /// Whether this is the synthetic set from [`blank`](Self::blank).
+    pub fn is_blank(&self) -> bool {
+        self.blank
+    }
+
     /// Get a ROM file's data by name.
+    ///
+    /// Always `None` for a blank set — there is no size to synthesize from.
     pub fn get(&self, name: &str) -> Option<&[u8]> {
         self.files.get(name).map(|v| v.as_slice())
     }
@@ -164,7 +213,20 @@ impl RomSet {
     }
 
     /// Get a ROM file's data, validating its size.
+    ///
+    /// A blank set answers with `expected_size` zero bytes (see
+    /// [`blank`](Self::blank)).
     pub fn require_sized(&self, name: &str, expected_size: usize) -> Result<&[u8], RomLoadError> {
+        if self.blank {
+            let zeros = BLANK_ROM.get_or_init(|| vec![0u8; BLANK_ROM_LIMIT]);
+            return zeros
+                .get(..expected_size)
+                .ok_or(RomLoadError::SizeMismatch {
+                    file: name.to_string(),
+                    expected: expected_size,
+                    actual: BLANK_ROM_LIMIT,
+                });
+        }
         let data = self.require(name)?;
         if data.len() != expected_size {
             return Err(RomLoadError::SizeMismatch {
@@ -278,7 +340,9 @@ impl RomRegion {
                 } else {
                     // Fall back to name-based lookup
                     let data = rom_set.require_sized(entry.name, entry.size)?;
-                    if verify_checksums {
+                    // All-zero data matches no real CRC, so a blank set would
+                    // fail every checksummed entry.
+                    if verify_checksums && !rom_set.is_blank() {
                         let actual_crc = crc32(data);
                         if !entry.crc32.contains(&actual_crc) {
                             return Err(RomLoadError::ChecksumMismatch {

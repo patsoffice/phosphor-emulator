@@ -2220,11 +2220,28 @@ fn create_esb_machine(rom_set: &RomSet) -> Result<Box<dyn FrontendMachine>, RomL
     Ok(Box::new(sys))
 }
 
-inventory::submit! {
-MachineEntry::new("starwars", &["starwars", "starwars1", "starwarso"], create_machine, STARWARS_CONTROLS) }
+// The ROM-less counterparts keep the variant distinction — ESB adds the
+// slapstic-banked ROM window, so the two are different hardware even with no
+// ROMs in them.
+fn create_bare() -> Box<dyn FrontendMachine> {
+    let mut sys = StarWarsSystem::new();
+    let _ = sys.board.load_rom_set(&RomSet::blank());
+    sys.reset();
+    Box::new(sys)
+}
+
+fn create_esb_bare() -> Box<dyn FrontendMachine> {
+    let mut sys = StarWarsSystem::new_esb();
+    let _ = sys.board.load_esb_rom_set(&RomSet::blank());
+    sys.reset();
+    Box::new(sys)
+}
 
 inventory::submit! {
-MachineEntry::new("esb", &["esb"], create_esb_machine, STARWARS_CONTROLS) }
+MachineEntry::new("starwars", &["starwars", "starwars1", "starwarso"], create_machine, create_bare, STARWARS_CONTROLS) }
+
+inventory::submit! {
+MachineEntry::new("esb", &["esb"], create_esb_machine, create_esb_bare, STARWARS_CONTROLS) }
 
 // ---------------------------------------------------------------------------
 // Tests

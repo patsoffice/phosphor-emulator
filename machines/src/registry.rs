@@ -17,12 +17,25 @@ pub struct MachineEntry {
     pub rom_names: &'static [&'static str],
     /// Factory: construct a FrontendMachine from a loaded ROM set.
     pub create: fn(&RomSet) -> Result<Box<dyn FrontendMachine>, RomLoadError>,
+    /// Factory: construct the machine with **no ROMs loaded**.
+    ///
+    /// The same constructor [`create`](Self::create) uses, with the
+    /// `load_rom_set` step omitted: real hardware structs, real devices,
+    /// zero-filled ROM. Such a machine cannot run its game — a zero-filled
+    /// ROM decodes to whatever the CPU makes of it — but it is a complete,
+    /// tickable machine, which is the point: registry-driven tests can reach
+    /// *behavior* (rendering, DIP accessors, save state, `run_frame`) rather
+    /// than only the static metadata on this struct.
+    ///
+    /// Exists because `create` needs a [`RomSet`] and CI has none. Tests that
+    /// need a machine which has really booted go through `create` and gate
+    /// themselves on a ROM directory being present.
+    pub create_bare: fn() -> Box<dyn FrontendMachine>,
     /// The machine's logical control table — the same slice its
     /// `input_controls()` returns.
     ///
-    /// Held here so the registry can be validated without ROMs: `create`
-    /// needs a [`RomSet`], which CI does not have, so this is the only way to
-    /// check every machine's controls in a test.
+    /// Held here so the control table can be validated without constructing
+    /// anything at all.
     pub controls: &'static [InputControl],
 }
 
@@ -31,12 +44,14 @@ impl MachineEntry {
         name: &'static str,
         rom_names: &'static [&'static str],
         create: fn(&RomSet) -> Result<Box<dyn FrontendMachine>, RomLoadError>,
+        create_bare: fn() -> Box<dyn FrontendMachine>,
         controls: &'static [InputControl],
     ) -> Self {
         Self {
             name,
             rom_names,
             create,
+            create_bare,
             controls,
         }
     }

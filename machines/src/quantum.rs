@@ -945,10 +945,16 @@ fn create_quantum(
     Ok(Box::new(sys))
 }
 
+fn create_quantum_bare() -> Box<dyn phosphor_core::core::machine::FrontendMachine> {
+    let mut sys = QuantumSystem::new();
+    let _ = sys.load_rom_set(&RomSet::blank());
+    Box::new(sys)
+}
+
 // One registration covers all three ROM sets: the loader tries each ZIP in turn
 // and CRC-matches whichever chips are present (see `QUANTUM_PROGRAM_ROM`).
 inventory::submit! {
-MachineEntry::new("quantum", &["quantum", "quantum1", "quantump"], create_quantum, QUANTUM_CONTROLS) }
+MachineEntry::new("quantum", &["quantum", "quantum1", "quantump"], create_quantum, create_quantum_bare, QUANTUM_CONTROLS) }
 
 #[cfg(test)]
 mod tests {

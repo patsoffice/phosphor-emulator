@@ -588,7 +588,12 @@ macro_rules! impl_dip_switches {
 pub(crate) use impl_dip_switches;
 
 /// Registers a machine with the front-end registry: builds the ROM-set factory
-/// and submits the [`registry::MachineEntry`] in one line.
+/// and its ROM-less counterpart, and submits the [`registry::MachineEntry`] in
+/// one line.
+///
+/// Both factories run the same constructor; only the ROM-set one goes on to
+/// `load_rom_set`. See [`registry::MachineEntry::create_bare`] for why the
+/// ROM-less one exists.
 ///
 /// The four arguments are the wrapper type, the CLI name, the ROM set names to
 /// try for ZIP lookup, and the machine's static control table. The control
@@ -635,6 +640,13 @@ macro_rules! register_machine {
                     Ok(Box::new(sys))
                 }
                 create
+            }, {
+                fn create_bare() -> Box<dyn phosphor_core::core::machine::FrontendMachine> {
+                    let mut sys = $ctor;
+                    let _ = sys.load_rom_set(&$crate::rom_loader::RomSet::blank());
+                    Box::new(sys)
+                }
+                create_bare
             }, $controls)
         }
     };
@@ -654,6 +666,13 @@ macro_rules! register_machine {
                     Ok(Box::new(sys))
                 }
                 create
+            }, {
+                fn create_bare() -> Box<dyn phosphor_core::core::machine::FrontendMachine> {
+                    let mut sys = <$type>::new();
+                    let _ = sys.load_rom_set(&$crate::rom_loader::RomSet::blank());
+                    Box::new(sys)
+                }
+                create_bare
             }, $controls)
         }
     };
@@ -679,6 +698,16 @@ macro_rules! register_machine {
                     Err(last_err.unwrap())
                 }
                 create
+            }, {
+                fn create_bare() -> Box<dyn phosphor_core::core::machine::FrontendMachine> {
+                    let mut sys = <$type>::new();
+                    // Any config will do: a blank set has no revision to match.
+                    if let Some(config) = $configs.first() {
+                        let _ = sys.load_roms(&$crate::rom_loader::RomSet::blank(), config);
+                    }
+                    Box::new(sys)
+                }
+                create_bare
             }, $controls)
         }
     };
@@ -778,14 +807,18 @@ pub use sinistar::SinistarSystem;
 pub use tempest::TempestSystem;
 pub use xevious::XeviousSystem;
 
-/// Shared DIP-table validator for machine unit tests.
+/// Shared DIP-table validator for machine tests.
 ///
 /// Asserts that, for each bank: options occupy disjoint bits, every choice fits
 /// its option's mask, and the live `defaults[bank]` byte decomposes into a
 /// defined choice for every option (so a table can't silently drift from the
 /// machine's historical power-on byte).
-#[cfg(test)]
-pub(crate) fn assert_dip_banks_valid(
+///
+/// Public (rather than `#[cfg(test)] pub(crate)`) because the registry-driven
+/// contract test in `machines/tests/` runs it over every machine's live
+/// power-on values — the in-crate `dip_test_suite!` callers only reach the
+/// machines that remembered to invoke the macro.
+pub fn assert_dip_banks_valid(
     banks: &[phosphor_core::core::machine::DipSwitchBank],
     defaults: &[u8],
 ) {
