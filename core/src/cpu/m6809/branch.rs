@@ -632,7 +632,10 @@ impl M6809 {
 
     /// JMP indexed (0x6E): Jump to indexed EA.
     /// No flags affected.
-    /// 3+ total cycles: 1 fetch + 1 postbyte + mode overhead + 1 base don't-care.
+    /// 3+ total cycles: 1 fetch + 1 postbyte + the mode's address formation.
+    /// JMP has no execute cycle of its own — the jump is taken on the last
+    /// don't-care of the address formation, so it lands the moment the resolver
+    /// reports the address ready.
     pub(crate) fn op_jmp_indexed<B: Bus<Address = u16, Data = u8> + ?Sized>(
         &mut self,
         opcode: u8,
@@ -640,18 +643,9 @@ impl M6809 {
         bus: &mut B,
         master: BusMaster,
     ) {
-        match cycle {
-            40 => {
-                // Last don't-care cycle of the address formation
-                self.indexed_dummy(bus, master);
-                self.pc = self.temp_addr;
-                self.state = ExecState::Fetch;
-            }
-            _ => {
-                if self.indexed_resolve(opcode, cycle, bus, master) {
-                    self.state = ExecState::Execute(opcode, 40);
-                }
-            }
+        if self.indexed_resolve(opcode, cycle, bus, master) {
+            self.pc = self.temp_addr;
+            self.state = ExecState::Fetch;
         }
     }
 
@@ -688,14 +682,9 @@ impl M6809 {
                 self.pc = self.temp_addr;
                 self.state = ExecState::Fetch;
             }
-            40 => {
-                // Last don't-care cycle of the address formation
-                self.indexed_dummy(bus, master);
-                self.state = ExecState::Execute(opcode, 50);
-            }
             _ => {
                 if self.indexed_resolve(opcode, cycle, bus, master) {
-                    self.state = ExecState::Execute(opcode, 40);
+                    self.state = ExecState::Execute(opcode, 50);
                 }
             }
         }

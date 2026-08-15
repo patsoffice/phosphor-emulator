@@ -1016,11 +1016,6 @@ impl M6809 {
         master: BusMaster,
     ) {
         match cycle {
-            39 => {
-                // Last don't-care cycle of the address formation
-                self.indexed_dummy(bus, master);
-                self.state = ExecState::Execute(opcode, 40);
-            }
             40 => {
                 // Read high byte of the 16-bit operand
                 let high = bus.read(master, self.temp_addr);
@@ -1042,7 +1037,7 @@ impl M6809 {
             }
             _ => {
                 if self.indexed_resolve(opcode, cycle, bus, master) {
-                    self.state = ExecState::Execute(opcode, 39);
+                    self.state = ExecState::Execute(opcode, 40);
                 }
             }
         }
@@ -1057,11 +1052,6 @@ impl M6809 {
         master: BusMaster,
     ) {
         match cycle {
-            39 => {
-                // Last don't-care cycle of the address formation
-                self.indexed_dummy(bus, master);
-                self.state = ExecState::Execute(opcode, 40);
-            }
             40 => {
                 // Read high byte of the 16-bit operand
                 let high = bus.read(master, self.temp_addr);
@@ -1083,7 +1073,7 @@ impl M6809 {
             }
             _ => {
                 if self.indexed_resolve(opcode, cycle, bus, master) {
-                    self.state = ExecState::Execute(opcode, 39);
+                    self.state = ExecState::Execute(opcode, 40);
                 }
             }
         }
@@ -1098,11 +1088,6 @@ impl M6809 {
         master: BusMaster,
     ) {
         match cycle {
-            39 => {
-                // Last don't-care cycle of the address formation
-                self.indexed_dummy(bus, master);
-                self.state = ExecState::Execute(opcode, 40);
-            }
             40 => {
                 // Read high byte of the 16-bit operand
                 let high = bus.read(master, self.temp_addr);
@@ -1124,7 +1109,7 @@ impl M6809 {
             }
             _ => {
                 if self.indexed_resolve(opcode, cycle, bus, master) {
-                    self.state = ExecState::Execute(opcode, 39);
+                    self.state = ExecState::Execute(opcode, 40);
                 }
             }
         }
@@ -1141,11 +1126,6 @@ impl M6809 {
         master: BusMaster,
     ) {
         match cycle {
-            39 => {
-                // Last don't-care cycle of the address formation
-                self.indexed_dummy(bus, master);
-                self.state = ExecState::ExecutePage2(opcode, 40);
-            }
             40 => {
                 // Read high byte of the 16-bit operand
                 let high = bus.read(master, self.temp_addr);
@@ -1167,7 +1147,7 @@ impl M6809 {
             }
             _ => {
                 if self.indexed_resolve_page2(opcode, cycle, bus, master) {
-                    self.state = ExecState::ExecutePage2(opcode, 39);
+                    self.state = ExecState::ExecutePage2(opcode, 40);
                 }
             }
         }
@@ -1182,11 +1162,6 @@ impl M6809 {
         master: BusMaster,
     ) {
         match cycle {
-            39 => {
-                // Last don't-care cycle of the address formation
-                self.indexed_dummy(bus, master);
-                self.state = ExecState::ExecutePage2(opcode, 40);
-            }
             40 => {
                 // Read high byte of the 16-bit operand
                 let high = bus.read(master, self.temp_addr);
@@ -1208,7 +1183,7 @@ impl M6809 {
             }
             _ => {
                 if self.indexed_resolve_page2(opcode, cycle, bus, master) {
-                    self.state = ExecState::ExecutePage2(opcode, 39);
+                    self.state = ExecState::ExecutePage2(opcode, 40);
                 }
             }
         }
@@ -1359,11 +1334,6 @@ impl M6809 {
         master: BusMaster,
     ) {
         match cycle {
-            39 => {
-                // Last don't-care cycle of the address formation
-                self.indexed_dummy(bus, master);
-                self.state = ExecState::ExecutePage3(opcode, 40);
-            }
             40 => {
                 // Read high byte of the 16-bit operand
                 let high = bus.read(master, self.temp_addr);
@@ -1385,7 +1355,7 @@ impl M6809 {
             }
             _ => {
                 if self.indexed_resolve_page3(opcode, cycle, bus, master) {
-                    self.state = ExecState::ExecutePage3(opcode, 39);
+                    self.state = ExecState::ExecutePage3(opcode, 40);
                 }
             }
         }
@@ -1534,11 +1504,6 @@ impl M6809 {
         master: BusMaster,
     ) {
         match cycle {
-            39 => {
-                // Last don't-care cycle of the address formation
-                self.indexed_dummy(bus, master);
-                self.state = ExecState::ExecutePage3(opcode, 40);
-            }
             40 => {
                 // Read high byte of the 16-bit operand
                 let high = bus.read(master, self.temp_addr);
@@ -1560,7 +1525,7 @@ impl M6809 {
             }
             _ => {
                 if self.indexed_resolve_page3(opcode, cycle, bus, master) {
-                    self.state = ExecState::ExecutePage3(opcode, 39);
+                    self.state = ExecState::ExecutePage3(opcode, 40);
                 }
             }
         }

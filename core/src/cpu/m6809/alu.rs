@@ -209,17 +209,20 @@ impl M6809 {
         }
     }
 
-    /// How many don't-care cycles an indexed mode spends before the caller's
-    /// own base don't-care. Together they account for the "+" in the datasheet
-    /// cycle counts (e.g. LDA indexed = 4+). See `indexed_mode_pc_dummies` for
-    /// which of them re-drive PC rather than holding $FFFF.
-    fn indexed_mode_internal(postbyte: u8) -> u8 {
+    /// How many don't-care cycles an indexed mode spends forming its base
+    /// address. Together with the offset bytes it reads from the instruction
+    /// stream these account for the "+" in the datasheet cycle counts (e.g.
+    /// LDA indexed = 4+). See `indexed_mode_pc_dummies` for which of them
+    /// re-drive PC rather than holding $FFFF.
+    ///
+    /// Every mode spends at least one — `,R` has nothing to compute and still
+    /// pays it. An indirect postbyte spends exactly these, then reads its
+    /// pointer, then one final /VMA; the count below is the same either way.
+    fn indexed_mode_dummies(postbyte: u8) -> u8 {
         if postbyte & 0x80 == 0 {
-            return 1; // 5-bit constant offset
+            return 1 + 1; // 5-bit constant offset
         }
-        let indirect = postbyte & 0x10 != 0;
-        let mode = postbyte & 0x0F;
-        let base: u8 = match mode {
+        let base: u8 = match postbyte & 0x0F {
             0x00 => 2, // ,R+
             0x01 => 3, // ,R++
             0x02 => 2, // ,-R
@@ -235,7 +238,14 @@ impl M6809 {
             0x0F => 0, // [n16] extended indirect
             _ => 0,
         };
-        if indirect { base + 1 } else { base }
+        base + 1
+    }
+
+    /// Whether a postbyte selects an indirect mode. Only the full postbyte
+    /// forms have one: with bit 7 clear the whole low half is a 5-bit constant
+    /// offset, so bit 4 there is offset data and not the indirect flag.
+    fn indexed_is_indirect(postbyte: u8) -> bool {
+        postbyte & 0x90 == 0x90
     }
 
     /// How many of an indexed mode's don't-care cycles re-drive the program
@@ -262,11 +272,22 @@ impl M6809 {
     /// Reads the postbyte and any additional offset bytes from memory,
     /// computing the effective address in `self.temp_addr`.
     ///
-    /// Returns `true` when the address is ready; `false` if more cycles are needed.
-    /// Cycle 20 handles mode-specific internal cycles before returning.
+    /// Returns `true` when the address is ready; `false` if more cycles are
+    /// needed. The cycle it returns `true` on is always a don't-care, so the
+    /// caller resumes on a cycle of its own that makes a real access.
+    ///
+    /// The order of those don't-cares is visible to anything that decodes the
+    /// address bus. A direct postbyte spends its mode's don't-cares (state 20)
+    /// and is done. An indirect one spends the *same* don't-cares first, then
+    /// reads the two pointer bytes (states 10 and 11), then holds $FFFF for one
+    /// final cycle (state 21):
+    ///
+    /// ```text
+    ///     [base don't-cares]  ptr_hi  ptr_lo  $FFFF
+    /// ```
     ///
     /// Uses `self.scratch` for the postbyte and indirect pointer high byte.
-    /// Uses `self.indexed_internal` as a countdown for internal cycles.
+    /// Uses `self.indexed_internal` as a countdown for the base don't-cares.
     pub(crate) fn indexed_resolve<B: Bus<Address = u16, Data = u8> + ?Sized>(
         &mut self,
         opcode: u8,
@@ -318,134 +339,84 @@ impl M6809 {
                 self.indexed_pc_dummies = Self::indexed_mode_pc_dummies(postbyte);
                 self.indexed_pc_offset = 0;
 
+                // The don't-care count is the same whether or not the mode is
+                // indirect: state 20 spends them all before state 10 reads the
+                // pointer, and the indirect form's extra cycle is the trailing
+                // /VMA of state 21.
+                self.indexed_internal = Self::indexed_mode_dummies(postbyte);
+
                 if postbyte & 0x80 == 0 {
-                    // 5-bit constant offset: 1 internal cycle
+                    // 5-bit constant offset
                     let reg = self.indexed_reg_value((postbyte >> 5) & 0x03);
                     let offset = Self::sign_extend_5(postbyte & 0x1F);
                     self.temp_addr = reg.wrapping_add(offset);
-                    self.indexed_internal = 1;
                     self.state = mk_state(opcode, 20);
                     return false;
                 }
 
                 let reg_sel = (postbyte >> 5) & 0x03;
-                let indirect = postbyte & 0x10 != 0;
+                let indirect = Self::indexed_is_indirect(postbyte);
                 let mode = postbyte & 0x0F;
                 let reg = self.indexed_reg_value(reg_sel);
-                let total_internal = Self::indexed_mode_internal(postbyte);
 
                 match mode {
                     0x00 if !indirect => {
                         // ,R+ (post-increment by 1, non-indirect only)
                         self.temp_addr = reg;
                         self.set_indexed_reg(reg_sel, reg.wrapping_add(1));
-                        self.indexed_internal = total_internal;
                         self.state = mk_state(opcode, 20);
-                        false
                     }
                     0x01 => {
                         // ,R++ (post-increment by 2)
                         self.temp_addr = reg;
                         self.set_indexed_reg(reg_sel, reg.wrapping_add(2));
-                        self.indexed_internal = total_internal;
-                        if indirect {
-                            self.state = mk_state(opcode, 10);
-                        } else {
-                            self.state = mk_state(opcode, 20);
-                        }
-                        false
+                        self.state = mk_state(opcode, 20);
                     }
                     0x02 if !indirect => {
                         // ,-R (pre-decrement by 1, non-indirect only)
                         let new_reg = reg.wrapping_sub(1);
                         self.set_indexed_reg(reg_sel, new_reg);
                         self.temp_addr = new_reg;
-                        self.indexed_internal = total_internal;
                         self.state = mk_state(opcode, 20);
-                        false
                     }
                     0x03 => {
                         // ,--R (pre-decrement by 2)
                         let new_reg = reg.wrapping_sub(2);
                         self.set_indexed_reg(reg_sel, new_reg);
                         self.temp_addr = new_reg;
-                        self.indexed_internal = total_internal;
-                        if indirect {
-                            self.state = mk_state(opcode, 10);
-                        } else {
-                            self.state = mk_state(opcode, 20);
-                        }
-                        false
+                        self.state = mk_state(opcode, 20);
                     }
                     0x04 => {
                         // ,R (no offset)
                         self.temp_addr = reg;
-                        if indirect {
-                            self.indexed_internal = total_internal;
-                            self.state = mk_state(opcode, 10);
-                            false
-                        } else {
-                            true // 0 internal cycles
-                        }
+                        self.state = mk_state(opcode, 20);
                     }
                     0x05 => {
                         // B,R (accumulator B offset)
                         self.temp_addr = reg.wrapping_add(self.b as i8 as i16 as u16);
-                        self.indexed_internal = total_internal;
-                        if indirect {
-                            self.state = mk_state(opcode, 10);
-                        } else {
-                            self.state = mk_state(opcode, 20);
-                        }
-                        false
+                        self.state = mk_state(opcode, 20);
                     }
                     0x06 => {
                         // A,R (accumulator A offset)
                         self.temp_addr = reg.wrapping_add(self.a as i8 as i16 as u16);
-                        self.indexed_internal = total_internal;
-                        if indirect {
-                            self.state = mk_state(opcode, 10);
-                        } else {
-                            self.state = mk_state(opcode, 20);
-                        }
-                        false
-                    }
-                    0x08 | 0x0C => {
-                        // n8,R or n8,PCR: need 1 more byte
-                        self.state = mk_state(opcode, 1);
-                        false
-                    }
-                    0x09 | 0x0D => {
-                        // n16,R or n16,PCR: need 2 more bytes
-                        self.state = mk_state(opcode, 1);
-                        false
+                        self.state = mk_state(opcode, 20);
                     }
                     0x0B => {
                         // D,R (accumulator D offset)
                         self.temp_addr = reg.wrapping_add(self.get_d());
-                        self.indexed_internal = total_internal;
-                        if indirect {
-                            self.state = mk_state(opcode, 10);
-                        } else {
-                            self.state = mk_state(opcode, 20);
-                        }
-                        false
+                        self.state = mk_state(opcode, 20);
                     }
-                    0x0F if indirect => {
-                        // [n16] extended indirect
-                        self.state = mk_state(opcode, 1);
-                        false
-                    }
-                    _ => {
-                        self.state = ExecState::Fetch;
-                        false
-                    }
+                    // n8,R / n8,PCR need 1 more byte; n16,R / n16,PCR / [n16]
+                    // need 2, and cycle 1 splits them by mode.
+                    0x08 | 0x09 | 0x0C | 0x0D => self.state = mk_state(opcode, 1),
+                    0x0F if indirect => self.state = mk_state(opcode, 1),
+                    _ => self.state = ExecState::Fetch,
                 }
+                false
             }
             1 => {
                 let postbyte = self.scratch;
                 let mode = postbyte & 0x0F;
-                let indirect = postbyte & 0x10 != 0;
                 let reg_sel = (postbyte >> 5) & 0x03;
 
                 match mode {
@@ -455,26 +426,14 @@ impl M6809 {
                         self.pc = self.pc.wrapping_add(1);
                         let reg = self.indexed_reg_value(reg_sel);
                         self.temp_addr = reg.wrapping_add(offset as i16 as u16);
-                        if indirect {
-                            self.indexed_internal = 1; // 0 base + 1 indirect
-                            self.state = mk_state(opcode, 10);
-                            false
-                        } else {
-                            true // 0 internal cycles for n8,R non-indirect
-                        }
+                        self.state = mk_state(opcode, 20);
                     }
                     0x0C => {
                         // n8,PCR: read 8-bit signed offset, PC-relative
                         let offset = bus.read(master, self.pc) as i8;
                         self.pc = self.pc.wrapping_add(1);
                         self.temp_addr = self.pc.wrapping_add(offset as i16 as u16);
-                        if indirect {
-                            self.indexed_internal = 1;
-                            self.state = mk_state(opcode, 10);
-                            false
-                        } else {
-                            true
-                        }
+                        self.state = mk_state(opcode, 20);
                     }
                     0x09 | 0x0D | 0x0F => {
                         // n16,R / n16,PCR / [n16]: read high byte of 16-bit offset
@@ -482,20 +441,15 @@ impl M6809 {
                         self.pc = self.pc.wrapping_add(1);
                         self.temp_addr = high << 8;
                         self.state = mk_state(opcode, 2);
-                        false
                     }
-                    _ => {
-                        self.state = ExecState::Fetch;
-                        false
-                    }
+                    _ => self.state = ExecState::Fetch,
                 }
+                false
             }
             2 => {
                 let postbyte = self.scratch;
                 let mode = postbyte & 0x0F;
-                let indirect = postbyte & 0x10 != 0;
                 let reg_sel = (postbyte >> 5) & 0x03;
-                let total_internal = Self::indexed_mode_internal(postbyte);
 
                 let low = bus.read(master, self.pc) as u16;
                 self.pc = self.pc.wrapping_add(1);
@@ -509,29 +463,16 @@ impl M6809 {
                     0x0D => {
                         self.temp_addr = self.pc.wrapping_add(offset16);
                     }
-                    0x0F => {
-                        // [n16] extended indirect
-                        self.temp_addr = offset16;
-                        self.indexed_internal = total_internal; // 1
-                        self.state = mk_state(opcode, 10);
-                        return false;
-                    }
+                    // [n16] extended indirect: the offset *is* the pointer
+                    0x0F => self.temp_addr = offset16,
                     _ => {}
                 }
 
-                if indirect {
-                    self.indexed_internal = total_internal;
-                    self.state = mk_state(opcode, 10);
-                    false
-                } else if total_internal > 0 {
-                    self.indexed_internal = total_internal;
-                    self.state = mk_state(opcode, 20);
-                    false
-                } else {
-                    true
-                }
+                self.state = mk_state(opcode, 20);
+                false
             }
-            // Indirect resolution: read 16-bit pointer from temp_addr
+            // Indirect resolution: read the 16-bit pointer at temp_addr. Only
+            // reached once state 20 has spent every base don't-care.
             10 => {
                 let high = bus.read(master, self.temp_addr);
                 self.temp_addr = self.temp_addr.wrapping_add(1);
@@ -543,31 +484,38 @@ impl M6809 {
                 let low = bus.read(master, self.temp_addr) as u16;
                 let high = (self.scratch as u16) << 8;
                 self.temp_addr = high | low;
+                self.state = mk_state(opcode, 21);
+                false
+            }
+            // Don't-care countdown for the base address formation, ahead of any
+            // pointer read.
+            20 => {
+                self.indexed_dummy(bus, master);
+                self.indexed_internal -= 1;
                 if self.indexed_internal > 0 {
                     self.state = mk_state(opcode, 20);
+                    false
+                } else if Self::indexed_is_indirect(self.scratch) {
+                    self.state = mk_state(opcode, 10);
                     false
                 } else {
                     true
                 }
             }
-            // Don't-care cycle countdown for indexed mode overhead
-            20 => {
-                self.indexed_dummy(bus, master);
-                self.indexed_internal -= 1;
-                if self.indexed_internal == 0 {
-                    true
-                } else {
-                    self.state = mk_state(opcode, 20);
-                    false
-                }
+            // The one don't-care that follows an indirect pointer read. The
+            // mode's PC don't-cares were all spent back in state 20, so this is
+            // always a /VMA cycle.
+            21 => {
+                self.dummy_vma(bus, master);
+                true
             }
             _ => false,
         }
     }
 
     /// Generic helper for Indexed Addressing Mode ALU instructions.
-    /// Variable execute cycles: address resolution via postbyte, then operand read.
-    /// Cycle 40 = base don't-care cycle, Cycle 50 = read operand.
+    /// Variable execute cycles: address resolution via postbyte, then operand
+    /// read on cycle 50.
     pub(crate) fn alu_indexed<B: Bus<Address = u16, Data = u8> + ?Sized, F>(
         &mut self,
         opcode: u8,
@@ -579,15 +527,6 @@ impl M6809 {
         F: FnOnce(&mut Self, u8),
     {
         match cycle {
-            40 => {
-                // The last don't-care cycle of the address formation, charged
-                // here rather than in `indexed_resolve` so a mode with no
-                // overhead at all still spends one. Empire Strikes Back's
-                // slapstic watches for the $FFFF it usually drives, to validate
-                // its alternate-banking sequence.
-                self.indexed_dummy(bus, master);
-                self.state = ExecState::Execute(opcode, 50);
-            }
             50 => {
                 let operand = bus.read(master, self.temp_addr);
                 operation(self, operand);
@@ -595,7 +534,7 @@ impl M6809 {
             }
             _ => {
                 if self.indexed_resolve(opcode, cycle, bus, master) {
-                    self.state = ExecState::Execute(opcode, 40);
+                    self.state = ExecState::Execute(opcode, 50);
                 }
             }
         }
@@ -603,9 +542,8 @@ impl M6809 {
 
     /// Generic helper for Indexed Addressing Mode read-modify-write instructions.
     /// Used by memory-modify ops in the 0x60-0x6F range (NEG, COM, LSR, etc.).
-    /// Cycle 39: base don't-care. Cycle 40: read value from EA. Cycle 41: the
-    /// modify don't-care. Cycle 42: write back (a second don't-care for TST —
-    /// see the note on cycle 42).
+    /// Cycle 40: read value from EA. Cycle 41: the modify don't-care. Cycle 42:
+    /// write back (a second don't-care for TST — see the note on cycle 42).
     pub(crate) fn rmw_indexed<B: Bus<Address = u16, Data = u8> + ?Sized, F>(
         &mut self,
         opcode: u8,
@@ -617,11 +555,6 @@ impl M6809 {
         F: FnOnce(&mut Self, u8) -> u8,
     {
         match cycle {
-            39 => {
-                // Last don't-care cycle of the address formation
-                self.indexed_dummy(bus, master);
-                self.state = ExecState::Execute(opcode, 40);
-            }
             40 => {
                 self.scratch = bus.read(master, self.temp_addr);
                 self.state = ExecState::Execute(opcode, 41);
@@ -654,7 +587,7 @@ impl M6809 {
             }
             _ => {
                 if self.indexed_resolve(opcode, cycle, bus, master) {
-                    self.state = ExecState::Execute(opcode, 39);
+                    self.state = ExecState::Execute(opcode, 40);
                 }
             }
         }
@@ -797,11 +730,6 @@ impl M6809 {
         F: FnOnce(&mut Self, u8),
     {
         match cycle {
-            40 => {
-                // Last don't-care cycle of the address formation
-                self.indexed_dummy(bus, master);
-                self.state = ExecState::ExecutePage2(opcode, 50);
-            }
             50 => {
                 let operand = bus.read(master, self.temp_addr);
                 operation(self, operand);
@@ -809,7 +737,7 @@ impl M6809 {
             }
             _ => {
                 if self.indexed_resolve_page2(opcode, cycle, bus, master) {
-                    self.state = ExecState::ExecutePage2(opcode, 40);
+                    self.state = ExecState::ExecutePage2(opcode, 50);
                 }
             }
         }

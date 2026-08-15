@@ -929,11 +929,6 @@ impl M6809 {
         master: BusMaster,
     ) {
         match cycle {
-            40 => {
-                // Last don't-care cycle of the address formation
-                self.indexed_dummy(bus, master);
-                self.state = ExecState::Execute(opcode, 50);
-            }
             50 => {
                 bus.write(master, self.temp_addr, self.a);
                 self.set_flags_logical(self.a);
@@ -941,7 +936,7 @@ impl M6809 {
             }
             _ => {
                 if self.indexed_resolve(opcode, cycle, bus, master) {
-                    self.state = ExecState::Execute(opcode, 40);
+                    self.state = ExecState::Execute(opcode, 50);
                 }
             }
         }
@@ -972,11 +967,6 @@ impl M6809 {
         master: BusMaster,
     ) {
         match cycle {
-            40 => {
-                // Last don't-care cycle of the address formation
-                self.indexed_dummy(bus, master);
-                self.state = ExecState::Execute(opcode, 50);
-            }
             50 => {
                 bus.write(master, self.temp_addr, self.b);
                 self.set_flags_logical(self.b);
@@ -984,7 +974,7 @@ impl M6809 {
             }
             _ => {
                 if self.indexed_resolve(opcode, cycle, bus, master) {
-                    self.state = ExecState::Execute(opcode, 40);
+                    self.state = ExecState::Execute(opcode, 50);
                 }
             }
         }
@@ -1014,14 +1004,9 @@ impl M6809 {
                 self.set_flags_logical16(val);
                 self.state = ExecState::Fetch;
             }
-            40 => {
-                // Last don't-care cycle of the address formation
-                self.indexed_dummy(bus, master);
-                self.state = ExecState::Execute(opcode, 50);
-            }
             _ => {
                 if self.indexed_resolve(opcode, cycle, bus, master) {
-                    self.state = ExecState::Execute(opcode, 40);
+                    self.state = ExecState::Execute(opcode, 50);
                 }
             }
         }
@@ -1048,14 +1033,9 @@ impl M6809 {
                 self.set_flags_logical16(val);
                 self.state = ExecState::Fetch;
             }
-            40 => {
-                // Last don't-care cycle of the address formation
-                self.indexed_dummy(bus, master);
-                self.state = ExecState::Execute(opcode, 50);
-            }
             _ => {
                 if self.indexed_resolve(opcode, cycle, bus, master) {
-                    self.state = ExecState::Execute(opcode, 40);
+                    self.state = ExecState::Execute(opcode, 50);
                 }
             }
         }
@@ -1083,14 +1063,9 @@ impl M6809 {
                 self.set_flags_logical16(self.x);
                 self.state = ExecState::Fetch;
             }
-            40 => {
-                // Last don't-care cycle of the address formation
-                self.indexed_dummy(bus, master);
-                self.state = ExecState::Execute(opcode, 50);
-            }
             _ => {
                 if self.indexed_resolve(opcode, cycle, bus, master) {
-                    self.state = ExecState::Execute(opcode, 40);
+                    self.state = ExecState::Execute(opcode, 50);
                 }
             }
         }
@@ -1116,14 +1091,9 @@ impl M6809 {
                 self.set_flags_logical16(self.x);
                 self.state = ExecState::Fetch;
             }
-            40 => {
-                // Last don't-care cycle of the address formation
-                self.indexed_dummy(bus, master);
-                self.state = ExecState::Execute(opcode, 50);
-            }
             _ => {
                 if self.indexed_resolve(opcode, cycle, bus, master) {
-                    self.state = ExecState::Execute(opcode, 40);
+                    self.state = ExecState::Execute(opcode, 50);
                 }
             }
         }
@@ -1151,14 +1121,9 @@ impl M6809 {
                 self.set_flags_logical16(self.u);
                 self.state = ExecState::Fetch;
             }
-            40 => {
-                // Last don't-care cycle of the address formation
-                self.indexed_dummy(bus, master);
-                self.state = ExecState::Execute(opcode, 50);
-            }
             _ => {
                 if self.indexed_resolve(opcode, cycle, bus, master) {
-                    self.state = ExecState::Execute(opcode, 40);
+                    self.state = ExecState::Execute(opcode, 50);
                 }
             }
         }
@@ -1184,14 +1149,9 @@ impl M6809 {
                 self.set_flags_logical16(self.u);
                 self.state = ExecState::Fetch;
             }
-            40 => {
-                // Last don't-care cycle of the address formation
-                self.indexed_dummy(bus, master);
-                self.state = ExecState::Execute(opcode, 50);
-            }
             _ => {
                 if self.indexed_resolve(opcode, cycle, bus, master) {
-                    self.state = ExecState::Execute(opcode, 40);
+                    self.state = ExecState::Execute(opcode, 50);
                 }
             }
         }
@@ -1210,11 +1170,6 @@ impl M6809 {
         master: BusMaster,
     ) {
         match cycle {
-            39 => {
-                // Last don't-care cycle of the address formation
-                self.indexed_dummy(bus, master);
-                self.state = ExecState::Execute(opcode, 40);
-            }
             40 => {
                 // LEA's own /VMA don't-care; the register is loaded on it
                 self.dummy_vma(bus, master);
@@ -1224,7 +1179,7 @@ impl M6809 {
             }
             _ => {
                 if self.indexed_resolve(opcode, cycle, bus, master) {
-                    self.state = ExecState::Execute(opcode, 39);
+                    self.state = ExecState::Execute(opcode, 40);
                 }
             }
         }
@@ -1241,11 +1196,6 @@ impl M6809 {
         master: BusMaster,
     ) {
         match cycle {
-            39 => {
-                // Last don't-care cycle of the address formation
-                self.indexed_dummy(bus, master);
-                self.state = ExecState::Execute(opcode, 40);
-            }
             40 => {
                 // LEA's own /VMA don't-care; the register is loaded on it
                 self.dummy_vma(bus, master);
@@ -1255,7 +1205,7 @@ impl M6809 {
             }
             _ => {
                 if self.indexed_resolve(opcode, cycle, bus, master) {
-                    self.state = ExecState::Execute(opcode, 39);
+                    self.state = ExecState::Execute(opcode, 40);
                 }
             }
         }
@@ -1272,11 +1222,6 @@ impl M6809 {
         master: BusMaster,
     ) {
         match cycle {
-            39 => {
-                // Last don't-care cycle of the address formation
-                self.indexed_dummy(bus, master);
-                self.state = ExecState::Execute(opcode, 40);
-            }
             40 => {
                 // LEA's own /VMA don't-care; the register is loaded on it
                 self.dummy_vma(bus, master);
@@ -1285,7 +1230,7 @@ impl M6809 {
             }
             _ => {
                 if self.indexed_resolve(opcode, cycle, bus, master) {
-                    self.state = ExecState::Execute(opcode, 39);
+                    self.state = ExecState::Execute(opcode, 40);
                 }
             }
         }
@@ -1302,11 +1247,6 @@ impl M6809 {
         master: BusMaster,
     ) {
         match cycle {
-            39 => {
-                // Last don't-care cycle of the address formation
-                self.indexed_dummy(bus, master);
-                self.state = ExecState::Execute(opcode, 40);
-            }
             40 => {
                 // LEA's own /VMA don't-care; the register is loaded on it
                 self.dummy_vma(bus, master);
@@ -1315,7 +1255,7 @@ impl M6809 {
             }
             _ => {
                 if self.indexed_resolve(opcode, cycle, bus, master) {
-                    self.state = ExecState::Execute(opcode, 39);
+                    self.state = ExecState::Execute(opcode, 40);
                 }
             }
         }
@@ -1345,14 +1285,9 @@ impl M6809 {
                 self.set_flags_logical16(self.y);
                 self.state = ExecState::Fetch;
             }
-            40 => {
-                // Last don't-care cycle of the address formation
-                self.indexed_dummy(bus, master);
-                self.state = ExecState::ExecutePage2(opcode, 50);
-            }
             _ => {
                 if self.indexed_resolve_page2(opcode, cycle, bus, master) {
-                    self.state = ExecState::ExecutePage2(opcode, 40);
+                    self.state = ExecState::ExecutePage2(opcode, 50);
                 }
             }
         }
@@ -1378,14 +1313,9 @@ impl M6809 {
                 self.set_flags_logical16(self.y);
                 self.state = ExecState::Fetch;
             }
-            40 => {
-                // Last don't-care cycle of the address formation
-                self.indexed_dummy(bus, master);
-                self.state = ExecState::ExecutePage2(opcode, 50);
-            }
             _ => {
                 if self.indexed_resolve_page2(opcode, cycle, bus, master) {
-                    self.state = ExecState::ExecutePage2(opcode, 40);
+                    self.state = ExecState::ExecutePage2(opcode, 50);
                 }
             }
         }
@@ -1413,14 +1343,9 @@ impl M6809 {
                 self.set_flags_logical16(self.s);
                 self.state = ExecState::Fetch;
             }
-            40 => {
-                // Last don't-care cycle of the address formation
-                self.indexed_dummy(bus, master);
-                self.state = ExecState::ExecutePage2(opcode, 50);
-            }
             _ => {
                 if self.indexed_resolve_page2(opcode, cycle, bus, master) {
-                    self.state = ExecState::ExecutePage2(opcode, 40);
+                    self.state = ExecState::ExecutePage2(opcode, 50);
                 }
             }
         }
@@ -1446,14 +1371,9 @@ impl M6809 {
                 self.set_flags_logical16(self.s);
                 self.state = ExecState::Fetch;
             }
-            40 => {
-                // Last don't-care cycle of the address formation
-                self.indexed_dummy(bus, master);
-                self.state = ExecState::ExecutePage2(opcode, 50);
-            }
             _ => {
                 if self.indexed_resolve_page2(opcode, cycle, bus, master) {
-                    self.state = ExecState::ExecutePage2(opcode, 40);
+                    self.state = ExecState::ExecutePage2(opcode, 50);
                 }
             }
         }
