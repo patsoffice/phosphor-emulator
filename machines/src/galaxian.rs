@@ -316,7 +316,13 @@ impl GalaxianBoard {
     pub fn bus_read_common(&mut self, addr: u16) -> u8 {
         let addr = self.norm(addr);
         let data = match addr {
-            0x0000..=0x5fff => self.map.read_backing(addr),
+            // ROM, Work RAM (+ its 0x4400 mirror), Video RAM (+ mirror) and
+            // Object RAM (×8). 0x4800-0x4FFF decodes to nothing on the board,
+            // so it floats high rather than reaching backing memory — the
+            // match arms below are coarser than the address map, and a read
+            // there would otherwise index an unbacked region.
+            0x0000..=0x47ff | 0x5000..=0x5fff => self.map.read_backing(addr),
+            0x4800..=0x4fff => 0xff,
             0x6000..=0x67ff => self.in0,
             0x6800..=0x6fff => self.in1,
             0x7000..=0x77ff => self.in2,
@@ -375,8 +381,10 @@ impl GalaxianBoard {
         }
 
         match addr {
-            // Work RAM, Video RAM, Object RAM
-            0x4000..=0x5fff => self.map.write_backing(addr, data),
+            // Work RAM, Video RAM, Object RAM. 0x4800-0x4FFF decodes to
+            // nothing (see `bus_read_common`), so a write there goes nowhere.
+            0x4000..=0x47ff | 0x5000..=0x5fff => self.map.write_backing(addr, data),
+            0x4800..=0x4fff => {}
 
             // 0x6000 block: lines 4-7 are the sound LFO ("wolf-whistle") DAC.
             // On base Galaxian lines 0-3 are lamps / coin (not modeled); on the

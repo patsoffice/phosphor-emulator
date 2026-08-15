@@ -828,7 +828,12 @@ impl CrystalCastlesSystem {
             return;
         }
 
-        let screen_y = (hw_scanline - self.vblank_end) as usize;
+        // Wrapping, like the `effy` computation below: a scanline above
+        // `vblank_end` is off-screen, and letting it wrap to a large value lets
+        // the visible-height check below reject it. A plain subtraction relies
+        // on the sync PROM flagging every such scanline as VBLANK, which is
+        // true of the real PROM but panics in debug on a blank one.
+        let screen_y = hw_scanline.wrapping_sub(self.vblank_end) as usize;
         if screen_y >= 232 {
             return;
         }

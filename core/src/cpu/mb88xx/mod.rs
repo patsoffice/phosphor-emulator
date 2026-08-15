@@ -337,13 +337,15 @@ impl Mb88xx {
     }
 
     /// Increment PC (6-bit), wrapping into PA.
-    /// PA is not masked here — the ROM address mask is applied when reading.
+    /// PA is not masked here — the ROM address mask is applied when reading,
+    /// and PA itself wraps: straight-line execution off the end of the address
+    /// space runs back round to page 0, as the counter does in hardware.
     #[inline]
     fn inc_pc(&mut self) {
         self.pc += 1;
         if self.pc >= 0x40 {
             self.pc = 0;
-            self.pa += 1;
+            self.pa = self.pa.wrapping_add(1);
         }
     }
 
