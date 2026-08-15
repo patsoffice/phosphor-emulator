@@ -128,14 +128,18 @@ macro_rules! m68xx_alu_rmw {
     };
 }
 
-/// Inherent (register-operand) ALU wrappers. These take no bus cycles: the
-/// opcode fetch already consumed the only bus access, so the work happens on
-/// the single execute cycle.
+/// Inherent (register-operand) ALU wrappers. The operand is a register, so the
+/// single execute cycle has no memory access to make.
 ///
-/// Three forms, selected by a marker at the head of the invocation:
+/// Three shapes, selected by a marker at the head of the invocation:
 /// * default — `reg = perform(reg)` (NEG, COM, INC, DEC, shifts, rotates)
 /// * `@no_operand` — `reg = perform()` (CLR, whose `perform_clr` takes nothing)
 /// * `@flags_only` — `perform(reg)` with the register left alone (TST)
+///
+/// An `@m6809` marker ahead of any of the three selects the M6809 form, which
+/// takes the bus: that CPU drives its don't-care cycles rather than leaving
+/// them silent, so the execute cycle still performs a read. TST drives $FFFF
+/// there and everything else re-drives PC — see `M6809::dummy_vma`.
 ///
 /// ```ignore
 /// impl M6800 {
@@ -146,6 +150,70 @@ macro_rules! m68xx_alu_rmw {
 /// }
 /// ```
 macro_rules! m68xx_alu_inherent {
+    // M6809 forms: the execute cycle drives a don't-care bus access.
+    (@m6809 @no_operand $(
+        $(#[$meta:meta])*
+        $name:ident => $reg:ident, $perform:ident;
+    )*) => {
+        $(
+            $(#[$meta])*
+            pub(crate) fn $name<B: Bus<Address = u16, Data = u8> + ?Sized>(
+                &mut self,
+                cycle: u8,
+                bus: &mut B,
+                master: BusMaster,
+            ) {
+                if cycle == 0 {
+                    self.dummy_at_pc(bus, master, 0);
+                    self.$reg = self.$perform();
+                    self.state = ExecState::Fetch;
+                }
+            }
+        )*
+    };
+
+    (@m6809 @flags_only $(
+        $(#[$meta:meta])*
+        $name:ident => $reg:ident, $perform:ident;
+    )*) => {
+        $(
+            $(#[$meta])*
+            pub(crate) fn $name<B: Bus<Address = u16, Data = u8> + ?Sized>(
+                &mut self,
+                cycle: u8,
+                bus: &mut B,
+                master: BusMaster,
+            ) {
+                if cycle == 0 {
+                    self.dummy_vma(bus, master);
+                    self.$perform(self.$reg);
+                    self.state = ExecState::Fetch;
+                }
+            }
+        )*
+    };
+
+    (@m6809 $(
+        $(#[$meta:meta])*
+        $name:ident => $reg:ident, $perform:ident;
+    )*) => {
+        $(
+            $(#[$meta])*
+            pub(crate) fn $name<B: Bus<Address = u16, Data = u8> + ?Sized>(
+                &mut self,
+                cycle: u8,
+                bus: &mut B,
+                master: BusMaster,
+            ) {
+                if cycle == 0 {
+                    self.dummy_at_pc(bus, master, 0);
+                    self.$reg = self.$perform(self.$reg);
+                    self.state = ExecState::Fetch;
+                }
+            }
+        )*
+    };
+
     (@no_operand $(
         $(#[$meta:meta])*
         $name:ident => $reg:ident, $perform:ident;

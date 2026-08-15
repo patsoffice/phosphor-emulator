@@ -6,10 +6,13 @@ Validates phosphor-core's M6809 test vectors against an independent reference
 ## Results
 
 266 opcodes validated, 266,000 test vectors (1,000 per opcode):
-**264,090/266,000 tests pass (99.3%)**.
+**264,132/266,000 tests pass (99.3%)**.
 
-All 1,910 mismatches are the same known divergence, described below. Any
-*other* failure is a regression.
+All 1,868 mismatches are the same known divergence, described below — every one
+of them a cycle count exactly 3 too low. Any *other* failure, and any mismatch
+in a register, in memory, or in a cycle count by any other amount, is a
+regression. The exact total shifts by a few dozen each time vectors are
+regenerated, because the divergence depends on a random postbyte value.
 
 ### Known divergence: `[n]` extended indirect costs 3 cycles too many
 
@@ -27,20 +30,22 @@ The divergence scales with how often a random postbyte lands on `0x9F`
 (~4/1,000 per indexed opcode), so the exact per-opcode counts shift each time
 vectors are regenerated.
 
-### Note: TST memory forms are not bus-trace-validated
+### Note: don't-care cycles are bus cycles, and are self-validated only
 
-`TST` direct/indexed/extended (`0x0D`/`0x6D`/`0x7D`) share read-modify-write
-timing but perform no write-back: Figure 17 (Cycle-by-Cycle Performance, sheet
-5) gives the RMW group `data(EA) / don't-care($FFFF) / write(EA)` and `TST`
-`data(EA) / don't-care($FFFF) / don't-care($FFFF)`. Phosphor models that final
-don't-care as an internal cycle with no bus access, the same as every other
-/VMA cycle in the core, so the vectors record it as `"internal"`.
+The MC6809E drives its address bus on every cycle, including the ones with no
+memory access to make. Phosphor models that: a don't-care cycle either holds
+$FFFF (the /VMA cycle proper) or re-drives the program counter, depending on
+where in the instruction it falls. `TST` direct/indexed/extended
+(`0x0D`/`0x6D`/`0x7D`) are the clearest case — they share read-modify-write
+timing but store nothing, and Figure 17 (Cycle-by-Cycle Performance, sheet 5)
+gives the RMW group `data(EA) / don't-care($FFFF) / write(EA)` against `TST`'s
+`data(EA) / don't-care($FFFF) / don't-care($FFFF)`.
 
-The reference core instead re-reads the effective address on that cycle. This
-does not show up in cross-validation — bus traces are not compared (see below)
-and the cycle *count* is identical — but it is why the self-validation vectors
-for these three opcodes must be regenerated from phosphor rather than taken
-from the reference.
+None of this is visible to cross-validation: bus traces are not compared (see
+below) and the cycle *counts* are unchanged. It is checked by
+`m6809_single_step_test.rs` against vectors generated from phosphor itself, and
+pinned instruction by instruction in
+`core/tests/m6809_dont_care_cycle_test.rs`.
 
 ## Prerequisites
 

@@ -77,6 +77,14 @@ pub struct M6809 {
     /// Countdown for internal cycles during indexed addressing
     #[save_skip(default)]
     pub(crate) indexed_internal: u8,
+    /// How many of the indexed sequence's remaining don't-care cycles re-drive
+    /// the program counter rather than $FFFF. See `indexed_dummy`.
+    #[save_skip(default)]
+    pub(crate) indexed_pc_dummies: u8,
+    /// Offset from PC used by the next program-counter don't-care cycle. Only
+    /// `D,R` uses more than one, at PC+0 then PC+1.
+    #[save_skip(default)]
+    pub(crate) indexed_pc_offset: u8,
     #[save_skip(default)]
     #[allow(dead_code)]
     resume_delay: u8, // For TSC/RDY release timing
@@ -122,6 +130,8 @@ impl M6809 {
             temp_addr: 0,
             interrupt_type: InterruptType::None,
             indexed_internal: 0,
+            indexed_pc_dummies: 0,
+            indexed_pc_offset: 0,
             reset_cycles: 0,
             resume_delay: 0,
         }
@@ -135,6 +145,63 @@ impl M6809 {
         let bytes = val.to_be_bytes();
         self.a = bytes[0];
         self.b = bytes[1];
+    }
+
+    // --- Don't-care cycles ---
+    //
+    // The MC6809E does not tri-state during the cycles it has no memory access
+    // to make. It keeps driving the address bus, so those cycles are visible to
+    // anything that decodes addresses — a bank-switching PAL, a watchdog, an
+    // address-triggered latch. Modelling them as silence presents a bus the
+    // hardware never presents; Empire Strikes Back's slapstic is one device
+    // that depends on the difference (see phosphor-emulator-j63p).
+    //
+    // Two addresses appear. Most don't-care cycles hold $FFFF (the /VMA cycle
+    // proper). The ones bracketing an operand fetch instead re-drive the
+    // program counter, re-reading a byte the CPU has already consumed. Which
+    // of the two applies is per-cycle, not per-instruction, so every call site
+    // names the one it means.
+
+    /// A /VMA don't-care cycle: the address bus holds $FFFF.
+    #[inline]
+    pub(crate) fn dummy_vma<B: Bus<Address = u16, Data = u8> + ?Sized>(
+        &mut self,
+        bus: &mut B,
+        master: BusMaster,
+    ) {
+        let _ = bus.read(master, 0xFFFF);
+    }
+
+    /// A don't-care cycle that re-drives the program counter, `offset` bytes
+    /// past where it currently points.
+    #[inline]
+    pub(crate) fn dummy_at_pc<B: Bus<Address = u16, Data = u8> + ?Sized>(
+        &mut self,
+        bus: &mut B,
+        master: BusMaster,
+        offset: u16,
+    ) {
+        let addr = self.pc.wrapping_add(offset);
+        let _ = bus.read(master, addr);
+    }
+
+    /// The next don't-care cycle of an indexed address formation. The leading
+    /// ones re-drive the program counter and the rest hold $FFFF; how many of
+    /// each a mode gets is fixed when the postbyte is decoded.
+    #[inline]
+    pub(crate) fn indexed_dummy<B: Bus<Address = u16, Data = u8> + ?Sized>(
+        &mut self,
+        bus: &mut B,
+        master: BusMaster,
+    ) {
+        if self.indexed_pc_dummies > 0 {
+            self.indexed_pc_dummies -= 1;
+            let offset = self.indexed_pc_offset as u16;
+            self.indexed_pc_offset += 1;
+            self.dummy_at_pc(bus, master, offset);
+        } else {
+            self.dummy_vma(bus, master);
+        }
     }
 }
 
@@ -187,6 +254,11 @@ impl M6809 {
             ExecState::Fetch => {
                 let ints = bus.check_interrupts(master);
                 if self.handle_interrupts(ints) {
+                    // The cycle that would have fetched an opcode becomes the
+                    // first of the interrupt sequence's two program-counter
+                    // don't-care cycles; PC is left alone so the pushed return
+                    // address still points at the un-executed instruction.
+                    self.dummy_at_pc(bus, master, 0);
                     return; // Interrupt taken, state changed to Interrupt sequence
                 }
 
@@ -242,14 +314,14 @@ impl M6809 {
             }
 
             // Misc inherent/immediate
-            0x12 => self.op_nop(cycle),
+            0x12 => self.op_nop(cycle, bus, master),
             0x13 => self.op_sync(cycle, bus, master),
             0x16 => self.op_lbra(opcode, cycle, bus, master),
             0x17 => self.op_lbsr(opcode, cycle, bus, master),
-            0x19 => self.op_daa(cycle),
+            0x19 => self.op_daa(cycle, bus, master),
             0x1A => self.op_orcc(cycle, bus, master),
             0x1C => self.op_andcc(cycle, bus, master),
-            0x1D => self.op_sex(cycle),
+            0x1D => self.op_sex(cycle, bus, master),
 
             // Direct-page unary/shift (0x00-0x0F)
             0x00 | 0x01 => self.op_neg_direct(opcode, cycle, bus, master),
@@ -270,18 +342,18 @@ impl M6809 {
             0x1F => self.op_tfr(cycle, bus, master),
 
             // ALU instructions (A register inherent)
-            0x3D => self.op_mul(cycle),
-            0x40 | 0x41 => self.op_nega(cycle),
-            0x43 => self.op_coma(cycle),
-            0x44 | 0x45 => self.op_lsra(cycle),
-            0x46 => self.op_rora(cycle),
-            0x47 => self.op_asra(cycle),
-            0x48 => self.op_asla(cycle),
-            0x49 => self.op_rola(cycle),
-            0x4A | 0x4B => self.op_deca(cycle),
-            0x4C => self.op_inca(cycle),
-            0x4D => self.op_tsta(cycle),
-            0x4F => self.op_clra(cycle),
+            0x3D => self.op_mul(cycle, bus, master),
+            0x40 | 0x41 => self.op_nega(cycle, bus, master),
+            0x43 => self.op_coma(cycle, bus, master),
+            0x44 | 0x45 => self.op_lsra(cycle, bus, master),
+            0x46 => self.op_rora(cycle, bus, master),
+            0x47 => self.op_asra(cycle, bus, master),
+            0x48 => self.op_asla(cycle, bus, master),
+            0x49 => self.op_rola(cycle, bus, master),
+            0x4A | 0x4B => self.op_deca(cycle, bus, master),
+            0x4C => self.op_inca(cycle, bus, master),
+            0x4D => self.op_tsta(cycle, bus, master),
+            0x4F => self.op_clra(cycle, bus, master),
 
             // LEA instructions
             0x30 => self.op_leax(opcode, cycle, bus, master),
@@ -291,7 +363,7 @@ impl M6809 {
 
             // Subroutine / Return / Interrupt
             0x39 => self.op_rts(cycle, bus, master),
-            0x3A => self.op_abx(cycle),
+            0x3A => self.op_abx(cycle, bus, master),
             0x3B => self.op_rti(cycle, bus, master),
             0x3C => self.op_cwai(cycle, bus, master),
             0x3F => self.op_swi(cycle, bus, master),
@@ -417,17 +489,17 @@ impl M6809 {
             0xBF => self.op_stx_extended(opcode, cycle, bus, master),
 
             // ALU instructions (B register inherent)
-            0x50 | 0x51 => self.op_negb(cycle),
-            0x53 => self.op_comb(cycle),
-            0x54 | 0x55 => self.op_lsrb(cycle),
-            0x56 => self.op_rorb(cycle),
-            0x57 => self.op_asrb(cycle),
-            0x58 => self.op_aslb(cycle),
-            0x59 => self.op_rolb(cycle),
-            0x5A | 0x5B => self.op_decb(cycle),
-            0x5C => self.op_incb(cycle),
-            0x5D => self.op_tstb(cycle),
-            0x5F => self.op_clrb(cycle),
+            0x50 | 0x51 => self.op_negb(cycle, bus, master),
+            0x53 => self.op_comb(cycle, bus, master),
+            0x54 | 0x55 => self.op_lsrb(cycle, bus, master),
+            0x56 => self.op_rorb(cycle, bus, master),
+            0x57 => self.op_asrb(cycle, bus, master),
+            0x58 => self.op_aslb(cycle, bus, master),
+            0x59 => self.op_rolb(cycle, bus, master),
+            0x5A | 0x5B => self.op_decb(cycle, bus, master),
+            0x5C => self.op_incb(cycle, bus, master),
+            0x5D => self.op_tstb(cycle, bus, master),
+            0x5F => self.op_clrb(cycle, bus, master),
             // ALU immediate (B register)
             0xC0 => self.op_subb_imm(cycle, bus, master),
             0xC1 => self.op_cmpb_imm(cycle, bus, master),

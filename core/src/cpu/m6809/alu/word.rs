@@ -55,7 +55,8 @@ impl M6809 {
                 self.state = ExecState::Execute(opcode, 2);
             }
             2 => {
-                // Internal cycle — compute
+                // Trailing don't-care cycle at PC; the ALU op runs on it
+                self.dummy_at_pc(bus, master, 0);
                 let operand = self.temp_addr;
                 self.perform_addd(operand);
                 self.state = ExecState::Fetch;
@@ -89,7 +90,8 @@ impl M6809 {
                 self.state = ExecState::Execute(opcode, 2);
             }
             2 => {
-                // Internal cycle — compute
+                // Trailing don't-care cycle at PC; the ALU op runs on it
+                self.dummy_at_pc(bus, master, 0);
                 let operand = self.temp_addr;
                 self.perform_subd(operand);
                 self.state = ExecState::Fetch;
@@ -122,6 +124,8 @@ impl M6809 {
                 self.state = ExecState::Execute(opcode, 2);
             }
             2 => {
+                // Trailing don't-care cycle at PC; the compare runs on it
+                self.dummy_at_pc(bus, master, 0);
                 let operand = self.temp_addr;
                 self.perform_cmp16(self.x, operand);
                 self.state = ExecState::Fetch;
@@ -154,6 +158,8 @@ impl M6809 {
                 self.state = ExecState::ExecutePage2(opcode, 2);
             }
             2 => {
+                // Trailing don't-care cycle at PC; the compare runs on it
+                self.dummy_at_pc(bus, master, 0);
                 let operand = self.temp_addr;
                 self.perform_cmp16(self.get_d(), operand);
                 self.state = ExecState::Fetch;
@@ -186,6 +192,8 @@ impl M6809 {
                 self.state = ExecState::ExecutePage2(opcode, 2);
             }
             2 => {
+                // Trailing don't-care cycle at PC; the compare runs on it
+                self.dummy_at_pc(bus, master, 0);
                 let operand = self.temp_addr;
                 self.perform_cmp16(self.y, operand);
                 self.state = ExecState::Fetch;
@@ -355,7 +363,8 @@ impl M6809 {
                 self.state = ExecState::Execute(opcode, 1);
             }
             1 => {
-                // Internal cycle
+                // Address-computation don't-care cycle (/VMA)
+                self.dummy_vma(bus, master);
                 self.state = ExecState::Execute(opcode, 2);
             }
             2 => {
@@ -372,7 +381,8 @@ impl M6809 {
                 self.temp_addr = operand;
             }
             4 => {
-                // Internal cycle — compute
+                // Trailing don't-care cycle at PC; the ALU op runs on it
+                self.dummy_at_pc(bus, master, 0);
                 let operand = self.temp_addr;
                 self.perform_subd(operand);
                 self.state = ExecState::Fetch;
@@ -400,7 +410,8 @@ impl M6809 {
                 self.state = ExecState::Execute(opcode, 1);
             }
             1 => {
-                // Internal cycle
+                // Address-computation don't-care cycle (/VMA)
+                self.dummy_vma(bus, master);
                 self.state = ExecState::Execute(opcode, 2);
             }
             2 => {
@@ -416,7 +427,8 @@ impl M6809 {
                 self.state = ExecState::Execute(opcode, 4);
             }
             4 => {
-                // Internal cycle — compute
+                // Trailing don't-care cycle at PC; the ALU op runs on it
+                self.dummy_at_pc(bus, master, 0);
                 let operand = self.temp_addr;
                 self.perform_addd(operand);
                 self.state = ExecState::Fetch;
@@ -442,7 +454,8 @@ impl M6809 {
                 self.state = ExecState::ExecutePage2(opcode, 1);
             }
             1 => {
-                // Internal cycle
+                // Address-computation don't-care cycle (/VMA)
+                self.dummy_vma(bus, master);
                 self.state = ExecState::ExecutePage2(opcode, 2);
             }
             2 => {
@@ -458,7 +471,8 @@ impl M6809 {
                 self.state = ExecState::ExecutePage2(opcode, 4);
             }
             4 => {
-                // Internal cycle — compute
+                // Trailing don't-care cycle at PC; the ALU op runs on it
+                self.dummy_at_pc(bus, master, 0);
                 let operand = self.temp_addr;
                 self.perform_cmp16(self.get_d(), operand);
                 self.state = ExecState::Fetch;
@@ -486,7 +500,8 @@ impl M6809 {
                 self.state = ExecState::ExecutePage2(opcode, 1);
             }
             1 => {
-                // Internal cycle
+                // Address-computation don't-care cycle (/VMA)
+                self.dummy_vma(bus, master);
                 self.state = ExecState::ExecutePage2(opcode, 2);
             }
             2 => {
@@ -502,7 +517,8 @@ impl M6809 {
                 self.state = ExecState::ExecutePage2(opcode, 4);
             }
             4 => {
-                // Internal cycle — compute
+                // Trailing don't-care cycle at PC; the ALU op runs on it
+                self.dummy_at_pc(bus, master, 0);
                 let operand = self.temp_addr;
                 self.perform_cmp16(self.y, operand);
                 self.state = ExecState::Fetch;
@@ -530,7 +546,8 @@ impl M6809 {
                 self.state = ExecState::Execute(opcode, 1);
             }
             1 => {
-                // Internal cycle
+                // Address-computation don't-care cycle (/VMA)
+                self.dummy_vma(bus, master);
                 self.state = ExecState::Execute(opcode, 2);
             }
             2 => {
@@ -546,7 +563,8 @@ impl M6809 {
                 self.state = ExecState::Execute(opcode, 4);
             }
             4 => {
-                // Internal cycle — compute
+                // Trailing don't-care cycle at PC; the ALU op runs on it
+                self.dummy_at_pc(bus, master, 0);
                 let operand = self.temp_addr;
                 self.perform_cmp16(self.x, operand);
                 self.state = ExecState::Fetch;
@@ -582,7 +600,8 @@ impl M6809 {
                 self.state = ExecState::Execute(opcode, 2);
             }
             2 => {
-                // Internal cycle
+                // Address-computation don't-care cycle (/VMA)
+                self.dummy_vma(bus, master);
                 self.state = ExecState::Execute(opcode, 3);
             }
             3 => {
@@ -598,7 +617,8 @@ impl M6809 {
                 self.state = ExecState::Execute(opcode, 5);
             }
             5 => {
-                // Internal cycle — compute
+                // Trailing don't-care cycle at PC; the ALU op runs on it
+                self.dummy_at_pc(bus, master, 0);
                 let operand = self.temp_addr;
                 self.perform_subd(operand);
                 self.state = ExecState::Fetch;
@@ -630,7 +650,8 @@ impl M6809 {
                 self.state = ExecState::ExecutePage2(opcode, 2);
             }
             2 => {
-                // Internal cycle
+                // Address-computation don't-care cycle (/VMA)
+                self.dummy_vma(bus, master);
                 self.state = ExecState::ExecutePage2(opcode, 3);
             }
             3 => {
@@ -646,7 +667,8 @@ impl M6809 {
                 self.state = ExecState::ExecutePage2(opcode, 5);
             }
             5 => {
-                // Internal cycle — compute
+                // Trailing don't-care cycle at PC; the ALU op runs on it
+                self.dummy_at_pc(bus, master, 0);
                 let operand = self.temp_addr;
                 self.perform_cmp16(self.get_d(), operand);
                 self.state = ExecState::Fetch;
@@ -680,7 +702,8 @@ impl M6809 {
                 self.state = ExecState::ExecutePage2(opcode, 2);
             }
             2 => {
-                // Internal cycle
+                // Address-computation don't-care cycle (/VMA)
+                self.dummy_vma(bus, master);
                 self.state = ExecState::ExecutePage2(opcode, 3);
             }
             3 => {
@@ -696,7 +719,8 @@ impl M6809 {
                 self.state = ExecState::ExecutePage2(opcode, 5);
             }
             5 => {
-                // Internal cycle — compute
+                // Trailing don't-care cycle at PC; the ALU op runs on it
+                self.dummy_at_pc(bus, master, 0);
                 let operand = self.temp_addr;
                 self.perform_cmp16(self.y, operand);
                 self.state = ExecState::Fetch;
@@ -729,7 +753,8 @@ impl M6809 {
                 self.state = ExecState::ExecutePage2(opcode, 2);
             }
             2 => {
-                // Internal cycle
+                // Address-computation don't-care cycle (/VMA)
+                self.dummy_vma(bus, master);
                 self.state = ExecState::ExecutePage2(opcode, 3);
             }
             3 => {
@@ -772,7 +797,8 @@ impl M6809 {
                 self.state = ExecState::ExecutePage2(opcode, 2);
             }
             2 => {
-                // Internal cycle
+                // Address-computation don't-care cycle (/VMA)
+                self.dummy_vma(bus, master);
                 self.state = ExecState::ExecutePage2(opcode, 3);
             }
             3 => {
@@ -813,7 +839,8 @@ impl M6809 {
                 self.state = ExecState::ExecutePage2(opcode, 2);
             }
             2 => {
-                // Internal cycle
+                // Address-computation don't-care cycle (/VMA)
+                self.dummy_vma(bus, master);
                 self.state = ExecState::ExecutePage2(opcode, 3);
             }
             3 => {
@@ -856,7 +883,8 @@ impl M6809 {
                 self.state = ExecState::ExecutePage2(opcode, 2);
             }
             2 => {
-                // Internal cycle
+                // Address-computation don't-care cycle (/VMA)
+                self.dummy_vma(bus, master);
                 self.state = ExecState::ExecutePage2(opcode, 3);
             }
             3 => {
@@ -898,7 +926,8 @@ impl M6809 {
                 self.state = ExecState::Execute(opcode, 2);
             }
             2 => {
-                // Internal cycle
+                // Address-computation don't-care cycle (/VMA)
+                self.dummy_vma(bus, master);
                 self.state = ExecState::Execute(opcode, 3);
             }
             3 => {
@@ -914,7 +943,8 @@ impl M6809 {
                 self.state = ExecState::Execute(opcode, 5);
             }
             5 => {
-                // Internal cycle — compute
+                // Trailing don't-care cycle at PC; the ALU op runs on it
+                self.dummy_at_pc(bus, master, 0);
                 let operand = self.temp_addr;
                 self.perform_addd(operand);
                 self.state = ExecState::Fetch;
@@ -948,7 +978,8 @@ impl M6809 {
                 self.state = ExecState::Execute(opcode, 2);
             }
             2 => {
-                // Internal cycle
+                // Address-computation don't-care cycle (/VMA)
+                self.dummy_vma(bus, master);
                 self.state = ExecState::Execute(opcode, 3);
             }
             3 => {
@@ -964,7 +995,8 @@ impl M6809 {
                 self.state = ExecState::Execute(opcode, 5);
             }
             5 => {
-                // Internal cycle — compute
+                // Trailing don't-care cycle at PC; the ALU op runs on it
+                self.dummy_at_pc(bus, master, 0);
                 let operand = self.temp_addr;
                 self.perform_cmp16(self.x, operand);
                 self.state = ExecState::Fetch;
@@ -984,26 +1016,29 @@ impl M6809 {
         master: BusMaster,
     ) {
         match cycle {
-            50 => {
-                // Read high byte of 16-bit operand
-                let high = bus.read(master, self.temp_addr);
-                self.temp_addr = self.temp_addr.wrapping_add(1);
-                self.scratch = high; // scratch for high byte
-                self.state = ExecState::Execute(opcode, 51);
-            }
-            51 => {
-                let low = bus.read(master, self.temp_addr) as u16;
-                let operand = ((self.scratch as u16) << 8) | low;
-                self.perform_subd(operand);
-                self.state = ExecState::Fetch;
-            }
             39 => {
-                // Base internal cycle 1
+                // Last don't-care cycle of the address formation
+                self.indexed_dummy(bus, master);
                 self.state = ExecState::Execute(opcode, 40);
             }
             40 => {
-                // Base internal cycle 2
+                // Read high byte of the 16-bit operand
+                let high = bus.read(master, self.temp_addr);
+                self.temp_addr = self.temp_addr.wrapping_add(1);
+                self.scratch = high;
                 self.state = ExecState::Execute(opcode, 50);
+            }
+            50 => {
+                let low = bus.read(master, self.temp_addr) as u16;
+                self.temp_addr = ((self.scratch as u16) << 8) | low;
+                self.state = ExecState::Execute(opcode, 51);
+            }
+            51 => {
+                // Trailing don't-care cycle at PC; the ALU op runs on it
+                self.dummy_at_pc(bus, master, 0);
+                let operand = self.temp_addr;
+                self.perform_subd(operand);
+                self.state = ExecState::Fetch;
             }
             _ => {
                 if self.indexed_resolve(opcode, cycle, bus, master) {
@@ -1022,23 +1057,29 @@ impl M6809 {
         master: BusMaster,
     ) {
         match cycle {
-            50 => {
-                let high = bus.read(master, self.temp_addr);
-                self.temp_addr = self.temp_addr.wrapping_add(1);
-                self.scratch = high;
-                self.state = ExecState::Execute(opcode, 51);
-            }
-            51 => {
-                let low = bus.read(master, self.temp_addr) as u16;
-                let operand = ((self.scratch as u16) << 8) | low;
-                self.perform_addd(operand);
-                self.state = ExecState::Fetch;
-            }
             39 => {
+                // Last don't-care cycle of the address formation
+                self.indexed_dummy(bus, master);
                 self.state = ExecState::Execute(opcode, 40);
             }
             40 => {
+                // Read high byte of the 16-bit operand
+                let high = bus.read(master, self.temp_addr);
+                self.temp_addr = self.temp_addr.wrapping_add(1);
+                self.scratch = high;
                 self.state = ExecState::Execute(opcode, 50);
+            }
+            50 => {
+                let low = bus.read(master, self.temp_addr) as u16;
+                self.temp_addr = ((self.scratch as u16) << 8) | low;
+                self.state = ExecState::Execute(opcode, 51);
+            }
+            51 => {
+                // Trailing don't-care cycle at PC; the ALU op runs on it
+                self.dummy_at_pc(bus, master, 0);
+                let operand = self.temp_addr;
+                self.perform_addd(operand);
+                self.state = ExecState::Fetch;
             }
             _ => {
                 if self.indexed_resolve(opcode, cycle, bus, master) {
@@ -1057,23 +1098,29 @@ impl M6809 {
         master: BusMaster,
     ) {
         match cycle {
-            50 => {
-                let high = bus.read(master, self.temp_addr);
-                self.temp_addr = self.temp_addr.wrapping_add(1);
-                self.scratch = high;
-                self.state = ExecState::Execute(opcode, 51);
-            }
-            51 => {
-                let low = bus.read(master, self.temp_addr) as u16;
-                let operand = ((self.scratch as u16) << 8) | low;
-                self.perform_cmp16(self.x, operand);
-                self.state = ExecState::Fetch;
-            }
             39 => {
+                // Last don't-care cycle of the address formation
+                self.indexed_dummy(bus, master);
                 self.state = ExecState::Execute(opcode, 40);
             }
             40 => {
+                // Read high byte of the 16-bit operand
+                let high = bus.read(master, self.temp_addr);
+                self.temp_addr = self.temp_addr.wrapping_add(1);
+                self.scratch = high;
                 self.state = ExecState::Execute(opcode, 50);
+            }
+            50 => {
+                let low = bus.read(master, self.temp_addr) as u16;
+                self.temp_addr = ((self.scratch as u16) << 8) | low;
+                self.state = ExecState::Execute(opcode, 51);
+            }
+            51 => {
+                // Trailing don't-care cycle at PC; the ALU op runs on it
+                self.dummy_at_pc(bus, master, 0);
+                let operand = self.temp_addr;
+                self.perform_cmp16(self.x, operand);
+                self.state = ExecState::Fetch;
             }
             _ => {
                 if self.indexed_resolve(opcode, cycle, bus, master) {
@@ -1094,23 +1141,29 @@ impl M6809 {
         master: BusMaster,
     ) {
         match cycle {
-            50 => {
-                let high = bus.read(master, self.temp_addr);
-                self.temp_addr = self.temp_addr.wrapping_add(1);
-                self.scratch = high;
-                self.state = ExecState::ExecutePage2(opcode, 51);
-            }
-            51 => {
-                let low = bus.read(master, self.temp_addr) as u16;
-                let operand = ((self.scratch as u16) << 8) | low;
-                self.perform_cmp16(self.get_d(), operand);
-                self.state = ExecState::Fetch;
-            }
             39 => {
+                // Last don't-care cycle of the address formation
+                self.indexed_dummy(bus, master);
                 self.state = ExecState::ExecutePage2(opcode, 40);
             }
             40 => {
+                // Read high byte of the 16-bit operand
+                let high = bus.read(master, self.temp_addr);
+                self.temp_addr = self.temp_addr.wrapping_add(1);
+                self.scratch = high;
                 self.state = ExecState::ExecutePage2(opcode, 50);
+            }
+            50 => {
+                let low = bus.read(master, self.temp_addr) as u16;
+                self.temp_addr = ((self.scratch as u16) << 8) | low;
+                self.state = ExecState::ExecutePage2(opcode, 51);
+            }
+            51 => {
+                // Trailing don't-care cycle at PC; the ALU op runs on it
+                self.dummy_at_pc(bus, master, 0);
+                let operand = self.temp_addr;
+                self.perform_cmp16(self.get_d(), operand);
+                self.state = ExecState::Fetch;
             }
             _ => {
                 if self.indexed_resolve_page2(opcode, cycle, bus, master) {
@@ -1129,23 +1182,29 @@ impl M6809 {
         master: BusMaster,
     ) {
         match cycle {
-            50 => {
-                let high = bus.read(master, self.temp_addr);
-                self.temp_addr = self.temp_addr.wrapping_add(1);
-                self.scratch = high;
-                self.state = ExecState::ExecutePage2(opcode, 51);
-            }
-            51 => {
-                let low = bus.read(master, self.temp_addr) as u16;
-                let operand = ((self.scratch as u16) << 8) | low;
-                self.perform_cmp16(self.y, operand);
-                self.state = ExecState::Fetch;
-            }
             39 => {
+                // Last don't-care cycle of the address formation
+                self.indexed_dummy(bus, master);
                 self.state = ExecState::ExecutePage2(opcode, 40);
             }
             40 => {
+                // Read high byte of the 16-bit operand
+                let high = bus.read(master, self.temp_addr);
+                self.temp_addr = self.temp_addr.wrapping_add(1);
+                self.scratch = high;
                 self.state = ExecState::ExecutePage2(opcode, 50);
+            }
+            50 => {
+                let low = bus.read(master, self.temp_addr) as u16;
+                self.temp_addr = ((self.scratch as u16) << 8) | low;
+                self.state = ExecState::ExecutePage2(opcode, 51);
+            }
+            51 => {
+                // Trailing don't-care cycle at PC; the ALU op runs on it
+                self.dummy_at_pc(bus, master, 0);
+                let operand = self.temp_addr;
+                self.perform_cmp16(self.y, operand);
+                self.state = ExecState::Fetch;
             }
             _ => {
                 if self.indexed_resolve_page2(opcode, cycle, bus, master) {
@@ -1181,6 +1240,8 @@ impl M6809 {
                 self.state = ExecState::ExecutePage3(opcode, 2);
             }
             2 => {
+                // Trailing don't-care cycle at PC; the compare runs on it
+                self.dummy_at_pc(bus, master, 0);
                 let operand = self.temp_addr;
                 self.perform_cmp16(self.u, operand);
                 self.state = ExecState::Fetch;
@@ -1208,7 +1269,8 @@ impl M6809 {
                 self.state = ExecState::ExecutePage3(opcode, 1);
             }
             1 => {
-                // Internal cycle
+                // Address-computation don't-care cycle (/VMA)
+                self.dummy_vma(bus, master);
                 self.state = ExecState::ExecutePage3(opcode, 2);
             }
             2 => {
@@ -1224,7 +1286,8 @@ impl M6809 {
                 self.state = ExecState::ExecutePage3(opcode, 4);
             }
             4 => {
-                // Internal cycle — compute
+                // Trailing don't-care cycle at PC; the ALU op runs on it
+                self.dummy_at_pc(bus, master, 0);
                 let operand = self.temp_addr;
                 self.perform_cmp16(self.u, operand);
                 self.state = ExecState::Fetch;
@@ -1258,7 +1321,8 @@ impl M6809 {
                 self.state = ExecState::ExecutePage3(opcode, 2);
             }
             2 => {
-                // Internal cycle
+                // Address-computation don't-care cycle (/VMA)
+                self.dummy_vma(bus, master);
                 self.state = ExecState::ExecutePage3(opcode, 3);
             }
             3 => {
@@ -1274,7 +1338,8 @@ impl M6809 {
                 self.state = ExecState::ExecutePage3(opcode, 5);
             }
             5 => {
-                // Internal cycle — compute
+                // Trailing don't-care cycle at PC; the ALU op runs on it
+                self.dummy_at_pc(bus, master, 0);
                 let operand = self.temp_addr;
                 self.perform_cmp16(self.u, operand);
                 self.state = ExecState::Fetch;
@@ -1294,23 +1359,29 @@ impl M6809 {
         master: BusMaster,
     ) {
         match cycle {
-            50 => {
-                let high = bus.read(master, self.temp_addr);
-                self.temp_addr = self.temp_addr.wrapping_add(1);
-                self.scratch = high;
-                self.state = ExecState::ExecutePage3(opcode, 51);
-            }
-            51 => {
-                let low = bus.read(master, self.temp_addr) as u16;
-                let operand = ((self.scratch as u16) << 8) | low;
-                self.perform_cmp16(self.u, operand);
-                self.state = ExecState::Fetch;
-            }
             39 => {
+                // Last don't-care cycle of the address formation
+                self.indexed_dummy(bus, master);
                 self.state = ExecState::ExecutePage3(opcode, 40);
             }
             40 => {
+                // Read high byte of the 16-bit operand
+                let high = bus.read(master, self.temp_addr);
+                self.temp_addr = self.temp_addr.wrapping_add(1);
+                self.scratch = high;
                 self.state = ExecState::ExecutePage3(opcode, 50);
+            }
+            50 => {
+                let low = bus.read(master, self.temp_addr) as u16;
+                self.temp_addr = ((self.scratch as u16) << 8) | low;
+                self.state = ExecState::ExecutePage3(opcode, 51);
+            }
+            51 => {
+                // Trailing don't-care cycle at PC; the ALU op runs on it
+                self.dummy_at_pc(bus, master, 0);
+                let operand = self.temp_addr;
+                self.perform_cmp16(self.u, operand);
+                self.state = ExecState::Fetch;
             }
             _ => {
                 if self.indexed_resolve_page3(opcode, cycle, bus, master) {
@@ -1344,6 +1415,8 @@ impl M6809 {
                 self.state = ExecState::ExecutePage3(opcode, 2);
             }
             2 => {
+                // Trailing don't-care cycle at PC; the compare runs on it
+                self.dummy_at_pc(bus, master, 0);
                 let operand = self.temp_addr;
                 self.perform_cmp16(self.s, operand);
                 self.state = ExecState::Fetch;
@@ -1371,7 +1444,8 @@ impl M6809 {
                 self.state = ExecState::ExecutePage3(opcode, 1);
             }
             1 => {
-                // Internal cycle
+                // Address-computation don't-care cycle (/VMA)
+                self.dummy_vma(bus, master);
                 self.state = ExecState::ExecutePage3(opcode, 2);
             }
             2 => {
@@ -1387,7 +1461,8 @@ impl M6809 {
                 self.state = ExecState::ExecutePage3(opcode, 4);
             }
             4 => {
-                // Internal cycle — compute
+                // Trailing don't-care cycle at PC; the ALU op runs on it
+                self.dummy_at_pc(bus, master, 0);
                 let operand = self.temp_addr;
                 self.perform_cmp16(self.s, operand);
                 self.state = ExecState::Fetch;
@@ -1421,7 +1496,8 @@ impl M6809 {
                 self.state = ExecState::ExecutePage3(opcode, 2);
             }
             2 => {
-                // Internal cycle
+                // Address-computation don't-care cycle (/VMA)
+                self.dummy_vma(bus, master);
                 self.state = ExecState::ExecutePage3(opcode, 3);
             }
             3 => {
@@ -1437,7 +1513,8 @@ impl M6809 {
                 self.state = ExecState::ExecutePage3(opcode, 5);
             }
             5 => {
-                // Internal cycle — compute
+                // Trailing don't-care cycle at PC; the ALU op runs on it
+                self.dummy_at_pc(bus, master, 0);
                 let operand = self.temp_addr;
                 self.perform_cmp16(self.s, operand);
                 self.state = ExecState::Fetch;
@@ -1457,23 +1534,29 @@ impl M6809 {
         master: BusMaster,
     ) {
         match cycle {
-            50 => {
-                let high = bus.read(master, self.temp_addr);
-                self.temp_addr = self.temp_addr.wrapping_add(1);
-                self.scratch = high;
-                self.state = ExecState::ExecutePage3(opcode, 51);
-            }
-            51 => {
-                let low = bus.read(master, self.temp_addr) as u16;
-                let operand = ((self.scratch as u16) << 8) | low;
-                self.perform_cmp16(self.s, operand);
-                self.state = ExecState::Fetch;
-            }
             39 => {
+                // Last don't-care cycle of the address formation
+                self.indexed_dummy(bus, master);
                 self.state = ExecState::ExecutePage3(opcode, 40);
             }
             40 => {
+                // Read high byte of the 16-bit operand
+                let high = bus.read(master, self.temp_addr);
+                self.temp_addr = self.temp_addr.wrapping_add(1);
+                self.scratch = high;
                 self.state = ExecState::ExecutePage3(opcode, 50);
+            }
+            50 => {
+                let low = bus.read(master, self.temp_addr) as u16;
+                self.temp_addr = ((self.scratch as u16) << 8) | low;
+                self.state = ExecState::ExecutePage3(opcode, 51);
+            }
+            51 => {
+                // Trailing don't-care cycle at PC; the ALU op runs on it
+                self.dummy_at_pc(bus, master, 0);
+                let operand = self.temp_addr;
+                self.perform_cmp16(self.s, operand);
+                self.state = ExecState::Fetch;
             }
             _ => {
                 if self.indexed_resolve_page3(opcode, cycle, bus, master) {

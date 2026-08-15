@@ -58,7 +58,8 @@ impl M6809 {
                 self.state = ExecState::Execute(0x1A, 1);
             }
             1 => {
-                // Internal cycle — apply
+                // Don't-care cycle at PC; the OR is applied on it
+                self.dummy_at_pc(bus, master, 0);
                 self.cc |= self.scratch;
                 self.state = ExecState::Fetch;
             }
@@ -82,7 +83,8 @@ impl M6809 {
                 self.state = ExecState::Execute(0x1C, 1);
             }
             1 => {
-                // Internal cycle — apply
+                // Don't-care cycle at PC; the AND is applied on it
+                self.dummy_at_pc(bus, master, 0);
                 self.cc &= self.scratch;
                 self.state = ExecState::Fetch;
             }
@@ -92,7 +94,8 @@ impl M6809 {
 
     /// Generic helper for Direct Addressing Mode ALU instructions.
     /// Three execute cycles: cycle 0 fetches the address byte and forms DP:addr,
-    /// cycle 1 is an internal cycle, cycle 2 reads the operand and runs the operation.
+    /// cycle 1 is the address-computation don't-care, cycle 2 reads the operand
+    /// and runs the operation.
     #[inline]
     pub(crate) fn alu_direct<B: Bus<Address = u16, Data = u8> + ?Sized, F>(
         &mut self,
@@ -112,7 +115,8 @@ impl M6809 {
                 self.state = ExecState::Execute(opcode, 1);
             }
             1 => {
-                // Internal cycle (address computation)
+                // Address-computation don't-care cycle (/VMA)
+                self.dummy_vma(bus, master);
                 self.state = ExecState::Execute(opcode, 2);
             }
             2 => {
@@ -128,7 +132,7 @@ impl M6809 {
     /// Four execute cycles:
     /// Cycle 0: Fetch high byte of address.
     /// Cycle 1: Fetch low byte of address, form effective address.
-    /// Cycle 2: Internal cycle.
+    /// Cycle 2: Address-computation don't-care.
     /// Cycle 3: Read operand from the effective address and run the operation.
     #[inline]
     pub(crate) fn alu_extended<B: Bus<Address = u16, Data = u8> + ?Sized, F>(
@@ -155,7 +159,8 @@ impl M6809 {
                 self.state = ExecState::Execute(opcode, 2);
             }
             2 => {
-                // Internal cycle
+                // Address-computation don't-care cycle (/VMA)
+                self.dummy_vma(bus, master);
                 self.state = ExecState::Execute(opcode, 3);
             }
             3 => {
@@ -204,8 +209,10 @@ impl M6809 {
         }
     }
 
-    /// Compute the number of internal cycles for an indexed addressing mode.
-    /// This accounts for the "+" in datasheet cycle counts (e.g., LDA indexed = 4+).
+    /// How many don't-care cycles an indexed mode spends before the caller's
+    /// own base don't-care. Together they account for the "+" in the datasheet
+    /// cycle counts (e.g. LDA indexed = 4+). See `indexed_mode_pc_dummies` for
+    /// which of them re-drive PC rather than holding $FFFF.
     fn indexed_mode_internal(postbyte: u8) -> u8 {
         if postbyte & 0x80 == 0 {
             return 1; // 5-bit constant offset
@@ -229,6 +236,25 @@ impl M6809 {
             _ => 0,
         };
         if indirect { base + 1 } else { base }
+    }
+
+    /// How many of an indexed mode's don't-care cycles re-drive the program
+    /// counter instead of holding $FFFF. They are always the leading ones, and
+    /// only `D,R` has two (at PC+0 then PC+1) — it is the one mode whose offset
+    /// arrives in registers yet still costs two prefetch-shaped cycles.
+    ///
+    /// The modes with none are exactly those that already read their offset
+    /// from the instruction stream over two bytes (`n16,R`, `n16,PCR`,
+    /// `[n16]`) plus `n8,PCR`.
+    fn indexed_mode_pc_dummies(postbyte: u8) -> u8 {
+        if postbyte & 0x80 == 0 {
+            return 1; // 5-bit constant offset
+        }
+        match postbyte & 0x0F {
+            0x0B => 2,                      // D,R
+            0x09 | 0x0C | 0x0D | 0x0F => 0, // n16,R / n8,PCR / n16,PCR / [n16]
+            _ => 1,
+        }
     }
 
     /// Multi-cycle indexed address resolution state machine.
@@ -284,6 +310,13 @@ impl M6809 {
                 let postbyte = bus.read(master, self.pc);
                 self.pc = self.pc.wrapping_add(1);
                 self.scratch = postbyte;
+
+                // Fix the don't-care plan now: the postbyte alone decides how
+                // many of this mode's don't-care cycles re-drive PC, and
+                // `self.scratch` is reused for the pointer byte once an
+                // indirect resolution starts.
+                self.indexed_pc_dummies = Self::indexed_mode_pc_dummies(postbyte);
+                self.indexed_pc_offset = 0;
 
                 if postbyte & 0x80 == 0 {
                     // 5-bit constant offset: 1 internal cycle
@@ -517,15 +550,9 @@ impl M6809 {
                     true
                 }
             }
-            // Internal cycle countdown for indexed mode overhead
+            // Don't-care cycle countdown for indexed mode overhead
             20 => {
-                // Don't-care cycles are not silent on a real MC6809E: it keeps
-                // driving the address bus, and address-snooping hardware sees
-                // what it drives. The postbyte-resolution don't-cares re-read
-                // at PC (MAME's `dummy_read_opcode_arg(0)`); the /VMA cycle
-                // just before the operand access drives $FFFF and is charged
-                // in `alu_indexed`'s cycle 40.
-                let _ = bus.read(master, self.pc);
+                self.indexed_dummy(bus, master);
                 self.indexed_internal -= 1;
                 if self.indexed_internal == 0 {
                     true
@@ -540,7 +567,7 @@ impl M6809 {
 
     /// Generic helper for Indexed Addressing Mode ALU instructions.
     /// Variable execute cycles: address resolution via postbyte, then operand read.
-    /// Cycle 40 = base internal cycle, Cycle 50 = read operand.
+    /// Cycle 40 = base don't-care cycle, Cycle 50 = read operand.
     pub(crate) fn alu_indexed<B: Bus<Address = u16, Data = u8> + ?Sized, F>(
         &mut self,
         opcode: u8,
@@ -553,11 +580,12 @@ impl M6809 {
     {
         match cycle {
             40 => {
-                // Base internal cycle: the /VMA cycle before the operand
-                // access, which drives $FFFF on a real MC6809E. Empire Strikes
-                // Back's slapstic watches for exactly this address to validate
+                // The last don't-care cycle of the address formation, charged
+                // here rather than in `indexed_resolve` so a mode with no
+                // overhead at all still spends one. Empire Strikes Back's
+                // slapstic watches for the $FFFF it usually drives, to validate
                 // its alternate-banking sequence.
-                let _ = bus.read(master, 0xFFFF);
+                self.indexed_dummy(bus, master);
                 self.state = ExecState::Execute(opcode, 50);
             }
             50 => {
@@ -575,8 +603,9 @@ impl M6809 {
 
     /// Generic helper for Indexed Addressing Mode read-modify-write instructions.
     /// Used by memory-modify ops in the 0x60-0x6F range (NEG, COM, LSR, etc.).
-    /// Cycles 39-40: base internal. Cycle 50: read value from EA. Cycle 51: modify and write back
-    /// (internal instead of a write for TST — see the note on cycle 51).
+    /// Cycle 39: base don't-care. Cycle 40: read value from EA. Cycle 41: the
+    /// modify don't-care. Cycle 42: write back (a second don't-care for TST —
+    /// see the note on cycle 42).
     pub(crate) fn rmw_indexed<B: Bus<Address = u16, Data = u8> + ?Sized, F>(
         &mut self,
         opcode: u8,
@@ -589,18 +618,25 @@ impl M6809 {
     {
         match cycle {
             39 => {
-                // Base internal cycle 1
+                // Last don't-care cycle of the address formation
+                self.indexed_dummy(bus, master);
                 self.state = ExecState::Execute(opcode, 40);
             }
             40 => {
-                // Base internal cycle 2
-                self.state = ExecState::Execute(opcode, 50);
-            }
-            50 => {
                 self.scratch = bus.read(master, self.temp_addr);
-                self.state = ExecState::Execute(opcode, 51);
+                self.state = ExecState::Execute(opcode, 41);
             }
-            51 => {
+            41 => {
+                // The modify cycle. TST re-drives $FFFF here, the rest re-drive
+                // PC — the same split the direct and extended helpers make.
+                if opcode == 0x6D {
+                    self.dummy_vma(bus, master);
+                } else {
+                    self.dummy_at_pc(bus, master, 0);
+                }
+                self.state = ExecState::Execute(opcode, 42);
+            }
+            42 => {
                 let result = operation(self, self.scratch);
                 // TST indexed (0x6D) shares RMW timing but does NOT write back.
                 // The cycle-by-cycle chart gives the RMW group `data(EA) /
@@ -609,11 +645,9 @@ impl M6809 {
                 // /VMA cycle, not a store. Writing back would corrupt destinations
                 // where reads and writes decode differently — e.g. banked VRAM
                 // where a read returns ROM but the write lands in video RAM.
-                //
-                // Like every other don't-care cycle here it is modelled as an
-                // internal cycle with no bus access, rather than as the $FFFF read
-                // real silicon drives, so it cannot disturb memory-mapped I/O.
-                if opcode != 0x6D {
+                if opcode == 0x6D {
+                    self.dummy_vma(bus, master);
+                } else {
                     bus.write(master, self.temp_addr, result);
                 }
                 self.state = ExecState::Fetch;
@@ -629,10 +663,10 @@ impl M6809 {
     /// Generic helper for Direct Addressing Mode read-modify-write instructions.
     /// Used by memory-modify ops in the 0x00-0x0F range (NEG, COM, LSR, etc.).
     /// Cycle 0: fetch address byte, form DP:addr.
-    /// Cycle 1: internal cycle.
+    /// Cycle 1: address-computation don't-care.
     /// Cycle 2: read value from EA.
-    /// Cycle 3: internal cycle (modify).
-    /// Cycle 4: write result back (internal instead for TST — see the note on cycle 4).
+    /// Cycle 3: the modify don't-care.
+    /// Cycle 4: write result back (a second don't-care for TST — see the note on cycle 4).
     pub(crate) fn rmw_direct<B: Bus<Address = u16, Data = u8> + ?Sized, F>(
         &mut self,
         opcode: u8,
@@ -651,7 +685,8 @@ impl M6809 {
                 self.state = ExecState::Execute(opcode, 1);
             }
             1 => {
-                // Internal cycle
+                // Address-computation don't-care cycle (/VMA)
+                self.dummy_vma(bus, master);
                 self.state = ExecState::Execute(opcode, 2);
             }
             2 => {
@@ -659,15 +694,22 @@ impl M6809 {
                 self.state = ExecState::Execute(opcode, 3);
             }
             3 => {
-                // Internal cycle (modify)
+                // The modify cycle; TST re-drives $FFFF, the rest re-drive PC
+                if opcode == 0x0D {
+                    self.dummy_vma(bus, master);
+                } else {
+                    self.dummy_at_pc(bus, master, 0);
+                }
                 self.state = ExecState::Execute(opcode, 4);
             }
             4 => {
                 let result = operation(self, self.scratch);
                 // TST direct (0x0D) shares RMW timing but does NOT write back — its
-                // final cycle is a don't-care /VMA cycle, not a store. Modelled as
-                // an internal cycle; see the rmw_indexed note.
-                if opcode != 0x0D {
+                // final cycle is a don't-care /VMA cycle, not a store. See the
+                // rmw_indexed note.
+                if opcode == 0x0D {
+                    self.dummy_vma(bus, master);
+                } else {
                     bus.write(master, self.temp_addr, result);
                 }
                 self.state = ExecState::Fetch;
@@ -680,10 +722,10 @@ impl M6809 {
     /// Used by memory-modify ops in the 0x70-0x7F range (NEG, COM, LSR, etc.).
     /// Cycle 0: fetch address high byte.
     /// Cycle 1: fetch address low byte.
-    /// Cycle 2: internal cycle.
+    /// Cycle 2: address-computation don't-care.
     /// Cycle 3: read value from EA.
-    /// Cycle 4: internal cycle (modify).
-    /// Cycle 5: write result back (internal instead for TST — see the note on cycle 5).
+    /// Cycle 4: the modify don't-care.
+    /// Cycle 5: write result back (a second don't-care for TST — see the note on cycle 5).
     pub(crate) fn rmw_extended<B: Bus<Address = u16, Data = u8> + ?Sized, F>(
         &mut self,
         opcode: u8,
@@ -708,7 +750,8 @@ impl M6809 {
                 self.state = ExecState::Execute(opcode, 2);
             }
             2 => {
-                // Internal cycle
+                // Address-computation don't-care cycle (/VMA)
+                self.dummy_vma(bus, master);
                 self.state = ExecState::Execute(opcode, 3);
             }
             3 => {
@@ -716,15 +759,22 @@ impl M6809 {
                 self.state = ExecState::Execute(opcode, 4);
             }
             4 => {
-                // Internal cycle (modify)
+                // The modify cycle; TST re-drives $FFFF, the rest re-drive PC
+                if opcode == 0x7D {
+                    self.dummy_vma(bus, master);
+                } else {
+                    self.dummy_at_pc(bus, master, 0);
+                }
                 self.state = ExecState::Execute(opcode, 5);
             }
             5 => {
                 let result = operation(self, self.scratch);
                 // TST extended (0x7D) shares RMW timing but does NOT write back —
-                // its final cycle is a don't-care /VMA cycle, not a store. Modelled
-                // as an internal cycle; see the rmw_indexed note.
-                if opcode != 0x7D {
+                // its final cycle is a don't-care /VMA cycle, not a store. See the
+                // rmw_indexed note.
+                if opcode == 0x7D {
+                    self.dummy_vma(bus, master);
+                } else {
                     bus.write(master, self.temp_addr, result);
                 }
                 self.state = ExecState::Fetch;
@@ -748,7 +798,8 @@ impl M6809 {
     {
         match cycle {
             40 => {
-                // Base internal cycle
+                // Last don't-care cycle of the address formation
+                self.indexed_dummy(bus, master);
                 self.state = ExecState::ExecutePage2(opcode, 50);
             }
             50 => {

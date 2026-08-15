@@ -102,14 +102,25 @@ impl M6809 {
 
     /// MUL inherent (0x3D): Multiplies A and B (unsigned), result in D (A=high, B=low).
     /// Z set if 16-bit result is zero. C set if bit 7 of B (low byte) is set.
-    /// 11 total cycles: 1 fetch + 10 exec (9 internal + compute).
-    pub(crate) fn op_mul(&mut self, cycle: u8) {
+    /// 11 total cycles: 1 fetch + 10 don't-care (one at PC, then nine /VMA)
+    /// while the multiply runs.
+    pub(crate) fn op_mul<B: Bus<Address = u16, Data = u8> + ?Sized>(
+        &mut self,
+        cycle: u8,
+        bus: &mut B,
+        master: BusMaster,
+    ) {
         match cycle {
-            0..=8 => {
-                // Internal cycles (multiply computation)
+            0 => {
+                self.dummy_at_pc(bus, master, 0);
+                self.state = ExecState::Execute(0x3D, 1);
+            }
+            1..=8 => {
+                self.dummy_vma(bus, master);
                 self.state = ExecState::Execute(0x3D, cycle + 1);
             }
             9 => {
+                self.dummy_vma(bus, master);
                 let result = (self.a as u16) * (self.b as u16);
                 self.a = (result >> 8) as u8;
                 self.b = (result & 0xFF) as u8;

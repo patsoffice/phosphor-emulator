@@ -3,7 +3,7 @@ use crate::core::{Bus, BusMaster};
 
 impl M6809 {
     /// Generic helper for short branch instructions (8-bit offset).
-    /// Takes 3 cycles: 1 (Fetch) + 1 (Read Offset) + 1 (Calc/Idle).
+    /// Takes 3 cycles: 1 (Fetch) + 1 (Read Offset) + 1 (/VMA don't-care).
     fn branch_short<B: Bus<Address = u16, Data = u8> + ?Sized>(
         &mut self,
         opcode: u8,
@@ -21,7 +21,8 @@ impl M6809 {
                 self.state = ExecState::Execute(opcode, 1);
             }
             1 => {
-                // Cycle 2: Internal operation (add offset if taken)
+                // Cycle 2: /VMA don't-care; the offset is added on it if taken
+                self.dummy_vma(bus, master);
                 if condition {
                     let offset = self.temp_addr as u8 as i8;
                     self.pc = self.pc.wrapping_add(offset as u16);
@@ -252,6 +253,8 @@ impl M6809 {
                 self.state = ExecState::ExecutePage2(opcode, 2);
             }
             2 => {
+                // /VMA don't-care; a taken branch spends a second one
+                self.dummy_vma(bus, master);
                 if condition {
                     self.state = ExecState::ExecutePage2(opcode, 3);
                 } else {
@@ -259,6 +262,7 @@ impl M6809 {
                 }
             }
             3 => {
+                self.dummy_vma(bus, master);
                 let offset = self.temp_addr as i16;
                 self.pc = self.pc.wrapping_add(offset as u16);
                 self.state = ExecState::Fetch;
@@ -454,7 +458,7 @@ impl M6809 {
 
     /// LBRA (0x16): Long Branch Always (Page 0).
     /// Unconditional branch with 16-bit signed offset.
-    /// No flags affected. 5 cycles total (1 fetch + 4 execute).
+    /// No flags affected. 5 cycles total (1 fetch + 2 offset + 2 /VMA don't-care).
     pub(crate) fn op_lbra<B: Bus<Address = u16, Data = u8> + ?Sized>(
         &mut self,
         opcode: u8,
@@ -476,10 +480,11 @@ impl M6809 {
                 self.state = ExecState::Execute(opcode, 2);
             }
             2 => {
-                // Internal
+                self.dummy_vma(bus, master);
                 self.state = ExecState::Execute(opcode, 3);
             }
             3 => {
+                self.dummy_vma(bus, master);
                 let offset = self.temp_addr as i16;
                 self.pc = self.pc.wrapping_add(offset as u16);
                 self.state = ExecState::Fetch;
@@ -490,7 +495,8 @@ impl M6809 {
 
     /// LBSR (0x17): Long Branch to Subroutine (Page 0).
     /// Pushes return address onto S stack, then branches to PC + 16-bit signed offset.
-    /// No flags affected. 9 cycles total (1 fetch + 8 execute).
+    /// No flags affected. 9 cycles total: 1 fetch + 2 offset bytes + 4 /VMA
+    /// don't-care + 2 pushes. The don't-cares all precede the pushes.
     pub(crate) fn op_lbsr<B: Bus<Address = u16, Data = u8> + ?Sized>(
         &mut self,
         opcode: u8,
@@ -511,32 +517,20 @@ impl M6809 {
                 self.temp_addr |= low;
                 self.state = ExecState::Execute(opcode, 2);
             }
-            2 => {
-                // Internal
-                self.state = ExecState::Execute(opcode, 3);
-            }
-            3 => {
-                // Internal
-                self.state = ExecState::Execute(opcode, 4);
-            }
-            4 => {
-                // Push PC low byte
-                self.s = self.s.wrapping_sub(1);
-                bus.write(master, self.s, self.pc as u8);
-                self.state = ExecState::Execute(opcode, 5);
-            }
-            5 => {
-                // Push PC high byte
-                self.s = self.s.wrapping_sub(1);
-                bus.write(master, self.s, (self.pc >> 8) as u8);
-                self.state = ExecState::Execute(opcode, 6);
+            c @ 2..=5 => {
+                self.dummy_vma(bus, master);
+                self.state = ExecState::Execute(opcode, c + 1);
             }
             6 => {
-                // Internal
+                // Push PC low byte (PC is already the return address)
+                self.s = self.s.wrapping_sub(1);
+                bus.write(master, self.s, self.pc as u8);
                 self.state = ExecState::Execute(opcode, 7);
             }
             7 => {
-                // Add signed offset to PC
+                // Push PC high byte, then take the branch
+                self.s = self.s.wrapping_sub(1);
+                bus.write(master, self.s, (self.pc >> 8) as u8);
                 let offset = self.temp_addr as i16;
                 self.pc = self.pc.wrapping_add(offset as u16);
                 self.state = ExecState::Fetch;
@@ -548,7 +542,8 @@ impl M6809 {
     /// BSR (0x8D): Branch to Subroutine.
     /// Pushes return address (PC after offset byte) onto S stack,
     /// then branches to PC + sign-extended 8-bit offset.
-    /// No flags affected. 7 cycles total (1 fetch + 6 execute).
+    /// No flags affected. 7 cycles total: 1 fetch + 1 offset byte + 3 /VMA
+    /// don't-care + 2 pushes.
     pub(crate) fn op_bsr<B: Bus<Address = u16, Data = u8> + ?Sized>(
         &mut self,
         opcode: u8,
@@ -564,28 +559,20 @@ impl M6809 {
                 self.temp_addr = offset as u16;
                 self.state = ExecState::Execute(opcode, 1);
             }
-            1 => {
-                // Internal
-                self.state = ExecState::Execute(opcode, 2);
-            }
-            2 => {
-                // Push PC low byte
-                self.s = self.s.wrapping_sub(1);
-                bus.write(master, self.s, self.pc as u8);
-                self.state = ExecState::Execute(opcode, 3);
-            }
-            3 => {
-                // Push PC high byte
-                self.s = self.s.wrapping_sub(1);
-                bus.write(master, self.s, (self.pc >> 8) as u8);
-                self.state = ExecState::Execute(opcode, 4);
+            c @ 1..=3 => {
+                self.dummy_vma(bus, master);
+                self.state = ExecState::Execute(opcode, c + 1);
             }
             4 => {
-                // Internal
+                // Push PC low byte (PC is already the return address)
+                self.s = self.s.wrapping_sub(1);
+                bus.write(master, self.s, self.pc as u8);
                 self.state = ExecState::Execute(opcode, 5);
             }
             5 => {
-                // Add signed offset to PC
+                // Push PC high byte, then take the branch
+                self.s = self.s.wrapping_sub(1);
+                bus.write(master, self.s, (self.pc >> 8) as u8);
                 let offset = self.temp_addr as u8 as i8;
                 self.pc = self.pc.wrapping_add(offset as u16);
                 self.state = ExecState::Fetch;
@@ -596,7 +583,8 @@ impl M6809 {
 
     /// JSR direct (0x9D): Jump to Subroutine (direct addressing).
     /// Pushes return address onto S stack, then jumps to DP:offset.
-    /// No flags affected. 7 cycles total (1 fetch + 6 execute).
+    /// No flags affected. 7 cycles total: 1 fetch + 1 address byte + 3
+    /// don't-care (/VMA, PC, /VMA) + 2 pushes.
     pub(crate) fn op_jsr_direct<B: Bus<Address = u16, Data = u8> + ?Sized>(
         &mut self,
         opcode: u8,
@@ -613,27 +601,28 @@ impl M6809 {
                 self.state = ExecState::Execute(opcode, 1);
             }
             1 => {
-                // Internal
+                // Address-computation don't-care cycle (/VMA)
+                self.dummy_vma(bus, master);
                 self.state = ExecState::Execute(opcode, 2);
             }
             2 => {
-                // Push PC low byte
-                self.s = self.s.wrapping_sub(1);
-                bus.write(master, self.s, self.pc as u8);
+                self.dummy_at_pc(bus, master, 0);
                 self.state = ExecState::Execute(opcode, 3);
             }
             3 => {
-                // Push PC high byte
-                self.s = self.s.wrapping_sub(1);
-                bus.write(master, self.s, (self.pc >> 8) as u8);
+                self.dummy_vma(bus, master);
                 self.state = ExecState::Execute(opcode, 4);
             }
             4 => {
-                // Internal
+                // Push PC low byte
+                self.s = self.s.wrapping_sub(1);
+                bus.write(master, self.s, self.pc as u8);
                 self.state = ExecState::Execute(opcode, 5);
             }
             5 => {
-                // Jump to target
+                // Push PC high byte, then jump
+                self.s = self.s.wrapping_sub(1);
+                bus.write(master, self.s, (self.pc >> 8) as u8);
                 self.pc = self.temp_addr;
                 self.state = ExecState::Fetch;
             }
@@ -643,7 +632,7 @@ impl M6809 {
 
     /// JMP indexed (0x6E): Jump to indexed EA.
     /// No flags affected.
-    /// 3+ total cycles: 1 fetch + 1 postbyte + mode overhead + 1 base internal.
+    /// 3+ total cycles: 1 fetch + 1 postbyte + mode overhead + 1 base don't-care.
     pub(crate) fn op_jmp_indexed<B: Bus<Address = u16, Data = u8> + ?Sized>(
         &mut self,
         opcode: u8,
@@ -653,7 +642,8 @@ impl M6809 {
     ) {
         match cycle {
             40 => {
-                // Base internal cycle
+                // Last don't-care cycle of the address formation
+                self.indexed_dummy(bus, master);
                 self.pc = self.temp_addr;
                 self.state = ExecState::Fetch;
             }
@@ -667,7 +657,8 @@ impl M6809 {
 
     /// JSR indexed (0xAD): Jump to Subroutine at indexed EA.
     /// Pushes return address onto S stack, then jumps to indexed EA.
-    /// No flags affected.
+    /// No flags affected. After the address is formed: one don't-care at PC,
+    /// one /VMA, then the two pushes.
     pub(crate) fn op_jsr_indexed<B: Bus<Address = u16, Data = u8> + ?Sized>(
         &mut self,
         opcode: u8,
@@ -677,28 +668,29 @@ impl M6809 {
     ) {
         match cycle {
             50 => {
-                // Internal cycle
+                self.dummy_at_pc(bus, master, 0);
                 self.state = ExecState::Execute(opcode, 51);
             }
             51 => {
-                // Push PC low byte
-                self.s = self.s.wrapping_sub(1);
-                bus.write(master, self.s, self.pc as u8);
+                self.dummy_vma(bus, master);
                 self.state = ExecState::Execute(opcode, 52);
             }
             52 => {
-                // Push PC high byte
+                // Push PC low byte
                 self.s = self.s.wrapping_sub(1);
-                bus.write(master, self.s, (self.pc >> 8) as u8);
+                bus.write(master, self.s, self.pc as u8);
                 self.state = ExecState::Execute(opcode, 53);
             }
             53 => {
-                // Jump to target
+                // Push PC high byte, then jump
+                self.s = self.s.wrapping_sub(1);
+                bus.write(master, self.s, (self.pc >> 8) as u8);
                 self.pc = self.temp_addr;
                 self.state = ExecState::Fetch;
             }
             40 => {
-                // Base internal cycle
+                // Last don't-care cycle of the address formation
+                self.indexed_dummy(bus, master);
                 self.state = ExecState::Execute(opcode, 50);
             }
             _ => {
@@ -725,6 +717,8 @@ impl M6809 {
                 self.state = ExecState::Execute(opcode, 1);
             }
             1 => {
+                // Address-computation don't-care cycle (/VMA)
+                self.dummy_vma(bus, master);
                 self.state = ExecState::Fetch;
             }
             _ => {}
@@ -753,6 +747,8 @@ impl M6809 {
                 self.state = ExecState::Execute(opcode, 2);
             }
             2 => {
+                // Address-computation don't-care cycle (/VMA)
+                self.dummy_vma(bus, master);
                 self.state = ExecState::Fetch;
             }
             _ => {}
@@ -761,7 +757,8 @@ impl M6809 {
 
     /// JSR extended (0xBD): Jump to Subroutine at 16-bit address.
     /// Pushes return address onto S stack, then jumps to 16-bit address.
-    /// No flags affected. 8 cycles total (1 fetch + 7 execute).
+    /// No flags affected. 8 cycles total: 1 fetch + 2 address bytes + 3
+    /// don't-care (/VMA, PC, /VMA) + 2 pushes.
     pub(crate) fn op_jsr_extended<B: Bus<Address = u16, Data = u8> + ?Sized>(
         &mut self,
         opcode: u8,
@@ -785,27 +782,28 @@ impl M6809 {
                 self.state = ExecState::Execute(opcode, 2);
             }
             2 => {
-                // Internal
+                // Address-computation don't-care cycle (/VMA)
+                self.dummy_vma(bus, master);
                 self.state = ExecState::Execute(opcode, 3);
             }
             3 => {
-                // Push PC low byte
-                self.s = self.s.wrapping_sub(1);
-                bus.write(master, self.s, self.pc as u8);
+                self.dummy_at_pc(bus, master, 0);
                 self.state = ExecState::Execute(opcode, 4);
             }
             4 => {
-                // Push PC high byte
-                self.s = self.s.wrapping_sub(1);
-                bus.write(master, self.s, (self.pc >> 8) as u8);
+                self.dummy_vma(bus, master);
                 self.state = ExecState::Execute(opcode, 5);
             }
             5 => {
-                // Internal
+                // Push PC low byte
+                self.s = self.s.wrapping_sub(1);
+                bus.write(master, self.s, self.pc as u8);
                 self.state = ExecState::Execute(opcode, 6);
             }
             6 => {
-                // Jump to target
+                // Push PC high byte, then jump
+                self.s = self.s.wrapping_sub(1);
+                bus.write(master, self.s, (self.pc >> 8) as u8);
                 self.pc = self.temp_addr;
                 self.state = ExecState::Fetch;
             }
@@ -815,7 +813,9 @@ impl M6809 {
 
     /// RTS (0x39): Return from Subroutine.
     /// Pulls PC from S stack. No flags affected.
-    /// 5 cycles total (1 fetch + 4 execute).
+    /// 5 cycles total: 1 fetch + 1 don't-care at PC + 2 pulls + 1 read at the
+    /// new S. That last read is real, not a don't-care: every pull sequence on
+    /// this CPU ends by reading the byte the stack pointer has landed on.
     pub(crate) fn op_rts<B: Bus<Address = u16, Data = u8> + ?Sized>(
         &mut self,
         cycle: u8,
@@ -824,7 +824,7 @@ impl M6809 {
     ) {
         match cycle {
             0 => {
-                // Internal
+                self.dummy_at_pc(bus, master, 0);
                 self.state = ExecState::Execute(0x39, 1);
             }
             1 => {
@@ -842,7 +842,8 @@ impl M6809 {
                 self.state = ExecState::Execute(0x39, 3);
             }
             3 => {
-                // Internal
+                // Trailing read at the settled stack pointer
+                let _ = bus.read(master, self.s);
                 self.state = ExecState::Fetch;
             }
             _ => {}

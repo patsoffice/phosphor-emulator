@@ -12,7 +12,9 @@ impl M6809 {
     /// Pushes registers from High ID (PC=7) to Low ID (CC=0).
     /// Stack grows downward.
     /// 16-bit regs: Push Low byte, then High byte (so High is at lower addr).
-    /// Timing: 5+n cycles (1 fetch + 1 read postbyte + 2 internal + n push bytes).
+    /// Timing: 5+n cycles — 1 fetch + 1 read postbyte + 2 /VMA don't-care +
+    /// 1 read at the stack pointer + n push bytes. The read is real: the CPU
+    /// probes the stack top before it starts writing.
     fn op_push<B: Bus<Address = u16, Data = u8> + ?Sized>(
         &mut self,
         opcode: u8,
@@ -31,24 +33,31 @@ impl M6809 {
             return;
         }
 
-        // Cycles 1-2: Internal cycles (datasheet: 5+n = 1 fetch + 1 postbyte + 2 internal + n push + 1 done-check)
+        // Cycles 1-2: /VMA don't-care cycles
         if cycle <= 2 {
+            self.dummy_vma(bus, master);
             self.state = ExecState::Execute(opcode, cycle + 1);
             return;
         }
 
-        // Cycle 3+: Process registers
+        // Cycle 3: probe the stack top, then start pushing
+        if cycle == 3 {
+            let sp = if use_u { self.u } else { self.s };
+            let _ = bus.read(master, sp);
+            self.state = if (self.temp_addr & 0xFF) == 0 {
+                ExecState::Fetch // empty postbyte: nothing to push
+            } else {
+                ExecState::Execute(opcode, 4)
+            };
+            return;
+        }
+
+        // Cycle 4+: Process registers
         // Check if we are currently processing a 16-bit register (second byte)
         let mut mask = (self.temp_addr & 0xFF) as u8;
         let state = (self.temp_addr >> 8) as u8;
         let second_byte = (state & 0x01) != 0;
         let mut current_bit = 0;
-
-        if mask == 0 && !second_byte {
-            // Done
-            self.state = ExecState::Fetch;
-            return;
-        }
 
         // If not in the middle of a 16-bit reg, find next register
         if !second_byte {
@@ -143,15 +152,22 @@ impl M6809 {
             self.temp_addr = mask as u16; // Clear state
         }
 
-        // Continue execution next cycle
-        self.state = ExecState::Execute(opcode, cycle + 1);
+        // The last push ends the instruction — there is no separate done-check
+        // cycle, because the stack-top read at cycle 3 already spent it.
+        self.state = if self.temp_addr == 0 {
+            ExecState::Fetch
+        } else {
+            ExecState::Execute(opcode, cycle + 1)
+        };
     }
 
     /// Generic PULL operation (PULS/PULU)
     /// Pulls registers from Low ID (CC=0) to High ID (PC=7).
     /// Stack grows upward (incrementing).
     /// 16-bit regs: Pull High byte, then Low byte.
-    /// Timing: 5+n cycles (1 fetch + 1 read postbyte + 3 internal + n pull bytes).
+    /// Timing: 5+n cycles — 1 fetch + 1 read postbyte + 2 /VMA don't-care +
+    /// n pull bytes + 1 trailing read at the settled stack pointer. That last
+    /// read is real, and is why a pull ends on a bus cycle rather than silence.
     fn op_pull<B: Bus<Address = u16, Data = u8> + ?Sized>(
         &mut self,
         opcode: u8,
@@ -168,8 +184,9 @@ impl M6809 {
             return;
         }
 
-        // Cycles 1-2: Internal cycles (datasheet: 5+n = 1 fetch + 1 postbyte + 2 internal + n pull + 1 done-check)
+        // Cycles 1-2: /VMA don't-care cycles
         if cycle <= 2 {
+            self.dummy_vma(bus, master);
             self.state = ExecState::Execute(opcode, cycle + 1);
             return;
         }
@@ -180,6 +197,9 @@ impl M6809 {
         let mut current_bit = 0;
 
         if mask == 0 && !second_byte {
+            // Trailing read at the settled stack pointer
+            let sp = if use_u { self.u } else { self.s };
+            let _ = bus.read(master, sp);
             self.state = ExecState::Fetch;
             return;
         }
@@ -332,12 +352,13 @@ impl M6809 {
     ) {
         match cycle {
             0 => {
-                // Internal: set E flag
+                // Don't-care cycle at PC; the E flag is set on it
+                self.dummy_at_pc(bus, master, 0);
                 self.cc |= CcFlag::E as u8;
                 self.state = ExecState::Execute(0x3F, 1);
             }
             1 => {
-                // Internal cycle
+                self.dummy_vma(bus, master);
                 self.state = ExecState::Execute(0x3F, 2);
             }
             c @ 2..=13 => {
@@ -347,7 +368,8 @@ impl M6809 {
                 self.state = ExecState::Execute(0x3F, c + 1);
             }
             14 => {
-                // Internal: set mask flags
+                // /VMA don't-care opening the vector fetch; masks set on it
+                self.dummy_vma(bus, master);
                 self.cc |= CcFlag::I as u8 | CcFlag::F as u8;
                 self.state = ExecState::Execute(0x3F, 15);
             }
@@ -364,7 +386,8 @@ impl M6809 {
                 self.state = ExecState::Execute(0x3F, 17);
             }
             17 => {
-                // Internal cycle (done)
+                // /VMA don't-care closing the vector fetch
+                self.dummy_vma(bus, master);
                 self.state = ExecState::Fetch;
             }
             _ => {}
@@ -383,12 +406,13 @@ impl M6809 {
     ) {
         match cycle {
             0 => {
-                // Internal: set E flag
+                // Don't-care cycle at PC; the E flag is set on it
+                self.dummy_at_pc(bus, master, 0);
                 self.cc |= CcFlag::E as u8;
                 self.state = ExecState::ExecutePage2(0x3F, 1);
             }
             1 => {
-                // Internal cycle
+                self.dummy_vma(bus, master);
                 self.state = ExecState::ExecutePage2(0x3F, 2);
             }
             c @ 2..=13 => {
@@ -398,7 +422,8 @@ impl M6809 {
                 self.state = ExecState::ExecutePage2(0x3F, c + 1);
             }
             14 => {
-                // Internal: SWI2 does NOT mask interrupts
+                // /VMA don't-care opening the vector fetch; SWI2 does NOT mask
+                self.dummy_vma(bus, master);
                 self.state = ExecState::ExecutePage2(0x3F, 15);
             }
             15 => {
@@ -412,7 +437,8 @@ impl M6809 {
                 self.state = ExecState::ExecutePage2(0x3F, 17);
             }
             17 => {
-                // Internal cycle (done)
+                // /VMA don't-care closing the vector fetch
+                self.dummy_vma(bus, master);
                 self.state = ExecState::Fetch;
             }
             _ => {}
@@ -431,12 +457,13 @@ impl M6809 {
     ) {
         match cycle {
             0 => {
-                // Internal: set E flag
+                // Don't-care cycle at PC; the E flag is set on it
+                self.dummy_at_pc(bus, master, 0);
                 self.cc |= CcFlag::E as u8;
                 self.state = ExecState::ExecutePage3(0x3F, 1);
             }
             1 => {
-                // Internal cycle
+                self.dummy_vma(bus, master);
                 self.state = ExecState::ExecutePage3(0x3F, 2);
             }
             c @ 2..=13 => {
@@ -446,7 +473,8 @@ impl M6809 {
                 self.state = ExecState::ExecutePage3(0x3F, c + 1);
             }
             14 => {
-                // Internal: SWI3 does NOT mask interrupts
+                // /VMA don't-care opening the vector fetch; SWI3 does NOT mask
+                self.dummy_vma(bus, master);
                 self.state = ExecState::ExecutePage3(0x3F, 15);
             }
             15 => {
@@ -460,7 +488,8 @@ impl M6809 {
                 self.state = ExecState::ExecutePage3(0x3F, 17);
             }
             17 => {
-                // Internal cycle (done)
+                // /VMA don't-care closing the vector fetch
+                self.dummy_vma(bus, master);
                 self.state = ExecState::Fetch;
             }
             _ => {}
@@ -523,12 +552,14 @@ impl M6809 {
     ) {
         match cycle {
             0 => {
-                // Internal: set E flag (matches SWI cycle 0)
+                // Second of the two don't-care cycles at PC (the first was the
+                // cycle that detected the interrupt); the E flag is set on it
+                self.dummy_at_pc(bus, master, 0);
                 self.cc |= CcFlag::E as u8;
                 self.state = ExecState::Interrupt(1);
             }
             1 => {
-                // Internal cycle (matches SWI cycle 1)
+                self.dummy_vma(bus, master);
                 self.state = ExecState::Interrupt(2);
             }
             c @ 2..=13 => {
@@ -538,7 +569,8 @@ impl M6809 {
                 self.state = ExecState::Interrupt(c + 1);
             }
             14 => {
-                // Internal: set mask flags (matches SWI cycle 14)
+                // /VMA don't-care opening the vector fetch; masks set on it
+                self.dummy_vma(bus, master);
                 let mask = match self.interrupt_type {
                     InterruptType::Nmi => CcFlag::I as u8 | CcFlag::F as u8,
                     _ => CcFlag::I as u8, // IRQ (FIRQ doesn't reach here)
@@ -567,7 +599,8 @@ impl M6809 {
                 self.state = ExecState::Interrupt(17);
             }
             17 => {
-                // Internal cycle (matches SWI cycle 17)
+                // /VMA don't-care closing the vector fetch
+                self.dummy_vma(bus, master);
                 self.state = ExecState::Fetch;
             }
             _ => {}
@@ -593,12 +626,14 @@ impl M6809 {
     ) {
         match cycle {
             0 => {
-                // Internal: clear E for fast return
+                // Second of the two don't-care cycles at PC (the first was the
+                // cycle that detected the interrupt); E cleared on it
+                self.dummy_at_pc(bus, master, 0);
                 self.cc &= !(CcFlag::E as u8);
                 self.state = ExecState::Interrupt(1);
             }
             1 => {
-                // Internal cycle
+                self.dummy_vma(bus, master);
                 self.state = ExecState::Interrupt(2);
             }
             2 => {
@@ -617,7 +652,8 @@ impl M6809 {
                 self.state = ExecState::Interrupt(5);
             }
             5 => {
-                // Internal: set mask flags
+                // /VMA don't-care opening the vector fetch; masks set on it
+                self.dummy_vma(bus, master);
                 self.cc |= CcFlag::I as u8 | CcFlag::F as u8;
                 self.state = ExecState::Interrupt(6);
             }
@@ -632,7 +668,8 @@ impl M6809 {
                 self.state = ExecState::Interrupt(8);
             }
             8 => {
-                // Internal cycle (done)
+                // /VMA don't-care closing the vector fetch
+                self.dummy_vma(bus, master);
                 self.state = ExecState::Fetch;
             }
             _ => {}
@@ -752,10 +789,11 @@ impl M6809 {
     pub(crate) fn op_sync<B: Bus<Address = u16, Data = u8> + ?Sized>(
         &mut self,
         cycle: u8,
-        _bus: &mut B,
-        _master: BusMaster,
+        bus: &mut B,
+        master: BusMaster,
     ) {
         if cycle == 0 {
+            self.dummy_at_pc(bus, master, 0);
             self.state = ExecState::SyncWait;
         }
     }
@@ -764,8 +802,10 @@ impl M6809 {
     /// Pulls CC from S stack. If E flag is set in pulled CC, pulls all registers
     /// (A, B, DP, X, Y, U, PC). If E is clear, pulls only PC (fast FIRQ return).
     /// CC is restored from the stack (all flags affected).
-    /// E=0: 6 cycles (1 fetch + 1 internal + 1 pull CC + 1 internal + 2 pull PC).
-    /// E=1: 15 cycles (1 fetch + 1 internal + 12 pulls + 1 internal).
+    /// Both paths open with a don't-care cycle at PC and, like every pull
+    /// sequence, close with a real read at the settled stack pointer.
+    /// E=0: 6 cycles (1 fetch + 1 don't-care + 1 pull CC + 2 pull PC + 1 read).
+    /// E=1: 15 cycles (1 fetch + 1 don't-care + 12 pulls + 1 read).
     pub(crate) fn op_rti<B: Bus<Address = u16, Data = u8> + ?Sized>(
         &mut self,
         cycle: u8,
@@ -774,7 +814,7 @@ impl M6809 {
     ) {
         match cycle {
             0 => {
-                // Internal cycle
+                self.dummy_at_pc(bus, master, 0);
                 self.state = ExecState::Execute(0x3B, 1);
             }
             1 => {
@@ -846,22 +886,24 @@ impl M6809 {
                 self.state = ExecState::Execute(0x3B, 13);
             }
             13 => {
-                // Internal cycle (E=1 done)
+                // Trailing read at the settled stack pointer (E=1 done)
+                let _ = bus.read(master, self.s);
                 self.state = ExecState::Fetch;
             }
-            // === E=0 path: internal + pull PC only ===
+            // === E=0 path: pull PC only ===
             20 => {
-                // Internal cycle
+                self.pc = (bus.read(master, self.s) as u16) << 8;
+                self.s = self.s.wrapping_add(1);
                 self.state = ExecState::Execute(0x3B, 21);
             }
             21 => {
-                self.pc = (bus.read(master, self.s) as u16) << 8;
+                self.pc |= bus.read(master, self.s) as u16;
                 self.s = self.s.wrapping_add(1);
                 self.state = ExecState::Execute(0x3B, 22);
             }
             22 => {
-                self.pc |= bus.read(master, self.s) as u16;
-                self.s = self.s.wrapping_add(1);
+                // Trailing read at the settled stack pointer (E=0 done)
+                let _ = bus.read(master, self.s);
                 self.state = ExecState::Fetch;
             }
             _ => {}

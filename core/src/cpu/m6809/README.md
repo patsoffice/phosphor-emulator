@@ -1,15 +1,46 @@
 # Motorola 6809 CPU
 
-Cycle-accurate emulation of the Motorola 6809E microprocessor, implementing all 285 opcodes across 3 opcode pages. Cross-validated against [elmerucr/MC6809](https://github.com/elmerucr/MC6809) with 266,000 test vectors (100% pass rate).
+Cycle-accurate emulation of the Motorola 6809E microprocessor, implementing all 285 opcodes across 3 opcode pages. Cross-validated against the reference core in `cross-validation/mame0148/src/emu/cpu/m6809/m6809.c` with 266,000 test vectors.
 
 ## Status
 
 | Metric | Value |
 |--------|-------|
 | Opcodes | 285 (238 page 0 + 38 page 2 + 9 page 3) |
-| Unit tests | 318 |
-| Cross-validation | 266,000/266,000 (100%) |
+| Unit tests | 459 |
+| Cross-validation | 264,132/266,000 (99.3%) |
 | Timing | Cycle-accurate |
+
+The 1,868 cross-validation mismatches are all one known divergence in extended-indirect indexed addressing, where the datasheet and the reference core disagree on the cycle count; see `cpu-validation/README_m6809.md`.
+
+## Bus behaviour on don't-care cycles
+
+The 6809E never tri-states its address bus. On a cycle with no memory access to
+make it keeps driving an address, and a device that decodes addresses reacts to
+it just as it would to a real access — so these cycles are modelled as reads,
+not as silence.
+
+Which address depends on where the cycle falls:
+
+| Cycle | Address |
+|-------|---------|
+| Address computation (direct, extended, most indexed overhead) | `$FFFF` |
+| The read-modify-write modify cycle | PC |
+| The trailing cycle of a 16-bit ALU op (ADDD/SUBD/CMPx) | PC |
+| Inherent register ops (NEGA, INCB, CLRA, shifts, DAA, SEX, NOP) | PC |
+| Inherent TST (TSTA/TSTB) and TST's memory forms | `$FFFF` |
+| Branch offset settle, TFR/EXG, LEA, vector fetch brackets | `$FFFF` |
+| Interrupt/SWI entry, first two cycles | PC |
+| Indexed overhead, leading cycles of `,R` / `n8,R` / `D,R` and friends | PC, then `$FFFF` |
+
+Pull sequences (RTS, RTI, PULS/PULU) close on a *real* read at the settled
+stack pointer, and push sequences (PSHS/PSHU) open on a real read at the stack
+top — neither is a don't-care cycle.
+
+`core/tests/m6809_dont_care_cycle_test.rs` pins these instruction by
+instruction. Getting them wrong is not academic: Empire Strikes Back's slapstic
+validates its alternate-banking sequence on a `$FFFF` don't-care cycle, and
+would not reach bank 2 without one.
 
 ## Registers
 

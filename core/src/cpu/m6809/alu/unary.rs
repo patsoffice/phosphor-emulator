@@ -4,7 +4,7 @@ use crate::cpu::m68xx_alu_macros::{m68xx_alu_inherent, m68xx_alu_rmw};
 use crate::cpu::m6809::{CcFlag, ExecState, M6809};
 
 impl M6809 {
-    m68xx_alu_inherent! {
+    m68xx_alu_inherent! { @m6809
         /// NEGA inherent (0x40): Negate A (A = 0 - A, two's complement).
         /// N set if result bit 7 is set. Z set if result is zero.
         /// V set if A was 0x80 (-128), since -(-128) overflows signed 8-bit range.
@@ -28,7 +28,7 @@ impl M6809 {
         op_comb => b, perform_com;
     }
 
-    m68xx_alu_inherent! { @no_operand
+    m68xx_alu_inherent! { @m6809 @no_operand
         /// CLRA inherent (0x4F): Clear A (A = 0).
         /// Flags are always set to fixed values: N=0, Z=1, V=0, C=0.
         op_clra => a, perform_clr;
@@ -38,7 +38,7 @@ impl M6809 {
         op_clrb => b, perform_clr;
     }
 
-    m68xx_alu_inherent! {
+    m68xx_alu_inherent! { @m6809
         /// INCA inherent (0x4C): Increment A (A = A + 1).
         /// N set if result bit 7 is set. Z set if result is zero.
         /// V set if A was 0x7F before increment (positive-to-negative signed overflow).
@@ -64,7 +64,7 @@ impl M6809 {
         op_decb => b, perform_dec;
     }
 
-    m68xx_alu_inherent! { @flags_only
+    m68xx_alu_inherent! { @m6809 @flags_only
         /// TSTA inherent (0x4D): Test A (set flags based on A, no modification).
         /// N set if A bit 7 is set. Z set if A is zero. V always cleared.
         op_tsta => a, perform_tst;
@@ -75,9 +75,15 @@ impl M6809 {
     }
 
     /// NOP inherent (0x12): No operation.
-    /// No flags affected.
-    pub(crate) fn op_nop(&mut self, cycle: u8) {
+    /// No flags affected. Its one execute cycle is a don't-care cycle at PC.
+    pub(crate) fn op_nop<B: Bus<Address = u16, Data = u8> + ?Sized>(
+        &mut self,
+        cycle: u8,
+        bus: &mut B,
+        master: BusMaster,
+    ) {
         if cycle == 0 {
+            self.dummy_at_pc(bus, master, 0);
             self.state = ExecState::Fetch;
         }
     }
@@ -85,8 +91,14 @@ impl M6809 {
     /// SEX inherent (0x1D): Sign-extend B into A.
     /// If B bit 7 is set, A = 0xFF; otherwise A = 0x00.
     /// N set if result is negative. Z set if D (A:B) is zero.
-    pub(crate) fn op_sex(&mut self, cycle: u8) {
+    pub(crate) fn op_sex<B: Bus<Address = u16, Data = u8> + ?Sized>(
+        &mut self,
+        cycle: u8,
+        bus: &mut B,
+        master: BusMaster,
+    ) {
         if cycle == 0 {
+            self.dummy_at_pc(bus, master, 0);
             self.a = if self.b & 0x80 != 0 { 0xFF } else { 0x00 };
             let d = self.get_d();
             self.set_flag(CcFlag::N, d & 0x8000 != 0);
@@ -97,14 +109,20 @@ impl M6809 {
 
     /// ABX inherent (0x3A): Add B (unsigned) to X.
     /// X = X + B. No flags affected.
-    /// 3 total cycles: 1 fetch + 2 exec (internal + compute).
-    pub(crate) fn op_abx(&mut self, cycle: u8) {
+    /// 3 total cycles: 1 fetch + 2 don't-care (one at PC, one /VMA).
+    pub(crate) fn op_abx<B: Bus<Address = u16, Data = u8> + ?Sized>(
+        &mut self,
+        cycle: u8,
+        bus: &mut B,
+        master: BusMaster,
+    ) {
         match cycle {
             0 => {
-                // Internal cycle
+                self.dummy_at_pc(bus, master, 0);
                 self.state = ExecState::Execute(0x3A, 1);
             }
             1 => {
+                self.dummy_vma(bus, master);
                 self.x = self.x.wrapping_add(self.b as u16);
                 self.state = ExecState::Fetch;
             }
@@ -116,8 +134,14 @@ impl M6809 {
     /// Adjusts A to produce valid BCD result after ADDA/ADCA.
     /// N set if result bit 7 is set. Z set if result is zero.
     /// C set if addition of A + correction overflows byte. V undefined (left unchanged).
-    pub(crate) fn op_daa(&mut self, cycle: u8) {
+    pub(crate) fn op_daa<B: Bus<Address = u16, Data = u8> + ?Sized>(
+        &mut self,
+        cycle: u8,
+        bus: &mut B,
+        master: BusMaster,
+    ) {
         if cycle == 0 {
+            self.dummy_at_pc(bus, master, 0);
             let mut correction: u8 = 0;
             let lsn = self.a & 0x0F;
 

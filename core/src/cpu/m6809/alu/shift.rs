@@ -4,7 +4,7 @@ use crate::cpu::m68xx_alu_macros::{m68xx_alu_inherent, m68xx_alu_rmw};
 use crate::cpu::m6809::{ExecState, M6809};
 
 impl M6809 {
-    m68xx_alu_inherent! {
+    m68xx_alu_inherent! { @m6809
         /// ASLA/LSLA inherent (0x48): Arithmetic/Logical Shift Left A.
         /// Shifts all bits left one position. Bit 7 goes to C, 0 enters bit 0.
         /// N set if result bit 7 is set. Z set if result is zero.

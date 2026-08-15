@@ -50,7 +50,7 @@ impl M6809 {
     /// TFR immediate (0x1F): Transfer register R1 to R2.
     /// Operand: High nibble = Source, Low nibble = Dest.
     /// Condition: Sizes must match (8->8 or 16->16).
-    /// 6 cycles total: 1 fetch + 1 read operand + 4 internal.
+    /// 6 cycles total: 1 fetch + 1 read operand + 4 /VMA don't-care.
     pub(crate) fn op_tfr<B: Bus<Address = u16, Data = u8> + ?Sized>(
         &mut self,
         cycle: u8,
@@ -65,10 +65,11 @@ impl M6809 {
                 self.state = ExecState::Execute(0x1F, 1);
             }
             1..=3 => {
-                // Internal cycles
+                self.dummy_vma(bus, master);
                 self.state = ExecState::Execute(0x1F, cycle + 1);
             }
             4 => {
+                self.dummy_vma(bus, master);
                 let operand = self.temp_addr as u8;
                 let src = operand >> 4;
                 let dst = operand & 0x0F;
@@ -88,7 +89,7 @@ impl M6809 {
     /// EXG immediate (0x1E): Exchange registers R1 and R2.
     /// Operand: High nibble = R1, Low nibble = R2.
     /// Condition: Sizes must match.
-    /// 8 cycles total: 1 fetch + 1 read operand + 6 internal.
+    /// 8 cycles total: 1 fetch + 1 read operand + 6 /VMA don't-care.
     pub(crate) fn op_exg<B: Bus<Address = u16, Data = u8> + ?Sized>(
         &mut self,
         cycle: u8,
@@ -103,10 +104,11 @@ impl M6809 {
                 self.state = ExecState::Execute(0x1E, 1);
             }
             1..=5 => {
-                // Internal cycles
+                self.dummy_vma(bus, master);
                 self.state = ExecState::Execute(0x1E, cycle + 1);
             }
             6 => {
+                self.dummy_vma(bus, master);
                 let operand = self.temp_addr as u8;
                 let r1 = operand >> 4;
                 let r2 = operand & 0x0F;

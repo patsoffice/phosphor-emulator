@@ -55,7 +55,8 @@ impl M6809 {
                 self.state = ExecState::Execute(opcode, 1);
             }
             1 => {
-                // Internal cycle
+                // Address-computation don't-care cycle (/VMA)
+                self.dummy_vma(bus, master);
                 self.state = ExecState::Execute(opcode, 2);
             }
             2 => {
@@ -85,7 +86,8 @@ impl M6809 {
                 self.state = ExecState::Execute(opcode, 1);
             }
             1 => {
-                // Internal cycle
+                // Address-computation don't-care cycle (/VMA)
+                self.dummy_vma(bus, master);
                 self.state = ExecState::Execute(opcode, 2);
             }
             2 => {
@@ -117,7 +119,8 @@ impl M6809 {
                 self.state = ExecState::Execute(opcode, 1);
             }
             1 => {
-                // Internal cycle
+                // Address-computation don't-care cycle (/VMA)
+                self.dummy_vma(bus, master);
                 self.state = ExecState::Execute(opcode, 2);
             }
             2 => {
@@ -147,7 +150,8 @@ impl M6809 {
                 self.state = ExecState::Execute(opcode, 1);
             }
             1 => {
-                // Internal cycle
+                // Address-computation don't-care cycle (/VMA)
+                self.dummy_vma(bus, master);
                 self.state = ExecState::Execute(opcode, 2);
             }
             2 => {
@@ -179,7 +183,8 @@ impl M6809 {
                 self.state = ExecState::Execute(opcode, 1);
             }
             1 => {
-                // Internal cycle
+                // Address-computation don't-care cycle (/VMA)
+                self.dummy_vma(bus, master);
                 self.state = ExecState::Execute(opcode, 2);
             }
             2 => {
@@ -216,7 +221,8 @@ impl M6809 {
                 self.state = ExecState::Execute(opcode, 1);
             }
             1 => {
-                // Internal cycle
+                // Address-computation don't-care cycle (/VMA)
+                self.dummy_vma(bus, master);
                 self.state = ExecState::Execute(opcode, 2);
             }
             2 => {
@@ -252,7 +258,8 @@ impl M6809 {
                 self.state = ExecState::Execute(opcode, 1);
             }
             1 => {
-                // Internal cycle
+                // Address-computation don't-care cycle (/VMA)
+                self.dummy_vma(bus, master);
                 self.state = ExecState::Execute(opcode, 2);
             }
             2 => {
@@ -289,7 +296,8 @@ impl M6809 {
                 self.state = ExecState::Execute(opcode, 1);
             }
             1 => {
-                // Internal cycle
+                // Address-computation don't-care cycle (/VMA)
+                self.dummy_vma(bus, master);
                 self.state = ExecState::Execute(opcode, 2);
             }
             2 => {
@@ -324,7 +332,8 @@ impl M6809 {
                 self.state = ExecState::Execute(opcode, 1);
             }
             1 => {
-                // Internal cycle
+                // Address-computation don't-care cycle (/VMA)
+                self.dummy_vma(bus, master);
                 self.state = ExecState::Execute(opcode, 2);
             }
             2 => {
@@ -361,7 +370,8 @@ impl M6809 {
                 self.state = ExecState::ExecutePage2(opcode, 1);
             }
             1 => {
-                // Internal cycle
+                // Address-computation don't-care cycle (/VMA)
+                self.dummy_vma(bus, master);
                 self.state = ExecState::ExecutePage2(opcode, 2);
             }
             2 => {
@@ -398,7 +408,8 @@ impl M6809 {
                 self.state = ExecState::ExecutePage2(opcode, 1);
             }
             1 => {
-                // Internal cycle
+                // Address-computation don't-care cycle (/VMA)
+                self.dummy_vma(bus, master);
                 self.state = ExecState::ExecutePage2(opcode, 2);
             }
             2 => {
@@ -433,7 +444,8 @@ impl M6809 {
                 self.state = ExecState::ExecutePage2(opcode, 1);
             }
             1 => {
-                // Internal cycle
+                // Address-computation don't-care cycle (/VMA)
+                self.dummy_vma(bus, master);
                 self.state = ExecState::ExecutePage2(opcode, 2);
             }
             2 => {
@@ -470,7 +482,8 @@ impl M6809 {
                 self.state = ExecState::ExecutePage2(opcode, 1);
             }
             1 => {
-                // Internal cycle
+                // Address-computation don't-care cycle (/VMA)
+                self.dummy_vma(bus, master);
                 self.state = ExecState::ExecutePage2(opcode, 2);
             }
             2 => {
@@ -505,7 +518,8 @@ impl M6809 {
                 self.state = ExecState::Execute(opcode, 1);
             }
             1 => {
-                // Internal cycle
+                // Address-computation don't-care cycle (/VMA)
+                self.dummy_vma(bus, master);
                 self.state = ExecState::Execute(opcode, 2);
             }
             2 => {
@@ -563,7 +577,8 @@ impl M6809 {
                 self.state = ExecState::Execute(opcode, 2);
             }
             2 => {
-                // Internal cycle
+                // Address-computation don't-care cycle (/VMA)
+                self.dummy_vma(bus, master);
                 self.state = ExecState::Execute(opcode, 3);
             }
             3 => {
@@ -614,7 +629,8 @@ impl M6809 {
                 self.state = ExecState::Execute(opcode, 2);
             }
             2 => {
-                // Internal cycle
+                // Address-computation don't-care cycle (/VMA)
+                self.dummy_vma(bus, master);
                 self.state = ExecState::Execute(opcode, 3);
             }
             3 => {
@@ -652,7 +668,8 @@ impl M6809 {
                 self.state = ExecState::Execute(opcode, 2);
             }
             2 => {
-                // Internal cycle
+                // Address-computation don't-care cycle (/VMA)
+                self.dummy_vma(bus, master);
                 self.state = ExecState::Execute(opcode, 3);
             }
             3 => {
@@ -694,7 +711,8 @@ impl M6809 {
                 self.state = ExecState::Execute(opcode, 2);
             }
             2 => {
-                // Internal cycle
+                // Address-computation don't-care cycle (/VMA)
+                self.dummy_vma(bus, master);
                 self.state = ExecState::Execute(opcode, 3);
             }
             3 => {
@@ -736,7 +754,8 @@ impl M6809 {
                 self.state = ExecState::Execute(opcode, 2);
             }
             2 => {
-                // Internal cycle
+                // Address-computation don't-care cycle (/VMA)
+                self.dummy_vma(bus, master);
                 self.state = ExecState::Execute(opcode, 3);
             }
             3 => {
@@ -779,7 +798,8 @@ impl M6809 {
                 self.state = ExecState::Execute(opcode, 2);
             }
             2 => {
-                // Internal cycle
+                // Address-computation don't-care cycle (/VMA)
+                self.dummy_vma(bus, master);
                 self.state = ExecState::Execute(opcode, 3);
             }
             3 => {
@@ -820,7 +840,8 @@ impl M6809 {
                 self.state = ExecState::Execute(opcode, 2);
             }
             2 => {
-                // Internal cycle
+                // Address-computation don't-care cycle (/VMA)
+                self.dummy_vma(bus, master);
                 self.state = ExecState::Execute(opcode, 3);
             }
             3 => {
@@ -863,7 +884,8 @@ impl M6809 {
                 self.state = ExecState::Execute(opcode, 2);
             }
             2 => {
-                // Internal cycle
+                // Address-computation don't-care cycle (/VMA)
+                self.dummy_vma(bus, master);
                 self.state = ExecState::Execute(opcode, 3);
             }
             3 => {
@@ -908,7 +930,8 @@ impl M6809 {
     ) {
         match cycle {
             40 => {
-                // Base internal cycle
+                // Last don't-care cycle of the address formation
+                self.indexed_dummy(bus, master);
                 self.state = ExecState::Execute(opcode, 50);
             }
             50 => {
@@ -950,7 +973,8 @@ impl M6809 {
     ) {
         match cycle {
             40 => {
-                // Base internal cycle
+                // Last don't-care cycle of the address formation
+                self.indexed_dummy(bus, master);
                 self.state = ExecState::Execute(opcode, 50);
             }
             50 => {
@@ -991,7 +1015,8 @@ impl M6809 {
                 self.state = ExecState::Fetch;
             }
             40 => {
-                // Base internal cycle
+                // Last don't-care cycle of the address formation
+                self.indexed_dummy(bus, master);
                 self.state = ExecState::Execute(opcode, 50);
             }
             _ => {
@@ -1024,7 +1049,8 @@ impl M6809 {
                 self.state = ExecState::Fetch;
             }
             40 => {
-                // Base internal cycle
+                // Last don't-care cycle of the address formation
+                self.indexed_dummy(bus, master);
                 self.state = ExecState::Execute(opcode, 50);
             }
             _ => {
@@ -1058,7 +1084,8 @@ impl M6809 {
                 self.state = ExecState::Fetch;
             }
             40 => {
-                // Base internal cycle
+                // Last don't-care cycle of the address formation
+                self.indexed_dummy(bus, master);
                 self.state = ExecState::Execute(opcode, 50);
             }
             _ => {
@@ -1090,7 +1117,8 @@ impl M6809 {
                 self.state = ExecState::Fetch;
             }
             40 => {
-                // Base internal cycle
+                // Last don't-care cycle of the address formation
+                self.indexed_dummy(bus, master);
                 self.state = ExecState::Execute(opcode, 50);
             }
             _ => {
@@ -1124,7 +1152,8 @@ impl M6809 {
                 self.state = ExecState::Fetch;
             }
             40 => {
-                // Base internal cycle
+                // Last don't-care cycle of the address formation
+                self.indexed_dummy(bus, master);
                 self.state = ExecState::Execute(opcode, 50);
             }
             _ => {
@@ -1156,7 +1185,8 @@ impl M6809 {
                 self.state = ExecState::Fetch;
             }
             40 => {
-                // Base internal cycle
+                // Last don't-care cycle of the address formation
+                self.indexed_dummy(bus, master);
                 self.state = ExecState::Execute(opcode, 50);
             }
             _ => {
@@ -1171,7 +1201,7 @@ impl M6809 {
 
     /// LEAX indexed (0x30): Load Effective Address into X.
     /// Z set if result is zero. No other flags affected.
-    /// 4+ total cycles: 1 fetch + 1 postbyte + mode overhead + 2 base internal.
+    /// 4+ total cycles: 1 fetch + 1 postbyte + mode overhead + 2 don't-care cycles.
     pub(crate) fn op_leax<B: Bus<Address = u16, Data = u8> + ?Sized>(
         &mut self,
         opcode: u8,
@@ -1181,11 +1211,13 @@ impl M6809 {
     ) {
         match cycle {
             39 => {
-                // Base internal cycle 1
+                // Last don't-care cycle of the address formation
+                self.indexed_dummy(bus, master);
                 self.state = ExecState::Execute(opcode, 40);
             }
             40 => {
-                // Base internal cycle 2
+                // LEA's own /VMA don't-care; the register is loaded on it
+                self.dummy_vma(bus, master);
                 self.x = self.temp_addr;
                 self.set_flag(CcFlag::Z, self.x == 0);
                 self.state = ExecState::Fetch;
@@ -1200,7 +1232,7 @@ impl M6809 {
 
     /// LEAY indexed (0x31): Load Effective Address into Y.
     /// Z set if result is zero. No other flags affected.
-    /// 4+ total cycles: 1 fetch + 1 postbyte + mode overhead + 2 base internal.
+    /// 4+ total cycles: 1 fetch + 1 postbyte + mode overhead + 2 don't-care cycles.
     pub(crate) fn op_leay<B: Bus<Address = u16, Data = u8> + ?Sized>(
         &mut self,
         opcode: u8,
@@ -1210,9 +1242,13 @@ impl M6809 {
     ) {
         match cycle {
             39 => {
+                // Last don't-care cycle of the address formation
+                self.indexed_dummy(bus, master);
                 self.state = ExecState::Execute(opcode, 40);
             }
             40 => {
+                // LEA's own /VMA don't-care; the register is loaded on it
+                self.dummy_vma(bus, master);
                 self.y = self.temp_addr;
                 self.set_flag(CcFlag::Z, self.y == 0);
                 self.state = ExecState::Fetch;
@@ -1227,7 +1263,7 @@ impl M6809 {
 
     /// LEAS indexed (0x32): Load Effective Address into S.
     /// No flags affected.
-    /// 4+ total cycles: 1 fetch + 1 postbyte + mode overhead + 2 base internal.
+    /// 4+ total cycles: 1 fetch + 1 postbyte + mode overhead + 2 don't-care cycles.
     pub(crate) fn op_leas<B: Bus<Address = u16, Data = u8> + ?Sized>(
         &mut self,
         opcode: u8,
@@ -1237,9 +1273,13 @@ impl M6809 {
     ) {
         match cycle {
             39 => {
+                // Last don't-care cycle of the address formation
+                self.indexed_dummy(bus, master);
                 self.state = ExecState::Execute(opcode, 40);
             }
             40 => {
+                // LEA's own /VMA don't-care; the register is loaded on it
+                self.dummy_vma(bus, master);
                 self.s = self.temp_addr;
                 self.state = ExecState::Fetch;
             }
@@ -1253,7 +1293,7 @@ impl M6809 {
 
     /// LEAU indexed (0x33): Load Effective Address into U.
     /// No flags affected.
-    /// 4+ total cycles: 1 fetch + 1 postbyte + mode overhead + 2 base internal.
+    /// 4+ total cycles: 1 fetch + 1 postbyte + mode overhead + 2 don't-care cycles.
     pub(crate) fn op_leau<B: Bus<Address = u16, Data = u8> + ?Sized>(
         &mut self,
         opcode: u8,
@@ -1263,9 +1303,13 @@ impl M6809 {
     ) {
         match cycle {
             39 => {
+                // Last don't-care cycle of the address formation
+                self.indexed_dummy(bus, master);
                 self.state = ExecState::Execute(opcode, 40);
             }
             40 => {
+                // LEA's own /VMA don't-care; the register is loaded on it
+                self.dummy_vma(bus, master);
                 self.u = self.temp_addr;
                 self.state = ExecState::Fetch;
             }
@@ -1302,7 +1346,8 @@ impl M6809 {
                 self.state = ExecState::Fetch;
             }
             40 => {
-                // Base internal cycle
+                // Last don't-care cycle of the address formation
+                self.indexed_dummy(bus, master);
                 self.state = ExecState::ExecutePage2(opcode, 50);
             }
             _ => {
@@ -1334,7 +1379,8 @@ impl M6809 {
                 self.state = ExecState::Fetch;
             }
             40 => {
-                // Base internal cycle
+                // Last don't-care cycle of the address formation
+                self.indexed_dummy(bus, master);
                 self.state = ExecState::ExecutePage2(opcode, 50);
             }
             _ => {
@@ -1368,7 +1414,8 @@ impl M6809 {
                 self.state = ExecState::Fetch;
             }
             40 => {
-                // Base internal cycle
+                // Last don't-care cycle of the address formation
+                self.indexed_dummy(bus, master);
                 self.state = ExecState::ExecutePage2(opcode, 50);
             }
             _ => {
@@ -1400,7 +1447,8 @@ impl M6809 {
                 self.state = ExecState::Fetch;
             }
             40 => {
-                // Base internal cycle
+                // Last don't-care cycle of the address formation
+                self.indexed_dummy(bus, master);
                 self.state = ExecState::ExecutePage2(opcode, 50);
             }
             _ => {
