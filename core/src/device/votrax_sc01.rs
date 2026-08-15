@@ -64,7 +64,7 @@ const OUTPUT_SAMPLE_RATE: u64 = 44_100;
 
 /// Votrax SC-01 speech synthesizer.
 #[derive(Saveable)]
-#[save_version(1)]
+#[save_version(2)] // v2: the output resampler's phase joined the snapshot
 pub struct VotraxSc01 {
     // --- Inputs ---
     phone: u8,
@@ -156,7 +156,16 @@ pub struct VotraxSc01 {
     vn_5: [f64; 2],
     vn_6: [f64; 2],
 
+    /// Serialized: its resampling phase decides *when* the next output sample
+    /// falls, so a restored device that kept a stale phase emits a different
+    /// number of samples per frame than the saved one did. (Its output buffer
+    /// is not carried across — `AudioResampler::load_state` clears it.)
+    resampler: AudioResampler<f32>,
+
     // --- Non-serialized fields ---
+    // Configuration, not state: `rom` and `main_clock_hz` are fixed at
+    // construction, and `sclock`/`cclock` are re-derived from the main clock
+    // whenever the driving board retunes the VCO.
     #[save_skip]
     rom: Vec<u8>,
     #[save_skip]
@@ -165,8 +174,6 @@ pub struct VotraxSc01 {
     sclock: f64,
     #[save_skip]
     cclock: f64,
-    #[save_skip]
-    resampler: AudioResampler<f32>,
 }
 
 impl VotraxSc01 {

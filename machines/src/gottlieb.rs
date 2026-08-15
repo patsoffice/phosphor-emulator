@@ -943,6 +943,12 @@ impl Saveable for GottliebBoard {
         self.watchdog_counter = r.read_u16_le()?;
         // Rebuild derived state
         self.rebuild_palette();
+        // Force the Votrax VCO divider to be re-derived from the loaded
+        // sound board on the next tick. Without this the applied frequency is
+        // whatever this instance happened to be running at, so a machine that
+        // had already retuned the VCO keeps the wrong speech clock — and emits
+        // a different number of samples per frame than the saved machine did.
+        self.votrax_clock_applied = 0;
         Ok(())
     }
 }
