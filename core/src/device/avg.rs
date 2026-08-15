@@ -13,13 +13,24 @@
 //!
 //! # Architecture
 //!
-//! The AVG reads 4 bytes per instruction from a contiguous vector memory space.
-//! The real hardware uses a 256×4-bit PROM state machine that sequences through
-//! handlers 0–3 (latching DVY, opcode, DVX, intensity) then dispatches to
-//! handlers 4–7 (strobe0–strobe3) based on the 3-bit opcode.
+//! The generator is a sequencer, not an instruction decoder. A 256×4-bit PROM
+//! holds the next-state table; a latch holds the current state plus the halt
+//! flag. Every clock the PROM is addressed by
+//! `(halt ^ 1) << 7 | op << 4 | state` and its low nibble becomes the next
+//! state. Bit 3 of the state (ST3) gates dispatch: states `8`–`F` run handlers
+//! `0`–`7`, states `0`–`7` are idle waits that still cost a clock. Handlers
+//! `0`–`3` latch DVY, the opcode, DVX and the intensity from vector memory;
+//! handlers `4`–`7` are strobe0–strobe3 (normalize, binary scale, color/branch,
+//! draw).
 //!
-//! This implementation decodes instructions directly at the word level for
-//! clarity, while matching the hardware's handler behavior exactly.
+//! [`Avg::execute`] runs that loop directly, so per-instruction timing falls
+//! out of the PROM rather than being assumed: the sequencer is clocked at
+//! master/8, each state costs 8 master-clock cycles, and strobe3 adds the beam
+//! time of the vector it draws. The total is reported by
+//! [`Avg::run_cycles`] and is what a board converts into its VG_HALT window.
+//!
+//! [`Avg::load_state_prom`] installs the game's own copy of that table; a
+//! built-in default stands in until it does.
 //!
 //! # Byte addressing
 //!
@@ -31,12 +42,11 @@
 //!
 //! # Instruction sizes
 //!
-//! - Op 0 (VCTR): 4-byte instruction (two 16-bit words)
-//! - Ops 1–7: 2-byte instructions (one 16-bit word)
-//!
-//! The PROM state machine determines handler sequencing per opcode.
-//! SVEC (op 2) packs DVX and int_latch into the low byte of its
-//! single word (handler 3 reads it), with 4-bit DVX/DVY precision.
+//! Instruction length is a consequence of how many latch states the PROM walks
+//! through, not a property decoded up front: VCTR (op 0) runs latch0–latch3 and
+//! so consumes 4 bytes, SVEC (op 2) runs latch1 and latch3 only and packs DVX
+//! and int_latch into the low byte of its single word, and every other opcode
+//! runs latch1 + latch0 for 2 bytes.
 //!
 //! # Tempest-specific behavior
 //!
@@ -91,6 +101,25 @@ pub struct Avg {
     /// Stack pointer (only bits 1:0 used).
     sp: u8,
 
+    /// The byte (word, on Quantum) the address counter is currently presenting
+    /// to the latches — refreshed before every dispatched state.
+    data: u16,
+    /// 3-bit opcode latched by handler 1 (0 VCTR, 1 HALT, 2 SVEC, 3 STAT,
+    /// 4 CNTR, 5 JSR, 6 RTS, 7 JMP). It also selects the PROM row, so it
+    /// steers the rest of the instruction's state sequence.
+    op: u8,
+    /// X delta (13-bit Tempest/Star Wars, 12-bit Quantum).
+    dvx: u16,
+    /// Y delta / operand (13-bit).
+    dvy: u16,
+    /// DVY bit 12 — selects scale vs color/intensity in the STAT strobe.
+    dvy12: u8,
+    /// Intensity latch (4-bit) from handler 3.
+    int_latch: u8,
+    /// Vector timer, loaded by normalization and binary scaling and consumed
+    /// (and cleared) by strobe3, where it sets the beam's travel time.
+    timer: u16,
+
     /// Current beam X position (fixed-point, pixel << 16).
     xpos: i32,
     /// Current beam Y position (fixed-point).
@@ -122,21 +151,29 @@ pub struct Avg {
     flip_x: bool,
     flip_y: bool,
 
-    /// True when the AVG has halted.
+    /// The halt flag, set by strobe3 on a HALT opcode and cleared by
+    /// [`go`](Self::go). It is bit 4 of the PROM address, so a halted
+    /// sequencer parks in the table's all-zero lower half.
     halted: bool,
 
-    /// Master-clock cycles the last run would have taken on the real state
-    /// machine. We walk the vector list in one go, but the hardware takes
-    /// real time to do it and holds VG_HALT low meanwhile — games poll that
-    /// flag, so a generator that is instantly done lets them do more work per
-    /// frame than the hardware would. The board converts this to its own
-    /// clock and reports "busy" for that long.
+    /// Master-clock cycles between the GO write and the halt becoming visible.
+    /// We walk the vector list in one go, but the hardware takes real time to
+    /// do it and holds VG_HALT low meanwhile — games poll that flag, so a
+    /// generator that is instantly done lets them do more work per frame than
+    /// the hardware would. The board converts this to its own clock and
+    /// reports "busy" for that long.
     run_cycles: u32,
 
-    /// The 256×4 state PROM (low nibbles), and the sequencer's current state.
-    /// Empty when the machine has not wired one up.
-    state_prom: Vec<u8>,
+    /// The 256×4 next-state PROM (low nibbles), initially the built-in
+    /// [`default_state_prom`] and replaced by the game's own via
+    /// [`load_state_prom`](Self::load_state_prom).
+    state_prom: [u8; 0x100],
+    /// Sequencer state latch: bits 3:0 the state, bit 4 the halt flag as it
+    /// stood when the current PROM lookup was addressed.
     state_latch: u8,
+    /// Set by strobe2 when a branch targets address 0 — the frame delimiter
+    /// for the games whose vector list loops forever instead of halting.
+    frame_done: bool,
 
     /// Accumulated display list for the current frame.
     display_list: Vec<VectorLine>,
@@ -147,25 +184,47 @@ pub struct Avg {
 /// only the *number* of states varies, and that comes from the state PROM.
 const AVG_CYCLES_PER_STATE: u32 = 8;
 
-/// Fallback state count per instruction when no state PROM has been loaded,
-/// so a machine that has not wired one up keeps working (with approximate
-/// timing) rather than reporting the generator instantly done.
-const AVG_FALLBACK_STATES: u32 = 2;
+/// Upper bound on states per [`Avg::execute`] call, so a vector list that
+/// neither halts nor branches to zero cannot spin forever. Real lists run a
+/// few thousand instructions of 3–8 states each.
+const MAX_STATES: u32 = 500_000;
 
-/// One decoded AVG instruction (fields common to all variants).
-struct Instr {
-    /// 3-bit opcode (0 VCTR, 1 HALT, 2 SVEC, 3 STAT, 4 CNTR, 5 JSR, 6 RTS, 7 JMP).
-    op: u8,
-    /// Y delta / operand (13-bit).
-    dvy: u16,
-    /// X delta (13-bit Tempest, 12-bit Quantum).
-    dvx: u16,
-    /// Intensity latch (4-bit).
-    int_latch: u8,
-    /// DVY bit 12 (selects scale vs color/intensity in STAT).
-    dvy12: u8,
-    /// True for Tempest SVEC (8-bit timer path); always false for Quantum.
-    is_short: bool,
+/// The state each opcode's sequence runs through, in order, starting from the
+/// idle state 0. States 8–F dispatch handlers 0–7 — 8 latch0, 9 latch1,
+/// A latch2, B latch3, C strobe0, D strobe1, E strobe2, F strobe3 — and
+/// states 0–7 are idle waits. Ops 0–4 drop back to idle at the end; the branch
+/// ops 5–7 chain straight into the next instruction's latch1.
+const STATE_CHAINS: [&[u8]; 8] = [
+    &[0, 9, 8, 0xB, 0xA, 0xC, 0xD, 0xF], // VCTR
+    &[0, 9, 8, 0xF],                     // HALT
+    &[0, 9, 0xB, 0xC, 0xD, 0xF],         // SVEC
+    &[0, 9, 8, 7, 6, 5, 0xE],            // STAT
+    &[0, 9, 8, 0xC, 0xF],                // CNTR
+    &[0, 9, 8, 0xC, 0xD, 0xE],           // JSR
+    &[0, 9, 8, 0xD, 0xE],                // RTS
+    &[0, 9, 8, 0xE],                     // JMP
+];
+
+/// The sequencer table a fresh [`Avg`] starts with, built from
+/// [`STATE_CHAINS`]: entry `0x80 | op << 4 | state` is the state that follows
+/// `state` while the generator runs, and the halted half (below `0x80`) is all
+/// zeros, which parks it.
+///
+/// [`Avg::load_state_prom`] replaces this with the game's own PROM. The games'
+/// PROMs differ only in which idle states pad an opcode out — the state counts,
+/// and so the timing, are the same — so a machine that has not wired its PROM
+/// up still sequences and times correctly.
+fn default_state_prom() -> [u8; 0x100] {
+    let mut prom = [0u8; 0x100];
+    for (op, chain) in STATE_CHAINS.iter().enumerate() {
+        let row = 0x80 | (op << 4);
+        for pair in chain.windows(2) {
+            prom[row | usize::from(pair[0])] = pair[1];
+        }
+        let last = usize::from(chain[chain.len() - 1]);
+        prom[row | last] = if op >= 5 { 9 } else { 0 };
+    }
+    prom
 }
 
 impl Avg {
@@ -191,6 +250,13 @@ impl Avg {
             pc: 0,
             stack: [0; 4],
             sp: 0,
+            data: 0,
+            op: 0,
+            dvx: 0,
+            dvy: 0,
+            dvy12: 0,
+            int_latch: 0,
+            timer: 0,
             xpos: xcenter,
             ypos: ycenter,
             prev_x: xcenter,
@@ -208,13 +274,19 @@ impl Avg {
             flip_y: false,
             halted: true,
             run_cycles: 0,
-            state_prom: Vec::new(),
+            state_prom: default_state_prom(),
             state_latch: 0,
+            frame_done: false,
             display_list: Vec::with_capacity(2048),
         }
     }
 
     /// Trigger AVG execution (CPU writes to AVG GO register).
+    ///
+    /// Only the address counter and the halt flag are reset. The state latch
+    /// keeps the state it parked in, so the first lookup of the new run still
+    /// comes from the halted half of the PROM and costs one idle state before
+    /// the first opcode is latched — exactly as the hardware does.
     pub fn go(&mut self) {
         self.pc = 0;
         self.sp = 0;
@@ -227,58 +299,54 @@ impl Avg {
         self.halted
     }
 
-    /// Master-clock cycles the last [`execute`](Self::execute) would have
-    /// taken on hardware. See [`run_cycles`](Self::run_cycles).
+    /// Master-clock cycles the last [`execute`](Self::execute) spent between
+    /// the GO write and raising the halt — the window over which the hardware
+    /// holds VG_HALT low and a polling game has to wait.
     pub fn run_cycles(&self) -> u32 {
         self.run_cycles
     }
 
-    /// Load the 256×4 AVG state PROM (the sequencer that decides how many
-    /// states each instruction takes). Only the low nibble of each byte is
-    /// the next-state field.
+    /// Load the game's 256×4 AVG state PROM — the sequencer's next-state
+    /// table, and therefore the source of instruction timing. Only the low
+    /// nibble of each byte is the next-state field. A short image leaves the
+    /// remaining entries at their [`default_state_prom`] values.
     pub fn load_state_prom(&mut self, data: &[u8]) {
-        self.state_prom = data.iter().map(|b| b & 0x0F).collect();
+        for (entry, byte) in self.state_prom.iter_mut().zip(data) {
+            *entry = byte & 0x0F;
+        }
     }
 
-    /// Count the state-machine iterations one instruction with opcode `op`
-    /// takes, by walking the real state PROM exactly as the hardware
-    /// sequencer does.
-    ///
-    /// The PROM is addressed by `(halt^1) << 7 | op << 4 | state`, and each
-    /// lookup yields the next state. An instruction runs until the sequence
-    /// returns to a state it has already visited (the sequencer is a small
-    /// cycle per opcode), which is what bounds the walk.
-    ///
-    /// Returns `None` when no PROM is loaded, so the caller can fall back
-    /// rather than silently reporting zero-length runs.
-    fn states_for_op(&self, op: u8) -> Option<u32> {
-        let prom = self.state_prom.as_slice();
-        if prom.len() < 0x100 {
-            return None;
-        }
-        let mut seen = [false; 16];
-        let mut state = self.state_latch & 0x0F;
-        let mut states = 0u32;
-        // 16 possible states, so a cycle must close within 16 steps.
-        while !seen[usize::from(state)] && states < 16 {
-            seen[usize::from(state)] = true;
-            // halt is 0 while the instruction runs, so (halt ^ 1) = 1.
-            let addr = 0x80 | (usize::from(op & 7) << 4) | usize::from(state);
-            state = prom[addr];
-            states += 1;
-        }
-        Some(states)
+    /// Address the next-state PROM: the halt flag (inverted) picks the half,
+    /// the opcode picks the row, and the latched state picks the column.
+    fn state_addr(&self) -> usize {
+        usize::from(((self.state_latch >> 4) ^ 1) & 1) << 7
+            | usize::from(self.op & 7) << 4
+            | usize::from(self.state_latch & 0x0F)
     }
 
-    /// Cycles the beam spends drawing one vector, from the normalized timer
-    /// value — the same derivation MAME makes in `avg_common_strobe3`. A
-    /// short vector counts in the low byte only.
-    fn draw_cycles(timer: u16, is_short: bool) -> u32 {
-        if is_short {
-            0x100 - u32::from(timer & 0xFF)
-        } else {
-            0x8000 - u32::from(timer)
-        }
+    // The opcode's individual bits each steer part of the datapath, so the
+    // strobes test them rather than the opcode as a whole.
+    fn op0(&self) -> bool {
+        self.op & 1 != 0
+    }
+    fn op1(&self) -> bool {
+        self.op & 2 != 0
+    }
+    fn op2(&self) -> bool {
+        self.op & 4 != 0
+    }
+
+    /// Present the byte (Quantum: word) at the address counter to the latches.
+    ///
+    /// Tempest addresses vector memory as `pc ^ 1`, Star Wars in native order,
+    /// and Quantum reads the big-endian word the counter is inside.
+    fn update_databus(&mut self, vmem: &[u8]) {
+        let byte = |i: usize| u16::from(vmem.get(i).copied().unwrap_or(0));
+        self.data = match self.variant {
+            AvgVariant::Tempest => byte(usize::from(self.pc) ^ 1),
+            AvgVariant::StarWars => byte(usize::from(self.pc)),
+            AvgVariant::Quantum => Self::read_word_be(vmem, self.pc & !1),
+        };
     }
 
     /// Debug: return (scale, bin_scale, color, intensity).
@@ -301,6 +369,16 @@ impl Avg {
         self.bin_scale = 0;
         self.color = 0;
         self.intensity = 0;
+        self.state_latch = 0;
+        self.timer = 0;
+        self.op = 0;
+        self.dvx = 0;
+        self.dvy = 0;
+        self.dvy12 = 0;
+        self.int_latch = 0;
+        self.data = 0;
+        self.frame_done = false;
+        self.run_cycles = 0;
         self.halted = true;
         self.has_prev = false;
         self.xpos = self.xcenter;
@@ -310,113 +388,76 @@ impl Avg {
         self.display_list.clear();
     }
 
-    /// Execute AVG instructions until halt or frame boundary (jump to address 0).
+    /// Run the sequencer until the vector list halts or branches to address 0.
     ///
     /// `vmem` is the combined vector RAM + ROM (8 KB for Tempest).
-    /// `color_ram` is the 16-entry color RAM for Tempest color lookup.
+    /// `color_ram` is the 16-entry color RAM for Tempest/Quantum color lookup.
     ///
-    /// Returns true if a frame was completed.
+    /// Each iteration is one state: look the next state up in the PROM, run
+    /// its handler if ST3 is set, and charge [`AVG_CYCLES_PER_STATE`] plus
+    /// whatever beam time the handler consumed. That accumulated count is what
+    /// [`run_cycles`](Self::run_cycles) reports, sampled at the moment the
+    /// halt flag is raised.
+    ///
+    /// Returns true if a frame was completed (a branch to address 0). Games
+    /// whose list ends in HALT return false; their frame is delimited by the
+    /// halt instead.
     pub fn execute(&mut self, vmem: &[u8], color_ram: &[u8; 16]) -> bool {
-        let mut instructions = 0u32;
-        const MAX_INSTRUCTIONS: u32 = 50_000;
+        self.frame_done = false;
+        let mut cycles = 0u32;
 
-        while !self.halted && instructions < MAX_INSTRUCTIONS {
-            // --- Decode (variant-specific) ---
-            let Instr {
-                op,
-                dvy,
-                dvx,
-                int_latch,
-                dvy12,
-                is_short,
-            } = match self.variant {
-                AvgVariant::Tempest => self.decode_tempest(vmem),
-                AvgVariant::Quantum => self.decode_quantum(vmem),
-                AvgVariant::StarWars => self.decode_starwars(vmem),
-            };
+        for _ in 0..MAX_STATES {
+            self.state_latch = (self.state_latch & 0x10) | self.state_prom[self.state_addr()];
 
-            // Every instruction costs state-machine time whether or not it
-            // draws, and how much is a property of the opcode's state
-            // sequence — read from the real PROM rather than assumed.
-            let states = self.states_for_op(op).unwrap_or(AVG_FALLBACK_STATES);
-            self.run_cycles += states * AVG_CYCLES_PER_STATE;
-
-            // --- Execute. Op meanings (0/2 VCTR/SVEC, 1 HALT, 3 STAT, 4 CNTR,
-            // 5 JSR, 6 RTS, 7 JMP) are shared across variants; only the vector
-            // draw math, normalization, and STAT color latch differ. ---
-            match op {
-                0 | 2 => match self.variant {
-                    AvgVariant::Tempest => {
-                        let (norm_dvx, norm_dvy, timer) = self.normalize(dvx, dvy, is_short);
-                        let timer = self.apply_bin_scale(timer, is_short);
-                        self.draw_vector(norm_dvx, norm_dvy, timer, is_short, int_latch, color_ram);
-                    }
-                    AvgVariant::Quantum => {
-                        let (norm_dvx, norm_dvy, timer) = self.normalize_quantum(dvx, dvy);
-                        let timer = self.apply_bin_scale_quantum(timer);
-                        self.draw_quantum(norm_dvx, norm_dvy, timer, int_latch, color_ram);
-                    }
-                    AvgVariant::StarWars => {
-                        // Star Wars shares Tempest's 13-bit normalization and
-                        // strobe3 position math; only color/intensity differ.
-                        let (norm_dvx, norm_dvy, timer) = self.normalize(dvx, dvy, is_short);
-                        let timer = self.apply_bin_scale(timer, is_short);
-                        self.run_cycles += Self::draw_cycles(timer, is_short);
-                        self.draw_starwars(norm_dvx, norm_dvy, timer, is_short, int_latch);
-                    }
-                },
-                1 => self.halted = true,
-                3 => {
-                    if dvy12 != 0 {
-                        self.scale = (dvy & 0xFF) as u8;
-                        self.bin_scale = ((dvy >> 8) & 7) as u8;
-                    } else if self.variant == AvgVariant::StarWars {
-                        // Star Wars strobe2 latches an 8-bit intensity and a
-                        // 4-bit color index together, ungated (no 0x800 select).
-                        self.intensity = (dvy & 0xFF) as u8;
-                        self.color = ((dvy >> 8) & 0xF) as u8;
-                    } else if dvy & 0x800 != 0 {
-                        self.color = (dvy & 0xF) as u8;
-                        // Quantum latches color and intensity together (its
-                        // strobe2); Tempest latches only color here.
-                        if self.variant == AvgVariant::Quantum {
-                            self.intensity = ((dvy >> 4) & 0xF) as u8;
-                        }
-                    } else if self.variant == AvgVariant::Tempest {
-                        self.intensity = ((dvy >> 4) & 0xF) as u8;
-                    }
-                }
-                4 => {
-                    self.xpos = self.xcenter;
-                    self.ypos = self.ycenter;
-                    self.add_point(self.xpos, self.ypos, 0, [0, 0, 0]);
-                }
-                5 => {
-                    self.stack[(self.sp & 3) as usize] = self.pc;
-                    self.sp = self.sp.wrapping_add(1) & 0xF;
-                    self.pc = dvy << 1;
-                    if dvy == 0 {
-                        self.halted = true;
-                        return true;
-                    }
-                }
-                6 => {
-                    self.sp = self.sp.wrapping_sub(1) & 0xF;
-                    self.pc = self.stack[(self.sp & 3) as usize];
-                }
-                7 => {
-                    self.pc = dvy << 1;
-                    if dvy == 0 {
-                        self.halted = true;
-                        return true;
-                    }
-                }
-                _ => {}
+            // ST3 gates dispatch: states 8-F run handlers 0-7, states 0-7 are
+            // idle waits that still cost the sequencer a clock.
+            if self.state_latch & 8 != 0 {
+                self.update_databus(vmem);
+                cycles += self.dispatch(self.state_latch & 7, color_ram);
             }
 
-            instructions += 1;
+            // The halt only becomes visible once the CPU has had the cycles
+            // the generator spent getting here, so sample the count on the
+            // state that raises it rather than at the end of the run.
+            if self.halted && self.state_latch & 0x10 == 0 {
+                self.run_cycles = cycles;
+            }
+
+            self.state_latch = (u8::from(self.halted) << 4) | (self.state_latch & 0x0F);
+            cycles += AVG_CYCLES_PER_STATE;
+
+            if self.halted {
+                // Parked in the PROM's zero half: nothing more happens until
+                // the next GO.
+                return false;
+            }
+            if self.frame_done {
+                // Tempest and Quantum never halt — their list loops forever
+                // and the branch back to address 0 delimits the frame. Stop
+                // there and report done so the board can flush and re-trigger.
+                self.halted = true;
+                self.run_cycles = cycles;
+                return true;
+            }
         }
         false
+    }
+
+    /// Run the handler for a dispatched state. Handlers 0-3 latch operands off
+    /// the data bus; 4-7 are strobe0-strobe3. The return value is the beam
+    /// time the handler consumed, in master-clock cycles.
+    fn dispatch(&mut self, handler: u8, color_ram: &[u8; 16]) -> u32 {
+        match handler {
+            0 => self.latch0(),
+            1 => self.latch1(),
+            2 => self.latch2(),
+            3 => self.latch3(),
+            4 => self.strobe0(),
+            5 => self.strobe1(),
+            6 => self.strobe2(),
+            _ => self.strobe3(color_ram),
+        }
+        .max(0) as u32
     }
 
     /// Drain the display list, returning ownership to the caller.
@@ -440,184 +481,281 @@ impl Avg {
         u16::from_be_bytes([hi, lo])
     }
 
-    /// Decode one Tempest instruction at the current PC, advancing PC.
+    // -----------------------------------------------------------------------
+    // State handlers
+    //
+    // Handlers 0-3 latch operands off the data bus and clock the address
+    // counter; 4-7 are strobe0-strobe3. Each returns the beam time it
+    // consumed, in master-clock cycles (only strobe3 ever charges any).
+    // -----------------------------------------------------------------------
+
+    /// Handler 0 (latch0): low byte of DVY.
     ///
-    /// The PROM state machine reads bytes in handler order 1,0 (high byte first
-    /// via XOR-1), then 3,2 for the 4-byte VCTR. VCTR (op 0) is 4 bytes, SVEC
-    /// (op 2) packs DVX/int_latch into its single word, all others are 2 bytes.
-    fn decode_tempest(&mut self, vmem: &[u8]) -> Instr {
-        self.decode_byte_addressed(vmem, true)
-    }
-
-    /// Decode one Star Wars instruction at the current PC, advancing PC.
-    ///
-    /// Star Wars uses the same byte-addressed 13-bit layout as Tempest, but the
-    /// AVG reads vector memory *without* the XOR-1 byte swap (`starwars_data`),
-    /// so the bytes are consumed in native order.
-    fn decode_starwars(&mut self, vmem: &[u8]) -> Instr {
-        self.decode_byte_addressed(vmem, false)
-    }
-
-    /// Shared byte-addressed decode for Tempest (`swap = true`, XOR-1 addressing)
-    /// and Star Wars (`swap = false`, native addressing).
-    ///
-    /// The PROM state machine reads bytes in handler order 1,0 (op/high byte
-    /// first), then 3,2 for the 4-byte VCTR. VCTR (op 0) is 4 bytes, SVEC (op 2)
-    /// packs DVX/int_latch into its single word, all others are 2 bytes.
-    fn decode_byte_addressed(&mut self, vmem: &[u8], swap: bool) -> Instr {
-        let rd = |addr: u16| -> u8 {
-            let idx = if swap {
-                (addr as usize) ^ 1
-            } else {
-                addr as usize
-            };
-            vmem.get(idx).copied().unwrap_or(0)
-        };
-        let hi0 = rd(self.pc);
-        let lo0 = rd(self.pc.wrapping_add(1));
-        let dvy12 = (hi0 >> 4) & 1;
-        let op = hi0 >> 5;
-
-        let (dvy, dvx, int_latch) = if op == 0 {
-            let dvy = (u16::from(dvy12) << 12) | (u16::from(hi0 & 0xF) << 8) | u16::from(lo0);
-            let hi1 = rd(self.pc.wrapping_add(2));
-            let lo1 = rd(self.pc.wrapping_add(3));
-            self.pc = self.pc.wrapping_add(4);
-            let il = hi1 >> 4;
-            let dx = (u16::from(il & 1) << 12) | (u16::from(hi1 & 0xF) << 8) | u16::from(lo1);
-            (dvy, dx, il)
-        } else if op == 2 {
-            let dvy = (u16::from(dvy12) << 12) | (u16::from(hi0 & 0xF) << 8);
-            let il = lo0 >> 4;
-            let dx = (u16::from(il & 1) << 12) | (u16::from(lo0 & 0xF) << 8);
-            self.pc = self.pc.wrapping_add(2);
-            (dvy, dx, il)
-        } else {
-            let dvy = (u16::from(dvy12) << 12) | (u16::from(hi0 & 0xF) << 8) | u16::from(lo0);
-            self.pc = self.pc.wrapping_add(2);
-            (dvy, 0u16, 0u8)
-        };
-
-        Instr {
-            op,
-            dvy,
-            dvx,
-            int_latch,
-            dvy12,
-            is_short: op == 2,
+    /// Quantum decodes whole words in latch1/latch3, so for it this state only
+    /// clocks the address counter.
+    fn latch0(&mut self) -> i32 {
+        if self.variant != AvgVariant::Quantum {
+            self.dvy = (self.dvy & 0x1F00) | self.data;
         }
+        self.pc = self.pc.wrapping_add(1);
+        0
     }
 
-    /// Decode one Quantum instruction at the current PC, advancing PC.
+    /// Handler 1 (latch1): the opcode, DVY bit 12, and the high bits of DVY.
     ///
-    /// Quantum reads whole 16-bit words: `op = word >> 13`, `dvy12 = bit 12`,
-    /// `dvy = word & 0x1FFF`. VCTR (op 0) reads a second word for
-    /// `int_latch = word >> 12` and `dvx = word & 0xFFF`; all others are one
-    /// word. There is no SVEC, so `is_short` is always false.
-    fn decode_quantum(&mut self, vmem: &[u8]) -> Instr {
-        let word0 = Self::read_word_be(vmem, self.pc);
-        let op = (word0 >> 13) as u8;
-        let dvy12 = ((word0 >> 12) & 1) as u8;
-        let dvy = word0 & 0x1FFF;
-
-        let (dvx, int_latch) = if op == 0 {
-            let word1 = Self::read_word_be(vmem, self.pc.wrapping_add(2));
-            self.pc = self.pc.wrapping_add(4);
-            (word1 & 0x0FFF, (word1 >> 12) as u8)
+    /// This is where an instruction begins — the opcode it latches selects the
+    /// PROM row that sequences the rest of it.
+    fn latch1(&mut self) -> i32 {
+        if self.variant == AvgVariant::Quantum {
+            self.dvy = self.data & 0x1FFF;
+            self.dvy12 = ((self.data >> 12) & 1) as u8;
+            self.op = (self.data >> 13) as u8;
         } else {
-            self.pc = self.pc.wrapping_add(2);
-            (0u16, 0u8)
-        };
-
-        Instr {
-            op,
-            dvy,
-            dvx,
-            int_latch,
-            dvy12,
-            is_short: false,
+            self.dvy12 = ((self.data >> 4) & 1) as u8;
+            self.op = (self.data >> 5) as u8;
+            self.dvy = (u16::from(self.dvy12) << 12) | ((self.data & 0xF) << 8);
         }
+        self.int_latch = 0;
+        self.dvx = 0;
+        self.pc = self.pc.wrapping_add(1);
+        0
     }
 
-    /// Normalize DVX/DVY (strobe0) — shift both axes together until EITHER
-    /// is normalized (sign bit differs from MSB).
-    fn normalize(&self, mut dvx: u16, mut dvy: u16, is_short: bool) -> (u16, u16, u16) {
-        let mut timer: u16 = 0;
-        let op1_bit: u16 = if is_short { 0x80 } else { 0 };
+    /// Handler 2 (latch2): low byte of DVX (Quantum: address counter only).
+    fn latch2(&mut self) -> i32 {
+        if self.variant != AvgVariant::Quantum {
+            self.dvx = (self.dvx & 0x1F00) | self.data;
+        }
+        self.pc = self.pc.wrapping_add(1);
+        0
+    }
 
-        // Continue while BOTH axes need normalization (AND condition).
-        // Stop when EITHER axis is normalized or after 16 iterations.
+    /// Handler 3 (latch3): the intensity latch and the high bits of DVX.
+    fn latch3(&mut self) -> i32 {
+        if self.variant == AvgVariant::Quantum {
+            self.int_latch = (self.data >> 12) as u8;
+            self.dvx = self.data & 0xFFF;
+        } else {
+            self.int_latch = (self.data >> 4) as u8;
+            self.dvx = (u16::from(self.int_latch & 1) << 12)
+                | ((self.data & 0xF) << 8)
+                | (self.dvx & 0xFF);
+        }
+        self.pc = self.pc.wrapping_add(1);
+        0
+    }
+
+    /// Handler 4 (strobe0): push the return address on a JSR, otherwise
+    /// normalize DVX/DVY — shift both axes together until EITHER is normalized
+    /// (sign bit differs from the next bit down), loading the timer as it goes.
+    ///
+    /// Normalization keeps deflection speed roughly constant: the X/Y DACs use
+    /// only bits 3-12, so the low three bits must not carry information. The
+    /// circuit does not special-case dvx = dvy = 0, in which case it shifts
+    /// forever; the count is cut off after 16.
+    fn strobe0(&mut self) -> i32 {
+        if self.op0() {
+            self.stack[(self.sp & 3) as usize] = self.pc;
+            return 0;
+        }
+
+        if self.variant == AvgVariant::Quantum {
+            // Quantum normalizes to 12 bits (sign at bit 11).
+            let mut i = 0;
+            while (((self.dvy ^ (self.dvy << 1)) & 0x800) == 0)
+                && (((self.dvx ^ (self.dvx << 1)) & 0x800) == 0)
+                && (i < 16)
+            {
+                self.dvy = (self.dvy << 1) & 0xFFF;
+                self.dvx = (self.dvx << 1) & 0xFFF;
+                self.timer >>= 1;
+                self.timer |= 0x2000;
+                i += 1;
+            }
+            return 0;
+        }
+
+        let op1_bit: u16 = if self.op1() { 0x80 } else { 0 };
         let mut i = 0;
-        while (((dvy ^ (dvy << 1)) & 0x1000) == 0)
-            && (((dvx ^ (dvx << 1)) & 0x1000) == 0)
+        while (((self.dvy ^ (self.dvy << 1)) & 0x1000) == 0)
+            && (((self.dvx ^ (self.dvx << 1)) & 0x1000) == 0)
             && (i < 16)
         {
-            dvy = (dvy & 0x1000) | ((dvy << 1) & 0x1FFF);
-            dvx = (dvx & 0x1000) | ((dvx << 1) & 0x1FFF);
-            timer >>= 1;
-            timer |= 0x4000 | op1_bit;
+            self.dvy = (self.dvy & 0x1000) | ((self.dvy << 1) & 0x1FFF);
+            self.dvx = (self.dvx & 0x1000) | ((self.dvx << 1) & 0x1FFF);
+            self.timer >>= 1;
+            self.timer |= 0x4000 | op1_bit;
             i += 1;
         }
-
-        // SVEC: mask timer to 8 bits
-        if is_short {
-            timer &= 0xFF;
+        // SVEC counts in the timer's low byte only.
+        if self.op1() {
+            self.timer &= 0xFF;
         }
-
-        (dvx, dvy, timer)
+        0
     }
 
-    /// Apply binary scale to the timer (strobe1).
-    fn apply_bin_scale(&self, mut timer: u16, is_short: bool) -> u16 {
-        let op1_bit: u16 = if is_short { 0x80 } else { 0 };
+    /// Handler 5 (strobe1): binary-scale the timer, or — on the branch opcodes,
+    /// which reach this state instead — move the stack pointer.
+    fn strobe1(&mut self) -> i32 {
+        if self.op2() {
+            // JSR/CNTR push, RTS/JMP pop. Only the opcodes whose PROM row
+            // actually visits this state see the adjustment.
+            self.sp = if self.op1() {
+                self.sp.wrapping_sub(1) & 0xF
+            } else {
+                self.sp.wrapping_add(1) & 0xF
+            };
+            return 0;
+        }
 
+        if self.variant == AvgVariant::Quantum {
+            for _ in 0..self.bin_scale {
+                self.timer >>= 1;
+                self.timer |= 0x2000;
+            }
+            return 0;
+        }
+
+        let op1_bit: u16 = if self.op1() { 0x80 } else { 0 };
         for _ in 0..self.bin_scale {
-            timer >>= 1;
-            timer |= 0x4000 | op1_bit;
+            self.timer >>= 1;
+            self.timer |= 0x4000 | op1_bit;
         }
-
-        // SVEC: mask timer to 8 bits again after bin_scale
-        if is_short {
-            timer &= 0xFF;
+        if self.op1() {
+            self.timer &= 0xFF;
         }
-
-        timer
+        0
     }
 
-    /// Draw a vector from the current beam position using normalized DVX/DVY.
-    /// Matches MAME's `avg_common_strobe3` + `tempest_strobe3`.
-    fn draw_vector(
-        &mut self,
-        dvx: u16,
-        dvy: u16,
-        timer: u16,
-        is_short: bool,
-        int_latch: u8,
-        color_ram: &[u8; 16],
-    ) {
-        // SVEC uses 8-bit timer, VCTR uses 16-bit timer
-        let cycles: i32 = if is_short {
-            0x100_i32 - i32::from(timer & 0xFF)
+    /// Handler 6 (strobe2): the STAT latches (scale, or color/intensity) and
+    /// the branches — JSR/JMP load the address counter, RTS pops it.
+    fn strobe2(&mut self) -> i32 {
+        if !self.op2() && self.dvy12 == 0 {
+            match self.variant {
+                // Star Wars latches an 8-bit intensity and a 4-bit color index
+                // together, with no 0x800 select bit.
+                AvgVariant::StarWars => {
+                    self.intensity = (self.dvy & 0xFF) as u8;
+                    self.color = ((self.dvy >> 8) & 0xF) as u8;
+                }
+                // Tempest picks color or intensity on DVY bit 11.
+                AvgVariant::Tempest => {
+                    if self.dvy & 0x800 != 0 {
+                        self.color = (self.dvy & 0xF) as u8;
+                    } else {
+                        self.intensity = ((self.dvy >> 4) & 0xF) as u8;
+                    }
+                }
+                // Quantum latches color and intensity together, gated on bit 11.
+                AvgVariant::Quantum => {
+                    if self.dvy & 0x800 != 0 {
+                        self.color = (self.dvy & 0xF) as u8;
+                        self.intensity = ((self.dvy >> 4) & 0xF) as u8;
+                    }
+                }
+            }
+        }
+
+        if self.op2() {
+            if self.op0() {
+                self.pc = self.dvy << 1;
+                // A branch to address 0 restarts the list. Games whose vector
+                // list loops forever use it as the frame delimiter.
+                if self.dvy == 0 {
+                    self.frame_done = true;
+                }
+            } else {
+                self.pc = self.stack[(self.sp & 3) as usize];
+            }
+        } else if self.dvy12 != 0 {
+            self.scale = (self.dvy & 0xFF) as u8;
+            self.bin_scale = ((self.dvy >> 8) & 7) as u8;
+        }
+        0
+    }
+
+    /// Handler 7 (strobe3): raise the halt flag on HALT, run the beam for the
+    /// timer's remaining count, and emit the resulting point.
+    ///
+    /// The count is the beam's travel time, so it is also what this state
+    /// charges the sequencer — the reason a screen full of long vectors holds
+    /// VG_HALT low far longer than the state count alone implies.
+    fn strobe3(&mut self, color_ram: &[u8; 16]) -> i32 {
+        self.halted = self.op0();
+
+        // CNTR re-centers the beam; the timer still has to run down first.
+        if self.op2() {
+            let cycles = self.timer_countdown(false);
+            self.timer = 0;
+            self.xpos = self.xcenter;
+            self.ypos = self.ycenter;
+            self.add_point(self.xpos, self.ypos, 0, [0, 0, 0]);
+            return cycles;
+        }
+        if self.op0() {
+            return 0;
+        }
+
+        let cycles = self.timer_countdown(self.op1());
+        self.timer = 0;
+        match self.variant {
+            AvgVariant::Tempest => self.draw_tempest(cycles, color_ram),
+            AvgVariant::Quantum => self.draw_quantum(cycles, color_ram),
+            AvgVariant::StarWars => self.draw_starwars(cycles),
+        }
+        cycles
+    }
+
+    /// Cycles left on the vector timer: it counts up to its terminal value, so
+    /// the remaining count is the distance to it. A short vector (SVEC) counts
+    /// in the low byte only; Quantum's timer is 14-bit rather than 15-bit.
+    fn timer_countdown(&self, is_short: bool) -> i32 {
+        if is_short {
+            0x100 - i32::from(self.timer & 0xFF)
+        } else if self.variant == AvgVariant::Quantum {
+            0x4000 - i32::from(self.timer)
         } else {
-            0x8000_i32 - i32::from(timer)
-        };
+            0x8000 - i32::from(self.timer)
+        }
+    }
 
-        // Scale factor: complement of 8-bit scale
+    /// Advance the beam by the normalized deltas over `cycles` of travel.
+    /// The DACs take the upper 10 bits of the delta (`shift` = 3 for the
+    /// 13-bit variants, 2 for Quantum's 12-bit), XOR in the sign, and center
+    /// the result on 0.
+    fn deflect(&self, cycles: i32, shift: u32) -> (i32, i32) {
         let scale_factor: i32 = i32::from(self.scale) ^ 0xFF;
+        let dx = ((i32::from(self.dvx >> shift) ^ i32::from(self.xdac_xor)) - 0x200)
+            .wrapping_mul(cycles)
+            .wrapping_mul(scale_factor)
+            >> 4;
+        let dy = ((i32::from(self.dvy >> shift) ^ i32::from(self.ydac_xor)) - 0x200)
+            .wrapping_mul(cycles)
+            .wrapping_mul(scale_factor)
+            >> 4;
+        (dx, dy)
+    }
 
-        // DAC conversion: upper 10 bits of 13-bit value, XOR for sign, center at 0
-        let dx = ((i32::from(dvx >> 3) ^ i32::from(self.xdac_xor)) - 0x200)
-            .wrapping_mul(cycles)
-            .wrapping_mul(scale_factor)
-            >> 4;
-        let dy = ((i32::from(dvy >> 3) ^ i32::from(self.ydac_xor)) - 0x200)
-            .wrapping_mul(cycles)
-            .wrapping_mul(scale_factor)
-            >> 4;
+    /// Beam position after flipping (set by the game's hardware register).
+    fn flipped(&self) -> (i32, i32) {
+        let mut x = self.xpos;
+        let mut y = self.ypos;
+        if self.flip_x {
+            x += (self.xcenter - x) << 1;
+        }
+        if self.flip_y {
+            y += (self.ycenter - y) << 1;
+        }
+        (x, y)
+    }
+
+    /// Tempest's strobe3 draw: 13-bit DAC and a 16-entry color RAM lookup.
+    fn draw_tempest(&mut self, cycles: i32, color_ram: &[u8; 16]) {
+        let (dx, dy) = self.deflect(cycles, 3);
         self.xpos = self.xpos.wrapping_add(dx);
         self.ypos = self.ypos.wrapping_sub(dy);
 
-        // Tempest color RAM lookup
+        // Color RAM holds the four active bits inverted in its low nibble.
         let data = color_ram[(self.color & 0xF) as usize];
         let bit3 = (!data >> 3) & 1;
         let bit2 = (!data >> 2) & 1;
@@ -629,79 +767,28 @@ impl Avg {
         let g = bit3.wrapping_mul(0xF3);
         let b = bit2.wrapping_mul(0xF3);
 
-        // Effective intensity: when int_latch bits 3:1 == 001 (DATEA signal), use stored intensity
-        // from STAT register; otherwise use int_latch bits 3:1 as direct intensity.
-        let eff_intensity = if (int_latch >> 1) == 1 {
+        // int_latch bits 3:1 == 001 is the DATEA signal, selecting the
+        // intensity the STAT strobe stored; otherwise those bits are the
+        // intensity directly.
+        let eff_intensity = if (self.int_latch >> 1) == 1 {
             self.intensity
         } else {
-            int_latch & 0xE
+            self.int_latch & 0xE
         };
 
-        // Apply flipping
-        let mut x = self.xpos;
-        let mut y = self.ypos;
-        if self.flip_x {
-            x += (self.xcenter - x) << 1;
-        }
-        if self.flip_y {
-            y += (self.ycenter - y) << 1;
-        }
-
+        let (x, y) = self.flipped();
         self.add_point(x, y, eff_intensity, [r, g, b]);
     }
 
-    /// Normalize DVX/DVY for Quantum (`quantum_strobe0`): 12-bit precision
-    /// (sign at bit 11), shifting both axes together until either normalizes.
-    fn normalize_quantum(&self, mut dvx: u16, mut dvy: u16) -> (u16, u16, u16) {
-        let mut timer: u16 = 0;
-        let mut i = 0;
-        while (((dvy ^ (dvy << 1)) & 0x800) == 0) && (((dvx ^ (dvx << 1)) & 0x800) == 0) && (i < 16)
-        {
-            dvy = (dvy << 1) & 0xFFF;
-            dvx = (dvx << 1) & 0xFFF;
-            timer >>= 1;
-            timer |= 0x2000;
-            i += 1;
-        }
-        (dvx, dvy, timer)
-    }
-
-    /// Apply binary scale to the Quantum timer (`quantum_strobe1`).
-    fn apply_bin_scale_quantum(&self, mut timer: u16) -> u16 {
-        for _ in 0..self.bin_scale {
-            timer >>= 1;
-            timer |= 0x2000;
-        }
-        timer
-    }
-
-    /// Draw a vector for Quantum (`quantum_strobe3`): 12-bit DAC, Quantum color
-    /// weights, and the vector generator's X/Y coordinate swap.
-    fn draw_quantum(
-        &mut self,
-        dvx: u16,
-        dvy: u16,
-        timer: u16,
-        int_latch: u8,
-        color_ram: &[u8; 16],
-    ) {
-        let cycles: i32 = 0x4000_i32 - i32::from(timer);
-        let scale_factor: i32 = i32::from(self.scale) ^ 0xFF;
-
-        // 12-bit DAC: upper 10 bits of the 12-bit value (>> 2), XOR for sign.
-        let dx = ((i32::from((dvx & 0xFFF) >> 2) ^ i32::from(self.xdac_xor)) - 0x200)
-            .wrapping_mul(cycles)
-            .wrapping_mul(scale_factor)
-            >> 4;
-        let dy = ((i32::from((dvy & 0xFFF) >> 2) ^ i32::from(self.ydac_xor)) - 0x200)
-            .wrapping_mul(cycles)
-            .wrapping_mul(scale_factor)
-            >> 4;
+    /// Quantum's strobe3 draw: 12-bit DAC and Quantum's color weights —
+    /// r = bit3·0xCE, g = bit1·0xAA + bit0·0x54, b = bit2·0xCE.
+    fn draw_quantum(&mut self, cycles: i32, color_ram: &[u8; 16]) {
+        self.dvx &= 0xFFF;
+        self.dvy &= 0xFFF;
+        let (dx, dy) = self.deflect(cycles, 2);
         self.xpos = self.xpos.wrapping_add(dx);
         self.ypos = self.ypos.wrapping_sub(dy);
 
-        // Quantum color: 16-entry color RAM (low byte holds the 4 active bits,
-        // inverted). r = bit3·0xCE, g = bit1·0xAA + bit0·0x54, b = bit2·0xCE.
         let data = color_ram[(self.color & 0xF) as usize];
         let bit3 = (!data >> 3) & 1;
         let bit2 = (!data >> 2) & 1;
@@ -713,53 +800,25 @@ impl Avg {
             .wrapping_add(bit0.wrapping_mul(0x54));
         let b = bit2.wrapping_mul(0xCE);
 
-        // Intensity: int_latch==2 (DATEA) selects the stored STAT intensity.
-        let eff_intensity = if int_latch == 2 {
+        // int_latch == 2 (DATEA) selects the stored STAT intensity.
+        let eff_intensity = if self.int_latch == 2 {
             self.intensity
         } else {
-            int_latch
+            self.int_latch
         };
 
-        // Emit the point in beam/screen space (with flipping), matching the
-        // Tempest path. MAME's quantum_strobe3 also transposes X/Y here, but
-        // that compensates for MAME's true-rotation screen pipeline; this
-        // engine's vector renderer applies only a Y-flip for portrait monitors,
-        // so the portrait orientation comes from the portrait display buffer
-        // instead (see the Quantum machine's TIMING).
-        let mut x = self.xpos;
-        let mut y = self.ypos;
-        if self.flip_x {
-            x += (self.xcenter - x) << 1;
-        }
-        if self.flip_y {
-            y += (self.ycenter - y) << 1;
-        }
         // Emit directly in screen space. The Quantum machine presents this as a
         // pre-rotated portrait display (display_size already portrait,
-        // Orientation::NORMAL), so no transpose/flip is applied here — unlike
-        // MAME, whose AVG transposes X/Y to feed a true-rotation screen.
+        // Orientation::NORMAL), so no transpose is applied here even though the
+        // generator's outputs are wired to a rotated monitor.
+        let (x, y) = self.flipped();
         self.add_point(x, y, eff_intensity, [r, g, b]);
     }
 
-    /// Draw a vector for Star Wars (`starwars_strobe3`): the same 13-bit strobe3
-    /// position math as Tempest, but a `color111` color (no color RAM) and a
-    /// combined intensity of `(int_latch >> 1) * intensity`.
-    fn draw_starwars(&mut self, dvx: u16, dvy: u16, timer: u16, is_short: bool, int_latch: u8) {
-        let cycles: i32 = if is_short {
-            0x100_i32 - i32::from(timer & 0xFF)
-        } else {
-            0x8000_i32 - i32::from(timer)
-        };
-        let scale_factor: i32 = i32::from(self.scale) ^ 0xFF;
-
-        let dx = ((i32::from(dvx >> 3) ^ i32::from(self.xdac_xor)) - 0x200)
-            .wrapping_mul(cycles)
-            .wrapping_mul(scale_factor)
-            >> 4;
-        let dy = ((i32::from(dvy >> 3) ^ i32::from(self.ydac_xor)) - 0x200)
-            .wrapping_mul(cycles)
-            .wrapping_mul(scale_factor)
-            >> 4;
+    /// Star Wars' strobe3 draw: the same 13-bit position math as Tempest, but a
+    /// `color111` color (no color RAM) and a combined intensity.
+    fn draw_starwars(&mut self, cycles: i32) {
+        let (dx, dy) = self.deflect(cycles, 3);
         self.xpos = self.xpos.wrapping_add(dx);
         // Star Wars is a normal (ROT0) monitor, so the display list uses the
         // Y-up convention (higher Y = higher on screen) the renderers expect for
@@ -772,10 +831,10 @@ impl Avg {
         let g = if (c >> 1) & 1 != 0 { 0xFF } else { 0 };
         let b = if c & 1 != 0 { 0xFF } else { 0 };
 
-        // MAME's strobe3 intensity is `((int_latch >> 1) * intensity) >> 3`, an
-        // 8-bit brightness. The renderer's LUT is 4-bit, so shift down by a
-        // further 4 (total >> 7) and clamp — preserving relative brightness.
-        let brightness = (u32::from(int_latch >> 1) * u32::from(self.intensity)) >> 3;
+        // Hardware brightness is `((int_latch >> 1) * intensity) >> 3`, an
+        // 8-bit value. The renderer's LUT is 4-bit, so shift down by a further
+        // 4 (total >> 7) and clamp — preserving relative brightness.
+        let brightness = (u32::from(self.int_latch >> 1) * u32::from(self.intensity)) >> 3;
         let eff_intensity = ((brightness >> 4).min(15)) as u8;
 
         // Star Wars does not flip the beam (its strobe3 emits xpos/ypos directly).
@@ -887,6 +946,10 @@ impl Saveable for Avg {
         w.write_bool(self.flip_x);
         w.write_bool(self.flip_y);
         w.write_bool(self.halted);
+        // The sequencer parks between runs, and where it parked decides how
+        // the next GO starts. Everything else the handlers latch (op, dvx,
+        // dvy, timer, …) is rebuilt from vector memory within a single run.
+        w.write_u8(self.state_latch);
     }
 
     fn load_state(
@@ -907,6 +970,7 @@ impl Saveable for Avg {
         self.flip_x = r.read_bool()?;
         self.flip_y = r.read_bool()?;
         self.halted = r.read_bool()?;
+        self.state_latch = r.read_u8()?;
         self.has_prev = false;
         self.display_list.clear();
         Ok(())
@@ -984,6 +1048,69 @@ mod tests {
         avg.go();
         avg.execute(&vmem, &color_ram);
         assert!(avg.is_halted());
+    }
+
+    // --- Sequencer timing ------------------------------------------------
+
+    #[test]
+    fn run_cycles_charge_eight_per_sequencer_state() {
+        // A bare HALT walks latch1, latch0, strobe3. The halt is sampled on
+        // the state that raises it, so it costs the two states before it.
+        let vmem = build_vmem(&[0x00, 0x20]); // HALT
+        let mut avg = Avg::new(1024, 1024);
+        avg.go();
+        avg.execute(&vmem, &default_color_ram());
+        assert!(avg.is_halted());
+        assert_eq!(avg.run_cycles(), 2 * 8);
+    }
+
+    #[test]
+    fn a_parked_sequencer_costs_an_idle_state_on_the_next_go() {
+        let vmem = build_vmem(&[0x00, 0x20]); // HALT
+        let mut avg = Avg::new(1024, 1024);
+        avg.go();
+        avg.execute(&vmem, &default_color_ram());
+        let first = avg.run_cycles();
+
+        avg.go();
+        avg.execute(&vmem, &default_color_ram());
+        // GO clears the halt flag but not the state latch, so the second run
+        // still addresses the PROM's parked (halted) half once before it
+        // latches an opcode — one idle state the first run never paid for.
+        assert_eq!(avg.run_cycles(), first + 8);
+    }
+
+    #[test]
+    fn a_loaded_prom_replaces_the_built_in_sequence() {
+        // Splice an extra idle state into HALT's chain: 9 -> 8 -> 3 -> F
+        // instead of 9 -> 8 -> F. The generator should take exactly one state
+        // longer to raise the halt.
+        let mut prom = default_state_prom();
+        prom[0x98] = 3; // after latch0, wait
+        prom[0x93] = 0xF; // then strobe3
+
+        let vmem = build_vmem(&[0x00, 0x20]); // HALT
+        let mut avg = Avg::new(1024, 1024);
+        avg.load_state_prom(&prom);
+        avg.go();
+        avg.execute(&vmem, &default_color_ram());
+        assert!(avg.is_halted());
+        assert_eq!(avg.run_cycles(), 3 * 8);
+    }
+
+    #[test]
+    fn drawing_charges_the_beam_its_travel_time() {
+        // VCTR (DVY = DVX = 0x200) then HALT. Normalization shifts twice,
+        // leaving timer = 0x6000, so the beam runs 0x8000 - 0x6000 cycles.
+        // The two instructions walk 11 states, 10 of them before the halt.
+        let vmem = build_vmem(&[
+            0x00, 0x02, 0x00, 0x82, // VCTR: DVY=0x200, DVX=0x200, intensity=8
+            0x00, 0x20, // HALT
+        ]);
+        let mut avg = Avg::new(1024, 1024);
+        avg.go();
+        avg.execute(&vmem, &default_color_ram());
+        assert_eq!(avg.run_cycles(), 10 * 8 + 0x2000);
     }
 
     #[test]

@@ -35,7 +35,10 @@ impl std::fmt::Display for SaveError {
 pub const SAVE_MAGIC: &[u8; 4] = b"PHOS";
 
 /// Current save-state format version.
-pub const SAVE_VERSION: u32 = 3;
+///
+/// Bumped to 4 when the AVG started saving its sequencer state latch, which
+/// changed the byte layout of every AVG machine's state.
+pub const SAVE_VERSION: u32 = 4;
 
 // -- Saveable trait ----------------------------------------------------------
 
