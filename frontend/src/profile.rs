@@ -343,7 +343,11 @@ pub fn draw_profile_panel(ctx: &egui::Context, state: &ProfileState, frame_budge
                     egui::pos2(rect.left(), budget_y),
                     egui::pos2(rect.right(), budget_y),
                 ],
-                egui::Stroke::new(1.0, egui::Color32::from_rgb(255, 60, 60)),
+                // `1.0_f32` rather than `1.0`: Stroke::new takes `impl Into<f32>`,
+                // so a bare literal is inferred through fallback rather than from
+                // the bound. rustc's float-literal-f32-fallback lint flags that,
+                // and it is slated to become a hard error.
+                egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(255, 60, 60)),
             );
 
             // Budget label
