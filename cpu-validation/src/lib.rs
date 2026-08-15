@@ -2,6 +2,35 @@ use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::{Bus, BusMaster};
 use serde::{Deserialize, Serialize};
 
+// --- Test-data availability ---
+
+/// Check for a validator's vector directory, reporting how to obtain it when
+/// it is missing.
+///
+/// Returns `true` when `dir` exists and the caller should run. Every vector
+/// directory lives under the gitignored `cpu-validation/test_data/` — the
+/// SingleStepTests suites are git submodules and the M6800/M6809 sets are
+/// generated — so a fresh checkout has none of them. Panicking there would
+/// make a clean clone (and CI) fail for an environment reason rather than a
+/// code one, so the validators skip instead and say what to run.
+///
+/// Note that libtest captures stderr for a *passing* test, so this message is
+/// only visible under `--nocapture`. A skipped validator is therefore green and
+/// quiet in a normal run, which is the hazard to be aware of: the suite reports
+/// success while validating nothing. The guard against that is not this
+/// message but a scheduled job that fetches the data and runs the validators
+/// for real — treat a permanently-skipping validator as an unvalidated CPU.
+pub fn require_test_data(dir: &std::path::Path, how_to_obtain: &str) -> bool {
+    if dir.exists() {
+        return true;
+    }
+    eprintln!(
+        "skipping: no vectors at {} — {how_to_obtain}",
+        dir.display()
+    );
+    false
+}
+
 // --- TracingBus: flat 64KB memory with cycle-by-cycle recording ---
 
 #[derive(Clone, Copy, Debug, PartialEq)]

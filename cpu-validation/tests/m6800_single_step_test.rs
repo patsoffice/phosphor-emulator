@@ -103,10 +103,11 @@ fn run_test_case(tc: &M6800TestCase) {
 #[test]
 fn test_all_opcodes() {
     let test_dir = Path::new("test_data/m6800");
-    if !test_dir.exists() {
-        panic!(
-            "No test data directory. Run: cargo run -p phosphor-cpu-validation --bin gen_m6800_tests -- all"
-        );
+    if !phosphor_cpu_validation::require_test_data(
+        test_dir,
+        "run: cargo run -p phosphor-cpu-validation --bin gen_m6800_tests -- all",
+    ) {
+        return;
     }
 
     let mut json_files: Vec<_> = std::fs::read_dir(test_dir)

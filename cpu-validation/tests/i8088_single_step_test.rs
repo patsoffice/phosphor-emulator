@@ -185,10 +185,11 @@ fn run_test_case(tc: &I8088TestCase, flags_mask: u16) -> Option<String> {
 #[test]
 fn test_all_i8088_opcodes() {
     let test_dir = Path::new("test_data/8088/v2");
-    if !test_dir.exists() {
-        panic!(
-            "No SingleStepTests data. Run: git submodule update --init cpu-validation/test_data/8088"
-        );
+    if !phosphor_cpu_validation::require_test_data(
+        test_dir,
+        "run: git submodule update --init cpu-validation/test_data/8088",
+    ) {
+        return;
     }
 
     // Load metadata for flag masks

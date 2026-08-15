@@ -167,10 +167,11 @@ fn run_test_case(tc: &M6502TestCase) {
 #[test]
 fn test_all_legal_opcodes() {
     let test_dir = Path::new("test_data/65x02/6502/v1");
-    if !test_dir.exists() {
-        panic!(
-            "No SingleStepTests data. Run: git submodule update --init cpu-validation/test_data/65x02"
-        );
+    if !phosphor_cpu_validation::require_test_data(
+        test_dir,
+        "run: git submodule update --init cpu-validation/test_data/65x02",
+    ) {
+        return;
     }
 
     let mut total_tests = 0;

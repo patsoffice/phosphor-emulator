@@ -1,0 +1,116 @@
+name: CI
+
+# Two jobs with deliberately different responsibilities.
+#
+# `check` runs on every push and pull request and must stay fast, so it does
+# NOT fetch the SingleStepTests submodules. Without them the six single-step
+# validators skip (see `require_test_data` in cpu-validation/src/lib.rs) — they
+# report success while validating nothing, which is fine here and is exactly
+# why `validate` exists.
+#
+# `validate` fetches the submodules, generates the M6800/M6809 vectors, and
+# runs all 7.1M of them. It is scheduled rather than per-push because the
+# submodules are large and the run is long. A permanently-skipping validator in
+# `check` is only safe while `validate` is actually green — if this job starts
+# failing or stops running, treat those CPUs as unvalidated.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Mondays, 06:00 UTC.
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Emulation is the workload; never let a panic unwind silently in CI.
+  RUST_BACKTRACE: 1
+
+jobs:
+  check:
+    name: fmt · clippy · tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install SDL2 and GL headers
+        # phosphor-frontend is the only crate with system dependencies, but
+        # `--workspace` builds it, so the whole job needs them. The flake pins
+        # the same set (SDL2, libGL, pkg-config) for local development.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libsdl2-dev libgl1-mesa-dev pkg-config
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-features --all-targets --locked -- -D warnings
+
+      - name: Tests
+        # ROM-gated tests (frameshot parity, and the golden frames to come)
+        # skip cleanly with PHOSPHOR_ROMS unset — arcade ROMs are not
+        # redistributable, so CI can never run them.
+        run: cargo test --workspace --locked
+
+  validate:
+    name: CPU validation (7.1M vectors)
+    # Long and bandwidth-heavy; not worth running per push.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The 65x02 / z80 / 8088 / 680x0 vector suites.
+          submodules: true
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Generate M6800 and M6809 vectors
+        # These two suites are generated rather than vendored;
+        # cpu-validation/test_data is gitignored in full.
+        #
+        # working-directory matters: the generators write to `test_data/...`
+        # relative to the *current* directory, while the validators read it
+        # relative to the crate root. Run these from the repo root and the
+        # vectors land in the wrong place, the validators skip, and the job
+        # passes having checked nothing.
+        working-directory: cpu-validation
+        run: |
+          cargo run --release --locked -p phosphor-cpu-validation --bin gen_m6800_tests -- all
+          cargo run --release --locked -p phosphor-cpu-validation --bin gen_m6809_tests -- all
+
+      - name: Verify every vector set is present
+        # This job's whole value is that it does not skip. A missing directory
+        # makes the validators return early and report success, so check
+        # explicitly rather than trusting a green run.
+        working-directory: cpu-validation
+        run: |
+          status=0
+          for d in test_data/m6800 test_data/m6809 \
+                   test_data/65x02/6502/v1 test_data/z80/v1 \
+                   test_data/680x0/68000/v1 test_data/8088/v2; do
+            if [ -d "$d" ]; then
+              echo "ok      $d"
+            else
+              echo "::error::missing vector set $d — validators would skip silently"
+              status=1
+            fi
+          done
+          exit $status
+
+      - name: Run single-step validators
+        # --nocapture so a validator that skipped anyway says so on stderr;
+        # libtest hides that message for a passing test.
+        run: cargo test --release --locked -p phosphor-cpu-validation -- --nocapture

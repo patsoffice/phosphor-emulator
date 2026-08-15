@@ -143,10 +143,11 @@ fn run_test_case(tc: &Z80TestCase) -> Option<String> {
 #[test]
 fn test_all_z80_opcodes() {
     let test_dir = Path::new("test_data/z80/v1");
-    if !test_dir.exists() {
-        panic!(
-            "No SingleStepTests data. Run: git submodule update --init cpu-validation/test_data/z80"
-        );
+    if !phosphor_cpu_validation::require_test_data(
+        test_dir,
+        "run: git submodule update --init cpu-validation/test_data/z80",
+    ) {
+        return;
     }
 
     let mut entries: Vec<_> = std::fs::read_dir(test_dir)
