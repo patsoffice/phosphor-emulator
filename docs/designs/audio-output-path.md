@@ -1,0 +1,267 @@
+# Design: Audio Output Path
+
+> **Status: proposed.** This document covers the shared path every sound device
+> takes from its native clock to the host audio device: decimation, buffering,
+> rate negotiation, and clock synchronisation. It does not change how any chip
+> is synthesised. Tracked in beads epic
+> `phosphor-emulator-audio-output-path-oe0b`.
+
+## Context
+
+The sound chips in this workspace are modelled at the clock level. POKEY steps a
+4-bit, a 5-bit, a 9-bit and a 17-bit LFSR once per 1.79 MHz tick and derives its
+channel dividers from them. The Namco WSG walks its waveform ROM from a phase
+accumulator clocked at the CPU rate. The AY-8910 runs its tone counters, noise
+LFSR and envelope at chip clock / 8. The TMS5220 runs an LPC lattice filter at
+its own 8 kHz frame rate. Each of these is a faithful model producing a signal at
+the rate the hardware produces it.
+
+Every one of them then converts to the host rate through a single shared path:
+
+```text
+chip synthesis            AudioResampler                  frontend
+──────────────            ──────────────                  ────────
+1.79 MHz (POKEY)   ─┐
+3.07 MHz (WSG)     ─┼─►  box-average N samples  ──►  Vec  ──►  Mutex<VecDeque>  ──►  SDL callback
+2.00 MHz (AY)      ─┤    emit the mean               drain(..n)     8192 cap
+8.14 kHz (TMS)     ─┘                                              drop-oldest on overflow
+```
+
+That path has one significant defect and four smaller ones, all of which are
+cheapest to address together because they touch the same two files.
+
+### The significant defect: box-filter decimation
+
+`AudioResampler::tick` (`core/src/audio/mod.rs:124`) accumulates input samples
+and emits their arithmetic mean each time a Bresenham phase accumulator crosses.
+Averaging N consecutive samples and taking one is a box filter of length N used
+as a decimation filter.
+
+A length-N box filter has magnitude response `|sin(πfN/fs) / (N sin(πf/fs))|`.
+Its first sidelobe is about 13 dB below the passband and the sidelobes decay at
+only 6 dB per octave. For the decimation ratios in use — roughly 40 for POKEY at
+1.79 MHz, roughly 70 for a 3.07 MHz Namco board — that means the stopband never
+usefully arrives.
+
+This matters more here than it would for most signals. These chips emit square
+waves and LFSR noise, which carry substantial energy in high harmonics: a square
+wave's Nth harmonic falls off only as 1/N. Everything above the 22.05 kHz output
+Nyquist folds back into the audible band, and because the fold-back is a
+reflection rather than a shift, it lands at frequencies unrelated to the
+fundamental. The audible result is inharmonic grit that rises with pitch —
+worst on exactly the bright, high-register effects these boards use most.
+
+So the current path spends real effort synthesising the right signal and then
+discards a meaningful part of that fidelity in the last step.
+
+### The four smaller defects
+
+1. **No clock synchronisation.** Video is paced against `frame_rate_hz` off the
+   host monotonic clock (`frontend/src/emulator.rs:1203`); audio is consumed off
+   the sound card's crystal. These differ by tens of ppm on real hardware.
+   Nothing reconciles them, so the ring either fills — dropping its oldest
+   samples at `emulator.rs:916` — or drains, holding the last sample at
+   `audio.rs:41`. Both are audible, and both recur on a period set by drift rate
+   rather than by anything happening in the game.
+
+2. **A mutex on the real-time thread.** The SDL callback locks a
+   `Mutex<VecDeque<i16>>` shared with the emulator thread (`audio.rs:26`). If the
+   emulator holds it when the callback fires, the audio thread blocks and
+   underruns. The drain-then-release structure narrows the window; it cannot
+   remove it.
+
+3. **Hardcoded output rate.** Devices construct their resampler against a literal
+   or per-file `44_100` (`ay8910.rs:106`, `namco_wsg.rs:64`, `konami_sound.rs:64`,
+   `ssio.rs:49`, `tms5220.rs:46`, `votrax_sc01.rs:59`,
+   `machines/src/congo_bongo.rs:98`), and the frontend discards the spec SDL
+   actually grants (`audio.rs:94`). On a device that opens at 48 kHz, the machine
+   plays about 8% sharp.
+
+4. **O(n) drain.** `fill_audio` uses `Vec::drain(..n)`, shifting the backlog down
+   on every call (`audio/mod.rs:192`). Star Wars and I, Robot each carry four
+   POKEYs, so they pay it four times per frame.
+
+## Goals
+
+1. Decimate with a filter whose stopband rejection is good enough that aliasing
+   is inaudible — target 60 dB or better above the output Nyquist.
+2. Keep the per-emulated-cycle cost essentially unchanged. Filter work must scale
+   with output samples, not input cycles.
+3. Keep `AudioResampler`'s public API, so no device or board changes.
+4. Never lock, allocate, or syscall on the audio callback thread.
+5. Track the host audio clock rather than assuming it matches the host monotonic
+   clock.
+6. Use whatever sample rate the audio device actually grants.
+7. Preserve deterministic save/load. Resampler phase is part of machine state.
+
+## Non-goals
+
+- Changing any chip's synthesis. The LFSRs, dividers, envelopes and lattice
+  filters stay exactly as they are.
+- Stereo, or per-machine mixing topology. The frontend contract stays mono `i16`
+  drained through `AudioSource::fill_audio`.
+- Board-level analog modelling. That is the discrete sound framework's job; see
+  `docs/designs/discrete-sound-framework.md`.
+
+## 1. Two-stage decimation
+
+Filtering 1.79 MHz down to 44.1 kHz in one FIR stage would need a very long
+filter to get a narrow transition band at that ratio, and would run per input
+sample — unaffordable in the per-cycle hot path.
+
+Split the ratio instead. The first stage is the existing box filter, which is
+cheap (one add per input sample) and is a perfectly adequate anti-alias filter
+when the target is still far above the final Nyquist. The second stage is a
+proper windowed-sinc FIR running at the intermediate rate.
+
+```text
+1.79 MHz ──► box decimate ──► ~176 kHz ──► polyphase FIR ──► 44.1 kHz
+             (1 add/sample)     (4× target)   (~64 taps, per output sample)
+```
+
+Choosing the intermediate rate at 4× the output rate means:
+
+- The box filter's first null sits at `f_int`, well above the 22.05 kHz final
+  Nyquist, so its poor stopband is harmless — everything it fails to reject is
+  still inside the intermediate band and gets a second chance.
+- The FIR only needs to reject above 22.05 kHz from a 176.4 kHz input, which is
+  a relaxed transition band and therefore a short filter.
+- The FIR runs at output rate — about 44,100 evaluations per second per device,
+  each roughly 64 multiply-adds. That is on the order of 3 M MAC/s per device,
+  against the ~50 M cycles/s of emulation the machine is already doing, and
+  crucially it does not touch the per-emulated-cycle path at all.
+
+Implementation notes:
+
+- Design the FIR once at build time as a `const` table. A Kaiser window with
+  β ≈ 8 over 64 taps gives roughly 80 dB stopband, comfortably past the 60 dB
+  goal.
+- Use a polyphase decomposition so only the taps contributing to each output
+  sample are evaluated, rather than filtering at the intermediate rate and
+  throwing samples away.
+- The existing Bresenham accumulator already handles arbitrary non-integer
+  ratios; it stays, moved to the boundary between the two stages.
+
+### The upsampling path must survive
+
+`AudioResampler` is not only a decimator. The TMS5220 produces 8,135 Hz and must
+reach 44.1 kHz, and `core/src/audio/mod.rs:253` pins that case specifically — its
+comment records that a downsample-only resampler was the cause of a "slow/choppy
+speech" bug.
+
+When `input_rate < output_rate`, skip stage one entirely and let the FIR
+interpolate. The sample-and-hold currently used for upsampling is itself a crude
+zero-order hold, so this path improves too, but the priority is not regressing
+it. Keep that test as-is.
+
+## 2. Output ring
+
+Replace the resampler's output `Vec` with a fixed-capacity ring. Both `tick` and
+`fill_audio` become O(1) amortised with no memmove.
+
+Capacity should be a small multiple of a frame's worth of samples — at 44.1 kHz
+and ~60 Hz that is ~735 per frame, so 4096 is ample. Overrun should be
+observable rather than silent: expose a counter the profiler can read, because
+a persistently overrunning device is a bug worth seeing.
+
+## 3. Rate negotiation
+
+`Pokey::with_clock(clock_hz, sample_rate)` already takes the output rate as a
+parameter. Generalise that shape to every device, and thread the real rate from
+SDL back through machine construction.
+
+The ordering problem: devices are constructed when the machine is built, but the
+granted rate is not known until the audio device is opened, and the frontend
+opens audio using `machine.audio_sample_rate()` — which the machine only knows
+after its devices exist.
+
+Break the cycle by opening the audio device first with a preferred rate, then
+constructing the machine with the granted rate. The registry's `create` already
+takes a `RomSet`; adding an audio-config parameter is a mechanical change across
+factories. Alternatively, keep construction as-is and add a
+`set_output_sample_rate(u32)` that propagates to each device's resampler —
+`AudioResampler::set_input_rate` already demonstrates in-place retuning, and the
+same phase-folding logic applies to the output side.
+
+The second option is smaller and is the recommended starting point; revisit if
+a device turns out to need its rate at construction time.
+
+## 4. Lock-free transport
+
+Replace `Arc<Mutex<VecDeque<i16>>>` with a single-producer / single-consumer ring
+over a fixed `[i16; N]` and two atomic indices — the emulator thread owns the
+write index, the callback owns the read index, and neither ever blocks.
+
+Roughly 60 lines and no new dependency. The existing fade-in/fade-out ramp and
+hold-last-sample-on-underrun behaviour are preserved exactly; only the transport
+underneath them changes.
+
+This is also a precondition for section 5, which needs to read fill level from
+the emulator thread without taking a lock.
+
+## 5. Clock synchronisation
+
+With a lock-free ring, the emulator can cheaply read how full it is, and that
+number is a direct measurement of the phase between the two clocks. Steer the
+resampler's output rate to hold it near a setpoint:
+
+```text
+  error   = fill_level - target_fill          (target ≈ half the ring)
+  trim    = clamp(-Kp * error, -0.005, +0.005)
+  rate    = nominal_rate * (1 + trim)
+```
+
+A ±0.5% authority is far more than the tens of ppm of real drift, so the loop
+has ample headroom, and a 0.5% pitch deviation is well under the ~1% threshold
+where pitch change becomes noticeable. Choose `Kp` for a time constant of
+several seconds: this must correct drift, not chase per-frame jitter, and a fast
+loop would modulate pitch audibly.
+
+`AudioResampler::set_input_rate` already supports retuning without discarding
+phase or buffered output, which is exactly the primitive this needs.
+
+The result is that dropped samples and underruns become genuine fault
+indications rather than the normal steady state — which is what makes the
+overrun counter from section 2 worth having.
+
+## Phasing
+
+Each phase is independently shippable and independently valuable.
+
+| Phase | Work | Why this order |
+|-------|------|----------------|
+| 1 | Output ring (§2) | Smallest, touches only `AudioResampler` internals, no behaviour change |
+| 2 | Two-stage decimation (§1) | The audible win; independent of everything else |
+| 3 | Rate negotiation (§3) | Mechanical; needed before the control loop has a correct nominal rate |
+| 4 | Lock-free transport (§4) | Removes the priority inversion; precondition for phase 5 |
+| 5 | Clock synchronisation (§5) | Needs phases 3 and 4 in place |
+
+## Testing
+
+- **Stopband rejection.** Drive the resampler with a tone above the output
+  Nyquist and assert the aliased energy in the output is at least 60 dB below a
+  reference in-band tone. This is the test that would have caught the current
+  behaviour, and it is the acceptance gate for phase 2.
+- **Existing resampler tests stay green unchanged.** `core/src/audio/mod.rs`
+  already covers sample counts in both directions, box averaging, upsample
+  hold, drain semantics, reset, and save/load round trip. They encode the
+  contract; phase 2 must not need them rewritten, only the averaging-specific
+  assertions relaxed to tolerances.
+- **Upsampling regression.** Keep `resampler_upsamples_to_full_output_count`
+  (`mod.rs:253`) exactly as it is. It pins a real past bug.
+- **No allocation on the callback.** Assert structurally by construction; a
+  debug assertion on the callback path is a reasonable belt-and-braces.
+- **Drift.** Run a machine headless for a simulated long session with a
+  deliberately mismatched consumer rate and assert the control loop settles and
+  holds without drops or underruns.
+- **By ear.** `--record-wav` already exists (`frontend/src/emulator.rs:1277`).
+  Capture the same machine and input sequence before and after phase 2 and
+  compare. Galaga, Tempest and Q*bert are good candidates — bright effects,
+  four-POKEY mixing, and speech respectively.
+
+## References
+
+- `core/src/audio/mod.rs` — the resampler being replaced
+- `frontend/src/audio.rs` — the SDL transport being replaced
+- `docs/designs/discrete-sound-framework.md` — board-level analog paths, which
+  feed into this path rather than changing it
