@@ -55,7 +55,10 @@ cargo clippy --all-features --all-targets --allow-dirty --fix  # Auto-fix clippy
 cargo fmt                                                      # Format code
 cargo run --package phosphor-frontend -- joust /path/to/roms --scale 3
 cargo run -p phosphor-disasm --bin disasm -- machine --machine mariobros --region sound /path/to/roms  # Disassemble a ROM
+cargo run --release -p phosphor-bench -- --roms /path/to/roms   # Benchmark emulation throughput
 ```
+
+- Before/after numbers for any performance change come from `phosphor-bench`, not from the interactive profiler — it reports the fastest of N repetitions, which is the stable estimator for a deterministic workload. Always `--release`; a debug build measures a different program.
 
 - Test the crate you changed; also test downstream crates when changing `phosphor-core` or `phosphor-macros`
 - `cargo clippy` must pass with no warnings
@@ -72,6 +75,8 @@ cargo run -p phosphor-disasm --bin disasm -- machine --machine mariobros --regio
 | `phosphor-frontend`        | SDL2 display, audio, input, debug UI      | phosphor-core, phosphor-machines, phosphor-harness, phosphor-script, sdl2, egui, gl |
 | `phosphor-cpu-validation`  | Test vector generation & validation       | phosphor-core, serde, serde_json, rand, flate2        |
 | `phosphor-disasm`          | Standalone ROM disassembler CLI           | phosphor-core, phosphor-machines, phosphor-harness, clap |
+| `phosphor-script`          | Rhai scripting over a booted machine      | phosphor-core, phosphor-machines, phosphor-harness, rhai |
+| `phosphor-bench`           | Headless emulation throughput benchmark   | phosphor-harness, clap                                |
 | `cross-validation`         | C++ cross-validate against ref emulators  | (non-Cargo, uses Makefile)                            |
 
 - Never create circular dependencies between crates

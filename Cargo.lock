@@ -823,6 +823,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "phosphor-bench"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "phosphor-harness",
+]
+
+[[package]]
 name = "phosphor-core"
 version = "0.1.0"
 dependencies = [

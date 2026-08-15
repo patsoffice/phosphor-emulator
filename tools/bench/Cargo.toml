@@ -1,0 +1,15 @@
+[package]
+name = "phosphor-bench"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "bench"
+path = "src/main.rs"
+
+[dependencies]
+# phosphor-harness re-exports everything needed: it hands back a
+# `&mut dyn FrontendMachine`, whose methods are callable through the trait
+# object without naming phosphor-core here.
+phosphor-harness = { path = "../../harness" }
+clap = { version = "4", features = ["derive"] }

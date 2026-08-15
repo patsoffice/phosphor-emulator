@@ -227,6 +227,21 @@ C++ harnesses that validate phosphor-core's test vectors against independent ref
 Standalone command-line utilities built on the core crates.
 
 - **`phosphor-disasm`** (`tools/disasm`) — disassembles a ROM with any per-CPU disassembler, in three modes: a raw file, a member of a `.zip`/directory ROM set, or a machine's named code region (CPU + origin auto-resolved from the disasm registry). Depends only on `phosphor-core`/`phosphor-machines` (no SDL2). See [docs/disassembler.md](docs/disassembler.md).
+- **`phosphor-script`** (`tools/script`) — Rhai scripting over a booted machine (`DebugSession`), shared by the frontend's interactive console and the headless script runner.
+- **`phosphor-bench`** (`tools/bench`) — headless throughput benchmark: boots a machine, runs a fixed number of frames with no window and no throttle, and reports per-frame cost split into emulation, render, and audio. Exists so performance changes are measurable rather than asserted.
+
+```bash
+# Representative board set: pacman, galaga, tempest, marble, joust
+cargo run --release -p phosphor-bench -- --roms /path/to/roms
+
+# One machine, more frames, past the power-on self-test
+cargo run --release -p phosphor-bench -- --machine galaga --frames 2000 --warmup 3000
+```
+
+Reports the **fastest** of N repetitions rather than the mean: emulation is
+deterministic, so run-to-run variation is host noise, and noise only ever adds
+time. The trailing `+/-` is how far the slowest repetition lagged — a large
+value means the machine was busy and the number deserves a re-run.
 
 ## Project Structure
 
@@ -249,8 +264,11 @@ phosphor-emulator/
 │   ├── src/bin/                 #   Test generators (M6809, M6800, I8035)
 │   ├── tests/                   #   Single-step validators (M6809, M6800, M6502, Z80, I8088)
 │   └── test_data/               #   Generated vectors + SingleStepTests submodules
+├── harness/                     # phosphor-harness — headless boot + ROM-path resolver
 ├── tools/                       # standalone CLIs built on the core crates
-│   └── disasm/                  #   phosphor-disasm — per-CPU ROM disassembler
+│   ├── bench/                   #   phosphor-bench — headless throughput benchmark
+│   ├── disasm/                  #   phosphor-disasm — per-CPU ROM disassembler
+│   └── script/                  #   phosphor-script — Rhai scripting over a booted machine
 └── cross-validation/            # C++ harnesses validating against reference emulators
 ```
 
