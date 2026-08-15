@@ -7,11 +7,16 @@ Cycle-accurate emulation of the Motorola 6809E microprocessor, implementing all 
 | Metric | Value |
 |--------|-------|
 | Opcodes | 285 (238 page 0 + 38 page 2 + 9 page 3) |
-| Unit tests | 459 |
-| Cross-validation | 264,132/266,000 (99.3%) |
+| Unit tests | 473 |
+| Cross-validation | 264,723/266,000 (99.5%) |
 | Timing | Cycle-accurate |
 
-The 1,868 cross-validation mismatches are all one known divergence in extended-indirect indexed addressing, where the datasheet and the reference core disagree on the cycle count; see `cpu-validation/README_m6809.md`.
+The 1,277 cross-validation mismatches are two known divergences, and phosphor
+is the side that matches the documented part in both: the cycle count of
+extended-indirect indexed addressing, where the datasheet and the reference
+core disagree, and `TFR`/`EXG` between registers of different sizes, which the
+reference fills with `$FF` instead of transferring. See
+`cpu-validation/README_m6809.md`.
 
 ## Bus behaviour on don't-care cycles
 
