@@ -3,6 +3,11 @@
 //! distinct colors) plus a coarse ASCII thumbnail so banked-GFX bring-up can be
 //! eyeballed without a window.
 //!
+//! The pass/fail verdict now also lives as a ROM-gated test
+//! (`the_galaxian_family_draws_a_populated_frame` in
+//! `harness/tests/boot_check_test.rs`); this stays as the interactive view —
+//! lit-pixel/color stats and an ASCII thumbnail per game.
+//!
 //!   cargo run -p phosphor-machines --example galaxian_boot_check -- <roms-root>
 //! where <roms-root> holds extracted subdirs galaxian/ mooncrst/ pisces/ uniwars/.
 

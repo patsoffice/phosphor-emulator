@@ -10,6 +10,11 @@
 //! counts over the tail window, the bounding box, distinct colors, and a coarse
 //! ASCII thumbnail so bring-up can be eyeballed without a window.
 //!
+//! The pass/fail verdict now also lives as a ROM-gated test
+//! (`empire_strikes_back_boots_past_its_slapstic` in
+//! `harness/tests/boot_check_test.rs`); this stays as the interactive view —
+//! per-frame counts, bounding box, colors, and an ASCII thumbnail.
+//!
 //!   cargo run -p phosphor-machines --example esb_boot_check -- <roms-dir> [frames]
 //!
 //! where <roms-dir> holds the extracted `esb` ROM files (unzip the MAME

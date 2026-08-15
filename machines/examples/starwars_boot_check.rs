@@ -9,6 +9,11 @@
 //! and a coarse ASCII thumbnail of the rasterized frame so bring-up can be
 //! eyeballed without a window.
 //!
+//! The pass/fail verdict now also lives as a ROM-gated test
+//! (`star_wars_boots_into_a_live_vector_display` in
+//! `harness/tests/boot_check_test.rs`); this stays as the interactive view —
+//! per-frame counts, bounding box, colors, and an ASCII thumbnail.
+//!
 //!   cargo run -p phosphor-machines --example starwars_boot_check -- <roms-dir> [frames]
 //!
 //! where <roms-dir> holds the extracted `starwars` ROM files (unzip the MAME

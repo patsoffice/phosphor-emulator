@@ -6,6 +6,11 @@
 //! renders — the playfield and motion objects land in Phases 3b/3c — so expect
 //! the attract-mode HUD text on an otherwise black frame.
 //!
+//! The pass/fail verdict now also lives as a ROM-gated test
+//! (`marble_madness_boots_its_68010_and_fills_video_ram` in
+//! `harness/tests/boot_check_test.rs`); this stays as the interactive view —
+//! sound/EEPROM debug counters and an ASCII thumbnail.
+//!
 //!   cargo run -p phosphor-machines --example marble_boot_check -- <roms-dir>
 //! where <roms-dir> holds the extracted `marble` ROM files (136032.*, 136033.*).
 

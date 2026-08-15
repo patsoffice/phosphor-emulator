@@ -7,6 +7,11 @@
 //! succeeded. Video rendering is not implemented yet (Milestone 1), so there is
 //! no framebuffer thumbnail.
 //!
+//! The pass/fail verdict now also lives as a ROM-gated test
+//! (`xevious_releases_its_sub_cpus_after_the_50xx_handshake` in
+//! `harness/tests/boot_check_test.rs`); this stays as the interactive view —
+//! the per-200-frame progress trace.
+//!
 //!   cargo run -p phosphor-machines --example xevious_boot_check -- <roms-dir> [frames]
 //! where <roms-dir> holds the extracted `xevious` ROM files (unzip xevious.zip).
 

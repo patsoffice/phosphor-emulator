@@ -5,6 +5,11 @@
 //! and a coarse ASCII thumbnail. Road Runner self-initializes a blank EEPROM and
 //! hand-shakes with the sound CPU during boot, so give it plenty of frames.
 //!
+//! The pass/fail verdict now also lives as a ROM-gated test
+//! (`road_runner_boots_its_68010_and_fills_video_ram` in
+//! `harness/tests/boot_check_test.rs`); this stays as the interactive view —
+//! sound/EEPROM debug counters and an ASCII thumbnail.
+//!
 //!   cargo run -p phosphor-machines --example roadrunner_boot_check -- <roms-dir> [frames]
 //! where <roms-dir> holds the extracted `roadrunn` ROM files.
 
