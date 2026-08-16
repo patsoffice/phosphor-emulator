@@ -167,13 +167,64 @@ pub struct BtimeConfig {
 ///   0x4000         IN0 (P1)      0x4001  IN1 (P2)      0x4002  system
 ///   0x4003         DSW1 (bit7 = live VBLANK)           0x4004  DSW2
 ///   0xB000-0xFFFF  Program ROM
+/// One CPU cycle: the main 6502, the sound 6502 on its divider, then the
+/// PSGs and the clock.
+///
+/// The CPUs live on the machine and the board *is* the bus, so this takes them
+/// as separate borrows and dispatches at a concrete type.
+#[inline]
+pub fn tick(cpu: &mut M6502, sound_cpu: &mut M6502, board: &mut BtimeBoard) {
+    // Main CPU @ 1.5 MHz.
+    board.begin_main_cycle(cpu);
+    cpu.execute_cycle(board, BusMaster::Cpu(0));
+
+    // Sound CPU @ 500 kHz (main / 3).
+    if board.sound_clock.tick() {
+        board.latch_sound_pc(sound_cpu);
+        sound_cpu.execute_cycle(board, BusMaster::Cpu(1));
+    }
+
+    board.end_cycle();
+}
+
+/// Run one frame's worth of cycles. This board has no scanline-boundary work
+/// -- the live VBLANK bit is derived from the clock when read -- so this is a
+/// plain loop.
+pub fn run_frame(cpu: &mut M6502, sound_cpu: &mut M6502, board: &mut BtimeBoard) {
+    for _ in 0..TIMING.cycles_per_frame() {
+        tick(cpu, sound_cpu, board);
+    }
+}
+
+// The board is the bus for every machine on it: they differ only in the
+// per-game config the board already carries.
+impl Bus for BtimeBoard {
+    type Address = u16;
+    type Data = u8;
+
+    #[inline]
+    fn read(&mut self, master: BusMaster, addr: u16) -> u8 {
+        self.bus_read(master, addr)
+    }
+
+    #[inline]
+    fn write(&mut self, master: BusMaster, addr: u16, data: u8) {
+        self.bus_write(master, addr, data);
+    }
+
+    #[inline]
+    fn is_halted_for(&self, master: BusMaster) -> bool {
+        self.bus_is_halted_for(master)
+    }
+
+    #[inline]
+    fn check_interrupts(&mut self, target: BusMaster) -> InterruptState {
+        self.bus_check_interrupts(target)
+    }
+}
+
 #[derive(BusDebug)]
 pub struct BtimeBoard {
-    #[debug_cpu("M6502 (DECO CPU-7)")]
-    pub(crate) cpu: M6502,
-    #[debug_cpu("M6502 Sound")]
-    pub(crate) sound_cpu: M6502,
-
     #[debug_map(cpu = 0)]
     pub(crate) main_map: AddressSpace16,
     #[debug_map(cpu = 1)]
@@ -212,6 +263,10 @@ pub struct BtimeBoard {
     // DECO CPU-7 decryption state: any main-CPU write arms decryption of the
     // next opcode fetch (consumed in `bus_read`).
     main_had_written: bool,
+    /// The main CPU's SYNC pin, sampled once per cycle by `begin_main_cycle`.
+    /// A reset CPU sits in Fetch, so this starts asserted. Not saved: it is
+    /// re-derived from the CPU before every cycle that could read the bus.
+    main_is_sync: bool,
 
     // I/O latches
     pub(crate) main_irq: bool, // coin-insertion IRQ (HOLD_LINE approximation)
@@ -267,8 +322,6 @@ impl BtimeBoard {
             .mirror(0xF000, 0xE000, 0x1000);
 
         let mut board = Self {
-            cpu: M6502::new(),
-            sound_cpu: M6502::new(),
             main_map,
             sound_map,
             ay1: Ay8910::new(AY_CLOCK_HZ),
@@ -288,6 +341,7 @@ impl BtimeBoard {
             bg_map: [0; 0x0800],
             framebuffer: vec![0u8; display_bytes()],
             main_had_written: false,
+            main_is_sync: true,
             main_irq: false,
             flip_screen: false,
             bnj_scroll0: 0,
@@ -400,29 +454,32 @@ impl BtimeBoard {
 
     // --- Core tick ---
 
-    pub fn tick(&mut self, bus: &mut dyn Bus<Address = u16, Data = u8>) {
-        // Main CPU @ 1.5 MHz.
+    /// Sample the main CPU state the bus needs for the coming cycle: the SYNC
+    /// pin (which DECO CPU-7 decryption keys off) and, when the debugger is
+    /// attached, the PC for access attribution. SYNC is stable across the whole
+    /// cycle -- the 6502 only leaves Fetch after the opcode read completes -- so
+    /// sampling it here sees exactly what the bus would see mid-read.
+    fn begin_main_cycle(&mut self, cpu: &M6502) {
+        self.main_is_sync = cpu.is_sync();
         if self.main_map.debug_active() {
-            let pc = self
-                .cpu
-                .at_instruction_boundary()
-                .then_some(self.cpu.pc as u32);
+            let pc = cpu.at_instruction_boundary().then_some(cpu.pc as u32);
             self.main_map.latch_access_context(self.clock, pc);
         }
-        self.cpu.execute_cycle(bus, BusMaster::Cpu(0));
+    }
 
-        // Sound CPU @ 500 kHz (main / 3).
-        if self.sound_clock.tick() {
-            if self.sound_map.debug_active() {
-                let pc = self
-                    .sound_cpu
-                    .at_instruction_boundary()
-                    .then_some(self.sound_cpu.pc as u32);
-                self.sound_map.latch_access_context(self.clock, pc);
-            }
-            self.sound_cpu.execute_cycle(bus, BusMaster::Cpu(1));
+    /// Latch the sound CPU's PC before its cycle.
+    fn latch_sound_pc(&mut self, sound_cpu: &M6502) {
+        if self.sound_map.debug_active() {
+            let pc = sound_cpu
+                .at_instruction_boundary()
+                .then_some(sound_cpu.pc as u32);
+            self.sound_map.latch_access_context(self.clock, pc);
         }
+    }
 
+    /// Board work after the CPUs' cycle: the PSGs, the clock, and the
+    /// end-of-frame render.
+    fn end_cycle(&mut self) {
         // Both AY-3-8910s @ 1.5 MHz (once per main tick).
         self.ay1.tick();
         self.ay2.tick();
@@ -443,6 +500,7 @@ impl BtimeBoard {
 
     pub fn reset(&mut self) {
         self.main_had_written = false;
+        self.main_is_sync = true;
         self.main_irq = false;
         self.sound_irq = false;
         self.audio_nmi_enable = false;
@@ -450,7 +508,7 @@ impl BtimeBoard {
         self.ay1.reset();
         self.ay2.reset();
         self.clock = 0;
-        // CPU resets are driven by the wrapper via `bus_split!` (Bus lives there).
+        // The CPUs live on the machine, which resets them against this board.
     }
 
     /// Current scanline (0-271) within the frame.
@@ -471,16 +529,10 @@ impl BtimeBoard {
     }
 
     /// Returns a bitmask of CPUs at instruction boundaries. Bit 0 = main CPU,
-    /// bit 1 = sound CPU.
-    pub fn debug_tick_boundaries(&self) -> u32 {
-        let mut result = 0;
-        if self.cpu.at_instruction_boundary() {
-            result |= 1;
-        }
-        if self.sound_cpu.at_instruction_boundary() {
-            result |= 2;
-        }
-        result
+    /// bit 1 = sound CPU. The CPUs live on the machine, which passes them in.
+    pub fn instruction_boundaries(cpu: &M6502, sound_cpu: &M6502) -> u32 {
+        u32::from(cpu.at_instruction_boundary())
+            | (u32::from(sound_cpu.at_instruction_boundary()) << 1)
     }
 
     // --- Capability-trait helpers (called by the game wrapper) ---
@@ -722,7 +774,7 @@ impl BtimeBoard {
         // write, consume the "had written" flag and deobfuscate the fetched
         // byte when (addr & 0x0104) == 0x0104. The flag clears on every sync
         // fetch regardless of address; only matching addresses are decrypted.
-        if self.cpu.is_sync() && self.main_had_written {
+        if self.main_is_sync && self.main_had_written {
             self.main_had_written = false;
             if (addr & 0x0104) == 0x0104 {
                 data = deco_cpu7_decrypt(data);
@@ -817,8 +869,6 @@ impl BtimeBoard {
 
 impl Saveable for BtimeBoard {
     fn save_state(&self, w: &mut StateWriter) {
-        self.cpu.save_state(w);
-        self.sound_cpu.save_state(w);
         w.write_bytes(&self.ram);
         w.write_bytes(&self.videoram);
         w.write_bytes(&self.colorram);
@@ -843,8 +893,6 @@ impl Saveable for BtimeBoard {
     }
 
     fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
-        self.cpu.load_state(r)?;
-        self.sound_cpu.load_state(r)?;
         r.read_bytes_into(&mut self.ram)?;
         r.read_bytes_into(&mut self.videoram)?;
         r.read_bytes_into(&mut self.colorram)?;
@@ -1054,7 +1102,7 @@ mod tests {
 
     // --- DECO CPU-7 opcode decryption ---
     //
-    // A fresh M6502 sits in the Fetch state, so `is_sync()` is true and every
+    // A fresh board has `main_is_sync` set (a reset 6502 sits in Fetch), so every
     // test `bus_read` behaves as an opcode fetch.
 
     #[test]

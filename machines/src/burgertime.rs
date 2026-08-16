@@ -3,10 +3,9 @@
 //! Thin wrapper around the shared [`BtimeBoard`] (see `btime.rs`) following the
 //! Board Wrapper Pattern (`joust.rs` / `gridlee.rs`): it constructs the board,
 //! registers the machine, defines the ROM regions, and wires the game-specific
-//! inputs and DIP banks. The board provides the CPUs, video, and sound.
+//! inputs and DIP banks. The board provides video and sound; the CPUs live
+//! here, beside it.
 
-use phosphor_core::bus_split;
-use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
     ActionRole, DefaultBinding, DipApplyTiming, DipChoice, DipOption, DipSwitchBank, DipSwitches,
     Direction, InputConfigurable, InputControl, InputEvent, InputId, InputKind, KeyId, MachineCore,
@@ -14,7 +13,8 @@ use phosphor_core::core::machine::{
 };
 use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
-use phosphor_macros::Saveable;
+use phosphor_core::cpu::m6502::M6502;
+use phosphor_macros::{BusDebug, Saveable};
 
 use crate::btime::{self, BtimeBoard, BtimeConfig};
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
@@ -316,14 +316,24 @@ const BURGERTIME_CONTROLS: &[InputControl] = &[
 // ---------------------------------------------------------------------------
 
 /// Data East btime board configured for Burgertime (1982).
-#[derive(Saveable)]
+///
+/// The two 6502s sit beside the board rather than inside it, so each cycle
+/// dispatches at the concrete `BtimeBoard` -- which *is* the bus.
+#[derive(Saveable, BusDebug)]
 pub struct BurgertimeSystem {
+    #[debug_cpu("M6502 (DECO CPU-7)")]
+    pub cpu: M6502,
+    #[debug_cpu("M6502 Sound")]
+    pub sound_cpu: M6502,
+    #[debug_bus]
     pub board: BtimeBoard,
 }
 
 impl BurgertimeSystem {
     pub fn new() -> Self {
         Self {
+            cpu: M6502::new(),
+            sound_cpu: M6502::new(),
             board: BtimeBoard::new(BURGERTIME_CONFIG),
         }
     }
@@ -355,6 +365,23 @@ impl BurgertimeSystem {
 
         Ok(())
     }
+
+    /// Advance one CPU cycle, returning the instruction-boundary mask.
+    pub fn step_cycle(&mut self) -> u32 {
+        btime::tick(&mut self.cpu, &mut self.sound_cpu, &mut self.board);
+        BtimeBoard::instruction_boundaries(&self.cpu, &self.sound_cpu)
+    }
+
+    /// Read the CPU-facing bus, side effects and all. Distinct from the
+    /// debugger's `BusDebug::peek`/`poke`, which avoid side effects.
+    pub fn bus_read(&mut self, master: BusMaster, addr: u16) -> u8 {
+        self.board.read(master, addr)
+    }
+
+    /// Write the CPU-facing bus, side effects and all. See [`Self::bus_read`].
+    pub fn bus_write(&mut self, master: BusMaster, addr: u16, data: u8) {
+        self.board.write(master, addr, data);
+    }
 }
 
 impl Default for BurgertimeSystem {
@@ -363,32 +390,14 @@ impl Default for BurgertimeSystem {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Bus — delegates to the board
-// ---------------------------------------------------------------------------
-
-impl Bus for BurgertimeSystem {
-    type Address = u16;
-    type Data = u8;
-
-    fn read(&mut self, master: BusMaster, addr: u16) -> u8 {
-        self.board.bus_read(master, addr)
-    }
-
-    fn write(&mut self, master: BusMaster, addr: u16, data: u8) {
-        self.board.bus_write(master, addr, data);
-    }
-
-    fn is_halted_for(&self, master: BusMaster) -> bool {
-        self.board.bus_is_halted_for(master)
-    }
-
-    fn check_interrupts(&mut self, target: BusMaster) -> InterruptState {
-        self.board.bus_check_interrupts(target)
-    }
-}
-
-crate::impl_board_delegation!(BurgertimeSystem, board, btime::TIMING, orientation);
+// The board is the bus -- see `impl Bus for BtimeBoard` in btime.rs.
+crate::impl_board_delegation!(
+    BurgertimeSystem,
+    board,
+    btime::TIMING,
+    orientation,
+    split_cpu
+);
 
 impl MachineCore for BurgertimeSystem {
     fn gfx_sheets(&self) -> Vec<phosphor_core::core::machine::GfxSheet<'_>> {
@@ -399,21 +408,15 @@ impl MachineCore for BurgertimeSystem {
         // Run one frame's worth of main-CPU cycles. The live VBLANK bit (read at
         // 0x4003) is derived from the clock each cycle, so the game's frame sync
         // works without a periodic interrupt; the coin IRQ is edge-driven.
-        bus_split!(self, bus => {
-            for _ in 0..btime::TIMING.cycles_per_frame() {
-                self.board.tick(bus);
-            }
-        });
+        btime::run_frame(&mut self.cpu, &mut self.sound_cpu, &mut self.board);
         // The board renders on the frame's last cycle inside `tick`, so the
         // single render site is shared with the debugger's `debug_tick` path.
     }
 
     fn reset(&mut self) {
         self.board.reset();
-        bus_split!(self, bus => {
-            self.board.cpu.reset(bus, BusMaster::Cpu(0));
-            self.board.sound_cpu.reset(bus, BusMaster::Cpu(1));
-        });
+        self.cpu.reset(&mut self.board, BusMaster::Cpu(0));
+        self.sound_cpu.reset(&mut self.board, BusMaster::Cpu(1));
     }
 
     fn frame_rate_hz(&self) -> f64 {

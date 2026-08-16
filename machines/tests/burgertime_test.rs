@@ -51,19 +51,19 @@ fn main_rom_region_layout() {
 #[test]
 fn ram_video_color_read_write() {
     let mut sys = BurgertimeSystem::new();
-    sys.write(CPU, 0x0042, 0xAB); // work RAM
-    sys.write(CPU, 0x1005, 0x12); // video RAM
-    sys.write(CPU, 0x1405, 0x34); // color RAM
-    assert_eq!(sys.read(CPU, 0x0042), 0xAB);
-    assert_eq!(sys.read(CPU, 0x1005), 0x12);
-    assert_eq!(sys.read(CPU, 0x1405), 0x34);
+    sys.bus_write(CPU, 0x0042, 0xAB); // work RAM
+    sys.bus_write(CPU, 0x1005, 0x12); // video RAM
+    sys.bus_write(CPU, 0x1405, 0x34); // color RAM
+    assert_eq!(sys.bus_read(CPU, 0x0042), 0xAB);
+    assert_eq!(sys.bus_read(CPU, 0x1005), 0x12);
+    assert_eq!(sys.bus_read(CPU, 0x1405), 0x34);
 }
 
 #[test]
 fn rom_is_not_bus_writable() {
     let mut sys = BurgertimeSystem::new();
-    sys.write(CPU, 0xC000, 0xFF);
-    assert_eq!(sys.read(CPU, 0xC000), 0x00, "ROM writes are ignored");
+    sys.bus_write(CPU, 0xC000, 0xFF);
+    assert_eq!(sys.bus_read(CPU, 0xC000), 0x00, "ROM writes are ignored");
 }
 
 // =================================================================
@@ -75,16 +75,16 @@ fn xy_swap_mirror_reaches_video_ram() {
     let mut sys = BurgertimeSystem::new();
     // swap(off) = 32*(off%32) + off/32, an involution. swap(5) = 160 (0xA0),
     // so 0x1800 + 0xA0 mirrors video-RAM offset 5.
-    sys.write(CPU, 0x1000 + 5, 0x7E);
-    assert_eq!(sys.read(CPU, 0x1800 + 0xA0), 0x7E, "video mirror");
+    sys.bus_write(CPU, 0x1000 + 5, 0x7E);
+    assert_eq!(sys.bus_read(CPU, 0x1800 + 0xA0), 0x7E, "video mirror");
 
     // Color-RAM mirror at 0x1C00 likewise.
-    sys.write(CPU, 0x1400 + 5, 0x11);
-    assert_eq!(sys.read(CPU, 0x1C00 + 0xA0), 0x11, "color mirror");
+    sys.bus_write(CPU, 0x1400 + 5, 0x11);
+    assert_eq!(sys.bus_read(CPU, 0x1C00 + 0xA0), 0x11, "color mirror");
 
     // A write through the mirror lands at the swapped offset (swap(1)=32).
-    sys.write(CPU, 0x1801, 0x3C);
-    assert_eq!(sys.read(CPU, 0x1000 + 32), 0x3C);
+    sys.bus_write(CPU, 0x1801, 0x3C);
+    assert_eq!(sys.bus_read(CPU, 0x1000 + 32), 0x3C);
 }
 
 // =================================================================
@@ -101,13 +101,13 @@ fn deco_decrypts_matching_opcode_fetch() {
 
     // A fresh CPU is in the Fetch state, so `is_sync()` is true and every read
     // behaves as an opcode fetch. Arm decryption with a write, then fetch.
-    sys.write(CPU, 0x0000, 0x00);
-    assert_eq!(sys.read(CPU, 0xC104), 0x0C, "0x84 bit-permuted");
+    sys.bus_write(CPU, 0x0000, 0x00);
+    assert_eq!(sys.bus_read(CPU, 0xC104), 0x0C, "0x84 bit-permuted");
 
     // Re-arm; a non-matching address is returned raw (flag still clears).
-    sys.write(CPU, 0x0000, 0x00);
+    sys.bus_write(CPU, 0x0000, 0x00);
     assert_eq!(
-        sys.read(CPU, 0xC000),
+        sys.bus_read(CPU, 0xC000),
         0x84,
         "no decrypt off the 0x104 lines"
     );
@@ -120,7 +120,7 @@ fn deco_no_decrypt_without_a_prior_write() {
     rom[0x1104] = 0x84;
     sys.board.load_main_rom(&rom);
     // No write has armed the flag: the matching address is returned raw.
-    assert_eq!(sys.read(CPU, 0xC104), 0x84);
+    assert_eq!(sys.bus_read(CPU, 0xC104), 0x84);
 }
 
 // =================================================================
@@ -176,12 +176,12 @@ fn default_palette_renders_white() {
 fn palette_write_changes_rendered_color() {
     let mut sys = BurgertimeSystem::new();
     // Entry 0 = 0xFF -> inverted 0x00 -> black.
-    sys.write(CPU, 0x0C00, 0xFF);
+    sys.bus_write(CPU, 0x0C00, 0xFF);
     sys.board.render();
     assert!(render(&sys).chunks_exact(3).all(|p| p == [0, 0, 0]));
 
     // Entry 0 = 0xF8 -> inverted 0x07 -> R=7 only -> pure red.
-    sys.write(CPU, 0x0C00, 0xF8);
+    sys.bus_write(CPU, 0x0C00, 0xF8);
     sys.board.render();
     assert!(render(&sys).chunks_exact(3).all(|p| p == [0xFF, 0, 0]));
 }
@@ -193,11 +193,19 @@ fn palette_write_changes_rendered_color() {
 #[test]
 fn p1_left_is_active_low_on_in0() {
     let mut sys = BurgertimeSystem::new();
-    assert_eq!(sys.read(CPU, 0x4000), 0xFF, "idle high");
+    assert_eq!(sys.bus_read(CPU, 0x4000), 0xFF, "idle high");
     press(&mut sys, INPUT_P1_LEFT, true);
-    assert_eq!(sys.read(CPU, 0x4000) & 0x02, 0, "P1 Left clears IN0 bit 1");
+    assert_eq!(
+        sys.bus_read(CPU, 0x4000) & 0x02,
+        0,
+        "P1 Left clears IN0 bit 1"
+    );
     press(&mut sys, INPUT_P1_LEFT, false);
-    assert_eq!(sys.read(CPU, 0x4000) & 0x02, 0x02, "released -> bit set");
+    assert_eq!(
+        sys.bus_read(CPU, 0x4000) & 0x02,
+        0x02,
+        "released -> bit set"
+    );
 }
 
 #[test]
@@ -205,30 +213,48 @@ fn start_and_tilt_are_active_low_on_system() {
     let mut sys = BurgertimeSystem::new();
     press(&mut sys, INPUT_START1, true);
     assert_eq!(
-        sys.read(CPU, 0x4002) & 0x01,
+        sys.bus_read(CPU, 0x4002) & 0x01,
         0,
         "start1 clears system bit 0"
     );
     press(&mut sys, INPUT_TILT, true);
-    assert_eq!(sys.read(CPU, 0x4002) & 0x04, 0, "tilt clears system bit 2");
+    assert_eq!(
+        sys.bus_read(CPU, 0x4002) & 0x04,
+        0,
+        "tilt clears system bit 2"
+    );
 }
 
 #[test]
 fn coins_are_active_high_and_latch_the_irq() {
     let mut sys = BurgertimeSystem::new();
-    assert!(!sys.check_interrupts(CPU).irq);
+    assert!(!sys.board.check_interrupts(CPU).irq);
 
     press(&mut sys, INPUT_COIN1, true);
-    assert_ne!(sys.read(CPU, 0x4002) & 0x40, 0, "coin1 sets system bit 6");
-    assert!(sys.check_interrupts(CPU).irq, "coin1 edge asserts IRQ");
+    assert_ne!(
+        sys.bus_read(CPU, 0x4002) & 0x40,
+        0,
+        "coin1 sets system bit 6"
+    );
+    assert!(
+        sys.board.check_interrupts(CPU).irq,
+        "coin1 edge asserts IRQ"
+    );
 
     // Vectoring through 0xFFFE acknowledges the HOLD_LINE IRQ.
-    sys.read(CPU, 0xFFFE);
-    assert!(!sys.check_interrupts(CPU).irq);
+    sys.bus_read(CPU, 0xFFFE);
+    assert!(!sys.board.check_interrupts(CPU).irq);
 
     press(&mut sys, INPUT_COIN2, true);
-    assert_ne!(sys.read(CPU, 0x4002) & 0x80, 0, "coin2 sets system bit 7");
-    assert!(sys.check_interrupts(CPU).irq, "coin2 edge asserts IRQ");
+    assert_ne!(
+        sys.bus_read(CPU, 0x4002) & 0x80,
+        0,
+        "coin2 sets system bit 7"
+    );
+    assert!(
+        sys.board.check_interrupts(CPU).irq,
+        "coin2 edge asserts IRQ"
+    );
 }
 
 // =================================================================
@@ -239,8 +265,8 @@ fn coins_are_active_high_and_latch_the_irq() {
 fn dip_defaults_and_ports() {
     let mut sys = BurgertimeSystem::new();
     // Read the raw ports (mask off the live VBLANK bit on DSW1).
-    assert_eq!(sys.read(CPU, 0x4003) & 0x7F, 0x1F);
-    assert_eq!(sys.read(CPU, 0x4004), 0x0B);
+    assert_eq!(sys.bus_read(CPU, 0x4003) & 0x7F, 0x1F);
+    assert_eq!(sys.bus_read(CPU, 0x4004), 0x0B);
     // ...and through the DipSwitches API.
     assert_eq!(sys.dip_bank_value(0), 0x1F);
     assert_eq!(sys.dip_bank_value(1), 0x0B);
@@ -259,11 +285,11 @@ fn dip_defaults_and_ports() {
 fn vblank_bit_toggles_on_0x4003() {
     let mut sys = BurgertimeSystem::new();
     // clock = 0 -> scanline 0 -> outside the visible [8,248) window -> VBLANK set.
-    assert_ne!(sys.read(CPU, 0x4003) & 0x80, 0, "vblank at scanline 0");
+    assert_ne!(sys.bus_read(CPU, 0x4003) & 0x80, 0, "vblank at scanline 0");
 
     // Advance into the visible window (scanline 100 = 100 * 96 cycles).
     for _ in 0..100 * 96 {
         sys.debug_tick();
     }
-    assert_eq!(sys.read(CPU, 0x4003) & 0x80, 0, "no vblank mid-screen");
+    assert_eq!(sys.bus_read(CPU, 0x4003) & 0x80, 0, "no vblank mid-screen");
 }
