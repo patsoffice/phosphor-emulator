@@ -241,6 +241,37 @@ one ever does. `DmaVram` still bypasses banking, unchanged.
 Reuse this shape for any other in-bus master; reach for it only when the master
 cannot live outside the bus the way a CPU does.
 
+### CPU state the bus has to answer for
+
+A CPU's *pins* are sometimes bus-visible. On the Donkey Kong boards the I8035
+reads its own P1/P2 latches back through `io_read`, and the main Z80 reads P2
+bit 4 as a sound-busy status bit — so moving the CPU out of the bus takes those
+values with it.
+
+The fix is a cycle-fresh mirror on the board, latched in `begin_cycle_inner`
+before either CPU steps:
+
+```rust
+self.sound_p1 = cpus.sound.p1;
+self.sound_p2 = cpus.sound.p2;
+```
+
+This is faithful wherever the mirrored CPU is the only writer and steps *later*
+in the same cycle than the readers — then the mirror holds exactly what a live
+read would have returned. Check that ordering before relying on it. The mirror
+is derived state: don't save it, and say so, or it becomes a second source of
+truth that can drift from the CPU.
+
+The same pattern already existed on these boards for the debug PC latch; this
+just extends it to hardware wires.
+
+### Watch for name collisions when the board becomes the bus
+
+Moving an `impl Bus` onto a board can shadow the board's own inherent methods:
+`MarioBrosBoard::check_interrupts` had to become `interrupt_state` so the `Bus`
+method of the same name could call it. The compiler catches this as *"function
+cannot return without recursing"* — heed that warning rather than silencing it.
+
 ### Machine API for tests and tools
 
 Converting a machine removes its `impl Bus`, which is what integration tests and
@@ -276,8 +307,11 @@ Ordered by payoff per unit of risk: shared boards with several machines first
 
 1. ~~**`Cpu::reset` generic over the bus**~~ — done; it unblocked everything
    non-Z80 (see the solved entry above).
-2. **TKG-04** (Donkey Kong, DK Jr, Mario Bros) — Z80 + I8035 + DMA; three
-   machines on one board, no reset-vector CPU.
+2. ~~**TKG-04** (Donkey Kong, DK Jr) **and Mario Bros**~~ — done. Mario Bros
+   turned out not to share TKG-04 at all: it has its own board and Z80 DMA, and
+   shares only the palette model. Neither board's DMA is a bus master in the
+   trait sense (both move bytes through the address space directly), so no lift
+   was needed.
 3. **Galaxian** (Moon Cresta, Pisces) and **MCR II** (Satan's Hollow) — single
    Z80 boards, mechanical.
 4. **Do Castle** — two Z80s and five registered variants in one file, eight
@@ -330,6 +364,10 @@ at 1 MHz these boards run a third as many cycles per frame as the Namco ones, so
 a larger share of the frame is the scanline renderer and the per-cycle audio
 path (DAC, CVSD, resampler), which neither change touches. Expect a board's gain
 to track how much of its frame is CPU cycles.
+
+The Nintendo boards, back at 3.072 MHz and 50,688 cycles a frame, bear that out
+with the largest gains so far: **dkong −16.8%**, **mariobros −17.8%**, both
+changes together.
 
 ## What this does not fix
 
