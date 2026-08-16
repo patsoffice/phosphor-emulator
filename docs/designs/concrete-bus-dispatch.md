@@ -257,6 +257,28 @@ they will catch a reordered tick), and measure the board with `phosphor-bench`
 before and after. A step that does not improve its board's ms/frame has almost
 certainly split inside the loop.
 
+### Invert the frame loop while you are in there
+
+Once a board's cycle loop is concrete, the other thing worth doing to it is
+moving the frame-position tests out. Every board's per-cycle work opens with a
+`clock % cycles_per_frame`, a scanline-divisibility test and a ladder of position
+comparisons, all evaluated on each of ~50,000 cycles to be true on a few hundred.
+Splitting that into a `begin_scanline` (the boundary work) and a
+`begin_cycle_inner` (no position test at all), and running scanline-outer /
+cycle-inner, was worth a further 7–18% on the Namco boards — as much as the
+dispatch change itself:
+
+| machine | dyn baseline | concrete | + scanline-outer | total |
+|---------|--------------|----------|------------------|-------|
+| galaga  | 0.887        | 0.759    | 0.646            | −27.2% |
+| xevious | 1.164        | 1.037    | 0.850            | −27.0% |
+| pacman  | 0.748        | 0.706    | 0.611            | −18.3% |
+| digdug  | 2.091        | 1.956    | 1.826            | −12.7% |
+
+Keep the per-cycle `tick` as the debugger's single-step path and route any
+partial scanline through it, so both paths run the identical sequence of cycles
+and share one copy of each piece of work.
+
 ## What this does not fix
 
 Concrete dispatch removes the indirect call, not the work behind it.
