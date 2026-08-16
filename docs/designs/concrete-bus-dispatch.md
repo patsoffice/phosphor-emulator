@@ -314,8 +314,10 @@ Ordered by payoff per unit of risk: shared boards with several machines first
    was needed.
 3. **Galaxian** (Moon Cresta, Pisces) and **MCR II** (Satan's Hollow) — single
    Z80 boards, mechanical.
-4. **Do Castle** — two Z80s and five registered variants in one file, eight
-   `bus_split!` sites, board and machines not split into a shared module.
+4. ~~**Do Castle**~~ — done. Two Z80s and five variants; the board is already
+   variant-parameterised, so it became the bus outright. Its WAIT handshake
+   rewinds the main Z80 from inside a bus read, which is only expressible once
+   the CPU is reachable independently of the bus.
 5. ~~**Williams** (Joust, Robotron, Sinistar)~~ — done; M6809 + M6800 + blitter,
    the second-bus-master case (see the solved entry above), and the first user
    of the generic `Cpu::reset`.
@@ -367,7 +369,11 @@ to track how much of its frame is CPU cycles.
 
 The Nintendo boards, back at 3.072 MHz and 50,688 cycles a frame, bear that out
 with the largest gains so far: **dkong −16.8%**, **mariobros −17.8%**, both
-changes together.
+changes together. Do Castle is the other end of the same rule — **docastle
+−4.1%**, **dorunrun −3.3%** — because four PSGs are serviced every cycle and
+every main-CPU T-state clones the Z80 for its WAIT rewind. When a board gains
+little, find out what the frame is actually spending its time on before
+concluding the change did not work.
 
 ## What this does not fix
 
