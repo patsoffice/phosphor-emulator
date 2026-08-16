@@ -215,14 +215,45 @@ nothing used `dyn Cpu` or `dyn BusMasterComponent`.
 `core/tests/cpu_bus_generic_test.rs` pins the property this exists for, by
 resetting a 6502 and a 6809 through a borrowed bus view.
 
-### Boards with a second bus master
+### ~~Boards with a second bus master~~ — solved for Williams
 
 Williams drives its blitter as `BusMaster::Dma`/`DmaVram` through the same bus.
-The blitter is board state, so it sits *inside* the bus and re-enters through
-`&mut self` — no split needed for that path, and it should convert like any other
-board. It is called out here because it is the only place where a non-CPU master
-touches the trait, and because `DmaVram` bypasses banking, so any refactor of the
-Williams read path must keep those two masters distinguishable.
+The blitter is board state, so it is a bus master that lives *inside* the bus it
+drives — the same borrow problem as the CPUs, one level down, except that it is
+also a memory-mapped device (its registers are written at `$CA00-$CA07`) and so
+cannot simply move out of the bus.
+
+The answer is to lift it for the duration of its cycle:
+
+```rust
+let mut blitter = core::mem::replace(&mut bus.board().blitter, WilliamsBlitter::new());
+blitter.do_dma_cycle(bus);
+bus.board().blitter = blitter;
+```
+
+Nothing else can observe the gap: only that cycle runs, and the halt line the
+blitter feeds is read by the main CPU, which is not stepping. The one behavior
+difference is that a blit whose destination walked into the blitter's own
+registers would lose the write (the aliased version corrupted the live blitter
+instead) — no game does that, and a `debug_assert` in `bus_write` catches it if
+one ever does. `DmaVram` still bypasses banking, unchanged.
+
+Reuse this shape for any other in-bus master; reach for it only when the master
+cannot live outside the bus the way a CPU does.
+
+### Machine API for tests and tools
+
+Converting a machine removes its `impl Bus`, which is what integration tests and
+tools used to poke the hardware. Converted machines expose instead:
+
+- `bus_read`/`bus_write` — the CPU-facing bus, side effects included; distinct
+  from `BusDebug::peek`/`poke`, which deliberately avoid them.
+- `get_cpu_state` (and `get_sound_cpu_state` where there are two) — the CPU
+  register snapshots that used to hang off the board.
+
+Board-level tests that assert `devices()` order or `write_device_register`
+indices should move up to a machine when the CPUs leave the board: that is where
+the indices the debugger actually uses are formed, across the CPU/board join.
 
 ### The wide-bus `bus_split!` arms
 
@@ -251,8 +282,9 @@ Ordered by payoff per unit of risk: shared boards with several machines first
    Z80 boards, mechanical.
 4. **Do Castle** — two Z80s and five registered variants in one file, eight
    `bus_split!` sites, board and machines not split into a shared module.
-5. **Williams** (Joust, Robotron, Sinistar) — M6809 + M6800 + blitter; needs (1),
-   and is the second-bus-master case.
+5. ~~**Williams** (Joust, Robotron, Sinistar)~~ — done; M6809 + M6800 + blitter,
+   the second-bus-master case (see the solved entry above), and the first user
+   of the generic `Cpu::reset`.
 6. **Atari DVG/AVG family** (Asteroids, Asteroids Deluxe, Lunar Lander, Quantum,
    Star Wars) — M6502 boards; needs (1). Star Wars has seven `bus_split!` sites.
 7. **Atari System 1** (Marble Madness, Road Runner) — M68000, the `u32 word`
@@ -291,6 +323,13 @@ dispatch change itself:
 Keep the per-cycle `tick` as the debugger's single-step path and route any
 partial scanline through it, so both paths run the identical sequence of cycles
 and share one copy of each piece of work.
+
+Williams took both changes at once and gained less — joust −3.5%, robotron
+−6.8%, sinistar −5.5%. That is the expected shape rather than a disappointment:
+at 1 MHz these boards run a third as many cycles per frame as the Namco ones, so
+a larger share of the frame is the scanline renderer and the per-cycle audio
+path (DAC, CVSD, resampler), which neither change touches. Expect a board's gain
+to track how much of its frame is CPU cycles.
 
 ## What this does not fix
 
