@@ -1,9 +1,8 @@
-use phosphor_core::bus_split;
-use phosphor_core::core::bus::InterruptState;
+use phosphor_core::core::BusMaster;
 use phosphor_core::core::machine::{MachineCore, SaveState};
-use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
-use phosphor_macros::Saveable;
+use phosphor_core::cpu::z80::Z80;
+use phosphor_macros::{BusDebug, Saveable};
 
 use crate::namco_pac::{self, NamcoPacBoard};
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
@@ -101,16 +100,32 @@ pub static PACMAN_SOUND_PROM: RomRegion = RomRegion {
 /// Hardware: Zilog Z80 @ 3.072 MHz, Namco WSG 3-voice wavetable sound.
 /// Video: 36×28 tile playfield + 8 sprites, 2bpp, PROM-based palette.
 /// Screen: 288×224 displayed rotated 90° CCW on vertical monitor.
-#[derive(Saveable)]
+///
+/// The Z80 and the board it drives are separate fields: `self.cpu` and
+/// `self.board` are disjoint borrows, so the CPU's bus accesses go straight to
+/// [`NamcoPacBoard`]'s `Bus` impl with no trait object in between.
+#[derive(Saveable, BusDebug)]
 pub struct PacmanSystem {
+    #[debug_cpu("Z80")]
+    pub cpu: Z80,
+
+    #[debug_bus]
     pub board: NamcoPacBoard,
 }
 
 impl PacmanSystem {
     pub fn new() -> Self {
         Self {
+            cpu: Z80::new(),
             board: NamcoPacBoard::new(),
         }
+    }
+
+    /// One CPU cycle. Returns 1 at an instruction boundary (for the debugger's
+    /// single-step, which counts instructions rather than cycles).
+    pub fn step_cycle(&mut self) -> u32 {
+        namco_pac::tick(&mut self.cpu, &mut self.board);
+        u32::from(self.cpu.at_instruction_boundary())
     }
 
     pub fn load_rom_set(&mut self, rom_set: &RomSet) -> Result<(), RomLoadError> {
@@ -130,7 +145,8 @@ impl PacmanSystem {
     }
 
     pub fn get_cpu_state(&self) -> phosphor_core::cpu::state::Z80State {
-        self.board.get_cpu_state()
+        use phosphor_core::cpu::CpuStateTrait;
+        self.cpu.snapshot()
     }
 
     pub fn clock(&self) -> u64 {
@@ -145,55 +161,19 @@ impl Default for PacmanSystem {
 }
 
 // ---------------------------------------------------------------------------
-// Bus implementation
-// ---------------------------------------------------------------------------
-
-impl Bus for PacmanSystem {
-    type Address = u16;
-    type Data = u8;
-
-    fn read(&mut self, _master: BusMaster, addr: u16) -> u8 {
-        // A15 not connected: 0x8000-0xFFFF mirrors 0x0000-0x7FFF
-        let addr = addr & 0x7FFF;
-        self.board.bus_read_common(addr)
-    }
-
-    fn write(&mut self, _master: BusMaster, addr: u16, data: u8) {
-        let addr = addr & 0x7FFF;
-        self.board.bus_write_common(addr, data);
-    }
-
-    fn io_read(&mut self, _master: BusMaster, _addr: u16) -> u8 {
-        0xFF // No I/O read ports used on Pac-Man
-    }
-
-    fn io_write(&mut self, _master: BusMaster, addr: u16, data: u8) {
-        // Port 0x00: set interrupt vector byte (used by Z80 IM2)
-        if addr & 0xFF == 0x00 {
-            self.board.interrupt_vector = data;
-        }
-    }
-
-    fn is_halted_for(&self, _master: BusMaster) -> bool {
-        false // No DMA hardware on Pac-Man
-    }
-
-    fn check_interrupts(&mut self, _target: BusMaster) -> InterruptState {
-        InterruptState {
-            nmi: false,
-            irq: self.board.vblank_irq_pending && self.board.irq_enabled,
-            firq: false,
-            irq_vector: self.board.interrupt_vector,
-            irq_level: 0,
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Trait implementations
 // ---------------------------------------------------------------------------
 
-crate::impl_board_delegation!(PacmanSystem, board, namco_pac::TIMING, orientation);
+// Pac-Man adds nothing to the base board's address decoding, so `NamcoPacBoard`
+// *is* the bus — see its `Bus` impl in namco_pac.rs.
+
+crate::impl_board_delegation!(
+    PacmanSystem,
+    board,
+    namco_pac::TIMING,
+    orientation,
+    split_cpu
+);
 
 impl MachineCore for PacmanSystem {
     crate::machine_core_metadata!("pacman", namco_pac::TIMING);
@@ -215,18 +195,14 @@ impl MachineCore for PacmanSystem {
     }
 
     fn run_frame(&mut self) {
-        bus_split!(self, bus => {
-            for _ in 0..namco_pac::TIMING.cycles_per_frame() {
-                self.board.tick(bus);
-            }
-        });
+        for _ in 0..namco_pac::TIMING.cycles_per_frame() {
+            namco_pac::tick(&mut self.cpu, &mut self.board);
+        }
     }
 
     fn reset(&mut self) {
         self.board.reset_board();
-        bus_split!(self, bus => {
-            self.board.cpu.reset(bus, BusMaster::Cpu(0));
-        });
+        self.cpu.reset(&mut self.board, BusMaster::Cpu(0));
     }
 }
 
@@ -289,7 +265,7 @@ mod tests {
 
         // Save
         let data = sys.save_state().expect("save_state should return Some");
-        let cpu_snap = sys.board.cpu.snapshot();
+        let cpu_snap = sys.cpu.snapshot();
 
         // Mutate everything
         let mut sys2 = PacmanSystem::new();
@@ -301,7 +277,7 @@ mod tests {
         sys2.load_state(&data).unwrap();
 
         // Verify CPU
-        assert_eq!(sys2.board.cpu.snapshot(), cpu_snap);
+        assert_eq!(sys2.cpu.snapshot(), cpu_snap);
 
         // Verify memory
         assert_eq!(sys2.board.map.region_data(Region::VideoRam)[0x100], 0xAA);

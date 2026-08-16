@@ -1,11 +1,11 @@
-use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{MachineCore, SaveState};
 use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
-use phosphor_macros::Saveable;
+use phosphor_core::cpu::z80::Z80;
+use phosphor_macros::{BusDebug, Saveable};
 
-use crate::namco_pac::{self, NamcoPacBoard};
+use crate::namco_pac::{self, NamcoPacBoard, NamcoPacBus};
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
 
 // ---------------------------------------------------------------------------
@@ -110,8 +110,12 @@ const DECODE_ENABLE_TRAP: u16 = 0x3FF8;
 /// Pac-Man base hardware with auxiliary daughter card containing three encrypted
 /// ROMs (U5, U6, U7) and decode latch copy protection. The daughter card patches
 /// the base Pac-Man code with new maze layouts, character graphics, and intermissions.
-#[derive(Saveable)]
+#[derive(Saveable, BusDebug)]
 pub struct MsPacmanSystem {
+    #[debug_cpu("Z80")]
+    pub cpu: Z80,
+
+    #[debug_bus]
     pub board: NamcoPacBoard,
 
     /// Decode latch state. When true, reads from ROM addresses return decoded
@@ -130,6 +134,7 @@ pub struct MsPacmanSystem {
 impl MsPacmanSystem {
     pub fn new() -> Self {
         Self {
+            cpu: Z80::new(),
             board: NamcoPacBoard::new(),
             decode_enabled: true, // MAME sets bank 1 (decoded) at init
             decoded_rom: vec![0u8; 0x10000],
@@ -275,16 +280,60 @@ impl MsPacmanSystem {
         }
     }
 
+    /// Borrow the CPU and the bus it drives as two disjoint pieces.
+    ///
+    /// The daughter card's state (decode latch, banked ROMs) is part of the bus,
+    /// not of the base board, so the bus is a view over several fields rather
+    /// than a single one. The borrow checker verifies the split — no raw
+    /// pointers — and every access through the returned view is a concrete,
+    /// inlinable call.
+    #[inline]
+    fn split(&mut self) -> (&mut Z80, MsPacmanBus<'_>) {
+        (
+            &mut self.cpu,
+            MsPacmanBus {
+                board: &mut self.board,
+                decode_enabled: &mut self.decode_enabled,
+                decoded_rom: &self.decoded_rom,
+                undecoded_rom: &self.undecoded_rom,
+            },
+        )
+    }
+
+    /// One CPU cycle. Returns 1 at an instruction boundary (for the debugger's
+    /// single-step, which counts instructions rather than cycles).
+    pub fn step_cycle(&mut self) -> u32 {
+        let (cpu, mut bus) = self.split();
+        namco_pac::tick(cpu, &mut bus);
+        u32::from(self.cpu.at_instruction_boundary())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Bus — base board behind the auxiliary daughter card
+// ---------------------------------------------------------------------------
+
+/// The Ms. Pac-Man bus: the Pac-Man board with the daughter card's decode latch
+/// and banked ROMs interposed in front of it.
+struct MsPacmanBus<'a> {
+    board: &'a mut NamcoPacBoard,
+    decode_enabled: &'a mut bool,
+    decoded_rom: &'a [u8],
+    undecoded_rom: &'a [u8],
+}
+
+impl MsPacmanBus<'_> {
     /// Check if the given address triggers the decode latch.
     /// Called at the start of every Bus::read and Bus::write.
+    #[inline]
     fn check_decode_latch(&mut self, addr: u16) {
         let aligned = addr & !0x07;
         if aligned == DECODE_ENABLE_TRAP {
-            self.decode_enabled = true;
+            *self.decode_enabled = true;
         } else {
             for &trap in DECODE_DISABLE_TRAPS {
                 if aligned == trap {
-                    self.decode_enabled = false;
+                    *self.decode_enabled = false;
                     return;
                 }
             }
@@ -292,17 +341,14 @@ impl MsPacmanSystem {
     }
 }
 
-impl Default for MsPacmanSystem {
-    fn default() -> Self {
-        Self::new()
+impl NamcoPacBus for MsPacmanBus<'_> {
+    #[inline]
+    fn board(&mut self) -> &mut NamcoPacBoard {
+        self.board
     }
 }
 
-// ---------------------------------------------------------------------------
-// Bus implementation
-// ---------------------------------------------------------------------------
-
-impl Bus for MsPacmanSystem {
+impl Bus for MsPacmanBus<'_> {
     type Address = u16;
     type Data = u8;
 
@@ -311,7 +357,7 @@ impl Bus for MsPacmanSystem {
         self.check_decode_latch(addr);
 
         // ROM range: select bank based on decode latch state
-        if self.decode_enabled {
+        if *self.decode_enabled {
             match addr {
                 0x0000..=0x3FFF | 0x8000..=0x97FF => {
                     let data = self.decoded_rom[addr as usize];
@@ -369,11 +415,23 @@ impl Bus for MsPacmanSystem {
     }
 }
 
+impl Default for MsPacmanSystem {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Trait implementations
 // ---------------------------------------------------------------------------
 
-crate::impl_board_delegation!(MsPacmanSystem, board, namco_pac::TIMING, orientation);
+crate::impl_board_delegation!(
+    MsPacmanSystem,
+    board,
+    namco_pac::TIMING,
+    orientation,
+    split_cpu
+);
 
 impl MachineCore for MsPacmanSystem {
     crate::machine_core_metadata!("mspacman", namco_pac::TIMING);
@@ -395,19 +453,21 @@ impl MachineCore for MsPacmanSystem {
     }
 
     fn run_frame(&mut self) {
-        bus_split!(self, bus => {
-            for _ in 0..namco_pac::TIMING.cycles_per_frame() {
-                self.board.tick(bus);
-            }
-        });
+        let (cpu, mut bus) = self.split();
+        for _ in 0..namco_pac::TIMING.cycles_per_frame() {
+            namco_pac::tick(cpu, &mut bus);
+        }
     }
 
     fn reset(&mut self) {
         self.board.reset_board();
         self.decode_enabled = true; // Latch defaults to enabled (Ms. Pac-Man code)
-        bus_split!(self, bus => {
-            self.board.cpu.reset(bus, BusMaster::Cpu(0));
-        });
+        // Reset goes to the base board rather than the daughter-card view:
+        // `Cpu::reset` takes `&mut dyn Bus + 'static`, which a borrowed view
+        // cannot satisfy. Equivalent here — the Z80 starts at 0x0000 without
+        // reading a reset vector — but a CPU that fetches one (6502, 6809)
+        // will need `Cpu::reset` generic over the bus type.
+        self.cpu.reset(&mut self.board, BusMaster::Cpu(0));
     }
 }
 
@@ -499,14 +559,14 @@ mod tests {
 
         // Save
         let data = sys.save_state().expect("save_state should return Some");
-        let cpu_snap = sys.board.cpu.snapshot();
+        let cpu_snap = sys.cpu.snapshot();
 
         // Load into fresh system
         let mut sys2 = MsPacmanSystem::new();
         sys2.load_state(&data).unwrap();
 
         // Verify CPU
-        assert_eq!(sys2.board.cpu.snapshot(), cpu_snap);
+        assert_eq!(sys2.cpu.snapshot(), cpu_snap);
 
         // Verify board state
         assert_eq!(sys2.board.map.region_data(Region::VideoRam)[0x100], 0xAA);
@@ -535,7 +595,7 @@ mod tests {
         // Each disable trap should clear the latch
         for &trap in DECODE_DISABLE_TRAPS {
             sys.decode_enabled = true;
-            sys.check_decode_latch(trap);
+            sys.split().1.check_decode_latch(trap);
             assert!(
                 !sys.decode_enabled,
                 "trap at 0x{trap:04X} should disable decode"
@@ -543,7 +603,7 @@ mod tests {
 
             // Also verify the last byte in the 8-byte range triggers it
             sys.decode_enabled = true;
-            sys.check_decode_latch(trap + 7);
+            sys.split().1.check_decode_latch(trap + 7);
             assert!(
                 !sys.decode_enabled,
                 "trap at 0x{:04X} should disable decode",
@@ -557,11 +617,11 @@ mod tests {
         let mut sys = MsPacmanSystem::new();
         sys.decode_enabled = false;
 
-        sys.check_decode_latch(DECODE_ENABLE_TRAP);
+        sys.split().1.check_decode_latch(DECODE_ENABLE_TRAP);
         assert!(sys.decode_enabled, "0x3FF8 should enable decode");
 
         sys.decode_enabled = false;
-        sys.check_decode_latch(DECODE_ENABLE_TRAP + 7);
+        sys.split().1.check_decode_latch(DECODE_ENABLE_TRAP + 7);
         assert!(sys.decode_enabled, "0x3FFF should enable decode");
     }
 
@@ -571,14 +631,14 @@ mod tests {
 
         // 0x3FF7 is in the 0x3FF0 disable range, NOT the 0x3FF8 enable range
         sys.decode_enabled = true;
-        sys.check_decode_latch(0x3FF7);
+        sys.split().1.check_decode_latch(0x3FF7);
         assert!(
             !sys.decode_enabled,
             "0x3FF7 should be in 0x3FF0 disable range"
         );
 
         // 0x3FF8 should enable
-        sys.check_decode_latch(0x3FF8);
+        sys.split().1.check_decode_latch(0x3FF8);
         assert!(sys.decode_enabled, "0x3FF8 should enable decode");
     }
 
@@ -591,11 +651,11 @@ mod tests {
         sys.undecoded_rom[0x0100] = 0xBB;
 
         sys.decode_enabled = true;
-        let val = sys.read(BusMaster::Cpu(0), 0x0100);
+        let val = sys.split().1.read(BusMaster::Cpu(0), 0x0100);
         assert_eq!(val, 0xAA, "should read from decoded bank when enabled");
 
         sys.decode_enabled = false;
-        let val = sys.read(BusMaster::Cpu(0), 0x0100);
+        let val = sys.split().1.read(BusMaster::Cpu(0), 0x0100);
         assert_eq!(val, 0xBB, "should read from undecoded bank when disabled");
     }
 
@@ -611,11 +671,11 @@ mod tests {
         sys.undecoded_rom[0x8008] = 0x12;
 
         sys.decode_enabled = true;
-        assert_eq!(sys.read(BusMaster::Cpu(0), 0x8008), 0xCD);
-        assert_eq!(sys.read(BusMaster::Cpu(0), 0x97EF), 0xEF);
+        assert_eq!(sys.split().1.read(BusMaster::Cpu(0), 0x8008), 0xCD);
+        assert_eq!(sys.split().1.read(BusMaster::Cpu(0), 0x97EF), 0xEF);
 
         sys.decode_enabled = false;
-        assert_eq!(sys.read(BusMaster::Cpu(0), 0x8008), 0x12);
+        assert_eq!(sys.split().1.read(BusMaster::Cpu(0), 0x8008), 0x12);
     }
 
     #[test]

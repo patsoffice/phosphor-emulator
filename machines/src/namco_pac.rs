@@ -1,3 +1,4 @@
+use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::debug_trace::{DebugEvent, DebugEventKind, DebugTraceBuffer};
 use phosphor_core::core::machine::{
     DipApplyTiming, DipChoice, DipOption, DipSwitchBank, Direction, InputControl, InputId,
@@ -7,8 +8,6 @@ use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWri
 use phosphor_core::core::watchpoint::DebugAccessSource;
 use phosphor_core::core::{AccessKind, AddressSpace16};
 use phosphor_core::core::{Bus, BusMaster, TimingConfig};
-use phosphor_core::cpu::CpuStateTrait;
-use phosphor_core::cpu::state::Z80State;
 use phosphor_core::cpu::z80::Z80;
 use phosphor_core::device::namco_wsg::NamcoWsg;
 use phosphor_core::gfx;
@@ -322,18 +321,101 @@ pub(crate) const DIP_BANKS: &[DipSwitchBank] = &[DipSwitchBank {
 }];
 
 // ---------------------------------------------------------------------------
+// Bus wiring
+// ---------------------------------------------------------------------------
+
+/// A Pac-Man-family bus: the shared board, plus whatever a particular game
+/// interposes in front of it (Ms. Pac-Man's decode latch and daughter-card
+/// ROMs, for instance).
+///
+/// Implemented by concrete types only — [`tick`] is generic over it, so every
+/// bus access the Z80 makes resolves to a direct, inlinable call.
+pub trait NamcoPacBus: Bus<Address = u16, Data = u8> {
+    fn board(&mut self) -> &mut NamcoPacBoard;
+}
+
+/// One CPU cycle of a Pac-Man-family machine: board work, the Z80's cycle, then
+/// the clock advance.
+///
+/// Callers hold the CPU and the bus as separate fields, so this takes them as
+/// two disjoint borrows rather than splitting one struct behind a raw pointer.
+#[inline]
+pub fn tick<B: NamcoPacBus>(cpu: &mut Z80, bus: &mut B) {
+    bus.board().begin_cycle(cpu);
+    cpu.execute_cycle(bus, BusMaster::Cpu(0));
+    bus.board().end_cycle();
+}
+
+/// The base board is itself a complete bus for games that add nothing to it.
+impl NamcoPacBus for NamcoPacBoard {
+    #[inline]
+    fn board(&mut self) -> &mut NamcoPacBoard {
+        self
+    }
+}
+
+/// Base Pac-Man hardware address decoding. A15 is not connected, so the upper
+/// 32K mirrors the lower; games that overlay their own ROM banking above
+/// 0x8000 (Ms. Pac-Man) intercept before delegating here.
+impl Bus for NamcoPacBoard {
+    type Address = u16;
+    type Data = u8;
+
+    #[inline]
+    fn read(&mut self, _master: BusMaster, addr: u16) -> u8 {
+        self.bus_read_common(addr & 0x7FFF)
+    }
+
+    #[inline]
+    fn write(&mut self, _master: BusMaster, addr: u16, data: u8) {
+        self.bus_write_common(addr & 0x7FFF, data);
+    }
+
+    #[inline]
+    fn io_read(&mut self, _master: BusMaster, _addr: u16) -> u8 {
+        0xFF // No I/O read ports on this hardware
+    }
+
+    #[inline]
+    fn io_write(&mut self, _master: BusMaster, addr: u16, data: u8) {
+        // Port 0x00: interrupt vector byte latch (Z80 IM2)
+        if addr & 0xFF == 0x00 {
+            self.interrupt_vector = data;
+        }
+    }
+
+    #[inline]
+    fn is_halted_for(&self, _master: BusMaster) -> bool {
+        false // No DMA hardware
+    }
+
+    #[inline]
+    fn check_interrupts(&mut self, _target: BusMaster) -> InterruptState {
+        InterruptState {
+            nmi: false,
+            irq: self.vblank_irq_pending && self.irq_enabled,
+            firq: false,
+            irq_vector: self.interrupt_vector,
+            irq_level: 0,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // NamcoPacBoard — shared hardware for the Namco Pac-Man platform
 // ---------------------------------------------------------------------------
 
 /// Namco Pac-Man hardware base (Z80 @ 3.072 MHz, Namco WSG 3-voice, tilemap + sprites).
 ///
 /// Shared by Pac-Man, Ms. Pac-Man, and other games on identical hardware.
-/// Game wrappers compose this struct and implement Bus to route memory accesses.
+///
+/// The board is everything the Z80 talks *to* — the CPU itself lives in the
+/// game wrapper. Keeping them in separate structs is what lets
+/// `cpu.execute_cycle(&mut bus, ..)` borrow-check without a raw-pointer split,
+/// so bus dispatch monomorphises at a concrete type instead of going through
+/// `&mut dyn Bus` on every access.
 #[derive(BusDebug, DebugTrace)]
 pub struct NamcoPacBoard {
-    #[debug_cpu("Z80")]
-    pub(crate) cpu: Z80,
-
     #[debug_map(cpu = 0)]
     pub(crate) map: AddressSpace16,
 
@@ -390,7 +472,6 @@ impl Default for NamcoPacBoard {
 impl NamcoPacBoard {
     pub fn new() -> Self {
         Self {
-            cpu: Z80::new(),
             map: Self::build_map(),
             sprite_coords: [0; 0x10],
             wsg: NamcoWsg::new(TIMING.cpu_clock_hz),
@@ -444,10 +525,13 @@ impl NamcoPacBoard {
     }
 
     // -----------------------------------------------------------------------
-    // Core tick — called from game wrappers via bus_split!
+    // Core tick — the board half of one CPU cycle (see [`tick`])
     // -----------------------------------------------------------------------
 
-    pub fn tick(&mut self, bus: &mut dyn Bus<Address = u16, Data = u8>) {
+    /// Board work that happens before the CPU's cycle: scanline rendering,
+    /// VBLANK interrupt assertion, the sound generator, and latching debug
+    /// attribution context.
+    fn begin_cycle(&mut self, cpu: &Z80) {
         let frame_cycle = self.clock % TIMING.cycles_per_frame();
 
         // Per-scanline rendering: at each scanline boundary, render the current
@@ -484,15 +568,13 @@ impl NamcoPacBoard {
         // CPU execution — bus dispatch cannot read CPU state mid-tick.
         // Both watchpoint hits and trace events draw PC from this latch.
         if self.map.has_any_watchpoints() || self.debug_trace.enabled() {
-            let pc = self
-                .cpu
-                .at_instruction_boundary()
-                .then_some(self.cpu.pc as u32);
+            let pc = cpu.at_instruction_boundary().then_some(cpu.pc as u32);
             self.map.latch_access_context(self.clock, pc);
         }
+    }
 
-        self.cpu.execute_cycle(bus, BusMaster::Cpu(0));
-
+    /// Board work after the CPU's cycle.
+    fn end_cycle(&mut self) {
         self.clock += 1;
         self.watchdog_counter += 1;
     }
@@ -689,10 +771,6 @@ impl NamcoPacBoard {
     // CPU state accessors
     // -----------------------------------------------------------------------
 
-    pub fn get_cpu_state(&self) -> Z80State {
-        self.cpu.snapshot()
-    }
-
     pub fn clock(&self) -> u64 {
         self.clock
     }
@@ -856,7 +934,7 @@ impl NamcoPacBoard {
     // -----------------------------------------------------------------------
 
     /// Reset all board state except ROMs, GFX caches, and palette.
-    /// The caller must reset the CPU separately (requires bus_split).
+    /// The caller resets the CPU separately — it lives in the game wrapper.
     pub fn reset_board(&mut self) {
         self.wsg.reset();
         self.irq_enabled = false;
@@ -874,23 +952,10 @@ impl NamcoPacBoard {
         self.sprite_coords = [0; 0x10];
         self.scanline_buffer.fill(0);
     }
-
-    // -----------------------------------------------------------------------
-    // Debug
-    // -----------------------------------------------------------------------
-
-    pub fn debug_tick_boundaries(&self) -> u32 {
-        if self.cpu.at_instruction_boundary() {
-            1
-        } else {
-            0
-        }
-    }
 }
 
 impl Saveable for NamcoPacBoard {
     fn save_state(&self, w: &mut StateWriter) {
-        self.cpu.save_state(w);
         w.write_bytes(self.map.region_data(Region::VideoRam));
         w.write_bytes(self.map.region_data(Region::ColorRam));
         w.write_bytes(self.map.region_data(Region::Ram));
@@ -908,7 +973,6 @@ impl Saveable for NamcoPacBoard {
     }
 
     fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
-        self.cpu.load_state(r)?;
         r.read_bytes_into(self.map.region_data_mut(Region::VideoRam))?;
         r.read_bytes_into(self.map.region_data_mut(Region::ColorRam))?;
         r.read_bytes_into(self.map.region_data_mut(Region::Ram))?;

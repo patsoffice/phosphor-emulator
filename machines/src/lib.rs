@@ -65,6 +65,10 @@ pub(crate) use impl_standalone_debug;
 /// - `overlay_stats` — calls `self.overlay_stats_impl()` (define on your type)
 /// - `debug_tick_pre` — calls `self.debug_pre_tick()` before `board.tick()` in `debug_tick()`
 /// - `bus_addr: Type` — address type for `bus_split!` (default: inferred)
+/// - `split_cpu` — the machine holds its CPU beside the board rather than
+///   inside it, so bus dispatch is concrete. `debug_tick()` calls the machine's
+///   inherent `step_cycle()`, and `debug_bus()` is the machine itself (which
+///   must `#[derive(BusDebug)]` with `#[debug_bus]` on the board field)
 macro_rules! impl_board_delegation {
     // Base case: standard audio, no extras
     ($type:ty, $board:ident, $timing:expr) => {
@@ -117,6 +121,10 @@ macro_rules! impl_board_delegation {
     // --- MachineDebug dispatch ---
     (@debug $type:ty, $board:ident, $timing:expr, debug_tick_pre $($rest:tt)*) => {
         $crate::impl_board_debug!($type, $board, $timing, debug_tick_pre);
+    };
+    // CPU held beside the bus (concrete dispatch) — see impl_board_debug!.
+    (@debug $type:ty, $board:ident, $timing:expr, split_cpu $($rest:tt)*) => {
+        $crate::impl_board_debug!($type, $board, $timing, split_cpu);
     };
     // 32-bit address / 16-bit data bus (Atari System 1). Matched literally and
     // before the single-token `bus_addr: $addr:tt` arms, since `u32 word` is two
@@ -217,6 +225,26 @@ pub(crate) use impl_board_audio;
 
 /// Implements `MachineDebug` delegating to board.
 macro_rules! impl_board_debug {
+    // Machine whose CPU lives beside the bus rather than inside it: the machine
+    // itself is the `BusDebug` (via `#[debug_bus]`, which merges the board's
+    // devices and maps with the machine's CPU), and one cycle is its inherent
+    // `step_cycle()` rather than a bus_split! around `board.tick(bus)`.
+    ($type:ty, $board:ident, $timing:expr, split_cpu) => {
+        impl phosphor_core::core::machine::MachineDebug for $type {
+            fn debug_bus(&self) -> Option<&dyn phosphor_core::core::debug::BusDebug> {
+                Some(self)
+            }
+            fn debug_bus_mut(&mut self) -> Option<&mut dyn phosphor_core::core::debug::BusDebug> {
+                Some(self)
+            }
+            fn cycles_per_frame(&self) -> u64 {
+                $timing.cycles_per_frame()
+            }
+            fn debug_tick(&mut self) -> u32 {
+                self.step_cycle()
+            }
+        }
+    };
     ($type:ty, $board:ident, $timing:expr) => {
         impl phosphor_core::core::machine::MachineDebug for $type {
             fn debug_bus(&self) -> Option<&dyn phosphor_core::core::debug::BusDebug> {
