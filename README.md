@@ -308,7 +308,9 @@ Cycle 2 (Fetch):  Read next opcode...
 
 ### Architecture
 
-The `Bus` trait connects CPUs to their board's address space using associated types for address and data width — compile-time polymorphism with no vtable overhead. Each board struct implements `Bus` to wire memory regions, I/O devices, interrupt lines, and bus arbitration (halt/DMA) together.
+The `Bus` trait connects CPUs to their board's address space using associated types for address and data width. Each board struct implements `Bus` to wire memory regions, I/O devices, interrupt lines, and bus arbitration (halt/DMA) together.
+
+The trait itself is generic, but every shipped machine currently dispatches through it *dynamically*: a board owns both its CPUs and its bus state in one struct, so `cpu.execute_cycle(bus, ..)` cannot borrow-check directly. The `bus_split!` macro works around that by handing the CPU a `&mut dyn Bus` reborrowed through a raw pointer, which means each memory access is a virtual call the optimiser cannot inline into the CPU's inner loop. Separating CPU state from bus state into distinct fields would let the call monomorphise at a concrete bus type and remove the `unsafe`; that work is tracked as its own epic and measured with `phosphor-bench`.
 
 - **`BusMasterComponent`** — anything that drives the bus (CPUs, DMA controllers)
 - **`Device`** — uniform interface for peripherals (PIAs, sound chips, timers): register read/write, tick, reset, plus debug inspection and save/load via supertraits
