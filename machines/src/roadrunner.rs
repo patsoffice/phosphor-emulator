@@ -12,7 +12,6 @@
 //! demo. Otherwise the wrapper forwards the bus to the shared board and handles
 //! the digital coin/start/service switches.
 
-use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::input::{AnalogAxis, AxisRange};
 use phosphor_core::core::machine::{
@@ -25,10 +24,11 @@ use phosphor_core::cpu::Cpu;
 use phosphor_core::cpu::state::M68000State;
 use phosphor_core::device::adc0809::Adc0809;
 
-use crate::atari_system1::{self, AtariSystem1Board};
+use crate::atari_system1::{self, AtariSystem1Board, AtariSystem1Bus};
 use crate::disasm_registry::{DisasmCpu, DisasmRegion};
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
 use crate::set_bit_active_low;
+use phosphor_core::cpu::m68000::M68000;
 
 // ---------------------------------------------------------------------------
 // ROM manifest ("roadrunn" parent set — Road Runner rev 2)
@@ -509,7 +509,13 @@ const ROADRUNNER_CONTROLS: &[InputControl] = &[
 
 /// Atari Road Runner (System 1). Slapstic 108, speech-equipped sound board,
 /// Hall-effect analog joystick on an ADC0809 (IRQ2).
+#[derive(phosphor_macros::BusDebug)]
 pub struct RoadRunnerSystem {
+    /// The 68010 is held beside the bus view over the board.
+    #[debug_cpu("M68010")]
+    pub cpu: M68000,
+
+    #[debug_bus]
     pub board: AtariSystem1Board,
 
     /// The joystick ADC (channels 6 = Y, 7 = X, X reversed like the cabinet).
@@ -535,6 +541,7 @@ fn new_stick() -> [AnalogAxis; 2] {
 impl RoadRunnerSystem {
     pub fn new() -> Self {
         let mut sys = Self {
+            cpu: AtariSystem1Board::new_cpu(),
             board: AtariSystem1Board::new(108, true),
             adc: Adc0809::new(),
             adc_irq_enabled: false,
@@ -547,6 +554,39 @@ impl RoadRunnerSystem {
 
     /// Feed the current stick position to the ADC channels. Y (channel 6) is
     /// direct; X (channel 7) is reversed, matching the cabinet's `PORT_REVERSE`.
+    /// Borrow the CPU and the bus it drives as two disjoint pieces.
+    #[inline]
+    fn split(&mut self) -> (&mut M68000, RoadRunnerBus<'_>) {
+        (
+            &mut self.cpu,
+            RoadRunnerBus {
+                board: &mut self.board,
+                adc: &mut self.adc,
+                adc_irq_enabled: &mut self.adc_irq_enabled,
+                adc_start_clock: &mut self.adc_start_clock,
+            },
+        )
+    }
+
+    /// One CPU cycle. Returns 1 at an instruction boundary (for the debugger,
+    /// which steps instructions rather than cycles).
+    pub fn step_cycle(&mut self) -> u32 {
+        let (cpu, mut bus) = self.split();
+        atari_system1::tick(cpu, &mut bus);
+        AtariSystem1Board::instruction_boundaries(&self.cpu)
+    }
+
+    /// Read the CPU-facing bus, side effects and all. Distinct from the
+    /// debugger's `BusDebug::peek`/`poke`, which avoid side effects.
+    pub fn bus_read(&mut self, master: BusMaster, addr: u32) -> u16 {
+        self.split().1.read(master, addr)
+    }
+
+    /// Write the CPU-facing bus, side effects and all. See [`Self::bus_read`].
+    pub fn bus_write(&mut self, master: BusMaster, addr: u32, data: u16) {
+        self.split().1.write(master, addr, data);
+    }
+
     fn push_stick(&mut self) {
         self.adc
             .set_input(ADC_Y_CH as usize, self.stick[1].position() as u8);
@@ -558,24 +598,6 @@ impl RoadRunnerSystem {
     /// held, spring-centered when released), then push it to the ADC.
     fn update_dir_keys(&mut self) {
         self.push_stick();
-    }
-
-    /// Select the ADC channel + start a conversion, latching the joystick-IRQ
-    /// enable from the address A4 bit (mirrors MAME `adc_w`). `offset` is the
-    /// word offset within 0xF40000-0xF4001F.
-    fn adc_start(&mut self, offset: u16) {
-        self.adc.address_offset_start_w(offset & 0x07);
-        self.adc_start_clock = self.board.clock();
-        // A4 (offset bit 3) low enables the analog-joystick interrupt.
-        self.adc_irq_enabled = offset & 0x08 == 0;
-    }
-
-    /// IRQ2 line: asserted while joystick interrupts are enabled and a conversion
-    /// has completed (end-of-conversion). Reading the ADC restarts a conversion,
-    /// which drops EOC and clears IRQ2 until the next one finishes.
-    fn adc_irq(&self) -> bool {
-        self.adc_irq_enabled
-            && self.board.clock().wrapping_sub(self.adc_start_clock) >= ADC_CONVERSION_CYCLES
     }
 
     pub fn load_rom_set(&mut self, rom_set: &RomSet) -> Result<(), RomLoadError> {
@@ -605,7 +627,8 @@ impl RoadRunnerSystem {
     // -- Bring-up diagnostics (forwarded to the board) -----------------------
 
     pub fn get_cpu_state(&self) -> M68000State {
-        self.board.get_cpu_state()
+        use phosphor_core::cpu::CpuStateTrait;
+        self.cpu.snapshot()
     }
 
     pub fn clock(&self) -> u64 {
@@ -635,7 +658,41 @@ impl Default for RoadRunnerSystem {
 // Bus — the analog-joystick ADC at 0xF40000, everything else to the board
 // ---------------------------------------------------------------------------
 
-impl Bus for RoadRunnerSystem {
+/// The Road Runner bus: the shared board plus this game's joystick ADC.
+struct RoadRunnerBus<'a> {
+    board: &'a mut AtariSystem1Board,
+    adc: &'a mut Adc0809,
+    adc_irq_enabled: &'a mut bool,
+    adc_start_clock: &'a mut u64,
+}
+
+impl AtariSystem1Bus for RoadRunnerBus<'_> {
+    #[inline]
+    fn board(&mut self) -> &mut AtariSystem1Board {
+        self.board
+    }
+}
+
+impl RoadRunnerBus<'_> {
+    /// Start an ADC conversion on `offset`, latching the clock so
+    /// end-of-conversion (and IRQ2) can be timed from it.
+    fn adc_start(&mut self, offset: u16) {
+        self.adc.address_offset_start_w(offset & 0x07);
+        *self.adc_start_clock = self.board.clock();
+        // A4 (offset bit 3) low enables the analog-joystick interrupt.
+        *self.adc_irq_enabled = offset & 0x08 == 0;
+    }
+
+    /// IRQ2 line: asserted while joystick interrupts are enabled and a
+    /// conversion has completed (end-of-conversion). Reading the ADC restarts a
+    /// conversion, which drops EOC and clears IRQ2 until the next one finishes.
+    fn adc_irq(&self) -> bool {
+        *self.adc_irq_enabled
+            && self.board.clock().wrapping_sub(*self.adc_start_clock) >= ADC_CONVERSION_CYCLES
+    }
+}
+
+impl Bus for RoadRunnerBus<'_> {
     type Address = u32;
     type Data = u16;
 
@@ -681,17 +738,16 @@ impl Bus for RoadRunnerSystem {
 // Capability traits
 // ---------------------------------------------------------------------------
 
-crate::impl_board_delegation!(RoadRunnerSystem, board, atari_system1::TIMING, bus_addr: u32 word);
+crate::impl_board_delegation!(RoadRunnerSystem, board, atari_system1::TIMING, split_cpu);
 
 impl MachineCore for RoadRunnerSystem {
     crate::machine_core_metadata!("roadrunner", atari_system1::TIMING);
 
     fn run_frame(&mut self) {
-        bus_split!(self, bus: u32 word => {
-            for _ in 0..atari_system1::TIMING.cycles_per_frame() {
-                self.board.tick(bus);
-            }
-        });
+        {
+            let (cpu, mut bus) = self.split();
+            atari_system1::run_frame(cpu, &mut bus);
+        }
 
         // Watchdog: System 1 reboots after 8 VBLANKs without a strobe to
         // 0x880001.
@@ -709,9 +765,8 @@ impl MachineCore for RoadRunnerSystem {
         self.adc_start_clock = 0;
         self.stick = new_stick();
         self.push_stick();
-        bus_split!(self, bus: u32 word => {
-            self.board.cpu.reset(bus, BusMaster::Cpu(0));
-        });
+        let (cpu, mut bus) = self.split();
+        cpu.reset(&mut bus, BusMaster::Cpu(0));
     }
 }
 
@@ -854,7 +909,7 @@ mod tests {
     #[test]
     fn board_is_a_108_speech_system_1() {
         let sys = RoadRunnerSystem::new();
-        assert_eq!(sys.board.cpu.variant, M68kVariant::M68010);
+        assert_eq!(sys.cpu.variant, M68kVariant::M68010);
         // The slapstic powers on to bank 3 (chip 108 bankstart).
         assert_eq!(sys.board.slapstic.current_bank(), 3);
     }
@@ -898,12 +953,15 @@ mod tests {
     #[test]
     fn control_latches_forward_to_the_board() {
         let mut sys = RoadRunnerSystem::new();
-        Bus::write(&mut sys, BusMaster::Cpu(0), 0x80_0000, 0x0040);
+        sys.bus_write(BusMaster::Cpu(0), 0x80_0000, 0x0040);
         assert_eq!(sys.board.xscroll, 0x0040);
         // VBLANK IRQ4 asserts and acks through the forwarded bus.
         sys.board.video_int = true;
-        assert_eq!(sys.check_interrupts(BusMaster::Cpu(0)).irq_level, 4);
-        Bus::write(&mut sys, BusMaster::Cpu(0), 0x8A_0000, 0x0000);
+        assert_eq!(
+            sys.split().1.check_interrupts(BusMaster::Cpu(0)).irq_level,
+            4
+        );
+        sys.bus_write(BusMaster::Cpu(0), 0x8A_0000, 0x0000);
         assert!(!sys.board.video_int);
     }
 
@@ -948,32 +1006,38 @@ mod tests {
         });
         // Channel 7 (X) select+start at word offset 7 (byte 0xF4000E); read data
         // on the low byte. X is reversed: 0xFF - STICK_MAX(0xF0) = 0x0F.
-        Bus::write(&mut sys, M, 0xF4_000E, 0);
-        assert_eq!(Bus::read(&mut sys, M, 0xF4_000F) & 0xFF, 0x0F);
+        sys.bus_write(M, 0xF4_000E, 0);
+        assert_eq!(sys.bus_read(M, 0xF4_000F) & 0xFF, 0x0F);
         // Channel 6 (Y) is centered → 0x80.
-        Bus::write(&mut sys, M, 0xF4_000C, 0);
-        assert_eq!(Bus::read(&mut sys, M, 0xF4_000D) & 0xFF, 0x80);
+        sys.bus_write(M, 0xF4_000C, 0);
+        assert_eq!(sys.bus_read(M, 0xF4_000D) & 0xFF, 0x80);
     }
 
     #[test]
     fn adc_irq2_gated_by_enable_and_conversion_time() {
         let mut sys = RoadRunnerSystem::new();
-        assert!(!sys.adc_irq(), "disabled out of reset");
+        assert!(!sys.split().1.adc_irq(), "disabled out of reset");
         // A conversion start with A4 low (word offset 6, byte 0xF4000C) enables
         // the joystick interrupt.
-        Bus::write(&mut sys, M, 0xF4_000C, 0);
+        sys.bus_write(M, 0xF4_000C, 0);
         assert!(sys.adc_irq_enabled);
         // Just started: end-of-conversion not reached (clock hasn't advanced).
-        assert!(!sys.adc_irq(), "no IRQ2 before the conversion completes");
+        assert!(
+            !sys.split().1.adc_irq(),
+            "no IRQ2 before the conversion completes"
+        );
         // Simulate the conversion time elapsing.
         sys.adc_start_clock = sys.board.clock().wrapping_sub(ADC_CONVERSION_CYCLES);
-        assert!(sys.adc_irq(), "IRQ2 asserts after end-of-conversion");
+        assert!(
+            sys.split().1.adc_irq(),
+            "IRQ2 asserts after end-of-conversion"
+        );
         // check_interrupts drives the board's IRQ2 line (nothing higher pending).
-        assert_eq!(sys.check_interrupts(M).irq_level, 2);
+        assert_eq!(sys.split().1.check_interrupts(M).irq_level, 2);
         // A start with A4 high (word offset 0xE, byte 0xF4001C) disables it.
-        Bus::write(&mut sys, M, 0xF4_001C, 0);
+        sys.bus_write(M, 0xF4_001C, 0);
         assert!(!sys.adc_irq_enabled);
-        assert!(!sys.adc_irq());
+        assert!(!sys.split().1.adc_irq());
     }
 
     /// End-to-end check on the real ROM set. Opt-in: set `ROADRUNNER_ROM_DIR` to
@@ -1012,7 +1076,7 @@ mod tests {
     #[test]
     fn adc_state_round_trips_through_save_load() {
         let mut sys = RoadRunnerSystem::new();
-        Bus::write(&mut sys, M, 0xF4_000C, 0); // enable + start channel 6
+        sys.bus_write(M, 0xF4_000C, 0); // enable + start channel 6
         sys.board.map.region_data_mut(Region::Ram)[0x40] = 0x5A;
 
         let data = SaveState::save_state(&sys).expect("save");

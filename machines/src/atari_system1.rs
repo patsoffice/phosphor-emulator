@@ -48,9 +48,7 @@ use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::{AccessKind, AddressSpace32};
 use phosphor_core::core::{Bus, BusMaster, ClockDivider, TimingConfig};
-use phosphor_core::cpu::CpuStateTrait;
 use phosphor_core::cpu::m68000::{M68kVariant, M68000};
-use phosphor_core::cpu::state::M68000State;
 use phosphor_core::device::slapstic::Slapstic;
 use phosphor_core::gfx::decode::{GfxCache, GfxLayout, decode_gfx};
 use phosphor_macros::{BusDebug, MemoryRegion};
@@ -303,12 +301,86 @@ pub(crate) const VBLANK_SCANLINE: u16 = 240;
 // AtariSystem1Board
 // ---------------------------------------------------------------------------
 
+/// An Atari System 1 bus: a game wrapper's view over the shared board plus its
+/// cartridge-specific input ports.
+///
+/// [`tick`] is generic over this trait, so every access the 68010 makes — this
+/// is a word-wide 24-bit bus — resolves to a direct call rather than a vtable
+/// entry.
+pub trait AtariSystem1Bus: Bus<Address = u32, Data = u16> {
+    fn board(&mut self) -> &mut AtariSystem1Board;
+}
+
+/// One CPU cycle: board work, the 68010, then the sound board on its divider.
+///
+/// This is the debugger's path — it tests the frame position on every cycle. A
+/// whole frame goes through [`run_scanlines`], which hoists that test out.
+#[inline]
+pub fn tick<B: AtariSystem1Bus>(cpu: &mut M68000, bus: &mut B) {
+    let board = bus.board();
+    let frame_cycle = board.clock % TIMING.cycles_per_frame();
+    if frame_cycle.is_multiple_of(TIMING.cycles_per_scanline) {
+        board.begin_scanline((frame_cycle / TIMING.cycles_per_scanline) as u16);
+    }
+    step_cycle(cpu, bus);
+}
+
+/// Run `cycles` CPU cycles, scanline-outer and cycle-inner. The caller must
+/// start on a scanline boundary and pass a multiple of `cycles_per_scanline`;
+/// the debugger's off-boundary stepping goes through [`tick`] instead.
+pub fn run_scanlines<B: AtariSystem1Bus>(cpu: &mut M68000, bus: &mut B, cycles: u64) {
+    debug_assert!(
+        bus.board().clock.is_multiple_of(TIMING.cycles_per_scanline)
+            && cycles.is_multiple_of(TIMING.cycles_per_scanline),
+        "run_scanlines must start on a scanline boundary and run whole scanlines"
+    );
+    for _ in 0..cycles / TIMING.cycles_per_scanline {
+        let board = bus.board();
+        let scanline = board.clock % TIMING.cycles_per_frame() / TIMING.cycles_per_scanline;
+        board.begin_scanline(scanline as u16);
+        for _ in 0..TIMING.cycles_per_scanline {
+            step_cycle(cpu, bus);
+        }
+    }
+}
+
+/// Run one frame's worth of cycles. Whole scanlines go through
+/// [`run_scanlines`]; a partial scanline at either end (only after the debugger
+/// has left the clock off-boundary) goes through [`tick`].
+pub fn run_frame<B: AtariSystem1Bus>(cpu: &mut M68000, bus: &mut B) {
+    let scanline = TIMING.cycles_per_scanline;
+    let mut remaining = TIMING.cycles_per_frame();
+
+    let lead = ((scanline - bus.board().clock % scanline) % scanline).min(remaining);
+    for _ in 0..lead {
+        tick(cpu, bus);
+    }
+    remaining -= lead;
+
+    let whole = remaining - remaining % scanline;
+    run_scanlines(cpu, bus, whole);
+    remaining -= whole;
+
+    for _ in 0..remaining {
+        tick(cpu, bus);
+    }
+}
+
+/// The part of a cycle with no frame-position test in it.
+#[inline]
+fn step_cycle<B: AtariSystem1Bus>(cpu: &mut M68000, bus: &mut B) {
+    bus.board().begin_cycle_inner(cpu);
+    cpu.execute_cycle(bus, BusMaster::Cpu(0));
+    bus.board().end_cycle();
+}
+
 /// The shared Atari System 1 hardware. A game wrapper owns one of these plus its
 /// cartridge-specific input ports and ROM manifest.
+///
+/// The board is everything the 68010 talks *to*; the CPU itself lives on the
+/// game wrapper.
 #[derive(BusDebug)]
 pub struct AtariSystem1Board {
-    #[debug_cpu("M68010")]
-    pub(crate) cpu: M68000,
     #[debug_map(cpu = 0)]
     pub(crate) map: AddressSpace32,
 
@@ -443,11 +515,16 @@ impl AtariSystem1Board {
 
     /// Build a board for the given slapstic chip (`137412-NNN`), with `speech`
     /// enabling the sound board's TMS5220 window.
-    pub fn new(slapstic_chip: u16, speech: bool) -> Self {
+    /// The 68010 the board is designed for. The machine owns the CPU; this
+    /// builds one configured for this hardware.
+    pub fn new_cpu() -> M68000 {
         let mut cpu = M68000::new();
         cpu.variant = M68kVariant::M68010;
+        cpu
+    }
+
+    pub fn new(slapstic_chip: u16, speech: bool) -> Self {
         Self {
-            cpu,
             map: Self::build_map(),
             slapstic: Slapstic::for_chip(slapstic_chip),
             slapstic_rom: vec![0; 0x8000],
@@ -504,10 +581,6 @@ impl AtariSystem1Board {
     }
 
     // -- Bring-up diagnostics (used by the headless boot-check example) ------
-
-    pub fn get_cpu_state(&self) -> M68000State {
-        self.cpu.snapshot()
-    }
 
     pub fn clock(&self) -> u64 {
         self.clock
@@ -932,36 +1005,41 @@ impl AtariSystem1Board {
     /// Advance the board one main-CPU cycle. The wrapper passes a `bus` (itself)
     /// so game-specific input ports can be intercepted before falling through to
     /// [`bus_read`](Self::bus_read)/[`bus_write`](Self::bus_write).
-    pub fn tick(&mut self, bus: &mut dyn Bus<Address = u32, Data = u16>) {
-        let frame_cycle = self.clock % TIMING.cycles_per_frame();
-
-        // Start a fresh motion-object bank log for the new frame, seeded with the
-        // bank in effect at scanline 0 (carried over from the previous frame).
-        if frame_cycle == 0 {
+    /// Work that only happens on the first cycle of a scanline: the VBLANK
+    /// interrupt (IRQ4) and the motion-object scanline interrupt (IRQ3).
+    ///
+    /// Called once per scanline from [`run_scanlines`] and, for the debugger's
+    /// single-step path, from [`tick`] when the clock lands on a boundary.
+    fn begin_scanline(&mut self, scanline: u16) {
+        // Start a fresh motion-object bank log for the new frame, seeded with
+        // the bank in effect at scanline 0 (carried from the previous frame).
+        if scanline == 0 {
             self.mo_bank_changes.clear();
             self.mo_bank_changes.push((0, (self.bankselect >> 3) & 7));
         }
 
-        // At each scanline boundary: VBLANK raises IRQ4 on the first blanked
-        // line, and IRQ3 tracks whether a motion-object timer targets this line
-        // (a one-scanline pulse, like the int3/int3off timer pair).
-        if frame_cycle.is_multiple_of(TIMING.cycles_per_scanline) {
-            let scanline = (frame_cycle / TIMING.cycles_per_scanline) as u16;
-            if scanline == VBLANK_SCANLINE {
-                self.video_int = true;
-                self.snapshot_motion_objects();
-            }
-            self.scanline_int = self.timer_irq_at_scanline(scanline);
+        // VBLANK raises IRQ4 on the first blanked line; IRQ3 tracks whether a
+        // motion-object timer targets this line (a one-scanline pulse, like the
+        // int3/int3off timer pair).
+        if scanline == VBLANK_SCANLINE {
+            self.video_int = true;
+            self.snapshot_motion_objects();
         }
+        self.scanline_int = self.timer_irq_at_scanline(scanline);
+    }
 
+    /// Per-cycle board work that runs before the CPU, with no frame-position
+    /// test in it.
+    fn begin_cycle_inner(&mut self, cpu: &M68000) {
         // Latch watchpoint attribution context before CPU execution.
         if self.map.debug_active() {
-            let pc = self.cpu.at_instruction_boundary().then_some(self.cpu.pc);
+            let pc = cpu.at_instruction_boundary().then_some(cpu.pc);
             self.map.latch_access_context(self.clock, pc);
         }
+    }
 
-        self.cpu.execute_cycle(bus, BusMaster::Cpu(0));
-
+    /// Board work after the CPU's cycle: the sound board and the clock.
+    fn end_cycle(&mut self) {
         // The sound board runs at 1/4 the main CPU rate.
         if self.sound_clock.tick() {
             self.sound.tick();
@@ -989,12 +1067,11 @@ impl AtariSystem1Board {
 
     /// Report the number of main-CPU instruction boundaries this tick (0 or 1)
     /// for the debugger's step accounting.
-    pub fn debug_tick_boundaries(&self) -> u32 {
-        if self.cpu.at_instruction_boundary() {
-            1
-        } else {
-            0
-        }
+    /// Report the number of main-CPU instruction boundaries this tick (0 or 1)
+    /// for the debugger's step accounting. The CPU lives on the machine, which
+    /// passes it back in.
+    pub fn instruction_boundaries(cpu: &M68000) -> u32 {
+        u32::from(cpu.at_instruction_boundary())
     }
 
     /// Advance the per-frame watchdog. System 1 reboots after 8 VBLANKs without a
@@ -1149,7 +1226,7 @@ impl AtariSystem1Board {
 
 impl Saveable for AtariSystem1Board {
     fn save_state(&self, w: &mut StateWriter) {
-        self.cpu.save_state(w);
+        // The CPU is saved by the machine, which owns it.
         self.slapstic.save_state(w);
         self.sound.save_state(w);
         self.sound_clock.save_state(w);
@@ -1174,7 +1251,7 @@ impl Saveable for AtariSystem1Board {
     }
 
     fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
-        self.cpu.load_state(r)?;
+        // The CPU is loaded by the machine, which owns it.
         self.slapstic.load_state(r)?;
         self.sound.load_state(r)?;
         self.sound_clock.load_state(r)?;
@@ -1360,11 +1437,9 @@ mod tests {
         // Park the beam one cycle short of vblank, then step across it so the
         // scanline boundary that latches the snapshot actually runs.
         sys.board.clock = VBLANK_SCANLINE as u64 * TIMING.cycles_per_scanline - 1;
-        phosphor_core::bus_split!(&mut sys, bus: u32 word => {
-            for _ in 0..2 {
-                sys.board.tick(bus);
-            }
-        });
+        for _ in 0..2 {
+            sys.step_cycle();
+        }
         assert!(
             !sys.board.mo_shadow.is_empty(),
             "entering vblank must latch the motion-object state"

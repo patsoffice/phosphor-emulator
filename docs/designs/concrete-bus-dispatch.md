@@ -318,8 +318,9 @@ option on `impl_board_delegation!` goes away at the same time as its
 `#[allow(unused_unsafe)]` and the safety comment that justified it.
 
 Quantum was the first wide-bus machine converted, and the prediction held:
-nothing about it was width-specific. The `u32 word` arm simply stopped being
-referenced.
+nothing about it was width-specific. With Atari System 1 and Gottlieb converted
+too, both wide arms are now unreferenced, as are `impl_board_delegation!`'s
+`bus_addr` options.
 
 ## Rollout order
 
@@ -352,9 +353,10 @@ Ordered by payoff per unit of risk: shared boards with several machines first
    `QuantumBoard` for its bus state (the standalone shape, ~120 field references
    rewritten), Star Wars moved both CPUs onto the machine and let its existing
    board be the bus.
-7. **Atari System 1** (Marble Madness, Road Runner) — M68000, the `u32 word`
-   arm; needs (1).
-8. **Gottlieb System 80** (Q*bert) — I8088 + M6502, the `u32` arm; needs (1).
+7. ~~**Atari System 1** (Marble Madness, Road Runner)~~ — done.
+8. ~~**Gottlieb System 80** (Q*bert)~~ — done for the main 8088 bus. Its sound
+   board runs a second 6502 through its own `bus_split!`, which is where
+   Q*bert's time actually goes; tracked separately.
 9. **Standalone leftovers** — Burger Time, Congo Bongo, Frogger, Scramble, Mr.
    Do, Gridlee, I, Robot, Tempest, Crystal Castles, Missile Command, Food Fight,
    Simple\* test systems.

@@ -5,7 +5,6 @@
 
 use std::time::Instant;
 
-use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
     DipApplyTiming, DipChoice, DipOption, DipSwitchBank, Direction, InputConfigurable,
@@ -235,8 +234,13 @@ const QBERT_CONTROLS: &[InputControl] = &[
 ///
 /// Wraps `GottliebBoard` with Q*Bert-specific ROM loading, input mapping,
 /// and `Bus<Address = u32>` implementation for the I8088 main CPU.
-#[derive(Saveable)]
+#[derive(Saveable, phosphor_macros::BusDebug)]
 pub struct QbertSystem {
+    /// The 8088 is held beside the board, which is its bus.
+    #[debug_cpu("I8088 Main")]
+    pub cpu: phosphor_core::cpu::i8088::I8088,
+
+    #[debug_bus]
     pub board: GottliebBoard,
 }
 
@@ -245,7 +249,28 @@ impl QbertSystem {
         let mut board = GottliebBoard::new();
         // IN1 default: service bit 6 is active-LOW (idle high)
         board.input_ports[0] = 0x40;
-        Self { board }
+        Self {
+            cpu: phosphor_core::cpu::i8088::I8088::new(),
+            board,
+        }
+    }
+
+    /// One CPU cycle. Returns 1 at an instruction boundary (for the debugger,
+    /// which steps instructions rather than cycles).
+    pub fn step_cycle(&mut self) -> u32 {
+        gottlieb::tick(&mut self.cpu, &mut self.board);
+        GottliebBoard::instruction_boundaries(&self.cpu)
+    }
+
+    /// Read the CPU-facing bus, side effects and all. Distinct from the
+    /// debugger's `BusDebug::peek`/`poke`, which avoid side effects.
+    pub fn bus_read(&mut self, master: BusMaster, addr: u32) -> u8 {
+        Bus::read(&mut self.board, master, addr)
+    }
+
+    /// Write the CPU-facing bus, side effects and all. See [`Self::bus_read`].
+    pub fn bus_write(&mut self, master: BusMaster, addr: u32, data: u8) {
+        Bus::write(&mut self.board, master, addr, data);
     }
 
     pub fn load_rom_set(&mut self, rom_set: &RomSet) -> Result<(), RomLoadError> {
@@ -288,7 +313,7 @@ impl Default for QbertSystem {
 // Bus — I8088 main CPU memory map (20-bit address masked to 16-bit)
 // ---------------------------------------------------------------------------
 
-impl Bus for QbertSystem {
+impl Bus for GottliebBoard {
     type Address = u32;
     type Data = u8;
 
@@ -296,78 +321,78 @@ impl Bus for QbertSystem {
         let addr16 = (addr & 0xFFFF) as u16;
         let data = match addr16 {
             // NVRAM: 0x0000-0x0FFF
-            0x0000..=0x0FFF => self.board.map.read_backing(addr16),
+            0x0000..=0x0FFF => self.map.read_backing(addr16),
 
             // RAM: 0x1000-0x2FFF
-            0x1000..=0x2FFF => self.board.map.read_backing(addr16),
+            0x1000..=0x2FFF => self.map.read_backing(addr16),
 
             // Sprite RAM: 0x3000-0x37FF (256 bytes mirrored)
             0x3000..=0x37FF => {
                 let offset = addr16 & 0xFF;
-                self.board.map.read_backing(0x3000 + offset)
+                self.map.read_backing(0x3000 + offset)
             }
 
             // Video RAM: 0x3800-0x3FFF (1KB mirrored)
             0x3800..=0x3FFF => {
                 let offset = addr16 & 0x3FF;
-                self.board.map.read_backing(0x3800 + offset)
+                self.map.read_backing(0x3800 + offset)
             }
 
             // Char RAM: 0x4000-0x4FFF
-            0x4000..=0x4FFF => self.board.map.read_backing(addr16),
+            0x4000..=0x4FFF => self.map.read_backing(addr16),
 
             // Palette RAM: 0x5000-0x57FF (32 bytes mirrored)
             0x5000..=0x57FF => {
                 let offset = (addr16 & 0x1F) as usize;
-                self.board.palette_ram[offset]
+                self.palette_ram[offset]
             }
 
             // I/O ports: 0x5800-0x5FFF (3-bit decode)
-            0x5800..=0x5FFF => self.board.io_port_read(addr16 as u8),
+            0x5800..=0x5FFF => self.io_port_read(addr16 as u8),
 
             // Program ROM: 0x6000-0xFFFF
-            0x6000..=0xFFFF => self.board.map.read_backing(addr16),
+            0x6000..=0xFFFF => self.map.read_backing(addr16),
         };
-        self.board.map.watch_read(0, master, addr16, data);
+        self.map.watch_read(0, master, addr16, data);
         data
     }
 
     fn write(&mut self, master: BusMaster, addr: u32, data: u8) {
         let addr16 = (addr & 0xFFFF) as u16;
-        self.board.map.watch_write(0, master, addr16, data);
+        self.map.watch_write(0, master, addr16, data);
         match addr16 {
             // NVRAM: 0x0000-0x0FFF
-            0x0000..=0x0FFF => self.board.map.write_backing(addr16, data),
+            0x0000..=0x0FFF => self.map.write_backing(addr16, data),
 
             // RAM: 0x1000-0x2FFF
-            0x1000..=0x2FFF => self.board.map.write_backing(addr16, data),
+            0x1000..=0x2FFF => self.map.write_backing(addr16, data),
 
             // Sprite RAM: 0x3000-0x37FF (256 bytes mirrored)
             0x3000..=0x37FF => {
                 let offset = addr16 & 0xFF;
-                self.board.map.write_backing(0x3000 + offset, data);
+                self.map.write_backing(0x3000 + offset, data);
             }
 
             // Video RAM: 0x3800-0x3FFF (1KB mirrored)
             0x3800..=0x3FFF => {
                 let offset = addr16 & 0x3FF;
-                self.board.map.write_backing(0x3800 + offset, data);
+                self.map.write_backing(0x3800 + offset, data);
             }
 
             // Char RAM: 0x4000-0x4FFF
             0x4000..=0x4FFF => {
                 let offset = (addr16 - 0x4000) as usize;
-                self.board.charram_write(offset, data);
+                self.charram_write(offset, data);
             }
 
             // Palette RAM: 0x5000-0x57FF (32 bytes mirrored)
             0x5000..=0x57FF => {
                 let offset = (addr16 & 0x1F) as usize;
-                self.board.update_palette(offset, data);
+                self.update_palette(offset, data);
             }
 
             // I/O ports: 0x5800-0x5FFF
-            0x5800..=0x5FFF => self.board.io_port_write(addr16 as u8, data),
+            0x5800..=0x5FFF => self.io_port_write(addr16 as u8, data),
 
             _ => {} // ROM and unmapped: writes ignored
         }
@@ -381,7 +406,7 @@ impl Bus for QbertSystem {
         match target {
             BusMaster::Cpu(0) => {
                 // VBLANK NMI: asserted during blanking period (scanlines 240-255)
-                let scanline = self.board.clock / gottlieb::TIMING.cycles_per_scanline
+                let scanline = self.clock / gottlieb::TIMING.cycles_per_scanline
                     % gottlieb::TIMING.total_scanlines;
                 let in_vblank = scanline >= gottlieb::VISIBLE_LINES;
                 InterruptState {
@@ -398,7 +423,7 @@ impl Bus for QbertSystem {
 // Machine traits (MachineCore + capabilities)
 // ---------------------------------------------------------------------------
 
-crate::impl_board_delegation!(QbertSystem, board, gottlieb::TIMING, bus_addr: u32, orientation);
+crate::impl_board_delegation!(QbertSystem, board, gottlieb::TIMING, orientation, split_cpu);
 
 impl InputConfigurable for QbertSystem {
     fn input_controls(&self) -> &'static [InputControl] {
@@ -451,11 +476,7 @@ impl MachineCore for QbertSystem {
 
         // The board renders on the frame's last cycle inside `tick`, so the
         // single render site is shared with the debugger's `debug_tick` path.
-        bus_split!(self, bus : u32 => {
-            for _ in 0..gottlieb::TIMING.cycles_per_frame() {
-                self.board.tick(bus);
-            }
-        });
+        gottlieb::run_frame(&mut self.cpu, &mut self.board);
 
         if let Some(t0) = t0 {
             // The render now runs inside the loop, so split it back out of the
@@ -476,9 +497,7 @@ impl MachineCore for QbertSystem {
 
     fn reset(&mut self) {
         self.board.reset_board();
-        bus_split!(self, bus : u32 => {
-            self.board.cpu.reset(bus, BusMaster::Cpu(0));
-        });
+        self.cpu.reset(&mut self.board, BusMaster::Cpu(0));
         // Re-initialize IN1 idle state
         self.board.input_ports[0] = 0x40;
     }
@@ -763,8 +782,8 @@ mod tests {
         let mut sys = QbertSystem::new();
 
         // Write palette entry 0: even byte G=0xF B=0x0, odd byte R=0xF
-        Bus::write(&mut sys, BusMaster::Cpu(0), 0x5000, 0xF0); // G=15, B=0
-        Bus::write(&mut sys, BusMaster::Cpu(0), 0x5001, 0x0F); // R=15
+        sys.bus_write(BusMaster::Cpu(0), 0x5000, 0xF0); // G=15, B=0
+        sys.bus_write(BusMaster::Cpu(0), 0x5001, 0x0F); // R=15
 
         assert_eq!(sys.board.palette_rgb[0], (255, 255, 0)); // R=255, G=255, B=0
     }
@@ -774,13 +793,13 @@ mod tests {
         let mut sys = QbertSystem::new();
 
         // Value 4 (0100): resistor DAC = 70, not linear 68
-        Bus::write(&mut sys, BusMaster::Cpu(0), 0x5000, 0x40); // G=4, B=0
-        Bus::write(&mut sys, BusMaster::Cpu(0), 0x5001, 0x04); // R=4
+        sys.bus_write(BusMaster::Cpu(0), 0x5000, 0x40); // G=4, B=0
+        sys.bus_write(BusMaster::Cpu(0), 0x5001, 0x04); // R=4
         assert_eq!(sys.board.palette_rgb[0], (70, 70, 0));
 
         // Value 12 (1100): resistor DAC = 206, not linear 204
-        Bus::write(&mut sys, BusMaster::Cpu(0), 0x5002, 0xC0); // G=12, B=0
-        Bus::write(&mut sys, BusMaster::Cpu(0), 0x5003, 0x0C); // R=12
+        sys.bus_write(BusMaster::Cpu(0), 0x5002, 0xC0); // G=12, B=0
+        sys.bus_write(BusMaster::Cpu(0), 0x5003, 0x0C); // R=12
         assert_eq!(sys.board.palette_rgb[1], (206, 206, 0));
     }
 
@@ -789,7 +808,7 @@ mod tests {
         let mut sys = QbertSystem::new();
 
         // Write through mirror (0x5020 maps to same as 0x5000)
-        Bus::write(&mut sys, BusMaster::Cpu(0), 0x5020, 0xAB);
+        sys.bus_write(BusMaster::Cpu(0), 0x5020, 0xAB);
         assert_eq!(sys.board.palette_ram[0], 0xAB);
     }
 
@@ -797,27 +816,27 @@ mod tests {
     fn memory_map_ram_read_write() {
         let mut sys = QbertSystem::new();
 
-        Bus::write(&mut sys, BusMaster::Cpu(0), 0x1000, 0x55);
-        assert_eq!(Bus::read(&mut sys, BusMaster::Cpu(0), 0x1000), 0x55);
+        sys.bus_write(BusMaster::Cpu(0), 0x1000, 0x55);
+        assert_eq!(sys.bus_read(BusMaster::Cpu(0), 0x1000), 0x55);
     }
 
     #[test]
     fn sprite_ram_mirror() {
         let mut sys = QbertSystem::new();
 
-        Bus::write(&mut sys, BusMaster::Cpu(0), 0x3010, 0xBB);
+        sys.bus_write(BusMaster::Cpu(0), 0x3010, 0xBB);
         // Mirror: 0x3110 maps to 0x3010 (offset 0x10)
-        assert_eq!(Bus::read(&mut sys, BusMaster::Cpu(0), 0x3110), 0xBB);
-        assert_eq!(Bus::read(&mut sys, BusMaster::Cpu(0), 0x3210), 0xBB);
+        assert_eq!(sys.bus_read(BusMaster::Cpu(0), 0x3110), 0xBB);
+        assert_eq!(sys.bus_read(BusMaster::Cpu(0), 0x3210), 0xBB);
     }
 
     #[test]
     fn video_ram_mirror() {
         let mut sys = QbertSystem::new();
 
-        Bus::write(&mut sys, BusMaster::Cpu(0), 0x3900, 0xCC);
+        sys.bus_write(BusMaster::Cpu(0), 0x3900, 0xCC);
         // Mirror: 0x3D00 maps to 0x3900 (offset 0x100, bit 10 don't-care)
-        assert_eq!(Bus::read(&mut sys, BusMaster::Cpu(0), 0x3D00), 0xCC);
+        assert_eq!(sys.bus_read(BusMaster::Cpu(0), 0x3D00), 0xCC);
     }
 
     #[test]
@@ -825,7 +844,7 @@ mod tests {
         let mut sys = QbertSystem::new();
 
         // I8088 physical address 0x10042 should wrap to 0x0042 (NVRAM)
-        Bus::write(&mut sys, BusMaster::Cpu(0), 0x10042, 0xDD);
-        assert_eq!(Bus::read(&mut sys, BusMaster::Cpu(0), 0x0042), 0xDD);
+        sys.bus_write(BusMaster::Cpu(0), 0x10042, 0xDD);
+        assert_eq!(sys.bus_read(BusMaster::Cpu(0), 0x0042), 0xDD);
     }
 }

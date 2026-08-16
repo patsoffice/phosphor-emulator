@@ -10,7 +10,6 @@
 //! The wrapper's [`Bus`] intercepts the trackball (and the unused joystick/ADC
 //! window) and forwards every other access to the board.
 
-use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::input::{DrainPolicy, RelativeCounter};
 use phosphor_core::core::machine::{
@@ -22,10 +21,11 @@ use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
 use phosphor_core::cpu::state::M68000State;
 
-use crate::atari_system1::{self, AtariSystem1Board};
+use crate::atari_system1::{self, AtariSystem1Board, AtariSystem1Bus};
 use crate::disasm_registry::{DisasmCpu, DisasmRegion};
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
 use crate::set_bit_active_low;
+use phosphor_core::cpu::m68000::M68000;
 
 // ---------------------------------------------------------------------------
 // ROM manifest ("marble" parent set, TTL Rev 2 motherboard BIOS)
@@ -440,7 +440,13 @@ const MARBLE_CONTROLS: &[InputControl] = &[
 // ---------------------------------------------------------------------------
 
 /// Atari Marble Madness (System 1) — the shared board plus Marble's trackballs.
+#[derive(phosphor_macros::BusDebug)]
 pub struct MarbleSystem {
+    /// The 68010 is held beside the bus view over the board.
+    #[debug_cpu("M68010")]
+    pub cpu: M68000,
+
+    #[debug_bus]
     pub board: AtariSystem1Board,
 
     /// Trackball counters [p1x, p1y, p2x, p2y] — free-running 8-bit counters,
@@ -472,6 +478,7 @@ fn new_trackball() -> [RelativeCounter; 4] {
 impl MarbleSystem {
     pub fn new() -> Self {
         Self {
+            cpu: AtariSystem1Board::new_cpu(),
             board: AtariSystem1Board::new(103, false),
             trackball: new_trackball(),
             trackball_cur: [[0; 2]; 2],
@@ -508,7 +515,8 @@ impl MarbleSystem {
     // -- Bring-up diagnostics (forwarded to the board) -----------------------
 
     pub fn get_cpu_state(&self) -> M68000State {
-        self.board.get_cpu_state()
+        use phosphor_core::cpu::CpuStateTrait;
+        self.cpu.snapshot()
     }
 
     pub fn clock(&self) -> u64 {
@@ -533,25 +541,42 @@ impl MarbleSystem {
     /// are mounted at 45°, so the hardware returns rotated counter pairs: the X
     /// port yields `x + y`, the paired Y port `x - y`. The even (X) read latches
     /// both from the live counters so the odd (Y) read sees the same snapshot.
-    fn trackball_read(&mut self, addr: u32) -> u16 {
-        let offset = ((addr >> 1) & 3) as usize;
-        let player = (offset >> 1) & 1;
-        let which = offset & 1;
-        if which == 0 {
-            let (x, y) = (
-                self.trackball[player * 2].counter(),
-                self.trackball[player * 2 + 1].counter(),
-            );
-            self.trackball_cur[player][0] = x.wrapping_add(y);
-            self.trackball_cur[player][1] = x.wrapping_sub(y);
-        }
-        self.trackball_cur[player][which] as u16
-    }
-
     /// Advance the trackball counters once per frame from pending input: held P1
     /// direction keys add a fixed step, then each axis drains a capped amount of
     /// its accumulator (mouse + keys) into the 8-bit counter. The X axes are
     /// reversed to match the cabinet's PORT_REVERSE wiring.
+    /// Borrow the CPU and the bus it drives as two disjoint pieces.
+    #[inline]
+    fn split(&mut self) -> (&mut M68000, MarbleBus<'_>) {
+        (
+            &mut self.cpu,
+            MarbleBus {
+                board: &mut self.board,
+                trackball_cur: &mut self.trackball_cur,
+                trackball: &mut self.trackball,
+            },
+        )
+    }
+
+    /// One CPU cycle. Returns 1 at an instruction boundary (for the debugger,
+    /// which steps instructions rather than cycles).
+    pub fn step_cycle(&mut self) -> u32 {
+        let (cpu, mut bus) = self.split();
+        atari_system1::tick(cpu, &mut bus);
+        AtariSystem1Board::instruction_boundaries(&self.cpu)
+    }
+
+    /// Read the CPU-facing bus, side effects and all. Distinct from the
+    /// debugger's `BusDebug::peek`/`poke`, which avoid side effects.
+    pub fn bus_read(&mut self, master: BusMaster, addr: u32) -> u16 {
+        self.split().1.read(master, addr)
+    }
+
+    /// Write the CPU-facing bus, side effects and all. See [`Self::bus_read`].
+    pub fn bus_write(&mut self, master: BusMaster, addr: u32, data: u16) {
+        self.split().1.write(master, addr, data);
+    }
+
     fn update_trackball(&mut self) {
         for counter in &mut self.trackball {
             counter.update();
@@ -569,7 +594,40 @@ impl Default for MarbleSystem {
 // Bus — Marble ports intercepted, everything else forwarded to the board
 // ---------------------------------------------------------------------------
 
-impl Bus for MarbleSystem {
+/// The Marble Madness bus: the shared board plus this game's trackballs.
+struct MarbleBus<'a> {
+    board: &'a mut AtariSystem1Board,
+    trackball_cur: &'a mut [[u8; 2]; 2],
+    trackball: &'a mut [RelativeCounter; 4],
+}
+
+impl AtariSystem1Bus for MarbleBus<'_> {
+    #[inline]
+    fn board(&mut self) -> &mut AtariSystem1Board {
+        self.board
+    }
+}
+
+impl MarbleBus<'_> {
+    /// Read one of the four rotated trackball counters. The even (X) read
+    /// latches both axes so the paired odd (Y) read sees the same snapshot.
+    fn trackball_read(&mut self, addr: u32) -> u16 {
+        let offset = ((addr >> 1) & 3) as usize;
+        let player = (offset >> 1) & 1;
+        let which = offset & 1;
+        if which == 0 {
+            let (x, y) = (
+                self.trackball[player * 2].counter(),
+                self.trackball[player * 2 + 1].counter(),
+            );
+            self.trackball_cur[player][0] = x.wrapping_add(y);
+            self.trackball_cur[player][1] = x.wrapping_sub(y);
+        }
+        self.trackball_cur[player][which] as u16
+    }
+}
+
+impl Bus for MarbleBus<'_> {
     type Address = u32;
     type Data = u16;
 
@@ -612,7 +670,7 @@ impl Bus for MarbleSystem {
 
 // Renderable / AudioSource / MachineDebug delegate to the board (24-bit,
 // 16-bit-data bus).
-crate::impl_board_delegation!(MarbleSystem, board, atari_system1::TIMING, bus_addr: u32 word);
+crate::impl_board_delegation!(MarbleSystem, board, atari_system1::TIMING, split_cpu);
 
 impl MachineCore for MarbleSystem {
     crate::machine_core_metadata!("marble", atari_system1::TIMING);
@@ -621,11 +679,10 @@ impl MachineCore for MarbleSystem {
         // Fold this frame's trackball input into the counters the game samples.
         self.update_trackball();
 
-        bus_split!(self, bus: u32 word => {
-            for _ in 0..atari_system1::TIMING.cycles_per_frame() {
-                self.board.tick(bus);
-            }
-        });
+        {
+            let (cpu, mut bus) = self.split();
+            atari_system1::run_frame(cpu, &mut bus);
+        }
 
         // Watchdog: System 1 reboots after 8 VBLANKs without a strobe to
         // 0x880001. The game kicks it every frame; if it stops, reset.
@@ -641,9 +698,8 @@ impl MachineCore for MarbleSystem {
         self.trackball = new_trackball();
         self.trackball_cur = [[0; 2]; 2];
 
-        bus_split!(self, bus: u32 word => {
-            self.board.cpu.reset(bus, BusMaster::Cpu(0));
-        });
+        let (cpu, mut bus) = self.split();
+        cpu.reset(&mut bus, BusMaster::Cpu(0));
     }
 }
 
@@ -801,7 +857,7 @@ mod tests {
     #[test]
     fn cpu_is_a_68010() {
         let sys = MarbleSystem::new();
-        assert_eq!(sys.board.cpu.variant, M68kVariant::M68010);
+        assert_eq!(sys.cpu.variant, M68kVariant::M68010);
     }
 
     #[test]
@@ -820,25 +876,25 @@ mod tests {
     #[test]
     fn ram_word_access_round_trips() {
         let mut sys = MarbleSystem::new();
-        Bus::write(&mut sys, BusMaster::Cpu(0), 0x40_0000, 0xBEEF);
-        assert_eq!(Bus::read(&mut sys, BusMaster::Cpu(0), 0x40_0000), 0xBEEF);
+        sys.bus_write(BusMaster::Cpu(0), 0x40_0000, 0xBEEF);
+        assert_eq!(sys.bus_read(BusMaster::Cpu(0), 0x40_0000), 0xBEEF);
     }
 
     #[test]
     fn palette_and_video_ram_round_trip() {
         let mut sys = MarbleSystem::new();
-        Bus::write(&mut sys, BusMaster::Cpu(0), 0xB0_0000, 0x0ABC);
-        assert_eq!(Bus::read(&mut sys, BusMaster::Cpu(0), 0xB0_0000), 0x0ABC);
-        Bus::write(&mut sys, BusMaster::Cpu(0), 0xA0_3000, 0x1234);
-        assert_eq!(Bus::read(&mut sys, BusMaster::Cpu(0), 0xA0_3000), 0x1234);
+        sys.bus_write(BusMaster::Cpu(0), 0xB0_0000, 0x0ABC);
+        assert_eq!(sys.bus_read(BusMaster::Cpu(0), 0xB0_0000), 0x0ABC);
+        sys.bus_write(BusMaster::Cpu(0), 0xA0_3000, 0x1234);
+        assert_eq!(sys.bus_read(BusMaster::Cpu(0), 0xA0_3000), 0x1234);
     }
 
     #[test]
     fn control_latches_and_acks() {
         let mut sys = MarbleSystem::new();
-        Bus::write(&mut sys, BusMaster::Cpu(0), 0x80_0000, 0x0040);
-        Bus::write(&mut sys, BusMaster::Cpu(0), 0x82_0000, 0x0020);
-        Bus::write(&mut sys, BusMaster::Cpu(0), 0x86_0000, 0x00AC);
+        sys.bus_write(BusMaster::Cpu(0), 0x80_0000, 0x0040);
+        sys.bus_write(BusMaster::Cpu(0), 0x82_0000, 0x0020);
+        sys.bus_write(BusMaster::Cpu(0), 0x86_0000, 0x00AC);
         assert_eq!(sys.board.xscroll, 0x0040);
         assert_eq!(sys.board.yscroll, 0x0020);
         assert_eq!(sys.board.bankselect, 0xAC);
@@ -846,9 +902,9 @@ mod tests {
         // VBLANK IRQ4 asserts, then 0x8A0001 acks it.
         sys.board.video_int = true;
         assert_eq!(sys.board.interrupt_level(), 4);
-        Bus::write(&mut sys, BusMaster::Cpu(0), 0x8A_0000, 0x0000);
+        sys.bus_write(BusMaster::Cpu(0), 0x8A_0000, 0x0000);
         assert!(!sys.board.video_int);
-        let st = sys.check_interrupts(BusMaster::Cpu(0));
+        let st = sys.split().1.check_interrupts(BusMaster::Cpu(0));
         assert_eq!(st.irq_level, 0);
         assert_eq!(st.irq_vector, 0xFF);
     }
@@ -857,7 +913,7 @@ mod tests {
     fn watchdog_strobe_resets_count() {
         let mut sys = MarbleSystem::new();
         sys.board.watchdog_count = 5;
-        Bus::write(&mut sys, BusMaster::Cpu(0), 0x88_0000, 0x0000);
+        sys.bus_write(BusMaster::Cpu(0), 0x88_0000, 0x0000);
         assert_eq!(sys.board.watchdog_count, 0);
     }
 
@@ -900,14 +956,14 @@ mod tests {
 
         // The 45° rotation: X port = x+y, Y port = x-y. The even read latches
         // both, so the odd read sees the same snapshot.
-        let xport = sys.trackball_read(0xF2_0000); // P1 X
-        let yport = sys.trackball_read(0xF2_0002); // P1 Y
+        let xport = sys.split().1.trackball_read(0xF2_0000); // P1 X
+        let yport = sys.split().1.trackball_read(0xF2_0002); // P1 Y
         assert_eq!(xport, 246u16.wrapping_add(3) & 0xFF);
         assert_eq!(yport, 246u16.wrapping_sub(3) & 0xFF);
 
         // P2 ports are independent and idle at zero.
-        assert_eq!(sys.trackball_read(0xF2_0004), 0);
-        assert_eq!(sys.trackball_read(0xF2_0006), 0);
+        assert_eq!(sys.split().1.trackball_read(0xF2_0004), 0);
+        assert_eq!(sys.split().1.trackball_read(0xF2_0006), 0);
     }
 
     #[test]
@@ -1238,8 +1294,9 @@ mod tests {
         // The CPU snoops each data access onto the slapstic via
         // `observe_data_access`, then performs the read; reproduce that pairing.
         let read = |sys: &mut MarbleSystem, a| {
-            Bus::observe_data_access(sys, BusMaster::Cpu(0), a, false);
-            Bus::read(sys, BusMaster::Cpu(0), a)
+            let mut bus = sys.split().1;
+            bus.observe_data_access(BusMaster::Cpu(0), a, false);
+            bus.read(BusMaster::Cpu(0), a)
         };
 
         // Power-on bank is 3; the arming read (offset 0) returns its marker.
@@ -1253,8 +1310,8 @@ mod tests {
     #[test]
     fn eeprom_writes_gated_by_unlock_and_relock() {
         let mut sys = MarbleSystem::new();
-        let w = |sys: &mut MarbleSystem, a, d| Bus::write(sys, BusMaster::Cpu(0), a, d);
-        let r = |sys: &mut MarbleSystem, a| Bus::read(sys, BusMaster::Cpu(0), a);
+        let w = |sys: &mut MarbleSystem, a, d| sys.bus_write(BusMaster::Cpu(0), a, d);
+        let r = |sys: &mut MarbleSystem, a| sys.bus_read(BusMaster::Cpu(0), a);
 
         // Locked: the write is dropped (still reads the erased 0xFF).
         w(&mut sys, 0xF0_0000, 0x0042);
@@ -1293,8 +1350,12 @@ mod tests {
         // Drive the slapstic to a non-default bank so its state is exercised.
         // Bank 1's select offset is 0x50 (word) → byte address 0x0800A0. The
         // CPU snoops accesses onto the chip via `observe_data_access`.
-        Bus::observe_data_access(&mut sys, BusMaster::Cpu(0), 0x08_0000, false); // arm
-        Bus::observe_data_access(&mut sys, BusMaster::Cpu(0), 0x08_00A0, false); // select bank 1
+        sys.split()
+            .1
+            .observe_data_access(BusMaster::Cpu(0), 0x08_0000, false); // arm
+        sys.split()
+            .1
+            .observe_data_access(BusMaster::Cpu(0), 0x08_00A0, false); // select bank 1
         assert_eq!(sys.board.slapstic.current_bank(), 1);
         sys.board.xscroll = 0x1234;
         sys.board.bankselect = 0x5A;

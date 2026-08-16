@@ -386,12 +386,29 @@ impl Debuggable for GottliebSoundBoard {
 /// Hardware: I8088 @ 5 MHz (main), M6502 @ 894 kHz (sound) with RIOT + DAC.
 /// Video: 32×32 tilemap (8×8 tiles, 4bpp) + 64 sprites (16×16, 4bpp),
 /// 16-color programmable palette, ROT270 display orientation.
+/// One CPU cycle: board work, the 8088, then the sound board and Votrax.
+///
+/// The CPU lives on the machine and the board *is* the bus (Q*bert is the only
+/// machine on this hardware), so this takes them as separate borrows and
+/// dispatches at a concrete type.
+#[inline]
+pub fn tick(cpu: &mut I8088, board: &mut GottliebBoard) {
+    board.begin_cycle(cpu);
+    cpu.execute_cycle(board, BusMaster::Cpu(0));
+    board.end_cycle();
+}
+
+/// Run one frame's worth of cycles. The board has no scanline-boundary work --
+/// its only frame-position test is the end-of-frame render inside `end_cycle`
+/// -- so this is a plain loop.
+pub fn run_frame(cpu: &mut I8088, board: &mut GottliebBoard) {
+    for _ in 0..TIMING.cycles_per_frame() {
+        tick(cpu, board);
+    }
+}
+
 #[derive(BusDebug)]
 pub struct GottliebBoard {
-    // Main CPU (I8088 @ 5 MHz)
-    #[debug_cpu("I8088 Main")]
-    pub(crate) cpu: I8088,
-
     // Sound board (M6502 + RIOT + DAC)
     #[debug_device("Sound Board")]
     pub(crate) sound: GottliebSoundBoard,
@@ -446,7 +463,6 @@ pub struct GottliebBoard {
 impl GottliebBoard {
     pub fn new() -> Self {
         Self {
-            cpu: I8088::new(),
             sound: GottliebSoundBoard::new(),
             map: Self::build_map(),
             tile_rom_cache: gfx::GfxCache::new(0, 8, 8),
@@ -646,21 +662,20 @@ impl GottliebBoard {
     // -----------------------------------------------------------------------
 
     /// Execute one CPU cycle at the I8088 clock rate (5 MHz).
-    pub fn tick(&mut self, bus: &mut dyn Bus<Address = u32, Data = u8>) {
+    /// Per-cycle board work that runs before the CPU.
+    fn begin_cycle(&mut self, cpu: &I8088) {
         // Latch watchpoint attribution context (cycle + instruction PC)
         // before CPU execution — bus dispatch cannot read CPU state mid-tick.
         // The I8088 debug surface uses IP as its PC (matching debug_pc).
         if self.map.debug_active() {
-            let pc = self
-                .cpu
-                .at_instruction_boundary()
-                .then_some(self.cpu.ip as u32);
+            let pc = cpu.at_instruction_boundary().then_some(cpu.ip as u32);
             self.map.latch_access_context(self.clock, pc);
         }
+    }
 
-        // Execute main CPU cycle
-        self.cpu.execute_cycle(bus, BusMaster::Cpu(0));
-
+    /// Board work after the CPU's cycle: the sound board, the Votrax, the
+    /// clock, and the end-of-frame render.
+    fn end_cycle(&mut self) {
         // The speech-clock DAC (sound CPU 0x3000) retunes the Votrax VCO. When
         // it changes — or after a state load, where votrax_clock_applied is 0 —
         // re-derive the tick divider and the device's internal sample clock so
@@ -899,18 +914,16 @@ impl GottliebBoard {
     // Debug
     // -----------------------------------------------------------------------
 
-    pub fn debug_tick_boundaries(&self) -> u32 {
-        if self.cpu.at_instruction_boundary() {
-            1
-        } else {
-            0
-        }
+    /// Whether the CPU is at an instruction boundary. It lives on the machine,
+    /// which passes it back in.
+    pub fn instruction_boundaries(cpu: &I8088) -> u32 {
+        u32::from(cpu.at_instruction_boundary())
     }
 }
 
 impl Saveable for GottliebBoard {
     fn save_state(&self, w: &mut StateWriter) {
-        self.cpu.save_state(w);
+        // The CPU is saved by the machine, which owns it.
         self.sound.save_state(w);
         w.write_bytes(self.map.region_data(Region::Nvram));
         w.write_bytes(self.map.region_data(Region::Ram));
@@ -927,7 +940,7 @@ impl Saveable for GottliebBoard {
     }
 
     fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
-        self.cpu.load_state(r)?;
+        // The CPU is loaded by the machine, which owns it.
         self.sound.load_state(r)?;
         r.read_bytes_into(self.map.region_data_mut(Region::Nvram))?;
         r.read_bytes_into(self.map.region_data_mut(Region::Ram))?;
