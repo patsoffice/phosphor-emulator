@@ -40,4 +40,4 @@ assert_eq!(cpu.a, 0x42);
 ## Gotchas
 
 - Tests failing with wrong PC values often need more `tick_with_bus()` calls (each cycle = one tick)
-- The borrow-splitting `unsafe` in system `tick()` methods is sound because CPU and Bus access disjoint memory
+- The borrow-splitting `unsafe` in system `tick()` methods is sound because CPU and Bus access disjoint memory. Boards are migrating off it: holding the CPU in a separate field from the bus makes the split safe *and* concrete-typed (`docs/designs/concrete-bus-dispatch.md`). `Cpu::reset` still takes `&mut dyn Bus + 'static`, which is what blocks the CPUs that fetch a reset vector

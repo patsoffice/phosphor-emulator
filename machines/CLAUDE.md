@@ -4,8 +4,9 @@ Arcade and system board implementations. Each machine implements the `Bus` trait
 
 ## Adding a New Machine
 
-- Implement the `Bus` trait for your system struct
-- Use the borrow-splitting `unsafe` pattern for `tick()` (CPU and bus access disjoint memory)
+- Implement the `Bus` trait for whatever the CPU talks *to* — the board, or a small view struct over the board plus the game's bus-visible state — never for the struct that owns the CPU
+- Keep CPU state and bus state in separate fields, so `cpu.execute_cycle(&mut bus, ..)` borrow-checks at a concrete type. Form the split **once per run** (per frame), never per cycle: a per-cycle split costs more than the trait object it replaces. See `docs/designs/concrete-bus-dispatch.md`
+- Unconverted boards still use the borrow-splitting `unsafe` (`bus_split!`, CPU and bus access disjoint memory); don't add new uses
 - ROM loading goes through `rom_loader.rs` utilities (ZIP extraction is handled by the frontend's `rom_path.rs`)
 - Register it with one `crate::register_machine!(JoustSystem, "joust", &["joust"], JOUST_CONTROLS);` — wrapper type, CLI name, ROM set names, control table. The macro emits the factory and the `inventory::submit!`; don't hand-write either. Two extra arms: `new = Type::new(arg)` when the constructor takes a hardware variant, and `configs = ALL_CONFIGS` when several ROM revisions are tried in turn. A factory that does anything more (a reset after load, a non-standard loader) stays hand-written — see `starwars.rs` and `quantum.rs`
 - Video rendering is per-scanline during `run_frame()`
@@ -62,8 +63,10 @@ Input is fully typed (the old name-matched `InputReceiver` / `InputButton` model
 
 Games sharing hardware (e.g. Joust/Robotron on Williams, Pac-Man/Ms. Pac-Man on Namco Pac) use a two-level structure:
 
-1. **Board struct** (e.g. `WilliamsBoard`, `NamcoPacBoard`) — owns CPUs, memory, and devices. Provides inherent methods: `render_frame()`, `fill_audio()`, `tick()`, etc.
+1. **Board struct** (e.g. `WilliamsBoard`, `NamcoPacBoard`) — owns memory and devices. Provides inherent methods: `render_frame()`, `fill_audio()`, the per-cycle board work, etc.
 2. **Game wrapper struct** (e.g. `JoustSystem`) — owns a `board` field plus game-specific state. Implements `MachineCore` and the capability traits, forwarding to the board.
+
+On converted boards the CPUs live in the *wrapper*, beside the board, and the wrapper derives `BusDebug` with `#[debug_cpu]` on the CPU and `#[debug_bus]` on the board (`pacman.rs`, `galaga.rs`). Boards not yet converted still own their CPUs.
 
 Obvious delegation is macro-generated, not hand-written. `impl_board_delegation!(Type, board, TIMING, ...)` expands to `Renderable` + `AudioSource` + `MachineDebug` impls with optional flags (`no_audio`, `vectors`, `overlay_stats`, `debug_tick_pre`, `bus_addr: T`); standalone single-CPU machines use `impl_standalone_debug!`. The boundary is strict: macros may generate obvious delegation and standard save-state/core-metadata methods, but machine-specific behavior (`run_frame`, `reset`, `handle_input`, NVRAM mapping, profiling) belongs in normal trait impls in the machine file — don't widen the macro option language to hide it.
 
