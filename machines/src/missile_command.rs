@@ -1,4 +1,3 @@
-use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::input::{DrainPolicy, RelativeCounter};
 use phosphor_core::core::machine::{
@@ -274,10 +273,11 @@ const TIMING: TimingConfig = TimingConfig {
 ///   0x4D00         Write: IRQ acknowledge
 ///   0x5000-0x7FFF  Program ROM (12KB)
 ///   0xF800-0xFFFF  ROM mirror (vectors)
+/// Missile Command's hardware, everything the 6502 talks *to*. Held apart from
+/// the CPU so a cycle dispatches at a concrete bus rather than a trait object
+/// (see `docs/designs/concrete-bus-dispatch.md`).
 #[derive(BusDebug)]
-pub struct MissileCommandSystem {
-    #[debug_cpu("M6502")]
-    cpu: M6502,
+pub struct MissileCommandBoard {
     #[debug_device("POKEY")]
     pokey: Pokey,
 
@@ -324,6 +324,12 @@ pub struct MissileCommandSystem {
     madsel_lastcycles: u64,
     stall_cycles: u8, // extra cycle penalty for 3rd-bit MUSHROOM MADSEL accesses
 
+    /// The 6502's SYNC pin, sampled once per cycle by `begin_cycle`. MADSEL is
+    /// armed on an opcode fetch, so the bus has to know. A reset CPU sits in
+    /// Fetch, so this starts asserted. Derived state: re-sampled before every
+    /// cycle that can read the bus, so it is not saved.
+    cpu_is_sync: bool,
+
     // System
     clock: u64,
     cpu_cycles: u64,          // incremented only when CPU actually executes
@@ -333,6 +339,27 @@ pub struct MissileCommandSystem {
     scanline_buffer_valid: bool, // true after run_frame() completes
 
     audio_buffer: Vec<i16>,
+}
+
+/// Atari Missile Command (1980): a 6502 beside the board it drives.
+#[derive(BusDebug)]
+pub struct MissileCommandSystem {
+    #[debug_cpu("M6502")]
+    cpu: M6502,
+    #[debug_bus]
+    pub board: MissileCommandBoard,
+}
+
+/// One master cycle. The board decides whether the CPU runs this cycle (the
+/// clock halves during vblank, and a MADSEL access can stall it), then the
+/// 6502 executes against the board, which *is* the bus.
+#[inline]
+pub fn tick(cpu: &mut M6502, board: &mut MissileCommandBoard) {
+    if board.begin_cycle(cpu) {
+        cpu.execute_cycle(board, BusMaster::Cpu(0));
+        board.cpu_cycles += 1;
+    }
+    board.clock += 1;
 }
 
 /// Missile Command reads two 4-bit trackball counters. `tick` drains them from
@@ -347,6 +374,42 @@ impl MissileCommandSystem {
     pub fn new() -> Self {
         Self {
             cpu: M6502::new(),
+            board: MissileCommandBoard::new(),
+        }
+    }
+
+    /// Advance one master cycle, returning the instruction-boundary mask.
+    pub fn step_cycle(&mut self) -> u32 {
+        tick(&mut self.cpu, &mut self.board);
+        u32::from(self.cpu.at_instruction_boundary())
+    }
+
+    pub fn load_rom_set(
+        &mut self,
+        rom_set: &crate::rom_loader::RomSet,
+    ) -> Result<(), crate::rom_loader::RomLoadError> {
+        self.board.load_rom_set(rom_set)
+    }
+
+    pub fn get_cpu_state(&self) -> M6502State {
+        self.cpu.snapshot()
+    }
+
+    /// Read the CPU-facing bus, side effects and all. Distinct from the
+    /// debugger's `BusDebug::peek`/`poke`, which avoid side effects.
+    pub fn bus_read(&mut self, master: BusMaster, addr: u16) -> u8 {
+        self.board.read(master, addr)
+    }
+
+    /// Write the CPU-facing bus, side effects and all. See [`Self::bus_read`].
+    pub fn bus_write(&mut self, master: BusMaster, addr: u16, data: u8) {
+        self.board.write(master, addr, data);
+    }
+}
+
+impl MissileCommandBoard {
+    pub fn new() -> Self {
+        Self {
             pokey: Pokey::with_clock(1_250_000, 44100),
             map: Self::build_map(),
             in0: 0xFF,          // All buttons released (active-low: 1 = not pressed)
@@ -359,6 +422,7 @@ impl MissileCommandSystem {
             irq_state: false,
             madsel_lastcycles: 0,
             stall_cycles: 0,
+            cpu_is_sync: true,
             clock: 0,
             cpu_cycles: 0,
             watchdog_frame_count: 0,
@@ -389,7 +453,11 @@ impl MissileCommandSystem {
         (frame_cycle / TIMING.cycles_per_scanline) as u16
     }
 
-    pub fn tick(&mut self) {
+    /// Board work that leads a master cycle, returning whether the CPU runs on
+    /// it. The CPU lives on the machine, which passes it in for the debugger's
+    /// access-attribution latch.
+    fn begin_cycle(&mut self, cpu: &M6502) -> bool {
+        self.cpu_is_sync = cpu.is_sync();
         // Trackball movement: increment 4-bit counters from keyboard or mouse accumulator.
         // Keyboard: ±1 per tick while held. Mouse: drain ±1 per tick from accumulator.
         // Rate: every 1000 cycles ≈ 20 ticks/frame — enough for smooth crosshair tracking
@@ -448,20 +516,12 @@ impl MissileCommandSystem {
             // before CPU execution — bus dispatch cannot read CPU state
             // mid-tick.
             if self.map.has_any_watchpoints() {
-                let pc = self
-                    .cpu
-                    .at_instruction_boundary()
-                    .then_some(self.cpu.pc as u32);
+                let pc = cpu.at_instruction_boundary().then_some(cpu.pc as u32);
                 self.map.latch_access_context(self.clock, pc);
             }
-
-            bus_split!(self, bus => {
-                self.cpu.execute_cycle(bus, BusMaster::Cpu(0));
-            });
-            self.cpu_cycles += 1;
         }
 
-        self.clock += 1;
+        run_cpu
     }
 
     pub fn load_rom_set(
@@ -471,10 +531,6 @@ impl MissileCommandSystem {
         let rom_data = MISSILE_COMMAND_ROM.load(rom_set)?;
         self.map.load_region(Region::Rom, &rom_data);
         Ok(())
-    }
-
-    pub fn get_cpu_state(&self) -> M6502State {
-        self.cpu.snapshot()
     }
 
     pub fn read_ram(&self, addr: usize) -> u8 {
@@ -594,7 +650,7 @@ impl MissileCommandSystem {
 
     /// Render the full frame directly from VRAM (fallback before first run_frame() completes).
     fn render_frame_from_vram(&self, buffer: &mut [u8]) {
-        let (width, height) = self.display_size();
+        let (width, height) = TIMING.display_size();
         let w = width as usize;
         let h = height as usize;
 
@@ -723,7 +779,14 @@ impl Default for MissileCommandSystem {
     }
 }
 
-impl Bus for MissileCommandSystem {
+impl Default for MissileCommandBoard {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// The board is the bus.
+impl Bus for MissileCommandBoard {
     type Address = u16;
     type Data = u8;
 
@@ -764,7 +827,7 @@ impl Bus for MissileCommandSystem {
         // MADSEL arming: during SYNC (opcode fetch), if the opcode has low 5 bits
         // == 0x01 (indirect X addressing mode) and IRQ is not asserted, arm the
         // MADSEL counter. It will fire 5 CPU cycles later.
-        if self.cpu.is_sync() && (data & 0x1F) == 0x01 && !self.irq_state {
+        if self.cpu_is_sync && (data & 0x1F) == 0x01 && !self.irq_state {
             self.madsel_lastcycles = self.cpu_cycles;
         }
 
@@ -828,19 +891,19 @@ impl Renderable for MissileCommandSystem {
     }
 
     fn render_frame(&self, buffer: &mut [u8]) {
-        if self.scanline_buffer_valid {
-            buffer.copy_from_slice(&self.scanline_buffer);
+        if self.board.scanline_buffer_valid {
+            buffer.copy_from_slice(&self.board.scanline_buffer);
         } else {
-            self.render_frame_from_vram(buffer);
+            self.board.render_frame_from_vram(buffer);
         }
     }
 }
 
 impl AudioSource for MissileCommandSystem {
     fn fill_audio(&mut self, buffer: &mut [i16]) -> usize {
-        let n = buffer.len().min(self.audio_buffer.len());
-        buffer[..n].copy_from_slice(&self.audio_buffer[..n]);
-        self.audio_buffer.drain(..n);
+        let n = buffer.len().min(self.board.audio_buffer.len());
+        buffer[..n].copy_from_slice(&self.board.audio_buffer[..n]);
+        self.board.audio_buffer.drain(..n);
         n
     }
 
@@ -858,30 +921,30 @@ impl InputConfigurable for MissileCommandSystem {
         match event {
             InputEvent::Button { id, pressed } => match id.0 as u8 {
                 // IN0 switches (active-low: clear bit when pressed, set when released)
-                INPUT_COIN => set_bit_active_low(&mut self.in0, 5, pressed), // Left Coin
-                INPUT_START1 => set_bit_active_low(&mut self.in0, 4, pressed), // 1P Start
-                INPUT_START2 => set_bit_active_low(&mut self.in0, 3, pressed), // 2P Start
+                INPUT_COIN => set_bit_active_low(&mut self.board.in0, 5, pressed), // Left Coin
+                INPUT_START1 => set_bit_active_low(&mut self.board.in0, 4, pressed), // 1P Start
+                INPUT_START2 => set_bit_active_low(&mut self.board.in0, 3, pressed), // 2P Start
 
                 // IN1 fire buttons (active-low: clear bit when pressed, set when released)
-                INPUT_FIRE_LEFT => set_bit_active_low(&mut self.in1, 2, pressed), // Left fire
-                INPUT_FIRE_CENTER => set_bit_active_low(&mut self.in1, 1, pressed), // Center fire
-                INPUT_FIRE_RIGHT => set_bit_active_low(&mut self.in1, 0, pressed), // Right fire
+                INPUT_FIRE_LEFT => set_bit_active_low(&mut self.board.in1, 2, pressed), // Left fire
+                INPUT_FIRE_CENTER => set_bit_active_low(&mut self.board.in1, 1, pressed), // Center fire
+                INPUT_FIRE_RIGHT => set_bit_active_low(&mut self.board.in1, 0, pressed), // Right fire
 
                 // Trackball directions
-                INPUT_TRACK_L => self.trackball_x.set_held(false, pressed),
-                INPUT_TRACK_R => self.trackball_x.set_held(true, pressed),
-                INPUT_TRACK_U => self.trackball_y.set_held(false, pressed),
-                INPUT_TRACK_D => self.trackball_y.set_held(true, pressed),
+                INPUT_TRACK_L => self.board.trackball_x.set_held(false, pressed),
+                INPUT_TRACK_R => self.board.trackball_x.set_held(true, pressed),
+                INPUT_TRACK_U => self.board.trackball_y.set_held(false, pressed),
+                INPUT_TRACK_D => self.board.trackball_y.set_held(true, pressed),
                 _ => {}
             },
             InputEvent::Relative { id, delta } => {
                 let delta = delta as i32;
                 if id == CTRL_TRACKBALL_X {
-                    self.trackball_x.add_delta(delta as f32);
+                    self.board.trackball_x.add_delta(delta as f32);
                 } else if id == CTRL_TRACKBALL_Y {
                     // Y axis inverted: mouse down (positive delta) moves the crosshair
                     // down on screen, but the trackball counter must decrease.
-                    self.trackball_y.add_delta(-delta as f32);
+                    self.board.trackball_y.add_delta(-delta as f32);
                 }
             }
             InputEvent::Absolute { .. } => {}
@@ -892,50 +955,50 @@ impl InputConfigurable for MissileCommandSystem {
     /// reach accumulated motion or a held deflection.
     fn release_all_inputs(&mut self) {
         phosphor_core::core::machine::release_all_controls(self);
-        self.trackball_x.release_all();
-        self.trackball_y.release_all();
+        self.board.trackball_x.release_all();
+        self.board.trackball_y.release_all();
     }
 }
 
-crate::impl_standalone_debug!(MissileCommandSystem);
+crate::impl_standalone_debug!(MissileCommandSystem, split_cpu);
 
 impl Saveable for MissileCommandSystem {
     fn save_state(&self, w: &mut StateWriter) {
         self.cpu.save_state(w);
-        self.pokey.save_state(w);
-        w.write_bytes(self.map.region_data(Region::Ram));
-        w.write_u8(self.in0);
-        w.write_u8(self.in1);
-        w.write_bool(self.ctrld);
-        w.write_bytes(&self.palette);
-        self.trackball_x.save_state(w);
-        self.trackball_y.save_state(w);
-        w.write_bool(self.irq_state);
-        w.write_u64_le(self.madsel_lastcycles);
-        w.write_u8(self.stall_cycles);
-        w.write_u64_le(self.clock);
-        w.write_u64_le(self.cpu_cycles);
-        w.write_u8(self.watchdog_frame_count);
+        self.board.pokey.save_state(w);
+        w.write_bytes(self.board.map.region_data(Region::Ram));
+        w.write_u8(self.board.in0);
+        w.write_u8(self.board.in1);
+        w.write_bool(self.board.ctrld);
+        w.write_bytes(&self.board.palette);
+        self.board.trackball_x.save_state(w);
+        self.board.trackball_y.save_state(w);
+        w.write_bool(self.board.irq_state);
+        w.write_u64_le(self.board.madsel_lastcycles);
+        w.write_u8(self.board.stall_cycles);
+        w.write_u64_le(self.board.clock);
+        w.write_u64_le(self.board.cpu_cycles);
+        w.write_u8(self.board.watchdog_frame_count);
     }
 
     fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
         self.cpu.load_state(r)?;
-        self.pokey.load_state(r)?;
-        r.read_bytes_into(self.map.region_data_mut(Region::Ram))?;
-        self.in0 = r.read_u8()?;
-        self.in1 = r.read_u8()?;
-        self.ctrld = r.read_bool()?;
-        r.read_bytes_into(&mut self.palette)?;
-        self.trackball_x.load_state(r)?;
-        self.trackball_y.load_state(r)?;
-        self.irq_state = r.read_bool()?;
-        self.madsel_lastcycles = r.read_u64_le()?;
-        self.stall_cycles = r.read_u8()?;
-        self.clock = r.read_u64_le()?;
-        self.cpu_cycles = r.read_u64_le()?;
-        self.watchdog_frame_count = r.read_u8()?;
-        self.scanline_buffer_valid = false;
-        self.audio_buffer.clear();
+        self.board.pokey.load_state(r)?;
+        r.read_bytes_into(self.board.map.region_data_mut(Region::Ram))?;
+        self.board.in0 = r.read_u8()?;
+        self.board.in1 = r.read_u8()?;
+        self.board.ctrld = r.read_bool()?;
+        r.read_bytes_into(&mut self.board.palette)?;
+        self.board.trackball_x.load_state(r)?;
+        self.board.trackball_y.load_state(r)?;
+        self.board.irq_state = r.read_bool()?;
+        self.board.madsel_lastcycles = r.read_u64_le()?;
+        self.board.stall_cycles = r.read_u8()?;
+        self.board.clock = r.read_u64_le()?;
+        self.board.cpu_cycles = r.read_u64_le()?;
+        self.board.watchdog_frame_count = r.read_u8()?;
+        self.board.scanline_buffer_valid = false;
+        self.board.audio_buffer.clear();
         Ok(())
     }
 }
@@ -943,37 +1006,37 @@ impl Saveable for MissileCommandSystem {
 impl MachineCore for MissileCommandSystem {
     fn run_frame(&mut self) {
         for _ in 0..TIMING.cycles_per_frame() {
-            self.tick();
+            tick(&mut self.cpu, &mut self.board);
         }
-        self.scanline_buffer_valid = true;
+        self.board.scanline_buffer_valid = true;
 
         // Watchdog: 8-VBLANK timeout. If the game hasn't written
         // to 0x4C00 within 8 frames, reset the machine.
-        self.watchdog_frame_count += 1;
-        if self.watchdog_frame_count >= 8 {
+        self.board.watchdog_frame_count += 1;
+        if self.board.watchdog_frame_count >= 8 {
             self.reset();
             return;
         }
 
         // Drain POKEY's resampled f32 buffer and convert to i16 PCM.
         // POKEY outputs unipolar [0.0, 1.0]; center around zero for signed PCM.
-        let samples = self.pokey.drain_audio();
-        self.audio_buffer
+        let samples = self.board.pokey.drain_audio();
+        self.board
+            .audio_buffer
             .extend(samples.iter().map(|&s| ((s * 2.0 - 1.0) * 32767.0) as i16));
     }
 
     fn reset(&mut self) {
-        self.irq_state = false;
-        self.madsel_lastcycles = 0;
-        self.stall_cycles = 0;
-        self.watchdog_frame_count = 0;
-        self.scanline_buffer.fill(0);
-        self.scanline_buffer_valid = false;
-        self.audio_buffer.clear();
+        self.board.irq_state = false;
+        self.board.madsel_lastcycles = 0;
+        self.board.stall_cycles = 0;
+        self.board.cpu_is_sync = true;
+        self.board.watchdog_frame_count = 0;
+        self.board.scanline_buffer.fill(0);
+        self.board.scanline_buffer_valid = false;
+        self.board.audio_buffer.clear();
 
-        bus_split!(self, bus => {
-            self.cpu.reset(bus, BusMaster::Cpu(0));
-        });
+        self.cpu.reset(&mut self.board, BusMaster::Cpu(0));
     }
 
     fn frame_rate_hz(&self) -> f64 {
@@ -1109,7 +1172,7 @@ const MISSILE_DIP_BANKS: &[DipSwitchBank] = &[DipSwitchBank {
     ],
 }];
 
-crate::impl_dip_switches!(MissileCommandSystem, MISSILE_DIP_BANKS, dip_switches);
+crate::impl_dip_switches!(MissileCommandSystem, MISSILE_DIP_BANKS, board.dip_switches);
 
 // ---------------------------------------------------------------------------
 // Machine registry
@@ -1148,23 +1211,23 @@ mod tests {
         let mut sys = MissileCommandSystem::new();
 
         // Set known state
-        sys.map.region_data_mut(Region::Ram)[0x100] = 0xAA;
-        sys.in0 = 0xEE;
-        sys.in1 = 0x77;
-        sys.ctrld = true;
-        sys.palette[3] = 0x0E;
-        sys.trackball_x.set_counter(7);
-        sys.trackball_y.set_counter(12);
-        sys.trackball_x.set_held(false, true);
-        sys.trackball_y.set_held(true, true);
-        sys.trackball_x.add_delta(-7.0);
-        sys.trackball_y.add_delta(12.0);
-        sys.irq_state = true;
-        sys.madsel_lastcycles = 42;
-        sys.stall_cycles = 1;
-        sys.clock = 100_000;
-        sys.cpu_cycles = 80_000;
-        sys.watchdog_frame_count = 5;
+        sys.board.map.region_data_mut(Region::Ram)[0x100] = 0xAA;
+        sys.board.in0 = 0xEE;
+        sys.board.in1 = 0x77;
+        sys.board.ctrld = true;
+        sys.board.palette[3] = 0x0E;
+        sys.board.trackball_x.set_counter(7);
+        sys.board.trackball_y.set_counter(12);
+        sys.board.trackball_x.set_held(false, true);
+        sys.board.trackball_y.set_held(true, true);
+        sys.board.trackball_x.add_delta(-7.0);
+        sys.board.trackball_y.add_delta(12.0);
+        sys.board.irq_state = true;
+        sys.board.madsel_lastcycles = 42;
+        sys.board.stall_cycles = 1;
+        sys.board.clock = 100_000;
+        sys.board.cpu_cycles = 80_000;
+        sys.board.watchdog_frame_count = 5;
 
         // Save
         let data = SaveState::save_state(&sys).expect("save_state should return Some");
@@ -1172,47 +1235,47 @@ mod tests {
 
         // Mutate everything
         let mut sys2 = MissileCommandSystem::new();
-        sys2.map.region_data_mut(Region::Ram)[0x100] = 0xFF;
-        sys2.clock = 999;
+        sys2.board.map.region_data_mut(Region::Ram)[0x100] = 0xFF;
+        sys2.board.clock = 999;
 
         // Load
         SaveState::load_state(&mut sys2, &data).unwrap();
 
         // Verify
         assert_eq!(sys2.cpu.snapshot(), cpu_snap);
-        assert_eq!(sys2.map.region_data_mut(Region::Ram)[0x100], 0xAA);
-        assert_eq!(sys2.in0, 0xEE);
-        assert_eq!(sys2.in1, 0x77);
-        assert!(sys2.ctrld);
-        assert_eq!(sys2.palette[3], 0x0E);
-        assert_eq!(sys2.trackball_x.counter(), 7);
-        assert_eq!(sys2.trackball_y.counter(), 12);
+        assert_eq!(sys2.board.map.region_data_mut(Region::Ram)[0x100], 0xAA);
+        assert_eq!(sys2.board.in0, 0xEE);
+        assert_eq!(sys2.board.in1, 0x77);
+        assert!(sys2.board.ctrld);
+        assert_eq!(sys2.board.palette[3], 0x0E);
+        assert_eq!(sys2.board.trackball_x.counter(), 7);
+        assert_eq!(sys2.board.trackball_y.counter(), 12);
         // Held keys and pending motion round-trip too: one tick of each
         // reproduces the pre-save step (key -1 plus drained -1 on X).
-        sys2.trackball_x.update();
-        sys2.trackball_y.update();
-        assert_eq!(sys2.trackball_x.counter(), 5);
-        assert_eq!(sys2.trackball_y.counter(), 14);
-        assert!(sys2.irq_state);
-        assert_eq!(sys2.madsel_lastcycles, 42);
-        assert_eq!(sys2.stall_cycles, 1);
-        assert_eq!(sys2.clock, 100_000);
-        assert_eq!(sys2.cpu_cycles, 80_000);
-        assert_eq!(sys2.watchdog_frame_count, 5);
-        assert!(!sys2.scanline_buffer_valid);
+        sys2.board.trackball_x.update();
+        sys2.board.trackball_y.update();
+        assert_eq!(sys2.board.trackball_x.counter(), 5);
+        assert_eq!(sys2.board.trackball_y.counter(), 14);
+        assert!(sys2.board.irq_state);
+        assert_eq!(sys2.board.madsel_lastcycles, 42);
+        assert_eq!(sys2.board.stall_cycles, 1);
+        assert_eq!(sys2.board.clock, 100_000);
+        assert_eq!(sys2.board.cpu_cycles, 80_000);
+        assert_eq!(sys2.board.watchdog_frame_count, 5);
+        assert!(!sys2.board.scanline_buffer_valid);
     }
 
     #[test]
     fn save_does_not_include_rom() {
         let mut sys = MissileCommandSystem::new();
-        sys.map.region_data_mut(Region::Rom)[0] = 0xDE;
+        sys.board.map.region_data_mut(Region::Rom)[0] = 0xDE;
 
         let data = SaveState::save_state(&sys).unwrap();
 
         let mut sys2 = MissileCommandSystem::new();
         SaveState::load_state(&mut sys2, &data).unwrap();
 
-        assert_eq!(sys2.map.region_data_mut(Region::Rom)[0], 0x00);
+        assert_eq!(sys2.board.map.region_data_mut(Region::Rom)[0], 0x00);
     }
 
     #[test]
@@ -1223,12 +1286,12 @@ mod tests {
             delta: (3) as f32,
         });
         // Counter unchanged until tick() drains the pending motion.
-        assert_eq!(sys.trackball_x.counter(), 0);
+        assert_eq!(sys.board.trackball_x.counter(), 0);
         for _ in 0..3000 {
-            sys.tick();
-            sys.clock += 1;
+            sys.step_cycle();
+            sys.board.clock += 1;
         }
-        assert_eq!(sys.trackball_x.counter(), 3);
+        assert_eq!(sys.board.trackball_x.counter(), 3);
     }
 
     #[test]
@@ -1240,52 +1303,52 @@ mod tests {
         });
         // Y axis is inverted: a negative mouse delta drives the counter up.
         for _ in 0..5000 {
-            sys.tick();
-            sys.clock += 1;
+            sys.step_cycle();
+            sys.board.clock += 1;
         }
-        assert_eq!(sys.trackball_y.counter(), 5);
+        assert_eq!(sys.board.trackball_y.counter(), 5);
     }
 
     #[test]
     fn tick_drains_mouse_accum_positive() {
         let mut sys = MissileCommandSystem::new();
-        sys.trackball_x.add_delta(3.0);
+        sys.board.trackball_x.add_delta(3.0);
         // Run enough ticks to drain (tick fires every 1000 cycles)
         for _ in 0..3000 {
-            sys.tick();
-            sys.clock += 1;
+            sys.step_cycle();
+            sys.board.clock += 1;
         }
-        assert_eq!(sys.trackball_x.counter(), 3);
+        assert_eq!(sys.board.trackball_x.counter(), 3);
         // Drained: further ticks do not move it.
         for _ in 0..3000 {
-            sys.tick();
-            sys.clock += 1;
+            sys.step_cycle();
+            sys.board.clock += 1;
         }
-        assert_eq!(sys.trackball_x.counter(), 3);
+        assert_eq!(sys.board.trackball_x.counter(), 3);
     }
 
     #[test]
     fn tick_drains_mouse_accum_negative() {
         let mut sys = MissileCommandSystem::new();
-        sys.trackball_y.set_counter(5);
-        sys.trackball_y.add_delta(-3.0);
+        sys.board.trackball_y.set_counter(5);
+        sys.board.trackball_y.add_delta(-3.0);
         for _ in 0..3000 {
-            sys.tick();
-            sys.clock += 1;
+            sys.step_cycle();
+            sys.board.clock += 1;
         }
-        assert_eq!(sys.trackball_y.counter(), 2);
+        assert_eq!(sys.board.trackball_y.counter(), 2);
     }
 
     #[test]
     fn tick_drains_mouse_accum_wraps_4_bit() {
         let mut sys = MissileCommandSystem::new();
-        sys.trackball_x.set_counter(14);
-        sys.trackball_x.add_delta(5.0);
+        sys.board.trackball_x.set_counter(14);
+        sys.board.trackball_x.add_delta(5.0);
         for _ in 0..5000 {
-            sys.tick();
-            sys.clock += 1;
+            sys.step_cycle();
+            sys.board.clock += 1;
         }
-        assert_eq!(sys.trackball_x.counter(), 3); // (14 + 5) & 0x0F = 3
+        assert_eq!(sys.board.trackball_x.counter(), 3); // (14 + 5) & 0x0F = 3
     }
 
     #[test]
@@ -1314,11 +1377,11 @@ mod tests {
             delta: -5.0,
         });
         for _ in 0..6000 {
-            sys.tick();
-            sys.clock += 1;
+            sys.step_cycle();
+            sys.board.clock += 1;
         }
-        assert_eq!(sys.trackball_x.counter(), 3);
-        assert_eq!(sys.trackball_y.counter(), 5);
+        assert_eq!(sys.board.trackball_x.counter(), 3);
+        assert_eq!(sys.board.trackball_y.counter(), 5);
     }
 
     #[test]
@@ -1334,8 +1397,8 @@ mod tests {
             pressed: true,
         });
         // Active-low: pressing clears IN1 bit 1.
-        assert_eq!(typed.in1 & 0b10, 0);
-        assert_eq!(typed.in1, legacy.in1);
+        assert_eq!(typed.board.in1 & 0b10, 0);
+        assert_eq!(typed.board.in1, legacy.board.in1);
     }
 
     #[test]

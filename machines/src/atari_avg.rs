@@ -1,9 +1,9 @@
 use phosphor_core::core::AddressSpace16;
+use phosphor_core::core::TimingConfig;
 use phosphor_core::core::debug_trace::{DebugEvent, DebugEventKind, DebugTraceBuffer};
 use phosphor_core::core::machine::Renderable;
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::watchpoint::DebugAccessSource;
-use phosphor_core::core::{Bus, BusMaster, TimingConfig};
 use phosphor_core::cpu::m6502::M6502;
 use phosphor_core::device::avg::Avg;
 use phosphor_core::device::dvg::VectorLine;
@@ -61,8 +61,6 @@ pub const IRQ_PERIOD_CYCLES: u64 = 6144;
 /// via a thin wrapper struct that owns this board and implements `Bus`.
 #[derive(BusDebug, DebugTrace)]
 pub struct AtariAvgBoard {
-    #[debug_cpu("M6502")]
-    pub(crate) cpu: M6502,
     #[debug_device("AVG")]
     pub(crate) avg: Avg,
 
@@ -92,7 +90,6 @@ impl AtariAvgBoard {
     /// For Tempest: 580×570.
     pub fn new(map: AddressSpace16, visible_width: i32, visible_height: i32) -> Self {
         Self {
-            cpu: M6502::new(),
             avg: Avg::new(visible_width, visible_height),
             map,
             clock: 0,
@@ -104,8 +101,10 @@ impl AtariAvgBoard {
         }
     }
 
-    /// Tick one cycle: IRQ timing + CPU execution.
-    pub fn tick(&mut self, bus: &mut dyn Bus<Address = u16, Data = u8>) {
+    /// Board work that leads a CPU cycle: the 250 Hz periodic IRQ and the
+    /// debugger's access-attribution latch. The CPU lives on the machine, which
+    /// passes it in.
+    pub fn begin_cycle(&mut self, cpu: &M6502) {
         // IRQ generation: 250 Hz periodic
         self.irq_counter += 1;
         if self.irq_counter >= IRQ_PERIOD_CYCLES {
@@ -128,15 +127,13 @@ impl AtariAvgBoard {
         // CPU execution — bus dispatch cannot read CPU state mid-tick.
         // Both watchpoint hits and trace events draw PC from this latch.
         if self.map.has_any_watchpoints() || self.debug_trace.enabled() {
-            let pc = self
-                .cpu
-                .at_instruction_boundary()
-                .then_some(self.cpu.pc as u32);
+            let pc = cpu.at_instruction_boundary().then_some(cpu.pc as u32);
             self.map.latch_access_context(self.clock, pc);
         }
+    }
 
-        // CPU tick
-        self.cpu.execute_cycle(bus, BusMaster::Cpu(0));
+    /// Board work after the CPU's cycle.
+    pub fn end_cycle(&mut self) {
         self.clock += 1;
     }
 
@@ -233,19 +230,15 @@ impl AtariAvgBoard {
         );
     }
 
-    /// Check if the CPU is at an instruction boundary (for debug stepping).
-    pub fn debug_tick_boundaries(&self) -> u32 {
-        if self.cpu.at_instruction_boundary() {
-            1
-        } else {
-            0
-        }
+    /// Whether the CPU is at an instruction boundary (for debug stepping). It
+    /// lives on the machine, which passes it back in.
+    pub fn instruction_boundaries(cpu: &M6502) -> u32 {
+        u32::from(cpu.at_instruction_boundary())
     }
 }
 
 impl Saveable for AtariAvgBoard {
     fn save_state(&self, w: &mut StateWriter) {
-        self.cpu.save_state(w);
         self.avg.save_state(w);
         w.write_bytes(self.map.region_data(Region::Ram));
         w.write_bytes(self.map.region_data(Region::ColorRam));
@@ -257,7 +250,6 @@ impl Saveable for AtariAvgBoard {
     }
 
     fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
-        self.cpu.load_state(r)?;
         self.avg.load_state(r)?;
         r.read_bytes_into(self.map.region_data_mut(Region::Ram))?;
         r.read_bytes_into(self.map.region_data_mut(Region::ColorRam))?;

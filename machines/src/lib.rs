@@ -24,6 +24,27 @@ pub(crate) fn set_bit_active_low(reg: &mut u8, bit: u8, pressed: bool) {
 /// - Implement `BusDebug` on `Self`
 /// - Have `TIMING` in scope
 macro_rules! impl_standalone_debug {
+    // The CPU lives beside the bus state, so a cycle is `step_cycle()` on the
+    // machine and it returns the boundary mask itself.
+    ($type:ty, split_cpu) => {
+        impl phosphor_core::core::machine::MachineDebug for $type {
+            fn debug_bus(&self) -> Option<&dyn phosphor_core::core::debug::BusDebug> {
+                Some(self)
+            }
+
+            fn debug_bus_mut(&mut self) -> Option<&mut dyn phosphor_core::core::debug::BusDebug> {
+                Some(self)
+            }
+
+            fn cycles_per_frame(&self) -> u64 {
+                TIMING.cycles_per_frame()
+            }
+
+            fn debug_tick(&mut self) -> u32 {
+                self.step_cycle()
+            }
+        }
+    };
     ($type:ty) => {
         impl phosphor_core::core::machine::MachineDebug for $type {
             fn debug_bus(&self) -> Option<&dyn phosphor_core::core::debug::BusDebug> {

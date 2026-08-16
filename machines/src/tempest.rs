@@ -1,4 +1,3 @@
-use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::input::{DrainPolicy, RelativeCounter};
 use phosphor_core::core::machine::{
@@ -9,10 +8,11 @@ use phosphor_core::core::machine::{
 use phosphor_core::core::{AccessKind, AddressSpace16};
 use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
+use phosphor_core::cpu::m6502::M6502;
 use phosphor_core::device::Er2055;
 use phosphor_core::device::Mathbox;
 use phosphor_core::device::pokey::Pokey;
-use phosphor_macros::Saveable;
+use phosphor_macros::{BusDebug, Saveable};
 
 use crate::atari_avg::{self, AtariAvgBoard, Region};
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
@@ -222,11 +222,11 @@ const TEMPEST_CONTROLS: &[InputControl] = &[
 ///   $60E0        W: LED control + FLIP (player select)
 ///   $9000–$DFFF  Program ROM (20 KB)
 ///   $F000–$FFFF  Program ROM mirror (for vectors)
+/// Tempest's own bus-visible hardware, held apart from the CPU so a cycle can
+/// dispatch at a concrete bus (see `docs/designs/concrete-bus-dispatch.md`).
+/// The shared AVG board carries the rest; [`TempestBus`] joins the two.
 #[derive(Saveable)]
-#[save_version(2)]
-pub struct TempestSystem {
-    pub board: AtariAvgBoard,
-
+pub struct TempestIo {
     // Mathbox coprocessor
     mathbox: Mathbox,
 
@@ -264,10 +264,39 @@ pub struct TempestSystem {
     /// Spinner conditioning: relative motion and the left/right keys feed a
     /// wrapping 4-bit counter the game samples as a signed per-frame delta.
     spinner: RelativeCounter,
+}
+
+#[derive(Saveable, BusDebug)]
+#[save_version(2)]
+pub struct TempestSystem {
+    #[debug_cpu("M6502")]
+    cpu: M6502,
+
+    #[debug_bus]
+    pub board: AtariAvgBoard,
+
+    io: TempestIo,
 
     // Audio buffer from dual POKEYs
     #[save_skip(default)]
     audio_buffer: Vec<i16>,
+}
+
+/// The bus the 6502 sees: the shared AVG board plus Tempest's own I/O, borrowed
+/// disjointly from the machine so the CPU can execute against a concrete type.
+pub struct TempestBus<'a> {
+    board: &'a mut AtariAvgBoard,
+    io: &'a mut TempestIo,
+}
+
+/// One CPU cycle: the two POKEYs, the board's IRQ timing, then the 6502.
+#[inline]
+fn tick(cpu: &mut M6502, bus: &mut TempestBus<'_>) {
+    bus.io.pokey1.tick();
+    bus.io.pokey2.tick();
+    bus.board.begin_cycle(cpu);
+    cpu.execute_cycle(bus, BusMaster::Cpu(0));
+    bus.board.end_cycle();
 }
 
 /// The spinner counter is read as a signed 4-bit per-frame delta, so a step
@@ -318,47 +347,73 @@ impl TempestSystem {
 
     pub fn new() -> Self {
         Self {
+            cpu: M6502::new(),
             board: AtariAvgBoard::new(Self::build_map(), 580, 570),
-            mathbox: Mathbox::new(),
-            pokey1: Pokey::with_clock(1_512_000, 44100),
-            pokey2: Pokey::with_clock(1_512_000, 44100),
-            earom: Er2055::new(),
-            in0: 0xFF,  // coins/tilt/test all active-LOW, default released = all 1s
-            in1: 0xF0,  // spinner bits 0-3 = 0, bit 4 = cabinet upright, bits 5-7 unused (1)
-            in2: 0xFF,  // difficulty=medium (0x03), rating (0x04), buttons released (0xF8)
-            dsw1: 0x00, // 1C/1C, right *1, left *1, no bonus
-            dsw2: 0x00, // 1 credit min, English, 20K bonus, 3 lives
-            player_select: false,
-            outlatch: 0,
-            spinner: new_spinner(),
+            io: TempestIo {
+                mathbox: Mathbox::new(),
+                pokey1: Pokey::with_clock(1_512_000, 44100),
+                pokey2: Pokey::with_clock(1_512_000, 44100),
+                earom: Er2055::new(),
+                in0: 0xFF,  // coins/tilt/test all active-LOW, default released = all 1s
+                in1: 0xF0,  // spinner bits 0-3 = 0, bit 4 = cabinet upright, bits 5-7 unused (1)
+                in2: 0xFF,  // difficulty=medium (0x03), rating (0x04), buttons released (0xF8)
+                dsw1: 0x00, // 1C/1C, right *1, left *1, no bonus
+                dsw2: 0x00, // 1 credit min, English, 20K bonus, 3 lives
+                player_select: false,
+                outlatch: 0,
+                spinner: new_spinner(),
+            },
             audio_buffer: Vec::with_capacity(2048),
         }
     }
 
-    fn debug_pre_tick(&mut self) {
-        self.pokey1.tick();
-        self.pokey2.tick();
+    fn split(&mut self) -> (&mut M6502, TempestBus<'_>) {
+        (
+            &mut self.cpu,
+            TempestBus {
+                board: &mut self.board,
+                io: &mut self.io,
+            },
+        )
+    }
+
+    /// Advance one CPU cycle, returning the instruction-boundary mask.
+    pub fn step_cycle(&mut self) -> u32 {
+        let (cpu, mut bus) = self.split();
+        tick(cpu, &mut bus);
+        AtariAvgBoard::instruction_boundaries(&self.cpu)
+    }
+
+    /// Read the CPU-facing bus, side effects and all. Distinct from the
+    /// debugger's `BusDebug::peek`/`poke`, which avoid side effects.
+    pub fn bus_read(&mut self, master: BusMaster, addr: u16) -> u8 {
+        self.split().1.read(master, addr)
+    }
+
+    /// Write the CPU-facing bus, side effects and all. See [`Self::bus_read`].
+    pub fn bus_write(&mut self, master: BusMaster, addr: u16, data: u8) {
+        self.split().1.write(master, addr, data);
     }
 
     /// Update POKEY pot inputs based on current input state.
     ///
     /// Each IN1/IN2 bit maps to a POKEY pot: 0 if set (fires immediately), 228 if clear.
-    fn update_pot_inputs(&mut self) {
-        self.spinner.update();
+    fn update_pot_inputs(io: &mut TempestIo) {
+        io.spinner.update();
 
         // Build IN1: spinner bits 0-3 + cabinet bit 4
-        self.in1 = (self.in1 & 0xF0) | self.spinner.counter();
+        io.in1 = (io.in1 & 0xF0) | io.spinner.counter();
 
         // POKEY1: each POT reads one bit from IN1
         for i in 0..8u8 {
-            let val = if self.in1 & (1 << i) != 0 { 0 } else { 228 };
-            self.pokey1.set_pot_input(i as usize, val);
+            let val = if io.in1 & (1 << i) != 0 { 0 } else { 228 };
+            io.pokey1.set_pot_input(i as usize, val);
         }
 
         // POKEY2: each POT reads one bit from IN2
         for i in 0..8u8 {
-            let val = if self.in2 & (1 << i) != 0 { 0 } else { 228 };
-            self.pokey2.set_pot_input(i as usize, val);
+            let val = if io.in2 & (1 << i) != 0 { 0 } else { 228 };
+            io.pokey2.set_pot_input(i as usize, val);
         }
     }
 
@@ -383,7 +438,7 @@ impl Default for TempestSystem {
 // Bus implementation
 // ---------------------------------------------------------------------------
 
-impl Bus for TempestSystem {
+impl Bus for TempestBus<'_> {
     type Address = u16;
     type Data = u8;
 
@@ -402,7 +457,7 @@ impl Bus for TempestSystem {
             Region::IO => match addr {
                 // IN0: coins, tilt, test, diagnostic, VG halt, 3KHz clock
                 0x0C00 => {
-                    let mut val = self.in0 & 0x3F; // bits 0-5 from latched input
+                    let mut val = self.io.in0 & 0x3F; // bits 0-5 from latched input
                     // Bit 6: VG halt (active HIGH = AVG is done/halted)
                     if self.board.avg.is_halted() {
                         val |= 0x40;
@@ -415,28 +470,28 @@ impl Bus for TempestSystem {
                 }
 
                 // DSW1 (pricing options)
-                0x0D00 => self.dsw1,
+                0x0D00 => self.io.dsw1,
 
                 // DSW2 (game options)
-                0x0E00 => self.dsw2,
+                0x0E00 => self.io.dsw2,
 
                 // Mathbox status (always ready)
-                0x6040 => self.mathbox.status_r(),
+                0x6040 => self.io.mathbox.status_r(),
 
                 // EAROM read (at previously latched address)
-                0x6050 => self.earom.read_latched(),
+                0x6050 => self.io.earom.read_latched(),
 
                 // Mathbox result low
-                0x6060 => self.mathbox.lo_r(),
+                0x6060 => self.io.mathbox.lo_r(),
 
                 // Mathbox result high
-                0x6070 => self.mathbox.hi_r(),
+                0x6070 => self.io.mathbox.hi_r(),
 
                 // POKEY 1
-                0x60C0..=0x60CF => self.pokey1.read(addr & 0x0F),
+                0x60C0..=0x60CF => self.io.pokey1.read(addr & 0x0F),
 
                 // POKEY 2
-                0x60D0..=0x60DF => self.pokey2.read(addr & 0x0F),
+                0x60D0..=0x60DF => self.io.pokey2.read(addr & 0x0F),
 
                 // $F000–$FFFF: mirror of program ROM $D000–$DFFF (for vectors)
                 0xF000..=0xFFFF => {
@@ -472,14 +527,14 @@ impl Bus for TempestSystem {
                 0x4000..=0x400F => {
                     let bit = (addr & 7) as u8;
                     if data & 1 != 0 {
-                        self.outlatch |= 1 << bit;
+                        self.io.outlatch |= 1 << bit;
                     } else {
-                        self.outlatch &= !(1 << bit);
+                        self.io.outlatch &= !(1 << bit);
                     }
                     // Bit 2 = flip_x, bit 3 = flip_y
                     self.board
                         .avg
-                        .set_flip(self.outlatch & 0x04 != 0, self.outlatch & 0x08 != 0);
+                        .set_flip(self.io.outlatch & 0x04 != 0, self.io.outlatch & 0x08 != 0);
                 }
 
                 // AVG GO
@@ -495,7 +550,7 @@ impl Bus for TempestSystem {
                 0x5800 => self.board.avg.reset(),
 
                 // EAROM write ($6000–$603F)
-                0x6000..=0x603F => self.earom.latch(addr & 0x3F, data),
+                0x6000..=0x603F => self.io.earom.latch(addr & 0x3F, data),
 
                 // EAROM control
                 0x6040 => {
@@ -503,21 +558,21 @@ impl Bus for TempestSystem {
                     let c1 = data & 0x04 == 0; // bit 2 inverted → C1
                     let c2 = data & 0x02 != 0; // bit 1 → C2
                     let cs1 = data & 0x08 != 0;
-                    self.earom.write_control(clock, cs1, c1, c2);
+                    self.io.earom.write_control(clock, cs1, c1, c2);
                 }
 
                 // Mathbox command ($6080–$609F)
-                0x6080..=0x609F => self.mathbox.go_w((addr & 0x1F) as u8, data),
+                0x6080..=0x609F => self.io.mathbox.go_w((addr & 0x1F) as u8, data),
 
                 // POKEY 1
-                0x60C0..=0x60CF => self.pokey1.write(addr & 0x0F, data),
+                0x60C0..=0x60CF => self.io.pokey1.write(addr & 0x0F, data),
 
                 // POKEY 2
-                0x60D0..=0x60DF => self.pokey2.write(addr & 0x0F, data),
+                0x60D0..=0x60DF => self.io.pokey2.write(addr & 0x0F, data),
 
                 // LED control + FLIP
                 0x60E0 => {
-                    self.player_select = data & 0x04 != 0;
+                    self.io.player_select = data & 0x04 != 0;
                 }
 
                 _ => {}
@@ -583,29 +638,29 @@ impl InputConfigurable for TempestSystem {
         match event {
             InputEvent::Button { id, pressed } => match id.0 as u8 {
                 // IN0: coins and tilt (active-LOW)
-                INPUT_COIN1 => set_bit_active_low(&mut self.in0, 2, pressed),
-                INPUT_COIN2 => set_bit_active_low(&mut self.in0, 1, pressed),
-                INPUT_COIN3 => set_bit_active_low(&mut self.in0, 0, pressed),
+                INPUT_COIN1 => set_bit_active_low(&mut self.io.in0, 2, pressed),
+                INPUT_COIN2 => set_bit_active_low(&mut self.io.in0, 1, pressed),
+                INPUT_COIN3 => set_bit_active_low(&mut self.io.in0, 0, pressed),
 
                 // IN2 bits 3-4: fire/zap buttons (active-LOW in buttons port)
                 // Button port bit 1 (fire) → IN2 bit 4
                 // Button port bit 0 (zap) → IN2 bit 3
-                INPUT_FIRE => set_bit_active_low(&mut self.in2, 4, pressed),
-                INPUT_ZAP => set_bit_active_low(&mut self.in2, 3, pressed),
+                INPUT_FIRE => set_bit_active_low(&mut self.io.in2, 4, pressed),
+                INPUT_ZAP => set_bit_active_low(&mut self.io.in2, 3, pressed),
 
                 // IN2 bits 5-6: start buttons (active-LOW)
-                INPUT_START1 => set_bit_active_low(&mut self.in2, 5, pressed),
-                INPUT_START2 => set_bit_active_low(&mut self.in2, 6, pressed),
+                INPUT_START1 => set_bit_active_low(&mut self.io.in2, 5, pressed),
+                INPUT_START2 => set_bit_active_low(&mut self.io.in2, 6, pressed),
 
                 // Digital spinner via left/right keys
-                INPUT_LEFT => self.spinner.set_held(false, pressed),
-                INPUT_RIGHT => self.spinner.set_held(true, pressed),
+                INPUT_LEFT => self.io.spinner.set_held(false, pressed),
+                INPUT_RIGHT => self.io.spinner.set_held(true, pressed),
 
                 _ => {}
             },
             InputEvent::Relative { id, delta } => {
                 if id == CTRL_SPINNER {
-                    self.spinner.add_delta(delta);
+                    self.io.spinner.add_delta(delta);
                 }
             }
             InputEvent::Absolute { .. } => {}
@@ -616,29 +671,28 @@ impl InputConfigurable for TempestSystem {
     /// reach accumulated motion or a held deflection.
     fn release_all_inputs(&mut self) {
         phosphor_core::core::machine::release_all_controls(self);
-        self.spinner.release_all();
+        self.io.spinner.release_all();
     }
 }
 
-crate::impl_board_debug!(TempestSystem, board, atari_avg::TIMING, debug_tick_pre);
+crate::impl_board_debug!(TempestSystem, board, atari_avg::TIMING, split_cpu);
 
 impl MachineCore for TempestSystem {
     crate::machine_core_metadata!("tempest", atari_avg::TIMING);
 
     fn run_frame(&mut self) {
-        self.update_pot_inputs();
+        Self::update_pot_inputs(&mut self.io);
 
-        bus_split!(self, bus => {
+        {
+            let (cpu, mut bus) = self.split();
             for _ in 0..atari_avg::TIMING.cycles_per_frame() {
-                self.pokey1.tick();
-                self.pokey2.tick();
-                self.board.tick(bus);
+                tick(cpu, &mut bus);
             }
-        });
+        }
 
         // Mix dual POKEY audio
-        let samples1 = self.pokey1.drain_audio();
-        let samples2 = self.pokey2.drain_audio();
+        let samples1 = self.io.pokey1.drain_audio();
+        let samples2 = self.io.pokey2.drain_audio();
         let len = samples1.len().min(samples2.len());
         for i in 0..len {
             let mixed = (samples1[i] + samples2[i]) * 0.5;
@@ -654,16 +708,15 @@ impl MachineCore for TempestSystem {
 
     fn reset(&mut self) {
         self.board.reset();
-        self.mathbox.reset();
-        self.pokey1.reset();
-        self.pokey2.reset();
-        self.earom.reset();
-        self.player_select = false;
-        self.outlatch = 0;
-        self.spinner = new_spinner();
-        bus_split!(self, bus => {
-            self.board.cpu.reset(bus, BusMaster::Cpu(0));
-        });
+        self.io.mathbox.reset();
+        self.io.pokey1.reset();
+        self.io.pokey2.reset();
+        self.io.earom.reset();
+        self.io.player_select = false;
+        self.io.outlatch = 0;
+        self.io.spinner = new_spinner();
+        let (cpu, mut bus) = self.split();
+        cpu.reset(&mut bus, BusMaster::Cpu(0));
     }
 }
 
@@ -673,11 +726,11 @@ impl SaveState for TempestSystem {
 
 impl Nvram for TempestSystem {
     fn save_nvram(&self) -> Option<&[u8]> {
-        Some(self.earom.snapshot())
+        Some(self.io.earom.snapshot())
     }
 
     fn load_nvram(&mut self, data: &[u8]) {
-        self.earom.load_from(data);
+        self.io.earom.load_from(data);
     }
 }
 
@@ -899,7 +952,7 @@ const TEMPEST_DIP_BANKS: &[DipSwitchBank] = &[
     },
 ];
 
-crate::impl_dip_switches!(TempestSystem, TEMPEST_DIP_BANKS, dsw1, dsw2);
+crate::impl_dip_switches!(TempestSystem, TEMPEST_DIP_BANKS, io.dsw1, io.dsw2);
 crate::impl_board_debug_trace!(TempestSystem, board);
 
 // ---------------------------------------------------------------------------
@@ -952,15 +1005,15 @@ mod tests {
         sys.board.map.region_data_mut(Region::Ram)[0x100] = 0xAA;
         sys.board.map.region_data_mut(Region::VectorRam)[0x200] = 0xBB;
         sys.board.map.region_data_mut(Region::ColorRam)[0] = 0x05;
-        sys.in0 = 0xFB;
-        sys.in2 = 0x57;
+        sys.io.in0 = 0xFB;
+        sys.io.in2 = 0x57;
         sys.board.clock = 75_000;
         sys.board.irq_counter = 3000;
         sys.board.irq_pending = true;
         sys.board.watchdog_frame_count = 5;
-        sys.player_select = true;
-        sys.spinner.set_counter(7);
-        sys.earom.load_from(&{
+        sys.io.player_select = true;
+        sys.io.spinner.set_counter(7);
+        sys.io.earom.load_from(&{
             let mut d = [0u8; 64];
             d[0] = 0x42;
             d[63] = 0xEF;
@@ -969,19 +1022,19 @@ mod tests {
 
         // Save
         let data = sys.save_state().expect("save_state should return Some");
-        let cpu_snap = sys.board.cpu.snapshot();
+        let cpu_snap = sys.cpu.snapshot();
 
         // Mutate everything
         let mut sys2 = TempestSystem::new();
         sys2.board.map.region_data_mut(Region::Ram)[0x100] = 0xFF;
-        sys2.in0 = 0x00;
+        sys2.io.in0 = 0x00;
         sys2.board.clock = 999;
 
         // Load
         sys2.load_state(&data).unwrap();
 
         // Verify CPU
-        assert_eq!(sys2.board.cpu.snapshot(), cpu_snap);
+        assert_eq!(sys2.cpu.snapshot(), cpu_snap);
 
         // Verify memory
         assert_eq!(sys2.board.map.region_data(Region::Ram)[0x100], 0xAA);
@@ -989,18 +1042,18 @@ mod tests {
         assert_eq!(sys2.board.map.region_data(Region::ColorRam)[0], 0x05);
 
         // Verify I/O and timing state
-        assert_eq!(sys2.in0, 0xFB);
-        assert_eq!(sys2.in2, 0x57);
+        assert_eq!(sys2.io.in0, 0xFB);
+        assert_eq!(sys2.io.in2, 0x57);
         assert_eq!(sys2.board.clock, 75_000);
         assert_eq!(sys2.board.irq_counter, 3000);
         assert!(sys2.board.irq_pending);
         assert_eq!(sys2.board.watchdog_frame_count, 5);
-        assert!(sys2.player_select);
-        assert_eq!(sys2.spinner.counter(), 7);
+        assert!(sys2.io.player_select);
+        assert_eq!(sys2.io.spinner.counter(), 7);
 
         // Verify EAROM
-        assert_eq!(sys2.earom.read(0), 0x42);
-        assert_eq!(sys2.earom.read(63), 0xEF);
+        assert_eq!(sys2.io.earom.read(0), 0x42);
+        assert_eq!(sys2.io.earom.read(63), 0xEF);
     }
 
     #[test]
@@ -1023,9 +1076,9 @@ mod tests {
         let mut sys = TempestSystem::new();
 
         // Write mathbox register 0 low byte
-        sys.write(BusMaster::Cpu(0), 0x6080, 0x42);
+        sys.bus_write(BusMaster::Cpu(0), 0x6080, 0x42);
         // Read result low
-        let lo = sys.read(BusMaster::Cpu(0), 0x6060);
+        let lo = sys.bus_read(BusMaster::Cpu(0), 0x6060);
         assert_eq!(lo, 0x42);
     }
 
@@ -1034,24 +1087,24 @@ mod tests {
         let mut sys = TempestSystem::new();
 
         // Latch address 0x05 with data 0xAB
-        sys.write(BusMaster::Cpu(0), 0x6005, 0xAB);
+        sys.bus_write(BusMaster::Cpu(0), 0x6005, 0xAB);
 
         // Tempest $6040 bits: 0=CK, 1=C2, 2=!C1, 3=CS1
 
         // Erase address 5: C1=0(bit2=1), C2=1(bit1=1), CS1=1(bit3=1)
-        sys.write(BusMaster::Cpu(0), 0x6040, 0x0F); // clock high
-        sys.write(BusMaster::Cpu(0), 0x6040, 0x0E); // clock low
+        sys.bus_write(BusMaster::Cpu(0), 0x6040, 0x0F); // clock high
+        sys.bus_write(BusMaster::Cpu(0), 0x6040, 0x0E); // clock low
 
         // Write 0xAB: C1=0(bit2=1), C2=0(bit1=0), CS1=1(bit3=1)
-        sys.write(BusMaster::Cpu(0), 0x6040, 0x0D); // clock high
-        sys.write(BusMaster::Cpu(0), 0x6040, 0x0C); // clock low
+        sys.bus_write(BusMaster::Cpu(0), 0x6040, 0x0D); // clock high
+        sys.bus_write(BusMaster::Cpu(0), 0x6040, 0x0C); // clock low
 
         // Read: C1=1(bit2=0), CS1=1(bit3=1), falling edge loads data register
-        sys.write(BusMaster::Cpu(0), 0x6040, 0x09); // clock high
-        sys.write(BusMaster::Cpu(0), 0x6040, 0x08); // falling edge → read
+        sys.bus_write(BusMaster::Cpu(0), 0x6040, 0x09); // clock high
+        sys.bus_write(BusMaster::Cpu(0), 0x6040, 0x08); // falling edge → read
 
         // Read data register via EAROM read port
-        let val = sys.read(BusMaster::Cpu(0), 0x6050);
+        let val = sys.bus_read(BusMaster::Cpu(0), 0x6050);
         assert_eq!(val, 0xAB);
     }
 }
