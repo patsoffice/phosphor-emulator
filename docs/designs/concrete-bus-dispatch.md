@@ -328,8 +328,11 @@ Ordered by payoff per unit of risk: shared boards with several machines first
 5. ~~**Williams** (Joust, Robotron, Sinistar)~~ — done; M6809 + M6800 + blitter,
    the second-bus-master case (see the solved entry above), and the first user
    of the generic `Cpu::reset`.
-6. **Atari DVG/AVG family** (Asteroids, Asteroids Deluxe, Lunar Lander, Quantum,
-   Star Wars) — M6502 boards; needs (1). Star Wars has seven `bus_split!` sites.
+6. ~~**Atari DVG board** (Asteroids, Asteroids Deluxe, Lunar Lander)~~ — done;
+   the first 6502 machines, and so the first real users of the generic
+   `Cpu::reset`. **Quantum and Star Wars** turned out not to share that board at
+   all and are their own step: Quantum is a standalone M68000 + AVG machine and
+   Star Wars a standalone two-6502 board with seven `bus_split!` sites.
 7. **Atari System 1** (Marble Madness, Road Runner) — M68000, the `u32 word`
    arm; needs (1).
 8. **Gottlieb System 80** (Q*bert) — I8088 + M6502, the `u32` arm; needs (1).

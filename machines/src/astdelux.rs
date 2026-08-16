@@ -1,4 +1,3 @@
-use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
     ActionRole, AudioSource, DipApplyTiming, DipChoice, DipOption, DipSwitchBank,
@@ -12,9 +11,10 @@ use phosphor_core::device::Er2055;
 use phosphor_core::device::pokey::Pokey;
 use phosphor_macros::Saveable;
 
-use crate::atari_dvg::{self, AtariDvgBoard, Region};
+use crate::atari_dvg::{self, AtariDvgBoard, AtariDvgBus, Region};
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
 use crate::set_bit_active_high;
+use phosphor_core::cpu::m6502::M6502;
 
 // ---------------------------------------------------------------------------
 // ROM definitions (MAME `astdelux` set, revision 3)
@@ -179,8 +179,13 @@ const ASTDELUX_CONTROLS: &[InputControl] = &[
 ///   0x4000–0x47FF  Vector RAM (2 KB, shared CPU/DVG)
 ///   0x4800–0x57FF  Vector ROM (4 KB)
 ///   0x6000–0x7FFF  Program ROM (8 KB)
-#[derive(Saveable)]
+#[derive(Saveable, phosphor_macros::BusDebug)]
 pub struct AsteroidsDeluxeSystem {
+    /// The 6502 is held beside the bus view over the board.
+    #[debug_cpu("M6502")]
+    pub cpu: M6502,
+
+    #[debug_bus]
     pub board: AtariDvgBoard,
 
     // POKEY sound chip at 0x2C00–0x2C0F
@@ -232,6 +237,7 @@ impl AsteroidsDeluxeSystem {
 
     pub fn new() -> Self {
         Self {
+            cpu: M6502::new(),
             // Asteroids Deluxe: VROM at DVG 0x0800, size 0x1000
             board: AtariDvgBoard::new(Self::build_map(), 0x0800, 0x1000),
             pokey: Pokey::with_clock(1_512_000, 44100),
@@ -243,8 +249,39 @@ impl AsteroidsDeluxeSystem {
         }
     }
 
-    fn debug_pre_tick(&mut self) {
-        self.pokey.tick();
+    /// Borrow the CPU and the bus it drives as two disjoint pieces.
+    #[inline]
+    fn split(&mut self) -> (&mut M6502, AsteroidsDeluxeBus<'_>) {
+        (
+            &mut self.cpu,
+            AsteroidsDeluxeBus {
+                board: &mut self.board,
+                pokey: &mut self.pokey,
+                earom: &mut self.earom,
+                in0: self.in0,
+                in1: self.in1,
+                dip_switches: self.dip_switches,
+            },
+        )
+    }
+
+    /// One CPU cycle. Returns 1 at an instruction boundary (for the debugger,
+    /// which steps instructions rather than cycles).
+    pub fn step_cycle(&mut self) -> u32 {
+        let (cpu, mut bus) = self.split();
+        atari_dvg::tick(cpu, &mut bus);
+        AtariDvgBoard::instruction_boundaries(&self.cpu)
+    }
+
+    /// Read the CPU-facing bus, side effects and all. Distinct from the
+    /// debugger's `BusDebug::peek`/`poke`, which avoid side effects.
+    pub fn bus_read(&mut self, master: BusMaster, addr: u16) -> u8 {
+        self.split().1.read(master, addr)
+    }
+
+    /// Write the CPU-facing bus, side effects and all. See [`Self::bus_read`].
+    pub fn bus_write(&mut self, master: BusMaster, addr: u16, data: u8) {
+        self.split().1.write(master, addr, data);
     }
 
     pub fn load_rom_set(&mut self, rom_set: &RomSet) -> Result<(), RomLoadError> {
@@ -266,7 +303,30 @@ impl Default for AsteroidsDeluxeSystem {
 // Bus implementation
 // ---------------------------------------------------------------------------
 
-impl Bus for AsteroidsDeluxeSystem {
+/// The Asteroids Deluxe bus: the shared DVG board plus this game's I/O -- the
+/// input multiplexers, the DIP switches, the POKEY and the high-score EAROM.
+struct AsteroidsDeluxeBus<'a> {
+    board: &'a mut AtariDvgBoard,
+    pokey: &'a mut Pokey,
+    earom: &'a mut Er2055,
+    in0: u8,
+    in1: u8,
+    dip_switches: u8,
+}
+
+impl AtariDvgBus for AsteroidsDeluxeBus<'_> {
+    #[inline]
+    fn board(&mut self) -> &mut AtariDvgBoard {
+        self.board
+    }
+
+    #[inline]
+    fn begin_cycle(&mut self) {
+        self.pokey.tick();
+    }
+}
+
+impl Bus for AsteroidsDeluxeBus<'_> {
     type Address = u16;
     type Data = u8;
 
@@ -431,23 +491,15 @@ impl InputConfigurable for AsteroidsDeluxeSystem {
     }
 }
 
-crate::impl_board_debug!(
-    AsteroidsDeluxeSystem,
-    board,
-    atari_dvg::TIMING,
-    debug_tick_pre
-);
+crate::impl_board_debug!(AsteroidsDeluxeSystem, board, atari_dvg::TIMING, split_cpu);
 
 impl MachineCore for AsteroidsDeluxeSystem {
     crate::machine_core_metadata!("astdelux", atari_dvg::TIMING);
 
     fn run_frame(&mut self) {
-        bus_split!(self, bus => {
-            for _ in 0..atari_dvg::TIMING.cycles_per_frame() {
-                self.pokey.tick();
-                self.board.tick(bus);
-            }
-        });
+        // The POKEY is clocked per cycle by the bus view's `begin_cycle` hook.
+        let (cpu, mut bus) = self.split();
+        atari_dvg::run_frame(cpu, &mut bus);
 
         // Drain POKEY audio samples
         let samples = self.pokey.drain_audio();
@@ -467,9 +519,8 @@ impl MachineCore for AsteroidsDeluxeSystem {
     fn reset(&mut self) {
         self.board.reset();
         self.pokey.reset();
-        bus_split!(self, bus => {
-            self.board.cpu.reset(bus, BusMaster::Cpu(0));
-        });
+        let (cpu, mut bus) = self.split();
+        cpu.reset(&mut bus, BusMaster::Cpu(0));
     }
 }
 
@@ -655,7 +706,7 @@ mod tests {
 
         // Save
         let data = sys.save_state().expect("save_state should return Some");
-        let cpu_snap = sys.board.cpu.snapshot();
+        let cpu_snap = sys.cpu.snapshot();
 
         // Mutate everything
         let mut sys2 = AsteroidsDeluxeSystem::new();
@@ -667,7 +718,7 @@ mod tests {
         sys2.load_state(&data).unwrap();
 
         // Verify CPU
-        assert_eq!(sys2.board.cpu.snapshot(), cpu_snap);
+        assert_eq!(sys2.cpu.snapshot(), cpu_snap);
 
         // Verify memory
         assert_eq!(sys2.board.map.region_data(Region::Ram)[0x100], 0xAA);
@@ -708,24 +759,24 @@ mod tests {
         let mut sys = AsteroidsDeluxeSystem::new();
 
         // Latch address 0x05 with data 0xAB
-        sys.write(BusMaster::Cpu(0), 0x3205, 0xAB);
+        sys.bus_write(BusMaster::Cpu(0), 0x3205, 0xAB);
 
         // Astdelux $3A00 bits: 0=CK, 1=!C1, 2=C2, 3=CS1
 
         // Erase address 5: C1=0(bit1=1), C2=1(bit2=1), CS1=1(bit3=1)
-        sys.write(BusMaster::Cpu(0), 0x3A00, 0x0F); // clock high
-        sys.write(BusMaster::Cpu(0), 0x3A00, 0x0E); // clock low
+        sys.bus_write(BusMaster::Cpu(0), 0x3A00, 0x0F); // clock high
+        sys.bus_write(BusMaster::Cpu(0), 0x3A00, 0x0E); // clock low
 
         // Write 0xAB: C1=0(bit1=1), C2=0(bit2=0), CS1=1(bit3=1)
-        sys.write(BusMaster::Cpu(0), 0x3A00, 0x0B); // clock high
-        sys.write(BusMaster::Cpu(0), 0x3A00, 0x0A); // clock low
+        sys.bus_write(BusMaster::Cpu(0), 0x3A00, 0x0B); // clock high
+        sys.bus_write(BusMaster::Cpu(0), 0x3A00, 0x0A); // clock low
 
         // Read: C1=1(bit1=0), CS1=1(bit3=1), falling edge loads data register
-        sys.write(BusMaster::Cpu(0), 0x3A00, 0x09); // clock high
-        sys.write(BusMaster::Cpu(0), 0x3A00, 0x08); // falling edge → read
+        sys.bus_write(BusMaster::Cpu(0), 0x3A00, 0x09); // clock high
+        sys.bus_write(BusMaster::Cpu(0), 0x3A00, 0x08); // falling edge → read
 
         // Read data register
-        let val = sys.read(BusMaster::Cpu(0), 0x2C45);
+        let val = sys.bus_read(BusMaster::Cpu(0), 0x2C45);
         assert_eq!(val, 0xAB);
     }
 }

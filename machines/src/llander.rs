@@ -1,4 +1,3 @@
-use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
     ActionRole, DipApplyTiming, DipChoice, DipOption, DipSwitchBank, InputConfigurable,
@@ -9,10 +8,11 @@ use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
 use phosphor_macros::Saveable;
 
-use crate::atari_dvg::{self, AtariDvgBoard, Region};
+use crate::atari_dvg::{self, AtariDvgBoard, AtariDvgBus, Region};
 use crate::llander_sound::LunarLanderDiscreteSound;
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
 use crate::{set_bit_active_high, set_bit_active_low};
+use phosphor_core::cpu::m6502::M6502;
 
 // ---------------------------------------------------------------------------
 // ROM definitions (MAME `llander` set, revision 2)
@@ -173,8 +173,13 @@ const LLANDER_CONTROLS: &[InputControl] = &[
 ///   0x4000–0x47FF  Vector RAM (2 KB, shared CPU/DVG)
 ///   0x4800–0x5FFF  Vector ROM (6 KB)
 ///   0x6000–0x7FFF  Program ROM (8 KB)
-#[derive(Saveable)]
+#[derive(Saveable, phosphor_macros::BusDebug)]
 pub struct LunarLanderSystem {
+    /// The 6502 is held beside the bus view over the board.
+    #[debug_cpu("M6502")]
+    pub cpu: M6502,
+
+    #[debug_bus]
     pub board: AtariDvgBoard,
 
     /// Discrete analog sound (thrust/explosion/3 KHz + 6 KHz tones).
@@ -236,6 +241,7 @@ impl LunarLanderSystem {
 
     pub fn new() -> Self {
         Self {
+            cpu: M6502::new(),
             // Lunar Lander: VROM at DVG 0x0800, size 0x1800
             board: AtariDvgBoard::new(Self::build_map(), 0x0800, 0x1800),
             sound: LunarLanderDiscreteSound::new(),
@@ -247,6 +253,41 @@ impl LunarLanderSystem {
             thrust_value: 0x00,
             thrust_target: 0x00,
         }
+    }
+
+    /// Borrow the CPU and the bus it drives as two disjoint pieces.
+    #[inline]
+    fn split(&mut self) -> (&mut M6502, LunarLanderBus<'_>) {
+        (
+            &mut self.cpu,
+            LunarLanderBus {
+                board: &mut self.board,
+                sound: &mut self.sound,
+                in0: self.in0,
+                in1: self.in1,
+                dip_switches: self.dip_switches,
+                thrust_value: self.thrust_value,
+            },
+        )
+    }
+
+    /// One CPU cycle. Returns 1 at an instruction boundary (for the debugger,
+    /// which steps instructions rather than cycles).
+    pub fn step_cycle(&mut self) -> u32 {
+        let (cpu, mut bus) = self.split();
+        atari_dvg::tick(cpu, &mut bus);
+        AtariDvgBoard::instruction_boundaries(&self.cpu)
+    }
+
+    /// Read the CPU-facing bus, side effects and all. Distinct from the
+    /// debugger's `BusDebug::peek`/`poke`, which avoid side effects.
+    pub fn bus_read(&mut self, master: BusMaster, addr: u16) -> u8 {
+        self.split().1.read(master, addr)
+    }
+
+    /// Write the CPU-facing bus, side effects and all. See [`Self::bus_read`].
+    pub fn bus_write(&mut self, master: BusMaster, addr: u16, data: u8) {
+        self.split().1.write(master, addr, data);
     }
 
     pub fn load_rom_set(&mut self, rom_set: &RomSet) -> Result<(), RomLoadError> {
@@ -268,7 +309,26 @@ impl Default for LunarLanderSystem {
 // Bus implementation
 // ---------------------------------------------------------------------------
 
-impl Bus for LunarLanderSystem {
+/// The Lunar Lander bus: the shared DVG board plus this game's I/O -- the input
+/// multiplexers, the DIP switches, the analog thrust pedal and the discrete
+/// sound board.
+struct LunarLanderBus<'a> {
+    board: &'a mut AtariDvgBoard,
+    sound: &'a mut LunarLanderDiscreteSound,
+    in0: u8,
+    in1: u8,
+    dip_switches: u8,
+    thrust_value: u8,
+}
+
+impl AtariDvgBus for LunarLanderBus<'_> {
+    #[inline]
+    fn board(&mut self) -> &mut AtariDvgBoard {
+        self.board
+    }
+}
+
+impl Bus for LunarLanderBus<'_> {
     type Address = u16;
     type Data = u8;
 
@@ -386,7 +446,7 @@ impl Bus for LunarLanderSystem {
 // Renderable + MachineDebug delegate to the shared board; audio is owned by the
 // game wrapper's discrete sound device, so AudioSource is hand-written.
 crate::impl_board_renderable!(LunarLanderSystem, board, atari_dvg::TIMING, vectors);
-crate::impl_board_debug!(LunarLanderSystem, board, atari_dvg::TIMING);
+crate::impl_board_debug!(LunarLanderSystem, board, atari_dvg::TIMING, split_cpu);
 
 impl phosphor_core::core::machine::AudioSource for LunarLanderSystem {
     fn fill_audio(&mut self, buffer: &mut [i16]) -> usize {
@@ -442,11 +502,8 @@ impl MachineCore for LunarLanderSystem {
                 .max(self.thrust_target)
         };
 
-        bus_split!(self, bus => {
-            for _ in 0..atari_dvg::TIMING.cycles_per_frame() {
-                self.board.tick(bus);
-            }
-        });
+        let (cpu, mut bus) = self.split();
+        atari_dvg::run_frame(cpu, &mut bus);
 
         // Advance the discrete sound circuit for the frame's worth of CPU cycles.
         self.sound.tick(atari_dvg::TIMING.cycles_per_frame());
@@ -464,9 +521,8 @@ impl MachineCore for LunarLanderSystem {
     fn reset(&mut self) {
         self.board.reset();
         self.sound.reset();
-        bus_split!(self, bus => {
-            self.board.cpu.reset(bus, BusMaster::Cpu(0));
-        });
+        let (cpu, mut bus) = self.split();
+        cpu.reset(&mut bus, BusMaster::Cpu(0));
     }
 }
 
@@ -635,7 +691,7 @@ mod tests {
 
         // Save
         let data = sys.save_state().expect("save_state should return Some");
-        let cpu_snap = sys.board.cpu.snapshot();
+        let cpu_snap = sys.cpu.snapshot();
 
         // Mutate everything
         let mut sys2 = LunarLanderSystem::new();
@@ -647,7 +703,7 @@ mod tests {
         sys2.load_state(&data).unwrap();
 
         // Verify CPU
-        assert_eq!(sys2.board.cpu.snapshot(), cpu_snap);
+        assert_eq!(sys2.cpu.snapshot(), cpu_snap);
 
         // Verify memory
         assert_eq!(sys2.board.map.region_data(Region::Ram)[0x50], 0xAA);

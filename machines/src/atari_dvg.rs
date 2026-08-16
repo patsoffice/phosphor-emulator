@@ -45,6 +45,41 @@ pub const NMI_PERIOD_CYCLES: u64 = TIMING.cpu_clock_hz / 250;
 // Atari DVG board
 // ---------------------------------------------------------------------------
 
+/// An Atari DVG bus: a game wrapper's view over the shared board plus its own
+/// I/O (inputs, DIPs, sound, EAROM).
+///
+/// [`tick`] is generic over this trait, so every access resolves to a direct
+/// call rather than a vtable entry.
+pub trait AtariDvgBus: Bus<Address = u16, Data = u8> {
+    fn board(&mut self) -> &mut AtariDvgBoard;
+
+    /// Per-cycle game hook, run before the board's own cycle work. Asteroids
+    /// Deluxe clocks its POKEY here; the others need nothing.
+    #[inline]
+    fn begin_cycle(&mut self) {}
+}
+
+/// One CPU cycle: NMI timing, then the 6502.
+///
+/// The CPU lives on the machine, beside the bus it drives, so this takes them
+/// as two disjoint borrows and dispatches at a concrete type.
+#[inline]
+pub fn tick<B: AtariDvgBus>(cpu: &mut M6502, bus: &mut B) {
+    bus.begin_cycle();
+    bus.board().begin_cycle(cpu);
+    cpu.execute_cycle(bus, BusMaster::Cpu(0));
+    bus.board().end_cycle();
+}
+
+/// Run one frame's worth of cycles. There is no scanline structure on this
+/// board -- the only periodic event is the 250 Hz NMI, counted per cycle -- so
+/// this is a plain loop.
+pub fn run_frame<B: AtariDvgBus>(cpu: &mut M6502, bus: &mut B) {
+    for _ in 0..TIMING.cycles_per_frame() {
+        tick(cpu, bus);
+    }
+}
+
 /// Shared hardware for Atari DVG-based arcade games (1979–1980).
 ///
 /// Hardware: MOS 6502 @ 1.512 MHz, Atari DVG vector display.
@@ -55,8 +90,6 @@ pub const NMI_PERIOD_CYCLES: u64 = TIMING.cpu_clock_hz / 250;
 /// via a thin wrapper struct that owns this board and implements `Bus`.
 #[derive(BusDebug, DebugTrace)]
 pub struct AtariDvgBoard {
-    #[debug_cpu("M6502")]
-    pub(crate) cpu: M6502,
     #[debug_device("DVG")]
     pub(crate) dvg: Dvg,
 
@@ -92,7 +125,6 @@ impl AtariDvgBoard {
     /// Create a new board with a pre-configured memory map and DVG ROM placement.
     pub fn new(map: AddressSpace16, vrom_dvg_offset: usize, vrom_size: usize) -> Self {
         Self {
-            cpu: M6502::new(),
             dvg: Dvg::new(),
             map,
             clock: 0,
@@ -106,12 +138,8 @@ impl AtariDvgBoard {
         }
     }
 
-    /// Tick one cycle: NMI timing + CPU execution.
-    ///
-    /// The caller provides a `Bus` reference (created via `bus_split!` on the
-    /// game wrapper) so the CPU's memory accesses route through game-specific
-    /// I/O decode logic.
-    pub fn tick(&mut self, bus: &mut dyn Bus<Address = u16, Data = u8>) {
+    /// Per-cycle board work that runs before the CPU.
+    fn begin_cycle(&mut self, cpu: &M6502) {
         // NMI generation: 3 KHz / 12 ≈ 250 Hz
         self.nmi_counter += 1;
         if self.nmi_counter >= NMI_PERIOD_CYCLES {
@@ -138,15 +166,13 @@ impl AtariDvgBoard {
         // CPU execution — bus dispatch cannot read CPU state mid-tick.
         // Both watchpoint hits and trace events draw PC from this latch.
         if self.map.has_any_watchpoints() || self.debug_trace.enabled() {
-            let pc = self
-                .cpu
-                .at_instruction_boundary()
-                .then_some(self.cpu.pc as u32);
+            let pc = cpu.at_instruction_boundary().then_some(cpu.pc as u32);
             self.map.latch_access_context(self.clock, pc);
         }
+    }
 
-        // CPU tick
-        self.cpu.execute_cycle(bus, BusMaster::Cpu(0));
+    /// Board work after the CPU's cycle.
+    fn end_cycle(&mut self) {
         self.clock += 1;
     }
 
@@ -229,19 +255,16 @@ impl AtariDvgBoard {
         );
     }
 
-    /// Check if the CPU is at an instruction boundary (for debug stepping).
-    pub fn debug_tick_boundaries(&self) -> u32 {
-        if self.cpu.at_instruction_boundary() {
-            1
-        } else {
-            0
-        }
+    /// Whether the CPU is at an instruction boundary (for debug stepping).
+    /// The CPU lives on the machine, which passes it back in.
+    pub fn instruction_boundaries(cpu: &M6502) -> u32 {
+        u32::from(cpu.at_instruction_boundary())
     }
 }
 
 impl Saveable for AtariDvgBoard {
     fn save_state(&self, w: &mut StateWriter) {
-        self.cpu.save_state(w);
+        // The CPU is saved by the machine, which owns it.
         self.dvg.save_state(w);
         w.write_bytes(self.map.region_data(Region::Ram));
         w.write_bytes(self.map.region_data(Region::VectorRam));
@@ -252,7 +275,7 @@ impl Saveable for AtariDvgBoard {
     }
 
     fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
-        self.cpu.load_state(r)?;
+        // The CPU is loaded by the machine, which owns it.
         self.dvg.load_state(r)?;
         r.read_bytes_into(self.map.region_data_mut(Region::Ram))?;
         r.read_bytes_into(self.map.region_data_mut(Region::VectorRam))?;

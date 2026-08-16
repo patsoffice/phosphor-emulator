@@ -1,4 +1,3 @@
-use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
     ActionRole, DipApplyTiming, DipChoice, DipOption, DipSwitchBank, InputConfigurable,
@@ -10,9 +9,10 @@ use phosphor_core::cpu::Cpu;
 use phosphor_macros::Saveable;
 
 use crate::asteroids_sound::AsteroidsDiscreteSound;
-use crate::atari_dvg::{self, AtariDvgBoard, Region};
+use crate::atari_dvg::{self, AtariDvgBoard, AtariDvgBus, Region};
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
 use crate::set_bit_active_high;
+use phosphor_core::cpu::m6502::M6502;
 
 // ---------------------------------------------------------------------------
 // ROM definitions (MAME `asteroid` parent set)
@@ -159,8 +159,13 @@ const ASTEROIDS_CONTROLS: &[InputControl] = &[
 ///   0x4000–0x47FF  Vector RAM (2 KB, shared CPU/DVG)
 ///   0x5000–0x57FF  Vector ROM (2 KB)
 ///   0x6800–0x7FFF  Program ROM (6 KB)
-#[derive(Saveable)]
+#[derive(Saveable, phosphor_macros::BusDebug)]
 pub struct AsteroidsSystem {
+    /// The 6502 is held beside the bus view over the board.
+    #[debug_cpu("M6502")]
+    pub cpu: M6502,
+
+    #[debug_bus]
     pub board: AtariDvgBoard,
 
     /// Discrete analog sound (explosion/thump/saucer/fire/thrust/life).
@@ -206,6 +211,7 @@ impl AsteroidsSystem {
 
     pub fn new() -> Self {
         Self {
+            cpu: M6502::new(),
             // Asteroids: VROM at DVG 0x1000, size 0x0800
             board: AtariDvgBoard::new(Self::build_map(), 0x1000, 0x0800),
             sound: AsteroidsDiscreteSound::new(),
@@ -213,6 +219,40 @@ impl AsteroidsSystem {
             in1: 0x00,
             dip_switches: 0x84, // English, 3 lives, 1C/1C
         }
+    }
+
+    /// Borrow the CPU and the bus it drives as two disjoint pieces.
+    #[inline]
+    fn split(&mut self) -> (&mut M6502, AsteroidsBus<'_>) {
+        (
+            &mut self.cpu,
+            AsteroidsBus {
+                board: &mut self.board,
+                sound: &mut self.sound,
+                in0: self.in0,
+                in1: self.in1,
+                dip_switches: self.dip_switches,
+            },
+        )
+    }
+
+    /// One CPU cycle. Returns 1 at an instruction boundary (for the debugger,
+    /// which steps instructions rather than cycles).
+    pub fn step_cycle(&mut self) -> u32 {
+        let (cpu, mut bus) = self.split();
+        atari_dvg::tick(cpu, &mut bus);
+        AtariDvgBoard::instruction_boundaries(&self.cpu)
+    }
+
+    /// Read the CPU-facing bus, side effects and all. Distinct from the
+    /// debugger's `BusDebug::peek`/`poke`, which avoid side effects.
+    pub fn bus_read(&mut self, master: BusMaster, addr: u16) -> u8 {
+        self.split().1.read(master, addr)
+    }
+
+    /// Write the CPU-facing bus, side effects and all. See [`Self::bus_read`].
+    pub fn bus_write(&mut self, master: BusMaster, addr: u16, data: u8) {
+        self.split().1.write(master, addr, data);
     }
 
     pub fn load_rom_set(&mut self, rom_set: &RomSet) -> Result<(), RomLoadError> {
@@ -234,7 +274,24 @@ impl Default for AsteroidsSystem {
 // Bus implementation
 // ---------------------------------------------------------------------------
 
-impl Bus for AsteroidsSystem {
+/// The Asteroids bus: the shared DVG board plus this game's I/O -- the input
+/// multiplexers, the DIP switches, and the discrete sound board.
+struct AsteroidsBus<'a> {
+    board: &'a mut AtariDvgBoard,
+    sound: &'a mut AsteroidsDiscreteSound,
+    in0: u8,
+    in1: u8,
+    dip_switches: u8,
+}
+
+impl AtariDvgBus for AsteroidsBus<'_> {
+    #[inline]
+    fn board(&mut self) -> &mut AtariDvgBoard {
+        self.board
+    }
+}
+
+impl Bus for AsteroidsBus<'_> {
     type Address = u16;
     type Data = u8;
 
@@ -350,7 +407,7 @@ impl Bus for AsteroidsSystem {
 // game wrapper's discrete sound device, so AudioSource is implemented by hand
 // (the board has no sound hardware to delegate to).
 crate::impl_board_renderable!(AsteroidsSystem, board, atari_dvg::TIMING, vectors);
-crate::impl_board_debug!(AsteroidsSystem, board, atari_dvg::TIMING);
+crate::impl_board_debug!(AsteroidsSystem, board, atari_dvg::TIMING, split_cpu);
 
 impl phosphor_core::core::machine::AudioSource for AsteroidsSystem {
     fn fill_audio(&mut self, buffer: &mut [i16]) -> usize {
@@ -392,11 +449,8 @@ impl MachineCore for AsteroidsSystem {
     crate::machine_core_metadata!("asteroids", atari_dvg::TIMING);
 
     fn run_frame(&mut self) {
-        bus_split!(self, bus => {
-            for _ in 0..atari_dvg::TIMING.cycles_per_frame() {
-                self.board.tick(bus);
-            }
-        });
+        let (cpu, mut bus) = self.split();
+        atari_dvg::run_frame(cpu, &mut bus);
 
         // Advance the discrete sound circuit for the frame's worth of CPU
         // cycles (register writes during the frame have already landed).
@@ -415,9 +469,8 @@ impl MachineCore for AsteroidsSystem {
     fn reset(&mut self) {
         self.board.reset();
         self.sound.reset();
-        bus_split!(self, bus => {
-            self.board.cpu.reset(bus, BusMaster::Cpu(0));
-        });
+        let (cpu, mut bus) = self.split();
+        cpu.reset(&mut bus, BusMaster::Cpu(0));
     }
 }
 
@@ -588,7 +641,7 @@ mod tests {
 
         // Save
         let data = sys.save_state().expect("save_state should return Some");
-        let cpu_snap = sys.board.cpu.snapshot();
+        let cpu_snap = sys.cpu.snapshot();
 
         // Mutate everything
         let mut sys2 = AsteroidsSystem::new();
@@ -600,7 +653,7 @@ mod tests {
         sys2.load_state(&data).unwrap();
 
         // Verify CPU
-        assert_eq!(sys2.board.cpu.snapshot(), cpu_snap);
+        assert_eq!(sys2.cpu.snapshot(), cpu_snap);
 
         // Verify memory
         assert_eq!(sys2.board.map.region_data(Region::Ram)[0x100], 0xAA);
