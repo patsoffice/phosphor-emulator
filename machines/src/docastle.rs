@@ -31,6 +31,7 @@
 
 use phosphor_core::audio::AudioResampler;
 use phosphor_core::core::bus::InterruptState;
+use phosphor_core::core::machine::DefaultBinding;
 use phosphor_core::core::machine::{
     ActionRole, DipApplyTiming, DipChoice, DipOption, DipSwitchBank, DipSwitches, Direction,
     InputConfigurable, InputControl, InputEvent, InputId, InputKind, MachineCore, Orientation,
@@ -44,7 +45,6 @@ use phosphor_core::cpu::z80::Z80;
 use phosphor_core::device::sn76489::Sn76489a;
 use phosphor_core::gfx;
 use phosphor_core::gfx::decode::{GfxLayout, decode_gfx};
-use phosphor_core::{bus_split, core::machine::DefaultBinding};
 use phosphor_macros::{BusDebug, MemoryRegion};
 
 use crate::disasm_registry::{DisasmCpu, DisasmRegion};
@@ -698,13 +698,123 @@ impl InputMux {
 // DocastleBoard
 // ---------------------------------------------------------------------------
 
+/// Run one main-CPU T-state, rewinding it if the access hit the latch and
+/// asserted WAIT.
+///
+/// The rewind is why the CPU has to be reachable separately from the bus: the
+/// board sets `main_retry` from inside a bus read, and the caller restores the
+/// CPU snapshot afterwards.
+fn step_main(main: &mut Z80, board: &mut DocastleBoard) {
+    let snapshot = main.clone();
+    board.main_retry = false;
+    let iff1_before = main.iff1;
+    main.execute_cycle(board, BusMaster::Cpu(0));
+    if board.main_retry {
+        *main = snapshot;
+        board.main_retry = false;
+        board.main_read_stalled = true;
+    } else if board.main_irq_pending && iff1_before && !main.iff1 {
+        // HOLD_LINE auto-clear: the CPU acknowledged, observed as IFF1
+        // dropping at an instruction boundary with the IRQ asserted.
+        board.main_irq_pending = false;
+    }
+}
+
+/// Advance the board by one 4 MHz cycle, stepping both Z80s in lockstep.
+///
+/// Both CPUs are clocked 1:1 and both bus accesses resolve inside the same
+/// tick, so the WAIT gates take effect at T-state granularity — which is what
+/// the latch handshake needs.
+///
+/// The CPUs live on the machine and the board *is* the bus, so this takes them
+/// as separate borrows and dispatches at a concrete type. This is the
+/// debugger's path — it tests the frame position on every cycle; a whole frame
+/// goes through [`run_scanlines`], which hoists that test out.
+#[inline]
+pub fn tick(main: &mut Z80, sub: &mut Z80, board: &mut DocastleBoard) {
+    let frame_cycle = board.clock % TIMING.cycles_per_frame();
+    if frame_cycle.is_multiple_of(TIMING.cycles_per_scanline) {
+        board.begin_scanline(frame_cycle / TIMING.cycles_per_scanline);
+    }
+    step_cycle(main, sub, board);
+}
+
+/// Run `cycles` CPU cycles, scanline-outer and cycle-inner. The caller must
+/// start on a scanline boundary and pass a multiple of `cycles_per_scanline`;
+/// the debugger's off-boundary stepping goes through [`tick`] instead.
+pub fn run_scanlines(main: &mut Z80, sub: &mut Z80, board: &mut DocastleBoard, cycles: u64) {
+    debug_assert!(
+        board.clock.is_multiple_of(TIMING.cycles_per_scanline)
+            && cycles.is_multiple_of(TIMING.cycles_per_scanline),
+        "run_scanlines must start on a scanline boundary and run whole scanlines"
+    );
+    for _ in 0..cycles / TIMING.cycles_per_scanline {
+        let line = board.clock % TIMING.cycles_per_frame() / TIMING.cycles_per_scanline;
+        board.begin_scanline(line);
+        for _ in 0..TIMING.cycles_per_scanline {
+            step_cycle(main, sub, board);
+        }
+    }
+}
+
+/// Run one frame's worth of cycles. Whole scanlines go through
+/// [`run_scanlines`]; a partial scanline at either end (only after the debugger
+/// has left the clock off-boundary) goes through [`tick`].
+pub fn run_frame(main: &mut Z80, sub: &mut Z80, board: &mut DocastleBoard) {
+    let scanline = TIMING.cycles_per_scanline;
+    let mut remaining = TIMING.cycles_per_frame();
+
+    let lead = ((scanline - board.clock % scanline) % scanline).min(remaining);
+    for _ in 0..lead {
+        tick(main, sub, board);
+    }
+    remaining -= lead;
+
+    let whole = remaining - remaining % scanline;
+    run_scanlines(main, sub, board, whole);
+    remaining -= whole;
+
+    for _ in 0..remaining {
+        tick(main, sub, board);
+    }
+}
+
+/// The part of a cycle with no frame-position test in it.
+#[inline]
+fn step_cycle(main: &mut Z80, sub: &mut Z80, board: &mut DocastleBoard) {
+    board.begin_cycle_inner(main, sub);
+
+    // Main CPU. A stalled latch read rewinds the CPU so the T-state runs again
+    // once the sub CPU releases WAIT — the chip holds the address on the bus
+    // and latches data only after WAIT goes away.
+    if !board.main_wait {
+        step_main(main, board);
+    }
+
+    // Sub CPU, stalled while any PSG holds READY low.
+    if board.sn.iter().all(Sn76489a::is_ready) {
+        let iff1_before = sub.iff1;
+        sub.execute_cycle(board, BusMaster::Cpu(1));
+        if board.sub_irq_pending && iff1_before && !sub.iff1 {
+            board.sub_irq_pending = false;
+        }
+    }
+
+    // A read that stalled cost the main CPU the cycle it was rewound out of; if
+    // the sub CPU released WAIT during this same cycle, hand it straight back
+    // by running the retry now. Without that the two `LDIR`s drift a cycle
+    // apart per byte and the main CPU starts sampling the latch one sub-write
+    // too late.
+    if board.main_read_stalled && !board.main_wait {
+        board.main_read_stalled = false;
+        step_main(main, board);
+    }
+
+    board.end_cycle();
+}
+
 #[derive(BusDebug)]
 pub struct DocastleBoard {
-    #[debug_cpu("Z80 Main")]
-    pub(crate) main_cpu: Z80,
-    #[debug_cpu("Z80 Sub")]
-    pub(crate) sub_cpu: Z80,
-
     #[debug_map(cpu = 0)]
     pub(crate) main_map: AddressSpace16,
     #[debug_map(cpu = 1)]
@@ -758,8 +868,6 @@ impl DocastleBoard {
             DocastleVariant::Dowild => DOWILD_DSW1_DEFAULT,
         };
         Self {
-            main_cpu: Z80::new(),
-            sub_cpu: Z80::new(),
             main_map: Self::build_main_map(variant),
             sub_map: Self::build_sub_map(),
             variant,
@@ -916,87 +1024,40 @@ impl DocastleBoard {
     }
 
     // -----------------------------------------------------------------------
-    // Core tick
+    // Core tick — the board half of one cycle (see [`tick`])
     // -----------------------------------------------------------------------
 
-    /// Run one main-CPU T-state, rewinding it if the access hit the latch and
-    /// asserted WAIT.
-    fn step_main(&mut self, bus: &mut dyn Bus<Address = u16, Data = u8>) {
-        let snapshot = self.main_cpu.clone();
-        self.main_retry = false;
-        let iff1_before = self.main_cpu.iff1;
-        self.main_cpu.execute_cycle(bus, BusMaster::Cpu(0));
-        if self.main_retry {
-            self.main_cpu = snapshot;
-            self.main_retry = false;
-            self.main_read_stalled = true;
-        } else if self.main_irq_pending && iff1_before && !self.main_cpu.iff1 {
-            // HOLD_LINE auto-clear: the CPU acknowledged, observed as IFF1
-            // dropping at an instruction boundary with the IRQ asserted.
-            self.main_irq_pending = false;
+    /// Work that only happens on the first cycle of a scanline: the VBLANK IRQ
+    /// to the main CPU and the sub CPU's periodic raster IRQ.
+    ///
+    /// Called once per scanline from [`run_scanlines`] and, for the debugger's
+    /// single-step path, from [`tick`] when the clock lands on a boundary.
+    fn begin_scanline(&mut self, line: u64) {
+        if line == VBLANK_IRQ_LINE {
+            self.main_irq_pending = true;
+        }
+        if (SUB_IRQ_FIRST_LINE..=SUB_IRQ_LAST_LINE).contains(&line)
+            && (line - SUB_IRQ_FIRST_LINE).is_multiple_of(SUB_IRQ_LINE_PERIOD)
+        {
+            self.sub_irq_pending = true;
         }
     }
 
-    /// Advance the board by one 4 MHz cycle, stepping both Z80s in lockstep.
-    ///
-    /// Both CPUs are clocked 1:1 and both bus accesses resolve inside the same
-    /// tick, so the WAIT gates take effect at T-state granularity — which is
-    /// what the latch handshake needs.
-    pub fn tick(&mut self, bus: &mut dyn Bus<Address = u16, Data = u8>) {
-        let frame_cycle = self.clock % TIMING.cycles_per_frame();
-        if frame_cycle.is_multiple_of(TIMING.cycles_per_scanline) {
-            let line = frame_cycle / TIMING.cycles_per_scanline;
-            if line == VBLANK_IRQ_LINE {
-                self.main_irq_pending = true;
-            }
-            if (SUB_IRQ_FIRST_LINE..=SUB_IRQ_LAST_LINE).contains(&line)
-                && (line - SUB_IRQ_FIRST_LINE).is_multiple_of(SUB_IRQ_LINE_PERIOD)
-            {
-                self.sub_irq_pending = true;
-            }
-        }
-
+    /// Per-cycle board work that runs before the CPUs, with no frame-position
+    /// test in it.
+    fn begin_cycle_inner(&mut self, main: &Z80, sub: &Z80) {
         if self.main_map.debug_active() {
-            let pc = self
-                .main_cpu
-                .at_instruction_boundary()
-                .then_some(self.main_cpu.pc as u32);
+            let pc = main.at_instruction_boundary().then_some(main.pc as u32);
             self.main_map.latch_access_context(self.clock, pc);
         }
         if self.sub_map.debug_active() {
-            let pc = self
-                .sub_cpu
-                .at_instruction_boundary()
-                .then_some(self.sub_cpu.pc as u32);
+            let pc = sub.at_instruction_boundary().then_some(sub.pc as u32);
             self.sub_map.latch_access_context(self.clock, pc);
         }
+    }
 
-        // Main CPU. A stalled latch read rewinds the CPU so the T-state runs
-        // again once the sub CPU releases WAIT — the chip holds the address on
-        // the bus and latches data only after WAIT goes away.
-        if !self.main_wait {
-            self.step_main(bus);
-        }
-
-        // Sub CPU, stalled while any PSG holds READY low.
-        if self.sn.iter().all(Sn76489a::is_ready) {
-            let iff1_before = self.sub_cpu.iff1;
-            self.sub_cpu.execute_cycle(bus, BusMaster::Cpu(1));
-            if self.sub_irq_pending && iff1_before && !self.sub_cpu.iff1 {
-                self.sub_irq_pending = false;
-            }
-        }
-
-        // A read that stalled cost the main CPU the cycle it was rewound out
-        // of; if the sub CPU released WAIT during this same cycle, hand it
-        // straight back by running the retry now. Without that the two `LDIR`s
-        // drift a cycle apart per byte and the main CPU starts sampling the
-        // latch one sub-write too late.
-        if self.main_read_stalled && !self.main_wait {
-            self.main_read_stalled = false;
-            self.step_main(bus);
-        }
-
+    /// Board work after the CPUs' cycle: the PSGs and the clock advance.
+    fn end_cycle(&mut self) {
         for chip in &mut self.sn {
             chip.tick_ready();
         }
@@ -1180,7 +1241,9 @@ impl DocastleBoard {
         self.sub_map.region_data_mut(SubRegion::Ram).fill(0);
     }
 
-    pub fn check_interrupts(&mut self, target: BusMaster) -> InterruptState {
+    /// Interrupt lines as the CPUs see them. Named apart from the `Bus` method
+    /// so the impl below can call it without recursing.
+    pub fn interrupt_state(&mut self, target: BusMaster) -> InterruptState {
         match target {
             BusMaster::Cpu(0) => InterruptState {
                 irq: self.main_irq_pending,
@@ -1201,16 +1264,16 @@ impl DocastleBoard {
         }
     }
 
-    pub fn debug_tick_boundaries(&self) -> u32 {
-        u32::from(self.main_cpu.at_instruction_boundary())
-            + u32::from(self.sub_cpu.at_instruction_boundary())
+    /// How many of the two CPUs are at an instruction boundary. The CPUs live
+    /// on the machine, which passes them back in.
+    pub fn instruction_boundaries(main: &Z80, sub: &Z80) -> u32 {
+        u32::from(main.at_instruction_boundary()) + u32::from(sub.at_instruction_boundary())
     }
 }
 
 impl Saveable for DocastleBoard {
     fn save_state(&self, w: &mut StateWriter) {
-        self.main_cpu.save_state(w);
-        self.sub_cpu.save_state(w);
+        // The CPUs are saved by the machine, which owns them.
         w.write_bytes(self.main_map.region_data(MainRegion::WorkRam));
         w.write_bytes(self.main_map.region_data(MainRegion::SpriteRam));
         w.write_bytes(self.main_map.region_data(MainRegion::VideoRam));
@@ -1239,8 +1302,7 @@ impl Saveable for DocastleBoard {
     }
 
     fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
-        self.main_cpu.load_state(r)?;
-        self.sub_cpu.load_state(r)?;
+        // The CPUs are loaded by the machine, which owns them.
         r.read_bytes_into(self.main_map.region_data_mut(MainRegion::WorkRam))?;
         r.read_bytes_into(self.main_map.region_data_mut(MainRegion::SpriteRam))?;
         r.read_bytes_into(self.main_map.region_data_mut(MainRegion::VideoRam))?;
@@ -1278,15 +1340,44 @@ impl Saveable for DocastleBoard {
 
 /// One of the three Mr. Do's Castle family games, selected by
 /// [`DocastleVariant`].
+#[derive(BusDebug)]
 pub struct DocastleSystem {
+    /// The CPUs are held beside the board, which is their bus: the board is
+    /// already variant-parameterised, so nothing is interposed.
+    #[debug_cpu("Z80 Main")]
+    pub main_cpu: Z80,
+    #[debug_cpu("Z80 Sub")]
+    pub sub_cpu: Z80,
+
+    #[debug_bus]
     pub board: DocastleBoard,
 }
 
 impl DocastleSystem {
     pub fn new(variant: DocastleVariant) -> Self {
         Self {
+            main_cpu: Z80::new(),
+            sub_cpu: Z80::new(),
             board: DocastleBoard::new(variant),
         }
+    }
+
+    /// One CPU cycle. Returns how many CPUs are at an instruction boundary
+    /// (for the debugger, which steps instructions rather than cycles).
+    pub fn step_cycle(&mut self) -> u32 {
+        tick(&mut self.main_cpu, &mut self.sub_cpu, &mut self.board);
+        DocastleBoard::instruction_boundaries(&self.main_cpu, &self.sub_cpu)
+    }
+
+    /// Read the CPU-facing bus, side effects and all. Distinct from the
+    /// debugger's `BusDebug::peek`/`poke`, which avoid side effects.
+    pub fn bus_read(&mut self, master: BusMaster, addr: u16) -> u8 {
+        Bus::read(&mut self.board, master, addr)
+    }
+
+    /// Write the CPU-facing bus, side effects and all. See [`Self::bus_read`].
+    pub fn bus_write(&mut self, master: BusMaster, addr: u16, data: u8) {
+        Bus::write(&mut self.board, master, addr, data);
     }
 
     pub fn variant(&self) -> DocastleVariant {
@@ -1333,56 +1424,59 @@ impl DocastleSystem {
 
 impl Saveable for DocastleSystem {
     fn save_state(&self, w: &mut StateWriter) {
+        // CPUs first, matching the layout the board used to write.
+        self.main_cpu.save_state(w);
+        self.sub_cpu.save_state(w);
         self.board.save_state(w);
     }
     fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
+        self.main_cpu.load_state(r)?;
+        self.sub_cpu.load_state(r)?;
         self.board.load_state(r)
     }
 }
 
-impl Bus for DocastleSystem {
+impl Bus for DocastleBoard {
     type Address = u16;
     type Data = u8;
 
     fn read(&mut self, master: BusMaster, addr: u16) -> u8 {
-        let cfg = self.board.variant.map();
+        let cfg = self.variant.map();
         let data = match master {
             BusMaster::Cpu(0) => {
                 if (MAIN_LATCH_BASE..MAIN_LATCH_BASE + LATCH_WINDOW_LEN).contains(&addr) {
                     // The stalled first attempt must leave no trace in the
                     // watch/trace rings — the retry records the real access.
-                    return self.board.main_read_latch();
+                    return self.main_read_latch();
                 }
                 match addr {
-                    a if a < cfg.rom_low_end => self.board.main_map.read_backing(a),
+                    a if a < cfg.rom_low_end => self.main_map.read_backing(a),
                     a if (cfg.work_ram_start..cfg.work_ram_start + WORK_RAM_LEN as u16)
                         .contains(&a) =>
                     {
-                        self.board.main_map.read_backing(a)
+                        self.main_map.read_backing(a)
                     }
                     a if (cfg.sprite_ram_start..cfg.sprite_ram_start + SPRITE_RAM_LEN as u16)
                         .contains(&a) =>
                     {
-                        self.board.main_map.read_backing(a)
+                        self.main_map.read_backing(a)
                     }
                     a if cfg.rom_high.is_some_and(|(s, e)| (s..e).contains(&a)) => {
-                        self.board.main_map.read_backing(a)
+                        self.main_map.read_backing(a)
                     }
-                    a if main_tile_ram_addr(cfg, a).is_some() => {
-                        self.board.main_map.read_backing(a)
-                    }
+                    a if main_tile_ram_addr(cfg, a).is_some() => self.main_map.read_backing(a),
                     _ => 0xFF,
                 }
             }
             BusMaster::Cpu(1) => match addr {
-                0x0000..=0x3FFF | 0x8000..=0x87FF => self.board.sub_map.read_backing(addr),
+                0x0000..=0x3FFF | 0x8000..=0x87FF => self.sub_map.read_backing(addr),
                 a if (cfg.sub_latch_base..cfg.sub_latch_base + LATCH_WINDOW_LEN).contains(&a) => {
-                    self.board.sub_read_latch()
+                    self.sub_read_latch()
                 }
                 0xC000..=0xC0FF => {
                     // Reading the mux window also clocks the flipscreen latch.
-                    self.board.flipscreen = addr & 0x80 != 0;
-                    self.board.inputs.read(addr as u8)
+                    self.flipscreen = addr & 0x80 != 0;
+                    self.inputs.read(addr as u8)
                 }
                 _ => 0xFF,
             },
@@ -1390,59 +1484,59 @@ impl Bus for DocastleSystem {
         };
 
         match master {
-            BusMaster::Cpu(0) => self.board.main_map.watch_read(0, master, addr, data),
-            _ => self.board.sub_map.watch_read(1, master, addr, data),
+            BusMaster::Cpu(0) => self.main_map.watch_read(0, master, addr, data),
+            _ => self.sub_map.watch_read(1, master, addr, data),
         };
         data
     }
 
     fn write(&mut self, master: BusMaster, addr: u16, data: u8) {
-        let cfg = self.board.variant.map();
+        let cfg = self.variant.map();
         match master {
             BusMaster::Cpu(0) => {
-                self.board.main_map.watch_write(0, master, addr, data);
+                self.main_map.watch_write(0, master, addr, data);
                 if (MAIN_LATCH_BASE..MAIN_LATCH_BASE + LATCH_WINDOW_LEN).contains(&addr) {
-                    self.board.main_write_latch(data);
+                    self.main_write_latch(data);
                     return;
                 }
                 if addr == cfg.sub_nmi_addr {
-                    self.board.sub_nmi_pending = true;
+                    self.sub_nmi_pending = true;
                     return;
                 }
                 match addr {
                     a if (cfg.work_ram_start..cfg.work_ram_start + WORK_RAM_LEN as u16)
                         .contains(&a) =>
                     {
-                        self.board.main_map.write_backing(a, data)
+                        self.main_map.write_backing(a, data)
                     }
                     a if (cfg.sprite_ram_start..cfg.sprite_ram_start + SPRITE_RAM_LEN as u16)
                         .contains(&a) =>
                     {
-                        self.board.main_map.write_backing(a, data)
+                        self.main_map.write_backing(a, data)
                     }
                     a if main_tile_ram_addr(cfg, a).is_some() => {
-                        self.board.main_map.write_backing(a, data)
+                        self.main_map.write_backing(a, data)
                     }
                     // ROM, watchdog reset and unmapped space.
                     _ => {}
                 }
             }
             BusMaster::Cpu(1) => {
-                self.board.sub_map.watch_write(1, master, addr, data);
+                self.sub_map.watch_write(1, master, addr, data);
                 if (cfg.sub_latch_base..cfg.sub_latch_base + LATCH_WINDOW_LEN).contains(&addr) {
-                    self.board.sub_write_latch(data);
+                    self.sub_write_latch(data);
                     return;
                 }
                 match addr {
-                    0x8000..=0x87FF => self.board.sub_map.write_backing(addr, data),
-                    0xC000..=0xC0FF => self.board.flipscreen = addr & 0x80 != 0,
+                    0x8000..=0x87FF => self.sub_map.write_backing(addr, data),
+                    0xC000..=0xC0FF => self.flipscreen = addr & 0x80 != 0,
                     // Four PSG ports, 0x400 apart.
                     a if (cfg.sn_base..cfg.sn_base + 0x1000).contains(&a)
                         && (a & 0x3FF) == 0
                         && a.wrapping_sub(cfg.sn_base) < 0x1000 =>
                     {
                         let idx = ((a - cfg.sn_base) >> 10) as usize;
-                        self.board.sn[idx].write(data);
+                        self.sn[idx].write(data);
                     }
                     _ => {}
                 }
@@ -1456,7 +1550,7 @@ impl Bus for DocastleSystem {
     }
 
     fn check_interrupts(&mut self, target: BusMaster) -> InterruptState {
-        self.board.check_interrupts(target)
+        self.interrupt_state(target)
     }
 }
 
@@ -1485,7 +1579,7 @@ impl phosphor_core::core::machine::Renderable for DocastleSystem {
 }
 
 crate::impl_board_audio!(DocastleSystem, board);
-crate::impl_board_debug!(DocastleSystem, board, crate::docastle::TIMING);
+crate::impl_board_debug!(DocastleSystem, board, crate::docastle::TIMING, split_cpu);
 
 impl MachineCore for DocastleSystem {
     fn frame_rate_hz(&self) -> f64 {
@@ -1513,19 +1607,13 @@ impl MachineCore for DocastleSystem {
     }
 
     fn run_frame(&mut self) {
-        bus_split!(self, bus => {
-            for _ in 0..crate::docastle::TIMING.cycles_per_frame() {
-                self.board.tick(bus);
-            }
-        });
+        run_frame(&mut self.main_cpu, &mut self.sub_cpu, &mut self.board);
     }
 
     fn reset(&mut self) {
         self.board.reset();
-        bus_split!(self, bus => {
-            self.board.main_cpu.reset(bus, BusMaster::Cpu(0));
-            self.board.sub_cpu.reset(bus, BusMaster::Cpu(1));
-        });
+        self.main_cpu.reset(&mut self.board, BusMaster::Cpu(0));
+        self.sub_cpu.reset(&mut self.board, BusMaster::Cpu(1));
     }
 }
 
@@ -2193,9 +2281,9 @@ mod tests {
             .board
             .main_map
             .load_region_at(MainRegion::RomLow, 0x7FFF, &[0xAB]);
-        assert_eq!(castle.read(BusMaster::Cpu(0), 0x7FFF), 0xAB);
-        castle.write(BusMaster::Cpu(0), 0x8000, 0x5A);
-        assert_eq!(castle.read(BusMaster::Cpu(0), 0x8000), 0x5A);
+        assert_eq!(castle.bus_read(BusMaster::Cpu(0), 0x7FFF), 0xAB);
+        castle.bus_write(BusMaster::Cpu(0), 0x8000, 0x5A);
+        assert_eq!(castle.bus_read(BusMaster::Cpu(0), 0x8000), 0x5A);
 
         // dorunrun: ROM is split around a RAM/sprite hole at 0x2000-0x3FFF.
         let mut runrun = DocastleSystem::new(DocastleVariant::Dorunrun);
@@ -2203,10 +2291,10 @@ mod tests {
             .board
             .main_map
             .load_region_at(MainRegion::RomHigh, 0, &[0xCD]);
-        assert_eq!(runrun.read(BusMaster::Cpu(0), 0x4000), 0xCD);
-        runrun.write(BusMaster::Cpu(0), 0x2000, 0x33);
-        assert_eq!(runrun.read(BusMaster::Cpu(0), 0x2000), 0x33);
-        runrun.write(BusMaster::Cpu(0), 0x3800, 0x44);
+        assert_eq!(runrun.bus_read(BusMaster::Cpu(0), 0x4000), 0xCD);
+        runrun.bus_write(BusMaster::Cpu(0), 0x2000, 0x33);
+        assert_eq!(runrun.bus_read(BusMaster::Cpu(0), 0x2000), 0x33);
+        runrun.bus_write(BusMaster::Cpu(0), 0x3800, 0x44);
         assert_eq!(
             runrun.board.main_map.region_data(MainRegion::SpriteRam)[0],
             0x44
@@ -2216,9 +2304,9 @@ mod tests {
     #[test]
     fn docastle_video_ram_is_mirrored() {
         let mut sys = DocastleSystem::new(DocastleVariant::Docastle);
-        sys.write(BusMaster::Cpu(0), 0xB000, 0x77);
-        assert_eq!(sys.read(BusMaster::Cpu(0), 0xB800), 0x77);
-        sys.write(BusMaster::Cpu(0), 0xBC00, 0x99);
+        sys.bus_write(BusMaster::Cpu(0), 0xB000, 0x77);
+        assert_eq!(sys.bus_read(BusMaster::Cpu(0), 0xB800), 0x77);
+        sys.bus_write(BusMaster::Cpu(0), 0xBC00, 0x99);
         assert_eq!(
             sys.board.main_map.region_data(MainRegion::ColorRam)[0],
             0x99,
@@ -2357,20 +2445,20 @@ mod tests {
         sys.board.inputs.dsw2 = 0x5A;
 
         // First read selects DSW2 but returns the (tri-stated) held value.
-        sys.read(BusMaster::Cpu(1), 0xC001);
+        sys.bus_read(BusMaster::Cpu(1), 0xC001);
         // Second read returns DSW2 and selects DSW1.
-        assert_eq!(sys.read(BusMaster::Cpu(1), 0xC002), 0x5A);
+        assert_eq!(sys.bus_read(BusMaster::Cpu(1), 0xC002), 0x5A);
         // Third read returns DSW1.
-        assert_eq!(sys.read(BusMaster::Cpu(1), 0xC000), 0xA5);
+        assert_eq!(sys.bus_read(BusMaster::Cpu(1), 0xC000), 0xA5);
     }
 
     #[test]
     fn input_window_bit7_drives_flipscreen() {
         let mut sys = DocastleSystem::new(DocastleVariant::Docastle);
         assert!(!sys.board.flipscreen);
-        sys.read(BusMaster::Cpu(1), 0xC083);
+        sys.bus_read(BusMaster::Cpu(1), 0xC083);
         assert!(sys.board.flipscreen, "address bit 7 sets flip");
-        sys.read(BusMaster::Cpu(1), 0xC003);
+        sys.bus_read(BusMaster::Cpu(1), 0xC003);
         assert!(!sys.board.flipscreen, "address bit 7 clear releases flip");
     }
 
@@ -2395,13 +2483,13 @@ mod tests {
         // docastle: 0xE000/0xE400/0xE800/0xEC00.
         let mut castle = DocastleSystem::new(DocastleVariant::Docastle);
         for (i, addr) in [0xE000u16, 0xE400, 0xE800, 0xEC00].into_iter().enumerate() {
-            castle.write(BusMaster::Cpu(1), addr, 0x80 | 0x05);
+            castle.bus_write(BusMaster::Cpu(1), addr, 0x80 | 0x05);
             assert!(!castle.board.sn[i].is_ready(), "PSG {i} took the write");
         }
         // dorunrun: 0xA000/0xA400/0xA800/0xAC00.
         let mut runrun = DocastleSystem::new(DocastleVariant::Dorunrun);
         for (i, addr) in [0xA000u16, 0xA400, 0xA800, 0xAC00].into_iter().enumerate() {
-            runrun.write(BusMaster::Cpu(1), addr, 0x80 | 0x05);
+            runrun.bus_write(BusMaster::Cpu(1), addr, 0x80 | 0x05);
             assert!(!runrun.board.sn[i].is_ready(), "PSG {i} took the write");
         }
     }
@@ -2409,23 +2497,21 @@ mod tests {
     #[test]
     fn psg_ready_stalls_the_sub_cpu() {
         let mut sys = DocastleSystem::new(DocastleVariant::Docastle);
-        sys.write(BusMaster::Cpu(1), 0xE000, 0x9F);
-        let pc = sys.board.sub_cpu.pc;
-        bus_split!(&mut sys, bus => {
-            for _ in 0..8 {
-                sys.board.tick(bus);
-            }
-        });
-        assert_eq!(sys.board.sub_cpu.pc, pc, "sub CPU held while READY is low");
+        sys.bus_write(BusMaster::Cpu(1), 0xE000, 0x9F);
+        let pc = sys.sub_cpu.pc;
+        for _ in 0..8 {
+            sys.step_cycle();
+        }
+        assert_eq!(sys.sub_cpu.pc, pc, "sub CPU held while READY is low");
     }
 
     #[test]
     fn main_latch_write_stalls_until_the_sub_cpu_reads() {
         let mut sys = DocastleSystem::new(DocastleVariant::Docastle);
-        sys.write(BusMaster::Cpu(0), 0xA000, 0x42);
+        sys.bus_write(BusMaster::Cpu(0), 0xA000, 0x42);
         assert!(sys.board.main_wait, "a latch write asserts main WAIT");
         assert_eq!(sys.board.shared_latch, 0x42);
-        assert_eq!(sys.read(BusMaster::Cpu(1), 0xA000), 0x42);
+        assert_eq!(sys.bus_read(BusMaster::Cpu(1), 0xA000), 0x42);
         assert!(!sys.board.main_wait, "the sub CPU released WAIT");
     }
 
@@ -2435,18 +2521,18 @@ mod tests {
         sys.board.shared_latch = 0x11;
 
         // First attempt: stalls and asks to be retried.
-        let stale = sys.read(BusMaster::Cpu(0), 0xA000);
+        let stale = sys.bus_read(BusMaster::Cpu(0), 0xA000);
         assert_eq!(stale, 0x11);
         assert!(sys.board.main_wait);
         assert!(sys.board.main_retry, "the stalled read must be re-run");
 
         // The sub CPU supplies the byte and releases WAIT.
-        sys.write(BusMaster::Cpu(1), 0xA000, 0x99);
+        sys.bus_write(BusMaster::Cpu(1), 0xA000, 0x99);
         assert!(!sys.board.main_wait);
 
         // The retry samples the value the sub CPU just wrote.
         sys.board.main_retry = false;
-        assert_eq!(sys.read(BusMaster::Cpu(0), 0xA000), 0x99);
+        assert_eq!(sys.bus_read(BusMaster::Cpu(0), 0xA000), 0x99);
         assert!(!sys.board.main_wait, "the retry does not re-stall");
         assert!(!sys.board.main_retry);
     }
@@ -2460,29 +2546,23 @@ mod tests {
             .load_region_at(MainRegion::RomLow, 0, &[0x3A, 0x00, 0xA0, 0x76]);
         sys.reset();
 
-        bus_split!(&mut sys, bus => {
-            for _ in 0..64 {
-                sys.board.tick(bus);
-            }
-        });
+        for _ in 0..64 {
+            sys.step_cycle();
+        }
         assert!(sys.board.main_wait, "main CPU is parked on the latch read");
-        let parked_pc = sys.board.main_cpu.pc;
+        let parked_pc = sys.main_cpu.pc;
 
-        bus_split!(&mut sys, bus => {
-            for _ in 0..64 {
-                sys.board.tick(bus);
-            }
-        });
-        assert_eq!(sys.board.main_cpu.pc, parked_pc, "no forward progress");
+        for _ in 0..64 {
+            sys.step_cycle();
+        }
+        assert_eq!(sys.main_cpu.pc, parked_pc, "no forward progress");
 
         // Answer from the sub side; the main CPU resumes and reads that byte.
         sys.board.sub_write_latch(0x7E);
-        bus_split!(&mut sys, bus => {
-            for _ in 0..64 {
-                sys.board.tick(bus);
-            }
-        });
-        assert_eq!(sys.board.main_cpu.a, 0x7E);
+        for _ in 0..64 {
+            sys.step_cycle();
+        }
+        assert_eq!(sys.main_cpu.a, 0x7E);
     }
 
     /// The real boot handshake: the main CPU pulses the sub CPU's NMI, then
@@ -2548,13 +2628,11 @@ mod tests {
             .copy_from_slice(&SENT); // 0x9000
         sys.board.sub_map.region_data_mut(SubRegion::Ram)[0x100..0x109].copy_from_slice(&REPLY);
 
-        bus_split!(&mut sys, bus => {
-            for _ in 0..4000 {
-                sys.board.tick(bus);
-            }
-        });
+        for _ in 0..4000 {
+            sys.step_cycle();
+        }
 
-        assert!(sys.board.main_cpu.halted, "main CPU never finished");
+        assert!(sys.main_cpu.halted, "main CPU never finished");
         assert_eq!(
             &sys.board.sub_map.region_data(SubRegion::Ram)[..9],
             &SENT,
@@ -2575,11 +2653,11 @@ mod tests {
         ] {
             let mut sys = DocastleSystem::new(variant);
             assert!(!sys.board.sub_nmi_pending);
-            sys.write(BusMaster::Cpu(0), addr, 0x00);
+            sys.bus_write(BusMaster::Cpu(0), addr, 0x00);
             assert!(sys.board.sub_nmi_pending, "{}", variant.id());
             // The pulse is consumed by a single interrupt check.
-            assert!(sys.check_interrupts(BusMaster::Cpu(1)).nmi);
-            assert!(!sys.check_interrupts(BusMaster::Cpu(1)).nmi);
+            assert!(sys.board.interrupt_state(BusMaster::Cpu(1)).nmi);
+            assert!(!sys.board.interrupt_state(BusMaster::Cpu(1)).nmi);
         }
     }
 
@@ -2587,17 +2665,15 @@ mod tests {
     fn sub_irq_fires_eight_times_per_frame() {
         let mut sys = DocastleSystem::new(DocastleVariant::Docastle);
         let mut count = 0;
-        bus_split!(&mut sys, bus => {
-            for _ in 0..TIMING.cycles_per_frame() {
-                sys.board.tick(bus);
-                // Stand in for the CPU acknowledging the auto-clearing line, so
-                // each assertion shows up as its own edge.
-                if sys.board.sub_irq_pending {
-                    sys.board.sub_irq_pending = false;
-                    count += 1;
-                }
+        for _ in 0..TIMING.cycles_per_frame() {
+            sys.step_cycle();
+            // Stand in for the CPU acknowledging the auto-clearing line, so
+            // each assertion shows up as its own edge.
+            if sys.board.sub_irq_pending {
+                sys.board.sub_irq_pending = false;
+                count += 1;
             }
-        });
+        }
         assert_eq!(count, 8, "one rising edge per CRTC MA6 transition");
     }
 
@@ -2605,7 +2681,7 @@ mod tests {
     fn sound_produces_non_silent_audio() {
         let mut sys = DocastleSystem::new(DocastleVariant::Docastle);
         for byte in [0x8Eu8, 0x0F, 0x90] {
-            sys.write(BusMaster::Cpu(1), 0xE000, byte);
+            sys.bus_write(BusMaster::Cpu(1), 0xE000, byte);
         }
         sys.run_frame();
         let mut buf = vec![0i16; 2048];
