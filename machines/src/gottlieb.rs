@@ -15,7 +15,6 @@
 //! - **NMI**: VBLANK → main CPU NMI; RIOT IRQ → sound CPU IRQ; Votrax A/R → sound CPU NMI
 
 use phosphor_core::audio::AudioResampler;
-use phosphor_core::bus_split;
 use phosphor_core::core::debug::{DebugRegister, Debuggable};
 use phosphor_core::core::machine::ProfileSpan;
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
@@ -134,7 +133,6 @@ const RESISTOR_DAC: [u8; 16] = [
 #[derive(Saveable)]
 #[save_version(3)]
 pub(crate) struct GottliebSoundBoard {
-    cpu: M6502,
     riot: Riot6532,
     dac: Mc1408Dac,
     votrax: VotraxSc01,
@@ -155,7 +153,6 @@ pub(crate) struct GottliebSoundBoard {
 impl GottliebSoundBoard {
     fn new() -> Self {
         Self {
-            cpu: M6502::new(),
             riot: Riot6532::new(),
             dac: Mc1408Dac::new(),
             votrax: VotraxSc01::new(VOTRAX_NOMINAL_CLOCK_HZ),
@@ -195,7 +192,12 @@ impl GottliebSoundBoard {
     }
 
     /// Advance the sound board by one sound CPU tick.
-    fn tick(&mut self) {
+    ///
+    /// The sound 6502 lives on [`GottliebBoard`] rather than in here, because
+    /// this struct *is* the bus it drives -- RIOT, DAC, Votrax and the sound
+    /// ROM. Taking the CPU as a separate borrow is what makes that dispatch
+    /// concrete instead of a trait object.
+    fn tick(&mut self, cpu: &mut M6502) {
         // Update RIOT PB7 with Votrax A/R signal before CPU reads it.
         // PB7 = A/R (1=ready, 0=busy). Other PB bits are directly driven.
         let ar = self.votrax.ar_output();
@@ -209,9 +211,7 @@ impl GottliebSoundBoard {
         self.votrax_ar_prev = ar;
 
         // Execute one M6502 cycle
-        bus_split!(self, bus => {
-            self.cpu.execute_cycle(bus, BusMaster::Cpu(1));
-        });
+        cpu.execute_cycle(self, BusMaster::Cpu(1));
 
         // Tick RIOT timer (clocked at same rate as M6502)
         self.riot.tick();
@@ -247,10 +247,9 @@ impl GottliebSoundBoard {
         mix_len
     }
 
+    /// Reset the sound board's devices. The CPU is reset by its owner (see
+    /// [`GottliebBoard::reset_sound`]), which resets it against this bus.
     fn reset(&mut self) {
-        bus_split!(self, bus => {
-            self.cpu.reset(bus, BusMaster::Cpu(1));
-        });
         self.riot.reset();
         self.dac.reset();
         self.votrax.reset();
@@ -409,7 +408,9 @@ pub fn run_frame(cpu: &mut I8088, board: &mut GottliebBoard) {
 
 #[derive(BusDebug)]
 pub struct GottliebBoard {
-    // Sound board (M6502 + RIOT + DAC)
+    // Sound board (RIOT + DAC + Votrax). Its M6502 sits beside it rather than
+    // inside it, so the sound CPU's cycles dispatch at a concrete type.
+    pub(crate) sound_cpu: M6502,
     #[debug_device("Sound Board")]
     pub(crate) sound: GottliebSoundBoard,
 
@@ -463,6 +464,7 @@ pub struct GottliebBoard {
 impl GottliebBoard {
     pub fn new() -> Self {
         Self {
+            sound_cpu: M6502::new(),
             sound: GottliebSoundBoard::new(),
             map: Self::build_map(),
             tile_rom_cache: gfx::GfxCache::new(0, 8, 8),
@@ -688,9 +690,11 @@ impl GottliebBoard {
             self.sound.set_votrax_clock(speech_hz);
         }
 
-        // Tick sound board at fractional rate (~895 kHz)
+        // Tick sound board at fractional rate (~895 kHz). The sound CPU and the
+        // board it drives are disjoint fields here, so its cycle dispatches at a
+        // concrete type just like the main CPU's.
         if self.sound_clock.tick() {
-            self.sound.tick();
+            self.sound.tick(&mut self.sound_cpu);
         }
 
         // Tick Votrax SC-01 at its VCO rate (nominally 950 kHz, DAC-tunable)
@@ -888,12 +892,19 @@ impl GottliebBoard {
         self.sound.fill_audio(buffer)
     }
 
+    /// Reset the sound board and its CPU. The 6502 fetches its reset vector
+    /// through the sound bus, which is why the two are reset together here.
+    fn reset_sound(&mut self) {
+        self.sound.reset();
+        self.sound_cpu.reset(&mut self.sound, BusMaster::Cpu(1));
+    }
+
     // -----------------------------------------------------------------------
     // Reset
     // -----------------------------------------------------------------------
 
     pub fn reset_board(&mut self) {
-        self.sound.reset();
+        self.reset_sound();
         self.map.region_data_mut(Region::Ram).fill(0);
         self.map.region_data_mut(Region::SpriteRam).fill(0);
         self.map.region_data_mut(Region::VideoRam).fill(0);
@@ -924,6 +935,9 @@ impl GottliebBoard {
 impl Saveable for GottliebBoard {
     fn save_state(&self, w: &mut StateWriter) {
         // The CPU is saved by the machine, which owns it.
+        // Sound CPU first, then the rest of the sound board: the same byte
+        // order the sound board wrote when it owned the CPU.
+        self.sound_cpu.save_state(w);
         self.sound.save_state(w);
         w.write_bytes(self.map.region_data(Region::Nvram));
         w.write_bytes(self.map.region_data(Region::Ram));
@@ -941,6 +955,7 @@ impl Saveable for GottliebBoard {
 
     fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
         // The CPU is loaded by the machine, which owns it.
+        self.sound_cpu.load_state(r)?;
         self.sound.load_state(r)?;
         r.read_bytes_into(self.map.region_data_mut(Region::Nvram))?;
         r.read_bytes_into(self.map.region_data_mut(Region::Ram))?;
@@ -994,18 +1009,19 @@ mod tests {
     #[test]
     fn votrax_ar_wires_to_riot_pb7() {
         let mut snd = GottliebSoundBoard::new();
+        let mut cpu = M6502::new();
 
         // Initially A/R is high (ready)
         assert!(snd.votrax.ar_output());
 
         // Tick once so RIOT PB7 is updated
-        snd.tick();
+        snd.tick(&mut cpu);
         let pb = snd.riot.read_io(0x02); // Read Port B data
         assert_eq!(pb & 0x80, 0x80, "PB7 should be high when A/R is ready");
 
         // Write a phoneme → A/R goes low
         Bus::write(&mut snd, BusMaster::Cpu(1), 0x2000, 0x00);
-        snd.tick();
+        snd.tick(&mut cpu);
         let pb = snd.riot.read_io(0x02);
         assert_eq!(pb & 0x80, 0, "PB7 should be low when A/R is busy");
     }
@@ -1064,10 +1080,11 @@ mod tests {
     #[test]
     fn fill_audio_returns_samples() {
         let mut snd = GottliebSoundBoard::new();
+        let mut cpu = M6502::new();
 
         // Tick many times to accumulate audio samples
         for _ in 0..2000 {
-            snd.tick();
+            snd.tick(&mut cpu);
         }
 
         let mut buf = [0i16; 256];
