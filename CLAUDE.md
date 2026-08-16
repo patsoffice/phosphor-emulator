@@ -113,6 +113,21 @@ Some tests iterate `registry::all()`, so a newly registered machine is covered w
 - `machines/tests/save_state_tests.rs` — save/load round trip, ROM-less
 - `harness/tests/boot_check_test.rs`, `harness/tests/save_state_rom_test.rs` — the same ground on machines booted from real ROMs. ROM-gated: they skip without `PHOSPHOR_ROMS` (or `~/ws/mame-runtime/roms`), and skip per machine for a ROM set the collection can't supply. Run them after any change that could affect boot; CI cannot.
 
+#### Golden frames
+
+`harness/tests/golden_frame_test.rs` pins what each machine *draws*: a SHA-256 of the oriented RGB frame at a fixed frame count (plus the vector display list for the vector games), with the pins committed as data in `harness/tests/golden/frames.toml` and a reference PNG per machine beside them.
+
+```bash
+cargo test -p phosphor-harness --test golden_frame_test                        # compare (ROM-gated)
+PHOSPHOR_GOLDEN_ONLY=galaga cargo test -p phosphor-harness --test golden_frame_test
+PHOSPHOR_GOLDEN_UPDATE=1 cargo test -p phosphor-harness --test golden_frame_test  # recapture
+```
+
+- Run it after any rendering, palette, video-timing or CPU change. It is the only test that would notice a machine drawing the wrong picture.
+- A failure writes the actual frame to `harness/tests/golden/actual/` and prints a `disasm imgdiff` command; **look at the image** before recapturing.
+- Recapture only for an intended change, and review the resulting PNG diff — a refreshed hash with a wrong picture is worse than no test.
+- Adding a machine to the registry fails `frames_toml_covers_every_registered_machine` until it has a pin, or an `[[unpinned]]` entry saying why a frame can't be captured.
+
 ### CPU Validation
 
 ```bash

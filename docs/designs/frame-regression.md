@@ -1,8 +1,7 @@
 # Design: Frame-Level Regression Testing
 
-> **Status: in progress.** Tracks beads epic
-> `phosphor-emulator-frame-regression-w1pi` and its two children; this commit
-> is the infrastructure child, with three machines pinned as proof.
+> **Status: implemented.** Tracks beads epic
+> `phosphor-emulator-frame-regression-w1pi` and its two children.
 
 ## Context
 
@@ -86,8 +85,8 @@ Design points, each answering a requirement of the epic:
   name) that `disasm frameshot --press` uses, so a golden entry cannot drift
   from what the tooling can reproduce by hand.
 - **`nvram` is an optional CMOS fixture**, a path under `tests/golden/`, loaded
-  right after reset the way `disasm frameshot --nvram` does. It exists for
-  machines that cannot reach a representative frame from a cold boot.
+  right after reset the way `disasm frameshot --nvram` does. Only the three
+  Williams machines need one, for the reason in *Findings* below.
 
 ### What gets hashed
 
@@ -169,21 +168,21 @@ the review of the resulting diff is the gate.
 ### Guards against a vacuous pass
 
 The epic's central risk is a golden suite that passes having checked nothing.
-Four guards, two of which run **without ROMs** so CI enforces them:
+Five guards, three of which run **without ROMs** so CI enforces them:
 
 | Guard | Needs ROMs | Catches |
 |---|---|---|
+| `frames_toml_covers_every_registered_machine` | no | a machine registered with no pinned frame |
 | `every_entry_names_a_registered_machine` | no | an entry left behind by a rename or removal |
 | `reference_pngs_match_their_hashes` | no | a hand-edited hash, a stale PNG, an empty golden set |
 | ROM-gated: at least one entry ran | yes | a ROM dir present but supplying nothing |
 | ROM-gated: no pinned frame is uniform | yes | pinning an all-black screen, which any breakage passes |
 
-One more guard belongs here and lands with the population pass: a check that
-every *registered* machine has an entry, so adding a machine fails CI until a
-golden frame is captured for it. That is the intended pressure — an unpinned
-machine is an unguarded machine — and it is the same shape as the
-`the_registry_is_not_empty` guards on the existing registry-driven suites. It
-cannot be turned on before the roster is pinned.
+The first guard is the one that makes the suite registry-driven: adding a
+machine to the registry fails CI until a golden frame is captured for it. That
+is the intended pressure — an unpinned machine is an unguarded machine — and
+it is the same shape as the `the_registry_is_not_empty` guards on the existing
+registry-driven suites.
 
 ## Choosing a frame count
 
@@ -201,6 +200,44 @@ part of the attract loop that is representative. Both bounds are real:
 There is no nondeterminism to worry about — no wall clock and no RNG in the
 tick path — so a fixed frame count is reproducible. That is the same property
 `frameshot_parity.rs` relies on.
+
+## Findings from the first capture
+
+Looking at 39 frames turned up three things no existing test could see. They
+are recorded here because they are the argument for the epic.
+
+**Super Cobra rendered 90° off.** `impl_board_delegation!(ScobraSystem, board,
+TIMING)` omitted the `orientation` flag its Scramble sibling one screen away
+passes, so Scobra fell back to `Orientation::NORMAL` and drew a portrait
+cabinet's raster unrotated. Fixed here, with
+`scobra_declares_the_same_rotation_as_scramble` beside the existing Scramble
+tests so it cannot come back.
+
+**Tempest's headless render is 90° off** (`phosphor-emulator-iitc`).
+`AtariAvgBoard::render_frame` rasterises with `flip_y = false`, which
+`rasterize_vectors` documents as already-screen-space for ROT270; every caller
+then applies the declared `ROT270` on top. The frontend escapes it because its
+GL shader's `rotation == 270` branch only negates Y instead of rotating, so
+the live game looks right and the two paths silently disagree —
+`frameshot_parity.rs` cannot see it because both of its sides go through
+`render_frame`. Not fixed here: the fix is a decision about where the AVG's
+screen mapping belongs, and it needs its own change. Tempest's entry pins the
+current, wrong-way-up frame and says so in `shows`, which still guards
+everything else about Tempest and will fail loudly when the orientation is
+corrected.
+
+**Joust, Robotron and Sinistar never leave their CMOS-init screen**
+(`phosphor-emulator-4waf`). From a cold boot all three print `FACTORY SETTINGS
+RESTORED` and stay there — Joust still shows it at 10,000 frames, about 166
+emulated seconds. `boot_check_test.rs` passes them because that message is lit
+pixels. With a factory CMOS image loaded they reach their title screens in
+about 2400 frames, so the boards, blitter and palette are fine; something in
+the post-init path is stuck. Their entries use committed `nvram` fixtures
+until it is fixed.
+
+The first two are the epic's thesis in miniature: both are *rendering* bugs in
+machines whose boot checks, save-state round trips and control tables were all
+green.
 
 ## Cost
 

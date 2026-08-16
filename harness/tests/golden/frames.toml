@@ -15,6 +15,21 @@
 #
 # A refresh should show up here as a hash change with a reviewed image diff in
 # tests/golden/<machine>.png beside it. See docs/designs/frame-regression.md.
+#
+# Every registered machine must appear, as a [[frame]] or — when no frame can
+# be captured at all — as an [[unpinned]] with a reason.
+
+[[unpinned]]
+machine = "dkongjr"
+reason = "The machine's ROM table names a revision (djr1-c_5b_f-2.5b) that neither the dkongjr nor the dkongjr2 ZIP in the reference collection supplies, so it cannot be booted here to capture a frame. Pin it once a matching dump is available."
+
+[[frame]]
+machine = "astdelux"
+frames = 1800
+shows = "Attract mode: GAME OVER over drifting asteroids, with the 2 COINS 1 CREDIT / CREDITS 0 coin prompt and the 1980 Atari copyright."
+size = [1024, 1024]
+frame = "sha256:ad98812e857cb3f95b0c21fbaf7d0820cac36ccbd189ec1970f725b7be24c465"
+vectors = "sha256:e35fb2afc87bf9ff39edac92b05e68f8d753249918c66a58b699a6bb6675acc4"
 
 [[frame]]
 machine = "asteroid"
@@ -25,6 +40,156 @@ frame = "sha256:468eb9a1fca3e204d6ebd30a4ae183eb282053d6b8ab5b87547a9f0c1e5c6e90
 vectors = "sha256:9a585721bc7b4c0dd124070aeb921f86c429de55655c240c7115ec8da8770fef"
 
 [[frame]]
+machine = "burgertime"
+frames = 1800
+shows = "Attract demo: the first burger level, its ladders and platforms with a hot dog and a pickle chasing, and the completed burgers on the bottom tray."
+size = [240, 240]
+frame = "sha256:16b3432c781a1421d906fd9a5e9427d6d6130e89d766a98b40bf52ecd6d18644"
+
+[[frame]]
+machine = "ccastles"
+frames = 1800
+shows = "Attract mode: the isometric first castle, the red bonus-timer bar top left, and the CRYSTAL CASTLES / 1983 Atari copyright panel."
+size = [256, 232]
+frame = "sha256:193512f12df70ff841ef8b91dd15ceafc5e02a4544586e11c4c756c4c7c653b0"
+
+[[frame]]
+machine = "congobongo"
+frames = 1800
+shows = "Attract demo: stage 1's isometric hill with the gorilla at the top right, the blue river, and the ape hopping between the burrows."
+size = [224, 256]
+frame = "sha256:65e071431eb2c220a0eda7f5d827124dc2f9bf4d73e806d83ddb476cc71352fc"
+
+[[frame]]
+machine = "digdug"
+frames = 1800
+shows = "Attract mode: the DIG DUG title over the namco logo, with Dig Dug, Pooka and Fygar lined up on the yellow field."
+size = [224, 288]
+frame = "sha256:bc511502ae48fa0766ba87bfee63d4474bf902920e63a1034fa90540ea518353"
+
+[[frame]]
+machine = "dkong"
+frames = 1800
+shows = "Attract mode: the DONKEY KONG title in blue block letters with Kong beneath it and the 1981 Nintendo of America copyright."
+size = [224, 256]
+frame = "sha256:4d8ad70ab09cc893b6904c793edc24cb5cfe853a61d06f16f878e1097b096eb3"
+
+[[frame]]
+machine = "docastle"
+frames = 1800
+shows = "Attract mode: the TODAY'S RANKING / BEST 10 table, ten green name rows on black inside the purple brick border."
+size = [192, 240]
+frame = "sha256:8642a37340e74a060f571449ab1ea86adc6e77cfe4c68bc6b1754802353fc757"
+
+[[frame]]
+machine = "dorunrun"
+frames = 2400
+shows = "Attract mode: the DO! RUN RUN title in shaded block letters over INSERT COIN / 1 COIN 1 PLAY and the Universal 1984 copyright."
+size = [240, 192]
+frame = "sha256:1ab0235facad6de06d8eac73b7c6e20b8088637b38c76f25bf10d0cc41df9416"
+
+[[frame]]
+machine = "dowild"
+frames = 1800
+shows = "Attract demo: the first course, its yellow track loops with coloured balls rolling, the GOAL flag top right, and the bonus and scene counters."
+size = [240, 192]
+frame = "sha256:cff65496ba44f98b07406692ddc0958dcbf5dc59dadad70a0b826a2c2b1e8f61"
+
+[[frame]]
+machine = "esb"
+frames = 1800
+shows = "Attract mode: the opening text crawl (IT IS A DARK TIME FOR THE REBELS...) in green over the starfield, under the red INSERT COINS / 1 COIN 1 PLAY header."
+size = [320, 330]
+frame = "sha256:5a3a805c52f0cb78205c8819671a010301e09c51844167a9ac42e7ff4b45c966"
+vectors = "sha256:1beeee4ec14a54227ee2ba1d3226c16ddb3c3ac41294b1f2964e22db2b6a5f0a"
+
+[[frame]]
+machine = "foodf"
+frames = 1800
+shows = "Attract mode: the FOOD FIGHT logo with INTRODUCING... below it, flying fruit, and a splash of pie in the top-right corner."
+size = [256, 224]
+frame = "sha256:e85197c18fbdb40cbb6f58e8e034169da38499974079db53364849934b42477d"
+
+[[frame]]
+machine = "frogger"
+frames = 2400
+shows = "Attract mode: the FROGGER title with the POINT TABLE header and 10 PTS FOR EACH STEP, over the Konami 1981 copyright."
+size = [224, 256]
+frame = "sha256:2aa858b2c4fbeaeba8d6455922c7da037c55575910056090966ac1775ed75f11"
+
+[[frame]]
+machine = "galaga"
+frames = 1800
+shows = "Attract mode: the GALAGA score-advance table over the starfield, with the enemy types beside their values and the 800-point flagship."
+size = [224, 288]
+frame = "sha256:6a0eda16e08b1b154a30ebfeeb36ba2519820e370e2b82fd4050b6ba0cf3870a"
+
+[[frame]]
+machine = "galaxian"
+frames = 1800
+shows = "Attract mode: WE ARE THE GALAXIANS / MISSION: DESTROY ALIENS above the SCORE ADVANCE TABLE, over the scrolling starfield."
+size = [224, 256]
+frame = "sha256:52e015d7a16770f4acaca1ef9463dc548f7758a4d68b4b0895dff98fb92843d6"
+
+[[frame]]
+machine = "gridlee"
+frames = 1800
+shows = "Attract mode: AVOID THE CHARGED SQUARES over the cyan perspective grid, with the player figure mid-field."
+size = [256, 240]
+frame = "sha256:81abe693819036e15d5925eb23f3f7b44ab423bf86407e1cfcbf3e82c263ac43"
+
+[[frame]]
+machine = "irobot"
+frames = 1800
+shows = "Attract mode: the EYE OPEN DONT JUMP instruction panel beside the red-and-blue eye, over the blue polygon playfield."
+size = [256, 232]
+frame = "sha256:cb584d7ce3710a223a34844cc9090d052a13920a5c8353806810612e78f36a39"
+
+[[frame]]
+machine = "joust"
+frames = 2400
+shows = "Attract mode: the JOUST title in yellow and red inside the animated blue chevron border, with the PRESENTED BY / Williams 1982 credits. Needs the CMOS fixture; see phosphor-emulator-4waf."
+nvram = "nvram/joust.nv"
+size = [292, 240]
+frame = "sha256:5129c5c150136ddf04c9ac408fd8dcf2f74ea281a6b3863fe70344037ed78132"
+
+[[frame]]
+machine = "llander"
+frames = 1800
+shows = "Attract mode: the lunar terrain profile under the SCORE / TIME / FUEL and ALTITUDE / SPEED readouts, with INSERT COINS and X FUEL UNITS PER COIN."
+size = [1024, 1024]
+frame = "sha256:b17a74b0be9b77b52ede62ae9f97e6bc58af90005599a6f5fa5b7c3044cddd39"
+vectors = "sha256:da33d1053a2b8202b2e127ef9f70575e7c6864d4d611da689313179dc377f201"
+
+[[frame]]
+machine = "marble"
+frames = 1800
+shows = "Attract mode: the MARBLE MADNESS logo over the TROUBLEMAKERS high-score table, with a red and a blue marble on the black field."
+size = [336, 240]
+frame = "sha256:23ab1e12d79177704100daca44d6b849cf1265f11b4e9bb9bde5109b3b07ff7e"
+
+[[frame]]
+machine = "mariobros"
+frames = 1800
+shows = "Attract demo: the platform level with Mario and Luigi mid-run, the POW block, a shellcreeper on the top floor, and the two pipes."
+size = [256, 224]
+frame = "sha256:125ae22f893b78fd36b941df7d0e1e0722f6293dc7460c3075a4f3d1403ce07a"
+
+[[frame]]
+machine = "missile"
+frames = 1800
+shows = "Attract demo: incoming ICBM trails and three red explosions above the six cities and the DEFEND CITIES prompt."
+size = [256, 231]
+frame = "sha256:b585a3dc7bbfa1f901bc0f08adb7d3189e5b07ee10d82115d87488fa6e14d2dc"
+
+[[frame]]
+machine = "mooncrst"
+frames = 1800
+shows = "Attract mode: DOCKING TIME 24:5 over the starfield, with the docking module above and the player ship at the bottom."
+size = [224, 256]
+frame = "sha256:e192a5fdc70a9588626fd0cdad8898b3dee747cfe7965ba8789d2ed7604cc495"
+
+[[frame]]
 machine = "mrdo"
 frames = 1800
 shows = "Attract mode: the Mr. Do! title with INSTRUCTION below it, over the tunnelled cherry field with Mr. Do and a 1000-point bonus."
@@ -32,8 +197,111 @@ size = [192, 240]
 frame = "sha256:b65883ea0d874401204561680b0f06f91441e76eec9f02aaab64af17f13a5ac0"
 
 [[frame]]
+machine = "mspacman"
+frames = 1800
+shows = "Attract demo: the pink maze with GAME OVER across the middle, two ghosts beside it and Ms. Pac-Man at the bottom."
+size = [224, 288]
+frame = "sha256:bafc50a329aeb1da391d788e2250a3542e407faff0fb24447de38d0443bb4cec"
+
+[[frame]]
 machine = "pacman"
 frames = 1800
 shows = "Attract demo: the blue maze with GAME OVER across the middle, Blinky at the top left, Pinky below it and Pac-Man at the bottom."
 size = [224, 288]
 frame = "sha256:b34b7008518b53d92f27f0b3cefdbee1f7ea4294cd069d079ff2f94e0b0b8cd6"
+
+[[frame]]
+machine = "pisces"
+frames = 900
+shows = "Attract demo: the player ship over the blue seabed strip, with a red and a blue enemy diving, on the scrolling starfield."
+size = [224, 256]
+frame = "sha256:83727b405dbc4c6203cd7ae33fdf9ca2f189ace41a081c808006e00541b8eb19"
+
+[[frame]]
+machine = "qbert"
+frames = 1800
+shows = "Attract mode: the Q*bert title and CHANGE TO: colour key over the full pyramid, with Q*bert, two red balls and the disc platforms."
+size = [240, 256]
+frame = "sha256:6817e9d59aa42dddbb99914b8e3415f27bccba18fb8946dfde0e971d375e8669"
+
+[[frame]]
+machine = "quantum"
+frames = 1800
+shows = "Attract mode: the QUANTUM title over coloured particle blobs, with INSERT COINS, the 1982 Atari copyright and the CREDIT line."
+size = [600, 900]
+frame = "sha256:0c7c4b22ad2b5daa7967eb213fba0887c355549aa22f1670564ba92f3602921f"
+vectors = "sha256:11f4c30e0cd73a9a3bd92cd7905be6d0e11aa31170e2939fbc441934c3d76bdf"
+
+[[frame]]
+machine = "roadrunner"
+frames = 1800
+shows = "Attract mode: the canyon backdrop with the striped road, a character mid-road, the BEWARE OF STEEL SHOT IN BIRDSEED banner and the 1985 Atari Games / Warner Bros. copyrights."
+size = [336, 240]
+frame = "sha256:1c805bf29619f869f96c230c6917a43b4c2b5c53129d7eccff3534ec7eb3678a"
+
+[[frame]]
+machine = "robotron"
+frames = 2400
+shows = "Attract mode: the ROBOTRON: 2084 title ringed by coloured Williams W badges, with the PRESENTED BY and DESIGNED BY VID KIDZ credits. Needs the CMOS fixture; see phosphor-emulator-4waf."
+nvram = "nvram/robotron.nv"
+size = [292, 240]
+frame = "sha256:c5bed9e980154cb8196b5d0da60fa2895cfb4a8ac4beab3a32483836165f0df9"
+
+[[frame]]
+machine = "scobra"
+frames = 1800
+shows = "Attract demo: the ship over the white mountain range, with the 1-8 BASE progress bar, the fuel gauge and the score header. Upright only since the wrapper started forwarding the board's ROT90."
+size = [224, 256]
+frame = "sha256:482baaec7604cbcef89ba2c3a59843886c0439131c3c6eb9e0d2393c5f663e3f"
+
+[[frame]]
+machine = "scramble"
+frames = 1800
+shows = "Attract demo: the ship over the blue mountains with a UFO to its left, the 1ST-5TH BASE progress bar and the fuel gauge."
+size = [224, 256]
+frame = "sha256:fa6867437bf3fbaa929ba81d82b9fc06da68499c6b8a47136be8455ea766ddad"
+
+[[frame]]
+machine = "shollow"
+frames = 1800
+shows = "Attract mode: the SATAN'S HOLLOW title spelled out in red bat sprites, over the 1 CREDIT PER PLAYER and Bally Midway MCMLXXXI copyright block."
+size = [480, 512]
+frame = "sha256:4d7fd90c3f123a068234b7f69836d774caf98e5b14acdd7113b6480312f597e2"
+
+[[frame]]
+machine = "sinistar"
+frames = 2400
+shows = "Attract mode: the FIRING DOES NOT AFFECT THE MIGHTY SINISTAR text screen, with the worker and planetoid sprites and the PRESS FIRE BUTTON prompt. Needs the CMOS fixture; see phosphor-emulator-4waf."
+nvram = "nvram/sinistar.nv"
+size = [240, 292]
+frame = "sha256:90cadc9bc803c976acbcb85a58ef6d52e2b8562cedb71708293c373c1a102512"
+
+[[frame]]
+machine = "starwars"
+frames = 2400
+shows = "Attract mode: the FLIGHT INSTRUCTIONS TO RED FIVE briefing, five numbered yellow paragraphs under the green INSERT COINS header."
+size = [320, 330]
+frame = "sha256:d40475d67158a699ecc15fa2b281d9abf6fbd7f936352233472963315bb423f3"
+vectors = "sha256:b3b633b25296d5f2dd49a51d698a7355fa9dc6aa0ff92a31eab9669f1f009591"
+
+[[frame]]
+machine = "tempest"
+frames = 1800
+shows = "Attract mode: the HIGH SCORES table with INSERT COINS and the 1 COIN 1 PLAY / BONUS EVERY 20000 lines. Drawn 90 degrees from upright: the raster fallback double-applies ROT270 (phosphor-emulator-iitc). The vectors hash is orientation-free and pins the real output."
+size = [570, 580]
+frame = "sha256:746dcc4028049e15e1f2dd098f5e6f8fa5f5d751ebd658fc62e2d85ddaaee305"
+vectors = "sha256:c64a73e90a9030150512da56a292912c4c18ad145984baef20f1d12881d3fa86"
+
+[[frame]]
+machine = "uniwars"
+frames = 1800
+shows = "Attract mode: the alien formation assembling into a single row over the starfield, under the 1UP / TOP SCORE header."
+size = [224, 256]
+frame = "sha256:26dc39c56e3d0bdff49b90e913683886db22a8bb9355b94381c9cb1606046294"
+
+[[frame]]
+machine = "xevious"
+frames = 1800
+shows = "Attract mode: the XEVIOUS title over the scrolling green forest, with the Solvalou below it and the 1982 Namco copyright."
+size = [224, 288]
+frame = "sha256:96d0b553f76510ef671fb64232166b34d591f4f7d87f7286cf45a3cccc875376"

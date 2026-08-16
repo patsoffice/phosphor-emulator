@@ -222,6 +222,26 @@ C++ harnesses that validate phosphor-core's test vectors against independent ref
 - **I8035** — 221,000/225,000 tests pass (98.2%) vs mame4all (4 ANLD opcodes excluded due to known MAME bug)
 - **I8088** — 2,577,000/2,577,000 tests pass (100%) — via SingleStepTests/8088 reference vectors
 
+### Golden Frames (`harness/tests/golden/`)
+
+Frame-level regression testing: what each machine is supposed to *look like*.
+Every registered machine has a pinned frame — a machine name, a frame count, a
+prose description of the picture, a SHA-256 of the rendered RGB frame (plus the
+vector display list for the vector games), and a committed reference PNG.
+
+```bash
+# Compare every machine against its pinned frame (needs ROMs)
+cargo test -p phosphor-harness --test golden_frame_test
+
+# Recapture after an intended rendering change, then review the image diff
+PHOSPHOR_GOLDEN_UPDATE=1 cargo test -p phosphor-harness --test golden_frame_test
+```
+
+Catches the class the boot check cannot: a swapped palette entry, a sprite
+drawn one line high, a scroll latch read from the wrong register. On a mismatch
+the actual frame is written to `harness/tests/golden/actual/` for `disasm
+imgdiff`. See [docs/designs/frame-regression.md](docs/designs/frame-regression.md).
+
 ### Tools (`tools/`)
 
 Standalone command-line utilities built on the core crates.

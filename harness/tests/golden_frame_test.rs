@@ -30,9 +30,10 @@
 //! The comparison needs real ROMs, so it skips without a ROM directory
 //! (`PHOSPHOR_ROMS`, else `~/ws/mame-runtime/roms`) and skips per machine for a
 //! set this collection cannot supply — the convention `boot_check_test.rs` and
-//! `save_state_rom_test.rs` already use. The two consistency tests at the
-//! bottom of this file need no ROMs, so CI still enforces that every pin
-//! describes itself and that every reference PNG matches its hash.
+//! `save_state_rom_test.rs` already use. The three consistency tests at the
+//! bottom of this file need no ROMs, so CI still enforces that every registered
+//! machine is pinned, that every pin describes itself, and that every reference
+//! PNG matches its hash.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -245,15 +246,63 @@ const FRAMES_TOML_HEADER: &str = "\
 #
 # A refresh should show up here as a hash change with a reviewed image diff in
 # tests/golden/<machine>.png beside it. See docs/designs/frame-regression.md.
+#
+# Every registered machine must appear, as a [[frame]] or — when no frame can
+# be captured at all — as an [[unpinned]] with a reason.
 ";
 
+/// A registered machine deliberately left without a pinned frame.
+///
+/// The only reason that has come up is a ROM set no available collection can
+/// supply, but the shape is general: an unpinned machine is an unguarded one,
+/// so the opt-out costs a written justification rather than silence.
+struct Unpinned {
+    machine: String,
+    reason: String,
+}
+
+/// Parse the `[[unpinned]]` opt-outs. Same panic-on-malformed policy as
+/// [`load_entries`].
+fn load_unpinned() -> Vec<Unpinned> {
+    let path = frames_toml();
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+    let doc: toml::Value =
+        toml::from_str(&text).unwrap_or_else(|e| panic!("parsing {}: {e}", path.display()));
+    let Some(toml::Value::Array(items)) = doc.get("unpinned") else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .map(|t| {
+            let get = |name: &str| -> String {
+                t.get(name)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_else(|| panic!("an [[unpinned]] entry has no `{name}`: {t}"))
+                    .to_string()
+            };
+            Unpinned {
+                machine: get("machine"),
+                reason: get("reason"),
+            }
+        })
+        .collect()
+}
+
 /// Render `entries` back to the canonical `frames.toml` text, sorted by machine.
-fn render_frames_toml(entries: &[Entry]) -> String {
+fn render_frames_toml(entries: &[Entry], unpinned: &[Unpinned]) -> String {
     let mut sorted: Vec<&Entry> = entries.iter().collect();
     sorted.sort_by(|a, b| a.machine.cmp(&b.machine));
+    let mut unpinned: Vec<&Unpinned> = unpinned.iter().collect();
+    unpinned.sort_by(|a, b| a.machine.cmp(&b.machine));
 
     let quote = |s: &str| toml::Value::String(s.to_string()).to_string();
     let mut out = String::from(FRAMES_TOML_HEADER);
+    for u in unpinned {
+        out.push_str("\n[[unpinned]]\n");
+        let _ = writeln!(out, "machine = {}", quote(&u.machine));
+        let _ = writeln!(out, "reason = {}", quote(&u.reason));
+    }
     for e in sorted {
         out.push_str("\n[[frame]]\n");
         let _ = writeln!(out, "machine = {}", quote(&e.machine));
@@ -496,11 +545,16 @@ fn every_pinned_machine_still_draws_its_frame() {
     // default frame count with placeholder prose — `every_entry_is_described`
     // then fails until a human has looked at the picture and written it up.
     if update {
-        let pinned: BTreeSet<&str> = entries.iter().map(|e| e.machine.as_str()).collect();
+        let unpinned = load_unpinned();
+        let known: BTreeSet<&str> = entries
+            .iter()
+            .map(|e| e.machine.as_str())
+            .chain(unpinned.iter().map(|u| u.machine.as_str()))
+            .collect();
         let new: Vec<String> = registry::all()
             .iter()
             .map(|m| m.name.to_string())
-            .filter(|n| !pinned.contains(n.as_str()))
+            .filter(|n| !known.contains(n.as_str()))
             // Respect PHOSPHOR_GOLDEN_ONLY here as well: a discovered machine
             // the loop below skips would otherwise be written back with empty
             // hashes.
@@ -640,7 +694,7 @@ fn every_pinned_machine_still_draws_its_frame() {
             .filter(|e| !e.frame.is_empty())
             .collect();
         let path = frames_toml();
-        std::fs::write(&path, render_frames_toml(&kept))
+        std::fs::write(&path, render_frames_toml(&kept, &load_unpinned()))
             .unwrap_or_else(|e| panic!("writing {}: {e}", path.display()));
         eprintln!(
             "updated {} ({} entr{} changed: {changed:?})",
@@ -664,6 +718,58 @@ fn every_pinned_machine_still_draws_its_frame() {
 // ---------------------------------------------------------------------------
 // Consistency of the pinned data — no ROMs needed, so CI enforces these
 // ---------------------------------------------------------------------------
+
+/// Every registered machine is accounted for: pinned, or explicitly unpinned
+/// with a written reason.
+///
+/// This is what makes the suite registry-driven: adding a machine fails here
+/// until a golden frame is captured for it, because an unpinned machine is an
+/// unguarded machine. The opt-out exists because a frame cannot always be
+/// captured (a ROM set no collection can supply), and it costs a sentence
+/// rather than silence.
+#[test]
+fn frames_toml_covers_every_registered_machine() {
+    let pinned: BTreeSet<String> = load_entries().into_iter().map(|e| e.machine).collect();
+    let unpinned = load_unpinned();
+
+    for u in &unpinned {
+        assert!(
+            registry::find(&u.machine).is_some(),
+            "{}: listed as [[unpinned]] but not registered",
+            u.machine
+        );
+        assert!(
+            !pinned.contains(&u.machine),
+            "{}: is both pinned and [[unpinned]] — one of the two is stale",
+            u.machine
+        );
+        assert!(
+            u.reason.len() > 30,
+            "{}: [[unpinned]] `reason` has to say why a frame cannot be \
+             captured, not just that one is missing: {:?}",
+            u.machine,
+            u.reason
+        );
+    }
+
+    let excused: BTreeSet<&str> = unpinned.iter().map(|u| u.machine.as_str()).collect();
+    let missing: Vec<&str> = registry::all()
+        .iter()
+        .map(|m| m.name)
+        .filter(|n| !pinned.contains(*n) && !excused.contains(n))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "registered machines with no golden frame: {missing:?}\n\
+         Capture them with PHOSPHOR_GOLDEN_UPDATE=1 cargo test -p phosphor-harness \
+         --test golden_frame_test, or add an [[unpinned]] entry saying why one \
+         cannot be captured"
+    );
+    assert!(
+        !registry::all().is_empty(),
+        "the registry is empty, so this test would pass having checked nothing"
+    );
+}
 
 /// Every entry names a distinct registered machine and describes itself.
 #[test]
