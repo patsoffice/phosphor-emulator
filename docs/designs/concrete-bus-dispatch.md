@@ -278,6 +278,18 @@ Moving an `impl Bus` onto a board can shadow the board's own inherent methods:
 method of the same name could call it. The compiler catches this as *"function
 cannot return without recursing"* — heed that warning rather than silencing it.
 
+### Hand-written `MachineDebug` needs its `debug_bus` repointed
+
+Machines whose `MachineDebug` is hand-written rather than macro-generated (Star
+Wars, because it overrides `set_debug_entropy`) keep returning the *board* from
+`debug_bus`. Once the CPUs move to the machine, that board no longer has any,
+and the debugger sees a machine with no CPUs. Return the machine instead — it
+merges the board through `#[debug_bus]`.
+
+Golden frames cannot catch this: the picture is identical either way. The
+ROM-gated boot check can, and did — "esb: exposes no CPUs through its debug bus,
+so this test cannot tell a booted machine from a wedged one". Run it.
+
 ### Machine API for tests and tools
 
 Converting a machine removes its `impl Bus`, which is what integration tests and
@@ -304,6 +316,10 @@ option on `impl_board_delegation!` goes away at the same time as its
 
 `bus_split!` itself is deleted when the last machine converts, along with the
 `#[allow(unused_unsafe)]` and the safety comment that justified it.
+
+Quantum was the first wide-bus machine converted, and the prediction held:
+nothing about it was width-specific. The `u32 word` arm simply stopped being
+referenced.
 
 ## Rollout order
 
@@ -332,7 +348,10 @@ Ordered by payoff per unit of risk: shared boards with several machines first
    the first 6502 machines, and so the first real users of the generic
    `Cpu::reset`. **Quantum and Star Wars** turned out not to share that board at
    all and are their own step: Quantum is a standalone M68000 + AVG machine and
-   Star Wars a standalone two-6502 board with seven `bus_split!` sites.
+   Star Wars a standalone two-6809 board. Both are now done too: Quantum grew a
+   `QuantumBoard` for its bus state (the standalone shape, ~120 field references
+   rewritten), Star Wars moved both CPUs onto the machine and let its existing
+   board be the bus.
 7. **Atari System 1** (Marble Madness, Road Runner) — M68000, the `u32 word`
    arm; needs (1).
 8. **Gottlieb System 80** (Q*bert) — I8088 + M6502, the `u32` arm; needs (1).

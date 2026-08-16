@@ -12,7 +12,6 @@
 //! AVG/matrix wiring, the POKEY/RIOT/TMS5220 sound, the ADC0809 flight yoke, and
 //! the X2212 NVRAM), loads the ROM set, and registers the machine.
 
-use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::debug_trace::{DebugEvent, DebugEventKind, DebugTraceBuffer};
 use phosphor_core::core::input::{AnalogAxis, AxisRange};
@@ -679,11 +678,6 @@ static ESB_MATHBOX_PROM: RomRegion = RomRegion {
 /// Processor, ROM banking, watchdog, periodic IRQ, and the main↔sound mailbox.
 #[derive(BusDebug, DebugTrace)]
 pub(crate) struct StarWarsBoard {
-    #[debug_cpu("M6809 Main")]
-    pub(crate) cpu: M6809,
-    #[debug_cpu("M6809 Sound")]
-    pub(crate) sound_cpu: M6809,
-
     #[debug_device("AVG")]
     pub(crate) avg: Avg,
     #[debug_device("SW-MATRIX")]
@@ -792,8 +786,6 @@ impl StarWarsBoard {
 
     fn with_variant(esb: bool) -> Self {
         Self {
-            cpu: M6809::new(),
-            sound_cpu: M6809::new(),
             avg: Avg::with_variant(
                 AvgVariant::StarWars,
                 TIMING.display_width as i32,
@@ -1341,7 +1333,9 @@ impl StarWarsBoard {
 
     /// One CPU cycle: periodic IRQ, watchdog, both CPUs, and the matrix busy
     /// countdown. `bus` aliases the owning wrapper (via `bus_split!`).
-    pub(crate) fn tick(&mut self, bus: &mut dyn Bus<Address = u16, Data = u8>) {
+    /// Board work before the CPUs' cycle: the periodic IRQ divider, the AVG
+    /// busy countdown and the watchdog.
+    pub(crate) fn begin_cycle(&mut self, cpu: &M6809) {
         // Compare before incrementing, so the divider fires on cycle
         // `IRQ_PERIOD_CYCLES` rather than one earlier. Incrementing first makes
         // the counter reach the period on cycle N-1, and an interrupt asserted
@@ -1364,7 +1358,7 @@ impl StarWarsBoard {
             if !self.watchdog_tripped && self.debug_trace.enabled() {
                 self.debug_trace.record(DebugEvent {
                     cpu_index: Some(0),
-                    pc: Some(self.cpu.pc as u32),
+                    pc: Some(cpu.pc as u32),
                     detail: Some("watchdog expired — board reset"),
                     ..DebugEvent::new(
                         self.clock,
@@ -1384,14 +1378,22 @@ impl StarWarsBoard {
         // normal runs pay nothing.
         if self.main_map.has_any_watchpoints() || self.debug_trace.enabled() {
             self.main_map
-                .latch_access_context(self.clock, Some(self.cpu.pc as u32));
+                .latch_access_context(self.clock, Some(cpu.pc as u32));
         }
-        self.cpu.execute_cycle(bus, BusMaster::Cpu(0));
+    }
+
+    /// Latch the sound CPU's PC before its cycle, so a watchpoint hit it takes
+    /// carries the instruction that caused it.
+    pub(crate) fn latch_sound_pc(&mut self, sound_cpu: &M6809) {
         if self.sound_map.has_any_watchpoints() {
             self.sound_map
-                .latch_access_context(self.clock, Some(self.sound_cpu.pc as u32));
+                .latch_access_context(self.clock, Some(sound_cpu.pc as u32));
         }
-        self.sound_cpu.execute_cycle(bus, BusMaster::Cpu(1));
+    }
+
+    /// Board work after the CPUs' cycle: the matrix processor, the sound
+    /// board, and the clock advance.
+    pub(crate) fn end_cycle(&mut self) {
         self.math.tick();
         for p in &mut self.pokey {
             p.tick();
@@ -1514,15 +1516,16 @@ impl StarWarsBoard {
         n
     }
 
-    pub(crate) fn debug_tick_boundaries(&self) -> u32 {
-        self.cpu.at_instruction_boundary() as u32
+    /// Whether the main CPU is at an instruction boundary. It lives on the
+    /// machine, which passes it back in.
+    pub(crate) fn instruction_boundaries(cpu: &M6809) -> u32 {
+        cpu.at_instruction_boundary() as u32
     }
 }
 
 impl Saveable for StarWarsBoard {
     fn save_state(&self, w: &mut StateWriter) {
-        self.cpu.save_state(w);
-        self.sound_cpu.save_state(w);
+        // The CPUs are saved by the machine, which owns them.
         self.avg.save_state(w);
         self.math.save_state(w);
         if let Some(sl) = &self.slapstic {
@@ -1554,8 +1557,7 @@ impl Saveable for StarWarsBoard {
     }
 
     fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
-        self.cpu.load_state(r)?;
-        self.sound_cpu.load_state(r)?;
+        // The CPUs are loaded by the machine, which owns them.
         self.avg.load_state(r)?;
         self.math.load_state(r)?;
         if let Some(sl) = &mut self.slapstic {
@@ -1618,8 +1620,15 @@ impl Saveable for StarWarsBoard {
 /// Star Wars / Empire Strikes Back machine: the board plus the registry id the
 /// two variants report (`machine_id` distinguishes them for save-state and NVRAM
 /// paths since both share this wrapper type).
-#[derive(phosphor_macros::Saveable)]
+#[derive(phosphor_macros::Saveable, phosphor_macros::BusDebug)]
 pub(crate) struct StarWarsSystem {
+    /// Both 6809s are held beside the board, which is their bus.
+    #[debug_cpu("M6809 Main")]
+    pub(crate) cpu: M6809,
+    #[debug_cpu("M6809 Sound")]
+    pub(crate) sound_cpu: M6809,
+
+    #[debug_bus]
     pub(crate) board: StarWarsBoard,
     #[save_skip]
     pub(crate) machine_id: &'static str,
@@ -1628,6 +1637,8 @@ pub(crate) struct StarWarsSystem {
 impl StarWarsSystem {
     pub(crate) fn new() -> Self {
         Self {
+            cpu: M6809::new(),
+            sound_cpu: M6809::new(),
             board: StarWarsBoard::new(),
             machine_id: "starwars",
         }
@@ -1636,6 +1647,8 @@ impl StarWarsSystem {
     /// The Empire Strikes Back variant (slapstic-banked window + bank 2).
     pub(crate) fn new_esb() -> Self {
         Self {
+            cpu: M6809::new(),
+            sound_cpu: M6809::new(),
             board: StarWarsBoard::new_esb(),
             machine_id: "esb",
         }
@@ -1657,34 +1670,61 @@ impl StarWarsSystem {
     /// forever and the sound CPU would keep running the pre-reset code — the
     /// machine would behave differently under the debugger than at full speed,
     /// which is the one thing a debugger must not do.
-    fn debug_pre_tick(&mut self) {
+    /// Service a pending sound-CPU reset ($46E0).
+    ///
+    /// The reset fetches a vector through the bus, which is why it is deferred
+    /// out of the $46E0 write: the CPU and the bus are separate fields here, so
+    /// this is now a plain call rather than something needing a borrow split.
+    fn service_sound_reset(&mut self) {
         if self.board.sound_reset_pending {
             self.board.sound_reset_pending = false;
-            bus_split!(self, bus => {
-                self.board.sound_cpu.reset(bus, BusMaster::Cpu(1));
-            });
+            self.sound_cpu.reset(&mut self.board, BusMaster::Cpu(1));
         }
+    }
+
+    /// One CPU cycle: board work, both 6809s, then the sound board.
+    pub(crate) fn step_cycle(&mut self) -> u32 {
+        self.service_sound_reset();
+        self.tick_once();
+        StarWarsBoard::instruction_boundaries(&self.cpu)
+    }
+
+    /// One cycle without the deferred-reset check (the frame loop does that
+    /// once per frame, as the hardware's reset line would settle).
+    fn tick_once(&mut self) {
+        self.board.begin_cycle(&self.cpu);
+        self.cpu.execute_cycle(&mut self.board, BusMaster::Cpu(0));
+        self.board.latch_sound_pc(&self.sound_cpu);
+        self.sound_cpu
+            .execute_cycle(&mut self.board, BusMaster::Cpu(1));
+        self.board.end_cycle();
     }
 }
 
-impl Bus for StarWarsSystem {
+// The board is the bus: Star Wars and Empire share it, and the variant
+// differences (the slapstic window, the bank) are board state already.
+impl Bus for StarWarsBoard {
     type Address = u16;
     type Data = u8;
 
+    #[inline]
     fn read(&mut self, master: BusMaster, addr: u16) -> u8 {
-        self.board.bus_read(master, addr)
+        self.bus_read(master, addr)
     }
 
+    #[inline]
     fn write(&mut self, master: BusMaster, addr: u16, data: u8) {
-        self.board.bus_write(master, addr, data);
+        self.bus_write(master, addr, data);
     }
 
+    #[inline]
     fn is_halted_for(&self, master: BusMaster) -> bool {
-        self.board.bus_is_halted_for(master)
+        self.bus_is_halted_for(master)
     }
 
+    #[inline]
     fn check_interrupts(&mut self, target: BusMaster) -> InterruptState {
-        self.board.bus_check_interrupts(target)
+        self.bus_check_interrupts(target)
     }
 }
 
@@ -1696,11 +1736,13 @@ crate::impl_board_audio!(StarWarsSystem, board);
 // for. Everything else is the same delegation the macro emits.
 impl phosphor_core::core::machine::MachineDebug for StarWarsSystem {
     fn debug_bus(&self) -> Option<&dyn phosphor_core::core::debug::BusDebug> {
-        Some(&self.board)
+        // The machine, not the board: it owns the CPUs and merges the board's
+        // devices and maps through `#[debug_bus]`.
+        Some(self)
     }
 
     fn debug_bus_mut(&mut self) -> Option<&mut dyn phosphor_core::core::debug::BusDebug> {
-        Some(&mut self.board)
+        Some(self)
     }
 
     fn cycles_per_frame(&self) -> u64 {
@@ -1708,11 +1750,7 @@ impl phosphor_core::core::machine::MachineDebug for StarWarsSystem {
     }
 
     fn debug_tick(&mut self) -> u32 {
-        self.debug_pre_tick();
-        bus_split!(self, bus => {
-            self.board.tick(bus);
-        });
-        self.board.debug_tick_boundaries()
+        self.step_cycle()
     }
 
     /// The board's only entropy source is the Matrix Processor PRNG at $4703.
@@ -1731,15 +1769,12 @@ impl MachineCore for StarWarsSystem {
     }
 
     fn run_frame(&mut self) {
-        // A pending sound-CPU reset ($46E0) is serviced here, where `bus_split!`
-        // yields a bus for the reset-vector fetch. `debug_pre_tick` does the
-        // same for the cycle-stepped paths, which never reach this function.
-        self.debug_pre_tick();
-        bus_split!(self, bus => {
-            for _ in 0..TIMING.cycles_per_frame() {
-                self.board.tick(bus);
-            }
-        });
+        // A pending sound-CPU reset ($46E0) is serviced once per frame; the
+        // cycle-stepped debugger paths do it per step in `step_cycle`.
+        self.service_sound_reset();
+        for _ in 0..TIMING.cycles_per_frame() {
+            self.tick_once();
+        }
         self.board.end_frame_audio();
         if self.board.take_watchdog_trip() {
             self.reset();
@@ -1748,10 +1783,8 @@ impl MachineCore for StarWarsSystem {
 
     fn reset(&mut self) {
         self.board.reset();
-        bus_split!(self, bus => {
-            self.board.cpu.reset(bus, BusMaster::Cpu(0));
-            self.board.sound_cpu.reset(bus, BusMaster::Cpu(1));
-        });
+        self.cpu.reset(&mut self.board, BusMaster::Cpu(0));
+        self.sound_cpu.reset(&mut self.board, BusMaster::Cpu(1));
     }
 }
 

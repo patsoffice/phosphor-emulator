@@ -36,7 +36,6 @@
 //! the containing word, so low-byte I/O writes (POKEY, NVRAM, color RAM,
 //! `led_w`) take `data & 0xFF` and I/O reads stay side-effect-light.
 
-use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::input::{DrainPolicy, RelativeCounter};
 use phosphor_core::core::machine::{
@@ -314,6 +313,17 @@ fn deinterleave_program(chips: &[u8]) -> Vec<u8> {
 pub struct QuantumSystem {
     #[debug_cpu("M68000")]
     cpu: M68000,
+
+    /// Everything the 68000 talks *to*. Held in its own struct so the CPU and
+    /// the bus are disjoint fields: `cpu.execute_cycle(&mut self.board, ..)`
+    /// then borrow-checks natively and dispatches at a concrete type.
+    #[debug_bus]
+    board: QuantumBoard,
+}
+
+/// The Quantum bus: address space, AVG, POKEYs, NVRAM and I/O.
+#[derive(BusDebug)]
+pub struct QuantumBoard {
     #[debug_map(cpu = 0)]
     map: AddressSpace32,
     #[debug_device("AVG")]
@@ -390,39 +400,41 @@ impl QuantumSystem {
     pub fn new() -> Self {
         let mut sys = Self {
             cpu: M68000::new(),
-            map: Self::build_map(),
-            avg: Avg::with_variant(
-                AvgVariant::Quantum,
-                TIMING.display_width as i32,
-                TIMING.display_height as i32,
-            ),
-            pokey: [
-                Pokey::with_clock(POKEY_CLOCK_HZ, 44100),
-                Pokey::with_clock(POKEY_CLOCK_HZ, 44100),
-            ],
-            color_ram: [0; 16],
-            nvram: [0xFF; 256], // X2212 powers up 1-filled
-            display_list: Vec::with_capacity(2048),
-            track_x: new_track_counter(),
-            track_y: new_track_counter(),
-            system_input: 0xFF,
-            dsw0: 0x00,
-            dsw1: 0x00,
-            irq_counter: 0,
-            irq_pending: false,
-            prev_irq_taken: false,
-            clock: 0,
-            watchdog_count: 0,
-            audio_buffer: Vec::with_capacity(2048),
+            board: QuantumBoard {
+                map: Self::build_map(),
+                avg: Avg::with_variant(
+                    AvgVariant::Quantum,
+                    TIMING.display_width as i32,
+                    TIMING.display_height as i32,
+                ),
+                pokey: [
+                    Pokey::with_clock(POKEY_CLOCK_HZ, 44100),
+                    Pokey::with_clock(POKEY_CLOCK_HZ, 44100),
+                ],
+                color_ram: [0; 16],
+                nvram: [0xFF; 256], // X2212 powers up 1-filled
+                display_list: Vec::with_capacity(2048),
+                track_x: new_track_counter(),
+                track_y: new_track_counter(),
+                system_input: 0xFF,
+                dsw0: 0x00,
+                dsw1: 0x00,
+                irq_counter: 0,
+                irq_pending: false,
+                prev_irq_taken: false,
+                clock: 0,
+                watchdog_count: 0,
+                audio_buffer: Vec::with_capacity(2048),
+            },
         };
-        sys.refresh_dip_pots();
+        sys.board.refresh_dip_pots();
         sys
     }
 
     pub fn load_rom_set(&mut self, rom_set: &RomSet) -> Result<(), RomLoadError> {
         self.load_program(&QUANTUM_PROGRAM_ROM, rom_set)?;
         let avg_prom = QUANTUM_AVG_PROM.load(rom_set)?;
-        self.avg.load_state_prom(&avg_prom);
+        self.board.avg.load_state_prom(&avg_prom);
         Ok(())
     }
 
@@ -432,7 +444,8 @@ impl QuantumSystem {
         // pair into the big-endian image: even chip → even byte (high), odd chip
         // → odd byte (low). Without this the 68000 runs scrambled code.
         let chips = region.load(rom_set)?;
-        self.map
+        self.board
+            .map
             .load_region(Region::Rom, &deinterleave_program(&chips));
         Ok(())
     }
@@ -442,9 +455,11 @@ impl QuantumSystem {
     }
 
     pub fn clock(&self) -> u64 {
-        self.clock
+        self.board.clock
     }
+}
 
+impl QuantumBoard {
     /// Feed the DIP switches to the POKEY pot inputs (same wiring as Food
     /// Fight): POKEY1 pots read DSW0, POKEY2 pots read DSW1; pot n returns DIP
     /// bit n in bit 7, so set the pot level to 0x80 when the bit is set.
@@ -490,7 +505,9 @@ impl QuantumSystem {
         self.track_y.update();
     }
 
-    pub fn tick(&mut self) {
+    /// Board work before the CPU's cycle: the periodic IRQ, the POKEYs on their
+    /// divider, and the watchpoint attribution latch.
+    fn begin_cycle(&mut self, cpu: &M68000) {
         // Periodic IRQ1 (HOLD_LINE).
         self.irq_counter += 1;
         if self.irq_counter >= IRQ_PERIOD_CYCLES {
@@ -506,26 +523,35 @@ impl QuantumSystem {
         }
 
         if self.map.has_any_watchpoints() {
-            let pc = self.cpu.at_instruction_boundary().then_some(self.cpu.pc);
+            let pc = cpu.at_instruction_boundary().then_some(cpu.pc);
             self.map.latch_access_context(self.clock, pc);
         }
+    }
 
-        bus_split!(self, bus: u32 word => {
-            self.cpu.execute_cycle(bus, BusMaster::Cpu(0));
-        });
-
-        // HOLD_LINE auto-ack: the periodic IRQ stays asserted until the CPU's
-        // interrupt-acknowledge. The 68000 core takes a level-1 IRQ while
-        // `level > mask` and raises the mask to 1, so detect the rising edge of
-        // "mask reached the IRQ level" and release the line — otherwise it would
-        // re-storm after the handler's RTE.
-        let taken = self.cpu.interrupt_mask() >= 1;
+    /// HOLD_LINE auto-ack plus the clock advance.
+    ///
+    /// The periodic IRQ stays asserted until the CPU's interrupt-acknowledge.
+    /// The 68000 core takes a level-1 IRQ while `level > mask` and raises the
+    /// mask to 1, so detect the rising edge of "mask reached the IRQ level" and
+    /// release the line — otherwise it would re-storm after the handler's RTE.
+    fn end_cycle(&mut self, cpu: &M68000) {
+        let taken = cpu.interrupt_mask() >= 1;
         if self.irq_pending && taken && !self.prev_irq_taken {
             self.irq_pending = false;
         }
         self.prev_irq_taken = taken;
 
         self.clock += 1;
+    }
+}
+
+impl QuantumSystem {
+    /// One CPU cycle. The CPU and the board are disjoint fields, so the 68000
+    /// drives the board directly — no trait object, no raw-pointer split.
+    pub fn tick(&mut self) {
+        self.board.begin_cycle(&self.cpu);
+        self.cpu.execute_cycle(&mut self.board, BusMaster::Cpu(0));
+        self.board.end_cycle(&self.cpu);
     }
 }
 
@@ -539,7 +565,7 @@ impl Default for QuantumSystem {
 // Bus
 // ---------------------------------------------------------------------------
 
-impl Bus for QuantumSystem {
+impl Bus for QuantumBoard {
     type Address = u32;
     type Data = u16;
 
@@ -626,7 +652,7 @@ impl Renderable for QuantumSystem {
         // board uses flip_y=false because its GL path applies a 270° rotation
         // that already negates Y.)
         rasterize_vectors(
-            &self.display_list,
+            &self.board.display_list,
             buffer,
             TIMING.display_width,
             TIMING.display_height,
@@ -635,7 +661,7 @@ impl Renderable for QuantumSystem {
     }
 
     fn vector_display_list(&self) -> Option<&[VectorLine]> {
-        Some(&self.display_list)
+        Some(&self.board.display_list)
     }
 
     // No orientation override: the cabinet is a vertical (portrait) monitor,
@@ -646,9 +672,9 @@ impl Renderable for QuantumSystem {
 
 impl AudioSource for QuantumSystem {
     fn fill_audio(&mut self, buffer: &mut [i16]) -> usize {
-        let n = buffer.len().min(self.audio_buffer.len());
-        buffer[..n].copy_from_slice(&self.audio_buffer[..n]);
-        self.audio_buffer.drain(..n);
+        let n = buffer.len().min(self.board.audio_buffer.len());
+        buffer[..n].copy_from_slice(&self.board.audio_buffer[..n]);
+        self.board.audio_buffer.drain(..n);
         n
     }
 
@@ -666,12 +692,12 @@ impl InputConfigurable for QuantumSystem {
         match event {
             InputEvent::Button { id, pressed } => match id.0 as u8 {
                 // SYSTEM active-low: coins (bits 5/4/1), start (2/3), service (7).
-                INPUT_COIN1 => set_bit_active_low(&mut self.system_input, 5, pressed),
-                INPUT_COIN2 => set_bit_active_low(&mut self.system_input, 4, pressed),
-                INPUT_COIN3 => set_bit_active_low(&mut self.system_input, 1, pressed),
-                INPUT_START1 => set_bit_active_low(&mut self.system_input, 2, pressed),
-                INPUT_START2 => set_bit_active_low(&mut self.system_input, 3, pressed),
-                INPUT_SERVICE => set_bit_active_low(&mut self.system_input, 7, pressed),
+                INPUT_COIN1 => set_bit_active_low(&mut self.board.system_input, 5, pressed),
+                INPUT_COIN2 => set_bit_active_low(&mut self.board.system_input, 4, pressed),
+                INPUT_COIN3 => set_bit_active_low(&mut self.board.system_input, 1, pressed),
+                INPUT_START1 => set_bit_active_low(&mut self.board.system_input, 2, pressed),
+                INPUT_START2 => set_bit_active_low(&mut self.board.system_input, 3, pressed),
+                INPUT_SERVICE => set_bit_active_low(&mut self.board.system_input, 7, pressed),
                 _ => {}
             },
             InputEvent::Relative { id, delta } => {
@@ -679,9 +705,9 @@ impl InputConfigurable for QuantumSystem {
                 // reads horizontal. Mouse X drives TRACKY, mouse Y drives
                 // TRACKX (negated for the PORT_REVERSE).
                 if id == CTRL_TRACK_X {
-                    self.track_y.add_delta(delta);
+                    self.board.track_y.add_delta(delta);
                 } else if id == CTRL_TRACK_Y {
-                    self.track_x.add_delta(-delta);
+                    self.board.track_x.add_delta(-delta);
                 }
             }
             InputEvent::Absolute { .. } => {}
@@ -692,8 +718,8 @@ impl InputConfigurable for QuantumSystem {
     /// reach accumulated motion or a held deflection.
     fn release_all_inputs(&mut self) {
         phosphor_core::core::machine::release_all_controls(self);
-        self.track_x.release_all();
-        self.track_y.release_all();
+        self.board.track_x.release_all();
+        self.board.track_y.release_all();
     }
 }
 
@@ -701,7 +727,7 @@ impl MachineCore for QuantumSystem {
     crate::machine_core_metadata!("quantum", TIMING);
 
     fn run_frame(&mut self) {
-        self.update_trackball();
+        self.board.update_trackball();
 
         for _ in 0..TIMING.cycles_per_frame() {
             self.tick();
@@ -711,40 +737,38 @@ impl MachineCore for QuantumSystem {
         // timeout must outlast Quantum's boot-time delay loops (which busy-wait
         // for ~0.3 s ≈ 18 frames while only *reading* the watchdog), so this is
         // far longer than Food Fight's 8-frame timeout.
-        self.watchdog_count = self.watchdog_count.saturating_add(1);
-        if self.watchdog_count >= WATCHDOG_FRAMES {
+        self.board.watchdog_count = self.board.watchdog_count.saturating_add(1);
+        if self.board.watchdog_count >= WATCHDOG_FRAMES {
             self.reset();
         }
 
         // Mix the two POKEYs to mono.
-        let s0 = self.pokey[0].drain_audio();
-        let s1 = self.pokey[1].drain_audio();
+        let s0 = self.board.pokey[0].drain_audio();
+        let s1 = self.board.pokey[1].drain_audio();
         let len = s0.len().min(s1.len());
-        self.audio_buffer.extend((0..len).map(|i| {
+        self.board.audio_buffer.extend((0..len).map(|i| {
             let mixed = (s0[i] + s1[i]) * 0.5; // [0, 1]
             ((mixed - 0.5) * 2.0 * 32767.0) as i16
         }));
     }
 
     fn reset(&mut self) {
-        self.avg.reset();
-        self.display_list.clear();
-        self.irq_pending = false;
-        self.irq_counter = 0;
-        self.prev_irq_taken = false;
-        self.watchdog_count = 0;
-        self.system_input = 0xFF;
-        self.track_x = new_track_counter();
-        self.track_y = new_track_counter();
-        self.audio_buffer.clear();
-        for p in &mut self.pokey {
+        self.board.avg.reset();
+        self.board.display_list.clear();
+        self.board.irq_pending = false;
+        self.board.irq_counter = 0;
+        self.board.prev_irq_taken = false;
+        self.board.watchdog_count = 0;
+        self.board.system_input = 0xFF;
+        self.board.track_x = new_track_counter();
+        self.board.track_y = new_track_counter();
+        self.board.audio_buffer.clear();
+        for p in &mut self.board.pokey {
             p.reset();
         }
-        self.refresh_dip_pots();
+        self.board.refresh_dip_pots();
 
-        bus_split!(self, bus: u32 word => {
-            self.cpu.reset(bus, BusMaster::Cpu(0));
-        });
+        self.cpu.reset(&mut self.board, BusMaster::Cpu(0));
     }
 }
 
@@ -755,48 +779,48 @@ crate::impl_standalone_debug!(QuantumSystem);
 impl Saveable for QuantumSystem {
     fn save_state(&self, w: &mut StateWriter) {
         self.cpu.save_state(w);
-        self.avg.save_state(w);
-        for p in &self.pokey {
+        self.board.avg.save_state(w);
+        for p in &self.board.pokey {
             p.save_state(w);
         }
-        w.write_bytes(self.map.region_data(Region::Ram));
-        w.write_bytes(self.map.region_data(Region::VectorRam));
-        w.write_bytes(&self.color_ram);
-        w.write_bytes(&self.nvram);
-        w.write_u8(self.track_x.counter());
-        w.write_u8(self.track_y.counter());
-        w.write_u8(self.system_input);
-        w.write_u8(self.dsw0);
-        w.write_u8(self.dsw1);
-        w.write_u64_le(self.irq_counter);
-        w.write_bool(self.irq_pending);
-        w.write_u64_le(self.clock);
-        w.write_u8(self.watchdog_count);
+        w.write_bytes(self.board.map.region_data(Region::Ram));
+        w.write_bytes(self.board.map.region_data(Region::VectorRam));
+        w.write_bytes(&self.board.color_ram);
+        w.write_bytes(&self.board.nvram);
+        w.write_u8(self.board.track_x.counter());
+        w.write_u8(self.board.track_y.counter());
+        w.write_u8(self.board.system_input);
+        w.write_u8(self.board.dsw0);
+        w.write_u8(self.board.dsw1);
+        w.write_u64_le(self.board.irq_counter);
+        w.write_bool(self.board.irq_pending);
+        w.write_u64_le(self.board.clock);
+        w.write_u8(self.board.watchdog_count);
     }
 
     fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
         self.cpu.load_state(r)?;
-        self.avg.load_state(r)?;
-        for p in &mut self.pokey {
+        self.board.avg.load_state(r)?;
+        for p in &mut self.board.pokey {
             p.load_state(r)?;
         }
-        r.read_bytes_into(self.map.region_data_mut(Region::Ram))?;
-        r.read_bytes_into(self.map.region_data_mut(Region::VectorRam))?;
-        r.read_bytes_into(&mut self.color_ram)?;
-        r.read_bytes_into(&mut self.nvram)?;
-        self.track_x.set_counter(r.read_u8()?);
-        self.track_y.set_counter(r.read_u8()?);
-        self.system_input = r.read_u8()?;
-        self.dsw0 = r.read_u8()?;
-        self.dsw1 = r.read_u8()?;
-        self.irq_counter = r.read_u64_le()?;
-        self.irq_pending = r.read_bool()?;
-        self.clock = r.read_u64_le()?;
-        self.watchdog_count = r.read_u8()?;
-        self.prev_irq_taken = false;
-        self.display_list.clear();
-        self.refresh_dip_pots();
-        self.audio_buffer.clear();
+        r.read_bytes_into(self.board.map.region_data_mut(Region::Ram))?;
+        r.read_bytes_into(self.board.map.region_data_mut(Region::VectorRam))?;
+        r.read_bytes_into(&mut self.board.color_ram)?;
+        r.read_bytes_into(&mut self.board.nvram)?;
+        self.board.track_x.set_counter(r.read_u8()?);
+        self.board.track_y.set_counter(r.read_u8()?);
+        self.board.system_input = r.read_u8()?;
+        self.board.dsw0 = r.read_u8()?;
+        self.board.dsw1 = r.read_u8()?;
+        self.board.irq_counter = r.read_u64_le()?;
+        self.board.irq_pending = r.read_bool()?;
+        self.board.clock = r.read_u64_le()?;
+        self.board.watchdog_count = r.read_u8()?;
+        self.board.prev_irq_taken = false;
+        self.board.display_list.clear();
+        self.board.refresh_dip_pots();
+        self.board.audio_buffer.clear();
         Ok(())
     }
 }
@@ -807,12 +831,12 @@ impl SaveState for QuantumSystem {
 
 impl Nvram for QuantumSystem {
     fn save_nvram(&self) -> Option<&[u8]> {
-        Some(&self.nvram)
+        Some(&self.board.nvram)
     }
 
     fn load_nvram(&mut self, data: &[u8]) {
-        let len = data.len().min(self.nvram.len());
-        self.nvram[..len].copy_from_slice(&data[..len]);
+        let len = data.len().min(self.board.nvram.len());
+        self.board.nvram[..len].copy_from_slice(&data[..len]);
     }
 }
 
@@ -920,13 +944,13 @@ impl DipSwitches for QuantumSystem {
     }
 
     fn dip_bank_value(&self, bank: usize) -> u8 {
-        if bank == 0 { self.dsw0 } else { 0 }
+        if bank == 0 { self.board.dsw0 } else { 0 }
     }
 
     fn set_dip_bank_value(&mut self, bank: usize, value: u8) {
         if bank == 0 {
-            self.dsw0 = value;
-            self.refresh_dip_pots();
+            self.board.dsw0 = value;
+            self.board.refresh_dip_pots();
         }
     }
 }
@@ -1007,10 +1031,16 @@ mod tests {
     #[test]
     fn map_decodes_documented_windows() {
         let sys = QuantumSystem::new();
-        assert_eq!(sys.map.region_at(0x00_0000).unwrap().id, Region::Rom.into());
-        assert_eq!(sys.map.region_at(0x01_8000).unwrap().id, Region::Ram.into());
         assert_eq!(
-            sys.map.region_at(0x80_0000).unwrap().id,
+            sys.board.map.region_at(0x00_0000).unwrap().id,
+            Region::Rom.into()
+        );
+        assert_eq!(
+            sys.board.map.region_at(0x01_8000).unwrap().id,
+            Region::Ram.into()
+        );
+        assert_eq!(
+            sys.board.map.region_at(0x80_0000).unwrap().id,
             Region::VectorRam.into()
         );
     }
@@ -1051,7 +1081,7 @@ mod tests {
         use phosphor_core::device::dvg::VectorLine;
 
         let mut sys = QuantumSystem::new();
-        sys.display_list = vec![VectorLine {
+        sys.board.display_list = vec![VectorLine {
             x0: 280,
             y0: 0,
             x1: 320,
@@ -1077,38 +1107,50 @@ mod tests {
     #[test]
     fn nvram_powers_up_one_filled_and_round_trips() {
         let mut sys = QuantumSystem::new();
-        assert_eq!(sys.nvram[0], 0xFF);
-        Bus::write(&mut sys, BusMaster::Cpu(0), 0x90_0000, 0x1234);
-        assert_eq!(sys.nvram[0], 0x34);
-        assert_eq!(Bus::read(&mut sys, BusMaster::Cpu(0), 0x90_0000), 0x0034);
+        assert_eq!(sys.board.nvram[0], 0xFF);
+        Bus::write(&mut sys.board, BusMaster::Cpu(0), 0x90_0000, 0x1234);
+        assert_eq!(sys.board.nvram[0], 0x34);
+        assert_eq!(
+            Bus::read(&mut sys.board, BusMaster::Cpu(0), 0x90_0000),
+            0x0034
+        );
     }
 
     #[test]
     fn ram_word_access_round_trips() {
         let mut sys = QuantumSystem::new();
-        Bus::write(&mut sys, BusMaster::Cpu(0), 0x01_8000, 0xBEEF);
-        assert_eq!(Bus::read(&mut sys, BusMaster::Cpu(0), 0x01_8000), 0xBEEF);
+        Bus::write(&mut sys.board, BusMaster::Cpu(0), 0x01_8000, 0xBEEF);
+        assert_eq!(
+            Bus::read(&mut sys.board, BusMaster::Cpu(0), 0x01_8000),
+            0xBEEF
+        );
     }
 
     #[test]
     fn trackball_packs_two_nibbles() {
         let mut sys = QuantumSystem::new();
-        sys.track_x.set_counter(0x3);
-        sys.track_y.set_counter(0x5);
-        assert_eq!(Bus::read(&mut sys, BusMaster::Cpu(0), 0x94_0000), 0x0053);
+        sys.board.track_x.set_counter(0x3);
+        sys.board.track_y.set_counter(0x5);
+        assert_eq!(
+            Bus::read(&mut sys.board, BusMaster::Cpu(0), 0x94_0000),
+            0x0053
+        );
     }
 
     #[test]
     fn system_reports_avg_halt_in_bit0() {
         let mut sys = QuantumSystem::new();
         // Fresh AVG is halted → bit0 set.
-        assert_eq!(Bus::read(&mut sys, BusMaster::Cpu(0), 0x94_8000) & 1, 1);
+        assert_eq!(
+            Bus::read(&mut sys.board, BusMaster::Cpu(0), 0x94_8000) & 1,
+            1
+        );
     }
 
     #[test]
     fn reset_loads_ssp_and_pc_from_vectors() {
         let mut sys = QuantumSystem::new();
-        let rom = sys.map.region_data_mut(Region::Rom);
+        let rom = sys.board.map.region_data_mut(Region::Rom);
         rom[0..8].copy_from_slice(&[0x00, 0x01, 0x80, 0x00, 0x00, 0x00, 0x04, 0x00]);
         sys.reset();
         let st = sys.get_cpu_state();
@@ -1122,7 +1164,7 @@ mod tests {
     fn synthetic_program_boots_and_takes_interrupts() {
         let mut sys = QuantumSystem::new();
         {
-            let rom = sys.map.region_data_mut(Region::Rom);
+            let rom = sys.board.map.region_data_mut(Region::Rom);
             // Reset vectors: SSP = 0x00018800, PC = 0x00000400.
             rom[0x00..0x08].copy_from_slice(&[0x00, 0x01, 0x88, 0x00, 0x00, 0x00, 0x04, 0x00]);
             // Autovector 25 (level-1 IRQ) → 0x500.
@@ -1155,7 +1197,7 @@ mod tests {
         let pc = sys.get_cpu_state().pc;
         assert!(pc < 0x1_4000, "PC {pc:#08X} escaped ROM");
 
-        let ram = sys.map.region_data(Region::Ram);
+        let ram = sys.board.map.region_data(Region::Ram);
         let alive = u32::from_be_bytes([ram[0], ram[1], ram[2], ram[3]]);
         assert!(alive > 0, "main loop never ran");
         let taken = u32::from_be_bytes([ram[0x10], ram[0x11], ram[0x12], ram[0x13]]);
@@ -1165,15 +1207,15 @@ mod tests {
     #[test]
     fn save_load_round_trip() {
         let mut sys = QuantumSystem::new();
-        sys.map.region_data_mut(Region::Ram)[0x100] = 0xAB;
-        sys.map.region_data_mut(Region::VectorRam)[0x10] = 0xCD;
-        sys.color_ram[5] = 0x0A;
-        sys.nvram[0x20] = 0x42;
-        sys.system_input = 0xF0;
-        sys.track_x.set_counter(0x7);
-        sys.irq_pending = true;
-        sys.clock = 12_345;
-        sys.watchdog_count = 3;
+        sys.board.map.region_data_mut(Region::Ram)[0x100] = 0xAB;
+        sys.board.map.region_data_mut(Region::VectorRam)[0x10] = 0xCD;
+        sys.board.color_ram[5] = 0x0A;
+        sys.board.nvram[0x20] = 0x42;
+        sys.board.system_input = 0xF0;
+        sys.board.track_x.set_counter(0x7);
+        sys.board.irq_pending = true;
+        sys.board.clock = 12_345;
+        sys.board.watchdog_count = 3;
 
         let data = SaveState::save_state(&sys).expect("save");
         let cpu_snap = sys.get_cpu_state();
@@ -1182,14 +1224,14 @@ mod tests {
         SaveState::load_state(&mut sys2, &data).unwrap();
 
         assert_eq!(sys2.get_cpu_state(), cpu_snap);
-        assert_eq!(sys2.map.region_data(Region::Ram)[0x100], 0xAB);
-        assert_eq!(sys2.map.region_data(Region::VectorRam)[0x10], 0xCD);
-        assert_eq!(sys2.color_ram[5], 0x0A);
-        assert_eq!(sys2.nvram[0x20], 0x42);
-        assert_eq!(sys2.system_input, 0xF0);
-        assert_eq!(sys2.track_x.counter(), 0x7);
-        assert!(sys2.irq_pending);
-        assert_eq!(sys2.clock, 12_345);
-        assert_eq!(sys2.watchdog_count, 3);
+        assert_eq!(sys2.board.map.region_data(Region::Ram)[0x100], 0xAB);
+        assert_eq!(sys2.board.map.region_data(Region::VectorRam)[0x10], 0xCD);
+        assert_eq!(sys2.board.color_ram[5], 0x0A);
+        assert_eq!(sys2.board.nvram[0x20], 0x42);
+        assert_eq!(sys2.board.system_input, 0xF0);
+        assert_eq!(sys2.board.track_x.counter(), 0x7);
+        assert!(sys2.board.irq_pending);
+        assert_eq!(sys2.board.clock, 12_345);
+        assert_eq!(sys2.board.watchdog_count, 3);
     }
 }
