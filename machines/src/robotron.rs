@@ -1,16 +1,16 @@
-use phosphor_core::bus_split;
-use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
     Direction, InputConfigurable, InputControl, InputEvent, InputId, InputKind, MachineCore, Nvram,
     Profilable, SaveState,
 };
 use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
-use phosphor_macros::Saveable;
+use phosphor_core::cpu::m6800::M6800;
+use phosphor_core::cpu::m6809::M6809;
+use phosphor_macros::{BusDebug, Saveable};
 
 use crate::rom_loader::{RomEntry, RomRegion};
 use crate::set_bit_active_high;
-use crate::williams::{self, WilliamsBoard};
+use crate::williams::{self, WilliamsBoard, WilliamsCpus};
 
 // Re-export decoder PROM under the game-specific name.
 pub use crate::williams::WILLIAMS_DECODER_PROM as ROBOTRON_DECODER_PROM;
@@ -254,8 +254,16 @@ const ROBOTRON_CONTROLS: &[InputControl] = &[
 /// Twin-stick controls: move stick on Widget PIA Port A bits 0-3,
 /// fire stick split across Port A bits 6-7 (up/down) and Port B bits 0-1 (left/right).
 /// No LS157 mux — all inputs directly wired.
-#[derive(Saveable)]
+#[derive(Saveable, BusDebug)]
 pub struct RobotronSystem {
+    /// The CPUs are held beside the board, which is their bus: Robotron adds
+    /// nothing to the board's address decoding.
+    #[debug_cpu("M6809 Main")]
+    pub cpu: M6809,
+    #[debug_cpu("M6800 Sound")]
+    pub sound_cpu: M6800,
+
+    #[debug_bus]
     pub board: WilliamsBoard,
 
     // Direct-wired input state
@@ -266,22 +274,63 @@ pub struct RobotronSystem {
 impl RobotronSystem {
     pub fn new() -> Self {
         Self {
+            cpu: M6809::new(),
+            sound_cpu: M6800::new(),
             board: WilliamsBoard::new(),
             widget_port_a: 0,
             widget_port_b: 0,
         }
     }
 
-    fn debug_pre_tick(&mut self) {
+    /// Push the direct-wired input state into the Widget PIA. `run_frame` does
+    /// this once per frame; the debugger's single-step does it per cycle, since
+    /// input can change between steps.
+    fn apply_inputs(&mut self) {
         self.board.widget_pia.set_port_a_input(self.widget_port_a);
         self.board.widget_pia.set_port_b_input(self.widget_port_b);
     }
 
-    /// Tick one cycle, splitting the borrow so the board can access the bus.
+    /// Main-CPU register snapshot (the CPUs live here, not on the board).
+    pub fn get_cpu_state(&self) -> phosphor_core::cpu::state::M6809State {
+        use phosphor_core::cpu::CpuStateTrait;
+        self.cpu.snapshot()
+    }
+
+    /// Sound-CPU register snapshot.
+    pub fn get_sound_cpu_state(&self) -> phosphor_core::cpu::state::M6800State {
+        use phosphor_core::cpu::CpuStateTrait;
+        self.sound_cpu.snapshot()
+    }
+
+    /// Read the CPU-facing bus, side effects and all.
+    ///
+    /// The board is the bus, so tests and tools reach it through here.
+    /// Distinct from the debugger's `BusDebug::peek`/`poke`, which
+    /// deliberately avoid side effects.
+    pub fn bus_read(&mut self, master: BusMaster, addr: u16) -> u8 {
+        Bus::read(&mut self.board, master, addr)
+    }
+
+    /// Write the CPU-facing bus, side effects and all. See [`Self::bus_read`].
+    pub fn bus_write(&mut self, master: BusMaster, addr: u16, data: u8) {
+        Bus::write(&mut self.board, master, addr, data);
+    }
+
+    /// One CPU cycle for the debugger. Returns a bitmask of CPUs at an
+    /// instruction boundary (it steps instructions rather than cycles).
+    pub fn step_cycle(&mut self) -> u32 {
+        self.apply_inputs();
+        self.tick();
+        WilliamsCpus::instruction_boundaries(&self.cpu, &self.sound_cpu)
+    }
+
+    /// Tick one cycle.
     pub fn tick(&mut self) {
-        bus_split!(self, bus => {
-            self.board.tick(bus);
-        });
+        let mut cpus = WilliamsCpus {
+            main: &mut self.cpu,
+            sound: &mut self.sound_cpu,
+        };
+        williams::tick(&mut cpus, &mut self.board);
     }
 
     /// Load program ROM from a RomSet using the Robotron ROM mapping.
@@ -311,32 +360,14 @@ impl Default for RobotronSystem {
 // Bus — pure delegation to WilliamsBoard (no game-specific hooks)
 // ---------------------------------------------------------------------------
 
-impl Bus for RobotronSystem {
-    type Address = u16;
-    type Data = u8;
-
-    fn read(&mut self, master: BusMaster, addr: u16) -> u8 {
-        self.board.bus_read(master, addr)
-    }
-
-    fn write(&mut self, master: BusMaster, addr: u16, data: u8) {
-        self.board.bus_write(master, addr, data);
-    }
-
-    fn is_halted_for(&self, master: BusMaster) -> bool {
-        self.board.bus_is_halted_for(master)
-    }
-
-    fn check_interrupts(&mut self, target: BusMaster) -> InterruptState {
-        self.board.bus_check_interrupts(target)
-    }
-}
+// Robotron adds nothing to the board's address decoding, so `WilliamsBoard`
+// *is* the bus — see its `Bus` impl in williams.rs.
 
 // ---------------------------------------------------------------------------
 // Machine traits — delegates to WilliamsBoard with Robotron input wiring
 // ---------------------------------------------------------------------------
 
-crate::impl_board_delegation!(RobotronSystem, board, williams::TIMING, debug_tick_pre);
+crate::impl_board_delegation!(RobotronSystem, board, williams::TIMING, split_cpu);
 
 impl InputConfigurable for RobotronSystem {
     fn input_controls(&self) -> &'static [InputControl] {
@@ -386,21 +417,19 @@ impl MachineCore for RobotronSystem {
         self.board
             .rom_pia
             .set_port_a_input(self.board.rom_pia_input);
-        bus_split!(self, bus => {
-            for _ in 0..williams::TIMING.cycles_per_frame() {
-                self.board.tick(bus);
-            }
-        });
+        let mut cpus = WilliamsCpus {
+            main: &mut self.cpu,
+            sound: &mut self.sound_cpu,
+        };
+        williams::run_frame(&mut cpus, &mut self.board);
     }
 
     fn reset(&mut self) {
         self.board.reset();
         self.widget_port_a = 0;
         self.widget_port_b = 0;
-        bus_split!(self, bus => {
-            self.board.cpu.reset(bus, BusMaster::Cpu(0));
-            self.board.sound_cpu.reset(bus, BusMaster::Cpu(1));
-        });
+        self.cpu.reset(&mut self.board, BusMaster::Cpu(0));
+        self.sound_cpu.reset(&mut self.board, BusMaster::Cpu(1));
     }
 }
 
@@ -455,8 +484,8 @@ mod tests {
         let data = sys.save_state().expect("save_state should return Some");
 
         // Capture CPU snapshots for comparison
-        let cpu_snap = sys.board.cpu.snapshot();
-        let sound_snap = sys.board.sound_cpu.snapshot();
+        let cpu_snap = sys.cpu.snapshot();
+        let sound_snap = sys.sound_cpu.snapshot();
 
         // Mutate everything
         let mut sys2 = RobotronSystem::new();
@@ -469,8 +498,8 @@ mod tests {
         sys2.load_state(&data).unwrap();
 
         // Verify CPU state
-        assert_eq!(sys2.board.cpu.snapshot(), cpu_snap);
-        assert_eq!(sys2.board.sound_cpu.snapshot(), sound_snap);
+        assert_eq!(sys2.cpu.snapshot(), cpu_snap);
+        assert_eq!(sys2.sound_cpu.snapshot(), sound_snap);
 
         // Verify board state
         assert_eq!(sys2.board.read_video_ram(0x100), 0xAA);

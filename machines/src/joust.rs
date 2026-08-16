@@ -1,4 +1,3 @@
-use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
     ActionRole, AxisSign, DefaultBinding, Direction, InputConfigurable, InputControl, InputEvent,
@@ -7,11 +6,13 @@ use phosphor_core::core::machine::{
 };
 use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
-use phosphor_macros::Saveable;
+use phosphor_core::cpu::m6800::M6800;
+use phosphor_core::cpu::m6809::M6809;
+use phosphor_macros::{BusDebug, Saveable};
 
 use crate::rom_loader::{RomEntry, RomRegion};
 use crate::set_bit_active_high;
-use crate::williams::{self, WILLIAMS_SOUND_ROM, WilliamsBoard};
+use crate::williams::{self, WILLIAMS_SOUND_ROM, WilliamsBoard, WilliamsBus, WilliamsCpus};
 
 // Re-export decoder PROM under the original name for backward compatibility.
 pub use crate::williams::WILLIAMS_DECODER_PROM as JOUST_DECODER_PROM;
@@ -238,8 +239,16 @@ const JOUST_CONTROLS: &[InputControl] = &[
 ///
 /// Adds the LS157 mux for player input multiplexing (CB2 selects P1 vs P2)
 /// and Joust-specific ROM definitions.
-#[derive(Saveable)]
+#[derive(Saveable, BusDebug)]
 pub struct JoustSystem {
+    /// The CPUs are held beside the bus, not inside it, so their cycles
+    /// dispatch to a concrete `JoustBus` (see [`JoustSystem::split`]).
+    #[debug_cpu("M6809 Main")]
+    pub cpu: M6809,
+    #[debug_cpu("M6800 Sound")]
+    pub sound_cpu: M6800,
+
+    #[debug_bus]
     pub board: WilliamsBoard,
 
     // Joust-specific: LS157 mux input state
@@ -251,6 +260,8 @@ pub struct JoustSystem {
 impl JoustSystem {
     pub fn new() -> Self {
         Self {
+            cpu: M6809::new(),
+            sound_cpu: M6800::new(),
             board: WilliamsBoard::new(),
             p1_controls: 0,
             p2_controls: 0,
@@ -258,33 +269,64 @@ impl JoustSystem {
         }
     }
 
-    /// Update Widget PIA Port A based on the LS157 mux state.
+    /// Borrow the CPUs and the bus they drive as two disjoint pieces.
     ///
-    /// The mux select line is Widget PIA CB2 output:
-    /// - CB2 = 1 (select B): P1 controls on bits 0-3
-    /// - CB2 = 0 (select A): P2 controls on bits 0-3
-    ///
-    /// Start buttons on bits 4-5 are always present (direct wiring).
-    fn update_widget_mux(&mut self) {
-        let select_p1 = self.board.widget_pia.cb2_output();
-        let mux_bits = if select_p1 {
-            self.p1_controls
-        } else {
-            self.p2_controls
-        };
-        let port_a = self.start_bits | (mux_bits & 0x0F);
-        self.board.widget_pia.set_port_a_input(port_a);
+    /// The control mux is bus state — the Widget PIA reads through it — while
+    /// the CPUs are bus *masters*, so they sit on opposite sides of the split.
+    /// The borrow checker verifies it; no raw pointers.
+    #[inline]
+    fn split(&mut self) -> (WilliamsCpus<'_>, JoustBus<'_>) {
+        (
+            WilliamsCpus {
+                main: &mut self.cpu,
+                sound: &mut self.sound_cpu,
+            },
+            JoustBus {
+                board: &mut self.board,
+                p1_controls: self.p1_controls,
+                p2_controls: self.p2_controls,
+                start_bits: self.start_bits,
+            },
+        )
     }
 
-    fn debug_pre_tick(&mut self) {
-        self.update_widget_mux();
+    /// Main-CPU register snapshot (the CPUs live here, not on the board).
+    pub fn get_cpu_state(&self) -> phosphor_core::cpu::state::M6809State {
+        use phosphor_core::cpu::CpuStateTrait;
+        self.cpu.snapshot()
     }
 
-    /// Tick one cycle, splitting the borrow so the board can access the bus.
+    /// Sound-CPU register snapshot.
+    pub fn get_sound_cpu_state(&self) -> phosphor_core::cpu::state::M6800State {
+        use phosphor_core::cpu::CpuStateTrait;
+        self.sound_cpu.snapshot()
+    }
+
+    /// Read the CPU-facing bus, side effects and all.
+    ///
+    /// The bus is a view over the board rather than the machine itself, so
+    /// tests and tools reach it through here. Distinct from the debugger's
+    /// `BusDebug::peek`/`poke`, which deliberately avoid side effects.
+    pub fn bus_read(&mut self, master: BusMaster, addr: u16) -> u8 {
+        self.split().1.read(master, addr)
+    }
+
+    /// Write the CPU-facing bus, side effects and all. See [`Self::bus_read`].
+    pub fn bus_write(&mut self, master: BusMaster, addr: u16, data: u8) {
+        self.split().1.write(master, addr, data);
+    }
+
+    /// One CPU cycle. Returns a bitmask of CPUs at an instruction boundary
+    /// (for the debugger, which steps instructions rather than cycles).
+    pub fn step_cycle(&mut self) -> u32 {
+        let (mut cpus, mut bus) = self.split();
+        williams::tick(&mut cpus, &mut bus);
+        WilliamsCpus::instruction_boundaries(&self.cpu, &self.sound_cpu)
+    }
+
+    /// Tick one cycle.
     pub fn tick(&mut self) {
-        bus_split!(self, bus => {
-            self.board.tick(bus);
-        });
+        self.step_cycle();
     }
 
     /// Load program ROM from a RomSet using the Joust ROM mapping.
@@ -317,7 +359,51 @@ impl Default for JoustSystem {
 // Bus — delegates to WilliamsBoard with Joust-specific mux hook
 // ---------------------------------------------------------------------------
 
-impl Bus for JoustSystem {
+/// The Joust bus: the shared board with the LS157 control mux in front of the
+/// Widget PIA.
+///
+/// The mux inputs are latched by value: `handle_input` writes them between
+/// frames, and the view is rebuilt each time the machine is split.
+struct JoustBus<'a> {
+    board: &'a mut WilliamsBoard,
+    p1_controls: u8,
+    p2_controls: u8,
+    start_bits: u8,
+}
+
+impl JoustBus<'_> {
+    /// Update Widget PIA Port A based on the LS157 mux state.
+    ///
+    /// The mux select line is Widget PIA CB2 output:
+    /// - CB2 = 1 (select B): P1 controls on bits 0-3
+    /// - CB2 = 0 (select A): P2 controls on bits 0-3
+    ///
+    /// Start buttons on bits 4-5 are always present (direct wiring).
+    fn update_widget_mux(&mut self) {
+        let select_p1 = self.board.widget_pia.cb2_output();
+        let mux_bits = if select_p1 {
+            self.p1_controls
+        } else {
+            self.p2_controls
+        };
+        let port_a = self.start_bits | (mux_bits & 0x0F);
+        self.board.widget_pia.set_port_a_input(port_a);
+    }
+}
+
+impl WilliamsBus for JoustBus<'_> {
+    #[inline]
+    fn board(&mut self) -> &mut WilliamsBoard {
+        self.board
+    }
+
+    #[inline]
+    fn begin_cycle(&mut self) {
+        self.update_widget_mux();
+    }
+}
+
+impl Bus for JoustBus<'_> {
     type Address = u16;
     type Data = u8;
 
@@ -346,7 +432,7 @@ impl Bus for JoustSystem {
 // Machine traits — delegates to WilliamsBoard with Joust input wiring
 // ---------------------------------------------------------------------------
 
-crate::impl_board_delegation!(JoustSystem, board, williams::TIMING, debug_tick_pre);
+crate::impl_board_delegation!(JoustSystem, board, williams::TIMING, split_cpu);
 
 impl MachineCore for JoustSystem {
     crate::machine_core_metadata!("joust", williams::TIMING);
@@ -355,12 +441,9 @@ impl MachineCore for JoustSystem {
         self.board
             .rom_pia
             .set_port_a_input(self.board.rom_pia_input);
-        bus_split!(self, bus => {
-            for _ in 0..williams::TIMING.cycles_per_frame() {
-                self.update_widget_mux();
-                self.board.tick(bus);
-            }
-        });
+        // The mux runs per cycle as the bus view's `begin_cycle` hook.
+        let (mut cpus, mut bus) = self.split();
+        williams::run_frame(&mut cpus, &mut bus);
     }
 
     fn reset(&mut self) {
@@ -368,10 +451,9 @@ impl MachineCore for JoustSystem {
         self.p1_controls = 0;
         self.p2_controls = 0;
         self.start_bits = 0;
-        bus_split!(self, bus => {
-            self.board.cpu.reset(bus, BusMaster::Cpu(0));
-            self.board.sound_cpu.reset(bus, BusMaster::Cpu(1));
-        });
+        let (cpus, mut bus) = self.split();
+        cpus.main.reset(&mut bus, BusMaster::Cpu(0));
+        cpus.sound.reset(&mut bus, BusMaster::Cpu(1));
     }
 }
 
@@ -420,7 +502,9 @@ impl InputConfigurable for JoustSystem {
             }
             _ => {}
         }
-        self.update_widget_mux();
+        // Re-drive the mux so the Widget PIA reflects the new input immediately,
+        // not just from the next cycle.
+        self.split().1.update_widget_mux();
     }
 }
 impl Profilable for JoustSystem {}
@@ -465,8 +549,8 @@ mod tests {
         let data = sys.save_state().expect("save_state should return Some");
 
         // Capture CPU snapshots for comparison
-        let cpu_snap = sys.board.cpu.snapshot();
-        let sound_snap = sys.board.sound_cpu.snapshot();
+        let cpu_snap = sys.cpu.snapshot();
+        let sound_snap = sys.sound_cpu.snapshot();
 
         // Mutate everything
         let mut sys2 = JoustSystem::new();
@@ -480,8 +564,8 @@ mod tests {
         sys2.load_state(&data).unwrap();
 
         // Verify CPU state
-        assert_eq!(sys2.board.cpu.snapshot(), cpu_snap);
-        assert_eq!(sys2.board.sound_cpu.snapshot(), sound_snap);
+        assert_eq!(sys2.cpu.snapshot(), cpu_snap);
+        assert_eq!(sys2.sound_cpu.snapshot(), sound_snap);
 
         // Verify board state
         assert_eq!(sys2.board.read_video_ram(0x100), 0xAA);

@@ -5,10 +5,8 @@ use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWri
 use phosphor_core::core::watchpoint::DebugAccessSource;
 use phosphor_core::core::{AccessKind, AddressSpace16};
 use phosphor_core::core::{Bus, BusMaster, TimingConfig};
-use phosphor_core::cpu::CpuStateTrait;
 use phosphor_core::cpu::m6800::M6800;
 use phosphor_core::cpu::m6809::M6809;
-use phosphor_core::cpu::state::{M6800State, M6809State};
 use phosphor_core::device::dac::Mc1408Dac;
 use phosphor_core::device::hc55516::Hc55516;
 use phosphor_core::device::pia6820::Pia6820;
@@ -156,6 +154,171 @@ impl Default for WilliamsConfig {
 }
 
 // ---------------------------------------------------------------------------
+// Bus wiring
+// ---------------------------------------------------------------------------
+
+/// The two CPUs that share the Williams board, borrowed together.
+///
+/// Each machine owns them as its own fields — so the debug derive sees one
+/// `#[debug_cpu]` per CPU, and save-state layout is unchanged — and hands them
+/// to [`tick`] as a pair alongside the bus they drive.
+pub struct WilliamsCpus<'a> {
+    pub main: &'a mut M6809,
+    pub sound: &'a mut M6800,
+}
+
+impl WilliamsCpus<'_> {
+    /// Bitmask of CPUs at an instruction boundary: bit 0 = main (M6809),
+    /// bit 1 = sound (M6800).
+    pub fn instruction_boundaries(main: &M6809, sound: &M6800) -> u32 {
+        let mut result = 0;
+        if main.at_instruction_boundary() {
+            result |= 1;
+        }
+        if sound.at_instruction_boundary() {
+            result |= 2;
+        }
+        result
+    }
+}
+
+/// A Williams bus: the shared board, plus whatever a particular game puts in
+/// front of it (Joust's control mux).
+///
+/// [`tick`] is generic over this trait, so every access the CPUs and the
+/// blitter make resolves to a direct call rather than a vtable entry.
+pub trait WilliamsBus: Bus<Address = u16, Data = u8> {
+    fn board(&mut self) -> &mut WilliamsBoard;
+
+    /// Per-cycle game hook, run before the board's own cycle work. Joust
+    /// re-drives its LS157 control mux here; the other games need nothing.
+    #[inline]
+    fn begin_cycle(&mut self) {}
+}
+
+/// The board is a complete bus for games that add nothing to it.
+impl WilliamsBus for WilliamsBoard {
+    #[inline]
+    fn board(&mut self) -> &mut WilliamsBoard {
+        self
+    }
+}
+
+impl Bus for WilliamsBoard {
+    type Address = u16;
+    type Data = u8;
+
+    #[inline]
+    fn read(&mut self, master: BusMaster, addr: u16) -> u8 {
+        self.bus_read(master, addr)
+    }
+
+    #[inline]
+    fn write(&mut self, master: BusMaster, addr: u16, data: u8) {
+        self.bus_write(master, addr, data);
+    }
+
+    #[inline]
+    fn is_halted_for(&self, master: BusMaster) -> bool {
+        self.bus_is_halted_for(master)
+    }
+
+    #[inline]
+    fn check_interrupts(&mut self, target: BusMaster) -> InterruptState {
+        self.bus_check_interrupts(target)
+    }
+}
+
+/// One CPU cycle of a Williams machine: board work, the blitter *or* the main
+/// CPU, the sound CPU, then the audio tail.
+///
+/// This is the debugger's path — it tests the frame position on every cycle.
+/// A whole frame goes through [`run_scanlines`], which hoists that test out.
+#[inline]
+pub fn tick<B: WilliamsBus>(cpus: &mut WilliamsCpus<'_>, bus: &mut B) {
+    let board = bus.board();
+    let frame_cycle = board.clock % TIMING.cycles_per_frame();
+    if frame_cycle.is_multiple_of(TIMING.cycles_per_scanline) {
+        board.begin_scanline((frame_cycle / TIMING.cycles_per_scanline) as u16);
+    }
+    step_cycle(cpus, bus);
+}
+
+/// Run `cycles` CPU cycles, scanline-outer and cycle-inner.
+///
+/// The scanline-boundary work — rendering a line and driving the video timing
+/// signals into the ROM PIA — happens 260 times a frame instead of on each of
+/// the 16,640 cycles. The caller must start on a scanline boundary and pass a
+/// multiple of `cycles_per_scanline`; the debugger's off-boundary stepping goes
+/// through [`tick`] instead.
+pub fn run_scanlines<B: WilliamsBus>(cpus: &mut WilliamsCpus<'_>, bus: &mut B, cycles: u64) {
+    debug_assert!(
+        bus.board().clock.is_multiple_of(TIMING.cycles_per_scanline)
+            && cycles.is_multiple_of(TIMING.cycles_per_scanline),
+        "run_scanlines must start on a scanline boundary and run whole scanlines"
+    );
+    for _ in 0..cycles / TIMING.cycles_per_scanline {
+        let board = bus.board();
+        let scanline = board.clock % TIMING.cycles_per_frame() / TIMING.cycles_per_scanline;
+        board.begin_scanline(scanline as u16);
+        for _ in 0..TIMING.cycles_per_scanline {
+            step_cycle(cpus, bus);
+        }
+    }
+}
+
+/// Run one frame's worth of cycles.
+///
+/// Whole scanlines go through [`run_scanlines`]; any partial scanline at either
+/// end — which only happens when the debugger has left the clock off-boundary —
+/// goes through [`tick`], so the frame is the same sequence of cycles either
+/// way.
+pub fn run_frame<B: WilliamsBus>(cpus: &mut WilliamsCpus<'_>, bus: &mut B) {
+    let scanline = TIMING.cycles_per_scanline;
+    let mut remaining = TIMING.cycles_per_frame();
+
+    let lead = ((scanline - bus.board().clock % scanline) % scanline).min(remaining);
+    for _ in 0..lead {
+        tick(cpus, bus);
+    }
+    remaining -= lead;
+
+    let whole = remaining - remaining % scanline;
+    run_scanlines(cpus, bus, whole);
+    remaining -= whole;
+
+    for _ in 0..remaining {
+        tick(cpus, bus);
+    }
+}
+
+/// The part of a cycle with no frame-position test in it.
+#[inline]
+fn step_cycle<B: WilliamsBus>(cpus: &mut WilliamsCpus<'_>, bus: &mut B) {
+    bus.begin_cycle();
+    bus.board().begin_cycle_inner(cpus);
+
+    // The blitter halts the main CPU while it runs (see `bus_is_halted_for`).
+    if bus.board().blitter.is_active() {
+        // The blitter is a bus master that lives *inside* the bus it drives, so
+        // it is lifted out of the board for its cycle and put back afterwards —
+        // the safe equivalent of the raw-pointer aliasing this used to rely on.
+        // Nothing else can observe the gap: only this cycle runs, and the halt
+        // line it feeds is only read by the main CPU, which is not stepping.
+        let mut blitter = core::mem::replace(&mut bus.board().blitter, WilliamsBlitter::new());
+        blitter.do_dma_cycle(bus);
+        bus.board().blitter = blitter;
+    } else {
+        cpus.main.execute_cycle(bus, BusMaster::Cpu(0));
+    }
+
+    // Sound CPU runs every cycle (separate bus, not halted by blitter)
+    cpus.sound.execute_cycle(bus, BusMaster::Cpu(1));
+
+    bus.board().end_cycle();
+}
+
+// ---------------------------------------------------------------------------
 // WilliamsBoard
 // ---------------------------------------------------------------------------
 
@@ -167,14 +330,12 @@ impl Default for WilliamsConfig {
 ///
 /// Game-specific machines (Joust, Robotron, etc.) compose this struct and
 /// provide their own ROM definitions and input wiring.
+///
+/// The board is everything the CPUs talk *to* — they live in [`WilliamsCpus`]
+/// on the machine, so `cpu.execute_cycle(&mut bus, ..)` is a pair of disjoint
+/// field borrows and dispatches at a concrete bus type.
 #[derive(BusDebug, DebugTrace)]
 pub struct WilliamsBoard {
-    // CPUs (debug reads/writes auto-routed through matching #[debug_map])
-    #[debug_cpu("M6809 Main")]
-    pub(crate) cpu: M6809,
-    #[debug_cpu("M6800 Sound")]
-    pub(crate) sound_cpu: M6800,
-
     // Peripheral devices
     #[debug_device("Widget PIA")]
     pub(crate) widget_pia: Pia6820, // 0xC804-0xC807: player inputs
@@ -231,8 +392,6 @@ impl WilliamsBoard {
     /// Construct a board with a specific hardware variant (see [`WilliamsConfig`]).
     pub fn with_config(config: WilliamsConfig) -> Self {
         Self {
-            cpu: M6809::new(),
-            sound_cpu: M6800::new(),
             widget_pia: Pia6820::new(),
             rom_pia: Pia6820::new(),
             blitter: match config.blitter_window_clip {
@@ -312,14 +471,6 @@ impl WilliamsBoard {
     }
 
     // --- Accessors ---
-
-    pub fn get_cpu_state(&self) -> M6809State {
-        self.cpu.snapshot()
-    }
-
-    pub fn get_sound_cpu_state(&self) -> M6800State {
-        self.sound_cpu.snapshot()
-    }
 
     pub fn read_video_ram(&self, addr: usize) -> u8 {
         let vram = self.main_map.region_data(MainRegion::VideoRam);
@@ -458,28 +609,33 @@ impl WilliamsBoard {
 
     // --- Core tick ---
 
-    pub fn tick(&mut self, bus: &mut dyn Bus<Address = u16, Data = u8>) {
+    /// Work that only happens on the first cycle of a scanline: rendering the
+    /// line, and driving the video timing signals into the ROM PIA.
+    ///
+    /// Called once per scanline from [`run_scanlines`] and, for the debugger's
+    /// single-step path, from [`tick`] when the clock lands on a boundary.
+    fn begin_scanline(&mut self, scanline: u16) {
         // Video timing signals on ROM PIA.
         // VA11 (scanline bit 5) → ROM PIA CB1, count240 → ROM PIA CA1.
         // These drive the main CPU's IRQ via ROM PIA interrupt outputs.
-        let frame_cycle = self.clock % TIMING.cycles_per_frame();
-        if frame_cycle.is_multiple_of(TIMING.cycles_per_scanline) {
-            let scanline = (frame_cycle / TIMING.cycles_per_scanline) as u16;
 
-            // Render this scanline from current VRAM + palette before the CPU
-            // processes it, matching hardware CRT read timing.
-            if (7..=246).contains(&scanline) {
-                self.render_scanline(scanline as usize);
-            }
-
-            if scanline != 256 {
-                // VA11: toggles every 32 scanlines
-                self.rom_pia.set_cb1((scanline & 0x20) != 0);
-            }
-            // count240: asserted from scanline 240 through VBLANK
-            self.rom_pia.set_ca1(scanline >= 240);
+        // Render this scanline from current VRAM + palette before the CPU
+        // processes it, matching hardware CRT read timing.
+        if (7..=246).contains(&scanline) {
+            self.render_scanline(scanline as usize);
         }
 
+        if scanline != 256 {
+            // VA11: toggles every 32 scanlines
+            self.rom_pia.set_cb1((scanline & 0x20) != 0);
+        }
+        // count240: asserted from scanline 240 through VBLANK
+        self.rom_pia.set_ca1(scanline >= 240);
+    }
+
+    /// Per-cycle board work that runs before the CPUs, with no frame-position
+    /// test in it.
+    fn begin_cycle_inner(&mut self, cpus: &WilliamsCpus<'_>) {
         // Propagate sound commands from main board ROM PIA to sound board PIA.
         // High two bits are externally pulled high on real hardware.
         // CB1 is held low for 0xFF (silence sentinel), asserted high otherwise to
@@ -507,28 +663,23 @@ impl WilliamsBoard {
         // CPU execution — bus dispatch cannot read CPU state mid-tick.
         // Both watchpoint hits and trace events draw PC from this latch.
         if self.main_map.has_any_watchpoints() || self.debug_trace.enabled() {
-            let pc = self
-                .cpu
+            let pc = cpus
+                .main
                 .at_instruction_boundary()
-                .then_some(self.cpu.pc as u32);
+                .then_some(cpus.main.pc as u32);
             self.main_map.latch_access_context(self.clock, pc);
         }
         if self.sound_map.has_any_watchpoints() || self.debug_trace.enabled() {
-            let pc = self
-                .sound_cpu
+            let pc = cpus
+                .sound
                 .at_instruction_boundary()
-                .then_some(self.sound_cpu.pc as u32);
+                .then_some(cpus.sound.pc as u32);
             self.sound_map.latch_access_context(self.clock, pc);
         }
+    }
 
-        if self.blitter.is_active() {
-            self.blitter.do_dma_cycle(bus);
-        } else {
-            self.cpu.execute_cycle(bus, BusMaster::Cpu(0));
-        }
-        // Sound CPU runs every cycle (separate bus, not halted by blitter)
-        self.sound_cpu.execute_cycle(bus, BusMaster::Cpu(1));
-
+    /// Board work after the CPUs' cycle: the audio tail and the clock advance.
+    fn end_cycle(&mut self) {
         // DAC is continuously connected to sound PIA Port A output pins
         let dac_byte = self.sound_pia.read_output_a();
         self.dac.write(dac_byte);
@@ -576,22 +727,7 @@ impl WilliamsBoard {
         self.rom_pia_input = 0;
         self.scanline_buffer.fill(0);
         // CMOS RAM and video RAM NOT cleared (battery-backed / not cleared by hardware)
-        // CPU resets are done by the game wrapper via bus_split! since Bus is on the wrapper.
-    }
-
-    // --- Debug helpers ---
-
-    /// Returns a bitmask of CPUs at instruction boundaries.
-    /// Bit 0 = main CPU (M6809), bit 1 = sound CPU (M6800).
-    pub fn debug_tick_boundaries(&self) -> u32 {
-        let mut result = 0;
-        if self.cpu.at_instruction_boundary() {
-            result |= 1;
-        }
-        if self.sound_cpu.at_instruction_boundary() {
-            result |= 2;
-        }
-        result
+        // The CPUs live on the machine, which resets them against this bus.
     }
 
     // --- Capability-trait helpers (called by game wrappers) ---
@@ -607,10 +743,7 @@ impl WilliamsBoard {
 
 impl Saveable for WilliamsBoard {
     fn save_state(&self, w: &mut StateWriter) {
-        // CPUs
-        self.cpu.save_state(w);
-        self.sound_cpu.save_state(w);
-        // RAM
+        // RAM (the CPUs are saved by the machine, which owns them)
         w.write_bytes(self.main_map.region_data(MainRegion::VideoRam));
         w.write_bytes(&self.main_map.region_data(MainRegion::Palette)[..16]);
         w.write_bytes(self.main_map.region_data(MainRegion::Cmos));
@@ -643,9 +776,7 @@ impl Saveable for WilliamsBoard {
     }
 
     fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
-        // CPUs
-        self.cpu.load_state(r)?;
-        self.sound_cpu.load_state(r)?;
+        // RAM (the CPUs are loaded by the machine, which owns them)
         // RAM
         r.read_bytes_into(self.main_map.region_data_mut(MainRegion::VideoRam))?;
         r.read_bytes_into(&mut self.main_map.region_data_mut(MainRegion::Palette)[..16])?;
@@ -914,6 +1045,15 @@ impl WilliamsBoard {
                 }
             }
             MainRegion::IO_BLITTER if (0xCA00..=0xCA07).contains(&addr) => {
+                // The blitter is lifted out of the board while it runs (see
+                // `williams::step_cycle`), so a blit whose destination walked
+                // into its own registers would write to the placeholder and be
+                // lost. No game does that — dest addresses are video RAM or
+                // SRAM — and this catches it in debug builds if one ever does.
+                debug_assert!(
+                    !matches!(master, BusMaster::Dma | BusMaster::DmaVram),
+                    "blitter DMA wrote its own registers at {addr:#06X}"
+                );
                 self.blitter.write_register(addr - 0xCA00, data);
             }
             MainRegion::IO_VIDEO if addr == 0xCBFF && data == 0x39 => {
@@ -963,7 +1103,6 @@ impl WilliamsBoard {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use phosphor_core::cpu::CpuStateTrait;
 
     #[test]
     fn board_save_load_round_trip() {
@@ -1006,17 +1145,8 @@ mod tests {
         let mut r = StateReader::new(&data);
         board2.load_state(&mut r).unwrap();
 
-        // Verify CPU state matches
-        assert_eq!(
-            board.cpu.snapshot(),
-            board2.cpu.snapshot(),
-            "main CPU state mismatch"
-        );
-        assert_eq!(
-            board.sound_cpu.snapshot(),
-            board2.sound_cpu.snapshot(),
-            "sound CPU state mismatch"
-        );
+        // CPU state is saved by the machine, not the board — see the
+        // per-machine round-trip tests.
 
         // Verify RAM
         assert_eq!(board2.read_video_ram(0), 0xAA);
@@ -1466,13 +1596,27 @@ mod tests {
         use super::*;
         use phosphor_core::core::debug::BusDebug;
 
-        /// devices() index of the Widget PIA (after the two CPU entries).
-        const WIDGET_PIA: usize = 2;
+        /// devices() index of the Widget PIA within the *board's* own list.
+        /// The machine prepends its two CPUs — see `machine_devices_*` below.
+        const WIDGET_PIA: usize = 0;
 
         #[test]
         fn devices_order_matches_dispatch_indices() {
             let board = WilliamsBoard::new();
             let names: Vec<&str> = board.devices().iter().map(|(name, _)| *name).collect();
+            assert_eq!(
+                names,
+                vec!["Widget PIA", "ROM PIA", "Blitter", "Sound PIA", "DAC"]
+            );
+        }
+
+        /// What the debugger actually sees: the machine's CPUs followed by the
+        /// board's devices, with `write_device_register` indices lining up
+        /// across the join (the board's index 0 is the machine's index 2).
+        #[test]
+        fn machine_devices_join_cpus_and_board_without_shifting_indices() {
+            let mut sys = crate::joust::JoustSystem::new();
+            let names: Vec<&str> = sys.devices().iter().map(|(name, _)| *name).collect();
             assert_eq!(
                 names,
                 vec![
@@ -1485,6 +1629,13 @@ mod tests {
                     "DAC",
                 ]
             );
+            assert_eq!(sys.cpus().len(), 2, "both CPUs are debuggable");
+
+            // Index 2 is the Widget PIA in that list; writing there must reach it.
+            sys.write_device_register(2, 0, 0xFF); // DDRA: all output
+            sys.write_device_register(2, 1, 0x04); // CRA: select ORA
+            sys.write_device_register(2, 0, 0x5A); // ORA
+            assert_eq!(sys.board.widget_pia.read_output_a(), 0x5A);
         }
 
         /// Program a PIA's port A as all-output and write a value to it,
@@ -1520,12 +1671,19 @@ mod tests {
 
         #[test]
         fn cpu_and_out_of_range_indices_are_ignored() {
+            // On the machine, indices 0/1 are CPUs and 99 is out of range;
+            // all must no-op rather than hitting a device or panicking.
+            let mut sys = crate::joust::JoustSystem::new();
+            sys.write_device_register(0, 0, 0xFF);
+            sys.write_device_register(1, 0, 0xFF);
+            sys.write_device_register(99, 0, 0xFF);
+            sys.reset_device(0);
+            sys.reset_device(99);
+            assert_eq!(sys.board.widget_pia.read_output_a(), 0x00);
+
+            // Same on the board, whose own list has no CPU entries.
             let mut board = WilliamsBoard::new();
-            // Indices 0/1 are CPUs; 99 is out of range. All must no-op.
-            board.write_device_register(0, 0, 0xFF);
-            board.write_device_register(1, 0, 0xFF);
             board.write_device_register(99, 0, 0xFF);
-            board.reset_device(0);
             board.reset_device(99);
         }
     }

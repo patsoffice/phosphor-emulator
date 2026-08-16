@@ -1,16 +1,16 @@
-use phosphor_core::bus_split;
-use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
     ActionRole, DefaultBinding, Direction, InputConfigurable, InputControl, InputEvent, InputId,
     InputKind, KeyId, MachineCore, Nvram, PadButton, PadControl, Profilable, Renderable, SaveState,
 };
 use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
-use phosphor_macros::Saveable;
+use phosphor_core::cpu::m6800::M6800;
+use phosphor_core::cpu::m6809::M6809;
+use phosphor_macros::{BusDebug, Saveable};
 
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
 use crate::set_bit_active_high;
-use crate::williams::{self, WilliamsBoard, WilliamsConfig};
+use crate::williams::{self, WilliamsBoard, WilliamsConfig, WilliamsCpus};
 
 // ---------------------------------------------------------------------------
 // Sinistar ROM definitions (parent set "sinistar", rev 3). ROMs are matched by
@@ -290,8 +290,16 @@ const SINISTAR_CONTROLS: &[InputControl] = &[
 ///
 /// The 49-way joystick (Widget PIA Port A) and CVSD speech are added by later
 /// issues; until then the stick reads centered and the CVSD channel is silent.
-#[derive(Saveable)]
+#[derive(Saveable, BusDebug)]
 pub struct SinistarSystem {
+    /// The CPUs are held beside the board, which is their bus: Sinistar adds
+    /// nothing to the board's address decoding.
+    #[debug_cpu("M6809 Main")]
+    pub cpu: M6809,
+    #[debug_cpu("M6800 Sound")]
+    pub sound_cpu: M6800,
+
+    #[debug_bus]
     pub board: WilliamsBoard,
 
     /// Widget PIA Port B (IN1): fire (b0), bomb (b1), P1 start (b4), P2 start (b5).
@@ -304,6 +312,8 @@ pub struct SinistarSystem {
 impl SinistarSystem {
     pub fn new() -> Self {
         let mut sys = Self {
+            cpu: M6809::new(),
+            sound_cpu: M6800::new(),
             board: WilliamsBoard::with_config(WilliamsConfig::sinistar()),
             port_b: 0,
             dir: 0,
@@ -337,11 +347,46 @@ impl SinistarSystem {
             .set_port_a_input(self.board.rom_pia_input);
     }
 
-    /// Tick one cycle, splitting the borrow so the board can access the bus.
+    /// Main-CPU register snapshot (the CPUs live here, not on the board).
+    pub fn get_cpu_state(&self) -> phosphor_core::cpu::state::M6809State {
+        use phosphor_core::cpu::CpuStateTrait;
+        self.cpu.snapshot()
+    }
+
+    /// Sound-CPU register snapshot.
+    pub fn get_sound_cpu_state(&self) -> phosphor_core::cpu::state::M6800State {
+        use phosphor_core::cpu::CpuStateTrait;
+        self.sound_cpu.snapshot()
+    }
+
+    /// Read the CPU-facing bus, side effects and all.
+    ///
+    /// The board is the bus, so tests and tools reach it through here.
+    /// Distinct from the debugger's `BusDebug::peek`/`poke`, which
+    /// deliberately avoid side effects.
+    pub fn bus_read(&mut self, master: BusMaster, addr: u16) -> u8 {
+        Bus::read(&mut self.board, master, addr)
+    }
+
+    /// Write the CPU-facing bus, side effects and all. See [`Self::bus_read`].
+    pub fn bus_write(&mut self, master: BusMaster, addr: u16, data: u8) {
+        Bus::write(&mut self.board, master, addr, data);
+    }
+
+    /// One CPU cycle. Returns a bitmask of CPUs at an instruction boundary
+    /// (for the debugger, which steps instructions rather than cycles).
+    pub fn step_cycle(&mut self) -> u32 {
+        let mut cpus = WilliamsCpus {
+            main: &mut self.cpu,
+            sound: &mut self.sound_cpu,
+        };
+        williams::tick(&mut cpus, &mut self.board);
+        WilliamsCpus::instruction_boundaries(&self.cpu, &self.sound_cpu)
+    }
+
+    /// Tick one cycle.
     pub fn tick(&mut self) {
-        bus_split!(self, bus => {
-            self.board.tick(bus);
-        });
+        self.step_cycle();
     }
 
     /// Load program, sound and decoder ROMs from a RomSet using Sinistar's map.
@@ -368,26 +413,8 @@ impl Default for SinistarSystem {
 // Bus — delegates to WilliamsBoard
 // ---------------------------------------------------------------------------
 
-impl Bus for SinistarSystem {
-    type Address = u16;
-    type Data = u8;
-
-    fn read(&mut self, master: BusMaster, addr: u16) -> u8 {
-        self.board.bus_read(master, addr)
-    }
-
-    fn write(&mut self, master: BusMaster, addr: u16, data: u8) {
-        self.board.bus_write(master, addr, data);
-    }
-
-    fn is_halted_for(&self, master: BusMaster) -> bool {
-        self.board.bus_is_halted_for(master)
-    }
-
-    fn check_interrupts(&mut self, target: BusMaster) -> InterruptState {
-        self.board.bus_check_interrupts(target)
-    }
-}
+// Sinistar adds nothing to the board's address decoding, so `WilliamsBoard`
+// *is* the bus — see its `Bus` impl in williams.rs.
 
 // ---------------------------------------------------------------------------
 // Machine traits
@@ -397,7 +424,7 @@ impl Bus for SinistarSystem {
 // apply Sinistar's ROT270 monitor rotation (the shared board renders in the
 // raw landscape raster used by the ROT0 games like Joust).
 crate::impl_board_audio!(SinistarSystem, board);
-crate::impl_board_debug!(SinistarSystem, board, williams::TIMING);
+crate::impl_board_debug!(SinistarSystem, board, williams::TIMING, split_cpu);
 
 impl Renderable for SinistarSystem {
     /// Portrait, after the 270-degree rotation (the board raster is landscape).
@@ -433,11 +460,11 @@ impl MachineCore for SinistarSystem {
 
     fn run_frame(&mut self) {
         self.apply_inputs();
-        bus_split!(self, bus => {
-            for _ in 0..williams::TIMING.cycles_per_frame() {
-                self.board.tick(bus);
-            }
-        });
+        let mut cpus = WilliamsCpus {
+            main: &mut self.cpu,
+            sound: &mut self.sound_cpu,
+        };
+        williams::run_frame(&mut cpus, &mut self.board);
     }
 
     fn reset(&mut self) {
@@ -445,10 +472,8 @@ impl MachineCore for SinistarSystem {
         self.port_b = 0;
         self.dir = 0;
         self.apply_inputs();
-        bus_split!(self, bus => {
-            self.board.cpu.reset(bus, BusMaster::Cpu(0));
-            self.board.sound_cpu.reset(bus, BusMaster::Cpu(1));
-        });
+        self.cpu.reset(&mut self.board, BusMaster::Cpu(0));
+        self.sound_cpu.reset(&mut self.board, BusMaster::Cpu(1));
     }
 }
 
