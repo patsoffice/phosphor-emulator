@@ -339,11 +339,64 @@ pub trait NamcoPacBus: Bus<Address = u16, Data = u8> {
 ///
 /// Callers hold the CPU and the bus as separate fields, so this takes them as
 /// two disjoint borrows rather than splitting one struct behind a raw pointer.
+///
+/// This is the debugger's path — it tests the frame position on every cycle.
+/// A whole frame goes through [`run_scanlines`], which hoists that test out.
 #[inline]
 pub fn tick<B: NamcoPacBus>(cpu: &mut Z80, bus: &mut B) {
     bus.board().begin_cycle(cpu);
     cpu.execute_cycle(bus, BusMaster::Cpu(0));
     bus.board().end_cycle();
+}
+
+/// Run one frame's worth of cycles.
+///
+/// Whole scanlines go through [`run_scanlines`]; any partial scanline at either
+/// end — which only happens when the debugger has left the clock off-boundary —
+/// goes through [`tick`], so the frame is the same sequence of cycles either
+/// way.
+pub fn run_frame<B: NamcoPacBus>(cpu: &mut Z80, bus: &mut B) {
+    let scanline = TIMING.cycles_per_scanline;
+    let mut remaining = TIMING.cycles_per_frame();
+
+    let lead = ((scanline - bus.board().clock % scanline) % scanline).min(remaining);
+    for _ in 0..lead {
+        tick(cpu, bus);
+    }
+    remaining -= lead;
+
+    let whole = remaining - remaining % scanline;
+    run_scanlines(cpu, bus, whole);
+    remaining -= whole;
+
+    for _ in 0..remaining {
+        tick(cpu, bus);
+    }
+}
+
+/// Run `cycles` CPU cycles, scanline-outer and cycle-inner.
+///
+/// The scanline-boundary work — rendering a line, asserting VBLANK — happens
+/// 264 times a frame, not on each of the 50,688 cycles, so the inner loop is
+/// the sound generator plus the CPU and nothing else. The caller must start on
+/// a scanline boundary and pass a multiple of `cycles_per_scanline`; the
+/// debugger's off-boundary stepping goes through [`tick`] instead.
+pub fn run_scanlines<B: NamcoPacBus>(cpu: &mut Z80, bus: &mut B, cycles: u64) {
+    debug_assert!(
+        bus.board().clock.is_multiple_of(TIMING.cycles_per_scanline)
+            && cycles.is_multiple_of(TIMING.cycles_per_scanline),
+        "run_scanlines must start on a scanline boundary and run whole scanlines"
+    );
+    for _ in 0..cycles / TIMING.cycles_per_scanline {
+        let board = bus.board();
+        let scanline = board.clock % TIMING.cycles_per_frame() / TIMING.cycles_per_scanline;
+        board.begin_scanline(scanline);
+        for _ in 0..TIMING.cycles_per_scanline {
+            bus.board().begin_cycle_inner(cpu);
+            cpu.execute_cycle(bus, BusMaster::Cpu(0));
+            bus.board().end_cycle();
+        }
+    }
 }
 
 /// The base board is itself a complete bus for games that add nothing to it.
@@ -533,20 +586,27 @@ impl NamcoPacBoard {
     /// attribution context.
     fn begin_cycle(&mut self, cpu: &Z80) {
         let frame_cycle = self.clock % TIMING.cycles_per_frame();
-
-        // Per-scanline rendering: at each scanline boundary, render the current
-        // scanline from VRAM + sprites before the CPU processes it, matching
-        // hardware CRT read timing.
         if frame_cycle.is_multiple_of(TIMING.cycles_per_scanline) {
-            let scanline = (frame_cycle / TIMING.cycles_per_scanline) as u16;
-            if scanline < VISIBLE_LINES as u16 {
-                self.render_scanline(scanline as usize);
-            }
+            self.begin_scanline(frame_cycle / TIMING.cycles_per_scanline);
+        }
+        self.begin_cycle_inner(cpu);
+    }
+
+    /// Work that only happens on the first cycle of a scanline: rendering that
+    /// line, and asserting VBLANK when the beam leaves the visible area.
+    ///
+    /// Called once per scanline from [`run_scanlines`] and, for the debugger's
+    /// single-step path, from `begin_cycle` when the clock lands on a boundary.
+    fn begin_scanline(&mut self, scanline: u64) {
+        // Per-scanline rendering: render the current scanline from VRAM +
+        // sprites before the CPU processes it, matching hardware CRT read
+        // timing.
+        if scanline < VISIBLE_LINES {
+            self.render_scanline(scanline as usize);
         }
 
         // VBLANK interrupt: fire at the start of VBLANK (scanline 224)
-        let vblank_cycle = VISIBLE_LINES * TIMING.cycles_per_scanline;
-        if frame_cycle == vblank_cycle {
+        if scanline == VISIBLE_LINES {
             self.vblank_irq_pending = true;
             if self.debug_trace.enabled() {
                 self.debug_trace.record(DebugEvent {
@@ -560,7 +620,10 @@ impl NamcoPacBoard {
                 });
             }
         }
+    }
 
+    /// Per-cycle board work, with no frame-position tests in it.
+    fn begin_cycle_inner(&mut self, cpu: &Z80) {
         // WSG tick (runs at CPU clock rate)
         self.wsg.tick();
 

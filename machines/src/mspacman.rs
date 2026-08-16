@@ -454,9 +454,7 @@ impl MachineCore for MsPacmanSystem {
 
     fn run_frame(&mut self) {
         let (cpu, mut bus) = self.split();
-        for _ in 0..namco_pac::TIMING.cycles_per_frame() {
-            namco_pac::tick(cpu, &mut bus);
-        }
+        namco_pac::run_frame(cpu, &mut bus);
     }
 
     fn reset(&mut self) {

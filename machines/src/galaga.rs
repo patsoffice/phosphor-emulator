@@ -1221,9 +1221,7 @@ impl MachineCore for GalagaSystem {
             let run = (cycles - self.board.clock % cycles).min(remaining);
             {
                 let (cpus, mut bus) = self.split();
-                for _ in 0..run {
-                    namco_galaga::tick(cpus, &mut bus);
-                }
+                namco_galaga::run_cycles(cpus, &mut bus, run);
             }
             remaining -= run;
             if self.board.clock.is_multiple_of(cycles) {

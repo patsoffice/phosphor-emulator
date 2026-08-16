@@ -381,12 +381,67 @@ pub struct CycleGate {
     debug: bool,
 }
 
+/// Run `cycles` CPU cycles, taking the scanline-outer path for whole scanlines
+/// and the per-cycle path for any partial scanline at either end — which only
+/// arises when the debugger has left the clock off-boundary.
+pub fn run_cycles<B: NamcoGalagaBus>(cpus: &mut GalagaCpus, bus: &mut B, cycles: u64) {
+    let scanline = TIMING.cycles_per_scanline;
+    let mut remaining = cycles;
+
+    let lead = ((scanline - bus.board().clock % scanline) % scanline).min(remaining);
+    for _ in 0..lead {
+        tick(cpus, bus);
+    }
+    remaining -= lead;
+
+    let whole = remaining - remaining % scanline;
+    run_scanlines(cpus, bus, whole);
+    remaining -= whole;
+
+    for _ in 0..remaining {
+        tick(cpus, bus);
+    }
+}
+
+/// Run `cycles` CPU cycles, scanline-outer and cycle-inner.
+///
+/// The scanline-boundary work — VBLANK, the 51XX TC pin, the sound CPU's
+/// scanline-timer NMI — happens 264 times a frame instead of on each of the
+/// 50,688 cycles, which on this board is a ladder that was being evaluated
+/// three times per cycle's worth of CPU work. The caller must start on a
+/// scanline boundary and pass a multiple of `cycles_per_scanline`; the
+/// debugger's off-boundary stepping goes through [`tick`] instead.
+pub fn run_scanlines<B: NamcoGalagaBus>(cpus: &mut GalagaCpus, bus: &mut B, cycles: u64) {
+    debug_assert!(
+        bus.board().clock.is_multiple_of(TIMING.cycles_per_scanline)
+            && cycles.is_multiple_of(TIMING.cycles_per_scanline),
+        "run_scanlines must start on a scanline boundary and run whole scanlines"
+    );
+    for _ in 0..cycles / TIMING.cycles_per_scanline {
+        let board = bus.board();
+        let scanline = board.clock % TIMING.cycles_per_frame() / TIMING.cycles_per_scanline;
+        board.begin_scanline(scanline);
+        for _ in 0..TIMING.cycles_per_scanline {
+            let gate = bus.board().begin_cycle_inner(cpus);
+            step_cpus(cpus, bus, gate);
+        }
+    }
+}
+
 /// One CPU cycle of a Galaga-family machine: board work, the three Z80s, then
 /// the custom-MCU servicing and clock advance.
+///
+/// This is the debugger's path — it tests the frame position on every cycle.
+/// Whole scanlines go through [`run_scanlines`], which hoists that test out.
 #[inline]
 pub fn tick<B: NamcoGalagaBus>(cpus: &mut GalagaCpus, bus: &mut B) {
     let gate = bus.board().begin_cycle(cpus);
+    step_cpus(cpus, bus, gate);
+}
 
+/// The three CPUs' half of a cycle, plus the post-CPU board work.
+#[inline]
+fn step_cpus<B: NamcoGalagaBus>(cpus: &mut GalagaCpus, bus: &mut B, gate: CycleGate) {
     // The map has one PC latch but three CPUs drive this bus, so hand it the
     // about-to-run CPU's PC immediately before that CPU steps; every access it
     // then makes is attributed to its own instruction.
@@ -555,29 +610,26 @@ impl NamcoGalagaBoard {
     /// debug attribution context.
     fn begin_cycle(&mut self, cpus: &mut GalagaCpus) -> CycleGate {
         let frame_cycle = self.clock % TIMING.cycles_per_frame();
-
-        // Handle deferred sub CPU reset (set by write_misc_latch bit 3).
-        // Mirrors Z80::reset() without needing 'static bus lifetime.
-        if self.pending_sub_cpu_reset {
-            self.pending_sub_cpu_reset = false;
-            cpus.sub.hardware_reset();
-            cpus.sound.hardware_reset();
-            // A CPU coming out of reset must start clean at 0x0000 with no
-            // stale interrupt latched. Clearing these prevents a pending sound
-            // NMI (accumulated while the CPU was held in reset) from firing
-            // before the freshly reset CPU has set up its stack pointer — which
-            // would otherwise push onto the reset SP (0xFFFF) and wreck it.
-            self.sub_irq_pending = false;
-            self.sound_nmi_pending = false;
+        if frame_cycle.is_multiple_of(TIMING.cycles_per_scanline) {
+            self.begin_scanline(frame_cycle / TIMING.cycles_per_scanline);
         }
+        self.begin_cycle_inner(cpus)
+    }
 
+    /// Work that only happens on the first cycle of a scanline: the VBLANK
+    /// interrupts and the 51XX's TC pin, and the sound CPU's scanline-timer
+    /// NMI. Every one of these fires on a scanline boundary, so none of it
+    /// belongs in the per-cycle path.
+    ///
+    /// Called once per scanline from [`run_scanlines`] and, for the debugger's
+    /// single-step path, from `begin_cycle` when the clock lands on a boundary.
+    fn begin_scanline(&mut self, scanline: u64) {
         // VBLANK interrupt: fire at the start of VBLANK (scanline 224).
         // Only assert IRQ if the mask (enable latch) is set, matching MAME's
         // vblank_irq: `if (state && m_main_irq_mask) set_input_line(ASSERT_LINE)`.
         // This prevents a race where VBLANK fires while the IRQ handler has
         // temporarily cleared the mask, which would cause spurious re-entry.
-        let vblank_cycle = VISIBLE_LINES * TIMING.cycles_per_scanline;
-        if frame_cycle == vblank_cycle {
+        if scanline == VISIBLE_LINES {
             if self.main_irq_enabled {
                 self.main_irq_pending = true;
                 self.trace_interrupt(0, "VBLANK IRQ (main)");
@@ -592,8 +644,8 @@ impl NamcoGalagaBoard {
                 lle.mcu.set_tc(false); // Assert (active low)
             }
         }
-        // Clear TC at end of VBLANK (start of visible area = frame_cycle 0)
-        if frame_cycle == 0
+        // Clear TC at end of VBLANK (start of visible area = scanline 0)
+        if scanline == 0
             && let Namco51Wrapper::Lle(ref mut lle) = self.namco51
         {
             lle.mcu.set_tc(true); // Deassert
@@ -603,14 +655,30 @@ impl NamcoGalagaBoard {
         // matching MAME's cpu3_interrupt_callback. Gated by misc latch Q2.
         const SOUND_NMI_SCANLINE_A: u64 = 64;
         const SOUND_NMI_SCANLINE_B: u64 = 192;
-        let scanline_a_cycle = SOUND_NMI_SCANLINE_A * TIMING.cycles_per_scanline;
-        let scanline_b_cycle = SOUND_NMI_SCANLINE_B * TIMING.cycles_per_scanline;
-        if (frame_cycle == scanline_a_cycle || frame_cycle == scanline_b_cycle)
+        if (scanline == SOUND_NMI_SCANLINE_A || scanline == SOUND_NMI_SCANLINE_B)
             && self.sound_nmi_enabled
             && !self.sub_reset
         {
             self.sound_nmi_pending = true;
             self.trace_interrupt(2, "sound NMI (scanline timer)");
+        }
+    }
+
+    /// Per-cycle board work, with no frame-position tests in it.
+    fn begin_cycle_inner(&mut self, cpus: &mut GalagaCpus) -> CycleGate {
+        // Handle deferred sub CPU reset (set by write_misc_latch bit 3).
+        // Mirrors Z80::reset() without needing 'static bus lifetime.
+        if self.pending_sub_cpu_reset {
+            self.pending_sub_cpu_reset = false;
+            cpus.sub.hardware_reset();
+            cpus.sound.hardware_reset();
+            // A CPU coming out of reset must start clean at 0x0000 with no
+            // stale interrupt latched. Clearing these prevents a pending sound
+            // NMI (accumulated while the CPU was held in reset) from firing
+            // before the freshly reset CPU has set up its stack pointer — which
+            // would otherwise push onto the reset SP (0xFFFF) and wreck it.
+            self.sub_irq_pending = false;
+            self.sound_nmi_pending = false;
         }
 
         // 06XX timer tick — NMI output is a level signal to the main CPU.

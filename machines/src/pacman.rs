@@ -195,9 +195,7 @@ impl MachineCore for PacmanSystem {
     }
 
     fn run_frame(&mut self) {
-        for _ in 0..namco_pac::TIMING.cycles_per_frame() {
-            namco_pac::tick(&mut self.cpu, &mut self.board);
-        }
+        namco_pac::run_frame(&mut self.cpu, &mut self.board);
     }
 
     fn reset(&mut self) {
