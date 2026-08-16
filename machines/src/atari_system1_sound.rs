@@ -22,7 +22,6 @@
 //! ```
 //! IRQ = YM2151 timer (or POKEY); NMI = a new command from the main CPU.
 
-use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::{Bus, BusMaster};
@@ -163,6 +162,15 @@ impl Speech {
 
 pub struct AtariSystem1Sound {
     cpu: M6502,
+    /// Everything the sound CPU talks to. Held apart from the CPU so a cycle
+    /// dispatches at a concrete bus rather than a trait object -- see
+    /// `docs/designs/concrete-bus-dispatch.md`.
+    bus: AtariSystem1SoundBus,
+}
+
+/// The sound 6502's bus: POKEY, YM2151, optional speech, memory, and the
+/// inter-CPU latches.
+struct AtariSystem1SoundBus {
     sound_ram: Box<[u8; 0x1000]>,
     /// ROM mapped at 0x4000-0xFFFF (0x4000-0x7FFF is empty on marble).
     sound_rom: Box<[u8; 0xC000]>,
@@ -202,46 +210,48 @@ impl AtariSystem1Sound {
     pub fn new(speech: bool) -> Self {
         Self {
             cpu: M6502::new(),
-            sound_ram: Box::new([0; 0x1000]),
-            sound_rom: Box::new([0xFF; 0xC000]),
-            pokey: Pokey::with_clock(SOUND_CLOCK_HZ, AUDIO_SAMPLE_RATE),
-            ym: Ym2151::new(),
-            speech: speech.then(Speech::new),
-            outlatch: 0,
-            coin_inputs: 0,
-            soundlatch: 0,
-            command_pending: false,
-            mainlatch: 0,
-            response_pending: false,
-            sound_nmi: false,
-            held_reset: true, // held until the main CPU releases it
-            reset_pending: false,
-            clock: 0,
+            bus: AtariSystem1SoundBus {
+                sound_ram: Box::new([0; 0x1000]),
+                sound_rom: Box::new([0xFF; 0xC000]),
+                pokey: Pokey::with_clock(SOUND_CLOCK_HZ, AUDIO_SAMPLE_RATE),
+                ym: Ym2151::new(),
+                speech: speech.then(Speech::new),
+                outlatch: 0,
+                coin_inputs: 0,
+                soundlatch: 0,
+                command_pending: false,
+                mainlatch: 0,
+                response_pending: false,
+                sound_nmi: false,
+                held_reset: true, // held until the main CPU releases it
+                reset_pending: false,
+                clock: 0,
+            },
         }
     }
 
     /// Load the 64 KB sound region; its 0x4000-0xFFFF window maps to ROM.
     pub fn load_rom(&mut self, sound_image: &[u8]) {
         let src = &sound_image[0x4000..0x10000];
-        self.sound_rom.copy_from_slice(src);
+        self.bus.sound_rom.copy_from_slice(src);
     }
 
     pub fn reset(&mut self) {
-        self.pokey.reset();
-        self.ym.reset();
-        if let Some(speech) = &mut self.speech {
+        self.bus.pokey.reset();
+        self.bus.ym.reset();
+        if let Some(speech) = &mut self.bus.speech {
             speech.reset();
         }
-        self.outlatch = 0;
-        self.coin_inputs = 0;
-        self.soundlatch = 0;
-        self.command_pending = false;
-        self.mainlatch = 0;
-        self.response_pending = false;
-        self.sound_nmi = false;
-        self.held_reset = true; // back under main-CPU control
-        self.reset_pending = false;
-        self.clock = 0;
+        self.bus.outlatch = 0;
+        self.bus.coin_inputs = 0;
+        self.bus.soundlatch = 0;
+        self.bus.command_pending = false;
+        self.bus.mainlatch = 0;
+        self.bus.response_pending = false;
+        self.bus.sound_nmi = false;
+        self.bus.held_reset = true; // back under main-CPU control
+        self.bus.reset_pending = false;
+        self.bus.clock = 0;
     }
 
     // -- Inter-CPU latch interface (called by the main bus) ------------------
@@ -249,41 +259,41 @@ impl AtariSystem1Sound {
     /// Main CPU writes a sound command (0xFE0000): latch it, flag it pending,
     /// and pulse the sound CPU's NMI.
     pub fn write_command(&mut self, data: u8) {
-        self.soundlatch = data;
-        self.command_pending = true;
+        self.bus.soundlatch = data;
+        self.bus.command_pending = true;
         // The NMI is a falling edge on /NMI. While the sound CPU is held in
         // reset its edge detector is cleared, so a command latched during reset
         // raises 68KBUF but generates no NMI — the CPU picks it up by polling
         // 0x1820 once it has booted. Only a command latched while the CPU is
         // running produces an edge.
-        if !self.held_reset {
-            self.sound_nmi = true;
+        if !self.bus.held_reset {
+            self.bus.sound_nmi = true;
         }
     }
 
     /// Main CPU reads the sound response (0xFC0000), clearing the pending flag.
     pub fn read_response(&mut self) -> u8 {
-        self.response_pending = false;
-        self.mainlatch
+        self.bus.response_pending = false;
+        self.bus.mainlatch
     }
 
     /// 68KBUF: a command is latched but the sound CPU has not read it yet.
     pub fn command_pending(&self) -> bool {
-        self.command_pending
+        self.bus.command_pending
     }
 
     /// SNDBUF: a response is latched for the main CPU — drives main IRQ6.
     pub fn response_pending(&self) -> bool {
-        self.response_pending
+        self.bus.response_pending
     }
 
     /// Press/release a coin switch (`bit` 0-2 → coin 1-3), read back at 0x1820.
     pub fn set_coin(&mut self, bit: u8, pressed: bool) {
         let mask = 1u8 << (bit & 0x07);
         if pressed {
-            self.coin_inputs |= mask;
+            self.bus.coin_inputs |= mask;
         } else {
-            self.coin_inputs &= !mask;
+            self.bus.coin_inputs &= !mask;
         }
     }
 
@@ -292,33 +302,29 @@ impl AtariSystem1Sound {
     /// CPU from its reset vector on the next tick.
     pub fn set_reset(&mut self, asserted: bool) {
         if asserted {
-            self.response_pending = false;
-        } else if self.held_reset {
-            self.reset_pending = true;
+            self.bus.response_pending = false;
+        } else if self.bus.held_reset {
+            self.bus.reset_pending = true;
         }
-        self.held_reset = asserted;
+        self.bus.held_reset = asserted;
     }
 
     /// Advance the sound board by one sound-CPU cycle (frozen while held reset).
     pub fn tick(&mut self) {
-        if self.held_reset {
+        if self.bus.held_reset {
             return;
         }
-        if self.reset_pending {
-            self.reset_pending = false;
-            bus_split!(self, bus => {
-                self.cpu.reset(bus, BusMaster::Cpu(1));
-            });
+        if self.bus.reset_pending {
+            self.bus.reset_pending = false;
+            self.cpu.reset(&mut self.bus, BusMaster::Cpu(1));
         }
-        bus_split!(self, bus => {
-            self.cpu.execute_cycle(bus, BusMaster::Cpu(1));
-        });
-        self.pokey.tick();
-        self.ym.tick(YM_CLOCKS_PER_TICK);
-        if let Some(speech) = &mut self.speech {
+        self.cpu.execute_cycle(&mut self.bus, BusMaster::Cpu(1));
+        self.bus.pokey.tick();
+        self.bus.ym.tick(YM_CLOCKS_PER_TICK);
+        if let Some(speech) = &mut self.bus.speech {
             speech.tick(SOUND_CLOCK_HZ);
         }
-        self.clock += 1;
+        self.bus.clock += 1;
     }
 
     /// Drain and mix the sound board's audio: the POKEY (unipolar `[0, 1]`, 0 at
@@ -334,9 +340,10 @@ impl AtariSystem1Sound {
         /// it at parity with the music. Tunable by ear vs MAME.
         const SPEECH_MIX: f32 = 1.0;
 
-        let ym = self.ym.drain_audio();
-        let pokey = self.pokey.drain_audio();
+        let ym = self.bus.ym.drain_audio();
+        let pokey = self.bus.pokey.drain_audio();
         let speech = self
+            .bus
             .speech
             .as_mut()
             .map(Speech::drain_audio)
@@ -355,13 +362,22 @@ impl AtariSystem1Sound {
     /// headless bring-up diagnostics.
     pub fn debug_state(&self) -> (bool, u64, bool, bool) {
         (
-            self.held_reset,
-            self.clock,
-            self.command_pending,
-            self.response_pending,
+            self.bus.held_reset,
+            self.bus.clock,
+            self.bus.command_pending,
+            self.bus.response_pending,
         )
     }
+}
 
+impl Default for AtariSystem1Sound {
+    /// Marble-style board: no speech.
+    fn default() -> Self {
+        Self::new(false)
+    }
+}
+
+impl AtariSystem1SoundBus {
     /// The 0x1820 status port: coin inputs, plus the buffer-full flags.
     fn read_1820(&self) -> u8 {
         // Coins (bits 0-2, active-low) and bit 7 idle high; a pressed coin mech
@@ -379,14 +395,7 @@ impl AtariSystem1Sound {
     }
 }
 
-impl Default for AtariSystem1Sound {
-    /// Marble-style board: no speech.
-    fn default() -> Self {
-        Self::new(false)
-    }
-}
-
-impl Bus for AtariSystem1Sound {
+impl Bus for AtariSystem1SoundBus {
     type Address = u16;
     type Data = u8;
 
@@ -471,22 +480,22 @@ impl phosphor_core::core::debug::Debuggable for AtariSystem1Sound {
         vec![
             DebugRegister {
                 name: "SND_CLK",
-                value: self.clock,
+                value: self.bus.clock,
                 width: 32,
             },
             DebugRegister {
                 name: "CMD",
-                value: self.soundlatch as u64,
+                value: self.bus.soundlatch as u64,
                 width: 8,
             },
             DebugRegister {
                 name: "RESP",
-                value: self.mainlatch as u64,
+                value: self.bus.mainlatch as u64,
                 width: 8,
             },
             DebugRegister {
                 name: "HELD_RST",
-                value: u64::from(self.held_reset),
+                value: u64::from(self.bus.held_reset),
                 width: 1,
             },
         ]
@@ -506,43 +515,43 @@ impl phosphor_core::device::Device for AtariSystem1Sound {
 impl Saveable for AtariSystem1Sound {
     fn save_state(&self, w: &mut StateWriter) {
         self.cpu.save_state(w);
-        self.pokey.save_state(w);
-        self.ym.save_state(w);
-        w.write_bytes(self.sound_ram.as_ref());
-        w.write_u8(self.outlatch);
-        w.write_u8(self.coin_inputs);
-        w.write_u8(self.soundlatch);
-        w.write_bool(self.command_pending);
-        w.write_u8(self.mainlatch);
-        w.write_bool(self.response_pending);
-        w.write_bool(self.sound_nmi);
-        w.write_bool(self.held_reset);
-        w.write_bool(self.reset_pending);
-        w.write_u64_le(self.clock);
+        self.bus.pokey.save_state(w);
+        self.bus.ym.save_state(w);
+        w.write_bytes(self.bus.sound_ram.as_ref());
+        w.write_u8(self.bus.outlatch);
+        w.write_u8(self.bus.coin_inputs);
+        w.write_u8(self.bus.soundlatch);
+        w.write_bool(self.bus.command_pending);
+        w.write_u8(self.bus.mainlatch);
+        w.write_bool(self.bus.response_pending);
+        w.write_bool(self.bus.sound_nmi);
+        w.write_bool(self.bus.held_reset);
+        w.write_bool(self.bus.reset_pending);
+        w.write_u64_le(self.bus.clock);
         // Speech state only exists on speech games; its presence is fixed by the
         // board config, so no discriminant is written (a Marble save is
         // unchanged, and a Road Runner save always has it).
-        if let Some(speech) = &self.speech {
+        if let Some(speech) = &self.bus.speech {
             speech.save_state(w);
         }
     }
 
     fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
         self.cpu.load_state(r)?;
-        self.pokey.load_state(r)?;
-        self.ym.load_state(r)?;
-        r.read_bytes_into(self.sound_ram.as_mut())?;
-        self.outlatch = r.read_u8()?;
-        self.coin_inputs = r.read_u8()?;
-        self.soundlatch = r.read_u8()?;
-        self.command_pending = r.read_bool()?;
-        self.mainlatch = r.read_u8()?;
-        self.response_pending = r.read_bool()?;
-        self.sound_nmi = r.read_bool()?;
-        self.held_reset = r.read_bool()?;
-        self.reset_pending = r.read_bool()?;
-        self.clock = r.read_u64_le()?;
-        if let Some(speech) = &mut self.speech {
+        self.bus.pokey.load_state(r)?;
+        self.bus.ym.load_state(r)?;
+        r.read_bytes_into(self.bus.sound_ram.as_mut())?;
+        self.bus.outlatch = r.read_u8()?;
+        self.bus.coin_inputs = r.read_u8()?;
+        self.bus.soundlatch = r.read_u8()?;
+        self.bus.command_pending = r.read_bool()?;
+        self.bus.mainlatch = r.read_u8()?;
+        self.bus.response_pending = r.read_bool()?;
+        self.bus.sound_nmi = r.read_bool()?;
+        self.bus.held_reset = r.read_bool()?;
+        self.bus.reset_pending = r.read_bool()?;
+        self.bus.clock = r.read_u64_le()?;
+        if let Some(speech) = &mut self.bus.speech {
             speech.load_state(r)?;
         }
         Ok(())
@@ -592,23 +601,23 @@ mod tests {
     fn coin_switch_pulls_1820_bit_low() {
         let mut snd = board_with_echo_program();
         // Coins idle high (active-low).
-        assert_eq!(snd.read_1820() & 0x07, 0x07);
+        assert_eq!(snd.bus.read_1820() & 0x07, 0x07);
         // Pressing coin 1 clears bit 0; the other coin bits stay high.
         snd.set_coin(0, true);
-        assert_eq!(snd.read_1820() & 0x07, 0x06);
+        assert_eq!(snd.bus.read_1820() & 0x07, 0x06);
         // Releasing restores it.
         snd.set_coin(0, false);
-        assert_eq!(snd.read_1820() & 0x07, 0x07);
+        assert_eq!(snd.bus.read_1820() & 0x07, 0x07);
     }
 
     #[test]
     fn held_in_reset_until_released() {
         let mut snd = board_with_echo_program();
         run(&mut snd, 100);
-        assert_eq!(snd.clock, 0, "frozen while held in reset");
+        assert_eq!(snd.bus.clock, 0, "frozen while held in reset");
         snd.set_reset(false); // release
         run(&mut snd, 10);
-        assert!(snd.clock > 0, "runs once released");
+        assert!(snd.bus.clock > 0, "runs once released");
     }
 
     #[test]
@@ -642,23 +651,23 @@ mod tests {
         // spurious NMI before it has run its init. See the boot desync this
         // guards against: an early NMI corrupts the first command/response.
         let mut snd = board_with_echo_program();
-        assert!(snd.held_reset, "starts held in reset");
+        assert!(snd.bus.held_reset, "starts held in reset");
         snd.write_command(0x00);
         assert!(snd.command_pending(), "68KBUF set for the poll path");
-        assert!(!snd.sound_nmi, "no NMI edge while held in reset");
+        assert!(!snd.bus.sound_nmi, "no NMI edge while held in reset");
 
         // A command latched once the CPU is running does produce an NMI edge.
         snd.set_reset(false);
         run(&mut snd, 20);
         snd.write_command(0x10);
-        assert!(snd.sound_nmi, "running CPU sees the NMI edge");
+        assert!(snd.bus.sound_nmi, "running CPU sees the NMI edge");
     }
 
     #[test]
     fn reset_assert_acknowledges_response() {
         let mut snd = board_with_echo_program();
-        snd.response_pending = true;
-        snd.mainlatch = 0x55;
+        snd.bus.response_pending = true;
+        snd.bus.mainlatch = 0x55;
         snd.set_reset(true); // assert reset
         assert!(!snd.response_pending(), "reset clears the pending response");
     }
@@ -668,9 +677,9 @@ mod tests {
         let mut snd = board_with_echo_program();
         snd.set_reset(false);
         run(&mut snd, 30);
-        snd.sound_ram[0x100] = 0x77;
-        snd.soundlatch = 0x12;
-        snd.command_pending = true;
+        snd.bus.sound_ram[0x100] = 0x77;
+        snd.bus.soundlatch = 0x12;
+        snd.bus.command_pending = true;
 
         let mut w = StateWriter::new();
         snd.save_state(&mut w);
@@ -679,9 +688,9 @@ mod tests {
         let mut snd2 = board_with_echo_program();
         let mut r = StateReader::new(&bytes);
         snd2.load_state(&mut r).unwrap();
-        assert_eq!(snd2.sound_ram[0x100], 0x77);
-        assert_eq!(snd2.soundlatch, 0x12);
-        assert!(snd2.command_pending);
+        assert_eq!(snd2.bus.sound_ram[0x100], 0x77);
+        assert_eq!(snd2.bus.soundlatch, 0x12);
+        assert!(snd2.bus.command_pending);
     }
 
     const M: BusMaster = BusMaster::Cpu(1);
@@ -691,9 +700,9 @@ mod tests {
         // Marble (speech=false): the 0x1000-0x100F window is not decoded and
         // reads back the open-bus 0xFF, exactly as before the speech wiring.
         let mut snd = AtariSystem1Sound::new(false);
-        assert!(snd.speech.is_none());
-        assert_eq!(Bus::read(&mut snd, M, 0x1000), 0xFF);
-        assert_eq!(Bus::read(&mut snd, M, 0x100F), 0xFF);
+        assert!(snd.bus.speech.is_none());
+        assert_eq!(Bus::read(&mut snd.bus, M, 0x1000), 0xFF);
+        assert_eq!(Bus::read(&mut snd.bus, M, 0x100F), 0xFF);
     }
 
     #[test]
@@ -703,8 +712,8 @@ mod tests {
         // (high = idle). An idle TMS is ready and not interrupting, and DDRB
         // powers up as all-input, so the port reads 0x08.
         let mut snd = AtariSystem1Sound::new(true);
-        assert!(snd.speech.is_some());
-        let pb = Bus::read(&mut snd, M, 0x1000);
+        assert!(snd.bus.speech.is_some());
+        let pb = Bus::read(&mut snd.bus, M, 0x1000);
         assert_eq!(pb & (1 << 2), 0, "TMS /READY low → ready");
         assert_eq!(pb & (1 << 3), 1 << 3, "TMS /INT high → idle");
     }
@@ -716,25 +725,29 @@ mod tests {
         // (SPEAK EXTERNAL is never sent), so nothing enters the FIFO and the
         // idle TMS stays ready throughout — the loop never blocks.
         let mut snd = AtariSystem1Sound::new(true);
-        Bus::write(&mut snd, M, 0x1003, 0xFF); // DDRA = all output
+        Bus::write(&mut snd.bus, M, 0x1003, 0xFF); // DDRA = all output
         for byte in 0..32u16 {
-            Bus::write(&mut snd, M, 0x1001, byte as u8); // ORA = data
-            Bus::write(&mut snd, M, 0x1000, 0x00); // /WS low (strobe)
-            Bus::write(&mut snd, M, 0x1000, 0x01); // /WS high
-            assert_eq!(Bus::read(&mut snd, M, 0x1000) & (1 << 2), 0, "still ready");
+            Bus::write(&mut snd.bus, M, 0x1001, byte as u8); // ORA = data
+            Bus::write(&mut snd.bus, M, 0x1000, 0x00); // /WS low (strobe)
+            Bus::write(&mut snd.bus, M, 0x1000, 0x01); // /WS high
+            assert_eq!(
+                Bus::read(&mut snd.bus, M, 0x1000) & (1 << 2),
+                0,
+                "still ready"
+            );
         }
         // The stub VIA emulates no interrupt sources, so it never raises the
         // sound CPU's IRQ.
-        assert!(!snd.speech.as_ref().unwrap().irq());
+        assert!(!snd.bus.speech.as_ref().unwrap().irq());
     }
 
     #[test]
     fn speech_state_round_trips_through_save_load() {
         let mut snd = AtariSystem1Sound::new(true);
         // Latch some VIA register state through the speech path.
-        Bus::write(&mut snd, M, 0x1002, 0xFF); // DDRB
-        Bus::write(&mut snd, M, 0x1000, 0x5A); // ORB
-        Bus::write(&mut snd, M, 0x100B, 0x40); // ACR (raw register file)
+        Bus::write(&mut snd.bus, M, 0x1002, 0xFF); // DDRB
+        Bus::write(&mut snd.bus, M, 0x1000, 0x5A); // ORB
+        Bus::write(&mut snd.bus, M, 0x100B, 0x40); // ACR (raw register file)
 
         let mut w = StateWriter::new();
         snd.save_state(&mut w);
@@ -744,8 +757,8 @@ mod tests {
         let mut r = StateReader::new(&bytes);
         snd2.load_state(&mut r).unwrap();
         // ORB drives all 8 pins (DDRB=0xFF), so Port B reads back 0x5A.
-        assert_eq!(Bus::read(&mut snd2, M, 0x1000), 0x5A);
-        assert_eq!(Bus::read(&mut snd2, M, 0x100B), 0x40);
+        assert_eq!(Bus::read(&mut snd2.bus, M, 0x1000), 0x5A);
+        assert_eq!(Bus::read(&mut snd2.bus, M, 0x100B), 0x40);
     }
 
     #[test]

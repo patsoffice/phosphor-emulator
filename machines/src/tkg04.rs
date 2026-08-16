@@ -776,8 +776,8 @@ impl Tkg04Board {
     // Reset
     // -----------------------------------------------------------------------
 
-    /// Reset board state (does not reset CPUs — the wrapper must do that
-    /// using its own unsafe borrow-split, since Bus is on the wrapper).
+    /// Reset board state (does not reset the CPUs — the machine owns them and
+    /// resets them against its bus view over this board).
     pub fn reset(&mut self) {
         self.nmi_mask = false;
         self.vblank_nmi_pending = false;

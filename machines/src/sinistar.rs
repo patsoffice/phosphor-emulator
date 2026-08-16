@@ -424,7 +424,7 @@ impl Default for SinistarSystem {
 // apply Sinistar's ROT270 monitor rotation (the shared board renders in the
 // raw landscape raster used by the ROT0 games like Joust).
 crate::impl_board_audio!(SinistarSystem, board);
-crate::impl_board_debug!(SinistarSystem, board, williams::TIMING, split_cpu);
+crate::impl_board_debug!(SinistarSystem, board, williams::TIMING);
 
 impl Renderable for SinistarSystem {
     /// Portrait, after the 270-degree rotation (the board raster is landscape).

@@ -738,7 +738,7 @@ impl Bus for RoadRunnerBus<'_> {
 // Capability traits
 // ---------------------------------------------------------------------------
 
-crate::impl_board_delegation!(RoadRunnerSystem, board, atari_system1::TIMING, split_cpu);
+crate::impl_board_delegation!(RoadRunnerSystem, board, atari_system1::TIMING);
 
 impl MachineCore for RoadRunnerSystem {
     crate::machine_core_metadata!("roadrunner", atari_system1::TIMING);

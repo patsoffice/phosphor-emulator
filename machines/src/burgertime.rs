@@ -391,13 +391,7 @@ impl Default for BurgertimeSystem {
 }
 
 // The board is the bus -- see `impl Bus for BtimeBoard` in btime.rs.
-crate::impl_board_delegation!(
-    BurgertimeSystem,
-    board,
-    btime::TIMING,
-    orientation,
-    split_cpu
-);
+crate::impl_board_delegation!(BurgertimeSystem, board, btime::TIMING, orientation);
 
 impl MachineCore for BurgertimeSystem {
     fn gfx_sheets(&self) -> Vec<phosphor_core::core::machine::GfxSheet<'_>> {

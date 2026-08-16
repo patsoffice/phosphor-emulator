@@ -1079,7 +1079,7 @@ impl MachineCore for FoodFightSystem {
 
 // `MachineDebug` (debug_bus + cycle stepping) via the standalone-debug macro;
 // `BusDebug` is `#[derive]`d on the struct above (24-bit `AddressSpace32` bus).
-crate::impl_standalone_debug!(FoodFightSystem, split_cpu);
+crate::impl_standalone_debug!(FoodFightSystem);
 
 impl Saveable for FoodFightSystem {
     fn save_state(&self, w: &mut StateWriter) {

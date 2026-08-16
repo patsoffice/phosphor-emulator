@@ -901,13 +901,7 @@ impl Bus for MrdoBoard {
     }
 }
 
-crate::impl_board_delegation!(
-    MrdoSystem,
-    board,
-    crate::mrdo::TIMING,
-    orientation,
-    split_cpu
-);
+crate::impl_board_delegation!(MrdoSystem, board, crate::mrdo::TIMING, orientation);
 
 impl MachineCore for MrdoSystem {
     crate::machine_core_metadata!("mrdo", crate::mrdo::TIMING);

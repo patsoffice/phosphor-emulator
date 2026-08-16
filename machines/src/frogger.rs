@@ -377,7 +377,7 @@ impl Default for FroggerSystem {
 }
 
 // The board is the bus -- see `impl Bus for ScrambleBoard` in scramble.rs.
-crate::impl_board_delegation!(FroggerSystem, board, TIMING, orientation, split_cpu);
+crate::impl_board_delegation!(FroggerSystem, board, TIMING, orientation);
 
 impl MachineCore for FroggerSystem {
     crate::machine_core_metadata!("frogger", TIMING);

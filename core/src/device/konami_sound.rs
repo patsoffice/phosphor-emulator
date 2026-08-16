@@ -46,7 +46,6 @@
 //! has its B3/B5 bits swapped (`frogger_sound_timer_r`).
 
 use crate::audio::AudioResampler;
-use crate::bus_split;
 use crate::core::debug::{DebugRegister, Debuggable};
 use crate::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use crate::core::{Bus, BusMaster};
@@ -72,7 +71,14 @@ const TIMER_HALF: u32 = 16 * 16 * 2 * 8 * 5; // 20480
 pub struct KonamiSound {
     // Sound CPU (Z80 @ ~1.79 MHz)
     cpu: Z80,
+    /// Everything the sound CPU talks to. Held apart from the CPU so a cycle
+    /// dispatches at a concrete bus rather than a trait object -- see
+    /// `docs/designs/concrete-bus-dispatch.md`.
+    bus: KonamiSoundBus,
+}
 
+/// The sound Z80's bus: PSGs, memory, the PPI interface and the timer.
+struct KonamiSoundBus {
     // 1-2× AY-8910 PSGs (`num_ay` selects how many are populated)
     ay: [Ay8910; 2],
     num_ay: usize,
@@ -112,19 +118,21 @@ impl KonamiSound {
     pub fn new(num_ay: usize) -> Self {
         Self {
             cpu: Z80::new(),
-            ay: [Ay8910::new(KONAMI_CPU_CLOCK), Ay8910::new(KONAMI_CPU_CLOCK)],
-            num_ay: num_ay.clamp(1, 2),
-            rom: vec![0; 0x2000],
-            ram: [0; 0x0400],
-            ppi: I8255::new(),
-            command: 0,
-            control: 0,
-            irq_pending: false,
-            mute: false,
-            filter: 0,
-            frogger: false,
-            resampler: AudioResampler::new(KONAMI_CPU_CLOCK, OUTPUT_SAMPLE_RATE),
-            clock: 0,
+            bus: KonamiSoundBus {
+                ay: [Ay8910::new(KONAMI_CPU_CLOCK), Ay8910::new(KONAMI_CPU_CLOCK)],
+                num_ay: num_ay.clamp(1, 2),
+                rom: vec![0; 0x2000],
+                ram: [0; 0x0400],
+                ppi: I8255::new(),
+                command: 0,
+                control: 0,
+                irq_pending: false,
+                mute: false,
+                filter: 0,
+                frogger: false,
+                resampler: AudioResampler::new(KONAMI_CPU_CLOCK, OUTPUT_SAMPLE_RATE),
+                clock: 0,
+            },
         }
     }
 
@@ -133,14 +141,14 @@ impl KonamiSound {
     /// B3/B5-swapped sound timer.
     pub fn new_frogger() -> Self {
         let mut board = Self::new(1);
-        board.frogger = true;
+        board.bus.frogger = true;
         board
     }
 
     /// Load sound ROM data (up to 8 KB).
     pub fn load_rom(&mut self, data: &[u8]) {
-        let len = data.len().min(self.rom.len());
-        self.rom[..len].copy_from_slice(&data[..len]);
+        let len = data.len().min(self.bus.rom.len());
+        self.bus.rom[..len].copy_from_slice(&data[..len]);
     }
 
     // -----------------------------------------------------------------------
@@ -151,55 +159,19 @@ impl KonamiSound {
     /// Port A drives the command latch; port B's bit 3 falling edge pulses the
     /// sound CPU IRQ and bit 4 mutes the board.
     pub fn ppi_write(&mut self, offset: u16, data: u8) {
-        self.ppi.write(offset, data);
-        self.command = self.ppi.read_output_a();
-        self.set_control(self.ppi.read_output_b());
+        self.bus.ppi.write(offset, data);
+        self.bus.command = self.bus.ppi.read_output_a();
+        self.bus.set_control(self.bus.ppi.read_output_b());
     }
 
     /// Read one of the four 8255 registers (`offset` 0=A, 1=B, 2=C, 3=control).
     pub fn ppi_read(&self, offset: u16) -> u8 {
-        self.ppi.read(offset)
+        self.bus.ppi.read(offset)
     }
 
     /// Drive the 8255 port C input pins (a main-board input port, e.g. IN3).
     pub fn set_ppi_portc_input(&mut self, data: u8) {
-        self.ppi.set_port_c_input(data);
-    }
-
-    /// Apply a new 8255 port-B (control) value: bit 3 high→low pulses the IRQ,
-    /// bit 4 is the global mute.
-    fn set_control(&mut self, data: u8) {
-        let old = self.control;
-        self.control = data;
-        // The inverse of bit 3 clocks a flip-flop that asserts the sound IRQ.
-        if old & 0x08 != 0 && data & 0x08 == 0 {
-            self.irq_pending = true;
-        }
-        self.mute = data & 0x10 != 0;
-    }
-
-    /// The free-running timer presented on AY0 port B (`konami_sound_timer_r`):
-    /// a chained divider whose top counter bits are mapped to B4–B7, with the
-    /// unused low bits pulled high (B0 grounded).
-    fn timer(&self) -> u8 {
-        let mut cycles = ((self.clock * 8) % TIMER_PERIOD as u64) as u32;
-        let hibit = if cycles >= TIMER_HALF {
-            cycles -= TIMER_HALF;
-            1u8
-        } else {
-            0
-        };
-        let t = (hibit << 7)
-            | (((cycles >> 14) & 1) as u8) << 6
-            | (((cycles >> 13) & 1) as u8) << 5
-            | (((cycles >> 11) & 1) as u8) << 4
-            | 0x0e;
-        if self.frogger {
-            // frogger_sound_timer_r: bitswap<8>(t, 7,6,3,4,5,2,1,0) — swap B3/B5.
-            (t & !0x28) | ((t & 0x08) << 2) | ((t & 0x20) >> 2)
-        } else {
-            t
-        }
+        self.bus.ppi.set_port_c_input(data);
     }
 
     // -----------------------------------------------------------------------
@@ -211,61 +183,60 @@ impl KonamiSound {
     /// accumulate audio.
     pub fn tick(&mut self) {
         // AY0 reads the command on port A and the timer on port B.
-        self.ay[0].set_port_a(self.command);
-        self.ay[0].set_port_b(self.timer());
+        let b = &mut self.bus;
+        b.ay[0].set_port_a(b.command);
+        let timer = b.timer();
+        b.ay[0].set_port_b(timer);
 
-        bus_split!(self, bus => {
-            self.cpu.execute_cycle(bus, BusMaster::Cpu(0));
-        });
+        self.cpu.execute_cycle(&mut self.bus, BusMaster::Cpu(0));
 
-        self.ay[0].tick();
-        if self.num_ay > 1 {
-            self.ay[1].tick();
+        let b = &mut self.bus;
+        b.ay[0].tick();
+        if self.bus.num_ay > 1 {
+            self.bus.ay[1].tick();
         }
 
         let mut buf0 = [0i16; 1];
         let mut buf1 = [0i16; 1];
-        let n0 = self.ay[0].fill_audio(&mut buf0);
-        let n1 = if self.num_ay > 1 {
-            self.ay[1].fill_audio(&mut buf1)
+        let n0 = self.bus.ay[0].fill_audio(&mut buf0);
+        let n1 = if self.bus.num_ay > 1 {
+            self.bus.ay[1].fill_audio(&mut buf1)
         } else {
             0
         };
         if n0 > 0 || n1 > 0 {
             let s0 = if n0 > 0 { buf0[0] as i32 } else { 0 };
             let s1 = if n1 > 0 { buf1[0] as i32 } else { 0 };
-            let mixed = if self.mute {
+            let mixed = if self.bus.mute {
                 0
             } else {
-                ((s0 + s1) / self.num_ay as i32).clamp(-32767, 32767) as i16
+                ((s0 + s1) / self.bus.num_ay as i32).clamp(-32767, 32767) as i16
             };
-            self.resampler.push_sample(mixed);
+            self.bus.resampler.push_sample(mixed);
         }
 
-        self.clock += 1;
+        self.bus.clock += 1;
     }
 
     /// Drain accumulated audio samples. Returns the number written.
     pub fn fill_audio(&mut self, buffer: &mut [i16]) -> usize {
-        self.resampler.fill_audio(buffer)
+        self.bus.resampler.fill_audio(buffer)
     }
 
     /// Reset the board to power-on state.
     pub fn reset(&mut self) {
-        bus_split!(self, bus => {
-            self.cpu.reset(bus, BusMaster::Cpu(0));
-        });
-        self.ay[0].reset();
-        self.ay[1].reset();
-        self.ppi.reset();
-        self.ram = [0; 0x0400];
-        self.command = 0;
-        self.control = 0;
-        self.irq_pending = false;
-        self.mute = false;
-        self.filter = 0;
-        self.resampler.reset();
-        self.clock = 0;
+        self.cpu.reset(&mut self.bus, BusMaster::Cpu(0));
+        self.bus.ay[0].reset();
+        self.bus.ay[1].reset();
+        self.bus.ppi.reset();
+        self.bus.ram = [0; 0x0400];
+        self.bus.command = 0;
+        self.bus.control = 0;
+        self.bus.irq_pending = false;
+        self.bus.mute = false;
+        self.bus.filter = 0;
+        self.bus.resampler.reset();
+        self.bus.clock = 0;
     }
 }
 
@@ -273,7 +244,7 @@ impl KonamiSound {
 // Bus implementation (sound Z80's memory + I/O map)
 // ---------------------------------------------------------------------------
 
-impl Bus for KonamiSound {
+impl Bus for KonamiSoundBus {
     type Address = u16;
     type Data = u8;
 
@@ -372,7 +343,43 @@ impl Bus for KonamiSound {
     }
 }
 
-impl KonamiSound {
+impl KonamiSoundBus {
+    /// Apply a new 8255 port-B (control) value: bit 3 high→low pulses the IRQ,
+    /// bit 4 is the global mute.
+    fn set_control(&mut self, data: u8) {
+        let old = self.control;
+        self.control = data;
+        // The inverse of bit 3 clocks a flip-flop that asserts the sound IRQ.
+        if old & 0x08 != 0 && data & 0x08 == 0 {
+            self.irq_pending = true;
+        }
+        self.mute = data & 0x10 != 0;
+    }
+
+    /// The free-running timer presented on AY0 port B (`konami_sound_timer_r`):
+    /// a chained divider whose top counter bits are mapped to B4–B7, with the
+    /// unused low bits pulled high (B0 grounded).
+    fn timer(&self) -> u8 {
+        let mut cycles = ((self.clock * 8) % TIMER_PERIOD as u64) as u32;
+        let hibit = if cycles >= TIMER_HALF {
+            cycles -= TIMER_HALF;
+            1u8
+        } else {
+            0
+        };
+        let t = (hibit << 7)
+            | (((cycles >> 14) & 1) as u8) << 6
+            | (((cycles >> 13) & 1) as u8) << 5
+            | (((cycles >> 11) & 1) as u8) << 4
+            | 0x0e;
+        if self.frogger {
+            // frogger_sound_timer_r: bitswap<8>(t, 7,6,3,4,5,2,1,0) — swap B3/B5.
+            (t & !0x28) | ((t & 0x08) << 2) | ((t & 0x20) >> 2)
+        } else {
+            t
+        }
+    }
+
     /// Read AY0's data port. Reading port A (register 14) is the command-latch
     /// fetch, which acknowledges and clears the held IRQ.
     fn ay0_data_read(&mut self) -> u8 {
@@ -410,27 +417,27 @@ impl Debuggable for KonamiSound {
         vec![
             DebugRegister {
                 name: "COMMAND",
-                value: self.command as u64,
+                value: self.bus.command as u64,
                 width: 8,
             },
             DebugRegister {
                 name: "CONTROL",
-                value: self.control as u64,
+                value: self.bus.control as u64,
                 width: 8,
             },
             DebugRegister {
                 name: "IRQ",
-                value: self.irq_pending as u64,
+                value: self.bus.irq_pending as u64,
                 width: 1,
             },
             DebugRegister {
                 name: "MUTE",
-                value: self.mute as u64,
+                value: self.bus.mute as u64,
                 width: 1,
             },
             DebugRegister {
                 name: "FILTER",
-                value: self.filter as u64,
+                value: self.bus.filter as u64,
                 width: 12,
             },
         ]
@@ -445,33 +452,33 @@ impl Saveable for KonamiSound {
     fn save_state(&self, w: &mut StateWriter) {
         w.write_version(1);
         self.cpu.save_state(w);
-        self.ay[0].save_state(w);
-        self.ay[1].save_state(w);
-        self.ppi.save_state(w);
-        w.write_bytes(&self.ram);
-        w.write_u8(self.command);
-        w.write_u8(self.control);
-        w.write_bool(self.irq_pending);
-        w.write_bool(self.mute);
-        w.write_u16_le(self.filter);
-        self.resampler.save_state(w);
-        w.write_u64_le(self.clock);
+        self.bus.ay[0].save_state(w);
+        self.bus.ay[1].save_state(w);
+        self.bus.ppi.save_state(w);
+        w.write_bytes(&self.bus.ram);
+        w.write_u8(self.bus.command);
+        w.write_u8(self.bus.control);
+        w.write_bool(self.bus.irq_pending);
+        w.write_bool(self.bus.mute);
+        w.write_u16_le(self.bus.filter);
+        self.bus.resampler.save_state(w);
+        w.write_u64_le(self.bus.clock);
     }
 
     fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
         r.read_version(1)?;
         self.cpu.load_state(r)?;
-        self.ay[0].load_state(r)?;
-        self.ay[1].load_state(r)?;
-        self.ppi.load_state(r)?;
-        r.read_bytes_into(&mut self.ram)?;
-        self.command = r.read_u8()?;
-        self.control = r.read_u8()?;
-        self.irq_pending = r.read_bool()?;
-        self.mute = r.read_bool()?;
-        self.filter = r.read_u16_le()?;
-        self.resampler.load_state(r)?;
-        self.clock = r.read_u64_le()?;
+        self.bus.ay[0].load_state(r)?;
+        self.bus.ay[1].load_state(r)?;
+        self.bus.ppi.load_state(r)?;
+        r.read_bytes_into(&mut self.bus.ram)?;
+        self.bus.command = r.read_u8()?;
+        self.bus.control = r.read_u8()?;
+        self.bus.irq_pending = r.read_bool()?;
+        self.bus.mute = r.read_bool()?;
+        self.bus.filter = r.read_u16_le()?;
+        self.bus.resampler.load_state(r)?;
+        self.bus.clock = r.read_u64_le()?;
         Ok(())
     }
 }
@@ -485,16 +492,16 @@ mod tests {
     use super::*;
 
     fn bus_read(b: &mut KonamiSound, addr: u16) -> u8 {
-        Bus::read(b, BusMaster::Cpu(0), addr)
+        Bus::read(&mut b.bus, BusMaster::Cpu(0), addr)
     }
     fn bus_write(b: &mut KonamiSound, addr: u16, data: u8) {
-        Bus::write(b, BusMaster::Cpu(0), addr, data);
+        Bus::write(&mut b.bus, BusMaster::Cpu(0), addr, data);
     }
     fn io_read(b: &mut KonamiSound, addr: u16) -> u8 {
-        Bus::io_read(b, BusMaster::Cpu(0), addr)
+        Bus::io_read(&mut b.bus, BusMaster::Cpu(0), addr)
     }
     fn io_write(b: &mut KonamiSound, addr: u16, data: u8) {
-        Bus::io_write(b, BusMaster::Cpu(0), addr, data);
+        Bus::io_write(&mut b.bus, BusMaster::Cpu(0), addr, data);
     }
 
     /// Configure the 8255 (port A + B output) the way the main board does.
@@ -506,10 +513,10 @@ mod tests {
     #[test]
     fn initial_state() {
         let b = KonamiSound::new(2);
-        assert_eq!(b.command, 0);
-        assert!(!b.irq_pending);
-        assert!(!b.mute);
-        assert_eq!(b.num_ay, 2);
+        assert_eq!(b.bus.command, 0);
+        assert!(!b.bus.irq_pending);
+        assert!(!b.bus.mute);
+        assert_eq!(b.bus.num_ay, 2);
     }
 
     #[test]
@@ -517,11 +524,11 @@ mod tests {
         let mut b = KonamiSound::new(2);
         init_ppi(&mut b);
         b.ppi_write(0, 0x5A); // 8255 port A = command
-        assert_eq!(b.command, 0x5A);
+        assert_eq!(b.bus.command, 0x5A);
 
         // tick() presents the command on AY0 port A; the sound CPU reads it by
         // latching register 14 (port A, an input — R7 bit 6 = 0 at reset).
-        b.rom[0] = 0x76; // HALT
+        b.bus.rom[0] = 0x76; // HALT
         b.tick();
         io_write(&mut b, 0x40, 14); // AY0 address latch = register 14
         assert_eq!(io_read(&mut b, 0x80), 0x5A);
@@ -533,29 +540,32 @@ mod tests {
         init_ppi(&mut b);
         // Raise bit 3, then drop it: the high→low edge asserts the IRQ.
         b.ppi_write(1, 0x08);
-        assert!(!b.irq_pending, "no IRQ on the rising edge");
+        assert!(!b.bus.irq_pending, "no IRQ on the rising edge");
         b.ppi_write(1, 0x00);
-        assert!(b.irq_pending, "IRQ asserted on the falling edge");
+        assert!(b.bus.irq_pending, "IRQ asserted on the falling edge");
     }
 
     #[test]
     fn irq_clears_when_command_latch_is_read() {
         let mut b = KonamiSound::new(2);
-        b.irq_pending = true;
+        b.bus.irq_pending = true;
         // Select AY0 port A (register 14) as the read target, then read it.
         io_write(&mut b, 0x40, 14);
         let _ = io_read(&mut b, 0x80);
-        assert!(!b.irq_pending, "reading the command latch acks the IRQ");
+        assert!(!b.bus.irq_pending, "reading the command latch acks the IRQ");
     }
 
     #[test]
     fn irq_not_cleared_by_reading_other_ay_register() {
         let mut b = KonamiSound::new(2);
-        b.irq_pending = true;
+        b.bus.irq_pending = true;
         // Reading the timer (port B, register 15) must not ack the command IRQ.
         io_write(&mut b, 0x40, 15);
         let _ = io_read(&mut b, 0x80);
-        assert!(b.irq_pending, "timer read must not clear the command IRQ");
+        assert!(
+            b.bus.irq_pending,
+            "timer read must not clear the command IRQ"
+        );
     }
 
     #[test]
@@ -563,9 +573,9 @@ mod tests {
         let mut b = KonamiSound::new(2);
         init_ppi(&mut b);
         b.ppi_write(1, 0x10);
-        assert!(b.mute);
+        assert!(b.bus.mute);
         b.ppi_write(1, 0x00);
-        assert!(!b.mute);
+        assert!(!b.bus.mute);
     }
 
     #[test]
@@ -603,15 +613,15 @@ mod tests {
     #[test]
     fn timer_advances_and_is_bounded() {
         let mut b = KonamiSound::new(2);
-        b.rom[0] = 0x76; // HALT, so the CPU doesn't run off into garbage
-        let t0 = b.timer();
+        b.bus.rom[0] = 0x76; // HALT, so the CPU doesn't run off into garbage
+        let t0 = b.bus.timer();
         for _ in 0..6000 {
             b.tick();
         }
-        let t1 = b.timer();
+        let t1 = b.bus.timer();
         assert_ne!(t0, t1, "timer should advance");
         // B0 is grounded, B1-B3 pulled high.
-        assert_eq!(b.timer() & 0x0f, 0x0e);
+        assert_eq!(b.bus.timer() & 0x0f, 0x0e);
     }
 
     #[test]
@@ -637,12 +647,12 @@ mod tests {
     #[test]
     fn frogger_command_latch_acks_irq() {
         let mut b = KonamiSound::new_frogger();
-        b.irq_pending = true;
+        b.bus.irq_pending = true;
         // Select AY0 port A (register 14) via the (swapped) address port, then
         // read it through the data port — this acknowledges the IRQ.
         io_write(&mut b, 0x80, 14);
         let _ = io_read(&mut b, 0x40);
-        assert!(!b.irq_pending, "reading the command latch acks the IRQ");
+        assert!(!b.bus.irq_pending, "reading the command latch acks the IRQ");
     }
 
     #[test]
@@ -651,12 +661,12 @@ mod tests {
         // with bits B3 and B5 swapped (frogger_sound_timer_r).
         let mut frog = KonamiSound::new_frogger();
         let mut std = KonamiSound::new(2);
-        frog.clock = 12_345;
-        std.clock = 12_345;
-        let s = std.timer();
+        frog.bus.clock = 12_345;
+        std.bus.clock = 12_345;
+        let s = std.bus.timer();
         let swapped = (s & !0x28) | ((s & 0x08) << 2) | ((s & 0x20) >> 2);
         assert_eq!(
-            frog.timer(),
+            frog.bus.timer(),
             swapped,
             "frogger timer swaps B3/B5 of the konami timer"
         );
@@ -665,15 +675,15 @@ mod tests {
     #[test]
     fn reset_clears_state() {
         let mut b = KonamiSound::new(2);
-        b.command = 0xFF;
-        b.irq_pending = true;
-        b.mute = true;
-        b.clock = 1234;
+        b.bus.command = 0xFF;
+        b.bus.irq_pending = true;
+        b.bus.mute = true;
+        b.bus.clock = 1234;
         b.reset();
-        assert_eq!(b.command, 0);
-        assert!(!b.irq_pending);
-        assert!(!b.mute);
-        assert_eq!(b.clock, 0);
+        assert_eq!(b.bus.command, 0);
+        assert!(!b.bus.irq_pending);
+        assert!(!b.bus.mute);
+        assert_eq!(b.bus.clock, 0);
     }
 
     #[test]
@@ -681,9 +691,9 @@ mod tests {
         let mut b = KonamiSound::new(2);
         init_ppi(&mut b);
         b.ppi_write(0, 0x42);
-        b.irq_pending = true;
-        b.clock = 9876;
-        b.filter = 0x123;
+        b.bus.irq_pending = true;
+        b.bus.clock = 9876;
+        b.bus.filter = 0x123;
 
         let mut w = StateWriter::new();
         b.save_state(&mut w);
@@ -692,9 +702,9 @@ mod tests {
         let mut b2 = KonamiSound::new(2);
         let mut r = StateReader::new(&data);
         b2.load_state(&mut r).unwrap();
-        assert_eq!(b2.command, 0x42);
-        assert!(b2.irq_pending);
-        assert_eq!(b2.clock, 9876);
-        assert_eq!(b2.filter, 0x123);
+        assert_eq!(b2.bus.command, 0x42);
+        assert!(b2.bus.irq_pending);
+        assert_eq!(b2.bus.clock, 9876);
+        assert_eq!(b2.bus.filter, 0x123);
     }
 }

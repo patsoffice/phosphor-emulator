@@ -1106,9 +1106,9 @@ impl AtariSystem1Board {
         n
     }
 
-    /// Reset the shared board state (everything but the CPU, which the wrapper
-    /// resets via `bus_split!` since [`Bus`] lives on the wrapper). EEPROM
-    /// contents are non-volatile and survive reset.
+    /// Reset the shared board state (everything but the CPU, which the machine
+    /// owns and resets against this board). EEPROM contents are non-volatile
+    /// and survive reset.
     pub fn reset(&mut self) {
         self.slapstic.reset();
         self.sound.reset();

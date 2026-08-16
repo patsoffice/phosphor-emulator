@@ -1,15 +1,17 @@
 # Design: Concrete Bus Dispatch
 
-> **Status: prototypes landed, rollout in progress.** Pac-Man (`66a4f84`…`498374b`)
-> and the Galaga family (`3d8886b`) are converted and measured. The rollout is
-> tracked as child issues of `concrete-bus-dispatch-blzz`. This document is
-> written from the prototype results, not before them.
+> **Status: done.** Every machine in the registry dispatches at a concrete bus,
+> `bus_split!` is deleted, and there is no `unsafe` left on any CPU↔bus path.
+> This document is written from measured results, not before them.
 
 ## Context
 
+> The tense below is the tense the work was written in: "every board owns its
+> CPUs" describes the starting state, not the current one.
+
 `Bus` is a generic trait — associated `Address` and `Data` types, and every CPU's
-`execute_cycle` is generic over `B: Bus<…>`. None of that generality reaches the
-machines. Every board owns its CPUs *and* its bus state in one struct, so
+`execute_cycle` is generic over `B: Bus<…>`. None of that generality reached the
+machines. Every board owned its CPUs *and* its bus state in one struct, so
 `cpu.execute_cycle(bus, …)` cannot borrow-check: the CPU is reached through the
 same `&mut self` the bus needs. `bus_split!` works around it by reborrowing the
 struct through a raw pointer and coercing to `&mut dyn Bus`:
@@ -215,9 +217,11 @@ pub trait Cpu: BusMasterComponent + CpuStateTrait {
 }
 ```
 
-`?Sized` keeps `&mut dyn Bus` legal, so boards still on `bus_split!` are
-unaffected and can convert one at a time. Neither trait is object-safe any more;
-nothing used `dyn Cpu` or `dyn BusMasterComponent`.
+`?Sized` kept `&mut dyn Bus` legal, so boards still on `bus_split!` were
+unaffected and could convert one at a time. It stays now that they all have,
+because it costs nothing and keeps dynamic dispatch available to a caller that
+wants it. Neither trait is object-safe any more; nothing used `dyn Cpu` or
+`dyn BusMasterComponent`.
 `core/tests/cpu_bus_generic_test.rs` pins the property this exists for, by
 resetting a 6502 and a 6809 through a borrowed bus view.
 
@@ -314,13 +318,16 @@ type parameters, and disappear with it. Atari System 1's `bus_addr: u32 word`
 option on `impl_board_delegation!` goes away at the same time as its
 `bus_split!`.
 
-`bus_split!` itself is deleted when the last machine converts, along with the
-`#[allow(unused_unsafe)]` and the safety comment that justified it.
-
 Quantum was the first wide-bus machine converted, and the prediction held:
-nothing about it was width-specific. With Atari System 1 and Gottlieb converted
-too, both wide arms are now unreferenced, as are `impl_board_delegation!`'s
-`bus_addr` options.
+nothing about it was width-specific. Food Fight was the last user of the
+`u32 word` arm.
+
+`bus_split!` is now deleted, along with the `#[allow(unused_unsafe)]` and the
+safety comment that justified it. With it went `impl_board_delegation!`'s
+`bus_addr` and `debug_tick_pre` options and the whole `split_cpu` flag: the
+split shape is no longer an option, it is the only shape, so
+`impl_board_debug!`/`impl_standalone_debug!` have one arm each and
+`debug_tick()` is always the machine's inherent `step_cycle()`.
 
 ## Rollout order
 
@@ -357,11 +364,20 @@ Ordered by payoff per unit of risk: shared boards with several machines first
 8. ~~**Gottlieb System 80** (Q*bert)~~ — done for the main 8088 bus. Its sound
    board runs a second 6502 through its own `bus_split!`, which is where
    Q*bert's time actually goes; tracked separately.
-9. **Standalone leftovers** — Burger Time, Congo Bongo, Frogger, Scramble, Mr.
-   Do, Gridlee, I, Robot, Tempest, Crystal Castles, Missile Command, Food Fight,
-   Simple\* test systems.
-10. **Delete `bus_split!`** and update `CLAUDE.md`, which still tells new machines
-    to use the borrow-splitting `unsafe`.
+9. ~~**Standalone leftovers**~~ — done. Burger Time, Congo Bongo, Mr. Do and the
+   Scramble board (Scramble, Super Cobra, Frogger) are board+wrapper machines
+   where the board became the bus. Crystal Castles, Gridlee, I Robot, Missile
+   Command and Food Fight had no board at all and grew one. Tempest kept the
+   shared AVG board and moved its own bus-visible hardware into a `TempestIo`
+   that a `TempestBus` view joins to it. The `Simple*` harnesses grew a
+   `FlatBus16`/`FlatBus32`/`FlatBus68k`.
+10. ~~**Sound boards with their own internal CPU**~~ — done. `KonamiSound`,
+    `SsioBoard` and `AtariSystem1Sound` each held a CPU inside the struct that
+    implemented its bus; each now holds a private inner bus struct beside the
+    CPU. These were the last `bus_split!` sites outside the macros.
+11. ~~**Delete `bus_split!`**~~ — done, along with the macro options that only
+    existed to feed it, and the `CLAUDE.md` text that told new machines to use
+    the borrow-splitting `unsafe`.
 
 Each step: convert, run `cargo test -p phosphor-machines` and the ROM-gated
 harness suites, run the golden frames (they will not catch a per-cycle split, but
@@ -414,3 +430,46 @@ on every access, and is too large to inline. The next lever — now available on
 because dispatch is concrete — is an inlinable fast path for the common
 backed-memory case, with the debug-observability work outlined. That is a
 separate issue, and it is where the remaining headroom is.
+
+## Outcome
+
+Every machine in the registry (39 pinned in the golden-frame roster) dispatches
+at a concrete bus. `bus_split!` is gone, and with it the only raw-pointer
+reborrow in the emulator: `sak fs grep unsafe core/src machines/src` now finds
+one `get_unchecked` in the address-space page lookup and nothing else.
+
+The gains ranged from ~0 to −19% of emulation time per frame, and the spread is
+not mysterious — it tracks how much of a frame is CPU bus cycles:
+
+- **Largest**: Quantum −19.0%, Pac-Man −18.3%, Mario Bros −17.8%, Donkey Kong
+  −16.8%, Road Runner −15.1%, Galaga −14.5%. Fast CPUs, tens of thousands of
+  cycles a frame, little else in the loop.
+- **Middling**: Star Wars −13.1%, Marble Madness −12.3%, the Williams boards
+  −3.5…−6.8%.
+- **Smallest**: Do Castle −4.1%, Q*bert −2.3% across both of its CPUs. Their
+  frames are dominated by per-cycle device work (four PSGs, a Votrax SC-01) that
+  this change does not touch.
+
+Two things were worth as much as the dispatch change on the boards that took
+them: inverting the frame loop to scanline-outer/cycle-inner, and hoisting the
+bus split out of the cycle loop. The second is not an optimisation but a
+correctness-of-approach constraint — splitting per cycle made Galaga *slower*
+than the trait object it replaced.
+
+### What the tests caught that the golden frames could not
+
+Two real regressions surfaced only in the ROM-gated suites, and both were
+invisible to the golden frames because the picture was identical either way:
+
+- Star Wars' hand-written `MachineDebug::debug_bus` still returned the board
+  after the CPUs moved to the machine, so Empire "exposed no CPUs through its
+  debug bus" (`boot_check_test`).
+- Marble Madness, Road Runner and Pisces have hand-written `Saveable` impls that
+  never picked up the `cpu` field the board stopped writing, so their save
+  states carried no CPU registers at all (`save_state_rom_test`). The ROM-less
+  save-state suite cannot see this: a blank-ROM CPU never leaves its reset
+  vector, so both instances agree whether or not the CPU is saved.
+
+Machines using `#[derive(Saveable)]` were never at risk — the derive picks up
+the new field. Prefer the derive; if you hand-write the impl, write the CPU
+first, which is where the board wrote it.

@@ -446,7 +446,7 @@ impl Bus for LunarLanderBus<'_> {
 // Renderable + MachineDebug delegate to the shared board; audio is owned by the
 // game wrapper's discrete sound device, so AudioSource is hand-written.
 crate::impl_board_renderable!(LunarLanderSystem, board, atari_dvg::TIMING, vectors);
-crate::impl_board_debug!(LunarLanderSystem, board, atari_dvg::TIMING, split_cpu);
+crate::impl_board_debug!(LunarLanderSystem, board, atari_dvg::TIMING);
 
 impl phosphor_core::core::machine::AudioSource for LunarLanderSystem {
     fn fill_audio(&mut self, buffer: &mut [i16]) -> usize {

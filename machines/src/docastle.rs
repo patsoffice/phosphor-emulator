@@ -1579,7 +1579,7 @@ impl phosphor_core::core::machine::Renderable for DocastleSystem {
 }
 
 crate::impl_board_audio!(DocastleSystem, board);
-crate::impl_board_debug!(DocastleSystem, board, crate::docastle::TIMING, split_cpu);
+crate::impl_board_debug!(DocastleSystem, board, crate::docastle::TIMING);
 
 impl MachineCore for DocastleSystem {
     fn frame_rate_hz(&self) -> f64 {

@@ -1167,8 +1167,8 @@ impl NamcoGalagaBoard {
     // Reset
     // -----------------------------------------------------------------------
 
-    /// Reset all board state except ROMs and palette PROMs.
-    /// The caller must reset CPUs separately (requires bus_split).
+    /// Reset all board state except ROMs and palette PROMs. The machine owns
+    /// the CPUs and resets them against this board.
     pub fn reset_board(&mut self) {
         self.wsg.reset();
         // Galaga-family hardware has no sound-enable latch; WSG is always

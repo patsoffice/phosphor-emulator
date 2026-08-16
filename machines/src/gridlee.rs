@@ -999,7 +999,7 @@ impl InputConfigurable for GridleeSystem {
     }
 }
 
-crate::impl_standalone_debug!(GridleeSystem, split_cpu);
+crate::impl_standalone_debug!(GridleeSystem);
 
 impl Saveable for GridleeSystem {
     fn save_state(&self, w: &mut StateWriter) {

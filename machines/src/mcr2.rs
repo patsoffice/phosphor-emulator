@@ -559,7 +559,8 @@ impl Mcr2Board {
     }
 
     // -----------------------------------------------------------------------
-    // Reset (does NOT reset CPU — wrapper must do that with bus_split)
+    // Reset (does NOT reset the CPU — the machine owns it and resets it
+    // against this board)
     // -----------------------------------------------------------------------
 
     pub fn reset_board(&mut self) {

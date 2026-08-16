@@ -367,7 +367,7 @@ impl Default for RobotronSystem {
 // Machine traits — delegates to WilliamsBoard with Robotron input wiring
 // ---------------------------------------------------------------------------
 
-crate::impl_board_delegation!(RobotronSystem, board, williams::TIMING, split_cpu);
+crate::impl_board_delegation!(RobotronSystem, board, williams::TIMING);
 
 impl InputConfigurable for RobotronSystem {
     fn input_controls(&self) -> &'static [InputControl] {

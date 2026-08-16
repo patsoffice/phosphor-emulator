@@ -1347,8 +1347,7 @@ crate::impl_board_delegation!(
     CongoBongoSystem,
     board,
     crate::congo_bongo::TIMING,
-    orientation,
-    split_cpu
+    orientation
 );
 
 impl MachineCore for CongoBongoSystem {

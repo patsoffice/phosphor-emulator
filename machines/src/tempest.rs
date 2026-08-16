@@ -675,7 +675,7 @@ impl InputConfigurable for TempestSystem {
     }
 }
 
-crate::impl_board_debug!(TempestSystem, board, atari_avg::TIMING, split_cpu);
+crate::impl_board_debug!(TempestSystem, board, atari_avg::TIMING);
 
 impl MachineCore for TempestSystem {
     crate::machine_core_metadata!("tempest", atari_avg::TIMING);

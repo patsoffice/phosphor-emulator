@@ -423,7 +423,7 @@ impl Bus for GottliebBoard {
 // Machine traits (MachineCore + capabilities)
 // ---------------------------------------------------------------------------
 
-crate::impl_board_delegation!(QbertSystem, board, gottlieb::TIMING, orientation, split_cpu);
+crate::impl_board_delegation!(QbertSystem, board, gottlieb::TIMING, orientation);
 
 impl InputConfigurable for QbertSystem {
     fn input_controls(&self) -> &'static [InputControl] {

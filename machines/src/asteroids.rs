@@ -407,7 +407,7 @@ impl Bus for AsteroidsBus<'_> {
 // game wrapper's discrete sound device, so AudioSource is implemented by hand
 // (the board has no sound hardware to delegate to).
 crate::impl_board_renderable!(AsteroidsSystem, board, atari_dvg::TIMING, vectors);
-crate::impl_board_debug!(AsteroidsSystem, board, atari_dvg::TIMING, split_cpu);
+crate::impl_board_debug!(AsteroidsSystem, board, atari_dvg::TIMING);
 
 impl phosphor_core::core::machine::AudioSource for AsteroidsSystem {
     fn fill_audio(&mut self, buffer: &mut [i16]) -> usize {

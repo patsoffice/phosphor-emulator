@@ -1331,8 +1331,6 @@ impl StarWarsBoard {
 
     // --- Frame execution ---------------------------------------------------
 
-    /// One CPU cycle: periodic IRQ, watchdog, both CPUs, and the matrix busy
-    /// countdown. `bus` aliases the owning wrapper (via `bus_split!`).
     /// Board work before the CPUs' cycle: the periodic IRQ divider, the AVG
     /// busy countdown and the watchdog.
     pub(crate) fn begin_cycle(&mut self, cpu: &M6809) {
@@ -1663,8 +1661,8 @@ impl StarWarsSystem {
 
     /// Service a pending sound-CPU reset ($46E0) before a cycle-stepped tick.
     ///
-    /// `run_frame` does this once per frame because that is where `bus_split!`
-    /// yields a bus for the reset-vector fetch. The debugger and the headless
+    /// `run_frame` does this once per frame, before its cycle loop. The
+    /// debugger and the headless
     /// `trace --cpu`/`--break-pc` loops call `debug_tick` instead and never go
     /// through `run_frame`, so without this the request would sit pending
     /// forever and the sound CPU would keep running the pre-reset code — the

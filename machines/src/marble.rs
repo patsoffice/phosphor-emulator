@@ -670,7 +670,7 @@ impl Bus for MarbleBus<'_> {
 
 // Renderable / AudioSource / MachineDebug delegate to the board (24-bit,
 // 16-bit-data bus).
-crate::impl_board_delegation!(MarbleSystem, board, atari_system1::TIMING, split_cpu);
+crate::impl_board_delegation!(MarbleSystem, board, atari_system1::TIMING);
 
 impl MachineCore for MarbleSystem {
     crate::machine_core_metadata!("marble", atari_system1::TIMING);

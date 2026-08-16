@@ -1295,8 +1295,7 @@ crate::impl_board_delegation!(
     MarioBrosSystem,
     board,
     crate::mario_bros::TIMING,
-    orientation,
-    split_cpu
+    orientation
 );
 
 impl InputConfigurable for MarioBrosSystem {

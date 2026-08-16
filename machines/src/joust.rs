@@ -432,7 +432,7 @@ impl Bus for JoustBus<'_> {
 // Machine traits — delegates to WilliamsBoard with Joust input wiring
 // ---------------------------------------------------------------------------
 
-crate::impl_board_delegation!(JoustSystem, board, williams::TIMING, split_cpu);
+crate::impl_board_delegation!(JoustSystem, board, williams::TIMING);
 
 impl MachineCore for JoustSystem {
     crate::machine_core_metadata!("joust", williams::TIMING);

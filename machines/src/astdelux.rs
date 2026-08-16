@@ -491,7 +491,7 @@ impl InputConfigurable for AsteroidsDeluxeSystem {
     }
 }
 
-crate::impl_board_debug!(AsteroidsDeluxeSystem, board, atari_dvg::TIMING, split_cpu);
+crate::impl_board_debug!(AsteroidsDeluxeSystem, board, atari_dvg::TIMING);
 
 impl MachineCore for AsteroidsDeluxeSystem {
     crate::machine_core_metadata!("astdelux", atari_dvg::TIMING);

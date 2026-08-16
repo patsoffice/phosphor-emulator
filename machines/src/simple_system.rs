@@ -2,7 +2,6 @@
 //!
 //! Provides flat-bus systems with no I/O devices — just a CPU and RAM.
 
-use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::component::BusMasterComponent;
 use phosphor_core::core::{Bus, BusMaster};
@@ -19,12 +18,19 @@ use phosphor_core::cpu::z80::Z80;
 // SimpleSystem<C> — 16-bit address space (64 KB flat RAM)
 // ---------------------------------------------------------------------------
 
+/// The flat 64 KB RAM the CPU sees. Held apart from the CPU so a cycle
+/// dispatches at a concrete bus rather than a trait object -- see
+/// `docs/designs/concrete-bus-dispatch.md`.
+pub struct FlatBus16 {
+    ram: [u8; 0x10000],
+}
+
 pub struct SimpleSystem<C>
 where
     C: Cpu + BusMasterComponent<Address = u16, Data = u8> + 'static,
 {
     pub cpu: C,
-    ram: [u8; 0x10000],
+    bus: FlatBus16,
     clock: u64,
 }
 
@@ -44,7 +50,7 @@ where
     pub fn new() -> Self {
         Self {
             cpu: C::default(),
-            ram: [0; 0x10000],
+            bus: FlatBus16 { ram: [0; 0x10000] },
             clock: 0,
         }
     }
@@ -55,9 +61,7 @@ where
     C: Cpu + BusMasterComponent<Address = u16, Data = u8> + 'static,
 {
     pub fn tick(&mut self) {
-        bus_split!(self, bus => {
-            self.cpu.tick_with_bus(bus, BusMaster::Cpu(0));
-        });
+        self.cpu.tick_with_bus(&mut self.bus, BusMaster::Cpu(0));
         self.clock += 1;
     }
 
@@ -70,8 +74,8 @@ where
 
     /// Load bytes into RAM at `offset`.
     pub fn load_program(&mut self, offset: usize, data: &[u8]) {
-        if offset + data.len() <= self.ram.len() {
-            self.ram[offset..offset + data.len()].copy_from_slice(data);
+        if offset + data.len() <= self.bus.ram.len() {
+            self.bus.ram[offset..offset + data.len()].copy_from_slice(data);
         }
     }
 
@@ -80,11 +84,11 @@ where
     }
 
     pub fn read_ram(&self, addr: usize) -> u8 {
-        self.ram.get(addr).copied().unwrap_or(0)
+        self.bus.ram.get(addr).copied().unwrap_or(0)
     }
 
     pub fn write_ram(&mut self, addr: usize, data: u8) {
-        if let Some(cell) = self.ram.get_mut(addr) {
+        if let Some(cell) = self.bus.ram.get_mut(addr) {
             *cell = data;
         }
     }
@@ -94,10 +98,7 @@ where
     }
 }
 
-impl<C> Bus for SimpleSystem<C>
-where
-    C: Cpu + BusMasterComponent<Address = u16, Data = u8> + 'static,
-{
+impl Bus for FlatBus16 {
     type Address = u16;
     type Data = u8;
 
@@ -129,12 +130,17 @@ pub type SimpleI8035System = SimpleSystem<I8035>;
 // SimpleSystem32<C> — 32-bit address space (1 MB flat RAM)
 // ---------------------------------------------------------------------------
 
+/// The flat 1 MB RAM the CPU sees; see [`FlatBus16`].
+pub struct FlatBus32 {
+    ram: Vec<u8>,
+}
+
 pub struct SimpleSystem32<C>
 where
     C: Cpu + BusMasterComponent<Address = u32, Data = u8> + 'static,
 {
     pub cpu: C,
-    ram: Vec<u8>,
+    bus: FlatBus32,
     clock: u64,
 }
 
@@ -154,7 +160,9 @@ where
     pub fn new() -> Self {
         Self {
             cpu: C::default(),
-            ram: vec![0; 0x10_0000], // 1 MB
+            bus: FlatBus32 {
+                ram: vec![0; 0x10_0000], // 1 MB
+            },
             clock: 0,
         }
     }
@@ -165,9 +173,7 @@ where
     C: Cpu + BusMasterComponent<Address = u32, Data = u8> + 'static,
 {
     pub fn tick(&mut self) {
-        bus_split!(self, bus: u32 => {
-            self.cpu.tick_with_bus(bus, BusMaster::Cpu(0));
-        });
+        self.cpu.tick_with_bus(&mut self.bus, BusMaster::Cpu(0));
         self.clock += 1;
     }
 
@@ -180,8 +186,8 @@ where
 
     /// Load bytes into RAM at `offset`.
     pub fn load_program(&mut self, offset: usize, data: &[u8]) {
-        if offset + data.len() <= self.ram.len() {
-            self.ram[offset..offset + data.len()].copy_from_slice(data);
+        if offset + data.len() <= self.bus.ram.len() {
+            self.bus.ram[offset..offset + data.len()].copy_from_slice(data);
         }
     }
 
@@ -190,11 +196,11 @@ where
     }
 
     pub fn read_ram(&self, addr: usize) -> u8 {
-        self.ram.get(addr).copied().unwrap_or(0)
+        self.bus.ram.get(addr).copied().unwrap_or(0)
     }
 
     pub fn write_ram(&mut self, addr: usize, data: u8) {
-        if let Some(cell) = self.ram.get_mut(addr) {
+        if let Some(cell) = self.bus.ram.get_mut(addr) {
             *cell = data;
         }
     }
@@ -204,10 +210,7 @@ where
     }
 }
 
-impl<C> Bus for SimpleSystem32<C>
-where
-    C: Cpu + BusMasterComponent<Address = u32, Data = u8> + 'static,
-{
+impl Bus for FlatBus32 {
     type Address = u32;
     type Data = u8;
 
@@ -237,12 +240,17 @@ pub type SimpleI8088System = SimpleSystem32<I8088>;
 
 /// Test harness for word-bus CPUs (68000 family): byte-addressable RAM
 /// serving 16-bit big-endian words at even addresses.
+/// The flat 16 MB RAM behind the word bus; see [`FlatBus16`].
+pub struct FlatBus68k {
+    ram: Vec<u8>,
+}
+
 pub struct SimpleSystem68k<C>
 where
     C: Cpu + BusMasterComponent<Address = u32, Data = u16> + 'static,
 {
     pub cpu: C,
-    ram: Vec<u8>,
+    bus: FlatBus68k,
     clock: u64,
 }
 
@@ -262,7 +270,9 @@ where
     pub fn new() -> Self {
         Self {
             cpu: C::default(),
-            ram: vec![0; 0x100_0000], // 16 MB (full 24-bit address space)
+            bus: FlatBus68k {
+                ram: vec![0; 0x100_0000], // 16 MB (full 24-bit address space)
+            },
             clock: 0,
         }
     }
@@ -273,9 +283,7 @@ where
     C: Cpu + BusMasterComponent<Address = u32, Data = u16> + 'static,
 {
     pub fn tick(&mut self) {
-        bus_split!(self, bus: u32 word => {
-            self.cpu.tick_with_bus(bus, BusMaster::Cpu(0));
-        });
+        self.cpu.tick_with_bus(&mut self.bus, BusMaster::Cpu(0));
         self.clock += 1;
     }
 
@@ -288,15 +296,13 @@ where
 
     /// Reset the CPU through the bus (loads SSP/PC from vectors 0/1).
     pub fn reset(&mut self) {
-        bus_split!(self, bus: u32 word => {
-            self.cpu.reset(bus, BusMaster::Cpu(0));
-        });
+        self.cpu.reset(&mut self.bus, BusMaster::Cpu(0));
     }
 
     /// Load bytes into RAM at `offset`.
     pub fn load_program(&mut self, offset: usize, data: &[u8]) {
-        if offset + data.len() <= self.ram.len() {
-            self.ram[offset..offset + data.len()].copy_from_slice(data);
+        if offset + data.len() <= self.bus.ram.len() {
+            self.bus.ram[offset..offset + data.len()].copy_from_slice(data);
         }
     }
 
@@ -305,11 +311,11 @@ where
     }
 
     pub fn read_ram(&self, addr: usize) -> u8 {
-        self.ram.get(addr).copied().unwrap_or(0)
+        self.bus.ram.get(addr).copied().unwrap_or(0)
     }
 
     pub fn write_ram(&mut self, addr: usize, data: u8) {
-        if let Some(cell) = self.ram.get_mut(addr) {
+        if let Some(cell) = self.bus.ram.get_mut(addr) {
             *cell = data;
         }
     }
@@ -319,10 +325,7 @@ where
     }
 }
 
-impl<C> Bus for SimpleSystem68k<C>
-where
-    C: Cpu + BusMasterComponent<Address = u32, Data = u16> + 'static,
-{
+impl Bus for FlatBus68k {
     type Address = u32;
     type Data = u16;
 
@@ -366,7 +369,7 @@ mod tests {
         // Word bus serves big-endian words at even addresses (24-bit masked)
         sys.write_ram(0x2000, 0xBE);
         sys.write_ram(0x2001, 0xEF);
-        let word = Bus::read(&mut sys, BusMaster::Cpu(0), 0xFF00_2001);
+        let word = Bus::read(&mut sys.bus, BusMaster::Cpu(0), 0xFF00_2001);
         assert_eq!(word, 0xBEEF);
     }
 }

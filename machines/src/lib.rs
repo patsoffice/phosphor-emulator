@@ -19,14 +19,11 @@ pub(crate) fn set_bit_active_low(reg: &mut u8, bit: u8, pressed: bool) {
 /// Implements `MachineDebug` for standalone machines (single CPU, flat bus).
 ///
 /// Requires the type to:
-/// - Have a `cpu` field with `at_instruction_boundary()`
-/// - Have a `tick()` method
+/// - Have a `step_cycle()` method returning the instruction-boundary mask
 /// - Implement `BusDebug` on `Self`
 /// - Have `TIMING` in scope
 macro_rules! impl_standalone_debug {
-    // The CPU lives beside the bus state, so a cycle is `step_cycle()` on the
-    // machine and it returns the boundary mask itself.
-    ($type:ty, split_cpu) => {
+    ($type:ty) => {
         impl phosphor_core::core::machine::MachineDebug for $type {
             fn debug_bus(&self) -> Option<&dyn phosphor_core::core::debug::BusDebug> {
                 Some(self)
@@ -45,30 +42,6 @@ macro_rules! impl_standalone_debug {
             }
         }
     };
-    ($type:ty) => {
-        impl phosphor_core::core::machine::MachineDebug for $type {
-            fn debug_bus(&self) -> Option<&dyn phosphor_core::core::debug::BusDebug> {
-                Some(self)
-            }
-
-            fn debug_bus_mut(&mut self) -> Option<&mut dyn phosphor_core::core::debug::BusDebug> {
-                Some(self)
-            }
-
-            fn cycles_per_frame(&self) -> u64 {
-                TIMING.cycles_per_frame()
-            }
-
-            fn debug_tick(&mut self) -> u32 {
-                self.tick();
-                if self.cpu.at_instruction_boundary() {
-                    1
-                } else {
-                    0
-                }
-            }
-        }
-    };
 }
 pub(crate) use impl_standalone_debug;
 
@@ -84,12 +57,6 @@ pub(crate) use impl_standalone_debug;
 /// - `no_audio` — empty `AudioSource` impl (no audio hardware emulated yet)
 /// - `vectors` — delegates `vector_display_list()` to the board
 /// - `overlay_stats` — calls `self.overlay_stats_impl()` (define on your type)
-/// - `debug_tick_pre` — calls `self.debug_pre_tick()` before `board.tick()` in `debug_tick()`
-/// - `bus_addr: Type` — address type for `bus_split!` (default: inferred)
-/// - `split_cpu` — the machine holds its CPU beside the board rather than
-///   inside it, so bus dispatch is concrete. `debug_tick()` calls the machine's
-///   inherent `step_cycle()`, and `debug_bus()` is the machine itself (which
-///   must `#[derive(BusDebug)]` with `#[debug_bus]` on the board field)
 macro_rules! impl_board_delegation {
     // Base case: standard audio, no extras
     ($type:ty, $board:ident, $timing:expr) => {
@@ -106,8 +73,8 @@ macro_rules! impl_board_delegation {
 
     // --- Renderable dispatch ---
     // Walk the full option list, gathering the render-relevant flags (and
-    // ignoring audio/debug flags like `no_audio`, `debug_tick_pre`,
-    // `bus_addr: T`), then emit a single accumulating `impl_board_renderable!`.
+    // ignoring audio flags like `no_audio`), then emit a single accumulating
+    // `impl_board_renderable!`.
     (@render $type:ty, $board:ident, $timing:expr, $($opt:tt)*) => {
         $crate::impl_board_delegation!(@render_gather [$type, $board, $timing] [] $($opt)*);
     };
@@ -125,8 +92,7 @@ macro_rules! impl_board_delegation {
     (@render_gather $ctx:tt [$($flag:ident)*] orientation $($rest:tt)*) => {
         $crate::impl_board_delegation!(@render_gather $ctx [$($flag)* orientation] $($rest)*);
     };
-    // Anything else (commas, `no_audio`, `debug_tick_pre`, `bus_addr`, `:`,
-    // type tokens, ...): drop one token and continue.
+    // Anything else (commas, `no_audio`, ...): drop one token and continue.
     (@render_gather $ctx:tt $flags:tt $skip:tt $($rest:tt)*) => {
         $crate::impl_board_delegation!(@render_gather $ctx $flags $($rest)*);
     };
@@ -140,31 +106,6 @@ macro_rules! impl_board_delegation {
     };
 
     // --- MachineDebug dispatch ---
-    (@debug $type:ty, $board:ident, $timing:expr, debug_tick_pre $($rest:tt)*) => {
-        $crate::impl_board_debug!($type, $board, $timing, debug_tick_pre);
-    };
-    // CPU held beside the bus (concrete dispatch) — see impl_board_debug!.
-    (@debug $type:ty, $board:ident, $timing:expr, split_cpu $($rest:tt)*) => {
-        $crate::impl_board_debug!($type, $board, $timing, split_cpu);
-    };
-    // 32-bit address / 16-bit data bus (Atari System 1). Matched literally and
-    // before the single-token `bus_addr: $addr:tt` arms, since `u32 word` is two
-    // tokens the generic arm can't capture.
-    (@debug $type:ty, $board:ident, $timing:expr, bus_addr: u32 word, debug_tick_pre $($rest:tt)*) => {
-        $crate::impl_board_debug!($type, $board, $timing, bus_addr: u32 word, debug_tick_pre);
-    };
-    (@debug $type:ty, $board:ident, $timing:expr, bus_addr: u32 word $(,)?) => {
-        $crate::impl_board_debug!($type, $board, $timing, bus_addr: u32 word);
-    };
-    (@debug $type:ty, $board:ident, $timing:expr, bus_addr: $addr:tt, debug_tick_pre $($rest:tt)*) => {
-        $crate::impl_board_debug!($type, $board, $timing, bus_addr: $addr, debug_tick_pre);
-    };
-    (@debug $type:ty, $board:ident, $timing:expr, bus_addr: $addr:tt $(,)?) => {
-        $crate::impl_board_debug!($type, $board, $timing, bus_addr: $addr);
-    };
-    (@debug $type:ty, $board:ident, $timing:expr, bus_addr: $addr:tt, $($rest:tt)*) => {
-        $crate::impl_board_debug!($type, $board, $timing, bus_addr: $addr);
-    };
     // Skip non-debug options
     (@debug $type:ty, $board:ident, $timing:expr, $opt:ident $($rest:tt)*) => {
         $crate::impl_board_delegation!(@debug $type, $board, $timing, $($rest)*);
@@ -244,13 +185,13 @@ macro_rules! impl_board_audio {
 }
 pub(crate) use impl_board_audio;
 
-/// Implements `MachineDebug` delegating to board.
+/// Implements `MachineDebug` for a board-wrapper machine.
+///
+/// The machine holds its CPU beside the board, so the machine itself is the
+/// `BusDebug` (via `#[debug_bus]`, which merges the board's devices and maps
+/// with the machine's CPU) and one cycle is its inherent `step_cycle()`.
 macro_rules! impl_board_debug {
-    // Machine whose CPU lives beside the bus rather than inside it: the machine
-    // itself is the `BusDebug` (via `#[debug_bus]`, which merges the board's
-    // devices and maps with the machine's CPU), and one cycle is its inherent
-    // `step_cycle()` rather than a bus_split! around `board.tick(bus)`.
-    ($type:ty, $board:ident, $timing:expr, split_cpu) => {
+    ($type:ty, $board:ident, $timing:expr) => {
         impl phosphor_core::core::machine::MachineDebug for $type {
             fn debug_bus(&self) -> Option<&dyn phosphor_core::core::debug::BusDebug> {
                 Some(self)
@@ -263,123 +204,6 @@ macro_rules! impl_board_debug {
             }
             fn debug_tick(&mut self) -> u32 {
                 self.step_cycle()
-            }
-        }
-    };
-    ($type:ty, $board:ident, $timing:expr) => {
-        impl phosphor_core::core::machine::MachineDebug for $type {
-            fn debug_bus(&self) -> Option<&dyn phosphor_core::core::debug::BusDebug> {
-                Some(&self.$board)
-            }
-            fn debug_bus_mut(&mut self) -> Option<&mut dyn phosphor_core::core::debug::BusDebug> {
-                Some(&mut self.$board)
-            }
-            fn cycles_per_frame(&self) -> u64 {
-                $timing.cycles_per_frame()
-            }
-            fn debug_tick(&mut self) -> u32 {
-                phosphor_core::bus_split!(self, bus => {
-                    self.$board.tick(bus);
-                });
-                self.$board.debug_tick_boundaries()
-            }
-        }
-    };
-    ($type:ty, $board:ident, $timing:expr, debug_tick_pre) => {
-        impl phosphor_core::core::machine::MachineDebug for $type {
-            fn debug_bus(&self) -> Option<&dyn phosphor_core::core::debug::BusDebug> {
-                Some(&self.$board)
-            }
-            fn debug_bus_mut(&mut self) -> Option<&mut dyn phosphor_core::core::debug::BusDebug> {
-                Some(&mut self.$board)
-            }
-            fn cycles_per_frame(&self) -> u64 {
-                $timing.cycles_per_frame()
-            }
-            fn debug_tick(&mut self) -> u32 {
-                self.debug_pre_tick();
-                phosphor_core::bus_split!(self, bus => {
-                    self.$board.tick(bus);
-                });
-                self.$board.debug_tick_boundaries()
-            }
-        }
-    };
-    ($type:ty, $board:ident, $timing:expr, bus_addr: u32 word) => {
-        impl phosphor_core::core::machine::MachineDebug for $type {
-            fn debug_bus(&self) -> Option<&dyn phosphor_core::core::debug::BusDebug> {
-                Some(&self.$board)
-            }
-            fn debug_bus_mut(&mut self) -> Option<&mut dyn phosphor_core::core::debug::BusDebug> {
-                Some(&mut self.$board)
-            }
-            fn cycles_per_frame(&self) -> u64 {
-                $timing.cycles_per_frame()
-            }
-            fn debug_tick(&mut self) -> u32 {
-                phosphor_core::bus_split!(self, bus : u32 word => {
-                    self.$board.tick(bus);
-                });
-                self.$board.debug_tick_boundaries()
-            }
-        }
-    };
-    ($type:ty, $board:ident, $timing:expr, bus_addr: u32 word, debug_tick_pre) => {
-        impl phosphor_core::core::machine::MachineDebug for $type {
-            fn debug_bus(&self) -> Option<&dyn phosphor_core::core::debug::BusDebug> {
-                Some(&self.$board)
-            }
-            fn debug_bus_mut(&mut self) -> Option<&mut dyn phosphor_core::core::debug::BusDebug> {
-                Some(&mut self.$board)
-            }
-            fn cycles_per_frame(&self) -> u64 {
-                $timing.cycles_per_frame()
-            }
-            fn debug_tick(&mut self) -> u32 {
-                self.debug_pre_tick();
-                phosphor_core::bus_split!(self, bus : u32 word => {
-                    self.$board.tick(bus);
-                });
-                self.$board.debug_tick_boundaries()
-            }
-        }
-    };
-    ($type:ty, $board:ident, $timing:expr, bus_addr: $addr:tt) => {
-        impl phosphor_core::core::machine::MachineDebug for $type {
-            fn debug_bus(&self) -> Option<&dyn phosphor_core::core::debug::BusDebug> {
-                Some(&self.$board)
-            }
-            fn debug_bus_mut(&mut self) -> Option<&mut dyn phosphor_core::core::debug::BusDebug> {
-                Some(&mut self.$board)
-            }
-            fn cycles_per_frame(&self) -> u64 {
-                $timing.cycles_per_frame()
-            }
-            fn debug_tick(&mut self) -> u32 {
-                phosphor_core::bus_split!(self, bus : $addr => {
-                    self.$board.tick(bus);
-                });
-                self.$board.debug_tick_boundaries()
-            }
-        }
-    };
-    ($type:ty, $board:ident, $timing:expr, bus_addr: $addr:tt, debug_tick_pre) => {
-        impl phosphor_core::core::machine::MachineDebug for $type {
-            fn debug_bus(&self) -> Option<&dyn phosphor_core::core::debug::BusDebug> {
-                Some(&self.$board)
-            }
-            fn debug_bus_mut(&mut self) -> Option<&mut dyn phosphor_core::core::debug::BusDebug> {
-                Some(&mut self.$board)
-            }
-            fn cycles_per_frame(&self) -> u64 {
-                $timing.cycles_per_frame()
-            }
-            fn debug_tick(&mut self) -> u32 {
-                self.debug_pre_tick();
-                phosphor_core::bus_split!(self, bus : $addr => {
-                    self.$board.tick(bus);
-                });
-                self.$board.debug_tick_boundaries()
             }
         }
     };

@@ -40,5 +40,5 @@ assert_eq!(cpu.a, 0x42);
 ## Gotchas
 
 - Tests failing with wrong PC values often need more `tick_with_bus()` calls (each cycle = one tick)
-- The borrow-splitting `unsafe` in system `tick()` methods is sound because CPU and Bus access disjoint memory. Boards are migrating off it: holding the CPU in a separate field from the bus makes the split safe *and* concrete-typed (`docs/designs/concrete-bus-dispatch.md`)
-- `BusMasterComponent`/`Cpu` take the bus as a method type parameter (`B: Bus<Address = Self::Address, Data = Self::Data> + ?Sized`), not an associated `dyn Bus` type — that is what lets a board pass a borrowed bus view. `?Sized` keeps `&mut dyn Bus` working for unconverted boards; neither trait is object-safe
+- A machine holds its CPU in a separate field from its bus state, so the borrow splits natively and the cycle dispatches at a concrete type (`docs/designs/concrete-bus-dispatch.md`). Don't reintroduce a raw-pointer split
+- `BusMasterComponent`/`Cpu` take the bus as a method type parameter (`B: Bus<Address = Self::Address, Data = Self::Data> + ?Sized`), not an associated `dyn Bus` type — that is what lets a board pass a borrowed bus view. `?Sized` keeps `&mut dyn Bus` usable for a caller that wants dynamic dispatch; neither trait is object-safe

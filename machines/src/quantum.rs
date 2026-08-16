@@ -553,6 +553,12 @@ impl QuantumSystem {
         self.cpu.execute_cycle(&mut self.board, BusMaster::Cpu(0));
         self.board.end_cycle(&self.cpu);
     }
+
+    /// Advance one CPU cycle, returning the instruction-boundary mask.
+    pub fn step_cycle(&mut self) -> u32 {
+        self.tick();
+        u32::from(self.cpu.at_instruction_boundary())
+    }
 }
 
 impl Default for QuantumSystem {

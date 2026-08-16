@@ -429,8 +429,7 @@ crate::impl_board_delegation!(
     board,
     mcr2::TIMING,
     overlay_stats,
-    orientation,
-    split_cpu
+    orientation
 );
 
 impl InputConfigurable for SatansHollowSystem {

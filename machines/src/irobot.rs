@@ -1634,7 +1634,7 @@ const IROBOT_DIP_BANKS: &[DipSwitchBank] = &[
 
 crate::impl_dip_switches!(IrobotSystem, IROBOT_DIP_BANKS, board.dsw1, board.dsw2);
 
-crate::impl_standalone_debug!(IrobotSystem, split_cpu);
+crate::impl_standalone_debug!(IrobotSystem);
 impl Profilable for IrobotSystem {}
 impl phosphor_core::core::debug_trace::DebugTrace for IrobotSystem {}
 

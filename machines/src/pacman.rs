@@ -167,13 +167,7 @@ impl Default for PacmanSystem {
 // Pac-Man adds nothing to the base board's address decoding, so `NamcoPacBoard`
 // *is* the bus — see its `Bus` impl in namco_pac.rs.
 
-crate::impl_board_delegation!(
-    PacmanSystem,
-    board,
-    namco_pac::TIMING,
-    orientation,
-    split_cpu
-);
+crate::impl_board_delegation!(PacmanSystem, board, namco_pac::TIMING, orientation);
 
 impl MachineCore for PacmanSystem {
     crate::machine_core_metadata!("pacman", namco_pac::TIMING);

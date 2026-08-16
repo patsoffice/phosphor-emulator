@@ -1196,7 +1196,7 @@ impl InputConfigurable for CrystalCastlesSystem {
     }
 }
 
-crate::impl_standalone_debug!(CrystalCastlesSystem, split_cpu);
+crate::impl_standalone_debug!(CrystalCastlesSystem);
 
 impl Saveable for CrystalCastlesSystem {
     fn save_state(&self, w: &mut StateWriter) {

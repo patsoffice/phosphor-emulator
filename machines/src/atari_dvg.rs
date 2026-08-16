@@ -234,8 +234,8 @@ impl AtariDvgBoard {
         self.display_list = self.dvg.take_display_list();
     }
 
-    /// Reset board state. CPU reset must be done separately by the wrapper
-    /// via `bus_split!` (since the CPU needs a Bus reference).
+    /// Reset board state. The CPU lives on the machine, which resets it
+    /// against this board.
     pub fn reset(&mut self) {
         self.dvg.reset();
         self.nmi_pending = false;

@@ -601,7 +601,7 @@ impl GalaxianBoard {
 
     /// Reset all board state except ROMs, GFX/palette, and the input/DIP ports
     /// (those are external switches that a reset signal does not move). The
-    /// caller resets the CPU separately (requires `bus_split`).
+    /// machine owns the CPU and resets it against this board.
     pub fn reset_board(&mut self) {
         self.video.reset();
         phosphor_core::device::Device::reset(&mut self.sound);
@@ -1044,7 +1044,7 @@ impl Bus for GalaxianBoard {
 // Trait implementations
 // ---------------------------------------------------------------------------
 
-crate::impl_board_delegation!(GalaxianSystem, board, TIMING, orientation, split_cpu);
+crate::impl_board_delegation!(GalaxianSystem, board, TIMING, orientation);
 
 impl MachineCore for GalaxianSystem {
     crate::machine_core_metadata!("galaxian", TIMING);

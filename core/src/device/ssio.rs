@@ -32,7 +32,6 @@
 //! | 0xF000–0xFFFF | R   | DIP switches                     |
 
 use crate::audio::AudioResampler;
-use crate::bus_split;
 use crate::core::debug::{DebugRegister, Debuggable};
 use crate::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use crate::core::{Bus, BusMaster};
@@ -73,7 +72,14 @@ const DUTY_CYCLE_VOLUME: [u8; 16] = [
 pub struct SsioBoard {
     // Sound CPU (Z80 @ 2 MHz)
     cpu: Z80,
+    /// Everything the sound CPU talks to. Held apart from the CPU so a cycle
+    /// dispatches at a concrete bus rather than a trait object -- see
+    /// `docs/designs/concrete-bus-dispatch.md`.
+    bus: SsioBus,
+}
 
+/// The sound Z80's bus: the two PSGs, memory, and the main-board latches.
+struct SsioBus {
     // 2× AY-8910 PSGs
     ay: [Ay8910; 2],
 
@@ -111,27 +117,29 @@ impl SsioBoard {
     pub fn new() -> Self {
         Self {
             cpu: Z80::new(),
-            ay: [Ay8910::new(SSIO_CLOCK_HZ), Ay8910::new(SSIO_CLOCK_HZ)],
-            rom: vec![0; 0x4000],
-            ram: [0; 0x0400],
-            data_latch: [0; 4],
-            status: 0,
-            input_ports: [0xFF; 5],
-            dip_switches: 0,
-            irq_counter: 0,
-            irq_pending: false,
-            duty_cycle: [[0; 3]; 2],
-            overall: [0; 2],
-            mute: false,
-            resampler: AudioResampler::new(SSIO_CLOCK_HZ, OUTPUT_SAMPLE_RATE),
-            clock: 0,
+            bus: SsioBus {
+                ay: [Ay8910::new(SSIO_CLOCK_HZ), Ay8910::new(SSIO_CLOCK_HZ)],
+                rom: vec![0; 0x4000],
+                ram: [0; 0x0400],
+                data_latch: [0; 4],
+                status: 0,
+                input_ports: [0xFF; 5],
+                dip_switches: 0,
+                irq_counter: 0,
+                irq_pending: false,
+                duty_cycle: [[0; 3]; 2],
+                overall: [0; 2],
+                mute: false,
+                resampler: AudioResampler::new(SSIO_CLOCK_HZ, OUTPUT_SAMPLE_RATE),
+                clock: 0,
+            },
         }
     }
 
     /// Load sound ROM data. `data` should be up to 16 KB.
     pub fn load_rom(&mut self, data: &[u8]) {
-        let len = data.len().min(self.rom.len());
-        self.rom[..len].copy_from_slice(&data[..len]);
+        let len = data.len().min(self.bus.rom.len());
+        self.bus.rom[..len].copy_from_slice(&data[..len]);
     }
 
     // -----------------------------------------------------------------------
@@ -142,18 +150,18 @@ impl SsioBoard {
     ///
     /// `latch` is 0–3, corresponding to addresses 0x1C–0x1F in the MCR I/O map.
     pub fn latch_write(&mut self, latch: u8, data: u8) {
-        self.data_latch[(latch & 3) as usize] = data;
+        self.bus.data_latch[(latch & 3) as usize] = data;
     }
 
     /// Read the status byte (SSIO → main CPU).
     pub fn status_read(&self) -> u8 {
-        self.status
+        self.bus.status
     }
 
     /// Read an input port value. `port` is 0–4.
     pub fn input_port(&self, port: usize) -> u8 {
         if port < 5 {
-            self.input_ports[port]
+            self.bus.input_ports[port]
         } else {
             0xFF
         }
@@ -162,13 +170,13 @@ impl SsioBoard {
     /// Set an input port value. `port` is 0–4.
     pub fn set_input_port(&mut self, port: usize, value: u8) {
         if port < 5 {
-            self.input_ports[port] = value;
+            self.bus.input_ports[port] = value;
         }
     }
 
     /// Set the DIP switch register.
     pub fn set_dip_switches(&mut self, value: u8) {
-        self.dip_switches = value;
+        self.bus.dip_switches = value;
     }
 
     // -----------------------------------------------------------------------
@@ -181,68 +189,70 @@ impl SsioBoard {
     /// accumulates audio.
     pub fn tick(&mut self) {
         // IRQ generation
-        self.irq_counter += 1;
-        if self.irq_counter >= IRQ_INTERVAL {
-            self.irq_counter = 0;
-            self.irq_pending = true;
+        self.bus.irq_counter += 1;
+        if self.bus.irq_counter >= IRQ_INTERVAL {
+            self.bus.irq_counter = 0;
+            self.bus.irq_pending = true;
         }
 
         // Execute one Z80 cycle
-        bus_split!(self, bus => {
-            self.cpu.execute_cycle(bus, BusMaster::Cpu(0));
-        });
+        self.cpu.execute_cycle(&mut self.bus, BusMaster::Cpu(0));
 
         // Tick both AY-8910s
-        self.ay[0].tick();
-        self.ay[1].tick();
+        self.bus.ay[0].tick();
+        self.bus.ay[1].tick();
 
         // Audio resampling: mix both AY outputs
         let mut buf0 = [0i16; 1];
         let mut buf1 = [0i16; 1];
-        let n0 = self.ay[0].fill_audio(&mut buf0);
-        let n1 = self.ay[1].fill_audio(&mut buf1);
+        let n0 = self.bus.ay[0].fill_audio(&mut buf0);
+        let n1 = self.bus.ay[1].fill_audio(&mut buf1);
 
         // When either AY produces a sample, mix and push through the resampler.
         // Both AYs run at the same clock, so they produce samples in lockstep.
         if n0 > 0 || n1 > 0 {
             let s0 = if n0 > 0 { buf0[0] as i32 } else { 0 };
             let s1 = if n1 > 0 { buf1[0] as i32 } else { 0 };
-            let mixed = if self.mute {
+            let mixed = if self.bus.mute {
                 0
             } else {
                 ((s0 + s1) / 2).clamp(-32767, 32767) as i16
             };
-            self.resampler.push_sample(mixed);
+            self.bus.resampler.push_sample(mixed);
         }
 
-        self.clock += 1;
+        self.bus.clock += 1;
     }
 
     /// Drain accumulated audio samples into the provided buffer.
     /// Returns the number of samples written.
     pub fn fill_audio(&mut self, buffer: &mut [i16]) -> usize {
-        self.resampler.fill_audio(buffer)
+        self.bus.resampler.fill_audio(buffer)
     }
 
     /// Reset the SSIO board to power-on state.
     pub fn reset(&mut self) {
-        bus_split!(self, bus => {
-            self.cpu.reset(bus, BusMaster::Cpu(0));
-        });
-        self.ay[0].reset();
-        self.ay[1].reset();
-        self.ram = [0; 0x0400];
-        self.data_latch = [0; 4];
-        self.status = 0;
-        self.irq_counter = 0;
-        self.irq_pending = false;
-        self.duty_cycle = [[0; 3]; 2];
-        self.overall = [0; 2];
-        self.mute = false;
-        self.resampler.reset();
-        self.clock = 0;
+        self.cpu.reset(&mut self.bus, BusMaster::Cpu(0));
+        self.bus.ay[0].reset();
+        self.bus.ay[1].reset();
+        self.bus.ram = [0; 0x0400];
+        self.bus.data_latch = [0; 4];
+        self.bus.status = 0;
+        self.bus.irq_counter = 0;
+        self.bus.irq_pending = false;
+        self.bus.duty_cycle = [[0; 3]; 2];
+        self.bus.overall = [0; 2];
+        self.bus.mute = false;
+        self.bus.resampler.reset();
+        self.bus.clock = 0;
     }
+}
 
+// ---------------------------------------------------------------------------
+// Bus implementation (SSIO Z80's memory/IO map)
+// ---------------------------------------------------------------------------
+
+impl SsioBus {
     // -----------------------------------------------------------------------
     // AY-8910 port callbacks (duty-cycle volume control)
     // -----------------------------------------------------------------------
@@ -281,11 +291,7 @@ impl SsioBoard {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Bus implementation (SSIO Z80's memory/IO map)
-// ---------------------------------------------------------------------------
-
-impl Bus for SsioBoard {
+impl Bus for SsioBus {
     type Address = u16;
     type Data = u8;
 
@@ -396,42 +402,42 @@ impl Debuggable for SsioBoard {
         vec![
             DebugRegister {
                 name: "STATUS",
-                value: self.status as u64,
+                value: self.bus.status as u64,
                 width: 8,
             },
             DebugRegister {
                 name: "LATCH0",
-                value: self.data_latch[0] as u64,
+                value: self.bus.data_latch[0] as u64,
                 width: 8,
             },
             DebugRegister {
                 name: "LATCH1",
-                value: self.data_latch[1] as u64,
+                value: self.bus.data_latch[1] as u64,
                 width: 8,
             },
             DebugRegister {
                 name: "LATCH2",
-                value: self.data_latch[2] as u64,
+                value: self.bus.data_latch[2] as u64,
                 width: 8,
             },
             DebugRegister {
                 name: "LATCH3",
-                value: self.data_latch[3] as u64,
+                value: self.bus.data_latch[3] as u64,
                 width: 8,
             },
             DebugRegister {
                 name: "IRQ_CTR",
-                value: self.irq_counter as u64,
+                value: self.bus.irq_counter as u64,
                 width: 16,
             },
             DebugRegister {
                 name: "IRQ",
-                value: self.irq_pending as u64,
+                value: self.bus.irq_pending as u64,
                 width: 1,
             },
             DebugRegister {
                 name: "MUTE",
-                value: self.mute as u64,
+                value: self.bus.mute as u64,
                 width: 1,
             },
         ]
@@ -446,59 +452,59 @@ impl Saveable for SsioBoard {
     fn save_state(&self, w: &mut StateWriter) {
         w.write_version(1);
         self.cpu.save_state(w);
-        self.ay[0].save_state(w);
-        self.ay[1].save_state(w);
-        w.write_bytes(&self.ram);
-        for &b in &self.data_latch {
+        self.bus.ay[0].save_state(w);
+        self.bus.ay[1].save_state(w);
+        w.write_bytes(&self.bus.ram);
+        for &b in &self.bus.data_latch {
             w.write_u8(b);
         }
-        w.write_u8(self.status);
-        for &p in &self.input_ports {
+        w.write_u8(self.bus.status);
+        for &p in &self.bus.input_ports {
             w.write_u8(p);
         }
-        w.write_u8(self.dip_switches);
-        w.write_u32_le(self.irq_counter);
-        w.write_bool(self.irq_pending);
+        w.write_u8(self.bus.dip_switches);
+        w.write_u32_le(self.bus.irq_counter);
+        w.write_bool(self.bus.irq_pending);
         for ay_idx in 0..2 {
             for ch in 0..3 {
-                w.write_u8(self.duty_cycle[ay_idx][ch]);
+                w.write_u8(self.bus.duty_cycle[ay_idx][ch]);
             }
         }
-        for &ov in &self.overall {
+        for &ov in &self.bus.overall {
             w.write_u8(ov);
         }
-        w.write_bool(self.mute);
-        self.resampler.save_state(w);
-        w.write_u64_le(self.clock);
+        w.write_bool(self.bus.mute);
+        self.bus.resampler.save_state(w);
+        w.write_u64_le(self.bus.clock);
     }
 
     fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
         r.read_version(1)?;
         self.cpu.load_state(r)?;
-        self.ay[0].load_state(r)?;
-        self.ay[1].load_state(r)?;
-        r.read_bytes_into(&mut self.ram)?;
-        for latch in &mut self.data_latch {
+        self.bus.ay[0].load_state(r)?;
+        self.bus.ay[1].load_state(r)?;
+        r.read_bytes_into(&mut self.bus.ram)?;
+        for latch in &mut self.bus.data_latch {
             *latch = r.read_u8()?;
         }
-        self.status = r.read_u8()?;
-        for port in &mut self.input_ports {
+        self.bus.status = r.read_u8()?;
+        for port in &mut self.bus.input_ports {
             *port = r.read_u8()?;
         }
-        self.dip_switches = r.read_u8()?;
-        self.irq_counter = r.read_u32_le()?;
-        self.irq_pending = r.read_bool()?;
+        self.bus.dip_switches = r.read_u8()?;
+        self.bus.irq_counter = r.read_u32_le()?;
+        self.bus.irq_pending = r.read_bool()?;
         for ay_idx in 0..2 {
             for ch in 0..3 {
-                self.duty_cycle[ay_idx][ch] = r.read_u8()?;
+                self.bus.duty_cycle[ay_idx][ch] = r.read_u8()?;
             }
         }
-        for ov in &mut self.overall {
+        for ov in &mut self.bus.overall {
             *ov = r.read_u8()?;
         }
-        self.mute = r.read_bool()?;
-        self.resampler.load_state(r)?;
-        self.clock = r.read_u64_le()?;
+        self.bus.mute = r.read_bool()?;
+        self.bus.resampler.load_state(r)?;
+        self.bus.clock = r.read_u64_le()?;
         Ok(())
     }
 }
@@ -513,22 +519,22 @@ mod tests {
 
     /// Helper: call Bus::read (disambiguates from Device::read).
     fn bus_read(ssio: &mut SsioBoard, addr: u16) -> u8 {
-        Bus::read(ssio, BusMaster::Cpu(0), addr)
+        Bus::read(&mut ssio.bus, BusMaster::Cpu(0), addr)
     }
 
     /// Helper: call Bus::write (disambiguates from Device::write).
     fn bus_write(ssio: &mut SsioBoard, addr: u16, data: u8) {
-        Bus::write(ssio, BusMaster::Cpu(0), addr, data);
+        Bus::write(&mut ssio.bus, BusMaster::Cpu(0), addr, data);
     }
 
     #[test]
     fn initial_state() {
         let ssio = SsioBoard::new();
-        assert_eq!(ssio.status, 0);
-        assert!(!ssio.irq_pending);
-        assert!(!ssio.mute);
-        assert_eq!(ssio.data_latch, [0; 4]);
-        for port in &ssio.input_ports {
+        assert_eq!(ssio.bus.status, 0);
+        assert!(!ssio.bus.irq_pending);
+        assert!(!ssio.bus.mute);
+        assert_eq!(ssio.bus.data_latch, [0; 4]);
+        for port in &ssio.bus.input_ports {
             assert_eq!(*port, 0xFF);
         }
     }
@@ -540,8 +546,8 @@ mod tests {
         ssio.latch_write(3, 0xAB);
 
         // SSIO Z80 would read these at 0x9000–0x9003
-        assert_eq!(ssio.data_latch[0], 0x42);
-        assert_eq!(ssio.data_latch[3], 0xAB);
+        assert_eq!(ssio.bus.data_latch[0], 0x42);
+        assert_eq!(ssio.bus.data_latch[3], 0xAB);
 
         // Verify through Bus::read
         assert_eq!(bus_read(&mut ssio, 0x9000), 0x42);
@@ -577,23 +583,23 @@ mod tests {
     #[test]
     fn irq_clears_on_read() {
         let mut ssio = SsioBoard::new();
-        ssio.irq_pending = true;
+        ssio.bus.irq_pending = true;
 
         // Reading 0xE000 should clear IRQ
         let _ = bus_read(&mut ssio, 0xE000);
-        assert!(!ssio.irq_pending);
+        assert!(!ssio.bus.irq_pending);
     }
 
     #[test]
     fn irq_fires_after_interval() {
         let mut ssio = SsioBoard::new();
         // Load a minimal ROM with HALT instruction (0x76) to prevent crash
-        ssio.rom[0] = 0x76; // HALT
+        ssio.bus.rom[0] = 0x76; // HALT
 
         for _ in 0..IRQ_INTERVAL {
             ssio.tick();
         }
-        assert!(ssio.irq_pending);
+        assert!(ssio.bus.irq_pending);
     }
 
     #[test]
@@ -618,29 +624,29 @@ mod tests {
     #[test]
     fn reset_clears_state() {
         let mut ssio = SsioBoard::new();
-        ssio.data_latch[0] = 0xFF;
-        ssio.status = 0x42;
-        ssio.irq_pending = true;
-        ssio.mute = true;
+        ssio.bus.data_latch[0] = 0xFF;
+        ssio.bus.status = 0x42;
+        ssio.bus.irq_pending = true;
+        ssio.bus.mute = true;
 
         ssio.reset();
 
-        assert_eq!(ssio.data_latch, [0; 4]);
-        assert_eq!(ssio.status, 0);
-        assert!(!ssio.irq_pending);
-        assert!(!ssio.mute);
+        assert_eq!(ssio.bus.data_latch, [0; 4]);
+        assert_eq!(ssio.bus.status, 0);
+        assert!(!ssio.bus.irq_pending);
+        assert!(!ssio.bus.mute);
     }
 
     #[test]
     fn save_load_round_trip() {
         let mut ssio = SsioBoard::new();
         ssio.latch_write(0, 0x42);
-        ssio.status = 0xAB;
-        ssio.irq_counter = 1234;
-        ssio.irq_pending = true;
-        ssio.duty_cycle[0][1] = 5;
-        ssio.overall[1] = 3;
-        ssio.mute = true;
+        ssio.bus.status = 0xAB;
+        ssio.bus.irq_counter = 1234;
+        ssio.bus.irq_pending = true;
+        ssio.bus.duty_cycle[0][1] = 5;
+        ssio.bus.overall[1] = 3;
+        ssio.bus.mute = true;
 
         let mut w = StateWriter::new();
         ssio.save_state(&mut w);
@@ -650,12 +656,12 @@ mod tests {
         let mut r = StateReader::new(&data);
         ssio2.load_state(&mut r).unwrap();
 
-        assert_eq!(ssio2.data_latch[0], 0x42);
-        assert_eq!(ssio2.status, 0xAB);
-        assert_eq!(ssio2.irq_counter, 1234);
-        assert!(ssio2.irq_pending);
-        assert_eq!(ssio2.duty_cycle[0][1], 5);
-        assert_eq!(ssio2.overall[1], 3);
-        assert!(ssio2.mute);
+        assert_eq!(ssio2.bus.data_latch[0], 0x42);
+        assert_eq!(ssio2.bus.status, 0xAB);
+        assert_eq!(ssio2.bus.irq_counter, 1234);
+        assert!(ssio2.bus.irq_pending);
+        assert_eq!(ssio2.bus.duty_cycle[0][1], 5);
+        assert_eq!(ssio2.bus.overall[1], 3);
+        assert!(ssio2.bus.mute);
     }
 }

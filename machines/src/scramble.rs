@@ -1052,7 +1052,7 @@ impl Bus for ScrambleBoard {
     }
 }
 
-crate::impl_board_delegation!(ScrambleSystem, board, TIMING, orientation, split_cpu);
+crate::impl_board_delegation!(ScrambleSystem, board, TIMING, orientation);
 
 impl MachineCore for ScrambleSystem {
     crate::machine_core_metadata!("scramble", TIMING);
@@ -1360,7 +1360,7 @@ impl Default for ScobraSystem {
     }
 }
 
-crate::impl_board_delegation!(ScobraSystem, board, TIMING, orientation, split_cpu);
+crate::impl_board_delegation!(ScobraSystem, board, TIMING, orientation);
 
 impl MachineCore for ScobraSystem {
     crate::machine_core_metadata!("scobra", TIMING);

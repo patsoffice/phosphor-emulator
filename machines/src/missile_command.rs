@@ -960,7 +960,7 @@ impl InputConfigurable for MissileCommandSystem {
     }
 }
 
-crate::impl_standalone_debug!(MissileCommandSystem, split_cpu);
+crate::impl_standalone_debug!(MissileCommandSystem);
 
 impl Saveable for MissileCommandSystem {
     fn save_state(&self, w: &mut StateWriter) {

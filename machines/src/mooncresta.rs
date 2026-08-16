@@ -329,7 +329,7 @@ impl Default for MoonCrestaSystem {
 
 // The board is the bus -- see `impl Bus for GalaxianBoard` in galaxian.rs.
 
-crate::impl_board_delegation!(MoonCrestaSystem, board, TIMING, orientation, split_cpu);
+crate::impl_board_delegation!(MoonCrestaSystem, board, TIMING, orientation);
 
 impl MachineCore for MoonCrestaSystem {
     crate::machine_core_metadata!("mooncrst", TIMING);
