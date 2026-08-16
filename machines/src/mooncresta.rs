@@ -7,8 +7,6 @@
 //! layout, and an XOR/bitswap encryption on the program ROM
 //! ([`decode_mooncrst`], MAME's `init_mooncrst`).
 
-use phosphor_core::bus_split;
-use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
     DipApplyTiming, DipChoice, DipOption, DipSwitchBank, InputConfigurable, InputControl,
     InputEvent, MachineCore, Nvram, Profilable, SaveState,
@@ -272,8 +270,13 @@ pub(crate) const MOONCRST_DIP_BANKS: &[DipSwitchBank] = &[
 
 /// Moon Cresta (Nichibutsu, 1980): base Galaxian board with GFX banking and an
 /// encrypted program ROM.
-#[derive(phosphor_macros::Saveable)]
+#[derive(phosphor_macros::Saveable, phosphor_macros::BusDebug)]
 pub struct MoonCrestaSystem {
+    /// The Z80 is held beside the board, which is its bus.
+    #[debug_cpu("Z80")]
+    pub cpu: phosphor_core::cpu::z80::Z80,
+
+    #[debug_bus]
     pub board: GalaxianBoard,
 }
 
@@ -283,7 +286,28 @@ impl MoonCrestaSystem {
         board.set_gfx_mode(GfxBankMode::Mooncrst);
         board.set_mooncrst_map(true);
         board.in1 = MC_DIP1_DEFAULT;
-        Self { board }
+        Self {
+            cpu: phosphor_core::cpu::z80::Z80::new(),
+            board,
+        }
+    }
+
+    /// One CPU cycle. Returns 1 at an instruction boundary (for the debugger,
+    /// which steps instructions rather than cycles).
+    pub fn step_cycle(&mut self) -> u32 {
+        crate::galaxian::tick(&mut self.cpu, &mut self.board);
+        GalaxianBoard::instruction_boundaries(&self.cpu)
+    }
+
+    /// Read the CPU-facing bus, side effects and all. Distinct from the
+    /// debugger's `BusDebug::peek`/`poke`, which avoid side effects.
+    pub fn bus_read(&mut self, master: BusMaster, addr: u16) -> u8 {
+        Bus::read(&mut self.board, master, addr)
+    }
+
+    /// Write the CPU-facing bus, side effects and all. See [`Self::bus_read`].
+    pub fn bus_write(&mut self, master: BusMaster, addr: u16, data: u8) {
+        Bus::write(&mut self.board, master, addr, data);
     }
 
     pub fn load_rom_set(&mut self, rom_set: &RomSet) -> Result<(), RomLoadError> {
@@ -303,34 +327,9 @@ impl Default for MoonCrestaSystem {
     }
 }
 
-impl Bus for MoonCrestaSystem {
-    type Address = u16;
-    type Data = u8;
+// The board is the bus -- see `impl Bus for GalaxianBoard` in galaxian.rs.
 
-    fn read(&mut self, _master: BusMaster, addr: u16) -> u8 {
-        self.board.bus_read_common(addr)
-    }
-
-    fn write(&mut self, _master: BusMaster, addr: u16, data: u8) {
-        self.board.bus_write_common(addr, data);
-    }
-
-    fn io_read(&mut self, _master: BusMaster, _addr: u16) -> u8 {
-        0xFF
-    }
-
-    fn io_write(&mut self, _master: BusMaster, _addr: u16, _data: u8) {}
-
-    fn is_halted_for(&self, _master: BusMaster) -> bool {
-        false
-    }
-
-    fn check_interrupts(&mut self, target: BusMaster) -> InterruptState {
-        self.board.check_interrupts(target)
-    }
-}
-
-crate::impl_board_delegation!(MoonCrestaSystem, board, TIMING, orientation);
+crate::impl_board_delegation!(MoonCrestaSystem, board, TIMING, orientation, split_cpu);
 
 impl MachineCore for MoonCrestaSystem {
     crate::machine_core_metadata!("mooncrst", TIMING);
@@ -353,18 +352,12 @@ impl MachineCore for MoonCrestaSystem {
     }
 
     fn run_frame(&mut self) {
-        bus_split!(self, bus => {
-            for _ in 0..TIMING.cycles_per_frame() {
-                self.board.tick(bus);
-            }
-        });
+        crate::galaxian::run_frame(&mut self.cpu, &mut self.board);
     }
 
     fn reset(&mut self) {
         self.board.reset_board();
-        bus_split!(self, bus => {
-            self.board.cpu.reset(bus, BusMaster::Cpu(0));
-        });
+        self.cpu.reset(&mut self.board, BusMaster::Cpu(0));
     }
 }
 

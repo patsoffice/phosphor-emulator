@@ -1,4 +1,3 @@
-use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
     ActionRole, Direction, InputConfigurable, InputControl, InputEvent, InputId, InputKind,
@@ -246,16 +245,40 @@ const SHOLLOW_CONTROLS: &[InputControl] = &[
 ///
 /// Thin wrapper around `Mcr2Board` providing game-specific ROM loading,
 /// input wiring, and `Bus` implementation for the main Z80's memory/IO map.
-#[derive(Saveable)]
+#[derive(Saveable, phosphor_macros::BusDebug)]
 pub struct SatansHollowSystem {
+    /// The Z80 is held beside the board, which is its bus.
+    #[debug_cpu("Z80 Main")]
+    pub cpu: phosphor_core::cpu::z80::Z80,
+
+    #[debug_bus]
     pub board: Mcr2Board,
 }
 
 impl SatansHollowSystem {
     pub fn new() -> Self {
         Self {
+            cpu: phosphor_core::cpu::z80::Z80::new(),
             board: Mcr2Board::new(),
         }
+    }
+
+    /// One CPU cycle. Returns 1 at an instruction boundary (for the debugger,
+    /// which steps instructions rather than cycles).
+    pub fn step_cycle(&mut self) -> u32 {
+        mcr2::tick(&mut self.cpu, &mut self.board);
+        Mcr2Board::instruction_boundaries(&self.cpu)
+    }
+
+    /// Read the CPU-facing bus, side effects and all. Distinct from the
+    /// debugger's `BusDebug::peek`/`poke`, which avoid side effects.
+    pub fn bus_read(&mut self, master: BusMaster, addr: u16) -> u8 {
+        Bus::read(&mut self.board, master, addr)
+    }
+
+    /// Write the CPU-facing bus, side effects and all. See [`Self::bus_read`].
+    pub fn bus_write(&mut self, master: BusMaster, addr: u16, data: u8) {
+        Bus::write(&mut self.board, master, addr, data);
     }
 
     fn overlay_stats_impl(&self) -> Option<String> {
@@ -300,36 +323,36 @@ impl Default for SatansHollowSystem {
 // Bus — MCR II main CPU memory and I/O map
 // ---------------------------------------------------------------------------
 
-impl Bus for SatansHollowSystem {
+impl Bus for Mcr2Board {
     type Address = u16;
     type Data = u8;
 
     fn read(&mut self, master: BusMaster, addr: u16) -> u8 {
-        let data = match self.board.map.page(addr).region_id {
+        let data = match self.map.page(addr).region_id {
             mcr2::Region::ROM
             | mcr2::Region::NVRAM
             | mcr2::Region::SPRITE_RAM
-            | mcr2::Region::VIDEO_RAM => self.board.map.read_backing(addr),
+            | mcr2::Region::VIDEO_RAM => self.map.read_backing(addr),
             _ => 0xFF,
         };
-        self.board.map.watch_read(0, master, addr, data);
+        self.map.watch_read(0, master, addr, data);
         data
     }
 
     fn write(&mut self, master: BusMaster, addr: u16, data: u8) {
-        self.board.map.watch_write(0, master, addr, data);
-        match self.board.map.page(addr).region_id {
+        self.map.watch_write(0, master, addr, data);
+        match self.map.page(addr).region_id {
             mcr2::Region::NVRAM | mcr2::Region::SPRITE_RAM => {
-                self.board.map.write_backing(addr, data);
+                self.map.write_backing(addr, data);
             }
             mcr2::Region::VIDEO_RAM => {
-                self.board.map.write_backing(addr, data);
+                self.map.write_backing(addr, data);
                 let offset = (addr & 0x7FF) as usize;
                 if (offset & 0x780) == 0x780 {
-                    self.board.update_palette_from_vram(offset, data);
-                    self.board.tile_dirty.mark_all();
+                    self.update_palette_from_vram(offset, data);
+                    self.tile_dirty.mark_all();
                 } else {
-                    self.board.mark_tile_dirty(offset);
+                    self.mark_tile_dirty(offset);
                 }
             }
             _ => {} // ROM and unmapped: writes ignored
@@ -343,26 +366,26 @@ impl Bus for SatansHollowSystem {
             0x00..=0x1F => {
                 let base = port & 0x07;
                 match base {
-                    0x00..=0x04 => self.board.ssio.input_port(base as usize),
-                    0x07 => self.board.ssio.status_read(),
+                    0x00..=0x04 => self.ssio.input_port(base as usize),
+                    0x07 => self.ssio.status_read(),
                     _ => 0xFF,
                 }
             }
-            0xF0..=0xF3 => self.board.ctc.read(port - 0xF0),
+            0xF0..=0xF3 => self.ctc.read(port - 0xF0),
             _ => 0xFF,
         }
     }
 
     fn io_write(&mut self, master: BusMaster, addr: u16, data: u8) {
-        self.board.map.trace_bus_io_write(master, addr, data, None);
+        self.map.trace_bus_io_write(master, addr, data, None);
         let port = addr as u8;
         match port {
             // SSIO output ports (no custom outputs for Satan's Hollow)
             0x00..=0x07 => {}
-            0x1C..=0x1F => self.board.ssio.latch_write(port - 0x1C, data),
-            0xE0 => self.board.watchdog_counter = 0,
+            0x1C..=0x1F => self.ssio.latch_write(port - 0x1C, data),
+            0xE0 => self.watchdog_counter = 0,
             0xE8 => {} // nop write (MAME: map(0xe8, 0xe8).nopw())
-            0xF0..=0xF3 => self.board.ctc.write(port - 0xF0, data),
+            0xF0..=0xF3 => self.ctc.write(port - 0xF0, data),
             _ => {}
         }
     }
@@ -374,10 +397,10 @@ impl Bus for SatansHollowSystem {
     fn check_interrupts(&mut self, target: BusMaster) -> InterruptState {
         match target {
             BusMaster::Cpu(0) => {
-                if self.board.ctc.interrupt_pending() {
-                    let vector = self.board.ctc.interrupt_vector();
-                    self.board.ctc_vector_latch = vector;
-                    self.board.ctc_ack_needed = true;
+                if self.ctc.interrupt_pending() {
+                    let vector = self.ctc.interrupt_vector();
+                    self.ctc_vector_latch = vector;
+                    self.ctc_ack_needed = true;
                     InterruptState {
                         irq: true,
                         irq_vector: vector,
@@ -387,7 +410,7 @@ impl Bus for SatansHollowSystem {
                     // Return latched vector for INTA cycle (Z80 reads irq_vector
                     // during interrupt acknowledge regardless of irq flag)
                     InterruptState {
-                        irq_vector: self.board.ctc_vector_latch,
+                        irq_vector: self.ctc_vector_latch,
                         ..Default::default()
                     }
                 }
@@ -406,7 +429,8 @@ crate::impl_board_delegation!(
     board,
     mcr2::TIMING,
     overlay_stats,
-    orientation
+    orientation,
+    split_cpu
 );
 
 impl InputConfigurable for SatansHollowSystem {
@@ -461,18 +485,12 @@ impl MachineCore for SatansHollowSystem {
     fn run_frame(&mut self) {
         // The board renders on the frame's last cycle inside `tick`, so the
         // single render site is shared with the debugger's `debug_tick` path.
-        bus_split!(self, bus => {
-            for _ in 0..mcr2::TIMING.cycles_per_frame() {
-                self.board.tick(bus);
-            }
-        });
+        mcr2::run_frame(&mut self.cpu, &mut self.board);
     }
 
     fn reset(&mut self) {
         self.board.reset_board();
-        bus_split!(self, bus => {
-            self.board.cpu.reset(bus, BusMaster::Cpu(0));
-        });
+        self.cpu.reset(&mut self.board, BusMaster::Cpu(0));
         // Re-initialize IP3 to active-high idle
         self.board.ssio.set_input_port(3, 0x00);
     }
@@ -543,14 +561,14 @@ mod tests {
         let data = sys.save_state().expect("save_state should return Some");
 
         // Capture CPU snapshot
-        let cpu_snap = sys.board.cpu.snapshot();
+        let cpu_snap = sys.cpu.snapshot();
 
         // Load into fresh system
         let mut sys2 = SatansHollowSystem::new();
         sys2.load_state(&data).unwrap();
 
         // Verify
-        assert_eq!(sys2.board.cpu.snapshot(), cpu_snap);
+        assert_eq!(sys2.cpu.snapshot(), cpu_snap);
         assert_eq!(sys2.board.map.region_data(mcr2::Region::Nvram)[0x100], 0xAA);
         assert_eq!(
             sys2.board.map.region_data(mcr2::Region::VideoRam)[0x50],
@@ -618,16 +636,16 @@ mod tests {
         // Palette is in video RAM at offset 0x780-0x7FF (CPU addr 0xEF80-0xEFFF).
         // Entry 0 = offsets 0x780 (even) and 0x781 (odd).
         // Write to odd byte: val9 = 0xFF | (1 << 8) = 0x1FF → all white
-        Bus::write(&mut sys, BusMaster::Cpu(0), 0xEF81, 0xFF);
+        sys.bus_write(BusMaster::Cpu(0), 0xEF81, 0xFF);
         assert_eq!(sys.board.palette_rgb[0], (255, 255, 255));
 
         // Write to even byte: val9 = 0x00 | (0 << 8) = 0x000 → all black
-        Bus::write(&mut sys, BusMaster::Cpu(0), 0xEF80, 0x00);
+        sys.bus_write(BusMaster::Cpu(0), 0xEF80, 0x00);
         assert_eq!(sys.board.palette_rgb[0], (0, 0, 0));
 
         // Entry 1 via mirror at 0xF800 range: 0xF800 + 0x782 = 0xFF82
         // val9 = 0x49 | (0 << 8) = 0x49 → R=1, G=1, B=1 → (36, 36, 36)
-        Bus::write(&mut sys, BusMaster::Cpu(0), 0xFF82, 0x49);
+        sys.bus_write(BusMaster::Cpu(0), 0xFF82, 0x49);
         assert_eq!(sys.board.palette_rgb[1], (36, 36, 36));
     }
 
@@ -636,18 +654,18 @@ mod tests {
         let mut sys = SatansHollowSystem::new();
 
         // NVRAM mirror: 0xC000 and 0xD000 map to same byte
-        Bus::write(&mut sys, BusMaster::Cpu(0), 0xC042, 0xAA);
-        assert_eq!(Bus::read(&mut sys, BusMaster::Cpu(0), 0xD042), 0xAA);
+        sys.bus_write(BusMaster::Cpu(0), 0xC042, 0xAA);
+        assert_eq!(sys.bus_read(BusMaster::Cpu(0), 0xD042), 0xAA);
 
         // Sprite RAM mirror: 0xE000 and 0xF000 map to same byte
-        Bus::write(&mut sys, BusMaster::Cpu(0), 0xE010, 0xBB);
-        assert_eq!(Bus::read(&mut sys, BusMaster::Cpu(0), 0xF010), 0xBB);
+        sys.bus_write(BusMaster::Cpu(0), 0xE010, 0xBB);
+        assert_eq!(sys.bus_read(BusMaster::Cpu(0), 0xF010), 0xBB);
         // Also mirrored within 0xE000-0xE7FF (bit 9)
-        assert_eq!(Bus::read(&mut sys, BusMaster::Cpu(0), 0xE210), 0xBB);
+        assert_eq!(sys.bus_read(BusMaster::Cpu(0), 0xE210), 0xBB);
 
         // Video RAM mirror: 0xE800 and 0xF800 map to same byte
-        Bus::write(&mut sys, BusMaster::Cpu(0), 0xE900, 0xCC);
-        assert_eq!(Bus::read(&mut sys, BusMaster::Cpu(0), 0xF900), 0xCC);
+        sys.bus_write(BusMaster::Cpu(0), 0xE900, 0xCC);
+        assert_eq!(sys.bus_read(BusMaster::Cpu(0), 0xF900), 0xCC);
     }
 
     #[test]
@@ -687,23 +705,23 @@ mod tests {
         sys.board.ssio.set_input_port(1, 0xBB);
 
         // Base addresses
-        assert_eq!(Bus::io_read(&mut sys, BusMaster::Cpu(0), 0x00), 0xAA);
-        assert_eq!(Bus::io_read(&mut sys, BusMaster::Cpu(0), 0x01), 0xBB);
+        assert_eq!(Bus::io_read(&mut sys.board, BusMaster::Cpu(0), 0x00), 0xAA);
+        assert_eq!(Bus::io_read(&mut sys.board, BusMaster::Cpu(0), 0x01), 0xBB);
 
         // Mirror with bit 3 set (0x08 offset)
-        assert_eq!(Bus::io_read(&mut sys, BusMaster::Cpu(0), 0x08), 0xAA);
-        assert_eq!(Bus::io_read(&mut sys, BusMaster::Cpu(0), 0x09), 0xBB);
+        assert_eq!(Bus::io_read(&mut sys.board, BusMaster::Cpu(0), 0x08), 0xAA);
+        assert_eq!(Bus::io_read(&mut sys.board, BusMaster::Cpu(0), 0x09), 0xBB);
 
         // Mirror with bit 4 set (0x10 offset)
-        assert_eq!(Bus::io_read(&mut sys, BusMaster::Cpu(0), 0x10), 0xAA);
-        assert_eq!(Bus::io_read(&mut sys, BusMaster::Cpu(0), 0x11), 0xBB);
+        assert_eq!(Bus::io_read(&mut sys.board, BusMaster::Cpu(0), 0x10), 0xAA);
+        assert_eq!(Bus::io_read(&mut sys.board, BusMaster::Cpu(0), 0x11), 0xBB);
 
         // Mirror with bits 3+4 set (0x18 offset)
-        assert_eq!(Bus::io_read(&mut sys, BusMaster::Cpu(0), 0x18), 0xAA);
+        assert_eq!(Bus::io_read(&mut sys.board, BusMaster::Cpu(0), 0x18), 0xAA);
 
         // Status read at base 0x07 and mirror 0x0F
-        assert_eq!(Bus::io_read(&mut sys, BusMaster::Cpu(0), 0x07), 0x00);
-        assert_eq!(Bus::io_read(&mut sys, BusMaster::Cpu(0), 0x0F), 0x00);
+        assert_eq!(Bus::io_read(&mut sys.board, BusMaster::Cpu(0), 0x07), 0x00);
+        assert_eq!(Bus::io_read(&mut sys.board, BusMaster::Cpu(0), 0x0F), 0x00);
     }
 
     #[test]
@@ -711,7 +729,7 @@ mod tests {
         let mut sys = SatansHollowSystem::new();
 
         // Write vector base to CTC channel 0
-        Bus::io_write(&mut sys, BusMaster::Cpu(0), 0xF0, 0xE0);
+        Bus::io_write(&mut sys.board, BusMaster::Cpu(0), 0xF0, 0xE0);
         assert_eq!(sys.board.ctc.read(0), 0); // counter value (vector base isn't readable this way)
     }
 
@@ -721,16 +739,16 @@ mod tests {
         sys.board.map.region_data_mut(mcr2::Region::Rom)[0] = 0x42;
         sys.board.map.region_data_mut(mcr2::Region::Rom)[0xBFFF] = 0x77;
 
-        assert_eq!(Bus::read(&mut sys, BusMaster::Cpu(0), 0x0000), 0x42);
-        assert_eq!(Bus::read(&mut sys, BusMaster::Cpu(0), 0xBFFF), 0x77);
+        assert_eq!(sys.bus_read(BusMaster::Cpu(0), 0x0000), 0x42);
+        assert_eq!(sys.bus_read(BusMaster::Cpu(0), 0xBFFF), 0x77);
     }
 
     #[test]
     fn memory_map_nvram_read_write() {
         let mut sys = SatansHollowSystem::new();
 
-        Bus::write(&mut sys, BusMaster::Cpu(0), 0xC000, 0x55);
-        assert_eq!(Bus::read(&mut sys, BusMaster::Cpu(0), 0xC000), 0x55);
+        sys.bus_write(BusMaster::Cpu(0), 0xC000, 0x55);
+        assert_eq!(sys.bus_read(BusMaster::Cpu(0), 0xC000), 0x55);
         assert_eq!(sys.board.map.region_data(mcr2::Region::Nvram)[0], 0x55);
     }
 }

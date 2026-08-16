@@ -94,7 +94,7 @@ This is the fastest shape — the bus is one pointer — and the one to prefer.
 Game-specific decoding that is really *board* behaviour (Pac-Man's A15 mirror,
 its IM2 vector latch) should move to the board rather than force shape 2.
 
-### 2. A bus view (Ms. Pac-Man, Galaga, Dig Dug, Xevious)
+### 2. A bus view (Ms. Pac-Man, Galaga, Dig Dug, Xevious, Joust, DK, Pisces)
 
 When the game genuinely interposes state — a decode latch, a scroll latch, an
 EAROM, banked ROMs — the bus is a view struct of disjoint field borrows, built
@@ -117,6 +117,12 @@ fn run_frame(&mut self) {
 
 Rendering state stays on the machine, outside the view, so a frame-boundary
 render still needs `&mut self` — see "Frame-boundary renders" below.
+
+When the only difference is the decode itself, the view is a newtype over the
+board (`struct DkongBus<'a>(&'a mut Tkg04Board)`), which measures the same as
+using the board directly: Pisces (newtype view) and Moon Cresta (board direct)
+land within 0.002 ms/frame of each other on the same hardware. It is the
+multi-pointer view rebuilt per cycle that costs, not the indirection itself.
 
 ### The per-family tick
 
@@ -312,8 +318,9 @@ Ordered by payoff per unit of risk: shared boards with several machines first
    shares only the palette model. Neither board's DMA is a bus master in the
    trait sense (both move bytes through the address space directly), so no lift
    was needed.
-3. **Galaxian** (Moon Cresta, Pisces) and **MCR II** (Satan's Hollow) — single
-   Z80 boards, mechanical.
+3. ~~**Galaxian** (Moon Cresta, Pisces, UniWar S) and **MCR II** (Satan's
+   Hollow)~~ — done. Both boards became their own bus; only Pisces needed a
+   view, for one re-wired write line.
 4. ~~**Do Castle**~~ — done. Two Z80s and five variants; the board is already
    variant-parameterised, so it became the bus outright. Its WAIT handshake
    rewinds the main Z80 from inside a bus read, which is only expressible once

@@ -63,6 +63,69 @@ pub(crate) const TILE_ROWS: usize = 30;
 // Mcr2Board — shared Bally Midway MCR II arcade hardware
 // ---------------------------------------------------------------------------
 
+/// One CPU cycle: board work, the Z80, then the sound board and clock advance.
+///
+/// The CPU lives on the machine and the board *is* the bus, so this takes them
+/// as separate borrows and dispatches at a concrete type. This is the
+/// debugger's path — it tests the frame position on every cycle; a whole frame
+/// goes through [`run_scanlines`], which hoists that test out.
+#[inline]
+pub fn tick(cpu: &mut Z80, board: &mut Mcr2Board) {
+    let frame_cycle = board.clock % TIMING.cycles_per_frame();
+    if frame_cycle.is_multiple_of(TIMING.cycles_per_scanline) {
+        board.begin_scanline(frame_cycle / TIMING.cycles_per_scanline);
+    }
+    step_cycle(cpu, board);
+}
+
+/// Run `cycles` CPU cycles, scanline-outer and cycle-inner. The caller must
+/// start on a scanline boundary and pass a multiple of `cycles_per_scanline`;
+/// the debugger's off-boundary stepping goes through [`tick`] instead.
+pub fn run_scanlines(cpu: &mut Z80, board: &mut Mcr2Board, cycles: u64) {
+    debug_assert!(
+        board.clock.is_multiple_of(TIMING.cycles_per_scanline)
+            && cycles.is_multiple_of(TIMING.cycles_per_scanline),
+        "run_scanlines must start on a scanline boundary and run whole scanlines"
+    );
+    for _ in 0..cycles / TIMING.cycles_per_scanline {
+        let scanline = board.clock % TIMING.cycles_per_frame() / TIMING.cycles_per_scanline;
+        board.begin_scanline(scanline);
+        for _ in 0..TIMING.cycles_per_scanline {
+            step_cycle(cpu, board);
+        }
+    }
+}
+
+/// Run one frame's worth of cycles. Whole scanlines go through
+/// [`run_scanlines`]; a partial scanline at either end (only after the debugger
+/// has left the clock off-boundary) goes through [`tick`].
+pub fn run_frame(cpu: &mut Z80, board: &mut Mcr2Board) {
+    let scanline = TIMING.cycles_per_scanline;
+    let mut remaining = TIMING.cycles_per_frame();
+
+    let lead = ((scanline - board.clock % scanline) % scanline).min(remaining);
+    for _ in 0..lead {
+        tick(cpu, board);
+    }
+    remaining -= lead;
+
+    let whole = remaining - remaining % scanline;
+    run_scanlines(cpu, board, whole);
+    remaining -= whole;
+
+    for _ in 0..remaining {
+        tick(cpu, board);
+    }
+}
+
+/// The part of a cycle with no frame-position test in it.
+#[inline]
+fn step_cycle(cpu: &mut Z80, board: &mut Mcr2Board) {
+    board.begin_cycle_inner(cpu);
+    cpu.execute_cycle(board, phosphor_core::core::BusMaster::Cpu(0));
+    board.end_cycle();
+}
+
 /// Shared hardware for the Bally Midway MCR II platform.
 ///
 /// Hardware: Z80 @ 2.496 MHz (main), SSIO sound board (Z80 + 2×AY-8910),
@@ -70,12 +133,12 @@ pub(crate) const TILE_ROWS: usize = 30;
 /// Video: 32×30 tile playfield (8×8 tiles displayed at 16×16) + 32×32 sprites,
 /// 4bpp, 9-bit programmable palette (64 entries).
 /// Screen: 512×480 interlaced, displayed rotated 90° CW on vertical monitor.
+///
+/// The board is everything the Z80 talks *to* — Satan's Hollow is the only
+/// machine on it, so the board implements [`Bus`] itself and the CPU lives on
+/// the machine.
 #[derive(BusDebug)]
 pub struct Mcr2Board {
-    // Main CPU (Z80 @ 2.496 MHz)
-    #[debug_cpu("Z80 Main")]
-    pub(crate) cpu: Z80,
-
     // Devices
     #[debug_device("SSIO")]
     pub(crate) ssio: SsioBoard,
@@ -119,7 +182,6 @@ pub struct Mcr2Board {
 impl Mcr2Board {
     pub fn new() -> Self {
         Self {
-            cpu: Z80::new(),
             ssio: SsioBoard::new(),
             ctc: Z80Ctc::new(),
             map: Self::build_map(),
@@ -278,43 +340,42 @@ impl Mcr2Board {
     ///
     /// The `bus` parameter is the game wrapper (which implements `Bus`) passed
     /// in from the wrapper's `run_frame()` / `debug_tick()`.
-    pub fn tick(&mut self, bus: &mut dyn phosphor_core::core::Bus<Address = u16, Data = u8>) {
-        let frame_cycle = self.clock % TIMING.cycles_per_frame();
-
-        // CTC triggers at scanline boundaries
-        if frame_cycle.is_multiple_of(TIMING.cycles_per_scanline) {
-            let scanline = frame_cycle / TIMING.cycles_per_scanline;
-
-            // CTC channel 2: triggered at scanlines 0 and 240 (VBLANK)
-            if scanline == 0 || scanline == VISIBLE_LINES {
-                self.ctc.trigger(2, true);
-                self.ctc.trigger(2, false);
-            }
-
-            // CTC channel 3: triggered at scanline 0 only (once per frame)
-            if scanline == 0 {
-                self.ctc.trigger(3, true);
-                self.ctc.trigger(3, false);
-            }
+    /// Work that only happens on the first cycle of a scanline: the CTC's
+    /// scanline-triggered channels.
+    ///
+    /// Called once per scanline from [`run_scanlines`] and, for the debugger's
+    /// single-step path, from [`tick`] when the clock lands on a boundary.
+    fn begin_scanline(&mut self, scanline: u64) {
+        // CTC channel 2: triggered at scanlines 0 and 240 (VBLANK)
+        if scanline == 0 || scanline == VISIBLE_LINES {
+            self.ctc.trigger(2, true);
+            self.ctc.trigger(2, false);
         }
 
+        // CTC channel 3: triggered at scanline 0 only (once per frame)
+        if scanline == 0 {
+            self.ctc.trigger(3, true);
+            self.ctc.trigger(3, false);
+        }
+    }
+
+    /// Per-cycle board work that runs before the CPU, with no frame-position
+    /// test in it.
+    fn begin_cycle_inner(&mut self, cpu: &Z80) {
         // Tick CTC (timer-mode channels count CPU clocks)
         self.ctc.tick();
 
         // Latch watchpoint attribution context (cycle + instruction PC)
         // before CPU execution — bus dispatch cannot read CPU state mid-tick.
         if self.map.debug_active() {
-            let pc = self
-                .cpu
-                .at_instruction_boundary()
-                .then_some(self.cpu.pc as u32);
+            let pc = cpu.at_instruction_boundary().then_some(cpu.pc as u32);
             self.map.latch_access_context(self.clock, pc);
         }
+    }
 
-        // Execute main CPU cycle
-        self.cpu
-            .execute_cycle(bus, phosphor_core::core::BusMaster::Cpu(0));
-
+    /// Board work after the CPU's cycle: the deferred CTC acknowledge, the
+    /// sound board, the clock advance, and the end-of-frame render.
+    fn end_cycle(&mut self) {
         // Deferred CTC interrupt acknowledge (after CPU has read the vector)
         if self.ctc_ack_needed {
             self.ctc.acknowledge_interrupt();
@@ -524,18 +585,16 @@ impl Mcr2Board {
     // Debug
     // -----------------------------------------------------------------------
 
-    pub fn debug_tick_boundaries(&self) -> u32 {
-        if self.cpu.at_instruction_boundary() {
-            1
-        } else {
-            0
-        }
+    /// Whether the CPU is at an instruction boundary. It lives on the machine,
+    /// which passes it back in.
+    pub fn instruction_boundaries(cpu: &Z80) -> u32 {
+        u32::from(cpu.at_instruction_boundary())
     }
 }
 
 impl Saveable for Mcr2Board {
     fn save_state(&self, w: &mut StateWriter) {
-        self.cpu.save_state(w);
+        // The CPU is saved by the machine, which owns it.
         self.ctc.save_state(w);
         self.ssio.save_state(w);
         w.write_bytes(self.map.region_data(Region::Nvram));
@@ -548,7 +607,7 @@ impl Saveable for Mcr2Board {
     }
 
     fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
-        self.cpu.load_state(r)?;
+        // The CPU is loaded by the machine, which owns it.
         self.ctc.load_state(r)?;
         self.ssio.load_state(r)?;
         r.read_bytes_into(self.map.region_data_mut(Region::Nvram))?;

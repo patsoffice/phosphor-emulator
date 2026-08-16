@@ -23,7 +23,6 @@
 //!   0x7800-0x7fff  watchdog (r) / sound pitch (w)
 //! ```
 
-use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::debug_trace::{DebugEvent, DebugEventKind, DebugTraceBuffer};
 use phosphor_core::core::machine::{
@@ -102,16 +101,96 @@ pub const VISIBLE_LINES: u64 = galaxian_video::NATIVE_HEIGHT as u64;
 // GalaxianBoard
 // ---------------------------------------------------------------------------
 
+/// A Galaxian-family bus: the shared board, or a game view over it (Pisces
+/// re-wires one write line).
+///
+/// [`tick`] is generic over this trait, so every access resolves to a direct
+/// call rather than a vtable entry.
+pub trait GalaxianBus: Bus<Address = u16, Data = u8> {
+    fn board(&mut self) -> &mut GalaxianBoard;
+}
+
+/// The board is a complete bus for the games that add nothing to it.
+impl GalaxianBus for GalaxianBoard {
+    #[inline]
+    fn board(&mut self) -> &mut GalaxianBoard {
+        self
+    }
+}
+
+/// One CPU cycle: board work, the Z80, then the sound tick.
+///
+/// The CPU lives on the machine and the bus is the board (or a game view over
+/// it), so this takes them as separate borrows and dispatches at a concrete
+/// type. This is the debugger's path — it tests the frame position on every
+/// cycle; a whole frame goes through [`run_scanlines`], which hoists that out.
+#[inline]
+pub fn tick<B: GalaxianBus>(cpu: &mut Z80, bus: &mut B) {
+    let board = bus.board();
+    let frame_cycle = board.clock % TIMING.cycles_per_frame();
+    if frame_cycle.is_multiple_of(TIMING.cycles_per_scanline) {
+        board.begin_scanline(frame_cycle / TIMING.cycles_per_scanline);
+    }
+    step_cycle(cpu, bus);
+}
+
+/// Run `cycles` CPU cycles, scanline-outer and cycle-inner. The caller must
+/// start on a scanline boundary and pass a multiple of `cycles_per_scanline`;
+/// the debugger's off-boundary stepping goes through [`tick`] instead.
+pub fn run_scanlines<B: GalaxianBus>(cpu: &mut Z80, bus: &mut B, cycles: u64) {
+    debug_assert!(
+        bus.board().clock.is_multiple_of(TIMING.cycles_per_scanline)
+            && cycles.is_multiple_of(TIMING.cycles_per_scanline),
+        "run_scanlines must start on a scanline boundary and run whole scanlines"
+    );
+    for _ in 0..cycles / TIMING.cycles_per_scanline {
+        let board = bus.board();
+        let scanline = board.clock % TIMING.cycles_per_frame() / TIMING.cycles_per_scanline;
+        board.begin_scanline(scanline);
+        for _ in 0..TIMING.cycles_per_scanline {
+            step_cycle(cpu, bus);
+        }
+    }
+}
+
+/// Run one frame's worth of cycles. Whole scanlines go through
+/// [`run_scanlines`]; a partial scanline at either end (only after the debugger
+/// has left the clock off-boundary) goes through [`tick`].
+pub fn run_frame<B: GalaxianBus>(cpu: &mut Z80, bus: &mut B) {
+    let scanline = TIMING.cycles_per_scanline;
+    let mut remaining = TIMING.cycles_per_frame();
+
+    let lead = ((scanline - bus.board().clock % scanline) % scanline).min(remaining);
+    for _ in 0..lead {
+        tick(cpu, bus);
+    }
+    remaining -= lead;
+
+    let whole = remaining - remaining % scanline;
+    run_scanlines(cpu, bus, whole);
+    remaining -= whole;
+
+    for _ in 0..remaining {
+        tick(cpu, bus);
+    }
+}
+
+/// The part of a cycle with no frame-position test in it.
+#[inline]
+fn step_cycle<B: GalaxianBus>(cpu: &mut Z80, bus: &mut B) {
+    bus.board().begin_cycle_inner(cpu);
+    cpu.execute_cycle(bus, BusMaster::Cpu(0));
+    bus.board().end_cycle();
+}
+
 /// Galaxian hardware base (Z80 @ 3.072 MHz, tilemap + sprites + starfield +
 /// discrete sound).
 ///
-/// Game wrappers compose this struct and implement [`Bus`] to route memory
-/// accesses.
+/// The board is everything the Z80 talks *to* — and, since every game on it
+/// decodes the same way, it implements [`Bus`] itself. The CPU lives on the
+/// game wrapper.
 #[derive(BusDebug, DebugTrace)]
 pub struct GalaxianBoard {
-    #[debug_cpu("Z80")]
-    pub(crate) cpu: Z80,
-
     #[debug_map(cpu = 0)]
     pub(crate) map: AddressSpace16,
 
@@ -154,7 +233,6 @@ impl Default for GalaxianBoard {
 impl GalaxianBoard {
     pub fn new() -> Self {
         Self {
-            cpu: Z80::new(),
             map: Self::build_map(),
             video: GalaxianVideo::new(),
             sound: GalaxianSound::new(SAMPLE_RATE),
@@ -214,27 +292,27 @@ impl GalaxianBoard {
     // Core tick
     // -----------------------------------------------------------------------
 
-    pub fn tick(&mut self, bus: &mut dyn Bus<Address = u16, Data = u8>) {
-        let frame_cycle = self.clock % TIMING.cycles_per_frame();
-
+    /// Work that only happens on the first cycle of a scanline: the starfield
+    /// advance at the top of the frame, rendering the line, and the VBLANK NMI
+    /// edges.
+    ///
+    /// Called once per scanline from [`run_scanlines`] and, for the debugger's
+    /// single-step path, from [`tick`] when the clock lands on a boundary.
+    fn begin_scanline(&mut self, scanline: u64) {
         // Advance the starfield scroll once at the top of each frame.
-        if frame_cycle == 0 {
+        if scanline == 0 {
             self.video.begin_frame();
         }
 
-        // Per-scanline rendering at each scanline boundary, before the CPU runs.
-        if frame_cycle.is_multiple_of(TIMING.cycles_per_scanline) {
-            let scanline = (frame_cycle / TIMING.cycles_per_scanline) as usize;
-            if (scanline as u64) < VISIBLE_LINES {
-                let vram = self.map.region_data(Region::VideoRam);
-                let objram = self.map.region_data(Region::ObjRam);
-                self.video.render_scanline(scanline, vram, objram);
-            }
+        // Per-scanline rendering, before the CPU runs.
+        if scanline < VISIBLE_LINES {
+            let vram = self.map.region_data(Region::VideoRam);
+            let objram = self.map.region_data(Region::ObjRam);
+            self.video.render_scanline(scanline as usize, vram, objram);
         }
 
         // VBLANK NMI: assert at the start of VBLANK (first non-visible line).
-        let vblank_cycle = VISIBLE_LINES * TIMING.cycles_per_scanline;
-        if frame_cycle == vblank_cycle {
+        if scanline == VISIBLE_LINES {
             self.vblank_nmi_pending = true;
             if self.debug_trace.enabled() {
                 self.debug_trace.record(DebugEvent {
@@ -253,28 +331,32 @@ impl GalaxianBoard {
             }
         }
         // Clear the NMI latch at the frame boundary (end of VBLANK).
-        if frame_cycle == 0 && self.clock > 0 {
+        if scanline == 0 && self.clock > 0 {
             self.vblank_nmi_pending = false;
         }
+    }
 
+    /// Per-cycle board work that runs before the CPU, with no frame-position
+    /// test in it.
+    fn begin_cycle_inner(&mut self, cpu: &Z80) {
         // Latch debug attribution context before CPU execution.
         if self.map.has_any_watchpoints() || self.debug_trace.enabled() {
-            let pc = self
-                .cpu
-                .at_instruction_boundary()
-                .then_some(self.cpu.pc as u32);
+            let pc = cpu.at_instruction_boundary().then_some(cpu.pc as u32);
             self.map.latch_access_context(self.clock, pc);
         }
+    }
 
-        self.cpu.execute_cycle(bus, BusMaster::Cpu(0));
+    /// Board work after the CPU's cycle.
+    fn end_cycle(&mut self) {
         self.sound.tick(1);
-
         self.clock += 1;
         self.watchdog_counter += 1;
     }
 
     /// Main CPU: VBLANK NMI, edge-triggered and gated by the IRQ-enable latch.
-    pub fn check_interrupts(&self, target: BusMaster) -> InterruptState {
+    /// Interrupt lines as the CPU sees them. Named apart from the `Bus` method
+    /// so the impl can call it without recursing.
+    pub fn interrupt_state(&self, target: BusMaster) -> InterruptState {
         match target {
             BusMaster::Cpu(0) => InterruptState {
                 nmi: self.vblank_nmi_pending && self.irq_enabled,
@@ -476,10 +558,6 @@ impl GalaxianBoard {
     // CPU state / video output
     // -----------------------------------------------------------------------
 
-    pub fn get_cpu_state(&self) -> Z80State {
-        self.cpu.snapshot()
-    }
-
     pub fn clock(&self) -> u64 {
         self.clock
     }
@@ -540,18 +618,16 @@ impl GalaxianBoard {
     // Debug
     // -----------------------------------------------------------------------
 
-    pub fn debug_tick_boundaries(&self) -> u32 {
-        if self.cpu.at_instruction_boundary() {
-            1
-        } else {
-            0
-        }
+    /// Whether the CPU is at an instruction boundary. It lives on the machine,
+    /// which passes it back in.
+    pub fn instruction_boundaries(cpu: &Z80) -> u32 {
+        u32::from(cpu.at_instruction_boundary())
     }
 }
 
 impl Saveable for GalaxianBoard {
     fn save_state(&self, w: &mut StateWriter) {
-        self.cpu.save_state(w);
+        // The CPU is saved by the machine, which owns it.
         w.write_bytes(self.map.region_data(Region::Ram));
         w.write_bytes(self.map.region_data(Region::VideoRam));
         w.write_bytes(self.map.region_data(Region::ObjRam));
@@ -567,7 +643,7 @@ impl Saveable for GalaxianBoard {
     }
 
     fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
-        self.cpu.load_state(r)?;
+        // The CPU is loaded by the machine, which owns it.
         r.read_bytes_into(self.map.region_data_mut(Region::Ram))?;
         r.read_bytes_into(self.map.region_data_mut(Region::VideoRam))?;
         r.read_bytes_into(self.map.region_data_mut(Region::ObjRam))?;
@@ -861,8 +937,13 @@ pub const GALAXIAN_CONTROLS: &[InputControl] = &[
 
 /// Galaxian (Namco/Midway, 1979): Z80 @ 3.072 MHz, tilemap + sprites +
 /// hardware starfield, discrete sound. Vertical monitor, 224×256 display.
-#[derive(phosphor_macros::Saveable)]
+#[derive(phosphor_macros::Saveable, BusDebug)]
 pub struct GalaxianSystem {
+    /// The Z80 is held beside the board, which is its bus.
+    #[debug_cpu("Z80")]
+    pub cpu: Z80,
+
+    #[debug_bus]
     pub board: GalaxianBoard,
 }
 
@@ -871,7 +952,10 @@ impl GalaxianSystem {
         let mut board = GalaxianBoard::new();
         // Apply factory-default DIP positions (IN0/IN1 = 0).
         board.in2 = DIP2_DEFAULT;
-        Self { board }
+        Self {
+            cpu: Z80::new(),
+            board,
+        }
     }
 
     pub fn load_rom_set(&mut self, rom_set: &RomSet) -> Result<(), RomLoadError> {
@@ -884,11 +968,29 @@ impl GalaxianSystem {
     }
 
     pub fn get_cpu_state(&self) -> Z80State {
-        self.board.get_cpu_state()
+        self.cpu.snapshot()
     }
 
     pub fn clock(&self) -> u64 {
         self.board.clock()
+    }
+
+    /// One CPU cycle. Returns 1 at an instruction boundary (for the debugger,
+    /// which steps instructions rather than cycles).
+    pub fn step_cycle(&mut self) -> u32 {
+        tick(&mut self.cpu, &mut self.board);
+        GalaxianBoard::instruction_boundaries(&self.cpu)
+    }
+
+    /// Read the CPU-facing bus, side effects and all. Distinct from the
+    /// debugger's `BusDebug::peek`/`poke`, which avoid side effects.
+    pub fn bus_read(&mut self, master: BusMaster, addr: u16) -> u8 {
+        Bus::read(&mut self.board, master, addr)
+    }
+
+    /// Write the CPU-facing bus, side effects and all. See [`Self::bus_read`].
+    pub fn bus_write(&mut self, master: BusMaster, addr: u16, data: u8) {
+        Bus::write(&mut self.board, master, addr, data);
     }
 }
 
@@ -902,30 +1004,39 @@ impl Default for GalaxianSystem {
 // Bus implementation
 // ---------------------------------------------------------------------------
 
-impl Bus for GalaxianSystem {
+// The board is the bus for every Galaxian-family game: they all decode the
+// same way, differing only in the map layout flag and GFX banking mode the
+// board already carries.
+impl Bus for GalaxianBoard {
     type Address = u16;
     type Data = u8;
 
+    #[inline]
     fn read(&mut self, _master: BusMaster, addr: u16) -> u8 {
-        self.board.bus_read_common(addr)
+        self.bus_read_common(addr)
     }
 
+    #[inline]
     fn write(&mut self, _master: BusMaster, addr: u16, data: u8) {
-        self.board.bus_write_common(addr, data);
+        self.bus_write_common(addr, data);
     }
 
+    #[inline]
     fn io_read(&mut self, _master: BusMaster, _addr: u16) -> u8 {
         0xFF // Galaxian uses no Z80 I/O ports (all I/O is memory-mapped)
     }
 
+    #[inline]
     fn io_write(&mut self, _master: BusMaster, _addr: u16, _data: u8) {}
 
+    #[inline]
     fn is_halted_for(&self, _master: BusMaster) -> bool {
         false // No DMA hardware
     }
 
+    #[inline]
     fn check_interrupts(&mut self, target: BusMaster) -> InterruptState {
-        self.board.check_interrupts(target)
+        self.interrupt_state(target)
     }
 }
 
@@ -933,7 +1044,7 @@ impl Bus for GalaxianSystem {
 // Trait implementations
 // ---------------------------------------------------------------------------
 
-crate::impl_board_delegation!(GalaxianSystem, board, TIMING, orientation);
+crate::impl_board_delegation!(GalaxianSystem, board, TIMING, orientation, split_cpu);
 
 impl MachineCore for GalaxianSystem {
     crate::machine_core_metadata!("galaxian", TIMING);
@@ -956,18 +1067,12 @@ impl MachineCore for GalaxianSystem {
     }
 
     fn run_frame(&mut self) {
-        bus_split!(self, bus => {
-            for _ in 0..TIMING.cycles_per_frame() {
-                self.board.tick(bus);
-            }
-        });
+        run_frame(&mut self.cpu, &mut self.board);
     }
 
     fn reset(&mut self) {
         self.board.reset_board();
-        bus_split!(self, bus => {
-            self.board.cpu.reset(bus, BusMaster::Cpu(0));
-        });
+        self.cpu.reset(&mut self.board, BusMaster::Cpu(0));
     }
 }
 
@@ -1147,7 +1252,6 @@ mod tests {
         let mut w = StateWriter::new();
         board.save_state(&mut w);
         let bytes = w.into_vec();
-        let cpu_snap = board.cpu.snapshot();
 
         let mut board2 = GalaxianBoard::new();
         board2.map.region_data_mut(Region::VideoRam)[0x100] = 0xFF;
@@ -1155,7 +1259,7 @@ mod tests {
         let mut r = StateReader::new(&bytes);
         board2.load_state(&mut r).unwrap();
 
-        assert_eq!(board2.cpu.snapshot(), cpu_snap);
+        // CPU state is saved by the machine, not the board.
         assert_eq!(board2.map.region_data(Region::VideoRam)[0x100], 0xAA);
         assert_eq!(board2.map.region_data(Region::ObjRam)[0x42], 0xBB);
         assert_eq!(board2.map.region_data(Region::Ram)[0x10], 0xCC);

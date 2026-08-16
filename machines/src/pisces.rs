@@ -6,7 +6,6 @@
 //! config-parameterised wrapper covers both (MAME's shared `pisces` machine /
 //! `init_pisces`). No program encryption.
 
-use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
     DipApplyTiming, DipChoice, DipOption, DipSwitchBank, DipSwitches, InputConfigurable,
@@ -430,7 +429,13 @@ static UNIWARS: PiscesGame = PiscesGame {
 // ---------------------------------------------------------------------------
 
 /// A Pisces-family game (Pisces or UniWar S) on the Galaxian board.
+#[derive(phosphor_macros::BusDebug)]
 pub struct PiscesSystem {
+    /// The Z80 is held beside the bus view over the board.
+    #[debug_cpu("Z80")]
+    pub cpu: phosphor_core::cpu::z80::Z80,
+
+    #[debug_bus]
     pub board: GalaxianBoard,
     cfg: &'static PiscesGame,
 }
@@ -442,7 +447,11 @@ impl PiscesSystem {
         board.in0 = cfg.port_defaults[0];
         board.in1 = cfg.port_defaults[1];
         board.in2 = cfg.port_defaults[2];
-        Self { board, cfg }
+        Self {
+            cpu: phosphor_core::cpu::z80::Z80::new(),
+            board,
+            cfg,
+        }
     }
 
     fn load_rom_set(&mut self, rom_set: &RomSet) -> Result<(), RomLoadError> {
@@ -451,6 +460,31 @@ impl PiscesSystem {
         self.board.load_gfx_rom(&self.cfg.gfx.load(rom_set)?);
         self.board.load_color_prom(&self.cfg.prom.load(rom_set)?);
         Ok(())
+    }
+
+    /// Borrow the CPU and the bus view over the board as disjoint pieces.
+    #[inline]
+    fn split(&mut self) -> (&mut phosphor_core::cpu::z80::Z80, PiscesBus<'_>) {
+        (&mut self.cpu, PiscesBus(&mut self.board))
+    }
+
+    /// One CPU cycle. Returns 1 at an instruction boundary (for the debugger,
+    /// which steps instructions rather than cycles).
+    pub fn step_cycle(&mut self) -> u32 {
+        let (cpu, mut bus) = self.split();
+        crate::galaxian::tick(cpu, &mut bus);
+        GalaxianBoard::instruction_boundaries(&self.cpu)
+    }
+
+    /// Read the CPU-facing bus, side effects and all. Distinct from the
+    /// debugger's `BusDebug::peek`/`poke`, which avoid side effects.
+    pub fn bus_read(&mut self, master: BusMaster, addr: u16) -> u8 {
+        self.split().1.read(master, addr)
+    }
+
+    /// Write the CPU-facing bus, side effects and all. See [`Self::bus_read`].
+    pub fn bus_write(&mut self, master: BusMaster, addr: u16, data: u8) {
+        self.split().1.write(master, addr, data);
     }
 
     fn port(&self, idx: u8) -> u8 {
@@ -471,21 +505,35 @@ impl PiscesSystem {
     }
 }
 
-impl Bus for PiscesSystem {
+/// The Pisces bus: the Galaxian board with one write line re-wired.
+///
+/// A newtype rather than using the board directly, because the 0x6002 line
+/// differs — keeping the test here rather than in `bus_write_common` means the
+/// other Galaxian games don't pay for it on every write.
+struct PiscesBus<'a>(&'a mut GalaxianBoard);
+
+impl crate::galaxian::GalaxianBus for PiscesBus<'_> {
+    #[inline]
+    fn board(&mut self) -> &mut GalaxianBoard {
+        self.0
+    }
+}
+
+impl Bus for PiscesBus<'_> {
     type Address = u16;
     type Data = u8;
 
     fn read(&mut self, _master: BusMaster, addr: u16) -> u8 {
-        self.board.bus_read_common(addr)
+        self.0.bus_read_common(addr)
     }
 
     fn write(&mut self, _master: BusMaster, addr: u16, data: u8) {
         // pisces_map: the 0x6002 coin-lockout line is replaced by the GFX-bank
         // bit (gfxbank[0], mirror 0x07f8). Everything else is the Galaxian map.
         if (0x6000..=0x67ff).contains(&addr) && addr & 7 == 2 {
-            self.board.set_gfxbank(0, data);
+            self.0.set_gfxbank(0, data);
         }
-        self.board.bus_write_common(addr, data);
+        self.0.bus_write_common(addr, data);
     }
 
     fn io_read(&mut self, _master: BusMaster, _addr: u16) -> u8 {
@@ -499,11 +547,11 @@ impl Bus for PiscesSystem {
     }
 
     fn check_interrupts(&mut self, target: BusMaster) -> InterruptState {
-        self.board.check_interrupts(target)
+        self.0.interrupt_state(target)
     }
 }
 
-crate::impl_board_delegation!(PiscesSystem, board, TIMING, orientation);
+crate::impl_board_delegation!(PiscesSystem, board, TIMING, orientation, split_cpu);
 
 impl MachineCore for PiscesSystem {
     // Hand-written (not machine_core_metadata!) because the id is per-instance
@@ -534,18 +582,12 @@ impl MachineCore for PiscesSystem {
     }
 
     fn run_frame(&mut self) {
-        bus_split!(self, bus => {
-            for _ in 0..TIMING.cycles_per_frame() {
-                self.board.tick(bus);
-            }
-        });
+        crate::galaxian::run_frame(&mut self.cpu, &mut self.board);
     }
 
     fn reset(&mut self) {
         self.board.reset_board();
-        bus_split!(self, bus => {
-            self.board.cpu.reset(bus, BusMaster::Cpu(0));
-        });
+        self.cpu.reset(&mut self.board, BusMaster::Cpu(0));
     }
 }
 
