@@ -7,3 +7,11 @@ edition = "2024"
 phosphor-core = { path = "../core" }
 phosphor-machines = { path = "../machines" }
 zip = "2"
+
+# Dev-only: the golden-frame suite reads its pinned data as TOML, fingerprints
+# frames with SHA-256, and writes/decodes reference PNGs. Deliberately not real
+# dependencies — the frontend links this crate and gains none of them.
+[dev-dependencies]
+png = "0.17"
+sha2 = "0.10"
+toml = "0.8"
