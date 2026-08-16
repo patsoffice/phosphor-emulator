@@ -36,9 +36,11 @@ pub const SAVE_MAGIC: &[u8; 4] = b"PHOS";
 
 /// Current save-state format version.
 ///
-/// Bumped to 4 when the AVG started saving its sequencer state latch, which
-/// changed the byte layout of every AVG machine's state.
-pub const SAVE_VERSION: u32 = 4;
+/// Bumped to 5 when the Galaga-family boards moved their three Z80s out of the
+/// board and into the machine wrapper (for concrete bus dispatch), which moved
+/// the CPU block ahead of the RAM block in those machines' state. Older files
+/// are rejected by version rather than misread.
+pub const SAVE_VERSION: u32 = 5;
 
 // -- Saveable trait ----------------------------------------------------------
 

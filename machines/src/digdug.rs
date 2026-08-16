@@ -1,4 +1,3 @@
-use phosphor_core::bus_split;
 use phosphor_core::core::address_space::AccessKind;
 use phosphor_core::core::address_space16::WriteAnnotation;
 use phosphor_core::core::bus::InterruptState;
@@ -9,14 +8,15 @@ use phosphor_core::core::machine::{
     Nvram, Profilable, Renderable, SaveState,
 };
 use phosphor_core::core::{Bus, BusMaster};
-use phosphor_core::cpu::Cpu;
 use phosphor_core::device::Er2055;
 use phosphor_core::gfx;
 use phosphor_core::gfx::GfxCache;
 use phosphor_core::gfx::decode::{GfxLayout, decode_gfx};
 use phosphor_macros::{MemoryRegion, Saveable};
 
-use crate::namco_galaga::{self, GALAGA_SPRITE_LAYOUT, NamcoGalagaBoard};
+use crate::namco_galaga::{
+    self, GALAGA_SPRITE_LAYOUT, GalagaCpus, NamcoGalagaBoard, NamcoGalagaBus,
+};
 use crate::namco_pac::PACMAN_TILE_LAYOUT;
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
 
@@ -520,6 +520,10 @@ pub(crate) enum Region {
 
 #[derive(Saveable)]
 pub struct DigDugSystem {
+    /// The three Z80s. Held beside the bus, not inside it, so their cycles
+    /// dispatch to a concrete `DigDugBus` (see [`DigDugSystem::split`]).
+    pub cpus: GalagaCpus,
+
     pub board: NamcoGalagaBoard,
 
     #[save_skip]
@@ -598,6 +602,7 @@ impl DigDugSystem {
             );
 
         Self {
+            cpus: GalagaCpus::new(),
             board,
 
             earom: Er2055::new(),
@@ -674,45 +679,24 @@ impl DigDugSystem {
     // Video latch (0xA000-0xA007, LS259 pattern)
     // -----------------------------------------------------------------------
 
-    fn write_video_latch(&mut self, bit: u8, value: bool) {
-        match bit {
-            0 => {
-                // bg_select bit 0
-                if value {
-                    self.bg_select |= 1;
-                } else {
-                    self.bg_select &= !1;
-                }
-            }
-            1 => {
-                // bg_select bit 1
-                if value {
-                    self.bg_select |= 2;
-                } else {
-                    self.bg_select &= !2;
-                }
-            }
-            2 => self.tx_color_mode = value,
-            3 => self.bg_disable = value,
-            4 => {
-                // bg_color_bank bit 4
-                if value {
-                    self.bg_color_bank |= 0x10;
-                } else {
-                    self.bg_color_bank &= !0x10;
-                }
-            }
-            5 => {
-                // bg_color_bank bit 5
-                if value {
-                    self.bg_color_bank |= 0x20;
-                } else {
-                    self.bg_color_bank &= !0x20;
-                }
-            }
-            7 => self.board.flip_screen = value,
-            _ => {} // 6: unused
-        }
+    /// Borrow the CPUs and the bus they drive as two disjoint pieces.
+    ///
+    /// The video latch and the EAROM are bus state (the Z80s write both); the
+    /// GFX caches and framebuffer are not. The borrow checker verifies the
+    /// split — no raw pointers — and dispatch through the view is concrete.
+    #[inline]
+    fn split(&mut self) -> (&mut GalagaCpus, DigDugBus<'_>) {
+        (
+            &mut self.cpus,
+            DigDugBus {
+                board: &mut self.board,
+                earom: &mut self.earom,
+                bg_select: &mut self.bg_select,
+                tx_color_mode: &mut self.tx_color_mode,
+                bg_disable: &mut self.bg_disable,
+                bg_color_bank: &mut self.bg_color_bank,
+            },
+        )
     }
 
     // -----------------------------------------------------------------------
@@ -735,9 +719,8 @@ impl DigDugSystem {
     /// deliberately does **not** fire at the start of vblank: this board writes
     /// video state during vblank, so sampling earlier would change the picture.
     fn tick_frame_boundary(&mut self) {
-        bus_split!(self, bus => {
-            self.board.tick(bus);
-        });
+        let (cpus, mut bus) = self.split();
+        namco_galaga::tick(cpus, &mut bus);
         if self
             .board
             .clock
@@ -1026,7 +1009,72 @@ pub(crate) fn write_annotation(addr: u16) -> WriteAnnotation {
     }
 }
 
-impl Bus for DigDugSystem {
+/// The Dig Dug bus: the shared board plus the video latch and the high-score
+/// EAROM the Z80s write.
+struct DigDugBus<'a> {
+    board: &'a mut NamcoGalagaBoard,
+    earom: &'a mut Er2055,
+    bg_select: &'a mut u8,
+    tx_color_mode: &'a mut bool,
+    bg_disable: &'a mut bool,
+    bg_color_bank: &'a mut u8,
+}
+
+impl DigDugBus<'_> {
+    // -----------------------------------------------------------------------
+    // Video latch (0xA000-0xA007, LS259)
+    // -----------------------------------------------------------------------
+
+    fn write_video_latch(&mut self, bit: u8, value: bool) {
+        match bit {
+            0 => {
+                // bg_select bit 0
+                if value {
+                    *self.bg_select |= 1;
+                } else {
+                    *self.bg_select &= !1;
+                }
+            }
+            1 => {
+                // bg_select bit 1
+                if value {
+                    *self.bg_select |= 2;
+                } else {
+                    *self.bg_select &= !2;
+                }
+            }
+            2 => *self.tx_color_mode = value,
+            3 => *self.bg_disable = value,
+            4 => {
+                // bg_color_bank bit 4
+                if value {
+                    *self.bg_color_bank |= 0x10;
+                } else {
+                    *self.bg_color_bank &= !0x10;
+                }
+            }
+            5 => {
+                // bg_color_bank bit 5
+                if value {
+                    *self.bg_color_bank |= 0x20;
+                } else {
+                    *self.bg_color_bank &= !0x20;
+                }
+            }
+            7 => self.board.flip_screen = value,
+            _ => {} // 6: unused
+        }
+    }
+}
+
+impl NamcoGalagaBus for DigDugBus<'_> {
+    #[inline]
+    fn board(&mut self) -> &mut NamcoGalagaBoard {
+        self.board
+    }
+}
+
+impl Bus for DigDugBus<'_> {
     type Address = u16;
     type Data = u8;
 
@@ -1151,9 +1199,9 @@ impl AudioSource for DigDugSystem {
 impl BusDebug for DigDugSystem {
     fn devices(&self) -> Vec<(&str, &dyn Debuggable)> {
         vec![
-            ("Z80 Main", &self.board.main_cpu as &dyn Debuggable),
-            ("Z80 Sub", &self.board.sub_cpu as &dyn Debuggable),
-            ("Z80 Sound", &self.board.sound_cpu as &dyn Debuggable),
+            ("Z80 Main", &self.cpus.main as &dyn Debuggable),
+            ("Z80 Sub", &self.cpus.sub as &dyn Debuggable),
+            ("Z80 Sound", &self.cpus.sound as &dyn Debuggable),
             ("Namco WSG", &self.board.wsg as &dyn Debuggable),
             ("Namco 06XX", &self.board.namco06 as &dyn Debuggable),
             ("Namco 51XX", &self.board.namco51 as &dyn Debuggable),
@@ -1163,9 +1211,9 @@ impl BusDebug for DigDugSystem {
 
     fn cpus(&self) -> Vec<(&str, &dyn DebugCpu)> {
         vec![
-            ("Z80 Main", &self.board.main_cpu as &dyn DebugCpu),
-            ("Z80 Sub", &self.board.sub_cpu as &dyn DebugCpu),
-            ("Z80 Sound", &self.board.sound_cpu as &dyn DebugCpu),
+            ("Z80 Main", &self.cpus.main as &dyn DebugCpu),
+            ("Z80 Sub", &self.cpus.sub as &dyn DebugCpu),
+            ("Z80 Sound", &self.cpus.sound as &dyn DebugCpu),
         ]
     }
 
@@ -1280,7 +1328,7 @@ impl MachineDebug for DigDugSystem {
 
     fn debug_tick(&mut self) -> u32 {
         self.tick_frame_boundary();
-        self.board.debug_tick_boundaries()
+        self.cpus.instruction_boundaries(self.board.sub_running())
     }
 }
 
@@ -1309,10 +1357,25 @@ impl MachineCore for DigDugSystem {
     }
 
     fn run_frame(&mut self) {
-        // The render happens in `tick_frame_boundary` on the frame's last cycle
-        // (single render site, shared with `debug_tick`).
-        for _ in 0..namco_galaga::TIMING.cycles_per_frame() {
-            self.tick_frame_boundary();
+        // Split once per frame-boundary run rather than per cycle: the bus view
+        // is several pointers wide, and re-forming it every cycle costs more
+        // than the dispatch it replaced. The render still happens exactly when
+        // the clock crosses a frame boundary, sampling the same video state
+        // `tick_frame_boundary` would have.
+        let cycles = namco_galaga::TIMING.cycles_per_frame();
+        let mut remaining = cycles;
+        while remaining > 0 {
+            let run = (cycles - self.board.clock % cycles).min(remaining);
+            {
+                let (cpus, mut bus) = self.split();
+                for _ in 0..run {
+                    namco_galaga::tick(cpus, &mut bus);
+                }
+            }
+            remaining -= run;
+            if self.board.clock.is_multiple_of(cycles) {
+                self.render_video();
+            }
         }
     }
 
@@ -1334,11 +1397,13 @@ impl MachineCore for DigDugSystem {
         self.earom.reset();
         self.native_buffer.fill(0);
 
-        bus_split!(self, bus => {
-            self.board.main_cpu.reset(bus, BusMaster::Cpu(0));
-            self.board.sub_cpu.reset(bus, BusMaster::Cpu(1));
-            self.board.sound_cpu.reset(bus, BusMaster::Cpu(2));
-        });
+        // Power-on reset of all three Z80s. `hardware_reset` is what the board
+        // already uses when the misc latch releases the sub/sound CPUs, and it
+        // clears the interrupt-enable and execution state that `Cpu::reset`
+        // leaves alone — a stronger reset, and one that needs no bus.
+        self.cpus.main.hardware_reset();
+        self.cpus.sub.hardware_reset();
+        self.cpus.sound.hardware_reset();
     }
 }
 
@@ -1647,13 +1712,13 @@ mod tests {
     // bit0=CK, bit1=!C1, bit2=C2, bit3=CS1 (CS2 hardwired). Regression guard for
     // the C1 inversion: with C1 decoded non-inverted the erase/write modes flip,
     // the write becomes a no-op, and the stored value stays 0xFF.
-    // `write`/`read` are ambiguous here (both Bus and BusDebug are in scope), so
-    // the helpers pin them to the Bus trait — the CPU-facing memory map.
+    // The CPU-facing memory map is the machine's bus view, not the machine
+    // itself, so these go through `split()` the way a CPU cycle does.
     fn cpu_write(sys: &mut DigDugSystem, addr: u16, data: u8) {
-        Bus::write(sys, BusMaster::Cpu(0), addr, data);
+        Bus::write(&mut sys.split().1, BusMaster::Cpu(0), addr, data);
     }
     fn cpu_read(sys: &mut DigDugSystem, addr: u16) -> u8 {
-        Bus::read(sys, BusMaster::Cpu(0), addr)
+        Bus::read(&mut sys.split().1, BusMaster::Cpu(0), addr)
     }
 
     // Commit the value latched at 0xB800+addr into the EAROM cell: erase (set to

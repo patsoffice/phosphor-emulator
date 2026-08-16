@@ -21,7 +21,6 @@
 //! so explosions are silent; the seam to add it lives at
 //! `namco_galaga.rs` chip-select-3 dispatch (see `write_custom_io`).
 
-use phosphor_core::bus_split;
 use phosphor_core::core::address_space::AccessKind;
 use phosphor_core::core::address_space16::WriteAnnotation;
 use phosphor_core::core::bus::InterruptState;
@@ -33,14 +32,13 @@ use phosphor_core::core::machine::{
     Renderable, SaveState,
 };
 use phosphor_core::core::{Bus, BusMaster};
-use phosphor_core::cpu::Cpu;
 use phosphor_core::gfx;
 use phosphor_core::gfx::GfxCache;
 use phosphor_core::gfx::decode::{GfxLayout, decode_gfx};
 use phosphor_macros::{MemoryRegion, Saveable};
 
 use crate::gfx_registry::GfxRegion;
-use crate::namco_galaga::{self, NamcoGalagaBoard};
+use crate::namco_galaga::{self, GalagaCpus, NamcoGalagaBoard, NamcoGalagaBus};
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
 
 // ---------------------------------------------------------------------------
@@ -401,6 +399,10 @@ pub(crate) enum Region {
 /// Screen: 288×224, rotated 90° CCW for a vertical display.
 #[derive(Saveable)]
 pub struct XeviousSystem {
+    /// The three Z80s. Held beside the bus, not inside it, so their cycles
+    /// dispatch to a concrete `XeviousBus` (see [`XeviousSystem::split`]).
+    pub cpus: GalagaCpus,
+
     pub board: NamcoGalagaBoard,
 
     // Scroll latch (0xD000-0xD07F): 9-bit scroll per layer, plus flip.
@@ -507,6 +509,7 @@ impl XeviousSystem {
             );
 
         Self {
+            cpus: GalagaCpus::new(),
             board,
             bg_scroll_x: 0,
             fg_scroll_x: 0,
@@ -589,7 +592,7 @@ impl XeviousSystem {
 
     /// Main-CPU program counter (for headless boot checks).
     pub fn main_pc(&self) -> u16 {
-        self.board.main_cpu.pc
+        self.cpus.main.pc
     }
 
     /// True once the main CPU has released the sub/sound CPUs from reset
@@ -600,10 +603,10 @@ impl XeviousSystem {
 
     /// Sub/sound CPU program counters and main IRQ enable state (boot checks).
     pub fn sub_pc(&self) -> u16 {
-        self.board.sub_cpu.pc
+        self.cpus.sub.pc
     }
     pub fn sound_pc(&self) -> u16 {
-        self.board.sound_cpu.pc
+        self.cpus.sound.pc
     }
     pub fn main_irq_on(&self) -> bool {
         self.board.main_irq_enabled
@@ -648,9 +651,8 @@ impl XeviousSystem {
     /// deliberately does **not** fire at the start of vblank: this board writes
     /// video state during vblank, so sampling earlier would change the picture.
     fn tick_frame_boundary(&mut self) {
-        bus_split!(self, bus => {
-            self.board.tick(bus);
-        });
+        let (cpus, mut bus) = self.split();
+        namco_galaga::tick(cpus, &mut bus);
         if self
             .board
             .clock
@@ -892,6 +894,49 @@ impl XeviousSystem {
         }
     }
 
+    /// Borrow the CPUs and the bus they drive as two disjoint pieces.
+    ///
+    /// The scroll latch and the background-map selector are bus state (the Z80s
+    /// write them); the GFX caches and framebuffer are not. The borrow checker
+    /// verifies the split — no raw pointers — and dispatch through the view is
+    /// concrete.
+    #[inline]
+    fn split(&mut self) -> (&mut GalagaCpus, XeviousBus<'_>) {
+        (
+            &mut self.cpus,
+            XeviousBus {
+                board: &mut self.board,
+                bg_scroll_x: &mut self.bg_scroll_x,
+                fg_scroll_x: &mut self.fg_scroll_x,
+                bg_scroll_y: &mut self.bg_scroll_y,
+                fg_scroll_y: &mut self.fg_scroll_y,
+                bs: &mut self.bs,
+                playfield_rom: &self.playfield_rom,
+            },
+        )
+    }
+}
+
+/// The Xevious bus: the shared board plus the scroll latch and the
+/// background-map lookup the Z80s drive.
+struct XeviousBus<'a> {
+    board: &'a mut NamcoGalagaBoard,
+    bg_scroll_x: &'a mut u16,
+    fg_scroll_x: &'a mut u16,
+    bg_scroll_y: &'a mut u16,
+    fg_scroll_y: &'a mut u16,
+    bs: &'a mut [u8; 2],
+    playfield_rom: &'a [u8],
+}
+
+impl NamcoGalagaBus for XeviousBus<'_> {
+    #[inline]
+    fn board(&mut self) -> &mut NamcoGalagaBoard {
+        self.board
+    }
+}
+
+impl XeviousBus<'_> {
     /// Read the interleaved DIP switch port at 0x6800-0x6807. Each address
     /// returns one bit of each bank: bit 0 from DSWB, bit 1 from DSWA.
     fn dsw_read(&self, offset: u8) -> u8 {
@@ -905,10 +950,10 @@ impl XeviousSystem {
     fn write_video_latch(&mut self, offset: u8, data: u8) {
         let scroll = (data as u16) | (((offset & 0x01) as u16) << 8);
         match (offset >> 4) & 0x0F {
-            0 => self.bg_scroll_x = scroll,
-            1 => self.fg_scroll_x = scroll,
-            2 => self.bg_scroll_y = scroll,
-            3 => self.fg_scroll_y = scroll,
+            0 => *self.bg_scroll_x = scroll,
+            1 => *self.fg_scroll_x = scroll,
+            2 => *self.bg_scroll_y = scroll,
+            3 => *self.fg_scroll_y = scroll,
             7 => self.board.flip_screen = (scroll & 1) != 0,
             _ => {}
         }
@@ -923,7 +968,7 @@ impl XeviousSystem {
     /// walk the 2A/2B/2C data ROMs to produce the tile number (even address) or
     /// its attribute byte (odd address) for the scrolling background layer.
     fn read_bg_map(&self, addr: u16) -> u8 {
-        let rom = &self.playfield_rom;
+        let rom = self.playfield_rom;
         // Sub-ROM bases within the combined gfx4 region.
         let rom2a = 0x0000usize; // xvi_9  (0x1000)
         let rom2b = 0x1000usize; // xvi_10 (0x2000)
@@ -1005,7 +1050,7 @@ pub(crate) fn write_annotation(addr: u16) -> WriteAnnotation {
     }
 }
 
-impl Bus for XeviousSystem {
+impl Bus for XeviousBus<'_> {
     type Address = u16;
     type Data = u8;
 
@@ -1107,9 +1152,9 @@ impl AudioSource for XeviousSystem {
 impl BusDebug for XeviousSystem {
     fn devices(&self) -> Vec<(&str, &dyn Debuggable)> {
         vec![
-            ("Z80 Main", &self.board.main_cpu as &dyn Debuggable),
-            ("Z80 Sub", &self.board.sub_cpu as &dyn Debuggable),
-            ("Z80 Sound", &self.board.sound_cpu as &dyn Debuggable),
+            ("Z80 Main", &self.cpus.main as &dyn Debuggable),
+            ("Z80 Sub", &self.cpus.sub as &dyn Debuggable),
+            ("Z80 Sound", &self.cpus.sound as &dyn Debuggable),
             ("Namco WSG", &self.board.wsg as &dyn Debuggable),
             ("Namco 06XX", &self.board.namco06 as &dyn Debuggable),
             ("Namco 51XX", &self.board.namco51 as &dyn Debuggable),
@@ -1118,9 +1163,9 @@ impl BusDebug for XeviousSystem {
 
     fn cpus(&self) -> Vec<(&str, &dyn DebugCpu)> {
         vec![
-            ("Z80 Main", &self.board.main_cpu as &dyn DebugCpu),
-            ("Z80 Sub", &self.board.sub_cpu as &dyn DebugCpu),
-            ("Z80 Sound", &self.board.sound_cpu as &dyn DebugCpu),
+            ("Z80 Main", &self.cpus.main as &dyn DebugCpu),
+            ("Z80 Sub", &self.cpus.sub as &dyn DebugCpu),
+            ("Z80 Sound", &self.cpus.sound as &dyn DebugCpu),
         ]
     }
 
@@ -1240,7 +1285,7 @@ impl MachineDebug for XeviousSystem {
 
     fn debug_tick(&mut self) -> u32 {
         self.tick_frame_boundary();
-        self.board.debug_tick_boundaries()
+        self.cpus.instruction_boundaries(self.board.sub_running())
     }
 }
 
@@ -1269,10 +1314,25 @@ impl MachineCore for XeviousSystem {
     }
 
     fn run_frame(&mut self) {
-        // The render happens in `tick_frame_boundary` on the frame's last cycle
-        // (single render site, shared with `debug_tick`).
-        for _ in 0..namco_galaga::TIMING.cycles_per_frame() {
-            self.tick_frame_boundary();
+        // Split once per frame-boundary run rather than per cycle: the bus view
+        // is several pointers wide, and re-forming it every cycle costs more
+        // than the dispatch it replaced. The render still happens exactly when
+        // the clock crosses a frame boundary, sampling the same video state
+        // `tick_frame_boundary` would have.
+        let cycles = namco_galaga::TIMING.cycles_per_frame();
+        let mut remaining = cycles;
+        while remaining > 0 {
+            let run = (cycles - self.board.clock % cycles).min(remaining);
+            {
+                let (cpus, mut bus) = self.split();
+                for _ in 0..run {
+                    namco_galaga::tick(cpus, &mut bus);
+                }
+            }
+            remaining -= run;
+            if self.board.clock.is_multiple_of(cycles) {
+                self.render_video();
+            }
         }
     }
 
@@ -1297,11 +1357,13 @@ impl MachineCore for XeviousSystem {
         self.bs = [0; 2];
         self.native_buffer.fill(0);
 
-        bus_split!(self, bus => {
-            self.board.main_cpu.reset(bus, BusMaster::Cpu(0));
-            self.board.sub_cpu.reset(bus, BusMaster::Cpu(1));
-            self.board.sound_cpu.reset(bus, BusMaster::Cpu(2));
-        });
+        // Power-on reset of all three Z80s. `hardware_reset` is what the board
+        // already uses when the misc latch releases the sub/sound CPUs, and it
+        // clears the interrupt-enable and execution state that `Cpu::reset`
+        // leaves alone — a stronger reset, and one that needs no bus.
+        self.cpus.main.hardware_reset();
+        self.cpus.sub.hardware_reset();
+        self.cpus.sound.hardware_reset();
     }
 }
 
@@ -1633,9 +1695,9 @@ mod dip_tests {
         let mut sys = XeviousSystem::new();
         sys.board.dswa = 0b0000_0001; // DSWA bit 0 set
         sys.board.dswb = 0b0000_0010; // DSWB bit 1 set
-        assert_eq!(sys.dsw_read(0), 0b10); // DSWA bit0 -> result bit1
-        assert_eq!(sys.dsw_read(1), 0b01); // DSWB bit1 -> result bit0
-        assert_eq!(sys.dsw_read(2), 0b00); // neither bank set here
+        assert_eq!(sys.split().1.dsw_read(0), 0b10); // DSWA bit0 -> result bit1
+        assert_eq!(sys.split().1.dsw_read(1), 0b01); // DSWB bit1 -> result bit0
+        assert_eq!(sys.split().1.dsw_read(2), 0b00); // neither bank set here
     }
 }
 
@@ -1794,19 +1856,23 @@ mod tests {
         let mut sys = XeviousSystem::new();
         sys.board.fit_50xx(); // Xevious carries the 50XX; new() leaves it unfitted.
 
+        // The CPU-facing map is the machine's bus view, reached the same way a
+        // CPU cycle reaches it.
         let send = |sys: &mut XeviousSystem, cmd: u8| {
-            Bus::write(sys, BusMaster::Cpu(0), 0x7100, 0x04); // select 50XX, write mode
-            Bus::write(sys, BusMaster::Cpu(0), 0x7000, cmd);
+            let mut bus = sys.split().1;
+            bus.write(BusMaster::Cpu(0), 0x7100, 0x04); // select 50XX, write mode
+            bus.write(BusMaster::Cpu(0), 0x7000, cmd);
         };
         send(&mut sys, 0x10); // reset scores
         send(&mut sys, 0x80); // increment player 1 by 5
 
-        Bus::write(&mut sys, BusMaster::Cpu(0), 0x7100, 0x14); // select 50XX, read mode
+        let mut bus = sys.split().1;
+        bus.write(BusMaster::Cpu(0), 0x7100, 0x14); // select 50XX, read mode
         let resp = [
-            Bus::read(&mut sys, BusMaster::Cpu(0), 0x7000),
-            Bus::read(&mut sys, BusMaster::Cpu(0), 0x7000),
-            Bus::read(&mut sys, BusMaster::Cpu(0), 0x7000),
-            Bus::read(&mut sys, BusMaster::Cpu(0), 0x7000),
+            bus.read(BusMaster::Cpu(0), 0x7000),
+            bus.read(BusMaster::Cpu(0), 0x7000),
+            bus.read(BusMaster::Cpu(0), 0x7000),
+            bus.read(BusMaster::Cpu(0), 0x7000),
         ];
         // Byte 0 = flags (high-score bit set), bytes 1-3 = BCD score = 000005.
         assert_eq!(resp, [0x80, 0x00, 0x00, 0x05]);
@@ -1828,8 +1894,8 @@ mod tests {
         sys.playfield_rom = rom;
         sys.bs = [0x00, 0x00];
 
-        assert_eq!(sys.read_bg_map(0xF000), 0x80); // even: tile, 0x40 -> 0x80 swap
-        assert_eq!(sys.read_bg_map(0xF001), 0x34); // odd: attribute byte
+        assert_eq!(sys.split().1.read_bg_map(0xF000), 0x80); // even: tile, 0x40 -> 0x80 swap
+        assert_eq!(sys.split().1.read_bg_map(0xF001), 0x34); // odd: attribute byte
     }
 
     /// The 0xD000-0xD07F video latch selects a scroll register by address bits
@@ -1838,21 +1904,21 @@ mod tests {
     #[test]
     fn scroll_latch_decode() {
         let mut sys = XeviousSystem::new();
-        sys.write_video_latch(0x00, 0x34); // bg X low
+        sys.split().1.write_video_latch(0x00, 0x34); // bg X low
         assert_eq!(sys.bg_scroll_x, 0x034);
-        sys.write_video_latch(0x01, 0x34); // bg X + 9th bit
+        sys.split().1.write_video_latch(0x01, 0x34); // bg X + 9th bit
         assert_eq!(sys.bg_scroll_x, 0x134);
-        sys.write_video_latch(0x10, 0x12); // fg X
+        sys.split().1.write_video_latch(0x10, 0x12); // fg X
         assert_eq!(sys.fg_scroll_x, 0x012);
-        sys.write_video_latch(0x11, 0x00); // fg X = 9th bit only
+        sys.split().1.write_video_latch(0x11, 0x00); // fg X = 9th bit only
         assert_eq!(sys.fg_scroll_x, 0x100);
-        sys.write_video_latch(0x20, 0x56); // bg Y
+        sys.split().1.write_video_latch(0x20, 0x56); // bg Y
         assert_eq!(sys.bg_scroll_y, 0x056);
-        sys.write_video_latch(0x30, 0x78); // fg Y
+        sys.split().1.write_video_latch(0x30, 0x78); // fg Y
         assert_eq!(sys.fg_scroll_y, 0x078);
-        sys.write_video_latch(0x70, 0x01); // flip on
+        sys.split().1.write_video_latch(0x70, 0x01); // flip on
         assert!(sys.board.flip_screen);
-        sys.write_video_latch(0x70, 0x00); // flip off
+        sys.split().1.write_video_latch(0x70, 0x00); // flip off
         assert!(!sys.board.flip_screen);
     }
 

@@ -306,17 +306,119 @@ impl Debuggable for Namco51Wrapper {
 // NamcoGalagaBoard — shared hardware for the Galaga platform
 // ---------------------------------------------------------------------------
 
+/// The three Z80s that share the Galaga bus.
+///
+/// They live outside [`NamcoGalagaBoard`] — and outside the game wrapper's bus
+/// state — so `cpu.execute_cycle(&mut bus, ..)` is a pair of disjoint field
+/// borrows and dispatches at a concrete bus type.
+pub struct GalagaCpus {
+    pub main: Z80,
+    pub sub: Z80,
+    pub sound: Z80,
+}
+
+impl Default for GalagaCpus {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl GalagaCpus {
+    pub fn new() -> Self {
+        Self {
+            main: Z80::new(),
+            sub: Z80::new(),
+            sound: Z80::new(),
+        }
+    }
+
+    /// Instruction-boundary mask (bit 0 = main, 1 = sub, 2 = sound) for the
+    /// debugger's instruction-granularity stepping. CPUs held in reset do not
+    /// count.
+    pub fn instruction_boundaries(&self, sub_running: bool) -> u32 {
+        let mut mask = 0u32;
+        if self.main.at_instruction_boundary() {
+            mask |= 1;
+        }
+        if sub_running && self.sub.at_instruction_boundary() {
+            mask |= 2;
+        }
+        if sub_running && self.sound.at_instruction_boundary() {
+            mask |= 4;
+        }
+        mask
+    }
+}
+
+impl Saveable for GalagaCpus {
+    fn save_state(&self, w: &mut StateWriter) {
+        self.main.save_state(w);
+        self.sub.save_state(w);
+        self.sound.save_state(w);
+    }
+
+    fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
+        self.main.load_state(r)?;
+        self.sub.load_state(r)?;
+        self.sound.load_state(r)?;
+        Ok(())
+    }
+}
+
+/// A Galaga-family bus: the shared board plus whatever the game puts in front
+/// of it (video latches, an EAROM, background-map lookup ROMs).
+///
+/// [`tick`] is generic over this trait, so every access the Z80s make resolves
+/// to a direct call rather than a vtable entry.
+pub trait NamcoGalagaBus: Bus<Address = u16, Data = u8> {
+    fn board(&mut self) -> &mut NamcoGalagaBoard;
+}
+
+/// What the board decided at the top of a cycle, handed back so the caller can
+/// step the CPUs without holding a borrow on the board.
+pub struct CycleGate {
+    /// Debug attribution is active (watchpoints set or tracing enabled).
+    debug: bool,
+}
+
+/// One CPU cycle of a Galaga-family machine: board work, the three Z80s, then
+/// the custom-MCU servicing and clock advance.
+#[inline]
+pub fn tick<B: NamcoGalagaBus>(cpus: &mut GalagaCpus, bus: &mut B) {
+    let gate = bus.board().begin_cycle(cpus);
+
+    // The map has one PC latch but three CPUs drive this bus, so hand it the
+    // about-to-run CPU's PC immediately before that CPU steps; every access it
+    // then makes is attributed to its own instruction.
+    if gate.debug {
+        bus.board().latch_pc(0);
+    }
+    cpus.main.execute_cycle(bus, BusMaster::Cpu(0));
+
+    // Read the reset latch *after* the main CPU's cycle: its write to the misc
+    // latch takes effect immediately, and hardware holds the other two CPUs
+    // from that moment.
+    if !bus.board().sub_reset {
+        if gate.debug {
+            bus.board().latch_pc(1);
+        }
+        cpus.sub.execute_cycle(bus, BusMaster::Cpu(1));
+        if gate.debug {
+            bus.board().latch_pc(2);
+        }
+        cpus.sound.execute_cycle(bus, BusMaster::Cpu(2));
+    }
+
+    bus.board().end_cycle();
+}
+
 /// Namco Galaga hardware base (3×Z80 @ 3.072 MHz, Namco WSG, custom I/O chips).
 ///
 /// Shared by Galaga, Dig Dug, Bosconian, and other games on the same PCB.
 /// Game wrappers compose this struct, own their RAM arrays, and implement
-/// Bus to route memory accesses.
+/// Bus to route memory accesses. The CPUs themselves live in [`GalagaCpus`],
+/// beside the bus rather than inside it.
 pub struct NamcoGalagaBoard {
-    // CPUs
-    pub(crate) main_cpu: Z80,
-    pub(crate) sub_cpu: Z80,
-    pub(crate) sound_cpu: Z80,
-
     /// Address space owning the three program ROMs and all debug observability
     /// (watchpoints, the write-event trace, and the access-context latch).
     pub(crate) map: AddressSpace16,
@@ -375,10 +477,6 @@ pub struct NamcoGalagaBoard {
 impl NamcoGalagaBoard {
     pub fn new() -> Self {
         Self {
-            main_cpu: Z80::new(),
-            sub_cpu: Z80::new(),
-            sound_cpu: Z80::new(),
-
             map: Self::build_map(),
 
             wsg: {
@@ -449,23 +547,21 @@ impl NamcoGalagaBoard {
     }
 
     // -----------------------------------------------------------------------
-    // Core tick — called from game wrappers via bus_split!
+    // Core tick — the board half of one CPU cycle (see [`tick`])
     // -----------------------------------------------------------------------
 
-    /// Reset a Z80 to power-on state.
-    fn reset_z80(cpu: &mut Z80) {
-        cpu.hardware_reset();
-    }
-
-    pub fn tick(&mut self, bus: &mut dyn Bus<Address = u16, Data = u8>) {
+    /// Board work that happens before the CPUs' cycle: deferred resets,
+    /// interrupt timing, the 06XX timer, the sound generator, and sampling
+    /// debug attribution context.
+    fn begin_cycle(&mut self, cpus: &mut GalagaCpus) -> CycleGate {
         let frame_cycle = self.clock % TIMING.cycles_per_frame();
 
         // Handle deferred sub CPU reset (set by write_misc_latch bit 3).
         // Mirrors Z80::reset() without needing 'static bus lifetime.
         if self.pending_sub_cpu_reset {
             self.pending_sub_cpu_reset = false;
-            Self::reset_z80(&mut self.sub_cpu);
-            Self::reset_z80(&mut self.sound_cpu);
+            cpus.sub.hardware_reset();
+            cpus.sound.hardware_reset();
             // A CPU coming out of reset must start clean at 0x0000 with no
             // stale interrupt latched. Clearing these prevents a pending sound
             // NMI (accumulated while the CPU was held in reset) from firing
@@ -535,38 +631,32 @@ impl NamcoGalagaBoard {
         // CPU execution — bus dispatch cannot read CPU state mid-tick.
         let debug = self.map.debug_active();
         if debug {
-            if self.main_cpu.at_instruction_boundary() {
-                self.debug_pc[0] = Some(self.main_cpu.pc as u32);
+            if cpus.main.at_instruction_boundary() {
+                self.debug_pc[0] = Some(cpus.main.pc as u32);
             }
-            if self.sub_cpu.at_instruction_boundary() {
-                self.debug_pc[1] = Some(self.sub_cpu.pc as u32);
+            if cpus.sub.at_instruction_boundary() {
+                self.debug_pc[1] = Some(cpus.sub.pc as u32);
             }
-            if self.sound_cpu.at_instruction_boundary() {
-                self.debug_pc[2] = Some(self.sound_cpu.pc as u32);
+            if cpus.sound.at_instruction_boundary() {
+                self.debug_pc[2] = Some(cpus.sound.pc as u32);
             }
         }
 
-        // Execute all 3 CPUs BEFORE MCU so Z80 writes reach o_latch
-        // before the MCU reads K (K is a hardware wire, not latched).
-        //
-        // The map has one PC latch but three CPUs drive this bus, so hand it
-        // the about-to-run CPU's PC immediately before that CPU steps; every
-        // access it then makes is attributed to its own instruction.
-        if debug {
-            self.map.latch_access_context(self.clock, self.debug_pc[0]);
-        }
-        self.main_cpu.execute_cycle(bus, BusMaster::Cpu(0));
-        if !self.sub_reset {
-            if debug {
-                self.map.latch_access_context(self.clock, self.debug_pc[1]);
-            }
-            self.sub_cpu.execute_cycle(bus, BusMaster::Cpu(1));
-            if debug {
-                self.map.latch_access_context(self.clock, self.debug_pc[2]);
-            }
-            self.sound_cpu.execute_cycle(bus, BusMaster::Cpu(2));
-        }
+        CycleGate { debug }
+    }
 
+    /// Point the map's single access-context latch at CPU `index`, so the
+    /// accesses that CPU is about to make are attributed to its instruction.
+    #[inline]
+    fn latch_pc(&mut self, index: usize) {
+        self.map
+            .latch_access_context(self.clock, self.debug_pc[index]);
+    }
+
+    /// Board work after the CPUs' cycle. The custom MCUs run here, after the
+    /// Z80s, so their K inputs see this cycle's writes to the 06XX latch
+    /// (K is a hardware wire, not a latch).
+    fn end_cycle(&mut self) {
         // Drive chip_select IRQ to LLE 51XX and tick MCU.
         // Executed AFTER Z80 so K reflects latest data writes.
         // Matches MAME's nmi_generate which pulses chip_select for selected
@@ -1048,18 +1138,9 @@ impl NamcoGalagaBoard {
     // Debug
     // -----------------------------------------------------------------------
 
-    pub fn debug_tick_boundaries(&self) -> u32 {
-        let mut mask = 0u32;
-        if self.main_cpu.at_instruction_boundary() {
-            mask |= 1;
-        }
-        if !self.sub_reset && self.sub_cpu.at_instruction_boundary() {
-            mask |= 2;
-        }
-        if !self.sub_reset && self.sound_cpu.at_instruction_boundary() {
-            mask |= 4;
-        }
-        mask
+    /// Whether the sub and sound CPUs are running (not held in reset).
+    pub fn sub_running(&self) -> bool {
+        !self.sub_reset
     }
 }
 
@@ -1084,12 +1165,7 @@ impl Saveable for NamcoGalagaBoard {
             w.write_bytes(self.map.region_data(id));
         }
 
-        // CPUs
-        self.main_cpu.save_state(w);
-        self.sub_cpu.save_state(w);
-        self.sound_cpu.save_state(w);
-
-        // Devices
+        // Devices (the CPUs are saved by the wrapper, which owns them)
         self.wsg.save_state(w);
         self.namco06.save_state(w);
 
@@ -1145,12 +1221,7 @@ impl Saveable for NamcoGalagaBoard {
             r.read_bytes_into(self.map.region_data_mut(id))?;
         }
 
-        // CPUs
-        self.main_cpu.load_state(r)?;
-        self.sub_cpu.load_state(r)?;
-        self.sound_cpu.load_state(r)?;
-
-        // Devices
+        // Devices (the CPUs are loaded by the wrapper, which owns them)
         self.wsg.load_state(r)?;
         self.namco06.load_state(r)?;
 
