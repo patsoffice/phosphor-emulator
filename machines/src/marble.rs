@@ -756,6 +756,8 @@ impl SaveState for MarbleSystem {
 
 impl Saveable for MarbleSystem {
     fn save_state(&self, w: &mut StateWriter) {
+        // The CPU first, which is where the board wrote it when it owned it.
+        self.cpu.save_state(w);
         self.board.save_state(w);
         for counter in &self.trackball {
             w.write_u8(counter.counter());
@@ -765,6 +767,7 @@ impl Saveable for MarbleSystem {
     }
 
     fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
+        self.cpu.load_state(r)?;
         self.board.load_state(r)?;
         for counter in &mut self.trackball {
             counter.set_counter(r.read_u8()?);

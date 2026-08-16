@@ -835,6 +835,8 @@ impl SaveState for RoadRunnerSystem {
 
 impl Saveable for RoadRunnerSystem {
     fn save_state(&self, w: &mut StateWriter) {
+        // The CPU first, which is where the board wrote it when it owned it.
+        self.cpu.save_state(w);
         self.board.save_state(w);
         self.adc.save_state(w);
         w.write_bool(self.adc_irq_enabled);
@@ -842,6 +844,7 @@ impl Saveable for RoadRunnerSystem {
     }
 
     fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
+        self.cpu.load_state(r)?;
         self.board.load_state(r)?;
         self.adc.load_state(r)?;
         self.adc_irq_enabled = r.read_bool()?;

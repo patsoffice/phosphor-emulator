@@ -593,9 +593,12 @@ impl MachineCore for PiscesSystem {
 
 impl Saveable for PiscesSystem {
     fn save_state(&self, w: &mut StateWriter) {
+        // The CPU first, which is where the board wrote it when it owned it.
+        self.cpu.save_state(w);
         self.board.save_state(w);
     }
     fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
+        self.cpu.load_state(r)?;
         self.board.load_state(r)
     }
 }
