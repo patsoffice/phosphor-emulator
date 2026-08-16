@@ -22,10 +22,16 @@ use syn::{DeriveInput, Expr, Fields, Type, parse_macro_input};
 ///   field type: `AddressSpace16` maps clamp debug addresses to 16 bits, while
 ///   `AddressSpace32` maps (24/32-bit M68000 buses) route them untruncated.
 ///   `memory_map()` exposes 16-bit maps only (its return type is `&AddressSpace16`).
+/// - `#[debug_bus]` — field's type also implements `BusDebug`; its devices, CPUs,
+///   maps and watchpoints are merged into this one. Used when a system struct
+///   owns the CPU separately from the board that owns the address space and
+///   devices, so that `cpu.execute_cycle(&mut board, ..)` borrow-checks at a
+///   concrete type. Local entries come first, so a `#[debug_cpu]` here keeps
+///   index 0 and the nested board's devices follow.
 ///
 /// CPU index assignment is positional: first `#[debug_cpu]` is index 0, etc.
 /// Device indices for `write_device_register` / `reset_device` match `devices()` order.
-#[proc_macro_derive(BusDebug, attributes(debug_device, debug_cpu, debug_map))]
+#[proc_macro_derive(BusDebug, attributes(debug_device, debug_cpu, debug_map, debug_bus))]
 pub fn derive_bus_debug(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let struct_name = &input.ident;
@@ -49,11 +55,20 @@ pub fn derive_bus_debug(input: TokenStream) -> TokenStream {
         Option<syn::LitStr>,
     )> = Vec::new(); // (name, field_ident, read_method?, write_method?)
     let mut map_entries: Vec<MapEntry> = Vec::new(); // (cpu_index, field_ident, is_32) for AddressSpace fields
+    let mut bus_field: Option<syn::Ident> = None; // #[debug_bus] — nested BusDebug to merge
 
     for field in fields {
         let field_ident = field.ident.as_ref().expect("named field");
 
         for attr in &field.attrs {
+            if attr.path().is_ident("debug_bus") {
+                assert!(
+                    bus_field.is_none(),
+                    "BusDebug allows only one #[debug_bus] field"
+                );
+                bus_field = Some(field_ident.clone());
+                continue;
+            }
             if attr.path().is_ident("debug_device") {
                 // #[debug_device("Name")] — field implements Device. On an
                 // array field `[T; N]`, expands to N entries "Name 1".."Name N".
@@ -101,99 +116,92 @@ pub fn derive_bus_debug(input: TokenStream) -> TokenStream {
         quote! { (#name, &self.#ident as &dyn phosphor_core::core::debug::DebugCpu) }
     });
 
-    // Generate read() match arms
-    let read_arms: Vec<_> = cpu_entries
+    // A CPU whose memory access is neither given explicitly nor served by a
+    // local map must be reachable through a #[debug_bus] field — otherwise the
+    // debugger would silently read nothing for it.
+    for (i, (_, _, read_method, _)) in cpu_entries.iter().enumerate() {
+        assert!(
+            read_method.is_some()
+                || map_entries.iter().any(|m| m.cpu_index == i)
+                || bus_field.is_some(),
+            "debug_cpu at index {i} has no read/write methods, no matching #[debug_map(cpu = {i})], and no #[debug_bus] field"
+        );
+    }
+
+    // Memory access arms are keyed by CPU index. A `#[debug_cpu]` with explicit
+    // read/write methods supplies its own; otherwise the arm comes from the
+    // `#[debug_map(cpu = N)]` at that index — which exists whether or not the
+    // CPU itself lives in this struct, so a board split away from its CPU still
+    // serves debug reads. Indices with neither fall through to `#[debug_bus]`.
+    let explicit: Vec<(usize, &syn::LitStr, &syn::LitStr)> = cpu_entries
         .iter()
         .enumerate()
-        .map(|(i, (_, _, read_method, _))| {
-            let idx = i;
-            if let Some(read_method) = read_method {
-                // Explicit method: self.method(addr) — 16-bit addressed.
-                let read_ident =
-                    syn::Ident::new(read_method.value().as_str(), read_method.span());
-                quote! { #idx => u16::try_from(addr).ok().and_then(|addr| self.#read_ident(addr)) }
-            } else {
-                // Auto-route through matching #[debug_map(cpu = N)]. 32-bit maps
-                // take the address untruncated; 16-bit maps clamp to their space.
-                let map_field = map_entries
-                    .iter()
-                    .find(|m| m.cpu_index == i)
-                    .unwrap_or_else(|| {
-                        panic!(
-                            "debug_cpu at index {i} has no read method and no matching #[debug_map(cpu = {i})]"
-                        )
-                    });
-                let map_ident = &map_field.field_ident;
-                if map_field.is_32 {
-                    quote! { #idx => self.#map_ident.debug_read(addr) }
-                } else {
-                    quote! { #idx => u16::try_from(addr).ok().and_then(|addr| self.#map_ident.debug_read(addr)) }
-                }
-            }
+        .filter_map(|(i, (_, _, read, write))| Some((i, read.as_ref()?, write.as_ref()?)))
+        .collect();
+    let mapped: Vec<&MapEntry> = map_entries
+        .iter()
+        .filter(|m| !explicit.iter().any(|(i, _, _)| *i == m.cpu_index))
+        .collect();
+
+    // Generate read() match arms
+    let read_arms: Vec<_> = explicit
+        .iter()
+        .map(|(idx, read_method, _)| {
+            // Explicit method: self.method(addr) — 16-bit addressed.
+            let read_ident = syn::Ident::new(read_method.value().as_str(), read_method.span());
+            quote! { #idx => u16::try_from(addr).ok().and_then(|addr| self.#read_ident(addr)) }
         })
+        .chain(mapped.iter().map(|map_field| {
+            // 32-bit maps take the address untruncated; 16-bit maps clamp to
+            // their space.
+            let idx = map_field.cpu_index;
+            let map_ident = &map_field.field_ident;
+            if map_field.is_32 {
+                quote! { #idx => self.#map_ident.debug_read(addr) }
+            } else {
+                quote! { #idx => u16::try_from(addr).ok().and_then(|addr| self.#map_ident.debug_read(addr)) }
+            }
+        }))
         .collect();
 
     // Generate write() match arms
-    let write_arms: Vec<_> = cpu_entries
+    let write_arms: Vec<_> = explicit
         .iter()
-        .enumerate()
-        .map(|(i, (_, _, _, write_method))| {
-            let idx = i;
-            if let Some(write_method) = write_method {
-                // Explicit method: self.method(addr, data) — 16-bit addressed.
-                let write_ident =
-                    syn::Ident::new(write_method.value().as_str(), write_method.span());
-                quote! { #idx => { if let Ok(addr) = u16::try_from(addr) { self.#write_ident(addr, data); } } }
-            } else {
-                // Auto-route through matching #[debug_map(cpu = N)].
-                let map_field = map_entries
-                    .iter()
-                    .find(|m| m.cpu_index == i)
-                    .unwrap_or_else(|| {
-                        panic!(
-                            "debug_cpu at index {i} has no write method and no matching #[debug_map(cpu = {i})]"
-                        )
-                    });
-                let map_ident = &map_field.field_ident;
-                if map_field.is_32 {
-                    quote! { #idx => self.#map_ident.debug_write(addr, data) }
-                } else {
-                    quote! { #idx => { if let Ok(addr) = u16::try_from(addr) { self.#map_ident.debug_write(addr, data); } } }
-                }
-            }
+        .map(|(idx, _, write_method)| {
+            // Explicit method: self.method(addr, data) — 16-bit addressed.
+            let write_ident = syn::Ident::new(write_method.value().as_str(), write_method.span());
+            quote! { #idx => { if let Ok(addr) = u16::try_from(addr) { self.#write_ident(addr, data); } } }
         })
+        .chain(mapped.iter().map(|map_field| {
+            let idx = map_field.cpu_index;
+            let map_ident = &map_field.field_ident;
+            if map_field.is_32 {
+                quote! { #idx => self.#map_ident.debug_write(addr, data) }
+            } else {
+                quote! { #idx => { if let Ok(addr) = u16::try_from(addr) { self.#map_ident.debug_write(addr, data); } } }
+            }
+        }))
         .collect();
 
     // Generate poke() match arms — a *debugger* write that records a Frontend
     // trace event. Mirrors write(), but the map path routes to `poke` (tagged)
     // instead of `debug_write` (untagged). No board uses explicit write methods
     // today, so that branch just falls back to the (untagged) method.
-    let poke_arms: Vec<_> = cpu_entries
+    let poke_arms: Vec<_> = explicit
         .iter()
-        .enumerate()
-        .map(|(i, (_, _, _, write_method))| {
-            let idx = i;
-            if let Some(write_method) = write_method {
-                let write_ident =
-                    syn::Ident::new(write_method.value().as_str(), write_method.span());
-                quote! { #idx => { if let Ok(addr) = u16::try_from(addr) { self.#write_ident(addr, data); } } }
-            } else {
-                let map_field = map_entries
-                    .iter()
-                    .find(|m| m.cpu_index == i)
-                    .unwrap_or_else(|| {
-                        panic!(
-                            "debug_cpu at index {i} has no write method and no matching #[debug_map(cpu = {i})]"
-                        )
-                    });
-                let map_ident = &map_field.field_ident;
-                if map_field.is_32 {
-                    quote! { #idx => self.#map_ident.poke(addr, data) }
-                } else {
-                    quote! { #idx => { if let Ok(addr) = u16::try_from(addr) { self.#map_ident.poke(addr, data); } } }
-                }
-            }
+        .map(|(idx, _, write_method)| {
+            let write_ident = syn::Ident::new(write_method.value().as_str(), write_method.span());
+            quote! { #idx => { if let Ok(addr) = u16::try_from(addr) { self.#write_ident(addr, data); } } }
         })
+        .chain(mapped.iter().map(|map_field| {
+            let idx = map_field.cpu_index;
+            let map_ident = &map_field.field_ident;
+            if map_field.is_32 {
+                quote! { #idx => self.#map_ident.poke(addr, data) }
+            } else {
+                quote! { #idx => { if let Ok(addr) = u16::try_from(addr) { self.#map_ident.poke(addr, data); } } }
+            }
+        }))
         .collect();
 
     // Generate write_device_register() match arms (only #[debug_device] fields)
@@ -228,8 +236,94 @@ pub fn derive_bus_debug(input: TokenStream) -> TokenStream {
                 }
             });
 
-    // Generate watchpoint methods (only when #[debug_map] fields exist)
-    let watchpoint_methods = if !map_entries.is_empty() {
+    // Fall-through arms. With a `#[debug_bus]` field, anything this struct does
+    // not answer for itself is forwarded to the nested bus; device indices are
+    // rebased past the local entries so `devices()` order stays the index space.
+    let local_device_count = device_entries.len();
+    let (
+        read_fallback,
+        write_fallback,
+        poke_fallback,
+        device_write_fallback,
+        device_reset_fallback,
+    ) = match &bus_field {
+        Some(bus) => (
+            quote! { _ => phosphor_core::core::debug::BusDebug::read(&self.#bus, cpu_index, addr) },
+            quote! { _ => phosphor_core::core::debug::BusDebug::write(&mut self.#bus, cpu_index, addr, data) },
+            quote! { _ => phosphor_core::core::debug::BusDebug::poke(&mut self.#bus, cpu_index, addr, data) },
+            quote! {
+                i if i >= #local_device_count => phosphor_core::core::debug::BusDebug::write_device_register(
+                    &mut self.#bus, i - #local_device_count, offset, data
+                ),
+                _ => {}
+            },
+            quote! {
+                i if i >= #local_device_count => phosphor_core::core::debug::BusDebug::reset_device(
+                    &mut self.#bus, i - #local_device_count
+                ),
+                _ => {}
+            },
+        ),
+        None => (
+            quote! { _ => None },
+            quote! { _ => {} },
+            quote! { _ => {} },
+            quote! { _ => {} },
+            quote! { _ => {} },
+        ),
+    };
+
+    // devices()/cpus(): local entries first, then the nested bus's.
+    let (devices_tail, cpus_tail) = match &bus_field {
+        Some(bus) => (
+            quote! { items.extend(phosphor_core::core::debug::BusDebug::devices(&self.#bus)); },
+            quote! { items.extend(phosphor_core::core::debug::BusDebug::cpus(&self.#bus)); },
+        ),
+        None => (quote! {}, quote! {}),
+    };
+
+    // Generate watchpoint methods (needed when this struct owns maps, or when a
+    // nested `#[debug_bus]` owns them on its behalf)
+    let watchpoint_methods = if !map_entries.is_empty() || bus_field.is_some() {
+        // Nested-bus fall-throughs for the address-space-shaped methods.
+        let (
+            peek_fallback,
+            take_hit_tail,
+            set_fallback,
+            set_cond_fallback,
+            clear_fallback,
+            clear_all_tail,
+            memory_map_fallback,
+        ) = match &bus_field {
+            Some(bus) => (
+                quote! { _ => phosphor_core::core::debug::BusDebug::peek(&self.#bus, cpu_index, addr) },
+                quote! { .or_else(|| phosphor_core::core::debug::BusDebug::take_watchpoint_hit(&mut self.#bus)) },
+                quote! { _ => phosphor_core::core::debug::BusDebug::set_watchpoint(&mut self.#bus, cpu_index, addr, kind) },
+                quote! { _ => phosphor_core::core::debug::BusDebug::set_watchpoint_cond(&mut self.#bus, cpu_index, addr, kind, condition) },
+                quote! { _ => phosphor_core::core::debug::BusDebug::clear_watchpoint(&mut self.#bus, cpu_index, addr, kind) },
+                quote! { phosphor_core::core::debug::BusDebug::clear_all_watchpoints(&mut self.#bus); },
+                quote! { _ => phosphor_core::core::debug::BusDebug::memory_map(&self.#bus, cpu_index) },
+            ),
+            None => (
+                // No nested bus: fall back to the read()-based default semantics.
+                quote! {
+                    _ => match self.read(cpu_index, addr) {
+                        Some(value) => phosphor_core::core::DebugRead::Backed {
+                            value: value as u32,
+                            width: 1,
+                            region_id: 0,
+                        },
+                        None => phosphor_core::core::DebugRead::Unmapped,
+                    }
+                },
+                quote! {},
+                quote! { _ => {} },
+                quote! { _ => {} },
+                quote! { _ => {} },
+                quote! {},
+                quote! { _ => None },
+            ),
+        };
         // take_watchpoint_hit: chain .or_else() across all maps (declaration order)
         let take_hit_chain = map_entries.iter().map(|entry| {
             let ident = &entry.field_ident;
@@ -285,14 +379,10 @@ pub fn derive_bus_debug(input: TokenStream) -> TokenStream {
                 quote! { #idx => Some(&self.#ident) }
             })
             .collect();
-        let memory_map_body = if map_arms.is_empty() {
-            quote! { let _ = cpu_index; None }
-        } else {
-            quote! {
-                match cpu_index {
-                    #(#map_arms,)*
-                    _ => None,
-                }
+        let memory_map_body = quote! {
+            match cpu_index {
+                #(#map_arms,)*
+                #memory_map_fallback,
             }
         };
 
@@ -318,44 +408,38 @@ pub fn derive_bus_debug(input: TokenStream) -> TokenStream {
             fn peek(&self, cpu_index: usize, addr: u32) -> phosphor_core::core::DebugRead {
                 match cpu_index {
                     #(#peek_arms,)*
-                    _ => match self.read(cpu_index, addr) {
-                        Some(value) => phosphor_core::core::DebugRead::Backed {
-                            value: value as u32,
-                            width: 1,
-                            region_id: 0,
-                        },
-                        None => phosphor_core::core::DebugRead::Unmapped,
-                    },
+                    #peek_fallback,
                 }
             }
 
             fn take_watchpoint_hit(&mut self) -> Option<phosphor_core::core::WatchpointHit> {
-                None #(#take_hit_chain)*
+                None #(#take_hit_chain)* #take_hit_tail
             }
 
             fn set_watchpoint(&mut self, cpu_index: usize, addr: u32, kind: phosphor_core::core::WatchpointKind) {
                 match cpu_index {
                     #(#set_arms,)*
-                    _ => {}
+                    #set_fallback,
                 }
             }
 
             fn set_watchpoint_cond(&mut self, cpu_index: usize, addr: u32, kind: phosphor_core::core::WatchpointKind, condition: phosphor_core::core::WatchpointCondition) {
                 match cpu_index {
                     #(#set_cond_arms,)*
-                    _ => {}
+                    #set_cond_fallback,
                 }
             }
 
             fn clear_watchpoint(&mut self, cpu_index: usize, addr: u32, kind: phosphor_core::core::WatchpointKind) {
                 match cpu_index {
                     #(#clear_arms,)*
-                    _ => {}
+                    #clear_fallback,
                 }
             }
 
             fn clear_all_watchpoints(&mut self) {
                 #(#clear_all_calls)*
+                #clear_all_tail
             }
 
             fn memory_map(&self, cpu_index: usize) -> Option<&phosphor_core::core::AddressSpace16> {
@@ -369,11 +453,19 @@ pub fn derive_bus_debug(input: TokenStream) -> TokenStream {
     let expanded = quote! {
         impl phosphor_core::core::debug::BusDebug for #struct_name {
             fn devices(&self) -> Vec<(&str, &dyn phosphor_core::core::debug::Debuggable)> {
-                vec![#(#device_items),*]
+                #[allow(unused_mut)]
+                let mut items: Vec<(&str, &dyn phosphor_core::core::debug::Debuggable)> =
+                    vec![#(#device_items),*];
+                #devices_tail
+                items
             }
 
             fn cpus(&self) -> Vec<(&str, &dyn phosphor_core::core::debug::DebugCpu)> {
-                vec![#(#cpu_items),*]
+                #[allow(unused_mut)]
+                let mut items: Vec<(&str, &dyn phosphor_core::core::debug::DebugCpu)> =
+                    vec![#(#cpu_items),*];
+                #cpus_tail
+                items
             }
 
             fn read(&self, cpu_index: usize, addr: u32) -> Option<u8> {
@@ -381,35 +473,35 @@ pub fn derive_bus_debug(input: TokenStream) -> TokenStream {
                 // clamp to their space, 32-bit maps take the address whole.
                 match cpu_index {
                     #(#read_arms,)*
-                    _ => None,
+                    #read_fallback,
                 }
             }
 
             fn write(&mut self, cpu_index: usize, addr: u32, data: u8) {
                 match cpu_index {
                     #(#write_arms,)*
-                    _ => {}
+                    #write_fallback,
                 }
             }
 
             fn poke(&mut self, cpu_index: usize, addr: u32, data: u8) {
                 match cpu_index {
                     #(#poke_arms,)*
-                    _ => {}
+                    #poke_fallback,
                 }
             }
 
             fn write_device_register(&mut self, device_index: usize, offset: u16, data: u8) {
                 match device_index {
                     #(#device_write_arms,)*
-                    _ => {}
+                    #device_write_fallback
                 }
             }
 
             fn reset_device(&mut self, device_index: usize) {
                 match device_index {
                     #(#device_reset_arms,)*
-                    _ => {}
+                    #device_reset_fallback
                 }
             }
 
