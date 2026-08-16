@@ -21,7 +21,6 @@
 //! Konami board; its port C is the "The End"/Scramble protection (a PAL whose
 //! result the boot self-test polls — see [`ScrambleBoard::protection_w`]).
 
-use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::debug_trace::DebugTraceBuffer;
 use phosphor_core::core::machine::{
@@ -31,7 +30,6 @@ use phosphor_core::core::machine::{
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::{AccessKind, AddressSpace16};
 use phosphor_core::core::{Bus, BusMaster, TimingConfig};
-use phosphor_core::cpu::state::Z80State;
 use phosphor_core::cpu::z80::Z80;
 use phosphor_core::cpu::{Cpu, CpuStateTrait};
 use phosphor_core::device::{I8255, KonamiSound};
@@ -129,12 +127,28 @@ impl Hw {
 // ScrambleBoard
 // ---------------------------------------------------------------------------
 
+/// One CPU cycle: the video/NMI work for this clock, the Z80, then the sound
+/// board on its Bresenham divider.
+///
+/// The CPU lives on the machine and the board *is* the bus, so this takes them
+/// as separate borrows and dispatches at a concrete type.
+#[inline]
+pub fn tick(cpu: &mut Z80, board: &mut ScrambleBoard) {
+    board.begin_cycle();
+    cpu.execute_cycle(board, BusMaster::Cpu(0));
+    board.end_cycle();
+}
+
+/// Run one frame's worth of CPU cycles.
+pub fn run_frame(cpu: &mut Z80, board: &mut ScrambleBoard) {
+    for _ in 0..TIMING.cycles_per_frame() {
+        tick(cpu, board);
+    }
+}
+
 /// Scramble hardware base: main Z80 + Galaxian-derived video + Konami sound.
 #[derive(BusDebug, DebugTrace)]
 pub struct ScrambleBoard {
-    #[debug_cpu("Z80")]
-    pub(crate) cpu: Z80,
-
     #[debug_map(cpu = 0)]
     pub(crate) map: AddressSpace16,
 
@@ -188,7 +202,6 @@ impl ScrambleBoard {
             KonamiSound::new(2)
         };
         Self {
-            cpu: Z80::new(),
             map: Self::build_map(hw),
             video,
             sound,
@@ -291,9 +304,6 @@ impl ScrambleBoard {
         self.sound.load_rom(data);
     }
 
-    pub fn get_cpu_state(&self) -> Z80State {
-        self.cpu.snapshot()
-    }
     pub fn clock(&self) -> u64 {
         self.clock
     }
@@ -302,7 +312,9 @@ impl ScrambleBoard {
     // Core tick
     // -----------------------------------------------------------------------
 
-    pub fn tick(&mut self, bus: &mut dyn Bus<Address = u16, Data = u8>) {
+    /// Board work that leads a CPU cycle: the per-scanline render and the
+    /// VBLANK NMI edge.
+    fn begin_cycle(&mut self) {
         let frame_cycle = self.clock % TIMING.cycles_per_frame();
 
         if frame_cycle == 0 {
@@ -324,9 +336,11 @@ impl ScrambleBoard {
         if frame_cycle == 0 && self.clock > 0 {
             self.vblank_nmi_pending = false;
         }
+    }
 
-        self.cpu.execute_cycle(bus, BusMaster::Cpu(0));
-
+    /// Board work after the CPU's cycle: the sound board, the clock, and the
+    /// watchdog counter.
+    fn end_cycle(&mut self) {
         // Tick the slower sound board in proportion (Bresenham).
         self.sound_acc += SOUND_CLOCK_HZ;
         while self.sound_acc >= TIMING.cpu_clock_hz {
@@ -338,7 +352,9 @@ impl ScrambleBoard {
         self.watchdog_counter += 1;
     }
 
-    pub fn check_interrupts(&self, target: BusMaster) -> InterruptState {
+    /// The interrupt lines this board drives. Named to avoid shadowing
+    /// [`Bus::check_interrupts`], which the board also implements.
+    pub fn interrupt_state(&self, target: BusMaster) -> InterruptState {
         let mut state = InterruptState::default();
         if let BusMaster::Cpu(0) = target {
             state.nmi = self.vblank_nmi_pending && self.nmi_enabled;
@@ -392,8 +408,10 @@ impl ScrambleBoard {
         self.map.region_data_mut(Region::ObjRam).fill(0);
     }
 
-    pub fn debug_tick_boundaries(&self) -> u32 {
-        u32::from(self.cpu.at_instruction_boundary())
+    /// Whether the CPU is at an instruction boundary. It lives on the machine,
+    /// which passes it back in.
+    pub fn instruction_boundaries(cpu: &Z80) -> u32 {
+        u32::from(cpu.at_instruction_boundary())
     }
 
     // -----------------------------------------------------------------------
@@ -634,7 +652,6 @@ impl ScrambleBoard {
 
 impl Saveable for ScrambleBoard {
     fn save_state(&self, w: &mut StateWriter) {
-        self.cpu.save_state(w);
         w.write_bytes(self.map.region_data(Region::Ram));
         w.write_bytes(self.map.region_data(Region::VideoRam));
         w.write_bytes(self.map.region_data(Region::ObjRam));
@@ -653,7 +670,6 @@ impl Saveable for ScrambleBoard {
     }
 
     fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
-        self.cpu.load_state(r)?;
         r.read_bytes_into(self.map.region_data_mut(Region::Ram))?;
         r.read_bytes_into(self.map.region_data_mut(Region::VideoRam))?;
         r.read_bytes_into(self.map.region_data_mut(Region::ObjRam))?;
@@ -950,8 +966,14 @@ pub const SCRAMBLE_CONTROLS: &[InputControl] = &[
 // ---------------------------------------------------------------------------
 
 /// Scramble (Konami, 1981).
-#[derive(phosphor_macros::Saveable)]
+///
+/// The Z80 sits beside the board rather than inside it, so each cycle
+/// dispatches at the concrete [`ScrambleBoard`] -- which *is* the bus.
+#[derive(phosphor_macros::Saveable, BusDebug)]
 pub struct ScrambleSystem {
+    #[debug_cpu("Z80")]
+    pub(crate) cpu: Z80,
+    #[debug_bus]
     pub board: ScrambleBoard,
 }
 
@@ -961,7 +983,10 @@ impl ScrambleSystem {
         // Apply factory-default DIPs (active-low: clear the configured bits).
         board.in1 &= !SC_DIP1_MASK;
         board.in2 &= !SC_DIP2_MASK;
-        Self { board }
+        Self {
+            cpu: Z80::new(),
+            board,
+        }
     }
 
     pub fn load_rom_set(&mut self, rom_set: &RomSet) -> Result<(), RomLoadError> {
@@ -974,6 +999,28 @@ impl ScrambleSystem {
             .load_color_prom(&SCRAMBLE_COLOR_PROM.load(rom_set)?);
         Ok(())
     }
+
+    /// Snapshot of the Z80's registers, for tests and the debugger.
+    pub fn get_cpu_state(&self) -> phosphor_core::cpu::state::Z80State {
+        self.cpu.snapshot()
+    }
+
+    /// Advance one CPU cycle, returning the instruction-boundary mask.
+    pub fn step_cycle(&mut self) -> u32 {
+        tick(&mut self.cpu, &mut self.board);
+        ScrambleBoard::instruction_boundaries(&self.cpu)
+    }
+
+    /// Read the CPU-facing bus, side effects and all. Distinct from the
+    /// debugger's `BusDebug::peek`/`poke`, which avoid side effects.
+    pub fn bus_read(&mut self, master: BusMaster, addr: u16) -> u8 {
+        self.board.read(master, addr)
+    }
+
+    /// Write the CPU-facing bus, side effects and all. See [`Self::bus_read`].
+    pub fn bus_write(&mut self, master: BusMaster, addr: u16, data: u8) {
+        self.board.write(master, addr, data);
+    }
 }
 
 impl Default for ScrambleSystem {
@@ -982,14 +1029,16 @@ impl Default for ScrambleSystem {
     }
 }
 
-impl Bus for ScrambleSystem {
+// The board is the bus. Scramble and Super Cobra differ only in the memory
+// map the board is built with, so one impl serves both.
+impl Bus for ScrambleBoard {
     type Address = u16;
     type Data = u8;
     fn read(&mut self, _m: BusMaster, addr: u16) -> u8 {
-        self.board.bus_read_common(addr)
+        self.bus_read_common(addr)
     }
     fn write(&mut self, _m: BusMaster, addr: u16, data: u8) {
-        self.board.bus_write_common(addr, data);
+        self.bus_write_common(addr, data);
     }
     fn io_read(&mut self, _m: BusMaster, _addr: u16) -> u8 {
         0xFF
@@ -999,11 +1048,11 @@ impl Bus for ScrambleSystem {
         false
     }
     fn check_interrupts(&mut self, target: BusMaster) -> InterruptState {
-        self.board.check_interrupts(target)
+        self.interrupt_state(target)
     }
 }
 
-crate::impl_board_delegation!(ScrambleSystem, board, TIMING, orientation);
+crate::impl_board_delegation!(ScrambleSystem, board, TIMING, orientation, split_cpu);
 
 impl MachineCore for ScrambleSystem {
     crate::machine_core_metadata!("scramble", TIMING);
@@ -1026,18 +1075,12 @@ impl MachineCore for ScrambleSystem {
     }
 
     fn run_frame(&mut self) {
-        bus_split!(self, bus => {
-            for _ in 0..TIMING.cycles_per_frame() {
-                self.board.tick(bus);
-            }
-        });
+        run_frame(&mut self.cpu, &mut self.board);
     }
 
     fn reset(&mut self) {
         self.board.reset_board();
-        bus_split!(self, bus => {
-            self.board.cpu.reset(bus, BusMaster::Cpu(0));
-        });
+        self.cpu.reset(&mut self.board, BusMaster::Cpu(0));
     }
 }
 
@@ -1255,8 +1298,13 @@ pub(crate) const SCOBRA_DIP_BANKS: &[DipSwitchBank] = &[
 ];
 
 /// Super Cobra (Konami, 1981) on the Scramble board with the `scobra_map`.
-#[derive(phosphor_macros::Saveable)]
+///
+/// Same split as [`ScrambleSystem`]: the Z80 sits beside the board.
+#[derive(phosphor_macros::Saveable, BusDebug)]
 pub struct ScobraSystem {
+    #[debug_cpu("Z80")]
+    pub(crate) cpu: Z80,
+    #[debug_bus]
     pub board: ScrambleBoard,
 }
 
@@ -1267,7 +1315,10 @@ impl ScobraSystem {
         // IN2 = 1C/1C + upright (0x02).
         board.in1 = (board.in1 & !SCB_DIP1_MASK) | 0x01;
         board.in2 = (board.in2 & !SCB_DIP2_MASK) | 0x02;
-        Self { board }
+        Self {
+            cpu: Z80::new(),
+            board,
+        }
     }
 
     pub fn load_rom_set(&mut self, rom_set: &RomSet) -> Result<(), RomLoadError> {
@@ -1279,6 +1330,28 @@ impl ScobraSystem {
             .load_color_prom(&SCOBRA_COLOR_PROM.load(rom_set)?);
         Ok(())
     }
+
+    /// Snapshot of the Z80's registers, for tests and the debugger.
+    pub fn get_cpu_state(&self) -> phosphor_core::cpu::state::Z80State {
+        self.cpu.snapshot()
+    }
+
+    /// Advance one CPU cycle, returning the instruction-boundary mask.
+    pub fn step_cycle(&mut self) -> u32 {
+        tick(&mut self.cpu, &mut self.board);
+        ScrambleBoard::instruction_boundaries(&self.cpu)
+    }
+
+    /// Read the CPU-facing bus, side effects and all. Distinct from the
+    /// debugger's `BusDebug::peek`/`poke`, which avoid side effects.
+    pub fn bus_read(&mut self, master: BusMaster, addr: u16) -> u8 {
+        self.board.read(master, addr)
+    }
+
+    /// Write the CPU-facing bus, side effects and all. See [`Self::bus_read`].
+    pub fn bus_write(&mut self, master: BusMaster, addr: u16, data: u8) {
+        self.board.write(master, addr, data);
+    }
 }
 
 impl Default for ScobraSystem {
@@ -1287,28 +1360,7 @@ impl Default for ScobraSystem {
     }
 }
 
-impl Bus for ScobraSystem {
-    type Address = u16;
-    type Data = u8;
-    fn read(&mut self, _m: BusMaster, addr: u16) -> u8 {
-        self.board.bus_read_common(addr)
-    }
-    fn write(&mut self, _m: BusMaster, addr: u16, data: u8) {
-        self.board.bus_write_common(addr, data);
-    }
-    fn io_read(&mut self, _m: BusMaster, _addr: u16) -> u8 {
-        0xFF
-    }
-    fn io_write(&mut self, _m: BusMaster, _addr: u16, _data: u8) {}
-    fn is_halted_for(&self, _m: BusMaster) -> bool {
-        false
-    }
-    fn check_interrupts(&mut self, target: BusMaster) -> InterruptState {
-        self.board.check_interrupts(target)
-    }
-}
-
-crate::impl_board_delegation!(ScobraSystem, board, TIMING, orientation);
+crate::impl_board_delegation!(ScobraSystem, board, TIMING, orientation, split_cpu);
 
 impl MachineCore for ScobraSystem {
     crate::machine_core_metadata!("scobra", TIMING);
@@ -1331,18 +1383,12 @@ impl MachineCore for ScobraSystem {
     }
 
     fn run_frame(&mut self) {
-        bus_split!(self, bus => {
-            for _ in 0..TIMING.cycles_per_frame() {
-                self.board.tick(bus);
-            }
-        });
+        run_frame(&mut self.cpu, &mut self.board);
     }
 
     fn reset(&mut self) {
         self.board.reset_board();
-        bus_split!(self, bus => {
-            self.board.cpu.reset(bus, BusMaster::Cpu(0));
-        });
+        self.cpu.reset(&mut self.board, BusMaster::Cpu(0));
     }
 }
 

@@ -16,7 +16,6 @@
 //! percussion (issues `.9`–`.10`).
 
 use phosphor_core::audio::AudioResampler;
-use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::debug_trace::DebugTraceBuffer;
 use phosphor_core::core::machine::{
@@ -374,13 +373,58 @@ fn congo_palette_rgb(palette_prom: &[u8]) -> [(u8, u8, u8); 512] {
 // CongoBongoBoard
 // ---------------------------------------------------------------------------
 
+/// One main-CPU cycle: the video/interrupt work for this clock, the main Z80,
+/// the sound Z80 on its fractional divider, and the audio chain.
+///
+/// The CPUs live on the machine and the board *is* the bus, so this takes them
+/// as separate borrows and dispatches at a concrete type.
+#[inline]
+pub fn tick(cpu: &mut Z80, sound_cpu: &mut Z80, board: &mut CongoBongoBoard) {
+    board.begin_cycle(cpu);
+    cpu.execute_cycle(board, BusMaster::Cpu(0));
+    tick_sound(sound_cpu, board);
+    board.clock += 1;
+}
+
+/// Advance the sound CPU, its periodic IRQ, the two PSGs, and the audio
+/// resampler by one main-CPU cycle's worth of time.
+fn tick_sound(sound_cpu: &mut Z80, board: &mut CongoBongoBoard) {
+    // Sound Z80 runs at 4 MHz against the 3.041 MHz main loop, so it may take
+    // more than one step per main cycle (a fractional Bresenham accumulator).
+    board.sound_cycle_accum += SOUND_CLOCK;
+    while board.sound_cycle_accum >= TIMING.cpu_clock_hz {
+        board.sound_cycle_accum -= TIMING.cpu_clock_hz;
+
+        // Periodic ~244 Hz IRQ (irq0_line_hold).
+        board.sound_irq_counter += 1;
+        if board.sound_irq_counter >= SOUND_IRQ_PERIOD {
+            board.sound_irq_counter = 0;
+            board.sound_irq_pending = true;
+        }
+
+        // HOLD_LINE auto-clear: the line drops when the CPU acknowledges the
+        // interrupt, which it does at an instruction boundary while IFF1 is
+        // set — observed here as IFF1 going 1→0 with the IRQ pending. (A DI
+        // with the IRQ pending could also clear it a cycle early; harmless.)
+        let iff1_before = sound_cpu.iff1;
+        sound_cpu.execute_cycle(board, BusMaster::Cpu(1));
+        if board.sound_irq_pending && iff1_before && !sound_cpu.iff1 {
+            board.sound_irq_pending = false;
+        }
+    }
+
+    board.tick_audio();
+}
+
+/// Run one frame's worth of main-CPU cycles.
+pub fn run_frame(cpu: &mut Z80, sound_cpu: &mut Z80, board: &mut CongoBongoBoard) {
+    for _ in 0..TIMING.cycles_per_frame() {
+        tick(cpu, sound_cpu, board);
+    }
+}
+
 #[derive(BusDebug, DebugTrace)]
 pub struct CongoBongoBoard {
-    #[debug_cpu("Z80 Main")]
-    pub(crate) cpu: Z80,
-    #[debug_cpu("Z80 Sound")]
-    pub(crate) sound_cpu: Z80,
-
     #[debug_map(cpu = 0)]
     pub(crate) main_map: AddressSpace16,
     #[debug_map(cpu = 1)]
@@ -475,8 +519,6 @@ impl Default for CongoBongoBoard {
 impl CongoBongoBoard {
     pub fn new() -> Self {
         Self {
-            cpu: Z80::new(),
-            sound_cpu: Z80::new(),
             main_map: Self::build_main_map(),
             sound_map: Self::build_sound_map(),
             tx_rom: [0; 0x1000],
@@ -823,9 +865,9 @@ impl CongoBongoBoard {
     // Core tick
     // -----------------------------------------------------------------------
 
-    /// Execute one main-CPU clock cycle (≈3.041 MHz), advancing the sound CPU,
-    /// PSGs, and audio resampler alongside it.
-    pub fn tick(&mut self, bus: &mut dyn Bus<Address = u16, Data = u8>) {
+    /// Board work that leads a main-CPU cycle: the per-scanline render, the
+    /// VBlank IRQ edge, and the debugger's access-attribution latch.
+    fn begin_cycle(&mut self, cpu: &Z80) {
         let frame_cycle = self.clock % TIMING.cycles_per_frame();
 
         // Per-scanline rendering hook (layers added by issues .5/.6/.7).
@@ -845,47 +887,13 @@ impl CongoBongoBoard {
         }
 
         if self.main_map.has_any_watchpoints() || self.debug_trace.enabled() {
-            let pc = self
-                .cpu
-                .at_instruction_boundary()
-                .then_some(self.cpu.pc as u32);
+            let pc = cpu.at_instruction_boundary().then_some(cpu.pc as u32);
             self.main_map.latch_access_context(self.clock, pc);
         }
-
-        self.cpu.execute_cycle(bus, BusMaster::Cpu(0));
-
-        self.tick_sound(bus);
-
-        self.clock += 1;
     }
 
-    /// Advance the sound CPU, its periodic IRQ, the two PSGs, and the audio
-    /// resampler by one main-CPU cycle's worth of time.
-    fn tick_sound(&mut self, bus: &mut dyn Bus<Address = u16, Data = u8>) {
-        // Sound Z80 runs at 4 MHz against the 3.041 MHz main loop, so it may take
-        // more than one step per main cycle (a fractional Bresenham accumulator).
-        self.sound_cycle_accum += SOUND_CLOCK;
-        while self.sound_cycle_accum >= TIMING.cpu_clock_hz {
-            self.sound_cycle_accum -= TIMING.cpu_clock_hz;
-
-            // Periodic ~244 Hz IRQ (irq0_line_hold).
-            self.sound_irq_counter += 1;
-            if self.sound_irq_counter >= SOUND_IRQ_PERIOD {
-                self.sound_irq_counter = 0;
-                self.sound_irq_pending = true;
-            }
-
-            // HOLD_LINE auto-clear: the line drops when the CPU acknowledges the
-            // interrupt, which it does at an instruction boundary while IFF1 is
-            // set — observed here as IFF1 going 1→0 with the IRQ pending. (A DI
-            // with the IRQ pending could also clear it a cycle early; harmless.)
-            let iff1_before = self.sound_cpu.iff1;
-            self.sound_cpu.execute_cycle(bus, BusMaster::Cpu(1));
-            if self.sound_irq_pending && iff1_before && !self.sound_cpu.iff1 {
-                self.sound_irq_pending = false;
-            }
-        }
-
+    /// Advance the two PSGs and the audio resampler by one main-CPU cycle.
+    fn tick_audio(&mut self) {
         // PSG generators run at chip_clock/16; sample the summed output each main
         // cycle, box-filter it to the audio rate, and feed each resulting sample
         // into the percussion circuit (which mixes PSGs + voices).
@@ -1058,7 +1066,9 @@ impl CongoBongoBoard {
         self.scanline_buffer.fill(0);
     }
 
-    pub fn check_interrupts(&self, target: BusMaster) -> InterruptState {
+    /// The interrupt lines this board drives, per CPU. Named to avoid shadowing
+    /// [`Bus::check_interrupts`], which the board also implements.
+    pub fn interrupt_state(&self, target: BusMaster) -> InterruptState {
         match target {
             BusMaster::Cpu(0) => InterruptState {
                 irq: self.vblank_irq_pending && self.int_enabled,
@@ -1072,22 +1082,16 @@ impl CongoBongoBoard {
         }
     }
 
-    pub fn debug_tick_boundaries(&self) -> u32 {
-        let mut result = 0;
-        if self.cpu.at_instruction_boundary() {
-            result |= 1;
-        }
-        if self.sound_cpu.at_instruction_boundary() {
-            result |= 2;
-        }
-        result
+    /// Bitmask of CPUs at instruction boundaries: bit 0 = main, bit 1 = sound.
+    /// The CPUs live on the machine, which passes them in.
+    pub fn instruction_boundaries(cpu: &Z80, sound_cpu: &Z80) -> u32 {
+        u32::from(cpu.at_instruction_boundary())
+            | (u32::from(sound_cpu.at_instruction_boundary()) << 1)
     }
 }
 
 impl Saveable for CongoBongoBoard {
     fn save_state(&self, w: &mut StateWriter) {
-        self.cpu.save_state(w);
-        self.sound_cpu.save_state(w);
         w.write_bytes(self.main_map.region_data(MainRegion::Ram));
         w.write_bytes(self.main_map.region_data(MainRegion::VideoRam));
         w.write_bytes(self.main_map.region_data(MainRegion::ColorRam));
@@ -1123,8 +1127,6 @@ impl Saveable for CongoBongoBoard {
     }
 
     fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
-        self.cpu.load_state(r)?;
-        self.sound_cpu.load_state(r)?;
         r.read_bytes_into(self.main_map.region_data_mut(MainRegion::Ram))?;
         r.read_bytes_into(self.main_map.region_data_mut(MainRegion::VideoRam))?;
         r.read_bytes_into(self.main_map.region_data_mut(MainRegion::ColorRam))?;
@@ -1166,8 +1168,16 @@ impl Saveable for CongoBongoBoard {
 // ---------------------------------------------------------------------------
 
 /// Sega Congo Bongo (1983).
-#[derive(Saveable)]
+///
+/// The two Z80s sit beside the board rather than inside it, so each cycle
+/// dispatches at the concrete [`CongoBongoBoard`] -- which *is* the bus.
+#[derive(Saveable, BusDebug)]
 pub struct CongoBongoSystem {
+    #[debug_cpu("Z80 Main")]
+    pub(crate) cpu: Z80,
+    #[debug_cpu("Z80 Sound")]
+    pub(crate) sound_cpu: Z80,
+    #[debug_bus]
     pub board: CongoBongoBoard,
 }
 
@@ -1180,6 +1190,8 @@ impl Default for CongoBongoSystem {
 impl CongoBongoSystem {
     pub fn new() -> Self {
         Self {
+            cpu: Z80::new(),
+            sound_cpu: Z80::new(),
             board: CongoBongoBoard::new(),
         }
     }
@@ -1217,6 +1229,25 @@ impl CongoBongoSystem {
         Ok(())
     }
 
+    /// Advance one main-CPU cycle, returning the instruction-boundary mask.
+    pub fn step_cycle(&mut self) -> u32 {
+        tick(&mut self.cpu, &mut self.sound_cpu, &mut self.board);
+        CongoBongoBoard::instruction_boundaries(&self.cpu, &self.sound_cpu)
+    }
+
+    /// Read the CPU-facing bus, side effects and all. Distinct from the
+    /// debugger's `BusDebug::peek`/`poke`, which avoid side effects.
+    pub fn bus_read(&mut self, master: BusMaster, addr: u16) -> u8 {
+        self.board.read(master, addr)
+    }
+
+    /// Write the CPU-facing bus, side effects and all. See [`Self::bus_read`].
+    pub fn bus_write(&mut self, master: BusMaster, addr: u16, data: u8) {
+        self.board.write(master, addr, data);
+    }
+}
+
+impl CongoBongoBoard {
     /// Canonicalize a 0xA000-0xBFFF access (video/color RAM + their 0x800/0x1000/
     /// 0x1800 mirrors) to the 0xA000-0xA7FF backing window.
     #[inline]
@@ -1225,7 +1256,8 @@ impl CongoBongoSystem {
     }
 }
 
-impl Bus for CongoBongoSystem {
+// The board is the bus: Congo Bongo is the only machine on it.
+impl Bus for CongoBongoBoard {
     type Address = u16;
     type Data = u8;
 
@@ -1233,28 +1265,28 @@ impl Bus for CongoBongoSystem {
         match master {
             BusMaster::Cpu(0) => {
                 let data = match addr {
-                    0x0000..=0x8FFF => self.board.main_map.read_backing(addr),
-                    0xA000..=0xBFFF => self.board.main_map.read_backing(Self::vram_addr(addr)),
+                    0x0000..=0x8FFF => self.main_map.read_backing(addr),
+                    0xA000..=0xBFFF => self.main_map.read_backing(Self::vram_addr(addr)),
                     0xC000..=0xDFFF => match addr & 0x3F {
-                        0x00 => self.board.in0,
-                        0x01 => self.board.in1,
-                        0x02 => self.board.dsw2,
-                        0x03 => self.board.dsw3,
-                        0x08 => self.board.read_sw100(),
+                        0x00 => self.in0,
+                        0x01 => self.in1,
+                        0x02 => self.dsw2,
+                        0x03 => self.dsw3,
+                        0x08 => self.read_sw100(),
                         _ => 0xFF,
                     },
                     _ => 0xFF,
                 };
-                self.board.main_map.watch_read(0, master, addr, data);
+                self.main_map.watch_read(0, master, addr, data);
                 data
             }
 
             // Sound CPU: program ROM, work RAM, and the i8255 PPI (the SN76489As
             // are write-only). The PSGs and PPI are heavily mirrored across 0x2000.
             BusMaster::Cpu(1) => match addr {
-                0x0000..=0x1FFF => self.board.sound_map.read_backing(addr),
-                0x4000..=0x4FFF => self.board.sound_map.read_backing(0x4000 | (addr & 0x07FF)),
-                0x8000..=0x9FFF => self.board.ppi.read(addr & 0x03),
+                0x0000..=0x1FFF => self.sound_map.read_backing(addr),
+                0x4000..=0x4FFF => self.sound_map.read_backing(0x4000 | (addr & 0x07FF)),
+                0x8000..=0x9FFF => self.ppi.read(addr & 0x03),
                 _ => 0xFF,
             },
 
@@ -1265,23 +1297,20 @@ impl Bus for CongoBongoSystem {
     fn write(&mut self, master: BusMaster, addr: u16, data: u8) {
         match master {
             BusMaster::Cpu(0) => {
-                self.board.main_map.watch_write(0, master, addr, data);
+                self.main_map.watch_write(0, master, addr, data);
                 match addr {
-                    0x8000..=0x8FFF => self.board.main_map.write_backing(addr, data),
-                    0xA000..=0xBFFF => self
-                        .board
-                        .main_map
-                        .write_backing(Self::vram_addr(addr), data),
+                    0x8000..=0x8FFF => self.main_map.write_backing(addr, data),
+                    0xA000..=0xBFFF => self.main_map.write_backing(Self::vram_addr(addr), data),
                     0xC000..=0xDFFF => match addr & 0x3F {
-                        0x18..=0x1F => self.board.write_latch1((addr & 0x07) as u8, data & 1 != 0),
-                        0x20..=0x27 => self.board.write_latch2((addr & 0x07) as u8, data & 1 != 0),
-                        0x28..=0x29 => self.board.bg_position[(addr & 0x01) as usize] = data,
-                        0x30..=0x33 => self.board.write_sprite_dma((addr & 0x03) as usize, data),
+                        0x18..=0x1F => self.write_latch1((addr & 0x07) as u8, data & 1 != 0),
+                        0x20..=0x27 => self.write_latch2((addr & 0x07) as u8, data & 1 != 0),
+                        0x28..=0x29 => self.bg_position[(addr & 0x01) as usize] = data,
+                        0x30..=0x33 => self.write_sprite_dma((addr & 0x03) as usize, data),
                         0x38..=0x3F => {
                             // Latch the sound command and drive it onto PPI port A
                             // (the sound CPU reads it there).
-                            self.board.sound_latch = data;
-                            self.board.ppi.set_port_a_input(data);
+                            self.sound_latch = data;
+                            self.ppi.set_port_a_input(data);
                         }
                         _ => {}
                     },
@@ -1291,17 +1320,14 @@ impl Bus for CongoBongoSystem {
             // Sound CPU: work RAM, SN76489A #1 (0x6000), i8255 PPI (0x8000), and
             // SN76489A #2 (0xA000), each mirrored across its 0x2000 block.
             BusMaster::Cpu(1) => match addr {
-                0x4000..=0x4FFF => self
-                    .board
-                    .sound_map
-                    .write_backing(0x4000 | (addr & 0x07FF), data),
-                0x6000..=0x7FFF => self.board.sn1.write(data),
+                0x4000..=0x4FFF => self.sound_map.write_backing(0x4000 | (addr & 0x07FF), data),
+                0x6000..=0x7FFF => self.sn1.write(data),
                 0x8000..=0x9FFF => {
-                    self.board.ppi.write(addr & 0x03, data);
+                    self.ppi.write(addr & 0x03, data);
                     // The PPI port B/C outputs drive the percussion triggers.
-                    self.board.sync_percussion();
+                    self.sync_percussion();
                 }
-                0xA000..=0xBFFF => self.board.sn2.write(data),
+                0xA000..=0xBFFF => self.sn2.write(data),
                 _ => {}
             },
             _ => {}
@@ -1313,7 +1339,7 @@ impl Bus for CongoBongoSystem {
     }
 
     fn check_interrupts(&mut self, target: BusMaster) -> InterruptState {
-        self.board.check_interrupts(target)
+        self.interrupt_state(target)
     }
 }
 
@@ -1321,7 +1347,8 @@ crate::impl_board_delegation!(
     CongoBongoSystem,
     board,
     crate::congo_bongo::TIMING,
-    orientation
+    orientation,
+    split_cpu
 );
 
 impl MachineCore for CongoBongoSystem {
@@ -1349,19 +1376,13 @@ impl MachineCore for CongoBongoSystem {
     }
 
     fn run_frame(&mut self) {
-        bus_split!(self, bus => {
-            for _ in 0..crate::congo_bongo::TIMING.cycles_per_frame() {
-                self.board.tick(bus);
-            }
-        });
+        run_frame(&mut self.cpu, &mut self.sound_cpu, &mut self.board);
     }
 
     fn reset(&mut self) {
         self.board.reset();
-        bus_split!(self, bus => {
-            self.board.cpu.reset(bus, BusMaster::Cpu(0));
-            self.board.sound_cpu.reset(bus, BusMaster::Cpu(1));
-        });
+        self.cpu.reset(&mut self.board, BusMaster::Cpu(0));
+        self.sound_cpu.reset(&mut self.board, BusMaster::Cpu(1));
     }
 }
 
@@ -1967,13 +1988,13 @@ mod tests {
         // four sprite bytes (Y, code, color, X).
         let desc = [0x03u8, 0xAA, 0xBB, 0xCC, 0xDD]; // slot 3 → sprite_ram[12..16]
         for (i, b) in desc.iter().enumerate() {
-            sys.write(BusMaster::Cpu(0), 0x8100 + i as u16, *b);
+            sys.bus_write(BusMaster::Cpu(0), 0x8100 + i as u16, *b);
         }
         // Program the DMA: source 0x8100, count 0 (one descriptor), then trigger.
-        sys.write(BusMaster::Cpu(0), 0xC030, 0x00);
-        sys.write(BusMaster::Cpu(0), 0xC031, 0x81);
-        sys.write(BusMaster::Cpu(0), 0xC032, 0x00);
-        sys.write(BusMaster::Cpu(0), 0xC033, 0x01); // go
+        sys.bus_write(BusMaster::Cpu(0), 0xC030, 0x00);
+        sys.bus_write(BusMaster::Cpu(0), 0xC031, 0x81);
+        sys.bus_write(BusMaster::Cpu(0), 0xC032, 0x00);
+        sys.bus_write(BusMaster::Cpu(0), 0xC033, 0x01); // go
 
         assert_eq!(&sys.board.sprite_ram[12..16], &[0xAA, 0xBB, 0xCC, 0xDD]);
     }
@@ -1993,23 +2014,23 @@ mod tests {
         let mut sys = CongoBongoSystem::new();
         // Main CPU writes the sound command (0xC038); the sound CPU reads it back
         // through PPI port A (configured as input by control word 0x90 at 0x8003).
-        sys.write(BusMaster::Cpu(0), 0xC038, 0x7e);
-        sys.write(BusMaster::Cpu(1), 0x8003, 0x90); // PPI: A in, B/C out
-        assert_eq!(sys.read(BusMaster::Cpu(1), 0x8000), 0x7e);
+        sys.bus_write(BusMaster::Cpu(0), 0xC038, 0x7e);
+        sys.bus_write(BusMaster::Cpu(1), 0x8003, 0x90); // PPI: A in, B/C out
+        assert_eq!(sys.bus_read(BusMaster::Cpu(1), 0x8000), 0x7e);
     }
 
     #[test]
     fn sound_writes_route_to_psgs_and_ppi() {
         let mut sys = CongoBongoSystem::new();
-        sys.write(BusMaster::Cpu(1), 0x8003, 0x90); // PPI mode
+        sys.bus_write(BusMaster::Cpu(1), 0x8003, 0x90); // PPI mode
         // Port B/C outputs (percussion lines) latch and read back.
-        sys.write(BusMaster::Cpu(1), 0x8001, 0x02); // port B
-        sys.write(BusMaster::Cpu(1), 0x8002, 0x0d); // port C
+        sys.bus_write(BusMaster::Cpu(1), 0x8001, 0x02); // port B
+        sys.bus_write(BusMaster::Cpu(1), 0x8002, 0x0d); // port C
         assert_eq!(sys.board.ppi.read_output_b(), 0x02);
         assert_eq!(sys.board.ppi.read_output_c(), 0x0d);
         // PSG #1 (0x6000) and #2 (0xA000) accept register writes (set a tone period).
-        sys.write(BusMaster::Cpu(1), 0x6000, 0x80 | 0x04); // sn1 tone0 low nibble
-        sys.write(BusMaster::Cpu(1), 0xA000, 0x80 | 0x04); // sn2 tone0 low nibble
+        sys.bus_write(BusMaster::Cpu(1), 0x6000, 0x80 | 0x04); // sn1 tone0 low nibble
+        sys.bus_write(BusMaster::Cpu(1), 0xA000, 0x80 | 0x04); // sn2 tone0 low nibble
         assert_eq!(sys.board.sn1.debug_registers()[0].value, 0x04);
         assert_eq!(sys.board.sn2.debug_registers()[0].value, 0x04);
     }
@@ -2023,7 +2044,7 @@ mod tests {
         // One frame is ~66k sound cycles ⇒ several 16384-cycle IRQ periods.
         let mut fired = false;
         for _ in 0..TIMING.cycles_per_frame() {
-            bus_split!(&mut sys, bus => { sys.board.tick(bus); });
+            sys.step_cycle();
             if sys.board.sound_irq_pending {
                 fired = true;
             }
@@ -2080,19 +2101,19 @@ mod tests {
         press(&mut sys, INPUT_P1_RIGHT, true);
         press(&mut sys, INPUT_P1_UP, true);
         press(&mut sys, INPUT_P1_BUTTON, true);
-        assert_eq!(sys.read(BusMaster::Cpu(0), 0xC000), 0b0001_0101);
+        assert_eq!(sys.bus_read(BusMaster::Cpu(0), 0xC000), 0b0001_0101);
 
         press(&mut sys, INPUT_P2_LEFT, true);
-        assert_eq!(sys.read(BusMaster::Cpu(0), 0xC001), 0b0000_0010);
+        assert_eq!(sys.bus_read(BusMaster::Cpu(0), 0xC001), 0b0000_0010);
 
         press(&mut sys, INPUT_P1_START, true);
         press(&mut sys, INPUT_P2_START, true);
         // SW100 start bits (2,3); no coins armed yet.
-        assert_eq!(sys.read(BusMaster::Cpu(0), 0xC008) & 0x0C, 0x0C);
+        assert_eq!(sys.bus_read(BusMaster::Cpu(0), 0xC008) & 0x0C, 0x0C);
 
         // Releasing clears the bit.
         press(&mut sys, INPUT_P1_RIGHT, false);
-        assert_eq!(sys.read(BusMaster::Cpu(0), 0xC000) & 0x01, 0);
+        assert_eq!(sys.bus_read(BusMaster::Cpu(0), 0xC000) & 0x01, 0);
     }
 
     #[test]
@@ -2100,34 +2121,34 @@ mod tests {
         let mut sys = CongoBongoSystem::new();
         // Not armed → coin ignored (SW100 bit5 stays low).
         press(&mut sys, INPUT_COIN1, true);
-        assert_eq!(sys.read(BusMaster::Cpu(0), 0xC008) & 0x20, 0);
+        assert_eq!(sys.bus_read(BusMaster::Cpu(0), 0xC008) & 0x20, 0);
 
         // Arm coin 1 (latch1 bit0 high), then insert → latches into SW100 bit5.
-        sys.write(BusMaster::Cpu(0), 0xC018, 0x01);
+        sys.bus_write(BusMaster::Cpu(0), 0xC018, 0x01);
         press(&mut sys, INPUT_COIN1, true);
         assert_eq!(
-            sys.read(BusMaster::Cpu(0), 0xC008) & 0x20,
+            sys.bus_read(BusMaster::Cpu(0), 0xC008) & 0x20,
             0x20,
             "coin latched"
         );
 
         // Acknowledge as the game does (0x0B73): pulse the coin's own enable line
         // low → the latch async-clears immediately, without touching bit 2.
-        sys.write(BusMaster::Cpu(0), 0xC018, 0x00);
+        sys.bus_write(BusMaster::Cpu(0), 0xC018, 0x00);
         assert_eq!(
-            sys.read(BusMaster::Cpu(0), 0xC008) & 0x20,
+            sys.bus_read(BusMaster::Cpu(0), 0xC008) & 0x20,
             0,
             "coin cleared"
         );
-        sys.write(BusMaster::Cpu(0), 0xC018, 0x01); // re-arm for the next coin
+        sys.bus_write(BusMaster::Cpu(0), 0xC018, 0x01); // re-arm for the next coin
     }
 
     #[test]
     fn dip_banks_valid_and_defaults() {
         crate::assert_dip_banks_valid(CONGO_DIP_BANKS, &[DSW2_DEFAULT, DSW3_DEFAULT]);
         let mut sys = CongoBongoSystem::new();
-        assert_eq!(sys.read(BusMaster::Cpu(0), 0xC002), DSW2_DEFAULT);
-        assert_eq!(sys.read(BusMaster::Cpu(0), 0xC003), DSW3_DEFAULT);
+        assert_eq!(sys.bus_read(BusMaster::Cpu(0), 0xC002), DSW2_DEFAULT);
+        assert_eq!(sys.bus_read(BusMaster::Cpu(0), 0xC003), DSW3_DEFAULT);
     }
 
     #[test]
@@ -2162,17 +2183,21 @@ mod tests {
     fn bus_decodes_ram_video_color() {
         let mut sys = CongoBongoSystem::new();
         for (addr, val) in [(0x8000u16, 0x11u8), (0xA000, 0x22), (0xA400, 0x33)] {
-            sys.write(BusMaster::Cpu(0), addr, val);
-            assert_eq!(sys.read(BusMaster::Cpu(0), addr), val, "addr {addr:#06x}");
+            sys.bus_write(BusMaster::Cpu(0), addr, val);
+            assert_eq!(
+                sys.bus_read(BusMaster::Cpu(0), addr),
+                val,
+                "addr {addr:#06x}"
+            );
         }
         // Video/color RAM mirrors (+0x800) alias the same backing store.
-        sys.write(BusMaster::Cpu(0), 0xA800, 0x44);
-        assert_eq!(sys.read(BusMaster::Cpu(0), 0xA000), 0x44);
+        sys.bus_write(BusMaster::Cpu(0), 0xA800, 0x44);
+        assert_eq!(sys.bus_read(BusMaster::Cpu(0), 0xA000), 0x44);
 
         // Program ROM is read-only: writes are ignored.
         sys.board.main_map.region_data_mut(MainRegion::Rom)[0] = 0xAB;
-        sys.write(BusMaster::Cpu(0), 0x0000, 0x00);
-        assert_eq!(sys.read(BusMaster::Cpu(0), 0x0000), 0xAB);
+        sys.bus_write(BusMaster::Cpu(0), 0x0000, 0x00);
+        assert_eq!(sys.bus_read(BusMaster::Cpu(0), 0x0000), 0xAB);
     }
 
     #[test]
@@ -2183,28 +2208,28 @@ mod tests {
         sys.board.dsw2 = 0x3C;
         sys.board.dsw3 = 0x12;
         sys.board.in2 = 0x77;
-        assert_eq!(sys.read(BusMaster::Cpu(0), 0xC000), 0x55);
-        assert_eq!(sys.read(BusMaster::Cpu(0), 0xC001), 0xAA);
-        assert_eq!(sys.read(BusMaster::Cpu(0), 0xC002), 0x3C);
-        assert_eq!(sys.read(BusMaster::Cpu(0), 0xC003), 0x12);
-        assert_eq!(sys.read(BusMaster::Cpu(0), 0xC008), 0x77);
+        assert_eq!(sys.bus_read(BusMaster::Cpu(0), 0xC000), 0x55);
+        assert_eq!(sys.bus_read(BusMaster::Cpu(0), 0xC001), 0xAA);
+        assert_eq!(sys.bus_read(BusMaster::Cpu(0), 0xC002), 0x3C);
+        assert_eq!(sys.bus_read(BusMaster::Cpu(0), 0xC003), 0x12);
+        assert_eq!(sys.bus_read(BusMaster::Cpu(0), 0xC008), 0x77);
 
         // LS259: INTON (latch1 Q7) gates the VBlank IRQ.
-        sys.write(BusMaster::Cpu(0), 0xC01F, 0x01);
+        sys.bus_write(BusMaster::Cpu(0), 0xC01F, 0x01);
         assert!(sys.board.int_enabled);
-        sys.write(BusMaster::Cpu(0), 0xC01F, 0x00);
+        sys.bus_write(BusMaster::Cpu(0), 0xC01F, 0x00);
         assert!(!sys.board.int_enabled);
 
         // BEN (latch1 Q5) toggles the background enable.
-        sys.write(BusMaster::Cpu(0), 0xC01D, 0x01);
+        sys.bus_write(BusMaster::Cpu(0), 0xC01D, 0x01);
         assert!(sys.board.bg_enabled);
 
         // Scroll, sprite-DMA, and sound latches store their bytes.
-        sys.write(BusMaster::Cpu(0), 0xC028, 0x84);
+        sys.bus_write(BusMaster::Cpu(0), 0xC028, 0x84);
         assert_eq!(sys.board.bg_position[0], 0x84);
-        sys.write(BusMaster::Cpu(0), 0xC032, 0x09);
+        sys.bus_write(BusMaster::Cpu(0), 0xC032, 0x09);
         assert_eq!(sys.board.sprite_dma[2], 0x09);
-        sys.write(BusMaster::Cpu(0), 0xC038, 0x5A);
+        sys.bus_write(BusMaster::Cpu(0), 0xC038, 0x5A);
         assert_eq!(sys.board.sound_latch, 0x5A);
     }
 
@@ -2212,21 +2237,21 @@ mod tests {
     fn vblank_irq_respects_int_enable() {
         let mut sys = CongoBongoSystem::new();
         // Disabled: no IRQ even at the VBlank cycle.
-        assert!(!sys.check_interrupts(BusMaster::Cpu(0)).irq);
+        assert!(!sys.board.check_interrupts(BusMaster::Cpu(0)).irq);
 
         sys.board.int_enabled = true;
         sys.board.vblank_irq_pending = true;
-        assert!(sys.check_interrupts(BusMaster::Cpu(0)).irq);
+        assert!(sys.board.check_interrupts(BusMaster::Cpu(0)).irq);
 
         // Clearing INTON via the latch drops the pending IRQ.
-        sys.write(BusMaster::Cpu(0), 0xC01F, 0x00);
-        assert!(!sys.check_interrupts(BusMaster::Cpu(0)).irq);
+        sys.bus_write(BusMaster::Cpu(0), 0xC01F, 0x00);
+        assert!(!sys.board.check_interrupts(BusMaster::Cpu(0)).irq);
     }
 
     #[test]
     fn save_load_round_trip() {
         let mut sys = CongoBongoSystem::new();
-        sys.write(BusMaster::Cpu(0), 0xA000, 0xC3);
+        sys.bus_write(BusMaster::Cpu(0), 0xA000, 0xC3);
         sys.board.latch2 = 0xC0;
         sys.board.sound_latch = 0x7E;
         sys.board.clock = 12345;
@@ -2235,7 +2260,7 @@ mod tests {
 
         let mut sys2 = CongoBongoSystem::new();
         SaveState::load_state(&mut sys2, &data).unwrap();
-        assert_eq!(sys2.read(BusMaster::Cpu(0), 0xA000), 0xC3);
+        assert_eq!(sys2.bus_read(BusMaster::Cpu(0), 0xA000), 0xC3);
         assert_eq!(sys2.board.latch2, 0xC0);
         assert_eq!(sys2.board.sound_latch, 0x7E);
         assert_eq!(sys2.board.clock, 12345);

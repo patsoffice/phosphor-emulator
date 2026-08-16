@@ -22,6 +22,7 @@
 
 use phosphor_core::audio::AudioResampler;
 use phosphor_core::core::bus::InterruptState;
+use phosphor_core::core::machine::DefaultBinding;
 use phosphor_core::core::machine::{
     ActionRole, DipApplyTiming, DipChoice, DipOption, DipSwitchBank, Direction, InputConfigurable,
     InputControl, InputEvent, InputId, InputKind, MachineCore, SaveState,
@@ -34,7 +35,6 @@ use phosphor_core::cpu::z80::Z80;
 use phosphor_core::device::sn76489::Sn76489a;
 use phosphor_core::gfx;
 use phosphor_core::gfx::decode::{GfxLayout, decode_gfx};
-use phosphor_core::{bus_split, core::machine::DefaultBinding};
 use phosphor_macros::{BusDebug, MemoryRegion, Saveable};
 
 use crate::disasm_registry::{DisasmCpu, DisasmRegion};
@@ -352,11 +352,35 @@ fn mrdo_protection_output(data: u8) -> u8 {
 // MrdoBoard
 // ---------------------------------------------------------------------------
 
+/// One CPU cycle (≈4.1 MHz): the VBLANK IRQ edge, the Z80, then the PSGs.
+///
+/// The CPU lives on the machine and the board *is* the bus, so this takes them
+/// as separate borrows and dispatches at a concrete type.
+#[inline]
+pub fn tick(cpu: &mut Z80, board: &mut MrdoBoard) {
+    board.begin_cycle(cpu);
+
+    // `irq0_line_hold` acknowledgement: the CPU takes the interrupt at an
+    // instruction boundary, observed here as IFF1 going 1->0 while pending.
+    let iff1_before = cpu.iff1;
+    cpu.execute_cycle(board, BusMaster::Cpu(0));
+    if board.vblank_irq_pending && iff1_before && !cpu.iff1 {
+        board.vblank_irq_pending = false;
+    }
+
+    board.end_cycle();
+}
+
+/// Run one frame's worth of CPU cycles. Mr. Do! renders whole-frame, so there
+/// is no per-scanline work to interleave.
+pub fn run_frame(cpu: &mut Z80, board: &mut MrdoBoard) {
+    for _ in 0..TIMING.cycles_per_frame() {
+        tick(cpu, board);
+    }
+}
+
 #[derive(BusDebug)]
 pub struct MrdoBoard {
-    #[debug_cpu("Z80")]
-    pub(crate) cpu: Z80,
-
     #[debug_map(cpu = 0)]
     pub(crate) main_map: AddressSpace16,
 
@@ -410,7 +434,6 @@ impl Default for MrdoBoard {
 impl MrdoBoard {
     pub fn new() -> Self {
         Self {
-            cpu: Z80::new(),
             main_map: Self::build_main_map(),
             fg_rom: [0; 0x2000],
             bg_rom: [0; 0x2000],
@@ -487,31 +510,23 @@ impl MrdoBoard {
     // Core tick
     // -----------------------------------------------------------------------
 
-    /// Execute one CPU clock cycle (≈4.1 MHz), asserting the VBLANK IRQ once per
-    /// frame at the start of vertical blanking.
-    pub fn tick(&mut self, bus: &mut dyn Bus<Address = u16, Data = u8>) {
+    /// Board work that leads a CPU cycle: the VBLANK IRQ edge (asserted at the
+    /// top of VBLANK and held until the CPU acknowledges it) and the debugger's
+    /// access-attribution latch.
+    fn begin_cycle(&mut self, cpu: &Z80) {
         let frame_cycle = self.clock % TIMING.cycles_per_frame();
-
-        // `irq0_line_hold`: asserted at the top of VBLANK, held until the CPU
-        // acknowledges it (observed below as IFF1 going 1→0 with the IRQ pending).
         if frame_cycle == VBLANK_IRQ_LINE * TIMING.cycles_per_scanline {
             self.vblank_irq_pending = true;
         }
 
         if self.main_map.debug_active() {
-            let pc = self
-                .cpu
-                .at_instruction_boundary()
-                .then_some(self.cpu.pc as u32);
+            let pc = cpu.at_instruction_boundary().then_some(cpu.pc as u32);
             self.main_map.latch_access_context(self.clock, pc);
         }
+    }
 
-        let iff1_before = self.cpu.iff1;
-        self.cpu.execute_cycle(bus, BusMaster::Cpu(0));
-        if self.vblank_irq_pending && iff1_before && !self.cpu.iff1 {
-            self.vblank_irq_pending = false;
-        }
-
+    /// Board work after the CPU's cycle: the PSGs and the clock.
+    fn end_cycle(&mut self) {
         // Advance both PSG generators (chip_clock/16) and box-filter the summed,
         // clamped output to the 44.1 kHz audio rate — one input sample per cycle.
         if self.sn1_clock.tick() {
@@ -684,7 +699,9 @@ impl MrdoBoard {
         self.main_map.region_data_mut(MainRegion::WorkRam).fill(0);
     }
 
-    pub fn check_interrupts(&self, target: BusMaster) -> InterruptState {
+    /// The interrupt lines this board drives. Named to avoid shadowing
+    /// [`Bus::check_interrupts`], which the board also implements.
+    pub fn interrupt_state(&self, target: BusMaster) -> InterruptState {
         match target {
             BusMaster::Cpu(0) => InterruptState {
                 irq: self.vblank_irq_pending,
@@ -694,14 +711,15 @@ impl MrdoBoard {
         }
     }
 
-    pub fn debug_tick_boundaries(&self) -> u32 {
-        u32::from(self.cpu.at_instruction_boundary())
+    /// Whether the CPU is at an instruction boundary. It lives on the machine,
+    /// which passes it back in.
+    pub fn instruction_boundaries(cpu: &Z80) -> u32 {
+        u32::from(cpu.at_instruction_boundary())
     }
 }
 
 impl Saveable for MrdoBoard {
     fn save_state(&self, w: &mut StateWriter) {
-        self.cpu.save_state(w);
         w.write_bytes(self.main_map.region_data(MainRegion::BgVideoRam));
         w.write_bytes(self.main_map.region_data(MainRegion::FgVideoRam));
         w.write_bytes(self.main_map.region_data(MainRegion::SpriteRam));
@@ -724,7 +742,6 @@ impl Saveable for MrdoBoard {
     }
 
     fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
-        self.cpu.load_state(r)?;
         r.read_bytes_into(self.main_map.region_data_mut(MainRegion::BgVideoRam))?;
         r.read_bytes_into(self.main_map.region_data_mut(MainRegion::FgVideoRam))?;
         r.read_bytes_into(self.main_map.region_data_mut(MainRegion::SpriteRam))?;
@@ -753,8 +770,14 @@ impl Saveable for MrdoBoard {
 // ---------------------------------------------------------------------------
 
 /// Universal Mr. Do! (1982).
-#[derive(Saveable)]
+///
+/// The Z80 sits beside the board rather than inside it, so each cycle
+/// dispatches at the concrete [`MrdoBoard`] -- which *is* the bus.
+#[derive(Saveable, BusDebug)]
 pub struct MrdoSystem {
+    #[debug_cpu("Z80")]
+    pub(crate) cpu: Z80,
+    #[debug_bus]
     pub board: MrdoBoard,
 }
 
@@ -767,6 +790,7 @@ impl Default for MrdoSystem {
 impl MrdoSystem {
     pub fn new() -> Self {
         Self {
+            cpu: Z80::new(),
             board: MrdoBoard::new(),
         }
     }
@@ -794,9 +818,27 @@ impl MrdoSystem {
         self.board.build_palette();
         Ok(())
     }
+
+    /// Advance one CPU cycle, returning the instruction-boundary mask.
+    pub fn step_cycle(&mut self) -> u32 {
+        tick(&mut self.cpu, &mut self.board);
+        MrdoBoard::instruction_boundaries(&self.cpu)
+    }
+
+    /// Read the CPU-facing bus, side effects and all. Distinct from the
+    /// debugger's `BusDebug::peek`/`poke`, which avoid side effects.
+    pub fn bus_read(&mut self, master: BusMaster, addr: u16) -> u8 {
+        self.board.read(master, addr)
+    }
+
+    /// Write the CPU-facing bus, side effects and all. See [`Self::bus_read`].
+    pub fn bus_write(&mut self, master: BusMaster, addr: u16, data: u8) {
+        self.board.write(master, addr, data);
+    }
 }
 
-impl Bus for MrdoSystem {
+// The board is the bus: Mr. Do! is the only machine on it.
+impl Bus for MrdoBoard {
     type Address = u16;
     type Data = u8;
 
@@ -805,17 +847,17 @@ impl Bus for MrdoSystem {
             return 0xFF;
         };
         let data = match addr {
-            0x0000..=0x90FF => self.board.main_map.read_backing(addr),
-            0x9803 => self.board.pal_u001, // protection PAL16R6 readback
+            0x0000..=0x90FF => self.main_map.read_backing(addr),
+            0x9803 => self.pal_u001, // protection PAL16R6 readback
 
-            0xA000 => self.board.in0,
-            0xA001 => self.board.in1,
-            0xA002 => self.board.dsw1,
-            0xA003 => self.board.dsw2,
-            0xE000..=0xEFFF => self.board.main_map.read_backing(addr),
+            0xA000 => self.in0,
+            0xA001 => self.in1,
+            0xA002 => self.dsw1,
+            0xA003 => self.dsw2,
+            0xE000..=0xEFFF => self.main_map.read_backing(addr),
             _ => 0xFF,
         };
-        self.board.main_map.watch_read(0, master, addr, data);
+        self.main_map.watch_read(0, master, addr, data);
         data
     }
 
@@ -823,24 +865,24 @@ impl Bus for MrdoSystem {
         let BusMaster::Cpu(0) = master else {
             return;
         };
-        self.board.main_map.watch_write(0, master, addr, data);
+        self.main_map.watch_write(0, master, addr, data);
         match addr {
             // BG video RAM + sprite RAM: plain backing writes.
-            0x8000..=0x87FF | 0x9000..=0x90FF => self.board.main_map.write_backing(addr, data),
+            0x8000..=0x87FF | 0x9000..=0x90FF => self.main_map.write_backing(addr, data),
             // FG video RAM: the PAL16R6 snoops the data bus on every FG write.
             0x8800..=0x8FFF => {
-                self.board.main_map.write_backing(addr, data);
-                self.board.pal_u001 = mrdo_protection_output(data);
+                self.main_map.write_backing(addr, data);
+                self.pal_u001 = mrdo_protection_output(data);
             }
             // Flipscreen (bit 0); bits 1-3 are playfield priority, unused by Mr. Do!.
-            0x9800 => self.board.flipscreen = data & 0x01 != 0,
-            0x9801 => self.board.sn1.write(data),
-            0x9802 => self.board.sn2.write(data),
-            0xE000..=0xEFFF => self.board.main_map.write_backing(addr, data),
-            0xF000..=0xF7FF => self.board.bg_scroll_x = data, // scrollx_w
+            0x9800 => self.flipscreen = data & 0x01 != 0,
+            0x9801 => self.sn1.write(data),
+            0x9802 => self.sn2.write(data),
+            0xE000..=0xEFFF => self.main_map.write_backing(addr, data),
+            0xF000..=0xF7FF => self.bg_scroll_x = data, // scrollx_w
             // scrolly_w: NOT affected by flipscreen — compensate when flipped.
             0xF800..=0xFFFF => {
-                self.board.bg_scroll_y = if self.board.flipscreen {
+                self.bg_scroll_y = if self.flipscreen {
                     ((256 - data as u16) & 0xff) as u8
                 } else {
                     data
@@ -855,11 +897,17 @@ impl Bus for MrdoSystem {
     }
 
     fn check_interrupts(&mut self, target: BusMaster) -> InterruptState {
-        self.board.check_interrupts(target)
+        self.interrupt_state(target)
     }
 }
 
-crate::impl_board_delegation!(MrdoSystem, board, crate::mrdo::TIMING, orientation);
+crate::impl_board_delegation!(
+    MrdoSystem,
+    board,
+    crate::mrdo::TIMING,
+    orientation,
+    split_cpu
+);
 
 impl MachineCore for MrdoSystem {
     crate::machine_core_metadata!("mrdo", crate::mrdo::TIMING);
@@ -886,18 +934,12 @@ impl MachineCore for MrdoSystem {
     }
 
     fn run_frame(&mut self) {
-        bus_split!(self, bus => {
-            for _ in 0..crate::mrdo::TIMING.cycles_per_frame() {
-                self.board.tick(bus);
-            }
-        });
+        run_frame(&mut self.cpu, &mut self.board);
     }
 
     fn reset(&mut self) {
         self.board.reset();
-        bus_split!(self, bus => {
-            self.board.cpu.reset(bus, BusMaster::Cpu(0));
-        });
+        self.cpu.reset(&mut self.board, BusMaster::Cpu(0));
     }
 }
 
@@ -1431,27 +1473,27 @@ mod tests {
     #[test]
     fn protection_latches_on_fg_write_and_reads_at_9803() {
         let mut sys = MrdoSystem::new();
-        assert_eq!(sys.read(BusMaster::Cpu(0), 0x9803), 0xFF); // power-up
+        assert_eq!(sys.bus_read(BusMaster::Cpu(0), 0x9803), 0xFF); // power-up
         // A write into FG video RAM clocks the PAL with the data byte.
-        sys.write(BusMaster::Cpu(0), 0x8800, 0xA1);
-        assert_eq!(sys.read(BusMaster::Cpu(0), 0x9803), 0xC1);
+        sys.bus_write(BusMaster::Cpu(0), 0x8800, 0xA1);
+        assert_eq!(sys.bus_read(BusMaster::Cpu(0), 0x9803), 0xC1);
         // A BG write must NOT disturb the protection latch.
-        sys.write(BusMaster::Cpu(0), 0x8000, 0x00);
-        assert_eq!(sys.read(BusMaster::Cpu(0), 0x9803), 0xC1);
+        sys.bus_write(BusMaster::Cpu(0), 0x8000, 0x00);
+        assert_eq!(sys.bus_read(BusMaster::Cpu(0), 0x9803), 0xC1);
     }
 
     #[test]
     fn scroll_and_flip_registers_latch() {
         let mut sys = MrdoSystem::new();
-        sys.write(BusMaster::Cpu(0), 0xF000, 0x12);
+        sys.bus_write(BusMaster::Cpu(0), 0xF000, 0x12);
         assert_eq!(sys.board.bg_scroll_x, 0x12);
         // Unflipped scroll-Y is stored verbatim.
-        sys.write(BusMaster::Cpu(0), 0xF800, 0x05);
+        sys.bus_write(BusMaster::Cpu(0), 0xF800, 0x05);
         assert_eq!(sys.board.bg_scroll_y, 0x05);
         // Flipscreen on → scroll-Y is compensated: (256 - data) & 0xff.
-        sys.write(BusMaster::Cpu(0), 0x9800, 0x01);
+        sys.bus_write(BusMaster::Cpu(0), 0x9800, 0x01);
         assert!(sys.board.flipscreen);
-        sys.write(BusMaster::Cpu(0), 0xF800, 0x05);
+        sys.bus_write(BusMaster::Cpu(0), 0xF800, 0x05);
         assert_eq!(sys.board.bg_scroll_y, 0xFB);
     }
 
@@ -1477,7 +1519,7 @@ mod tests {
         // Program SN76489 #1 channel 0: a mid tone at full volume (attenuator 0).
         // With no program ROM the Z80 just NOPs, so it never disturbs the chip.
         for byte in [0x8Eu8, 0x0F, 0x90] {
-            sys.write(BusMaster::Cpu(0), 0x9801, byte);
+            sys.bus_write(BusMaster::Cpu(0), 0x9801, byte);
         }
         sys.run_frame();
         let mut buf = vec![0i16; 1024];
@@ -1493,7 +1535,7 @@ mod tests {
     fn reset_silences_sound() {
         let mut sys = MrdoSystem::new();
         for byte in [0x8Eu8, 0x0F, 0x90] {
-            sys.write(BusMaster::Cpu(0), 0x9802, byte);
+            sys.bus_write(BusMaster::Cpu(0), 0x9802, byte);
         }
         sys.board.reset();
         // After reset both PSGs are attenuated to silence.

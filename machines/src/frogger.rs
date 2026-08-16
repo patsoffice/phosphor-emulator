@@ -22,17 +22,17 @@
 //! lines swapped (MAME `decode_frogger_sound` / `decode_frogger_gfx`), undone at
 //! load time.
 
-use phosphor_core::bus_split;
-use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
     DipApplyTiming, DipChoice, DipOption, DipSwitchBank, Direction, InputConfigurable,
     InputControl, InputEvent, InputId, InputKind, MachineCore, Nvram, Profilable, SaveState,
 };
 use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
+use phosphor_core::cpu::state::CpuStateTrait;
+use phosphor_core::cpu::z80::Z80;
 
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
-use crate::scramble::{Hw, ScrambleBoard, TIMING};
+use crate::scramble::{self, Hw, ScrambleBoard, TIMING};
 
 // Input button IDs (Frogger is a 4-way joystick with no fire buttons).
 const F_COIN: u8 = 0;
@@ -288,8 +288,14 @@ pub const FROGGER_CONTROLS: &[InputControl] = &[
 // ---------------------------------------------------------------------------
 
 /// Frogger (Konami, 1981).
-#[derive(phosphor_macros::Saveable)]
+///
+/// Same split as the other Scramble-board machines: the Z80 sits beside the
+/// board, which *is* the bus, so each cycle dispatches at a concrete type.
+#[derive(phosphor_macros::Saveable, phosphor_macros::BusDebug)]
 pub struct FroggerSystem {
+    #[debug_cpu("Z80")]
+    pub(crate) cpu: Z80,
+    #[debug_bus]
     pub board: ScrambleBoard,
 }
 
@@ -300,7 +306,10 @@ impl FroggerSystem {
         // 1C/1C, upright).
         board.in1 &= !FR_DIP1_MASK;
         board.in2 &= !FR_DIP2_MASK;
-        Self { board }
+        Self {
+            cpu: Z80::new(),
+            board,
+        }
     }
 
     pub fn load_rom_set(&mut self, rom_set: &RomSet) -> Result<(), RomLoadError> {
@@ -337,6 +346,28 @@ impl FroggerSystem {
             _ => {}
         }
     }
+
+    /// Snapshot of the Z80's registers, for tests and the debugger.
+    pub fn get_cpu_state(&self) -> phosphor_core::cpu::state::Z80State {
+        self.cpu.snapshot()
+    }
+
+    /// Advance one CPU cycle, returning the instruction-boundary mask.
+    pub fn step_cycle(&mut self) -> u32 {
+        scramble::tick(&mut self.cpu, &mut self.board);
+        ScrambleBoard::instruction_boundaries(&self.cpu)
+    }
+
+    /// Read the CPU-facing bus, side effects and all. Distinct from the
+    /// debugger's `BusDebug::peek`/`poke`, which avoid side effects.
+    pub fn bus_read(&mut self, master: BusMaster, addr: u16) -> u8 {
+        self.board.read(master, addr)
+    }
+
+    /// Write the CPU-facing bus, side effects and all. See [`Self::bus_read`].
+    pub fn bus_write(&mut self, master: BusMaster, addr: u16, data: u8) {
+        self.board.write(master, addr, data);
+    }
 }
 
 impl Default for FroggerSystem {
@@ -345,28 +376,8 @@ impl Default for FroggerSystem {
     }
 }
 
-impl Bus for FroggerSystem {
-    type Address = u16;
-    type Data = u8;
-    fn read(&mut self, _m: BusMaster, addr: u16) -> u8 {
-        self.board.bus_read_common(addr)
-    }
-    fn write(&mut self, _m: BusMaster, addr: u16, data: u8) {
-        self.board.bus_write_common(addr, data);
-    }
-    fn io_read(&mut self, _m: BusMaster, _addr: u16) -> u8 {
-        0xFF
-    }
-    fn io_write(&mut self, _m: BusMaster, _addr: u16, _data: u8) {}
-    fn is_halted_for(&self, _m: BusMaster) -> bool {
-        false
-    }
-    fn check_interrupts(&mut self, target: BusMaster) -> InterruptState {
-        self.board.check_interrupts(target)
-    }
-}
-
-crate::impl_board_delegation!(FroggerSystem, board, TIMING, orientation);
+// The board is the bus -- see `impl Bus for ScrambleBoard` in scramble.rs.
+crate::impl_board_delegation!(FroggerSystem, board, TIMING, orientation, split_cpu);
 
 impl MachineCore for FroggerSystem {
     crate::machine_core_metadata!("frogger", TIMING);
@@ -389,18 +400,12 @@ impl MachineCore for FroggerSystem {
     }
 
     fn run_frame(&mut self) {
-        bus_split!(self, bus => {
-            for _ in 0..TIMING.cycles_per_frame() {
-                self.board.tick(bus);
-            }
-        });
+        scramble::run_frame(&mut self.cpu, &mut self.board);
     }
 
     fn reset(&mut self) {
         self.board.reset_board();
-        bus_split!(self, bus => {
-            self.board.cpu.reset(bus, BusMaster::Cpu(0));
-        });
+        self.cpu.reset(&mut self.board, BusMaster::Cpu(0));
     }
 }
 
