@@ -19,7 +19,6 @@
 //! upright cabinet this set targets).
 
 use phosphor_core::audio::AudioResampler;
-use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::debug_trace::{DebugEvent, DebugEventKind, DebugTraceBuffer};
 use phosphor_core::core::machine::{
@@ -494,13 +493,77 @@ pub const MARIO_CONTROLS: &[InputControl] = &[
 // MarioBrosBoard
 // ---------------------------------------------------------------------------
 
+/// One CPU cycle: board work, the Z80, then the sound CPU on its own divider.
+///
+/// The CPUs live on the machine and the board *is* the bus, so this takes them
+/// as separate borrows and dispatches at a concrete type. This is the
+/// debugger's path — it tests the frame position on every cycle; a whole frame
+/// goes through [`run_scanlines`], which hoists that test out.
+#[inline]
+pub fn tick(main: &mut Z80, sound: &mut I8035, board: &mut MarioBrosBoard) {
+    let frame_cycle = board.clock % TIMING.cycles_per_frame();
+    if frame_cycle.is_multiple_of(TIMING.cycles_per_scanline) {
+        board.begin_scanline((frame_cycle / TIMING.cycles_per_scanline) as u16);
+    }
+    step_cycle(main, sound, board);
+}
+
+/// Run `cycles` CPU cycles, scanline-outer and cycle-inner. The caller must
+/// start on a scanline boundary and pass a multiple of `cycles_per_scanline`.
+pub fn run_scanlines(main: &mut Z80, sound: &mut I8035, board: &mut MarioBrosBoard, cycles: u64) {
+    debug_assert!(
+        board.clock.is_multiple_of(TIMING.cycles_per_scanline)
+            && cycles.is_multiple_of(TIMING.cycles_per_scanline),
+        "run_scanlines must start on a scanline boundary and run whole scanlines"
+    );
+    for _ in 0..cycles / TIMING.cycles_per_scanline {
+        let scanline = board.clock % TIMING.cycles_per_frame() / TIMING.cycles_per_scanline;
+        board.begin_scanline(scanline as u16);
+        for _ in 0..TIMING.cycles_per_scanline {
+            step_cycle(main, sound, board);
+        }
+    }
+}
+
+/// Run one frame's worth of cycles. Whole scanlines go through
+/// [`run_scanlines`]; a partial scanline at either end (only after the debugger
+/// has left the clock off-boundary) goes through [`tick`].
+pub fn run_frame(main: &mut Z80, sound: &mut I8035, board: &mut MarioBrosBoard) {
+    let scanline = TIMING.cycles_per_scanline;
+    let mut remaining = TIMING.cycles_per_frame();
+
+    let lead = ((scanline - board.clock % scanline) % scanline).min(remaining);
+    for _ in 0..lead {
+        tick(main, sound, board);
+    }
+    remaining -= lead;
+
+    let whole = remaining - remaining % scanline;
+    run_scanlines(main, sound, board, whole);
+    remaining -= whole;
+
+    for _ in 0..remaining {
+        tick(main, sound, board);
+    }
+}
+
+/// The part of a cycle with no frame-position test in it.
+#[inline]
+fn step_cycle(main: &mut Z80, sound: &mut I8035, board: &mut MarioBrosBoard) {
+    board.begin_cycle_inner(main, sound);
+
+    main.execute_cycle(board, BusMaster::Cpu(0));
+
+    // Sound CPU (8049): 11/60 of the Z80 clock.
+    if board.sound_clock.tick() {
+        sound.execute_cycle(board, BusMaster::Cpu(1));
+    }
+
+    board.end_cycle();
+}
+
 #[derive(BusDebug, DebugTrace)]
 pub struct MarioBrosBoard {
-    #[debug_cpu("Z80 Main")]
-    pub(crate) cpu: Z80,
-    #[debug_cpu("I8039 Sound")]
-    pub(crate) sound_cpu: I8035,
-
     #[debug_map(cpu = 0)]
     pub(crate) main_map: AddressSpace16,
     #[debug_map(cpu = 1)]
@@ -536,6 +599,15 @@ pub struct MarioBrosBoard {
 
     pub(crate) sound_irq_pending: bool,
 
+    /// Mirror of the sound CPU's P2 port latch, refreshed at the top of every
+    /// cycle from the CPU itself.
+    ///
+    /// P2 is a hardware wire the *bus* has to answer for — the 8039 selects its
+    /// command source and ROM bank with it, and reads it back through `io_read`
+    /// — but the CPU that owns it lives outside the bus. Derived state, so it
+    /// is not saved: the next cycle re-latches it before anything can read it.
+    pub(crate) sound_p2: u8,
+
     // Z80 DMA controller (sprite-list transfer)
     pub(crate) dma: Z80Dma,
 
@@ -565,11 +637,7 @@ impl Default for MarioBrosBoard {
 
 impl MarioBrosBoard {
     pub fn new() -> Self {
-        let mut sound_cpu = I8035::new();
-        sound_cpu.ram_mask = 0x7F; // 8039/8049: 128 bytes of internal RAM
         Self {
-            cpu: Z80::new(),
-            sound_cpu,
             main_map: Self::build_main_map(),
             sound_map: Self::build_sound_map(),
             tile_rom: [0; 0x2000],
@@ -589,6 +657,7 @@ impl MarioBrosBoard {
             nmi_mask: false,
             scroll_y: 0,
             sound_irq_pending: false,
+            sound_p2: 0,
             dma: Z80Dma::new(),
             dac: Mc1408Dac::new(),
             resampler: AudioResampler::new(TIMING.cpu_clock_hz, OUTPUT_SAMPLE_RATE),
@@ -746,19 +815,18 @@ impl MarioBrosBoard {
     // -----------------------------------------------------------------------
 
     /// Execute one Z80 clock cycle (4 MHz).
-    pub fn tick(&mut self, bus: &mut dyn Bus<Address = u16, Data = u8>) {
-        let frame_cycle = self.clock % TIMING.cycles_per_frame();
-
-        if frame_cycle.is_multiple_of(TIMING.cycles_per_scanline) {
-            let scanline = (frame_cycle / TIMING.cycles_per_scanline) as u16;
-            if scanline < VISIBLE_LINES as u16 {
-                self.render_scanline(scanline as usize);
-            }
+    /// Work that only happens on the first cycle of a scanline: rendering the
+    /// line, and the VBLANK NMI edges.
+    ///
+    /// Called once per scanline from [`run_scanlines`] and, for the debugger's
+    /// single-step path, from [`tick`] when the clock lands on a boundary.
+    fn begin_scanline(&mut self, scanline: u16) {
+        if scanline < VISIBLE_LINES as u16 {
+            self.render_scanline(scanline as usize);
         }
 
         // VBLANK NMI at scanline 240.
-        let vblank_cycle = VISIBLE_LINES * TIMING.cycles_per_scanline;
-        if frame_cycle == vblank_cycle {
+        if scanline == VISIBLE_LINES as u16 {
             self.vblank_nmi_pending = true;
             if self.debug_trace.enabled() {
                 self.debug_trace.record(DebugEvent {
@@ -776,25 +844,27 @@ impl MarioBrosBoard {
                 });
             }
         }
-        if frame_cycle == 0 && self.clock > 0 {
+        if scanline == 0 && self.clock > 0 {
             self.vblank_nmi_pending = false;
         }
+    }
+
+    /// Per-cycle board work that runs before the CPUs, with no frame-position
+    /// test in it.
+    fn begin_cycle_inner(&mut self, main: &Z80, sound: &I8035) {
+        // Mirror the sound CPU's P2 latch: the bus answers for it (command
+        // source select and ROM bank), but the CPU that owns it is outside the
+        // bus. Only the sound CPU changes it, and it steps later in this cycle.
+        self.sound_p2 = sound.p2;
 
         if self.main_map.has_any_watchpoints() || self.debug_trace.enabled() {
-            let pc = self
-                .cpu
-                .at_instruction_boundary()
-                .then_some(self.cpu.pc as u32);
+            let pc = main.at_instruction_boundary().then_some(main.pc as u32);
             self.main_map.latch_access_context(self.clock, pc);
         }
+    }
 
-        self.cpu.execute_cycle(bus, BusMaster::Cpu(0));
-
-        // Sound CPU (8049): 11/60 of the Z80 clock.
-        if self.sound_clock.tick() {
-            self.sound_cpu.execute_cycle(bus, BusMaster::Cpu(1));
-        }
-
+    /// Board work after the CPUs' cycle: the audio tail and the clock advance.
+    fn end_cycle(&mut self) {
         // Audio: 8-bit DAC resampled to 44.1 kHz. (Discrete sound deferred.)
         if let Some(avg) = self.resampler.tick_sample(self.dac.sample_i16()) {
             self.resampler.push_sample(avg);
@@ -934,12 +1004,11 @@ impl MarioBrosBoard {
         self.main_map.region_data_mut(MainRegion::Ram).fill(0);
         self.main_map.region_data_mut(MainRegion::SpriteRam).fill(0);
         self.scanline_buffer.fill(0);
-
-        // 8039/8049 RAM size is configuration, not reset by the CPU core.
-        self.sound_cpu.ram_mask = 0x7F;
     }
 
-    pub fn check_interrupts(&self, target: BusMaster) -> InterruptState {
+    /// Interrupt lines as the CPUs see them. Named apart from the `Bus`
+    /// method so the impl below can call it without recursing.
+    pub fn interrupt_state(&self, target: BusMaster) -> InterruptState {
         match target {
             BusMaster::Cpu(0) => InterruptState {
                 nmi: self.vblank_nmi_pending && self.nmi_mask,
@@ -953,12 +1022,15 @@ impl MarioBrosBoard {
         }
     }
 
-    pub fn debug_tick_boundaries(&self) -> u32 {
+    /// Bitmask of CPUs at an instruction boundary: bit 0 = main (Z80),
+    /// bit 1 = sound (I8039). The CPUs live on the machine, which passes them
+    /// back in.
+    pub fn instruction_boundaries(main: &Z80, sound: &I8035) -> u32 {
         let mut result = 0;
-        if self.cpu.at_instruction_boundary() {
+        if main.at_instruction_boundary() {
             result |= 1;
         }
-        if self.sound_cpu.at_instruction_boundary() {
+        if sound.at_instruction_boundary() {
             result |= 2;
         }
         result
@@ -967,8 +1039,7 @@ impl MarioBrosBoard {
 
 impl Saveable for MarioBrosBoard {
     fn save_state(&self, w: &mut StateWriter) {
-        self.cpu.save_state(w);
-        self.sound_cpu.save_state(w);
+        // The CPUs are saved by the machine, which owns them.
         w.write_bytes(self.main_map.region_data(MainRegion::Ram));
         w.write_bytes(self.main_map.region_data(MainRegion::Nvram));
         w.write_bytes(self.main_map.region_data(MainRegion::SpriteRam));
@@ -993,8 +1064,7 @@ impl Saveable for MarioBrosBoard {
     }
 
     fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
-        self.cpu.load_state(r)?;
-        self.sound_cpu.load_state(r)?;
+        // The CPUs are loaded by the machine, which owns them.
         r.read_bytes_into(self.main_map.region_data_mut(MainRegion::Ram))?;
         r.read_bytes_into(self.main_map.region_data_mut(MainRegion::Nvram))?;
         r.read_bytes_into(self.main_map.region_data_mut(MainRegion::SpriteRam))?;
@@ -1025,8 +1095,16 @@ impl Saveable for MarioBrosBoard {
 // ---------------------------------------------------------------------------
 
 /// Nintendo Mario Bros. (1983).
-#[derive(Saveable)]
+#[derive(Saveable, BusDebug)]
 pub struct MarioBrosSystem {
+    /// The CPUs are held beside the board, which is their bus: nothing is
+    /// interposed between them and it.
+    #[debug_cpu("Z80 Main")]
+    pub cpu: Z80,
+    #[debug_cpu("I8039 Sound")]
+    pub sound_cpu: I8035,
+
+    #[debug_bus]
     pub board: MarioBrosBoard,
 }
 
@@ -1038,9 +1116,31 @@ impl Default for MarioBrosSystem {
 
 impl MarioBrosSystem {
     pub fn new() -> Self {
+        let mut sound_cpu = I8035::new();
+        sound_cpu.ram_mask = 0x7F; // 8039/8049: 128 bytes of internal RAM
         Self {
+            cpu: Z80::new(),
+            sound_cpu,
             board: MarioBrosBoard::new(),
         }
+    }
+
+    /// One CPU cycle. Returns a bitmask of CPUs at an instruction boundary
+    /// (for the debugger, which steps instructions rather than cycles).
+    pub fn step_cycle(&mut self) -> u32 {
+        tick(&mut self.cpu, &mut self.sound_cpu, &mut self.board);
+        MarioBrosBoard::instruction_boundaries(&self.cpu, &self.sound_cpu)
+    }
+
+    /// Read the CPU-facing bus, side effects and all. Distinct from the
+    /// debugger's `BusDebug::peek`/`poke`, which avoid side effects.
+    pub fn bus_read(&mut self, master: BusMaster, addr: u16) -> u8 {
+        Bus::read(&mut self.board, master, addr)
+    }
+
+    /// Write the CPU-facing bus, side effects and all. See [`Self::bus_read`].
+    pub fn bus_write(&mut self, master: BusMaster, addr: u16, data: u8) {
+        Bus::write(&mut self.board, master, addr, data);
     }
 
     pub fn load_rom_set(&mut self, rom_set: &RomSet) -> Result<(), RomLoadError> {
@@ -1074,34 +1174,34 @@ impl MarioBrosSystem {
     }
 }
 
-impl Bus for MarioBrosSystem {
+impl Bus for MarioBrosBoard {
     type Address = u16;
     type Data = u8;
 
     fn read(&mut self, master: BusMaster, addr: u16) -> u8 {
         match master {
             BusMaster::Cpu(0) => {
-                let data = match self.board.main_map.page(addr).region_id {
+                let data = match self.main_map.page(addr).region_id {
                     MainRegion::ROM
                     | MainRegion::RAM
                     | MainRegion::NVRAM
                     | MainRegion::SPRITE_RAM
                     | MainRegion::VIDEO_RAM
-                    | MainRegion::ROM_HIGH => self.board.main_map.read_backing(addr),
+                    | MainRegion::ROM_HIGH => self.main_map.read_backing(addr),
                     MainRegion::IO_PORTS => match addr {
-                        0x7C00 => self.board.in0,
-                        0x7C80 => self.board.in1,
-                        0x7F80 => self.board.dsw,
+                        0x7C00 => self.in0,
+                        0x7C80 => self.in1,
+                        0x7F80 => self.dsw,
                         _ => 0xFF,
                     },
                     _ => 0xFF,
                 };
-                self.board.main_map.watch_read(0, master, addr, data);
+                self.main_map.watch_read(0, master, addr, data);
                 data
             }
 
             // Sound CPU (I8039) program ROM.
-            BusMaster::Cpu(1) => self.board.sound_map.read_backing(addr & 0x0FFF),
+            BusMaster::Cpu(1) => self.sound_map.read_backing(addr & 0x0FFF),
 
             _ => 0xFF,
         }
@@ -1110,24 +1210,23 @@ impl Bus for MarioBrosSystem {
     fn write(&mut self, master: BusMaster, addr: u16, data: u8) {
         match master {
             BusMaster::Cpu(0) => {
-                self.board.main_map.watch_write(0, master, addr, data);
-                match self.board.main_map.page(addr).region_id {
+                self.main_map.watch_write(0, master, addr, data);
+                match self.main_map.page(addr).region_id {
                     MainRegion::RAM
                     | MainRegion::NVRAM
                     | MainRegion::SPRITE_RAM
-                    | MainRegion::VIDEO_RAM => self.board.main_map.write_backing(addr, data),
+                    | MainRegion::VIDEO_RAM => self.main_map.write_backing(addr, data),
                     MainRegion::IO_PORTS => match addr {
                         // 0x7C00 / 0x7C80 are reads (inputs); writes trigger the
                         // Mario/Luigi walk discrete sounds (deferred → ignored).
                         0x7C00 | 0x7C80 => {}
-                        0x7D00 => self.board.scroll_y = data,
-                        0x7E00 => self.board.sound_latch = data,
+                        0x7D00 => self.scroll_y = data,
+                        0x7E00 => self.sound_latch = data,
                         0x7E80..=0x7E87 => {
-                            self.board
-                                .write_control_bit((addr & 0x07) as u8, data & 1 != 0);
+                            self.write_control_bit((addr & 0x07) as u8, data & 1 != 0);
                         }
                         0x7F00..=0x7F07 => {
-                            self.board.write_sample_trigger(addr & 0x07, data);
+                            self.write_sample_trigger(addr & 0x07, data);
                         }
                         _ => {}
                     },
@@ -1142,28 +1241,28 @@ impl Bus for MarioBrosSystem {
     fn io_read(&mut self, master: BusMaster, addr: u16) -> u8 {
         match master {
             // Main CPU I/O port 0x00 = Z80 DMA.
-            BusMaster::Cpu(0) if addr & 0xFF == 0x00 => self.board.dma.read(),
+            BusMaster::Cpu(0) if addr & 0xFF == 0x00 => self.dma.read(),
             BusMaster::Cpu(0) => 0xFF,
 
             // Sound CPU (I8039) I/O.
             BusMaster::Cpu(1) => match addr {
                 // MOVX external read = tune_r: command latch (P2 bit7) or banked ROM.
                 0x00..=0x100 => {
-                    let p2 = self.board.sound_cpu.p2;
+                    let p2 = self.sound_p2;
                     if p2 & 0x80 != 0 {
-                        self.board.sound_latch
+                        self.sound_latch
                     } else {
                         let rom_addr = (((p2 & 0x0F) as usize) << 8) | (addr as usize & 0xFF);
-                        self.board.sound_map.read_backing(rom_addr as u16 & 0x0FFF)
+                        self.sound_map.read_backing(rom_addr as u16 & 0x0FFF)
                     }
                 }
                 // IN A,P1: crab/turtle/fly/coin triggers.
-                0x101 => self.board.sound_latch1,
+                0x101 => self.sound_latch1,
                 // IN A,P2: last value written, bit 4 grounded.
-                0x102 => self.board.sound_cpu.p2 & 0xEF,
+                0x102 => self.sound_p2 & 0xEF,
                 // T0 / T1: get-coin / ice triggers.
-                0x110 => self.board.sound_latch3 & 0x01,
-                0x111 => (self.board.sound_latch3 >> 1) & 0x01,
+                0x110 => self.sound_latch3 & 0x01,
+                0x111 => (self.sound_latch3 >> 1) & 0x01,
                 _ => 0xFF,
             },
 
@@ -1174,11 +1273,11 @@ impl Bus for MarioBrosSystem {
     fn io_write(&mut self, master: BusMaster, addr: u16, data: u8) {
         match master {
             BusMaster::Cpu(0) if addr & 0xFF == 0x00 => {
-                self.board.dma.write(data);
-                self.board.service_dma();
+                self.dma.write(data);
+                self.service_dma();
             }
             // Sound CPU: MOVX external write = DAC. P1/P2 out tracked internally.
-            BusMaster::Cpu(1) if addr <= 0x100 => self.board.dac.write(data),
+            BusMaster::Cpu(1) if addr <= 0x100 => self.dac.write(data),
             _ => {}
         }
     }
@@ -1188,7 +1287,7 @@ impl Bus for MarioBrosSystem {
     }
 
     fn check_interrupts(&mut self, target: BusMaster) -> InterruptState {
-        self.board.check_interrupts(target)
+        self.interrupt_state(target)
     }
 }
 
@@ -1196,7 +1295,8 @@ crate::impl_board_delegation!(
     MarioBrosSystem,
     board,
     crate::mario_bros::TIMING,
-    orientation
+    orientation,
+    split_cpu
 );
 
 impl InputConfigurable for MarioBrosSystem {
@@ -1247,20 +1347,14 @@ impl MachineCore for MarioBrosSystem {
     }
 
     fn run_frame(&mut self) {
-        bus_split!(self, bus => {
-            for _ in 0..crate::mario_bros::TIMING.cycles_per_frame() {
-                self.board.tick(bus);
-            }
-        });
+        run_frame(&mut self.cpu, &mut self.sound_cpu, &mut self.board);
     }
 
     fn reset(&mut self) {
         self.board.reset();
-        bus_split!(self, bus => {
-            self.board.cpu.reset(bus, BusMaster::Cpu(0));
-            self.board.sound_cpu.reset(bus, BusMaster::Cpu(1));
-        });
-        self.board.sound_cpu.ram_mask = 0x7F; // 8049: 128 bytes internal RAM
+        self.cpu.reset(&mut self.board, BusMaster::Cpu(0));
+        self.sound_cpu.reset(&mut self.board, BusMaster::Cpu(1));
+        self.sound_cpu.ram_mask = 0x7F; // 8049: 128 bytes internal RAM
 
         // The M58715 sound CPU has an internal-ROM bootstrap (undumped) that
         // runs before the external program. Per MAME's audiocpu trace it is:
@@ -1271,10 +1365,10 @@ impl MachineCore for MarioBrosSystem {
         // decode so that the STRT T at 0x101 is consumed as an operand — the
         // sound engine's duration timer never starts and every effect hangs in
         // its playback loop (silent DAC). Replicate the bootstrap's net effect.
-        self.board.sound_cpu.p2 = 0xDF;
-        self.board.sound_cpu.a11 = false;
-        self.board.sound_cpu.a11_pending = false;
-        self.board.sound_cpu.pc = 0x101;
+        self.sound_cpu.p2 = 0xDF;
+        self.sound_cpu.a11 = false;
+        self.sound_cpu.a11_pending = false;
+        self.sound_cpu.pc = 0x101;
     }
 }
 
@@ -1423,7 +1517,9 @@ mod tests {
     /// Program the on-board Z80 DMA for a memory-to-memory copy via the I/O bus,
     /// exactly as the game would (writes to port 0x00), then leave it armed.
     fn program_dma(sys: &mut MarioBrosSystem, src: u16, dst: u16, len_minus_1: u16) {
-        let io = |sys: &mut MarioBrosSystem, b: u8| sys.io_write(BusMaster::Cpu(0), 0x00, b);
+        let io = |sys: &mut MarioBrosSystem, b: u8| {
+            Bus::io_write(&mut sys.board, BusMaster::Cpu(0), 0x00, b)
+        };
         // WR0: transfer, port A source, follow port-A addr L/H + block-len L/H.
         io(sys, 0b0111_1101);
         io(sys, (src & 0xFF) as u8);
@@ -1481,7 +1577,7 @@ mod tests {
         // Size the GFX caches (load_rom_set normally does this); ROMs stay zeroed.
         sys.board.decode_gfx_roms();
         sys.reset();
-        assert_eq!(sys.board.sound_cpu.ram_mask, 0x7F, "I8039 has 128B RAM");
+        assert_eq!(sys.sound_cpu.ram_mask, 0x7F, "I8039 has 128B RAM");
         for _ in 0..3 {
             sys.run_frame();
         }
@@ -1499,10 +1595,10 @@ mod tests {
         // otherwise the sound engine's timer never starts and the DAC is silent.
         let mut sys = MarioBrosSystem::new();
         sys.reset();
-        assert_eq!(sys.board.sound_cpu.pc, 0x101);
-        assert_eq!(sys.board.sound_cpu.p2, 0xDF);
-        assert!(!sys.board.sound_cpu.a11);
-        assert!(!sys.board.sound_cpu.a11_pending);
+        assert_eq!(sys.sound_cpu.pc, 0x101);
+        assert_eq!(sys.sound_cpu.p2, 0xDF);
+        assert!(!sys.sound_cpu.a11);
+        assert!(!sys.sound_cpu.a11_pending);
     }
 
     #[test]
@@ -1515,13 +1611,17 @@ mod tests {
             (0x7400, 0x33),
             (0x7000, 0x44),
         ] {
-            sys.write(BusMaster::Cpu(0), addr, val);
-            assert_eq!(sys.read(BusMaster::Cpu(0), addr), val, "addr {addr:#06x}");
+            sys.bus_write(BusMaster::Cpu(0), addr, val);
+            assert_eq!(
+                sys.bus_read(BusMaster::Cpu(0), addr),
+                val,
+                "addr {addr:#06x}"
+            );
         }
         // Program ROM is read-only: writes are ignored.
         sys.board.main_map.region_data_mut(MainRegion::Rom)[0] = 0xAB;
-        sys.write(BusMaster::Cpu(0), 0x0000, 0x00);
-        assert_eq!(sys.read(BusMaster::Cpu(0), 0x0000), 0xAB);
+        sys.bus_write(BusMaster::Cpu(0), 0x0000, 0x00);
+        assert_eq!(sys.bus_read(BusMaster::Cpu(0), 0x0000), 0xAB);
     }
 
     #[test]
@@ -1530,21 +1630,21 @@ mod tests {
         sys.board.in0 = 0x55;
         sys.board.in1 = 0xAA;
         sys.board.dsw = 0x3C;
-        assert_eq!(sys.read(BusMaster::Cpu(0), 0x7C00), 0x55);
-        assert_eq!(sys.read(BusMaster::Cpu(0), 0x7C80), 0xAA);
-        assert_eq!(sys.read(BusMaster::Cpu(0), 0x7F80), 0x3C);
+        assert_eq!(sys.bus_read(BusMaster::Cpu(0), 0x7C00), 0x55);
+        assert_eq!(sys.bus_read(BusMaster::Cpu(0), 0x7C80), 0xAA);
+        assert_eq!(sys.bus_read(BusMaster::Cpu(0), 0x7F80), 0x3C);
 
         // Scroll + sound command latches.
-        sys.write(BusMaster::Cpu(0), 0x7D00, 0x42);
+        sys.bus_write(BusMaster::Cpu(0), 0x7D00, 0x42);
         assert_eq!(sys.board.scroll_y, 0x42);
-        sys.write(BusMaster::Cpu(0), 0x7E00, 0x99);
+        sys.bus_write(BusMaster::Cpu(0), 0x7E00, 0x99);
         assert_eq!(sys.board.sound_latch, 0x99);
 
         // LS259: gfx bank (Q0), flip (Q2), palette bank (Q3), NMI mask (Q4).
-        sys.write(BusMaster::Cpu(0), 0x7E80, 0x01);
-        sys.write(BusMaster::Cpu(0), 0x7E82, 0x01);
-        sys.write(BusMaster::Cpu(0), 0x7E83, 0x01);
-        sys.write(BusMaster::Cpu(0), 0x7E84, 0x01);
+        sys.bus_write(BusMaster::Cpu(0), 0x7E80, 0x01);
+        sys.bus_write(BusMaster::Cpu(0), 0x7E82, 0x01);
+        sys.bus_write(BusMaster::Cpu(0), 0x7E83, 0x01);
+        sys.bus_write(BusMaster::Cpu(0), 0x7E84, 0x01);
         assert_eq!(sys.board.gfx_bank, 1);
         assert!(sys.board.flip_screen);
         assert_eq!(sys.board.palette_bank, 1);
@@ -1555,18 +1655,18 @@ mod tests {
     fn sample_triggers_route_to_sound_latches() {
         let mut sys = MarioBrosSystem::new();
         // 0x7F00: death → sound CPU IRQ.
-        sys.write(BusMaster::Cpu(0), 0x7F00, 0x01);
+        sys.bus_write(BusMaster::Cpu(0), 0x7F00, 0x01);
         assert!(sys.board.sound_irq_pending);
-        sys.write(BusMaster::Cpu(0), 0x7F00, 0x00);
+        sys.bus_write(BusMaster::Cpu(0), 0x7F00, 0x00);
         assert!(!sys.board.sound_irq_pending);
 
         // 0x7F01/0x7F02 → soundlatch3 bits 0/1 (T0/T1).
-        sys.write(BusMaster::Cpu(0), 0x7F01, 0x01);
-        sys.write(BusMaster::Cpu(0), 0x7F02, 0x01);
+        sys.bus_write(BusMaster::Cpu(0), 0x7F01, 0x01);
+        sys.bus_write(BusMaster::Cpu(0), 0x7F02, 0x01);
         assert_eq!(sys.board.sound_latch3 & 0x03, 0x03);
 
         // 0x7F03..0x7F06 → soundlatch1 bits 0..3 (P1 input).
-        sys.write(BusMaster::Cpu(0), 0x7F05, 0x01); // crab/.. bit 2
+        sys.bus_write(BusMaster::Cpu(0), 0x7F05, 0x01); // crab/.. bit 2
         assert_eq!(sys.board.sound_latch1, 0x04);
     }
 
@@ -1579,7 +1679,7 @@ mod tests {
 
         program_dma(&mut sys, 0x6000, 0x7000, 0x0004); // 5 bytes
         // Trigger via LS259 Q5 (DMA SET → RDY).
-        sys.write(BusMaster::Cpu(0), 0x7E85, 0x01);
+        sys.bus_write(BusMaster::Cpu(0), 0x7E85, 0x01);
 
         let spr = sys.board.main_map.region_data(MainRegion::SpriteRam);
         assert_eq!(&spr[0..5], &[0xDE, 0xAD, 0xBE, 0xEF, 0x42]);
@@ -1670,15 +1770,15 @@ mod tests {
         sys.board.vblank_nmi_pending = true;
 
         let data = SaveState::save_state(&sys).expect("save_state");
-        let cpu_snap = sys.board.cpu.snapshot();
-        let snd_snap = sys.board.sound_cpu.snapshot();
+        let cpu_snap = sys.cpu.snapshot();
+        let snd_snap = sys.sound_cpu.snapshot();
 
         let mut sys2 = MarioBrosSystem::new();
         sys2.board.clock = 999;
         SaveState::load_state(&mut sys2, &data).unwrap();
 
-        assert_eq!(sys2.board.cpu.snapshot(), cpu_snap);
-        assert_eq!(sys2.board.sound_cpu.snapshot(), snd_snap);
+        assert_eq!(sys2.cpu.snapshot(), cpu_snap);
+        assert_eq!(sys2.sound_cpu.snapshot(), snd_snap);
         assert_eq!(
             sys2.board.main_map.region_data(MainRegion::Ram)[0x100],
             0xAA

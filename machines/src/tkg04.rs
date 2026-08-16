@@ -220,6 +220,117 @@ pub(crate) fn compute_tkg04_palette(palette_prom: &[u8]) -> [(u8, u8, u8); 256] 
 // Tkg04Board — shared Nintendo TKG/TRS arcade hardware
 // ---------------------------------------------------------------------------
 
+/// The two CPUs that share the TKG-04 board, borrowed together.
+///
+/// Each machine owns them as its own fields — so the debug derive sees one
+/// `#[debug_cpu]` per CPU, and the save-state layout is unchanged — and hands
+/// them to [`tick`] as a pair alongside the bus they drive.
+pub struct Tkg04Cpus<'a> {
+    pub main: &'a mut Z80,
+    pub sound: &'a mut I8035,
+}
+
+impl Tkg04Cpus<'_> {
+    /// Bitmask of CPUs at an instruction boundary: bit 0 = main (Z80),
+    /// bit 1 = sound (I8035).
+    pub fn instruction_boundaries(main: &Z80, sound: &I8035) -> u32 {
+        let mut result = 0;
+        if main.at_instruction_boundary() {
+            result |= 1;
+        }
+        if sound.at_instruction_boundary() {
+            result |= 2;
+        }
+        result
+    }
+}
+
+/// A TKG-04 bus: the shared board behind a game's address decoding.
+///
+/// [`tick`] is generic over this trait, so every access the CPUs make resolves
+/// to a direct call rather than a vtable entry.
+pub trait Tkg04Bus: Bus<Address = u16, Data = u8> {
+    fn board(&mut self) -> &mut Tkg04Board;
+}
+
+/// One CPU cycle of a TKG-04 machine: board work, the Z80, then the sound CPU
+/// on its own divider, then the audio tail.
+///
+/// This is the debugger's path — it tests the frame position on every cycle.
+/// A whole frame goes through [`run_scanlines`], which hoists that test out.
+#[inline]
+pub fn tick<B: Tkg04Bus>(cpus: &mut Tkg04Cpus<'_>, bus: &mut B) {
+    let board = bus.board();
+    let frame_cycle = board.clock % TIMING.cycles_per_frame();
+    if frame_cycle.is_multiple_of(TIMING.cycles_per_scanline) {
+        board.begin_scanline((frame_cycle / TIMING.cycles_per_scanline) as u16);
+    }
+    step_cycle(cpus, bus);
+}
+
+/// Run `cycles` CPU cycles, scanline-outer and cycle-inner.
+///
+/// The scanline-boundary work — rendering a line and raising the VBLANK NMI —
+/// happens 264 times a frame instead of on each of the 50,688 cycles. The
+/// caller must start on a scanline boundary and pass a multiple of
+/// `cycles_per_scanline`; the debugger's off-boundary stepping goes through
+/// [`tick`] instead.
+pub fn run_scanlines<B: Tkg04Bus>(cpus: &mut Tkg04Cpus<'_>, bus: &mut B, cycles: u64) {
+    debug_assert!(
+        bus.board().clock.is_multiple_of(TIMING.cycles_per_scanline)
+            && cycles.is_multiple_of(TIMING.cycles_per_scanline),
+        "run_scanlines must start on a scanline boundary and run whole scanlines"
+    );
+    for _ in 0..cycles / TIMING.cycles_per_scanline {
+        let board = bus.board();
+        let scanline = board.clock % TIMING.cycles_per_frame() / TIMING.cycles_per_scanline;
+        board.begin_scanline(scanline as u16);
+        for _ in 0..TIMING.cycles_per_scanline {
+            step_cycle(cpus, bus);
+        }
+    }
+}
+
+/// Run one frame's worth of cycles.
+///
+/// Whole scanlines go through [`run_scanlines`]; any partial scanline at either
+/// end — which only happens when the debugger has left the clock off-boundary —
+/// goes through [`tick`], so the frame is the same sequence of cycles either
+/// way.
+pub fn run_frame<B: Tkg04Bus>(cpus: &mut Tkg04Cpus<'_>, bus: &mut B) {
+    let scanline = TIMING.cycles_per_scanline;
+    let mut remaining = TIMING.cycles_per_frame();
+
+    let lead = ((scanline - bus.board().clock % scanline) % scanline).min(remaining);
+    for _ in 0..lead {
+        tick(cpus, bus);
+    }
+    remaining -= lead;
+
+    let whole = remaining - remaining % scanline;
+    run_scanlines(cpus, bus, whole);
+    remaining -= whole;
+
+    for _ in 0..remaining {
+        tick(cpus, bus);
+    }
+}
+
+/// The part of a cycle with no frame-position test in it.
+#[inline]
+fn step_cycle<B: Tkg04Bus>(cpus: &mut Tkg04Cpus<'_>, bus: &mut B) {
+    bus.board().begin_cycle_inner(cpus);
+
+    cpus.main.execute_cycle(bus, BusMaster::Cpu(0));
+
+    // Sound CPU (Bresenham 25/192 ratio: 400 kHz from 3.072 MHz)
+    if bus.board().sound_clock.tick() {
+        cpus.sound.execute_cycle(bus, BusMaster::Cpu(1));
+    }
+
+    bus.board().end_cycle();
+}
+
 /// Shared hardware for the Nintendo TKG-04 arcade platform.
 ///
 /// Named after the Nintendo PCB designation "TKG-04", the final 2-board
@@ -227,18 +338,16 @@ pub(crate) fn compute_tkg04_palette(palette_prom: &[u8]) -> [(u8, u8, u8); 256] 
 /// used by Donkey Kong (TKG-04), Donkey Kong Jr, and Radar Scope (TRS-02).
 /// Earlier 4-board sets (TKG-02, TKG-03) are electrically equivalent.
 ///
+/// The board is everything the CPUs talk *to* — they live on the machine, so
+/// `cpu.execute_cycle(&mut bus, ..)` is a pair of disjoint field borrows and
+/// dispatches at a concrete bus type.
+///
 /// Hardware: Z80 @ 3.072 MHz (main), I8035 @ 6 MHz (sound).
 /// Video: 32×32 tile playfield + 16×16 sprites, 2bpp, PROM palette.
 /// Audio: I8035 DAC + discrete circuits (walk, jump, stomp effects).
 /// Screen: 256×240 displayed rotated 90° CCW on vertical monitor.
 #[derive(BusDebug, DebugTrace)]
 pub struct Tkg04Board {
-    // CPUs (debug reads/writes auto-routed through matching #[debug_map])
-    #[debug_cpu("Z80 Main")]
-    pub(crate) cpu: Z80,
-    #[debug_cpu("I8035 Sound")]
-    pub(crate) sound_cpu: I8035,
-
     // Memory maps (page-table dispatch + watchpoints + backing memory)
     // CPU-addressable RAM/ROM storage lives in the AddressSpace16 backing store.
     #[debug_map(cpu = 0)]
@@ -293,6 +402,17 @@ pub struct Tkg04Board {
     // Sound CPU interface
     pub(crate) sound_irq_pending: bool,
 
+    /// Mirror of the sound CPU's P1/P2 port latches, refreshed at the top of
+    /// every cycle from the CPU itself.
+    ///
+    /// The ports are hardware wires the *bus* has to answer for -- the sound
+    /// CPU reads its own ports back through `io_read`, and the main CPU reads
+    /// P2 bit 4 as a sound-busy status bit -- but the CPU that owns them now
+    /// lives outside the bus. Derived state, so it is not saved: the next
+    /// cycle re-latches it before anything can read it.
+    pub(crate) sound_p1: u8,
+    pub(crate) sound_p2: u8,
+
     // Audio output
     #[debug_device("DAC")]
     pub(crate) dac: Mc1408Dac,
@@ -319,8 +439,6 @@ impl Tkg04Board {
     /// - DK Jr: `tile_plane1_offset = 0x1000` (8KB tile ROM)
     pub fn new(tile_plane1_offset: usize) -> Self {
         Self {
-            cpu: Z80::new(),
-            sound_cpu: I8035::new(),
             main_map: Self::build_main_map(),
             sound_map: Self::build_sound_map(),
             tune_rom: [0; 0x0800],
@@ -347,6 +465,8 @@ impl Tkg04Board {
             tile_plane1_offset,
             dma: I8257::new(),
             sound_irq_pending: false,
+            sound_p1: 0,
+            sound_p2: 0,
             dac: Mc1408Dac::new(),
             resampler: AudioResampler::new(TIMING.cpu_clock_hz, OUTPUT_SAMPLE_RATE),
             clock: 0,
@@ -554,24 +674,19 @@ impl Tkg04Board {
     // Core tick
     // -----------------------------------------------------------------------
 
-    /// Execute one CPU cycle at the Z80 clock rate (3.072 MHz).
+    /// Work that only happens on the first cycle of a scanline: rendering the
+    /// line, and the VBLANK NMI edges.
     ///
-    /// The `bus` parameter is the game wrapper (which implements `Bus`) passed
-    /// in from the wrapper's `run_frame()` / `debug_tick()`.
-    pub fn tick(&mut self, bus: &mut dyn Bus<Address = u16, Data = u8>) {
-        let frame_cycle = self.clock % TIMING.cycles_per_frame();
-
-        // Per-scanline rendering at scanline boundary
-        if frame_cycle.is_multiple_of(TIMING.cycles_per_scanline) {
-            let scanline = (frame_cycle / TIMING.cycles_per_scanline) as u16;
-            if scanline < VISIBLE_LINES as u16 {
-                self.render_scanline(scanline as usize);
-            }
+    /// Called once per scanline from [`run_scanlines`] and, for the debugger's
+    /// single-step path, from [`tick`] when the clock lands on a boundary.
+    fn begin_scanline(&mut self, scanline: u16) {
+        // Per-scanline rendering
+        if scanline < VISIBLE_LINES as u16 {
+            self.render_scanline(scanline as usize);
         }
 
         // VBLANK NMI: assert at scanline 240
-        let vblank_cycle = VISIBLE_LINES * TIMING.cycles_per_scanline;
-        if frame_cycle == vblank_cycle {
+        if scanline == VISIBLE_LINES as u16 {
             self.vblank_nmi_pending = true;
             if self.debug_trace.enabled() {
                 self.debug_trace.record(DebugEvent {
@@ -590,29 +705,36 @@ impl Tkg04Board {
             }
         }
         // Clear NMI at frame boundary (end of VBLANK)
-        if frame_cycle == 0 && self.clock > 0 {
+        if scanline == 0 && self.clock > 0 {
             self.vblank_nmi_pending = false;
         }
+    }
+
+    /// Per-cycle board work that runs before the CPUs, with no frame-position
+    /// test in it.
+    fn begin_cycle_inner(&mut self, cpus: &Tkg04Cpus<'_>) {
+        // Mirror the sound CPU's port latches. The bus has to answer for them —
+        // the sound CPU reads its own ports back, and the main CPU reads P2 bit
+        // 4 as a sound-busy bit — but the CPU that owns them is outside the bus.
+        // Sampling here is faithful: only the sound CPU changes these, and it
+        // steps later in this same cycle.
+        self.sound_p1 = cpus.sound.p1;
+        self.sound_p2 = cpus.sound.p2;
 
         // Latch debug attribution context (cycle + instruction PC) before
         // CPU execution — bus dispatch cannot read CPU state mid-tick.
         // (sound_map has no watchpoint hooks in bus dispatch yet.)
         if self.main_map.has_any_watchpoints() || self.debug_trace.enabled() {
-            let pc = self
-                .cpu
+            let pc = cpus
+                .main
                 .at_instruction_boundary()
-                .then_some(self.cpu.pc as u32);
+                .then_some(cpus.main.pc as u32);
             self.main_map.latch_access_context(self.clock, pc);
         }
+    }
 
-        // Execute main CPU cycle
-        self.cpu.execute_cycle(bus, BusMaster::Cpu(0));
-
-        // Tick sound CPU (Bresenham 25/192 ratio: 400 kHz from 3.072 MHz)
-        if self.sound_clock.tick() {
-            self.sound_cpu.execute_cycle(bus, BusMaster::Cpu(1));
-        }
-
+    /// Board work after the CPUs' cycle: the audio tail and the clock advance.
+    fn end_cycle(&mut self) {
         // Box-filter the DAC (3.072 MHz → 44.1 kHz); each produced sample drives
         // one step of the discrete circuit, which sums it with the effects.
         if let Some(dac_avg) = self.resampler.tick_sample(self.dac.sample_i16()) {
@@ -800,28 +922,11 @@ impl Tkg04Board {
             )
         });
     }
-
-    // -----------------------------------------------------------------------
-    // Debug
-    // -----------------------------------------------------------------------
-
-    /// Return instruction-boundary bitmask for debugger.
-    pub fn debug_tick_boundaries(&self) -> u32 {
-        let mut result = 0;
-        if self.cpu.at_instruction_boundary() {
-            result |= 1;
-        }
-        if self.sound_cpu.at_instruction_boundary() {
-            result |= 2;
-        }
-        result
-    }
 }
 
 impl Saveable for Tkg04Board {
     fn save_state(&self, w: &mut StateWriter) {
-        self.cpu.save_state(w);
-        self.sound_cpu.save_state(w);
+        // The CPUs are saved by the machine, which owns them.
         w.write_bytes(self.main_map.region_data(MainRegion::Ram));
         w.write_bytes(self.main_map.region_data(MainRegion::SpriteRam));
         w.write_bytes(self.main_map.region_data(MainRegion::VideoRam));
@@ -847,8 +952,7 @@ impl Saveable for Tkg04Board {
     }
 
     fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
-        self.cpu.load_state(r)?;
-        self.sound_cpu.load_state(r)?;
+        // The CPUs are loaded by the machine, which owns them.
         r.read_bytes_into(self.main_map.region_data_mut(MainRegion::Ram))?;
         r.read_bytes_into(self.main_map.region_data_mut(MainRegion::SpriteRam))?;
         r.read_bytes_into(self.main_map.region_data_mut(MainRegion::VideoRam))?;

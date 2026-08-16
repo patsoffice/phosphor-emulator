@@ -1,4 +1,3 @@
-use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
     ActionRole, DipApplyTiming, DipChoice, DipOption, DipSwitchBank, Direction, InputConfigurable,
@@ -6,14 +5,16 @@ use phosphor_core::core::machine::{
 };
 use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
-use phosphor_macros::Saveable;
+use phosphor_core::cpu::i8035::I8035;
+use phosphor_core::cpu::z80::Z80;
+use phosphor_macros::{BusDebug, Saveable};
 
 use phosphor_core::gfx::decode::GfxLayout;
 
 use crate::gfx_registry::GfxRegion;
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
 use crate::set_bit_active_high;
-use crate::tkg04::{self, MainRegion, SoundRegion, Tkg04Board};
+use crate::tkg04::{self, MainRegion, SoundRegion, Tkg04Board, Tkg04Bus, Tkg04Cpus};
 
 // ---------------------------------------------------------------------------
 // Donkey Kong ROM definitions (TKG-04 / "dkong" MAME set)
@@ -379,8 +380,16 @@ pub const DKONG_CONTROLS: &[InputControl] = &[
 // ---------------------------------------------------------------------------
 
 /// Donkey Kong (Nintendo, 1981) on the shared DK hardware platform.
-#[derive(Saveable)]
+#[derive(Saveable, BusDebug)]
 pub struct DkongSystem {
+    /// The CPUs are held beside the bus, not inside it, so their cycles
+    /// dispatch to a concrete bus view.
+    #[debug_cpu("Z80 Main")]
+    pub cpu: Z80,
+    #[debug_cpu("I8035 Sound")]
+    pub sound_cpu: I8035,
+
+    #[debug_bus]
     pub board: Tkg04Board,
 }
 
@@ -393,11 +402,44 @@ impl Default for DkongSystem {
 impl DkongSystem {
     pub fn new() -> Self {
         Self {
+            cpu: Z80::new(),
+            sound_cpu: I8035::new(),
             board: Tkg04Board::new(0x800), // 4KB tile ROM → plane 1 at 0x800
         }
     }
 
     /// Load all ROM sets.
+    /// Borrow the CPUs and the bus they drive as two disjoint pieces.
+    #[inline]
+    fn split(&mut self) -> (Tkg04Cpus<'_>, DkongBus<'_>) {
+        (
+            Tkg04Cpus {
+                main: &mut self.cpu,
+                sound: &mut self.sound_cpu,
+            },
+            DkongBus(&mut self.board),
+        )
+    }
+
+    /// One CPU cycle. Returns a bitmask of CPUs at an instruction boundary
+    /// (for the debugger, which steps instructions rather than cycles).
+    pub fn step_cycle(&mut self) -> u32 {
+        let (mut cpus, mut bus) = self.split();
+        tkg04::tick(&mut cpus, &mut bus);
+        Tkg04Cpus::instruction_boundaries(&self.cpu, &self.sound_cpu)
+    }
+
+    /// Read the CPU-facing bus, side effects and all. Distinct from the
+    /// debugger's `BusDebug::peek`/`poke`, which avoid side effects.
+    pub fn bus_read(&mut self, master: BusMaster, addr: u16) -> u8 {
+        self.split().1.read(master, addr)
+    }
+
+    /// Write the CPU-facing bus, side effects and all. See [`Self::bus_read`].
+    pub fn bus_write(&mut self, master: BusMaster, addr: u16, data: u8) {
+        self.split().1.write(master, addr, data);
+    }
+
     pub fn load_rom_set(&mut self, rom_set: &RomSet) -> Result<(), RomLoadError> {
         let rom_data = DKONG_PROGRAM_ROM.load(rom_set)?;
         self.board
@@ -437,7 +479,21 @@ impl DkongSystem {
 // Bus implementation (DK-specific memory map)
 // ---------------------------------------------------------------------------
 
-impl Bus for DkongSystem {
+/// The Donkey Kong bus: the shared board behind DK's address decoding.
+///
+/// Nothing but the board is on this bus — the wrapper is a newtype so the
+/// game-specific decode has somewhere to live without the machine (which owns
+/// the CPUs) implementing `Bus` itself.
+struct DkongBus<'a>(&'a mut Tkg04Board);
+
+impl Tkg04Bus for DkongBus<'_> {
+    #[inline]
+    fn board(&mut self) -> &mut Tkg04Board {
+        self.0
+    }
+}
+
+impl Bus for DkongBus<'_> {
     type Address = u16;
     type Data = u8;
 
@@ -445,36 +501,36 @@ impl Bus for DkongSystem {
         match master {
             // Main CPU (Z80)
             BusMaster::Cpu(0) => {
-                let data = match self.board.main_map.page(addr).region_id {
+                let data = match self.0.main_map.page(addr).region_id {
                     MainRegion::ROM
                     | MainRegion::RAM
                     | MainRegion::SPRITE_RAM
-                    | MainRegion::VIDEO_RAM => self.board.main_map.read_backing(addr),
-                    MainRegion::IO_DMA if addr <= 0x7808 => self.board.dma.read(addr - 0x7800),
+                    | MainRegion::VIDEO_RAM => self.0.main_map.read_backing(addr),
+                    MainRegion::IO_DMA if addr <= 0x7808 => self.0.dma.read(addr - 0x7800),
                     MainRegion::IO_PORTS => match addr {
-                        0x7C00 => self.board.in0,
-                        0x7C80 => self.board.in1,
+                        0x7C00 => self.0.in0,
+                        0x7C80 => self.0.in1,
                         0x7D00 => {
                             // IN2: active-high inputs + sound status at bit 6
-                            let sound_status = if self.board.sound_cpu.p2 & 0x10 != 0 {
+                            let sound_status = if self.0.sound_p2 & 0x10 != 0 {
                                 0x00
                             } else {
                                 0x40
                             };
-                            (self.board.in2 & !0x40) | sound_status
+                            (self.0.in2 & !0x40) | sound_status
                         }
-                        0x7D80 => self.board.dsw0,
+                        0x7D80 => self.0.dsw0,
                         _ => 0x00,
                     },
                     _ => 0x00,
                 };
-                self.board.main_map.watch_read(0, master, addr, data);
-                self.board.trace_main_read(addr, data);
+                self.0.main_map.watch_read(0, master, addr, data);
+                self.0.trace_main_read(addr, data);
                 data
             }
 
             // Sound CPU (I8035) - program memory
-            BusMaster::Cpu(1) => self.board.sound_map.read_backing(addr & 0x0FFF),
+            BusMaster::Cpu(1) => self.0.sound_map.read_backing(addr & 0x0FFF),
 
             _ => 0x00,
         }
@@ -485,60 +541,60 @@ impl Bus for DkongSystem {
             BusMaster::Cpu(0) => {
                 // Check the watchpoint before the side effect so the hit
                 // records pre-write state (WatchpointPhase::Before).
-                self.board.main_map.watch_write(0, master, addr, data);
-                self.board.trace_main_write(addr, data);
-                match self.board.main_map.page(addr).region_id {
+                self.0.main_map.watch_write(0, master, addr, data);
+                self.0.trace_main_write(addr, data);
+                match self.0.main_map.page(addr).region_id {
                     MainRegion::RAM | MainRegion::SPRITE_RAM | MainRegion::VIDEO_RAM => {
-                        self.board.main_map.write_backing(addr, data);
+                        self.0.main_map.write_backing(addr, data);
                     }
                     MainRegion::IO_DMA if addr <= 0x7808 => {
-                        self.board.dma.write(addr - 0x7800, data);
+                        self.0.dma.write(addr - 0x7800, data);
                     }
                     MainRegion::IO_PORTS => match addr {
                         // Sound latch (ls175.3d)
-                        0x7C00 => self.board.sound_latch = data,
+                        0x7C00 => self.0.sound_latch = data,
 
                         // 74LS259 sound control latch: addr bits 0-2 select bit
                         0x7D00..=0x7D07 => {
                             let bit = (addr & 0x07) as u8;
-                            self.board.write_sound_control_bit(bit, data & 1 != 0);
+                            self.0.write_sound_control_bit(bit, data & 1 != 0);
                         }
 
                         // Sound CPU IRQ trigger
                         0x7D80 => {
-                            self.board.sound_irq_pending = data != 0;
+                            self.0.sound_irq_pending = data != 0;
                         }
 
                         // Flip screen
-                        0x7D82 => self.board.flip_screen = (data & 1) != 0,
+                        0x7D82 => self.0.flip_screen = (data & 1) != 0,
 
                         // Sprite bank select
-                        0x7D83 => self.board.sprite_bank = (data & 1) != 0,
+                        0x7D83 => self.0.sprite_bank = (data & 1) != 0,
 
                         // NMI mask
                         0x7D84 => {
-                            self.board.nmi_mask = (data & 1) != 0;
-                            if !self.board.nmi_mask {
-                                self.board.vblank_nmi_pending = false;
+                            self.0.nmi_mask = (data & 1) != 0;
+                            if !self.0.nmi_mask {
+                                self.0.vblank_nmi_pending = false;
                             }
                         }
 
                         // DMA DRQ: trigger sprite DMA transfer from i8257 channel 0
-                        0x7D85 => self.board.trigger_sprite_dma(),
+                        0x7D85 => self.0.trigger_sprite_dma(),
 
                         // Palette bank (2-bit, one bit per address)
                         0x7D86 => {
                             if data & 1 != 0 {
-                                self.board.palette_bank |= 0x01;
+                                self.0.palette_bank |= 0x01;
                             } else {
-                                self.board.palette_bank &= !0x01;
+                                self.0.palette_bank &= !0x01;
                             }
                         }
                         0x7D87 => {
                             if data & 1 != 0 {
-                                self.board.palette_bank |= 0x02;
+                                self.0.palette_bank |= 0x02;
                             } else {
-                                self.board.palette_bank &= !0x02;
+                                self.0.palette_bank &= !0x02;
                             }
                         }
 
@@ -564,16 +620,16 @@ impl Bus for DkongSystem {
             BusMaster::Cpu(1) => match addr {
                 // MOVX and INS A,BUS: dkong_tune_r logic
                 0x00..=0x100 => {
-                    if self.board.sound_cpu.p2 & 0x40 != 0 {
+                    if self.0.sound_p2 & 0x40 != 0 {
                         // Command mode: read sound latch (lower 4 bits, inverted by ls175.3d)
-                        (self.board.sound_latch & 0x0F) ^ 0x0F
+                        (self.0.sound_latch & 0x0F) ^ 0x0F
                     } else {
                         // Tune ROM mode: bank select from P2 bits 2-0
-                        let bank = (self.board.sound_cpu.p2 & 0x07) as usize;
+                        let bank = (self.0.sound_p2 & 0x07) as usize;
                         let offset = (addr & 0xFF) as usize;
                         let rom_addr = bank * 256 + offset;
-                        if rom_addr < self.board.tune_rom.len() {
-                            self.board.tune_rom[rom_addr]
+                        if rom_addr < self.0.tune_rom.len() {
+                            self.0.tune_rom[rom_addr]
                         } else {
                             0xFF
                         }
@@ -581,13 +637,13 @@ impl Bus for DkongSystem {
                 }
 
                 // IN A,P1: read P1 latch
-                0x101 => self.board.sound_cpu.p1,
+                0x101 => self.0.sound_p1,
 
                 // IN A,P2: virtual port with bit 5 from sound control latch bit 3 (XOR'd)
                 0x102 => {
-                    let mut val = self.board.sound_cpu.p2;
+                    let mut val = self.0.sound_p2;
                     val = (val & !0x20)
-                        | if self.board.sound_control_latch.bit(3) {
+                        | if self.0.sound_control_latch.bit(3) {
                             0x20
                         } else {
                             0x00
@@ -596,10 +652,10 @@ impl Bus for DkongSystem {
                 }
 
                 // T0: inverted bit 5 of sound control latch
-                0x110 => u8::from(!self.board.sound_control_latch.bit(5)),
+                0x110 => u8::from(!self.0.sound_control_latch.bit(5)),
 
                 // T1: inverted bit 4 of sound control latch
-                0x111 => u8::from(!self.board.sound_control_latch.bit(4)),
+                0x111 => u8::from(!self.0.sound_control_latch.bit(4)),
 
                 _ => 0xFF,
             },
@@ -614,7 +670,7 @@ impl Bus for DkongSystem {
 
             BusMaster::Cpu(1) => match addr {
                 // OUTL P1,A: DAC output
-                0x101 => self.board.dac.write(data),
+                0x101 => self.0.dac.write(data),
 
                 // OUTL P2,A: control port (tracked by I8035 internally)
                 0x102 => {}
@@ -631,7 +687,7 @@ impl Bus for DkongSystem {
     }
 
     fn check_interrupts(&mut self, target: BusMaster) -> InterruptState {
-        self.board.check_interrupts(target)
+        self.0.check_interrupts(target)
     }
 }
 
@@ -639,7 +695,7 @@ impl Bus for DkongSystem {
 // Machine traits (MachineCore + capabilities)
 // ---------------------------------------------------------------------------
 
-crate::impl_board_delegation!(DkongSystem, board, tkg04::TIMING, orientation);
+crate::impl_board_delegation!(DkongSystem, board, tkg04::TIMING, orientation, split_cpu);
 
 impl InputConfigurable for DkongSystem {
     fn input_controls(&self) -> &'static [InputControl] {
@@ -676,20 +732,16 @@ impl MachineCore for DkongSystem {
     crate::machine_core_metadata!("dkong", tkg04::TIMING);
 
     fn run_frame(&mut self) {
-        bus_split!(self, bus => {
-            for _ in 0..tkg04::TIMING.cycles_per_frame() {
-                self.board.tick(bus);
-            }
-        });
+        let (mut cpus, mut bus) = self.split();
+        tkg04::run_frame(&mut cpus, &mut bus);
     }
 
     fn reset(&mut self) {
         self.board.reset();
         self.board.dsw0 = 0x80; // upright cabinet, 3 lives, 7000 bonus, 1 coin/1 play
-        bus_split!(self, bus => {
-            self.board.cpu.reset(bus, BusMaster::Cpu(0));
-            self.board.sound_cpu.reset(bus, BusMaster::Cpu(1));
-        });
+        let (cpus, mut bus) = self.split();
+        cpus.main.reset(&mut bus, BusMaster::Cpu(0));
+        cpus.sound.reset(&mut bus, BusMaster::Cpu(1));
     }
 
     fn gfx_sheets(&self) -> Vec<phosphor_core::core::machine::GfxSheet<'_>> {
@@ -860,8 +912,8 @@ mod tests {
 
         // Save
         let data = sys.save_state().expect("save_state should return Some");
-        let cpu_snap = sys.board.cpu.snapshot();
-        let sound_snap = sys.board.sound_cpu.snapshot();
+        let cpu_snap = sys.cpu.snapshot();
+        let sound_snap = sys.sound_cpu.snapshot();
 
         // Mutate everything
         let mut sys2 = DkongSystem::new();
@@ -872,8 +924,8 @@ mod tests {
         sys2.load_state(&data).unwrap();
 
         // Verify CPUs
-        assert_eq!(sys2.board.cpu.snapshot(), cpu_snap);
-        assert_eq!(sys2.board.sound_cpu.snapshot(), sound_snap);
+        assert_eq!(sys2.cpu.snapshot(), cpu_snap);
+        assert_eq!(sys2.sound_cpu.snapshot(), sound_snap);
 
         // Verify memory
         assert_eq!(
