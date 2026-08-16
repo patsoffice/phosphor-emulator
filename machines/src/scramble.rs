@@ -1308,7 +1308,7 @@ impl Bus for ScobraSystem {
     }
 }
 
-crate::impl_board_delegation!(ScobraSystem, board, TIMING);
+crate::impl_board_delegation!(ScobraSystem, board, TIMING, orientation);
 
 impl MachineCore for ScobraSystem {
     crate::machine_core_metadata!("scobra", TIMING);
@@ -1411,6 +1411,23 @@ mod tests {
         // Default DIPs (active-low): IN1 continue+3 lives, IN2 1C/1C upright.
         assert_eq!(sys.board.in1 & SCB_DIP1_MASK, 0x01);
         assert_eq!(sys.board.in2 & SCB_DIP2_MASK, 0x02);
+    }
+
+    /// Super Cobra shares Scramble's rotated monitor, so both wrappers have to
+    /// forward the board's declared orientation. Scobra's delegation once
+    /// omitted it and fell back to `NORMAL`, which drew the whole game 90° off
+    /// while every existing test stayed green.
+    #[test]
+    fn scobra_declares_the_same_rotation_as_scramble() {
+        use phosphor_core::core::machine::Renderable;
+        let scobra = ScobraSystem::new();
+        let scramble = ScrambleSystem::new();
+        assert_eq!(scobra.orientation(), scramble.orientation());
+        assert!(
+            scobra.orientation().swaps_axes(),
+            "the Scramble board is a portrait cabinet: {:?}",
+            scobra.orientation()
+        );
     }
 
     #[test]
