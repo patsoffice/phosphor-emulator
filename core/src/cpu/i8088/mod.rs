@@ -254,16 +254,25 @@ impl I8088 {
 // ---------------------------------------------------------------------------
 
 impl BusMasterComponent for I8088 {
-    type Bus = dyn Bus<Address = u32, Data = u8>;
+    type Address = u32;
+    type Data = u8;
 
-    fn tick_with_bus(&mut self, bus: &mut Self::Bus, master: BusMaster) -> bool {
+    fn tick_with_bus<B: Bus<Address = u32, Data = u8> + ?Sized>(
+        &mut self,
+        bus: &mut B,
+        master: BusMaster,
+    ) -> bool {
         self.execute_cycle(bus, master);
         matches!(self.state, ExecState::Fetch)
     }
 }
 
 impl Cpu for I8088 {
-    fn reset(&mut self, bus: &mut Self::Bus, master: BusMaster) {
+    fn reset<B: Bus<Address = Self::Address, Data = Self::Data> + ?Sized>(
+        &mut self,
+        bus: &mut B,
+        master: BusMaster,
+    ) {
         self.ax = 0;
         self.bx = 0;
         self.cx = 0;

@@ -1,10 +1,18 @@
-use crate::core::BusMaster;
 use crate::core::component::BusMasterComponent;
+use crate::core::{Bus, BusMaster};
 
 /// Generic CPU interface
 pub trait Cpu: BusMasterComponent + CpuStateTrait {
     /// Reset the CPU and fetch the reset vector from the bus (matching real hardware).
-    fn reset(&mut self, bus: &mut Self::Bus, master: BusMaster);
+    ///
+    /// Generic over the bus for the same reason [`BusMasterComponent`] is: a
+    /// board that holds its CPU beside its bus passes a borrowed view here,
+    /// whose lifetime an associated `dyn Bus` type could not name.
+    fn reset<B: Bus<Address = Self::Address, Data = Self::Data> + ?Sized>(
+        &mut self,
+        bus: &mut B,
+        master: BusMaster,
+    );
 
     /// Signal a specific interrupt line (implementation-defined)
     fn signal_interrupt(&mut self, int: crate::core::bus::InterruptState);

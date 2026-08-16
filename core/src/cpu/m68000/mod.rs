@@ -443,16 +443,25 @@ impl M68000 {
 // ---------------------------------------------------------------------------
 
 impl BusMasterComponent for M68000 {
-    type Bus = dyn Bus<Address = u32, Data = u16>;
+    type Address = u32;
+    type Data = u16;
 
-    fn tick_with_bus(&mut self, bus: &mut Self::Bus, master: BusMaster) -> bool {
+    fn tick_with_bus<B: Bus<Address = u32, Data = u16> + ?Sized>(
+        &mut self,
+        bus: &mut B,
+        master: BusMaster,
+    ) -> bool {
         self.execute_cycle(bus, master);
         matches!(self.state, ExecState::Fetch)
     }
 }
 
 impl Cpu for M68000 {
-    fn reset(&mut self, bus: &mut Self::Bus, master: BusMaster) {
+    fn reset<B: Bus<Address = Self::Address, Data = Self::Data> + ?Sized>(
+        &mut self,
+        bus: &mut B,
+        master: BusMaster,
+    ) {
         // Reset enters supervisor mode with trace off and interrupts masked,
         // then loads SSP from vector 0 and PC from vector 1.
         self.sr = 0x2700; // S=1, T=0, interrupt mask = 7

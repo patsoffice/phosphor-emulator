@@ -460,12 +460,8 @@ impl MachineCore for MsPacmanSystem {
     fn reset(&mut self) {
         self.board.reset_board();
         self.decode_enabled = true; // Latch defaults to enabled (Ms. Pac-Man code)
-        // Reset goes to the base board rather than the daughter-card view:
-        // `Cpu::reset` takes `&mut dyn Bus + 'static`, which a borrowed view
-        // cannot satisfy. Equivalent here — the Z80 starts at 0x0000 without
-        // reading a reset vector — but a CPU that fetches one (6502, 6809)
-        // will need `Cpu::reset` generic over the bus type.
-        self.cpu.reset(&mut self.board, BusMaster::Cpu(0));
+        let (cpu, mut bus) = self.split();
+        cpu.reset(&mut bus, BusMaster::Cpu(0));
     }
 }
 

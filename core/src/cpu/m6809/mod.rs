@@ -702,9 +702,14 @@ impl M6809 {
 }
 
 impl BusMasterComponent for M6809 {
-    type Bus = dyn Bus<Address = u16, Data = u8>;
+    type Address = u16;
+    type Data = u8;
 
-    fn tick_with_bus(&mut self, bus: &mut Self::Bus, master: BusMaster) -> bool {
+    fn tick_with_bus<B: Bus<Address = u16, Data = u8> + ?Sized>(
+        &mut self,
+        bus: &mut B,
+        master: BusMaster,
+    ) -> bool {
         self.execute_cycle(bus, master);
         // Return true if instruction boundary reached
         matches!(self.state, ExecState::Fetch)
@@ -712,7 +717,11 @@ impl BusMasterComponent for M6809 {
 }
 
 impl Cpu for M6809 {
-    fn reset(&mut self, bus: &mut Self::Bus, master: BusMaster) {
+    fn reset<B: Bus<Address = Self::Address, Data = Self::Data> + ?Sized>(
+        &mut self,
+        bus: &mut B,
+        master: BusMaster,
+    ) {
         self.cc = CcFlag::I as u8 | CcFlag::F as u8; // IRQ/FIRQ masked
         let hi = bus.read(master, 0xFFFE);
         let lo = bus.read(master, 0xFFFF);

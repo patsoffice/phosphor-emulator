@@ -21,7 +21,7 @@ use phosphor_core::cpu::z80::Z80;
 
 pub struct SimpleSystem<C>
 where
-    C: Cpu + BusMasterComponent<Bus = dyn Bus<Address = u16, Data = u8>> + 'static,
+    C: Cpu + BusMasterComponent<Address = u16, Data = u8> + 'static,
 {
     pub cpu: C,
     ram: [u8; 0x10000],
@@ -30,7 +30,7 @@ where
 
 impl<C> Default for SimpleSystem<C>
 where
-    C: Cpu + Default + BusMasterComponent<Bus = dyn Bus<Address = u16, Data = u8>> + 'static,
+    C: Cpu + Default + BusMasterComponent<Address = u16, Data = u8> + 'static,
 {
     fn default() -> Self {
         Self::new()
@@ -39,7 +39,7 @@ where
 
 impl<C> SimpleSystem<C>
 where
-    C: Cpu + Default + BusMasterComponent<Bus = dyn Bus<Address = u16, Data = u8>> + 'static,
+    C: Cpu + Default + BusMasterComponent<Address = u16, Data = u8> + 'static,
 {
     pub fn new() -> Self {
         Self {
@@ -52,7 +52,7 @@ where
 
 impl<C> SimpleSystem<C>
 where
-    C: Cpu + BusMasterComponent<Bus = dyn Bus<Address = u16, Data = u8>> + 'static,
+    C: Cpu + BusMasterComponent<Address = u16, Data = u8> + 'static,
 {
     pub fn tick(&mut self) {
         bus_split!(self, bus => {
@@ -96,7 +96,7 @@ where
 
 impl<C> Bus for SimpleSystem<C>
 where
-    C: Cpu + BusMasterComponent<Bus = dyn Bus<Address = u16, Data = u8>> + 'static,
+    C: Cpu + BusMasterComponent<Address = u16, Data = u8> + 'static,
 {
     type Address = u16;
     type Data = u8;
@@ -131,7 +131,7 @@ pub type SimpleI8035System = SimpleSystem<I8035>;
 
 pub struct SimpleSystem32<C>
 where
-    C: Cpu + BusMasterComponent<Bus = dyn Bus<Address = u32, Data = u8>> + 'static,
+    C: Cpu + BusMasterComponent<Address = u32, Data = u8> + 'static,
 {
     pub cpu: C,
     ram: Vec<u8>,
@@ -140,7 +140,7 @@ where
 
 impl<C> Default for SimpleSystem32<C>
 where
-    C: Cpu + Default + BusMasterComponent<Bus = dyn Bus<Address = u32, Data = u8>> + 'static,
+    C: Cpu + Default + BusMasterComponent<Address = u32, Data = u8> + 'static,
 {
     fn default() -> Self {
         Self::new()
@@ -149,7 +149,7 @@ where
 
 impl<C> SimpleSystem32<C>
 where
-    C: Cpu + Default + BusMasterComponent<Bus = dyn Bus<Address = u32, Data = u8>> + 'static,
+    C: Cpu + Default + BusMasterComponent<Address = u32, Data = u8> + 'static,
 {
     pub fn new() -> Self {
         Self {
@@ -162,7 +162,7 @@ where
 
 impl<C> SimpleSystem32<C>
 where
-    C: Cpu + BusMasterComponent<Bus = dyn Bus<Address = u32, Data = u8>> + 'static,
+    C: Cpu + BusMasterComponent<Address = u32, Data = u8> + 'static,
 {
     pub fn tick(&mut self) {
         bus_split!(self, bus: u32 => {
@@ -206,7 +206,7 @@ where
 
 impl<C> Bus for SimpleSystem32<C>
 where
-    C: Cpu + BusMasterComponent<Bus = dyn Bus<Address = u32, Data = u8>> + 'static,
+    C: Cpu + BusMasterComponent<Address = u32, Data = u8> + 'static,
 {
     type Address = u32;
     type Data = u8;
@@ -239,7 +239,7 @@ pub type SimpleI8088System = SimpleSystem32<I8088>;
 /// serving 16-bit big-endian words at even addresses.
 pub struct SimpleSystem68k<C>
 where
-    C: Cpu + BusMasterComponent<Bus = dyn Bus<Address = u32, Data = u16>> + 'static,
+    C: Cpu + BusMasterComponent<Address = u32, Data = u16> + 'static,
 {
     pub cpu: C,
     ram: Vec<u8>,
@@ -248,7 +248,7 @@ where
 
 impl<C> Default for SimpleSystem68k<C>
 where
-    C: Cpu + Default + BusMasterComponent<Bus = dyn Bus<Address = u32, Data = u16>> + 'static,
+    C: Cpu + Default + BusMasterComponent<Address = u32, Data = u16> + 'static,
 {
     fn default() -> Self {
         Self::new()
@@ -257,7 +257,7 @@ where
 
 impl<C> SimpleSystem68k<C>
 where
-    C: Cpu + Default + BusMasterComponent<Bus = dyn Bus<Address = u32, Data = u16>> + 'static,
+    C: Cpu + Default + BusMasterComponent<Address = u32, Data = u16> + 'static,
 {
     pub fn new() -> Self {
         Self {
@@ -270,7 +270,7 @@ where
 
 impl<C> SimpleSystem68k<C>
 where
-    C: Cpu + BusMasterComponent<Bus = dyn Bus<Address = u32, Data = u16>> + 'static,
+    C: Cpu + BusMasterComponent<Address = u32, Data = u16> + 'static,
 {
     pub fn tick(&mut self) {
         bus_split!(self, bus: u32 word => {
@@ -321,7 +321,7 @@ where
 
 impl<C> Bus for SimpleSystem68k<C>
 where
-    C: Cpu + BusMasterComponent<Bus = dyn Bus<Address = u32, Data = u16>> + 'static,
+    C: Cpu + BusMasterComponent<Address = u32, Data = u16> + 'static,
 {
     type Address = u32;
     type Data = u16;

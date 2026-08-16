@@ -623,16 +623,25 @@ impl M6502 {
 }
 
 impl BusMasterComponent for M6502 {
-    type Bus = dyn Bus<Address = u16, Data = u8>;
+    type Address = u16;
+    type Data = u8;
 
-    fn tick_with_bus(&mut self, bus: &mut Self::Bus, master: BusMaster) -> bool {
+    fn tick_with_bus<B: Bus<Address = u16, Data = u8> + ?Sized>(
+        &mut self,
+        bus: &mut B,
+        master: BusMaster,
+    ) -> bool {
         self.execute_cycle(bus, master);
         matches!(self.state, ExecState::Fetch)
     }
 }
 
 impl Cpu for M6502 {
-    fn reset(&mut self, bus: &mut Self::Bus, master: BusMaster) {
+    fn reset<B: Bus<Address = Self::Address, Data = Self::Data> + ?Sized>(
+        &mut self,
+        bus: &mut B,
+        master: BusMaster,
+    ) {
         self.sp = 0xFD;
         self.p = 0x24;
         let lo = bus.read(master, 0xFFFC);

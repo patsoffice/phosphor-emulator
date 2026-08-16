@@ -183,25 +183,37 @@ clock off-phase, and still splits once per run.
 
 ## Open problems for the rollout
 
-### `Cpu::reset` takes `&mut dyn Bus + 'static`
+### ~~`Cpu::reset` takes `&mut dyn Bus + 'static`~~ — solved
 
-`BusMasterComponent::Bus` is an associated *type* (`dyn Bus<Address = u16, Data =
-u8>`), so a borrowed view struct cannot be passed to `Cpu::reset` — the lifetime
-cannot be named. The Z80 ignores the bus at reset, so both prototypes sidestepped
-it (Pac-Man resets against the board; Galaga uses `Z80::hardware_reset`).
+`BusMasterComponent::Bus` used to be an associated *type* (`dyn Bus<Address =
+u16, Data = u8>`), so a borrowed view struct could not be passed to `Cpu::reset`
+— the lifetime could not be named. The Z80 ignores the bus at reset, so both
+prototypes sidestepped it (Pac-Man reset against the board; Galaga uses
+`Z80::hardware_reset`); the 6502, 6809 and 68000 fetch their reset vector through
+the bus and had no such escape.
 
-**The 6502, 6809 and 68000 fetch their reset vector through the bus.** Their
-boards cannot convert until `Cpu::reset` is generic over the bus type:
+The associated type is now the bus *widths* rather than a bus type, and both
+methods take the bus as a parameter:
 
 ```rust
-fn reset<B: Bus<Address = Self::Address, Data = Self::Data> + ?Sized>(
-    &mut self, bus: &mut B, master: BusMaster);
+pub trait BusMasterComponent {
+    type Address: Copy + Into<u64>;
+    type Data;
+    fn tick_with_bus<B: Bus<Address = Self::Address, Data = Self::Data> + ?Sized>(
+        &mut self, bus: &mut B, master_id: BusMaster) -> bool;
+}
+
+pub trait Cpu: BusMasterComponent + CpuStateTrait {
+    fn reset<B: Bus<Address = Self::Address, Data = Self::Data> + ?Sized>(
+        &mut self, bus: &mut B, master: BusMaster);
+}
 ```
 
-This is a phosphor-core change touching every CPU and every reset call site, and
-it makes `Cpu` non-object-safe — no `dyn Cpu` exists in the workspace today, so
-that costs nothing. **It is the first rollout task, and it blocks every non-Z80
-board.**
+`?Sized` keeps `&mut dyn Bus` legal, so boards still on `bus_split!` are
+unaffected and can convert one at a time. Neither trait is object-safe any more;
+nothing used `dyn Cpu` or `dyn BusMasterComponent`.
+`core/tests/cpu_bus_generic_test.rs` pins the property this exists for, by
+resetting a 6502 and a 6809 through a borrowed bus view.
 
 ### Boards with a second bus master
 
@@ -231,7 +243,8 @@ Ordered by payoff per unit of risk: shared boards with several machines first
 (one conversion, several machines), Z80 boards before the CPUs that need the
 `Cpu::reset` change, and the odd standalone machines last.
 
-1. **`Cpu::reset` generic over the bus** — unblocks everything non-Z80.
+1. ~~**`Cpu::reset` generic over the bus**~~ — done; it unblocked everything
+   non-Z80 (see the solved entry above).
 2. **TKG-04** (Donkey Kong, DK Jr, Mario Bros) — Z80 + I8035 + DMA; three
    machines on one board, no reset-vector CPU.
 3. **Galaxian** (Moon Cresta, Pisces) and **MCR II** (Satan's Hollow) — single
