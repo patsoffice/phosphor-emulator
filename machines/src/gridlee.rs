@@ -1,4 +1,3 @@
-use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
     ActionRole, AnalogAxisKind, AudioSource, DefaultBinding, DipApplyTiming, DipChoice, DipOption,
@@ -311,11 +310,11 @@ const GRIDLEE_SPRITE_LAYOUT: GfxLayout<'static> = GfxLayout {
 ///   0x9828-0x993F  Sound registers
 ///   0x9C00-0x9CFF  NVRAM (256 bytes)
 ///   0xA000-0xFFFF  Program ROM (24KB)
+/// Gridlee's hardware, everything the 6809 talks *to*. Held apart from the CPU
+/// so a cycle dispatches at a concrete bus rather than a trait object (see
+/// `docs/designs/concrete-bus-dispatch.md`).
 #[derive(BusDebug)]
-pub struct GridleeSystem {
-    #[debug_cpu("M6809")]
-    cpu: M6809,
-
+pub struct GridleeBoard {
     #[debug_map(cpu = 0)]
     map: AddressSpace16,
 
@@ -367,10 +366,62 @@ pub struct GridleeSystem {
     scanline_buffer: Vec<u8>,
 }
 
+/// Videa Gridlee (1982): a 6809 beside the board it drives.
+#[derive(BusDebug)]
+pub struct GridleeSystem {
+    #[debug_cpu("M6809")]
+    cpu: M6809,
+    #[debug_bus]
+    pub board: GridleeBoard,
+}
+
+/// One CPU cycle: the board's per-scanline work and audio, then the 6809
+/// against the board, which *is* the bus.
+#[inline]
+pub fn tick(cpu: &mut M6809, board: &mut GridleeBoard) {
+    board.begin_cycle(cpu);
+    cpu.execute_cycle(board, BusMaster::Cpu(0));
+    board.cpu_cycles += 1;
+    board.clock += 1;
+}
+
 impl GridleeSystem {
     pub fn new() -> Self {
         Self {
             cpu: M6809::new(),
+            board: GridleeBoard::new(),
+        }
+    }
+
+    /// Advance one CPU cycle, returning the instruction-boundary mask.
+    pub fn step_cycle(&mut self) -> u32 {
+        tick(&mut self.cpu, &mut self.board);
+        u32::from(self.cpu.at_instruction_boundary())
+    }
+
+    pub fn load_rom_set(&mut self, rom_set: &RomSet) -> Result<(), RomLoadError> {
+        self.board.load_rom_set(rom_set)
+    }
+
+    pub fn get_cpu_state(&self) -> M6809State {
+        self.cpu.snapshot()
+    }
+
+    /// Read the CPU-facing bus, side effects and all. Distinct from the
+    /// debugger's `BusDebug::peek`/`poke`, which avoid side effects.
+    pub fn bus_read(&mut self, master: BusMaster, addr: u16) -> u8 {
+        self.board.read(master, addr)
+    }
+
+    /// Write the CPU-facing bus, side effects and all. See [`Self::bus_read`].
+    pub fn bus_write(&mut self, master: BusMaster, addr: u16, data: u8) {
+        self.board.write(master, addr, data);
+    }
+}
+
+impl GridleeBoard {
+    pub fn new() -> Self {
+        Self {
             map: Self::build_map(),
             gfx_rom: [0; 0x4000],
             sprite_cache: GfxCache::new(256, 8, 16),
@@ -423,7 +474,10 @@ impl GridleeSystem {
         (self.clock % TIMING.cycles_per_frame()) / TIMING.cycles_per_scanline
     }
 
-    pub fn tick(&mut self) {
+    /// Board work that leads a CPU cycle: the trackball simulation, the
+    /// per-scanline render and interrupts, the tone generator, and the
+    /// debugger's access-attribution latch.
+    fn begin_cycle(&mut self, cpu: &M6809) {
         let frame_cycle = self.clock % TIMING.cycles_per_frame();
 
         // Trackball movement simulation: increment raw position while keys held.
@@ -496,20 +550,9 @@ impl GridleeSystem {
         // Latch watchpoint attribution context (cycle + instruction PC)
         // before CPU execution — bus dispatch cannot read CPU state mid-tick.
         if self.map.has_any_watchpoints() {
-            let pc = self
-                .cpu
-                .at_instruction_boundary()
-                .then_some(self.cpu.pc as u32);
+            let pc = cpu.at_instruction_boundary().then_some(cpu.pc as u32);
             self.map.latch_access_context(self.clock, pc);
         }
-
-        // CPU execution
-        bus_split!(self, bus => {
-            self.cpu.execute_cycle(bus, BusMaster::Cpu(0));
-        });
-        self.cpu_cycles += 1;
-
-        self.clock += 1;
     }
 
     /// Read trackball axis (0=Y, 1=X). Implements the analog_port_r logic:
@@ -769,14 +812,16 @@ impl GridleeSystem {
         Ok(())
     }
 
-    pub fn get_cpu_state(&self) -> M6809State {
-        self.cpu.snapshot()
-    }
-
     /// Rebuild sprite cache from gfx_rom (for tests that modify ROM data directly).
     #[cfg(test)]
     fn decode_sprite_cache(&mut self) {
         self.sprite_cache = decode_gfx(&self.gfx_rom, 0, 256, &GRIDLEE_SPRITE_LAYOUT);
+    }
+}
+
+impl Default for GridleeBoard {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -790,7 +835,8 @@ impl Default for GridleeSystem {
 // Bus implementation
 // ---------------------------------------------------------------------------
 
-impl Bus for GridleeSystem {
+// The board is the bus.
+impl Bus for GridleeBoard {
     type Address = u16;
     type Data = u8;
 
@@ -875,15 +921,15 @@ impl Renderable for GridleeSystem {
     }
 
     fn render_frame(&self, buffer: &mut [u8]) {
-        buffer.copy_from_slice(&self.scanline_buffer);
+        buffer.copy_from_slice(&self.board.scanline_buffer);
     }
 }
 
 impl AudioSource for GridleeSystem {
     fn fill_audio(&mut self, buffer: &mut [i16]) -> usize {
-        let n = buffer.len().min(self.audio_buffer.len());
-        buffer[..n].copy_from_slice(&self.audio_buffer[..n]);
-        self.audio_buffer.drain(..n);
+        let n = buffer.len().min(self.board.audio_buffer.len());
+        buffer[..n].copy_from_slice(&self.board.audio_buffer[..n]);
+        self.board.audio_buffer.drain(..n);
         n
     }
 
@@ -900,37 +946,37 @@ impl InputConfigurable for GridleeSystem {
     fn handle_input(&mut self, event: InputEvent) {
         match event {
             InputEvent::Button { id, pressed } => match id.0 as u8 {
-                INPUT_TRACK_U => self.track_u_pressed = pressed,
-                INPUT_TRACK_D => self.track_d_pressed = pressed,
-                INPUT_TRACK_L => self.track_l_pressed = pressed,
-                INPUT_TRACK_R => self.track_r_pressed = pressed,
+                INPUT_TRACK_U => self.board.track_u_pressed = pressed,
+                INPUT_TRACK_D => self.board.track_d_pressed = pressed,
+                INPUT_TRACK_L => self.board.track_l_pressed = pressed,
+                INPUT_TRACK_R => self.board.track_r_pressed = pressed,
                 // Active-low buttons: clear bit on press, set bit on release
                 INPUT_P1_FIRE => {
                     if pressed {
-                        self.fire_buttons &= !0x01;
+                        self.board.fire_buttons &= !0x01;
                     } else {
-                        self.fire_buttons |= 0x01;
+                        self.board.fire_buttons |= 0x01;
                     }
                 }
                 INPUT_COIN => {
                     if pressed {
-                        self.coin_start &= !0x01;
+                        self.board.coin_start &= !0x01;
                     } else {
-                        self.coin_start |= 0x01;
+                        self.board.coin_start |= 0x01;
                     }
                 }
                 INPUT_START1 => {
                     if pressed {
-                        self.coin_start &= !0x04;
+                        self.board.coin_start &= !0x04;
                     } else {
-                        self.coin_start |= 0x04;
+                        self.board.coin_start |= 0x04;
                     }
                 }
                 INPUT_START2 => {
                     if pressed {
-                        self.coin_start &= !0x08;
+                        self.board.coin_start &= !0x08;
                     } else {
-                        self.coin_start |= 0x08;
+                        self.board.coin_start |= 0x08;
                     }
                 }
                 _ => {}
@@ -940,10 +986,12 @@ impl InputConfigurable for GridleeSystem {
                 let scaled = ((delta as i32) / 3).clamp(-6, 6) as i8;
                 if id == CTRL_TRACKBALL_X {
                     // X axis reversed: positive mouse motion (right) decreases counter
-                    self.trackball_pos[1] = self.trackball_pos[1].wrapping_sub(scaled as u8);
+                    self.board.trackball_pos[1] =
+                        self.board.trackball_pos[1].wrapping_sub(scaled as u8);
                 } else if id == CTRL_TRACKBALL_Y {
                     // Y axis: positive mouse motion (down) increases counter
-                    self.trackball_pos[0] = self.trackball_pos[0].wrapping_add(scaled as u8);
+                    self.board.trackball_pos[0] =
+                        self.board.trackball_pos[0].wrapping_add(scaled as u8);
                 }
             }
             InputEvent::Absolute { .. } => {}
@@ -951,65 +999,65 @@ impl InputConfigurable for GridleeSystem {
     }
 }
 
-crate::impl_standalone_debug!(GridleeSystem);
+crate::impl_standalone_debug!(GridleeSystem, split_cpu);
 
 impl Saveable for GridleeSystem {
     fn save_state(&self, w: &mut StateWriter) {
         self.cpu.save_state(w);
-        w.write_bytes(self.map.region_data(Region::Ram));
-        w.write_bytes(self.map.region_data(Region::VideoRam));
-        w.write_bytes(self.map.region_data(Region::Nvram));
-        w.write_u8(self.palette_bank);
-        w.write_bytes(&self.palette_bank_per_scanline);
-        w.write_u8(self.fire_buttons);
-        w.write_u8(self.coin_start);
-        w.write_bool(self.cocktail_flip);
-        w.write_bool(self.track_u_pressed);
-        w.write_bool(self.track_d_pressed);
-        w.write_bool(self.track_l_pressed);
-        w.write_bool(self.track_r_pressed);
-        w.write_bytes(&self.last_analog_input);
-        w.write_bytes(&self.last_analog_output);
-        w.write_bytes(&self.trackball_pos);
-        w.write_bytes(&self.sound_data);
-        w.write_u64_le(self.tone_step);
-        w.write_u64_le(self.tone_fraction);
-        w.write_u8(self.tone_volume);
-        self.audio_clock.save_state(w);
-        w.write_bool(self.irq_pending);
-        w.write_bool(self.firq_pending);
-        w.write_u64_le(self.clock);
-        w.write_u64_le(self.cpu_cycles);
-        w.write_u8(self.watchdog_frame_count);
+        w.write_bytes(self.board.map.region_data(Region::Ram));
+        w.write_bytes(self.board.map.region_data(Region::VideoRam));
+        w.write_bytes(self.board.map.region_data(Region::Nvram));
+        w.write_u8(self.board.palette_bank);
+        w.write_bytes(&self.board.palette_bank_per_scanline);
+        w.write_u8(self.board.fire_buttons);
+        w.write_u8(self.board.coin_start);
+        w.write_bool(self.board.cocktail_flip);
+        w.write_bool(self.board.track_u_pressed);
+        w.write_bool(self.board.track_d_pressed);
+        w.write_bool(self.board.track_l_pressed);
+        w.write_bool(self.board.track_r_pressed);
+        w.write_bytes(&self.board.last_analog_input);
+        w.write_bytes(&self.board.last_analog_output);
+        w.write_bytes(&self.board.trackball_pos);
+        w.write_bytes(&self.board.sound_data);
+        w.write_u64_le(self.board.tone_step);
+        w.write_u64_le(self.board.tone_fraction);
+        w.write_u8(self.board.tone_volume);
+        self.board.audio_clock.save_state(w);
+        w.write_bool(self.board.irq_pending);
+        w.write_bool(self.board.firq_pending);
+        w.write_u64_le(self.board.clock);
+        w.write_u64_le(self.board.cpu_cycles);
+        w.write_u8(self.board.watchdog_frame_count);
     }
 
     fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
         self.cpu.load_state(r)?;
-        r.read_bytes_into(self.map.region_data_mut(Region::Ram))?;
-        r.read_bytes_into(self.map.region_data_mut(Region::VideoRam))?;
-        r.read_bytes_into(self.map.region_data_mut(Region::Nvram))?;
-        self.palette_bank = r.read_u8()?;
-        r.read_bytes_into(&mut self.palette_bank_per_scanline)?;
-        self.fire_buttons = r.read_u8()?;
-        self.coin_start = r.read_u8()?;
-        self.cocktail_flip = r.read_bool()?;
-        self.track_u_pressed = r.read_bool()?;
-        self.track_d_pressed = r.read_bool()?;
-        self.track_l_pressed = r.read_bool()?;
-        self.track_r_pressed = r.read_bool()?;
-        r.read_bytes_into(&mut self.last_analog_input)?;
-        r.read_bytes_into(&mut self.last_analog_output)?;
-        r.read_bytes_into(&mut self.trackball_pos)?;
-        r.read_bytes_into(&mut self.sound_data)?;
-        self.tone_step = r.read_u64_le()?;
-        self.tone_fraction = r.read_u64_le()?;
-        self.tone_volume = r.read_u8()?;
-        self.audio_clock.load_state(r)?;
-        self.irq_pending = r.read_bool()?;
-        self.firq_pending = r.read_bool()?;
-        self.clock = r.read_u64_le()?;
-        self.cpu_cycles = r.read_u64_le()?;
-        self.watchdog_frame_count = r.read_u8()?;
+        r.read_bytes_into(self.board.map.region_data_mut(Region::Ram))?;
+        r.read_bytes_into(self.board.map.region_data_mut(Region::VideoRam))?;
+        r.read_bytes_into(self.board.map.region_data_mut(Region::Nvram))?;
+        self.board.palette_bank = r.read_u8()?;
+        r.read_bytes_into(&mut self.board.palette_bank_per_scanline)?;
+        self.board.fire_buttons = r.read_u8()?;
+        self.board.coin_start = r.read_u8()?;
+        self.board.cocktail_flip = r.read_bool()?;
+        self.board.track_u_pressed = r.read_bool()?;
+        self.board.track_d_pressed = r.read_bool()?;
+        self.board.track_l_pressed = r.read_bool()?;
+        self.board.track_r_pressed = r.read_bool()?;
+        r.read_bytes_into(&mut self.board.last_analog_input)?;
+        r.read_bytes_into(&mut self.board.last_analog_output)?;
+        r.read_bytes_into(&mut self.board.trackball_pos)?;
+        r.read_bytes_into(&mut self.board.sound_data)?;
+        self.board.tone_step = r.read_u64_le()?;
+        self.board.tone_fraction = r.read_u64_le()?;
+        self.board.tone_volume = r.read_u8()?;
+        self.board.audio_clock.load_state(r)?;
+        self.board.irq_pending = r.read_bool()?;
+        self.board.firq_pending = r.read_bool()?;
+        self.board.clock = r.read_u64_le()?;
+        self.board.cpu_cycles = r.read_u64_le()?;
+        self.board.watchdog_frame_count = r.read_u8()?;
         Ok(())
     }
 }
@@ -1022,37 +1070,35 @@ impl MachineCore for GridleeSystem {
         // there's no single "the" palette — show bank 0's 32 entries.
         vec![GfxSheet {
             name: "sprites",
-            cache: &self.sprite_cache,
-            palette: &self.palette_rgb[..32],
+            cache: &self.board.sprite_cache,
+            palette: &self.board.palette_rgb[..32],
         }]
     }
 
     fn run_frame(&mut self) {
         for _ in 0..TIMING.cycles_per_frame() {
-            self.tick();
+            tick(&mut self.cpu, &mut self.board);
         }
 
         // Watchdog: We keep the frame counter for documentation but
         //don't reset.
-        self.watchdog_frame_count += 1;
+        self.board.watchdog_frame_count += 1;
     }
 
     fn reset(&mut self) {
-        self.irq_pending = false;
-        self.firq_pending = false;
-        self.watchdog_frame_count = 0;
-        self.clock = 0;
-        self.cpu_cycles = 0;
-        self.tone_step = 0;
-        self.tone_fraction = 0;
-        self.tone_volume = 0;
-        self.audio_buffer.clear();
-        self.audio_clock.reset();
-        self.scanline_buffer.fill(0);
+        self.board.irq_pending = false;
+        self.board.firq_pending = false;
+        self.board.watchdog_frame_count = 0;
+        self.board.clock = 0;
+        self.board.cpu_cycles = 0;
+        self.board.tone_step = 0;
+        self.board.tone_fraction = 0;
+        self.board.tone_volume = 0;
+        self.board.audio_buffer.clear();
+        self.board.audio_clock.reset();
+        self.board.scanline_buffer.fill(0);
 
-        bus_split!(self, bus => {
-            self.cpu.reset(bus, BusMaster::Cpu(0));
-        });
+        self.cpu.reset(&mut self.board, BusMaster::Cpu(0));
     }
 
     fn frame_rate_hz(&self) -> f64 {
@@ -1077,11 +1123,11 @@ impl SaveState for GridleeSystem {
 
 impl Nvram for GridleeSystem {
     fn save_nvram(&self) -> Option<&[u8]> {
-        Some(self.map.region_data(Region::Nvram))
+        Some(self.board.map.region_data(Region::Nvram))
     }
 
     fn load_nvram(&mut self, data: &[u8]) {
-        let nvram = self.map.region_data_mut(Region::Nvram);
+        let nvram = self.board.map.region_data_mut(Region::Nvram);
         let len = data.len().min(nvram.len());
         nvram[..len].copy_from_slice(&data[..len]);
     }
@@ -1203,7 +1249,7 @@ const GRIDLEE_DIP_BANKS: &[DipSwitchBank] = &[DipSwitchBank {
     ],
 }];
 
-crate::impl_dip_switches!(GridleeSystem, GRIDLEE_DIP_BANKS, dip_switches);
+crate::impl_dip_switches!(GridleeSystem, GRIDLEE_DIP_BANKS, board.dip_switches);
 impl phosphor_core::core::debug_trace::DebugTrace for GridleeSystem {}
 
 // ---------------------------------------------------------------------------
@@ -1220,7 +1266,7 @@ mod tests {
 
     fn make_system() -> GridleeSystem {
         let mut sys = GridleeSystem::new();
-        sys.init_lfsr();
+        sys.board.init_lfsr();
         sys
     }
 
@@ -1236,9 +1282,9 @@ mod tests {
         prom[0] = 0x0F; // R = 15
         prom[0x0800] = 0x00; // G = 0
         prom[0x1000] = 0x08; // B = 8
-        sys.build_palette(&prom);
+        sys.board.build_palette(&prom);
         // 0xF * 17 = 255, 0x0 * 17 = 0, 0x8 * 17 = 136
-        assert_eq!(sys.palette_rgb[0], (255, 0, 136));
+        assert_eq!(sys.board.palette_rgb[0], (255, 0, 136));
     }
 
     #[test]
@@ -1249,8 +1295,8 @@ mod tests {
         prom[69] = 0x0A; // R
         prom[0x0800 + 69] = 0x05; // G
         prom[0x1000 + 69] = 0x03; // B
-        sys.build_palette(&prom);
-        let color = sys.resolve_color(2, 5);
+        sys.board.build_palette(&prom);
+        let color = sys.board.resolve_color(2, 5);
         assert_eq!(color, (0x0A * 17, 0x05 * 17, 0x03 * 17));
     }
 
@@ -1261,21 +1307,21 @@ mod tests {
     #[test]
     fn lfsr_table_non_zero() {
         let sys = make_system();
-        assert_eq!(sys.rand17.len(), POLY17_SIZE + 1);
+        assert_eq!(sys.board.rand17.len(), POLY17_SIZE + 1);
         // Table should have non-zero entries (not all zeros)
-        let nonzero_count = sys.rand17.iter().filter(|&&b| b != 0).count();
+        let nonzero_count = sys.board.rand17.iter().filter(|&&b| b != 0).count();
         assert!(nonzero_count > POLY17_SIZE / 2, "LFSR table mostly zero");
     }
 
     #[test]
     fn rng_returns_different_values_at_different_cycles() {
         let mut sys = make_system();
-        sys.cpu_cycles = 100;
-        let v1 = sys.read_rng();
-        sys.cpu_cycles = 200;
-        let v2 = sys.read_rng();
-        sys.cpu_cycles = 300;
-        let v3 = sys.read_rng();
+        sys.board.cpu_cycles = 100;
+        let v1 = sys.board.read_rng();
+        sys.board.cpu_cycles = 200;
+        let v2 = sys.board.read_rng();
+        sys.board.cpu_cycles = 300;
+        let v3 = sys.board.read_rng();
         // At least two of three should differ
         assert!(
             v1 != v2 || v2 != v3,
@@ -1290,36 +1336,36 @@ mod tests {
     #[test]
     fn ram_read_write_roundtrip() {
         let mut sys = make_system();
-        Bus::write(&mut sys, BusMaster::Cpu(0), 0x0042, 0xAB);
-        assert_eq!(Bus::read(&mut sys, BusMaster::Cpu(0), 0x0042), 0xAB);
+        Bus::write(&mut sys.board, BusMaster::Cpu(0), 0x0042, 0xAB);
+        assert_eq!(Bus::read(&mut sys.board, BusMaster::Cpu(0), 0x0042), 0xAB);
     }
 
     #[test]
     fn vram_read_write_roundtrip() {
         let mut sys = make_system();
-        Bus::write(&mut sys, BusMaster::Cpu(0), 0x0800, 0xCD);
-        assert_eq!(Bus::read(&mut sys, BusMaster::Cpu(0), 0x0800), 0xCD);
+        Bus::write(&mut sys.board, BusMaster::Cpu(0), 0x0800, 0xCD);
+        assert_eq!(Bus::read(&mut sys.board, BusMaster::Cpu(0), 0x0800), 0xCD);
     }
 
     #[test]
     fn nvram_read_write_roundtrip() {
         let mut sys = make_system();
-        Bus::write(&mut sys, BusMaster::Cpu(0), 0x9C42, 0x77);
-        assert_eq!(Bus::read(&mut sys, BusMaster::Cpu(0), 0x9C42), 0x77);
+        Bus::write(&mut sys.board, BusMaster::Cpu(0), 0x9C42, 0x77);
+        assert_eq!(Bus::read(&mut sys.board, BusMaster::Cpu(0), 0x9C42), 0x77);
     }
 
     #[test]
     fn rom_write_ignored() {
         let mut sys = make_system();
-        sys.map.region_data_mut(Region::Rom)[0] = 0xAA;
-        Bus::write(&mut sys, BusMaster::Cpu(0), 0xA000, 0x55);
-        assert_eq!(Bus::read(&mut sys, BusMaster::Cpu(0), 0xA000), 0xAA);
+        sys.board.map.region_data_mut(Region::Rom)[0] = 0xAA;
+        Bus::write(&mut sys.board, BusMaster::Cpu(0), 0xA000, 0x55);
+        assert_eq!(Bus::read(&mut sys.board, BusMaster::Cpu(0), 0xA000), 0xAA);
     }
 
     #[test]
     fn unmapped_reads_return_ff() {
         let mut sys = make_system();
-        assert_eq!(Bus::read(&mut sys, BusMaster::Cpu(0), 0x8000), 0xFF);
+        assert_eq!(Bus::read(&mut sys.board, BusMaster::Cpu(0), 0x8000), 0xFF);
     }
 
     // -----------------------------------------------------------------------
@@ -1330,8 +1376,8 @@ mod tests {
     fn vblank_active_during_blanking() {
         let mut sys = make_system();
         // Scanline 0 (< VBEND=16): in VBLANK
-        sys.clock = 0;
-        let status = Bus::read(&mut sys, BusMaster::Cpu(0), 0x9700);
+        sys.board.clock = 0;
+        let status = Bus::read(&mut sys.board, BusMaster::Cpu(0), 0x9700);
         assert_ne!(status & 0x80, 0, "VBLANK should be active at scanline 0");
     }
 
@@ -1339,8 +1385,8 @@ mod tests {
     fn vblank_inactive_during_active_display() {
         let mut sys = make_system();
         // Scanline 128 (within VBEND..VBSTART): active display
-        sys.clock = 128 * TIMING.cycles_per_scanline;
-        let status = Bus::read(&mut sys, BusMaster::Cpu(0), 0x9700);
+        sys.board.clock = 128 * TIMING.cycles_per_scanline;
+        let status = Bus::read(&mut sys.board, BusMaster::Cpu(0), 0x9700);
         assert_eq!(
             status & 0x80,
             0,
@@ -1352,8 +1398,8 @@ mod tests {
     fn vblank_active_after_vbstart() {
         let mut sys = make_system();
         // Scanline 256 (>= VBSTART): in VBLANK
-        sys.clock = 256 * TIMING.cycles_per_scanline;
-        let status = Bus::read(&mut sys, BusMaster::Cpu(0), 0x9700);
+        sys.board.clock = 256 * TIMING.cycles_per_scanline;
+        let status = Bus::read(&mut sys.board, BusMaster::Cpu(0), 0x9700);
         assert_ne!(status & 0x80, 0, "VBLANK should be active at scanline 256");
     }
 
@@ -1365,47 +1411,53 @@ mod tests {
     fn irq_not_asserted_at_scanline_0() {
         let mut sys = make_system();
         // Steady-state pattern is {64, 128, 192, 256}.
-        sys.clock = TIMING.cycles_per_frame(); // Start of next frame = scanline 0
-        sys.tick();
-        assert!(!sys.irq_pending, "IRQ should NOT fire at scanline 0");
+        sys.board.clock = TIMING.cycles_per_frame(); // Start of next frame = scanline 0
+        sys.step_cycle();
+        assert!(!sys.board.irq_pending, "IRQ should NOT fire at scanline 0");
     }
 
     #[test]
     fn irq_asserted_at_scanline_64() {
         let mut sys = make_system();
-        sys.clock = 64 * TIMING.cycles_per_scanline;
-        sys.tick();
-        assert!(sys.irq_pending, "IRQ should be pending at scanline 64");
+        sys.board.clock = 64 * TIMING.cycles_per_scanline;
+        sys.step_cycle();
+        assert!(
+            sys.board.irq_pending,
+            "IRQ should be pending at scanline 64"
+        );
     }
 
     #[test]
     fn irq_asserted_at_scanline_256() {
         let mut sys = make_system();
         // Scanline 256 is the VBLANK IRQ
-        sys.clock = 256 * TIMING.cycles_per_scanline;
-        sys.tick();
-        assert!(sys.irq_pending, "IRQ should fire at scanline 256");
+        sys.board.clock = 256 * TIMING.cycles_per_scanline;
+        sys.step_cycle();
+        assert!(sys.board.irq_pending, "IRQ should fire at scanline 256");
     }
 
     #[test]
     fn firq_asserted_at_scanline_92() {
         let mut sys = make_system();
-        sys.clock = 92 * TIMING.cycles_per_scanline;
-        sys.tick();
-        assert!(sys.firq_pending, "FIRQ should be pending at scanline 92");
+        sys.board.clock = 92 * TIMING.cycles_per_scanline;
+        sys.step_cycle();
+        assert!(
+            sys.board.firq_pending,
+            "FIRQ should be pending at scanline 92"
+        );
     }
 
     #[test]
     fn irq_cleared_at_hblank() {
         let mut sys = make_system();
         // Assert IRQ at scanline 64
-        sys.clock = 64 * TIMING.cycles_per_scanline;
-        sys.tick();
-        assert!(sys.irq_pending);
+        sys.board.clock = 64 * TIMING.cycles_per_scanline;
+        sys.step_cycle();
+        assert!(sys.board.irq_pending);
         // Cleared at HBSTART (CPU cycle 64 within scanline)
-        sys.clock = 64 * TIMING.cycles_per_scanline + HBSTART_CYCLE;
-        sys.tick();
-        assert!(!sys.irq_pending, "IRQ should be cleared at HBLANK");
+        sys.board.clock = 64 * TIMING.cycles_per_scanline + HBSTART_CYCLE;
+        sys.step_cycle();
+        assert!(!sys.board.irq_pending, "IRQ should be cleared at HBLANK");
     }
 
     // -----------------------------------------------------------------------
@@ -1415,10 +1467,10 @@ mod tests {
     #[test]
     fn watchdog_reset_prevents_timeout() {
         let mut sys = make_system();
-        sys.watchdog_frame_count = 7;
+        sys.board.watchdog_frame_count = 7;
         // Write to watchdog resets counter
-        Bus::write(&mut sys, BusMaster::Cpu(0), 0x9380, 0x00);
-        assert_eq!(sys.watchdog_frame_count, 0);
+        Bus::write(&mut sys.board, BusMaster::Cpu(0), 0x9380, 0x00);
+        assert_eq!(sys.board.watchdog_frame_count, 0);
     }
 
     // -----------------------------------------------------------------------
@@ -1428,8 +1480,8 @@ mod tests {
     #[test]
     fn palette_bank_select_masks_to_6_bits() {
         let mut sys = make_system();
-        Bus::write(&mut sys, BusMaster::Cpu(0), 0x9200, 0xFF);
-        assert_eq!(sys.palette_bank, 0x3F);
+        Bus::write(&mut sys.board, BusMaster::Cpu(0), 0x9200, 0xFF);
+        assert_eq!(sys.board.palette_bank, 0x3F);
     }
 
     // -----------------------------------------------------------------------
@@ -1440,8 +1492,8 @@ mod tests {
     fn trackball_filters_small_deltas() {
         let mut sys = make_system();
         // Move by 1 (should be filtered)
-        sys.trackball_pos[0] = 1;
-        let result = sys.read_trackball(0);
+        sys.board.trackball_pos[0] = 1;
+        let result = sys.board.read_trackball(0);
         assert_eq!(result, 0, "Delta of 1 should be filtered out");
     }
 
@@ -1449,8 +1501,8 @@ mod tests {
     fn trackball_reports_magnitude_and_sign() {
         let mut sys = make_system();
         // Move by +5
-        sys.trackball_pos[0] = 5;
-        let result = sys.read_trackball(0);
+        sys.board.trackball_pos[0] = 5;
+        let result = sys.board.read_trackball(0);
         // Magnitude = 5 & 0xF = 5, sign = 0 (positive)
         assert_eq!(result & 0x0F, 5);
         assert_eq!(result & 0x10, 0, "Should be positive direction");
@@ -1460,8 +1512,8 @@ mod tests {
     fn trackball_negative_direction() {
         let mut sys = make_system();
         // Move by -5 (wraps to 251)
-        sys.trackball_pos[0] = 251;
-        let result = sys.read_trackball(0);
+        sys.board.trackball_pos[0] = 251;
+        let result = sys.board.read_trackball(0);
         // Magnitude = 5 & 0xF = 5, sign = 0x10 (negative)
         assert_eq!(result & 0x0F, 5);
         assert_eq!(result & 0x10, 0x10, "Should be negative direction");
@@ -1474,16 +1526,16 @@ mod tests {
     #[test]
     fn sound_tone_step_zero_when_freq_zero() {
         let mut sys = make_system();
-        sys.write_sound(0x10, 0);
-        assert_eq!(sys.tone_step, 0);
+        sys.board.write_sound(0x10, 0);
+        assert_eq!(sys.board.tone_step, 0);
     }
 
     #[test]
     fn sound_tone_step_nonzero_when_freq_set() {
         let mut sys = make_system();
-        sys.write_sound(0x10, 0x40);
+        sys.board.write_sound(0x10, 0x40);
         assert!(
-            sys.tone_step > 0,
+            sys.board.tone_step > 0,
             "tone_step should be non-zero for freq=0x40"
         );
     }
@@ -1494,47 +1546,50 @@ mod tests {
         // For data=255: (float) ≈ (1<<24) * 255 * 5 / 44100 = 485097
         // Old truncated: ((1<<24)/44100) * 255 * 5 = 380 * 1275 = 484500
         // New full precision: (1<<24) * 255 * 5 / 44100 = 485097
-        sys.write_sound(0x10, 255);
+        sys.board.write_sound(0x10, 255);
         let expected = (1u64 << 24) * 255 * 5 / SAMPLE_RATE;
-        assert_eq!(sys.tone_step, expected);
+        assert_eq!(sys.board.tone_step, expected);
         // Verify it's more accurate than the truncated version
         let truncated = ((1u64 << 24) / SAMPLE_RATE) * 255 * 5;
-        assert!(sys.tone_step > truncated, "Full precision should be larger");
+        assert!(
+            sys.board.tone_step > truncated,
+            "Full precision should be larger"
+        );
     }
 
     #[test]
     fn sound_volume_register() {
         let mut sys = make_system();
-        sys.write_sound(0x11, 0xAB);
-        assert_eq!(sys.tone_volume, 0xAB);
+        sys.board.write_sound(0x11, 0xAB);
+        assert_eq!(sys.board.tone_volume, 0xAB);
     }
 
     #[test]
     fn sound_bounce_trigger_edge_detect() {
         let mut sys = make_system();
         // Write initial state for bounce trigger offset 0x0C
-        sys.write_sound(0x0C, 0x00);
-        assert_eq!(sys.sound_data[0x0C], 0x00);
+        sys.board.write_sound(0x0C, 0x00);
+        assert_eq!(sys.board.sound_data[0x0C], 0x00);
         // Trigger 0→1 edge (would start sample in full impl)
-        sys.write_sound(0x0C, 0x01);
-        assert_eq!(sys.sound_data[0x0C], 0x01);
+        sys.board.write_sound(0x0C, 0x01);
+        assert_eq!(sys.board.sound_data[0x0C], 0x01);
         // Trigger 1→0 edge (would stop sample)
-        sys.write_sound(0x0C, 0x00);
-        assert_eq!(sys.sound_data[0x0C], 0x00);
+        sys.board.write_sound(0x0C, 0x00);
+        assert_eq!(sys.board.sound_data[0x0C], 0x00);
     }
 
     #[test]
     fn sound_sample_trigger_0xef() {
         let mut sys = make_system();
         // Write non-0xEF first
-        sys.write_sound(0x04, 0x00);
-        assert_eq!(sys.sound_data[0x04], 0x00);
+        sys.board.write_sound(0x04, 0x00);
+        assert_eq!(sys.board.sound_data[0x04], 0x00);
         // Write 0xEF (triggers sample in full impl)
-        sys.write_sound(0x04, 0xEF);
-        assert_eq!(sys.sound_data[0x04], 0xEF);
+        sys.board.write_sound(0x04, 0xEF);
+        assert_eq!(sys.board.sound_data[0x04], 0xEF);
         // Write back (stops sample)
-        sys.write_sound(0x04, 0x00);
-        assert_eq!(sys.sound_data[0x04], 0x00);
+        sys.board.write_sound(0x04, 0x00);
+        assert_eq!(sys.board.sound_data[0x04], 0x00);
     }
 
     // -----------------------------------------------------------------------
@@ -1545,51 +1600,51 @@ mod tests {
     fn fire_button_active_low() {
         let mut sys = make_system();
         // Default: bit 0 high (not pressed)
-        assert_eq!(sys.fire_buttons & 0x01, 0x01);
+        assert_eq!(sys.board.fire_buttons & 0x01, 0x01);
         // Press: bit 0 goes low
         sys.handle_input(InputEvent::Button {
             id: InputId((INPUT_P1_FIRE) as u16),
             pressed: true,
         });
-        assert_eq!(sys.fire_buttons & 0x01, 0x00);
+        assert_eq!(sys.board.fire_buttons & 0x01, 0x00);
         // Release: bit 0 goes high again
         sys.handle_input(InputEvent::Button {
             id: InputId((INPUT_P1_FIRE) as u16),
             pressed: false,
         });
-        assert_eq!(sys.fire_buttons & 0x01, 0x01);
+        assert_eq!(sys.board.fire_buttons & 0x01, 0x01);
     }
 
     #[test]
     fn coin_and_start_active_low() {
         let mut sys = make_system();
         // Default: bits 0-3 and 6-7 all high (nothing pressed, unknown bits active-low)
-        assert_eq!(sys.coin_start, 0xCF);
+        assert_eq!(sys.board.coin_start, 0xCF);
         // Coin press: bit 0 goes low
         sys.handle_input(InputEvent::Button {
             id: InputId((INPUT_COIN) as u16),
             pressed: true,
         });
-        assert_eq!(sys.coin_start & 0x01, 0x00);
+        assert_eq!(sys.board.coin_start & 0x01, 0x00);
         // Start1 press: bit 2 goes low
         sys.handle_input(InputEvent::Button {
             id: InputId((INPUT_START1) as u16),
             pressed: true,
         });
-        assert_eq!(sys.coin_start & 0x04, 0x00);
+        assert_eq!(sys.board.coin_start & 0x04, 0x00);
         // Start2 press: bit 3 goes low
         sys.handle_input(InputEvent::Button {
             id: InputId((INPUT_START2) as u16),
             pressed: true,
         });
-        assert_eq!(sys.coin_start & 0x08, 0x00);
+        assert_eq!(sys.board.coin_start & 0x08, 0x00);
     }
 
     #[test]
     fn dip_switch_defaults() {
         let sys = make_system();
         // Default: 3 lives (bits 3-2 = 01), bonus 10000 (bits 1-0 = 01)
-        assert_eq!(sys.dip_switches, 0x05);
+        assert_eq!(sys.board.dip_switches, 0x05);
         assert_eq!(sys.dip_bank_value(0), 0x05);
         crate::assert_dip_banks_valid(sys.dip_banks(), &[0x05]);
     }
@@ -1609,15 +1664,15 @@ mod tests {
     #[test]
     fn nvram_save_load_roundtrip() {
         let mut sys = make_system();
-        sys.map.region_data_mut(Region::Nvram)[0] = 0x42;
-        sys.map.region_data_mut(Region::Nvram)[255] = 0xFF;
+        sys.board.map.region_data_mut(Region::Nvram)[0] = 0x42;
+        sys.board.map.region_data_mut(Region::Nvram)[255] = 0xFF;
         let saved = sys.save_nvram().unwrap().to_vec();
         assert_eq!(saved.len(), 256);
 
         let mut sys2 = make_system();
         sys2.load_nvram(&saved);
-        assert_eq!(sys2.map.region_data_mut(Region::Nvram)[0], 0x42);
-        assert_eq!(sys2.map.region_data_mut(Region::Nvram)[255], 0xFF);
+        assert_eq!(sys2.board.map.region_data_mut(Region::Nvram)[0], 0x42);
+        assert_eq!(sys2.board.map.region_data_mut(Region::Nvram)[255], 0xFF);
     }
 
     // -----------------------------------------------------------------------
@@ -1630,20 +1685,20 @@ mod tests {
         // Place sprite at image 1, Y position that puts it at scanline 20
         // sprite_y_start = (y_pos + 17 + 16) as u8
         // We want sprite_y_start = 20, so y_pos = 20 - 33 = -13 → wraps to 243
-        sys.map.region_data_mut(Region::Ram)[0] = 1; // image
-        sys.map.region_data_mut(Region::Ram)[2] = 243; // y_pos → (243 + 33) & 0xFF = 20
-        sys.map.region_data_mut(Region::Ram)[3] = 10; // x_pos
+        sys.board.map.region_data_mut(Region::Ram)[0] = 1; // image
+        sys.board.map.region_data_mut(Region::Ram)[2] = 243; // y_pos → (243 + 33) & 0xFF = 20
+        sys.board.map.region_data_mut(Region::Ram)[3] = 10; // x_pos
         // Put non-zero pixel data in GFX ROM for image 1
-        sys.gfx_rom[64] = 0x12; // left=1, right=2
-        sys.decode_sprite_cache();
+        sys.board.gfx_rom[64] = 0x12; // left=1, right=2
+        sys.board.decode_sprite_cache();
 
         // Build a simple palette so pixels would be visible
-        sys.palette_rgb[1] = (255, 0, 0);
-        sys.palette_rgb[2] = (0, 255, 0);
+        sys.board.palette_rgb[1] = (255, 0, 0);
+        sys.board.palette_rgb[2] = (0, 255, 0);
 
         // Render scanline 20 (< 32 clip threshold)
-        sys.palette_bank_per_scanline[20] = 0;
-        sys.render_scanline(20);
+        sys.board.palette_bank_per_scanline[20] = 0;
+        sys.board.render_scanline(20);
 
         // Sprite should NOT appear (clipped). Check pixel at x=10.
         let screen_y = 20 - VBEND as usize;
@@ -1651,7 +1706,10 @@ mod tests {
         // Should be background (black, since VRAM is zero → palette index 16)
         // not sprite color (255,0,0)
         assert_ne!(
-            (sys.scanline_buffer[off], sys.scanline_buffer[off + 1]),
+            (
+                sys.board.scanline_buffer[off],
+                sys.board.scanline_buffer[off + 1]
+            ),
             (255, 0),
             "Sprite should not render on scanline < 32"
         );
@@ -1661,25 +1719,25 @@ mod tests {
     fn sprite_rendered_on_scanline_32() {
         let mut sys = make_system();
         // sprite_y_start = (y_pos + 33) as u8 = 32 → y_pos = 255 (wraps)
-        sys.map.region_data_mut(Region::Ram)[0] = 0; // image 0
-        sys.map.region_data_mut(Region::Ram)[2] = 255; // y_pos → (255 + 33) & 0xFF = 32
-        sys.map.region_data_mut(Region::Ram)[3] = 0; // x_pos = 0
+        sys.board.map.region_data_mut(Region::Ram)[0] = 0; // image 0
+        sys.board.map.region_data_mut(Region::Ram)[2] = 255; // y_pos → (255 + 33) & 0xFF = 32
+        sys.board.map.region_data_mut(Region::Ram)[3] = 0; // x_pos = 0
         // Non-zero pixel in image 0, row 0
-        sys.gfx_rom[0] = 0x30; // left pixel = 3, right pixel = 0
-        sys.decode_sprite_cache();
+        sys.board.gfx_rom[0] = 0x30; // left pixel = 3, right pixel = 0
+        sys.board.decode_sprite_cache();
 
-        sys.palette_rgb[3] = (0, 0, 255);
-        sys.palette_bank_per_scanline[32] = 0;
-        sys.render_scanline(32);
+        sys.board.palette_rgb[3] = (0, 0, 255);
+        sys.board.palette_bank_per_scanline[32] = 0;
+        sys.board.render_scanline(32);
 
         // Sprite SHOULD appear at x=0 on scanline 32
         let screen_y = 32 - VBEND as usize;
         let off = (screen_y * TIMING.display_width as usize) * 3;
         assert_eq!(
             (
-                sys.scanline_buffer[off],
-                sys.scanline_buffer[off + 1],
-                sys.scanline_buffer[off + 2]
+                sys.board.scanline_buffer[off],
+                sys.board.scanline_buffer[off + 1],
+                sys.board.scanline_buffer[off + 2]
             ),
             (0, 0, 255),
             "Sprite should render on scanline 32"
@@ -1690,27 +1748,27 @@ mod tests {
     fn sprite_transparent_pixel_zero() {
         let mut sys = make_system();
         // Set up sprite at a visible scanline
-        sys.map.region_data_mut(Region::Ram)[0] = 0; // image 0
-        sys.map.region_data_mut(Region::Ram)[2] = 255; // y_pos → sprite_y_start = 32
-        sys.map.region_data_mut(Region::Ram)[3] = 0; // x_pos = 0
+        sys.board.map.region_data_mut(Region::Ram)[0] = 0; // image 0
+        sys.board.map.region_data_mut(Region::Ram)[2] = 255; // y_pos → sprite_y_start = 32
+        sys.board.map.region_data_mut(Region::Ram)[3] = 0; // x_pos = 0
         // Pixel data: left=0 (transparent), right=5
-        sys.gfx_rom[0] = 0x05;
-        sys.decode_sprite_cache();
+        sys.board.gfx_rom[0] = 0x05;
+        sys.board.decode_sprite_cache();
 
-        sys.palette_rgb[5] = (100, 200, 50);
+        sys.board.palette_rgb[5] = (100, 200, 50);
         // Set background color (palette index 16) to something distinct
-        sys.palette_rgb[16] = (10, 20, 30);
-        sys.palette_bank_per_scanline[32] = 0;
-        sys.render_scanline(32);
+        sys.board.palette_rgb[16] = (10, 20, 30);
+        sys.board.palette_bank_per_scanline[32] = 0;
+        sys.board.render_scanline(32);
 
         let screen_y = 32 - VBEND as usize;
         // x=0: should be background (transparent sprite pixel)
         let off0 = (screen_y * TIMING.display_width as usize) * 3;
         assert_eq!(
             (
-                sys.scanline_buffer[off0],
-                sys.scanline_buffer[off0 + 1],
-                sys.scanline_buffer[off0 + 2]
+                sys.board.scanline_buffer[off0],
+                sys.board.scanline_buffer[off0 + 1],
+                sys.board.scanline_buffer[off0 + 2]
             ),
             (10, 20, 30),
             "Sprite pixel 0 should be transparent (background shows through)"
@@ -1719,9 +1777,9 @@ mod tests {
         let off1 = (screen_y * TIMING.display_width as usize + 1) * 3;
         assert_eq!(
             (
-                sys.scanline_buffer[off1],
-                sys.scanline_buffer[off1 + 1],
-                sys.scanline_buffer[off1 + 2]
+                sys.board.scanline_buffer[off1],
+                sys.board.scanline_buffer[off1 + 1],
+                sys.board.scanline_buffer[off1 + 2]
             ),
             (100, 200, 50),
             "Sprite pixel 5 should render"
@@ -1731,7 +1789,7 @@ mod tests {
     #[test]
     fn cocktail_flip_reverses_background() {
         let mut sys = make_system();
-        sys.cocktail_flip = true;
+        sys.board.cocktail_flip = true;
 
         // Write a distinctive byte to VRAM at bottom-right of normal screen.
         // Flipped: this should appear at top-left.
@@ -1741,12 +1799,12 @@ mod tests {
         // VRAM row 223, reversed X. Byte 127 in that row (rightmost pair).
         let src_row = 223;
         let vram_offset = src_row * 128 + 127; // rightmost byte of row 223
-        sys.map.region_data_mut(Region::VideoRam)[vram_offset] = 0xAB; // left=0xA(10), right=0xB(11)
-        sys.palette_rgb[(10 + 16) as usize] = (111, 0, 0);
-        sys.palette_rgb[(11 + 16) as usize] = (0, 222, 0);
-        sys.palette_bank_per_scanline[16] = 0;
+        sys.board.map.region_data_mut(Region::VideoRam)[vram_offset] = 0xAB; // left=0xA(10), right=0xB(11)
+        sys.board.palette_rgb[(10 + 16) as usize] = (111, 0, 0);
+        sys.board.palette_rgb[(11 + 16) as usize] = (0, 222, 0);
+        sys.board.palette_bank_per_scanline[16] = 0;
 
-        sys.render_scanline(16);
+        sys.board.render_scanline(16);
 
         // When flipped, byte 127 becomes the leftmost pair (x_pair=0),
         // and the nibbles swap: right nibble (0xB) becomes left pixel,
@@ -1756,18 +1814,18 @@ mod tests {
         let off1 = (screen_y * TIMING.display_width as usize + 1) * 3;
         assert_eq!(
             (
-                sys.scanline_buffer[off0],
-                sys.scanline_buffer[off0 + 1],
-                sys.scanline_buffer[off0 + 2]
+                sys.board.scanline_buffer[off0],
+                sys.board.scanline_buffer[off0 + 1],
+                sys.board.scanline_buffer[off0 + 2]
             ),
             (0, 222, 0),
             "Flipped: lower nibble (0xB) should be left pixel"
         );
         assert_eq!(
             (
-                sys.scanline_buffer[off1],
-                sys.scanline_buffer[off1 + 1],
-                sys.scanline_buffer[off1 + 2]
+                sys.board.scanline_buffer[off1],
+                sys.board.scanline_buffer[off1 + 1],
+                sys.board.scanline_buffer[off1 + 2]
             ),
             (111, 0, 0),
             "Flipped: upper nibble (0xA) should be right pixel"
@@ -1782,10 +1840,10 @@ mod tests {
     fn latch_cocktail_flip() {
         let mut sys = make_system();
         // Q7 (bit 7 select) = address bits 6:4 = 0b111, so addr = 0x9070
-        Bus::write(&mut sys, BusMaster::Cpu(0), 0x9070, 0x01);
-        assert!(sys.cocktail_flip);
-        Bus::write(&mut sys, BusMaster::Cpu(0), 0x9070, 0x00);
-        assert!(!sys.cocktail_flip);
+        Bus::write(&mut sys.board, BusMaster::Cpu(0), 0x9070, 0x01);
+        assert!(sys.board.cocktail_flip);
+        Bus::write(&mut sys.board, BusMaster::Cpu(0), 0x9070, 0x00);
+        assert!(!sys.board.cocktail_flip);
     }
 
     // -----------------------------------------------------------------------
@@ -1811,28 +1869,28 @@ mod tests {
         let mut sys = make_system();
 
         // Set known state
-        sys.map.region_data_mut(Region::Ram)[0x100] = 0xAA;
-        sys.map.region_data_mut(Region::VideoRam)[0x200] = 0xBB;
-        sys.map.region_data_mut(Region::Nvram)[50] = 0xCC;
-        sys.palette_bank = 0x1F;
-        sys.fire_buttons = 0xFE;
-        sys.coin_start = 0xCE;
-        sys.cocktail_flip = true;
-        sys.track_u_pressed = true;
-        sys.track_r_pressed = true;
-        sys.last_analog_input = [5, 10];
-        sys.last_analog_output = [15, 20];
-        sys.trackball_pos = [25, 30];
-        sys.sound_data[0x10] = 0x40;
-        sys.tone_step = 1234;
-        sys.tone_fraction = 5678;
-        sys.tone_volume = 0xAB;
-        sys.audio_clock.set_phase(9012);
-        sys.irq_pending = true;
-        sys.firq_pending = true;
-        sys.clock = 150_000;
-        sys.cpu_cycles = 120_000;
-        sys.watchdog_frame_count = 3;
+        sys.board.map.region_data_mut(Region::Ram)[0x100] = 0xAA;
+        sys.board.map.region_data_mut(Region::VideoRam)[0x200] = 0xBB;
+        sys.board.map.region_data_mut(Region::Nvram)[50] = 0xCC;
+        sys.board.palette_bank = 0x1F;
+        sys.board.fire_buttons = 0xFE;
+        sys.board.coin_start = 0xCE;
+        sys.board.cocktail_flip = true;
+        sys.board.track_u_pressed = true;
+        sys.board.track_r_pressed = true;
+        sys.board.last_analog_input = [5, 10];
+        sys.board.last_analog_output = [15, 20];
+        sys.board.trackball_pos = [25, 30];
+        sys.board.sound_data[0x10] = 0x40;
+        sys.board.tone_step = 1234;
+        sys.board.tone_fraction = 5678;
+        sys.board.tone_volume = 0xAB;
+        sys.board.audio_clock.set_phase(9012);
+        sys.board.irq_pending = true;
+        sys.board.firq_pending = true;
+        sys.board.clock = 150_000;
+        sys.board.cpu_cycles = 120_000;
+        sys.board.watchdog_frame_count = 3;
 
         // Save
         let data = SaveState::save_state(&sys).expect("save_state should return Some");
@@ -1840,51 +1898,54 @@ mod tests {
 
         // Mutate everything
         let mut sys2 = make_system();
-        sys2.map.region_data_mut(Region::Ram)[0x100] = 0xFF;
-        sys2.clock = 999;
+        sys2.board.map.region_data_mut(Region::Ram)[0x100] = 0xFF;
+        sys2.board.clock = 999;
 
         // Load
         SaveState::load_state(&mut sys2, &data).unwrap();
 
         // Verify
         assert_eq!(sys2.cpu.snapshot(), cpu_snap);
-        assert_eq!(sys2.map.region_data_mut(Region::Ram)[0x100], 0xAA);
-        assert_eq!(sys2.map.region_data_mut(Region::VideoRam)[0x200], 0xBB);
-        assert_eq!(sys2.map.region_data_mut(Region::Nvram)[50], 0xCC);
-        assert_eq!(sys2.palette_bank, 0x1F);
-        assert_eq!(sys2.fire_buttons, 0xFE);
-        assert_eq!(sys2.coin_start, 0xCE);
-        assert!(sys2.cocktail_flip);
-        assert!(sys2.track_u_pressed);
-        assert!(sys2.track_r_pressed);
-        assert_eq!(sys2.last_analog_input, [5, 10]);
-        assert_eq!(sys2.last_analog_output, [15, 20]);
-        assert_eq!(sys2.trackball_pos, [25, 30]);
-        assert_eq!(sys2.sound_data[0x10], 0x40);
-        assert_eq!(sys2.tone_step, 1234);
-        assert_eq!(sys2.tone_fraction, 5678);
-        assert_eq!(sys2.tone_volume, 0xAB);
-        assert_eq!(sys2.audio_clock.phase(), 9012);
-        assert!(sys2.irq_pending);
-        assert!(sys2.firq_pending);
-        assert_eq!(sys2.clock, 150_000);
-        assert_eq!(sys2.cpu_cycles, 120_000);
-        assert_eq!(sys2.watchdog_frame_count, 3);
+        assert_eq!(sys2.board.map.region_data_mut(Region::Ram)[0x100], 0xAA);
+        assert_eq!(
+            sys2.board.map.region_data_mut(Region::VideoRam)[0x200],
+            0xBB
+        );
+        assert_eq!(sys2.board.map.region_data_mut(Region::Nvram)[50], 0xCC);
+        assert_eq!(sys2.board.palette_bank, 0x1F);
+        assert_eq!(sys2.board.fire_buttons, 0xFE);
+        assert_eq!(sys2.board.coin_start, 0xCE);
+        assert!(sys2.board.cocktail_flip);
+        assert!(sys2.board.track_u_pressed);
+        assert!(sys2.board.track_r_pressed);
+        assert_eq!(sys2.board.last_analog_input, [5, 10]);
+        assert_eq!(sys2.board.last_analog_output, [15, 20]);
+        assert_eq!(sys2.board.trackball_pos, [25, 30]);
+        assert_eq!(sys2.board.sound_data[0x10], 0x40);
+        assert_eq!(sys2.board.tone_step, 1234);
+        assert_eq!(sys2.board.tone_fraction, 5678);
+        assert_eq!(sys2.board.tone_volume, 0xAB);
+        assert_eq!(sys2.board.audio_clock.phase(), 9012);
+        assert!(sys2.board.irq_pending);
+        assert!(sys2.board.firq_pending);
+        assert_eq!(sys2.board.clock, 150_000);
+        assert_eq!(sys2.board.cpu_cycles, 120_000);
+        assert_eq!(sys2.board.watchdog_frame_count, 3);
     }
 
     #[test]
     fn save_does_not_include_rom() {
         let mut sys = make_system();
-        sys.map.region_data_mut(Region::Rom)[0] = 0xDE;
-        sys.gfx_rom[0] = 0xAD;
+        sys.board.map.region_data_mut(Region::Rom)[0] = 0xDE;
+        sys.board.gfx_rom[0] = 0xAD;
 
         let data = SaveState::save_state(&sys).unwrap();
 
         let mut sys2 = make_system();
         SaveState::load_state(&mut sys2, &data).unwrap();
 
-        assert_eq!(sys2.map.region_data_mut(Region::Rom)[0], 0x00);
-        assert_eq!(sys2.gfx_rom[0], 0x00);
+        assert_eq!(sys2.board.map.region_data_mut(Region::Rom)[0], 0x00);
+        assert_eq!(sys2.board.gfx_rom[0], 0x00);
     }
 
     #[test]
@@ -1894,7 +1955,7 @@ mod tests {
             id: CTRL_TRACKBALL_Y,
             delta: (6) as f32,
         }); // 6 / 3 = 2
-        assert_eq!(sys.trackball_pos[0], 2);
+        assert_eq!(sys.board.trackball_pos[0], 2);
     }
 
     #[test]
@@ -1905,7 +1966,7 @@ mod tests {
             delta: (9) as f32,
         }); // 9 / 3 = 3
         // X axis is reversed: positive mouse motion (right) subtracts
-        assert_eq!(sys.trackball_pos[1], 253); // 0u8.wrapping_sub(3)
+        assert_eq!(sys.board.trackball_pos[1], 253); // 0u8.wrapping_sub(3)
     }
 
     #[test]
@@ -1916,7 +1977,7 @@ mod tests {
             delta: (-9) as f32,
         }); // -9 / 3 = -3
         // Negative delta (left) → adds 3 due to reversal
-        assert_eq!(sys.trackball_pos[1], 3); // 0u8.wrapping_sub(-3 as u8) = wrapping_sub(253) = 3
+        assert_eq!(sys.board.trackball_pos[1], 3); // 0u8.wrapping_sub(-3 as u8) = wrapping_sub(253) = 3
     }
 
     #[test]

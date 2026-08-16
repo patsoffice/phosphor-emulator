@@ -18,7 +18,6 @@
 //! the text layer; four POKEYs mixed to mono; and the self-centering analog
 //! flight stick via the ADC0809 are all implemented and verified on the real ROM.
 
-use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::input::{AnalogAxis, AxisRange};
 use phosphor_core::core::machine::{
@@ -465,12 +464,11 @@ const IROBOT_CONTROLS: &[InputControl] = &[
 // System
 // ---------------------------------------------------------------------------
 
-/// Atari I, Robot (1983).
+/// I, Robot's hardware, everything the 6809 talks *to*. Held apart from the CPU
+/// so a cycle dispatches at a concrete bus rather than a trait object (see
+/// `docs/designs/concrete-bus-dispatch.md`).
 #[derive(BusDebug)]
-pub struct IrobotSystem {
-    #[debug_cpu("M6809")]
-    cpu: M6809,
-
+pub struct IrobotBoard {
     #[debug_map(cpu = 0)]
     map: AddressSpace16,
 
@@ -523,6 +521,24 @@ pub struct IrobotSystem {
     clock: u64,
 }
 
+/// Atari I, Robot (1983): a 6809 beside the board it drives.
+#[derive(BusDebug)]
+pub struct IrobotSystem {
+    #[debug_cpu("M6809")]
+    cpu: M6809,
+    #[debug_bus]
+    pub board: IrobotBoard,
+}
+
+/// One CPU cycle: the board's per-scanline IRQ, the 6809 against the board
+/// (which *is* the bus), then the four POKEYs.
+#[inline]
+pub fn tick(cpu: &mut M6809, board: &mut IrobotBoard) {
+    board.begin_cycle(cpu);
+    cpu.execute_cycle(board, BusMaster::Cpu(0));
+    board.end_cycle();
+}
+
 /// I, Robot's two stick channels. Their electrical ranges are genuinely
 /// asymmetric about the 0x80 rest position — X spans 96..159, Y 96..163 — so an
 /// absolute deflection scales by whichever side it is heading toward, which is
@@ -540,10 +556,45 @@ impl Default for IrobotSystem {
     }
 }
 
+impl Default for IrobotBoard {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl IrobotSystem {
     pub fn new() -> Self {
-        let mut sys = Self {
+        Self {
             cpu: M6809::new(),
+            board: IrobotBoard::new(),
+        }
+    }
+
+    /// Advance one CPU cycle, returning the instruction-boundary mask.
+    pub fn step_cycle(&mut self) -> u32 {
+        tick(&mut self.cpu, &mut self.board);
+        u32::from(self.cpu.at_instruction_boundary())
+    }
+
+    pub fn load_rom_set(&mut self, rom_set: &RomSet) -> Result<(), RomLoadError> {
+        self.board.load_rom_set(rom_set)
+    }
+
+    /// Read the CPU-facing bus, side effects and all. Distinct from the
+    /// debugger's `BusDebug::peek`/`poke`, which avoid side effects.
+    pub fn bus_read(&mut self, master: BusMaster, addr: u16) -> u8 {
+        self.board.read(master, addr)
+    }
+
+    /// Write the CPU-facing bus, side effects and all. See [`Self::bus_read`].
+    pub fn bus_write(&mut self, master: BusMaster, addr: u16, data: u8) {
+        self.board.write(master, addr, data);
+    }
+}
+
+impl IrobotBoard {
+    pub fn new() -> Self {
+        let mut sys = Self {
             map: Self::build_map(),
             char_cache: GfxCache::new(0, 8, 8),
             text_palette: [(0, 0, 0); 32],
@@ -789,7 +840,9 @@ impl IrobotSystem {
         self.pokeys[num].write(reg, data);
     }
 
-    pub fn tick(&mut self) {
+    /// Board work that leads a CPU cycle: the 32V interrupt edge and the
+    /// debugger's access-attribution latch.
+    fn begin_cycle(&mut self, cpu: &M6809) {
         let frame_cycle = self.clock % TIMING.cycles_per_frame();
 
         if frame_cycle.is_multiple_of(TIMING.cycles_per_scanline) {
@@ -804,17 +857,13 @@ impl IrobotSystem {
         }
 
         if self.map.has_any_watchpoints() {
-            let pc = self
-                .cpu
-                .at_instruction_boundary()
-                .then_some(self.cpu.pc as u32);
+            let pc = cpu.at_instruction_boundary().then_some(cpu.pc as u32);
             self.map.latch_access_context(self.clock, pc);
         }
+    }
 
-        bus_split!(self, bus => {
-            self.cpu.execute_cycle(bus, BusMaster::Cpu(0));
-        });
-
+    /// Board work after the CPU's cycle: the POKEYs and the clock.
+    fn end_cycle(&mut self) {
         // The four POKEYs run at the CPU clock (1:1).
         for p in &mut self.pokeys {
             p.tick();
@@ -1051,7 +1100,8 @@ impl IrobotSystem {
 // Bus
 // ---------------------------------------------------------------------------
 
-impl Bus for IrobotSystem {
+// The board is the bus.
+impl Bus for IrobotBoard {
     type Address = u16;
     type Data = u8;
 
@@ -1122,15 +1172,15 @@ impl Renderable for IrobotSystem {
         TIMING.display_aspect()
     }
     fn render_frame(&self, buffer: &mut [u8]) {
-        self.render(buffer);
+        self.board.render(buffer);
     }
 }
 
 impl AudioSource for IrobotSystem {
     fn fill_audio(&mut self, buffer: &mut [i16]) -> usize {
-        let n = buffer.len().min(self.audio_buffer.len());
-        buffer[..n].copy_from_slice(&self.audio_buffer[..n]);
-        self.audio_buffer.drain(..n);
+        let n = buffer.len().min(self.board.audio_buffer.len());
+        buffer[..n].copy_from_slice(&self.board.audio_buffer[..n]);
+        self.board.audio_buffer.drain(..n);
         n
     }
     fn audio_sample_rate(&self) -> u32 {
@@ -1145,48 +1195,46 @@ impl MachineCore for IrobotSystem {
         // GFX is the alphanumeric overlay font.
         vec![GfxSheet {
             name: "chars",
-            cache: &self.char_cache,
-            palette: &self.text_palette,
+            cache: &self.board.char_cache,
+            palette: &self.board.text_palette,
         }]
     }
 
     fn run_frame(&mut self) {
         for _ in 0..TIMING.cycles_per_frame() {
-            self.tick();
+            tick(&mut self.cpu, &mut self.board);
         }
-        self.mix_audio();
+        self.board.mix_audio();
     }
 
     fn reset(&mut self) {
-        self.out0 = 0;
-        self.statwr = 0;
-        self.rombanksel = 0;
-        self.irq_pending = false;
-        self.firq_pending = false;
-        self.prev_v32 = false;
-        self.clock = 0;
-        self.novram.reset();
-        self.mathbox.reset();
-        self.adc.reset();
-        self.stick = new_stick();
-        self.update_adc_inputs();
-        for p in &mut self.pokeys {
+        self.board.out0 = 0;
+        self.board.statwr = 0;
+        self.board.rombanksel = 0;
+        self.board.irq_pending = false;
+        self.board.firq_pending = false;
+        self.board.prev_v32 = false;
+        self.board.clock = 0;
+        self.board.novram.reset();
+        self.board.mathbox.reset();
+        self.board.adc.reset();
+        self.board.stick = new_stick();
+        self.board.update_adc_inputs();
+        for p in &mut self.board.pokeys {
             p.reset();
         }
-        self.audio_buffer.clear();
-        self.bufsel = 0;
-        self.vg_clear = false;
-        self.commbank = 0;
-        self.irvg_running = false;
-        self.polybitmap[0].fill(0);
-        self.polybitmap[1].fill(0);
-        self.map.region_data_mut(Region::Ram).fill(0);
-        self.map.region_data_mut(Region::BankedRam).fill(0);
-        self.map.region_data_mut(Region::VideoRam).fill(0);
-        self.apply_banking();
-        bus_split!(self, bus => {
-            self.cpu.reset(bus, BusMaster::Cpu(0));
-        });
+        self.board.audio_buffer.clear();
+        self.board.bufsel = 0;
+        self.board.vg_clear = false;
+        self.board.commbank = 0;
+        self.board.irvg_running = false;
+        self.board.polybitmap[0].fill(0);
+        self.board.polybitmap[1].fill(0);
+        self.board.map.region_data_mut(Region::Ram).fill(0);
+        self.board.map.region_data_mut(Region::BankedRam).fill(0);
+        self.board.map.region_data_mut(Region::VideoRam).fill(0);
+        self.board.apply_banking();
+        self.cpu.reset(&mut self.board, BusMaster::Cpu(0));
     }
 
     fn frame_rate_hz(&self) -> f64 {
@@ -1201,69 +1249,69 @@ impl MachineCore for IrobotSystem {
 impl Saveable for IrobotSystem {
     fn save_state(&self, w: &mut StateWriter) {
         self.cpu.save_state(w);
-        w.write_bytes(self.map.region_data(Region::Ram));
-        w.write_bytes(self.map.region_data(Region::BankedRam));
-        w.write_bytes(self.map.region_data(Region::VideoRam));
-        self.novram.save_state(w);
-        self.mathbox.save_state(w);
-        self.adc.save_state(w);
-        for axis in &self.stick {
+        w.write_bytes(self.board.map.region_data(Region::Ram));
+        w.write_bytes(self.board.map.region_data(Region::BankedRam));
+        w.write_bytes(self.board.map.region_data(Region::VideoRam));
+        self.board.novram.save_state(w);
+        self.board.mathbox.save_state(w);
+        self.board.adc.save_state(w);
+        for axis in &self.board.stick {
             w.write_u8(axis.position() as u8);
         }
-        for p in &self.pokeys {
+        for p in &self.board.pokeys {
             p.save_state(w);
         }
-        w.write_bytes(&self.polybitmap[0]);
-        w.write_bytes(&self.polybitmap[1]);
-        w.write_u8(self.bufsel);
-        w.write_bool(self.vg_clear);
-        w.write_u8(self.commbank);
-        w.write_bool(self.irvg_running);
-        w.write_u8(self.out0);
-        w.write_u8(self.statwr);
-        w.write_u8(self.rombanksel);
-        w.write_u8(self.in0);
-        w.write_u8(self.in1);
-        w.write_u8(self.dsw1);
-        w.write_u8(self.dsw2);
-        w.write_bool(self.irq_pending);
-        w.write_bool(self.firq_pending);
-        w.write_bool(self.prev_v32);
-        w.write_u64_le(self.clock);
+        w.write_bytes(&self.board.polybitmap[0]);
+        w.write_bytes(&self.board.polybitmap[1]);
+        w.write_u8(self.board.bufsel);
+        w.write_bool(self.board.vg_clear);
+        w.write_u8(self.board.commbank);
+        w.write_bool(self.board.irvg_running);
+        w.write_u8(self.board.out0);
+        w.write_u8(self.board.statwr);
+        w.write_u8(self.board.rombanksel);
+        w.write_u8(self.board.in0);
+        w.write_u8(self.board.in1);
+        w.write_u8(self.board.dsw1);
+        w.write_u8(self.board.dsw2);
+        w.write_bool(self.board.irq_pending);
+        w.write_bool(self.board.firq_pending);
+        w.write_bool(self.board.prev_v32);
+        w.write_u64_le(self.board.clock);
     }
 
     fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
         self.cpu.load_state(r)?;
-        r.read_bytes_into(self.map.region_data_mut(Region::Ram))?;
-        r.read_bytes_into(self.map.region_data_mut(Region::BankedRam))?;
-        r.read_bytes_into(self.map.region_data_mut(Region::VideoRam))?;
-        self.novram.load_state(r)?;
-        self.mathbox.load_state(r)?;
-        self.adc.load_state(r)?;
-        for axis in &mut self.stick {
+        r.read_bytes_into(self.board.map.region_data_mut(Region::Ram))?;
+        r.read_bytes_into(self.board.map.region_data_mut(Region::BankedRam))?;
+        r.read_bytes_into(self.board.map.region_data_mut(Region::VideoRam))?;
+        self.board.novram.load_state(r)?;
+        self.board.mathbox.load_state(r)?;
+        self.board.adc.load_state(r)?;
+        for axis in &mut self.board.stick {
             axis.set_position(r.read_u8()? as i32);
         }
-        for p in &mut self.pokeys {
+        for p in &mut self.board.pokeys {
             p.load_state(r)?;
         }
-        r.read_bytes_into(&mut self.polybitmap[0])?;
-        r.read_bytes_into(&mut self.polybitmap[1])?;
-        self.bufsel = r.read_u8()?;
-        self.vg_clear = r.read_bool()?;
-        self.commbank = r.read_u8()?;
-        self.irvg_running = r.read_bool()?;
-        self.out0 = r.read_u8()?;
-        self.statwr = r.read_u8()?;
-        self.rombanksel = r.read_u8()?;
-        self.in0 = r.read_u8()?;
-        self.in1 = r.read_u8()?;
-        self.dsw1 = r.read_u8()?;
-        self.dsw2 = r.read_u8()?;
-        self.irq_pending = r.read_bool()?;
-        self.firq_pending = r.read_bool()?;
-        self.prev_v32 = r.read_bool()?;
-        self.clock = r.read_u64_le()?;
-        self.apply_banking();
+        r.read_bytes_into(&mut self.board.polybitmap[0])?;
+        r.read_bytes_into(&mut self.board.polybitmap[1])?;
+        self.board.bufsel = r.read_u8()?;
+        self.board.vg_clear = r.read_bool()?;
+        self.board.commbank = r.read_u8()?;
+        self.board.irvg_running = r.read_bool()?;
+        self.board.out0 = r.read_u8()?;
+        self.board.statwr = r.read_u8()?;
+        self.board.rombanksel = r.read_u8()?;
+        self.board.in0 = r.read_u8()?;
+        self.board.in1 = r.read_u8()?;
+        self.board.dsw1 = r.read_u8()?;
+        self.board.dsw2 = r.read_u8()?;
+        self.board.irq_pending = r.read_bool()?;
+        self.board.firq_pending = r.read_bool()?;
+        self.board.prev_v32 = r.read_bool()?;
+        self.board.clock = r.read_u64_le()?;
+        self.board.apply_banking();
         Ok(())
     }
 }
@@ -1280,10 +1328,10 @@ impl SaveState for IrobotSystem {
 
 impl Nvram for IrobotSystem {
     fn save_nvram(&self) -> Option<&[u8]> {
-        Some(self.novram.nvram())
+        Some(self.board.novram.nvram())
     }
     fn load_nvram(&mut self, data: &[u8]) {
-        self.novram.load_nvram(data);
+        self.board.novram.load_nvram(data);
     }
 }
 
@@ -1304,30 +1352,30 @@ impl InputConfigurable for IrobotSystem {
                     }
                 };
                 match id.0 {
-                    INPUT_SERVICE => apply(&mut self.in0, 4),
-                    INPUT_COIN3 => apply(&mut self.in0, 5),
-                    INPUT_COIN1 => apply(&mut self.in0, 6),
-                    INPUT_COIN2 => apply(&mut self.in0, 7),
-                    INPUT_FIRE => apply(&mut self.in1, 4),
-                    INPUT_BUTTON2 => apply(&mut self.in1, 5),
-                    INPUT_START2 => apply(&mut self.in1, 6),
-                    INPUT_START1 => apply(&mut self.in1, 7),
+                    INPUT_SERVICE => apply(&mut self.board.in0, 4),
+                    INPUT_COIN3 => apply(&mut self.board.in0, 5),
+                    INPUT_COIN1 => apply(&mut self.board.in0, 6),
+                    INPUT_COIN2 => apply(&mut self.board.in0, 7),
+                    INPUT_FIRE => apply(&mut self.board.in1, 4),
+                    INPUT_BUTTON2 => apply(&mut self.board.in1, 5),
+                    INPUT_START2 => apply(&mut self.board.in1, 6),
+                    INPUT_START1 => apply(&mut self.board.in1, 7),
                     // Digital stick directions feed the self-centering stick.
                     INPUT_STICK_LEFT => {
-                        self.stick[0].set_held(false, pressed);
-                        self.update_stick();
+                        self.board.stick[0].set_held(false, pressed);
+                        self.board.update_stick();
                     }
                     INPUT_STICK_RIGHT => {
-                        self.stick[0].set_held(true, pressed);
-                        self.update_stick();
+                        self.board.stick[0].set_held(true, pressed);
+                        self.board.update_stick();
                     }
                     INPUT_STICK_UP => {
-                        self.stick[1].set_held(false, pressed);
-                        self.update_stick();
+                        self.board.stick[1].set_held(false, pressed);
+                        self.board.update_stick();
                     }
                     INPUT_STICK_DOWN => {
-                        self.stick[1].set_held(true, pressed);
-                        self.update_stick();
+                        self.board.stick[1].set_held(true, pressed);
+                        self.board.update_stick();
                     }
                     _ => {}
                 }
@@ -1335,13 +1383,17 @@ impl InputConfigurable for IrobotSystem {
             // Analog stick: an absolute deflection (-1.0..=1.0) maps straight to
             // the channel range; relative motion (mouse) accumulates and clamps.
             InputEvent::Absolute { id, value } => match id.0 {
-                INPUT_STICK_X => self.set_stick_abs(0, value, STICK_X_MIN, STICK_X_MAX),
-                INPUT_STICK_Y => self.set_stick_abs(1, value, STICK_Y_MIN, STICK_Y_MAX),
+                INPUT_STICK_X => self.board.set_stick_abs(0, value, STICK_X_MIN, STICK_X_MAX),
+                INPUT_STICK_Y => self.board.set_stick_abs(1, value, STICK_Y_MIN, STICK_Y_MAX),
                 _ => {}
             },
             InputEvent::Relative { id, delta } => match id.0 {
-                INPUT_STICK_X => self.move_stick_rel(0, delta, STICK_X_MIN, STICK_X_MAX),
-                INPUT_STICK_Y => self.move_stick_rel(1, delta, STICK_Y_MIN, STICK_Y_MAX),
+                INPUT_STICK_X => self
+                    .board
+                    .move_stick_rel(0, delta, STICK_X_MIN, STICK_X_MAX),
+                INPUT_STICK_Y => self
+                    .board
+                    .move_stick_rel(1, delta, STICK_Y_MIN, STICK_Y_MAX),
                 _ => {}
             },
         }
@@ -1351,7 +1403,7 @@ impl InputConfigurable for IrobotSystem {
     /// reach accumulated motion or a held deflection.
     fn release_all_inputs(&mut self) {
         phosphor_core::core::machine::release_all_controls(self);
-        for c in &mut self.stick {
+        for c in &mut self.board.stick {
             c.release_all();
         }
     }
@@ -1580,9 +1632,9 @@ const IROBOT_DIP_BANKS: &[DipSwitchBank] = &[
     },
 ];
 
-crate::impl_dip_switches!(IrobotSystem, IROBOT_DIP_BANKS, dsw1, dsw2);
+crate::impl_dip_switches!(IrobotSystem, IROBOT_DIP_BANKS, board.dsw1, board.dsw2);
 
-crate::impl_standalone_debug!(IrobotSystem);
+crate::impl_standalone_debug!(IrobotSystem, split_cpu);
 impl Profilable for IrobotSystem {}
 impl phosphor_core::core::debug_trace::DebugTrace for IrobotSystem {}
 
@@ -1649,9 +1701,9 @@ mod tests {
             sys.run_frame();
         }
         // The mathbox built a display list that the rasterizer drew.
-        let poly_pixels = sys.polybitmap[0]
+        let poly_pixels = sys.board.polybitmap[0]
             .iter()
-            .chain(&sys.polybitmap[1])
+            .chain(&sys.board.polybitmap[1])
             .filter(|&&b| b != 0)
             .count();
         assert!(poly_pixels > 0, "polygons should be rasterized");
@@ -1671,22 +1723,27 @@ mod tests {
     /// Write a 16-bit big-endian comm-RAM word (bank 0) through the CPU's paged
     /// window (out0 selects outx=2 = comm RAM).
     fn write_comram(sys: &mut IrobotSystem, word: u16, val: u16) {
-        sys.out0_w(0x10); // outx = 2 (comm RAM), bank 0
+        sys.board.out0_w(0x10); // outx = 2 (comm RAM), bank 0
         let off = 0x2000 + word * 2;
-        Bus::write(sys, BusMaster::Cpu(0), off, (val >> 8) as u8);
-        Bus::write(sys, BusMaster::Cpu(0), off + 1, (val & 0xff) as u8);
+        Bus::write(&mut sys.board, BusMaster::Cpu(0), off, (val >> 8) as u8);
+        Bus::write(
+            &mut sys.board,
+            BusMaster::Cpu(0),
+            off + 1,
+            (val & 0xff) as u8,
+        );
     }
 
     #[test]
     fn draw_line_plots_clipped_run() {
         let mut bm = vec![0u8; BITMAP_W * BITMAP_H];
-        IrobotSystem::draw_line(&mut bm, 2, 5, 6, 5, 9); // horizontal run y=5
+        IrobotBoard::draw_line(&mut bm, 2, 5, 6, 5, 9); // horizontal run y=5
         for x in 2..=6 {
             assert_eq!(bm[(5 << 8) + x], 9, "x={x} on the line");
         }
         assert_eq!(bm[(5 << 8) + 7], 0, "past the end");
         // Off-screen endpoints are clipped, not panicking.
-        IrobotSystem::draw_line(&mut bm, -50, -50, 300, 300, 1);
+        IrobotBoard::draw_line(&mut bm, -50, -50, 300, 300, 1);
     }
 
     #[test]
@@ -1698,8 +1755,8 @@ mod tests {
         write_comram(&mut sys, 2, pixel_word(10, 0)); // X = 10
         write_comram(&mut sys, 3, pixel_word(20, 5)); // Y = 20, color 5
         write_comram(&mut sys, 4, 0xffff); // end of point list
-        sys.statwr_w(0x04); // bit 2 rising → run the polygon generator (bufsel 0)
-        assert_eq!(sys.polybitmap[0][(20 << 8) + 10], 5);
+        sys.board.statwr_w(0x04); // bit 2 rising → run the polygon generator (bufsel 0)
+        assert_eq!(sys.board.polybitmap[0][(20 << 8) + 10], 5);
     }
 
     #[test]
@@ -1718,20 +1775,36 @@ mod tests {
         write_comram(&mut sys, 13, 0xffff); // ...and ey = 0xffff
         write_comram(&mut sys, 20, 0); // slope 2 = 0
         write_comram(&mut sys, 21, pixel_word(15, 0)); // edge 2 ends at Y = 15
-        sys.statwr_w(0x04);
+        sys.board.statwr_w(0x04);
         // Spans fill x in [21, 40] for rows 10..=15.
-        assert_eq!(sys.polybitmap[0][(12 << 8) + 30], 3, "inside the polygon");
-        assert_eq!(sys.polybitmap[0][(12 << 8) + 20], 0, "left edge excluded");
-        assert_eq!(sys.polybitmap[0][(9 << 8) + 30], 0, "above the polygon");
-        assert_eq!(sys.polybitmap[0][(16 << 8) + 30], 0, "below the polygon");
+        assert_eq!(
+            sys.board.polybitmap[0][(12 << 8) + 30],
+            3,
+            "inside the polygon"
+        );
+        assert_eq!(
+            sys.board.polybitmap[0][(12 << 8) + 20],
+            0,
+            "left edge excluded"
+        );
+        assert_eq!(
+            sys.board.polybitmap[0][(9 << 8) + 30],
+            0,
+            "above the polygon"
+        );
+        assert_eq!(
+            sys.board.polybitmap[0][(16 << 8) + 30],
+            0,
+            "below the polygon"
+        );
     }
 
     #[test]
     fn render_draws_polygon_through_palette() {
         let mut sys = IrobotSystem::new();
-        sys.poly_palette[7] = (10, 20, 30);
+        sys.board.poly_palette[7] = (10, 20, 30);
         // bufsel 0 ⇒ the displayed buffer is index 1.
-        sys.polybitmap[1][(50 << 8) + 60] = 7;
+        sys.board.polybitmap[1][(50 << 8) + 60] = 7;
         let (w, h) = sys.display_size();
         let mut buf = vec![0u8; (w * h * 3) as usize];
         sys.render_frame(&mut buf);
@@ -1743,11 +1816,11 @@ mod tests {
     fn render_composites_text_over_polygon() {
         let mut sys = IrobotSystem::new();
         // All-ones char data ⇒ every char pixel is opaque (pen 1).
-        sys.char_cache = decode_gfx(&[0xFFu8; 0x800], 0, 64, &CHAR_LAYOUT);
-        sys.text_palette[1] = (200, 10, 20); // tile data 0 → color 0 → pen 1
+        sys.board.char_cache = decode_gfx(&[0xFFu8; 0x800], 0, 64, &CHAR_LAYOUT);
+        sys.board.text_palette[1] = (200, 10, 20); // tile data 0 → color 0 → pen 1
         // A non-zero polygon background that the text must cover.
-        sys.poly_palette[4] = (1, 2, 3);
-        sys.polybitmap[1].fill(4);
+        sys.board.poly_palette[4] = (1, 2, 3);
+        sys.board.polybitmap[1].fill(4);
         let (w, h) = sys.display_size();
         let mut buf = vec![0u8; (w * h * 3) as usize];
         sys.render_frame(&mut buf);
@@ -1758,38 +1831,38 @@ mod tests {
     #[test]
     fn fixed_ram_and_rom_decode() {
         let mut sys = IrobotSystem::new();
-        Bus::write(&mut sys, BusMaster::Cpu(0), 0x0042, 0xAB);
-        assert_eq!(Bus::read(&mut sys, BusMaster::Cpu(0), 0x0042), 0xAB);
+        Bus::write(&mut sys.board, BusMaster::Cpu(0), 0x0042, 0xAB);
+        assert_eq!(Bus::read(&mut sys.board, BusMaster::Cpu(0), 0x0042), 0xAB);
 
-        sys.map.region_data_mut(Region::Rom)[0] = 0x5A; // 0x6000
-        Bus::write(&mut sys, BusMaster::Cpu(0), 0x6000, 0x11); // ROM write ignored
-        assert_eq!(Bus::read(&mut sys, BusMaster::Cpu(0), 0x6000), 0x5A);
+        sys.board.map.region_data_mut(Region::Rom)[0] = 0x5A; // 0x6000
+        Bus::write(&mut sys.board, BusMaster::Cpu(0), 0x6000, 0x11); // ROM write ignored
+        assert_eq!(Bus::read(&mut sys.board, BusMaster::Cpu(0), 0x6000), 0x5A);
     }
 
     #[test]
     fn ram_bank_switching() {
         let mut sys = IrobotSystem::new();
         // Bank 0 then bank 1 see independent backing at 0x0800.
-        sys.out0_w(0x00); // ram bank 0
-        Bus::write(&mut sys, BusMaster::Cpu(0), 0x0800, 0x10);
-        sys.out0_w(0x20); // ram bank 1 (bits 6-5 = 01)
-        Bus::write(&mut sys, BusMaster::Cpu(0), 0x0800, 0x11);
-        sys.out0_w(0x00);
-        assert_eq!(Bus::read(&mut sys, BusMaster::Cpu(0), 0x0800), 0x10);
-        sys.out0_w(0x20);
-        assert_eq!(Bus::read(&mut sys, BusMaster::Cpu(0), 0x0800), 0x11);
+        sys.board.out0_w(0x00); // ram bank 0
+        Bus::write(&mut sys.board, BusMaster::Cpu(0), 0x0800, 0x10);
+        sys.board.out0_w(0x20); // ram bank 1 (bits 6-5 = 01)
+        Bus::write(&mut sys.board, BusMaster::Cpu(0), 0x0800, 0x11);
+        sys.board.out0_w(0x00);
+        assert_eq!(Bus::read(&mut sys.board, BusMaster::Cpu(0), 0x0800), 0x10);
+        sys.board.out0_w(0x20);
+        assert_eq!(Bus::read(&mut sys.board, BusMaster::Cpu(0), 0x0800), 0x11);
     }
 
     #[test]
     fn rom_bank_switching() {
         let mut sys = IrobotSystem::new();
         // Write distinct markers into two banks' backing, then select each.
-        sys.map.region_data_mut(Region::BankedRom)[0] = 0xA0; // bank 0
-        sys.map.region_data_mut(Region::BankedRom)[0x2000] = 0xA1; // bank 1
-        sys.rom_banksel_w(0x00); // bank 0
-        assert_eq!(Bus::read(&mut sys, BusMaster::Cpu(0), 0x4000), 0xA0);
-        sys.rom_banksel_w(0x02); // bank 1 (bits 3-1 = 001)
-        assert_eq!(Bus::read(&mut sys, BusMaster::Cpu(0), 0x4000), 0xA1);
+        sys.board.map.region_data_mut(Region::BankedRom)[0] = 0xA0; // bank 0
+        sys.board.map.region_data_mut(Region::BankedRom)[0x2000] = 0xA1; // bank 1
+        sys.board.rom_banksel_w(0x00); // bank 0
+        assert_eq!(Bus::read(&mut sys.board, BusMaster::Cpu(0), 0x4000), 0xA0);
+        sys.board.rom_banksel_w(0x02); // bank 1 (bits 3-1 = 001)
+        assert_eq!(Bus::read(&mut sys.board, BusMaster::Cpu(0), 0x4000), 0xA1);
     }
 
     #[test]
@@ -1797,80 +1870,93 @@ mod tests {
         let mut sys = IrobotSystem::new();
         // out0 bits 4-3 = 11 selects the mathbox scratch RAM page (outx = 3),
         // with RAM bank 0 (bits 6-5 = 00) and mathbox page 0 (bits 2-1 = 00).
-        sys.out0_w(0x18);
-        Bus::write(&mut sys, BusMaster::Cpu(0), 0x2000, 0x12);
-        Bus::write(&mut sys, BusMaster::Cpu(0), 0x2001, 0x34);
-        assert_eq!(Bus::read(&mut sys, BusMaster::Cpu(0), 0x2000), 0x12);
-        assert_eq!(Bus::read(&mut sys, BusMaster::Cpu(0), 0x2001), 0x34);
+        sys.board.out0_w(0x18);
+        Bus::write(&mut sys.board, BusMaster::Cpu(0), 0x2000, 0x12);
+        Bus::write(&mut sys.board, BusMaster::Cpu(0), 0x2001, 0x34);
+        assert_eq!(Bus::read(&mut sys.board, BusMaster::Cpu(0), 0x2000), 0x12);
+        assert_eq!(Bus::read(&mut sys.board, BusMaster::Cpu(0), 0x2001), 0x34);
     }
 
     #[test]
     fn dsw_read_paths() {
         let mut sys = IrobotSystem::new();
-        sys.dsw1 = 0x5A;
-        sys.dsw2 = 0xC3;
-        assert_eq!(Bus::read(&mut sys, BusMaster::Cpu(0), 0x10c0), 0x5A);
+        sys.board.dsw1 = 0x5A;
+        sys.board.dsw2 = 0xC3;
+        assert_eq!(Bus::read(&mut sys.board, BusMaster::Cpu(0), 0x10c0), 0x5A);
         // DSW2 via POKEY 0 ALLPOT: offset 0x20 → pokey 0, reg 8.
-        assert_eq!(Bus::read(&mut sys, BusMaster::Cpu(0), 0x1420), 0xC3);
+        assert_eq!(Bus::read(&mut sys.board, BusMaster::Cpu(0), 0x1420), 0xC3);
     }
 
     #[test]
     fn status_vblank_and_mathbox_done() {
         let mut sys = IrobotSystem::new();
-        sys.clock = 0; // line 0: no vblank
-        assert_eq!(sys.status_r() & 0x80, 0);
-        assert_eq!(sys.status_r() & 0x20, 0x20); // mathbox reported done
-        sys.clock = VBLANK_LINE * TIMING.cycles_per_scanline; // line 224
-        assert_eq!(sys.status_r() & 0x80, 0x80);
+        sys.board.clock = 0; // line 0: no vblank
+        assert_eq!(sys.board.status_r() & 0x80, 0);
+        assert_eq!(sys.board.status_r() & 0x20, 0x20); // mathbox reported done
+        sys.board.clock = VBLANK_LINE * TIMING.cycles_per_scanline; // line 224
+        assert_eq!(sys.board.status_r() & 0x80, 0x80);
     }
 
     #[test]
     fn irq_asserts_on_32v_rising_edge_and_clears_on_write() {
         let mut sys = IrobotSystem::new();
         // Advance to line 32 (32V rising edge).
-        sys.clock = 32 * TIMING.cycles_per_scanline;
-        sys.tick();
-        assert!(sys.irq_pending, "IRQ should assert at the 32V rising edge");
-        Bus::write(&mut sys, BusMaster::Cpu(0), 0x1100, 0); // clear IRQ
-        assert!(!sys.irq_pending);
+        sys.board.clock = 32 * TIMING.cycles_per_scanline;
+        sys.step_cycle();
+        assert!(
+            sys.board.irq_pending,
+            "IRQ should assert at the 32V rising edge"
+        );
+        Bus::write(&mut sys.board, BusMaster::Cpu(0), 0x1100, 0); // clear IRQ
+        assert!(!sys.board.irq_pending);
     }
 
     #[test]
     fn mathbox_start_raises_firq_cleared_by_write() {
         let mut sys = IrobotSystem::new();
-        sys.statwr_w(0x00);
-        sys.statwr_w(0x10); // rising edge on bit 4
-        assert!(sys.firq_pending);
-        Bus::write(&mut sys, BusMaster::Cpu(0), 0x1a00, 0); // clear FIRQ
-        assert!(!sys.firq_pending);
+        sys.board.statwr_w(0x00);
+        sys.board.statwr_w(0x10); // rising edge on bit 4
+        assert!(sys.board.firq_pending);
+        Bus::write(&mut sys.board, BusMaster::Cpu(0), 0x1a00, 0); // clear FIRQ
+        assert!(!sys.board.firq_pending);
     }
 
     #[test]
     fn nvram_round_trip_through_bus() {
         let mut sys = IrobotSystem::new();
-        Bus::write(&mut sys, BusMaster::Cpu(0), 0x1205, 0x09);
-        assert_eq!(Bus::read(&mut sys, BusMaster::Cpu(0), 0x1205) & 0x0f, 0x09);
+        Bus::write(&mut sys.board, BusMaster::Cpu(0), 0x1205, 0x09);
+        assert_eq!(
+            Bus::read(&mut sys.board, BusMaster::Cpu(0), 0x1205) & 0x0f,
+            0x09
+        );
         // save/load NVRAM image.
         let img = sys.save_nvram().unwrap().to_vec();
         let mut sys2 = IrobotSystem::new();
         sys2.load_nvram(&img);
-        assert_eq!(Bus::read(&mut sys2, BusMaster::Cpu(0), 0x1205) & 0x0f, 0x09);
+        assert_eq!(
+            Bus::read(&mut sys2.board, BusMaster::Cpu(0), 0x1205) & 0x0f,
+            0x09
+        );
     }
 
     #[test]
     fn inputs_are_active_low() {
         let mut sys = IrobotSystem::new();
-        assert_eq!(sys.in0, 0xFF);
+        assert_eq!(sys.board.in0, 0xFF);
         sys.handle_input(InputEvent::Button {
             id: InputId(INPUT_COIN1),
             pressed: true,
         });
-        assert_eq!(sys.in0 & 0x40, 0, "coin1 clears IN0 bit 6 while pressed");
+        assert_eq!(
+            sys.board.in0 & 0x40,
+            0,
+            "coin1 clears IN0 bit 6 while pressed"
+        );
         sys.handle_input(InputEvent::Button {
             id: InputId(INPUT_COIN1),
             pressed: false,
         });
-        assert_eq!(sys.in0 & 0x40, 0x40);
+        assert_eq!(sys.board.in0 & 0x40, 0x40);
     }
 
     #[test]
@@ -1882,9 +1968,9 @@ mod tests {
             id: InputId(INPUT_STICK_X),
             value: 1.0,
         });
-        Bus::write(&mut sys, BusMaster::Cpu(0), 0x1b01, 0); // start, channel 1
+        Bus::write(&mut sys.board, BusMaster::Cpu(0), 0x1b01, 0); // start, channel 1
         assert_eq!(
-            Bus::read(&mut sys, BusMaster::Cpu(0), 0x1300) as i32,
+            Bus::read(&mut sys.board, BusMaster::Cpu(0), 0x1300) as i32,
             2 * STICK_CENTER - STICK_X_MAX
         );
         // Y (AN0) is not reversed: full -Y deflection reads the Y min directly.
@@ -1892,9 +1978,9 @@ mod tests {
             id: InputId(INPUT_STICK_Y),
             value: -1.0,
         });
-        Bus::write(&mut sys, BusMaster::Cpu(0), 0x1b00, 0); // start, channel 0
+        Bus::write(&mut sys.board, BusMaster::Cpu(0), 0x1b00, 0); // start, channel 0
         assert_eq!(
-            Bus::read(&mut sys, BusMaster::Cpu(0), 0x1300) as i32,
+            Bus::read(&mut sys.board, BusMaster::Cpu(0), 0x1300) as i32,
             STICK_Y_MIN
         );
     }
@@ -1903,8 +1989,8 @@ mod tests {
     fn digital_stick_self_centers() {
         let mut sys = IrobotSystem::new();
         let read_ch = |sys: &mut IrobotSystem, ch: u16| {
-            Bus::write(sys, BusMaster::Cpu(0), 0x1b00 | ch, 0);
-            Bus::read(sys, BusMaster::Cpu(0), 0x1300) as i32
+            Bus::write(&mut sys.board, BusMaster::Cpu(0), 0x1b00 | ch, 0);
+            Bus::read(&mut sys.board, BusMaster::Cpu(0), 0x1300) as i32
         };
         // At rest both axes read center (X reversed around 0x80 stays 0x80).
         assert_eq!(read_ch(&mut sys, 0), STICK_CENTER); // Y
@@ -1927,53 +2013,56 @@ mod tests {
         let mut sys = IrobotSystem::new();
         MachineCore::reset(&mut sys);
         // A POKEY register write must route without panicking (AUDC1 on POKEY 2).
-        Bus::write(&mut sys, BusMaster::Cpu(0), 0x1410 | 0x01, 0xAF);
+        Bus::write(&mut sys.board, BusMaster::Cpu(0), 0x1410 | 0x01, 0xAF);
         sys.run_frame();
         assert_eq!(sys.audio_sample_rate(), SAMPLE_RATE);
         assert!(
-            !sys.audio_buffer.is_empty(),
+            !sys.board.audio_buffer.is_empty(),
             "a frame should mix POKEY output"
         );
         let mut buf = vec![0i16; 4096];
         let n = sys.fill_audio(&mut buf);
         assert!(n > 0);
-        assert!(sys.audio_buffer.is_empty(), "fill_audio drains the buffer");
+        assert!(
+            sys.board.audio_buffer.is_empty(),
+            "fill_audio drains the buffer"
+        );
     }
 
     #[test]
     fn save_state_round_trip() {
         let mut sys = IrobotSystem::new();
-        sys.out0_w(0x20);
-        sys.rom_banksel_w(0x02);
-        Bus::write(&mut sys, BusMaster::Cpu(0), 0x0042, 0x7E);
+        sys.board.out0_w(0x20);
+        sys.board.rom_banksel_w(0x02);
+        Bus::write(&mut sys.board, BusMaster::Cpu(0), 0x0042, 0x7E);
         // Mathbox scratch RAM (via the paged window) is part of the snapshot.
-        sys.out0_w(0x18); // outx = 3 (scratch RAM)
-        Bus::write(&mut sys, BusMaster::Cpu(0), 0x2002, 0x5C);
-        sys.out0_w(0x20); // restore RAM bank 1 selection
-        sys.clock = 1234;
+        sys.board.out0_w(0x18); // outx = 3 (scratch RAM)
+        Bus::write(&mut sys.board, BusMaster::Cpu(0), 0x2002, 0x5C);
+        sys.board.out0_w(0x20); // restore RAM bank 1 selection
+        sys.board.clock = 1234;
         let blob = SaveState::save_state(&sys).unwrap();
 
         let mut sys2 = IrobotSystem::new();
         SaveState::load_state(&mut sys2, &blob).unwrap();
-        assert_eq!(sys2.out0, 0x20);
-        assert_eq!(sys2.rombanksel, 0x02);
-        assert_eq!(sys2.clock, 1234);
-        sys2.out0_w(0x18); // outx = 3 to read scratch RAM back
-        assert_eq!(Bus::read(&mut sys2, BusMaster::Cpu(0), 0x2002), 0x5C);
-        sys2.out0_w(0x20);
-        assert_eq!(Bus::read(&mut sys2, BusMaster::Cpu(0), 0x0042), 0x7E);
+        assert_eq!(sys2.board.out0, 0x20);
+        assert_eq!(sys2.board.rombanksel, 0x02);
+        assert_eq!(sys2.board.clock, 1234);
+        sys2.board.out0_w(0x18); // outx = 3 to read scratch RAM back
+        assert_eq!(Bus::read(&mut sys2.board, BusMaster::Cpu(0), 0x2002), 0x5C);
+        sys2.board.out0_w(0x20);
+        assert_eq!(Bus::read(&mut sys2.board, BusMaster::Cpu(0), 0x0042), 0x7E);
     }
 
     #[test]
     fn text_palette_decodes_intensity_scaled_rgb() {
         let mut sys = IrobotSystem::new();
-        sys.proms = vec![0u8; 0x3420];
+        sys.board.proms = vec![0u8; 0x3420];
         // entry 0: full R (bits 7-6=11), intensity 3 (bits 1-0=11) → 28*3*3 = 252
-        sys.proms[0] = 0b1100_0011;
-        sys.build_text_palette();
+        sys.board.proms[0] = 0b1100_0011;
+        sys.board.build_text_palette();
         // index 0 bit-swaps to 0; R channel should be 252.
-        assert_eq!(sys.text_palette[0].0, 252);
-        assert_eq!(sys.text_palette[0].1, 0);
+        assert_eq!(sys.board.text_palette[0].0, 252);
+        assert_eq!(sys.board.text_palette[0].1, 0);
     }
 
     #[test]
@@ -1991,8 +2080,11 @@ mod tests {
 
         let mut sys = IrobotSystem::new();
         // Load directly (skip CRC) so the synthetic ROM is accepted.
-        sys.map.load_region(Region::Rom, &main[0x6000..0x10000]);
-        sys.map
+        sys.board
+            .map
+            .load_region(Region::Rom, &main[0x6000..0x10000]);
+        sys.board
+            .map
             .load_region(Region::BankedRom, &main[0x10000..0x1c000]);
         MachineCore::reset(&mut sys);
 

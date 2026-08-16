@@ -1,7 +1,7 @@
+use phosphor_core::core::BusMaster;
 use phosphor_core::core::machine::{
     InputConfigurable, InputEvent, InputId, MachineCore, Renderable,
 };
-use phosphor_core::core::BusMaster;
 use phosphor_machines::missile_command::{
     INPUT_COIN, INPUT_FIRE_CENTER, INPUT_FIRE_LEFT, INPUT_FIRE_RIGHT, INPUT_START1, INPUT_START2,
     INPUT_TRACK_D, INPUT_TRACK_R, MissileCommandBoard, MissileCommandSystem,

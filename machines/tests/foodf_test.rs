@@ -4,10 +4,10 @@
 //! is gated on a real ROM set: set `FOODF_ROMS` to a directory or `.zip`
 //! containing the `foodf` chips to run it; otherwise it skips cleanly.
 
+use phosphor_core::core::BusMaster;
 use phosphor_core::core::machine::{
     AudioSource, InputConfigurable, InputEvent, InputId, MachineCore, Nvram, Renderable, SaveState,
 };
-use phosphor_core::core::{Bus, BusMaster};
 use phosphor_machines::foodf::{
     FoodFightSystem, INPUT_COIN1, INPUT_P1_LEFT, INPUT_P1_THROW, INPUT_START1,
 };
@@ -43,7 +43,7 @@ fn input_map_is_complete() {
 fn digital_inputs_are_active_low() {
     let mut sys = FoodFightSystem::new();
     // Idle: SYSTEM reads all-high (nothing pressed).
-    assert_eq!(sys.read(BusMaster::Cpu(0), 0x94_8000) & 0xFF, 0xFF);
+    assert_eq!(sys.bus_read(BusMaster::Cpu(0), 0x94_8000) & 0xFF, 0xFF);
 
     sys.handle_input(InputEvent::Button {
         id: InputId((INPUT_COIN1) as u16),
@@ -57,14 +57,14 @@ fn digital_inputs_are_active_low() {
         id: InputId((INPUT_P1_THROW) as u16),
         pressed: true,
     }); // bit 5
-    let v = sys.read(BusMaster::Cpu(0), 0x94_8000) & 0xFF;
+    let v = sys.bus_read(BusMaster::Cpu(0), 0x94_8000) & 0xFF;
     assert_eq!(v, 0xFF & !0x01 & !0x04 & !0x20);
 
     sys.handle_input(InputEvent::Button {
         id: InputId((INPUT_COIN1) as u16),
         pressed: false,
     });
-    let v = sys.read(BusMaster::Cpu(0), 0x94_8000) & 0xFF;
+    let v = sys.bus_read(BusMaster::Cpu(0), 0x94_8000) & 0xFF;
     assert_eq!(v & 0x01, 0x01); // released
 }
 
@@ -74,36 +74,36 @@ fn p1_stick_keys_drive_the_adc() {
     // Select ADC channel 3 (P1 X). The sticks read reversed (MAME PORT_REVERSE
     // on all four ADC ports), so the value is mirrored at the read: the 0x7F
     // neutral reads as 0x80, and pressing LEFT (raw 0x00) reads as 0xFF.
-    sys.write(BusMaster::Cpu(0), 0x94_4006, 0); // channel = (0x944006>>1)&7 = 3
-    assert_eq!(sys.read(BusMaster::Cpu(0), 0x94_0001) & 0xFF, 0x80);
+    sys.bus_write(BusMaster::Cpu(0), 0x94_4006, 0); // channel = (0x944006>>1)&7 = 3
+    assert_eq!(sys.bus_read(BusMaster::Cpu(0), 0x94_0001) & 0xFF, 0x80);
     sys.handle_input(InputEvent::Button {
         id: InputId((INPUT_P1_LEFT) as u16),
         pressed: true,
     });
-    assert_eq!(sys.read(BusMaster::Cpu(0), 0x94_0001) & 0xFF, 0xFF);
+    assert_eq!(sys.bus_read(BusMaster::Cpu(0), 0x94_0001) & 0xFF, 0xFF);
 }
 
 #[test]
 fn nvram_persists_through_save_and_load() {
     let mut sys = FoodFightSystem::new();
-    sys.write(BusMaster::Cpu(0), 0x90_0010, 0x0042); // NVRAM cell 8, low byte
+    sys.bus_write(BusMaster::Cpu(0), 0x90_0010, 0x0042); // NVRAM cell 8, low byte
     let saved = sys.save_nvram().unwrap().to_vec();
     assert_eq!(saved[8], 0x42);
 
     let mut sys2 = FoodFightSystem::new();
     sys2.load_nvram(&saved);
-    assert_eq!(sys2.read(BusMaster::Cpu(0), 0x90_0010) & 0xFF, 0x42);
+    assert_eq!(sys2.bus_read(BusMaster::Cpu(0), 0x90_0010) & 0xFF, 0x42);
 }
 
 #[test]
 fn save_state_round_trips_through_public_api() {
     let mut sys = FoodFightSystem::new();
-    sys.write(BusMaster::Cpu(0), 0x01_4020, 0xCAFE);
+    sys.bus_write(BusMaster::Cpu(0), 0x01_4020, 0xCAFE);
     let data = SaveState::save_state(&sys).expect("save");
 
     let mut sys2 = FoodFightSystem::new();
     SaveState::load_state(&mut sys2, &data).unwrap();
-    assert_eq!(sys2.read(BusMaster::Cpu(0), 0x01_4020), 0xCAFE);
+    assert_eq!(sys2.bus_read(BusMaster::Cpu(0), 0x01_4020), 0xCAFE);
 }
 
 #[test]

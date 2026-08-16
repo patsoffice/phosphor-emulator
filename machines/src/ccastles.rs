@@ -1,4 +1,3 @@
-use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::input::{DrainPolicy, RelativeCounter};
 use phosphor_core::core::machine::{
@@ -395,10 +394,11 @@ const CCASTLES_SPRITE_LAYOUT: GfxLayout<'static> = GfxLayout {
 ///   0x9F80-0x9FBF  Palette RAM (32 entries, 3-bit RGB inverted)
 ///   0xA000-0xDFFF  Banked program ROM (16KB, 2 banks)
 ///   0xE000-0xFFFF  Fixed program ROM (8KB)
+/// Crystal Castles' hardware, everything the 6502 talks *to*. Held apart from
+/// the CPU so a cycle dispatches at a concrete bus rather than a trait object
+/// (see `docs/designs/concrete-bus-dispatch.md`).
 #[derive(BusDebug)]
-pub struct CrystalCastlesSystem {
-    #[debug_cpu("M6502")]
-    cpu: M6502,
+pub struct CrystalCastlesBoard {
     #[debug_device("POKEY 1")]
     pokey1: Pokey,
     #[debug_device("POKEY 2")]
@@ -461,6 +461,24 @@ pub struct CrystalCastlesSystem {
     audio_buffer: Vec<i16>,
 }
 
+/// Atari Crystal Castles (1983): a 6502 beside the board it drives.
+#[derive(BusDebug)]
+pub struct CrystalCastlesSystem {
+    #[debug_cpu("M6502")]
+    cpu: M6502,
+    #[debug_bus]
+    pub board: CrystalCastlesBoard,
+}
+
+/// One CPU cycle: the board's per-scanline work and POKEYs, then the 6502
+/// against the board, which *is* the bus.
+#[inline]
+pub fn tick(cpu: &mut M6502, board: &mut CrystalCastlesBoard) {
+    board.begin_cycle(cpu);
+    cpu.execute_cycle(board, BusMaster::Cpu(0));
+    board.clock += 1;
+}
+
 /// Crystal Castles reads full 8-bit trackball counters. `tick` drains them from
 /// a 200-cycle divider (~100 ticks/frame), so each call moves a single unit and
 /// the divider rate sets the responsiveness; the remainder stays pending.
@@ -468,7 +486,7 @@ fn new_track_counter() -> RelativeCounter {
     RelativeCounter::new(0xFF, 1, false, DrainPolicy::Unit)
 }
 
-impl CrystalCastlesSystem {
+impl CrystalCastlesBoard {
     fn build_map() -> AddressSpace16 {
         let mut map = AddressSpace16::new();
         map.region(
@@ -526,7 +544,6 @@ impl CrystalCastlesSystem {
 
     pub fn new() -> Self {
         Self {
-            cpu: M6502::new(),
             pokey1: Pokey::with_clock(1_250_000, 44100),
             pokey2: Pokey::with_clock(1_250_000, 44100),
 
@@ -603,10 +620,6 @@ impl CrystalCastlesSystem {
             .unwrap_or(24);
 
         Ok(())
-    }
-
-    pub fn get_cpu_state(&self) -> M6502State {
-        self.cpu.snapshot()
     }
 
     /// Rebuild sprite cache from gfx_rom (for tests that modify ROM data directly).
@@ -884,7 +897,9 @@ impl CrystalCastlesSystem {
     // Tick
     // -----------------------------------------------------------------------
 
-    pub fn tick(&mut self) {
+    /// Board work that leads a CPU cycle: trackballs, the per-scanline IRQ and
+    /// render, the VBLANK bit, the POKEYs, and the debugger's attribution latch.
+    fn begin_cycle(&mut self, cpu: &M6502) {
         // Trackball movement: drain mouse accumulator / apply keyboard input.
         // Rate: every 200 cycles (~100 ticks/frame) for responsive 8-bit counters.
         if self.clock.is_multiple_of(200) {
@@ -931,19 +946,43 @@ impl CrystalCastlesSystem {
         // Latch watchpoint attribution context (cycle + instruction PC)
         // before CPU execution — bus dispatch cannot read CPU state mid-tick.
         if self.map.has_any_watchpoints() {
-            let pc = self
-                .cpu
-                .at_instruction_boundary()
-                .then_some(self.cpu.pc as u32);
+            let pc = cpu.at_instruction_boundary().then_some(cpu.pc as u32);
             self.map.latch_access_context(self.clock, pc);
         }
+    }
+}
 
-        // CPU tick
-        bus_split!(self, bus => {
-            self.cpu.execute_cycle(bus, BusMaster::Cpu(0));
-        });
+impl CrystalCastlesSystem {
+    pub fn new() -> Self {
+        Self {
+            cpu: M6502::new(),
+            board: CrystalCastlesBoard::new(),
+        }
+    }
 
-        self.clock += 1;
+    /// Advance one CPU cycle, returning the instruction-boundary mask.
+    pub fn step_cycle(&mut self) -> u32 {
+        tick(&mut self.cpu, &mut self.board);
+        u32::from(self.cpu.at_instruction_boundary())
+    }
+
+    pub fn load_rom_set(&mut self, rom_set: &RomSet) -> Result<(), RomLoadError> {
+        self.board.load_rom_set(rom_set)
+    }
+
+    pub fn get_cpu_state(&self) -> M6502State {
+        self.cpu.snapshot()
+    }
+
+    /// Read the CPU-facing bus, side effects and all. Distinct from the
+    /// debugger's `BusDebug::peek`/`poke`, which avoid side effects.
+    pub fn bus_read(&mut self, master: BusMaster, addr: u16) -> u8 {
+        self.board.read(master, addr)
+    }
+
+    /// Write the CPU-facing bus, side effects and all. See [`Self::bus_read`].
+    pub fn bus_write(&mut self, master: BusMaster, addr: u16, data: u8) {
+        self.board.write(master, addr, data);
     }
 }
 
@@ -953,11 +992,18 @@ impl Default for CrystalCastlesSystem {
     }
 }
 
+impl Default for CrystalCastlesBoard {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Bus implementation — full address decoding
 // ---------------------------------------------------------------------------
 
-impl Bus for CrystalCastlesSystem {
+// The board is the bus.
+impl Bus for CrystalCastlesBoard {
     type Address = u16;
     type Data = u8;
 
@@ -1087,8 +1133,8 @@ impl Renderable for CrystalCastlesSystem {
     }
 
     fn render_frame(&self, buffer: &mut [u8]) {
-        if self.scanline_buffer_valid {
-            buffer.copy_from_slice(&self.scanline_buffer);
+        if self.board.scanline_buffer_valid {
+            buffer.copy_from_slice(&self.board.scanline_buffer);
         } else {
             // Black screen before first frame
             buffer.fill(0);
@@ -1098,9 +1144,9 @@ impl Renderable for CrystalCastlesSystem {
 
 impl AudioSource for CrystalCastlesSystem {
     fn fill_audio(&mut self, buffer: &mut [i16]) -> usize {
-        let n = buffer.len().min(self.audio_buffer.len());
-        buffer[..n].copy_from_slice(&self.audio_buffer[..n]);
-        self.audio_buffer.drain(..n);
+        let n = buffer.len().min(self.board.audio_buffer.len());
+        buffer[..n].copy_from_slice(&self.board.audio_buffer[..n]);
+        self.board.audio_buffer.drain(..n);
         n
     }
 
@@ -1117,23 +1163,23 @@ impl InputConfigurable for CrystalCastlesSystem {
     fn handle_input(&mut self, event: InputEvent) {
         match event {
             InputEvent::Button { id, pressed } => match id.0 as u8 {
-                INPUT_COIN_L => set_bit_active_low(&mut self.in0, 1, pressed),
-                INPUT_COIN_R => set_bit_active_low(&mut self.in0, 0, pressed),
-                INPUT_JUMP_LEFT => set_bit_active_low(&mut self.in0, 6, pressed),
-                INPUT_JUMP_RIGHT => set_bit_active_low(&mut self.in0, 7, pressed),
-                INPUT_TRACK_L => self.trackball[1].set_held(false, pressed),
-                INPUT_TRACK_R => self.trackball[1].set_held(true, pressed),
-                INPUT_TRACK_U => self.trackball[0].set_held(false, pressed),
-                INPUT_TRACK_D => self.trackball[0].set_held(true, pressed),
+                INPUT_COIN_L => set_bit_active_low(&mut self.board.in0, 1, pressed),
+                INPUT_COIN_R => set_bit_active_low(&mut self.board.in0, 0, pressed),
+                INPUT_JUMP_LEFT => set_bit_active_low(&mut self.board.in0, 6, pressed),
+                INPUT_JUMP_RIGHT => set_bit_active_low(&mut self.board.in0, 7, pressed),
+                INPUT_TRACK_L => self.board.trackball[1].set_held(false, pressed),
+                INPUT_TRACK_R => self.board.trackball[1].set_held(true, pressed),
+                INPUT_TRACK_U => self.board.trackball[0].set_held(false, pressed),
+                INPUT_TRACK_D => self.board.trackball[0].set_held(true, pressed),
                 _ => {}
             },
             InputEvent::Relative { id, delta } => {
                 let delta = delta as i32;
                 if id == CTRL_TRACKBALL_X {
-                    self.trackball[1].add_delta(delta as f32);
+                    self.board.trackball[1].add_delta(delta as f32);
                 } else if id == CTRL_TRACKBALL_Y {
                     // Y inverted: mouse down → trackball counter increases (moves down)
-                    self.trackball[0].add_delta(-delta as f32);
+                    self.board.trackball[0].add_delta(-delta as f32);
                 }
             }
             InputEvent::Absolute { .. } => {}
@@ -1144,68 +1190,68 @@ impl InputConfigurable for CrystalCastlesSystem {
     /// reach accumulated motion or a held deflection.
     fn release_all_inputs(&mut self) {
         phosphor_core::core::machine::release_all_controls(self);
-        for c in &mut self.trackball {
+        for c in &mut self.board.trackball {
             c.release_all();
         }
     }
 }
 
-crate::impl_standalone_debug!(CrystalCastlesSystem);
+crate::impl_standalone_debug!(CrystalCastlesSystem, split_cpu);
 
 impl Saveable for CrystalCastlesSystem {
     fn save_state(&self, w: &mut StateWriter) {
         self.cpu.save_state(w);
-        self.pokey1.save_state(w);
-        self.pokey2.save_state(w);
-        w.write_bytes(self.map.region_data(Region::VideoRam));
-        w.write_bytes(self.map.region_data(Region::Sram));
-        w.write_bytes(self.map.region_data(Region::SpriteRam));
-        w.write_bytes(self.map.region_data(Region::Nvram));
-        w.write_bytes(&self.bitmode_addr);
-        w.write_u8(self.hscroll);
-        w.write_u8(self.vscroll);
-        w.write_bytes(&self.palette_ram);
-        self.outlatch0.save_state(w);
-        self.outlatch1.save_state(w);
-        w.write_u8(self.in0);
-        for counter in &self.trackball {
+        self.board.pokey1.save_state(w);
+        self.board.pokey2.save_state(w);
+        w.write_bytes(self.board.map.region_data(Region::VideoRam));
+        w.write_bytes(self.board.map.region_data(Region::Sram));
+        w.write_bytes(self.board.map.region_data(Region::SpriteRam));
+        w.write_bytes(self.board.map.region_data(Region::Nvram));
+        w.write_bytes(&self.board.bitmode_addr);
+        w.write_u8(self.board.hscroll);
+        w.write_u8(self.board.vscroll);
+        w.write_bytes(&self.board.palette_ram);
+        self.board.outlatch0.save_state(w);
+        self.board.outlatch1.save_state(w);
+        w.write_u8(self.board.in0);
+        for counter in &self.board.trackball {
             counter.save_state(w);
         }
-        w.write_bool(self.irq_state);
-        w.write_u64_le(self.clock);
-        w.write_u8(self.watchdog_frame_count);
-        w.write_u8(self.dip_switches);
+        w.write_bool(self.board.irq_state);
+        w.write_u64_le(self.board.clock);
+        w.write_u8(self.board.watchdog_frame_count);
+        w.write_u8(self.board.dip_switches);
     }
 
     fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
         self.cpu.load_state(r)?;
-        self.pokey1.load_state(r)?;
-        self.pokey2.load_state(r)?;
-        r.read_bytes_into(self.map.region_data_mut(Region::VideoRam))?;
-        r.read_bytes_into(self.map.region_data_mut(Region::Sram))?;
-        r.read_bytes_into(self.map.region_data_mut(Region::SpriteRam))?;
-        r.read_bytes_into(self.map.region_data_mut(Region::Nvram))?;
-        r.read_bytes_into(&mut self.bitmode_addr)?;
-        self.hscroll = r.read_u8()?;
-        self.vscroll = r.read_u8()?;
-        r.read_bytes_into(&mut self.palette_ram)?;
-        self.outlatch0.load_state(r)?;
-        self.outlatch1.load_state(r)?;
-        self.in0 = r.read_u8()?;
-        for counter in &mut self.trackball {
+        self.board.pokey1.load_state(r)?;
+        self.board.pokey2.load_state(r)?;
+        r.read_bytes_into(self.board.map.region_data_mut(Region::VideoRam))?;
+        r.read_bytes_into(self.board.map.region_data_mut(Region::Sram))?;
+        r.read_bytes_into(self.board.map.region_data_mut(Region::SpriteRam))?;
+        r.read_bytes_into(self.board.map.region_data_mut(Region::Nvram))?;
+        r.read_bytes_into(&mut self.board.bitmode_addr)?;
+        self.board.hscroll = r.read_u8()?;
+        self.board.vscroll = r.read_u8()?;
+        r.read_bytes_into(&mut self.board.palette_ram)?;
+        self.board.outlatch0.load_state(r)?;
+        self.board.outlatch1.load_state(r)?;
+        self.board.in0 = r.read_u8()?;
+        for counter in &mut self.board.trackball {
             counter.load_state(r)?;
         }
-        self.irq_state = r.read_bool()?;
-        self.clock = r.read_u64_le()?;
-        self.watchdog_frame_count = r.read_u8()?;
-        self.dip_switches = r.read_u8()?;
+        self.board.irq_state = r.read_bool()?;
+        self.board.clock = r.read_u64_le()?;
+        self.board.watchdog_frame_count = r.read_u8()?;
+        self.board.dip_switches = r.read_u8()?;
         // Recompute derived state
         for i in 0..64 {
-            self.update_palette_entry(i);
+            self.board.update_palette_entry(i);
         }
-        self.update_rom_bank();
-        self.scanline_buffer_valid = false;
-        self.audio_buffer.clear();
+        self.board.update_rom_bank();
+        self.board.scanline_buffer_valid = false;
+        self.board.audio_buffer.clear();
         Ok(())
     }
 }
@@ -1218,44 +1264,42 @@ impl MachineCore for CrystalCastlesSystem {
 
     fn run_frame(&mut self) {
         for _ in 0..TIMING.cycles_per_frame() {
-            self.tick();
+            tick(&mut self.cpu, &mut self.board);
         }
-        self.scanline_buffer_valid = true;
+        self.board.scanline_buffer_valid = true;
 
         // Watchdog: 8-VBLANK timeout
-        self.watchdog_frame_count += 1;
-        if self.watchdog_frame_count >= 8 {
+        self.board.watchdog_frame_count += 1;
+        if self.board.watchdog_frame_count >= 8 {
             self.reset();
         }
 
         // Drain both POKEYs and mix to mono
-        let samples1 = self.pokey1.drain_audio();
-        let samples2 = self.pokey2.drain_audio();
+        let samples1 = self.board.pokey1.drain_audio();
+        let samples2 = self.board.pokey2.drain_audio();
         let len = samples1.len().min(samples2.len());
-        self.audio_buffer.extend((0..len).map(|i| {
+        self.board.audio_buffer.extend((0..len).map(|i| {
             let mixed = (samples1[i] + samples2[i]) - 1.0; // center around zero
             (mixed * 32767.0) as i16
         }));
     }
 
     fn reset(&mut self) {
-        self.irq_state = false;
-        self.watchdog_frame_count = 0;
-        self.outlatch0.reset();
-        self.outlatch1.reset();
-        self.update_rom_bank();
-        self.bitmode_addr = [0; 2];
-        self.hscroll = 0;
-        self.vscroll = 0;
-        self.in0 = 0xDF;
-        self.scanline_buffer.fill(0);
-        self.scanline_buffer_valid = false;
-        self.sprite_buffer.fill(0);
-        self.audio_buffer.clear();
+        self.board.irq_state = false;
+        self.board.watchdog_frame_count = 0;
+        self.board.outlatch0.reset();
+        self.board.outlatch1.reset();
+        self.board.update_rom_bank();
+        self.board.bitmode_addr = [0; 2];
+        self.board.hscroll = 0;
+        self.board.vscroll = 0;
+        self.board.in0 = 0xDF;
+        self.board.scanline_buffer.fill(0);
+        self.board.scanline_buffer_valid = false;
+        self.board.sprite_buffer.fill(0);
+        self.board.audio_buffer.clear();
 
-        bus_split!(self, bus => {
-            self.cpu.reset(bus, BusMaster::Cpu(0));
-        });
+        self.cpu.reset(&mut self.board, BusMaster::Cpu(0));
     }
 
     fn frame_rate_hz(&self) -> f64 {
@@ -1280,11 +1324,11 @@ impl SaveState for CrystalCastlesSystem {
 
 impl Nvram for CrystalCastlesSystem {
     fn save_nvram(&self) -> Option<&[u8]> {
-        Some(self.map.region_data(Region::Nvram))
+        Some(self.board.map.region_data(Region::Nvram))
     }
 
     fn load_nvram(&mut self, data: &[u8]) {
-        let nvram = self.map.region_data_mut(Region::Nvram);
+        let nvram = self.board.map.region_data_mut(Region::Nvram);
         let len = data.len().min(nvram.len());
         nvram[..len].copy_from_slice(&data[..len]);
     }
@@ -1316,7 +1360,7 @@ const CCASTLES_DIP_BANKS: &[DipSwitchBank] = &[DipSwitchBank {
     }],
 }];
 
-crate::impl_dip_switches!(CrystalCastlesSystem, CCASTLES_DIP_BANKS, dip_switches);
+crate::impl_dip_switches!(CrystalCastlesSystem, CCASTLES_DIP_BANKS, board.dip_switches);
 impl phosphor_core::core::debug_trace::DebugTrace for CrystalCastlesSystem {}
 
 // ---------------------------------------------------------------------------
@@ -1346,7 +1390,7 @@ mod tests {
     #[test]
     fn set_dip_option_masks_only_its_bits() {
         let mut sys = CrystalCastlesSystem::new();
-        sys.dip_switches = 0x05; // stray bits outside the Cabinet mask
+        sys.board.dip_switches = 0x05; // stray bits outside the Cabinet mask
         // Cabinet is option 0 (mask 0x20); pick "Cocktail" (0x20).
         sys.set_dip_option(0, 0, 0x20);
         assert_eq!(sys.dip_bank_value(0), 0x25); // 0x05 preserved + cabinet bit
@@ -1355,25 +1399,25 @@ mod tests {
     #[test]
     fn save_load_round_trip() {
         let mut sys = CrystalCastlesSystem::new();
-        sys.map.region_data_mut(Region::VideoRam)[0x1000] = 0xAB;
-        sys.map.region_data_mut(Region::Sram)[0x100] = 0xCD;
-        sys.map.region_data_mut(Region::SpriteRam)[0x10] = 0xEF;
-        sys.map.region_data_mut(Region::Nvram)[0x20] = 0x42;
-        sys.hscroll = 0x80;
-        sys.vscroll = 0x40;
+        sys.board.map.region_data_mut(Region::VideoRam)[0x1000] = 0xAB;
+        sys.board.map.region_data_mut(Region::Sram)[0x100] = 0xCD;
+        sys.board.map.region_data_mut(Region::SpriteRam)[0x10] = 0xEF;
+        sys.board.map.region_data_mut(Region::Nvram)[0x20] = 0x42;
+        sys.board.hscroll = 0x80;
+        sys.board.vscroll = 0x40;
         // Set outlatch0 to 0x80 (bit 7) via latch API
-        sys.outlatch0.write(7, true);
+        sys.board.outlatch0.write(7, true);
         // Set outlatch1 to 0x0F (bits 0-3) via latch API
         for b in 0..4u8 {
-            sys.outlatch1.write(b, true);
+            sys.board.outlatch1.write(b, true);
         }
-        sys.in0 = 0xBF;
-        sys.trackball[1].set_counter(0x55);
-        sys.trackball[1].add_delta(-10.0);
-        sys.irq_state = true;
-        sys.clock = 50_000;
-        sys.watchdog_frame_count = 3;
-        sys.dip_switches = 0x55;
+        sys.board.in0 = 0xBF;
+        sys.board.trackball[1].set_counter(0x55);
+        sys.board.trackball[1].add_delta(-10.0);
+        sys.board.irq_state = true;
+        sys.board.clock = 50_000;
+        sys.board.watchdog_frame_count = 3;
+        sys.board.dip_switches = 0x55;
 
         let data = SaveState::save_state(&sys).expect("save_state should return Some");
         let cpu_snap = sys.cpu.snapshot();
@@ -1382,46 +1426,46 @@ mod tests {
         SaveState::load_state(&mut sys2, &data).unwrap();
 
         assert_eq!(sys2.cpu.snapshot(), cpu_snap);
-        assert_eq!(sys2.map.region_data(Region::VideoRam)[0x1000], 0xAB);
-        assert_eq!(sys2.map.region_data(Region::Sram)[0x100], 0xCD);
-        assert_eq!(sys2.map.region_data(Region::SpriteRam)[0x10], 0xEF);
-        assert_eq!(sys2.map.region_data(Region::Nvram)[0x20], 0x42);
-        assert_eq!(sys2.hscroll, 0x80);
-        assert_eq!(sys2.vscroll, 0x40);
-        assert_eq!(sys2.outlatch0.value(), 0x80);
-        assert_eq!(sys2.outlatch1.value(), 0x0F);
-        assert_eq!(sys2.in0, 0xBF);
-        assert_eq!(sys2.trackball[1].counter(), 0x55);
+        assert_eq!(sys2.board.map.region_data(Region::VideoRam)[0x1000], 0xAB);
+        assert_eq!(sys2.board.map.region_data(Region::Sram)[0x100], 0xCD);
+        assert_eq!(sys2.board.map.region_data(Region::SpriteRam)[0x10], 0xEF);
+        assert_eq!(sys2.board.map.region_data(Region::Nvram)[0x20], 0x42);
+        assert_eq!(sys2.board.hscroll, 0x80);
+        assert_eq!(sys2.board.vscroll, 0x40);
+        assert_eq!(sys2.board.outlatch0.value(), 0x80);
+        assert_eq!(sys2.board.outlatch1.value(), 0x0F);
+        assert_eq!(sys2.board.in0, 0xBF);
+        assert_eq!(sys2.board.trackball[1].counter(), 0x55);
         // Pending motion survives the round-trip: one drain step moves it.
-        sys2.trackball[1].update();
-        assert_eq!(sys2.trackball[1].counter(), 0x54);
-        assert!(sys2.irq_state);
-        assert_eq!(sys2.clock, 50_000);
-        assert_eq!(sys2.watchdog_frame_count, 3);
-        assert_eq!(sys2.dip_switches, 0x55);
+        sys2.board.trackball[1].update();
+        assert_eq!(sys2.board.trackball[1].counter(), 0x54);
+        assert!(sys2.board.irq_state);
+        assert_eq!(sys2.board.clock, 50_000);
+        assert_eq!(sys2.board.watchdog_frame_count, 3);
+        assert_eq!(sys2.board.dip_switches, 0x55);
     }
 
     #[test]
     fn rom_banking_selects_correct_bank() {
         let mut sys = CrystalCastlesSystem::new();
         // Fill bank 0 low with 0xAA, bank 1 low with 0xBB
-        sys.map.region_data_mut(Region::RomBank0)[..0x2000].fill(0xAA);
-        sys.map.region_data_mut(Region::RomBank1)[..0x2000].fill(0xBB);
+        sys.board.map.region_data_mut(Region::RomBank0)[..0x2000].fill(0xAA);
+        sys.board.map.region_data_mut(Region::RomBank1)[..0x2000].fill(0xBB);
 
         // Bank 0 (default, outlatch0 bit 7 = 0)
-        sys.outlatch0.reset();
-        sys.update_rom_bank();
+        sys.board.outlatch0.reset();
+        sys.board.update_rom_bank();
         assert_eq!(
-            Bus::read(&mut sys, BusMaster::Cpu(0), 0xA000),
+            Bus::read(&mut sys.board, BusMaster::Cpu(0), 0xA000),
             0xAA,
             "Bank 0 should read from ROM_BANK0"
         );
 
         // Bank 1 (outlatch0 bit 7 = 1)
-        sys.outlatch0.write(7, true);
-        sys.update_rom_bank();
+        sys.board.outlatch0.write(7, true);
+        sys.board.update_rom_bank();
         assert_eq!(
-            Bus::read(&mut sys, BusMaster::Cpu(0), 0xA000),
+            Bus::read(&mut sys.board, BusMaster::Cpu(0), 0xA000),
             0xBB,
             "Bank 1 should read from ROM_BANK1"
         );
@@ -1430,58 +1474,58 @@ mod tests {
     #[test]
     fn fixed_rom_always_accessible() {
         let mut sys = CrystalCastlesSystem::new();
-        sys.map.region_data_mut(Region::RomFixed)[0x0000] = 0xDE;
-        sys.map.region_data_mut(Region::RomFixed)[0x1FFF] = 0xAD;
+        sys.board.map.region_data_mut(Region::RomFixed)[0x0000] = 0xDE;
+        sys.board.map.region_data_mut(Region::RomFixed)[0x1FFF] = 0xAD;
 
-        assert_eq!(Bus::read(&mut sys, BusMaster::Cpu(0), 0xE000), 0xDE);
-        assert_eq!(Bus::read(&mut sys, BusMaster::Cpu(0), 0xFFFF), 0xAD);
+        assert_eq!(Bus::read(&mut sys.board, BusMaster::Cpu(0), 0xE000), 0xDE);
+        assert_eq!(Bus::read(&mut sys.board, BusMaster::Cpu(0), 0xFFFF), 0xAD);
     }
 
     #[test]
     fn nvram_mirroring() {
         let mut sys = CrystalCastlesSystem::new();
-        Bus::write(&mut sys, BusMaster::Cpu(0), 0x9000, 0x42);
-        assert_eq!(Bus::read(&mut sys, BusMaster::Cpu(0), 0x9100), 0x42);
-        assert_eq!(Bus::read(&mut sys, BusMaster::Cpu(0), 0x9200), 0x42);
-        assert_eq!(Bus::read(&mut sys, BusMaster::Cpu(0), 0x9300), 0x42);
+        Bus::write(&mut sys.board, BusMaster::Cpu(0), 0x9000, 0x42);
+        assert_eq!(Bus::read(&mut sys.board, BusMaster::Cpu(0), 0x9100), 0x42);
+        assert_eq!(Bus::read(&mut sys.board, BusMaster::Cpu(0), 0x9200), 0x42);
+        assert_eq!(Bus::read(&mut sys.board, BusMaster::Cpu(0), 0x9300), 0x42);
     }
 
     #[test]
     fn outlatch0_bit_write() {
         let mut sys = CrystalCastlesSystem::new();
         // Set bit 7 (ROM bank select) by writing data & 1 = 1 to addr 0x9E87
-        Bus::write(&mut sys, BusMaster::Cpu(0), 0x9E87, 0x01);
-        assert!(sys.outlatch0.bit(7));
+        Bus::write(&mut sys.board, BusMaster::Cpu(0), 0x9E87, 0x01);
+        assert!(sys.board.outlatch0.bit(7));
         // Clear it
-        Bus::write(&mut sys, BusMaster::Cpu(0), 0x9E87, 0x00);
-        assert!(!sys.outlatch0.bit(7));
+        Bus::write(&mut sys.board, BusMaster::Cpu(0), 0x9E87, 0x00);
+        assert!(!sys.board.outlatch0.bit(7));
     }
 
     #[test]
     fn outlatch1_uses_bit3_of_data() {
         let mut sys = CrystalCastlesSystem::new();
         // Set bit 0 (/AX): data bit 3 must be set
-        Bus::write(&mut sys, BusMaster::Cpu(0), 0x9F00, 0x08);
-        assert!(sys.outlatch1.bit(0));
+        Bus::write(&mut sys.board, BusMaster::Cpu(0), 0x9F00, 0x08);
+        assert!(sys.board.outlatch1.bit(0));
         // Data bit 0 should NOT set the latch (only D3 matters)
-        Bus::write(&mut sys, BusMaster::Cpu(0), 0x9F00, 0x01);
-        assert!(!sys.outlatch1.bit(0));
+        Bus::write(&mut sys.board, BusMaster::Cpu(0), 0x9F00, 0x01);
+        assert!(!sys.board.outlatch1.bit(0));
     }
 
     #[test]
     fn irq_acknowledge_clears_state() {
         let mut sys = CrystalCastlesSystem::new();
-        sys.irq_state = true;
-        Bus::write(&mut sys, BusMaster::Cpu(0), 0x9D80, 0x00);
-        assert!(!sys.irq_state);
+        sys.board.irq_state = true;
+        Bus::write(&mut sys.board, BusMaster::Cpu(0), 0x9D80, 0x00);
+        assert!(!sys.board.irq_state);
     }
 
     #[test]
     fn palette_entry_updates_rgb() {
         let mut sys = CrystalCastlesSystem::new();
         // Write all-zeros to palette entry 0 → all bits inverted → max brightness
-        Bus::write(&mut sys, BusMaster::Cpu(0), 0x9F80, 0x00);
-        assert_eq!(sys.palette_rgb[0], (255, 255, 255));
+        Bus::write(&mut sys.board, BusMaster::Cpu(0), 0x9F80, 0x00);
+        assert_eq!(sys.board.palette_rgb[0], (255, 255, 255));
 
         // Write all-ones (0xFF) → r_raw = 3, g_raw = 7, b_raw = 7
         // Inverted: r = 7^7=4 (wait, r_raw = ((0xC0>>6) | (0&0x20)>>3) = 3)
@@ -1489,21 +1533,21 @@ mod tests {
         // Actually: 3 ^ 7 = 0b011 ^ 0b111 = 0b100 = 4. bit0=0, bit1=0, bit2=1 → 144
         // g_inv = 7^7=0 → all zero → 0
         // b_inv = 7^7=0 → 0
-        Bus::write(&mut sys, BusMaster::Cpu(0), 0x9F80, 0xFF);
-        assert_eq!(sys.palette_rgb[0], (144, 0, 0));
+        Bus::write(&mut sys.board, BusMaster::Cpu(0), 0x9F80, 0xFF);
+        assert_eq!(sys.board.palette_rgb[0], (144, 0, 0));
     }
 
     #[test]
     fn input_active_low() {
         let mut sys = CrystalCastlesSystem::new();
         // Default: all active-low bits set (released)
-        assert_eq!(sys.in0 & 0x02, 0x02, "Coin L should be released");
+        assert_eq!(sys.board.in0 & 0x02, 0x02, "Coin L should be released");
         sys.handle_input(InputEvent::Button {
             id: InputId((INPUT_COIN_L) as u16),
             pressed: true,
         });
         assert_eq!(
-            sys.in0 & 0x02,
+            sys.board.in0 & 0x02,
             0x00,
             "Coin L should be pressed (active-low)"
         );
@@ -1511,7 +1555,11 @@ mod tests {
             id: InputId((INPUT_COIN_L) as u16),
             pressed: false,
         });
-        assert_eq!(sys.in0 & 0x02, 0x02, "Coin L should be released again");
+        assert_eq!(
+            sys.board.in0 & 0x02,
+            0x02,
+            "Coin L should be released again"
+        );
     }
 
     #[test]
@@ -1533,18 +1581,18 @@ mod tests {
         // gfx_rom[0x2000] = 0xD6 = 1101_0110
         //   high nibble bits 7,6,5,4 = 1,1,0,1
         //   low nibble bits 3,2,1,0 = 0,1,1,0
-        sys.gfx_rom[0x0000] = 0x0B;
-        sys.gfx_rom[0x2000] = 0xD6;
-        sys.decode_sprite_cache();
+        sys.board.gfx_rom[0x0000] = 0x0B;
+        sys.board.gfx_rom[0x2000] = 0xD6;
+        sys.board.decode_sprite_cache();
 
         // Pixel 0: p2=bit3(0x0B)=1, p1=bit7(0xD6)=1, p0=bit3(0xD6)=0 → 0b110 = 6
-        assert_eq!(sys.sprite_cache.pixel(0, 0, 0), 6);
+        assert_eq!(sys.board.sprite_cache.pixel(0, 0, 0), 6);
         // Pixel 1: p2=bit2(0x0B)=0, p1=bit6(0xD6)=1, p0=bit2(0xD6)=1 → 0b011 = 3
-        assert_eq!(sys.sprite_cache.pixel(0, 1, 0), 3);
+        assert_eq!(sys.board.sprite_cache.pixel(0, 1, 0), 3);
         // Pixel 2: p2=bit1(0x0B)=1, p1=bit5(0xD6)=0, p0=bit1(0xD6)=1 → 0b101 = 5
-        assert_eq!(sys.sprite_cache.pixel(0, 2, 0), 5);
+        assert_eq!(sys.board.sprite_cache.pixel(0, 2, 0), 5);
         // Pixel 3: p2=bit0(0x0B)=1, p1=bit4(0xD6)=1, p0=bit0(0xD6)=0 → 0b110 = 6
-        assert_eq!(sys.sprite_cache.pixel(0, 3, 0), 6);
+        assert_eq!(sys.board.sprite_cache.pixel(0, 3, 0), 6);
     }
 
     #[test]
@@ -1555,22 +1603,22 @@ mod tests {
         // Plane 0 (first half, low nibble): all 1s → 0x0F
         // Plane 1 (second half, high nibble): all 1s → 0xF0
         // Plane 2 (second half, low nibble): all 1s → 0x0F
-        sys.gfx_rom[0..0x2000].fill(0x0F);
-        sys.gfx_rom[0x2000..0x4000].fill(0xFF); // 0xF0 | 0x0F
-        sys.decode_sprite_cache();
+        sys.board.gfx_rom[0..0x2000].fill(0x0F);
+        sys.board.gfx_rom[0x2000..0x4000].fill(0xFF); // 0xF0 | 0x0F
+        sys.board.decode_sprite_cache();
 
         // Place sprite 0 at position (100, 100)
-        let sprites = sys.map.region_data_mut(Region::SpriteRam);
+        let sprites = sys.board.map.region_data_mut(Region::SpriteRam);
         sprites[0] = 0; // sprite code
         sprites[1] = (256 - 16 - 100) as u8; // Y = 100
         sprites[2] = 0; // color group 0
         sprites[3] = 100; // X = 100
 
-        sys.render_sprites_to_buffer();
+        sys.board.render_sprites_to_buffer();
 
         // All transparent → sprite buffer should remain 0x0F everywhere
-        assert_eq!(sys.sprite_buffer[100 * 256 + 100], 0x0F);
-        assert_eq!(sys.sprite_buffer[100 * 256 + 107], 0x0F);
+        assert_eq!(sys.board.sprite_buffer[100 * 256 + 100], 0x0F);
+        assert_eq!(sys.board.sprite_buffer[100 * 256 + 107], 0x0F);
     }
 
     #[test]
@@ -1581,70 +1629,70 @@ mod tests {
         // Pixel 0 uses bit position 3 (MSB-first: 3 - 0%4 = 3).
         // First half: sprite 1 starts at byte 32. Row 0, byte 0 = offset 32.
         //   Plane 0 (low nibble) bit 3 → set bit 3 = 0x08
-        sys.gfx_rom[32] = 0x08;
+        sys.board.gfx_rom[32] = 0x08;
         // Second half: offset 0x2000 + 32 = 0x2020.
         //   Plane 1 (high nibble) bit 7 → clear (want p1=0)
         //   Plane 2 (low nibble) bit 3 → set bit 3 = 0x08
-        sys.gfx_rom[0x2020] = 0x08;
-        sys.decode_sprite_cache();
+        sys.board.gfx_rom[0x2020] = 0x08;
+        sys.board.decode_sprite_cache();
 
         // Place sprite with code 1 at (50, 200)
-        let sprites = sys.map.region_data_mut(Region::SpriteRam);
+        let sprites = sys.board.map.region_data_mut(Region::SpriteRam);
         sprites[0] = 1; // sprite code
         sprites[1] = (256u16.wrapping_sub(16).wrapping_sub(200)) as u8; // Y
         sprites[2] = 0x80; // color group 1 → color_base = 8
         sprites[3] = 50; // X
 
-        sys.render_sprites_to_buffer();
+        sys.board.render_sprites_to_buffer();
 
         // Sprite pixel 0 of row 0 should be at (50, 200): color_base(8) | 5 = 13
-        assert_eq!(sys.sprite_buffer[200 * 256 + 50], 13);
+        assert_eq!(sys.board.sprite_buffer[200 * 256 + 50], 13);
     }
 
     #[test]
     fn scanline_compositing_renders_bitmap() {
         let mut sys = CrystalCastlesSystem::new();
         // Set sync PROM: scanlines 0-23 = VBLANK (bit 0 set), 24-255 = visible
-        sys.sync_prom[..24].fill(0x01);
-        sys.sync_prom[24..].fill(0x00);
-        sys.vblank_end = 24;
+        sys.board.sync_prom[..24].fill(0x01);
+        sys.board.sync_prom[24..].fill(0x00);
+        sys.board.vblank_end = 24;
 
         // Set palette entry 5 to a known color
-        sys.palette_ram[5] = 0x00; // all zeros → inverted = all 1s → white
-        sys.update_palette_entry(5);
-        assert_eq!(sys.palette_rgb[5], (255, 255, 255));
+        sys.board.palette_ram[5] = 0x00; // all zeros → inverted = all 1s → white
+        sys.board.update_palette_entry(5);
+        assert_eq!(sys.board.palette_rgb[5], (255, 255, 255));
 
         // Write bitmap pixel value 5 at effective Y=24, X=0
         // videoram[24 * 128 + 0] low nibble = 5
-        sys.map.region_data_mut(Region::VideoRam)[24 * 128] = 0x05;
+        sys.board.map.region_data_mut(Region::VideoRam)[24 * 128] = 0x05;
 
         // Sprite buffer clear (transparent)
-        sys.sprite_buffer.fill(0x0F);
+        sys.board.sprite_buffer.fill(0x0F);
 
         // Set a priority PROM that selects bitmap (bit 1 = 0) and no bit 4 (bit 0 = 0)
         // For transparent sprite (mopix=0x0F): prindex = 0x40 | (7<<2) | (8>>2) | (5>>3)
         //   = 0x40 | 0x1C | 0x02 | 0x01 = 0x5F
-        sys.pri_prom[0x5F] = 0x00; // select bitmap, no bit 4
+        sys.board.pri_prom[0x5F] = 0x00; // select bitmap, no bit 4
 
         // Render scanline 24 (first visible)
-        sys.render_scanline_to_buffer(24);
+        sys.board.render_scanline_to_buffer(24);
 
         // Screen Y = 24 - 24 = 0. Pixel 0 should be white.
-        assert_eq!(sys.scanline_buffer[0], 255); // R
-        assert_eq!(sys.scanline_buffer[1], 255); // G
-        assert_eq!(sys.scanline_buffer[2], 255); // B
+        assert_eq!(sys.board.scanline_buffer[0], 255); // R
+        assert_eq!(sys.board.scanline_buffer[1], 255); // G
+        assert_eq!(sys.board.scanline_buffer[2], 255); // B
     }
 
     #[test]
     fn scanline_skips_vblank() {
         let mut sys = CrystalCastlesSystem::new();
-        sys.sync_prom[10] = 0x01; // VBLANK active
+        sys.board.sync_prom[10] = 0x01; // VBLANK active
 
         // Fill scanline buffer with a known pattern
-        sys.scanline_buffer.fill(0xAA);
+        sys.board.scanline_buffer.fill(0xAA);
 
         // Rendering a VBLANK scanline should not modify the buffer
-        sys.render_scanline_to_buffer(10);
-        assert_eq!(sys.scanline_buffer[0], 0xAA);
+        sys.board.render_scanline_to_buffer(10);
+        assert_eq!(sys.board.scanline_buffer[0], 0xAA);
     }
 }

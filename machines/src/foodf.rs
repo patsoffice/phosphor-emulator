@@ -39,7 +39,6 @@
 //! side-effect-light, so the stray RMW read is harmless. This is the documented
 //! limitation in the m68000 README and the main thing to watch during bring-up.
 
-use phosphor_core::bus_split;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
     ActionRole, AnalogAxisKind, AudioSource, DefaultBinding, DipApplyTiming, DipChoice, DipOption,
@@ -420,11 +419,11 @@ const PLAYFIELD_ROWS: usize = 32;
 // FoodFightSystem
 // ---------------------------------------------------------------------------
 
-/// Atari Food Fight arcade system.
+/// Food Fight's hardware, everything the 68000 talks *to*. Held apart from the
+/// CPU so a cycle dispatches at a concrete bus rather than a trait object (see
+/// `docs/designs/concrete-bus-dispatch.md`).
 #[derive(BusDebug)]
-pub struct FoodFightSystem {
-    #[debug_cpu("M68000")]
-    cpu: M68000,
+pub struct FoodFightBoard {
     #[debug_map(cpu = 0)]
     map: AddressSpace32,
     /// POKEY 1, 2, 3 (index 0 = chip "pokey1" at 0xA80000).
@@ -468,7 +467,65 @@ pub struct FoodFightSystem {
     audio_buffer: Vec<i16>,
 }
 
+/// Atari Food Fight (1983): a 68000 beside the board it drives.
+#[derive(BusDebug)]
+pub struct FoodFightSystem {
+    #[debug_cpu("M68000")]
+    cpu: M68000,
+    #[debug_bus]
+    pub board: FoodFightBoard,
+}
+
+/// One CPU cycle: the board's raster interrupts and POKEYs, then the 68000
+/// against the board, which *is* the bus.
+#[inline]
+pub fn tick(cpu: &mut M68000, board: &mut FoodFightBoard) {
+    board.begin_cycle(cpu);
+    cpu.execute_cycle(board, BusMaster::Cpu(0));
+    board.clock += 1;
+}
+
 impl FoodFightSystem {
+    pub fn new() -> Self {
+        Self {
+            cpu: M68000::new(),
+            board: FoodFightBoard::new(),
+        }
+    }
+
+    /// Advance one CPU cycle, returning the instruction-boundary mask.
+    pub fn step_cycle(&mut self) -> u32 {
+        tick(&mut self.cpu, &mut self.board);
+        u32::from(self.cpu.at_instruction_boundary())
+    }
+
+    pub fn load_rom_set(&mut self, rom_set: &RomSet) -> Result<(), RomLoadError> {
+        self.board.load_rom_set(rom_set)
+    }
+
+    pub fn get_cpu_state(&self) -> M68000State {
+        self.cpu.snapshot()
+    }
+
+    /// Read the CPU-facing bus, side effects and all. Distinct from the
+    /// debugger's `BusDebug::peek`/`poke`, which avoid side effects.
+    pub fn bus_read(&mut self, master: BusMaster, addr: u32) -> u16 {
+        self.board.read(master, addr)
+    }
+
+    /// Write the CPU-facing bus, side effects and all. See [`Self::bus_read`].
+    pub fn bus_write(&mut self, master: BusMaster, addr: u32, data: u16) {
+        self.board.write(master, addr, data);
+    }
+}
+
+impl Default for FoodFightBoard {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl FoodFightBoard {
     fn build_map() -> AddressSpace32 {
         let mut map = AddressSpace32::new();
         map.region(
@@ -504,7 +561,6 @@ impl FoodFightSystem {
 
     pub fn new() -> Self {
         let mut sys = Self {
-            cpu: M68000::new(),
             map: Self::build_map(),
             pokey: [
                 Pokey::with_clock(POKEY_CLOCK_HZ, 44100),
@@ -568,10 +624,6 @@ impl FoodFightSystem {
         }
 
         Ok(())
-    }
-
-    pub fn get_cpu_state(&self) -> M68000State {
-        self.cpu.snapshot()
     }
 
     pub fn clock(&self) -> u64 {
@@ -648,7 +700,9 @@ impl FoodFightSystem {
         }
     }
 
-    pub fn tick(&mut self) {
+    /// Board work that leads a CPU cycle: the raster interrupt latches, the
+    /// POKEYs on their divider, and the debugger's attribution latch.
+    fn begin_cycle(&mut self, cpu: &M68000) {
         let cycles_per_frame = TIMING.cycles_per_frame();
         let frame_cycle = self.clock % cycles_per_frame;
 
@@ -673,15 +727,9 @@ impl FoodFightSystem {
 
         // Latch watchpoint attribution context before CPU execution.
         if self.map.debug_active() {
-            let pc = self.cpu.at_instruction_boundary().then_some(self.cpu.pc);
+            let pc = cpu.at_instruction_boundary().then_some(cpu.pc);
             self.map.latch_access_context(self.clock, pc);
         }
-
-        bus_split!(self, bus: u32 word => {
-            self.cpu.execute_cycle(bus, BusMaster::Cpu(0));
-        });
-
-        self.clock += 1;
     }
 
     // -----------------------------------------------------------------------
@@ -818,7 +866,8 @@ impl Default for FoodFightSystem {
 // Bus
 // ---------------------------------------------------------------------------
 
-impl Bus for FoodFightSystem {
+// The board is the bus.
+impl Bus for FoodFightBoard {
     type Address = u32;
     type Data = u16;
 
@@ -900,15 +949,15 @@ impl Renderable for FoodFightSystem {
     }
 
     fn render_frame(&self, buffer: &mut [u8]) {
-        self.render(buffer);
+        self.board.render(buffer);
     }
 }
 
 impl AudioSource for FoodFightSystem {
     fn fill_audio(&mut self, buffer: &mut [i16]) -> usize {
-        let n = buffer.len().min(self.audio_buffer.len());
-        buffer[..n].copy_from_slice(&self.audio_buffer[..n]);
-        self.audio_buffer.drain(..n);
+        let n = buffer.len().min(self.board.audio_buffer.len());
+        buffer[..n].copy_from_slice(&self.board.audio_buffer[..n]);
+        self.board.audio_buffer.drain(..n);
         n
     }
 
@@ -925,29 +974,29 @@ impl InputConfigurable for FoodFightSystem {
     fn handle_input(&mut self, event: InputEvent) {
         match event {
             InputEvent::Button { id, pressed } => match id.0 as u8 {
-                INPUT_COIN1 => set_bit_active_low(&mut self.system_input, 0, pressed),
-                INPUT_COIN2 => set_bit_active_low(&mut self.system_input, 1, pressed),
-                INPUT_START1 => set_bit_active_low(&mut self.system_input, 2, pressed),
-                INPUT_START2 => set_bit_active_low(&mut self.system_input, 3, pressed),
-                INPUT_SERVICE => set_bit_active_low(&mut self.system_input, 4, pressed),
-                INPUT_SELFTEST => set_bit_active_low(&mut self.system_input, 7, pressed),
-                INPUT_P1_THROW => set_bit_active_low(&mut self.system_input, 5, pressed),
-                INPUT_P2_THROW => set_bit_active_low(&mut self.system_input, 6, pressed),
+                INPUT_COIN1 => set_bit_active_low(&mut self.board.system_input, 0, pressed),
+                INPUT_COIN2 => set_bit_active_low(&mut self.board.system_input, 1, pressed),
+                INPUT_START1 => set_bit_active_low(&mut self.board.system_input, 2, pressed),
+                INPUT_START2 => set_bit_active_low(&mut self.board.system_input, 3, pressed),
+                INPUT_SERVICE => set_bit_active_low(&mut self.board.system_input, 4, pressed),
+                INPUT_SELFTEST => set_bit_active_low(&mut self.board.system_input, 7, pressed),
+                INPUT_P1_THROW => set_bit_active_low(&mut self.board.system_input, 5, pressed),
+                INPUT_P2_THROW => set_bit_active_low(&mut self.board.system_input, 6, pressed),
                 INPUT_P1_LEFT => {
-                    self.p1_left = pressed;
-                    self.update_p1_stick();
+                    self.board.p1_left = pressed;
+                    self.board.update_p1_stick();
                 }
                 INPUT_P1_RIGHT => {
-                    self.p1_right = pressed;
-                    self.update_p1_stick();
+                    self.board.p1_right = pressed;
+                    self.board.update_p1_stick();
                 }
                 INPUT_P1_UP => {
-                    self.p1_up = pressed;
-                    self.update_p1_stick();
+                    self.board.p1_up = pressed;
+                    self.board.update_p1_stick();
                 }
                 INPUT_P1_DOWN => {
-                    self.p1_down = pressed;
-                    self.update_p1_stick();
+                    self.board.p1_down = pressed;
+                    self.board.update_p1_stick();
                 }
                 _ => {}
             },
@@ -955,13 +1004,13 @@ impl InputConfigurable for FoodFightSystem {
                 let delta = delta as i32;
                 let apply = |v: &mut u8, d: i32| *v = (*v as i32 + d).clamp(0, 255) as u8;
                 if id == CTRL_P1_STICK_X {
-                    apply(&mut self.stick[3], delta);
+                    apply(&mut self.board.stick[3], delta);
                 } else if id == CTRL_P1_STICK_Y {
-                    apply(&mut self.stick[1], delta);
+                    apply(&mut self.board.stick[1], delta);
                 } else if id == CTRL_P2_STICK_X {
-                    apply(&mut self.stick[2], delta);
+                    apply(&mut self.board.stick[2], delta);
                 } else if id == CTRL_P2_STICK_Y {
-                    apply(&mut self.stick[0], delta);
+                    apply(&mut self.board.stick[0], delta);
                 }
             }
             InputEvent::Absolute { .. } => {}
@@ -977,110 +1026,108 @@ impl MachineCore for FoodFightSystem {
         vec![
             GfxSheet {
                 name: "tiles",
-                cache: &self.tile_cache,
-                palette: &self.palette_rgb,
+                cache: &self.board.tile_cache,
+                palette: &self.board.palette_rgb,
             },
             GfxSheet {
                 name: "sprites",
-                cache: &self.sprite_cache,
-                palette: &self.palette_rgb,
+                cache: &self.board.sprite_cache,
+                palette: &self.board.palette_rgb,
             },
         ]
     }
 
     fn run_frame(&mut self) {
         for _ in 0..TIMING.cycles_per_frame() {
-            self.tick();
+            tick(&mut self.cpu, &mut self.board);
         }
 
         // Watchdog: Food Fight uses an 8-VBLANK timeout. The game strobes the
         // watchdog reset register each frame; if it stops, reboot.
-        self.watchdog_count = self.watchdog_count.saturating_add(1);
-        if self.watchdog_count >= 8 {
+        self.board.watchdog_count = self.board.watchdog_count.saturating_add(1);
+        if self.board.watchdog_count >= 8 {
             self.reset();
         }
 
         // Mix the three POKEYs to mono.
-        let s0 = self.pokey[0].drain_audio();
-        let s1 = self.pokey[1].drain_audio();
-        let s2 = self.pokey[2].drain_audio();
+        let s0 = self.board.pokey[0].drain_audio();
+        let s1 = self.board.pokey[1].drain_audio();
+        let s2 = self.board.pokey[2].drain_audio();
         let len = s0.len().min(s1.len()).min(s2.len());
-        self.audio_buffer.extend((0..len).map(|i| {
+        self.board.audio_buffer.extend((0..len).map(|i| {
             let mixed = (s0[i] + s1[i] + s2[i]) / 3.0; // [0, 1]
             ((mixed - 0.5) * 2.0 * 32767.0) as i16
         }));
     }
 
     fn reset(&mut self) {
-        self.scanline_int = false;
-        self.video_int = false;
-        self.watchdog_count = 0;
-        self.playfield_flip = false;
-        self.adc_channel = 0;
-        self.system_input = 0xFF;
-        self.audio_buffer.clear();
-        for p in &mut self.pokey {
+        self.board.scanline_int = false;
+        self.board.video_int = false;
+        self.board.watchdog_count = 0;
+        self.board.playfield_flip = false;
+        self.board.adc_channel = 0;
+        self.board.system_input = 0xFF;
+        self.board.audio_buffer.clear();
+        for p in &mut self.board.pokey {
             p.reset();
         }
-        self.refresh_dip_pots();
+        self.board.refresh_dip_pots();
 
-        bus_split!(self, bus: u32 word => {
-            self.cpu.reset(bus, BusMaster::Cpu(0));
-        });
+        self.cpu.reset(&mut self.board, BusMaster::Cpu(0));
     }
 }
 
 // `MachineDebug` (debug_bus + cycle stepping) via the standalone-debug macro;
 // `BusDebug` is `#[derive]`d on the struct above (24-bit `AddressSpace32` bus).
-crate::impl_standalone_debug!(FoodFightSystem);
+crate::impl_standalone_debug!(FoodFightSystem, split_cpu);
 
 impl Saveable for FoodFightSystem {
     fn save_state(&self, w: &mut StateWriter) {
         self.cpu.save_state(w);
-        for p in &self.pokey {
+        for p in &self.board.pokey {
             p.save_state(w);
         }
-        w.write_bytes(self.map.region_data(Region::Ram));
-        w.write_bytes(self.map.region_data(Region::SpriteRam));
-        w.write_bytes(self.map.region_data(Region::Playfield));
-        w.write_bytes(&self.palette_ram);
-        w.write_bytes(&self.nvram);
-        w.write_bytes(&self.stick);
-        w.write_u8(self.adc_channel as u8);
-        w.write_u8(self.system_input);
-        w.write_u8(self.dip_switches);
-        w.write_bool(self.playfield_flip);
-        w.write_bool(self.scanline_int);
-        w.write_bool(self.video_int);
-        w.write_u64_le(self.clock);
-        w.write_u8(self.watchdog_count);
+        w.write_bytes(self.board.map.region_data(Region::Ram));
+        w.write_bytes(self.board.map.region_data(Region::SpriteRam));
+        w.write_bytes(self.board.map.region_data(Region::Playfield));
+        w.write_bytes(&self.board.palette_ram);
+        w.write_bytes(&self.board.nvram);
+        w.write_bytes(&self.board.stick);
+        w.write_u8(self.board.adc_channel as u8);
+        w.write_u8(self.board.system_input);
+        w.write_u8(self.board.dip_switches);
+        w.write_bool(self.board.playfield_flip);
+        w.write_bool(self.board.scanline_int);
+        w.write_bool(self.board.video_int);
+        w.write_u64_le(self.board.clock);
+        w.write_u8(self.board.watchdog_count);
     }
 
     fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
         self.cpu.load_state(r)?;
-        for p in &mut self.pokey {
+        for p in &mut self.board.pokey {
             p.load_state(r)?;
         }
-        r.read_bytes_into(self.map.region_data_mut(Region::Ram))?;
-        r.read_bytes_into(self.map.region_data_mut(Region::SpriteRam))?;
-        r.read_bytes_into(self.map.region_data_mut(Region::Playfield))?;
-        r.read_bytes_into(&mut self.palette_ram)?;
-        r.read_bytes_into(&mut self.nvram)?;
-        r.read_bytes_into(&mut self.stick)?;
-        self.adc_channel = (r.read_u8()? & 0x07) as usize;
-        self.system_input = r.read_u8()?;
-        self.dip_switches = r.read_u8()?;
-        self.playfield_flip = r.read_bool()?;
-        self.scanline_int = r.read_bool()?;
-        self.video_int = r.read_bool()?;
-        self.clock = r.read_u64_le()?;
-        self.watchdog_count = r.read_u8()?;
+        r.read_bytes_into(self.board.map.region_data_mut(Region::Ram))?;
+        r.read_bytes_into(self.board.map.region_data_mut(Region::SpriteRam))?;
+        r.read_bytes_into(self.board.map.region_data_mut(Region::Playfield))?;
+        r.read_bytes_into(&mut self.board.palette_ram)?;
+        r.read_bytes_into(&mut self.board.nvram)?;
+        r.read_bytes_into(&mut self.board.stick)?;
+        self.board.adc_channel = (r.read_u8()? & 0x07) as usize;
+        self.board.system_input = r.read_u8()?;
+        self.board.dip_switches = r.read_u8()?;
+        self.board.playfield_flip = r.read_bool()?;
+        self.board.scanline_int = r.read_bool()?;
+        self.board.video_int = r.read_bool()?;
+        self.board.clock = r.read_u64_le()?;
+        self.board.watchdog_count = r.read_u8()?;
         // Recompute derived state.
         for i in 0..256 {
-            self.update_palette_entry(i);
+            self.board.update_palette_entry(i);
         }
-        self.refresh_dip_pots();
-        self.audio_buffer.clear();
+        self.board.refresh_dip_pots();
+        self.board.audio_buffer.clear();
         Ok(())
     }
 }
@@ -1091,12 +1138,12 @@ impl SaveState for FoodFightSystem {
 
 impl Nvram for FoodFightSystem {
     fn save_nvram(&self) -> Option<&[u8]> {
-        Some(&self.nvram)
+        Some(&self.board.nvram)
     }
 
     fn load_nvram(&mut self, data: &[u8]) {
-        let len = data.len().min(self.nvram.len());
-        self.nvram[..len].copy_from_slice(&data[..len]);
+        let len = data.len().min(self.board.nvram.len());
+        self.board.nvram[..len].copy_from_slice(&data[..len]);
     }
 }
 
@@ -1199,8 +1246,8 @@ const FOODF_DIP_BANKS: &[DipSwitchBank] = &[DipSwitchBank {
     ],
 }];
 
-crate::impl_dip_switches!(FoodFightSystem, FOODF_DIP_BANKS, dip_switches);
-crate::impl_map_debug_trace!(FoodFightSystem, map);
+crate::impl_dip_switches!(FoodFightSystem, FOODF_DIP_BANKS, board.dip_switches);
+crate::impl_map_debug_trace!(FoodFightSystem, board.map);
 
 // ---------------------------------------------------------------------------
 // Registry
@@ -1231,14 +1278,20 @@ mod tests {
     #[test]
     fn map_decodes_documented_windows() {
         let sys = FoodFightSystem::new();
-        assert_eq!(sys.map.region_at(0x00_0000).unwrap().id, Region::Rom.into());
-        assert_eq!(sys.map.region_at(0x01_4000).unwrap().id, Region::Ram.into());
         assert_eq!(
-            sys.map.region_at(0x01_C000).unwrap().id,
+            sys.board.map.region_at(0x00_0000).unwrap().id,
+            Region::Rom.into()
+        );
+        assert_eq!(
+            sys.board.map.region_at(0x01_4000).unwrap().id,
+            Region::Ram.into()
+        );
+        assert_eq!(
+            sys.board.map.region_at(0x01_C000).unwrap().id,
             Region::SpriteRam.into()
         );
         assert_eq!(
-            sys.map.region_at(0x80_0000).unwrap().id,
+            sys.board.map.region_at(0x80_0000).unwrap().id,
             Region::Playfield.into()
         );
     }
@@ -1247,7 +1300,7 @@ mod tests {
     fn reset_loads_ssp_and_pc_from_vectors() {
         let mut sys = FoodFightSystem::new();
         // Vector 0 (SSP) = 0x00010000, vector 1 (PC) = 0x00000400.
-        let rom = sys.map.region_data_mut(Region::Rom);
+        let rom = sys.board.map.region_data_mut(Region::Rom);
         rom[0..8].copy_from_slice(&[0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00]);
         sys.reset();
         let st = sys.get_cpu_state();
@@ -1258,22 +1311,22 @@ mod tests {
     #[test]
     fn interrupt_level_encodes_and_acks() {
         let mut sys = FoodFightSystem::new();
-        assert_eq!(sys.interrupt_level(), 0);
-        sys.scanline_int = true;
-        assert_eq!(sys.interrupt_level(), 1);
-        sys.video_int = true;
-        assert_eq!(sys.interrupt_level(), 3);
-        sys.scanline_int = false;
-        assert_eq!(sys.interrupt_level(), 2);
+        assert_eq!(sys.board.interrupt_level(), 0);
+        sys.board.scanline_int = true;
+        assert_eq!(sys.board.interrupt_level(), 1);
+        sys.board.video_int = true;
+        assert_eq!(sys.board.interrupt_level(), 3);
+        sys.board.scanline_int = false;
+        assert_eq!(sys.board.interrupt_level(), 2);
 
         // digital_w acks are active-low: bit 2 clears INT1, bit 3 clears INT2.
-        sys.scanline_int = true;
-        sys.video_int = true;
-        sys.digital_w(0x00); // both ack bits low
-        assert!(!sys.scanline_int);
-        assert!(!sys.video_int);
+        sys.board.scanline_int = true;
+        sys.board.video_int = true;
+        sys.board.digital_w(0x00); // both ack bits low
+        assert!(!sys.board.scanline_int);
+        assert!(!sys.board.video_int);
 
-        let st = sys.check_interrupts(BusMaster::Cpu(0));
+        let st = sys.board.check_interrupts(BusMaster::Cpu(0));
         assert_eq!(st.irq_level, 0);
         assert_eq!(st.irq_vector, 0xFF);
     }
@@ -1282,27 +1335,33 @@ mod tests {
     fn nvram_low_byte_round_trips() {
         let mut sys = FoodFightSystem::new();
         // Byte write lands in the low byte of the NVRAM cell.
-        Bus::write(&mut sys, BusMaster::Cpu(0), 0x90_0000, 0x1234);
-        assert_eq!(sys.nvram[0], 0x34);
-        assert_eq!(Bus::read(&mut sys, BusMaster::Cpu(0), 0x90_0000), 0x0034);
+        Bus::write(&mut sys.board, BusMaster::Cpu(0), 0x90_0000, 0x1234);
+        assert_eq!(sys.board.nvram[0], 0x34);
+        assert_eq!(
+            Bus::read(&mut sys.board, BusMaster::Cpu(0), 0x90_0000),
+            0x0034
+        );
     }
 
     #[test]
     fn ram_word_access_round_trips() {
         let mut sys = FoodFightSystem::new();
-        Bus::write(&mut sys, BusMaster::Cpu(0), 0x01_4000, 0xBEEF);
-        assert_eq!(Bus::read(&mut sys, BusMaster::Cpu(0), 0x01_4000), 0xBEEF);
+        Bus::write(&mut sys.board, BusMaster::Cpu(0), 0x01_4000, 0xBEEF);
+        assert_eq!(
+            Bus::read(&mut sys.board, BusMaster::Cpu(0), 0x01_4000),
+            0xBEEF
+        );
     }
 
     #[test]
     fn palette_write_updates_rgb() {
         let mut sys = FoodFightSystem::new();
         // All bits set in the low byte → white-ish (max R/G/B).
-        Bus::write(&mut sys, BusMaster::Cpu(0), 0x95_0000, 0x00FF);
-        assert_eq!(sys.palette_rgb[0], (255, 255, 255));
+        Bus::write(&mut sys.board, BusMaster::Cpu(0), 0x95_0000, 0x00FF);
+        assert_eq!(sys.board.palette_rgb[0], (255, 255, 255));
         // All bits clear → black.
-        Bus::write(&mut sys, BusMaster::Cpu(0), 0x95_0002, 0x0000);
-        assert_eq!(sys.palette_rgb[1], (0, 0, 0));
+        Bus::write(&mut sys.board, BusMaster::Cpu(0), 0x95_0002, 0x0000);
+        assert_eq!(sys.board.palette_rgb[1], (0, 0, 0));
     }
 
     /// Boot a hand-assembled 68000 program on the full board and prove the core
@@ -1312,7 +1371,7 @@ mod tests {
     fn synthetic_program_boots_and_takes_interrupts() {
         let mut sys = FoodFightSystem::new();
         {
-            let rom = sys.map.region_data_mut(Region::Rom);
+            let rom = sys.board.map.region_data_mut(Region::Rom);
 
             // Reset vectors: SSP = 0x00018000, PC = 0x00000400.
             rom[0x00..0x08].copy_from_slice(&[0x00, 0x01, 0x80, 0x00, 0x00, 0x00, 0x04, 0x00]);
@@ -1357,7 +1416,7 @@ mod tests {
         assert!(pc < 0x1_0000, "PC {pc:#08X} escaped ROM");
 
         // The "alive" counter advanced → the core is actually running code.
-        let ram = sys.map.region_data(Region::Ram);
+        let ram = sys.board.map.region_data(Region::Ram);
         let alive = u32::from_be_bytes([ram[0], ram[1], ram[2], ram[3]]);
         assert!(alive > 0, "main loop never ran");
 
@@ -1370,14 +1429,14 @@ mod tests {
     #[test]
     fn save_load_round_trip() {
         let mut sys = FoodFightSystem::new();
-        sys.map.region_data_mut(Region::Ram)[0x100] = 0xAB;
-        sys.map.region_data_mut(Region::Playfield)[0x10] = 0xCD;
-        sys.nvram[0x20] = 0x42;
-        sys.palette_ram[5] = 0x55;
-        sys.system_input = 0xF0;
-        sys.scanline_int = true;
-        sys.clock = 12_345;
-        sys.watchdog_count = 3;
+        sys.board.map.region_data_mut(Region::Ram)[0x100] = 0xAB;
+        sys.board.map.region_data_mut(Region::Playfield)[0x10] = 0xCD;
+        sys.board.nvram[0x20] = 0x42;
+        sys.board.palette_ram[5] = 0x55;
+        sys.board.system_input = 0xF0;
+        sys.board.scanline_int = true;
+        sys.board.clock = 12_345;
+        sys.board.watchdog_count = 3;
 
         let data = SaveState::save_state(&sys).expect("save");
         let cpu_snap = sys.get_cpu_state();
@@ -1386,13 +1445,13 @@ mod tests {
         SaveState::load_state(&mut sys2, &data).unwrap();
 
         assert_eq!(sys2.get_cpu_state(), cpu_snap);
-        assert_eq!(sys2.map.region_data(Region::Ram)[0x100], 0xAB);
-        assert_eq!(sys2.map.region_data(Region::Playfield)[0x10], 0xCD);
-        assert_eq!(sys2.nvram[0x20], 0x42);
-        assert_eq!(sys2.palette_ram[5], 0x55);
-        assert_eq!(sys2.system_input, 0xF0);
-        assert!(sys2.scanline_int);
-        assert_eq!(sys2.clock, 12_345);
-        assert_eq!(sys2.watchdog_count, 3);
+        assert_eq!(sys2.board.map.region_data(Region::Ram)[0x100], 0xAB);
+        assert_eq!(sys2.board.map.region_data(Region::Playfield)[0x10], 0xCD);
+        assert_eq!(sys2.board.nvram[0x20], 0x42);
+        assert_eq!(sys2.board.palette_ram[5], 0x55);
+        assert_eq!(sys2.board.system_input, 0xF0);
+        assert!(sys2.board.scanline_int);
+        assert_eq!(sys2.board.clock, 12_345);
+        assert_eq!(sys2.board.watchdog_count, 3);
     }
 }
