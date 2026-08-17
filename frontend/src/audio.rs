@@ -39,6 +39,8 @@ pub struct SpscRing {
     read: AtomicUsize,
     /// Producer-owned. Samples the producer could not fit.
     dropped: AtomicU64,
+    /// Consumer-owned. Samples the consumer asked for and the ring did not have.
+    starved: AtomicU64,
 }
 
 impl SpscRing {
@@ -51,6 +53,7 @@ impl SpscRing {
             write: AtomicUsize::new(0),
             read: AtomicUsize::new(0),
             dropped: AtomicU64::new(0),
+            starved: AtomicU64::new(0),
         }
     }
 
@@ -71,6 +74,13 @@ impl SpscRing {
     /// outrunning the sound card.
     pub fn dropped(&self) -> u64 {
         self.dropped.load(Ordering::Relaxed)
+    }
+
+    /// Samples the consumer asked for and the ring did not have. Non-zero means
+    /// the sound card is outrunning the emulator — an underrun, heard as the
+    /// callback holding its last sample.
+    pub fn starved(&self) -> u64 {
+        self.starved.load(Ordering::Relaxed)
     }
 
     /// Append as many of `samples` as fit, oldest first. Returns how many were
@@ -121,8 +131,62 @@ impl SpscRing {
         }
         // Release: the producer may reuse these slots once it sees the index.
         self.read.store(read.wrapping_add(n), Ordering::Release);
+
+        if n < out.len() {
+            let short = (out.len() - n) as u64;
+            self.starved.store(
+                self.starved.load(Ordering::Relaxed) + short,
+                Ordering::Relaxed,
+            );
+        }
         n
     }
+}
+
+// ---------------------------------------------------------------------------
+// Clock tracking
+// ---------------------------------------------------------------------------
+
+/// Proportional gain of the clock-tracking loop.
+///
+/// Chosen for a time constant of `target / (rate · gain)` — about 9 seconds at
+/// 44.1 kHz with a 4096-sample setpoint. This loop exists to cancel crystal
+/// drift, which is a constant, not to chase per-frame jitter; a fast loop would
+/// modulate the frame rate visibly and buy nothing.
+const CLOCK_GAIN: f64 = 0.01;
+
+/// How far the frame period may be stretched or squeezed, as a fraction.
+///
+/// Real crystals differ by tens of ppm, so 0.5% is roughly a hundred times the
+/// authority the loop needs — ample headroom — while being far below the point
+/// where a speed change is noticeable.
+const MAX_TRIM: f64 = 0.005;
+
+/// Multiplier for the emulator's frame period that steers audio production
+/// toward the rate the sound card consumes at.
+///
+/// Video is paced off the host monotonic clock; audio is consumed off the sound
+/// card's crystal. Those differ by tens of ppm, and with nothing reconciling
+/// them the ring either fills — dropping samples — or drains, holding the last
+/// sample. Both are audible, and both recur on a period set by drift rate
+/// rather than by anything happening in the game.
+///
+/// The ring's fill level is a direct measurement of the phase between the two
+/// clocks, so it is what the loop steers on: above the setpoint the emulator is
+/// ahead and its frames are stretched; below, they are shortened. Returns a
+/// number near 1.0.
+///
+/// Note this trims the *frame period*, not the resampler's output rate. Both
+/// close the loop, but a machine emitting a fixed number of samples per frame
+/// slightly more often produces audio faster without altering a single sample —
+/// so pitch stays exact and only emulation speed moves, by at most 0.5%.
+/// Trimming the resampler instead would spread the same audio over more
+/// samples and detune the machine by up to 8.6 cents, and would need every
+/// device's resampler retuned in step.
+pub fn frame_pace_trim(fill: usize, capacity: usize) -> f64 {
+    let target = (capacity / 2) as f64;
+    let error = (fill as f64 - target) / target;
+    1.0 + (CLOCK_GAIN * error).clamp(-MAX_TRIM, MAX_TRIM)
 }
 
 pub(crate) struct AudioPlayer {
@@ -331,6 +395,80 @@ mod tests {
                 expected += 1;
             }
         }
+    }
+
+    #[test]
+    fn the_trim_is_neutral_at_the_setpoint_and_signed_correctly() {
+        let cap = 8192;
+        assert_eq!(frame_pace_trim(cap / 2, cap), 1.0);
+        assert!(
+            frame_pace_trim(cap * 3 / 4, cap) > 1.0,
+            "a full ring means the emulator is ahead, so frames get longer"
+        );
+        assert!(
+            frame_pace_trim(cap / 4, cap) < 1.0,
+            "a draining ring means the emulator is behind, so frames get shorter"
+        );
+    }
+
+    #[test]
+    fn the_trim_never_exceeds_its_authority() {
+        let cap = 8192;
+        for fill in [0, 1, cap / 8, cap - 1, cap] {
+            let trim = frame_pace_trim(fill, cap);
+            assert!(
+                (trim - 1.0).abs() <= MAX_TRIM + f64::EPSILON,
+                "fill {fill} produced {trim}, beyond the ±{MAX_TRIM} authority"
+            );
+        }
+    }
+
+    #[test]
+    fn the_clock_loop_settles_against_a_mismatched_consumer() {
+        // The drift test: run the loop against a sound card whose crystal is
+        // deliberately far worse than any real one and assert it holds — never
+        // filling (which drops samples) and never emptying (which underruns).
+        const CAPACITY: usize = 8192;
+        const RATE: f64 = 44_100.0;
+        const FRAME_HZ: f64 = 60.0;
+        // 200 ppm fast. Real crystals are tens of ppm.
+        const CONSUMER_RATE: f64 = RATE * 1.0002;
+
+        let samples_per_frame = RATE / FRAME_HZ;
+        let nominal_period = 1.0 / FRAME_HZ;
+
+        let mut fill = (CAPACITY / 2) as f64;
+        let (mut low, mut high) = (f64::MAX, f64::MIN);
+
+        // Twenty minutes of frames; the first minute is settling time and is
+        // not held against the loop.
+        for frame in 0..(20 * 60 * FRAME_HZ as usize) {
+            let period = nominal_period * frame_pace_trim(fill as usize, CAPACITY);
+            fill += samples_per_frame;
+            fill -= CONSUMER_RATE * period;
+            fill = fill.clamp(0.0, CAPACITY as f64);
+            if frame > 60 * FRAME_HZ as usize {
+                low = low.min(fill);
+                high = high.max(fill);
+            }
+        }
+
+        assert!(low > 0.0, "ring emptied — that is an underrun");
+        assert!(
+            high < CAPACITY as f64,
+            "ring filled — that is a dropped sample"
+        );
+
+        // A proportional loop holds a standing offset proportional to the drift
+        // it is cancelling. What matters is that the offset is small next to
+        // the ring, so both margins survive.
+        let offset = (fill - (CAPACITY / 2) as f64).abs();
+        assert!(
+            offset < CAPACITY as f64 * 0.1,
+            "settled {offset:.0} samples off the setpoint, expected well under \
+             {}",
+            CAPACITY as f64 * 0.1
+        );
     }
 
     #[test]

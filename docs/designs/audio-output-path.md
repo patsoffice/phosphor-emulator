@@ -1,6 +1,8 @@
 # Design: Audio Output Path
 
-> **Status: proposed.** This document covers the shared path every sound device
+> **Status: implemented.** All five phases are built; each section carries an
+> "as built" note where the implementation departed from the proposal. This
+> document covers the shared path every sound device
 > takes from its native clock to the host audio device: decimation, buffering,
 > rate negotiation, and clock synchronisation. It does not change how any chip
 > is synthesised. Tracked in beads epic
@@ -29,6 +31,19 @@ chip synthesis            AudioResampler                  frontend
 
 That path has one significant defect and four smaller ones, all of which are
 cheapest to address together because they touch the same two files.
+
+Where it landed, for a reader arriving after the fact:
+
+```text
+chip synthesis        AudioResampler                       frontend
+──────────────        ──────────────                       ────────
+1.79 MHz (POKEY) ─┐   box to 4× out ─► 101-tap FIR ─►  SampleRing ─► SPSC ring ─► SDL callback
+3.07 MHz (WSG)   ─┼─► 1 add/cycle       per output      O(1) drain    lock-free    8192 cap
+2.00 MHz (AY)    ─┤                                                       ▲        drop-newest
+8.14 kHz (TMS)   ─┘                                                       │
+                      output rate negotiated from the device ─────────────┤
+                      frame period trimmed from ring fill ────────────────┘
+```
 
 ### The significant defect: box-filter decimation
 
@@ -277,7 +292,7 @@ because the value is process-wide: at 48 kHz every registered machine reports
 produces a second of samples. Verified against a real device too — asking for
 48_000 grants it, and the machine is built for it.
 
-## 4. Lock-free transport
+## 4. Lock-free transport — *implemented*
 
 Replace `Arc<Mutex<VecDeque<i16>>>` with a single-producer / single-consumer ring
 over a fixed `[i16; N]` and two atomic indices — the emulator thread owns the
@@ -290,7 +305,27 @@ underneath them changes.
 This is also a precondition for section 5, which needs to read fill level from
 the emulator thread without taking a lock.
 
-## 5. Clock synchronisation
+### As built
+
+- The slots are `AtomicI16`, not a raw `[i16; N]` behind an `UnsafeCell`. A
+  relaxed 16-bit load or store is a plain machine load or store, and the
+  release/acquire pair on the indices is what actually publishes the samples —
+  so the whole ring is safe Rust at no cost. Goal 4 (never lock, allocate or
+  syscall on the callback) holds by construction, and the callback now pops
+  straight into SDL's output buffer, so even its scratch `Vec` is gone.
+- **A full ring turns away the newest samples, not the oldest.** The old
+  `VecDeque` evicted from the front; a producer cannot safely move an index the
+  consumer owns. Latency is unaffected — both leave the ring full — and only
+  the choice of which samples are lost differs.
+- Playback waits for the ring to reach the setpoint before the device is
+  resumed. Starting on a nearly-empty ring guarantees underruns until the
+  emulator gets ahead; ~90 ms of startup delay buys a margin against frame-time
+  jitter.
+- Both directions are counted: `dropped()` (producer could not fit) and
+  `starved()` (consumer asked for more than the ring held). §5 is what makes
+  these fault indications rather than the steady state.
+
+## 5. Clock synchronisation — *implemented*
 
 With a lock-free ring, the emulator can cheaply read how full it is, and that
 number is a direct measurement of the phase between the two clocks. Steer the
@@ -315,6 +350,60 @@ The result is that dropped samples and underruns become genuine fault
 indications rather than the normal steady state — which is what makes the
 overrun counter from section 2 worth having.
 
+### As built: trim the frame period, not the sample rate
+
+The control law is exactly as above. What it steers is not.
+
+Trimming the resampler's output rate makes the machine emit `N·(1+trim)`
+samples per emulated frame. The same audio is then spread over more samples and
+played back at the card's fixed rate, so the machine is **detuned** by up to
+0.5% — about 8.6 cents, which is audible on sustained tones. It also needs every
+device's resampler retuned in step, which is precisely the per-machine
+propagation §3 avoided.
+
+Trimming the *frame period* instead reaches the same place from the other side:
+the machine still emits exactly `N` samples per frame, but frames happen
+slightly more or less often in wall-clock time, so audio is produced faster or
+slower without a single sample being altered. **Pitch stays exact**, and what
+moves is emulation speed, by at most 0.5%.
+
+That is also a better answer to the problem this section names. The complaint
+was that video is paced off the host monotonic clock while audio is consumed off
+the sound card's crystal, with nothing reconciling them. Steering the frame
+period makes video follow the audio clock, so the two are locked rather than
+merely both corrected. And it lands in one place — the frontend's throttle — so
+no machine or device is touched at all.
+
+Gain and authority: `CLOCK_GAIN = 0.01` over a 4096-sample setpoint gives a time
+constant of about 9 seconds at 44.1 kHz, slow enough that the loop cancels
+drift without chasing per-frame jitter. Being proportional-only it holds a
+standing offset proportional to the drift it cancels — 200 ppm settles about 82
+samples off setpoint, negligible against a 4096-sample margin — so there is no
+reason to add integral action and its wind-up.
+
+The loop is engaged only once playback has started; while the ring is
+prefilling, its low fill level is by design and not something to correct.
+
+Two things the fault counters must *not* report, both learned by watching them:
+
+- **Host warm-up.** For the first second or two after the window appears the
+  emulator misses frame deadlines — shader compilation, font atlas upload, cold
+  pages — and starves the ring by ~13k samples. That has nothing to do with
+  clock drift, and a counter that latched it would read as a permanent fault.
+  The frontend takes a baseline three seconds after playback starts and reports
+  only what moves beyond it.
+- **Running unthrottled.** Fast-forward legitimately produces faster than the
+  card consumes, so the overrun is the expected consequence rather than a
+  defect. The clock loop is skipped entirely in that mode, and the message says
+  so.
+
+Acceptance: `the_clock_loop_settles_against_a_mismatched_consumer` simulates
+twenty minutes against a 200 ppm mismatch (an order of magnitude worse than a
+real crystal) and asserts the ring neither fills nor empties. Confirmed on real
+hardware over an unbroken 11 min 51 s, with fill oscillating between about 3650
+and 4700 around the 4096 setpoint and neither counter moving. The phase called
+for 30 minutes; the run was ended deliberately at that point, not by a fault.
+
 ## Phasing
 
 Each phase is independently shippable and independently valuable.
@@ -324,8 +413,8 @@ Each phase is independently shippable and independently valuable.
 | 1 | Output ring (§2) — **done** | Smallest, touches only `AudioResampler` internals, no behaviour change |
 | 2 | Two-stage decimation (§1) — **done** | The audible win; independent of everything else |
 | 3 | Rate negotiation (§3) — **done** | Mechanical; needed before the control loop has a correct nominal rate |
-| 4 | Lock-free transport (§4) | Removes the priority inversion; precondition for phase 5 |
-| 5 | Clock synchronisation (§5) | Needs phases 3 and 4 in place |
+| 4 | Lock-free transport (§4) — **done** | Removes the priority inversion; precondition for phase 5 |
+| 5 | Clock synchronisation (§5) — **done** | Needs phases 3 and 4 in place |
 
 ## Testing
 
@@ -349,6 +438,12 @@ Each phase is independently shippable and independently valuable.
   Capture the same machine and input sequence before and after phase 2 and
   compare. Galaga, Tempest and Q*bert are good candidates — bright effects,
   four-POKEY mixing, and speech respectively.
+
+  *Done: all three sound correct after the change.* This was the gate the
+  measurements could not stand in for — 91 dB of stopband rejection says the
+  aliasing is gone, but only listening confirms nothing else broke on the way,
+  and speech through the upsampling path (Q*bert) was the case most at risk
+  since stage one still holds rather than interpolating.
 
 ## References
 

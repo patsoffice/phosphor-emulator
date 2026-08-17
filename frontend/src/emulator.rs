@@ -327,8 +327,14 @@ pub fn run(
 
     let audio_state = crate::audio::init(&sdl_audio, machine.audio_sample_rate());
     let mut audio_started = false;
-    // Say it once. An overrun is a standing condition, not a per-frame event.
+    // Say each once. These are standing conditions, not per-frame events.
     let mut audio_overrun_reported = false;
+    let mut audio_underrun_reported = false;
+    /// Grace period after playback starts, before the ring's fault counters are
+    /// believed. See where it is consumed for why.
+    const AUDIO_SETTLE: Duration = Duration::from_secs(3);
+    let mut audio_settled_at: Option<Instant> = None;
+    let mut audio_fault_baseline = (0u64, 0u64);
 
     let buffer_size = (width * height * 3) as usize;
     // Native buffer that `render_frame` fills, plus a second buffer for the
@@ -928,14 +934,6 @@ pub fn run(
                 // Lock-free: the callback never waits on this thread. A short
                 // write means the sound card is behind, which the ring counts.
                 ring.push_slice(&audio_scratch[..n]);
-                if ring.dropped() > 0 && !audio_overrun_reported {
-                    audio_overrun_reported = true;
-                    eprintln!(
-                        "Note: audio ring overran — the emulator is producing \
-                         samples faster than the sound card consumes them."
-                    );
-                }
-
                 // Hold playback until the ring is half full. Starting with a
                 // nearly-empty ring guarantees the callback underruns until the
                 // emulator gets ahead; a prefill costs ~90 ms of startup delay
@@ -944,6 +942,49 @@ pub fn run(
                 if !audio_started && ring.len() >= ring.capacity() / 2 {
                     device.resume();
                     audio_started = true;
+                    audio_settled_at = Some(Instant::now() + AUDIO_SETTLE);
+                }
+
+                // Both counters measure the clock loop, and the loop only has a
+                // steady state to measure once the host has one. The first
+                // second or so after the window appears is shader compilation,
+                // font atlas upload and cold pages — the emulator misses frame
+                // deadlines there for reasons that have nothing to do with
+                // clock drift, and the counters would report that warm-up
+                // forever after. So take a baseline once things settle and
+                // report only what happens beyond it.
+                match audio_settled_at {
+                    Some(at) if Instant::now() >= at => {
+                        audio_settled_at = None;
+                        audio_fault_baseline = (ring.dropped(), ring.starved());
+                    }
+                    Some(_) => {}
+                    None => {
+                        // Past settling: either counter moving now is a real
+                        // fault. Say it once — both are standing conditions.
+                        //
+                        // Running unthrottled is the exception: fast-forward
+                        // legitimately produces faster than the card consumes,
+                        // and the overrun is the expected consequence.
+                        if ring.dropped() > audio_fault_baseline.0 && !audio_overrun_reported {
+                            audio_overrun_reported = true;
+                            eprintln!(
+                                "Note: audio ring overran ({} samples) — the \
+                                 emulator is producing faster than the sound \
+                                 card consumes. Expected while unthrottled.",
+                                ring.dropped() - audio_fault_baseline.0
+                            );
+                        }
+                        if ring.starved() > audio_fault_baseline.1 && !audio_underrun_reported {
+                            audio_underrun_reported = true;
+                            eprintln!(
+                                "Note: audio ring underran ({} samples) — the \
+                                 sound card is consuming faster than the \
+                                 emulator produces.",
+                                ring.starved() - audio_fault_baseline.1
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -1222,16 +1263,28 @@ pub fn run(
             // setting.
             std::thread::sleep(Duration::from_millis(16));
         } else if throttle {
+            // Track the sound card's clock rather than assuming it matches the
+            // host monotonic clock. The ring's fill level measures the phase
+            // between the two, and stretching or squeezing the frame period by
+            // at most 0.5% steers it back to the setpoint. Only once playback
+            // has started: while the ring is prefilling, its low fill level is
+            // by design and not something to correct.
+            let paced = match audio_state {
+                Some((_, ref ring, _)) if audio_started => frame_duration
+                    .mul_f64(crate::audio::frame_pace_trim(ring.len(), ring.capacity())),
+                _ => frame_duration,
+            };
+
             let now = Instant::now();
             if next_frame_time > now {
                 std::thread::sleep(next_frame_time - now);
             }
-            next_frame_time += frame_duration;
+            next_frame_time += paced;
 
             // If we've fallen more than one frame behind, reset the deadline
             // rather than burst-catching-up (which would cause choppy audio).
             if next_frame_time < Instant::now() {
-                next_frame_time = Instant::now() + frame_duration;
+                next_frame_time = Instant::now() + paced;
             }
         }
 
