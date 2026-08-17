@@ -180,21 +180,12 @@ fn event_pad_slot(event: &Event, controllers: &[sdl2::controller::GameController
         .map(pad_slot_of)
 }
 
-#[allow(clippy::too_many_arguments)]
-pub fn run(
-    mut machine: Box<dyn FrontendMachine>,
-    bindings: &mut BindingSet,
-    scale: u32,
-    fullscreen: bool,
-    save_path: &Path,
-    screenshot_dir: &Path,
-    machine_name: &str,
-    start_in_debug: bool,
-    start_in_profile: bool,
-    no_mouse_grab: bool,
-    record_wav: Option<&str>,
-    state: &mut crate::state::State,
-) -> Box<dyn FrontendMachine> {
+/// Initialize SDL, applying the hints that have to be set before init.
+///
+/// Split out of [`run`] because the audio rate has to be negotiated before the
+/// machine is constructed — devices read it when they build their resamplers —
+/// and that needs SDL up. `main` initializes once and hands the context here.
+pub fn init_sdl() -> sdl2::Sdl {
     // Enable controller backends before SDL init — needed for Xbox on macOS
     sdl2::hint::set("SDL_JOYSTICK_HIDAPI", "1");
     sdl2::hint::set("SDL_JOYSTICK_HIDAPI_XBOX", "1");
@@ -209,7 +200,25 @@ pub fn run(
     // https://github.com/libsdl-org/SDL/issues/5340.
     sdl2::hint::set("SDL_MOUSE_RELATIVE_MODE_WARP", "1");
 
-    let sdl_context = sdl2::init().expect("Failed to initialize SDL2");
+    sdl2::init().expect("Failed to initialize SDL2")
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn run(
+    sdl_context: sdl2::Sdl,
+    mut machine: Box<dyn FrontendMachine>,
+    bindings: &mut BindingSet,
+    scale: u32,
+    fullscreen: bool,
+    save_path: &Path,
+    screenshot_dir: &Path,
+    machine_name: &str,
+    start_in_debug: bool,
+    start_in_profile: bool,
+    no_mouse_grab: bool,
+    record_wav: Option<&str>,
+    state: &mut crate::state::State,
+) -> Box<dyn FrontendMachine> {
     let sdl_video = sdl_context.video().expect("Failed to init SDL video");
     let sdl_audio = sdl_context.audio().expect("Failed to init SDL audio");
 

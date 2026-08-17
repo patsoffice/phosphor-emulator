@@ -221,7 +221,7 @@ The same `SampleRing` replaced the `audio_buffer: Vec<i16>` mix buffer in the
 ten machines that sum several chips before `fill_audio`, which had the identical
 front-of-`Vec` drain one level further down the path.
 
-## 3. Rate negotiation
+## 3. Rate negotiation — *implemented*
 
 `Pokey::with_clock(clock_hz, sample_rate)` already takes the output rate as a
 parameter. Generalise that shape to every device, and thread the real rate from
@@ -242,6 +242,40 @@ same phase-folding logic applies to the output side.
 
 The second option is smaller and is the recommended starting point; revisit if
 a device turns out to need its rate at construction time.
+
+### As built: neither option, a third
+
+Both options above put the rate in the *call graph* — either a parameter on
+every machine factory, or a `set_output_sample_rate` every machine forwards to
+its devices. Both mean about forty machines carrying a value that can only ever
+have one answer per run, because there is one host audio device.
+
+So the rate lives in one place instead:
+`phosphor_core::audio::host_sample_rate()` / `set_host_sample_rate()`, a
+process-wide value defaulting to 44_100. Devices read it when they construct
+their resamplers. About thirty hardcoded `44_100`s — device constructors,
+per-file `const OUTPUT_SAMPLE_RATE`, and every machine's `audio_sample_rate()` —
+now go through it. A per-file `const` becomes a small `fn`, since a `const`
+cannot call one.
+
+The ordering problem is answered by the first option's insight, just without the
+parameter: the frontend opens a throwaway playback device to learn the granted
+rate, calls `set_host_sample_rate`, and *then* builds the machine.
+`emulator::init_sdl` exists so `main` can bring SDL up before construction and
+hand the context to `run` — the alternative was an SDL init/quit/init cycle,
+which is a worse thing to depend on.
+
+The cost of this shape is one ordering rule: set the rate before building a
+machine, because a device that already exists keeps the rate it was built with.
+That rule is obeyed at exactly one call site, and `set_host_sample_rate`
+documents it. Retuning a *live* machine's output rate is a different problem,
+and §5 needs it — see the note there.
+
+Acceptance is `machines/tests/audio_rate_test.rs`, in its own test binary
+because the value is process-wide: at 48 kHz every registered machine reports
+48 kHz, and a second of frames from a POKEY machine and a WSG machine each
+produces a second of samples. Verified against a real device too — asking for
+48_000 grants it, and the machine is built for it.
 
 ## 4. Lock-free transport
 
@@ -289,7 +323,7 @@ Each phase is independently shippable and independently valuable.
 |-------|------|----------------|
 | 1 | Output ring (§2) — **done** | Smallest, touches only `AudioResampler` internals, no behaviour change |
 | 2 | Two-stage decimation (§1) — **done** | The audible win; independent of everything else |
-| 3 | Rate negotiation (§3) | Mechanical; needed before the control loop has a correct nominal rate |
+| 3 | Rate negotiation (§3) — **done** | Mechanical; needed before the control loop has a correct nominal rate |
 | 4 | Lock-free transport (§4) | Removes the priority inversion; precondition for phase 5 |
 | 5 | Clock synchronisation (§5) | Needs phases 3 and 4 in place |
 

@@ -67,12 +67,48 @@ pub type AudioRing = Arc<Mutex<VecDeque<i16>>>;
 /// Handle for signalling the audio callback to fade out before shutdown.
 pub type FadeOut = Arc<AtomicBool>;
 
+/// A callback that produces nothing, for the rate probe below.
+struct Silence;
+
+impl AudioCallback for Silence {
+    type Channel = i16;
+    fn callback(&mut self, out: &mut [i16]) {
+        out.fill(0);
+    }
+}
+
+/// Ask the audio device what output rate it will actually grant.
+///
+/// Every sound chip has to resample to the host's clock, and the devices read
+/// that rate when they construct — so it has to be known before the machine is
+/// built, which is before the real playback device is opened. SDL offers no way
+/// to query the rate without opening a device, so this opens one, reads the
+/// spec it was granted, and closes it again. The device is never unpaused, so
+/// nothing is heard.
+///
+/// Falls back to `preferred` if the device cannot be opened at all; the caller
+/// will fail on the real open a moment later and report it properly there.
+pub fn granted_output_rate(sdl_audio: &sdl2::AudioSubsystem, preferred: u32) -> u32 {
+    let desired = AudioSpecDesired {
+        freq: Some(preferred as i32),
+        channels: Some(1),
+        samples: Some(1024),
+    };
+    match sdl_audio.open_playback(None, &desired, |_| Silence) {
+        Ok(probe) => probe.spec().freq as u32,
+        Err(_) => preferred,
+    }
+}
+
 /// Initialize SDL2 audio playback.
 ///
 /// Returns the audio device (must be kept alive), a shared ring buffer
 /// for feeding samples, and a fade-out signal for clean shutdown.
 ///
 /// If `sample_rate` is 0, returns `None` (machine has no audio).
+///
+/// `sample_rate` is expected to be the rate [`granted_output_rate`] already
+/// negotiated, so the device opens at exactly what the machine is producing.
 pub fn init(
     sdl_audio: &sdl2::AudioSubsystem,
     sample_rate: u32,
@@ -100,6 +136,20 @@ pub fn init(
             fade_out_pos: 0,
         })
         .expect("Failed to open SDL audio device");
+
+    // The machine's chips were built against `sample_rate`; if the device came
+    // back on a different one anyway, everything plays off-pitch. That should
+    // not happen — the rate was negotiated from this same device — so say so
+    // rather than drifting silently.
+    let granted = device.spec().freq as u32;
+    if granted != sample_rate {
+        eprintln!(
+            "Warning: audio device opened at {granted} Hz but the machine was \
+             built for {sample_rate} Hz; playback will be off-pitch by \
+             {:.1}%.",
+            (granted as f64 / sample_rate as f64 - 1.0) * 100.0
+        );
+    }
 
     // Device starts paused; the emulator loop resumes it after the first
     // frame of audio has been buffered.

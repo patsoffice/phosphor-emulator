@@ -123,6 +123,28 @@ fn main() {
             std::process::exit(1);
         });
 
+    // Bring SDL up before the machine exists, so the audio device can be asked
+    // what output rate it will grant. Every sound chip resamples to that rate
+    // and reads it when it constructs, so it has to be settled first — see
+    // `phosphor_core::audio::set_host_sample_rate`. Headless capture never
+    // touches SDL, and keeps the default rate.
+    let sdl_context = (!cli.headless).then(|| {
+        let sdl = emulator::init_sdl();
+        match sdl.audio() {
+            Ok(sdl_audio) => {
+                let rate = audio::granted_output_rate(
+                    &sdl_audio,
+                    phosphor_core::audio::DEFAULT_HOST_SAMPLE_RATE,
+                );
+                phosphor_core::audio::set_host_sample_rate(rate);
+            }
+            // No audio device (headless CI, no sound card). Video still works;
+            // the machine keeps the default rate and its samples go nowhere.
+            Err(e) => eprintln!("Note: no audio device ({e}); running without sound."),
+        }
+        sdl
+    });
+
     let mut machine = create_from_first_rom_set(entry, &rom_path);
 
     // GFX viewer: display the machine's decoded charset/sprite sheets.
@@ -202,6 +224,7 @@ fn main() {
     }
 
     machine = emulator::run(
+        sdl_context.expect("SDL is initialized on every non-headless path"),
         machine,
         &mut bindings,
         scale,
