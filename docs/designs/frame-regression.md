@@ -203,8 +203,9 @@ tick path — so a fixed frame count is reproducible. That is the same property
 
 ## Findings from the first capture
 
-Looking at 39 frames turned up three things no existing test could see. They
-are recorded here because they are the argument for the epic.
+Looking at 39 frames turned up two bugs no existing test could see, plus one
+boot behaviour that changes how three machines are pinned. They are recorded
+here because they are the argument for the epic.
 
 **Super Cobra rendered 90° off.** `impl_board_delegation!(ScobraSystem, board,
 TIMING)` omitted the `orientation` flag its Scramble sibling one screen away
@@ -226,16 +227,16 @@ current, wrong-way-up frame and says so in `shows`, which still guards
 everything else about Tempest and will fail loudly when the orientation is
 corrected.
 
-**Joust, Robotron and Sinistar never leave their CMOS-init screen**
-(`phosphor-emulator-4waf`). From a cold boot all three print `FACTORY SETTINGS
-RESTORED` and stay there — Joust still shows it at 10,000 frames, about 166
-emulated seconds. `boot_check_test.rs` passes them because that message is lit
-pixels. With a factory CMOS image loaded they reach their title screens in
-about 2400 frames, so the boards, blitter and palette are fine; something in
-the post-init path is stuck. Their entries use committed `nvram` fixtures
-until it is fixed.
+**Joust, Robotron and Sinistar sit on `FACTORY SETTINGS RESTORED` from a cold
+boot** — Joust still shows it at 10,000 frames, about 166 emulated seconds.
+This one is not a defect: with blank battery RAM the board factory-resets and
+holds that message until an operator presses the reset button, which is what
+the hardware does. It still matters for pinning. `boot_check_test.rs` passes
+them because the message is lit pixels, and a frame pinned on it would guard
+about as little, so the three entries load a committed `nvram` fixture and pin
+the attract-mode frame that follows.
 
-The first two are the epic's thesis in miniature: both are *rendering* bugs in
+The two bugs are the epic's thesis in miniature: both are *rendering* bugs in
 machines whose boot checks, save-state round trips and control tables were all
 green.
 

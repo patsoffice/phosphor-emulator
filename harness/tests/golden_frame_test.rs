@@ -104,9 +104,10 @@ struct Entry {
     /// Optional factory NVRAM fixture, relative to `tests/golden/`, loaded
     /// straight after reset exactly as `disasm frameshot --nvram` does.
     ///
-    /// Needed by the Williams machines, which sit on their CMOS-init message
-    /// indefinitely from a cold boot (`phosphor-emulator-4waf`) and only reach
-    /// attract mode with an initialised CMOS.
+    /// Needed by the Williams machines: with blank battery RAM the board
+    /// factory-resets and holds `FACTORY SETTINGS RESTORED` until an operator
+    /// presses reset, as on hardware, so they only reach attract mode with an
+    /// initialised CMOS.
     nvram: Option<String>,
     /// Oriented display dimensions, pinned separately from the hash because a
     /// geometry change is legible in a diff and a hash change is not.
