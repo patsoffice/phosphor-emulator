@@ -127,6 +127,41 @@ fn design() -> [f32; TAPS] {
     std::array::from_fn(|n| (taps[n] / sum) as f32)
 }
 
+/// Width of the dot product's accumulator bank.
+///
+/// A single running sum makes each multiply-add wait on the previous one, and
+/// float addition is not associative so the compiler may not split the chain
+/// itself. Summing into four independent lanes and combining at the end breaks
+/// the dependency and lets the loop vectorise — worth about 3× on the filter,
+/// which is most of its cost. The lane count is fixed, so the summation order
+/// is fixed too and results stay bit-for-bit reproducible.
+const LANES: usize = 4;
+
+/// Inner product of the taps with the delay line.
+///
+/// Folding the filter about its centre — linear phase means
+/// `h[j] == h[TAPS-1-j]` — would halve the multiplies, but the reversed access
+/// on one half costs more in lost vectorisation than the saved multiplies are
+/// worth. Measured, it was within noise of this straight loop, so the simpler
+/// one stays.
+#[inline]
+fn dot(taps: &[f32; TAPS], history: &[f32; TAPS]) -> f32 {
+    let mut acc = [0.0f32; LANES];
+    let mut i = 0;
+    while i + LANES <= TAPS {
+        for (lane, a) in acc.iter_mut().enumerate() {
+            *a += taps[i + lane] * history[i + lane];
+        }
+        i += LANES;
+    }
+    let mut sum = acc.iter().sum::<f32>();
+    while i < TAPS {
+        sum += taps[i] * history[i];
+        i += 1;
+    }
+    sum
+}
+
 /// The stage-two filter's running state: a delay line of intermediate-rate
 /// samples plus the partial group waiting to complete an output.
 #[derive(Debug, Clone)]
@@ -171,12 +206,7 @@ impl DecimatingFir {
         self.history.copy_within(DECIMATION.., 0);
         self.history[TAPS - DECIMATION..].copy_from_slice(&self.pending);
 
-        let taps = coefficients();
-        let mut acc = 0.0f32;
-        for (h, x) in taps.iter().zip(self.history.iter()) {
-            acc += h * x;
-        }
-        Some(acc)
+        Some(dot(coefficients(), &self.history))
     }
 
     /// Zero the delay line.

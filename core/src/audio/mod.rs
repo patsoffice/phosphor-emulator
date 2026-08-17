@@ -36,6 +36,13 @@ pub trait Sample: Copy + Default {
     /// Compute the average from the accumulator and sample count.
     fn accum_avg(accum: Self::Accum, count: u32) -> Self;
 
+    /// Convert to the `f32` the anti-alias filter works in.
+    fn to_f32(self) -> f32;
+
+    /// Convert back from the filter's `f32`, saturating rather than wrapping —
+    /// a windowed-sinc filter overshoots slightly at a step.
+    fn from_f32(value: f32) -> Self;
+
     /// Save the accumulator to a state writer (format-preserving).
     fn save_accum(accum: &Self::Accum, w: &mut StateWriter);
 
@@ -54,6 +61,16 @@ impl Sample for i16 {
     #[inline]
     fn accum_avg(accum: i64, count: u32) -> i16 {
         (accum / count as i64) as i16
+    }
+
+    #[inline]
+    fn to_f32(self) -> f32 {
+        self as f32
+    }
+
+    #[inline]
+    fn from_f32(value: f32) -> i16 {
+        value.round().clamp(i16::MIN as f32, i16::MAX as f32) as i16
     }
 
     fn save_accum(accum: &i64, w: &mut StateWriter) {
@@ -78,6 +95,16 @@ impl Sample for f32 {
         accum / count as f32
     }
 
+    #[inline]
+    fn to_f32(self) -> f32 {
+        self
+    }
+
+    #[inline]
+    fn from_f32(value: f32) -> f32 {
+        value
+    }
+
     fn save_accum(accum: &f32, w: &mut StateWriter) {
         w.write_f32_le(*accum);
     }
@@ -91,18 +118,32 @@ impl Sample for f32 {
 // AudioResampler<T>
 // ---------------------------------------------------------------------------
 
-/// Bresenham box-filter audio resampler.
+/// Two-stage audio resampler.
 ///
-/// Downsamples from an input clock rate to an output sample rate using
-/// box-filter averaging. Each `tick()` accumulates a sample; when the
-/// Bresenham phase crosses the threshold, the averaged sample is pushed
-/// to the internal buffer.
+/// Stage one is a Bresenham box filter from the input clock down to an
+/// intermediate rate of [`fir::DECIMATION`]× the output rate: one add per
+/// emulated cycle, which is what keeps the per-cycle path cheap. Stage two is a
+/// windowed-sinc [`DecimatingFir`] from there to the output rate, and it runs
+/// once per *output* sample.
+///
+/// The split is what gives the path a real stopband. A box filter alone has its
+/// first sidelobe only 13 dB down, so content above the output Nyquist folds
+/// back into the audible band as inharmonic grit — see [`fir`] for the detail.
+/// Reaching only 4× the output rate keeps the whole audio band inside the box's
+/// flat region, and the FIR does the actual anti-aliasing.
+///
+/// The filter costs about 0.28 ms of group delay and a short start-up transient
+/// while its delay line fills. Sample *counts* are unaffected in either
+/// direction.
 pub struct AudioResampler<T: Sample> {
     sample_accum: T::Accum,
     sample_count: u32,
     sample_phase: u64,
     input_rate: u64,
     output_rate: u64,
+    /// `output_rate * fir::DECIMATION`, kept so the hot path does not multiply.
+    intermediate_rate: u64,
+    fir: DecimatingFir,
     buffer: SampleRing<T>,
 }
 
@@ -115,11 +156,18 @@ impl<T: Sample> AudioResampler<T> {
         Self {
             input_rate,
             output_rate,
+            intermediate_rate: output_rate * fir::DECIMATION as u64,
             sample_accum: T::Accum::default(),
             sample_count: 0,
             sample_phase: 0,
+            fir: DecimatingFir::new(),
             buffer: SampleRing::new(),
         }
+    }
+
+    /// The host sample rate this resampler targets.
+    pub fn output_rate(&self) -> u64 {
+        self.output_rate
     }
 
     /// Number of output samples produced but not yet drained.
@@ -136,27 +184,31 @@ impl<T: Sample> AudioResampler<T> {
     /// Accumulate one input sample, pushing any completed output samples to the
     /// internal buffer.
     ///
-    /// Handles both directions: when downsampling (`input_rate > output_rate`)
-    /// each input completes at most one box-filtered output; when upsampling
-    /// (`output_rate > input_rate`) one input can complete several output
-    /// samples, which are sample-and-held from the same average. (The single-emit
+    /// Handles both directions: when the input clock is faster than the
+    /// intermediate rate each tick completes at most one stage-one sample; when
+    /// it is slower (the TMS5220's 8 kHz, say) one tick completes several, held
+    /// from the same average. Either way the anti-alias filter smooths the
+    /// result, so the count of output samples per second of input is exact
+    /// while the values are filtered rather than held. (The single-step
     /// [`tick_sample`] only supports downsampling.)
     #[inline]
     pub fn tick(&mut self, sample: T) {
         T::accum_add(&mut self.sample_accum, sample);
         self.sample_count += 1;
-        self.sample_phase += self.output_rate;
+        self.sample_phase += self.intermediate_rate;
         if self.sample_phase < self.input_rate {
             return;
         }
-        let avg = T::accum_avg(self.sample_accum, self.sample_count);
+        let avg = T::accum_avg(self.sample_accum, self.sample_count).to_f32();
         self.sample_accum = T::Accum::default();
         self.sample_count = 0;
-        // Emit one output per input period consumed: exactly one when
-        // downsampling, several (sample-and-hold) when upsampling.
+        // One stage-one sample per input period consumed. Each is offered to
+        // the filter, which returns an output on every DECIMATION-th.
         loop {
             self.sample_phase -= self.input_rate;
-            self.buffer.push(avg);
+            if let Some(out) = self.fir.push(avg) {
+                self.buffer.push(T::from_f32(out));
+            }
             if self.sample_phase < self.input_rate {
                 break;
             }
@@ -164,26 +216,28 @@ impl<T: Sample> AudioResampler<T> {
     }
 
     /// Accumulate one input sample. If this tick completes an output sample,
-    /// returns the box-filtered average without pushing it to the buffer.
+    /// returns it without pushing it to the buffer.
     ///
     /// Use this when you need to post-process (e.g., mix with another source)
-    /// before calling [`push_sample`].
+    /// before calling [`push_sample`]. Advances stage one by a single step, so
+    /// it is only correct when the input clock is faster than the intermediate
+    /// rate — every caller drives it from a CPU clock.
     #[inline]
     pub fn tick_sample(&mut self, sample: T) -> Option<T> {
         T::accum_add(&mut self.sample_accum, sample);
         self.sample_count += 1;
-        self.sample_phase += self.output_rate;
+        self.sample_phase += self.intermediate_rate;
 
         if self.sample_phase >= self.input_rate {
             self.sample_phase -= self.input_rate;
             let avg = if self.sample_count > 0 {
-                T::accum_avg(self.sample_accum, self.sample_count)
+                T::accum_avg(self.sample_accum, self.sample_count).to_f32()
             } else {
-                T::default()
+                0.0
             };
             self.sample_accum = T::Accum::default();
             self.sample_count = 0;
-            Some(avg)
+            self.fir.push(avg).map(T::from_f32)
         } else {
             None
         }
@@ -192,7 +246,8 @@ impl<T: Sample> AudioResampler<T> {
     /// Manually push a sample to the output buffer.
     ///
     /// Use after [`tick_sample`] returns `Some` and you've mixed or
-    /// post-processed the averaged sample.
+    /// post-processed the resampled sample. The sample goes straight to the
+    /// queue — it is already at the output rate, so it bypasses both stages.
     #[inline]
     pub fn push_sample(&mut self, sample: T) {
         self.buffer.push(sample);
@@ -216,31 +271,62 @@ impl<T: Sample> AudioResampler<T> {
         self.buffer.drain_all()
     }
 
-    /// Clear all runtime state (phase, accumulator, buffer).
+    /// Clear all runtime state (phase, accumulator, filter delay line, buffer).
     pub fn reset(&mut self) {
         self.sample_accum = T::Accum::default();
         self.sample_count = 0;
         self.sample_phase = 0;
+        self.fir.reset();
         self.buffer.clear();
     }
 }
 
-/// Manual `Saveable` implementation preserving the existing save format:
-/// version(1) + accumulator + sample_count + sample_phase.
-/// Buffer and rates are transient and not serialized.
+/// Manual `Saveable` implementation: version(2) + accumulator + sample_count +
+/// sample_phase + the anti-alias filter's delay line.
+///
+/// Version 2 added the filter state. Without it a load would resume with a
+/// zeroed delay line and click for the ~0.3 ms the filter takes to refill, and
+/// save/load would not round-trip. The output queue and the rates stay
+/// transient.
 impl<T: Sample> Saveable for AudioResampler<T> {
     fn save_state(&self, w: &mut StateWriter) {
-        w.write_version(1);
+        w.write_version(2);
         T::save_accum(&self.sample_accum, w);
         w.write_u32_le(self.sample_count);
         w.write_u64_le(self.sample_phase);
+        for &tap in self.fir.history() {
+            w.write_f32_le(tap);
+        }
+        let pending = self.fir.pending();
+        w.write_u8(pending.len() as u8);
+        for &sample in pending {
+            w.write_f32_le(sample);
+        }
     }
 
     fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
-        r.read_version(1)?;
+        r.read_version(2)?;
         self.sample_accum = T::load_accum(r)?;
         self.sample_count = r.read_u32_le()?;
         self.sample_phase = r.read_u64_le()?;
+
+        let mut history = [0.0f32; fir::TAPS];
+        for tap in history.iter_mut() {
+            *tap = r.read_f32_le()?;
+        }
+        let pending_len = r.read_u8()? as usize;
+        if pending_len >= fir::DECIMATION {
+            return Err(SaveError::InvalidFormat(format!(
+                "resampler filter has {pending_len} pending samples, expected under {}",
+                fir::DECIMATION
+            )));
+        }
+        let mut pending = [0.0f32; fir::DECIMATION];
+        for sample in pending.iter_mut().take(pending_len) {
+            *sample = r.read_f32_le()?;
+        }
+        self.fir.restore(history, &pending[..pending_len])?;
+
         self.buffer.clear();
         Ok(())
     }
@@ -284,37 +370,54 @@ mod tests {
     }
 
     #[test]
-    fn resampler_upsample_holds_sample_value() {
-        // A single input at 3x upsampling holds its value across three outputs.
+    fn resampler_upsample_emits_one_output_per_period() {
+        // A single input at 3x upsampling still completes three output periods.
+        // The values are filtered rather than sample-and-held, so only the count
+        // is pinned here — `resampler_reproduces_a_constant` covers the values.
         let mut r = AudioResampler::<i16>::new(1, 3);
         r.tick(500);
-        let out = r.drain_audio();
-        assert_eq!(out.len(), 3);
-        assert!(out.iter().all(|&s| s == 500));
+        assert_eq!(r.drain_audio().len(), 3);
     }
 
     #[test]
-    fn resampler_averages_correctly() {
-        // Input rate 4, output rate 1: averages 4 samples into 1
+    fn resampler_emits_one_output_per_input_period() {
+        // Input rate 4, output rate 1: four inputs complete one output.
         let mut r = AudioResampler::<i16>::new(4, 1);
         r.tick(100);
         r.tick(200);
         r.tick(300);
-        r.tick(400); // average = 250
+        r.tick(400);
 
         let mut buf = [0i16; 4];
-        let n = r.fill_audio(&mut buf);
-        assert_eq!(n, 1);
-        assert_eq!(buf[0], 250);
+        assert_eq!(r.fill_audio(&mut buf), 1);
     }
 
     #[test]
-    fn tick_sample_returns_average_without_pushing() {
+    fn resampler_reproduces_a_constant() {
+        // The filter has unit DC gain, so once its delay line has filled a
+        // constant input comes back out unchanged. This is the value contract
+        // that replaced the old "emits the box average" assertion.
+        let mut r = AudioResampler::<i16>::new(1_000_000, 44_100);
+        for _ in 0..1_000_000 {
+            r.tick(1000);
+        }
+        let out = r.drain_audio();
+        let settled = &out[out.len() / 2..];
+        assert!(
+            settled.iter().all(|&s| (s - 1000).abs() <= 1),
+            "steady state should hold 1000, got {:?}",
+            &settled[..8]
+        );
+    }
+
+    #[test]
+    fn tick_sample_returns_the_output_without_pushing() {
+        // One `Some` per output period, whatever the filter's start-up value.
         let mut r = AudioResampler::<i16>::new(4, 1);
         assert_eq!(r.tick_sample(100), None);
         assert_eq!(r.tick_sample(200), None);
         assert_eq!(r.tick_sample(300), None);
-        assert_eq!(r.tick_sample(400), Some(250));
+        assert!(r.tick_sample(400).is_some());
 
         // Buffer should be empty since tick_sample doesn't push
         let mut buf = [0i16; 4];
@@ -338,11 +441,10 @@ mod tests {
     fn fill_audio_drains_buffer() {
         let mut r = AudioResampler::<i16>::new(2, 1);
         r.tick(100);
-        r.tick(200); // produces one sample: avg 150
+        r.tick(200); // completes one output period
 
         let mut buf = [0i16; 1];
         assert_eq!(r.fill_audio(&mut buf), 1);
-        assert_eq!(buf[0], 150);
 
         // Second call should return 0 (drained)
         assert_eq!(r.fill_audio(&mut buf), 0);
@@ -359,6 +461,8 @@ mod tests {
         assert_eq!(r.sample_count, 0);
         assert_eq!(r.sample_phase, 0);
         assert!(r.buffer.is_empty());
+        assert!(r.fir.history().iter().all(|&t| t == 0.0));
+        assert!(r.fir.pending().is_empty());
     }
 
     #[test]
@@ -379,6 +483,34 @@ mod tests {
         assert_eq!(r2.sample_accum, r.sample_accum);
         assert_eq!(r2.sample_count, r.sample_count);
         assert_eq!(r2.sample_phase, r.sample_phase);
+        assert_eq!(r2.fir.history(), r.fir.history());
+        assert_eq!(r2.fir.pending(), r.fir.pending());
+    }
+
+    #[test]
+    fn a_loaded_resampler_continues_the_same_waveform() {
+        // The filter's delay line is machine state: resuming with a zeroed one
+        // would click. Drive two resamplers identically, snapshot one into the
+        // other mid-stream, then check they agree from there on.
+        let tone = |i: u32| ((i % 37) as i16 - 18) * 400;
+
+        let mut a = AudioResampler::<i16>::new(1_789_000, 44_100);
+        for i in 0..20_000 {
+            a.tick(tone(i));
+        }
+        a.drain_audio();
+
+        let mut w = StateWriter::new();
+        a.save_state(&mut w);
+        let data = w.into_vec();
+        let mut b = AudioResampler::<i16>::new(1_789_000, 44_100);
+        b.load_state(&mut StateReader::new(&data)).unwrap();
+
+        for i in 20_000..30_000 {
+            a.tick(tone(i));
+            b.tick(tone(i));
+        }
+        assert_eq!(a.drain_audio(), b.drain_audio());
     }
 
     // -- AudioResampler<f32> tests --
@@ -398,15 +530,28 @@ mod tests {
     }
 
     #[test]
-    fn f32_resampler_averages_correctly() {
+    fn f32_resampler_emits_one_output_per_input_period() {
         let mut r = AudioResampler::<f32>::new(4, 1);
         r.tick(0.1);
         r.tick(0.2);
         r.tick(0.3);
         r.tick(0.4);
-        let samples = r.drain_audio();
-        assert_eq!(samples.len(), 1);
-        assert!((samples[0] - 0.25).abs() < 1e-6);
+        assert_eq!(r.drain_audio().len(), 1);
+    }
+
+    #[test]
+    fn f32_resampler_reproduces_a_constant() {
+        let mut r = AudioResampler::<f32>::new(1_000_000, 44_100);
+        for _ in 0..1_000_000 {
+            r.tick(0.5);
+        }
+        let out = r.drain_audio();
+        let settled = &out[out.len() / 2..];
+        assert!(
+            settled.iter().all(|&s| (s - 0.5).abs() < 1e-5),
+            "steady state should hold 0.5, got {:?}",
+            &settled[..8]
+        );
     }
 
     #[test]
@@ -427,5 +572,80 @@ mod tests {
         assert_eq!(r2.sample_count, r.sample_count);
         assert_eq!(r2.sample_phase, r.sample_phase);
         assert!((r2.sample_accum - r.sample_accum).abs() < 1e-6);
+    }
+
+    // -- Anti-aliasing --
+
+    /// Amplitude of `hz` in `samples`, taken at `rate`, via a Hann-windowed
+    /// single-bin DFT. Frequencies are chosen to land on exact bins, so the
+    /// window is only there to suppress edge effects.
+    fn bin_amplitude(samples: &[f32], rate: f64, hz: f64) -> f64 {
+        let n = samples.len() as f64;
+        let (mut re, mut im, mut window_sum) = (0.0, 0.0, 0.0);
+        for (i, &s) in samples.iter().enumerate() {
+            let t = i as f64;
+            let w = 0.5 - 0.5 * (2.0 * std::f64::consts::PI * t / n).cos();
+            let phase = -2.0 * std::f64::consts::PI * hz * t / rate;
+            re += s as f64 * w * phase.cos();
+            im += s as f64 * w * phase.sin();
+            window_sum += w;
+        }
+        // Divide by the window's coherent gain, so a unit-amplitude sine on an
+        // exact bin reads back as 1.0.
+        2.0 * (re * re + im * im).sqrt() / window_sum
+    }
+
+    /// Resample a sine at `hz` from `input_rate` to 44.1 kHz and return a
+    /// settled second-half slice of the output.
+    fn resample_tone(hz: f64, input_rate: u64) -> Vec<f32> {
+        let mut r = AudioResampler::<f32>::new(input_rate, 44_100);
+        // 0.2 s of input: the first half is discarded so the filter's delay
+        // line and the analysis are both looking at steady state.
+        let ticks = input_rate / 5;
+        for i in 0..ticks {
+            let t = i as f64 / input_rate as f64;
+            r.tick((2.0 * std::f64::consts::PI * hz * t).sin() as f32);
+        }
+        let out = r.drain_audio();
+        out[out.len() / 2..][..4410].to_vec()
+    }
+
+    #[test]
+    fn content_above_the_output_nyquist_does_not_fold_back() {
+        // The acceptance gate for two-stage decimation. A 30 kHz tone is above
+        // the 22.05 kHz output Nyquist; decimation folds it to 14.1 kHz. Under
+        // the old single box filter it arrived there at roughly −5 dB, which is
+        // the inharmonic grit this filter exists to remove.
+        //
+        // 1.764 MHz in is 40× the output rate and exactly 10× the intermediate
+        // rate, so stage one is a clean length-10 box. Measured rejection is
+        // about 91 dB; the gate is set at 60 to leave design headroom.
+        const INPUT_RATE: u64 = 1_764_000;
+        const ALIAS_HZ: f64 = 14_100.0; // 44_100 − 30_000
+
+        let aliased = bin_amplitude(&resample_tone(30_000.0, INPUT_RATE), 44_100.0, ALIAS_HZ);
+        let reference = bin_amplitude(&resample_tone(ALIAS_HZ, INPUT_RATE), 44_100.0, ALIAS_HZ);
+
+        let rejection_db = 20.0 * (aliased / reference).log10();
+        assert!(
+            rejection_db < -60.0,
+            "30 kHz folded to 14.1 kHz at only {rejection_db:.1} dB below \
+             an equal in-band tone; expected at least 60 dB of rejection"
+        );
+    }
+
+    #[test]
+    fn audible_content_passes_at_unity() {
+        // The other half of the contract: rejecting the stopband is only useful
+        // if the passband survives.
+        const INPUT_RATE: u64 = 1_764_000;
+        for hz in [500.0, 2_000.0, 8_000.0, 15_000.0] {
+            let amplitude = bin_amplitude(&resample_tone(hz, INPUT_RATE), 44_100.0, hz);
+            let db = 20.0 * amplitude.log10();
+            assert!(
+                db.abs() < 0.5,
+                "{hz} Hz came through at {db:+.2} dB, expected unity"
+            );
+        }
     }
 }

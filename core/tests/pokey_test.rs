@@ -83,14 +83,17 @@ fn test_volume_only() {
     let mut pokey = Pokey::new(44100);
     pokey.write(0x01, 0x18); // Vol 8, volume-only mode (force output)
 
-    for _ in 0..50 {
+    // Volume-only holds a DC level, so read it once the resampler's anti-alias
+    // filter has settled rather than from the first sample, which lands while
+    // its delay line is still filling.
+    for _ in 0..20_000 {
         pokey.tick();
     }
 
     let samples = pokey.drain_audio();
     assert!(!samples.is_empty());
-    let val = samples[0];
-    assert!((val - 0.133).abs() < 0.01);
+    let val = *samples.last().unwrap();
+    assert!((val - 0.133).abs() < 0.01, "settled level was {val}");
 }
 
 #[test]

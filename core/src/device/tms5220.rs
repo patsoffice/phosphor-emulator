@@ -103,10 +103,13 @@ pub enum Tms52xxVariant {
 
 /// TMS5220 / TMS5220C voice synthesis processor.
 ///
-/// Runtime state (FIFO + handshake flags) is serialized; the variant, clock,
-/// and resampler are configuration preserved across reset.
+/// Runtime state (FIFO + handshake flags, and the resampler's phase and filter
+/// delay line) is serialized; the variant and clock are configuration preserved
+/// across reset. `AudioResampler`'s own `Saveable` covers only its running
+/// state, never its rates, so saving it does not disturb a board that retunes
+/// the clock after a load.
 #[derive(Saveable)]
-#[save_version(2)]
+#[save_version(3)]
 pub struct Tms5220 {
     /// Speak-external FIFO (ring buffer).
     fifo: [u8; FIFO_SIZE],
@@ -180,7 +183,6 @@ pub struct Tms5220 {
     variant: Tms52xxVariant,
     #[save_skip]
     clock_hz: u32,
-    #[save_skip]
     resampler: AudioResampler<f32>,
 }
 

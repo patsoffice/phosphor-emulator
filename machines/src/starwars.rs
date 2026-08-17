@@ -1549,6 +1549,10 @@ impl Saveable for StarWarsBoard {
         w.write_u64_le(self.irq_counter);
         w.write_u64_le(self.watchdog_counter);
         w.write_u64_le(self.clock);
+        // The DC blocker is a one-pole recursive filter, so its two state
+        // values steer every sample that follows a load.
+        w.write_f32_le(self.audio_dc.0);
+        w.write_f32_le(self.audio_dc.1);
     }
 
     fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
@@ -1602,6 +1606,7 @@ impl Saveable for StarWarsBoard {
         self.irq_counter = r.read_u64_le()?;
         self.watchdog_counter = r.read_u64_le()?;
         self.clock = r.read_u64_le()?;
+        self.audio_dc = (r.read_f32_le()?, r.read_f32_le()?);
         self.watchdog_tripped = false;
         self.display_list.clear();
         Ok(())

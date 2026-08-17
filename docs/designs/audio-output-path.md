@@ -94,6 +94,13 @@ discards a meaningful part of that fidelity in the last step.
 6. Use whatever sample rate the audio device actually grants.
 7. Preserve deterministic save/load. Resampler phase is part of machine state.
 
+> Goal 7 turned out to have two pre-existing violations that the box filter's
+> coarse output had been hiding. Star Wars never saved `audio_dc`, its DC
+> blocker's two recursive state values; and the TMS5220's resampler was
+> `#[save_skip]`ed alongside the variant and clock, though only the rates are
+> configuration. Both surfaced in `save_state_tests` as soon as the output got
+> finer-grained, and both are fixed.
+
 ## Non-goals
 
 - Changing any chip's synthesis. The LFSRs, dividers, envelopes and lattice
@@ -103,7 +110,7 @@ discards a meaningful part of that fidelity in the last step.
 - Board-level analog modelling. That is the discrete sound framework's job; see
   `docs/designs/discrete-sound-framework.md`.
 
-## 1. Two-stage decimation
+## 1. Two-stage decimation — *implemented*
 
 Filtering 1.79 MHz down to 44.1 kHz in one FIR stage would need a very long
 filter to get a narrow transition band at that ratio, and would run per input
@@ -149,10 +156,45 @@ reach 44.1 kHz, and `core/src/audio/mod.rs:253` pins that case specifically — 
 comment records that a downsample-only resampler was the cause of a "slow/choppy
 speech" bug.
 
-When `input_rate < output_rate`, skip stage one entirely and let the FIR
-interpolate. The sample-and-hold currently used for upsampling is itself a crude
-zero-order hold, so this path improves too, but the priority is not regressing
-it. Keep that test as-is.
+As built, stage one is not skipped for the upsampling case: its Bresenham
+accumulator holds the input up to the intermediate rate as before, and the FIR
+then smooths that zero-order hold rather than interpolating from the source
+directly. This keeps one code path for both directions, and the ZOH images the
+FIR cannot remove are the ones that were already there, so the path does not
+regress. `resampler_upsamples_to_full_output_count` is unchanged and still
+passes.
+
+### As built
+
+- 101 taps, not the estimated 64. The Kaiser order estimate
+  `N ≈ (A − 8) / (2.285·Δω)` puts 80 dB across a 17.4→26.7 kHz transition at
+  about 100; a 95-tap trial measured 75.6 dB at the stopband edge.
+- Measured end to end (`content_above_the_output_nyquist_does_not_fold_back`):
+  a 30 kHz tone folds to 14.1 kHz at **91 dB** below an equal in-band tone,
+  against the 60 dB goal.
+- The dot product sums into four lanes rather than one running total. Float
+  addition is not associative, so a single accumulator serialises the
+  multiply-adds and blocks vectorisation — worth about 3× on the filter.
+  Folding the filter about its centre to halve the multiplies was tried and
+  measured within noise, because the reversed access costs more vectorisation
+  than it saves multiplies.
+- Cost, `phosphor-bench` at 600 frames × 5 reps: starwars 3.573 → 3.964 ms/f,
+  tempest 1.108 → 1.308, galaga 0.712 → 0.771, qbert 2.768 → 2.973. That is
+  7–18% of emulation time on the audio-heavy machines, all still 5–21×
+  realtime. Goal 2 holds in the sense that matters — filter work scales with
+  output samples — but note that most of the measured cost is stage one now
+  firing 4× as often, not the filter itself. If this needs to come down, that
+  is where to look, not at the tap count.
+
+### Aliasing this does not remove
+
+Stage one still aliases around multiples of the intermediate rate: input content
+at `f_int − δ` folds to `δ`, and stage two cannot undo it. The box's own
+response is the only protection there, and it has the right shape — about
+−45 dB for content folding to 1 kHz, weakening to about −19 dB for content
+folding to 18 kHz. Low-frequency aliases, the audible ones, are the
+well-protected case. Raising [`DECIMATION`] would deepen this at the cost of a
+proportionally longer filter.
 
 ## 2. Output ring — *implemented*
 
@@ -246,7 +288,7 @@ Each phase is independently shippable and independently valuable.
 | Phase | Work | Why this order |
 |-------|------|----------------|
 | 1 | Output ring (§2) — **done** | Smallest, touches only `AudioResampler` internals, no behaviour change |
-| 2 | Two-stage decimation (§1) | The audible win; independent of everything else |
+| 2 | Two-stage decimation (§1) — **done** | The audible win; independent of everything else |
 | 3 | Rate negotiation (§3) | Mechanical; needed before the control loop has a correct nominal rate |
 | 4 | Lock-free transport (§4) | Removes the priority inversion; precondition for phase 5 |
 | 5 | Clock synchronisation (§5) | Needs phases 3 and 4 in place |
