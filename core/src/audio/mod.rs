@@ -9,8 +9,10 @@
 //! the machine-level mix buffers that sit downstream of the per-device
 //! resamplers.
 
+pub mod fir;
 mod ring;
 
+pub use fir::DecimatingFir;
 pub use ring::SampleRing;
 
 use crate::core::save_state::{SaveError, StateReader, StateWriter};
