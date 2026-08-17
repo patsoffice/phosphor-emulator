@@ -4,6 +4,14 @@
 //! high-frequency audio (at CPU clock rates) to standard output sample rates
 //! (e.g., 44.1 kHz). Use `AudioResampler<i16>` for integer pipelines (most
 //! devices) or `AudioResampler<f32>` for float pipelines (POKEY, etc.).
+//!
+//! Output is queued in a [`SampleRing`], which is also available on its own for
+//! the machine-level mix buffers that sit downstream of the per-device
+//! resamplers.
+
+mod ring;
+
+pub use ring::SampleRing;
 
 use crate::core::save_state::{SaveError, StateReader, StateWriter};
 use crate::prelude::Saveable;
@@ -93,7 +101,7 @@ pub struct AudioResampler<T: Sample> {
     sample_phase: u64,
     input_rate: u64,
     output_rate: u64,
-    buffer: Vec<T>,
+    buffer: SampleRing<T>,
 }
 
 impl<T: Sample> AudioResampler<T> {
@@ -108,8 +116,19 @@ impl<T: Sample> AudioResampler<T> {
             sample_accum: T::Accum::default(),
             sample_count: 0,
             sample_phase: 0,
-            buffer: Vec::with_capacity(2048),
+            buffer: SampleRing::new(),
         }
+    }
+
+    /// Number of output samples produced but not yet drained.
+    pub fn buffered(&self) -> usize {
+        self.buffer.len()
+    }
+
+    /// Output samples dropped because the caller stopped draining. Always zero
+    /// in normal operation; see [`SampleRing::overruns`].
+    pub fn overruns(&self) -> u64 {
+        self.buffer.overruns()
     }
 
     /// Accumulate one input sample, pushing any completed output samples to the
@@ -187,15 +206,12 @@ impl<T: Sample> AudioResampler<T> {
     /// Drain audio samples into the provided buffer. Returns the number
     /// of samples written.
     pub fn fill_audio(&mut self, buffer: &mut [T]) -> usize {
-        let n = buffer.len().min(self.buffer.len());
-        buffer[..n].copy_from_slice(&self.buffer[..n]);
-        self.buffer.drain(..n);
-        n
+        self.buffer.pop_front_into(buffer)
     }
 
     /// Take all buffered samples, leaving the buffer empty.
     pub fn drain_audio(&mut self) -> Vec<T> {
-        std::mem::take(&mut self.buffer)
+        self.buffer.drain_all()
     }
 
     /// Clear all runtime state (phase, accumulator, buffer).
@@ -223,7 +239,7 @@ impl<T: Sample> Saveable for AudioResampler<T> {
         self.sample_accum = T::load_accum(r)?;
         self.sample_count = r.read_u32_le()?;
         self.sample_phase = r.read_u64_le()?;
-        self.buffer = Vec::new();
+        self.buffer.clear();
         Ok(())
     }
 }
