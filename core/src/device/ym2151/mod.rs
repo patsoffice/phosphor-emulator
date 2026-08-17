@@ -215,7 +215,7 @@ pub struct Ym2151 {
 
 impl Ym2151 {
     pub fn new() -> Self {
-        Self::with_clock(3_579_545, 44_100)
+        Self::with_clock(3_579_545, crate::audio::host_sample_rate())
     }
 
     /// Construct with a specific input clock and host sample rate.

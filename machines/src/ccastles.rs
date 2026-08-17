@@ -545,8 +545,8 @@ impl CrystalCastlesBoard {
 
     pub fn new() -> Self {
         Self {
-            pokey1: Pokey::with_clock(1_250_000, 44100),
-            pokey2: Pokey::with_clock(1_250_000, 44100),
+            pokey1: Pokey::with_clock(1_250_000, phosphor_core::audio::host_sample_rate()),
+            pokey2: Pokey::with_clock(1_250_000, phosphor_core::audio::host_sample_rate()),
 
             map: Self::build_map(),
             gfx_rom: [0; 0x4000],
@@ -1149,7 +1149,7 @@ impl AudioSource for CrystalCastlesSystem {
     }
 
     fn audio_sample_rate(&self) -> u32 {
-        44100
+        phosphor_core::audio::host_sample_rate()
     }
 }
 

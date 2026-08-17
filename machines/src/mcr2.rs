@@ -43,7 +43,9 @@ pub const TIMING: TimingConfig = TimingConfig {
 
 pub const VISIBLE_LINES: u64 = 240;
 
-pub const OUTPUT_SAMPLE_RATE: u64 = 44_100;
+pub fn output_sample_rate() -> u64 {
+    phosphor_core::audio::host_sample_rate() as u64
+}
 
 // SSIO runs at 2 MHz, main CPU at 2.496 MHz. Ratio = 2000000/2496000 = 125/156.
 pub const SSIO_CLOCK_NUM: u32 = 125;

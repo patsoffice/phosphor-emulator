@@ -66,7 +66,9 @@ pub const TIMING: TimingConfig = TimingConfig {
 };
 
 pub const VISIBLE_LINES: u64 = 240;
-pub const OUTPUT_SAMPLE_RATE: u64 = 44_100;
+pub fn output_sample_rate() -> u64 {
+    phosphor_core::audio::host_sample_rate() as u64
+}
 
 pub const NATIVE_WIDTH: usize = 256;
 pub const NATIVE_HEIGHT: usize = 240;
@@ -156,7 +158,7 @@ impl GottliebSoundBoard {
             riot: Riot6532::new(),
             dac: Mc1408Dac::new(),
             votrax: VotraxSc01::new(VOTRAX_NOMINAL_CLOCK_HZ),
-            resampler: AudioResampler::new(SOUND_CLOCK_HZ, OUTPUT_SAMPLE_RATE),
+            resampler: AudioResampler::new(SOUND_CLOCK_HZ, output_sample_rate()),
             sound_rom: vec![0xFF; 0x2000],
             clock: 0,
             votrax_ar_prev: true,

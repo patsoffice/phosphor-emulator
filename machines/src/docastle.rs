@@ -134,7 +134,9 @@ const SUB_IRQ_LAST_LINE: u64 = SUB_IRQ_FIRST_LINE + 7 * SUB_IRQ_LINE_PERIOD; // 
 
 /// All four PSGs share the CPU's 4 MHz clock.
 const SOUND_CLOCK: u32 = TIMING.cpu_clock_hz as u32;
-const OUTPUT_SAMPLE_RATE: u64 = 44_100;
+fn output_sample_rate() -> u64 {
+    phosphor_core::audio::host_sample_rate() as u64
+}
 
 /// Palette pens: 32 colour codes × 16 pens. Pen bit 3 is the transparency /
 /// priority flag rather than a colour bit, so pens `n` and `n | 8` share an RGB
@@ -892,7 +894,7 @@ impl DocastleBoard {
                 Sn76489a::new(SOUND_CLOCK),
             ],
             sn_clock: ClockDivider::new(SOUND_CLOCK / 16, TIMING.cpu_clock_hz as u32),
-            audio: AudioResampler::new(TIMING.cpu_clock_hz, OUTPUT_SAMPLE_RATE),
+            audio: AudioResampler::new(TIMING.cpu_clock_hz, output_sample_rate()),
             clock: 0,
             main_irq_pending: false,
             sub_irq_pending: false,

@@ -1049,7 +1049,7 @@ impl AudioSource for GalagaSystem {
     }
 
     fn audio_sample_rate(&self) -> u32 {
-        44100
+        phosphor_core::audio::host_sample_rate()
     }
 }
 

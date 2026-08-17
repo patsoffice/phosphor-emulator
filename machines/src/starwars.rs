@@ -230,7 +230,9 @@ const SOUND_CLOCK_HZ: u32 = 1_512_000;
 /// TMS5220 speech clock: master / 2 / 9 = 672 kHz.
 const TMS_CLOCK_HZ: u32 = 672_000;
 /// Host audio output rate.
-const AUDIO_SAMPLE_RATE: u32 = 44_100;
+fn audio_sample_rate_hz() -> u32 {
+    phosphor_core::audio::host_sample_rate() as u32
+}
 
 /// Watchdog timeout ≈ 3 kHz / 128 ≈ 23 Hz. Reset if not pet within this many
 /// CPU cycles (1.512 MHz / 23 ≈ 65_700).
@@ -795,7 +797,9 @@ impl StarWarsBoard {
             math: StarWarsMath::new(),
             novram: X2212::new(),
             slapstic: esb.then(|| Slapstic::for_chip(101)),
-            pokey: std::array::from_fn(|_| Pokey::with_clock(SOUND_CLOCK_HZ, AUDIO_SAMPLE_RATE)),
+            pokey: std::array::from_fn(|_| {
+                Pokey::with_clock(SOUND_CLOCK_HZ, audio_sample_rate_hz())
+            }),
             riot: Riot6532::new(),
             tms: Tms5220::with_variant(Tms52xxVariant::Tms5220, TMS_CLOCK_HZ),
             tms_clock_acc: 0,

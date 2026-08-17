@@ -94,7 +94,9 @@ pub const VISIBLE_LINES: u64 = 240; // lines rendered (top VBLANK_END clipped on
 pub const SOUND_CLOCK: u64 = 4_000_000;
 pub const SOUND_PSG2_CLOCK: u32 = 1_000_000;
 pub const SOUND_IRQ_PERIOD: u64 = 16 * 16 * 16 * 4; // 16384 sound cycles
-pub const OUTPUT_SAMPLE_RATE: u64 = 44_100;
+pub fn output_sample_rate() -> u64 {
+    phosphor_core::audio::host_sample_rate() as u64
+}
 
 // ---------------------------------------------------------------------------
 // ROM definitions ("congo" parent set — 2-board stack, Sega ID 834-5180)
@@ -554,7 +556,7 @@ impl CongoBongoBoard {
             sound_irq_pending: false,
             sn1_clock: ClockDivider::new((SOUND_CLOCK / 16) as u32, TIMING.cpu_clock_hz as u32),
             sn2_clock: ClockDivider::new(SOUND_PSG2_CLOCK / 16, TIMING.cpu_clock_hz as u32),
-            audio: AudioResampler::new(TIMING.cpu_clock_hz, OUTPUT_SAMPLE_RATE),
+            audio: AudioResampler::new(TIMING.cpu_clock_hz, output_sample_rate()),
             congo_sound: CongoSound::new(),
             clock: 0,
             vblank_irq_pending: false,

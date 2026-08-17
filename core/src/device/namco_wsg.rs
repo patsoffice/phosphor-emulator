@@ -8,7 +8,7 @@
 //! Clock: master_clock / 6 / 32 = 96 KHz for 18.432 MHz master.
 //! Register interface: 32 nibble-wide registers written at 0x5040–0x505F.
 
-use crate::audio::AudioResampler;
+use crate::audio::{AudioResampler, host_sample_rate};
 use crate::prelude::Saveable;
 
 /// 3-voice Namco WSG wavetable synthesizer.
@@ -61,7 +61,7 @@ impl NamcoWsg {
             sound_regs: [0; 32],
             waveform_rom: [0; 256],
             sound_enabled: false,
-            resampler: AudioResampler::new(cpu_clock_hz, 44_100),
+            resampler: AudioResampler::new(cpu_clock_hz, host_sample_rate() as u64),
         }
     }
 

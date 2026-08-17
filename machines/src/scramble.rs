@@ -38,7 +38,9 @@ use phosphor_macros::{BusDebug, DebugTrace, MemoryRegion};
 use crate::galaxian_video::{self, GalaxianVideo, GfxBankMode};
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
 
-pub const SAMPLE_RATE: u32 = 44_100;
+pub fn sample_rate() -> u32 {
+    phosphor_core::audio::host_sample_rate() as u32
+}
 
 /// Main CPU: 18.432 MHz / 6 = 3.072 MHz (same as Galaxian).
 pub const TIMING: TimingConfig = TimingConfig {

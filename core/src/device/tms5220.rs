@@ -34,16 +34,13 @@
 use super::tms5220_tables::{
     CHIRP, ENERGY, ENERGY_BITS, INTERP_SHIFT, K, K_BITS, NUM_K, PITCH, PITCH_BITS,
 };
-use crate::audio::AudioResampler;
+use crate::audio::{AudioResampler, host_sample_rate};
 use crate::core::debug::{DebugRegister, Debuggable};
 use crate::device::Device;
 use phosphor_macros::Saveable;
 
 /// FIFO depth in bytes.
 const FIFO_SIZE: usize = 16;
-
-/// Host output sample rate the internal resampler targets.
-const OUTPUT_SAMPLE_RATE: u64 = 44_100;
 
 /// TMS5220C nominal master clock on Atari System 1: 14.318181 MHz / 2 / 11.
 /// The board re-selects the exact rate at runtime via [`Tms5220::set_clock`].
@@ -236,7 +233,7 @@ impl Tms5220 {
             uv_zpar: false,
             variant,
             clock_hz,
-            resampler: AudioResampler::new(sample_rate(clock_hz), OUTPUT_SAMPLE_RATE),
+            resampler: AudioResampler::new(sample_rate(clock_hz), host_sample_rate() as u64),
         };
         chip.reset();
         chip

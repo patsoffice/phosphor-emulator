@@ -274,7 +274,9 @@ const VBSTART: u64 = 256; // First blanking scanline
 const HBSTART_CYCLE: u64 = 64; // HBLANK at pixel 256 = CPU cycle 64 (of 80)
 const FIRQ_SCANLINE: u64 = 92;
 
-const SAMPLE_RATE: u64 = 44100; // Audio output sample rate
+fn sample_rate() -> u64 {
+    phosphor_core::audio::host_sample_rate() as u64
+} // Audio output sample rate
 
 // LFSR constants (MM5837 noise generator, same polynomial as POKEY)
 const POLY17_SIZE: usize = (1 << 17) - 1; // 131071
@@ -446,7 +448,7 @@ impl GridleeBoard {
             tone_fraction: 0,
             tone_volume: 0,
             audio_buffer: SampleRing::with_capacity(1024),
-            audio_clock: ClockDivider::new(SAMPLE_RATE as u32, TIMING.cpu_clock_hz as u32),
+            audio_clock: ClockDivider::new(sample_rate() as u32, TIMING.cpu_clock_hz as u32),
             irq_pending: false,
             firq_pending: false,
             clock: 0,
@@ -644,7 +646,7 @@ impl GridleeBoard {
             // We compute in full precision to avoid intermediate truncation.
             0x10 => {
                 if data > 0 {
-                    self.tone_step = (1u64 << 24) * data as u64 * 5 / SAMPLE_RATE;
+                    self.tone_step = (1u64 << 24) * data as u64 * 5 / sample_rate();
                 } else {
                     self.tone_step = 0;
                 }
@@ -932,7 +934,7 @@ impl AudioSource for GridleeSystem {
     }
 
     fn audio_sample_rate(&self) -> u32 {
-        44100
+        phosphor_core::audio::host_sample_rate()
     }
 }
 
@@ -1545,10 +1547,10 @@ mod tests {
         // Old truncated: ((1<<24)/44100) * 255 * 5 = 380 * 1275 = 484500
         // New full precision: (1<<24) * 255 * 5 / 44100 = 485097
         sys.board.write_sound(0x10, 255);
-        let expected = (1u64 << 24) * 255 * 5 / SAMPLE_RATE;
+        let expected = (1u64 << 24) * 255 * 5 / sample_rate();
         assert_eq!(sys.board.tone_step, expected);
         // Verify it's more accurate than the truncated version
-        let truncated = ((1u64 << 24) / SAMPLE_RATE) * 255 * 5;
+        let truncated = ((1u64 << 24) / sample_rate()) * 255 * 5;
         assert!(
             sys.board.tone_step > truncated,
             "Full precision should be larger"

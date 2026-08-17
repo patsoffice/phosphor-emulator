@@ -411,7 +411,7 @@ impl MissileCommandSystem {
 impl MissileCommandBoard {
     pub fn new() -> Self {
         Self {
-            pokey: Pokey::with_clock(1_250_000, 44100),
+            pokey: Pokey::with_clock(1_250_000, phosphor_core::audio::host_sample_rate()),
             map: Self::build_map(),
             in0: 0xFF,          // All buttons released (active-low: 1 = not pressed)
             in1: 0x67, // Fire buttons released (bits 0-2 = 1), test/tilt released (bits 5-6 = 1), VBLANK off
@@ -906,7 +906,7 @@ impl AudioSource for MissileCommandSystem {
     }
 
     fn audio_sample_rate(&self) -> u32 {
-        44100
+        phosphor_core::audio::host_sample_rate()
     }
 }
 

@@ -402,7 +402,10 @@ impl WilliamsBoard {
             sound_pia: Pia6820::new(),
             dac: Mc1408Dac::new(),
             cvsd: config.has_cvsd.then(Hc55516::new),
-            resampler: AudioResampler::new(1_000_000, 44_100),
+            resampler: AudioResampler::new(
+                1_000_000,
+                phosphor_core::audio::host_sample_rate() as u64,
+            ),
             main_map: Self::build_main_map(config),
             sound_map: Self::build_sound_map(config),
             config,

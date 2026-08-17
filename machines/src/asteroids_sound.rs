@@ -289,7 +289,10 @@ fn build_fire(
 }
 
 fn build_circuit() -> (DiscreteCircuit, AsteroidsDiscreteInputs) {
-    let mut b = DiscreteCircuitBuilder::new(TIMING.cpu_clock_hz, 44_100);
+    let mut b = DiscreteCircuitBuilder::new(
+        TIMING.cpu_clock_hz,
+        phosphor_core::audio::host_sample_rate() as u64,
+    );
 
     // --- Board-facing inputs ---
     let explosion_vol = b.data_input("EXPLODE_VOL", 1.0);

@@ -564,9 +564,9 @@ impl FoodFightBoard {
         let mut sys = Self {
             map: Self::build_map(),
             pokey: [
-                Pokey::with_clock(POKEY_CLOCK_HZ, 44100),
-                Pokey::with_clock(POKEY_CLOCK_HZ, 44100),
-                Pokey::with_clock(POKEY_CLOCK_HZ, 44100),
+                Pokey::with_clock(POKEY_CLOCK_HZ, phosphor_core::audio::host_sample_rate()),
+                Pokey::with_clock(POKEY_CLOCK_HZ, phosphor_core::audio::host_sample_rate()),
+                Pokey::with_clock(POKEY_CLOCK_HZ, phosphor_core::audio::host_sample_rate()),
             ],
             tile_cache: GfxCache::new(512, 8, 8),
             sprite_cache: GfxCache::new(256, 16, 16),
@@ -960,7 +960,7 @@ impl AudioSource for FoodFightSystem {
     }
 
     fn audio_sample_rate(&self) -> u32 {
-        44100
+        phosphor_core::audio::host_sample_rate()
     }
 }
 

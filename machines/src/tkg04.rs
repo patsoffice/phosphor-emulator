@@ -63,7 +63,9 @@ pub const TIMING: TimingConfig = TimingConfig {
 };
 
 pub const VISIBLE_LINES: u64 = 240;
-pub const OUTPUT_SAMPLE_RATE: u64 = 44_100;
+pub fn output_sample_rate() -> u64 {
+    phosphor_core::audio::host_sample_rate() as u64
+}
 
 // Sound CPU: I8035 @ 6 MHz / 15 = 400 kHz machine cycles
 // Bresenham ratio: 400000 / 3072000 = 25 / 192
@@ -468,7 +470,7 @@ impl Tkg04Board {
             sound_p1: 0,
             sound_p2: 0,
             dac: Mc1408Dac::new(),
-            resampler: AudioResampler::new(TIMING.cpu_clock_hz, OUTPUT_SAMPLE_RATE),
+            resampler: AudioResampler::new(TIMING.cpu_clock_hz, output_sample_rate()),
             clock: 0,
             sound_clock: ClockDivider::new(SOUND_TICK_NUM, SOUND_TICK_DEN),
             vblank_nmi_pending: false,

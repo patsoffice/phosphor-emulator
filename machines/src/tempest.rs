@@ -352,8 +352,8 @@ impl TempestSystem {
             board: AtariAvgBoard::new(Self::build_map(), 580, 570),
             io: TempestIo {
                 mathbox: Mathbox::new(),
-                pokey1: Pokey::with_clock(1_512_000, 44100),
-                pokey2: Pokey::with_clock(1_512_000, 44100),
+                pokey1: Pokey::with_clock(1_512_000, phosphor_core::audio::host_sample_rate()),
+                pokey2: Pokey::with_clock(1_512_000, phosphor_core::audio::host_sample_rate()),
                 earom: Er2055::new(),
                 in0: 0xFF,  // coins/tilt/test all active-LOW, default released = all 1s
                 in1: 0xF0,  // spinner bits 0-3 = 0, bit 4 = cabinet upright, bits 5-7 unused (1)
@@ -623,7 +623,7 @@ impl AudioSource for TempestSystem {
     }
 
     fn audio_sample_rate(&self) -> u32 {
-        44100
+        phosphor_core::audio::host_sample_rate()
     }
 }
 

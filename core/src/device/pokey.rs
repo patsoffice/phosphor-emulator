@@ -824,7 +824,7 @@ impl Debuggable for Pokey {
 
 impl Default for Pokey {
     fn default() -> Self {
-        Self::new(44100)
+        Self::new(crate::audio::host_sample_rate())
     }
 }
 

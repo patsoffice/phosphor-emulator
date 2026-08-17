@@ -409,8 +409,8 @@ impl QuantumSystem {
                     TIMING.display_height as i32,
                 ),
                 pokey: [
-                    Pokey::with_clock(POKEY_CLOCK_HZ, 44100),
-                    Pokey::with_clock(POKEY_CLOCK_HZ, 44100),
+                    Pokey::with_clock(POKEY_CLOCK_HZ, phosphor_core::audio::host_sample_rate()),
+                    Pokey::with_clock(POKEY_CLOCK_HZ, phosphor_core::audio::host_sample_rate()),
                 ],
                 color_ram: [0; 16],
                 nvram: [0xFF; 256], // X2212 powers up 1-filled
@@ -683,7 +683,7 @@ impl AudioSource for QuantumSystem {
     }
 
     fn audio_sample_rate(&self) -> u32 {
-        44100
+        phosphor_core::audio::host_sample_rate()
     }
 }
 

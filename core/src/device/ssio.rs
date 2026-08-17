@@ -31,7 +31,7 @@
 //! | 0xE000–0xEFFF | R   | IRQ acknowledge/clear            |
 //! | 0xF000–0xFFFF | R   | DIP switches                     |
 
-use crate::audio::AudioResampler;
+use crate::audio::{AudioResampler, host_sample_rate};
 use crate::core::debug::{DebugRegister, Debuggable};
 use crate::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use crate::core::{Bus, BusMaster};
@@ -43,9 +43,6 @@ use super::Device;
 
 /// SSIO CPU clock: 16 MHz / 8 = 2 MHz.
 const SSIO_CLOCK_HZ: u64 = 2_000_000;
-
-/// Output audio sample rate.
-const OUTPUT_SAMPLE_RATE: u64 = 44_100;
 
 /// IRQ interval in SSIO CPU ticks.
 ///
@@ -130,7 +127,7 @@ impl SsioBoard {
                 duty_cycle: [[0; 3]; 2],
                 overall: [0; 2],
                 mute: false,
-                resampler: AudioResampler::new(SSIO_CLOCK_HZ, OUTPUT_SAMPLE_RATE),
+                resampler: AudioResampler::new(SSIO_CLOCK_HZ, host_sample_rate() as u64),
                 clock: 0,
             },
         }

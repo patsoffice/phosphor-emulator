@@ -89,7 +89,9 @@ const VBLANK_IRQ_LINE: u64 = 224;
 /// Both SN76489 PSGs and the CPU share the 8.2 MHz/2 clock; the tone/noise
 /// generators advance at chip_clock / 16.
 const SOUND_CLOCK: u32 = TIMING.cpu_clock_hz as u32;
-const OUTPUT_SAMPLE_RATE: u64 = 44_100;
+fn output_sample_rate() -> u64 {
+    phosphor_core::audio::host_sample_rate() as u64
+}
 
 // ---------------------------------------------------------------------------
 // ROM definitions ("mrdot" — Taito set, full PAL protection equations)
@@ -455,7 +457,7 @@ impl MrdoBoard {
             sn2: Sn76489a::new(SOUND_CLOCK),
             sn1_clock: ClockDivider::new(SOUND_CLOCK / 16, TIMING.cpu_clock_hz as u32),
             sn2_clock: ClockDivider::new(SOUND_CLOCK / 16, TIMING.cpu_clock_hz as u32),
-            audio: AudioResampler::new(TIMING.cpu_clock_hz, OUTPUT_SAMPLE_RATE),
+            audio: AudioResampler::new(TIMING.cpu_clock_hz, output_sample_rate()),
             clock: 0,
             vblank_irq_pending: false,
         }

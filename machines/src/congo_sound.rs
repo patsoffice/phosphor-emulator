@@ -22,7 +22,9 @@ use phosphor_core::device::{
     LogicInputId, OutputGain,
 };
 
-const SAMPLE_RATE: u64 = 44_100;
+fn sample_rate() -> u64 {
+    phosphor_core::audio::host_sample_rate() as u64
+}
 
 /// PSG headroom: the music/effects are attenuated so the percussion has room to
 /// sit above them without the output clamp swallowing it.
@@ -265,7 +267,7 @@ struct CongoInputs {
 }
 
 fn build_circuit() -> (DiscreteCircuit, CongoInputs) {
-    let mut b = DiscreteCircuitBuilder::new(SAMPLE_RATE, SAMPLE_RATE);
+    let mut b = DiscreteCircuitBuilder::new(sample_rate(), sample_rate());
 
     let psg = b.external_source("PSG");
     let gorilla_g = b.logic_input("GORILLA");
@@ -410,7 +412,7 @@ mod tests {
     /// rendered samples.
     fn render(snd: &mut CongoSound, ms: u64, port_b: u8, port_c: u8) -> Vec<i16> {
         snd.set_triggers(port_b, port_c);
-        let n = (SAMPLE_RATE * ms / 1000) as usize;
+        let n = (sample_rate() * ms / 1000) as usize;
         for _ in 0..n {
             snd.feed_psg(0); // silent PSG so we measure percussion only
         }

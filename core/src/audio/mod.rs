@@ -17,6 +17,47 @@ pub use ring::SampleRing;
 
 use crate::core::save_state::{SaveError, StateReader, StateWriter};
 use crate::prelude::Saveable;
+use std::sync::atomic::{AtomicU32, Ordering};
+
+// ---------------------------------------------------------------------------
+// Host output rate
+// ---------------------------------------------------------------------------
+
+/// The rate to ask the host for, and the rate used when nothing negotiated one.
+pub const DEFAULT_HOST_SAMPLE_RATE: u32 = 44_100;
+
+/// The rate every device resamples to.
+///
+/// This is process-wide because the thing it describes is process-wide: there
+/// is one host audio device, and every sound chip in the machine has to land on
+/// its clock. Threading it through each device constructor instead would mean a
+/// parameter on every machine factory for a value that can only ever have one
+/// answer per run.
+///
+/// The ordering rule is the price: [`set_host_sample_rate`] must be called
+/// before the machine is built, because devices read it when they construct
+/// their resamplers. The frontend does this once, after asking the audio device
+/// what it will actually grant and before creating the machine.
+static HOST_SAMPLE_RATE: AtomicU32 = AtomicU32::new(DEFAULT_HOST_SAMPLE_RATE);
+
+/// The rate every device resamples to. Defaults to
+/// [`DEFAULT_HOST_SAMPLE_RATE`] until a host negotiates otherwise.
+pub fn host_sample_rate() -> u32 {
+    HOST_SAMPLE_RATE.load(Ordering::Relaxed)
+}
+
+/// Set the rate every subsequently constructed device resamples to.
+///
+/// Call before building a machine. A device that already exists keeps the rate
+/// it was built with — a resampler derives its Bresenham ratio at construction,
+/// so changing this afterwards would leave the machine's chips disagreeing
+/// about where their samples land. Passing 0 is ignored, since a rate of zero
+/// means "no audio" elsewhere in the frontend contract.
+pub fn set_host_sample_rate(rate: u32) {
+    if rate > 0 {
+        HOST_SAMPLE_RATE.store(rate, Ordering::Relaxed);
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Sample trait

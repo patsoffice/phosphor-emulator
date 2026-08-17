@@ -45,7 +45,7 @@
 //! ports are swapped (data on `A&0x40`, address on `A&0x80`); and the timer read
 //! has its B3/B5 bits swapped (`frogger_sound_timer_r`).
 
-use crate::audio::AudioResampler;
+use crate::audio::{AudioResampler, host_sample_rate};
 use crate::core::debug::{DebugRegister, Debuggable};
 use crate::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use crate::core::{Bus, BusMaster};
@@ -59,9 +59,6 @@ use super::Device;
 const KONAMI_SOUND_CLOCK: u64 = 14_318_000;
 /// Sound CPU / AY-8910 clock: master / 8 ≈ 1.79 MHz.
 const KONAMI_CPU_CLOCK: u64 = KONAMI_SOUND_CLOCK / 8;
-/// Output audio sample rate.
-const OUTPUT_SAMPLE_RATE: u64 = 44_100;
-
 /// Timer period in master-clock counts: a chained 16·16·2·8·5·2 divider.
 const TIMER_PERIOD: u32 = 16 * 16 * 2 * 8 * 5 * 2; // 40960
 /// The point in the period where the final divide-by-2 high bit (B7) is set.
@@ -130,7 +127,7 @@ impl KonamiSound {
                 mute: false,
                 filter: 0,
                 frogger: false,
-                resampler: AudioResampler::new(KONAMI_CPU_CLOCK, OUTPUT_SAMPLE_RATE),
+                resampler: AudioResampler::new(KONAMI_CPU_CLOCK, host_sample_rate() as u64),
                 clock: 0,
             },
         }

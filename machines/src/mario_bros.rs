@@ -90,7 +90,9 @@ pub const TIMING: TimingConfig = TimingConfig {
 };
 
 pub const VISIBLE_LINES: u64 = 240; // lines rendered (top VBLANK_END clipped on output)
-pub const OUTPUT_SAMPLE_RATE: u64 = 44_100;
+pub fn output_sample_rate() -> u64 {
+    phosphor_core::audio::host_sample_rate() as u64
+}
 
 pub const NATIVE_WIDTH: usize = 256;
 pub const NATIVE_HEIGHT: usize = 240;
@@ -660,7 +662,7 @@ impl MarioBrosBoard {
             sound_p2: 0,
             dma: Z80Dma::new(),
             dac: Mc1408Dac::new(),
-            resampler: AudioResampler::new(TIMING.cpu_clock_hz, OUTPUT_SAMPLE_RATE),
+            resampler: AudioResampler::new(TIMING.cpu_clock_hz, output_sample_rate()),
             tile_cache: gfx::GfxCache::new(0, 8, 8),
             sprite_cache: gfx::GfxCache::new(0, 16, 16),
             clock: 0,

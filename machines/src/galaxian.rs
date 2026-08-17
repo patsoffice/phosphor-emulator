@@ -44,7 +44,9 @@ use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
 
 /// Audio output rate produced by [`GalaxianBoard::fill_audio`]; matches the
 /// frontend's `audio_sample_rate`.
-pub const SAMPLE_RATE: u32 = 44_100;
+pub fn sample_rate() -> u32 {
+    phosphor_core::audio::host_sample_rate() as u32
+}
 
 // ---------------------------------------------------------------------------
 // Memory map regions
@@ -235,7 +237,7 @@ impl GalaxianBoard {
         Self {
             map: Self::build_map(),
             video: GalaxianVideo::new(),
-            sound: GalaxianSound::new(SAMPLE_RATE),
+            sound: GalaxianSound::new(sample_rate()),
             in0: 0x00,
             in1: 0x00,
             in2: 0x00,

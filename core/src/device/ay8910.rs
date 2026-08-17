@@ -29,7 +29,7 @@
 //! | R14 | PORT_A    | I/O Port A data                                      |
 //! | R15 | PORT_B    | I/O Port B data                                      |
 
-use crate::audio::AudioResampler;
+use crate::audio::{AudioResampler, host_sample_rate};
 use phosphor_macros::Saveable;
 
 /// AY-8910 DAC volume table (logarithmic, ~3 dB per step).
@@ -103,7 +103,7 @@ impl Ay8910 {
             port_a_in: 0,
             port_b_in: 0,
             prescaler_count: 0,
-            resampler: AudioResampler::new(chip_clock_hz, 44_100),
+            resampler: AudioResampler::new(chip_clock_hz, host_sample_rate() as u64),
             channel_gain: [255; 3],
         }
     }

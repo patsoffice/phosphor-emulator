@@ -38,7 +38,9 @@ use phosphor_core::device::ym2151::Ym2151;
 pub const SOUND_CLOCK_HZ: u32 = 1_789_772;
 const YM_CLOCKS_PER_TICK: u32 = 2;
 
-const AUDIO_SAMPLE_RATE: u32 = 44_100;
+fn audio_sample_rate_hz() -> u32 {
+    phosphor_core::audio::host_sample_rate() as u32
+}
 
 /// TMS5220 clock base: 14.318181 MHz / 2. Port B bit 4 selects the final
 /// divider (÷11 nominal or ÷9), giving the two speech pitches the game uses.
@@ -213,7 +215,7 @@ impl AtariSystem1Sound {
             bus: AtariSystem1SoundBus {
                 sound_ram: Box::new([0; 0x1000]),
                 sound_rom: Box::new([0xFF; 0xC000]),
-                pokey: Pokey::with_clock(SOUND_CLOCK_HZ, AUDIO_SAMPLE_RATE),
+                pokey: Pokey::with_clock(SOUND_CLOCK_HZ, audio_sample_rate_hz()),
                 ym: Ym2151::new(),
                 speech: speech.then(Speech::new),
                 outlatch: 0,

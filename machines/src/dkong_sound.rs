@@ -27,7 +27,9 @@ use phosphor_core::device::{
 /// Output sample rate. The circuit is built board = sim = output = this rate, so
 /// `tick(1)` advances exactly one simulation step; the board drives one step per
 /// box-filtered DAC sample.
-const SAMPLE_RATE: u64 = 44_100;
+fn sample_rate() -> u64 {
+    phosphor_core::audio::host_sample_rate() as u64
+}
 
 // Per-effect output low-pass cutoffs (Hz) and gains, calibrated against captured
 // hardware references (tools/sound-reference). On the board each effect passes
@@ -204,7 +206,7 @@ struct DkongInputs {
 }
 
 fn build_circuit() -> (DiscreteCircuit, DkongInputs) {
-    let mut b = DiscreteCircuitBuilder::new(SAMPLE_RATE, SAMPLE_RATE);
+    let mut b = DiscreteCircuitBuilder::new(sample_rate(), sample_rate());
 
     let dac = b.external_source("DAC"); // normalized I8035 DAC stream
     let walk_en = b.logic_input("WALK_EN");

@@ -241,7 +241,7 @@ impl AsteroidsDeluxeSystem {
             cpu: M6502::new(),
             // Asteroids Deluxe: VROM at DVG 0x0800, size 0x1000
             board: AtariDvgBoard::new(Self::build_map(), 0x0800, 0x1000),
-            pokey: Pokey::with_clock(1_512_000, 44100),
+            pokey: Pokey::with_clock(1_512_000, phosphor_core::audio::host_sample_rate()),
             in0: 0x00,
             in1: 0x00,
             dip_switches: 0x00,
@@ -458,7 +458,7 @@ impl AudioSource for AsteroidsDeluxeSystem {
     }
 
     fn audio_sample_rate(&self) -> u32 {
-        44100
+        phosphor_core::audio::host_sample_rate()
     }
 }
 

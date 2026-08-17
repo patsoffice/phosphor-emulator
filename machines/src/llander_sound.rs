@@ -103,7 +103,10 @@ const THRUST_OUT_GAIN: f64 = 18.7; // post-band-pass make-up + trim
 const OUTPUT_GAIN: f64 = 1.0 / 14347.0;
 
 fn build_circuit() -> (DiscreteCircuit, LunarLanderInputs) {
-    let mut b = DiscreteCircuitBuilder::new(TIMING.cpu_clock_hz, 44_100);
+    let mut b = DiscreteCircuitBuilder::new(
+        TIMING.cpu_clock_hz,
+        phosphor_core::audio::host_sample_rate() as u64,
+    );
 
     // --- Board-facing inputs ---
     let thrust_data = b.data_input("THRUST_DATA", 1.0); // normalized 0..1 (data/7)

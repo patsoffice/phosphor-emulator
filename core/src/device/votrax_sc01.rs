@@ -23,7 +23,7 @@
 //! - MAME `src/devices/sound/votrax.cpp` (Olivier Galibert, BSD-3-Clause)
 //! - US Patent 4,433,210 (switched capacitor filter technology)
 
-use crate::audio::AudioResampler;
+use crate::audio::{AudioResampler, host_sample_rate};
 use crate::core::debug::{DebugRegister, Debuggable};
 use phosphor_macros::Saveable;
 
@@ -55,8 +55,6 @@ const PHONE_NAMES: [&str; 64] = [
     "A", "AY", "Y1", "UH3", "AH", "P", "O", "I", "U", "Y", "T", "R", "E", "W", "AE", "AE1", "AW2",
     "UH2", "UH1", "UH", "O2", "O1", "IU", "U1", "THV", "TH", "ER", "EH", "E1", "AW", "PA1", "STOP",
 ];
-
-const OUTPUT_SAMPLE_RATE: u64 = 44_100;
 
 // ---------------------------------------------------------------------------
 // VotraxSc01
@@ -257,7 +255,7 @@ impl VotraxSc01 {
             main_clock_hz,
             sclock,
             cclock: main_clock_hz as f64 / 36.0,
-            resampler: AudioResampler::new(sclock as u64, OUTPUT_SAMPLE_RATE),
+            resampler: AudioResampler::new(sclock as u64, host_sample_rate() as u64),
         }
     }
 

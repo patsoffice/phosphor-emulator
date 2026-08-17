@@ -82,7 +82,9 @@ const BITMAP_H: usize = 256;
 
 // Sound: four POKEYs clocked at the 6809 rate; mixed to mono at 44.1 kHz.
 const POKEY_CLOCK: u32 = 1_512_000;
-const SAMPLE_RATE: u32 = 44_100;
+fn sample_rate() -> u32 {
+    phosphor_core::audio::host_sample_rate() as u32
+}
 
 // ---------------------------------------------------------------------------
 // ROM definitions ("irobot" parent set)
@@ -617,7 +619,7 @@ impl IrobotBoard {
             novram: X2212::new(),
             adc: Adc0809::new(),
             stick: new_stick(),
-            pokeys: std::array::from_fn(|_| Pokey::with_clock(POKEY_CLOCK, SAMPLE_RATE)),
+            pokeys: std::array::from_fn(|_| Pokey::with_clock(POKEY_CLOCK, sample_rate())),
             audio_buffer: SampleRing::with_capacity(2048),
             irq_pending: false,
             firq_pending: false,
@@ -1182,7 +1184,7 @@ impl AudioSource for IrobotSystem {
         self.board.audio_buffer.pop_front_into(buffer)
     }
     fn audio_sample_rate(&self) -> u32 {
-        SAMPLE_RATE
+        sample_rate()
     }
 }
 
@@ -2013,7 +2015,7 @@ mod tests {
         // A POKEY register write must route without panicking (AUDC1 on POKEY 2).
         Bus::write(&mut sys.board, BusMaster::Cpu(0), 0x1410 | 0x01, 0xAF);
         sys.run_frame();
-        assert_eq!(sys.audio_sample_rate(), SAMPLE_RATE);
+        assert_eq!(sys.audio_sample_rate(), sample_rate());
         assert!(
             !sys.board.audio_buffer.is_empty(),
             "a frame should mix POKEY output"
