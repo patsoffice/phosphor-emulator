@@ -1,3 +1,4 @@
+use phosphor_core::audio::SampleRing;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
     ActionRole, AnalogAxisKind, AudioSource, DefaultBinding, DipApplyTiming, DipChoice, DipOption,
@@ -350,7 +351,7 @@ pub struct GridleeBoard {
     tone_step: u64,       // Phase increment per output sample
     tone_fraction: u64,   // 24-bit phase accumulator
     tone_volume: u8,      // 8-bit volume
-    audio_buffer: Vec<i16>,
+    audio_buffer: SampleRing<i16>,
     audio_clock: ClockDivider, // Bresenham phase for 1.25 MHz → 44.1 kHz
 
     // Interrupt state
@@ -444,7 +445,7 @@ impl GridleeBoard {
             tone_step: 0,
             tone_fraction: 0,
             tone_volume: 0,
-            audio_buffer: Vec::with_capacity(1024),
+            audio_buffer: SampleRing::with_capacity(1024),
             audio_clock: ClockDivider::new(SAMPLE_RATE as u32, TIMING.cpu_clock_hz as u32),
             irq_pending: false,
             firq_pending: false,
@@ -927,10 +928,7 @@ impl Renderable for GridleeSystem {
 
 impl AudioSource for GridleeSystem {
     fn fill_audio(&mut self, buffer: &mut [i16]) -> usize {
-        let n = buffer.len().min(self.board.audio_buffer.len());
-        buffer[..n].copy_from_slice(&self.board.audio_buffer[..n]);
-        self.board.audio_buffer.drain(..n);
-        n
+        self.board.audio_buffer.pop_front_into(buffer)
     }
 
     fn audio_sample_rate(&self) -> u32 {

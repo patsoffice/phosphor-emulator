@@ -12,6 +12,7 @@
 //! AVG/matrix wiring, the POKEY/RIOT/TMS5220 sound, the ADC0809 flight yoke, and
 //! the X2212 NVRAM), loads the ROM set, and registers the machine.
 
+use phosphor_core::audio::SampleRing;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::debug_trace::{DebugEvent, DebugEventKind, DebugTraceBuffer};
 use phosphor_core::core::input::{AnalogAxis, AxisRange};
@@ -744,7 +745,7 @@ pub(crate) struct StarWarsBoard {
     pub(crate) display_list: Vec<VectorLine>,
 
     // Mixed audio for the current frame, plus DC-block filter state.
-    pub(crate) audio_buffer: Vec<i16>,
+    pub(crate) audio_buffer: SampleRing<i16>,
     pub(crate) audio_dc: (f32, f32),
 
     // Debug event ring (observer state — never saved in save states).
@@ -827,7 +828,7 @@ impl StarWarsBoard {
             avg_busy_cycles: 0,
             clock: 0,
             display_list: Vec::with_capacity(2048),
-            audio_buffer: Vec::new(),
+            audio_buffer: SampleRing::new(),
             audio_dc: (0.0, 0.0),
             debug_trace: DebugTraceBuffer::new(),
         }
@@ -1488,7 +1489,6 @@ impl StarWarsBoard {
             .unwrap_or(0);
 
         let (mut x1, mut y1) = self.audio_dc;
-        self.audio_buffer.reserve(n);
         for i in 0..n {
             let pokey = POKEY_GAIN
                 * chans
@@ -1508,10 +1508,7 @@ impl StarWarsBoard {
 
     /// Copy pending audio into the frontend's buffer.
     pub(crate) fn fill_audio(&mut self, buffer: &mut [i16]) -> usize {
-        let n = buffer.len().min(self.audio_buffer.len());
-        buffer[..n].copy_from_slice(&self.audio_buffer[..n]);
-        self.audio_buffer.drain(..n);
-        n
+        self.audio_buffer.pop_front_into(buffer)
     }
 
     /// Whether the main CPU is at an instruction boundary. It lives on the

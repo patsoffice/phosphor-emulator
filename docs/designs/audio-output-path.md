@@ -154,15 +154,30 @@ interpolate. The sample-and-hold currently used for upsampling is itself a crude
 zero-order hold, so this path improves too, but the priority is not regressing
 it. Keep that test as-is.
 
-## 2. Output ring
+## 2. Output ring — *implemented*
 
-Replace the resampler's output `Vec` with a fixed-capacity ring. Both `tick` and
-`fill_audio` become O(1) amortised with no memmove.
+Replace the resampler's output `Vec` with a ring. Both `tick` and `fill_audio`
+become O(1) amortised with no memmove.
 
 Capacity should be a small multiple of a frame's worth of samples — at 44.1 kHz
 and ~60 Hz that is ~735 per frame, so 4096 is ample. Overrun should be
 observable rather than silent: expose a counter the profiler can read, because
 a persistently overrunning device is a bug worth seeing.
+
+As built (`core/src/audio/ring.rs`), `SampleRing<T>` starts at that 4096 and
+**grows by doubling to a 131072-sample ceiling** rather than being strictly
+fixed. The reason is that the resampler runs on the emulator thread, not the
+audio callback — the no-allocation constraint of goal 4 applies to §4's
+transport, not here — and several callers legitimately accumulate a full second
+before draining (the headless harness, and the resampler's own
+sample-count tests). Past the ceiling the ring drops oldest and counts it in
+`overruns()`, so the diagnostic this section asks for still exists; it just
+reports a consumer that has stopped draining for three seconds rather than for
+a tenth of one.
+
+The same `SampleRing` replaced the `audio_buffer: Vec<i16>` mix buffer in the
+ten machines that sum several chips before `fill_audio`, which had the identical
+front-of-`Vec` drain one level further down the path.
 
 ## 3. Rate negotiation
 
@@ -230,7 +245,7 @@ Each phase is independently shippable and independently valuable.
 
 | Phase | Work | Why this order |
 |-------|------|----------------|
-| 1 | Output ring (§2) | Smallest, touches only `AudioResampler` internals, no behaviour change |
+| 1 | Output ring (§2) — **done** | Smallest, touches only `AudioResampler` internals, no behaviour change |
 | 2 | Two-stage decimation (§1) | The audible win; independent of everything else |
 | 3 | Rate negotiation (§3) | Mechanical; needed before the control loop has a correct nominal rate |
 | 4 | Lock-free transport (§4) | Removes the priority inversion; precondition for phase 5 |

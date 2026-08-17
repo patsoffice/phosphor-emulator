@@ -39,6 +39,7 @@
 //! side-effect-light, so the stray RMW read is harmless. This is the documented
 //! limitation in the m68000 README and the main thing to watch during bring-up.
 
+use phosphor_core::audio::SampleRing;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
     ActionRole, AnalogAxisKind, AudioSource, DefaultBinding, DipApplyTiming, DipChoice, DipOption,
@@ -464,7 +465,7 @@ pub struct FoodFightBoard {
     clock: u64,
     watchdog_count: u8,
 
-    audio_buffer: Vec<i16>,
+    audio_buffer: SampleRing<i16>,
 }
 
 /// Atari Food Fight (1983): a 68000 beside the board it drives.
@@ -585,7 +586,7 @@ impl FoodFightBoard {
             video_int: false,
             clock: 0,
             watchdog_count: 0,
-            audio_buffer: Vec::with_capacity(2048),
+            audio_buffer: SampleRing::with_capacity(2048),
         };
         sys.refresh_dip_pots();
         sys
@@ -955,10 +956,7 @@ impl Renderable for FoodFightSystem {
 
 impl AudioSource for FoodFightSystem {
     fn fill_audio(&mut self, buffer: &mut [i16]) -> usize {
-        let n = buffer.len().min(self.board.audio_buffer.len());
-        buffer[..n].copy_from_slice(&self.board.audio_buffer[..n]);
-        self.board.audio_buffer.drain(..n);
-        n
+        self.board.audio_buffer.pop_front_into(buffer)
     }
 
     fn audio_sample_rate(&self) -> u32 {

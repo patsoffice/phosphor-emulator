@@ -1,3 +1,4 @@
+use phosphor_core::audio::SampleRing;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
     ActionRole, AudioSource, DipApplyTiming, DipChoice, DipOption, DipSwitchBank,
@@ -203,7 +204,7 @@ pub struct AsteroidsDeluxeSystem {
 
     // Audio buffer from POKEY
     #[save_skip(default)]
-    audio_buffer: Vec<i16>,
+    audio_buffer: SampleRing<i16>,
 }
 
 impl AsteroidsDeluxeSystem {
@@ -245,7 +246,7 @@ impl AsteroidsDeluxeSystem {
             in1: 0x00,
             dip_switches: 0x00,
             earom: Er2055::new(),
-            audio_buffer: Vec::with_capacity(1024),
+            audio_buffer: SampleRing::with_capacity(1024),
         }
     }
 
@@ -453,10 +454,7 @@ crate::impl_board_renderable!(AsteroidsDeluxeSystem, board, atari_dvg::TIMING, v
 
 impl AudioSource for AsteroidsDeluxeSystem {
     fn fill_audio(&mut self, buffer: &mut [i16]) -> usize {
-        let n = buffer.len().min(self.audio_buffer.len());
-        buffer[..n].copy_from_slice(&self.audio_buffer[..n]);
-        self.audio_buffer.drain(..n);
-        n
+        self.audio_buffer.pop_front_into(buffer)
     }
 
     fn audio_sample_rate(&self) -> u32 {

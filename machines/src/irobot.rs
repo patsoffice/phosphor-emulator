@@ -18,6 +18,7 @@
 //! the text layer; four POKEYs mixed to mono; and the self-centering analog
 //! flight stick via the ADC0809 are all implemented and verified on the real ROM.
 
+use phosphor_core::audio::SampleRing;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::input::{AnalogAxis, AxisRange};
 use phosphor_core::core::machine::{
@@ -512,7 +513,7 @@ pub struct IrobotBoard {
 
     // Sound: four POKEYs @ 1.512 MHz, all outputs summed to mono.
     pokeys: [Pokey; 4],
-    audio_buffer: Vec<i16>,
+    audio_buffer: SampleRing<i16>,
 
     // Interrupts / timing.
     irq_pending: bool,
@@ -617,7 +618,7 @@ impl IrobotBoard {
             adc: Adc0809::new(),
             stick: new_stick(),
             pokeys: std::array::from_fn(|_| Pokey::with_clock(POKEY_CLOCK, SAMPLE_RATE)),
-            audio_buffer: Vec::with_capacity(2048),
+            audio_buffer: SampleRing::with_capacity(2048),
             irq_pending: false,
             firq_pending: false,
             prev_v32: false,
@@ -1178,10 +1179,7 @@ impl Renderable for IrobotSystem {
 
 impl AudioSource for IrobotSystem {
     fn fill_audio(&mut self, buffer: &mut [i16]) -> usize {
-        let n = buffer.len().min(self.board.audio_buffer.len());
-        buffer[..n].copy_from_slice(&self.board.audio_buffer[..n]);
-        self.board.audio_buffer.drain(..n);
-        n
+        self.board.audio_buffer.pop_front_into(buffer)
     }
     fn audio_sample_rate(&self) -> u32 {
         SAMPLE_RATE

@@ -44,6 +44,7 @@
 
 use std::collections::HashMap;
 
+use phosphor_core::audio::SampleRing;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::{AccessKind, AddressSpace32};
@@ -434,7 +435,7 @@ pub struct AtariSystem1Board {
     pub(crate) sound: AtariSystem1Sound,
     /// Sound CPU runs at 1/4 the main CPU rate.
     sound_clock: ClockDivider,
-    audio_buffer: Vec<i16>,
+    audio_buffer: SampleRing<i16>,
 
     pub(crate) clock: u64,
     pub(crate) watchdog_count: u8,
@@ -544,7 +545,7 @@ impl AtariSystem1Board {
             audio_dc: (0.0, 0.0),
             sound: AtariSystem1Sound::new(speech),
             sound_clock: ClockDivider::new(1, 4),
-            audio_buffer: Vec::with_capacity(2048),
+            audio_buffer: SampleRing::with_capacity(2048),
             clock: 0,
             watchdog_count: 0,
             mo_bank_changes: Vec::with_capacity(16),
@@ -1100,10 +1101,7 @@ impl AtariSystem1Board {
     /// Copy pending audio into the frontend's buffer. Delegated to by the
     /// wrapper's `AudioSource`.
     pub fn fill_audio(&mut self, buffer: &mut [i16]) -> usize {
-        let n = buffer.len().min(self.audio_buffer.len());
-        buffer[..n].copy_from_slice(&self.audio_buffer[..n]);
-        self.audio_buffer.drain(..n);
-        n
+        self.audio_buffer.pop_front_into(buffer)
     }
 
     /// Reset the shared board state (everything but the CPU, which the machine

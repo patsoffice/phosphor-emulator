@@ -1,3 +1,4 @@
+use phosphor_core::audio::SampleRing;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::input::{DrainPolicy, RelativeCounter};
 use phosphor_core::core::machine::{
@@ -338,7 +339,7 @@ pub struct MissileCommandBoard {
     scanline_buffer: Vec<u8>,    // 256 * 231 * 3 = 177,408 bytes (RGB24)
     scanline_buffer_valid: bool, // true after run_frame() completes
 
-    audio_buffer: Vec<i16>,
+    audio_buffer: SampleRing<i16>,
 }
 
 /// Atari Missile Command (1980): a 6502 beside the board it drives.
@@ -428,7 +429,7 @@ impl MissileCommandBoard {
             watchdog_frame_count: 0,
             scanline_buffer: vec![0u8; 256 * 231 * 3],
             scanline_buffer_valid: false,
-            audio_buffer: Vec::with_capacity(1024),
+            audio_buffer: SampleRing::with_capacity(1024),
         }
     }
 
@@ -901,10 +902,7 @@ impl Renderable for MissileCommandSystem {
 
 impl AudioSource for MissileCommandSystem {
     fn fill_audio(&mut self, buffer: &mut [i16]) -> usize {
-        let n = buffer.len().min(self.board.audio_buffer.len());
-        buffer[..n].copy_from_slice(&self.board.audio_buffer[..n]);
-        self.board.audio_buffer.drain(..n);
-        n
+        self.board.audio_buffer.pop_front_into(buffer)
     }
 
     fn audio_sample_rate(&self) -> u32 {

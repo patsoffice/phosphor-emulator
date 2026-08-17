@@ -1,3 +1,4 @@
+use phosphor_core::audio::SampleRing;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::input::{DrainPolicy, RelativeCounter};
 use phosphor_core::core::machine::{
@@ -458,7 +459,7 @@ pub struct CrystalCastlesBoard {
     scanline_buffer_valid: bool,
     sprite_buffer: Vec<u8>, // 256 × 256 temporary sprite layer (5-bit index)
 
-    audio_buffer: Vec<i16>,
+    audio_buffer: SampleRing<i16>,
 }
 
 /// Atari Crystal Castles (1983): a 6502 beside the board it drives.
@@ -582,7 +583,7 @@ impl CrystalCastlesBoard {
             scanline_buffer_valid: false,
             sprite_buffer: vec![0u8; 256 * 256],
 
-            audio_buffer: Vec::with_capacity(2048),
+            audio_buffer: SampleRing::with_capacity(2048),
         }
     }
 
@@ -1144,10 +1145,7 @@ impl Renderable for CrystalCastlesSystem {
 
 impl AudioSource for CrystalCastlesSystem {
     fn fill_audio(&mut self, buffer: &mut [i16]) -> usize {
-        let n = buffer.len().min(self.board.audio_buffer.len());
-        buffer[..n].copy_from_slice(&self.board.audio_buffer[..n]);
-        self.board.audio_buffer.drain(..n);
-        n
+        self.board.audio_buffer.pop_front_into(buffer)
     }
 
     fn audio_sample_rate(&self) -> u32 {

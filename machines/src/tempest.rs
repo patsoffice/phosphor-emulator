@@ -1,3 +1,4 @@
+use phosphor_core::audio::SampleRing;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::input::{DrainPolicy, RelativeCounter};
 use phosphor_core::core::machine::{
@@ -279,7 +280,7 @@ pub struct TempestSystem {
 
     // Audio buffer from dual POKEYs
     #[save_skip(default)]
-    audio_buffer: Vec<i16>,
+    audio_buffer: SampleRing<i16>,
 }
 
 /// The bus the 6502 sees: the shared AVG board plus Tempest's own I/O, borrowed
@@ -363,7 +364,7 @@ impl TempestSystem {
                 outlatch: 0,
                 spinner: new_spinner(),
             },
-            audio_buffer: Vec::with_capacity(2048),
+            audio_buffer: SampleRing::with_capacity(2048),
         }
     }
 
@@ -618,10 +619,7 @@ impl phosphor_core::core::machine::Renderable for TempestSystem {
 
 impl AudioSource for TempestSystem {
     fn fill_audio(&mut self, buffer: &mut [i16]) -> usize {
-        let n = buffer.len().min(self.audio_buffer.len());
-        buffer[..n].copy_from_slice(&self.audio_buffer[..n]);
-        self.audio_buffer.drain(..n);
-        n
+        self.audio_buffer.pop_front_into(buffer)
     }
 
     fn audio_sample_rate(&self) -> u32 {

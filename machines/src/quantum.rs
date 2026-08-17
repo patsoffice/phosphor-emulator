@@ -36,6 +36,7 @@
 //! the containing word, so low-byte I/O writes (POKEY, NVRAM, color RAM,
 //! `led_w`) take `data & 0xFF` and I/O reads stay side-effect-light.
 
+use phosphor_core::audio::SampleRing;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::input::{DrainPolicy, RelativeCounter};
 use phosphor_core::core::machine::{
@@ -359,7 +360,7 @@ pub struct QuantumBoard {
     clock: u64,
     watchdog_count: u8,
 
-    audio_buffer: Vec<i16>,
+    audio_buffer: SampleRing<i16>,
 }
 
 /// Quantum reads each trackball counter as a small signed 4-bit per-frame
@@ -424,7 +425,7 @@ impl QuantumSystem {
                 prev_irq_taken: false,
                 clock: 0,
                 watchdog_count: 0,
-                audio_buffer: Vec::with_capacity(2048),
+                audio_buffer: SampleRing::with_capacity(2048),
             },
         };
         sys.board.refresh_dip_pots();
@@ -678,10 +679,7 @@ impl Renderable for QuantumSystem {
 
 impl AudioSource for QuantumSystem {
     fn fill_audio(&mut self, buffer: &mut [i16]) -> usize {
-        let n = buffer.len().min(self.board.audio_buffer.len());
-        buffer[..n].copy_from_slice(&self.board.audio_buffer[..n]);
-        self.board.audio_buffer.drain(..n);
-        n
+        self.board.audio_buffer.pop_front_into(buffer)
     }
 
     fn audio_sample_rate(&self) -> u32 {
