@@ -327,6 +327,8 @@ pub fn run(
 
     let audio_state = crate::audio::init(&sdl_audio, machine.audio_sample_rate());
     let mut audio_started = false;
+    // Say it once. An overrun is a standing condition, not a per-frame event.
+    let mut audio_overrun_reported = false;
 
     let buffer_size = (width * height * 3) as usize;
     // Native buffer that `render_frame` fills, plus a second buffer for the
@@ -923,16 +925,23 @@ pub fn run(
                 if let Some(rec) = audio_recording.as_mut() {
                     rec.extend_from_slice(&audio_scratch[..n]);
                 }
-                let mut buf = ring.lock().unwrap();
-                const MAX_RING_SIZE: usize = 8192;
-                while buf.len() + n > MAX_RING_SIZE {
-                    buf.pop_front();
+                // Lock-free: the callback never waits on this thread. A short
+                // write means the sound card is behind, which the ring counts.
+                ring.push_slice(&audio_scratch[..n]);
+                if ring.dropped() > 0 && !audio_overrun_reported {
+                    audio_overrun_reported = true;
+                    eprintln!(
+                        "Note: audio ring overran — the emulator is producing \
+                         samples faster than the sound card consumes them."
+                    );
                 }
-                buf.extend(&audio_scratch[..n]);
 
-                // Start playback after the first batch of real samples is buffered,
-                // so the callback never transitions from silence to audio (no pop).
-                if !audio_started {
+                // Hold playback until the ring is half full. Starting with a
+                // nearly-empty ring guarantees the callback underruns until the
+                // emulator gets ahead; a prefill costs ~90 ms of startup delay
+                // and buys a margin against frame-time jitter. This also means
+                // the callback never transitions from silence to audio (no pop).
+                if !audio_started && ring.len() >= ring.capacity() / 2 {
                     device.resume();
                     audio_started = true;
                 }
