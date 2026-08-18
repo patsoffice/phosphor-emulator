@@ -10,6 +10,7 @@ mod gfxview;
 mod headless;
 mod host_keys;
 mod input;
+mod movie;
 mod overlay;
 mod profile;
 mod screenshot;
@@ -145,7 +146,7 @@ fn main() {
         sdl
     });
 
-    let mut machine = create_from_first_rom_set(entry, &rom_path);
+    let (mut machine, rom_digest) = create_from_first_rom_set(entry, &rom_path);
 
     // GFX viewer: display the machine's decoded charset/sprite sheets.
     if cli.gfxview {
@@ -231,6 +232,8 @@ fn main() {
         fullscreen,
         &save_path,
         &screenshot_dir,
+        &movie_dir(),
+        rom_digest,
         &machine_name,
         cli.debug,
         cli.profile,
@@ -325,6 +328,12 @@ fn screenshot_dir() -> std::path::PathBuf {
     dir
 }
 
+/// Where captured input movies are written. Created lazily by the capture
+/// itself, so a session that never records leaves no directory behind.
+fn movie_dir() -> std::path::PathBuf {
+    default_data_dir("movies")
+}
+
 /// Try each ROM set name in order, returning the first machine that
 /// initialises successfully. This ensures that ROM loading *and* machine
 /// creation (which validates CRC32s, sizes, and ROM_CONTINUE layouts) both
@@ -332,7 +341,10 @@ fn screenshot_dir() -> std::path::PathBuf {
 fn create_from_first_rom_set(
     entry: &phosphor_machines::registry::MachineEntry,
     path: &str,
-) -> Box<dyn phosphor_core::core::machine::FrontendMachine> {
+) -> (
+    Box<dyn phosphor_core::core::machine::FrontendMachine>,
+    [u8; 32],
+) {
     // Surface the most common failure — a ROM path that doesn't exist on disk —
     // with a clear, dedicated message before we even try each ROM name. Without
     // this, a missing directory only shows up as a generic "I/O error: ROM path
@@ -363,7 +375,12 @@ fn create_from_first_rom_set(
             }
         };
         match (entry.create)(&rom_set) {
-            Ok(machine) => return machine,
+            // Digest the set the machine was actually built from, so a captured
+            // movie can refuse to replay against a different dump.
+            Ok(machine) => {
+                let digest = phosphor_harness::movie::rom_digest(&rom_set, &[name]);
+                return (machine, digest);
+            }
             Err(e) => last_err = Some(e),
         }
     }

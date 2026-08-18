@@ -212,6 +212,8 @@ pub fn run(
     fullscreen: bool,
     save_path: &Path,
     screenshot_dir: &Path,
+    movie_dir: &Path,
+    rom_digest: [u8; 32],
     machine_name: &str,
     start_in_debug: bool,
     start_in_profile: bool,
@@ -433,6 +435,8 @@ pub fn run(
     }
     let mut console_scope = rhai::Scope::new();
     console_scope.push("m", Rc::clone(&session));
+
+    let mut movie_capture = crate::movie::MovieCapture::new(movie_dir, machine_name, rom_digest);
 
     'main: loop {
         let t0 = Instant::now();
@@ -661,6 +665,23 @@ pub fn run(
                     // across it produces no new KeyDown — without this the
                     // input is dead until the user releases and re-presses.
                     needs_resync = true;
+                }
+
+                // Record input movie (F2). Arming resets to power-on, because a
+                // movie carries no save state and can only be replayed from
+                // there; stopping writes the file.
+                Event::KeyDown {
+                    scancode: Some(sc),
+                    repeat: false,
+                    ..
+                } if host_bindings.action_for(sc) == Some(HostAction::MovieRecord) => {
+                    let armed = !movie_capture.is_recording();
+                    eprintln!("{}", movie_capture.toggle(machine));
+                    if armed {
+                        debug_state.frame_count = 0;
+                        // Same reason as Reset above: arming resets the machine.
+                        needs_resync = true;
+                    }
                 }
 
                 // Quick Save (F6)
@@ -892,17 +913,24 @@ pub fn run(
 
                 // Game input — last, so every hotkey above keeps precedence.
                 other => {
-                    input::dispatch(
-                        &other,
-                        bindings,
-                        machine,
-                        input::DispatchCtx {
-                            egui_wants_keyboard: video.wants_keyboard(),
-                            mouse_grabbed,
-                            pad_slot: event_pad_slot(&other, &controllers),
-                        },
-                        &mut dispatch_state,
-                    );
+                    let ctx = input::DispatchCtx {
+                        egui_wants_keyboard: video.wants_keyboard(),
+                        mouse_grabbed,
+                        pad_slot: event_pad_slot(&other, &controllers),
+                    };
+                    // While recording, the machine is reached through a tee that
+                    // captures every call on the way past. `dispatch` itself is
+                    // unchanged and unaware — which is what stops a future input
+                    // path from being recorded incompletely.
+                    match movie_capture.recorder_mut() {
+                        Some(sink) => {
+                            let mut tee = crate::movie::Recording::new(machine, sink);
+                            input::dispatch(&other, bindings, &mut tee, ctx, &mut dispatch_state);
+                        }
+                        None => {
+                            input::dispatch(&other, bindings, machine, ctx, &mut dispatch_state);
+                        }
+                    }
                 }
             }
         }
@@ -915,13 +943,25 @@ pub fn run(
                 keyboard: event_pump.keyboard_state(),
                 controllers: &controllers,
             };
-            input::resync(bindings, machine, &devices);
+            match movie_capture.recorder_mut() {
+                Some(sink) => {
+                    let mut tee = crate::movie::Recording::new(machine, sink);
+                    input::resync(bindings, &mut tee, &devices);
+                }
+                None => input::resync(bindings, machine, &devices),
+            }
         }
 
         let t1 = Instant::now();
 
         // Execute based on debug state
         let frame_executed = debug_ui::execute_frame(machine, &mut debug_state);
+        // Only whole frames advance the movie. Under the debugger `execute_frame`
+        // may step a handful of cycles instead, and counting those would slide
+        // every later record one frame early on replay.
+        if frame_executed {
+            movie_capture.advance_frame();
+        }
         let t2 = Instant::now();
 
         // Drain audio samples only when a full frame was executed
@@ -1215,9 +1255,14 @@ pub fn run(
                         *bindings = crate::input::build_bindings(&*machine);
                         settings_state.reset_requested = false;
                     }
-                    // Apply DIP edits recorded by the panel this frame.
+                    // Apply DIP edits recorded by the panel this frame. A DIP
+                    // change alters gameplay (coinage, lives, difficulty), so a
+                    // recording has to carry it or replay diverges from the
+                    // point the operator flipped it.
                     for change in settings_state.pending_dip_changes.drain(..) {
                         machine.set_dip_option(change.bank, change.option, change.value);
+                        movie_capture
+                            .push_dip(change.bank as u8, machine.dip_bank_value(change.bank));
                     }
                     // Hotkey rebinds and resets recorded by the panel.
                     if settings_state.host_reset_requested {
@@ -1309,6 +1354,12 @@ pub fn run(
                 Err(err) => console_state.push_output(&format!("error: {err}")),
             }
         }
+    }
+
+    // A session quit while recording still gets its movie: the in-memory records
+    // are the only copy, so dropping them would silently discard the take.
+    if movie_capture.is_recording() {
+        eprintln!("{}", movie_capture.stop());
     }
 
     // Reclaim the machine from the session (drop the console handle so the Rc is

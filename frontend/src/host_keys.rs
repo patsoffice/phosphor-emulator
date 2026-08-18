@@ -37,6 +37,7 @@ pub enum HostAction {
     StepCycle,
     StepFrame,
     ToggleDebugPause,
+    MovieRecord,
 }
 
 impl HostAction {
@@ -58,6 +59,7 @@ impl HostAction {
             HostAction::ToggleMouseGrab => "Grab mouse",
             HostAction::ToggleKeyLegend => "Key legend",
             HostAction::StepInstruction => "Debugger: step instruction",
+            HostAction::MovieRecord => "Record input movie",
             HostAction::StepCycle => "Debugger: step cycle",
             HostAction::StepFrame => "Debugger: step frame",
             HostAction::ToggleDebugPause => "Debugger: pause/run",
@@ -109,6 +111,7 @@ pub const DEFAULTS: &[(HostAction, Scancode)] = &[
     (HostAction::StepInstruction, Scancode::Num8),
     (HostAction::StepFrame, Scancode::Num9),
     (HostAction::ToggleDebugPause, Scancode::Num0),
+    (HostAction::MovieRecord, Scancode::F2),
 ];
 
 /// Human label for a key in the legend and the rebinding panel.
