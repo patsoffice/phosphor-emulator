@@ -55,7 +55,7 @@ use flate2::read::DeflateDecoder;
 use flate2::write::DeflateEncoder;
 use sha2::{Digest, Sha256};
 
-use phosphor_core::core::machine::{InputControl, InputEvent, InputId};
+use phosphor_core::core::machine::{FrontendMachine, InputControl, InputEvent, InputId};
 use phosphor_machines::rom_loader::RomSet;
 
 /// File magic: "PHosphor Movie Input".
@@ -968,6 +968,42 @@ impl MoviePlayer {
     /// against a freshly reset machine.
     pub fn rewind(&mut self) {
         self.cursor = 0;
+    }
+
+    /// Deliver this movie's records for `frame` to `machine`, in the order they
+    /// were recorded.
+    ///
+    /// A free-standing method rather than [`Harness`](crate::Harness) internals
+    /// because two callers drive frames themselves: the harness, and the
+    /// frontend, whose machine reference is borrowed out of a session and so
+    /// cannot reach back into the object holding the player. Sharing the body
+    /// keeps the delivery order — which is load-bearing — defined once.
+    ///
+    /// Order matters twice over. Across records, because a press and its release
+    /// in the same frame must arrive that way round. Within analog records,
+    /// because each truncates independently inside the machine, which is why a
+    /// movie stores every delta rather than a per-frame sum.
+    pub fn deliver(&mut self, machine: &mut dyn FrontendMachine, frame: u32) {
+        let records: Vec<MovieRecord> = self.take_frame(frame).to_vec();
+        if records.is_empty() {
+            return;
+        }
+        let ids = self.ids.clone();
+        for record in &records {
+            match record {
+                MovieRecord::ReleaseAll { .. } => machine.release_all_inputs(),
+                MovieRecord::Dip { bank, value, .. } => {
+                    machine.set_dip_bank_value(*bank as usize, *value)
+                }
+                // Markers are author bookmarks; they change no machine state.
+                MovieRecord::Marker { .. } => {}
+                _ => {
+                    if let Some(event) = record.to_input_event(&ids) {
+                        machine.handle_input(event);
+                    }
+                }
+            }
+        }
     }
 }
 

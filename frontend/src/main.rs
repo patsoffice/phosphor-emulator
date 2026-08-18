@@ -70,6 +70,15 @@ struct Cli {
     #[arg(long, value_name = "PATH")]
     record_wav: Option<String>,
 
+    /// Replay a recorded input movie (`.phmi`) instead of taking live input.
+    ///
+    /// Resets to power-on and plays the session back in the window, with sound
+    /// and the debugger available — so a bug that only appears behind a coin and
+    /// three minutes of play can be reached and then inspected. Live game input
+    /// is ignored while a movie plays.
+    #[arg(long, value_name = "PATH")]
+    movie: Option<std::path::PathBuf>,
+
     /// Open the interactive GFX viewer (charset/sprite ROM sheets) instead of
     /// running the machine. Cycle regions with ←/→, zoom with +/-, 0 to fit.
     #[arg(long)]
@@ -239,6 +248,7 @@ fn main() {
         cli.profile,
         cli.no_mouse_grab,
         cli.record_wav.as_deref(),
+        cli.movie.as_deref(),
         &mut state,
     );
 

@@ -18,7 +18,7 @@ use phosphor_core::core::machine::{FrontendMachine, InputEvent, InputId};
 use phosphor_machines::registry;
 
 use crate::load_rom_set;
-use crate::movie::{Movie, MovieError, MoviePlayer, MovieRecord, rom_digest};
+use crate::movie::{Movie, MovieError, MoviePlayer, rom_digest};
 
 /// Default frames to hold a scripted input down (coin / `--press` pulse).
 const DEFAULT_HOLD: usize = 8;
@@ -314,30 +314,7 @@ impl Harness {
         let Some(player) = &mut self.movie else {
             return;
         };
-        let frame = self.frame as u32;
-        // Take the frame's records out of the borrow before touching the
-        // machine: delivery needs `&mut self.machine` while the slice borrows
-        // `self.movie`.
-        let records: Vec<MovieRecord> = player.take_frame(frame).to_vec();
-        if records.is_empty() {
-            return;
-        }
-        let ids = player.ids().to_vec();
-        for record in &records {
-            match record {
-                MovieRecord::ReleaseAll { .. } => self.machine.release_all_inputs(),
-                MovieRecord::Dip { bank, value, .. } => {
-                    self.machine.set_dip_bank_value(*bank as usize, *value)
-                }
-                // Markers are author bookmarks; they change no machine state.
-                MovieRecord::Marker { .. } => {}
-                _ => {
-                    if let Some(event) = record.to_input_event(&ids) {
-                        self.machine.handle_input(event);
-                    }
-                }
-            }
-        }
+        player.deliver(&mut *self.machine, self.frame as u32);
     }
 
     /// Record that the frame just run is complete, advancing the frame number

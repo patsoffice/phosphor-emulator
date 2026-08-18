@@ -30,7 +30,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use phosphor_core::core::machine::{FrontendMachine, InputConfigurable, InputControl, InputEvent};
-use phosphor_harness::movie::MovieRecorder;
+use phosphor_harness::movie::{MoviePlayer, MovieRecorder};
 
 /// Tees every `InputConfigurable` call into a recorder before forwarding it.
 pub struct Recording<'a, M: ?Sized> {
@@ -195,6 +195,106 @@ impl MovieCapture {
             )
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Playback
+// ---------------------------------------------------------------------------
+
+/// A movie being replayed in the live window.
+///
+/// Playback state is held here rather than in the session's `Harness` because
+/// the frame loop borrows the machine *out* of the session and so cannot reach
+/// back into it mid-frame. `MoviePlayer::deliver` is the shared body, so the
+/// harness and the frontend agree on delivery order without duplicating it.
+pub struct MoviePlayback {
+    player: MoviePlayer,
+    frame: u32,
+    total: u32,
+}
+
+impl MoviePlayback {
+    /// Bind a decoded movie to a machine that is about to be reset to power-on.
+    ///
+    /// Reproduces the same starting conditions `Harness::from_movie` does, minus
+    /// the two it cannot reach from here — the host sample rate and the ROM set,
+    /// both fixed when the frontend built the machine. The caller must have
+    /// verified the ROM digest before getting here.
+    pub fn bind(
+        movie: phosphor_harness::Movie,
+        machine: &mut dyn FrontendMachine,
+    ) -> Result<Self, phosphor_harness::MovieError> {
+        let total = movie.header.frames;
+        machine.reset();
+        if let Some(nv) = &movie.header.nvram {
+            machine.load_nvram(nv);
+        }
+        for (bank, &value) in movie.header.dip.iter().enumerate() {
+            machine.set_dip_bank_value(bank, value);
+        }
+        let player = MoviePlayer::bind(movie, machine.input_controls())?;
+        Ok(Self {
+            player,
+            frame: 0,
+            total,
+        })
+    }
+
+    /// Deliver this frame's recorded input, immediately before the frame runs.
+    pub fn deliver(&mut self, machine: &mut dyn FrontendMachine) {
+        self.player.deliver(machine, self.frame);
+    }
+
+    /// Note that a whole frame ran. Only whole frames count, for the same reason
+    /// recording only counts them: the debugger can step cycles instead, and
+    /// counting those would slide the rest of the movie one frame early.
+    pub fn advance_frame(&mut self) {
+        self.frame += 1;
+    }
+
+    /// `(frame, total)` for the overlay — the number a golden pin's `frames`
+    /// field wants, read off while watching rather than guessed and re-rendered.
+    pub fn progress(&self) -> (u32, u32) {
+        (self.frame, self.total)
+    }
+
+    /// Whether playback has passed the movie's last recorded frame. The machine
+    /// keeps running; it simply receives no further input.
+    pub fn finished(&self) -> bool {
+        self.frame >= self.total
+    }
+}
+
+/// Load a movie for playback against an already-built machine, checking it
+/// belongs here before anything is reset.
+///
+/// Both checks matter and fail differently. A movie for another machine would
+/// bind against a control table it was never recorded against; a movie for the
+/// same machine but a different ROM dump would bind fine and then silently
+/// diverge, which is the failure the digest exists to turn into a message.
+pub fn load_for_playback(
+    path: &Path,
+    machine_name: &str,
+    rom_digest: [u8; 32],
+) -> Result<phosphor_harness::Movie, String> {
+    let bytes =
+        std::fs::read(path).map_err(|e| format!("reading movie {}: {e}", path.display()))?;
+    let movie = phosphor_harness::Movie::decode(&bytes)
+        .map_err(|e| format!("reading movie {}: {e}", path.display()))?;
+    if movie.header.machine != machine_name {
+        return Err(format!(
+            "movie {} was recorded for '{}', but this session is running '{machine_name}'",
+            path.display(),
+            movie.header.machine
+        ));
+    }
+    if movie.header.rom_digest != rom_digest {
+        return Err(format!(
+            "movie {} was recorded against a different ROM set than the one loaded",
+            path.display()
+        ));
+    }
+    Ok(movie)
 }
 
 #[cfg(test)]

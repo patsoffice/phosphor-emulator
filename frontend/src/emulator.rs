@@ -219,6 +219,7 @@ pub fn run(
     start_in_profile: bool,
     no_mouse_grab: bool,
     record_wav: Option<&str>,
+    movie_path: Option<&Path>,
     state: &mut crate::state::State,
 ) -> Box<dyn FrontendMachine> {
     let sdl_video = sdl_context.video().expect("Failed to init SDL video");
@@ -437,6 +438,30 @@ pub fn run(
     console_scope.push("m", Rc::clone(&session));
 
     let mut movie_capture = crate::movie::MovieCapture::new(movie_dir, machine_name, rom_digest);
+
+    // Playback binds before the first frame, resetting to power-on: a movie
+    // carries no save state and replays only from there. A bad movie is fatal
+    // rather than a warning — the session was launched to watch it, and silently
+    // running live input instead would look like the replay diverged.
+    let mut movie_playback = movie_path.map(|p| {
+        let movie =
+            crate::movie::load_for_playback(p, machine_name, rom_digest).unwrap_or_else(|e| {
+                eprintln!("{e}");
+                std::process::exit(1);
+            });
+        let (frames, records) = (movie.header.frames, movie.records.len());
+        let mut sess = session.borrow_mut();
+        let playback =
+            crate::movie::MoviePlayback::bind(movie, sess.machine_mut()).unwrap_or_else(|e| {
+                eprintln!("binding movie {}: {e}", p.display());
+                std::process::exit(1);
+            });
+        eprintln!(
+            "Movie: replaying {frames} frame(s), {records} record(s) from {}",
+            p.display()
+        );
+        playback
+    });
 
     'main: loop {
         let t0 = Instant::now();
@@ -912,6 +937,12 @@ pub fn run(
                 } => needs_resync = true,
 
                 // Game input — last, so every hotkey above keeps precedence.
+                // Suppressed entirely during playback: a stray keypress would
+                // silently make the window disagree with the movie, which is the
+                // one thing a replay must not do. Host hotkeys above still work,
+                // so pause, step and the debug panels stay available.
+                _ if movie_playback.is_some() => {}
+
                 other => {
                     let ctx = input::DispatchCtx {
                         egui_wants_keyboard: video.wants_keyboard(),
@@ -954,14 +985,36 @@ pub fn run(
 
         let t1 = Instant::now();
 
+        // Deliver the replayed frame's input just before it runs — the same
+        // point in the loop the live path delivers at, which is what makes a
+        // replay reproduce the session rather than approximate it.
+        if let Some(pb) = &mut movie_playback {
+            pb.deliver(machine);
+        }
+
         // Execute based on debug state
         let frame_executed = debug_ui::execute_frame(machine, &mut debug_state);
-        // Only whole frames advance the movie. Under the debugger `execute_frame`
+        // Only whole frames advance a movie. Under the debugger `execute_frame`
         // may step a handful of cycles instead, and counting those would slide
-        // every later record one frame early on replay.
+        // every later record one frame early.
         if frame_executed {
             movie_capture.advance_frame();
+            if let Some(pb) = &mut movie_playback {
+                pb.advance_frame();
+            }
         }
+
+        // Shown for the whole of playback, not gated behind the FPS toggle:
+        // reading the frame number off the screen is the point of watching a
+        // replay, and it is what a golden pin's `frames` field wants.
+        let movie_status = movie_playback.as_ref().map(|pb| {
+            let (f, t) = pb.progress();
+            if pb.finished() {
+                format!("MOVIE {f}/{t} ended")
+            } else {
+                format!("MOVIE {f}/{t}")
+            }
+        });
         let t2 = Instant::now();
 
         // Drain audio samples only when a full frame was executed
@@ -1051,13 +1104,12 @@ pub fn run(
                 // Tempest) is exercised today; the shader special-cases it.
                 let rot = orientation_degrees(machine.orientation());
                 let paused = debug_state.global_paused;
-                if show_fps || paused {
+                if show_fps || paused || movie_status.is_some() {
                     let fps = show_fps.then(|| fps_text.clone());
-                    let stats = if show_fps {
-                        machine.overlay_stats()
-                    } else {
-                        None
-                    };
+                    let stats = overlay_stats_with_movie(
+                        show_fps.then(|| machine.overlay_stats()).flatten(),
+                        movie_status.as_deref(),
+                    );
                     video.present_vectors_with_overlay(
                         renderer,
                         lines,
@@ -1129,15 +1181,14 @@ pub fn run(
 
                 // FPS / PAUSED overlay onto the displayed buffer (only when no
                 // side panels are active). PAUSED shows independent of FPS.
-                if (show_fps || debug_state.global_paused)
+                if (show_fps || debug_state.global_paused || movie_status.is_some())
                     && !debug_state.active
                     && !profile_state.active
                 {
-                    let stats = if show_fps {
-                        machine.overlay_stats()
-                    } else {
-                        None
-                    };
+                    let stats = overlay_stats_with_movie(
+                        show_fps.then(|| machine.overlay_stats()).flatten(),
+                        movie_status.as_deref(),
+                    );
                     crate::overlay::draw_overlay(
                         display_fb,
                         disp_w as usize,
@@ -1486,6 +1537,19 @@ pub fn fit_aspect(available: egui::Vec2, aspect: f32) -> (egui::Vec2, egui::Vec2
         egui::Vec2::new(w, h),
         egui::Vec2::new((available.x - w) / 2.0, (available.y - h) / 2.0),
     )
+}
+
+/// Merge the machine's own overlay stats with a movie-playback status line.
+///
+/// The movie line comes first because it is the reason the window is open
+/// during a replay, and it is the number a golden pin's `frames` field wants
+/// read off the screen.
+fn overlay_stats_with_movie(stats: Option<String>, movie: Option<&str>) -> Option<String> {
+    match (movie, stats) {
+        (Some(m), Some(s)) => Some(format!("{m}\n{s}")),
+        (Some(m), None) => Some(m.to_string()),
+        (None, s) => s,
+    }
 }
 
 #[cfg(test)]
