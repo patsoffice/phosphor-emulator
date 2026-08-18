@@ -126,8 +126,7 @@ no corresponding SDL event, and it would not cover `release_all_inputs` at all.
 
 `(frame, InputEvent)` in delivery order. Nothing aggregated.
 
-Per-event fidelity is **not** optional. `RelativeCounter::add_delta`
-(`core/src/core/input.rs:78`) is:
+`RelativeCounter::add_delta` (`core/src/core/input.rs:78`) is:
 
 ```rust
 pub fn add_delta(&mut self, delta: f32) { self.pending += delta as i32; }
@@ -136,12 +135,32 @@ pub fn add_delta(&mut self, delta: f32) { self.pending += delta as i32; }
 The truncation happens on every call. Two 0.6-deltas contribute 0; one summed
 1.2-delta contributes 1. On Tempest and Quantum, `DrainPolicy::ClampDrop`
 discards the remainder rather than carrying it, so the error does not average
-out over subsequent frames — it is a permanent divergence. Any design that
-records one accumulated delta per frame would therefore replay differently from
-what it recorded, on exactly the machines the format exists to serve.
+out over subsequent frames — it is a permanent divergence.
+
+**How much this currently bites — measured, not assumed.** With the default
+binding sensitivity, it does not. SDL's `xrel` is an integer and `DEFAULT_SCALE`
+is 1.0, so mouse deltas arrive whole and `trunc(a) + trunc(b) == trunc(a + b)`
+holds trivially. Decoding a four-minute Marble Madness capture: all 35,178
+analog records were whole numbers, 127 distinct values, and **zero** of its
+15,954 multi-delta frames would have summed differently. The divergence becomes
+real only when a sensitivity other than 1.0 is set (`BindingSet::set_scale`,
+persisted per machine in `state.toml`) or a sub-unit input device appears.
+
+So per-event is the *conservative* choice rather than a currently active fix. It
+is still the right one — it costs little (the record block deflates ~4.6× on a
+real analog trace, 82.8 KB for four minutes) and it stays correct under a
+sensitivity change instead of becoming silently wrong — but the earlier framing
+of this section overstated the case, and the honest version is above.
 
 Float values are stored as `f32::to_bits`, so the replayed value is bit-identical
 and truncates identically.
+
+**Zero relative deltas are not recorded.** Both `RelativeCounter` and
+`AnalogAxis` apply one as `pending += 0`, so it is a provable no-op, and the
+frontend emits an X *and* a Y event for every mouse motion — meaning any
+straight-line movement records a zero on the other axis. That was 4,173 of
+35,178 records (12%) on the capture above. A zero `Absolute` is kept: it is a
+*position*, a centred stick, and dropping it would lose a real state change.
 
 ### Frame indexing
 

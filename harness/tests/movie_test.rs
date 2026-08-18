@@ -369,6 +369,13 @@ fn the_generated_input_actually_changes_machine_state() {
 /// a single delta changes the result, because the machine truncates each delta
 /// independently — this asserts the two are actually distinguishable, so the
 /// determinism tests above are not passing vacuously.
+///
+/// Note the deltas here are deliberately fractional. With the default binding
+/// sensitivity a real mouse only ever produces whole deltas (SDL's `xrel` is an
+/// integer, `DEFAULT_SCALE` is 1.0), and whole deltas sum identically — a
+/// four-minute Marble Madness capture contained no case where it mattered. This
+/// pins the property for the configurations where it *does*: a non-default
+/// sensitivity, or a future sub-unit device.
 #[test]
 fn summing_a_frames_analog_deltas_is_not_equivalent_to_delivering_them() {
     let all = registry::all();

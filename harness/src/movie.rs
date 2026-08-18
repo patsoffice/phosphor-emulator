@@ -9,13 +9,26 @@
 //! # Why per event, not per frame
 //!
 //! It is tempting to accumulate a frame's analog motion into a single delta.
-//! That would not replay faithfully. [`RelativeCounter::add_delta`] is
-//! `pending += delta as i32` — the truncation happens on *every call*, so two
-//! 0.6-deltas contribute 0 while one summed 1.2-delta contributes 1. On the
-//! boards using `DrainPolicy::ClampDrop` the remainder is discarded rather than
-//! carried, so that divergence never washes out over later frames. Records are
-//! therefore one-to-one with delivered events, and float payloads are stored as
-//! raw [`f32::to_bits`] so a replayed value truncates identically.
+//! [`RelativeCounter::add_delta`] is `pending += delta as i32` — the truncation
+//! happens on *every call*, so two 0.6-deltas contribute 0 while one summed
+//! 1.2-delta contributes 1, and on the boards using `DrainPolicy::ClampDrop` the
+//! remainder is discarded rather than carried, so that divergence never washes
+//! out over later frames.
+//!
+//! **How much this currently bites, stated honestly.** With the default binding
+//! sensitivity it does not. SDL's `xrel` is an integer and `DEFAULT_SCALE` is
+//! 1.0, so mouse deltas arrive whole and `trunc(a) + trunc(b) == trunc(a + b)`
+//! holds trivially — measured across a four-minute Marble Madness capture, all
+//! 35,178 analog records were whole numbers and not one of its 15,954
+//! multi-delta frames would have summed differently. The divergence becomes real
+//! the moment a sensitivity other than 1.0 is set (`BindingSet::set_scale`,
+//! persisted per machine in `state.toml`), or a sub-unit input device appears.
+//!
+//! So the per-event shape is the conservative choice rather than a currently
+//! active fix: it costs little (the record block deflates ~4.6× on a real analog
+//! trace) and it is correct under a sensitivity change instead of silently
+//! wrong. Float payloads are stored as raw [`f32::to_bits`] for the same reason
+//! — a replayed value must truncate exactly as the recorded one did.
 //!
 //! [`RelativeCounter::add_delta`]: phosphor_core::core::input::RelativeCounter::add_delta
 //!
@@ -757,6 +770,21 @@ impl MovieRecorder {
     /// value per frame. See the module docs for why summing analog deltas does
     /// not replay faithfully.
     pub fn push_event(&mut self, event: InputEvent) {
+        // A zero relative delta is a provable no-op — both `RelativeCounter` and
+        // `AnalogAxis` apply it as `pending += 0` — so recording it would only
+        // cost space and overstate how much input a session actually contained.
+        // They are not rare: the frontend emits an X and a Y event for every
+        // mouse motion, so any straight-line movement records a zero on the other
+        // axis. On a real four-minute trackball capture that was 4,173 of 35,178
+        // analog records, 12% of the file.
+        //
+        // Deliberately only `Relative`. An `Absolute` 0.0 is a *position* — a
+        // centred stick — and dropping it would lose a real state change.
+        if let InputEvent::Relative { delta, .. } = event
+            && delta == 0.0
+        {
+            return;
+        }
         let id = match event {
             InputEvent::Button { id, .. }
             | InputEvent::Absolute { id, .. }
@@ -1269,6 +1297,37 @@ mod tests {
         assert_eq!(m.records[2].frame(), 2);
         // `frames` is the span, so it counts the frames advanced through.
         assert_eq!(m.header.frames, 2);
+    }
+
+    #[test]
+    fn recorder_skips_zero_relative_deltas_but_keeps_zero_absolutes() {
+        let mut r = recorder();
+        r.push_event(InputEvent::Relative {
+            id: TRACK_X,
+            delta: 0.0,
+        });
+        r.push_event(InputEvent::Relative {
+            id: TRACK_X,
+            delta: -0.0,
+        });
+        assert!(
+            r.is_empty(),
+            "a zero delta is a no-op and must not be stored"
+        );
+
+        // A zero *position* is a centred stick, which is a real state change.
+        r.push_event(InputEvent::Absolute {
+            id: TRACK_X,
+            value: 0.0,
+        });
+        assert_eq!(r.len(), 1);
+
+        // Non-zero deltas are unaffected, including sub-unit ones.
+        r.push_event(InputEvent::Relative {
+            id: TRACK_X,
+            delta: 0.6,
+        });
+        assert_eq!(r.len(), 2);
     }
 
     #[test]
