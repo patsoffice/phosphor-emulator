@@ -382,3 +382,110 @@ fn replay_audio_covers_the_whole_run() {
     );
     assert!(wav.exists(), "no WAV written");
 }
+
+// ---------------------------------------------------------------------------
+// MAME script generation (needs no ROMs — controls come from the registry)
+// ---------------------------------------------------------------------------
+
+/// Build a movie for a registered machine using its static control table.
+fn movie_for(
+    machine: &str,
+    f: impl FnOnce(&mut MovieRecorder, &[phosphor_core::core::machine::InputControl]),
+) -> Movie {
+    let all = registry::all();
+    let entry = all.iter().find(|e| e.name == machine).expect("registered");
+    let mut rec = MovieRecorder::new(machine, [0u8; 32], entry.controls, Vec::new(), None);
+    f(&mut rec, entry.controls);
+    rec.advance_frame();
+    rec.finish()
+}
+
+#[test]
+fn movie_mame_emits_a_script_with_conventional_field_names() {
+    let movie = movie_for("burgertime", |rec, controls| {
+        for name in ["coin1", "start1", "p1_up", "coin2"] {
+            let c = controls
+                .iter()
+                .find(|c| c.stable_name == name)
+                .unwrap_or_else(|| panic!("burgertime has no {name}"));
+            rec.push_event(phosphor_core::core::machine::InputEvent::Button {
+                id: c.id,
+                pressed: true,
+            });
+        }
+    });
+    let path = write_movie("mame.phmi", &movie);
+    let lua = scratch().join("mame.lua");
+
+    let out = disasm(&[
+        "movie",
+        "mame",
+        path.to_str().unwrap(),
+        "-o",
+        lua.to_str().unwrap(),
+    ]);
+    assert!(out.ok, "movie mame failed: {}{}", out.stdout, out.stderr);
+    assert!(
+        out.stdout.contains("MAME driver `btime`"),
+        "should report MAME's name for the game, not ours:\n{}",
+        out.stdout
+    );
+
+    let script = std::fs::read_to_string(&lua).expect("read lua");
+    // These names were read off MAME 0.287 itself.
+    for expected in [
+        "\"Coin 1\"",
+        "\"Coin 2\"",
+        "\"1 Player Start\"",
+        "\"P1 Up\"",
+    ] {
+        assert!(
+            script.contains(expected),
+            "lua missing {expected}:\n{script}"
+        );
+    }
+    // The subscription must be bound. MAME unsubscribes when the object is
+    // collected, so an unbound notifier silently does nothing and the run looks
+    // like plain attract mode — which is exactly how this was found.
+    assert!(
+        script.contains("movie_sub = emu.add_machine_frame_notifier"),
+        "the frame notifier's subscription is not retained:\n{script}"
+    );
+}
+
+/// Analog cannot transfer, so a trackball movie must say so loudly rather than
+/// emit a script that silently replays only half the session.
+#[test]
+fn movie_mame_warns_that_analog_is_dropped() {
+    let movie = movie_for("marble", |rec, controls| {
+        let axis = controls
+            .iter()
+            .find(|c| c.stable_name.contains("trackball"))
+            .expect("marble has a trackball");
+        rec.push_event(phosphor_core::core::machine::InputEvent::Relative {
+            id: axis.id,
+            delta: 3.0,
+        });
+    });
+    let path = write_movie("mame_analog.phmi", &movie);
+    let lua = scratch().join("mame_analog.lua");
+
+    let out = disasm(&[
+        "movie",
+        "mame",
+        path.to_str().unwrap(),
+        "-o",
+        lua.to_str().unwrap(),
+    ]);
+    assert!(out.ok, "movie mame failed: {}{}", out.stdout, out.stderr);
+    assert!(
+        out.stdout.contains("analog record(s) dropped"),
+        "an analog movie must warn on stdout:\n{}",
+        out.stdout
+    );
+    let script = std::fs::read_to_string(&lua).expect("read lua");
+    assert!(
+        script.contains("WARNING"),
+        "the script itself should carry the caveat too:\n{script}"
+    );
+}
