@@ -105,6 +105,15 @@ struct Entry {
     /// presses reset, as on hardware, so they only reach attract mode with an
     /// initialised CMOS.
     nvram: Option<String>,
+    /// Optional recorded input movie, relative to `tests/golden/`, replayed
+    /// instead of running the machine input-free.
+    ///
+    /// This is what lets an entry pin a frame of *gameplay* rather than one of
+    /// attract mode. A movie carries its own starting conditions — ROM digest,
+    /// power-on DIP bytes, NVRAM, host sample rate — so it is mutually exclusive
+    /// with `press` and `nvram`; combining them would leave the entry's
+    /// provenance ambiguous.
+    movie: Option<String>,
     /// Oriented display dimensions, pinned separately from the hash because a
     /// geometry change is legible in a diff and a hash change is not.
     size: (u32, u32),
@@ -121,8 +130,13 @@ fn load_entries() -> Vec<Entry> {
     let path = frames_toml();
     let text = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
-    let doc: toml::Value =
-        toml::from_str(&text).unwrap_or_else(|e| panic!("parsing {}: {e}", path.display()));
+    parse_entries(&text, &path.display().to_string())
+}
+
+/// Parse `frames.toml` text. Split from [`load_entries`] so the writer/parser
+/// round trip can be tested without a committed fixture.
+fn parse_entries(text: &str, origin: &str) -> Vec<Entry> {
+    let doc: toml::Value = toml::from_str(text).unwrap_or_else(|e| panic!("parsing {origin}: {e}"));
 
     let tables = match doc.get("frame") {
         Some(toml::Value::Array(a)) => a.clone(),
@@ -208,6 +222,11 @@ fn load_entries() -> Vec<Entry> {
                         .unwrap_or_else(|| panic!("{machine}: `vectors` is not a string"))
                         .to_string()
                 }),
+                movie: t.get("movie").map(|v| {
+                    v.as_str()
+                        .unwrap_or_else(|| panic!("{machine}: `movie` is not a string"))
+                        .to_string()
+                }),
                 nvram: t.get("nvram").map(|v| {
                     v.as_str()
                         .unwrap_or_else(|| panic!("{machine}: `nvram` is not a string"))
@@ -236,6 +255,7 @@ const FRAMES_TOML_HEADER: &str = "\
 #   frames   frames from reset before the frame is sampled  (human)
 #   shows    what the pinned frame depicts, in prose        (human)
 #   press    optional scripted input, as disasm --press     (human)
+#   movie    optional recorded input movie, relative to here (human)
 #   nvram    optional factory CMOS fixture, relative to here (human)
 #   size     oriented display dimensions                    (captured)
 #   frame    SHA-256 of the oriented RGB frame              (captured)
@@ -318,6 +338,9 @@ fn render_frames_toml(entries: &[Entry], unpinned: &[Unpinned]) -> String {
             }
             out.push_str("]\n");
         }
+        if let Some(mv) = &e.movie {
+            let _ = writeln!(out, "movie = {}", quote(mv));
+        }
         if let Some(nv) = &e.nvram {
             let _ = writeln!(out, "nvram = {}", quote(nv));
         }
@@ -333,6 +356,67 @@ fn render_frames_toml(entries: &[Entry], unpinned: &[Unpinned]) -> String {
 // ---------------------------------------------------------------------------
 // Capture and fingerprint
 // ---------------------------------------------------------------------------
+
+/// Boot the machine an entry pins, either input-free (optionally with scripted
+/// presses and an NVRAM fixture) or by replaying a recorded movie.
+///
+/// A missing fixture is a hard error rather than a skip: both the NVRAM and the
+/// movie are committed beside the hash, so their absence means the pin is
+/// unreproducible, not that this collection is short a ROM.
+fn build_for(entry: &Entry, name: &str, dir: &Path) -> Result<Harness, String> {
+    if let Some(mv) = &entry.movie {
+        // A movie carries its own ROM digest, DIP bytes, NVRAM and sample rate.
+        // Accepting `press` or `nvram` alongside would leave two sources of
+        // truth for the starting conditions and no way to tell which won.
+        assert!(
+            entry.press.is_empty() && entry.nvram.is_none(),
+            "{name}: `movie` is mutually exclusive with `press` and `nvram` — \
+             a movie already carries its own starting conditions"
+        );
+        let path = golden_dir().join(mv);
+        assert!(
+            path.is_file(),
+            "{name}: `movie = {mv:?}` but {} does not exist",
+            path.display()
+        );
+        let harness = Harness::build_with_movie(dir.to_str().unwrap(), &path)?;
+        // `build_with_movie` takes the machine from the movie, so a mislabelled
+        // entry would silently pin a different game against this machine's hash.
+        let actual = harness.machine().machine_id();
+        assert_eq!(
+            actual, name,
+            "{name}: `movie = {mv:?}` was recorded against '{actual}'"
+        );
+        return Ok(harness);
+    }
+
+    let presses: Vec<PressSpec> = entry
+        .press
+        .iter()
+        .map(|p| PressSpec {
+            control: p.control.clone(),
+            at: p.at,
+            hold: p.hold,
+        })
+        .collect();
+    let nvram = entry.nvram.as_ref().map(|n| {
+        let p = golden_dir().join(n);
+        assert!(
+            p.is_file(),
+            "{name}: `nvram = {n:?}` but {} does not exist",
+            p.display()
+        );
+        p
+    });
+    Harness::build(
+        name,
+        dir.to_str().unwrap(),
+        nvram.as_deref(),
+        None,
+        &presses,
+        &[],
+    )
+}
 
 // `hash_frame`, `hash_vectors` and `render_oriented` live in `phosphor_harness`
 // (see `harness/src/frame.rs`), shared with `disasm frameshot` and movie replay
@@ -370,35 +454,7 @@ fn capture(dir: &Path, entry: &Entry) -> Option<Capture> {
         return None;
     }
 
-    let presses: Vec<PressSpec> = entry
-        .press
-        .iter()
-        .map(|p| PressSpec {
-            control: p.control.clone(),
-            at: p.at,
-            hold: p.hold,
-        })
-        .collect();
-    // A missing NVRAM fixture is a hard error, not a skip: it is committed
-    // beside the hash, so its absence means the pin is unreproducible rather
-    // than that this collection is short a ROM.
-    let nvram = entry.nvram.as_ref().map(|n| {
-        let p = golden_dir().join(n);
-        assert!(
-            p.is_file(),
-            "{name}: `nvram = {n:?}` but {} does not exist",
-            p.display()
-        );
-        p
-    });
-    let mut harness = match Harness::build(
-        name,
-        dir.to_str().unwrap(),
-        nvram.as_deref(),
-        None,
-        &presses,
-        &[],
-    ) {
+    let mut harness = match build_for(entry, name, dir) {
         Ok(h) => h,
         Err(e) => {
             eprintln!("skipping {name}: {e}");
@@ -522,6 +578,7 @@ fn every_pinned_machine_still_draws_its_frame() {
                 frames: DEFAULT_FRAMES,
                 shows: TODO_SHOWS.to_string(),
                 press: Vec::new(),
+                movie: None,
                 nvram: None,
                 size: (0, 0),
                 frame: String::new(),
@@ -815,4 +872,140 @@ fn reference_pngs_match_their_hashes() {
         checked > 0,
         "no reference PNGs were checked, so this test passed having verified nothing"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The movie-entry mechanism
+// ---------------------------------------------------------------------------
+//
+// No entry pins a movie yet — gameplay pins are captured by a human who has
+// looked at the frame. These two tests keep the `movie` path from being
+// untested code in the meantime: one proves the field survives the file, the
+// other proves a movie actually drives the capture.
+
+/// `movie` is a human-authored field, so update mode must round-trip it. A
+/// refresh that silently dropped it would turn a gameplay pin back into an
+/// attract-mode one and change the hash for no visible reason.
+#[test]
+fn a_movie_entry_round_trips_through_frames_toml() {
+    let entries = vec![Entry {
+        machine: "marble".into(),
+        frames: 6000,
+        shows: "Level 1, ball on the second ramp".into(),
+        press: Vec::new(),
+        movie: Some("movies/marble-level1.phmi".into()),
+        nvram: None,
+        size: (336, 240),
+        frame: "sha256:abc".into(),
+        vectors: None,
+    }];
+    let text = render_frames_toml(&entries, &[]);
+    assert!(
+        text.contains("movie = \"movies/marble-level1.phmi\""),
+        "the writer dropped `movie`:\n{text}"
+    );
+
+    let back = parse_entries(&text, "<round trip>");
+    assert_eq!(back.len(), 1);
+    assert_eq!(back[0].movie.as_deref(), Some("movies/marble-level1.phmi"));
+    assert_eq!(back[0].frames, 6000);
+}
+
+/// A `movie` entry must actually replay: the captured frame has to differ from
+/// the same machine run input-free for the same number of frames, and has to be
+/// reproducible.
+///
+/// The difference is the load-bearing half. Without it a `movie` field that was
+/// parsed and then ignored would still produce a stable hash, and the pin would
+/// silently be an attract-mode pin wearing a gameplay label.
+#[test]
+fn a_movie_entry_replays_and_is_reproducible() {
+    let Some(dir) = roms_dir() else {
+        eprintln!("skipping: no ROM dir (set PHOSPHOR_ROMS or ~/ws/mame-runtime/roms)");
+        return;
+    };
+
+    // Record a short session against whichever machine this collection can
+    // supply, driving a control hard enough to move the picture.
+    let all = registry::all();
+    let Some(entry_meta) = all.iter().find(|e| {
+        e.rom_names
+            .iter()
+            .any(|n| dir.join(format!("{n}.zip")).exists())
+    }) else {
+        eprintln!("skipping: the ROM directory supplies no registered machine");
+        return;
+    };
+    let name = entry_meta.name;
+    let roms = dir.to_str().unwrap();
+
+    const FRAMES: usize = 400;
+    let set = phosphor_harness::load_rom_set(roms, entry_meta.rom_names).expect("load_rom_set");
+    let digest = phosphor_harness::movie::rom_digest(&set, entry_meta.rom_names);
+
+    let mut h = Harness::build(name, roms, None, None, &[], &[]).expect("build");
+    let controls = h.machine().input_controls();
+    let dip: Vec<u8> = (0..h.machine().dip_banks().len())
+        .map(|b| h.machine().dip_bank_value(b))
+        .collect();
+    let mut rec = phosphor_harness::MovieRecorder::new(name, digest, controls, dip, None);
+    for frame in 0..FRAMES {
+        // Coin repeatedly: on every machine in the roster that visibly changes
+        // the screen (credits, attract interruption) well inside 400 frames.
+        if let Some(c) = controls.iter().find(|c| c.stable_name == "coin") {
+            let pressed = (frame / 8) % 2 == 0;
+            if frame % 8 == 0 {
+                let e = phosphor_core::core::machine::InputEvent::Button { id: c.id, pressed };
+                rec.push_event(e);
+                h.machine_mut().handle_input(e);
+            }
+        }
+        h.run_frame();
+        rec.advance_frame();
+    }
+    let movie_path = golden_dir()
+        .join("actual")
+        .join(format!("{name}-mechanism.phmi"));
+    std::fs::create_dir_all(movie_path.parent().unwrap()).expect("create actual/");
+    std::fs::write(&movie_path, rec.finish().encode()).expect("write movie");
+
+    let rel = format!("actual/{name}-mechanism.phmi");
+    let with_movie = Entry {
+        machine: name.to_string(),
+        frames: FRAMES,
+        shows: "mechanism test".into(),
+        press: Vec::new(),
+        movie: Some(rel.clone()),
+        nvram: None,
+        size: (0, 0),
+        frame: String::new(),
+        vectors: None,
+    };
+    let without_movie = Entry {
+        movie: None,
+        machine: name.to_string(),
+        frames: FRAMES,
+        shows: "mechanism test".into(),
+        press: Vec::new(),
+        nvram: None,
+        size: (0, 0),
+        frame: String::new(),
+        vectors: None,
+    };
+
+    let a = capture(&dir, &with_movie).expect("movie capture");
+    let b = capture(&dir, &with_movie).expect("movie capture, again");
+    let plain = capture(&dir, &without_movie).expect("input-free capture");
+
+    assert_eq!(
+        a.frame, b.frame,
+        "{name}: a movie entry is not reproducible"
+    );
+    assert_ne!(
+        a.frame, plain.frame,
+        "{name}: the movie entry produced the same frame as running input-free, \
+         so the movie is being parsed but not replayed"
+    );
+
+    let _ = std::fs::remove_file(&movie_path);
 }

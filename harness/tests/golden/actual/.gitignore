@@ -2,3 +2,5 @@
 # inspected as a picture (`disasm imgdiff ../<machine>.png <machine>.png`).
 # Diagnostic output, never committed — the reference PNGs one level up are.
 *.png
+# Movies recorded by the movie-entry mechanism test.
+*.phmi
