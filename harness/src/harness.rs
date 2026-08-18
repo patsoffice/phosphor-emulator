@@ -388,13 +388,26 @@ impl Harness {
         }
     }
 
-    /// Bind a movie to an already-wrapped machine.
+    /// Bind a movie to an already-wrapped machine, restoring the starting
+    /// conditions the harness can still reach.
     ///
-    /// [`from_movie`](Self::from_movie) is the normal path (it boots the machine
-    /// the movie names and reconstructs its starting conditions). This is the
-    /// seam for the ROM-less registry-driven tests, which build a bare machine
-    /// themselves and only need the replay half.
+    /// [`from_movie`](Self::from_movie) is the normal path: it boots the machine
+    /// the movie names, so it also owns the two conditions that must be
+    /// established *before* construction — the host sample rate and the ROM set.
+    /// This is the seam for callers holding a machine they built themselves,
+    /// notably the ROM-less registry-driven tests.
+    ///
+    /// It still applies the movie's NVRAM and power-on DIP bytes. Leaving those
+    /// to the caller would make the two entry points silently disagree about
+    /// what "bound" means, and a DIP the replay did not restore diverges in a
+    /// way that looks like a movie bug rather than a missing step.
     pub fn bind_movie(&mut self, movie: Movie) -> Result<(), MovieError> {
+        if let Some(nv) = &movie.header.nvram {
+            self.machine.load_nvram(nv);
+        }
+        for (bank, &value) in movie.header.dip.iter().enumerate() {
+            self.machine.set_dip_bank_value(bank, value);
+        }
         self.movie = Some(MoviePlayer::bind(movie, self.machine.input_controls())?);
         Ok(())
     }
