@@ -277,3 +277,108 @@ fn replay_refuses_a_movie_recorded_against_other_roms() {
         out.stderr
     );
 }
+
+// ---------------------------------------------------------------------------
+// Audio capture length
+// ---------------------------------------------------------------------------
+
+/// Parse the `audio: N samples @ R Hz` line the capture subcommands print.
+fn reported_samples(stdout: &str) -> usize {
+    stdout
+        .lines()
+        .find_map(|l| l.strip_prefix("audio: ")?.split(" samples").next())
+        .unwrap_or_else(|| panic!("no audio line in:\n{stdout}"))
+        .parse()
+        .expect("sample count")
+}
+
+/// `SampleRing` tops out here and then drops its *oldest* samples. A capture
+/// that only drained after its frame loop returned exactly this number and
+/// silently discarded the rest of the run — about three seconds of a fifty-second
+/// capture. Both `frameshot --audio-out` and `replay --audio-out` now drain per
+/// frame, so a run longer than the ceiling must exceed it by a wide margin.
+const RING_CEILING: usize = 131_072;
+
+/// 600 frames is ~10 s, so ~440k samples at 44.1 kHz — comfortably above the
+/// ceiling. The assertion is deliberately loose on the upper side, since frame
+/// rates are not exactly 60 Hz, and tight on the lower: anything near the
+/// ceiling means the tail bug is back.
+#[test]
+fn frameshot_audio_covers_the_whole_run_not_just_the_tail() {
+    let Some(dir) = roms_dir() else {
+        eprintln!("skipping: no ROM dir (set PHOSPHOR_ROMS or ~/ws/mame-runtime/roms)");
+        return;
+    };
+    let all = registry::all();
+    let Some(entry) = all.iter().find(|e| {
+        e.rom_names
+            .iter()
+            .any(|n| dir.join(format!("{n}.zip")).exists())
+    }) else {
+        eprintln!("skipping: the ROM directory supplies no registered machine");
+        return;
+    };
+
+    let wav = scratch().join("frameshot.wav");
+    let png = scratch().join("frameshot.png");
+    let out = disasm(&[
+        "frameshot",
+        "--machine",
+        entry.name,
+        "--frames",
+        "600",
+        "--audio-out",
+        wav.to_str().unwrap(),
+        "-o",
+        png.to_str().unwrap(),
+        dir.to_str().unwrap(),
+    ]);
+    assert!(out.ok, "frameshot failed: {}{}", out.stdout, out.stderr);
+
+    let n = reported_samples(&out.stdout);
+    assert!(
+        n > RING_CEILING * 2,
+        "{}: captured {n} samples for a 600-frame run — at or near the {RING_CEILING} \
+         ring ceiling, so the run is being truncated to its tail again",
+        entry.name
+    );
+    assert!(wav.exists(), "no WAV written");
+}
+
+#[test]
+fn replay_audio_covers_the_whole_run() {
+    let Some(dir) = roms_dir() else {
+        eprintln!("skipping: no ROM dir (set PHOSPHOR_ROMS or ~/ws/mame-runtime/roms)");
+        return;
+    };
+    let Some((_, path)) = record_against_roms(&dir) else {
+        eprintln!("skipping: the ROM directory supplies no registered machine");
+        return;
+    };
+
+    // The recorded movie is short, so run past its span — replay continues with
+    // no further input, which is exactly the "watch what it settles into" case.
+    let wav = scratch().join("replay.wav");
+    let png = scratch().join("replay_audio.png");
+    let out = disasm(&[
+        "replay",
+        "--movie",
+        path.to_str().unwrap(),
+        "--frames",
+        "600",
+        "--audio-out",
+        wav.to_str().unwrap(),
+        "-o",
+        png.to_str().unwrap(),
+        dir.to_str().unwrap(),
+    ]);
+    assert!(out.ok, "replay failed: {}{}", out.stdout, out.stderr);
+
+    let n = reported_samples(&out.stdout);
+    assert!(
+        n > RING_CEILING * 2,
+        "replay captured {n} samples for a 600-frame run — at or near the \
+         {RING_CEILING} ring ceiling, so the run is being truncated to its tail"
+    );
+    assert!(wav.exists(), "no WAV written");
+}

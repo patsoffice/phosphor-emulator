@@ -285,6 +285,11 @@ enum Command {
         /// Optional reference PNG to diff the captured frame against.
         #[arg(long)]
         compare: Option<PathBuf>,
+        /// Write the replayed session's audio to this path as a 16-bit mono
+        /// WAV, for comparing a recorded game by ear or by spectrum against a
+        /// reference capture.
+        #[arg(long)]
+        audio_out: Option<PathBuf>,
         /// ROM set: a `.zip` archive or a directory of loose ROM files.
         path: String,
     },
@@ -511,8 +516,16 @@ fn run_command(cmd: Command) -> Result<String, String> {
             frames,
             out,
             compare,
+            audio_out,
             path,
-        } => run_replay(&movie, frames, out.as_deref(), compare.as_deref(), &path),
+        } => run_replay(
+            &movie,
+            frames,
+            out.as_deref(),
+            compare.as_deref(),
+            audio_out.as_deref(),
+            &path,
+        ),
         Command::Movie { cmd } => match cmd {
             MovieCommand::Info { movie } => run_movie_info(&movie),
             MovieCommand::Check {
@@ -564,9 +577,7 @@ fn run_frameshot(
     path: &str,
 ) -> Result<String, String> {
     let mut harness = Harness::build(machine, path, nvram, coin_at, &[], &[])?;
-    for _ in 0..frames {
-        harness.run_frame();
-    }
+    let (audio, rate) = run_capturing_audio(&mut harness, frames);
     let machine_box = harness.machine_mut();
 
     // Render native, then apply the machine's declared orientation centrally —
@@ -575,18 +586,6 @@ fn run_frameshot(
     // suite so both produce identical bytes.
     let (w, h, buf) = phosphor_harness::render_oriented(machine_box);
 
-    // Drain ALL buffered audio. The resampler is a FIFO, so a single fill only
-    // returns the oldest samples — loop until empty to cover the whole run.
-    let rate = machine_box.audio_sample_rate();
-    let mut audio: Vec<i16> = Vec::new();
-    let mut chunk = vec![0i16; (rate as usize).max(1)];
-    loop {
-        let n = machine_box.fill_audio(&mut chunk);
-        if n == 0 {
-            break;
-        }
-        audio.extend_from_slice(&chunk[..n]);
-    }
     let n_audio = audio.len();
     let peak = audio.iter().map(|s| s.unsigned_abs()).max().unwrap_or(0);
 
@@ -646,6 +645,32 @@ fn run_frameshot(
     Ok(msg)
 }
 
+/// Run `frames` frames, draining audio after each one.
+///
+/// Draining per frame is not an optimisation, it is the only correct way to
+/// capture a run. `SampleRing` grows by doubling to `SampleRing::MAX_CAPACITY`
+/// — about three seconds at 44.1 kHz — and past that it drops its *oldest*
+/// samples (`core/src/audio/ring.rs`). A loop that runs to completion and only
+/// then drains therefore keeps the last three seconds and silently discards
+/// everything before, which for a typical 1800-3100 frame capture is most of it.
+fn run_capturing_audio(harness: &mut Harness, frames: usize) -> (Vec<i16>, u32) {
+    let rate = harness.machine().audio_sample_rate();
+    let mut audio: Vec<i16> = Vec::new();
+    let mut chunk = vec![0i16; (rate as usize).max(1)];
+    for _ in 0..frames {
+        harness.run_frame();
+        let machine = harness.machine_mut();
+        loop {
+            let n = machine.fill_audio(&mut chunk);
+            if n == 0 {
+                break;
+            }
+            audio.extend_from_slice(&chunk[..n]);
+        }
+    }
+    (audio, rate)
+}
+
 // ---------------------------------------------------------------------------
 // Input movies
 // ---------------------------------------------------------------------------
@@ -667,6 +692,7 @@ fn run_replay(
     frames: Option<usize>,
     out: Option<&Path>,
     compare: Option<&Path>,
+    audio_out: Option<&Path>,
     roms: &str,
 ) -> Result<String, String> {
     let movie = load_movie(movie_path)?;
@@ -678,9 +704,7 @@ fn run_replay(
     let frames = frames.unwrap_or(span);
 
     let mut harness = Harness::from_movie(roms, movie)?;
-    for _ in 0..frames {
-        harness.run_frame();
-    }
+    let (audio, rate) = run_capturing_audio(&mut harness, frames);
 
     let machine_box = harness.machine_mut();
     let (w, h, buf) = render_oriented(machine_box);
@@ -693,10 +717,22 @@ fn run_replay(
 
     let mut msg = format!(
         "replayed {machine} {frames} frame(s) (movie spans {span}) -> {} ({w}×{h})\n\
-         frame: {}\n",
+         frame: {}\n\
+         audio: {} samples @ {rate} Hz, peak {}\n",
         out_path.display(),
-        hash_frame(w, h, &buf)
+        hash_frame(w, h, &buf),
+        audio.len(),
+        audio.iter().map(|s| s.unsigned_abs()).max().unwrap_or(0),
     );
+
+    if let Some(ap) = audio_out {
+        write_wav(ap, &audio, rate).map_err(|e| format!("writing audio {}: {e}", ap.display()))?;
+        msg.push_str(&format!(
+            "audio: wrote {} samples -> {}\n",
+            audio.len(),
+            ap.display()
+        ));
+    }
 
     if let Some(reference) = compare {
         let (rw, rh, rgb) = load_png(reference)?;
