@@ -474,6 +474,14 @@ pub fn run(
         // `event_pump` back from `poll_iter`'s borrow.
         let mut needs_resync = false;
 
+        // While a movie plays it is the ONLY source of input, so every path that
+        // reconciles the machine against physical devices has to be off. Those
+        // paths are exactly why an unguarded replay differs run to run: losing
+        // focus clears whatever the movie was holding, regaining it injects
+        // whichever keys happen to be down, and a controller unplugged mid-run
+        // does both. None of that is in the recording.
+        let replaying = movie_playback.is_some();
+
         // Poll all pending SDL events, translate to machine input
         for event in event_pump.poll_iter() {
             // Forward every event to egui first
@@ -865,7 +873,7 @@ pub fn run(
                     sdl_context.mouse().set_relative_mouse_mode(mouse_grabbed);
                     // Ungrabbing stops mouse events reaching the game, so a
                     // button held at that moment would never see its release.
-                    if !mouse_grabbed {
+                    if !mouse_grabbed && !replaying {
                         machine.release_all_inputs();
                     }
                 }
@@ -920,8 +928,10 @@ pub fn run(
                     // An unplugged pad sends no button-up for whatever it was
                     // holding. Clear everything, then re-assert from the pads
                     // that are still connected.
-                    machine.release_all_inputs();
-                    needs_resync = true;
+                    if !replaying {
+                        machine.release_all_inputs();
+                        needs_resync = true;
+                    }
                 }
 
                 // Focus loss strands every held input — the window stops
@@ -929,12 +939,16 @@ pub fn run(
                 Event::Window {
                     win_event: WindowEvent::FocusLost,
                     ..
-                } => machine.release_all_inputs(),
+                } => {
+                    if !replaying {
+                        machine.release_all_inputs();
+                    }
+                }
 
                 Event::Window {
                     win_event: WindowEvent::FocusGained,
                     ..
-                } => needs_resync = true,
+                } => needs_resync = !replaying,
 
                 // Game input — last, so every hotkey above keeps precedence.
                 // Suppressed entirely during playback: a stray keypress would
@@ -968,7 +982,7 @@ pub fn run(
 
         // Reconcile the machine with the physical devices, now that
         // `event_pump` is free to be queried for their live state.
-        if needs_resync {
+        if needs_resync && !replaying {
             let devices = SdlDevices {
                 mouse: mouse_grabbed.then(|| event_pump.mouse_state()),
                 keyboard: event_pump.keyboard_state(),
