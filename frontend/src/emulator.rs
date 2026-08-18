@@ -220,6 +220,11 @@ pub fn run(
     no_mouse_grab: bool,
     record_wav: Option<&str>,
     movie_path: Option<&Path>,
+    // `rebuild_machine` builds a machine from ROM exactly as the harness does.
+    // Arming a movie recording needs one: `reset()` is a reset button, not a
+    // power cycle, so recording on a reset live machine starts somewhere replay
+    // cannot reconstruct.
+    rebuild_machine: &dyn Fn() -> Box<dyn FrontendMachine>,
     state: &mut crate::state::State,
 ) -> Box<dyn FrontendMachine> {
     let sdl_video = sdl_context.video().expect("Failed to init SDL video");
@@ -463,8 +468,30 @@ pub fn run(
         playback
     });
 
+    // Set by F2, serviced at the top of the next iteration. The rebuild cannot
+    // happen in the event handler: the machine is borrowed out of the session
+    // for the whole loop body, and arming has to replace it wholesale.
+    let mut arm_requested = false;
+
     'main: loop {
         let t0 = Instant::now();
+
+        if arm_requested {
+            arm_requested = false;
+            let (nvram, dip) = {
+                let sess = session.borrow();
+                crate::movie::MovieCapture::starting_conditions(sess.machine())
+            };
+            // Build from ROM, exactly as Harness::from_movie will on replay, so
+            // the recording's starting state is identical by construction rather
+            // than by hoping reset() is thorough.
+            let mut fresh = rebuild_machine();
+            movie_capture.arm_fresh(&mut *fresh, nvram, dip);
+            *session.borrow_mut() = DebugSession::from_machine(fresh);
+            debug_state.frame_count = 0;
+            eprintln!("{}", movie_capture.armed_message());
+        }
+
         let mut sess = session.borrow_mut();
         let machine: &mut dyn FrontendMachine = sess.machine_mut();
 
@@ -708,12 +735,12 @@ pub fn run(
                     repeat: false,
                     ..
                 } if host_bindings.action_for(sc) == Some(HostAction::MovieRecord) => {
-                    let armed = !movie_capture.is_recording();
-                    eprintln!("{}", movie_capture.toggle(machine));
-                    if armed {
-                        debug_state.frame_count = 0;
-                        // Same reason as Reset above: arming resets the machine.
-                        needs_resync = true;
+                    if movie_capture.is_recording() {
+                        eprintln!("{}", movie_capture.stop());
+                    } else {
+                        // Deferred: arming rebuilds the machine from ROM, which
+                        // cannot happen while it is borrowed for this frame.
+                        arm_requested = true;
                     }
                 }
 

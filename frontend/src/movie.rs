@@ -90,25 +90,41 @@ impl MovieCapture {
         self.recorder.as_mut()
     }
 
-    /// Start recording, resetting the machine to power-on first.
+    /// The starting conditions a recording must be armed on: the NVRAM and DIP
+    /// bytes the live session had, carried across to a freshly built machine.
+    pub fn starting_conditions(machine: &dyn FrontendMachine) -> (Option<Vec<u8>>, Vec<u8>) {
+        (
+            machine.save_nvram().map(<[u8]>::to_vec),
+            (0..machine.dip_banks().len())
+                .map(|b| machine.dip_bank_value(b))
+                .collect(),
+        )
+    }
+
+    /// Start recording against a machine that was just built from ROM.
     ///
-    /// Returns the message to show the user. The caller must resync input
-    /// afterwards: the reset clears the machine's port bits, and a key held
-    /// across it produces no new event.
-    pub fn arm(&mut self, machine: &mut dyn FrontendMachine) {
-        // Capture the battery state *before* the reset, then restore it after —
-        // the same order `Harness::from_movie` uses, so replay reconstructs this
-        // exact starting point rather than a subtly different one.
-        let nvram: Option<Vec<u8>> = machine.save_nvram().map(<[u8]>::to_vec);
+    /// `machine` MUST be freshly constructed, not the live one reset in place.
+    /// `reset()` is a reset button, not a power cycle — state survives it, and
+    /// measurably so: after 600 frames of attract mode and a reset, every
+    /// machine sampled differs from a fresh build (burgertime by 1449 state
+    /// bytes and 28134 rendered pixels). Arming on a reset live machine
+    /// therefore starts the recording somewhere `Harness::from_movie` — which
+    /// builds from ROM — can never reconstruct, and the replay diverges.
+    ///
+    /// The order below mirrors `from_movie` exactly: reset, NVRAM, DIP.
+    pub fn arm_fresh(
+        &mut self,
+        machine: &mut dyn FrontendMachine,
+        nvram: Option<Vec<u8>>,
+        dip: Vec<u8>,
+    ) {
         machine.reset();
         if let Some(nv) = &nvram {
             machine.load_nvram(nv);
         }
-
-        let dip: Vec<u8> = (0..machine.dip_banks().len())
-            .map(|b| machine.dip_bank_value(b))
-            .collect();
-
+        for (bank, &value) in dip.iter().enumerate() {
+            machine.set_dip_bank_value(bank, value);
+        }
         self.recorder = Some(MovieRecorder::new(
             self.machine_name.clone(),
             self.rom_digest,
@@ -182,18 +198,12 @@ impl MovieCapture {
         msg
     }
 
-    /// Toggle recording, returning a message for the user. Arming resets the
-    /// machine; the caller must resync input afterwards.
-    pub fn toggle(&mut self, machine: &mut dyn FrontendMachine) -> String {
-        if self.is_recording() {
-            self.stop()
-        } else {
-            self.arm(machine);
-            format!(
-                "Movie: recording {} from power-on (press again to stop)",
-                self.machine_name
-            )
-        }
+    /// Message shown when a recording has just been armed.
+    pub fn armed_message(&self) -> String {
+        format!(
+            "Movie: recording {} from power-on (press again to stop)",
+            self.machine_name
+        )
     }
 }
 

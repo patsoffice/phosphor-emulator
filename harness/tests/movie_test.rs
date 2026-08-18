@@ -617,3 +617,69 @@ fn replay_refuses_a_movie_naming_an_unregistered_machine() {
         "expected an unknown-machine error, got: {err}"
     );
 }
+
+/// `reset()` is a reset button, not a power cycle — and the movie recorder now
+/// depends on that being true.
+///
+/// The frontend used to arm a recording by resetting the live machine, which
+/// had been running attract mode. Replay builds a fresh machine from ROM, so
+/// the two started from different states and a recorded session replayed
+/// differently from the one that was played — on Donkey Kong, visibly so by
+/// about frame 1800. Arming now rebuilds from ROM instead.
+///
+/// This pins the assumption. If someone later makes `reset()` a true power
+/// cycle, this fails — and the right response is to come back here and simplify
+/// the frontend's arm path, not to delete the test.
+#[test]
+fn reset_is_not_a_power_cycle_so_arming_must_rebuild() {
+    let Some(dir) = roms_dir() else {
+        eprintln!("skipping: no ROM dir (set PHOSPHOR_ROMS or ~/ws/mame-runtime/roms)");
+        return;
+    };
+
+    let mut differing = Vec::new();
+    let mut checked = 0usize;
+    for entry in registry::all() {
+        let name = entry.name;
+
+        // What arming in place used to produce: a machine that has run, reset.
+        let Some(mut used) = booted(&dir, entry) else {
+            continue;
+        };
+        checked += 1;
+        for _ in 0..600 {
+            used.run_frame();
+        }
+        used.reset();
+        for _ in 0..120 {
+            used.run_frame();
+        }
+        let after_use = Fingerprint::of(&mut *used, name);
+        drop(used);
+
+        // What replay constructs: a fresh machine from ROM.
+        let mut fresh = booted(&dir, entry).expect("ROMs were present a moment ago");
+        for _ in 0..120 {
+            fresh.run_frame();
+        }
+        let from_fresh = Fingerprint::of(&mut *fresh, name);
+
+        if after_use.state != from_fresh.state || after_use.frame != from_fresh.frame {
+            differing.push(name);
+        }
+    }
+
+    assert!(checked > 0, "no machine's ROMs were available");
+    assert!(
+        !differing.is_empty(),
+        "every machine now returns to power-on state on reset(), across {checked} \
+         checked. If that is a deliberate change, the frontend's movie arm no \
+         longer needs to rebuild from ROM and can be simplified — see \
+         frontend/src/movie.rs::arm_fresh."
+    );
+    eprintln!(
+        "{} of {checked} machines differ after reset-following-play: {:?}",
+        differing.len(),
+        differing
+    );
+}

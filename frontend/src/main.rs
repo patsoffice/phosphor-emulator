@@ -249,6 +249,7 @@ fn main() {
         cli.no_mouse_grab,
         cli.record_wav.as_deref(),
         cli.movie.as_deref(),
+        &|| create_from_first_rom_set(entry, &rom_path).0,
         &mut state,
     );
 
