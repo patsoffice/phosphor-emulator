@@ -7,11 +7,17 @@ edition = "2024"
 phosphor-core = { path = "../core" }
 phosphor-machines = { path = "../machines" }
 zip = "2"
+# Input movies fingerprint their ROM set and their own contents with SHA-256,
+# and deflate their record block (analog traces run to tens of thousands of
+# records per minute). Both are effectively free here: `zip` already pulls
+# `flate2` into this crate's runtime tree, and `digest`/`block-buffer`/
+# `crypto-common` are already vendored for `zip`'s `sha1` and `hmac`.
+flate2 = "1"
+sha2 = "0.10"
 
-# Dev-only: the golden-frame suite reads its pinned data as TOML, fingerprints
-# frames with SHA-256, and writes/decodes reference PNGs. Deliberately not real
-# dependencies — the frontend links this crate and gains none of them.
+# Dev-only: the golden-frame suite reads its pinned data as TOML and
+# writes/decodes reference PNGs. Deliberately not real dependencies — the
+# frontend links this crate and gains none of them.
 [dev-dependencies]
 png = "0.17"
-sha2 = "0.10"
 toml = "0.8"
