@@ -8,10 +8,12 @@
 
 use std::path::PathBuf;
 
+mod frame;
 mod harness;
 pub mod movie;
 mod rom_path;
 
+pub use frame::{hash_frame, hash_vectors, render_oriented};
 pub use harness::{Harness, MotionSpec, PressSpec};
 pub use movie::{
     Movie, MovieError, MovieHeader, MoviePlayer, MovieRecord, MovieRecorder, rom_digest,

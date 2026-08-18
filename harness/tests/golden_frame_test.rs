@@ -39,12 +39,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-use phosphor_core::core::machine::{FrontendMachine, Orientation};
-use phosphor_core::device::dvg::VectorLine;
-use phosphor_core::gfx::apply_orientation;
-use phosphor_harness::{Harness, PressSpec, roms_dir};
+use phosphor_harness::{Harness, PressSpec, hash_frame, hash_vectors, render_oriented, roms_dir};
 use phosphor_machines::registry;
-use sha2::{Digest, Sha256};
 
 /// Frames a newly discovered machine is captured at before a human picks a
 /// better number. Past every registered machine's power-on self-test — the
@@ -338,53 +334,11 @@ fn render_frames_toml(entries: &[Entry], unpinned: &[Unpinned]) -> String {
 // Capture and fingerprint
 // ---------------------------------------------------------------------------
 
-/// SHA-256 over a length-prefixed encoding of the frame, so a buffer that
-/// changes shape without changing bytes still changes the hash.
-fn hash_frame(w: u32, h: u32, rgb: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(b"phosphor-frame-v1");
-    hasher.update(w.to_le_bytes());
-    hasher.update(h.to_le_bytes());
-    hasher.update(rgb);
-    format!("sha256:{:x}", hasher.finalize())
-}
-
-/// SHA-256 over the vector display list — for the vector games this, not the
-/// rasterised frame, is what the frontend actually draws.
-fn hash_vectors(lines: &[VectorLine]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(b"phosphor-vectors-v1");
-    hasher.update((lines.len() as u32).to_le_bytes());
-    for l in lines {
-        for c in [l.x0, l.y0, l.x1, l.y1] {
-            hasher.update(c.to_le_bytes());
-        }
-        hasher.update([l.intensity, l.r, l.g, l.b]);
-    }
-    format!("sha256:{:x}", hasher.finalize())
-}
-
-/// Render the booted machine the way `disasm frameshot` and the frontend do:
-/// native buffer, then the machine's declared orientation applied centrally.
-/// Hashing the *oriented* frame means a machine that loses its rotation
-/// declaration fails here.
-fn render_oriented(m: &mut dyn FrontendMachine) -> (u32, u32, Vec<u8>) {
-    let (nw, nh) = m.display_size();
-    let mut native = vec![0u8; nw as usize * nh as usize * 3];
-    m.render_frame(&mut native);
-    let orient = m.orientation();
-    if orient == Orientation::NORMAL {
-        return (nw, nh, native);
-    }
-    let (dw, dh) = if orient.swaps_axes() {
-        (nh, nw)
-    } else {
-        (nw, nh)
-    };
-    let mut oriented = vec![0u8; dw as usize * dh as usize * 3];
-    apply_orientation(&native, &mut oriented, nw as usize, nh as usize, orient);
-    (dw, dh, oriented)
-}
+// `hash_frame`, `hash_vectors` and `render_oriented` live in `phosphor_harness`
+// (see `harness/src/frame.rs`), shared with `disasm frameshot` and movie replay
+// so a `disasm movie check` hash is directly comparable with the pins below.
+// Their encoding is wire format — changing it invalidates every hash in
+// `frames.toml`.
 
 /// What a run of one entry produced.
 struct Capture {

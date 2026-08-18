@@ -505,29 +505,9 @@ fn run_frameshot(
 
     // Render native, then apply the machine's declared orientation centrally —
     // mirroring the frontend — so the PNG matches what the cabinet displays for
-    // machines that declare a rotation/cocktail flip (NORMAL stays zero-copy).
-    let (nw, nh) = machine_box.display_size();
-    let mut native = vec![0u8; (nw * nh * 3) as usize];
-    machine_box.render_frame(&mut native);
-    let orient = machine_box.orientation();
-    let (w, h, buf) = if orient == phosphor_core::core::machine::Orientation::NORMAL {
-        (nw, nh, native)
-    } else {
-        let (dw, dh) = if orient.swaps_axes() {
-            (nh, nw)
-        } else {
-            (nw, nh)
-        };
-        let mut oriented = vec![0u8; (dw * dh * 3) as usize];
-        phosphor_core::gfx::apply_orientation(
-            &native,
-            &mut oriented,
-            nw as usize,
-            nh as usize,
-            orient,
-        );
-        (dw, dh, oriented)
-    };
+    // machines that declare a rotation/cocktail flip. Shared with the golden
+    // suite so both produce identical bytes.
+    let (w, h, buf) = phosphor_harness::render_oriented(machine_box);
 
     // Drain ALL buffered audio. The resampler is a FIFO, so a single fill only
     // returns the oldest samples — loop until empty to cover the whole run.
