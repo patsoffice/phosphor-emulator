@@ -637,7 +637,14 @@ impl Tkg04Board {
             if (test & 0xF0) == 0xF0 {
                 let row_in_sprite = test & 0x0F;
 
-                let spr_code = (code_byte & 0x7F) as u16 | (((attr_byte & 0x40) as u16) << 1);
+                // The code space is 0..=255, but the sprite ROM is 8 KB — 128
+                // sprites of 16x16 2bpp — so the top bit addresses a line that
+                // is not there. Wrapping models an unconnected address line:
+                // the ROM sees the low bits and repeats. Without this a sprite
+                // with attribute bit 0x40 set indexes past the cache and panics,
+                // which dkong reaches after a reset mid-session.
+                let spr_code = ((code_byte & 0x7F) as u16 | (((attr_byte & 0x40) as u16) << 1))
+                    % sprite_cache.count().max(1) as u16;
                 let flip_y = (code_byte & 0x80) != 0;
                 let flip_x = (attr_byte & 0x80) != 0;
                 let color_attr = (attr_byte & 0x0F) + 0x10 * palette_bank;
