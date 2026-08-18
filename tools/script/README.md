@@ -90,6 +90,7 @@ method maps 1:1 onto a `DebugSession` accessor. The one remaining gap is
 | Rhai | DebugSession | Returns |
 |---|---|---|
 | `m.run_frames(n)` | `run_frames` | `()` — advance `n` whole frames |
+| `m.load_movie(path)` | `load_movie` | `()` — reset to power-on and replay a recorded `.phmi`; errors on a movie for another machine or ROM dump |
 | `m.step()` | `step` | `int` — advance one cycle; bitmask of CPUs at an instruction boundary |
 | `m.read(cpu, addr)` | `read` | `int` — byte value, or `-1` if unmapped / no debug support |
 | `m.pc(cpu)` | `pc` | `int` — program counter, or `-1` if none |
@@ -125,6 +126,39 @@ memory-viewer poke would be). It is an explicit *debug* write, distinct from the
 legitimate machine inputs `input` drives — and it records a
 `DebugAccessSource::Frontend` event, so with tracing on a poke shows up in
 `events()` tagged `frontend`, never masquerading as a hardware store.
+
+### Input movies
+
+`m.load_movie(path)` binds a recorded session (see `docs/designs/input-movie.md`)
+and resets to power-on. Subsequent `run_frames` deliver the recording — there is
+no separate "play" call, because the session's frame loop already applies a bound
+movie.
+
+The point is sampling a run cheaply. `disasm replay --frames N` re-runs from
+frame 0 for every sample, so hunting for a golden-pin frame costs a whole replay
+per guess; a bound movie boots once and walks forward:
+
+```rhai
+let m = open("burgertime", "/path/to/roms");
+m.load_movie("burgertime-1787015412.phmi");
+let prev = 0;
+for f in [1500, 2500, 3300, 4324] {
+    m.run_frames(f - prev);
+    prev = f;
+    m.screenshot("bt_" + f + ".png");
+}
+```
+
+Four samples of a 4324-frame recording take about seven seconds that way, against
+~11,600 frames replayed if each were its own `disasm replay`. See
+`examples/sample_movie.rhai`.
+
+A movie recorded for another machine, or against a different ROM dump, is
+refused before the reset — the first would bind against a control table it was
+never recorded against, the second would bind fine and then silently diverge.
+The ROM-digest check is skipped only for a session wrapping a machine someone
+else booted (the in-frontend console), which has no ROM path to re-derive it
+from.
 
 ### Watchpoints
 

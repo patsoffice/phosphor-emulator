@@ -75,6 +75,12 @@ fn register_machine(engine: &mut Engine) {
     );
 
     // --- Drive ---
+    engine.register_fn(
+        "load_movie",
+        |m: &mut Machine, path: &str| -> Result<(), Box<EvalAltResult>> {
+            m.borrow_mut().load_movie(path).map_err(|e| e.into())
+        },
+    );
     engine.register_fn("run_frames", |m: &mut Machine, n: i64| {
         m.borrow_mut().run_frames(n.max(0) as u64);
     });

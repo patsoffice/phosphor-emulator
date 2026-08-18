@@ -22,7 +22,9 @@ use phosphor_core::core::machine::{
     DipSwitchBank, FrontendMachine, InputEvent, InputId, Orientation,
 };
 use phosphor_core::core::watchpoint::{WatchpointCondition, WatchpointHit, WatchpointKind};
-use phosphor_harness::Harness;
+use phosphor_harness::movie::{Movie, rom_digest};
+use phosphor_harness::{Harness, load_rom_set};
+use phosphor_machines::registry;
 
 /// A booted machine plus the read-first inspection state layered on top of it.
 pub struct DebugSession {
@@ -43,6 +45,10 @@ pub struct DebugSession {
     hang: Option<HangDetector>,
     /// Hang reports collected while running frames.
     hang_reports: Vec<HangReport>,
+    /// Where this session's ROMs came from, when it was opened by name. `None`
+    /// for a session wrapping an already-booted machine (the in-frontend
+    /// console), which has no path to re-derive a ROM digest from.
+    rom_path: Option<String>,
 }
 
 impl DebugSession {
@@ -50,7 +56,9 @@ impl DebugSession {
     /// [`Harness`]) and index its input controls.
     pub fn open(machine_name: &str, rom_path: &str) -> Result<Self, String> {
         let harness = Harness::build(machine_name, rom_path, None, None, &[], &[])?;
-        Ok(Self::wrap(harness))
+        let mut session = Self::wrap(harness);
+        session.rom_path = Some(rom_path.to_string());
+        Ok(session)
     }
 
     /// Wrap a booted [`Harness`], building the stable-name → `InputId` index.
@@ -69,6 +77,7 @@ impl DebugSession {
             events: Vec::new(),
             hang: None,
             hang_reports: Vec::new(),
+            rom_path: None,
         }
     }
 
@@ -105,6 +114,58 @@ impl DebugSession {
             self.drain_trace_events();
             self.sample_hang();
         }
+    }
+
+    /// Load a recorded input movie and replay it from power-on.
+    ///
+    /// The machine is reset first: a movie carries no save state, so it is only
+    /// meaningful from there. Subsequent `run_frames` deliver the recording —
+    /// no extra call is needed, because [`run_frames`](Self::run_frames) already
+    /// goes through the harness, which already applies a bound movie.
+    ///
+    /// This is the cheap way to sample a recorded session at several points: one
+    /// boot, then `run_frames` between screenshots, instead of `disasm replay
+    /// --frames N` re-running from frame 0 for every sample.
+    ///
+    /// Two checks before anything is reset. A movie for another machine would
+    /// bind against a control table it was never recorded against; a movie for
+    /// this machine but a different ROM dump would bind fine and then silently
+    /// diverge, which is the whole reason the digest exists. The digest check is
+    /// skipped only when the session wraps a machine someone else booted, since
+    /// there is then no ROM path to re-derive it from.
+    pub fn load_movie(&mut self, path: &str) -> Result<(), String> {
+        let bytes = std::fs::read(path).map_err(|e| format!("reading movie {path}: {e}"))?;
+        let movie = Movie::decode(&bytes).map_err(|e| format!("reading movie {path}: {e}"))?;
+
+        let id = self.harness.machine().machine_id().to_string();
+        if movie.header.machine != id {
+            return Err(format!(
+                "movie {path} was recorded for '{}', but this session is running '{id}'",
+                movie.header.machine
+            ));
+        }
+        if let Some(rp) = self.rom_path.clone()
+            && let Some(entry) = registry::find(&id)
+        {
+            let set = load_rom_set(&rp, entry.rom_names)
+                .map_err(|e| format!("loading ROM set {rp}: {e}"))?;
+            if rom_digest(&set, entry.rom_names) != movie.header.rom_digest {
+                return Err(format!(
+                    "movie {path} was recorded against a different ROM set than {rp}"
+                ));
+            }
+        }
+
+        self.harness.reset();
+        self.harness
+            .bind_movie(movie)
+            .map_err(|e| format!("binding movie {path}: {e}"))?;
+        // Observations collected before the reset describe a run that no longer
+        // exists; keeping them would silently mix two timelines.
+        self.hits.clear();
+        self.events.clear();
+        self.hang_reports.clear();
+        Ok(())
     }
 
     /// Advance a single clock cycle via `debug_tick()`, returning the bitmask of
@@ -531,6 +592,76 @@ mod tests {
         // The motion is scheduled for frames 2, 3 and 4.
         assert_eq!(deliveries(false), (6, 3), "frame-loop baseline");
         assert_eq!(deliveries(true), (6, 3), "cycle-stepped driving");
+    }
+
+    /// A movie bound through the session replays via `run_frames`, with no extra
+    /// call — the property that makes this binding ~20 lines rather than a
+    /// parallel playback path.
+    #[test]
+    fn a_bound_movie_is_delivered_by_run_frames() {
+        use phosphor_harness::MovieRecorder;
+
+        let (machine, rec) = stub_machine(true);
+        let controls = machine.input_controls();
+        let mut r = MovieRecorder::new("stub", [0u8; 32], controls, Vec::new(), None);
+        for frame in 0..6 {
+            if frame == 2 || frame == 4 {
+                r.push_event(InputEvent::Button {
+                    id: COIN_ID,
+                    pressed: frame == 2,
+                });
+            }
+            r.advance_frame();
+        }
+        let movie = r.finish();
+
+        let dir = std::env::temp_dir().join(format!("phosphor-rhai-movie-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let path = dir.join("stub.phmi");
+        std::fs::write(&path, movie.encode()).expect("write movie");
+
+        let mut s = DebugSession::from_machine(machine);
+        s.load_movie(path.to_str().unwrap()).expect("load_movie");
+        s.run_frames(6);
+
+        let buttons = rec
+            .borrow()
+            .inputs
+            .iter()
+            .filter(|e| matches!(e, InputEvent::Button { .. }))
+            .count();
+        assert_eq!(buttons, 2, "the movie's presses were not delivered");
+        assert_eq!(s.frame_count(), 6);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A movie for a different machine is refused *before* the reset, so a
+    /// mistyped path cannot quietly destroy the session it was aimed at.
+    #[test]
+    fn load_movie_refuses_another_machines_recording() {
+        use phosphor_harness::MovieRecorder;
+
+        let (machine, _rec) = stub_machine(true);
+        let r = MovieRecorder::new(
+            "not_the_stub",
+            [0u8; 32],
+            machine.input_controls(),
+            Vec::new(),
+            None,
+        );
+        let dir = std::env::temp_dir().join(format!("phosphor-rhai-movie-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        let path = dir.join("wrong.phmi");
+        std::fs::write(&path, r.finish().encode()).expect("write movie");
+
+        let mut s = DebugSession::from_machine(machine);
+        s.run_frames(3);
+        let err = s
+            .load_movie(path.to_str().unwrap())
+            .expect_err("must refuse");
+        assert!(err.contains("not_the_stub"), "unhelpful error: {err}");
+        assert_eq!(s.frame_count(), 3, "the session was reset despite refusing");
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
