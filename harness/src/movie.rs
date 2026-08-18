@@ -42,7 +42,7 @@ use flate2::read::DeflateDecoder;
 use flate2::write::DeflateEncoder;
 use sha2::{Digest, Sha256};
 
-use phosphor_core::core::machine::{InputEvent, InputId};
+use phosphor_core::core::machine::{InputControl, InputEvent, InputId};
 use phosphor_machines::rom_loader::RomSet;
 
 /// File magic: "PHosphor Movie Input".
@@ -89,6 +89,9 @@ pub enum MovieError {
     UnknownControl(String),
     /// A record's frame is past the header's declared span.
     FrameOutOfRange { frame: u32, frames: u32 },
+    /// Records are not in ascending frame order, which replay's forward cursor
+    /// requires.
+    FramesNotMonotonic { frame: u32, previous: u32 },
 }
 
 impl fmt::Display for MovieError {
@@ -122,6 +125,10 @@ impl fmt::Display for MovieError {
             Self::FrameOutOfRange { frame, frames } => write!(
                 f,
                 "movie record at frame {frame} is past its declared span of {frames} frames"
+            ),
+            Self::FramesNotMonotonic { frame, previous } => write!(
+                f,
+                "movie records are out of order: frame {frame} follows frame {previous}"
             ),
         }
     }
@@ -614,7 +621,19 @@ impl Movie {
     /// up front, naming the problem — instead of replaying most of a session and
     /// then diverging.
     fn validate(&self) -> Result<(), MovieError> {
+        let mut prev = 0u32;
         for r in &self.records {
+            // Replay walks the records with a single forward cursor, so a movie
+            // whose frames go backwards would silently drop everything after the
+            // step. Reject it here rather than deliver a partial session.
+            if r.frame() < prev {
+                return Err(MovieError::FramesNotMonotonic {
+                    frame: r.frame(),
+                    previous: prev,
+                });
+            }
+            prev = r.frame();
+
             if self.header.frames != 0 && r.frame() >= self.header.frames {
                 return Err(MovieError::FrameOutOfRange {
                     frame: r.frame(),
@@ -656,6 +675,271 @@ impl Movie {
             MovieRecord::Marker { frame, label } => Some((*frame, label.as_str())),
             _ => None,
         })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Recording
+// ---------------------------------------------------------------------------
+
+/// Accumulates a movie from a live session.
+///
+/// The recorder is a passive sink: something else decides when an event happens
+/// and when a frame ends. Headlessly that is [`Harness`](crate::Harness); in the
+/// frontend it is a wrapper over `InputConfigurable` that tees every call here
+/// before forwarding it to the machine, so no input path can be recorded
+/// incompletely without also bypassing the trait.
+///
+/// A recording always starts from power-on. There is no seek and no initial
+/// snapshot, because carrying one would tie the movie to `SAVE_VERSION` and cost
+/// it the durability that makes committing one worthwhile.
+pub struct MovieRecorder {
+    machine: String,
+    rom_digest: [u8; 32],
+    controls: Vec<String>,
+    /// `InputId` → index into `controls`. Built once from the machine's control
+    /// table; input ids are machine-local and small, but not necessarily dense
+    /// or zero-based, so this is a map rather than an index.
+    index_of: Vec<(InputId, u16)>,
+    dip: Vec<u8>,
+    nvram: Option<Vec<u8>>,
+    host_sample_rate: u32,
+    records: Vec<MovieRecord>,
+    frame: u32,
+    /// Events whose `InputId` was not in the machine's control table. Should
+    /// always be zero — a non-zero count means something is synthesising ids
+    /// outside the table, which would replay as silence.
+    unmapped: usize,
+}
+
+impl MovieRecorder {
+    /// Start a recording against a machine that has just been reset.
+    ///
+    /// `controls` is the machine's `input_controls()` table, `dip` its power-on
+    /// bank bytes in bank order, and `nvram` the image loaded after reset (if
+    /// any). All three are captured now because replay must reconstruct the same
+    /// starting conditions before delivering a single record.
+    pub fn new(
+        machine: impl Into<String>,
+        rom_digest: [u8; 32],
+        controls: &[InputControl],
+        dip: Vec<u8>,
+        nvram: Option<Vec<u8>>,
+    ) -> Self {
+        Self {
+            machine: machine.into(),
+            rom_digest,
+            controls: controls.iter().map(|c| c.stable_name.to_owned()).collect(),
+            index_of: controls
+                .iter()
+                .enumerate()
+                .map(|(i, c)| (c.id, i as u16))
+                .collect(),
+            dip,
+            nvram,
+            host_sample_rate: phosphor_core::audio::host_sample_rate(),
+            records: Vec::new(),
+            frame: 0,
+            unmapped: 0,
+        }
+    }
+
+    fn index(&self, id: InputId) -> Option<u16> {
+        self.index_of
+            .iter()
+            .find(|(i, _)| *i == id)
+            .map(|(_, n)| *n)
+    }
+
+    /// Record one delivered [`InputEvent`].
+    ///
+    /// Call this for *every* event, in delivery order — never one accumulated
+    /// value per frame. See the module docs for why summing analog deltas does
+    /// not replay faithfully.
+    pub fn push_event(&mut self, event: InputEvent) {
+        let id = match event {
+            InputEvent::Button { id, .. }
+            | InputEvent::Absolute { id, .. }
+            | InputEvent::Relative { id, .. } => id,
+        };
+        let Some(ctl) = self.index(id) else {
+            self.unmapped += 1;
+            return;
+        };
+        let frame = self.frame;
+        self.records.push(match event {
+            InputEvent::Button { pressed, .. } => MovieRecord::Button {
+                frame,
+                ctl,
+                pressed,
+            },
+            InputEvent::Absolute { value, .. } => MovieRecord::Absolute {
+                frame,
+                ctl,
+                bits: value.to_bits(),
+            },
+            InputEvent::Relative { delta, .. } => MovieRecord::Relative {
+                frame,
+                ctl,
+                bits: delta.to_bits(),
+            },
+        });
+    }
+
+    /// Record a `release_all_inputs()` call.
+    pub fn push_release_all(&mut self) {
+        self.records
+            .push(MovieRecord::ReleaseAll { frame: self.frame });
+    }
+
+    /// Record a mid-session DIP change.
+    pub fn push_dip(&mut self, bank: u8, value: u8) {
+        self.records.push(MovieRecord::Dip {
+            frame: self.frame,
+            bank,
+            value,
+        });
+    }
+
+    /// Record an author-placed bookmark at the current frame.
+    pub fn push_marker(&mut self, label: impl Into<String>) {
+        self.records.push(MovieRecord::Marker {
+            frame: self.frame,
+            label: label.into(),
+        });
+    }
+
+    /// Note that a frame has completed. Subsequent events belong to the next one.
+    pub fn advance_frame(&mut self) {
+        self.frame += 1;
+    }
+
+    /// Frames recorded so far.
+    pub fn frame(&self) -> u32 {
+        self.frame
+    }
+
+    /// Records captured so far.
+    pub fn len(&self) -> usize {
+        self.records.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.records.is_empty()
+    }
+
+    /// Events dropped because their `InputId` was not in the control table.
+    /// Always zero in a correct session; exposed so a test can assert it.
+    pub fn unmapped(&self) -> usize {
+        self.unmapped
+    }
+
+    /// Finish the recording into a [`Movie`] ready to encode.
+    pub fn finish(self) -> Movie {
+        Movie {
+            header: MovieHeader {
+                machine: self.machine,
+                rom_digest: self.rom_digest,
+                controls: self.controls,
+                dip: self.dip,
+                nvram: self.nvram,
+                host_sample_rate: self.host_sample_rate,
+                frames: self.frame,
+            },
+            records: self.records,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Playback
+// ---------------------------------------------------------------------------
+
+/// A decoded movie bound to a specific machine's control table, with a forward
+/// cursor over its records.
+///
+/// Binding happens once, up front: every control name in the header is resolved
+/// to the machine's live [`InputId`], so a missing control is an error before
+/// the first frame runs rather than silent no-input halfway through.
+pub struct MoviePlayer {
+    movie: Movie,
+    /// Control index → this machine's `InputId`, parallel to `header.controls`.
+    ids: Vec<InputId>,
+    cursor: usize,
+}
+
+impl MoviePlayer {
+    /// Bind `movie` to a machine's control table.
+    pub fn bind(movie: Movie, controls: &[InputControl]) -> Result<Self, MovieError> {
+        let ids = movie
+            .header
+            .controls
+            .iter()
+            .map(|name| {
+                controls
+                    .iter()
+                    .find(|c| c.stable_name == *name)
+                    .map(|c| c.id)
+                    .ok_or_else(|| MovieError::UnknownControl(name.clone()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self {
+            movie,
+            ids,
+            cursor: 0,
+        })
+    }
+
+    /// The records scheduled for `frame`, advancing the cursor past them.
+    ///
+    /// Frames must be requested in ascending order — which is how both
+    /// [`Harness::run_frame`](crate::Harness::run_frame) and the cycle-granular
+    /// debug loop drive it. Records for a skipped frame are discarded rather
+    /// than delivered late, so a caller that jumps forward does not get a burst
+    /// of stale input.
+    pub fn take_frame(&mut self, frame: u32) -> &[MovieRecord] {
+        while self
+            .movie
+            .records
+            .get(self.cursor)
+            .is_some_and(|r| r.frame() < frame)
+        {
+            self.cursor += 1;
+        }
+        let start = self.cursor;
+        while self
+            .movie
+            .records
+            .get(self.cursor)
+            .is_some_and(|r| r.frame() == frame)
+        {
+            self.cursor += 1;
+        }
+        &self.movie.records[start..self.cursor]
+    }
+
+    /// Control index → `InputId` table, for turning a record into an event.
+    pub fn ids(&self) -> &[InputId] {
+        &self.ids
+    }
+
+    pub fn header(&self) -> &MovieHeader {
+        &self.movie.header
+    }
+
+    pub fn movie(&self) -> &Movie {
+        &self.movie
+    }
+
+    /// Whether every record has been delivered.
+    pub fn finished(&self) -> bool {
+        self.cursor >= self.movie.records.len()
+    }
+
+    /// Rewind the cursor to the start, for replaying the same movie twice
+    /// against a freshly reset machine.
+    pub fn rewind(&mut self) {
+        self.cursor = 0;
     }
 }
 
@@ -903,6 +1187,219 @@ mod tests {
     fn markers_are_listed_in_order() {
         let m = movie();
         assert_eq!(m.markers().collect::<Vec<_>>(), vec![(9, "level 1")]);
+    }
+
+    // -----------------------------------------------------------------------
+    // Recorder / player
+    // -----------------------------------------------------------------------
+
+    use phosphor_core::core::machine::InputKind;
+
+    const TRACK_X: InputId = InputId(11);
+    const COIN: InputId = InputId(4);
+
+    /// A two-control table with deliberately sparse, non-zero-based ids, so a
+    /// recorder that assumed `InputId` *was* the index would fail here.
+    const CONTROLS: &[InputControl] = &[
+        InputControl {
+            id: TRACK_X,
+            stable_name: "track_x",
+            label: "Trackball X",
+            kind: InputKind::Button,
+            player: Some(1),
+            default_bindings: &[],
+        },
+        InputControl {
+            id: COIN,
+            stable_name: "coin",
+            label: "Coin",
+            kind: InputKind::Coin,
+            player: None,
+            default_bindings: &[],
+        },
+    ];
+
+    fn recorder() -> MovieRecorder {
+        MovieRecorder::new("marble", [7; 32], CONTROLS, vec![0x40], None)
+    }
+
+    #[test]
+    fn recorder_maps_sparse_input_ids_to_table_indices() {
+        let mut r = recorder();
+        r.push_event(InputEvent::Button {
+            id: COIN,
+            pressed: true,
+        });
+        r.push_event(InputEvent::Relative {
+            id: TRACK_X,
+            delta: 2.5,
+        });
+        let m = r.finish();
+        assert_eq!(
+            m.records,
+            vec![
+                MovieRecord::Button {
+                    frame: 0,
+                    ctl: 1,
+                    pressed: true
+                },
+                MovieRecord::Relative {
+                    frame: 0,
+                    ctl: 0,
+                    bits: 2.5f32.to_bits()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn recorder_tags_records_with_the_frame_they_were_delivered_before() {
+        let mut r = recorder();
+        r.push_event(InputEvent::Button {
+            id: COIN,
+            pressed: true,
+        });
+        r.advance_frame();
+        r.advance_frame();
+        r.push_release_all();
+        r.push_marker("here");
+        let m = r.finish();
+        assert_eq!(m.records[0].frame(), 0);
+        assert_eq!(m.records[1].frame(), 2);
+        assert_eq!(m.records[2].frame(), 2);
+        // `frames` is the span, so it counts the frames advanced through.
+        assert_eq!(m.header.frames, 2);
+    }
+
+    #[test]
+    fn recorder_counts_events_outside_the_control_table_instead_of_recording_them() {
+        let mut r = recorder();
+        r.push_event(InputEvent::Button {
+            id: InputId(999),
+            pressed: true,
+        });
+        assert_eq!(r.unmapped(), 1);
+        assert!(r.is_empty());
+    }
+
+    /// The property the whole format exists for: what was recorded is what is
+    /// delivered, in order, against the same frames.
+    #[test]
+    fn a_recorded_session_replays_as_the_same_events() {
+        let mut r = recorder();
+        r.push_event(InputEvent::Relative {
+            id: TRACK_X,
+            delta: 0.6,
+        });
+        r.push_event(InputEvent::Relative {
+            id: TRACK_X,
+            delta: 0.6,
+        });
+        r.advance_frame();
+        r.push_event(InputEvent::Button {
+            id: COIN,
+            pressed: true,
+        });
+        r.advance_frame();
+        r.push_event(InputEvent::Button {
+            id: COIN,
+            pressed: false,
+        });
+        r.advance_frame();
+
+        let encoded = r.finish().encode();
+        let decoded = Movie::decode(&encoded).expect("decode");
+        let mut p = MoviePlayer::bind(decoded, CONTROLS).expect("bind");
+
+        // `take_frame` borrows the player, so the id table is lifted out first —
+        // the same shape `Harness::apply_movie_input` uses.
+        let ids = p.ids().to_vec();
+
+        // Frame 0: both analog deltas, separately. Summing them would be the
+        // bug this format is shaped to avoid.
+        let f0: Vec<InputEvent> = p
+            .take_frame(0)
+            .iter()
+            .filter_map(|r| r.to_input_event(&ids))
+            .collect();
+        assert_eq!(
+            f0,
+            vec![
+                InputEvent::Relative {
+                    id: TRACK_X,
+                    delta: 0.6
+                },
+                InputEvent::Relative {
+                    id: TRACK_X,
+                    delta: 0.6
+                },
+            ]
+        );
+        assert_eq!(p.take_frame(1).len(), 1);
+        assert_eq!(p.take_frame(2).len(), 1);
+        assert!(p.finished());
+    }
+
+    #[test]
+    fn player_returns_nothing_for_a_frame_with_no_records() {
+        let mut r = recorder();
+        r.advance_frame();
+        r.advance_frame();
+        r.push_release_all();
+        r.advance_frame();
+        let mut p = MoviePlayer::bind(r.finish(), CONTROLS).expect("bind");
+        assert!(p.take_frame(0).is_empty());
+        assert!(p.take_frame(1).is_empty());
+        assert_eq!(p.take_frame(2).len(), 1);
+    }
+
+    /// A caller that jumps forward must not receive a burst of stale input for
+    /// frames it skipped.
+    #[test]
+    fn player_discards_records_for_skipped_frames() {
+        let mut r = recorder();
+        r.push_release_all();
+        r.advance_frame();
+        r.push_release_all();
+        r.advance_frame();
+        r.push_release_all();
+        r.advance_frame();
+        let mut p = MoviePlayer::bind(r.finish(), CONTROLS).expect("bind");
+        assert_eq!(p.take_frame(2).len(), 1);
+        assert!(p.finished());
+    }
+
+    #[test]
+    fn binding_fails_when_the_machine_lacks_a_recorded_control() {
+        let m = Movie {
+            header: MovieHeader {
+                controls: vec!["not_a_control".into()],
+                ..header()
+            },
+            records: Vec::new(),
+        };
+        assert_eq!(
+            MoviePlayer::bind(m, CONTROLS).err(),
+            Some(MovieError::UnknownControl("not_a_control".into()))
+        );
+    }
+
+    #[test]
+    fn rejects_records_that_go_backwards_in_time() {
+        let m = Movie {
+            header: header(),
+            records: vec![
+                MovieRecord::ReleaseAll { frame: 5 },
+                MovieRecord::ReleaseAll { frame: 3 },
+            ],
+        };
+        assert_eq!(
+            Movie::decode(&m.encode()),
+            Err(MovieError::FramesNotMonotonic {
+                frame: 3,
+                previous: 5
+            })
+        );
     }
 
     /// A long analog trace is the case the record block is compressed for.

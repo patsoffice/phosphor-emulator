@@ -13,7 +13,9 @@ pub mod movie;
 mod rom_path;
 
 pub use harness::{Harness, MotionSpec, PressSpec};
-pub use movie::{Movie, MovieError, MovieHeader, MovieRecord, rom_digest};
+pub use movie::{
+    Movie, MovieError, MovieHeader, MoviePlayer, MovieRecord, MovieRecorder, rom_digest,
+};
 pub use rom_path::load_rom_set;
 
 /// Locate a ROM directory for ROM-gated integration tests: `PHOSPHOR_ROMS` if

@@ -18,6 +18,7 @@ use phosphor_core::core::machine::{FrontendMachine, InputEvent, InputId};
 use phosphor_machines::registry;
 
 use crate::load_rom_set;
+use crate::movie::{Movie, MovieError, MoviePlayer, MovieRecord, rom_digest};
 
 /// Default frames to hold a scripted input down (coin / `--press` pulse).
 const DEFAULT_HOLD: usize = 8;
@@ -54,6 +55,10 @@ pub struct Harness {
     machine: Box<dyn FrontendMachine>,
     presses: Vec<ScheduledPress>,
     motions: Vec<ScheduledMotion>,
+    /// A bound input movie, when this harness is replaying one. Independent of
+    /// `presses`/`motions`: a movie is a recorded trace, those are CLI sugar,
+    /// and nothing stops a caller using both.
+    movie: Option<MoviePlayer>,
     /// Number of frames run so far (also the index of the next frame).
     frame: usize,
 }
@@ -161,8 +166,82 @@ impl Harness {
             machine: machine_box,
             presses: scheduled,
             motions: scheduled_motions,
+            movie: None,
             frame: 0,
         })
+    }
+
+    /// Boot the machine an input movie was recorded against, and bind the movie
+    /// for replay.
+    ///
+    /// The machine name comes from the movie, not the caller — a movie knows
+    /// what it was recorded against, and letting the caller assert a different
+    /// one would only create a way to be wrong.
+    pub fn build_with_movie(roms_path: &str, movie_path: &Path) -> Result<Self, String> {
+        let bytes = std::fs::read(movie_path)
+            .map_err(|e| format!("reading movie {}: {e}", movie_path.display()))?;
+        let movie = Movie::decode(&bytes)
+            .map_err(|e| format!("reading movie {}: {e}", movie_path.display()))?;
+        Self::from_movie(roms_path, movie)
+    }
+
+    /// Boot and bind an already-decoded movie. The seam tests use to replay a
+    /// movie they just recorded, without a round trip through the filesystem.
+    ///
+    /// Reconstructs the recording's starting conditions in the order they were
+    /// established: the host sample rate is set *before* the machine is built
+    /// (devices derive their resampler ratios at construction, so setting it
+    /// afterwards would leave the chips disagreeing), then reset, NVRAM, and the
+    /// power-on DIP bytes.
+    pub fn from_movie(roms_path: &str, movie: Movie) -> Result<Self, String> {
+        let name = movie.header.machine.clone();
+        let entry = registry::find(&name).ok_or_else(|| {
+            let avail: Vec<&str> = registry::all().iter().map(|e| e.name).collect();
+            format!(
+                "movie names unknown machine '{name}'; available: {}",
+                avail.join(", ")
+            )
+        })?;
+
+        phosphor_core::audio::set_host_sample_rate(movie.header.host_sample_rate);
+
+        let set = load_rom_set(roms_path, entry.rom_names)
+            .map_err(|e| format!("loading ROM set {roms_path}: {e}"))?;
+
+        // A movie replayed against a different dump boots fine and then diverges
+        // silently, so this check is the difference between a clear error and a
+        // golden hash that moved for no visible reason.
+        let actual = rom_digest(&set, entry.rom_names);
+        if actual != movie.header.rom_digest {
+            return Err(MovieError::RomMismatch.to_string());
+        }
+
+        let mut machine_box =
+            (entry.create)(&set).map_err(|e| format!("creating machine '{name}': {e}"))?;
+        machine_box.reset();
+
+        if let Some(nv) = &movie.header.nvram {
+            machine_box.load_nvram(nv);
+        }
+        for (bank, &value) in movie.header.dip.iter().enumerate() {
+            machine_box.set_dip_bank_value(bank, value);
+        }
+
+        let player = MoviePlayer::bind(movie, machine_box.input_controls())
+            .map_err(|e| format!("binding movie to '{name}': {e}"))?;
+
+        Ok(Self {
+            machine: machine_box,
+            presses: Vec::new(),
+            motions: Vec::new(),
+            movie: Some(player),
+            frame: 0,
+        })
+    }
+
+    /// The bound movie, if this harness is replaying one.
+    pub fn movie(&self) -> Option<&MoviePlayer> {
+        self.movie.as_ref()
     }
 
     /// Schedule sustained relative motion on an already-resolved control.
@@ -200,6 +279,7 @@ impl Harness {
     ///
     /// [`advance_frame`]: Self::advance_frame
     pub fn apply_scheduled_input(&mut self) {
+        self.apply_movie_input();
         for p in &self.presses {
             if self.frame == p.at {
                 self.machine.handle_input(InputEvent::Button {
@@ -219,6 +299,43 @@ impl Harness {
                     id: m.id,
                     delta: m.delta,
                 });
+            }
+        }
+    }
+
+    /// Deliver the bound movie's records for the frame about to run, in the
+    /// order they were recorded.
+    ///
+    /// Order is load-bearing twice over. Across records, because a press and its
+    /// release in the same frame must arrive that way round. Within analog
+    /// records, because each one truncates independently inside the machine —
+    /// which is why a movie stores every delta rather than a per-frame sum.
+    fn apply_movie_input(&mut self) {
+        let Some(player) = &mut self.movie else {
+            return;
+        };
+        let frame = self.frame as u32;
+        // Take the frame's records out of the borrow before touching the
+        // machine: delivery needs `&mut self.machine` while the slice borrows
+        // `self.movie`.
+        let records: Vec<MovieRecord> = player.take_frame(frame).to_vec();
+        if records.is_empty() {
+            return;
+        }
+        let ids = player.ids().to_vec();
+        for record in &records {
+            match record {
+                MovieRecord::ReleaseAll { .. } => self.machine.release_all_inputs(),
+                MovieRecord::Dip { bank, value, .. } => {
+                    self.machine.set_dip_bank_value(*bank as usize, *value)
+                }
+                // Markers are author bookmarks; they change no machine state.
+                MovieRecord::Marker { .. } => {}
+                _ => {
+                    if let Some(event) = record.to_input_event(&ids) {
+                        self.machine.handle_input(event);
+                    }
+                }
             }
         }
     }
@@ -266,8 +383,20 @@ impl Harness {
             machine,
             presses: Vec::new(),
             motions: Vec::new(),
+            movie: None,
             frame: 0,
         }
+    }
+
+    /// Bind a movie to an already-wrapped machine.
+    ///
+    /// [`from_movie`](Self::from_movie) is the normal path (it boots the machine
+    /// the movie names and reconstructs its starting conditions). This is the
+    /// seam for the ROM-less registry-driven tests, which build a bare machine
+    /// themselves and only need the replay half.
+    pub fn bind_movie(&mut self, movie: Movie) -> Result<(), MovieError> {
+        self.movie = Some(MoviePlayer::bind(movie, self.machine.input_controls())?);
+        Ok(())
     }
 
     /// Consume the harness and return the wrapped machine — the seam the
