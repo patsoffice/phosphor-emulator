@@ -34,7 +34,6 @@ use phosphor_harness::movie::{Movie, MovieRecord, hex};
 use phosphor_harness::{Harness, hash_frame, hash_vectors, load_rom_set, render_oriented};
 
 mod gfxsheet;
-mod mame;
 mod trace;
 use gfxsheet::SheetConfig;
 use trace::TraceFormat;
@@ -329,23 +328,6 @@ enum MovieCommand {
         /// Movie file (`.phmi`).
         movie: PathBuf,
     },
-    /// Emit a MAME autoboot Lua script that replays this movie's DIGITAL input,
-    /// so the same session can be run in both emulators and the frames compared.
-    ///
-    /// Analog cannot transfer — MAME's analog ports carry an absolute value
-    /// while a movie carries relative deltas — so analog records are reported
-    /// and skipped rather than approximated. Needs no ROM set.
-    Mame {
-        /// Movie file (`.phmi`).
-        movie: PathBuf,
-        /// Take a MAME snapshot at this frame, for diffing against
-        /// `disasm replay --frames <same>`.
-        #[arg(long)]
-        snap_at: Option<u32>,
-        /// Output Lua path (default: `<machine>.lua`).
-        #[arg(short = 'o', long)]
-        out: Option<PathBuf>,
-    },
     /// Replay a movie and print the resulting frame hash, for CI that has ROMs
     /// but no reference PNG. The hash is the same one `frames.toml` pins, so it
     /// can be compared directly against a golden entry.
@@ -546,11 +528,6 @@ fn run_command(cmd: Command) -> Result<String, String> {
         ),
         Command::Movie { cmd } => match cmd {
             MovieCommand::Info { movie } => run_movie_info(&movie),
-            MovieCommand::Mame {
-                movie,
-                snap_at,
-                out,
-            } => run_movie_mame(&movie, snap_at, out.as_deref()),
             MovieCommand::Check {
                 movie,
                 frames,
@@ -877,56 +854,6 @@ fn run_movie_info(movie_path: &Path) -> Result<String, String> {
         }
     }
     Ok(out)
-}
-
-/// Emit a MAME autoboot script replaying a movie's digital input.
-///
-/// ROM-free: the control table comes from the registry, which is also where
-/// MAME's driver name for the game comes from — our `burgertime` is MAME's
-/// `btime`, and the registry's first ROM-set name is that value.
-fn run_movie_mame(
-    movie_path: &Path,
-    snap_at: Option<u32>,
-    out: Option<&Path>,
-) -> Result<String, String> {
-    let movie = load_movie(movie_path)?;
-    let name = movie.header.machine.clone();
-    let entry =
-        registry::find(&name).ok_or_else(|| format!("movie names unknown machine '{name}'"))?;
-    let driver = entry
-        .rom_names
-        .first()
-        .ok_or_else(|| format!("machine '{name}' declares no ROM set"))?;
-
-    let conv = mame::to_lua(&movie, entry.controls, driver, snap_at);
-    let out_path = out
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(format!("{name}.lua")));
-    std::fs::write(&out_path, &conv.lua)
-        .map_err(|e| format!("writing {}: {e}", out_path.display()))?;
-
-    let mut msg = format!(
-        "wrote {} ({} digital edge(s), MAME driver `{driver}`)\n\
-         run: mame {driver} -autoboot_script {} -video none -seconds_to_run <N>\n",
-        out_path.display(),
-        conv.edges,
-        out_path.display(),
-    );
-    // Both of these change what the script reproduces, so they are reported on
-    // stdout rather than left as a comment in a file nobody opens.
-    if conv.analog_dropped > 0 {
-        msg.push_str(&format!(
-            "WARNING: {} analog record(s) dropped — this replays the digital half only\n",
-            conv.analog_dropped
-        ));
-    }
-    if !conv.unmapped.is_empty() {
-        msg.push_str(&format!(
-            "WARNING: no MAME field for: {}\n",
-            conv.unmapped.join(", ")
-        ));
-    }
-    Ok(msg)
 }
 
 /// Replay a movie and print the frame fingerprint, for CI without a reference
