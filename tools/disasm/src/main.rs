@@ -30,7 +30,8 @@ use phosphor_machines::disasm_registry::{self, DisasmCpu};
 use phosphor_machines::gfx_registry;
 use phosphor_machines::registry;
 
-use phosphor_harness::{Harness, load_rom_set};
+use phosphor_harness::movie::{Movie, MovieRecord, hex};
+use phosphor_harness::{Harness, hash_frame, hash_vectors, load_rom_set, render_oriented};
 
 mod gfxsheet;
 mod trace;
@@ -267,6 +268,31 @@ enum Command {
         /// ROM set: a `.zip` archive or a directory of loose ROM files.
         path: String,
     },
+    /// Replay a recorded input movie and capture the resulting frame — the
+    /// gameplay counterpart of `frameshot`, which can only reach attract mode.
+    /// The machine and its starting conditions come from the movie.
+    Replay {
+        /// Movie file (`.phmi`) to replay.
+        #[arg(long)]
+        movie: PathBuf,
+        /// Frames to run. Defaults to the movie's own span; running longer is
+        /// allowed and simply continues with no further input.
+        #[arg(long)]
+        frames: Option<usize>,
+        /// Output PNG path (default: `<machine>_f<frames>.png`).
+        #[arg(short = 'o', long)]
+        out: Option<PathBuf>,
+        /// Optional reference PNG to diff the captured frame against.
+        #[arg(long)]
+        compare: Option<PathBuf>,
+        /// ROM set: a `.zip` archive or a directory of loose ROM files.
+        path: String,
+    },
+    /// Inspect and verify input movies.
+    Movie {
+        #[command(subcommand)]
+        cmd: MovieCommand,
+    },
     /// Compare two RGB PNGs pixel-by-pixel; print the diff percentage and,
     /// optionally, write a highlight image (differing pixels in red).
     Imgdiff {
@@ -284,6 +310,31 @@ enum Command {
     /// List the registered machines (the `--machine` values accepted by
     /// `frameshot`/`trace`/`machine`/`gfxview`), with their ROM-set names.
     Machines,
+}
+
+#[derive(Subcommand)]
+enum MovieCommand {
+    /// Describe a movie: its machine, ROM digest, starting conditions, record
+    /// counts per kind, busiest frames and markers.
+    ///
+    /// Needs neither a ROM set nor the machine — the header is self-describing,
+    /// which is what makes a binary format acceptable for the trace itself.
+    Info {
+        /// Movie file (`.phmi`).
+        movie: PathBuf,
+    },
+    /// Replay a movie and print the resulting frame hash, for CI that has ROMs
+    /// but no reference PNG. The hash is the same one `frames.toml` pins, so it
+    /// can be compared directly against a golden entry.
+    Check {
+        /// Movie file (`.phmi`).
+        movie: PathBuf,
+        /// Frames to run (default: the movie's own span).
+        #[arg(long)]
+        frames: Option<usize>,
+        /// ROM set: a `.zip` archive or a directory of loose ROM files.
+        path: String,
+    },
 }
 
 /// Address-range / instruction-count limits shared by every mode.
@@ -455,6 +506,21 @@ fn run_command(cmd: Command) -> Result<String, String> {
             out: out.as_deref(),
             ..trace::TraceOptions::new(&machine, &path)
         }),
+        Command::Replay {
+            movie,
+            frames,
+            out,
+            compare,
+            path,
+        } => run_replay(&movie, frames, out.as_deref(), compare.as_deref(), &path),
+        Command::Movie { cmd } => match cmd {
+            MovieCommand::Info { movie } => run_movie_info(&movie),
+            MovieCommand::Check {
+                movie,
+                frames,
+                path,
+            } => run_movie_check(&movie, frames, &path),
+        },
         Command::Imgdiff {
             a,
             b,
@@ -575,6 +641,211 @@ fn run_frameshot(
             "diff vs {}: {ndiff}/{total} ({:.1}%)\n",
             reference.display(),
             100.0 * ndiff as f64 / total as f64
+        ));
+    }
+    Ok(msg)
+}
+
+// ---------------------------------------------------------------------------
+// Input movies
+// ---------------------------------------------------------------------------
+
+/// Read and decode a movie, reporting the path in any error.
+fn load_movie(path: &Path) -> Result<Movie, String> {
+    let bytes =
+        std::fs::read(path).map_err(|e| format!("reading movie {}: {e}", path.display()))?;
+    Movie::decode(&bytes).map_err(|e| format!("reading movie {}: {e}", path.display()))
+}
+
+/// Replay a movie and capture the frame it reaches.
+///
+/// The gameplay counterpart of `frameshot`. Everything about the machine — which
+/// one, its ROM digest, NVRAM, DIP bytes and audio rate — comes from the movie,
+/// so the only thing the caller supplies is where the ROMs live.
+fn run_replay(
+    movie_path: &Path,
+    frames: Option<usize>,
+    out: Option<&Path>,
+    compare: Option<&Path>,
+    roms: &str,
+) -> Result<String, String> {
+    let movie = load_movie(movie_path)?;
+    let machine = movie.header.machine.clone();
+    let span = movie.header.frames as usize;
+    // Running past the movie's span is legitimate — it simply continues with no
+    // further input, which is how you look at what a recorded session settles
+    // into a few seconds later.
+    let frames = frames.unwrap_or(span);
+
+    let mut harness = Harness::from_movie(roms, movie)?;
+    for _ in 0..frames {
+        harness.run_frame();
+    }
+
+    let machine_box = harness.machine_mut();
+    let (w, h, buf) = render_oriented(machine_box);
+
+    let out_path = out
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(format!("{machine}_f{frames}.png")));
+    gfxsheet::write_png(&out_path, &buf, w, h)
+        .map_err(|e| format!("writing {}: {e}", out_path.display()))?;
+
+    let mut msg = format!(
+        "replayed {machine} {frames} frame(s) (movie spans {span}) -> {} ({w}×{h})\n\
+         frame: {}\n",
+        out_path.display(),
+        hash_frame(w, h, &buf)
+    );
+
+    if let Some(reference) = compare {
+        let (rw, rh, rgb) = load_png(reference)?;
+        if (rw, rh) != (w, h) {
+            return Err(format!(
+                "reference {} is {rw}×{rh}, replayed frame is {w}×{h}",
+                reference.display()
+            ));
+        }
+        let (ndiff, total) = count_diff(&buf, &rgb, 12);
+        msg.push_str(&format!(
+            "diff vs {}: {ndiff}/{total} ({:.1}%)\n",
+            reference.display(),
+            100.0 * ndiff as f64 / total as f64
+        ));
+    }
+    Ok(msg)
+}
+
+/// Describe a movie without booting anything.
+fn run_movie_info(movie_path: &Path) -> Result<String, String> {
+    let m = load_movie(movie_path)?;
+    let h = &m.header;
+
+    let mut buttons = 0usize;
+    let mut absolute = 0usize;
+    let mut relative = 0usize;
+    let mut release_all = 0usize;
+    let mut dips = 0usize;
+    let mut markers = 0usize;
+    for r in &m.records {
+        match r {
+            MovieRecord::Button { .. } => buttons += 1,
+            MovieRecord::Absolute { .. } => absolute += 1,
+            MovieRecord::Relative { .. } => relative += 1,
+            MovieRecord::ReleaseAll { .. } => release_all += 1,
+            MovieRecord::Dip { .. } => dips += 1,
+            MovieRecord::Marker { .. } => markers += 1,
+        }
+    }
+
+    let mut out = format!(
+        "{}\n\
+         machine:     {}\n\
+         rom digest:  {}\n\
+         frames:      {}\n\
+         host rate:   {} Hz\n\
+         dip bytes:   {}\n\
+         nvram:       {}\n\
+         controls:    {}{}\n\
+         records:     {} total\n",
+        movie_path.display(),
+        h.machine,
+        hex(&h.rom_digest),
+        h.frames,
+        h.host_sample_rate,
+        if h.dip.is_empty() {
+            "none".to_string()
+        } else {
+            h.dip
+                .iter()
+                .map(|b| format!("{b:#04x}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        },
+        match &h.nvram {
+            Some(nv) => format!("{} bytes", nv.len()),
+            None => "none".to_string(),
+        },
+        h.controls.len(),
+        if h.controls.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", h.controls.join(", "))
+        },
+        m.records.len(),
+    );
+
+    // A movie that recorded nothing is almost always a mistake — a capture that
+    // was armed but never played, or one whose input never reached the machine.
+    // Say so rather than printing an empty breakdown and looking healthy.
+    if m.records.is_empty() {
+        out.push_str("  (no input was recorded)\n");
+    }
+
+    for (label, n) in [
+        ("button", buttons),
+        ("absolute", absolute),
+        ("relative", relative),
+        ("release-all", release_all),
+        ("dip", dips),
+        ("marker", markers),
+    ] {
+        if n > 0 {
+            out.push_str(&format!("  {label:<12} {n}\n"));
+        }
+    }
+
+    // The busiest frames are what a human wants to see: they are where the
+    // player was actually doing something.
+    let mut hist = m.frame_histogram();
+    if !hist.is_empty() {
+        let frames_with_input = hist.len();
+        hist.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        out.push_str(&format!(
+            "input on {frames_with_input} of {} frame(s); busiest:\n",
+            h.frames
+        ));
+        for (frame, n) in hist.iter().take(5) {
+            out.push_str(&format!("  frame {frame:<8} {n} record(s)\n"));
+        }
+    }
+
+    let markers: Vec<(u32, &str)> = m.markers().collect();
+    if !markers.is_empty() {
+        out.push_str("markers:\n");
+        for (frame, label) in markers {
+            out.push_str(&format!("  frame {frame:<8} {label}\n"));
+        }
+    }
+    Ok(out)
+}
+
+/// Replay a movie and print the frame fingerprint, for CI without a reference
+/// PNG. The hash is the one `frames.toml` pins, so it compares directly.
+fn run_movie_check(movie_path: &Path, frames: Option<usize>, roms: &str) -> Result<String, String> {
+    let movie = load_movie(movie_path)?;
+    let machine = movie.header.machine.clone();
+    let span = movie.header.frames as usize;
+    let frames = frames.unwrap_or(span);
+
+    let mut harness = Harness::from_movie(roms, movie)?;
+    for _ in 0..frames {
+        harness.run_frame();
+    }
+
+    let machine_box = harness.machine_mut();
+    let (w, h, buf) = render_oriented(machine_box);
+    let mut msg = format!(
+        "{machine} @ frame {frames} ({w}×{h})\nframe:   {}\n",
+        hash_frame(w, h, &buf)
+    );
+    // For the vector games the display list, not the rasterised frame, is what
+    // the frontend draws — so report both, exactly as the golden suite pins both.
+    if let Some(lines) = machine_box.vector_display_list() {
+        msg.push_str(&format!(
+            "vectors: {} ({} line(s))\n",
+            hash_vectors(lines),
+            lines.len()
         ));
     }
     Ok(msg)
