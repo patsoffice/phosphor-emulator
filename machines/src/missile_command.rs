@@ -969,6 +969,7 @@ impl Saveable for MissileCommandSystem {
     fn save_state(&self, w: &mut StateWriter) {
         self.cpu.save_state(w);
         self.board.pokey.save_state(w);
+        self.board.dc_blocker.save_state(w);
         w.write_bytes(self.board.map.region_data(Region::Ram));
         w.write_u8(self.board.in0);
         w.write_u8(self.board.in1);
@@ -987,6 +988,7 @@ impl Saveable for MissileCommandSystem {
     fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
         self.cpu.load_state(r)?;
         self.board.pokey.load_state(r)?;
+        self.board.dc_blocker.load_state(r)?;
         r.read_bytes_into(self.board.map.region_data_mut(Region::Ram))?;
         self.board.in0 = r.read_u8()?;
         self.board.in1 = r.read_u8()?;

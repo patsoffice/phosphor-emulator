@@ -1,4 +1,4 @@
-use phosphor_core::audio::AudioResampler;
+use phosphor_core::audio::{AudioResampler, DcBlocker};
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::debug_trace::{DebugEvent, DebugEventKind, DebugTraceBuffer};
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
@@ -356,6 +356,9 @@ pub struct WilliamsBoard {
     pub(crate) dac: Mc1408Dac,
     /// HC55516 CVSD speech decoder (extra-sound boards only, e.g. Sinistar).
     pub(crate) cvsd: Option<Hc55516>,
+    /// Output coupling capacitor. Runs at the 1 MHz DAC update rate, before
+    /// the downsampler, so the pedestal never reaches the resampler.
+    dc_blocker: DcBlocker,
     pub(crate) resampler: AudioResampler<i16>,
 
     // Memory maps (page-table dispatch + watchpoints + backing memory)
@@ -402,6 +405,7 @@ impl WilliamsBoard {
             sound_pia: Pia6820::new(),
             dac: Mc1408Dac::new(),
             cvsd: config.has_cvsd.then(Hc55516::new),
+            dc_blocker: DcBlocker::new(1_000_000),
             resampler: AudioResampler::new(
                 1_000_000,
                 phosphor_core::audio::host_sample_rate() as u64,
@@ -701,6 +705,19 @@ impl WilliamsBoard {
             sample = (sample as i32 + cvsd_scaled).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
         }
 
+        // Output coupling capacitor.
+        //
+        // `Mc1408Dac::sample_i16` maps 0x00 to -32768, treating 0x80 as the
+        // silent code. The sound PIA's port A resets to 0x00 and the sound
+        // program does not idle it at mid-scale, so an idle board sat at
+        // negative full scale — Joust measured DC -1.0 with 100% of samples
+        // clipped before a coin went in, and -0.35 with 42% clipped during
+        // play. The MC1408 is a unipolar current DAC and the board AC-couples
+        // its output stage, so tracking and removing the DC is what the
+        // hardware does; assuming a mid-scale rest code is not.
+        let blocked = self.dc_blocker.process(sample as f32 / -(i16::MIN as f32));
+        let sample = (blocked * -(i16::MIN as f32)).clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+
         // Bresenham downsample: 1 MHz CPU clock -> 44.1 kHz output
         self.resampler.tick(sample);
 
@@ -725,6 +742,7 @@ impl WilliamsBoard {
             cvsd.reset();
         }
         self.resampler.reset();
+        self.dc_blocker.reset();
         self.watchdog_counter = 0;
         self.clock = 0;
         self.rom_pia_input = 0;
@@ -759,6 +777,7 @@ impl Saveable for WilliamsBoard {
         self.dac.save_state(w);
         // I/O & timing
         w.write_u8(self.rom_bank);
+        self.dc_blocker.save_state(w);
         self.resampler.save_state(w);
         w.write_u32_le(self.watchdog_counter);
         w.write_u64_le(self.clock);
@@ -793,6 +812,7 @@ impl Saveable for WilliamsBoard {
         self.dac.load_state(r)?;
         // I/O & timing
         self.rom_bank = r.read_u8()?;
+        self.dc_blocker.load_state(r)?;
         self.resampler.load_state(r)?;
         self.watchdog_counter = r.read_u32_le()?;
         self.clock = r.read_u64_le()?;

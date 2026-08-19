@@ -85,6 +85,27 @@ impl DcBlocker {
     }
 }
 
+/// The filter's two-sample history is live state, so a save state has to carry
+/// it: a machine restored mid-passage would otherwise re-settle from zero and
+/// disagree with the run it was restored from. `r` is derived from the sample
+/// rate at construction and is not serialized — reconstructing the machine
+/// establishes it, exactly as it does for the resamplers.
+impl crate::core::save_state::Saveable for DcBlocker {
+    fn save_state(&self, w: &mut crate::core::save_state::StateWriter) {
+        w.write_f32_le(self.prev_in);
+        w.write_f32_le(self.prev_out);
+    }
+
+    fn load_state(
+        &mut self,
+        r: &mut crate::core::save_state::StateReader,
+    ) -> Result<(), crate::core::save_state::SaveError> {
+        self.prev_in = r.read_f32_le()?;
+        self.prev_out = r.read_f32_le()?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

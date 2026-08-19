@@ -1094,6 +1094,7 @@ impl Saveable for FoodFightSystem {
         for p in &self.board.pokey {
             p.save_state(w);
         }
+        self.board.dc_blocker.save_state(w);
         w.write_bytes(self.board.map.region_data(Region::Ram));
         w.write_bytes(self.board.map.region_data(Region::SpriteRam));
         w.write_bytes(self.board.map.region_data(Region::Playfield));
@@ -1115,6 +1116,7 @@ impl Saveable for FoodFightSystem {
         for p in &mut self.board.pokey {
             p.load_state(r)?;
         }
+        self.board.dc_blocker.load_state(r)?;
         r.read_bytes_into(self.board.map.region_data_mut(Region::Ram))?;
         r.read_bytes_into(self.board.map.region_data_mut(Region::SpriteRam))?;
         r.read_bytes_into(self.board.map.region_data_mut(Region::Playfield))?;

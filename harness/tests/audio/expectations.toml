@@ -54,12 +54,10 @@ clipping = true
 reason = "movie: DC -0.966 with 67.9% clipped — the worst of the set, and badly saturated during real play"
 issue = "phosphor-emulator-audio-dc-play-sweep-stxr"
 
-[[known_defect]]
-machine = "sinistar"
-dc = true
-clipping = true
-reason = "movie: DC -0.531 with 9.9% clipped"
-issue = "phosphor-emulator-audio-dc-play-sweep-stxr"
+# Note joust and robotron keep only `clipping` — the Williams coupling
+# capacitor cleared their offsets (joust -0.350 -> +0.001, robotron +0.074 ->
+# -0.002) but both still drive the rail, which is excess gain rather than bias.
+# Sinistar came clean on both counts and its entry is gone.
 
 [[known_defect]]
 machine = "qbert"
@@ -70,9 +68,8 @@ issue = "phosphor-emulator-audio-dc-play-sweep-stxr"
 
 [[known_defect]]
 machine = "joust"
-dc = true
 clipping = true
-reason = "movie: DC -0.350 with 42.2% clipped — heavily saturated during play"
+reason = "movie: 3.9% clipped with DC now clean (+0.001) — residual excess gain, not bias"
 issue = "phosphor-emulator-audio-dc-play-sweep-stxr"
 
 [[known_defect]]
@@ -95,9 +92,8 @@ issue = "phosphor-emulator-audio-dc-play-sweep-stxr"
 
 [[known_defect]]
 machine = "robotron"
-dc = true
 clipping = true
-reason = "movie: 25.3% clipped with DC +0.074 — the offset is far smaller than the +0.85 an input-free boot shows, but still over threshold"
+reason = "movie: 15.8% clipped with DC now clean (-0.002) — the loudest of the Williams set and the clearest case of excess gain"
 issue = "phosphor-emulator-audio-dc-play-sweep-stxr"
 
 [[known_defect]]
