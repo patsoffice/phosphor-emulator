@@ -45,24 +45,26 @@ fn sample_rate() -> u64 {
     phosphor_core::audio::host_sample_rate() as u64
 }
 
-// Per-effect output low-pass cutoffs (Hz) and gains, calibrated against captured
-// hardware references (tools/sound-reference). On the board each effect passes
-// through RC integrators and a coupling filter, so the raw squares/noise are
-// darkened by the low-passes and balanced against each other (walk subtle, jump
-// moderate, stomp prominent). The absolute gains are scaled up relative to the
-// reference because Phosphor's DAC plays at full scale while the board's music
-// sits ~5x lower (the VR2 volume pot + mixer): matching the effect/music *ratio*
-// keeps the effects audible over the music rather than buried under it.
-// The DAC (music) is attenuated to leave output headroom for the effects, the
-// way the VR2 volume pot + mixer do on hardware. At full scale the music
-// consumed the entire range, so any effect loud enough to hear over it clipped
-// against the output clamp. With headroom, the effects sit clearly above.
-const DAC_GAIN: f64 = 0.55;
+// Every voice's level is now calibrated against the board's own, so the balance
+// between them is the board's rather than a judgement about what sounds right.
+//
+// This used to be a compromise: the music was held down to leave the effects
+// somewhere to sit, because at full scale it consumed the whole output range and
+// anything loud enough to hear over it clipped. That was a symptom rather than a
+// requirement. The DAC's signal-decay circuit was missing, so samples ended on a
+// step instead of fading — the clicks that produced ran 5.5 dB above the board's
+// peaks while the body of the music sat 4.9 dB below them, and the headroom they
+// consumed was what the attenuation was really paying for. With the decay
+// modelled the peaks drop 6.6 dB and the level can simply be the board's.
+const DAC_GAIN: f64 = 1.213;
 // I8035 DAC reconstruction filter: a Sallen-Key low-pass on the board (R = 5.6 kΩ
 // ×2, C = 22 nF / 10 nF) gives f ≈ 1916 Hz, Q ≈ 0.74. It rolls off the DAC step
 // edges and sample brightness so the music/effects sit warm rather than hashy.
 const DAC_LP_HZ: f64 = 1_916.0;
 const DAC_LP_Q: f64 = 0.74;
+/// The DAC's signal-decay network: 10 kΩ across 10 µF, so a sample fades with
+/// τ = 100 ms once the sound CPU drops its decay line.
+const DAC_DECAY_S: f64 = 10_000.0 * 10e-6;
 // Walk, fitted against a MAME capture of the effect triggered once
 // (`drive_dkong_single.lua` with DK_EFFECT=walk) against `sndcmp capture
 // dkong/walk`:
@@ -571,8 +573,7 @@ fn build_circuit() -> (DiscreteCircuit, DkongInputs) {
     let walk_en = b.logic_input("WALK_EN");
     let jump_en = b.logic_input("JUMP_EN");
     let stomp_en = b.logic_input("STOMP_EN");
-    // Discharge control line — wired for the board-level mute/discharge path,
-    // currently inert (the TKG-04 model does not drive it yet).
+    // The DAC's signal-decay line, driven by the sound CPU's port 2 bit 7.
     let discharge = b.logic_input("DISCHARGE");
 
     // Walk: a fixed 555 control voltage, AC-coupled to drop the duty-dependent
@@ -906,9 +907,38 @@ fn build_circuit() -> (DiscreteCircuit, DkongInputs) {
     );
     let stomp = b.gain("STOMP_OUT", stomp_int, STOMP_GAIN * STOMP_DIVIDER);
 
+    // The DAC's signal-decay circuit: a transistor across 10 kΩ and 10 µF that
+    // fades the DAC out rather than letting it stop.
+    //
+    // The sound CPU drops its port 2 bit 7 when a sample finishes. While that
+    // line is asserted the DAC's contribution is multiplied by a capacitor
+    // decaying with τ = 100 ms, so every sound trails off; released, the
+    // multiplier is 1 and the DAC passes untouched.
+    //
+    // The board never simply stops, which is what this model used to do — the
+    // line was allocated and left undriven. That is audible in two directions at
+    // once: a sample ending on a step is a click, and the gap after it is
+    // silence the board fills with a tail. Measured against the board our music
+    // ran 5.5 dB hotter at the peaks and 4.9 dB quieter in the body, with a
+    // crest factor of 12.2 against 3.7 and a fifth of the capture reading
+    // silent against a twenty-fifth.
+    // Asserting the line starts the fade; releasing it restores the DAC at once,
+    // because the transistor shorts the capacitor rather than letting it charge
+    // back. So the fall has the 100 ms time constant and the rise has none.
+    let dac_decay = b.rc_envelope("DAC_DECAY", discharge, DAC_DECAY_S, 0.0);
+    let dac_open = b.gain("DAC_OPEN", dac_decay, -1.0);
+    let dac_one = b.constant("DAC_ONE", 1.0);
+    let dac_gate = b.add("DAC_GATE", &[dac_one, dac_open]);
+    let dac_gated = b.multiply("DAC_GATED", dac, dac_gate);
     // DAC reconstruction: a Sallen-Key low-pass darkens the raw DAC steps before
     // the mix, matching the board's filter so the sampled music isn't hashy.
-    let dac_lp = b.second_order("DAC_LP", dac, FilterMode::LowPass, DAC_LP_HZ, DAC_LP_Q);
+    let dac_lp = b.second_order(
+        "DAC_LP",
+        dac_gated,
+        FilterMode::LowPass,
+        DAC_LP_HZ,
+        DAC_LP_Q,
+    );
 
     // Op-amp summing mixer: the filtered DAC plus the three filtered effects.
     let mix = b.add("MIX", &[dac_lp, walk, jump, stomp]);

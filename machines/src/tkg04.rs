@@ -747,6 +747,12 @@ impl Tkg04Board {
         // Box-filter the DAC (3.072 MHz → 44.1 kHz); each produced sample drives
         // one step of the discrete circuit, which sums it with the effects.
         if let Some(dac_avg) = self.resampler.tick_sample(self.dac.sample_i16()) {
+            // P2 bit 7 is the DAC's signal-decay line. The sound CPU drops it
+            // when a sample finishes, and the board fades the DAC out over a
+            // ~100 ms time constant rather than cutting it — so the tail of
+            // every sound decays instead of ending on a step. Leaving it undriven
+            // is audible as clicks where the steps land and silence between.
+            self.sound.set_discharge(self.sound_p2 & 0x80 == 0);
             self.sound.feed_dac(dac_avg);
         }
 
