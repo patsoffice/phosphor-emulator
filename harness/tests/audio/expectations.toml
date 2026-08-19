@@ -113,29 +113,8 @@ reason = "boot (no movie): DC offset over threshold; shares the Do's Castle hard
 issue = "phosphor-emulator-audio-dc-play-sweep-stxr"
 
 [[known_defect]]
-machine = "missile"
-dc = true
-clipping = true
-reason = "boot (no movie): output constant at -1.0, 100% clipped, AC RMS -200 dBFS — no AC content whatsoever"
-issue = "phosphor-emulator-audio-dc-play-sweep-stxr"
-
-[[known_defect]]
-machine = "quantum"
-dc = true
-clipping = true
-reason = "boot (no movie): DC -1.0 with 100% clipped"
-issue = "phosphor-emulator-audio-dc-play-sweep-stxr"
-
-[[known_defect]]
 machine = "mariobros"
 dc = true
 clipping = true
-reason = "boot: DC -1.0 with 100% clipped; its movie was recorded against a different ROM revision so play could not be measured"
-issue = "phosphor-emulator-audio-dc-play-sweep-stxr"
-
-[[known_defect]]
-machine = "foodf"
-dc = true
-clipping = true
-reason = "boot (no movie): DC -0.980 with 85.0% clipped"
+reason = "boot: DC -1.0 with 100% clipped; its movie was recorded against a different ROM name list so play could not be measured (…-movie-rom-digest-names-not-contents-aa1c)"
 issue = "phosphor-emulator-audio-dc-play-sweep-stxr"

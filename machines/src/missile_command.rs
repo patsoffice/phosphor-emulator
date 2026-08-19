@@ -1,4 +1,4 @@
-use phosphor_core::audio::SampleRing;
+use phosphor_core::audio::{DcBlocker, SampleRing};
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::input::{DrainPolicy, RelativeCounter};
 use phosphor_core::core::machine::{
@@ -340,6 +340,10 @@ pub struct MissileCommandBoard {
     scanline_buffer_valid: bool, // true after run_frame() completes
 
     audio_buffer: SampleRing<i16>,
+    /// The output coupling capacitor. POKEY's output is unipolar and sits at
+    /// zero when idle, so it needs the DC removed rather than a fixed midpoint
+    /// subtracted — see [`DcBlocker`].
+    dc_blocker: DcBlocker,
 }
 
 /// Atari Missile Command (1980): a 6502 beside the board it drives.
@@ -430,6 +434,7 @@ impl MissileCommandBoard {
             scanline_buffer: vec![0u8; 256 * 231 * 3],
             scanline_buffer_valid: false,
             audio_buffer: SampleRing::with_capacity(1024),
+            dc_blocker: DcBlocker::new(phosphor_core::audio::host_sample_rate()),
         }
     }
 
@@ -1017,11 +1022,17 @@ impl MachineCore for MissileCommandSystem {
         }
 
         // Drain POKEY's resampled f32 buffer and convert to i16 PCM.
-        // POKEY outputs unipolar [0.0, 1.0]; center around zero for signed PCM.
+        //
+        // POKEY's output is unipolar [0.0, 1.0] and sits at *zero* when idle,
+        // not at half scale, so the board's coupling capacitor is what centres
+        // it. Subtracting a fixed 0.5 instead — as this did — mapped silence to
+        // -32767 and pinned the output at the rail for the whole attract mode.
+        // The ×2 restores the level that centring on 0.5 was reaching for.
         let samples = self.board.pokey.drain_audio();
-        self.board
-            .audio_buffer
-            .extend(samples.iter().map(|&s| ((s * 2.0 - 1.0) * 32767.0) as i16));
+        let blocker = &mut self.board.dc_blocker;
+        self.board.audio_buffer.extend(samples.iter().map(|&s| {
+            (blocker.process(s) * 2.0 * 32767.0).clamp(i16::MIN as f32, i16::MAX as f32) as i16
+        }));
     }
 
     fn reset(&mut self) {
@@ -1033,6 +1044,7 @@ impl MachineCore for MissileCommandSystem {
         self.board.scanline_buffer.fill(0);
         self.board.scanline_buffer_valid = false;
         self.board.audio_buffer.clear();
+        self.board.dc_blocker.reset();
 
         self.cpu.reset(&mut self.board, BusMaster::Cpu(0));
     }

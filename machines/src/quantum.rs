@@ -36,7 +36,7 @@
 //! the containing word, so low-byte I/O writes (POKEY, NVRAM, color RAM,
 //! `led_w`) take `data & 0xFF` and I/O reads stay side-effect-light.
 
-use phosphor_core::audio::SampleRing;
+use phosphor_core::audio::{DcBlocker, SampleRing};
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::input::{DrainPolicy, RelativeCounter};
 use phosphor_core::core::machine::{
@@ -361,6 +361,9 @@ pub struct QuantumBoard {
     watchdog_count: u8,
 
     audio_buffer: SampleRing<i16>,
+    /// Output coupling capacitor: POKEY is unipolar and idles at zero, so the
+    /// DC must be tracked and removed rather than a fixed midpoint assumed.
+    dc_blocker: DcBlocker,
 }
 
 /// Quantum reads each trackball counter as a small signed 4-bit per-frame
@@ -426,6 +429,7 @@ impl QuantumSystem {
                 clock: 0,
                 watchdog_count: 0,
                 audio_buffer: SampleRing::with_capacity(2048),
+                dc_blocker: DcBlocker::new(phosphor_core::audio::host_sample_rate()),
             },
         };
         sys.board.refresh_dip_pots();
@@ -750,9 +754,13 @@ impl MachineCore for QuantumSystem {
         let s0 = self.board.pokey[0].drain_audio();
         let s1 = self.board.pokey[1].drain_audio();
         let len = s0.len().min(s1.len());
+        let blocker = &mut self.board.dc_blocker;
         self.board.audio_buffer.extend((0..len).map(|i| {
-            let mixed = (s0[i] + s1[i]) * 0.5; // [0, 1]
-            ((mixed - 0.5) * 2.0 * 32767.0) as i16
+            // Both POKEYs are unipolar [0, 1] and idle at *zero*, so the board's
+            // coupling capacitor is what centres the mix. Subtracting a fixed
+            // 0.5 instead mapped silence to -32767 and pinned the output.
+            let mixed = (s0[i] + s1[i]) * 0.5;
+            (blocker.process(mixed) * 2.0 * 32767.0).clamp(i16::MIN as f32, i16::MAX as f32) as i16
         }));
     }
 
@@ -767,6 +775,7 @@ impl MachineCore for QuantumSystem {
         self.board.track_x = new_track_counter();
         self.board.track_y = new_track_counter();
         self.board.audio_buffer.clear();
+        self.board.dc_blocker.reset();
         for p in &mut self.board.pokey {
             p.reset();
         }
@@ -825,6 +834,7 @@ impl Saveable for QuantumSystem {
         self.board.display_list.clear();
         self.board.refresh_dip_pots();
         self.board.audio_buffer.clear();
+        self.board.dc_blocker.reset();
         Ok(())
     }
 }
