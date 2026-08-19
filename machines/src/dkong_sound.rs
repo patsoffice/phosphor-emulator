@@ -53,29 +53,31 @@ const WALK_LP_HZ: f64 = 700.0;
 const WALK_GAIN: f64 = 0.14;
 const JUMP_LP_HZ: f64 = 1_400.0;
 const JUMP_GAIN: f64 = 0.25;
-// Stomp is a low rumble, not a hiss. Fitted against a MAME reference capture of
-// the isolated effect (`tools/sound-reference/drive_dkong_sound.lua`, window
-// 5-6 s) with `disasm audiodiff --range 5:6`:
+// Stomp is a low rumble, not a hiss. Fitted against a MAME capture of the
+// effect triggered ONCE (`tools/sound-reference/drive_dkong_single.lua` with
+// DK_EFFECT=stomp) against `sndcmp capture dkong/stomp`:
 //
-//                    was      now      reference
-//   AC RMS       -21.72 dB  -19.03 dB   -19.06 dB
-//   centroid      250.1 Hz   125.4 Hz    125.1 Hz
-//   below 150 Hz     29.5 %    63.8 %      89.6 %
-//   decay T20      0.090 s    0.374 s     0.515 s
+//                  original    reference    now
+//   AC RMS        -21.72 dB    -23.89 dB   -23.87 dB
+//   centroid       250.1 Hz     124.9 Hz    126.7 Hz
+//   decay T20       0.090 s      0.545 s     0.374 s
 //
-// The old 340 Hz corner put most of the energy above the reference's, and a
-// 50 ms envelope truncated at 250 ms cut the tail off before the reference had
-// finished falling 20 dB.
+// The original 340 Hz corner put most of the energy above the reference's, and
+// a 50 ms envelope truncated at 250 ms cut the tail off before the reference
+// had finished falling 20 dB.
 //
-// Level and brightness now match closely. Two gaps remain and are NOT component
-// values to keep tuning: the tail is still ~0.14 s short, and the reference has
-// 90 % of its energy below 150 Hz where this has 64 % with an 85 % rolloff at
-// 215 Hz against the reference's 141 Hz. A one-pole 175 Hz corner cannot be both
-// as dark as the reference and as loud; the reference falls off faster than one
-// pole allows, which points at a second filter stage on the board rather than a
-// wrong corner. See `…-discrete-sound-fidelity-l5r3.7`.
+// The gain was first fitted against a repeated-pulse reference window holding
+// more than one stomp, which made it read ~3 dB loud and pulled it down to 5.0.
+// Measured against a single trigger it is 7.0, close to where it started — a
+// reminder that a level fitted against overlapping decays is not a level.
+//
+// The remaining tail gap is NOT a component value to keep tuning. The reference
+// rolls off at 141 Hz where a 175 Hz one-pole rolls off at 215 Hz, and a single
+// pole cannot be both as dark as the reference and as loud. The reference falls
+// faster than one pole allows, which points at a second filter stage on the
+// board. See `…-discrete-sound-fidelity-l5r3.7`.
 const STOMP_LP_HZ: f64 = 175.0;
-const STOMP_GAIN: f64 = 5.0;
+const STOMP_GAIN: f64 = 7.0;
 /// Stomp envelope decay, fitted (see above). Longer than T20/ln(10) would
 /// suggest because the output low-pass smears the envelope's start.
 const STOMP_TAU: f64 = 0.39;

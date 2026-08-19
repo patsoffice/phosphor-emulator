@@ -25,7 +25,7 @@
 //! - [`Spectrum`] — what does it sound like? Centroid, flatness and band ratios
 //!   separate a filter error from a mix error from a gain error.
 //!
-//! Band energy ratios are the load-bearing measurement when diffing two
+//! Band energy ratios are the measurement to read first when diffing two
 //! captures: they are scale-invariant, so a pure gain error leaves them all at
 //! zero and anything large is a filter, mix or source difference.
 

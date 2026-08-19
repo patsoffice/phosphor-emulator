@@ -411,7 +411,7 @@ pub fn compare(
         1,
     );
 
-    // --- band energy: the load-bearing column ---
+    // --- band energy: the column to read first ---
     let _ = writeln!(
         s,
         "\nband energy (% of total) — scale-invariant, so a gain error leaves these at 0"

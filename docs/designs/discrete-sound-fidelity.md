@@ -344,7 +344,7 @@ Reports duration and rate, RMS and the gain ratio between files, DC offset,
 clipped-sample count, silent fraction, spectral centroid, spectral flatness, and
 a band-energy table with deltas. Exits non-zero when tolerances are exceeded.
 
-The band deltas are the load-bearing column: they are scale-invariant, so a pure
+The band deltas are the column to read first: they are scale-invariant, so a pure
 gain error leaves them at zero and anything large is a filter, mix or source
 difference. That single property is what separates the four ways a netlist goes
 wrong — source, filter, mix, output stage — and it is why `compare_wav.py`

@@ -235,8 +235,8 @@ pub fn fundamental_hz(ac: &[f64], spec: &[f64], n: usize, sample_rate: f64) -> f
 /// Fraction of total energy in each band of [`BAND_EDGES_HZ`], plus a final
 /// band above the last edge.
 ///
-/// The load-bearing comparison between two captures: scale-invariant, so a gain
-/// difference leaves every entry unchanged.
+/// The comparison to read first between two captures: scale-invariant, so a
+/// gain difference leaves every entry unchanged.
 pub fn band_energy_ratios(spec: &[f64], n: usize, sample_rate: f64) -> Vec<f64> {
     let mut bands = vec![0.0; BAND_EDGES_HZ.len()];
     let mut total = 0.0;
