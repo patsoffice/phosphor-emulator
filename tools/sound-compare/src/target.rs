@@ -61,7 +61,10 @@ pub type CreateFn = fn(probe: Option<&str>) -> Result<Box<dyn SoundTarget>, Stri
 /// A hand-written list rather than an inventory registry: there are a handful of
 /// these, they are only reachable from this binary, and a plain slice is what
 /// makes the coverage tests trivially exhaustive.
-static ALL: &[&TargetSpec] = &[&crate::targets::dkong::SPEC];
+static ALL: &[&TargetSpec] = &[
+    &crate::targets::dkong::SPEC,
+    &crate::targets::galaxian::SPEC,
+];
 
 pub fn all() -> &'static [&'static TargetSpec] {
     ALL

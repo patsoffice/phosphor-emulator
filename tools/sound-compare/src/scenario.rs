@@ -36,6 +36,18 @@ pub struct Action {
     /// The value to set. Booleans cover latch lines; a number covers a level.
     #[serde(default)]
     pub value: Value,
+    /// This action puts the board into the state the measurement assumes,
+    /// rather than being the stimulus under test.
+    ///
+    /// Some voices free-run. Galaxian's melody oscillator is always going, so
+    /// isolating its fire or hit means parking the melody somewhere inaudible
+    /// first — and that parking is not part of what is being measured. The
+    /// distinction matters to `sndcmp verify`, whose null check removes the
+    /// stimulus and requires silence: without it, any scenario on a board with a
+    /// free-running voice could never pass, and the check would have to be
+    /// weakened to the point of proving nothing.
+    #[serde(default)]
+    pub setup: bool,
 }
 
 /// A control value: a latch line or a level.

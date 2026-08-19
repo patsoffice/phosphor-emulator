@@ -1,0 +1,47 @@
+schema = 1
+id = "galaxian/fire"
+target = "galaxian-discrete"
+duration_s = 3.0
+description = "One fire shot, triggered once and allowed to decay completely"
+
+# The melody oscillator free-runs on this board, so isolating any other voice
+# means parking it somewhere inaudible first. A high pitch register puts its note
+# clock ultrasonic; both volume lines off keep it out of the mixer either way.
+# Marked setup, so `sndcmp verify` keeps it while removing the stimulus — the
+# question its null check asks is whether the window is silent with nothing
+# TRIGGERED, not whether the board is silent at reset.
+[[action]]
+at_s = 0.0
+control = "pitch"
+value = 255
+setup = true
+
+[[action]]
+at_s = 0.0
+control = "vol1"
+value = false
+setup = true
+
+[[action]]
+at_s = 0.0
+control = "vol2"
+value = false
+setup = true
+
+# Edge-triggered one-shot, so a single narrow pulse. The reference driver used to
+# re-pulse this every 0.6 s, which overlapped decays and made the envelope and
+# integrated energy unmeasurable — the same mistake the Donkey Kong scenarios
+# started with. One trigger, then silence to the end of the run.
+[[action]]
+at_s = 1.0
+control = "fire"
+value = true
+
+[[action]]
+at_s = 1.05
+control = "fire"
+value = false
+
+[analysis]
+start_s = 0.95
+end_s = 3.0

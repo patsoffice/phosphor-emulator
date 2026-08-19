@@ -92,20 +92,27 @@ pub fn verify(id: &str, path: &std::path::Path) -> Result<String, String> {
     let baseline = run(&sc)?;
     let baseline_rms = rms_dbfs(&baseline);
 
-    // --- Null: the same scenario with nothing driving it. -------------------
+    // --- Null: the same scenario with the STIMULUS removed. -----------------
+    //
+    // Setup actions stay. They put the board into the state the measurement
+    // assumes — parking a free-running voice somewhere inaudible, typically —
+    // and removing them would test whether the board is silent at reset, which
+    // is a different and less useful question. What must be silent is the window
+    // with nothing *triggered*.
     let mut null_sc = sc.clone();
-    null_sc.actions.clear();
+    null_sc.actions.retain(|a| a.setup);
     let null = run(&null_sc)?;
     let null_rms = rms_dbfs(&null);
     let null_check = Check {
         name: "null",
         passed: null_rms < SILENCE_DBFS,
         detail: if null_rms < SILENCE_DBFS {
-            format!("silent at {null_rms:.1} dBFS with no actions (driven: {baseline_rms:.1})")
+            format!("silent at {null_rms:.1} dBFS untriggered (driven: {baseline_rms:.1})")
         } else {
             format!(
-                "NOT silent — {null_rms:.1} dBFS with every action removed, against {baseline_rms:.1} driven. \
-                 The window is capturing something this scenario does not drive."
+                "NOT silent — {null_rms:.1} dBFS with nothing triggered, against {baseline_rms:.1} driven. \
+                 Either the window captures something this scenario does not drive, or a \
+                 free-running voice needs parking with a `setup = true` action."
             )
         },
     };

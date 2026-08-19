@@ -44,7 +44,10 @@ use crate::device::discrete::{
 };
 
 /// Galaxian master clock is 18.432 MHz; the sound section runs at /6/2.
-const SOUND_CLOCK: f64 = 18_432_000.0 / 6.0 / 2.0; // 1.536 MHz
+/// The rate [`GalaxianSound::tick`] counts in. Public so a driver outside the
+/// board — a comparison harness, say — can work out how many cycles make one
+/// output sample without guessing.
+pub const SOUND_CLOCK: f64 = 18_432_000.0 / 6.0 / 2.0; // 1.536 MHz
 /// Main-CPU clock; [`GalaxianSound::tick`] is driven in these cycles.
 pub const CPU_CLOCK_HZ: u64 = 3_072_000;
 /// Internal simulation rate. High enough for the few-kHz tones and the
@@ -393,6 +396,15 @@ impl GalaxianSound {
     /// Drain produced mono `i16` samples. Returns the number written.
     pub fn fill_audio(&mut self, out: &mut [i16]) -> usize {
         self.circuit.fill_audio(out)
+    }
+
+    /// The built circuit, for tooling that reads individual stages.
+    ///
+    /// Exposed so a comparison run can render one voice on its own — a mixed sum
+    /// cannot say which of the melody, background, hit or fire is wrong, and
+    /// they overlap in frequency, so no analysis of the sum recovers it.
+    pub fn circuit(&self) -> &DiscreteCircuit {
+        &self.circuit
     }
 
     /// The audio output rate in Hz.

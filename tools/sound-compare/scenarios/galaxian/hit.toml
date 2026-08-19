@@ -1,0 +1,39 @@
+schema = 1
+id = "galaxian/hit"
+target = "galaxian-discrete"
+duration_s = 3.0
+description = "One explosion, triggered once and allowed to decay completely"
+
+# Park the free-running melody, as galaxian/fire does and for the same reason.
+[[action]]
+at_s = 0.0
+control = "pitch"
+value = 255
+setup = true
+
+[[action]]
+at_s = 0.0
+control = "vol1"
+value = false
+setup = true
+
+[[action]]
+at_s = 0.0
+control = "vol2"
+value = false
+setup = true
+
+# A one-shot measured in isolation rather than as a pulse train.
+[[action]]
+at_s = 1.0
+control = "hit"
+value = true
+
+[[action]]
+at_s = 1.05
+control = "hit"
+value = false
+
+[analysis]
+start_s = 0.95
+end_s = 3.0

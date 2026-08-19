@@ -1,0 +1,51 @@
+schema = 1
+id = "galaxian/melody"
+target = "galaxian-discrete"
+duration_s = 3.0
+description = "Background melody at a fixed pitch with both volume lines on"
+
+# The melody oscillator free-runs, so its resting state is part of the setup even
+# here: parked at a pitch whose note clock is ultrasonic, with the volume lines
+# off. What this scenario measures is the board being asked for a note, which
+# means the stimulus is the pitch value and the volume lines — not the
+# oscillator's existence.
+[[action]]
+at_s = 0.0
+control = "pitch"
+value = 255
+setup = true
+
+[[action]]
+at_s = 0.0
+control = "vol1"
+value = false
+setup = true
+
+[[action]]
+at_s = 0.0
+control = "vol2"
+value = false
+setup = true
+
+# A sustained voice rather than a one-shot, so it is held for the whole window.
+# The pitch is parked rather than swept: a moving pitch smears the spectrum and
+# makes a centroid meaningless, and what is checked here is the note the register
+# asks for, not the tune. 0xB0 is the value the reference driver holds.
+[[action]]
+at_s = 1.0
+control = "pitch"
+value = 176
+
+[[action]]
+at_s = 1.0
+control = "vol1"
+value = true
+
+[[action]]
+at_s = 1.0
+control = "vol2"
+value = true
+
+[analysis]
+start_s = 1.5
+end_s = 3.0
