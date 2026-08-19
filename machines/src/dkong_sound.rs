@@ -157,15 +157,16 @@ const WALK_HOLD_S: f64 = 0.4;
 // vs `sndcmp capture dkong/jump`). "before" is the previous committed model:
 //
 //                     before        now      reference
-//   AC RMS         -31.00 dB   -34.58 dB    -34.67 dB
-//   decay T20         0.145 s     0.419 s      0.495 s
-//   decay T40         1.477 s     0.459 s      0.500 s
-//   centroid         15.4 Hz    415.5 Hz     379.7 Hz
-//   fundamental     347.2 Hz    361.5 Hz     347.8 Hz
-//   band 0-150 Hz     97.7 %       2.2 %        3.7 %
-//   band 150-400      1.7 %       51.6 %       69.0 %
-//   band 400-1000     0.5 %       45.5 %       27.1 %
-//   STFT distance      5.885       3.348            —
+//   AC RMS         -31.00 dB   -34.67 dB    -34.67 dB
+//   decay T20         0.145 s     0.474 s      0.495 s
+//   decay T40         1.477 s     0.509 s      0.500 s
+//   centroid         15.4 Hz    407.2 Hz     379.7 Hz
+//   rolloff 85%       21.5 Hz    452.2 Hz     445.3 Hz
+//   fundamental     347.2 Hz    347.2 Hz     347.8 Hz
+//   band 0-150 Hz     97.7 %       1.8 %        3.7 %
+//   band 150-400      1.7 %       59.2 %       69.0 %
+//   band 400-1000     0.5 %       38.3 %       27.1 %
+//   STFT distance      5.885       3.196            —
 //
 // The pitch trajectory now tracks the reference cycle for cycle: the wobble's
 // period measures 0.109 s against 0.110 s and it carries the note between 320
@@ -190,7 +191,7 @@ const WALK_HOLD_S: f64 = 0.4;
 /// version (555 high = 1) had to fold each of those into a ratio, and two of
 /// the ratios were wrong in ways that cancelled in the level and not in the
 /// spectrum.
-const JUMP_GAIN: f64 = 0.648;
+const JUMP_GAIN: f64 = 0.605;
 // Stomp is a low rumble, not a hiss, and the rumble is a COUNTER — not a filter.
 //
 // The board clocks a 24-bit shift register at 4 kHz and feeds a counter that
@@ -212,16 +213,16 @@ const JUMP_GAIN: f64 = 0.648;
 //
 //                     before        now      reference
 //   AC RMS         -23.89 dB  -23.89 dB      -23.89 dB
-//   decay T20         0.279 s    0.519 s        0.545 s
-//   decay T40         1.098 s    0.688 s        0.695 s
-//   centroid        133.0 Hz   135.0 Hz       124.9 Hz
+//   decay T20         0.279 s    0.574 s        0.545 s
+//   decay T40         1.098 s    0.713 s        0.695 s
+//   centroid        133.0 Hz   134.8 Hz       124.9 Hz
 //   rolloff 85%     193.8 Hz   150.7 Hz       140.6 Hz
 //   fundamental      88.1 Hz   132.0 Hz       125.0 Hz
-//   band 0-150         61.8 %     72.3 %         89.5 %
-//   band 150-400       37.2 %     27.1 %         10.2 %
+//   band 0-150         61.8 %     72.4 %         89.5 %
+//   band 150-400       37.2 %     27.0 %         10.2 %
 //
 // The decay is the headline: it was 49 % short at T20 and 58 % long at T40, and
-// is now within 5 % and 1 %. That is what comes of the envelope and the
+// is now 5 % long and 3 % long. That is what comes of the envelope and the
 // follower being present rather than approximated by a one-pole filter.
 //
 // The rumble's rate is exact — the divided source measures 124.7 Hz against the
@@ -229,10 +230,12 @@ const JUMP_GAIN: f64 = 0.648;
 // four, divided by eight. So the pitch is right and the remaining 150-400 Hz
 // excess is harmonic content above it, not a mistuned source.
 //
-// That excess is the SAME residual jump has, in the same direction, and both
-// voices reach the output through `rc_integrate`. Two independently rebuilt
-// chains showing one signature is good evidence it is one cause in the shared
-// follower rather than two coincidences; see `…-0fbi`.
+// That excess has the same shape as jump's, but the two are no longer known to
+// share a cause. A node dump settled jump's — its envelope was dipping too
+// shallow — and correcting the trigger width they share moved jump onto the
+// reference while pushing stomp's decay from 5 % short to 5 % long. If one
+// trigger serves both on the board, something else in this envelope differs;
+// its capacitor and both resistors are its own. See `…-0fbi`.
 //
 // Note the multi-resolution STFT distance reads WORSE than the old model's
 // (3.95 against 3.21) while every band and envelope measure improved. That is
@@ -259,7 +262,7 @@ const STOMP_DIVIDER: f64 = 5.1 / 7.1;
 /// Output calibration, the only scalar in the chain that is not a component
 /// value. Re-derived from scratch when the structure changed; the old 9.54 was
 /// calibrated against a model with no envelope and no follower in it.
-const STOMP_GAIN: f64 = 0.546;
+const STOMP_GAIN: f64 = 0.519;
 
 // Shared 555 astable values for the walk/jump VCOs: R1 charges through 47 kΩ,
 // R2 discharges through 27 kΩ, Vcc = 5 V. The control voltage on pin 5 sets
@@ -382,14 +385,26 @@ const JUMP_DIVIDER: f64 = 5.1 / 7.1;
 /// The lid charges toward the 5 V supply, which is above the 555's high — so at
 /// rest it closes over the oscillator completely.
 const JUMP_LID_REST_V: f64 = VCC;
-/// Conditioned trigger width.
+/// Conditioned trigger width, measured on the board at 28.4 ms. Shared with
+/// stomp, whose differentiator is the same three parts.
 ///
-/// The latch edge is differentiated by 1 µF through 10 kΩ into another 10 kΩ,
-/// so the cap relaxes with τ = 20 ms, and the comparator watches the divider tap
-/// at half the cap's swing — 2.2 V at the edge — passing it while it stays above
-/// 0.6 V. That is 20 ms · ln(2.2/0.6) ≈ 26 ms, and it does not depend on how
-/// long the game holds the line.
-const JUMP_TRIG_S: f64 = 0.026;
+/// The mechanism is not in doubt: the latch edge is differentiated by 1 µF
+/// through 10 kΩ into another 10 kΩ and a comparator passes the decaying spike
+/// while it stays above its reference, which is why the note's length does not
+/// depend on how long the game holds the line. The arithmetic is what does not
+/// resolve. Reading the relaxation as τ = 20 ms, the spike as starting at half
+/// the cap's 4.4 V swing, and the reference as 0.6 V gives 20·ln(2.2/0.6) =
+/// 26.0 ms — 9 % short, and any one of the three terms would account for it
+/// alone (a 2.48 V start, a 0.53 V reference, or a 21.8 ms relaxation).
+///
+/// So this is measured rather than computed, and deliberately: picking one of
+/// the three to bend would look derived while being a guess. The envelope's dip
+/// time constant either side of it needs no such apology — the board measures
+/// 46.83 ms against the 47.0 that 10 kΩ and 4.7 µF give.
+///
+/// Logging the differentiator and comparator nodes would settle which term is
+/// wrong in one measurement; see `…-0fbi`.
+const JUMP_TRIG_S: f64 = 0.0284;
 /// How fast the jump's lid is pulled down when the latch asserts: 10 kΩ into
 /// 4.7 µF. The fast half of the asymmetry — a jump snaps open.
 const JUMP_ENV_DIP_S: f64 = 0.047;
