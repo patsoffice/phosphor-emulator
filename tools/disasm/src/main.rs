@@ -356,6 +356,16 @@ enum Command {
         /// place the same effect at different times.
         #[arg(long)]
         range_b: Option<String>,
+        /// Write `a - b` to this path instead of comparing, isolating what `a`
+        /// has that `b` does not.
+        ///
+        /// For two runs of one machine on one input schedule differing only in
+        /// whether a control was held: they are identical until it matters, so
+        /// the difference is that control's effect with everything else
+        /// cancelled. Needs a shared rate and sample alignment, which holds
+        /// within an emulator's own pair.
+        #[arg(long)]
+        subtract_to: Option<PathBuf>,
     },
     /// List the registered machines (the `--machine` values accepted by
     /// `frameshot`/`trace`/`machine`/`gfxview`), with their ROM-set names.
@@ -596,6 +606,7 @@ fn run_command(cmd: Command) -> Result<String, String> {
             png_height,
             range,
             range_b,
+            subtract_to,
         } => run_audiodiff(
             &a,
             b.as_deref(),
@@ -609,6 +620,7 @@ fn run_command(cmd: Command) -> Result<String, String> {
             png_height,
             range.as_deref(),
             range_b.as_deref(),
+            subtract_to.as_deref(),
         ),
         Command::Machines => Ok(list_machines()),
     }
@@ -1027,6 +1039,7 @@ fn run_audiodiff(
     png_height: u32,
     range: Option<&str>,
     range_b: Option<&str>,
+    subtract_to: Option<&Path>,
 ) -> Result<String, String> {
     // `--range` applies to both inputs; `--range-b` overrides it for the second,
     // for the common case where two captures place the same effect at different
@@ -1072,6 +1085,22 @@ fn run_audiodiff(
 
     let cb = clip(&audiodiff::read_wav(b, channels)?, range_for_b)?;
     let label_b = file_label(b);
+
+    // Subtraction is a different job from comparison: it produces a signal
+    // rather than a verdict, so it returns instead of falling through.
+    if let Some(out) = subtract_to {
+        let diff = audiodiff::subtract(&ca, &cb)?;
+        audiodiff::write_wav(out, &diff)?;
+        return Ok(format!(
+            "{} - {} -> {} ({} samples at {} Hz, {:.3} s)\n",
+            label_a,
+            label_b,
+            out.display(),
+            diff.samples.len(),
+            diff.sample_rate as u64,
+            diff.samples.len() as f64 / diff.sample_rate
+        ));
+    }
     let (mut report, verdict) = audiodiff::compare(&ca, &cb, &label_a, &label_b, tol);
 
     if let (Some(pa), Some(pb)) = (png_for("-a"), png_for("-b")) {

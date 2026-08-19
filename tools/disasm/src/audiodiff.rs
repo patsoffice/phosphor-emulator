@@ -233,6 +233,81 @@ pub fn parse_range(s: &str) -> Result<(f64, f64), String> {
     Ok((parse(a, "start")?, parse(b, "end")?))
 }
 
+/// Sample-wise `a - b`, for isolating what one capture has that another does not.
+///
+/// The use this exists for: a game's audio cannot be captured one effect at a
+/// time, because the music plays throughout. But two runs of the *same* machine
+/// on the *same* input schedule, differing only in whether one control is held,
+/// are identical until that control matters — verified, not assumed: the
+/// pre-input window of two such captures diffs to a multi-resolution STFT
+/// distance of exactly 0. Subtracting them therefore cancels the music and
+/// leaves the effect.
+///
+/// That makes a real-gameplay effect comparison possible between two emulators
+/// that share no state: difference each side's pair, then compare the two
+/// differences. Neither side needs its sound latch poked by hand, so the
+/// trigger pattern is whatever the game actually emits.
+///
+/// Requires a common sample rate and sample alignment, which holds within one
+/// emulator's pair and does not across two — so subtract per side, then compare
+/// the results spectrally.
+pub fn subtract(a: &Capture, b: &Capture) -> Result<Capture, String> {
+    if a.sample_rate != b.sample_rate {
+        return Err(format!(
+            "cannot subtract captures at different rates ({} vs {} Hz); \
+             subtract within one emulator's pair, then compare the differences",
+            a.sample_rate, b.sample_rate
+        ));
+    }
+    let n = a.samples.len().min(b.samples.len());
+    if n == 0 {
+        return Err("nothing to subtract: one capture is empty".into());
+    }
+    Ok(Capture {
+        samples: (0..n).map(|i| a.samples[i] - b.samples[i]).collect(),
+        sample_rate: a.sample_rate,
+        channels: 1,
+        bits: a.bits,
+    })
+}
+
+/// Write a capture as a 16-bit mono WAV.
+pub fn write_wav(path: &Path, capture: &Capture) -> Result<(), String> {
+    use std::io::Write;
+    let pcm: Vec<i16> = capture
+        .samples
+        .iter()
+        .map(|s| (s * -(i16::MIN as f64)).clamp(i16::MIN as f64, i16::MAX as f64) as i16)
+        .collect();
+    let rate = capture.sample_rate as u32;
+    let data_len = (pcm.len() * 2) as u32;
+    let mut f = std::io::BufWriter::new(
+        std::fs::File::create(path).map_err(|e| format!("creating {}: {e}", path.display()))?,
+    );
+    let mut put = |b: &[u8]| -> Result<(), String> {
+        f.write_all(b)
+            .map_err(|e| format!("writing {}: {e}", path.display()))
+    };
+    put(b"RIFF")?;
+    put(&(36 + data_len).to_le_bytes())?;
+    put(b"WAVE")?;
+    put(b"fmt ")?;
+    put(&16u32.to_le_bytes())?;
+    put(&1u16.to_le_bytes())?;
+    put(&1u16.to_le_bytes())?;
+    put(&rate.to_le_bytes())?;
+    put(&(rate * 2).to_le_bytes())?;
+    put(&2u16.to_le_bytes())?;
+    put(&16u16.to_le_bytes())?;
+    put(b"data")?;
+    put(&data_len.to_le_bytes())?;
+    for s in &pcm {
+        put(&s.to_le_bytes())?;
+    }
+    f.flush()
+        .map_err(|e| format!("writing {}: {e}", path.display()))
+}
+
 /// Tolerances past which `audiodiff` exits non-zero.
 ///
 /// Defaults are deliberately loose: this gates against gross regressions —
