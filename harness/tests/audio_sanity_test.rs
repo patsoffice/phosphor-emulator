@@ -14,15 +14,33 @@
 //! 3. it is not permanently silent, unless the machine says it should be.
 //!
 //! Each is a defect rather than a difference — no reference could make a
-//! half-scale DC offset acceptable. Those three would have caught both halves
-//! of `…-audio-dc-offset-g7p4` (Donkey Kong's offset and Joust's saturation) on
-//! the day they landed.
+//! half-scale DC offset acceptable.
+//!
+//! # The fixture matters more than the metrics
+//!
+//! An input-free boot reaches attract mode, and *most arcade boards are silent
+//! in attract mode* — they make no sound until a coin goes in. Measuring one
+//! and concluding "this machine emits nothing" is a statement about the
+//! fixture, not about the machine. Measured directly: booting Pac-Man,
+//! Frogger and Tempest input-free yields digital zero for ten solid seconds,
+//! while replaying thirty seconds of recorded play on the same builds yields
+//! healthy audio — Pac-Man at -4.6 dBFS peak with a DC offset of -0.018.
+//!
+//! So this suite replays a recorded input movie whenever one exists for the
+//! machine, and only falls back to an input-free boot when none does. The
+//! fallback still catches a pinned or offset output, which is visible with or
+//! without input; it cannot say anything about silence, so it does not try.
 //!
 //! # Gating
 //!
 //! No ROM directory (`PHOSPHOR_ROMS`, else `~/ws/mame-runtime/roms`) → skip, so
 //! CI stays green without ROMs, exactly as `boot_check_test` does. A machine
-//! whose own ROM set is missing skips individually.
+//! whose own ROM set is missing skips individually, as does one whose movie was
+//! recorded against a different ROM revision.
+//!
+//! Movies come from `PHOSPHOR_MOVIES`, else `~/.config/phosphor/movies`, named
+//! `<machine>-*.phmi`. They are a local collection, not committed, so a machine
+//! without one is normal and not a failure.
 //!
 //! # Expectations
 //!
@@ -242,16 +260,84 @@ fn rom_set(dir: &Path, machine: &str) -> Option<RomSet> {
     load_rom_set(dir.to_str().unwrap(), entry.rom_names).ok()
 }
 
-/// Boot a machine and measure its audio, or `None` if this collection cannot
-/// supply its ROMs.
-fn measure(dir: &Path, machine: &str) -> Option<Integrity> {
+/// Where recorded input movies live.
+fn movies_dir() -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("PHOSPHOR_MOVIES") {
+        let p = PathBuf::from(p);
+        return p.is_dir().then_some(p);
+    }
+    let p = PathBuf::from(std::env::var("HOME").ok()?).join(".config/phosphor/movies");
+    p.is_dir().then_some(p)
+}
+
+/// The movie for a machine, if the local collection has one.
+///
+/// Movies are named `<machine>-<timestamp>.phmi`; the newest wins so that
+/// re-recording a session supersedes the old take without deleting it.
+fn movie_for(machine: &str) -> Option<PathBuf> {
+    let dir = movies_dir()?;
+    let mut candidates: Vec<PathBuf> = std::fs::read_dir(dir)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            p.extension().is_some_and(|x| x == "phmi")
+                && p.file_stem()
+                    .and_then(|s| s.to_str())
+                    .is_some_and(|s| s.split('-').next() == Some(machine))
+        })
+        .collect();
+    candidates.sort();
+    candidates.pop()
+}
+
+/// Which fixture a measurement came from. Reported, because a silence result
+/// means something completely different between the two.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Fixture {
+    /// Replayed recorded play: the machine had input, so silence is a defect.
+    Movie,
+    /// Input-free boot into attract mode: silence proves nothing.
+    Boot,
+}
+
+/// Measure a machine's audio, or `None` if this collection cannot run it.
+fn measure(dir: &Path, machine: &str) -> Option<(Integrity, Fixture)> {
     let _ = rom_set(dir, machine)?;
-    let mut harness = Harness::build(machine, dir.to_str().unwrap(), None, None, &[], &[]).ok()?;
+    let roms = dir.to_str()?;
+
+    // Prefer recorded play. A movie recorded against a different ROM revision
+    // is a skip, not a failure — the same judgement `boot_check_test` makes
+    // about a ROM set the local collection cannot supply.
+    let (mut harness, fixture, frames) = match movie_for(machine) {
+        Some(path) => match Harness::build_with_movie(roms, &path) {
+            Ok(h) => {
+                let span = h
+                    .movie()
+                    .map(|p| p.movie().header.frames as usize)
+                    .unwrap_or(FRAMES);
+                (h, Fixture::Movie, span)
+            }
+            Err(e) => {
+                eprintln!("{machine}: movie unusable ({e}); falling back to boot");
+                (
+                    Harness::build(machine, roms, None, None, &[], &[]).ok()?,
+                    Fixture::Boot,
+                    FRAMES,
+                )
+            }
+        },
+        None => (
+            Harness::build(machine, roms, None, None, &[], &[]).ok()?,
+            Fixture::Boot,
+            FRAMES,
+        ),
+    };
 
     let rate = harness.machine().audio_sample_rate().max(1) as usize;
     let mut audio: Vec<i16> = Vec::new();
     let mut chunk = vec![0i16; rate];
-    for frame in 0..FRAMES {
+    for frame in 0..frames {
         harness.run_frame();
         let m = harness.machine_mut();
         loop {
@@ -272,7 +358,7 @@ fn measure(dir: &Path, machine: &str) -> Option<Integrity> {
     if audio.is_empty() {
         return None;
     }
-    Some(Integrity::measure(&pcm_to_f64(&audio)))
+    Some((Integrity::measure(&pcm_to_f64(&audio)), fixture))
 }
 
 // ---------------------------------------------------------------------------
@@ -318,7 +404,7 @@ fn sweep(dir: &Path) -> (BTreeMap<String, Vec<Defect>>, usize, Vec<&'static str>
     let mut skipped = Vec::new();
 
     for entry in registry::all() {
-        let Some(integrity) = measure(dir, entry.name) else {
+        let Some((integrity, fixture)) = measure(dir, entry.name) else {
             skipped.push(entry.name);
             continue;
         };
@@ -331,7 +417,12 @@ fn sweep(dir: &Path) -> (BTreeMap<String, Vec<Defect>>, usize, Vec<&'static str>
         if integrity.clipped_fraction > e.defaults.max_clipped_fraction {
             defects.push(Defect::Clipping);
         }
-        if integrity.is_silent || integrity.silent_fraction > e.defaults.max_silent_fraction {
+        // Only a movie can prove silence is wrong. An input-free boot sits in
+        // attract mode, where most boards are legitimately silent, so calling
+        // that a defect would be measuring the fixture.
+        if fixture == Fixture::Movie
+            && (integrity.is_silent || integrity.silent_fraction > e.defaults.max_silent_fraction)
+        {
             defects.push(Defect::Silence);
         }
         if !defects.is_empty() {

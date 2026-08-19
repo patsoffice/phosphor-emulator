@@ -1,11 +1,18 @@
-# What each machine's audio is allowed to look like after a short headless boot.
+# What each machine's audio is allowed to look like.
 #
-# `audio_sanity_test.rs` boots every registered machine, captures ten seconds,
-# and asserts three things that need no reference capture and no MAME: the
-# output is not sitting on a large DC offset, is not permanently saturated, and
-# is not permanently silent. Those are the audio counterpart of
-# `golden_frame_test`'s guards — defects visible without knowing what the
-# machine is supposed to sound like.
+# `audio_sanity_test.rs` runs every registered machine, captures its audio, and
+# asserts three things that need no reference capture and no MAME: the output is
+# not on a large DC offset, is not permanently saturated, and is not permanently
+# silent. The audio counterpart of `golden_frame_test`'s guards.
+#
+# THE FIXTURE MATTERS MORE THAN THE THRESHOLDS. The suite replays a recorded
+# input movie when one exists and falls back to an input-free boot when none
+# does, and it only judges *silence* on a movie. An input-free boot sits in
+# attract mode, where most arcade boards are legitimately silent until coined
+# up, so calling that silence a defect measures the fixture rather than the
+# machine. This file previously carried 23 machines listed as silent for exactly
+# that reason; every one of them turned out to produce healthy audio under
+# replay, and the ratchet below is what forced the correction.
 #
 # There are two kinds of entry, and they mean opposite things.
 #
@@ -14,9 +21,7 @@
 #
 # `known_defect` is a RATCHET, not a skip list: the test asserts such a machine
 # is *still* defective. Fixing one fails the suite until its entry is deleted,
-# so the list can only shrink and cannot quietly absorb a new regression. That
-# is the difference between an inventory of known bugs and a place where
-# failures go to be forgotten.
+# so the list can only shrink and cannot quietly absorb a new regression.
 #
 # A machine with no entry must pass the defaults. Registering a new machine
 # needs no entry here unless it fails.
@@ -28,243 +33,109 @@
 max_dc_offset = 0.05
 # Fraction of samples pinned at the rail.
 max_clipped_fraction = 0.01
-# Fraction of the capture that may be silent. Attract mode is often quiet, so
-# this is loose by design — it is here to catch a machine that emits *nothing*,
-# not to police how busy a demo loop is.
+# Fraction of a *movie* capture that may be silent. Loose by design — this
+# catches a machine that emits nothing during recorded play, not one with quiet
+# passages.
 max_silent_fraction = 0.999
 
 # ---------------------------------------------------------------------------
-# Correct: silent by design
+# Known defect: DC offset and saturation
 # ---------------------------------------------------------------------------
-# Verified by capture — `disasm frameshot --machine <m> --frames 600
-# --audio-out /tmp/x.wav` yields an all-zero WAV. This is the documented
-# behaviour of the Atari vector boards and the reason
-# `tools/sound-reference/`'s Lua drivers poke their sound registers directly
-# instead of waiting for attract mode to do it.
-
-[[correct]]
-machine = "asteroid"
-silent = true
-reason = "silent attract mode by design; the board makes no sound until coined up"
-
-[[correct]]
-machine = "llander"
-silent = true
-reason = "silent attract mode by design; the board makes no sound until coined up"
-
-# ---------------------------------------------------------------------------
-# Known defect: pinned output
-# ---------------------------------------------------------------------------
-# Measured 2026-08-19 on a ten-second headless boot. These are not quiet — they
-# are jammed against a rail, which costs the entire output range.
-
-[[known_defect]]
-machine = "missile"
-dc = true
-clipping = true
-reason = "output constant at -1.0: 100% clipped with AC RMS at -200 dBFS, i.e. no AC content whatsoever"
-issue = "phosphor-emulator-audio-dc-saturation-sweep-whri"
-
-[[known_defect]]
-machine = "joust"
-dc = true
-clipping = true
-reason = "DC -1.0 with 99.996% clipped; a real but tiny signal rides on a pinned rail"
-issue = "phosphor-emulator-audio-dc-saturation-sweep-whri"
-
-[[known_defect]]
-machine = "mariobros"
-dc = true
-clipping = true
-reason = "DC -1.0 with 100% clipped"
-issue = "phosphor-emulator-audio-dc-saturation-sweep-whri"
-
-[[known_defect]]
-machine = "quantum"
-dc = true
-clipping = true
-reason = "DC -1.0 with 100% clipped"
-issue = "phosphor-emulator-audio-dc-saturation-sweep-whri"
-
-[[known_defect]]
-machine = "sinistar"
-dc = true
-clipping = true
-reason = "DC -1.0 with 100% clipped"
-issue = "phosphor-emulator-audio-dc-saturation-sweep-whri"
+# Measured 2026-08-19. Machines with a movie are measured over recorded play;
+# the rest over a ten-second input-free boot, noted per entry. Both fixtures see
+# a pinned or offset output, so unlike silence these findings do not depend on
+# which one was used — though the magnitudes do, which is why the fixture is
+# recorded alongside the number.
 
 [[known_defect]]
 machine = "ccastles"
 dc = true
 clipping = true
-reason = "DC -0.983 with 89.6% clipped"
-issue = "phosphor-emulator-audio-dc-saturation-sweep-whri"
+reason = "movie: DC -0.966 with 67.9% clipped — the worst of the set, and badly saturated during real play"
+issue = "phosphor-emulator-audio-dc-play-sweep-stxr"
 
 [[known_defect]]
-machine = "foodf"
+machine = "sinistar"
 dc = true
 clipping = true
-reason = "DC -0.980 with 85.0% clipped"
-issue = "phosphor-emulator-audio-dc-saturation-sweep-whri"
+reason = "movie: DC -0.531 with 9.9% clipped"
+issue = "phosphor-emulator-audio-dc-play-sweep-stxr"
+
+[[known_defect]]
+machine = "qbert"
+dc = true
+clipping = true
+reason = "movie: DC -0.430 with 4.0% clipped"
+issue = "phosphor-emulator-audio-dc-play-sweep-stxr"
+
+[[known_defect]]
+machine = "joust"
+dc = true
+clipping = true
+reason = "movie: DC -0.350 with 42.2% clipped — heavily saturated during play"
+issue = "phosphor-emulator-audio-dc-play-sweep-stxr"
+
+[[known_defect]]
+machine = "burgertime"
+dc = true
+reason = "movie: DC +0.198, no clipping — an offset riding on otherwise healthy audio (peak -2.0 dBFS)"
+issue = "phosphor-emulator-audio-dc-play-sweep-stxr"
+
+[[known_defect]]
+machine = "dkong"
+dc = true
+reason = "movie: DC -0.136, essentially no clipping; the discrete sound path is the first fitting target"
+issue = "phosphor-emulator-audio-dc-play-sweep-stxr"
+
+[[known_defect]]
+machine = "docastle"
+dc = true
+reason = "movie: DC +0.132 with 0.4% clipped"
+issue = "phosphor-emulator-audio-dc-play-sweep-stxr"
 
 [[known_defect]]
 machine = "robotron"
 dc = true
 clipping = true
-reason = "DC +0.848 with 6.8% clipped, but real audio underneath (AC RMS -5.9 dBFS, f0 139 Hz) — an offset on a working voice, not a dead output"
-issue = "phosphor-emulator-audio-dc-saturation-sweep-whri"
+reason = "movie: 25.3% clipped with DC +0.074 — the offset is far smaller than the +0.85 an input-free boot shows, but still over threshold"
+issue = "phosphor-emulator-audio-dc-play-sweep-stxr"
 
 [[known_defect]]
-machine = "dkong"
+machine = "dorunrun"
 dc = true
-reason = "DC -0.550 with AC RMS at -45.7 dBFS and 100% of spectral energy below 150 Hz; the discrete sound path is the first fitting target"
-issue = "phosphor-emulator-audio-dc-saturation-sweep-whri"
-
-# ---------------------------------------------------------------------------
-# Known defect: no audio at all
-# ---------------------------------------------------------------------------
-# Every one of these produces a capture whose peak is -200 dBFS — digital zero
-# for the entire ten seconds, including the boot window. Deliberately recorded
-# as defects rather than as `[[correct]] silent = true`: several of these boards
-# demonstrably make sound at power-on (Pac-Man's startup jingle among them), so
-# calling them "silent by design" would be inventing a hardware claim to make a
-# test pass. Whether the sound path is not driven from a headless boot, needs a
-# coin, or is genuinely unimplemented is what the tracking issue is for.
-
-[[known_defect]]
-machine = "pacman"
-silence = true
-reason = "no audio at all from a headless boot, though the board plays a startup jingle on real hardware"
-issue = "phosphor-emulator-headless-audio-silent-sweep-pql6"
-
-[[known_defect]]
-machine = "mspacman"
-silence = true
-reason = "no audio at all from a headless boot; shares the Pac-Man sound path"
-issue = "phosphor-emulator-headless-audio-silent-sweep-pql6"
-
-[[known_defect]]
-machine = "galaga"
-silence = true
-reason = "no audio at all from a headless boot; the 54XX explosion path is also unimplemented"
-issue = "phosphor-emulator-headless-audio-silent-sweep-pql6"
-
-[[known_defect]]
-machine = "digdug"
-silence = true
-reason = "no audio at all from a headless boot; shares the Namco WSG path"
-issue = "phosphor-emulator-headless-audio-silent-sweep-pql6"
-
-[[known_defect]]
-machine = "xevious"
-silence = true
-reason = "no audio at all from a headless boot; shares the Namco WSG path and its 54XX explosion output is unimplemented"
-issue = "phosphor-emulator-headless-audio-silent-sweep-pql6"
-
-[[known_defect]]
-machine = "galaxian"
-silence = true
-reason = "no audio after the first second; only a power-on transient, which the settle window discards"
-issue = "phosphor-emulator-headless-audio-silent-sweep-pql6"
-
-[[known_defect]]
-machine = "mooncrst"
-silence = true
-reason = "no audio at all from a headless boot; shares the Galaxian sound board"
-issue = "phosphor-emulator-headless-audio-silent-sweep-pql6"
-
-[[known_defect]]
-machine = "pisces"
-silence = true
-reason = "no audio at all from a headless boot; shares the Galaxian sound board"
-issue = "phosphor-emulator-headless-audio-silent-sweep-pql6"
-
-[[known_defect]]
-machine = "uniwars"
-silence = true
-reason = "no audio at all from a headless boot; shares the Galaxian sound board"
-issue = "phosphor-emulator-headless-audio-silent-sweep-pql6"
-
-[[known_defect]]
-machine = "scramble"
-silence = true
-reason = "no audio at all from a headless boot; its discrete output filters are latched but not modelled"
-issue = "phosphor-emulator-headless-audio-silent-sweep-pql6"
-
-[[known_defect]]
-machine = "scobra"
-silence = true
-reason = "no audio at all from a headless boot; shares the Konami/Scramble sound path"
-issue = "phosphor-emulator-headless-audio-silent-sweep-pql6"
-
-[[known_defect]]
-machine = "frogger"
-silence = true
-reason = "no audio at all from a headless boot; shares the Konami/Scramble sound path"
-issue = "phosphor-emulator-headless-audio-silent-sweep-pql6"
-
-[[known_defect]]
-machine = "mrdo"
-silence = true
-reason = "no audio at all from a headless boot"
-issue = "phosphor-emulator-headless-audio-silent-sweep-pql6"
-
-[[known_defect]]
-machine = "docastle"
-silence = true
-reason = "no audio at all from a headless boot"
-issue = "phosphor-emulator-headless-audio-silent-sweep-pql6"
+reason = "boot (no movie): DC offset over threshold; shares the Do's Castle hardware with docastle and dowild, which show the same"
+issue = "phosphor-emulator-audio-dc-play-sweep-stxr"
 
 [[known_defect]]
 machine = "dowild"
-silence = true
-reason = "no audio at all from a headless boot; shares the Do's Castle hardware"
-issue = "phosphor-emulator-headless-audio-silent-sweep-pql6"
+dc = true
+reason = "boot (no movie): DC offset over threshold; shares the Do's Castle hardware with docastle and dorunrun, which show the same"
+issue = "phosphor-emulator-audio-dc-play-sweep-stxr"
 
 [[known_defect]]
-machine = "gridlee"
-silence = true
-reason = "no audio at all from a headless boot"
-issue = "phosphor-emulator-headless-audio-silent-sweep-pql6"
+machine = "missile"
+dc = true
+clipping = true
+reason = "boot (no movie): output constant at -1.0, 100% clipped, AC RMS -200 dBFS — no AC content whatsoever"
+issue = "phosphor-emulator-audio-dc-play-sweep-stxr"
 
 [[known_defect]]
-machine = "shollow"
-silence = true
-reason = "no audio at all from a headless boot"
-issue = "phosphor-emulator-headless-audio-silent-sweep-pql6"
+machine = "quantum"
+dc = true
+clipping = true
+reason = "boot (no movie): DC -1.0 with 100% clipped"
+issue = "phosphor-emulator-audio-dc-play-sweep-stxr"
 
 [[known_defect]]
-machine = "astdelux"
-silence = true
-reason = "no audio at all from a headless boot; its discrete effect registers are stubbed, though its POKEYs work"
-issue = "phosphor-emulator-headless-audio-silent-sweep-pql6"
+machine = "mariobros"
+dc = true
+clipping = true
+reason = "boot: DC -1.0 with 100% clipped; its movie was recorded against a different ROM revision so play could not be measured"
+issue = "phosphor-emulator-audio-dc-play-sweep-stxr"
 
 [[known_defect]]
-machine = "tempest"
-silence = true
-reason = "no audio at all from a headless boot"
-issue = "phosphor-emulator-headless-audio-silent-sweep-pql6"
-
-[[known_defect]]
-machine = "starwars"
-silence = true
-reason = "no audio at all from a headless boot"
-issue = "phosphor-emulator-headless-audio-silent-sweep-pql6"
-
-[[known_defect]]
-machine = "esb"
-silence = true
-reason = "no audio at all from a headless boot; shares the Star Wars hardware"
-issue = "phosphor-emulator-headless-audio-silent-sweep-pql6"
-
-[[known_defect]]
-machine = "irobot"
-silence = true
-reason = "no audio at all from a headless boot"
-issue = "phosphor-emulator-headless-audio-silent-sweep-pql6"
-
-[[known_defect]]
-machine = "marble"
-silence = true
-reason = "no audio at all from a headless boot"
-issue = "phosphor-emulator-headless-audio-silent-sweep-pql6"
+machine = "foodf"
+dc = true
+clipping = true
+reason = "boot (no movie): DC -0.980 with 85.0% clipped"
+issue = "phosphor-emulator-audio-dc-play-sweep-stxr"
