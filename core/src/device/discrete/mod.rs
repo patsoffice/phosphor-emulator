@@ -22,6 +22,7 @@
 //! left as back-edges rather than rejected, so feedback loops resolve with a
 //! one-step delay.
 
+mod derive;
 mod node;
 
 use node::{Node, NodeKind};
@@ -386,7 +387,7 @@ impl DiscreteCircuitBuilder {
             name,
             NodeKind::RcLowPass {
                 src: src.into(),
-                tau: ohms * farads,
+                tau: derive::rc_tau(ohms, farads),
                 y: 0.0,
             },
             ClockDomain::BoardCycle,
@@ -395,7 +396,7 @@ impl DiscreteCircuitBuilder {
 
     /// First-order low-pass specified by cutoff frequency (Hz).
     pub fn low_pass_hz(&mut self, name: &str, src: impl Into<NodeId>, cutoff_hz: f64) -> NodeId {
-        let tau = 1.0 / (std::f64::consts::TAU * cutoff_hz);
+        let tau = derive::tau_from_cutoff_hz(cutoff_hz);
         self.push_node(
             name,
             NodeKind::RcLowPass {
@@ -419,7 +420,7 @@ impl DiscreteCircuitBuilder {
             name,
             NodeKind::RcHighPass {
                 src: src.into(),
-                tau: ohms * farads,
+                tau: derive::rc_tau(ohms, farads),
                 x_prev: 0.0,
                 y: 0.0,
             },
@@ -491,8 +492,7 @@ impl DiscreteCircuitBuilder {
         taps: &[(NodeId, f64)],
         load_ohms: Option<f64>,
     ) -> NodeId {
-        let srcs: Vec<(NodeId, f64)> = taps.iter().map(|(n, r)| (*n, 1.0 / r)).collect();
-        let total_g = srcs.iter().map(|(_, g)| g).sum::<f64>() + load_ohms.map_or(0.0, |r| 1.0 / r);
+        let (srcs, total_g) = derive::resistor_mixer_conductances(taps, load_ohms);
         self.push_node(
             name,
             NodeKind::ResistorMixer { srcs, total_g },
@@ -527,10 +527,7 @@ impl DiscreteCircuitBuilder {
 
     /// Linear `bits`-wide R-2R DAC: full-scale code maps to `vref`.
     pub fn dac_r2r(&mut self, name: &str, src: impl Into<NodeId>, bits: u8, vref: f64) -> NodeId {
-        let full = ((1u64 << bits) - 1) as f64;
-        let weights: Vec<f64> = (0..bits)
-            .map(|b| vref * (1u64 << b) as f64 / full)
-            .collect();
+        let weights = derive::dac_r2r_weights(bits, vref);
         self.dac_weighted(name, src, &weights)
     }
 
@@ -557,15 +554,17 @@ impl DiscreteCircuitBuilder {
         output: Output555,
     ) -> NodeId {
         let dt = 1.0 / self.sim_rate as f64;
+        let (exp_charge, exp_discharge) = derive::ne555_astable_exponents(r1, r2, c, dt);
+        let (threshold_fixed, trigger_fixed) = derive::ne555_thresholds(vcc);
         self.push_node(
             name,
             NodeKind::Ne555Astable {
                 cv_src,
-                exp_charge: 1.0 - (-dt / ((r1 + r2) * c)).exp(),
-                exp_discharge: 1.0 - (-dt / (r2 * c)).exp(),
+                exp_charge,
+                exp_discharge,
                 v_charge: vcc,
-                threshold_fixed: vcc * 2.0 / 3.0,
-                trigger_fixed: vcc / 3.0,
+                threshold_fixed,
+                trigger_fixed,
                 out_high,
                 output,
                 cap_v: 0.0,
@@ -593,6 +592,7 @@ impl DiscreteCircuitBuilder {
         junction: f64,
         output: Output555,
     ) -> NodeId {
+        let (threshold, trigger) = derive::ne555_thresholds(vcc);
         self.push_node(
             name,
             NodeKind::Ne555Cc {
@@ -601,9 +601,9 @@ impl DiscreteCircuitBuilder {
                 c,
                 v_cc_source,
                 junction,
-                threshold: vcc * 2.0 / 3.0,
-                trigger: vcc / 3.0,
-                out_high: vcc - 1.2,
+                threshold,
+                trigger,
+                out_high: derive::ne555_default_out_high(vcc),
                 output,
                 cap_v: 0.0,
                 flip_flop: true,
@@ -637,27 +637,16 @@ impl DiscreteCircuitBuilder {
         v_pos: f64,
     ) -> NodeId {
         assert!(!r_in.is_empty(), "op_amp_band_pass needs an input resistor");
-        let sr = self.sim_rate as f64;
-        let r_total = 1.0 / r_in.iter().map(|r| 1.0 / r).sum::<f64>();
-        let fc = 1.0 / (std::f64::consts::TAU * (r_total * rf * c1 * c2).sqrt());
-        let d = (c1 + c2) / (rf / r_total * c1 * c2).sqrt();
-        let gain = -rf / r_total * c2 / (c1 + c2);
-        // Pre-warped bilinear transform (MAME `calculate_filter2_coefficients`).
-        let two_over_t = 2.0 * sr;
-        let two_over_t2 = two_over_t * two_over_t;
-        let wc = sr * 2.0 * (std::f64::consts::PI * fc / sr).tan();
-        let wc2 = wc * wc;
-        let den = two_over_t2 + d * wc * two_over_t + wc2;
-        let b0 = gain * (d * wc * two_over_t / den);
+        let k = derive::op_amp_band_pass_coeffs(r_in, rf, c1, c2, self.sim_rate as f64);
         self.push_node(
             name,
             NodeKind::OpAmpBandPass {
                 src: src.into(),
-                a1: 2.0 * (-two_over_t2 + wc2) / den,
-                a2: (two_over_t2 - d * wc * two_over_t + wc2) / den,
-                b0,
-                b2: -b0,
-                in_gain: r_total / r_in[0],
+                a1: k.a1,
+                a2: k.a2,
+                b0: k.b0,
+                b2: k.b2,
+                in_gain: k.in_gain,
                 v_ref,
                 clip_lo: v_neg,
                 clip_hi: v_pos - 1.5,
@@ -689,7 +678,7 @@ impl DiscreteCircuitBuilder {
             NodeKind::RcDisc5 {
                 in_src: in_src.into(),
                 enable_src: enable_src.into(),
-                charge_exp: 1.0 - (-dt / (r * c)).exp(),
+                charge_exp: derive::rc_charge_exp(r, c, dt),
                 cap_v: 0.0,
             },
             ClockDomain::BoardCycle,

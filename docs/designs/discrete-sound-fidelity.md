@@ -28,8 +28,8 @@ and a spectrogram for *same-session* comparisons.
 **`phosphor-emulator-audiodiff-76wx`** observed that none of this can ever
 become a gate: it needs numpy, a nix-shell whose setup takes a README section,
 and a human to run it. Everything it measures is arithmetic already done in
-Rust, over audio already produced in Rust — `disasm run --audio-out` and
-`disasm movie replay --audio-out` both write 16-bit mono WAVs today, and
+Rust, over audio already produced in Rust — `disasm frameshot --audio-out` and
+`disasm replay --audio-out` both write 16-bit mono WAVs today, and
 `disasm imgdiff` plus `gfxsheet::write_png` are the established, actually-used
 shape for "compare two artifacts and gate on the delta".
 
