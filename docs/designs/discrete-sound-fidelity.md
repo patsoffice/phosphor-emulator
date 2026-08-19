@@ -599,6 +599,52 @@ alongside authenticity, and it applies to `sndcmp`'s own scenarios equally.
 The consequence for sequencing is in the phase list below: node comparison moves
 ahead of `fit`.
 
+### What finishing the first board taught
+
+Donkey Kong was then taken to completion — all three effects and the music built
+from the board rather than fitted. Four more things came out of it.
+
+**A fitted filter corner is the *usual* disguise for a missing stage.** Every
+one of Donkey Kong's voices carried one, and in each case the corner had no
+counterpart on the board at all:
+
+| voice | the fitted stand-in | what was actually there |
+|---|---|---|
+| stomp | a 175 Hz low-pass | a counter dividing the noise's edges by eight |
+| walk | a 700 Hz low-pass | an oscillator *chopping* the envelope, not multiplying it |
+| jump | a normalized 555 level | absolute volts compared against a 5 V lid |
+| music | a 0.55 attenuation | the DAC's 100 ms signal-decay circuit, undriven |
+
+Each measured plausibly. Each was standing in for a mechanism, and the giveaway
+was always the same: the fitted value had no schematic counterpart. That test —
+*can I point at the part?* — is faster than any spectral comparison and it never
+gave a false answer here.
+
+**Diagnosing from the output blames the stage nearest the output.** Jump's
+residual was attributed to the emitter follower on the strength of a waveform
+read off the final mix, and two independently rebuilt voices seemed to confirm
+it. The node dump showed the follower matched to within 7 % of its time constant
+and the oscillator to within half a percent of its duty; the error was in the
+envelope, three stages upstream. An output comparison cannot localise, and it
+will systematically accuse the last stage before it.
+
+**"One metric improves, another degrades" meant a missing mechanism every single
+time.** It fired on jump's level-versus-spectrum, on stomp's decay-versus-band
+split, and on walk's low end versus its body. Not once did it turn out to be a
+constant needing a nudge. Treat it as a positive signal rather than a nuisance:
+it is the model telling you where it is incomplete.
+
+**Structurally right can be audibly worse, and that has to be said out loud.**
+Walk's rebuild closed a 13-point gap below 150 Hz and made its decay exact — and
+the result sounded thinner, because a band the fitted filter had been holding up
+went 16 points light. It shipped anyway, because the alternative was to re-fit
+the same compensation over a mechanism that is now genuinely present. But it
+shipped *labelled*: the commit says it is a regression, the issue was repointed
+to the new symptom, and the source comment says which side of the trade is
+structural. A fidelity project accumulates these; the danger is not making the
+trade, it is making it silently and then forgetting which numbers are load
+bearing.
+
 ## Part 5 — Construction-time tuning
 
 A small construction-only API, in `phosphor_core::device::discrete::tuning`:
