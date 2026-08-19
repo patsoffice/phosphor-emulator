@@ -211,9 +211,27 @@ impl Harness {
         // A movie replayed against a different dump boots fine and then diverges
         // silently, so this check is the difference between a clear error and a
         // golden hash that moved for no visible reason.
+        //
+        // Report both digests. Note what this check can and cannot see:
+        // `rom_digest` hashes `set.get(name)` over the entry's *set* names, and
+        // those are ZIP-set names rather than member names, so every lookup
+        // misses and the digest is a function of `rom_names` alone. It therefore
+        // does NOT detect a different dump — pointing this at mario.zip,
+        // marioe.zip and mariof.zip yields one identical digest — and it DOES
+        // reject a movie whose only sin is predating a change to the entry's
+        // name list. Tracked in `…-movie-rom-digest-names-not-contents`.
         let actual = rom_digest(&set, entry.rom_names);
         if actual != movie.header.rom_digest {
-            return Err(MovieError::RomMismatch.to_string());
+            return Err(format!(
+                "{}: movie expects {}, this build computes {} for '{name}' \
+                 (accepted sets: {}). Note this digest covers the registry's ROM-set \
+                 name list, not the dump, so a mismatch usually means the movie \
+                 predates a change to that list rather than that you have the wrong ROMs.",
+                MovieError::RomMismatch,
+                crate::movie::hex(&movie.header.rom_digest),
+                crate::movie::hex(&actual),
+                entry.rom_names.join(", "),
+            ));
         }
 
         let mut machine_box =
