@@ -74,6 +74,26 @@ pub static SPEC: TargetSpec = TargetSpec {
         // same bands, so a spectral difference at the output is consistent with
         // an error in any of them.
         ProbeSpec {
+            name: "stomp-noise",
+            description: "Stomp shift-register output, before the divider (±1)",
+        },
+        ProbeSpec {
+            name: "stomp-div",
+            description: "Stomp counter output: the divided rumble (0/1)",
+        },
+        ProbeSpec {
+            name: "stomp-lid",
+            description: "Stomp envelope capacitor, before its diode (volts)",
+        },
+        ProbeSpec {
+            name: "stomp-mix",
+            description: "Stomp diode-mixer node: envelope and rumble combined (volts)",
+        },
+        ProbeSpec {
+            name: "stomp-int",
+            description: "Stomp emitter follower output, before the divider (volts)",
+        },
+        ProbeSpec {
             name: "jump-cv",
             description: "Jump 555 control voltage, after the slew capacitor (volts)",
         },
@@ -187,6 +207,11 @@ fn probe_value(circuit: &DiscreteCircuit, probe: &str) -> Option<f64> {
         "jump" => ("JUMP_OUT", 1.0),
         "stomp" => ("STOMP_OUT", 1.0),
         "dac" => ("DAC_LP", 1.0),
+        "stomp-noise" => ("STOMP_NOISE", 1.0),
+        "stomp-div" => ("STOMP_DIV", 1.0),
+        "stomp-lid" => ("STOMP_LID", 5.0),
+        "stomp-mix" => ("STOMP_MIX", 5.0),
+        "stomp-int" => ("STOMP_INT", 5.0),
         "jump-cv" => ("JUMP_CV", 5.0),
         "jump-555" => ("JUMP_555", 5.0),
         "jump-lid" => ("JUMP_LID", 5.0),
@@ -247,18 +272,36 @@ mod tests {
     }
 
     /// The point of solo render: one voice's capture must differ from another's.
+    ///
+    /// Measured as AC energy after letting the circuit settle, because neither
+    /// assumption the obvious version makes holds on this board.
+    ///
+    /// An idle voice is not at zero: jump and stomp are diode-mixed under an
+    /// envelope resting *above* their source, so each sits at a steady ~4 V that
+    /// the amplifier's coupling capacitors remove much further downstream.
+    /// Summing raw samples would call that silence loud.
+    ///
+    /// And an idle voice is not immediately quiet from reset: those envelope
+    /// capacitors start discharged and take most of a second to charge past
+    /// their source's peak, so every free-running source leaks until they do.
+    /// That is the board's power-on noise, and it is why the capture scenarios
+    /// carry a 2 s pre-roll. Measuring from reset measures the transient.
     #[test]
     fn probes_render_different_voices() {
+        // Long enough for the slowest envelope (stomp's 363 ms, jump's 517 ms)
+        // to close over its source.
+        const SETTLE_STEPS: usize = 88_200;
+
         let render = |probe: &str, bit: u8| -> f64 {
             let mut t = create(Some(probe)).expect("create");
+            for _ in 0..SETTLE_STEPS {
+                t.step();
+            }
             t.set_control(if bit == 0 { "walk" } else { "stomp" }, Value::Bool(true))
                 .unwrap();
-            let mut energy = 0.0;
-            for _ in 0..20_000 {
-                let s = t.step() as f64;
-                energy += s * s;
-            }
-            energy
+            let samples: Vec<f64> = (0..20_000).map(|_| t.step() as f64).collect();
+            let mean = samples.iter().sum::<f64>() / samples.len() as f64;
+            samples.iter().map(|s| (s - mean) * (s - mean)).sum()
         };
         // With only walk asserted, the walk probe carries energy and the stomp
         // probe carries none.

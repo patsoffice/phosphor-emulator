@@ -694,6 +694,37 @@ impl DiscreteCircuitBuilder {
         )
     }
 
+    /// Binary counter wired as a divider: counts `clock_src`'s rising edges and
+    /// outputs its top bit, so one output period spans `divisor` edges with even
+    /// duty. Output is 0.0 or 1.0; scale it with [`gain`](Self::gain) to reach a
+    /// logic level in volts.
+    ///
+    /// The clock does not have to be periodic. Driven by a noise source this
+    /// divides the *edges*, which gives a square whose period wanders with the
+    /// source's run lengths — a rumble with a fundamental, not the spectral tilt
+    /// that low-passing the same noise to the same average frequency produces.
+    /// Boards reach for this to get a low frequency out of a fast source, and it
+    /// is not interchangeable with a filter.
+    pub fn edge_divider(
+        &mut self,
+        name: &str,
+        clock_src: impl Into<NodeId>,
+        divisor: u32,
+    ) -> NodeId {
+        assert!(divisor >= 2, "edge divider needs a divisor of at least 2");
+        self.push_node(
+            name,
+            NodeKind::EdgeDivider {
+                clock_src: clock_src.into(),
+                divisor,
+                count: 0,
+                level: false,
+                last: 0.0,
+            },
+            ClockDomain::BoardCycle,
+        )
+    }
+
     /// Emitter follower charging a capacitor (port of `dst_rcintegrate`, type 1):
     /// base at `src`, emitter through `r_e` (ohms) into `c` (farads), with
     /// `r_load` (ohms) to ground. Conducting, the cap charges toward

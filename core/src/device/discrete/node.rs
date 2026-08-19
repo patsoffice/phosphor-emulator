@@ -200,6 +200,24 @@ pub(crate) enum NodeKind {
         charge_exp: f64,
         cap_v: f64,
     },
+    /// Binary counter clocked by another node's rising edges, output taken from
+    /// its top bit — a divide-by-`divisor` square with even duty.
+    ///
+    /// Models a counter IC wired as a divider, which is how a board turns a fast
+    /// source into a slow one. Note the clock need not be periodic: driven by a
+    /// noise source this divides the *edges*, producing a square whose period
+    /// varies with the source's run lengths. That is a different signal from the
+    /// same noise low-passed to the same average frequency — it has a
+    /// fundamental where the filtered version only has a spectral tilt.
+    EdgeDivider {
+        clock_src: NodeId,
+        /// Rising edges per output period. Halved to get the toggle interval.
+        divisor: u32,
+        count: u32,
+        level: bool,
+        /// Previous clock value, for edge detection.
+        last: f64,
+    },
     /// Emitter follower charging a capacitor (port of `dst_rcintegrate`, type 1).
     /// The base is `src`; the emitter sits on `r_e` into `c`, with `r_load` to
     /// ground. While the base is high enough the transistor conducts and the cap
@@ -264,6 +282,7 @@ impl NodeKind {
             }
             NodeKind::Add { srcs } => out.extend(srcs.iter().map(|s| s.index())),
             NodeKind::DiodeMixer { srcs } => out.extend(srcs.iter().map(|(s, _)| s.index())),
+            NodeKind::EdgeDivider { clock_src, .. } => out.push(clock_src.index()),
             NodeKind::ResistorMixer { srcs, .. } => out.extend(srcs.iter().map(|(s, _)| s.index())),
             NodeKind::Custom { inputs, .. } => out.extend(inputs.iter().map(|s| s.index())),
             _ => {}
@@ -578,6 +597,26 @@ impl NodeKind {
                     0.0
                 }
             }
+            NodeKind::EdgeDivider {
+                clock_src,
+                divisor,
+                count,
+                level,
+                last,
+            } => {
+                let cur = values[clock_src.index()];
+                // Rising edge through zero: the clock swings either 0/1 or ±1,
+                // and both cross zero exactly once per period.
+                if cur > 0.0 && *last <= 0.0 {
+                    *count += 1;
+                    if *count >= (*divisor).max(2) / 2 {
+                        *count = 0;
+                        *level = !*level;
+                    }
+                }
+                *last = cur;
+                if *level { 1.0 } else { 0.0 }
+            }
             NodeKind::RcIntegrate {
                 src,
                 v_be,
@@ -665,6 +704,13 @@ impl NodeKind {
                 *y2 = 0.0;
             }
             NodeKind::RcDisc5 { cap_v, .. } | NodeKind::RcIntegrate { cap_v, .. } => *cap_v = 0.0,
+            NodeKind::EdgeDivider {
+                count, level, last, ..
+            } => {
+                *count = 0;
+                *level = false;
+                *last = 0.0;
+            }
             NodeKind::Custom { comp, .. } => comp.reset(),
             NodeKind::Constant { .. }
             | NodeKind::Gain { .. }
@@ -723,6 +769,13 @@ impl NodeKind {
             NodeKind::RcDisc5 { cap_v, .. } | NodeKind::RcIntegrate { cap_v, .. } => {
                 w.write_f64_le(*cap_v)
             }
+            NodeKind::EdgeDivider {
+                count, level, last, ..
+            } => {
+                w.write_u32_le(*count);
+                w.write_bool(*level);
+                w.write_f64_le(*last);
+            }
             NodeKind::Custom { comp, .. } => comp.save_state(w),
             NodeKind::Constant { .. }
             | NodeKind::Gain { .. }
@@ -780,6 +833,13 @@ impl NodeKind {
             }
             NodeKind::RcDisc5 { cap_v, .. } | NodeKind::RcIntegrate { cap_v, .. } => {
                 *cap_v = r.read_f64_le()?
+            }
+            NodeKind::EdgeDivider {
+                count, level, last, ..
+            } => {
+                *count = r.read_u32_le()?;
+                *level = r.read_bool()?;
+                *last = r.read_f64_le()?;
             }
             NodeKind::Custom { comp, .. } => comp.load_state(r)?,
             NodeKind::Constant { .. }

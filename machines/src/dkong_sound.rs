@@ -8,18 +8,20 @@
 //! Walk and jump are voltage-controlled 555 astables (R1 = 47 kΩ / R2 = 27 kΩ,
 //! C = 33 nF walk / 47 nF jump), built on the framework's [`ne555_astable`]
 //! primitive driven by a control-voltage node, so the cap integration (and its
-//! ~73 % duty, and its harmonics) comes from the real 555 model. Each 555 free
-//! runs; what makes a note is the envelope opening over it. Stomp stays on its
-//! LFSR-noise model — on hardware it is an LS164 noise source + LS161 counter,
-//! not a 555. The board talks to the device with hardware intent
-//! (`write_sound_bit`, `feed_dac`, `set_discharge`).
+//! ~73 % duty, and its harmonics) comes from the real 555 model. Stomp's source
+//! is instead a shift register clocked at 4 kHz feeding a counter that divides
+//! its edges by eight — an LS164 chain into an LS161, which is where its rumble
+//! gets its 125 Hz. All three sources free-run; what makes a note is the
+//! envelope opening over one. The board talks to the device with hardware
+//! intent (`write_sound_bit`, `feed_dac`, `set_discharge`).
 //!
-//! Jump is the chain that has been taken furthest toward the board: a slewing
-//! control-voltage capacitor with its own wobble oscillator, a fixed-width
-//! conditioned trigger, an envelope that is diode-mixed with the square rather
-//! than multiplied by it, and an emitter follower rather than a filter on the
-//! output. It works in volts throughout, because every one of those stages
-//! compares two absolute voltages against each other.
+//! Jump and stomp share one chain, stage for stage and largely value for value:
+//! a fixed-width conditioned trigger, an envelope that is diode-mixed with the
+//! source rather than multiplied by it, and an emitter follower rather than a
+//! filter on the output, into a divider. Both work in volts throughout, because
+//! every one of those stages compares two absolute voltages against each other.
+//! Jump adds a slewing control-voltage capacitor with its own wobble oscillator,
+//! which is the only part of the two that differs downstream of the source.
 //!
 //! Downstream of the mix, three stages belong to the board rather than to any
 //! voice and apply to the music as well: the summing node's own 100 nF
@@ -33,7 +35,7 @@ use phosphor_core::core::debug::{DebugRegister, Debuggable};
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::device::{
     CustomComponent, DiscreteCircuit, DiscreteCircuitBuilder, ExternalSourceId, FilterMode,
-    LogicInputId, NodeId, Output555, OutputGain,
+    LfsrSpec, LogicInputId, NodeId, Output555, OutputGain,
 };
 
 /// Output sample rate. The circuit is built board = sim = output = this rate, so
@@ -188,39 +190,75 @@ const WALK_HOLD_S: f64 = 0.4;
 /// the ratios were wrong in ways that cancelled in the level and not in the
 /// spectrum.
 const JUMP_GAIN: f64 = 0.648;
-// Stomp is a low rumble, not a hiss. Fitted against a MAME capture of the
-// effect triggered ONCE (`tools/sound-reference/drive_dkong_single.lua` with
-// DK_EFFECT=stomp) against `sndcmp capture dkong/stomp`:
+// Stomp is a low rumble, not a hiss, and the rumble is a COUNTER — not a filter.
 //
-//                  original    reference    now
-//   AC RMS        -21.72 dB    -23.89 dB   -23.89 dB
-//   centroid       250.1 Hz     124.9 Hz    133.0 Hz
-//   decay T20       0.090 s      0.545 s     0.279 s
+// The board clocks a 24-bit shift register at 4 kHz and feeds a counter that
+// divides its rising edges by eight, taking the top bit. That alone lands the
+// pitch near 125 Hz, which is where the reference's centroid sits. Everything
+// after it is jump's chain, stage for stage and mostly value for value: the
+// same ~26 ms conditioned trigger, the same diode-mixed lid, the same emitter
+// follower into the same divider.
 //
-// The original 340 Hz corner put most of the energy above the reference's, and
-// a 50 ms envelope truncated at 250 ms cut the tail off before the reference
-// had finished falling 20 dB.
+// This used to be a one-shot noise burst with a fitted exponential envelope
+// into a fitted one-pole low-pass, which is the same shape by coincidence and
+// not by mechanism. A low-pass on white noise gives a spectral tilt with no
+// fundamental; a divided edge stream gives a square whose period wanders with
+// the noise's run lengths. They can be made to measure the same centroid and
+// they do not sound the same, and the old model's tail could never be made to
+// fit — the comment here used to conclude that "the reference falls faster than
+// one pole allows, which points at a second filter stage on the board." There
+// is no second filter. The decay was never a filter's.
 //
-// The gain was first fitted against a repeated-pulse reference window holding
-// more than one stomp, which made it read ~3 dB loud and pulled it down to 5.0.
-// Measured against a single trigger it is 7.0, close to where it started — a
-// reminder that a level fitted against overlapping decays is not a level.
+//                     before        now      reference
+//   AC RMS         -23.89 dB  -23.89 dB      -23.89 dB
+//   decay T20         0.279 s    0.519 s        0.545 s
+//   decay T40         1.098 s    0.688 s        0.695 s
+//   centroid        133.0 Hz   135.0 Hz       124.9 Hz
+//   rolloff 85%     193.8 Hz   150.7 Hz       140.6 Hz
+//   fundamental      88.1 Hz   132.0 Hz       125.0 Hz
+//   band 0-150         61.8 %     72.3 %         89.5 %
+//   band 150-400       37.2 %     27.1 %         10.2 %
 //
-// The remaining tail gap is NOT a component value to keep tuning. The reference
-// rolls off at 141 Hz where a 175 Hz one-pole rolls off at 215 Hz, and a single
-// pole cannot be both as dark as the reference and as loud. The reference falls
-// faster than one pole allows, which points at a second filter stage on the
-// board. See `…-discrete-sound-fidelity-l5r3.7`.
-const STOMP_LP_HZ: f64 = 175.0;
-/// Raised by 2.7 dB with walk, for the same reason: the mixer low-pass and the
-/// amplifier high-passes now sit below every voice.
-const STOMP_GAIN: f64 = 9.54;
-/// Stomp envelope decay, fitted (see above). Longer than T20/ln(10) would
-/// suggest because the output low-pass smears the envelope's start.
-const STOMP_TAU: f64 = 0.39;
-/// How long the burst runs before it is cut off. Several time constants, so the
-/// envelope decays away rather than being truncated mid-fall as it was at 250 ms.
-const STOMP_HOLD_S: f64 = 1.2;
+// The decay is the headline: it was 49 % short at T20 and 58 % long at T40, and
+// is now within 5 % and 1 %. That is what comes of the envelope and the
+// follower being present rather than approximated by a one-pole filter.
+//
+// The rumble's rate is exact — the divided source measures 124.7 Hz against the
+// board's 125.0, which is 4 kHz of shift-register edges at one rising edge in
+// four, divided by eight. So the pitch is right and the remaining 150-400 Hz
+// excess is harmonic content above it, not a mistuned source.
+//
+// That excess is the SAME residual jump has, in the same direction, and both
+// voices reach the output through `rc_integrate`. Two independently rebuilt
+// chains showing one signature is good evidence it is one cause in the shared
+// follower rather than two coincidences; see `…-0fbi`.
+//
+// Note the multi-resolution STFT distance reads WORSE than the old model's
+// (3.95 against 3.21) while every band and envelope measure improved. That is
+// the metric, not the model: for a noise-derived voice it penalises a
+// fundamental sitting a few Hz off more than it penalises having no fundamental
+// at all, and the old filtered-noise model had none to misplace.
+/// Noise clock, 4 kHz: the shift register is clocked by the video counter's 2VF,
+/// which divides the 61.44 MHz master by 5 and 4 to get 1H, by 16 to get 16H, by
+/// 12 and 2 to get 1VF, and by 2 again.
+const STOMP_NOISE_HZ: f64 = 61_440_000.0 / 5.0 / 4.0 / 16.0 / 12.0 / 2.0 / 2.0;
+/// The counter divides the noise's rising edges by eight and the board takes the
+/// top bit, so one output period spans eight edges.
+const STOMP_DIVISOR: u32 = 8;
+/// Envelope lid: 3.3 µF pulled down through 10 kΩ and recovering through
+/// 100 kΩ + 10 kΩ. Jump's asymmetry with jump's parts, a little faster.
+const STOMP_ENV_DIP_S: f64 = 0.033;
+const STOMP_ENV_RECOVER_S: f64 = 0.363;
+/// Output stage, the same emitter follower jump has: 750 Ω into 1 µF against
+/// 4.7 kΩ ∥ (2 kΩ + 5.1 kΩ), so 750 µs to charge and 3.6 ms to drain.
+const STOMP_OUT_RE: f64 = 750.0;
+/// Output divider, 5.1 kΩ of the 2 kΩ + 5.1 kΩ following the integrator — the
+/// same network jump's output sees.
+const STOMP_DIVIDER: f64 = 5.1 / 7.1;
+/// Output calibration, the only scalar in the chain that is not a component
+/// value. Re-derived from scratch when the structure changed; the old 9.54 was
+/// calibrated against a model with no envelope and no follower in it.
+const STOMP_GAIN: f64 = 0.546;
 
 // Shared 555 astable values for the walk/jump VCOs: R1 charges through 47 kΩ,
 // R2 discharges through 27 kΩ, Vcc = 5 V. The control voltage on pin 5 sets
@@ -492,70 +530,6 @@ impl CustomComponent for DkongOneShotEnv {
     fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
         self.active = r.read_bool()?;
         self.timer = r.read_f64_le()?;
-        self.last_en = r.read_bool()?;
-        Ok(())
-    }
-}
-
-/// Stomp: a 24-bit LFSR noise burst (4 kHz clock) with a [`STOMP_TAU`] amplitude
-/// decay, triggered on the rising edge of the enable. Input: `[stomp_en]`.
-struct DkongStomp {
-    active: bool,
-    timer: f64,
-    lfsr: u32,
-    lfsr_clock: f64,
-    last_en: bool,
-}
-
-impl DkongStomp {
-    const SEED: u32 = 0x1A_CFFC;
-}
-
-impl CustomComponent for DkongStomp {
-    fn reset(&mut self) {
-        self.active = false;
-        self.timer = 0.0;
-        self.lfsr = Self::SEED;
-        self.lfsr_clock = 0.0;
-        self.last_en = false;
-    }
-    fn step(&mut self, inputs: &[f64], dt: f64) -> f64 {
-        let en = inputs[0] > 0.5;
-        if en && !self.last_en {
-            self.active = true;
-            self.timer = 0.0;
-        }
-        self.last_en = en;
-        if !self.active {
-            return 0.0;
-        }
-        self.timer += dt;
-        if self.timer > STOMP_HOLD_S {
-            self.active = false;
-            return 0.0;
-        }
-        self.lfsr_clock += 4000.0 * dt;
-        while self.lfsr_clock >= 1.0 {
-            self.lfsr_clock -= 1.0;
-            let bit = ((self.lfsr >> 10) ^ (self.lfsr >> 23)) & 1;
-            self.lfsr = (self.lfsr >> 1) | (bit << 23);
-        }
-        let noise = if self.lfsr & 1 != 0 { 1.0 } else { -1.0 };
-        let amp = (-self.timer / STOMP_TAU).exp();
-        noise * amp * 0.12
-    }
-    fn save_state(&self, w: &mut StateWriter) {
-        w.write_bool(self.active);
-        w.write_f64_le(self.timer);
-        w.write_u32_le(self.lfsr);
-        w.write_f64_le(self.lfsr_clock);
-        w.write_bool(self.last_en);
-    }
-    fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
-        self.active = r.read_bool()?;
-        self.timer = r.read_f64_le()?;
-        self.lfsr = r.read_u32_le()?;
-        self.lfsr_clock = r.read_f64_le()?;
         self.last_en = r.read_bool()?;
         Ok(())
     }
@@ -839,25 +813,62 @@ fn build_circuit() -> (DiscreteCircuit, DkongInputs) {
     );
     let jump = b.gain("JUMP_OUT", jump_int, JUMP_GAIN * JUMP_DIVIDER);
 
-    let stomp_raw = b.custom(
-        "STOMP",
+    // Stomp is jump's chain with a different source: free-running noise divided
+    // down to a rumble, held off the output by a lid until the latch fires.
+    //
+    // The source is a shift register clocked at 4 kHz whose edges a counter
+    // divides by eight. The counter is what makes this a rumble — its output is
+    // a square at roughly an eighth of the noise's edge rate, with a period that
+    // wanders as the noise's run lengths do. Low-passing the raw noise to the
+    // same average frequency measures a similar centroid and sounds like hiss,
+    // because it has no fundamental to hear.
+    let stomp_noise = b.lfsr_noise(
+        "STOMP_NOISE",
+        STOMP_NOISE_HZ,
+        LfsrSpec {
+            width: 24,
+            taps: (10, 23),
+            seed: 0x1A_CFFC,
+        },
+    );
+    let stomp_div = b.edge_divider("STOMP_DIV", stomp_noise, STOMP_DIVISOR);
+    let stomp_src = b.gain("STOMP_SRC", stomp_div, VCC);
+
+    // From here it is jump's chain, and mostly jump's values. The trigger is the
+    // same differentiator into the same comparator (10 kΩ + 10 kΩ, 1 µF), so it
+    // is the same ~26 ms pulse and equally indifferent to the latch's width.
+    let stomp_trig = b.custom(
+        "STOMP_TRIG",
         vec![stomp_en.into()],
-        Box::new(DkongStomp {
-            active: false,
+        Box::new(DkongEdgePulse {
+            width: JUMP_TRIG_S,
             timer: 0.0,
-            lfsr: DkongStomp::SEED,
-            lfsr_clock: 0.0,
+            active: false,
             last_en: false,
         }),
     );
-    let stomp_lp = b.second_order(
-        "STOMP_LP",
-        stomp_raw,
-        FilterMode::LowPass,
-        STOMP_LP_HZ,
-        0.707,
+    let stomp_lid_rest = b.constant("STOMP_LID_REST", JUMP_LID_REST_V);
+    let stomp_lid_dip = b.gain("STOMP_LID_DIP", stomp_trig, -JUMP_LID_REST_V);
+    let stomp_lid_target = b.add("STOMP_LID_TARGET", &[stomp_lid_rest, stomp_lid_dip]);
+    let stomp_lid = b.rc_envelope(
+        "STOMP_LID",
+        stomp_lid_target,
+        STOMP_ENV_RECOVER_S,
+        STOMP_ENV_DIP_S,
     );
-    let stomp = b.gain("STOMP_OUT", stomp_lp, STOMP_GAIN);
+    let stomp_mixed = b.diode_mixer_drops(
+        "STOMP_MIX",
+        &[(stomp_lid, JUMP_LID_DIODE_V), (stomp_src, JUMP_555_DIODE_V)],
+    );
+    let stomp_int = b.rc_integrate(
+        "STOMP_INT",
+        stomp_mixed,
+        JUMP_OUT_VBE,
+        STOMP_OUT_RE,
+        JUMP_OUT_RLOAD,
+        JUMP_OUT_C,
+    );
+    let stomp = b.gain("STOMP_OUT", stomp_int, STOMP_GAIN * STOMP_DIVIDER);
 
     // DAC reconstruction: a Sallen-Key low-pass darkens the raw DAC steps before
     // the mix, matching the board's filter so the sampled music isn't hashy.
