@@ -9,6 +9,7 @@
 //! the machine-level mix buffers that sit downstream of the per-device
 //! resamplers.
 
+pub mod analysis;
 pub mod fir;
 mod ring;
 
