@@ -38,7 +38,9 @@ local function on_frame()
   -- Pet the watchdog (read of 0x7800) so the parked CPU doesn't trigger a reset.
   mem:read_u8(0x7800)
 
-  local t = manager.machine.time.seconds
+  -- Elapsed time, not the attotime's integer `seconds` field — that one holds a
+  -- whole-second value and quantizes every segment boundary below to 1 s.
+  local t = manager.machine.time:as_double()
 
   -- Baseline: everything off. Pitch is parked high (0xFF) so the always-on
   -- melody note clock is ultrasonic (silent) and doesn't bleed into the other

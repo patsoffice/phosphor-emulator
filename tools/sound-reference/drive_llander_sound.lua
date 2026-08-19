@@ -28,7 +28,9 @@ local function on_frame()
     if not cpu then return end
     mem = cpu.spaces["program"]
   end
-  local t = manager.machine.time.seconds
+  -- Elapsed time, not the attotime's integer `seconds` field — that one holds a
+  -- whole-second value and quantizes every segment boundary below to 1 s.
+  local t = manager.machine.time:as_double()
   local value = 0x00
   for _, seg in ipairs(timeline) do
     if t >= seg[1] then value = seg[3] end

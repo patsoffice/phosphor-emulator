@@ -44,7 +44,9 @@ local function on_frame()
     announced = true
   end
 
-  local t = manager.machine.time.seconds
+  -- Elapsed time, not the attotime's integer `seconds` field — that one holds a
+  -- whole-second value and quantizes every segment boundary below to 1 s.
+  local t = manager.machine.time:as_double()
   all_off(mem)
   local active
   for _, seg in ipairs(timeline) do

@@ -96,7 +96,13 @@ local function on_frame()
   mem:write_u8(SPIN + 2, (SPIN >> 8) & 0xff)
   manager.machine.devices[":maincpu"].state["PC"].value = SPIN
 
-  local t = manager.machine.time.seconds
+  -- `manager.machine.time.seconds` is the attotime's INTEGER seconds field, not
+  -- the elapsed time — it reads 2 for the whole of the third second. Every
+  -- comparison against a fractional timeline below then holds for a full second,
+  -- so a 50 ms pulse became a 1 s assertion and the release edge never happened
+  -- at all. Captures made that way measure a held line, not a pulse, and no
+  -- amount of care on the Phosphor side reconciles with them.
+  local t = manager.machine.time:as_double()
 
   -- Hold every trigger low except the one this run is measuring, so a stray
   -- latch bit cannot leak another voice into the capture.

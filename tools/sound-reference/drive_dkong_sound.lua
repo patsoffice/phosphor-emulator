@@ -37,7 +37,9 @@ local function on_frame()
   mem:write_u8(SPIN + 2, (SPIN >> 8) & 0xff)
   manager.machine.devices[":maincpu"].state["PC"].value = SPIN
 
-  local t = manager.machine.time.seconds
+  -- Elapsed time, not the attotime's integer `seconds` field — that one holds a
+  -- whole-second value and quantizes every segment boundary below to 1 s.
+  local t = manager.machine.time:as_double()
   -- All triggers off, then apply the active segment.
   for b = 0, 2 do set_bit(b, false) end
   for _, seg in ipairs(timeline) do

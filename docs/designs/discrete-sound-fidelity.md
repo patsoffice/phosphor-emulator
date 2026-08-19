@@ -548,7 +548,7 @@ than everything below it in this document. See
 
 ### What the first board taught
 
-Donkey Kong was the first real use of this design, and it revised two of its
+Donkey Kong was the first real use of this design, and it revised three of its
 assumptions.
 
 **Read the reference implementation before measuring anything.** The design
@@ -570,6 +570,31 @@ Each fit made the output measure better while the model got further from the
 board, and each had to be undone. A fitted scalar standing in for a missing
 mechanism is the failure this document warns about in the reference policy — it
 turns out to be the *common* case, not the exceptional one.
+
+**The reference has to be verified as an experiment, not just as a capture.**
+The document's reference policy asks whether the reference is *authentic*. It
+does not ask whether the reference ran the experiment we think it ran, and that
+is where the largest single error in this work came from.
+
+Every timeline-driven MAME driver read the clock as
+`manager.machine.time.seconds`. That is the attotime's integer seconds field,
+not elapsed time — it reads `2` for the whole of the third second. So every
+comparison against a fractional timeline held for a full second: a jump captured
+as a 50 ms pulse was really a 1 s assertion, and the release edge never happened
+at all. The correct accessor is `manager.machine.time:as_double()`.
+
+Nothing about the capture looks wrong. It contains a plausible note of plausible
+length that starts when it should. It was only caught by an experiment on the
+reference itself — capturing with two different hold lengths and finding the
+results byte-identical, then with the line never asserted and finding silence.
+The jump note it produced sat a fifth below the real one, and every attempt to
+reconcile Phosphor with it was chasing a control voltage the board never holds.
+
+So: before trusting a reference, prove it responds to the stimulus. Vary the
+one parameter under test and confirm the capture changes; drive the null case
+and confirm it goes quiet. A capture that ignores its own timeline is worse than
+no capture, because it looks like evidence. This belongs in the reference policy
+alongside authenticity, and it applies to `sndcmp`'s own scenarios equally.
 
 The consequence for sequencing is in the phase list below: node comparison moves
 ahead of `fit`.
