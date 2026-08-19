@@ -510,7 +510,9 @@ defect this tooling *reveals*, not a prerequisite for building it.
 ## Part 4 — Probes: per-voice, per-node, per-section
 
 Output-only evidence shows that a model is wrong without showing where it went
-wrong. Three facilities, in increasing power:
+wrong. Four facilities, in increasing power. The fourth was added after the
+Donkey Kong work made its absence the binding constraint — see "What the first
+board taught" below.
 
 **Per-voice solo render.** Render one voice or node to its own WAV instead of
 the mix. This is the difference between "our dkong sounds wrong" and "our dkong
@@ -533,6 +535,44 @@ elsewhere. This is the only measurement that cleanly separates a *source* error
 (LFSR taps, oscillator divider, envelope shape) from a *filter* error (RC corner,
 Q, order) — a spectral diff of mixed output fundamentally cannot, because both
 move the same bands.
+
+**Node-level comparison against the reference implementation.** Render a named
+node on our side and the corresponding node in MAME's netlist, and diff them.
+MAME's discrete engine can log named nodes (`DISCRETE_CSVLOG`,
+`DISCRETE_WAVLOG`); ours can already render one by name. What is missing is the
+node map between them and a command to capture both.
+
+This is the facility whose absence stalled the first board, and it is worth more
+than everything below it in this document. See
+`phosphor-emulator-discrete-node-compare-2b7f`.
+
+### What the first board taught
+
+Donkey Kong was the first real use of this design, and it revised two of its
+assumptions.
+
+**Read the reference implementation before measuring anything.** The design
+frames MAME as a source of reference *captures*. It is also a source of
+reference *topology*, and that is the more valuable half. Hours went into
+inferring circuit structure from spectra — a sustained-vs-triggered envelope, a
+wobble oscillator's existence, whether an envelope multiplies or diode-mixes —
+while `dkong_a.cpp` sat on disk with the answers. Reading it took minutes and
+was decisive every time. The reference policy is unchanged (schematics remain
+the authority, and MAME is not to be cited in comments) but the working order
+should be: read the topology, model it, then measure to check.
+
+**Fitting is the wrong tool while the topology is unknown, and actively
+harmful.** Every value fitted before the structure was right was either wrong or
+right for the wrong reason: a stomp gain fitted against overlapping decays, a
+walk pitch fitted against a two-second hold the game never produces, a wobble
+oscillator deleted because its per-step variation looked like measurement noise.
+Each fit made the output measure better while the model got further from the
+board, and each had to be undone. A fitted scalar standing in for a missing
+mechanism is the failure this document warns about in the reference policy — it
+turns out to be the *common* case, not the exceptional one.
+
+The consequence for sequencing is in the phase list below: node comparison moves
+ahead of `fit`.
 
 ## Part 5 — Construction-time tuning
 
@@ -1048,12 +1088,27 @@ with `phosphor-bench`. The override file lands here rather than with `fit`
 because it is independently useful: it makes hand-exploring a value a
 no-rebuild operation even before any optimizer exists.
 
+**Phase 5b — Node-level comparison.** Diff a named node against MAME's
+corresponding netlist node rather than only the final output. Inserted here, and
+ahead of `fit`, on the first board's evidence: with a five-stage chain, an output
+that disagrees says nothing about which stage is at fault, and the work collapses
+into editing constants and watching one metric improve while another degrades.
+`…-discrete-node-compare-2b7f`.
+
 **Phase 6 — `fit`, `writeback`, and correct Donkey Kong.** Objective, optimizer,
 E-series snapping, conditioning and hold-out reporting, `--out-tuning`, and
 `sndcmp writeback` with its `Literal`/`Derived` split. Diagnose each DK effect
 from evidence; prefer topology fixes to implausible scalar fits; validate the
 three effects together for relative level; add a mixed full-machine scenario for
 effect-to-DAC balance. Gated on Phase 0 having concluded the reference is clean.
+
+Worth less than this document originally assumed, and dangerous earlier than its
+place here. See "What the first board taught": fitting a value while the topology
+is wrong produces a number that measures well and models nothing, and every such
+number had to be undone once the structure was corrected. Build it for the
+"which of these two plausible values is right" case it was scoped for, after the
+structure can be verified stage by stage — not as the primary route to
+correctness.
 
 **Phase 7 — Remaining implemented devices.** Congo Bongo (including comparison
 against MAME's samples and any original recordings), Galaxian and the shared
