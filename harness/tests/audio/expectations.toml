@@ -78,11 +78,6 @@ dc = true
 reason = "movie: DC +0.198, no clipping — an offset riding on otherwise healthy audio (peak -2.0 dBFS)"
 issue = "phosphor-emulator-audio-dc-play-sweep-stxr"
 
-[[known_defect]]
-machine = "dkong"
-dc = true
-reason = "movie: DC -0.136, essentially no clipping; the discrete sound path is the first fitting target"
-issue = "phosphor-emulator-audio-dc-play-sweep-stxr"
 
 [[known_defect]]
 machine = "docastle"

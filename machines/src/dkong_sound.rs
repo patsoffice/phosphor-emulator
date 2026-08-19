@@ -300,7 +300,22 @@ fn build_circuit() -> (DiscreteCircuit, DkongInputs) {
 
     // Op-amp summing mixer: the filtered DAC plus the three filtered effects.
     let mix = b.add("MIX", &[dac_lp, walk, jump, stomp]);
-    b.output(mix, OutputGain::unity());
+
+    // Output coupling capacitor.
+    //
+    // Walk and jump are AC-coupled individually above, but the I8035 DAC is
+    // unipolar — its codes span 0..Vref, so its rest level is a pedestal, not
+    // zero — and nothing was removing that from the summed output. It reached
+    // the speaker as a slow drift that carried 94 % of the board's measured
+    // energy below 150 Hz, with a spectral centroid of 32 Hz: content no
+    // cabinet speaker reproduces, swamping the walk/jump/stomp voices this
+    // circuit exists to model.
+    //
+    // The corner matches the per-effect couplings already here (11.2 kΩ /
+    // 4.7 µF ≈ 3 Hz), which is the same part value the board uses on its
+    // output stage.
+    let out_ac = b.rc_high_pass("OUT_AC", mix, AC_R, AC_C);
+    b.output(out_ac, OutputGain::unity());
 
     let circuit = b.build();
     (
@@ -475,22 +490,41 @@ mod tests {
         (sum / n as f64).sqrt()
     }
 
+    /// The DAC reaches the output, and its *DC* does not.
+    ///
+    /// This used to assert that a held DAC value settled to a constant at the
+    /// output, which is exactly the defect the output coupling capacitor now
+    /// removes: the I8035 DAC is unipolar, so a held code is a pedestal, and
+    /// letting it through put 94 % of the board's energy below 150 Hz and
+    /// swamped the walk/jump/stomp voices. A coupling capacitor passes the step
+    /// and then decays to zero, which is what a real one does and what this now
+    /// checks.
     #[test]
-    fn dac_passes_through_the_mix() {
+    fn the_dac_reaches_the_output_but_its_dc_does_not() {
         let mut s = DkongDiscreteSound::new();
-        run(&mut s, 10_000, 400);
-        let mut buf = vec![0i16; 1024];
+        // The coupling network is 11.2 kΩ / 4.7 µF, so τ ≈ 53 ms. Hold the code
+        // for a second — about twenty time constants — so the decay is fully
+        // resolved rather than caught mid-slope.
+        run(&mut s, 10_000, 44_100);
+        let mut buf = vec![0i16; 65_536];
         let n = s.fill_audio(&mut buf);
-        assert!(n > 0);
-        // With no effects active the output is the (attenuated) DAC value, but it
-        // now passes through the Sallen-Key reconstruction low-pass: a held DAC
-        // settles to the same value (unity DC gain) after the filter's rise, so
-        // check the converged tail rather than every sample.
-        let expected = (10_000.0 * DAC_GAIN) as i16;
+        assert!(n > 1000, "expected about a second of audio, got {n}");
+
+        // The step itself gets through: the output moves when the DAC does.
+        let peak = buf[..n].iter().map(|v| v.abs()).max().unwrap();
         assert!(
-            buf[n - 50..n].iter().all(|&v| (v - expected).abs() <= 1),
-            "held DAC should settle to {expected}, got tail {:?}",
-            &buf[n - 5..n]
+            peak > (10_000.0 * DAC_GAIN * 0.5) as i16,
+            "the DAC step should reach the output, peak was {peak}"
+        );
+
+        // And the held level decays away rather than sitting there as a pedestal.
+        let tail_slice = &buf[n - 200..n];
+        let tail = (tail_slice.iter().map(|&v| (v as f64).powi(2)).sum::<f64>()
+            / tail_slice.len() as f64)
+            .sqrt();
+        assert!(
+            tail < peak as f64 * 0.05,
+            "a held DAC code must not survive as DC: peak {peak}, tail RMS {tail:.1}"
         );
     }
 
