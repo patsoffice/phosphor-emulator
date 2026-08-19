@@ -125,6 +125,24 @@ fn register_machine(engine: &mut Engine) {
             .unwrap_or_default()
     });
 
+    // --- Audio capture ---
+    // `capture_audio()` starts accumulating, `write_audio(path)` stops and
+    // writes a 16-bit mono WAV. Driving real input on a schedule is the only way
+    // to reach a sound a game only makes during play, which a device-level
+    // capture cannot produce.
+    engine.register_fn("capture_audio", |m: &mut Machine| {
+        m.borrow_mut().capture_audio();
+    });
+    engine.register_fn(
+        "write_audio",
+        |m: &mut Machine, path: &str| -> Result<i64, Box<EvalAltResult>> {
+            m.borrow_mut()
+                .write_audio(path)
+                .map(|n| n as i64)
+                .map_err(|e| e.into())
+        },
+    );
+
     // --- Watchpoints ---
     // `watch*` set on every CPU (see DebugSession::watch for why) and return the
     // CPU count; `hits()` drains the accumulated hits as an array of maps.

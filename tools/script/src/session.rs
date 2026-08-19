@@ -41,6 +41,9 @@ pub struct DebugSession {
     /// Bus events drained from the machine's trace ring after each frame/step,
     /// so a whole run survives the ring's finite capacity.
     events: Vec<DebugEvent>,
+    /// Accumulated audio, `Some` once a script calls `capture_audio`. The ring
+    /// is drained every frame either way; this decides whether to keep it.
+    audio: Option<Vec<i16>>,
     /// Per-frame PC-sampling hang detector, `Some` once a script enables it.
     hang: Option<HangDetector>,
     /// Hang reports collected while running frames.
@@ -75,6 +78,7 @@ impl DebugSession {
             fb: Vec::new(),
             hits: Vec::new(),
             events: Vec::new(),
+            audio: None,
             hang: None,
             hang_reports: Vec::new(),
             rom_path: None,
@@ -110,9 +114,50 @@ impl DebugSession {
     pub fn run_frames(&mut self, n: u64) {
         for _ in 0..n {
             self.harness.run_frame();
+            self.drain_audio();
             self.drain_watchpoint_hits();
             self.drain_trace_events();
             self.sample_hang();
+        }
+    }
+
+    /// Start accumulating audio, discarding anything captured so far.
+    ///
+    /// Scripts drive real input on a schedule, which is the only way to reach a
+    /// sound a game only makes during play — a Donkey Kong footstep needs a
+    /// coin, a start and a held joystick, none of which a device-level capture
+    /// can produce.
+    pub fn capture_audio(&mut self) {
+        self.audio = Some(Vec::new());
+    }
+
+    /// Stop accumulating and write what was captured as a 16-bit mono WAV.
+    pub fn write_audio(&mut self, path: &str) -> Result<usize, String> {
+        let samples = self
+            .audio
+            .take()
+            .ok_or_else(|| "capture_audio() was never called".to_string())?;
+        let rate = self.harness.machine().audio_sample_rate();
+        write_wav_16(path, &samples, rate).map_err(|e| format!("writing {path}: {e}"))?;
+        Ok(samples.len())
+    }
+
+    /// Drain the machine's audio into the capture buffer.
+    ///
+    /// The ring has to be drained every frame whether or not anyone asked for
+    /// audio, or it overruns and the capture develops gaps; when no capture is
+    /// active the samples are simply dropped.
+    fn drain_audio(&mut self) {
+        let rate = self.harness.machine().audio_sample_rate().max(1) as usize;
+        let mut chunk = vec![0i16; rate];
+        loop {
+            let n = self.harness.machine_mut().fill_audio(&mut chunk);
+            if n == 0 {
+                break;
+            }
+            if let Some(buf) = &mut self.audio {
+                buf.extend_from_slice(&chunk[..n]);
+            }
         }
     }
 
@@ -925,4 +970,31 @@ mod tests {
         assert_eq!(&data[..8], b"\x89PNG\r\n\x1a\n", "PNG magic");
         std::fs::remove_file(&path).unwrap();
     }
+}
+
+/// Write 16-bit mono PCM as a WAV.
+///
+/// Hand-rolled rather than shared with `disasm`: this crate does not depend on
+/// that binary, and the header is fourteen fields.
+fn write_wav_16(path: &str, samples: &[i16], rate: u32) -> std::io::Result<()> {
+    use std::io::Write;
+    let data_len = (samples.len() * 2) as u32;
+    let mut f = std::io::BufWriter::new(std::fs::File::create(path)?);
+    f.write_all(b"RIFF")?;
+    f.write_all(&(36 + data_len).to_le_bytes())?;
+    f.write_all(b"WAVE")?;
+    f.write_all(b"fmt ")?;
+    f.write_all(&16u32.to_le_bytes())?;
+    f.write_all(&1u16.to_le_bytes())?;
+    f.write_all(&1u16.to_le_bytes())?;
+    f.write_all(&rate.to_le_bytes())?;
+    f.write_all(&(rate * 2).to_le_bytes())?;
+    f.write_all(&2u16.to_le_bytes())?;
+    f.write_all(&16u16.to_le_bytes())?;
+    f.write_all(b"data")?;
+    f.write_all(&data_len.to_le_bytes())?;
+    for s in samples {
+        f.write_all(&s.to_le_bytes())?;
+    }
+    f.flush()
 }
