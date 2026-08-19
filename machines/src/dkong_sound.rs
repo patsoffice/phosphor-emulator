@@ -53,8 +53,35 @@ const WALK_LP_HZ: f64 = 700.0;
 const WALK_GAIN: f64 = 0.14;
 const JUMP_LP_HZ: f64 = 1_400.0;
 const JUMP_GAIN: f64 = 0.25;
-const STOMP_LP_HZ: f64 = 340.0;
-const STOMP_GAIN: f64 = 7.0;
+// Stomp is a low rumble, not a hiss. Fitted against a MAME reference capture of
+// the isolated effect (`tools/sound-reference/drive_dkong_sound.lua`, window
+// 5-6 s) with `disasm audiodiff --range 5:6`:
+//
+//                    was      now      reference
+//   AC RMS       -21.72 dB  -19.03 dB   -19.06 dB
+//   centroid      250.1 Hz   125.4 Hz    125.1 Hz
+//   below 150 Hz     29.5 %    63.8 %      89.6 %
+//   decay T20      0.090 s    0.374 s     0.515 s
+//
+// The old 340 Hz corner put most of the energy above the reference's, and a
+// 50 ms envelope truncated at 250 ms cut the tail off before the reference had
+// finished falling 20 dB.
+//
+// Level and brightness now match closely. Two gaps remain and are NOT component
+// values to keep tuning: the tail is still ~0.14 s short, and the reference has
+// 90 % of its energy below 150 Hz where this has 64 % with an 85 % rolloff at
+// 215 Hz against the reference's 141 Hz. A one-pole 175 Hz corner cannot be both
+// as dark as the reference and as loud; the reference falls off faster than one
+// pole allows, which points at a second filter stage on the board rather than a
+// wrong corner. See `…-discrete-sound-fidelity-l5r3.7`.
+const STOMP_LP_HZ: f64 = 175.0;
+const STOMP_GAIN: f64 = 5.0;
+/// Stomp envelope decay, fitted (see above). Longer than T20/ln(10) would
+/// suggest because the output low-pass smears the envelope's start.
+const STOMP_TAU: f64 = 0.39;
+/// How long the burst runs before it is cut off. Several time constants, so the
+/// envelope decays away rather than being truncated mid-fall as it was at 250 ms.
+const STOMP_HOLD_S: f64 = 1.2;
 
 // Shared 555 astable values for the walk/jump VCOs: R1 charges through 47 kΩ,
 // R2 discharges through 27 kΩ, Vcc = 5 V. The control voltage on pin 5 sets
@@ -128,7 +155,7 @@ impl CustomComponent for DkongJumpEnv {
     }
 }
 
-/// Stomp: a 24-bit LFSR noise burst (4 kHz clock) with τ ≈ 50 ms amplitude
+/// Stomp: a 24-bit LFSR noise burst (4 kHz clock) with a [`STOMP_TAU`] amplitude
 /// decay, triggered on the rising edge of the enable. Input: `[stomp_en]`.
 struct DkongStomp {
     active: bool,
@@ -161,7 +188,7 @@ impl CustomComponent for DkongStomp {
             return 0.0;
         }
         self.timer += dt;
-        if self.timer > 0.25 {
+        if self.timer > STOMP_HOLD_S {
             self.active = false;
             return 0.0;
         }
@@ -172,7 +199,7 @@ impl CustomComponent for DkongStomp {
             self.lfsr = (self.lfsr >> 1) | (bit << 23);
         }
         let noise = if self.lfsr & 1 != 0 { 1.0 } else { -1.0 };
-        let amp = (-self.timer / 0.05).exp();
+        let amp = (-self.timer / STOMP_TAU).exp();
         noise * amp * 0.12
     }
     fn save_state(&self, w: &mut StateWriter) {

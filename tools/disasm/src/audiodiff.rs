@@ -193,6 +193,46 @@ pub fn read_wav(path: &Path, policy: ChannelPolicy) -> Result<Capture, String> {
     })
 }
 
+/// Restrict a capture to `start..end` seconds.
+///
+/// The reason this exists: a capture that walks through several effects on a
+/// timeline averages them together, and the average describes none of them. A
+/// board whose walk is too bright and whose stomp is too dark reads as roughly
+/// correct overall. Comparing one effect at a time is the only way the numbers
+/// mean anything, and until the scenario runner exists this is how to do it.
+pub fn slice_seconds(capture: &Capture, start_s: f64, end_s: f64) -> Result<Capture, String> {
+    let to_index = |t: f64| (t.max(0.0) * capture.sample_rate) as usize;
+    let (a, b) = (
+        to_index(start_s),
+        to_index(end_s).min(capture.samples.len()),
+    );
+    if a >= b {
+        return Err(format!(
+            "empty range {start_s}..{end_s} s in a {:.3} s capture",
+            capture.samples.len() as f64 / capture.sample_rate
+        ));
+    }
+    Ok(Capture {
+        samples: capture.samples[a..b].to_vec(),
+        sample_rate: capture.sample_rate,
+        channels: capture.channels,
+        bits: capture.bits,
+    })
+}
+
+/// Parse a `START:END` range in seconds.
+pub fn parse_range(s: &str) -> Result<(f64, f64), String> {
+    let (a, b) = s
+        .split_once(':')
+        .ok_or_else(|| format!("range {s:?} should look like START:END, in seconds"))?;
+    let parse = |t: &str, which: &str| -> Result<f64, String> {
+        t.trim()
+            .parse::<f64>()
+            .map_err(|_| format!("{which} of range {s:?} is not a number"))
+    };
+    Ok((parse(a, "start")?, parse(b, "end")?))
+}
+
 /// Tolerances past which `audiodiff` exits non-zero.
 ///
 /// Defaults are deliberately loose: this gates against gross regressions —

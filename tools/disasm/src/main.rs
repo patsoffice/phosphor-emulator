@@ -346,6 +346,16 @@ enum Command {
         /// Spectrogram height in pixels.
         #[arg(long, default_value_t = 512)]
         png_height: u32,
+        /// Compare only `START:END` seconds of each input, e.g. `1.2:2.8`.
+        ///
+        /// A capture that walks through several effects averages them together,
+        /// and the average describes none of them. Compare one at a time.
+        #[arg(long)]
+        range: Option<String>,
+        /// Apply a different range to the second input, when the two captures
+        /// place the same effect at different times.
+        #[arg(long)]
+        range_b: Option<String>,
     },
     /// List the registered machines (the `--machine` values accepted by
     /// `frameshot`/`trace`/`machine`/`gfxview`), with their ROM-set names.
@@ -584,6 +594,8 @@ fn run_command(cmd: Command) -> Result<String, String> {
             centroid_tolerance,
             rms_tolerance,
             png_height,
+            range,
+            range_b,
         } => run_audiodiff(
             &a,
             b.as_deref(),
@@ -595,6 +607,8 @@ fn run_command(cmd: Command) -> Result<String, String> {
                 rms_db: rms_tolerance,
             },
             png_height,
+            range.as_deref(),
+            range_b.as_deref(),
         ),
         Command::Machines => Ok(list_machines()),
     }
@@ -1011,8 +1025,23 @@ fn run_audiodiff(
     channels: audiodiff::ChannelPolicy,
     tol: audiodiff::Tolerance,
     png_height: u32,
+    range: Option<&str>,
+    range_b: Option<&str>,
 ) -> Result<String, String> {
-    let ca = audiodiff::read_wav(a, channels)?;
+    // `--range` applies to both inputs; `--range-b` overrides it for the second,
+    // for the common case where two captures place the same effect at different
+    // times.
+    let range_a = range.map(audiodiff::parse_range).transpose()?;
+    let range_for_b = match range_b {
+        Some(r) => Some(audiodiff::parse_range(r)?),
+        None => range_a,
+    };
+    let clip = |c: &audiodiff::Capture, r: Option<(f64, f64)>| match r {
+        Some((s, e)) => audiodiff::slice_seconds(c, s, e),
+        None => Ok(c.clone()),
+    };
+
+    let ca = clip(&audiodiff::read_wav(a, channels)?, range_a)?;
     let label_a = file_label(a);
 
     // Spectrogram naming: one input keeps the given path, two inputs get `-a`
@@ -1041,7 +1070,7 @@ fn run_audiodiff(
         return Ok(out);
     };
 
-    let cb = audiodiff::read_wav(b, channels)?;
+    let cb = clip(&audiodiff::read_wav(b, channels)?, range_for_b)?;
     let label_b = file_label(b);
     let (mut report, verdict) = audiodiff::compare(&ca, &cb, &label_a, &label_b, tol);
 
