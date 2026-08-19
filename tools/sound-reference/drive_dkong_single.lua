@@ -34,6 +34,18 @@ local SPIN = 0x6000 -- main-RAM address holding a JP-to-self
 -- Latch bit per effect (74LS259 at 0x7d00-0x7d02).
 local BITS = { walk = 0, jump = 1, stomp = 2 }
 
+-- DK_PULSE_TRAIN=1 drives walk the way the game actually does instead of the
+-- single assert below: a 3-frame pulse every 12 frames, which a watchpoint on
+-- the 74LS259 shows is exactly what the Z80 writes while Mario walks (see
+-- tools/script/examples/dkong_walk_trace.rhai). The single-assert timeline is
+-- still right for jump and stomp, which really are one-shots, but it puts walk
+-- in a state gameplay never produces — a two-second hold — and a model fitted
+-- to that sounds wrong in play while measuring well in isolation.
+local PULSE_TRAIN = os.getenv("DK_PULSE_TRAIN") ~= nil
+local PULSE_ON_FRAMES = 3
+local PULSE_PERIOD_FRAMES = 12
+local FRAME_S = 1.0 / 60.0
+
 -- {assert_s, release_s} per effect, matching the scenario files.
 --
 -- The 2 s pre-roll is not padding. Donkey Kong makes power-on noise the moment
@@ -92,8 +104,21 @@ local function on_frame()
     if b ~= bit then set_bit(b, false) end
   end
 
-  -- One assert, one release. No re-pulsing: that is the entire point.
-  set_bit(bit, t >= assert_s and t < release_s)
+  if PULSE_TRAIN then
+    -- Reproduce the game's drive: 3 frames on, 9 off, repeating. Counted in
+    -- frames rather than seconds because that is the unit the game works in —
+    -- it rewrites the whole latch once per frame.
+    if t >= assert_s and t < release_s then
+      local frame = math.floor((t - assert_s) / FRAME_S)
+      set_bit(bit, (frame % PULSE_PERIOD_FRAMES) < PULSE_ON_FRAMES)
+    else
+      set_bit(bit, false)
+    end
+  else
+    -- One assert, one release. No re-pulsing: that is the entire point for the
+    -- genuine one-shots.
+    set_bit(bit, t >= assert_s and t < release_s)
+  end
 end
 
 _G.__drive_sub = nil
