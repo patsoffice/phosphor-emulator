@@ -42,12 +42,28 @@ local function on_frame()
   -- whole-second value and quantizes every segment boundary below to 1 s.
   local t = manager.machine.time:as_double()
 
+  -- SND_VERIFY drives the two checks that prove this reference responds to its
+  -- own timeline. `null` runs the schedule with nothing ever asserted, so the
+  -- capture must be silent; `nudge` shifts every boundary by 30 ms, so the
+  -- capture must change. A driver that ignores its timeline passes neither, and
+  -- that is precisely the failure that made every capture here a held line
+  -- rather than a pulse. The shift is deliberately sub-second: the bug it looks
+  -- for quantised to whole seconds and would swallow anything coarser.
+  local verify = os.getenv("SND_VERIFY")
+  if verify == "nudge" then
+    t = t - 0.030
+  end
+
   -- Baseline: everything off. Pitch is parked high (0xFF) so the always-on
   -- melody note clock is ultrasonic (silent) and doesn't bleed into the other
   -- voices' windows.
   set_pitch(0xff)
   set_lfo(0)
   for line = 0, 7 do set_latch(line, false) end
+
+  if verify == "null" then
+    return -- everything already parked off above
+  end
 
   if t >= 1.0 and t < 3.0 then
     -- Background melody: steady pitch, mixer volume on.

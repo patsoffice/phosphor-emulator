@@ -20,6 +20,7 @@
 mod scenario;
 mod target;
 mod targets;
+mod verify;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -47,6 +48,16 @@ enum Command {
     Scenarios {
         /// Only scenarios for this target id.
         target: Option<String>,
+    },
+    /// Prove a scenario drives what it claims before trusting a comparison.
+    ///
+    /// Runs it with no actions (must be silent) and with the timeline moved
+    /// 30 ms (must change). A scenario that passes neither is capturing
+    /// something it does not drive.
+    Verify {
+        /// Scenario id (`dkong/stomp`) or a path to a scenario file. Omit to
+        /// check every registered scenario.
+        scenario: Option<String>,
     },
     /// Run a scenario and write a WAV.
     Capture {
@@ -81,12 +92,47 @@ fn run(cmd: Command) -> Result<String, String> {
     match cmd {
         Command::Targets => Ok(list_targets()),
         Command::Scenarios { target } => list_scenarios(target.as_deref()),
+        Command::Verify { scenario } => verify_cmd(scenario.as_deref()),
         Command::Capture {
             scenario,
             out,
             probe,
             full,
         } => capture(&scenario, &out, probe.as_deref(), full),
+    }
+}
+
+/// Verify one scenario, or every registered one.
+///
+/// Checking all of them is the useful default after touching a driver or an
+/// adapter: the failure this guards against is silent, so it is only caught by
+/// asking, and asking is cheap.
+fn verify_cmd(id: Option<&str>) -> Result<String, String> {
+    let ids: Vec<String> = match id {
+        Some(one) => vec![one.to_string()],
+        None => all_scenarios()?.into_iter().map(|(_, sc)| sc.id).collect(),
+    };
+
+    let mut out = String::new();
+    let mut failures = 0usize;
+    for id in &ids {
+        match verify::verify(id, &resolve(id)) {
+            Ok(report) => out.push_str(&report),
+            Err(report) => {
+                failures += 1;
+                out.push_str(&report);
+                out.push('\n');
+            }
+        }
+    }
+
+    if failures == 0 {
+        Ok(out)
+    } else {
+        Err(format!(
+            "{out}\n{failures} of {} scenarios failed verification",
+            ids.len()
+        ))
     }
 }
 

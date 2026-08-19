@@ -104,10 +104,25 @@ local function on_frame()
   -- amount of care on the Phosphor side reconciles with them.
   local t = manager.machine.time:as_double()
 
+  -- SND_VERIFY drives the two checks that prove this reference responds to its
+  -- own timeline: `null` never asserts, so the capture must be silent, and
+  -- `nudge` shifts the schedule 30 ms, so the capture must change. Sub-second on
+  -- purpose — the bug above quantised to whole seconds and would swallow any
+  -- coarser probe.
+  local verify = os.getenv("SND_VERIFY")
+  if verify == "nudge" then
+    t = t - 0.030
+  end
+
   -- Hold every trigger low except the one this run is measuring, so a stray
   -- latch bit cannot leak another voice into the capture.
   for _, b in pairs(BITS) do
     if b ~= bit then set_bit(b, false) end
+  end
+
+  if verify == "null" then
+    set_bit(bit, false) -- every other bit is already held low above
+    return
   end
 
   if PULSE_TRAIN then
