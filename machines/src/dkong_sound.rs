@@ -7,8 +7,11 @@
 //!
 //! Walk and jump are voltage-controlled 555 astables (R1 = 47 kΩ / R2 = 27 kΩ,
 //! C = 33 nF walk / 47 nF jump), built on the framework's [`ne555_astable`]
-//! primitive driven by a control-voltage node — a slow LFO for the walk wobble,
-//! an exponential pitch-sweep envelope for the jump. This replaces the old
+//! primitive driven by a control-voltage node — a fixed voltage for the walk
+//! footstep, an exponential pitch-sweep envelope for the jump. Both are
+//! one-shots: the latch bit triggers an envelope rather than gating a running
+//! oscillator, because the board thumps once per assertion and does not drone
+//! while the bit is held. This replaces the old
 //! closed-form `vco_freq()` + phase-accumulator squares, so the cap integration
 //! (and its ~73 % duty, harmonics) comes from the real 555 model. Stomp stays on
 //! its LFSR-noise model — on hardware it is an LS164 noise source + LS161
@@ -49,8 +52,58 @@ const DAC_GAIN: f64 = 0.55;
 // edges and sample brightness so the music/effects sit warm rather than hashy.
 const DAC_LP_HZ: f64 = 1_916.0;
 const DAC_LP_Q: f64 = 0.74;
+// Walk, fitted against a MAME capture of the effect triggered once
+// (`drive_dkong_single.lua` with DK_EFFECT=walk) against `sndcmp capture
+// dkong/walk`:
+//
+//                  original      now      reference
+//   AC RMS        -28.33 dB   -38.59 dB   -38.42 dB
+//   fundamental      ~600 Hz    344.5 Hz    338.0 Hz
+//   decay T20        0.733 s     0.060 s     0.055 s
+//   centroid        512.6 Hz    453.7 Hz    403.0 Hz
+//
+// The corner stays where the schematic-derived model had it. Dropping it to
+// 460 Hz to chase the centroid moved that number by 11 Hz, because what
+// dominates it is the oscillator's pitch rather than the filter, and a corner
+// below the fundamental only attenuates the note.
+//
+// The centroid is the last gap and it is a *distribution* difference, not a
+// pitch one now that the fundamental matches: the reference spreads its energy
+// 15/37/46 % across the bottom three bands where this puts 0/0/97 % in one. A
+// single gated square through one pole cannot produce that spread — the board's
+// footstep has low-frequency content this model has no source for. Structural,
+// so recorded rather than tuned; see `…-dkong-walk-not-sustained-4q42`.
 const WALK_LP_HZ: f64 = 700.0;
-const WALK_GAIN: f64 = 0.14;
+/// Re-fitted after the envelope changed: a decaying footstep carries far less
+/// energy than the sustained tone this used to be, so the level had to come up
+/// by ~12 dB to match the same reference.
+const WALK_GAIN: f64 = 0.573;
+// Walk control voltage, derived from the board's CV network rather than fitted.
+// Three currents meet at the 555's CV pin and charge a 3.3 µF cap: a fixed one
+// through the chip's own 5 kΩ divider, one through 1 kΩ + 10 kΩ gated by the
+// walk latch, and one through 12 kΩ from the wobble oscillator. They see about
+// 2.25 kΩ, which sets both the settled voltages and the slew rate.
+//
+/// CV the 555 settles to while the walk latch is asserted.
+const WALK_CV: f64 = 3.745;
+/// CV it settles to while the latch is released, the gated current removed.
+const WALK_CV_RELEASED: f64 = 2.684;
+/// Slew network: 3.3 µF against ~2.25 kΩ, so τ ≈ 7.4 ms — short enough to settle
+/// between footsteps, long enough that the pitch is still moving while one
+/// sounds. Modelling this as an instant switch is what made every earlier
+/// version give a steady pitch per step.
+const WALK_CV_SLEW_R: f64 = 2_250.0;
+const WALK_CV_SLEW_C: f64 = 3.3e-6;
+/// Wobble rate. On the board this is a CMOS inverter oscillator (4.3 kΩ / 43 kΩ
+/// / 10 µF), which lands near 1 Hz.
+const WALK_LFO_HZ: f64 = 1.16;
+/// Wobble depth in volts, from the oscillator's swing through its 12 kΩ.
+const WALK_CV_SWING: f64 = 0.47;
+/// Walk footstep decay. The reference falls 20 dB in 55 ms, so τ ≈ 55 ms / ln(10).
+const WALK_TAU: f64 = 0.024;
+/// How long one footstep runs before it is cut off — many time constants, so the
+/// envelope decays away on its own rather than being truncated.
+const WALK_HOLD_S: f64 = 0.4;
 const JUMP_LP_HZ: f64 = 1_400.0;
 const JUMP_GAIN: f64 = 0.25;
 // Stomp is a low rumble, not a hiss. Fitted against a MAME capture of the
@@ -109,19 +162,40 @@ const JUMP_TAU: f64 = 0.36;
 // Effect components (custom escape hatch)
 // ---------------------------------------------------------------------------
 
-/// Jump amplitude/pitch envelope: a one-shot exponential decay (τ = [`JUMP_TAU`])
-/// triggered on the rising edge of the enable and held for 0.5 s. Drives both the
-/// 555 control voltage (`1 + 3·env`, so the pitch sweeps up as it decays) and the
-/// output amplitude. This is envelope shaping only — the oscillator itself is the
+/// One-shot exponential decay, triggered on the rising edge of its enable and
+/// cut off after `hold`.
+///
+/// Shared by walk and jump, which differ only in their constants: walk is a
+/// 24 ms footstep driving amplitude alone, jump a 360 ms decay driving both the
+/// 555 control voltage (`1 + 3·env`, so the pitch sweeps up as it decays) and
+/// the amplitude. Envelope shaping only — the oscillator is the
 /// [`ne555_astable`](phosphor_core::device::DiscreteCircuitBuilder::ne555_astable)
-/// node. Input: `[jump_en]`.
-struct DkongJumpEnv {
+/// node. Input: `[enable]`.
+struct DkongOneShotEnv {
+    /// Amplitude decay time constant, seconds.
+    tau: f64,
+    /// How long the envelope runs before it is cut off, seconds.
+    hold: f64,
+    /// Retrigger on *either* edge rather than only the rising one.
+    ///
+    /// Walk needs this; jump does not. The game pulses the walk line for 3
+    /// frames every 12 while Mario moves, and the board sounds on both edges of
+    /// that pulse at two different pitches — so each step is a note at 0 ms and
+    /// another 50 ms later, repeating every 200 ms. That is the alternating
+    /// two-tone footstep. Triggering on the rising edge alone gives a single
+    /// repeated tone, which is audibly wrong however well its pitch is fitted.
+    both_edges: bool,
+    /// Amplitude of a falling-edge trigger relative to a rising one. The two
+    /// notes are not a matched pair. Only meaningful with `both_edges`.
+    falling_scale: f64,
+    /// Which edge started the envelope currently running.
+    on_falling: bool,
     active: bool,
     timer: f64,
     last_en: bool,
 }
 
-impl CustomComponent for DkongJumpEnv {
+impl CustomComponent for DkongOneShotEnv {
     fn reset(&mut self) {
         self.active = false;
         self.timer = 0.0;
@@ -129,20 +203,31 @@ impl CustomComponent for DkongJumpEnv {
     }
     fn step(&mut self, inputs: &[f64], dt: f64) -> f64 {
         let en = inputs[0] > 0.5;
-        if en && !self.last_en {
+        let triggered = if self.both_edges {
+            en != self.last_en
+        } else {
+            en && !self.last_en
+        };
+        if triggered {
             self.active = true;
             self.timer = 0.0;
+            self.on_falling = !en;
         }
         self.last_en = en;
         if !self.active {
             return 0.0;
         }
         self.timer += dt;
-        if self.timer > 0.5 {
+        if self.timer > self.hold {
             self.active = false;
             return 0.0;
         }
-        (-self.timer / JUMP_TAU).exp()
+        let scale = if self.on_falling {
+            self.falling_scale
+        } else {
+            1.0
+        };
+        scale * (-self.timer / self.tau).exp()
     }
     fn save_state(&self, w: &mut StateWriter) {
         w.write_bool(self.active);
@@ -245,13 +330,56 @@ fn build_circuit() -> (DiscreteCircuit, DkongInputs) {
     // currently inert (the TKG-04 model does not drive it yet).
     let discharge = b.logic_input("DISCHARGE");
 
-    // Walk: a ~1 Hz LFO wobbles the 555 control voltage around 3.15 ±0.65 V; the
-    // 555 oscillates near ~430 Hz. AC-couple to drop the duty-dependent DC, gate
-    // by the enable, then darken with the output low-pass and level it.
-    let walk_lfo = b.triangle("WALK_LFO", 1.0); // ±1
-    let walk_lfo_s = b.gain("WALK_LFO_S", walk_lfo, 0.65);
-    let walk_cv_off = b.constant("WALK_CV_OFF", 3.15);
-    let walk_cv = b.add("WALK_CV", &[walk_lfo_s, walk_cv_off]);
+    // Walk: a fixed 555 control voltage, AC-coupled to drop the duty-dependent
+    // DC, shaped by a one-shot envelope, darkened by the output low-pass.
+    //
+    // This used to add a 1 Hz ±0.65 V triangle LFO to the control voltage. That
+    // made sense while walk was a sustained drone — it gave a continuous tone
+    // some movement. It stopped making sense the moment walk became a 24 ms
+    // footstep: a burst that short samples the LFO at whatever phase it happens
+    // to occupy when the step fires, so every footstep came out at a different
+    // pitch depending on *when* it was triggered. Measuring the same voice
+    // across three captures gave 551, 377 and 604 Hz, which read as an unstable
+    // estimator and was really an unstable oscillator.
+    //
+    // A fixed CV also lets the pitch be solved for rather than guessed. With
+    // R1 = 47 kΩ, R2 = 27 kΩ, C = 33 nF and Vcc = 5 V the 555 charges from CV/2
+    // to CV through R1+R2 and discharges through R2, so
+    //     T = (R1+R2)·C·ln((Vcc − CV/2)/(Vcc − CV)) + R2·C·ln2
+    // and the reference's 338 Hz wants CV ≈ 3.35 V.
+    // A slow oscillator wobbles the 555's control voltage, so successive
+    // footsteps come out at different pitches.
+    //
+    // This is where the walk's alternating two-tone character comes from, and
+    // it is easy to mistake for a bug: a footstep lasts tens of milliseconds
+    // and samples the wobble wherever it happens to be, so measuring one step
+    // in isolation gives a pitch that appears to drift run to run. It is not
+    // drift — the board really does vary the pitch per step, and removing the
+    // wobble to "stabilise" it produces a single repeated tone that is audibly
+    // wrong however precisely its frequency is fitted.
+    //
+    // On the board this is a CMOS inverter oscillator (4.3 kΩ / 43 kΩ / 10 µF),
+    // which puts it near 1 Hz — slow enough that consecutive steps 200 ms apart
+    // land on meaningfully different parts of the cycle.
+    // The control voltage is a capacitor, not a switch.
+    //
+    // Three currents feed the 555's CV pin through a 3.3 µF cap: a fixed one
+    // from the chip's own divider, one gated by the walk latch, and one from the
+    // wobble oscillator. The cap makes the CV *slew* between its two latched
+    // levels with a ~7.4 ms time constant rather than stepping — and since a
+    // footstep only lasts a few tens of milliseconds, the pitch is still moving
+    // while the note sounds. Each step is a small downward sweep, not a tone.
+    //
+    // That slew is the piece every earlier attempt was missing. Modelling the CV
+    // as instantaneous gives a steady pitch per step, which measures plausibly
+    // and sounds wrong; a hold-based capture cannot reveal it because after two
+    // seconds the cap has long since settled.
+    let walk_lfo = b.triangle("WALK_LFO", WALK_LFO_HZ);
+    let walk_lfo_s = b.gain("WALK_LFO_S", walk_lfo, WALK_CV_SWING);
+    let walk_cv_base = b.constant("WALK_CV_BASE", WALK_CV_RELEASED);
+    let walk_cv_gate = b.gain("WALK_CV_GATE", walk_en, WALK_CV - WALK_CV_RELEASED);
+    let walk_cv_raw = b.add("WALK_CV_RAW", &[walk_cv_base, walk_cv_gate, walk_lfo_s]);
+    let walk_cv = b.rc_low_pass("WALK_CV", walk_cv_raw, WALK_CV_SLEW_R, WALK_CV_SLEW_C);
     let walk_555 = b.ne555_astable(
         "WALK_555",
         Some(walk_cv),
@@ -263,7 +391,27 @@ fn build_circuit() -> (DiscreteCircuit, DkongInputs) {
         Output555::Square,
     );
     let walk_ac = b.rc_high_pass("WALK_AC", walk_555, AC_R, AC_C);
-    let walk_gated = b.multiply("WALK_GATED", walk_ac, walk_en);
+    // Walk is a footstep — one thump per assertion, not a tone that runs for as
+    // long as the latch bit is held. Measured against a reference that holds the
+    // bit for two full seconds, the board sounds for about half of one and
+    // decays 20 dB in 55 ms; gating a free-running oscillator by the level
+    // instead gave a 733 ms drone 10 dB too loud. So the enable triggers a
+    // one-shot envelope, exactly as jump's does.
+    let walk_env = b.custom(
+        "WALK_ENV",
+        vec![walk_en.into()],
+        Box::new(DkongOneShotEnv {
+            tau: WALK_TAU,
+            both_edges: false,
+            falling_scale: 1.0,
+            on_falling: false,
+            hold: WALK_HOLD_S,
+            active: false,
+            timer: 0.0,
+            last_en: false,
+        }),
+    );
+    let walk_gated = b.multiply("WALK_GATED", walk_ac, walk_env);
     let walk_lp = b.second_order(
         "WALK_LP",
         walk_gated,
@@ -279,7 +427,12 @@ fn build_circuit() -> (DiscreteCircuit, DkongInputs) {
     let jump_env = b.custom(
         "JUMP_ENV",
         vec![jump_en.into()],
-        Box::new(DkongJumpEnv {
+        Box::new(DkongOneShotEnv {
+            tau: JUMP_TAU,
+            both_edges: false,
+            falling_scale: 1.0,
+            on_falling: false,
+            hold: 0.5,
             active: false,
             timer: 0.0,
             last_en: false,
