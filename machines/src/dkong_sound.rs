@@ -7,16 +7,25 @@
 //!
 //! Walk and jump are voltage-controlled 555 astables (R1 = 47 kΩ / R2 = 27 kΩ,
 //! C = 33 nF walk / 47 nF jump), built on the framework's [`ne555_astable`]
-//! primitive driven by a control-voltage node — a fixed voltage for the walk
-//! footstep, an exponential pitch-sweep envelope for the jump. Both are
-//! one-shots: the latch bit triggers an envelope rather than gating a running
-//! oscillator, because the board thumps once per assertion and does not drone
-//! while the bit is held. This replaces the old
-//! closed-form `vco_freq()` + phase-accumulator squares, so the cap integration
-//! (and its ~73 % duty, harmonics) comes from the real 555 model. Stomp stays on
-//! its LFSR-noise model — on hardware it is an LS164 noise source + LS161
-//! counter, not a 555. The board talks to the device with hardware intent
+//! primitive driven by a control-voltage node, so the cap integration (and its
+//! ~73 % duty, and its harmonics) comes from the real 555 model. Each 555 free
+//! runs; what makes a note is the envelope opening over it. Stomp stays on its
+//! LFSR-noise model — on hardware it is an LS164 noise source + LS161 counter,
+//! not a 555. The board talks to the device with hardware intent
 //! (`write_sound_bit`, `feed_dac`, `set_discharge`).
+//!
+//! Jump is the chain that has been taken furthest toward the board: a slewing
+//! control-voltage capacitor with its own wobble oscillator, a fixed-width
+//! conditioned trigger, an envelope that is diode-mixed with the square rather
+//! than multiplied by it, and an emitter follower rather than a filter on the
+//! output. It works in volts throughout, because every one of those stages
+//! compares two absolute voltages against each other.
+//!
+//! Downstream of the mix, three stages belong to the board rather than to any
+//! voice and apply to the music as well: the summing node's own 100 nF
+//! (~295 Hz), and the amplifier's couplings and emitter bypass, which together
+//! put the board's low-frequency limit near 34 Hz rather than the 3 Hz a single
+//! coupling capacitor suggests.
 //!
 //! [`ne555_astable`]: phosphor_core::device::DiscreteCircuitBuilder::ne555_astable
 
@@ -57,27 +66,38 @@ const DAC_LP_Q: f64 = 0.74;
 // dkong/walk`:
 //
 //                  original      now      reference
-//   AC RMS        -28.33 dB   -38.59 dB   -38.42 dB
-//   fundamental      ~600 Hz    344.5 Hz    338.0 Hz
+//   AC RMS        -28.33 dB   -38.42 dB   -38.42 dB
+//   fundamental      ~600 Hz    373.7 Hz    338.0 Hz
 //   decay T20        0.733 s     0.060 s     0.055 s
-//   centroid        512.6 Hz    453.7 Hz    403.0 Hz
+//   centroid        512.6 Hz    400.6 Hz    403.0 Hz
 //
 // The corner stays where the schematic-derived model had it. Dropping it to
 // 460 Hz to chase the centroid moved that number by 11 Hz, because what
 // dominates it is the oscillator's pitch rather than the filter, and a corner
 // below the fundamental only attenuates the note.
 //
-// The centroid is the last gap and it is a *distribution* difference, not a
-// pitch one now that the fundamental matches: the reference spreads its energy
-// 15/37/46 % across the bottom three bands where this puts 0/0/97 % in one. A
-// single gated square through one pole cannot produce that spread — the board's
-// footstep has low-frequency content this model has no source for. Structural,
-// so recorded rather than tuned; see `…-dkong-walk-not-sustained-4q42`.
+// The centroid now matches. What is left is a distribution difference: the
+// reference spreads its energy 15/37/46 % across the bottom three bands where
+// this puts 2/64/34 % — the board's footstep has low-frequency content this
+// model has no source for. Structural, so recorded rather than tuned; see
+// `…-dkong-walk-not-sustained-4q42`.
+//
+// Walk's wobble oscillator is still wrong in the way jump's was, and knowingly
+// so: `WALK_LFO_HZ` was derived from an RC corner rather than from the
+// relaxation period, which is the same mistake jump's 8.4 Hz was. Left alone
+// here because walk is not this change's subject and moving it would confound
+// the jump measurements.
 const WALK_LP_HZ: f64 = 700.0;
 /// Re-fitted after the envelope changed: a decaying footstep carries far less
 /// energy than the sustained tone this used to be, so the level had to come up
 /// by ~12 dB to match the same reference.
-const WALK_GAIN: f64 = 0.573;
+///
+/// Raised again by 5.4 dB when the mixer's own low-pass and the amplifier's
+/// high-passes were added below it. Only the level moved — the centroid landed
+/// on the reference's (400.6 Hz against 403.0) without touching `WALK_LP_HZ`,
+/// which is the sign that the new stage belongs where it was put rather than
+/// duplicating this one.
+const WALK_GAIN: f64 = 1.072;
 // Walk control voltage, derived from the board's CV network rather than fitted.
 // Three currents meet at the 555's CV pin and charge a 3.3 µF cap: a fixed one
 // through the chip's own 5 kΩ divider, one through 1 kΩ + 10 kΩ gated by the
@@ -104,23 +124,52 @@ const WALK_TAU: f64 = 0.024;
 /// How long one footstep runs before it is cut off — many time constants, so the
 /// envelope decays away on its own rather than being truncated.
 const WALK_HOLD_S: f64 = 0.4;
+// Jump, against a single trigger (`drive_dkong_single.lua` with DK_EFFECT=jump
+// vs `sndcmp capture dkong/jump`). "before" is the previous committed model:
+//
+//                     before        now      reference
+//   AC RMS         -31.00 dB   -34.58 dB    -34.67 dB
+//   decay T20         0.145 s     0.419 s      0.495 s
+//   decay T40         1.477 s     0.459 s      0.500 s
+//   centroid         15.4 Hz    415.5 Hz     379.7 Hz
+//   fundamental     347.2 Hz    361.5 Hz     347.8 Hz
+//   band 0-150 Hz     97.7 %       2.2 %        3.7 %
+//   band 150-400      1.7 %       51.6 %       69.0 %
+//   band 400-1000     0.5 %       45.5 %       27.1 %
+//   STFT distance      5.885       3.348            —
+//
+// The pitch trajectory now tracks the reference cycle for cycle: the wobble's
+// period measures 0.109 s against 0.110 s and it carries the note between 320
+// and 485 Hz against 325 and 485.
+//
+// The remaining gap is the 150-400 / 400-1000 split, and it is a waveform
+// shape difference rather than a pitch one. Plotted against the reference this
+// model's cycle has a genuinely FLAT top where the board's is rounded
+// throughout — the emitter follower reaches its target and sits there for the
+// rest of the square's high phase, and a flat top with a sharp corner carries
+// harmonics the board's does not. The missing rounding is somewhere in the
+// follower's response; it is structural, so it is recorded rather than closed
+// with a filter at a fitted corner. See `…-0fbi`.
+//
 /// Output calibration, not a hardware value: it maps this circuit's volts into
 /// the finite PCM range alongside the other effects.
 ///
-/// Re-derived when the envelope became a diode-mixed lid. The board only ever
-/// exposes a fraction of the square — a 21 ms trigger dips the lid from 5 V to
-/// 3.2 V, and the 555 peaks at 3.8 V, so 0.6 V of a 3.8 V swing gets out, about
-/// 16 %. The old value was calibrated against a multiply-based envelope that
-/// passed the whole square, so it left the corrected circuit ~14 dB quiet.
-const JUMP_GAIN: f64 = 1.218;
+/// The jump chain works in volts end to end, so this is the only scalar in it
+/// that is not a component value. Everything upstream — the 555's 4.5 V high,
+/// the 5 V lid, the diode drops, the follower's Vbe — is an absolute voltage,
+/// and they only combine correctly on one shared scale. The earlier normalized
+/// version (555 high = 1) had to fold each of those into a ratio, and two of
+/// the ratios were wrong in ways that cancelled in the level and not in the
+/// spectrum.
+const JUMP_GAIN: f64 = 0.648;
 // Stomp is a low rumble, not a hiss. Fitted against a MAME capture of the
 // effect triggered ONCE (`tools/sound-reference/drive_dkong_single.lua` with
 // DK_EFFECT=stomp) against `sndcmp capture dkong/stomp`:
 //
 //                  original    reference    now
-//   AC RMS        -21.72 dB    -23.89 dB   -23.87 dB
-//   centroid       250.1 Hz     124.9 Hz    126.7 Hz
-//   decay T20       0.090 s      0.545 s     0.374 s
+//   AC RMS        -21.72 dB    -23.89 dB   -23.89 dB
+//   centroid       250.1 Hz     124.9 Hz    133.0 Hz
+//   decay T20       0.090 s      0.545 s     0.279 s
 //
 // The original 340 Hz corner put most of the energy above the reference's, and
 // a 50 ms envelope truncated at 250 ms cut the tail off before the reference
@@ -137,7 +186,9 @@ const JUMP_GAIN: f64 = 1.218;
 // faster than one pole allows, which points at a second filter stage on the
 // board. See `…-discrete-sound-fidelity-l5r3.7`.
 const STOMP_LP_HZ: f64 = 175.0;
-const STOMP_GAIN: f64 = 7.0;
+/// Raised by 2.7 dB with walk, for the same reason: the mixer low-pass and the
+/// amplifier high-passes now sit below every voice.
+const STOMP_GAIN: f64 = 9.54;
 /// Stomp envelope decay, fitted (see above). Longer than T20/ln(10) would
 /// suggest because the output low-pass smears the envelope's start.
 const STOMP_TAU: f64 = 0.39;
@@ -162,6 +213,48 @@ const OUT_HIGH: f64 = 1.0;
 /// so AC-couple before filtering rather than subtracting a fixed mean.
 const AC_R: f64 = 11_200.0;
 const AC_C: f64 = 4.7e-6;
+// Everything between the summing node and the speaker. Three couplings in
+// series, and the one that matters is the last.
+//
+// The mixer's own output capacitor is the gentlest of the three, and modelling
+// only that one left the board with a low end it does not have. What sets the
+// real corner is the amplifier module's input: 1 kΩ against 4.7 µF, near 34 Hz.
+// A voice whose envelope steps its DC level — jump, whose lid drops 2 V and
+// takes half a second to climb back — puts a large slow transient into the
+// mixer, and on the board that transient is what these stages exist to remove.
+// With only a 3 Hz pole in the way it survives to the output and swamps the
+// note it belongs to.
+//
+/// Mixer output coupling, 1 µF into the following stage's input impedance
+/// (~100 kΩ) — about 1.6 Hz.
+const MIX_AC_R: f64 = 100_000.0;
+const MIX_AC_C: f64 = 1e-6;
+/// The summing node's own capacitor: 100 nF across it, against the four 47 kΩ
+/// input legs in parallel with the 10 kΩ feedback — about 5.4 kΩ, so a corner
+/// near 295 Hz.
+///
+/// This sits right on top of the jump's fundamental, which is why leaving it
+/// out is audible rather than subtle: every voice reached the output with its
+/// full harmonic series, and the jump in particular carried three times the
+/// reference's energy above 400 Hz. It is a *mixer* stage, not a per-effect
+/// one — the effects were each given a private low-pass to stand in for it, and
+/// those corners were fitted with this pole missing from underneath them.
+const MIX_LP_R: f64 = 1.0 / (4.0 / 47_000.0 + 1.0 / 10_000.0);
+const MIX_LP_C: f64 = 100e-9;
+/// Amplifier interstage coupling, 50 kΩ / 33 µF. A tenth of a hertz: a DC block
+/// and nothing more, but it is in the path.
+const AMP_AC_R: f64 = 50_000.0;
+const AMP_AC_C: f64 = 33e-6;
+/// The amplifier stage's emitter bypass: 33 µF across the 150 Ω emitter leg, so
+/// the stage has little gain below ~32 Hz and full gain above it. A second pole
+/// within a few hertz of the coupling below, which is why the board's low end
+/// falls away so much faster than one RC would.
+const AMP_HP_R: f64 = 150.0;
+const AMP_HP_C: f64 = 33e-6;
+/// The amplifier module's input coupling, 1 kΩ / 4.7 µF ≈ 34 Hz. The board's
+/// actual low-frequency limit.
+const SPK_AC_R: f64 = 1_000.0;
+const SPK_AC_C: f64 = 4.7e-6;
 // Jump's control-voltage network, derived like walk's: currents through
 // 10 kΩ + 10 kΩ (latch-gated) and the 555's own 5 kΩ divider meet at a 10 µF cap
 // behind 1.2 kΩ, seeing about 2.3 kΩ.
@@ -174,32 +267,64 @@ const JUMP_CV_RELEASED: f64 = 2.71;
 /// Slew network: 10 µF against ~2.3 kΩ, τ ≈ 22 ms.
 const JUMP_CV_SLEW_R: f64 = 2_300.0;
 const JUMP_CV_SLEW_C: f64 = 10e-6;
-/// Jump's wobble rate: 18 kΩ with 3.3 µF, near 8 Hz — fast enough that a
-/// half-second jump warbles several times as it sweeps.
-const JUMP_LFO_HZ: f64 = 8.4;
+/// Jump's wobble rate: three CMOS inverters around 18 kΩ and 3.3 µF, so the
+/// timing capacitor relaxes with τ = 59.4 ms and the period is a fixed multiple
+/// of that. Measured on the board it is 110 ms — 1.85 τ, and 9.09 Hz.
+///
+/// The multiple is the part that cannot be read off the schematic. Taking the
+/// inverter's datasheet switching thresholds (a third and two thirds of the
+/// supply) gives 3.54 τ and half this rate; three inverters in cascade make the
+/// composite transition far sharper than one, so the effective thresholds
+/// collapse toward mid-supply and the capacitor turns round after a much shorter
+/// swing. Deriving *where* they land needs the inverter's transfer curve, which
+/// this model does not carry — so the ratio is measured rather than computed,
+/// and it is the one number in this chain that is. Modelling the inverter chain
+/// properly would replace it; see the design note.
+const JUMP_LFO_HZ: f64 = 9.09;
 /// Wobble depth in volts, from the oscillator's swing through its own 10 kΩ into
 /// the ~2.3 kΩ the CV currents see.
 const JUMP_CV_SWING: f64 = 0.575;
-/// 1N5553 forward drop through the output diodes, expressed in the normalized
-/// units this circuit works in rather than in volts: 0.4 V against the 555's
-/// ~3.8 V high, which `OUT_HIGH` stands for.
-const DIODE_DROP: f64 = 0.4 / 3.8;
-/// Output integrator: 150 Ω charging 1 µF, so a corner near 1.06 kHz.
+/// The jump 555's output-high level. Unlike walk, this chain runs in volts, so
+/// it needs the real one rather than a normalized stand-in: it is compared
+/// directly against a 5 V lid across two diodes, and the ~0.8 V by which the
+/// square clears that lid is the difference of two absolute voltages. Getting
+/// this wrong does not scale the note, it changes how much of it exists.
+const JUMP_555_HIGH: f64 = VCC - 0.5;
+/// 1N5553 forward drop at 1 mA.
+const DIODE_V: f64 = 0.4;
+/// The envelope reaches the summing node through one junction and the 555
+/// through two. That 0.4 V asymmetry sets the crossover between them, so a
+/// single shared drop is not a simplification — it moves where the note starts
+/// and stops.
+const JUMP_LID_DIODE_V: f64 = DIODE_V;
+const JUMP_555_DIODE_V: f64 = DIODE_V * 2.0;
+/// Output stage: an emitter follower, not a filter.
 ///
-/// The 4.7 kΩ ∥ (2 kΩ + 5.1 kΩ) in the board's integrator is the *discharge*
-/// path, not the corner — folding it in gave 2.8 kΩ and a 57 Hz corner, which
-/// removed most of the note and left the jump 13 dB quiet and far too dark.
-const JUMP_OUT_R: f64 = 150.0;
+/// 150 Ω from the emitter into 1 µF, loaded by 4.7 kΩ ∥ (2 kΩ + 5.1 kΩ). The
+/// transistor charges the cap in 150 µs and then cuts off, leaving it to drain
+/// through ~2.8 kΩ in 3.0 ms — two time constants toward two different targets.
+///
+/// Modelling this as a plain 150 Ω/1 µF low-pass is what buried the note. A
+/// low-pass settles on the square's *mean*, which makes the whole voice a slow
+/// DC level following the envelope; the follower tracks the square's peaks and
+/// sags between them, which is where the fundamental comes from.
+const JUMP_OUT_VBE: f64 = 0.7;
+const JUMP_OUT_RE: f64 = 150.0;
+const JUMP_OUT_RLOAD: f64 = 4_700.0 * 7_100.0 / (4_700.0 + 7_100.0);
 const JUMP_OUT_C: f64 = 1e-6;
 /// Output divider, 5.1 kΩ of the 2 kΩ + 5.1 kΩ that follows the integrator.
 const JUMP_DIVIDER: f64 = 5.1 / 7.1;
-/// How far the lid rests above the 555's peak, as a ratio. The board's lid
-/// charges to the 5 V supply while the 555 tops out at Vcc − 1.2 ≈ 3.8 V.
-const JUMP_LID_HEADROOM: f64 = 5.0 / 3.8;
-/// Conditioned trigger width. The latch edge is differentiated by 1 µF into
-/// 10 kΩ (τ = 10 ms) and compared against 0.6 V, so the pulse lasts
-/// 10 ms · ln(5/0.6) ≈ 21 ms whatever the latch does.
-const JUMP_TRIG_S: f64 = 0.021;
+/// The lid charges toward the 5 V supply, which is above the 555's high — so at
+/// rest it closes over the oscillator completely.
+const JUMP_LID_REST_V: f64 = VCC;
+/// Conditioned trigger width.
+///
+/// The latch edge is differentiated by 1 µF through 10 kΩ into another 10 kΩ,
+/// so the cap relaxes with τ = 20 ms, and the comparator watches the divider tap
+/// at half the cap's swing — 2.2 V at the edge — passing it while it stays above
+/// 0.6 V. That is 20 ms · ln(2.2/0.6) ≈ 26 ms, and it does not depend on how
+/// long the game holds the line.
+const JUMP_TRIG_S: f64 = 0.026;
 /// How fast the jump's lid is pulled down when the latch asserts: 10 kΩ into
 /// 4.7 µF. The fast half of the asymmetry — a jump snaps open.
 const JUMP_ENV_DIP_S: f64 = 0.047;
@@ -553,13 +678,18 @@ fn build_circuit() -> (DiscreteCircuit, DkongInputs) {
     // Target rests *above* the square's peak, not level with it.
     //
     // On the board the lid charges toward the 5 V supply while the 555 tops out
-    // at Vcc − 1.2 ≈ 3.8 V, so the lid has headroom to close fully over the
-    // oscillator — and the note ends at the finite moment it crosses the peak.
-    // Resting exactly at the peak instead makes the lid approach it
-    // asymptotically, so the note never quite stops and the decay measures
-    // several times too long however the time constants are set.
-    let jump_lid_rest = b.constant("JUMP_LID_REST", OUT_HIGH * JUMP_LID_HEADROOM);
-    let jump_lid_dip = b.gain("JUMP_LID_DIP", jump_trig, -OUT_HIGH * JUMP_LID_HEADROOM);
+    // at 4.5 V, so the lid has headroom to close fully over the oscillator — and
+    // the note ends at the finite moment it crosses the peak. Resting exactly at
+    // the peak instead makes the lid approach it asymptotically, so the note
+    // never quite stops and the decay measures several times too long however
+    // the time constants are set.
+    //
+    // Reaching the node, the lid loses one diode drop and the square loses two,
+    // so the crossing happens 0.4 V earlier than the bare levels suggest: the
+    // 26 ms trigger leaves the lid at 2.9 V, the square peaks 1.2 V above it,
+    // and the note ends ~440 ms later when the recovering lid reaches 4.1 V.
+    let jump_lid_rest = b.constant("JUMP_LID_REST", JUMP_LID_REST_V);
+    let jump_lid_dip = b.gain("JUMP_LID_DIP", jump_trig, -JUMP_LID_REST_V);
     let jump_lid_target = b.add("JUMP_LID_TARGET", &[jump_lid_rest, jump_lid_dip]);
     let jump_lid = b.rc_envelope(
         "JUMP_LID",
@@ -591,7 +721,14 @@ fn build_circuit() -> (DiscreteCircuit, DkongInputs) {
     // I first read this circuit's 3.3 MΩ as the timing resistor and concluded
     // the oscillator ran at 0.05 Hz — effectively a DC offset — and left it out.
     // That resistor is the bias pull; the first of the pair sets the rate.
-    let jump_lfo = b.triangle("JUMP_LFO", JUMP_LFO_HZ);
+    // The wobble is a SQUARE, not a triangle. What reaches the control voltage
+    // is the third inverter's output, which is a logic level — so the note
+    // alternates between two pitches rather than gliding between them. The
+    // 10 µF control-voltage capacitor rounds its edges over ~23 ms, which is
+    // where the glide that is audible comes from; a triangle source produces a
+    // continuous sweep instead, and smears the note's energy up into the
+    // harmonics rather than holding it at two fundamentals.
+    let jump_lfo = b.fixed_square("JUMP_LFO", JUMP_LFO_HZ);
     let jump_lfo_s = b.gain("JUMP_LFO_S", jump_lfo, JUMP_CV_SWING);
     let jump_cv_base = b.constant("JUMP_CV_BASE", JUMP_CV_RELEASED);
     let jump_cv_gate = b.gain("JUMP_CV_GATE", jump_en, JUMP_CV_ASSERTED - JUMP_CV_RELEASED);
@@ -604,7 +741,7 @@ fn build_circuit() -> (DiscreteCircuit, DkongInputs) {
         R2,
         JUMP_C,
         VCC,
-        OUT_HIGH,
+        JUMP_555_HIGH,
         Output555::Square,
     );
     // The envelope is DIODE-MIXED with the oscillator, not multiplied by it.
@@ -637,27 +774,35 @@ fn build_circuit() -> (DiscreteCircuit, DkongInputs) {
     // lets the free-running oscillator through permanently, so the board hums
     // continuously and the jump itself does nothing.
     //
-    // Both inputs must share a scale for a max() to mean anything. The 555 emits
-    // `OUT_HIGH` rather than volts here (its absolute level is folded into the
-    // per-effect gains), so the lid is expressed in the same units.
-    let jump_mixed = b.diode_mixer("JUMP_MIX", &[jump_lid, jump_555], DIODE_DROP);
+    // Both inputs must share a scale for a max() to mean anything, and here that
+    // scale is volts — the lid's 5 V rail against the 555's 4.5 V high, each
+    // less its own diode drop.
+    let jump_mixed = b.diode_mixer_drops(
+        "JUMP_MIX",
+        &[(jump_lid, JUMP_LID_DIODE_V), (jump_555, JUMP_555_DIODE_V)],
+    );
 
-    // Output stage: an RC integrator into the divider that feeds the mixer,
-    // rather than a low-pass at a guessed corner. 150 Ω charging 1 µF against
-    // 4.7 kΩ ∥ (2 kΩ + 5.1 kΩ) is a far gentler corner than the 1400 Hz this
-    // used to assume, which is why the old model read twice as bright as the
-    // reference.
-    // No coupling capacitor here. Walk's chain has one; jump's does not — it
-    // runs diode mixer straight into the integrator and on to the board mixer,
-    // where the shared output coupling removes the DC.
+    // Output stage: a transistor buffering the summing node into 1 µF, then the
+    // divider that feeds the board mixer.
     //
-    // Adding one costs more than it looks. The lid resting high means the node
-    // sits at a large steady DC, and the trigger steps it down sharply; a
-    // high-pass turns that step into a big low-frequency transient that
-    // dominates the whole effect. It pulled the spectral centroid to 48 Hz
-    // against the reference's 312, and no amount of level correction fixes a
-    // spectrum made mostly of a thump.
-    let jump_int = b.rc_low_pass("JUMP_INT", jump_mixed, JUMP_OUT_R, JUMP_OUT_C);
+    // No coupling capacitor here. Walk's chain has one; jump's does not — it
+    // runs diode mixer straight into the follower and on to the board mixer,
+    // where the shared amplifier couplings remove the DC.
+    //
+    // The DC is substantial and it is not an artifact: the lid resting high
+    // holds this node near 4 V at rest, and the trigger steps it down and lets
+    // it climb back over half a second. That step is real on the board too. What
+    // removes it is the amplifier's 34 Hz input coupling, not anything in this
+    // chain — putting a high-pass here instead makes the step ring at whatever
+    // corner is chosen and leaves the note buried under it.
+    let jump_int = b.rc_integrate(
+        "JUMP_INT",
+        jump_mixed,
+        JUMP_OUT_VBE,
+        JUMP_OUT_RE,
+        JUMP_OUT_RLOAD,
+        JUMP_OUT_C,
+    );
     let jump = b.gain("JUMP_OUT", jump_int, JUMP_GAIN * JUMP_DIVIDER);
 
     let stomp_raw = b.custom(
@@ -697,10 +842,20 @@ fn build_circuit() -> (DiscreteCircuit, DkongInputs) {
     // cabinet speaker reproduces, swamping the walk/jump/stomp voices this
     // circuit exists to model.
     //
-    // The corner matches the per-effect couplings already here (11.2 kΩ /
-    // 4.7 µF ≈ 3 Hz), which is the same part value the board uses on its
-    // output stage.
-    let out_ac = b.rc_high_pass("OUT_AC", mix, AC_R, AC_C);
+    // This used to be a single 3 Hz pole, on the reasoning that the board's
+    // output coupling uses the same 4.7 µF part as walk's. The capacitor is the
+    // same; the resistor it works against is not. Walk's sees 11.2 kΩ, the
+    // amplifier's input sees 1 kΩ — an order of magnitude, and the difference
+    // between a board that reproduces sub-audio transients and one that does
+    // not.
+    let mix_lp = b.rc_low_pass("MIX_LP", mix, MIX_LP_R, MIX_LP_C);
+    let mix_ac = b.rc_high_pass("MIX_AC", mix_lp, MIX_AC_R, MIX_AC_C);
+    let amp_ac = b.rc_high_pass("AMP_AC", mix_ac, AMP_AC_R, AMP_AC_C);
+    // The amplifier stage itself, as its emitter bypass: its gain rolls off
+    // below ~32 Hz. Only the linear half is here — the transistor's clipping
+    // ceiling is not modelled.
+    let amp = b.rc_high_pass("AMP_HP", amp_ac, AMP_HP_R, AMP_HP_C);
+    let out_ac = b.rc_high_pass("OUT_AC", amp, SPK_AC_R, SPK_AC_C);
     b.output(out_ac, OutputGain::unity());
 
     let circuit = b.build();

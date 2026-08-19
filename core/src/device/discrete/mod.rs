@@ -500,13 +500,22 @@ impl DiscreteCircuitBuilder {
         )
     }
 
-    /// Diode-OR mixer: the highest input wins, less a forward drop (volts).
+    /// Diode-OR mixer: the highest input wins, less a forward drop (volts),
+    /// and never below the reference.
     pub fn diode_mixer(&mut self, name: &str, srcs: &[NodeId], drop: f64) -> NodeId {
+        let taps: Vec<(NodeId, f64)> = srcs.iter().map(|s| (*s, drop)).collect();
+        self.diode_mixer_drops(name, &taps)
+    }
+
+    /// Diode-OR mixer with a per-branch forward drop (volts), for a node where
+    /// the branches do not have the same number of junctions in series — two
+    /// diodes on one input and one on another is a common arrangement, and the
+    /// extra drop decides which branch wins near the crossover.
+    pub fn diode_mixer_drops(&mut self, name: &str, taps: &[(NodeId, f64)]) -> NodeId {
         self.push_node(
             name,
             NodeKind::DiodeMixer {
-                srcs: srcs.to_vec(),
-                drop,
+                srcs: taps.to_vec(),
             },
             ClockDomain::BoardCycle,
         )
@@ -679,6 +688,41 @@ impl DiscreteCircuitBuilder {
                 in_src: in_src.into(),
                 enable_src: enable_src.into(),
                 charge_exp: derive::rc_charge_exp(r, c, dt),
+                cap_v: 0.0,
+            },
+            ClockDomain::BoardCycle,
+        )
+    }
+
+    /// Emitter follower charging a capacitor (port of `dst_rcintegrate`, type 1):
+    /// base at `src`, emitter through `r_e` (ohms) into `c` (farads), with
+    /// `r_load` (ohms) to ground. Conducting, the cap charges toward
+    /// `src − v_be` with `τ = r_e·c`; cut off, it drains toward ground with
+    /// `τ = (r_e + r_load)·c`.
+    ///
+    /// Reach for this rather than [`rc_low_pass`](Self::rc_low_pass) wherever
+    /// the board buffers a node with a transistor. A low-pass would settle on
+    /// the input's *mean*; this tracks its peaks and sags between them, so it
+    /// keeps a square's fundamental where an averaging filter turns it into a
+    /// DC level.
+    #[allow(clippy::too_many_arguments)]
+    pub fn rc_integrate(
+        &mut self,
+        name: &str,
+        src: impl Into<NodeId>,
+        v_be: f64,
+        r_e: f64,
+        r_load: f64,
+        c: f64,
+    ) -> NodeId {
+        let dt = 1.0 / self.sim_rate as f64;
+        self.push_node(
+            name,
+            NodeKind::RcIntegrate {
+                src: src.into(),
+                v_be,
+                charge_exp: derive::rc_charge_exp(r_e, c, dt),
+                discharge_exp: derive::rc_charge_exp(r_e + r_load, c, dt),
                 cap_v: 0.0,
             },
             ClockDomain::BoardCycle,

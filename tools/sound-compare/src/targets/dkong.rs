@@ -68,6 +68,31 @@ pub static SPEC: TargetSpec = TargetSpec {
             name: "mix",
             description: "Final mix — the default, same as no probe",
         },
+        // Stage probes along the jump chain. The final mix cannot say which
+        // stage is wrong: the control voltage, the oscillator it drives, the
+        // envelope that gates it and the follower that buffers it all move the
+        // same bands, so a spectral difference at the output is consistent with
+        // an error in any of them.
+        ProbeSpec {
+            name: "jump-cv",
+            description: "Jump 555 control voltage, after the slew capacitor (volts)",
+        },
+        ProbeSpec {
+            name: "jump-555",
+            description: "Jump 555 square, before the envelope (volts)",
+        },
+        ProbeSpec {
+            name: "jump-lid",
+            description: "Jump envelope capacitor, before its diode (volts)",
+        },
+        ProbeSpec {
+            name: "jump-mix",
+            description: "Jump diode-mixer node: envelope and square combined (volts)",
+        },
+        ProbeSpec {
+            name: "jump-int",
+            description: "Jump emitter follower output, before the divider (volts)",
+        },
     ],
     create,
 };
@@ -152,15 +177,26 @@ impl SoundTarget for DkongTarget {
 /// Node names are the ones the circuit constructor assigned. Kept as a small
 /// curated map rather than exposing every node, so a probe id describes circuit
 /// intent and survives a local topology change.
+/// The scale divides the node's value before it is written as PCM. Voice
+/// outputs are already calibrated to the mix's range and need none; a stage
+/// probe carries circuit volts, which run to the 5 V supply and would saturate
+/// a full-scale sample, so those are scaled by the supply.
 fn probe_value(circuit: &DiscreteCircuit, probe: &str) -> Option<f64> {
-    let node = match probe {
-        "walk" => "WALK_OUT",
-        "jump" => "JUMP_OUT",
-        "stomp" => "STOMP_OUT",
-        "dac" => "DAC_LP",
+    let (node, scale) = match probe {
+        "walk" => ("WALK_OUT", 1.0),
+        "jump" => ("JUMP_OUT", 1.0),
+        "stomp" => ("STOMP_OUT", 1.0),
+        "dac" => ("DAC_LP", 1.0),
+        "jump-cv" => ("JUMP_CV", 5.0),
+        "jump-555" => ("JUMP_555", 5.0),
+        "jump-lid" => ("JUMP_LID", 5.0),
+        "jump-mix" => ("JUMP_MIX", 5.0),
+        "jump-int" => ("JUMP_INT", 5.0),
         _ => return None,
     };
-    circuit.node_by_name(node).map(|id| circuit.value(id))
+    circuit
+        .node_by_name(node)
+        .map(|id| circuit.value(id) / scale)
 }
 
 #[cfg(test)]

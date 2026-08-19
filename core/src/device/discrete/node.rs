@@ -111,8 +111,11 @@ pub(crate) enum NodeKind {
         srcs: Vec<(NodeId, f64)>,
         total_g: f64,
     },
-    /// Diode-OR mixer: the highest input wins, less a forward drop.
-    DiodeMixer { srcs: Vec<NodeId>, drop: f64 },
+    /// Diode-OR mixer: the highest input wins, less that diode's forward drop.
+    /// `srcs` holds `(node, drop)` so branches with different numbers of
+    /// junctions in series can carry their own drop. The output cannot go
+    /// below the reference — a reverse-biased diode conducts nothing.
+    DiodeMixer { srcs: Vec<(NodeId, f64)> },
     /// DAC / resistor ladder: sums per-bit `weights` for each set bit of the
     /// integer code carried by `src`.
     DacLadder { src: NodeId, weights: Vec<f64> },
@@ -197,6 +200,26 @@ pub(crate) enum NodeKind {
         charge_exp: f64,
         cap_v: f64,
     },
+    /// Emitter follower charging a capacitor (port of `dst_rcintegrate`, type 1).
+    /// The base is `src`; the emitter sits on `r_e` into `c`, with `r_load` to
+    /// ground. While the base is high enough the transistor conducts and the cap
+    /// charges toward `src − v_be` with `τ = r_e·c`; once the base falls below
+    /// the emitter the transistor cuts off and the cap drains through
+    /// `r_e + r_load` toward ground.
+    ///
+    /// The asymmetry is the point, and it is not a low-pass: charge and
+    /// discharge have different time constants *and different targets*. A
+    /// symmetric RC in its place settles on the input's mean, where this one
+    /// tracks its peaks and sags between them.
+    RcIntegrate {
+        src: NodeId,
+        v_be: f64,
+        /// Fraction of the gap closed per step while conducting, `1 - exp(-dt/(r_e·c))`.
+        charge_exp: f64,
+        /// Fraction closed per step while cut off, `1 - exp(-dt/((r_e+r_load)·c))`.
+        discharge_exp: f64,
+        cap_v: f64,
+    },
 
     // --- Escape hatch ---
     /// Circuit-specific behavior. The only dynamically dispatched variant.
@@ -221,6 +244,7 @@ impl NodeKind {
             | NodeKind::RcEnvelope { src, .. }
             | NodeKind::SecondOrder { src, .. }
             | NodeKind::DacLadder { src, .. }
+            | NodeKind::RcIntegrate { src, .. }
             | NodeKind::OpAmpBandPass { src, .. } => out.push(src.index()),
             NodeKind::Ne555Cc { vin_src, .. } => out.push(vin_src.index()),
             NodeKind::Ne555Astable {
@@ -239,7 +263,7 @@ impl NodeKind {
                 out.push(b.index());
             }
             NodeKind::Add { srcs } => out.extend(srcs.iter().map(|s| s.index())),
-            NodeKind::DiodeMixer { srcs, .. } => out.extend(srcs.iter().map(|s| s.index())),
+            NodeKind::DiodeMixer { srcs } => out.extend(srcs.iter().map(|(s, _)| s.index())),
             NodeKind::ResistorMixer { srcs, .. } => out.extend(srcs.iter().map(|(s, _)| s.index())),
             NodeKind::Custom { inputs, .. } => out.extend(inputs.iter().map(|s| s.index())),
             _ => {}
@@ -384,17 +408,10 @@ impl NodeKind {
                     sum / *total_g
                 }
             }
-            NodeKind::DiodeMixer { srcs, drop } => {
-                let max_v = srcs
-                    .iter()
-                    .map(|s| values[s.index()])
-                    .fold(f64::NEG_INFINITY, f64::max);
-                if max_v.is_finite() {
-                    max_v - *drop
-                } else {
-                    0.0
-                }
-            }
+            NodeKind::DiodeMixer { srcs } => srcs
+                .iter()
+                .map(|(s, drop)| values[s.index()] - *drop)
+                .fold(0.0, f64::max),
             NodeKind::DacLadder { src, weights } => {
                 let code = values[src.index()].round().max(0.0) as u32;
                 weights
@@ -561,6 +578,24 @@ impl NodeKind {
                     0.0
                 }
             }
+            NodeKind::RcIntegrate {
+                src,
+                v_be,
+                charge_exp,
+                discharge_exp,
+                cap_v,
+            } => {
+                let emitter = values[src.index()] - *v_be;
+                if emitter > *cap_v {
+                    // Conducting: the emitter drives the cap through r_e.
+                    *cap_v += (emitter - *cap_v) * *charge_exp;
+                } else {
+                    // Cut off: nothing holds the cap up, so it drains to ground
+                    // through r_e + r_load — not back down to the input.
+                    *cap_v -= *cap_v * *discharge_exp;
+                }
+                *cap_v
+            }
 
             NodeKind::Custom {
                 inputs,
@@ -629,7 +664,7 @@ impl NodeKind {
                 *y1 = 0.0;
                 *y2 = 0.0;
             }
-            NodeKind::RcDisc5 { cap_v, .. } => *cap_v = 0.0,
+            NodeKind::RcDisc5 { cap_v, .. } | NodeKind::RcIntegrate { cap_v, .. } => *cap_v = 0.0,
             NodeKind::Custom { comp, .. } => comp.reset(),
             NodeKind::Constant { .. }
             | NodeKind::Gain { .. }
@@ -685,7 +720,9 @@ impl NodeKind {
                 w.write_f64_le(*y1);
                 w.write_f64_le(*y2);
             }
-            NodeKind::RcDisc5 { cap_v, .. } => w.write_f64_le(*cap_v),
+            NodeKind::RcDisc5 { cap_v, .. } | NodeKind::RcIntegrate { cap_v, .. } => {
+                w.write_f64_le(*cap_v)
+            }
             NodeKind::Custom { comp, .. } => comp.save_state(w),
             NodeKind::Constant { .. }
             | NodeKind::Gain { .. }
@@ -741,7 +778,9 @@ impl NodeKind {
                 *y1 = r.read_f64_le()?;
                 *y2 = r.read_f64_le()?;
             }
-            NodeKind::RcDisc5 { cap_v, .. } => *cap_v = r.read_f64_le()?,
+            NodeKind::RcDisc5 { cap_v, .. } | NodeKind::RcIntegrate { cap_v, .. } => {
+                *cap_v = r.read_f64_le()?
+            }
             NodeKind::Custom { comp, .. } => comp.load_state(r)?,
             NodeKind::Constant { .. }
             | NodeKind::Gain { .. }
