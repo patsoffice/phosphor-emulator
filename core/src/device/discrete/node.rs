@@ -200,6 +200,38 @@ pub(crate) enum NodeKind {
         charge_exp: f64,
         cap_v: f64,
     },
+    /// CMOS inverter relaxation oscillator: a ring of inverters with a timing
+    /// resistor from one output back to the input and a capacitor from another.
+    ///
+    /// The period is a fixed multiple of `R·C`, but the multiple depends on
+    /// where the inverter chain actually switches, which is *not* at its
+    /// datasheet thresholds and not at mid-supply. Modelling the gate's transfer
+    /// curve is what makes the period fall out of component values; assuming an
+    /// ideal threshold instead gets it wrong by ~20 %, and assuming the
+    /// datasheet thresholds act as hysteresis gets it wrong by a factor of two
+    /// in both directions.
+    InverterOsc {
+        /// Three inverters (resistor from the third, capacitor from the second)
+        /// rather than two (resistor from the first, capacitor from the second).
+        three_stage: bool,
+        v_supply: f64,
+        /// Input protection clamp: the input node is held to
+        /// `[-clamp, v_supply + clamp]`, and the timing capacitor swings well
+        /// past both, so this is part of the timing rather than a detail.
+        clamp: f64,
+        /// Transfer curve `v_supply · exp(-a·(x/v_supply)^b)`, solved at
+        /// construction so it passes through both datasheet threshold points.
+        tf_a: f64,
+        tf_b: f64,
+        /// Per-step charge fraction free-running, and while the clamp conducts
+        /// and the bias resistor shares the current.
+        exp_free: f64,
+        exp_clamped: f64,
+        /// `r_bias / (r_bias + r)`: how the target divides while clamped.
+        ratio: f64,
+        v_cap: f64,
+        v_mid_prev: f64,
+    },
     /// Binary counter clocked by another node's rising edges, output taken from
     /// its top bit — a divide-by-`divisor` square with even duty.
     ///
@@ -597,6 +629,49 @@ impl NodeKind {
                     0.0
                 }
             }
+            NodeKind::InverterOsc {
+                three_stage,
+                v_supply,
+                clamp,
+                tf_a,
+                tf_b,
+                exp_free,
+                exp_clamped,
+                ratio,
+                v_cap,
+                v_mid_prev,
+            } => {
+                let vb = *v_supply;
+                let tf = |x: f64| {
+                    if x <= 0.0 {
+                        vb
+                    } else {
+                        vb * (-*tf_a * (x / vb).powf(*tf_b)).exp()
+                    }
+                };
+                // The capacitor sits between the mid node and the input, so the
+                // input rides on whatever the mid node did last step.
+                let v_in = *v_cap + *v_mid_prev;
+                let (v_out, v_mid) = if *three_stage {
+                    let a = tf(v_in);
+                    let mid = tf(a);
+                    (tf(mid), mid)
+                } else {
+                    let out = tf(v_in);
+                    (out, tf(out))
+                };
+                if v_in < -*clamp || v_in > vb + *clamp {
+                    // Protection diodes conducting: the bias resistor now shares
+                    // the charging current, so both the rate and the target move.
+                    let v_in_c = v_in.clamp(-*clamp, vb + *clamp);
+                    let target = v_out * *ratio + v_in_c * (1.0 - *ratio) - v_mid;
+                    *v_cap += (target - *v_cap) * *exp_clamped;
+                } else {
+                    *v_cap += ((v_out - v_mid) - *v_cap) * *exp_free;
+                }
+                *v_mid_prev = v_mid;
+                v_out
+            }
             NodeKind::EdgeDivider {
                 clock_src,
                 divisor,
@@ -711,6 +786,12 @@ impl NodeKind {
                 *level = false;
                 *last = 0.0;
             }
+            NodeKind::InverterOsc {
+                v_cap, v_mid_prev, ..
+            } => {
+                *v_cap = 0.0;
+                *v_mid_prev = 0.0;
+            }
             NodeKind::Custom { comp, .. } => comp.reset(),
             NodeKind::Constant { .. }
             | NodeKind::Gain { .. }
@@ -776,6 +857,12 @@ impl NodeKind {
                 w.write_bool(*level);
                 w.write_f64_le(*last);
             }
+            NodeKind::InverterOsc {
+                v_cap, v_mid_prev, ..
+            } => {
+                w.write_f64_le(*v_cap);
+                w.write_f64_le(*v_mid_prev);
+            }
             NodeKind::Custom { comp, .. } => comp.save_state(w),
             NodeKind::Constant { .. }
             | NodeKind::Gain { .. }
@@ -840,6 +927,12 @@ impl NodeKind {
                 *count = r.read_u32_le()?;
                 *level = r.read_bool()?;
                 *last = r.read_f64_le()?;
+            }
+            NodeKind::InverterOsc {
+                v_cap, v_mid_prev, ..
+            } => {
+                *v_cap = r.read_f64_le()?;
+                *v_mid_prev = r.read_f64_le()?;
             }
             NodeKind::Custom { comp, .. } => comp.load_state(r)?,
             NodeKind::Constant { .. }

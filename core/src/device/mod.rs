@@ -74,9 +74,9 @@ pub use ay8910::Ay8910;
 pub use cmos_ram::CmosRam;
 pub use dac::Mc1408Dac;
 pub use discrete::{
-    ClockDomain, CustomComponent, DataInputId, DiscreteCircuit, DiscreteCircuitBuilder,
-    ExternalSourceId, FilterMode, LfsrSpec, LogicInputId, NodeId, Output555, OutputGain,
-    PulseInputId,
+    ClockDomain, CmosInverter, CustomComponent, DataInputId, DiscreteCircuit,
+    DiscreteCircuitBuilder, ExternalSourceId, FilterMode, InverterOsc, LfsrSpec, LogicInputId,
+    NodeId, Output555, OutputGain, PulseInputId,
 };
 pub use dvg::Dvg;
 pub use er2055::Er2055;

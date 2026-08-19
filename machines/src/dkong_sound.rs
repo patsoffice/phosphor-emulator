@@ -34,8 +34,8 @@
 use phosphor_core::core::debug::{DebugRegister, Debuggable};
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::device::{
-    CustomComponent, DiscreteCircuit, DiscreteCircuitBuilder, ExternalSourceId, FilterMode,
-    LfsrSpec, LogicInputId, NodeId, Output555, OutputGain,
+    CmosInverter, CustomComponent, DiscreteCircuit, DiscreteCircuitBuilder, ExternalSourceId,
+    FilterMode, InverterOsc, LfsrSpec, LogicInputId, NodeId, Output555, OutputGain,
 };
 
 /// Output sample rate. The circuit is built board = sim = output = this rate, so
@@ -111,42 +111,43 @@ const WALK_GAIN: f64 = 1.072;
 // walk latch, and one through 12 kΩ from the wobble oscillator. They see about
 // 2.25 kΩ, which sets both the settled voltages and the slew rate.
 //
-/// CV the 555 settles to while the walk latch is asserted.
-const WALK_CV: f64 = 3.745;
+/// CV the 555 settles to while the walk latch is asserted, from the fixed and
+/// gated currents alone — the wobble oscillator adds to this rather than being
+/// folded into it.
+const WALK_CV: f64 = 3.275;
 /// CV it settles to while the latch is released, the gated current removed.
-const WALK_CV_RELEASED: f64 = 2.684;
+const WALK_CV_RELEASED: f64 = 2.221;
+/// The wobble reaches the CV node through its own 12 kΩ, into the ~2.25 kΩ the
+/// CV currents see — so the oscillator's rail-to-rail output arrives scaled by
+/// 2251.8/12000, contributing about 0.02 V at its low level and 0.92 V at its
+/// high one.
+const WALK_LFO_CV_GAIN: f64 = 2_251.8 / 12_000.0;
 /// Slew network: 3.3 µF against ~2.25 kΩ, so τ ≈ 7.4 ms — short enough to settle
 /// between footsteps, long enough that the pitch is still moving while one
 /// sounds. Modelling this as an instant switch is what made every earlier
 /// version give a steady pitch per step.
 const WALK_CV_SLEW_R: f64 = 2_250.0;
 const WALK_CV_SLEW_C: f64 = 3.3e-6;
-/// Wobble rate: a CMOS inverter oscillator around 4.3 kΩ and 10 µF, so its
-/// timing capacitor relaxes with τ = 43 ms. Measured on the board the period is
-/// 87 ms — 2.02 τ, and 11.5 Hz.
+/// Walk's wobble oscillator: two CMOS inverters, 4.3 kΩ timing resistor, 43 kΩ
+/// bias, 10 µF. The rate is no longer stated — it comes out of these parts,
+/// at 84 ms against the 87 ms the board measures.
 ///
-/// This was 1.16 Hz, taken from the RC corner rather than from the relaxation
-/// period — the same mistake jump's 8.4 Hz was. A tenth of the real rate does
-/// not read as a slow wobble; it reads as no wobble at all, because a footstep
-/// lasts 160 ms and 1.16 Hz moves by a few percent in that time. Against the
-/// board's two-level alternation between 280 and 440 Hz this gave a single
+/// It used to be a bare 1.16 Hz, taken from the RC corner rather than from the
+/// relaxation period. A tenth of the real rate does not read as a slow wobble;
+/// it reads as no wobble at all, because a footstep lasts 160 ms. Against the
+/// board's two-level alternation between 280 and 440 Hz that gave a single
 /// smooth glide from 432 down to 262 and stayed there.
-///
-/// Jump's oscillator has the same shape and settles at 1.85 τ; this one takes
-/// 2.02. They differ because the ratio depends on where the inverter's
-/// effective switching thresholds land, and this one has two inverters in
-/// cascade where jump has three. Deriving that needs the transfer curve the
-/// model does not carry, so as with jump the ratio is measured.
-const WALK_LFO_HZ: f64 = 11.49;
+const WALK_LFO_R: f64 = 4_300.0;
+const WALK_LFO_R_BIAS: f64 = 43_000.0;
+const WALK_LFO_C: f64 = 10e-6;
 /// Wobble depth in volts, from the oscillator's rail-to-rail swing through its
 /// 12 kΩ into the ~2.25 kΩ the CV currents see: 2.4 V × 2251.8/12000.
 ///
 /// What reaches the 555 is smaller than this, and should be: the 3.3 µF CV
 /// capacitor only has 43 ms to slew, so it covers about 90 % of the step. The
-/// board measures a CV swinging 3.35 to 4.12 V against the 3.745 ± 0.450 this
-/// implies before the slew, which is the cross-check that the depth and the
+/// board measures a CV swinging 3.35 to 4.12 V, against the 3.745 ± 0.450 the
+/// network implies before the slew — the cross-check that the depth and the
 /// slew are both right.
-const WALK_CV_SWING: f64 = 0.450;
 /// Walk footstep decay. The reference falls 20 dB in 55 ms, so τ ≈ 55 ms / ln(10).
 const WALK_TAU: f64 = 0.024;
 /// How long one footstep runs before it is cut off — many time constants, so the
@@ -323,31 +324,31 @@ const SPK_AC_C: f64 = 4.7e-6;
 // 10 kΩ + 10 kΩ (latch-gated) and the 555's own 5 kΩ divider meet at a 10 µF cap
 // behind 1.2 kΩ, seeing about 2.3 kΩ.
 //
-/// CV the 555 settles to while the jump latch is asserted.
-const JUMP_CV_ASSERTED: f64 = 3.51;
+/// CV the 555 settles to while the jump latch is asserted, from the fixed and
+/// gated currents alone; the wobble oscillator adds to this.
+const JUMP_CV_ASSERTED: f64 = 2.927;
 /// CV it falls back to once released. Lower CV is a higher frequency, so the
 /// decay toward this is the jump's upward sweep.
-const JUMP_CV_RELEASED: f64 = 2.71;
+const JUMP_CV_RELEASED: f64 = 2.168;
 /// Slew network: 10 µF against ~2.3 kΩ, τ ≈ 22 ms.
 const JUMP_CV_SLEW_R: f64 = 2_300.0;
 const JUMP_CV_SLEW_C: f64 = 10e-6;
-/// Jump's wobble rate: three CMOS inverters around 18 kΩ and 3.3 µF, so the
-/// timing capacitor relaxes with τ = 59.4 ms and the period is a fixed multiple
-/// of that. Measured on the board it is 110 ms — 1.85 τ, and 9.09 Hz.
+/// Jump's wobble oscillator: three CMOS inverters, 18 kΩ timing resistor,
+/// 3.3 MΩ bias, 3.3 µF. Like walk's, the rate is a consequence of these rather
+/// than a number — it comes out at 110.5 ms against the board's 110 ms.
 ///
-/// The multiple is the part that cannot be read off the schematic. Taking the
-/// inverter's datasheet switching thresholds (a third and two thirds of the
-/// supply) gives 3.54 τ and half this rate; three inverters in cascade make the
-/// composite transition far sharper than one, so the effective thresholds
-/// collapse toward mid-supply and the capacitor turns round after a much shorter
-/// swing. Deriving *where* they land needs the inverter's transfer curve, which
-/// this model does not carry — so the ratio is measured rather than computed,
-/// and it is the one number in this chain that is. Modelling the inverter chain
-/// properly would replace it; see the design note.
-const JUMP_LFO_HZ: f64 = 9.09;
-/// Wobble depth in volts, from the oscillator's swing through its own 10 kΩ into
-/// the ~2.3 kΩ the CV currents see.
-const JUMP_CV_SWING: f64 = 0.575;
+/// This spent a while as a bare 8.4 Hz read off the RC corner. The corner is not
+/// the rate and no simple expression is: the period is a fixed multiple of R·C,
+/// but the multiple depends on where the gate chain switches, and that needs the
+/// inverter's transfer curve. It is 1.85 τ here and 1.96 τ for walk's two-gate
+/// version — a difference no threshold assumption reproduces.
+const JUMP_LFO_R: f64 = 18_000.0;
+const JUMP_LFO_R_BIAS: f64 = 3_300_000.0;
+const JUMP_LFO_C: f64 = 3.3e-6;
+/// The wobble reaches the CV node through its own 10 kΩ, into the ~2.34 kΩ the
+/// CV currents see, so the oscillator's output arrives scaled by 2341.3/10000 —
+/// about 0.02 V at its low level and 1.15 V at its high one.
+const JUMP_LFO_CV_GAIN: f64 = 2_341.3 / 10_000.0;
 /// The jump 555's output-high level. Unlike walk, this chain runs in volts, so
 /// it needs the real one rather than a normalized stand-in: it is compared
 /// directly against a 5 V lid across two diodes, and the ~0.8 V by which the
@@ -592,13 +593,19 @@ fn build_circuit() -> (DiscreteCircuit, DkongInputs) {
     // capacitor rounds each step over ~7.4 ms, and that rounding is the whole of
     // the pitch movement audible *within* a single footstep.
     //
-    // The board's square is not symmetric: it measures about 40 % high and 60 %
-    // low. That asymmetry is real — this oscillator's bias resistor is only ten
-    // times its timing resistor where jump's is a hundred and eighty, so its two
-    // half cycles see meaningfully different resistance. Left as an even square
-    // because the duty is a smaller effect than the rate and the shape, and
-    // carrying it means a primitive with a duty parameter; recorded rather than
-    // approximated by detuning the frequency to compensate.
+    // The board's square is not symmetric: measured, it holds the low pitch for
+    // about 60 % of each cycle and the high pitch for 40 %. The oscillator model
+    // does produce an asymmetry from the same mechanism — this circuit's bias
+    // resistor is only ten times its timing resistor where jump's is a hundred
+    // and eighty — but only 53/47, not 60/40. So the period comes out of the
+    // components and the duty still does not, and that is worth knowing rather
+    // than papering over: whatever skews these half cycles is not in this model.
+    //
+    // Note a single footstep is a poor place to measure any of this. The wobble
+    // free-runs and a step lasts under two of its cycles, so which phase a step
+    // catches — and therefore its pitch and its spectral centroid — depends on
+    // when the trigger happens to land. Judge the wobble from the gameplay
+    // capture, where many steps sample many phases.
     //
     // The control voltage is a capacitor, not a switch.
     //
@@ -611,8 +618,15 @@ fn build_circuit() -> (DiscreteCircuit, DkongInputs) {
     // as instantaneous gives a steady pitch per step, which measures plausibly
     // and sounds wrong; a hold-based capture cannot reveal it because after two
     // seconds the cap has long since settled.
-    let walk_lfo = b.fixed_square("WALK_LFO", WALK_LFO_HZ);
-    let walk_lfo_s = b.gain("WALK_LFO_S", walk_lfo, WALK_CV_SWING);
+    let walk_lfo = b.inverter_osc(
+        "WALK_LFO",
+        InverterOsc::TwoStage,
+        WALK_LFO_R,
+        WALK_LFO_R_BIAS,
+        WALK_LFO_C,
+        CmosInverter::cd40xx(VCC),
+    );
+    let walk_lfo_s = b.gain("WALK_LFO_S", walk_lfo, WALK_LFO_CV_GAIN);
     let walk_cv_base = b.constant("WALK_CV_BASE", WALK_CV_RELEASED);
     let walk_cv_gate = b.gain("WALK_CV_GATE", walk_en, WALK_CV - WALK_CV_RELEASED);
     let walk_cv_raw = b.add("WALK_CV_RAW", &[walk_cv_base, walk_cv_gate, walk_lfo_s]);
@@ -736,8 +750,15 @@ fn build_circuit() -> (DiscreteCircuit, DkongInputs) {
     // where the glide that is audible comes from; a triangle source produces a
     // continuous sweep instead, and smears the note's energy up into the
     // harmonics rather than holding it at two fundamentals.
-    let jump_lfo = b.fixed_square("JUMP_LFO", JUMP_LFO_HZ);
-    let jump_lfo_s = b.gain("JUMP_LFO_S", jump_lfo, JUMP_CV_SWING);
+    let jump_lfo = b.inverter_osc(
+        "JUMP_LFO",
+        InverterOsc::ThreeStage,
+        JUMP_LFO_R,
+        JUMP_LFO_R_BIAS,
+        JUMP_LFO_C,
+        CmosInverter::cd40xx(VCC),
+    );
+    let jump_lfo_s = b.gain("JUMP_LFO_S", jump_lfo, JUMP_LFO_CV_GAIN);
     let jump_cv_base = b.constant("JUMP_CV_BASE", JUMP_CV_RELEASED);
     let jump_cv_gate = b.gain("JUMP_CV_GATE", jump_en, JUMP_CV_ASSERTED - JUMP_CV_RELEASED);
     let jump_cv_raw = b.add("JUMP_CV_RAW", &[jump_cv_base, jump_cv_gate, jump_lfo_s]);

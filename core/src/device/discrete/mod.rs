@@ -130,6 +130,56 @@ pub struct LfsrSpec {
     pub seed: u32,
 }
 
+/// A CMOS inverting gate, as its datasheet transfer characteristic.
+///
+/// The four voltages are what a 4000-series datasheet publishes for a given
+/// supply, and they are enough to place the gate's transfer curve. They matter
+/// because an inverter's switching point is not at mid-supply and not at the
+/// quoted input thresholds — see [`inverter_osc`](DiscreteCircuitBuilder::inverter_osc).
+#[derive(Clone, Copy, Debug)]
+pub struct CmosInverter {
+    /// Supply rail (volts).
+    pub v_supply: f64,
+    /// Output level driven low.
+    pub v_out_low: f64,
+    /// Output level driven high.
+    pub v_out_high: f64,
+    /// Input level at which a falling input has driven the output fully high.
+    pub v_in_rise: f64,
+    /// Input level at which a rising input has driven the output fully low.
+    pub v_in_fall: f64,
+    /// How far the input protection diodes let the input past either rail.
+    pub input_clamp: f64,
+}
+
+impl CmosInverter {
+    /// Typical unbuffered 4000-series inverter at the given supply: rails within
+    /// 2 % of each, thresholds at 30 % and 70 % of supply, 0.1 V of input clamp.
+    pub fn cd40xx(v_supply: f64) -> Self {
+        Self {
+            v_supply,
+            v_out_low: v_supply * 0.02,
+            v_out_high: v_supply * 0.98,
+            v_in_rise: v_supply * 0.30,
+            v_in_fall: v_supply * 0.70,
+            input_clamp: 0.1,
+        }
+    }
+}
+
+/// Which arrangement of inverters an [`inverter_osc`](DiscreteCircuitBuilder::inverter_osc)
+/// uses. They differ in more than gate count: which output drives the timing
+/// resistor and which drives the capacitor is not the same in the two.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum InverterOsc {
+    /// Two gates: the first's output drives the timing resistor, the second's
+    /// the capacitor.
+    TwoStage,
+    /// Three gates: the third's output drives the timing resistor, the second's
+    /// the capacitor.
+    ThreeStage,
+}
+
 /// Escape hatch for circuit-specific behavior that does not justify a shared
 /// primitive. Held by a `Custom` node — the only dynamically dispatched kind.
 pub trait CustomComponent {
@@ -689,6 +739,52 @@ impl DiscreteCircuitBuilder {
                 enable_src: enable_src.into(),
                 charge_exp: derive::rc_charge_exp(r, c, dt),
                 cap_v: 0.0,
+            },
+            ClockDomain::BoardCycle,
+        )
+    }
+
+    /// CMOS inverter relaxation oscillator from component values: a ring of
+    /// inverters with timing resistor `r` (ohms) and capacitor `c` (farads), and
+    /// a bias resistor `r_bias` (ohms) limiting current through the input's
+    /// protection diodes. Output is the driving gate's level in volts, so it
+    /// swings between the inverter's output rails.
+    ///
+    /// Reach for this instead of a fixed square at a frequency read off the RC
+    /// corner. `1/(2πRC)` is not this circuit's rate and neither is any other
+    /// simple expression: the period is a fixed multiple of `R·C`, but the
+    /// multiple depends on where the gate chain actually switches. Modelled
+    /// against two oscillators measured on hardware — a three-stage at 1.85 τ
+    /// and a two-stage at 1.96 τ — this predicts their periods to 0.5 % and 3 %.
+    /// Assuming an ideal mid-supply threshold instead gives 2.20 τ for both,
+    /// missing each by ~20 % and unable to tell them apart at all; treating the
+    /// datasheet thresholds as hysteresis is worse still, out by +91 % and −41 %
+    /// on the same two circuits.
+    pub fn inverter_osc(
+        &mut self,
+        name: &str,
+        topology: InverterOsc,
+        r: f64,
+        r_bias: f64,
+        c: f64,
+        gate: CmosInverter,
+    ) -> NodeId {
+        let dt = 1.0 / self.sim_rate as f64;
+        let (tf_a, tf_b) = derive::cmos_transfer_curve(&gate);
+        let r_par = r * r_bias / (r + r_bias);
+        self.push_node(
+            name,
+            NodeKind::InverterOsc {
+                three_stage: topology == InverterOsc::ThreeStage,
+                v_supply: gate.v_supply,
+                clamp: gate.input_clamp,
+                tf_a,
+                tf_b,
+                exp_free: derive::rc_charge_exp(r, c, dt),
+                exp_clamped: derive::rc_charge_exp(r_par, c, dt),
+                ratio: r_bias / (r_bias + r),
+                v_cap: 0.0,
+                v_mid_prev: 0.0,
             },
             ClockDomain::BoardCycle,
         )

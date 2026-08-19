@@ -45,6 +45,28 @@ pub(crate) fn rc_charge_exp(ohms: f64, farads: f64, dt: f64) -> f64 {
     1.0 - (-dt / (ohms * farads)).exp()
 }
 
+/// Solve a CMOS inverter's transfer curve from its datasheet voltages.
+///
+/// The curve is `v_supply · exp(-a·(x/v_supply)^b)`, a monotonically decreasing
+/// function of input — an inverter — with the two free parameters fixed by
+/// requiring it to pass through both published threshold points: a falling input
+/// reaching `v_in_rise` drives the output to `v_out_high`, and a rising input
+/// reaching `v_in_fall` drives it to `v_out_low`.
+///
+/// This shape is not arbitrary. The gate's gain is what decides where a ring of
+/// them switches, and therefore an oscillator's period; a step at mid-supply
+/// misses the measured periods by ~20 %.
+pub(crate) fn cmos_transfer_curve(gate: &super::CmosInverter) -> (f64, f64) {
+    let vb = gate.v_supply;
+    // ln(-ln(v/vb)) at each endpoint; the double log is what makes the fit
+    // linear in ln(a) and b.
+    let lo = (-(gate.v_out_low / vb).ln()).ln();
+    let hi = (-(gate.v_out_high / vb).ln()).ln();
+    let b = (lo - hi) / (gate.v_in_fall / gate.v_in_rise).ln();
+    let a = (lo - b * (gate.v_in_fall / vb).ln()).exp();
+    (a, b)
+}
+
 /// NE555 astable charge/discharge fractions per simulation step.
 ///
 /// The cap charges through `r1 + r2` and discharges through `r2` alone, which
