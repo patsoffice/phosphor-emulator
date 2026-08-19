@@ -33,6 +33,7 @@ use phosphor_machines::registry;
 use phosphor_harness::movie::{Movie, MovieRecord, hex};
 use phosphor_harness::{Harness, hash_frame, hash_vectors, load_rom_set, render_oriented};
 
+mod audiodiff;
 mod gfxsheet;
 mod trace;
 use gfxsheet::SheetConfig;
@@ -312,6 +313,40 @@ enum Command {
         #[arg(long, default_value_t = 12)]
         threshold: u32,
     },
+    /// Compare two WAV captures and report where they differ: level, DC,
+    /// clipping, spectrum and per-band energy. The audio sibling of `imgdiff`.
+    ///
+    /// Exits non-zero when a tolerance is exceeded, so it can gate. Read the
+    /// band-energy deltas first: they are scale-invariant, so a pure gain
+    /// difference leaves them all at zero and anything large is a filter, mix
+    /// or source difference.
+    ///
+    /// With only one WAV it describes that capture instead of comparing.
+    Audiodiff {
+        /// First WAV.
+        a: PathBuf,
+        /// Second WAV. Omit to describe `a` on its own.
+        b: Option<PathBuf>,
+        /// Write a log-magnitude spectrogram PNG of each input. With two
+        /// inputs, `-a`/`-b` are appended to the stem so both are written.
+        #[arg(long)]
+        png: Option<PathBuf>,
+        /// How to fold a multi-channel WAV to mono.
+        #[arg(long, default_value = "downmix")]
+        channels: audiodiff::ChannelPolicy,
+        /// Largest allowed band-energy delta, in percentage points.
+        #[arg(long, default_value_t = 10.0)]
+        band_tolerance: f64,
+        /// Largest allowed spectral-centroid difference, as a fraction.
+        #[arg(long, default_value_t = 0.25)]
+        centroid_tolerance: f64,
+        /// Largest allowed AC RMS difference, in dB.
+        #[arg(long, default_value_t = 6.0)]
+        rms_tolerance: f64,
+        /// Spectrogram height in pixels.
+        #[arg(long, default_value_t = 512)]
+        png_height: u32,
+    },
     /// List the registered machines (the `--machine` values accepted by
     /// `frameshot`/`trace`/`machine`/`gfxview`), with their ROM-set names.
     Machines,
@@ -540,6 +575,27 @@ fn run_command(cmd: Command) -> Result<String, String> {
             out,
             threshold,
         } => run_imgdiff(&a, &b, out.as_deref(), threshold),
+        Command::Audiodiff {
+            a,
+            b,
+            png,
+            channels,
+            band_tolerance,
+            centroid_tolerance,
+            rms_tolerance,
+            png_height,
+        } => run_audiodiff(
+            &a,
+            b.as_deref(),
+            png.as_deref(),
+            channels,
+            audiodiff::Tolerance {
+                band_pp: band_tolerance,
+                centroid_frac: centroid_tolerance,
+                rms_db: rms_tolerance,
+            },
+            png_height,
+        ),
         Command::Machines => Ok(list_machines()),
     }
 }
@@ -940,6 +996,76 @@ fn run_imgdiff(a: &Path, b: &Path, out: Option<&Path>, threshold: u32) -> Result
         "diff: {ndiff}/{total} ({:.2}%)\n",
         100.0 * ndiff as f64 / total as f64
     ))
+}
+
+/// Compare two WAV captures, or describe one.
+///
+/// Out-of-tolerance is a *result*, not an error: the report still goes to
+/// stdout in full, and only the one-line verdict goes to stderr along with the
+/// non-zero exit. That is what lets this be dropped into a CI step without the
+/// evidence disappearing when it fails.
+fn run_audiodiff(
+    a: &Path,
+    b: Option<&Path>,
+    png: Option<&Path>,
+    channels: audiodiff::ChannelPolicy,
+    tol: audiodiff::Tolerance,
+    png_height: u32,
+) -> Result<String, String> {
+    let ca = audiodiff::read_wav(a, channels)?;
+    let label_a = file_label(a);
+
+    // Spectrogram naming: one input keeps the given path, two inputs get `-a`
+    // and `-b` inserted so a single --png flag produces both.
+    let png_for = |suffix: &str| -> Option<PathBuf> {
+        png.map(|p| {
+            if suffix.is_empty() {
+                return p.to_path_buf();
+            }
+            let stem = p.file_stem().map(|s| s.to_string_lossy().into_owned());
+            let ext = p.extension().map(|s| s.to_string_lossy().into_owned());
+            match (stem, ext) {
+                (Some(stem), Some(ext)) => p.with_file_name(format!("{stem}{suffix}.{ext}")),
+                (Some(stem), None) => p.with_file_name(format!("{stem}{suffix}")),
+                _ => p.to_path_buf(),
+            }
+        })
+    };
+
+    let Some(b) = b else {
+        let mut out = audiodiff::describe(&ca, &label_a);
+        if let Some(p) = png_for("") {
+            out.push_str(&audiodiff::spectrogram(&ca, &p, png_height)?);
+            out.push('\n');
+        }
+        return Ok(out);
+    };
+
+    let cb = audiodiff::read_wav(b, channels)?;
+    let label_b = file_label(b);
+    let (mut report, verdict) = audiodiff::compare(&ca, &cb, &label_a, &label_b, tol);
+
+    if let (Some(pa), Some(pb)) = (png_for("-a"), png_for("-b")) {
+        report.push_str(&audiodiff::spectrogram(&ca, &pa, png_height)?);
+        report.push('\n');
+        report.push_str(&audiodiff::spectrogram(&cb, &pb, png_height)?);
+        report.push('\n');
+    }
+
+    if verdict.is_clean() {
+        Ok(report)
+    } else {
+        print!("{report}");
+        Err(verdict.summary())
+    }
+}
+
+/// Short display name for a capture — the file stem, which is what makes a
+/// two-column report readable.
+fn file_label(p: &Path) -> String {
+    p.file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| p.display().to_string())
 }
 
 #[inline]

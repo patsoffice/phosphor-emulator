@@ -5,6 +5,27 @@ both through an identical timeline of register writes and measuring the result.
 Born out of the Asteroids migration — see the case study in
 [docs/debugging-asteroids-discrete-sound.md](../../docs/debugging-asteroids-discrete-sound.md).
 
+> **Use `disasm audiodiff` for anything repeatable.** The Python analyzers below
+> are superseded for measurement:
+>
+> ```bash
+> disasm audiodiff ours.wav mame.wav --png spec.png   # compare, exit non-zero past tolerance
+> disasm audiodiff ours.wav                           # describe one capture
+> ```
+>
+> It measures everything `analyze_wav.py` and `compare_wav.py` do — level, DC,
+> clipping, centroid, flatness, band energy, decay — plus onset, crest factor,
+> harmonic ratios and a multi-resolution STFT distance, and it is tested
+> ([`core/src/audio/analysis/`](../../core/src/audio/analysis/)) where the Python
+> never was. It needs no numpy and no nix-shell, and because it *gates* it can
+> run in CI, which is the thing the Python could never do.
+>
+> The Lua drivers here are still the way to produce a MAME reference, and the
+> Python remains fine for exploratory one-offs where editing a script beats
+> rebuilding. It is no longer the documented path for anything you intend to
+> repeat. See
+> [docs/designs/discrete-sound-fidelity.md](../../docs/designs/discrete-sound-fidelity.md).
+
 ## Contents
 
 - `drive_asteroid_sound.lua` / `drive_llander_sound.lua` / `drive_dkong_sound.lua`
