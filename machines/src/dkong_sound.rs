@@ -104,8 +104,15 @@ const WALK_TAU: f64 = 0.024;
 /// How long one footstep runs before it is cut off — many time constants, so the
 /// envelope decays away on its own rather than being truncated.
 const WALK_HOLD_S: f64 = 0.4;
-const JUMP_LP_HZ: f64 = 1_400.0;
-const JUMP_GAIN: f64 = 0.25;
+/// Output calibration, not a hardware value: it maps this circuit's volts into
+/// the finite PCM range alongside the other effects.
+///
+/// Re-derived when the envelope became a diode-mixed lid. The board only ever
+/// exposes a fraction of the square — a 21 ms trigger dips the lid from 5 V to
+/// 3.2 V, and the 555 peaks at 3.8 V, so 0.6 V of a 3.8 V swing gets out, about
+/// 16 %. The old value was calibrated against a multiply-based envelope that
+/// passed the whole square, so it left the corrected circuit ~14 dB quiet.
+const JUMP_GAIN: f64 = 1.218;
 // Stomp is a low rumble, not a hiss. Fitted against a MAME capture of the
 // effect triggered ONCE (`tools/sound-reference/drive_dkong_single.lua` with
 // DK_EFFECT=stomp) against `sndcmp capture dkong/stomp`:
@@ -155,12 +162,109 @@ const OUT_HIGH: f64 = 1.0;
 /// so AC-couple before filtering rather than subtracting a fixed mean.
 const AC_R: f64 = 11_200.0;
 const AC_C: f64 = 4.7e-6;
-/// Jump pitch-sweep / amplitude decay time constant (seconds).
-const JUMP_TAU: f64 = 0.36;
+// Jump's control-voltage network, derived like walk's: currents through
+// 10 kΩ + 10 kΩ (latch-gated) and the 555's own 5 kΩ divider meet at a 10 µF cap
+// behind 1.2 kΩ, seeing about 2.3 kΩ.
+//
+/// CV the 555 settles to while the jump latch is asserted.
+const JUMP_CV_ASSERTED: f64 = 3.51;
+/// CV it falls back to once released. Lower CV is a higher frequency, so the
+/// decay toward this is the jump's upward sweep.
+const JUMP_CV_RELEASED: f64 = 2.71;
+/// Slew network: 10 µF against ~2.3 kΩ, τ ≈ 22 ms.
+const JUMP_CV_SLEW_R: f64 = 2_300.0;
+const JUMP_CV_SLEW_C: f64 = 10e-6;
+/// Jump's wobble rate: 18 kΩ with 3.3 µF, near 8 Hz — fast enough that a
+/// half-second jump warbles several times as it sweeps.
+const JUMP_LFO_HZ: f64 = 8.4;
+/// Wobble depth in volts, from the oscillator's swing through its own 10 kΩ into
+/// the ~2.3 kΩ the CV currents see.
+const JUMP_CV_SWING: f64 = 0.575;
+/// 1N5553 forward drop through the output diodes, expressed in the normalized
+/// units this circuit works in rather than in volts: 0.4 V against the 555's
+/// ~3.8 V high, which `OUT_HIGH` stands for.
+const DIODE_DROP: f64 = 0.4 / 3.8;
+/// Output integrator: 150 Ω charging 1 µF, so a corner near 1.06 kHz.
+///
+/// The 4.7 kΩ ∥ (2 kΩ + 5.1 kΩ) in the board's integrator is the *discharge*
+/// path, not the corner — folding it in gave 2.8 kΩ and a 57 Hz corner, which
+/// removed most of the note and left the jump 13 dB quiet and far too dark.
+const JUMP_OUT_R: f64 = 150.0;
+const JUMP_OUT_C: f64 = 1e-6;
+/// Output divider, 5.1 kΩ of the 2 kΩ + 5.1 kΩ that follows the integrator.
+const JUMP_DIVIDER: f64 = 5.1 / 7.1;
+/// How far the lid rests above the 555's peak, as a ratio. The board's lid
+/// charges to the 5 V supply while the 555 tops out at Vcc − 1.2 ≈ 3.8 V.
+const JUMP_LID_HEADROOM: f64 = 5.0 / 3.8;
+/// Conditioned trigger width. The latch edge is differentiated by 1 µF into
+/// 10 kΩ (τ = 10 ms) and compared against 0.6 V, so the pulse lasts
+/// 10 ms · ln(5/0.6) ≈ 21 ms whatever the latch does.
+const JUMP_TRIG_S: f64 = 0.021;
+/// How fast the jump's lid is pulled down when the latch asserts: 10 kΩ into
+/// 4.7 µF. The fast half of the asymmetry — a jump snaps open.
+const JUMP_ENV_DIP_S: f64 = 0.047;
+/// How slowly it recovers once released: 100 kΩ + 10 kΩ into 4.7 µF. The slow
+/// half — and closing over the oscillator is what ends the note.
+const JUMP_ENV_RECOVER_S: f64 = 0.517;
 
 // ---------------------------------------------------------------------------
 // Effect components (custom escape hatch)
 // ---------------------------------------------------------------------------
+
+/// Fixed-width pulse on the rising edge of its input, regardless of how long the
+/// input stays asserted.
+///
+/// Models the board's trigger conditioner: the latch edge is differentiated by a
+/// 1 µF cap into 10 kΩ, and a comparator passes the resulting spike while it
+/// stays above 0.6 V. Since the spike decays with a 10 ms time constant from
+/// roughly the supply, that is about 21 ms — and crucially it does not depend on
+/// the latch pulse width, so a game that holds the line longer does not get a
+/// longer envelope.
+///
+/// Without this the envelope followed the latch directly, which tied the note's
+/// length to a pulse width the circuit deliberately discards.
+struct DkongEdgePulse {
+    width: f64,
+    timer: f64,
+    active: bool,
+    last_en: bool,
+}
+
+impl CustomComponent for DkongEdgePulse {
+    fn reset(&mut self) {
+        self.timer = 0.0;
+        self.active = false;
+        self.last_en = false;
+    }
+    fn step(&mut self, inputs: &[f64], dt: f64) -> f64 {
+        let en = inputs[0] > 0.5;
+        if en && !self.last_en {
+            self.active = true;
+            self.timer = 0.0;
+        }
+        self.last_en = en;
+        if !self.active {
+            return 0.0;
+        }
+        self.timer += dt;
+        if self.timer > self.width {
+            self.active = false;
+            return 0.0;
+        }
+        1.0
+    }
+    fn save_state(&self, w: &mut StateWriter) {
+        w.write_f64_le(self.timer);
+        w.write_bool(self.active);
+        w.write_bool(self.last_en);
+    }
+    fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
+        self.timer = r.read_f64_le()?;
+        self.active = r.read_bool()?;
+        self.last_en = r.read_bool()?;
+        Ok(())
+    }
+}
 
 /// One-shot exponential decay, triggered on the rising edge of its enable and
 /// cut off after `hold`.
@@ -421,26 +525,78 @@ fn build_circuit() -> (DiscreteCircuit, DkongInputs) {
     );
     let walk = b.gain("WALK_OUT", walk_lp, WALK_GAIN);
 
-    // Jump: a one-shot exponential envelope drives both the 555 control voltage
-    // (CV = 1 + 3·env, so the pitch sweeps up as it decays) and the output
-    // amplitude. AC-couple the square, apply the amplitude envelope, then filter.
-    let jump_env = b.custom(
-        "JUMP_ENV",
+    // Jump's envelope is an asymmetric RC following the latch, not a one-shot.
+    //
+    // On the board a 4.7 µF cap is pulled toward ground through 10 kΩ while the
+    // latch is asserted and recovers toward the supply through 110 kΩ when it is
+    // released — 47 ms down, 517 ms back. The asymmetry is the whole character:
+    // a jump snaps open and closes slowly.
+    //
+    // A single-time-constant one-shot cannot express that. It dipped instantly
+    // and recovered at one rate, which made the decay about twice as long as the
+    // board's while losing the fast attack entirely. Following the latch through
+    // an asymmetric RC needs no one-shot at all, because the latch pulse *is*
+    // the trigger — which is also what the board does.
+    // The envelope is driven by the conditioned trigger, not the latch: a fixed
+    // ~21 ms pulse from the edge, whatever the game's pulse width.
+    let jump_trig = b.custom(
+        "JUMP_TRIG",
         vec![jump_en.into()],
-        Box::new(DkongOneShotEnv {
-            tau: JUMP_TAU,
-            both_edges: false,
-            falling_scale: 1.0,
-            on_falling: false,
-            hold: 0.5,
-            active: false,
+        Box::new(DkongEdgePulse {
+            width: JUMP_TRIG_S,
             timer: 0.0,
+            active: false,
             last_en: false,
         }),
     );
-    let jump_cv_s = b.gain("JUMP_CV_S", jump_env, 3.0);
-    let jump_cv_off = b.constant("JUMP_CV_OFF", 1.0);
-    let jump_cv = b.add("JUMP_CV", &[jump_cv_s, jump_cv_off]);
+
+    // Target rests *above* the square's peak, not level with it.
+    //
+    // On the board the lid charges toward the 5 V supply while the 555 tops out
+    // at Vcc − 1.2 ≈ 3.8 V, so the lid has headroom to close fully over the
+    // oscillator — and the note ends at the finite moment it crosses the peak.
+    // Resting exactly at the peak instead makes the lid approach it
+    // asymptotically, so the note never quite stops and the decay measures
+    // several times too long however the time constants are set.
+    let jump_lid_rest = b.constant("JUMP_LID_REST", OUT_HIGH * JUMP_LID_HEADROOM);
+    let jump_lid_dip = b.gain("JUMP_LID_DIP", jump_trig, -OUT_HIGH * JUMP_LID_HEADROOM);
+    let jump_lid_target = b.add("JUMP_LID_TARGET", &[jump_lid_rest, jump_lid_dip]);
+    let jump_lid = b.rc_envelope(
+        "JUMP_LID",
+        jump_lid_target,
+        JUMP_ENV_RECOVER_S,
+        JUMP_ENV_DIP_S,
+    );
+    // The pitch sweep is the control-voltage capacitor discharging, not the
+    // amplitude envelope in disguise.
+    //
+    // Jump's CV network is the same shape as walk's — a latch-gated current and
+    // a fixed one meeting at a cap — but with 10 µF instead of 3.3 µF, so it
+    // slews with τ ≈ 22 ms between 3.51 V asserted and 2.71 V released. A lower
+    // control voltage is a faster charge and so a higher frequency, which is why
+    // a jump sweeps *upward* as the cap discharges after the trigger.
+    //
+    // This used to drive the CV straight from the amplitude envelope
+    // (`1 + 3·env`), which produces a sweep of roughly the right direction from
+    // the wrong mechanism: the sweep and the amplitude decay were forced to
+    // share one time constant, when the board gives them two (22 ms and ~0.5 s).
+    //
+    // Jump has its own wobble oscillator, and it is audible.
+    //
+    // 18 kΩ with 3.3 µF puts it near 8 Hz — several cycles across a half-second
+    // jump, so the note warbles as it sweeps. It enters the control voltage
+    // through its own 10 kΩ, alongside the latch-gated current, so the wobble
+    // and the sweep add rather than one modulating the other.
+    //
+    // I first read this circuit's 3.3 MΩ as the timing resistor and concluded
+    // the oscillator ran at 0.05 Hz — effectively a DC offset — and left it out.
+    // That resistor is the bias pull; the first of the pair sets the rate.
+    let jump_lfo = b.triangle("JUMP_LFO", JUMP_LFO_HZ);
+    let jump_lfo_s = b.gain("JUMP_LFO_S", jump_lfo, JUMP_CV_SWING);
+    let jump_cv_base = b.constant("JUMP_CV_BASE", JUMP_CV_RELEASED);
+    let jump_cv_gate = b.gain("JUMP_CV_GATE", jump_en, JUMP_CV_ASSERTED - JUMP_CV_RELEASED);
+    let jump_cv_raw = b.add("JUMP_CV_RAW", &[jump_cv_base, jump_cv_gate, jump_lfo_s]);
+    let jump_cv = b.rc_low_pass("JUMP_CV", jump_cv_raw, JUMP_CV_SLEW_R, JUMP_CV_SLEW_C);
     let jump_555 = b.ne555_astable(
         "JUMP_555",
         Some(jump_cv),
@@ -451,10 +607,58 @@ fn build_circuit() -> (DiscreteCircuit, DkongInputs) {
         OUT_HIGH,
         Output555::Square,
     );
-    let jump_ac = b.rc_high_pass("JUMP_AC", jump_555, AC_R, AC_C);
-    let jump_amp = b.multiply("JUMP_AMP", jump_ac, jump_env);
-    let jump_lp = b.second_order("JUMP_LP", jump_amp, FilterMode::LowPass, JUMP_LP_HZ, 0.707);
-    let jump = b.gain("JUMP_OUT", jump_lp, JUMP_GAIN);
+    // The envelope is DIODE-MIXED with the oscillator, not multiplied by it.
+    //
+    // Two diodes meet at the output node, so what reaches it is whichever of the
+    // envelope and the 555 square is *higher*, less a forward drop. That is a
+    // completely different combining rule from multiplication, and it is what
+    // gives a jump its shape: while the envelope is high it holds the node above
+    // the square's peaks, so the start is a swell with no tone in it at all; as
+    // the envelope decays the square begins to poke through the top, so the note
+    // emerges and grows. The envelope acts as a falling floor that clips the
+    // oscillator from below, which also means the audible duty cycle changes
+    // over the effect's life.
+    //
+    // Multiplying instead scales the oscillator by the envelope — tone from the
+    // first instant, uniform duty, decaying amplitude. Recognisably a jump, and
+    // wrong in a way no amount of retuning the envelope could fix.
+    // The envelope is a LID that rests high and is pulled down by the trigger,
+    // not a floor that rises.
+    //
+    // The 555 free-runs whether or not anything is jumping, so at rest something
+    // has to keep it off the output. That something is the envelope: it sits
+    // above the square's peaks, and since the diodes pass whichever input is
+    // higher, the node holds a constant DC that the coupling capacitor then
+    // removes — silence. Triggering pulls the lid down, the square rises above
+    // it, and the note is heard; as the lid recovers it closes over the peaks
+    // again and the note fades.
+    //
+    // Getting this backwards is audible rather than subtle: a lid that rests low
+    // lets the free-running oscillator through permanently, so the board hums
+    // continuously and the jump itself does nothing.
+    //
+    // Both inputs must share a scale for a max() to mean anything. The 555 emits
+    // `OUT_HIGH` rather than volts here (its absolute level is folded into the
+    // per-effect gains), so the lid is expressed in the same units.
+    let jump_mixed = b.diode_mixer("JUMP_MIX", &[jump_lid, jump_555], DIODE_DROP);
+
+    // Output stage: an RC integrator into the divider that feeds the mixer,
+    // rather than a low-pass at a guessed corner. 150 Ω charging 1 µF against
+    // 4.7 kΩ ∥ (2 kΩ + 5.1 kΩ) is a far gentler corner than the 1400 Hz this
+    // used to assume, which is why the old model read twice as bright as the
+    // reference.
+    // No coupling capacitor here. Walk's chain has one; jump's does not — it
+    // runs diode mixer straight into the integrator and on to the board mixer,
+    // where the shared output coupling removes the DC.
+    //
+    // Adding one costs more than it looks. The lid resting high means the node
+    // sits at a large steady DC, and the trigger steps it down sharply; a
+    // high-pass turns that step into a big low-frequency transient that
+    // dominates the whole effect. It pulled the spectral centroid to 48 Hz
+    // against the reference's 312, and no amount of level correction fixes a
+    // spectrum made mostly of a thump.
+    let jump_int = b.rc_low_pass("JUMP_INT", jump_mixed, JUMP_OUT_R, JUMP_OUT_C);
+    let jump = b.gain("JUMP_OUT", jump_int, JUMP_GAIN * JUMP_DIVIDER);
 
     let stomp_raw = b.custom(
         "STOMP",
