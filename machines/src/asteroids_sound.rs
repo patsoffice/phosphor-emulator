@@ -331,11 +331,9 @@ fn build_circuit() -> (DiscreteCircuit, AsteroidsDiscreteInputs) {
     let thrust_noise = b.lfsr_noise(
         "THRUST_NOISE",
         12_000.0,
-        LfsrSpec {
-            width: 16,
-            taps: (6, 14),
-            seed: 0xACE1,
-        },
+        // Taps chosen against the toward-zero shift, so they keep it; migrating
+        // to the hardware convention would run a different polynomial.
+        LfsrSpec::toward_zero(16, (6, 14), 0xACE1),
     );
     let thrust_rc = b.rc_low_pass("THRUST_RC", thrust_noise, 2_200.0, 1e-6);
     let thrust_gated = b.multiply("THRUST_GATE", thrust_rc, thrust_en);

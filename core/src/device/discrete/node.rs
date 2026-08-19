@@ -60,6 +60,12 @@ pub(crate) enum NodeKind {
         tap_a: u8,
         tap_b: u8,
         width: u8,
+        /// Shift toward the high end (newest bit at 0) rather than toward 0.
+        toward_high: bool,
+        /// Invert the XOR before shifting it in.
+        invert_feedback: bool,
+        /// Emit the feedback term rather than bit 0.
+        output_feedback: bool,
         freq: f64,
         clock_acc: f64,
     },
@@ -411,17 +417,36 @@ impl NodeKind {
                 tap_a,
                 tap_b,
                 width,
+                toward_high,
+                invert_feedback,
+                output_feedback,
                 freq,
                 clock_acc,
                 ..
             } => {
+                let mask = if *width >= 32 {
+                    u32::MAX
+                } else {
+                    (1u32 << *width) - 1
+                };
+                let mut feedback = ((*lfsr >> *tap_a) ^ (*lfsr >> *tap_b)) & 1;
                 *clock_acc += *freq * dt;
                 while *clock_acc >= 1.0 {
                     *clock_acc -= 1.0;
-                    let bit = ((*lfsr >> *tap_a) ^ (*lfsr >> *tap_b)) & 1;
-                    *lfsr = (*lfsr >> 1) | (bit << (*width - 1));
+                    feedback = ((*lfsr >> *tap_a) ^ (*lfsr >> *tap_b)) & 1;
+                    let shifted_in = feedback ^ u32::from(*invert_feedback);
+                    *lfsr = if *toward_high {
+                        ((*lfsr << 1) | shifted_in) & mask
+                    } else {
+                        (*lfsr >> 1) | (shifted_in << (*width - 1))
+                    };
                 }
-                if *lfsr & 1 != 0 { 1.0 } else { -1.0 }
+                let level = if *output_feedback {
+                    feedback
+                } else {
+                    *lfsr & 1
+                };
+                if level != 0 { 1.0 } else { -1.0 }
             }
 
             NodeKind::EdgeDetector { src, last } => {

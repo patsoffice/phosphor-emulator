@@ -35,7 +35,8 @@ use phosphor_core::core::debug::{DebugRegister, Debuggable};
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::device::{
     CmosInverter, CustomComponent, DiscreteCircuit, DiscreteCircuitBuilder, ExternalSourceId,
-    FilterMode, InverterOsc, LfsrSpec, LogicInputId, NodeId, Output555, OutputGain,
+    FilterMode, InverterOsc, LfsrOutput, LfsrShift, LfsrSpec, LogicInputId, NodeId, Output555,
+    OutputGain,
 };
 
 /// Output sample rate. The circuit is built board = sim = output = this rate, so
@@ -269,7 +270,7 @@ const STOMP_DIVIDER: f64 = 5.1 / 7.1;
 /// Output calibration, the only scalar in the chain that is not a component
 /// value. Re-derived from scratch when the structure changed; the old 9.54 was
 /// calibrated against a model with no envelope and no follower in it.
-const STOMP_GAIN: f64 = 0.519;
+const STOMP_GAIN: f64 = 0.505;
 
 // Shared 555 astable values for the walk/jump VCOs: R1 charges through 47 kΩ,
 // R2 discharges through 27 kΩ, Vcc = 5 V. The control voltage on pin 5 sets
@@ -812,10 +813,25 @@ fn build_circuit() -> (DiscreteCircuit, DkongInputs) {
     let stomp_noise = b.lfsr_noise(
         "STOMP_NOISE",
         STOMP_NOISE_HZ,
+        // Three LS164s in a chain: data shifts in at bit 0 and along, so bit n is
+        // the bit clocked in n steps ago and the tap numbers mean what the
+        // schematic says. The feedback is inverted before it re-enters and the
+        // output is taken from the XOR gate rather than from the register.
+        //
+        // Stated the other way round — shifting toward bit 0, as this framework
+        // did by default — the same tap numbers describe a different recurrence,
+        // and that one is not maximal length: it repeats every 11811 states,
+        // which at 4 kHz is a 2.95 s loop. The edge statistics come out the same
+        // either way (0.2500 rising edges per clock against the board's 0.2494),
+        // which is why the rumble's rate was right regardless and this was never
+        // audible in a burst that lasts under a second.
         LfsrSpec {
             width: 24,
             taps: (10, 23),
-            seed: 0x1A_CFFC,
+            seed: 0,
+            shift: LfsrShift::TowardHigh,
+            invert_feedback: true,
+            output: LfsrOutput::Feedback,
         },
     );
     let stomp_div = b.edge_divider("STOMP_DIV", stomp_noise, STOMP_DIVISOR);

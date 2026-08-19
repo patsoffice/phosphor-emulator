@@ -158,11 +158,7 @@ fn lfsr_circuit() -> DiscreteCircuit {
     let noise = b.lfsr_noise(
         "NOISE",
         RATE as f64,
-        LfsrSpec {
-            width: 24,
-            taps: (10, 23),
-            seed: 0x1A_CFFC,
-        },
+        LfsrSpec::toward_zero(24, (10, 23), 0x1A_CFFC),
     );
     b.output(noise, OutputGain::unity());
     b.build()
@@ -298,11 +294,7 @@ fn mixed_circuit() -> DiscreteCircuit {
     let noise = b.lfsr_noise(
         "NOISE",
         12_000.0,
-        LfsrSpec {
-            width: 17,
-            taps: (0, 2),
-            seed: 0x1_2345,
-        },
+        LfsrSpec::toward_zero(17, (0, 2), 0x1_2345),
     );
     let counter = b.custom("CNT", vec![], Box::new(StepCounter { n: 0 }));
     let mix = b.add("MIX", &[sq, noise]);

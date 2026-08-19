@@ -119,7 +119,37 @@ impl OutputGain {
     }
 }
 
-/// Configuration for an [`DiscreteCircuitBuilder::lfsr_noise`] generator.
+/// Which way an [`LfsrSpec`]'s register shifts — which is what its tap numbers
+/// mean, and therefore which polynomial it runs.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum LfsrShift {
+    /// Toward bit 0, the newest bit entering at the top. Convenient, but the tap
+    /// numbers then count from the *oldest* bit, so they do not correspond to a
+    /// schematic's.
+    TowardZero,
+    /// Toward the high end, the newest bit entering at bit 0 — how a chain of
+    /// shift registers is actually wired, so bit *n* is the bit shifted in *n*
+    /// steps ago and tap numbers mean what a schematic says they mean.
+    TowardHigh,
+}
+
+/// Where an [`LfsrSpec`]'s output is taken from.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum LfsrOutput {
+    /// Bit 0 of the register.
+    RegisterBit,
+    /// The feedback term itself, before it is shifted in. Real noise circuits
+    /// often tap the XOR gate rather than the register.
+    Feedback,
+}
+
+/// Configuration for a [`DiscreteCircuitBuilder::lfsr_noise`] generator.
+///
+/// The last three fields exist because "taps (10, 23)" is not by itself a
+/// polynomial. Read off a schematic those numbers describe a register shifting
+/// one way; implemented shifting the other way they describe a different
+/// recurrence, and the failure mode is not an error but a *shortened cycle* —
+/// which sounds like a repeating pattern rather than noise.
 #[derive(Clone, Copy, Debug)]
 pub struct LfsrSpec {
     /// Register width in bits (1..=32).
@@ -128,6 +158,13 @@ pub struct LfsrSpec {
     pub taps: (u8, u8),
     /// Non-zero seed loaded at reset.
     pub seed: u32,
+    /// Shift direction, which decides what `taps` refers to.
+    pub shift: LfsrShift,
+    /// Invert the feedback before shifting it in. Some circuits do; it changes
+    /// the sequence and the fixed point.
+    pub invert_feedback: bool,
+    /// Whether to emit a register bit or the feedback term.
+    pub output: LfsrOutput,
 }
 
 /// A CMOS inverting gate, as its datasheet transfer characteristic.
@@ -150,6 +187,26 @@ pub struct CmosInverter {
     pub v_in_fall: f64,
     /// How far the input protection diodes let the input past either rail.
     pub input_clamp: f64,
+}
+
+impl LfsrSpec {
+    /// The shape this framework used before the shift direction was explicit:
+    /// shifting toward bit 0, feedback uninverted, output from bit 0.
+    ///
+    /// Kept so callers whose tap numbers were chosen against that behaviour keep
+    /// it. It is NOT the arrangement a schematic describes — see
+    /// [`LfsrShift`] — so prefer stating the real one for new circuits, and
+    /// check the cycle length before migrating an existing one.
+    pub fn toward_zero(width: u8, taps: (u8, u8), seed: u32) -> Self {
+        Self {
+            width,
+            taps,
+            seed,
+            shift: LfsrShift::TowardZero,
+            invert_feedback: false,
+            output: LfsrOutput::RegisterBit,
+        }
+    }
 }
 
 impl CmosInverter {
@@ -360,7 +417,15 @@ impl DiscreteCircuitBuilder {
             spec.width >= 1 && spec.width <= 32,
             "LFSR width out of range"
         );
-        assert!(spec.seed != 0, "LFSR seed must be non-zero");
+        // An all-zero register is a fixed point only when the feedback is not
+        // inverted: XOR of two zero taps shifts in another zero for ever.
+        // Inverting the feedback makes it shift in a one, so zero is a perfectly
+        // ordinary starting state — and it is the state a real register powers
+        // up in, so refusing it would force a fictitious seed.
+        assert!(
+            spec.seed != 0 || spec.invert_feedback,
+            "LFSR seed must be non-zero unless the feedback is inverted"
+        );
         self.push_node(
             name,
             NodeKind::LfsrNoise {
@@ -369,6 +434,9 @@ impl DiscreteCircuitBuilder {
                 tap_a: spec.taps.0,
                 tap_b: spec.taps.1,
                 width: spec.width,
+                toward_high: spec.shift == LfsrShift::TowardHigh,
+                invert_feedback: spec.invert_feedback,
+                output_feedback: spec.output == LfsrOutput::Feedback,
                 freq,
                 clock_acc: 0.0,
             },

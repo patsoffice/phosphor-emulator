@@ -163,11 +163,8 @@ impl GalaxianSound {
         let noise_pm = b.lfsr_noise(
             "noise",
             NOISE_RATE,
-            LfsrSpec {
-                width: 17,
-                taps: (11, 0),
-                seed: 0x1_FFFF,
-            },
+            // Taps chosen against the toward-zero shift, so they keep it.
+            LfsrSpec::toward_zero(17, (11, 0), 0x1_FFFF),
         );
         // The HIT/FIRE stages gate on the noise as a logic level, so map the
         // ±1 LFSR to the 0/1 line the D-flip-flop (NODE_152) presents.
