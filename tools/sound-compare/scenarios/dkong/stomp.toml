@@ -1,0 +1,19 @@
+schema = 1
+id = "dkong/stomp"
+target = "dkong-discrete"
+duration_s = 3.0
+description = "One stomp, triggered once and allowed to decay completely"
+
+[[action]]
+at_s = 0.5
+control = "stomp"
+value = true
+
+[[action]]
+at_s = 0.55
+control = "stomp"
+value = false
+
+[analysis]
+start_s = 0.45
+end_s = 3.0

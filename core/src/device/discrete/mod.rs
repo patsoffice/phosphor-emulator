@@ -895,6 +895,20 @@ impl DiscreteCircuit {
         &self.names[node.into().index()]
     }
 
+    /// Find a node by the name its constructor gave it.
+    ///
+    /// For tooling that addresses a specific stage — rendering one voice on its
+    /// own, say — where the caller has a name rather than the `NodeId` the
+    /// builder returned. Names are not enforced unique, so this returns the
+    /// first match; a circuit that reuses a name for two stages cannot be
+    /// probed unambiguously, which is a reason not to.
+    pub fn node_by_name(&self, name: &str) -> Option<NodeId> {
+        self.names
+            .iter()
+            .position(|n| n == name)
+            .map(|i| NodeId(i as u16))
+    }
+
     /// Clear all runtime state, preserving topology and static configuration.
     pub fn reset(&mut self) {
         for node in &mut self.nodes {

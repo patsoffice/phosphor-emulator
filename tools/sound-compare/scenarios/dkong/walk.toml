@@ -1,0 +1,21 @@
+schema = 1
+id = "dkong/walk"
+target = "dkong-discrete"
+duration_s = 3.5
+description = "Walk held for two seconds, then released with its tail"
+
+# Sustained: assert, hold, release, and capture the coupling tail. The release
+# matters — it is where a wrong coupling time constant shows.
+[[action]]
+at_s = 0.5
+control = "walk"
+value = true
+
+[[action]]
+at_s = 2.5
+control = "walk"
+value = false
+
+[analysis]
+start_s = 0.45
+end_s = 3.5

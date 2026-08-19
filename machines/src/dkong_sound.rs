@@ -413,6 +413,15 @@ impl DkongDiscreteSound {
         self.circuit.fill_audio(out)
     }
 
+    /// The built circuit, for tooling that reads individual stages.
+    ///
+    /// Exposed so a comparison run can render one voice on its own — a mixed
+    /// sum cannot say which of walk, jump or stomp is wrong, and they overlap in
+    /// frequency, so no analysis of the sum recovers it.
+    pub fn circuit(&self) -> &DiscreteCircuit {
+        &self.circuit
+    }
+
     pub fn reset(&mut self) {
         self.circuit.reset();
         self.latch = 0;
