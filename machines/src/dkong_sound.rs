@@ -66,27 +66,32 @@ const DAC_LP_Q: f64 = 0.74;
 // dkong/walk`:
 //
 //                  original      now      reference
-//   AC RMS        -28.33 dB   -38.42 dB   -38.42 dB
-//   fundamental      ~600 Hz    373.7 Hz    338.0 Hz
+//   AC RMS        -28.33 dB   -38.75 dB   -38.42 dB
 //   decay T20        0.733 s     0.060 s     0.055 s
-//   centroid        512.6 Hz    400.6 Hz    403.0 Hz
+//   decay T40           n/a      0.120 s     0.120 s
+//   centroid        512.6 Hz    419.7 Hz    403.0 Hz
+//   rolloff 85%         n/a     559.9 Hz    585.9 Hz
+//   band 400-1000       n/a       47.1 %      45.9 %
+//
+// The "fundamental" is not quoted because it stopped meaning anything once the
+// wobble was right: the voice alternates between two pitches rather than
+// holding one, so a single-peak estimator reports whichever of them happens to
+// dominate. It reads 286 Hz here against the reference's 338, and both are
+// picking a different tone out of the same 280/440 pair.
 //
 // The corner stays where the schematic-derived model had it. Dropping it to
 // 460 Hz to chase the centroid moved that number by 11 Hz, because what
 // dominates it is the oscillator's pitch rather than the filter, and a corner
 // below the fundamental only attenuates the note.
 //
-// The centroid now matches. What is left is a distribution difference: the
-// reference spreads its energy 15/37/46 % across the bottom three bands where
-// this puts 2/64/34 % — the board's footstep has low-frequency content this
-// model has no source for. Structural, so recorded rather than tuned; see
-// `…-dkong-walk-not-sustained-4q42`.
-//
-// Walk's wobble oscillator is still wrong in the way jump's was, and knowingly
-// so: `WALK_LFO_HZ` was derived from an RC corner rather than from the
-// relaxation period, which is the same mistake jump's 8.4 Hz was. Left alone
-// here because walk is not this change's subject and moving it would confound
-// the jump measurements.
+// What is left is one distribution difference, and it is the whole of the
+// remaining distance: the reference puts 15 % of its energy below 150 Hz where
+// this puts 2 %. The board's footstep has low-frequency content this model has
+// no source for, and no filter corner produces it because there is nothing to
+// filter. Structural, so recorded rather than tuned; see
+// `…-dkong-walk-not-sustained-4q42`. Above that the two now agree closely —
+// 400-1000 Hz lands within 1.2 points, and the decay matches to the
+// millisecond at T40.
 const WALK_LP_HZ: f64 = 700.0;
 /// Re-fitted after the envelope changed: a decaying footstep carries far less
 /// energy than the sustained tone this used to be, so the level had to come up
@@ -114,11 +119,32 @@ const WALK_CV_RELEASED: f64 = 2.684;
 /// version give a steady pitch per step.
 const WALK_CV_SLEW_R: f64 = 2_250.0;
 const WALK_CV_SLEW_C: f64 = 3.3e-6;
-/// Wobble rate. On the board this is a CMOS inverter oscillator (4.3 kΩ / 43 kΩ
-/// / 10 µF), which lands near 1 Hz.
-const WALK_LFO_HZ: f64 = 1.16;
-/// Wobble depth in volts, from the oscillator's swing through its 12 kΩ.
-const WALK_CV_SWING: f64 = 0.47;
+/// Wobble rate: a CMOS inverter oscillator around 4.3 kΩ and 10 µF, so its
+/// timing capacitor relaxes with τ = 43 ms. Measured on the board the period is
+/// 87 ms — 2.02 τ, and 11.5 Hz.
+///
+/// This was 1.16 Hz, taken from the RC corner rather than from the relaxation
+/// period — the same mistake jump's 8.4 Hz was. A tenth of the real rate does
+/// not read as a slow wobble; it reads as no wobble at all, because a footstep
+/// lasts 160 ms and 1.16 Hz moves by a few percent in that time. Against the
+/// board's two-level alternation between 280 and 440 Hz this gave a single
+/// smooth glide from 432 down to 262 and stayed there.
+///
+/// Jump's oscillator has the same shape and settles at 1.85 τ; this one takes
+/// 2.02. They differ because the ratio depends on where the inverter's
+/// effective switching thresholds land, and this one has two inverters in
+/// cascade where jump has three. Deriving that needs the transfer curve the
+/// model does not carry, so as with jump the ratio is measured.
+const WALK_LFO_HZ: f64 = 11.49;
+/// Wobble depth in volts, from the oscillator's rail-to-rail swing through its
+/// 12 kΩ into the ~2.25 kΩ the CV currents see: 2.4 V × 2251.8/12000.
+///
+/// What reaches the 555 is smaller than this, and should be: the 3.3 µF CV
+/// capacitor only has 43 ms to slew, so it covers about 90 % of the step. The
+/// board measures a CV swinging 3.35 to 4.12 V against the 3.745 ± 0.450 this
+/// implies before the slew, which is the cross-check that the depth and the
+/// slew are both right.
+const WALK_CV_SWING: f64 = 0.450;
 /// Walk footstep decay. The reference falls 20 dB in 55 ms, so τ ≈ 55 ms / ln(10).
 const WALK_TAU: f64 = 0.024;
 /// How long one footstep runs before it is cut off — many time constants, so the
@@ -576,34 +602,42 @@ fn build_circuit() -> (DiscreteCircuit, DkongInputs) {
     // to CV through R1+R2 and discharges through R2, so
     //     T = (R1+R2)·C·ln((Vcc − CV/2)/(Vcc − CV)) + R2·C·ln2
     // and the reference's 338 Hz wants CV ≈ 3.35 V.
-    // A slow oscillator wobbles the 555's control voltage, so successive
-    // footsteps come out at different pitches.
+    // An oscillator wobbles the 555's control voltage, and it is where walk's
+    // alternating two-tone character comes from. This is easy to mistake for a
+    // bug: a footstep lasts tens of milliseconds and catches the wobble wherever
+    // it happens to be, so measuring one step in isolation gives a pitch that
+    // appears to drift run to run. It is not drift — the board really does vary
+    // the pitch per step, and removing the wobble to "stabilise" it gives a
+    // single repeated tone that is audibly wrong however precisely its frequency
+    // is fitted.
     //
-    // This is where the walk's alternating two-tone character comes from, and
-    // it is easy to mistake for a bug: a footstep lasts tens of milliseconds
-    // and samples the wobble wherever it happens to be, so measuring one step
-    // in isolation gives a pitch that appears to drift run to run. It is not
-    // drift — the board really does vary the pitch per step, and removing the
-    // wobble to "stabilise" it produces a single repeated tone that is audibly
-    // wrong however precisely its frequency is fitted.
+    // The wobble is a SQUARE, not a triangle: what feeds the control voltage is
+    // the output of a CMOS inverter chain, which is a logic level. So the board
+    // alternates between two pitches — measured, 280 Hz and 440 Hz — rather than
+    // gliding through the range between them. The 3.3 µF control-voltage
+    // capacitor rounds each step over ~7.4 ms, and that rounding is the whole of
+    // the pitch movement audible *within* a single footstep.
     //
-    // On the board this is a CMOS inverter oscillator (4.3 kΩ / 43 kΩ / 10 µF),
-    // which puts it near 1 Hz — slow enough that consecutive steps 200 ms apart
-    // land on meaningfully different parts of the cycle.
+    // The board's square is not symmetric: it measures about 40 % high and 60 %
+    // low. That asymmetry is real — this oscillator's bias resistor is only ten
+    // times its timing resistor where jump's is a hundred and eighty, so its two
+    // half cycles see meaningfully different resistance. Left as an even square
+    // because the duty is a smaller effect than the rate and the shape, and
+    // carrying it means a primitive with a duty parameter; recorded rather than
+    // approximated by detuning the frequency to compensate.
+    //
     // The control voltage is a capacitor, not a switch.
     //
     // Three currents feed the 555's CV pin through a 3.3 µF cap: a fixed one
     // from the chip's own divider, one gated by the walk latch, and one from the
-    // wobble oscillator. The cap makes the CV *slew* between its two latched
-    // levels with a ~7.4 ms time constant rather than stepping — and since a
-    // footstep only lasts a few tens of milliseconds, the pitch is still moving
-    // while the note sounds. Each step is a small downward sweep, not a tone.
+    // wobble oscillator. The cap makes the CV *slew* between its levels with a
+    // ~7.4 ms time constant rather than stepping.
     //
     // That slew is the piece every earlier attempt was missing. Modelling the CV
     // as instantaneous gives a steady pitch per step, which measures plausibly
     // and sounds wrong; a hold-based capture cannot reveal it because after two
     // seconds the cap has long since settled.
-    let walk_lfo = b.triangle("WALK_LFO", WALK_LFO_HZ);
+    let walk_lfo = b.fixed_square("WALK_LFO", WALK_LFO_HZ);
     let walk_lfo_s = b.gain("WALK_LFO_S", walk_lfo, WALK_CV_SWING);
     let walk_cv_base = b.constant("WALK_CV_BASE", WALK_CV_RELEASED);
     let walk_cv_gate = b.gain("WALK_CV_GATE", walk_en, WALK_CV - WALK_CV_RELEASED);
