@@ -74,6 +74,14 @@ pub static SPEC: TargetSpec = TargetSpec {
         // same bands, so a spectral difference at the output is consistent with
         // an error in any of them.
         ProbeSpec {
+            name: "walk-env",
+            description: "Walk envelope after the 555 chops it (volts)",
+        },
+        ProbeSpec {
+            name: "walk-555",
+            description: "Walk 555 square, the chopper",
+        },
+        ProbeSpec {
             name: "stomp-noise",
             description: "Stomp shift-register output, before the divider (±1)",
         },
@@ -207,6 +215,8 @@ fn probe_value(circuit: &DiscreteCircuit, probe: &str) -> Option<f64> {
         "jump" => ("JUMP_OUT", 1.0),
         "stomp" => ("STOMP_OUT", 1.0),
         "dac" => ("DAC_LP", 1.0),
+        "walk-env" => ("WALK_ENV", 5.0),
+        "walk-555" => ("WALK_555", 1.0),
         "stomp-noise" => ("STOMP_NOISE", 1.0),
         "stomp-div" => ("STOMP_DIV", 1.0),
         "stomp-lid" => ("STOMP_LID", 5.0),

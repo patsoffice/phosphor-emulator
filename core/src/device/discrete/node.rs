@@ -200,6 +200,37 @@ pub(crate) enum NodeKind {
         charge_exp: f64,
         cap_v: f64,
     },
+    /// Logic-triggered RC discharge, gated and modulated by a second input
+    /// (port of `dst_rcdisc_mod`).
+    ///
+    /// A capacitor charges toward the supply through one resistor network while
+    /// `trigger` is released and toward ground while it is asserted; the output
+    /// is the voltage still across the charging resistor, so it is a decaying
+    /// envelope rather than a level. `modulator` does two things at once: it
+    /// switches a second resistor in and out, changing the decay rate, and it
+    /// chops the output to zero whenever it is high.
+    ///
+    /// That chopping is what makes this different from multiplying an envelope
+    /// by an oscillator. The output is a train of one-sided pulses — present
+    /// only while the modulator is low — which carries far more low-frequency
+    /// energy than the symmetric product of the same two signals.
+    ///
+    /// With `modulator` tied low it degenerates into a fixed-width pulse from
+    /// the trigger edge, which is how a board conditions a latch write into a
+    /// trigger of its own choosing.
+    RcDiscModulated {
+        trigger_src: NodeId,
+        modulator_src: NodeId,
+        v_supply: f64,
+        /// Per-step charge fractions, indexed by `(modulator << 1) | trigger`.
+        exp_high: [f64; 4],
+        /// Divider ratios deciding when the diode clamp conducts, same index.
+        vd_gain: [f64; 4],
+        /// Per-step fractions and output divider while clamped, by trigger only.
+        exp_low: [f64; 2],
+        gain: [f64; 2],
+        v_cap: f64,
+    },
     /// CMOS inverter relaxation oscillator: a ring of inverters with a timing
     /// resistor from one output back to the input and a capacitor from another.
     ///
@@ -315,6 +346,14 @@ impl NodeKind {
             NodeKind::Add { srcs } => out.extend(srcs.iter().map(|s| s.index())),
             NodeKind::DiodeMixer { srcs } => out.extend(srcs.iter().map(|(s, _)| s.index())),
             NodeKind::EdgeDivider { clock_src, .. } => out.push(clock_src.index()),
+            NodeKind::RcDiscModulated {
+                trigger_src,
+                modulator_src,
+                ..
+            } => {
+                out.push(trigger_src.index());
+                out.push(modulator_src.index());
+            }
             NodeKind::ResistorMixer { srcs, .. } => out.extend(srcs.iter().map(|(s, _)| s.index())),
             NodeKind::Custom { inputs, .. } => out.extend(inputs.iter().map(|s| s.index())),
             _ => {}
@@ -629,6 +668,39 @@ impl NodeKind {
                     0.0
                 }
             }
+            NodeKind::RcDiscModulated {
+                trigger_src,
+                modulator_src,
+                v_supply,
+                exp_high,
+                vd_gain,
+                exp_low,
+                gain,
+                v_cap,
+            } => {
+                let trig = usize::from(values[trigger_src.index()] > 0.5);
+                let modu = usize::from(values[modulator_src.index()] > 0.6);
+                let state = (modu << 1) | trig;
+                // Asserted pulls the network to ground; released lets it charge.
+                let u = if trig == 1 { 0.0 } else { *v_supply };
+                let diff = u - *v_cap;
+                if diff * vd_gain[state] < -0.6 {
+                    // The clamp diode conducts, holding the output at its drop.
+                    let mut d = u + 0.6 - *v_cap;
+                    d -= d * exp_low[trig];
+                    *v_cap += d;
+                    if modu == 1 { 0.0 } else { -0.6 }
+                } else {
+                    let mut d = diff;
+                    d -= d * exp_high[state];
+                    *v_cap += d;
+                    if modu == 1 {
+                        0.0
+                    } else {
+                        (u - *v_cap) * gain[trig]
+                    }
+                }
+            }
             NodeKind::InverterOsc {
                 three_stage,
                 v_supply,
@@ -792,6 +864,7 @@ impl NodeKind {
                 *v_cap = 0.0;
                 *v_mid_prev = 0.0;
             }
+            NodeKind::RcDiscModulated { v_cap, .. } => *v_cap = 0.0,
             NodeKind::Custom { comp, .. } => comp.reset(),
             NodeKind::Constant { .. }
             | NodeKind::Gain { .. }
@@ -863,6 +936,7 @@ impl NodeKind {
                 w.write_f64_le(*v_cap);
                 w.write_f64_le(*v_mid_prev);
             }
+            NodeKind::RcDiscModulated { v_cap, .. } => w.write_f64_le(*v_cap),
             NodeKind::Custom { comp, .. } => comp.save_state(w),
             NodeKind::Constant { .. }
             | NodeKind::Gain { .. }
@@ -934,6 +1008,7 @@ impl NodeKind {
                 *v_cap = r.read_f64_le()?;
                 *v_mid_prev = r.read_f64_le()?;
             }
+            NodeKind::RcDiscModulated { v_cap, .. } => *v_cap = r.read_f64_le()?,
             NodeKind::Custom { comp, .. } => comp.load_state(r)?,
             NodeKind::Constant { .. }
             | NodeKind::Gain { .. }

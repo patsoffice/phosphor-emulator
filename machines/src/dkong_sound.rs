@@ -65,48 +65,58 @@ const DAC_LP_Q: f64 = 0.74;
 /// The DAC's signal-decay network: 10 kΩ across 10 µF, so a sample fades with
 /// τ = 100 ms once the sound CPU drops its decay line.
 const DAC_DECAY_S: f64 = 10_000.0 * 10e-6;
-// Walk, fitted against a MAME capture of the effect triggered once
-// (`drive_dkong_single.lua` with DK_EFFECT=walk) against `sndcmp capture
-// dkong/walk`:
+// Walk, against a single trigger (`drive_dkong_single.lua` with DK_EFFECT=walk
+// vs `sndcmp capture dkong/walk`). "before" is the fitted model this replaced:
 //
-//                  original      now      reference
-//   AC RMS        -28.33 dB   -38.75 dB   -38.42 dB
-//   decay T20        0.733 s     0.060 s     0.055 s
-//   decay T40           n/a      0.120 s     0.120 s
-//   centroid        512.6 Hz    419.7 Hz    403.0 Hz
-//   rolloff 85%         n/a     559.9 Hz    585.9 Hz
-//   band 400-1000       n/a       47.1 %      45.9 %
+//                     before        now      reference
+//   AC RMS         -38.75 dB  -38.43 dB      -38.42 dB
+//   decay T20         0.060 s    0.055 s        0.055 s
+//   decay T40         0.120 s    0.110 s        0.120 s
+//   centroid        419.7 Hz   470.8 Hz       403.0 Hz
+//   band 0-150          2.2 %     14.3 %         15.5 %
+//   band 150-400       50.0 %     21.2 %         36.9 %
+//   band 400-1000      47.1 %     61.0 %         45.9 %
+//   STFT distance       6.153      6.249              —
 //
-// The "fundamental" is not quoted because it stopped meaning anything once the
-// wobble was right: the voice alternates between two pitches rather than
-// holding one, so a single-peak estimator reports whichever of them happens to
-// dominate. It reads 286 Hz here against the reference's 338, and both are
-// picking a different tone out of the same 280/440 pair.
+// THE POINT OF THE CHANGE, and it worked: sub-150 Hz went from 13 points out to
+// 1. That gap had stood as `…-dkong-walk-not-sustained-4q42` on the grounds
+// that "the board's footstep has low-frequency content this model has no source
+// for" — correct, and the source is that the oscillator CHOPS the envelope
+// rather than multiplying it. A one-sided pulse train has that content and a
+// symmetric product does not, which is why no filter corner ever produced it.
+// The decay is exact at T20 now that it comes from the network instead of a
+// fitted 24 ms.
 //
-// The corner stays where the schematic-derived model had it. Dropping it to
-// 460 Hz to chase the centroid moved that number by 11 Hz, because what
-// dominates it is the oscillator's pitch rather than the filter, and a corner
-// below the fundamental only attenuates the note.
+// AND IT COST SOMETHING. The mid/high balance went the other way: 150-400 Hz is
+// now 16 points low and 400-1000 Hz 15 points high, where the old model had the
+// upper band nearly right. The overall STFT distance is unchanged within noise
+// (6.15 to 6.25). So this is a trade, not a clean win.
 //
-// What is left is one distribution difference, and it is the whole of the
-// remaining distance: the reference puts 15 % of its energy below 150 Hz where
-// this puts 2 %. The board's footstep has low-frequency content this model has
-// no source for, and no filter corner produces it because there is nothing to
-// filter. Structural, so recorded rather than tuned; see
-// `…-dkong-walk-not-sustained-4q42`. Above that the two now agree closely —
-// 400-1000 Hz lands within 1.2 points, and the decay matches to the
-// millisecond at T40.
-const WALK_LP_HZ: f64 = 700.0;
-/// Re-fitted after the envelope changed: a decaying footstep carries far less
-/// energy than the sustained tone this used to be, so the level had to come up
-/// by ~12 dB to match the same reference.
-///
-/// Raised again by 5.4 dB when the mixer's own low-pass and the amplifier's
-/// high-passes were added below it. Only the level moved — the centroid landed
-/// on the reference's (400.6 Hz against 403.0) without touching `WALK_LP_HZ`,
-/// which is the sign that the new stage belongs where it was put rather than
-/// duplicating this one.
-const WALK_GAIN: f64 = 1.072;
+// It is kept because of WHICH side of the trade is structural. The old model's
+// upper band was right because a 700 Hz low-pass had been fitted to make it
+// right, and that filter has no counterpart on the board — it was standing in
+// for this stage. Putting one back would be re-fitting the same compensation
+// over a mechanism that is now present, which is the failure this file has hit
+// three times. The brightness is a narrower question than the one just closed:
+// the pulses are probably too sharp, since nothing here models the finite edges
+// of the 555 or the switching, and our square is hard where the board's is
+// band-limited. Worth a node dump of the walk chain before touching anything.
+/// Walk's envelope network: the latch drives 3.3 µF through 1 kΩ + 4.7 kΩ
+/// against 10 kΩ, with the 555 switching 1 kΩ across the last of those. The
+/// decay is ~26 ms while the square is low and ~22 ms while it is high, which is
+/// what the fitted 24 ms was averaging over.
+const WALK_ENV_R1: f64 = 1_000.0;
+const WALK_ENV_R2: f64 = 4_700.0;
+const WALK_ENV_R3: f64 = 1_000.0;
+const WALK_ENV_R4: f64 = 10_000.0;
+const WALK_ENV_C: f64 = 3.3e-6;
+/// Output divider, the tap halfway along the coupling network's 5.6 kΩ + 5.6 kΩ.
+const WALK_DIVIDER: f64 = 0.5;
+/// Output calibration, the only scalar in this chain that is not a component
+/// value. Re-derived when the envelope became the board's network — the old
+/// figure was calibrated against a model whose envelope multiplied rather than
+/// chopped, and which passed a filter that is not on the board.
+const WALK_GAIN: f64 = 0.491;
 // Walk control voltage, derived from the board's CV network rather than fitted.
 // Three currents meet at the 555's CV pin and charge a 3.3 µF cap: a fixed one
 // through the chip's own 5 kΩ divider, one through 1 kΩ + 10 kΩ gated by the
@@ -150,11 +160,6 @@ const WALK_LFO_C: f64 = 10e-6;
 /// board measures a CV swinging 3.35 to 4.12 V, against the 3.745 ± 0.450 the
 /// network implies before the slew — the cross-check that the depth and the
 /// slew are both right.
-/// Walk footstep decay. The reference falls 20 dB in 55 ms, so τ ≈ 55 ms / ln(10).
-const WALK_TAU: f64 = 0.024;
-/// How long one footstep runs before it is cut off — many time constants, so the
-/// envelope decays away on its own rather than being truncated.
-const WALK_HOLD_S: f64 = 0.4;
 // Jump, against a single trigger (`drive_dkong_single.lua` with DK_EFFECT=jump
 // vs `sndcmp capture dkong/jump`). "before" is the previous committed model:
 //
@@ -473,85 +478,15 @@ impl CustomComponent for DkongEdgePulse {
     }
 }
 
-/// One-shot exponential decay, triggered on the rising edge of its enable and
-/// cut off after `hold`.
-///
-/// Shared by walk and jump, which differ only in their constants: walk is a
-/// 24 ms footstep driving amplitude alone, jump a 360 ms decay driving both the
-/// 555 control voltage (`1 + 3·env`, so the pitch sweeps up as it decays) and
-/// the amplitude. Envelope shaping only — the oscillator is the
-/// [`ne555_astable`](phosphor_core::device::DiscreteCircuitBuilder::ne555_astable)
-/// node. Input: `[enable]`.
-struct DkongOneShotEnv {
-    /// Amplitude decay time constant, seconds.
-    tau: f64,
-    /// How long the envelope runs before it is cut off, seconds.
-    hold: f64,
-    /// Retrigger on *either* edge rather than only the rising one.
-    ///
-    /// Walk needs this; jump does not. The game pulses the walk line for 3
-    /// frames every 12 while Mario moves, and the board sounds on both edges of
-    /// that pulse at two different pitches — so each step is a note at 0 ms and
-    /// another 50 ms later, repeating every 200 ms. That is the alternating
-    /// two-tone footstep. Triggering on the rising edge alone gives a single
-    /// repeated tone, which is audibly wrong however well its pitch is fitted.
-    both_edges: bool,
-    /// Amplitude of a falling-edge trigger relative to a rising one. The two
-    /// notes are not a matched pair. Only meaningful with `both_edges`.
-    falling_scale: f64,
-    /// Which edge started the envelope currently running.
-    on_falling: bool,
-    active: bool,
-    timer: f64,
-    last_en: bool,
-}
-
-impl CustomComponent for DkongOneShotEnv {
-    fn reset(&mut self) {
-        self.active = false;
-        self.timer = 0.0;
-        self.last_en = false;
-    }
-    fn step(&mut self, inputs: &[f64], dt: f64) -> f64 {
-        let en = inputs[0] > 0.5;
-        let triggered = if self.both_edges {
-            en != self.last_en
-        } else {
-            en && !self.last_en
-        };
-        if triggered {
-            self.active = true;
-            self.timer = 0.0;
-            self.on_falling = !en;
-        }
-        self.last_en = en;
-        if !self.active {
-            return 0.0;
-        }
-        self.timer += dt;
-        if self.timer > self.hold {
-            self.active = false;
-            return 0.0;
-        }
-        let scale = if self.on_falling {
-            self.falling_scale
-        } else {
-            1.0
-        };
-        scale * (-self.timer / self.tau).exp()
-    }
-    fn save_state(&self, w: &mut StateWriter) {
-        w.write_bool(self.active);
-        w.write_f64_le(self.timer);
-        w.write_bool(self.last_en);
-    }
-    fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
-        self.active = r.read_bool()?;
-        self.timer = r.read_f64_le()?;
-        self.last_en = r.read_bool()?;
-        Ok(())
-    }
-}
+// The one-shot exponential envelope that used to shape walk and jump is gone.
+// Both voices now get their envelopes from the networks the board uses — jump
+// from a diode-mixed lid, walk from the modulated RC discharge the 555 chops.
+//
+// It carried a `both_edges` flag for walk, because the board audibly sounds on
+// the release as well as the assert and a rising-edge one-shot gave a single
+// repeated tone. That behaviour was real and is now a consequence rather than a
+// flag: walk's capacitor discharges the other way on release, so the second
+// pulse comes out of the same network as the first.
 
 // ---------------------------------------------------------------------------
 // Circuit + wrapper
@@ -657,36 +592,51 @@ fn build_circuit() -> (DiscreteCircuit, DkongInputs) {
         OUT_HIGH,
         Output555::Square,
     );
-    let walk_ac = b.rc_high_pass("WALK_AC", walk_555, AC_R, AC_C);
-    // Walk is a footstep — one thump per assertion, not a tone that runs for as
-    // long as the latch bit is held. Measured against a reference that holds the
-    // bit for two full seconds, the board sounds for about half of one and
-    // decays 20 dB in 55 ms; gating a free-running oscillator by the level
-    // instead gave a 733 ms drone 10 dB too loud. So the enable triggers a
-    // one-shot envelope, exactly as jump's does.
-    let walk_env = b.custom(
+    // Walk's envelope is not a multiply. The oscillator CHOPS it.
+    //
+    // The latch drives a capacitor through 1 kΩ + 4.7 kΩ against 10 kΩ, and the
+    // output is the voltage still across that network — a decaying envelope,
+    // starting near 3.2 V and falling with roughly a 26 ms time constant. The
+    // 555 is wired into the same stage's second input, where it does two things:
+    // it switches 1 kΩ across the 10 kΩ, so the envelope decays faster while the
+    // square is high, and it forces the output to zero for the whole of that
+    // high phase.
+    //
+    // So a footstep is a train of ONE-SIDED pulses, present only in the square's
+    // low 27 %, not a symmetric tone under an envelope. That distinction is the
+    // whole of `…-dkong-walk-not-sustained-4q42`: a one-sided train carries
+    // substantial low-frequency energy and a symmetric product carries almost
+    // none, which is why this voice had 2 % of its energy below 150 Hz against
+    // the board's 15 % and no filter corner could produce the difference.
+    //
+    // This replaces a one-shot exponential multiplied into an AC-coupled square,
+    // and with it `WALK_LP_HZ` — a 700 Hz low-pass with no counterpart on the
+    // board, fitted to stand in for what this stage does. Both its decay
+    // (WALK_TAU, fitted at 24 ms against the ~26 ms the network gives) and its
+    // two-edge behaviour now fall out of the components: the release edge
+    // produces its own pulse because the capacitor discharges the other way.
+    // The latch reaches this stage through an inverter, so an asserted latch
+    // *releases* the network to charge. Driving it the other way round holds the
+    // capacitor at ground and the voice is silent — which is exactly what
+    // happens if you wire the raw latch bit in.
+    let walk_en_low = b.gain("WALK_EN_LOW", walk_en, -1.0);
+    let walk_one = b.constant("WALK_ONE", 1.0);
+    let walk_trig = b.add("WALK_TRIG", &[walk_one, walk_en_low]);
+    let walk_env = b.rc_disc_modulated(
         "WALK_ENV",
-        vec![walk_en.into()],
-        Box::new(DkongOneShotEnv {
-            tau: WALK_TAU,
-            both_edges: false,
-            falling_scale: 1.0,
-            on_falling: false,
-            hold: WALK_HOLD_S,
-            active: false,
-            timer: 0.0,
-            last_en: false,
-        }),
+        walk_trig,
+        walk_555,
+        WALK_ENV_R1,
+        WALK_ENV_R2,
+        WALK_ENV_R3,
+        WALK_ENV_R4,
+        WALK_ENV_C,
+        VCC,
     );
-    let walk_gated = b.multiply("WALK_GATED", walk_ac, walk_env);
-    let walk_lp = b.second_order(
-        "WALK_LP",
-        walk_gated,
-        FilterMode::LowPass,
-        WALK_LP_HZ,
-        0.707,
-    );
-    let walk = b.gain("WALK_OUT", walk_lp, WALK_GAIN);
+    // Coupling into the board mixer: 5.6 kΩ + 5.6 kΩ against 4.7 µF, then the
+    // divider tap halfway along it.
+    let walk_ac = b.rc_high_pass("WALK_AC", walk_env, AC_R, AC_C);
+    let walk = b.gain("WALK_OUT", walk_ac, WALK_GAIN * WALK_DIVIDER);
 
     // Jump's envelope is an asymmetric RC following the latch, not a one-shot.
     //

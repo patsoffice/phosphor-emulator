@@ -45,6 +45,16 @@ pub(crate) fn rc_charge_exp(ohms: f64, farads: f64, dt: f64) -> f64 {
     1.0 - (-dt / (ohms * farads)).exp()
 }
 
+/// `e^(−dt/τ)` — the fraction of the gap REMAINING after one step.
+///
+/// The complement of [`rc_charge_exp`], which is the fraction closed. Both are
+/// called "the exponent" in circuit code and they are not interchangeable:
+/// mixing them up moves a capacitor the whole way in one step instead of a
+/// sliver, which reads as a stage that has no time constant at all.
+pub(crate) fn rc_decay_exp(ohms: f64, farads: f64, dt: f64) -> f64 {
+    (-dt / (ohms * farads)).exp()
+}
+
 /// Solve a CMOS inverter's transfer curve from its datasheet voltages.
 ///
 /// The curve is `v_supply · exp(-a·(x/v_supply)^b)`, a monotonically decreasing

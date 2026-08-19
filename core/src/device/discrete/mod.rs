@@ -744,6 +744,66 @@ impl DiscreteCircuitBuilder {
         )
     }
 
+    /// Logic-triggered RC discharge, gated and modulated by a second input
+    /// (port of `dst_rcdisc_mod`). `trigger_src` pulls the network to ground
+    /// while asserted and releases it to charge toward `v_supply`; the output is
+    /// the voltage still across the charging resistor, so it is a decaying
+    /// envelope. `modulator_src` switches `r3` in and out — changing the decay
+    /// rate — and chops the output to zero whenever it is above 0.6 V.
+    ///
+    /// The chopping is the part worth understanding. Feeding an oscillator into
+    /// `modulator_src` does NOT give the same result as multiplying that
+    /// oscillator by an envelope: the output is a train of one-sided pulses,
+    /// present only in the oscillator's low phase, and a one-sided train carries
+    /// far more low-frequency energy than the symmetric product does.
+    ///
+    /// Tie `modulator_src` to a constant 0 and it degenerates into a fixed-width
+    /// pulse from the trigger edge, whose width depends on the resistor network
+    /// rather than on how long the trigger is held.
+    #[allow(clippy::too_many_arguments)]
+    pub fn rc_disc_modulated(
+        &mut self,
+        name: &str,
+        trigger_src: impl Into<NodeId>,
+        modulator_src: impl Into<NodeId>,
+        r1: f64,
+        r2: f64,
+        r3: f64,
+        r4: f64,
+        c: f64,
+        v_supply: f64,
+    ) -> NodeId {
+        let dt = 1.0 / self.sim_rate as f64;
+        // The trigger switches r1 in or out; the modulator switches r3 across r4.
+        let rc = [(r1 + r2).max(1.0), r2.max(1.0)];
+        let rc2 = [r4, r3 * r4 / (r3 + r4)];
+        let mut exp_high = [0.0; 4];
+        let mut vd_gain = [0.0; 4];
+        for m in 0..2 {
+            for t in 0..2 {
+                exp_high[(m << 1) | t] = derive::rc_decay_exp(rc[t] + rc2[m], c, dt);
+                vd_gain[(m << 1) | t] = rc2[m] / (rc[t] + rc2[m]);
+            }
+        }
+        self.push_node(
+            name,
+            NodeKind::RcDiscModulated {
+                trigger_src: trigger_src.into(),
+                modulator_src: modulator_src.into(),
+                v_supply,
+                exp_high,
+                vd_gain,
+                exp_low: [
+                    derive::rc_decay_exp(rc[0], c, dt),
+                    derive::rc_decay_exp(rc[1], c, dt),
+                ],
+                gain: [r4 / (rc[0] + r4), r4 / (rc[1] + r4)],
+                v_cap: 0.0,
+            },
+            ClockDomain::BoardCycle,
+        )
+    }
+
     /// CMOS inverter relaxation oscillator from component values: a ring of
     /// inverters with timing resistor `r` (ohms) and capacitor `c` (farads), and
     /// a bias resistor `r_bias` (ohms) limiting current through the input's
