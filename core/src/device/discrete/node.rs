@@ -83,6 +83,8 @@ pub(crate) enum NodeKind {
     Multiply { a: NodeId, b: NodeId },
     /// `src` clamped to `[lo, hi]`.
     Clamp { src: NodeId, lo: f64, hi: f64 },
+    /// Comparator: `1.0` while `src` exceeds `level`, else `0.0`.
+    Threshold { src: NodeId, level: f64 },
 
     // --- Analog approximations ---
     /// One-pole RC low-pass tracking `src`, time constant `tau` (seconds).
@@ -326,6 +328,7 @@ impl NodeKind {
             NodeKind::EdgeDetector { src, .. }
             | NodeKind::Gain { src, .. }
             | NodeKind::Clamp { src, .. }
+            | NodeKind::Threshold { src, .. }
             | NodeKind::RcLowPass { src, .. }
             | NodeKind::RcHighPass { src, .. }
             | NodeKind::RcEnvelope { src, .. }
@@ -459,6 +462,13 @@ impl NodeKind {
             NodeKind::Add { srcs } => srcs.iter().map(|s| values[s.index()]).sum(),
             NodeKind::Multiply { a, b } => values[a.index()] * values[b.index()],
             NodeKind::Clamp { src, lo, hi } => values[src.index()].clamp(*lo, *hi),
+            NodeKind::Threshold { src, level } => {
+                if values[src.index()] > *level {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
 
             NodeKind::RcLowPass { src, tau, y } => {
                 let x = values[src.index()];
@@ -896,6 +906,7 @@ impl NodeKind {
             | NodeKind::Add { .. }
             | NodeKind::Multiply { .. }
             | NodeKind::Clamp { .. }
+            | NodeKind::Threshold { .. }
             | NodeKind::ResistorMixer { .. }
             | NodeKind::DiodeMixer { .. }
             | NodeKind::DacLadder { .. } => {}
@@ -968,6 +979,7 @@ impl NodeKind {
             | NodeKind::Add { .. }
             | NodeKind::Multiply { .. }
             | NodeKind::Clamp { .. }
+            | NodeKind::Threshold { .. }
             | NodeKind::ResistorMixer { .. }
             | NodeKind::DiodeMixer { .. }
             | NodeKind::DacLadder { .. } => {}
@@ -1040,6 +1052,7 @@ impl NodeKind {
             | NodeKind::Add { .. }
             | NodeKind::Multiply { .. }
             | NodeKind::Clamp { .. }
+            | NodeKind::Threshold { .. }
             | NodeKind::ResistorMixer { .. }
             | NodeKind::DiodeMixer { .. }
             | NodeKind::DacLadder { .. } => {}

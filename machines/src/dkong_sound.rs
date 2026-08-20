@@ -34,9 +34,8 @@
 use phosphor_core::core::debug::{DebugRegister, Debuggable};
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::device::{
-    CmosInverter, CustomComponent, DiscreteCircuit, DiscreteCircuitBuilder, ExternalSourceId,
-    FilterMode, InverterOsc, LfsrOutput, LfsrShift, LfsrSpec, LogicInputId, NodeId, Output555,
-    OutputGain,
+    CmosInverter, DiscreteCircuit, DiscreteCircuitBuilder, ExternalSourceId, FilterMode,
+    InverterOsc, LfsrOutput, LfsrShift, LfsrSpec, LogicInputId, NodeId, Output555, OutputGain,
 };
 
 /// Output sample rate. The circuit is built board = sim = output = this rate, so
@@ -393,26 +392,33 @@ const JUMP_DIVIDER: f64 = 5.1 / 7.1;
 /// The lid charges toward the 5 V supply, which is above the 555's high — so at
 /// rest it closes over the oscillator completely.
 const JUMP_LID_REST_V: f64 = VCC;
-/// Conditioned trigger width, measured on the board at 28.4 ms. Shared with
-/// stomp, whose differentiator is the same three parts.
-///
-/// The mechanism is not in doubt: the latch edge is differentiated by 1 µF
-/// through 10 kΩ into another 10 kΩ and a comparator passes the decaying spike
-/// while it stays above its reference, which is why the note's length does not
-/// depend on how long the game holds the line. The arithmetic is what does not
-/// resolve. Reading the relaxation as τ = 20 ms, the spike as starting at half
-/// the cap's 4.4 V swing, and the reference as 0.6 V gives 20·ln(2.2/0.6) =
-/// 26.0 ms — 9 % short, and any one of the three terms would account for it
-/// alone (a 2.48 V start, a 0.53 V reference, or a 21.8 ms relaxation).
-///
-/// So this is measured rather than computed, and deliberately: picking one of
-/// the three to bend would look derived while being a guess. The envelope's dip
-/// time constant either side of it needs no such apology — the board measures
-/// 46.83 ms against the 47.0 that 10 kΩ and 4.7 µF give.
-///
-/// Logging the differentiator and comparator nodes would settle which term is
-/// wrong in one measurement; see `…-0fbi`.
-const JUMP_TRIG_S: f64 = 0.0284;
+// The conditioned trigger, shared by jump and stomp — the same three parts in
+// both, so the same behaviour. 1 µF differentiates the latch edge through 10 kΩ
+// into another 10 kΩ, and a comparator passes the decaying spike while it stays
+// above 0.6 V.
+//
+// This spent a while as a fixed 28.4 ms one-shot, measured off the board because
+// the derivation came out 9 % short and three terms could each have accounted
+// for it. Logging the differentiator and its comparator settled it in one
+// measurement: relaxation 20.00 ms against the modelled 20.00, reference
+// 0.5994 V against 0.60 — both exactly right — and the spike starting at
+// 2.4974 V where the model assumed 2.20. The capacitor sits DISCHARGED while the
+// latch is idle, not at the 0.6 V clamp, so asserting releases it from 0 and the
+// divider tap starts at half the supply.
+//
+// 20 ms · ln(2.5/0.6) = 28.5 ms, and the board measures 28.52.
+//
+// One consequence the fixed one-shot could never express: the width is not
+// strictly independent of the game's pulse. It depends on where the capacitor
+// sits when the edge arrives, so a re-trigger before it has settled gives a
+// shorter note. Building the network gets that for nothing.
+const TRIG_R1: f64 = 10_000.0;
+const TRIG_R2: f64 = 0.0;
+const TRIG_R3: f64 = 0.0;
+const TRIG_R4: f64 = 10_000.0;
+const TRIG_C: f64 = 1e-6;
+/// The comparator's reference, measured at 0.5994 V on the board.
+const TRIG_THRESHOLD_V: f64 = 0.6;
 /// How fast the jump's lid is pulled down when the latch asserts: 10 kΩ into
 /// 4.7 µF. The fast half of the asymmetry — a jump snaps open.
 const JUMP_ENV_DIP_S: f64 = 0.047;
@@ -420,64 +426,17 @@ const JUMP_ENV_DIP_S: f64 = 0.047;
 /// half — and closing over the oscillator is what ends the note.
 const JUMP_ENV_RECOVER_S: f64 = 0.517;
 
-// ---------------------------------------------------------------------------
-// Effect components (custom escape hatch)
-// ---------------------------------------------------------------------------
-
-/// Fixed-width pulse on the rising edge of its input, regardless of how long the
-/// input stays asserted.
-///
-/// Models the board's trigger conditioner: the latch edge is differentiated by a
-/// 1 µF cap into 10 kΩ, and a comparator passes the resulting spike while it
-/// stays above 0.6 V. Since the spike decays with a 10 ms time constant from
-/// roughly the supply, that is about 21 ms — and crucially it does not depend on
-/// the latch pulse width, so a game that holds the line longer does not get a
-/// longer envelope.
-///
-/// Without this the envelope followed the latch directly, which tied the note's
-/// length to a pulse width the circuit deliberately discards.
-struct DkongEdgePulse {
-    width: f64,
-    timer: f64,
-    active: bool,
-    last_en: bool,
-}
-
-impl CustomComponent for DkongEdgePulse {
-    fn reset(&mut self) {
-        self.timer = 0.0;
-        self.active = false;
-        self.last_en = false;
-    }
-    fn step(&mut self, inputs: &[f64], dt: f64) -> f64 {
-        let en = inputs[0] > 0.5;
-        if en && !self.last_en {
-            self.active = true;
-            self.timer = 0.0;
-        }
-        self.last_en = en;
-        if !self.active {
-            return 0.0;
-        }
-        self.timer += dt;
-        if self.timer > self.width {
-            self.active = false;
-            return 0.0;
-        }
-        1.0
-    }
-    fn save_state(&self, w: &mut StateWriter) {
-        w.write_f64_le(self.timer);
-        w.write_bool(self.active);
-        w.write_bool(self.last_en);
-    }
-    fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
-        self.timer = r.read_f64_le()?;
-        self.active = r.read_bool()?;
-        self.last_en = r.read_bool()?;
-        Ok(())
-    }
-}
+// This file no longer holds any custom components. Every stage that used to
+// need one — a fixed-width trigger pulse, a one-shot exponential envelope, a
+// noise burst — turned out to be a network the board already describes, and each
+// is now built from its parts in the discrete framework instead.
+//
+// The trigger is the clearest case. It was a one-shot whose width was first
+// derived (26 ms, 9 % short), then measured (28.4 ms) because the derivation
+// could not be resolved. Modelling the differentiator and its comparator gives
+// 28.5 ms against the board's 28.52, and gives it as a consequence rather than a
+// number — including that the width depends on where the capacitor sits when the
+// edge arrives, which no fixed-width component could express.
 
 // The one-shot exponential envelope that used to shape walk and jump is gone.
 // Both voices now get their envelopes from the networks the board uses — jump
@@ -651,18 +610,43 @@ fn build_circuit() -> (DiscreteCircuit, DkongInputs) {
     // board's while losing the fast attack entirely. Following the latch through
     // an asymmetric RC needs no one-shot at all, because the latch pulse *is*
     // the trigger — which is also what the board does.
-    // The envelope is driven by the conditioned trigger, not the latch: a fixed
-    // ~21 ms pulse from the edge, whatever the game's pulse width.
-    let jump_trig = b.custom(
-        "JUMP_TRIG",
-        vec![jump_en.into()],
-        Box::new(DkongEdgePulse {
-            width: JUMP_TRIG_S,
-            timer: 0.0,
-            active: false,
-            last_en: false,
-        }),
+    // The envelope is driven by a conditioned trigger, not by the latch, and
+    // that trigger is the same network walk's envelope is — with its modulator
+    // grounded instead of fed by an oscillator.
+    //
+    // The latch edge is differentiated by 1 µF through 10 kΩ into another 10 kΩ,
+    // and a comparator passes the resulting spike while it stays above 0.6 V.
+    // Idle, the capacitor sits discharged; asserting releases it toward the
+    // supply and the divider tap starts at half of 5 V, so the spike begins at
+    // 2.5 V and the comparator holds for 20 ms · ln(2.5/0.6) ≈ 28.5 ms.
+    //
+    // This was a fixed 28.4 ms one-shot, measured off the board because the
+    // derivation came out 9 % short. The node dump found the wrong term: the
+    // spike starts at 2.50 V, not the 2.20 the model assumed, because the
+    // capacitor is at ~0 V when the latch asserts rather than at the 0.6 V clamp.
+    // Relaxation (20.00 ms) and reference (0.5994 V) were both exactly right.
+    //
+    // Worth knowing: the width is NOT strictly independent of the game's pulse
+    // after all. It depends on where the capacitor sits when the edge arrives,
+    // so a re-trigger before it has settled gives a shorter note. Building it
+    // from the network gets that for free, where a fixed-width one-shot never
+    // could.
+    let trig_gnd = b.constant("TRIG_GND", 0.0);
+    let jump_trig_low = b.gain("JUMP_TRIG_LOW", jump_en, -1.0);
+    let one = b.constant("TRIG_ONE", 1.0);
+    let jump_trig_n = b.add("JUMP_TRIG_N", &[one, jump_trig_low]);
+    let jump_spike = b.rc_disc_modulated(
+        "JUMP_SPIKE",
+        jump_trig_n,
+        trig_gnd,
+        TRIG_R1,
+        TRIG_R2,
+        TRIG_R3,
+        TRIG_R4,
+        TRIG_C,
+        VCC,
     );
+    let jump_trig = b.threshold("JUMP_TRIG", jump_spike, TRIG_THRESHOLD_V);
 
     // Target rests *above* the square's peak, not level with it.
     //
@@ -840,16 +824,22 @@ fn build_circuit() -> (DiscreteCircuit, DkongInputs) {
     // From here it is jump's chain, and mostly jump's values. The trigger is the
     // same differentiator into the same comparator (10 kΩ + 10 kΩ, 1 µF), so it
     // is the same ~26 ms pulse and equally indifferent to the latch's width.
-    let stomp_trig = b.custom(
-        "STOMP_TRIG",
-        vec![stomp_en.into()],
-        Box::new(DkongEdgePulse {
-            width: JUMP_TRIG_S,
-            timer: 0.0,
-            active: false,
-            last_en: false,
-        }),
+    // The same differentiator, to the resistor and the capacitor — so the same
+    // width, and it now comes from those parts rather than being asserted.
+    let stomp_trig_low = b.gain("STOMP_TRIG_LOW", stomp_en, -1.0);
+    let stomp_trig_n = b.add("STOMP_TRIG_N", &[one, stomp_trig_low]);
+    let stomp_spike = b.rc_disc_modulated(
+        "STOMP_SPIKE",
+        stomp_trig_n,
+        trig_gnd,
+        TRIG_R1,
+        TRIG_R2,
+        TRIG_R3,
+        TRIG_R4,
+        TRIG_C,
+        VCC,
     );
+    let stomp_trig = b.threshold("STOMP_TRIG", stomp_spike, TRIG_THRESHOLD_V);
     let stomp_lid_rest = b.constant("STOMP_LID_REST", JUMP_LID_REST_V);
     let stomp_lid_dip = b.gain("STOMP_LID_DIP", stomp_trig, -JUMP_LID_REST_V);
     let stomp_lid_target = b.add("STOMP_LID_TARGET", &[stomp_lid_rest, stomp_lid_dip]);

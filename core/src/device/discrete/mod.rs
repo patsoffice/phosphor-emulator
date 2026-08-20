@@ -812,6 +812,24 @@ impl DiscreteCircuitBuilder {
         )
     }
 
+    /// Comparator: `1.0` while `src` is above `level`, else `0.0`.
+    ///
+    /// The board shape this models is a decaying spike watched by a comparator,
+    /// which is how a latch write becomes a trigger of the circuit's own
+    /// choosing rather than the game's. The resulting width is not a constant —
+    /// it depends on how far the spike started above the reference, which in
+    /// turn depends on what the driving network was doing beforehand.
+    pub fn threshold(&mut self, name: &str, src: impl Into<NodeId>, level: f64) -> NodeId {
+        self.push_node(
+            name,
+            NodeKind::Threshold {
+                src: src.into(),
+                level,
+            },
+            ClockDomain::BoardCycle,
+        )
+    }
+
     /// Logic-triggered RC discharge, gated and modulated by a second input
     /// (port of `dst_rcdisc_mod`). `trigger_src` pulls the network to ground
     /// while asserted and releases it to charge toward `v_supply`; the output is
