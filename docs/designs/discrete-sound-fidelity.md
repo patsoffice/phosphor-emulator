@@ -645,6 +645,43 @@ structural. A fidelity project accumulates these; the danger is not making the
 trade, it is making it silently and then forgetting which numbers are load
 bearing.
 
+### What the second board taught immediately
+
+Galaxian's first comparison reported all three voices badly wrong: the melody an
+octave low, the hit an octave low, the fire's decay twice as long. One line
+explained every number. The `sndcmp` target converted output samples to device
+cycles with the board's *sound* clock (1.536 MHz, what the melody's note counter
+divides) where `GalaxianSound::tick` counts *main-CPU* cycles (3.072 MHz). Every
+Galaxian capture ran the board at half speed.
+
+**Both halves of an experiment need verifying, not just the reference.** The
+lesson above, prove the reference responds to its own timeline, was applied, and
+the reference was fine. Nothing asked the same question of our side. `sndcmp
+verify`'s two checks did not catch it and could not: the null check asks whether
+an untriggered window is silent and the sensitivity check whether a 30 ms shift
+changes the capture. Both are *relative*, and a board running at half speed
+passes both. The checks establish that the harness responds to the stimulus;
+they say nothing about the rate at which it does.
+
+**A unit-conversion constant belongs to whichever side owns the unit.** The
+device exported `SOUND_CLOCK` with a doc comment inviting a harness to use it for
+exactly this conversion, on the wrong constant, since `tick` counts CPU cycles.
+The harness took the invitation. `CPU_CLOCK_HZ` was right there, unexported.
+
+**A test that builds its subject from the expression under test proves nothing.**
+`a_second_of_samples_is_a_second_of_cpu_time` constructed a target with
+`SOUND_CLOCK / rate` and then checked the target's cycle accumulator did not
+drift, which it did not, at either clock. It now compares against the machine's
+own `TIMING.cpu_clock_hz`, which is the independent authority, and against the
+melody tap's schematic frequency, which is arithmetic off the netlist.
+
+The general form: **a spectral comparison cannot distinguish "the model is
+wrong" from "the model is being run wrong."** Before reading a first comparison
+as evidence about the circuit, confirm that a quantity computable from the
+schematic alone (a divider output, a counter tap) measures where the schematic
+puts it. Galaxian's melody offered exactly that, `SOUND_CLOCK/(256-pitch)/16` or
+1200 Hz at the pitch under test, and it was the first thing to check.
+
 ## Part 5 — Construction-time tuning
 
 A small construction-only API, in `phosphor_core::device::discrete::tuning`:

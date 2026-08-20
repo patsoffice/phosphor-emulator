@@ -44,11 +44,18 @@ use crate::device::discrete::{
 };
 
 /// Galaxian master clock is 18.432 MHz; the sound section runs at /6/2.
-/// The rate [`GalaxianSound::tick`] counts in. Public so a driver outside the
-/// board — a comparison harness, say — can work out how many cycles make one
-/// output sample without guessing.
+///
+/// This is the *internal* clock the melody's note counter divides
+/// (`SOUND_CLOCK / (256 - pitch)`). It is **not** the rate
+/// [`GalaxianSound::tick`] counts in; that is [`CPU_CLOCK_HZ`], which is twice
+/// this. Driving the device in these units runs the whole board at half speed,
+/// so every pitch, every filter corner and every decay comes out exactly an
+/// octave low and twice as long, which is what it did.
 pub const SOUND_CLOCK: f64 = 18_432_000.0 / 6.0 / 2.0; // 1.536 MHz
-/// Main-CPU clock; [`GalaxianSound::tick`] is driven in these cycles.
+/// Main-CPU clock, and the rate [`GalaxianSound::tick`] counts in: the board
+/// calls `tick(1)` once per Z80 cycle. Public so a driver outside the board,
+/// such as a comparison harness, can work out how many cycles make one output
+/// sample without guessing (or reaching for [`SOUND_CLOCK`]).
 pub const CPU_CLOCK_HZ: u64 = 3_072_000;
 /// Internal simulation rate. High enough for the few-kHz tones and the
 /// band-pass filters; the output is resampled down from here.

@@ -80,7 +80,9 @@ pub use discrete::{
 };
 pub use dvg::Dvg;
 pub use er2055::Er2055;
-pub use galaxian_sound::{GalaxianSound, SOUND_CLOCK as GALAXIAN_SOUND_CLOCK};
+pub use galaxian_sound::{
+    CPU_CLOCK_HZ as GALAXIAN_CPU_CLOCK, GalaxianSound, SOUND_CLOCK as GALAXIAN_SOUND_CLOCK,
+};
 pub use i8255::I8255;
 pub use i8257::I8257;
 pub use irobot_mathbox::IrobotMathbox;

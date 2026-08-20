@@ -11,7 +11,7 @@
 //! `verify-reference.sh`, but nothing has re-checked the values, and until
 //! something does they rest on the same footing Donkey Kong's jump did.
 
-use phosphor_core::device::{DiscreteCircuit, GALAXIAN_SOUND_CLOCK as SOUND_CLOCK, GalaxianSound};
+use phosphor_core::device::{DiscreteCircuit, GALAXIAN_CPU_CLOCK, GalaxianSound};
 
 use crate::scenario::Value;
 use crate::target::{ControlSpec, ProbeSpec, SoundTarget, TargetSpec};
@@ -93,20 +93,7 @@ fn create(probe: Option<&str>) -> Result<Box<dyn SoundTarget>, String> {
         let names: Vec<&str> = SPEC.probes.iter().map(|s| s.name).collect();
         return Err(format!("unknown probe {p:?}; known: {}", names.join(", ")));
     }
-    let device = GalaxianSound::new(phosphor_core::audio::host_sample_rate());
-    let rate = device.sample_rate() as f64;
-    Ok(Box::new(GalaxianTarget {
-        device,
-        probe: probe.map(str::to_string),
-        // The device counts main-CPU cycles, not samples, so one output sample
-        // is a fractional number of them. Carrying the remainder keeps the
-        // scenario's action times landing where they should rather than drifting
-        // by a cycle per sample.
-        cycles_per_sample: SOUND_CLOCK / rate,
-        cycles_owed: 0.0,
-        buf: vec![0i16; 8],
-        last: 0,
-    }))
+    Ok(Box::new(GalaxianTarget::new(probe)))
 }
 
 struct GalaxianTarget {
@@ -116,6 +103,33 @@ struct GalaxianTarget {
     cycles_owed: f64,
     buf: Vec<i16>,
     last: i16,
+}
+
+impl GalaxianTarget {
+    /// One construction site, so a test can hold a concrete target and check the
+    /// clock conversion rather than restating it.
+    fn new(probe: Option<&str>) -> Self {
+        let device = GalaxianSound::new(phosphor_core::audio::host_sample_rate());
+        let rate = device.sample_rate() as f64;
+        Self {
+            device,
+            probe: probe.map(str::to_string),
+            // The device counts main-CPU cycles, not samples, so one output
+            // sample is a fractional number of them. Carrying the remainder
+            // keeps the scenario's action times landing where they should
+            // rather than drifting by a cycle per sample.
+            //
+            // MAIN-CPU cycles, not the 1.536 MHz sound clock the melody counter
+            // divides. This read the sound clock, so every capture ran the board
+            // at half speed and every voice measured an octave low with its
+            // decay twice as long, which was the whole of what the first
+            // Galaxian comparison reported.
+            cycles_per_sample: GALAXIAN_CPU_CLOCK as f64 / rate,
+            cycles_owed: 0.0,
+            buf: vec![0i16; 8],
+            last: 0,
+        }
+    }
 }
 
 impl SoundTarget for GalaxianTarget {
@@ -204,6 +218,11 @@ fn probe_value(circuit: &DiscreteCircuit, probe: &str) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use phosphor_core::device::GALAXIAN_SOUND_CLOCK as SOUND_CLOCK;
+
+    fn new_target() -> GalaxianTarget {
+        GalaxianTarget::new(None)
+    }
 
     #[test]
     fn the_declared_controls_are_all_accepted() {
@@ -243,16 +262,8 @@ mod tests {
     /// that a second of samples really is a second of CPU time.
     #[test]
     fn a_second_of_samples_is_a_second_of_cpu_time() {
-        let device = GalaxianSound::new(phosphor_core::audio::host_sample_rate());
-        let rate = device.sample_rate() as f64;
-        let mut t = GalaxianTarget {
-            device,
-            probe: None,
-            cycles_per_sample: SOUND_CLOCK / rate,
-            cycles_owed: 0.0,
-            buf: vec![0i16; 8],
-            last: 0,
-        };
+        let mut t = new_target();
+        let rate = t.sample_rate() as f64;
         for _ in 0..(rate as usize) {
             t.step();
         }
@@ -262,6 +273,73 @@ mod tests {
             t.cycles_owed < 1.0,
             "cycle remainder ran away: {}",
             t.cycles_owed
+        );
+    }
+
+    /// The harness must advance the device at the rate the *board* advances it.
+    /// The board calls `sound.tick(1)` once per main-CPU cycle, so a second of
+    /// harness stepping owes the device a second of `TIMING.cpu_clock_hz`.
+    ///
+    /// This existed only in the form above, which built its target from the same
+    /// expression it was checking, so it passed while the harness was feeding
+    /// the 1.536 MHz sound clock instead of the 3.072 MHz CPU clock and running
+    /// every capture at half speed. Comparing against the machine's own timing
+    /// constant is what makes it an actual check rather than a restatement.
+    #[test]
+    fn the_harness_clocks_the_device_at_the_boards_rate() {
+        let t = new_target();
+        let per_second = t.cycles_per_sample * t.sample_rate() as f64;
+        let board = phosphor_machines::galaxian::TIMING.cpu_clock_hz as f64;
+        assert!(
+            (per_second - board).abs() < 1.0,
+            "harness runs the sound device at {per_second} Hz, board runs it at {board} Hz"
+        );
+    }
+
+    /// The melody's lowest tap is arithmetic off the schematic: the note clock
+    /// is `SOUND_CLOCK / (256 - pitch)` and QD divides it by 16, so at pitch
+    /// 0xB0 it is exactly 1200 Hz, and no part of that depends on the harness.
+    /// Measuring it through the harness therefore pins the harness's clock:
+    /// stepping the device too slowly halves this, which is exactly the error
+    /// that shipped.
+    #[test]
+    fn the_melody_tap_lands_on_its_schematic_frequency() {
+        let mut t = new_target();
+        t.set_control("pitch", Value::Number(0xB0 as f64)).unwrap();
+        t.set_control("vol1", Value::Bool(true)).unwrap();
+        t.set_control("vol2", Value::Bool(true)).unwrap();
+        t.probe = Some("melody".to_string());
+
+        let rate = t.sample_rate() as f64;
+        // Settle first: the probe reads a live node, and the first steps carry
+        // the circuit's power-on transient.
+        for _ in 0..(rate as usize / 10) {
+            t.step();
+        }
+        let samples: Vec<f64> = (0..(rate as usize / 4)).map(|_| t.step() as f64).collect();
+
+        // QA (4800 Hz) and QC (2400 Hz) are whole multiples of QD, so the summed
+        // waveform repeats at QD's 1200 Hz. Autocorrelation finds that period
+        // without being pulled to the faster taps the way zero crossings are.
+        let mean = samples.iter().sum::<f64>() / samples.len() as f64;
+        let ac: Vec<f64> = samples.iter().map(|s| s - mean).collect();
+        let lag_lo = (rate / 4000.0) as usize; // skip the trivial peak at 0
+        let lag_hi = (rate / 300.0) as usize;
+        let corr = |lag: usize| -> f64 {
+            ac[..ac.len() - lag]
+                .iter()
+                .zip(&ac[lag..])
+                .map(|(x, y)| x * y)
+                .sum::<f64>()
+        };
+        let best = (lag_lo..lag_hi)
+            .max_by(|&a, &b| corr(a).total_cmp(&corr(b)))
+            .unwrap();
+        let measured = rate / best as f64;
+        let expected = SOUND_CLOCK / (256.0 - 0xB0 as f64) / 16.0; // 1200 Hz
+        assert!(
+            (measured / expected - 1.0).abs() < 0.02,
+            "melody QD tap measured {measured:.1} Hz, schematic says {expected:.1} Hz"
         );
     }
 }
