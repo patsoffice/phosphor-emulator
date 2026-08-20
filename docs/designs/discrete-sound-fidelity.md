@@ -724,6 +724,46 @@ respond perfectly to its own timeline and still be reporting its own
 discretisation, and a residual that shrinks when you refine the reference was
 never the model's.
 
+### Establish that a metric is stable before drawing anything from it
+
+Donkey Kong's walk produced four different conclusions from one set of captures,
+in both directions, across two sessions. None of them came from new evidence.
+The cause was not any single mistake but a property of the measurement: **on a
+transient effect, a band share is not stable enough to compare.**
+
+The walk is a thump that is over in about 40 ms. Measured from each side's own
+onset over three windows differing by 10 ms of start or 50 ms of length, the
+150-400 Hz delta swung about five points and changed sign twice, on our capture
+and the board's alike. Every reading of it, favourable and unfavourable, was
+noise dressed as a finding.
+
+What stayed stable was **crest factor**, which describes pulse structure and
+cannot be faked by a gain or a filter: it ordered the three builds identically
+in every window. Full-window band shares were also stable, because averaging
+over the whole decay is what removes the sensitivity.
+
+So, before a number becomes evidence: **move the window and see if the number
+moves.** Two offsets and one length change take a minute and would have saved
+this issue twice over. A metric that is not reproducible under that test does
+not become reproducible by being measured more carefully.
+
+Four specific traps, each of which cost real time here:
+
+- **A `sndcmp capture` output is already the analysis window.** Re-ranging it
+  shifts the span. This produced a comparison of the board from its assert
+  against ours from 50 ms before ours, and a confident wrong retraction.
+- **Never align a decaying effect by cross-correlation.** The aligner slid the
+  board 528 samples, 12 ms, on a 40 ms thump, and cheerfully compared our attack
+  against its tail. Align each side on its own onset and check the tool reports
+  the same onset and an envelope alignment near zero.
+- **Exclude post-decay silence from an STFT comparison.** Our output is
+  digitally silent after a one-shot; a reference has a noise floor. A
+  log-magnitude distance over three seconds of that reported 12.3 where the
+  driven span alone reports 1.3, and it was read as a real defect.
+- **A centroid shift through a filter is not a filter comparison.** The same
+  filter produces different centroid shifts on two different input spectra. To
+  compare two chains, measure each one's own input-to-output magnitude ratio.
+
 ## Part 5 — Construction-time tuning
 
 > **NOT BUILT, and deliberately so.** Parts 5 and 6 describe a fitting loop, and
@@ -971,6 +1011,8 @@ scalar tuning is the wrong response:
 | No exposed parameter materially improves the score | Missing/wrong structure, or a wrong reference procedure |
 | Best fit needs out-of-tolerance schematic values | Structural mismatch compensated by a scalar |
 | One effect improves while another sharing the path degrades | Overfit, or wrong shared topology |
+| A metric changes sign when the window moves by a few ms | The metric, not the model. Establish stability before believing it |
+| STFT large while every band agrees | Compare the driven span only; post-decay silence against a noise floor dominates a log-magnitude distance |
 | Excess or shortfall confined to the top octave, on a voice with fast edges | Check the reference's simulation rate before the model |
 | Residual shrinks when the reference is re-simulated at a higher rate | The reference's discretisation, not a model error |
 | Every voice on one board is out by the same exact factor | A clock or divider feeding the whole device, including the harness's |
