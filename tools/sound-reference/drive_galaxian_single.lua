@@ -13,8 +13,20 @@
 -- Select the voice with GAL_EFFECT: melody, fire, hit.
 --
 --   GAL_EFFECT=fire mame galaxian -rompath <roms> -nothrottle -seconds_to_run 4 \
---        -video none -autoboot_script tools/sound-reference/drive_galaxian_single.lua \
---        -wavwrite /tmp/gal_fire_ref.wav
+--        -video none -samplerate 192000 \
+--        -autoboot_script tools/sound-reference/drive_galaxian_single.lua \
+--        -wavwrite /tmp/gal_fire_ref192.wav
+--   ffmpeg -i /tmp/gal_fire_ref192.wav -af aresample=44100:resampler=soxr \
+--        /tmp/gal_fire_ref.wav
+--
+-- CAPTURE AT 192 kHz AND RESAMPLE. That is not a quality preference. The
+-- discrete engine simulates the netlist at the audio sample rate, so at the
+-- 48 kHz default this board's 555 squares have their edges quantised to 20.8 us
+-- and the capture carries broadband hash the circuit does not produce. Measured
+-- at matched bandwidth, moving the simulation from 48 kHz to 192 kHz drops
+-- fire's energy above 8 kHz from 46.4 % to 39.1 % and its spectral flatness
+-- from 0.62 to 0.37. Two Galaxian voices were written up as having residuals
+-- that were entirely this. Do not compare against a 48 kHz capture.
 --
 -- Then compare against the Phosphor side. `sndcmp capture` writes only the
 -- scenario's analysis window, so trim the reference to the same span:

@@ -40,6 +40,26 @@ MACHINE=$1; shift
 
 MAME=${MAME:-mame}
 ROMS=${ROMS:-$HOME/ws/mame-runtime/roms}
+
+# The discrete engine simulates the netlist at the AUDIO SAMPLE RATE, so the
+# capture rate is also the simulation rate. At the 48 kHz default a few-kHz 555
+# square has its edges quantised to 20.8 us, and the capture carries broadband
+# hash the circuit does not produce: for Galaxian's fire that was 7 points of
+# energy above 8 kHz and a spectral flatness of 0.62 against 0.37.
+#
+# Two Galaxian "residuals" were nothing but this, and one of them nearly bought
+# a rebuild of a noise source that turned out to be correct. So capture high and
+# band-limit afterwards, rather than comparing at 48 kHz.
+#
+# Prepended, so a caller passing its own -samplerate still wins.
+#
+# Unlike the two checks below this is PREVENTED rather than detected. Detecting
+# it means resampling one capture to another's bandwidth and comparing band
+# energies, which needs a resampler and an FFT; this script deliberately depends
+# on nothing but python3's standard library. Note also that raising the rate
+# raises the capture BANDWIDTH as well as the simulation rate, so a naive
+# compare-at-two-rates check measures mostly the bandwidth change.
+SIM_RATE=${SND_SIM_RATE:-192000}
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
@@ -49,12 +69,13 @@ run() { # $1 = SND_VERIFY value ("" for the real schedule), $2 = output wav,
   local out=$1; shift
   SND_VERIFY=$mode "$MAME" "$MACHINE" \
     -rompath "$ROMS" -nothrottle -video none -sound none \
+    -samplerate "$SIM_RATE" \
     -cfg_directory "$WORK/cfg" -snapshot_directory "$WORK/snap" \
     -autoboot_script "$DRIVER" -wavwrite "$out" "$@" >"$WORK/log" 2>&1 \
     || { echo "  mame failed for mode '${mode:-real}':"; sed -n '1,5p' "$WORK/log"; exit 1; }
 }
 
-echo "verifying $DRIVER on $MACHINE"
+echo "verifying $DRIVER on $MACHINE at ${SIM_RATE} Hz"
 
 run ""      "$WORK/base.wav"  "$@"
 run "null"  "$WORK/null.wav"  "$@"

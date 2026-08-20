@@ -682,7 +682,64 @@ schematic alone (a divider output, a counter tap) measures where the schematic
 puts it. Galaxian's melody offered exactly that, `SOUND_CLOCK/(256-pitch)/16` or
 1200 Hz at the pitch under test, and it was the first thing to check.
 
+### The reference's own simulation rate is part of the reference
+
+The discrete engine simulates a netlist at the *audio sample rate*, so a
+capture's rate is also its simulation rate. At the 48 kHz default, a few-kHz 555
+square has its edges quantised to 20.8 µs, and the capture carries broadband
+hash the circuit does not produce. Measured at matched bandwidth, moving
+Galaxian's simulation from 48 kHz to 192 kHz drops fire's energy above 8 kHz
+from 46.4 % to 39.1 % and its spectral flatness from 0.62 to 0.37.
+
+**Two of Galaxian's three reported residuals were entirely this**, and neither
+was a small effect. Fire's 12-point shortfall above 8 kHz became 2.9 points; the
+hit's 11-point band split became 1.4. Fire's had already been written up as a
+topology difference in the noise source, with a plausible mechanism attached
+(our LFSR is clocked at 7920 Hz where the netlist runs it at RNG_RATE/100 and
+samples it with the 2V flip-flop). That rebuild was one step from starting, and
+it would have "fixed" a gap that did not exist by breaking a source that was
+right.
+
+So: **capture references at 192 kHz and band-limit afterwards.** This is now the
+default in `verify-reference.sh` (`SND_SIM_RATE`), and the capture commands in
+the drivers carry the resample step.
+
+Two traps inside the trap:
+
+- Raising the rate raises the capture *bandwidth* as well as the simulation
+  rate, so comparing a 48 kHz capture against a 192 kHz one measures mostly the
+  bandwidth change. Resample to a common rate first. The confounded comparison
+  says the reference gained high-frequency energy; the honest one says it lost
+  it.
+- This is a property of the **discrete engine specifically**. A board on the
+  netlist subsystem has a real solver with its own internal timestep, so its
+  output rate is only an output rate. Do not carry the rule across without
+  checking which engine the board uses.
+
+The general form, and it generalises past audio: **when a reference is itself a
+simulation, its numerical parameters are part of the experiment.** The
+reference-verification rule above asks whether the reference responded to the
+stimulus. It does not ask whether the reference was converged. A capture can
+respond perfectly to its own timeline and still be reporting its own
+discretisation, and a residual that shrinks when you refine the reference was
+never the model's.
+
 ## Part 5 — Construction-time tuning
+
+> **NOT BUILT, and deliberately so.** Parts 5 and 6 describe a fitting loop, and
+> the boards done since concluded that fitting is the wrong tool for this
+> problem: every value ever fitted here was later deleted, and each was standing
+> in for a mechanism missing from the model. The reasoning is in "What finishing
+> the first board taught" and "What the second board taught immediately" above,
+> and in the close reasons on `…-l5r3.6` and `…-l5r3.7`.
+>
+> The text stays because two pieces keep independent worth and are the ones to
+> restore first if this is ever revisited: **sensitivity ranking** (Part 6,
+> "Baseline and sensitivity"), which is a structural signal rather than a
+> fitting step, and **preferred-value snapping** with the identifiability
+> analysis. The optimizer itself should wait for a residual that has survived a
+> node dump and a schematic reading.
+
 
 A small construction-only API, in `phosphor_core::device::discrete::tuning`:
 
@@ -787,6 +844,13 @@ a load — which is correct: a save state captures a run, not a circuit edit.
 Worth a comment in `Saveable`, nothing more.
 
 ## Part 6 — Sensitivity and search
+
+> **NOT BUILT.** See the note under Part 5. The objective's shape did survive:
+> `disasm audiodiff` reports level, envelope and spectrum separately rather than
+> as one aggregate score, which is what this section argued for and is what made
+> "one metric improves, another degrades" readable as the missing-mechanism
+> signal it turned out to be.
+
 
 ### Baseline and sensitivity before any optimization
 
@@ -907,6 +971,9 @@ scalar tuning is the wrong response:
 | No exposed parameter materially improves the score | Missing/wrong structure, or a wrong reference procedure |
 | Best fit needs out-of-tolerance schematic values | Structural mismatch compensated by a scalar |
 | One effect improves while another sharing the path degrades | Overfit, or wrong shared topology |
+| Excess or shortfall confined to the top octave, on a voice with fast edges | Check the reference's simulation rate before the model |
+| Residual shrinks when the reference is re-simulated at a higher rate | The reference's discretisation, not a model error |
+| Every voice on one board is out by the same exact factor | A clock or divider feeding the whole device, including the harness's |
 
 A structural finding reports the metric evidence, the sensitivity evidence, the
 relevant probe captures, the schematic limits, the best *rejected* scalar fit,
@@ -928,6 +995,16 @@ post-processing.
 needs no code, and it is why the fitting rungs sit at the top of the ladder
 rather than the bottom.
 
+### Nor is it automatically converged
+
+A second way a capture fails to be ground truth, found on Galaxian and written
+up in Part 4: for a board on the discrete engine, the capture's sample rate *is*
+the simulation rate, so a 48 kHz reference reports its own edge quantisation
+above a few kHz. `sample_rate_hz` in the manifest below is therefore not
+bookkeeping. It is the reference's numerical resolution, and a capture taken at
+the 48 kHz default should be treated as untrustworthy in its top octave
+regardless of how authentic its provenance is.
+
 ### Manifest
 
 Each reference WAV is accompanied by a manifest describing what happened,
@@ -942,7 +1019,7 @@ wav = "jump.wav"
 producer = "mame"
 producer_version = "0.287"
 romset = "dkong"
-sample_rate_hz = 48000
+sample_rate_hz = 192000        # the SIMULATION rate too; 48000 is not converged
 channels = 2
 channel_policy = "downmix"     # mono | left | right | downmix
 master_volume_db = 0.0
@@ -1188,13 +1265,17 @@ scenario schema, the Donkey Kong adapter, `capture` / `compare` /
 `dkong_capture.rs`. At this point the tooling is useful with no parameter search
 at all.
 
-**Phase 5 — Tuning, overrides and sensitivity.** `TuningContext`, explicit
-registration, the `tuning.toml` override file and `--tuning` loading in
-`sndcmp` / `disasm` / the frontend, fresh-device candidate capture, sensitivity
-ranking, tolerance and class reporting, structural diagnostic rules. Benchmark
-with `phosphor-bench`. The override file lands here rather than with `fit`
-because it is independently useful: it makes hand-exploring a value a
-no-rebuild operation even before any optimizer exists.
+**Phase 5 (tuning, overrides and sensitivity). DROPPED, not deferred.** The
+override file's premise was that hand-exploring a value should not need a
+rebuild. The loop we actually run is "understand the topology, express it,
+rebuild", where a one-minute cargo build is nothing against reading a netlist,
+and an override file mainly makes it easy to keep a value alive with no part
+behind it. `TuningContext` named a real problem, that builders collapse their
+arguments so a coefficient cannot be turned back into a component; the answer
+that stuck was simpler than a parameter registry, which is to keep schematic
+values as literals at the call site with the part designator beside them. What
+is worth restoring first is sensitivity ranking, which is a structural signal
+rather than a fitting step.
 
 **Phase 5b — Node-level comparison.** Diff a named node against MAME's
 corresponding netlist node rather than only the final output. Inserted here, and
@@ -1203,20 +1284,27 @@ that disagrees says nothing about which stage is at fault, and the work collapse
 into editing constants and watching one metric improve while another degrades.
 `…-discrete-node-compare-2b7f`.
 
-**Phase 6 — `fit`, `writeback`, and correct Donkey Kong.** Objective, optimizer,
-E-series snapping, conditioning and hold-out reporting, `--out-tuning`, and
-`sndcmp writeback` with its `Literal`/`Derived` split. Diagnose each DK effect
-from evidence; prefer topology fixes to implausible scalar fits; validate the
-three effects together for relative level; add a mixed full-machine scenario for
-effect-to-DAC balance. Gated on Phase 0 having concluded the reference is clean.
+**Phase 6 (`fit`, `writeback`, and correct Donkey Kong). DROPPED, not deferred.**
+Its own deliverable, "correct Donkey Kong", was delivered without it, and so
+were all three Galaxian voices. What did the work was reading the topology,
+modelling it, probing per stage, and comparing against a reference proved to
+respond to its own timeline.
 
 Worth less than this document originally assumed, and dangerous earlier than its
 place here. See "What the first board taught": fitting a value while the topology
 is wrong produces a number that measures well and models nothing, and every such
-number had to be undone once the structure was corrected. Build it for the
-"which of these two plausible values is right" case it was scoped for, after the
-structure can be verified stage by stage — not as the primary route to
-correctness.
+number had to be undone once the structure was corrected. That was not the
+exceptional case, it was every case: four fitted filter corners on Donkey Kong
+and two fitted gains on Galaxian, none with a part on the schematic, each
+standing in for a missing mechanism. An optimizer would have found excellent
+values for every one of those wrong models, which is precisely the failure mode.
+
+The parts that earned their place: the objective's shape, kept in
+`disasm audiodiff`, which reports level, envelope and spectrum separately rather
+than as one score. The parts to restore first if this is revisited: E-series
+snapping and the identifiability analysis. The trigger for revisiting: a
+residual that has survived a node dump and a schematic reading, which has not
+happened yet on either board.
 
 **Phase 7 — Remaining implemented devices.** Congo Bongo (including comparison
 against MAME's samples and any original recordings), Galaxian and the shared
