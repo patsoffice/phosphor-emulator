@@ -75,6 +75,10 @@ pub static SPEC: TargetSpec = TargetSpec {
             description: "Explosion voice, after its band-pass",
         },
         ProbeSpec {
+            name: "hit-rc",
+            description: "Explosion's gated discharge, before the band-pass",
+        },
+        ProbeSpec {
             name: "fire",
             description: "Fire voice, after its coupling capacitor",
         },
@@ -203,16 +207,25 @@ impl SoundTarget for GalaxianTarget {
 ///
 /// Curated rather than exposing every node, so a probe id describes circuit
 /// intent and survives a local topology change.
+///
+/// The scale divides the node's value before it is written as PCM. These are all
+/// circuit nodes carrying VOLTS, which run to the 5 V supply and would clip a
+/// full-scale sample flat; only the logic-level noise line is already in range.
+/// Without this every stage probe here rendered as a clipped square, so anything
+/// measured off one was the clipping and not the circuit.
 fn probe_value(circuit: &DiscreteCircuit, probe: &str) -> Option<f64> {
-    let node = match probe {
-        "melody" => "melody",
-        "background" => "bg",
-        "hit" => "hit",
-        "fire" => "fire_ac",
-        "noise" => "noise01",
+    let (node, scale) = match probe {
+        "melody" => ("melody", 5.0),
+        "background" => ("bg", 5.0),
+        "hit" => ("hit", 5.0),
+        "hit-rc" => ("hit_rc", 5.0),
+        "fire" => ("fire_ac", 5.0),
+        "noise" => ("noise01", 1.0),
         _ => return None,
     };
-    circuit.node_by_name(node).map(|id| circuit.value(id))
+    circuit
+        .node_by_name(node)
+        .map(|id| circuit.value(id) / scale)
 }
 
 #[cfg(test)]
