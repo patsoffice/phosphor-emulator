@@ -454,6 +454,25 @@ pub fn compare(
         ba.level.decay_t40_s,
         3,
     );
+    // The fitted time constant, which is the one to read on a noisy voice: T20
+    // and T40 take two points off a curve that a shift-register-gated effect
+    // moves around, where this fits the whole decay. The r² is printed with it
+    // because a low one means the decay is not a single exponential and the tau
+    // should not be quoted at all.
+    opt_row(
+        &mut s,
+        "  decay tau (s)",
+        aa.level.decay_tau_s.map(|(t, _)| t),
+        ba.level.decay_tau_s.map(|(t, _)| t),
+        3,
+    );
+    opt_row(
+        &mut s,
+        "  decay fit r2",
+        aa.level.decay_tau_s.map(|(_, r)| r),
+        ba.level.decay_tau_s.map(|(_, r)| r),
+        3,
+    );
 
     // --- spectrum ---
     let _ = writeln!(s, "\nspectrum");

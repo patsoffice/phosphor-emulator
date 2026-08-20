@@ -116,6 +116,11 @@ pub struct Level {
     pub decay_t20_s: Option<f64>,
     /// Seconds for the envelope to fall 40 dB from its peak.
     pub decay_t40_s: Option<f64>,
+    /// Fitted decay time constant in seconds, and the fit's r². The fit is the
+    /// trustworthy decay number on a noisy voice; T20 and T40 read two points
+    /// off the same curve and a shift-register-gated effect moves those points
+    /// around. Check the r² before believing the tau.
+    pub decay_tau_s: Option<(f64, f64)>,
     /// Seconds the envelope spends within 40 dB of its peak.
     pub duration_above_threshold_s: f64,
 }
@@ -133,7 +138,7 @@ impl Level {
 
         // Everything below is measured from the envelope peak, so a capture
         // with no signal at all has no meaningful decay or duration.
-        let (t20, t40, above) = if peak_env > 0.0 {
+        let (t20, t40, tau, above) = if peak_env > 0.0 {
             let hop_s = hop as f64 / sample_rate;
             let above_count = envelope
                 .iter()
@@ -142,10 +147,13 @@ impl Level {
             (
                 decay_time(&envelope, hop_s, 20.0),
                 decay_time(&envelope, hop_s, 40.0),
+                // Fitted over the top 30 dB: below that a one-shot's tail is
+                // into the capture's noise floor and only flattens the slope.
+                decay_tau(&envelope, hop_s, -30.0),
                 above_count as f64 * hop_s,
             )
         } else {
-            (None, None, 0.0)
+            (None, None, None, 0.0)
         };
 
         Self {
@@ -156,6 +164,7 @@ impl Level {
             onset_s: onset_index(ac, sample_rate).map(|i| i as f64 / sample_rate),
             decay_t20_s: t20,
             decay_t40_s: t40,
+            decay_tau_s: tau,
             duration_above_threshold_s: above,
         }
     }
@@ -225,12 +234,37 @@ pub fn onset_index(ac: &[f64], sample_rate: f64) -> Option<usize> {
     env.iter().position(|&v| v >= threshold).map(|b| b * hop)
 }
 
+/// The envelope's non-increasing upper hull from `start`: `hull[i]` is the
+/// largest value at or after `i`.
+///
+/// A noisy voice's envelope fluctuates hard. An explosion gated by a shift
+/// register is a narrowband noise burst whose block RMS wanders by many dB
+/// around its trend, so it dips far below that trend and comes straight back.
+/// Taking the hull answers "has it fallen this far *and stayed* there", which is
+/// what a decay time means, instead of "did it ever momentarily dip".
+fn decay_hull(envelope: &[f64], start: usize) -> Vec<f64> {
+    let mut hull: Vec<f64> = envelope[start..].to_vec();
+    for i in (0..hull.len().saturating_sub(1)).rev() {
+        hull[i] = hull[i].max(hull[i + 1]);
+    }
+    hull
+}
+
 /// Time in seconds for an envelope to fall `drop_db` below its peak, measured
 /// from the peak forward.
 ///
 /// Returns `None` when the signal never falls that far — common for short
 /// arcade effects, which is exactly why T20 and T40 are reported instead of a
 /// single T60 that would usually be unavailable.
+///
+/// Measured on the envelope's upper hull, not on its raw first crossing. The
+/// raw version reported Galaxian's explosion decaying in 0.524 s against the
+/// board's 0.818 s, and both were wrong: the voice's true time constant is
+/// 0.75 s, which is a T20 of 1.75 s. What it had found was a statistical dip in
+/// a noise envelope, and the bias is one-sided because the peak it measures
+/// down from is itself the maximum of the same fluctuation. That reading
+/// survived long enough to be written up as a board's last outstanding
+/// residual, so this is not a rounding-level concern.
 pub fn decay_time(envelope: &[f64], hop_s: f64, drop_db: f64) -> Option<f64> {
     let (peak_i, peak) = envelope
         .iter()
@@ -240,10 +274,72 @@ pub fn decay_time(envelope: &[f64], hop_s: f64, drop_db: f64) -> Option<f64> {
         return None;
     }
     let target = peak * 10f64.powf(-drop_db / 20.0);
-    envelope[peak_i..]
+    decay_hull(envelope, peak_i)
         .iter()
         .position(|&v| v <= target)
         .map(|d| d as f64 * hop_s)
+}
+
+/// Least-squares time constant of an envelope's decay, in seconds, with the
+/// coefficient of determination of the fit.
+///
+/// Fitted across the whole decay rather than read off two crossings, so noise
+/// averages out instead of choosing the answer. `r2` is what makes the number
+/// safe to use: a genuine exponential fits near 1.0, and anything that is not
+/// exponential (a two-stage decay, a sustained tone, a signal still in its
+/// attack) reports a low value rather than a confident wrong time constant.
+///
+/// Fitted from the envelope peak forward over the samples above `floor_db`
+/// below the peak, since once the tail reaches the noise floor it stops
+/// carrying decay information and would flatten the slope.
+pub fn decay_tau(envelope: &[f64], hop_s: f64, floor_db: f64) -> Option<(f64, f64)> {
+    let (peak_i, peak) = envelope
+        .iter()
+        .enumerate()
+        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())?;
+    if *peak <= 0.0 {
+        return None;
+    }
+    let floor = peak * 10f64.powf(floor_db / 20.0);
+    let pts: Vec<(f64, f64)> = envelope[peak_i..]
+        .iter()
+        .enumerate()
+        .filter(|(_, v)| **v > floor && **v > 0.0)
+        .map(|(i, v)| (i as f64 * hop_s, v.ln()))
+        .collect();
+    // Three points can be fitted but say nothing; below this the fit is noise.
+    if pts.len() < 8 {
+        return None;
+    }
+
+    let n = pts.len() as f64;
+    let sx: f64 = pts.iter().map(|p| p.0).sum();
+    let sy: f64 = pts.iter().map(|p| p.1).sum();
+    let sxx: f64 = pts.iter().map(|p| p.0 * p.0).sum();
+    let sxy: f64 = pts.iter().map(|p| p.0 * p.1).sum();
+    let denom = n * sxx - sx * sx;
+    if denom.abs() < f64::EPSILON {
+        return None;
+    }
+    let slope = (n * sxy - sx * sy) / denom;
+    // A flat or rising envelope is not a decay.
+    if slope >= 0.0 {
+        return None;
+    }
+    let intercept = (sy - slope * sx) / n;
+
+    let mean_y = sy / n;
+    let ss_tot: f64 = pts.iter().map(|p| (p.1 - mean_y).powi(2)).sum();
+    let ss_res: f64 = pts
+        .iter()
+        .map(|p| (p.1 - (slope * p.0 + intercept)).powi(2))
+        .sum();
+    let r2 = if ss_tot > 0.0 {
+        1.0 - ss_res / ss_tot
+    } else {
+        0.0
+    };
+    Some((-1.0 / slope, r2))
 }
 
 #[cfg(test)]
@@ -361,6 +457,101 @@ mod tests {
     fn a_sustained_tone_has_no_decay_time() {
         let level = Level::measure(&sine(440.0, 8000.0, 8000), 8000.0);
         assert!(level.decay_t20_s.is_none());
+    }
+
+    /// The fitted time constant recovers the tau that generated the signal.
+    #[test]
+    fn fitted_tau_matches_a_known_exponential() {
+        let rate = 8000.0;
+        let tau = 0.25;
+        let sig: Vec<f64> = (0..(rate as usize * 3))
+            .map(|i| {
+                let t = i as f64 / rate;
+                (-t / tau).exp() * (std::f64::consts::TAU * 300.0 * t).sin()
+            })
+            .collect();
+        let (fitted, r2) = Level::measure(&sig, rate).decay_tau_s.expect("tau");
+        assert!((fitted - tau).abs() < 0.02, "tau {fitted} vs {tau}");
+        assert!(r2 > 0.99, "a clean exponential should fit tightly, r2={r2}");
+    }
+
+    /// THE DEFECT THIS EXISTS FOR. A decay carried by noise, as every
+    /// shift-register-gated explosion on these boards is, has an envelope that
+    /// fluctuates hard around its trend. Reading the first crossing of a
+    /// threshold finds one of those dips and reports a decay several times too
+    /// fast; on Galaxian's explosion it reported 0.524 s where the voice's true
+    /// time constant of 0.75 s means a T20 of 1.75 s.
+    ///
+    /// Both measurements have to survive the noise: T20 because it is quoted
+    /// everywhere, and the fitted tau because it is the number to trust.
+    #[test]
+    fn a_noisy_decay_is_not_cut_short_by_a_dip_in_its_envelope() {
+        let rate = 44100.0;
+        let tau = 0.75;
+        // A deterministic LFSR gate at 7920 Hz, which is the real mechanism:
+        // the voice is a capacitor voltage chopped by a noise line, so about
+        // half its samples are legitimately zero at any amplitude.
+        let mut lfsr: u32 = 0x1_ACE1;
+        let mut gate = false;
+        let mut next = 0.0;
+        let sig: Vec<f64> = (0..(rate as usize * 3))
+            .map(|i| {
+                let t = i as f64 / rate;
+                if t >= next {
+                    next += 1.0 / 7920.0;
+                    let bit = ((lfsr >> 16) ^ (lfsr >> 13)) & 1;
+                    lfsr = ((lfsr << 1) | bit) & 0x1_FFFF;
+                    gate = bit != 0;
+                }
+                let carrier = (std::f64::consts::TAU * 170.0 * t).sin();
+                if gate {
+                    (-t / tau).exp() * carrier
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+
+        let level = Level::measure(&sig, rate);
+
+        let (fitted, r2) = level.decay_tau_s.expect("tau");
+        assert!(
+            (fitted - tau).abs() < 0.10,
+            "fitted tau {fitted} should recover {tau} through the gating"
+        );
+        assert!(r2 > 0.85, "a gated exponential still fits well, r2={r2}");
+
+        // T20 of a tau=0.75 decay is tau*ln(10) = 1.727 s. The pre-fix code
+        // returned a small fraction of that, so a loose bound still pins it.
+        let t20 = level.decay_t20_s.expect("t20");
+        let expect = tau * 10f64.ln();
+        assert!(
+            (t20 - expect).abs() < 0.25,
+            "t20 {t20} should be near {expect}, not an envelope dip"
+        );
+    }
+
+    /// A decay that is not a single exponential must report a poor fit rather
+    /// than a confident wrong time constant. Two stacked decays are the common
+    /// case: an effect whose envelope and its carrier's filter both ring.
+    #[test]
+    fn a_two_stage_decay_reports_a_poor_fit() {
+        let rate = 8000.0;
+        let sig: Vec<f64> = (0..(rate as usize * 3))
+            .map(|i| {
+                let t = i as f64 / rate;
+                // The slow stage has to sit ABOVE the fit's -30 dB floor to be
+                // part of what is fitted; at 0.02 it is below the floor and the
+                // fit sees only the clean fast stage, which of course fits.
+                let env = (-t / 0.05).exp() + 0.15 * (-t / 1.5).exp();
+                env * (std::f64::consts::TAU * 300.0 * t).sin()
+            })
+            .collect();
+        let (_, r2) = Level::measure(&sig, rate).decay_tau_s.expect("tau");
+        assert!(
+            r2 < 0.95,
+            "a two-stage decay should not fit cleanly, r2={r2}"
+        );
     }
 
     #[test]
