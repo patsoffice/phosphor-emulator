@@ -10,7 +10,7 @@
 -- drive_dkong_single.lua. The multi-voice driver stays useful for a quick listen
 -- and for spectral shape, which is level-independent.
 --
--- Select the voice with GAL_EFFECT: melody, fire, hit.
+-- Select the voice with GAL_EFFECT: melody, fire, hit, background.
 --
 --   GAL_EFFECT=fire mame galaxian -rompath <roms> -nothrottle -seconds_to_run 4 \
 --        -video none -samplerate 192000 \
@@ -45,15 +45,26 @@ local SPIN = 0x4000 -- work-RAM address holding a JP-to-self
 
 local function set_pitch(v) mem:write_u8(0x7800, v & 0xff) end
 local function set_latch(line, on) mem:write_u8(0x6800 + line, on and 1 or 0) end
+-- The background DAC is four separate one-bit ports, not a nibble register.
+local function set_lfo(v)
+  for bit = 0, 3 do mem:write_u8(0x6004 + bit, (v >> bit) & 1) end
+end
 
 -- 74LS259 lines, as wired on the board.
 local FS1, FS2, FS3, HIT, FIRE, VOL1, VOL2 = 0, 1, 2, 3, 5, 6, 7
 
 local effect = os.getenv("GAL_EFFECT")
-if effect ~= "melody" and effect ~= "fire" and effect ~= "hit" then
-  print("[DRIVER] ERROR: set GAL_EFFECT to one of: melody, fire, hit")
+local EFFECTS = { melody = true, fire = true, hit = true, background = true }
+if not EFFECTS[effect] then
+  print("[DRIVER] ERROR: set GAL_EFFECT to one of: melody, fire, hit, background")
   return
 end
+
+-- The background DAC code the `background` effect parks at, matching
+-- scenarios/galaxian/background.toml. Parked rather than swept: the DAC sets the
+-- charging current of a 555 whose sawtooth sweeps the three oscillators, so the
+-- voice still warbles at a fixed code and only the warble's rate is being held.
+local BG_DAC = 8
 
 -- Matches the scenario files: one trigger at 1.0 s, released at 1.05 s, and a
 -- run long enough for the decay to finish inside the analysis window.
@@ -92,6 +103,7 @@ local function on_frame()
   -- Setup, every frame: park the free-running melody and hold every trigger low.
   -- This is not part of the stimulus, which is why the null check keeps it.
   set_pitch(0xff)
+  set_lfo(0)
   set_latch(VOL1, false)
   set_latch(VOL2, false)
   for _, line in ipairs({ FS1, FS2, FS3, HIT, FIRE }) do set_latch(line, false) end
@@ -106,6 +118,15 @@ local function on_frame()
       set_pitch(0xB0)
       set_latch(VOL1, true)
       set_latch(VOL2, true)
+    end
+  elseif effect == "background" then
+    -- Sustained, like the melody. The DAC is parked rather than swept: it sets
+    -- the charging current of a 555 whose capacitor sawtooth sweeps the three
+    -- oscillators, so the voice warbles at a fixed code and only the warble's
+    -- rate is being held still. Sweeping it would smear the spectrum.
+    if t >= TRIGGER_S then
+      set_lfo(BG_DAC)
+      for _, line in ipairs({ FS1, FS2, FS3 }) do set_latch(line, true) end
     end
   elseif effect == "fire" then
     set_latch(FIRE, on)

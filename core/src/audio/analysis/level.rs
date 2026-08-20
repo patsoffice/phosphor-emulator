@@ -339,7 +339,14 @@ pub fn decay_tau(envelope: &[f64], hop_s: f64, floor_db: f64) -> Option<(f64, f6
     } else {
         0.0
     };
-    Some((-1.0 / slope, r2))
+    // Below this the envelope is not describable as one exponential and no
+    // number should be offered. A sustained voice drifts just enough to produce
+    // a slope, and reporting it gave a 143-second time constant next to an r² of
+    // zero. The r² was doing its job, but a number that meaningless should not
+    // be printed at all: it invites exactly the misreading this metric exists to
+    // prevent.
+    const MIN_FIT_R2: f64 = 0.5;
+    (r2 >= MIN_FIT_R2).then_some((-1.0 / slope, r2))
 }
 
 #[cfg(test)]
@@ -452,11 +459,18 @@ mod tests {
     }
 
     /// A sustained tone never decays, so a decay time is genuinely absent
-    /// rather than reported as the end of the capture.
+    /// rather than reported as the end of the capture. Neither is a time
+    /// constant: a sustained voice drifts just enough to fit a slope, and a
+    /// galaxian background capture produced a 143-second tau that way.
     #[test]
     fn a_sustained_tone_has_no_decay_time() {
         let level = Level::measure(&sine(440.0, 8000.0, 8000), 8000.0);
         assert!(level.decay_t20_s.is_none());
+        assert!(
+            level.decay_tau_s.is_none(),
+            "a sustained tone reported a time constant: {:?}",
+            level.decay_tau_s
+        );
     }
 
     /// The fitted time constant recovers the tau that generated the signal.

@@ -1,0 +1,80 @@
+schema = 1
+id = "galaxian/background"
+target = "galaxian-discrete"
+duration_s = 3.0
+description = "The wolf-whistle: three FS oscillators swept by the background DAC"
+
+# Park the free-running melody, as every other galaxian scenario does and for the
+# same reason: a high pitch register puts its note clock ultrasonic and both
+# volume lines off keep it out of the mixer. Marked setup so `sndcmp verify`
+# keeps it while removing the stimulus.
+#
+# Note the background reaches the mixer through R34, which the VOL switches do
+# NOT gate, so this voice is audible with both volume lines off. Turning them on
+# would only change the divider and pull the parked melody's resistors in.
+[[action]]
+at_s = 0.0
+control = "pitch"
+value = 255
+setup = true
+
+[[action]]
+at_s = 0.0
+control = "vol1"
+value = false
+setup = true
+
+[[action]]
+at_s = 0.0
+control = "vol2"
+value = false
+setup = true
+
+# Park the DAC explicitly rather than relying on the reset value. A fresh device
+# starts at 0, but the board starts at whatever the game last wrote before the
+# driver parked its CPU, which is 15 in practice. Both sides being defined before
+# the trigger is what makes the two captures comparable.
+[[action]]
+at_s = 0.0
+control = "lfo"
+value = 0
+setup = true
+
+# The DAC is PARKED rather than swept, which is the same trade the melody
+# scenario makes. In the game it ramps 0 to 15 and that ramp is the whistle, but
+# a moving stimulus smears the spectrum and makes a centroid meaningless. What is
+# parked here is only the DAC: the voice is still moving, because the DAC sets
+# the charging current of a 555 whose capacitor sawtooth is what sweeps the three
+# oscillators. So this measures a steady warble rather than a steady tone.
+#
+# What the DAC changes is the warble's RATE, not its depth: the sawtooth always
+# runs between a third and two thirds of the supply, and only its slope moves.
+# From the parts that is about 63 ms per cycle at code 0 and 48 ms at code 15, so
+# the analysis window below covers roughly 25 cycles and averages to something
+# stationary. A window shorter than a few cycles would measure whichever part of
+# the sweep it happened to land on.
+[[action]]
+at_s = 1.0
+control = "lfo"
+value = 8
+
+[[action]]
+at_s = 1.0
+control = "fs1"
+value = true
+
+[[action]]
+at_s = 1.0
+control = "fs2"
+value = true
+
+[[action]]
+at_s = 1.0
+control = "fs3"
+value = true
+
+# Sustained, so held to the end. The 0.5 s before the window starts is more than
+# the ~55 ms the first sawtooth needs to establish itself.
+[analysis]
+start_s = 1.5
+end_s = 3.0
