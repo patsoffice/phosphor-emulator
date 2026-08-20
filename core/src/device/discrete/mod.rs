@@ -618,6 +618,43 @@ impl DiscreteCircuitBuilder {
         )
     }
 
+    /// Passive resistor mixer with an analog switch in some of its legs: taps
+    /// are `(node, ohms, switch)`, and a leg carrying a switch is in the network
+    /// only while that node is non-zero. `load_ohms` is any permanent load to
+    /// the reference.
+    ///
+    /// This is the CD4066 pattern, and it is not the same as feeding
+    /// [`resistor_mixer`](Self::resistor_mixer) from gated sources. Gating a
+    /// source to zero leaves its resistor in the divider, so the leg still
+    /// attenuates every other leg; opening the switch removes the resistor, so
+    /// the remaining legs get *louder*. Where the switched legs carry different
+    /// signals it also re-weights them against each other, which makes the
+    /// switch a timbre control rather than a volume control. A board that
+    /// switches one voice's resistors in and out cannot be modelled as a gain on
+    /// that voice.
+    pub fn resistor_mixer_switched(
+        &mut self,
+        name: &str,
+        taps: &[(NodeId, f64, Option<NodeId>)],
+        load_ohms: Option<f64>,
+    ) -> NodeId {
+        let srcs: Vec<(NodeId, f64, Option<NodeId>)> = taps
+            .iter()
+            .map(|(n, r, sw)| {
+                assert!(*r > 0.0, "mixer leg {name:?} needs a positive resistance");
+                (*n, 1.0 / r, *sw)
+            })
+            .collect();
+        self.push_node(
+            name,
+            NodeKind::SwitchedResistorMixer {
+                srcs,
+                load_g: load_ohms.map_or(0.0, |r| 1.0 / r),
+            },
+            ClockDomain::BoardCycle,
+        )
+    }
+
     /// Diode-OR mixer: the highest input wins, less a forward drop (volts),
     /// and never below the reference.
     pub fn diode_mixer(&mut self, name: &str, srcs: &[NodeId], drop: f64) -> NodeId {

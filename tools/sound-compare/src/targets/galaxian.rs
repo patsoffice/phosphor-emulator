@@ -205,7 +205,7 @@ impl SoundTarget for GalaxianTarget {
 /// intent and survives a local topology change.
 fn probe_value(circuit: &DiscreteCircuit, probe: &str) -> Option<f64> {
     let node = match probe {
-        "melody" => "tune_vol",
+        "melody" => "melody",
         "background" => "bg",
         "hit" => "hit",
         "fire" => "fire_ac",

@@ -20,27 +20,30 @@
 //! The four audible voices the issue calls out — background tone, shoot/noise,
 //! hit, and the wolf-whistle LFO — are each a small sub-graph below.
 //!
-//! This is a component-level port of MAME's `galaxian_discrete` netlist
-//! (`mame/src/mame/galaxian/galaxian_a.cpp`) built on the framework's NE555 and
-//! op-amp primitives with the real `GAL_R*`/`GAL_C*` schematic values, so the
-//! oscillator waveforms and filter responses match the hardware rather than
-//! approximating them. The wolf-whistle is a 555 constant-current VCO driving
-//! three CV-modulated 555 astables; the HIT is a noise-gated op-amp
-//! multiple-feedback band-pass; the FIRE is a noise-jittered 555 VCO gating an
-//! RC discharge. Documented simplifications vs. MAME: the 555 sub-sample
-//! threshold-crossing loop is dropped (faithful at the 192 kHz sim rate); the
-//! per-tap pitch counter keeps the validated [`TuneVoice`] custom component
-//! rather than a discrete `DISCRETE_NOTE`; and the VOL1/VOL2 switched-resistor
-//! melody mix is modelled as a melody-level gain (the combined `TuneVoice`
-//! output cannot be split per QC/QD tap). The output level is calibrated to
-//! MAME's `32767/5` scale.
+//! This is a component-level model built on the framework's NE555 and op-amp
+//! primitives with the board's own resistor and capacitor values, so the
+//! oscillator waveforms and filter responses come out of the parts rather than
+//! being approximated. The wolf-whistle is a 555 constant-current VCO driving
+//! three CV-modulated 555 astables; the melody is a note counter whose QA, QC
+//! and QD taps each reach the mixer through their own resistor; the HIT is a
+//! noise-gated op-amp multiple-feedback band-pass; the FIRE is a noise-jittered
+//! 555 VCO gating an RC discharge.
+//!
+//! Nothing in the signal path is a fitted scalar: every gain here is a
+//! conductance ratio off the schematic, and the final node drives full scale
+//! directly. Two fitted values used to sit here, a 0.8 output trim and a 1.25x
+//! lift on the hit, and both turned out to be standing in for the melody's
+//! counter taps being mixed at the wrong weights.
+//!
+//! One deliberate simplification: the 555 sub-sample threshold-crossing loop is
+//! dropped, which is faithful at the 192 kHz simulation rate.
 
 use crate::core::debug::{DebugRegister, Debuggable};
 use crate::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use crate::device::Device;
 use crate::device::discrete::{
     CustomComponent, DataInputId, DiscreteCircuit, DiscreteCircuitBuilder, LfsrSpec, LogicInputId,
-    Output555, OutputGain,
+    NodeId, Output555, OutputGain,
 };
 
 /// Galaxian master clock is 18.432 MHz; the sound section runs at /6/2.
@@ -62,6 +65,8 @@ pub const CPU_CLOCK_HZ: u64 = 3_072_000;
 const SIM_RATE: u64 = 192_000;
 /// Noise flip-flop sample rate (`2V` = 60·264/2 Hz on the real board).
 const NOISE_RATE: f64 = 60.0 * 264.0 / 2.0; // 7920 Hz
+/// The logic high the latches and counter taps present to the analog side.
+const TTL_OUT: f64 = 4.0;
 
 // ---------------------------------------------------------------------------
 // Background-melody voice (the pitched 74393 tap chord)
@@ -74,51 +79,72 @@ const NOISE_RATE: f64 = 60.0 * 264.0 / 2.0; // 7920 Hz
 /// the clock instead would fold that into a constant audible tone.
 const AUDIBLE_CEILING: f64 = 16_000.0;
 
-/// The background melody: a note clock `SOUND_CLOCK / (256 - pitch)` feeding a
-/// 74393 counter whose QA(/2), QC(/8), QD(/16) taps are summed (QC weighted
-/// twice, matching MAME's mixer). Synthesized directly so ultrasonic taps can be
-/// muted (see [`AUDIBLE_CEILING`]) instead of aliased.
-#[derive(Default)]
-struct TuneVoice {
-    phase: [f64; 3],
+/// One tap of the background melody's 74393 counter.
+///
+/// The note clock is `SOUND_CLOCK / (256 - pitch)`, the counter divides it, and
+/// the board wires out QA (bit 0), QC (bit 2) and QD (bit 3). Bit `b` toggles at
+/// `f_count / 2^(b+1)`, so the three taps are the note, its octave down and two
+/// octaves down.
+///
+/// Each tap is its own node because each reaches the mixer through its own
+/// resistor, and two of those resistors are switched by the VOL lines. The
+/// balance between the taps is part of the sound and changes with the switches,
+/// so the taps cannot be pre-summed into one melody signal and scaled.
+///
+/// Three instances run the same counter rather than one instance publishing
+/// three outputs, because a node produces one value. They read the same input
+/// and take the same step, so their counters stay identical and the taps keep
+/// exactly the phase relationship one counter gives them. That is why the
+/// counter advances even while the tap is muted below: a tap that skipped its
+/// update would drift out of step with the other two.
+struct TuneTap {
+    bit: u8,
+    phase: f64,
+    count: u8,
 }
 
-impl TuneVoice {
-    const TAPS: [f64; 3] = [0.5, 0.125, 0.0625]; // QA, QC, QD divisors
-    const WEIGHTS: [f64; 3] = [1.0, 2.0, 1.0]; // QC mixed twice
+impl TuneTap {
+    fn new(bit: u8) -> Self {
+        Self {
+            bit,
+            phase: 0.0,
+            count: 0,
+        }
+    }
 }
 
-impl CustomComponent for TuneVoice {
+impl CustomComponent for TuneTap {
     fn reset(&mut self) {
-        self.phase = [0.0; 3];
+        self.phase = 0.0;
+        self.count = 0;
     }
 
     fn step(&mut self, inputs: &[f64], dt: f64) -> f64 {
         let pitch = inputs[0].round().clamp(0.0, 255.0);
         let f_count = SOUND_CLOCK / (256.0 - pitch);
-        let mut out = 0.0;
-        for i in 0..3 {
-            let f = f_count * Self::TAPS[i];
-            if f <= AUDIBLE_CEILING {
-                self.phase[i] = (self.phase[i] + f * dt).fract();
-                let square = if self.phase[i] < 0.5 { 1.0 } else { -1.0 };
-                out += square * Self::WEIGHTS[i];
-            }
-            // else: ultrasonic tap is inaudible — contributes nothing.
+
+        self.phase += f_count * dt;
+        let ticks = self.phase.floor();
+        self.phase -= ticks;
+        self.count = self.count.wrapping_add(ticks as u8) & 0x0F;
+
+        // An ultrasonic tap is inaudible on the board but would alias here, so
+        // it sits low rather than being synthesized (see AUDIBLE_CEILING). Its
+        // resistor stays in the mixer either way, which is what the board does.
+        if f_count / (1u32 << (self.bit + 1)) as f64 > AUDIBLE_CEILING {
+            return 0.0;
         }
-        out
+        f64::from((self.count >> self.bit) & 1) * TTL_OUT
     }
 
     fn save_state(&self, w: &mut StateWriter) {
-        for p in self.phase {
-            w.write_f64_le(p);
-        }
+        w.write_f64_le(self.phase);
+        w.write_u8(self.count);
     }
 
     fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
-        for p in self.phase.iter_mut() {
-            *p = r.read_f64_le()?;
-        }
+        self.phase = r.read_f64_le()?;
+        self.count = r.read_u8()?;
         Ok(())
     }
 }
@@ -192,7 +218,7 @@ impl GalaxianSound {
         let r_bias = 15.0e3; // R20
         let r_gnd = 330.0e3; // R19
         let v_bias = 4.4;
-        let v_on = 4.0; // TTL_OUT
+        let v_on = TTL_OUT;
         let dac_denom = r_dac.iter().map(|r| 1.0 / r).sum::<f64>() + 1.0 / r_bias + 1.0 / r_gnd;
         let dac_weights: Vec<f64> = r_dac.iter().map(|r| v_on / (r * dac_denom)).collect();
         let dac_bits = b.dac_weighted("bg_dac_bits", bg_dac_in, &dac_weights);
@@ -248,12 +274,13 @@ impl GalaxianSound {
         let bg_mix = b.resistor_mixer("bg_mix", &fs_taps, None);
         let bg = b.rc_low_pass("bg", bg_mix, 10.0e3 / 3.0, 0.1e-6); // NODE_120
 
-        // --- Pitch / melody (NODE_132/133): the validated TuneVoice ---------
-        let tune = b.custom(
-            "tune",
-            vec![pitch_in.into()],
-            Box::new(TuneVoice::default()),
-        );
+        // --- Pitch / melody (NODE_132/133): the 74393's three wired-out taps --
+        // QA is bit 0, QC bit 2, QD bit 3 of the note counter. Kept separate
+        // because the mixer gives each its own resistor and switches two of
+        // them; see the pre-mix below.
+        let tune_qa = b.custom("tune_qa", vec![pitch_in.into()], Box::new(TuneTap::new(0)));
+        let tune_qc = b.custom("tune_qc", vec![pitch_in.into()], Box::new(TuneTap::new(2)));
+        let tune_qd = b.custom("tune_qd", vec![pitch_in.into()], Box::new(TuneTap::new(3)));
 
         // --- HIT (NODE_155/157): noise-gated op-amp band-pass ----------------
         // RCDISC5 gated by the noise (enable) with the HIT TTL level as input,
@@ -275,11 +302,12 @@ impl GalaxianSound {
         // The band-pass output sits on the op-amp's vRef rail; the downstream
         // output coupling (cAmp) removes the DC, so strip it here for mixing.
         let hit_vref_off = b.constant("hit_vref_off", -hit_vref);
-        let hit_ac = b.add("hit_ac", &[hit_bp, hit_vref_off]);
-        // Calibration trim: MAME's own netlist flags the hit as too quiet ("op-amp
-        // band filter" note, R40 0.6 trim); the capture confirms our band-pass
-        // output runs ~1.25x low, so lift it to match the explosion's punch.
-        let hit = b.gain("hit", hit_ac, 1.25);
+        // The band-pass feeds the mixer through R40, which already carries the
+        // board's own 0.6 volume trim (applied at the mixer below). There is no
+        // second trim here: the 1.25x lift that used to sit at this node was
+        // fitted against a capture taken at half the board's clock rate, and it
+        // has no part on the schematic to point at.
+        let hit = b.add("hit", &[hit_bp, hit_vref_off]);
 
         // --- FIRE (NODE_170..182): noise-jittered 555 VCO gating an RC -------
         let fire4 = b.gain("fire4", fire_in, v_on); // NODE_171 = TTL_OUT·fire
@@ -308,21 +336,32 @@ impl GalaxianSound {
         // The VCO square gates the fire envelope through RCDISC5 (R41/C25).
         let fire = b.rc_disc5("fire", fire4, fire_vco, 100.0e3, 1.0e-6); // NODE_182
 
-        // --- Pre-mix: melody + background, VOL1/VOL2 switched gain (NODE_279) -
-        // The CD4066 VOL switches add parallel melody resistors (R49/R52). With
-        // the combined TuneVoice we model this as a melody-level gain rather
-        // than per-tap conductance switching.
-        let vol_base = b.constant("vol_base", 0.25);
-        let vol1_g = b.gain("vol1_g", vol_in[0], 0.3);
-        let vol2_g = b.gain("vol2_g", vol_in[1], 0.3);
-        let vol_gain = b.add("vol_gain", &[vol_base, vol1_g, vol2_g]);
-        let tune_vol = b.multiply("tune_vol", tune, vol_gain);
-        // The melody mixes through R51 (QA) and R50 (QC), plus R49 (QC) and R52
-        // (QD) switched in by VOL1/VOL2 — both on gives ~4.1k in parallel. Using
-        // that parallel value (with vol_gain modelling the switch level) keeps
-        // the melody-vs-background balance MAME has; a lone R51 buries the tune.
-        let r_melody = 1.0 / (1.0 / 33.0e3 + 1.0 / 22.0e3 + 1.0 / 10.0e3 + 1.0 / 15.0e3);
-        let pre = b.resistor_mixer("pre", &[(tune_vol, r_melody), (bg, 5.1e3)], None);
+        // --- Pre-mix (NODE_279): the melody taps and the background ----------
+        // Each counter tap has its own resistor into the node, and the two VOL
+        // lines are CD4066 switches that put R49 and R52 in or out. That is not
+        // a volume control on the melody: with VOL2 open the QD tap is not in
+        // the mix at all, and the surviving legs each get louder because the
+        // divider loses a conductance. Both lines on gives the taps a
+        // QA : QC : QD conductance ratio of 1 : 4.8 : 2.2, so the counter's
+        // fastest tap is the quietest by a wide margin.
+        //
+        // This replaced a single pre-summed melody scaled by a fitted gain
+        // (0.25, +0.3 per VOL line). That gain had no part to point at, and it
+        // weighted the taps 1 : 2 : 1, which left the 9600 Hz QA tap several
+        // times too loud and put 11 points of excess energy above 8 kHz.
+        let melody_legs: [(NodeId, f64, Option<NodeId>); 4] = [
+            (tune_qa, 33.0e3, None),                   // R51
+            (tune_qc, 10.0e3, Some(vol_in[0].into())), // R49, switched by VOL1
+            (tune_qc, 22.0e3, None),                   // R50
+            (tune_qd, 15.0e3, Some(vol_in[1].into())), // R52, switched by VOL2
+        ];
+        // The melody on its own, for the per-voice probe. The mix below is the
+        // node the board actually has; this is the same network without the
+        // background leg, so a probe reads the voice rather than the sum.
+        let _melody = b.resistor_mixer_switched("melody", &melody_legs, None);
+        let mut pre_legs = melody_legs.to_vec();
+        pre_legs.push((bg, 5.1e3, None)); // R34
+        let pre = b.resistor_mixer_switched("pre", &pre_legs, None);
 
         // --- Final mix (NODE_280): R34/R40/R43 into the R91 load -------------
         let (r34, r40, r43, r91) = (5.1e3, 2.2e3 * 0.6, 2.2e3, 10.0e3); // R40 has a 0.6 volume trim
@@ -333,8 +372,11 @@ impl GalaxianSound {
         // Output coupling cap (cAmp = C46) — MAME models it as a ≈16 Hz DC block
         // against a 100 k final-stage impedance.
         let out = b.rc_high_pass("out", mix, 100.0e3, 0.1e-6); // C46
-        // Calibrated to MAME's 32767/5 output scale.
-        b.output(out, OutputGain::linear(0.8));
+        // The board's final node drives the amplifier directly, and one volt of
+        // it is full scale, so there is nothing left to scale by. The 0.8 that
+        // used to sit here was fitted, and it was compensating for a melody
+        // whose counter taps were mixed at the wrong weights.
+        b.output(out, OutputGain::unity());
 
         Self {
             circuit: b.build(),

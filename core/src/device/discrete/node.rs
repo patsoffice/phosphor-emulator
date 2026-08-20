@@ -119,6 +119,22 @@ pub(crate) enum NodeKind {
         srcs: Vec<(NodeId, f64)>,
         total_g: f64,
     },
+    /// Passive resistor mixer with analog switches in some of its legs (the
+    /// CD4066 pattern). `srcs` holds `(node, conductance, switch)`; a leg with a
+    /// switch contributes only while that node is non-zero, and `load_g` is the
+    /// conductance of any permanent load.
+    ///
+    /// An open switch removes its resistor from the network, so it leaves the
+    /// *denominator* as well as the numerator. That is the whole reason this is
+    /// not [`ResistorMixer`](Self::ResistorMixer) fed by gated sources: gating a
+    /// source to zero mixes in a silent leg, which attenuates every other leg,
+    /// where opening a switch makes the remaining legs louder. It also changes
+    /// the balance between the surviving legs, so a switched mixer is a timbre
+    /// control and not only a volume control.
+    SwitchedResistorMixer {
+        srcs: Vec<(NodeId, f64, Option<NodeId>)>,
+        load_g: f64,
+    },
     /// Diode-OR mixer: the highest input wins, less that diode's forward drop.
     /// `srcs` holds `(node, drop)` so branches with different numbers of
     /// junctions in series can carry their own drop. The output cannot go
@@ -364,6 +380,14 @@ impl NodeKind {
                 out.push(modulator_src.index());
             }
             NodeKind::ResistorMixer { srcs, .. } => out.extend(srcs.iter().map(|(s, _)| s.index())),
+            NodeKind::SwitchedResistorMixer { srcs, .. } => {
+                for (s, _, sw) in srcs.iter() {
+                    out.push(s.index());
+                    if let Some(id) = sw {
+                        out.push(id.index());
+                    }
+                }
+            }
             NodeKind::Custom { inputs, .. } => out.extend(inputs.iter().map(|s| s.index())),
             _ => {}
         }
@@ -532,6 +556,20 @@ impl NodeKind {
                     let sum: f64 = srcs.iter().map(|(s, g)| values[s.index()] * g).sum();
                     sum / *total_g
                 }
+            }
+            NodeKind::SwitchedResistorMixer { srcs, load_g } => {
+                // Millman over the legs that are actually connected: an open
+                // switch drops out of both sums, not just the numerator.
+                let mut sum = 0.0;
+                let mut total_g = *load_g;
+                for (s, g, sw) in srcs.iter() {
+                    if sw.is_some_and(|id| values[id.index()] == 0.0) {
+                        continue;
+                    }
+                    sum += values[s.index()] * g;
+                    total_g += g;
+                }
+                if total_g == 0.0 { 0.0 } else { sum / total_g }
             }
             NodeKind::DiodeMixer { srcs } => srcs
                 .iter()
@@ -908,6 +946,7 @@ impl NodeKind {
             | NodeKind::Clamp { .. }
             | NodeKind::Threshold { .. }
             | NodeKind::ResistorMixer { .. }
+            | NodeKind::SwitchedResistorMixer { .. }
             | NodeKind::DiodeMixer { .. }
             | NodeKind::DacLadder { .. } => {}
         }
@@ -981,6 +1020,7 @@ impl NodeKind {
             | NodeKind::Clamp { .. }
             | NodeKind::Threshold { .. }
             | NodeKind::ResistorMixer { .. }
+            | NodeKind::SwitchedResistorMixer { .. }
             | NodeKind::DiodeMixer { .. }
             | NodeKind::DacLadder { .. } => {}
         }
@@ -1054,6 +1094,7 @@ impl NodeKind {
             | NodeKind::Clamp { .. }
             | NodeKind::Threshold { .. }
             | NodeKind::ResistorMixer { .. }
+            | NodeKind::SwitchedResistorMixer { .. }
             | NodeKind::DiodeMixer { .. }
             | NodeKind::DacLadder { .. } => {}
         }
