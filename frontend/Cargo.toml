@@ -14,6 +14,10 @@ phosphor-harness = { path = "../harness" }
 phosphor-script = { path = "../tools/script" }
 rhai = "1"
 sdl2 = "0.38"
+# These two move together or not at all: egui_sdl2_gl is built against one
+# egui version, so egui cannot be bumped past whatever the backend supports.
+# egui is at 0.36 upstream, but 0.33.2 is the newest egui_sdl2_gl there is, so
+# the ceiling here is the backend's release cadence and not our own.
 egui_sdl2_gl = { version = "0.33", default-features = false }
 egui = "0.33"
 gl = "0.14"

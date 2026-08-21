@@ -10,10 +10,13 @@ zip = "8"
 # Input movies fingerprint their ROM set and their own contents with SHA-256,
 # and deflate their record block (analog traces run to tens of thousands of
 # records per minute). Both are effectively free here: `zip` already pulls
-# `flate2` into this crate's runtime tree, and `digest`/`block-buffer`/
-# `crypto-common` are already vendored for `zip`'s `sha1` and `hmac`.
+# `flate2` into this crate's runtime tree, and `digest`/`crypto-common`/
+# `hybrid-array` are already vendored for `zip`'s `sha1` and `hmac`.
+#
+# Keep sha2 on the same `digest` generation as `zip`'s hashes, or the tree
+# carries both. zip 8 and sha2 0.11 are both on digest 0.11.
 flate2 = "1"
-sha2 = "0.10"
+sha2 = "0.11"
 
 # Dev-only: the golden-frame suite reads its pinned data as TOML and
 # writes/decodes reference PNGs. Deliberately not real dependencies — the
