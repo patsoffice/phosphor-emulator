@@ -9,4 +9,4 @@ phosphor-core = { path = "../core" }
 phosphor-macros = { path = "../macros" }
 
 [dev-dependencies]
-png = "0.17"
+png = "0.18"

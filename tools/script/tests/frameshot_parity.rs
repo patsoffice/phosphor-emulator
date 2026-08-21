@@ -49,7 +49,12 @@ fn render_oriented(m: &mut dyn FrontendMachine) -> (u32, u32, Vec<u8>) {
 fn decode_png(path: &Path) -> (u32, u32, Vec<u8>) {
     let decoder = png::Decoder::new(BufReader::new(File::open(path).unwrap()));
     let mut reader = decoder.read_info().unwrap();
-    let mut buf = vec![0u8; reader.output_buffer_size()];
+    let mut buf = vec![
+        0u8;
+        reader
+            .output_buffer_size()
+            .expect("decoded size fits in memory")
+    ];
     let info = reader.next_frame(&mut buf).unwrap();
     assert_eq!(
         info.color_type,

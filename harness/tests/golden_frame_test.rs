@@ -506,7 +506,13 @@ fn read_png(path: &Path) -> (u32, u32, Vec<u8>) {
     let mut reader = png::Decoder::new(std::io::BufReader::new(file))
         .read_info()
         .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
-    let mut buf = vec![0u8; reader.output_buffer_size()];
+    let mut buf = vec![
+        0u8;
+        reader.output_buffer_size().unwrap_or_else(|| panic!(
+            "{}: decoded size does not fit in memory",
+            path.display()
+        ))
+    ];
     let info = reader
         .next_frame(&mut buf)
         .unwrap_or_else(|e| panic!("decoding {}: {e}", path.display()));

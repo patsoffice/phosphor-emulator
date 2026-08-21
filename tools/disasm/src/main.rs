@@ -1178,10 +1178,15 @@ fn count_diff(a: &[u8], b: &[u8], threshold: u32) -> (usize, usize) {
 /// Decode an 8-bit RGB/RGBA PNG into a tightly-packed RGB byte buffer.
 fn load_png(path: &Path) -> Result<(u32, u32, Vec<u8>), String> {
     let file = std::fs::File::open(path).map_err(|e| format!("opening {}: {e}", path.display()))?;
-    let mut reader = png::Decoder::new(file)
+    let mut reader = png::Decoder::new(std::io::BufReader::new(file))
         .read_info()
         .map_err(|e| format!("reading {}: {e}", path.display()))?;
-    let mut buf = vec![0u8; reader.output_buffer_size()];
+    // `output_buffer_size` is fallible: it reports None when the decoded frame
+    // would not fit this platform's usize, rather than overflowing the length.
+    let size = reader
+        .output_buffer_size()
+        .ok_or_else(|| format!("{}: decoded size does not fit in memory", path.display()))?;
+    let mut buf = vec![0u8; size];
     let info = reader
         .next_frame(&mut buf)
         .map_err(|e| format!("decoding {}: {e}", path.display()))?;

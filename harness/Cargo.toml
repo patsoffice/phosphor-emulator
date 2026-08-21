@@ -19,5 +19,5 @@ sha2 = "0.10"
 # writes/decodes reference PNGs. Deliberately not real dependencies — the
 # frontend links this crate and gains none of them.
 [dev-dependencies]
-png = "0.17"
+png = "0.18"
 toml = "0.8"

@@ -19,4 +19,4 @@ phosphor-harness = { path = "../../harness" }
 # handles may use Rc/RefCell rather than Arc/Mutex.
 rhai = "1"
 clap = { version = "4", features = ["derive"] }
-png = "0.17"
+png = "0.18"
