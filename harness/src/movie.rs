@@ -46,6 +46,11 @@
 //! replaying against the wrong ROM dump or decoding a truncated file — accidents
 //! rather than forgery — but there is no reason to reach for something weaker
 //! when `digest` and friends are already linked.
+//!
+//! `rom_digest` covers the loaded set's member files, names and contents. It
+//! deliberately does *not* cover the registry's `rom_names`: those name the
+//! archive to look in, not the dump inside it, and hashing them was the bug
+//! [`rom_digest`] documents.
 
 use std::fmt;
 use std::io::{Read, Write};
@@ -63,7 +68,15 @@ pub const MOVIE_MAGIC: [u8; 4] = *b"PHMI";
 
 /// Format version. Bumped only for envelope changes; a new record kind that old
 /// readers must reject also bumps it.
-pub const MOVIE_VERSION: u16 = 1;
+///
+/// Version 2 bumps for a change of *meaning* rather than of layout: the bytes
+/// are laid out exactly as version 1 laid them out, but [`rom_digest`] now
+/// fingerprints the ROM dump instead of the registry's name list. A version-1
+/// file therefore carries a header field this build cannot interpret, and there
+/// is no way to recompute the old value from the new inputs, so such a file is
+/// rejected outright rather than replayed against a guess. A movie is a log of
+/// inputs and nothing else, so the remedy is to record it again.
+pub const MOVIE_VERSION: u16 = 2;
 
 /// Ceiling on a decompressed record block, so a corrupt or hostile file cannot
 /// make the decoder allocate without bound. 64 MiB is roughly six million
@@ -153,32 +166,54 @@ impl std::error::Error for MovieError {}
 // ROM identity
 // ---------------------------------------------------------------------------
 
-/// SHA-256 over the ROM files a machine will be built from, in the registry's
-/// `rom_names` order.
+/// SHA-256 over the ROM dump a machine was built from: every member file in
+/// the set, name and contents, in sorted name order.
 ///
 /// Replaying a movie against a different dump of the same game is the failure
 /// this exists to catch: the machine boots, the frames differ, and without a
 /// digest the only symptom is a golden hash that moved for no visible reason.
 ///
-/// Each name and each body is length-prefixed before being absorbed, so two
-/// different splits of the same bytes cannot collide.
+/// It takes the set and nothing else, deliberately. This used to take the
+/// registry entry's `rom_names` too and look each one up as a member file, but
+/// those are *archive* names ("mariobros") while members are *chip* names
+/// ("tma1-c-7f.7f"), so every lookup missed, every branch took the not-found
+/// arm, and the digest collapsed to a hash of the name list. That was wrong in
+/// both directions at once: three genuinely different Mario Bros dumps digested
+/// identically, and reordering an entry's name list invalidated every movie
+/// recorded before the change. Hashing the set fixes both, and leaves no name
+/// list to pass in wrongly.
+///
+/// Names are sorted because a set is backed by a `HashMap`, whose iteration
+/// order is not stable across processes. Each name and each body is
+/// length-prefixed before being absorbed, so two different splits of the same
+/// bytes cannot collide.
+///
+/// The whole archive is covered, not just the files a machine loads, because
+/// the registry knows the set's name and not its manifest. The cost is that a
+/// dump carrying an extra unused file reads as a different dump; the benefit is
+/// that anything the machine could have loaded is in scope.
 ///
 /// A blank set ([`RomSet::blank`], used by the ROM-less registry-driven tests)
-/// has no bytes to digest, so each name absorbs a sentinel instead. That still
-/// yields a stable per-machine value, which is all those tests need.
-pub fn rom_digest(set: &RomSet, rom_names: &[&str]) -> [u8; 32] {
+/// holds no members and synthesizes zeroes on demand, so it has nothing to
+/// fingerprint. It absorbs a marker instead and yields one constant for every
+/// machine. Those tests never compare digests, and a movie's `machine` field
+/// already separates machines.
+pub fn rom_digest(set: &RomSet) -> [u8; 32] {
     let mut h = Sha256::new();
-    for name in rom_names {
+    if set.is_blank() {
+        h.update(b"phosphor-movie-blank-rom-set");
+        return h.finalize().into();
+    }
+    let mut names = set.file_names();
+    names.sort_unstable();
+    h.update((names.len() as u64).to_le_bytes());
+    for name in names {
         h.update((name.len() as u64).to_le_bytes());
         h.update(name.as_bytes());
-        match set.get(name) {
-            Some(bytes) => {
-                h.update([1u8]);
-                h.update((bytes.len() as u64).to_le_bytes());
-                h.update(bytes);
-            }
-            None => h.update([0u8]),
-        }
+        // Always `Some`: the names came from the set itself.
+        let bytes = set.get(name).unwrap_or_default();
+        h.update((bytes.len() as u64).to_le_bytes());
+        h.update(bytes);
     }
     h.finalize().into()
 }

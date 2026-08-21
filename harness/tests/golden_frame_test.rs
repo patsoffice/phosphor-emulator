@@ -941,7 +941,7 @@ fn a_movie_entry_replays_and_is_reproducible() {
 
     const FRAMES: usize = 400;
     let set = phosphor_harness::load_rom_set(roms, entry_meta.rom_names).expect("load_rom_set");
-    let digest = phosphor_harness::movie::rom_digest(&set, entry_meta.rom_names);
+    let digest = phosphor_harness::movie::rom_digest(&set);
 
     let mut h = Harness::build(name, roms, None, None, &[], &[]).expect("build");
     let controls = h.machine().input_controls();

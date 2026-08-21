@@ -389,7 +389,7 @@ fn create_from_first_rom_set(
             // Digest the set the machine was actually built from, so a captured
             // movie can refuse to replay against a different dump.
             Ok(machine) => {
-                let digest = phosphor_harness::movie::rom_digest(&rom_set, &[name]);
+                let digest = phosphor_harness::movie::rom_digest(&rom_set);
                 return (machine, digest);
             }
             Err(e) => last_err = Some(e),

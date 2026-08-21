@@ -31,6 +31,13 @@
 //! fallback still catches a pinned or offset output, which is visible with or
 //! without input; it cannot say anything about silence, so it does not try.
 //!
+//! The fallback cannot *retire* a `known_defect` entry either, for the same
+//! reason in the other direction: attract mode drives a different set of voices
+//! than play does, so a defect measured from a recording is not observable
+//! there. A machine that fell back is reported as unchecked rather than as
+//! fixed, so a movie that goes missing costs coverage instead of quietly
+//! deleting the entries it used to hold up.
+//!
 //! # Gating
 //!
 //! No ROM directory (`PHOSPHOR_ROMS`, else `~/ws/mame-runtime/roms`) → skip, so
@@ -395,11 +402,27 @@ fn every_expectation_names_a_registered_machine() {
     }
 }
 
+/// What one pass over the roster measured.
+struct Sweep {
+    /// Defects found, per machine. Machines with none are absent.
+    found: BTreeMap<String, Vec<Defect>>,
+    /// Which fixture each measured machine ran under. A [`Fixture::Boot`]
+    /// result describes attract mode, which drives a different set of voices
+    /// than play does, so it can confirm neither the presence nor the absence
+    /// of a defect that was pinned from a recording.
+    fixtures: BTreeMap<String, Fixture>,
+    /// Machines actually measured.
+    checked: usize,
+    /// Machines this collection cannot run.
+    skipped: Vec<&'static str>,
+}
+
 /// Measure every machine once, then judge. Split from the assertions so both
 /// directions of the ratchet read from one sweep.
-fn sweep(dir: &Path) -> (BTreeMap<String, Vec<Defect>>, usize, Vec<&'static str>) {
+fn sweep(dir: &Path) -> Sweep {
     let e = load_expectations();
     let mut found: BTreeMap<String, Vec<Defect>> = BTreeMap::new();
+    let mut fixtures: BTreeMap<String, Fixture> = BTreeMap::new();
     let mut checked = 0usize;
     let mut skipped = Vec::new();
 
@@ -409,6 +432,7 @@ fn sweep(dir: &Path) -> (BTreeMap<String, Vec<Defect>>, usize, Vec<&'static str>
             continue;
         };
         checked += 1;
+        fixtures.insert(entry.name.to_string(), fixture);
         let mut defects = Vec::new();
 
         if integrity.dc_offset.abs() > e.defaults.max_dc_offset {
@@ -429,7 +453,12 @@ fn sweep(dir: &Path) -> (BTreeMap<String, Vec<Defect>>, usize, Vec<&'static str>
             found.insert(entry.name.to_string(), defects);
         }
     }
-    (found, checked, skipped)
+    Sweep {
+        found,
+        fixtures,
+        checked,
+        skipped,
+    }
 }
 
 /// No machine may be newly defective.
@@ -440,7 +469,12 @@ fn sweep(dir: &Path) -> (BTreeMap<String, Vec<Defect>>, usize, Vec<&'static str>
 fn no_machine_emits_newly_defective_audio() {
     let Some(dir) = roms() else { return };
     let e = load_expectations();
-    let (found, checked, skipped) = sweep(&dir);
+    let Sweep {
+        found,
+        checked,
+        skipped,
+        ..
+    } = sweep(&dir);
 
     if !skipped.is_empty() {
         eprintln!(
@@ -502,11 +536,28 @@ fn describe(d: Defect) -> &'static str {
 fn every_known_defect_is_still_present() {
     let Some(dir) = roms() else { return };
     let e = load_expectations();
-    let (found, _, skipped) = sweep(&dir);
+    let Sweep {
+        found,
+        fixtures,
+        skipped,
+        ..
+    } = sweep(&dir);
 
     let mut fixed: Vec<String> = Vec::new();
+    let mut inconclusive: Vec<&str> = Vec::new();
     for (machine, known) in &e.known_defects {
         if skipped.contains(&machine.as_str()) {
+            continue;
+        }
+        // A boot fixture cannot retire an entry. Attract mode drives a
+        // different set of voices than play does, so a defect measured from a
+        // recording simply is not observable here, and reporting it as fixed would
+        // invite deleting an entry that still holds. This is not hypothetical:
+        // a movie that goes missing, or one left behind by a format bump,
+        // silently turns every one of its machine's entries into a false
+        // "fixed".
+        if fixtures.get(machine) != Some(&Fixture::Movie) {
+            inconclusive.push(machine);
             continue;
         }
         let actual = found.get(machine).map(|v| v.as_slice()).unwrap_or(&[]);
@@ -515,6 +566,16 @@ fn every_known_defect_is_still_present() {
                 fixed.push(format!("{machine}: {} is fixed", kind.as_str()));
             }
         }
+    }
+
+    if !inconclusive.is_empty() {
+        eprintln!(
+            "{} machine(s) measured from attract mode, so their known_defect entries \
+             were not checked: {}. Record a movie for each to put them back under the \
+             ratchet.",
+            inconclusive.len(),
+            inconclusive.join(", ")
+        );
     }
 
     assert!(

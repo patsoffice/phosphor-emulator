@@ -141,7 +141,7 @@ fn record_against_roms(dir: &Path) -> Option<(String, PathBuf)> {
 
     let roms = dir.to_str().unwrap();
     let set = load_rom_set(roms, entry.rom_names).ok()?;
-    let digest = rom_digest(&set, entry.rom_names);
+    let digest = rom_digest(&set);
 
     let mut h = Harness::build(entry.name, roms, None, None, &[], &[]).ok()?;
     let controls = h.machine().input_controls();

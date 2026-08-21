@@ -23,6 +23,7 @@ use phosphor_core::core::machine::{FrontendMachine, InputControl, InputEvent, In
 use phosphor_harness::movie::{MovieError, MovieRecorder, rom_digest};
 use phosphor_harness::{Harness, Movie, load_rom_set, roms_dir};
 use phosphor_machines::registry;
+use phosphor_machines::rom_loader::RomSet;
 
 /// Frames each ROM-less case runs. Long enough that a mis-delivered event has
 /// time to propagate into the saved state and the framebuffer, short enough to
@@ -452,6 +453,76 @@ fn binding_rejects_a_control_the_machine_does_not_expose() {
 }
 
 // ---------------------------------------------------------------------------
+// ROM identity
+// ---------------------------------------------------------------------------
+
+/// The property `rom_digest` exists for, and the one it used to lack: two dumps
+/// that differ in a single byte must not fingerprint the same.
+///
+/// It once hashed the registry's `rom_names` (archive names) as if they were
+/// member names, so every lookup missed and the digest was a function of the
+/// name list alone. Three genuinely different Mario Bros dumps digested
+/// identically. This is that case in miniature.
+#[test]
+fn digest_separates_two_dumps_that_differ_in_one_byte() {
+    let a = RomSet::from_slices(&[("cpu.1a", &[0x00, 0x11, 0x22]), ("gfx.2b", &[0xFF])]);
+    let b = RomSet::from_slices(&[("cpu.1a", &[0x00, 0x11, 0x23]), ("gfx.2b", &[0xFF])]);
+    assert_ne!(rom_digest(&a), rom_digest(&b));
+}
+
+/// A member that is present in one set and absent in the other is a different
+/// dump too, and a rename with identical bytes likewise.
+#[test]
+fn digest_separates_sets_by_membership_and_by_name() {
+    let base = RomSet::from_slices(&[("cpu.1a", &[0x00, 0x11])]);
+    let extra = RomSet::from_slices(&[("cpu.1a", &[0x00, 0x11]), ("prom.4c", &[0x00])]);
+    let renamed = RomSet::from_slices(&[("cpu.1b", &[0x00, 0x11])]);
+    assert_ne!(rom_digest(&base), rom_digest(&extra));
+    assert_ne!(rom_digest(&base), rom_digest(&renamed));
+}
+
+/// The digest must not depend on the order files were inserted. A `RomSet` is
+/// backed by a `HashMap`, so an unsorted walk would make a movie replayable in
+/// one process and not the next.
+#[test]
+fn digest_is_independent_of_insertion_order() {
+    let forward = RomSet::from_slices(&[
+        ("a.1", &[1, 2, 3]),
+        ("b.2", &[4, 5]),
+        ("c.3", &[6]),
+        ("d.4", &[7, 8, 9, 10]),
+    ]);
+    let reverse = RomSet::from_slices(&[
+        ("d.4", &[7, 8, 9, 10]),
+        ("c.3", &[6]),
+        ("b.2", &[4, 5]),
+        ("a.1", &[1, 2, 3]),
+    ]);
+    assert_eq!(rom_digest(&forward), rom_digest(&reverse));
+}
+
+/// Length-prefixing exists so that regrouping the same bytes across members
+/// cannot collide. Without it these two sets absorb the identical byte stream.
+#[test]
+fn digest_separates_two_splits_of_the_same_bytes() {
+    let split = RomSet::from_slices(&[("r", &[0xAA]), ("s", &[0xBB, 0xCC])]);
+    let other = RomSet::from_slices(&[("r", &[0xAA, 0xBB]), ("s", &[0xCC])]);
+    assert_ne!(rom_digest(&split), rom_digest(&other));
+}
+
+/// A blank set has no members to fingerprint, so it answers with one constant.
+/// The only requirement is that it is stable and is not mistaken for a real
+/// dump; machines are separated by the movie's `machine` field, not by this.
+#[test]
+fn a_blank_set_digests_to_a_stable_value_of_its_own() {
+    assert_eq!(rom_digest(&RomSet::blank()), rom_digest(&RomSet::blank()));
+    assert_ne!(
+        rom_digest(&RomSet::blank()),
+        rom_digest(&RomSet::from_slices(&[]))
+    );
+}
+
+// ---------------------------------------------------------------------------
 // ROM-gated
 // ---------------------------------------------------------------------------
 
@@ -559,7 +630,7 @@ fn replay_refuses_a_rom_set_the_movie_was_not_recorded_against() {
     };
 
     let set = load_rom_set(dir.to_str().unwrap(), entry.rom_names).expect("load_rom_set");
-    let real = rom_digest(&set, entry.rom_names);
+    let real = rom_digest(&set);
 
     let machine = booted(&dir, entry).expect("just checked");
     let movie = Movie {
@@ -682,4 +753,56 @@ fn reset_is_not_a_power_cycle_so_arming_must_rebuild() {
         differing.len(),
         differing
     );
+}
+
+/// The bug's own demonstration, against the real collection: an entry listing
+/// more than one archive, with more than one of them on disk, holds genuinely
+/// different dumps of one game. Replaying a movie recorded on one against the
+/// other is the failure the digest exists to name, and for a long time it could
+/// not see it: all three Mario Bros dumps digested alike.
+#[test]
+fn two_dumps_of_one_game_do_not_digest_alike() {
+    let Some(dir) = roms_dir() else {
+        eprintln!("skipping: no ROM dir (set PHOSPHOR_ROMS or ~/ws/mame-runtime/roms)");
+        return;
+    };
+
+    let all = registry::all();
+    let mut checked = 0usize;
+    for entry in &all {
+        let present: Vec<&str> = entry
+            .rom_names
+            .iter()
+            .copied()
+            .filter(|n| dir.join(format!("{n}.zip")).exists())
+            .collect();
+        if present.len() < 2 {
+            continue;
+        }
+        // Digest each archive on its own, which is what a recording session
+        // does: `create_from_first_rom_set` loads one name at a time.
+        let mut seen: Vec<(&str, [u8; 32])> = Vec::new();
+        for name in present {
+            let path = dir.join(format!("{name}.zip"));
+            let Ok(set) = load_rom_set(path.to_str().unwrap(), &[name]) else {
+                continue;
+            };
+            let digest = rom_digest(&set);
+            if let Some((other, _)) = seen.iter().find(|(_, d)| *d == digest) {
+                panic!(
+                    "{}: '{name}.zip' and '{other}.zip' digest identically, so a movie \
+                     recorded against one would replay against the other and diverge",
+                    entry.name
+                );
+            }
+            seen.push((name, digest));
+            checked += 1;
+        }
+    }
+
+    if checked == 0 {
+        eprintln!("skipping: no registered machine has two of its archives on disk");
+    } else {
+        eprintln!("{checked} archives digested, all distinct");
+    }
 }

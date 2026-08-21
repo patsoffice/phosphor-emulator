@@ -187,7 +187,7 @@ trailer: sha256(all preceding bytes), 32 bytes
 ```rust
 struct MovieHeader {
     machine: String,          // registry name, e.g. "marble"
-    rom_digest: [u8; 32],     // sha256 over the loaded ROMs, in rom_names order
+    rom_digest: [u8; 32],     // sha256 over the loaded set's members, name-sorted
     controls: Vec<String>,    // stable_names; records index into this
     dip: Vec<u8>,             // power-on dip_bank_value() in bank order
     nvram: Option<Vec<u8>>,   // inline CMOS fixture, if the run used one
@@ -209,7 +209,14 @@ Four header fields deserve their rationale:
 
 * **`rom_digest`** is the check that matters most. A movie recorded against one
   dump replayed against another must fail loudly rather than desync into a
-  plausible-but-wrong frame hash.
+  plausible-but-wrong frame hash. It hashes the **member files** of the loaded
+  set: each name and body length-prefixed, walked in sorted name order because
+  a `RomSet` is a `HashMap`. It does *not* hash the registry's `rom_names`:
+  those name the archive to open, not the dump inside it. Version 1 of this
+  format hashed the name list by mistake, which both missed a wrong dump and
+  rejected movies that had merely outlived a reordering of the list; version 2
+  exists to draw the line between the two meanings, and version-1 files are
+  rejected rather than reinterpreted.
 * **`controls` is an index table.** Records carry a `u16` index, not an
   `InputId` and not a per-record string. Indexing by stable name means a movie
   survives `InputId` renumbering; interning it means a 36k-event trackball

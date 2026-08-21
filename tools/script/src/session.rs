@@ -194,7 +194,7 @@ impl DebugSession {
         {
             let set = load_rom_set(&rp, entry.rom_names)
                 .map_err(|e| format!("loading ROM set {rp}: {e}"))?;
-            if rom_digest(&set, entry.rom_names) != movie.header.rom_digest {
+            if rom_digest(&set) != movie.header.rom_digest {
                 return Err(format!(
                     "movie {path} was recorded against a different ROM set than {rp}"
                 ));

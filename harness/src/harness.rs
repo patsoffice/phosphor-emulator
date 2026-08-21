@@ -212,25 +212,31 @@ impl Harness {
         // silently, so this check is the difference between a clear error and a
         // golden hash that moved for no visible reason.
         //
-        // Report both digests. Note what this check can and cannot see:
-        // `rom_digest` hashes `set.get(name)` over the entry's *set* names, and
-        // those are ZIP-set names rather than member names, so every lookup
-        // misses and the digest is a function of `rom_names` alone. It therefore
-        // does NOT detect a different dump — pointing this at mario.zip,
-        // marioe.zip and mariof.zip yields one identical digest — and it DOES
-        // reject a movie whose only sin is predating a change to the entry's
-        // name list. Tracked in `…-movie-rom-digest-names-not-contents`.
-        let actual = rom_digest(&set, entry.rom_names);
+        // Report both digests and how this build chose its dump. Pointed at a
+        // directory, `load_rom_set` takes the first of `rom_names` that has an
+        // archive there, so a collection holding more than one dump of a game
+        // can legitimately have handed the recording and this replay different
+        // ones, and naming the order is what makes that diagnosable. Pointed
+        // straight at an archive it consults no names at all, and saying it
+        // "tried" any would be a fabrication.
+        let actual = rom_digest(&set);
         if actual != movie.header.rom_digest {
+            let chose = if roms_path.to_ascii_lowercase().ends_with(".zip") {
+                String::new()
+            } else {
+                format!(
+                    " (of {}, the first with an archive in {roms_path} was used)",
+                    entry.rom_names.join(", ")
+                )
+            };
             return Err(format!(
-                "{}: movie expects {}, this build computes {} for '{name}' \
-                 (accepted sets: {}). Note this digest covers the registry's ROM-set \
-                 name list, not the dump, so a mismatch usually means the movie \
-                 predates a change to that list rather than that you have the wrong ROMs.",
+                "{}: movie expects {}, this build computes {} for '{name}'{chose}. \
+                 This digest covers the member files of the dump that was loaded, so a \
+                 mismatch means the bytes differ: a different revision of the set, or \
+                 a different archive of the same game.",
                 MovieError::RomMismatch,
                 crate::movie::hex(&movie.header.rom_digest),
                 crate::movie::hex(&actual),
-                entry.rom_names.join(", "),
             ));
         }
 
