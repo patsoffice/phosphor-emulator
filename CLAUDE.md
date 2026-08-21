@@ -91,13 +91,37 @@ cargo run --release -p phosphor-bench -- --roms /path/to/roms   # Benchmark emul
 
 ### Nix Dev Environment
 
-The repo ships a `flake.nix` that pins the toolchain (cargo, rustc, clang, SDL2, pkg-config, libGL, plus Wayland on Linux) and sets `CC`/`CXX` and `LD_LIBRARY_PATH`. This is the source of truth for the build environment — prefer it over a system Rust/SDL2 install.
+The repo ships a `flake.nix` that pins the toolchain (cargo, rustc, clang, SDL2, pkg-config, libGL, ast-grep, cargo-audit, plus Wayland on Linux) and sets `CC`/`CXX` and `LD_LIBRARY_PATH`. This is the source of truth for the build environment — prefer it over a system Rust/SDL2 install.
 
 - **Enter the shell:** `nix develop`, or just `cd` into the repo if you use direnv (`.envrc` runs `use flake`; run `direnv allow` once).
 - **Run one command without entering:** `nix develop -c cargo test` (etc.).
 - **`nix-shell` still works** — `shell.nix` is a flake-compat shim that re-exports the same dev shell for anyone without flakes enabled.
-- **Bump pinned deps:** `nix flake update` (rewrites `flake.lock`); commit the lockfile. Don't hand-edit a nixpkgs URL/sha.
+- **Bump pinned deps:** `nix flake update` (rewrites `flake.lock`); commit the lockfile. Don't hand-edit a nixpkgs URL/sha — the input tracks the `nixos-unstable` branch precisely so this command can move it.
+- **The rustc pin is mirrored in CI.** `.github/workflows/ci.yml` pins `dtolnay/rust-toolchain` to the version the flake provides, so that "clippy is clean locally" and "clippy is clean in CI" mean the same thing. After `nix flake update`, run `nix develop -c rustc --version` and update that pin to match in the same commit.
 - `nix develop -c …` prints `warning: Git tree '…' is dirty` to **stderr** when the tree has uncommitted changes — strip with `2>/dev/null`, not a `grep` filter.
+
+### Dependency Updates
+
+Three surfaces, updated on different cadences. `Cargo.lock` and `flake.lock` are both committed.
+
+| Surface | Bumped with | Cadence |
+|---|---|---|
+| Lockfile (semver-compatible) | `cargo update` | Monthly |
+| Manifest requirements (majors) | edit the member `Cargo.toml` by hand | Quarterly, one crate per commit |
+| Toolchain and system libs | `nix flake update` | Quarterly, with the CI pin |
+
+- Use plain `cargo update`, **not** `cargo update --workspace`: the `--workspace` form only re-locks the path dependencies and silently reports "Locking 0 packages" while every registry crate stays put.
+- `cargo update --dry-run` previews the lockfile pass; add `--verbose` to also list the crates held back by a major-version requirement.
+- Never batch major bumps. One crate per commit is what makes a golden-frame diff or a bench regression attributable.
+- **Run the ROM-gated suites after any bump.** They are the only checks that would notice a dependency changing what a machine draws or whether it boots, and CI can never run them (arcade ROMs are not redistributable):
+
+  ```bash
+  PHOSPHOR_ROMS=~/ws/mame-runtime/roms nix develop -c cargo test -p phosphor-harness
+  ```
+
+- Re-run `cargo run --release -p phosphor-bench -- --roms …` around a bump that touches the hot path; `[profile.release]` leans on fat LTO and one codegen unit, so a dependency can move throughput.
+- `nix develop -c cargo audit` checks `Cargo.lock` against the RustSec advisory database. CI runs it on pushes to `main` and on the Monday cron, but not on pull requests — an advisory lands on someone else's schedule and has no business failing an unrelated PR. `unmaintained` notices are warnings and do not fail the run.
+- Most of the tree is inert for an offline emulator. The dependencies where staleness is a real risk rather than housekeeping are `zip` and `flate2`, which parse ROM archives from wherever the user got them.
 
 ### SDL2 Dependency
 

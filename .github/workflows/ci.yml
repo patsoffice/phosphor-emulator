@@ -1,6 +1,6 @@
 name: CI
 
-# Three jobs with deliberately different responsibilities.
+# Four jobs with deliberately different responsibilities.
 #
 # `check` is the gate. It runs on every push and pull request, must stay fast,
 # and is pinned to the same rustc the Nix dev shell provides so that "clippy is
@@ -15,6 +15,13 @@ name: CI
 # future-compatibility lints that will become hard errors later, and we would
 # rather see those on a schedule than discover them the day the pin moves.
 # When it goes red, fix the code — do not silence the job.
+#
+# `audit` checks Cargo.lock against the RustSec advisory database. Scheduled
+# rather than per-push on purpose: an advisory is published on the world's
+# timetable, not ours, so it has no business failing a PR that did not touch
+# dependencies. It is not marked continue-on-error, though — off the PR path a
+# red run means something real, and dependency updates are exactly when it
+# should be consulted. Same check locally: `nix develop -c cargo audit`.
 #
 # `validate` fetches the submodules, generates the M6800/M6809 vectors, and
 # runs all 7.1M of them. It is scheduled rather than per-push because the
@@ -52,7 +59,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             libsdl2-dev libgl1-mesa-dev pkg-config
 
-      - uses: dtolnay/rust-toolchain@1.95.0
+      - uses: dtolnay/rust-toolchain@1.97.1
         # Pinned to the rustc the flake provides, so a clean local clippy run
         # means a clean CI one. Keep in sync when `nix flake update` moves it:
         #   nix develop -c rustc --version
@@ -109,6 +116,21 @@ jobs:
 
       - name: Clippy on current stable
         run: cargo clippy --workspace --all-features --all-targets --locked -- -D warnings
+
+  audit:
+    name: RustSec advisories
+    # Not on pull requests: see the header. Pushes to main, the Monday cron, and
+    # manual runs are enough to keep the lockfile honest.
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # No SDL2 or toolchain setup: cargo-audit reads Cargo.lock as data and
+      # never builds the workspace, so the system dependencies are irrelevant.
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
 
   validate:
     name: CPU validation (7.1M vectors)

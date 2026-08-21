@@ -2,9 +2,12 @@
   description = "Phosphor Emulator — cycle-accurate retro CPU emulator framework";
 
   inputs = {
-    # Pinned to the same nixpkgs rev that shell.nix used (nixos-unstable 2026-06-06).
+    # Tracks the nixos-unstable branch rather than a fixed rev. The exact commit
+    # is still pinned — in flake.lock — so builds stay reproducible; the branch
+    # is what lets `nix flake update` actually move the toolchain forward. A rev
+    # here would have made that command a no-op for nixpkgs.
     # Bump with: nix flake update
-    nixpkgs.url = "github:NixOS/nixpkgs/a799d3e3886da994fa307f817a6bc705ae538eeb";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
     flake-compat = {
       url = "github:edolstra/flake-compat";
@@ -16,7 +19,7 @@
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = import nixpkgs { inherit system; };
-        isLinux = pkgs.stdenv.isLinux;
+        isLinux = pkgs.stdenv.hostPlatform.isLinux;
         linuxPkgs = pkgs.lib.optionals isLinux [
           pkgs.wayland
           pkgs.wayland-protocols
@@ -39,6 +42,12 @@
             pkgs.pkg-config
             pkgs.libGL
             pkgs.ast-grep # structural (AST-aware) search/replace for code mods
+            # RustSec advisory check over Cargo.lock: `cargo audit`. The tree is
+            # mostly inert for an offline emulator, but `zip` and `flate2` parse
+            # ROM archives from wherever the user got them, so that path is worth
+            # watching. Lives here so the check runs in the same shell as the
+            # build rather than needing an ad-hoc `cargo install`.
+            pkgs.cargo-audit
           ] ++ linuxPkgs;
 
           LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath ([
