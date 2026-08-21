@@ -1,4 +1,4 @@
-use phosphor_core::audio::SampleRing;
+use phosphor_core::audio::{DcBlocker, SampleRing};
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::input::{DrainPolicy, RelativeCounter};
 use phosphor_core::core::machine::{
@@ -460,6 +460,13 @@ pub struct CrystalCastlesBoard {
     sprite_buffer: Vec<u8>, // 256 × 256 temporary sprite layer (5-bit index)
 
     audio_buffer: SampleRing<i16>,
+    /// The POKEYs' coupling into the amplifier.
+    ///
+    /// Both chips are unipolar, so their sum carries an offset that varies with
+    /// how much they are playing. Removing it needs the running mean, not a
+    /// constant: see the mixing site, where a fixed subtraction used to pin the
+    /// output at the rail.
+    pokey_coupling: DcBlocker,
 }
 
 /// Atari Crystal Castles (1983): a 6502 beside the board it drives.
@@ -584,6 +591,7 @@ impl CrystalCastlesBoard {
             sprite_buffer: vec![0u8; 256 * 256],
 
             audio_buffer: SampleRing::with_capacity(2048),
+            pokey_coupling: DcBlocker::new(phosphor_core::audio::host_sample_rate()),
         }
     }
 
@@ -1201,6 +1209,7 @@ impl Saveable for CrystalCastlesSystem {
         self.cpu.save_state(w);
         self.board.pokey1.save_state(w);
         self.board.pokey2.save_state(w);
+        self.board.pokey_coupling.save_state(w);
         w.write_bytes(self.board.map.region_data(Region::VideoRam));
         w.write_bytes(self.board.map.region_data(Region::Sram));
         w.write_bytes(self.board.map.region_data(Region::SpriteRam));
@@ -1225,6 +1234,7 @@ impl Saveable for CrystalCastlesSystem {
         self.cpu.load_state(r)?;
         self.board.pokey1.load_state(r)?;
         self.board.pokey2.load_state(r)?;
+        self.board.pokey_coupling.load_state(r)?;
         r.read_bytes_into(self.board.map.region_data_mut(Region::VideoRam))?;
         r.read_bytes_into(self.board.map.region_data_mut(Region::Sram))?;
         r.read_bytes_into(self.board.map.region_data_mut(Region::SpriteRam))?;
@@ -1276,9 +1286,24 @@ impl MachineCore for CrystalCastlesSystem {
         let samples1 = self.board.pokey1.drain_audio();
         let samples2 = self.board.pokey2.drain_audio();
         let len = samples1.len().min(samples2.len());
+        // Each POKEY emits 0..1: a channel contributes its volume while its
+        // output is high and nothing while it is low, so the pin swings from
+        // ground up rather than either side of it.
+        //
+        // This used to centre the pair by subtracting 1.0, which assumes their
+        // mean is exactly 1.0, i.e. that both chips sit at half scale. They do
+        // not: they are near zero most of the time, so the subtraction pinned
+        // the output at the negative rail. It measured a DC of -0.973 with 74 %
+        // of samples clipped, which is the offset and the saturation both
+        // coming from this one constant.
+        //
+        // A coupling capacitor centres on the mean the chips actually produce
+        // instead of an assumed one, which is also what the board has between
+        // them and the amplifier.
+        let coupling = &mut self.board.pokey_coupling;
         self.board.audio_buffer.extend((0..len).map(|i| {
-            let mixed = (samples1[i] + samples2[i]) - 1.0; // center around zero
-            (mixed * 32767.0) as i16
+            let mixed = coupling.process(samples1[i] + samples2[i]);
+            (mixed * 32767.0).clamp(i16::MIN as f32, i16::MAX as f32) as i16
         }));
     }
 

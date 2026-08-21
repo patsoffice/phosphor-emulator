@@ -13,6 +13,7 @@
 //! 500 kHz driving two AY-3-8910s @ 1.5 MHz, with the command latch IRQ and the
 //! scanline-gated NMI). The game boots, plays, and has sound.
 
+use phosphor_core::audio::DcBlocker;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::{AccessKind, AddressSpace16};
@@ -235,6 +236,22 @@ pub struct BtimeBoard {
     ay1: Ay8910,
     #[debug_device("AY-3-8910 #2")]
     ay2: Ay8910,
+    /// The PSGs' coupling into the amplifier.
+    ///
+    /// These chips are UNIPOLAR: a channel contributes its level while it is
+    /// enabled and nothing while it is not, so the pin swings from ground up
+    /// rather than either side of it. Summed, the two of them put the output on
+    /// a DC offset of +0.198 of full scale under recorded play, on audio that
+    /// was otherwise healthy and never clipped.
+    ///
+    /// The chip is not modelled wrongly; its output really is unipolar, and so
+    /// is its reference implementation's. What was missing is the analog side
+    /// between the chips and the speaker, which no board using this part can do
+    /// without: a loudspeaker cannot reproduce DC and the amplifier would sit
+    /// off centre. The exact capacitor is not on a schematic to hand, so the
+    /// corner is the shared default, which is honest for a part whose only job
+    /// is to remove an offset.
+    ay_coupling: DcBlocker,
     sound_ram: [u8; 0x0400],
     sound_irq: bool,           // set on main write to 0x4003, cleared on 0xA000 read
     audio_nmi_enable: bool,    // 0xC000 write bit0; ANDs with scanline bit3 -> NMI
@@ -326,6 +343,7 @@ impl BtimeBoard {
             sound_map,
             ay1: Ay8910::new(AY_CLOCK_HZ),
             ay2: Ay8910::new(AY_CLOCK_HZ),
+            ay_coupling: DcBlocker::new(phosphor_core::audio::host_sample_rate()),
             sound_ram: [0; 0x0400],
             sound_irq: false,
             audio_nmi_enable: false,
@@ -559,6 +577,14 @@ impl BtimeBoard {
         let n2 = self.ay2.fill_audio(&mut tmp);
         for (out, &s) in buffer.iter_mut().zip(tmp.iter()).take(n1.min(n2)) {
             *out = out.saturating_add(s);
+        }
+        // Coupled after the sum, because the capacitor sits between the chips
+        // and the amplifier rather than inside either chip.
+        for s in buffer.iter_mut().take(n1) {
+            *s = self
+                .ay_coupling
+                .process(*s as f32)
+                .clamp(i16::MIN as f32, i16::MAX as f32) as i16;
         }
         n1
     }
@@ -876,6 +902,7 @@ impl Saveable for BtimeBoard {
         w.write_bytes(&self.sound_ram);
         self.ay1.save_state(w);
         self.ay2.save_state(w);
+        self.ay_coupling.save_state(w);
         self.sound_clock.save_state(w);
         w.write_bool(self.main_had_written);
         w.write_bool(self.main_irq);
@@ -900,6 +927,7 @@ impl Saveable for BtimeBoard {
         r.read_bytes_into(&mut self.sound_ram)?;
         self.ay1.load_state(r)?;
         self.ay2.load_state(r)?;
+        self.ay_coupling.load_state(r)?;
         self.sound_clock.load_state(r)?;
         self.main_had_written = r.read_bool()?;
         self.main_irq = r.read_bool()?;

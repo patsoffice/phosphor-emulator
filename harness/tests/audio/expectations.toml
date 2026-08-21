@@ -39,60 +39,42 @@ max_clipped_fraction = 0.01
 max_silent_fraction = 0.999
 
 # ---------------------------------------------------------------------------
-# Known defect: DC offset and saturation
+# No machine is a known defect
 # ---------------------------------------------------------------------------
-# Measured 2026-08-19. Machines with a movie are measured over recorded play;
-# the rest over a ten-second input-free boot, noted per entry. Both fixtures see
-# a pinned or offset output, so unlike silence these findings do not depend on
-# which one was used — though the magnitudes do, which is why the fixture is
-# recorded alongside the number.
-
-[[known_defect]]
-machine = "ccastles"
-dc = true
-clipping = true
-reason = "movie: DC -0.966 with 67.9% clipped — the worst of the set, and badly saturated during real play"
-issue = "phosphor-emulator-audio-dc-play-sweep-stxr"
-
-# Note joust and robotron keep only `clipping` — the Williams coupling
-# capacitor cleared their offsets (joust -0.350 -> +0.001, robotron +0.074 ->
-# -0.002) but both still drive the rail, which is excess gain rather than bias.
-# Sinistar came clean on both counts and its entry is gone.
-
-[[known_defect]]
-machine = "qbert"
-dc = true
-clipping = true
-reason = "movie: DC -0.430 with 4.0% clipped"
-issue = "phosphor-emulator-audio-dc-play-sweep-stxr"
-
-[[known_defect]]
-machine = "joust"
-clipping = true
-reason = "movie: 3.9% clipped with DC now clean (+0.001) — residual excess gain, not bias"
-issue = "phosphor-emulator-audio-dc-play-sweep-stxr"
-
-[[known_defect]]
-machine = "burgertime"
-dc = true
-reason = "movie: DC +0.198, no clipping — an offset riding on otherwise healthy audio (peak -2.0 dBFS)"
-issue = "phosphor-emulator-audio-dc-play-sweep-stxr"
-
-
-[[known_defect]]
-machine = "robotron"
-clipping = true
-reason = "movie: 15.8% clipped with DC now clean (-0.002) — the loudest of the Williams set and the clearest case of excess gain"
-issue = "phosphor-emulator-audio-dc-play-sweep-stxr"
-
-# Four entries are gone from here, all one fault in two places: a chip whose
-# output swings from ground up rather than either side of it, feeding the
-# speaker with no coupling capacitor in between.
 #
-#   mariobros                     its DAC ladder    DC -0.530  -> -0.0014
-#   docastle, dorunrun, dowild    their four PSGs   DC +0.130  -> +0.0000
-#                                                      +0.120  -> +0.0001
-#                                                      +0.208  -> +0.0000
+# There were fourteen. Every one is fixed, and the list below is kept because
+# what they had in common is worth more than the entries were.
+#
+# TWELVE WERE ONE FAULT: a sound chip whose output swings from ground up rather
+# than either side of it, feeding the amplifier with no coupling capacitor in
+# between. Five different parts, one omission.
+#
+#   mariobros                     MC1408 ladder    DC -0.530 -> -0.0014
+#   docastle, dorunrun, dowild    4x SN76489A      DC +0.130 -> +0.0000
+#                                                     +0.120 -> +0.0001
+#                                                     +0.208 -> +0.0000
+#   burgertime                    2x AY-3-8910     DC +0.196 -> +0.0001
+#   qbert                         MC1408 + speech  DC -0.447 -> -0.0001
+#   ccastles                      2x POKEY         DC -0.973 -> -0.0000
+#   missile, quantum, foodf,      (fixed earlier, same shape)
+#     sinistar, dkong
+#
+# None of those chips was modelled wrongly: each matches its reference
+# implementation, and a unipolar swing is what the silicon does. What was
+# missing every time was the board's analog side. If a new machine shows a DC
+# offset, look for the coupling capacitor before looking at the chip.
+#
+# TWO WERE GAIN, NOT BIAS: joust and robotron had clean offsets and still drove
+# the rail, 4.9 % and 16.2 % of samples. Their MC1408 was mapped across the whole
+# i16 range, which leaves no headroom for the shift that removing a pedestal
+# applies. The board runs that part at a quarter of full scale, which is also
+# what the reference routes it at, and both went to 0.00 % clipped.
+#
+# ccastles is worth singling out. It had tried to centre its two POKEYs by
+# subtracting a constant 1.0, which assumes both chips sit at half scale on
+# average. They sit near zero, so the subtraction pinned the output at the
+# negative rail: that one constant was both its -0.97 offset AND its 74 %
+# clipping. Removing an offset needs the running mean, not a guess at it.
 #
 # The Do's Castle three share one board, so one capacitor cleared all of them,
 # and their clipping went with the offset. Worth knowing for what remains: an

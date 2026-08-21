@@ -387,8 +387,29 @@ fn the_expectations_file_parses_and_has_sane_defaults() {
     assert!(e.defaults.max_dc_offset > 0.0 && e.defaults.max_dc_offset < 1.0);
     assert!(e.defaults.max_clipped_fraction >= 0.0 && e.defaults.max_clipped_fraction < 1.0);
     assert!(e.defaults.max_silent_fraction > 0.0 && e.defaults.max_silent_fraction <= 1.0);
-    // Parsing enforces reasons and issue links; reaching here means it held.
-    assert!(!e.known_defects.is_empty() || !e.correct.is_empty());
+
+    // Every entry in the file reached the parsed maps.
+    //
+    // This used to assert that at least one map was non-empty, as a proxy for
+    // "the parse produced something". That proxy fails the day the last defect
+    // is fixed, which is the state the ratchet exists to reach: it turned a
+    // finished job into a red suite. Counting the file's own section headers
+    // instead checks the same thing and still holds at zero.
+    //
+    // Headers only at column zero: the file's documentation quotes both names
+    // in an indented comment, and a substring count would find those too.
+    let text = std::fs::read_to_string(expectations_path()).expect("re-reading expectations");
+    let headers = |name: &str| text.lines().filter(|l| l.trim_end() == name).count();
+    assert_eq!(
+        headers("[[known_defect]]"),
+        e.known_defects.len(),
+        "known_defect entries in the file did not all parse"
+    );
+    assert_eq!(
+        headers("[[correct]]"),
+        e.correct.len(),
+        "correct entries in the file did not all parse"
+    );
 }
 
 /// An entry that outlives its machine is stale documentation, and stale

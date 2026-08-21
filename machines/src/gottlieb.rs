@@ -14,7 +14,7 @@
 //! - **I/O**: MOS 6532 RIOT (128B RAM, 2 ports, timer, edge detect)
 //! - **NMI**: VBLANK → main CPU NMI; RIOT IRQ → sound CPU IRQ; Votrax A/R → sound CPU NMI
 
-use phosphor_core::audio::AudioResampler;
+use phosphor_core::audio::{AudioResampler, DcBlocker};
 use phosphor_core::core::debug::{DebugRegister, Debuggable};
 use phosphor_core::core::machine::ProfileSpan;
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
@@ -139,6 +139,19 @@ pub(crate) struct GottliebSoundBoard {
     dac: Mc1408Dac,
     votrax: VotraxSc01,
     resampler: AudioResampler<i16>,
+    /// The sound board's coupling into the amplifier.
+    ///
+    /// The MC1408 is a current-output ladder and is UNIPOLAR, so what it puts
+    /// out sits above ground rather than either side of it, and the sound CPU
+    /// drives it around a low code rather than the mid-scale its conversion
+    /// assumes. Q*bert measured a DC of -0.447 under recorded play with 5.6 %
+    /// of samples clipped, which is that pedestal eating headroom until the
+    /// peaks run out of room.
+    ///
+    /// Applied to the summed output rather than the ladder alone: the speech
+    /// synthesizer joins the same amplifier, and one capacitor at that point is
+    /// what the board has.
+    output_coupling: DcBlocker,
     #[save_skip]
     sound_rom: Vec<u8>, // 8KB (mapped at 0x6000-0x7FFF in 15-bit space)
     clock: u64,
@@ -159,6 +172,7 @@ impl GottliebSoundBoard {
             dac: Mc1408Dac::new(),
             votrax: VotraxSc01::new(VOTRAX_NOMINAL_CLOCK_HZ),
             resampler: AudioResampler::new(SOUND_CLOCK_HZ, output_sample_rate()),
+            output_coupling: DcBlocker::new(output_sample_rate() as u32),
             sound_rom: vec![0xFF; 0x2000],
             clock: 0,
             votrax_ar_prev: true,
@@ -245,6 +259,15 @@ impl GottliebSoundBoard {
                 0
             };
             buffer[i] = (dac_sample + speech_sample).clamp(-32768, 32767) as i16;
+        }
+        // The coupling capacitor, after the sum: it sits between the sound
+        // board and the amplifier, so it sees the ladder and the speech
+        // together.
+        for s in buffer.iter_mut().take(mix_len) {
+            *s = self
+                .output_coupling
+                .process(*s as f32)
+                .clamp(i16::MIN as f32, i16::MAX as f32) as i16;
         }
         mix_len
     }

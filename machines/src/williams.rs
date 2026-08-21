@@ -49,6 +49,13 @@ pub(crate) enum SoundRegion {
 // Williams gen-1 hardware constants
 // ---------------------------------------------------------------------------
 
+/// How much of full scale the MC1408 DAC (mc1408.ic6) reaches the speaker at.
+///
+/// A quarter. Expressed as a ratio rather than a float so the sample stays in
+/// integer arithmetic, matching the speech decoder's 4/5 beside it.
+const DAC_ROUTE_NUM: i32 = 1;
+const DAC_ROUTE_DEN: i32 = 4;
+
 pub const TIMING: TimingConfig = TimingConfig {
     cpu_clock_hz: 1_000_000, // E clock = 4 MHz XTAL ÷ 4
     cycles_per_scanline: 64, // 1 MHz / ~15.6 kHz horizontal
@@ -690,7 +697,20 @@ impl WilliamsBoard {
         // DAC is continuously connected to sound PIA Port A output pins
         let dac_byte = self.sound_pia.read_output_a();
         self.dac.write(dac_byte);
-        let mut sample = self.dac.sample_i16();
+        // The DAC reaches the speaker at a quarter of full scale.
+        //
+        // `Mc1408Dac::sample_i16` spreads the ladder's 8 bits across the whole
+        // i16 range, which leaves no room for anything else and none for the
+        // shift that removing the pedestal applies: a code near either end
+        // ended up past the rail once the coupling below re-centred it. Joust
+        // clipped 4.9 % of its samples during recorded play and Robotron 16.2 %,
+        // with their offsets already clean, so this was gain and not bias.
+        //
+        // A quarter is what the board's own amplifier does with this part
+        // (mc1408.ic6), and it is the same figure the reference routes it at.
+        // It also sets the balance against the speech decoder, which is routed
+        // at 0.8 and already scaled that way below.
+        let mut sample = (self.dac.sample_i16() as i32 * DAC_ROUTE_NUM / DAC_ROUTE_DEN) as i16;
 
         // CVSD speech (Sinistar): the sound CPU bit-bangs the stream on the
         // sound PIA's CA2 (data) and CB2 (clock) lines. clock_w is edge-
