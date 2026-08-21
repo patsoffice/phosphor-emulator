@@ -29,7 +29,7 @@
 //!   memory-address bit to the sub CPU's IRQ; both are approximated here from
 //!   the raster position (see [`SUB_IRQ_FIRST_LINE`]).
 
-use phosphor_core::audio::AudioResampler;
+use phosphor_core::audio::{AudioResampler, DcBlocker};
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::DefaultBinding;
 use phosphor_core::core::machine::{
@@ -853,6 +853,23 @@ pub struct DocastleBoard {
     #[debug_device("SN76489A")]
     pub(crate) sn: [Sn76489a; 4],
     pub(crate) sn_clock: ClockDivider,
+    /// The PSGs' coupling into the amplifier.
+    ///
+    /// These chips are UNIPOLAR: each channel contributes its volume while its
+    /// output bit is set and nothing while it is clear, so the pin swings from
+    /// ground up rather than either side of it. A square at half duty therefore
+    /// sits on a DC offset of half its amplitude, and with four chips summed
+    /// that reached +0.13 to +0.21 of full scale across the three games on this
+    /// board. That is not a modelling error in the chip, which matches its
+    /// reference implementation; it is the board's analog side missing.
+    ///
+    /// No board using this part can feed it to a speaker directly, because a
+    /// loudspeaker cannot reproduce DC and the amplifier would sit off centre.
+    /// The coupling capacitor is not on any schematic to hand, so its corner is
+    /// the shared default rather than a specific part. That is honest here in a
+    /// way it would not be for a filter: this capacitor's only job is to remove
+    /// the offset, and every value that does that is inaudible.
+    pub(crate) sn_coupling: DcBlocker,
     pub(crate) audio: AudioResampler<i16>,
 
     // Timing / interrupts.
@@ -894,6 +911,7 @@ impl DocastleBoard {
                 Sn76489a::new(SOUND_CLOCK),
             ],
             sn_clock: ClockDivider::new(SOUND_CLOCK / 16, TIMING.cpu_clock_hz as u32),
+            sn_coupling: DcBlocker::new(output_sample_rate() as u32),
             audio: AudioResampler::new(TIMING.cpu_clock_hz, output_sample_rate()),
             clock: 0,
             main_irq_pending: false,
@@ -1077,8 +1095,13 @@ impl DocastleBoard {
             .map(|c| i32::from(c.output()))
             .sum::<i32>()
             .clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+        // Coupled after the box filter, once per output sample: the capacitor
+        // sits between the chips and the amplifier, so what it strips the
+        // offset from is the summed signal on its way to the speaker.
         if let Some(avg) = self.audio.tick_sample(mix) {
-            self.audio.push_sample(avg);
+            let coupled = self.sn_coupling.process(avg as f32);
+            self.audio
+                .push_sample(coupled.clamp(i16::MIN as f32, i16::MAX as f32) as i16);
         }
 
         self.clock += 1;
@@ -1297,6 +1320,7 @@ impl Saveable for DocastleBoard {
             chip.save_state(w);
         }
         self.sn_clock.save_state(w);
+        self.sn_coupling.save_state(w);
         self.audio.save_state(w);
         w.write_u64_le(self.clock);
         w.write_bool(self.main_irq_pending);
@@ -1326,6 +1350,7 @@ impl Saveable for DocastleBoard {
             chip.load_state(r)?;
         }
         self.sn_clock.load_state(r)?;
+        self.sn_coupling.load_state(r)?;
         self.audio.load_state(r)?;
         self.clock = r.read_u64_le()?;
         self.main_irq_pending = r.read_bool()?;

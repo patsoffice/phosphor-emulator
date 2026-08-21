@@ -80,29 +80,21 @@ issue = "phosphor-emulator-audio-dc-play-sweep-stxr"
 
 
 [[known_defect]]
-machine = "docastle"
-dc = true
-reason = "movie: DC +0.132 with 0.4% clipped"
-issue = "phosphor-emulator-audio-dc-play-sweep-stxr"
-
-[[known_defect]]
 machine = "robotron"
 clipping = true
 reason = "movie: 15.8% clipped with DC now clean (-0.002) — the loudest of the Williams set and the clearest case of excess gain"
 issue = "phosphor-emulator-audio-dc-play-sweep-stxr"
 
-[[known_defect]]
-machine = "dorunrun"
-dc = true
-reason = "boot (no movie): DC offset over threshold; shares the Do's Castle hardware with docastle and dowild, which show the same"
-issue = "phosphor-emulator-audio-dc-play-sweep-stxr"
-
-[[known_defect]]
-machine = "dowild"
-dc = true
-reason = "boot (no movie): DC offset over threshold; shares the Do's Castle hardware with docastle and dorunrun, which show the same"
-issue = "phosphor-emulator-audio-dc-play-sweep-stxr"
-
-# mariobros' entry is gone: its DAC's coupling capacitor was not modelled, so the
-# unipolar ladder's pedestal reached the speaker. DC -0.530 -> -0.0014 under
-# recorded play, clipping with it.
+# Four entries are gone from here, all one fault in two places: a chip whose
+# output swings from ground up rather than either side of it, feeding the
+# speaker with no coupling capacitor in between.
+#
+#   mariobros                     its DAC ladder    DC -0.530  -> -0.0014
+#   docastle, dorunrun, dowild    their four PSGs   DC +0.130  -> +0.0000
+#                                                      +0.120  -> +0.0001
+#                                                      +0.208  -> +0.0000
+#
+# The Do's Castle three share one board, so one capacitor cleared all of them,
+# and their clipping went with the offset. Worth knowing for what remains: an
+# offset of this shape is the analog side missing, not the chip being modelled
+# wrongly, and both chips match their reference implementations exactly.
