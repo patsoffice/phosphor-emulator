@@ -3,7 +3,7 @@ use std::path::Path;
 
 use phosphor_core::cpu::mb88xx::{Mb88xx, Mb88xxVariant};
 use phosphor_cpu_validation::{Mb88xxCpuState, Mb88xxTestCase};
-use rand::Rng;
+use rand::{Rng, RngExt};
 
 const NUM_TESTS: usize = 1000;
 
@@ -148,27 +148,27 @@ fn generate_opcode(rng: &mut impl Rng, instr: &InstrDef) -> Vec<Mb88xxTestCase> 
 
         // Randomize ROM
         for addr in 0..ROM_SIZE as u16 {
-            cpu.poke_rom(addr, rng.r#gen());
+            cpu.poke_rom(addr, rng.random());
         }
 
         // Randomize RAM (nibbles)
         for addr in 0..RAM_SIZE as u8 {
-            cpu.poke_ram(addr, rng.gen_range(0..=0x0Fu8));
+            cpu.poke_ram(addr, rng.random_range(0..=0x0Fu8));
         }
 
         // Randomize registers
-        cpu.a = rng.gen_range(0..=0x0Fu8);
-        cpu.x = rng.gen_range(0..=0x0Fu8);
-        cpu.y = rng.gen_range(0..=0x0Fu8);
-        cpu.st = rng.gen_range(0..=1u8);
-        cpu.zf = rng.gen_range(0..=1u8);
-        cpu.cf = rng.gen_range(0..=1u8);
-        cpu.vf = rng.gen_range(0..=1u8);
-        cpu.sf = rng.gen_range(0..=1u8);
-        cpu.irq_pin = rng.gen_range(0..=1u8);
-        cpu.sb = rng.gen_range(0..=0x0Fu8);
-        cpu.th = rng.gen_range(0..=0x0Fu8);
-        cpu.tl = rng.gen_range(0..=0x0Fu8);
+        cpu.a = rng.random_range(0..=0x0Fu8);
+        cpu.x = rng.random_range(0..=0x0Fu8);
+        cpu.y = rng.random_range(0..=0x0Fu8);
+        cpu.st = rng.random_range(0..=1u8);
+        cpu.zf = rng.random_range(0..=1u8);
+        cpu.cf = rng.random_range(0..=1u8);
+        cpu.vf = rng.random_range(0..=1u8);
+        cpu.sf = rng.random_range(0..=1u8);
+        cpu.irq_pin = rng.random_range(0..=1u8);
+        cpu.sb = rng.random_range(0..=0x0Fu8);
+        cpu.th = rng.random_range(0..=0x0Fu8);
+        cpu.tl = rng.random_range(0..=0x0Fu8);
 
         // PIO = 0: disable timer and all interrupts for clean single-step
         cpu.pio = 0;
@@ -176,33 +176,33 @@ fn generate_opcode(rng: &mut impl Rng, instr: &InstrDef) -> Vec<Mb88xxTestCase> 
 
         // Randomize R port inputs/outputs
         for i in 0..4 {
-            cpu.r_input[i] = rng.gen_range(0..=0x0Fu8);
-            cpu.r_output[i] = rng.gen_range(0..=0x0Fu8);
+            cpu.r_input[i] = rng.random_range(0..=0x0Fu8);
+            cpu.r_output[i] = rng.random_range(0..=0x0Fu8);
         }
-        cpu.k_input = rng.gen_range(0..=0x0Fu8);
-        cpu.p_output = rng.gen_range(0..=0x0Fu8);
-        cpu.o_latch = rng.r#gen();
-        cpu.si_input = rng.gen_range(0..=1u8);
+        cpu.k_input = rng.random_range(0..=0x0Fu8);
+        cpu.p_output = rng.random_range(0..=0x0Fu8);
+        cpu.o_latch = rng.random();
+        cpu.si_input = rng.random_range(0..=1u8);
 
         // Set PC to a random position that fits the instruction
         let max_pc_offset = if instr.cycles == 2 { 0x3E } else { 0x3F };
-        cpu.pc = rng.gen_range(0..=max_pc_offset);
-        cpu.pa = rng.gen_range(0..=0x1Fu8); // 5-bit PA for MB8841
+        cpu.pc = rng.random_range(0..=max_pc_offset);
+        cpu.pa = rng.random_range(0..=0x1Fu8); // 5-bit PA for MB8841
 
         // Stack: randomize with constraints
         if is_return(instr.opcode) {
             // Need at least one entry on stack (si > 0)
-            cpu.si = rng.gen_range(1..=3u8);
+            cpu.si = rng.random_range(1..=3u8);
         } else if is_call(instr.opcode) {
             // Need room on stack (si < 4)
-            cpu.si = rng.gen_range(0..=3u8);
+            cpu.si = rng.random_range(0..=3u8);
         } else {
-            cpu.si = rng.gen_range(0..=3u8);
+            cpu.si = rng.random_range(0..=3u8);
         }
 
         for i in 0..4 {
             // Stack entries: 10-bit PC + 3 flag bits in upper bits
-            cpu.stack[i] = rng.gen_range(0..=0xFFFFu16);
+            cpu.stack[i] = rng.random_range(0..=0xFFFFu16);
         }
 
         // Place opcode at current PC
@@ -307,7 +307,7 @@ fn main() {
     fs::create_dir_all(out_dir).expect("Failed to create output directory");
 
     let all = all_instructions();
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
 
     if args[1] == "all" {
         for instr in &all {

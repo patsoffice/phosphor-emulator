@@ -5,7 +5,7 @@ use std::path::Path;
 use phosphor_core::core::{BusMaster, BusMasterComponent};
 use phosphor_core::cpu::i8035::I8035;
 use phosphor_cpu_validation::{BusOp, I8035CpuState, I8035TestCase, TracingBus};
-use rand::Rng;
+use rand::{Rng, RngExt};
 
 const NUM_TESTS: usize = 1000;
 const MAX_TICKS: usize = 20;
@@ -272,35 +272,35 @@ fn generate_opcode(rng: &mut impl Rng, instr: &InstrDef) -> Vec<I8035TestCase> {
         rng.fill(&mut bus.memory[..]);
 
         // Randomize CPU registers
-        cpu.a = rng.r#gen();
-        cpu.pc = rng.gen_range(0..=max_pc);
-        cpu.t = rng.r#gen();
-        cpu.f1 = rng.gen_bool(0.5);
-        cpu.dbbb = rng.r#gen();
-        cpu.p1 = rng.r#gen();
-        cpu.p2 = rng.r#gen();
-        cpu.a11 = rng.gen_bool(0.5);
-        cpu.a11_pending = rng.gen_bool(0.5);
-        cpu.timer_overflow = rng.gen_bool(0.3);
+        cpu.a = rng.random();
+        cpu.pc = rng.random_range(0..=max_pc);
+        cpu.t = rng.random();
+        cpu.f1 = rng.random_bool(0.5);
+        cpu.dbbb = rng.random();
+        cpu.p1 = rng.random();
+        cpu.p2 = rng.random();
+        cpu.a11 = rng.random_bool(0.5);
+        cpu.a11_pending = rng.random_bool(0.5);
+        cpu.timer_overflow = rng.random_bool(0.3);
 
         // Randomize PSW: [CY, AC, F0, BS, 1, SP2..SP0]
         // Keep SP in valid range for the opcode
-        let psw_upper = rng.r#gen::<u8>() & 0xF0;
+        let psw_upper = rng.random::<u8>() & 0xF0;
         if is_return(instr.opcode) {
             // RET/RETR need SP > 0 (there must be something to pop)
-            let sp = rng.gen_range(1..=7u8);
+            let sp = rng.random_range(1..=7u8);
             cpu.psw = psw_upper | sp;
         } else if is_call(instr.opcode) {
             // CALL needs SP < 8 (room to push)
-            let sp = rng.gen_range(0..=6u8);
+            let sp = rng.random_range(0..=6u8);
             cpu.psw = psw_upper | sp;
         } else {
-            cpu.psw = psw_upper | rng.gen_range(0..=7u8);
+            cpu.psw = psw_upper | rng.random_range(0..=7u8);
         }
 
         // Randomize internal RAM (first 64 bytes)
         for i in 0..RAM_SIZE {
-            cpu.ram[i] = rng.r#gen();
+            cpu.ram[i] = rng.random();
         }
 
         // For indirect addressing, R0/R1 must point within RAM range
@@ -313,9 +313,9 @@ fn generate_opcode(rng: &mut impl Rng, instr: &InstrDef) -> Vec<I8035TestCase> {
             let sp = cpu.psw & 0x07;
             let stack_addr = 2 * (sp - 1) + 8;
             // Low byte: return PC[7:0] — within 12-bit range
-            cpu.ram[stack_addr as usize] = rng.r#gen();
+            cpu.ram[stack_addr as usize] = rng.random();
             // High byte: PSW[7:4] | PC[11:8]
-            cpu.ram[(stack_addr + 1) as usize] = rng.r#gen();
+            cpu.ram[(stack_addr + 1) as usize] = rng.random();
         }
 
         // Keep timer and counter disabled to avoid side effects during test
@@ -451,7 +451,7 @@ fn main() {
     fs::create_dir_all(out_dir).expect("Failed to create output directory");
 
     let all = all_instructions();
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
 
     if args[1] == "all" {
         for instr in &all {

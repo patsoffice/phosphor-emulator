@@ -5,7 +5,7 @@ use std::path::Path;
 use phosphor_core::core::{BusMaster, BusMasterComponent};
 use phosphor_core::cpu::m6800::M6800;
 use phosphor_cpu_validation::{BusOp, M6800CpuState, M6800TestCase, TracingBus};
-use rand::Rng;
+use rand::{Rng, RngExt};
 
 const NUM_TESTS: usize = 1000;
 const MAX_TICKS: usize = 200;
@@ -310,12 +310,12 @@ fn generate_opcode(rng: &mut impl Rng, instr: &InstrDef) -> Vec<M6800TestCase> {
         rng.fill(&mut bus.memory[..]);
 
         // Randomize all registers
-        cpu.a = rng.r#gen();
-        cpu.b = rng.r#gen();
-        cpu.x = rng.r#gen();
-        cpu.sp = rng.r#gen();
-        cpu.cc = rng.r#gen();
-        cpu.pc = rng.gen_range(0..=max_pc);
+        cpu.a = rng.random();
+        cpu.b = rng.random();
+        cpu.x = rng.random();
+        cpu.sp = rng.random();
+        cpu.cc = rng.random();
+        cpu.pc = rng.random_range(0..=max_pc);
 
         // Place opcode at PC
         let pc = cpu.pc;
@@ -426,7 +426,7 @@ fn main() {
     fs::create_dir_all(out_dir).expect("Failed to create output directory");
 
     let all = all_instructions();
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
 
     if args[1] == "all" {
         for instr in &all {
