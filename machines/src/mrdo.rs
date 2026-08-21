@@ -1452,7 +1452,7 @@ mod tests {
         let mut buf = vec![0u8; VISIBLE_WIDTH * VISIBLE_HEIGHT * 3];
         sys.board.render_frame(&mut buf);
         // At least one sprite pixel should be green somewhere in the output.
-        let any_green = buf.chunks_exact(3).any(|px| px == [0u8, 180, 0].as_slice());
+        let any_green = buf.as_chunks::<3>().0.contains(&[0u8, 180, 0]);
         assert!(any_green, "sprite pixel not found in output");
     }
 

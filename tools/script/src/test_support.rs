@@ -299,7 +299,7 @@ impl SaveState for StubMachine {
             ));
         }
         self.bus.poked.clear();
-        for chunk in data.chunks_exact(5) {
+        for chunk in data.as_chunks::<5>().0 {
             let addr = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
             self.bus.poked.insert(addr, chunk[4]);
         }

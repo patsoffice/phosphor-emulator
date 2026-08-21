@@ -70,7 +70,7 @@ impl Video {
         // Create initial game texture (black with full alpha)
         let pixel_count = (native_width * native_height) as usize;
         let mut rgba_buffer = vec![0u8; pixel_count * 4];
-        for chunk in rgba_buffer.chunks_exact_mut(4) {
+        for chunk in rgba_buffer.as_chunks_mut::<4>().0 {
             chunk[3] = 255;
         }
         let game_texture_id = painter.new_user_texture_rgba8(

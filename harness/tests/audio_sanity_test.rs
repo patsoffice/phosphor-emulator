@@ -492,8 +492,8 @@ fn report(sweep: &Sweep, e: &Expectations) {
     });
 
     eprintln!(
-        "\n{:<14} {:<7} {:>9} {:>9} {:>9} {:>10}  {}",
-        "machine", "fixture", "dc", "clipped", "silent", "peak dBFS", "verdict"
+        "\n{:<14} {:<7} {:>9} {:>9} {:>9} {:>10}  verdict",
+        "machine", "fixture", "dc", "clipped", "silent", "peak dBFS"
     );
     for (machine, i) in rows {
         let fixture = sweep.fixtures.get(machine).map_or("-", |f| match f {

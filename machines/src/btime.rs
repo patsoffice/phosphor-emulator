@@ -1328,7 +1328,7 @@ mod tests {
         b.render_visible(&mut buffer);
 
         // Chars are transparent over the backdrop, so the blue bg shows through.
-        let has_blue = buffer.chunks_exact(3).any(|p| p == [0, 0, 0xFF]);
+        let has_blue = buffer.as_chunks::<3>().0.contains(&[0, 0, 0xFF]);
         assert!(has_blue, "background (palette base 8) should be visible");
     }
 

@@ -1009,7 +1009,13 @@ fn run_imgdiff(a: &Path, b: &Path, out: Option<&Path>, threshold: u32) -> Result
     if let Some(out_path) = out {
         // Dim the matching pixels, paint differing pixels solid red.
         let mut hi = vec![0u8; ap.len()];
-        for (i, (pa, pb)) in ap.chunks_exact(3).zip(bp.chunks_exact(3)).enumerate() {
+        for (i, (pa, pb)) in ap
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .zip(bp.as_chunks::<3>().0)
+            .enumerate()
+        {
             if channel_sum_delta(pa, pb) > threshold {
                 hi[i * 3] = 255;
             } else {
@@ -1168,9 +1174,11 @@ fn channel_sum_delta(a: &[u8], b: &[u8]) -> u32 {
 fn count_diff(a: &[u8], b: &[u8], threshold: u32) -> (usize, usize) {
     let total = a.len() / 3;
     let ndiff = a
-        .chunks_exact(3)
-        .zip(b.chunks_exact(3))
-        .filter(|(pa, pb)| channel_sum_delta(pa, pb) > threshold)
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .zip(b.as_chunks::<3>().0)
+        .filter(|(pa, pb)| channel_sum_delta(*pa, *pb) > threshold)
         .count();
     (ndiff, total)
 }

@@ -482,13 +482,13 @@ impl GalaxianVideo {
                 // `frogger_draw_background`: rgb(0,0,0x47) for native x < 128,
                 // black beyond). The split is symmetric, so flip is handled by
                 // the whole-buffer mirror in render_frame.
-                for (x, px) in buf.chunks_exact_mut(3).enumerate() {
-                    px.copy_from_slice(if x < 128 { &[0, 0, 0x47] } else { &[0, 0, 0] });
+                for (x, px) in buf.as_chunks_mut::<3>().0.iter_mut().enumerate() {
+                    *px = if x < 128 { [0, 0, 0x47] } else { [0, 0, 0] };
                 }
             } else if self.background_enable {
                 // Blue background (390 Ω resistor → ~0x56), per MAME.
-                for px in buf.chunks_exact_mut(3) {
-                    px.copy_from_slice(&[0, 0, 0x56]);
+                for px in buf.as_chunks_mut::<3>().0 {
+                    *px = [0, 0, 0x56];
                 }
             } else {
                 buf.fill(0);
