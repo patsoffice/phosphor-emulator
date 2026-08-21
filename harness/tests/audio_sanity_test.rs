@@ -135,9 +135,12 @@ fn load_expectations() -> Expectations {
     let path = expectations_path();
     let text = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
-    let doc: toml::Value = text
-        .parse()
-        .unwrap_or_else(|e| panic!("parsing {}: {e}", path.display()));
+    // `toml::from_str` rather than `text.parse()`. As of toml 1.x, `FromStr for
+    // Value` parses a single TOML *value* (`42`, `'s'`, `[1, 2]`, `{ x = 1 }`)
+    // rather than a document, so a whole file fails with "unexpected content,
+    // expected nothing". It still compiles, so only a run catches it.
+    let doc: toml::Value =
+        toml::from_str(&text).unwrap_or_else(|e| panic!("parsing {}: {e}", path.display()));
     let table = doc.as_table().expect("expectations must be a table");
 
     let d = table
