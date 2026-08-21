@@ -123,6 +123,13 @@ jobs:
     # manual runs are enough to keep the lockfile honest.
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
+    # audit-check reports through a check run, which the default read-only
+    # token cannot create: the step failed with "Resource not accessible by
+    # integration" while the audit itself had found nothing. Without this the
+    # job goes red on a permissions error and looks like an advisory.
+    permissions:
+      contents: read
+      checks: write
     steps:
       - uses: actions/checkout@v4
 
