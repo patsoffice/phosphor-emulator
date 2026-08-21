@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 phosphor-core = { path = "../core" }
 phosphor-machines = { path = "../machines" }
-zip = "2"
+zip = "8"
 # Input movies fingerprint their ROM set and their own contents with SHA-256,
 # and deflate their record block (analog traces run to tens of thousands of
 # records per minute). Both are effectively free here: `zip` already pulls
