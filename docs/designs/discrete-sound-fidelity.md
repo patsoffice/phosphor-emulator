@@ -285,10 +285,12 @@ it.** Four separate ceilings, none of which more compute removes:
    values onto four coefficients, so its schematic space is under-determined by
    construction; the fit will be ill-conditioned and must say so instead of
    returning confident numbers.
-4. *The reference may not be ground truth.* If MAME's `-wavwrite` taps after the
-   `<audio_effects>` chain, matching it perfectly means reproducing MAME's
-   compressor and EQ in a discrete circuit model. Phase 0 exists to settle this
-   before any fit is trusted.
+4. *The reference may not be ground truth.* Two ways it can fail, both found
+   rather than hypothesized: a capture whose driver never asserted what it
+   claimed, and a capture reporting the reference simulation's own edge
+   quantisation. The third candidate, that `-wavwrite` taps after the
+   `<audio_effects>` chain and a fit would be chasing MAME's compressor and EQ,
+   was Phase 0 and did not happen. The tap is before the chain.
 
 So the honest claim is: **automatic, closed-loop, Python-free fitting to the
 best match the modeled topology can express** — and a clear report when the
@@ -764,6 +766,51 @@ Four specific traps, each of which cost real time here:
   filter produces different centroid shifts on two different input spectra. To
   compare two chains, measure each one's own input-to-output magnitude ratio.
 
+### The reference records the mix, not the mix you hear
+
+This was Phase 0, and the answer is that `-wavwrite` taps the speaker mix
+**before** the `<audio_effects>` chain. Every capture ever taken here is raw
+mixed netlist output. The finding is a negative one, so what is worth keeping is
+the shape of the check rather than the answer.
+
+**From the source.** The recording buffer has exactly one writer. It is filled in
+`sound_manager::output_push`, at the moment a speaker device's inputs arrive,
+straight out of the stream's input buffer and clamped to 16 bits. The effects run
+later, in `run_effects`, over a copy in a separate buffer, and their output feeds
+only the OSD output streams. There is no path from an effect back to the
+recording buffer, and the field's own declaration says so. The same is true in
+the 0.287 tag and in 0.288-dev, byte for byte. The Lua sound hook reads the same
+pre-effects speaker buffer, so it is not an alternative tap.
+
+**From an experiment, because a source reading is a claim about a program and
+not about a file on disk.** Two captures of the same four seconds of Asteroids,
+differing only in the per-game cfg: one stock, one carrying a compressor at 20:1
+with +24 dB in and out and a five-band equalizer at +18 dB per band. The captures
+are byte-identical. So is a third with `-volume -20`.
+
+Three identical files prove nothing on their own, which is the trap this document
+has fallen into before in the other direction: a check that cannot fail is not a
+check. The control is a `<device_volume gain="0.5">` on the discrete device,
+which sits in the stream mixing and therefore *upstream* of the tap. That capture
+differs, and by 0.4999 in RMS. So the capture does respond to a cfg-driven mixer
+change; it is the effects chain specifically that it cannot see. MAME rewrites
+the cfg on exit with the compressor and EQ attributes intact, which is only
+possible if it parsed them into the speaker's live effect objects.
+
+**What MAME's stock chain actually does**, since the issue's premise was that
+Asteroids' cfg "carries" a compressor and an EQ: that cfg is what MAME writes for
+every game. All four effects are listed because the chain is fixed; the listing
+records no non-default parameter. Compressor and Reverb default to mode 0, off.
+The Equalizer is on with every band at 0 dB. Only the Filters stage does anything
+at all, a 20 Hz Q=0.707 high-pass with its low-pass disabled. So the difference
+between the played sound and the capture is a DC blocker, on both sides of any
+comparison anyone has made by ear.
+
+The general form: **when a reference tool has a processing chain, find the tap in
+its source, then prove the tap by moving something on each side of it.** One
+identical pair says the knob was ignored. An identical pair plus a control that
+does move says where the tap is.
+
 ## Part 5 — Construction-time tuning
 
 > **NOT BUILT, and deliberately so.** Parts 5 and 6 describe a fitting loop, and
@@ -1025,17 +1072,27 @@ hypotheses expressed as hypotheses, and a suggested next inspection.
 
 ### The capture is not automatically ground truth
 
-`phosphor-emulator-asteroids-sound-postprocessing-hm4` records an unresolved
-question: MAME 0.287 applies a per-game `<audio_effects>` chain — Asteroids' cfg
-carries Filters, Compressor, Reverb and Equalizer on `:mono` — and it is not
-established whether `-wavwrite` taps the mix before or after it. If after, every
-reference WAV in the existing rig already contains a compressor and an EQ, and
-fitting component values to match it would be fitting Phosphor to MAME's
-post-processing.
+Phase 0's question was whether MAME 0.287's `-wavwrite` taps the mix before or
+after the per-game `<audio_effects>` chain. If after, every reference WAV in the
+existing rig already contained a compressor and an EQ, and fitting component
+values to match it would have been fitting Phosphor to MAME's post-processing.
 
-**This must be settled before any fit result is trusted.** It is Phase 0, it
-needs no code, and it is why the fitting rungs sit at the top of the ladder
-rather than the bottom.
+**Settled: `-wavwrite` taps the speaker mix BEFORE the effects chain.** Both
+halves of the evidence are recorded in "The reference records the mix, not the
+mix you hear" in Part 4. The reference captures are the raw mixed netlist output,
+which is what the whole rig assumed. Nothing on this branch has to be requalified.
+
+Two consequences that are not restatements of that:
+
+- The tap is also before the master gain and before the output mixing steps, so
+  `-volume` and the mute state cannot reach a capture either. `master_volume_db`
+  in the manifest below is therefore bookkeeping rather than a correction to
+  apply.
+- MAME's *played* sound is not the capture. With a stock configuration it
+  differs by a 20 Hz Butterworth high-pass, which is the only default-active
+  processing in the chain. That is inaudible against anything these boards make
+  above 40 Hz, but it does mean an ear comparison against MAME's speaker is
+  comparing a DC-blocked signal against our capture's raw one.
 
 ### Nor is it automatically converged
 
@@ -1282,11 +1339,15 @@ Sized so each lands independently and so value arrives before the fitting
 machinery does. Beads to be created under one epic; `phosphor-emulator-audiodiff-76wx`
 is absorbed by Phases 1–2 and 4.
 
-**Phase 0 — Settle the reference.** Determine MAME 0.287's `-wavwrite` tap point
-relative to the `<audio_effects>` chain, from source or by toggling effects and
-diffing captures. Define and document the canonical capture procedure and the
-manifest schema. Recapture Donkey Kong walk/jump/stomp with the single-trigger
-protocol. No code. *Nothing in Phase 6 is trustworthy until this concludes.*
+**Phase 0 — Settle the reference. DONE for the tap point.** MAME 0.287's
+`-wavwrite` taps the speaker mix before the `<audio_effects>` chain, established
+from the source and confirmed by an experiment with a control; see "The reference
+records the mix, not the mix you hear" in Part 4. Every capture the rig has ever
+taken is raw mixed netlist output, so nothing published on this branch rests on a
+compressor or an EQ. The rest of the phase's scope was overtaken: the canonical
+capture procedure now lives in `verify-reference.sh` and the capture-rate rule,
+the single-trigger protocol became `drive_dkong_single.lua`, and the manifest
+schema above is unbuilt because `fit` was dropped along with Phase 6.
 
 **Phase 1 — `analysis` module + `disasm audiodiff`.** The shared DSP in core,
 the differ in disasm, spectrogram PNG via `gfxsheet::write_png`, tolerance-based
@@ -1374,10 +1435,10 @@ every catalog entry is `validated` or carries a documented blocker.
   parameter classes, tolerance flags, cross-effect hold-out and separate metric
   families — but the mitigation is cultural as much as technical: the output has
   to read as evidence, not as an instruction.
-- **Phase 0 comes back badly.** If `-wavwrite` taps post-effects and the chain
-  cannot be cleanly disabled, references get much harder to produce and Phase 6
-  may not be worth building. This is why Phase 0 is first, cheap, and why
-  Phases 1–5 are independently valuable.
+- **Phase 0 comes back badly.** *Retired.* The risk was that `-wavwrite` taps
+  post-effects and the chain cannot be cleanly disabled, which would have made
+  references much harder to produce. It taps pre-effects, so the chain never has
+  to be disabled at all and no existing capture is contaminated.
 - **Optimizing the wrong model.** Mitigated by sensitivity-first ordering, probe
   and impulse evidence, structural diagnostics, small parameter sets, and
   reporting bound-hitting and out-of-tolerance fits as findings.
@@ -1416,8 +1477,14 @@ every catalog entry is `validated` or carries a documented blocker.
    in the hot-path crate.
 2. Whether trusted reference WAVs live only in an external collection, or
    whether a small legally reviewed subset may be committed.
-3. The exact clean MAME invocation guaranteeing `-wavwrite` excludes optional
-   post-processing for a chosen version. (Phase 0.)
+3. ~~The exact clean MAME invocation guaranteeing `-wavwrite` excludes optional
+   post-processing for a chosen version.~~ Answered: there is no such
+   invocation to find, because there is no invocation that would include it.
+   `-wavwrite` records the speaker mix before the effects chain, the master gain
+   and the mute state, in 0.287 and in 0.288-dev alike. A capture is not
+   configuration-independent, though: anything upstream of the speaker still
+   reaches it, which is why `verify-reference.sh` captures into a scratch
+   `-cfg_directory`.
 4. Is there a Phosphor-side equivalent of MAME's effects chain to worry about?
    `AudioResampler` sits between the circuit and the WAV; the capture path
    should tap the circuit output directly, and this should be verified rather
@@ -1448,7 +1515,8 @@ every catalog entry is `validated` or carries a documented blocker.
 - `phosphor-emulator-audiodiff-76wx` — absorbed here (Phases 1, 2, 4)
 - `phosphor-emulator-audio-dc-offset-g7p4` — the bug Phase 2 would have caught
 - `phosphor-emulator-asteroids-sound-postprocessing-hm4` — the wavwrite tap-point
-  question (Phase 0)
+  question (Phase 0, answered: pre-effects) and Asteroids' remaining thrust
+  rumble deficit
 - `phosphor-emulator-uxi9`, `phosphor-emulator-pd5e` — Galaga / Xevious 54XX
   explosion sound (Phase 8)
 - `phosphor-emulator-clock-tree-jv78.9` — the analogous "make live values

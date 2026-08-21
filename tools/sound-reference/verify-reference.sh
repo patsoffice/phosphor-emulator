@@ -63,6 +63,21 @@ SIM_RATE=${SND_SIM_RATE:-192000}
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 
+# -cfg_directory points at a scratch directory, and that is not tidiness.
+#
+# -wavwrite taps the speaker mix BEFORE the per-game <audio_effects> chain,
+# before the master gain and before the mute state, so nothing a user does to
+# the effects chain or the volume can reach a capture. (Established from MAME's
+# sound_manager: the recording buffer has one writer, in output_push, and the
+# effects run later over a copy that feeds only the OSD streams. Confirmed by
+# capturing with a 20:1 compressor and a +18 dB five-band EQ configured and
+# getting a byte-identical file.)
+#
+# What CAN reach a capture is anything upstream of the speaker, and the cfg
+# carries per-device mixer gains that are exactly that: a <device_volume> of 0.5
+# on the discrete device moves a capture by 6 dB. So the effects chain needs no
+# disabling, but a stray cfg is still able to scale a reference silently, and a
+# scratch directory is what rules that out.
 run() { # $1 = SND_VERIFY value ("" for the real schedule), $2 = output wav,
         # the rest are passed through to MAME
   local mode=$1; shift

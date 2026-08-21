@@ -262,14 +262,23 @@ swap the driver's register map and the analyzer's segment list.
 ## Open threads
 
 - **Thrust still doesn't rumble enough** by ear, even though its band centre
-  (~85 Hz) matches MAME. The prime suspect is **MAME's post-processing**: the new
-  audio system applies an `<audio_effects>` chain (Filters, **Compressor**,
-  Reverb, **Equalizer**) *after* the discrete mix, per the per-game config. A
-  compressor/low-shelf EQ would lift and thicken the sub-bass rumble in a way the
-  raw discrete output doesn't capture. Worth determining whether `-wavwrite` taps
-  **before or after** those effects, and whether Phosphor should model an
-  output-stage shelf/compressor to match the *played* sound rather than the raw
-  netlist.
+  (~85 Hz) matches MAME. The prime suspect used to be **MAME's post-processing**,
+  on the reasoning that the new audio system applies an `<audio_effects>` chain
+  (Filters, Compressor, Reverb, Equalizer) after the discrete mix, so a
+  compressor and a low shelf would be thickening the sub-bass in the played sound
+  but not in a `-wavwrite` capture. **That suspect is cleared.** `-wavwrite` taps
+  the speaker mix *before* the chain, so the capture is raw netlist output; and
+  the chain the per-game config lists is MAME's fixed default, in which the
+  compressor and the reverb are off, the equalizer is flat, and the only active
+  stage is a 20 Hz high-pass. There is nothing between the netlist and the
+  speaker to explain a missing low end on either side. See the design doc's "The
+  reference records the mix, not the mix you hear".
+
+  So the deficit is a real difference between the two circuit models, and the
+  next step is the netlist rather than an output stage: read the thrust path in
+  MAME's `asteroid.cpp` discrete blocks against the schematic, and probe per
+  stage. Modelling an output-stage shelf or compressor to match the played sound
+  is off the table, since the played sound does not have one.
 - **Reference-probe tests as CI.** The Phosphor-vs-MAME centroid comparison could
   be checked in as a tolerance test (gated/local-only, since it needs MAME +
   ROMs), per the design doc's testing strategy.
