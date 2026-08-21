@@ -1270,9 +1270,7 @@ impl DiscreteCircuit {
             node.phase_acc = 0.0;
             node.last_gen = 0;
         }
-        for v in &mut self.values {
-            *v = 0.0;
-        }
+        self.values.fill(0.0);
         self.sim_phase = 0;
         self.input_generation = 1;
         self.resampler.reset();

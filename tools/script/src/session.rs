@@ -597,6 +597,33 @@ fn write_png(path: &Path, rgb24: &[u8], width: u32, height: u32) -> std::io::Res
     Ok(())
 }
 
+/// Write 16-bit mono PCM as a WAV.
+///
+/// Hand-rolled rather than shared with `disasm`: this crate does not depend on
+/// that binary, and the header is fourteen fields.
+fn write_wav_16(path: &str, samples: &[i16], rate: u32) -> std::io::Result<()> {
+    use std::io::Write;
+    let data_len = (samples.len() * 2) as u32;
+    let mut f = std::io::BufWriter::new(std::fs::File::create(path)?);
+    f.write_all(b"RIFF")?;
+    f.write_all(&(36 + data_len).to_le_bytes())?;
+    f.write_all(b"WAVE")?;
+    f.write_all(b"fmt ")?;
+    f.write_all(&16u32.to_le_bytes())?;
+    f.write_all(&1u16.to_le_bytes())?;
+    f.write_all(&1u16.to_le_bytes())?;
+    f.write_all(&rate.to_le_bytes())?;
+    f.write_all(&(rate * 2).to_le_bytes())?;
+    f.write_all(&2u16.to_le_bytes())?;
+    f.write_all(&16u16.to_le_bytes())?;
+    f.write_all(b"data")?;
+    f.write_all(&data_len.to_le_bytes())?;
+    for s in samples {
+        f.write_all(&s.to_le_bytes())?;
+    }
+    f.flush()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -970,31 +997,4 @@ mod tests {
         assert_eq!(&data[..8], b"\x89PNG\r\n\x1a\n", "PNG magic");
         std::fs::remove_file(&path).unwrap();
     }
-}
-
-/// Write 16-bit mono PCM as a WAV.
-///
-/// Hand-rolled rather than shared with `disasm`: this crate does not depend on
-/// that binary, and the header is fourteen fields.
-fn write_wav_16(path: &str, samples: &[i16], rate: u32) -> std::io::Result<()> {
-    use std::io::Write;
-    let data_len = (samples.len() * 2) as u32;
-    let mut f = std::io::BufWriter::new(std::fs::File::create(path)?);
-    f.write_all(b"RIFF")?;
-    f.write_all(&(36 + data_len).to_le_bytes())?;
-    f.write_all(b"WAVE")?;
-    f.write_all(b"fmt ")?;
-    f.write_all(&16u32.to_le_bytes())?;
-    f.write_all(&1u16.to_le_bytes())?;
-    f.write_all(&1u16.to_le_bytes())?;
-    f.write_all(&rate.to_le_bytes())?;
-    f.write_all(&(rate * 2).to_le_bytes())?;
-    f.write_all(&2u16.to_le_bytes())?;
-    f.write_all(&16u16.to_le_bytes())?;
-    f.write_all(b"data")?;
-    f.write_all(&data_len.to_le_bytes())?;
-    for s in samples {
-        f.write_all(&s.to_le_bytes())?;
-    }
-    f.flush()
 }

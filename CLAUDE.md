@@ -50,8 +50,8 @@ cargo test -p phosphor-macros                                  # Test proc macro
 cargo test -p phosphor-frontend                                # Test frontend changes
 cargo test -p phosphor-cpu-validation                          # CPU validation (slow — only after CPU changes)
 cargo test m6809_alu_shift_test                                # Run specific test category
-cargo clippy --all-features --all-targets                      # Check code quality
-cargo clippy --all-features --all-targets --allow-dirty --fix  # Auto-fix clippy warnings
+cargo clippy --workspace --all-features --all-targets --locked -- -D warnings  # Check code quality (exactly what CI runs)
+cargo clippy --workspace --all-features --all-targets --allow-dirty --fix      # Auto-fix clippy warnings
 cargo fmt                                                      # Format code
 cargo run --package phosphor-frontend -- joust /path/to/roms --scale 3
 cargo run -p phosphor-disasm --bin disasm -- machine --machine mariobros --region sound /path/to/roms  # Disassemble a ROM
@@ -61,7 +61,15 @@ cargo run --release -p phosphor-bench -- --roms /path/to/roms   # Benchmark emul
 - Before/after numbers for any performance change come from `phosphor-bench`, not from the interactive profiler — it reports the fastest of N repetitions, which is the stable estimator for a deterministic workload. Always `--release`; a debug build measures a different program.
 
 - Test the crate you changed; also test downstream crates when changing `phosphor-core` or `phosphor-macros`
-- `cargo clippy` must pass with no warnings
+- `cargo clippy` must pass with no warnings. Run it with the full flag set above:
+  without `-D warnings` a lint prints as a non-fatal warning locally and fails
+  the build in CI, and without `--workspace` a crate you did not touch is never
+  re-linted. Cargo also replays no diagnostics for a crate it considers fresh,
+  so a run that prints nothing is not proof of a clean tree; `touch` the file or
+  `cargo clean -p <crate>` when in doubt
+- CI additionally runs clippy on current stable as an early warning, so a lint
+  introduced in a newer toolchain than the pinned one can fail CI while passing
+  locally. Those failures name the toolchain in the help URL
 - `cargo fmt` must pass with no warnings
 
 ### Workspace Crates

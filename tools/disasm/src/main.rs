@@ -608,19 +608,23 @@ fn run_command(cmd: Command) -> Result<String, String> {
             range_b,
             subtract_to,
         } => run_audiodiff(
-            &a,
-            b.as_deref(),
-            png.as_deref(),
+            AudiodiffInputs {
+                a: &a,
+                b: b.as_deref(),
+                range: range.as_deref(),
+                range_b: range_b.as_deref(),
+            },
             channels,
             audiodiff::Tolerance {
                 band_pp: band_tolerance,
                 centroid_frac: centroid_tolerance,
                 rms_db: rms_tolerance,
             },
-            png_height,
-            range.as_deref(),
-            range_b.as_deref(),
-            subtract_to.as_deref(),
+            AudiodiffOutputs {
+                png: png.as_deref(),
+                png_height,
+                subtract_to: subtract_to.as_deref(),
+            },
         ),
         Command::Machines => Ok(list_machines()),
     }
@@ -1024,23 +1028,52 @@ fn run_imgdiff(a: &Path, b: &Path, out: Option<&Path>, threshold: u32) -> Result
     ))
 }
 
+/// The captures to compare, and the window taken from each.
+struct AudiodiffInputs<'a> {
+    a: &'a Path,
+    /// Absent for a one-input run, which describes `a` instead of comparing.
+    b: Option<&'a Path>,
+    range: Option<&'a str>,
+    range_b: Option<&'a str>,
+}
+
+/// What audiodiff writes, beyond the report it returns.
+struct AudiodiffOutputs<'a> {
+    /// Spectrogram path. With two inputs, `-a` and `-b` are inserted into the
+    /// stem so one flag produces both.
+    png: Option<&'a Path>,
+    png_height: u32,
+    /// Write `a - b` here instead of comparing them.
+    subtract_to: Option<&'a Path>,
+}
+
 /// Compare two WAV captures, or describe one.
 ///
 /// Out-of-tolerance is a *result*, not an error: the report still goes to
 /// stdout in full, and only the one-line verdict goes to stderr along with the
 /// non-zero exit. That is what lets this be dropped into a CI step without the
 /// evidence disappearing when it fails.
+///
+/// The nine things this needs arrive as two groups rather than nine parameters:
+/// what is being read, and what is being written.
 fn run_audiodiff(
-    a: &Path,
-    b: Option<&Path>,
-    png: Option<&Path>,
+    inputs: AudiodiffInputs<'_>,
     channels: audiodiff::ChannelPolicy,
     tol: audiodiff::Tolerance,
-    png_height: u32,
-    range: Option<&str>,
-    range_b: Option<&str>,
-    subtract_to: Option<&Path>,
+    outputs: AudiodiffOutputs<'_>,
 ) -> Result<String, String> {
+    let AudiodiffInputs {
+        a,
+        b,
+        range,
+        range_b,
+    } = inputs;
+    let AudiodiffOutputs {
+        png,
+        png_height,
+        subtract_to,
+    } = outputs;
+
     // `--range` applies to both inputs; `--range-b` overrides it for the second,
     // for the common case where two captures place the same effect at different
     // times.

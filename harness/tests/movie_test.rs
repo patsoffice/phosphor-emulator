@@ -88,7 +88,7 @@ fn input_plan(controls: &[InputControl], frames: usize, seed: u64) -> Vec<Vec<In
                 } else {
                     frame_events.push(InputEvent::Button {
                         id: c.id,
-                        pressed: rng.next() % 2 == 0,
+                        pressed: rng.next().is_multiple_of(2),
                     });
                 }
             }
