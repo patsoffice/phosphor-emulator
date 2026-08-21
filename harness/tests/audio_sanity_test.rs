@@ -409,6 +409,11 @@ fn every_expectation_names_a_registered_machine() {
 struct Sweep {
     /// Defects found, per machine. Machines with none are absent.
     found: BTreeMap<String, Vec<Defect>>,
+    /// What every measured machine actually read, kept so the sweep can be
+    /// reported rather than only judged. The issue this suite feeds is a table
+    /// of these numbers, and without them that table has to be assembled by
+    /// hand from a run that already computed it. See [`report`].
+    measured: BTreeMap<String, Integrity>,
     /// Which fixture each measured machine ran under. A [`Fixture::Boot`]
     /// result describes attract mode, which drives a different set of voices
     /// than play does, so it can confirm neither the presence nor the absence
@@ -425,6 +430,7 @@ struct Sweep {
 fn sweep(dir: &Path) -> Sweep {
     let e = load_expectations();
     let mut found: BTreeMap<String, Vec<Defect>> = BTreeMap::new();
+    let mut measured: BTreeMap<String, Integrity> = BTreeMap::new();
     let mut fixtures: BTreeMap<String, Fixture> = BTreeMap::new();
     let mut checked = 0usize;
     let mut skipped = Vec::new();
@@ -436,6 +442,7 @@ fn sweep(dir: &Path) -> Sweep {
         };
         checked += 1;
         fixtures.insert(entry.name.to_string(), fixture);
+        measured.insert(entry.name.to_string(), integrity);
         let mut defects = Vec::new();
 
         if integrity.dc_offset.abs() > e.defaults.max_dc_offset {
@@ -458,10 +465,70 @@ fn sweep(dir: &Path) -> Sweep {
     }
     Sweep {
         found,
+        measured,
         fixtures,
         checked,
         skipped,
     }
+}
+
+/// Print every machine's measurement, worst offset first.
+///
+/// Set `PHOSPHOR_AUDIO_REPORT=1` to get it. The sweep already computes these
+/// numbers to decide pass or fail; this just stops them being thrown away, so
+/// the table in the tracking issue can be regenerated from a run instead of
+/// transcribed from one.
+///
+/// Reported for every machine, not only the failing ones: knowing that a
+/// machine sits just under the threshold is what says whether a fix elsewhere
+/// moved it, and a machine that is fine is the control group.
+fn report(sweep: &Sweep, e: &Expectations) {
+    let mut rows: Vec<(&String, &Integrity)> = sweep.measured.iter().collect();
+    rows.sort_by(|a, b| {
+        b.1.dc_offset
+            .abs()
+            .partial_cmp(&a.1.dc_offset.abs())
+            .unwrap()
+    });
+
+    eprintln!(
+        "\n{:<14} {:<7} {:>9} {:>9} {:>9} {:>10}  {}",
+        "machine", "fixture", "dc", "clipped", "silent", "peak dBFS", "verdict"
+    );
+    for (machine, i) in rows {
+        let fixture = sweep.fixtures.get(machine).map_or("-", |f| match f {
+            Fixture::Movie => "movie",
+            Fixture::Boot => "boot",
+        });
+        let known = e.known_defects.contains_key(machine);
+        let defects = sweep.found.get(machine);
+        let verdict = match (defects, known) {
+            (None, true) => "LISTED BUT CLEAN".to_string(),
+            (None, false) => String::new(),
+            (Some(d), known) => {
+                let names: Vec<&str> = d.iter().map(|k| k.as_str()).collect();
+                format!(
+                    "{}{}",
+                    if known { "known: " } else { "NEW: " },
+                    names.join("+")
+                )
+            }
+        };
+        eprintln!(
+            "{:<14} {:<7} {:>+9.4} {:>8.2}% {:>8.2}% {:>10.2}  {}",
+            machine,
+            fixture,
+            i.dc_offset,
+            i.clipped_fraction * 100.0,
+            i.silent_fraction * 100.0,
+            i.peak_dbfs,
+            verdict
+        );
+    }
+    eprintln!(
+        "\nthresholds: dc {:.3}, clipped {:.3}, silent {:.3}\n",
+        e.defaults.max_dc_offset, e.defaults.max_clipped_fraction, e.defaults.max_silent_fraction
+    );
 }
 
 /// No machine may be newly defective.
@@ -472,12 +539,16 @@ fn sweep(dir: &Path) -> Sweep {
 fn no_machine_emits_newly_defective_audio() {
     let Some(dir) = roms() else { return };
     let e = load_expectations();
+    let s = sweep(&dir);
+    if std::env::var("PHOSPHOR_AUDIO_REPORT").is_ok() {
+        report(&s, &e);
+    }
     let Sweep {
         found,
         checked,
         skipped,
         ..
-    } = sweep(&dir);
+    } = s;
 
     if !skipped.is_empty() {
         eprintln!(

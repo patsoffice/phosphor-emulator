@@ -103,9 +103,6 @@ dc = true
 reason = "boot (no movie): DC offset over threshold; shares the Do's Castle hardware with docastle and dorunrun, which show the same"
 issue = "phosphor-emulator-audio-dc-play-sweep-stxr"
 
-[[known_defect]]
-machine = "mariobros"
-dc = true
-clipping = true
-reason = "boot: DC -1.0 with 100% clipped; its movie was recorded against a different ROM name list so play could not be measured (…-movie-rom-digest-names-not-contents-aa1c)"
-issue = "phosphor-emulator-audio-dc-play-sweep-stxr"
+# mariobros' entry is gone: its DAC's coupling capacitor was not modelled, so the
+# unipolar ladder's pedestal reached the speaker. DC -0.530 -> -0.0014 under
+# recorded play, clipping with it.

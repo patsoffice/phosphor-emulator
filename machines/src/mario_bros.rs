@@ -18,7 +18,7 @@
 //! pixel offsets (flip is approximated as a 180° rotation and is unused on the
 //! upright cabinet this set targets).
 
-use phosphor_core::audio::AudioResampler;
+use phosphor_core::audio::{AudioResampler, DcBlocker};
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::debug_trace::{DebugEvent, DebugEventKind, DebugTraceBuffer};
 use phosphor_core::core::machine::{
@@ -102,6 +102,15 @@ pub const VBLANK_END: usize = 16; // first visible scanline
 // Bresenham ratio to the 4 MHz Z80: (11e6/15) / 4e6 = 11 / 60.
 pub const SOUND_TICK_NUM: u32 = 11;
 pub const SOUND_TICK_DEN: u32 = 60;
+
+/// Corner of the DAC's coupling capacitor, in Hz.
+///
+/// From the parts: a 1 µF capacitor between the DAC amplifier's output and the
+/// filter stage that follows it, working into roughly 1.1 MΩ of series
+/// resistance. `1/(2π·1.11e6·1e-6)` is 0.143 Hz, which is far below anything
+/// audible and is the point: this capacitor exists to strip the unipolar
+/// ladder's pedestal, not to shape the sound.
+const DAC_COUPLING_HZ: f32 = 0.143;
 
 // ---------------------------------------------------------------------------
 // ROM definitions ("mario" parent set)
@@ -613,9 +622,29 @@ pub struct MarioBrosBoard {
     // Z80 DMA controller (sprite-list transfer)
     pub(crate) dma: Z80Dma,
 
-    // Audio output (8-bit DAC + resampler; discrete sound deferred)
+    // Audio output (8-bit DAC + coupling + resampler; the rest of the discrete
+    // sound is deferred)
     #[debug_device("DAC")]
     pub(crate) dac: Mc1408Dac,
+    /// The DAC's coupling capacitor.
+    ///
+    /// The R-2R ladder is UNIPOLAR: its eight bits span 0 V to the reference,
+    /// so its rest level is a pedestal rather than zero, and the sound CPU
+    /// parks it near the bottom of that span rather than in the middle. Feeding
+    /// that straight to the speaker put the output on a -0.53 DC offset under
+    /// recorded play and pinned it at -1.0 from a cold boot, where the CPU has
+    /// written the ladder to zero and left it there. Half the headroom every
+    /// voice needs was going to bias.
+    ///
+    /// The board does not do that: the ladder drives an inverting amplifier
+    /// whose output reaches the filter stage through a 1 µF capacitor into
+    /// about 1.1 MΩ, which is a 0.14 Hz corner. That is a coupling capacitor
+    /// doing nothing but removing the pedestal, which is what this models.
+    ///
+    /// Only the coupling, not the two active filter stages around it. Those
+    /// shape the tone and are part of the deferred discrete work; this is the
+    /// one part needed to stop the pedestal reaching the speaker.
+    pub(crate) dac_coupling: DcBlocker,
     pub(crate) resampler: AudioResampler<i16>,
 
     // Pre-decoded GFX caches
@@ -662,6 +691,7 @@ impl MarioBrosBoard {
             sound_p2: 0,
             dma: Z80Dma::new(),
             dac: Mc1408Dac::new(),
+            dac_coupling: DcBlocker::with_cutoff(DAC_COUPLING_HZ, output_sample_rate() as u32),
             resampler: AudioResampler::new(TIMING.cpu_clock_hz, output_sample_rate()),
             tile_cache: gfx::GfxCache::new(0, 8, 8),
             sprite_cache: gfx::GfxCache::new(0, 16, 16),
@@ -867,9 +897,18 @@ impl MarioBrosBoard {
 
     /// Board work after the CPUs' cycle: the audio tail and the clock advance.
     fn end_cycle(&mut self) {
-        // Audio: 8-bit DAC resampled to 44.1 kHz. (Discrete sound deferred.)
+        // Audio: 8-bit DAC, through its coupling capacitor, resampled to the
+        // output rate. (The rest of the discrete sound is deferred.)
+        //
+        // Coupled after the resampler's box filter rather than before it: the
+        // capacitor sits at the far end of the board's DAC amplifier, so it
+        // removes the pedestal from the averaged signal that reaches the
+        // speaker, and running it once per output sample rather than once per
+        // CPU cycle is both cheaper and what its 0.14 Hz corner describes.
         if let Some(avg) = self.resampler.tick_sample(self.dac.sample_i16()) {
-            self.resampler.push_sample(avg);
+            let coupled = self.dac_coupling.process(avg as f32);
+            self.resampler
+                .push_sample(coupled.clamp(i16::MIN as f32, i16::MAX as f32) as i16);
         }
 
         self.clock += 1;
@@ -1059,6 +1098,10 @@ impl Saveable for MarioBrosBoard {
         w.write_bool(self.sound_irq_pending);
         self.dma.save_state(w);
         self.dac.save_state(w);
+        // The coupling capacitor holds charge, so it is state the running game
+        // mutates: restoring without it resumes with the pedestal still on the
+        // output and takes seconds to settle again.
+        self.dac_coupling.save_state(w);
         self.resampler.save_state(w);
         w.write_u64_le(self.clock);
         self.sound_clock.save_state(w);
@@ -1084,6 +1127,7 @@ impl Saveable for MarioBrosBoard {
         self.sound_irq_pending = r.read_bool()?;
         self.dma.load_state(r)?;
         self.dac.load_state(r)?;
+        self.dac_coupling.load_state(r)?;
         self.resampler.load_state(r)?;
         self.clock = r.read_u64_le()?;
         self.sound_clock.load_state(r)?;
