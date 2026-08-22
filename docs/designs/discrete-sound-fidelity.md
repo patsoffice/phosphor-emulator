@@ -901,6 +901,42 @@ its source, then prove the tap by moving something on each side of it.** One
 identical pair says the knob was ignored. An identical pair plus a control that
 does move says where the tap is.
 
+### Gate the source, not its output
+
+Asteroids' thump was rebuilt from the schematic until every measurement of it
+agreed with the board: waveform high and low levels within 1 %, duty within
+0.2 points, fundamental and 85 % rolloff exact to the reported precision,
+harmonic and non-harmonic energy both within a fifth of a decibel, level within
+1.7 dB, and not one clipped sample in forty seconds of recorded play. It still
+sounded wrong, and the report that located it was one sentence: *scratchiness
+right as it starts.*
+
+The model gated the voice by multiplying the filtered output by the enable line,
+with the 555 free-running underneath. So switching thump on connected an
+oscillator at whatever phase it happened to be passing, and the largest
+single-sample step at the onset was 3636 where the corrected version's is 272.
+The board does not do that. Its enable drives the timer's **reset** pin, which
+holds the capacitor discharged and the output low, so every onset begins from
+the same state. Moving the gate there is what fixed it, and it changed no
+steady-state number at all.
+
+Two things to take from it.
+
+**A gate belongs where the circuit puts it, and on this class of part that is
+almost never the output.** `oscillator → filters → multiply(enable)` is an
+inviting shape and it is wrong wherever the real enable reaches a reset, a
+discharge pin or a supply. The tell is that the voice is correct once running
+and wrong at its edges.
+
+**A steady-state comparison cannot see a transient defect, and the listening
+test is not a formality.** That 3636-sample step sat *inside* the analysis
+window and moved nothing: it is one sample in ninety thousand, so RMS, crest,
+centroid and every band share absorbed it without a flicker. Every metric this
+document recommends was computed, was stable across five windows, and agreed.
+The defect was audible immediately. Where the metrics and the ear disagree,
+suspect the metrics of not measuring the thing, and ask *when* it sounds wrong
+rather than how much.
+
 ## Part 5 — Construction-time tuning
 
 > **NOT BUILT, and deliberately so.** Parts 5 and 6 describe a fitting loop, and

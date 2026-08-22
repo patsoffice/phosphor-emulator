@@ -142,15 +142,11 @@ pub static SPEC: TargetSpec = TargetSpec {
         },
         ProbeSpec {
             name: "thump-555",
-            description: "Thump VCO capacitor sawtooth, the audible tap (volts)",
-        },
-        ProbeSpec {
-            name: "thump-ac",
-            description: "Thump sawtooth after its coupling capacitor (volts)",
+            description: "Thump VCO square on pin 3, the board's tap (volts)",
         },
         ProbeSpec {
             name: "thump-rc",
-            description: "Thump after the coupling low-pass, before the gate (volts)",
+            description: "Thump square after R74/C64's 482 Hz low-pass, before the gate (volts)",
         },
         // Explosion: the noise source and its one filter.
         ProbeSpec {
@@ -342,7 +338,6 @@ fn probe_value(circuit: &DiscreteCircuit, probe: &str) -> Option<f64> {
         "thrust-lp" => ("THRUST_LP", 12.0),
         "thump-cv" => ("THUMP_CV", 5.0),
         "thump-555" => ("THUMP_555", 5.0),
-        "thump-ac" => ("THUMP_AC", 5.0),
         "thump-rc" => ("THUMP_RC", 5.0),
         "explosion-noise" => ("EXPLODE_NOISE", 1.0),
         "explosion-lp" => ("EXPLODE_LP", 1.0),

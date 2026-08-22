@@ -176,9 +176,17 @@ pub(crate) enum NodeKind {
     Ne555Cc {
         /// Control-voltage source (the current-setting input voltage).
         vin_src: NodeId,
+        /// Reset pin. While low the timer is held discharged and its output
+        /// low. `None` free-runs.
+        reset: Option<NodeId>,
         /// Charge resistor (ohms) and cap (farads) setting the current ramp.
         r: f64,
         c: f64,
+        /// Discharge-pin resistance (ohms); 0 is an ideal one-step discharge.
+        r_disch: f64,
+        /// Per-step approach fraction toward the discharge asymptote,
+        /// `1 − exp(−dt/(r_disch·c))`. Zero when `r_disch` is.
+        discharge_alpha: f64,
         /// Constant-current source supply and its transistor junction drop.
         v_cc_source: f64,
         junction: f64,
@@ -352,7 +360,12 @@ impl NodeKind {
             | NodeKind::DacLadder { src, .. }
             | NodeKind::RcIntegrate { src, .. }
             | NodeKind::OpAmpBandPass { src, .. } => out.push(src.index()),
-            NodeKind::Ne555Cc { vin_src, .. } => out.push(vin_src.index()),
+            NodeKind::Ne555Cc { vin_src, reset, .. } => {
+                out.push(vin_src.index());
+                if let Some(r) = reset {
+                    out.push(r.index());
+                }
+            }
             NodeKind::Ne555Astable {
                 cv_src: Some(cv), ..
             } => out.push(cv.index()),
@@ -657,8 +670,11 @@ impl NodeKind {
             }
             NodeKind::Ne555Cc {
                 vin_src,
+                reset,
                 r,
                 c,
+                r_disch,
+                discharge_alpha,
                 v_cc_source,
                 junction,
                 threshold,
@@ -668,6 +684,16 @@ impl NodeKind {
                 cap_v,
                 flip_flop,
             } => {
+                // Held in reset: cap discharged, flip-flop set, output low. This
+                // is what makes an onset clean, because the timer always starts
+                // from the same state instead of being switched on mid-ramp.
+                if let Some(r) = reset
+                    && values[r.index()] <= 0.5
+                {
+                    *cap_v = 0.0;
+                    *flip_flop = true;
+                    return 0.0;
+                }
                 // The current source charges the cap; vin + junction caps the
                 // voltage it can reach. i = (v_cc_source - (vin+junction))/R.
                 let v_charge_limit = values[vin_src.index()] + *junction;
@@ -679,8 +705,24 @@ impl NodeKind {
                         *cap_v = *threshold;
                         *flip_flop = false;
                     }
+                } else if *r_disch > 0.0 {
+                    // Discharging through the discharge pin's resistor. The
+                    // current source keeps feeding that resistor while it does,
+                    // so the cap relaxes toward i·r_disch and not toward ground.
+                    // Above the charge limit the source contributes nothing and
+                    // the limit is the asymptote instead.
+                    let target = if *cap_v < v_charge_limit {
+                        i * *r_disch
+                    } else {
+                        v_charge_limit
+                    };
+                    *cap_v += (target - *cap_v) * *discharge_alpha;
+                    if *cap_v <= *trigger {
+                        *cap_v = *trigger;
+                        *flip_flop = true;
+                    }
                 } else {
-                    // No discharge resistor: immediate drop to the trigger.
+                    // Ideal discharge: straight to the trigger in one step.
                     *cap_v = *trigger;
                     *flip_flop = true;
                 }

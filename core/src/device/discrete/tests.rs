@@ -754,8 +754,10 @@ fn cc_freq(vin: f64) -> f64 {
     let cc = b.ne555_cc(
         "CC",
         vin_in,
+        None,
         100e3,
         0.01e-6,
+        0.0,
         5.0,
         5.0,
         0.7,
@@ -794,6 +796,105 @@ fn ne555_cc_frequency_scales_with_control_voltage() {
     );
 }
 
+/// A discharge resistor is what gives the square output a duty worth tapping.
+///
+/// With an ideal discharge the cap snaps back in one simulation step, so the
+/// square is high for all but one step of every period: a pulse, not a square.
+/// Asteroids' thump tapped the capacitor instead for exactly that reason, and
+/// the voice measured 17 Hz dull because a sawtooth's harmonics fall as 1/n²
+/// where a square's fall as 1/n.
+#[test]
+fn ne555_cc_discharge_resistor_gives_the_square_a_duty_cycle() {
+    let duty_of = |r_disch: f64| -> f64 {
+        let mut b = builder_1to1(SIM);
+        let vin_in = b.constant("VIN", 3.5);
+        let cc = b.ne555_cc(
+            "CC",
+            vin_in,
+            None,
+            22e3,
+            0.22e-6,
+            r_disch,
+            5.0,
+            5.0,
+            0.8,
+            Output555::Square,
+        );
+        let mut c = b.build();
+        step_n(&mut c, 5_000); // past the first ramp from a cold cap
+        let mut high = 0usize;
+        const N: usize = 200_000;
+        for _ in 0..N {
+            c.tick(1);
+            if c.value(cc) > 0.0 {
+                high += 1;
+            }
+        }
+        high as f64 / N as f64
+    };
+
+    // Ideal: high essentially all the time, one step low per period.
+    assert!(
+        duty_of(0.0) > 0.98,
+        "ideal discharge should leave a near-100% duty, got {}",
+        duty_of(0.0)
+    );
+
+    // With the board's 18k on the discharge pin, a real square emerges.
+    let duty = duty_of(18e3);
+    assert!(
+        (0.5..0.95).contains(&duty),
+        "18k discharge should give a usable duty, got {duty}"
+    );
+}
+
+/// The discharge relaxes toward `i·r_disch`, not toward ground, because the
+/// current source keeps feeding the resistor while the pin sinks it. Raising
+/// the discharge resistance therefore raises that asymptote as well as slowing
+/// the decay, and both push the duty the same way.
+#[test]
+fn ne555_cc_discharge_asymptote_follows_the_current_source() {
+    let period_of = |r_disch: f64| -> f64 {
+        let mut b = builder_1to1(SIM);
+        let vin_in = b.constant("VIN", 3.5);
+        let cc = b.ne555_cc(
+            "CC",
+            vin_in,
+            None,
+            22e3,
+            0.22e-6,
+            r_disch,
+            5.0,
+            5.0,
+            0.8,
+            Output555::Square,
+        );
+        let mut c = b.build();
+        step_n(&mut c, 5_000);
+        // Count rising edges over a fixed span to get the period.
+        let mut edges = 0usize;
+        let mut prev = c.value(cc);
+        const N: usize = 200_000;
+        for _ in 0..N {
+            c.tick(1);
+            let v = c.value(cc);
+            if prev <= 0.0 && v > 0.0 {
+                edges += 1;
+            }
+            prev = v;
+        }
+        N as f64 / SIM as f64 / edges as f64
+    };
+
+    // A larger discharge resistor lengthens the low phase, so the period grows.
+    let short = period_of(18e3);
+    let long = period_of(47e3);
+    assert!(
+        long > short,
+        "a larger discharge resistor must lengthen the period: {short} then {long}"
+    );
+}
+
 #[test]
 fn ne555_cc_capacitor_stays_between_trigger_and_threshold() {
     let mut b = builder_1to1(SIM);
@@ -801,8 +902,10 @@ fn ne555_cc_capacitor_stays_between_trigger_and_threshold() {
     let cc = b.ne555_cc(
         "CC",
         vin_in,
+        None,
         100e3,
         0.01e-6,
+        0.0,
         5.0,
         5.0,
         0.7,
@@ -952,8 +1055,10 @@ fn analog_555_circuit() -> DiscreteCircuit {
     let cc = b.ne555_cc(
         "CC",
         vin,
+        None,
         100e3,
         0.01e-6,
+        0.0,
         5.0,
         5.0,
         0.7,

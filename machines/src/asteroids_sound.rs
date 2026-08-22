@@ -284,9 +284,22 @@ const THRUST_Q: f64 = 7.6;
 /// fitted over a broken stage does.
 const THRUST_GAIN: f64 = (LVL_THRUST / LVL_TOTAL) * THRUST_Q / THRUST_BP_CENTRE_GAIN;
 
-/// Output gain after the thump 555/RC chain, calibrated to the reference thump
-/// level (replaces the old `LVL_THUMP / LVL_TOTAL` weight on the square VCO).
-const THUMP_GAIN: f64 = 0.135;
+/// Half the 555's output swing, which is the amplitude its square carries once
+/// the amplifier's coupling capacitor has centred it. `out_high` is `vcc − 1.2`.
+const THUMP_555_SWING: f64 = (5.0 - 1.2) / 2.0;
+
+/// Output gain after the thump 555/RC chain: the path's mix weight, applied to a
+/// signal first normalised out of volts, which is the same shape thrust uses.
+///
+/// This was 0.135, "calibrated to the reference thump level", and it was fitted
+/// against the capacitor tap. With the square, which is what the board takes, it
+/// ran the voice 10 dB hot.
+///
+/// The residual is about a decibel, and it is the reference's own doing: its
+/// thump carries a bare `GAIN 30` where the mix level its table documents would
+/// want 69. That is the same kind of tweak as thrust's 600 against the 1000 its
+/// summing resistor implies, and it is not something to reproduce.
+const THUMP_GAIN: f64 = (LVL_THUMP / LVL_TOTAL) / THUMP_555_SWING;
 
 // Fire chirp constant-current 555 VCO. The frequency is linear in the control
 // voltage, `f = (Vcc_src − Vbe − Vcv) / ((Vcc/3)·C·R)`, so a linear CV ramp gives
@@ -362,8 +375,16 @@ fn build_fire(
     let osc = b.ne555_cc(
         &format!("{name}_555"),
         vin,
+        // Free-running, unchanged. The fires gate through their envelope rather
+        // than the timer, which is one of the things wrong with them; left for
+        // when they are taken on properly.
+        None,
         FIRE_R,
         FIRE_C,
+        // Ideal discharge, unchanged. The fires have their own untraced chain
+        // and their own fitted gains, so this stays as it was until they are
+        // taken on properly rather than being half-corrected here.
+        0.0,
         FIRE_VCC,
         FIRE_VCC_SRC,
         FIRE_JUNCTION,
@@ -461,27 +482,38 @@ fn build_circuit() -> (DiscreteCircuit, AsteroidsDiscreteInputs) {
         .collect();
     let thump_dac_bits = b.dac_weighted("THUMP_DAC", thump_data, &thump_weights);
     let thump_dac_off = b.constant("THUMP_DAC_OFF", 4.3 / (6.8e3 * thump_denom));
-    let thump_cv_raw = b.add("THUMP_CV_RAW", &[thump_dac_bits, thump_dac_off]);
-    // The constant-current VCO's frequency is steep near the charge limit (a few
-    // % of CV moves the pitch ~20 %), so trim the modeled DAC voltage slightly to
-    // land the reference pitch (~53 Hz at full data).
-    let thump_cv = b.gain("THUMP_CV", thump_cv_raw, 1.027);
+    let thump_cv = b.add("THUMP_CV", &[thump_dac_bits, thump_dac_off]);
+    // No trim on this. It used to pass through a 1.027 gain "to land the
+    // reference pitch", and what that was compensating for was the missing
+    // discharge time: with the cap snapping back in one step the period was
+    // short by however long R51 takes, and slowing the charge by 2.7 % hid it.
+    // Model the discharge and the pitch lands on the parts.
     let thump_555 = b.ne555_cc(
         "THUMP_555",
         thump_cv,
-        22e3,
-        0.22e-6, // R, C
+        // The enable gates the 555's reset pin, which is where the board puts
+        // it. Gating the output instead switched a free-running oscillator on
+        // at whatever phase it was passing, and that step was audible as a
+        // scratch at every onset.
+        Some(thump_en.into()),
+        22e3,    // R50, the current-source emitter resistor
+        0.22e-6, // C33, the timing cap
+        18e3,    // R51 on the discharge pin, which is what gives pin 3 a duty
         5.0,
         5.0,
         0.8, // vcc, v_cc_source, 2N3906 junction
-        // The cap sawtooth is the audible tap; the framework's CC square is a
-        // near-100 %-duty pulse (instant discharge) that doesn't model this VCO.
-        Output555::Capacitor,
+        // Pin 3, the square, which is what the board takes through R74. This
+        // used to tap the capacitor, because without R51 above the square was a
+        // pulse one step wide and unusable. A sawtooth's harmonics fall as 1/n²
+        // where a square's fall as 1/n, so the voice measured dull: 17 Hz low on
+        // centroid with 7 points too much energy below 150 Hz.
+        Output555::Square,
     );
-    let thump_ac = b.rc_high_pass("THUMP_AC", thump_555, 16e3, 1e-6); // strip the cap-voltage DC
-    let thump_rc = b.rc_low_pass("THUMP_RC", thump_ac, 3.3e3, 0.1e-6); // ~482 Hz coupling filter
-    let thump_gated = b.multiply("THUMP_G", thump_rc, thump_en);
-    let thump = b.gain("THUMP", thump_gated, THUMP_GAIN);
+    let thump_rc = b.rc_low_pass("THUMP_RC", thump_555, 3.3e3, 0.1e-6); // R74, C64: 482 Hz
+    // No gate here: the 555's reset above is the gate, as on the board. A
+    // multiply at this point would also have to cut the RC's stored charge,
+    // which is a discontinuity the hardware does not make.
+    let thump = b.gain("THUMP", thump_rc, THUMP_GAIN);
 
     // --- Saucer (MAME asteroid_a.cpp): a triangle warble LFO (8.25 Hz small /
     // 5.75 Hz large) sweeps a triangle tone VCO. SAUCER_SEL shifts both the
@@ -534,7 +566,20 @@ fn build_circuit() -> (DiscreteCircuit, AsteroidsDiscreteInputs) {
         "MIX",
         &[expl, thrust, thump, saucer, ship_out, sfire_out, life],
     );
-    b.output(mix, OutputGain::unity());
+    // The amplifier board's input coupling, R14 and C6 on the Regulator/Audio
+    // PCB: 1.59 Hz, which is inaudible and is what actually removes the DC this
+    // board's voices carry. Thump needs it, because its 555 output is a
+    // unipolar square sitting well above ground and the game PCB has nothing in
+    // its path to centre it.
+    //
+    // Modelling it here rather than leaving the DC for the frontend follows the
+    // rule this project arrived at over fourteen machines: a DC offset is a
+    // missing coupling capacitor, and the fix is the capacitor. The reference
+    // instead subtracts half the square's swing, which its own header calls a
+    // cheat to make the waveform AC, and which leaves a residual whenever the
+    // duty is not 50 %. That is worth not reproducing.
+    let out = b.rc_high_pass("AUDIO_COUPLING", mix, 10e3, 10e-6);
+    b.output(out, OutputGain::unity());
 
     let circuit = b.build();
     (

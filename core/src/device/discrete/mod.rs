@@ -808,31 +808,67 @@ impl DiscreteCircuitBuilder {
         )
     }
 
-    /// NE555 constant-current VCO, simple type (port of `dsd_555_cc`). A
-    /// transistor current source `i = (v_cc_source − (vin + junction)) / r`
-    /// (clamped ≥ 0) ramps cap `c` from 1/3·`vcc` to 2/3·`vcc`, then it snaps
-    /// back; the control voltage at `vin_src` sets the slope, so higher `vin`
-    /// means a slower ramp and a lower frequency. `output` selects the cap
-    /// voltage (the usual VCO tap) or the square wave.
+    /// NE555 constant-current VCO, simple type. A transistor current source
+    /// `i = (v_cc_source − (vin + junction)) / r` (clamped ≥ 0) ramps cap `c`
+    /// from 1/3·`vcc` to 2/3·`vcc`; the control voltage at `vin_src` sets the
+    /// slope, so higher `vin` means a slower ramp and a lower frequency.
+    /// `output` selects the cap voltage or the square wave.
+    ///
+    /// `r_disch` is the resistance the 555's discharge pin pulls the cap down
+    /// through, and it is what gives the square output a duty cycle worth
+    /// tapping. Pass **0 for an ideal discharge**, where the cap snaps to the
+    /// trigger in one step: that is the physical limit of the same model, and it
+    /// leaves the square a pulse one step wide.
+    ///
+    /// While discharging, the current source keeps feeding the discharge
+    /// resistor, so the cap relaxes toward `i·r_disch` rather than toward
+    /// ground. That asymptote is the difference between a plausible-looking
+    /// discharge and the right one, and it is only correct for the arrangement
+    /// where the source feeds the cap directly, which is what both boards using
+    /// this have.
+    ///
+    /// `reset` is the 555's reset pin. While it is low the timer is held with
+    /// its capacitor discharged and its output low, so releasing it always
+    /// starts the voice from the same place. **Gate here rather than at the
+    /// output.** Multiplying a free-running oscillator's output by an enable
+    /// switches it on at whatever phase it happens to be passing, which is a
+    /// step discontinuity and is audible as a scratch at every onset. Asteroids'
+    /// thump had exactly that. Pass `None` for a timer that free-runs.
     #[allow(clippy::too_many_arguments)]
     pub fn ne555_cc(
         &mut self,
         name: &str,
         vin_src: impl Into<NodeId>,
+        reset: Option<NodeId>,
         r: f64,
         c: f64,
+        r_disch: f64,
         vcc: f64,
         v_cc_source: f64,
         junction: f64,
         output: Output555,
     ) -> NodeId {
+        assert!(
+            r_disch >= 0.0,
+            "555 discharge resistance must not be negative"
+        );
         let (threshold, trigger) = derive::ne555_thresholds(vcc);
+        // Precomputed here rather than per step: the timestep is fixed, and this
+        // sits in the audio hot path.
+        let discharge_alpha = if r_disch > 0.0 {
+            1.0 - (-1.0 / (self.sim_rate as f64 * r_disch * c)).exp()
+        } else {
+            0.0
+        };
         self.push_node(
             name,
             NodeKind::Ne555Cc {
                 vin_src: vin_src.into(),
+                reset,
                 r,
                 c,
+                r_disch,
+                discharge_alpha,
                 v_cc_source,
                 junction,
                 threshold,

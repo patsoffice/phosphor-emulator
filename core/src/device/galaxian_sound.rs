@@ -230,11 +230,13 @@ impl GalaxianSound {
         let bg_vco = b.ne555_cc(
             "bg_vco",
             bg_dac_v,
-            100.0e3, // R21
-            1.0e-6,  // C15
+            None,
+            100.0e3,
+            1.0e-6,
+            0.0,
             5.0,
             5.0,
-            0.7, // vcc, v_cc_source, Q2 junction
+            0.7,
             Output555::Capacitor,
         ); // NODE_105
 
