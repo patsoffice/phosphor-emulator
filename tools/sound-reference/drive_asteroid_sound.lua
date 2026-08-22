@@ -19,6 +19,13 @@
 --        -seconds_to_run 18
 
 local mem
+-- Work RAM holding a JMP to itself. The main CPU is parked there because the
+-- game clears the 74LS259 audio latch as housekeeping, about 0.3 ms after this
+-- callback sets it, which chops every latch-driven voice into one short burst
+-- per frame. See drive_asteroid_single.lua for the full account; the short
+-- version is that "attract mode is silent" does not mean the game is not
+-- writing, and neither check in verify-reference.sh can see the difference.
+local SPIN = 0x0300
 local announced = false
 
 local function all_off(m)
@@ -55,6 +62,13 @@ local function on_frame()
 
   -- Elapsed time, not the attotime's integer `seconds` field — that one holds a
   -- whole-second value and quantizes every segment boundary below to 1 s.
+  -- Park the 6502 and pet the watchdog so a parked CPU cannot reset the board.
+  mem:write_u8(SPIN + 0, 0x4c) -- JMP $0300
+  mem:write_u8(SPIN + 1, 0x00)
+  mem:write_u8(SPIN + 2, 0x03)
+  manager.machine.devices[":maincpu"].state["PC"].value = SPIN
+  mem:write_u8(0x3400, 0)
+
   local t = manager.machine.time:as_double()
 
   -- SND_VERIFY drives the two checks in verify-reference.sh: `null` never drives

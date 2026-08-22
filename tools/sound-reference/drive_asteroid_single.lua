@@ -34,12 +34,27 @@
 --   sndcmp capture asteroids/thrust --out /tmp/ast_thrust_ours.wav
 --   disasm audiodiff /tmp/ast_thrust_ours.wav /tmp/ast_thrust_ref.wav --range-b 0.95:3.0
 --
--- ATTRACT MODE IS SILENT on this board, so unlike Galaxian and Donkey Kong the
--- main CPU does not need parking: it is not writing sound registers while this
--- runs. The all-off pass below is still applied every frame, so a game write
--- during a longer run cannot leak into a capture.
+-- THE MAIN CPU IS PARKED, and this driver used to say it did not need to be:
+-- "attract mode is silent, so the game is not writing sound registers". Silent
+-- is not the same as not writing. The game clears the 74LS259 audio latch as
+-- housekeeping, roughly 0.3 ms after this callback sets it, so every
+-- latch-driven voice came out as one short burst per frame instead of a held
+-- note. The life tone was the obvious casualty: chopped to a 0.3 ms burst at
+-- 61.7 Hz, which measured 14 dB quiet with a crest factor of 10.5 against a
+-- square wave's 1.0, and read as a badly broken voice on our side.
+--
+-- Neither check in verify-reference.sh can see this. A chopped capture is still
+-- silent when nothing is triggered and still changes when the schedule moves, so
+-- null and sensitivity both pass on a contaminated reference. What gives it away
+-- is that the capture is modulated at the machine's frame rate, which is a thing
+-- no voice on this board does on its own.
+--
+-- So park the CPU in a spin loop and pet the watchdog, as the Galaxian and
+-- Donkey Kong drivers already do. The sound hardware is driven directly here and
+-- does not need the game running.
 
 local mem
+local SPIN = 0x0300 -- work RAM, holding a JMP to itself
 
 -- Board writes, as decoded at 0x3600 / 0x3A00 / 0x3C00+n.
 local function write_explosion(vol, pitch_sel)
@@ -103,6 +118,14 @@ local function on_frame()
   -- Elapsed time, not the attotime's integer `seconds` field. That one holds a
   -- whole-second value, so every fractional boundary here would quantise to a
   -- full second and the capture would silently describe a different experiment.
+  -- Park the 6502 so the game cannot clear the audio latch between our writes,
+  -- and pet the watchdog so a parked CPU does not trigger a reset.
+  mem:write_u8(SPIN + 0, 0x4c) -- JMP $0300
+  mem:write_u8(SPIN + 1, 0x00)
+  mem:write_u8(SPIN + 2, 0x03)
+  manager.machine.devices[":maincpu"].state["PC"].value = SPIN
+  mem:write_u8(0x3400, 0)
+
   local t = manager.machine.time:as_double()
 
   -- SND_VERIFY drives the checks in verify-reference.sh: `null` never asserts, so

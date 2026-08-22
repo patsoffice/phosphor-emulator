@@ -601,6 +601,41 @@ alongside authenticity, and it applies to `sndcmp`'s own scenarios equally.
 The consequence for sequencing is in the phase list below: node comparison moves
 ahead of `fit`.
 
+**And those two checks are not sufficient, which Asteroids showed later.** Its
+driver did not park the main CPU, on the reasoning that "attract mode is silent,
+so the game is not writing sound registers". Silent is not the same as not
+writing: the game clears the 74LS259 audio latch as housekeeping about 0.3 ms
+after the driver sets it, so every latch-driven voice was captured as one short
+burst per frame rather than a held note. Five of the eight scenarios ran on that
+latch.
+
+The life tone made it obvious once looked at: chopped to a 0.3 ms burst at
+61.7 Hz, measuring 14 dB quiet with a crest factor of 10.5 where a square wave's
+is 1.0, and a spectral flatness of 0.22 where a tone's is zero. Read as a
+comparison it said our life voice was badly broken. Parking the CPU moved the
+same comparison to within tolerance on every metric with no change to our side
+at all.
+
+**Neither check could see it.** The null run is still silent, because nothing is
+triggered. The sensitivity run still changes, because a chopped capture chops
+differently when the schedule moves. Worse, the null check is a *peak*
+measurement, and chopping a tone does not change its peak: the driven peaks
+before and after parking were identical to seventeen significant figures.
+
+So the pair generalises to three, and the third is about contamination rather
+than response:
+
+- **null**: untriggered must be quiet.
+- **sensitivity**: moving the schedule must change the capture.
+- **exclusivity**: nothing but the driver may be driving. Park the CPU by
+  default and treat "the game is quiet here" as a claim needing evidence, not a
+  reason to skip it.
+
+The cheap detector, if parking is genuinely not possible: **a capture modulated
+at the machine's frame rate is contaminated.** No voice on these boards is
+periodic at 60 Hz on its own, so frame-rate modulation is the game's hand
+showing. That is one autocorrelation and it would have caught this immediately.
+
 ### What finishing the first board taught
 
 Donkey Kong was then taken to completion — all three effects and the music built
