@@ -185,6 +185,65 @@ fn lfsr_is_deterministic_and_not_constant() {
     assert!(seq.iter().any(|&v| v > 0.0) && seq.iter().any(|&v| v < 0.0));
 }
 
+/// The check that "the sequence toggles" cannot make: a register can toggle
+/// happily around a 42-state cycle and be a tone rather than noise.
+///
+/// Both directions are exercised because the direction is what decides the
+/// polynomial, and the failure is silent either way.
+#[test]
+fn cycle_length_separates_a_noise_source_from_a_tone() {
+    // Primitive: a maximal 17-bit register visits every non-zero state.
+    let good = LfsrSpec::toward_zero(17, (11, 0), 0x1_FFFF);
+    assert_eq!(good.cycle_length(), (1 << 17) - 1);
+
+    // The same tap numbers run the other way are a different recurrence, and
+    // this pair is not primitive in either arrangement without the inversion.
+    let bad = LfsrSpec::toward_zero(16, (6, 14), 0xACE1);
+    assert_eq!(
+        bad.cycle_length(),
+        42,
+        "this is the Asteroids thrust defect; if it changes, the finding moved"
+    );
+
+    // Inverted feedback shifting the other way is the arrangement the board
+    // wires, and it reaches every state but the all-ones lock.
+    let real = LfsrSpec {
+        width: 16,
+        taps: (6, 14),
+        seed: 0,
+        shift: LfsrShift::TowardHigh,
+        invert_feedback: true,
+        output: LfsrOutput::Feedback,
+    };
+    assert_eq!(real.cycle_length(), (1 << 15) - 1);
+}
+
+/// The cycle length must describe the register that actually runs, or it is a
+/// guarantee about nothing. Walk a live circuit's output far enough to see the
+/// sequence come round, and check it comes round where the spec says.
+#[test]
+fn the_computed_cycle_is_the_one_the_node_runs() {
+    let spec = LfsrSpec::toward_zero(16, (6, 14), 0xACE1);
+    let period = spec.cycle_length() as usize;
+
+    // Clock the register once per simulation step so the emitted sequence is
+    // the register's own, with no resampling between.
+    let rate = 48_000.0;
+    let mut b = DiscreteCircuitBuilder::new(rate as u64, rate as u64);
+    let noise = b.lfsr_noise("N", rate, spec);
+    b.output(noise, OutputGain::unity());
+    let mut c = b.build();
+
+    // Past the transient before sampling: the seed is not on the cycle.
+    let seq = lfsr_sequence(&mut c, 64 + 3 * period);
+    let tail = &seq[64..];
+    assert_eq!(
+        tail[..period],
+        tail[period..2 * period],
+        "the running node does not repeat at the computed cycle length"
+    );
+}
+
 #[test]
 fn lfsr_reset_restores_seed_sequence() {
     let mut c = lfsr_circuit();

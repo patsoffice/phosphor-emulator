@@ -622,6 +622,25 @@ was always the same: the fitted value had no schematic counterpart. That test â€
 *can I point at the part?* â€” is faster than any spectral comparison and it never
 gave a false answer here.
 
+Asteroids added a fifth entry and a variant. Its thrust carried a fitted output
+gain of 0.12, and what that was covering was not a missing stage but a **broken
+one**: the noise register ran a 42-state cycle where the board's runs 32767, so
+the voice was a 286 Hz tone rather than noise. A band-pass with a Q of 7.6 rings
+at its own centre whatever it is fed, so a ringing filter needs far more make-up
+than a properly excited one, and the fitted gain was supplying it. Correcting the
+register drove the same gain into hard clipping at full scale, which is how the
+dependency announced itself.
+
+Two things generalise. **A wrong shift direction in a shift register does not
+fail, it runs a different polynomial**, usually a much shorter one, and a short
+cycle is a tone wearing a noise source's name. `LfsrSpec::cycle_length` exists so
+that is one assertion rather than an investigation; assert it for any register
+whose output is supposed to be noise. And **the stage after a defect can hide it
+from every metric you would think to check**: this voice's pitch, centroid and
+fundamental all matched the board throughout, because they were the filter's and
+not the source's. Crest factor was the only thing that could see it, which is the
+second time that metric has been the one worth keeping.
+
 **Diagnosing from the output blames the stage nearest the output.** Jump's
 residual was attributed to the emitter follower on the strength of a waveform
 read off the final mix, and two independently rebuilt voices seemed to confirm

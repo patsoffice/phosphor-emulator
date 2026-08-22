@@ -207,6 +207,76 @@ impl LfsrSpec {
             output: LfsrOutput::RegisterBit,
         }
     }
+
+    /// How many states the register visits before repeating, from its seed.
+    ///
+    /// **Assert this for any register whose output is meant to be noise.** A
+    /// wrong shift direction does not fail, it runs a different and usually far
+    /// shorter recurrence, and a short cycle is a tone rather than noise.
+    ///
+    /// Asteroids' thrust ran a 42-state cycle where the board runs 32767, so its
+    /// "noise" repeated every 3.5 ms. No seed helped: 42 was the longest cycle
+    /// any of the 65536 starting states reached, because the polynomial was not
+    /// primitive in that direction at all. It survived a long time because the
+    /// stage after it is a high-Q band-pass, which rings at its own resonance
+    /// whatever it is fed, so every pitch and centroid check passed while the
+    /// voice was structurally wrong.
+    ///
+    /// A full-width register is 2^n states, so this walks the sequence with
+    /// Floyd's algorithm rather than remembering where it has been.
+    pub fn cycle_length(&self) -> u64 {
+        let step = |s: u32| {
+            lfsr_advance(
+                s,
+                self.taps.0,
+                self.taps.1,
+                self.width,
+                self.shift == LfsrShift::TowardHigh,
+                self.invert_feedback,
+            )
+            .0
+        };
+        let (mut slow, mut fast) = (step(self.seed), step(step(self.seed)));
+        while slow != fast {
+            slow = step(slow);
+            fast = step(step(fast));
+        }
+        let mut len = 1u64;
+        fast = step(slow);
+        while slow != fast {
+            fast = step(fast);
+            len += 1;
+        }
+        len
+    }
+}
+
+/// Advance one LFSR state, returning the next state and the feedback bit.
+///
+/// Shared between the running node and [`LfsrSpec::cycle_length`] on purpose: a
+/// cycle length computed from a different recurrence than the one that runs
+/// would be worse than not checking, since it would read as a guarantee.
+pub(crate) fn lfsr_advance(
+    state: u32,
+    tap_a: u8,
+    tap_b: u8,
+    width: u8,
+    toward_high: bool,
+    invert_feedback: bool,
+) -> (u32, u32) {
+    let mask = if width >= 32 {
+        u32::MAX
+    } else {
+        (1u32 << width) - 1
+    };
+    let feedback = ((state >> tap_a) ^ (state >> tap_b)) & 1;
+    let shifted_in = feedback ^ u32::from(invert_feedback);
+    let next = if toward_high {
+        ((state << 1) | shifted_in) & mask
+    } else {
+        (state >> 1) | (shifted_in << (width - 1))
+    };
+    (next, feedback)
 }
 
 impl CmosInverter {

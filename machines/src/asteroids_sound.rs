@@ -11,8 +11,8 @@
 use phosphor_core::core::debug::{DebugRegister, Debuggable};
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::device::{
-    CustomComponent, DataInputId, DiscreteCircuit, DiscreteCircuitBuilder, FilterMode, LfsrSpec,
-    LogicInputId, NodeId, Output555, OutputGain, PulseInputId,
+    CustomComponent, DataInputId, DiscreteCircuit, DiscreteCircuitBuilder, FilterMode, LfsrOutput,
+    LfsrShift, LfsrSpec, LogicInputId, NodeId, Output555, OutputGain, PulseInputId,
 };
 
 use crate::atari_dvg::TIMING;
@@ -215,11 +215,44 @@ const LVL_TOTAL: f64 = LVL_EXPLOSION
     + LVL_SHIP_FIRE
     + LVL_SAUCER_FIRE;
 
-/// Output gain after the thrust band-pass. The multiple-feedback band-pass
-/// already provides the resonant make-up (its center gain is `Rf / 2·Rin`), so
-/// this only trims the path to its mix level — calibrated against the reference
-/// thrust rumble rather than the hand-tuned pre-gain it replaces.
-const THRUST_GAIN: f64 = 0.12;
+/// Thrust band-pass components. `Rf/(2·Rin)` and `1/(2π·C·sqrt(Rin·Rf/2))` set
+/// its centre gain, centre frequency and Q together.
+///
+/// CAUTION, these are not schematic values. They were back-solved to land a
+/// centre of 89.5 Hz and a Q of 7.6, which is why `Rin` is 1.17 kΩ, a resistance
+/// no series makes. So the centre gain below is a consequence of that solve
+/// rather than a fact about the board, and the level structure it feeds cannot
+/// be trusted further than the values are.
+const THRUST_BP_RIN: f64 = 1_170.0;
+const THRUST_BP_RF: f64 = 270_000.0;
+const THRUST_BP_C: f64 = 0.1e-6;
+
+/// Q of the thrust band-pass, which is also its energy make-up factor.
+///
+/// A band-pass this narrow throws away most of the noise handed to it, so a path
+/// carrying its mix weight through one arrives far too quiet. Multiplying the
+/// weight by Q is the compensation, and the reference makes the same correction
+/// in the same place for the same reason.
+const THRUST_Q: f64 = 7.6;
+
+/// Output gain after the thrust band-pass: the path's mix weight, scaled by the
+/// filter's energy make-up, with the band-pass primitive's own resonant gain
+/// divided back out so it is not counted twice.
+///
+/// LEVEL HERE IS NOT SETTLED, and the honest statement is that it cannot be
+/// derived while [`THRUST_BP_RIN`] and its neighbours are back-solved numbers
+/// rather than parts. This mirrors the reference's structure, which puts the
+/// same weight-times-Q correction ahead of a band-pass whose centre gain is
+/// unity, and it lands about 3 dB under the board.
+///
+/// It was 0.12, fitted against a reference capture, and that value was standing
+/// in for the broken noise source upstream: a ringing filter needs far more
+/// make-up than a genuinely excited one, so once the register was corrected the
+/// old gain drove the path into hard clipping at full scale. That is what a gain
+/// fitted over a broken stage does. Do not fit this one; the way to settle it is
+/// the schematic's actual band-pass values.
+const THRUST_GAIN: f64 =
+    (LVL_THRUST / LVL_TOTAL) * THRUST_Q / (THRUST_BP_RF / (2.0 * THRUST_BP_RIN));
 
 /// Output gain after the thump 555/RC chain, calibrated to the reference thump
 /// level (replaces the old `LVL_THUMP / LVL_TOTAL` weight on the square VCO).
@@ -238,6 +271,34 @@ const FIRE_JUNCTION: f64 = 0.7;
 /// Per-fire output gains, calibrated to the reference pew levels.
 const SHIP_FIRE_GAIN: f64 = 0.104;
 const SAUCER_FIRE_GAIN: f64 = 0.064;
+
+/// The board's noise register: 16 bits, XNOR of bits 6 and 14 fed back into the
+/// bottom, clocked at 12 kHz.
+///
+/// The direction is the whole point. Tap numbers read off a schematic describe a
+/// register shifting toward its high end, and running the same numbers the other
+/// way is a different polynomial. This was `toward_zero(16, (6, 14), 0xACE1)`,
+/// which is not primitive at all in that direction: its longest cycle is 42
+/// states from any of the 65536 starting points, so the "noise" repeated every
+/// 3.5 ms and was a 286 Hz tone.
+///
+/// It measured as the right pitch throughout, because the stage after it is a
+/// band-pass with a Q of 7.6 and that rings at its own 89.5 Hz whatever it is
+/// fed. What it could not do was sound like noise: filtered white noise has a
+/// crest factor above 3, and a ringing filter has one near a sine wave's.
+///
+/// XNOR rather than XOR makes the all-zero state ordinary and the all-ones state
+/// the lock, which is why the register can seed at zero, the state it powers up
+/// in. The output is the gate's own term rather than a register bit; that is a
+/// one-step phase difference and does not change the spectrum.
+const THRUST_NOISE_LFSR: LfsrSpec = LfsrSpec {
+    width: 16,
+    taps: (6, 14),
+    seed: 0,
+    shift: LfsrShift::TowardHigh,
+    invert_feedback: true,
+    output: LfsrOutput::Feedback,
+};
 
 /// Control voltage that makes the fire 555 oscillate at `freq` Hz (inverse of the
 /// linear CC-VCO frequency law above).
@@ -324,34 +385,33 @@ fn build_circuit() -> (DiscreteCircuit, AsteroidsDiscreteInputs) {
     let expl = b.gain("EXPLODE", expl_lp, LVL_EXPLOSION / LVL_TOTAL);
 
     // --- Thrust: 12 kHz noise -> RC pre-filter (~72 Hz) -> gate -> resonant
-    // op-amp multiple-feedback band-pass (~89.5 Hz, Q ~7.6) -> 160 Hz output
-    // low-pass. The band-pass R/C set fc, Q and the make-up gain together
-    // (center gain Rf/2·Rin ≈ 115), so the path no longer needs a hand-tuned
-    // pre-gain. Deep rumble, no high-frequency hiss. ---
-    let thrust_noise = b.lfsr_noise(
-        "THRUST_NOISE",
-        12_000.0,
-        // Taps chosen against the toward-zero shift, so they keep it; migrating
-        // to the hardware convention would run a different polynomial.
-        LfsrSpec::toward_zero(16, (6, 14), 0xACE1),
-    );
+    // op-amp multiple-feedback band-pass (~89.5 Hz, Q ~7.6) -> output low-pass
+    // -> mix weight. The noise source, the pre-filter, the gate and the
+    // band-pass all match the reference stage for stage. ---
+    let thrust_noise = b.lfsr_noise("THRUST_NOISE", 12_000.0, THRUST_NOISE_LFSR);
     let thrust_rc = b.rc_low_pass("THRUST_RC", thrust_noise, 2_200.0, 1e-6);
     let thrust_gated = b.multiply("THRUST_GATE", thrust_rc, thrust_en);
-    // R_in 1.17 kΩ / R_f 270 kΩ / C 0.1 µF give fc ≈ 89.5 Hz, Q ≈ 7.6 (matching
-    // the reference). Rails wide enough to stay linear over the noise drive.
+    // fc ≈ 89.5 Hz, Q ≈ 7.6. Rails wide enough to stay linear over the noise
+    // drive. See THRUST_BP_RIN on where these values come from and do not.
     let thrust_bp = b.op_amp_band_pass(
         "THRUST_BP",
         thrust_gated,
-        &[1_170.0],
-        270_000.0,
-        0.1e-6,
-        0.1e-6,
+        &[THRUST_BP_RIN],
+        THRUST_BP_RF,
+        THRUST_BP_C,
+        THRUST_BP_C,
         0.0,
         -12.0,
         12.0,
     );
-    // Steep 2nd-order output low-pass to keep it a deep rumble (the resonant
-    // band-pass skirts otherwise leave audible upper noise).
+    // KNOWN DIFFERENCE, deliberately left: this is 2nd order at 120 Hz where the
+    // reference is 1st order at 160 Hz. It was added to suppress upper noise the
+    // band-pass skirts let through, back when the source was a 42-state cycle
+    // and produced almost none, so what it was really suppressing is unclear.
+    // Left alone on purpose: the source fix is the change under test, and moving
+    // two stages at once makes neither attributable. Its cost is visible, a
+    // crest factor of 3.00 against the board's 3.25, and it may well be right to
+    // remove once the schematic settles what this stage actually is.
     let thrust_lp = b.second_order("THRUST_LP", thrust_bp, FilterMode::LowPass, 120.0, 0.707);
     let thrust = b.gain("THRUST", thrust_lp, THRUST_GAIN);
 
@@ -667,6 +727,46 @@ mod tests {
         }
         let sum: f64 = buf[..n].iter().map(|&v| (v as f64).powi(2)).sum();
         (sum / n as f64).sqrt()
+    }
+
+    /// The thrust noise must be noise. Its register has to reach every state but
+    /// the XNOR lock, which for 16 bits is 32767.
+    ///
+    /// This shipped as a 42-state cycle, a 286 Hz tone, and measured as the
+    /// right pitch the whole time because the band-pass after it rings at its
+    /// own resonance whatever it is fed. Nothing else in the suite could see it:
+    /// the sequence was deterministic, it toggled, it reset correctly, and the
+    /// output's centroid was within a couple of Hz of the board's.
+    #[test]
+    fn the_thrust_noise_register_runs_a_full_cycle() {
+        assert_eq!(
+            THRUST_NOISE_LFSR.cycle_length(),
+            (1 << 15) - 1,
+            "thrust noise is running a short cycle, which is a tone and not noise"
+        );
+    }
+
+    /// The explosion register is the same 16 bits with the same taps, so it must
+    /// agree with the thrust register on the recurrence.
+    ///
+    /// The board has one noise source feeding both paths. This model builds two,
+    /// because the explosion re-clocks its register at a divided rate where the
+    /// board samples a free-running one, so they cannot yet be the same node.
+    /// They can at least be required to run the same polynomial.
+    #[test]
+    fn the_explosion_noise_runs_the_same_recurrence_as_thrust() {
+        // Seed 0 is one step off the cycle rather than on it, so count where the
+        // sequence rejoins itself instead of counting states visited.
+        let mut lfsr = ExplosionNoise::SEED;
+        let mut seen = std::collections::HashMap::new();
+        let mut step = 0u64;
+        while !seen.contains_key(&lfsr) {
+            seen.insert(lfsr, step);
+            let fb = !(((lfsr >> 6) ^ (lfsr >> 14)) & 1) & 1;
+            lfsr = (lfsr << 1) | fb;
+            step += 1;
+        }
+        assert_eq!(step - seen[&lfsr], THRUST_NOISE_LFSR.cycle_length());
     }
 
     #[test]

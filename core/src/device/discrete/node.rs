@@ -451,22 +451,25 @@ impl NodeKind {
                 clock_acc,
                 ..
             } => {
-                let mask = if *width >= 32 {
-                    u32::MAX
-                } else {
-                    (1u32 << *width) - 1
+                let advance = |state: u32| {
+                    super::lfsr_advance(
+                        state,
+                        *tap_a,
+                        *tap_b,
+                        *width,
+                        *toward_high,
+                        *invert_feedback,
+                    )
                 };
-                let mut feedback = ((*lfsr >> *tap_a) ^ (*lfsr >> *tap_b)) & 1;
+                // Read before the loop as well, so a step that carries no clock
+                // edge still reports the feedback of the current state.
+                let mut feedback = advance(*lfsr).1;
                 *clock_acc += *freq * dt;
                 while *clock_acc >= 1.0 {
                     *clock_acc -= 1.0;
-                    feedback = ((*lfsr >> *tap_a) ^ (*lfsr >> *tap_b)) & 1;
-                    let shifted_in = feedback ^ u32::from(*invert_feedback);
-                    *lfsr = if *toward_high {
-                        ((*lfsr << 1) | shifted_in) & mask
-                    } else {
-                        (*lfsr >> 1) | (shifted_in << (*width - 1))
-                    };
+                    let (next, fb) = advance(*lfsr);
+                    feedback = fb;
+                    *lfsr = next;
                 }
                 let level = if *output_feedback {
                     feedback
