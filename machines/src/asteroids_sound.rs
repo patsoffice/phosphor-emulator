@@ -11,8 +11,8 @@
 use phosphor_core::core::debug::{DebugRegister, Debuggable};
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::device::{
-    CustomComponent, DataInputId, DiscreteCircuit, DiscreteCircuitBuilder, FilterMode, LfsrOutput,
-    LfsrShift, LfsrSpec, LogicInputId, NodeId, Output555, OutputGain, PulseInputId,
+    CustomComponent, DataInputId, DiscreteCircuit, DiscreteCircuitBuilder, LfsrOutput, LfsrShift,
+    LfsrSpec, LogicInputId, NodeId, Output555, OutputGain, PulseInputId,
 };
 
 use crate::atari_dvg::TIMING;
@@ -215,17 +215,41 @@ const LVL_TOTAL: f64 = LVL_EXPLOSION
     + LVL_SHIP_FIRE
     + LVL_SAUCER_FIRE;
 
-/// Thrust band-pass components. `Rf/(2·Rin)` and `1/(2π·C·sqrt(Rin·Rf/2))` set
-/// its centre gain, centre frequency and Q together.
+/// Thrust band-pass: a multiple-feedback stage around one section of the LM324.
 ///
-/// CAUTION, these are not schematic values. They were back-solved to land a
-/// centre of 89.5 Hz and a Q of 7.6, which is why `Rin` is 1.17 kΩ, a resistance
-/// no series makes. So the centre gain below is a consequence of that solve
-/// rather than a fact about the board, and the level structure it feeds cannot
-/// be trusted further than the values are.
-const THRUST_BP_RIN: f64 = 1_170.0;
-const THRUST_BP_RF: f64 = 270_000.0;
-const THRUST_BP_C: f64 = 0.1e-6;
+/// R76 carries the signal into the node and R100 ties that node to the +5 V
+/// reference, so BOTH belong in the builder's `r_in` list. The centre frequency
+/// and Q come from their parallel combination, 47 k ∥ 1.2 k = 1170 Ω, while the
+/// centre gain is `Rf/(2·R76)`, or 2.87.
+///
+/// This used to pass the parallel value alone, as a single 1170 Ω input
+/// resistor. That gets the first two exactly right and the third wrong by
+/// 47 k / 1170 = 40, so the filter's shape measured perfectly while its gain was
+/// forty times what the parts give. Nothing that looks at a corner or a Q could
+/// have caught it, and the missing factor sat in a fitted output gain instead.
+const THRUST_BP_R_IN: f64 = 47_000.0; // R76
+const THRUST_BP_R_REF: f64 = 1_200.0; // R100, to the +5 V reference
+const THRUST_BP_RF: f64 = 270_000.0; // R101
+const THRUST_BP_C: f64 = 0.1e-6; // C67 and C68
+
+/// Centre gain of the band-pass above, `Rf/(2·R_in)`, which the path's own gain
+/// divides back out so the mix weight is the only thing it applies.
+const THRUST_BP_CENTRE_GAIN: f64 = THRUST_BP_RF / (2.0 * THRUST_BP_R_IN);
+
+/// Thrust output stage: an inverting active low-pass on the next LM324 section.
+///
+/// R104 sets the input, R103 the feedback and C69 sits across R103. That is a
+/// DC gain of `R103/R104` and a SINGLE pole at `1/(2π·R103·C69)`, or 159 Hz.
+///
+/// This was a second-order 120 Hz Butterworth with unity gain, added to suppress
+/// upper noise the band-pass skirts let through. It had no part behind it, and
+/// what it was suppressing was mostly the noise source's own defect: it cost
+/// about a quarter of a point of crest factor by rolling off the peaks that make
+/// filtered noise sound like noise.
+const THRUST_LP_R_IN: f64 = 6_800.0; // R104
+const THRUST_LP_RF: f64 = 10_000.0; // R103
+const THRUST_LP_C: f64 = 0.1e-6; // C69
+const THRUST_LP_GAIN: f64 = THRUST_LP_RF / THRUST_LP_R_IN;
 
 /// Q of the thrust band-pass, which is also its energy make-up factor.
 ///
@@ -239,20 +263,26 @@ const THRUST_Q: f64 = 7.6;
 /// filter's energy make-up, with the band-pass primitive's own resonant gain
 /// divided back out so it is not counted twice.
 ///
-/// LEVEL HERE IS NOT SETTLED, and the honest statement is that it cannot be
-/// derived while [`THRUST_BP_RIN`] and its neighbours are back-solved numbers
-/// rather than parts. This mirrors the reference's structure, which puts the
-/// same weight-times-Q correction ahead of a band-pass whose centre gain is
-/// unity, and it lands about 3 dB under the board.
+/// Dividing out the band-pass's centre gain makes this path algebraically the
+/// reference's: a weight-times-Q scaling, filters with unity centre gain, and
+/// one output normalisation. That is why the two agree on absolute level once
+/// the stages either side of it are right.
+///
+/// STILL NOT DERIVED FROM PARTS, and the distinction matters. The measured level
+/// agrees with the board to well inside the window-to-window spread, but the
+/// weight is the reference's own tweaked 600 rather than the 1000 its summing
+/// resistor implies, and Q is here as an energy correction rather than as a
+/// component. What would retire it is expressing every voice in volts and
+/// letting the mixer weight them, which the schematic now makes possible:
+/// thrust enters the LM324 mixer through R102 4.7 kΩ against R86's 1 kΩ, the
+/// same pair the explosion uses. That is a board-wide change, not a thrust one.
 ///
 /// It was 0.12, fitted against a reference capture, and that value was standing
 /// in for the broken noise source upstream: a ringing filter needs far more
 /// make-up than a genuinely excited one, so once the register was corrected the
 /// old gain drove the path into hard clipping at full scale. That is what a gain
-/// fitted over a broken stage does. Do not fit this one; the way to settle it is
-/// the schematic's actual band-pass values.
-const THRUST_GAIN: f64 =
-    (LVL_THRUST / LVL_TOTAL) * THRUST_Q / (THRUST_BP_RF / (2.0 * THRUST_BP_RIN));
+/// fitted over a broken stage does.
+const THRUST_GAIN: f64 = (LVL_THRUST / LVL_TOTAL) * THRUST_Q / THRUST_BP_CENTRE_GAIN;
 
 /// Output gain after the thump 555/RC chain, calibrated to the reference thump
 /// level (replaces the old `LVL_THUMP / LVL_TOTAL` weight on the square VCO).
@@ -389,14 +419,21 @@ fn build_circuit() -> (DiscreteCircuit, AsteroidsDiscreteInputs) {
     // -> mix weight. The noise source, the pre-filter, the gate and the
     // band-pass all match the reference stage for stage. ---
     let thrust_noise = b.lfsr_noise("THRUST_NOISE", 12_000.0, THRUST_NOISE_LFSR);
+    // R75 and C62: one pole at 72.3 Hz.
     let thrust_rc = b.rc_low_pass("THRUST_RC", thrust_noise, 2_200.0, 1e-6);
+    // The board gates with a 4016B analog switch BEFORE this RC, not after it,
+    // so its attack and release are shaped differently from what this does.
+    // Left as is for now: it moves the edges of the effect and nothing in the
+    // steady state, which is what the scenario measures.
     let thrust_gated = b.multiply("THRUST_GATE", thrust_rc, thrust_en);
-    // fc ≈ 89.5 Hz, Q ≈ 7.6. Rails wide enough to stay linear over the noise
-    // drive. See THRUST_BP_RIN on where these values come from and do not.
+    // fc ≈ 89.5 Hz, Q ≈ 7.6, centre gain 2.87. Both input resistors are listed:
+    // the signal enters through the first and the second ties the node to the
+    // reference, and the builder needs both to separate the filter's shape from
+    // its gain. Rails wide enough to stay linear over the noise drive.
     let thrust_bp = b.op_amp_band_pass(
         "THRUST_BP",
         thrust_gated,
-        &[THRUST_BP_RIN],
+        &[THRUST_BP_R_IN, THRUST_BP_R_REF],
         THRUST_BP_RF,
         THRUST_BP_C,
         THRUST_BP_C,
@@ -404,16 +441,10 @@ fn build_circuit() -> (DiscreteCircuit, AsteroidsDiscreteInputs) {
         -12.0,
         12.0,
     );
-    // KNOWN DIFFERENCE, deliberately left: this is 2nd order at 120 Hz where the
-    // reference is 1st order at 160 Hz. It was added to suppress upper noise the
-    // band-pass skirts let through, back when the source was a 42-state cycle
-    // and produced almost none, so what it was really suppressing is unclear.
-    // Left alone on purpose: the source fix is the change under test, and moving
-    // two stages at once makes neither attributable. Its cost is visible, a
-    // crest factor of 3.00 against the board's 3.25, and it may well be right to
-    // remove once the schematic settles what this stage actually is.
-    let thrust_lp = b.second_order("THRUST_LP", thrust_bp, FilterMode::LowPass, 120.0, 0.707);
-    let thrust = b.gain("THRUST", thrust_lp, THRUST_GAIN);
+    // One pole at 159 Hz, from R103 across C69. The stage's own gain and the
+    // path's mix weight are applied together at the node below.
+    let thrust_lp = b.rc_low_pass("THRUST_LP", thrust_bp, THRUST_LP_RF, THRUST_LP_C);
+    let thrust = b.gain("THRUST", thrust_lp, THRUST_LP_GAIN * THRUST_GAIN);
 
     // --- Thump: a 4-bit R-1 DAC sets the control voltage of a constant-current
     // 555 VCO (the cap sawtooth), AC-coupled, RC-smoothed and gated. Higher data

@@ -641,6 +641,35 @@ fundamental all matched the board throughout, because they were the filter's and
 not the source's. Crest factor was the only thing that could see it, which is the
 second time that metric has been the one worth keeping.
 
+**A value can be correctly derived and still be wrong, if the derivation threw
+away what the model needed.** Reading the schematic afterwards showed the rest of
+Asteroids' thrust chain was built from real parts all along, and that the one
+value this document had written off as invented, a 1170 Ω input resistor "no
+series makes", was `47 kΩ ∥ 1.2 kΩ` to four figures. R76 carries the signal in
+and R100 ties the node to the reference; the builder wants both, because a
+multiple-feedback band-pass takes its centre frequency and Q from their parallel
+combination and its centre gain from the input resistor alone. Passing the
+parallel value as a single input resistor made fc and Q exact and the gain wrong
+by a factor of forty.
+
+That is worth separating from a fitted constant, because it defeats the test that
+catches those. *Can I point at the part?* had a plausible answer here: the number
+was a real network's real impedance. What it was not was the argument the model
+asked for. **When a primitive takes several component values, its argument list
+is a topology, and an equivalent value is not equivalent to it.** The check that
+would have caught this is dimensional rather than numerical: ask what each
+argument is for, and whether one number can carry two jobs.
+
+Two consequences followed the correction, and only one was the point. The gain
+came right, and so did the level, which had been closed with a fitted constant
+before. The second was that the forty-times overdrive had been pinning the
+modelled op-amp against its rails: the band-pass node sat at 11.75 V into a 12 V
+rail, and the clamping flattened exactly the peaks that make filtered noise sound
+like noise. Correcting the arguments moved that node's crest factor from 3.11 to
+3.31 without touching a filter. **A modelled rail is a real nonlinearity, so an
+overdriven stage does not merely sound loud, it sounds wrong.** An implausible
+internal level is worth checking on any stage whose primitive clamps.
+
 **Diagnosing from the output blames the stage nearest the output.** Jump's
 residual was attributed to the emitter follower on the strength of a waveform
 read off the final mix, and two independently rebuilt voices seemed to confirm
