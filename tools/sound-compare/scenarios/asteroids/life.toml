@@ -1,0 +1,22 @@
+schema = 1
+id = "asteroids/life"
+target = "asteroids-discrete"
+duration_s = 3.0
+description = "Extra-life tone, held"
+
+# The simplest voice on the board: one fixed tone, gated. It is here mostly
+# because it is the one thing on this board whose frequency is not in dispute, so
+# a comparison that disagrees about the life tone is telling you something about
+# the harness or the capture rather than about the circuit.
+[[action]]
+at_s = 1.0
+control = "life"
+value = true
+
+# From before the gate edge, for the reason spelled out in thrust.toml: the tone
+# free-runs and the trigger only gates it, so a window opening after the gate
+# cannot tell when the gate opened. Held to the end rather than released, so no
+# post-gate silence enters the window.
+[analysis]
+start_s = 0.95
+end_s = 3.0

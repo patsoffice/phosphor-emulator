@@ -1,0 +1,24 @@
+schema = 1
+id = "asteroids/saucer-fire"
+target = "asteroids-discrete"
+duration_s = 3.0
+description = "One saucer fire chirp, its enable held for the whole sweep"
+
+# Held rather than pulsed for the same reason as the ship's chirp, and the note
+# there applies here unchanged: the envelope is driven off the enable level, so a
+# short trigger truncates the sweep. See ship-fire.toml.
+#
+# Worth having separately from the ship's despite sharing a builder: the two are
+# given different sweep spans and very different decay constants, 81 ms against
+# 300 ms, and both of those are literals rather than component values.
+[[action]]
+at_s = 1.0
+control = "saucer-fire"
+value = true
+
+# The slower decay is why the run is not shorter: at 300 ms this is still a fifth
+# of its starting level after a second, and a window that ended sooner would put
+# the cut into the decay constant it is supposed to measure.
+[analysis]
+start_s = 0.95
+end_s = 3.0

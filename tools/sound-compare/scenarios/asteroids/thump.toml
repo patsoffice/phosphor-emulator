@@ -1,0 +1,32 @@
+schema = 1
+id = "asteroids/thump"
+target = "asteroids-discrete"
+duration_s = 3.0
+description = "Background thump at maximum DAC code, its lowest pitch"
+
+# The thump register packs the enable and a 4-bit DAC code. The code steers a
+# constant-current VCO, and higher codes lower the pitch, so 15 is the slowest
+# thump the board can ask for and the one furthest from the DAC's linear region.
+# That makes it the useful code to pin: the modelled control voltage carries a
+# 1.027 trim placed to land the reference pitch here, and if that trim is standing
+# in for something, this is where it shows.
+[[action]]
+at_s = 1.0
+control = "thump-data"
+value = 15
+
+[[action]]
+at_s = 1.0
+control = "thump"
+value = true
+
+# From before the edge and held to the end, matching the rest of this board's
+# scenarios; see thrust.toml.
+#
+# The thump is a repeating pulse, not a tone, so the window has to hold many of
+# them: at around 53 Hz, 2.05 s is about a hundred. A window short enough to catch
+# a different number of pulses run to run would put that count into every level
+# and band number taken from it.
+[analysis]
+start_s = 0.95
+end_s = 3.0

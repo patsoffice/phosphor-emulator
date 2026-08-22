@@ -1,0 +1,28 @@
+schema = 1
+id = "asteroids/saucer-large"
+target = "asteroids-discrete"
+duration_s = 3.0
+description = "Large saucer warble tone, held"
+
+# The same voice with the select line high. Pinned separately because the select
+# moves two things at once in the model, the warble rate and the tone centre, and
+# both are frequency literals with no part behind them. With only the small saucer
+# measured, neither offset is ever compared against anything.
+[[action]]
+at_s = 1.0
+control = "saucer-sel"
+value = true
+
+[[action]]
+at_s = 1.0
+control = "saucer"
+value = true
+
+# From before the edge and held to the end, matching the rest of this board's
+# scenarios; see thrust.toml.
+#
+# The large saucer's warble is slower, about 5.75 Hz, so 2.05 s is roughly twelve
+# cycles. Still whole enough that the window edge does not decide the answer.
+[analysis]
+start_s = 0.95
+end_s = 3.0

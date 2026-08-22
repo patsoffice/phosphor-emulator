@@ -545,6 +545,15 @@ impl AsteroidsDiscreteSound {
         self.circuit.sample_rate()
     }
 
+    /// The built circuit, for tooling that reads individual stages.
+    ///
+    /// Exposed so a comparison run can render one stage on its own. Seven voices
+    /// sum into one node here, and thrust alone is five stages deep, so an
+    /// output that disagrees says nothing about which stage is at fault.
+    pub fn circuit(&self) -> &DiscreteCircuit {
+        &self.circuit
+    }
+
     pub fn reset(&mut self) {
         self.circuit.reset();
         self.explosion_reg = 0;

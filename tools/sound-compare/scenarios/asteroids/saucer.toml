@@ -1,0 +1,32 @@
+schema = 1
+id = "asteroids/saucer"
+target = "asteroids-discrete"
+duration_s = 3.0
+description = "Small saucer warble tone, held"
+
+# The select line stays low for the small saucer. Set explicitly rather than left
+# at reset, so the scenario reads as the state it measures instead of relying on
+# what the circuit happens to power up as.
+[[action]]
+at_s = 1.0
+control = "saucer-sel"
+value = false
+
+[[action]]
+at_s = 1.0
+control = "saucer"
+value = true
+
+# From before the gate edge, for the reason spelled out in thrust.toml: both the
+# tone and the warble that sweeps it free-run and the trigger only gates them.
+#
+# The window also has to span whole warble cycles, or the measured spectrum
+# depends on where it was cut. At about 8.25 Hz, 2.05 s is roughly seventeen of
+# them, enough that one partial cycle at the edge does not move a band share.
+#
+# This is the voice built with the least circuit behind it: its warble rate, its
+# sweep depth and its tone centre are all frequency literals rather than component
+# values, so nothing here is checkable against a part.
+[analysis]
+start_s = 0.95
+end_s = 3.0

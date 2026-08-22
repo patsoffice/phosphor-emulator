@@ -8,6 +8,15 @@
 --   mame asteroid -nothrottle -seconds_to_run 18 -video none \
 --        -autoboot_script <repo>/tools/sound-reference/drive_asteroid_sound.lua \
 --        -wavwrite /tmp/asteroid_ref.wav
+--
+-- For a LEVEL or a DECAY use drive_asteroid_single.lua instead. The 2 s windows
+-- here sit back to back, so no single event is isolated and the analysis has to
+-- guess where one voice ends. This driver stays useful for a listen and for
+-- spectral shape, which is level-independent.
+--
+-- Verify it before trusting anything measured against it:
+--   tools/sound-reference/verify-reference.sh drive_asteroid_sound.lua asteroid \
+--        -seconds_to_run 18
 
 local mem
 local announced = false
@@ -47,7 +56,25 @@ local function on_frame()
   -- Elapsed time, not the attotime's integer `seconds` field — that one holds a
   -- whole-second value and quantizes every segment boundary below to 1 s.
   local t = manager.machine.time:as_double()
+
+  -- SND_VERIFY drives the two checks in verify-reference.sh: `null` never drives
+  -- a segment, so the capture must be silent, and `nudge` shifts the schedule
+  -- 30 ms, so the capture must change. Without honouring it the script cannot be
+  -- pointed at this driver at all, and its captures stay unverified.
+  --
+  -- The shift is sub-second on purpose. The integer-seconds bug this guards
+  -- against quantised everything to whole seconds and would pass a check that
+  -- moved an event by a second.
+  local verify = os.getenv("SND_VERIFY")
+  if verify == "nudge" then
+    t = t - 0.030
+  end
+
+  -- Applied unconditionally, including in the null case: holding every line low
+  -- is the resting state the measurement assumes, not part of the stimulus.
   all_off(mem)
+  if verify == "null" then return end
+
   local active
   for _, seg in ipairs(timeline) do
     if t >= seg[1] then active = seg end

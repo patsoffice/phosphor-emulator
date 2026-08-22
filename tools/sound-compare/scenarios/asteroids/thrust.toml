@@ -1,0 +1,32 @@
+schema = 1
+id = "asteroids/thrust"
+target = "asteroids-discrete"
+duration_s = 3.0
+description = "Thrust rumble held for two seconds"
+
+# The voice this board is being reworked for: its band centre already matches the
+# reference while its low end does not, which is the signature of a missing
+# mechanism rather than a wrong constant.
+#
+# Sustained, so it is held and measured well after the attack. Every stage in the
+# chain is free-running noise gated by this line, so what the trigger switches on
+# is the gate, not an oscillator starting.
+[[action]]
+at_s = 1.0
+control = "thrust"
+value = true
+
+# THE WINDOW MUST CONTAIN THE GATE EDGE, and on this voice that is not a
+# preference. The noise source free-runs and the trigger only gates it, so a
+# window opening after the gate holds no trace of WHEN the gate opened: a capture
+# measured from 1.5 s is byte-identical whether the trigger fired at 1.0 s or
+# 1.03 s, and `sndcmp verify`'s sensitivity check fails it. Correctly. Starting
+# 50 ms early makes the ring-up part of what is measured, which is also the
+# honest thing to measure, and matches dkong/walk.
+#
+# Held to the end of the run rather than released inside it. Releasing a hard
+# gate gives digital silence, and a window carrying a second of that reports the
+# silence rather than the effect.
+[analysis]
+start_s = 0.95
+end_s = 3.0

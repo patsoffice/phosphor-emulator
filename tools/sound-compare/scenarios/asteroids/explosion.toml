@@ -1,0 +1,34 @@
+schema = 1
+id = "asteroids/explosion"
+target = "asteroids-discrete"
+duration_s = 3.0
+description = "Explosion noise at full volume, pitch divider 3"
+
+# The explosion register packs volume and a noise re-clock divider into one byte,
+# so both are set here and the adapter rebuilds the byte. Divider select 2 is the
+# 12 kHz / 3 setting.
+#
+# NOT a one-shot in this model, and that is a modelling question rather than a
+# choice made here: the board's game code writes a falling volume every frame, so
+# the decay lives in the ROM and not in the circuit. Nothing in the modelled path
+# shapes the level. Holding the volume steady is therefore the only way to measure
+# the noise source and its filter, which is what this scenario is for. What the
+# real explosion sounds like is a separate question that needs the game driving.
+[[action]]
+at_s = 1.0
+control = "explosion-pitch"
+value = 2
+
+[[action]]
+at_s = 1.0
+control = "explosion-vol"
+value = 15
+
+# From before the edge, and held to the end, matching the rest of this board's
+# scenarios. See thrust.toml for why the window has to contain the edge: this one
+# would pass a sensitivity check either way, because the divider write changes the
+# noise clock and so moves the sequence, but that is incidental and not something
+# to build a window on.
+[analysis]
+start_s = 0.95
+end_s = 3.0

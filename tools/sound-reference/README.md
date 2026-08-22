@@ -33,6 +33,21 @@ Born out of the Asteroids migration — see the case study in
   effect per window). The Atari boards have silent attract modes so they just
   drive the registers; the DK driver parks the main Z80 in a spin loop to isolate
   the discrete walk/jump/stomp from the DAC music.
+- `drive_asteroid_single.lua` / `drive_galaxian_single.lua` /
+  `drive_dkong_single.lua` — the same boards driven ONE effect at a time, on the
+  timeline of the matching `sndcmp` scenario under
+  [`tools/sound-compare/scenarios/`](../sound-compare/scenarios/). Select the
+  voice with `AST_EFFECT` / `GAL_EFFECT` / `DK_EFFECT`. Use these for anything
+  that is a level or a decay: the multi-effect drivers above put their windows
+  back to back, so no single event is isolated and neither an envelope nor an
+  integrated energy can be recovered from them.
+- `verify-reference.sh` — proves a driver responds to its own timeline before
+  anything is measured against it. A driver has to honour `SND_VERIFY` for the
+  checks to mean anything, and one that does not cannot be checked at all. Run it
+  after touching a driver. Both Asteroids drivers, both Galaxian ones and
+  `drive_dkong_single.lua` honour it; `drive_dkong_sound.lua`,
+  `drive_llander_sound.lua` and `drive_dkong_gameplay.lua` do not yet, so nothing
+  measured against those three is verified.
 - `analyze_wav.py` — segments a capture by time and prints, per effect, the
   dominant FFT peak and the spectral centroid (DC removed). Reads WAVs with the
   stdlib `wave` module; needs only `numpy`. Pass `--llander` / `--dkong` /

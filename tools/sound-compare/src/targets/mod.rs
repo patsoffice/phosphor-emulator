@@ -1,4 +1,5 @@
 //! Per-device adapters. One module per sound target.
 
+pub mod asteroids;
 pub mod dkong;
 pub mod galaxian;

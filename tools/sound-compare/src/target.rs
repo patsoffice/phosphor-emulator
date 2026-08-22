@@ -62,6 +62,7 @@ pub type CreateFn = fn(probe: Option<&str>) -> Result<Box<dyn SoundTarget>, Stri
 /// these, they are only reachable from this binary, and a plain slice is what
 /// makes the coverage tests trivially exhaustive.
 static ALL: &[&TargetSpec] = &[
+    &crate::targets::asteroids::SPEC,
     &crate::targets::dkong::SPEC,
     &crate::targets::galaxian::SPEC,
 ];
