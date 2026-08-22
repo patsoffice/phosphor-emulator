@@ -344,42 +344,104 @@ pub fn envelope_distance(a: &[f64], b: &[f64]) -> f64 {
         / n as f64
 }
 
+/// How well two envelopes could be aligned, and how strongly that answer is
+/// determined.
+///
+/// The second part is not decoration. A sustained voice carries no timing
+/// information at all, since one second of a steady rumble looks like any
+/// other, so its correlation is nearly flat in shift and the best offset is
+/// whatever the noise happened to favour. Reporting the offset alone invites
+/// reading that as a finding, which is the failure this crate keeps meeting in
+/// other forms.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EnvelopeAlignment {
+    /// Offset in samples that best aligns `b` to `a`.
+    pub shift_samples: isize,
+    /// Normalized correlation at that offset: 1.0 is a perfect match.
+    pub peak: f64,
+    /// Median correlation across all the offsets tried.
+    pub median: f64,
+}
+
+impl EnvelopeAlignment {
+    /// How far the best offset stands above a typical one.
+    ///
+    /// Near zero means the signal does not say where it is in time, whatever
+    /// `shift_samples` happens to hold.
+    pub fn prominence(&self) -> f64 {
+        self.peak - self.median
+    }
+}
+
 /// Sample offset that best aligns `b` to `a`, found by cross-correlating their
 /// RMS envelopes within `±max_shift` envelope blocks.
 ///
 /// Envelopes rather than waveforms on purpose: correlating raw samples of two
 /// independent noise sources measures seed coincidence, not timing.
-pub fn envelope_alignment(a: &[f64], b: &[f64], hop: usize, max_shift: usize) -> isize {
+///
+/// The score is the correlation of the overlapping blocks normalized by BOTH
+/// segments' norms, which is a cosine and so cannot be inflated by what the
+/// overlap contains. The obvious alternative, a mean of products, can: with a
+/// silent lead-in on `a`, every negative shift slides those zeros out of the
+/// average and scores higher for it. That version reported a 70 ms offset for a
+/// capture against ITSELF, and the error grew with the length of the silence, so
+/// it was worst exactly where a capture starts before its trigger.
+pub fn envelope_alignment(a: &[f64], b: &[f64], hop: usize, max_shift: usize) -> EnvelopeAlignment {
+    let none = EnvelopeAlignment {
+        shift_samples: 0,
+        peak: 0.0,
+        median: 0.0,
+    };
     let ea = super::level::rms_envelope(a, hop);
     let eb = super::level::rms_envelope(b, hop);
     if ea.is_empty() || eb.is_empty() {
-        return 0;
+        return none;
     }
-    let mut best = (0isize, f64::NEG_INFINITY);
-    let max = max_shift as isize;
-    for shift in -max..=max {
-        let mut dot = 0.0;
-        let mut n = 0usize;
+
+    let score = |shift: isize| -> Option<f64> {
+        let (mut dot, mut na, mut nb) = (0.0f64, 0.0f64, 0.0f64);
         for (i, x) in ea.iter().enumerate() {
             let j = i as isize + shift;
             if j < 0 || j as usize >= eb.len() {
                 continue;
             }
-            dot += x * eb[j as usize];
-            n += 1;
+            let y = eb[j as usize];
+            dot += x * y;
+            na += x * x;
+            nb += y * y;
         }
-        // Normalize by overlap so a large shift with few overlapping blocks
-        // cannot win by accumulating less.
-        let score = if n > 0 {
-            dot / n as f64
-        } else {
-            f64::NEG_INFINITY
-        };
-        if score > best.1 {
-            best = (shift, score);
+        (na > 0.0 && nb > 0.0).then(|| dot / (na * nb).sqrt())
+    };
+
+    // Searched outward from zero with a strict comparison, so a tie goes to the
+    // smaller offset. A periodic signal correlates equally well at every
+    // multiple of its period, and reporting the smallest of those is both the
+    // least surprising answer and the one that does not look like a discovery.
+    let mut scores = Vec::with_capacity(2 * max_shift + 1);
+    let mut best = (0isize, f64::NEG_INFINITY);
+    let mut consider = |shift: isize, scores: &mut Vec<f64>| {
+        if let Some(v) = score(shift) {
+            scores.push(v);
+            if v > best.1 {
+                best = (shift, v);
+            }
         }
+    };
+    consider(0, &mut scores);
+    for s in 1..=max_shift as isize {
+        consider(-s, &mut scores);
+        consider(s, &mut scores);
     }
-    best.0 * hop as isize
+    if scores.is_empty() {
+        return none;
+    }
+    scores.sort_by(f64::total_cmp);
+
+    EnvelopeAlignment {
+        shift_samples: best.0 * hop as isize,
+        peak: best.1,
+        median: scores[scores.len() / 2],
+    }
 }
 
 /// Overall loudness ratio between two captures, as a linear gain.
@@ -584,9 +646,71 @@ mod tests {
             v.extend(vec![0.0; 2000]);
             v
         };
-        let shift = envelope_alignment(&burst, &delayed, hop, 50);
+        let al = envelope_alignment(&burst, &delayed, hop, 50);
         // b lags a by 400 samples, so a must shift forward to meet it.
-        assert!((shift - 400).abs() <= hop as isize, "shift {shift}");
+        assert!(
+            (al.shift_samples - 400).abs() <= hop as isize,
+            "shift {}",
+            al.shift_samples
+        );
+        // An isolated burst says exactly where it is, so the answer must also
+        // stand well clear of a typical offset's score.
+        assert!(al.prominence() > 0.1, "prominence {}", al.prominence());
+    }
+
+    /// A capture aligned against ITSELF must report zero, and the case that
+    /// matters is one with a silent lead-in: a scenario's window opens before
+    /// its trigger, so every real capture has one.
+    ///
+    /// The previous scoring, a mean of products over the overlap, failed this.
+    /// Sliding the overlap off the leading zeros raised the average, so quietly
+    /// discarding the start of the signal always scored better than aligning it,
+    /// and a real Asteroids capture reported -70 ms against a byte-identical
+    /// copy of itself.
+    #[test]
+    fn a_signal_with_a_silent_lead_in_aligns_to_itself_at_zero() {
+        let rate = 8000.0;
+        let hop = 80; // 10 ms
+        let mut sig = vec![0.0; 400]; // 50 ms of digital silence, as a scenario leaves
+        sig.extend(sine(220.0, rate, 16_000));
+        let al = envelope_alignment(&sig, &sig, hop, 50);
+        assert_eq!(al.shift_samples, 0, "self-alignment must be exactly zero");
+        assert!((al.peak - 1.0).abs() < 1e-9, "peak {}", al.peak);
+    }
+
+    /// A sustained signal carries no timing information, so the reported offset
+    /// is arbitrary and must not read as a finding. What says so is the
+    /// prominence: one second of steady noise correlates about as well at every
+    /// offset as at the right one.
+    #[test]
+    fn a_sustained_signal_reports_a_weakly_determined_alignment() {
+        let rate = 8000.0;
+        let hop = 80;
+        // Two independent noise sources, deterministic but uncorrelated.
+        let noise = |seed: u32, n: usize| -> Vec<f64> {
+            let mut s = seed;
+            (0..n)
+                .map(|_| {
+                    s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                    (s >> 8) as f64 / (1u32 << 23) as f64 - 1.0
+                })
+                .collect()
+        };
+        let a = noise(1, 16_000);
+        let b = noise(99, 16_000);
+        let sustained = envelope_alignment(&a, &b, hop, 50);
+
+        let mut burst = vec![0.0; 400];
+        burst.extend(sine(220.0, rate, 800));
+        burst.extend(vec![0.0; 8000]);
+        let transient = envelope_alignment(&burst, &burst, hop, 50);
+
+        assert!(
+            sustained.prominence() < transient.prominence() / 10.0,
+            "sustained {} is not clearly flatter than transient {}",
+            sustained.prominence(),
+            transient.prominence()
+        );
     }
 
     #[test]

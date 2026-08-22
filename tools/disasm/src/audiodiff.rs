@@ -539,11 +539,36 @@ pub fn compare(
     );
 
     let hop = ((a.sample_rate * 0.005) as usize).max(1);
-    let shift = envelope_alignment(&ac, &bc, hop, 200);
+    let al = envelope_alignment(&ac, &bc, hop, 200);
+    // A sustained voice has no timing information in it, so its best offset is
+    // whatever the noise favoured. Saying so beside the number is the difference
+    // between a diagnostic and a trap: an offset reported bare gets read as a
+    // real lag, and a 12 ms slide on a 40 ms effect has already cost this
+    // project a full misdiagnosis once.
+    //
+    // The cutoff is measured rather than chosen. Against a byte-identical copy
+    // of itself, every transient tried clears it and is reported bare: Donkey
+    // Kong's stomp and jump, Galaxian's fire, Asteroids' ship fire. Asteroids'
+    // thrust, a sustained rumble, reaches only 0.028 against its own copy, and
+    // 0.021 against the board. So the line falls between "the effect says where
+    // it is" and "it does not", which is the distinction worth drawing, and a
+    // self-comparison being caveated is correct rather than embarrassing: the
+    // offset is genuinely zero and the signal genuinely cannot prove it.
+    const DETERMINED: f64 = 0.05;
     let _ = writeln!(
         s,
-        "envelope alignment: {:+.3} s  (b relative to a)",
-        shift as f64 / a.sample_rate
+        "envelope alignment: {:+.3} s  (b relative to a){}",
+        al.shift_samples as f64 / a.sample_rate,
+        if al.prominence() < DETERMINED {
+            format!(
+                "\n  WEAKLY DETERMINED: the peak stands only {:.3} above a \
+                 typical offset. A sustained voice does not say where it is in \
+                 time, so this is not a lag.",
+                al.prominence()
+            )
+        } else {
+            String::new()
+        }
     );
 
     // --- verdict, kept in two buckets ---

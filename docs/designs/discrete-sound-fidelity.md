@@ -749,6 +749,29 @@ moves.** Two offsets and one length change take a minute and would have saved
 this issue twice over. A metric that is not reproducible under that test does
 not become reproducible by being measured more carefully.
 
+**Which metrics survive is a property of the voice, not of the metric.** Run on
+Asteroids' thrust, a sustained rumble, the same test came out differently from
+Donkey Kong's walk in both directions. Over six windows, two start shifts each
+way and two length changes:
+
+| delta, ours minus board | across six windows | verdict |
+|---|---|---|
+| crest factor | -1.29 to -1.55 | stable, never changes sign |
+| 0-150 Hz share | +0.80 to +1.14 pp | stable, and nearly uninformative: both sides are over 98 % sub-150 |
+| centroid | -0.9 to -2.7 Hz on 88 Hz | stable, about 2 % |
+| level | +0.49 dB to -0.33 dB | **not stable, changes sign** |
+
+So the band share that was noise on a 40 ms transient is steady on a sustained
+voice, and the level that is normally the most robust thing in the report is the
+one that moves: a 2 s window of a noise voice does not have a settled RMS, and
+the first comparison's "levels agree to 0.06 dB" was the window being kind. The
+honest claim from this set is that they agree to about half a decibel.
+
+Crest factor was stable on both boards, and on Asteroids it is also the only
+metric here with anything to say: 1.7 against the board's 3.2 at matched RMS and
+matched centroid. That is the pattern to expect from this test rather than a
+ranking of metrics to reuse. **Run it per voice.**
+
 Four specific traps, each of which cost real time here:
 
 - **A `sndcmp capture` output is already the analysis window.** Re-ranging it
@@ -756,8 +779,27 @@ Four specific traps, each of which cost real time here:
   against ours from 50 ms before ours, and a confident wrong retraction.
 - **Never align a decaying effect by cross-correlation.** The aligner slid the
   board 528 samples, 12 ms, on a 40 ms thump, and cheerfully compared our attack
-  against its tail. Align each side on its own onset and check the tool reports
-  the same onset and an envelope alignment near zero.
+  against its tail. Align each side on its own onset instead, and make both
+  windows the same span of the same event by construction rather than by search.
+- **A tool's own diagnostics need the same scepticism as its measurements.** The
+  advice above used to end "and check the tool reports the same onset and an
+  envelope alignment near zero", which assumed the aligner. It was scoring
+  candidate offsets by the mean of the products of the two envelopes, so sliding
+  the overlap off a quiet stretch raised the average and scored better: with the
+  50 ms of silence every scenario leaves before its trigger, the aligner reported
+  **-70 ms for a capture against a byte-identical copy of itself**, and it missed
+  a known 50 ms delay by the same amount. Normalizing by both segments' norms
+  makes the score a cosine, which Cauchy-Schwarz pins at exactly 1 at zero shift,
+  and both cases became exact. Nothing about the wrong number looked wrong; it
+  was found by asking the tool to align a file with itself, which took a minute
+  and is now a test.
+- **A sustained voice does not say where it is in time.** Even fixed, the
+  alignment of a steady rumble against its own copy stands only 0.028 above a
+  typical offset, where every transient tried clears 0.05 comfortably. The offset
+  is therefore whatever the noise favoured, and `audiodiff` now says so beside
+  the number rather than printing it bare. The general form: a statistic computed
+  over a signal that cannot determine it is not a small error, it is a confident
+  answer to a question the data did not contain.
 - **Exclude post-decay silence from an STFT comparison.** Our output is
   digitally silent after a one-shot; a reference has a noise floor. A
   log-magnitude distance over three seconds of that reported 12.3 where the
