@@ -972,6 +972,123 @@ The defect was audible immediately. Where the metrics and the ear disagree,
 suspect the metrics of not measuring the thing, and ask *when* it sounds wrong
 rather than how much.
 
+**`audiodiff` can now see it, so the next one does not need an ear.** The report
+carries a discontinuity block: the largest `|x[n] − x[n−1]|`, the
+99.9th-percentile step beside it, the ratio of the two, and where the largest one
+lands relative to each side's *own* onset. The ratio is what makes it usable on
+this material — a square wave's every edge is a full-swing step, so its ratio is
+about 1.0 and the metric does not accuse a sharp waveform of anything, while a
+signal with one step outside its own distribution stands out immediately. It is
+compared side to side rather than against a fixed ceiling, because a genuinely
+impulsive effect has a high ratio on *both* sides and is not defective; the
+finding is one side jumping where the other does not.
+
+### The trigger discipline is part of the voice, and the game knows it
+
+Both Asteroids fire scenarios held their enable for the whole run. Both said in
+their own comments that this was a modelled limitation rather than the board's
+behaviour, and both were right: the old chirp was a frequency ramp times an
+exponential envelope, each driven off the enable *level*, so a short trigger
+truncated it and there was nothing else to do.
+
+Rebuilding the voice from the schematic made the question answerable, and it took
+one script to answer. `tools/script/examples/asteroid_fire_trace.rhai` watches
+every write to the 74LS259 through a real shot: the game rewrites the whole latch
+every frame and holds line 4 for **fourteen of them, about 230 ms**, whether the
+button is tapped for two frames or held for forty. It is the game's timer, not
+the player's finger.
+
+That is not a detail. Held, the board's pitch capacitor fills all the way to its
+source transistor's saturation and the 555 runs on at a steady low pitch forever,
+because nothing in the circuit ends it. The reference goes quiet instead, but not
+from a mechanism: its duty is fitted as `4500/f + 67`, which reaches 100 % at
+136 Hz and stops making edges. So a held comparison put our capacitor against the
+reference's arithmetic running off the end of its own fit, over a window that was
+86 % silence on one side and 2 % on the other, and neither side was the sound the
+game makes.
+
+**When a scenario has to hold a line to see an effect, that is a fact about the
+model, and it expires when the model is fixed.** Write down which it is, and go
+back for it. Both files and the driver now pulse, and the trace is committed
+beside them so the number has a provenance rather than a rationale.
+
+**Pulsing it also made a check go vacuous, in the way this document keeps
+finding.** `verify-reference.sh` measures its peaks from 2.0 s onward, to skip
+the power-on noise these boards make. With the event over by 1.23 s, the driven
+capture and the null capture were both silent in that window, and "the null run
+is quieter" went on reporting ok — a comparison between two silences that would
+pass for any driver at all. It now refuses a driven window with no effect in it,
+and names `SND_SKIP_S` as the fix.
+
+### A pedestal can be the board's, and the reference can be the one cheating
+
+The two fire voices now match the reference on everything above 150 Hz: centroid
+within 4 % and 14 %, 85 % rolloff within 4 % and 7 %, fundamental within 12 Hz
+and 40 Hz, every band share within 9 points, and the fitted amplitude decay
+within 2 ms and 9 ms of the reference's on time constants of 0.11 s and 0.32 s.
+That last one is worth stating plainly: ours falls out of R66·C48 and R58·C39
+weighted by the duty cycle, and the reference's is a hand-fitted `2700·3·1e-5`.
+Two unrelated routes to the same two numbers.
+
+Below 150 Hz they disagree completely, and the mechanism is not in doubt. The
+board's fire path has **no coupling capacitor anywhere in it**: the summing node
+rests at the diode clamp, because an idle voice holds its 555 in reset and a 555
+in reset has its output low, and firing releases that node upward for 62 % of
+each cycle rising to 94 %. So a shot is a 230 ms DC excursion at the mixer with a
+pulse train riding on it, and the mix's own coupling capacitor (1.59 Hz, τ 100 ms)
+barely touches something that short. The reference has no such thing, because it
+does not build the output network at all: it emits a square wave primitive, and
+that primitive is `±amplitude/2` about a bias it leaves at zero. Centred by
+construction rather than by a circuit — the same shape of simplification as the
+555's `_AC` option, which the reference's own header calls a cheat.
+
+Full band that is +40 and +34 points of 0-150 Hz share. It is also the difference
+between a signal and what a cabinet speaker can move, which is why the honest
+report is the split one: *above 150 Hz within tolerance on every metric, below it
+a pedestal the board has and the reference does not.*
+
+**Do not fit that away.** The check that settles it is the one this document
+keeps coming back to: point at the part. There is no part. Two crops at 400 dpi
+of the game PCB's mixer and of both fire outputs show seven summing resistors
+going straight into the LM324, and the only capacitors in the path are C113 after
+the mixer and C6 at the amplifier's input.
+
+**The residual was quantified before it was accepted**, which is the rule the
+thump's onset artefact cost. C113 (1 µF into R111's 10 kΩ, 15.9 Hz) *is* a real
+part and does sit between the mixer and one speaker output — but only one. The
+board's two outputs are anti-phase into a bridged speaker, so the differential
+response is `HP(1.59 Hz) · (1 + HP(15.9 Hz))/2`, which is a 6 dB shelf between
+8 and 16 Hz rather than a second high-pass. It halves the pedestal. It does not
+remove it, it is inaudible on everything else, and modelling one channel's
+capacitor without the bridge sum would over-apply it, so it is written down here
+rather than added.
+
+### Two identical-looking timers can be different circuits
+
+Asteroids' thump and its two fire voices all run a 555 as a constant-current VCO,
+all three are drawn on the same sheet within a few centimetres of each other, and
+they are wired differently in a way that changes the sound.
+
+The thump's source transistor joins the timing capacitor, and R51 goes on from
+there to the discharge pin. The fires' source transistors join the **discharge
+pin**, and R57/R61 goes on from there to the capacitor. Charging is identical
+either way, since the current has nowhere to go but through the resistor into the
+cap. Discharging is not: with the source on the cap it keeps feeding the resistor
+while the pin sinks, so the cap relaxes toward `i·r_disch`; with the source on the
+pin, the pin swallows that current and the cap empties toward ground.
+
+On the saucer fire at the top of its sweep, `i·R57` is 1.44 V against a 1.667 V
+trigger. A model with the wrong asymptote crawls that last quarter volt and takes
+**three times as long** to reach it, which is a wrong duty and a wrong pitch, and
+neither would look like a topology error from the output. `ne555_cc` therefore
+takes a `Feed555` argument now, and the assertion that pins it is arithmetic off
+the parts rather than a comparison between the two variants.
+
+The general form is the one the band-pass argument list already taught, pointed
+at a different target: **the same components in the same count can be two
+circuits, and which one you have is a question about the drawing rather than
+about the values.** Read the connection, not the bill of materials.
+
 ## Part 5 — Construction-time tuning
 
 > **NOT BUILT, and deliberately so.** Parts 5 and 6 describe a fitting loop, and

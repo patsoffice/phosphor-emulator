@@ -42,8 +42,8 @@ use crate::core::debug::{DebugRegister, Debuggable};
 use crate::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use crate::device::Device;
 use crate::device::discrete::{
-    CustomComponent, DataInputId, DiscreteCircuit, DiscreteCircuitBuilder, LfsrSpec, LogicInputId,
-    NodeId, Output555, OutputGain,
+    CustomComponent, DataInputId, DiscreteCircuit, DiscreteCircuitBuilder, Feed555, LfsrSpec,
+    LogicInputId, NodeId, Output555, OutputGain,
 };
 
 /// Galaxian master clock is 18.432 MHz; the sound section runs at /6/2.
@@ -237,6 +237,10 @@ impl GalaxianSound {
             5.0,
             5.0,
             0.7,
+            // No discharge resistance to be on either side of, so the feed point
+            // is unobservable here; the cap-side arrangement is the one this
+            // timer is drawn as.
+            Feed555::Capacitor,
             Output555::Capacitor,
         ); // NODE_105
 

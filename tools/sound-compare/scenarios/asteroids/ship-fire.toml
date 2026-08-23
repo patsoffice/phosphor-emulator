@@ -1,32 +1,48 @@
 schema = 1
 id = "asteroids/ship-fire"
 target = "asteroids-discrete"
-duration_s = 3.0
-description = "One ship fire chirp, its enable held for the whole sweep"
+duration_s = 2.0
+description = "One ship fire chirp, its enable held the fourteen frames the game holds it"
 
-# HELD, NOT PULSED, and that is a modelled limitation rather than the board's
-# behaviour. The chirp's sweep and its amplitude decay are both driven off the
-# enable LEVEL: the envelope component returns zero the instant the line drops, so
-# a 50 ms trigger truncates a chirp that should run about 280 ms. Its own `active`
-# flag is set on the rising edge and then never read, which is what a one-shot
-# that lost its one-shot looks like.
+# PULSED, and the length is the game's own. This file used to hold the line for
+# the whole run and say so as a modelled limitation: the old chirp was a linear
+# frequency ramp times an exponential envelope, both driven off the enable LEVEL,
+# so a short trigger truncated it and there was nothing else to do.
 #
-# So this scenario holds the line, because that is the only way to see the whole
-# chirp the model can make, and the matching reference driver holds it too so both
-# sides describe the same event. It is NOT evidence that the board holds it. When
-# the trigger discipline is settled against the netlist, this file and the driver
-# change together, and the change will be visible as a change here rather than as
-# a quiet shift in a number.
+# The voice is now the board's, which made the question answerable rather than
+# awkward. Tracing every write to the 74LS259 through a real shot
+# (tools/script/examples/asteroid_fire_trace.rhai) shows the game rewrites the
+# whole latch every frame and holds line 4 for fourteen of them, about 230 ms,
+# whether the button is tapped for two frames or held for forty. It is the
+# game's timer and not the player's finger.
+#
+# The length matters to what this voice IS. Held, its pitch capacitor fills all
+# the way to the source transistor's saturation and the 555 settles into a
+# steady low buzz that never stops, because nothing in the circuit ends it. The
+# reference goes quiet instead, but for a reason that is not a mechanism: its
+# duty is fitted as 4500/f + 67, which crosses 100 % at 136 Hz and stops making
+# edges. Comparing a held run therefore compares our capacitor against the
+# reference's arithmetic running off the end of its own fit, and neither is the
+# sound the game makes.
 [[action]]
 at_s = 1.0
 control = "ship-fire"
 value = true
 
-# Measured from just before the trigger, because the attack is the part under
-# test. The window runs to the end of the run so the whole decay is inside it,
-# rather than cutting the tail and putting the cut into every level measured from
-# it. The enable is never released, so no hard-gated silence enters the window
-# either; what the tail holds is the envelope's own decay.
+[[action]]
+at_s = 1.23
+control = "ship-fire"
+value = false
+
+# From 50 ms before the trigger, which is where every scenario on this board
+# starts, and ending 70 ms after the release. The gate edge is inside the window
+# at both ends on purpose: the release is where the two analog switches restore
+# both capacitors and the 555 goes back into reset, and that is a real event
+# with a real shape rather than a fade-out.
+#
+# Not longer. Both sides are digitally silent after the release apart from the
+# mix coupling capacitor's own recovery, and a window carrying a second of that
+# reports the silence rather than the effect.
 [analysis]
 start_s = 0.95
-end_s = 3.0
+end_s = 1.30

@@ -93,6 +93,20 @@ end
 -- the silence rather than the effect.
 local TRIGGER_S = 1.0
 
+-- The two fire voices are the exception, and their length is the game's own.
+-- Tracing every write to the 74LS259 through a real shot
+-- (tools/script/examples/asteroid_fire_trace.rhai) shows the game rewrites the
+-- whole latch every frame and holds line 4 for fourteen of them, about 230 ms,
+-- whether the button is tapped for two frames or held for forty.
+--
+-- Holding them instead is not a neutral choice. The board's pitch capacitor
+-- keeps filling until its source transistor saturates and then the 555 runs on
+-- at a steady low pitch forever, because nothing in the circuit ends it. This
+-- netlist goes quiet, but from its fit rather than from a mechanism: its duty is
+-- 4500/f + 67, which reaches 100 % at 136 Hz and stops making edges. A held
+-- capture therefore measures the fit running off its own end.
+local FIRE_RELEASE_S = TRIGGER_S + 0.23
+
 -- Explosion volume and noise-divider select, matching scenarios/asteroids/
 -- explosion.toml. Divider select 2 is the 12 kHz / 3 re-clock.
 local EXPL_VOL, EXPL_PITCH = 15, 2
@@ -156,14 +170,12 @@ local function on_frame()
     set_latch(SAUCER_SEL, true)
     set_latch(SAUCER, true)
   elseif effect == "ship-fire" then
-    -- HELD, not pulsed, matching ship-fire.toml. Whether the board holds this
-    -- line is an open question; what is certain is that our model's chirp is
-    -- driven off the enable LEVEL and truncates the moment it drops. Both sides
-    -- hold it so they describe the same event, and both change together when the
-    -- trigger discipline is settled against the netlist.
-    set_latch(SHIP_FIRE, true)
+    -- Pulsed to the game's own fourteen frames, matching ship-fire.toml. The
+    -- open question this used to carry is settled: the trace says the game
+    -- drives the line off its own timer, not off the button.
+    if t < FIRE_RELEASE_S then set_latch(SHIP_FIRE, true) end
   elseif effect == "saucer-fire" then
-    set_latch(SAUCER_FIRE, true)
+    if t < FIRE_RELEASE_S then set_latch(SAUCER_FIRE, true) end
   elseif effect == "life" then
     set_latch(LIFE, true)
   end

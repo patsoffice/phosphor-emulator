@@ -1,18 +1,25 @@
 //! Asteroids (1979) discrete sound, built on the [`DiscreteCircuit`] framework.
 //!
-//! Approximates the seven effect paths of MAME's `asteroid_a.cpp` discrete
-//! netlist — explosion, thump, saucer, saucer-fire, ship-fire, thrust, and life
-//! — summed into one mono output. This is a behaviorally faithful model, not a
-//! bit-exact port: relative mix levels follow MAME, while the chirp/warble
-//! shapes are reasonable approximations. The board talks to it with hardware
+//! Seven effect paths — explosion, thump, saucer, saucer-fire, ship-fire,
+//! thrust, and life — summed into one mono output, then through the coupling
+//! capacitor at the amplifier's input. The board talks to it with hardware
 //! intent (`write_explosion`, `write_thump`, `write_audio_latch_bit`,
 //! `pulse_noise_reset`) and never sees internal node ids.
+//!
+//! Thrust, thump and both fire voices are built stage for stage from Sheet 2
+//! Side B, with every component named for its designator at the call site. The
+//! saucer's warble and the explosion's pitch divider are not: those still carry
+//! literals taken from the reference netlist, and they are the two left to do.
+//! Relative mix levels are the reference's adder weights throughout, which is a
+//! board-wide question — the schematic gives all seven summing resistors, so
+//! expressing every voice in volts and letting the mixer weight them would
+//! retire the last constant in the file.
 
 use phosphor_core::core::debug::{DebugRegister, Debuggable};
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::device::{
-    CustomComponent, DataInputId, DiscreteCircuit, DiscreteCircuitBuilder, LfsrOutput, LfsrShift,
-    LfsrSpec, LogicInputId, NodeId, Output555, OutputGain, PulseInputId,
+    CustomComponent, DataInputId, DiscreteCircuit, DiscreteCircuitBuilder, Feed555, LfsrOutput,
+    LfsrShift, LfsrSpec, LogicInputId, NodeId, Output555, OutputGain, PulseInputId,
 };
 
 use crate::atari_dvg::TIMING;
@@ -85,92 +92,168 @@ impl CustomComponent for ExplosionNoise {
 }
 
 // ---------------------------------------------------------------------------
-// Fire chirp envelope (custom escape-hatch component)
+// Fire voice storage capacitors (custom escape-hatch components)
 // ---------------------------------------------------------------------------
 
-/// Triggered envelope for the fire "pew". On each rising edge of the enable it
-/// restarts a timer and, while the enable is held, outputs one of two shapes:
+/// The fire voices' pitch capacitor: C38 with Q3 (saucer) and C47 with Q1
+/// (ship).
 ///
-/// - **Linear** (`exponential = false`): the sweep position `min(elapsed/span, 1)`,
-///   rising 0→1 over `span` seconds. It drives the [`ne555_cc`] control voltage;
-///   because that VCO's frequency is *linear* in its CV, a linear CV ramp yields
-///   a linear frequency sweep (the descending "pew").
-/// - **Exponential** (`exponential = true`): the amplitude decay `exp(-elapsed/span)`,
-///   which multiplies the oscillator output.
+/// A 4016B section holds the cap at +5 V while the enable is low. Releasing it
+/// leaves a PNP constant-current source charging the cap, and that rising
+/// voltage is what a following op-amp turns into the 555's falling charge
+/// current. So the pitch does not sweep because something ramps it; it sweeps
+/// because a capacitor is filling, and it stops when the transistor saturates.
 ///
-/// The oscillator itself is the `ne555_cc` node, so this component carries no
-/// phase — only the envelopes the framework can't express as a triggered ramp.
-/// Input: `[enable 0/1]`.
-///
-/// [`ne555_cc`]: phosphor_core::device::DiscreteCircuitBuilder::ne555_cc
-struct FireEnvelope {
-    span: f64,
-    exponential: bool,
-    active: bool,
-    elapsed: f64,
-    last_en: bool,
+/// Input: `[enable 0/1]`. Output: the capacitor's voltage.
+struct FireControlCap {
+    /// What the analog switch holds the cap at while the voice is idle.
+    hold_v: f64,
+    /// Where the PNP saturates and stops sourcing, which is what ends the
+    /// sweep. Nothing else on this node draws current, so this is a floor the
+    /// voltage rests on rather than an asymptote it approaches.
+    ceiling_v: f64,
+    /// `i/C` in volts per second.
+    slew: f64,
+    v: f64,
 }
 
-impl FireEnvelope {
-    fn linear(span: f64) -> Self {
+impl FireControlCap {
+    fn new(hold_v: f64, ceiling_v: f64, current: f64, c: f64) -> Self {
         Self {
-            span,
-            exponential: false,
-            active: false,
-            elapsed: 0.0,
-            last_en: false,
-        }
-    }
-    fn exp(span: f64) -> Self {
-        Self {
-            span,
-            exponential: true,
-            active: false,
-            elapsed: 0.0,
-            last_en: false,
+            hold_v,
+            ceiling_v,
+            slew: current / c,
+            v: hold_v,
         }
     }
 }
 
-impl CustomComponent for FireEnvelope {
+impl CustomComponent for FireControlCap {
     fn reset(&mut self) {
-        self.active = false;
-        self.elapsed = 0.0;
-        self.last_en = false;
+        self.v = self.hold_v;
     }
 
     fn step(&mut self, inputs: &[f64], dt: f64) -> f64 {
-        let en = inputs[0] > 0.5;
-        if !en {
-            // Silent while released; the sweep restarts on the next rising edge.
-            self.active = false;
-            self.last_en = false;
-            return 0.0;
-        }
-        if !self.last_en {
-            self.active = true;
-            self.elapsed = 0.0;
-        }
-        self.last_en = true;
-        let e = self.elapsed;
-        self.elapsed += dt;
-        if self.exponential {
-            (-e / self.span).exp()
+        if inputs[0] > 0.5 {
+            self.v = (self.v + self.slew * dt).min(self.ceiling_v);
         } else {
-            (e / self.span).min(1.0)
+            self.v = self.hold_v;
         }
+        self.v
     }
 
     fn save_state(&self, w: &mut StateWriter) {
-        w.write_bool(self.active);
-        w.write_f64_le(self.elapsed);
-        w.write_bool(self.last_en);
+        w.write_f64_le(self.v);
     }
 
     fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
-        self.active = r.read_bool()?;
-        self.elapsed = r.read_f64_le()?;
-        self.last_en = r.read_bool()?;
+        self.v = r.read_f64_le()?;
+        Ok(())
+    }
+}
+
+/// The fire voices' output network: C39/R58/CR6 (saucer) and C48/R66/CR8
+/// (ship), summed into the mixer through R81/R84.
+///
+/// This is where the amplitude decay lives, and it is not an envelope
+/// multiplying an oscillator. A second 4016B section holds this capacitor at
+/// +5 V while the voice is idle. Once released, the capacitor's voltage reaches
+/// the summing node through the series resistor, and the 555 is tied to that
+/// node through a diode whose **cathode faces the timer**. So the timer can
+/// only ever pull the node down, and only in the half of its cycle where its
+/// output transistor is sinking; the level it is pulled up from is whatever
+/// charge the capacitor has left.
+///
+/// Three things follow that a multiplied envelope does not give:
+///
+/// - The decay rate depends on the duty cycle, because the capacitor empties
+///   through the diode during the low phase and through the series resistor and
+///   the summing resistor into the mixer's +5 V reference during the high one,
+///   and those differ by a factor of eleven on the saucer.
+/// - The decay therefore does not reach zero. It settles where the two average
+///   out, which is why the reference's own amplitude ramp stops at a floor it
+///   adds by hand.
+/// - The waveform is a *pulse*, and its rest is the clamp rather than the
+///   reference. An idle voice has its 555 held in reset, so pin 3 is low and the
+///   diode is conducting: the node sits at the clamp all the while, and firing
+///   is the node being *released upward* for the fraction of each cycle the
+///   timer spends charging. That fraction starts near 62 % and grows toward 94 %
+///   as the pitch falls, so the voice ends as a narrow notch train rather than
+///   fading out.
+///
+/// Inputs: `[enable 0/1, 555 output volts]`. Output: how far the summing node
+/// stands above where it rests, in volts.
+struct FireOutput {
+    /// Series resistor from the capacitor to the summing node (R58 / R66).
+    r_series: f64,
+    /// Summing resistor into the mixer's virtual ground (R81 / R84).
+    r_mix: f64,
+    /// Storage capacitor (C39 / C48).
+    c: f64,
+    /// What the analog switch holds the capacitor at while idle, which is also
+    /// the voltage the mixer holds its summing node at.
+    hold_v: f64,
+    /// Where the diode pins the node while the timer's output is low, which is
+    /// also where an idle voice rests: the enable drives the 555's reset, and a
+    /// 555 in reset has its output low.
+    clamp_v: f64,
+    v: f64,
+}
+
+impl FireOutput {
+    fn new(r_series: f64, c: f64, r_mix: f64, hold_v: f64, clamp_v: f64) -> Self {
+        Self {
+            r_series,
+            r_mix,
+            c,
+            hold_v,
+            clamp_v,
+            v: hold_v,
+        }
+    }
+}
+
+impl CustomComponent for FireOutput {
+    fn reset(&mut self) {
+        self.v = self.hold_v;
+    }
+
+    fn step(&mut self, inputs: &[f64], dt: f64) -> f64 {
+        if inputs[0] <= 0.5 {
+            // The switch closes and the capacitor is back at the rail. Snapping
+            // it rather than charging it through the 4016B's own few hundred
+            // ohms is a 2 ms approximation of a 2 ms event, and it is
+            // unobservable twice over: the node reads the clamp throughout,
+            // because the timer is in reset with its output low, and the game's
+            // own fire timer cannot re-trigger inside one frame.
+            self.v = self.hold_v;
+            return 0.0;
+        }
+        // What the node would sit at with the diode out of circuit: the
+        // capacitor and the mixer's reference, divided by their two resistors.
+        let (g_series, g_mix) = (1.0 / self.r_series, 1.0 / self.r_mix);
+        let open = (self.v * g_series + self.hold_v * g_mix) / (g_series + g_mix);
+        // The timer sinks through the diode only while its output is low. It is
+        // NOT clamped while high, even when the node sits above the timer's own
+        // high level: a 555's high side is a Darlington to Vcc that turns off
+        // rather than sinking, so there is nothing for a forward diode current
+        // to flow into. Modelling a clamp there would be inventing a mechanism
+        // the part does not have, which is the failure this file keeps finding.
+        let node = if inputs[1] > 0.5 {
+            open
+        } else {
+            open.min(self.clamp_v)
+        };
+        self.v -= (self.v - node) / self.r_series * dt / self.c;
+        node - self.clamp_v
+    }
+
+    fn save_state(&self, w: &mut StateWriter) {
+        w.write_f64_le(self.v);
+    }
+
+    fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
+        self.v = r.read_f64_le()?;
         Ok(())
     }
 }
@@ -301,19 +384,76 @@ const THUMP_555_SWING: f64 = (5.0 - 1.2) / 2.0;
 /// summing resistor implies, and it is not something to reproduce.
 const THUMP_GAIN: f64 = (LVL_THUMP / LVL_TOTAL) / THUMP_555_SWING;
 
-// Fire chirp constant-current 555 VCO. The frequency is linear in the control
-// voltage, `f = (Vcc_src − Vbe − Vcv) / ((Vcc/3)·C·R)`, so a linear CV ramp gives
-// a linear frequency sweep. R·C is sized so the stall edge (cap just reaches the
-// ⅔·Vcc threshold) sits above the top of the sweep (~910 Hz), leaving the
-// 110–830 Hz pew range comfortably oscillating.
-const FIRE_C: f64 = 0.01e-6;
-const FIRE_R: f64 = 110e3;
-const FIRE_VCC: f64 = 5.0;
-const FIRE_VCC_SRC: f64 = 5.0;
-const FIRE_JUNCTION: f64 = 0.7;
-/// Per-fire output gains, calibrated to the reference pew levels.
-const SHIP_FIRE_GAIN: f64 = 0.104;
-const SAUCER_FIRE_GAIN: f64 = 0.064;
+// ---------------------------------------------------------------------------
+// Fire voices — the two "pew" chains, built from the board's own parts
+// ---------------------------------------------------------------------------
+//
+// The board draws these twice, identically, and the manual says so: "The Fire
+// sounds for the Saucer and the Space Ships are generated by two identical
+// circuits." Only two components differ between them, and those two are the
+// whole difference in character. Everything below is shared.
+//
+// The chain is: a 4016B section holds a capacitor at +5 V while the voice is
+// idle. On enable it is released and a PNP constant-current source charges it.
+// An LM324 follower puts that rising voltage on a second PNP's emitter, whose
+// 3.3 kΩ to +12 V therefore delivers a FALLING current, and that current runs a
+// 555 as a constant-current VCO. So the pitch sweeps down because a capacitor
+// is filling up. In parallel, a second 4016B section releases a second
+// capacitor, and that one's decaying charge sets how far the 555 can pull the
+// summing node down through its diode. See [`FireOutput`] for why that is not
+// an amplitude envelope.
+//
+// None of this was here before. The model was a linear frequency ramp driving a
+// 555 with a 0.01 µF timing cap and no discharge resistor, multiplied by an
+// exponential envelope, with both output levels fitted. Every one of those
+// numbers is now a part.
+
+/// CR3 and CR4 (1N914) drop this each, at the ~10 mA R53's 1 kΩ draws from
+/// +12 V. Note R53 does not set the reference itself — two diodes in series
+/// with it fix the node at `12 − 2·Vf` whatever the resistor is — it only sets
+/// the current, and so the drop.
+const FIRE_BIAS_DIODE_V: f64 = 0.72;
+/// 2N3906 base-emitter drop at the tens of microamps these two source.
+const FIRE_PNP_VEB: f64 = 0.6;
+/// 2N3906 collector-emitter saturation, where Q3/Q1 stop being current sources
+/// and the sweep ends.
+const FIRE_PNP_VCE_SAT: f64 = 0.2;
+const FIRE_SUPPLY_V: f64 = 12.0;
+/// What both M9 4016B sections hold their capacitors at while the voice is
+/// idle, and also the voltage P11's non-inverting input holds the summing node
+/// at. The two being equal is why an idle fire voice contributes exactly zero
+/// rather than a bias the mixer has to reject.
+const FIRE_REST_V: f64 = 5.0;
+/// The reference the two current sources work against: `12 − CR3 − CR4`.
+const FIRE_BIAS_V: f64 = FIRE_SUPPLY_V - 2.0 * FIRE_BIAS_DIODE_V;
+/// Voltage across R54/R52, which with that resistor is the charging current.
+const FIRE_CS_DRIVE_V: f64 = FIRE_SUPPLY_V - FIRE_BIAS_V - FIRE_PNP_VEB;
+/// Where the pitch capacitor stops rising: the source transistor's own emitter,
+/// less its saturation drop.
+const FIRE_CV_CEILING_V: f64 = FIRE_BIAS_V + FIRE_PNP_VEB - FIRE_PNP_VCE_SAT;
+
+/// M8/L9 555 timing parts. R56/R65 is the current-source emitter resistor from
+/// +12 V, C35/C50 the timing cap, R57/R61 the resistor between the discharge
+/// pin and that cap.
+const FIRE_555_R: f64 = 3_300.0; // R56 / R65
+const FIRE_555_C: f64 = 1e-6; // C35 / C50
+const FIRE_555_R_DISCH: f64 = 680.0; // R57 / R61
+const FIRE_555_VCC: f64 = 5.0;
+
+/// R81/R84 into the mixer's 1 kΩ feedback: the highest summing resistor on the
+/// board, and the quietest two voices for it.
+const FIRE_MIX_R: f64 = 100_000.0; // R81 / R84
+
+/// Where CR6/CR8 pin the summing node while the 555's output is low: the
+/// timer's own output-low level plus the 1N914's forward drop at the few
+/// hundred microamps R58/R66 hands it.
+const FIRE_CLAMP_V: f64 = 0.1 + 0.6;
+
+/// Half the summing node's full swing, from the diode clamp it rests at up to
+/// the +5 V it reaches with a full output capacitor. Dividing by it turns the
+/// node's volts into the normalised units the mix weights are expressed in,
+/// which is the shape thrust and thump use.
+const FIRE_HALF_SWING: f64 = (FIRE_REST_V - FIRE_CLAMP_V) / 2.0;
 
 /// The board's noise register: 16 bits, XNOR of bits 6 and 14 fed back into the
 /// bottom, clocked at 12 kHz.
@@ -343,61 +483,88 @@ const THRUST_NOISE_LFSR: LfsrSpec = LfsrSpec {
     output: LfsrOutput::Feedback,
 };
 
-/// Control voltage that makes the fire 555 oscillate at `freq` Hz (inverse of the
-/// linear CC-VCO frequency law above).
-fn fire_cv(freq: f64) -> f64 {
-    FIRE_VCC_SRC - FIRE_JUNCTION - freq * (FIRE_VCC / 3.0) * FIRE_C * FIRE_R
+/// The four components that differ between the two fire voices, and the mix
+/// weight that goes with them. Everything else in the chain is shared, so this
+/// is the whole of what makes one a "pew" and the other a "pip".
+struct FireParts {
+    /// Current-source emitter resistor: R54 (saucer) / R52 (ship).
+    r_source: f64,
+    /// Pitch capacitor: C38 / C47.
+    c_pitch: f64,
+    /// Output-network series resistor: R58 / R66.
+    r_series: f64,
+    /// Output-network storage capacitor: C39 / C48.
+    c_amp: f64,
+    /// The path's weight in the final adder.
+    level: f64,
 }
 
-/// Build one fire "pew": a linear CV ramp (`f_hi`→`f_lo` over `ramp` s) sweeps a
-/// constant-current 555 VCO, AC-coupled and shaped by an exponential amplitude
-/// envelope (`amp_tau`). Returns the leveled output node.
-#[allow(clippy::too_many_arguments)]
+/// Build one fire "pew" from the board's parts.
 fn build_fire(
     b: &mut DiscreteCircuitBuilder,
     enable: LogicInputId,
     name: &str,
-    f_hi: f64,
-    f_lo: f64,
-    ramp: f64,
-    amp_tau: f64,
-    gain: f64,
+    parts: FireParts,
 ) -> NodeId {
-    let sweep = b.custom(
-        &format!("{name}_SWEEP"),
+    let FireParts {
+        r_source,
+        c_pitch,
+        r_series,
+        c_amp,
+        level,
+    } = parts;
+    let cv = b.custom(
+        &format!("{name}_FIRE_CV"),
         vec![enable.into()],
-        Box::new(FireEnvelope::linear(ramp)),
+        Box::new(FireControlCap::new(
+            FIRE_REST_V,
+            FIRE_CV_CEILING_V,
+            FIRE_CS_DRIVE_V / r_source,
+            c_pitch,
+        )),
     );
-    let (v0, v1) = (fire_cv(f_hi), fire_cv(f_lo));
-    let vin_g = b.gain(&format!("{name}_VIN_G"), sweep, v1 - v0);
-    let vin_b = b.constant(&format!("{name}_VIN0"), v0);
-    let vin = b.add(&format!("{name}_VIN"), &[vin_g, vin_b]);
     let osc = b.ne555_cc(
-        &format!("{name}_555"),
-        vin,
-        // Free-running, unchanged. The fires gate through their envelope rather
-        // than the timer, which is one of the things wrong with them; left for
-        // when they are taken on properly.
-        None,
-        FIRE_R,
-        FIRE_C,
-        // Ideal discharge, unchanged. The fires have their own untraced chain
-        // and their own fitted gains, so this stays as it was until they are
-        // taken on properly rather than being half-corrected here.
+        &format!("{name}_FIRE_555"),
+        cv,
+        // The enable reaches pin 4, the reset, exactly as thump's does. Gating
+        // the output instead is what made thump scratch at every onset.
+        Some(enable.into()),
+        FIRE_555_R,
+        FIRE_555_C,
+        FIRE_555_R_DISCH,
+        FIRE_555_VCC,
+        FIRE_SUPPLY_V,
+        // No junction drop. Q4/Q5 sit inside an LM324 follower's feedback loop,
+        // which holds the emitter at the control voltage itself, so the base-
+        // emitter drop the bare current source in thump has to carry is not in
+        // this current's equation at all. Putting the transistor's 0.6 V here
+        // would be reading the part rather than the circuit.
         0.0,
-        FIRE_VCC,
-        FIRE_VCC_SRC,
-        FIRE_JUNCTION,
-        Output555::Capacitor,
+        // The source is on the discharge pin with R57/R61 between it and the
+        // cap, which is the opposite of thump's arrangement a few centimetres
+        // away on the same sheet. The cap therefore empties toward ground, not
+        // toward i·R57, and that is worth a factor of three in discharge time
+        // at the top of the sweep.
+        Feed555::DischargePin,
+        // Pin 3, the square, which is what CR6/CR8 reads.
+        Output555::Square,
     );
-    let ac = b.rc_high_pass(&format!("{name}_AC"), osc, 16e3, 1e-6);
-    let amp = b.custom(
-        &format!("{name}_AMP"),
-        vec![enable.into()],
-        Box::new(FireEnvelope::exp(amp_tau)),
+    let node = b.custom(
+        &format!("{name}_FIRE_NODE"),
+        vec![enable.into(), osc],
+        Box::new(FireOutput::new(
+            r_series,
+            c_amp,
+            FIRE_MIX_R,
+            FIRE_REST_V,
+            FIRE_CLAMP_V,
+        )),
     );
-    let env = b.multiply(&format!("{name}_ENV"), ac, amp);
-    b.gain(&format!("{name}_FIRE_OUT"), env, gain)
+    b.gain(
+        &format!("{name}_FIRE_OUT"),
+        node,
+        (level / LVL_TOTAL) / FIRE_HALF_SWING,
+    )
 }
 
 fn build_circuit() -> (DiscreteCircuit, AsteroidsDiscreteInputs) {
@@ -502,6 +669,10 @@ fn build_circuit() -> (DiscreteCircuit, AsteroidsDiscreteInputs) {
         5.0,
         5.0,
         0.8, // vcc, v_cc_source, 2N3906 junction
+        // Q2's collector joins C33 and R51 goes on to pin 7, so the source is
+        // on the capacitor and the cap relaxes toward i·R51 while the pin
+        // sinks. The two fire timers below are drawn the other way round.
+        Feed555::Capacitor,
         // Pin 3, the square, which is what the board takes through R74. This
         // used to tap the capacitor, because without R51 above the square was a
         // pulse one step wide and unusable. A sawtooth's harmonics fall as 1/n²
@@ -531,29 +702,38 @@ fn build_circuit() -> (DiscreteCircuit, AsteroidsDiscreteInputs) {
     let saucer_gated = b.multiply("SAUCER_G", saucer_tone, saucer_en);
     let saucer = b.gain("SAUCER", saucer_gated, LVL_SAUCER / LVL_TOTAL);
 
-    // --- Fire paths: a constant-current 555 VCO swept by a linear CV ramp gives
-    // the descending-frequency "pew"; an exponential envelope sets the amplitude.
-    // Ship: 820 -> 110 Hz over 0.28 s, fast decay (τ 81 ms). ---
+    // --- Fire paths: two identical chains, differing in four components. ---
+    //
+    // Ship: 33 kΩ charging 1 µF is 25 V/s, so its pitch capacitor crosses the
+    // whole span in about 0.23 s and the sweep is wide, ~795 Hz down to ~175.
+    // Its output capacitor empties through 2.7 kΩ, the fastest decay here.
     let ship_out = build_fire(
         &mut b,
         ship_fire,
         "SHIP",
-        820.0,
-        110.0,
-        0.28,
-        0.081,
-        SHIP_FIRE_GAIN,
+        FireParts {
+            r_source: 33e3,  // R52
+            c_pitch: 1e-6,   // C47
+            r_series: 2.7e3, // R66
+            c_amp: 10e-6,    // C48
+            level: LVL_SHIP_FIRE,
+        },
     );
-    // Saucer: a higher, narrower 830 -> 630 Hz sweep with a slower decay (τ 0.3 s).
+    // Saucer: 10 kΩ into 10 µF is 8.4 V/s, twelve times slower on the pitch, so
+    // the same 0.28 s covers only ~795 Hz down to ~605. Its output capacitor
+    // empties through 10 kΩ, and the two together are why this one is a short
+    // "pip" where the ship's is a "pew".
     let sfire_out = build_fire(
         &mut b,
         saucer_fire,
         "SAUCER",
-        830.0,
-        630.0,
-        0.28,
-        0.3,
-        SAUCER_FIRE_GAIN,
+        FireParts {
+            r_source: 10e3, // R54
+            c_pitch: 10e-6, // C38
+            r_series: 10e3, // R58
+            c_amp: 10e-6,   // C39
+            level: LVL_SAUCER_FIRE,
+        },
     );
 
     // --- Life: fixed 3 kHz tone, gated ---

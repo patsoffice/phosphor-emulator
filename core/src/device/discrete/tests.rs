@@ -761,6 +761,7 @@ fn cc_freq(vin: f64) -> f64 {
         5.0,
         5.0,
         0.7,
+        Feed555::Capacitor,
         Output555::Capacitor,
     );
     let mut c = b.build();
@@ -818,6 +819,7 @@ fn ne555_cc_discharge_resistor_gives_the_square_a_duty_cycle() {
             5.0,
             5.0,
             0.8,
+            Feed555::Capacitor,
             Output555::Square,
         );
         let mut c = b.build();
@@ -848,10 +850,11 @@ fn ne555_cc_discharge_resistor_gives_the_square_a_duty_cycle() {
     );
 }
 
-/// The discharge relaxes toward `i·r_disch`, not toward ground, because the
-/// current source keeps feeding the resistor while the pin sinks it. Raising
-/// the discharge resistance therefore raises that asymptote as well as slowing
-/// the decay, and both push the duty the same way.
+/// With the source on the capacitor, the discharge relaxes toward `i·r_disch`
+/// and not toward ground, because the current source keeps feeding the resistor
+/// while the pin sinks it. Raising the discharge resistance therefore raises
+/// that asymptote as well as slowing the decay, and both push the duty the same
+/// way.
 #[test]
 fn ne555_cc_discharge_asymptote_follows_the_current_source() {
     let period_of = |r_disch: f64| -> f64 {
@@ -867,6 +870,7 @@ fn ne555_cc_discharge_asymptote_follows_the_current_source() {
             5.0,
             5.0,
             0.8,
+            Feed555::Capacitor,
             Output555::Square,
         );
         let mut c = b.build();
@@ -895,6 +899,81 @@ fn ne555_cc_discharge_asymptote_follows_the_current_source() {
     );
 }
 
+/// With the source on the *discharge pin* instead, the pin swallows its current
+/// and the cap empties through the resistor toward ground. Checked against the
+/// closed form rather than against the other variant alone, because the point is
+/// that one of these is arithmetic off the parts and the other is not.
+///
+/// Values are Asteroids' saucer fire at the top of its sweep: R56 3.3 k from
+/// +12 V with the follower holding the emitter at the 5 V the control cap starts
+/// at, R57 680 Ω, C35 1 µF, a 5 V timer. The charge is 785.7 µs either way; the
+/// discharge is 471.4 µs here and 1450 µs with the source on the cap, because
+/// that arrangement's asymptote is i·R57 = 1.44 V against a 1.667 V trigger and
+/// the last stretch crawls.
+#[test]
+fn ne555_cc_source_on_the_discharge_pin_empties_the_cap_toward_ground() {
+    const FINE: u64 = 1_920_000;
+    let period_of = |feed: Feed555| -> f64 {
+        let mut b = builder_1to1(FINE);
+        let vin_in = b.constant("VIN", 5.0);
+        let cc = b.ne555_cc(
+            "CC",
+            vin_in,
+            None,
+            3.3e3,
+            1e-6,
+            680.0,
+            5.0,
+            12.0,
+            0.0,
+            feed,
+            Output555::Square,
+        );
+        let mut c = b.build();
+        step_n(&mut c, 20_000); // past the first ramp from a cold cap
+        let mut edges = 0usize;
+        let mut prev = c.value(cc);
+        const N: usize = 1_920_000;
+        for _ in 0..N {
+            c.tick(1);
+            let v = c.value(cc);
+            if prev <= 0.0 && v > 0.0 {
+                edges += 1;
+            }
+            prev = v;
+        }
+        N as f64 / FINE as f64 / edges as f64
+    };
+
+    let i = (12.0 - 5.0) / 3.3e3;
+    let (threshold, trigger): (f64, f64) = (5.0 * 2.0 / 3.0, 5.0 / 3.0);
+    let t_charge = 1e-6 * (threshold - trigger) / i;
+    let t_ground = 680.0 * 1e-6 * (threshold / trigger).ln();
+    let expected = t_charge + t_ground;
+
+    let pin = period_of(Feed555::DischargePin);
+    assert!(
+        (pin - expected).abs() / expected < 0.02,
+        "expected {:.1} µs from the parts, got {:.1}",
+        expected * 1e6,
+        pin * 1e6
+    );
+
+    // And the other arrangement is a different oscillator, not a rounding
+    // difference: its asymptote sits just under the trigger.
+    let asymptote = i * 680.0;
+    assert!(asymptote < trigger);
+    let cap = period_of(Feed555::Capacitor);
+    let t_asymptote = 680.0 * 1e-6 * ((threshold - asymptote) / (trigger - asymptote)).ln();
+    assert!(
+        (cap - (t_charge + t_asymptote)).abs() / cap < 0.02,
+        "expected {:.1} µs, got {:.1}",
+        (t_charge + t_asymptote) * 1e6,
+        cap * 1e6
+    );
+    assert!(cap > pin * 1.5, "{cap} against {pin}");
+}
+
 #[test]
 fn ne555_cc_capacitor_stays_between_trigger_and_threshold() {
     let mut b = builder_1to1(SIM);
@@ -909,6 +988,7 @@ fn ne555_cc_capacitor_stays_between_trigger_and_threshold() {
         5.0,
         5.0,
         0.7,
+        Feed555::Capacitor,
         Output555::Capacitor,
     );
     let mut c = b.build();
@@ -1062,6 +1142,7 @@ fn analog_555_circuit() -> DiscreteCircuit {
         5.0,
         5.0,
         0.7,
+        Feed555::Capacitor,
         Output555::Capacitor,
     );
     let gate = b.fixed_square("GATE", 400.0);

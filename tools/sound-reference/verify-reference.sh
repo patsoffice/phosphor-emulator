@@ -109,6 +109,14 @@ fail=0
 # before it triggers anything. Measuring the whole file measures that noise, and
 # the null check then "fails" identically for every mode, which is exactly what
 # this script did on its first run.
+#
+# SND_SKIP_S moves it, and an effect that does not run to the end of the capture
+# NEEDS it moved. The two Asteroids fire voices are pulsed to the fourteen frames
+# the game holds their latch line, so they are over by 1.23 s and the default
+# 2.0 s window contains nothing at all. The check below refuses that rather than
+# passing on it, but the way to make it pass is to put the window on the event:
+#
+#   AST_EFFECT=ship-fire SND_SKIP_S=0.9 verify-reference.sh drive_asteroid_single.lua asteroid
 SKIP_S=${SND_SKIP_S:-2.0}
 
 peak() {
@@ -124,9 +132,20 @@ PY
 
 base_peak=$(peak "$WORK/base.wav")
 null_peak=$(peak "$WORK/null.wav")
+# The driven capture has to contain the effect, or "the null run is quieter than
+# the driven one" is a comparison between two silences and passes for any driver
+# at all. That is not hypothetical: pulsing the two fire voices to the length the
+# game actually holds their latch line put the whole event before this window,
+# and both peaks went to zero while the check went on reporting ok. A check that
+# cannot fail is not a check.
+if awk "BEGIN{exit !($base_peak < 0.01)}"; then
+  echo "  FAIL null         driven peak $base_peak from ${SKIP_S}s on: the window"
+  echo "                    holds no effect, so the null comparison is between two"
+  echo "                    silences. Move it with SND_SKIP_S."
+  fail=1
 # 0.01 of full scale is far below any effect worth capturing and above the
 # board's idle noise floor.
-if awk "BEGIN{exit !($null_peak < 0.01)}"; then
+elif awk "BEGIN{exit !($null_peak < 0.01)}"; then
   echo "  ok   null         peak $null_peak with nothing asserted (driven: $base_peak)"
 else
   echo "  FAIL null         peak $null_peak with NOTHING asserted, against $base_peak driven."

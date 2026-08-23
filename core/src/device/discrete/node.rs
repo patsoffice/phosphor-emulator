@@ -5,7 +5,7 @@
 //! in the `NodeId` references inside each kind and is fixed once the circuit is
 //! built; everything mutated at runtime is serialized by `save_runtime`.
 
-use super::{ClockDomain, CustomComponent, FilterMode, NodeId, Output555};
+use super::{ClockDomain, CustomComponent, Feed555, FilterMode, NodeId, Output555};
 use crate::core::save_state::{SaveError, StateReader, StateWriter};
 
 /// One node in the circuit graph: a primitive kind plus per-node scheduler
@@ -190,6 +190,9 @@ pub(crate) enum NodeKind {
         /// Constant-current source supply and its transistor junction drop.
         v_cc_source: f64,
         junction: f64,
+        /// Which side of `r_disch` the current source sits on, which is what
+        /// sets the discharge asymptote.
+        feed: Feed555,
         /// 2/3·Vcc threshold and 1/3·Vcc trigger.
         threshold: f64,
         trigger: f64,
@@ -677,6 +680,7 @@ impl NodeKind {
                 discharge_alpha,
                 v_cc_source,
                 junction,
+                feed,
                 threshold,
                 trigger,
                 out_high,
@@ -699,22 +703,37 @@ impl NodeKind {
                 let v_charge_limit = values[vin_src.index()] + *junction;
                 let i = ((*v_cc_source - v_charge_limit) / *r).max(0.0);
                 if *flip_flop {
-                    // Constant-current charge: dv = i·dt/C, clamped to the limit.
-                    *cap_v = (*cap_v + i * dt / *c).min(v_charge_limit);
+                    // Constant-current charge: dv = i·dt/C, clamped to the
+                    // source's compliance. With the source on the discharge pin
+                    // the current still has nowhere to go but through r_disch
+                    // into the cap, so the ramp is the same; what the source
+                    // cannot do is hold the cap above its own limit less the
+                    // drop it is making across that resistor.
+                    let ceiling = match feed {
+                        Feed555::Capacitor => v_charge_limit,
+                        Feed555::DischargePin => v_charge_limit - i * *r_disch,
+                    };
+                    *cap_v = (*cap_v + i * dt / *c).min(ceiling.max(0.0));
                     if *cap_v >= *threshold {
                         *cap_v = *threshold;
                         *flip_flop = false;
                     }
                 } else if *r_disch > 0.0 {
-                    // Discharging through the discharge pin's resistor. The
-                    // current source keeps feeding that resistor while it does,
-                    // so the cap relaxes toward i·r_disch and not toward ground.
+                    // Discharging through the discharge pin's resistor, toward
+                    // whichever place the source is not.
+                    //
+                    // Source on the cap: it keeps feeding the resistor while
+                    // the pin pulls down, so the cap relaxes toward i·r_disch.
                     // Above the charge limit the source contributes nothing and
                     // the limit is the asymptote instead.
-                    let target = if *cap_v < v_charge_limit {
-                        i * *r_disch
-                    } else {
-                        v_charge_limit
+                    //
+                    // Source on the pin: the pin is a saturated transistor to
+                    // ground, so it swallows the source's current, and the only
+                    // path left for the cap's charge is the resistor to ground.
+                    let target = match feed {
+                        Feed555::Capacitor if *cap_v < v_charge_limit => i * *r_disch,
+                        Feed555::Capacitor => v_charge_limit,
+                        Feed555::DischargePin => 0.0,
                     };
                     *cap_v += (target - *cap_v) * *discharge_alpha;
                     if *cap_v <= *trigger {

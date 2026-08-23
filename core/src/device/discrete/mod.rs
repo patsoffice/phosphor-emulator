@@ -104,6 +104,32 @@ pub enum Output555 {
     Capacitor,
 }
 
+/// Where a constant-current 555's source injects, relative to the timing cap
+/// and the discharge resistor. The two arrangements charge identically and
+/// discharge toward different places, so this is a topology and not a taste.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Feed555 {
+    /// Source onto the capacitor node, with the discharge resistor between that
+    /// node and the discharge pin. While the pin is pulling down, the source is
+    /// still feeding the resistor, so the cap relaxes toward `i·r_disch` rather
+    /// than toward ground. Asteroids' thump is wired this way (Q2's collector
+    /// joins C33, and R51 goes on to pin 7).
+    Capacitor,
+    /// Source onto the discharge pin, with the discharge resistor between that
+    /// pin and the capacitor. Charging is unchanged, since the current has
+    /// nowhere to go but through the resistor into the cap. Discharging is not:
+    /// the pin is a saturated transistor to ground, so it swallows the source's
+    /// current and the cap empties through the resistor toward **ground**.
+    /// Asteroids' two fire voices are wired this way (Q4/Q5's collector joins
+    /// pin 7, and R57/R61 goes on to C35/C50).
+    ///
+    /// The difference is not small. On the saucer fire, `i·r_disch` at the top
+    /// of the sweep is 1.44 V against a 1.667 V trigger, so a model with the
+    /// wrong asymptote crawls the last stretch and takes three times as long to
+    /// reach it.
+    DischargePin,
+}
+
 /// Final output scaling applied before the signal enters the resampler.
 #[derive(Clone, Copy, Debug)]
 pub struct OutputGain(f64);
@@ -818,14 +844,17 @@ impl DiscreteCircuitBuilder {
     /// through, and it is what gives the square output a duty cycle worth
     /// tapping. Pass **0 for an ideal discharge**, where the cap snaps to the
     /// trigger in one step: that is the physical limit of the same model, and it
-    /// leaves the square a pulse one step wide.
+    /// leaves the square a pulse one step wide. [`Feed555::DischargePin`] needs a
+    /// real resistance, since with none the pin would sit straight across the
+    /// cap.
     ///
-    /// While discharging, the current source keeps feeding the discharge
-    /// resistor, so the cap relaxes toward `i·r_disch` rather than toward
-    /// ground. That asymptote is the difference between a plausible-looking
-    /// discharge and the right one, and it is only correct for the arrangement
-    /// where the source feeds the cap directly, which is what both boards using
-    /// this have.
+    /// `feed` says which side of that resistor the current source sits on, and
+    /// it decides where the cap relaxes to while the discharge pin is pulling
+    /// down: toward `i·r_disch` when the source feeds the cap, toward ground
+    /// when it feeds the pin. Read it off the schematic rather than assuming.
+    /// Asteroids has one of each, drawn a few centimetres apart, and the
+    /// difference is worth three times the discharge time at the top of the
+    /// fire sweep.
     ///
     /// `reset` is the 555's reset pin. While it is low the timer is held with
     /// its capacitor discharged and its output low, so releasing it always
@@ -846,11 +875,17 @@ impl DiscreteCircuitBuilder {
         vcc: f64,
         v_cc_source: f64,
         junction: f64,
+        feed: Feed555,
         output: Output555,
     ) -> NodeId {
         assert!(
             r_disch >= 0.0,
             "555 discharge resistance must not be negative"
+        );
+        assert!(
+            !(feed == Feed555::DischargePin && r_disch == 0.0),
+            "a source feeding the discharge pin needs a discharge resistance: \
+             with none, the pin sits straight across the timing capacitor"
         );
         let (threshold, trigger) = derive::ne555_thresholds(vcc);
         // Precomputed here rather than per step: the timestep is fixed, and this
@@ -871,6 +906,7 @@ impl DiscreteCircuitBuilder {
                 discharge_alpha,
                 v_cc_source,
                 junction,
+                feed,
                 threshold,
                 trigger,
                 out_high: derive::ne555_default_out_high(vcc),

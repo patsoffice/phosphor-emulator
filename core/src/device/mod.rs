@@ -75,8 +75,8 @@ pub use cmos_ram::CmosRam;
 pub use dac::Mc1408Dac;
 pub use discrete::{
     ClockDomain, CmosInverter, CustomComponent, DataInputId, DiscreteCircuit,
-    DiscreteCircuitBuilder, ExternalSourceId, FilterMode, InverterOsc, LfsrOutput, LfsrShift,
-    LfsrSpec, LogicInputId, NodeId, Output555, OutputGain, PulseInputId,
+    DiscreteCircuitBuilder, ExternalSourceId, Feed555, FilterMode, InverterOsc, LfsrOutput,
+    LfsrShift, LfsrSpec, LogicInputId, NodeId, Output555, OutputGain, PulseInputId,
 };
 pub use dvg::Dvg;
 pub use er2055::Er2055;

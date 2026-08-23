@@ -167,19 +167,33 @@ pub static SPEC: TargetSpec = TargetSpec {
             name: "saucer-lfo",
             description: "Saucer warble oscillator sweeping the tone (+/-1)",
         },
-        // Ship fire: the sweep envelope, the VCO it steers, and the amplitude
-        // envelope applied after.
+        // The two fire chains, stage by stage. Both are walked because the
+        // pitch and the amplitude come from two separate capacitors on
+        // different time constants, and at the output a slow sweep and a slow
+        // decay are hard to tell apart.
         ProbeSpec {
-            name: "ship-sweep",
-            description: "Ship fire frequency sweep ramp, 0 to 1 over the chirp",
+            name: "ship-cv",
+            description: "Ship fire pitch capacitor C47, rising 5 V to ~11 V (volts/12)",
         },
         ProbeSpec {
             name: "ship-555",
-            description: "Ship fire VCO capacitor output, before its envelope (volts)",
+            description: "Ship fire 555 pin 3, the square CR8 reads (volts/5)",
         },
         ProbeSpec {
-            name: "ship-env",
-            description: "Ship fire after its amplitude envelope, before its gain (volts)",
+            name: "ship-node",
+            description: "Ship fire summing node, pulled below +5 V (volts/5)",
+        },
+        ProbeSpec {
+            name: "saucer-fire-cv",
+            description: "Saucer fire pitch capacitor C38, rising 5 V to ~11 V (volts/12)",
+        },
+        ProbeSpec {
+            name: "saucer-fire-555",
+            description: "Saucer fire 555 pin 3, the square CR6 reads (volts/5)",
+        },
+        ProbeSpec {
+            name: "saucer-fire-node",
+            description: "Saucer fire summing node, pulled below +5 V (volts/5)",
         },
     ],
     create,
@@ -343,9 +357,15 @@ fn probe_value(circuit: &DiscreteCircuit, probe: &str) -> Option<f64> {
         "explosion-lp" => ("EXPLODE_LP", 1.0),
         "saucer-tone" => ("SAUCER_TONE", 1.0),
         "saucer-lfo" => ("SAUCER_LFO", 1.0),
-        "ship-sweep" => ("SHIP_SWEEP", 1.0),
-        "ship-555" => ("SHIP_555", 5.0),
-        "ship-env" => ("SHIP_ENV", 5.0),
+        // The fire chains, stage by stage. The control voltage swings over the
+        // whole 5..11 V span between the analog switch and the source
+        // transistor's saturation, so it is scaled by 12 rather than 5.
+        "ship-cv" => ("SHIP_FIRE_CV", 12.0),
+        "ship-555" => ("SHIP_FIRE_555", 5.0),
+        "ship-node" => ("SHIP_FIRE_NODE", 5.0),
+        "saucer-fire-cv" => ("SAUCER_FIRE_CV", 12.0),
+        "saucer-fire-555" => ("SAUCER_FIRE_555", 5.0),
+        "saucer-fire-node" => ("SAUCER_FIRE_NODE", 5.0),
         _ => return None,
     };
     circuit

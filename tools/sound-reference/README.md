@@ -48,6 +48,19 @@ Born out of the Asteroids migration — see the case study in
   `drive_dkong_single.lua` honour it; `drive_dkong_sound.lua`,
   `drive_llander_sound.lua` and `drive_dkong_gameplay.lua` do not yet, so nothing
   measured against those three is verified.
+
+  An effect that does not run to the end of its capture needs `SND_SKIP_S` moved
+  onto the event, or the null check compares the driven silence after it against
+  the null silence and passes for any driver at all. It now refuses that rather
+  than reporting ok, which is how it was caught: the two Asteroids fire voices
+  are pulsed to the fourteen frames the game holds their latch line, so they are
+  over by 1.23 s and the default 2.0 s window held nothing.
+
+  ```
+  AST_EFFECT=ship-fire SND_SKIP_S=0.9 \
+    tools/sound-reference/verify-reference.sh \
+    tools/sound-reference/drive_asteroid_single.lua asteroid -seconds_to_run 3
+  ```
 - `analyze_wav.py` — segments a capture by time and prints, per effect, the
   dominant FFT peak and the spectral centroid (DC removed). Reads WAVs with the
   stdlib `wave` module; needs only `numpy`. Pass `--llander` / `--dkong` /
