@@ -736,15 +736,26 @@ impl Avg {
         (dx, dy)
     }
 
-    /// Beam position after flipping (set by the game's hardware register).
+    /// Beam position after flipping (set by the game's hardware register):
+    /// mirror the beam about the screen center, `2 * center - pos`.
+    ///
+    /// The beam position is the same unbounded, deliberately wrapping
+    /// accumulator the rest of this datapath treats it as (see [`deflect`] and
+    /// the `draw_*` handlers), and nothing clamps it to the screen: nine
+    /// full-scale vectors in one direction put it more than 2^30 from the
+    /// center, at which point the doubled distance no longer fits in an i32
+    /// even though the mirrored coordinate itself does. So the subtraction
+    /// wraps like every other step, and the rasterizer clips the result.
+    ///
+    /// [`deflect`]: Self::deflect
     fn flipped(&self) -> (i32, i32) {
         let mut x = self.xpos;
         let mut y = self.ypos;
         if self.flip_x {
-            x += (self.xcenter - x) << 1;
+            x = (self.xcenter << 1).wrapping_sub(x);
         }
         if self.flip_y {
-            y += (self.ycenter - y) << 1;
+            y = (self.ycenter << 1).wrapping_sub(y);
         }
         (x, y)
     }
@@ -1329,6 +1340,72 @@ mod tests {
         let list = avg.take_display_list();
         let drawn = list.iter().find(|l| l.intensity != 0).expect("a lit line");
         assert_eq!((drawn.r, drawn.g, drawn.b), (0x00, 0x54, 0xCE));
+    }
+
+    // --- Beam flipping ---------------------------------------------------
+
+    #[test]
+    fn flip_mirrors_the_beam_about_the_center() {
+        // 600 x 900 puts the center at (300, 450).
+        let mut avg = Avg::with_variant(AvgVariant::Quantum, 600, 900);
+        avg.xpos = 100 << 16;
+        avg.ypos = 600 << 16;
+
+        assert_eq!(avg.flipped(), (100 << 16, 600 << 16));
+
+        avg.set_flip(true, true);
+        assert_eq!(avg.flipped(), (500 << 16, 300 << 16));
+
+        avg.set_flip(true, false);
+        assert_eq!(avg.flipped(), (500 << 16, 600 << 16));
+
+        avg.set_flip(false, true);
+        assert_eq!(avg.flipped(), (100 << 16, 300 << 16));
+    }
+
+    #[test]
+    fn flip_survives_a_beam_far_off_screen() {
+        // Nine full-scale VCTRs in one direction walk the beam far enough off
+        // screen that mirroring it doubles a distance too big for an i32. The
+        // list is not exotic: Quantum has no vector ROM, its scale register
+        // powers up at 0 (which is *maximum* deflection, the DAC input being
+        // `scale ^ 0xFF`), and each of these vectors moves the beam about 2036
+        // pixels.
+        //
+        // dvx = dvy = 0x7FF is the largest positive delta the 12-bit DACs take,
+        // and it is already normalized (bit 11 differs from bit 10), so strobe0
+        // leaves the timer at 0 and strobe3 runs the beam the full 0x4000.
+        let mut words = Vec::new();
+        for _ in 0..9 {
+            words.push(0x07FF); // VCTR word 0: dvy
+            words.push(0x87FF); // VCTR word 1: int_latch 8, dvx
+        }
+        words.push(0x2000); // HALT
+        let vmem = build_vmem_be(&words);
+
+        let mut avg = Avg::with_variant(AvgVariant::Quantum, 600, 900);
+        avg.set_flip(false, true);
+        avg.go();
+        avg.execute(&vmem, &[0u8; 16]);
+
+        // The premise: without an excursion past 2^30 this test proves nothing,
+        // because the doubled distance would still fit and the old expression
+        // would have been fine.
+        let ycenter = i64::from(avg.ycenter);
+        let ypos = i64::from(avg.ypos);
+        assert!(
+            (ypos - ycenter).abs() > (1 << 30),
+            "beam only reached {} from center, too close to exercise the mirror",
+            (ypos - ycenter).abs()
+        );
+
+        // Mirroring is 2*center - pos. Computed in i64 here so the expectation
+        // does not come from the i32 expression under test.
+        let expected = ((2 * ycenter - ypos) >> 16) as i32;
+        let list = avg.take_display_list();
+        let last = list.last().expect("the VCTRs drew");
+        assert_eq!(last.y1, expected);
+        assert_eq!(last.x1, avg.xpos >> 16, "flip_x was off, X passes through");
     }
 
     #[test]
