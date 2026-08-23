@@ -178,12 +178,24 @@ fn palette_write_changes_rendered_color() {
     // Entry 0 = 0xFF -> inverted 0x00 -> black.
     sys.bus_write(CPU, 0x0C00, 0xFF);
     sys.board.render();
-    assert!(render(&sys).chunks_exact(3).all(|p| p == [0, 0, 0]));
+    assert!(
+        render(&sys)
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .all(|&p| p == [0, 0, 0])
+    );
 
     // Entry 0 = 0xF8 -> inverted 0x07 -> R=7 only -> pure red.
     sys.bus_write(CPU, 0x0C00, 0xF8);
     sys.board.render();
-    assert!(render(&sys).chunks_exact(3).all(|p| p == [0xFF, 0, 0]));
+    assert!(
+        render(&sys)
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .all(|&p| p == [0xFF, 0, 0])
+    );
 }
 
 // =================================================================

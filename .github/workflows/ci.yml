@@ -117,7 +117,17 @@ jobs:
         run: rustc --version
 
       - name: Clippy on current stable
-        run: cargo clippy --workspace --all-features --all-targets --locked -- -D warnings
+        # --keep-going because this job's output is a work list, not a gate.
+        # Cargo stops scheduling new units once one fails, so a single new lint
+        # in an early crate hides whatever the rest of the workspace would have
+        # said: the run that added chunks_exact_to_as_chunks aborted in
+        # phosphor-machines and never checked phosphor-script or
+        # phosphor-frontend at all. One run should enumerate everything current
+        # stable dislikes, so the fix can be one commit rather than a queue of
+        # them discovered a week apart.
+        run: >
+          cargo clippy --workspace --all-features --all-targets --locked
+          --keep-going -- -D warnings
 
   audit:
     name: RustSec advisories
