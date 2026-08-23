@@ -120,8 +120,17 @@ enum ExecState {
 - **FIRQ** -- Level-triggered, masked by F flag, pushes CC+PC only, vectors through $FFF6
 - **IRQ** -- Level-triggered, masked by I flag, pushes entire state, vectors through $FFF8
 - **SWI/SWI2/SWI3** -- Software interrupts with separate vectors
-- **CWAI** -- Pre-pushes state, then waits for interrupt
+- **CWAI** -- Pre-pushes state, then waits for interrupt. 16 cycles to reach the
+  wait state (fetch, operand, two don't-care, twelve pushes), an indefinite wait
+  that drives no address at all, then five to resume: one to notice the request,
+  then the vector fetch bracketed by a /VMA cycle on each side
 - **SYNC** -- Waits for any interrupt edge
+
+Neither CWAI nor SYNC can be cross-validated: a single-step vector has no way to
+express "and then an interrupt arrives". `m6809_interrupt_test.rs` pins CWAI's
+bus *sequence* rather than only its cycle count, which is the difference that
+matters here — a total can be right for the wrong reason, since two missing
+don't-care cycles and two spurious ones cancel exactly.
 
 ### Bus Halting
 

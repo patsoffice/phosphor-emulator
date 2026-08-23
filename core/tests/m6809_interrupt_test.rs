@@ -2,12 +2,20 @@ use phosphor_core::core::{Bus, BusMaster, BusMasterComponent, bus::InterruptStat
 use phosphor_core::cpu::Cpu;
 use phosphor_core::cpu::m6809::{CcFlag, M6809};
 
+/// One recorded bus cycle: the address driven, and whether it was a write.
+/// A cycle with no bus access at all leaves no entry.
+type Access = (u16, bool);
+
 /// Test bus with controllable interrupt lines.
 struct InterruptBus {
     memory: [u8; 0x10000],
     irq: bool,
     firq: bool,
     nmi: bool,
+    /// Every access in order, so a test can assert the *sequence* rather than
+    /// only the total. A cycle count can be right for the wrong reason: two
+    /// missing don't-care cycles and two spurious ones cancel exactly.
+    trace: Vec<Access>,
 }
 
 impl InterruptBus {
@@ -17,12 +25,17 @@ impl InterruptBus {
             irq: false,
             firq: false,
             nmi: false,
+            trace: Vec::new(),
         }
     }
 
     fn load(&mut self, addr: u16, data: &[u8]) {
         let start = addr as usize;
         self.memory[start..start + data.len()].copy_from_slice(data);
+    }
+
+    fn take_trace(&mut self) -> Vec<Access> {
+        std::mem::take(&mut self.trace)
     }
 }
 
@@ -31,10 +44,12 @@ impl Bus for InterruptBus {
     type Data = u8;
 
     fn read(&mut self, _master: BusMaster, addr: u16) -> u8 {
+        self.trace.push((addr, false));
         self.memory[addr as usize]
     }
 
     fn write(&mut self, _master: BusMaster, addr: u16, data: u8) {
+        self.trace.push((addr, true));
         self.memory[addr as usize] = data;
     }
 
@@ -474,8 +489,9 @@ fn test_cwai_ands_cc_sets_e_and_pushes() {
     // CWAI #$EF = AND CC with 0xEF (clears I flag)
     bus.load(0x0000, &[0x3C, 0xEF]);
 
-    // CWAI: 1 fetch + 13 execute (1 read imm + 12 push) = 14 cycles before wait
-    tick(&mut cpu, &mut bus, 14);
+    // CWAI: 1 fetch + 15 execute (1 read imm + 2 don't-care + 12 push)
+    // = 16 cycles before the wait state.
+    tick(&mut cpu, &mut bus, 16);
 
     // CPU should be sleeping (WaitForInterrupt)
     assert!(cpu.is_sleeping(), "CPU should be in wait state");
@@ -512,14 +528,15 @@ fn test_cwai_wakes_on_irq() {
     bus.memory[0xFFF9] = 0x00;
 
     // Execute CWAI (push phase)
-    tick(&mut cpu, &mut bus, 14);
+    tick(&mut cpu, &mut bus, 16);
     assert!(cpu.is_sleeping(), "Should be waiting");
 
     // Assert IRQ
     bus.irq = true;
 
-    // CWAI completion: 1 cycle (detect) + 2 cycles (vector read) = 3 cycles
-    tick(&mut cpu, &mut bus, 3);
+    // CWAI completion: 1 cycle to notice the request, then the vector fetch
+    // bracketed by a /VMA cycle on each side = 1 + 4 = 5 cycles.
+    tick(&mut cpu, &mut bus, 5);
 
     assert!(!cpu.is_sleeping(), "Should be awake");
     assert_eq!(cpu.pc, 0x4000, "Should be at IRQ handler");
@@ -544,12 +561,12 @@ fn test_cwai_wakes_on_firq() {
     bus.memory[0xFFF6] = 0x50;
     bus.memory[0xFFF7] = 0x00;
 
-    tick(&mut cpu, &mut bus, 14);
+    tick(&mut cpu, &mut bus, 16);
     assert!(cpu.is_sleeping());
 
     bus.firq = true;
 
-    tick(&mut cpu, &mut bus, 3);
+    tick(&mut cpu, &mut bus, 5);
 
     assert_eq!(cpu.pc, 0x5000, "Should be at FIRQ handler");
     // CWAI always pushes all with E set, even for FIRQ
@@ -576,12 +593,12 @@ fn test_cwai_wakes_on_nmi() {
     bus.memory[0xFFFC] = 0x60;
     bus.memory[0xFFFD] = 0x00;
 
-    tick(&mut cpu, &mut bus, 14);
+    tick(&mut cpu, &mut bus, 16);
     assert!(cpu.is_sleeping());
 
     bus.nmi = true;
 
-    tick(&mut cpu, &mut bus, 3);
+    tick(&mut cpu, &mut bus, 5);
 
     assert_eq!(cpu.pc, 0x6000, "Should be at NMI handler");
     // NMI masks both I and F
@@ -613,11 +630,11 @@ fn test_cwai_then_rti_roundtrip() {
     bus.load(0x4000, &[0x3B]); // RTI
 
     // Execute CWAI
-    tick(&mut cpu, &mut bus, 14);
+    tick(&mut cpu, &mut bus, 16);
 
     // Assert IRQ, wake up and vector
     bus.irq = true;
-    tick(&mut cpu, &mut bus, 3);
+    tick(&mut cpu, &mut bus, 5);
     assert_eq!(cpu.pc, 0x4000);
 
     // Deassert IRQ
@@ -880,4 +897,69 @@ fn reset_sequence_costs_four_cycles_before_the_first_opcode() {
 
     tick(&mut cpu, &mut bus, 1); // fetch the NOP
     assert_eq!(cpu.pc, 0x3001);
+}
+
+/// CWAI and the path that resumes from it spend the cycles the hardware spends,
+/// on the addresses it drives.
+///
+/// Both halves were short by two, and neither was catchable any other way: a
+/// single-step vector cannot express "and then an interrupt arrives", so CWAI
+/// and SYNC are excluded from cross-validation entirely.
+///
+/// This pins the sequence rather than the count. A total can be right for the
+/// wrong reason — drop two don't-care cycles and add two elsewhere and it
+/// balances — and the whole content of this fix is *which* cycles those are.
+#[test]
+fn cwai_and_its_wake_drive_the_addresses_the_hardware_drives() {
+    let mut cpu = M6809::new();
+    let mut bus = InterruptBus::new();
+
+    cpu.s = 0x0100;
+    cpu.pc = 0x0000;
+    cpu.cc = CcFlag::I as u8; // IRQ masked until the operand clears it
+    bus.load(0x0000, &[0x3C, 0xEF]); // CWAI #$EF
+    bus.memory[0xFFF8] = 0x40;
+    bus.memory[0xFFF9] = 0x00;
+
+    tick(&mut cpu, &mut bus, 16);
+    assert!(cpu.is_sleeping(), "should have reached the wait state");
+
+    let mut expected: Vec<(u16, bool)> = vec![
+        (0x0000, false), // opcode fetch
+        (0x0001, false), // the immediate operand
+        (0x0002, false), // don't-care re-driving PC, now past the operand
+        (0xFFFF, false), // /VMA don't-care
+    ];
+    // Twelve pushes, S predecrementing from 0x0100.
+    expected.extend((1..=12).map(|n| (0x0100 - n as u16, true)));
+    assert_eq!(bus.take_trace(), expected, "CWAI entry");
+
+    // The wait itself touches nothing: the hardware burns cycles here without
+    // driving an address, and so does this.
+    tick(&mut cpu, &mut bus, 4);
+    assert!(cpu.is_sleeping(), "still waiting with no request asserted");
+    assert_eq!(
+        bus.take_trace(),
+        Vec::new(),
+        "the wait state is off the bus"
+    );
+
+    bus.irq = true;
+    tick(&mut cpu, &mut bus, 5);
+    assert!(!cpu.is_sleeping(), "should have woken");
+    assert_eq!(cpu.pc, 0x4000, "should be at the IRQ handler");
+
+    // One cycle to notice the request, which touches nothing, then the vector
+    // fetch bracketed by a /VMA cycle on each side — exactly as the full
+    // NMI/IRQ/FIRQ entry sequences bracket theirs.
+    assert_eq!(
+        bus.take_trace(),
+        vec![
+            (0xFFFF, false),
+            (0xFFF8, false),
+            (0xFFF9, false),
+            (0xFFFF, false),
+        ],
+        "CWAI wake"
+    );
 }

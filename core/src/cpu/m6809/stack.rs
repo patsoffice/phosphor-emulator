@@ -508,17 +508,32 @@ impl M6809 {
         master: BusMaster,
     ) {
         match cycle {
-            // Vector-only phase (used by CWAI completion, cycles 20-21)
+            // Vector-only phase (used by CWAI completion, cycles 20-23).
+            //
+            // CWAI has already pushed every register, so waking from it needs
+            // nothing but the vector fetch — and the hardware brackets that
+            // fetch with a /VMA cycle on each side, exactly as the full
+            // NMI/IRQ/FIRQ entry sequences below do at their cycles 14/17 and
+            // 5/8. This path used to read the two vector bytes and nothing
+            // else, so resuming from CWAI was two cycles short.
             20 => {
+                self.dummy_vma(bus, master);
+                self.state = ExecState::Interrupt(21);
+            }
+            21 => {
                 // temp_addr has vector base address, read high byte
                 let hi = bus.read(master, self.temp_addr);
                 self.temp_addr = self.temp_addr.wrapping_add(1);
                 self.scratch = hi; // scratch storage for vector high
-                self.state = ExecState::Interrupt(21);
+                self.state = ExecState::Interrupt(22);
             }
-            21 => {
+            22 => {
                 let lo = bus.read(master, self.temp_addr);
                 self.pc = ((self.scratch as u16) << 8) | (lo as u16);
+                self.state = ExecState::Interrupt(23);
+            }
+            23 => {
+                self.dummy_vma(bus, master);
                 self.state = ExecState::Fetch;
             }
             // Full interrupt response (dispatched by type)
@@ -749,9 +764,19 @@ impl M6809 {
 
     /// CWAI (0x3C): Clear and Wait for Interrupt.
     /// Cycle 0: Read immediate operand, AND with CC, set E flag.
-    /// Cycles 1-12: Push all registers (same as SWI push sequence).
+    /// Cycle 1: don't-care re-driving PC.
+    /// Cycle 2: /VMA don't-care at $FFFF.
+    /// Cycles 3-14: Push all registers (same as SWI push sequence).
     /// Then enter WaitForInterrupt state.
     /// When interrupt arrives: skip push (already done), just mask + vector.
+    ///
+    /// The two don't-care cycles between the operand and the pushes are the
+    /// hardware's, and this used to go straight from one to the other. They are
+    /// cycles the instruction spends rather than addresses it drives wrongly, so
+    /// nothing was silently wrong — CWAI was simply two cycles short. Neither
+    /// this nor SYNC can be cross-validated, because a single-step vector cannot
+    /// express "and then an interrupt arrives", so nothing but a hand-written
+    /// timing test covers it.
     pub(crate) fn op_cwai<B: Bus<Address = u16, Data = u8> + ?Sized>(
         &mut self,
         cycle: u8,
@@ -767,11 +792,20 @@ impl M6809 {
                 self.cc |= CcFlag::E as u8;
                 self.state = ExecState::Execute(0x3C, 1);
             }
-            c @ 1..=12 => {
+            1 => {
+                // Don't-care re-driving PC, which by now points past the operand.
+                self.dummy_at_pc(bus, master, 0);
+                self.state = ExecState::Execute(0x3C, 2);
+            }
+            2 => {
+                self.dummy_vma(bus, master);
+                self.state = ExecState::Execute(0x3C, 3);
+            }
+            c @ 3..=14 => {
                 // Push all registers (same order as SWI)
                 self.s = self.s.wrapping_sub(1);
-                bus.write(master, self.s, self.swi_push_byte(c - 1));
-                if c == 12 {
+                bus.write(master, self.s, self.swi_push_byte(c - 3));
+                if c == 14 {
                     // All registers pushed, enter wait state
                     self.state = ExecState::WaitForInterrupt;
                 } else {
