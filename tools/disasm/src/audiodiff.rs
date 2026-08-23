@@ -321,6 +321,12 @@ pub struct Tolerance {
     pub centroid_frac: f64,
     /// Largest allowed RMS difference in dB.
     pub rms_db: f64,
+    /// Largest allowed difference between the two captures' discontinuity
+    /// ratios. Compared side to side rather than against a fixed ceiling
+    /// because a genuinely impulsive effect has a high ratio on both sides and
+    /// is not defective; what matters is one side jumping where the other does
+    /// not.
+    pub step_ratio: f64,
 }
 
 impl Default for Tolerance {
@@ -329,6 +335,7 @@ impl Default for Tolerance {
             band_pp: 10.0,
             centroid_frac: 0.25,
             rms_db: 6.0,
+            step_ratio: 2.0,
         }
     }
 }
@@ -474,6 +481,57 @@ pub fn compare(
         3,
     );
 
+    // --- discontinuity: the only line here that can see a transient defect ---
+    //
+    // Everything above and below averages over a window, and Asteroids' thump
+    // proved what that costs: it gated a free-running 555 at the output, so
+    // every onset connected the oscillator at whatever phase it was passing,
+    // and the largest step at the onset was 3636 against the corrected 272.
+    // That one sample in ninety thousand moved no RMS, no crest factor, no
+    // centroid and no band share, across five windows, while being plainly
+    // audible. The ratio is the column to read: a square wave's every edge is a
+    // full-swing step, so its ratio is near 1 and the metric does not accuse a
+    // sharp waveform of anything.
+    let _ = writeln!(s, "\ndiscontinuity");
+    row(
+        &mut s,
+        "  max step",
+        aa.discontinuity.max_step,
+        ba.discontinuity.max_step,
+        5,
+    );
+    row(
+        &mut s,
+        "  typical step (99.9%)",
+        aa.discontinuity.typical_step,
+        ba.discontinuity.typical_step,
+        5,
+    );
+    row(
+        &mut s,
+        "  ratio max/typical",
+        aa.discontinuity.ratio(),
+        ba.discontinuity.ratio(),
+        2,
+    );
+    row(
+        &mut s,
+        "  max step at (s)",
+        aa.discontinuity.max_step_s,
+        ba.discontinuity.max_step_s,
+        4,
+    );
+    // Where the jump sits relative to each side's own onset, because "at the
+    // onset" is the answer that names a gate in the wrong place, and "in the
+    // middle" is a different fault entirely.
+    opt_row(
+        &mut s,
+        "  ...after own onset (s)",
+        aa.level.onset_s.map(|o| aa.discontinuity.max_step_s - o),
+        ba.level.onset_s.map(|o| ba.discontinuity.max_step_s - o),
+        4,
+    );
+
     // --- spectrum ---
     let _ = writeln!(s, "\nspectrum");
     row(
@@ -594,6 +652,20 @@ pub fn compare(
             .differences
             .push(format!("AC RMS differs by more than {} dB", tol.rms_db));
         let _ = writeln!(s, "  [!] AC RMS differs by more than {} dB", tol.rms_db);
+    }
+    let (ra, rb) = (aa.discontinuity.ratio(), ba.discontinuity.ratio());
+    if (ra - rb).abs() > tol.step_ratio {
+        let louder = if ra > rb { label_a } else { label_b };
+        verdict.differences.push(format!(
+            "{louder} jumps where the other does not ({ra:.2} against {rb:.2} \
+             max/typical step)"
+        ));
+        let _ = writeln!(
+            s,
+            "  [!] {louder} carries a step the other capture does not \
+             ({ra:.2} against {rb:.2}); look at where it happens above, not at \
+             how big it is"
+        );
     }
     for (label, integrity) in [(label_a, &aa.integrity), (label_b, &ba.integrity)] {
         if integrity.is_silent {
@@ -722,6 +794,13 @@ pub fn describe(capture: &Capture, label: &str) -> String {
         .map(|r| format!("{:.1}", r * 100.0))
         .collect();
     let _ = writeln!(s, "  bands (%): {}", bands.join(" / "));
+    let _ = writeln!(
+        s,
+        "  max step {:.5} at {:.4} s, {:.2}x the typical step",
+        a.discontinuity.max_step,
+        a.discontinuity.max_step_s,
+        a.discontinuity.ratio()
+    );
     s
 }
 

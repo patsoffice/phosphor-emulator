@@ -24,6 +24,9 @@
 //!   live here, and a windowed spectrum averages them away.
 //! - [`Spectrum`] — what does it sound like? Centroid, flatness and band ratios
 //!   separate a filter error from a mix error from a gain error.
+//! - [`Discontinuity`] — does one sample do something the rest of the waveform
+//!   never does? Everything above is a window average, and a window average
+//!   cannot see a transient defect at all.
 //!
 //! Band energy ratios are the measurement to read first when diffing two
 //! captures: they are scale-invariant, so a pure gain error leaves them all at
@@ -34,8 +37,8 @@ mod level;
 mod spectrum;
 
 pub use level::{
-    Integrity, Level, dc_offset, decay_time, integrated_energy, onset_index, rms, rms_dbfs,
-    rms_envelope,
+    Discontinuity, Integrity, Level, dc_offset, decay_time, integrated_energy, onset_index, rms,
+    rms_dbfs, rms_envelope,
 };
 pub use spectrum::{
     BAND_EDGES_HZ, Peak, Spectrum, band_energy_ratios, dominant_peaks, envelope_alignment,
@@ -78,6 +81,7 @@ pub struct Analysis {
     pub integrity: Integrity,
     pub level: Level,
     pub spectrum: Spectrum,
+    pub discontinuity: Discontinuity,
 }
 
 impl Analysis {
@@ -101,6 +105,7 @@ pub fn analyze(samples: &[f64], sample_rate: f64) -> Analysis {
         integrity,
         level: Level::measure(&ac, sample_rate),
         spectrum: Spectrum::measure(&ac, sample_rate),
+        discontinuity: Discontinuity::measure(samples, sample_rate),
     }
 }
 

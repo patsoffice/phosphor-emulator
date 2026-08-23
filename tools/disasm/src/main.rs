@@ -343,6 +343,11 @@ enum Command {
         /// Largest allowed AC RMS difference, in dB.
         #[arg(long, default_value_t = 6.0)]
         rms_tolerance: f64,
+        /// Largest allowed difference between the two captures' discontinuity
+        /// ratios (largest sample step over the typical one), which is what
+        /// catches a glitch a windowed measurement averages away.
+        #[arg(long, default_value_t = 2.0)]
+        step_tolerance: f64,
         /// Spectrogram height in pixels.
         #[arg(long, default_value_t = 512)]
         png_height: u32,
@@ -603,6 +608,7 @@ fn run_command(cmd: Command) -> Result<String, String> {
             band_tolerance,
             centroid_tolerance,
             rms_tolerance,
+            step_tolerance,
             png_height,
             range,
             range_b,
@@ -619,6 +625,7 @@ fn run_command(cmd: Command) -> Result<String, String> {
                 band_pp: band_tolerance,
                 centroid_frac: centroid_tolerance,
                 rms_db: rms_tolerance,
+                step_ratio: step_tolerance,
             },
             AudiodiffOutputs {
                 png: png.as_deref(),

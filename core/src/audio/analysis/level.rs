@@ -97,6 +97,85 @@ impl Integrity {
     }
 }
 
+/// The largest sample-to-sample step, and how it compares to the rest.
+///
+/// This is the only metric here that can see a *transient* defect. Every other
+/// one averages over a window, and a single wrong sample in ninety thousand
+/// moves none of them: Asteroids' thump gated a free-running oscillator at its
+/// output, so every onset connected the timer at an arbitrary phase, and RMS,
+/// crest factor, centroid and every band share absorbed that without a flicker
+/// while it was plainly audible as a scratch.
+///
+/// [`Discontinuity::ratio`] is the number to read. A square wave's every edge is
+/// a full-swing step, so its max and its typical step are the same and the ratio
+/// is near 1 — the metric does not accuse a signal of being sharp. A signal with
+/// one step far outside its own distribution has a large ratio, and that is a
+/// glitch rather than a waveform.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Discontinuity {
+    /// Largest `|x[n] − x[n−1]|`.
+    pub max_step: f64,
+    /// Index of the `x[n]` where that step landed.
+    pub max_step_index: usize,
+    /// Time of that sample, in seconds from the start of the capture.
+    pub max_step_s: f64,
+    /// The 99.9th-percentile step: what the body of the signal does, so a lone
+    /// outlier has something to stand against.
+    pub typical_step: f64,
+}
+
+impl Discontinuity {
+    /// The percentile that defines "typical". High enough that a waveform's own
+    /// edges set it, low enough that a handful of glitches cannot.
+    const TYPICAL_PERCENTILE: f64 = 0.999;
+
+    /// Measure the raw signal: a discontinuity is an absolute jump, and removing
+    /// DC first would not change it but reordering the arithmetic invites the
+    /// question, so this takes what it is given.
+    pub fn measure(samples: &[f64], sample_rate: f64) -> Self {
+        if samples.len() < 2 || sample_rate <= 0.0 {
+            return Self {
+                max_step: 0.0,
+                max_step_index: 0,
+                max_step_s: 0.0,
+                typical_step: 0.0,
+            };
+        }
+        let mut steps: Vec<f64> = Vec::with_capacity(samples.len() - 1);
+        let mut max_step = 0.0f64;
+        let mut max_step_index = 1;
+        for n in 1..samples.len() {
+            let step = (samples[n] - samples[n - 1]).abs();
+            if step > max_step {
+                max_step = step;
+                max_step_index = n;
+            }
+            steps.push(step);
+        }
+        steps.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let idx = ((steps.len() - 1) as f64 * Self::TYPICAL_PERCENTILE) as usize;
+        Self {
+            max_step,
+            max_step_index,
+            max_step_s: max_step_index as f64 / sample_rate,
+            typical_step: steps[idx],
+        }
+    }
+
+    /// How far the largest step stands outside the signal's own distribution.
+    ///
+    /// 1.0 means the biggest jump is an ordinary edge. Large means one sample
+    /// does something the rest of the waveform never does. Zero when the signal
+    /// does not move at all, which is a silence question and not this one.
+    pub fn ratio(&self) -> f64 {
+        if self.typical_step > 0.0 {
+            self.max_step / self.typical_step
+        } else {
+            0.0
+        }
+    }
+}
+
 /// Level, and how it changes over time.
 #[derive(Clone, Debug)]
 pub struct Level {
@@ -381,6 +460,60 @@ mod tests {
         assert!((i.dc_offset - 0.4).abs() < 1e-3);
         // And it inflates the peak, which is the audible consequence.
         assert!(i.peak > 0.49);
+    }
+
+    /// A square wave must not be accused of being glitchy. Every edge it has is
+    /// the same full-swing step, so the largest one is an ordinary one.
+    #[test]
+    fn a_square_wave_is_not_a_discontinuity() {
+        let square: Vec<f64> = (0..48_000)
+            .map(|i| if (i / 60) % 2 == 0 { 0.5 } else { -0.5 })
+            .collect();
+        let d = Discontinuity::measure(&square, 48_000.0);
+        assert!((d.max_step - 1.0).abs() < 1e-9);
+        assert!(d.ratio() < 1.01, "{}", d.ratio());
+    }
+
+    /// The case the metric exists for: one sample does something the rest of
+    /// the waveform never does, and every windowed measurement absorbs it.
+    /// A phase splice keeps the peak, the RMS and the DC exactly where they
+    /// were, which is what a mid-note gate change does to a real capture.
+    #[test]
+    fn a_phase_splice_is_invisible_to_every_window_average_and_obvious_here() {
+        let rate = 48_000.0;
+        let clean = sine(200.0, rate, 24_000);
+        let spliced: Vec<f64> = clean
+            .iter()
+            .enumerate()
+            .map(|(i, &v)| if i < 10_000 { v } else { -v })
+            .collect();
+
+        let d = Discontinuity::measure(&spliced, rate);
+        assert_eq!(d.max_step_index, 10_000);
+        assert!((d.max_step_s - 10_000.0 / rate).abs() < 1e-9);
+        // A 200 Hz sine at this rate moves at most 0.027 per sample; the splice
+        // moves nearly 2.
+        assert!(d.ratio() > 20.0, "{}", d.ratio());
+        assert!(Discontinuity::measure(&clean, rate).ratio() < 1.01);
+
+        let (a, b) = (Integrity::measure(&clean), Integrity::measure(&spliced));
+        assert!((a.peak - b.peak).abs() < 1e-9);
+        assert!((a.crest_factor - b.crest_factor).abs() < 1e-3);
+        assert!((rms(&clean) - rms(&spliced)).abs() < 1e-4);
+    }
+
+    #[test]
+    fn discontinuity_of_a_degenerate_capture_is_finite() {
+        for probe in [
+            Discontinuity::measure(&[], 48_000.0),
+            Discontinuity::measure(&[0.5], 48_000.0),
+            Discontinuity::measure(&[0.0; 64], 48_000.0),
+            Discontinuity::measure(&[0.1, 0.2], 0.0),
+        ] {
+            assert!(probe.max_step.is_finite());
+            assert!(probe.max_step_s.is_finite());
+            assert!(probe.ratio().is_finite());
+        }
     }
 
     #[test]
