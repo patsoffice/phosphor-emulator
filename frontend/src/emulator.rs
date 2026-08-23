@@ -611,6 +611,25 @@ pub fn run(
                 continue;
             }
 
+            // A focused egui text field owns the keyboard. Game input has always
+            // honoured that (`DispatchCtx::egui_wants_keyboard`), but it is
+            // checked in the *last* arm below, so every hotkey matched ahead of
+            // it and fired while the user was typing: a `7` in the debug panel's
+            // watch-address field stepped a cycle. Drop the press here instead,
+            // above all of them, except on the keys egui makes no use of.
+            //
+            // `KeyDown` only. Releases must keep flowing for the reason
+            // `input::dispatch` gives: a key held when egui takes focus needs its
+            // release, or the button sticks on.
+            if video.wants_keyboard()
+                && let Event::KeyDown {
+                    scancode: Some(sc), ..
+                } = &event
+                && !crate::host_keys::survives_text_entry(*sc)
+            {
+                continue;
+            }
+
             match event {
                 Event::Quit { .. } => break 'main,
 

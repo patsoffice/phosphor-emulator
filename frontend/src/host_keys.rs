@@ -137,6 +137,41 @@ pub fn key_label(scancode: Scancode) -> String {
     }
 }
 
+/// Whether a hotkey on this key may still fire while an egui text field has
+/// keyboard focus.
+///
+/// The debug panel has text fields (a watch address, a breakpoint address). Any
+/// hotkey on a printable key fired *while typing into one*: entering an address
+/// containing `7` stepped a cycle, `0` toggled run/pause, and `/`, `` ` ``, `P`
+/// and `Tab` were hit the same way. The frontend has a focus flag for exactly
+/// this, but it was only ever consulted on the game-input path
+/// ([`DispatchCtx::egui_wants_keyboard`](crate::input::DispatchCtx)), never on
+/// the hotkeys, which match earlier.
+///
+/// The exemption is the keys egui cannot turn into text or focus movement, so
+/// suppressing them would cost something and protect nothing. That is the
+/// function keys, plus `ScrollLock` because a hotkey lives there. `Escape` is
+/// deliberately *not* exempt: egui takes it to leave a field, so the first press
+/// defocuses and only the second reaches [`HostAction::Quit`].
+pub fn survives_text_entry(scancode: Scancode) -> bool {
+    matches!(
+        scancode,
+        Scancode::F1
+            | Scancode::F2
+            | Scancode::F3
+            | Scancode::F4
+            | Scancode::F5
+            | Scancode::F6
+            | Scancode::F7
+            | Scancode::F8
+            | Scancode::F9
+            | Scancode::F10
+            | Scancode::F11
+            | Scancode::F12
+            | Scancode::ScrollLock
+    )
+}
+
 /// Which key triggers each host action.
 ///
 /// Persisted globally rather than per machine: these are properties of the
@@ -300,6 +335,41 @@ mod tests {
         // Keys with a readable Debug name pass through unchanged.
         assert_eq!(key_label(Scancode::F5), "F5");
         assert_eq!(key_label(Scancode::Tab), "Tab");
+    }
+
+    #[test]
+    fn text_entry_suppresses_printable_hotkeys_but_not_function_keys() {
+        // Every one of these fired while typing an address into the debug
+        // panel: 7/8/9/0 stepped the CPU, `/` opened the legend, `` ` `` the DIP
+        // panel, P paused and Tab opened the settings panel.
+        for sc in [
+            Scancode::Num7,
+            Scancode::Num8,
+            Scancode::Num9,
+            Scancode::Num0,
+            Scancode::Slash,
+            Scancode::Grave,
+            Scancode::P,
+            Scancode::Tab,
+        ] {
+            assert!(
+                !survives_text_entry(sc),
+                "{sc:?} must yield to a focused text field"
+            );
+        }
+        // Function keys produce no text, so suppressing them would cost the
+        // debugger its step keys and protect nothing.
+        for sc in [
+            Scancode::F1,
+            Scancode::F5,
+            Scancode::F8,
+            Scancode::F12,
+            Scancode::ScrollLock,
+        ] {
+            assert!(survives_text_entry(sc), "{sc:?} must stay live");
+        }
+        // Escape leaves the field on the first press and quits on the second.
+        assert!(!survives_text_entry(Scancode::Escape));
     }
 
     #[test]
