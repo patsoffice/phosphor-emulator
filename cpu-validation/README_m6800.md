@@ -19,8 +19,9 @@ as a standalone reference emulator.
 # Build
 make -C cross-validation bin/validate_m6800
 
-# Generate test vectors (must run from cpu-validation/ directory)
-cd cpu-validation && cargo run --bin gen_m6800_tests --release -- all
+# Generate test vectors (from anywhere; the generator resolves its output
+# against the crate root, and prints the absolute path it wrote to)
+cargo run -p phosphor-cpu-validation --release --bin gen_m6800_tests -- all
 ```
 
 ## Usage

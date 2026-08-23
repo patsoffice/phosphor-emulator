@@ -8,7 +8,6 @@
 //! known-bad ones (suite generation glitches).
 
 use std::io::Read;
-use std::path::Path;
 
 use phosphor_core::core::{BusMaster, BusMasterComponent};
 use phosphor_core::cpu::m68000::M68000;
@@ -160,7 +159,8 @@ fn compare_final(tc: &M68000TestCase, cpu: &M68000, bus: &TracingBus68k) -> Outc
 
 #[test]
 fn test_m68000_single_step() {
-    let test_dir = Path::new("test_data/680x0/68000/v1");
+    let test_dir = phosphor_cpu_validation::vector_dir("680x0/68000/v1");
+    let test_dir = test_dir.as_path();
     if !phosphor_cpu_validation::require_test_data(
         test_dir,
         "run: git submodule update --init cpu-validation/test_data/680x0",

@@ -4,6 +4,37 @@ use serde::{Deserialize, Serialize};
 
 // --- Test-data availability ---
 
+/// Setting this to anything turns a missing vector directory from a skip into a
+/// panic. CI's validation job sets it.
+pub const REQUIRE_VECTORS_ENV: &str = "PHOSPHOR_REQUIRE_VECTORS";
+
+/// Where a validator's vectors live, resolved against this crate's root rather
+/// than the current directory.
+///
+/// `relative` is the path under `cpu-validation/test_data/`, e.g. `"m6800"` or
+/// `"65x02/6502/v1"`.
+///
+/// It has to be absolute, because the two halves of this crate run from
+/// different directories. Cargo runs an integration test with the current
+/// directory set to the crate root, so `Path::new("test_data/m6800")` resolved
+/// there and found the vectors. It runs a *binary* with the current directory
+/// wherever the user invoked cargo, so the generators resolved the same literal
+/// against the repo root and wrote the vectors one level too high.
+///
+/// The command the validators print on a skip is
+/// `cargo run -p phosphor-cpu-validation --bin gen_m6800_tests -- all`, which
+/// is run from the repo root by anyone reading it, and the failure was silent
+/// in the worst way: the generator reported success, the validator then found
+/// nothing and skipped, and libtest hides a skip message for a passing test. A
+/// green suite that had validated nothing. `CARGO_MANIFEST_DIR` is fixed at
+/// compile time and is the same for both halves, so the literal cannot mean two
+/// places again.
+pub fn vector_dir(relative: &str) -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("test_data")
+        .join(relative)
+}
+
 /// Check for a validator's vector directory, reporting how to obtain it when
 /// it is missing.
 ///
@@ -14,15 +45,38 @@ use serde::{Deserialize, Serialize};
 /// make a clean clone (and CI) fail for an environment reason rather than a
 /// code one, so the validators skip instead and say what to run.
 ///
-/// Note that libtest captures stderr for a *passing* test, so this message is
-/// only visible under `--nocapture`. A skipped validator is therefore green and
-/// quiet in a normal run, which is the hazard to be aware of: the suite reports
-/// success while validating nothing. The guard against that is not this
-/// message but a scheduled job that fetches the data and runs the validators
-/// for real — treat a permanently-skipping validator as an unvalidated CPU.
+/// **A skip is green and quiet**, because libtest captures stderr for a passing
+/// test, so the suite reports success while validating nothing. That is a real
+/// hazard rather than a note: it is the same defect shape as a check whose two
+/// sides are both silent. Set [`REQUIRE_VECTORS_ENV`] where the data is
+/// supposed to be present and the skip becomes a failure that names the
+/// directory. CI's validation job sets it, which is what makes that job's green
+/// mean something; treat a permanently-skipping validator as an unvalidated CPU.
 pub fn require_test_data(dir: &std::path::Path, how_to_obtain: &str) -> bool {
+    vectors_available(
+        dir,
+        how_to_obtain,
+        std::env::var_os(REQUIRE_VECTORS_ENV).is_some(),
+    )
+}
+
+/// The decision behind [`require_test_data`], with the environment lifted into
+/// an argument.
+///
+/// Split out so the guard can be tested without `set_var`, which is unsafe in
+/// this edition and process-global besides, so a test using it would race every
+/// other test in the binary.
+fn vectors_available(dir: &std::path::Path, how_to_obtain: &str, required: bool) -> bool {
     if dir.exists() {
         return true;
+    }
+    if required {
+        panic!(
+            "no vectors at {} — {how_to_obtain}\n{REQUIRE_VECTORS_ENV} is set, \
+             so this is a failure rather than a skip: something was supposed to \
+             have put them there.",
+            dir.display()
+        );
     }
     eprintln!(
         "skipping: no vectors at {} — {how_to_obtain}",
@@ -625,5 +679,60 @@ impl Bus for TracingBus68k {
 
     fn check_interrupts(&mut self, _target: BusMaster) -> InterruptState {
         InterruptState::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    /// The whole point of `vector_dir`: the same literal must mean one place
+    /// whichever directory the caller happens to be in. Cargo runs this crate's
+    /// integration tests from the crate root and its binaries from wherever the
+    /// user invoked cargo, and a relative path meant two different directories
+    /// to those two halves.
+    #[test]
+    fn a_vector_directory_is_absolute_so_it_cannot_mean_two_places() {
+        let dir = vector_dir("m6800");
+        assert!(dir.is_absolute(), "{}", dir.display());
+        assert!(dir.ends_with(Path::new("cpu-validation/test_data/m6800")));
+        // Nested suite paths land in the same tree rather than being rebased.
+        assert!(vector_dir("65x02/6502/v1").ends_with(Path::new("test_data/65x02/6502/v1")),);
+    }
+
+    /// A missing directory is a skip by default, because a fresh clone has no
+    /// vectors at all and failing there would be an environment complaint
+    /// rather than a finding.
+    #[test]
+    fn a_missing_directory_skips_when_the_vectors_are_optional() {
+        assert!(!vectors_available(
+            Path::new("/nonexistent/vectors"),
+            "run: the generator",
+            false
+        ));
+    }
+
+    /// And a failure where something was supposed to have put them there. This
+    /// is the guard on the hazard the skip creates: libtest hides stderr for a
+    /// passing test, so without it a validator that found nothing is green and
+    /// silent, and the suite reports success having validated nothing.
+    #[test]
+    #[should_panic(expected = "PHOSPHOR_REQUIRE_VECTORS is set")]
+    fn a_missing_directory_fails_when_the_vectors_are_required() {
+        vectors_available(
+            Path::new("/nonexistent/vectors"),
+            "run: the generator",
+            true,
+        );
+    }
+
+    /// A directory that exists is available either way, and says so without
+    /// consulting the flag.
+    #[test]
+    fn an_existing_directory_is_available_however_it_was_asked_for() {
+        let here = Path::new(env!("CARGO_MANIFEST_DIR"));
+        assert!(vectors_available(here, "unused", false));
+        assert!(vectors_available(here, "unused", true));
     }
 }

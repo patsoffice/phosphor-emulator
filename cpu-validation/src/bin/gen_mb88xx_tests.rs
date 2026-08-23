@@ -303,7 +303,11 @@ fn main() {
         std::process::exit(1);
     }
 
-    let out_dir = Path::new("test_data/mb88xx");
+    // Resolved against the crate root, not the current directory: the command
+    // the READMEs print is run from the repo root, and a relative literal there
+    // wrote the vectors one level above where the cross-validators read them.
+    let out_dir = phosphor_cpu_validation::vector_dir("mb88xx");
+    let out_dir = out_dir.as_path();
     fs::create_dir_all(out_dir).expect("Failed to create output directory");
 
     let all = all_instructions();

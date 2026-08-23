@@ -558,7 +558,11 @@ fn main() {
         std::process::exit(1);
     }
 
-    let out_dir = Path::new("test_data/m6809");
+    // Resolved against the crate root, not the current directory: the command
+    // the validators print is run from the repo root, and a relative literal
+    // there wrote the vectors one level above where the validators read them.
+    let out_dir = phosphor_cpu_validation::vector_dir("m6809");
+    let out_dir = out_dir.as_path();
     fs::create_dir_all(out_dir).expect("Failed to create output directory");
 
     let all = all_instructions();

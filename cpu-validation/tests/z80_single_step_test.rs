@@ -1,5 +1,3 @@
-use std::path::Path;
-
 use phosphor_core::core::{BusMaster, BusMasterComponent};
 use phosphor_core::cpu::z80::Z80;
 use phosphor_cpu_validation::{TracingBus, Z80CpuState, Z80TestCase};
@@ -142,7 +140,8 @@ fn run_test_case(tc: &Z80TestCase) -> Option<String> {
 
 #[test]
 fn test_all_z80_opcodes() {
-    let test_dir = Path::new("test_data/z80/v1");
+    let test_dir = phosphor_cpu_validation::vector_dir("z80/v1");
+    let test_dir = test_dir.as_path();
     if !phosphor_cpu_validation::require_test_data(
         test_dir,
         "run: git submodule update --init cpu-validation/test_data/z80",

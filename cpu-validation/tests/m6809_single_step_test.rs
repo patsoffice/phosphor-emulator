@@ -1,5 +1,3 @@
-use std::path::Path;
-
 use phosphor_core::core::{BusMaster, BusMasterComponent};
 use phosphor_core::cpu::m6809::M6809;
 use phosphor_cpu_validation::{BusOp, TestCase, TracingBus};
@@ -115,7 +113,8 @@ fn run_test_case(tc: &TestCase) -> Option<String> {
 
 #[test]
 fn test_all_opcodes() {
-    let test_dir = Path::new("test_data/m6809");
+    let test_dir = phosphor_cpu_validation::vector_dir("m6809");
+    let test_dir = test_dir.as_path();
     if !phosphor_cpu_validation::require_test_data(
         test_dir,
         "run: cargo run -p phosphor-cpu-validation --bin gen_m6809_tests -- all",

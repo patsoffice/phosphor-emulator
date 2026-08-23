@@ -97,8 +97,9 @@ git submodule update --init
 # Build
 make -C cross-validation bin/validate_m6809
 
-# Generate test vectors (must run from cpu-validation/ directory)
-cd cpu-validation && cargo run --bin gen_m6809_tests --release -- all
+# Generate test vectors (from anywhere; the generator resolves its output
+# against the crate root, and prints the absolute path it wrote to)
+cargo run -p phosphor-cpu-validation --release --bin gen_m6809_tests -- all
 ```
 
 ## Usage
@@ -171,10 +172,10 @@ vectors per opcode:
 
 ```bash
 # Generate a single opcode
-cd cpu-validation && cargo run --bin gen_m6809_tests -- 0x86
+cargo run -p phosphor-cpu-validation --bin gen_m6809_tests -- 0x86
 
 # Generate all opcodes
-cd cpu-validation && cargo run --bin gen_m6809_tests -- all
+cargo run -p phosphor-cpu-validation --bin gen_m6809_tests -- all
 ```
 
 Output: `cpu-validation/test_data/m6809/<opcode>.json` (e.g., `86.json`,

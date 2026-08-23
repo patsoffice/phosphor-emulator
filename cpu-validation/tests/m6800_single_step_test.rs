@@ -1,5 +1,3 @@
-use std::path::Path;
-
 use phosphor_core::core::{BusMaster, BusMasterComponent};
 use phosphor_core::cpu::m6800::M6800;
 use phosphor_cpu_validation::{BusOp, M6800TestCase, TracingBus};
@@ -102,7 +100,8 @@ fn run_test_case(tc: &M6800TestCase) {
 
 #[test]
 fn test_all_opcodes() {
-    let test_dir = Path::new("test_data/m6800");
+    let test_dir = phosphor_cpu_validation::vector_dir("m6800");
+    let test_dir = test_dir.as_path();
     if !phosphor_cpu_validation::require_test_data(
         test_dir,
         "run: cargo run -p phosphor-cpu-validation --bin gen_m6800_tests -- all",

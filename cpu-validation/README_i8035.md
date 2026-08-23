@@ -18,8 +18,9 @@ Validates phosphor-core's I8035 test vectors against
 # Build
 make -C cross-validation bin/validate_i8035
 
-# Generate test vectors (must run from cpu-validation/ directory)
-cd cpu-validation && cargo run --bin gen_i8035_tests --release -- all
+# Generate test vectors (from anywhere; the generator resolves its output
+# against the crate root, and prints the absolute path it wrote to)
+cargo run -p phosphor-cpu-validation --release --bin gen_i8035_tests -- all
 ```
 
 ### Vendoring MAME MCS-48
@@ -115,10 +116,10 @@ vectors per opcode:
 
 ```bash
 # Generate a single opcode
-cd cpu-validation && cargo run --bin gen_i8035_tests -- 0x68
+cargo run -p phosphor-cpu-validation --bin gen_i8035_tests -- 0x68
 
 # Generate all opcodes
-cd cpu-validation && cargo run --bin gen_i8035_tests -- all
+cargo run -p phosphor-cpu-validation --bin gen_i8035_tests -- all
 ```
 
 Output: `cpu-validation/test_data/i8035/<opcode>.json` (e.g., `68.json`,

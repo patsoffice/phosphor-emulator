@@ -1,5 +1,4 @@
 use std::io::Read;
-use std::path::Path;
 
 use phosphor_core::core::{BusMaster, BusMasterComponent};
 use phosphor_core::cpu::i8088::I8088;
@@ -184,7 +183,8 @@ fn run_test_case(tc: &I8088TestCase, flags_mask: u16) -> Option<String> {
 
 #[test]
 fn test_all_i8088_opcodes() {
-    let test_dir = Path::new("test_data/8088/v2");
+    let test_dir = phosphor_cpu_validation::vector_dir("8088/v2");
+    let test_dir = test_dir.as_path();
     if !phosphor_cpu_validation::require_test_data(
         test_dir,
         "run: git submodule update --init cpu-validation/test_data/8088",

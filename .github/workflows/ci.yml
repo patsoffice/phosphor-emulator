@@ -24,10 +24,12 @@ name: CI
 # should be consulted. Same check locally: `nix develop -c cargo audit`.
 #
 # `validate` fetches the submodules, generates the M6800/M6809 vectors, and
-# runs all 7.1M of them. It is scheduled rather than per-push because the
-# submodules are large and the run is long. A permanently-skipping validator in
-# `check` is only safe while `validate` is actually green — if this job starts
-# failing or stops running, treat those CPUs as unvalidated.
+# runs all 7.1M of them with PHOSPHOR_REQUIRE_VECTORS set, so a missing set is
+# a failure there rather than the skip it is everywhere else. It is scheduled
+# rather than per-push because the submodules are large and the run is long. A
+# permanently-skipping validator in `check` is only safe while `validate` is
+# actually green — if this job starts failing or stops running, treat those
+# CPUs as unvalidated.
 
 on:
   push:
@@ -158,36 +160,26 @@ jobs:
         # These two suites are generated rather than vendored;
         # cpu-validation/test_data is gitignored in full.
         #
-        # working-directory matters: the generators write to `test_data/...`
-        # relative to the *current* directory, while the validators read it
-        # relative to the crate root. Run these from the repo root and the
-        # vectors land in the wrong place, the validators skip, and the job
-        # passes having checked nothing.
-        working-directory: cpu-validation
+        # No working-directory needed: the generators resolve their output
+        # against CARGO_MANIFEST_DIR, so they write where the validators read
+        # whatever directory they are invoked from. This step used to have to
+        # run from cpu-validation, and getting that wrong put the vectors one
+        # level too high, made every validator skip, and left the job green
+        # having checked nothing.
         run: |
           cargo run --release --locked -p phosphor-cpu-validation --bin gen_m6800_tests -- all
           cargo run --release --locked -p phosphor-cpu-validation --bin gen_m6809_tests -- all
 
-      - name: Verify every vector set is present
-        # This job's whole value is that it does not skip. A missing directory
-        # makes the validators return early and report success, so check
-        # explicitly rather than trusting a green run.
-        working-directory: cpu-validation
-        run: |
-          status=0
-          for d in test_data/m6800 test_data/m6809 \
-                   test_data/65x02/6502/v1 test_data/z80/v1 \
-                   test_data/680x0/68000/v1 test_data/8088/v2; do
-            if [ -d "$d" ]; then
-              echo "ok      $d"
-            else
-              echo "::error::missing vector set $d — validators would skip silently"
-              status=1
-            fi
-          done
-          exit $status
-
       - name: Run single-step validators
-        # --nocapture so a validator that skipped anyway says so on stderr;
-        # libtest hides that message for a passing test.
+        # This job's whole value is that it does not skip, so require the
+        # vectors rather than trusting a green run: PHOSPHOR_REQUIRE_VECTORS
+        # turns a missing directory from a silent skip into a failure that names
+        # it. There used to be a hand-written list of the expected directories
+        # here, which was a second copy of what the tests already know and would
+        # have rotted the first time one of them moved.
+        #
+        # --nocapture so the per-CPU vector counts reach the log; libtest hides
+        # stderr for a passing test.
+        env:
+          PHOSPHOR_REQUIRE_VECTORS: 1
         run: cargo test --release --locked -p phosphor-cpu-validation -- --nocapture
