@@ -478,8 +478,42 @@ pub fn run(
     // for the whole loop body, and arming has to replace it wholesale.
     let mut arm_requested = false;
 
+    // Same deferral, for the same reason: a hard reset replaces the machine
+    // wholesale and cannot run while it is borrowed for the frame.
+    let mut hard_reset_requested = false;
+
+    // Carries a resync request from a loop-top rebuild into that iteration's
+    // `needs_resync`, which is declared below the rebuild.
+    let mut pending_resync = false;
+
     'main: loop {
         let t0 = Instant::now();
+
+        if hard_reset_requested {
+            hard_reset_requested = false;
+            // A power cycle, not the reset button. `reset()` leaves state behind
+            // and measurably so (see `MovieCapture::arm_fresh`), which is the
+            // whole difference between the two reset keys.
+            //
+            // Battery-backed RAM survives a power cycle on the real board, and
+            // building from ROM does not reload it, so the live NVRAM and DIPs
+            // are carried across. Skipping that would not merely reset the
+            // machine: `main` writes the machine's NVRAM back on exit, so the
+            // blank would overwrite the player's saved file.
+            let (nvram, dip) = {
+                let sess = session.borrow();
+                crate::movie::MovieCapture::starting_conditions(sess.machine())
+            };
+            let mut fresh = rebuild_machine();
+            crate::movie::MovieCapture::adopt_conditions(&mut *fresh, nvram.as_deref(), &dip);
+            *session.borrow_mut() = DebugSession::from_machine(fresh);
+            debug_state.frame_count = 0;
+            // The new machine's ports start clear and a key held across the
+            // rebuild raises no fresh KeyDown, so it would be dead until
+            // released and pressed again.
+            pending_resync = true;
+            eprintln!("Hard reset: machine rebuilt from ROM");
+        }
 
         if arm_requested {
             arm_requested = false;
@@ -504,7 +538,7 @@ pub fn run(
         // (reset, state load, focus regain, controller unplug). Reconciled once
         // after the event batch, because reading live device state needs
         // `event_pump` back from `poll_iter`'s borrow.
-        let mut needs_resync = false;
+        let mut needs_resync = std::mem::take(&mut pending_resync);
 
         // While a movie plays it is the ONLY source of input, so every path that
         // reconciles the machine against physical devices has to be off. Those
@@ -745,6 +779,7 @@ pub fn run(
                     settings_state.legend_visible = !settings_state.legend_visible;
                 }
 
+                // Soft reset: the reset button on the cabinet.
                 Event::KeyDown { repeat: false, .. } if hot == Some(HostAction::Reset) => {
                     machine.reset();
                     debug_state.frame_count = 0;
@@ -752,6 +787,12 @@ pub fn run(
                     // across it produces no new KeyDown — without this the
                     // input is dead until the user releases and re-presses.
                     needs_resync = true;
+                }
+
+                // Hard reset: the power switch. Deferred, because rebuilding
+                // cannot happen while the machine is borrowed for this frame.
+                Event::KeyDown { repeat: false, .. } if hot == Some(HostAction::HardReset) => {
+                    hard_reset_requested = true;
                 }
 
                 // Record input movie. Arming resets to power-on, because a

@@ -67,7 +67,8 @@ ROMs are matched by CRC32 checksum, so any MAME ROM naming convention works.
 | 5                | Insert Coin                                   |
 | Mouse            | Trackball (Crystal Castles, Missile Command)  |
 | F1               | Toggle Debug Panel                            |
-| F3               | Reset Machine                                 |
+| F3               | Reset Machine (reset button)                  |
+| Shift + F3       | Hard Reset (power cycle, rebuild from ROM)    |
 | F5               | Pause / Resume                                |
 | F6 / F7          | Quick Save / Quick Load                       |
 | F8               | Pause / Run toggle (Debug Panel)              |

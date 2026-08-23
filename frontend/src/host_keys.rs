@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 pub enum HostAction {
     Quit,
     Reset,
+    HardReset,
     QuickSave,
     QuickLoad,
     Screenshot,
@@ -47,6 +48,7 @@ impl HostAction {
         match self {
             HostAction::Quit => "Quit",
             HostAction::Reset => "Reset machine",
+            HostAction::HardReset => "Hard reset (power cycle)",
             HostAction::QuickSave => "Quick save",
             HostAction::QuickLoad => "Quick load",
             HostAction::Screenshot => "Screenshot",
@@ -169,6 +171,7 @@ impl HostChord {
 pub const DEFAULTS: &[(HostAction, HostChord)] = &[
     (HostAction::Quit, HostChord::bare(Scancode::Escape)),
     (HostAction::Reset, HostChord::bare(Scancode::F3)),
+    (HostAction::HardReset, HostChord::shift(Scancode::F3)),
     (HostAction::QuickSave, HostChord::bare(Scancode::F6)),
     (HostAction::QuickLoad, HostChord::bare(Scancode::F7)),
     (HostAction::Screenshot, HostChord::bare(Scancode::F12)),
@@ -446,6 +449,7 @@ mod tests {
         let b = HostBindings::default();
         let expected = [
             (HostAction::Reset, HostChord::bare(Scancode::F3)),
+            (HostAction::HardReset, HostChord::shift(Scancode::F3)),
             (HostAction::TogglePause, HostChord::bare(Scancode::F5)),
             (HostAction::QuickSave, HostChord::bare(Scancode::F6)),
             (HostAction::QuickLoad, HostChord::bare(Scancode::F7)),
@@ -524,11 +528,22 @@ mod tests {
         );
         assert_eq!(b.action_for(HostChord::bare(Scancode::F12)), None);
         // ...and in the other direction: a bare binding must not fire shifted.
+        // F6 rather than F3, which legitimately has an action on both halves.
+        assert_eq!(
+            b.action_for(HostChord::bare(Scancode::F6)),
+            Some(HostAction::QuickSave)
+        );
+        assert_eq!(b.action_for(HostChord::shift(Scancode::F6)), None);
+        // F3 is the case that motivates exact matching: two different resets,
+        // one destructive, separated only by the modifier.
         assert_eq!(
             b.action_for(HostChord::bare(Scancode::F3)),
             Some(HostAction::Reset)
         );
-        assert_eq!(b.action_for(HostChord::shift(Scancode::F3)), None);
+        assert_eq!(
+            b.action_for(HostChord::shift(Scancode::F3)),
+            Some(HostAction::HardReset)
+        );
     }
 
     #[test]

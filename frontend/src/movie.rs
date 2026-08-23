@@ -101,6 +101,22 @@ impl MovieCapture {
         )
     }
 
+    /// Put a freshly built machine into the state it is replacing.
+    ///
+    /// The order mirrors `Harness::from_movie`: reset, NVRAM, DIP. Shared with
+    /// the frontend's hard reset, which rebuilds for the same reason and must
+    /// inherit the same things: battery-backed RAM survives a power cycle on the
+    /// real board, and a rebuild from ROM does not reload it.
+    pub fn adopt_conditions(machine: &mut dyn FrontendMachine, nvram: Option<&[u8]>, dip: &[u8]) {
+        machine.reset();
+        if let Some(nv) = nvram {
+            machine.load_nvram(nv);
+        }
+        for (bank, &value) in dip.iter().enumerate() {
+            machine.set_dip_bank_value(bank, value);
+        }
+    }
+
     /// Start recording against a machine that was just built from ROM.
     ///
     /// `machine` MUST be freshly constructed, not the live one reset in place.
@@ -118,13 +134,7 @@ impl MovieCapture {
         nvram: Option<Vec<u8>>,
         dip: Vec<u8>,
     ) {
-        machine.reset();
-        if let Some(nv) = &nvram {
-            machine.load_nvram(nv);
-        }
-        for (bank, &value) in dip.iter().enumerate() {
-            machine.set_dip_bank_value(bank, value);
-        }
+        Self::adopt_conditions(machine, nvram.as_deref(), &dip);
         self.recorder = Some(MovieRecorder::new(
             self.machine_name.clone(),
             self.rom_digest,
