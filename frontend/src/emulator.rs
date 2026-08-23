@@ -939,7 +939,19 @@ pub fn run(
                     }
                 }
 
-                // P: Toggle global pause (frontend-level control, not a game input)
+                // Pause and advance a single frame. Autorepeat is deliberate:
+                // held down, this walks the machine forward a frame at a time,
+                // which is the point of the key.
+                //
+                // It pauses first if the machine is running, so one press always
+                // means "hold here, one frame on" rather than depending on which
+                // state you happened to be in.
+                Event::KeyDown { .. } if hot == Some(HostAction::FrameAdvance) => {
+                    debug_state.global_paused = true;
+                    debug_state.global_step = true;
+                }
+
+                // Toggle global pause (frontend-level control, not a game input)
                 Event::KeyDown { repeat: false, .. } if hot == Some(HostAction::TogglePause) => {
                     debug_state.global_paused = !debug_state.global_paused;
                     eprintln!(

@@ -27,6 +27,7 @@ pub enum HostAction {
     QuickLoad,
     Screenshot,
     TogglePause,
+    FrameAdvance,
     ToggleDebugPanel,
     ToggleSettingsPanel,
     ToggleDipPanel,
@@ -53,6 +54,7 @@ impl HostAction {
             HostAction::QuickLoad => "Quick load",
             HostAction::Screenshot => "Screenshot",
             HostAction::TogglePause => "Pause",
+            HostAction::FrameAdvance => "Pause and advance one frame",
             HostAction::ToggleDebugPanel => "Debug panel",
             HostAction::ToggleSettingsPanel => "Input settings panel",
             HostAction::ToggleDipPanel => "DIP switch panel",
@@ -147,10 +149,14 @@ impl HostChord {
 ///   `--gfxview` CLI mode, so the key is reserved rather than bound.
 /// - `Shift+F4` is MAME's rewind step. Reserved for the checkpoint-rewind work,
 ///   which has not decided between a step and a hold.
-/// - `F8`/`F9` are frameskip in MAME. We do not implement frameskip, so the
-///   debugger takes them rather than leaving two function keys idle. This is the
-///   one place the layout knowingly diverges.
-/// - `Insert` (fast forward) and `Shift+F8` (cheats) have no counterpart here.
+/// - `F9` is frameskip increment in MAME. We do not implement frameskip, so it
+///   stays unbound.
+/// - `Insert` (fast forward) has no counterpart here.
+///
+/// One key is knowingly taken for something else. `F8` is MAME's frameskip
+/// decrement and `Shift+F8` its cheat toggle, neither of which exists here, so
+/// the debugger takes `F8` and the three shifted keys above rather than leaving
+/// a whole run of function keys idle. That is the layout's one real divergence.
 ///
 /// Two more deviations worth stating rather than discovering:
 ///
@@ -176,6 +182,7 @@ pub const DEFAULTS: &[(HostAction, HostChord)] = &[
     (HostAction::QuickLoad, HostChord::bare(Scancode::F7)),
     (HostAction::Screenshot, HostChord::bare(Scancode::F12)),
     (HostAction::TogglePause, HostChord::bare(Scancode::F5)),
+    (HostAction::FrameAdvance, HostChord::shift(Scancode::F5)),
     (HostAction::ToggleDebugPanel, HostChord::bare(Scancode::F1)),
     (
         HostAction::ToggleSettingsPanel,
@@ -451,6 +458,7 @@ mod tests {
             (HostAction::Reset, HostChord::bare(Scancode::F3)),
             (HostAction::HardReset, HostChord::shift(Scancode::F3)),
             (HostAction::TogglePause, HostChord::bare(Scancode::F5)),
+            (HostAction::FrameAdvance, HostChord::shift(Scancode::F5)),
             (HostAction::QuickSave, HostChord::bare(Scancode::F6)),
             (HostAction::QuickLoad, HostChord::bare(Scancode::F7)),
             (HostAction::ToggleThrottle, HostChord::bare(Scancode::F10)),
@@ -481,8 +489,6 @@ mod tests {
             HostChord::bare(Scancode::F4),
             // MAME: rewind one checkpoint. Owned by the rewind work.
             HostChord::shift(Scancode::F4),
-            // MAME: pause single step. Frame advance is not implemented yet.
-            HostChord::shift(Scancode::F5),
             // MAME: frameskip. We have none.
             HostChord::bare(Scancode::F9),
         ] {

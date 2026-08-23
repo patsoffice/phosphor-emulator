@@ -56,20 +56,22 @@ ROMs are matched by CRC32 checksum, so any MAME ROM naming convention works.
 | Key              | Action                                        |
 | ---------------- | --------------------------------------------- |
 | Arrows           | P1 Move                                       |
-| Space            | P1 Fire / Flap / Bomb (Sinistar)              |
-| Left Ctrl        | P1 Flap                                       |
-| Left Shift       | P1 Jump / Fire (Sinistar)                     |
-| I / K / J / L    | P1 Fire Up / Down / Left / Right (Robotron)   |
+| Left Shift       | P1 Button 1                                   |
+| Space            | P1 Button 2                                   |
+| Left Ctrl        | P1 Button 3                                   |
+| I / K / J / L    | P1 Fire Up / Down / Left / Right (twin-stick) |
 | 1                | P1 Start                                      |
 | W / A / S / D    | P2 Move                                       |
-| E                | P2 Fire / Jump                                |
+| Right Shift      | P2 Button 1                                   |
 | 2                | P2 Start                                      |
 | 5                | Insert Coin                                   |
+| 6                | Service                                       |
 | Mouse            | Trackball (Crystal Castles, Missile Command)  |
 | F1               | Toggle Debug Panel                            |
 | F3               | Reset Machine (reset button)                  |
 | Shift + F3       | Hard Reset (power cycle, rebuild from ROM)    |
 | F5               | Pause / Resume                                |
+| Shift + F5       | Pause and advance one frame (autorepeats)     |
 | F6 / F7          | Quick Save / Quick Load                       |
 | F8               | Pause / Run toggle (Debug Panel)              |
 | Shift + F8/F9/F10 | Step Cycle / Instruction / Frame (Debug Panel) |
@@ -85,12 +87,22 @@ ROMs are matched by CRC32 checksum, so any MAME ROM naming convention works.
 | ?                | Toggle Key Legend                             |
 | Escape           | Quit                                          |
 
+Buttons are numbered by rank rather than named per game, so the same key does
+the most-used action everywhere: Button 1 is whatever the game's main action is
+(fire, jump, flap), Button 2 the secondary one, Button 3 a third if the cabinet
+had one. On a gamepad they are A, B and X. Only Button 1 differs between
+players; a machine with more than one button for player 2 gives them the same
+keys as player 1. A game with fewer buttons leaves the higher ones unbound, and
+individual machines add their own keys on top where the cabinet had something
+that does not fit the ladder.
+
 The function keys follow MAME's layout, so muscle memory carries over. Where
 MAME has a feature this emulator does not, the key is left free rather than
-reused: F2 (service switch, a machine input), F4 (decoded-graphics viewer,
-available here as `--gfxview`), Shift + F4 (rewind), Shift + F5 (frame
-advance) and F9 (frameskip). F8 through Shift + F10 carry the debugger instead
-of MAME's frameskip, which is the one deliberate divergence.
+reused: F2 (MAME's service switch, which is a machine input rather than an
+emulator one; ours is on 6), F4 (decoded-graphics viewer,
+available here as `--gfxview`), Shift + F4 (rewind) and F9 (frameskip). F8
+through Shift + F10 carry the debugger instead of MAME's frameskip, which is
+the one deliberate divergence.
 
 Every key above is rebindable in the settings panel (Tab), and `?` lists the
 live bindings — emulator, debugger, and game — so the table is a starting

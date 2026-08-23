@@ -125,10 +125,17 @@ pub enum DeviceAction {
 pub struct DebugState {
     pub active: bool,
     pub run_mode: RunMode,
-    /// Global pause toggled by the P key, independent of the debug UI. When the
-    /// debug UI is inactive this gates emulation in [`execute_frame`]; while the
-    /// debug UI is active it is ignored and `run_mode` governs instead.
+    /// Global pause, independent of the debug UI. When the debug UI is inactive
+    /// this gates emulation in [`execute_frame`]; while the debug UI is active
+    /// it is ignored and `run_mode` governs instead.
     pub global_paused: bool,
+    /// Let exactly one frame through the global pause, then re-hold.
+    ///
+    /// [`execute_frame`] consumes this on every call, whether or not it is in a
+    /// position to honour it. Clearing it only on the path that uses it would
+    /// let a request made while the debug panel governs sit there and spend
+    /// itself later, jumping a frame the moment the panel closed.
+    pub global_step: bool,
     pub cpu_panels: Vec<CpuPanel>,
     pub device_panels: Vec<DevicePanel>,
     pub step_cpu: usize,
@@ -262,6 +269,7 @@ impl DebugState {
             active: false,
             run_mode: RunMode::Running,
             global_paused: false,
+            global_step: false,
             cpu_panels: Vec::new(),
             device_panels: Vec::new(),
             step_cpu: 0,
@@ -428,11 +436,14 @@ fn drain_watchpoint_hits(machine: &mut dyn FrontendMachine, state: &mut DebugSta
 /// Execute one frame of emulation according to the current run mode.
 /// Returns true if a full frame was executed (caller should drain audio).
 pub fn execute_frame(machine: &mut dyn FrontendMachine, state: &mut DebugState) -> bool {
+    // Taken unconditionally: see `DebugState::global_step`.
+    let step_once = std::mem::take(&mut state.global_step);
+
     if !state.active {
-        // Global pause (P key): hold the machine without running a frame, so no
-        // audio is drained. The audio callback repeats its last sample, so the
-        // output stays silent rather than buzzing.
-        if state.global_paused {
+        // Global pause: hold the machine without running a frame, so no audio is
+        // drained. The audio callback repeats its last sample, so the output
+        // stays silent rather than buzzing.
+        if state.global_paused && !step_once {
             return false;
         }
         machine.run_frame();
@@ -1856,6 +1867,56 @@ fn draw_memory_row(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A ROM-less machine, purely as something `execute_frame` can be handed.
+    /// The tests below assert about frame accounting, not about what it draws.
+    fn bare_machine() -> Box<dyn FrontendMachine> {
+        let entry = *phosphor_machines::registry::all()
+            .first()
+            .expect("the registry is not empty");
+        (entry.create_bare)()
+    }
+
+    #[test]
+    fn frame_advance_lets_exactly_one_frame_through_the_global_pause() {
+        let mut m = bare_machine();
+        let mut s = DebugState::new();
+        s.global_paused = true;
+
+        // Paused with no request: nothing runs, and the frame counter is the
+        // check that would catch a frame slipping through.
+        assert!(!execute_frame(&mut *m, &mut s));
+        assert_eq!(s.frame_count, 0);
+
+        // One request, one frame.
+        s.global_step = true;
+        assert!(execute_frame(&mut *m, &mut s));
+        assert_eq!(s.frame_count, 1);
+
+        // And it re-holds rather than running free.
+        assert!(!execute_frame(&mut *m, &mut s));
+        assert_eq!(s.frame_count, 1);
+    }
+
+    #[test]
+    fn a_step_request_cannot_outlive_the_frame_it_asked_for() {
+        // Requested while the debug panel governs, so `execute_frame` is in no
+        // position to honour it. If it were left set instead of consumed, the
+        // machine would jump a frame the moment the panel closed.
+        let mut m = bare_machine();
+        let mut s = DebugState::new();
+        s.global_paused = true;
+        s.active = true;
+        s.run_mode = RunMode::Paused;
+        s.global_step = true;
+
+        execute_frame(&mut *m, &mut s);
+        assert!(!s.global_step, "a stale request would spend itself later");
+
+        s.active = false;
+        assert!(!execute_frame(&mut *m, &mut s));
+        assert_eq!(s.frame_count, 0, "closing the panel must not run a frame");
+    }
 
     #[test]
     fn fmt_hex_value_pads_to_the_access_width() {
