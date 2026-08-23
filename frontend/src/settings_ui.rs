@@ -53,7 +53,7 @@ pub struct SettingsState {
     /// Host action awaiting a captured key (hotkey rebind in progress).
     pub capturing_host: Option<crate::host_keys::HostAction>,
     /// Hotkey rebinds recorded this frame.
-    pub pending_host_rebind: Vec<(crate::host_keys::HostAction, sdl2::keyboard::Scancode)>,
+    pub pending_host_rebind: Vec<(crate::host_keys::HostAction, crate::host_keys::HostChord)>,
     /// Set when the user asks to restore factory hotkeys.
     pub host_reset_requested: bool,
     /// Whether the key legend (`?`) is visible.
@@ -184,7 +184,7 @@ pub fn draw_input_panel(
                                 "press key…".to_string()
                             } else {
                                 match host.key_for(*action) {
-                                    Some(sc) => crate::host_keys::key_label(sc),
+                                    Some(chord) => crate::host_keys::chord_label(chord),
                                     None => "(unbound)".to_string(),
                                 }
                             };
@@ -215,7 +215,7 @@ pub fn draw_key_legend(
     host: &crate::host_keys::HostBindings,
     state: &mut SettingsState,
 ) {
-    use crate::host_keys::{DEFAULTS, key_label};
+    use crate::host_keys::{DEFAULTS, chord_label};
 
     let mut open = state.legend_visible;
     egui::Window::new("Keys")
@@ -234,7 +234,7 @@ pub fn draw_key_legend(
                                     continue;
                                 }
                                 let key = match host.key_for(*action) {
-                                    Some(sc) => key_label(sc),
+                                    Some(chord) => chord_label(chord),
                                     None => "(unbound)".to_string(),
                                 };
                                 ui.label(egui::RichText::new(key).monospace().strong());
@@ -249,11 +249,15 @@ pub fn draw_key_legend(
 
                 ui.add_space(6.0);
                 ui.heading("Debugger");
+                let panel_key = host
+                    .key_for(crate::host_keys::HostAction::ToggleDebugPanel)
+                    .map(chord_label)
+                    .unwrap_or_else(|| "unbound".to_string());
                 ui.label(
-                    egui::RichText::new(
-                        "Only while the debug panel (F1) is open, so the game keeps \
-                         these keys otherwise.",
-                    )
+                    egui::RichText::new(format!(
+                        "Only while the debug panel ({panel_key}) is open, so the game keeps \
+                         these keys otherwise."
+                    ))
                     .small()
                     .weak(),
                 );

@@ -66,22 +66,30 @@ ROMs are matched by CRC32 checksum, so any MAME ROM naming convention works.
 | 2                | P2 Start                                      |
 | 5                | Insert Coin                                   |
 | Mouse            | Trackball (Crystal Castles, Missile Command)  |
-| P                | Pause / Resume                                |
 | F1               | Toggle Debug Panel                            |
-| 7 / 8 / 9        | Step Cycle / Instruction / Frame (Debug Panel) |
-| 0                | Pause / Run toggle (Debug Panel)              |
-| F5               | Reset Machine                                 |
+| F3               | Reset Machine                                 |
+| F5               | Pause / Resume                                |
 | F6 / F7          | Quick Save / Quick Load                       |
-| F8               | Toggle Profiler                               |
-| F9               | Toggle Throttle                               |
-| F10              | Toggle Debug Overlay                          |
-| F11              | Toggle Mouse Grab                             |
+| F8               | Pause / Run toggle (Debug Panel)              |
+| Shift + F8/F9/F10 | Step Cycle / Instruction / Frame (Debug Panel) |
+| F10              | Toggle Throttle                               |
+| F11              | Toggle Debug Overlay                          |
+| Shift + F11      | Toggle Profiler                               |
 | F12              | Screenshot                                    |
+| Shift + F12      | Record Input Movie                            |
+| Scroll Lock      | Toggle Mouse Grab                             |
 | Tab              | Toggle Input Bindings Panel                   |
 | \`               | Toggle DIP Switches Panel                     |
 | Ctrl + \`        | Toggle Script Console                         |
 | ?                | Toggle Key Legend                             |
 | Escape           | Quit                                          |
+
+The function keys follow MAME's layout, so muscle memory carries over. Where
+MAME has a feature this emulator does not, the key is left free rather than
+reused: F2 (service switch, a machine input), F4 (decoded-graphics viewer,
+available here as `--gfxview`), Shift + F4 (rewind), Shift + F5 (frame
+advance) and F9 (frameskip). F8 through Shift + F10 carry the debugger instead
+of MAME's frameskip, which is the one deliberate divergence.
 
 Every key above is rebindable in the settings panel (Tab), and `?` lists the
 live bindings — emulator, debugger, and game — so the table is a starting
@@ -197,7 +205,7 @@ SDL2 + egui windowed frontend — external dependencies: SDL2, zip, egui:
 - SDL2 window with GPU-scaled texture rendering (VSync frame timing)
 - **Debug panel** (F1 or `--debug`) — egui side panel showing all CPU and device registers, step/cycle/continue controls (works on both 16-bit and 24-bit-bus machines, including the MC68000 games Food Fight and Quantum)
 - Keyboard, game controller, and mouse input bound from each machine's typed `InputConfigurable` controls; rebindable in the settings panel (Tab) and persisted per machine
-- Quick save/load (F6/F7), debug overlay with FPS and machine stats (F10), mouse grab for trackball games (F11)
+- Quick save/load (F6/F7), debug overlay with FPS and machine stats (F11), mouse grab for trackball games (Scroll Lock)
 
 ### CPU Validation Crate (`phosphor-cpu-validation`)
 

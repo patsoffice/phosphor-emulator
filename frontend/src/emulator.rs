@@ -10,7 +10,7 @@ use sdl2::keyboard::{Mod, Scancode};
 
 use crate::console_ui::{self, ConsoleState};
 use crate::debug_ui::{self, DebugState, RunMode};
-use crate::host_keys::{HostAction, HostBindings};
+use crate::host_keys::{HostAction, HostBindings, HostChord};
 use crate::input::{self, AxisDir, BindingSet, MouseAxis, PhysicalInput};
 use crate::profile::ProfileState;
 use crate::settings_ui::{self, SettingsState};
@@ -46,7 +46,7 @@ fn panels_width(
 /// bindings so a rebound key relabels its button.
 fn step_key_hints(host: &HostBindings) -> debug_ui::StepKeyHints {
     let key = |action| match host.key_for(action) {
-        Some(sc) => crate::host_keys::key_label(sc),
+        Some(chord) => crate::host_keys::chord_label(chord),
         None => "\u{2014}".to_string(),
     };
     debug_ui::StepKeyHints {
@@ -319,10 +319,14 @@ pub fn run(
                 _ => None,
             })
             .collect();
+        let panel_key = host_bindings
+            .key_for(HostAction::ToggleSettingsPanel)
+            .map(crate::host_keys::chord_label)
+            .unwrap_or_else(|| "unbound".to_string());
         for (action, key) in crate::host_keys::conflicts(&host_bindings, &machine_keys) {
             eprintln!(
                 "Note: {key:?} is the '{}' hotkey, so {machine_name} cannot see it. \
-                 Rebind either side in the settings panel (F12).",
+                 Rebind either side in the settings panel ({panel_key}).",
                 action.label()
             );
         }
@@ -365,13 +369,13 @@ pub fn run(
     // does — not only when a panel opens or closes.
     let mut last_panels_width: u32 = 0;
 
-    // FPS overlay state (F10 to toggle)
+    // FPS overlay state
     let mut show_fps = false;
     let mut fps_text = String::new();
     let mut fps_smoothed: f64 = machine.frame_rate_hz();
     let mut fps_last_instant = Instant::now();
 
-    // Profiler state (F8 to toggle)
+    // Profiler state
     let mut profile_state = crate::profile::ProfileState::new();
 
     // Input settings panel (Tab to toggle); only meaningful for machines with
@@ -385,7 +389,7 @@ pub fn run(
     // DIP switch panel (` to toggle); only for machines with DIP banks.
     let has_dip = !machine.dip_banks().is_empty();
 
-    // Mouse grab for trackball games (F11 to toggle)
+    // Mouse grab for trackball games
     let has_analog = machine
         .input_controls()
         .iter()
@@ -468,7 +472,8 @@ pub fn run(
         playback
     });
 
-    // Set by F2, serviced at the top of the next iteration. The rebuild cannot
+    // Set by the movie-record hotkey, serviced at the top of the next
+    // iteration. The rebuild cannot
     // happen in the event handler: the machine is borrowed out of the session
     // for the whole loop body, and arming has to replace it wholesale.
     let mut arm_requested = false;
@@ -526,15 +531,30 @@ pub fn run(
                         settings_state.capturing_host = None;
                         continue;
                     }
+                    // Shift is half of a chord, never a binding on its own. It
+                    // presses first and produces its own KeyDown, so capturing
+                    // the first press unconditionally would bind Shift and end
+                    // the capture before the user reached the key they meant.
+                    // Wait for a non-modifier and take the modifier state with
+                    // it.
                     Event::KeyDown {
                         scancode: Some(sc),
+                        keymod,
                         repeat: false,
                         ..
-                    } => {
-                        settings_state.pending_host_rebind.push((action, *sc));
+                    } if !crate::host_keys::is_modifier(*sc) => {
+                        settings_state
+                            .pending_host_rebind
+                            .push((action, HostChord::from_event(*sc, *keymod)));
                         settings_state.capturing_host = None;
                         continue;
                     }
+                    // The modifier's own press is swallowed rather than passed
+                    // on, so holding shift to build a chord does not also reach
+                    // the game.
+                    Event::KeyDown {
+                        scancode: Some(sc), ..
+                    } if crate::host_keys::is_modifier(*sc) => continue,
                     _ => {}
                 }
             }
@@ -630,20 +650,28 @@ pub fn run(
                 continue;
             }
 
+            // Resolve the press to a host action once, here, rather than in
+            // every arm below. Chords are matched on the exact modifier state,
+            // so bare F5 and Shift+F5 are different bindings; doing that per arm
+            // is nineteen chances to forget the modifier and have one of the
+            // pair silently shadow the other.
+            let hot = match &event {
+                Event::KeyDown {
+                    scancode: Some(sc),
+                    keymod,
+                    ..
+                } => host_bindings.action_for(HostChord::from_event(*sc, *keymod)),
+                _ => None,
+            };
+
             match event {
                 Event::Quit { .. } => break 'main,
 
-                Event::KeyDown {
-                    scancode: Some(sc), ..
-                } if host_bindings.action_for(sc) == Some(HostAction::Quit) => break 'main,
+                Event::KeyDown { .. } if hot == Some(HostAction::Quit) => break 'main,
 
-                // F1: Toggle debug mode
-                Event::KeyDown {
-                    scancode: Some(sc),
-                    repeat: false,
-                    ..
-                } if has_debug
-                    && host_bindings.action_for(sc) == Some(HostAction::ToggleDebugPanel) =>
+                // Toggle the debug panel
+                Event::KeyDown { repeat: false, .. }
+                    if has_debug && hot == Some(HostAction::ToggleDebugPanel) =>
                 {
                     debug_state.active = !debug_state.active;
                     if debug_state.active {
@@ -666,53 +694,39 @@ pub fn run(
                     );
                 }
 
-                // Step one instruction (debug + paused). Default key: 8 —
-                // the step keys are ordered by granularity (7 cycle, 8
-                // instruction, 9 frame), and all of them are rebindable, so
-                // `host_keys::DEFAULTS` is the authority, not this comment.
-                Event::KeyDown {
-                    scancode: Some(sc),
-                    repeat: false,
-                    ..
-                } if debug_state.active
-                    && debug_state.run_mode == RunMode::Paused
-                    && host_bindings.action_for(sc) == Some(HostAction::StepInstruction) =>
+                // Step one instruction (debug + paused). The step keys are
+                // ordered by granularity and all of them are rebindable, so
+                // `host_keys::DEFAULTS` is the authority for which is which.
+                Event::KeyDown { repeat: false, .. }
+                    if debug_state.active
+                        && debug_state.run_mode == RunMode::Paused
+                        && hot == Some(HostAction::StepInstruction) =>
                 {
                     debug_state.run_mode = RunMode::StepInstruction;
                 }
 
-                // Step one cycle (debug + paused). Default key: 7.
-                Event::KeyDown {
-                    scancode: Some(sc),
-                    repeat: false,
-                    ..
-                } if debug_state.active
-                    && debug_state.run_mode == RunMode::Paused
-                    && host_bindings.action_for(sc) == Some(HostAction::StepCycle) =>
+                // Step one cycle (debug + paused).
+                Event::KeyDown { repeat: false, .. }
+                    if debug_state.active
+                        && debug_state.run_mode == RunMode::Paused
+                        && hot == Some(HostAction::StepCycle) =>
                 {
                     debug_state.run_mode = RunMode::StepCycle;
                 }
 
-                // 9: Step frame — run one frame, pause at the next frame start
+                // Step frame — run one frame, pause at the next frame start
                 // (debug + paused)
-                Event::KeyDown {
-                    scancode: Some(sc),
-                    repeat: false,
-                    ..
-                } if debug_state.active
-                    && debug_state.run_mode == RunMode::Paused
-                    && host_bindings.action_for(sc) == Some(HostAction::StepFrame) =>
+                Event::KeyDown { repeat: false, .. }
+                    if debug_state.active
+                        && debug_state.run_mode == RunMode::Paused
+                        && hot == Some(HostAction::StepFrame) =>
                 {
                     debug_state.run_mode = RunMode::StepFrame;
                 }
 
-                // 0: Toggle run <-> pause (running -> paused, otherwise continue)
-                Event::KeyDown {
-                    scancode: Some(sc),
-                    repeat: false,
-                    ..
-                } if debug_state.active
-                    && host_bindings.action_for(sc) == Some(HostAction::ToggleDebugPause) =>
+                // Toggle run <-> pause (running -> paused, otherwise continue)
+                Event::KeyDown { repeat: false, .. }
+                    if debug_state.active && hot == Some(HostAction::ToggleDebugPause) =>
                 {
                     if debug_state.run_mode == RunMode::Running {
                         debug_state.run_mode = RunMode::Paused;
@@ -725,19 +739,13 @@ pub fn run(
                 }
 
                 // ?: Toggle the key legend (works with no other panel open)
-                Event::KeyDown {
-                    scancode: Some(sc),
-                    repeat: false,
-                    ..
-                } if host_bindings.action_for(sc) == Some(HostAction::ToggleKeyLegend) => {
+                Event::KeyDown { repeat: false, .. }
+                    if hot == Some(HostAction::ToggleKeyLegend) =>
+                {
                     settings_state.legend_visible = !settings_state.legend_visible;
                 }
 
-                Event::KeyDown {
-                    scancode: Some(sc),
-                    repeat: false,
-                    ..
-                } if host_bindings.action_for(sc) == Some(HostAction::Reset) => {
+                Event::KeyDown { repeat: false, .. } if hot == Some(HostAction::Reset) => {
                     machine.reset();
                     debug_state.frame_count = 0;
                     // reset() clears the machine's port bits, but a key held
@@ -746,14 +754,10 @@ pub fn run(
                     needs_resync = true;
                 }
 
-                // Record input movie (F2). Arming resets to power-on, because a
+                // Record input movie. Arming resets to power-on, because a
                 // movie carries no save state and can only be replayed from
                 // there; stopping writes the file.
-                Event::KeyDown {
-                    scancode: Some(sc),
-                    repeat: false,
-                    ..
-                } if host_bindings.action_for(sc) == Some(HostAction::MovieRecord) => {
+                Event::KeyDown { repeat: false, .. } if hot == Some(HostAction::MovieRecord) => {
                     if movie_capture.is_recording() {
                         eprintln!("{}", movie_capture.stop());
                     } else {
@@ -763,12 +767,8 @@ pub fn run(
                     }
                 }
 
-                // Quick Save (F6)
-                Event::KeyDown {
-                    scancode: Some(sc),
-                    repeat: false,
-                    ..
-                } if host_bindings.action_for(sc) == Some(HostAction::QuickSave) => {
+                // Quick save
+                Event::KeyDown { repeat: false, .. } if hot == Some(HostAction::QuickSave) => {
                     if let Some(data) = machine.save_state() {
                         match std::fs::write(save_path, &data) {
                             Ok(()) => eprintln!("Save state written ({} bytes)", data.len()),
@@ -779,12 +779,8 @@ pub fn run(
                     }
                 }
 
-                // Quick Load (F7)
-                Event::KeyDown {
-                    scancode: Some(sc),
-                    repeat: false,
-                    ..
-                } if host_bindings.action_for(sc) == Some(HostAction::QuickLoad) => {
+                // Quick load
+                Event::KeyDown { repeat: false, .. } if hot == Some(HostAction::QuickLoad) => {
                     match std::fs::read(save_path) {
                         Ok(data) => match machine.load_state(&data) {
                             Ok(()) => {
@@ -800,12 +796,8 @@ pub fn run(
                     }
                 }
 
-                // F8: Toggle profiler
-                Event::KeyDown {
-                    scancode: Some(sc),
-                    repeat: false,
-                    ..
-                } if host_bindings.action_for(sc) == Some(HostAction::ToggleProfiler) => {
+                // Toggle the profiler
+                Event::KeyDown { repeat: false, .. } if hot == Some(HostAction::ToggleProfiler) => {
                     if profile_state.active {
                         machine.set_profiling(false);
                         profile_state.stop();
@@ -826,12 +818,8 @@ pub fn run(
                 }
 
                 // Tab: Toggle input settings panel (machines with typed controls)
-                Event::KeyDown {
-                    scancode: Some(sc),
-                    repeat: false,
-                    ..
-                } if has_typed_controls
-                    && host_bindings.action_for(sc) == Some(HostAction::ToggleSettingsPanel) =>
+                Event::KeyDown { repeat: false, .. }
+                    if has_typed_controls && hot == Some(HostAction::ToggleSettingsPanel) =>
                 {
                     settings_state.active = !settings_state.active;
                     settings_state.capturing = None;
@@ -868,12 +856,8 @@ pub fn run(
                 }
 
                 // Backtick (`): Toggle DIP switch panel (machines with DIP banks)
-                Event::KeyDown {
-                    scancode: Some(sc),
-                    repeat: false,
-                    ..
-                } if has_dip
-                    && host_bindings.action_for(sc) == Some(HostAction::ToggleDipPanel) =>
+                Event::KeyDown { repeat: false, .. }
+                    if has_dip && hot == Some(HostAction::ToggleDipPanel) =>
                 {
                     settings_state.dip_active = !settings_state.dip_active;
                     video.resize_window(
@@ -888,33 +872,23 @@ pub fn run(
                     );
                 }
 
-                Event::KeyDown {
-                    scancode: Some(sc),
-                    repeat: false,
-                    ..
-                } if host_bindings.action_for(sc) == Some(HostAction::ToggleThrottle) => {
+                Event::KeyDown { repeat: false, .. } if hot == Some(HostAction::ToggleThrottle) => {
                     throttle = !throttle;
                     if throttle {
                         next_frame_time = Instant::now() + frame_duration;
                     }
                 }
 
-                Event::KeyDown {
-                    scancode: Some(sc),
-                    repeat: false,
-                    ..
-                } if host_bindings.action_for(sc) == Some(HostAction::ToggleFps) => {
+                Event::KeyDown { repeat: false, .. } if hot == Some(HostAction::ToggleFps) => {
                     show_fps = !show_fps;
                     fps_smoothed = machine.frame_rate_hz();
                     fps_last_instant = Instant::now();
                 }
 
-                // Mouse grab toggle (F11)
-                Event::KeyDown {
-                    scancode: Some(sc),
-                    repeat: false,
-                    ..
-                } if host_bindings.action_for(sc) == Some(HostAction::ToggleMouseGrab) => {
+                // Mouse grab toggle
+                Event::KeyDown { repeat: false, .. }
+                    if hot == Some(HostAction::ToggleMouseGrab) =>
+                {
                     mouse_grabbed = !mouse_grabbed;
                     sdl_context.mouse().set_relative_mouse_mode(mouse_grabbed);
                     // Ungrabbing stops mouse events reaching the game, so a
@@ -925,11 +899,7 @@ pub fn run(
                 }
 
                 // P: Toggle global pause (frontend-level control, not a game input)
-                Event::KeyDown {
-                    scancode: Some(sc),
-                    repeat: false,
-                    ..
-                } if host_bindings.action_for(sc) == Some(HostAction::TogglePause) => {
+                Event::KeyDown { repeat: false, .. } if hot == Some(HostAction::TogglePause) => {
                     debug_state.global_paused = !debug_state.global_paused;
                     eprintln!(
                         "{}",
@@ -941,12 +911,8 @@ pub fn run(
                     );
                 }
 
-                // Screenshot (F12)
-                Event::KeyDown {
-                    scancode: Some(sc),
-                    repeat: false,
-                    ..
-                } if host_bindings.action_for(sc) == Some(HostAction::Screenshot) => {
+                // Screenshot
+                Event::KeyDown { repeat: false, .. } if hot == Some(HostAction::Screenshot) => {
                     machine.render_frame(&mut framebuffer);
                     match crate::screenshot::save_screenshot(
                         &framebuffer,
@@ -1380,8 +1346,8 @@ pub fn run(
                         host_bindings.reset();
                         settings_state.host_reset_requested = false;
                     }
-                    for (action, sc) in settings_state.pending_host_rebind.drain(..) {
-                        host_bindings.rebind(action, sc);
+                    for (action, chord) in settings_state.pending_host_rebind.drain(..) {
+                        host_bindings.rebind(action, chord);
                     }
                     // Same for analog sensitivity / deadzone edits.
                     for change in settings_state.pending_tuning.drain(..) {
