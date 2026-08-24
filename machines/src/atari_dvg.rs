@@ -321,12 +321,55 @@ const INTENSITY_LUT: [u8; 16] = [
     0, 20, 40, 60, 80, 100, 120, 140, 160, 175, 190, 205, 220, 232, 244, 255,
 ];
 
+/// Focused beam spot diameter as a fraction of the tube's long axis.
+///
+/// The Atari colour XY monitors are 19 inch shadow-mask tubes, the same family
+/// as the raster monitors of the era, and two things bound the spot: the mask
+/// pitch, about 0.6 mm, below which nothing is resolvable, and the focused spot
+/// itself at about 0.7 mm. The long axis of a 19 inch 4:3 viewable area is about
+/// 360 mm. So the spot is 0.7/360 of the screen whatever coordinate space a
+/// particular generator uses, which works out at about 1.1 units on Tempest's
+/// 580, 1.8 on Quantum's 900, and 2.0 on the DVG's 1024.
+const BEAM_SPOT_FRACTION: f32 = 0.7 / 360.0;
+
+/// A Gaussian's standard deviation for a given full width at half maximum:
+/// `FWHM = 2*sqrt(2*ln 2)*sigma`.
+const FWHM_TO_SIGMA: f32 = 1.0 / 2.354_82;
+
+/// Floor on the spot's sigma, in output pixels.
+///
+/// Not a taste value: a Gaussian sampled on a unit grid has a residual ripple of
+/// about `2*exp(-2*pi^2*sigma^2)` depending on where its centre falls between
+/// samples, which is the spot aliasing against the grid. That ripple is a
+/// brightness that varies with the angle of the line, the very defect this
+/// rasterizer exists to fix, so sigma has to stay where the ripple is
+/// negligible: 0.4 gives 8%, 0.5 gives 1.5%, 0.6 gives 0.2%.
+///
+/// Tempest's physical spot works out slightly under this, so it renders a touch
+/// wider than the tube would. That is a limit of rasterizing at display-list
+/// resolution, not of the tube; the GL path draws at window resolution and can
+/// use the true figure.
+const MIN_SIGMA_PIXELS: f32 = 0.6;
+
+std::thread_local! {
+    /// Per-frame energy accumulator, kept across frames. See `rasterize_vectors`.
+    static ACCUMULATOR: std::cell::RefCell<Vec<f32>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
 /// Rasterize a display list of vector line segments into an RGB24 framebuffer.
 ///
-/// Uses Cohen-Sutherland line clipping followed by Bresenham line drawing
-/// with additive blending (saturating add) so crossing lines appear brighter.
-/// Coordinates may extend beyond the display bounds; clipping trims to the
-/// visible area. Vector Y=0 is at bottom; the framebuffer uses Y=0 at top.
+/// The beam is a round spot with a Gaussian profile, swept along each segment,
+/// so a line has real width and soft edges rather than being one hard pixel.
+/// Energy is deposited per unit *length*: a segment of length L emits L times
+/// its per-unit energy however it is angled, spread across the spot's profile.
+/// That is what the hardware does, and it is also what Bresenham could not do,
+/// since it lights one pixel per unit of x and so drew a 45 degree line at
+/// about 1/sqrt(2) of the brightness per unit length of a horizontal one.
+///
+/// Segments are clipped in parameter space to the visible area plus the spot's
+/// reach, so a vector running far off screen costs only the part that shows.
+/// Vector Y=0 is at bottom; the framebuffer uses Y=0 at top.
 ///
 /// `width` and `height` define the display dimensions (e.g. 1024×1024 for DVG,
 /// 580×570 for Tempest AVG).
@@ -341,136 +384,226 @@ pub(crate) fn rasterize_vectors(
 
     let w = width as i32;
     let h = height as i32;
-    let x_max = w - 1;
     let y_max = h - 1;
 
-    for line in display_list {
-        if line.intensity == 0 {
+    let sigma = (w.max(h) as f32 * BEAM_SPOT_FRACTION * FWHM_TO_SIGMA).max(MIN_SIGMA_PIXELS);
+    // Where the profile is cut off. Truncating leaves a step the height of the
+    // profile there, so it has to fall below one level of an 8-bit channel:
+    // 3 sigma is 1.1% of the peak and would show as a faint edge, 3.5 is 0.2%
+    // and rounds away.
+    let radius = (3.5 * sigma).ceil() as i32;
+
+    // The monitor's brightness control, set where an operator would set it: a
+    // full-intensity vector reaches full white along its centre and no further.
+    //
+    // Spreading a fixed energy across a wider spot lowers its peak, so without
+    // this a machine with a coarser coordinate space looks dimmer for no reason
+    // that is about the hardware. The peak of a unit-area Gaussian is
+    // 1/(sigma*sqrt(2*pi)), so its reciprocal is the gain that puts the centre
+    // of a line back at full scale, whatever the spot works out to.
+    let gain = sigma * (std::f32::consts::TAU).sqrt();
+
+    // Energy accumulates in float and is quantised once at the end. Summing
+    // 8-bit steps per segment would lose every contribution under half a step,
+    // which is most of the profile's skirt and all of a dim vector.
+    //
+    // The buffer is kept between frames rather than allocated per frame:
+    // `render_frame` takes `&self` so there is nowhere on the board to put it,
+    // and a screen's worth of fresh pages costs more in faults than the
+    // rasterizing does.
+    ACCUMULATOR.with_borrow_mut(|acc| {
+        let n = (w * h * 3) as usize;
+        if acc.len() < n {
+            acc.resize(n, 0.0);
+        }
+        acc[..n].fill(0.0);
+        let acc = &mut acc[..n];
+
+        // The profile, sampled once over the squared distances the sweep can
+        // produce, so the inner loop indexes a table instead of calling exp(). The
+        // table is fine enough that the step between neighbouring entries is under
+        // one level of an 8-bit channel.
+        let profile = beam_profile(sigma, radius);
+
+        // Rows that were actually touched, so a sparse frame does not pay to
+        // convert a screenful of untouched black at the end.
+        let (mut dirty_lo, mut dirty_hi) = (h, -1i32);
+
+        for line in display_list {
+            if line.intensity == 0 {
+                continue;
+            }
+            let brightness = INTENSITY_LUT[(line.intensity & 0xF) as usize] as f32 / 255.0 * gain;
+            let energy = [
+                brightness * line.r as f32,
+                brightness * line.g as f32,
+                brightness * line.b as f32,
+            ];
+
+            let (sy0, sy1) = if flip_y {
+                // Normal: vector Y=0 is bottom, screen Y=0 is top.
+                (y_max - line.y0, y_max - line.y1)
+            } else {
+                // ROT270: Y already maps to screen-Y directly.
+                (line.y0, line.y1)
+            };
+
+            let (lo, hi) = sweep_beam(
+                acc,
+                w,
+                h,
+                (line.x0 as f32, sy0 as f32),
+                (line.x1 as f32, sy1 as f32),
+                radius,
+                &profile,
+                energy,
+            );
+            dirty_lo = dirty_lo.min(lo);
+            dirty_hi = dirty_hi.max(hi);
+        }
+
+        if dirty_hi >= dirty_lo {
+            let from = (dirty_lo * w * 3) as usize;
+            let to = ((dirty_hi + 1) * w * 3) as usize;
+            for (out, e) in buffer[from..to].iter_mut().zip(acc[from..to].iter()) {
+                *out = e.clamp(0.0, 255.0) as u8;
+            }
+        }
+    });
+}
+
+/// The beam profile sampled against squared distance, for the sweep's inner
+/// loop to index rather than evaluating an exponential per pixel.
+///
+/// Entry `i` is the profile at `d^2 = i * radius^2 / (LEN - 1)`, and the
+/// profile has unit area across the line so that sweeping it deposits one unit
+/// of energy per unit of length.
+fn beam_profile(sigma: f32, radius: i32) -> Vec<f32> {
+    /// Long enough that the step between neighbouring entries stays under one
+    /// level of an 8-bit channel: the profile falls fastest at the centre, at
+    /// `1/(2*sigma^2)` per unit of squared distance.
+    const LEN: usize = 2048;
+
+    let norm = 1.0 / (sigma * std::f32::consts::TAU.sqrt());
+    let inv_two_sigma_sq = 1.0 / (2.0 * sigma * sigma);
+    let r2 = (radius * radius) as f32;
+
+    (0..LEN)
+        .map(|i| {
+            let d2 = r2 * i as f32 / (LEN - 1) as f32;
+            norm * (-d2 * inv_two_sigma_sq).exp()
+        })
+        .collect()
+}
+
+/// Sweep the beam spot from `p0` to `p1`, depositing `energy` per unit length.
+///
+/// Every pixel within the spot's reach of the segment gets the beam profile
+/// evaluated at its distance from the segment. Summed over the pixel grid, a
+/// profile of unit area deposits one unit of energy per unit of length, which
+/// is what makes the result independent of the angle of the line: the grid has
+/// unit density whichever way the segment runs, so the sum tracks the area
+/// integral and the area integral is just the length.
+///
+/// Distance is measured to the segment rather than to the infinite line, so the
+/// ends are round, which is what a round spot arriving and leaving looks like.
+///
+/// The work is proportional to the length times the spot's width, and the rows
+/// are windowed to the stadium around the segment, so a long diagonal costs its
+/// own length rather than the area of its bounding box.
+/// Returns the range of rows it touched, so the caller can convert only those.
+#[allow(clippy::too_many_arguments)]
+fn sweep_beam(
+    acc: &mut [f32],
+    w: i32,
+    h: i32,
+    p0: (f32, f32),
+    p1: (f32, f32),
+    radius: i32,
+    profile: &[f32],
+    energy: [f32; 3],
+) -> (i32, i32) {
+    let (dx, dy) = (p1.0 - p0.0, p1.1 - p0.1);
+    let len_sq = dx * dx + dy * dy;
+    let len = len_sq.sqrt();
+    let r = radius as f32;
+
+    let y_lo = (p0.1.min(p1.1) - r).floor().max(0.0) as i32;
+    let y_hi = (p0.1.max(p1.1) + r).ceil().min((h - 1) as f32) as i32;
+    if y_lo > y_hi {
+        return (h, -1);
+    }
+    let seg_x_lo = p0.0.min(p1.0) - r;
+    let seg_x_hi = p0.0.max(p1.0) + r;
+
+    let r2 = r * r;
+    let lut_scale = (profile.len() - 1) as f32 / r2;
+
+    for py in y_lo..=y_hi {
+        let y = py as f32;
+
+        // Where this row crosses the stadium: the slab around the infinite
+        // line, widened by whichever end caps reach this far.
+        let (mut x_min, mut x_max);
+        if dy.abs() > 1e-6 {
+            // |(-dy)*x + dx*y + c| <= r*len is the slab of half-width r.
+            let (a, b) = (-dy, dx);
+            let c = -(a * p0.0 + b * p0.1);
+            let rhs = r * len;
+            let lo = (-rhs - b * y - c) / a;
+            let hi = (rhs - b * y - c) / a;
+            x_min = lo.min(hi);
+            x_max = lo.max(hi);
+        } else {
+            x_min = seg_x_lo;
+            x_max = seg_x_hi;
+        }
+        for (cx, cy) in [p0, p1] {
+            let ddy = (y - cy).abs();
+            if ddy <= r {
+                let half = (r * r - ddy * ddy).sqrt();
+                x_min = x_min.min(cx - half);
+                x_max = x_max.max(cx + half);
+            }
+        }
+
+        // Clamp to the segment's own reach and to the screen, so the part of a
+        // vector that runs off the display costs nothing.
+        let x_from = x_min.max(seg_x_lo).max(0.0);
+        let x_to = x_max.min(seg_x_hi).min((w - 1) as f32);
+        if x_from > x_to {
             continue;
         }
-        let brightness = INTENSITY_LUT[(line.intensity & 0xF) as usize];
-        let br = ((brightness as u16 * line.r as u16) / 255) as u8;
-        let bg = ((brightness as u16 * line.g as u16) / 255) as u8;
-        let bb = ((brightness as u16 * line.b as u16) / 255) as u8;
 
-        let (sy0, sy1) = if flip_y {
-            // Normal: vector Y=0 is bottom, screen Y=0 is top.
-            (y_max - line.y0, y_max - line.y1)
-        } else {
-            // ROT270: Y already maps to screen-Y directly.
-            (line.y0, line.y1)
-        };
+        let row = (py * w) as usize;
+        for px in (x_from.floor() as i32)..=(x_to.ceil() as i32) {
+            if px < 0 || px >= w {
+                continue;
+            }
+            let x = px as f32;
 
-        // Clip line to display bounds (Cohen-Sutherland).
-        if let Some((cx0, cy0, cx1, cy1)) = clip_line(line.x0, sy0, line.x1, sy1, x_max, y_max) {
-            draw_line(buffer, cx0, cy0, cx1, cy1, w, [br, bg, bb]);
+            // Distance to the segment: project onto it, clamped to its ends.
+            let t = if len_sq > 0.0 {
+                (((x - p0.0) * dx + (y - p0.1) * dy) / len_sq).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let ex = x - (p0.0 + dx * t);
+            let ey = y - (p0.1 + dy * t);
+            let d2 = ex * ex + ey * ey;
+            if d2 > r2 {
+                continue;
+            }
+
+            let weight = profile[(d2 * lut_scale) as usize];
+            let o = (row + px as usize) * 3;
+            acc[o] += energy[0] * weight;
+            acc[o + 1] += energy[1] * weight;
+            acc[o + 2] += energy[2] * weight;
         }
     }
-}
 
-/// Cohen-Sutherland line clipping.
-/// Returns None if the line is entirely outside 0..x_max × 0..y_max.
-fn clip_line(
-    mut x0: i32,
-    mut y0: i32,
-    mut x1: i32,
-    mut y1: i32,
-    x_max: i32,
-    y_max: i32,
-) -> Option<(i32, i32, i32, i32)> {
-    const INSIDE: u8 = 0;
-    const LEFT: u8 = 1;
-    const RIGHT: u8 = 2;
-    const BOTTOM: u8 = 4;
-    const TOP: u8 = 8;
-
-    let outcode = |x: i32, y: i32| -> u8 {
-        let mut code = INSIDE;
-        if x < 0 {
-            code |= LEFT;
-        } else if x > x_max {
-            code |= RIGHT;
-        }
-        if y < 0 {
-            code |= TOP;
-        } else if y > y_max {
-            code |= BOTTOM;
-        }
-        code
-    };
-
-    let mut oc0 = outcode(x0, y0);
-    let mut oc1 = outcode(x1, y1);
-
-    loop {
-        if (oc0 | oc1) == INSIDE {
-            return Some((x0, y0, x1, y1));
-        }
-        if (oc0 & oc1) != 0 {
-            return None;
-        }
-
-        let oc_out = if oc0 != INSIDE { oc0 } else { oc1 };
-        let dx = x1 as i64 - x0 as i64;
-        let dy = y1 as i64 - y0 as i64;
-
-        let (nx, ny) = if oc_out & BOTTOM != 0 {
-            let nx = x0 as i64 + dx * (y_max as i64 - y0 as i64) / dy;
-            (nx as i32, y_max)
-        } else if oc_out & TOP != 0 {
-            let nx = x0 as i64 + dx * (0i64 - y0 as i64) / dy;
-            (nx as i32, 0)
-        } else if oc_out & RIGHT != 0 {
-            let ny = y0 as i64 + dy * (x_max as i64 - x0 as i64) / dx;
-            (x_max, ny as i32)
-        } else {
-            let ny = y0 as i64 + dy * (0i64 - x0 as i64) / dx;
-            (0, ny as i32)
-        };
-
-        if oc_out == oc0 {
-            x0 = nx;
-            y0 = ny;
-            oc0 = outcode(x0, y0);
-        } else {
-            x1 = nx;
-            y1 = ny;
-            oc1 = outcode(x1, y1);
-        }
-    }
-}
-
-/// Bresenham line drawing with additive blending.
-/// All coordinates must be within display bounds (pre-clipped).
-fn draw_line(buffer: &mut [u8], x0: i32, y0: i32, x1: i32, y1: i32, width: i32, rgb: [u8; 3]) {
-    let mut x = x0;
-    let mut y = y0;
-    let dx = (x1 - x0).abs();
-    let dy = -(y1 - y0).abs();
-    let sx: i32 = if x0 < x1 { 1 } else { -1 };
-    let sy: i32 = if y0 < y1 { 1 } else { -1 };
-    let mut err = dx + dy;
-
-    loop {
-        let offset = ((y * width + x) as usize) * 3;
-        buffer[offset] = buffer[offset].saturating_add(rgb[0]);
-        buffer[offset + 1] = buffer[offset + 1].saturating_add(rgb[1]);
-        buffer[offset + 2] = buffer[offset + 2].saturating_add(rgb[2]);
-
-        if x == x1 && y == y1 {
-            break;
-        }
-
-        let e2 = 2 * err;
-        if e2 >= dy {
-            err += dy;
-            x += sx;
-        }
-        if e2 <= dx {
-            err += dx;
-            y += sy;
-        }
-    }
+    (y_lo, y_hi)
 }
 
 // ---------------------------------------------------------------------------
@@ -481,6 +614,114 @@ fn draw_line(buffer: &mut [u8], x0: i32, y0: i32, x1: i32, y1: i32, width: i32, 
 mod tests {
     use super::*;
     use phosphor_core::core::AccessKind;
+
+    /// The beam rasterizer, on its own, without a machine around it.
+    mod beam {
+        use super::*;
+
+        const W: u32 = 256;
+        const H: u32 = 256;
+
+        fn white(x0: i32, y0: i32, x1: i32, y1: i32) -> VectorLine {
+            VectorLine {
+                x0,
+                y0,
+                x1,
+                y1,
+                intensity: 15,
+                r: 255,
+                g: 255,
+                b: 255,
+            }
+        }
+
+        fn render(lines: &[VectorLine]) -> Vec<u8> {
+            let mut buf = vec![0u8; (W * H * 3) as usize];
+            rasterize_vectors(lines, &mut buf, W, H, false);
+            buf
+        }
+
+        /// Total light emitted, summing one channel over the whole frame.
+        fn total_light(buf: &[u8]) -> u64 {
+            buf.iter().step_by(3).map(|&v| v as u64).sum()
+        }
+
+        fn peak(buf: &[u8]) -> u8 {
+            buf.iter().step_by(3).copied().max().unwrap_or(0)
+        }
+
+        #[test]
+        fn a_full_intensity_vector_reaches_full_white_at_its_centre() {
+            // The monitor's brightness control is set here: full intensity puts
+            // the centre of a line at full scale. Without that, spreading the
+            // beam's energy over a wider spot would make every machine dimmer
+            // in proportion to how coarse its coordinate space happens to be.
+            let buf = render(&[white(40, 128, 200, 128)]);
+            assert!(
+                peak(&buf) >= 250,
+                "a full-intensity line should peak at full white, got {}",
+                peak(&buf)
+            );
+        }
+
+        #[test]
+        fn brightness_per_unit_length_does_not_depend_on_angle() {
+            // The defect Bresenham had: it lights one pixel per unit of x, so a
+            // 45 degree line got about 1/sqrt(2) of the light per unit length of
+            // a horizontal one. Sweeping a spot deposits per unit *length*, so
+            // equal-length segments emit equal light whatever their angle.
+            let len = 100.0f32;
+            let horizontal = total_light(&render(&[white(70, 128, 70 + len as i32, 128)]));
+
+            let d = (len / std::f32::consts::SQRT_2).round() as i32;
+            let diagonal = total_light(&render(&[white(70, 80, 70 + d, 80 + d)]));
+
+            let ratio = diagonal as f64 / horizontal as f64;
+            assert!(
+                (0.95..=1.05).contains(&ratio),
+                "a diagonal of the same length emitted {ratio:.3} of the light of a horizontal one"
+            );
+        }
+
+        #[test]
+        fn splitting_a_vector_in_two_conserves_the_light_it_emits() {
+            // Energy is deposited per unit length, so where the display list
+            // happens to put its vertices cannot change how much light comes
+            // out. The two collinear halves share an endpoint, where the beam
+            // is stamped twice, so allow that one spot's worth of overlap.
+            let whole = total_light(&render(&[white(60, 128, 180, 128)]));
+            let halves = total_light(&render(&[
+                white(60, 128, 120, 128),
+                white(120, 128, 180, 128),
+            ]));
+
+            let ratio = halves as f64 / whole as f64;
+            assert!(
+                (0.98..=1.06).contains(&ratio),
+                "splitting the vector changed emitted light by a factor of {ratio:.3}"
+            );
+        }
+
+        #[test]
+        fn a_vector_running_off_screen_costs_only_the_part_that_shows() {
+            // The beam really does run off the screen (see the AVG's unclamped
+            // position), so the rasterizer has to clip rather than trust the
+            // coordinates, and must not light anything outside.
+            let buf = render(&[white(-100_000, 128, 100_000, 128)]);
+            assert!(peak(&buf) >= 250, "the visible part is still drawn");
+
+            // Nothing outside the row the line runs along, give or take the spot.
+            let mut stray = 0;
+            for y in 0..H as usize {
+                for x in 0..W as usize {
+                    if buf[(y * W as usize + x) * 3] > 0 && y.abs_diff(128) > 4 {
+                        stray += 1;
+                    }
+                }
+            }
+            assert_eq!(stray, 0, "light landed away from the vector");
+        }
+    }
 
     mod debug_events {
         use super::*;
