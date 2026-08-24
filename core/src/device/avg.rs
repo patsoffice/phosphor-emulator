@@ -23,11 +23,31 @@
 //! handlers `4`–`7` are strobe0–strobe3 (normalize, binary scale, color/branch,
 //! draw).
 //!
-//! [`Avg::execute`] runs that loop directly, so per-instruction timing falls
-//! out of the PROM rather than being assumed: the sequencer is clocked at
-//! master/8, each state costs 8 master-clock cycles, and strobe3 adds the beam
-//! time of the vector it draws. The total is reported by
-//! [`Avg::run_cycles`] and is what a board converts into its VG_HALT window.
+//! [`Avg::step`] runs that loop directly, so per-instruction timing falls out
+//! of the PROM rather than being assumed: the sequencer is clocked at master/8,
+//! each state costs 8 master-clock cycles, and strobe3 adds the beam time of
+//! the vector it draws.
+//!
+//! # Running in step with the CPU
+//!
+//! The generator is a second bus master, not a subroutine. It walks vector
+//! memory on its own clock while the CPU rewrites that same memory for the next
+//! frame, and the two genuinely overlap: the games whose list loops forever
+//! (Tempest, Quantum) rely on it, and the hardware is built so the generator
+//! reads between the CPU's writes rather than being fenced off from them.
+//!
+//! So a board hands the generator a slice of time per CPU cycle and the regions
+//! themselves ([`VectorMemory`]), rather than running the whole list at the GO
+//! write against a snapshot. The difference is not academic. A snapshot taken
+//! while the CPU is part way through writing its list contains no terminating
+//! branch, and a generator that runs it to completion in zero time walks off
+//! the end of the list and draws whatever the rest of memory happens to hold.
+//! Stepped in time, the CPU finishes the list underneath a generator that is
+//! still walking it, which is what the hardware does.
+//!
+//! VG_HALT follows from this rather than being modelled separately: the halt is
+//! visible exactly while the generator is between a GO and the HALT opcode that
+//! ends its list, so a game polling it waits as long as the beam really takes.
 //!
 //! [`Avg::load_state_prom`] installs the game's own copy of that table; a
 //! built-in default stands in until it does.
@@ -156,13 +176,23 @@ pub struct Avg {
     /// sequencer parks in the table's all-zero lower half.
     halted: bool,
 
-    /// Master-clock cycles between the GO write and the halt becoming visible.
-    /// We walk the vector list in one go, but the hardware takes real time to
-    /// do it and holds VG_HALT low meanwhile — games poll that flag, so a
-    /// generator that is instantly done lets them do more work per frame than
-    /// the hardware would. The board converts this to its own clock and
-    /// reports "busy" for that long.
+    /// Master-clock cycles between the GO write and the halt becoming visible,
+    /// sampled on the state that raises the halt. An observable for tests and
+    /// the debug UI: it is what the sequencer's own timing works out to, so a
+    /// change in the PROM or in a handler's beam charge shows up here.
     run_cycles: u32,
+
+    /// Master-clock cycles consumed since the last [`go`](Self::go).
+    elapsed: u32,
+
+    /// Master-clock cycles owed to the sequencer but not yet spent.
+    ///
+    /// [`step`](Self::step) adds the board's slice of time here and runs states
+    /// while it is positive. A state charges 8 cycles plus whatever beam time
+    /// strobe3 spent, and a long vector can cost far more than one slice, so
+    /// this goes negative and the generator stays busy across the following
+    /// slices, exactly as the beam does.
+    pending: i32,
 
     /// The 256×4 next-state PROM (low nibbles), initially the built-in
     /// [`default_state_prom`] and replaced by the game's own via
@@ -184,9 +214,55 @@ pub struct Avg {
 /// only the *number* of states varies, and that comes from the state PROM.
 const AVG_CYCLES_PER_STATE: u32 = 8;
 
-/// Upper bound on states per [`Avg::execute`] call, so a vector list that
-/// neither halts nor branches to zero cannot spin forever. Real lists run a
-/// few thousand instructions of 3–8 states each.
+/// The generator's view of vector memory, borrowed live from the board.
+///
+/// The AVG reads its instructions out of memory the CPU is still writing, and
+/// on hardware those two are genuinely concurrent: the generator walks the list
+/// while the game rewrites it for the next frame. So a board hands over the
+/// regions themselves rather than a snapshot, and [`Avg::step`] reads through
+/// them as it goes.
+///
+/// The address space is one contiguous byte range with RAM at the bottom and,
+/// on the boards that have one, vector ROM at `rom_base`. Reads outside both
+/// regions return 0.
+pub struct VectorMemory<'a> {
+    ram: &'a [u8],
+    rom: &'a [u8],
+    rom_base: usize,
+}
+
+impl<'a> VectorMemory<'a> {
+    /// An address space that is all RAM, for a board with no vector ROM.
+    pub fn ram_only(ram: &'a [u8]) -> Self {
+        Self {
+            ram,
+            rom: &[],
+            rom_base: usize::MAX,
+        }
+    }
+
+    /// RAM from 0, vector ROM from `rom_base`.
+    pub fn split(ram: &'a [u8], rom: &'a [u8], rom_base: usize) -> Self {
+        Self { ram, rom, rom_base }
+    }
+
+    fn byte(&self, addr: usize) -> u8 {
+        if addr >= self.rom_base {
+            self.rom.get(addr - self.rom_base).copied().unwrap_or(0)
+        } else {
+            self.ram.get(addr).copied().unwrap_or(0)
+        }
+    }
+}
+
+/// Upper bound on states for [`Avg::run_to_stop`], so a test list that neither
+/// halts nor branches to zero cannot spin forever. Real lists run a few
+/// thousand instructions of 3-8 states each.
+///
+/// [`Avg::step`] needs no such bound: every state charges the sequencer at
+/// least [`AVG_CYCLES_PER_STATE`], so a slice of time buys a bounded number of
+/// them however the list is shaped.
+#[cfg(test)]
 const MAX_STATES: u32 = 500_000;
 
 /// The state each opcode's sequence runs through, in order, starting from the
@@ -274,6 +350,8 @@ impl Avg {
             flip_y: false,
             halted: true,
             run_cycles: 0,
+            elapsed: 0,
+            pending: 0,
             state_prom: default_state_prom(),
             state_latch: 0,
             frame_done: false,
@@ -292,6 +370,11 @@ impl Avg {
         self.sp = 0;
         self.halted = false;
         self.run_cycles = 0;
+        self.elapsed = 0;
+        // Time owed to a run that is being restarted is not owed any more. The
+        // GO write restarts the sequencer where it stands rather than letting
+        // the previous run's beam debt delay the new one.
+        self.pending = 0;
     }
 
     /// Returns true if the AVG has halted.
@@ -340,12 +423,12 @@ impl Avg {
     ///
     /// Tempest addresses vector memory as `pc ^ 1`, Star Wars in native order,
     /// and Quantum reads the big-endian word the counter is inside.
-    fn update_databus(&mut self, vmem: &[u8]) {
-        let byte = |i: usize| u16::from(vmem.get(i).copied().unwrap_or(0));
+    fn update_databus(&mut self, mem: &VectorMemory) {
+        let byte = |i: usize| u16::from(mem.byte(i));
         self.data = match self.variant {
             AvgVariant::Tempest => byte(usize::from(self.pc) ^ 1),
             AvgVariant::StarWars => byte(usize::from(self.pc)),
-            AvgVariant::Quantum => Self::read_word_be(vmem, self.pc & !1),
+            AvgVariant::Quantum => Self::read_word_be(mem, self.pc & !1),
         };
     }
 
@@ -379,6 +462,8 @@ impl Avg {
         self.data = 0;
         self.frame_done = false;
         self.run_cycles = 0;
+        self.elapsed = 0;
+        self.pending = 0;
         self.halted = true;
         self.has_prev = false;
         self.xpos = self.xcenter;
@@ -388,55 +473,105 @@ impl Avg {
         self.display_list.clear();
     }
 
-    /// Run the sequencer until the vector list halts or branches to address 0.
+    /// Clock the sequencer once and return the master-clock cycles it took.
     ///
-    /// `vmem` is the combined vector RAM + ROM (8 KB for Tempest).
-    /// `color_ram` is the 16-entry color RAM for Tempest/Quantum color lookup.
+    /// One state: look the next state up in the PROM, run its handler if ST3
+    /// is set, and charge [`AVG_CYCLES_PER_STATE`] plus whatever beam time the
+    /// handler consumed. Per-instruction timing therefore falls out of the PROM
+    /// rather than being assumed anywhere.
+    fn run_one_state(&mut self, mem: &VectorMemory, color_ram: &[u8; 16]) -> u32 {
+        self.frame_done = false;
+        self.state_latch = (self.state_latch & 0x10) | self.state_prom[self.state_addr()];
+
+        // ST3 gates dispatch: states 8-F run handlers 0-7, states 0-7 are
+        // idle waits that still cost the sequencer a clock.
+        let mut charge = 0;
+        if self.state_latch & 8 != 0 {
+            self.update_databus(mem);
+            charge += self.dispatch(self.state_latch & 7, color_ram);
+        }
+        self.elapsed = self.elapsed.saturating_add(charge);
+
+        // The halt only becomes visible once the CPU has had the cycles the
+        // generator spent getting here, so sample the count on the state that
+        // raises it rather than at the end of the run.
+        if self.halted && self.state_latch & 0x10 == 0 {
+            self.run_cycles = self.elapsed;
+        }
+
+        self.state_latch = (u8::from(self.halted) << 4) | (self.state_latch & 0x0F);
+        self.elapsed = self.elapsed.saturating_add(AVG_CYCLES_PER_STATE);
+        charge + AVG_CYCLES_PER_STATE
+    }
+
+    /// Advance the sequencer by `cycles` of master-clock time.
     ///
-    /// Each iteration is one state: look the next state up in the PROM, run
-    /// its handler if ST3 is set, and charge [`AVG_CYCLES_PER_STATE`] plus
-    /// whatever beam time the handler consumed. That accumulated count is what
-    /// [`run_cycles`](Self::run_cycles) reports, sampled at the moment the
-    /// halt flag is raised.
+    /// This is how a board drives the generator: a slice of time per CPU cycle
+    /// (or per group of them), against vector memory the CPU is still writing.
+    /// The generator gets through however many states that time buys, which is
+    /// what makes a list the game is part way through rewriting work out the
+    /// same way it does on hardware. The CPU finishes the list underneath a
+    /// generator that is still walking it, instead of the generator seeing a
+    /// half-written snapshot and running off the end of it.
+    ///
+    /// Returns true if a complete pass over the list finished during this
+    /// slice, which is the board's cue to take the display list. The two list
+    /// styles end a pass differently and this covers both: Tempest and Quantum
+    /// loop forever and branch back to address 0, where the generator carries
+    /// straight on into the next pass as the hardware does, while Star Wars
+    /// ends its list with HALT and parks there.
+    ///
+    /// A halted generator is parked in the PROM's all-zero half and consumes no
+    /// time until the next [`go`](Self::go).
+    pub fn step(&mut self, cycles: u32, mem: &VectorMemory, color_ram: &[u8; 16]) -> bool {
+        if self.halted {
+            return false;
+        }
+
+        self.pending = self.pending.saturating_add_unsigned(cycles);
+        let mut finished = false;
+        while self.pending > 0 {
+            let spent = self.run_one_state(mem, color_ram);
+            self.pending -= spent as i32;
+            finished |= self.frame_done;
+            if self.halted {
+                // Reached a HALT: the list is drawn and nothing more happens
+                // until the next GO, so do not carry a beam debt across the
+                // park.
+                self.pending = 0;
+                finished = true;
+                break;
+            }
+        }
+        finished
+    }
+
+    /// Run the sequencer to a stop against a fixed snapshot of vector memory.
+    ///
+    /// This is the bring-up and unit-test driver, not how a board runs the
+    /// generator: it walks the list with no time passing, so nothing can write
+    /// vector memory underneath it. Use [`step`](Self::step) for that.
     ///
     /// Returns true if a frame was completed (a branch to address 0). Games
     /// whose list ends in HALT return false; their frame is delimited by the
     /// halt instead.
-    pub fn execute(&mut self, vmem: &[u8], color_ram: &[u8; 16]) -> bool {
+    #[cfg(test)]
+    fn run_to_stop(&mut self, vmem: &[u8], color_ram: &[u8; 16]) -> bool {
+        let mem = VectorMemory::ram_only(vmem);
         self.frame_done = false;
-        let mut cycles = 0u32;
 
         for _ in 0..MAX_STATES {
-            self.state_latch = (self.state_latch & 0x10) | self.state_prom[self.state_addr()];
-
-            // ST3 gates dispatch: states 8-F run handlers 0-7, states 0-7 are
-            // idle waits that still cost the sequencer a clock.
-            if self.state_latch & 8 != 0 {
-                self.update_databus(vmem);
-                cycles += self.dispatch(self.state_latch & 7, color_ram);
-            }
-
-            // The halt only becomes visible once the CPU has had the cycles
-            // the generator spent getting here, so sample the count on the
-            // state that raises it rather than at the end of the run.
-            if self.halted && self.state_latch & 0x10 == 0 {
-                self.run_cycles = cycles;
-            }
-
-            self.state_latch = (u8::from(self.halted) << 4) | (self.state_latch & 0x0F);
-            cycles += AVG_CYCLES_PER_STATE;
+            self.run_one_state(&mem, color_ram);
 
             if self.halted {
-                // Parked in the PROM's zero half: nothing more happens until
-                // the next GO.
                 return false;
             }
             if self.frame_done {
-                // Tempest and Quantum never halt — their list loops forever
-                // and the branch back to address 0 delimits the frame. Stop
-                // there and report done so the board can flush and re-trigger.
+                // Tempest and Quantum never halt: their list loops forever and
+                // the branch back to address 0 delimits the frame. A board runs
+                // straight on through it; this driver stops so a test can look.
                 self.halted = true;
-                self.run_cycles = cycles;
+                self.run_cycles = self.elapsed;
                 return true;
             }
         }
@@ -474,11 +609,9 @@ impl Avg {
     ///
     /// Quantum's 68000 writes vector RAM as big-endian words, and the AVG reads
     /// whole words (no XOR-1 byte swap), so the word at even PC is `[hi, lo]`.
-    fn read_word_be(vmem: &[u8], addr: u16) -> u16 {
+    fn read_word_be(mem: &VectorMemory, addr: u16) -> u16 {
         let i = addr as usize;
-        let hi = vmem.get(i).copied().unwrap_or(0);
-        let lo = vmem.get(i + 1).copied().unwrap_or(0);
-        u16::from_be_bytes([hi, lo])
+        u16::from_be_bytes([mem.byte(i), mem.byte(i + 1)])
     }
 
     // -----------------------------------------------------------------------
@@ -958,9 +1091,22 @@ impl Saveable for Avg {
         w.write_bool(self.flip_y);
         w.write_bool(self.halted);
         // The sequencer parks between runs, and where it parked decides how
-        // the next GO starts. Everything else the handlers latch (op, dvx,
-        // dvy, timer, …) is rebuilt from vector memory within a single run.
+        // the next GO starts.
         w.write_u8(self.state_latch);
+        // The generator runs in step with the CPU, so a snapshot lands part way
+        // through an instruction as often as not. Everything the handlers have
+        // latched so far has to come back with it, or the instruction in flight
+        // finishes with operands from whatever ran before the load.
+        w.write_u8(self.op);
+        w.write_u16_le(self.data);
+        w.write_u16_le(self.dvx);
+        w.write_u16_le(self.dvy);
+        w.write_u8(self.dvy12);
+        w.write_u8(self.int_latch);
+        w.write_u16_le(self.timer);
+        w.write_i32_le(self.pending);
+        w.write_u32_le(self.elapsed);
+        w.write_u32_le(self.run_cycles);
     }
 
     fn load_state(
@@ -982,6 +1128,16 @@ impl Saveable for Avg {
         self.flip_y = r.read_bool()?;
         self.halted = r.read_bool()?;
         self.state_latch = r.read_u8()?;
+        self.op = r.read_u8()?;
+        self.data = r.read_u16_le()?;
+        self.dvx = r.read_u16_le()?;
+        self.dvy = r.read_u16_le()?;
+        self.dvy12 = r.read_u8()?;
+        self.int_latch = r.read_u8()?;
+        self.timer = r.read_u16_le()?;
+        self.pending = r.read_i32_le()?;
+        self.elapsed = r.read_u32_le()?;
+        self.run_cycles = r.read_u32_le()?;
         self.has_prev = false;
         self.display_list.clear();
         Ok(())
@@ -1057,7 +1213,7 @@ mod tests {
         let color_ram = default_color_ram();
         let mut avg = Avg::new(1024, 1024);
         avg.go();
-        avg.execute(&vmem, &color_ram);
+        avg.run_to_stop(&vmem, &color_ram);
         assert!(avg.is_halted());
     }
 
@@ -1070,7 +1226,7 @@ mod tests {
         let vmem = build_vmem(&[0x00, 0x20]); // HALT
         let mut avg = Avg::new(1024, 1024);
         avg.go();
-        avg.execute(&vmem, &default_color_ram());
+        avg.run_to_stop(&vmem, &default_color_ram());
         assert!(avg.is_halted());
         assert_eq!(avg.run_cycles(), 2 * 8);
     }
@@ -1080,11 +1236,11 @@ mod tests {
         let vmem = build_vmem(&[0x00, 0x20]); // HALT
         let mut avg = Avg::new(1024, 1024);
         avg.go();
-        avg.execute(&vmem, &default_color_ram());
+        avg.run_to_stop(&vmem, &default_color_ram());
         let first = avg.run_cycles();
 
         avg.go();
-        avg.execute(&vmem, &default_color_ram());
+        avg.run_to_stop(&vmem, &default_color_ram());
         // GO clears the halt flag but not the state latch, so the second run
         // still addresses the PROM's parked (halted) half once before it
         // latches an opcode — one idle state the first run never paid for.
@@ -1104,7 +1260,7 @@ mod tests {
         let mut avg = Avg::new(1024, 1024);
         avg.load_state_prom(&prom);
         avg.go();
-        avg.execute(&vmem, &default_color_ram());
+        avg.run_to_stop(&vmem, &default_color_ram());
         assert!(avg.is_halted());
         assert_eq!(avg.run_cycles(), 3 * 8);
     }
@@ -1120,7 +1276,7 @@ mod tests {
         ]);
         let mut avg = Avg::new(1024, 1024);
         avg.go();
-        avg.execute(&vmem, &default_color_ram());
+        avg.run_to_stop(&vmem, &default_color_ram());
         assert_eq!(avg.run_cycles(), 10 * 8 + 0x2000);
     }
 
@@ -1149,7 +1305,7 @@ mod tests {
         let color_ram = default_color_ram();
         let mut avg = Avg::new(1024, 1024);
         avg.go();
-        let frame = avg.execute(&vmem, &color_ram);
+        let frame = avg.run_to_stop(&vmem, &color_ram);
         assert!(frame, "expected frame boundary on JSR to address 0");
     }
 
@@ -1162,7 +1318,7 @@ mod tests {
         let color_ram = default_color_ram();
         let mut avg = Avg::new(1024, 1024);
         avg.go();
-        let frame = avg.execute(&vmem, &color_ram);
+        let frame = avg.run_to_stop(&vmem, &color_ram);
         assert!(frame, "expected frame boundary on JMP to address 0");
     }
 
@@ -1178,7 +1334,7 @@ mod tests {
         let color_ram = default_color_ram();
         let mut avg = Avg::new(1024, 1024);
         avg.go();
-        avg.execute(&vmem, &color_ram);
+        avg.run_to_stop(&vmem, &color_ram);
         assert!(
             avg.is_halted(),
             "CNTR should advance PC by 2, reaching HALT at offset 2"
@@ -1197,7 +1353,7 @@ mod tests {
         let color_ram = default_color_ram();
         let mut avg = Avg::new(1024, 1024);
         avg.go();
-        avg.execute(&vmem, &color_ram);
+        avg.run_to_stop(&vmem, &color_ram);
         assert!(avg.is_halted());
         assert_eq!(avg.intensity, 0xA);
     }
@@ -1247,7 +1403,7 @@ mod tests {
         let color_ram = default_color_ram();
         let mut avg = Avg::new(1024, 1024);
         avg.go();
-        let frame = avg.execute(&vmem, &color_ram);
+        let frame = avg.run_to_stop(&vmem, &color_ram);
         assert!(!frame, "HALT should not signal frame boundary");
         assert!(avg.is_halted(), "AVG should be halted after HALT");
 
@@ -1277,7 +1433,7 @@ mod tests {
         let vmem = build_vmem_be(&[0x2000]);
         let mut avg = Avg::with_variant(AvgVariant::Quantum, 900, 600);
         avg.go();
-        avg.execute(&vmem, &[0u8; 16]);
+        avg.run_to_stop(&vmem, &[0u8; 16]);
         assert!(avg.is_halted());
     }
 
@@ -1287,7 +1443,7 @@ mod tests {
         let vmem = build_vmem_be(&[0xE000]);
         let mut avg = Avg::with_variant(AvgVariant::Quantum, 900, 600);
         avg.go();
-        assert!(avg.execute(&vmem, &[0u8; 16]));
+        assert!(avg.run_to_stop(&vmem, &[0u8; 16]));
     }
 
     #[test]
@@ -1300,7 +1456,7 @@ mod tests {
         let vmem = build_vmem_be(&[0x7380, 0x68A5, 0x2000]);
         let mut avg = Avg::with_variant(AvgVariant::Quantum, 900, 600);
         avg.go();
-        avg.execute(&vmem, &[0u8; 16]);
+        avg.run_to_stop(&vmem, &[0u8; 16]);
         assert!(avg.is_halted());
         assert_eq!(avg.scale, 0x80);
         assert_eq!(avg.bin_scale, 3);
@@ -1315,7 +1471,7 @@ mod tests {
         let vmem = build_vmem_be(&[0x0400, 0x8400, 0x2000]);
         let mut avg = Avg::with_variant(AvgVariant::Quantum, 900, 600);
         avg.go();
-        let frame = avg.execute(&vmem, &[0u8; 16]);
+        let frame = avg.run_to_stop(&vmem, &[0u8; 16]);
         assert!(!frame);
         assert!(avg.is_halted());
         let list = avg.take_display_list();
@@ -1336,10 +1492,106 @@ mod tests {
         let vmem = build_vmem_be(&[0x0400, 0x8400, 0x0400, 0x8400, 0x2000]);
         let mut avg = Avg::with_variant(AvgVariant::Quantum, 900, 600);
         avg.go();
-        avg.execute(&vmem, &color_ram);
+        avg.run_to_stop(&vmem, &color_ram);
         let list = avg.take_display_list();
         let drawn = list.iter().find(|l| l.intensity != 0).expect("a lit line");
         assert_eq!((drawn.r, drawn.g, drawn.b), (0x00, 0x54, 0xCE));
+    }
+
+    // --- Running in step with the CPU ------------------------------------
+
+    #[test]
+    fn a_write_that_lands_mid_pass_is_seen_by_the_generator() {
+        // The point of stepping the generator in time: the CPU rewrites the
+        // list while the generator is part way through walking it, and the
+        // hardware lets those writes land between states. A snapshot taken at
+        // the GO write cannot do this, and a list the CPU had not finished
+        // writing when the GO landed would be walked off the end of.
+        let mut words = vec![
+            0x0400, 0x8400, // VCTR
+            0x0400, 0x8400, // VCTR
+            0x2000, // HALT, rewritten below into a third VCTR
+        ];
+        let mut vmem = build_vmem_be(&words);
+
+        // The other half of the experiment: left alone, this list draws two
+        // vectors. Anything the stepped run draws beyond that came from the
+        // rewrite, and could not have come from the list as it stood at GO.
+        let mut baseline = Avg::with_variant(AvgVariant::Quantum, 600, 900);
+        baseline.go();
+        baseline.run_to_stop(&vmem, &[0u8; 16]);
+        assert_eq!(baseline.take_display_list().len(), 2);
+
+        let mut avg = Avg::with_variant(AvgVariant::Quantum, 600, 900);
+        avg.go();
+
+        let mut patched = false;
+        for _ in 0..2000 {
+            let stopped = {
+                let mem = VectorMemory::ram_only(&vmem);
+                avg.step(64, &mem, &[0u8; 16])
+            };
+            if stopped {
+                break;
+            }
+            // As soon as the first vector has been drawn, the generator is
+            // committed to this run and has not read word 4 yet.
+            if !patched && !avg.display_list.is_empty() {
+                words[4] = 0x0400;
+                words.push(0x8400);
+                words.push(0x2000); // HALT after the new vector
+                vmem = build_vmem_be(&words);
+                patched = true;
+            }
+        }
+
+        assert!(patched, "the run never got far enough to rewrite the list");
+        assert!(avg.is_halted(), "the rewritten HALT should have stopped it");
+        assert_eq!(
+            avg.take_display_list().len(),
+            3,
+            "the third vector was written after the run started and must still be drawn"
+        );
+    }
+
+    #[test]
+    fn beam_time_is_charged_as_elapsed_time() {
+        // strobe3 charges the vector's travel time, and that time has to be
+        // spent before the generator moves on, or a list of long vectors would
+        // draw in no time at all and the game would see VG_HALT come back
+        // immediately. A full-scale Quantum vector runs the beam 0x4000
+        // cycles, so a slice far shorter than that cannot get past it.
+        let vmem = build_vmem_be(&[0x07FF, 0x87FF, 0x2000]);
+        let mem = VectorMemory::ram_only(&vmem);
+
+        let mut avg = Avg::with_variant(AvgVariant::Quantum, 600, 900);
+        avg.go();
+
+        // Enough slices to walk the states, nowhere near enough for the beam.
+        for _ in 0..16 {
+            assert!(!avg.step(8, &mem, &[0u8; 16]));
+            assert!(!avg.is_halted(), "the beam is still travelling");
+        }
+
+        // Hand it the rest of the vector's travel time and it finishes.
+        assert!(avg.step(0x4000, &mem, &[0u8; 16]));
+        assert!(avg.is_halted());
+    }
+
+    #[test]
+    fn a_halted_generator_consumes_no_time() {
+        let vmem = build_vmem_be(&[0x2000]); // HALT
+        let mem = VectorMemory::ram_only(&vmem);
+
+        let mut avg = Avg::with_variant(AvgVariant::Quantum, 600, 900);
+        avg.go();
+        while !avg.is_halted() {
+            avg.step(64, &mem, &[0u8; 16]);
+        }
+
+        let parked = avg.pc;
+        assert!(!avg.step(1_000_000, &mem, &[0u8; 16]));
+        assert_eq!(avg.pc, parked, "a parked generator does not advance");
     }
 
     // --- Beam flipping ---------------------------------------------------
@@ -1386,7 +1638,7 @@ mod tests {
         let mut avg = Avg::with_variant(AvgVariant::Quantum, 600, 900);
         avg.set_flip(false, true);
         avg.go();
-        avg.execute(&vmem, &[0u8; 16]);
+        avg.run_to_stop(&vmem, &[0u8; 16]);
 
         // The premise: without an excursion past 2^30 this test proves nothing,
         // because the doubled distance would still fit and the old expression
@@ -1428,7 +1680,7 @@ mod tests {
         let color_ram = default_color_ram();
         let mut avg = Avg::new(1024, 1024);
         avg.go();
-        avg.execute(&vmem, &color_ram);
+        avg.run_to_stop(&vmem, &color_ram);
         assert!(avg.is_halted());
         assert_eq!(avg.scale, 0x80);
         assert_eq!(avg.bin_scale, 3);
@@ -1447,12 +1699,12 @@ mod tests {
         // (0x00) → op 0 (VCTR), so it does not halt.
         let mut sw = Avg::with_variant(AvgVariant::StarWars, 1024, 1024);
         sw.go();
-        sw.execute(&build_vmem(&[0x20, 0x00]), &default_color_ram());
+        sw.run_to_stop(&build_vmem(&[0x20, 0x00]), &default_color_ram());
         assert!(sw.is_halted(), "Star Wars decodes [0x20,0x00] as HALT");
 
         let mut tempest = Avg::new(1024, 1024);
         tempest.go();
-        tempest.execute(&build_vmem(&[0x20, 0x00]), &default_color_ram());
+        tempest.run_to_stop(&build_vmem(&[0x20, 0x00]), &default_color_ram());
         assert!(
             !tempest.is_halted(),
             "Tempest reads the swapped byte order and never reaches HALT"
@@ -1466,7 +1718,7 @@ mod tests {
         let vmem = build_vmem(&[0x61, 0xF0, 0x20, 0x00]); // STAT, HALT
         let mut sw = Avg::with_variant(AvgVariant::StarWars, 1024, 1024);
         sw.go();
-        sw.execute(&vmem, &default_color_ram());
+        sw.run_to_stop(&vmem, &default_color_ram());
         assert!(sw.is_halted());
         assert_eq!(sw.intensity, 0xF0);
         assert_eq!(sw.color, 1);
@@ -1489,7 +1741,7 @@ mod tests {
         ]);
         let mut sw = Avg::with_variant(AvgVariant::StarWars, 1024, 1024);
         sw.go();
-        sw.execute(&vmem, &default_color_ram());
+        sw.run_to_stop(&vmem, &default_color_ram());
         assert!(sw.is_halted());
 
         let list = sw.take_display_list();
@@ -1513,7 +1765,7 @@ mod tests {
         ]);
         let mut sw = Avg::with_variant(AvgVariant::StarWars, 1024, 1024);
         sw.go();
-        sw.execute(&vmem, &default_color_ram());
+        sw.run_to_stop(&vmem, &default_color_ram());
         let list = sw.take_display_list();
         let drawn = list.iter().find(|l| l.intensity != 0).expect("a lit line");
         assert_eq!((drawn.r, drawn.g, drawn.b), (0xFF, 0x00, 0x00));

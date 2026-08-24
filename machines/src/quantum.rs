@@ -50,7 +50,7 @@ use phosphor_core::core::{Bus, BusMaster, TimingConfig};
 use phosphor_core::cpu::m68000::M68000;
 use phosphor_core::cpu::state::M68000State;
 use phosphor_core::cpu::{Cpu, CpuStateTrait};
-use phosphor_core::device::avg::{Avg, AvgVariant};
+use phosphor_core::device::avg::{Avg, AvgVariant, VectorMemory};
 use phosphor_core::device::dvg::VectorLine;
 use phosphor_core::device::pokey::Pokey;
 use phosphor_macros::{BusDebug, MemoryRegion};
@@ -282,6 +282,10 @@ const IRQ_PERIOD_CYCLES: u64 = 24_576;
 const POKEY_CLOCK_HZ: u32 = 600_000;
 const CPU_PER_POKEY: u64 = 10;
 
+/// AVG master-clock cycles per 68000 cycle. The 12.096 MHz crystal drives the
+/// vector generator directly and the CPU through a divide-by-2.
+const AVG_CYCLES_PER_CPU_CYCLE: u32 = 2;
+
 /// Watchdog timeout in frames (~1 s at 60 Hz). Long enough to survive the
 /// boot-time delay loops, short enough to recover from a genuine hang.
 const WATCHDOG_FRAMES: u8 = 64;
@@ -493,13 +497,36 @@ impl QuantumBoard {
         self.avg.set_flip(data & 0x40 != 0, data & 0x80 != 0);
     }
 
-    /// Assemble vector memory and run the AVG to a frame boundary.
+    /// VGGO: restart the vector generator at the top of the list.
+    ///
+    /// The generator then runs on its own clock from [`step_avg`], so this only
+    /// restarts it. Whatever it had drawn since the last frame boundary is
+    /// dropped: the game writes GO when it wants the list drawn from the top,
+    /// and a partial pass is not a frame.
+    ///
+    /// [`step_avg`]: Self::step_avg
     fn trigger_avg(&mut self) {
-        // Quantum has no vector ROM; the whole 0x800000 window is vector RAM.
-        let vmem = self.map.region_data(Region::VectorRam).to_vec();
         self.avg.go();
-        self.avg.execute(&vmem, &self.color_ram);
-        self.display_list = self.avg.take_display_list();
+        self.avg.take_display_list();
+    }
+
+    /// Advance the vector generator alongside the CPU.
+    ///
+    /// The 12.096 MHz crystal feeds the 68000 through a divide-by-2 and the
+    /// generator's own counter directly, so one CPU cycle is two AVG cycles.
+    /// The generator reads vector RAM live, which is the point: Quantum's list
+    /// loops forever and the CPU rewrites it underneath a generator that is
+    /// still walking it.
+    fn step_avg(&mut self) {
+        // Quantum has no vector ROM; the whole 0x800000 window is vector RAM.
+        let vmem = VectorMemory::ram_only(self.map.region_data(Region::VectorRam));
+        if self
+            .avg
+            .step(AVG_CYCLES_PER_CPU_CYCLE, &vmem, &self.color_ram)
+        {
+            // Branched back to address 0: that pass over the list is a frame.
+            self.display_list = self.avg.take_display_list();
+        }
     }
 
     /// Drain trackball accumulators into the 4-bit counters. Like Tempest's
@@ -526,6 +553,8 @@ impl QuantumBoard {
                 p.tick();
             }
         }
+
+        self.step_avg();
 
         if self.map.has_any_watchpoints() {
             let pc = cpu.at_instruction_boundary().then_some(cpu.pc);

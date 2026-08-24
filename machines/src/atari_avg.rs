@@ -5,7 +5,7 @@ use phosphor_core::core::machine::Renderable;
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::watchpoint::DebugAccessSource;
 use phosphor_core::cpu::m6502::M6502;
-use phosphor_core::device::avg::Avg;
+use phosphor_core::device::avg::{Avg, VectorMemory};
 use phosphor_core::device::dvg::VectorLine;
 use phosphor_macros::{BusDebug, DebugTrace, MemoryRegion};
 
@@ -46,6 +46,10 @@ pub const TIMING: TimingConfig = TimingConfig {
 
 /// IRQ period: master_clock / 4096 / 12 = 246.09375 Hz → 6144 CPU cycles.
 pub const IRQ_PERIOD_CYCLES: u64 = 6144;
+
+/// AVG master-clock cycles per CPU cycle. The 12.096 MHz crystal drives the
+/// vector generator directly and the 6502 through a divide-by-8.
+const AVG_CYCLES_PER_CPU_CYCLE: u32 = 8;
 
 // ---------------------------------------------------------------------------
 // Atari AVG board
@@ -130,6 +134,8 @@ impl AtariAvgBoard {
             let pc = cpu.at_instruction_boundary().then_some(cpu.pc as u32);
             self.map.latch_access_context(self.clock, pc);
         }
+
+        self.step_avg();
     }
 
     /// Board work after the CPU's cycle.
@@ -175,11 +181,14 @@ impl AtariAvgBoard {
         });
     }
 
-    /// Trigger the AVG: assemble vector memory and run to completion.
+    /// VGGO: restart the vector generator at the top of the list.
     ///
-    /// The AVG has a 13-bit (8 KB) byte address space:
-    ///   0x0000–0x0FFF  Vector RAM (4 KB)
-    ///   0x1000–0x1FFF  Vector ROM (4 KB)
+    /// The generator then runs on its own clock from [`step_avg`], so this only
+    /// restarts it, dropping whatever it had drawn since the last frame
+    /// boundary. Tempest's list loops forever and the branch back to address 0
+    /// is what delimits a frame; a partial pass is not one.
+    ///
+    /// [`step_avg`]: Self::step_avg
     pub fn trigger_avg(&mut self) {
         if self.debug_trace.enabled() {
             self.debug_trace.record(DebugEvent {
@@ -194,21 +203,38 @@ impl AtariAvgBoard {
                 )
             });
         }
-        let mut vmem = vec![0u8; 0x2000]; // 8 KB AVG address space
-        vmem[0x0000..0x1000].copy_from_slice(self.map.region_data(Region::VectorRam));
-        let vrom = self.map.region_data(Region::VectorRom);
-        let vrom_len = vrom.len().min(0x1000);
-        vmem[0x1000..0x1000 + vrom_len].copy_from_slice(&vrom[..vrom_len]);
-
-        // Get color RAM for Tempest color lookup
-        let color_ram_data = self.map.region_data(Region::ColorRam);
-        let mut color_ram = [0u8; 16];
-        let len = color_ram_data.len().min(16);
-        color_ram[..len].copy_from_slice(&color_ram_data[..len]);
-
         self.avg.go();
-        self.avg.execute(&vmem, &color_ram);
-        self.display_list = self.avg.take_display_list();
+        self.avg.take_display_list();
+    }
+
+    /// Advance the vector generator alongside the CPU.
+    ///
+    /// The 12.096 MHz crystal drives the generator directly and the 6502
+    /// through a divide-by-8, so one CPU cycle is eight AVG cycles. The
+    /// generator reads vector RAM live, so the CPU's writes land between states
+    /// the way they do on hardware rather than being frozen at the GO write.
+    ///
+    /// The AVG has a 13-bit (8 KB) byte address space:
+    ///   0x0000–0x0FFF  Vector RAM (4 KB)
+    ///   0x1000–0x1FFF  Vector ROM (4 KB)
+    pub fn step_avg(&mut self) {
+        let mem = VectorMemory::split(
+            self.map.region_data(Region::VectorRam),
+            self.map.region_data(Region::VectorRom),
+            0x1000,
+        );
+
+        // Color RAM is read live too: the game rewrites it while the generator
+        // is running, and a colour latched by strobe2 is looked up at the draw.
+        let mut color_ram = [0u8; 16];
+        let data = self.map.region_data(Region::ColorRam);
+        let len = data.len().min(16);
+        color_ram[..len].copy_from_slice(&data[..len]);
+
+        if self.avg.step(AVG_CYCLES_PER_CPU_CYCLE, &mem, &color_ram) {
+            // Branched back to address 0: that pass over the list is a frame.
+            self.display_list = self.avg.take_display_list();
+        }
     }
 
     /// Reset board state. CPU reset must be done separately by the wrapper.

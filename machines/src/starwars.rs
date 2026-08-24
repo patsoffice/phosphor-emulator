@@ -28,7 +28,7 @@ use phosphor_core::core::{AccessKind, AddressSpace16, Bus, BusMaster, TimingConf
 use phosphor_core::cpu::Cpu;
 use phosphor_core::cpu::m6809::M6809;
 use phosphor_core::device::adc0809::Adc0809;
-use phosphor_core::device::avg::{Avg, AvgVariant};
+use phosphor_core::device::avg::{Avg, AvgVariant, VectorMemory};
 use phosphor_core::device::dvg::VectorLine;
 use phosphor_core::device::pokey::Pokey;
 use phosphor_core::device::riot6532::Riot6532;
@@ -224,6 +224,10 @@ pub const TIMING: TimingConfig = TimingConfig {
 
 /// Periodic IRQ: 3 kHz / 12 ≈ 246.09 Hz → every 6144 CPU cycles.
 const IRQ_PERIOD_CYCLES: u64 = 6144;
+
+/// AVG master-clock cycles per CPU cycle. The 12.096 MHz crystal drives the
+/// vector generator directly and the 6809E through a divide-by-8.
+const AVG_CYCLES_PER_CPU_CYCLE: u32 = 8;
 
 /// POKEY / sound-CPU clock: master / 8 = 1.512 MHz.
 const SOUND_CLOCK_HZ: u32 = 1_512_000;
@@ -737,13 +741,10 @@ pub(crate) struct StarWarsBoard {
     pub(crate) dsw0: u8,
     pub(crate) dsw1: u8,
 
-    /// CPU cycles remaining before the vector generator finishes its run and
-    /// VG_HALT (IN1 bit 6) reads set again.
-    pub(crate) avg_busy_cycles: u64,
-
     pub(crate) clock: u64,
 
-    // Vector display list (AVG output, refreshed on each GO).
+    // Vector display list (AVG output, refreshed when a pass over the list
+    // finishes, which for Star Wars is the HALT that ends it).
     pub(crate) display_list: Vec<VectorLine>,
 
     // Mixed audio for the current frame, plus DC-block filter state.
@@ -829,7 +830,6 @@ impl StarWarsBoard {
             // Freeze OFF ($03|$00|$30|$40|$80 = $F3).
             dsw0: if esb { 0xF3 } else { 0x98 },
             dsw1: 0x02, // coinage default: 1 coin / 1 credit
-            avg_busy_cycles: 0,
             clock: 0,
             display_list: Vec::with_capacity(2048),
             audio_buffer: SampleRing::new(),
@@ -1131,7 +1131,7 @@ impl StarWarsBoard {
         // Active-low button bits (2,4,5); bit 6 = AVG done (VG_HALT, active
         // high), bit 7 = MATH_RUN (active high).
         let mut v = self.in1_buttons & 0x34;
-        if self.avg.is_halted() && self.avg_busy_cycles == 0 {
+        if self.avg.is_halted() {
             v |= 0x40;
         }
         if self.math.math_run() {
@@ -1311,27 +1311,34 @@ impl StarWarsBoard {
 
     // --- Vector generator --------------------------------------------------
 
-    /// Run the AVG over the current $0000–$3FFF image (RAM display list + vector
-    /// ROM) and capture the resulting line list.
+    /// VGGO: restart the vector generator at the top of the list.
+    ///
+    /// Star Wars' list ends in HALT rather than looping, so the frame is
+    /// delimited by the halt: the display list is taken when the generator
+    /// actually reaches it, which is now a real moment in emulated time rather
+    /// than the instant of the GO write.
     pub(crate) fn trigger_avg(&mut self) {
-        let mut vmem = vec![0u8; 0x4000];
-        let ram = self.main_map.region_data(MainRegion::Ram);
-        let n = ram.len().min(0x3000);
-        vmem[..n].copy_from_slice(&ram[..n]);
-        let vrom = self.main_map.region_data(MainRegion::VectorRom);
-        let m = vrom.len().min(0x1000);
-        vmem[0x3000..0x3000 + m].copy_from_slice(&vrom[..m]);
-
         self.avg.go();
-        self.avg.execute(&vmem, &[0u8; 16]); // Star Wars ignores color RAM
-        self.display_list = self.avg.take_display_list();
+        self.avg.take_display_list();
+    }
 
-        // We drew the whole list synchronously, but the hardware takes real
-        // time and holds VG_HALT (IN1 bit 6) low until it finishes. The game
-        // polls that flag, so reporting "done" immediately lets it run more
-        // per frame than the real board does. The AVG counts in master
-        // clocks; the board's cycle is master/8.
-        self.avg_busy_cycles = u64::from(self.avg.run_cycles()) / 8;
+    /// Advance the vector generator alongside the CPUs.
+    ///
+    /// The 12.096 MHz crystal drives the generator directly and the 6809E
+    /// through a divide-by-8, so one CPU cycle is eight AVG cycles. VG_HALT
+    /// (IN1 bit 6) then reads busy for exactly as long as the generator is
+    /// still walking the list, which is what the game polls; there is no
+    /// separate countdown to keep in step with it any more.
+    fn step_avg(&mut self) {
+        let mem = VectorMemory::split(
+            self.main_map.region_data(MainRegion::Ram),
+            self.main_map.region_data(MainRegion::VectorRom),
+            0x3000,
+        );
+        // Star Wars has no color RAM: its colors come from the color111 index.
+        if self.avg.step(AVG_CYCLES_PER_CPU_CYCLE, &mem, &[0u8; 16]) {
+            self.display_list = self.avg.take_display_list();
+        }
     }
 
     // --- Frame execution ---------------------------------------------------
@@ -1351,8 +1358,7 @@ impl StarWarsBoard {
         }
         self.irq_counter += 1;
 
-        // The vector generator is still running for this long after a GO.
-        self.avg_busy_cycles = self.avg_busy_cycles.saturating_sub(1);
+        self.step_avg();
 
         if self.watchdog_counter >= WATCHDOG_CYCLES {
             // Record the edge, not the level: the flag stays set until
@@ -2375,9 +2381,31 @@ mod tests {
         put_avg_word(&mut board.main_map, 0x0008, 0x2000); // HALT
 
         board.bus_write(BusMaster::Cpu(0), 0x4600, 0x00); // AVG GO
+
+        // The generator runs on its own clock, so GO starts it rather than
+        // drawing the list: nothing is published until it reaches the HALT.
+        assert!(
+            board.vector_display_list().is_some_and(|l| l.is_empty()),
+            "GO starts the generator, it does not draw the list"
+        );
+        assert!(!board.avg.is_halted(), "and it is running");
+
+        // VG_HALT stays busy while it walks the list, and the list appears when
+        // it gets to the HALT. One CPU cycle is eight AVG cycles, and this list
+        // is a handful of states plus one vector's beam time.
+        for _ in 0..0x4000 {
+            if board.avg.is_halted() {
+                break;
+            }
+            assert_eq!(board.in1() & 0x40, 0, "VG_HALT reads busy while running");
+            board.step_avg();
+        }
+
+        assert!(board.avg.is_halted(), "the HALT was reached");
+        assert_ne!(board.in1() & 0x40, 0, "VG_HALT reads done once it parks");
         assert!(
             board.vector_display_list().is_some_and(|l| !l.is_empty()),
-            "AVG GO should produce a vector display list"
+            "the finished pass was published"
         );
     }
 

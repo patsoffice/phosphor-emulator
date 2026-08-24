@@ -8,6 +8,7 @@
 #   frames   frames from reset before the frame is sampled  (human)
 #   shows    what the pinned frame depicts, in prose        (human)
 #   press    optional scripted input, as disasm --press     (human)
+#   movie    optional recorded input movie, relative to here (human)
 #   nvram    optional factory CMOS fixture, relative to here (human)
 #   size     oriented display dimensions                    (captured)
 #   frame    SHA-256 of the oriented RGB frame              (captured)
@@ -229,8 +230,8 @@ machine = "quantum"
 frames = 1800
 shows = "Attract mode: the QUANTUM title over coloured particle blobs, with INSERT COINS, the 1982 Atari copyright and the CREDIT line."
 size = [600, 900]
-frame = "sha256:0c7c4b22ad2b5daa7967eb213fba0887c355549aa22f1670564ba92f3602921f"
-vectors = "sha256:11f4c30e0cd73a9a3bd92cd7905be6d0e11aa31170e2939fbc441934c3d76bdf"
+frame = "sha256:b4c74bdccde52f0124992ba75ef80c8979c2f27bf510bc68e444dceb9ada83bc"
+vectors = "sha256:5574f5dd94b39e75d9c78b515f284ec50dfabf2506f0cc57ad6915f7284a922e"
 
 [[frame]]
 machine = "roadrunner"
@@ -281,16 +282,16 @@ machine = "starwars"
 frames = 2400
 shows = "Attract mode: the FLIGHT INSTRUCTIONS TO RED FIVE briefing, five numbered yellow paragraphs under the green INSERT COINS header."
 size = [320, 330]
-frame = "sha256:d40475d67158a699ecc15fa2b281d9abf6fbd7f936352233472963315bb423f3"
-vectors = "sha256:b3b633b25296d5f2dd49a51d698a7355fa9dc6aa0ff92a31eab9669f1f009591"
+frame = "sha256:4f60c3667dcfc8822e9595f90954972968589b2ddaacddd0044aa82c7db44a46"
+vectors = "sha256:9b2b79d98bb3f39609489737f00156065450eba34f98e92891b48b6ff8d3cee1"
 
 [[frame]]
 machine = "tempest"
 frames = 1800
 shows = "Attract mode: the HIGH SCORES table with INSERT COINS and the 1 COIN 1 PLAY / BONUS EVERY 20000 lines. Drawn 90 degrees from upright: the raster fallback double-applies ROT270 (phosphor-emulator-iitc). The vectors hash is orientation-free and pins the real output."
 size = [570, 580]
-frame = "sha256:746dcc4028049e15e1f2dd098f5e6f8fa5f5d751ebd658fc62e2d85ddaaee305"
-vectors = "sha256:c64a73e90a9030150512da56a292912c4c18ad145984baef20f1d12881d3fa86"
+frame = "sha256:89e925600d5305a4d539019275af3b8b6d7787c5bb7fc47e8c1ad357f0595b20"
+vectors = "sha256:0317d87657e062c987a3a8377c04588a388ac2bd188f44da402b7f262bf47f7e"
 
 [[frame]]
 machine = "uniwars"
