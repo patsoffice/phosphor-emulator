@@ -774,7 +774,6 @@ mod tests {
     /// The beam rasterizer, on its own, without a machine around it.
     mod beam {
         use super::*;
-        use phosphor_core::device::dvg::HALATION_FRACTION;
 
         const W: u32 = 256;
         const H: u32 = 256;
@@ -789,6 +788,10 @@ mod tests {
                 r: 255,
                 g: 255,
                 b: 255,
+                // These tests are about the beam's shape, which the rasterizer
+                // takes from the geometry and the intensity code; dwell time is
+                // not read yet.
+                beam_cycles: 0,
             }
         }
 

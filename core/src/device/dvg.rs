@@ -40,6 +40,20 @@ pub struct VectorLine {
     pub r: u8,
     pub g: u8,
     pub b: u8,
+
+    /// Master-clock cycles the beam spent travelling this segment.
+    ///
+    /// How long the beam dwells on a piece of screen is what sets how bright
+    /// that piece is, so this and not the intensity code is the physical input
+    /// to brightness: the code sets beam current, this sets exposure. A short
+    /// vector at a given code is brighter per unit length than a long one, and
+    /// it is why the vertices of a shape are the brightest part of it.
+    ///
+    /// The AVG works this out as part of its own timing, since the beam's travel
+    /// time is also what it charges the sequencer. The DVG models no timing at
+    /// all and leaves this 0, which reads as "not known, fall back to the
+    /// intensity code".
+    pub beam_cycles: u32,
 }
 
 // ---------------------------------------------------------------------------
@@ -562,6 +576,9 @@ impl Dvg {
                 r: 255,
                 g: 255,
                 b: 255,
+                // The DVG decodes at the word level and models no beam timing,
+                // so it has no travel time to report. See `VectorLine`.
+                beam_cycles: 0,
             });
         } else {
             // First point — no previous segment, just record position.
@@ -574,6 +591,7 @@ impl Dvg {
                 r: 255,
                 g: 255,
                 b: 255,
+                beam_cycles: 0,
             });
         }
     }
@@ -785,6 +803,7 @@ mod tests {
             r: 255,
             g: 255,
             b: 255,
+            beam_cycles: 0,
         });
         dvg.reset();
         assert_eq!(dvg.pc, 0);
@@ -808,6 +827,7 @@ mod tests {
             r: 255,
             g: 255,
             b: 255,
+            beam_cycles: 0,
         });
         assert!(dvg.is_halted());
         dvg.go();

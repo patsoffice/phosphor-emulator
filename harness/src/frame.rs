@@ -83,6 +83,7 @@ pub fn hash_vectors(lines: &[VectorLine]) -> String {
             hasher.update(c.to_le_bytes());
         }
         hasher.update([l.intensity, l.r, l.g, l.b]);
+        hasher.update(l.beam_cycles.to_le_bytes());
     }
     format!("sha256:{}", hex(&hasher.finalize()))
 }

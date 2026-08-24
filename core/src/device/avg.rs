@@ -822,7 +822,7 @@ impl Avg {
             self.timer = 0;
             self.xpos = self.xcenter;
             self.ypos = self.ycenter;
-            self.add_point(self.xpos, self.ypos, 0, [0, 0, 0]);
+            self.add_point(self.xpos, self.ypos, 0, [0, 0, 0], cycles.max(0) as u32);
             return cycles;
         }
         if self.op0() {
@@ -921,7 +921,7 @@ impl Avg {
         };
 
         let (x, y) = self.flipped();
-        self.add_point(x, y, eff_intensity, [r, g, b]);
+        self.add_point(x, y, eff_intensity, [r, g, b], cycles.max(0) as u32);
     }
 
     /// Quantum's strobe3 draw: 12-bit DAC and Quantum's color weights —
@@ -956,7 +956,7 @@ impl Avg {
         // Orientation::NORMAL), so no transpose is applied here even though the
         // generator's outputs are wired to a rotated monitor.
         let (x, y) = self.flipped();
-        self.add_point(x, y, eff_intensity, [r, g, b]);
+        self.add_point(x, y, eff_intensity, [r, g, b], cycles.max(0) as u32);
     }
 
     /// Star Wars' strobe3 draw: the same 13-bit position math as Tempest, but a
@@ -982,13 +982,24 @@ impl Avg {
         let eff_intensity = ((brightness >> 4).min(15)) as u8;
 
         // Star Wars does not flip the beam (its strobe3 emits xpos/ypos directly).
-        self.add_point(self.xpos, self.ypos, eff_intensity, [r, g, b]);
+        self.add_point(
+            self.xpos,
+            self.ypos,
+            eff_intensity,
+            [r, g, b],
+            cycles.max(0) as u32,
+        );
     }
 
     /// Add a point to the display list, creating a line from the previous point.
     ///
+    /// `beam_cycles` is the travel time strobe3 charged for getting here, which
+    /// belongs to the segment being closed rather than to the point itself: it
+    /// is how long the beam took to come from the previous position, and so how
+    /// brightly it wrote the ground it covered.
+    ///
     /// Coordinates are stored unclamped — the rasterizer handles clipping.
-    fn add_point(&mut self, x: i32, y: i32, intensity: u8, rgb: [u8; 3]) {
+    fn add_point(&mut self, x: i32, y: i32, intensity: u8, rgb: [u8; 3], beam_cycles: u32) {
         // Convert from fixed-point to pixel coordinates (no clamping).
         let px = x >> 16;
         let py = y >> 16;
@@ -1012,8 +1023,11 @@ impl Avg {
                 r: rgb[0],
                 g: rgb[1],
                 b: rgb[2],
+                beam_cycles,
             });
         } else {
+            // Nothing to travel from yet: this only parks the beam where the
+            // first real vector will start.
             self.display_list.push(VectorLine {
                 x0: px,
                 y0: py,
@@ -1023,6 +1037,7 @@ impl Avg {
                 r: 0,
                 g: 0,
                 b: 0,
+                beam_cycles: 0,
             });
         }
 
@@ -1592,6 +1607,73 @@ mod tests {
         let parked = avg.pc;
         assert!(!avg.step(1_000_000, &mem, &[0u8; 16]));
         assert_eq!(avg.pc, parked, "a parked generator does not advance");
+    }
+
+    // --- Beam travel time ------------------------------------------------
+
+    #[test]
+    fn a_drawn_vector_carries_the_time_the_beam_spent_on_it() {
+        // Quantum's vector timer counts up to 0x4000 and strobe3 runs the beam
+        // for whatever is left, so a delta that needs no normalization shifts
+        // costs the whole count. dvx = dvy = 0x7FF is already normalized (bit 11
+        // differs from bit 10), so strobe0 shifts nothing and the timer is still
+        // at zero when strobe3 reads it.
+        let vmem = build_vmem_be(&[0x07FF, 0x87FF, 0x07FF, 0x87FF, 0x2000]);
+        let mut avg = Avg::with_variant(AvgVariant::Quantum, 600, 900);
+        avg.go();
+        avg.run_to_stop(&vmem, &[0u8; 16]);
+
+        let list = avg.take_display_list();
+        assert_eq!(
+            list[0].beam_cycles, 0,
+            "the first point only parks the beam, it travels from nowhere"
+        );
+        assert_eq!(list[1].beam_cycles, 0x4000);
+    }
+
+    #[test]
+    fn a_smaller_delta_is_normalized_up_and_costs_the_beam_less_time() {
+        // Each normalization shift doubles the delta and halves what is left on
+        // the timer, which is how the hardware holds deflection speed roughly
+        // constant. Shifting stops once the sign bit differs from the one below
+        // it, so a delta of 1 is shifted until its set bit reaches position 10:
+        // ten shifts, and the beam runs 0x4000 >> 10 cycles. A shorter vector,
+        // drawn quicker, and so a brighter one per unit of length.
+        let vmem = build_vmem_be(&[0x0001, 0x8001, 0x0001, 0x8001, 0x2000]);
+        let mut avg = Avg::with_variant(AvgVariant::Quantum, 600, 900);
+        avg.go();
+        avg.run_to_stop(&vmem, &[0u8; 16]);
+
+        let list = avg.take_display_list();
+        assert_eq!(list[1].beam_cycles, 0x4000 >> 10);
+    }
+
+    #[test]
+    fn the_beam_time_on_the_list_is_the_time_the_sequencer_was_charged() {
+        // The two have to agree, because they are the same quantity: strobe3
+        // charges the sequencer the beam's travel time and hands the same figure
+        // to the display list. If they ever diverge, one of them is wrong and
+        // the picture and the timing would disagree about what the beam did.
+        let vmem = build_vmem_be(&[0x07FF, 0x87FF, 0x07FF, 0x87FF, 0x2000]);
+        let mut avg = Avg::with_variant(AvgVariant::Quantum, 600, 900);
+        avg.go();
+        avg.run_to_stop(&vmem, &[0u8; 16]);
+
+        let sequencer_total = avg.run_cycles();
+        let drawn: u32 = avg.take_display_list().iter().map(|l| l.beam_cycles).sum();
+
+        // One segment's worth, not two: the first VCTR has no previous position
+        // to draw from, so it parks the beam, and neither its segment nor the
+        // time it took to get there reaches the list. A real list opens with a
+        // CNTR, which is what does the parking there.
+        assert_eq!(drawn, 0x4000);
+
+        // The run cost at least the beam time it carries, since the sequencer
+        // was charged that time and the states around it on top.
+        assert!(
+            sequencer_total > drawn,
+            "the run cost {sequencer_total} but carries {drawn} of beam time"
+        );
     }
 
     // --- Beam flipping ---------------------------------------------------

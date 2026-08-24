@@ -1136,6 +1136,7 @@ mod tests {
             r: 255,
             g: 255,
             b: 255,
+            beam_cycles: 0,
         }];
 
         let (w, h) = (
