@@ -890,13 +890,26 @@ mod tests {
         }
 
         #[test]
-        fn halation_spreads_light_past_the_core_without_creating_any() {
-            // Light that leaves through the faceplate rather than straight out
-            // is taken from the core, not added to it, so a vector's total
-            // emitted light does not depend on how much of it halates. What
-            // changes is where the light lands.
+        fn halation_moves_light_outward_and_holds_the_peak() {
+            // The composite takes halation out of the core rather than adding it
+            // on: (1-f)*core + f*halo. But the brightness gain is then raised so
+            // a full-intensity vector still peaks at full white, and that is an
+            // operator turning the monitor up, which emits more light overall.
+            // So total emitted light *rises* with the halation fraction, and the
+            // invariants worth pinning are where the light goes and where the
+            // peak sits, not the total.
+            //
+            // Exercised at a fraction well above the default, which is a taste
+            // value someone will keep turning: at the 0.07 it currently sits at,
+            // the skirt of one thin line is under half of an 8-bit level and
+            // rounds to nothing, so a test pinned to it would be testing the
+            // quantiser rather than the optics. The glow earns its keep where
+            // many vectors overlap, not on a single line.
+            const STRONG: f32 = 0.4;
+
             let line = [white(60, 128, 180, 128)];
-            let buf = render_with_halation(&line, HALATION_FRACTION);
+            let with_halo = render_with_halation(&line, STRONG);
+            let without = render_with_halation(&line, HALATION_OFF);
 
             let core_reach = (BEAM_CUTOFF_SIGMAS * MIN_SIGMA_PIXELS).ceil() as usize + 1;
             let halo_reach =
@@ -906,26 +919,52 @@ mod tests {
                 "the faceplate's glow should be far broader than the spot"
             );
 
-            // There is light out where only halation can put it.
-            let mut in_skirt = 0u64;
-            for y in 0..H as usize {
-                if y.abs_diff(128) <= core_reach || y.abs_diff(128) > halo_reach {
-                    continue;
+            let skirt = |buf: &[u8]| -> u64 {
+                let mut sum = 0;
+                for y in 0..H as usize {
+                    if y.abs_diff(128) <= core_reach || y.abs_diff(128) > halo_reach {
+                        continue;
+                    }
+                    for x in 0..W as usize {
+                        sum += buf[(y * W as usize + x) * 3] as u64;
+                    }
                 }
-                for x in 0..W as usize {
-                    in_skirt += buf[(y * W as usize + x) * 3] as u64;
-                }
-            }
-            assert!(in_skirt > 0, "no halation reached beyond the core");
+                sum
+            };
 
-            // And the light in the skirt came out of the core: emitted light
-            // tracks the vector, not the halation setting.
-            let total = total_light(&buf);
-            let core_only = total - in_skirt;
+            // Both halves: light lands out where only halation can put it, and
+            // with halation off nothing lands there at all.
+            assert!(skirt(&with_halo) > 0, "no halation reached beyond the core");
+            assert_eq!(
+                skirt(&without),
+                0,
+                "something other than halation lit the skirt"
+            );
+
+            // The peak holds at full white either way. This is what the gain
+            // correction exists for: spreading a fixed energy into a much wider
+            // skirt drops the centre, and without compensating, turning halation
+            // up would quietly dim every machine.
             assert!(
-                in_skirt * 4 < core_only,
-                "the skirt holds {in_skirt} against the core's {core_only}, \
-                 which is more than the halation fraction should move"
+                peak(&with_halo) >= 250 && peak(&without) >= 250,
+                "peak went from {} to {} when halation was turned on",
+                peak(&without),
+                peak(&with_halo)
+            );
+
+            // And more light is emitted, not less, because that compensation is
+            // the brightness control going up. A composite that added the glow
+            // on top *and* compensated would overshoot this badly; one that
+            // forgot to compensate would fall below it.
+            let (on, off) = (total_light(&with_halo), total_light(&without));
+            assert!(
+                on > off,
+                "turning halation up should emit more light, got {on} against {off}"
+            );
+            assert!(
+                on < off * 3,
+                "halation emitted {on} against {off}, far past what holding the \
+                 peak through a wider skirt calls for"
             );
         }
     }

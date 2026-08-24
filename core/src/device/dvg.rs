@@ -82,10 +82,14 @@ pub const FACEPLATE_INDEX: f32 = 1.54;
 /// This is the one figure here that is not derived. The others are lengths on
 /// the glass; this is an optical efficiency that depends on how isotropically
 /// the phosphor emits, the aluminium backing behind it, the glass tint and any
-/// anti-reflective coating, none of which we have numbers for. 0.15 is a stated
-/// default in the range measured CRT spot profiles show, and it is the natural
-/// thing for a viewer to want to turn up or down.
-pub const HALATION_FRACTION: f32 = 0.15;
+/// anti-reflective coating, none of which we have numbers for.
+///
+/// So it is set by eye, which is the only instrument we have for it: 0.15 read
+/// as slightly too much glow against the core, and 0.07 is where it was left.
+/// Both are inside the range measured CRT spot profiles show. This is the
+/// natural thing for a viewer to want on a slider, and the value here is only
+/// the default it should start from.
+pub const HALATION_FRACTION: f32 = 0.07;
 
 /// Halation for a renderer that has to composite it over the whole frame on the
 /// CPU, where it is not worth its cost.
