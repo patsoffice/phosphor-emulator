@@ -42,6 +42,57 @@ pub struct VectorLine {
     pub b: u8,
 }
 
+// ---------------------------------------------------------------------------
+// The beam, as the renderers need to know it
+//
+// Both the CPU rasterizer and the frontend's GL path draw the same beam, so the
+// figures it is described by live here beside [`VectorLine`] rather than being
+// written down twice and drifting apart.
+// ---------------------------------------------------------------------------
+
+/// Focused beam spot diameter as a fraction of the tube's long axis.
+///
+/// The Atari colour XY monitors are 19 inch shadow-mask tubes, the same family
+/// as the raster monitors of the era, and two things bound the spot: the mask
+/// pitch, about 0.6 mm, below which nothing is resolvable, and the focused spot
+/// itself at about 0.7 mm. The long axis of a 19 inch 4:3 viewable area is about
+/// 360 mm. So the spot is 0.7/360 of the screen whatever coordinate space a
+/// particular generator uses, which works out at about 1.1 units on Tempest's
+/// 580, 1.8 on Quantum's 900, and 2.0 on the DVG's 1024.
+pub const BEAM_SPOT_FRACTION: f32 = 0.7 / 360.0;
+
+/// A Gaussian's standard deviation for a given full width at half maximum:
+/// `FWHM = 2*sqrt(2*ln 2)*sigma`.
+pub const FWHM_TO_SIGMA: f32 = 1.0 / 2.354_82;
+
+/// Where the beam profile is cut off, in sigmas.
+///
+/// Truncating leaves a step the height of the profile there, so it has to fall
+/// below one level of an 8-bit channel: 3 sigma is 1.1% of the peak and would
+/// show as a faint edge, 3.5 is 0.2% and rounds away.
+pub const BEAM_CUTOFF_SIGMAS: f32 = 3.5;
+
+/// Floor on the rendered spot's sigma, in output pixels.
+///
+/// Not a taste value: a Gaussian sampled on a unit grid has a residual ripple of
+/// about `2*exp(-2*pi^2*sigma^2)` depending on where its centre falls between
+/// samples, which is the spot aliasing against the grid. That ripple is a
+/// brightness that varies with the angle of the line, so sigma has to stay where
+/// it is negligible: 0.4 gives 8%, 0.5 gives 1.5%, 0.6 gives 0.2%.
+///
+/// This is a property of the output grid, not of the tube. Rasterizing at
+/// display-list resolution hits it (Tempest's physical spot is just under it, so
+/// it draws a touch wide); drawing at window resolution usually does not.
+pub const MIN_SIGMA_PIXELS: f32 = 0.6;
+
+/// The beam's sigma in a generator's own coordinate units.
+///
+/// `long_axis_units` is the larger of the generator's two display dimensions,
+/// which is the one that maps onto the tube's long axis.
+pub fn beam_sigma_units(long_axis_units: f32) -> f32 {
+    long_axis_units * BEAM_SPOT_FRACTION * FWHM_TO_SIGMA
+}
+
 use crate::prelude::Saveable;
 
 /// Atari Digital Vector Generator (DVG).

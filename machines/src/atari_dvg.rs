@@ -5,7 +5,9 @@ use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWri
 use phosphor_core::core::watchpoint::DebugAccessSource;
 use phosphor_core::core::{Bus, BusMaster, TimingConfig};
 use phosphor_core::cpu::m6502::M6502;
-use phosphor_core::device::dvg::{Dvg, VectorLine};
+use phosphor_core::device::dvg::{
+    BEAM_CUTOFF_SIGMAS, Dvg, MIN_SIGMA_PIXELS, VectorLine, beam_sigma_units,
+};
 use phosphor_macros::{BusDebug, DebugTrace, MemoryRegion};
 
 // ---------------------------------------------------------------------------
@@ -321,36 +323,6 @@ const INTENSITY_LUT: [u8; 16] = [
     0, 20, 40, 60, 80, 100, 120, 140, 160, 175, 190, 205, 220, 232, 244, 255,
 ];
 
-/// Focused beam spot diameter as a fraction of the tube's long axis.
-///
-/// The Atari colour XY monitors are 19 inch shadow-mask tubes, the same family
-/// as the raster monitors of the era, and two things bound the spot: the mask
-/// pitch, about 0.6 mm, below which nothing is resolvable, and the focused spot
-/// itself at about 0.7 mm. The long axis of a 19 inch 4:3 viewable area is about
-/// 360 mm. So the spot is 0.7/360 of the screen whatever coordinate space a
-/// particular generator uses, which works out at about 1.1 units on Tempest's
-/// 580, 1.8 on Quantum's 900, and 2.0 on the DVG's 1024.
-const BEAM_SPOT_FRACTION: f32 = 0.7 / 360.0;
-
-/// A Gaussian's standard deviation for a given full width at half maximum:
-/// `FWHM = 2*sqrt(2*ln 2)*sigma`.
-const FWHM_TO_SIGMA: f32 = 1.0 / 2.354_82;
-
-/// Floor on the spot's sigma, in output pixels.
-///
-/// Not a taste value: a Gaussian sampled on a unit grid has a residual ripple of
-/// about `2*exp(-2*pi^2*sigma^2)` depending on where its centre falls between
-/// samples, which is the spot aliasing against the grid. That ripple is a
-/// brightness that varies with the angle of the line, the very defect this
-/// rasterizer exists to fix, so sigma has to stay where the ripple is
-/// negligible: 0.4 gives 8%, 0.5 gives 1.5%, 0.6 gives 0.2%.
-///
-/// Tempest's physical spot works out slightly under this, so it renders a touch
-/// wider than the tube would. That is a limit of rasterizing at display-list
-/// resolution, not of the tube; the GL path draws at window resolution and can
-/// use the true figure.
-const MIN_SIGMA_PIXELS: f32 = 0.6;
-
 std::thread_local! {
     /// Per-frame energy accumulator, kept across frames. See `rasterize_vectors`.
     static ACCUMULATOR: std::cell::RefCell<Vec<f32>> =
@@ -386,12 +358,15 @@ pub(crate) fn rasterize_vectors(
     let h = height as i32;
     let y_max = h - 1;
 
-    let sigma = (w.max(h) as f32 * BEAM_SPOT_FRACTION * FWHM_TO_SIGMA).max(MIN_SIGMA_PIXELS);
+    // The spot in this generator's own units, floored where the output grid can
+    // no longer represent it. Rasterizing at display-list resolution means one
+    // unit is one pixel, so the floor applies directly.
+    let sigma = beam_sigma_units(w.max(h) as f32).max(MIN_SIGMA_PIXELS);
     // Where the profile is cut off. Truncating leaves a step the height of the
     // profile there, so it has to fall below one level of an 8-bit channel:
     // 3 sigma is 1.1% of the peak and would show as a faint edge, 3.5 is 0.2%
     // and rounds away.
-    let radius = (3.5 * sigma).ceil() as i32;
+    let radius = (BEAM_CUTOFF_SIGMAS * sigma).ceil() as i32;
 
     // The monitor's brightness control, set where an operator would set it: a
     // full-intensity vector reaches full white along its centre and no further.

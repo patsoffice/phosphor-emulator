@@ -1,14 +1,26 @@
-//! OpenGL line renderer for vector display machines (DVG/AVG).
+//! OpenGL beam renderer for vector display machines (DVG/AVG).
 //!
-//! Renders `VectorLine` segments directly as GL_LINES with additive blending,
-//! bypassing the CPU framebuffer entirely. Lines are drawn at the window's
-//! native resolution, so scaling has zero performance impact.
+//! Each `VectorLine` is drawn as a quad covering the beam's reach around it,
+//! with the fragment shader evaluating the beam profile at every fragment's
+//! distance from the segment. So a vector has the width the tube's spot really
+//! has, with soft edges and round ends, rather than being one hard pixel.
+//! Blending is additive, so crossing beams and the overlapping skirts of
+//! neighbouring vectors sum the way the phosphor sums them.
+//!
+//! This bypasses the CPU framebuffer entirely and draws at the window's native
+//! resolution, which is also what lets it use the tube's real spot size: the
+//! CPU rasterizer in `atari_dvg.rs` works at display-list resolution, where the
+//! spot can fall below what the grid can represent. The two share their figures
+//! (see `phosphor_core::device::dvg`) and the same peak convention, so they
+//! agree about what they are drawing.
 
 use std::ffi::CString;
 use std::mem;
 use std::ptr;
 
-use phosphor_core::device::dvg::VectorLine;
+use phosphor_core::device::dvg::{
+    BEAM_CUTOFF_SIGMAS, MIN_SIGMA_PIXELS, VectorLine, beam_sigma_units,
+};
 
 /// Intensity-to-brightness lookup table (4-bit, 0 = invisible).
 /// Matches the table in `atari_dvg.rs` for identical visual output.
@@ -34,8 +46,11 @@ const INTENSITY_LUT: [f32; 16] = [
 const VERTEX_SHADER_SRC: &str = r#"
 #version 150
 in vec2 position;
+in vec4 segment;
 in vec3 v_color;
 out vec3 f_color;
+out vec2 f_pos;
+flat out vec4 f_segment;
 uniform vec2 display_half_size;
 uniform int rotation;
 void main() {
@@ -49,23 +64,52 @@ void main() {
     }
     gl_Position = vec4(ndc, 0.0, 1.0);
     f_color = v_color;
+    // The corner's position interpolates to give each fragment its own place
+    // in vector space, which is where the beam profile is evaluated.
+    f_pos = position;
+    f_segment = segment;
 }
 "#;
 
 const FRAGMENT_SHADER_SRC: &str = r#"
 #version 150
 in vec3 f_color;
+in vec2 f_pos;
+flat in vec4 f_segment;
 out vec4 color;
+uniform float inv_two_sigma_sq;
 void main() {
-    color = vec4(f_color, 1.0);
+    // Distance from this fragment to the segment, not to the infinite line, so
+    // the ends are round the way a round spot arriving and leaving is round.
+    vec2 p0 = f_segment.xy;
+    vec2 p1 = f_segment.zw;
+    vec2 d = p1 - p0;
+    float len_sq = dot(d, d);
+    float t = (len_sq > 0.0) ? clamp(dot(f_pos - p0, d) / len_sq, 0.0, 1.0) : 0.0;
+    vec2 e = f_pos - (p0 + d * t);
+
+    // The profile peaks at the colour it was given, which is the same
+    // convention the CPU rasterizer uses: a full-intensity vector reaches full
+    // white along its centre and no further.
+    color = vec4(f_color * exp(-dot(e, e) * inv_two_sigma_sq), 1.0);
 }
 "#;
 
-/// Per-vertex data: x, y (vector coords), r, g, b (0.0-1.0).
+/// Per-vertex data: the quad corner and the segment it belongs to, both in
+/// vector coordinates, plus the colour the beam peaks at.
+///
+/// All six vertices of a segment's quad carry the same segment and colour; only
+/// the corner differs. That is what lets the fragment shader work out its own
+/// distance from the beam's path.
 #[repr(C)]
+#[derive(Clone, Copy)]
 struct Vertex {
     x: f32,
     y: f32,
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
     r: f32,
     g: f32,
     b: f32,
@@ -77,8 +121,8 @@ pub struct VectorRenderer {
     vbo: gl::types::GLuint,
     uniform_half_size: gl::types::GLint,
     uniform_rotation: gl::types::GLint,
+    uniform_inv_two_sigma_sq: gl::types::GLint,
     vertex_buf: Vec<Vertex>,
-    point_start: usize, // index where point vertices begin in vertex_buf
 }
 
 impl VectorRenderer {
@@ -93,6 +137,10 @@ impl VectorRenderer {
             let name = std::ffi::CString::new("rotation").unwrap();
             gl::GetUniformLocation(program, name.as_ptr())
         };
+        let uniform_inv_two_sigma_sq = unsafe {
+            let name = std::ffi::CString::new("inv_two_sigma_sq").unwrap();
+            gl::GetUniformLocation(program, name.as_ptr())
+        };
 
         Self {
             program,
@@ -100,8 +148,10 @@ impl VectorRenderer {
             vbo,
             uniform_half_size,
             uniform_rotation,
-            vertex_buf: Vec::with_capacity(2048),
-            point_start: 0,
+            uniform_inv_two_sigma_sq,
+            // Six vertices per vector, and a busy frame runs to a couple of
+            // thousand vectors.
+            vertex_buf: Vec::with_capacity(16384),
         }
     }
 
@@ -124,61 +174,6 @@ impl VectorRenderer {
         display_h: u32,
         rotation: i32,
     ) {
-        // Build vertex data from display list.
-        // Lines go first, then point vertices (for zero-length vectors / dots).
-        self.vertex_buf.clear();
-        self.point_start = 0;
-        for line in lines {
-            if line.intensity == 0 {
-                continue;
-            }
-            if line.x0 == line.x1 && line.y0 == line.y1 {
-                continue; // collect points in second pass
-            }
-            let brightness = INTENSITY_LUT[(line.intensity & 0xF) as usize];
-            let r = brightness * (line.r as f32 / 255.0);
-            let g = brightness * (line.g as f32 / 255.0);
-            let b = brightness * (line.b as f32 / 255.0);
-            self.vertex_buf.push(Vertex {
-                x: line.x0 as f32,
-                y: line.y0 as f32,
-                r,
-                g,
-                b,
-            });
-            self.vertex_buf.push(Vertex {
-                x: line.x1 as f32,
-                y: line.y1 as f32,
-                r,
-                g,
-                b,
-            });
-        }
-        self.point_start = self.vertex_buf.len();
-        for line in lines {
-            if line.intensity == 0 {
-                continue;
-            }
-            if line.x0 != line.x1 || line.y0 != line.y1 {
-                continue;
-            }
-            let brightness = INTENSITY_LUT[(line.intensity & 0xF) as usize];
-            let r = brightness * (line.r as f32 / 255.0);
-            let g = brightness * (line.g as f32 / 255.0);
-            let b = brightness * (line.b as f32 / 255.0);
-            self.vertex_buf.push(Vertex {
-                x: line.x0 as f32,
-                y: line.y0 as f32,
-                r,
-                g,
-                b,
-            });
-        }
-
-        if self.vertex_buf.is_empty() {
-            return;
-        }
-
         // Centered sub-viewport at the target display aspect (letterbox the
         // beam field rather than stretch it to fill the window).
         let (win_w, win_h) = (viewport_w as f32, viewport_h as f32);
@@ -190,6 +185,72 @@ impl VectorRenderer {
         let vp_x = ((win_w - vp_w) / 2.0) as i32;
         let vp_y = ((win_h - vp_h) / 2.0) as i32;
 
+        // The spot, in the generator's own units.
+        //
+        // Unlike the CPU rasterizer, this draws at window resolution rather
+        // than display-list resolution, so a unit is usually several pixels and
+        // the grid can carry the tube's real spot size. The floor still applies
+        // when the window is small enough that it cannot, and it is expressed
+        // in units here by converting through the pixels-per-unit of the
+        // viewport we just worked out.
+        let long_axis = display_w.max(display_h) as f32;
+        let px_per_unit = vp_w.max(vp_h) / long_axis;
+        let sigma =
+            beam_sigma_units(long_axis).max(MIN_SIGMA_PIXELS / px_per_unit.max(f32::MIN_POSITIVE));
+        let radius = BEAM_CUTOFF_SIGMAS * sigma;
+
+        // Each segment becomes a quad covering the beam's reach around it: the
+        // segment grown by the profile's cutoff in every direction, including
+        // past the ends, where the round cap lives. The fragment shader does
+        // the rest.
+        self.vertex_buf.clear();
+        for line in lines {
+            if line.intensity == 0 {
+                continue;
+            }
+            let brightness = INTENSITY_LUT[(line.intensity & 0xF) as usize];
+            let (r, g, b) = (
+                brightness * (line.r as f32 / 255.0),
+                brightness * (line.g as f32 / 255.0),
+                brightness * (line.b as f32 / 255.0),
+            );
+
+            let (x0, y0) = (line.x0 as f32, line.y0 as f32);
+            let (x1, y1) = (line.x1 as f32, line.y1 as f32);
+            let (dx, dy) = (x1 - x0, y1 - y0);
+            let len = (dx * dx + dy * dy).sqrt();
+            // A zero-length vector is a dot: the beam arrived and did not
+            // travel. Any direction will do, the quad is square either way.
+            let (ux, uy) = if len > 0.0 {
+                (dx / len, dy / len)
+            } else {
+                (1.0, 0.0)
+            };
+            let (nx, ny) = (-uy, ux);
+
+            let corner = |along: f32, across: f32, px: f32, py: f32| Vertex {
+                x: px + ux * along + nx * across,
+                y: py + uy * along + ny * across,
+                x0,
+                y0,
+                x1,
+                y1,
+                r,
+                g,
+                b,
+            };
+            let a = corner(-radius, radius, x0, y0);
+            let bb = corner(-radius, -radius, x0, y0);
+            let c = corner(radius, -radius, x1, y1);
+            let d = corner(radius, radius, x1, y1);
+
+            self.vertex_buf.extend([a, bb, c, a, c, d]);
+        }
+
+        if self.vertex_buf.is_empty() {
+            return;
+        }
+
         unsafe {
             gl::Viewport(vp_x, vp_y, vp_w as i32, vp_h as i32);
             gl::UseProgram(self.program);
@@ -199,6 +260,7 @@ impl VectorRenderer {
                 display_h as f32 / 2.0,
             );
             gl::Uniform1i(self.uniform_rotation, rotation);
+            gl::Uniform1f(self.uniform_inv_two_sigma_sq, 1.0 / (2.0 * sigma * sigma));
             gl::BindVertexArray(self.vao);
 
             // Upload vertex data.
@@ -210,26 +272,25 @@ impl VectorRenderer {
                 gl::DYNAMIC_DRAW,
             );
 
-            // Additive blending: crossing lines appear brighter (matches
-            // the CPU rasterizer's saturating_add behavior).
+            // Additive blending: where two beams cross, the light adds, and
+            // the overlapping skirts of neighbouring vectors sum the way the
+            // phosphor sums them.
             gl::Enable(gl::BLEND);
             gl::BlendFunc(gl::ONE, gl::ONE);
-            gl::Enable(gl::LINE_SMOOTH);
 
-            // Draw lines.
-            if self.point_start > 0 {
-                gl::DrawArrays(gl::LINES, 0, self.point_start as i32);
-            }
+            // These are quads now, not lines. Whichever way a segment runs
+            // decides the winding of its triangles, so culling would drop half
+            // of them, and a depth test against whatever egui last left in the
+            // buffer would drop the rest.
+            gl::Disable(gl::CULL_FACE);
+            gl::Disable(gl::DEPTH_TEST);
 
-            // Draw zero-length vectors as points (bullets, dots).
-            let point_count = self.vertex_buf.len() - self.point_start;
-            if point_count > 0 {
-                gl::PointSize(2.0);
-                gl::DrawArrays(gl::POINTS, self.point_start as i32, point_count as i32);
-            }
+            // One quad per vector, two triangles each. Zero-length vectors are
+            // in here too: their quad is a square and the profile makes it a
+            // round dot, so bullets need no separate pass.
+            gl::DrawArrays(gl::TRIANGLES, 0, self.vertex_buf.len() as i32);
 
             // Restore state for egui.
-            gl::Disable(gl::LINE_SMOOTH);
             gl::BlendFunc(gl::SRC_ALPHA, gl::ONE_MINUS_SRC_ALPHA);
             gl::BindVertexArray(0);
             gl::UseProgram(0);
@@ -327,7 +388,21 @@ unsafe fn create_vertex_objects(
             );
         }
 
-        // color (vec3): offset 8
+        // segment (vec4): offset 8
+        let seg_attr = gl::GetAttribLocation(program, c"segment".as_ptr());
+        if seg_attr >= 0 {
+            gl::EnableVertexAttribArray(seg_attr as u32);
+            gl::VertexAttribPointer(
+                seg_attr as u32,
+                4,
+                gl::FLOAT,
+                gl::FALSE,
+                stride,
+                (2 * mem::size_of::<f32>()) as *const _,
+            );
+        }
+
+        // color (vec3): offset 24
         let color_attr = gl::GetAttribLocation(program, c"v_color".as_ptr());
         if color_attr >= 0 {
             gl::EnableVertexAttribArray(color_attr as u32);
@@ -337,7 +412,7 @@ unsafe fn create_vertex_objects(
                 gl::FLOAT,
                 gl::FALSE,
                 stride,
-                (2 * mem::size_of::<f32>()) as *const _,
+                (6 * mem::size_of::<f32>()) as *const _,
             );
         }
 
