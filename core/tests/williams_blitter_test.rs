@@ -1013,14 +1013,12 @@ fn mame_reference_blit(
 
         for _x in 0..w {
             let rawval = mem[source as usize];
-            let srcdata: u8;
-
-            if shift {
+            let srcdata: u8 = if shift {
                 pixdata = (pixdata << 8) | rawval as i32;
-                srcdata = ((pixdata >> 4) & 0xff) as u8;
+                ((pixdata >> 4) & 0xff) as u8
             } else {
-                srcdata = rawval;
-            }
+                rawval
+            };
 
             // blit_pixel (MAME)
             let curpix = mem[dest as usize];
