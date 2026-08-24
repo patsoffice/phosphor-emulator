@@ -29,7 +29,7 @@ use phosphor_core::cpu::Cpu;
 use phosphor_core::cpu::m6809::M6809;
 use phosphor_core::device::adc0809::Adc0809;
 use phosphor_core::device::avg::{Avg, AvgVariant, VectorMemory};
-use phosphor_core::device::dvg::VectorLine;
+use phosphor_core::device::dvg::{HALATION_OFF, VectorLine};
 use phosphor_core::device::pokey::Pokey;
 use phosphor_core::device::riot6532::Riot6532;
 use phosphor_core::device::slapstic::Slapstic;
@@ -1477,6 +1477,7 @@ impl StarWarsBoard {
             TIMING.display_width,
             TIMING.display_height,
             true,
+            HALATION_OFF,
         );
     }
 

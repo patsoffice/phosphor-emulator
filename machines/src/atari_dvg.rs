@@ -6,7 +6,8 @@ use phosphor_core::core::watchpoint::DebugAccessSource;
 use phosphor_core::core::{Bus, BusMaster, TimingConfig};
 use phosphor_core::cpu::m6502::M6502;
 use phosphor_core::device::dvg::{
-    BEAM_CUTOFF_SIGMAS, Dvg, MIN_SIGMA_PIXELS, VectorLine, beam_sigma_units,
+    BEAM_CUTOFF_SIGMAS, Dvg, HALATION_OFF, MIN_SIGMA_PIXELS, VectorLine, beam_sigma_units,
+    halation_sigma_units,
 };
 use phosphor_macros::{BusDebug, DebugTrace, MemoryRegion};
 
@@ -254,6 +255,7 @@ impl AtariDvgBoard {
             TIMING.display_width,
             TIMING.display_height,
             true,
+            HALATION_OFF,
         );
     }
 
@@ -306,6 +308,7 @@ impl Renderable for AtariDvgBoard {
             TIMING.display_width,
             TIMING.display_height,
             true,
+            HALATION_OFF,
         );
     }
 
@@ -326,6 +329,10 @@ const INTENSITY_LUT: [u8; 16] = [
 std::thread_local! {
     /// Per-frame energy accumulator, kept across frames. See `rasterize_vectors`.
     static ACCUMULATOR: std::cell::RefCell<Vec<f32>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+
+    /// Reduced-resolution halation field, kept across frames for the same reason.
+    static HALO: std::cell::RefCell<Vec<f32>> =
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
@@ -351,6 +358,7 @@ pub(crate) fn rasterize_vectors(
     width: u32,
     height: u32,
     flip_y: bool,
+    halation: f32,
 ) {
     buffer.fill(0);
 
@@ -368,6 +376,14 @@ pub(crate) fn rasterize_vectors(
     // and rounds away.
     let radius = (BEAM_CUTOFF_SIGMAS * sigma).ceil() as i32;
 
+    // The halation skirt: the fraction of each spot's light that leaves the tube
+    // by way of the faceplate rather than straight out of it. Zero turns it off,
+    // which is what the boards ask for: compositing it is O(pixels) and costs
+    // several times the sweep, and the frontend's GL path does it on the GPU for
+    // nothing. See the note on the callers.
+    let halo_sigma = halation_sigma_units(w.max(h) as f32);
+    let halo_fraction = halation;
+
     // The monitor's brightness control, set where an operator would set it: a
     // full-intensity vector reaches full white along its centre and no further.
     //
@@ -376,7 +392,14 @@ pub(crate) fn rasterize_vectors(
     // that is about the hardware. The peak of a unit-area Gaussian is
     // 1/(sigma*sqrt(2*pi)), so its reciprocal is the gain that puts the centre
     // of a line back at full scale, whatever the spot works out to.
-    let gain = sigma * (std::f32::consts::TAU).sqrt();
+    //
+    // Halation is light taken *from* the core rather than added to it, so the
+    // operator would turn the brightness up to compensate. For an isolated
+    // straight line both profiles have unit area, so its centre ends up at
+    // `(1 - f) + f*sigma/halo_sigma` of what the core alone would give, and the
+    // reciprocal of that restores it.
+    let halo_peak_share = (1.0 - halo_fraction) + halo_fraction * sigma / halo_sigma;
+    let gain = sigma * std::f32::consts::TAU.sqrt() / halo_peak_share;
 
     // Energy accumulates in float and is quantised once at the end. Summing
     // 8-bit steps per segment would lose every contribution under half a step,
@@ -437,14 +460,172 @@ pub(crate) fn rasterize_vectors(
             dirty_hi = dirty_hi.max(hi);
         }
 
-        if dirty_hi >= dirty_lo {
+        if dirty_hi < dirty_lo {
+            return;
+        }
+
+        if halo_fraction <= 0.0 {
+            // No halation: the core is the whole picture, and only the rows the
+            // vectors touched need converting.
             let from = (dirty_lo * w * 3) as usize;
             let to = ((dirty_hi + 1) * w * 3) as usize;
             for (out, e) in buffer[from..to].iter_mut().zip(acc[from..to].iter()) {
                 *out = e.clamp(0.0, 255.0) as u8;
             }
+            return;
         }
+
+        // Halation spreads far past the vectors that caused it, so the rows it
+        // reaches have to be converted too.
+        let reach = (BEAM_CUTOFF_SIGMAS * halo_sigma).ceil() as i32;
+        let out_lo = (dirty_lo - reach).max(0);
+        let out_hi = (dirty_hi + reach).min(h - 1);
+
+        HALO.with_borrow_mut(|halo| {
+            let (halo_w, halo_h, down) = build_halo(acc, w, h, halo_sigma, halo);
+
+            // Which two samples each destination row and column falls between,
+            // worked out once. Done per pixel instead, this is a float divide
+            // and a handful of casts on every one of them, which costs more than
+            // the interpolation it feeds.
+            let cols = upsample_taps(w, halo_w, down);
+            let rows = upsample_taps(h, halo_h, down);
+
+            let core_share = 1.0 - halo_fraction;
+            let stride = (halo_w * 3) as usize;
+
+            for py in out_lo..=out_hi {
+                let (ry0, ry1, fy) = rows[py as usize];
+                let (row0, row1) = (ry0 * stride, ry1 * stride);
+                let base = (py * w * 3) as usize;
+
+                for (px, &(cx0, cx1, fx)) in cols.iter().enumerate() {
+                    let (a, b) = (cx0 * 3, cx1 * 3);
+                    let o = base + px * 3;
+                    for c in 0..3 {
+                        // Bilinear in the reduced-resolution halo. It is a
+                        // broad, smooth field, so sampling it coarsely and
+                        // interpolating is invisible, and it saves blurring at
+                        // full size.
+                        let t = halo[row0 + a + c];
+                        let top = t + (halo[row0 + b + c] - t) * fx;
+                        let l = halo[row1 + a + c];
+                        let bot = l + (halo[row1 + b + c] - l) * fx;
+                        let glow = top + (bot - top) * fy;
+                        let v = acc[o + c] * core_share + glow * halo_fraction;
+                        buffer[o + c] = v.clamp(0.0, 255.0) as u8;
+                    }
+                }
+            }
+        });
     });
+}
+
+/// One axis of the bilinear upsample: which two samples of the reduced field a
+/// destination row or column falls between, and how far along.
+fn upsample_taps(dst_len: i32, src_len: i32, down: i32) -> Vec<(usize, usize, f32)> {
+    let inv = 1.0 / down as f32;
+    (0..dst_len)
+        .map(|i| {
+            let s = (i as f32 + 0.5) * inv - 0.5;
+            let a = s.floor().clamp(0.0, (src_len - 1) as f32) as i32;
+            let b = (a + 1).min(src_len - 1);
+            (a as usize, b as usize, (s - a as f32).clamp(0.0, 1.0))
+        })
+        .collect()
+}
+
+/// Build the halation field: the core energy, blurred to the faceplate's scale.
+///
+/// The blur runs at reduced resolution because the field is broad and smooth,
+/// and a Gaussian of this width applied at full size would cost more than
+/// everything else here put together. Returns the reduced field's dimensions and
+/// the factor it was reduced by.
+fn build_halo(acc: &[f32], w: i32, h: i32, halo_sigma: f32, out: &mut Vec<f32>) -> (i32, i32, i32) {
+    /// Sigma to aim for in the reduced field. Small enough that the blur is a
+    /// handful of taps, large enough that the reduction is not visible once the
+    /// field is interpolated back up.
+    const TARGET_SIGMA: f32 = 4.0;
+
+    let down = (halo_sigma / TARGET_SIGMA).round().max(1.0) as i32;
+    let (sw, sh) = ((w + down - 1) / down, (h + down - 1) / down);
+
+    let n = (sw * sh * 3) as usize;
+    if out.len() < n {
+        out.resize(n, 0.0);
+    }
+    out[..n].fill(0.0);
+
+    // Box-average each block down. This is a resampling of an energy field, so
+    // the average is what carries the energy across rather than a point sample.
+    //
+    // Walked as blocks rather than per pixel, because the obvious form needs two
+    // integer divisions on every source pixel to find the block it lands in, and
+    // there are a million of them.
+    let block = (down * down) as f32;
+    for sy in 0..sh {
+        let y_end = ((sy + 1) * down).min(h);
+        for sx in 0..sw {
+            let x_end = ((sx + 1) * down).min(w);
+            let mut sum = [0f32; 3];
+            for py in (sy * down)..y_end {
+                let row = (py * w) as usize;
+                for px in (sx * down)..x_end {
+                    let src = (row + px as usize) * 3;
+                    sum[0] += acc[src];
+                    sum[1] += acc[src + 1];
+                    sum[2] += acc[src + 2];
+                }
+            }
+            let dst = ((sy * sw + sx) * 3) as usize;
+            out[dst] = sum[0] / block;
+            out[dst + 1] = sum[1] / block;
+            out[dst + 2] = sum[2] / block;
+        }
+    }
+
+    blur_separable(&mut out[..n], sw, sh, halo_sigma / down as f32);
+    (sw, sh, down)
+}
+
+/// Separable Gaussian blur over an RGB float field, in place.
+fn blur_separable(buf: &mut [f32], w: i32, h: i32, sigma: f32) {
+    if sigma <= 0.0 {
+        return;
+    }
+    let radius = (BEAM_CUTOFF_SIGMAS * sigma).ceil() as i32;
+    let kernel: Vec<f32> = (-radius..=radius)
+        .map(|i| (-(i * i) as f32 / (2.0 * sigma * sigma)).exp())
+        .collect();
+    let sum: f32 = kernel.iter().sum();
+    let kernel: Vec<f32> = kernel.iter().map(|k| k / sum).collect();
+
+    let mut tmp = vec![0f32; buf.len()];
+
+    for y in 0..h {
+        for x in 0..w {
+            for c in 0..3 {
+                let mut acc = 0.0;
+                for (k, &weight) in kernel.iter().enumerate() {
+                    let sx = (x + k as i32 - radius).clamp(0, w - 1);
+                    acc += buf[((y * w + sx) * 3 + c) as usize] * weight;
+                }
+                tmp[((y * w + x) * 3 + c) as usize] = acc;
+            }
+        }
+    }
+    for y in 0..h {
+        for x in 0..w {
+            for c in 0..3 {
+                let mut acc = 0.0;
+                for (k, &weight) in kernel.iter().enumerate() {
+                    let sy = (y + k as i32 - radius).clamp(0, h - 1);
+                    acc += tmp[((sy * w + x) * 3 + c) as usize] * weight;
+                }
+                buf[((y * w + x) * 3 + c) as usize] = acc;
+            }
+        }
+    }
 }
 
 /// The beam profile sampled against squared distance, for the sweep's inner
@@ -593,6 +774,7 @@ mod tests {
     /// The beam rasterizer, on its own, without a machine around it.
     mod beam {
         use super::*;
+        use phosphor_core::device::dvg::HALATION_FRACTION;
 
         const W: u32 = 256;
         const H: u32 = 256;
@@ -610,9 +792,17 @@ mod tests {
             }
         }
 
+        /// The core beam alone, which is what the boards ask for.
         fn render(lines: &[VectorLine]) -> Vec<u8> {
+            render_with_halation(lines, HALATION_OFF)
+        }
+
+        /// The full optical model, halation included. Passed explicitly rather
+        /// than taken from what the boards happen to be configured with, so
+        /// these tests keep testing halation whatever that default becomes.
+        fn render_with_halation(lines: &[VectorLine], halation: f32) -> Vec<u8> {
             let mut buf = vec![0u8; (W * H * 3) as usize];
-            rasterize_vectors(lines, &mut buf, W, H, false);
+            rasterize_vectors(lines, &mut buf, W, H, false, halation);
             buf
         }
 
@@ -681,20 +871,62 @@ mod tests {
         fn a_vector_running_off_screen_costs_only_the_part_that_shows() {
             // The beam really does run off the screen (see the AVG's unclamped
             // position), so the rasterizer has to clip rather than trust the
-            // coordinates, and must not light anything outside.
+            // coordinates, and must not light anything beyond its reach.
             let buf = render(&[white(-100_000, 128, 100_000, 128)]);
             assert!(peak(&buf) >= 250, "the visible part is still drawn");
 
-            // Nothing outside the row the line runs along, give or take the spot.
+            // `render` is the core beam alone, so the only thing lit should be
+            // the row the vector runs along, give or take the spot.
+            let reach = (BEAM_CUTOFF_SIGMAS * MIN_SIGMA_PIXELS).ceil() as usize + 1;
             let mut stray = 0;
             for y in 0..H as usize {
                 for x in 0..W as usize {
-                    if buf[(y * W as usize + x) * 3] > 0 && y.abs_diff(128) > 4 {
+                    if buf[(y * W as usize + x) * 3] > 0 && y.abs_diff(128) > reach {
                         stray += 1;
                     }
                 }
             }
-            assert_eq!(stray, 0, "light landed away from the vector");
+            assert_eq!(stray, 0, "light landed beyond the beam's reach");
+        }
+
+        #[test]
+        fn halation_spreads_light_past_the_core_without_creating_any() {
+            // Light that leaves through the faceplate rather than straight out
+            // is taken from the core, not added to it, so a vector's total
+            // emitted light does not depend on how much of it halates. What
+            // changes is where the light lands.
+            let line = [white(60, 128, 180, 128)];
+            let buf = render_with_halation(&line, HALATION_FRACTION);
+
+            let core_reach = (BEAM_CUTOFF_SIGMAS * MIN_SIGMA_PIXELS).ceil() as usize + 1;
+            let halo_reach =
+                (BEAM_CUTOFF_SIGMAS * halation_sigma_units(W.max(H) as f32)).ceil() as usize;
+            assert!(
+                halo_reach > core_reach * 3,
+                "the faceplate's glow should be far broader than the spot"
+            );
+
+            // There is light out where only halation can put it.
+            let mut in_skirt = 0u64;
+            for y in 0..H as usize {
+                if y.abs_diff(128) <= core_reach || y.abs_diff(128) > halo_reach {
+                    continue;
+                }
+                for x in 0..W as usize {
+                    in_skirt += buf[(y * W as usize + x) * 3] as u64;
+                }
+            }
+            assert!(in_skirt > 0, "no halation reached beyond the core");
+
+            // And the light in the skirt came out of the core: emitted light
+            // tracks the vector, not the halation setting.
+            let total = total_light(&buf);
+            let core_only = total - in_skirt;
+            assert!(
+                in_skirt * 4 < core_only,
+                "the skirt holds {in_skirt} against the core's {core_only}, \
+                 which is more than the halation fraction should move"
+            );
         }
     }
 

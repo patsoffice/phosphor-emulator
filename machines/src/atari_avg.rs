@@ -6,6 +6,7 @@ use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWri
 use phosphor_core::core::watchpoint::DebugAccessSource;
 use phosphor_core::cpu::m6502::M6502;
 use phosphor_core::device::avg::{Avg, VectorMemory};
+use phosphor_core::device::dvg::HALATION_OFF;
 use phosphor_core::device::dvg::VectorLine;
 use phosphor_macros::{BusDebug, DebugTrace, MemoryRegion};
 
@@ -253,6 +254,7 @@ impl AtariAvgBoard {
             TIMING.display_width,
             TIMING.display_height,
             false,
+            HALATION_OFF,
         );
     }
 

@@ -51,7 +51,7 @@ use phosphor_core::cpu::m68000::M68000;
 use phosphor_core::cpu::state::M68000State;
 use phosphor_core::cpu::{Cpu, CpuStateTrait};
 use phosphor_core::device::avg::{Avg, AvgVariant, VectorMemory};
-use phosphor_core::device::dvg::VectorLine;
+use phosphor_core::device::dvg::{HALATION_OFF, VectorLine};
 use phosphor_core::device::pokey::Pokey;
 use phosphor_macros::{BusDebug, MemoryRegion};
 
@@ -697,6 +697,7 @@ impl Renderable for QuantumSystem {
             TIMING.display_width,
             TIMING.display_height,
             true,
+            HALATION_OFF,
         );
     }
 

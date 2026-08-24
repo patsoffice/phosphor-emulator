@@ -50,16 +50,53 @@ pub struct VectorLine {
 // written down twice and drifting apart.
 // ---------------------------------------------------------------------------
 
-/// Focused beam spot diameter as a fraction of the tube's long axis.
+/// Long axis of a 19 inch 4:3 viewable area, in millimetres.
+///
+/// Every figure below is a length on the glass, so they are all expressed
+/// against this and converted into whatever units a generator uses.
+pub const TUBE_LONG_AXIS_MM: f32 = 360.0;
+
+/// Focused beam spot diameter, in millimetres.
 ///
 /// The Atari colour XY monitors are 19 inch shadow-mask tubes, the same family
 /// as the raster monitors of the era, and two things bound the spot: the mask
 /// pitch, about 0.6 mm, below which nothing is resolvable, and the focused spot
-/// itself at about 0.7 mm. The long axis of a 19 inch 4:3 viewable area is about
-/// 360 mm. So the spot is 0.7/360 of the screen whatever coordinate space a
-/// particular generator uses, which works out at about 1.1 units on Tempest's
-/// 580, 1.8 on Quantum's 900, and 2.0 on the DVG's 1024.
-pub const BEAM_SPOT_FRACTION: f32 = 0.7 / 360.0;
+/// itself at about 0.7 mm.
+pub const BEAM_SPOT_MM: f32 = 0.7;
+
+/// Focused beam spot diameter as a fraction of the tube's long axis.
+///
+/// Works out at about 1.1 units on Tempest's 580, 1.8 on Quantum's 900, and 2.0
+/// on the DVG's 1024.
+pub const BEAM_SPOT_FRACTION: f32 = BEAM_SPOT_MM / TUBE_LONG_AXIS_MM;
+
+/// Faceplate thickness of a 19 inch CRT, in millimetres.
+pub const FACEPLATE_MM: f32 = 11.0;
+
+/// Refractive index of CRT faceplate glass.
+pub const FACEPLATE_INDEX: f32 = 1.54;
+
+/// Fraction of a spot's light that leaves the tube as halation rather than
+/// directly.
+///
+/// This is the one figure here that is not derived. The others are lengths on
+/// the glass; this is an optical efficiency that depends on how isotropically
+/// the phosphor emits, the aluminium backing behind it, the glass tint and any
+/// anti-reflective coating, none of which we have numbers for. 0.15 is a stated
+/// default in the range measured CRT spot profiles show, and it is the natural
+/// thing for a viewer to want to turn up or down.
+pub const HALATION_FRACTION: f32 = 0.15;
+
+/// Halation for a renderer that has to composite it over the whole frame on the
+/// CPU, where it is not worth its cost.
+///
+/// The skirt is wide, so compositing it is proportional to the pixel count
+/// rather than to the number of vectors, and it measured at four to five times
+/// the beam sweep itself: on Asteroids' 1024 by 1024 field, 2.7 ms per frame
+/// became 13.5, against 0.4 ms to emulate the machine. The GPU does the same
+/// blur for nothing, so the frontend's path has it and the CPU rasterizer that
+/// serves screenshots and the debug panel does not.
+pub const HALATION_OFF: f32 = 0.0;
 
 /// A Gaussian's standard deviation for a given full width at half maximum:
 /// `FWHM = 2*sqrt(2*ln 2)*sigma`.
@@ -91,6 +128,24 @@ pub const MIN_SIGMA_PIXELS: f32 = 0.6;
 /// which is the one that maps onto the tube's long axis.
 pub fn beam_sigma_units(long_axis_units: f32) -> f32 {
     long_axis_units * BEAM_SPOT_FRACTION * FWHM_TO_SIGMA
+}
+
+/// The halation skirt's sigma in a generator's own coordinate units.
+///
+/// The phosphor emits into the faceplate in every direction. Light steeper than
+/// the critical angle cannot leave the front surface, so it reflects back,
+/// crosses the glass again and re-emerges a distance away: for thickness `t` and
+/// index `n`, at a radius of `2*t*tan(asin(1/n))`. With an 11 mm faceplate at
+/// n = 1.54 that is about 19 mm, or 5% of the tube's long axis, and it is why a
+/// bright vector sits in a broad glow rather than ending at its own edge.
+///
+/// The ring is treated as a Gaussian skirt of that scale rather than as a ring,
+/// which is what the sum over all the emission angles and depths looks like from
+/// the front.
+pub fn halation_sigma_units(long_axis_units: f32) -> f32 {
+    let critical_angle = (1.0 / FACEPLATE_INDEX).asin();
+    let radius_mm = 2.0 * FACEPLATE_MM * critical_angle.tan();
+    long_axis_units * radius_mm / TUBE_LONG_AXIS_MM
 }
 
 use crate::prelude::Saveable;
