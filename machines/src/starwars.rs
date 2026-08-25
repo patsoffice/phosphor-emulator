@@ -223,6 +223,24 @@ pub const TIMING: TimingConfig = TimingConfig {
     display_aspect: Some((4, 3)),
 };
 
+/// The board's crystal and everything divided out of it.
+///
+/// One 12.096 MHz crystal: the AVG runs off it directly, both 6809Es and the
+/// POKEYs through a divide-by-eight, and the TMS5220 through /2/9. The AVG
+/// division is what [`AVG_CYCLES_PER_CPU_CYCLE`] is, and
+/// `avg_step_matches_the_declared_crystals` checks the constant against it.
+pub fn clock_tree() -> phosphor_core::core::ClockTree {
+    use phosphor_core::core::{ClockDomainName as Clk, ClockTree, RootId};
+    let mut t = ClockTree::new(12_096_000);
+    let cpu = t.add_domain(Clk::Cpu, RootId::MAIN, 1, 8); // 1.512 MHz 6809E
+    t.add_domain(Clk::SoundCpu, RootId::MAIN, 1, 8); // sound 6809E, same rate
+    t.add_domain(Clk::Vector, RootId::MAIN, 1, 1); // 12.096 MHz AVG
+    t.add_domain(Clk::Speech, RootId::MAIN, 1, 18); // TMS5220 at 672 kHz
+    t.set_step_domain(cpu);
+    // No raster derivation: a vector board has no dot clock.
+    t
+}
+
 /// Periodic IRQ: 3 kHz / 12 ≈ 246.09 Hz → every 6144 CPU cycles.
 const IRQ_PERIOD_CYCLES: u64 = 6144;
 
@@ -1784,6 +1802,8 @@ impl MachineCore for StarWarsSystem {
         self.machine_id
     }
 
+    crate::machine_clock_declaration!(TIMING, crate::starwars::clock_tree);
+
     fn run_frame(&mut self) {
         // A pending sound-CPU reset ($46E0) is serviced once per frame; the
         // cycle-stepped debugger paths do it per step in `step_cycle`.
@@ -2299,6 +2319,24 @@ MachineEntry::new("esb", &["esb"], create_esb_machine, create_esb_bare, STARWARS
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `AVG_CYCLES_PER_CPU_CYCLE` is a hand-derived integer sitting in a
+    /// comment. It is the ratio between two domains of the declared tree, so
+    /// derive it there and hold the constant to it.
+    #[test]
+    fn avg_step_matches_the_declared_crystals() {
+        let t = clock_tree();
+        let avg = t
+            .find(phosphor_core::core::ClockDomainName::Vector)
+            .expect("the tree declares an AVG domain");
+        let (num, den) = t.domain(avg).step_ratio();
+        assert_eq!(den, 1, "the AVG is a whole multiple of the CPU clock");
+        assert_eq!(
+            num, AVG_CYCLES_PER_CPU_CYCLE,
+            "AVG_CYCLES_PER_CPU_CYCLE says {AVG_CYCLES_PER_CPU_CYCLE}, but the \
+             declared crystals divide out to {num}"
+        );
+    }
 
     /// Encode a 16-bit word into main RAM (or region backing) big-endian in the
     /// order the Star Wars AVG reads (op/high byte first, no XOR swap).

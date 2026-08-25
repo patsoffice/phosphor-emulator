@@ -351,6 +351,21 @@ const TIMING: TimingConfig = TimingConfig {
     display_aspect: Some((4, 3)),
 };
 
+/// The board's crystal and everything divided out of it.
+///
+/// One 10 MHz crystal, with the 6502 on a divide-by-eight and the pixel clock
+/// on a divide-by-two.
+pub fn clock_tree() -> phosphor_core::core::ClockTree {
+    use phosphor_core::core::{ClockDomainName as Clk, ClockTree, RootId};
+    let mut t = ClockTree::new(10_000_000);
+    let cpu = t.add_domain(Clk::Cpu, RootId::MAIN, 1, 8); // 1.25 MHz
+    let dot = t.add_domain(Clk::Pixel, RootId::MAIN, 1, 2); // 5 MHz
+    t.set_step_domain(cpu);
+    // 4:1 off one crystal, so 320 dot clocks is exactly 80 CPU cycles.
+    t.set_raster(dot, 320, 0);
+    t
+}
+
 // Palette resistor values: 22K / 10K / 4.7K with 1K pulldown.
 // Each color channel uses a 3-bit inverted DAC through this network.
 const PALETTE_RESISTORS: [f64; 3] = [22_000.0, 10_000.0, 4_700.0];
@@ -1332,6 +1347,8 @@ impl MachineCore for CrystalCastlesSystem {
     fn machine_id(&self) -> &str {
         "ccastles"
     }
+
+    crate::machine_clock_declaration!(TIMING, crate::ccastles::clock_tree);
 }
 
 impl SaveState for CrystalCastlesSystem {

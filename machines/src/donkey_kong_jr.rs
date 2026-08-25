@@ -510,7 +510,7 @@ impl InputConfigurable for DkongJrSystem {
 }
 
 impl MachineCore for DkongJrSystem {
-    crate::machine_core_metadata!("dkongjr", tkg04::TIMING);
+    crate::machine_core_metadata!("dkongjr", tkg04::TIMING, tkg04::clock_tree);
 
     fn gfx_sheets(&self) -> Vec<phosphor_core::core::machine::GfxSheet<'_>> {
         self.board.gfx_sheets()

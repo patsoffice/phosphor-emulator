@@ -741,7 +741,11 @@ impl Bus for RoadRunnerBus<'_> {
 crate::impl_board_delegation!(RoadRunnerSystem, board, atari_system1::TIMING);
 
 impl MachineCore for RoadRunnerSystem {
-    crate::machine_core_metadata!("roadrunner", atari_system1::TIMING);
+    crate::machine_core_metadata!(
+        "roadrunner",
+        atari_system1::TIMING,
+        atari_system1::clock_tree
+    );
 
     fn run_frame(&mut self) {
         {

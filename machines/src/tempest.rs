@@ -691,7 +691,7 @@ impl InputConfigurable for TempestSystem {
 crate::impl_board_debug!(TempestSystem, board, atari_avg::TIMING);
 
 impl MachineCore for TempestSystem {
-    crate::machine_core_metadata!("tempest", atari_avg::TIMING);
+    crate::machine_core_metadata!("tempest", atari_avg::TIMING, atari_avg::clock_tree);
 
     fn run_frame(&mut self) {
         Self::update_pot_inputs(&mut self.io);

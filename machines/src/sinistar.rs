@@ -456,7 +456,7 @@ impl Renderable for SinistarSystem {
 }
 
 impl MachineCore for SinistarSystem {
-    crate::machine_core_metadata!("sinistar", williams::TIMING);
+    crate::machine_core_metadata!("sinistar", williams::TIMING, williams::clock_tree);
 
     fn run_frame(&mut self) {
         self.apply_inputs();

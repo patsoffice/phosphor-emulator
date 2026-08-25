@@ -276,6 +276,25 @@ const TIMING: TimingConfig = TimingConfig {
     display_aspect: Some((3, 4)),
 };
 
+/// The board's crystal and everything divided out of it.
+///
+/// One 12.096 MHz crystal: the AVG runs off it directly, the 68000 through a
+/// divide-by-two. That single fact is what [`AVG_CYCLES_PER_CPU_CYCLE`] is, and
+/// `avg_step_matches_the_declared_crystals` checks the constant against it.
+///
+/// The POKEY is not declared: its 600 kHz is not a whole division of the
+/// crystal (12.096 MHz over 600 kHz is 20.16), so it is not a fact this type
+/// can state.
+pub fn clock_tree() -> phosphor_core::core::ClockTree {
+    use phosphor_core::core::{ClockDomainName as Clk, ClockTree, RootId};
+    let mut t = ClockTree::new(12_096_000);
+    let cpu = t.add_domain(Clk::Cpu, RootId::MAIN, 1, 2); // 6.048 MHz 68000
+    t.add_domain(Clk::Vector, RootId::MAIN, 1, 1); // 12.096 MHz AVG
+    t.set_step_domain(cpu);
+    // No raster derivation: a vector board has no dot clock.
+    t
+}
+
 /// Periodic IRQ1: MASTER/4096/12 = 246.094 Hz → every 24576 CPU cycles.
 const IRQ_PERIOD_CYCLES: u64 = 24_576;
 
@@ -775,7 +794,7 @@ impl InputConfigurable for QuantumSystem {
 }
 
 impl MachineCore for QuantumSystem {
-    crate::machine_core_metadata!("quantum", TIMING);
+    crate::machine_core_metadata!("quantum", TIMING, crate::quantum::clock_tree);
 
     fn run_frame(&mut self) {
         self.board.update_trackball();
@@ -1042,6 +1061,24 @@ MachineEntry::new("quantum", &["quantum", "quantum1", "quantump"], create_quantu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `AVG_CYCLES_PER_CPU_CYCLE` is a hand-derived integer sitting in a
+    /// comment. It is the ratio between two domains of the declared tree, so
+    /// derive it there and hold the constant to it.
+    #[test]
+    fn avg_step_matches_the_declared_crystals() {
+        let t = clock_tree();
+        let avg = t
+            .find(phosphor_core::core::ClockDomainName::Vector)
+            .expect("the tree declares an AVG domain");
+        let (num, den) = t.domain(avg).step_ratio();
+        assert_eq!(den, 1, "the AVG is a whole multiple of the CPU clock");
+        assert_eq!(
+            num, AVG_CYCLES_PER_CPU_CYCLE,
+            "AVG_CYCLES_PER_CPU_CYCLE says {AVG_CYCLES_PER_CPU_CYCLE}, but the \
+             declared crystals divide out to {num}"
+        );
+    }
 
     #[test]
     fn dip_default_and_metadata() {

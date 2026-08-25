@@ -420,6 +420,8 @@ impl MachineCore for BurgertimeSystem {
     fn machine_id(&self) -> &str {
         self.board.machine_id()
     }
+
+    crate::machine_clock_declaration!(btime::TIMING, btime::clock_tree);
 }
 
 impl SaveState for BurgertimeSystem {

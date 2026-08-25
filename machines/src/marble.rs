@@ -673,7 +673,7 @@ impl Bus for MarbleBus<'_> {
 crate::impl_board_delegation!(MarbleSystem, board, atari_system1::TIMING);
 
 impl MachineCore for MarbleSystem {
-    crate::machine_core_metadata!("marble", atari_system1::TIMING);
+    crate::machine_core_metadata!("marble", atari_system1::TIMING, atari_system1::clock_tree);
 
     fn run_frame(&mut self) {
         // Fold this frame's trackball input into the counters the game samples.

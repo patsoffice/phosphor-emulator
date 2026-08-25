@@ -380,7 +380,7 @@ impl Default for FroggerSystem {
 crate::impl_board_delegation!(FroggerSystem, board, TIMING, orientation);
 
 impl MachineCore for FroggerSystem {
-    crate::machine_core_metadata!("frogger", TIMING);
+    crate::machine_core_metadata!("frogger", TIMING, crate::scramble::clock_tree);
 
     fn gfx_sheets(&self) -> Vec<phosphor_core::core::machine::GfxSheet<'_>> {
         use phosphor_core::core::machine::GfxSheet;

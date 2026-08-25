@@ -463,7 +463,7 @@ impl InputConfigurable for SatansHollowSystem {
 }
 
 impl MachineCore for SatansHollowSystem {
-    crate::machine_core_metadata!("shollow", mcr2::TIMING);
+    crate::machine_core_metadata!("shollow", mcr2::TIMING, mcr2::clock_tree);
 
     fn gfx_sheets(&self) -> Vec<phosphor_core::core::machine::GfxSheet<'_>> {
         use phosphor_core::core::machine::GfxSheet;

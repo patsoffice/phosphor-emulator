@@ -446,7 +446,7 @@ impl InputConfigurable for AsteroidsSystem {
 }
 
 impl MachineCore for AsteroidsSystem {
-    crate::machine_core_metadata!("asteroids", atari_dvg::TIMING);
+    crate::machine_core_metadata!("asteroids", atari_dvg::TIMING, atari_dvg::clock_tree);
 
     fn run_frame(&mut self) {
         let (cpu, mut bus) = self.split();

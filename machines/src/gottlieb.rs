@@ -65,6 +65,31 @@ pub const TIMING: TimingConfig = TimingConfig {
     display_aspect: Some((3, 4)),         // portrait tube as viewed (after ROT270)
 };
 
+/// The board's crystals and everything divided out of them.
+///
+/// Three. The main board carries two, 15 MHz and 20 MHz, and the sound board a
+/// third at 3.579545 MHz (Q*Bert instruction manual, parts list). The two main
+/// board crystals both land on 5 MHz by different divisions, which is why the
+/// I8088 and the pixel clock look like one clock in the code and are not.
+///
+/// The Votrax SC-01's clock is not declared: it is an RC VCO steered by a DAC
+/// write, not a crystal division, so it belongs in the retune work rather than
+/// here.
+pub fn clock_tree() -> phosphor_core::core::ClockTree {
+    use phosphor_core::core::{ClockDomainName as Clk, ClockTree, RootId};
+    let mut t = ClockTree::new(15_000_000);
+    let vid = t.add_root(20_000_000);
+    let snd = t.add_root(3_579_545);
+    let cpu = t.add_domain(Clk::Cpu, RootId::MAIN, 1, 3); // 5 MHz I8088
+    let dot = t.add_domain(Clk::Pixel, vid, 1, 4); // 5 MHz pixel clock
+    t.add_domain(Clk::SoundCpu, snd, 1, 4); // 894886.25 Hz 6502
+    t.set_step_domain(cpu);
+    // Two crystals, but both divide to exactly 5 MHz, so 318 pixel clocks is
+    // exactly 318 CPU cycles with nothing to round.
+    t.set_raster(dot, 318, 0);
+    t
+}
+
 pub const VISIBLE_LINES: u64 = 240;
 pub fn output_sample_rate() -> u64 {
     phosphor_core::audio::host_sample_rate() as u64

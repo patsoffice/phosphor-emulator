@@ -492,7 +492,7 @@ impl InputConfigurable for AsteroidsDeluxeSystem {
 crate::impl_board_debug!(AsteroidsDeluxeSystem, board, atari_dvg::TIMING);
 
 impl MachineCore for AsteroidsDeluxeSystem {
-    crate::machine_core_metadata!("astdelux", atari_dvg::TIMING);
+    crate::machine_core_metadata!("astdelux", atari_dvg::TIMING, atari_dvg::clock_tree);
 
     fn run_frame(&mut self) {
         // The POKEY is clocked per cycle by the bus view's `begin_cycle` hook.

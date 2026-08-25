@@ -435,7 +435,7 @@ impl Bus for JoustBus<'_> {
 crate::impl_board_delegation!(JoustSystem, board, williams::TIMING);
 
 impl MachineCore for JoustSystem {
-    crate::machine_core_metadata!("joust", williams::TIMING);
+    crate::machine_core_metadata!("joust", williams::TIMING, williams::clock_tree);
 
     fn run_frame(&mut self) {
         self.board

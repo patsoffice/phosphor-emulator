@@ -453,7 +453,7 @@ impl InputConfigurable for QbertSystem {
 }
 
 impl MachineCore for QbertSystem {
-    crate::machine_core_metadata!("qbert", gottlieb::TIMING);
+    crate::machine_core_metadata!("qbert", gottlieb::TIMING, gottlieb::clock_tree);
 
     fn gfx_sheets(&self) -> Vec<phosphor_core::core::machine::GfxSheet<'_>> {
         use phosphor_core::core::machine::GfxSheet;

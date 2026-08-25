@@ -310,9 +310,17 @@ pub fn clock_tree() -> ClockTree {
 //   tree.cycles_per_scanline(dot, 312) == (254, -122 ppm)
 ```
 
-The 122 ppm is now a *number in a test* rather than a rounding buried in a
-comment. Mr. Do!'s equivalent is +230 ppm, and its comment already admits the
+The rounding error is now a *number in a test* rather than a figure buried in a
+comment. Mr. Do!'s equivalent is +235 ppm, and its comment already admits the
 count "is not a clean integer".
+
+> **Implemented (steps 1 and 2).** The real figures are -125 ppm for Do! Castle
+> and +235 ppm for Mr. Do!, not the -122 and +230 written above: 312 dot clocks
+> is 253.96825 CPU cycles, and 254 against that is 125 ppm. The earlier numbers
+> came from rounding the intermediate to three decimals before dividing.
+> `cycles_per_scanline` computes it in exact integer arithmetic; the sign
+> convention here is retained, so the ppm is the error in the *video rate* the
+> integer count implies (negative means the count runs the video clock slow).
 
 ### Frame position
 
@@ -443,6 +451,14 @@ Each step is one commit, validated by `cargo test -p phosphor-machines` plus
 
 Steps 1–2 are worth landing on their own even if 3–8 never happen.
 
+**Steps 1 and 2 are implemented** (`0156409`, `f2df73f`). Two notes for whoever
+picks up step 3. `MachineCore::clock_declaration()` is how a board's tree and
+its `TimingConfig` reach a test together, emitted by `machine_core_metadata!`
+from the same `$timing` expression so the pair cannot drift. And `hz()` reads a
+domain's *step* ratio rather than its root ratio, which is what makes the
+save-state split self-consistent: a domain restored at a retuned rate reports
+the retuned rate, while `root_ratio()` stays the board's unchanged declaration.
+
 ## Alternatives Considered
 
 ### Keep `TimingConfig` + per-board `ClockDivider`
@@ -474,18 +490,18 @@ letting a board step the two or three domains it has.
 
 ## Open Questions
 
-* **Gottlieb's crystals.** `gottlieb.rs:8` says the I8088 is 15 MHz / 3;
-  `gottlieb.rs:51` says the pixel clock is 20 MHz / 4. Both give 5 MHz, which is
-  why the discrepancy has gone unnoticed. 15 MHz ÷ 3 is the textbook 8284A
-  arrangement for a 5 MHz 8088, so both are plausibly real and this is a
-  two-crystal board. **Verify against the schematic or MAME's `gottlieb.cpp`
-  clock definitions before step 3 declares the tree** — the CPU domain's Hz is
-  unaffected either way, but the declared crystal is the thing this design
-  claims to be authoritative about.
-* **Rounding tolerance policy.** Step 2's test needs a per-board declared
-  tolerance. Proposal: the board states the ppm it accepts and the test asserts
-  the actual error is within it, so a tightened divider shows up as a failing
-  bound rather than a silent improvement. Mr. Do! would declare ~250 ppm.
+* ~~**Gottlieb's crystals.**~~ Answered: the Q\*Bert instruction manual's parts
+  list carries two crystals on the main board, 15 MHz and 20 MHz, and a third
+  at 3.579545 MHz on the sound board. Both `gottlieb.rs:8` and `gottlieb.rs:51`
+  are correct and neither is stale; System 80 is a three-crystal board whose two
+  main-board crystals divide to the same 5 MHz, which is why nobody noticed.
+* ~~**Rounding tolerance policy.**~~ Settled as proposed, with one addition. The
+  tolerance is declared on the tree itself (`ClockTree::set_raster(video,
+  htotal, ppm)`) rather than in the test, so it sits beside the crystals it
+  bounds. A second check asserts the declared bound is within a factor of two of
+  the real error, because "actual is within declared" alone cannot fail when a
+  divider is tightened. Do! Castle declares 130, Mr. Do! 240, and every board
+  whose clocks divide evenly declares 0.
 * ~~**Does anything need a domain faster than the CPU besides congo_bongo?**~~
   Checked: no. mario_bros' I8039 looks like a second case at 11 MHz against a
   4 MHz Z80, but `SOUND_TICK_NUM/DEN = 11/60` (`mario_bros.rs:103-104`) is the

@@ -78,6 +78,27 @@ pub const TIMING: TimingConfig = TimingConfig {
     display_aspect: Some((3, 4)),          // portrait tube as viewed (after ROT270)
 };
 
+/// The board's crystals and everything divided out of them.
+///
+/// Two: an 8.2 MHz crystal for the Z80 at /2 and a 19.6 MHz one for the pixel
+/// clock at /4. As on Do! Castle, that makes `TIMING.cycles_per_scanline` a
+/// conversion rather than a hardware constant: 312 dot clocks is 261.061 CPU
+/// cycles, and running 261 makes the video clock 235 ppm fast. The comment
+/// above `TIMING` already says the count "is not a clean integer"; the
+/// tolerance below is that admission as a number a test can hold.
+pub fn clock_tree() -> phosphor_core::core::ClockTree {
+    use phosphor_core::core::{ClockDomainName as Clk, ClockTree, RootId};
+    let mut t = ClockTree::new(8_200_000);
+    let vid = t.add_root(19_600_000);
+    let cpu = t.add_domain(Clk::Cpu, RootId::MAIN, 1, 2); // 4.1 MHz
+    let dot = t.add_domain(Clk::Pixel, vid, 1, 4); // 4.9 MHz
+    t.add_domain(Clk::Psg, RootId::MAIN, 1, 32); // SN76489 tones at 4.1 MHz / 16
+    t.add_domain(Clk::Psg2, RootId::MAIN, 1, 32); // second SN76489, same clock
+    t.set_step_domain(cpu);
+    t.set_raster(dot, 312, 240);
+    t
+}
+
 /// Native (pre-rotation) visible raster: MAME visarea x 8..248, y 32..224.
 pub const VISIBLE_WIDTH: usize = 240;
 pub const VISIBLE_HEIGHT: usize = 192;
@@ -906,7 +927,7 @@ impl Bus for MrdoBoard {
 crate::impl_board_delegation!(MrdoSystem, board, crate::mrdo::TIMING, orientation);
 
 impl MachineCore for MrdoSystem {
-    crate::machine_core_metadata!("mrdo", crate::mrdo::TIMING);
+    crate::machine_core_metadata!("mrdo", crate::mrdo::TIMING, crate::mrdo::clock_tree);
 
     fn gfx_sheets(&self) -> Vec<phosphor_core::core::machine::GfxSheet<'_>> {
         use phosphor_core::core::machine::GfxSheet;

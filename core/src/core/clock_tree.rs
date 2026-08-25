@@ -321,6 +321,25 @@ impl ClockDomain {
 // Debug view
 // ---------------------------------------------------------------------------
 
+/// A board's raster derivation: which domain is the dot clock, how wide a
+/// scanline is in dot clocks, and how much rounding the board accepts when
+/// that is converted into whole CPU cycles.
+///
+/// Declared by boards whose CPU and video clocks come off *different* crystals,
+/// where `cycles_per_scanline` is not a hardware constant at all but a
+/// conversion between two oscillators. Stating the accepted error here turns
+/// that conversion into something a test can check.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct Raster {
+    /// The dot clock.
+    pub video: DomainId,
+    /// Scanline width in dot clocks (HTOTAL).
+    pub htotal: u32,
+    /// Magnitude of the conversion error the board accepts, in ppm. Zero when
+    /// the two clocks divide evenly.
+    pub tolerance_ppm: i32,
+}
+
 /// One row of a tree's debug view. See [`ClockTree::domains`].
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct DomainInfo {
@@ -354,6 +373,8 @@ pub struct ClockTree {
     len: u8,
     #[save_skip]
     step: Option<DomainId>,
+    #[save_skip]
+    raster: Option<Raster>,
 }
 
 impl ClockTree {
@@ -368,6 +389,7 @@ impl ClockTree {
             domains: [ClockDomain::INERT; MAX_DOMAINS],
             len: 0,
             step: None,
+            raster: None,
         }
     }
 
@@ -446,6 +468,33 @@ impl ClockTree {
         self.step
     }
 
+    /// Declare how this board's scanline count comes out of its dot clock, and
+    /// how much rounding it accepts doing so.
+    ///
+    /// Stating the tolerance is the point: it makes the board's rounding a
+    /// number a test can check rather than a remark in a comment.
+    pub fn set_raster(&mut self, video: DomainId, htotal: u32, tolerance_ppm: i32) {
+        assert!(
+            video.index() < self.len as usize,
+            "clock tree: unknown domain"
+        );
+        assert!(htotal != 0, "clock tree: HTOTAL is 0");
+        assert!(
+            tolerance_ppm >= 0,
+            "clock tree: tolerance is a magnitude, so it cannot be negative"
+        );
+        self.raster = Some(Raster {
+            video,
+            htotal,
+            tolerance_ppm,
+        });
+    }
+
+    /// The board's declared raster derivation, if it has one.
+    pub const fn raster(&self) -> Option<Raster> {
+        self.raster
+    }
+
     /// Number of declared domains.
     pub const fn len(&self) -> usize {
         self.len as usize
@@ -498,6 +547,19 @@ impl ClockTree {
     pub fn hz(&self, id: DomainId) -> u64 {
         let (num, den) = self.hz_ratio(id);
         ((num + den / 2) / den) as u64
+    }
+
+    /// A domain's live rate as an exact rational `(numerator, denominator)` in
+    /// Hz.
+    ///
+    /// Most board rates are whole numbers of hertz, but not all: Atari System
+    /// 1's 14.318181 MHz colourburst crystal halves to 7159090.5 Hz, and
+    /// Gottlieb's sound 6502 lands on 894886.25 Hz. Comparing a stored leaf
+    /// against [`hz`](Self::hz) would make such a board's agreement with its
+    /// crystals depend on which way the rounding went, so anything checking a
+    /// derivation should compare against this instead.
+    pub fn hz_exact(&self, id: DomainId) -> (u128, u128) {
+        self.hz_ratio(id)
     }
 
     /// Retune a domain to an absolute rate.

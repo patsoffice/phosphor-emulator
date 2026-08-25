@@ -73,6 +73,22 @@ pub const TIMING: TimingConfig = TimingConfig {
     display_aspect: Some((4, 3)),
 };
 
+/// The board's crystal and everything divided out of it.
+///
+/// One 12.096 MHz crystal: the 6809E at /8, the pixel clock at /2, and the four
+/// POKEYs at the 6809E's own rate.
+pub fn clock_tree() -> phosphor_core::core::ClockTree {
+    use phosphor_core::core::{ClockDomainName as Clk, ClockTree, RootId};
+    let mut t = ClockTree::new(12_096_000);
+    let cpu = t.add_domain(Clk::Cpu, RootId::MAIN, 1, 8); // 1.512 MHz 6809E
+    let dot = t.add_domain(Clk::Pixel, RootId::MAIN, 1, 2); // 6.048 MHz
+    t.add_domain(Clk::Pokey, RootId::MAIN, 1, 8); // POKEYs at the 6809E rate
+    t.set_step_domain(cpu);
+    // 4:1 off one crystal, so 384 dot clocks is exactly 96 CPU cycles.
+    t.set_raster(dot, 384, 0);
+    t
+}
+
 const VBLANK_LINE: u64 = 224; // status VBLANK flag set at line 224, cleared at 0
 
 // Polygon bitmap geometry. The generator draws into a 256×256 8-bit buffer
@@ -1244,6 +1260,8 @@ impl MachineCore for IrobotSystem {
     fn machine_id(&self) -> &str {
         "irobot"
     }
+
+    crate::machine_clock_declaration!(TIMING, crate::irobot::clock_tree);
 }
 
 impl Saveable for IrobotSystem {

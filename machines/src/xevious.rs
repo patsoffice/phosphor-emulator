@@ -1290,7 +1290,7 @@ impl MachineDebug for XeviousSystem {
 }
 
 impl MachineCore for XeviousSystem {
-    crate::machine_core_metadata!("xevious", namco_galaga::TIMING);
+    crate::machine_core_metadata!("xevious", namco_galaga::TIMING, namco_galaga::clock_tree);
 
     fn gfx_sheets(&self) -> Vec<phosphor_core::core::machine::GfxSheet<'_>> {
         use phosphor_core::core::machine::GfxSheet;

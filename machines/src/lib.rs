@@ -236,27 +236,46 @@ pub(crate) use impl_board_debug;
 
 /// Generates `MachineCore` identity/timing methods inside an `impl MachineCore` block.
 ///
-/// Expands to: `frame_rate_hz()`, `machine_id()`.
+/// Expands to: `frame_rate_hz()`, `machine_id()`, and `clock_declaration()`.
 ///
 /// # Usage
 /// ```ignore
 /// impl MachineCore for PacmanSystem {
-///     crate::machine_core_metadata!("pacman", namco_pac::TIMING);
+///     crate::machine_core_metadata!("pacman", namco_pac::TIMING, namco_pac::clock_tree);
 ///     fn run_frame(&mut self) { ... }
 ///     fn reset(&mut self) { ... }
 /// }
 /// ```
+///
+/// The clock tree is required: `clock_tree_test.rs` asserts every registered
+/// machine declares one, because a board whose crystals are only in a comment
+/// is the thing that test exists to catch.
 macro_rules! machine_core_metadata {
-    ($id:expr, $timing:expr) => {
+    ($id:expr, $timing:expr, $tree:path) => {
         fn frame_rate_hz(&self) -> f64 {
             $timing.frame_rate_hz()
         }
         fn machine_id(&self) -> &str {
             $id
         }
+        $crate::machine_clock_declaration!($timing, $tree);
     };
 }
 pub(crate) use machine_core_metadata;
+
+/// Generates just `MachineCore::clock_declaration()`, for the machines that
+/// hand-write the rest of their identity methods.
+macro_rules! machine_clock_declaration {
+    ($timing:expr, $tree:path) => {
+        fn clock_declaration(&self) -> Option<phosphor_core::core::ClockDeclaration> {
+            Some(phosphor_core::core::ClockDeclaration {
+                tree: $tree(),
+                timing: $timing,
+            })
+        }
+    };
+}
+pub(crate) use machine_clock_declaration;
 
 /// Implements default-only frontend capabilities for machines without
 /// battery-backed RAM, sub-span profiling, or event tracing.

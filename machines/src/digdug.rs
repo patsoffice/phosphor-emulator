@@ -1333,7 +1333,7 @@ impl MachineDebug for DigDugSystem {
 }
 
 impl MachineCore for DigDugSystem {
-    crate::machine_core_metadata!("digdug", namco_galaga::TIMING);
+    crate::machine_core_metadata!("digdug", namco_galaga::TIMING, namco_galaga::clock_tree);
 
     fn gfx_sheets(&self) -> Vec<phosphor_core::core::machine::GfxSheet<'_>> {
         use phosphor_core::core::machine::GfxSheet;

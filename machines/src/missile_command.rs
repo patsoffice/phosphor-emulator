@@ -256,6 +256,21 @@ const TIMING: TimingConfig = TimingConfig {
     display_aspect: Some((4, 3)),
 };
 
+/// The board's crystal and everything divided out of it.
+///
+/// One 10 MHz crystal, with the 6502 on a divide-by-eight and the pixel clock
+/// on a divide-by-two.
+pub fn clock_tree() -> phosphor_core::core::ClockTree {
+    use phosphor_core::core::{ClockDomainName as Clk, ClockTree, RootId};
+    let mut t = ClockTree::new(10_000_000);
+    let cpu = t.add_domain(Clk::Cpu, RootId::MAIN, 1, 8); // 1.25 MHz
+    let dot = t.add_domain(Clk::Pixel, RootId::MAIN, 1, 2); // 5 MHz
+    t.set_step_domain(cpu);
+    // 4:1 off one crystal, so 320 dot clocks is exactly 80 CPU cycles.
+    t.set_raster(dot, 320, 0);
+    t
+}
+
 /// Missile Command Arcade System (Atari, 1980)
 ///
 /// Hardware: MOS 6502 @ 1.25 MHz, POKEY for sound/IO.
@@ -1058,6 +1073,8 @@ impl MachineCore for MissileCommandSystem {
     fn machine_id(&self) -> &str {
         "missile_command"
     }
+
+    crate::machine_clock_declaration!(TIMING, crate::missile_command::clock_tree);
 }
 
 impl SaveState for MissileCommandSystem {

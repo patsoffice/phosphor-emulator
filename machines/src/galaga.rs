@@ -1188,7 +1188,7 @@ impl MachineDebug for GalagaSystem {
 }
 
 impl MachineCore for GalagaSystem {
-    crate::machine_core_metadata!("galaga", namco_galaga::TIMING);
+    crate::machine_core_metadata!("galaga", namco_galaga::TIMING, namco_galaga::clock_tree);
 
     fn gfx_sheets(&self) -> Vec<phosphor_core::core::machine::GfxSheet<'_>> {
         use phosphor_core::core::machine::GfxSheet;

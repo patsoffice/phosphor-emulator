@@ -729,7 +729,7 @@ impl InputConfigurable for DkongSystem {
 }
 
 impl MachineCore for DkongSystem {
-    crate::machine_core_metadata!("dkong", tkg04::TIMING);
+    crate::machine_core_metadata!("dkong", tkg04::TIMING, tkg04::clock_tree);
 
     fn run_frame(&mut self) {
         let (mut cpus, mut bus) = self.split();

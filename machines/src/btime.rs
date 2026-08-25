@@ -137,6 +137,25 @@ pub const TIMING: TimingConfig = TimingConfig {
     display_aspect: Some((3, 4)),
 };
 
+/// The board's crystal and everything divided out of it.
+///
+/// One 12 MHz crystal: the main 6502 at /8, the pixel clock at /2, and both
+/// AY-3-8910s at the main CPU's own 1.5 MHz. The sound 6502's 500 kHz is not
+/// declared, because this file documents the rate but not the divider chain
+/// that produces it.
+pub fn clock_tree() -> phosphor_core::core::ClockTree {
+    use phosphor_core::core::{ClockDomainName as Clk, ClockTree, RootId};
+    let mut t = ClockTree::new(12_000_000);
+    let cpu = t.add_domain(Clk::Cpu, RootId::MAIN, 1, 8); // 1.5 MHz
+    let dot = t.add_domain(Clk::Pixel, RootId::MAIN, 1, 2); // 6 MHz
+    t.add_domain(Clk::Psg, RootId::MAIN, 1, 8); // AY-3-8910 at 1.5 MHz
+    t.set_step_domain(cpu);
+    // Both clocks come off the same crystal in a 4:1 ratio, so 384 dot clocks
+    // is exactly 96 CPU cycles.
+    t.set_raster(dot, 384, 0);
+    t
+}
+
 // ---------------------------------------------------------------------------
 // Per-game configuration
 // ---------------------------------------------------------------------------

@@ -83,6 +83,28 @@ pub const TIMING: TimingConfig = TimingConfig {
     display_aspect: Some((3, 4)),                        // portrait tube as viewed (after ROT90)
 };
 
+/// The board's crystals and everything divided out of them.
+///
+/// Two: a 48.66 MHz master on the main board (Z80 at /16, pixel clock at /8)
+/// and a 4 MHz crystal on the sound board. The sound Z80 therefore runs
+/// *faster* than the main CPU the frame loop counts in, which is the one board
+/// here whose domain has to be stepped with `advance()` rather than `tick()`.
+pub fn clock_tree() -> phosphor_core::core::ClockTree {
+    use phosphor_core::core::{ClockDomainName as Clk, ClockTree, RootId};
+    let mut t = ClockTree::new(48_660_000);
+    let snd = t.add_root(SOUND_CLOCK as u32); // 4 MHz sound board crystal
+    let cpu = t.add_domain(Clk::Cpu, RootId::MAIN, 1, 16); // 3.04125 MHz
+    let dot = t.add_domain(Clk::Pixel, RootId::MAIN, 1, 8); // 6.0825 MHz
+    t.add_domain(Clk::SoundCpu, snd, 1, 1); // 4 MHz Z80
+    t.add_domain(Clk::Psg, snd, 1, 16); // SN76489A at 4 MHz, tones at /16
+    t.add_domain(Clk::Psg2, snd, 1, 64); // second SN76489A at 1 MHz, tones at /16
+    t.set_step_domain(cpu);
+    // Pixel clock is exactly twice the CPU clock off the same crystal, so 384
+    // dot clocks is exactly 192 CPU cycles.
+    t.set_raster(dot, 384, 0);
+    t
+}
+
 pub const NATIVE_WIDTH: usize = 256;
 pub const NATIVE_HEIGHT: usize = 240;
 pub const VBLANK_END: usize = 16; // first visible scanline
@@ -1353,7 +1375,11 @@ crate::impl_board_delegation!(
 );
 
 impl MachineCore for CongoBongoSystem {
-    crate::machine_core_metadata!("congobongo", crate::congo_bongo::TIMING);
+    crate::machine_core_metadata!(
+        "congobongo",
+        crate::congo_bongo::TIMING,
+        crate::congo_bongo::clock_tree
+    );
 
     fn gfx_sheets(&self) -> Vec<phosphor_core::core::machine::GfxSheet<'_>> {
         use phosphor_core::core::machine::GfxSheet;

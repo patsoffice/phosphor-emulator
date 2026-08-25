@@ -89,6 +89,29 @@ pub const TIMING: TimingConfig = TimingConfig {
     display_aspect: Some((4, 3)),
 };
 
+/// The board's crystals and everything divided out of them.
+///
+/// Three: 8 MHz for the Z80 at /2, 24 MHz for the pixel clock at /4, and 11 MHz
+/// on the sound board for the I8039, whose machine cycles are its crystal over
+/// fifteen. Two of the three divide evenly against each other: 384 dot clocks
+/// at 6 MHz is exactly 256 cycles at 4 MHz, so unlike Do! Castle and Mr. Do!
+/// this board's cross-crystal scanline count has nothing to round.
+///
+/// The sound domain reduces to 11/60 against the Z80, which is the ratio
+/// [`SOUND_TICK_NUM`]/[`SOUND_TICK_DEN`] states by hand.
+pub fn clock_tree() -> phosphor_core::core::ClockTree {
+    use phosphor_core::core::{ClockDomainName as Clk, ClockTree, RootId};
+    let mut t = ClockTree::new(8_000_000);
+    let vid = t.add_root(24_000_000);
+    let snd = t.add_root(11_000_000);
+    let cpu = t.add_domain(Clk::Cpu, RootId::MAIN, 1, 2); // 4 MHz Z80
+    let dot = t.add_domain(Clk::Pixel, vid, 1, 4); // 6 MHz
+    t.add_domain(Clk::Mcu, snd, 1, 15); // I8039 machine cycles, 733.33 kHz
+    t.set_step_domain(cpu);
+    t.set_raster(dot, 384, 0);
+    t
+}
+
 pub const VISIBLE_LINES: u64 = 240; // lines rendered (top VBLANK_END clipped on output)
 pub fn output_sample_rate() -> u64 {
     phosphor_core::audio::host_sample_rate() as u64
@@ -1373,7 +1396,11 @@ impl InputConfigurable for MarioBrosSystem {
 }
 
 impl MachineCore for MarioBrosSystem {
-    crate::machine_core_metadata!("mariobros", crate::mario_bros::TIMING);
+    crate::machine_core_metadata!(
+        "mariobros",
+        crate::mario_bros::TIMING,
+        crate::mario_bros::clock_tree
+    );
 
     fn gfx_sheets(&self) -> Vec<phosphor_core::core::machine::GfxSheet<'_>> {
         use phosphor_core::core::machine::GfxSheet;

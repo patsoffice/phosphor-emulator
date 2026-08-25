@@ -41,6 +41,24 @@ pub const TIMING: TimingConfig = TimingConfig {
     display_aspect: Some((3, 4)),         // portrait tube as viewed (after ROT90)
 };
 
+/// The board's crystal and everything divided out of it.
+///
+/// One 19.968 MHz oscillator on the main board, with the Z80 at /8 and the
+/// pixel clock at /4. The SSIO's 2 MHz sound Z80 is not declared: it is on the
+/// sound board with its own oscillator, and this file documents the rate but
+/// not the division that produces it.
+pub fn clock_tree() -> phosphor_core::core::ClockTree {
+    use phosphor_core::core::{ClockDomainName as Clk, ClockTree, RootId};
+    let mut t = ClockTree::new(19_968_000);
+    let cpu = t.add_domain(Clk::Cpu, RootId::MAIN, 1, 8); // 2.496 MHz
+    let dot = t.add_domain(Clk::Pixel, RootId::MAIN, 1, 4); // 4.992 MHz
+    t.set_step_domain(cpu);
+    // Pixel clock is exactly twice the CPU clock, so 512 dot clocks is exactly
+    // 256 CPU cycles.
+    t.set_raster(dot, 512, 0);
+    t
+}
+
 pub const VISIBLE_LINES: u64 = 240;
 
 pub fn output_sample_rate() -> u64 {

@@ -222,6 +222,26 @@ pub const TIMING: TimingConfig = TimingConfig {
     display_aspect: Some((3, 4)),
 };
 
+/// The board's crystal and everything divided out of it.
+///
+/// One 18.432 MHz crystal: all three Z80s at /6, the pixel clock at /3, and the
+/// Namco 51xx at /12, which is the divide-by-two the board applies to the CPU
+/// clock.
+pub fn clock_tree() -> phosphor_core::core::ClockTree {
+    use phosphor_core::core::{ClockDomainName as Clk, ClockTree, RootId};
+    let mut t = ClockTree::new(18_432_000);
+    let cpu = t.add_domain(Clk::Cpu, RootId::MAIN, 1, 6); // 3.072 MHz
+    t.add_domain(Clk::Cpu2, RootId::MAIN, 1, 6);
+    t.add_domain(Clk::Cpu3, RootId::MAIN, 1, 6);
+    let dot = t.add_domain(Clk::Pixel, RootId::MAIN, 1, 3); // 6.144 MHz
+    t.add_domain(Clk::Mcu, RootId::MAIN, 1, 12); // Namco 51xx at 1.536 MHz
+    t.set_step_domain(cpu);
+    // Pixel clock is exactly twice the CPU clock, so 384 dot clocks is exactly
+    // 192 CPU cycles.
+    t.set_raster(dot, 384, 0);
+    t
+}
+
 const VISIBLE_LINES: u64 = 224;
 
 /// CPU clock / 06XX clock = 3.072 MHz / 48 kHz = 64.

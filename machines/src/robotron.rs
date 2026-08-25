@@ -409,7 +409,7 @@ impl InputConfigurable for RobotronSystem {
 }
 
 impl MachineCore for RobotronSystem {
-    crate::machine_core_metadata!("robotron", williams::TIMING);
+    crate::machine_core_metadata!("robotron", williams::TIMING, williams::clock_tree);
 
     fn run_frame(&mut self) {
         self.board.widget_pia.set_port_a_input(self.widget_port_a);

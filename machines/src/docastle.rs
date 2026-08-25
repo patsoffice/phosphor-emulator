@@ -106,6 +106,27 @@ pub const TIMING: TimingConfig = TimingConfig {
     display_aspect: Some((4, 3)),
 };
 
+/// The board's crystals and everything divided out of them.
+///
+/// Two: both Z80s run straight off a 4 MHz crystal, and video comes off a
+/// separate 9.828 MHz one. Because the CPU and the dot clock are on different
+/// oscillators, `TIMING.cycles_per_scanline` is not a hardware constant at all:
+/// 312 dot clocks is 253.968 CPU cycles, and running 254 of them makes the
+/// video clock 125 ppm slow. That is the number the tolerance below states, and
+/// `clock_tree_test.rs` holds it to it.
+pub fn clock_tree() -> phosphor_core::core::ClockTree {
+    use phosphor_core::core::{ClockDomainName as Clk, ClockTree, RootId};
+    let mut t = ClockTree::new(4_000_000);
+    let vid = t.add_root(9_828_000);
+    let cpu = t.add_domain(Clk::Cpu, RootId::MAIN, 1, 1); // 4 MHz main Z80
+    t.add_domain(Clk::SubCpu, RootId::MAIN, 1, 1); // 4 MHz sub Z80
+    let dot = t.add_domain(Clk::Pixel, vid, 1, 2); // 4.914 MHz
+    t.add_domain(Clk::Psg, RootId::MAIN, 1, 16); // SN76489 tones at 4 MHz / 16
+    t.set_step_domain(cpu);
+    t.set_raster(dot, 312, 130);
+    t
+}
+
 /// Native visible raster. The CRTC is programmed for 32 characters, but its
 /// display-enable output is gated so the first and last 8 pixels of every line
 /// are blanked: x 8..247 of a 256-pixel line, y 0..191.
@@ -1616,6 +1637,8 @@ impl MachineCore for DocastleSystem {
     fn machine_id(&self) -> &str {
         self.variant().id()
     }
+
+    crate::machine_clock_declaration!(TIMING, crate::docastle::clock_tree);
 
     fn gfx_sheets(&self) -> Vec<phosphor_core::core::machine::GfxSheet<'_>> {
         use phosphor_core::core::machine::GfxSheet;

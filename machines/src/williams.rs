@@ -65,6 +65,23 @@ pub const TIMING: TimingConfig = TimingConfig {
     display_aspect: Some((4, 3)),
 };
 
+/// The board's crystal and everything divided out of it.
+///
+/// One 4 MHz crystal with the 6809's E clock at /4.
+///
+/// No dot clock is declared, because this board does not document one:
+/// `TIMING.cycles_per_scanline` is 64 because the horizontal rate is about
+/// 15.6 kHz, which is a measured frequency rather than a division of a crystal.
+/// It is the one raster board here whose scanline count is not derived from
+/// anything, and `clock_tree_test.rs` names it for that.
+pub fn clock_tree() -> phosphor_core::core::ClockTree {
+    use phosphor_core::core::{ClockDomainName as Clk, ClockTree, RootId};
+    let mut t = ClockTree::new(4_000_000);
+    let cpu = t.add_domain(Clk::Cpu, RootId::MAIN, 1, 4); // 1 MHz E clock
+    t.set_step_domain(cpu);
+    t
+}
+
 // ---------------------------------------------------------------------------
 // Shared ROM definitions (common to all Williams gen-1 games)
 // ---------------------------------------------------------------------------

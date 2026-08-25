@@ -62,6 +62,26 @@ pub const TIMING: TimingConfig = TimingConfig {
     display_aspect: Some((3, 4)),                        // portrait tube as viewed (after ROT90)
 };
 
+/// The board's crystals and everything divided out of them.
+///
+/// Two: a 61.44 MHz master (Z80 at /20, pixel clock at /10) and a 6 MHz crystal
+/// on the sound section, whose I8035 machine cycles are its crystal over
+/// fifteen. That sound domain reduces to 25/192 against the Z80, which is the
+/// ratio [`SOUND_TICK_NUM`]/[`SOUND_TICK_DEN`] states by hand.
+pub fn clock_tree() -> phosphor_core::core::ClockTree {
+    use phosphor_core::core::{ClockDomainName as Clk, ClockTree, RootId};
+    let mut t = ClockTree::new(61_440_000);
+    let snd = t.add_root(6_000_000);
+    let cpu = t.add_domain(Clk::Cpu, RootId::MAIN, 1, 20); // 3.072 MHz
+    let dot = t.add_domain(Clk::Pixel, RootId::MAIN, 1, 10); // 6.144 MHz
+    t.add_domain(Clk::Mcu, snd, 1, 15); // I8035 machine cycles, 400 kHz
+    t.set_step_domain(cpu);
+    // Pixel clock is exactly twice the CPU clock off the same crystal, so 384
+    // dot clocks is exactly 192 CPU cycles.
+    t.set_raster(dot, 384, 0);
+    t
+}
+
 pub const VISIBLE_LINES: u64 = 240;
 pub fn output_sample_rate() -> u64 {
     phosphor_core::audio::host_sample_rate() as u64

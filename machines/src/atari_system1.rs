@@ -295,6 +295,31 @@ pub const TIMING: TimingConfig = TimingConfig {
     display_aspect: Some((4, 3)),
 };
 
+/// The board's crystal and everything divided out of it.
+///
+/// One 14.318181 MHz crystal (four times the NTSC colour subcarrier) feeds the
+/// whole board: the 68010 and the pixel clock at /2, the sound 6502 and its
+/// POKEY at /8, the YM2151 at /4.
+///
+/// The CPU rate is exactly 7159090.5 Hz, so `TIMING.cpu_clock_hz` is the
+/// nearest whole hertz to it rather than an exact division. The TMS5220 is not
+/// declared: Port B bit 4 reselects its divisor at runtime, which is a retune
+/// rather than a fixed ratio (see `atari_system1_sound.rs`).
+pub fn clock_tree() -> phosphor_core::core::ClockTree {
+    use phosphor_core::core::{ClockDomainName as Clk, ClockTree, RootId};
+    let mut t = ClockTree::new(14_318_181);
+    let cpu = t.add_domain(Clk::Cpu, RootId::MAIN, 1, 2); // 7.15909 MHz 68010
+    let dot = t.add_domain(Clk::Pixel, RootId::MAIN, 1, 2); // same clock as the CPU
+    t.add_domain(Clk::SoundCpu, RootId::MAIN, 1, 8); // 1.789772 MHz 6502
+    t.add_domain(Clk::Pokey, RootId::MAIN, 1, 8); // POKEY shares the sound CPU's rate
+    t.add_domain(Clk::Psg, RootId::MAIN, 1, 4); // YM2151, twice the sound CPU
+    t.set_step_domain(cpu);
+    // CPU and pixel clock are the same signal, so HTOTAL is the cycle count
+    // with nothing to round.
+    t.set_raster(dot, 456, 0);
+    t
+}
+
 /// First scanline of vertical blank (`vbstart`); VBLANK asserts IRQ4 here.
 pub(crate) const VBLANK_SCANLINE: u16 = 240;
 

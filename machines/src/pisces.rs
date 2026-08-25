@@ -564,6 +564,8 @@ impl MachineCore for PiscesSystem {
         self.cfg.id
     }
 
+    crate::machine_clock_declaration!(TIMING, crate::galaxian::clock_tree);
+
     fn gfx_sheets(&self) -> Vec<phosphor_core::core::machine::GfxSheet<'_>> {
         use phosphor_core::core::machine::GfxSheet;
         let v = &self.board.video;

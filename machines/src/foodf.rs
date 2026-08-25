@@ -408,6 +408,22 @@ const TIMING: TimingConfig = TimingConfig {
     display_aspect: Some((4, 3)),
 };
 
+/// The board's crystal and everything divided out of it.
+///
+/// One 12.096 MHz crystal: the 68000 and the pixel clock share master/2, and
+/// the POKEYs run at master/20.
+pub fn clock_tree() -> phosphor_core::core::ClockTree {
+    use phosphor_core::core::{ClockDomainName as Clk, ClockTree, RootId};
+    let mut t = ClockTree::new(12_096_000);
+    let cpu = t.add_domain(Clk::Cpu, RootId::MAIN, 1, 2); // 6.048 MHz 68000
+    let dot = t.add_domain(Clk::Pixel, RootId::MAIN, 1, 2); // same clock as the CPU
+    t.add_domain(Clk::Pokey, RootId::MAIN, 1, 20); // 604.8 kHz
+    t.set_step_domain(cpu);
+    // CPU and pixel clock are the same signal, so HTOTAL is the cycle count.
+    t.set_raster(dot, 384, 0);
+    t
+}
+
 /// POKEY runs at master/20 = 604.8 kHz, i.e. one POKEY clock per 10 CPU cycles.
 const POKEY_CLOCK_HZ: u32 = 604_800;
 const CPU_PER_POKEY: u64 = 10;
@@ -1021,7 +1037,7 @@ impl InputConfigurable for FoodFightSystem {
 }
 
 impl MachineCore for FoodFightSystem {
-    crate::machine_core_metadata!("foodf", TIMING);
+    crate::machine_core_metadata!("foodf", TIMING, crate::foodf::clock_tree);
 
     fn gfx_sheets(&self) -> Vec<phosphor_core::core::machine::GfxSheet<'_>> {
         use phosphor_core::core::machine::GfxSheet;

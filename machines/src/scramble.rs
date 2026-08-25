@@ -55,6 +55,30 @@ pub const TIMING: TimingConfig = TimingConfig {
     display_aspect: Some((3, 4)),                       // portrait tube as viewed (after ROT90)
 };
 
+/// The board's crystals and everything divided out of them.
+///
+/// Two: 18.432 MHz on the main board (Z80 at /6, pixel clock at /3) and a
+/// 14.318181 MHz colourburst crystal on the Konami sound board, with its Z80 at
+/// /8.
+///
+/// Note the sound crystal declared here is the real 14.318181 MHz, while
+/// [`SOUND_CLOCK_HZ`] below rounds it to 14.318 MHz, which puts the sound CPU
+/// 13 Hz (7 ppm) slow. Migrating that constant onto this tree is the fix, and
+/// is a behaviour change rather than part of declaring the tree.
+pub fn clock_tree() -> phosphor_core::core::ClockTree {
+    use phosphor_core::core::{ClockDomainName as Clk, ClockTree, RootId};
+    let mut t = ClockTree::new(18_432_000);
+    let snd = t.add_root(14_318_181);
+    let cpu = t.add_domain(Clk::Cpu, RootId::MAIN, 1, 6); // 3.072 MHz
+    let dot = t.add_domain(Clk::Pixel, RootId::MAIN, 1, 3); // 6.144 MHz
+    t.add_domain(Clk::SoundCpu, snd, 1, 8); // 1.789772 MHz
+    t.set_step_domain(cpu);
+    // Pixel clock is exactly twice the CPU clock, so 384 dot clocks is exactly
+    // 192 CPU cycles.
+    t.set_raster(dot, 384, 0);
+    t
+}
+
 /// Sound CPU clock: 14.318 MHz / 8 ≈ 1.79 MHz.
 const SOUND_CLOCK_HZ: u64 = 14_318_000 / 8;
 
@@ -1057,7 +1081,7 @@ impl Bus for ScrambleBoard {
 crate::impl_board_delegation!(ScrambleSystem, board, TIMING, orientation);
 
 impl MachineCore for ScrambleSystem {
-    crate::machine_core_metadata!("scramble", TIMING);
+    crate::machine_core_metadata!("scramble", TIMING, crate::scramble::clock_tree);
 
     fn gfx_sheets(&self) -> Vec<phosphor_core::core::machine::GfxSheet<'_>> {
         use phosphor_core::core::machine::GfxSheet;
@@ -1365,7 +1389,7 @@ impl Default for ScobraSystem {
 crate::impl_board_delegation!(ScobraSystem, board, TIMING, orientation);
 
 impl MachineCore for ScobraSystem {
-    crate::machine_core_metadata!("scobra", TIMING);
+    crate::machine_core_metadata!("scobra", TIMING, crate::scramble::clock_tree);
 
     fn gfx_sheets(&self) -> Vec<phosphor_core::core::machine::GfxSheet<'_>> {
         use phosphor_core::core::machine::GfxSheet;

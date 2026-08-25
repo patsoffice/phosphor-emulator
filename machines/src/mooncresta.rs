@@ -332,7 +332,7 @@ impl Default for MoonCrestaSystem {
 crate::impl_board_delegation!(MoonCrestaSystem, board, TIMING, orientation);
 
 impl MachineCore for MoonCrestaSystem {
-    crate::machine_core_metadata!("mooncrst", TIMING);
+    crate::machine_core_metadata!("mooncrst", TIMING, crate::galaxian::clock_tree);
 
     fn gfx_sheets(&self) -> Vec<phosphor_core::core::machine::GfxSheet<'_>> {
         use phosphor_core::core::machine::GfxSheet;

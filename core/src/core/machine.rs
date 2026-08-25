@@ -5,6 +5,7 @@ use crate::gfx::GfxCache;
 pub use crate::gfx::Orientation;
 
 use super::address_space16::AddressSpace16;
+use super::clock_tree::ClockTree;
 use super::debug::BusDebug;
 use super::debug_trace::DebugTrace;
 use super::save_state::SaveError;
@@ -754,6 +755,29 @@ pub trait MachineCore {
     fn gfx_sheets(&self) -> Vec<GfxSheet<'_>> {
         Vec::new()
     }
+
+    /// The board's declared crystals, paired with the [`TimingConfig`] they are
+    /// supposed to produce.
+    ///
+    /// Both halves come from the same board declaration, which is the point:
+    /// `TimingConfig` stores the *leaf* rates, so nothing could previously
+    /// check that a board's stored CPU clock and scanline count really follow
+    /// from the crystals its comments name. Returning them together lets a
+    /// registry-driven test check exactly that.
+    ///
+    /// The default is `None` only so the trait stays implementable; every
+    /// registered machine is required to override it.
+    fn clock_declaration(&self) -> Option<ClockDeclaration> {
+        None
+    }
+}
+
+/// A board's clock tree beside the [`TimingConfig`] derived from it.
+///
+/// See [`MachineCore::clock_declaration`].
+pub struct ClockDeclaration {
+    pub tree: ClockTree,
+    pub timing: TimingConfig,
 }
 
 // ---------------------------------------------------------------------------

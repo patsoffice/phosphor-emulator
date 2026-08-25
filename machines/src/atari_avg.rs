@@ -45,6 +45,22 @@ pub const TIMING: TimingConfig = TimingConfig {
     display_aspect: Some((3, 4)),
 };
 
+/// The board's crystal and everything divided out of it.
+///
+/// One 12.096 MHz crystal: the AVG runs off it directly, the 6502 through a
+/// divide-by-eight. That single fact is what [`AVG_CYCLES_PER_CPU_CYCLE`] is,
+/// and `avg_step_matches_the_declared_crystals` checks the constant against it.
+pub fn clock_tree() -> phosphor_core::core::ClockTree {
+    use phosphor_core::core::{ClockDomainName as Clk, ClockTree, RootId};
+    let mut t = ClockTree::new(12_096_000);
+    let cpu = t.add_domain(Clk::Cpu, RootId::MAIN, 1, 8); // 1.512 MHz 6502
+    t.add_domain(Clk::Vector, RootId::MAIN, 1, 1); // 12.096 MHz AVG
+    t.set_step_domain(cpu);
+    // No raster derivation: a vector board has no dot clock, and TIMING's
+    // "scanline" is the whole frame.
+    t
+}
+
 /// IRQ period: master_clock / 4096 / 12 = 246.09375 Hz → 6144 CPU cycles.
 pub const IRQ_PERIOD_CYCLES: u64 = 6144;
 
@@ -325,6 +341,24 @@ impl Renderable for AtariAvgBoard {
 mod tests {
     use super::*;
     use phosphor_core::core::AccessKind;
+
+    /// `AVG_CYCLES_PER_CPU_CYCLE` is a hand-derived integer sitting in a
+    /// comment. It is the ratio between two domains of the declared tree, so
+    /// derive it there and hold the constant to it.
+    #[test]
+    fn avg_step_matches_the_declared_crystals() {
+        let t = clock_tree();
+        let avg = t
+            .find(phosphor_core::core::ClockDomainName::Vector)
+            .expect("the tree declares an AVG domain");
+        let (num, den) = t.domain(avg).step_ratio();
+        assert_eq!(den, 1, "the AVG is a whole multiple of the CPU clock");
+        assert_eq!(
+            num, AVG_CYCLES_PER_CPU_CYCLE,
+            "AVG_CYCLES_PER_CPU_CYCLE says {AVG_CYCLES_PER_CPU_CYCLE}, but the \
+             declared crystals divide out to {num}"
+        );
+    }
 
     mod debug_events {
         use super::*;

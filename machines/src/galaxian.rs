@@ -96,6 +96,21 @@ pub const TIMING: TimingConfig = TimingConfig {
     display_aspect: Some((3, 4)),                       // portrait tube as viewed (after ROT90)
 };
 
+/// The board's crystal and everything divided out of it.
+///
+/// One 18.432 MHz crystal, with the Z80 at /6 and the pixel clock at /3.
+pub fn clock_tree() -> phosphor_core::core::ClockTree {
+    use phosphor_core::core::{ClockDomainName as Clk, ClockTree, RootId};
+    let mut t = ClockTree::new(18_432_000);
+    let cpu = t.add_domain(Clk::Cpu, RootId::MAIN, 1, 6); // 3.072 MHz
+    let dot = t.add_domain(Clk::Pixel, RootId::MAIN, 1, 3); // 6.144 MHz
+    t.set_step_domain(cpu);
+    // Pixel clock is exactly twice the CPU clock, so 384 dot clocks is exactly
+    // 192 CPU cycles.
+    t.set_raster(dot, 384, 0);
+    t
+}
+
 /// Visible scanlines per frame (native rows rendered into the framebuffer).
 pub const VISIBLE_LINES: u64 = galaxian_video::NATIVE_HEIGHT as u64;
 
@@ -1049,7 +1064,7 @@ impl Bus for GalaxianBoard {
 crate::impl_board_delegation!(GalaxianSystem, board, TIMING, orientation);
 
 impl MachineCore for GalaxianSystem {
-    crate::machine_core_metadata!("galaxian", TIMING);
+    crate::machine_core_metadata!("galaxian", TIMING, crate::galaxian::clock_tree);
 
     fn gfx_sheets(&self) -> Vec<phosphor_core::core::machine::GfxSheet<'_>> {
         use phosphor_core::core::machine::GfxSheet;

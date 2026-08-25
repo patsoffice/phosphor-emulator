@@ -45,6 +45,21 @@ pub const TIMING: TimingConfig = TimingConfig {
 
 pub const NMI_PERIOD_CYCLES: u64 = TIMING.cpu_clock_hz / 250;
 
+/// The board's crystal and everything divided out of it.
+///
+/// One 12.096 MHz crystal with the 6502 on a divide-by-eight. The DVG is not
+/// declared as a domain: unlike the AVG boards, nothing here steps it at a rate
+/// derived from the crystal. Its work is bounded by a chosen 60 Hz frame budget
+/// instead, so declaring a ratio would state a derivation the board does not
+/// make.
+pub fn clock_tree() -> phosphor_core::core::ClockTree {
+    use phosphor_core::core::{ClockDomainName as Clk, ClockTree, RootId};
+    let mut t = ClockTree::new(12_096_000);
+    let cpu = t.add_domain(Clk::Cpu, RootId::MAIN, 1, 8); // 1.512 MHz
+    t.set_step_domain(cpu);
+    t
+}
+
 // ---------------------------------------------------------------------------
 // Atari DVG board
 // ---------------------------------------------------------------------------

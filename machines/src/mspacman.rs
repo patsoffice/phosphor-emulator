@@ -428,7 +428,7 @@ impl Default for MsPacmanSystem {
 crate::impl_board_delegation!(MsPacmanSystem, board, namco_pac::TIMING, orientation);
 
 impl MachineCore for MsPacmanSystem {
-    crate::machine_core_metadata!("mspacman", namco_pac::TIMING);
+    crate::machine_core_metadata!("mspacman", namco_pac::TIMING, namco_pac::clock_tree);
 
     fn gfx_sheets(&self) -> Vec<phosphor_core::core::machine::GfxSheet<'_>> {
         use phosphor_core::core::machine::GfxSheet;

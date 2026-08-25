@@ -20,17 +20,18 @@ pub use address_space32::{AddressMap32, AddressRegion32, AddressSpace32, RegionT
 pub use bus::{Bus, BusMaster, InterruptState};
 pub use clock::ClockDivider;
 pub use clock_tree::{
-    ClockDomain, ClockDomainName, ClockTree, DomainId, DomainInfo, FrameParams, RootId,
+    ClockDomain, ClockDomainName, ClockTree, DomainId, DomainInfo, FrameParams, Raster, RootId,
 };
 pub use component::BusMasterComponent;
 pub use debug::{BusDebug, DebugCpu, DebugDisassembly, DebugRegister, Debuggable};
 pub use debug_hang::{HangDetector, HangReport};
 pub use debug_trace::{DebugEvent, DebugEventKind, DebugTrace, DebugTraceBuffer};
 pub use machine::{
-    AnalogAxisKind, AudioSource, AxisSign, DefaultBinding, DipApplyTiming, DipChoice, DipOption,
-    DipSwitchBank, DipSwitches, Direction, FrontendMachine, InputConfigurable, InputControl,
-    InputEvent, InputId, InputKind, KeyId, MachineCore, MachineDebug, MouseControl, Nvram, PadAxis,
-    PadButton, PadControl, Profilable, ProfileSpan, Renderable, SaveState, TimingConfig,
+    AnalogAxisKind, AudioSource, AxisSign, ClockDeclaration, DefaultBinding, DipApplyTiming,
+    DipChoice, DipOption, DipSwitchBank, DipSwitches, Direction, FrontendMachine,
+    InputConfigurable, InputControl, InputEvent, InputId, InputKind, KeyId, MachineCore,
+    MachineDebug, MouseControl, Nvram, PadAxis, PadButton, PadControl, Profilable, ProfileSpan,
+    Renderable, SaveState, TimingConfig,
 };
 pub use save_state::{SaveError, Saveable, StateReader, StateWriter, load_machine, save_machine};
 pub use watchpoint::{

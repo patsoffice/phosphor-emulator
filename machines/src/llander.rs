@@ -487,7 +487,7 @@ impl InputConfigurable for LunarLanderSystem {
 }
 
 impl MachineCore for LunarLanderSystem {
-    crate::machine_core_metadata!("llander", atari_dvg::TIMING);
+    crate::machine_core_metadata!("llander", atari_dvg::TIMING, atari_dvg::clock_tree);
 
     fn run_frame(&mut self) {
         // Sweep the thrust pedal toward its target before the CPU reads it, so a

@@ -269,6 +269,20 @@ const TIMING: TimingConfig = TimingConfig {
     display_height: 240,
     display_aspect: Some((4, 3)),
 };
+/// The board's crystal and everything divided out of it.
+///
+/// One 20 MHz crystal, with the 6809 at /16 and the pixel clock at /4.
+pub fn clock_tree() -> phosphor_core::core::ClockTree {
+    use phosphor_core::core::{ClockDomainName as Clk, ClockTree, RootId};
+    let mut t = ClockTree::new(20_000_000);
+    let cpu = t.add_domain(Clk::Cpu, RootId::MAIN, 1, 16); // 1.25 MHz
+    let dot = t.add_domain(Clk::Pixel, RootId::MAIN, 1, 4); // 5 MHz
+    t.set_step_domain(cpu);
+    // 4:1 off one crystal, so 320 dot clocks is exactly 80 CPU cycles.
+    t.set_raster(dot, 320, 0);
+    t
+}
+
 const VBEND: u64 = 16; // First visible scanline
 const VBSTART: u64 = 256; // First blanking scanline
 const HBSTART_CYCLE: u64 = 64; // HBLANK at pixel 256 = CPU cycle 64 (of 80)
@@ -1108,6 +1122,8 @@ impl MachineCore for GridleeSystem {
     fn machine_id(&self) -> &str {
         "gridlee"
     }
+
+    crate::machine_clock_declaration!(TIMING, crate::gridlee::clock_tree);
 }
 
 impl SaveState for GridleeSystem {
