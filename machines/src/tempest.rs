@@ -600,7 +600,15 @@ impl Bus for TempestBus<'_> {
 
 impl phosphor_core::core::machine::Renderable for TempestSystem {
     fn display_size(&self) -> (u32, u32) {
-        atari_avg::TIMING.display_size()
+        // The timing's dimensions are the display list's coordinate extent; how
+        // many pixels to draw it into comes from the tube. See
+        // `Renderable::vector_field_size`.
+        let (w, h) = atari_avg::TIMING.display_size();
+        phosphor_core::device::dvg::raster_size_for_field(w, h)
+    }
+
+    fn vector_field_size(&self) -> Option<(u32, u32)> {
+        Some(atari_avg::TIMING.display_size())
     }
 
     fn display_aspect(&self) -> Option<(u32, u32)> {

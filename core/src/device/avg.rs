@@ -1000,15 +1000,23 @@ impl Avg {
     ///
     /// Coordinates are stored unclamped — the rasterizer handles clipping.
     fn add_point(&mut self, x: i32, y: i32, intensity: u8, rgb: [u8; 3], beam_cycles: u32) {
-        // Convert from fixed-point to pixel coordinates (no clamping).
-        let px = x >> 16;
-        let py = y >> 16;
+        // Fixed-point to units, keeping the 16 bits below the unit: they are
+        // real position, and rounding them away costs the machines whose data
+        // happens to span a smaller numeric range (see `VectorLine`). No
+        // clamping either; the rasterizer does the clipping.
+        const UNIT: f32 = 65536.0;
+        let (px, py) = (x as f32 / UNIT, y as f32 / UNIT);
 
         if self.has_prev {
-            let prev_px = self.prev_x >> 16;
-            let prev_py = self.prev_y >> 16;
+            let (prev_px, prev_py) = (self.prev_x as f32 / UNIT, self.prev_y as f32 / UNIT);
 
-            if intensity == 0 && prev_px == px && prev_py == py {
+            // A dark move that lands where the beam already is draws nothing.
+            // Compared at whole units, as the hardware's own resolution: a
+            // fractional difference here is the beam not having moved.
+            if intensity == 0
+                && (self.prev_x >> 16) == (x >> 16)
+                && (self.prev_y >> 16) == (y >> 16)
+            {
                 self.prev_x = x;
                 self.prev_y = y;
                 return;
@@ -1734,12 +1742,18 @@ mod tests {
         );
 
         // Mirroring is 2*center - pos. Computed in i64 here so the expectation
-        // does not come from the i32 expression under test.
+        // does not come from the i32 expression under test. Compared at whole
+        // units: the display list keeps the fraction too, but the mirror is what
+        // is being checked, not the conversion.
         let expected = ((2 * ycenter - ypos) >> 16) as i32;
         let list = avg.take_display_list();
         let last = list.last().expect("the VCTRs drew");
-        assert_eq!(last.y1, expected);
-        assert_eq!(last.x1, avg.xpos >> 16, "flip_x was off, X passes through");
+        assert_eq!(last.y1.floor() as i32, expected);
+        assert_eq!(
+            last.x1.floor() as i32,
+            avg.xpos >> 16,
+            "flip_x was off, X passes through"
+        );
     }
 
     #[test]

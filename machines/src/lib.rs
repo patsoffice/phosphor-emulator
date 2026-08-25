@@ -129,6 +129,30 @@ pub(crate) use impl_board_delegation;
 /// - `orientation` — delegate `orientation()` to the board (rotating boards
 ///   provide an inherent `orientation()` reading their DIP/state)
 macro_rules! impl_board_renderable {
+    // Vector machines: the timing's dimensions are the coordinate extent the
+    // display list is expressed in, not a pixel count, and the resolution to
+    // rasterize it at is derived from the tube rather than from whatever
+    // numeric range the game's data happens to use. See `vector_field_size`.
+    ($type:ty, $board:ident, $timing:expr, vector_field $(, $opt:ident)* $(,)?) => {
+        impl phosphor_core::core::machine::Renderable for $type {
+            fn display_size(&self) -> (u32, u32) {
+                let (w, h) = $timing.display_size();
+                phosphor_core::device::dvg::raster_size_for_field(w, h)
+            }
+            fn vector_field_size(&self) -> Option<(u32, u32)> {
+                Some($timing.display_size())
+            }
+            fn display_aspect(&self) -> Option<(u32, u32)> {
+                $timing.display_aspect()
+            }
+            fn render_frame(&self, buffer: &mut [u8]) {
+                self.$board.render_frame(buffer);
+            }
+            $(
+                $crate::impl_board_renderable!(@method $board, $opt);
+            )*
+        }
+    };
     // Entry: the always-present methods plus one accumulated method per flag.
     ($type:ty, $board:ident, $timing:expr $(, $opt:ident)* $(,)?) => {
         impl phosphor_core::core::machine::Renderable for $type {

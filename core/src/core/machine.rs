@@ -128,6 +128,27 @@ pub trait Renderable {
         None
     }
 
+    /// The coordinate extent [`vector_display_list`] is expressed in, for a
+    /// vector machine.
+    ///
+    /// This is a different thing from [`display_size`], which is how many pixels
+    /// to rasterize into. On a raster machine the two coincide, because a
+    /// coordinate is a pixel. On a vector machine a coordinate is a position on
+    /// a beam deflection, whose numeric range is decided by whatever scale
+    /// values the game happens to use: Tempest's data spans 580 and Star Wars'
+    /// spans 320 across the same physical tube. Conflating the two caps a
+    /// machine's rendered detail at whatever numbers its programmers picked,
+    /// which is why Star Wars rasterized at 320 across and looked it.
+    ///
+    /// Renderers map this extent onto whatever they are drawing into. Returning
+    /// `None`, the default, means there is no separate extent to map.
+    ///
+    /// [`vector_display_list`]: Self::vector_display_list
+    /// [`display_size`]: Self::display_size
+    fn vector_field_size(&self) -> Option<(u32, u32)> {
+        None
+    }
+
     /// Declarative screen orientation, applied centrally by the frontend.
     ///
     /// Queried **every frame**, so machines with a dynamic (DIP-driven) cocktail

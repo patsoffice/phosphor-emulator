@@ -92,7 +92,7 @@ fn main() {
     // Bounding box + lit-segment stats over the final frame's list.
     let lit = vectors.iter().filter(|v| v.intensity > 0).count();
     let mut colors = std::collections::HashSet::new();
-    let (mut minx, mut miny, mut maxx, mut maxy) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
+    let (mut minx, mut miny, mut maxx, mut maxy) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
     for v in vectors {
         colors.insert((v.r, v.g, v.b));
         for (x, y) in [(v.x0, v.y0), (v.x1, v.y1)] {

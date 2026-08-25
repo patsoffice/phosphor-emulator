@@ -24,18 +24,29 @@
 
 /// A line segment produced by vector generator execution (DVG or AVG).
 ///
-/// Coordinates are in the generator's native space (0–1023), with (0, 0) at
-/// the bottom-left of the display. Intensity 0 means a blank (invisible) move;
+/// Coordinates are in the generator's native space, with (0, 0) at the
+/// bottom-left of the display. Intensity 0 means a blank (invisible) move;
 /// intensities 1–15 are visible brightness levels.
+///
+/// # Why these are fractional
+///
+/// A "unit" here is not a pixel and has no size of its own: it is 1/65536 of the
+/// AVG's position accumulator, so how many units a picture spans is decided by
+/// whatever scale values the game happens to use. Tempest's data spans 580 and
+/// Star Wars' spans 320 across the same physical tube, which would give Star
+/// Wars half the geometric precision if positions were rounded to whole units.
+/// The generator computes 16 bits below the unit and there is no reason to throw
+/// them away, least of all for the GL path, which draws at window resolution and
+/// can put a vertex where it actually is.
 ///
 /// RGB color defaults to white (255, 255, 255) for monochrome generators (DVG).
 /// Color generators (AVG Tempest) set per-line RGB from their color RAM.
 #[derive(Clone, Debug)]
 pub struct VectorLine {
-    pub x0: i32,
-    pub y0: i32,
-    pub x1: i32,
-    pub y1: i32,
+    pub x0: f32,
+    pub y0: f32,
+    pub x1: f32,
+    pub y1: f32,
     pub intensity: u8,
     pub r: u8,
     pub g: u8,
@@ -116,6 +127,22 @@ pub const HALATION_FRACTION: f32 = 0.07;
 /// serves screenshots and the debug panel does not.
 pub const HALATION_OFF: f32 = 0.0;
 
+/// The fewest master-clock cycles the beam can spend crossing one unit of the
+/// display: its top speed, and so the reference the brightness control is set
+/// against.
+///
+/// The deflection DACs take a 10-bit delta and the analog scale multiplies it,
+/// so the most the beam moves in one cycle is `0x1FF * 255 >> 4` in 16.16 units.
+/// That is 8.05 cycles per unit along an axis, and `1/sqrt(2)` of it along a
+/// diagonal where both axes contribute. Measured across Tempest, Quantum and
+/// Star Wars, the observed floor is 5.7 and the 5th percentile is 8.0, which is
+/// those two figures: the same deflection hardware in all three.
+///
+/// A full-intensity vector drawn at this speed reads full white. Anything slower
+/// dwells longer per unit length, deposits more light, and blooms, which is what
+/// the beam really does.
+pub const MIN_CYCLES_PER_UNIT: f32 = 16.0 * 65536.0 / (511.0 * 255.0);
+
 /// A Gaussian's standard deviation for a given full width at half maximum:
 /// `FWHM = 2*sqrt(2*ln 2)*sigma`.
 pub const FWHM_TO_SIGMA: f32 = 1.0 / 2.354_82;
@@ -139,6 +166,37 @@ pub const BEAM_CUTOFF_SIGMAS: f32 = 3.5;
 /// display-list resolution hits it (Tempest's physical spot is just under it, so
 /// it draws a touch wide); drawing at window resolution usually does not.
 pub const MIN_SIGMA_PIXELS: f32 = 0.6;
+
+/// The smallest raster long axis, in pixels, on which the tube's spot is still
+/// representable.
+///
+/// A generator's coordinate units have no size of their own, so the spot's size
+/// in *raster* pixels depends only on how many pixels the long axis has:
+/// `sigma_px = raster_long * BEAM_SPOT_FRACTION * FWHM_TO_SIGMA`, with the
+/// generator's own extent cancelling out. Setting that equal to
+/// [`MIN_SIGMA_PIXELS`], below which the spot aliases against the grid, gives
+/// about 727 pixels.
+///
+/// So this is a floor and not a quality target: under it the beam has to be
+/// drawn wider than the tube's, and detail is lost that the generator computed.
+/// Above it there is more to gain, and how much more is a cost decision that
+/// belongs with the rest of the display settings.
+pub const MIN_RASTER_LONG_AXIS: f32 = MIN_SIGMA_PIXELS / (BEAM_SPOT_FRACTION * FWHM_TO_SIGMA);
+
+/// How many pixels to rasterize a vector field of this extent into.
+///
+/// Scales the field up until its long axis clears [`MIN_RASTER_LONG_AXIS`], so
+/// the tube's spot is representable on the grid, and leaves it alone if it
+/// already is. Star Wars' 320 by 330 field becomes 705 by 727; Quantum's 600 by
+/// 900 is already past it and is unchanged.
+pub fn raster_size_for_field(field_w: u32, field_h: u32) -> (u32, u32) {
+    let long = field_w.max(field_h) as f32;
+    let scale = (MIN_RASTER_LONG_AXIS / long).max(1.0);
+    (
+        (field_w as f32 * scale).round() as u32,
+        (field_h as f32 * scale).round() as u32,
+    )
+}
 
 /// The beam's sigma in a generator's own coordinate units.
 ///
@@ -563,15 +621,19 @@ impl Dvg {
         // valid — they represent bright dots (e.g., shots in Asteroids). On real
         // CRT hardware the beam dwells at the position with the beam on, producing
         // a visible point. We only skip consecutive blank moves to the same spot.
+        // The DVG works in whole units and has no fraction to contribute, so
+        // these convert exactly. See `VectorLine` for why the field is
+        // fractional at all.
+        let (fx, fy) = (x as f32, y as f32);
         if let Some(prev) = self.display_list.last() {
-            if prev.x1 == x && prev.y1 == y && intensity == 0 {
+            if prev.x1 == fx && prev.y1 == fy && intensity == 0 {
                 return; // skip consecutive blank moves to same position
             }
             self.display_list.push(VectorLine {
                 x0: prev.x1,
                 y0: prev.y1,
-                x1: x,
-                y1: y,
+                x1: fx,
+                y1: fy,
                 intensity,
                 r: 255,
                 g: 255,
@@ -583,10 +645,10 @@ impl Dvg {
         } else {
             // First point — no previous segment, just record position.
             self.display_list.push(VectorLine {
-                x0: x,
-                y0: y,
-                x1: x,
-                y1: y,
+                x0: fx,
+                y0: fy,
+                x1: fx,
+                y1: fy,
                 intensity: 0,
                 r: 255,
                 g: 255,
@@ -795,10 +857,10 @@ mod tests {
         dvg.scale = 7;
         dvg.intensity = 15;
         dvg.display_list.push(VectorLine {
-            x0: 0,
-            y0: 0,
-            x1: 100,
-            y1: 100,
+            x0: 0.0,
+            y0: 0.0,
+            x1: 100.0,
+            y1: 100.0,
             intensity: 15,
             r: 255,
             g: 255,
@@ -819,10 +881,10 @@ mod tests {
     fn go_clears_halt_and_display_list() {
         let mut dvg = Dvg::new();
         dvg.display_list.push(VectorLine {
-            x0: 0,
-            y0: 0,
-            x1: 1,
-            y1: 1,
+            x0: 0.0,
+            y0: 0.0,
+            x1: 1.0,
+            y1: 1.0,
             intensity: 10,
             r: 255,
             g: 255,

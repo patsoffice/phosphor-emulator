@@ -6,8 +6,8 @@ use phosphor_core::core::watchpoint::DebugAccessSource;
 use phosphor_core::core::{Bus, BusMaster, TimingConfig};
 use phosphor_core::cpu::m6502::M6502;
 use phosphor_core::device::dvg::{
-    BEAM_CUTOFF_SIGMAS, Dvg, HALATION_OFF, MIN_SIGMA_PIXELS, VectorLine, beam_sigma_units,
-    halation_sigma_units,
+    BEAM_CUTOFF_SIGMAS, Dvg, HALATION_OFF, MIN_CYCLES_PER_UNIT, MIN_SIGMA_PIXELS, VectorLine,
+    beam_sigma_units, halation_sigma_units, raster_size_for_field,
 };
 use phosphor_macros::{BusDebug, DebugTrace, MemoryRegion};
 
@@ -249,11 +249,14 @@ impl AtariDvgBoard {
 
     /// Render the vector display list into an RGB24 framebuffer.
     pub fn render_frame(&self, buffer: &mut [u8]) {
+        let field = TIMING.display_size();
+        let (rw, rh) = raster_size_for_field(field.0, field.1);
         rasterize_vectors(
             &self.display_list,
             buffer,
-            TIMING.display_width,
-            TIMING.display_height,
+            rw,
+            rh,
+            field,
             true,
             HALATION_OFF,
         );
@@ -294,7 +297,15 @@ impl Saveable for AtariDvgBoard {
 
 impl Renderable for AtariDvgBoard {
     fn display_size(&self) -> (u32, u32) {
-        TIMING.display_size()
+        // The timing's dimensions are the display list's coordinate extent; how
+        // many pixels to draw it into comes from the tube. See
+        // `Renderable::vector_field_size`.
+        let (w, h) = TIMING.display_size();
+        phosphor_core::device::dvg::raster_size_for_field(w, h)
+    }
+
+    fn vector_field_size(&self) -> Option<(u32, u32)> {
+        Some(TIMING.display_size())
     }
 
     fn display_aspect(&self) -> Option<(u32, u32)> {
@@ -302,11 +313,14 @@ impl Renderable for AtariDvgBoard {
     }
 
     fn render_frame(&self, buffer: &mut [u8]) {
+        let field = TIMING.display_size();
+        let (rw, rh) = raster_size_for_field(field.0, field.1);
         rasterize_vectors(
             &self.display_list,
             buffer,
-            TIMING.display_width,
-            TIMING.display_height,
+            rw,
+            rh,
+            field,
             true,
             HALATION_OFF,
         );
@@ -357,6 +371,7 @@ pub(crate) fn rasterize_vectors(
     buffer: &mut [u8],
     width: u32,
     height: u32,
+    field: (u32, u32),
     flip_y: bool,
     halation: f32,
 ) {
@@ -366,9 +381,22 @@ pub(crate) fn rasterize_vectors(
     let h = height as i32;
     let y_max = h - 1;
 
-    // The spot in this generator's own units, floored where the output grid can
-    // no longer represent it. Rasterizing at display-list resolution means one
-    // unit is one pixel, so the floor applies directly.
+    // Display-list coordinates are in the generator's own extent; this maps them
+    // onto however many pixels we are drawing into. They are usually different:
+    // a generator's units are a numeric range its programmers chose, and the
+    // resolution worth drawing at comes from the tube (see
+    // `raster_size_for_field`).
+    let (fw, fh) = field;
+    let scale = if fw > 0 && fh > 0 {
+        (w as f32 / fw as f32).min(h as f32 / fh as f32)
+    } else {
+        1.0
+    };
+
+    // The spot's size in output pixels depends only on how many pixels the long
+    // axis has, since the generator's extent cancels out of
+    // `field_units * spot_fraction * (pixels / field_units)`. Floored where the
+    // grid can no longer represent it.
     let sigma = beam_sigma_units(w.max(h) as f32).max(MIN_SIGMA_PIXELS);
     // Where the profile is cut off. Truncating leaves a step the height of the
     // profile there, so it has to fall below one level of an 8-bit channel:
@@ -431,7 +459,9 @@ pub(crate) fn rasterize_vectors(
             if line.intensity == 0 {
                 continue;
             }
-            let brightness = INTENSITY_LUT[(line.intensity & 0xF) as usize] as f32 / 255.0 * gain;
+            let brightness = INTENSITY_LUT[(line.intensity & 0xF) as usize] as f32 / 255.0
+                * gain
+                * dwell_gain(line);
             let energy = [
                 brightness * line.r as f32,
                 brightness * line.g as f32,
@@ -440,18 +470,21 @@ pub(crate) fn rasterize_vectors(
 
             let (sy0, sy1) = if flip_y {
                 // Normal: vector Y=0 is bottom, screen Y=0 is top.
-                (y_max - line.y0, y_max - line.y1)
+                (
+                    y_max as f32 - line.y0 * scale,
+                    y_max as f32 - line.y1 * scale,
+                )
             } else {
                 // ROT270: Y already maps to screen-Y directly.
-                (line.y0, line.y1)
+                (line.y0 * scale, line.y1 * scale)
             };
 
             let (lo, hi) = sweep_beam(
                 acc,
                 w,
                 h,
-                (line.x0 as f32, sy0 as f32),
-                (line.x1 as f32, sy1 as f32),
+                (line.x0 * scale, sy0),
+                (line.x1 * scale, sy1),
                 radius,
                 &profile,
                 energy,
@@ -519,6 +552,33 @@ pub(crate) fn rasterize_vectors(
             }
         });
     });
+}
+
+/// How much brighter this vector is than one drawn at the beam's top speed.
+///
+/// Light deposited per unit of length is beam current times how long the beam
+/// spent there, and the intensity code only supplies the current. A vector the
+/// beam crossed slowly was written over for longer and comes out brighter, which
+/// is why a game that turns its analog scale down gets a hotter picture rather
+/// than a smaller one.
+///
+/// Returns 1.0 for a generator that reports no travel time, which is the DVG:
+/// with nothing to divide, the intensity code is all there is to go on.
+fn dwell_gain(line: &VectorLine) -> f32 {
+    if line.beam_cycles == 0 {
+        return 1.0;
+    }
+    let dx = line.x1 - line.x0;
+    let dy = line.y1 - line.y0;
+    let len = (dx * dx + dy * dy).sqrt();
+    if len < 1.0 {
+        // A dot: all of the travel time landed on one spot rather than being
+        // spread along a path, and dividing by a length near zero would send it
+        // to infinity. One unit is the smallest length the display list can
+        // describe, so that is the most it can concentrate into.
+        return line.beam_cycles as f32 / MIN_CYCLES_PER_UNIT;
+    }
+    (line.beam_cycles as f32 / len) / MIN_CYCLES_PER_UNIT
 }
 
 /// One axis of the bilinear upsample: which two samples of the reduced field a
@@ -778,19 +838,18 @@ mod tests {
         const W: u32 = 256;
         const H: u32 = 256;
 
+        /// A lit vector on whole-unit coordinates, which is what these tests
+        /// reason in; the display list itself carries a fraction as well.
         fn white(x0: i32, y0: i32, x1: i32, y1: i32) -> VectorLine {
             VectorLine {
-                x0,
-                y0,
-                x1,
-                y1,
+                x0: x0 as f32,
+                y0: y0 as f32,
+                x1: x1 as f32,
+                y1: y1 as f32,
                 intensity: 15,
                 r: 255,
                 g: 255,
                 b: 255,
-                // These tests are about the beam's shape, which the rasterizer
-                // takes from the geometry and the intensity code; dwell time is
-                // not read yet.
                 beam_cycles: 0,
             }
         }
@@ -805,7 +864,10 @@ mod tests {
         /// these tests keep testing halation whatever that default becomes.
         fn render_with_halation(lines: &[VectorLine], halation: f32) -> Vec<u8> {
             let mut buf = vec![0u8; (W * H * 3) as usize];
-            rasterize_vectors(lines, &mut buf, W, H, false, halation);
+            // Field and raster are the same here: these tests reason in whole
+            // units and want one unit to be one pixel so the numbers they assert
+            // are the numbers the sweep sees.
+            rasterize_vectors(lines, &mut buf, W, H, (W, H), false, halation);
             buf
         }
 
@@ -890,6 +952,75 @@ mod tests {
                 }
             }
             assert_eq!(stray, 0, "light landed beyond the beam's reach");
+        }
+
+        /// As `white`, but reporting the beam time a generator would have.
+        fn timed(x0: i32, y0: i32, x1: i32, y1: i32, beam_cycles: u32) -> VectorLine {
+            VectorLine {
+                beam_cycles,
+                ..white(x0, y0, x1, y1)
+            }
+        }
+
+        #[test]
+        fn a_vector_the_beam_crossed_slowly_is_brighter_per_unit_length() {
+            // Light per unit length is beam current times dwell, and the
+            // intensity code only supplies the current. Two identical segments
+            // at the same code, one given twice the travel time, should differ
+            // by exactly that factor in the light they emit.
+            //
+            // Drawn at a low code so there is headroom: the brightness control
+            // is set so a full-intensity vector at the beam's top speed already
+            // reads full white, so at that code twice the dwell only saturates.
+            // That is the display blooming, which is right, but it is not what
+            // this test is asking about.
+            let len = 100.0f32;
+            let at_top_speed = (len * MIN_CYCLES_PER_UNIT) as u32;
+            let dim = |cycles| VectorLine {
+                intensity: 4,
+                ..timed(70, 128, 170, 128, cycles)
+            };
+
+            let quick = total_light(&render(&[dim(at_top_speed)]));
+            let slow = total_light(&render(&[dim(at_top_speed * 2)]));
+
+            let ratio = slow as f64 / quick as f64;
+            assert!(
+                (1.9..=2.1).contains(&ratio),
+                "twice the dwell should be twice the light, got {ratio:.3}"
+            );
+        }
+
+        #[test]
+        fn the_beams_top_speed_is_the_brightness_the_control_is_set_against() {
+            // A full-intensity vector drawn as fast as the deflection hardware
+            // can move reads full white and no more. Anything slower than that
+            // is brighter, which is what makes it bloom rather than what makes
+            // everything else dim.
+            let len = 100.0f32;
+            let at_top_speed = (len * MIN_CYCLES_PER_UNIT) as u32;
+
+            let quick = render(&[timed(70, 128, 170, 128, at_top_speed)]);
+            assert!(
+                (250..=255).contains(&peak(&quick)),
+                "a vector at the beam's top speed should peak at full white, got {}",
+                peak(&quick)
+            );
+
+            let slow = render(&[timed(70, 128, 170, 128, at_top_speed * 4)]);
+            assert_eq!(peak(&slow), 255, "and a slower one saturates");
+        }
+
+        #[test]
+        fn a_generator_that_reports_no_travel_time_falls_back_to_the_code() {
+            // The DVG models no beam timing, so there is nothing to divide and
+            // the intensity code is all there is. It must not come out black.
+            let none = render(&[timed(70, 128, 170, 128, 0)]);
+            assert!(
+                peak(&none) >= 250,
+                "a vector with no reported travel time went dark, peak {}",
+                peak(&none)
+            );
         }
 
         #[test]

@@ -51,7 +51,7 @@ use phosphor_core::cpu::m68000::M68000;
 use phosphor_core::cpu::state::M68000State;
 use phosphor_core::cpu::{Cpu, CpuStateTrait};
 use phosphor_core::device::avg::{Avg, AvgVariant, VectorMemory};
-use phosphor_core::device::dvg::{HALATION_OFF, VectorLine};
+use phosphor_core::device::dvg::{HALATION_OFF, VectorLine, raster_size_for_field};
 use phosphor_core::device::pokey::Pokey;
 use phosphor_macros::{BusDebug, MemoryRegion};
 
@@ -677,7 +677,15 @@ impl Bus for QuantumBoard {
 
 impl Renderable for QuantumSystem {
     fn display_size(&self) -> (u32, u32) {
-        TIMING.display_size()
+        // The timing's dimensions are the display list's coordinate extent; how
+        // many pixels to draw it into comes from the tube. See
+        // `Renderable::vector_field_size`.
+        let (w, h) = TIMING.display_size();
+        phosphor_core::device::dvg::raster_size_for_field(w, h)
+    }
+
+    fn vector_field_size(&self) -> Option<(u32, u32)> {
+        Some(TIMING.display_size())
     }
 
     fn display_aspect(&self) -> Option<(u32, u32)> {
@@ -691,11 +699,14 @@ impl Renderable for QuantumSystem {
         // the debug/profiler panel forces this fallback path. (Tempest's AVG
         // board uses flip_y=false because its GL path applies a 270° rotation
         // that already negates Y.)
+        let field = TIMING.display_size();
+        let (rw, rh) = raster_size_for_field(field.0, field.1);
         rasterize_vectors(
             &self.board.display_list,
             buffer,
-            TIMING.display_width,
-            TIMING.display_height,
+            rw,
+            rh,
+            field,
             true,
             HALATION_OFF,
         );
@@ -1128,10 +1139,10 @@ mod tests {
 
         let mut sys = QuantumSystem::new();
         sys.board.display_list = vec![VectorLine {
-            x0: 280,
-            y0: 0,
-            x1: 320,
-            y1: 0,
+            x0: 280.0,
+            y0: 0.0,
+            x1: 320.0,
+            y1: 0.0,
             intensity: 0xF,
             r: 255,
             g: 255,

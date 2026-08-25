@@ -1177,7 +1177,13 @@ pub fn run(
                 && !profile_state.active
                 && !settings_state.active
             {
-                let ds = machine.display_size();
+                // The GL path maps display-list coordinates to the viewport, so
+                // it needs the extent those coordinates are in, not the pixel
+                // count a rasterizer would want. They differ on a vector
+                // machine; see `Renderable::vector_field_size`.
+                let ds = machine
+                    .vector_field_size()
+                    .unwrap_or_else(|| machine.display_size());
                 // Drive the GL shader's rotation uniform from the declared
                 // orientation flags. Only ROT270 (portrait vector monitors, e.g.
                 // Tempest) is exercised today; the shader special-cases it.

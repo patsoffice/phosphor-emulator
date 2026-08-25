@@ -29,7 +29,7 @@ use phosphor_core::cpu::Cpu;
 use phosphor_core::cpu::m6809::M6809;
 use phosphor_core::device::adc0809::Adc0809;
 use phosphor_core::device::avg::{Avg, AvgVariant, VectorMemory};
-use phosphor_core::device::dvg::{HALATION_OFF, VectorLine};
+use phosphor_core::device::dvg::{HALATION_OFF, VectorLine, raster_size_for_field};
 use phosphor_core::device::pokey::Pokey;
 use phosphor_core::device::riot6532::Riot6532;
 use phosphor_core::device::slapstic::Slapstic;
@@ -1471,11 +1471,14 @@ impl StarWarsBoard {
     pub(crate) fn render_frame(&self, buffer: &mut [u8]) {
         // flip_y: the AVG emits a Y-up display list; a normal (ROT0) monitor maps
         // that to screen Y-down.
+        let field = TIMING.display_size();
+        let (rw, rh) = raster_size_for_field(field.0, field.1);
         rasterize_vectors(
             &self.display_list,
             buffer,
-            TIMING.display_width,
-            TIMING.display_height,
+            rw,
+            rh,
+            field,
             true,
             HALATION_OFF,
         );
@@ -1739,7 +1742,7 @@ impl Bus for StarWarsBoard {
     }
 }
 
-crate::impl_board_renderable!(StarWarsSystem, board, TIMING, vectors);
+crate::impl_board_renderable!(StarWarsSystem, board, TIMING, vector_field, vectors);
 crate::impl_board_audio!(StarWarsSystem, board);
 
 // `MachineDebug` is hand-written rather than macro-generated because this

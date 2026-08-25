@@ -6,8 +6,7 @@ use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWri
 use phosphor_core::core::watchpoint::DebugAccessSource;
 use phosphor_core::cpu::m6502::M6502;
 use phosphor_core::device::avg::{Avg, VectorMemory};
-use phosphor_core::device::dvg::HALATION_OFF;
-use phosphor_core::device::dvg::VectorLine;
+use phosphor_core::device::dvg::{HALATION_OFF, VectorLine, raster_size_for_field};
 use phosphor_macros::{BusDebug, DebugTrace, MemoryRegion};
 
 use crate::atari_dvg::rasterize_vectors;
@@ -248,11 +247,14 @@ impl AtariAvgBoard {
     }
 
     pub fn render_frame(&self, buffer: &mut [u8]) {
+        let field = TIMING.display_size();
+        let (rw, rh) = raster_size_for_field(field.0, field.1);
         rasterize_vectors(
             &self.display_list,
             buffer,
-            TIMING.display_width,
-            TIMING.display_height,
+            rw,
+            rh,
+            field,
             false,
             HALATION_OFF,
         );

@@ -356,8 +356,8 @@ impl VectorRenderer {
                 brightness * (line.b as f32 / 255.0),
             );
 
-            let (x0, y0) = (line.x0 as f32, line.y0 as f32);
-            let (x1, y1) = (line.x1 as f32, line.y1 as f32);
+            let (x0, y0) = (line.x0, line.y0);
+            let (x1, y1) = (line.x1, line.y1);
             let (dx, dy) = (x1 - x0, y1 - y0);
             let len = (dx * dx + dy * dy).sqrt();
             // A zero-length vector is a dot: the beam arrived and did not
