@@ -14,6 +14,7 @@
 
 use std::collections::HashMap;
 
+use phosphor_core::core::display::DisplaySettings;
 use serde::{Deserialize, Serialize};
 
 use crate::input::SerializedBinding;
@@ -50,6 +51,9 @@ pub struct MachineSettings {
     /// Overridden input bindings. Empty means "use the machine defaults".
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub input_bindings: Vec<SerializedBinding>,
+    /// Display knobs that this game is set differently from the defaults.
+    #[serde(default, skip_serializing_if = "DisplayOverrides::is_empty")]
+    pub display: DisplayOverrides,
 }
 
 impl MachineSettings {
@@ -63,6 +67,48 @@ impl MachineSettings {
             && self.save_path.is_none()
             && self.dip_switches.is_empty()
             && self.input_bindings.is_empty()
+            && self.display.is_empty()
+    }
+}
+
+/// Display knobs recorded only where they differ from what they are resolved
+/// against, so a game left alone writes nothing at all.
+///
+/// A serialisable mirror of [`DisplaySettings`] rather than the type itself:
+/// phosphor-core carries no serde, and it should not grow a dependency for a
+/// frontend preference.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct DisplayOverrides {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub brightness: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub focus: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub halation: Option<f32>,
+}
+
+impl DisplayOverrides {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    /// What `settings` differs from `base` in, and nothing else.
+    pub fn diff(settings: DisplaySettings, base: DisplaySettings) -> Self {
+        let keep = |value: f32, against: f32| (value != against).then_some(value);
+        Self {
+            brightness: keep(settings.brightness, base.brightness),
+            focus: keep(settings.focus, base.focus),
+            halation: keep(settings.halation, base.halation),
+        }
+    }
+
+    /// `base` with whatever this records laid over it.
+    pub fn apply_to(&self, base: DisplaySettings) -> DisplaySettings {
+        DisplaySettings {
+            brightness: self.brightness.unwrap_or(base.brightness),
+            focus: self.focus.unwrap_or(base.focus),
+            halation: self.halation.unwrap_or(base.halation),
+        }
     }
 }
 
@@ -153,6 +199,73 @@ pub fn save(state: &State) {
         && let Err(e) = std::fs::write(dir.join("state.toml"), contents)
     {
         eprintln!("Warning: failed to save state: {e}");
+    }
+}
+
+#[cfg(test)]
+mod display_overrides_tests {
+    use super::*;
+
+    #[test]
+    fn a_setting_left_alone_records_nothing() {
+        let base = DisplaySettings::MEASURED;
+        let diff = DisplayOverrides::diff(base, base);
+        assert!(
+            diff.is_empty(),
+            "a game at the defaults should leave no trace in state.toml"
+        );
+        assert_eq!(diff.apply_to(base), base);
+    }
+
+    #[test]
+    fn only_the_knob_that_moved_is_recorded() {
+        let base = DisplaySettings::MEASURED;
+        let moved = DisplaySettings {
+            halation: base.halation + 0.05,
+            ..base
+        };
+
+        let diff = DisplayOverrides::diff(moved, base);
+        assert_eq!(diff.halation, Some(moved.halation));
+        assert_eq!(diff.brightness, None, "brightness did not move");
+        assert_eq!(diff.focus, None, "focus did not move");
+        assert_eq!(diff.apply_to(base), moved, "and it round trips");
+    }
+
+    #[test]
+    fn a_per_game_override_wins_over_the_global_one() {
+        // The chain is measured, then the global preference, then this game's
+        // own, the same order the paths and the scale resolve in.
+        let measured = DisplaySettings::MEASURED;
+        let global = DisplayOverrides {
+            brightness: Some(1.4),
+            focus: Some(1.5),
+            halation: None,
+        };
+        let per_game = DisplayOverrides {
+            brightness: Some(0.8),
+            ..DisplayOverrides::default()
+        };
+
+        let base = global.apply_to(measured);
+        let resolved = per_game.apply_to(base);
+
+        assert_eq!(resolved.brightness, 0.8, "the game's own wins");
+        assert_eq!(
+            resolved.focus, 1.5,
+            "the global shows through where it is silent"
+        );
+        assert_eq!(
+            resolved.halation, measured.halation,
+            "and the measured figure where both are"
+        );
+
+        // Recorded against what it was resolved from, so the game only carries
+        // its own departure and not the global preference as well.
+        let recorded = DisplayOverrides::diff(resolved, base);
+        assert_eq!(recorded.brightness, Some(0.8));
+        assert_eq!(recorded.focus, None);
+        assert_eq!(recorded.halation, None);
     }
 }
 

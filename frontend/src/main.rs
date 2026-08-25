@@ -1,4 +1,5 @@
 use clap::Parser;
+use phosphor_core::core::display::DisplaySettings;
 use phosphor_machines::registry;
 
 mod audio;
@@ -225,6 +226,12 @@ fn main() {
         }
     }
 
+    // Display knobs resolve the way the paths above do: the measured figures
+    // first, then any global preference, then this game's own. Set before the
+    // first frame so the picture opens the way it was left.
+    let display_base = config.display.apply_to(DisplaySettings::MEASURED);
+    phosphor_core::core::display::set_display_settings(per_game.display.apply_to(display_base));
+
     machine.reset();
 
     // Headless capture short-circuits the SDL main loop entirely.
@@ -283,6 +290,13 @@ fn main() {
             current
         };
     }
+
+    // Persist the display knobs against what they were resolved from, so a game
+    // left at the global preference writes nothing of its own.
+    settings.display = state::DisplayOverrides::diff(
+        phosphor_core::core::display::display_settings(),
+        display_base,
+    );
 
     state.set_machine(&machine_name, settings);
     state::save(&state);

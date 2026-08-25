@@ -23,6 +23,10 @@ pub struct Config {
     pub scale: Option<u32>,
     /// Start in desktop fullscreen. Absent (or `false`) keeps windowed mode.
     pub fullscreen: Option<bool>,
+    /// Display knobs applied to every machine, over the measured defaults. A
+    /// per-machine entry in `state.toml` overrides these in turn.
+    #[serde(default)]
+    pub display: crate::state::DisplayOverrides,
 }
 
 /// Return the platform config directory: `~/.config/phosphor` (macOS/Linux).
