@@ -3,6 +3,7 @@ pub mod address_space16;
 pub mod address_space32;
 pub mod bus;
 pub mod clock;
+pub mod clock_tree;
 pub mod component;
 pub mod debug;
 pub mod debug_hang;
@@ -18,6 +19,9 @@ pub use address_space16::{AddressMap16, AddressSpace16, PageEntry, RegionDescrip
 pub use address_space32::{AddressMap32, AddressRegion32, AddressSpace32, RegionTarget};
 pub use bus::{Bus, BusMaster, InterruptState};
 pub use clock::ClockDivider;
+pub use clock_tree::{
+    ClockDomain, ClockDomainName, ClockTree, DomainId, DomainInfo, FrameParams, RootId,
+};
 pub use component::BusMasterComponent;
 pub use debug::{BusDebug, DebugCpu, DebugDisassembly, DebugRegister, Debuggable};
 pub use debug_hang::{HangDetector, HangReport};
