@@ -249,13 +249,17 @@ impl AtariAvgBoard {
     pub fn render_frame(&self, buffer: &mut [u8]) {
         let field = TIMING.display_size();
         let (rw, rh) = raster_size_for_field(field.0, field.1);
+        // flip_y: the display list is Y-up, as the renderers expect, and a
+        // framebuffer's row 0 is its top. What comes out is the finished
+        // picture, so the machine declares no orientation for the frontend to
+        // apply over it; see `TempestSystem::orientation`.
         rasterize_vectors(
             &self.display_list,
             buffer,
             rw,
             rh,
             field,
-            false,
+            true,
             HALATION_OFF,
         );
     }

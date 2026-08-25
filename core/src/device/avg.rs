@@ -913,7 +913,14 @@ impl Avg {
     fn draw_tempest(&mut self, cycles: i32, color_ram: &[u8; 16]) {
         let (dx, dy) = self.deflect(cycles, 3);
         self.xpos = self.xpos.wrapping_add(dx);
-        self.ypos = self.ypos.wrapping_sub(dy);
+        // Y-up, the convention the renderers expect of a display list, as Star
+        // Wars already emits. Tempest's tube is mounted the other way up in its
+        // cabinet, and where that is accounted for is the screen mapping's
+        // business rather than the generator's: emitting it upside down here
+        // meant the machine had to claim a rotation to correct it, and that
+        // claim was then also applied to the framebuffer, turning the rasterized
+        // picture a further 90 degrees. See `TempestSystem::orientation`.
+        self.ypos = self.ypos.wrapping_add(dy);
 
         // Color RAM holds the four active bits inverted in its low nibble.
         let data = color_ram[(self.color & 0xF) as usize];

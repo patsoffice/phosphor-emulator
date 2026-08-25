@@ -620,9 +620,16 @@ impl phosphor_core::core::machine::Renderable for TempestSystem {
     fn vector_display_list(&self) -> Option<&[phosphor_core::device::dvg::VectorLine]> {
         self.board.vector_display_list()
     }
-    fn orientation(&self) -> phosphor_core::core::machine::Orientation {
-        phosphor_core::core::machine::Orientation::ROT270
-    }
+    // No orientation override, as for Quantum. The cabinet's tube is mounted
+    // rotated, but that is already accounted for in the coordinates the AVG
+    // emits and in the aspect the field is presented at, so what render_frame
+    // produces is the finished picture.
+    //
+    // It used to declare ROT270, which the frontend applies to a framebuffer and
+    // which the GL path separately reads as "negate Y". Only the second was
+    // wanted: every rasterized frame was rotated a further 90 degrees, which is
+    // what phosphor-emulator-iitc was. The GL path is unchanged, because the
+    // display list is now Y-up and needs no negate to say the same thing.
 }
 
 impl AudioSource for TempestSystem {
@@ -985,13 +992,64 @@ mod tests {
     }
 
     #[test]
-    fn declares_rot270_orientation() {
+    fn declares_no_orientation_to_be_applied_over_the_picture() {
         use phosphor_core::core::machine::{Orientation, Renderable};
-        // Tempest's portrait vector monitor is declared, not baked: the frontend
-        // rotates the AVG output via the GL shader driven by these flags.
+        // The cabinet's tube is mounted rotated, but that is accounted for in
+        // the coordinates the AVG emits and in the aspect the field is shown at,
+        // so render_frame already produces the finished picture. Declaring a
+        // rotation on top turned every rasterized frame a further 90 degrees,
+        // which is what phosphor-emulator-iitc was.
         let sys = TempestSystem::new();
-        assert_eq!(sys.orientation(), Orientation::ROT270);
-        assert!(sys.orientation().swaps_axes());
+        assert_eq!(sys.orientation(), Orientation::NORMAL);
+        assert!(!sys.orientation().swaps_axes());
+
+        // Portrait presentation is the aspect's job, not a rotation's.
+        assert_eq!(sys.display_aspect(), Some((3, 4)));
+    }
+
+    #[test]
+    fn a_vector_drawn_up_the_display_list_lands_up_the_screen() {
+        use phosphor_core::core::machine::Renderable;
+        use phosphor_core::device::dvg::VectorLine;
+
+        // The end-to-end statement the enum above can only gesture at: put one
+        // vector from the middle of the field towards its top, and see which
+        // half of the rasterized frame lights up. This fails on a sign flip
+        // anywhere between the generator's Y convention and the framebuffer's
+        // row order, which is where the rotation bug lived.
+        let (fw, fh) = (
+            atari_avg::TIMING.display_width as f32,
+            atari_avg::TIMING.display_height as f32,
+        );
+        let mut sys = TempestSystem::new();
+        sys.board.display_list = vec![VectorLine {
+            x0: fw / 2.0,
+            y0: fh / 2.0,
+            x1: fw / 2.0,
+            y1: fh * 0.9,
+            intensity: 15,
+            r: 255,
+            g: 255,
+            b: 255,
+            beam_cycles: 0,
+            dwell_cycles: 0,
+        }];
+
+        let (w, h) = sys.display_size();
+        let mut buf = vec![0u8; (w * h * 3) as usize];
+        sys.render_frame(&mut buf);
+
+        let row_light = |row: u32| -> u64 {
+            (0..w)
+                .map(|x| buf[((row * w + x) * 3) as usize] as u64)
+                .sum()
+        };
+        let above: u64 = (0..h / 2).map(row_light).sum();
+        let below: u64 = (h / 2..h).map(row_light).sum();
+        assert!(
+            above > below * 4,
+            "drawn up the list, it should land up the screen: {above} above, {below} below"
+        );
     }
 
     #[test]
