@@ -65,6 +65,21 @@ pub struct VectorLine {
     /// all and leaves this 0, which reads as "not known, fall back to the
     /// intensity code".
     pub beam_cycles: u32,
+
+    /// Master-clock cycles the beam stood still at this segment's start before
+    /// setting off along it.
+    ///
+    /// The deflection DACs hold their last value while the sequencer fetches and
+    /// latches the next instruction, so between one vector and the next the beam
+    /// is parked on a single point, writing it the whole time. Eight states at
+    /// eight cycles is around 64 cycles on one spot against roughly ten for a
+    /// unit of moving line, which is why the corners of a shape are the
+    /// brightest part of it and why a list of many short vectors comes out
+    /// dotty.
+    ///
+    /// 0 means the same as it does for [`beam_cycles`](Self::beam_cycles): the
+    /// generator does not model this.
+    pub dwell_cycles: u32,
 }
 
 // ---------------------------------------------------------------------------
@@ -639,8 +654,10 @@ impl Dvg {
                 g: 255,
                 b: 255,
                 // The DVG decodes at the word level and models no beam timing,
-                // so it has no travel time to report. See `VectorLine`.
+                // so it has neither travel nor dwell to report. See
+                // `VectorLine`.
                 beam_cycles: 0,
+                dwell_cycles: 0,
             });
         } else {
             // First point — no previous segment, just record position.
@@ -654,6 +671,7 @@ impl Dvg {
                 g: 255,
                 b: 255,
                 beam_cycles: 0,
+                dwell_cycles: 0,
             });
         }
     }
@@ -866,6 +884,7 @@ mod tests {
             g: 255,
             b: 255,
             beam_cycles: 0,
+            dwell_cycles: 0,
         });
         dvg.reset();
         assert_eq!(dvg.pc, 0);
@@ -890,6 +909,7 @@ mod tests {
             g: 255,
             b: 255,
             beam_cycles: 0,
+            dwell_cycles: 0,
         });
         assert!(dvg.is_halted());
         dvg.go();

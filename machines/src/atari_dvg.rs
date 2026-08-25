@@ -459,14 +459,18 @@ pub(crate) fn rasterize_vectors(
             if line.intensity == 0 {
                 continue;
             }
-            let brightness = INTENSITY_LUT[(line.intensity & 0xF) as usize] as f32 / 255.0
-                * gain
-                * dwell_gain(line);
-            let energy = [
-                brightness * line.r as f32,
-                brightness * line.g as f32,
-                brightness * line.b as f32,
+            // Beam current, before any question of how long it was applied.
+            let current = INTENSITY_LUT[(line.intensity & 0xF) as usize] as f32 / 255.0 * gain;
+            let colour = [
+                current * line.r as f32,
+                current * line.g as f32,
+                current * line.b as f32,
             ];
+
+            // Along the segment, light lands per unit of length, so what matters
+            // is dwell per unit of length.
+            let along = dwell_gain(line);
+            let energy = [colour[0] * along, colour[1] * along, colour[2] * along];
 
             let (sy0, sy1) = if flip_y {
                 // Normal: vector Y=0 is bottom, screen Y=0 is top.
@@ -491,6 +495,36 @@ pub(crate) fn rasterize_vectors(
             );
             dirty_lo = dirty_lo.min(lo);
             dirty_hi = dirty_hi.max(hi);
+
+            // The beam stood still here before setting off, so this much light
+            // lands on one point instead of being spread along a path. It is
+            // what makes the corners of a shape brighter than its sides.
+            //
+            // A degenerate sweep deposits `sigma * sqrt(2*pi)` times what it is
+            // given, that being the volume under a profile of unit width used as
+            // a disc, so dividing it out leaves the dot carrying exactly the
+            // light of its dwell.
+            if line.dwell_cycles > 0 {
+                let at_rest = (line.dwell_cycles as f32 / MIN_CYCLES_PER_UNIT)
+                    / (sigma * std::f32::consts::TAU.sqrt());
+                let dot = [
+                    colour[0] * at_rest,
+                    colour[1] * at_rest,
+                    colour[2] * at_rest,
+                ];
+                let (lo, hi) = sweep_beam(
+                    acc,
+                    w,
+                    h,
+                    (line.x0 * scale, sy0),
+                    (line.x0 * scale, sy0),
+                    radius,
+                    &profile,
+                    dot,
+                );
+                dirty_lo = dirty_lo.min(lo);
+                dirty_hi = dirty_hi.max(hi);
+            }
         }
 
         if dirty_hi < dirty_lo {
@@ -851,6 +885,7 @@ mod tests {
                 g: 255,
                 b: 255,
                 beam_cycles: 0,
+                dwell_cycles: 0,
             }
         }
 
@@ -1009,6 +1044,46 @@ mod tests {
 
             let slow = render(&[timed(70, 128, 170, 128, at_top_speed * 4)]);
             assert_eq!(peak(&slow), 255, "and a slower one saturates");
+        }
+
+        #[test]
+        fn standing_still_at_a_vertex_puts_a_dot_there() {
+            // The beam holds position while the sequencer fetches the next
+            // instruction, so it writes one point for that whole time. Against a
+            // moving line, which spreads its light along a path, that lands as a
+            // bright dot at the corner.
+            let len = 100.0f32;
+            let at_top_speed = (len * MIN_CYCLES_PER_UNIT) as u32;
+            let moving = VectorLine {
+                intensity: 4,
+                ..timed(70, 128, 170, 128, at_top_speed)
+            };
+            let parked = VectorLine {
+                // Eight states at eight cycles, which is what a VCTR costs.
+                dwell_cycles: 64,
+                ..moving.clone()
+            };
+
+            let without = render(&[moving]);
+            let with = render(&[parked]);
+
+            // The extra light is at the start of the segment, not along it.
+            let at = |buf: &[u8], x: usize| buf[(128 * W as usize + x) * 3] as i32;
+            assert!(
+                at(&with, 70) > at(&without, 70) + 8,
+                "the vertex should be brighter: {} against {}",
+                at(&with, 70),
+                at(&without, 70)
+            );
+            assert_eq!(
+                at(&with, 140),
+                at(&without, 140),
+                "the middle of the segment is untouched by it"
+            );
+
+            // And it is light added, not moved: the beam really was on for
+            // longer.
+            assert!(total_light(&with) > total_light(&without));
         }
 
         #[test]

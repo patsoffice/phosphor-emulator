@@ -185,6 +185,11 @@ pub struct Avg {
     /// Master-clock cycles consumed since the last [`go`](Self::go).
     elapsed: u32,
 
+    /// Sequencer time since the last vector was drawn, during which the beam
+    /// stood still at the point that vector ended on. Handed to the next drawn
+    /// segment as the dwell at its starting vertex, and reset there.
+    idle_cycles: u32,
+
     /// Master-clock cycles owed to the sequencer but not yet spent.
     ///
     /// [`step`](Self::step) adds the board's slice of time here and runs states
@@ -351,6 +356,7 @@ impl Avg {
             halted: true,
             run_cycles: 0,
             elapsed: 0,
+            idle_cycles: 0,
             pending: 0,
             state_prom: default_state_prom(),
             state_latch: 0,
@@ -463,6 +469,7 @@ impl Avg {
         self.frame_done = false;
         self.run_cycles = 0;
         self.elapsed = 0;
+        self.idle_cycles = 0;
         self.pending = 0;
         self.halted = true;
         self.has_prev = false;
@@ -501,6 +508,15 @@ impl Avg {
 
         self.state_latch = (u8::from(self.halted) << 4) | (self.state_latch & 0x0F);
         self.elapsed = self.elapsed.saturating_add(AVG_CYCLES_PER_STATE);
+
+        // A state costs the sequencer time during which the beam is not being
+        // deflected: the DACs hold whatever they were last loaded with while the
+        // next instruction is fetched and latched. So the beam sits still at the
+        // point it last reached, writing that one spot for the whole of it. That
+        // is why the corners of a shape are the brightest part of it, and it is
+        // the reason a game with many short vectors gets a dotty picture.
+        self.idle_cycles = self.idle_cycles.saturating_add(AVG_CYCLES_PER_STATE);
+
         charge + AVG_CYCLES_PER_STATE
     }
 
@@ -1032,6 +1048,9 @@ impl Avg {
                 g: rgb[1],
                 b: rgb[2],
                 beam_cycles,
+                // Everything the sequencer spent since the last vector was
+                // drawn, which the beam spent parked on this segment's start.
+                dwell_cycles: self.idle_cycles,
             });
         } else {
             // Nothing to travel from yet: this only parks the beam where the
@@ -1046,8 +1065,13 @@ impl Avg {
                 g: 0,
                 b: 0,
                 beam_cycles: 0,
+                dwell_cycles: 0,
             });
         }
+
+        // The beam is about to be somewhere new, so whatever it spent standing
+        // still belongs to the segment just recorded and not to the next one.
+        self.idle_cycles = 0;
 
         self.prev_x = x;
         self.prev_y = y;
