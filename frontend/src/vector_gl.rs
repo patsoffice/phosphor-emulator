@@ -18,9 +18,9 @@ use std::ffi::CString;
 use std::mem;
 use std::ptr;
 
+use phosphor_core::core::display::display_settings;
 use phosphor_core::device::dvg::{
-    BEAM_CUTOFF_SIGMAS, HALATION_FRACTION, MIN_SIGMA_PIXELS, VectorLine, beam_sigma_units,
-    halation_sigma_units,
+    BEAM_CUTOFF_SIGMAS, MIN_SIGMA_PIXELS, VectorLine, beam_sigma_units, halation_sigma_units,
 };
 
 /// Intensity-to-brightness lookup table (4-bit, 0 = invisible).
@@ -447,10 +447,11 @@ impl VectorRenderer {
         // when the window is small enough that it cannot, and it is expressed
         // in units here by converting through the pixels-per-unit of the
         // viewport we just worked out.
+        let settings = display_settings();
         let long_axis = display_w.max(display_h) as f32;
         let px_per_unit = vp_w.max(vp_h) / long_axis;
-        let sigma =
-            beam_sigma_units(long_axis).max(MIN_SIGMA_PIXELS / px_per_unit.max(f32::MIN_POSITIVE));
+        let sigma = (beam_sigma_units(long_axis) * settings.focus.max(0.0))
+            .max(MIN_SIGMA_PIXELS / px_per_unit.max(f32::MIN_POSITIVE));
         let radius = BEAM_CUTOFF_SIGMAS * sigma;
 
         // Halation, sized in this viewport's pixels. The reduced field is scaled
@@ -475,10 +476,12 @@ impl VectorRenderer {
         // straight out, so it comes out of the core rather than adding to it.
         // With no targets to draw it into there is no glow, and then the core
         // keeps all of its light.
+        let halation = settings.halation.clamp(0.0, 1.0);
         let (core_scale, halo_amount) = match self.halo {
-            Some(_) => (1.0 - HALATION_FRACTION, HALATION_FRACTION),
-            None => (1.0, 0.0),
+            Some(_) if halation > 0.0 => (1.0 - halation, halation),
+            _ => (1.0, 0.0),
         };
+        let core_scale = core_scale * settings.brightness.max(0.0);
 
         let half_size = (display_w as f32 / 2.0, display_h as f32 / 2.0);
 
@@ -502,7 +505,10 @@ impl VectorRenderer {
                     gl::UseProgram(self.program);
                     gl::Uniform2f(self.uniform_half_size, half_size.0, half_size.1);
                     gl::Uniform1i(self.uniform_rotation, rotation);
-                    self.draw_quads(source_sigma, 1.0);
+                    // Full energy here: the (1-f)/f split is applied when the
+                    // two are composited, not when the glow's source is drawn.
+                    // Brightness scales both, being the control in front of them.
+                    self.draw_quads(source_sigma, settings.brightness.max(0.0));
 
                     // Separable blur, ping-ponging between the two targets. The
                     // passes replace rather than add, so blending is off.

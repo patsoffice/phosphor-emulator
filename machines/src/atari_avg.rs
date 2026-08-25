@@ -1,12 +1,13 @@
 use phosphor_core::core::AddressSpace16;
 use phosphor_core::core::TimingConfig;
 use phosphor_core::core::debug_trace::{DebugEvent, DebugEventKind, DebugTraceBuffer};
+use phosphor_core::core::display::display_settings;
 use phosphor_core::core::machine::Renderable;
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::watchpoint::DebugAccessSource;
 use phosphor_core::cpu::m6502::M6502;
 use phosphor_core::device::avg::{Avg, VectorMemory};
-use phosphor_core::device::dvg::{HALATION_OFF, VectorLine, raster_size_for_field};
+use phosphor_core::device::dvg::{VectorLine, raster_size_for_field};
 use phosphor_macros::{BusDebug, DebugTrace, MemoryRegion};
 
 use crate::atari_dvg::rasterize_vectors;
@@ -260,7 +261,8 @@ impl AtariAvgBoard {
             rh,
             field,
             true,
-            HALATION_OFF,
+            // The viewer's settings, minus the glow this path cannot afford.
+            &display_settings().without_halation(),
         );
     }
 

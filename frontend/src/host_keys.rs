@@ -31,6 +31,7 @@ pub enum HostAction {
     ToggleDebugPanel,
     ToggleSettingsPanel,
     ToggleDipPanel,
+    ToggleDisplayPanel,
     ToggleProfiler,
     ToggleThrottle,
     ToggleFps,
@@ -58,6 +59,7 @@ impl HostAction {
             HostAction::ToggleDebugPanel => "Debug panel",
             HostAction::ToggleSettingsPanel => "Input settings panel",
             HostAction::ToggleDipPanel => "DIP switch panel",
+            HostAction::ToggleDisplayPanel => "Display panel",
             HostAction::ToggleProfiler => "Profiler",
             HostAction::ToggleThrottle => "Frame throttle",
             HostAction::ToggleFps => "FPS overlay",
@@ -189,6 +191,12 @@ pub const DEFAULTS: &[(HostAction, HostChord)] = &[
         HostChord::bare(Scancode::Tab),
     ),
     (HostAction::ToggleDipPanel, HostChord::bare(Scancode::Grave)),
+    // Shift+` for the display knobs, beside the DIP panel on bare `: both are
+    // "how this cabinet is set up" rather than anything MAME has a key for.
+    (
+        HostAction::ToggleDisplayPanel,
+        HostChord::shift(Scancode::Grave),
+    ),
     (HostAction::ToggleProfiler, HostChord::shift(Scancode::F11)),
     (HostAction::ToggleThrottle, HostChord::bare(Scancode::F10)),
     (HostAction::ToggleFps, HostChord::bare(Scancode::F11)),

@@ -15,6 +15,7 @@
 use phosphor_core::audio::SampleRing;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::debug_trace::{DebugEvent, DebugEventKind, DebugTraceBuffer};
+use phosphor_core::core::display::display_settings;
 use phosphor_core::core::input::{AnalogAxis, AxisRange};
 use phosphor_core::core::machine::{
     ActionRole, AnalogAxisKind, DefaultBinding, DipApplyTiming, DipChoice, DipOption,
@@ -29,7 +30,7 @@ use phosphor_core::cpu::Cpu;
 use phosphor_core::cpu::m6809::M6809;
 use phosphor_core::device::adc0809::Adc0809;
 use phosphor_core::device::avg::{Avg, AvgVariant, VectorMemory};
-use phosphor_core::device::dvg::{HALATION_OFF, VectorLine, raster_size_for_field};
+use phosphor_core::device::dvg::{VectorLine, raster_size_for_field};
 use phosphor_core::device::pokey::Pokey;
 use phosphor_core::device::riot6532::Riot6532;
 use phosphor_core::device::slapstic::Slapstic;
@@ -1480,7 +1481,8 @@ impl StarWarsBoard {
             rh,
             field,
             true,
-            HALATION_OFF,
+            // The viewer's settings, minus the glow this path cannot afford.
+            &display_settings().without_halation(),
         );
     }
 

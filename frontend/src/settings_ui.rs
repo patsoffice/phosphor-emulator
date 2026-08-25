@@ -1,5 +1,7 @@
-//! egui settings panels: the input-rebinding panel and the DIP switch panel.
+//! egui settings panels: the input-rebinding panel, the DIP switch panel and
+//! the display panel.
 
+use phosphor_core::core::display::{DisplaySettings, set_display_settings};
 use phosphor_core::core::machine::{
     ActionRole, DipApplyTiming, DipSwitchBank, InputControl, InputId, InputKind,
 };
@@ -58,6 +60,13 @@ pub struct SettingsState {
     pub host_reset_requested: bool,
     /// Whether the key legend (`?`) is visible.
     pub legend_visible: bool,
+    /// Whether the display panel is visible.
+    pub display_active: bool,
+    /// The display knobs as the panel has them. Applied the moment they move,
+    /// since the point of them is to be turned while looking at the picture;
+    /// `display_changed` tells the emulator loop there is something to persist.
+    pub display: phosphor_core::core::display::DisplaySettings,
+    pub display_changed: bool,
 }
 
 /// Draw the input-rebinding side panel.
@@ -399,5 +408,84 @@ pub fn draw_dip_panel(
                         });
                 }
             });
+        });
+}
+
+/// Draw the display panel: the knobs a viewer has over how the picture is drawn.
+///
+/// Each is labelled with what it is a deviation from, because the model behind
+/// them is measured rather than invented and the numbers mean something: 1.0 is
+/// the figure the tube gives, not an arbitrary middle of a slider.
+///
+/// Changes apply immediately, since the whole point of them is to be turned
+/// while looking at the result. The emulator loop notices `display_changed` and
+/// persists them.
+pub fn draw_display_panel(ctx: &egui::Context, state: &mut SettingsState) {
+    egui::SidePanel::right("display_settings_panel")
+        .default_width(PANEL_WIDTH as f32)
+        .resizable(false)
+        .show(ctx, |ui| {
+            ui.heading("Display");
+            ui.separator();
+            ui.label(
+                "How the picture is drawn. These do not affect emulation, and \
+                 1.0 is what was measured off the tube rather than a midpoint.",
+            );
+            ui.separator();
+
+            let before = state.display;
+
+            egui::Grid::new("display_grid")
+                .num_columns(2)
+                .striped(true)
+                .show(ui, |ui| {
+                    ui.label("Brightness").on_hover_text(
+                        "The monitor's brightness control. At 1.0 a full-intensity \
+                             vector drawn at the beam's top speed reaches full white and \
+                             no further; above that, more of the picture saturates and blooms.",
+                    );
+                    ui.add(egui::Slider::new(&mut state.display.brightness, 0.1..=3.0));
+                    ui.end_row();
+
+                    ui.label("Focus").on_hover_text(
+                        "Spot size, as a multiple of the tube's own. 1.0 is the 0.7 mm \
+                         spot of a well adjusted 19 inch tube. A renderer will not draw \
+                         a spot finer than its grid can represent, whatever this says.",
+                    );
+                    ui.add(egui::Slider::new(&mut state.display.focus, 0.5..=4.0));
+                    ui.end_row();
+
+                    ui.label("Halation").on_hover_text(
+                        "How much of each spot's light leaves by way of the faceplate \
+                         rather than straight out, which is the broad glow around a \
+                         bright vector. This is the one figure in the model with no \
+                         derivation behind it, so it is the one most worth your eye.",
+                    );
+                    ui.add(egui::Slider::new(&mut state.display.halation, 0.0..=0.4));
+                    ui.end_row();
+                });
+
+            ui.separator();
+            ui.horizontal(|ui| {
+                if ui
+                    .button("Measured")
+                    .on_hover_text("Everything back to the figures the tube gives.")
+                    .clicked()
+                {
+                    state.display = DisplaySettings::MEASURED;
+                }
+                if ui
+                    .button("Punchy")
+                    .on_hover_text("Brighter and glowier than the cabinet ever was.")
+                    .clicked()
+                {
+                    state.display = DisplaySettings::PUNCHY;
+                }
+            });
+
+            if state.display != before {
+                set_display_settings(state.display);
+                state.display_changed = true;
+            }
         });
 }

@@ -20,6 +20,29 @@ use crate::video::Video;
 /// grown window still shows its own borders rather than running off screen.
 const WINDOW_MARGIN: u32 = 64;
 
+/// Whether any side panel is open.
+///
+/// A panel needs the CPU framebuffer path: egui lays out around a texture, and
+/// the vector machines' GL path draws straight to the window with no texture to
+/// lay out against. Both the render branch and [`panels_width`] ask this, so a
+/// panel added to one cannot be forgotten by the other. It was: the DIP panel,
+/// the key legend and the console all resized the window on a vector machine and
+/// then never drew, because the branch listed three of the flags by hand.
+fn any_panel_open(
+    debug: &DebugState,
+    profile: &ProfileState,
+    settings: &SettingsState,
+    console: &ConsoleState,
+) -> bool {
+    debug.active
+        || profile.active
+        || settings.active
+        || settings.dip_active
+        || settings.display_active
+        || settings.legend_visible
+        || console.visible
+}
+
 /// Combined width of all active right-side panels, used when resizing the window.
 fn panels_width(
     debug: &DebugState,
@@ -38,7 +61,8 @@ fn panels_width(
         0
     };
     // The input and DIP panels are independent side panels that stack.
-    let sw = (settings.active as u32 + settings.dip_active as u32) * settings_ui::PANEL_WIDTH;
+    let sw = (settings.active as u32 + settings.dip_active as u32 + settings.display_active as u32)
+        * settings_ui::PANEL_WIDTH;
     dw + pw + sw + console.visible as u32 * settings_ui::PANEL_WIDTH
 }
 
@@ -913,6 +937,30 @@ pub fn run(
                     );
                 }
 
+                // Shift+backtick: the display knobs. Every machine has them,
+                // since they are about the tube rather than about the game.
+                Event::KeyDown { repeat: false, .. }
+                    if hot == Some(HostAction::ToggleDisplayPanel) =>
+                {
+                    settings_state.display_active = !settings_state.display_active;
+                    if settings_state.display_active {
+                        // Open on whatever is actually in force, so the sliders
+                        // start where the picture is rather than at a default
+                        // that would jump it the moment one is touched.
+                        settings_state.display = phosphor_core::core::display::display_settings();
+                    }
+                    video.resize_window(
+                        win_w * scale
+                            + panels_width(
+                                &debug_state,
+                                &profile_state,
+                                &settings_state,
+                                &console_state,
+                            ),
+                        win_h * scale,
+                    );
+                }
+
                 Event::KeyDown { repeat: false, .. } if hot == Some(HostAction::ToggleThrottle) => {
                     throttle = !throttle;
                     if throttle {
@@ -1173,9 +1221,12 @@ pub fn run(
             // (side panels need a texture for layout).
             if let Some(ref mut renderer) = vector_renderer
                 && let Some(lines) = machine.vector_display_list()
-                && !debug_state.active
-                && !profile_state.active
-                && !settings_state.active
+                && !any_panel_open(
+                    &debug_state,
+                    &profile_state,
+                    &settings_state,
+                    &console_state,
+                )
             {
                 // The GL path maps display-list coordinates to the viewport, so
                 // it needs the extent those coordinates are in, not the pixel
@@ -1285,13 +1336,12 @@ pub fn run(
 
                 video.update_game_texture(display_fb);
 
-                if debug_state.active
-                    || profile_state.active
-                    || settings_state.active
-                    || settings_state.dip_active
-                    || settings_state.legend_visible
-                    || console_state.visible
-                {
+                if any_panel_open(
+                    &debug_state,
+                    &profile_state,
+                    &settings_state,
+                    &console_state,
+                ) {
                     let bus_ref = machine.debug_bus();
                     let profiling = profile_state.active;
                     let show_settings = settings_state.active;
@@ -1302,6 +1352,7 @@ pub fn run(
                     // Snapshot DIP metadata + live bank bytes before the egui
                     // closure (which must not hold `&mut machine`).
                     let show_dip = settings_state.dip_active;
+                    let show_display = settings_state.display_active;
                     let show_console = console_state.visible;
                     let dip_banks = machine.dip_banks();
                     let dip_values: Vec<u8> = (0..dip_banks.len())
@@ -1333,6 +1384,9 @@ pub fn run(
                                 &dip_values,
                                 &mut settings_state,
                             );
+                        }
+                        if show_display {
+                            settings_ui::draw_display_panel(ctx, &mut settings_state);
                         }
                         if show_console {
                             console_ui::draw_console_panel(ctx, &mut console_state);

@@ -38,6 +38,7 @@
 
 use phosphor_core::audio::{DcBlocker, SampleRing};
 use phosphor_core::core::bus::InterruptState;
+use phosphor_core::core::display::display_settings;
 use phosphor_core::core::input::{DrainPolicy, RelativeCounter};
 use phosphor_core::core::machine::{
     AnalogAxisKind, AudioSource, DefaultBinding, DipApplyTiming, DipChoice, DipOption,
@@ -51,7 +52,7 @@ use phosphor_core::cpu::m68000::M68000;
 use phosphor_core::cpu::state::M68000State;
 use phosphor_core::cpu::{Cpu, CpuStateTrait};
 use phosphor_core::device::avg::{Avg, AvgVariant, VectorMemory};
-use phosphor_core::device::dvg::{HALATION_OFF, VectorLine, raster_size_for_field};
+use phosphor_core::device::dvg::{VectorLine, raster_size_for_field};
 use phosphor_core::device::pokey::Pokey;
 use phosphor_macros::{BusDebug, MemoryRegion};
 
@@ -708,7 +709,8 @@ impl Renderable for QuantumSystem {
             rh,
             field,
             true,
-            HALATION_OFF,
+            // The viewer's settings, minus the glow this path cannot afford.
+            &display_settings().without_halation(),
         );
     }
 

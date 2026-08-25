@@ -1,13 +1,14 @@
 use phosphor_core::core::AddressSpace16;
 use phosphor_core::core::debug_trace::{DebugEvent, DebugEventKind, DebugTraceBuffer};
+use phosphor_core::core::display::{DisplaySettings, display_settings};
 use phosphor_core::core::machine::Renderable;
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::watchpoint::DebugAccessSource;
 use phosphor_core::core::{Bus, BusMaster, TimingConfig};
 use phosphor_core::cpu::m6502::M6502;
 use phosphor_core::device::dvg::{
-    BEAM_CUTOFF_SIGMAS, Dvg, HALATION_OFF, MIN_CYCLES_PER_UNIT, MIN_SIGMA_PIXELS, VectorLine,
-    beam_sigma_units, halation_sigma_units, raster_size_for_field,
+    BEAM_CUTOFF_SIGMAS, Dvg, MIN_CYCLES_PER_UNIT, MIN_SIGMA_PIXELS, VectorLine, beam_sigma_units,
+    halation_sigma_units, raster_size_for_field,
 };
 use phosphor_macros::{BusDebug, DebugTrace, MemoryRegion};
 
@@ -258,7 +259,8 @@ impl AtariDvgBoard {
             rh,
             field,
             true,
-            HALATION_OFF,
+            // The viewer's settings, minus the glow this path cannot afford.
+            &display_settings().without_halation(),
         );
     }
 
@@ -322,7 +324,8 @@ impl Renderable for AtariDvgBoard {
             rh,
             field,
             true,
-            HALATION_OFF,
+            // The viewer's settings, minus the glow this path cannot afford.
+            &display_settings().without_halation(),
         );
     }
 
@@ -373,7 +376,7 @@ pub(crate) fn rasterize_vectors(
     height: u32,
     field: (u32, u32),
     flip_y: bool,
-    halation: f32,
+    settings: &DisplaySettings,
 ) {
     buffer.fill(0);
 
@@ -395,9 +398,10 @@ pub(crate) fn rasterize_vectors(
 
     // The spot's size in output pixels depends only on how many pixels the long
     // axis has, since the generator's extent cancels out of
-    // `field_units * spot_fraction * (pixels / field_units)`. Floored where the
-    // grid can no longer represent it.
-    let sigma = beam_sigma_units(w.max(h) as f32).max(MIN_SIGMA_PIXELS);
+    // `field_units * spot_fraction * (pixels / field_units)`. The focus control
+    // scales it, and the floor holds whatever focus says: below it the spot
+    // aliases against the grid rather than getting finer.
+    let sigma = (beam_sigma_units(w.max(h) as f32) * settings.focus.max(0.0)).max(MIN_SIGMA_PIXELS);
     // Where the profile is cut off. Truncating leaves a step the height of the
     // profile there, so it has to fall below one level of an 8-bit channel:
     // 3 sigma is 1.1% of the peak and would show as a faint edge, 3.5 is 0.2%
@@ -410,7 +414,7 @@ pub(crate) fn rasterize_vectors(
     // several times the sweep, and the frontend's GL path does it on the GPU for
     // nothing. See the note on the callers.
     let halo_sigma = halation_sigma_units(w.max(h) as f32);
-    let halo_fraction = halation;
+    let halo_fraction = settings.halation.clamp(0.0, 1.0);
 
     // The monitor's brightness control, set where an operator would set it: a
     // full-intensity vector reaches full white along its centre and no further.
@@ -427,7 +431,8 @@ pub(crate) fn rasterize_vectors(
     // `(1 - f) + f*sigma/halo_sigma` of what the core alone would give, and the
     // reciprocal of that restores it.
     let halo_peak_share = (1.0 - halo_fraction) + halo_fraction * sigma / halo_sigma;
-    let gain = sigma * std::f32::consts::TAU.sqrt() / halo_peak_share;
+    let gain =
+        sigma * std::f32::consts::TAU.sqrt() / halo_peak_share * settings.brightness.max(0.0);
 
     // Energy accumulates in float and is quantised once at the end. Summing
     // 8-bit steps per segment would lose every contribution under half a step,
@@ -868,6 +873,7 @@ mod tests {
     /// The beam rasterizer, on its own, without a machine around it.
     mod beam {
         use super::*;
+        use phosphor_core::device::dvg::HALATION_OFF;
 
         const W: u32 = 256;
         const H: u32 = 256;
@@ -894,15 +900,21 @@ mod tests {
             render_with_halation(lines, HALATION_OFF)
         }
 
-        /// The full optical model, halation included. Passed explicitly rather
-        /// than taken from what the boards happen to be configured with, so
-        /// these tests keep testing halation whatever that default becomes.
+        /// The full optical model, halation included.
+        ///
+        /// Settings are handed over rather than read from the process-wide ones,
+        /// so these tests keep asserting the same thing whatever a viewer has
+        /// their knobs set to, and cannot race another test changing them.
         fn render_with_halation(lines: &[VectorLine], halation: f32) -> Vec<u8> {
+            let settings = DisplaySettings {
+                halation,
+                ..DisplaySettings::MEASURED
+            };
             let mut buf = vec![0u8; (W * H * 3) as usize];
             // Field and raster are the same here: these tests reason in whole
             // units and want one unit to be one pixel so the numbers they assert
             // are the numbers the sweep sees.
-            rasterize_vectors(lines, &mut buf, W, H, (W, H), false, halation);
+            rasterize_vectors(lines, &mut buf, W, H, (W, H), false, &settings);
             buf
         }
 
