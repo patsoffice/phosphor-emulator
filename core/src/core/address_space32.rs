@@ -18,8 +18,10 @@
 //! here, so 68020+ class machines inherit correct semantics.
 
 use crate::core::address_space::{AccessKind, DebugRead, DebugWrite, MemoryBacking, RegionId};
+use crate::core::address_space16::ADDRESS_SPACE_SAVE_VERSION;
 use crate::core::bus::BusMaster;
 use crate::core::debug_trace::{DebugEvent, DebugEventKind, DebugTraceBuffer};
+use crate::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use crate::core::watchpoint::{
     DebugAccessSource, WatchpointCondition, WatchpointHit, WatchpointKind, WatchpointPhase,
     Watchpoints,
@@ -922,6 +924,44 @@ impl AddressSpace32 {
         self.map.region_at(addr)
     }
 
+    /// Backing regions this space saves, ascending, deduplicated.
+    ///
+    /// Keyed on the *backing* region a range targets rather than on the range
+    /// itself, because a bank window and a mirror are extra ranges over bytes
+    /// already accounted for. A region counts as saveable if any range exposing
+    /// it is CPU-writable, so a pool reachable read-only through one window and
+    /// writable through another is still saved.
+    ///
+    /// Public for the same reason as the 16-bit sibling's: the rule should be
+    /// inspectable rather than inferred from a save file.
+    pub fn saved_region_ids(&self) -> Vec<RegionId> {
+        let mut ids: Vec<RegionId> = Vec::new();
+        for region in self.map.regions() {
+            if !region.access.is_cpu_writable() {
+                continue;
+            }
+            let RegionTarget::Backing { region_id, .. } = region.target else {
+                continue;
+            };
+            if !self.backing.has_region(region_id) || ids.contains(&region_id) {
+                continue;
+            }
+            ids.push(region_id);
+        }
+        ids.sort_unstable();
+        ids
+    }
+
+    fn region_name(&self, id: RegionId) -> &'static str {
+        self.map
+            .regions()
+            .iter()
+            .find(
+                |r| matches!(r.target, RegionTarget::Backing { region_id, .. } if region_id == id),
+            )
+            .map_or("unnamed region", |r| r.name)
+    }
+
     /// Resolve `addr` to a backing location, following aliases (see
     /// [`AddressMap32::resolved_offset`]).
     #[inline]
@@ -933,6 +973,61 @@ impl AddressSpace32 {
 impl Default for AddressSpace32 {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// See [`AddressSpace16`](crate::core::address_space16::AddressSpace16)'s
+/// `Saveable` impl for the format and for why the page map is not part of it.
+/// The two bodies are identical in shape; only how a range names its backing
+/// region differs.
+impl Saveable for AddressSpace32 {
+    fn save_state(&self, w: &mut StateWriter) {
+        w.write_version(ADDRESS_SPACE_SAVE_VERSION);
+        let ids = self.saved_region_ids();
+        w.write_u16_le(ids.len() as u16);
+        for id in ids {
+            w.write_tlv(u16::from(id), |w| w.write_raw(self.backing.region_data(id)));
+        }
+    }
+
+    fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
+        r.read_version(ADDRESS_SPACE_SAVE_VERSION)?;
+        let expected = self.saved_region_ids();
+        let count = r.read_u16_le()?;
+        let mut seen: Vec<RegionId> = Vec::new();
+
+        for i in 0..count {
+            let at = r.offset();
+            let Some((tag, len)) = r.read_tag_len()? else {
+                return Err(SaveError::InvalidFormat(format!(
+                    "address space declares {count} regions but ran out after {i}"
+                )));
+            };
+            let id = tag as RegionId;
+            if u16::from(id) != tag || !expected.contains(&id) {
+                r.skip_unknown(tag, len, at)?;
+                continue;
+            }
+            if seen.contains(&id) {
+                return Err(SaveError::InvalidFormat(format!(
+                    "region {id} appears twice"
+                )));
+            }
+            seen.push(id);
+            let name = self.region_name(id);
+            r.read_payload(tag, len, at, name, |r| {
+                r.read_raw_into(self.backing.region_data_mut(id))
+            })?;
+        }
+
+        if let Some(missing) = expected.iter().find(|id| !seen.contains(id)) {
+            return Err(SaveError::InvalidFormat(format!(
+                "region {} ({}) is absent from the save",
+                missing,
+                self.region_name(*missing)
+            )));
+        }
+        Ok(())
     }
 }
 

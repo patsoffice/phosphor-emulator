@@ -22,6 +22,7 @@
 use crate::core::address_space::{AccessKind, DebugRead, MemoryBacking, RegionId, UNMAPPED};
 use crate::core::bus::BusMaster;
 use crate::core::debug_trace::{DebugEvent, DebugEventKind, DebugTraceBuffer};
+use crate::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use crate::core::watchpoint::{
     DebugAccessSource, WatchpointCondition, WatchpointHit, WatchpointKind, WatchpointPhase,
     Watchpoints,
@@ -572,6 +573,13 @@ impl AddressSpace16 {
         self.backing.region_data_mut(region_id)
     }
 
+    /// Whether a region has bytes behind it, as opposed to being I/O or
+    /// unregistered. The question [`Self::region_data`] panics rather than
+    /// answers.
+    pub fn has_backing(&self, region_id: impl Into<RegionId>) -> bool {
+        self.backing.has_region(region_id)
+    }
+
     /// Bulk-copy data into a region's backing store (e.g., ROM loading).
     ///
     /// `data` must exactly match the region's length.
@@ -993,6 +1001,115 @@ impl AddressSpace16 {
     /// Get the region descriptor for the page containing `addr`, if mapped.
     pub fn region_at(&self, addr: u16) -> Option<&RegionDescriptor> {
         self.map.region_at(addr)
+    }
+
+    /// Backing regions this space saves, ascending, deduplicated.
+    ///
+    /// A region is saved when the CPU can change it (see
+    /// [`AccessKind::is_cpu_writable`]) and it has backing. Keyed on the backing
+    /// region id rather than on descriptors, because a mirrored or banked window
+    /// is a second descriptor over bytes that are already accounted for.
+    ///
+    /// Public so the rule can be inspected rather than inferred from a save
+    /// file: a board that expected a region to be persisted can check here.
+    pub fn saved_region_ids(&self) -> Vec<RegionId> {
+        let mut ids: Vec<RegionId> = Vec::new();
+        for region in self.map.regions() {
+            if !region.access.is_cpu_writable() || !self.backing.has_region(region.id) {
+                continue;
+            }
+            if !ids.contains(&region.id) {
+                ids.push(region.id);
+            }
+        }
+        ids.sort_unstable();
+        ids
+    }
+
+    fn region_name(&self, id: RegionId) -> &'static str {
+        self.map
+            .regions()
+            .iter()
+            .find(|r| r.id == id)
+            .map_or("unnamed region", |r| r.name)
+    }
+}
+
+/// Version of the address-space body, independent of any board's, and shared
+/// with [`AddressSpace32`](crate::core::address_space32::AddressSpace32).
+pub(crate) const ADDRESS_SPACE_SAVE_VERSION: u8 = 1;
+
+/// An address space saves the bytes the CPU can change, and nothing else.
+///
+/// ```text
+/// body   := version:u8 | count:u16 | region{count}
+/// region := id:u16 | len:u32 | bytes
+/// ```
+///
+/// Which regions those are is derived from the map rather than listed by each
+/// board: a region is saved when its [`AccessKind`] is CPU-writable and it has
+/// backing. ROM drops out because it is `ReadOnly`, and I/O because it has no
+/// bytes. Boards used to enumerate this by hand, two lines a region, which made
+/// "forgot to save a region" a silent bug with nothing to catch it.
+///
+/// What is *not* saved is where each region is currently mapped. The page table
+/// is rebuilt by the board from its own bank register on load, which is what
+/// already happens today; saving it here as well would give two sources of truth
+/// for the same thing.
+///
+/// The count makes the body self-delimiting, so it is correct even inside a
+/// parent that frames nothing.
+impl Saveable for AddressSpace16 {
+    fn save_state(&self, w: &mut StateWriter) {
+        w.write_version(ADDRESS_SPACE_SAVE_VERSION);
+        let ids = self.saved_region_ids();
+        w.write_u16_le(ids.len() as u16);
+        for id in ids {
+            w.write_tlv(id as u16, |w| w.write_raw(self.backing.region_data(id)));
+        }
+    }
+
+    fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
+        r.read_version(ADDRESS_SPACE_SAVE_VERSION)?;
+        let expected = self.saved_region_ids();
+        let count = r.read_u16_le()?;
+        let mut seen: Vec<RegionId> = Vec::new();
+
+        for i in 0..count {
+            let at = r.offset();
+            let Some((tag, len)) = r.read_tag_len()? else {
+                return Err(SaveError::InvalidFormat(format!(
+                    "address space declares {count} regions but ran out after {i}"
+                )));
+            };
+            let id = tag as RegionId;
+            // A region this build's map does not have: another configuration of
+            // the same board, or one since removed. Skipping by length is what
+            // makes either harmless.
+            if u16::from(id) != tag || !expected.contains(&id) {
+                r.skip_unknown(tag, len, at)?;
+                continue;
+            }
+            if seen.contains(&id) {
+                return Err(SaveError::InvalidFormat(format!(
+                    "region {id} appears twice"
+                )));
+            }
+            seen.push(id);
+            let name = self.region_name(id);
+            r.read_payload(tag, len, at, name, |r| {
+                r.read_raw_into(self.backing.region_data_mut(id))
+            })?;
+        }
+
+        if let Some(missing) = expected.iter().find(|id| !seen.contains(id)) {
+            return Err(SaveError::InvalidFormat(format!(
+                "region {} ({}) is absent from the save",
+                missing,
+                self.region_name(*missing)
+            )));
+        }
+        Ok(())
     }
 }
 

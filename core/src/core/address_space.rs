@@ -29,6 +29,18 @@ pub enum AccessKind {
     Unmapped,
 }
 
+impl AccessKind {
+    /// Whether the CPU can change what this region holds.
+    ///
+    /// This is what decides whether an address space saves a region: state is
+    /// what the program can alter, so ROM is excluded by construction rather
+    /// than by each board remembering to leave it out. `Io` has no bytes and
+    /// `Unmapped` has no region.
+    pub fn is_cpu_writable(self) -> bool {
+        matches!(self, AccessKind::ReadWrite | AccessKind::WriteOnly)
+    }
+}
+
 /// Result of a side-effect-free debug read from an address space.
 ///
 /// Canonical memory-result type shared with debug-observability (see
