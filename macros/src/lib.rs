@@ -790,9 +790,73 @@ fn pascal_to_screaming_snake(s: &str) -> String {
 /// caught. *Reordering* is not: it renumbers both components, so the tags still
 /// line up and only the bodies disagree, so two components that encode alike
 /// swap silently. Reordering components is a wire change; bump this struct's
-/// `#[save_version]` when you do it. Explicit stable ids that survive a reorder
-/// are Stage B (`phosphor-emulator-tlv-save-state-hc61.3`).
-#[proc_macro_derive(Saveable, attributes(save_version, save_skip, save_elements))]
+/// `#[save_version]` when you do it.
+///
+/// # Field TLV (`#[save_tlv]`)
+///
+/// A struct marked `#[save_tlv]` frames **every** saved field, not just its
+/// nested components, under an explicit id:
+///
+/// ```text
+/// body      := version:u8 | count:u16 | field_tlv{count}
+/// field_tlv := id:u16 | len:u32 | payload
+/// ```
+///
+/// The reader dispatches on id rather than position, so declaration order stops
+/// being wire order and an id it does not recognise is skipped by length. The
+/// payload drops the redundant inner length that the positional encoding needs:
+/// `[u8; N]` and `Vec<u8>` write raw bytes, because `len` already is the length.
+///
+/// `count` is what makes the body **self-delimiting**, and it is not optional.
+/// A dispatch loop with no count runs to the end of whatever reader it is
+/// handed, which is its own bytes only when a parent framed it; the 49
+/// hand-written `Saveable` impls frame nothing, so a TLV struct inside one would
+/// read straight through its parent's remaining fields. The count means a struct
+/// can be opted in without auditing everyone who embeds it. (A child still
+/// cannot know its own *tag*, which is why parents keep doing the framing.)
+///
+/// The writer emits fields in ascending id order rather than declaration order,
+/// so the bytes are a function of the ids alone.
+///
+/// A TLV struct must carry `#[save_version(N)]`. The two mechanisms answer
+/// different questions and are both needed: TLV absorbs *additive* change
+/// (a field appears or disappears), the version byte catches *semantic* change
+/// (`u16` widening to `u32`, or an existing field being reinterpreted).
+///
+/// Structs without `#[save_tlv]` keep positional bodies, and the two
+/// interoperate in either direction: a TLV struct nested in a positional parent
+/// is framed by the parent's ordinal tag, and a positional struct nested in a
+/// TLV parent is framed by its `#[save(id = N)]`.
+///
+/// ## Field attributes under TLV
+///
+/// - `#[save(id = N)]` is required. Every saved field needs one; an id absent
+///   from the file fails the load naming the field.
+/// - `#[save(id = N, default)]` may be absent, in which case the field keeps
+///   the value it was constructed with. This is how a newly added field stays
+///   compatible with saves written before it existed. It is opt-in rather than
+///   the default because a silently absent field leaves a device at power-on
+///   while the rest of the machine is at frame N, which is the failure chunk
+///   framing exists to make loud.
+/// - `#[save_skip]` and its `(default)` / `(default = expr)` forms behave
+///   exactly as they do positionally.
+/// - `#[save_elements]` is rejected: `[u8; N]` is raw bytes under TLV, so it
+///   would have no effect.
+///
+/// ## Retiring an id
+///
+/// `#[save_retired(3, 7)]` at the struct level lists ids that once existed and
+/// must never be reused. The derive asserts no live field collides with one,
+/// so "never reuse a tag" is checked rather than left to reviewer discipline.
+/// Readers already skip an unknown id, so a retired one needs nothing at load
+/// time; the attribute exists purely for the assertion.
+///
+/// Ids are assigned by hand. Hashing field names was rejected: a rename would
+/// silently change the wire.
+#[proc_macro_derive(
+    Saveable,
+    attributes(save_version, save_skip, save_elements, save_tlv, save, save_retired)
+)]
 pub fn derive_saveable(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let struct_name = &input.ident;
@@ -807,52 +871,36 @@ pub fn derive_saveable(input: TokenStream) -> TokenStream {
 
     // Parse #[save_version(N)] from struct attributes
     let version = parse_save_version(&input.attrs);
+    let tlv = input.attrs.iter().any(|a| a.path().is_ident("save_tlv"));
+    let retired = parse_save_retired(&input.attrs);
+
+    if !tlv {
+        if !retired.is_empty() {
+            panic!("{struct_name}: #[save_retired] only means anything with #[save_tlv]");
+        }
+        if let Some(field) = fields.iter().find(|f| has_save_id_attr(&f.attrs)) {
+            let ident = field.ident.as_ref().expect("named field");
+            panic!(
+                "{struct_name}.{ident}: #[save(id = ...)] needs #[save_tlv] on the struct, \
+                 or the id would be silently ignored"
+            );
+        }
+    } else if version.is_none() {
+        panic!(
+            "{struct_name}: #[save_tlv] needs #[save_version(N)]. TLV absorbs additive change; \
+             the version byte is what catches a field changing meaning."
+        );
+    }
 
     let version_write = version.map(|v| quote! { w.write_version(#v); });
     let version_read = version.map(|v| quote! { r.read_version(#v)?; });
 
-    let mut save_stmts = Vec::new();
-    let mut load_stmts = Vec::new();
     let mut load_skip_stmts = Vec::new();
-    // Ordinal chunk tags, assigned to nested components in declaration order.
-    // Tag 0 is reserved, so the first component is 1.
-    let mut next_tag: u16 = 1;
 
     for field in fields {
         let ident = field.ident.as_ref().expect("named field");
-
-        let force_elements = has_save_elements(&field.attrs);
-
         match parse_save_skip(&field.attrs) {
-            SaveSkip::None => {
-                // Normal field: generate save + load code based on type
-                let (save, load) = gen_field_io(ident, &field.ty, force_elements);
-                let (save, load) = if delegates_to_saveable(&field.ty) {
-                    // Parents frame children: a nested component goes in a
-                    // chunk so a change to it cannot walk into its siblings.
-                    let tag = next_tag;
-                    next_tag = next_tag
-                        .checked_add(1)
-                        .filter(|t| *t != u16::MAX)
-                        .unwrap_or_else(|| {
-                            panic!("{struct_name} has too many nested components for u16 tags")
-                        });
-                    let path = format!("{struct_name}.{ident}");
-                    (
-                        quote! { w.write_tlv(#tag, |w| { #save }); },
-                        quote! {
-                            r.read_component(#tag, #path, |r| { #load Ok(()) })?;
-                        },
-                    )
-                } else {
-                    (save, load)
-                };
-                save_stmts.push(save);
-                load_stmts.push(load);
-            }
-            SaveSkip::Keep => {
-                // #[save_skip] — excluded, no code generated
-            }
+            SaveSkip::None | SaveSkip::Keep => {}
             SaveSkip::Default => {
                 // #[save_skip(default)] — set to Default::default() on load
                 load_skip_stmts.push(quote! { self.#ident = Default::default(); });
@@ -864,11 +912,17 @@ pub fn derive_saveable(input: TokenStream) -> TokenStream {
         }
     }
 
+    let (save_body, load_body) = if tlv {
+        gen_tlv_body(struct_name, fields, &retired)
+    } else {
+        gen_positional_body(struct_name, fields)
+    };
+
     let expanded = quote! {
         impl phosphor_core::prelude::Saveable for #struct_name {
             fn save_state(&self, w: &mut phosphor_core::prelude::StateWriter) {
                 #version_write
-                #(#save_stmts)*
+                #save_body
             }
 
             fn load_state(
@@ -876,7 +930,7 @@ pub fn derive_saveable(input: TokenStream) -> TokenStream {
                 r: &mut phosphor_core::prelude::StateReader,
             ) -> Result<(), phosphor_core::prelude::SaveError> {
                 #version_read
-                #(#load_stmts)*
+                #load_body
                 #(#load_skip_stmts)*
                 Ok(())
             }
@@ -884,6 +938,235 @@ pub fn derive_saveable(input: TokenStream) -> TokenStream {
     };
 
     TokenStream::from(expanded)
+}
+
+/// Positional body: fields in declaration order, nested components framed under
+/// an ordinal tag so a change to one cannot walk into its siblings.
+fn gen_positional_body(
+    struct_name: &syn::Ident,
+    fields: &syn::punctuated::Punctuated<syn::Field, syn::Token![,]>,
+) -> (TokenStream2, TokenStream2) {
+    let mut save_stmts = Vec::new();
+    let mut load_stmts = Vec::new();
+    // Tag 0 is reserved, so the first component is 1.
+    let mut next_tag: u16 = 1;
+
+    for field in fields {
+        if !matches!(parse_save_skip(&field.attrs), SaveSkip::None) {
+            continue;
+        }
+        let ident = field.ident.as_ref().expect("named field");
+        let force_elements = has_save_elements(&field.attrs);
+        let (save, load) = gen_field_io(ident, &field.ty, force_elements, Encoding::Positional);
+
+        if delegates_to_saveable(&field.ty) {
+            let tag = next_tag;
+            next_tag = next_tag
+                .checked_add(1)
+                .filter(|t| *t != u16::MAX)
+                .unwrap_or_else(|| {
+                    panic!("{struct_name} has too many nested components for u16 tags")
+                });
+            let path = format!("{struct_name}.{ident}");
+            save_stmts.push(quote! { w.write_tlv(#tag, |w| { #save }); });
+            load_stmts.push(quote! { r.read_component(#tag, #path, |r| { #load Ok(()) })?; });
+        } else {
+            save_stmts.push(save);
+            load_stmts.push(load);
+        }
+    }
+
+    (quote! { #(#save_stmts)* }, quote! { #(#load_stmts)* })
+}
+
+/// TLV body: every saved field framed under its explicit id, read back by
+/// dispatching on the id rather than on position.
+fn gen_tlv_body(
+    struct_name: &syn::Ident,
+    fields: &syn::punctuated::Punctuated<syn::Field, syn::Token![,]>,
+    retired: &[u16],
+) -> (TokenStream2, TokenStream2) {
+    // Save statements are kept with their ids and emitted in ascending id
+    // order, not declaration order. That makes the bytes a function of the ids
+    // alone, so reordering fields in the source is a no-op on the wire in both
+    // directions rather than only for the reader.
+    let mut save_stmts: Vec<(u16, TokenStream2)> = Vec::new();
+    let mut arms = Vec::new();
+    let mut seen_decls = Vec::new();
+    let mut missing_checks = Vec::new();
+    let mut assigned: Vec<(u16, String)> = Vec::new();
+    let struct_path = struct_name.to_string();
+
+    for field in fields {
+        if !matches!(parse_save_skip(&field.attrs), SaveSkip::None) {
+            continue;
+        }
+        let ident = field.ident.as_ref().expect("named field");
+        let path = format!("{struct_name}.{ident}");
+
+        if has_save_elements(&field.attrs) {
+            panic!(
+                "{path}: #[save_elements] has no meaning under #[save_tlv] \
+                 ([u8; N] is raw bytes there, since the field length is the length). Remove it."
+            );
+        }
+
+        let spec = parse_save_id(&field.attrs).unwrap_or_else(|| {
+            panic!("{path}: #[save_tlv] structs need #[save(id = N)] on every saved field")
+        });
+        let id = spec.id;
+        if id == 0 || id == u16::MAX {
+            panic!("{path}: id {id} is reserved");
+        }
+        if let Some((_, other)) = assigned.iter().find(|(other_id, _)| *other_id == id) {
+            panic!("{path}: id {id} is already used by {other}");
+        }
+        if retired.contains(&id) {
+            panic!("{path}: id {id} is listed in #[save_retired] and must never be reused");
+        }
+        assigned.push((id, path.clone()));
+
+        let (save, load) = gen_field_io(ident, &field.ty, false, Encoding::Tlv);
+        save_stmts.push((id, quote! { w.write_tlv(#id, |w| { #save }); }));
+
+        let seen = syn::Ident::new(&format!("__seen_{ident}"), ident.span());
+        seen_decls.push(quote! { let mut #seen = false; });
+        arms.push(quote! {
+            #id => {
+                if #seen {
+                    return Err(phosphor_core::prelude::SaveError::InvalidFormat(
+                        format!("field id {} ({}) appears twice", #id, #path)
+                    ));
+                }
+                #seen = true;
+                r.read_payload(__id, __len, __at, #path, |r| { #load Ok(()) })?;
+            }
+        });
+        if !spec.default_if_absent {
+            missing_checks.push(quote! {
+                if !#seen {
+                    return Err(phosphor_core::prelude::SaveError::InvalidFormat(
+                        format!(
+                            "required field {} (id {}) is absent; add `default` to its \
+                             #[save(id = ...)] if it is meant to be optional",
+                            #path, #id
+                        )
+                    ));
+                }
+            });
+        }
+    }
+
+    let load = quote! {
+        #(#seen_decls)*
+        // The count is what makes a TLV body self-delimiting. Without it the
+        // loop would run to the end of whatever reader it was handed, which is
+        // only its own bytes when a parent framed it, and 49 hand-written
+        // `Saveable` impls frame nothing.
+        let __count = r.read_u16_le()?;
+        for __i in 0..__count {
+            // Captured before the header is read, so the trace and any error
+            // point at the chunk header rather than past it.
+            let __at = r.offset();
+            let Some((__id, __len)) = r.read_tag_len()? else {
+                return Err(phosphor_core::prelude::SaveError::InvalidFormat(
+                    format!(
+                        "{} declares {} fields but ran out after {}",
+                        #struct_path, __count, __i
+                    )
+                ));
+            };
+            match __id {
+                #(#arms)*
+                // An id this build does not know: a field a newer build added,
+                // or one retired here. Skipping by length is what makes either
+                // harmless.
+                _ => r.skip_unknown(__id, __len, __at)?,
+            }
+        }
+        #(#missing_checks)*
+    };
+
+    save_stmts.sort_by_key(|(id, _)| *id);
+    let field_count = save_stmts.len() as u16;
+    let save_stmts = save_stmts.into_iter().map(|(_, stmt)| stmt);
+    let save = quote! {
+        w.write_u16_le(#field_count);
+        #(#save_stmts)*
+    };
+    (save, load)
+}
+
+/// `#[save(id = N)]` / `#[save(id = N, default)]` on a field.
+struct SaveIdSpec {
+    id: u16,
+    /// The field may be absent from the file, keeping its constructed value.
+    default_if_absent: bool,
+}
+
+impl syn::parse::Parse for SaveIdSpec {
+    fn parse(input: syn::parse::ParseStream) -> syn::Result<Self> {
+        let key: syn::Ident = input.parse()?;
+        if key != "id" {
+            return Err(syn::Error::new(
+                key.span(),
+                format!("unknown attribute `{key}`, expected `id`"),
+            ));
+        }
+        input.parse::<syn::Token![=]>()?;
+        let lit: syn::LitInt = input.parse()?;
+        let id = lit.base10_parse::<u16>()?;
+
+        let mut default_if_absent = false;
+        if input.peek(syn::Token![,]) {
+            input.parse::<syn::Token![,]>()?;
+            let flag: syn::Ident = input.parse()?;
+            if flag != "default" {
+                return Err(syn::Error::new(
+                    flag.span(),
+                    format!("unknown flag `{flag}`, expected `default`"),
+                ));
+            }
+            default_if_absent = true;
+        }
+        Ok(SaveIdSpec {
+            id,
+            default_if_absent,
+        })
+    }
+}
+
+fn has_save_id_attr(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().any(|a| a.path().is_ident("save"))
+}
+
+fn parse_save_id(attrs: &[syn::Attribute]) -> Option<SaveIdSpec> {
+    attrs.iter().find(|a| a.path().is_ident("save")).map(|a| {
+        a.parse_args()
+            .expect("#[save] expects (id = N) or (id = N, default)")
+    })
+}
+
+/// Extract `#[save_retired(3, 7)]` from struct-level attributes.
+fn parse_save_retired(attrs: &[syn::Attribute]) -> Vec<u16> {
+    let mut out = Vec::new();
+    for attr in attrs {
+        if !attr.path().is_ident("save_retired") {
+            continue;
+        }
+        let ids = attr
+            .parse_args_with(
+                syn::punctuated::Punctuated::<syn::LitInt, syn::Token![,]>::parse_terminated,
+            )
+            .expect("#[save_retired] expects a comma-separated list of integers");
+        for lit in ids {
+            out.push(
+                lit.base10_parse::<u16>()
+                    .expect("#[save_retired] values must be u16"),
+            );
+        }
+    }
+    out
 }
 
 /// Extract `#[save_version(N)]` from struct-level attributes.
@@ -1002,15 +1285,27 @@ fn delegates_to_saveable(ty: &Type) -> bool {
     }
 }
 
+/// How a field's payload is encoded, which differs only for bulk bytes.
+#[derive(Clone, Copy, PartialEq)]
+enum Encoding {
+    /// Positional body: a byte blob carries its own `u32` length, because
+    /// nothing else in the stream says where it ends.
+    Positional,
+    /// TLV body: a byte blob is written raw, because the field's own `len`
+    /// already is the length and repeating it would be redundant.
+    Tlv,
+}
+
 /// Generate save and load token streams for a single field based on its type.
 fn gen_field_io(
     ident: &syn::Ident,
     ty: &Type,
     force_elements: bool,
+    enc: Encoding,
 ) -> (TokenStream2, TokenStream2) {
     match ty {
         // Fixed-size array: [T; N]
-        Type::Array(arr) => gen_array_io(ident, &arr.elem, force_elements),
+        Type::Array(arr) => gen_array_io(ident, &arr.elem, force_elements, enc),
         // Path types: primitives, Vec<u8>, or Saveable delegates
         Type::Path(path) => {
             let seg = path.path.segments.last().expect("non-empty path");
@@ -1058,16 +1353,21 @@ fn gen_field_io(
                 ),
                 "Vec" => {
                     // Verify it's Vec<u8>
-                    if is_vec_u8(seg) {
-                        (
-                            quote! { w.write_bytes(&self.#ident); },
-                            quote! { self.#ident = r.read_bytes()?.to_vec(); },
-                        )
-                    } else {
+                    if !is_vec_u8(seg) {
                         panic!(
                             "Saveable derive only supports Vec<u8>; field `{}` has unsupported Vec type",
                             ident
                         );
+                    }
+                    match enc {
+                        Encoding::Positional => (
+                            quote! { w.write_bytes(&self.#ident); },
+                            quote! { self.#ident = r.read_bytes()?.to_vec(); },
+                        ),
+                        Encoding::Tlv => (
+                            quote! { w.write_raw(&self.#ident); },
+                            quote! { self.#ident = r.read_rest().to_vec(); },
+                        ),
                     }
                 }
                 // Unknown type — delegate to Saveable
@@ -1096,13 +1396,20 @@ fn gen_array_io(
     ident: &syn::Ident,
     elem_ty: &Type,
     force_elements: bool,
+    enc: Encoding,
 ) -> (TokenStream2, TokenStream2) {
     // Check if element is u8 — use bulk bytes path (unless force_elements)
     if is_type_u8(elem_ty) && !force_elements {
-        return (
-            quote! { w.write_bytes(&self.#ident); },
-            quote! { r.read_bytes_into(&mut self.#ident)?; },
-        );
+        return match enc {
+            Encoding::Positional => (
+                quote! { w.write_bytes(&self.#ident); },
+                quote! { r.read_bytes_into(&mut self.#ident)?; },
+            ),
+            Encoding::Tlv => (
+                quote! { w.write_raw(&self.#ident); },
+                quote! { r.read_raw_into(&mut self.#ident)?; },
+            ),
+        };
     }
 
     // For other element types, generate a loop

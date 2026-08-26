@@ -15,29 +15,46 @@
 //! chunk     := tag:u16 | len:u32 | payload:len bytes
 //! ```
 //!
-//! A component payload is `component_version:u8 | fields`, where the fields are
-//! written in declaration order. Scalars are inline; every *nested component* is
-//! wrapped in a chunk by its parent.
+//! A component payload is `component_version:u8 | fields`. There are two ways a
+//! body lays its fields out, and they interoperate in both directions.
 //!
-//! Two rules make that work:
+//! **Positional**, the default: fields in declaration order, scalars inline, and
+//! every *nested component* wrapped in a chunk by its parent. Chunk tags are
+//! ordinals in declaration order, so field order is still wire order. Inserting
+//! or removing a component changes the chunk count and is always caught;
+//! *reordering* renumbers both components and is caught only where their bodies
+//! differ. Reordering is a wire change: bump the parent's `#[save_version]`.
+//!
+//! **Field TLV**, opted into per struct with `#[save_tlv]`: every field framed
+//! under an explicit `#[save(id = N)]`, read back by dispatching on the id.
+//!
+//! ```text
+//! tlv_body  := component_version:u8 | count:u16 | field_tlv{count}
+//! field_tlv := id:u16 | len:u32 | payload
+//! ```
+//!
+//! Declaration order stops mattering, an unrecognised id is skipped by length,
+//! and a field marked `#[save(id = N, default)]` may be absent. `count` makes a
+//! TLV body self-delimiting so it is correct even in a parent that frames
+//! nothing, which the 49 hand-written `Saveable` impls do not.
+//!
+//! Three rules make all of it work:
 //!
 //! * **Parents frame children; children never frame themselves.** A struct
 //!   cannot know the tag its parent filed it under, so [`Saveable::save_state`]
 //!   and [`Saveable::load_state`] write and read a *payload*, never a frame.
 //!   [`StateWriter::write_tlv`] and [`StateReader::read_component`] own all
-//!   framing.
+//!   framing. (A TLV body's `count` is not an exception: a child always knows
+//!   how many fields it has, just not what it is called.)
 //! * **Readers are bounded to their chunk.** [`StateReader::sub`] hands a child
 //!   an independent reader over exactly its own bytes, and the parent's cursor
 //!   advances past them however much the child consumes. A child that misreads
 //!   its own body therefore cannot walk into its parent's next field, and an
 //!   unknown chunk can be skipped by length.
-//!
-//! Chunk tags are ordinals assigned by the parent in declaration order, so field
-//! order is still wire order. Inserting or removing a component changes the
-//! chunk count and is always caught; *reordering* renumbers both components and
-//! is caught only where their bodies differ. Reordering is a wire change: bump
-//! the parent's `#[save_version]` when you do it. Explicit stable ids are
-//! Stage B (`phosphor-emulator-tlv-save-state-hc61.3`).
+//! * **A version byte and framing answer different questions.** Framing absorbs
+//!   *additive* change; the version byte catches *semantic* change, such as a
+//!   `u16` widening to a `u32` or an existing field being reinterpreted. Both
+//!   are needed, so every component keeps both.
 
 /// Errors that can occur during save-state operations.
 #[derive(Debug)]
@@ -217,6 +234,14 @@ impl StateWriter {
     /// Write a length-prefixed byte slice (u32 LE length + data).
     pub fn write_bytes(&mut self, bytes: &[u8]) {
         self.write_u32_le(bytes.len() as u32);
+        self.data.extend_from_slice(bytes);
+    }
+
+    /// Write bytes with no length prefix.
+    ///
+    /// For a field inside a TLV body, whose `field_len` already is the length,
+    /// so [`Self::write_bytes`]'s `u32` prefix would just repeat it.
+    pub fn write_raw(&mut self, bytes: &[u8]) {
         self.data.extend_from_slice(bytes);
     }
 
@@ -416,6 +441,26 @@ impl<'a> StateReader<'a> {
         self.take(len)
     }
 
+    /// Fill `buf` from bytes carrying no length prefix.
+    ///
+    /// The counterpart of [`StateWriter::write_raw`], for a TLV field. A file
+    /// whose array is a different size fails here or leaves bytes unread, both
+    /// of which the caller reports against the field.
+    pub fn read_raw_into(&mut self, buf: &mut [u8]) -> Result<(), SaveError> {
+        let slice = self.take(buf.len())?;
+        buf.copy_from_slice(slice);
+        Ok(())
+    }
+
+    /// Take everything left in this reader.
+    ///
+    /// For a `Vec<u8>` in a TLV field, where the field length is the length.
+    pub fn read_rest(&mut self) -> &'a [u8] {
+        let n = self.remaining();
+        self.take(n)
+            .expect("remaining() bytes are always available")
+    }
+
     /// Read and validate a component version tag. Returns an error if the
     /// version does not match `expected`.
     pub fn read_version(&mut self, expected: u8) -> Result<(), SaveError> {
@@ -515,6 +560,29 @@ impl<'a> StateReader<'a> {
             ))
             .in_component(name));
         }
+        self.read_payload(tag, len, at, name, f)
+    }
+
+    /// Consume the payload of a chunk whose header has already been read.
+    ///
+    /// Split out of [`Self::read_component`] for the field-TLV dispatch loop,
+    /// which has to read the header first in order to know which field it is
+    /// looking at. `at` is the offset the header started, for the trace.
+    ///
+    /// `f` must consume the whole payload; bytes left over mean the reader and
+    /// the writer disagree about the body, which is reported against `name`
+    /// rather than allowed to surface as a wrong value somewhere downstream.
+    pub fn read_payload<F>(
+        &mut self,
+        tag: u16,
+        len: u32,
+        at: usize,
+        name: &str,
+        f: F,
+    ) -> Result<(), SaveError>
+    where
+        F: FnOnce(&mut StateReader<'a>) -> Result<(), SaveError>,
+    {
         self.enter_trace(tag, name, at, len);
         let mut child = self.sub(len)?;
         let result = f(&mut child);
@@ -528,6 +596,15 @@ impl<'a> StateReader<'a> {
             .in_component(name));
         }
         Ok(())
+    }
+
+    /// Skip a chunk this build does not know about, by its length.
+    ///
+    /// This is what makes a field added by a newer build harmless to an older
+    /// reader, and it is why the length is in the wire format at all.
+    pub fn skip_unknown(&mut self, tag: u16, len: u32, at: usize) -> Result<(), SaveError> {
+        self.record_skipped(tag, "<unknown>", at, len);
+        self.skip(len)
     }
 
     /// Read a chunk that this hardware configuration may or may not have.
