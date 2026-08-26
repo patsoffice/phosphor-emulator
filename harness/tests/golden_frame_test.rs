@@ -35,6 +35,8 @@
 //! machine is pinned, that every pin describes itself, and that every reference
 //! PNG matches its hash.
 
+mod common;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -600,12 +602,25 @@ fn every_pinned_machine_still_draws_its_frame() {
     let mut changed = Vec::new();
     let mut failures = String::new();
 
-    for entry in &mut entries {
-        if only.as_deref().is_some_and(|m| m != entry.machine) {
-            continue;
-        }
+    // Booting a machine and running it to its pinned frame is pure CPU and
+    // touches nothing another machine can see, so the captures run on every
+    // core. Judging them stays sequential: it writes back into `entries` in
+    // update mode and appends to the failure list, and it costs nothing.
+    let selected: Vec<usize> = entries
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| only.as_deref().is_none_or(|m| m == e.machine))
+        .map(|(i, _)| i)
+        .collect();
+    let caps: Vec<Option<Capture>> = {
+        let pending: Vec<&Entry> = selected.iter().map(|&i| &entries[i]).collect();
+        common::map_parallel(&pending, |entry| capture(&dir, entry))
+    };
+
+    for (&index, cap) in selected.iter().zip(caps) {
+        let entry = &mut entries[index];
         let name = entry.machine.clone();
-        let Some(cap) = capture(&dir, entry) else {
+        let Some(cap) = cap else {
             skipped.push(name);
             continue;
         };

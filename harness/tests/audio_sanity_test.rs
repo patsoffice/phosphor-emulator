@@ -56,8 +56,11 @@
 //! a `reason`, which keeps the exceptions a reviewed claim about hardware
 //! rather than a skip list that grows in silence.
 
+mod common;
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use phosphor_core::audio::analysis::{Integrity, pcm_to_f64};
 use phosphor_harness::{Harness, load_rom_set, roms_dir};
@@ -448,7 +451,18 @@ struct Sweep {
 
 /// Measure every machine once, then judge. Split from the assertions so both
 /// directions of the ratchet read from one sweep.
-fn sweep(dir: &Path) -> Sweep {
+///
+/// **Once per process, not once per test.** Both ratchet tests call this, and
+/// libtest runs them on separate threads, so a plain function meant the whole
+/// roster was emulated twice over concurrently: the split above bought the
+/// shared judgement it describes but not the shared work. Whichever test gets
+/// here first does the sweep and the other waits on it.
+fn sweep(dir: &Path) -> &'static Sweep {
+    static SWEEP: OnceLock<Sweep> = OnceLock::new();
+    SWEEP.get_or_init(|| sweep_uncached(dir))
+}
+
+fn sweep_uncached(dir: &Path) -> Sweep {
     let e = load_expectations();
     let mut found: BTreeMap<String, Vec<Defect>> = BTreeMap::new();
     let mut measured: BTreeMap<String, Integrity> = BTreeMap::new();
@@ -456,14 +470,20 @@ fn sweep(dir: &Path) -> Sweep {
     let mut checked = 0usize;
     let mut skipped = Vec::new();
 
-    for entry in registry::all() {
-        let Some((integrity, fixture)) = measure(dir, entry.name) else {
-            skipped.push(entry.name);
+    // One machine's measurement cannot see another's, so they run on every
+    // core. Judging stays sequential and in registry order, which is what keeps
+    // the reported defect list stable between runs.
+    let machines: Vec<&'static str> = registry::all().iter().map(|m| m.name).collect();
+    let results = common::map_parallel(&machines, |name| measure(dir, name));
+
+    for (entry, result) in machines.iter().zip(results) {
+        let Some((integrity, fixture)) = result else {
+            skipped.push(*entry);
             continue;
         };
         checked += 1;
-        fixtures.insert(entry.name.to_string(), fixture);
-        measured.insert(entry.name.to_string(), integrity);
+        fixtures.insert(entry.to_string(), fixture);
+        measured.insert(entry.to_string(), integrity);
         let mut defects = Vec::new();
 
         if integrity.dc_offset.abs() > e.defaults.max_dc_offset {
@@ -481,7 +501,7 @@ fn sweep(dir: &Path) -> Sweep {
             defects.push(Defect::Silence);
         }
         if !defects.is_empty() {
-            found.insert(entry.name.to_string(), defects);
+            found.insert(entry.to_string(), defects);
         }
     }
     Sweep {
@@ -562,7 +582,7 @@ fn no_machine_emits_newly_defective_audio() {
     let e = load_expectations();
     let s = sweep(&dir);
     if std::env::var("PHOSPHOR_AUDIO_REPORT").is_ok() {
-        report(&s, &e);
+        report(s, &e);
     }
     let Sweep {
         found,
@@ -570,6 +590,7 @@ fn no_machine_emits_newly_defective_audio() {
         skipped,
         ..
     } = s;
+    let checked = *checked;
 
     if !skipped.is_empty() {
         eprintln!(
@@ -584,7 +605,7 @@ fn no_machine_emits_newly_defective_audio() {
     );
 
     let mut unexpected: Vec<String> = Vec::new();
-    for (machine, defects) in &found {
+    for (machine, defects) in found {
         let allowed_silent = e.correct.get(machine).is_some_and(|c| c.silent);
         let known: &[Defect] = e
             .known_defects

@@ -258,7 +258,16 @@ cargo test -p phosphor-harness --test golden_frame_test -- --ignored
 
 # Recapture after an intended rendering change, then review the image diff
 PHOSPHOR_GOLDEN_UPDATE=1 cargo test -p phosphor-harness --test golden_frame_test -- --ignored
+
+# One machine at a time, for bisecting or a single refresh
+PHOSPHOR_GOLDEN_ONLY=galaga cargo test -p phosphor-harness --test golden_frame_test -- --ignored
 ```
+
+The machines are emulated on every core: one board's frame cannot affect
+another's, so the sweep fans out and the results are put back in registry order.
+`PHOSPHOR_TEST_THREADS=1` forces it sequential again, which is the first thing to
+try if a suite ever disagrees with itself between runs. The same applies to
+`audio_sanity_test`.
 
 Catches the class the boot check cannot: a swapped palette entry, a sprite
 drawn one line high, a scroll latch read from the wrong register. On a mismatch

@@ -145,6 +145,8 @@ Some tests iterate `registry::all()`, so a newly registered machine is covered w
 - `machines/tests/save_state_tests.rs` — save/load round trip, ROM-less
 - `harness/tests/boot_check_test.rs`, `harness/tests/save_state_rom_test.rs` — the same ground on machines booted from real ROMs. ROM-gated: they skip without `PHOSPHOR_ROMS` (or `~/ws/mame-runtime/roms`), and skip per machine for a ROM set the collection can't supply. Run them after any change that could affect boot; CI cannot.
 
+The registry sweeps in `golden_frame_test` and `audio_sanity_test` run one machine per core via `harness/tests/common/map_parallel`, which returns results in registry order so failure lists stay diffable between runs. `PHOSPHOR_TEST_THREADS=1` forces either back to sequential for bisecting. When adding a suite that sweeps the registry, reach for that helper rather than a bare `for` loop.
+
 #### Golden frames
 
 `harness/tests/golden_frame_test.rs` pins what each machine *draws*: a SHA-256 of the oriented RGB frame at a fixed frame count (plus the vector display list for the vector games), with the pins committed as data in `harness/tests/golden/frames.toml` and a reference PNG per machine beside them.
