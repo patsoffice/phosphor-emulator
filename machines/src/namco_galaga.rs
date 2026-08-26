@@ -14,7 +14,7 @@ use phosphor_core::device::namco51::Namco51;
 use phosphor_core::device::namco51_lle::Namco51Lle;
 use phosphor_core::device::namco53::Namco53;
 use phosphor_core::gfx::decode::GfxLayout;
-use phosphor_macros::MemoryRegion;
+use phosphor_macros::{MemoryRegion, Saveable};
 
 // ---------------------------------------------------------------------------
 // Memory map region IDs
@@ -331,9 +331,15 @@ impl Debuggable for Namco51Wrapper {
 /// They live outside [`NamcoGalagaBoard`] — and outside the game wrapper's bus
 /// state — so `cpu.execute_cycle(&mut bus, ..)` is a pair of disjoint field
 /// borrows and dispatches at a concrete bus type.
+#[derive(Saveable)]
+#[save_version(1)]
+#[save_tlv]
 pub struct GalagaCpus {
+    #[save(id = 1)]
     pub main: Z80,
+    #[save(id = 2)]
     pub sub: Z80,
+    #[save(id = 3)]
     pub sound: Z80,
 }
 
@@ -367,21 +373,6 @@ impl GalagaCpus {
             mask |= 4;
         }
         mask
-    }
-}
-
-impl Saveable for GalagaCpus {
-    fn save_state(&self, w: &mut StateWriter) {
-        self.main.save_state(w);
-        self.sub.save_state(w);
-        self.sound.save_state(w);
-    }
-
-    fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
-        self.main.load_state(r)?;
-        self.sub.load_state(r)?;
-        self.sound.load_state(r)?;
-        Ok(())
     }
 }
 

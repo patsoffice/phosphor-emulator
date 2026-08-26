@@ -29,9 +29,9 @@
 //!     jointly so the brightest network reaches `RGB_MAXIMUM` (224), leaving
 //!     headroom for the brighter star and bullet colors.
 
-use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::gfx;
 use phosphor_core::gfx::decode::{GfxCache, GfxLayout, decode_gfx};
+use phosphor_macros::Saveable;
 
 // ---------------------------------------------------------------------------
 // Geometry
@@ -92,44 +92,66 @@ pub enum GfxBankMode {
 
 /// Galaxian-family video engine: decoded GFX, PROM palettes, starfield, and a
 /// native-orientation scanline framebuffer.
+#[derive(Saveable)]
+#[save_version(1)]
+#[save_tlv]
 pub struct GalaxianVideo {
     // Pre-decoded GFX (chars and sprites share the same GFX ROM; sprites are
     // 2×2 groups of chars decoded as 16×16 elements). Sized from the ROM:
     // 256/64 for a 4 KB ROM, 512/128 for an 8 KB banked ROM.
+    #[save_skip]
     tile_cache: GfxCache,
+    #[save_skip]
     sprite_cache: GfxCache,
 
-    // GFX bank-switching scheme and the 74LS259 latch bits that drive it.
+    // GFX bank-switching scheme and the 74LS259 latch bits that drive it. The
+    // scheme is how the board is wired; the latch bits are what it currently
+    // holds.
+    #[save_skip]
     gfx_mode: GfxBankMode,
+    #[save(id = 5)]
     gfxbank: [u8; 3],
 
-    // PROM + derived colors.
+    // PROM + derived colors: loaded from ROM and computed once.
+    #[save_skip]
     palette_prom: [u8; 32],
+    #[save_skip]
     palette_rgb: [(u8, u8, u8); 32], // 8 colors × 4 pens
+    #[save_skip]
     star_color: [(u8, u8, u8); 64],
+    #[save_skip]
     bullet_color: [(u8, u8, u8); 8],
 
     // Precomputed starfield LFSR table (one byte per clock: bit 7 = enable,
     // bits 0..5 = color index). Derived from ROM-independent hardware logic, so
     // it is rebuilt on construction and never saved.
+    #[save_skip]
     stars: Vec<u8>,
+    #[save(id = 1)]
     star_rng_origin: u32,
 
     // Latch outputs that affect rendering (driven by the board).
+    #[save(id = 2)]
     stars_enabled: bool,
+    #[save(id = 3)]
     flip_x: bool,
+    #[save(id = 4)]
     flip_y: bool,
 
     // Scramble video extras (layered on the shared engine): a blue background
     // fill and the blinking-star variant — a non-scrolling, color-masked
     // starfield whose mask cycles through `stars_blink`.
+    #[save_skip]
     scramble_stars: bool,
+    #[save(id = 6)]
     background_enable: bool,
+    #[save(id = 7)]
     stars_blink: u8,
 
     // Scramble-style shells: a shorter 2-pixel, all-yellow bullet (MAME
     // `scramble_draw_bullet`) instead of Galaxian's 4-pixel white shell +
     // yellow missile (`galaxian_draw_bullet`).
+    #[save_skip]
     scramble_bullets: bool,
 
     // Frogger video extras (static config, set once by the board): a half-screen
@@ -137,9 +159,11 @@ pub struct GalaxianVideo {
     // the "frogger adjust" nibble swap applied to the column-scroll and sprite-Y
     // bytes entering the adder (MAME `m_frogger_adjust`). Frogger draws no
     // bullets, so the bullet pass is suppressed when this is set.
+    #[save_skip]
     frogger: bool,
 
     // Native-orientation RGB24 framebuffer (256 × 224), filled per scanline.
+    #[save_skip]
     scanline_buffer: Vec<u8>,
 }
 
@@ -759,29 +783,6 @@ impl GalaxianVideo {
 // Save state — only the dynamic latch/scroll state; caches are ROM-derived.
 // ---------------------------------------------------------------------------
 
-impl Saveable for GalaxianVideo {
-    fn save_state(&self, w: &mut StateWriter) {
-        w.write_u32_le(self.star_rng_origin);
-        w.write_bool(self.stars_enabled);
-        w.write_bool(self.flip_x);
-        w.write_bool(self.flip_y);
-        w.write_bytes(&self.gfxbank);
-        w.write_bool(self.background_enable);
-        w.write_u8(self.stars_blink);
-    }
-
-    fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
-        self.star_rng_origin = r.read_u32_le()?;
-        self.stars_enabled = r.read_bool()?;
-        self.flip_x = r.read_bool()?;
-        self.flip_y = r.read_bool()?;
-        r.read_bytes_into(&mut self.gfxbank)?;
-        self.background_enable = r.read_bool()?;
-        self.stars_blink = r.read_u8()?;
-        Ok(())
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -789,7 +790,7 @@ impl Saveable for GalaxianVideo {
 #[cfg(test)]
 mod tests {
     use super::*;
-
+    use phosphor_core::core::save_state::Saveable as _;
     #[test]
     fn gfx_rom_size_selects_tile_and_sprite_count() {
         // A 4 KB ROM → 256 tiles / 64 sprites; an 8 KB banked ROM → 512 / 128.

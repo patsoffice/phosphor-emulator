@@ -18,7 +18,7 @@ use phosphor_core::core::machine::{
     AnalogAxisKind, DefaultBinding, Direction, InputConfigurable, InputControl, InputEvent,
     InputId, InputKind, MachineCore, MouseControl, Nvram, Profilable, SaveState,
 };
-use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
+
 use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
 use phosphor_core::cpu::state::M68000State;
@@ -509,26 +509,37 @@ const ROADRUNNER_CONTROLS: &[InputControl] = &[
 
 /// Atari Road Runner (System 1). Slapstic 108, speech-equipped sound board,
 /// Hall-effect analog joystick on an ADC0809 (IRQ2).
-#[derive(phosphor_macros::BusDebug)]
+#[derive(phosphor_macros::BusDebug, phosphor_macros::Saveable)]
+#[save_version(1)]
+#[save_tlv]
 pub struct RoadRunnerSystem {
     /// The 68010 is held beside the bus view over the board.
     #[debug_cpu("M68010")]
+    #[save(id = 1)]
     pub cpu: M68000,
 
     #[debug_bus]
+    #[save(id = 2)]
     pub board: AtariSystem1Board,
 
     /// The joystick ADC (channels 6 = Y, 7 = X, X reversed like the cabinet).
+    #[save(id = 3)]
     adc: Adc0809,
     /// Joystick-interrupt enable (the ADC address A4 bit): true once the game
     /// arms IRQ2 by starting a conversion with A4 low.
+    #[save(id = 4)]
     adc_irq_enabled: bool,
     /// Main-CPU clock at the last conversion start; end-of-conversion (and thus
     /// IRQ2) is asserted `ADC_CONVERSION_CYCLES` later.
+    #[save(id = 5)]
     adc_start_clock: u64,
 
     /// Self-centering analog stick [x, y] fed to the ADC channels: held
     /// direction keys deflect fully, mouse motion nudges within the range.
+    ///
+    /// Where the player is holding the stick *now*, not machine state, so a
+    /// load leaves it wherever the hands are.
+    #[save_skip]
     stick: [AnalogAxis; 2],
 }
 
@@ -835,26 +846,6 @@ impl InputConfigurable for RoadRunnerSystem {
 
 impl SaveState for RoadRunnerSystem {
     crate::machine_save_state!();
-}
-
-impl Saveable for RoadRunnerSystem {
-    fn save_state(&self, w: &mut StateWriter) {
-        // The CPU first, which is where the board wrote it when it owned it.
-        self.cpu.save_state(w);
-        self.board.save_state(w);
-        self.adc.save_state(w);
-        w.write_bool(self.adc_irq_enabled);
-        w.write_u64_le(self.adc_start_clock);
-    }
-
-    fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
-        self.cpu.load_state(r)?;
-        self.board.load_state(r)?;
-        self.adc.load_state(r)?;
-        self.adc_irq_enabled = r.read_bool()?;
-        self.adc_start_clock = r.read_u64_le()?;
-        Ok(())
-    }
 }
 
 // The 2804 EEPROM is the machine's battery-backed store.

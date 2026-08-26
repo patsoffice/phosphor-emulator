@@ -47,7 +47,7 @@ use phosphor_core::cpu::z80::Z80;
 use phosphor_core::device::sn76489::Sn76489a;
 use phosphor_core::gfx;
 use phosphor_core::gfx::decode::{GfxLayout, decode_gfx};
-use phosphor_macros::{BusDebug, MemoryRegion};
+use phosphor_macros::{BusDebug, MemoryRegion, Saveable};
 
 use crate::disasm_registry::{DisasmCpu, DisasmRegion};
 use crate::gfx_registry::GfxRegion;
@@ -1396,16 +1396,21 @@ impl Saveable for DocastleBoard {
 
 /// One of the three Mr. Do's Castle family games, selected by
 /// [`DocastleVariant`].
-#[derive(BusDebug)]
+#[derive(BusDebug, Saveable)]
+#[save_version(1)]
+#[save_tlv]
 pub struct DocastleSystem {
     /// The CPUs are held beside the board, which is their bus: the board is
     /// already variant-parameterised, so nothing is interposed.
     #[debug_cpu("Z80 Main")]
+    #[save(id = 1)]
     pub main_cpu: Z80,
     #[debug_cpu("Z80 Sub")]
+    #[save(id = 2)]
     pub sub_cpu: Z80,
 
     #[debug_bus]
+    #[save(id = 3)]
     pub board: DocastleBoard,
 }
 
@@ -1475,20 +1480,6 @@ impl DocastleSystem {
         self.board.decode_gfx_roms();
         self.board.build_palette();
         Ok(())
-    }
-}
-
-impl Saveable for DocastleSystem {
-    fn save_state(&self, w: &mut StateWriter) {
-        // CPUs first, matching the layout the board used to write.
-        self.main_cpu.save_state(w);
-        self.sub_cpu.save_state(w);
-        self.board.save_state(w);
-    }
-    fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
-        self.main_cpu.load_state(r)?;
-        self.sub_cpu.load_state(r)?;
-        self.board.load_state(r)
     }
 }
 

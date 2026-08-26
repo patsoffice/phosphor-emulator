@@ -11,7 +11,7 @@
 //!
 //! Reference: MAME `src/devices/machine/z80dma.cpp`, Zilog Z80 DMA datasheet.
 
-use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
+use phosphor_macros::Saveable;
 
 /// A resolved memory-to-memory block transfer, produced by
 /// [`Z80Dma::take_transfer`] once the chip is loaded, enabled and ready.
@@ -49,31 +49,52 @@ const CMD_ENABLE_DMA: u8 = 0x87;
 const CMD_FORCE_READY: u8 = 0xb3;
 
 /// Minimal Z80 DMA controller (memory-to-memory only).
+#[derive(Saveable)]
+#[save_version(1)]
+#[save_tlv]
 pub struct Z80Dma {
     /// Base registers WR0..=WR6.
+    #[save(id = 1)]
     wr: [u8; 7],
 
     // Programmable "follow" registers we actually use.
+    #[save(id = 2)]
     porta_l: u8,
+    #[save(id = 3)]
     porta_h: u8,
+    #[save(id = 4)]
     portb_l: u8,
+    #[save(id = 5)]
     portb_h: u8,
+    #[save(id = 6)]
     blocklen_l: u8,
+    #[save(id = 7)]
     blocklen_h: u8,
 
-    // Follow-byte routing state machine.
+    // Follow-byte routing state machine: transient mid-program state, so a load
+    // lands between byte sequences rather than part way through one.
+    #[save_skip]
     follow: [Follow; 6],
+    #[save_skip(default)]
     num_follow: u8,
+    #[save_skip(default)]
     cur_follow: u8,
 
     // Transfer state latched by COMMAND_LOAD / COMMAND_CONTINUE.
+    #[save(id = 8)]
     address_a: u16,
+    #[save(id = 9)]
     address_b: u16,
+    #[save(id = 10)]
     count: u16,
+    #[save(id = 11)]
     armed: bool,
 
+    #[save(id = 12)]
     enabled: bool,
+    #[save(id = 13)]
     force_ready: bool,
+    #[save(id = 14)]
     rdy_line: bool,
 }
 
@@ -292,52 +313,10 @@ impl Z80Dma {
     }
 }
 
-impl Saveable for Z80Dma {
-    fn save_state(&self, w: &mut StateWriter) {
-        w.write_bytes(&self.wr);
-        w.write_u8(self.porta_l);
-        w.write_u8(self.porta_h);
-        w.write_u8(self.portb_l);
-        w.write_u8(self.portb_h);
-        w.write_u8(self.blocklen_l);
-        w.write_u8(self.blocklen_h);
-        w.write_u16_le(self.address_a);
-        w.write_u16_le(self.address_b);
-        w.write_u16_le(self.count);
-        w.write_bool(self.armed);
-        w.write_bool(self.enabled);
-        w.write_bool(self.force_ready);
-        w.write_bool(self.rdy_line);
-        // Follow-byte routing is transient mid-program state; not persisted.
-    }
-
-    fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
-        let mut wr = [0u8; 7];
-        r.read_bytes_into(&mut wr)?;
-        self.wr = wr;
-        self.porta_l = r.read_u8()?;
-        self.porta_h = r.read_u8()?;
-        self.portb_l = r.read_u8()?;
-        self.portb_h = r.read_u8()?;
-        self.blocklen_l = r.read_u8()?;
-        self.blocklen_h = r.read_u8()?;
-        self.address_a = r.read_u16_le()?;
-        self.address_b = r.read_u16_le()?;
-        self.count = r.read_u16_le()?;
-        self.armed = r.read_bool()?;
-        self.enabled = r.read_bool()?;
-        self.force_ready = r.read_bool()?;
-        self.rdy_line = r.read_bool()?;
-        self.num_follow = 0;
-        self.cur_follow = 0;
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
+    use phosphor_core::core::save_state::{Saveable as _, StateReader, StateWriter};
     /// Program a memory-to-memory transfer: port A (source) 0x6900 incrementing,
     /// port B (dest) 0x7000 incrementing, length 4 bytes (block-len reg = 3),
     /// active-high ready, then LOAD + ENABLE.

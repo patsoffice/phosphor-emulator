@@ -11,7 +11,7 @@ use phosphor_core::core::machine::{
     DipApplyTiming, DipChoice, DipOption, DipSwitchBank, DipSwitches, InputConfigurable,
     InputControl, InputEvent, MachineCore, Nvram, Profilable, SaveState,
 };
-use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
+
 use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
 
@@ -429,14 +429,20 @@ static UNIWARS: PiscesGame = PiscesGame {
 // ---------------------------------------------------------------------------
 
 /// A Pisces-family game (Pisces or UniWar S) on the Galaxian board.
-#[derive(phosphor_macros::BusDebug)]
+#[derive(phosphor_macros::BusDebug, phosphor_macros::Saveable)]
+#[save_version(1)]
+#[save_tlv]
 pub struct PiscesSystem {
     /// The Z80 is held beside the bus view over the board.
     #[debug_cpu("Z80")]
+    #[save(id = 1)]
     pub cpu: phosphor_core::cpu::z80::Z80,
 
     #[debug_bus]
+    #[save(id = 2)]
     pub board: GalaxianBoard,
+    /// Which game this is, fixed at construction.
+    #[save_skip]
     cfg: &'static PiscesGame,
 }
 
@@ -593,18 +599,6 @@ impl MachineCore for PiscesSystem {
     }
 }
 
-impl Saveable for PiscesSystem {
-    fn save_state(&self, w: &mut StateWriter) {
-        // The CPU first, which is where the board wrote it when it owned it.
-        self.cpu.save_state(w);
-        self.board.save_state(w);
-    }
-    fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
-        self.cpu.load_state(r)?;
-        self.board.load_state(r)
-    }
-}
-
 impl SaveState for PiscesSystem {
     crate::machine_save_state!();
 }
@@ -669,7 +663,7 @@ crate::register_machine!(
 #[cfg(test)]
 mod tests {
     use super::*;
-
+    use phosphor_core::core::save_state::{Saveable, StateReader, StateWriter};
     #[test]
     fn machine_ids() {
         assert_eq!(PiscesSystem::new(&PISCES).machine_id(), "pisces");
