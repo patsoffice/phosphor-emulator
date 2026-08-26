@@ -898,7 +898,28 @@ impl MovieRecorder {
     }
 
     /// Finish the recording into a [`Movie`] ready to encode.
+    ///
+    /// The declared span has to cover every record, because [`Movie::decode`]
+    /// rejects a record at or past it. `self.frame` counts *completed* frames,
+    /// and an event is filed against the frame in progress, so stopping between
+    /// an input and the [`advance_frame`](Self::advance_frame) that would have
+    /// closed that frame leaves a record one past the count. The span is
+    /// therefore taken from the records when they run ahead of it.
+    ///
+    /// The alternative was dropping those records, which throws away input the
+    /// player really gave. Replaying one extra frame carries it instead.
+    ///
+    /// This is not hypothetical: it produced an unreadable Tempest recording,
+    /// whose spinner emits a relative event on nearly every frame and so is the
+    /// board most likely to have input on whichever frame recording stopped.
     pub fn finish(self) -> Movie {
+        let span = self
+            .records
+            .iter()
+            .map(|r| r.frame().saturating_add(1))
+            .max()
+            .unwrap_or(0)
+            .max(self.frame);
         Movie {
             header: MovieHeader {
                 machine: self.machine,
@@ -907,7 +928,7 @@ impl MovieRecorder {
                 dip: self.dip,
                 nvram: self.nvram,
                 host_sample_rate: self.host_sample_rate,
-                frames: self.frame,
+                frames: span,
             },
             records: self.records,
         }
@@ -1322,6 +1343,51 @@ mod tests {
         MovieRecorder::new("marble", [7; 32], CONTROLS, vec![0x40], None)
     }
 
+    /// Stopping with input on a frame that never completed still yields a
+    /// readable movie.
+    ///
+    /// This is how a Tempest recording came out unreadable: its spinner emits a
+    /// relative event on nearly every frame, so an event landed on the frame
+    /// recording stopped, `finish` declared a span that excluded it, and
+    /// `decode` rejected the file it had just written. A recorder that can
+    /// produce a movie its own reader refuses is worse than one that drops the
+    /// event, so the span now covers the records.
+    #[test]
+    fn a_movie_stopped_mid_frame_is_still_readable() {
+        let mut r = recorder();
+        for _ in 0..4 {
+            r.advance_frame();
+        }
+        // Input on frame 4, and then the session ends without frame 4 closing.
+        r.push_event(InputEvent::Relative {
+            id: TRACK_X,
+            delta: 1.0,
+        });
+        let m = r.finish();
+
+        assert_eq!(m.header.frames, 5, "the span must cover the last record");
+        assert_eq!(
+            Movie::decode(&m.encode()).map(|d| d.records),
+            Ok(m.records.clone()),
+            "the recorder must not write a movie its own decoder rejects"
+        );
+    }
+
+    /// The ordinary case is unchanged: a clean stop declares exactly the frames
+    /// that completed, and does not gain a phantom one.
+    #[test]
+    fn a_cleanly_stopped_movie_declares_the_frames_it_ran() {
+        let mut r = recorder();
+        r.push_event(InputEvent::Button {
+            id: COIN,
+            pressed: true,
+        });
+        for _ in 0..4 {
+            r.advance_frame();
+        }
+        assert_eq!(r.finish().header.frames, 4);
+    }
+
     #[test]
     fn recorder_maps_sparse_input_ids_to_table_indices() {
         let mut r = recorder();
@@ -1366,8 +1432,16 @@ mod tests {
         assert_eq!(m.records[0].frame(), 0);
         assert_eq!(m.records[1].frame(), 2);
         assert_eq!(m.records[2].frame(), 2);
-        // `frames` is the span, so it counts the frames advanced through.
-        assert_eq!(m.header.frames, 2);
+        // The span covers the records, so it is 3 and not the 2 frames advanced
+        // through. This assertion used to read 2, which is the off-by-one that
+        // made a Tempest recording unreadable: two records sit at frame 2, and
+        // `decode` rejects a record at or past the declared span. The old
+        // expectation described a movie that could not be read back.
+        assert_eq!(m.header.frames, 3);
+        assert!(
+            Movie::decode(&m.encode()).is_ok(),
+            "a finished recording must survive its own decoder"
+        );
     }
 
     #[test]

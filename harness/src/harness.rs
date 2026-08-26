@@ -16,12 +16,81 @@ use std::path::Path;
 
 use phosphor_core::core::machine::{FrontendMachine, InputEvent, InputId};
 use phosphor_machines::registry;
+use phosphor_machines::rom_loader::RomSet;
 
 use crate::load_rom_set;
 use crate::movie::{Movie, MovieError, MoviePlayer, rom_digest};
 
 /// Default frames to hold a scripted input down (coin / `--press` pulse).
 const DEFAULT_HOLD: usize = 8;
+
+/// Load the first dump in `entry.rom_names` that this machine can actually be
+/// built from, and hand back both the set and the built machine.
+///
+/// **The machine is the judge, not the filesystem.** `load_rom_set` pointed at a
+/// directory returns the first name with an archive present, which is not the
+/// same question as which archive satisfies the machine's ROM entries. Donkey
+/// Kong Jr. is the case that found this: it declares `["dkongjr", "dkongjr2"]`,
+/// its entries name the members of the *dkongjr2* dump (`0`, `1`, `2`, `8`, `9`,
+/// `10`, `v_7c.bin`, …), and a collection holding both archives handed it
+/// `dkongjr.zip`, whose members are named `djr1-c-2e.2e` and friends. Nothing
+/// matched, construction failed, and every ROM-gated suite reported the machine
+/// as having no ROM set at all while a working dump sat beside it.
+///
+/// Six machines declare more than one name, so this is not one game's problem;
+/// it is decided by which archives a given collection happens to hold.
+///
+/// The first candidate's error is the one reported, because it is the dump the
+/// old behaviour would have chosen and so the one a reader is most likely asking
+/// about. Trying a candidate costs decompressing it, which is why this stops at
+/// the first success rather than scoring them all.
+fn load_set_the_machine_accepts(
+    entry: &registry::MachineEntry,
+    path: &str,
+) -> Result<(RomSet, Box<dyn FrontendMachine>), String> {
+    // Pointed straight at an archive there is nothing to choose between.
+    let single = path.to_ascii_lowercase().ends_with(".zip") || entry.rom_names.len() < 2;
+    if single {
+        let set = load_rom_set(path, entry.rom_names)
+            .map_err(|e| format!("loading ROM set {path}: {e}"))?;
+        let machine =
+            (entry.create)(&set).map_err(|e| format!("creating machine '{}': {e}", entry.name))?;
+        return Ok((set, machine));
+    }
+
+    let mut first_error = None;
+    for name in entry.rom_names {
+        if !Path::new(path).join(format!("{name}.zip")).exists() {
+            continue;
+        }
+        let set = match load_rom_set(path, std::slice::from_ref(name)) {
+            Ok(set) => set,
+            Err(e) => {
+                first_error.get_or_insert(format!("loading ROM set {name}.zip: {e}"));
+                continue;
+            }
+        };
+        match (entry.create)(&set) {
+            Ok(machine) => return Ok((set, machine)),
+            Err(e) => {
+                first_error.get_or_insert(format!("creating machine '{}': {e}", entry.name));
+            }
+        }
+    }
+
+    // No candidate archive worked. Fall back so a loose-file directory, which
+    // names no archive at all, still resolves the way it always has.
+    match first_error {
+        Some(e) => Err(e),
+        None => {
+            let set = load_rom_set(path, entry.rom_names)
+                .map_err(|e| format!("loading ROM set {path}: {e}"))?;
+            let machine = (entry.create)(&set)
+                .map_err(|e| format!("creating machine '{}': {e}", entry.name))?;
+            Ok((set, machine))
+        }
+    }
+}
 
 /// A requested input pulse: hold `control` (by stable name) down for `hold`
 /// frames starting at frame `at`.
@@ -111,10 +180,7 @@ impl Harness {
             )
         })?;
 
-        let set = load_rom_set(path, entry.rom_names)
-            .map_err(|e| format!("loading ROM set {path}: {e}"))?;
-        let mut machine_box =
-            (entry.create)(&set).map_err(|e| format!("creating machine '{machine}': {e}"))?;
+        let (_set, mut machine_box) = load_set_the_machine_accepts(entry, path)?;
 
         machine_box.reset();
 
@@ -205,27 +271,26 @@ impl Harness {
 
         phosphor_core::audio::set_host_sample_rate(movie.header.host_sample_rate);
 
-        let set = load_rom_set(roms_path, entry.rom_names)
-            .map_err(|e| format!("loading ROM set {roms_path}: {e}"))?;
+        let (set, mut machine_box) = load_set_the_machine_accepts(entry, roms_path)?;
 
         // A movie replayed against a different dump boots fine and then diverges
         // silently, so this check is the difference between a clear error and a
         // golden hash that moved for no visible reason.
         //
         // Report both digests and how this build chose its dump. Pointed at a
-        // directory, `load_rom_set` takes the first of `rom_names` that has an
-        // archive there, so a collection holding more than one dump of a game
-        // can legitimately have handed the recording and this replay different
-        // ones, and naming the order is what makes that diagnosable. Pointed
-        // straight at an archive it consults no names at all, and saying it
-        // "tried" any would be a fabrication.
+        // directory, more than one of `rom_names` can have an archive there, so
+        // a collection holding several dumps of a game can legitimately have
+        // handed the recording and this replay different ones, and naming the
+        // order is what makes that diagnosable. Pointed straight at an archive
+        // it consults no names at all, and saying it "tried" any would be a
+        // fabrication.
         let actual = rom_digest(&set);
         if actual != movie.header.rom_digest {
             let chose = if roms_path.to_ascii_lowercase().ends_with(".zip") {
                 String::new()
             } else {
                 format!(
-                    " (of {}, the first with an archive in {roms_path} was used)",
+                    " (of {}, the first in {roms_path} this machine accepted was used)",
                     entry.rom_names.join(", ")
                 )
             };
@@ -240,8 +305,6 @@ impl Harness {
             ));
         }
 
-        let mut machine_box =
-            (entry.create)(&set).map_err(|e| format!("creating machine '{name}': {e}"))?;
         machine_box.reset();
 
         if let Some(nv) = &movie.header.nvram {
