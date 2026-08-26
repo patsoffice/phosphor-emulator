@@ -42,10 +42,10 @@ max_silent_fraction = 0.999
 # No machine is a known defect
 # ---------------------------------------------------------------------------
 #
-# There were fourteen. Every one is fixed, and the list below is kept because
+# There were fifteen. Every one is fixed, and the list below is kept because
 # what they had in common is worth more than the entries were.
 #
-# TWELVE WERE ONE FAULT: a sound chip whose output swings from ground up rather
+# THIRTEEN WERE ONE FAULT: a sound chip whose output swings from ground up rather
 # than either side of it, feeding the amplifier with no coupling capacitor in
 # between. Five different parts, one omission.
 #
@@ -56,8 +56,27 @@ max_silent_fraction = 0.999
 #   burgertime                    2x AY-3-8910     DC +0.196 -> +0.0001
 #   qbert                         MC1408 + speech  DC -0.447 -> -0.0001
 #   ccastles                      2x POKEY         DC -0.973 -> -0.0000
+#   mrdo                          2x SN76489       DC +0.183 -> -0.0000
 #   missile, quantum, foodf,      (fixed earlier, same shape)
 #     sinistar, dkong
+#
+# mrdo is the one that says why the fixture matters. It sat clean for as long as
+# it had no recorded movie: the fallback boot measures attract mode, Mr. Do!'s
+# attract mode is silent, and a silent capture has no offset to report. It read
+# dc +0.0000, 100% silent, peak -200 dBFS, and passed. It took recording a movie
+# for every machine before the board played at all, and then it read +0.183 --
+# the same fault as its SN76489 cousins on the Do's Castle board, and in the same
+# range as theirs.
+#
+# A SECOND STATISTIC MOVES WITH THE FIX, in the direction that looks wrong.
+# Silence is counted over blocks where every sample is below 1e-4. An uncoupled
+# board sits at exactly zero between voices; a capacitor discharges instead, so
+# quiet passages carry a decaying tail and stop counting as silent. Coupled
+# boards read low (docastle 1.61%, dorunrun 0.00%, dowild 6.41%, burgertime
+# 13.03%) and uncoupled ones read high (xevious 35.57%, digdug 38.44%, galaga
+# 39.87%). mrdo went 20.82% -> 2.68% along with its offset. A machine crossing
+# from one population to the other on both axes is the fix working, not a
+# regression.
 #
 # None of those chips was modelled wrongly: each matches its reference
 # implementation, and a unipolar swing is what the silicon does. What was
