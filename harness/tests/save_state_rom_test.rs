@@ -16,6 +16,8 @@
 //! Skips entirely without a ROM directory, and per machine for a ROM set this
 //! collection cannot supply.
 
+mod common;
+
 use std::path::Path;
 
 use phosphor_core::core::machine::FrontendMachine;
@@ -154,12 +156,15 @@ fn a_snapshot_of_a_running_game_determines_everything_that_follows_it() {
         return;
     };
 
-    let mut checked = Vec::new();
-    for entry in registry::all() {
+    // One machine's round trip cannot see another's, and each boots several
+    // instances of its own, so this is the expensive part and it fans out. A
+    // failing assertion still panics inside its worker; `map_parallel` re-raises
+    // the lowest-index one with its own message, which is the same machine a
+    // sequential run would have stopped on.
+    let entries = registry::all();
+    let checked: Vec<&'static str> = common::map_parallel(&entries, |entry| {
         let name = entry.name;
-        let Some(mut origin) = booted(&dir, entry) else {
-            continue;
-        };
+        let mut origin = booted(&dir, entry)?;
         run(&mut *origin, WARMUP);
         let snapshot = origin
             .save_state()
@@ -188,8 +193,11 @@ fn a_snapshot_of_a_running_game_determines_everything_that_follows_it() {
                 &other.state,
             );
         }
-        checked.push(name);
-    }
+        Some(name)
+    })
+    .into_iter()
+    .flatten()
+    .collect();
 
     eprintln!("round-tripped {} booted machine(s)", checked.len());
     assert!(

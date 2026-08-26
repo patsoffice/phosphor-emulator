@@ -4,8 +4,8 @@
 //! own; each suite pulls it in with `mod common;`.
 
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
+
+use rayon::prelude::*;
 
 /// A worker's result, or the panic payload it died with.
 type Caught<R> = Result<R, Box<dyn std::any::Any + Send>>;
@@ -18,11 +18,7 @@ type Caught<R> = Result<R, Box<dyn std::any::Any + Send>>;
 /// suspected ordering bug: `PHOSPHOR_TEST_THREADS=1` makes a suite sequential
 /// again without editing it.
 ///
-/// Note the pool is per call, not per process. `cargo test` runs test binaries
-/// concurrently and libtest runs a binary's tests concurrently, so two suites
-/// fanning out at once can oversubscribe the machine. That is tolerable because
-/// oversubscription costs context switches rather than correctness, and because
-/// each suite now sweeps once rather than once per test.
+/// This is the process-wide budget, not a per-call one. See [`Permits`].
 pub fn test_threads() -> usize {
     if let Some(n) = std::env::var("PHOSPHOR_TEST_THREADS")
         .ok()
@@ -34,6 +30,36 @@ pub fn test_threads() -> usize {
     std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1)
+}
+
+/// Configure one process-wide worker pool, once.
+///
+/// **Two hand-rolled schedulers were measured and both were wrong**, which is
+/// why this is rayon rather than something local. libtest already runs a
+/// binary's tests concurrently, so any fan-out inside a test is nested
+/// parallelism:
+///
+/// - A pool per call oversubscribed the machine. `movie_test` put roughly eighty
+///   threads on sixteen cores and went from 70.9s to **80.0s**, slower than the
+///   sequential loops it replaced.
+/// - A global budget handed out first-come starved the caller that mattered. The
+///   quick tests start first and took every worker, so the one 70.4s test that
+///   *is* this binary's cost got none and ran sequentially: **74.6s**, no better
+///   than doing nothing.
+///
+/// What is actually needed is one pool that every caller feeds and that steals
+/// work between them, so the machine stays busy and no caller is starved. That
+/// is rayon's whole purpose, and writing a third version of it here would be the
+/// wrong use of anyone's afternoon.
+fn install_pool() {
+    static ONCE: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    ONCE.get_or_init(|| {
+        // Fails only if a pool is already installed, which is fine: it means
+        // another call got here first and the thread count is already set.
+        let _ = rayon::ThreadPoolBuilder::new()
+            .num_threads(test_threads())
+            .build_global();
+    });
 }
 
 /// Apply `f` to every item on a bounded pool, returning results **in input
@@ -56,43 +82,21 @@ where
     T: Sync,
     R: Send,
 {
-    let n = items.len();
-    let workers = test_threads().min(n);
-    if workers <= 1 {
+    if test_threads() <= 1 || items.len() <= 1 {
         return items.iter().map(f).collect();
     }
+    install_pool();
 
-    let next = AtomicUsize::new(0);
-    let slots: Mutex<Vec<Option<Caught<R>>>> = Mutex::new((0..n).map(|_| None).collect());
-    let f = &f;
-    let slots = &slots;
-    let next = &next;
-
-    std::thread::scope(|scope| {
-        for _ in 0..workers {
-            scope.spawn(move || {
-                loop {
-                    let i = next.fetch_add(1, Ordering::Relaxed);
-                    if i >= n {
-                        break;
-                    }
-                    // The lock is taken only to store, never across `f`, so the
-                    // machines really do run concurrently.
-                    let value = catch_unwind(AssertUnwindSafe(|| f(&items[i])));
-                    slots.lock().expect("results mutex")[i] = Some(value);
-                }
-            });
-        }
-    });
-
-    let caught: Vec<Caught<R>> = slots
-        .lock()
-        .expect("results mutex")
-        .drain(..)
-        .map(|slot| slot.expect("every index is filled exactly once"))
+    // Each item is caught individually rather than letting rayon propagate
+    // whichever panic it noticed first: that keeps the reported failure the
+    // lowest-index one, so a failing run names the same item however the work
+    // happened to be scheduled. `collect` into a Vec preserves input order.
+    let caught: Vec<Caught<R>> = items
+        .par_iter()
+        .map(|item| catch_unwind(AssertUnwindSafe(|| f(item))))
         .collect();
 
-    let mut out = Vec::with_capacity(n);
+    let mut out = Vec::with_capacity(caught.len());
     for slot in caught {
         match slot {
             Ok(value) => out.push(value),
@@ -114,6 +118,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// Results come back in input order even when later items finish first.
     ///

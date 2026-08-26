@@ -17,6 +17,8 @@
 //! skips the gated tests entirely, and a machine whose set the collection cannot
 //! supply skips individually.
 
+mod common;
+
 use std::path::Path;
 
 use phosphor_core::core::machine::{FrontendMachine, InputControl, InputEvent, InputKind};
@@ -210,7 +212,8 @@ fn the_registry_is_not_empty() {
 /// the machine that recorded it.
 #[test]
 fn a_recorded_session_replays_to_the_same_machine_state() {
-    for entry in registry::all() {
+    let entries = registry::all();
+    common::map_parallel(&entries, |entry| {
         let name = entry.name;
         let controls = (entry.create_bare)().input_controls();
         let plan = input_plan(controls, BARE_FRAMES, 0x5EED_0001);
@@ -224,14 +227,15 @@ fn a_recorded_session_replays_to_the_same_machine_state() {
             &replayed,
             "replaying the movie did not reproduce the session it recorded",
         );
-    }
+    });
 }
 
 /// Replay must also be deterministic against itself — the same movie, twice,
 /// from power-on.
 #[test]
 fn replaying_the_same_movie_twice_gives_identical_state() {
-    for entry in registry::all() {
+    let entries = registry::all();
+    common::map_parallel(&entries, |entry| {
         let name = entry.name;
         let controls = (entry.create_bare)().input_controls();
         let plan = input_plan(controls, BARE_FRAMES, 0x5EED_0002);
@@ -240,13 +244,14 @@ fn replaying_the_same_movie_twice_gives_identical_state() {
         let first = replay_session((entry.create_bare)(), name, movie.clone(), BARE_FRAMES);
         let second = replay_session((entry.create_bare)(), name, movie, BARE_FRAMES);
         assert_same(name, &first, &second, "two replays of one movie diverged");
-    }
+    });
 }
 
 /// A movie survives the filesystem round trip, not just the in-memory one.
 #[test]
 fn a_movie_encoded_and_decoded_replays_identically() {
-    for entry in registry::all() {
+    let entries = registry::all();
+    common::map_parallel(&entries, |entry| {
         let name = entry.name;
         let controls = (entry.create_bare)().input_controls();
         let plan = input_plan(controls, 40, 0x5EED_0003);
@@ -264,7 +269,7 @@ fn a_movie_encoded_and_decoded_replays_identically() {
             &round_tripped,
             "a movie replayed differently after an encode/decode round trip",
         );
-    }
+    });
 }
 
 /// Whether the host drains audio must not change the machine's saved state.
@@ -281,9 +286,12 @@ fn a_movie_encoded_and_decoded_replays_identically() {
 /// as an unreproducible golden frame.
 #[test]
 fn draining_audio_does_not_change_the_saved_state() {
-    let mut chunk = vec![0i16; 4096];
-    for entry in registry::all() {
+    let entries = registry::all();
+    common::map_parallel(&entries, |entry| {
         let name = entry.name;
+        // The drain buffer moved inside the body: it was shared across
+        // iterations, which was harmless sequentially and is not shareable now.
+        let mut chunk = vec![0i16; 4096];
 
         let mut undrained = (entry.create_bare)();
         for _ in 0..BARE_FRAMES {
@@ -303,7 +311,7 @@ fn draining_audio_does_not_change_the_saved_state() {
             "draining audio changed the machine's saved state, so a movie \
              fingerprint depends on who replayed it",
         );
-    }
+    });
 }
 
 /// Guard against the determinism tests passing vacuously.
@@ -554,12 +562,14 @@ fn a_recorded_session_replays_identically_on_a_booted_machine() {
         return;
     };
 
-    let mut checked = Vec::new();
-    for entry in registry::all() {
+    // Each machine records and replays two booted instances of itself and shares
+    // nothing with the others, so this fans out. An assertion still panics
+    // inside its worker and `map_parallel` re-raises the lowest-index one, which
+    // is the machine a sequential run would have stopped on.
+    let entries = registry::all();
+    let checked: Vec<&'static str> = common::map_parallel(&entries, |entry| {
         let name = entry.name;
-        let Some(mut machine) = booted(&dir, entry) else {
-            continue;
-        };
+        let mut machine = booted(&dir, entry)?;
 
         // Warm up past the self-test *before* recording starts, so the recorded
         // window covers a machine with live state. Replay reproduces the warmup
@@ -599,8 +609,11 @@ fn a_recorded_session_replays_identically_on_a_booted_machine() {
             &replayed,
             "replaying the movie did not reproduce the booted session it recorded",
         );
-        checked.push(name);
-    }
+        Some(name)
+    })
+    .into_iter()
+    .flatten()
+    .collect();
 
     eprintln!(
         "record/replay round-tripped {} booted machine(s)",
@@ -708,16 +721,15 @@ fn reset_is_not_a_power_cycle_so_arming_must_rebuild() {
         return;
     };
 
-    let mut differing = Vec::new();
-    let mut checked = 0usize;
-    for entry in registry::all() {
+    // The whole binary's cost is here: 720 frames on one machine and 120 on
+    // another, for every registered game, and nothing shared between them. It
+    // measured 70.4s where the next slowest test in this file is 15.3s.
+    let entries = registry::all();
+    let outcomes = common::map_parallel(&entries, |entry| {
         let name = entry.name;
 
         // What arming in place used to produce: a machine that has run, reset.
-        let Some(mut used) = booted(&dir, entry) else {
-            continue;
-        };
-        checked += 1;
+        let mut used = booted(&dir, entry)?;
         for _ in 0..600 {
             used.run_frame();
         }
@@ -735,10 +747,17 @@ fn reset_is_not_a_power_cycle_so_arming_must_rebuild() {
         }
         let from_fresh = Fingerprint::of(&mut *fresh, name);
 
-        if after_use.state != from_fresh.state || after_use.frame != from_fresh.frame {
-            differing.push(name);
-        }
-    }
+        let differs = after_use.state != from_fresh.state || after_use.frame != from_fresh.frame;
+        Some((name, differs))
+    });
+
+    let checked = outcomes.iter().flatten().count();
+    let differing: Vec<&'static str> = outcomes
+        .iter()
+        .flatten()
+        .filter(|(_, differs)| *differs)
+        .map(|(name, _)| *name)
+        .collect();
 
     assert!(checked > 0, "no machine's ROMs were available");
     assert!(

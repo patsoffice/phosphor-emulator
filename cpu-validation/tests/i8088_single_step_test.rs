@@ -1,5 +1,7 @@
 use std::io::Read;
 
+use rayon::prelude::*;
+
 use phosphor_core::core::{BusMaster, BusMasterComponent};
 use phosphor_core::cpu::i8088::I8088;
 use phosphor_cpu_validation::{I8088InitialState, I8088Metadata, I8088TestCase, TracingBus20};
@@ -209,6 +211,77 @@ fn test_all_i8088_opcodes() {
         .collect();
     entries.sort_by_key(|e| e.file_name());
 
+    /// One opcode file's verdict. Files are independent — decompress, parse,
+    /// run — so they are measured in parallel and reduced afterwards in file
+    /// order, which keeps the reported counts and the first-failure list
+    /// identical to a sequential run.
+    struct FileOutcome {
+        filename: String,
+        skipped: bool,
+        tests: usize,
+        failed: usize,
+        first_failure: Option<String>,
+    }
+
+    let outcomes: Vec<FileOutcome> = entries
+        .par_iter()
+        .map(|entry| {
+            let filename = entry.file_name();
+            let filename_str = filename.to_string_lossy().into_owned();
+
+            if should_skip(&filename_str) {
+                return FileOutcome {
+                    filename: filename_str,
+                    skipped: true,
+                    tests: 0,
+                    failed: 0,
+                    first_failure: None,
+                };
+            }
+
+            // Determine the opcode key for metadata lookup (strip .json.gz)
+            let opcode_key = filename_str
+                .strip_suffix(".json.gz")
+                .unwrap_or(&filename_str)
+                .to_uppercase();
+
+            // Look up flag mask (handles nested reg sub-keys for group opcodes)
+            let flags_mask = metadata.flags_mask_for(&opcode_key);
+
+            // Decompress and parse the gzipped JSON
+            let gz_data = std::fs::read(entry.path())
+                .unwrap_or_else(|e| panic!("Failed to read {:?}: {}", entry.path(), e));
+            let mut decoder = flate2::read::GzDecoder::new(&gz_data[..]);
+            let mut json = String::new();
+            decoder
+                .read_to_string(&mut json)
+                .unwrap_or_else(|e| panic!("Failed to decompress {:?}: {}", entry.path(), e));
+            let tests: Vec<I8088TestCase> = serde_json::from_str(&json)
+                .unwrap_or_else(|e| panic!("Failed to parse {:?}: {}", entry.path(), e));
+
+            assert!(!tests.is_empty(), "Test file {} is empty", filename_str);
+
+            let mut failed = 0;
+            let mut first_failure = None;
+            for tc in &tests {
+                if let Some(err) = run_test_case(tc, flags_mask) {
+                    failed += 1;
+                    if first_failure.is_none() {
+                        first_failure = Some(err);
+                    }
+                }
+            }
+
+            FileOutcome {
+                filename: filename_str,
+                skipped: false,
+                tests: tests.len(),
+                failed,
+                first_failure,
+            }
+        })
+        .collect();
+
     let mut total_tests = 0;
     let mut total_files = 0;
     let mut skipped_files = 0;
@@ -216,53 +289,20 @@ fn test_all_i8088_opcodes() {
     let mut failed_files = std::collections::BTreeSet::new();
     let mut first_failures: Vec<String> = Vec::new();
 
-    for entry in &entries {
-        let filename = entry.file_name();
-        let filename_str = filename.to_string_lossy();
-
-        if should_skip(&filename_str) {
+    for outcome in outcomes {
+        if outcome.skipped {
             skipped_files += 1;
             continue;
         }
-
-        // Determine the opcode key for metadata lookup (strip .json.gz)
-        let opcode_key = filename_str
-            .strip_suffix(".json.gz")
-            .unwrap_or(&filename_str)
-            .to_uppercase();
-
-        // Look up flag mask (handles nested reg sub-keys for group opcodes)
-        let flags_mask = metadata.flags_mask_for(&opcode_key);
-
-        // Decompress and parse the gzipped JSON
-        let gz_data = std::fs::read(entry.path())
-            .unwrap_or_else(|e| panic!("Failed to read {:?}: {}", entry.path(), e));
-        let mut decoder = flate2::read::GzDecoder::new(&gz_data[..]);
-        let mut json = String::new();
-        decoder
-            .read_to_string(&mut json)
-            .unwrap_or_else(|e| panic!("Failed to decompress {:?}: {}", entry.path(), e));
-        let tests: Vec<I8088TestCase> = serde_json::from_str(&json)
-            .unwrap_or_else(|e| panic!("Failed to parse {:?}: {}", entry.path(), e));
-
-        assert!(!tests.is_empty(), "Test file {} is empty", filename_str);
-
-        let mut file_recorded = false;
-        for tc in &tests {
-            if let Some(err) = run_test_case(tc, flags_mask) {
-                failed_tests += 1;
-                if !file_recorded {
-                    file_recorded = true;
-                    failed_files.insert(filename_str.to_string());
-                    if first_failures.len() < 100 {
-                        first_failures.push(err);
-                    }
-                }
+        total_tests += outcome.tests;
+        total_files += 1;
+        failed_tests += outcome.failed;
+        if let Some(err) = outcome.first_failure {
+            failed_files.insert(outcome.filename);
+            if first_failures.len() < 100 {
+                first_failures.push(err);
             }
         }
-
-        total_tests += tests.len();
-        total_files += 1;
     }
 
     eprintln!(
