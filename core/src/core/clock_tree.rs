@@ -559,7 +559,12 @@ impl ClockTree {
     /// crystals depend on which way the rounding went, so anything checking a
     /// derivation should compare against this instead.
     pub fn hz_exact(&self, id: DomainId) -> (u128, u128) {
-        self.hz_ratio(id)
+        // Reduced: the value is the same either way, but a caller comparing or
+        // printing this wants 3579545/4 rather than 10738635000000/12000000.
+        // Every check built on it is scale-invariant, so reducing is free.
+        let (num, den) = self.hz_ratio(id);
+        let g = gcd(num, den).max(1);
+        (num / g, den / g)
     }
 
     /// Retune a domain to an absolute rate.

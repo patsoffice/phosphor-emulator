@@ -304,6 +304,15 @@ impl<T: Sample> AudioResampler<T> {
         self.input_rate = input_rate;
     }
 
+    /// The input (source) sample rate this resampler is converting from.
+    ///
+    /// Exposed so a board can be checked to be resampling from the same rate it
+    /// clocks the source at. Those are two numbers that have to agree and, when
+    /// they are written down separately, quietly do not.
+    pub fn input_rate(&self) -> u64 {
+        self.input_rate
+    }
+
     /// Drain audio samples into the provided buffer. Returns the number
     /// of samples written.
     pub fn fill_audio(&mut self, buffer: &mut [T]) -> usize {

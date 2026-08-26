@@ -114,26 +114,8 @@ const GOTTLIEB_TILE_LAYOUT: GfxLayout<'static> = GfxLayout {
     char_increment: 256,
 };
 
-// Sound CPU clock (for audio resampler)
-const SOUND_CLOCK_HZ: u64 = 894_886;
-
-// I8088 main CPU clock; the sound and Votrax rates are expressed against it.
-const I8088_CLOCK_HZ: u64 = 5_000_000;
-
-/// The sound CPU rate this board actually runs, as opposed to the one its
-/// crystal produces.
-///
-/// The 3.579545 MHz sound crystal over four is 894886.25 Hz, which is 715909 /
-/// 4000000 of the I8088. The board has always run a hand-reduced 179/1000
-/// instead, and 179/1000 of 5 MHz is exactly this: 114 Hz fast, 127 ppm.
-///
-/// Kept deliberately. Replacing it with the tree's exact ratio changes what the
-/// board sounds like, so it belongs in its own commit
-/// (`phosphor-emulator-clock-tree-jv78.5`) where a bisect can find it. Note
-/// that [`SOUND_CLOCK_HZ`] above, which is what the resampler is told the sound
-/// board emits at, is the *crystal* figure: the two disagree by the same
-/// 127 ppm today, and that correction has to move both.
-const LEGACY_SOUND_CLOCK_HZ: u32 = (I8088_CLOCK_HZ * 179 / 1000) as u32; // 895_000
+// The I8088's 5 MHz, the sound 6502's rate and the Votrax's VCO all come from
+// `clock_tree()` now, so none of them is a constant here any more.
 
 // Votrax SC-01 VCO frequency at the speech-clock DAC center (data = 0xA0).
 // The VCO is driven by the speech-clock DAC at 0x3000, so the actual clock is
@@ -216,17 +198,19 @@ pub(crate) struct GottliebSoundBoard {
 
 impl GottliebSoundBoard {
     fn new() -> Self {
-        let mut clocks = clock_tree();
+        let clocks = clock_tree();
         let sound_dom = clocks.find(Clk::SoundCpu).expect("declared sound domain");
         let votrax_dom = clocks.find(Clk::Speech).expect("declared speech domain");
-        // The one place the board departs from its own crystals; see
-        // `LEGACY_SOUND_CLOCK_HZ`.
-        clocks.set_domain_hz(sound_dom, LEGACY_SOUND_CLOCK_HZ);
+        // The rate the sound CPU is stepped at and the rate its samples are
+        // resampled from are now the same derivation, read from the same
+        // domain. They used to be two separately-rounded constants that
+        // disagreed by 127 ppm in opposite directions.
+        let sound_hz = clocks.hz(sound_dom);
         Self {
             riot: Riot6532::new(),
             dac: Mc1408Dac::new(),
             votrax: VotraxSc01::new(VOTRAX_NOMINAL_CLOCK_HZ),
-            resampler: AudioResampler::new(SOUND_CLOCK_HZ, output_sample_rate()),
+            resampler: AudioResampler::new(sound_hz, output_sample_rate()),
             output_coupling: DcBlocker::new(output_sample_rate() as u32),
             sound_rom: vec![0xFF; 0x2000],
             clock: 0,
@@ -1128,12 +1112,17 @@ mod tests {
 
     #[test]
     fn votrax_clock_divider_ratio() {
-        // The Votrax VCO domain is expressed against the 5 MHz I8088 clock;
-        // at the nominal 950 kHz it fires 950k times per second.
+        // The Votrax VCO domain is expressed against the I8088's clock; at the
+        // nominal 950 kHz it fires 950k times per second. Both figures come out
+        // of the tree, so the test states no rate of its own.
         let mut snd = GottliebSoundBoard::new();
         assert_eq!(snd.clocks.hz(snd.votrax_dom), VOTRAX_NOMINAL_CLOCK_HZ);
+        let cpu_hz = snd
+            .clocks
+            .hz(snd.clocks.find(Clk::Cpu).expect("cpu domain"));
+        assert_eq!(cpu_hz, 5_000_000);
         let mut ticks = 0u32;
-        for _ in 0..I8088_CLOCK_HZ {
+        for _ in 0..cpu_hz {
             if snd.votrax_due() {
                 ticks += 1;
             }
@@ -1141,22 +1130,36 @@ mod tests {
         assert_eq!(ticks, VOTRAX_NOMINAL_CLOCK_HZ as u32);
     }
 
-    /// The migration must not move the sound CPU's rate.
+    /// The sound CPU runs the ratio its crystal gives, not a hand-reduced one.
     ///
-    /// The board deliberately runs a hand-reduced 179/1000 rather than the
-    /// 715909/4000000 its crystal gives; see `LEGACY_SOUND_CLOCK_HZ`. Pin the
-    /// ratio so replacing it is a deliberate act with a failing test attached,
-    /// not a side effect of touching this file.
+    /// 3.579545 MHz over four is 894886.25 Hz, and against the 5 MHz I8088 that
+    /// is exactly 715909/4000000. The board ran 179/1000 for years, which is
+    /// 895000 Hz: 114 Hz fast. Nothing rounds on the way here now, so pin the
+    /// ratio itself rather than a rounded rate.
     #[test]
-    fn sound_cpu_still_runs_the_legacy_ratio() {
+    fn sound_cpu_runs_the_crystal_ratio() {
         let snd = GottliebSoundBoard::new();
-        assert_eq!(snd.clocks.domain(snd.sound_dom).step_ratio(), (179, 1000));
-        assert_eq!(snd.clocks.hz(snd.sound_dom), LEGACY_SOUND_CLOCK_HZ as u64);
-        // What the crystal actually produces, for the commit that corrects it.
         assert_eq!(
-            snd.clocks.domain(snd.sound_dom).root_ratio(),
-            (179_000, 715_909)
+            snd.clocks.domain(snd.sound_dom).step_ratio(),
+            (715_909, 4_000_000)
         );
+        // A quarter of the sound crystal, stated as such.
+        assert_eq!(snd.clocks.domain(snd.sound_dom).root_ratio(), (1, 4));
+        // The exact rate is 894886.25 Hz, so hz() reports the nearest hertz.
+        assert_eq!(snd.clocks.hz_exact(snd.sound_dom), (3_579_545, 4));
+        assert_eq!(snd.clocks.hz(snd.sound_dom), 894_886);
+    }
+
+    /// The divider and the resampler come from one derivation.
+    ///
+    /// They used to be separate constants: the domain ticked 895000 times a
+    /// second while the resampler was told the board emitted at 894886, so the
+    /// two disagreed by 127 ppm in opposite directions from the truth. That is
+    /// the shape of the Votrax bug (`phosphor-emulator-1fg`), one level down.
+    #[test]
+    fn the_resampler_input_rate_is_the_domain_rate() {
+        let snd = GottliebSoundBoard::new();
+        assert_eq!(snd.resampler.input_rate(), snd.clocks.hz(snd.sound_dom));
     }
 
     #[test]
