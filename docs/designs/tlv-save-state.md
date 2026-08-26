@@ -1,6 +1,6 @@
 # Design: Chunked & TLV Save-State Format
 
-> **Status: rev 3. Stages A and D are implemented; B and C are not.** Rev 1
+> **Status: rev 4. Stages A, B and D are implemented; C is not.** Rev 1
 > proposed replacing the positional binary `Saveable` format wholesale with
 > tag-length-value framing. Rev 2 kept that as the end state but split it into
 > stages, because the repo's own history shows most of the pain is fixed by the
@@ -9,7 +9,10 @@
 > [What Stage A shipped](#what-stage-a-shipped)), and corrects rev 2's stale
 > anchors. `SAVE_VERSION` was 12 by the time Stage A was written, not 5: seven
 > further global invalidations had landed since rev 2, every one of them a
-> single subsystem changing.
+> single subsystem changing. Rev 4 does the same for Stage B, which also differs
+> from its sketch in one structural way (see
+> [What Stage B shipped](#what-stage-b-shipped)), and records Stage B's answer
+> to the question Stage C was deferred pending.
 
 ## The problem, stated from the git log
 
@@ -154,14 +157,18 @@ chunk     := tag:u16 | len:u32 | payload:len bytes
   in one place and "not including magic" in another; resolved in favour of
   covering everything before the CRC field, which is the simpler rule.)
 * A component payload is `component_version:u8 | body`, where `body` is either
-  today's positional encoding (Stage A) or field TLVs (Stage B):
+  the positional encoding (Stage A) or field TLVs (Stage B):
 
 ```text
+tlv_body  := component_version:u8 | count:u16 | field_tlv{count}
 field_tlv := field_tag:u16 | field_len:u32 | field_payload
 ```
 
 Under TLV, `field_payload` drops the redundant inner length: `[u8;N]` and
 `Vec<u8>` write raw bytes, since `field_len` already is the length.
+
+`count` is not in rev 2's sketch and is not optional; see
+[What Stage B shipped](#what-stage-b-shipped).
 
 ### Two rules rev 1 got wrong
 
@@ -307,6 +314,8 @@ Marble Madness's 1.05 MB (0.004%). Worst case measured was Tempest at 0.86%.
 
 ### Stage B — opt-in field TLV, for the structs that need it
 
+**Implemented.** See [What Stage B shipped](#what-stage-b-shipped).
+
 Add `#[save(id=N)]` to the derive and a `#[save_tlv]` struct opt-in; structs
 without it keep emitting positional bodies inside their Stage A chunk. Migrate
 only where the payoff is concrete:
@@ -318,6 +327,66 @@ only where the payoff is concrete:
 
 This is where order-immunity and additive compatibility actually arrive, for the
 ~10 types that have ever needed them.
+
+### What Stage B shipped
+
+**A TLV body carries a field count, which rev 2's sketch does not have.** This
+was found by Gridlee failing to load, and it is the most important thing on this
+page. A TLV reader dispatches in a loop, and a loop needs to know when to stop.
+Bounding it by the reader's end is only correct when the reader *is* the
+struct's own bytes, which holds when a parent framed it. Stage A made all 68
+derive sites frame their children, but **49 `Saveable` impls are hand-written
+and frame nothing**: they call a child's `save_state` straight into their own
+stream. `GridleeSystem` does exactly that with its `M6809`, so the moment the
+M6809 became TLV its loop read on into Gridlee's RAM blob.
+
+Four such sites existed (`GridleeSystem`, `IrobotSystem`, `GottliebBoard`,
+`AtariSystem1Sound`'s speech section), and hand-fixing them was rejected: the
+requirement is invisible at the call site, no compile-time check is possible
+because framing is the parent's choice, and the failure is not reliably loud.
+Gridlee errored only because the stray bytes happened not to parse as TLVs; had
+they parsed, it would have loaded silently wrong.
+
+A `u16` count after the version byte makes a TLV body self-delimiting, so a
+struct can be opted in without auditing everyone who embeds it. Two bytes per
+TLV struct instance. This does not contradict "children never frame themselves":
+a child cannot know its own *tag*, but it always knows how many fields it has.
+
+**An absent field is an error unless it says otherwise.** Rev 2 left this open.
+`#[save(id = N)]` is required and `#[save(id = N, default)]` opts into absence,
+keeping the field's constructed value. Making absence the default would have
+softened, one level down, exactly the property Stage A went out of its way to
+establish: rev 2 rejected "a missing chunk means keep current state" as a
+correctness hazard, and a missing *field* leaving a device at power-on while the
+rest of the machine is at frame N is the same hazard. Additive compatibility
+then costs one word, at the moment the field is added.
+
+**The writer emits fields in ascending id order**, not declaration order, so the
+bytes are a function of the ids alone and reordering fields in the source is a
+no-op on the wire in both directions rather than only for the reader.
+
+**Migrated: the six derive sites whose version had ever moved.** `m6809` (2),
+`tms5220` (3), `votrax_sc01` (2), `williams_blitter` (2), `gottlieb` (4),
+`tempest` (2). All six are `#[derive(Saveable)]`, so migration is attributes
+only. The three conditional-field boards were *not* migrated: they are
+hand-written impls, and Stage A already solved their append-and-guard problem at
+the chunk level, so field TLV would buy order-immunity for their scalars at the
+cost of hand-rolling dispatch loops for about sixty fields.
+
+**The envelope stayed at 13**, which is the whole Stage A payoff made concrete.
+Each migrated struct bumped its own `#[save_version]`, so **10 of 33 machines
+lose their saves** (Joust, Robotron, Sinistar, Star Wars, Empire Strikes Back,
+Gridlee, I Robot, Q\*bert, Road Runner, Tempest) and the other 23 keep
+byte-identical ones. Under the pre-Stage-A format this would have been all 33.
+
+**Compile-time checks, with a gap.** The derive rejects `#[save_tlv]` without
+`#[save_version]`, `#[save(id)]` or `#[save_retired]` without `#[save_tlv]`, a
+missing id, a reserved id (0 or `0xFFFF`), a duplicate id, an id colliding with
+`#[save_retired]`, and `#[save_elements]` under TLV. All eight were verified by
+writing the bad struct and watching it fail, but **there is no permanent
+regression test for them**: that needs `trybuild`, whose expected-output files
+are brittle across toolchain bumps, and this repo pins its toolchain precisely
+so that local and CI clippy agree. Re-verify by hand if the derive is reworked.
 
 ### Stage C — sweep (not recommended by default)
 
@@ -331,6 +400,16 @@ Do this only if Stage B proves the ergonomics are good and the sweep can be
 largely automated. Otherwise a mixed codebase — TLV where it earns its keep,
 positional where it doesn't — is a legitimate end state, since Stage A's chunk
 framing makes the two interoperate.
+
+**Stage B's verdict on that question, now that it has landed:** split. For a
+derive site the ergonomics are good and the sweep *is* automatable, save for
+assigning ids, which cannot be automated safely because the ids are the wire
+contract. `VotraxSc01` took 71 hand-numbered attributes. For a hand-written
+impl nothing changed: it still needs a dispatch loop written by hand, and that
+is where 49 of the remaining types are. The count byte does remove the argument
+that a mixed codebase is *risky*, since a TLV struct is now safe anywhere, so
+the case is purely cost against benefit, and the benefit is still absent for a
+component that has never changed.
 
 ### Stage D — tooling
 
@@ -397,19 +476,41 @@ Predicted a non-issue; measured, and it is. Framing costs 6 bytes per chunk
 | Sinistar | 55,253 | 13 | 78 | 0.14% |
 | Marble Madness | 1,081,334 | 7 | 42 | 0.004% |
 
-Worst case measured is 66 bytes. Save/load is not on the hot path. Stage B's
-per-*field* TLV will cost considerably more, and should be measured again then
-rather than assumed from these numbers.
+Worst case measured is 66 bytes. Save/load is not on the hot path.
+
+Stage B's per-*field* TLV was measured rather than assumed. It adds 6 bytes a
+field plus 2 a struct, less the 4-byte inner length each `[u8; N]` and `Vec<u8>`
+field stops carrying. Against the Stage A numbers above:
+
+| Machine | Stage A | Stage B | Delta |
+|---|---|---|---|
+| Pac-Man (no migrated component) | 3,701 | 3,701 | 0 |
+| Mr. Do! (none) | 9,202 | 9,202 | 0 |
+| Marble Madness (none) | 1,081,334 | 1,081,334 | 0 |
+| Tempest | 7,716 | 7,718 | +2 |
+| Joust | 51,114 | 51,304 | +190 (0.37%) |
+| Empire Strikes Back | 23,961 | 24,307 | +346 (1.4%) |
+| Q\*bert | 22,551 | 22,993 | +442 (**1.9%**) |
+
+Q\*bert is the worst because it carries the Votrax, whose 71 fields are mostly
+one byte each, so the framing is six times the payload for most of them. Still
+under 2% of a save, and the file is dominated by video RAM.
+
+The zero rows are the point of Stage A: a machine containing none of the six
+migrated components has a byte-identical save.
 
 ## Open questions
 
 * **Tag namespace for shared boards** (Joust vs Robotron on `WilliamsBoard`) —
   resolved: the board owns its tag space, stable across every game using it;
   `machine_id` in the header disambiguates the file.
-* **Region blobs**: still open after Stage A. Regions are written with
-  `write_bytes` (a `u32` length prefix) and stay inline rather than becoming
-  chunks, so `read_bytes_into`'s length check is not yet redundant with an outer
-  length and has not been relaxed. It becomes redundant under Stage B.
+* **Region blobs**: resolved for TLV structs, still open elsewhere. In a
+  `#[save_tlv]` body a `[u8; N]` or `Vec<u8>` field writes raw bytes and the
+  field length is the length, so `read_bytes_into`'s check is genuinely
+  redundant there and `read_raw_into` replaces it. Positional bodies still use
+  `write_bytes`, and the memory regions in the hand-written board impls are all
+  positional, so that check stays where it is. It goes away for a given board
+  only when that board does.
 * **Do components need both a version byte and TLV?** Yes — TLV handles additive
   change, the version byte handles semantic change (`x: u16` → `u32`, or a
   re-interpretation of an existing field). Keep both.
@@ -433,5 +534,6 @@ rather than assumed from these numbers.
 * Manual impls: `core/src/cpu/i8035/mod.rs`, `mb88xx/mod.rs`, `m6502/mod.rs`,
   `m68000/mod.rs`, and 35 sites in `machines/src/`.
 * What framing buys, and what it does not: `core/tests/save_state_framing_test.rs`.
+* What field TLV buys over it: `core/tests/save_state_tlv_test.rs`.
 * Tool behaviour: `tools/disasm/tests/dump_save_cli_test.rs`.
 * Version-bump history: `git log -L/SAVE_VERSION/,+1:core/src/core/save_state.rs`.

@@ -396,6 +396,11 @@ enum Command {
         /// the machine whose layout to dump.
         #[arg(long)]
         machine: Option<String>,
+        /// Show only chunks this many levels deep (0 = top-level components).
+        /// A `#[save_tlv]` struct frames every field, so its innards are chunks
+        /// too and a whole machine can run to a few hundred lines.
+        #[arg(long)]
+        max_depth: Option<usize>,
     },
     /// List the registered machines (the `--machine` values accepted by
     /// `frameshot`/`trace`/`machine`/`gfxview`), with their ROM-set names.
@@ -658,7 +663,11 @@ fn run_command(cmd: Command) -> Result<String, String> {
                 subtract_to: subtract_to.as_deref(),
             },
         ),
-        Command::DumpSave { file, machine } => dumpsave::run(file.as_deref(), machine.as_deref()),
+        Command::DumpSave {
+            file,
+            machine,
+            max_depth,
+        } => dumpsave::run(file.as_deref(), machine.as_deref(), max_depth),
         Command::Machines => Ok(list_machines()),
     }
 }

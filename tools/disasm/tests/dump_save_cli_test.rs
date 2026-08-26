@@ -136,6 +136,28 @@ fn a_machine_layout_can_be_dumped_without_a_file() {
     );
 }
 
+/// A `#[save_tlv]` struct frames every field, so its fields are chunks and show
+/// up in the tree by name. `--max-depth` trims them back to the component level,
+/// and must say how many it hid rather than reading as "that is all there was".
+#[test]
+fn max_depth_trims_the_tree_and_says_what_it_hid() {
+    // Q*bert's sound board holds a Votrax, which is TLV: 71 fields.
+    let full = disasm(&["dump-save", "--machine", "qbert"]);
+    let trimmed = disasm(&["dump-save", "--machine", "qbert", "--max-depth", "1"]);
+    assert!(full.ok && trimmed.ok, "stderr: {}", trimmed.stderr);
+
+    let deep = components(&full.stdout);
+    assert!(
+        deep.iter().any(|n| n.starts_with("VotraxSc01.")),
+        "TLV fields should appear as named chunks: {deep:?}"
+    );
+
+    let shallow = components(&trimmed.stdout);
+    assert!(!shallow.iter().any(|n| n.starts_with("VotraxSc01.")));
+    assert!(shallow.contains(&"GottliebSoundBoard.votrax".to_string()));
+    assert!(trimmed.stdout.contains("not shown"), "{}", trimmed.stdout);
+}
+
 // -- Failure modes -----------------------------------------------------------
 
 #[test]

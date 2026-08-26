@@ -66,7 +66,11 @@ fn parse_header(data: &[u8]) -> Result<Header, String> {
     })
 }
 
-pub fn run(file: Option<&Path>, machine_override: Option<&str>) -> Result<String, String> {
+pub fn run(
+    file: Option<&Path>,
+    machine_override: Option<&str>,
+    max_depth: Option<usize>,
+) -> Result<String, String> {
     let (source, data) = match (file, machine_override) {
         (Some(f), _) => {
             let data = std::fs::read(f).map_err(|e| format!("reading {}: {e}", f.display()))?;
@@ -134,10 +138,15 @@ pub fn run(file: Option<&Path>, machine_override: Option<&str>) -> Result<String
     );
     let mut top_framed = 0usize;
     let mut top_level = 0usize;
+    let mut elided = 0usize;
     for e in trace.events() {
         if e.depth == 0 {
             top_framed += e.len as usize + CHUNK_HEADER_LEN;
             top_level += 1;
+        }
+        if max_depth.is_some_and(|d| e.depth > d) {
+            elided += 1;
+            continue;
         }
         let indent = "    ".repeat(e.depth);
         let note = if e.skipped {
@@ -153,6 +162,13 @@ pub fn run(file: Option<&Path>, machine_override: Option<&str>) -> Result<String
     }
     if trace.events().is_empty() {
         let _ = writeln!(out, "  (none)");
+    }
+    // Never let a depth limit read as "that is all there was".
+    if elided > 0 {
+        let _ = writeln!(
+            out,
+            "  ... {elided} chunks deeper than --max-depth not shown"
+        );
     }
 
     let body_len = data.len() - header.body_start - 4;
