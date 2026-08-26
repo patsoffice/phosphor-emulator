@@ -39,12 +39,13 @@
 //! dropped, which is faithful at the 192 kHz simulation rate.
 
 use crate::core::debug::{DebugRegister, Debuggable};
-use crate::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
+use crate::core::save_state::{SaveError, StateReader, StateWriter};
 use crate::device::Device;
 use crate::device::discrete::{
     CustomComponent, DataInputId, DiscreteCircuit, DiscreteCircuitBuilder, Feed555, LfsrSpec,
     LogicInputId, NodeId, Output555, OutputGain,
 };
+use phosphor_macros::Saveable;
 
 /// Galaxian master clock is 18.432 MHz; the sound section runs at /6/2.
 ///
@@ -155,21 +156,35 @@ impl CustomComponent for TuneTap {
 
 /// The Galaxian custom sound board as a discrete circuit plus its register
 /// latches.
+#[derive(Saveable)]
+#[save_version(1)]
+#[save_tlv]
 pub struct GalaxianSound {
+    #[save(id = 1)]
     circuit: DiscreteCircuit,
 
-    // Input handles.
+    // Input handles: fixed when the circuit is built, so configuration rather
+    // than state.
+    #[save_skip]
     pitch_in: DataInputId,
+    #[save_skip]
     bg_dac_in: DataInputId,
+    #[save_skip]
     fs_in: [LogicInputId; 3],
+    #[save_skip]
     hit_in: LogicInputId,
+    #[save_skip]
     fire_in: LogicInputId,
+    #[save_skip]
     vol_in: [LogicInputId; 2],
 
     // Shadowed latch state (for debug views, save state, and the lfo
     // read-modify-write).
+    #[save(id = 2)]
     pitch: u8,
+    #[save(id = 3)]
     lfo_val: u8,
+    #[save(id = 4)]
     sound_latch: u8,
 }
 
@@ -511,23 +526,6 @@ impl Debuggable for GalaxianSound {
     }
 }
 
-impl Saveable for GalaxianSound {
-    fn save_state(&self, w: &mut StateWriter) {
-        self.circuit.save_state(w);
-        w.write_u8(self.pitch);
-        w.write_u8(self.lfo_val);
-        w.write_u8(self.sound_latch);
-    }
-
-    fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
-        self.circuit.load_state(r)?;
-        self.pitch = r.read_u8()?;
-        self.lfo_val = r.read_u8()?;
-        self.sound_latch = r.read_u8()?;
-        Ok(())
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -535,7 +533,7 @@ impl Saveable for GalaxianSound {
 #[cfg(test)]
 mod tests {
     use super::*;
-
+    use crate::core::save_state::Saveable as _;
     const RATE: u32 = 44_100;
 
     /// Run the device for `ms` milliseconds of CPU time and return the produced

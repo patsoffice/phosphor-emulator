@@ -16,11 +16,12 @@
 
 use std::f64::consts::TAU;
 
-use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
+use phosphor_core::core::save_state::{SaveError, StateReader, StateWriter};
 use phosphor_core::device::{
     CustomComponent, DiscreteCircuit, DiscreteCircuitBuilder, ExternalSourceId, FilterMode,
     LogicInputId, OutputGain,
 };
+use phosphor_macros::Saveable;
 
 fn sample_rate() -> u64 {
     phosphor_core::audio::host_sample_rate() as u64
@@ -343,8 +344,14 @@ fn build_circuit() -> (DiscreteCircuit, CongoInputs) {
 // ---------------------------------------------------------------------------
 
 /// Congo Bongo percussion: the PSG mix summed with the five synthesized voices.
+#[derive(Saveable)]
+#[save_version(1)]
+#[save_tlv]
 pub struct CongoSound {
+    #[save(id = 1)]
     circuit: DiscreteCircuit,
+    /// Input handles, fixed when the circuit is built.
+    #[save_skip]
     ids: CongoInputs,
 }
 
@@ -390,19 +397,10 @@ impl CongoSound {
     }
 }
 
-impl Saveable for CongoSound {
-    fn save_state(&self, w: &mut StateWriter) {
-        self.circuit.save_state(w);
-    }
-    fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
-        self.circuit.load_state(r)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
+    use phosphor_core::core::save_state::{Saveable as _, StateReader, StateWriter};
     fn rms(samples: &[i16]) -> f64 {
         let sum: f64 = samples.iter().map(|&s| (s as f64).powi(2)).sum();
         (sum / samples.len().max(1) as f64).sqrt()

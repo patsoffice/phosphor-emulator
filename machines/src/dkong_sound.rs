@@ -32,11 +32,12 @@
 //! [`ne555_astable`]: phosphor_core::device::DiscreteCircuitBuilder::ne555_astable
 
 use phosphor_core::core::debug::{DebugRegister, Debuggable};
-use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
+
 use phosphor_core::device::{
     CmosInverter, DiscreteCircuit, DiscreteCircuitBuilder, ExternalSourceId, FilterMode,
     InverterOsc, LfsrOutput, LfsrShift, LfsrSpec, LogicInputId, NodeId, Output555, OutputGain,
 };
+use phosphor_macros::Saveable;
 
 /// Output sample rate. The circuit is built board = sim = output = this rate, so
 /// `tick(1)` advances exactly one simulation step; the board drives one step per
@@ -941,11 +942,19 @@ fn build_circuit() -> (DiscreteCircuit, DkongInputs) {
 
 /// Donkey Kong discrete sound device: the DAC stream summed with the walk, jump,
 /// and stomp effects inside a [`DiscreteCircuit`].
+#[derive(Saveable)]
+#[save_version(1)]
+#[save_tlv]
 pub struct DkongDiscreteSound {
+    #[save(id = 3)]
     circuit: DiscreteCircuit,
+    /// Input handles, fixed when the circuit is built.
+    #[save_skip]
     ids: DkongInputs,
     /// 74LS259 sound control latch bits 0-2 (walk/jump/stomp).
+    #[save(id = 1)]
     latch: u8,
+    #[save(id = 2)]
     discharge: bool,
 }
 
@@ -1025,23 +1034,6 @@ impl phosphor_core::device::Device for DkongDiscreteSound {
     }
 }
 
-impl Saveable for DkongDiscreteSound {
-    fn save_state(&self, w: &mut StateWriter) {
-        w.write_version(1);
-        w.write_u8(self.latch);
-        w.write_bool(self.discharge);
-        self.circuit.save_state(w);
-    }
-
-    fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
-        r.read_version(1)?;
-        self.latch = r.read_u8()?;
-        self.discharge = r.read_bool()?;
-        self.circuit.load_state(r)?;
-        Ok(())
-    }
-}
-
 impl Debuggable for DkongDiscreteSound {
     fn debug_registers(&self) -> Vec<DebugRegister> {
         let bit = |b: u8| ((self.latch >> b) & 1) as u64;
@@ -1089,7 +1081,7 @@ impl Debuggable for DkongDiscreteSound {
 #[cfg(test)]
 mod tests {
     use super::*;
-
+    use phosphor_core::core::save_state::{Saveable as _, StateReader, StateWriter};
     /// Run `n` output samples with a fixed DAC value.
     fn run(s: &mut DkongDiscreteSound, dac: i16, n: usize) {
         for _ in 0..n {

@@ -16,11 +16,12 @@
 //! retire the last constant in the file.
 
 use phosphor_core::core::debug::{DebugRegister, Debuggable};
-use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
+use phosphor_core::core::save_state::{SaveError, StateReader, StateWriter};
 use phosphor_core::device::{
     CustomComponent, DataInputId, DiscreteCircuit, DiscreteCircuitBuilder, Feed555, LfsrOutput,
     LfsrShift, LfsrSpec, LogicInputId, NodeId, Output555, OutputGain, PulseInputId,
 };
+use phosphor_macros::Saveable;
 
 use crate::atari_dvg::TIMING;
 
@@ -787,14 +788,23 @@ fn build_circuit() -> (DiscreteCircuit, AsteroidsDiscreteInputs) {
 
 /// Concrete Asteroids sound device. Wraps a [`DiscreteCircuit`] and exposes
 /// hardware-intent methods for the board's bus writes.
+#[derive(Saveable)]
+#[save_version(1)]
+#[save_tlv]
 pub struct AsteroidsDiscreteSound {
+    #[save(id = 4)]
     circuit: DiscreteCircuit,
+    /// Input handles, fixed when the circuit is built.
+    #[save_skip]
     ids: AsteroidsDiscreteInputs,
     /// 0x3600 explosion register (volume bits 2-5, pitch bits 6-7).
+    #[save(id = 1)]
     explosion_reg: u8,
     /// 0x3A00 thump register (bit 4 enable, low nibble DAC data).
+    #[save(id = 2)]
     thump_reg: u8,
     /// 0x3C00-0x3C07 addressable audio latch (74LS259).
+    #[save(id = 3)]
     audio_latch: u8,
 }
 
@@ -884,25 +894,6 @@ impl Default for AsteroidsDiscreteSound {
     }
 }
 
-impl Saveable for AsteroidsDiscreteSound {
-    fn save_state(&self, w: &mut StateWriter) {
-        w.write_version(1);
-        w.write_u8(self.explosion_reg);
-        w.write_u8(self.thump_reg);
-        w.write_u8(self.audio_latch);
-        self.circuit.save_state(w);
-    }
-
-    fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
-        r.read_version(1)?;
-        self.explosion_reg = r.read_u8()?;
-        self.thump_reg = r.read_u8()?;
-        self.audio_latch = r.read_u8()?;
-        self.circuit.load_state(r)?;
-        Ok(())
-    }
-}
-
 impl Debuggable for AsteroidsDiscreteSound {
     fn debug_registers(&self) -> Vec<DebugRegister> {
         let bit = |b: u8| ((self.audio_latch >> b) & 1) as u64;
@@ -970,7 +961,7 @@ impl Debuggable for AsteroidsDiscreteSound {
 #[cfg(test)]
 mod tests {
     use super::*;
-
+    use phosphor_core::core::save_state::{Saveable as _, StateReader, StateWriter};
     fn run_frame(s: &mut AsteroidsDiscreteSound) {
         s.tick(TIMING.cycles_per_frame());
     }

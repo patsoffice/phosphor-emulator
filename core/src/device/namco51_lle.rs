@@ -1,6 +1,6 @@
 use crate::core::debug::{DebugRegister, Debuggable};
-use crate::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use crate::cpu::mb88xx::{Mb88xx, Mb88xxVariant};
+use phosphor_macros::Saveable;
 
 /// Namco 51XX custom chip — LLE (low-level emulation) using MB8843 MCU.
 ///
@@ -15,8 +15,12 @@ use crate::cpu::mb88xx::{Mb88xx, Mb88xxVariant};
 ///   R2 ← IN1[3:0] (P1 Fire, P2 Fire, Start1, Start2)
 ///   R3 ← IN1[7:4] (Coin1, Coin2, Service, Test)
 ///   O port → data to 06XX (read responses to Z80)
+#[derive(Saveable)]
+#[save_version(1)]
+#[save_tlv]
 pub struct Namco51Lle {
     /// The MB8843 MCU running the 51XX firmware.
+    #[save(id = 1)]
     pub mcu: Mb88xx,
 }
 
@@ -88,15 +92,5 @@ impl super::Device for Namco51Lle {
 impl Debuggable for Namco51Lle {
     fn debug_registers(&self) -> Vec<DebugRegister> {
         self.mcu.debug_registers()
-    }
-}
-
-impl Saveable for Namco51Lle {
-    fn save_state(&self, w: &mut StateWriter) {
-        self.mcu.save_state(w);
-    }
-
-    fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
-        self.mcu.load_state(r)
     }
 }

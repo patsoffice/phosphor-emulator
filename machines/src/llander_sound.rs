@@ -6,11 +6,12 @@
 //! intent (`write_sound_register`, `pulse_noise_reset`).
 
 use phosphor_core::core::debug::{DebugRegister, Debuggable};
-use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
+use phosphor_core::core::save_state::{SaveError, StateReader, StateWriter};
 use phosphor_core::device::{
     CustomComponent, DataInputId, DiscreteCircuit, DiscreteCircuitBuilder, LogicInputId, NodeId,
     OutputGain, PulseInputId,
 };
+use phosphor_macros::Saveable;
 
 use crate::atari_dvg::TIMING;
 
@@ -188,10 +189,17 @@ fn build_circuit() -> (DiscreteCircuit, LunarLanderInputs) {
 
 /// Concrete Lunar Lander sound device. Wraps a [`DiscreteCircuit`] and exposes
 /// hardware-intent methods for the board's bus writes.
+#[derive(Saveable)]
+#[save_version(1)]
+#[save_tlv]
 pub struct LunarLanderDiscreteSound {
+    #[save(id = 2)]
     circuit: DiscreteCircuit,
+    /// Input handles, fixed when the circuit is built.
+    #[save_skip]
     ids: LunarLanderInputs,
     /// Last value written to the 0x3C00 sound register (for debug/save).
+    #[save(id = 1)]
     sound_reg: u8,
 }
 
@@ -248,21 +256,6 @@ impl Default for LunarLanderDiscreteSound {
     }
 }
 
-impl Saveable for LunarLanderDiscreteSound {
-    fn save_state(&self, w: &mut StateWriter) {
-        w.write_version(1);
-        w.write_u8(self.sound_reg);
-        self.circuit.save_state(w);
-    }
-
-    fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
-        r.read_version(1)?;
-        self.sound_reg = r.read_u8()?;
-        self.circuit.load_state(r)?;
-        Ok(())
-    }
-}
-
 impl Debuggable for LunarLanderDiscreteSound {
     fn debug_registers(&self) -> Vec<DebugRegister> {
         vec![
@@ -299,7 +292,7 @@ impl Debuggable for LunarLanderDiscreteSound {
 #[cfg(test)]
 mod tests {
     use super::*;
-
+    use phosphor_core::core::save_state::Saveable as _;
     fn run_frame(s: &mut LunarLanderDiscreteSound) {
         s.tick(TIMING.cycles_per_frame());
     }
