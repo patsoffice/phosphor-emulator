@@ -29,7 +29,9 @@ use phosphor_core::core::machine::{
 };
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::{AccessKind, AddressSpace16};
-use phosphor_core::core::{Bus, BusMaster, TimingConfig};
+use phosphor_core::core::{
+    Bus, BusMaster, ClockDomainName as Clk, ClockTree, DomainId, TimingConfig,
+};
 use phosphor_core::cpu::z80::Z80;
 use phosphor_core::cpu::{Cpu, CpuStateTrait};
 use phosphor_core::device::{I8255, KonamiSound};
@@ -62,11 +64,11 @@ pub const TIMING: TimingConfig = TimingConfig {
 /// /8.
 ///
 /// Note the sound crystal declared here is the real 14.318181 MHz, while
-/// [`SOUND_CLOCK_HZ`] below rounds it to 14.318 MHz, which puts the sound CPU
-/// 13 Hz (7 ppm) slow. Migrating that constant onto this tree is the fix, and
-/// is a behaviour change rather than part of declaring the tree.
-pub fn clock_tree() -> phosphor_core::core::ClockTree {
-    use phosphor_core::core::{ClockDomainName as Clk, ClockTree, RootId};
+/// [`SOUND_CLOCK_HZ`] below rounds it to 14.318 MHz. That puts the sound CPU
+/// 22.6 Hz (12.6 ppm) slow: 181 Hz at the crystal, over eight. Letting the
+/// board take the declared rate is a behaviour change and gets its own commit.
+pub fn clock_tree() -> ClockTree {
+    use phosphor_core::core::RootId;
     let mut t = ClockTree::new(18_432_000);
     let snd = t.add_root(14_318_181);
     let cpu = t.add_domain(Clk::Cpu, RootId::MAIN, 1, 6); // 3.072 MHz
@@ -200,7 +202,10 @@ pub struct ScrambleBoard {
     protection_result: u8,
 
     pub(crate) clock: u64,
-    sound_acc: u64, // Bresenham accumulator for the slower sound clock
+    /// The board's clock tree, as [`clock_tree`] declares it. Only the sound
+    /// domain is stepped; the rest is the derivation it rides on.
+    clocks: ClockTree,
+    sound_dom: DomainId,
     watchdog_counter: u32,
 
     #[debug_events]
@@ -215,6 +220,13 @@ impl Default for ScrambleBoard {
 
 impl ScrambleBoard {
     pub fn new(hw: Hw) -> Self {
+        let mut clocks = clock_tree();
+        let sound_dom = clocks.find(Clk::SoundCpu).expect("declared sound domain");
+        // Hold the rate the board has always run, rather than the one its
+        // crystal gives; see `SOUND_CLOCK_HZ`. Correcting it is a behaviour
+        // change and gets its own commit, so that this one moves the mechanism
+        // and nothing else.
+        clocks.set_domain_hz(sound_dom, SOUND_CLOCK_HZ as u32);
         let mut video = GalaxianVideo::new();
         let _ = GfxBankMode::None; // base Scramble has no GFX banking
         let sound = if hw == Hw::Frogger {
@@ -241,7 +253,8 @@ impl ScrambleBoard {
             protection_state: 0,
             protection_result: 0,
             clock: 0,
-            sound_acc: 0,
+            clocks,
+            sound_dom,
             watchdog_counter: 0,
             debug_trace: DebugTraceBuffer::new(),
         }
@@ -367,10 +380,8 @@ impl ScrambleBoard {
     /// Board work after the CPU's cycle: the sound board, the clock, and the
     /// watchdog counter.
     fn end_cycle(&mut self) {
-        // Tick the slower sound board in proportion (Bresenham).
-        self.sound_acc += SOUND_CLOCK_HZ;
-        while self.sound_acc >= TIMING.cpu_clock_hz {
-            self.sound_acc -= TIMING.cpu_clock_hz;
+        // Tick the slower sound board in proportion.
+        if self.clocks.tick(self.sound_dom) {
             self.sound.tick();
         }
 
@@ -427,7 +438,7 @@ impl ScrambleBoard {
         self.protection_state = 0;
         self.protection_result = 0;
         self.clock = 0;
-        self.sound_acc = 0;
+        self.clocks.reset();
         self.watchdog_counter = 0;
         self.map.region_data_mut(Region::Ram).fill(0);
         self.map.region_data_mut(Region::VideoRam).fill(0);
@@ -692,7 +703,7 @@ impl Saveable for ScrambleBoard {
         w.write_u32_le(self.protection_state);
         w.write_u8(self.protection_result);
         w.write_u64_le(self.clock);
-        w.write_u64_le(self.sound_acc);
+        self.clocks.save_state(w);
     }
 
     fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
@@ -710,7 +721,7 @@ impl Saveable for ScrambleBoard {
         self.protection_state = r.read_u32_le()?;
         self.protection_result = r.read_u8()?;
         self.clock = r.read_u64_le()?;
-        self.sound_acc = r.read_u64_le()?;
+        self.clocks.load_state(r)?;
         Ok(())
     }
 }
@@ -1451,6 +1462,27 @@ crate::register_machine!(ScobraSystem, "scobra", &["scobra"], SCRAMBLE_CONTROLS)
 mod tests {
     use super::*;
     use phosphor_core::core::machine::DipSwitches;
+
+    /// The sound board steps at the rate it always has, not yet the one its
+    /// crystal gives.
+    ///
+    /// `SOUND_CLOCK_HZ` divides a 14.318 MHz crystal, but the real Konami sound
+    /// board carries the 14.318181 MHz colourburst part that `clock_tree()`
+    /// declares. That is 22.6 Hz (12.6 ppm) of difference. Moving the mechanism
+    /// onto the tree and correcting the rate are separate acts, so this pins
+    /// the old rate and will fail when the correction lands, which is the
+    /// point.
+    #[test]
+    fn the_sound_domain_still_runs_the_rounded_crystal() {
+        let board = ScrambleBoard::new(Hw::Scramble);
+        assert_eq!(board.clocks.hz(board.sound_dom), SOUND_CLOCK_HZ);
+        assert_eq!(board.clocks.hz(board.sound_dom), 1_789_750);
+        // What the declared crystal would give: 14318181 / 8.
+        assert_eq!(
+            board.clocks.domain(board.sound_dom).root_ratio(),
+            (1_789_750, 14_318_181)
+        );
+    }
 
     #[test]
     fn machine_id_and_defaults() {

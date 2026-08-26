@@ -63,10 +63,13 @@ pub const SAVE_MAGIC: &[u8; 4] = b"PHOS";
 /// Bumped to 10 when Congo Bongo's `sound_cycle_accum` became a clock-tree
 /// domain, replacing a bare `u64` with the domain's saved ratio and phase.
 ///
+/// Bumped to 11 when Scramble's `sound_acc` became a clock-tree domain, the
+/// last of the hand-rolled board accumulators.
+///
 /// The format is positional, so every board whose field layout changes costs a
 /// bump like those. `phosphor-emulator-tlv-save-state-hc61` Stage A is what
 /// makes that cost go away.
-pub const SAVE_VERSION: u32 = 10;
+pub const SAVE_VERSION: u32 = 11;
 
 // -- Saveable trait ----------------------------------------------------------
 
