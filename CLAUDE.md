@@ -185,13 +185,17 @@ Local issues are tracked with `br` (beads). They live in `.beads/` and are commi
 RUST_LOG=error br list                          # Show open issues (RUST_LOG=error quiets log noise)
 br ready --json                                 # Actionable issues (not blocked/deferred)
 br show <id>                                     # Issue details
-br create "Title" -p 2 --type bug               # Create (types: feature, bug, task, chore)
+br create "Title" -p 2 --type bug               # Create (types: epic, feature, task, bug, chore)
 br update <id> --status in_progress             # Claim work
+br update <id> --type epic                      # Retype (e.g. a container filed as a feature)
 br close <id> --reason "explanation"            # Close with a descriptive reason
+br epic status                                  # Open epics with child-completion rollups
 br sync --flush-only                            # Export to issues.jsonl for committing
 ```
 
 - Priority: 0 = critical … 4 = backlog. Statuses: `open`, `in_progress`, `deferred`, `closed`.
+- An issue that exists to hold child work is `--type epic`, not `feature`. `br epic status` keys off the type, so an epic filed as a feature is invisible to it and its progress is never rolled up.
+- **`br` does not validate the type string.** A typo silently creates a new type rather than failing, which is how `test`, `refactor` and `docs` ended up in the history as one-off types. Use one of the five above.
 - `br` never auto-commits — run `br sync --flush-only`, then commit `.beads/` yourself.
 - Check `br ready --json` at the start of a session to see what's actionable.
 
