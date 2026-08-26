@@ -50,7 +50,15 @@ pub const SAVE_MAGIC: &[u8; 4] = b"PHOS";
 /// Bumped to 7 when Mr. Do! gained the output coupling capacitor its PSGs
 /// reached the speaker without, which adds the blocker's state to that board's
 /// stream.
-pub const SAVE_VERSION: u32 = 7;
+///
+/// Bumped to 8 when Gottlieb System 80's two `ClockDivider` fields became a
+/// `ClockTree` owned by its sound board, moving those bytes out of the end of
+/// the board's block and into the middle of the sound board's.
+///
+/// The format is positional, so every board whose field layout changes costs a
+/// bump like that one. `phosphor-emulator-tlv-save-state-hc61` Stage A is what
+/// makes that cost go away.
+pub const SAVE_VERSION: u32 = 8;
 
 // -- Saveable trait ----------------------------------------------------------
 

@@ -19,7 +19,9 @@ use phosphor_core::core::debug::{DebugRegister, Debuggable};
 use phosphor_core::core::machine::ProfileSpan;
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::{AccessKind, AddressSpace16};
-use phosphor_core::core::{Bus, BusMaster, ClockDivider, InterruptState, TimingConfig};
+use phosphor_core::core::{
+    Bus, BusMaster, ClockDomainName as Clk, ClockTree, DomainId, InterruptState, TimingConfig,
+};
 use phosphor_core::cpu::Cpu;
 use phosphor_core::cpu::i8088::I8088;
 use phosphor_core::cpu::m6502::M6502;
@@ -72,17 +74,19 @@ pub const TIMING: TimingConfig = TimingConfig {
 /// board crystals both land on 5 MHz by different divisions, which is why the
 /// I8088 and the pixel clock look like one clock in the code and are not.
 ///
-/// The Votrax SC-01's clock is not declared: it is an RC VCO steered by a DAC
-/// write, not a crystal division, so it belongs in the retune work rather than
-/// here.
-pub fn clock_tree() -> phosphor_core::core::ClockTree {
-    use phosphor_core::core::{ClockDomainName as Clk, ClockTree, RootId};
+/// The Votrax SC-01's VCO is a fourth clock source rather than a division of
+/// any of them: it is an RC oscillator steered by the speech-clock DAC, so its
+/// declared rate is only the power-on nominal and `set_domain_hz` moves it.
+pub fn clock_tree() -> ClockTree {
+    use phosphor_core::core::RootId;
     let mut t = ClockTree::new(15_000_000);
     let vid = t.add_root(20_000_000);
     let snd = t.add_root(3_579_545);
+    let vco = t.add_root(VOTRAX_NOMINAL_CLOCK_HZ as u32);
     let cpu = t.add_domain(Clk::Cpu, RootId::MAIN, 1, 3); // 5 MHz I8088
     let dot = t.add_domain(Clk::Pixel, vid, 1, 4); // 5 MHz pixel clock
     t.add_domain(Clk::SoundCpu, snd, 1, 4); // 894886.25 Hz 6502
+    t.add_domain(Clk::Speech, vco, 1, 1); // Votrax SC-01, 950 kHz at DAC centre
     t.set_step_domain(cpu);
     // Two crystals, but both divide to exactly 5 MHz, so 318 pixel clocks is
     // exactly 318 CPU cycles with nothing to round.
@@ -110,15 +114,26 @@ const GOTTLIEB_TILE_LAYOUT: GfxLayout<'static> = GfxLayout {
     char_increment: 256,
 };
 
-// Sound CPU ratio: 894,886 / 5,000,000 ≈ 179/1000
-const SOUND_CLOCK_NUM: u32 = 179;
-const SOUND_CLOCK_DEN: u32 = 1000;
-
 // Sound CPU clock (for audio resampler)
 const SOUND_CLOCK_HZ: u64 = 894_886;
 
-// I8088 main CPU clock; the Votrax tick divider is derived against this.
+// I8088 main CPU clock; the sound and Votrax rates are expressed against it.
 const I8088_CLOCK_HZ: u64 = 5_000_000;
+
+/// The sound CPU rate this board actually runs, as opposed to the one its
+/// crystal produces.
+///
+/// The 3.579545 MHz sound crystal over four is 894886.25 Hz, which is 715909 /
+/// 4000000 of the I8088. The board has always run a hand-reduced 179/1000
+/// instead, and 179/1000 of 5 MHz is exactly this: 114 Hz fast, 127 ppm.
+///
+/// Kept deliberately. Replacing it with the tree's exact ratio changes what the
+/// board sounds like, so it belongs in its own commit
+/// (`phosphor-emulator-clock-tree-jv78.5`) where a bisect can find it. Note
+/// that [`SOUND_CLOCK_HZ`] above, which is what the resampler is told the sound
+/// board emits at, is the *crystal* figure: the two disagree by the same
+/// 127 ppm today, and that correction has to move both.
+const LEGACY_SOUND_CLOCK_HZ: u32 = (I8088_CLOCK_HZ * 179 / 1000) as u32; // 895_000
 
 // Votrax SC-01 VCO frequency at the speech-clock DAC center (data = 0xA0).
 // The VCO is driven by the speech-clock DAC at 0x3000, so the actual clock is
@@ -158,7 +173,7 @@ const RESISTOR_DAC: [u8; 16] = [
 /// sound CPU address space. Its A/R (articulate/request) output is
 /// wired to RIOT Port B bit 7. A/R rising edge triggers sound CPU NMI.
 #[derive(Saveable)]
-#[save_version(3)]
+#[save_version(4)] // v4: the two ClockDividers became a ClockTree living here
 pub(crate) struct GottliebSoundBoard {
     riot: Riot6532,
     dac: Mc1408Dac,
@@ -184,14 +199,29 @@ pub(crate) struct GottliebSoundBoard {
     votrax_ar_prev: bool,
     /// NMI pending from Votrax A/R rising edge.
     votrax_nmi: bool,
-    /// Votrax VCO frequency (Hz) last requested by the speech-clock DAC.
-    /// The board reads this to retune both the Votrax tick rate and the
-    /// device's internal sample/capacitor clocks.
-    speech_clock_hz: u64,
+    /// The whole board's clock tree, exactly as [`clock_tree`] declares it.
+    ///
+    /// It lives on the *sound* board rather than on [`GottliebBoard`] because
+    /// the speech-clock DAC write that retunes the Votrax VCO arrives here, in
+    /// this struct's `Bus` impl. Holding the tree where the retune happens is
+    /// what lets that be a single call site instead of a flag the outer board
+    /// polls once per CPU cycle. The main CPU and pixel domains ride along
+    /// unstepped: they are the reference the other two are expressed against.
+    clocks: ClockTree,
+    #[save_skip]
+    sound_dom: DomainId,
+    #[save_skip]
+    votrax_dom: DomainId,
 }
 
 impl GottliebSoundBoard {
     fn new() -> Self {
+        let mut clocks = clock_tree();
+        let sound_dom = clocks.find(Clk::SoundCpu).expect("declared sound domain");
+        let votrax_dom = clocks.find(Clk::Speech).expect("declared speech domain");
+        // The one place the board departs from its own crystals; see
+        // `LEGACY_SOUND_CLOCK_HZ`.
+        clocks.set_domain_hz(sound_dom, LEGACY_SOUND_CLOCK_HZ);
         Self {
             riot: Riot6532::new(),
             dac: Mc1408Dac::new(),
@@ -202,13 +232,53 @@ impl GottliebSoundBoard {
             clock: 0,
             votrax_ar_prev: true,
             votrax_nmi: false,
-            speech_clock_hz: VOTRAX_NOMINAL_CLOCK_HZ,
+            clocks,
+            sound_dom,
+            votrax_dom,
         }
     }
 
-    /// Apply a new Votrax VCO frequency to the speech device.
+    /// Retune the Votrax VCO, device and clock domain together.
+    ///
+    /// The pairing is the point: a rate that reaches one but not the other is
+    /// how the speech clock got out of step in the first place
+    /// (`phosphor-emulator-1fg`).
     fn set_votrax_clock(&mut self, clock_hz: u64) {
+        self.clocks.set_domain_hz(self.votrax_dom, clock_hz as u32);
         self.votrax.set_clock(clock_hz);
+    }
+
+    /// Whether the sound 6502 is due a cycle this I8088 cycle.
+    #[inline]
+    fn sound_cpu_due(&mut self) -> bool {
+        self.clocks.tick(self.sound_dom)
+    }
+
+    /// Whether the Votrax is due a cycle this I8088 cycle.
+    #[inline]
+    fn votrax_due(&mut self) -> bool {
+        self.clocks.tick(self.votrax_dom)
+    }
+
+    /// Clear every domain's phase, leaving the rates alone.
+    ///
+    /// A board reset does not re-centre the speech-clock DAC, so the VCO keeps
+    /// whatever frequency it was last steered to.
+    fn reset_clock_phases(&mut self) {
+        self.clocks.reset();
+    }
+
+    /// Push the loaded VCO rate back into the speech device.
+    ///
+    /// The tree restores its own ratio, because [`ClockDomain`] saves the live
+    /// one. The device cannot: `VotraxSc01` save-skips `main_clock_hz` and the
+    /// sample and capacitor clocks derived from it, so they have to be re-fed
+    /// from the tree once, here, rather than left for a per-cycle comparison to
+    /// notice.
+    ///
+    /// [`ClockDomain`]: phosphor_core::core::ClockDomain
+    fn reapply_speech_clock(&mut self) {
+        self.votrax.set_clock(self.clocks.hz(self.votrax_dom));
     }
 
     /// Load sound ROM data (up to 8KB, mapped at 0x6000-0x7FFF).
@@ -359,9 +429,9 @@ impl Bus for GottliebSoundBoard {
                 self.votrax.write_phoneme(!data);
             }
 
-            // Speech clock DAC: 0x3000-0x3FFF retunes the Votrax VCO frequency.
-            // The board picks this up on its next tick to retune the device.
-            0x3000..=0x3FFF => self.speech_clock_hz = convert_speech_clock(data),
+            // Speech clock DAC: 0x3000-0x3FFF retunes the Votrax VCO frequency,
+            // applied to the clock domain and the device in the same call.
+            0x3000..=0x3FFF => self.set_votrax_clock(convert_speech_clock(data)),
 
             _ => {}
         }
@@ -494,12 +564,6 @@ pub struct GottliebBoard {
 
     // Timing
     pub(crate) clock: u64,
-    pub(crate) sound_clock: ClockDivider,
-    pub(crate) votrax_clock: ClockDivider,
-    /// Votrax VCO frequency currently applied to `votrax_clock` and the
-    /// speech device. Transient (not saved): reset to 0 on construction/load
-    /// so the next tick re-derives the divider from `sound.speech_clock_hz`.
-    pub(crate) votrax_clock_applied: u64,
     pub(crate) watchdog_counter: u16,
 
     // Profiling (not saved)
@@ -530,9 +594,6 @@ impl GottliebBoard {
             input_ports: [0; 4],
             dsw: 0,
             clock: 0,
-            sound_clock: ClockDivider::new(SOUND_CLOCK_NUM, SOUND_CLOCK_DEN),
-            votrax_clock: ClockDivider::new(VOTRAX_NOMINAL_CLOCK_HZ as u32, I8088_CLOCK_HZ as u32),
-            votrax_clock_applied: 0,
             watchdog_counter: 0,
             profiling: false,
             profile_spans: Vec::new(),
@@ -728,27 +789,19 @@ impl GottliebBoard {
     /// Board work after the CPU's cycle: the sound board, the Votrax, the
     /// clock, and the end-of-frame render.
     fn end_cycle(&mut self) {
-        // The speech-clock DAC (sound CPU 0x3000) retunes the Votrax VCO. When
-        // it changes — or after a state load, where votrax_clock_applied is 0 —
-        // re-derive the tick divider and the device's internal sample clock so
-        // both phoneme rate and pitch track the requested frequency.
-        let speech_hz = self.sound.speech_clock_hz;
-        if speech_hz != self.votrax_clock_applied {
-            self.votrax_clock_applied = speech_hz;
-            self.votrax_clock
-                .set_ratio(speech_hz as u32, I8088_CLOCK_HZ as u32);
-            self.sound.set_votrax_clock(speech_hz);
-        }
-
         // Tick sound board at fractional rate (~895 kHz). The sound CPU and the
         // board it drives are disjoint fields here, so its cycle dispatches at a
         // concrete type just like the main CPU's.
-        if self.sound_clock.tick() {
+        //
+        // No speech-clock comparison precedes this any more: the DAC write
+        // retunes the domain and the device together where it lands, so there
+        // is nothing for this loop to notice.
+        if self.sound.sound_cpu_due() {
             self.sound.tick(&mut self.sound_cpu);
         }
 
         // Tick Votrax SC-01 at its VCO rate (nominally 950 kHz, DAC-tunable)
-        if self.votrax_clock.tick() {
+        if self.sound.votrax_due() {
             self.sound.tick_votrax();
         }
 
@@ -965,8 +1018,7 @@ impl GottliebBoard {
         self.video_control = 0;
         self.sprite_bank = 0;
         self.clock = 0;
-        self.sound_clock.reset();
-        self.votrax_clock.reset();
+        self.sound.reset_clock_phases();
         self.watchdog_counter = 0;
         // NVRAM is NOT cleared (battery-backed)
     }
@@ -998,8 +1050,7 @@ impl Saveable for GottliebBoard {
         w.write_u8(self.video_control);
         w.write_u8(self.sprite_bank);
         w.write_u64_le(self.clock);
-        self.sound_clock.save_state(w);
-        self.votrax_clock.save_state(w);
+        // The clock tree travels inside the sound board, which owns it.
         w.write_u16_le(self.watchdog_counter);
     }
 
@@ -1016,17 +1067,16 @@ impl Saveable for GottliebBoard {
         self.video_control = r.read_u8()?;
         self.sprite_bank = r.read_u8()?;
         self.clock = r.read_u64_le()?;
-        self.sound_clock.load_state(r)?;
-        self.votrax_clock.load_state(r)?;
         self.watchdog_counter = r.read_u16_le()?;
         // Rebuild derived state
         self.rebuild_palette();
-        // Force the Votrax VCO divider to be re-derived from the loaded
-        // sound board on the next tick. Without this the applied frequency is
-        // whatever this instance happened to be running at, so a machine that
-        // had already retuned the VCO keeps the wrong speech clock — and emits
-        // a different number of samples per frame than the saved machine did.
-        self.votrax_clock_applied = 0;
+        // The speech domain came back at whatever rate it was retuned to,
+        // because ClockDomain saves its live ratio. The SC-01 itself cannot:
+        // it save-skips its main clock and the two clocks derived from it, so
+        // hand them back from the tree. Without this a machine that had already
+        // retuned the VCO keeps the wrong speech clock, and emits a different
+        // number of samples per frame than the saved machine did.
+        self.sound.reapply_speech_clock();
         Ok(())
     }
 }
@@ -1078,16 +1128,35 @@ mod tests {
 
     #[test]
     fn votrax_clock_divider_ratio() {
-        // The Votrax VCO divider is derived from its frequency against the
-        // 5 MHz I8088 clock; at the nominal 950 kHz it fires 950k times/sec.
-        let mut divider = ClockDivider::new(VOTRAX_NOMINAL_CLOCK_HZ as u32, I8088_CLOCK_HZ as u32);
+        // The Votrax VCO domain is expressed against the 5 MHz I8088 clock;
+        // at the nominal 950 kHz it fires 950k times per second.
+        let mut snd = GottliebSoundBoard::new();
+        assert_eq!(snd.clocks.hz(snd.votrax_dom), VOTRAX_NOMINAL_CLOCK_HZ);
         let mut ticks = 0u32;
         for _ in 0..I8088_CLOCK_HZ {
-            if divider.tick() {
+            if snd.votrax_due() {
                 ticks += 1;
             }
         }
         assert_eq!(ticks, VOTRAX_NOMINAL_CLOCK_HZ as u32);
+    }
+
+    /// The migration must not move the sound CPU's rate.
+    ///
+    /// The board deliberately runs a hand-reduced 179/1000 rather than the
+    /// 715909/4000000 its crystal gives; see `LEGACY_SOUND_CLOCK_HZ`. Pin the
+    /// ratio so replacing it is a deliberate act with a failing test attached,
+    /// not a side effect of touching this file.
+    #[test]
+    fn sound_cpu_still_runs_the_legacy_ratio() {
+        let snd = GottliebSoundBoard::new();
+        assert_eq!(snd.clocks.domain(snd.sound_dom).step_ratio(), (179, 1000));
+        assert_eq!(snd.clocks.hz(snd.sound_dom), LEGACY_SOUND_CLOCK_HZ as u64);
+        // What the crystal actually produces, for the commit that corrects it.
+        assert_eq!(
+            snd.clocks.domain(snd.sound_dom).root_ratio(),
+            (179_000, 715_909)
+        );
     }
 
     #[test]
@@ -1098,11 +1167,37 @@ mod tests {
         assert_eq!(convert_speech_clock(0xA0 + 10), 950_000 + 10 * 5_500);
         assert_eq!(convert_speech_clock(0xA0 - 10), 950_000 - 10 * 5_500);
 
-        // A write to the speech-clock DAC region updates the requested clock.
+        // A write to the speech-clock DAC region retunes the clock domain and
+        // the device in the same call, which is the whole point of routing it
+        // through `set_votrax_clock`.
         let mut snd = GottliebSoundBoard::new();
-        assert_eq!(snd.speech_clock_hz, VOTRAX_NOMINAL_CLOCK_HZ);
+        assert_eq!(snd.clocks.hz(snd.votrax_dom), VOTRAX_NOMINAL_CLOCK_HZ);
         Bus::write(&mut snd, BusMaster::Cpu(1), 0x3000, 0xC0);
-        assert_eq!(snd.speech_clock_hz, convert_speech_clock(0xC0));
+        let want = convert_speech_clock(0xC0);
+        assert_eq!(snd.clocks.hz(snd.votrax_dom), want);
+        assert_eq!(snd.votrax.clock_hz(), want);
+    }
+
+    /// A retuned speech clock survives a save/load, without the shadow field
+    /// that used to force a re-derive on the next tick.
+    #[test]
+    fn a_retuned_speech_clock_reloads_retuned() {
+        let mut board = GottliebBoard::new();
+        Bus::write(&mut board.sound, BusMaster::Cpu(1), 0x3000, 0xC0);
+        let want = convert_speech_clock(0xC0);
+
+        let mut w = StateWriter::new();
+        board.save_state(&mut w);
+        let data = w.into_vec();
+
+        let mut restored = GottliebBoard::new();
+        assert_eq!(restored.sound.clocks.hz(restored.sound.votrax_dom), 950_000);
+        let mut r = StateReader::new(&data);
+        restored.load_state(&mut r).unwrap();
+
+        assert_eq!(restored.sound.clocks.hz(restored.sound.votrax_dom), want);
+        // The device save-skips its clock, so the load has to hand it back.
+        assert_eq!(restored.sound.votrax.clock_hz(), want);
     }
 
     #[test]

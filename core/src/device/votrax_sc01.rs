@@ -280,6 +280,15 @@ impl VotraxSc01 {
         self.filters_commit(true);
     }
 
+    /// The main clock the device is currently running at, in Hz.
+    ///
+    /// Save-skipped along with everything derived from it, so a host that
+    /// retunes the clock has to re-apply it after a state load. Exposed so that
+    /// re-application can be checked rather than assumed.
+    pub fn clock_hz(&self) -> u64 {
+        self.main_clock_hz
+    }
+
     /// Load the phoneme ROM (512 bytes, 64 entries × 8 bytes, little-endian).
     pub fn load_rom(&mut self, data: &[u8]) {
         let len = data.len().min(512);
