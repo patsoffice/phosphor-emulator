@@ -34,6 +34,7 @@ use phosphor_harness::movie::{Movie, MovieRecord, hex};
 use phosphor_harness::{Harness, hash_frame, hash_vectors, load_rom_set, render_oriented};
 
 mod audiodiff;
+mod dumpsave;
 mod gfxsheet;
 mod trace;
 use gfxsheet::SheetConfig;
@@ -372,6 +373,30 @@ enum Command {
         #[arg(long)]
         subtract_to: Option<PathBuf>,
     },
+    /// Print the chunk tree of a save-state file: which component owns each
+    /// chunk, how long it is, and where it starts.
+    ///
+    /// The tree comes from loading the file into a bare machine of the id its
+    /// header names, with the reader recording what it enters, so the names
+    /// are the reader's, not a guess from the bytes. A file that fails to load
+    /// still prints everything read before it stopped, which is normally where
+    /// the problem is.
+    ///
+    /// Needs no ROM set: the state layout does not depend on ROM contents.
+    ///
+    /// With `--machine` and no file it saves a freshly built machine and dumps
+    /// that instead: the layout this build expects. Diff it against a file
+    /// that will not load to see which chunk the two disagree about.
+    DumpSave {
+        /// Save-state file. Omit with `--machine` to dump that machine's own
+        /// expected layout.
+        file: Option<PathBuf>,
+        /// Machine to load the file as, when the header's id is not a
+        /// registered name (`disasm machines` lists them). Without a file,
+        /// the machine whose layout to dump.
+        #[arg(long)]
+        machine: Option<String>,
+    },
     /// List the registered machines (the `--machine` values accepted by
     /// `frameshot`/`trace`/`machine`/`gfxview`), with their ROM-set names.
     Machines,
@@ -633,6 +658,7 @@ fn run_command(cmd: Command) -> Result<String, String> {
                 subtract_to: subtract_to.as_deref(),
             },
         ),
+        Command::DumpSave { file, machine } => dumpsave::run(file.as_deref(), machine.as_deref()),
         Command::Machines => Ok(list_machines()),
     }
 }

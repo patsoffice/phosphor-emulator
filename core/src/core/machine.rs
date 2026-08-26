@@ -676,6 +676,24 @@ pub trait SaveState {
     fn load_state(&mut self, _data: &[u8]) -> Result<(), SaveError> {
         Err(SaveError::InvalidFormat("save states not supported".into()))
     }
+
+    /// Restore while recording the chunk tree, for `disasm dump-save`.
+    ///
+    /// The dump walks the file by *loading* it, so what it prints is what a
+    /// reader makes of the bytes rather than a guess from their shape. There is
+    /// no way to derive that generically: only the machine's own `load_state`
+    /// knows where its chunks are. The default therefore refuses rather than
+    /// loading untraced and reporting an empty tree, which would read as "this
+    /// machine has no chunks".
+    fn load_state_traced(
+        &mut self,
+        _data: &[u8],
+        _trace: &std::cell::RefCell<crate::core::save_state::ChunkTrace>,
+    ) -> Result<(), SaveError> {
+        Err(SaveError::InvalidFormat(
+            "this machine does not support traced loads".into(),
+        ))
+    }
 }
 
 /// Battery-backed RAM persistence.

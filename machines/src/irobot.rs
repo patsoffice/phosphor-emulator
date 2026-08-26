@@ -26,7 +26,7 @@ use phosphor_core::core::machine::{
     DipSwitchBank, Direction, InputConfigurable, InputControl, InputEvent, InputId, InputKind,
     MachineCore, MouseControl, Nvram, PadAxis, PadControl, Profilable, Renderable, SaveState,
 };
-use phosphor_core::core::save_state::{self, SaveError, Saveable, StateReader, StateWriter};
+use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::{AccessKind, AddressSpace16};
 use phosphor_core::core::{Bus, BusMaster, TimingConfig};
 use phosphor_core::cpu::Cpu;
@@ -1335,13 +1335,7 @@ impl Saveable for IrobotSystem {
 }
 
 impl SaveState for IrobotSystem {
-    fn save_state(&self) -> Option<Vec<u8>> {
-        Some(save_state::save_machine(self, self.machine_id()))
-    }
-    fn load_state(&mut self, data: &[u8]) -> Result<(), SaveError> {
-        let id = self.machine_id().to_string();
-        save_state::load_machine(self, &id, data)
-    }
+    crate::machine_save_state!();
 }
 
 impl Nvram for IrobotSystem {

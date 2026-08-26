@@ -7,7 +7,7 @@ use phosphor_core::core::machine::{
     InputKind, KeyId, MachineCore, MouseControl, PadAxis, PadButton, PadControl, Renderable,
     SaveState,
 };
-use phosphor_core::core::save_state::{self, SaveError, Saveable, StateReader, StateWriter};
+use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::{AccessKind, AddressSpace16};
 use phosphor_core::core::{Bus, BusMaster, TimingConfig};
 use phosphor_core::cpu::m6502::M6502;
@@ -1078,14 +1078,7 @@ impl MachineCore for MissileCommandSystem {
 }
 
 impl SaveState for MissileCommandSystem {
-    fn save_state(&self) -> Option<Vec<u8>> {
-        Some(save_state::save_machine(self, self.machine_id()))
-    }
-
-    fn load_state(&mut self, data: &[u8]) -> Result<(), SaveError> {
-        let id = self.machine_id().to_string();
-        save_state::load_machine(self, &id, data)
-    }
+    crate::machine_save_state!();
 }
 
 // No battery RAM, sub-span profiling, or event tracing; DIP switches are real

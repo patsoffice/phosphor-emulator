@@ -372,6 +372,14 @@ macro_rules! machine_save_state {
             let id = self.machine_id().to_string();
             phosphor_core::core::save_state::load_machine(self, &id, data)
         }
+        fn load_state_traced(
+            &mut self,
+            data: &[u8],
+            trace: &std::cell::RefCell<phosphor_core::core::save_state::ChunkTrace>,
+        ) -> Result<(), phosphor_core::core::save_state::SaveError> {
+            let id = self.machine_id().to_string();
+            phosphor_core::core::save_state::load_machine_traced(self, &id, data, trace)
+        }
     };
 }
 pub(crate) use machine_save_state;
