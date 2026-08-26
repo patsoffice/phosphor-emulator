@@ -302,9 +302,12 @@ pub const TIMING: TimingConfig = TimingConfig {
 /// POKEY at /8, the YM2151 at /4.
 ///
 /// The CPU rate is exactly 7159090.5 Hz, so `TIMING.cpu_clock_hz` is the
-/// nearest whole hertz to it rather than an exact division. The TMS5220 is not
-/// declared: Port B bit 4 reselects its divisor at runtime, which is a retune
-/// rather than a fixed ratio (see `atari_system1_sound.rs`).
+/// nearest whole hertz to it rather than an exact division.
+///
+/// The TMS5220 hangs off master/2 through a divider Port B bit 4 reselects at
+/// runtime: /11 nominal, /9 when the bit is set. It is declared here at the
+/// nominal /22 of the crystal, and `atari_system1_sound.rs` moves it with
+/// `set_domain_hz` when the bit changes.
 pub fn clock_tree() -> phosphor_core::core::ClockTree {
     use phosphor_core::core::{ClockDomainName as Clk, ClockTree, RootId};
     let mut t = ClockTree::new(14_318_181);
@@ -313,6 +316,7 @@ pub fn clock_tree() -> phosphor_core::core::ClockTree {
     t.add_domain(Clk::SoundCpu, RootId::MAIN, 1, 8); // 1.789772 MHz 6502
     t.add_domain(Clk::Pokey, RootId::MAIN, 1, 8); // POKEY shares the sound CPU's rate
     t.add_domain(Clk::Psg, RootId::MAIN, 1, 4); // YM2151, twice the sound CPU
+    t.add_domain(Clk::Speech, RootId::MAIN, 1, 22); // TMS5220 at master/2/11
     t.set_step_domain(cpu);
     // CPU and pixel clock are the same signal, so HTOTAL is the cycle count
     // with nothing to round.

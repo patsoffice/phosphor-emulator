@@ -25,7 +25,10 @@ use phosphor_core::core::machine::{
 };
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::watchpoint::DebugAccessSource;
-use phosphor_core::core::{AccessKind, AddressSpace16, Bus, BusMaster, TimingConfig};
+use phosphor_core::core::{
+    AccessKind, AddressSpace16, Bus, BusMaster, ClockDomainName as Clk, ClockTree, DomainId,
+    TimingConfig,
+};
 use phosphor_core::cpu::Cpu;
 use phosphor_core::cpu::m6809::M6809;
 use phosphor_core::device::adc0809::Adc0809;
@@ -250,8 +253,8 @@ const AVG_CYCLES_PER_CPU_CYCLE: u32 = 8;
 
 /// POKEY / sound-CPU clock: master / 8 = 1.512 MHz.
 const SOUND_CLOCK_HZ: u32 = 1_512_000;
-/// TMS5220 speech clock: master / 2 / 9 = 672 kHz.
-const TMS_CLOCK_HZ: u32 = 672_000;
+// The TMS5220's 672 kHz (master / 2 / 9) is no longer a constant here: it comes
+// off the speech domain in `clock_tree()`, which is also what steps it.
 /// Host audio output rate.
 fn audio_sample_rate_hz() -> u32 {
     phosphor_core::audio::host_sample_rate() as u32
@@ -720,8 +723,12 @@ pub(crate) struct StarWarsBoard {
     pub(crate) riot: Riot6532,
     /// TMS5220 speech synthesizer, driven through the RIOT ports.
     pub(crate) tms: Tms5220,
-    /// Fractional accumulator stepping the 672 kHz TMS against the sound clock.
-    pub(crate) tms_clock_acc: u64,
+    /// The board's clock tree, as [`clock_tree`] declares it. Only the speech
+    /// domain is stepped here; the rest is the derivation it rides on. Save and
+    /// load are hand-written below, so the handle beside it is simply not
+    /// written rather than being marked skipped.
+    pub(crate) clocks: ClockTree,
+    pub(crate) tms_dom: DomainId,
 
     #[debug_map(cpu = 0)]
     pub(crate) main_map: AddressSpace16,
@@ -808,6 +815,11 @@ impl StarWarsBoard {
     }
 
     fn with_variant(esb: bool) -> Self {
+        let clocks = clock_tree();
+        let tms_dom = clocks.find(Clk::Speech).expect("declared speech domain");
+        // The TMS's rate and the ratio it is stepped at are now one derivation,
+        // read from the domain the crystal declares.
+        let tms_hz = clocks.hz(tms_dom) as u32;
         Self {
             avg: Avg::with_variant(
                 AvgVariant::StarWars,
@@ -821,8 +833,9 @@ impl StarWarsBoard {
                 Pokey::with_clock(SOUND_CLOCK_HZ, audio_sample_rate_hz())
             }),
             riot: Riot6532::new(),
-            tms: Tms5220::with_variant(Tms52xxVariant::Tms5220, TMS_CLOCK_HZ),
-            tms_clock_acc: 0,
+            tms: Tms5220::with_variant(Tms52xxVariant::Tms5220, tms_hz),
+            clocks,
+            tms_dom,
             main_map: if esb {
                 build_esb_main_map()
             } else {
@@ -1430,9 +1443,7 @@ impl StarWarsBoard {
         // Drive the RIOT input pins, then clock it and the TMS (672 kHz).
         self.refresh_riot_pa();
         self.riot.tick();
-        self.tms_clock_acc += TMS_CLOCK_HZ as u64;
-        while self.tms_clock_acc >= SOUND_CLOCK_HZ as u64 {
-            self.tms_clock_acc -= SOUND_CLOCK_HZ as u64;
+        if self.clocks.tick(self.tms_dom) {
             self.tms.tick();
         }
 
@@ -1455,7 +1466,7 @@ impl StarWarsBoard {
         }
         self.riot.reset();
         self.tms.reset();
-        self.tms_clock_acc = 0;
+        self.clocks.reset();
         self.adc.reset();
         self.stick = new_yoke();
         self.push_stick();
@@ -1565,7 +1576,7 @@ impl Saveable for StarWarsBoard {
         }
         self.riot.save_state(w);
         self.tms.save_state(w);
-        w.write_u64_le(self.tms_clock_acc);
+        self.clocks.save_state(w);
         self.adc.save_state(w);
         w.write_u32_le(self.stick[0].position() as u32);
         w.write_u32_le(self.stick[1].position() as u32);
@@ -1604,9 +1615,10 @@ impl Saveable for StarWarsBoard {
         }
         self.riot.load_state(r)?;
         self.tms.load_state(r)?;
-        self.tms_clock_acc = r.read_u64_le()?;
-        // Re-sync the TMS resampler to its (configuration) clock.
-        self.tms.set_clock(TMS_CLOCK_HZ);
+        self.clocks.load_state(r)?;
+        // The TMS save-skips its clock, so hand it back from the domain that
+        // just came out of the save file.
+        self.tms.set_clock(self.clocks.hz(self.tms_dom) as u32);
         self.adc.load_state(r)?;
         self.stick[0].set_position(r.read_u32_le()? as i32);
         self.stick[1].set_position(r.read_u32_le()? as i32);

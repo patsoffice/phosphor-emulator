@@ -24,7 +24,7 @@
 
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
-use phosphor_core::core::{Bus, BusMaster};
+use phosphor_core::core::{Bus, BusMaster, ClockDomainName as Clk, ClockTree, DomainId};
 use phosphor_core::cpu::Cpu;
 use phosphor_core::cpu::m6502::M6502;
 use phosphor_core::device::pokey::Pokey;
@@ -62,35 +62,56 @@ fn tms_clock_for_pb4(pb4: bool) -> u32 {
 struct Speech {
     via: Via6522,
     tms: Tms5220,
-    /// TMS master clock currently selected by Port B bit 4.
-    tms_clock_hz: u32,
-    /// Fractional accumulator stepping the TMS clock against the sound-CPU clock.
-    clock_acc: u64,
+    /// The board's clock tree, stepped in *sound-CPU* cycles.
+    ///
+    /// The declaration in [`clock_tree`](crate::atari_system1::clock_tree) is
+    /// the same one the registry test checks; only the reference differs.
+    /// `set_step_domain` renominates the sound 6502 as the domain ratios are
+    /// expressed against, because that is what this section's loop counts in:
+    /// [`tick`](Self::tick) runs once per sound-CPU cycle.
+    clocks: ClockTree,
+    tms_dom: DomainId,
 }
 
 impl Speech {
     fn new() -> Self {
-        Self {
+        let mut clocks = crate::atari_system1::clock_tree();
+        let sound = clocks.find(Clk::SoundCpu).expect("declared sound domain");
+        clocks.set_step_domain(sound);
+        let tms_dom = clocks.find(Clk::Speech).expect("declared speech domain");
+        let mut speech = Self {
             via: Via6522::new(),
             tms: Tms5220::new(),
-            tms_clock_hz: tms_clock_for_pb4(false),
-            clock_acc: 0,
-        }
+            clocks,
+            tms_dom,
+        };
+        speech.select_clock(false);
+        speech
     }
 
     fn reset(&mut self) {
         self.via.reset();
         self.tms.reset();
-        self.tms_clock_hz = tms_clock_for_pb4(false);
-        self.clock_acc = 0;
+        self.clocks.reset();
+        self.select_clock(false);
+    }
+
+    /// Apply the clock Port B bit 4 selects, to the domain and the device
+    /// together.
+    fn select_clock(&mut self, pb4: bool) {
+        let hz = tms_clock_for_pb4(pb4);
+        self.clocks.set_domain_hz(self.tms_dom, hz);
+        self.tms.set_clock(hz);
+    }
+
+    /// The TMS master clock currently selected.
+    fn tms_clock_hz(&self) -> u32 {
+        self.clocks.hz(self.tms_dom) as u32
     }
 
     /// Step the TMS at its (variable) master clock for one sound-CPU cycle.
-    fn tick(&mut self, sound_clock_hz: u32) {
-        self.clock_acc += self.tms_clock_hz as u64;
-        let step = sound_clock_hz as u64;
-        while self.clock_acc >= step {
-            self.clock_acc -= step;
+    fn tick(&mut self) {
+        if self.clocks.tick(self.tms_dom) {
             self.tms.tick();
         }
     }
@@ -125,12 +146,11 @@ impl Speech {
             self.tms.data_w(data);
         }
         if offset & 0x0F == 0 {
-            // Port B bit 4 (an output pin) selects the TMS master clock.
+            // Port B bit 4 (an output pin) selects the TMS master clock. The
+            // domain and the device move together, in one call.
             let pb4 = self.via.read_output_b() & 0x10 != 0;
-            let clk = tms_clock_for_pb4(pb4);
-            if clk != self.tms_clock_hz {
-                self.tms_clock_hz = clk;
-                self.tms.set_clock(clk);
+            if tms_clock_for_pb4(pb4) != self.tms_clock_hz() {
+                self.select_clock(pb4);
             }
         }
     }
@@ -146,18 +166,18 @@ impl Speech {
     fn save_state(&self, w: &mut StateWriter) {
         self.via.save_state(w);
         self.tms.save_state(w);
-        w.write_u32_le(self.tms_clock_hz);
-        w.write_u64_le(self.clock_acc);
+        // The selected clock travels as the domain's own ratio, so it no longer
+        // needs writing beside the accumulator that used to carry it.
+        self.clocks.save_state(w);
     }
 
     fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
         self.via.load_state(r)?;
         self.tms.load_state(r)?;
-        self.tms_clock_hz = r.read_u32_le()?;
-        self.clock_acc = r.read_u64_le()?;
+        self.clocks.load_state(r)?;
         // Re-sync the TMS resampler to the restored clock (the device's clock is
         // configuration and isn't part of its own save state).
-        self.tms.set_clock(self.tms_clock_hz);
+        self.tms.set_clock(self.tms_clock_hz());
         Ok(())
     }
 }
@@ -324,7 +344,7 @@ impl AtariSystem1Sound {
         self.bus.pokey.tick();
         self.bus.ym.tick(YM_CLOCKS_PER_TICK);
         if let Some(speech) = &mut self.bus.speech {
-            speech.tick(SOUND_CLOCK_HZ);
+            speech.tick();
         }
         self.bus.clock += 1;
     }
@@ -772,12 +792,54 @@ mod tests {
     #[test]
     fn speech_port_b_bit4_retunes_the_tms_clock() {
         let mut sp = Speech::new();
-        assert_eq!(sp.tms_clock_hz, 650_826, "powers up at the ÷11 clock");
+        assert_eq!(sp.tms_clock_hz(), 650_826, "powers up at the ÷11 clock");
         sp.write(0x2, 0x10); // DDRB: Port B bit 4 = output
         sp.write(0x0, 0x10); // ORB bit 4 high → ÷9 clock
-        assert_eq!(sp.tms_clock_hz, 795_454);
+        assert_eq!(sp.tms_clock_hz(), 795_454);
         sp.write(0x0, 0x00); // ORB bit 4 low → back to nominal
-        assert_eq!(sp.tms_clock_hz, 650_826);
+        assert_eq!(sp.tms_clock_hz(), 650_826);
+    }
+
+    /// The retune reaches the device as well as the domain, and both survive a
+    /// save/load. The device cannot restore its own clock (it save-skips it),
+    /// which is exactly the gap the old `_applied` shadow fields existed to
+    /// paper over.
+    #[test]
+    fn a_retuned_tms_clock_reloads_retuned() {
+        let mut sp = Speech::new();
+        sp.write(0x2, 0x10);
+        sp.write(0x0, 0x10); // select the ÷9 clock
+        assert_eq!(sp.tms_clock_hz(), 795_454);
+
+        let mut w = StateWriter::new();
+        sp.save_state(&mut w);
+        let data = w.into_vec();
+
+        let mut restored = Speech::new();
+        assert_eq!(restored.tms_clock_hz(), 650_826);
+        let mut r = StateReader::new(&data);
+        restored.load_state(&mut r).unwrap();
+        assert_eq!(restored.tms_clock_hz(), 795_454);
+    }
+
+    /// The TMS is stepped against the *sound* CPU, not the main one.
+    ///
+    /// `Speech::tick` runs once per sound-CPU cycle, so its tree renominates
+    /// the sound 6502 as the stepping domain. Against the main CPU the ratio
+    /// would be four times too slow.
+    #[test]
+    fn the_speech_domain_is_stepped_against_the_sound_cpu() {
+        let sp = Speech::new();
+        let sound = sp.clocks.find(Clk::SoundCpu).expect("sound domain");
+        assert_eq!(sp.clocks.step_domain(), Some(sound));
+        // 650826 / 1789772.625, which is what the hand-rolled accumulator did
+        // against a truncated 1789772.
+        let (num, den) = sp.clocks.domain(sp.tms_dom).step_ratio();
+        assert_eq!(
+            (num as f64 / den as f64 * 1_000_000.0).round(),
+            363_636.0,
+            "the TMS runs at 0.3636 of the sound CPU"
+        );
     }
 
     #[test]
@@ -791,7 +853,7 @@ mod tests {
         assert_ne!(sp.read(0x0) & (1 << 2), 0, "full FIFO → not ready");
         // Ticking the TMS synthesizes speech, consuming the FIFO over time.
         for _ in 0..400_000 {
-            sp.tick(SOUND_CLOCK_HZ);
+            sp.tick();
         }
         assert_eq!(sp.read(0x0) & (1 << 2), 0, "drained FIFO → ready again");
     }

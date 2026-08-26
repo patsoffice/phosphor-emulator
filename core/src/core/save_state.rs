@@ -55,10 +55,15 @@ pub const SAVE_MAGIC: &[u8; 4] = b"PHOS";
 /// `ClockTree` owned by its sound board, moving those bytes out of the end of
 /// the board's block and into the middle of the sound board's.
 ///
+/// Bumped to 9 when the last two hand-rolled clock accumulators, Atari System
+/// 1's TMS5220 clock-select and Star Wars' `tms_clock_acc`, became clock-tree
+/// domains. Each replaced a rate plus an accumulator with the domain's own
+/// saved ratio.
+///
 /// The format is positional, so every board whose field layout changes costs a
-/// bump like that one. `phosphor-emulator-tlv-save-state-hc61` Stage A is what
+/// bump like those. `phosphor-emulator-tlv-save-state-hc61` Stage A is what
 /// makes that cost go away.
-pub const SAVE_VERSION: u32 = 8;
+pub const SAVE_VERSION: u32 = 9;
 
 // -- Saveable trait ----------------------------------------------------------
 
