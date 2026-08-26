@@ -63,9 +63,8 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use phosphor_core::audio::analysis::{Integrity, pcm_to_f64};
-use phosphor_harness::{Harness, load_rom_set, roms_dir};
+use phosphor_harness::{Harness, roms_dir};
 use phosphor_machines::registry;
-use phosphor_machines::rom_loader::RomSet;
 
 /// Frames to run before measuring.
 ///
@@ -261,16 +260,12 @@ fn roms() -> Option<PathBuf> {
     dir
 }
 
-fn rom_set(dir: &Path, machine: &str) -> Option<RomSet> {
+fn rom_set_present(dir: &Path, machine: &str) -> bool {
     let entry = registry::find(machine).unwrap_or_else(|| panic!("{machine} is not registered"));
-    if !entry
+    entry
         .rom_names
         .iter()
         .any(|n| dir.join(format!("{n}.zip")).exists())
-    {
-        return None;
-    }
-    load_rom_set(dir.to_str().unwrap(), entry.rom_names).ok()
 }
 
 /// Where recorded input movies live.
@@ -316,7 +311,14 @@ enum Fixture {
 
 /// Measure a machine's audio, or `None` if this collection cannot run it.
 fn measure(dir: &Path, machine: &str) -> Option<(Integrity, Fixture)> {
-    let _ = rom_set(dir, machine)?;
+    // Availability is a file-existence question. Loading the set here to answer
+    // it, as this used to, decompressed every ROM zip twice per machine: once
+    // for the answer, which was then dropped on the floor, and once inside
+    // `Harness::build` below. A set that exists but will not load still skips,
+    // because the build returns `None` through `.ok()?`.
+    if !rom_set_present(dir, machine) {
+        return None;
+    }
     let roms = dir.to_str()?;
 
     // Prefer recorded play. A movie recorded against a different ROM revision
@@ -447,6 +449,15 @@ struct Sweep {
     checked: usize,
     /// Machines this collection cannot run.
     skipped: Vec<&'static str>,
+    /// Wall time each machine's measurement took, and the whole sweep's.
+    ///
+    /// Kept because "the suite is slow" is otherwise unanswerable without
+    /// instrumenting it again from scratch. The sweep runs one machine per core,
+    /// so the wall time is the makespan of these, not their sum: comparing the
+    /// two says whether the remaining cost is one long machine, a ragged tail,
+    /// or genuinely spread across the roster.
+    per_machine: Vec<(&'static str, f64)>,
+    elapsed: f64,
 }
 
 /// Measure every machine once, then judge. Split from the assertions so both
@@ -474,9 +485,19 @@ fn sweep_uncached(dir: &Path) -> Sweep {
     // core. Judging stays sequential and in registry order, which is what keeps
     // the reported defect list stable between runs.
     let machines: Vec<&'static str> = registry::all().iter().map(|m| m.name).collect();
-    let results = common::map_parallel(&machines, |name| measure(dir, name));
+    let started = std::time::Instant::now();
+    let results = common::map_parallel(&machines, |name| {
+        let t = std::time::Instant::now();
+        (measure(dir, name), t.elapsed().as_secs_f64())
+    });
+    let elapsed = started.elapsed().as_secs_f64();
+    let per_machine: Vec<(&'static str, f64)> = machines
+        .iter()
+        .zip(results.iter())
+        .map(|(name, (_, secs))| (*name, *secs))
+        .collect();
 
-    for (entry, result) in machines.iter().zip(results) {
+    for (entry, (result, _)) in machines.iter().zip(results) {
         let Some((integrity, fixture)) = result else {
             skipped.push(*entry);
             continue;
@@ -510,7 +531,36 @@ fn sweep_uncached(dir: &Path) -> Sweep {
         fixtures,
         checked,
         skipped,
+        per_machine,
+        elapsed,
     }
+}
+
+/// Where the sweep's time went, slowest machine first.
+///
+/// The three numbers that matter are printed together on purpose. Total CPU
+/// against wall time is the achieved parallelism, and the slowest machine
+/// against wall time says whether the floor is one board: no amount of extra
+/// workers can finish sooner than the longest single machine, because one
+/// machine's emulation is inherently sequential.
+fn report_cost(sweep: &Sweep) {
+    let mut rows = sweep.per_machine.clone();
+    rows.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+    let total: f64 = rows.iter().map(|(_, s)| s).sum();
+    let slowest = rows.first().map(|(_, s)| *s).unwrap_or(0.0);
+
+    eprintln!("\nsweep cost, slowest first:");
+    for (machine, secs) in rows.iter().take(12) {
+        eprintln!("  {machine:<16} {secs:6.2}s");
+    }
+    eprintln!(
+        "  ... {} machines, {total:.1}s of CPU in {:.1}s of wall time \
+         ({:.1}x parallel); slowest single machine {slowest:.1}s, which is the \
+         floor no thread count can beat",
+        rows.len(),
+        sweep.elapsed,
+        total / sweep.elapsed.max(f64::EPSILON),
+    );
 }
 
 /// Print every machine's measurement, worst offset first.
@@ -524,6 +574,7 @@ fn sweep_uncached(dir: &Path) -> Sweep {
 /// machine sits just under the threshold is what says whether a fix elsewhere
 /// moved it, and a machine that is fine is the control group.
 fn report(sweep: &Sweep, e: &Expectations) {
+    report_cost(sweep);
     let mut rows: Vec<(&String, &Integrity)> = sweep.measured.iter().collect();
     rows.sort_by(|a, b| {
         b.1.dc_offset
