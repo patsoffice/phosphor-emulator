@@ -534,11 +534,23 @@ impl phosphor_core::device::Device for AtariSystem1Sound {
     }
 }
 
+// Chunk tags for this board's components, assigned explicitly because the impl
+// is hand-written. Stable for the board; a retired tag is never reused.
+//
+// The speech board is only on the speech games, so its tag may be absent. It is
+// last in the body, with nothing after it: an optional chunk can only be
+// followed by another chunk or by the end of the board's own bytes, because
+// absence is detected by peeking at the next tag.
+const A1S_TAG_CPU: u16 = 1;
+const A1S_TAG_POKEY: u16 = 2;
+const A1S_TAG_YM: u16 = 3;
+const A1S_TAG_SPEECH: u16 = 4;
+
 impl Saveable for AtariSystem1Sound {
     fn save_state(&self, w: &mut StateWriter) {
-        self.cpu.save_state(w);
-        self.bus.pokey.save_state(w);
-        self.bus.ym.save_state(w);
+        w.write_component(A1S_TAG_CPU, &self.cpu);
+        w.write_component(A1S_TAG_POKEY, &self.bus.pokey);
+        w.write_component(A1S_TAG_YM, &self.bus.ym);
         w.write_bytes(self.bus.sound_ram.as_ref());
         w.write_u8(self.bus.outlatch);
         w.write_u8(self.bus.coin_inputs);
@@ -550,18 +562,26 @@ impl Saveable for AtariSystem1Sound {
         w.write_bool(self.bus.held_reset);
         w.write_bool(self.bus.reset_pending);
         w.write_u64_le(self.bus.clock);
-        // Speech state only exists on speech games; its presence is fixed by the
-        // board config, so no discriminant is written (a Marble save is
-        // unchanged, and a Road Runner save always has it).
+        // Speech state only exists on speech games. It is now a chunk, so a
+        // Marble save that has none is distinguishable from a Road Runner save
+        // that does, rather than the two differing only in trailing length.
+        // `Speech` keeps inherent save/load rather than a `Saveable` impl, so
+        // the frame goes on by hand.
         if let Some(speech) = &self.bus.speech {
-            speech.save_state(w);
+            w.write_tlv(A1S_TAG_SPEECH, |w| speech.save_state(w));
         }
     }
 
     fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
-        self.cpu.load_state(r)?;
-        self.bus.pokey.load_state(r)?;
-        self.bus.ym.load_state(r)?;
+        r.read_component(A1S_TAG_CPU, "AtariSystem1Sound.cpu", |r| {
+            self.cpu.load_state(r)
+        })?;
+        r.read_component(A1S_TAG_POKEY, "AtariSystem1Sound.pokey", |r| {
+            self.bus.pokey.load_state(r)
+        })?;
+        r.read_component(A1S_TAG_YM, "AtariSystem1Sound.ym", |r| {
+            self.bus.ym.load_state(r)
+        })?;
         r.read_bytes_into(self.bus.sound_ram.as_mut())?;
         self.bus.outlatch = r.read_u8()?;
         self.bus.coin_inputs = r.read_u8()?;
@@ -573,9 +593,19 @@ impl Saveable for AtariSystem1Sound {
         self.bus.held_reset = r.read_bool()?;
         self.bus.reset_pending = r.read_bool()?;
         self.bus.clock = r.read_u64_le()?;
-        if let Some(speech) = &mut self.bus.speech {
-            speech.load_state(r)?;
-        }
+        let has_speech = self.bus.speech.is_some();
+        r.read_optional(
+            A1S_TAG_SPEECH,
+            "AtariSystem1Sound.speech",
+            has_speech,
+            |r| {
+                self.bus
+                    .speech
+                    .as_mut()
+                    .expect("guarded by has_speech")
+                    .load_state(r)
+            },
+        )?;
         Ok(())
     }
 }

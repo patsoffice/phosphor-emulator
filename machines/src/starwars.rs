@@ -1564,21 +1564,36 @@ impl StarWarsBoard {
     }
 }
 
+// Chunk tags for this board's components, assigned explicitly because the impl
+// is hand-written. Stable for the board; a retired tag is never reused.
+//
+// The Slapstic is only on Empire Strikes Back, so its tag may be absent. Every
+// component after it is framed too, which is what lets the reader tell an
+// absent Slapstic from the first POKEY.
+const SW_TAG_AVG: u16 = 1;
+const SW_TAG_MATH: u16 = 2;
+const SW_TAG_SLAPSTIC: u16 = 3;
+const SW_TAG_POKEY: u16 = 4;
+const SW_TAG_RIOT: u16 = 5;
+const SW_TAG_TMS: u16 = 6;
+const SW_TAG_CLOCKS: u16 = 7;
+const SW_TAG_ADC: u16 = 8;
+
 impl Saveable for StarWarsBoard {
     fn save_state(&self, w: &mut StateWriter) {
         // The CPUs are saved by the machine, which owns them.
-        self.avg.save_state(w);
-        self.math.save_state(w);
-        if let Some(sl) = &self.slapstic {
-            sl.save_state(w);
-        }
-        for p in &self.pokey {
-            p.save_state(w);
-        }
-        self.riot.save_state(w);
-        self.tms.save_state(w);
-        self.clocks.save_state(w);
-        self.adc.save_state(w);
+        w.write_component(SW_TAG_AVG, &self.avg);
+        w.write_component(SW_TAG_MATH, &self.math);
+        w.write_optional_component(SW_TAG_SLAPSTIC, self.slapstic.as_ref());
+        w.write_tlv(SW_TAG_POKEY, |w| {
+            for p in &self.pokey {
+                p.save_state(w);
+            }
+        });
+        w.write_component(SW_TAG_RIOT, &self.riot);
+        w.write_component(SW_TAG_TMS, &self.tms);
+        w.write_component(SW_TAG_CLOCKS, &self.clocks);
+        w.write_component(SW_TAG_ADC, &self.adc);
         w.write_u32_le(self.stick[0].position() as u32);
         w.write_u32_le(self.stick[1].position() as u32);
         w.write_bytes(self.novram.nvram());
@@ -1603,24 +1618,37 @@ impl Saveable for StarWarsBoard {
 
     fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
         // The CPUs are loaded by the machine, which owns them.
-        self.avg.load_state(r)?;
-        self.math.load_state(r)?;
-        if let Some(sl) = &mut self.slapstic {
-            sl.load_state(r)?;
+        r.read_component(SW_TAG_AVG, "StarWarsBoard.avg", |r| self.avg.load_state(r))?;
+        r.read_component(SW_TAG_MATH, "StarWarsBoard.math", |r| {
+            self.math.load_state(r)
+        })?;
+        r.read_optional_component(
+            SW_TAG_SLAPSTIC,
+            "StarWarsBoard.slapstic",
+            self.slapstic.as_mut(),
+        )?;
+        if let Some(sl) = &self.slapstic {
             let bank = sl.current_bank() as u32;
             self.main_map
                 .remap_pages(0x80, 0x20, MainRegion::SlapsticWindow, bank * 0x2000);
         }
-        for p in &mut self.pokey {
-            p.load_state(r)?;
-        }
-        self.riot.load_state(r)?;
-        self.tms.load_state(r)?;
-        self.clocks.load_state(r)?;
+        r.read_component(SW_TAG_POKEY, "StarWarsBoard.pokey", |r| {
+            for p in &mut self.pokey {
+                p.load_state(r)?;
+            }
+            Ok(())
+        })?;
+        r.read_component(SW_TAG_RIOT, "StarWarsBoard.riot", |r| {
+            self.riot.load_state(r)
+        })?;
+        r.read_component(SW_TAG_TMS, "StarWarsBoard.tms", |r| self.tms.load_state(r))?;
+        r.read_component(SW_TAG_CLOCKS, "StarWarsBoard.clocks", |r| {
+            self.clocks.load_state(r)
+        })?;
         // The TMS save-skips its clock, so hand it back from the domain that
         // just came out of the save file.
         self.tms.set_clock(self.clocks.hz(self.tms_dom) as u32);
-        self.adc.load_state(r)?;
+        r.read_component(SW_TAG_ADC, "StarWarsBoard.adc", |r| self.adc.load_state(r))?;
         self.stick[0].set_position(r.read_u32_le()? as i32);
         self.stick[1].set_position(r.read_u32_le()? as i32);
         let mut nvram = vec![0u8; self.novram.nvram().len()];

@@ -799,6 +799,25 @@ impl WilliamsBoard {
     }
 }
 
+// Chunk tags for this board's components, assigned explicitly because the impl
+// is hand-written. Stable for the board; a retired tag is never reused.
+//
+// The last three are per-variant and may be absent. They sit at the end of the
+// body with nothing but each other after them, which is what lets the reader
+// tell an absent chunk from the next field: absence is detected by peeking at
+// the next tag, so an optional chunk can only be followed by another chunk or
+// by the end of the board's own bytes.
+const WB_TAG_WIDGET_PIA: u16 = 1;
+const WB_TAG_ROM_PIA: u16 = 2;
+const WB_TAG_SOUND_PIA: u16 = 3;
+const WB_TAG_BLITTER: u16 = 4;
+const WB_TAG_DAC: u16 = 5;
+const WB_TAG_DC_BLOCKER: u16 = 6;
+const WB_TAG_RESAMPLER: u16 = 7;
+const WB_TAG_SRAM: u16 = 8;
+const WB_TAG_CVSD: u16 = 9;
+const WB_TAG_BLITTER_WINDOW: u16 = 10;
+
 impl Saveable for WilliamsBoard {
     fn save_state(&self, w: &mut StateWriter) {
         // RAM (the CPUs are saved by the machine, which owns them)
@@ -807,63 +826,85 @@ impl Saveable for WilliamsBoard {
         w.write_bytes(self.main_map.region_data(MainRegion::Cmos));
         w.write_bytes(self.sound_map.region_data(SoundRegion::Ram));
         // Peripherals
-        self.widget_pia.save_state(w);
-        self.rom_pia.save_state(w);
-        self.sound_pia.save_state(w);
-        self.blitter.save_state(w);
-        self.dac.save_state(w);
+        w.write_component(WB_TAG_WIDGET_PIA, &self.widget_pia);
+        w.write_component(WB_TAG_ROM_PIA, &self.rom_pia);
+        w.write_component(WB_TAG_SOUND_PIA, &self.sound_pia);
+        w.write_component(WB_TAG_BLITTER, &self.blitter);
+        w.write_component(WB_TAG_DAC, &self.dac);
         // I/O & timing
         w.write_u8(self.rom_bank);
-        self.dc_blocker.save_state(w);
-        self.resampler.save_state(w);
+        w.write_component(WB_TAG_DC_BLOCKER, &self.dc_blocker);
+        w.write_component(WB_TAG_RESAMPLER, &self.resampler);
         w.write_u32_le(self.watchdog_counter);
         w.write_u64_le(self.clock);
         w.write_u8(self.rom_pia_input);
-        // Variant state appended last (guarded by construction-time config) so
-        // standard gen-1 saves stay byte-identical to the pre-variant layout.
+        // Variant state, each in its own chunk. It used to be appended raw and
+        // guarded by the construction-time config, so a reader had no way to
+        // tell a CVSD chip from whatever followed it.
         if self.config.extra_sram_dxxx {
-            w.write_bytes(self.main_map.region_data(MainRegion::Sram));
+            w.write_tlv(WB_TAG_SRAM, |w| {
+                w.write_bytes(self.main_map.region_data(MainRegion::Sram))
+            });
         }
-        if let Some(cvsd) = &self.cvsd {
-            cvsd.save_state(w);
-        }
+        w.write_optional_component(WB_TAG_CVSD, self.cvsd.as_ref());
         // Blitter window-enable is runtime state but save-skipped by the blitter
-        // (to keep other games' saves byte-identical); persist it here, guarded.
+        // (only the games with a clip window have it); persist it here.
         if self.config.blitter_window_clip.is_some() {
-            w.write_u8(self.blitter.window_enable() as u8);
+            w.write_tlv(WB_TAG_BLITTER_WINDOW, |w| {
+                w.write_u8(self.blitter.window_enable() as u8)
+            });
         }
     }
 
     fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
         // RAM (the CPUs are loaded by the machine, which owns them)
-        // RAM
         r.read_bytes_into(self.main_map.region_data_mut(MainRegion::VideoRam))?;
         r.read_bytes_into(&mut self.main_map.region_data_mut(MainRegion::Palette)[..16])?;
         r.read_bytes_into(self.main_map.region_data_mut(MainRegion::Cmos))?;
         r.read_bytes_into(self.sound_map.region_data_mut(SoundRegion::Ram))?;
         // Peripherals
-        self.widget_pia.load_state(r)?;
-        self.rom_pia.load_state(r)?;
-        self.sound_pia.load_state(r)?;
-        self.blitter.load_state(r)?;
-        self.dac.load_state(r)?;
+        r.read_component(WB_TAG_WIDGET_PIA, "WilliamsBoard.widget_pia", |r| {
+            self.widget_pia.load_state(r)
+        })?;
+        r.read_component(WB_TAG_ROM_PIA, "WilliamsBoard.rom_pia", |r| {
+            self.rom_pia.load_state(r)
+        })?;
+        r.read_component(WB_TAG_SOUND_PIA, "WilliamsBoard.sound_pia", |r| {
+            self.sound_pia.load_state(r)
+        })?;
+        r.read_component(WB_TAG_BLITTER, "WilliamsBoard.blitter", |r| {
+            self.blitter.load_state(r)
+        })?;
+        r.read_component(WB_TAG_DAC, "WilliamsBoard.dac", |r| self.dac.load_state(r))?;
         // I/O & timing
         self.rom_bank = r.read_u8()?;
-        self.dc_blocker.load_state(r)?;
-        self.resampler.load_state(r)?;
+        r.read_component(WB_TAG_DC_BLOCKER, "WilliamsBoard.dc_blocker", |r| {
+            self.dc_blocker.load_state(r)
+        })?;
+        r.read_component(WB_TAG_RESAMPLER, "WilliamsBoard.resampler", |r| {
+            self.resampler.load_state(r)
+        })?;
         self.watchdog_counter = r.read_u32_le()?;
         self.clock = r.read_u64_le()?;
         self.rom_pia_input = r.read_u8()?;
         // Variant state (see save_state).
-        if self.config.extra_sram_dxxx {
-            r.read_bytes_into(self.main_map.region_data_mut(MainRegion::Sram))?;
-        }
-        if let Some(cvsd) = &mut self.cvsd {
-            cvsd.load_state(r)?;
-        }
-        if self.config.blitter_window_clip.is_some() {
-            self.blitter.set_window_enable(r.read_u8()? != 0);
-        }
+        r.read_optional(
+            WB_TAG_SRAM,
+            "WilliamsBoard.sram",
+            self.config.extra_sram_dxxx,
+            |r| r.read_bytes_into(self.main_map.region_data_mut(MainRegion::Sram)),
+        )?;
+        r.read_optional_component(WB_TAG_CVSD, "WilliamsBoard.cvsd", self.cvsd.as_mut())?;
+        r.read_optional(
+            WB_TAG_BLITTER_WINDOW,
+            "WilliamsBoard.blitter_window",
+            self.config.blitter_window_clip.is_some(),
+            |r| {
+                let on = r.read_u8()? != 0;
+                self.blitter.set_window_enable(on);
+                Ok(())
+            },
+        )?;
         Ok(())
     }
 }
@@ -1356,10 +1397,11 @@ mod tests {
         }
 
         #[test]
-        fn standard_save_appends_no_variant_bytes() {
-            // Regression guard: the standard gen-1 save layout is unchanged — the
-            // only difference for an extra-RAM board is exactly the 4KB SRAM
-            // appended at the end, so pre-variant Joust/Robotron saves stay valid.
+        fn a_standard_board_writes_none_of_the_variant_chunks() {
+            // The three per-variant components are chunks now, so a board
+            // without them writes nothing for them at all: not a discriminant,
+            // not a zero length. That is what makes absence readable, and it is
+            // what the size difference has to show.
             let save_len = |cfg| {
                 let board = WilliamsBoard::with_config(cfg);
                 let mut w = StateWriter::new();
@@ -1368,23 +1410,63 @@ mod tests {
             };
             let standard = save_len(WilliamsConfig::gen1_standard());
             let sinistar = save_len(SINISTAR);
-            // Serialized size of one 4KB region write (data + framing), so the
-            // check is robust to the writer's length-prefix format.
-            let sram_block = {
+
+            // Each chunk costs a u16 tag plus a u32 length on top of its body.
+            const FRAME: usize = 6;
+            // Serialized size of one 4KB region write (data + length prefix), so
+            // the check is robust to the writer's length-prefix format.
+            let sram_body = {
                 let mut w = StateWriter::new();
                 w.write_bytes(&[0u8; 0x1000]);
                 w.into_vec().len()
             };
-            // Sinistar also appends CVSD device state and a 1-byte window-enable.
-            let cvsd_block = {
+            let cvsd_body = {
                 let mut w = StateWriter::new();
                 Hc55516::new().save_state(&mut w);
                 w.into_vec().len()
             };
+            // ... and the blitter window-enable is a single byte.
             assert_eq!(
                 sinistar - standard,
-                sram_block + cvsd_block + 1,
-                "only the appended SRAM + CVSD + window-enable bytes should differ"
+                (FRAME + sram_body) + (FRAME + cvsd_body) + (FRAME + 1),
+                "only the SRAM, CVSD and window-enable chunks should differ"
+            );
+        }
+
+        /// A Sinistar save carries chunks a Joust save does not, and a reader
+        /// that lacks those components skips them by length rather than
+        /// mistaking them for the next field.
+        #[test]
+        fn a_variant_board_save_is_readable_by_a_board_without_the_variants() {
+            let mut board = WilliamsBoard::with_config(SINISTAR);
+            board.main_map.region_data_mut(MainRegion::Sram)[0] = 0xDE;
+            board.clock = 4242;
+            let mut w = StateWriter::new();
+            board.save_state(&mut w);
+            let data = w.into_vec();
+
+            let mut plain = WilliamsBoard::new();
+            let mut r = StateReader::new(&data);
+            plain.load_state(&mut r).unwrap();
+
+            assert_eq!(plain.clock, 4242);
+            assert_eq!(r.remaining(), 0, "the variant chunks were not consumed");
+        }
+
+        /// The reverse must not load quietly: this board has a CVSD and the file
+        /// does not, so restoring would leave a live chip at power-on.
+        #[test]
+        fn a_standard_save_is_refused_by_a_board_that_has_the_variants() {
+            let mut w = StateWriter::new();
+            WilliamsBoard::new().save_state(&mut w);
+            let data = w.into_vec();
+
+            let mut sinistar = WilliamsBoard::with_config(SINISTAR);
+            let mut r = StateReader::new(&data);
+            let err = sinistar.load_state(&mut r).unwrap_err();
+            assert!(
+                err.to_string().contains("WilliamsBoard.sram"),
+                "unexpected message: {err}"
             );
         }
 
