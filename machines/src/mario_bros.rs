@@ -28,7 +28,9 @@ use phosphor_core::core::machine::{
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::watchpoint::DebugAccessSource;
 use phosphor_core::core::{AccessKind, AddressSpace16};
-use phosphor_core::core::{Bus, BusMaster, ClockDivider, TimingConfig};
+use phosphor_core::core::{
+    Bus, BusMaster, ClockDomainName as Clk, ClockTree, DomainId, TimingConfig,
+};
 use phosphor_core::cpu::Cpu;
 use phosphor_core::cpu::i8035::I8035;
 use phosphor_core::cpu::z80::Z80;
@@ -100,7 +102,7 @@ pub const TIMING: TimingConfig = TimingConfig {
 /// The sound domain reduces to 11/60 against the Z80, which is the ratio
 /// [`SOUND_TICK_NUM`]/[`SOUND_TICK_DEN`] states by hand.
 pub fn clock_tree() -> phosphor_core::core::ClockTree {
-    use phosphor_core::core::{ClockDomainName as Clk, ClockTree, RootId};
+    use phosphor_core::core::RootId;
     let mut t = ClockTree::new(8_000_000);
     let vid = t.add_root(24_000_000);
     let snd = t.add_root(11_000_000);
@@ -589,7 +591,7 @@ fn step_cycle(main: &mut Z80, sound: &mut I8035, board: &mut MarioBrosBoard) {
     main.execute_cycle(board, BusMaster::Cpu(0));
 
     // Sound CPU (8049): 11/60 of the Z80 clock.
-    if board.sound_clock.tick() {
+    if board.clocks.tick(board.sound_dom) {
         sound.execute_cycle(board, BusMaster::Cpu(1));
     }
 
@@ -676,7 +678,9 @@ pub struct MarioBrosBoard {
 
     // Timing
     pub(crate) clock: u64,
-    pub(crate) sound_clock: ClockDivider,
+    /// The board's clock tree, as [`clock_tree`] declares it.
+    pub(crate) clocks: ClockTree,
+    pub(crate) sound_dom: DomainId,
     pub(crate) vblank_nmi_pending: bool,
 
     #[debug_events]
@@ -691,6 +695,8 @@ impl Default for MarioBrosBoard {
 
 impl MarioBrosBoard {
     pub fn new() -> Self {
+        let clocks = clock_tree();
+        let sound_dom = clocks.find(Clk::Mcu).expect("declared I8039 domain");
         Self {
             main_map: Self::build_main_map(),
             sound_map: Self::build_sound_map(),
@@ -719,7 +725,8 @@ impl MarioBrosBoard {
             tile_cache: gfx::GfxCache::new(0, 8, 8),
             sprite_cache: gfx::GfxCache::new(0, 16, 16),
             clock: 0,
-            sound_clock: ClockDivider::new(SOUND_TICK_NUM, SOUND_TICK_DEN),
+            clocks,
+            sound_dom,
             vblank_nmi_pending: false,
             debug_trace: DebugTraceBuffer::new(),
         }
@@ -1057,7 +1064,7 @@ impl MarioBrosBoard {
         self.dma.reset();
 
         self.clock = 0;
-        self.sound_clock.reset();
+        self.clocks.reset();
         self.resampler.reset();
         self.dac.reset();
 
@@ -1127,7 +1134,7 @@ impl Saveable for MarioBrosBoard {
         self.dac_coupling.save_state(w);
         self.resampler.save_state(w);
         w.write_u64_le(self.clock);
-        self.sound_clock.save_state(w);
+        self.clocks.save_state(w);
         w.write_bool(self.vblank_nmi_pending);
     }
 
@@ -1153,7 +1160,7 @@ impl Saveable for MarioBrosBoard {
         self.dac_coupling.load_state(r)?;
         self.resampler.load_state(r)?;
         self.clock = r.read_u64_le()?;
-        self.sound_clock.load_state(r)?;
+        self.clocks.load_state(r)?;
         self.vblank_nmi_pending = r.read_bool()?;
         Ok(())
     }

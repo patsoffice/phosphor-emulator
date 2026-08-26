@@ -17,7 +17,9 @@ use phosphor_core::audio::DcBlocker;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::{AccessKind, AddressSpace16};
-use phosphor_core::core::{Bus, BusMaster, ClockDivider, TimingConfig};
+use phosphor_core::core::{
+    Bus, BusMaster, ClockDomainName as Clk, ClockTree, DomainId, TimingConfig,
+};
 use phosphor_core::cpu::m6502::M6502;
 use phosphor_core::device::ay8910::Ay8910;
 use phosphor_core::gfx::decode::{GfxCache, GfxLayout, decode_gfx};
@@ -139,16 +141,20 @@ pub const TIMING: TimingConfig = TimingConfig {
 
 /// The board's crystal and everything divided out of it.
 ///
-/// One 12 MHz crystal: the main 6502 at /8, the pixel clock at /2, and both
-/// AY-3-8910s at the main CPU's own 1.5 MHz. The sound 6502's 500 kHz is not
-/// declared, because this file documents the rate but not the divider chain
-/// that produces it.
-pub fn clock_tree() -> phosphor_core::core::ClockTree {
-    use phosphor_core::core::{ClockDomainName as Clk, ClockTree, RootId};
+/// One 12 MHz crystal: the main 6502 at /8, the pixel clock at /2, both
+/// AY-3-8910s at the main CPU's own 1.5 MHz, and the sound 6502 at /24.
+///
+/// That last one is the divider the board's `1/3` of the main CPU implies:
+/// 12 MHz over 24 is 500 kHz exactly, and 500000/1500000 reduces to 1/3. The
+/// chain through the counter that produces it is not documented in this file,
+/// but the division is a whole number either way.
+pub fn clock_tree() -> ClockTree {
+    use phosphor_core::core::RootId;
     let mut t = ClockTree::new(12_000_000);
     let cpu = t.add_domain(Clk::Cpu, RootId::MAIN, 1, 8); // 1.5 MHz
     let dot = t.add_domain(Clk::Pixel, RootId::MAIN, 1, 2); // 6 MHz
     t.add_domain(Clk::Psg, RootId::MAIN, 1, 8); // AY-3-8910 at 1.5 MHz
+    t.add_domain(Clk::SoundCpu, RootId::MAIN, 1, 24); // sound 6502 at 500 kHz
     t.set_step_domain(cpu);
     // Both clocks come off the same crystal in a 4:1 ratio, so 384 dot clocks
     // is exactly 96 CPU cycles.
@@ -199,7 +205,7 @@ pub fn tick(cpu: &mut M6502, sound_cpu: &mut M6502, board: &mut BtimeBoard) {
     cpu.execute_cycle(board, BusMaster::Cpu(0));
 
     // Sound CPU @ 500 kHz (main / 3).
-    if board.sound_clock.tick() {
+    if board.clocks.tick(board.sound_dom) {
         board.latch_sound_pc(sound_cpu);
         sound_cpu.execute_cycle(board, BusMaster::Cpu(1));
     }
@@ -272,9 +278,11 @@ pub struct BtimeBoard {
     /// is to remove an offset.
     ay_coupling: DcBlocker,
     sound_ram: [u8; 0x0400],
-    sound_irq: bool,           // set on main write to 0x4003, cleared on 0xA000 read
-    audio_nmi_enable: bool,    // 0xC000 write bit0; ANDs with scanline bit3 -> NMI
-    sound_clock: ClockDivider, // 500 kHz from the 1.5 MHz main tick (1/3)
+    sound_irq: bool,        // set on main write to 0x4003, cleared on 0xA000 read
+    audio_nmi_enable: bool, // 0xC000 write bit0; ANDs with scanline bit3 -> NMI
+    /// The board's clock tree, as [`clock_tree`] declares it.
+    clocks: ClockTree,
+    sound_dom: DomainId,
 
     // Work / video memory (kept as flat arrays, not in the AddressSpace16).
     ram: [u8; 0x0800],
@@ -337,6 +345,8 @@ impl BtimeBoard {
     }
 
     pub fn new(config: BtimeConfig) -> Self {
+        let clocks = clock_tree();
+        let sound_dom = clocks.find(Clk::SoundCpu).expect("declared sound domain");
         let mut main_map = AddressSpace16::new();
         main_map.region(
             Region::Main,
@@ -366,7 +376,8 @@ impl BtimeBoard {
             sound_ram: [0; 0x0400],
             sound_irq: false,
             audio_nmi_enable: false,
-            sound_clock: ClockDivider::new(1, 3),
+            clocks,
+            sound_dom,
             ram: [0; 0x0800],
             videoram: [0; 0x0400],
             colorram: [0; 0x0400],
@@ -541,7 +552,7 @@ impl BtimeBoard {
         self.main_irq = false;
         self.sound_irq = false;
         self.audio_nmi_enable = false;
-        self.sound_clock.reset();
+        self.clocks.reset();
         self.ay1.reset();
         self.ay2.reset();
         self.clock = 0;
@@ -922,7 +933,7 @@ impl Saveable for BtimeBoard {
         self.ay1.save_state(w);
         self.ay2.save_state(w);
         self.ay_coupling.save_state(w);
-        self.sound_clock.save_state(w);
+        self.clocks.save_state(w);
         w.write_bool(self.main_had_written);
         w.write_bool(self.main_irq);
         w.write_bool(self.sound_irq);
@@ -947,7 +958,7 @@ impl Saveable for BtimeBoard {
         self.ay1.load_state(r)?;
         self.ay2.load_state(r)?;
         self.ay_coupling.load_state(r)?;
-        self.sound_clock.load_state(r)?;
+        self.clocks.load_state(r)?;
         self.main_had_written = r.read_bool()?;
         self.main_irq = r.read_bool()?;
         self.sound_irq = r.read_bool()?;

@@ -25,7 +25,7 @@ use phosphor_core::core::machine::{
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::{AccessKind, AddressSpace16};
 use phosphor_core::core::{
-    Bus, BusMaster, ClockDivider, ClockDomainName as Clk, ClockTree, DomainId, TimingConfig,
+    Bus, BusMaster, ClockDomainName as Clk, ClockTree, DomainId, TimingConfig,
 };
 use phosphor_core::cpu::Cpu;
 use phosphor_core::cpu::z80::Z80;
@@ -527,8 +527,8 @@ pub struct CongoBongoBoard {
     // output to 44.1 kHz, which feeds the discrete percussion circuit; the
     // circuit mixes the PSGs with the five synthesized voices and is drained for
     // the final output.
-    pub(crate) sn1_clock: ClockDivider,
-    pub(crate) sn2_clock: ClockDivider,
+    pub(crate) sn1_dom: DomainId,
+    pub(crate) sn2_dom: DomainId,
     pub(crate) audio: AudioResampler<i16>,
     pub(crate) congo_sound: CongoSound,
 
@@ -550,6 +550,8 @@ impl CongoBongoBoard {
     pub fn new() -> Self {
         let clocks = clock_tree();
         let sound_dom = clocks.find(Clk::SoundCpu).expect("declared sound domain");
+        let sn1_dom = clocks.find(Clk::Psg).expect("declared PSG domain");
+        let sn2_dom = clocks.find(Clk::Psg2).expect("declared second PSG domain");
         Self {
             main_map: Self::build_main_map(),
             sound_map: Self::build_sound_map(),
@@ -585,8 +587,8 @@ impl CongoBongoBoard {
             sound_dom,
             sound_irq_counter: 0,
             sound_irq_pending: false,
-            sn1_clock: ClockDivider::new((SOUND_CLOCK / 16) as u32, TIMING.cpu_clock_hz as u32),
-            sn2_clock: ClockDivider::new(SOUND_PSG2_CLOCK / 16, TIMING.cpu_clock_hz as u32),
+            sn1_dom,
+            sn2_dom,
             audio: AudioResampler::new(TIMING.cpu_clock_hz, output_sample_rate()),
             congo_sound: CongoSound::new(),
             clock: 0,
@@ -930,10 +932,10 @@ impl CongoBongoBoard {
         // PSG generators run at chip_clock/16; sample the summed output each main
         // cycle, box-filter it to the audio rate, and feed each resulting sample
         // into the percussion circuit (which mixes PSGs + voices).
-        if self.sn1_clock.tick() {
+        if self.clocks.tick(self.sn1_dom) {
             self.sn1.tick();
         }
-        if self.sn2_clock.tick() {
+        if self.clocks.tick(self.sn2_dom) {
             self.sn2.tick();
         }
         let mix = (self.sn1.output() as i32 + self.sn2.output() as i32)
@@ -1087,8 +1089,6 @@ impl CongoBongoBoard {
         self.clocks.reset();
         self.sound_irq_counter = 0;
         self.sound_irq_pending = false;
-        self.sn1_clock.reset();
-        self.sn2_clock.reset();
         self.audio.reset();
         self.congo_sound.reset();
 
@@ -1151,8 +1151,6 @@ impl Saveable for CongoBongoBoard {
         self.clocks.save_state(w);
         w.write_u64_le(self.sound_irq_counter);
         w.write_bool(self.sound_irq_pending);
-        self.sn1_clock.save_state(w);
-        self.sn2_clock.save_state(w);
         self.audio.save_state(w);
         self.congo_sound.save_state(w);
         w.write_u64_le(self.clock);
@@ -1186,8 +1184,6 @@ impl Saveable for CongoBongoBoard {
         self.clocks.load_state(r)?;
         self.sound_irq_counter = r.read_u64_le()?;
         self.sound_irq_pending = r.read_bool()?;
-        self.sn1_clock.load_state(r)?;
-        self.sn2_clock.load_state(r)?;
         self.audio.load_state(r)?;
         self.congo_sound.load_state(r)?;
         self.clock = r.read_u64_le()?;

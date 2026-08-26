@@ -48,7 +48,9 @@ use phosphor_core::audio::SampleRing;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::{AccessKind, AddressSpace32};
-use phosphor_core::core::{Bus, BusMaster, ClockDivider, TimingConfig};
+use phosphor_core::core::{
+    Bus, BusMaster, ClockDomainName as Clk, ClockTree, DomainId, TimingConfig,
+};
 use phosphor_core::cpu::m68000::{M68kVariant, M68000};
 use phosphor_core::device::slapstic::Slapstic;
 use phosphor_core::gfx::decode::{GfxCache, GfxLayout, decode_gfx};
@@ -309,7 +311,7 @@ pub const TIMING: TimingConfig = TimingConfig {
 /// nominal /22 of the crystal, and `atari_system1_sound.rs` moves it with
 /// `set_domain_hz` when the bit changes.
 pub fn clock_tree() -> phosphor_core::core::ClockTree {
-    use phosphor_core::core::{ClockDomainName as Clk, ClockTree, RootId};
+    use phosphor_core::core::RootId;
     let mut t = ClockTree::new(14_318_181);
     let cpu = t.add_domain(Clk::Cpu, RootId::MAIN, 1, 2); // 7.15909 MHz 68010
     let dot = t.add_domain(Clk::Pixel, RootId::MAIN, 1, 2); // same clock as the CPU
@@ -463,7 +465,12 @@ pub struct AtariSystem1Board {
     #[debug_device("Sound")]
     pub(crate) sound: AtariSystem1Sound,
     /// Sound CPU runs at 1/4 the main CPU rate.
-    sound_clock: ClockDivider,
+    /// The board's clock tree, as [`clock_tree`] declares it, stepped in
+    /// main-CPU cycles. The speech section holds its own copy of the same
+    /// declaration stepped in sound-CPU cycles, which is the rate its loop
+    /// counts in.
+    clocks: ClockTree,
+    sound_dom: DomainId,
     audio_buffer: SampleRing<i16>,
 
     pub(crate) clock: u64,
@@ -554,6 +561,8 @@ impl AtariSystem1Board {
     }
 
     pub fn new(slapstic_chip: u16, speech: bool) -> Self {
+        let clocks = clock_tree();
+        let sound_dom = clocks.find(Clk::SoundCpu).expect("declared sound domain");
         Self {
             map: Self::build_map(),
             slapstic: Slapstic::for_chip(slapstic_chip),
@@ -573,7 +582,8 @@ impl AtariSystem1Board {
             int2: false,
             audio_dc: (0.0, 0.0),
             sound: AtariSystem1Sound::new(speech),
-            sound_clock: ClockDivider::new(1, 4),
+            clocks,
+            sound_dom,
             audio_buffer: SampleRing::with_capacity(2048),
             clock: 0,
             watchdog_count: 0,
@@ -1071,7 +1081,7 @@ impl AtariSystem1Board {
     /// Board work after the CPU's cycle: the sound board and the clock.
     fn end_cycle(&mut self) {
         // The sound board runs at 1/4 the main CPU rate.
-        if self.sound_clock.tick() {
+        if self.clocks.tick(self.sound_dom) {
             self.sound.tick();
         }
 
@@ -1139,7 +1149,7 @@ impl AtariSystem1Board {
     pub fn reset(&mut self) {
         self.slapstic.reset();
         self.sound.reset();
-        self.sound_clock.reset();
+        self.clocks.reset();
         self.audio_buffer.clear();
         self.xscroll = 0;
         self.yscroll = 0;
@@ -1256,7 +1266,7 @@ impl Saveable for AtariSystem1Board {
         // The CPU is saved by the machine, which owns it.
         self.slapstic.save_state(w);
         self.sound.save_state(w);
-        self.sound_clock.save_state(w);
+        self.clocks.save_state(w);
         w.write_bytes(self.map.region_data(Region::Ram));
         w.write_bytes(self.map.region_data(Region::CartRam));
         w.write_bytes(self.map.region_data(Region::Playfield));
@@ -1281,7 +1291,7 @@ impl Saveable for AtariSystem1Board {
         // The CPU is loaded by the machine, which owns it.
         self.slapstic.load_state(r)?;
         self.sound.load_state(r)?;
-        self.sound_clock.load_state(r)?;
+        self.clocks.load_state(r)?;
         r.read_bytes_into(self.map.region_data_mut(Region::Ram))?;
         r.read_bytes_into(self.map.region_data_mut(Region::CartRam))?;
         r.read_bytes_into(self.map.region_data_mut(Region::Playfield))?;

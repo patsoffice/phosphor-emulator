@@ -1,6 +1,6 @@
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::{AccessKind, AddressSpace16};
-use phosphor_core::core::{ClockDivider, TimingConfig};
+use phosphor_core::core::{ClockDomainName as Clk, ClockTree, DomainId, TimingConfig};
 use phosphor_core::cpu::z80::Z80;
 use phosphor_core::device::Z80Ctc;
 use phosphor_core::dirty_bitset::DirtyBitset;
@@ -44,14 +44,20 @@ pub const TIMING: TimingConfig = TimingConfig {
 /// The board's crystal and everything divided out of it.
 ///
 /// One 19.968 MHz oscillator on the main board, with the Z80 at /8 and the
-/// pixel clock at /4. The SSIO's 2 MHz sound Z80 is not declared: it is on the
-/// sound board with its own oscillator, and this file documents the rate but
-/// not the division that produces it.
-pub fn clock_tree() -> phosphor_core::core::ClockTree {
-    use phosphor_core::core::{ClockDomainName as Clk, ClockTree, RootId};
+/// pixel clock at /4, plus the SSIO sound board's own clock at 2 MHz.
+///
+/// The SSIO is declared as a second *source* rather than a division of the
+/// first, because 2 MHz is not one: 19.968 over 2 is 9.984. It runs off its own
+/// oscillator on its own board, and 2 MHz is the rate this file documents at
+/// the Z80. Declaring it here is what makes the 125/156 ratio a consequence of
+/// two stated clocks instead of a fraction reduced by hand.
+pub fn clock_tree() -> ClockTree {
+    use phosphor_core::core::RootId;
     let mut t = ClockTree::new(19_968_000);
+    let ssio = t.add_root(2_000_000);
     let cpu = t.add_domain(Clk::Cpu, RootId::MAIN, 1, 8); // 2.496 MHz
     let dot = t.add_domain(Clk::Pixel, RootId::MAIN, 1, 4); // 4.992 MHz
+    t.add_domain(Clk::SoundCpu, ssio, 1, 1); // SSIO Z80 at 2 MHz
     t.set_step_domain(cpu);
     // Pixel clock is exactly twice the CPU clock, so 512 dot clocks is exactly
     // 256 CPU cycles.
@@ -195,12 +201,16 @@ pub struct Mcr2Board {
 
     // Timing
     pub(crate) clock: u64,
-    pub(crate) ssio_clock: ClockDivider,
+    /// The board's clock tree, as [`clock_tree`] declares it.
+    pub(crate) clocks: ClockTree,
+    pub(crate) ssio_dom: DomainId,
     pub(crate) watchdog_counter: u16,
 }
 
 impl Mcr2Board {
     pub fn new() -> Self {
+        let clocks = clock_tree();
+        let ssio_dom = clocks.find(Clk::SoundCpu).expect("declared SSIO domain");
         Self {
             ssio: SsioBoard::new(),
             ctc: Z80Ctc::new(),
@@ -217,7 +227,8 @@ impl Mcr2Board {
             ctc_ack_needed: false,
             ctc_vector_latch: 0,
             clock: 0,
-            ssio_clock: ClockDivider::new(SSIO_CLOCK_NUM, SSIO_CLOCK_DEN),
+            clocks,
+            ssio_dom,
             watchdog_counter: 0,
         }
     }
@@ -403,7 +414,7 @@ impl Mcr2Board {
         }
 
         // Tick SSIO at 125/156 ratio (2 MHz from 2.496 MHz)
-        if self.ssio_clock.tick() {
+        if self.clocks.tick(self.ssio_dom) {
             self.ssio.tick();
         }
 
@@ -595,7 +606,7 @@ impl Mcr2Board {
         self.tile_dirty = DirtyBitset::new_all_dirty();
         self.sprite_tile_dirty = DirtyBitset::new_all_dirty();
         self.clock = 0;
-        self.ssio_clock.reset();
+        self.clocks.reset();
         self.watchdog_counter = 0;
         self.ctc_ack_needed = false;
         self.ctc_vector_latch = 0;
@@ -623,7 +634,7 @@ impl Saveable for Mcr2Board {
         w.write_bytes(self.map.region_data(Region::VideoRam));
         w.write_bytes(&self.palette_ram);
         w.write_u64_le(self.clock);
-        self.ssio_clock.save_state(w);
+        self.clocks.save_state(w);
         w.write_u16_le(self.watchdog_counter);
     }
 
@@ -636,7 +647,7 @@ impl Saveable for Mcr2Board {
         r.read_bytes_into(self.map.region_data_mut(Region::VideoRam))?;
         r.read_bytes_into(&mut self.palette_ram)?;
         self.clock = r.read_u64_le()?;
-        self.ssio_clock.load_state(r)?;
+        self.clocks.load_state(r)?;
         self.watchdog_counter = r.read_u16_le()?;
         // Rebuild derived state from loaded data
         self.rebuild_palette();

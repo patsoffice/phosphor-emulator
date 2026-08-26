@@ -246,3 +246,136 @@ fn the_cross_crystal_scanline_conversions_are_what_we_think() {
         );
     }
 }
+
+/// Every ratio the `ClockDivider` migration replaced, pinned to what the
+/// divider it replaced was constructed with.
+///
+/// The migration touched nine boards at once. Each field was a
+/// `ClockDivider::new(a, b)` whose ratio the board had derived by hand; each is
+/// now a domain whose ratio the crystals derive. This is the table that says
+/// those two agree, because "the tree declares the right crystals" and "the
+/// board steps at the rate it used to" are different claims and only the first
+/// is covered above.
+///
+/// A reduced Bresenham fires identically to its unreduced form from zero phase,
+/// so equality of the reduced ratios is equality of the fire patterns.
+#[test]
+fn the_migrated_dividers_kept_their_ratios() {
+    fn reduce(mut a: u64, mut b: u64) -> (u32, u32) {
+        let (n, d) = (a, b);
+        while b != 0 {
+            let t = a % b;
+            a = b;
+            b = t;
+        }
+        ((n / a) as u32, (d / a) as u32)
+    }
+
+    // (board tree, domain, the ClockDivider::new(num, den) it replaced)
+    let cases: [(&str, phosphor_core::core::ClockTree, Clk, (u64, u64)); 11] = [
+        // sound 6502 at master/4, was ClockDivider::new(1, 4)
+        (
+            "atari_system1",
+            phosphor_machines::atari_system1::clock_tree(),
+            Clk::SoundCpu,
+            (1, 4),
+        ),
+        // sound 6502 at 500 kHz from the 1.5 MHz main tick, was (1, 3)
+        (
+            "btime",
+            phosphor_machines::btime::clock_tree(),
+            Clk::SoundCpu,
+            (1, 3),
+        ),
+        // SN76489A tone rates: chip/16 against the 3.04125 MHz main CPU
+        (
+            "congo_bongo",
+            phosphor_machines::congo_bongo::clock_tree(),
+            Clk::Psg,
+            (4_000_000 / 16, 3_041_250),
+        ),
+        (
+            "congo_bongo",
+            phosphor_machines::congo_bongo::clock_tree(),
+            Clk::Psg2,
+            (1_000_000 / 16, 3_041_250),
+        ),
+        // sound Z80 at 4 MHz against the same, the accumulator case
+        (
+            "congo_bongo",
+            phosphor_machines::congo_bongo::clock_tree(),
+            Clk::SoundCpu,
+            (4_000_000, 3_041_250),
+        ),
+        (
+            "docastle",
+            phosphor_machines::docastle::clock_tree(),
+            Clk::Psg,
+            (4_000_000 / 16, 4_000_000),
+        ),
+        (
+            "mrdo",
+            phosphor_machines::mrdo::clock_tree(),
+            Clk::Psg,
+            (4_100_000 / 16, 4_100_000),
+        ),
+        (
+            "mrdo",
+            phosphor_machines::mrdo::clock_tree(),
+            Clk::Psg2,
+            (4_100_000 / 16, 4_100_000),
+        ),
+        // I8039 machine cycles, was SOUND_TICK_NUM/DEN = 11/60
+        (
+            "mario_bros",
+            phosphor_machines::mario_bros::clock_tree(),
+            Clk::Mcu,
+            (11, 60),
+        ),
+        // SSIO Z80 at 2 MHz against 2.496 MHz, was SSIO_CLOCK_NUM/DEN = 125/156
+        (
+            "mcr2",
+            phosphor_machines::mcr2::clock_tree(),
+            Clk::SoundCpu,
+            (125, 156),
+        ),
+        // Namco 51xx at half the CPU clock, was ClockDivider::new(1, 2)
+        (
+            "namco_galaga",
+            phosphor_machines::namco_galaga::clock_tree(),
+            Clk::Mcu,
+            (1, 2),
+        ),
+    ];
+
+    for (board, tree, name, (num, den)) in cases {
+        let id = tree
+            .find(name)
+            .unwrap_or_else(|| panic!("{board}: no {name:?} domain"));
+        assert_eq!(
+            tree.domain(id).step_ratio(),
+            reduce(num, den),
+            "{board}/{name:?}: the tree now steps it at {:?}, the divider it \
+             replaced used {num}/{den}",
+            tree.domain(id).step_ratio(),
+        );
+    }
+}
+
+/// TKG-04's I8035 is checked apart from the table because its ratio is stated
+/// in the board file rather than inline, and that constant is the thing worth
+/// holding the tree to.
+#[test]
+fn tkg04_sound_ratio_matches_its_declared_constant() {
+    let tree = phosphor_machines::tkg04::clock_tree();
+    let mcu = tree.find(Clk::Mcu).expect("declared I8035 domain");
+    assert_eq!(
+        tree.domain(mcu).step_ratio(),
+        (
+            phosphor_machines::tkg04::SOUND_TICK_NUM,
+            phosphor_machines::tkg04::SOUND_TICK_DEN
+        )
+    );
+    // 6 MHz / 15 machine cycles, against the 61.44 MHz board's 3.072 MHz Z80.
+    assert_eq!(tree.hz(mcu), 400_000);
+}

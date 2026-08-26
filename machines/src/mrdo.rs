@@ -29,7 +29,9 @@ use phosphor_core::core::machine::{
 };
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::{AccessKind, AddressSpace16};
-use phosphor_core::core::{Bus, BusMaster, ClockDivider, TimingConfig};
+use phosphor_core::core::{
+    Bus, BusMaster, ClockDomainName as Clk, ClockTree, DomainId, TimingConfig,
+};
 use phosphor_core::cpu::Cpu;
 use phosphor_core::cpu::z80::Z80;
 use phosphor_core::device::sn76489::Sn76489a;
@@ -87,7 +89,7 @@ pub const TIMING: TimingConfig = TimingConfig {
 /// above `TIMING` already says the count "is not a clean integer"; the
 /// tolerance below is that admission as a number a test can hold.
 pub fn clock_tree() -> phosphor_core::core::ClockTree {
-    use phosphor_core::core::{ClockDomainName as Clk, ClockTree, RootId};
+    use phosphor_core::core::RootId;
     let mut t = ClockTree::new(8_200_000);
     let vid = t.add_root(19_600_000);
     let cpu = t.add_domain(Clk::Cpu, RootId::MAIN, 1, 2); // 4.1 MHz
@@ -439,8 +441,10 @@ pub struct MrdoBoard {
     pub(crate) sn1: Sn76489a,
     #[debug_device("SN76489 #2")]
     pub(crate) sn2: Sn76489a,
-    pub(crate) sn1_clock: ClockDivider,
-    pub(crate) sn2_clock: ClockDivider,
+    /// The board's clock tree, as [`clock_tree`] declares it.
+    pub(crate) clocks: ClockTree,
+    pub(crate) sn1_dom: DomainId,
+    pub(crate) sn2_dom: DomainId,
     /// Output coupling capacitor.
     ///
     /// An SN76489's output swings from ground upward rather than either side of
@@ -466,6 +470,9 @@ impl Default for MrdoBoard {
 
 impl MrdoBoard {
     pub fn new() -> Self {
+        let clocks = clock_tree();
+        let sn1_dom = clocks.find(Clk::Psg).expect("declared PSG domain");
+        let sn2_dom = clocks.find(Clk::Psg2).expect("declared second PSG domain");
         Self {
             main_map: Self::build_main_map(),
             fg_rom: [0; 0x2000],
@@ -486,8 +493,9 @@ impl MrdoBoard {
             dsw2: DSW2_DEFAULT,
             sn1: Sn76489a::new(SOUND_CLOCK),
             sn2: Sn76489a::new(SOUND_CLOCK),
-            sn1_clock: ClockDivider::new(SOUND_CLOCK / 16, TIMING.cpu_clock_hz as u32),
-            sn2_clock: ClockDivider::new(SOUND_CLOCK / 16, TIMING.cpu_clock_hz as u32),
+            clocks,
+            sn1_dom,
+            sn2_dom,
             sn_coupling: DcBlocker::new(output_sample_rate() as u32),
             audio: AudioResampler::new(TIMING.cpu_clock_hz, output_sample_rate()),
             clock: 0,
@@ -563,10 +571,10 @@ impl MrdoBoard {
     fn end_cycle(&mut self) {
         // Advance both PSG generators (chip_clock/16) and box-filter the summed,
         // clamped output to the 44.1 kHz audio rate — one input sample per cycle.
-        if self.sn1_clock.tick() {
+        if self.clocks.tick(self.sn1_dom) {
             self.sn1.tick();
         }
-        if self.sn2_clock.tick() {
+        if self.clocks.tick(self.sn2_dom) {
             self.sn2.tick();
         }
         let mix = (i32::from(self.sn1.output()) + i32::from(self.sn2.output()))
@@ -725,8 +733,7 @@ impl MrdoBoard {
         self.pal_u001 = 0xFF;
         self.sn1.reset();
         self.sn2.reset();
-        self.sn1_clock.reset();
-        self.sn2_clock.reset();
+        self.clocks.reset();
         self.sn_coupling.reset();
         self.audio.reset();
         self.main_map
@@ -774,8 +781,7 @@ impl Saveable for MrdoBoard {
         w.write_u8(self.pal_u001);
         self.sn1.save_state(w);
         self.sn2.save_state(w);
-        self.sn1_clock.save_state(w);
-        self.sn2_clock.save_state(w);
+        self.clocks.save_state(w);
         self.sn_coupling.save_state(w);
         self.audio.save_state(w);
         w.write_u64_le(self.clock);
@@ -797,8 +803,7 @@ impl Saveable for MrdoBoard {
         self.pal_u001 = r.read_u8()?;
         self.sn1.load_state(r)?;
         self.sn2.load_state(r)?;
-        self.sn1_clock.load_state(r)?;
-        self.sn2_clock.load_state(r)?;
+        self.clocks.load_state(r)?;
         self.sn_coupling.load_state(r)?;
         self.audio.load_state(r)?;
         self.clock = r.read_u64_le()?;

@@ -6,7 +6,9 @@ use phosphor_core::core::machine::GfxSheet;
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::watchpoint::DebugAccessSource;
 use phosphor_core::core::{AccessKind, AddressSpace16};
-use phosphor_core::core::{Bus, BusMaster, ClockDivider, TimingConfig};
+use phosphor_core::core::{
+    Bus, BusMaster, ClockDomainName as Clk, ClockTree, DomainId, TimingConfig,
+};
 use phosphor_core::cpu::i8035::I8035;
 use phosphor_core::cpu::z80::Z80;
 use phosphor_core::device::dac::Mc1408Dac;
@@ -69,7 +71,7 @@ pub const TIMING: TimingConfig = TimingConfig {
 /// fifteen. That sound domain reduces to 25/192 against the Z80, which is the
 /// ratio [`SOUND_TICK_NUM`]/[`SOUND_TICK_DEN`] states by hand.
 pub fn clock_tree() -> phosphor_core::core::ClockTree {
-    use phosphor_core::core::{ClockDomainName as Clk, ClockTree, RootId};
+    use phosphor_core::core::RootId;
     let mut t = ClockTree::new(61_440_000);
     let snd = t.add_root(6_000_000);
     let cpu = t.add_domain(Clk::Cpu, RootId::MAIN, 1, 20); // 3.072 MHz
@@ -346,7 +348,11 @@ fn step_cycle<B: Tkg04Bus>(cpus: &mut Tkg04Cpus<'_>, bus: &mut B) {
     cpus.main.execute_cycle(bus, BusMaster::Cpu(0));
 
     // Sound CPU (Bresenham 25/192 ratio: 400 kHz from 3.072 MHz)
-    if bus.board().sound_clock.tick() {
+    let sound_due = {
+        let board = bus.board();
+        board.clocks.tick(board.sound_dom)
+    };
+    if sound_due {
         cpus.sound.execute_cycle(bus, BusMaster::Cpu(1));
     }
 
@@ -442,7 +448,9 @@ pub struct Tkg04Board {
 
     // Timing
     pub(crate) clock: u64,
-    pub(crate) sound_clock: ClockDivider,
+    /// The board's clock tree, as [`clock_tree`] declares it.
+    pub(crate) clocks: ClockTree,
+    pub(crate) sound_dom: DomainId,
     pub(crate) vblank_nmi_pending: bool,
 
     // Discrete sound: DAC stream + walk/jump/stomp effects, mixed in-circuit.
@@ -460,6 +468,8 @@ impl Tkg04Board {
     /// - DK: `tile_plane1_offset = 0x800` (4KB tile ROM)
     /// - DK Jr: `tile_plane1_offset = 0x1000` (8KB tile ROM)
     pub fn new(tile_plane1_offset: usize) -> Self {
+        let clocks = clock_tree();
+        let sound_dom = clocks.find(Clk::Mcu).expect("declared I8035 domain");
         Self {
             main_map: Self::build_main_map(),
             sound_map: Self::build_sound_map(),
@@ -492,7 +502,8 @@ impl Tkg04Board {
             dac: Mc1408Dac::new(),
             resampler: AudioResampler::new(TIMING.cpu_clock_hz, output_sample_rate()),
             clock: 0,
-            sound_clock: ClockDivider::new(SOUND_TICK_NUM, SOUND_TICK_DEN),
+            clocks,
+            sound_dom,
             vblank_nmi_pending: false,
             sound: DkongDiscreteSound::new(),
             debug_trace: DebugTraceBuffer::new(),
@@ -827,7 +838,7 @@ impl Tkg04Board {
         self.dma.reset();
 
         self.clock = 0;
-        self.sound_clock.reset();
+        self.clocks.reset();
         self.resampler.reset();
         self.dac.reset();
         self.sound.reset();
@@ -982,7 +993,7 @@ impl Saveable for Tkg04Board {
         w.write_bool(self.sound_irq_pending);
         self.resampler.save_state(w);
         w.write_u64_le(self.clock);
-        self.sound_clock.save_state(w);
+        self.clocks.save_state(w);
         w.write_bool(self.vblank_nmi_pending);
     }
 
@@ -1008,7 +1019,7 @@ impl Saveable for Tkg04Board {
         self.sound_irq_pending = r.read_bool()?;
         self.resampler.load_state(r)?;
         self.clock = r.read_u64_le()?;
-        self.sound_clock.load_state(r)?;
+        self.clocks.load_state(r)?;
         self.vblank_nmi_pending = r.read_bool()?;
         Ok(())
     }

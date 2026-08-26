@@ -39,7 +39,9 @@ use phosphor_core::core::machine::{
 };
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::{AccessKind, AddressSpace16};
-use phosphor_core::core::{Bus, BusMaster, ClockDivider, TimingConfig};
+use phosphor_core::core::{
+    Bus, BusMaster, ClockDomainName as Clk, ClockTree, DomainId, TimingConfig,
+};
 use phosphor_core::cpu::Cpu;
 use phosphor_core::cpu::z80::Z80;
 use phosphor_core::device::sn76489::Sn76489a;
@@ -873,7 +875,9 @@ pub struct DocastleBoard {
     // sub CPU's WAIT input.
     #[debug_device("SN76489A")]
     pub(crate) sn: [Sn76489a; 4],
-    pub(crate) sn_clock: ClockDivider,
+    /// The board's clock tree, as [`clock_tree`] declares it.
+    pub(crate) clocks: ClockTree,
+    pub(crate) sn_dom: DomainId,
     /// The PSGs' coupling into the amplifier.
     ///
     /// These chips are UNIPOLAR: each channel contributes its volume while its
@@ -907,6 +911,8 @@ impl DocastleBoard {
             DocastleVariant::Dorunrun => DORUNRUN_DSW1_DEFAULT,
             DocastleVariant::Dowild => DOWILD_DSW1_DEFAULT,
         };
+        let clocks = clock_tree();
+        let sn_dom = clocks.find(Clk::Psg).expect("declared PSG domain");
         Self {
             main_map: Self::build_main_map(variant),
             sub_map: Self::build_sub_map(),
@@ -931,7 +937,8 @@ impl DocastleBoard {
                 Sn76489a::new(SOUND_CLOCK),
                 Sn76489a::new(SOUND_CLOCK),
             ],
-            sn_clock: ClockDivider::new(SOUND_CLOCK / 16, TIMING.cpu_clock_hz as u32),
+            clocks,
+            sn_dom,
             sn_coupling: DcBlocker::new(output_sample_rate() as u32),
             audio: AudioResampler::new(TIMING.cpu_clock_hz, output_sample_rate()),
             clock: 0,
@@ -1105,7 +1112,7 @@ impl DocastleBoard {
 
         // PSG generators run at chip_clock / 16; box-filter the summed output
         // down to the audio rate, one input sample per CPU cycle.
-        if self.sn_clock.tick() {
+        if self.clocks.tick(self.sn_dom) {
             for chip in &mut self.sn {
                 chip.tick();
             }
@@ -1278,7 +1285,7 @@ impl DocastleBoard {
         for chip in &mut self.sn {
             chip.reset();
         }
-        self.sn_clock.reset();
+        self.clocks.reset();
         self.audio.reset();
         self.main_map.region_data_mut(MainRegion::WorkRam).fill(0);
         self.main_map.region_data_mut(MainRegion::SpriteRam).fill(0);
@@ -1340,7 +1347,7 @@ impl Saveable for DocastleBoard {
         for chip in &self.sn {
             chip.save_state(w);
         }
-        self.sn_clock.save_state(w);
+        self.clocks.save_state(w);
         self.sn_coupling.save_state(w);
         self.audio.save_state(w);
         w.write_u64_le(self.clock);
@@ -1370,7 +1377,7 @@ impl Saveable for DocastleBoard {
         for chip in &mut self.sn {
             chip.load_state(r)?;
         }
-        self.sn_clock.load_state(r)?;
+        self.clocks.load_state(r)?;
         self.sn_coupling.load_state(r)?;
         self.audio.load_state(r)?;
         self.clock = r.read_u64_le()?;

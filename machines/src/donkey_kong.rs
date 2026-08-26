@@ -907,7 +907,13 @@ mod tests {
         sys.board.palette_bank = 2;
         sys.board.sound_irq_pending = true;
         sys.board.clock = 200_000;
-        sys.board.sound_clock.set_phase(150);
+        // Give the sound domain a phase worth round-tripping. Seven ticks of
+        // 25/192 leaves 175, short of a fire, so the accumulator is mid-period.
+        for _ in 0..7 {
+            sys.board.clocks.tick(sys.board.sound_dom);
+        }
+        let sound_phase = sys.board.clocks.domain(sys.board.sound_dom).phase();
+        assert_ne!(sound_phase, 0, "expected a mid-period phase to save");
         sys.board.vblank_nmi_pending = true;
 
         // Save
@@ -953,7 +959,10 @@ mod tests {
         assert_eq!(sys2.board.palette_bank, 2);
         assert!(sys2.board.sound_irq_pending);
         assert_eq!(sys2.board.clock, 200_000);
-        assert_eq!(sys2.board.sound_clock.phase(), 150);
+        assert_eq!(
+            sys2.board.clocks.domain(sys2.board.sound_dom).phase(),
+            sound_phase
+        );
         assert!(sys2.board.vblank_nmi_pending);
     }
 

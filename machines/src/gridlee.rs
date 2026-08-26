@@ -368,7 +368,13 @@ pub struct GridleeBoard {
     tone_fraction: u64,   // 24-bit phase accumulator
     tone_volume: u8,      // 8-bit volume
     audio_buffer: SampleRing<i16>,
-    audio_clock: ClockDivider, // Bresenham phase for 1.25 MHz → 44.1 kHz
+    /// Bresenham phase for 1.25 MHz → 44.1 kHz.
+    ///
+    /// The last `ClockDivider` in the machines crate, and deliberately so: this
+    /// paces sampling against the *host's* audio rate, which is not a clock on
+    /// this board and has no crystal to derive it from. Every divider that was
+    /// a board clock is a `ClockTree` domain now; this one is not one.
+    audio_clock: ClockDivider,
 
     // Interrupt state
     irq_pending: bool,

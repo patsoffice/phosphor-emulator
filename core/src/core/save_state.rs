@@ -66,10 +66,14 @@ pub const SAVE_MAGIC: &[u8; 4] = b"PHOS";
 /// Bumped to 11 when Scramble's `sound_acc` became a clock-tree domain, the
 /// last of the hand-rolled board accumulators.
 ///
+/// Bumped to 12 when the last nine boards' `ClockDivider` fields became
+/// `ClockTree` domains: atari_system1, btime, congo_bongo, docastle, mario_bros,
+/// mcr2, mrdo, namco_galaga and tkg04, in one commit rather than nine bumps.
+///
 /// The format is positional, so every board whose field layout changes costs a
 /// bump like those. `phosphor-emulator-tlv-save-state-hc61` Stage A is what
 /// makes that cost go away.
-pub const SAVE_VERSION: u32 = 11;
+pub const SAVE_VERSION: u32 = 12;
 
 // -- Saveable trait ----------------------------------------------------------
 

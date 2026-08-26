@@ -5,7 +5,7 @@ use phosphor_core::core::machine::{
     ActionRole, Direction, InputControl, InputId, InputKind, TimingConfig,
 };
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
-use phosphor_core::core::{Bus, BusMaster, ClockDivider};
+use phosphor_core::core::{Bus, BusMaster, ClockDomainName as Clk, ClockTree, DomainId};
 use phosphor_core::cpu::z80::Z80;
 use phosphor_core::device::namco_wsg::NamcoWsg;
 use phosphor_core::device::namco06::Namco06;
@@ -228,7 +228,7 @@ pub const TIMING: TimingConfig = TimingConfig {
 /// Namco 51xx at /12, which is the divide-by-two the board applies to the CPU
 /// clock.
 pub fn clock_tree() -> phosphor_core::core::ClockTree {
-    use phosphor_core::core::{ClockDomainName as Clk, ClockTree, RootId};
+    use phosphor_core::core::RootId;
     let mut t = ClockTree::new(18_432_000);
     let cpu = t.add_domain(Clk::Cpu, RootId::MAIN, 1, 6); // 3.072 MHz
     t.add_domain(Clk::Cpu2, RootId::MAIN, 1, 6);
@@ -509,7 +509,9 @@ pub struct NamcoGalagaBoard {
     pub(crate) namco50: Option<Namco50>,
 
     // Clock divider for the 51XX MCU (LLE mode only). MB88xx runs at 256 kHz.
-    pub(crate) namco51_divider: ClockDivider,
+    /// The board's clock tree, as [`clock_tree`] declares it.
+    pub(crate) clocks: ClockTree,
+    pub(crate) namco51_dom: DomainId,
 
     // Input ports (active-low: 0xFF = all released)
     pub(crate) in0: u8,
@@ -551,6 +553,8 @@ pub struct NamcoGalagaBoard {
 
 impl NamcoGalagaBoard {
     pub fn new() -> Self {
+        let clocks = clock_tree();
+        let namco51_dom = clocks.find(Clk::Mcu).expect("declared Namco 51xx domain");
         Self {
             map: Self::build_map(),
 
@@ -566,7 +570,8 @@ impl NamcoGalagaBoard {
             namco53: Namco53::new(),
             namco50: None,
 
-            namco51_divider: ClockDivider::new(1, 2),
+            clocks,
+            namco51_dom,
 
             in0: 0xFF,
             in1: 0xFF,
@@ -757,7 +762,7 @@ impl NamcoGalagaBoard {
             // We only need to keep rw_input current; o_latch updates instantly
             // when the Z80 writes via write_custom_io → namco51.write().
             lle.mcu.rw_input = if self.namco06.is_read_mode() { 1 } else { 0 };
-            if self.namco51_divider.tick() {
+            if self.clocks.tick(self.namco51_dom) {
                 lle.update_inputs(self.in0, self.in1);
                 lle.tick();
             }
@@ -1200,7 +1205,7 @@ impl NamcoGalagaBoard {
         if let Some(ref mut n50) = self.namco50 {
             n50.reset();
         }
-        self.namco51_divider.reset();
+        self.clocks.reset();
 
         self.in0 = 0xFF;
         self.in1 = 0xFF;
@@ -1266,7 +1271,7 @@ impl Saveable for NamcoGalagaBoard {
             Namco51Wrapper::Lle(n) => {
                 w.write_u8(1);
                 n.save_state(w);
-                self.namco51_divider.save_state(w);
+                self.clocks.save_state(w);
             }
         }
 
@@ -1327,7 +1332,7 @@ impl Saveable for NamcoGalagaBoard {
                 match &mut self.namco51 {
                     Namco51Wrapper::Lle(n) => {
                         n.load_state(r)?;
-                        self.namco51_divider.load_state(r)?;
+                        self.clocks.load_state(r)?;
                     }
                     _ => {
                         return Err(SaveError::InvalidFormat(
