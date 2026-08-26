@@ -24,7 +24,9 @@ use phosphor_core::core::machine::{
 };
 use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::{AccessKind, AddressSpace16};
-use phosphor_core::core::{Bus, BusMaster, ClockDivider, TimingConfig};
+use phosphor_core::core::{
+    Bus, BusMaster, ClockDivider, ClockDomainName as Clk, ClockTree, DomainId, TimingConfig,
+};
 use phosphor_core::cpu::Cpu;
 use phosphor_core::cpu::z80::Z80;
 use phosphor_core::device::i8255::I8255;
@@ -90,7 +92,7 @@ pub const TIMING: TimingConfig = TimingConfig {
 /// *faster* than the main CPU the frame loop counts in, which is the one board
 /// here whose domain has to be stepped with `advance()` rather than `tick()`.
 pub fn clock_tree() -> phosphor_core::core::ClockTree {
-    use phosphor_core::core::{ClockDomainName as Clk, ClockTree, RootId};
+    use phosphor_core::core::RootId;
     let mut t = ClockTree::new(48_660_000);
     let snd = t.add_root(SOUND_CLOCK as u32); // 4 MHz sound board crystal
     let cpu = t.add_domain(Clk::Cpu, RootId::MAIN, 1, 16); // 3.04125 MHz
@@ -414,11 +416,9 @@ pub fn tick(cpu: &mut Z80, sound_cpu: &mut Z80, board: &mut CongoBongoBoard) {
 /// resampler by one main-CPU cycle's worth of time.
 fn tick_sound(sound_cpu: &mut Z80, board: &mut CongoBongoBoard) {
     // Sound Z80 runs at 4 MHz against the 3.041 MHz main loop, so it may take
-    // more than one step per main cycle (a fractional Bresenham accumulator).
-    board.sound_cycle_accum += SOUND_CLOCK;
-    while board.sound_cycle_accum >= TIMING.cpu_clock_hz {
-        board.sound_cycle_accum -= TIMING.cpu_clock_hz;
-
+    // more than one step per main cycle. `advance` returns how many, which is
+    // the whole reason it returns a count rather than a bool.
+    for _ in 0..board.clocks.advance(board.sound_dom) {
         // Periodic ~244 Hz IRQ (irq0_line_hold).
         board.sound_irq_counter += 1;
         if board.sound_irq_counter >= SOUND_IRQ_PERIOD {
@@ -511,9 +511,15 @@ pub struct CongoBongoBoard {
     #[debug_device("PPI")]
     pub(crate) ppi: I8255,
 
-    // Sound-CPU clocking (4 MHz from the 3.041 MHz main loop ⇒ fractional, may
-    // step more than once per main cycle) + the ~244 Hz periodic IRQ.
-    pub(crate) sound_cycle_accum: u64,
+    /// The board's clock tree, as [`clock_tree`] declares it.
+    ///
+    /// The sound Z80 has its own 4 MHz crystal and so outruns the 3.04125 MHz
+    /// main loop this board counts in. That is what [`ClockTree::advance`]
+    /// exists for: it returns how many times the domain fired, where
+    /// `ClockDivider::tick() -> bool` could only ever say "once".
+    pub(crate) clocks: ClockTree,
+    pub(crate) sound_dom: DomainId,
+    /// The ~244 Hz periodic IRQ, counted in sound-CPU cycles.
     pub(crate) sound_irq_counter: u64,
     pub(crate) sound_irq_pending: bool,
 
@@ -542,6 +548,8 @@ impl Default for CongoBongoBoard {
 
 impl CongoBongoBoard {
     pub fn new() -> Self {
+        let clocks = clock_tree();
+        let sound_dom = clocks.find(Clk::SoundCpu).expect("declared sound domain");
         Self {
             main_map: Self::build_main_map(),
             sound_map: Self::build_sound_map(),
@@ -573,7 +581,8 @@ impl CongoBongoBoard {
             sn1: Sn76489a::new(SOUND_CLOCK as u32),
             sn2: Sn76489a::new(SOUND_PSG2_CLOCK),
             ppi: I8255::new(),
-            sound_cycle_accum: 0,
+            clocks,
+            sound_dom,
             sound_irq_counter: 0,
             sound_irq_pending: false,
             sn1_clock: ClockDivider::new((SOUND_CLOCK / 16) as u32, TIMING.cpu_clock_hz as u32),
@@ -1075,7 +1084,7 @@ impl CongoBongoBoard {
         self.sn1.reset();
         self.sn2.reset();
         self.ppi.reset();
-        self.sound_cycle_accum = 0;
+        self.clocks.reset();
         self.sound_irq_counter = 0;
         self.sound_irq_pending = false;
         self.sn1_clock.reset();
@@ -1139,7 +1148,7 @@ impl Saveable for CongoBongoBoard {
         self.sn1.save_state(w);
         self.sn2.save_state(w);
         self.ppi.save_state(w);
-        w.write_u64_le(self.sound_cycle_accum);
+        self.clocks.save_state(w);
         w.write_u64_le(self.sound_irq_counter);
         w.write_bool(self.sound_irq_pending);
         self.sn1_clock.save_state(w);
@@ -1174,7 +1183,7 @@ impl Saveable for CongoBongoBoard {
         self.sn1.load_state(r)?;
         self.sn2.load_state(r)?;
         self.ppi.load_state(r)?;
-        self.sound_cycle_accum = r.read_u64_le()?;
+        self.clocks.load_state(r)?;
         self.sound_irq_counter = r.read_u64_le()?;
         self.sound_irq_pending = r.read_bool()?;
         self.sn1_clock.load_state(r)?;
@@ -1849,6 +1858,52 @@ inventory::submit! {
 mod tests {
     use super::*;
     use phosphor_core::core::debug::Debuggable;
+
+    /// The tree fires the sound Z80 on exactly the cycles the hand-rolled
+    /// accumulator did.
+    ///
+    /// Not just at the same rate: the same steps, in the same order. The two
+    /// are the same Bresenham in different terms, 4000000/3041250 against its
+    /// reduction 3200/2433, and a reduced ratio tracks an unreduced one exactly
+    /// when both start from zero phase. This checks that rather than trusting
+    /// it, because a fire landing one main cycle early or late would shift the
+    /// sound CPU against the latch writes it reads and nothing else here would
+    /// notice.
+    #[test]
+    fn the_sound_domain_fires_on_the_same_cycles_as_the_old_accumulator() {
+        let mut board = CongoBongoBoard::new();
+        assert_eq!(
+            board.clocks.domain(board.sound_dom).step_ratio(),
+            (3200, 2433)
+        );
+
+        // The arithmetic this replaced, reproduced verbatim.
+        let mut accum: u64 = 0;
+        let mut fired_twice = 0;
+        // A whole period of the ratio, three times over.
+        for step in 0..(2433 * 3) {
+            accum += SOUND_CLOCK;
+            let mut want = 0;
+            while accum >= TIMING.cpu_clock_hz {
+                accum -= TIMING.cpu_clock_hz;
+                want += 1;
+            }
+            let got = board.clocks.advance(board.sound_dom);
+            assert_eq!(
+                got, want,
+                "main cycle {step}: tree fired {got} times, accumulator {want}"
+            );
+            if want == 2 {
+                fired_twice += 1;
+            }
+        }
+        // The case that motivated `advance() -> u32` really does occur, so the
+        // comparison above is not vacuously matching two streams of ones.
+        assert!(
+            fired_twice > 2000,
+            "expected the sound Z80 to double-step often, saw {fired_twice}"
+        );
+    }
 
     #[test]
     fn registered_in_machine_and_disasm_registries() {

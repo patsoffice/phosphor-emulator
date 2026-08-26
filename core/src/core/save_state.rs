@@ -60,10 +60,13 @@ pub const SAVE_MAGIC: &[u8; 4] = b"PHOS";
 /// domains. Each replaced a rate plus an accumulator with the domain's own
 /// saved ratio.
 ///
+/// Bumped to 10 when Congo Bongo's `sound_cycle_accum` became a clock-tree
+/// domain, replacing a bare `u64` with the domain's saved ratio and phase.
+///
 /// The format is positional, so every board whose field layout changes costs a
 /// bump like those. `phosphor-emulator-tlv-save-state-hc61` Stage A is what
 /// makes that cost go away.
-pub const SAVE_VERSION: u32 = 9;
+pub const SAVE_VERSION: u32 = 10;
 
 // -- Saveable trait ----------------------------------------------------------
 
