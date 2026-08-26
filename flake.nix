@@ -42,6 +42,14 @@
             pkgs.pkg-config
             pkgs.libGL
             pkgs.ast-grep # structural (AST-aware) search/replace for code mods
+            # Alfred Arnold's macro assembler, and the p2bin that turns its code
+            # file into a raw image. Assembles the synthetic conformance ROMs in
+            # machines/tests/roms, which are our own source rather than arcade
+            # ROMs and so can be committed and rebuilt. Chosen over the 6809-only
+            # lwtools, which nixpkgs does not carry: asl targets 6502, Z80, 68000
+            # and the rest, so a conformance ROM for a second board needs no new
+            # assembler here.
+            pkgs.asl
             # RustSec advisory check over Cargo.lock: `cargo audit`. The tree is
             # mostly inert for an offline emulator, but `zip` and `flate2` parse
             # ROM archives from wherever the user got them, so that path is worth
@@ -58,6 +66,12 @@
           shellHook = ''
             export CC="${pkgs.clang}/bin/clang"
             export CXX="${pkgs.clang}/bin/clang++"
+            # Tells the conformance-ROM drift guard that an assembler is
+            # supposed to be on PATH here, so a missing one is a failure rather
+            # than a skip. Without this the guard reports green whenever the
+            # toolchain is absent, which is exactly how it reported green while
+            # no assembler existed anywhere. CI sets nothing and still skips.
+            export PHOSPHOR_ASM=1
           '';
         };
       });
