@@ -45,9 +45,13 @@
 //! whose own ROM set is missing skips individually, as does one whose movie was
 //! recorded against a different ROM revision.
 //!
-//! Movies come from `PHOSPHOR_MOVIES`, else `~/.config/phosphor/movies`, named
-//! `<machine>-*.phmi`. They are a local collection, not committed, so a machine
-//! without one is normal and not a failure.
+//! Movies come from `tests/golden/movies`, named `<machine>-*.phmi`, unless
+//! `PHOSPHOR_MOVIES` points elsewhere. They are **committed**: a movie is a
+//! recorded input trace of our own making rather than ROM content, the whole
+//! collection is under 200 KB, and the fixture decides the result — so leaving
+//! it on one developer's disk meant everyone else silently ran a weaker suite.
+//! A machine whose recording will not replay is a failure, not a note; see
+//! [`every_machine_with_a_recording_replays_it`].
 //!
 //! # Expectations
 //!
@@ -268,13 +272,25 @@ fn rom_set_present(dir: &Path, machine: &str) -> bool {
         .any(|n| dir.join(format!("{n}.zip")).exists())
 }
 
-/// Where recorded input movies live.
+/// Where recorded input movies live: the committed collection, unless
+/// `PHOSPHOR_MOVIES` points somewhere else.
+///
+/// These are committed rather than read out of `~/.config/phosphor/movies`
+/// because the fixture decides the result. The suite only judges *silence* on a
+/// movie, so a contributor without a collection used to fall back to input-free
+/// boot on every machine, lose that check entirely, and see the same green run.
+/// Mr. Do! passed clean for the whole life of this suite that way: its attract
+/// mode is silent, a silent capture has no offset to report, and it turned out
+/// to be missing a coupling capacitor worth +0.183 of DC.
+///
+/// A movie is a recorded input trace of our own making, not ROM content, and the
+/// whole collection is under 200 KB.
 fn movies_dir() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("PHOSPHOR_MOVIES") {
         let p = PathBuf::from(p);
         return p.is_dir().then_some(p);
     }
-    let p = PathBuf::from(std::env::var("HOME").ok()?).join(".config/phosphor/movies");
+    let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden/movies");
     p.is_dir().then_some(p)
 }
 
@@ -449,6 +465,11 @@ struct Sweep {
     checked: usize,
     /// Machines this collection cannot run.
     skipped: Vec<&'static str>,
+    /// Machines that have a recording but were measured from an input-free boot
+    /// anyway, because the movie would not load. The suite is strictly weaker
+    /// for these — silence is not judged on a boot fixture — and the whole point
+    /// of committing the collection is that this is not supposed to happen.
+    fell_back: Vec<&'static str>,
     /// Wall time each machine's measurement took, and the whole sweep's.
     ///
     /// Kept because "the suite is slow" is otherwise unanswerable without
@@ -480,6 +501,7 @@ fn sweep_uncached(dir: &Path) -> Sweep {
     let mut fixtures: BTreeMap<String, Fixture> = BTreeMap::new();
     let mut checked = 0usize;
     let mut skipped = Vec::new();
+    let mut fell_back = Vec::new();
 
     // One machine's measurement cannot see another's, so they run on every
     // core. Judging stays sequential and in registry order, which is what keeps
@@ -503,6 +525,12 @@ fn sweep_uncached(dir: &Path) -> Sweep {
             continue;
         };
         checked += 1;
+        // A boot result for a machine that has a recording means the movie
+        // would not load, which is a fixture fault rather than a property of
+        // the board.
+        if fixture == Fixture::Boot && movie_for(entry).is_some() {
+            fell_back.push(*entry);
+        }
         fixtures.insert(entry.to_string(), fixture);
         measured.insert(entry.to_string(), integrity);
         let mut defects = Vec::new();
@@ -531,6 +559,7 @@ fn sweep_uncached(dir: &Path) -> Sweep {
         fixtures,
         checked,
         skipped,
+        fell_back,
         per_machine,
         elapsed,
     }
@@ -621,6 +650,105 @@ fn report(sweep: &Sweep, e: &Expectations) {
         "\nthresholds: dc {:.3}, clipped {:.3}, silent {:.3}\n",
         e.defaults.max_dc_offset, e.defaults.max_clipped_fraction, e.defaults.max_silent_fraction
     );
+}
+
+/// Every machine that has a recording must actually replay it.
+///
+/// **This is the check that stops the suite quietly becoming a weaker one.**
+/// Silence is only judged on a movie fixture, so a machine that falls back to an
+/// input-free boot is measured against two of three thresholds instead of three,
+/// and reports the same `ok` either way. Mr. Do! sat in exactly that state for
+/// the whole life of this suite and was hiding a missing coupling capacitor.
+///
+/// A fall-back means the recording did not load: a corrupt movie, or a ROM dump
+/// that differs from the one it was recorded against. Both are worth a failure
+/// rather than a printed note. Point `PHOSPHOR_MOVIES` at your own collection if
+/// your dumps differ from the committed fixtures.
+#[test]
+fn every_machine_with_a_recording_replays_it() {
+    let Some(dir) = roms() else { return };
+    let s = sweep(&dir);
+
+    let movie_fixtures = s
+        .fixtures
+        .values()
+        .filter(|f| **f == Fixture::Movie)
+        .count();
+    eprintln!(
+        "fixtures: {movie_fixtures} movie, {} boot, of {} checked",
+        s.checked - movie_fixtures,
+        s.checked
+    );
+
+    assert!(
+        s.fell_back.is_empty(),
+        "{} machine(s) have a recording that would not replay, so their audio was \
+         measured from an input-free boot and their silence was never judged:\n  {}\n\n\
+         The movie is corrupt, or your ROM dump differs from the one it was recorded \
+         against; the run above names which. Set PHOSPHOR_MOVIES to point at your own \
+         collection if your dumps differ from the committed ones.",
+        s.fell_back.len(),
+        s.fell_back.join("\n  ")
+    );
+
+    // A collection that supplies nothing would otherwise pass having judged
+    // silence on no machine at all, which is the state this suite spent its
+    // whole life in for most of the roster.
+    assert!(
+        movie_fixtures > 0,
+        "no machine ran under a movie fixture, so the silence threshold was \
+         applied to nothing. The committed collection is at \
+         harness/tests/golden/movies; PHOSPHOR_MOVIES overrides it."
+    );
+}
+
+/// One recording per machine in the committed collection.
+///
+/// `movie_for` takes the lexically last match, so a second recording for a
+/// machine silently supersedes the first. That is the right behaviour for a
+/// working directory where re-recording should win without deleting the old
+/// take, and the wrong thing to have in the repository, where it would mean
+/// carrying a fixture nothing reads.
+#[test]
+fn the_committed_collection_has_one_recording_per_machine() {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/golden/movies");
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return;
+    };
+
+    let mut by_machine: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for path in entries.filter_map(|e| e.ok()).map(|e| e.path()) {
+        if path.extension().is_none_or(|x| x != "phmi") {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let machine = stem.split('-').next().unwrap_or(stem).to_string();
+        by_machine
+            .entry(machine)
+            .or_default()
+            .push(stem.to_string());
+    }
+
+    let dupes: Vec<String> = by_machine
+        .iter()
+        .filter(|(_, takes)| takes.len() > 1)
+        .map(|(m, takes)| format!("{m}: {}", takes.join(", ")))
+        .collect();
+    assert!(
+        dupes.is_empty(),
+        "more than one committed recording for a machine; only the lexically last \
+         is ever read, so the others are dead weight:\n  {}",
+        dupes.join("\n  ")
+    );
+
+    for machine in by_machine.keys() {
+        assert!(
+            registry::find(machine).is_some(),
+            "{machine}.phmi is committed but no such machine is registered"
+        );
+    }
 }
 
 /// No machine may be newly defective.
