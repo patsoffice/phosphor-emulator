@@ -92,17 +92,29 @@ use phosphor_macros::Saveable;
 #[derive(Saveable)]
 // Bumped to 2 by the `stall` field: a blit saved mid-transfer in slow mode
 // reloads owing the same clock it owed, rather than losing or gaining one.
-#[save_version(2)]
+//
+// Bumped to 3 by the move to field TLV. `stall` is why: it was an added field,
+// and adding it cost every Williams save on disk. Under TLV a field added with
+// `default` costs nothing, so the next one will not.
+#[save_version(3)]
+#[save_tlv]
 pub struct WilliamsBlitter {
     // Registers (offsets 0-7, write-only)
+    #[save(id = 1)]
     control: u8,
+    #[save(id = 2)]
     solid_color: u8,
+    #[save(id = 3)]
     src_addr: u16,
+    #[save(id = 4)]
     dst_addr: u16,
+    #[save(id = 5)]
     width: u8,
+    #[save(id = 6)]
     height: u8,
 
     // Configuration (set at construction, not via registers)
+    #[save(id = 7)]
     size_xor: u8, // 4 for SC1 (VL2001), 0 for SC2 (VL2001A)
 
     // Window clip (Sinistar). When `window_enable` is set, blits into
@@ -117,22 +129,35 @@ pub struct WilliamsBlitter {
     window_enable: bool,
 
     // Execution state
+    #[save(id = 8)]
     active: bool,
     /// Set after a byte moves in `CTRL_SLOW` mode: the next clock is the second
     /// of that byte's two, and moves nothing. The blit stays `active` across it,
     /// which is what actually holds the CPU halted for the extra microsecond.
+    #[save(id = 9)]
     stall: bool,
-    x: u16,         // current column within row (0..w)
-    w: u16,         // effective width (1-based, post-XOR + clamp)
-    h: u16,         // effective height (1-based, post-XOR + clamp)
+    #[save(id = 10)]
+    x: u16, // current column within row (0..w)
+    #[save(id = 11)]
+    w: u16, // effective width (1-based, post-XOR + clamp)
+    #[save(id = 12)]
+    h: u16, // effective height (1-based, post-XOR + clamp)
+    #[save(id = 13)]
     rows_done: u16, // number of rows completed
-    sstart: u16,    // source row-start address
-    dstart: u16,    // dest row-start address
-    cur_src: u16,   // current source address
-    cur_dst: u16,   // current dest address
-    sxadv: u16,     // source per-column advance (1 or 256)
-    dxadv: u16,     // dest per-column advance (1 or 256)
-    shift_reg: u8,  // previous raw source byte for shift mode
+    #[save(id = 14)]
+    sstart: u16, // source row-start address
+    #[save(id = 15)]
+    dstart: u16, // dest row-start address
+    #[save(id = 16)]
+    cur_src: u16, // current source address
+    #[save(id = 17)]
+    cur_dst: u16, // current dest address
+    #[save(id = 18)]
+    sxadv: u16, // source per-column advance (1 or 256)
+    #[save(id = 19)]
+    dxadv: u16, // dest per-column advance (1 or 256)
+    #[save(id = 20)]
+    shift_reg: u8, // previous raw source byte for shift mode
 }
 
 use crate::core::debug::{DebugRegister, Debuggable};

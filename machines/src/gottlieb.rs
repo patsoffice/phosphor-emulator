@@ -155,11 +155,21 @@ const RESISTOR_DAC: [u8; 16] = [
 /// sound CPU address space. Its A/R (articulate/request) output is
 /// wired to RIOT Port B bit 7. A/R rising edge triggers sound CPU NMI.
 #[derive(Saveable)]
-#[save_version(4)] // v4: the two ClockDividers became a ClockTree living here
+// v4: the two ClockDividers became a ClockTree living here.
+//
+// Bumped to 5 by the move to field TLV. This struct is the reason it is worth
+// doing: four bumps in its life, three of them a component being added to or
+// taken out of the middle of the body, which is exactly what TLV absorbs.
+#[save_version(5)]
+#[save_tlv]
 pub(crate) struct GottliebSoundBoard {
+    #[save(id = 1)]
     riot: Riot6532,
+    #[save(id = 2)]
     dac: Mc1408Dac,
+    #[save(id = 3)]
     votrax: VotraxSc01,
+    #[save(id = 4)]
     resampler: AudioResampler<i16>,
     /// The sound board's coupling into the amplifier.
     ///
@@ -173,13 +183,17 @@ pub(crate) struct GottliebSoundBoard {
     /// Applied to the summed output rather than the ladder alone: the speech
     /// synthesizer joins the same amplifier, and one capacitor at that point is
     /// what the board has.
+    #[save(id = 5)]
     output_coupling: DcBlocker,
     #[save_skip]
     sound_rom: Vec<u8>, // 8KB (mapped at 0x6000-0x7FFF in 15-bit space)
+    #[save(id = 6)]
     clock: u64,
     /// Previous A/R state for edge detection (NMI on rising edge).
+    #[save(id = 7)]
     votrax_ar_prev: bool,
     /// NMI pending from Votrax A/R rising edge.
+    #[save(id = 8)]
     votrax_nmi: bool,
     /// The whole board's clock tree, exactly as [`clock_tree`] declares it.
     ///
@@ -189,6 +203,7 @@ pub(crate) struct GottliebSoundBoard {
     /// what lets that be a single call site instead of a flag the outer board
     /// polls once per CPU cycle. The main CPU and pixel domains ride along
     /// unstepped: they are the reference the other two are expressed against.
+    #[save(id = 9)]
     clocks: ClockTree,
     #[save_skip]
     sound_dom: DomainId,

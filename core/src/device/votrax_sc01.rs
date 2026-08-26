@@ -62,102 +62,179 @@ const PHONE_NAMES: [&str; 64] = [
 
 /// Votrax SC-01 speech synthesizer.
 #[derive(Saveable)]
-#[save_version(2)] // v2: the output resampler's phase joined the snapshot
+// v2: the output resampler's phase joined the snapshot.
+//
+// Bumped to 3 by the move to field TLV. The v2 bump is the case in point: one
+// field joining the end of a seventy-field body invalidated every Gottlieb
+// save. Under TLV a field added with `default` costs nothing.
+#[save_version(3)]
+#[save_tlv]
 pub struct VotraxSc01 {
     // --- Inputs ---
+    #[save(id = 1)]
     phone: u8,
+    #[save(id = 2)]
     inflection: u8,
 
     // --- Outputs ---
+    #[save(id = 3)]
     ar_state: bool,
 
     // --- ROM-extracted parameters for current phoneme ---
+    #[save(id = 4)]
     rom_duration: u8,
+    #[save(id = 5)]
     rom_vd: u8,
+    #[save(id = 6)]
     rom_cld: u8,
+    #[save(id = 7)]
     rom_fa: u8,
+    #[save(id = 8)]
     rom_fc: u8,
+    #[save(id = 9)]
     rom_va: u8,
+    #[save(id = 10)]
     rom_f1: u8,
+    #[save(id = 11)]
     rom_f2: u8,
+    #[save(id = 12)]
     rom_f2q: u8,
+    #[save(id = 13)]
     rom_f3: u8,
+    #[save(id = 14)]
     rom_closure: bool,
+    #[save(id = 15)]
     rom_pause: bool,
 
     // --- Interpolation registers (8-bit, exponential approach) ---
+    #[save(id = 16)]
     cur_fa: u8,
+    #[save(id = 17)]
     cur_fc: u8,
+    #[save(id = 18)]
     cur_va: u8,
+    #[save(id = 19)]
     cur_f1: u8,
+    #[save(id = 20)]
     cur_f2: u8,
+    #[save(id = 21)]
     cur_f2q: u8,
+    #[save(id = 22)]
     cur_f3: u8,
 
     // --- Committed filter parameter values ---
+    #[save(id = 23)]
     filt_fa: u8,
+    #[save(id = 24)]
     filt_fc: u8,
+    #[save(id = 25)]
     filt_va: u8,
+    #[save(id = 26)]
     filt_f1: u8,
+    #[save(id = 27)]
     filt_f2: u8, // 5 bits (cur_f2 >> 3)
+    #[save(id = 28)]
     filt_f2q: u8,
+    #[save(id = 29)]
     filt_f3: u8,
 
     // --- Timing counters ---
+    #[save(id = 30)]
     phonetick: u16,
+    #[save(id = 31)]
     ticks: u8,
+    #[save(id = 32)]
     update_counter: u8,
+    #[save(id = 33)]
     pitch: u8,
+    #[save(id = 34)]
     closure: u8,
+    #[save(id = 35)]
     sample_count: u32,
+    #[save(id = 36)]
     main_divider: u8,
+    #[save(id = 37)]
     cur_closure: bool,
 
     // --- Noise generator ---
+    #[save(id = 38)]
     noise: u16,
+    #[save(id = 39)]
     cur_noise: bool,
 
     // --- Commit/end-of-phone scheduling ---
+    #[save(id = 40)]
     commit_pending: bool,
+    #[save(id = 41)]
     commit_countdown: u32,
+    #[save(id = 42)]
     end_phone_pending: bool,
+    #[save(id = 43)]
     end_phone_countdown: u32,
 
     // --- Filter coefficients (IIR biquads) ---
+    #[save(id = 44)]
     f1_a: [f64; 4],
+    #[save(id = 45)]
     f1_b: [f64; 4],
+    #[save(id = 46)]
     f2v_a: [f64; 4],
+    #[save(id = 47)]
     f2v_b: [f64; 4],
+    #[save(id = 48)]
     f2n_a: [f64; 2],
+    #[save(id = 49)]
     f2n_b: [f64; 2],
+    #[save(id = 50)]
     f3_a: [f64; 4],
+    #[save(id = 51)]
     f3_b: [f64; 4],
+    #[save(id = 52)]
     f4_a: [f64; 4],
+    #[save(id = 53)]
     f4_b: [f64; 4],
+    #[save(id = 54)]
     fx_a: [f64; 1],
+    #[save(id = 55)]
     fx_b: [f64; 2],
+    #[save(id = 56)]
     fn_a: [f64; 3],
+    #[save(id = 57)]
     fn_b: [f64; 3],
 
     // --- Signal path histories ---
+    #[save(id = 58)]
     voice_1: [f64; 4],
+    #[save(id = 59)]
     voice_2: [f64; 4],
+    #[save(id = 60)]
     voice_3: [f64; 4],
+    #[save(id = 61)]
     noise_1: [f64; 3],
+    #[save(id = 62)]
     noise_2: [f64; 3],
+    #[save(id = 63)]
     noise_3: [f64; 2],
+    #[save(id = 64)]
     noise_4: [f64; 2],
+    #[save(id = 65)]
     vn_1: [f64; 4],
+    #[save(id = 66)]
     vn_2: [f64; 4],
+    #[save(id = 67)]
     vn_3: [f64; 4],
+    #[save(id = 68)]
     vn_4: [f64; 4],
+    #[save(id = 69)]
     vn_5: [f64; 2],
+    #[save(id = 70)]
     vn_6: [f64; 2],
 
     /// Serialized: its resampling phase decides *when* the next output sample
     /// falls, so a restored device that kept a stale phase emits a different
     /// number of samples per frame than the saved one did. (Its output buffer
     /// is not carried across — `AudioResampler::load_state` clears it.)
+    #[save(id = 71)]
     resampler: AudioResampler<f32>,
 
     // --- Non-serialized fields ---

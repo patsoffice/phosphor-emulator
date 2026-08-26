@@ -268,14 +268,19 @@ pub struct TempestIo {
 }
 
 #[derive(Saveable, BusDebug)]
-#[save_version(2)]
+// Bumped to 3 by the move to field TLV.
+#[save_version(3)]
+#[save_tlv]
 pub struct TempestSystem {
     #[debug_cpu("M6502")]
+    #[save(id = 1)]
     cpu: M6502,
 
     #[debug_bus]
+    #[save(id = 2)]
     pub board: AtariAvgBoard,
 
+    #[save(id = 3)]
     io: TempestIo,
 
     // Audio buffer from dual POKEYs

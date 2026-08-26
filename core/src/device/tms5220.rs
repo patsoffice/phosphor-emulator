@@ -106,80 +106,121 @@ pub enum Tms52xxVariant {
 /// state, never its rates, so saving it does not disturb a board that retunes
 /// the clock after a load.
 #[derive(Saveable)]
-#[save_version(3)]
+// Bumped to 4 by the move to field TLV. Three bumps before this one, each of
+// them a field joining or leaving the middle of the body, is what earned it a
+// place in the Stage B set.
+#[save_version(4)]
+#[save_tlv]
 pub struct Tms5220 {
     /// Speak-external FIFO (ring buffer).
+    #[save(id = 1)]
     fifo: [u8; FIFO_SIZE],
+    #[save(id = 2)]
     fifo_head: u8,
+    #[save(id = 3)]
     fifo_tail: u8,
+    #[save(id = 4)]
     fifo_count: u8,
     /// Bits already consumed from the FIFO head byte by the frame parser.
+    #[save(id = 5)]
     fifo_bits_taken: u8,
 
     /// SPEN: synthesizer enabled (set by a speak command / FIFO passing
     /// half-full; cleared by reset or buffer-empty in speak-external mode).
+    #[save(id = 6)]
     spen: bool,
     /// TALK: latched "should be speaking"; TALKD follows it a frame later.
+    #[save(id = 7)]
     talk: bool,
     /// TALKD: synthesis actively producing samples (latched from TALK at the
     /// end of each interpolation cycle).
+    #[save(id = 8)]
     talkd: bool,
     /// DDIS: speak-external (FIFO) mode, entered by the SPEAK EXTERNAL command.
+    #[save(id = 9)]
     ddis: bool,
 
     /// BL: buffer low (FIFO half-empty or less).
+    #[save(id = 10)]
     buffer_low: bool,
     /// BE: buffer empty.
+    #[save(id = 11)]
     buffer_empty: bool,
     /// Previous talk-status, for edge-detecting the falling `/INT`.
+    #[save(id = 12)]
     previous_talk_status: bool,
     /// `/INT` pin state (true = interrupt asserted).
+    #[save(id = 13)]
     irq_pin: bool,
 
     /// 5220C SET RATE value (low nibble of the last set-rate command).
+    #[save(id = 14)]
     c_variant_rate: u8,
 
     // --- Synthesizer state ---
     /// Newly parsed frame's target indices (energy, pitch, K1..K10).
+    #[save(id = 15)]
     new_frame_energy_idx: u8,
+    #[save(id = 16)]
     new_frame_pitch_idx: u8,
+    #[save(id = 17)]
     new_frame_k_idx: [u8; NUM_K],
     /// Interpolated current parameter values fed to the lattice filter.
+    #[save(id = 18)]
     current_energy: i32,
+    #[save(id = 19)]
     current_pitch: i32,
+    #[save(id = 20)]
     current_k: [i32; NUM_K],
     /// Energy applied on the previous sample (lattice excitation scale).
+    #[save(id = 21)]
     previous_energy: i32,
     /// Lattice filter delay lines.
+    #[save(id = 22)]
     lat_u: [i32; 11],
+    #[save(id = 23)]
     lat_x: [i32; NUM_K],
     /// Unvoiced-excitation noise LFSR.
+    #[save(id = 24)]
     rng: u16,
     /// Current excitation sample (chirp or noise).
+    #[save(id = 25)]
     excitation_data: i32,
     /// Pitch (chirp) counter.
+    #[save(id = 26)]
     pitch_count: u16,
     /// Interpolation period (0..7), parameter counter (0..12), subcycle (0..2).
+    #[save(id = 27)]
     ip: u8,
+    #[save(id = 28)]
     pc: u8,
+    #[save(id = 29)]
     subcycle: u8,
     /// Master-clock divider toward the per-sample synthesis step (0..79).
+    #[save(id = 30)]
     clock_div: u8,
     /// Interpolation-inhibit flag (voiced/unvoiced or silence transitions).
+    #[save(id = 31)]
     inhibit: bool,
     /// Pitch-counter zeroing latch (circuit 412).
+    #[save(id = 32)]
     pitch_zero: bool,
     /// OLDE / OLDP: previous frame's "energy == 0" / "unvoiced" latches.
+    #[save(id = 33)]
     olde: bool,
+    #[save(id = 34)]
     oldp: bool,
     /// Zero-parameter latches while (re)starting speech.
+    #[save(id = 35)]
     zpar: bool,
+    #[save(id = 36)]
     uv_zpar: bool,
 
     #[save_skip]
     variant: Tms52xxVariant,
     #[save_skip]
     clock_hz: u32,
+    #[save(id = 37)]
     resampler: AudioResampler<f32>,
 }
 

@@ -37,25 +37,40 @@ pub(crate) enum InterruptType {
     Irq = 3,
 }
 
-/// Fields are ordered to match the save-state serialization layout (version 2).
+/// Field ids, not field order, are the save-state layout (version 3).
 #[derive(Saveable)]
-#[save_version(2)]
+// Bumped to 3 by the move to field TLV, which is also what lets this struct
+// stop caring about declaration order: version 2 existed because the fields had
+// to be reordered to match the wire, and under TLV they no longer do.
+#[save_version(3)]
+#[save_tlv]
 pub struct M6809 {
     // Registers (a,b,x,y,u,s,pc,cc)
+    #[save(id = 1)]
     pub a: u8,
+    #[save(id = 2)]
     pub b: u8,
+    #[save(id = 3)]
     pub dp: u8,
+    #[save(id = 4)]
     pub x: u16,
+    #[save(id = 5)]
     pub y: u16,
+    #[save(id = 6)]
     pub u: u16,
+    #[save(id = 7)]
     pub s: u16,
+    #[save(id = 8)]
     pub pc: u16,
+    #[save(id = 9)]
     pub cc: u8,
 
     // Internal state (serialized)
     /// Previous NMI line state for edge detection
+    #[save(id = 10)]
     pub(crate) nmi_previous: bool,
     /// True when the bus HALT line is asserted (TSC/RDY logic)
+    #[save(id = 11)]
     pub(crate) halted: bool,
 
     // Execution temporaries — not saved, reset to defaults on load
