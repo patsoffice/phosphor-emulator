@@ -55,10 +55,6 @@ use crate::device::{Ay8910, I8255};
 
 use super::Device;
 
-/// Konami sound master clock (≈ NTSC colorburst × 4).
-const KONAMI_SOUND_CLOCK: u64 = 14_318_000;
-/// Sound CPU / AY-8910 clock: master / 8 ≈ 1.79 MHz.
-const KONAMI_CPU_CLOCK: u64 = KONAMI_SOUND_CLOCK / 8;
 /// Timer period in master-clock counts: a chained 16·16·2·8·5·2 divider.
 const TIMER_PERIOD: u32 = 16 * 16 * 2 * 8 * 5 * 2; // 40960
 /// The point in the period where the final divide-by-2 high bit (B7) is set.
@@ -112,11 +108,19 @@ struct KonamiSoundBus {
 impl KonamiSound {
     /// Create a board with `num_ay` AY-8910s (1 or 2). Call `load_rom` before
     /// use.
-    pub fn new(num_ay: usize) -> Self {
+    ///
+    /// `cpu_clock_hz` is the sound Z80's rate, which the AY-8910s share. The
+    /// caller supplies it rather than this file naming it, so the rate the
+    /// board is *stepped* at and the rate its PSGs and resampler are told
+    /// cannot be two separately-written numbers. They were, and they disagreed.
+    ///
+    /// The board's own timer needs no rate: it counts CPU cycles times eight,
+    /// which is the divider ratio and not a frequency.
+    pub fn new(num_ay: usize, cpu_clock_hz: u64) -> Self {
         Self {
             cpu: Z80::new(),
             bus: KonamiSoundBus {
-                ay: [Ay8910::new(KONAMI_CPU_CLOCK), Ay8910::new(KONAMI_CPU_CLOCK)],
+                ay: [Ay8910::new(cpu_clock_hz), Ay8910::new(cpu_clock_hz)],
                 num_ay: num_ay.clamp(1, 2),
                 rom: vec![0; 0x2000],
                 ram: [0; 0x0400],
@@ -127,7 +131,7 @@ impl KonamiSound {
                 mute: false,
                 filter: 0,
                 frogger: false,
-                resampler: AudioResampler::new(KONAMI_CPU_CLOCK, host_sample_rate() as u64),
+                resampler: AudioResampler::new(cpu_clock_hz, host_sample_rate() as u64),
                 clock: 0,
             },
         }
@@ -136,10 +140,23 @@ impl KonamiSound {
     /// Create a Frogger-wired board: a single AY-8910 with RAM at 0x4000, the
     /// filter latch at 0x6000, swapped AY0 address/data I/O ports, and a
     /// B3/B5-swapped sound timer.
-    pub fn new_frogger() -> Self {
-        let mut board = Self::new(1);
+    pub fn new_frogger(cpu_clock_hz: u64) -> Self {
+        let mut board = Self::new(1, cpu_clock_hz);
         board.bus.frogger = true;
         board
+    }
+
+    /// The sound CPU rate this board was built with.
+    ///
+    /// Read back from the audio path rather than from a stored copy, so it
+    /// reports what the resampler actually got.
+    pub fn cpu_clock_hz(&self) -> u64 {
+        self.bus.resampler.input_rate()
+    }
+
+    /// The AY-8910s' chip clock, which is the same signal as the sound CPU's.
+    pub fn psg_clock_hz(&self) -> u64 {
+        self.bus.ay[0].chip_clock_hz()
     }
 
     /// Load sound ROM data (up to 8 KB).
@@ -488,6 +505,11 @@ impl Saveable for KonamiSound {
 mod tests {
     use super::*;
 
+    /// The rate a Scramble-family board supplies: its 14.318181 MHz sound
+    /// crystal over eight. Nothing here depends on the exact value, but using
+    /// the real one keeps the device's tests honest about what it is fed.
+    const TEST_CPU_CLOCK: u64 = 14_318_181 / 8;
+
     fn bus_read(b: &mut KonamiSound, addr: u16) -> u8 {
         Bus::read(&mut b.bus, BusMaster::Cpu(0), addr)
     }
@@ -509,7 +531,7 @@ mod tests {
 
     #[test]
     fn initial_state() {
-        let b = KonamiSound::new(2);
+        let b = KonamiSound::new(2, TEST_CPU_CLOCK);
         assert_eq!(b.bus.command, 0);
         assert!(!b.bus.irq_pending);
         assert!(!b.bus.mute);
@@ -518,7 +540,7 @@ mod tests {
 
     #[test]
     fn command_latches_through_ppi_port_a() {
-        let mut b = KonamiSound::new(2);
+        let mut b = KonamiSound::new(2, TEST_CPU_CLOCK);
         init_ppi(&mut b);
         b.ppi_write(0, 0x5A); // 8255 port A = command
         assert_eq!(b.bus.command, 0x5A);
@@ -533,7 +555,7 @@ mod tests {
 
     #[test]
     fn control_bit3_falling_edge_pulses_irq() {
-        let mut b = KonamiSound::new(2);
+        let mut b = KonamiSound::new(2, TEST_CPU_CLOCK);
         init_ppi(&mut b);
         // Raise bit 3, then drop it: the high→low edge asserts the IRQ.
         b.ppi_write(1, 0x08);
@@ -544,7 +566,7 @@ mod tests {
 
     #[test]
     fn irq_clears_when_command_latch_is_read() {
-        let mut b = KonamiSound::new(2);
+        let mut b = KonamiSound::new(2, TEST_CPU_CLOCK);
         b.bus.irq_pending = true;
         // Select AY0 port A (register 14) as the read target, then read it.
         io_write(&mut b, 0x40, 14);
@@ -554,7 +576,7 @@ mod tests {
 
     #[test]
     fn irq_not_cleared_by_reading_other_ay_register() {
-        let mut b = KonamiSound::new(2);
+        let mut b = KonamiSound::new(2, TEST_CPU_CLOCK);
         b.bus.irq_pending = true;
         // Reading the timer (port B, register 15) must not ack the command IRQ.
         io_write(&mut b, 0x40, 15);
@@ -567,7 +589,7 @@ mod tests {
 
     #[test]
     fn control_bit4_mutes() {
-        let mut b = KonamiSound::new(2);
+        let mut b = KonamiSound::new(2, TEST_CPU_CLOCK);
         init_ppi(&mut b);
         b.ppi_write(1, 0x10);
         assert!(b.bus.mute);
@@ -577,7 +599,7 @@ mod tests {
 
     #[test]
     fn ram_read_write_with_mirror() {
-        let mut b = KonamiSound::new(2);
+        let mut b = KonamiSound::new(2, TEST_CPU_CLOCK);
         bus_write(&mut b, 0x8000, 0x55);
         assert_eq!(bus_read(&mut b, 0x8000), 0x55);
         assert_eq!(bus_read(&mut b, 0x8400), 0x55); // 1 KB mirror
@@ -585,7 +607,7 @@ mod tests {
 
     #[test]
     fn ay_register_write_through_io() {
-        let mut b = KonamiSound::new(2);
+        let mut b = KonamiSound::new(2, TEST_CPU_CLOCK);
         // AY0: address (port 0x40) = reg 8, data (port 0x80) = 0x0F.
         io_write(&mut b, 0x40, 8);
         io_write(&mut b, 0x80, 0x0F);
@@ -600,7 +622,7 @@ mod tests {
 
     #[test]
     fn single_ay_ignores_second_chip() {
-        let mut b = KonamiSound::new(1);
+        let mut b = KonamiSound::new(1, TEST_CPU_CLOCK);
         // Writes to AY1 (ports 0x10/0x20) are ignored; reads return 0xFF.
         io_write(&mut b, 0x10, 8);
         io_write(&mut b, 0x20, 0x1F);
@@ -609,7 +631,7 @@ mod tests {
 
     #[test]
     fn timer_advances_and_is_bounded() {
-        let mut b = KonamiSound::new(2);
+        let mut b = KonamiSound::new(2, TEST_CPU_CLOCK);
         b.bus.rom[0] = 0x76; // HALT, so the CPU doesn't run off into garbage
         let t0 = b.bus.timer();
         for _ in 0..6000 {
@@ -623,7 +645,7 @@ mod tests {
 
     #[test]
     fn frogger_ram_lives_at_0x4000() {
-        let mut b = KonamiSound::new_frogger();
+        let mut b = KonamiSound::new_frogger(TEST_CPU_CLOCK);
         bus_write(&mut b, 0x4000, 0x55);
         assert_eq!(bus_read(&mut b, 0x4000), 0x55);
         assert_eq!(bus_read(&mut b, 0x4400), 0x55); // 1 KB mirror within 0x4000-0x5fff
@@ -633,7 +655,7 @@ mod tests {
 
     #[test]
     fn frogger_swaps_ay_address_and_data_ports() {
-        let mut b = KonamiSound::new_frogger();
+        let mut b = KonamiSound::new_frogger(TEST_CPU_CLOCK);
         // Frogger: address on A&0x80, data on A&0x40 (swapped vs standard).
         io_write(&mut b, 0x80, 8); // AY0 address latch = register 8
         io_write(&mut b, 0x40, 0x1F); // AY0 data = 0x1F
@@ -643,7 +665,7 @@ mod tests {
 
     #[test]
     fn frogger_command_latch_acks_irq() {
-        let mut b = KonamiSound::new_frogger();
+        let mut b = KonamiSound::new_frogger(TEST_CPU_CLOCK);
         b.bus.irq_pending = true;
         // Select AY0 port A (register 14) via the (swapped) address port, then
         // read it through the data port — this acknowledges the IRQ.
@@ -656,8 +678,8 @@ mod tests {
     fn frogger_timer_swaps_b3_b5() {
         // At a matching clock, the Frogger timer is the standard Konami timer
         // with bits B3 and B5 swapped (frogger_sound_timer_r).
-        let mut frog = KonamiSound::new_frogger();
-        let mut std = KonamiSound::new(2);
+        let mut frog = KonamiSound::new_frogger(TEST_CPU_CLOCK);
+        let mut std = KonamiSound::new(2, TEST_CPU_CLOCK);
         frog.bus.clock = 12_345;
         std.bus.clock = 12_345;
         let s = std.bus.timer();
@@ -671,7 +693,7 @@ mod tests {
 
     #[test]
     fn reset_clears_state() {
-        let mut b = KonamiSound::new(2);
+        let mut b = KonamiSound::new(2, TEST_CPU_CLOCK);
         b.bus.command = 0xFF;
         b.bus.irq_pending = true;
         b.bus.mute = true;
@@ -685,7 +707,7 @@ mod tests {
 
     #[test]
     fn save_load_round_trip() {
-        let mut b = KonamiSound::new(2);
+        let mut b = KonamiSound::new(2, TEST_CPU_CLOCK);
         init_ppi(&mut b);
         b.ppi_write(0, 0x42);
         b.bus.irq_pending = true;
@@ -696,7 +718,7 @@ mod tests {
         b.save_state(&mut w);
         let data = w.into_vec();
 
-        let mut b2 = KonamiSound::new(2);
+        let mut b2 = KonamiSound::new(2, TEST_CPU_CLOCK);
         let mut r = StateReader::new(&data);
         b2.load_state(&mut r).unwrap();
         assert_eq!(b2.bus.command, 0x42);

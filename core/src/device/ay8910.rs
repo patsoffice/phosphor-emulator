@@ -80,6 +80,14 @@ pub struct Ay8910 {
 }
 
 impl Ay8910 {
+    /// The chip clock this AY was built with, which sets its tone pitch.
+    ///
+    /// Exposed so a board can be checked to be clocking the chip at the same
+    /// rate it steps it at, rather than the two being separately written down.
+    pub fn chip_clock_hz(&self) -> u64 {
+        self.resampler.input_rate()
+    }
+
     /// Create a new AY-8910 with the given chip clock rate.
     ///
     /// The internal generator rate is chip_clock / 8. For Midway SSIO,

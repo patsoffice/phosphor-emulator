@@ -63,10 +63,9 @@ pub const TIMING: TimingConfig = TimingConfig {
 /// 14.318181 MHz colourburst crystal on the Konami sound board, with its Z80 at
 /// /8.
 ///
-/// Note the sound crystal declared here is the real 14.318181 MHz, while
-/// [`SOUND_CLOCK_HZ`] below rounds it to 14.318 MHz. That puts the sound CPU
-/// 22.6 Hz (12.6 ppm) slow: 181 Hz at the crystal, over eight. Letting the
-/// board take the declared rate is a behaviour change and gets its own commit.
+/// The sound crystal is the real 14.318181 MHz colourburst part. The board used
+/// to round it to 14.318 MHz and run its sound CPU 22.6 Hz (12.6 ppm) slow;
+/// that rate is now taken from this declaration, and from nowhere else.
 pub fn clock_tree() -> ClockTree {
     use phosphor_core::core::RootId;
     let mut t = ClockTree::new(18_432_000);
@@ -80,9 +79,6 @@ pub fn clock_tree() -> ClockTree {
     t.set_raster(dot, 384, 0);
     t
 }
-
-/// Sound CPU clock: 14.318 MHz / 8 ≈ 1.79 MHz.
-const SOUND_CLOCK_HZ: u64 = 14_318_000 / 8;
 
 const VISIBLE_LINES: u64 = galaxian_video::NATIVE_HEIGHT as u64;
 
@@ -221,24 +217,23 @@ impl Default for ScrambleBoard {
 
 impl ScrambleBoard {
     pub fn new(hw: Hw) -> Self {
-        let mut clocks = clock_tree();
+        let clocks = clock_tree();
         let sound_dom = clocks.find(Clk::SoundCpu).expect("declared sound domain");
-        // Hold the rate the board has always run, rather than the one its
-        // crystal gives; see `SOUND_CLOCK_HZ`. Correcting it is a behaviour
-        // change and gets its own commit, so that this one moves the mechanism
-        // and nothing else.
-        clocks.set_domain_hz(sound_dom, SOUND_CLOCK_HZ as u32);
+        // One derivation reaches all three places the sound rate is used: the
+        // ratio this board steps the sound section at, the AY-8910s' chip
+        // clock, and the resampler's input rate.
+        let sound_hz = clocks.hz(sound_dom);
         let mut video = GalaxianVideo::new();
         let _ = GfxBankMode::None; // base Scramble has no GFX banking
         let sound = if hw == Hw::Frogger {
             // Frogger: blue color-split background, color/scroll/sprite remaps,
             // no stars or bullets; single-AY sound board.
             video.set_frogger(true);
-            KonamiSound::new_frogger()
+            KonamiSound::new_frogger(sound_hz)
         } else {
             video.set_scramble_stars(true);
             video.set_scramble_bullets(true);
-            KonamiSound::new(2)
+            KonamiSound::new(2, sound_hz)
         };
         Self {
             map: Self::build_map(hw),
@@ -1464,25 +1459,48 @@ mod tests {
     use super::*;
     use phosphor_core::core::machine::DipSwitches;
 
-    /// The sound board steps at the rate it always has, not yet the one its
-    /// crystal gives.
+    /// The sound board runs its crystal's rate, not a rounded one.
     ///
-    /// `SOUND_CLOCK_HZ` divides a 14.318 MHz crystal, but the real Konami sound
-    /// board carries the 14.318181 MHz colourburst part that `clock_tree()`
-    /// declares. That is 22.6 Hz (12.6 ppm) of difference. Moving the mechanism
-    /// onto the tree and correcting the rate are separate acts, so this pins
-    /// the old rate and will fail when the correction lands, which is the
-    /// point.
+    /// The board used to divide a 14.318 MHz crystal, but the Konami sound
+    /// board carries the 14.318181 MHz colourburst part `clock_tree()`
+    /// declares. /8 of it is 1789772.625 Hz, so the old 1789750 was 22.6 Hz
+    /// (12.6 ppm) slow.
     #[test]
-    fn the_sound_domain_still_runs_the_rounded_crystal() {
+    fn the_sound_domain_runs_the_crystal_rate() {
         let board = ScrambleBoard::new(Hw::Scramble);
-        assert_eq!(board.clocks.hz(board.sound_dom), SOUND_CLOCK_HZ);
-        assert_eq!(board.clocks.hz(board.sound_dom), 1_789_750);
-        // What the declared crystal would give: 14318181 / 8.
         assert_eq!(
             board.clocks.domain(board.sound_dom).root_ratio(),
-            (1_789_750, 14_318_181)
+            (1, 8),
+            "an eighth of the sound crystal, stated as such"
         );
+        assert_eq!(board.clocks.hz_exact(board.sound_dom), (14_318_181, 8));
+        assert_eq!(board.clocks.hz(board.sound_dom), 1_789_773);
+        assert_ne!(board.clocks.hz(board.sound_dom), 1_789_750);
+    }
+
+    /// The three places that rate is used all come from that one domain.
+    ///
+    /// This is the half of the fix that is easy to miss. Correcting only the
+    /// ratio the board steps at would have left the AY-8910s and the resampler
+    /// on the old rounded rate, relocating the inconsistency instead of
+    /// removing it, which is exactly what the Gottlieb sound clock did
+    /// (phosphor-emulator-clock-tree-jv78.5).
+    #[test]
+    fn the_psgs_and_the_resampler_share_the_sound_domains_rate() {
+        for hw in [Hw::Scramble, Hw::Frogger] {
+            let board = ScrambleBoard::new(hw);
+            let domain_hz = board.clocks.hz(board.sound_dom);
+            assert_eq!(
+                board.sound.cpu_clock_hz(),
+                domain_hz,
+                "{hw:?}: the resampler was told a different rate than the board is stepped at"
+            );
+            assert_eq!(
+                board.sound.psg_clock_hz(),
+                domain_hz,
+                "{hw:?}: the AY-8910s were clocked at a different rate, which is pitch"
+            );
+        }
     }
 
     #[test]
