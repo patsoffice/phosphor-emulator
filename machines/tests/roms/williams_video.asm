@@ -2,12 +2,15 @@
 ; Williams gen-1 video timing conformance ROM
 ;
 ; Design: docs/designs/williams-video-conformance.md
-; Assemble: asl -q -o williams_video.p williams_video.asm
-;           p2bin williams_video.p williams_video.bin -r 0xD000-0xFFFF -l 0x00
+; Assemble (both images; see the ROMBASE note below):
+;   asl -q -o williams_video.p williams_video.asm
+;   p2bin williams_video.p williams_video.bin -r 0xD000-0xFFFF -l 0x00
+;   asl -q -D ROMBASE=0xE000 -o williams_video_e000.p williams_video.asm
+;   p2bin williams_video_e000.p williams_video_e000.bin -r 0xE000-0xFFFF -l 0x00
 ;
-; Both are in the Nix dev shell. p2bin's -r selects the $D000-$FFFF window and
-; -l zero-fills the gap between the code and the vector table, which is what
-; makes the image a flat 12 KB the loader can copy byte for byte.
+; Both tools are in the Nix dev shell. p2bin's -r selects the program-ROM window
+; and -l zero-fills the gap between the code and the vector table, which is what
+; makes each image flat and copyable byte for byte.
 ;
 ; Runs on the Joust / Robotron program-ROM map ($D000-$FFFF, 12 KB). Loaded by
 ; machines/tests/williams_video_timing_test.rs into a ROM-less machine built
@@ -118,7 +121,21 @@ RESLEN      equ 32
 
 ; ---------------------------------------------------------------------------
 
-            org     $D000
+; Link address. Joust and Robotron carry 12 KB of program ROM at $D000-$FFFF;
+; Sinistar shrinks that to 8 KB at $E000-$FFFF and puts 4 KB of work RAM at
+; $D000 instead (williams.rs:461-470). Nothing else about the program differs,
+; so the same source is assembled twice rather than forked:
+;
+;   asl -q -o ...                   -> $D000, 12 KB image
+;   asl -q -D ROMBASE=0xE000 -o ... ->  $E000, 8 KB image
+;
+; Everything the program touches other than its own code lives in video RAM
+; below $C000, so relocating the code is the whole difference.
+            ifndef  ROMBASE
+ROMBASE     equ     $D000
+            endif
+
+            org     ROMBASE
 
 ; ===========================================================================
 ; Entry

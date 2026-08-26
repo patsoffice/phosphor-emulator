@@ -376,9 +376,10 @@ the kind of trap a conformance ROM should not be carrying.
 
 ## The harness
 
-`machines/tests/williams_video_timing_test.rs`, ROM-less, over Joust and
-Robotron. Each machine is built with `create_bare`, the image is poked in
-through `BusDebug::write`, and `reset()` picks up the patched vector.
+`machines/tests/williams_video_timing_test.rs`, ROM-less, over Joust, Robotron
+and Sinistar. Each machine is built with `create_bare`, the image its
+program-ROM window takes is poked in through `BusDebug::write`, and `reset()`
+picks up the patched vector.
 
 ```rust
 let mut m = (entry.create_bare)();
@@ -404,10 +405,34 @@ its derivation in its doc comment. Every test calls `assert_completed` first, so
 a wedged program fails on the magic byte rather than on a dozen assertions about
 zeroes.
 
+### Sinistar, and the rotation that caught the harness out
+
 Sinistar maps program ROM at `$E000-$FFFF` (8 KB) and adds SRAM at `$D000`
-(`williams.rs:461-470`), so it needs a second link address. Its blitter also
-carries the window clip; `$C900` bit 2 gates it and the ROM must leave it off.
-The first pass covers Joust and Robotron; Sinistar is `itvk.6`.
+(`williams.rs:461-470`). Rather than fork the source, the origin is a build-time
+symbol: `asl -D ROMBASE=0xE000` produces a second 8 KB image from the same
+assembly, and everything the program touches other than its own code lives in
+video RAM below `$C000`, so relocating the code is the whole difference. Its
+blitter also carries the window clip, which `$C900` bit 2 gates and the program
+clears at startup along with the ROM bank.
+
+**The thing that actually broke was not the memory map.** Sinistar's cabinet
+stands the monitor on its side, so `SinistarSystem::render_frame`
+(`sinistar.rs:442`) rotates the board's landscape raster 270 degrees into a
+240x292 portrait buffer. Every coordinate in this document is a *raster*
+coordinate — scanline 7 is screen row 0, VRAM column 80 is x 154 — so reading the
+rendered frame directly asked for row 0 and got row 239.
+
+Both picture tests failed, and usefully they failed in *opposite* directions:
+T6 saw green where it wanted red at the top of the frame, T7 saw red where it
+wanted green near the bottom. A capture taken at the wrong frame would have
+moved both the same way, which is what ruled that out; a probe confirmed all
+three machines publish each phase on the identical frame. The harness now undoes
+the rotation on read, so the assertions stay in raster coordinates and the
+cabinet's orientation remains a separate concern with its own tests.
+
+Not covered: the `$D000` SRAM as a blit destination that is not video RAM. It is
+the one thing Sinistar could exercise that the other two cannot, and it needs a
+new phase in the ROM rather than a relocation of the existing one.
 
 ## Build and toolchain
 
@@ -504,7 +529,8 @@ Tracked as `phosphor-emulator-williams-video-conformance-itvk`.
    it.
 5. **Done** (`itvk.5`) — ROM-gated suites re-run; Robotron and Sinistar
    recaptured, Joust unmoved.
-6. `itvk.6` — Sinistar, which needs a second link address.
+6. **Done** (`itvk.6`) — Sinistar, from a second link address built out of the
+   same source. All three machines on `WilliamsBoard` are covered.
 
 Only then a second board. `raster-sampling-fidelity.md` W3 lists seven:
 `namco_galaga`, `btime`, `mrdo`, `foodf`, `gottlieb`, `mcr2`, `atari_system1`.
