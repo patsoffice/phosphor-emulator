@@ -20,7 +20,7 @@
 //! - PAL16R6 protection (`.8`)
 //! - full DIP tables (`.9`) and tests (`.10`)
 
-use phosphor_core::audio::AudioResampler;
+use phosphor_core::audio::{AudioResampler, DcBlocker};
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::DefaultBinding;
 use phosphor_core::core::machine::{
@@ -441,6 +441,16 @@ pub struct MrdoBoard {
     pub(crate) sn2: Sn76489a,
     pub(crate) sn1_clock: ClockDivider,
     pub(crate) sn2_clock: ClockDivider,
+    /// Output coupling capacitor.
+    ///
+    /// An SN76489's output swings from ground upward rather than either side of
+    /// it, so the summed pair carries a pedestal that the board's analog stage
+    /// blocks on the way to the amplifier. Without it the mean sat at +0.183 of
+    /// full scale, which eats the headroom every real voice needs. The chips
+    /// themselves are not modelled wrongly: a unipolar swing is what the silicon
+    /// does, and the same omission accounted for twelve machines across five
+    /// different sound parts before this one.
+    pub(crate) sn_coupling: DcBlocker,
     pub(crate) audio: AudioResampler<i16>,
 
     // Timing / interrupts.
@@ -478,6 +488,7 @@ impl MrdoBoard {
             sn2: Sn76489a::new(SOUND_CLOCK),
             sn1_clock: ClockDivider::new(SOUND_CLOCK / 16, TIMING.cpu_clock_hz as u32),
             sn2_clock: ClockDivider::new(SOUND_CLOCK / 16, TIMING.cpu_clock_hz as u32),
+            sn_coupling: DcBlocker::new(output_sample_rate() as u32),
             audio: AudioResampler::new(TIMING.cpu_clock_hz, output_sample_rate()),
             clock: 0,
             vblank_irq_pending: false,
@@ -560,8 +571,13 @@ impl MrdoBoard {
         }
         let mix = (i32::from(self.sn1.output()) + i32::from(self.sn2.output()))
             .clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+        // Coupled after the box filter, once per output sample: the capacitor
+        // sits between the chips and the amplifier, so what it strips the offset
+        // from is the summed signal on its way to the speaker.
         if let Some(avg) = self.audio.tick_sample(mix) {
-            self.audio.push_sample(avg);
+            let coupled = self.sn_coupling.process(avg as f32);
+            self.audio
+                .push_sample(coupled.clamp(i16::MIN as f32, i16::MAX as f32) as i16);
         }
 
         self.clock += 1;
@@ -711,6 +727,7 @@ impl MrdoBoard {
         self.sn2.reset();
         self.sn1_clock.reset();
         self.sn2_clock.reset();
+        self.sn_coupling.reset();
         self.audio.reset();
         self.main_map
             .region_data_mut(MainRegion::BgVideoRam)
@@ -759,6 +776,7 @@ impl Saveable for MrdoBoard {
         self.sn2.save_state(w);
         self.sn1_clock.save_state(w);
         self.sn2_clock.save_state(w);
+        self.sn_coupling.save_state(w);
         self.audio.save_state(w);
         w.write_u64_le(self.clock);
         w.write_bool(self.vblank_irq_pending);
@@ -781,6 +799,7 @@ impl Saveable for MrdoBoard {
         self.sn2.load_state(r)?;
         self.sn1_clock.load_state(r)?;
         self.sn2_clock.load_state(r)?;
+        self.sn_coupling.load_state(r)?;
         self.audio.load_state(r)?;
         self.clock = r.read_u64_le()?;
         self.vblank_irq_pending = r.read_bool()?;

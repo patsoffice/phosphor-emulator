@@ -46,7 +46,11 @@ pub const SAVE_MAGIC: &[u8; 4] = b"PHOS";
 /// machine's state. The blitter's own component tag went 1 to 2 with it; the
 /// global bump is what gives an old file a clear rejection instead of a
 /// component-level one.
-pub const SAVE_VERSION: u32 = 6;
+///
+/// Bumped to 7 when Mr. Do! gained the output coupling capacitor its PSGs
+/// reached the speaker without, which adds the blocker's state to that board's
+/// stream.
+pub const SAVE_VERSION: u32 = 7;
 
 // -- Saveable trait ----------------------------------------------------------
 
