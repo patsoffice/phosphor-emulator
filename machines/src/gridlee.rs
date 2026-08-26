@@ -5,7 +5,6 @@ use phosphor_core::core::machine::{
     DipSwitchBank, Direction, InputConfigurable, InputControl, InputEvent, InputId, InputKind,
     MachineCore, MouseControl, Nvram, Profilable, Renderable, SaveState,
 };
-use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::{AccessKind, AddressSpace16};
 use phosphor_core::core::{Bus, BusMaster, ClockDivider, TimingConfig};
 use phosphor_core::cpu::m6809::M6809;
@@ -13,6 +12,7 @@ use phosphor_core::cpu::state::M6809State;
 use phosphor_core::cpu::{Cpu, CpuStateTrait};
 use phosphor_core::gfx::decode::{GfxCache, GfxLayout, decode_gfx};
 use phosphor_core::gfx::render_bitmap_scanline;
+use phosphor_macros::Saveable;
 use phosphor_macros::{BusDebug, MemoryRegion};
 
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
@@ -330,43 +330,72 @@ const GRIDLEE_SPRITE_LAYOUT: GfxLayout<'static> = GfxLayout {
 /// Gridlee's hardware, everything the 6809 talks *to*. Held apart from the CPU
 /// so a cycle dispatches at a concrete bus rather than a trait object (see
 /// `docs/designs/concrete-bus-dispatch.md`).
-#[derive(BusDebug)]
+#[derive(BusDebug, Saveable)]
+#[save_version(1)]
+#[save_tlv]
 pub struct GridleeBoard {
+    /// Saved whole: the address space persists its own CPU-writable regions
+    /// (RAM, video RAM and NVRAM here), so this board no longer lists them.
     #[debug_map(cpu = 0)]
+    #[save(id = 1)]
     map: AddressSpace16,
 
     // Graphics ROMs (not CPU-addressable)
-    gfx_rom: [u8; 0x4000],  // 16KB sprite graphics
+    #[save_skip]
+    gfx_rom: [u8; 0x4000], // 16KB sprite graphics
+    #[save_skip]
     sprite_cache: GfxCache, // Pre-decoded 256 sprites (8×16, 4bpp)
 
     // Palette: pre-computed from 3x2KB PROMs (2048 entries, RGB)
+    #[save_skip]
     palette_rgb: [(u8, u8, u8); 2048],
+    #[save(id = 2)]
     palette_bank: u8, // Current bank (6 bits, 0-63)
+    #[save(id = 3)]
     palette_bank_per_scanline: [u8; TIMING.total_scanlines as usize], // Latched per-scanline
 
     // I/O — coin/start and fire buttons are ACTIVE LOW (1 = not pressed, 0 = pressed)
+    #[save(id = 4)]
     fire_buttons: u8, // 0x9502: bit 0 = P1 fire, bit 1 = P2 fire (active low)
-    coin_start: u8,   // 0x9503: bits 0-3 = coin/start (active low), bits 4-5 = coinage DIP
+    #[save(id = 5)]
+    coin_start: u8, // 0x9503: bits 0-3 = coin/start (active low), bits 4-5 = coinage DIP
+    /// Operator configuration rather than state, so it survives a load the way
+    /// the switches on the cabinet do.
+    #[save_skip]
     dip_switches: u8, // 0x9600: bonus/lives/free-play/cabinet/reset
+    #[save(id = 6)]
     cocktail_flip: bool,
 
     // Trackball state (keyboard emulation → cumulative delta)
+    #[save(id = 7)]
     track_u_pressed: bool,
+    #[save(id = 8)]
     track_d_pressed: bool,
+    #[save(id = 9)]
     track_l_pressed: bool,
+    #[save(id = 10)]
     track_r_pressed: bool,
-    last_analog_input: [u8; 2],  // Last raw trackball position [Y, X]
+    #[save(id = 11)]
+    last_analog_input: [u8; 2], // Last raw trackball position [Y, X]
+    #[save(id = 12)]
     last_analog_output: [u8; 2], // Cumulative output [Y, X]
-    trackball_pos: [u8; 2],      // Simulated raw position [Y, X]
+    #[save(id = 13)]
+    trackball_pos: [u8; 2], // Simulated raw position [Y, X]
 
     // Random number generator (17-bit LFSR)
+    #[save_skip]
     rand17: Vec<u8>, // Pre-computed LFSR table (POLY17_SIZE + 1 entries)
 
     // Sound
+    #[save(id = 14)]
     sound_data: [u8; 24], // Sound registers (0x00-0x17: triggers, freq, volume)
-    tone_step: u64,       // Phase increment per output sample
-    tone_fraction: u64,   // 24-bit phase accumulator
-    tone_volume: u8,      // 8-bit volume
+    #[save(id = 15)]
+    tone_step: u64, // Phase increment per output sample
+    #[save(id = 16)]
+    tone_fraction: u64, // 24-bit phase accumulator
+    #[save(id = 17)]
+    tone_volume: u8, // 8-bit volume
+    #[save_skip]
     audio_buffer: SampleRing<i16>,
     /// Bresenham phase for 1.25 MHz → 44.1 kHz.
     ///
@@ -374,27 +403,38 @@ pub struct GridleeBoard {
     /// paces sampling against the *host's* audio rate, which is not a clock on
     /// this board and has no crystal to derive it from. Every divider that was
     /// a board clock is a `ClockTree` domain now; this one is not one.
+    #[save(id = 18)]
     audio_clock: ClockDivider,
 
     // Interrupt state
+    #[save(id = 19)]
     irq_pending: bool,
+    #[save(id = 20)]
     firq_pending: bool,
 
     // Timing
+    #[save(id = 21)]
     clock: u64,
+    #[save(id = 22)]
     cpu_cycles: u64,
+    #[save(id = 23)]
     watchdog_frame_count: u8,
 
     // Framebuffer (256 x 240 x RGB24)
+    #[save_skip]
     scanline_buffer: Vec<u8>,
 }
 
 /// Videa Gridlee (1982): a 6809 beside the board it drives.
-#[derive(BusDebug)]
+#[derive(BusDebug, Saveable)]
+#[save_version(1)]
+#[save_tlv]
 pub struct GridleeSystem {
     #[debug_cpu("M6809")]
+    #[save(id = 1)]
     cpu: M6809,
     #[debug_bus]
+    #[save(id = 2)]
     pub board: GridleeBoard,
 }
 
@@ -1020,67 +1060,6 @@ impl InputConfigurable for GridleeSystem {
 }
 
 crate::impl_standalone_debug!(GridleeSystem);
-
-impl Saveable for GridleeSystem {
-    fn save_state(&self, w: &mut StateWriter) {
-        self.cpu.save_state(w);
-        w.write_bytes(self.board.map.region_data(Region::Ram));
-        w.write_bytes(self.board.map.region_data(Region::VideoRam));
-        w.write_bytes(self.board.map.region_data(Region::Nvram));
-        w.write_u8(self.board.palette_bank);
-        w.write_bytes(&self.board.palette_bank_per_scanline);
-        w.write_u8(self.board.fire_buttons);
-        w.write_u8(self.board.coin_start);
-        w.write_bool(self.board.cocktail_flip);
-        w.write_bool(self.board.track_u_pressed);
-        w.write_bool(self.board.track_d_pressed);
-        w.write_bool(self.board.track_l_pressed);
-        w.write_bool(self.board.track_r_pressed);
-        w.write_bytes(&self.board.last_analog_input);
-        w.write_bytes(&self.board.last_analog_output);
-        w.write_bytes(&self.board.trackball_pos);
-        w.write_bytes(&self.board.sound_data);
-        w.write_u64_le(self.board.tone_step);
-        w.write_u64_le(self.board.tone_fraction);
-        w.write_u8(self.board.tone_volume);
-        self.board.audio_clock.save_state(w);
-        w.write_bool(self.board.irq_pending);
-        w.write_bool(self.board.firq_pending);
-        w.write_u64_le(self.board.clock);
-        w.write_u64_le(self.board.cpu_cycles);
-        w.write_u8(self.board.watchdog_frame_count);
-    }
-
-    fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
-        self.cpu.load_state(r)?;
-        r.read_bytes_into(self.board.map.region_data_mut(Region::Ram))?;
-        r.read_bytes_into(self.board.map.region_data_mut(Region::VideoRam))?;
-        r.read_bytes_into(self.board.map.region_data_mut(Region::Nvram))?;
-        self.board.palette_bank = r.read_u8()?;
-        r.read_bytes_into(&mut self.board.palette_bank_per_scanline)?;
-        self.board.fire_buttons = r.read_u8()?;
-        self.board.coin_start = r.read_u8()?;
-        self.board.cocktail_flip = r.read_bool()?;
-        self.board.track_u_pressed = r.read_bool()?;
-        self.board.track_d_pressed = r.read_bool()?;
-        self.board.track_l_pressed = r.read_bool()?;
-        self.board.track_r_pressed = r.read_bool()?;
-        r.read_bytes_into(&mut self.board.last_analog_input)?;
-        r.read_bytes_into(&mut self.board.last_analog_output)?;
-        r.read_bytes_into(&mut self.board.trackball_pos)?;
-        r.read_bytes_into(&mut self.board.sound_data)?;
-        self.board.tone_step = r.read_u64_le()?;
-        self.board.tone_fraction = r.read_u64_le()?;
-        self.board.tone_volume = r.read_u8()?;
-        self.board.audio_clock.load_state(r)?;
-        self.board.irq_pending = r.read_bool()?;
-        self.board.firq_pending = r.read_bool()?;
-        self.board.clock = r.read_u64_le()?;
-        self.board.cpu_cycles = r.read_u64_le()?;
-        self.board.watchdog_frame_count = r.read_u8()?;
-        Ok(())
-    }
-}
 
 impl MachineCore for GridleeSystem {
     fn gfx_sheets(&self) -> Vec<phosphor_core::core::machine::GfxSheet<'_>> {
