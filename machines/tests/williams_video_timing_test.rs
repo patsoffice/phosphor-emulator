@@ -53,11 +53,6 @@ const R_T3RLIN: u32 = RES + 10;
 const R_T3FCNT: u32 = RES + 14;
 const R_T3FLIN: u32 = RES + 15;
 const R_T4FST: u32 = RES + 18;
-/// The ROM measures the slow blit into this byte, but nothing asserts it yet:
-/// the board charges one cycle a byte for `CTRL_SLOW` instead of two, so the
-/// assertion lands with the fix rather than pinning the bug.
-/// See `the_blitter_halts_the_cpu_for_the_cycles_it_charges`.
-#[allow(dead_code)]
 const R_T4SLW: u32 = RES + 19;
 const R_T5A: u32 = RES + 20;
 const R_T5B: u32 = RES + 21;
@@ -285,17 +280,16 @@ fn va11_toggles_cb1_every_thirty_two_scanlines() {
     }
 }
 
-/// A blit halts the CPU for one cycle per byte.
+/// A blit halts the CPU for one cycle per byte, or two with `CTRL_SLOW`.
 ///
-/// 8 × 128 = 1024 bytes, so 1024 cycles, which is 16 scanlines and a counter
-/// delta of `$10`.
+/// 8 × 128 = 1024 bytes, so 1024 cycles fast (16 scanlines, counter delta
+/// `$10`) and 2048 slow (32 scanlines, `$20`).
 ///
-/// The slow half of T4 is deliberately not asserted here. The ROM measures it
-/// into `R_T4SLW` and the board gets it wrong: `CTRL_SLOW` should cost two
-/// cycles a byte and costs one, because `do_dma_cycle` returns the cost and
-/// `williams.rs` discards it. Asserting `$20` would land a failing test and
-/// asserting `$10` would pin the bug, so the assertion arrives with the fix.
-/// See `phosphor-emulator-williams-video-conformance-itvk.4`.
+/// The slow half is the assertion this suite was worth writing for. It failed
+/// on first run with `$10`, because `do_dma_cycle` returned the cost of the byte
+/// it moved and `williams.rs` discarded it, so `CTRL_SLOW` cost nothing. The
+/// device was right and the board was right; the join was wrong, which is the
+/// shape of bug a device unit test cannot reach.
 #[test]
 fn the_blitter_halts_the_cpu_for_the_cycles_it_charges() {
     for machine in ["joust", "robotron"] {
@@ -306,6 +300,13 @@ fn the_blitter_halts_the_cpu_for_the_cycles_it_charges() {
             0x10,
             "{machine}: a 1024-byte fast blit should halt the CPU for 1024 \
              cycles, i.e. 16 scanlines"
+        );
+        assert_eq!(
+            r.at(R_T4SLW),
+            0x20,
+            "{machine}: a 1024-byte slow blit should halt the CPU for 2048 \
+             cycles, i.e. 32 scanlines. Equal to the fast figure means the \
+             stall clock is not being charged."
         );
     }
 }

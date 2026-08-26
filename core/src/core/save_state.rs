@@ -40,7 +40,13 @@ pub const SAVE_MAGIC: &[u8; 4] = b"PHOS";
 /// board and into the machine wrapper (for concrete bus dispatch), which moved
 /// the CPU block ahead of the RAM block in those machines' state. Older files
 /// are rejected by version rather than misread.
-pub const SAVE_VERSION: u32 = 5;
+///
+/// Bumped to 6 when the Williams blitter gained the stall flag that makes a
+/// slow blit cost two clocks a byte, which adds a byte to every Williams
+/// machine's state. The blitter's own component tag went 1 to 2 with it; the
+/// global bump is what gives an old file a clear rejection instead of a
+/// component-level one.
+pub const SAVE_VERSION: u32 = 6;
 
 // -- Saveable trait ----------------------------------------------------------
 

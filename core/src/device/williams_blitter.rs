@@ -80,15 +80,19 @@ use phosphor_macros::Saveable;
 /// # DMA integration
 ///
 /// After triggering, `is_active()` returns `true`. The system should halt the
-/// CPU while the blitter is active. Each call to `do_dma_cycle()` transfers
-/// one byte and returns the number of clock cycles consumed (1 for fast,
-/// 2 for slow). When the blit completes, `is_active()` returns `false`.
+/// CPU while the blitter is active and call `do_dma_cycle()` once per CPU
+/// cycle. Each call consumes **one clock**: a fast blit moves a byte on every
+/// one, a slow blit moves a byte and then spends a clock moving nothing, so it
+/// costs two clocks a byte. When the blit completes, `is_active()` returns
+/// `false`, and the caller's halt line drops with it.
 ///
 /// Reference (Sean Riddle): "CPU completes current instruction, sets BA/BS
 /// high. /BABS signal goes low; blitter gains bus control. [...] Upon
 /// completion, /HALT deasserts; CPU resumes."
 #[derive(Saveable)]
-#[save_version(1)]
+// Bumped to 2 by the `stall` field: a blit saved mid-transfer in slow mode
+// reloads owing the same clock it owed, rather than losing or gaining one.
+#[save_version(2)]
 pub struct WilliamsBlitter {
     // Registers (offsets 0-7, write-only)
     control: u8,
@@ -114,6 +118,10 @@ pub struct WilliamsBlitter {
 
     // Execution state
     active: bool,
+    /// Set after a byte moves in `CTRL_SLOW` mode: the next clock is the second
+    /// of that byte's two, and moves nothing. The blit stays `active` across it,
+    /// which is what actually holds the CPU halted for the extra microsecond.
+    stall: bool,
     x: u16,         // current column within row (0..w)
     w: u16,         // effective width (1-based, post-XOR + clamp)
     h: u16,         // effective height (1-based, post-XOR + clamp)
@@ -228,6 +236,7 @@ impl WilliamsBlitter {
             clip_address: 0,
             window_enable: false,
             active: false,
+            stall: false,
             x: 0,
             w: 0,
             h: 0,
@@ -271,8 +280,24 @@ impl WilliamsBlitter {
         self.active
     }
 
-    /// Execute one DMA cycle, transferring one byte through the system bus.
-    /// Returns the number of clock cycles consumed: 1 for fast, 2 for slow.
+    /// Execute one clock of the blit, and return the clocks it consumed: 1
+    /// while active, 0 when idle.
+    ///
+    /// **One clock, not one byte.** A fast blit moves a byte on every clock; a
+    /// slow one moves a byte and then spends a clock moving nothing, so it
+    /// costs two clocks a byte. The caller steps this device once per CPU cycle
+    /// and holds the CPU halted while `is_active()`, so the stall clock is what
+    /// charges the second microsecond. Charging it here rather than at the
+    /// caller is what keeps all blit timing in this file: the board previously
+    /// discarded the returned cost, and `CTRL_SLOW` cost nothing at all.
+    ///
+    /// Which of a slow byte's two clocks moves it is not determined by anything
+    /// available: the CPU is halted throughout and cannot observe the
+    /// difference. The byte moves on the first, so it is visible to the
+    /// renderer as early as the hardware could manage.
+    ///
+    /// Reference (Sean Riddle): "Blits from RAM to RAM have to run at half
+    /// speed, 2 microseconds per byte."
     ///
     /// The blitter shares the CPU's address bus, so reads go through the same
     /// address decoding (including ROM banking overlays).
@@ -285,14 +310,18 @@ impl WilliamsBlitter {
             return 0;
         }
 
-        // Timing: MAME bit 2 (SLOW). 0 = fast (1 cycle), 1 = slow (2 cycles).
-        // Reference (Sean Riddle): "Blits from RAM to RAM have to run at half
-        // speed, 2 microseconds per byte."
-        let cycles: u8 = if (self.control & CTRL_SLOW) != 0 {
-            2
-        } else {
-            1
-        };
+        // The second clock of a slow byte. Nothing moves; the blit only ends
+        // here if the byte before it was the last one.
+        if self.stall {
+            self.stall = false;
+            if self.rows_done >= self.h {
+                self.active = false;
+            }
+            return 1;
+        }
+
+        // Timing: MAME bit 2 (SLOW). 0 = fast (one clock a byte), 1 = slow (two).
+        let slow = (self.control & CTRL_SLOW) != 0;
 
         // Step 1: Read source byte.
         // MAME: `const u8 rawval = m_remap[space.read_byte(source)];`
@@ -392,8 +421,14 @@ impl WilliamsBlitter {
             self.rows_done += 1;
 
             if self.rows_done >= self.h {
-                self.active = false;
-                return cycles;
+                // The last byte has moved. A slow blit still owes a clock, and
+                // the stall branch above ends it; a fast one is done now.
+                if slow {
+                    self.stall = true;
+                } else {
+                    self.active = false;
+                }
+                return 1;
             }
 
             // Row advance: MAME wraps within page for stride-256.
@@ -413,7 +448,8 @@ impl WilliamsBlitter {
             self.cur_dst = self.dstart;
         }
 
-        cycles
+        self.stall = slow;
+        1
     }
 
     /// Initialize blit execution state from the configured registers.
@@ -446,6 +482,7 @@ impl WilliamsBlitter {
         };
 
         self.active = true;
+        self.stall = false;
         self.w = w;
         self.h = h;
         self.x = 0;
@@ -470,6 +507,7 @@ impl WilliamsBlitter {
         // size_xor and clip_address preserved (construction-time configuration)
         self.window_enable = false;
         self.active = false;
+        self.stall = false;
         self.x = 0;
         self.w = 0;
         self.h = 0;

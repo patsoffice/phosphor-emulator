@@ -246,7 +246,7 @@ frames = 2400
 shows = "Attract mode: the ROBOTRON: 2084 title ringed by coloured Williams W badges, with the PRESENTED BY and DESIGNED BY VID KIDZ credits. Needs the CMOS fixture: blank battery RAM factory-resets the board and waits for an operator reset, as on hardware."
 nvram = "nvram/robotron.nv"
 size = [292, 240]
-frame = "sha256:c5bed9e980154cb8196b5d0da60fa2895cfb4a8ac4beab3a32483836165f0df9"
+frame = "sha256:63bc0c98d060a358e943dd4ce64af6261740f100b98b99df08c2eb82d89cef99"
 
 [[frame]]
 machine = "scobra"
@@ -275,7 +275,7 @@ frames = 2400
 shows = "Attract mode: the FIRING DOES NOT AFFECT THE MIGHTY SINISTAR text screen, with the worker and planetoid sprites and the PRESS FIRE BUTTON prompt. Needs the CMOS fixture: blank battery RAM factory-resets the board and waits for an operator reset, as on hardware."
 nvram = "nvram/sinistar.nv"
 size = [240, 292]
-frame = "sha256:90cadc9bc803c976acbcb85a58ef6d52e2b8562cedb71708293c373c1a102512"
+frame = "sha256:6af3e54bcc51b1f2d9262e9aa40771691a83a30d0c4c0bf969cb2f6e6e838311"
 
 [[frame]]
 machine = "starwars"

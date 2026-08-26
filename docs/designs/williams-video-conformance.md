@@ -250,7 +250,7 @@ derivation, except `T4_SLOW`, which is the bug.
 | `$B00E` | `T3F_COUNT` | `3` | in the window [line 16, line 240): falls at 64, 128, 192 |
 | `$B00F-$B011` | `T3F_LINES` | `$40 $80 $C0` | |
 | `$B012` | `T4_FAST` | `$10` | 8 × 128 = 1024 bytes × 1 cycle = 1024 cycles = 16 lines |
-| `$B013` | `T4_SLOW` | `$20` | same blit with `CTRL_SLOW` = 2048 cycles = 32 lines. **Measured `$10`.** The bug, see below |
+| `$B013` | `T4_SLOW` | `$20` | same blit with `CTRL_SLOW` = 2048 cycles = 32 lines. Measured `$10` before the fix, `$20` after. The bug, see below |
 | `$B014` | `T5_A` | `$EE` | `$A000` written by the 4×4 blit |
 | `$B015` | `T5_B` | `$00` | `$A100` **untouched**: SC1 XORs 4 into width/height, `4^4 = 0`, clamped to 1, so the blit is 1×1 |
 
@@ -274,15 +274,26 @@ is right, the board is right in isolation, and the join is wrong. It is the
 single best argument for the whole exercise, and it was found by reading the
 code while designing the test rather than by running it.
 
-The fix is `itvk.4` and charges the second cycle **inside the device**, so all
-blit timing stays in `williams_blitter.rs`: `do_dma_cycle` becomes "consume one
-clock" and moves a byte every other clock while `CTRL_SLOW` is set. The
-alternative, a stall counter on the board driven by the returned count, keeps
-the device untouched but puts blit timing in two places.
+The fix charges the second cycle **inside the device**, so all blit timing stays
+in `williams_blitter.rs`: `do_dma_cycle` consumes one clock, moving a byte on
+the first of a slow byte's two and nothing on the second, with a `stall` flag
+carrying the blit across. The alternative, a stall counter on the board driven
+by the returned count, keeps the device untouched but puts blit timing in two
+places.
 
-Until that lands, the harness asserts the fast half only. Asserting `$20` would
-land a failing test and asserting `$10` would pin the bug, so the slow assertion
-arrives in the same commit as the fix.
+The return value did **not** become vestigial as expected. It now means "clocks
+consumed by this call", which is 1 while active, so
+`core/tests/williams_blitter_test.rs` needed no change at all: its slow-mode
+timing test still accumulates 2n and now does so for the right reason.
+
+Which of a slow byte's two clocks moves it is not determined by anything
+available. The CPU is halted throughout and cannot see the difference; only the
+renderer could, and only within one scanline. The byte moves on the first clock.
+
+**What it cost.** Robotron and Sinistar drew a different attract frame
+afterwards and their golden frames were recaptured, reviewed by eye and by play.
+Joust did not move at all, which says its attract loop issues no slow blit in
+1800 frames while the other two do.
 
 ### T6 and T7 — the picture tests
 
@@ -489,9 +500,10 @@ Tracked as `phosphor-emulator-williams-video-conformance-itvk`.
 2. **Done** (`itvk.2`) — hold phase 9 for a frame so capture C is taken.
 3. **Done** (`itvk.3`) — land the ROM, the image and the harness, with the slow
    assertion held back. Nine assertions, no arcade ROMs, running in CI.
-4. `itvk.4` — the slow-blit fix, landed with the assertion that found it.
-5. `itvk.5` — re-run the ROM-gated suites and recapture the Williams golden
-   frames, which the fix will probably move.
+4. **Done** (`itvk.4`) — the slow-blit fix, landed with the assertion that found
+   it.
+5. **Done** (`itvk.5`) — ROM-gated suites re-run; Robotron and Sinistar
+   recaptured, Joust unmoved.
 6. `itvk.6` — Sinistar, which needs a second link address.
 
 Only then a second board. `raster-sampling-fidelity.md` W3 lists seven:
