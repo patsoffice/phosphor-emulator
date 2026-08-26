@@ -773,6 +773,25 @@ fn pascal_to_screaming_snake(s: &str) -> String {
 /// `bool`), byte arrays (`[u8; N]`), byte vectors (`Vec<u8>`), fixed-size
 /// arrays of primitives or `Saveable` types (`[T; N]`), and any other type
 /// that implements `Saveable` (delegated via `save_state`/`load_state`).
+///
+/// # Chunk framing
+///
+/// Primitives and blobs are written inline. Every *nested component*, meaning a
+/// field whose bytes come from another `Saveable` impl (an array of them
+/// included), is wrapped by this parent in a `tag | len | payload` chunk, and
+/// read back
+/// through a reader bounded to that payload. A component whose body changes
+/// therefore fails against its own name and cannot misread its siblings, and
+/// only machines containing it lose their saves.
+///
+/// Tags are ordinals over the nested components in declaration order, starting
+/// at 1 (tag 0 is reserved), so **field order is still wire order**. Inserting
+/// or removing a component changes how many chunks the body holds and is always
+/// caught. *Reordering* is not: it renumbers both components, so the tags still
+/// line up and only the bodies disagree, so two components that encode alike
+/// swap silently. Reordering components is a wire change; bump this struct's
+/// `#[save_version]` when you do it. Explicit stable ids that survive a reorder
+/// are Stage B (`phosphor-emulator-tlv-save-state-hc61.3`).
 #[proc_macro_derive(Saveable, attributes(save_version, save_skip, save_elements))]
 pub fn derive_saveable(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -795,6 +814,9 @@ pub fn derive_saveable(input: TokenStream) -> TokenStream {
     let mut save_stmts = Vec::new();
     let mut load_stmts = Vec::new();
     let mut load_skip_stmts = Vec::new();
+    // Ordinal chunk tags, assigned to nested components in declaration order.
+    // Tag 0 is reserved, so the first component is 1.
+    let mut next_tag: u16 = 1;
 
     for field in fields {
         let ident = field.ident.as_ref().expect("named field");
@@ -805,6 +827,26 @@ pub fn derive_saveable(input: TokenStream) -> TokenStream {
             SaveSkip::None => {
                 // Normal field: generate save + load code based on type
                 let (save, load) = gen_field_io(ident, &field.ty, force_elements);
+                let (save, load) = if delegates_to_saveable(&field.ty) {
+                    // Parents frame children: a nested component goes in a
+                    // chunk so a change to it cannot walk into its siblings.
+                    let tag = next_tag;
+                    next_tag = next_tag
+                        .checked_add(1)
+                        .filter(|t| *t != u16::MAX)
+                        .unwrap_or_else(|| {
+                            panic!("{struct_name} has too many nested components for u16 tags")
+                        });
+                    let path = format!("{struct_name}.{ident}");
+                    (
+                        quote! { w.write_tlv(#tag, |w| { #save }); },
+                        quote! {
+                            r.read_component(#tag, #path, |r| { #load Ok(()) })?;
+                        },
+                    )
+                } else {
+                    (save, load)
+                };
                 save_stmts.push(save);
                 load_stmts.push(load);
             }
@@ -925,6 +967,39 @@ impl syn::parse::Parse for SaveSkipArgs {
 /// Check if a field has the `#[save_elements]` attribute.
 fn has_save_elements(attrs: &[syn::Attribute]) -> bool {
     attrs.iter().any(|a| a.path().is_ident("save_elements"))
+}
+
+/// The primitive type names `gen_field_io` encodes inline.
+fn is_primitive_type(ty: &Type) -> bool {
+    let Type::Path(path) = ty else { return false };
+    let seg = path.path.segments.last().expect("non-empty path");
+    matches!(
+        seg.ident.to_string().as_str(),
+        "u8" | "u16" | "u32" | "u64" | "i16" | "i32" | "i64" | "f32" | "f64" | "bool"
+    )
+}
+
+/// Whether a field is a *nested component*, one whose bytes come from another
+/// `Saveable` impl, rather than a primitive or a length-prefixed blob.
+///
+/// Components are the fields the parent frames in a chunk. Mirrors the branches
+/// in [`gen_field_io`]: primitives, `[u8; N]`, arrays of primitives and
+/// `Vec<u8>` are inline; everything else delegates.
+fn delegates_to_saveable(ty: &Type) -> bool {
+    match ty {
+        // An array delegates only when its elements do; `[u8; N]` and
+        // `[u16; N]` are inline either way, `#[save_elements]` or not.
+        Type::Array(arr) => !is_primitive_type(&arr.elem),
+        Type::Path(path) => {
+            if is_primitive_type(ty) {
+                return false;
+            }
+            // Vec<u8> is a length-prefixed blob. A Vec of anything else is
+            // rejected by `gen_field_io`, so it never reaches a chunk.
+            path.path.segments.last().expect("non-empty path").ident != "Vec"
+        }
+        _ => true,
+    }
 }
 
 /// Generate save and load token streams for a single field based on its type.

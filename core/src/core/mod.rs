@@ -33,7 +33,10 @@ pub use machine::{
     MachineDebug, MouseControl, Nvram, PadAxis, PadButton, PadControl, Profilable, ProfileSpan,
     Renderable, SaveState, TimingConfig,
 };
-pub use save_state::{SaveError, Saveable, StateReader, StateWriter, load_machine, save_machine};
+pub use save_state::{
+    ChunkEvent, ChunkGuard, ChunkTrace, SaveError, Saveable, StateReader, StateWriter,
+    load_machine, load_machine_traced, save_machine,
+};
 pub use watchpoint::{
     DebugAccessSource, Watchpoint, WatchpointCondition, WatchpointHit, WatchpointKind,
     WatchpointPhase, Watchpoints,
