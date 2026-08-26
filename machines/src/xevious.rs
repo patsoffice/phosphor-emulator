@@ -1158,6 +1158,7 @@ impl BusDebug for XeviousSystem {
             ("Namco WSG", &self.board.wsg as &dyn Debuggable),
             ("Namco 06XX", &self.board.namco06 as &dyn Debuggable),
             ("Namco 51XX", &self.board.namco51 as &dyn Debuggable),
+            ("Clocks", &self.board.clocks as &dyn Debuggable),
         ]
     }
 

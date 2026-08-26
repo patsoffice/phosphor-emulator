@@ -517,6 +517,7 @@ pub struct CongoBongoBoard {
     /// main loop this board counts in. That is what [`ClockTree::advance`]
     /// exists for: it returns how many times the domain fired, where
     /// `ClockDivider::tick() -> bool` could only ever say "once".
+    #[debug_device("Clocks")]
     pub(crate) clocks: ClockTree,
     pub(crate) sound_dom: DomainId,
     /// The ~244 Hz periodic IRQ, counted in sound-CPU cycles.

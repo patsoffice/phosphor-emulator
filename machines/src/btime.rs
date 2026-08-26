@@ -281,6 +281,7 @@ pub struct BtimeBoard {
     sound_irq: bool,        // set on main write to 0x4003, cleared on 0xA000 read
     audio_nmi_enable: bool, // 0xC000 write bit0; ANDs with scanline bit3 -> NMI
     /// The board's clock tree, as [`clock_tree`] declares it.
+    #[debug_device("Clocks")]
     clocks: ClockTree,
     sound_dom: DomainId,
 

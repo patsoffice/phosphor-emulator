@@ -876,6 +876,7 @@ pub struct DocastleBoard {
     #[debug_device("SN76489A")]
     pub(crate) sn: [Sn76489a; 4],
     /// The board's clock tree, as [`clock_tree`] declares it.
+    #[debug_device("Clocks")]
     pub(crate) clocks: ClockTree,
     pub(crate) sn_dom: DomainId,
     /// The PSGs' coupling into the amplifier.

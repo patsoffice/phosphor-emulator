@@ -16,8 +16,18 @@ pub struct DebugRegister {
     pub name: &'static str,
     /// Register value (all register widths fit in u64).
     pub value: u64,
-    /// Display width in bits (8 or 16).
+    /// Display width in bits (8 or 16), or [`DebugRegister::DECIMAL`].
     pub width: u8,
+}
+
+impl DebugRegister {
+    /// A `width` marking a row that is a *magnitude* rather than a register: a
+    /// clock rate, a rate counter, anything with no fixed bit width. The panel
+    /// renders these in decimal with thousands separators instead of hex.
+    ///
+    /// Zero is the natural spelling because such a row genuinely has no width
+    /// in bits, and no real register has one either.
+    pub const DECIMAL: u8 = 0;
 }
 
 /// Result of disassembling one instruction at a given address.

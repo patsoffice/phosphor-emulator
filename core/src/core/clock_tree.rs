@@ -143,6 +143,30 @@ pub enum ClockDomainName {
 }
 
 impl ClockDomainName {
+    /// Label for a debug register row, carrying its unit.
+    ///
+    /// Separate from [`as_str`](Self::as_str) because that one reads as prose
+    /// inside a panic message, while a register panel wants to say what the
+    /// number is.
+    pub const fn debug_name(self) -> &'static str {
+        match self {
+            Self::Unused => "UNUSED",
+            Self::Cpu => "CPU_HZ",
+            Self::Cpu2 => "CPU2_HZ",
+            Self::Cpu3 => "CPU3_HZ",
+            Self::SubCpu => "SUBCPU_HZ",
+            Self::SoundCpu => "SNDCPU_HZ",
+            Self::Mcu => "MCU_HZ",
+            Self::Pixel => "PIXEL_HZ",
+            Self::Psg => "PSG_HZ",
+            Self::Psg2 => "PSG2_HZ",
+            Self::Pokey => "POKEY_HZ",
+            Self::Speech => "SPEECH_HZ",
+            Self::Dac => "DAC_HZ",
+            Self::Vector => "VECTOR_HZ",
+        }
+    }
+
     /// Short label for debug views.
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -705,6 +729,54 @@ impl ClockTree {
                 self.domains[i].phase_accum %= den;
             }
         }
+    }
+}
+
+/// The live clocks, for the debugger's device panel.
+///
+/// A board that holds a tree can mark the field `#[debug_device("Clocks")]` and
+/// the panel lists every domain with the rate it is *currently* running at.
+/// That is the part worth having: a rate that has been retuned since power-on
+/// (a Votrax VCO steered by a DAC write, a TMS5220 clock-select bit) cannot be
+/// read off the constructor any more, and this is where it can be read off
+/// instead.
+impl super::debug::Debuggable for ClockTree {
+    fn debug_registers(&self) -> Vec<super::debug::DebugRegister> {
+        (0..self.len as usize)
+            .map(|i| {
+                let id = DomainId(i as u8);
+                super::debug::DebugRegister {
+                    name: self.domains[i].name.debug_name(),
+                    value: self.hz(id),
+                    // A rate, not a register: shown as 894,886 rather than
+                    // $000DA6E6.
+                    width: super::debug::DebugRegister::DECIMAL,
+                }
+            })
+            .collect()
+    }
+}
+
+impl ClockTree {
+    /// One line naming every domain and the rate it is running at, for the
+    /// frame overlay.
+    ///
+    /// Rates are rendered at the scale they read best: MHz for a CPU or dot
+    /// clock, kHz for a sound chip.
+    pub fn overlay_summary(&self) -> String {
+        let mut out = String::new();
+        for (i, d) in self.domains().enumerate() {
+            if i > 0 {
+                out.push(' ');
+            }
+            let hz = d.hz;
+            if hz >= 1_000_000 {
+                out.push_str(&format!("{}:{:.3}MHz", d.name.as_str(), hz as f64 / 1e6));
+            } else {
+                out.push_str(&format!("{}:{:.1}kHz", d.name.as_str(), hz as f64 / 1e3));
+            }
+        }
+        out
     }
 }
 

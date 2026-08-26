@@ -30,6 +30,25 @@ pub trait Device: Debuggable + Saveable {
     fn tick(&mut self) {}
 }
 
+/// A board's clock tree, presentable in the debugger's device panel.
+///
+/// It has no register file, so `read`/`write`/`tick` keep their no-op defaults;
+/// what it offers is [`Debuggable::debug_registers`], which lists every domain
+/// at the rate it is *currently* running. `reset` matches this trait's contract
+/// exactly: clock rates are configuration and survive, only the phase
+/// accumulators clear.
+///
+/// [`Debuggable::debug_registers`]: crate::core::debug::Debuggable::debug_registers
+impl Device for crate::core::clock_tree::ClockTree {
+    fn name(&self) -> &'static str {
+        "Clocks"
+    }
+
+    fn reset(&mut self) {
+        crate::core::clock_tree::ClockTree::reset(self);
+    }
+}
+
 pub mod adc0809;
 pub mod avg;
 pub mod ay8910;

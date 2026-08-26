@@ -510,6 +510,9 @@ pub struct NamcoGalagaBoard {
 
     // Clock divider for the 51XX MCU (LLE mode only). MB88xx runs at 256 kHz.
     /// The board's clock tree, as [`clock_tree`] declares it.
+    ///
+    /// The game wrappers hand-write `BusDebug::devices`, so unlike the boards
+    /// that derive it this one is listed there rather than by attribute.
     pub(crate) clocks: ClockTree,
     pub(crate) namco51_dom: DomainId,
 

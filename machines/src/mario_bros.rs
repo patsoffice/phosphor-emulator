@@ -679,6 +679,7 @@ pub struct MarioBrosBoard {
     // Timing
     pub(crate) clock: u64,
     /// The board's clock tree, as [`clock_tree`] declares it.
+    #[debug_device("Clocks")]
     pub(crate) clocks: ClockTree,
     pub(crate) sound_dom: DomainId,
     pub(crate) vblank_nmi_pending: bool,

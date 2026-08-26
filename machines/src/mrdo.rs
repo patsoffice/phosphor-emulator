@@ -442,6 +442,7 @@ pub struct MrdoBoard {
     #[debug_device("SN76489 #2")]
     pub(crate) sn2: Sn76489a,
     /// The board's clock tree, as [`clock_tree`] declares it.
+    #[debug_device("Clocks")]
     pub(crate) clocks: ClockTree,
     pub(crate) sn1_dom: DomainId,
     pub(crate) sn2_dom: DomainId,

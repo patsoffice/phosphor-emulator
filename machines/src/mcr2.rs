@@ -202,6 +202,7 @@ pub struct Mcr2Board {
     // Timing
     pub(crate) clock: u64,
     /// The board's clock tree, as [`clock_tree`] declares it.
+    #[debug_device("Clocks")]
     pub(crate) clocks: ClockTree,
     pub(crate) ssio_dom: DomainId,
     pub(crate) watchdog_counter: u16,

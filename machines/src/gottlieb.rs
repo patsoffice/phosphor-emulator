@@ -455,7 +455,7 @@ impl phosphor_core::device::Device for GottliebSoundBoard {
 
 impl Debuggable for GottliebSoundBoard {
     fn debug_registers(&self) -> Vec<DebugRegister> {
-        vec![
+        let mut regs = vec![
             DebugRegister {
                 name: "SND_CLK",
                 value: self.clock,
@@ -476,7 +476,12 @@ impl Debuggable for GottliebSoundBoard {
                 value: u64::from(self.votrax.ar_output()),
                 width: 1,
             },
-        ]
+        ];
+        // The live clocks, including the Votrax VCO's, which the speech-clock
+        // DAC moves at runtime. Reading it off the constructor stopped being
+        // right the first time the game wrote to 0x3000.
+        regs.extend(self.clocks.debug_registers());
+        regs
     }
 }
 
@@ -979,6 +984,11 @@ impl GottliebBoard {
         self.sound.fill_audio(buffer)
     }
 
+    /// One line of live clock rates, for the frame overlay.
+    pub fn clock_summary(&self) -> String {
+        self.sound.clocks.overlay_summary()
+    }
+
     /// Reset the sound board and its CPU. The 6502 fetches its reset vector
     /// through the sound bus, which is why the two are reset together here.
     fn reset_sound(&mut self) {
@@ -1179,6 +1189,54 @@ mod tests {
         let want = convert_speech_clock(0xC0);
         assert_eq!(snd.clocks.hz(snd.votrax_dom), want);
         assert_eq!(snd.votrax.clock_hz(), want);
+    }
+
+    /// The debugger shows the Votrax's live rate, and it moves when the game
+    /// retunes the VCO.
+    ///
+    /// This is the question the epic set out to make answerable: "is the sound
+    /// chip running at the right rate?" used to mean reading the constructor,
+    /// and after a speech-clock DAC write the constructor is not even the right
+    /// answer any more.
+    #[test]
+    fn the_debugger_shows_the_live_votrax_rate() {
+        let mut snd = GottliebSoundBoard::new();
+        let speech_hz = |snd: &GottliebSoundBoard| {
+            snd.debug_registers()
+                .into_iter()
+                .find(|r| r.name == "SPEECH_HZ")
+                .expect("the debug panel lists the speech domain")
+                .value
+        };
+        assert_eq!(speech_hz(&snd), VOTRAX_NOMINAL_CLOCK_HZ);
+
+        Bus::write(&mut snd, BusMaster::Cpu(1), 0x3000, 0xC0);
+        assert_eq!(speech_hz(&snd), convert_speech_clock(0xC0));
+        assert_ne!(convert_speech_clock(0xC0), VOTRAX_NOMINAL_CLOCK_HZ);
+
+        // The sound CPU's own domain is listed beside it, at the rate the
+        // crystal gives rather than the rounded one the board used to run.
+        let regs = snd.debug_registers();
+        let sndcpu = regs.iter().find(|r| r.name == "SNDCPU_HZ").expect("listed");
+        assert_eq!(sndcpu.value, 894_886);
+    }
+
+    #[test]
+    fn the_overlay_names_every_domain_and_its_rate() {
+        let mut board = GottliebBoard::new();
+        let line = board.clock_summary();
+        assert_eq!(
+            line,
+            "cpu:5.000MHz pixel:5.000MHz soundcpu:894.9kHz speech:950.0kHz"
+        );
+
+        // And it follows a retune, which is the point of showing it live.
+        Bus::write(&mut board.sound, BusMaster::Cpu(1), 0x3000, 0x80);
+        assert!(
+            board.clock_summary().contains("speech:774.0kHz"),
+            "overlay did not follow the VCO: {}",
+            board.clock_summary()
+        );
     }
 
     /// A retuned speech clock survives a save/load, without the shadow field

@@ -423,7 +423,24 @@ impl Bus for GottliebBoard {
 // Machine traits (MachineCore + capabilities)
 // ---------------------------------------------------------------------------
 
-crate::impl_board_delegation!(QbertSystem, board, gottlieb::TIMING, orientation);
+crate::impl_board_delegation!(
+    QbertSystem,
+    board,
+    gottlieb::TIMING,
+    orientation,
+    overlay_stats
+);
+
+impl QbertSystem {
+    /// The live clock domains, under the FPS counter.
+    ///
+    /// Q*Bert is the board whose speech clock is a VCO the game steers at
+    /// runtime, so its rates are the ones actually worth watching move rather
+    /// than reading once out of a constructor.
+    fn overlay_stats_impl(&self) -> Option<String> {
+        Some(self.board.clock_summary())
+    }
+}
 
 impl InputConfigurable for QbertSystem {
     fn input_controls(&self) -> &'static [InputControl] {

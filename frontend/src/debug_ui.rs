@@ -635,6 +635,23 @@ pub fn execute_frame(machine: &mut dyn FrontendMachine, state: &mut DebugState) 
 // Shared helpers
 // ---------------------------------------------------------------------------
 
+/// Render a magnitude in decimal, grouped in threes: `894,886`.
+///
+/// For the rows that are rates rather than register contents, where the reader
+/// wants to compare against a number they know (a 5 MHz CPU, a 950 kHz VCO)
+/// rather than decode a bit pattern.
+fn fmt_grouped_decimal(value: u64) -> String {
+    let digits = value.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
 fn draw_register_grid(ui: &mut egui::Ui, id: &str, registers: &[DebugRegister]) {
     egui::Grid::new(id)
         .num_columns(2)
@@ -642,8 +659,14 @@ fn draw_register_grid(ui: &mut egui::Ui, id: &str, registers: &[DebugRegister]) 
         .show(ui, |ui| {
             for reg in registers {
                 ui.label(egui::RichText::new(reg.name).monospace());
-                // reg.width is in BITS; fmt_hex_value takes BYTES.
-                let value_text = format!("${}", fmt_hex_value(reg.value, reg.width / 8));
+                let value_text = if reg.width == DebugRegister::DECIMAL {
+                    // A magnitude, not a register: a clock rate reads as a
+                    // number, not as a bit pattern.
+                    fmt_grouped_decimal(reg.value)
+                } else {
+                    // reg.width is in BITS; fmt_hex_value takes BYTES.
+                    format!("${}", fmt_hex_value(reg.value, reg.width / 8))
+                };
                 ui.label(egui::RichText::new(value_text).monospace());
                 ui.end_row();
             }
@@ -1932,6 +1955,40 @@ mod tests {
         // to a bare {:X}, so a column never loses its leading zeroes.
         assert_eq!(fmt_hex_value(0x7u32, 0), "07");
         assert_eq!(fmt_hex_value(0x7u32, 3), "07");
+    }
+
+    #[test]
+    fn fmt_grouped_decimal_groups_in_threes() {
+        assert_eq!(fmt_grouped_decimal(0), "0");
+        assert_eq!(fmt_grouped_decimal(7), "7");
+        assert_eq!(fmt_grouped_decimal(999), "999");
+        assert_eq!(fmt_grouped_decimal(1_000), "1,000");
+        // The rates this exists for.
+        assert_eq!(fmt_grouped_decimal(894_886), "894,886");
+        assert_eq!(fmt_grouped_decimal(5_000_000), "5,000,000");
+        assert_eq!(fmt_grouped_decimal(12_096_000), "12,096,000");
+    }
+
+    /// A clock domain's row is a rate, so it renders in decimal; a real
+    /// register still renders in hex beside it.
+    #[test]
+    fn clock_rows_render_decimal_and_registers_stay_hex() {
+        let rate = DebugRegister {
+            name: "SPEECH_HZ",
+            value: 894_886,
+            width: DebugRegister::DECIMAL,
+        };
+        let reg = DebugRegister {
+            name: "A",
+            value: 0x42,
+            width: 8,
+        };
+        assert_eq!(rate.width, DebugRegister::DECIMAL);
+        assert_eq!(fmt_grouped_decimal(rate.value), "894,886");
+        assert_eq!(
+            format!("${}", fmt_hex_value(reg.value, reg.width / 8)),
+            "$42"
+        );
     }
 
     /// The register grid keys on a *bit* width and divides by 8 before

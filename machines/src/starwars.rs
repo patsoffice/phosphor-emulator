@@ -727,6 +727,7 @@ pub(crate) struct StarWarsBoard {
     /// domain is stepped here; the rest is the derivation it rides on. Save and
     /// load are hand-written below, so the handle beside it is simply not
     /// written rather than being marked skipped.
+    #[debug_device("Clocks")]
     pub(crate) clocks: ClockTree,
     pub(crate) tms_dom: DomainId,
 

@@ -204,6 +204,7 @@ pub struct ScrambleBoard {
     pub(crate) clock: u64,
     /// The board's clock tree, as [`clock_tree`] declares it. Only the sound
     /// domain is stepped; the rest is the derivation it rides on.
+    #[debug_device("Clocks")]
     clocks: ClockTree,
     sound_dom: DomainId,
     watchdog_counter: u32,

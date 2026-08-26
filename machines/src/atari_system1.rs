@@ -469,6 +469,7 @@ pub struct AtariSystem1Board {
     /// main-CPU cycles. The speech section holds its own copy of the same
     /// declaration stepped in sound-CPU cycles, which is the rate its loop
     /// counts in.
+    #[debug_device("Clocks")]
     clocks: ClockTree,
     sound_dom: DomainId,
     audio_buffer: SampleRing<i16>,
