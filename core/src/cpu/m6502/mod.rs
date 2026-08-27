@@ -7,7 +7,6 @@ mod shift;
 mod stack;
 mod unary;
 
-use crate::core::save_state::{SaveError, StateReader, StateWriter};
 use crate::core::{Bus, BusMaster, bus::InterruptState, component::BusMasterComponent};
 use crate::cpu::{
     Cpu,
@@ -37,26 +36,11 @@ impl From<StatusFlag> for u8 {
 /// Interrupt type being processed by the M6502 interrupt state machine.
 /// BRK (software interrupt) has its own handler and does not use this enum.
 #[repr(u8)]
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, PartialEq, Saveable)]
 pub(crate) enum InterruptType {
     None = 0,
     Nmi = 1,
     Irq = 2,
-}
-
-impl Saveable for InterruptType {
-    fn save_state(&self, w: &mut StateWriter) {
-        w.write_u8(*self as u8);
-    }
-
-    fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
-        *self = match r.read_u8()? {
-            1 => InterruptType::Nmi,
-            2 => InterruptType::Irq,
-            _ => InterruptType::None,
-        };
-        Ok(())
-    }
 }
 
 /// Field order matches save-state serialization order (version 1).

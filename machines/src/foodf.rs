@@ -46,7 +46,6 @@ use phosphor_core::core::machine::{
     DipSwitchBank, Direction, InputConfigurable, InputControl, InputEvent, InputId, InputKind,
     KeyId, MachineCore, MouseControl, Nvram, Profilable, Renderable, SaveState,
 };
-use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::{AccessKind, AddressSpace32};
 use phosphor_core::core::{Bus, BusMaster, TimingConfig};
 use phosphor_core::cpu::m68000::M68000;
@@ -55,7 +54,7 @@ use phosphor_core::cpu::{Cpu, CpuStateTrait};
 use phosphor_core::device::pokey::Pokey;
 use phosphor_core::gfx::decode::{GfxCache, GfxLayout, decode_gfx};
 use phosphor_core::gfx::{combine_weights, compute_resistor_weights};
-use phosphor_macros::{BusDebug, MemoryRegion};
+use phosphor_macros::{BusDebug, MemoryRegion, Saveable};
 
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
 use crate::set_bit_active_low;
@@ -439,60 +438,97 @@ const PLAYFIELD_ROWS: usize = 32;
 /// Food Fight's hardware, everything the 68000 talks *to*. Held apart from the
 /// CPU so a cycle dispatches at a concrete bus rather than a trait object (see
 /// `docs/designs/concrete-bus-dispatch.md`).
-#[derive(BusDebug)]
+#[derive(BusDebug, Saveable)]
+#[save_version(1)]
+#[save_tlv]
+#[save_after_load(clamp_adc_channel)]
 pub struct FoodFightBoard {
+    /// The address space persists its own writable regions: work RAM, sprite
+    /// RAM and the playfield here.
     #[debug_map(cpu = 0)]
+    #[save(id = 1)]
     map: AddressSpace32,
     /// POKEY 1, 2, 3 (index 0 = chip "pokey1" at 0xA80000).
     #[debug_device("POKEY")]
+    #[save(id = 2)]
     pokey: [Pokey; 3],
 
     // Graphics (not CPU-addressable)
-    tile_cache: GfxCache,   // 512 × 8×8 × 2bpp
+    #[save_skip]
+    tile_cache: GfxCache, // 512 × 8×8 × 2bpp
+    #[save_skip]
     sprite_cache: GfxCache, // 256 × 16×16 × 2bpp
 
     // Palette: 256 entries, low byte written by the CPU, pre-converted to RGB24.
+    #[save(id = 3)]
     palette_ram: [u8; 256],
+    /// Expanded from `palette_ram`, and saved beside it rather than rebuilt:
+    /// the rebuild ran only from `reset` and from a load, so forgetting it left
+    /// the board showing the palette from before the load.
+    #[save(id = 4)]
     palette_rgb: [(u8, u8, u8); 256],
 
     // NVRAM (X2212): 256 low-byte cells at 0x900000-9001FF.
+    #[save(id = 5)]
     nvram: [u8; 256],
 
     // Analog stick ADC channels: [0]=P2 Y, [1]=P1 Y, [2]=P2 X, [3]=P1 X
     // (MAME adc in_callbacks); selected channel latched by writes to 0x944000.
+    #[save(id = 6)]
     stick: [u8; 4],
-    adc_channel: usize,
+    /// The latched ADC channel, three bits wide as the address decode makes it.
+    #[save(id = 7)]
+    adc_channel: u8,
     // P1 digital direction state (keyboard play drives the ADC stick).
+    #[save_skip]
     p1_left: bool,
+    #[save_skip]
     p1_right: bool,
+    #[save_skip]
     p1_up: bool,
+    #[save_skip]
     p1_down: bool,
 
     // Digital SYSTEM port (active-low): see set_input.
+    #[save(id = 8)]
     system_input: u8,
+    #[save(id = 9)]
     dip_switches: u8,
 
+    #[save(id = 10)]
     playfield_flip: bool,
 
     // Autovectored interrupt latches (held until acked via digital_w).
+    #[save(id = 11)]
     scanline_int: bool, // IRQ1 (32V)
-    video_int: bool,    // IRQ2 (VBLANK)
+    #[save(id = 12)]
+    video_int: bool, // IRQ2 (VBLANK)
 
+    #[save(id = 13)]
     clock: u64,
+    #[save(id = 14)]
     watchdog_count: u8,
 
+    /// Samples already mixed and waiting for the frontend to drain, which the
+    /// next frame refills.
+    #[save_skip(default = SampleRing::with_capacity(2048))]
     audio_buffer: SampleRing<i16>,
     /// Output coupling capacitor: POKEY is unipolar and idles at zero, so the
     /// DC must be tracked and removed rather than a fixed midpoint assumed.
+    #[save(id = 15)]
     dc_blocker: DcBlocker,
 }
 
 /// Atari Food Fight (1983): a 68000 beside the board it drives.
-#[derive(BusDebug)]
+#[derive(BusDebug, Saveable)]
+#[save_version(1)]
+#[save_tlv]
 pub struct FoodFightSystem {
     #[debug_cpu("M68000")]
+    #[save(id = 1)]
     cpu: M68000,
     #[debug_bus]
+    #[save(id = 2)]
     pub board: FoodFightBoard,
 }
 
@@ -649,6 +685,15 @@ impl FoodFightBoard {
 
     pub fn clock(&self) -> u64 {
         self.clock
+    }
+
+    /// Bring the latched ADC channel back into the three bits the address
+    /// decode gives it, after a load.
+    ///
+    /// The write path masks with `0x07`, so nothing this writer emits is out of
+    /// range; the mask is here because a save is an input.
+    fn clamp_adc_channel(&mut self) {
+        self.adc_channel &= 0x07;
     }
 
     /// Feed the DIP switches to POKEY 1's pot inputs. The hardware wires each
@@ -906,7 +951,7 @@ impl Bus for FoodFightBoard {
             // ADC data (0x940001). The real sticks read reversed (MAME applies
             // PORT_REVERSE on both axes), so mirror the value here — this flips
             // both the digital-direction and analog-mouse input paths at once.
-            0x94_0000..=0x94_01FF => 0xFF - self.stick[self.adc_channel] as u16,
+            0x94_0000..=0x94_01FF => 0xFF - self.stick[self.adc_channel as usize] as u16,
             0x94_8000..=0x94_81FF => self.system_input as u16, // SYSTEM
             0x95_8000..=0x95_81FF => {
                 self.watchdog_count = 0; // watchdog also resets on read
@@ -930,7 +975,7 @@ impl Bus for FoodFightBoard {
                 self.map.write_bus_word_be(addr, data);
             }
             0x90_0000..=0x90_01FF => self.nvram[((addr >> 1) & 0xFF) as usize] = byte,
-            0x94_4000..=0x94_4007 => self.adc_channel = ((addr >> 1) & 0x07) as usize,
+            0x94_4000..=0x94_4007 => self.adc_channel = ((addr >> 1) & 0x07) as u8,
             0x94_8000..=0x94_81FF => self.digital_w(byte),
             0x95_0000..=0x95_01FF => {
                 let idx = ((addr >> 1) & 0xFF) as usize;
@@ -1103,60 +1148,6 @@ impl MachineCore for FoodFightSystem {
 // `MachineDebug` (debug_bus + cycle stepping) via the standalone-debug macro;
 // `BusDebug` is `#[derive]`d on the struct above (24-bit `AddressSpace32` bus).
 crate::impl_standalone_debug!(FoodFightSystem);
-
-impl Saveable for FoodFightSystem {
-    fn save_state(&self, w: &mut StateWriter) {
-        self.cpu.save_state(w);
-        for p in &self.board.pokey {
-            p.save_state(w);
-        }
-        self.board.dc_blocker.save_state(w);
-        w.write_bytes(self.board.map.region_data(Region::Ram));
-        w.write_bytes(self.board.map.region_data(Region::SpriteRam));
-        w.write_bytes(self.board.map.region_data(Region::Playfield));
-        w.write_bytes(&self.board.palette_ram);
-        w.write_bytes(&self.board.nvram);
-        w.write_bytes(&self.board.stick);
-        w.write_u8(self.board.adc_channel as u8);
-        w.write_u8(self.board.system_input);
-        w.write_u8(self.board.dip_switches);
-        w.write_bool(self.board.playfield_flip);
-        w.write_bool(self.board.scanline_int);
-        w.write_bool(self.board.video_int);
-        w.write_u64_le(self.board.clock);
-        w.write_u8(self.board.watchdog_count);
-    }
-
-    fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
-        self.cpu.load_state(r)?;
-        for p in &mut self.board.pokey {
-            p.load_state(r)?;
-        }
-        self.board.dc_blocker.load_state(r)?;
-        r.read_bytes_into(self.board.map.region_data_mut(Region::Ram))?;
-        r.read_bytes_into(self.board.map.region_data_mut(Region::SpriteRam))?;
-        r.read_bytes_into(self.board.map.region_data_mut(Region::Playfield))?;
-        r.read_bytes_into(&mut self.board.palette_ram)?;
-        r.read_bytes_into(&mut self.board.nvram)?;
-        r.read_bytes_into(&mut self.board.stick)?;
-        self.board.adc_channel = (r.read_u8()? & 0x07) as usize;
-        self.board.system_input = r.read_u8()?;
-        self.board.dip_switches = r.read_u8()?;
-        self.board.playfield_flip = r.read_bool()?;
-        self.board.scanline_int = r.read_bool()?;
-        self.board.video_int = r.read_bool()?;
-        self.board.clock = r.read_u64_le()?;
-        self.board.watchdog_count = r.read_u8()?;
-        // Recompute derived state.
-        for i in 0..256 {
-            self.board.update_palette_entry(i);
-        }
-        self.board.refresh_dip_pots();
-        self.board.audio_buffer.clear();
-        self.board.dc_blocker.reset();
-        Ok(())
-    }
-}
 
 impl SaveState for FoodFightSystem {
     crate::machine_save_state!();

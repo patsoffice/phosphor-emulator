@@ -767,6 +767,25 @@ fn pascal_to_screaming_snake(s: &str) -> String {
 ///   `write_bytes`/`read_bytes_into`. Use when compatibility with existing
 ///   save formats that use individual `write_u8` calls is required.
 ///
+/// # Struct attributes
+///
+/// - `#[save_version(N)]` — emit and check a version byte.
+/// - `#[save_tlv]` — frame every field under an explicit id (below).
+/// - `#[save_retired(3, 7)]` — ids that once existed and must not be reused.
+/// - `#[save_after_load(a, b)]` — call the inherent methods `self.a()` and
+///   `self.b()`, in that order, once the load has finished and every
+///   `#[save_skip(default…)]` has been applied.
+///
+/// `#[save_after_load]` is a **last resort**, not the normal way to restore a
+/// derived value. Where the derived thing can simply be saved, save it: a
+/// palette expanded from palette RAM is `[(u8, u8, u8); N]`, which this derive
+/// encodes, and a page table implied by a bank register belongs to the address
+/// space, which saves its own. Both were rebuild calls once, and both were bugs
+/// waiting for someone to forget the call. What is left for the hook is the
+/// state a save deliberately does not carry: a device re-reading a clock or a
+/// potentiometer from configuration the file has no business pinning, or a
+/// value that must be brought back into range before anything indexes with it.
+///
 /// # Supported field types
 ///
 /// Primitives (`u8`, `u16`, `u32`, `u64`, `i16`, `i32`, `i64`, `f32`, `f64`,
@@ -859,26 +878,54 @@ fn pascal_to_screaming_snake(s: &str) -> String {
 ///
 /// Ids are assigned by hand. Hashing field names was rejected: a rename would
 /// silently change the wire.
+///
+/// # Fieldless enums
+///
+/// Deriving on an enum whose variants all carry no data writes one byte: the
+/// variant's Rust discriminant, so `#[repr(u8)]` with `= N` on each variant and
+/// a bare `enum` counting from zero both encode the way the source reads. A
+/// byte no variant claims fails the load naming the type, rather than landing
+/// on the first variant the way a hand-written `match` with a `_` arm does.
+///
+/// `#[save_tlv]` is rejected on an enum: one byte has no fields to give ids to.
+/// `#[save_version(N)]` still works, and means what it does on a struct.
 #[proc_macro_derive(
     Saveable,
-    attributes(save_version, save_skip, save_elements, save_tlv, save, save_retired)
+    attributes(
+        save_version,
+        save_skip,
+        save_elements,
+        save_tlv,
+        save,
+        save_retired,
+        save_after_load
+    )
 )]
 pub fn derive_saveable(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let struct_name = &input.ident;
+
+    // Parse #[save_version(N)] from struct attributes
+    let version = parse_save_version(&input.attrs);
+    let tlv = input.attrs.iter().any(|a| a.path().is_ident("save_tlv"));
+    let retired = parse_save_retired(&input.attrs);
+    let after_load = parse_save_after_load(&input.attrs);
 
     let fields = match &input.data {
         syn::Data::Struct(data) => match &data.fields {
             Fields::Named(fields) => &fields.named,
             _ => panic!("Saveable can only be derived on structs with named fields"),
         },
-        _ => panic!("Saveable can only be derived on structs"),
+        // A fieldless enum is one byte, not a body of fields, so it takes the
+        // whole path of its own.
+        syn::Data::Enum(data) => {
+            if !after_load.is_empty() {
+                panic!("{struct_name}: #[save_after_load] has no meaning on an enum");
+            }
+            return gen_unit_enum(struct_name, data, version, tlv, &retired);
+        }
+        _ => panic!("Saveable can only be derived on structs and fieldless enums"),
     };
-
-    // Parse #[save_version(N)] from struct attributes
-    let version = parse_save_version(&input.attrs);
-    let tlv = input.attrs.iter().any(|a| a.path().is_ident("save_tlv"));
-    let retired = parse_save_retired(&input.attrs);
 
     if !tlv {
         if !retired.is_empty() {
@@ -938,12 +985,118 @@ pub fn derive_saveable(input: TokenStream) -> TokenStream {
                 #version_read
                 #load_body
                 #(#load_skip_stmts)*
+                #(self.#after_load();)*
                 Ok(())
             }
         }
     };
 
     TokenStream::from(expanded)
+}
+
+/// A fieldless enum: one byte carrying the variant's discriminant.
+///
+/// The discriminants are Rust's own, so `#[repr(u8)]` with `= N` on each variant
+/// and a bare `enum` counting from zero both encode the way the source reads.
+/// The variant a byte names is looked up rather than transmuted, so a value no
+/// variant claims **fails the load naming the type** rather than landing on the
+/// first variant. Every hand-written impl this replaces fell back to variant
+/// zero, which is a corrupt save resuming as a plausible one.
+fn gen_unit_enum(
+    name: &syn::Ident,
+    data: &syn::DataEnum,
+    version: Option<u8>,
+    tlv: bool,
+    retired: &[u16],
+) -> TokenStream {
+    if tlv {
+        panic!(
+            "{name}: #[save_tlv] has no meaning on an enum. A fieldless enum is a \
+             single byte, so there are no fields to give ids to."
+        );
+    }
+    if !retired.is_empty() {
+        panic!("{name}: #[save_retired] only means anything with #[save_tlv]");
+    }
+
+    let mut next: u8 = 0;
+    let mut writes = Vec::new();
+    let mut reads = Vec::new();
+    let mut assigned: Vec<(u8, String)> = Vec::new();
+
+    for variant in &data.variants {
+        let ident = &variant.ident;
+        if !matches!(variant.fields, Fields::Unit) {
+            panic!("{name}::{ident}: Saveable supports fieldless enums only");
+        }
+        let value = match &variant.discriminant {
+            Some((_, expr)) => parse_u8_literal(expr).unwrap_or_else(|| {
+                panic!(
+                    "{name}::{ident}: a discriminant must be a literal 0-255 for the \
+                     derive to encode it"
+                )
+            }),
+            None => next,
+        };
+        if let Some((_, other)) = assigned.iter().find(|(v, _)| *v == value) {
+            panic!("{name}::{ident}: discriminant {value} is already used by {other}");
+        }
+        assigned.push((value, format!("{name}::{ident}")));
+        next = value
+            .checked_add(1)
+            .unwrap_or_else(|| panic!("{name}::{ident}: discriminants must fit in a u8"));
+
+        writes.push(quote! { Self::#ident => #value, });
+        reads.push(quote! { #value => Self::#ident, });
+    }
+
+    if writes.is_empty() {
+        panic!("{name}: Saveable needs at least one variant to encode");
+    }
+
+    let version_write = version.map(|v| quote! { w.write_version(#v); });
+    let version_read = version.map(|v| quote! { r.read_version(#v)?; });
+    let type_name = name.to_string();
+
+    let expanded = quote! {
+        impl phosphor_core::prelude::Saveable for #name {
+            fn save_state(&self, w: &mut phosphor_core::prelude::StateWriter) {
+                #version_write
+                w.write_u8(match self { #(#writes)* });
+            }
+
+            fn load_state(
+                &mut self,
+                r: &mut phosphor_core::prelude::StateReader,
+            ) -> Result<(), phosphor_core::prelude::SaveError> {
+                #version_read
+                let __v = r.read_u8()?;
+                *self = match __v {
+                    #(#reads)*
+                    other => {
+                        return Err(phosphor_core::prelude::SaveError::InvalidFormat(
+                            format!("{} has no variant with discriminant {}", #type_name, other)
+                        ));
+                    }
+                };
+                Ok(())
+            }
+        }
+    };
+
+    TokenStream::from(expanded)
+}
+
+/// A discriminant expression that is a plain `u8` literal, which is the only
+/// form the derive can turn into a wire byte.
+fn parse_u8_literal(expr: &syn::Expr) -> Option<u8> {
+    let syn::Expr::Lit(lit) = expr else {
+        return None;
+    };
+    let syn::Lit::Int(int) = &lit.lit else {
+        return None;
+    };
+    int.base10_parse::<u8>().ok()
 }
 
 /// Positional body: fields in declaration order, nested components framed under
@@ -1171,6 +1324,24 @@ fn parse_save_retired(attrs: &[syn::Attribute]) -> Vec<u16> {
                     .expect("#[save_retired] values must be u16"),
             );
         }
+    }
+    out
+}
+
+/// Extract `#[save_after_load(a, b)]` from struct-level attributes: inherent
+/// methods to call, in order, once the load has finished.
+fn parse_save_after_load(attrs: &[syn::Attribute]) -> Vec<syn::Ident> {
+    let mut out = Vec::new();
+    for attr in attrs {
+        if !attr.path().is_ident("save_after_load") {
+            continue;
+        }
+        let names = attr
+            .parse_args_with(
+                syn::punctuated::Punctuated::<syn::Ident, syn::Token![,]>::parse_terminated,
+            )
+            .expect("#[save_after_load] expects a comma-separated list of method names");
+        out.extend(names);
     }
     out
 }

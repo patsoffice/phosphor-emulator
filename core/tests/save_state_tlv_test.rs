@@ -396,6 +396,8 @@ fn a_count_that_overruns_the_body_is_rejected() {
     assert!(msg.contains("ran out after 1"), "{msg}");
 }
 
+// -- Types the derive can encode ---------------------------------------------
+
 /// An expanded palette is `[(u8, u8, u8); N]`, and boards hold several. They
 /// were unsupported, which is why every one of them was either `#[save_skip]`
 /// with a rebuild call bolted onto `load_state`, or hand-written.
@@ -481,6 +483,144 @@ fn an_array_of_arrays_round_trips_flat() {
         &[1, 2, 3, 4, 5, 6],
         "the outer array's elements follow one another with no framing"
     );
+}
+
+/// A CPU's interrupt phase, a 68000's family member and a Slapstic's sequence
+/// step are all fieldless enums with an explicit byte mapping, and each was a
+/// hand-written impl for that reason alone.
+#[test]
+fn a_fieldless_enum_round_trips_on_its_discriminant() {
+    #[derive(Saveable, Debug, PartialEq)]
+    #[repr(u8)]
+    enum Interrupt {
+        None = 0,
+        Nmi = 1,
+        Irq = 2,
+    }
+
+    /// No `#[repr]` and no discriminants: Rust counts from zero, and so does
+    /// the wire.
+    #[derive(Saveable, Debug, PartialEq)]
+    enum Step {
+        Idle,
+        Active,
+        Commit,
+    }
+
+    for (src, byte) in [
+        (Interrupt::None, 0u8),
+        (Interrupt::Nmi, 1),
+        (Interrupt::Irq, 2),
+    ] {
+        let data = bytes_of(&src);
+        assert_eq!(data, vec![byte]);
+        let mut out = Interrupt::None;
+        load_into(&mut out, &data).unwrap();
+        assert_eq!(out, src);
+    }
+
+    assert_eq!(bytes_of(&Step::Commit), vec![2u8]);
+    let mut out = Step::Idle;
+    load_into(&mut out, &[1]).unwrap();
+    assert_eq!(out, Step::Active);
+}
+
+/// The hand-written impls all ended in a `_ =>` arm that turned an unrecognised
+/// byte into variant zero, so a corrupt save resumed as a plausible one. The
+/// derive names the type instead.
+#[test]
+fn an_unknown_discriminant_fails_and_names_its_type() {
+    #[derive(Saveable, Debug, PartialEq)]
+    #[repr(u8)]
+    enum Variant {
+        M68000 = 0,
+        M68010 = 1,
+    }
+
+    let mut out = Variant::M68000;
+    let err = load_into(&mut out, &[7]).unwrap_err();
+    let msg = format!("{err}");
+    assert!(msg.contains("Variant"), "{msg}");
+    assert!(msg.contains('7'), "{msg}");
+    assert_eq!(out, Variant::M68000, "the value is left alone");
+}
+
+/// An enum nested in a TLV struct is a field like any other: framed under its
+/// id, with the byte as the whole payload.
+#[test]
+fn an_enum_nests_in_a_tlv_struct() {
+    #[derive(Saveable, Debug, PartialEq, Default)]
+    #[repr(u8)]
+    enum Phase {
+        #[default]
+        Idle = 0,
+        Running = 3,
+    }
+
+    #[derive(Saveable, Debug, PartialEq, Default)]
+    #[save_version(1)]
+    #[save_tlv]
+    struct Cpu {
+        #[save(id = 1)]
+        pc: u16,
+        #[save(id = 2)]
+        phase: Phase,
+    }
+
+    let src = Cpu {
+        pc: 0x1234,
+        phase: Phase::Running,
+    };
+    let mut out = Cpu::default();
+    load_into(&mut out, &bytes_of(&src)).unwrap();
+    assert_eq!(out, src);
+}
+
+// -- The post-load hook ------------------------------------------------------
+
+/// `#[save_after_load]` runs its methods in order, after the body and after
+/// every `#[save_skip(default…)]` has been applied, so a hook sees the finished
+/// state rather than a half-restored one.
+#[test]
+fn after_load_hooks_run_in_order_on_the_finished_state() {
+    #[derive(Saveable, Default, Debug, PartialEq)]
+    #[save_version(1)]
+    #[save_tlv]
+    #[save_after_load(clamp, note)]
+    struct Chip {
+        #[save(id = 1)]
+        bank: u8,
+        #[save_skip(default = 9)]
+        scratch: u8,
+        #[save_skip]
+        trace: Vec<u8>,
+    }
+
+    impl Chip {
+        fn clamp(&mut self) {
+            self.bank &= 3;
+            self.trace.push(1);
+        }
+        fn note(&mut self) {
+            // Reads `scratch`, so this fails unless the skip default ran first.
+            self.trace.push(self.scratch);
+        }
+    }
+
+    // A byte no writer of this struct can emit, which is the case the hook is
+    // for: a save is an input.
+    let data: &[u8] = &[
+        0x01, // version
+        0x01, 0x00, // one field
+        0x01, 0x00, // id 1
+        0x01, 0x00, 0x00, 0x00, // one byte
+        0xFF,
+    ];
+
+    let mut out = Chip::default();
+    load_into(&mut out, data).unwrap();
+    assert_eq!(out.bank, 3, "clamp ran");
+    assert_eq!(out.trace, vec![1, 9], "in order, after the skip defaults");
 }
 
 /// A machine whose components are a mix loads end to end through the real

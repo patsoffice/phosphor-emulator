@@ -28,7 +28,7 @@
 //! Reference: <http://www.aarongiles.com/slapstic.html> and MAME's
 //! `src/mame/atari/slapstic.cpp`.
 
-use crate::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
+use phosphor_macros::Saveable;
 
 /// A resolved address matcher: true when `addr & mask == value`. Unlike the raw
 /// chip constants this works on the **full bus address**, so the secret
@@ -263,7 +263,7 @@ pub const SLAPSTIC_108: SlapsticConfig = SlapsticConfig {
 // State machine
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Saveable)]
 enum State {
     /// Waiting for the window's base offset (0) to arm the chip.
     Idle,
@@ -278,40 +278,23 @@ enum State {
     BitSetEven,
 }
 
-impl State {
-    fn to_u8(self) -> u8 {
-        match self {
-            State::Idle => 0,
-            State::Active => 1,
-            State::AltValid => 2,
-            State::AltSelect => 3,
-            State::AltCommit => 4,
-            State::BitLoad => 5,
-            State::BitSetOdd => 6,
-            State::BitSetEven => 7,
-        }
-    }
-    fn from_u8(v: u8) -> Self {
-        match v {
-            1 => State::Active,
-            2 => State::AltValid,
-            3 => State::AltSelect,
-            4 => State::AltCommit,
-            5 => State::BitLoad,
-            6 => State::BitSetOdd,
-            7 => State::BitSetEven,
-            _ => State::Idle,
-        }
-    }
-}
-
 /// Atari Slapstic address-sequence bank selector, parameterized by chip.
+#[derive(Saveable)]
+#[save_version(1)]
+#[save_tlv]
+#[save_after_load(clamp_banks)]
 pub struct Slapstic {
     /// The chip's matcher constants; the state machine reads every pattern here.
+    ///
+    /// Which chip is fitted is how the board is built, not something that runs.
+    #[save_skip]
     config: &'static SlapsticConfig,
+    #[save(id = 1)]
     state: State,
+    #[save(id = 2)]
     current_bank: u8,
     /// Bank assembled by an in-progress alt/bitwise sequence, committed at the end.
+    #[save(id = 3)]
     loaded_bank: u8,
 }
 
@@ -338,6 +321,17 @@ impl Slapstic {
             _ => panic!("unsupported slapstic chip 137412-{chip}"),
         };
         Self::new(config)
+    }
+
+    /// Bring both bank numbers back into 0-3 after a load.
+    ///
+    /// The chip only ever holds a two-bit bank, and the board indexes a 32 KB
+    /// ROM with `bank * 0x2000`, so a wider value read out of a file would run
+    /// off the end of it. Nothing this writer emits can be out of range; the
+    /// mask is here because a save is an input.
+    fn clamp_banks(&mut self) {
+        self.current_bank &= 3;
+        self.loaded_bank &= 3;
     }
 
     /// Reset to power-on: idle, back on the start bank.
@@ -490,24 +484,10 @@ impl Default for Slapstic {
     }
 }
 
-impl Saveable for Slapstic {
-    fn save_state(&self, w: &mut StateWriter) {
-        w.write_u8(self.state.to_u8());
-        w.write_u8(self.current_bank);
-        w.write_u8(self.loaded_bank);
-    }
-
-    fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
-        self.state = State::from_u8(r.read_u8()?);
-        self.current_bank = r.read_u8()? & 3;
-        self.loaded_bank = r.read_u8()? & 3;
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::save_state::{Saveable, StateReader, StateWriter};
 
     // Canonical byte addresses for each sequence step (window base 0x80000).
     const ARM: u32 = 0x0008_0000; // window base, the re-arm / reset access

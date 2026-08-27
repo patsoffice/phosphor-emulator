@@ -25,7 +25,6 @@ use alu::binary::LogicalOp;
 use alu::unary::UnaryOp;
 pub use flags::SrFlag;
 
-use crate::core::save_state::{SaveError, StateReader, StateWriter};
 use crate::core::{Bus, BusMaster, bus::InterruptState, component::BusMasterComponent};
 use crate::cpu::{
     Cpu,
@@ -39,28 +38,12 @@ use crate::prelude::Saveable;
 /// logic (address-bus width, exception frame formats, brief-extension-word
 /// scaling) can be gated in one place as later variants are added.
 #[repr(u8)]
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Saveable)]
 pub enum M68kVariant {
     M68000 = 0,
     M68010 = 1,
     M68020 = 2,
     M68030 = 3,
-}
-
-impl Saveable for M68kVariant {
-    fn save_state(&self, w: &mut StateWriter) {
-        w.write_u8(*self as u8);
-    }
-
-    fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
-        *self = match r.read_u8()? {
-            1 => M68kVariant::M68010,
-            2 => M68kVariant::M68020,
-            3 => M68kVariant::M68030,
-            _ => M68kVariant::M68000,
-        };
-        Ok(())
-    }
 }
 
 /// Execution state machine for multi-cycle instructions.

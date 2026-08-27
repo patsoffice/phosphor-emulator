@@ -45,7 +45,6 @@ use phosphor_core::core::machine::{
     DipSwitchBank, DipSwitches, InputConfigurable, InputControl, InputEvent, InputId, InputKind,
     MachineCore, MouseControl, Nvram, Profilable, Renderable, SaveState,
 };
-use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::{AccessKind, AddressSpace32};
 use phosphor_core::core::{Bus, BusMaster, TimingConfig};
 use phosphor_core::cpu::m68000::M68000;
@@ -54,7 +53,7 @@ use phosphor_core::cpu::{Cpu, CpuStateTrait};
 use phosphor_core::device::avg::{Avg, AvgVariant, VectorMemory};
 use phosphor_core::device::dvg::{VectorLine, raster_size_for_field};
 use phosphor_core::device::pokey::Pokey;
-use phosphor_macros::{BusDebug, MemoryRegion};
+use phosphor_macros::{BusDebug, MemoryRegion, Saveable};
 
 use crate::atari_dvg::rasterize_vectors;
 use crate::registry::MachineEntry;
@@ -334,59 +333,92 @@ fn deinterleave_program(chips: &[u8]) -> Vec<u8> {
 // ---------------------------------------------------------------------------
 
 /// Atari Quantum arcade system.
-#[derive(BusDebug)]
+#[derive(BusDebug, Saveable)]
+#[save_version(1)]
+#[save_tlv]
 pub struct QuantumSystem {
     #[debug_cpu("M68000")]
+    #[save(id = 1)]
     cpu: M68000,
 
     /// Everything the 68000 talks *to*. Held in its own struct so the CPU and
     /// the bus are disjoint fields: `cpu.execute_cycle(&mut self.board, ..)`
     /// then borrow-checks natively and dispatches at a concrete type.
     #[debug_bus]
+    #[save(id = 2)]
     board: QuantumBoard,
 }
 
 /// The Quantum bus: address space, AVG, POKEYs, NVRAM and I/O.
-#[derive(BusDebug)]
+#[derive(BusDebug, Saveable)]
+#[save_version(1)]
+#[save_tlv]
 pub struct QuantumBoard {
+    /// The address space persists its own writable regions: work RAM and
+    /// vector RAM here.
     #[debug_map(cpu = 0)]
+    #[save(id = 1)]
     map: AddressSpace32,
     #[debug_device("AVG")]
+    #[save(id = 2)]
     avg: Avg,
     /// POKEY 1 (0x840000) and POKEY 2 (0x840020).
     #[debug_device("POKEY")]
+    #[save(id = 3)]
     pokey: [Pokey; 2],
 
     /// Color RAM: 16 entries; only the low byte (4 active bits) is used.
+    #[save(id = 4)]
     color_ram: [u8; 16],
 
     /// NVRAM (X2212): 256 low-byte cells at 0x900000.
+    #[save(id = 5)]
     nvram: [u8; 256],
 
     /// Vector display list (unrotated AVG coordinates), refreshed on AVG GO.
+    ///
+    /// Emptied by a load rather than restored, so the frame after one is drawn
+    /// from the AVG's own restored state rather than resumed part way through.
+    #[save_skip(default = Vec::with_capacity(2048))]
     display_list: Vec<VectorLine>,
 
     // Trackball: two 4-bit up/down counters read at 0x940000. Mouse motion
     // accumulates into the *_accum fields, drained per-frame into the counters.
+    #[save(id = 6)]
     track_x: RelativeCounter,
+    #[save(id = 7)]
     track_y: RelativeCounter,
 
     /// SYSTEM port (948000), active-low except bit0 (AVG halt, supplied live).
+    #[save(id = 8)]
     system_input: u8,
+    #[save(id = 9)]
     dsw0: u8,
+    #[save(id = 10)]
     dsw1: u8,
 
     // Periodic IRQ1 (HOLD_LINE: auto-acked when the CPU takes it).
+    #[save(id = 11)]
     irq_counter: u64,
+    #[save(id = 12)]
     irq_pending: bool,
+    /// Edge-detect history for the IRQ acknowledge, cleared by a load so the
+    /// first cycle after one compares against the CPU it actually has.
+    #[save_skip(default)]
     prev_irq_taken: bool,
 
+    #[save(id = 13)]
     clock: u64,
+    #[save(id = 14)]
     watchdog_count: u8,
 
+    /// Samples already mixed and waiting for the frontend to drain, which the
+    /// next frame refills.
+    #[save_skip(default = SampleRing::with_capacity(2048))]
     audio_buffer: SampleRing<i16>,
     /// Output coupling capacitor: POKEY is unipolar and idles at zero, so the
     /// DC must be tracked and removed rather than a fixed midpoint assumed.
+    #[save(id = 15)]
     dc_blocker: DcBlocker,
 }
 
@@ -850,58 +882,6 @@ impl MachineCore for QuantumSystem {
 // `MachineDebug` (debug_bus + cycle stepping) via the standalone-debug macro;
 // `BusDebug` is `#[derive]`d on the struct above (24-bit `AddressSpace32` bus).
 crate::impl_standalone_debug!(QuantumSystem);
-
-impl Saveable for QuantumSystem {
-    fn save_state(&self, w: &mut StateWriter) {
-        self.cpu.save_state(w);
-        self.board.avg.save_state(w);
-        for p in &self.board.pokey {
-            p.save_state(w);
-        }
-        self.board.dc_blocker.save_state(w);
-        w.write_bytes(self.board.map.region_data(Region::Ram));
-        w.write_bytes(self.board.map.region_data(Region::VectorRam));
-        w.write_bytes(&self.board.color_ram);
-        w.write_bytes(&self.board.nvram);
-        w.write_u8(self.board.track_x.counter());
-        w.write_u8(self.board.track_y.counter());
-        w.write_u8(self.board.system_input);
-        w.write_u8(self.board.dsw0);
-        w.write_u8(self.board.dsw1);
-        w.write_u64_le(self.board.irq_counter);
-        w.write_bool(self.board.irq_pending);
-        w.write_u64_le(self.board.clock);
-        w.write_u8(self.board.watchdog_count);
-    }
-
-    fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
-        self.cpu.load_state(r)?;
-        self.board.avg.load_state(r)?;
-        for p in &mut self.board.pokey {
-            p.load_state(r)?;
-        }
-        self.board.dc_blocker.load_state(r)?;
-        r.read_bytes_into(self.board.map.region_data_mut(Region::Ram))?;
-        r.read_bytes_into(self.board.map.region_data_mut(Region::VectorRam))?;
-        r.read_bytes_into(&mut self.board.color_ram)?;
-        r.read_bytes_into(&mut self.board.nvram)?;
-        self.board.track_x.set_counter(r.read_u8()?);
-        self.board.track_y.set_counter(r.read_u8()?);
-        self.board.system_input = r.read_u8()?;
-        self.board.dsw0 = r.read_u8()?;
-        self.board.dsw1 = r.read_u8()?;
-        self.board.irq_counter = r.read_u64_le()?;
-        self.board.irq_pending = r.read_bool()?;
-        self.board.clock = r.read_u64_le()?;
-        self.board.watchdog_count = r.read_u8()?;
-        self.board.prev_irq_taken = false;
-        self.board.display_list.clear();
-        self.board.refresh_dip_pots();
-        self.board.audio_buffer.clear();
-        self.board.dc_blocker.reset();
-        Ok(())
-    }
-}
 
 impl SaveState for QuantumSystem {
     crate::machine_save_state!();
