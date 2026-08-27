@@ -27,7 +27,7 @@ use phosphor_core::core::machine::{
     ActionRole, DipApplyTiming, DipChoice, DipOption, DipSwitchBank, Direction, InputConfigurable,
     InputControl, InputEvent, InputId, InputKind, MachineCore, SaveState,
 };
-use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
+
 use phosphor_core::core::{AccessKind, AddressSpace16};
 use phosphor_core::core::{
     Bus, BusMaster, ClockDomainName as Clk, ClockTree, DomainId, TimingConfig,
@@ -404,47 +404,76 @@ pub fn run_frame(cpu: &mut Z80, board: &mut MrdoBoard) {
     }
 }
 
-#[derive(BusDebug)]
+#[derive(BusDebug, Saveable)]
+#[save_version(1)]
+#[save_tlv]
 pub struct MrdoBoard {
+    /// The address space persists its own writable regions: the two video RAMs,
+    /// sprite RAM and work RAM here.
     #[debug_map(cpu = 0)]
+    #[save(id = 1)]
     pub(crate) main_map: AddressSpace16,
 
     // GFX ROMs + their decoded pixel caches.
+    #[save_skip]
     pub(crate) fg_rom: [u8; 0x2000],
+    #[save_skip]
     pub(crate) bg_rom: [u8; 0x2000],
+    #[save_skip]
     pub(crate) spr_rom: [u8; 0x2000],
+    #[save_skip]
     pub(crate) fg_cache: gfx::GfxCache, // 512 × 8×8 2bpp FG tiles
+    #[save_skip]
     pub(crate) bg_cache: gfx::GfxCache, // 512 × 8×8 2bpp BG tiles
+    #[save_skip]
     pub(crate) sprite_cache: gfx::GfxCache, // 128 × 16×16 2bpp sprites
 
-    // Color PROMs + the decoded RGB palette (256 char pens + 64 sprite pens).
+    /// Color PROMs + the decoded RGB palette (256 char pens + 64 sprite pens).
+    ///
+    /// Derived from the PROM rather than from anything the CPU writes, so it is
+    /// rebuilt at ROM load and is not state.
+    #[save_skip]
     pub(crate) palette_prom: [u8; 0x80],
+    #[save_skip]
     pub(crate) palette_rgb: [(u8, u8, u8); PALETTE_LEN],
 
     // Video registers: BG scroll (only the BG layer scrolls) + flipscreen.
+    #[save(id = 2)]
     pub(crate) bg_scroll_x: u8,
+    #[save(id = 3)]
     pub(crate) bg_scroll_y: u8,
+    #[save(id = 4)]
     pub(crate) flipscreen: bool,
 
     // Protection PAL16R6 (IC U001) latched output, read back at 0x9803.
+    #[save(id = 5)]
     pub(crate) pal_u001: u8,
 
     // Inputs (active-low, latched by `handle_input`) + DIP banks.
+    #[save(id = 6)]
     pub(crate) in0: u8,
+    #[save(id = 7)]
     pub(crate) in1: u8,
+    #[save(id = 8)]
     pub(crate) dsw1: u8,
+    #[save(id = 9)]
     pub(crate) dsw2: u8,
 
     // Sound: 2× SN76489 (write-only, at 0x9801/0x9802), box-filtered to the
     // output rate. `snN_clock` gates each chip's generators (chip_clock/16).
     #[debug_device("SN76489 #1")]
+    #[save(id = 10)]
     pub(crate) sn1: Sn76489a,
     #[debug_device("SN76489 #2")]
+    #[save(id = 11)]
     pub(crate) sn2: Sn76489a,
     /// The board's clock tree, as [`clock_tree`] declares it.
     #[debug_device("Clocks")]
+    #[save(id = 12)]
     pub(crate) clocks: ClockTree,
+    #[save_skip]
     pub(crate) sn1_dom: DomainId,
+    #[save_skip]
     pub(crate) sn2_dom: DomainId,
     /// Output coupling capacitor.
     ///
@@ -455,11 +484,15 @@ pub struct MrdoBoard {
     /// themselves are not modelled wrongly: a unipolar swing is what the silicon
     /// does, and the same omission accounted for twelve machines across five
     /// different sound parts before this one.
+    #[save(id = 13)]
     pub(crate) sn_coupling: DcBlocker,
+    #[save(id = 14)]
     pub(crate) audio: AudioResampler<i16>,
 
     // Timing / interrupts.
+    #[save(id = 15)]
     pub(crate) clock: u64,
+    #[save(id = 16)]
     pub(crate) vblank_irq_pending: bool,
 }
 
@@ -763,53 +796,6 @@ impl MrdoBoard {
     /// which passes it back in.
     pub fn instruction_boundaries(cpu: &Z80) -> u32 {
         u32::from(cpu.at_instruction_boundary())
-    }
-}
-
-impl Saveable for MrdoBoard {
-    fn save_state(&self, w: &mut StateWriter) {
-        w.write_bytes(self.main_map.region_data(MainRegion::BgVideoRam));
-        w.write_bytes(self.main_map.region_data(MainRegion::FgVideoRam));
-        w.write_bytes(self.main_map.region_data(MainRegion::SpriteRam));
-        w.write_bytes(self.main_map.region_data(MainRegion::WorkRam));
-        w.write_u8(self.in0);
-        w.write_u8(self.in1);
-        w.write_u8(self.dsw1);
-        w.write_u8(self.dsw2);
-        w.write_u8(self.bg_scroll_x);
-        w.write_u8(self.bg_scroll_y);
-        w.write_bool(self.flipscreen);
-        w.write_u8(self.pal_u001);
-        self.sn1.save_state(w);
-        self.sn2.save_state(w);
-        self.clocks.save_state(w);
-        self.sn_coupling.save_state(w);
-        self.audio.save_state(w);
-        w.write_u64_le(self.clock);
-        w.write_bool(self.vblank_irq_pending);
-    }
-
-    fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
-        r.read_bytes_into(self.main_map.region_data_mut(MainRegion::BgVideoRam))?;
-        r.read_bytes_into(self.main_map.region_data_mut(MainRegion::FgVideoRam))?;
-        r.read_bytes_into(self.main_map.region_data_mut(MainRegion::SpriteRam))?;
-        r.read_bytes_into(self.main_map.region_data_mut(MainRegion::WorkRam))?;
-        self.in0 = r.read_u8()?;
-        self.in1 = r.read_u8()?;
-        self.dsw1 = r.read_u8()?;
-        self.dsw2 = r.read_u8()?;
-        self.bg_scroll_x = r.read_u8()?;
-        self.bg_scroll_y = r.read_u8()?;
-        self.flipscreen = r.read_bool()?;
-        self.pal_u001 = r.read_u8()?;
-        self.sn1.load_state(r)?;
-        self.sn2.load_state(r)?;
-        self.clocks.load_state(r)?;
-        self.sn_coupling.load_state(r)?;
-        self.audio.load_state(r)?;
-        self.clock = r.read_u64_le()?;
-        self.vblank_irq_pending = r.read_bool()?;
-        Ok(())
     }
 }
 
