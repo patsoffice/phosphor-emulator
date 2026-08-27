@@ -15,7 +15,6 @@
 
 use phosphor_core::audio::DcBlocker;
 use phosphor_core::core::bus::InterruptState;
-use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::{AccessKind, AddressSpace16};
 use phosphor_core::core::{
     Bus, BusMaster, ClockDomainName as Clk, ClockTree, DomainId, TimingConfig,
@@ -24,7 +23,7 @@ use phosphor_core::cpu::m6502::M6502;
 use phosphor_core::device::ay8910::Ay8910;
 use phosphor_core::gfx::decode::{GfxCache, GfxLayout, decode_gfx};
 use phosphor_core::gfx::pal_nbit;
-use phosphor_macros::{BusDebug, MemoryRegion};
+use phosphor_macros::{BusDebug, MemoryRegion, Saveable};
 
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, PartialEq, MemoryRegion)]
@@ -249,17 +248,27 @@ impl Bus for BtimeBoard {
     }
 }
 
-#[derive(BusDebug)]
+#[derive(BusDebug, Saveable)]
+#[save_version(1)]
+#[save_tlv]
+#[save_after_load(render)]
 pub struct BtimeBoard {
+    /// Both maps hold only ROM, so what they persist is their page layout
+    /// rather than any bytes: this board keeps its memory in plain fields
+    /// below, not in the address space.
     #[debug_map(cpu = 0)]
+    #[save(id = 1)]
     pub(crate) main_map: AddressSpace16,
     #[debug_map(cpu = 1)]
+    #[save(id = 2)]
     pub(crate) sound_map: AddressSpace16,
 
     // Sound subsystem (sound CPU @ 500 kHz; two AY-3-8910 @ 1.5 MHz).
     #[debug_device("AY-3-8910 #1")]
+    #[save(id = 3)]
     ay1: Ay8910,
     #[debug_device("AY-3-8910 #2")]
+    #[save(id = 4)]
     ay2: Ay8910,
     /// The PSGs' coupling into the amplifier.
     ///
@@ -276,61 +285,95 @@ pub struct BtimeBoard {
     /// off centre. The exact capacitor is not on a schematic to hand, so the
     /// corner is the shared default, which is honest for a part whose only job
     /// is to remove an offset.
+    #[save(id = 5)]
     ay_coupling: DcBlocker,
+    #[save(id = 6)]
     sound_ram: [u8; 0x0400],
-    sound_irq: bool,        // set on main write to 0x4003, cleared on 0xA000 read
+    #[save(id = 7)]
+    sound_irq: bool, // set on main write to 0x4003, cleared on 0xA000 read
+    #[save(id = 8)]
     audio_nmi_enable: bool, // 0xC000 write bit0; ANDs with scanline bit3 -> NMI
     /// The board's clock tree, as [`clock_tree`] declares it.
     #[debug_device("Clocks")]
+    #[save(id = 9)]
     clocks: ClockTree,
+    /// A handle into the clock tree, which is itself saved.
+    #[save_skip]
     sound_dom: DomainId,
 
     // Work / video memory (kept as flat arrays, not in the AddressSpace16).
+    #[save(id = 10)]
     ram: [u8; 0x0800],
+    #[save(id = 11)]
     videoram: [u8; 0x0400],
+    #[save(id = 12)]
     colorram: [u8; 0x0400],
+    #[save(id = 13)]
     palette_ram: [u8; 16],
-    /// RGB expansion of `palette_ram` (rebuilt on every palette write and after
-    /// load_state; not itself part of the save state).
+    /// RGB expansion of `palette_ram`, rebuilt on every palette write and saved
+    /// beside the RAM it comes from rather than rebuilt after a load.
+    #[save(id = 14)]
     palette_rgb: [(u8, u8, u8); 16],
 
     // Decoded graphics (derived from ROM at load; not saved). Consumed by the
     // renderer.
-    chars: GfxCache,      // 8×8×3, 1024 tiles (gfx1)
-    sprites: GfxCache,    // 16×16×3, 256 tiles (gfx1)
-    bg_tiles: GfxCache,   // 16×16×3, 64 tiles (gfx2)
+    #[save_skip]
+    chars: GfxCache, // 8×8×3, 1024 tiles (gfx1)
+    #[save_skip]
+    sprites: GfxCache, // 16×16×3, 256 tiles (gfx1)
+    #[save_skip]
+    bg_tiles: GfxCache, // 16×16×3, 64 tiles (gfx2)
+    #[save_skip]
     bg_map: [u8; 0x0800], // background tilemap selector ROM
 
-    // Display framebuffer (native 240×240 RGB, square pixels), refreshed once per
-    // frame at the end of run_frame. Derived output, not part of the save state.
+    /// Display framebuffer (native 240×240 RGB, square pixels), refreshed once
+    /// per frame at the end of run_frame. Derived output rather than state, but
+    /// it cannot be rebuilt lazily either: `Renderable::render_frame` takes
+    /// `&self`. So a load redraws it, which is what `#[save_after_load(render)]`
+    /// on this struct is for.
+    #[save_skip]
     pub(crate) framebuffer: Vec<u8>,
 
     // DECO CPU-7 decryption state: any main-CPU write arms decryption of the
     // next opcode fetch (consumed in `bus_read`).
+    #[save(id = 15)]
     main_had_written: bool,
     /// The main CPU's SYNC pin, sampled once per cycle by `begin_main_cycle`.
     /// A reset CPU sits in Fetch, so this starts asserted. Not saved: it is
     /// re-derived from the CPU before every cycle that could read the bus.
+    #[save_skip]
     main_is_sync: bool,
 
     // I/O latches
+    #[save(id = 16)]
     pub(crate) main_irq: bool, // coin-insertion IRQ (HOLD_LINE approximation)
-    flip_screen: bool,         // 0x4002 write bit0
-    bnj_scroll0: u8,           // 0x4004 write (bit4 -> background enable)
-    sound_latch: u8,           // 0x4003 write — stored; sound CPU/IRQ deferred (§10)
+    #[save(id = 17)]
+    flip_screen: bool, // 0x4002 write bit0
+    #[save(id = 18)]
+    bnj_scroll0: u8, // 0x4004 write (bit4 -> background enable)
+    #[save(id = 19)]
+    sound_latch: u8, // 0x4003 write — stored; sound CPU/IRQ deferred (§10)
 
     // Input ports (active-low players, active-high coins) and DIP banks.
     // Mutated directly by the wrapper's `handle_input` (same-crate access, per
     // the joust.rs pattern).
+    #[save(id = 20)]
     pub(crate) p1: u8,
+    #[save(id = 21)]
     pub(crate) p2: u8,
+    #[save(id = 22)]
     pub(crate) system: u8,
+    #[save(id = 23)]
     pub(crate) dsw1: u8, // bits 0-6 are DIPs; bit 7 is the live VBLANK (injected on read)
+    #[save(id = 24)]
     pub(crate) dsw2: u8,
 
-    // Per-game configuration (identity + future variation points).
+    /// Per-game configuration (identity + future variation points), fixed at
+    /// construction.
+    #[save_skip]
     config: BtimeConfig,
 
+    #[save(id = 25)]
     clock: u64,
 }
 
@@ -924,66 +967,10 @@ impl BtimeBoard {
     }
 }
 
-impl Saveable for BtimeBoard {
-    fn save_state(&self, w: &mut StateWriter) {
-        w.write_bytes(&self.ram);
-        w.write_bytes(&self.videoram);
-        w.write_bytes(&self.colorram);
-        w.write_bytes(&self.palette_ram);
-        w.write_bytes(&self.sound_ram);
-        self.ay1.save_state(w);
-        self.ay2.save_state(w);
-        self.ay_coupling.save_state(w);
-        self.clocks.save_state(w);
-        w.write_bool(self.main_had_written);
-        w.write_bool(self.main_irq);
-        w.write_bool(self.sound_irq);
-        w.write_bool(self.audio_nmi_enable);
-        w.write_bool(self.flip_screen);
-        w.write_u8(self.bnj_scroll0);
-        w.write_u8(self.sound_latch);
-        w.write_u8(self.p1);
-        w.write_u8(self.p2);
-        w.write_u8(self.system);
-        w.write_u8(self.dsw1);
-        w.write_u8(self.dsw2);
-        w.write_u64_le(self.clock);
-    }
-
-    fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
-        r.read_bytes_into(&mut self.ram)?;
-        r.read_bytes_into(&mut self.videoram)?;
-        r.read_bytes_into(&mut self.colorram)?;
-        r.read_bytes_into(&mut self.palette_ram)?;
-        r.read_bytes_into(&mut self.sound_ram)?;
-        self.ay1.load_state(r)?;
-        self.ay2.load_state(r)?;
-        self.ay_coupling.load_state(r)?;
-        self.clocks.load_state(r)?;
-        self.main_had_written = r.read_bool()?;
-        self.main_irq = r.read_bool()?;
-        self.sound_irq = r.read_bool()?;
-        self.audio_nmi_enable = r.read_bool()?;
-        self.flip_screen = r.read_bool()?;
-        self.bnj_scroll0 = r.read_u8()?;
-        self.sound_latch = r.read_u8()?;
-        self.p1 = r.read_u8()?;
-        self.p2 = r.read_u8()?;
-        self.system = r.read_u8()?;
-        self.dsw1 = r.read_u8()?;
-        self.dsw2 = r.read_u8()?;
-        self.clock = r.read_u64_le()?;
-        // palette_rgb and the framebuffer are derived, not saved — rebuild them
-        // so a render before the next run_frame reflects the restored state.
-        self.rebuild_palette();
-        self.render();
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use phosphor_core::core::save_state::{Saveable, StateReader, StateWriter};
 
     fn board() -> BtimeBoard {
         BtimeBoard::new(BtimeConfig { name: "btime-test" })

@@ -16,7 +16,6 @@ use phosphor_core::core::machine::{
     AnalogAxisKind, DefaultBinding, Direction, InputConfigurable, InputControl, InputEvent,
     InputId, InputKind, MachineCore, MouseControl, Nvram, Profilable, SaveState,
 };
-use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
 use phosphor_core::cpu::state::M68000State;
@@ -440,20 +439,26 @@ const MARBLE_CONTROLS: &[InputControl] = &[
 // ---------------------------------------------------------------------------
 
 /// Atari Marble Madness (System 1) — the shared board plus Marble's trackballs.
-#[derive(phosphor_macros::BusDebug)]
+#[derive(phosphor_macros::BusDebug, phosphor_macros::Saveable)]
+#[save_version(1)]
+#[save_tlv]
 pub struct MarbleSystem {
     /// The 68010 is held beside the bus view over the board.
     #[debug_cpu("M68010")]
+    #[save(id = 1)]
     pub cpu: M68000,
 
     #[debug_bus]
+    #[save(id = 2)]
     pub board: AtariSystem1Board,
 
     /// Trackball counters [p1x, p1y, p2x, p2y] — free-running 8-bit counters,
     /// the trackball motion the game samples at 0xF20000.
+    #[save(id = 3)]
     trackball: [RelativeCounter; 4],
     /// Per-player 45°-rotated counter pair, latched on the even (X) read so the
     /// paired odd (Y) read sees the same snapshot — see [`Self::trackball_read`].
+    #[save(id = 4)]
     trackball_cur: [[u8; 2]; 2],
 }
 
@@ -752,30 +757,6 @@ impl InputConfigurable for MarbleSystem {
 
 impl SaveState for MarbleSystem {
     crate::machine_save_state!();
-}
-
-impl Saveable for MarbleSystem {
-    fn save_state(&self, w: &mut StateWriter) {
-        // The CPU first, which is where the board wrote it when it owned it.
-        self.cpu.save_state(w);
-        self.board.save_state(w);
-        for counter in &self.trackball {
-            w.write_u8(counter.counter());
-        }
-        w.write_bytes(&self.trackball_cur[0]);
-        w.write_bytes(&self.trackball_cur[1]);
-    }
-
-    fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
-        self.cpu.load_state(r)?;
-        self.board.load_state(r)?;
-        for counter in &mut self.trackball {
-            counter.set_counter(r.read_u8()?);
-        }
-        r.read_bytes_into(&mut self.trackball_cur[0])?;
-        r.read_bytes_into(&mut self.trackball_cur[1])?;
-        Ok(())
-    }
 }
 
 // The 2804 EEPROM is the machine's battery-backed store; the frontend persists

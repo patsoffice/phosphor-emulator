@@ -7,14 +7,13 @@ use phosphor_core::core::machine::{
     InputKind, KeyId, MachineCore, MouseControl, PadAxis, PadButton, PadControl, Renderable,
     SaveState,
 };
-use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::{AccessKind, AddressSpace16};
 use phosphor_core::core::{Bus, BusMaster, TimingConfig};
 use phosphor_core::cpu::m6502::M6502;
 use phosphor_core::cpu::state::M6502State;
 use phosphor_core::cpu::{Cpu, CpuStateTrait};
 use phosphor_core::device::pokey::Pokey;
-use phosphor_macros::{BusDebug, MemoryRegion};
+use phosphor_macros::{BusDebug, MemoryRegion, Saveable};
 
 use crate::rom_loader::{RomEntry, RomRegion};
 use crate::set_bit_active_low;
@@ -292,12 +291,18 @@ pub fn clock_tree() -> phosphor_core::core::ClockTree {
 /// Missile Command's hardware, everything the 6502 talks *to*. Held apart from
 /// the CPU so a cycle dispatches at a concrete bus rather than a trait object
 /// (see `docs/designs/concrete-bus-dispatch.md`).
-#[derive(BusDebug)]
+#[derive(BusDebug, Saveable)]
+#[save_version(1)]
+#[save_tlv]
 pub struct MissileCommandBoard {
     #[debug_device("POKEY")]
+    #[save(id = 1)]
     pokey: Pokey,
 
+    /// The address space persists its own writable regions, which here is the
+    /// single 16 KB RAM the MADSEL circuit also writes pixels into.
     #[debug_map(cpu = 0)]
+    #[save(id = 2)]
     map: AddressSpace16,
 
     // I/O registers
@@ -305,6 +310,7 @@ pub struct MissileCommandBoard {
     //   Bit 7: Right Coin    Bit 6: Center Coin   Bit 5: Left Coin
     //   Bit 4: 1P Start      Bit 3: 2P Start
     //   Bit 2-0: Cocktail fire buttons (active-low)
+    #[save(id = 3)]
     in0: u8,
     // IN1 at 0x4900 (mixed polarity)
     //   Bit 7: VBLANK (active-high, set dynamically)
@@ -314,16 +320,23 @@ pub struct MissileCommandBoard {
     //   Bit 2: Fire Left (active-low, normally 1)
     //   Bit 1: Fire Center (active-low, normally 1)
     //   Bit 0: Fire Right (active-low, normally 1)
+    #[save(id = 4)]
     in1: u8,
-    // DIP switches at 0x4A00 (pricing options)
+    // DIP switches at 0x4A00 (pricing options). Operator configuration, which
+    // survives a load the way the switches on a cabinet do.
+    #[save_skip]
     dip_switches: u8,
     // CTRLD: bit 0 of output latch (0x4800 write) — selects trackball vs switches at 0x4800 read
+    #[save(id = 5)]
     ctrld: bool,
     // Color RAM: 8 palette entries at 0x4B00-0x4B07
+    #[save(id = 6)]
     palette: [u8; 8],
 
     // Trackball counters (4-bit each, combined into one byte when CTRLD=1)
+    #[save(id = 7)]
     trackball_x: RelativeCounter,
+    #[save(id = 8)]
     trackball_y: RelativeCounter,
     // Mouse accumulator: set_analog() adds here; tick() drains ±1 per tick
     // so the 4-bit counters never skip values and the game reads correct deltas.
@@ -331,42 +344,61 @@ pub struct MissileCommandBoard {
     // IRQ state — based on /32V signal (inverted bit 5 of V counter)
     // Asserted at scanlines where 32V=0 (scanlines 0-31, 64-95, 128-159, 192-223)
     // Cleared by writing to 0x4D00 (IRQ acknowledge)
+    #[save(id = 9)]
     irq_state: bool,
 
     // MADSEL circuit: intercepts (zp,X) addressing mode instructions (opcodes with
     // low 5 bits == 0x01) and redirects bus access 5 CPU cycles later to VRAM.
     // This is how the game writes pixels — without it, the screen stays blank.
     // Timed in CPU cycles (not master ticks) so clock halving doesn't break it.
+    #[save(id = 10)]
     madsel_lastcycles: u64,
+    #[save(id = 11)]
     stall_cycles: u8, // extra cycle penalty for 3rd-bit MUSHROOM MADSEL accesses
 
     /// The 6502's SYNC pin, sampled once per cycle by `begin_cycle`. MADSEL is
     /// armed on an opcode fetch, so the bus has to know. A reset CPU sits in
     /// Fetch, so this starts asserted. Derived state: re-sampled before every
     /// cycle that can read the bus, so it is not saved.
+    #[save_skip]
     cpu_is_sync: bool,
 
     // System
+    #[save(id = 12)]
     clock: u64,
-    cpu_cycles: u64,          // incremented only when CPU actually executes
+    #[save(id = 13)]
+    cpu_cycles: u64, // incremented only when CPU actually executes
+    #[save(id = 14)]
     watchdog_frame_count: u8, // frames since last write to 0x4C00; resets machine at 8
 
-    scanline_buffer: Vec<u8>,    // 256 * 231 * 3 = 177,408 bytes (RGB24)
+    #[save_skip]
+    scanline_buffer: Vec<u8>, // 256 * 231 * 3 = 177,408 bytes (RGB24)
+    /// A load lands mid-frame, so the buffer it left behind describes a frame
+    /// that was never finished; the next `run_frame` refills it.
+    #[save_skip(default)]
     scanline_buffer_valid: bool, // true after run_frame() completes
 
+    /// Samples already mixed and waiting for the frontend to drain, which the
+    /// next frame refills.
+    #[save_skip(default = SampleRing::with_capacity(1024))]
     audio_buffer: SampleRing<i16>,
     /// The output coupling capacitor. POKEY's output is unipolar and sits at
     /// zero when idle, so it needs the DC removed rather than a fixed midpoint
     /// subtracted — see [`DcBlocker`].
+    #[save(id = 15)]
     dc_blocker: DcBlocker,
 }
 
 /// Atari Missile Command (1980): a 6502 beside the board it drives.
-#[derive(BusDebug)]
+#[derive(BusDebug, Saveable)]
+#[save_version(1)]
+#[save_tlv]
 pub struct MissileCommandSystem {
     #[debug_cpu("M6502")]
+    #[save(id = 1)]
     cpu: M6502,
     #[debug_bus]
+    #[save(id = 2)]
     pub board: MissileCommandBoard,
 }
 
@@ -979,49 +1011,6 @@ impl InputConfigurable for MissileCommandSystem {
 }
 
 crate::impl_standalone_debug!(MissileCommandSystem);
-
-impl Saveable for MissileCommandSystem {
-    fn save_state(&self, w: &mut StateWriter) {
-        self.cpu.save_state(w);
-        self.board.pokey.save_state(w);
-        self.board.dc_blocker.save_state(w);
-        w.write_bytes(self.board.map.region_data(Region::Ram));
-        w.write_u8(self.board.in0);
-        w.write_u8(self.board.in1);
-        w.write_bool(self.board.ctrld);
-        w.write_bytes(&self.board.palette);
-        self.board.trackball_x.save_state(w);
-        self.board.trackball_y.save_state(w);
-        w.write_bool(self.board.irq_state);
-        w.write_u64_le(self.board.madsel_lastcycles);
-        w.write_u8(self.board.stall_cycles);
-        w.write_u64_le(self.board.clock);
-        w.write_u64_le(self.board.cpu_cycles);
-        w.write_u8(self.board.watchdog_frame_count);
-    }
-
-    fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
-        self.cpu.load_state(r)?;
-        self.board.pokey.load_state(r)?;
-        self.board.dc_blocker.load_state(r)?;
-        r.read_bytes_into(self.board.map.region_data_mut(Region::Ram))?;
-        self.board.in0 = r.read_u8()?;
-        self.board.in1 = r.read_u8()?;
-        self.board.ctrld = r.read_bool()?;
-        r.read_bytes_into(&mut self.board.palette)?;
-        self.board.trackball_x.load_state(r)?;
-        self.board.trackball_y.load_state(r)?;
-        self.board.irq_state = r.read_bool()?;
-        self.board.madsel_lastcycles = r.read_u64_le()?;
-        self.board.stall_cycles = r.read_u8()?;
-        self.board.clock = r.read_u64_le()?;
-        self.board.cpu_cycles = r.read_u64_le()?;
-        self.board.watchdog_frame_count = r.read_u8()?;
-        self.board.scanline_buffer_valid = false;
-        self.board.audio_buffer.clear();
-        Ok(())
-    }
-}
 
 impl MachineCore for MissileCommandSystem {
     fn run_frame(&mut self) {
