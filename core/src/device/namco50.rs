@@ -1,5 +1,5 @@
 use crate::core::debug::{DebugRegister, Debuggable};
-use crate::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
+use phosphor_macros::Saveable;
 
 /// Namco 50XX custom chip — HLE (high-level emulation) of the score /
 /// protection device.
@@ -21,24 +21,38 @@ use crate::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 ///
 /// Xevious uses it only for a periodic protection check: reset, add 5, read,
 /// and verify the low byte reads back 5.
+#[derive(Saveable)]
+#[save_version(1)]
+#[save_tlv]
+#[save_after_load(clamp_indices)]
 pub struct Namco50 {
     /// Per-player running score (decimal; converted to BCD on read).
+    #[save(id = 1)]
     score: [u32; 2],
     /// High-score threshold (decimal) for the status flag / set via command 5x.
+    #[save(id = 2)]
     high_score: u32,
     /// Currently selected player (0 or 1).
-    player: usize,
+    #[save(id = 3)]
+    player: u8,
     /// True = add on the increment commands, false = subtract.
+    #[save(id = 4)]
     increment: bool,
     /// Status flags for first / interval bonus.
+    #[save(id = 5)]
     first_bonus: bool,
+    #[save(id = 6)]
     interval_bonus: bool,
     /// Read byte position, cycles 0..3 across a four-byte response.
+    #[save(id = 7)]
     read_index: u8,
     /// Remaining operand bytes for a multi-byte command (2x/3x/5x), and which
     /// command is collecting them.
+    #[save(id = 8)]
     pending_cmd: u8,
+    #[save(id = 9)]
     pending_bytes: u8,
+    #[save(id = 10)]
     pending_data: [u8; 3],
 }
 
@@ -141,11 +155,11 @@ impl Namco50 {
                 self.pending_bytes = 3;
             }
             0x4 => {} // unknown/unused
-            0x6 => self.player = usize::from(cmd == 0x68),
+            0x6 => self.player = u8::from(cmd == 0x68),
             0x7 => self.increment = cmd == 0x70,
             0x8..=0xF => {
                 let amount = increment_amount(cmd);
-                let s = &mut self.score[self.player];
+                let s = &mut self.score[self.player as usize];
                 if self.increment {
                     *s = (*s + amount) % 100_000_000;
                 } else {
@@ -154,6 +168,17 @@ impl Namco50 {
             }
             _ => unreachable!(),
         }
+    }
+
+    /// Bring the two indices back into range after a load.
+    ///
+    /// `player` selects one of two scores and `read_index` one of four response
+    /// bytes, and both are masked wherever the chip sets them, so nothing this
+    /// writer emits is out of range. The masks are here because a save is an
+    /// input, and `player` indexes an array.
+    fn clamp_indices(&mut self) {
+        self.player &= 1;
+        self.read_index &= 0x03;
     }
 
     /// Read the next response byte (50XX → main CPU via the 06XX data port).
@@ -165,7 +190,7 @@ impl Namco50 {
     }
 
     fn response_byte(&self, index: u8) -> u8 {
-        let score = self.score[self.player];
+        let score = self.score[self.player as usize];
         match index & 0x03 {
             0 => {
                 let mut flags = 0u8;
@@ -204,41 +229,6 @@ impl super::Device for Namco50 {
 impl Debuggable for Namco50 {
     fn debug_registers(&self) -> Vec<DebugRegister> {
         Vec::new()
-    }
-}
-
-impl Saveable for Namco50 {
-    fn save_state(&self, w: &mut StateWriter) {
-        w.write_u32_le(self.score[0]);
-        w.write_u32_le(self.score[1]);
-        w.write_u32_le(self.high_score);
-        w.write_u8(self.player as u8);
-        w.write_bool(self.increment);
-        w.write_bool(self.first_bonus);
-        w.write_bool(self.interval_bonus);
-        w.write_u8(self.read_index);
-        w.write_u8(self.pending_cmd);
-        w.write_u8(self.pending_bytes);
-        for b in self.pending_data {
-            w.write_u8(b);
-        }
-    }
-
-    fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
-        self.score[0] = r.read_u32_le()?;
-        self.score[1] = r.read_u32_le()?;
-        self.high_score = r.read_u32_le()?;
-        self.player = r.read_u8()? as usize & 1;
-        self.increment = r.read_bool()?;
-        self.first_bonus = r.read_bool()?;
-        self.interval_bonus = r.read_bool()?;
-        self.read_index = r.read_u8()? & 0x03;
-        self.pending_cmd = r.read_u8()?;
-        self.pending_bytes = r.read_u8()?;
-        for b in &mut self.pending_data {
-            *b = r.read_u8()?;
-        }
-        Ok(())
     }
 }
 

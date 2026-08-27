@@ -24,42 +24,75 @@ impl From<PswFlag> for u8 {
     }
 }
 
+#[derive(Saveable)]
+#[save_version(1)]
+#[save_tlv]
 pub struct I8035 {
     // Registers
+    #[save(id = 1)]
     pub a: u8,
+    #[save(id = 2)]
     pub pc: u16,
+    #[save(id = 3)]
     pub psw: u8,
+    #[save(id = 4)]
     pub f1: bool,
+    #[save(id = 5)]
     pub t: u8,
+    #[save(id = 6)]
     pub dbbb: u8,
+    #[save(id = 7)]
     pub p1: u8,
+    #[save(id = 8)]
     pub p2: u8,
 
-    // Internal RAM (sized for largest MCS-48 variant; 8035 uses 64 bytes)
+    /// Internal RAM, sized for the largest MCS-48 variant; the 8035 uses the
+    /// low 64 bytes. Saved whole rather than clipped to `ram_mask`, so the
+    /// bytes on the wire do not depend on how the chip was configured.
+    #[save(id = 9)]
     pub ram: [u8; 256],
+    #[save(id = 10)]
     pub ram_mask: u8,
 
     // Memory bank flag
+    #[save(id = 11)]
     pub a11: bool,
+    #[save(id = 12)]
     pub a11_pending: bool,
 
     // Timer/counter state
+    #[save(id = 13)]
     pub timer_enabled: bool,
+    #[save(id = 14)]
     pub counter_enabled: bool,
+    #[save(id = 15)]
     pub timer_overflow: bool,
+    #[save(id = 16)]
     pub t1_prev: bool,
+    #[save(id = 17)]
     pub prescaler: u8, // 5-bit prescaler (T increments every 32 machine cycles)
 
     // Interrupt state
+    #[save(id = 18)]
     pub int_enabled: bool,
+    #[save(id = 19)]
     pub tcnti_enabled: bool,
+    #[save(id = 20)]
     pub in_interrupt: bool,
+    #[save(id = 21)]
     pub irq_pending: bool,
+    #[save(id = 22)]
     pub timer_irq_pending: bool,
 
-    // Execution state
+    // Execution temporaries — not saved, reset to defaults on load, as on the
+    // other CPUs. A save is taken at an instruction boundary
+    // (`is_at_save_boundary`), where the only reachable states are `Fetch` and
+    // the reserved `Stopped` that nothing ever enters.
+    #[save_skip(default = ExecState::Fetch)]
     pub(crate) state: ExecState,
+    #[save_skip(default)]
     pub(crate) opcode: u8,
+    #[save_skip(default)]
     pub(crate) temp_data: u8,
 }
 
@@ -738,10 +771,7 @@ impl CpuStateTrait for I8035 {
 
 // -- Save state support ------------------------------------------------------
 
-use crate::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
-
-const STATE_TAG_FETCH: u8 = 0;
-const STATE_TAG_STOPPED: u8 = 1;
+use phosphor_macros::Saveable;
 
 impl I8035 {
     /// Returns true when the CPU is at a saveable instruction boundary.
@@ -776,85 +806,5 @@ impl DebugCpu for I8035 {
 
     fn debug_disassemble(&self, addr: u32, bytes: &[u8]) -> DisassembledInstruction {
         <Self as crate::cpu::Disassemble>::disassemble(addr, bytes)
-    }
-}
-
-impl Saveable for I8035 {
-    fn save_state(&self, w: &mut StateWriter) {
-        w.write_version(1);
-        // Registers
-        w.write_u8(self.a);
-        w.write_u16_le(self.pc);
-        w.write_u8(self.psw);
-        w.write_bool(self.f1);
-        w.write_u8(self.t);
-        w.write_u8(self.dbbb);
-        w.write_u8(self.p1);
-        w.write_u8(self.p2);
-        // Internal RAM (length-prefixed)
-        w.write_bytes(&self.ram[..(self.ram_mask as usize + 1)]);
-        w.write_u8(self.ram_mask);
-        // Memory bank
-        w.write_bool(self.a11);
-        w.write_bool(self.a11_pending);
-        // Timer/counter
-        w.write_bool(self.timer_enabled);
-        w.write_bool(self.counter_enabled);
-        w.write_bool(self.timer_overflow);
-        w.write_bool(self.t1_prev);
-        w.write_u8(self.prescaler);
-        // Interrupts
-        w.write_bool(self.int_enabled);
-        w.write_bool(self.tcnti_enabled);
-        w.write_bool(self.in_interrupt);
-        w.write_bool(self.irq_pending);
-        w.write_bool(self.timer_irq_pending);
-        // ExecState tag
-        let tag = match self.state {
-            ExecState::Stopped => STATE_TAG_STOPPED,
-            _ => STATE_TAG_FETCH,
-        };
-        w.write_u8(tag);
-    }
-
-    fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
-        r.read_version(1)?;
-        self.a = r.read_u8()?;
-        self.pc = r.read_u16_le()?;
-        self.psw = r.read_u8()?;
-        self.f1 = r.read_bool()?;
-        self.t = r.read_u8()?;
-        self.dbbb = r.read_u8()?;
-        self.p1 = r.read_u8()?;
-        self.p2 = r.read_u8()?;
-        // Internal RAM
-        let ram_data = r.read_bytes()?;
-        let len = ram_data.len().min(self.ram.len());
-        self.ram[..len].copy_from_slice(&ram_data[..len]);
-        self.ram_mask = r.read_u8()?;
-        // Memory bank
-        self.a11 = r.read_bool()?;
-        self.a11_pending = r.read_bool()?;
-        // Timer/counter
-        self.timer_enabled = r.read_bool()?;
-        self.counter_enabled = r.read_bool()?;
-        self.timer_overflow = r.read_bool()?;
-        self.t1_prev = r.read_bool()?;
-        self.prescaler = r.read_u8()?;
-        // Interrupts
-        self.int_enabled = r.read_bool()?;
-        self.tcnti_enabled = r.read_bool()?;
-        self.in_interrupt = r.read_bool()?;
-        self.irq_pending = r.read_bool()?;
-        self.timer_irq_pending = r.read_bool()?;
-        // ExecState
-        let tag = r.read_u8()?;
-        self.state = match tag {
-            STATE_TAG_STOPPED => ExecState::Stopped,
-            _ => ExecState::Fetch,
-        };
-        self.opcode = 0;
-        self.temp_data = 0;
-        Ok(())
     }
 }

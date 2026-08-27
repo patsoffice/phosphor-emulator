@@ -25,8 +25,8 @@
 pub mod disasm;
 
 use crate::core::debug::{DebugRegister, Debuggable};
-use crate::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use crate::cpu::state::CpuStateTrait;
+use phosphor_macros::Saveable;
 
 // ---------------------------------------------------------------------------
 // Variant configuration
@@ -98,33 +98,50 @@ const TIMER_PRESCALE: u8 = 32;
 // ---------------------------------------------------------------------------
 
 /// Fujitsu MB88xx 4-bit microcontroller.
+#[derive(Saveable)]
+#[save_version(2)]
+#[save_tlv]
+#[save_after_load(fit_ram)]
 pub struct Mb88xx {
     // --- Registers ---
     /// Program counter offset within page (6 bits, 0-63).
+    #[save(id = 1)]
     pub pc: u8,
     /// Page address register (4 or 5 bits depending on variant).
+    #[save(id = 2)]
     pub pa: u8,
     /// Hardware call stack (4 entries, 10-bit addresses + 3 flag bits in upper bits).
+    #[save(id = 3)]
     pub stack: [u16; 4],
     /// Stack index (0-3, points to next free slot).
+    #[save(id = 4)]
     pub si: u8,
     /// Accumulator (4 bits).
+    #[save(id = 5)]
     pub a: u8,
     /// Index register X (4 bits).
+    #[save(id = 6)]
     pub x: u8,
     /// Index register Y (4 bits).
+    #[save(id = 7)]
     pub y: u8,
     /// Status/test flag (1 bit). Used for conditional branching.
+    #[save(id = 8)]
     pub st: u8,
     /// Zero flag (1 bit). 1 = result was zero, 0 = result was not zero.
+    #[save(id = 9)]
     pub zf: u8,
     /// Carry flag (1 bit). Note: inverted sense — 1 means carry DID occur.
+    #[save(id = 10)]
     pub cf: u8,
     /// Timer overflow flag (1 bit).
+    #[save(id = 11)]
     pub vf: u8,
     /// Serial full/empty flag (1 bit).
+    #[save(id = 12)]
     pub sf: u8,
     /// Interrupt pin state (1 bit).
+    #[save(id = 13)]
     pub irq_pin: u8,
 
     // --- Peripheral control ---
@@ -136,88 +153,131 @@ pub struct Mb88xx {
     /// Bit 4-5: serial mode
     /// Bit 6: external counter enable
     /// Bit 7: internal timer enable
+    #[save(id = 14)]
     pub pio: u8,
 
     // --- Timer ---
     /// Timer high nibble (4 bits).
+    #[save(id = 15)]
     pub th: u8,
     /// Timer low nibble (4 bits).
+    #[save(id = 16)]
     pub tl: u8,
     /// Timer prescaler (counts up to TIMER_PRESCALE).
+    #[save(id = 17)]
     pub tp: u8,
     /// External counter pin state.
+    #[save(id = 18)]
     pub ctr: u8,
 
     // --- Serial ---
     /// Serial buffer (4 bits).
+    #[save(id = 19)]
     pub sb: u8,
     /// Serial bit count.
+    #[save(id = 20)]
     pub sb_count: u16,
 
     // --- O port ---
     /// O port internal output register (8 bits, PLA-mapped or direct).
     /// Updated by write_pla (OUTO instruction). Equivalent to MAME's m_o_output.
+    #[save(id = 21)]
     pub o_latch: u8,
     /// Shared external O port register. Updated asynchronously from o_latch
     /// after each execute_cycle, matching MAME's m_portO which is updated
     /// via O_w_sync between scheduler timeslices. Z80 reads/writes go through
     /// this register. K port reads also use this in dynamic_k mode.
+    #[save(id = 22)]
     pub port_o: u8,
 
     // --- Interrupt state ---
     /// Pending interrupt causes (bit flags).
+    #[save(id = 23)]
     pub pending_irq: u8,
     /// Currently inside an IRQ handler.
+    #[save(id = 24)]
     pub in_irq: bool,
 
     // --- Internal memory ---
-    /// Program ROM (1024 or 2048 bytes).
+    /// Program ROM (1024 or 2048 bytes). Put back by whoever loaded it.
+    #[save_skip]
     rom: Vec<u8>,
     /// Data RAM (64 or 128 nibbles, stored as bytes with upper 4 bits unused).
+    ///
+    /// A `Vec<u8>` field takes whatever length the file holds, so
+    /// `#[save_after_load(fit_ram)]` resizes it back to the variant's, which is
+    /// what the old impl's `len.min()` did on the way in.
+    #[save(id = 25)]
     ram: Vec<u8>,
 
     // --- Configuration ---
-    /// Chip variant.
+    /// Chip variant. How the part is wired, fixed at construction.
+    #[save_skip]
     variant: Mb88xxVariant,
     /// ROM address mask.
+    #[save_skip]
     rom_mask: u16,
     /// RAM address mask.
+    #[save_skip]
     ram_mask: u8,
     /// PA register mask.
+    #[save_skip]
     pa_mask: u8,
 
     // --- I/O port callbacks (external state set by wrapper) ---
     /// K port input (4 bits, active-low, set externally).
+    #[save(id = 26)]
     pub k_input: u8,
     /// R port inputs (4 × 4 bits, set externally, read by firmware).
+    #[save(id = 27)]
     pub r_input: [u8; 4],
     /// R port outputs (4 × 4 bits, written by firmware, read externally).
+    #[save(id = 28)]
     pub r_output: [u8; 4],
     /// P port output (4 bits, written by firmware).
+    #[save(id = 29)]
     pub p_output: u8,
 
     /// Serial input bit (set externally).
+    #[save(id = 30)]
     pub si_input: u8,
     /// Serial output bit (written by firmware).
+    #[save(id = 31)]
     pub so_output: u8,
 
     /// R/W input for dynamic K port mode (set externally by 06XX).
     /// When `dynamic_k` is true, INK computes K = (rw_input << 3) | (o_latch & 0x07)
     /// instead of reading the pre-set k_input, matching MAME's K_r() callback
     /// which reads m_portO (= o_latch) at the moment the MCU accesses K.
+    #[save_skip]
     pub rw_input: u8,
     /// When true, INK reads K dynamically from rw_input and o_latch.
     /// This matches the 51XX hardware wiring where K3=R/W and K2-K0=portO.
+    ///
+    /// How the part is wired, like `variant`, so it comes from construction
+    /// rather than from the file.
+    #[save_skip]
     pub dynamic_k: bool,
 
     // --- Execution state ---
     /// Whether we are in cycle 2 of a 2-cycle instruction.
+    #[save(id = 32)]
     second_cycle: bool,
     /// Opcode being executed (for 2-cycle instructions).
+    #[save(id = 33)]
     pending_opcode: u8,
 }
 
 impl Mb88xx {
+    /// Resize the data RAM back to this variant's, after a load.
+    ///
+    /// The RAM is indexed through `ram_mask`, which comes from the variant and
+    /// not from the file, so a file holding a different variant's RAM would
+    /// otherwise leave the two disagreeing about how big it is.
+    fn fit_ram(&mut self) {
+        self.ram.resize(self.variant.ram_size(), 0);
+    }
+
     pub fn new(variant: Mb88xxVariant) -> Self {
         Self {
             pc: 0,
@@ -1212,102 +1272,5 @@ impl CpuStateTrait for Mb88xx {
 impl Debuggable for Mb88xx {
     fn debug_registers(&self) -> Vec<DebugRegister> {
         self.snapshot().debug_registers()
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Save state
-// ---------------------------------------------------------------------------
-
-const SAVE_VERSION: u8 = 2;
-
-impl Saveable for Mb88xx {
-    fn save_state(&self, w: &mut StateWriter) {
-        w.write_version(SAVE_VERSION);
-        w.write_u8(self.pc);
-        w.write_u8(self.pa);
-        for &s in &self.stack {
-            w.write_u16_le(s);
-        }
-        w.write_u8(self.si);
-        w.write_u8(self.a);
-        w.write_u8(self.x);
-        w.write_u8(self.y);
-        w.write_u8(self.st);
-        w.write_u8(self.zf);
-        w.write_u8(self.cf);
-        w.write_u8(self.vf);
-        w.write_u8(self.sf);
-        w.write_u8(self.irq_pin);
-        w.write_u8(self.pio);
-        w.write_u8(self.th);
-        w.write_u8(self.tl);
-        w.write_u8(self.tp);
-        w.write_u8(self.ctr);
-        w.write_u8(self.sb);
-        w.write_u16_le(self.sb_count);
-        w.write_u8(self.o_latch);
-        w.write_u8(self.port_o);
-        w.write_u8(self.pending_irq);
-        w.write_bool(self.in_irq);
-        w.write_bytes(&self.ram);
-        w.write_u8(self.k_input);
-        for &r in &self.r_input {
-            w.write_u8(r);
-        }
-        for &r in &self.r_output {
-            w.write_u8(r);
-        }
-        w.write_u8(self.p_output);
-        w.write_u8(self.si_input);
-        w.write_u8(self.so_output);
-        w.write_bool(self.second_cycle);
-        w.write_u8(self.pending_opcode);
-    }
-
-    fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
-        r.read_version(SAVE_VERSION)?;
-        self.pc = r.read_u8()?;
-        self.pa = r.read_u8()?;
-        for s in &mut self.stack {
-            *s = r.read_u16_le()?;
-        }
-        self.si = r.read_u8()?;
-        self.a = r.read_u8()?;
-        self.x = r.read_u8()?;
-        self.y = r.read_u8()?;
-        self.st = r.read_u8()?;
-        self.zf = r.read_u8()?;
-        self.cf = r.read_u8()?;
-        self.vf = r.read_u8()?;
-        self.sf = r.read_u8()?;
-        self.irq_pin = r.read_u8()?;
-        self.pio = r.read_u8()?;
-        self.th = r.read_u8()?;
-        self.tl = r.read_u8()?;
-        self.tp = r.read_u8()?;
-        self.ctr = r.read_u8()?;
-        self.sb = r.read_u8()?;
-        self.sb_count = r.read_u16_le()?;
-        self.o_latch = r.read_u8()?;
-        self.port_o = r.read_u8()?;
-        self.pending_irq = r.read_u8()?;
-        self.in_irq = r.read_bool()?;
-        let ram_data = r.read_bytes()?;
-        let len = ram_data.len().min(self.ram.len());
-        self.ram[..len].copy_from_slice(&ram_data[..len]);
-        self.k_input = r.read_u8()?;
-        for ri in &mut self.r_input {
-            *ri = r.read_u8()?;
-        }
-        for ro in &mut self.r_output {
-            *ro = r.read_u8()?;
-        }
-        self.p_output = r.read_u8()?;
-        self.si_input = r.read_u8()?;
-        self.so_output = r.read_u8()?;
-        self.second_cycle = r.read_bool()?;
-        self.pending_opcode = r.read_u8()?;
-        Ok(())
     }
 }
