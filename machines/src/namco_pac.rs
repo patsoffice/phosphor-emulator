@@ -4,7 +4,7 @@ use phosphor_core::core::machine::{
     DipApplyTiming, DipChoice, DipOption, DipSwitchBank, Direction, InputControl, InputId,
     InputKind,
 };
-use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
+
 use phosphor_core::core::watchpoint::DebugAccessSource;
 use phosphor_core::core::{AccessKind, AddressSpace16};
 use phosphor_core::core::{Bus, BusMaster, TimingConfig};
@@ -12,7 +12,7 @@ use phosphor_core::cpu::z80::Z80;
 use phosphor_core::device::namco_wsg::NamcoWsg;
 use phosphor_core::gfx;
 use phosphor_core::gfx::decode::{GfxLayout, decode_gfx};
-use phosphor_macros::{BusDebug, DebugTrace, MemoryRegion};
+use phosphor_macros::{BusDebug, DebugTrace, MemoryRegion, Saveable};
 
 // ---------------------------------------------------------------------------
 // Memory map region IDs (shared across all Namco Pac-Man hardware games)
@@ -482,52 +482,81 @@ impl Bus for NamcoPacBoard {
 /// `cpu.execute_cycle(&mut bus, ..)` borrow-check without a raw-pointer split,
 /// so bus dispatch monomorphises at a concrete type instead of going through
 /// `&mut dyn Bus` on every access.
-#[derive(BusDebug, DebugTrace)]
+#[derive(BusDebug, DebugTrace, Saveable)]
+#[save_version(1)]
+#[save_tlv]
 pub struct NamcoPacBoard {
+    /// The address space persists its own writable regions: video RAM, colour
+    /// RAM and work RAM here.
     #[debug_map(cpu = 0)]
+    #[save(id = 1)]
     pub(crate) map: AddressSpace16,
 
+    #[save(id = 2)]
     pub(crate) sprite_coords: [u8; 0x10], // 0x5060-0x506F: sprite X/Y positions
 
     // Sound
     #[debug_device("NamcoWSG")]
+    #[save(id = 3)]
     pub(crate) wsg: NamcoWsg,
 
     // Pre-decoded GFX caches (from GFX ROM)
+    #[save_skip]
     pub(crate) tile_cache: gfx::GfxCache,
+    #[save_skip]
     pub(crate) sprite_cache: gfx::GfxCache,
 
-    // PROMs
+    // PROMs, loaded from ROM
+    #[save_skip]
     pub(crate) palette_prom: [u8; 32],
+    #[save_skip]
     pub(crate) color_lut_prom: [u8; 256],
 
-    // Pre-computed palette (32 RGB entries from PROM resistor weighting)
+    /// Pre-computed palette (32 RGB entries from PROM resistor weighting).
+    ///
+    /// Derived from the PROM rather than from anything the CPU writes, so it is
+    /// rebuilt at ROM load and is not state. Unlike the boards whose palette
+    /// lives in RAM.
+    #[save_skip]
     pub(crate) palette_rgb: [(u8, u8, u8); 32],
 
     // Scanline-rendered framebuffer (288 x 224 x RGB24 = 193,536 bytes).
     // Native orientation, populated incrementally during run_frame().
+    #[save_skip]
     pub(crate) scanline_buffer: Vec<u8>,
 
     // I/O state (active-low: 0xFF = all released)
+    #[save(id = 4)]
     pub(crate) in0: u8,
+    #[save(id = 5)]
     pub(crate) in1: u8,
+    /// Operator configuration, as it was before: not part of the snapshot.
+    #[save_skip]
     pub(crate) dip_switches: u8,
 
     // 74LS259 addressable latch outputs
+    #[save(id = 6)]
     pub(crate) irq_enabled: bool,
+    #[save(id = 7)]
     pub(crate) sound_enabled: bool,
+    #[save(id = 8)]
     pub(crate) flip_screen: bool,
 
     // Interrupt
+    #[save(id = 9)]
     pub(crate) interrupt_vector: u8,
+    #[save(id = 10)]
     pub(crate) vblank_irq_pending: bool,
 
     // Timing
+    #[save(id = 11)]
     pub(crate) clock: u64,
+    #[save(id = 12)]
     pub(crate) watchdog_counter: u32,
 
     // Debug event ring (observer state — never saved in save states)
     #[debug_events]
+    #[save_skip]
     pub(crate) debug_trace: DebugTraceBuffer,
 }
 
@@ -1029,43 +1058,6 @@ impl NamcoPacBoard {
         self.map.region_data_mut(Region::Ram).fill(0);
         self.sprite_coords = [0; 0x10];
         self.scanline_buffer.fill(0);
-    }
-}
-
-impl Saveable for NamcoPacBoard {
-    fn save_state(&self, w: &mut StateWriter) {
-        w.write_bytes(self.map.region_data(Region::VideoRam));
-        w.write_bytes(self.map.region_data(Region::ColorRam));
-        w.write_bytes(self.map.region_data(Region::Ram));
-        w.write_bytes(&self.sprite_coords);
-        self.wsg.save_state(w);
-        w.write_u8(self.in0);
-        w.write_u8(self.in1);
-        w.write_bool(self.irq_enabled);
-        w.write_bool(self.sound_enabled);
-        w.write_bool(self.flip_screen);
-        w.write_u8(self.interrupt_vector);
-        w.write_bool(self.vblank_irq_pending);
-        w.write_u64_le(self.clock);
-        w.write_u32_le(self.watchdog_counter);
-    }
-
-    fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
-        r.read_bytes_into(self.map.region_data_mut(Region::VideoRam))?;
-        r.read_bytes_into(self.map.region_data_mut(Region::ColorRam))?;
-        r.read_bytes_into(self.map.region_data_mut(Region::Ram))?;
-        r.read_bytes_into(&mut self.sprite_coords)?;
-        self.wsg.load_state(r)?;
-        self.in0 = r.read_u8()?;
-        self.in1 = r.read_u8()?;
-        self.irq_enabled = r.read_bool()?;
-        self.sound_enabled = r.read_bool()?;
-        self.flip_screen = r.read_bool()?;
-        self.interrupt_vector = r.read_u8()?;
-        self.vblank_irq_pending = r.read_bool()?;
-        self.clock = r.read_u64_le()?;
-        self.watchdog_counter = r.read_u32_le()?;
-        Ok(())
     }
 }
 

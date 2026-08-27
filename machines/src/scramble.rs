@@ -27,7 +27,7 @@ use phosphor_core::core::machine::{
     ActionRole, DipApplyTiming, DipChoice, DipOption, DipSwitchBank, Direction, InputConfigurable,
     InputControl, InputEvent, InputId, InputKind, MachineCore, Nvram, Profilable, SaveState,
 };
-use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
+
 use phosphor_core::core::{AccessKind, AddressSpace16};
 use phosphor_core::core::{
     Bus, BusMaster, ClockDomainName as Clk, ClockTree, DomainId, TimingConfig,
@@ -35,7 +35,7 @@ use phosphor_core::core::{
 use phosphor_core::cpu::z80::Z80;
 use phosphor_core::cpu::{Cpu, CpuStateTrait};
 use phosphor_core::device::{I8255, KonamiSound};
-use phosphor_macros::{BusDebug, DebugTrace, MemoryRegion};
+use phosphor_macros::{BusDebug, DebugTrace, MemoryRegion, Saveable};
 
 use crate::galaxian_video::{self, GalaxianVideo, GfxBankMode};
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
@@ -171,41 +171,65 @@ pub fn run_frame(cpu: &mut Z80, board: &mut ScrambleBoard) {
 }
 
 /// Scramble hardware base: main Z80 + Galaxian-derived video + Konami sound.
-#[derive(BusDebug, DebugTrace)]
+#[derive(BusDebug, DebugTrace, Saveable)]
+#[save_version(1)]
+#[save_tlv]
 pub struct ScrambleBoard {
+    /// The address space persists its own writable regions: work RAM, video RAM
+    /// and object RAM here.
     #[debug_map(cpu = 0)]
+    #[save(id = 1)]
     pub(crate) map: AddressSpace16,
 
+    #[save(id = 2)]
     pub(crate) video: GalaxianVideo,
 
     #[debug_device("Konami Sound")]
+    #[save(id = 3)]
     pub(crate) sound: KonamiSound,
 
     // Input ports (active-low: 0xFF = nothing pressed). DIP bits share them.
+    #[save(id = 4)]
     pub(crate) in0: u8,
+    #[save(id = 5)]
     pub(crate) in1: u8,
+    #[save(id = 6)]
     pub(crate) in2: u8,
+    #[save(id = 7)]
     ppi0: I8255, // routes IN0/IN1/IN2 to the CPU
 
+    /// Which variant of the hardware this is, fixed at construction.
+    #[save_skip]
     pub(crate) hw: Hw,
+    #[save(id = 8)]
     pub(crate) nmi_enabled: bool,
+    #[save(id = 9)]
     pub(crate) vblank_nmi_pending: bool,
 
     // "The End"/Scramble protection (a PAL on ppi1 port C): writes shift a
     // nibble into a state register; an opcode nibble computes the result the
     // game reads back on port C and on IN2 bits 5/7.
+    #[save(id = 10)]
     protection_state: u32,
+    #[save(id = 11)]
     protection_result: u8,
 
+    #[save(id = 12)]
     pub(crate) clock: u64,
     /// The board's clock tree, as [`clock_tree`] declares it. Only the sound
     /// domain is stepped; the rest is the derivation it rides on.
     #[debug_device("Clocks")]
+    #[save(id = 13)]
     clocks: ClockTree,
+    #[save_skip]
     sound_dom: DomainId,
+    /// Kept out of the save, as it was before: the watchdog is a countdown to a
+    /// reset, and a load restarting it is the safer of the two.
+    #[save_skip]
     watchdog_counter: u32,
 
     #[debug_events]
+    #[save_skip]
     pub(crate) debug_trace: DebugTraceBuffer,
 }
 
@@ -680,45 +704,6 @@ impl ScrambleBoard {
             0xf => self.protection_result = ((num1 - num2).max(0) as u8) << 4,
             _ => {}
         }
-    }
-}
-
-impl Saveable for ScrambleBoard {
-    fn save_state(&self, w: &mut StateWriter) {
-        w.write_bytes(self.map.region_data(Region::Ram));
-        w.write_bytes(self.map.region_data(Region::VideoRam));
-        w.write_bytes(self.map.region_data(Region::ObjRam));
-        self.video.save_state(w);
-        self.sound.save_state(w);
-        self.ppi0.save_state(w);
-        w.write_u8(self.in0);
-        w.write_u8(self.in1);
-        w.write_u8(self.in2);
-        w.write_bool(self.nmi_enabled);
-        w.write_bool(self.vblank_nmi_pending);
-        w.write_u32_le(self.protection_state);
-        w.write_u8(self.protection_result);
-        w.write_u64_le(self.clock);
-        self.clocks.save_state(w);
-    }
-
-    fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
-        r.read_bytes_into(self.map.region_data_mut(Region::Ram))?;
-        r.read_bytes_into(self.map.region_data_mut(Region::VideoRam))?;
-        r.read_bytes_into(self.map.region_data_mut(Region::ObjRam))?;
-        self.video.load_state(r)?;
-        self.sound.load_state(r)?;
-        self.ppi0.load_state(r)?;
-        self.in0 = r.read_u8()?;
-        self.in1 = r.read_u8()?;
-        self.in2 = r.read_u8()?;
-        self.nmi_enabled = r.read_bool()?;
-        self.vblank_nmi_pending = r.read_bool()?;
-        self.protection_state = r.read_u32_le()?;
-        self.protection_result = r.read_u8()?;
-        self.clock = r.read_u64_le()?;
-        self.clocks.load_state(r)?;
-        Ok(())
     }
 }
 

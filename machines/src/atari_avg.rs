@@ -3,12 +3,12 @@ use phosphor_core::core::TimingConfig;
 use phosphor_core::core::debug_trace::{DebugEvent, DebugEventKind, DebugTraceBuffer};
 use phosphor_core::core::display::display_settings;
 use phosphor_core::core::machine::Renderable;
-use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
+
 use phosphor_core::core::watchpoint::DebugAccessSource;
 use phosphor_core::cpu::m6502::M6502;
 use phosphor_core::device::avg::{Avg, VectorMemory};
 use phosphor_core::device::dvg::{VectorLine, raster_size_for_field};
-use phosphor_macros::{BusDebug, DebugTrace, MemoryRegion};
+use phosphor_macros::{BusDebug, DebugTrace, MemoryRegion, Saveable};
 
 use crate::atari_dvg::rasterize_vectors;
 
@@ -80,27 +80,42 @@ const AVG_CYCLES_PER_CPU_CYCLE: u32 = 8;
 ///
 /// Each game provides its own memory map, I/O decode, and ROM definitions
 /// via a thin wrapper struct that owns this board and implements `Bus`.
-#[derive(BusDebug, DebugTrace)]
+#[derive(BusDebug, DebugTrace, Saveable)]
+#[save_version(1)]
+#[save_tlv]
 pub struct AtariAvgBoard {
     #[debug_device("AVG")]
+    #[save(id = 1)]
     pub(crate) avg: Avg,
 
+    /// The address space persists its own writable regions: RAM, colour RAM and
+    /// vector RAM here.
     #[debug_map(cpu = 0)]
+    #[save(id = 2)]
     pub(crate) map: AddressSpace16,
 
     // IRQ timing (250 Hz periodic)
+    #[save(id = 3)]
     pub(crate) clock: u64,
+    #[save(id = 4)]
     pub(crate) irq_counter: u64,
+    #[save(id = 5)]
     pub(crate) irq_pending: bool,
 
     // Watchdog (resets if not written within 8 frames)
+    #[save(id = 6)]
     pub(crate) watchdog_frame_count: u8,
 
-    // Vector display (unrotated AVG coordinates)
+    /// Vector display (unrotated AVG coordinates).
+    ///
+    /// Cleared by a load: the frame is redrawn from the restored generator
+    /// state rather than resumed part way through.
+    #[save_skip(default)]
     pub(crate) display_list: Vec<VectorLine>,
 
     // Debug event ring (observer state — never saved in save states)
     #[debug_events]
+    #[save_skip]
     pub(crate) debug_trace: DebugTraceBuffer,
 }
 
@@ -286,32 +301,6 @@ impl AtariAvgBoard {
     /// lives on the machine, which passes it back in.
     pub fn instruction_boundaries(cpu: &M6502) -> u32 {
         u32::from(cpu.at_instruction_boundary())
-    }
-}
-
-impl Saveable for AtariAvgBoard {
-    fn save_state(&self, w: &mut StateWriter) {
-        self.avg.save_state(w);
-        w.write_bytes(self.map.region_data(Region::Ram));
-        w.write_bytes(self.map.region_data(Region::ColorRam));
-        w.write_bytes(self.map.region_data(Region::VectorRam));
-        w.write_u64_le(self.clock);
-        w.write_u64_le(self.irq_counter);
-        w.write_bool(self.irq_pending);
-        w.write_u8(self.watchdog_frame_count);
-    }
-
-    fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
-        self.avg.load_state(r)?;
-        r.read_bytes_into(self.map.region_data_mut(Region::Ram))?;
-        r.read_bytes_into(self.map.region_data_mut(Region::ColorRam))?;
-        r.read_bytes_into(self.map.region_data_mut(Region::VectorRam))?;
-        self.clock = r.read_u64_le()?;
-        self.irq_counter = r.read_u64_le()?;
-        self.irq_pending = r.read_bool()?;
-        self.watchdog_frame_count = r.read_u8()?;
-        self.display_list.clear();
-        Ok(())
     }
 }
 

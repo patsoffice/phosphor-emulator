@@ -29,7 +29,7 @@ use phosphor_core::core::machine::{
     ActionRole, DipApplyTiming, DipChoice, DipOption, DipSwitchBank, Direction, InputConfigurable,
     InputControl, InputEvent, InputId, InputKind, MachineCore, Nvram, Profilable, SaveState,
 };
-use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
+
 use phosphor_core::core::watchpoint::DebugAccessSource;
 use phosphor_core::core::{AccessKind, AddressSpace16};
 use phosphor_core::core::{Bus, BusMaster, TimingConfig};
@@ -37,7 +37,7 @@ use phosphor_core::cpu::state::Z80State;
 use phosphor_core::cpu::z80::Z80;
 use phosphor_core::cpu::{Cpu, CpuStateTrait};
 use phosphor_core::device::GalaxianSound;
-use phosphor_macros::{BusDebug, DebugTrace, MemoryRegion};
+use phosphor_macros::{BusDebug, DebugTrace, MemoryRegion, Saveable};
 
 use crate::galaxian_video::{self, GalaxianVideo, GfxBankMode};
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
@@ -206,38 +206,56 @@ fn step_cycle<B: GalaxianBus>(cpu: &mut Z80, bus: &mut B) {
 /// The board is everything the Z80 talks *to* — and, since every game on it
 /// decodes the same way, it implements [`Bus`] itself. The CPU lives on the
 /// game wrapper.
-#[derive(BusDebug, DebugTrace)]
+#[derive(BusDebug, DebugTrace, Saveable)]
+#[save_version(1)]
+#[save_tlv]
 pub struct GalaxianBoard {
+    /// The address space persists its own writable regions: work RAM, video RAM
+    /// and object RAM here.
     #[debug_map(cpu = 0)]
+    #[save(id = 1)]
     pub(crate) map: AddressSpace16,
 
+    #[save(id = 2)]
     pub(crate) video: GalaxianVideo,
 
     #[debug_device("Galaxian Sound")]
+    #[save(id = 3)]
     pub(crate) sound: GalaxianSound,
 
     // Input ports (active-high: 0x00 = nothing pressed). IN2 is DIP-only.
+    #[save(id = 4)]
     pub(crate) in0: u8,
+    #[save(id = 5)]
     pub(crate) in1: u8,
+    #[save(id = 6)]
     pub(crate) in2: u8,
 
     // 74LS259 latch output: NMI enable (gates the VBLANK NMI).
+    #[save(id = 7)]
     pub(crate) irq_enabled: bool,
 
     // VBLANK NMI latch (edge-triggered, gated by irq_enabled).
+    #[save(id = 8)]
     pub(crate) vblank_nmi_pending: bool,
 
-    // Memory-map layout: base Galaxian (false) puts RAM/I/O at 0x4000-0x7fff;
-    // the Moon Cresta layout (true) shifts them to 0x8000-0xbfff and moves a
-    // couple of I/O lines (GFX bank latch + IRQ-enable).
+    /// Memory-map layout: base Galaxian (false) puts RAM/I/O at 0x4000-0x7fff;
+    /// the Moon Cresta layout (true) shifts them to 0x8000-0xbfff and moves a
+    /// couple of I/O lines (GFX bank latch + IRQ-enable).
+    ///
+    /// How the board is wired, fixed when it is built.
+    #[save_skip]
     pub(crate) mooncrst_map: bool,
 
     // Timing
+    #[save(id = 9)]
     pub(crate) clock: u64,
+    #[save(id = 10)]
     pub(crate) watchdog_counter: u32,
 
     // Debug event ring (observer state — never saved).
     #[debug_events]
+    #[save_skip]
     pub(crate) debug_trace: DebugTraceBuffer,
 }
 
@@ -639,41 +657,6 @@ impl GalaxianBoard {
     /// which passes it back in.
     pub fn instruction_boundaries(cpu: &Z80) -> u32 {
         u32::from(cpu.at_instruction_boundary())
-    }
-}
-
-impl Saveable for GalaxianBoard {
-    fn save_state(&self, w: &mut StateWriter) {
-        // The CPU is saved by the machine, which owns it.
-        w.write_bytes(self.map.region_data(Region::Ram));
-        w.write_bytes(self.map.region_data(Region::VideoRam));
-        w.write_bytes(self.map.region_data(Region::ObjRam));
-        self.video.save_state(w);
-        self.sound.save_state(w);
-        w.write_u8(self.in0);
-        w.write_u8(self.in1);
-        w.write_u8(self.in2);
-        w.write_bool(self.irq_enabled);
-        w.write_bool(self.vblank_nmi_pending);
-        w.write_u64_le(self.clock);
-        w.write_u32_le(self.watchdog_counter);
-    }
-
-    fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
-        // The CPU is loaded by the machine, which owns it.
-        r.read_bytes_into(self.map.region_data_mut(Region::Ram))?;
-        r.read_bytes_into(self.map.region_data_mut(Region::VideoRam))?;
-        r.read_bytes_into(self.map.region_data_mut(Region::ObjRam))?;
-        self.video.load_state(r)?;
-        self.sound.load_state(r)?;
-        self.in0 = r.read_u8()?;
-        self.in1 = r.read_u8()?;
-        self.in2 = r.read_u8()?;
-        self.irq_enabled = r.read_bool()?;
-        self.vblank_nmi_pending = r.read_bool()?;
-        self.clock = r.read_u64_le()?;
-        self.watchdog_counter = r.read_u32_le()?;
-        Ok(())
     }
 }
 
@@ -1136,6 +1119,7 @@ crate::register_machine!(GalaxianSystem, "galaxian", &["galaxian"], GALAXIAN_CON
 mod tests {
     use super::*;
     use phosphor_core::core::machine::DipSwitches;
+    use phosphor_core::core::save_state::{Saveable as _, StateReader, StateWriter};
 
     #[test]
     fn memory_map_mirrors_fold_to_one_backing() {

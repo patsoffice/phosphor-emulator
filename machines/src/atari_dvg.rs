@@ -2,7 +2,7 @@ use phosphor_core::core::AddressSpace16;
 use phosphor_core::core::debug_trace::{DebugEvent, DebugEventKind, DebugTraceBuffer};
 use phosphor_core::core::display::{DisplaySettings, display_settings};
 use phosphor_core::core::machine::Renderable;
-use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
+
 use phosphor_core::core::watchpoint::DebugAccessSource;
 use phosphor_core::core::{Bus, BusMaster, TimingConfig};
 use phosphor_core::cpu::m6502::M6502;
@@ -10,7 +10,7 @@ use phosphor_core::device::dvg::{
     BEAM_CUTOFF_SIGMAS, Dvg, MIN_CYCLES_PER_UNIT, MIN_SIGMA_PIXELS, VectorLine, beam_sigma_units,
     halation_sigma_units, raster_size_for_field,
 };
-use phosphor_macros::{BusDebug, DebugTrace, MemoryRegion};
+use phosphor_macros::{BusDebug, DebugTrace, MemoryRegion, Saveable};
 
 // ---------------------------------------------------------------------------
 // Memory regions (shared by Asteroids, Asteroids Deluxe, Lunar Lander)
@@ -107,23 +107,35 @@ pub fn run_frame<B: AtariDvgBus>(cpu: &mut M6502, bus: &mut B) {
 ///
 /// Each game provides its own memory map, I/O decode, and ROM definitions
 /// via a thin wrapper struct that owns this board and implements `Bus`.
-#[derive(BusDebug, DebugTrace)]
+#[derive(BusDebug, DebugTrace, Saveable)]
+#[save_version(1)]
+#[save_tlv]
 pub struct AtariDvgBoard {
     #[debug_device("DVG")]
+    #[save(id = 1)]
     pub(crate) dvg: Dvg,
 
+    /// The address space persists its own writable regions: RAM and vector RAM
+    /// here.
     #[debug_map(cpu = 0)]
+    #[save(id = 2)]
     pub(crate) map: AddressSpace16,
 
     // NMI timing
+    #[save(id = 3)]
     pub(crate) clock: u64,
+    #[save(id = 4)]
     pub(crate) nmi_counter: u64,
+    #[save(id = 5)]
     pub(crate) nmi_pending: bool,
 
     // Watchdog (resets if not written within 8 frames)
+    #[save(id = 6)]
     pub(crate) watchdog_frame_count: u8,
 
-    // Vector display
+    /// Vector display, cleared by a load: the frame is redrawn from the
+    /// restored generator state rather than resumed part way through.
+    #[save_skip(default)]
     pub(crate) display_list: Vec<VectorLine>,
 
     // DVG vector ROM placement in the 8 KB DVG address space.
@@ -132,11 +144,14 @@ pub struct AtariDvgBoard {
     //   Asteroids:        offset 0x1000, size 0x0800 (2 KB)
     //   Asteroids Deluxe: offset 0x0800, size 0x1000 (4 KB)
     //   Lunar Lander:     offset 0x0800, size 0x1800 (6 KB)
+    #[save_skip]
     vrom_dvg_offset: usize,
+    #[save_skip]
     vrom_size: usize,
 
     // Debug event ring (observer state — never saved in save states)
     #[debug_events]
+    #[save_skip]
     pub(crate) debug_trace: DebugTraceBuffer,
 }
 
@@ -283,32 +298,6 @@ impl AtariDvgBoard {
     /// The CPU lives on the machine, which passes it back in.
     pub fn instruction_boundaries(cpu: &M6502) -> u32 {
         u32::from(cpu.at_instruction_boundary())
-    }
-}
-
-impl Saveable for AtariDvgBoard {
-    fn save_state(&self, w: &mut StateWriter) {
-        // The CPU is saved by the machine, which owns it.
-        self.dvg.save_state(w);
-        w.write_bytes(self.map.region_data(Region::Ram));
-        w.write_bytes(self.map.region_data(Region::VectorRam));
-        w.write_u64_le(self.clock);
-        w.write_u64_le(self.nmi_counter);
-        w.write_bool(self.nmi_pending);
-        w.write_u8(self.watchdog_frame_count);
-    }
-
-    fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
-        // The CPU is loaded by the machine, which owns it.
-        self.dvg.load_state(r)?;
-        r.read_bytes_into(self.map.region_data_mut(Region::Ram))?;
-        r.read_bytes_into(self.map.region_data_mut(Region::VectorRam))?;
-        self.clock = r.read_u64_le()?;
-        self.nmi_counter = r.read_u64_le()?;
-        self.nmi_pending = r.read_bool()?;
-        self.watchdog_frame_count = r.read_u8()?;
-        self.display_list.clear();
-        Ok(())
     }
 }
 
