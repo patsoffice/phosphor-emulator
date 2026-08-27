@@ -46,7 +46,6 @@ use std::collections::HashMap;
 
 use phosphor_core::audio::SampleRing;
 use phosphor_core::core::bus::InterruptState;
-use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::{AccessKind, AddressSpace32};
 use phosphor_core::core::{
     Bus, BusMaster, ClockDomainName as Clk, ClockTree, DomainId, TimingConfig,
@@ -54,7 +53,7 @@ use phosphor_core::core::{
 use phosphor_core::cpu::m68000::{M68kVariant, M68000};
 use phosphor_core::device::slapstic::Slapstic;
 use phosphor_core::gfx::decode::{GfxCache, GfxLayout, decode_gfx};
-use phosphor_macros::{BusDebug, MemoryRegion};
+use phosphor_macros::{BusDebug, MemoryRegion, Saveable};
 
 use crate::atari_system1_sound::AtariSystem1Sound;
 
@@ -411,58 +410,83 @@ fn step_cycle<B: AtariSystem1Bus>(cpu: &mut M68000, bus: &mut B) {
 ///
 /// The board is everything the 68010 talks *to*; the CPU itself lives on the
 /// game wrapper.
-#[derive(BusDebug)]
+#[derive(BusDebug, Saveable)]
+#[save_version(1)]
+#[save_tlv]
 pub struct AtariSystem1Board {
+    /// The address space persists its own writable regions: work RAM,
+    /// cartridge RAM, and the playfield, motion-object, alpha and palette RAMs.
     #[debug_map(cpu = 0)]
+    #[save(id = 1)]
     pub(crate) map: AddressSpace32,
 
     /// Slapstic protection PAL gating the 080000-087FFF ROM window.
+    #[save(id = 2)]
     pub(crate) slapstic: Slapstic,
     /// The 32 KB (4 × 8 KB bank) slapstic ROM the window selects between.
+    #[save_skip]
     pub(crate) slapstic_rom: Vec<u8>,
 
     /// EEPROM 2804 (512 bytes, low byte at F00000-F003FF), gated by `eeprom_unlocked`.
+    #[save(id = 3)]
     pub(crate) eeprom: [u8; 512],
     /// 0x8C0001 EEPROM unlock latch. The 2804 re-locks after each write.
+    #[save(id = 4)]
     pub(crate) eeprom_unlocked: bool,
     /// Count of accepted EEPROM byte writes (bring-up diagnostic; not saved).
+    #[save_skip]
     eeprom_writes: u64,
 
     /// Decoded 8×8 2bpp alpha (text/HUD) font tiles. Not CPU-addressable.
+    #[save_skip]
     pub(crate) alpha_cache: GfxCache,
     /// Decoded playfield tile banks + the PROM remap lookup. Not CPU-addressable.
+    #[save_skip]
     pub(crate) playfield: PlayfieldGfx,
 
     // Video control latches (consumed by the video pipeline).
+    #[save(id = 5)]
     pub(crate) xscroll: u16,
+    #[save(id = 6)]
     pub(crate) yscroll: u16,
+    #[save(id = 7)]
     pub(crate) priority_pens: u16,
     /// 0x860001 audio/video control: bit 7 = sound-CPU reset, bits 5-3 =
     /// motion-object bank, bit 2 = playfield tile bank.
+    #[save(id = 8)]
     pub(crate) bankselect: u8,
 
     // F60000 switch port low byte (active-low; bits 0/1 = start, bit 6 = service).
     // Bits 4 (VBLANK) and 7 (sound buffer) are computed live in `read_f60000`.
+    #[save(id = 9)]
     pub(crate) f60000_buttons: u8,
 
     // VBLANK interrupt latch (IRQ4), held until acked via 0x8A0001.
+    #[save(id = 10)]
     pub(crate) video_int: bool,
     /// Scanline motion-object interrupt (IRQ3 / "SLIP"). Asserted for the one
     /// scanline a motion-object timer entry targets; also read back at 0x2E0000
     /// bit 7. Recomputed at every scanline boundary from the active sprite bank.
+    #[save(id = 11)]
     pub(crate) scanline_int: bool,
     /// Analog-joystick interrupt (IRQ2). Games with an ADC0809 (Road Runner et
     /// al.) drive this from the converter's end-of-conversion line, gated by the
     /// joystick-IRQ enable; games without one (Marble) leave it false.
+    #[save(id = 12)]
     pub(crate) int2: bool,
 
     /// One-pole DC-blocker state (prev input, prev output) for the audio mix —
     /// removes the POKEY's unipolar DC so the FM music gets full headroom, the
     /// way the cabinet's AC-coupled amplifier does.
+    ///
+    /// Two samples of filter history, which a load re-establishes within a
+    /// sample or two of resuming.
+    #[save_skip]
     audio_dc: (f32, f32),
 
     /// M6502 sound board (POKEY + YM2151 + optional speech + inter-CPU latches).
     #[debug_device("Sound")]
+    #[save(id = 13)]
     pub(crate) sound: AtariSystem1Sound,
     /// Sound CPU runs at 1/4 the main CPU rate.
     /// The board's clock tree, as [`clock_tree`] declares it, stepped in
@@ -470,11 +494,19 @@ pub struct AtariSystem1Board {
     /// declaration stepped in sound-CPU cycles, which is the rate its loop
     /// counts in.
     #[debug_device("Clocks")]
+    #[save(id = 14)]
     clocks: ClockTree,
+    /// A handle into the clock tree, which is itself saved.
+    #[save_skip]
     sound_dom: DomainId,
+    /// Samples already mixed and waiting for the frontend to drain, which the
+    /// next frame refills.
+    #[save_skip]
     audio_buffer: SampleRing<i16>,
 
+    #[save(id = 15)]
     pub(crate) clock: u64,
+    #[save(id = 16)]
     pub(crate) watchdog_count: u8,
 
     /// Per-frame log of motion-object bank switches as `(scanline, mo_bank)`,
@@ -482,6 +514,7 @@ pub struct AtariSystem1Board {
     /// reprograms the MO bank mid-frame (e.g. Road Runner), so the compositor
     /// renders each scanline band with the bank that was live there — mirroring
     /// the hardware's beam-time bank select. Rebuilt every frame; not saved.
+    #[save_skip]
     mo_bank_changes: Vec<(u16, u8)>,
 
     /// Motion-object state as it stood when the beam finished the visible area,
@@ -492,7 +525,12 @@ pub struct AtariSystem1Board {
     /// list. Rendering from this snapshot keeps the sprite RAM and the bands
     /// paired with the frame they actually describe. Empty until the first
     /// vblank (a direct render without stepping falls back to live state).
+    ///
+    /// Rebuilt at the next vblank, one frame after a load, which is why the old
+    /// hand-written impl left it out too.
+    #[save_skip]
     mo_shadow: Vec<u8>,
+    #[save_skip]
     mo_shadow_bands: Vec<(u16, u8)>,
 }
 
@@ -1259,59 +1297,6 @@ impl AtariSystem1Board {
             irq_vector: 0xFF,
             ..Default::default()
         }
-    }
-}
-
-impl Saveable for AtariSystem1Board {
-    fn save_state(&self, w: &mut StateWriter) {
-        // The CPU is saved by the machine, which owns it.
-        self.slapstic.save_state(w);
-        self.sound.save_state(w);
-        self.clocks.save_state(w);
-        w.write_bytes(self.map.region_data(Region::Ram));
-        w.write_bytes(self.map.region_data(Region::CartRam));
-        w.write_bytes(self.map.region_data(Region::Playfield));
-        w.write_bytes(self.map.region_data(Region::Mob));
-        w.write_bytes(self.map.region_data(Region::Alpha));
-        w.write_bytes(self.map.region_data(Region::Palette));
-        w.write_bytes(&self.eeprom);
-        w.write_u16_le(self.xscroll);
-        w.write_u16_le(self.yscroll);
-        w.write_u16_le(self.priority_pens);
-        w.write_u8(self.bankselect);
-        w.write_bool(self.eeprom_unlocked);
-        w.write_u8(self.f60000_buttons);
-        w.write_bool(self.video_int);
-        w.write_bool(self.scanline_int);
-        w.write_bool(self.int2);
-        w.write_u64_le(self.clock);
-        w.write_u8(self.watchdog_count);
-    }
-
-    fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
-        // The CPU is loaded by the machine, which owns it.
-        self.slapstic.load_state(r)?;
-        self.sound.load_state(r)?;
-        self.clocks.load_state(r)?;
-        r.read_bytes_into(self.map.region_data_mut(Region::Ram))?;
-        r.read_bytes_into(self.map.region_data_mut(Region::CartRam))?;
-        r.read_bytes_into(self.map.region_data_mut(Region::Playfield))?;
-        r.read_bytes_into(self.map.region_data_mut(Region::Mob))?;
-        r.read_bytes_into(self.map.region_data_mut(Region::Alpha))?;
-        r.read_bytes_into(self.map.region_data_mut(Region::Palette))?;
-        r.read_bytes_into(&mut self.eeprom)?;
-        self.xscroll = r.read_u16_le()?;
-        self.yscroll = r.read_u16_le()?;
-        self.priority_pens = r.read_u16_le()?;
-        self.bankselect = r.read_u8()?;
-        self.eeprom_unlocked = r.read_bool()?;
-        self.f60000_buttons = r.read_u8()?;
-        self.video_int = r.read_bool()?;
-        self.scanline_int = r.read_bool()?;
-        self.int2 = r.read_bool()?;
-        self.clock = r.read_u64_le()?;
-        self.watchdog_count = r.read_u8()?;
-        Ok(())
     }
 }
 

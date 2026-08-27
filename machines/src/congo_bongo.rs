@@ -22,7 +22,6 @@ use phosphor_core::core::machine::{
     ActionRole, DipApplyTiming, DipChoice, DipOption, DipSwitchBank, Direction, InputConfigurable,
     InputControl, InputEvent, InputId, InputKind, MachineCore, Nvram, SaveState,
 };
-use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::{AccessKind, AddressSpace16};
 use phosphor_core::core::{
     Bus, BusMaster, ClockDomainName as Clk, ClockTree, DomainId, TimingConfig,
@@ -447,68 +446,107 @@ pub fn run_frame(cpu: &mut Z80, sound_cpu: &mut Z80, board: &mut CongoBongoBoard
     }
 }
 
-#[derive(BusDebug, DebugTrace)]
+#[derive(BusDebug, DebugTrace, Saveable)]
+#[save_version(1)]
+#[save_tlv]
 pub struct CongoBongoBoard {
+    /// The address space persists its own writable regions: work RAM, video RAM
+    /// and color RAM here.
     #[debug_map(cpu = 0)]
+    #[save(id = 1)]
     pub(crate) main_map: AddressSpace16,
+    /// Likewise the sound CPU's, whose only writable region is its work RAM.
     #[debug_map(cpu = 1)]
+    #[save(id = 2)]
     pub(crate) sound_map: AddressSpace16,
 
     // GFX ROMs + their decoded pixel caches.
+    #[save_skip]
     pub(crate) tx_rom: [u8; 0x1000],
+    #[save_skip]
     pub(crate) bg_rom: [u8; 0x6000],
+    #[save_skip]
     pub(crate) spr_rom: [u8; 0xc000],
+    #[save_skip]
     pub(crate) tilemap_dat: [u8; 0x4000],
+    #[save_skip]
     pub(crate) tx_cache: gfx::GfxCache, // 256 × 8×8 2bpp foreground tiles
+    #[save_skip]
     pub(crate) bg_cache: gfx::GfxCache, // 1024 × 8×8 3bpp background tiles
+    #[save_skip]
     pub(crate) sprite_cache: gfx::GfxCache, // 128 × 32×32 3bpp sprites
 
     // Pre-rendered background tilemap pixmap (256×4096 palette-pen indices). The
     // bg map is fixed in `tilemap_dat` ROM, so it is built once at load.
+    #[save_skip]
     pub(crate) bg_pixmap: Vec<u8>,
 
-    // Color PROM + the 512-entry RGB palette decoded from it.
+    /// Color PROM + the 512-entry RGB palette decoded from it.
+    ///
+    /// Expanded from the PROM rather than from anything the CPU writes, so
+    /// unlike the boards whose palette lives in RAM it stays derived and is
+    /// rebuilt at ROM load.
+    #[save_skip]
     pub(crate) palette_prom: [u8; 0x0200],
+    #[save_skip]
     pub(crate) palette_rgb: [(u8, u8, u8); 512],
 
     // Scanline-rendered framebuffer (256 × 240 × RGB24, pre-rotation).
+    #[save_skip]
     pub(crate) scanline_buffer: Vec<u8>,
 
     // Inputs (active-high) + DIP banks. `in2` holds the start buttons; the coin
     // bits (SW100 5/6/7) come from `coin_status`, which the game latches and
     // clears via the coin-enable latch lines.
+    #[save(id = 3)]
     pub(crate) in0: u8,
+    #[save(id = 4)]
     pub(crate) in1: u8,
+    #[save(id = 5)]
     pub(crate) in2: u8,
+    #[save(id = 6)]
     pub(crate) dsw2: u8,
+    #[save(id = 7)]
     pub(crate) dsw3: u8,
+    #[save(id = 8)]
     pub(crate) coin_status: [bool; 3], // coin A, coin B, service
 
     // 74LS259 addressable latches (raw bytes; individual lines decoded by the
     // render/input issues). `int_enabled`/`bg_enabled` are broken out because the
     // run loop needs them now.
+    #[save(id = 9)]
     pub(crate) latch1: u8,
+    #[save(id = 10)]
     pub(crate) latch2: u8,
+    #[save(id = 11)]
     pub(crate) int_enabled: bool,
+    #[save(id = 12)]
     pub(crate) bg_enabled: bool,
 
     // Background scroll position (two raw bytes; decoded by issue .6).
+    #[save(id = 13)]
     pub(crate) bg_position: [u8; 2],
 
     // Custom sprite-DMA registers (src lo/hi, count, trigger) and the 256-byte
     // sprite RAM the DMA engine fills (not in the CPU address map).
+    #[save(id = 14)]
     pub(crate) sprite_dma: [u8; 4],
+    #[save(id = 15)]
     pub(crate) sprite_ram: [u8; 0x100],
 
     // Sound command latch (main CPU → PPI port A).
+    #[save(id = 16)]
     pub(crate) sound_latch: u8,
 
     // Sound section devices.
     #[debug_device("SN76489A #1")]
+    #[save(id = 17)]
     pub(crate) sn1: Sn76489a,
     #[debug_device("SN76489A #2")]
+    #[save(id = 18)]
     pub(crate) sn2: Sn76489a,
     #[debug_device("PPI")]
+    #[save(id = 19)]
     pub(crate) ppi: I8255,
 
     /// The board's clock tree, as [`clock_tree`] declares it.
@@ -518,26 +556,40 @@ pub struct CongoBongoBoard {
     /// exists for: it returns how many times the domain fired, where
     /// `ClockDivider::tick() -> bool` could only ever say "once".
     #[debug_device("Clocks")]
+    #[save(id = 20)]
     pub(crate) clocks: ClockTree,
+    /// A handle into the clock tree, which is itself saved.
+    #[save_skip]
     pub(crate) sound_dom: DomainId,
     /// The ~244 Hz periodic IRQ, counted in sound-CPU cycles.
+    #[save(id = 21)]
     pub(crate) sound_irq_counter: u64,
+    #[save(id = 22)]
     pub(crate) sound_irq_pending: bool,
 
     // PSG generator clocks (chip_clock / 16). `audio` box-filters the summed PSG
     // output to 44.1 kHz, which feeds the discrete percussion circuit; the
     // circuit mixes the PSGs with the five synthesized voices and is drained for
     // the final output.
+    #[save_skip]
     pub(crate) sn1_dom: DomainId,
+    #[save_skip]
     pub(crate) sn2_dom: DomainId,
+    #[save(id = 23)]
     pub(crate) audio: AudioResampler<i16>,
+    #[save(id = 24)]
     pub(crate) congo_sound: CongoSound,
 
     // Timing / interrupts.
+    #[save(id = 25)]
     pub(crate) clock: u64,
+    #[save(id = 26)]
     pub(crate) vblank_irq_pending: bool,
 
+    /// The debugger's own ring buffer, which belongs to whoever is debugging
+    /// rather than to the machine.
     #[debug_events]
+    #[save_skip]
     pub(crate) debug_trace: DebugTraceBuffer,
 }
 
@@ -1121,75 +1173,6 @@ impl CongoBongoBoard {
     pub fn instruction_boundaries(cpu: &Z80, sound_cpu: &Z80) -> u32 {
         u32::from(cpu.at_instruction_boundary())
             | (u32::from(sound_cpu.at_instruction_boundary()) << 1)
-    }
-}
-
-impl Saveable for CongoBongoBoard {
-    fn save_state(&self, w: &mut StateWriter) {
-        w.write_bytes(self.main_map.region_data(MainRegion::Ram));
-        w.write_bytes(self.main_map.region_data(MainRegion::VideoRam));
-        w.write_bytes(self.main_map.region_data(MainRegion::ColorRam));
-        w.write_bytes(self.sound_map.region_data(SoundRegion::Ram));
-        w.write_u8(self.in0);
-        w.write_u8(self.in1);
-        w.write_u8(self.in2);
-        w.write_u8(self.dsw2);
-        w.write_u8(self.dsw3);
-        for &c in &self.coin_status {
-            w.write_bool(c);
-        }
-        w.write_u8(self.latch1);
-        w.write_u8(self.latch2);
-        w.write_bool(self.int_enabled);
-        w.write_bool(self.bg_enabled);
-        w.write_bytes(&self.bg_position);
-        w.write_bytes(&self.sprite_dma);
-        w.write_bytes(&self.sprite_ram);
-        w.write_u8(self.sound_latch);
-        self.sn1.save_state(w);
-        self.sn2.save_state(w);
-        self.ppi.save_state(w);
-        self.clocks.save_state(w);
-        w.write_u64_le(self.sound_irq_counter);
-        w.write_bool(self.sound_irq_pending);
-        self.audio.save_state(w);
-        self.congo_sound.save_state(w);
-        w.write_u64_le(self.clock);
-        w.write_bool(self.vblank_irq_pending);
-    }
-
-    fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
-        r.read_bytes_into(self.main_map.region_data_mut(MainRegion::Ram))?;
-        r.read_bytes_into(self.main_map.region_data_mut(MainRegion::VideoRam))?;
-        r.read_bytes_into(self.main_map.region_data_mut(MainRegion::ColorRam))?;
-        r.read_bytes_into(self.sound_map.region_data_mut(SoundRegion::Ram))?;
-        self.in0 = r.read_u8()?;
-        self.in1 = r.read_u8()?;
-        self.in2 = r.read_u8()?;
-        self.dsw2 = r.read_u8()?;
-        self.dsw3 = r.read_u8()?;
-        for c in &mut self.coin_status {
-            *c = r.read_bool()?;
-        }
-        self.latch1 = r.read_u8()?;
-        self.latch2 = r.read_u8()?;
-        self.int_enabled = r.read_bool()?;
-        self.bg_enabled = r.read_bool()?;
-        r.read_bytes_into(&mut self.bg_position)?;
-        r.read_bytes_into(&mut self.sprite_dma)?;
-        r.read_bytes_into(&mut self.sprite_ram)?;
-        self.sound_latch = r.read_u8()?;
-        self.sn1.load_state(r)?;
-        self.sn2.load_state(r)?;
-        self.ppi.load_state(r)?;
-        self.clocks.load_state(r)?;
-        self.sound_irq_counter = r.read_u64_le()?;
-        self.sound_irq_pending = r.read_bool()?;
-        self.audio.load_state(r)?;
-        self.congo_sound.load_state(r)?;
-        self.clock = r.read_u64_le()?;
-        self.vblank_irq_pending = r.read_bool()?;
-        Ok(())
     }
 }
 

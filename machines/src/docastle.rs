@@ -37,7 +37,6 @@ use phosphor_core::core::machine::{
     InputConfigurable, InputControl, InputEvent, InputId, InputKind, MachineCore, Orientation,
     SaveState,
 };
-use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::{AccessKind, AddressSpace16};
 use phosphor_core::core::{
     Bus, BusMaster, ClockDomainName as Clk, ClockTree, DomainId, TimingConfig,
@@ -670,16 +669,25 @@ const MUX_SYSTEM: u8 = 7;
 /// data returned belongs to the port selected by the *previous* access. Reading
 /// a port is therefore a two-step dance, and it is what makes the boot-time DIP
 /// reads on this board so sensitive to CPU timing.
-#[derive(Default)]
+#[derive(Default, Saveable)]
+#[save_version(1)]
+#[save_tlv]
 struct InputMux {
     /// Latched S0-S2 select lines (0-7).
+    #[save(id = 1)]
     select: u8,
     /// Last value driven onto the H outputs, held while `select == 0`.
+    #[save(id = 2)]
     hold: u8,
+    #[save(id = 3)]
     joys: u8,
+    #[save(id = 4)]
     buttons: u8,
+    #[save(id = 5)]
     system: u8,
+    #[save(id = 6)]
     dsw1: u8,
+    #[save(id = 7)]
     dsw2: u8,
 }
 
@@ -838,46 +846,77 @@ fn step_cycle(main: &mut Z80, sub: &mut Z80, board: &mut DocastleBoard) {
     board.end_cycle();
 }
 
-#[derive(BusDebug)]
+#[derive(BusDebug, Saveable)]
+#[save_version(1)]
+#[save_tlv]
 pub struct DocastleBoard {
+    /// The address space persists its own writable regions: work RAM, sprite
+    /// RAM, video RAM and color RAM here.
     #[debug_map(cpu = 0)]
+    #[save(id = 1)]
     pub(crate) main_map: AddressSpace16,
+    /// Likewise the sub CPU's, whose only writable region is its work RAM.
     #[debug_map(cpu = 1)]
+    #[save(id = 2)]
     pub(crate) sub_map: AddressSpace16,
 
+    /// Which of the three games this board is wired as, fixed at construction.
+    #[save_skip]
     pub(crate) variant: DocastleVariant,
 
     // GFX ROMs + decoded pixel caches.
+    #[save_skip]
     pub(crate) tile_rom: [u8; 0x4000],
+    #[save_skip]
     pub(crate) sprite_rom: [u8; 0x8000],
-    pub(crate) tile_cache: gfx::GfxCache,   // 512 × 8×8 4bpp
+    #[save_skip]
+    pub(crate) tile_cache: gfx::GfxCache, // 512 × 8×8 4bpp
+    #[save_skip]
     pub(crate) sprite_cache: gfx::GfxCache, // 256 × 16×16 4bpp
+    /// The color PROM and the palette expanded from it. Derived from ROM rather
+    /// than from anything the CPU writes, so it is rebuilt at ROM load.
+    #[save_skip]
     pub(crate) palette_prom: [u8; 0x100],
+    #[save_skip]
     pub(crate) palette_rgb: [(u8, u8, u8); PALETTE_LEN],
 
     // Dual-CPU handshake. `main_wait` gates the main CPU's clock; `wait_toggle`
     // distinguishes a stalled latch read from the retry that follows it, and
     // `retry` tells `tick` to rewind the CPU so the read happens after the
     // stall rather than before it.
+    #[save(id = 3)]
     pub(crate) shared_latch: u8,
+    #[save(id = 4)]
     pub(crate) main_wait: bool,
+    #[save(id = 5)]
     pub(crate) main_wait_toggle: bool,
+    /// Both describe a rewind in progress inside one cycle, which a save can
+    /// never be taken part way through, so a load starts them clear.
+    #[save_skip(default)]
     pub(crate) main_retry: bool,
+    #[save_skip(default)]
     pub(crate) main_read_stalled: bool,
+    #[save(id = 6)]
     pub(crate) sub_nmi_pending: bool,
 
     // Video.
+    #[save(id = 7)]
     pub(crate) flipscreen: bool,
 
+    #[save(id = 8)]
     inputs: InputMux,
 
     // Sound: four PSGs summed to mono. Their READY outputs are OR'd into the
     // sub CPU's WAIT input.
     #[debug_device("SN76489A")]
+    #[save(id = 9)]
     pub(crate) sn: [Sn76489a; 4],
     /// The board's clock tree, as [`clock_tree`] declares it.
     #[debug_device("Clocks")]
+    #[save(id = 10)]
     pub(crate) clocks: ClockTree,
+    /// A handle into the clock tree, which is itself saved.
+    #[save_skip]
     pub(crate) sn_dom: DomainId,
     /// The PSGs' coupling into the amplifier.
     ///
@@ -895,12 +934,17 @@ pub struct DocastleBoard {
     /// the shared default rather than a specific part. That is honest here in a
     /// way it would not be for a filter: this capacitor's only job is to remove
     /// the offset, and every value that does that is inaudible.
+    #[save(id = 11)]
     pub(crate) sn_coupling: DcBlocker,
+    #[save(id = 12)]
     pub(crate) audio: AudioResampler<i16>,
 
     // Timing / interrupts.
+    #[save(id = 13)]
     pub(crate) clock: u64,
+    #[save(id = 14)]
     pub(crate) main_irq_pending: bool,
+    #[save(id = 15)]
     pub(crate) sub_irq_pending: bool,
 }
 
@@ -1322,71 +1366,6 @@ impl DocastleBoard {
     /// on the machine, which passes them back in.
     pub fn instruction_boundaries(main: &Z80, sub: &Z80) -> u32 {
         u32::from(main.at_instruction_boundary()) + u32::from(sub.at_instruction_boundary())
-    }
-}
-
-impl Saveable for DocastleBoard {
-    fn save_state(&self, w: &mut StateWriter) {
-        // The CPUs are saved by the machine, which owns them.
-        w.write_bytes(self.main_map.region_data(MainRegion::WorkRam));
-        w.write_bytes(self.main_map.region_data(MainRegion::SpriteRam));
-        w.write_bytes(self.main_map.region_data(MainRegion::VideoRam));
-        w.write_bytes(self.main_map.region_data(MainRegion::ColorRam));
-        w.write_bytes(self.sub_map.region_data(SubRegion::Ram));
-        w.write_u8(self.shared_latch);
-        w.write_bool(self.main_wait);
-        w.write_bool(self.main_wait_toggle);
-        w.write_bool(self.sub_nmi_pending);
-        w.write_bool(self.flipscreen);
-        w.write_u8(self.inputs.select);
-        w.write_u8(self.inputs.hold);
-        w.write_u8(self.inputs.joys);
-        w.write_u8(self.inputs.buttons);
-        w.write_u8(self.inputs.system);
-        w.write_u8(self.inputs.dsw1);
-        w.write_u8(self.inputs.dsw2);
-        for chip in &self.sn {
-            chip.save_state(w);
-        }
-        self.clocks.save_state(w);
-        self.sn_coupling.save_state(w);
-        self.audio.save_state(w);
-        w.write_u64_le(self.clock);
-        w.write_bool(self.main_irq_pending);
-        w.write_bool(self.sub_irq_pending);
-    }
-
-    fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
-        // The CPUs are loaded by the machine, which owns them.
-        r.read_bytes_into(self.main_map.region_data_mut(MainRegion::WorkRam))?;
-        r.read_bytes_into(self.main_map.region_data_mut(MainRegion::SpriteRam))?;
-        r.read_bytes_into(self.main_map.region_data_mut(MainRegion::VideoRam))?;
-        r.read_bytes_into(self.main_map.region_data_mut(MainRegion::ColorRam))?;
-        r.read_bytes_into(self.sub_map.region_data_mut(SubRegion::Ram))?;
-        self.shared_latch = r.read_u8()?;
-        self.main_wait = r.read_bool()?;
-        self.main_wait_toggle = r.read_bool()?;
-        self.sub_nmi_pending = r.read_bool()?;
-        self.flipscreen = r.read_bool()?;
-        self.inputs.select = r.read_u8()?;
-        self.inputs.hold = r.read_u8()?;
-        self.inputs.joys = r.read_u8()?;
-        self.inputs.buttons = r.read_u8()?;
-        self.inputs.system = r.read_u8()?;
-        self.inputs.dsw1 = r.read_u8()?;
-        self.inputs.dsw2 = r.read_u8()?;
-        for chip in &mut self.sn {
-            chip.load_state(r)?;
-        }
-        self.clocks.load_state(r)?;
-        self.sn_coupling.load_state(r)?;
-        self.audio.load_state(r)?;
-        self.clock = r.read_u64_le()?;
-        self.main_irq_pending = r.read_bool()?;
-        self.sub_irq_pending = r.read_bool()?;
-        self.main_retry = false;
-        self.main_read_stalled = false;
-        Ok(())
     }
 }
 
