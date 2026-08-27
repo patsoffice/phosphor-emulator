@@ -1252,6 +1252,15 @@ fn has_save_elements(attrs: &[syn::Attribute]) -> bool {
     attrs.iter().any(|a| a.path().is_ident("save_elements"))
 }
 
+/// Array element types written inline rather than framed as a component: a
+/// primitive, or a tuple of them such as an expanded palette's `(u8, u8, u8)`.
+fn is_inline_element_type(ty: &Type) -> bool {
+    match ty {
+        Type::Tuple(t) => !t.elems.is_empty() && t.elems.iter().all(is_primitive_type),
+        _ => is_primitive_type(ty),
+    }
+}
+
 /// The primitive type names `gen_field_io` encodes inline.
 fn is_primitive_type(ty: &Type) -> bool {
     let Type::Path(path) = ty else { return false };
@@ -1270,9 +1279,10 @@ fn is_primitive_type(ty: &Type) -> bool {
 /// `Vec<u8>` are inline; everything else delegates.
 fn delegates_to_saveable(ty: &Type) -> bool {
     match ty {
-        // An array delegates only when its elements do; `[u8; N]` and
-        // `[u16; N]` are inline either way, `#[save_elements]` or not.
-        Type::Array(arr) => !is_primitive_type(&arr.elem),
+        // An array delegates only when its elements do; `[u8; N]`, `[u16; N]`
+        // and `[(u8, u8, u8); N]` are inline either way, `#[save_elements]` or
+        // not.
+        Type::Array(arr) => !is_inline_element_type(&arr.elem),
         Type::Path(path) => {
             if is_primitive_type(ty) {
                 return false;
@@ -1421,67 +1431,72 @@ fn gen_array_io(
 }
 
 /// Generate per-element save/load for array loops.
+/// Read/write statements for one primitive at `place`, or `None` if the type is
+/// not a primitive.
+///
+/// `place` is the expression naming the value: `*__v` for an array element,
+/// `__v.0` for a tuple field within one.
+fn gen_primitive_io(place: &TokenStream2, ty: &Type) -> Option<(TokenStream2, TokenStream2)> {
+    let Type::Path(path) = ty else { return None };
+    let name = path
+        .path
+        .segments
+        .last()
+        .expect("non-empty path")
+        .ident
+        .to_string();
+    let (write, read) = match name.as_str() {
+        "u8" => (quote! { write_u8 }, quote! { read_u8 }),
+        "u16" => (quote! { write_u16_le }, quote! { read_u16_le }),
+        "u32" => (quote! { write_u32_le }, quote! { read_u32_le }),
+        "u64" => (quote! { write_u64_le }, quote! { read_u64_le }),
+        "i16" => (quote! { write_i16_le }, quote! { read_i16_le }),
+        "i32" => (quote! { write_i32_le }, quote! { read_i32_le }),
+        "i64" => (quote! { write_i64_le }, quote! { read_i64_le }),
+        "f32" => (quote! { write_f32_le }, quote! { read_f32_le }),
+        "f64" => (quote! { write_f64_le }, quote! { read_f64_le }),
+        "bool" => (quote! { write_bool }, quote! { read_bool }),
+        _ => return None,
+    };
+    Some((
+        quote! { w.#write(#place); },
+        quote! { #place = r.#read()?; },
+    ))
+}
+
+/// Generate per-element save/load for array loops.
 fn gen_array_element_io(ident: &syn::Ident, elem_ty: &Type) -> (TokenStream2, TokenStream2) {
-    if let Type::Path(path) = elem_ty {
-        let seg = path.path.segments.last().expect("non-empty path");
-        let type_name = seg.ident.to_string();
-        match type_name.as_str() {
-            "u8" => (
-                quote! { w.write_u8(*__v); },
-                quote! { *__v = r.read_u8()?; },
-            ),
-            "u16" => (
-                quote! { w.write_u16_le(*__v); },
-                quote! { *__v = r.read_u16_le()?; },
-            ),
-            "u32" => (
-                quote! { w.write_u32_le(*__v); },
-                quote! { *__v = r.read_u32_le()?; },
-            ),
-            "u64" => (
-                quote! { w.write_u64_le(*__v); },
-                quote! { *__v = r.read_u64_le()?; },
-            ),
-            "i16" => (
-                quote! { w.write_i16_le(*__v); },
-                quote! { *__v = r.read_i16_le()?; },
-            ),
-            "i32" => (
-                quote! { w.write_i32_le(*__v); },
-                quote! { *__v = r.read_i32_le()?; },
-            ),
-            "i64" => (
-                quote! { w.write_i64_le(*__v); },
-                quote! { *__v = r.read_i64_le()?; },
-            ),
-            "f32" => (
-                quote! { w.write_f32_le(*__v); },
-                quote! { *__v = r.read_f32_le()?; },
-            ),
-            "f64" => (
-                quote! { w.write_f64_le(*__v); },
-                quote! { *__v = r.read_f64_le()?; },
-            ),
-            "bool" => (
-                quote! { w.write_bool(*__v); },
-                quote! { *__v = r.read_bool()?; },
-            ),
-            _ => {
-                // Delegate to nested Saveable
-                let _ = ident; // suppress unused warning
-                (
-                    quote! { phosphor_core::prelude::Saveable::save_state(__v, w); },
-                    quote! { phosphor_core::prelude::Saveable::load_state(__v, r)?; },
+    // A tuple of primitives, such as the `[(u8, u8, u8); N]` an expanded palette
+    // is held in. Written field by field, in order, with no framing: the array's
+    // length and the tuple's arity are both fixed by the type.
+    if let Type::Tuple(tuple) = elem_ty {
+        let mut writes = Vec::new();
+        let mut reads = Vec::new();
+        for (i, ty) in tuple.elems.iter().enumerate() {
+            let index = syn::Index::from(i);
+            let place = quote! { __v.#index };
+            let (write, read) = gen_primitive_io(&place, ty).unwrap_or_else(|| {
+                panic!(
+                    "Saveable derive supports tuples of primitives only; field `{ident}` \
+                     has a tuple element that is not one"
                 )
-            }
+            });
+            writes.push(write);
+            reads.push(read);
         }
-    } else {
-        // Non-path element type — delegate to Saveable
-        (
-            quote! { phosphor_core::prelude::Saveable::save_state(__v, w); },
-            quote! { phosphor_core::prelude::Saveable::load_state(__v, r)?; },
-        )
+        return (quote! { #(#writes)* }, quote! { #(#reads)* });
     }
+
+    if let Some(io) = gen_primitive_io(&quote! { *__v }, elem_ty) {
+        return io;
+    }
+
+    // Anything else is a nested component, framed by its parent.
+    let _ = ident;
+    (
+        quote! { phosphor_core::prelude::Saveable::save_state(__v, w); },
+        quote! { phosphor_core::prelude::Saveable::load_state(__v, r)?; },
+    )
 }
 
 /// Check if a type is `u8`.

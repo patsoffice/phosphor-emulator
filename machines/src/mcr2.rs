@@ -1,4 +1,3 @@
-use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::{AccessKind, AddressSpace16};
 use phosphor_core::core::{ClockDomainName as Clk, ClockTree, DomainId, TimingConfig};
 use phosphor_core::cpu::z80::Z80;
@@ -6,7 +5,7 @@ use phosphor_core::device::Z80Ctc;
 use phosphor_core::dirty_bitset::DirtyBitset;
 use phosphor_core::gfx;
 use phosphor_core::gfx::decode::{GfxLayout, decode_gfx};
-use phosphor_macros::{BusDebug, MemoryRegion};
+use phosphor_macros::{BusDebug, MemoryRegion, Saveable};
 
 use phosphor_core::device::SsioBoard;
 
@@ -163,48 +162,75 @@ fn step_cycle(cpu: &mut Z80, board: &mut Mcr2Board) {
 /// The board is everything the Z80 talks *to* — Satan's Hollow is the only
 /// machine on it, so the board implements [`Bus`] itself and the CPU lives on
 /// the machine.
-#[derive(BusDebug)]
+#[derive(BusDebug, Saveable)]
+#[save_version(1)]
+#[save_tlv]
 pub struct Mcr2Board {
     // Devices
     #[debug_device("SSIO")]
+    #[save(id = 1)]
     pub(crate) ssio: SsioBoard,
     #[debug_device("CTC")]
+    #[save(id = 2)]
     pub(crate) ctc: Z80Ctc,
 
-    // Memory
+    // Memory: the address space persists its own writable regions (NVRAM,
+    // sprite RAM and video RAM here) and where its windows point.
     #[debug_map(cpu = 0)]
+    #[save(id = 3)]
     pub(crate) map: AddressSpace16,
 
     // GFX caches (pre-decoded from ROM)
+    #[save_skip]
     pub(crate) tile_cache: gfx::GfxCache,
+    #[save_skip]
     pub(crate) sprite_cache: gfx::GfxCache,
 
     // Palette (64 entries; 9-bit values embedded in video_ram[0x780..0x800])
     // palette_ram caches the canonical 2-byte representation for save state.
+    #[save(id = 4)]
     pub(crate) palette_ram: [u8; 0x80],
+    /// The expanded form, saved rather than rebuilt on load.
+    ///
+    /// It is derived from `palette_ram`, but the rebuild ran only from
+    /// `reset_board` and `load_state` — never on the normal path — so it was a
+    /// call this board had to remember to make. 192 bytes buys that back.
+    #[save(id = 5)]
     pub(crate) palette_rgb: [(u8, u8, u8); 64],
 
     // Framebuffers (indexed — palette lookup deferred to rotation pass)
+    #[save_skip]
     pub(crate) pixel_buffer: Vec<u8>, // 512×480 palette index (u8)
+    #[save_skip]
     pub(crate) priority_buffer: Vec<u8>, // 512×480 (sprite palette bank per pixel)
 
-    // Tile dirty tracking (960 tiles = 15 × 64 bits)
+    // Tile dirty tracking (960 tiles = 15 × 64 bits). A load redraws
+    // everything rather than trusting what the pre-load frame had drawn.
+    #[save_skip(default = DirtyBitset::new_all_dirty())]
     pub(crate) tile_dirty: DirtyBitset<15>,
     // Tracks which tiles had sprites composited on them (for next-frame erasure)
+    #[save_skip(default = DirtyBitset::new_all_dirty())]
     sprite_tile_dirty: DirtyBitset<15>,
     // Dirty tracking stats (for debug overlay)
+    #[save_skip]
     pub(crate) tiles_redrawn: usize,
 
     // CTC interrupt handling
+    #[save_skip(default)]
     pub(crate) ctc_ack_needed: bool,
+    #[save_skip(default)]
     pub(crate) ctc_vector_latch: u8,
 
     // Timing
+    #[save(id = 6)]
     pub(crate) clock: u64,
     /// The board's clock tree, as [`clock_tree`] declares it.
     #[debug_device("Clocks")]
+    #[save(id = 7)]
     pub(crate) clocks: ClockTree,
+    #[save_skip]
     pub(crate) ssio_dom: DomainId,
+    #[save(id = 8)]
     pub(crate) watchdog_counter: u16,
 }
 
@@ -622,41 +648,6 @@ impl Mcr2Board {
     /// which passes it back in.
     pub fn instruction_boundaries(cpu: &Z80) -> u32 {
         u32::from(cpu.at_instruction_boundary())
-    }
-}
-
-impl Saveable for Mcr2Board {
-    fn save_state(&self, w: &mut StateWriter) {
-        // The CPU is saved by the machine, which owns it.
-        self.ctc.save_state(w);
-        self.ssio.save_state(w);
-        w.write_bytes(self.map.region_data(Region::Nvram));
-        w.write_bytes(self.map.region_data(Region::SpriteRam));
-        w.write_bytes(self.map.region_data(Region::VideoRam));
-        w.write_bytes(&self.palette_ram);
-        w.write_u64_le(self.clock);
-        self.clocks.save_state(w);
-        w.write_u16_le(self.watchdog_counter);
-    }
-
-    fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
-        // The CPU is loaded by the machine, which owns it.
-        self.ctc.load_state(r)?;
-        self.ssio.load_state(r)?;
-        r.read_bytes_into(self.map.region_data_mut(Region::Nvram))?;
-        r.read_bytes_into(self.map.region_data_mut(Region::SpriteRam))?;
-        r.read_bytes_into(self.map.region_data_mut(Region::VideoRam))?;
-        r.read_bytes_into(&mut self.palette_ram)?;
-        self.clock = r.read_u64_le()?;
-        self.clocks.load_state(r)?;
-        self.watchdog_counter = r.read_u16_le()?;
-        // Rebuild derived state from loaded data
-        self.rebuild_palette();
-        self.tile_dirty = DirtyBitset::new_all_dirty();
-        self.sprite_tile_dirty = DirtyBitset::new_all_dirty();
-        self.ctc_ack_needed = false;
-        self.ctc_vector_latch = 0;
-        Ok(())
     }
 }
 

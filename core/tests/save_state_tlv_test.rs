@@ -396,6 +396,58 @@ fn a_count_that_overruns_the_body_is_rejected() {
     assert!(msg.contains("ran out after 1"), "{msg}");
 }
 
+/// An expanded palette is `[(u8, u8, u8); N]`, and boards hold several. They
+/// were unsupported, which is why every one of them was either `#[save_skip]`
+/// with a rebuild call bolted onto `load_state`, or hand-written.
+#[test]
+fn an_array_of_primitive_tuples_round_trips() {
+    #[derive(Saveable, Default, Debug, PartialEq)]
+    #[save_version(1)]
+    #[save_tlv]
+    struct Video {
+        #[save(id = 1)]
+        palette_rgb: [(u8, u8, u8); 3],
+        #[save(id = 2)]
+        mixed: [(u16, bool); 2],
+    }
+
+    let src = Video {
+        palette_rgb: [(1, 2, 3), (0xAA, 0xBB, 0xCC), (0xFF, 0, 0x7F)],
+        mixed: [(0x1234, true), (0x5678, false)],
+    };
+
+    let mut out = Video::default();
+    load_into(&mut out, &bytes_of(&src)).unwrap();
+    assert_eq!(out, src);
+}
+
+/// Tuple elements are written in order with no framing of their own: the array
+/// length and the tuple arity are both fixed by the type, so nothing else has to
+/// carry them.
+#[test]
+fn a_tuple_array_is_written_flat() {
+    #[derive(Saveable, Default)]
+    #[save_version(1)]
+    #[save_tlv]
+    struct Palette {
+        #[save(id = 1)]
+        rgb: [(u8, u8, u8); 2],
+    }
+
+    let data = bytes_of(&Palette {
+        rgb: [(1, 2, 3), (4, 5, 6)],
+    });
+    #[rustfmt::skip]
+    let expected: &[u8] = &[
+        0x01,                   // version
+        0x01, 0x00,             // one field
+        0x01, 0x00,             // id 1
+        0x06, 0x00, 0x00, 0x00, // six bytes: two tuples of three
+        1, 2, 3, 4, 5, 6,
+    ];
+    assert_eq!(data, expected);
+}
+
 /// A machine whose components are a mix loads end to end through the real
 /// envelope, checksum included.
 #[test]
