@@ -411,6 +411,53 @@ that a mixed codebase is *risky*, since a TLV struct is now safe anywhere, so
 the case is purely cost against benefit, and the benefit is still absent for a
 component that has never changed.
 
+### What Stage C shipped
+
+**The expensive part was never TLV.** Reading all 49 hand-written impls found
+that about two thirds of them were hand-written for one removable reason each,
+not because they were irreducibly bespoke, and the largest single reason was
+that `AddressSpace16`/`32` did not implement `Saveable`, so 22 boards
+hand-enumerated their memory a region at a time. Stage C was therefore re-shaped
+into: give the address space its own impl, add the handful of derive features
+the remaining impls were blocked on, and convert. **TLV came last and cost
+least — it is attributes.**
+
+**The address space saves the bytes the CPU can write, and knows which those
+are.** A region is saved when `AccessKind::is_cpu_writable()` and it has
+backing, so ROM drops out by construction and "a board forgot a region" stops
+being a silent bug with nothing to catch it. `AddressSpace16` also saves its
+page table, which carries bank switching; the argument is the same one level up,
+since replaying banking from a board's own `load_state` is a call each board has
+to remember to make and runs nowhere else on the normal path. The derived
+writable set has now matched a hand-written list on **twelve boards
+independently**, which is the only evidence that the rule matches what boards
+expected.
+
+**Five derive features, each unlocking impls rather than being wanted for its
+own sake.** Tuple arrays (`[(u8, u8, u8); N]`), so an expanded palette is saved
+rather than rebuilt. Nested arrays (`[[u8; 3]; 2]`). Fieldless enums, which is
+three impls that existed for nothing else — and an unrecognised discriminant is
+now an error naming the type, where every hand-written impl fell back to variant
+zero. `Option<T>` fields, which is a per-variant component expressed as a field
+and replaces the chunk-level `read_optional` Stage A had to add by hand.
+`#[save_after_load]`, documented as a last resort.
+
+**"Do we need the post-load methods, or is it state we should save?"** That
+question removed most of them. Banking went with the page table. Five palette
+rebuilds went with tuple arrays. Two `refresh_dip_pots` calls went because the
+POKEY already saves its own pot inputs. What is left for the hook is what a save
+deliberately does not carry: a device re-reading a clock from configuration
+(`reapply_speech_clock`, `resync_tms_clock`), or a value that must be brought
+back into range before something indexes with it (the Slapstic's bank, an ADC
+channel, an MB88xx RAM length).
+
+**What stays hand-written, and should.** `AddressSpace16`/`32` themselves, since
+they *are* the mechanism. `Namco51Wrapper`, a two-variant enum whose live
+variant is decided by whether a firmware ROM was found and whose LLE variant
+cannot be constructed from a file at all — a derive that built the variant the
+bytes name would be wrong. And the boards that combine accessor-backed state,
+post-load remapping and variable-length reads.
+
 ### Stage D — tooling
 
 **Implemented**, but not the way this sketched it. "Iterate tag/len and print a

@@ -389,9 +389,10 @@ pub struct ClockTree {
     roots: [u32; MAX_ROOTS],
     #[save_skip]
     root_len: u8,
-    /// Fixed-size: the save-state derive delegates array elements to
-    /// `Saveable`, and there is no `impl Saveable for Option<T>`. Slots past
-    /// `len` are [`ClockDomain::INERT`].
+    /// Fixed-size, so the whole array is on the wire whatever `len` is: the
+    /// derive delegates array elements to `Saveable`, and an array of
+    /// `Option<T>` would put a presence byte behind every slot to say nothing.
+    /// Slots past `len` are [`ClockDomain::INERT`].
     domains: [ClockDomain; MAX_DOMAINS],
     #[save_skip]
     len: u8,

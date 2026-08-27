@@ -17,7 +17,6 @@
 use phosphor_core::audio::{AudioResampler, DcBlocker};
 use phosphor_core::core::debug::{DebugRegister, Debuggable};
 use phosphor_core::core::machine::ProfileSpan;
-use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::{AccessKind, AddressSpace16};
 use phosphor_core::core::{
     Bus, BusMaster, ClockDomainName as Clk, ClockTree, DomainId, InterruptState, TimingConfig,
@@ -530,56 +529,99 @@ pub fn run_frame(cpu: &mut I8088, board: &mut GottliebBoard) {
     }
 }
 
-#[derive(BusDebug)]
+/// The speech clock is the one thing a load cannot restore from the file. The
+/// domain comes back at whatever rate it was retuned to, because `ClockDomain`
+/// saves its live ratio, but the SC-01 itself save-skips its main clock and the
+/// two derived from it, so they have to be handed back from the tree. Without
+/// that a machine that had already retuned the VCO keeps the wrong speech clock
+/// and emits a different number of samples per frame than the saved machine
+/// did.
+#[derive(BusDebug, Saveable)]
+#[save_version(1)]
+#[save_tlv]
+#[save_after_load(reapply_speech_clock)]
 pub struct GottliebBoard {
     // Sound board (RIOT + DAC + Votrax). Its M6502 sits beside it rather than
     // inside it, so the sound CPU's cycles dispatch at a concrete type.
+    #[save(id = 1)]
     pub(crate) sound_cpu: M6502,
     #[debug_device("Sound Board")]
+    #[save(id = 2)]
     pub(crate) sound: GottliebSoundBoard,
 
-    // Memory
+    /// The address space persists its own writable regions: NVRAM, work RAM,
+    /// sprite RAM, video RAM and char RAM here.
     #[debug_map(cpu = 0)]
+    #[save(id = 3)]
     pub(crate) map: AddressSpace16,
 
     // GFX caches
+    #[save_skip]
     pub(crate) tile_rom_cache: gfx::GfxCache,
+    #[save_skip]
     pub(crate) charram_cache: gfx::GfxCache,
+    #[save_skip]
     pub(crate) sprite_cache: gfx::GfxCache,
 
     // Palette (16 entries, 4-bit RGB per channel)
+    #[save(id = 4)]
     pub(crate) palette_ram: [u8; 32],
+    /// Expanded from `palette_ram`, and saved beside it rather than rebuilt
+    /// after a load.
+    #[save(id = 5)]
     pub(crate) palette_rgb: [(u8, u8, u8); 16],
 
-    // Framebuffer (256×240 palette indices)
+    /// Framebuffer (256×240 palette indices), refilled by the render that runs
+    /// at the end of every frame.
+    #[save_skip]
     pub(crate) pixel_buffer: Vec<u8>,
 
     // Video state
+    #[save(id = 6)]
     pub(crate) video_control: u8,
+    #[save(id = 7)]
     pub(crate) sprite_bank: u8,
 
-    // Tile source selection (true = ROM, false = charram)
+    // Tile source selection (true = ROM, false = charram). Set once at ROM load
+    // by the game wrapper, so it is how the board is built rather than state.
+    #[save_skip]
     pub(crate) gfxcharlo: bool, // codes 0x00-0x7F
+    #[save_skip]
     pub(crate) gfxcharhi: bool, // codes 0x80-0xFF
 
-    // I/O ports (active-high for Q*Bert joystick/buttons)
+    // I/O ports (active-high for Q*Bert joystick/buttons) and the DIP byte,
+    // which keep their previous treatment: live input and operator
+    // configuration, neither of which a load takes back.
+    #[save_skip]
     pub(crate) input_ports: [u8; 4], // IN1-IN4
+    #[save_skip]
     pub(crate) dsw: u8,
 
     // Timing
+    #[save(id = 8)]
     pub(crate) clock: u64,
+    #[save(id = 9)]
     pub(crate) watchdog_counter: u16,
 
     // Profiling (not saved)
+    #[save_skip]
     pub(crate) profiling: bool,
+    #[save_skip]
     pub(crate) profile_spans: Vec<ProfileSpan>,
     /// Time spent in the most recent frame-boundary render. The render now runs
     /// inside `tick`, so the wrapper subtracts this to keep its "cpu" vs "gfx"
     /// spans meaningful. Only populated while `profiling` is on.
+    #[save_skip]
     pub(crate) last_render: std::time::Duration,
 }
 
 impl GottliebBoard {
+    /// Hand the SC-01 its clocks back from the tree after a load. See the note
+    /// on the struct for why the file cannot carry them.
+    fn reapply_speech_clock(&mut self) {
+        self.sound.reapply_speech_clock();
+    }
+
     pub fn new() -> Self {
         Self {
             sound_cpu: M6502::new(),
@@ -1043,53 +1085,6 @@ impl GottliebBoard {
     }
 }
 
-impl Saveable for GottliebBoard {
-    fn save_state(&self, w: &mut StateWriter) {
-        // The CPU is saved by the machine, which owns it.
-        // Sound CPU first, then the rest of the sound board: the same byte
-        // order the sound board wrote when it owned the CPU.
-        self.sound_cpu.save_state(w);
-        self.sound.save_state(w);
-        w.write_bytes(self.map.region_data(Region::Nvram));
-        w.write_bytes(self.map.region_data(Region::Ram));
-        w.write_bytes(self.map.region_data(Region::SpriteRam));
-        w.write_bytes(self.map.region_data(Region::VideoRam));
-        w.write_bytes(self.map.region_data(Region::CharRam));
-        w.write_bytes(&self.palette_ram);
-        w.write_u8(self.video_control);
-        w.write_u8(self.sprite_bank);
-        w.write_u64_le(self.clock);
-        // The clock tree travels inside the sound board, which owns it.
-        w.write_u16_le(self.watchdog_counter);
-    }
-
-    fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
-        // The CPU is loaded by the machine, which owns it.
-        self.sound_cpu.load_state(r)?;
-        self.sound.load_state(r)?;
-        r.read_bytes_into(self.map.region_data_mut(Region::Nvram))?;
-        r.read_bytes_into(self.map.region_data_mut(Region::Ram))?;
-        r.read_bytes_into(self.map.region_data_mut(Region::SpriteRam))?;
-        r.read_bytes_into(self.map.region_data_mut(Region::VideoRam))?;
-        r.read_bytes_into(self.map.region_data_mut(Region::CharRam))?;
-        r.read_bytes_into(&mut self.palette_ram)?;
-        self.video_control = r.read_u8()?;
-        self.sprite_bank = r.read_u8()?;
-        self.clock = r.read_u64_le()?;
-        self.watchdog_counter = r.read_u16_le()?;
-        // Rebuild derived state
-        self.rebuild_palette();
-        // The speech domain came back at whatever rate it was retuned to,
-        // because ClockDomain saves its live ratio. The SC-01 itself cannot:
-        // it save-skips its main clock and the two clocks derived from it, so
-        // hand them back from the tree. Without this a machine that had already
-        // retuned the VCO keeps the wrong speech clock, and emits a different
-        // number of samples per frame than the saved machine did.
-        self.sound.reapply_speech_clock();
-        Ok(())
-    }
-}
-
 impl Default for GottliebBoard {
     fn default() -> Self {
         Self::new()
@@ -1103,6 +1098,7 @@ impl Default for GottliebBoard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use phosphor_core::core::save_state::{Saveable, StateReader, StateWriter};
 
     #[test]
     fn votrax_write_sets_phoneme_and_inflection() {

@@ -868,6 +868,20 @@ fn pascal_to_screaming_snake(s: &str) -> String {
 /// - `#[save_elements]` is rejected: `[u8; N]` is raw bytes under TLV, so it
 ///   would have no effect.
 ///
+/// ## Optional components
+///
+/// An `Option<T>` field is written exactly when it is `Some`, and its id is
+/// simply absent from the body otherwise. That is how a per-variant component
+/// — a speech board fitted on one game and not its sibling — is expressed
+/// without a presence flag of its own.
+///
+/// Both directions of the mismatch fail, naming the field: a file that carries
+/// the component into a machine without one, and a machine with one fitted
+/// loading a file that has none. Adding `default` waives the second, for a
+/// component introduced after the saves were written. An `Option` field in a
+/// positional struct is rejected, because a positional body writes every field
+/// and so has nowhere to say a component is absent.
+///
 /// ## Retiring an id
 ///
 /// `#[save_retired(3, 7)]` at the struct level lists ids that once existed and
@@ -1115,6 +1129,12 @@ fn gen_positional_body(
             continue;
         }
         let ident = field.ident.as_ref().expect("named field");
+        if option_inner_type(&field.ty).is_some() {
+            panic!(
+                "{struct_name}.{ident}: an Option field needs #[save_tlv]. A positional body \
+                 has nowhere to say a component is absent, since every field is written."
+            );
+        }
         let force_elements = has_save_elements(&field.attrs);
         let (save, load) = gen_field_io(ident, &field.ty, force_elements, Encoding::Positional);
 
@@ -1154,6 +1174,10 @@ fn gen_tlv_body(
     let mut seen_decls = Vec::new();
     let mut missing_checks = Vec::new();
     let mut assigned: Vec<(u16, String)> = Vec::new();
+    // Fields that are always written, and the `Option` ones that are written
+    // only when fitted, which is why the count cannot be a constant.
+    let mut fixed_count: u16 = 0;
+    let mut optional_counts: Vec<TokenStream2> = Vec::new();
     let struct_path = struct_name.to_string();
 
     for field in fields {
@@ -1185,11 +1209,69 @@ fn gen_tlv_body(
         }
         assigned.push((id, path.clone()));
 
+        let seen = syn::Ident::new(&format!("__seen_{ident}"), ident.span());
+        seen_decls.push(quote! { let mut #seen = false; });
+
+        // An `Option<T>` component is present in the body exactly when it is
+        // fitted on the machine, which is what makes a per-variant component
+        // expressible without a presence flag of its own.
+        if option_inner_type(&field.ty).is_some() {
+            optional_counts.push(quote! {
+                if self.#ident.is_some() {
+                    __count += 1;
+                }
+            });
+            save_stmts.push((
+                id,
+                quote! {
+                    if let Some(__v) = &self.#ident {
+                        w.write_tlv(#id, |w| {
+                            phosphor_core::prelude::Saveable::save_state(__v, w);
+                        });
+                    }
+                },
+            ));
+            arms.push(quote! {
+                #id => {
+                    if #seen {
+                        return Err(phosphor_core::prelude::SaveError::InvalidFormat(
+                            format!("field id {} ({}) appears twice", #id, #path)
+                        ));
+                    }
+                    #seen = true;
+                    let Some(__v) = self.#ident.as_mut() else {
+                        return Err(phosphor_core::prelude::SaveError::InvalidFormat(
+                            format!(
+                                "{} is in the file but this machine has no such component",
+                                #path
+                            )
+                        ));
+                    };
+                    r.read_payload(__id, __len, __at, #path, |r| {
+                        phosphor_core::prelude::Saveable::load_state(__v, r)?;
+                        Ok(())
+                    })?;
+                }
+            });
+            if !spec.default_if_absent {
+                missing_checks.push(quote! {
+                    if !#seen && self.#ident.is_some() {
+                        return Err(phosphor_core::prelude::SaveError::InvalidFormat(
+                            format!(
+                                "{} is fitted on this machine but absent from the file",
+                                #path
+                            )
+                        ));
+                    }
+                });
+            }
+            continue;
+        }
+
+        fixed_count += 1;
         let (save, load) = gen_field_io(ident, &field.ty, false, Encoding::Tlv);
         save_stmts.push((id, quote! { w.write_tlv(#id, |w| { #save }); }));
 
-        let seen = syn::Ident::new(&format!("__seen_{ident}"), ident.span());
-        seen_decls.push(quote! { let mut #seen = false; });
         arms.push(quote! {
             #id => {
                 if #seen {
@@ -1247,13 +1329,37 @@ fn gen_tlv_body(
     };
 
     save_stmts.sort_by_key(|(id, _)| *id);
-    let field_count = save_stmts.len() as u16;
     let save_stmts = save_stmts.into_iter().map(|(_, stmt)| stmt);
+    let write_count = if optional_counts.is_empty() {
+        quote! { w.write_u16_le(#fixed_count); }
+    } else {
+        quote! {
+            let mut __count: u16 = #fixed_count;
+            #(#optional_counts)*
+            w.write_u16_le(__count);
+        }
+    };
     let save = quote! {
-        w.write_u16_le(#field_count);
+        #write_count
         #(#save_stmts)*
     };
     (save, load)
+}
+
+/// The `T` of an `Option<T>` field, which TLV writes only when it is `Some`.
+fn option_inner_type(ty: &Type) -> Option<&Type> {
+    let Type::Path(path) = ty else { return None };
+    let seg = path.path.segments.last().expect("non-empty path");
+    if seg.ident != "Option" {
+        return None;
+    }
+    let syn::PathArguments::AngleBracketed(args) = &seg.arguments else {
+        return None;
+    };
+    match args.args.first() {
+        Some(syn::GenericArgument::Type(inner)) => Some(inner),
+        _ => None,
+    }
 }
 
 /// `#[save(id = N)]` / `#[save(id = N, default)]` on a field.
@@ -1467,9 +1573,17 @@ fn delegates_to_saveable(ty: &Type) -> bool {
             if is_primitive_type(ty) {
                 return false;
             }
+            let seg = path.path.segments.last().expect("non-empty path");
+            // A Box is transparent, so what it holds decides.
+            if seg.ident == "Box" {
+                return match generic_inner_type(seg) {
+                    Some(inner) => delegates_to_saveable(inner),
+                    None => true,
+                };
+            }
             // Vec<u8> is a length-prefixed blob. A Vec of anything else is
             // rejected by `gen_field_io`, so it never reaches a chunk.
-            path.path.segments.last().expect("non-empty path").ident != "Vec"
+            seg.ident != "Vec"
         }
         _ => true,
     }
@@ -1486,8 +1600,20 @@ enum Encoding {
     Tlv,
 }
 
-/// Generate save and load token streams for a single field based on its type.
+/// Generate save and load token streams for one field of `self`.
 fn gen_field_io(
+    ident: &syn::Ident,
+    ty: &Type,
+    force_elements: bool,
+    enc: Encoding,
+) -> (TokenStream2, TokenStream2) {
+    gen_place_io(&quote! { self.#ident }, ident, ty, force_elements, enc)
+}
+
+/// Generate save and load token streams for the value at `place`, whose type is
+/// `ty`. `ident` names the field for panic messages and loop bindings.
+fn gen_place_io(
+    place: &TokenStream2,
     ident: &syn::Ident,
     ty: &Type,
     force_elements: bool,
@@ -1495,52 +1621,61 @@ fn gen_field_io(
 ) -> (TokenStream2, TokenStream2) {
     match ty {
         // Fixed-size array: [T; N]
-        Type::Array(arr) => gen_array_io(ident, &arr.elem, force_elements, enc),
+        Type::Array(arr) => gen_array_io(place, ident, &arr.elem, force_elements, enc),
         // Path types: primitives, Vec<u8>, or Saveable delegates
         Type::Path(path) => {
             let seg = path.path.segments.last().expect("non-empty path");
             let type_name = seg.ident.to_string();
             match type_name.as_str() {
                 "u8" => (
-                    quote! { w.write_u8(self.#ident); },
-                    quote! { self.#ident = r.read_u8()?; },
+                    quote! { w.write_u8(#place); },
+                    quote! { #place = r.read_u8()?; },
                 ),
                 "u16" => (
-                    quote! { w.write_u16_le(self.#ident); },
-                    quote! { self.#ident = r.read_u16_le()?; },
+                    quote! { w.write_u16_le(#place); },
+                    quote! { #place = r.read_u16_le()?; },
                 ),
                 "u32" => (
-                    quote! { w.write_u32_le(self.#ident); },
-                    quote! { self.#ident = r.read_u32_le()?; },
+                    quote! { w.write_u32_le(#place); },
+                    quote! { #place = r.read_u32_le()?; },
                 ),
                 "u64" => (
-                    quote! { w.write_u64_le(self.#ident); },
-                    quote! { self.#ident = r.read_u64_le()?; },
+                    quote! { w.write_u64_le(#place); },
+                    quote! { #place = r.read_u64_le()?; },
                 ),
                 "i16" => (
-                    quote! { w.write_i16_le(self.#ident); },
-                    quote! { self.#ident = r.read_i16_le()?; },
+                    quote! { w.write_i16_le(#place); },
+                    quote! { #place = r.read_i16_le()?; },
                 ),
                 "i32" => (
-                    quote! { w.write_i32_le(self.#ident); },
-                    quote! { self.#ident = r.read_i32_le()?; },
+                    quote! { w.write_i32_le(#place); },
+                    quote! { #place = r.read_i32_le()?; },
                 ),
                 "i64" => (
-                    quote! { w.write_i64_le(self.#ident); },
-                    quote! { self.#ident = r.read_i64_le()?; },
+                    quote! { w.write_i64_le(#place); },
+                    quote! { #place = r.read_i64_le()?; },
                 ),
                 "f32" => (
-                    quote! { w.write_f32_le(self.#ident); },
-                    quote! { self.#ident = r.read_f32_le()?; },
+                    quote! { w.write_f32_le(#place); },
+                    quote! { #place = r.read_f32_le()?; },
                 ),
                 "f64" => (
-                    quote! { w.write_f64_le(self.#ident); },
-                    quote! { self.#ident = r.read_f64_le()?; },
+                    quote! { w.write_f64_le(#place); },
+                    quote! { #place = r.read_f64_le()?; },
                 ),
                 "bool" => (
-                    quote! { w.write_bool(self.#ident); },
-                    quote! { self.#ident = r.read_bool()?; },
+                    quote! { w.write_bool(#place); },
+                    quote! { #place = r.read_bool()?; },
                 ),
+                // A `Box` is transparent on the wire: a 4 KB RAM held behind one
+                // encodes exactly as it would inline. Dereferencing it here is
+                // what lets the inner type's own encoding be reused verbatim.
+                "Box" => {
+                    let inner = generic_inner_type(seg).unwrap_or_else(|| {
+                        panic!("Saveable derive: field `{ident}` has a Box with no type argument")
+                    });
+                    gen_place_io(&quote! { (*#place) }, ident, inner, force_elements, enc)
+                }
                 "Vec" => {
                     // Verify it's Vec<u8>
                     if !is_vec_u8(seg) {
@@ -1551,27 +1686,27 @@ fn gen_field_io(
                     }
                     match enc {
                         Encoding::Positional => (
-                            quote! { w.write_bytes(&self.#ident); },
-                            quote! { self.#ident = r.read_bytes()?.to_vec(); },
+                            quote! { w.write_bytes(&#place); },
+                            quote! { #place = r.read_bytes()?.to_vec(); },
                         ),
                         Encoding::Tlv => (
-                            quote! { w.write_raw(&self.#ident); },
-                            quote! { self.#ident = r.read_rest().to_vec(); },
+                            quote! { w.write_raw(&#place); },
+                            quote! { #place = r.read_rest().to_vec(); },
                         ),
                     }
                 }
                 // Unknown type — delegate to Saveable
                 _ => (
-                    quote! { phosphor_core::prelude::Saveable::save_state(&self.#ident, w); },
-                    quote! { phosphor_core::prelude::Saveable::load_state(&mut self.#ident, r)?; },
+                    quote! { phosphor_core::prelude::Saveable::save_state(&#place, w); },
+                    quote! { phosphor_core::prelude::Saveable::load_state(&mut #place, r)?; },
                 ),
             }
         }
         _ => {
             // Fallback: delegate to Saveable
             (
-                quote! { phosphor_core::prelude::Saveable::save_state(&self.#ident, w); },
-                quote! { phosphor_core::prelude::Saveable::load_state(&mut self.#ident, r)?; },
+                quote! { phosphor_core::prelude::Saveable::save_state(&#place, w); },
+                quote! { phosphor_core::prelude::Saveable::load_state(&mut #place, r)?; },
             )
         }
     }
@@ -1583,6 +1718,7 @@ fn gen_field_io(
 /// of using the bulk `write_bytes`/`read_bytes_into` path. This preserves
 /// compatibility with hand-written impls that used individual `write_u8` calls.
 fn gen_array_io(
+    place: &TokenStream2,
     ident: &syn::Ident,
     elem_ty: &Type,
     force_elements: bool,
@@ -1592,12 +1728,12 @@ fn gen_array_io(
     if is_type_u8(elem_ty) && !force_elements {
         return match enc {
             Encoding::Positional => (
-                quote! { w.write_bytes(&self.#ident); },
-                quote! { r.read_bytes_into(&mut self.#ident)?; },
+                quote! { w.write_bytes(&#place); },
+                quote! { r.read_bytes_into(&mut #place)?; },
             ),
             Encoding::Tlv => (
-                quote! { w.write_raw(&self.#ident); },
-                quote! { r.read_raw_into(&mut self.#ident)?; },
+                quote! { w.write_raw(&#place); },
+                quote! { r.read_raw_into(&mut #place)?; },
             ),
         };
     }
@@ -1606,8 +1742,8 @@ fn gen_array_io(
     let var = syn::Ident::new("__v0", ident.span());
     let (elem_save, elem_load) = gen_array_element_io(ident, &var, elem_ty, 0);
     (
-        quote! { for #var in &self.#ident { #elem_save } },
-        quote! { for #var in &mut self.#ident { #elem_load } },
+        quote! { for #var in &#place { #elem_save } },
+        quote! { for #var in &mut #place { #elem_load } },
     )
 }
 
@@ -1713,10 +1849,19 @@ fn is_type_u8(ty: &Type) -> bool {
 
 /// Check if a path segment is `Vec<u8>`.
 fn is_vec_u8(seg: &syn::PathSegment) -> bool {
-    if let syn::PathArguments::AngleBracketed(args) = &seg.arguments
-        && let Some(syn::GenericArgument::Type(inner)) = args.args.first()
-    {
-        return is_type_u8(inner);
+    match generic_inner_type(seg) {
+        Some(inner) => is_type_u8(inner),
+        None => false,
     }
-    false
+}
+
+/// The first type argument of a segment like `Box<T>` or `Vec<T>`.
+fn generic_inner_type(seg: &syn::PathSegment) -> Option<&Type> {
+    let syn::PathArguments::AngleBracketed(args) = &seg.arguments else {
+        return None;
+    };
+    match args.args.first() {
+        Some(syn::GenericArgument::Type(inner)) => Some(inner),
+        _ => None,
+    }
 }

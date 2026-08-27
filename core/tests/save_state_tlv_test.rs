@@ -576,6 +576,101 @@ fn an_enum_nests_in_a_tlv_struct() {
     assert_eq!(out, src);
 }
 
+/// A per-variant component — a speech board fitted on one game and not its
+/// sibling — is an `Option<T>` field, present in the body exactly when it is
+/// fitted.
+#[test]
+fn an_optional_component_is_written_only_when_fitted() {
+    #[derive(Saveable, Default, Debug, PartialEq)]
+    #[save_version(1)]
+    #[save_tlv]
+    struct Speech {
+        #[save(id = 1)]
+        phoneme: u8,
+    }
+
+    #[derive(Saveable, Default, Debug, PartialEq)]
+    #[save_version(1)]
+    #[save_tlv]
+    struct Sound {
+        #[save(id = 1)]
+        volume: u8,
+        #[save(id = 2)]
+        speech: Option<Speech>,
+    }
+
+    // Fitted: two fields on the wire, and the component round trips.
+    let src = Sound {
+        volume: 7,
+        speech: Some(Speech { phoneme: 0x2A }),
+    };
+    let fitted = bytes_of(&src);
+    assert_eq!(&fitted[1..3], &[2, 0], "two fields");
+    let mut out = Sound {
+        volume: 0,
+        speech: Some(Speech::default()),
+    };
+    load_into(&mut out, &fitted).unwrap();
+    assert_eq!(out, src);
+
+    // Not fitted: the id is simply absent, and the body says one field.
+    let bare = bytes_of(&Sound {
+        volume: 7,
+        speech: None,
+    });
+    assert_eq!(&bare[1..3], &[1, 0], "one field");
+    let mut out = Sound::default();
+    load_into(&mut out, &bare).unwrap();
+    assert_eq!(out.speech, None);
+}
+
+/// Both directions of the mismatch fail naming the field, which is what makes
+/// "optional" mean "per variant" rather than "sometimes skipped".
+#[test]
+fn an_optional_component_fails_against_a_machine_that_disagrees() {
+    #[derive(Saveable, Default, Debug, PartialEq)]
+    #[save_version(1)]
+    #[save_tlv]
+    struct Speech {
+        #[save(id = 1)]
+        phoneme: u8,
+    }
+
+    #[derive(Saveable, Default, Debug, PartialEq)]
+    #[save_version(1)]
+    #[save_tlv]
+    struct Sound {
+        #[save(id = 1)]
+        volume: u8,
+        #[save(id = 2)]
+        speech: Option<Speech>,
+    }
+
+    let fitted = bytes_of(&Sound {
+        volume: 7,
+        speech: Some(Speech { phoneme: 1 }),
+    });
+    let bare = bytes_of(&Sound {
+        volume: 7,
+        speech: None,
+    });
+
+    // A file with the component, loaded into a machine without one.
+    let mut no_speech = Sound::default();
+    let msg = format!("{}", load_into(&mut no_speech, &fitted).unwrap_err());
+    assert!(msg.contains("Sound.speech"), "{msg}");
+    assert!(msg.contains("no such component"), "{msg}");
+
+    // A machine with the component, loading a file that has none.
+    let mut has_speech = Sound {
+        volume: 0,
+        speech: Some(Speech::default()),
+    };
+    let msg = format!("{}", load_into(&mut has_speech, &bare).unwrap_err());
+    assert!(msg.contains("Sound.speech"), "{msg}");
+    assert!(msg.contains("absent from the file"), "{msg}");
+}
+
 // -- The post-load hook ------------------------------------------------------
 
 /// `#[save_after_load]` runs its methods in order, after the body and after

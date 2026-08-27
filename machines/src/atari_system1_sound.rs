@@ -23,7 +23,6 @@
 //! IRQ = YM2151 timer (or POKEY); NMI = a new command from the main CPU.
 
 use phosphor_core::core::bus::InterruptState;
-use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::{Bus, BusMaster, ClockDomainName as Clk, ClockTree, DomainId};
 use phosphor_core::cpu::Cpu;
 use phosphor_core::cpu::m6502::M6502;
@@ -31,6 +30,7 @@ use phosphor_core::device::pokey::Pokey;
 use phosphor_core::device::tms5220::Tms5220;
 use phosphor_core::device::via6522::Via6522;
 use phosphor_core::device::ym2151::Ym2151;
+use phosphor_macros::Saveable;
 
 /// Sound CPU clock: 14.318181 MHz / 8 = 1.789772 MHz. POKEY runs at the same
 /// rate; the YM2151 runs at /4 = twice the sound CPU, so its timers advance two
@@ -59,8 +59,14 @@ fn tms_clock_for_pb4(pb4: bool) -> u32 {
 /// Port A is the TMS data / status byte, and Port B carries the `/WS` (D0) and
 /// `/RS` (D1) strobes plus the TMS `/READY` (D2) and `/INT` (D3) status the
 /// sound CPU polls.
+#[derive(Saveable)]
+#[save_version(1)]
+#[save_tlv]
+#[save_after_load(resync_tms_clock)]
 struct Speech {
+    #[save(id = 1)]
     via: Via6522,
+    #[save(id = 2)]
     tms: Tms5220,
     /// The board's clock tree, stepped in *sound-CPU* cycles.
     ///
@@ -69,7 +75,13 @@ struct Speech {
     /// `set_step_domain` renominates the sound 6502 as the domain ratios are
     /// expressed against, because that is what this section's loop counts in:
     /// [`tick`](Self::tick) runs once per sound-CPU cycle.
+    ///
+    /// The clock Port B bit 4 selects travels as the domain's own ratio, so it
+    /// needs no field of its own.
+    #[save(id = 3)]
     clocks: ClockTree,
+    /// A handle into the clock tree, which is itself saved.
+    #[save_skip]
     tms_dom: DomainId,
 }
 
@@ -163,66 +175,86 @@ impl Speech {
         self.tms.drain_audio()
     }
 
-    fn save_state(&self, w: &mut StateWriter) {
-        self.via.save_state(w);
-        self.tms.save_state(w);
-        // The selected clock travels as the domain's own ratio, so it no longer
-        // needs writing beside the accumulator that used to carry it.
-        self.clocks.save_state(w);
-    }
-
-    fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
-        self.via.load_state(r)?;
-        self.tms.load_state(r)?;
-        self.clocks.load_state(r)?;
-        // Re-sync the TMS resampler to the restored clock (the device's clock is
-        // configuration and isn't part of its own save state).
-        self.tms.set_clock(self.tms_clock_hz());
-        Ok(())
+    /// Re-sync the TMS resampler to the restored clock.
+    ///
+    /// The domain comes back at whatever rate Port B bit 4 had selected,
+    /// because the tree saves its live ratio, but the device's own clock is
+    /// configuration and is not part of its save state, so it is handed back
+    /// from the tree.
+    fn resync_tms_clock(&mut self) {
+        let hz = self.tms_clock_hz();
+        self.tms.set_clock(hz);
     }
 }
 
+#[derive(Saveable)]
+#[save_version(1)]
+#[save_tlv]
 pub struct AtariSystem1Sound {
+    #[save(id = 1)]
     cpu: M6502,
     /// Everything the sound CPU talks to. Held apart from the CPU so a cycle
     /// dispatches at a concrete bus rather than a trait object -- see
     /// `docs/designs/concrete-bus-dispatch.md`.
+    #[save(id = 2)]
     bus: AtariSystem1SoundBus,
 }
 
 /// The sound 6502's bus: POKEY, YM2151, optional speech, memory, and the
 /// inter-CPU latches.
+#[derive(Saveable)]
+#[save_version(1)]
+#[save_tlv]
 struct AtariSystem1SoundBus {
+    #[save(id = 1)]
     sound_ram: Box<[u8; 0x1000]>,
     /// ROM mapped at 0x4000-0xFFFF (0x4000-0x7FFF is empty on marble).
+    #[save_skip]
     sound_rom: Box<[u8; 0xC000]>,
+    #[save(id = 2)]
     pokey: Pokey,
+    #[save(id = 3)]
     ym: Ym2151,
     /// TMS5220 speech behind a VIA6522 at `0x1000-0x100F` — present only on
     /// speech games (Road Runner et al.), `None` on Marble.
+    ///
+    /// An `Option` field is on the wire exactly when it is fitted, so a Marble
+    /// save and a Road Runner save differ by the id being there rather than by
+    /// a trailing length.
+    #[save(id = 4)]
     speech: Option<Speech>,
     /// Addressable output latch (LS259): bit 0 = YM reset (unused here),
     /// bits 6-7 = coin counters (Phase 5).
+    #[save(id = 5)]
     outlatch: u8,
     /// Coin switches read at 0x1820 (active-low, bits 0-2): a set bit here means
     /// that coin mech is currently pressed, so its 0x1820 bit reads 0.
+    #[save(id = 6)]
     coin_inputs: u8,
 
     // Inter-CPU latches.
     /// Command from the main CPU; `command_pending` is the 68KBUF flag.
+    #[save(id = 7)]
     soundlatch: u8,
+    #[save(id = 8)]
     command_pending: bool,
     /// Response to the main CPU; `response_pending` raises main IRQ6 (SNDBUF).
+    #[save(id = 9)]
     mainlatch: u8,
+    #[save(id = 10)]
     response_pending: bool,
     /// One-shot NMI to the 6502, set when a fresh command arrives.
+    #[save(id = 11)]
     sound_nmi: bool,
 
     /// True while the main CPU holds the sound CPU in reset (bankselect bit 7).
+    #[save(id = 12)]
     held_reset: bool,
     /// Set when reset is released, so the next tick boots the CPU from its vector.
+    #[save(id = 13)]
     reset_pending: bool,
 
+    #[save(id = 14)]
     clock: u64,
 }
 
@@ -534,85 +566,10 @@ impl phosphor_core::device::Device for AtariSystem1Sound {
     }
 }
 
-// Chunk tags for this board's components, assigned explicitly because the impl
-// is hand-written. Stable for the board; a retired tag is never reused.
-//
-// The speech board is only on the speech games, so its tag may be absent. It is
-// last in the body, with nothing after it: an optional chunk can only be
-// followed by another chunk or by the end of the board's own bytes, because
-// absence is detected by peeking at the next tag.
-const A1S_TAG_CPU: u16 = 1;
-const A1S_TAG_POKEY: u16 = 2;
-const A1S_TAG_YM: u16 = 3;
-const A1S_TAG_SPEECH: u16 = 4;
-
-impl Saveable for AtariSystem1Sound {
-    fn save_state(&self, w: &mut StateWriter) {
-        w.write_component(A1S_TAG_CPU, &self.cpu);
-        w.write_component(A1S_TAG_POKEY, &self.bus.pokey);
-        w.write_component(A1S_TAG_YM, &self.bus.ym);
-        w.write_bytes(self.bus.sound_ram.as_ref());
-        w.write_u8(self.bus.outlatch);
-        w.write_u8(self.bus.coin_inputs);
-        w.write_u8(self.bus.soundlatch);
-        w.write_bool(self.bus.command_pending);
-        w.write_u8(self.bus.mainlatch);
-        w.write_bool(self.bus.response_pending);
-        w.write_bool(self.bus.sound_nmi);
-        w.write_bool(self.bus.held_reset);
-        w.write_bool(self.bus.reset_pending);
-        w.write_u64_le(self.bus.clock);
-        // Speech state only exists on speech games. It is now a chunk, so a
-        // Marble save that has none is distinguishable from a Road Runner save
-        // that does, rather than the two differing only in trailing length.
-        // `Speech` keeps inherent save/load rather than a `Saveable` impl, so
-        // the frame goes on by hand.
-        if let Some(speech) = &self.bus.speech {
-            w.write_tlv(A1S_TAG_SPEECH, |w| speech.save_state(w));
-        }
-    }
-
-    fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
-        r.read_component(A1S_TAG_CPU, "AtariSystem1Sound.cpu", |r| {
-            self.cpu.load_state(r)
-        })?;
-        r.read_component(A1S_TAG_POKEY, "AtariSystem1Sound.pokey", |r| {
-            self.bus.pokey.load_state(r)
-        })?;
-        r.read_component(A1S_TAG_YM, "AtariSystem1Sound.ym", |r| {
-            self.bus.ym.load_state(r)
-        })?;
-        r.read_bytes_into(self.bus.sound_ram.as_mut())?;
-        self.bus.outlatch = r.read_u8()?;
-        self.bus.coin_inputs = r.read_u8()?;
-        self.bus.soundlatch = r.read_u8()?;
-        self.bus.command_pending = r.read_bool()?;
-        self.bus.mainlatch = r.read_u8()?;
-        self.bus.response_pending = r.read_bool()?;
-        self.bus.sound_nmi = r.read_bool()?;
-        self.bus.held_reset = r.read_bool()?;
-        self.bus.reset_pending = r.read_bool()?;
-        self.bus.clock = r.read_u64_le()?;
-        let has_speech = self.bus.speech.is_some();
-        r.read_optional(
-            A1S_TAG_SPEECH,
-            "AtariSystem1Sound.speech",
-            has_speech,
-            |r| {
-                self.bus
-                    .speech
-                    .as_mut()
-                    .expect("guarded by has_speech")
-                    .load_state(r)
-            },
-        )?;
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use phosphor_core::core::save_state::{Saveable, StateReader, StateWriter};
 
     /// Build a sound board with a tiny hand-assembled 6502 program that, on NMI,
     /// reads the command latch and echoes (command + 1) back to the main CPU.

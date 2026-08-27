@@ -1,4 +1,3 @@
-use phosphor_core::core::address_space::{AccessKind, RegionId};
 use phosphor_core::core::address_space16::{AddressSpace16, WriteAnnotation};
 use phosphor_core::core::debug_trace::{DebugEvent, DebugEventKind};
 use phosphor_core::core::machine::{
@@ -311,6 +310,49 @@ impl Namco51Wrapper {
     }
 }
 
+/// Mode discriminants for the wrapper's own body.
+const NAMCO51_MODE_HLE: u8 = 0;
+const NAMCO51_MODE_LLE: u8 = 1;
+
+/// Hand-written, and staying that way: which mode this chip is in is decided by
+/// whether a 51XX firmware ROM was found, and the LLE variant cannot be
+/// constructed from a file at all. A derive would have to build the variant the
+/// bytes name, which is exactly what must not happen here.
+impl Saveable for Namco51Wrapper {
+    fn save_state(&self, w: &mut StateWriter) {
+        match self {
+            Self::Hle(n) => {
+                w.write_u8(NAMCO51_MODE_HLE);
+                n.save_state(w);
+            }
+            Self::Lle(n) => {
+                w.write_u8(NAMCO51_MODE_LLE);
+                n.save_state(w);
+            }
+        }
+    }
+
+    fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
+        match r.read_u8()? {
+            NAMCO51_MODE_HLE => {
+                let mut n = Namco51::new();
+                n.load_state(r)?;
+                *self = Self::Hle(n);
+                Ok(())
+            }
+            NAMCO51_MODE_LLE => match self {
+                Self::Lle(n) => n.load_state(r),
+                _ => Err(SaveError::InvalidFormat(
+                    "51XX LLE save state but no ROM loaded".to_string(),
+                )),
+            },
+            mode => Err(SaveError::InvalidFormat(format!(
+                "unknown 51XX mode: {mode}"
+            ))),
+        }
+    }
+}
+
 use phosphor_core::core::debug::{DebugRegister, Debuggable};
 
 impl Debuggable for Namco51Wrapper {
@@ -484,19 +526,35 @@ fn step_cpus<B: NamcoGalagaBus>(cpus: &mut GalagaCpus, bus: &mut B, gate: CycleG
 /// Game wrappers compose this struct, own their RAM arrays, and implement
 /// Bus to route memory accesses. The CPUs themselves live in [`GalagaCpus`],
 /// beside the bus rather than inside it.
+#[derive(Saveable)]
+#[save_version(1)]
+#[save_tlv]
 pub struct NamcoGalagaBoard {
     /// Address space owning the three program ROMs and all debug observability
     /// (watchpoints, the write-event trace, and the access-context latch).
+    ///
+    /// It persists its own writable regions, which is the rule this board used
+    /// to apply by hand: `saved_region_ids` filtered `regions()` on
+    /// `AccessKind::ReadWrite` and wrote each in turn.
+    #[save(id = 1)]
     pub(crate) map: AddressSpace16,
 
     // Devices
+    #[save(id = 2)]
     pub(crate) wsg: NamcoWsg,
+    #[save(id = 3)]
     pub(crate) namco06: Namco06,
+    #[save(id = 4)]
     pub(crate) namco51: Namco51Wrapper,
+    #[save(id = 5)]
     pub(crate) namco53: Namco53,
 
-    // Optional score/protection MCU (06XX chip-select 2). Present only on the
-    // boards that fit it (e.g. Xevious, Bosconian); `None` on Galaga/Dig Dug.
+    /// Optional score/protection MCU (06XX chip-select 2). Present only on the
+    /// boards that fit it (e.g. Xevious, Bosconian); `None` on Galaga/Dig Dug.
+    ///
+    /// An `Option` field is on the wire exactly when it is fitted, which is
+    /// what the hand-written impl's presence flag did.
+    #[save(id = 6)]
     pub(crate) namco50: Option<Namco50>,
 
     // Clock divider for the 51XX MCU (LLE mode only). MB88xx runs at 256 kHz.
@@ -504,37 +562,62 @@ pub struct NamcoGalagaBoard {
     ///
     /// The game wrappers hand-write `BusDebug::devices`, so unlike the boards
     /// that derive it this one is listed there rather than by attribute.
+    #[save(id = 7)]
     pub(crate) clocks: ClockTree,
+    /// A handle into the clock tree, which is itself saved.
+    #[save_skip]
     pub(crate) namco51_dom: DomainId,
 
     // Input ports (active-low: 0xFF = all released)
+    #[save(id = 8)]
     pub(crate) in0: u8,
+    #[save(id = 9)]
     pub(crate) in1: u8,
+    #[save(id = 10)]
     pub(crate) dswa: u8,
+    #[save(id = 11)]
     pub(crate) dswb: u8,
 
     // LS259 misc latch outputs
-    pub(crate) main_irq_enabled: bool,  // Q0
-    pub(crate) sub_irq_enabled: bool,   // Q1
+    #[save(id = 12)]
+    pub(crate) main_irq_enabled: bool, // Q0
+    #[save(id = 13)]
+    pub(crate) sub_irq_enabled: bool, // Q1
+    #[save(id = 14)]
     pub(crate) sound_nmi_enabled: bool, // Q2 (inverted!)
-    pub(crate) sub_reset: bool,         // Q3 (true = sub/sound held in reset)
+    #[save(id = 15)]
+    pub(crate) sub_reset: bool, // Q3 (true = sub/sound held in reset)
 
     // Interrupt state
+    #[save(id = 16)]
     pub(crate) main_irq_pending: bool,
+    #[save(id = 17)]
     pub(crate) main_nmi_pending: bool, // from 06XX timer
+    #[save(id = 18)]
     pub(crate) sub_irq_pending: bool,
+    #[save(id = 19)]
     pub(crate) sound_nmi_pending: bool, // from scanline timer (64/192), gated by Q2
 
-    // Palette
+    /// The colour PROM and the palette expanded from it. Derived from ROM
+    /// rather than from anything the CPU writes, so it is rebuilt at ROM load
+    /// and stays out of the save.
+    #[save_skip]
     pub(crate) palette_prom: [u8; 32],
+    #[save_skip]
     pub(crate) palette_rgb: [(u8, u8, u8); 32],
 
     // Timing
+    #[save(id = 20)]
     pub(crate) clock: u64,
+    #[save(id = 21)]
     pub(crate) watchdog_counter: u32,
+    #[save(id = 22)]
     pub(crate) flip_screen: bool,
 
-    // Deferred sub CPU reset (set by write_misc_latch, acted on in tick)
+    /// Deferred sub CPU reset (set by write_misc_latch, acted on in tick).
+    /// Describes a hand-off inside one tick, which a save is never taken part
+    /// way through, so a load starts it clear.
+    #[save_skip(default)]
     pending_sub_cpu_reset: bool,
 
     // Debug observability (observer state — never saved in save states).
@@ -542,6 +625,7 @@ pub struct NamcoGalagaBoard {
     /// boundaries each tick for hit/event attribution. The map has a single
     /// PC latch, but three CPUs share this bus, so the board remembers all
     /// three and feeds the map the relevant one before each CPU runs.
+    #[save_skip]
     pub(crate) debug_pc: [Option<u32>; 3],
 }
 
@@ -1228,157 +1312,6 @@ impl NamcoGalagaBoard {
     /// Whether the sub and sound CPUs are running (not held in reset).
     pub fn sub_running(&self) -> bool {
         !self.sub_reset
-    }
-}
-
-/// Ids of the writable map regions, in declaration order.
-///
-/// Game RAM lives in regions the game wrapper declares on the board's map, so
-/// the board serializes them here rather than each wrapper hand-listing its
-/// own. Writable is the discriminator: the three CPU ROMs are `ReadOnly` and,
-/// like every other board, are reloaded from files rather than saved.
-fn saved_region_ids(map: &AddressSpace16) -> Vec<RegionId> {
-    map.regions()
-        .iter()
-        .filter(|r| r.access == AccessKind::ReadWrite)
-        .map(|r| r.id)
-        .collect()
-}
-
-impl Saveable for NamcoGalagaBoard {
-    fn save_state(&self, w: &mut StateWriter) {
-        // Game RAM, in map declaration order (load reads it back the same way).
-        for id in saved_region_ids(&self.map) {
-            w.write_bytes(self.map.region_data(id));
-        }
-
-        // Devices (the CPUs are saved by the wrapper, which owns them)
-        self.wsg.save_state(w);
-        self.namco06.save_state(w);
-
-        // 51XX: mode discriminant (0=HLE, 1=LLE) + mode-specific state
-        match &self.namco51 {
-            Namco51Wrapper::Hle(n) => {
-                w.write_u8(0);
-                n.save_state(w);
-            }
-            Namco51Wrapper::Lle(n) => {
-                w.write_u8(1);
-                n.save_state(w);
-                self.clocks.save_state(w);
-            }
-        }
-
-        self.namco53.save_state(w);
-
-        // 50XX: presence flag + (when fitted) its score/protection state.
-        match &self.namco50 {
-            Some(n50) => {
-                w.write_bool(true);
-                n50.save_state(w);
-            }
-            None => w.write_bool(false),
-        }
-
-        // I/O state
-        w.write_u8(self.in0);
-        w.write_u8(self.in1);
-        w.write_u8(self.dswa);
-        w.write_u8(self.dswb);
-
-        // Latch + interrupt state
-        w.write_bool(self.main_irq_enabled);
-        w.write_bool(self.sub_irq_enabled);
-        w.write_bool(self.sound_nmi_enabled);
-        w.write_bool(self.sub_reset);
-        w.write_bool(self.main_irq_pending);
-        w.write_bool(self.main_nmi_pending);
-        w.write_bool(self.sub_irq_pending);
-        w.write_bool(self.sound_nmi_pending);
-        w.write_bool(self.flip_screen);
-
-        // Timing
-        w.write_u64_le(self.clock);
-        w.write_u32_le(self.watchdog_counter);
-    }
-
-    fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
-        // Game RAM, in the same order save_state wrote it.
-        for id in saved_region_ids(&self.map) {
-            r.read_bytes_into(self.map.region_data_mut(id))?;
-        }
-
-        // Devices (the CPUs are loaded by the wrapper, which owns them)
-        self.wsg.load_state(r)?;
-        self.namco06.load_state(r)?;
-
-        // 51XX: read mode discriminant and load matching state
-        let namco51_mode = r.read_u8()?;
-        match namco51_mode {
-            0 => {
-                // HLE mode
-                let mut n = Namco51::new();
-                n.load_state(r)?;
-                self.namco51 = Namco51Wrapper::Hle(n);
-            }
-            1 => {
-                // LLE mode — requires that the ROM was already loaded
-                match &mut self.namco51 {
-                    Namco51Wrapper::Lle(n) => {
-                        n.load_state(r)?;
-                        self.clocks.load_state(r)?;
-                    }
-                    _ => {
-                        return Err(SaveError::InvalidFormat(
-                            "51XX LLE save state but no ROM loaded".to_string(),
-                        ));
-                    }
-                }
-            }
-            _ => {
-                return Err(SaveError::InvalidFormat(format!(
-                    "unknown 51XX mode: {}",
-                    namco51_mode
-                )));
-            }
-        }
-
-        self.namco53.load_state(r)?;
-
-        // 50XX: presence flag; if set, the chip must already be fitted.
-        if r.read_bool()? {
-            match &mut self.namco50 {
-                Some(n50) => n50.load_state(r)?,
-                None => {
-                    return Err(SaveError::InvalidFormat(
-                        "50XX save state but chip not fitted".to_string(),
-                    ));
-                }
-            }
-        }
-
-        // I/O state
-        self.in0 = r.read_u8()?;
-        self.in1 = r.read_u8()?;
-        self.dswa = r.read_u8()?;
-        self.dswb = r.read_u8()?;
-
-        // Latch + interrupt state
-        self.main_irq_enabled = r.read_bool()?;
-        self.sub_irq_enabled = r.read_bool()?;
-        self.sound_nmi_enabled = r.read_bool()?;
-        self.sub_reset = r.read_bool()?;
-        self.main_irq_pending = r.read_bool()?;
-        self.main_nmi_pending = r.read_bool()?;
-        self.sub_irq_pending = r.read_bool()?;
-        self.sound_nmi_pending = r.read_bool()?;
-        self.flip_screen = r.read_bool()?;
-
-        // Timing
-        self.clock = r.read_u64_le()?;
-        self.watchdog_counter = r.read_u32_le()?;
-
-        Ok(())
     }
 }
 
