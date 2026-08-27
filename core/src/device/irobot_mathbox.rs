@@ -26,7 +26,7 @@
 //! [`sharedmem_w`](IrobotMathbox::sharedmem_w)): the mathbox scratch RAM, the
 //! paged mathbox ROM, and the double-buffered comm RAM (the display list).
 
-use crate::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
+use phosphor_macros::Saveable;
 
 // Microcode op flags (MAME `irobot_state::FL_*`).
 const FL_MULT: u32 = 0x01;
@@ -59,19 +59,40 @@ struct IrmbOp {
 }
 
 /// I, Robot AM2901 microcoded mathbox.
+#[derive(Saveable)]
+#[save_version(1)]
+#[save_tlv]
+#[save_after_load(clamp_stack)]
 pub struct IrobotMathbox {
-    ops: Vec<IrmbOp>,      // 1024 decoded microcode ops
-    rom: Vec<u16>,         // big-endian 16-bit mathbox ROM words
-    ram: Vec<u16>,         // mathbox scratch RAM
-    comram: [Vec<u16>; 2], // double-buffered display-list RAM
-    regs: [u32; 16],       // AM2901 working registers
-    latch: u16,            // address latch
-    stack: [usize; 16],    // microcode subroutine stack (op indices)
+    /// The decoded microcode ops and the ROM they come from, both rebuilt by
+    /// [`load_rom`](Self::load_rom).
+    #[save_skip]
+    ops: Vec<IrmbOp>, // 1024 decoded microcode ops
+    #[save_skip]
+    rom: Vec<u16>, // big-endian 16-bit mathbox ROM words
+    /// The two word memories. Boxed fixed-size arrays rather than `Vec`s: both
+    /// are allocated once at their constant size and never resize, and a fixed
+    /// array is a shape the save-state derive can encode.
+    #[save(id = 1)]
+    ram: Box<[u16; MATHBOX_RAM_WORDS]>, // mathbox scratch RAM
+    #[save(id = 2)]
+    comram: Box<[[u16; COMRAM_WORDS]; 2]>, // double-buffered display-list RAM
+    #[save(id = 3)]
+    regs: [u32; 16], // AM2901 working registers
+    #[save(id = 4)]
+    latch: u16, // address latch
+    /// Microcode subroutine stack, holding op indices in `0..NUM_OPS`.
+    #[save(id = 5)]
+    stack: [u16; 16],
     // CPU-window paging latches (driven from out0 / statwr).
+    #[save(id = 6)]
     outx: u8,
+    #[save(id = 7)]
     mpage: u8,
+    #[save(id = 8)]
     commbank: u8,
     // Set when a run completes; the status register reports/clears it.
+    #[save(id = 9)]
     running: bool,
 }
 
@@ -86,8 +107,8 @@ impl IrobotMathbox {
         Self {
             ops: vec![IrmbOp::default(); NUM_OPS],
             rom: vec![0; MATHBOX_ROM_WORDS],
-            ram: vec![0; MATHBOX_RAM_WORDS],
-            comram: [vec![0; COMRAM_WORDS], vec![0; COMRAM_WORDS]],
+            ram: Box::new([0; MATHBOX_RAM_WORDS]),
+            comram: Box::new([[0; COMRAM_WORDS]; 2]),
             regs: [0; 16],
             latch: 0,
             stack: [0; 16],
@@ -192,6 +213,17 @@ impl IrobotMathbox {
     /// Clear the running flag (the status register clears it on read).
     pub fn clear_running(&mut self) {
         self.running = false;
+    }
+
+    /// Bring every stack entry into `0..NUM_OPS` after a load.
+    ///
+    /// The entries are op indices, and `run` uses one directly as the next op
+    /// after an RTS. The mask is here because a save is an input; the hand
+    /// written impl applied the same one on the way in.
+    fn clamp_stack(&mut self) {
+        for slot in self.stack.iter_mut() {
+            *slot &= (NUM_OPS - 1) as u16;
+        }
     }
 
     /// Read the comm-RAM display list (consumed by the polygon rasterizer).
@@ -477,14 +509,14 @@ impl IrobotMathbox {
                 5 => cur_op.nxtadd,
                 6 => {
                     // JSR
-                    self.stack[sp] = cur + 1;
+                    self.stack[sp] = (cur + 1) as u16;
                     sp = (sp + 1) & 15;
                     cur_op.nxtadd
                 }
                 _ => {
                     // RTS
                     sp = (sp.wrapping_sub(1)) & 15;
-                    self.stack[sp]
+                    self.stack[sp] as usize
                 }
             };
             cur &= NUM_OPS - 1;
@@ -542,58 +574,10 @@ fn alu(op: u32, r: u32, s: u32, ci: u32) -> (u32, u32, u32) {
     }
 }
 
-impl Saveable for IrobotMathbox {
-    fn save_state(&self, w: &mut StateWriter) {
-        // ROM and the decoded op table are reconstructed from ROM at load time;
-        // only the dynamic state is serialized.
-        for &word in &self.ram {
-            w.write_u16_le(word);
-        }
-        for bank in &self.comram {
-            for &word in bank {
-                w.write_u16_le(word);
-            }
-        }
-        for &reg in &self.regs {
-            w.write_u32_le(reg);
-        }
-        w.write_u16_le(self.latch);
-        for &s in &self.stack {
-            w.write_u32_le(s as u32);
-        }
-        w.write_u8(self.outx);
-        w.write_u8(self.mpage);
-        w.write_u8(self.commbank);
-        w.write_bool(self.running);
-    }
-
-    fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
-        for word in &mut self.ram {
-            *word = r.read_u16_le()?;
-        }
-        for bank in &mut self.comram {
-            for word in bank.iter_mut() {
-                *word = r.read_u16_le()?;
-            }
-        }
-        for reg in &mut self.regs {
-            *reg = r.read_u32_le()?;
-        }
-        self.latch = r.read_u16_le()?;
-        for s in &mut self.stack {
-            *s = r.read_u32_le()? as usize & (NUM_OPS - 1);
-        }
-        self.outx = r.read_u8()?;
-        self.mpage = r.read_u8()?;
-        self.commbank = r.read_u8()? & 1;
-        self.running = r.read_bool()?;
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::save_state::{Saveable, StateReader, StateWriter};
 
     #[test]
     fn alu_add_sets_carry_and_overflow() {

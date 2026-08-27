@@ -1,7 +1,6 @@
 use phosphor_core::audio::{AudioResampler, DcBlocker};
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::debug_trace::{DebugEvent, DebugEventKind, DebugTraceBuffer};
-use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::watchpoint::DebugAccessSource;
 use phosphor_core::core::{AccessKind, AddressSpace16};
 use phosphor_core::core::{Bus, BusMaster, TimingConfig};
@@ -12,7 +11,7 @@ use phosphor_core::device::hc55516::Hc55516;
 use phosphor_core::device::pia6820::Pia6820;
 use phosphor_core::device::williams_blitter::WilliamsBlitter;
 use phosphor_core::gfx::render_bitmap_scanline;
-use phosphor_macros::{BusDebug, DebugTrace, MemoryRegion};
+use phosphor_macros::{BusDebug, DebugTrace, MemoryRegion, Saveable};
 
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
 
@@ -358,55 +357,82 @@ fn step_cycle<B: WilliamsBus>(cpus: &mut WilliamsCpus<'_>, bus: &mut B) {
 /// The board is everything the CPUs talk *to* — they live in [`WilliamsCpus`]
 /// on the machine, so `cpu.execute_cycle(&mut bus, ..)` is a pair of disjoint
 /// field borrows and dispatches at a concrete bus type.
-#[derive(BusDebug, DebugTrace)]
+#[derive(BusDebug, DebugTrace, Saveable)]
+#[save_version(1)]
+#[save_tlv]
 pub struct WilliamsBoard {
     // Peripheral devices
     #[debug_device("Widget PIA")]
+    #[save(id = 1)]
     pub(crate) widget_pia: Pia6820, // 0xC804-0xC807: player inputs
     #[debug_device("ROM PIA")]
+    #[save(id = 2)]
     pub(crate) rom_pia: Pia6820, // 0xC80C-0xC80F: ROM bank, video timing
     #[debug_device("Blitter")]
+    #[save(id = 3)]
     pub(crate) blitter: WilliamsBlitter, // 0xCA00-0xCA07: DMA blitter
 
     // I/O registers
+    #[save(id = 4)]
     pub(crate) rom_bank: u8, // 0xC900: ROM bank select
 
     // Sound board
     #[debug_device("Sound PIA")]
+    #[save(id = 5)]
     pub(crate) sound_pia: Pia6820, // 0x0400-0x0403: Sound PIA
 
     // Audio output
     #[debug_device("DAC")]
+    #[save(id = 6)]
     pub(crate) dac: Mc1408Dac,
     /// HC55516 CVSD speech decoder (extra-sound boards only, e.g. Sinistar).
+    ///
+    /// An `Option` field is on the wire exactly when it is fitted, which is
+    /// what the hand-written impl's optional chunk did.
+    #[save(id = 7)]
     pub(crate) cvsd: Option<Hc55516>,
     /// Output coupling capacitor. Runs at the 1 MHz DAC update rate, before
     /// the downsampler, so the pedestal never reaches the resampler.
+    #[save(id = 8)]
     dc_blocker: DcBlocker,
+    #[save(id = 9)]
     pub(crate) resampler: AudioResampler<i16>,
 
-    // Memory maps (page-table dispatch + watchpoints + backing memory)
-    // All RAM/ROM storage lives in the AddressSpace16 backing store.
+    /// Memory maps (page-table dispatch + watchpoints + backing memory). All
+    /// RAM/ROM storage lives in the `AddressSpace16` backing store, and each
+    /// map persists its own writable regions: video RAM, the palette and CMOS
+    /// here, plus the SRAM that only the extra-RAM boards declare, which is how
+    /// the board's conditional SRAM chunk stops needing to exist.
     #[debug_map(cpu = 0)]
+    #[save(id = 10)]
     pub(crate) main_map: AddressSpace16,
     #[debug_map(cpu = 1)]
+    #[save(id = 11)]
     pub(crate) sound_map: AddressSpace16,
 
     // Board variant (fixed at construction; not part of save state)
+    #[save_skip]
     pub(crate) config: WilliamsConfig,
 
     // System state
+    #[save(id = 12)]
     pub watchdog_counter: u32,
+    #[save(id = 13)]
     pub(crate) clock: u64,
 
     // ROM PIA Port A input (game sets coin/service bits)
+    #[save(id = 14)]
     pub(crate) rom_pia_input: u8,
 
-    // Scanline-rendered framebuffer (292 × 240 × RGB24)
+    /// Scanline-rendered framebuffer (292 × 240 × RGB24), refilled as the next
+    /// frame is drawn.
+    #[save_skip]
     pub(crate) scanline_buffer: Vec<u8>,
 
-    // Debug event ring (observer state — never saved in save states)
+    /// The debugger's own ring buffer, which belongs to whoever is debugging
+    /// rather than to the machine.
     #[debug_events]
+    #[save_skip]
     pub(crate) debug_trace: DebugTraceBuffer,
 }
 
@@ -799,116 +825,6 @@ impl WilliamsBoard {
     }
 }
 
-// Chunk tags for this board's components, assigned explicitly because the impl
-// is hand-written. Stable for the board; a retired tag is never reused.
-//
-// The last three are per-variant and may be absent. They sit at the end of the
-// body with nothing but each other after them, which is what lets the reader
-// tell an absent chunk from the next field: absence is detected by peeking at
-// the next tag, so an optional chunk can only be followed by another chunk or
-// by the end of the board's own bytes.
-const WB_TAG_WIDGET_PIA: u16 = 1;
-const WB_TAG_ROM_PIA: u16 = 2;
-const WB_TAG_SOUND_PIA: u16 = 3;
-const WB_TAG_BLITTER: u16 = 4;
-const WB_TAG_DAC: u16 = 5;
-const WB_TAG_DC_BLOCKER: u16 = 6;
-const WB_TAG_RESAMPLER: u16 = 7;
-const WB_TAG_SRAM: u16 = 8;
-const WB_TAG_CVSD: u16 = 9;
-const WB_TAG_BLITTER_WINDOW: u16 = 10;
-
-impl Saveable for WilliamsBoard {
-    fn save_state(&self, w: &mut StateWriter) {
-        // RAM (the CPUs are saved by the machine, which owns them)
-        w.write_bytes(self.main_map.region_data(MainRegion::VideoRam));
-        w.write_bytes(&self.main_map.region_data(MainRegion::Palette)[..16]);
-        w.write_bytes(self.main_map.region_data(MainRegion::Cmos));
-        w.write_bytes(self.sound_map.region_data(SoundRegion::Ram));
-        // Peripherals
-        w.write_component(WB_TAG_WIDGET_PIA, &self.widget_pia);
-        w.write_component(WB_TAG_ROM_PIA, &self.rom_pia);
-        w.write_component(WB_TAG_SOUND_PIA, &self.sound_pia);
-        w.write_component(WB_TAG_BLITTER, &self.blitter);
-        w.write_component(WB_TAG_DAC, &self.dac);
-        // I/O & timing
-        w.write_u8(self.rom_bank);
-        w.write_component(WB_TAG_DC_BLOCKER, &self.dc_blocker);
-        w.write_component(WB_TAG_RESAMPLER, &self.resampler);
-        w.write_u32_le(self.watchdog_counter);
-        w.write_u64_le(self.clock);
-        w.write_u8(self.rom_pia_input);
-        // Variant state, each in its own chunk. It used to be appended raw and
-        // guarded by the construction-time config, so a reader had no way to
-        // tell a CVSD chip from whatever followed it.
-        if self.config.extra_sram_dxxx {
-            w.write_tlv(WB_TAG_SRAM, |w| {
-                w.write_bytes(self.main_map.region_data(MainRegion::Sram))
-            });
-        }
-        w.write_optional_component(WB_TAG_CVSD, self.cvsd.as_ref());
-        // Blitter window-enable is runtime state but save-skipped by the blitter
-        // (only the games with a clip window have it); persist it here.
-        if self.config.blitter_window_clip.is_some() {
-            w.write_tlv(WB_TAG_BLITTER_WINDOW, |w| {
-                w.write_u8(self.blitter.window_enable() as u8)
-            });
-        }
-    }
-
-    fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
-        // RAM (the CPUs are loaded by the machine, which owns them)
-        r.read_bytes_into(self.main_map.region_data_mut(MainRegion::VideoRam))?;
-        r.read_bytes_into(&mut self.main_map.region_data_mut(MainRegion::Palette)[..16])?;
-        r.read_bytes_into(self.main_map.region_data_mut(MainRegion::Cmos))?;
-        r.read_bytes_into(self.sound_map.region_data_mut(SoundRegion::Ram))?;
-        // Peripherals
-        r.read_component(WB_TAG_WIDGET_PIA, "WilliamsBoard.widget_pia", |r| {
-            self.widget_pia.load_state(r)
-        })?;
-        r.read_component(WB_TAG_ROM_PIA, "WilliamsBoard.rom_pia", |r| {
-            self.rom_pia.load_state(r)
-        })?;
-        r.read_component(WB_TAG_SOUND_PIA, "WilliamsBoard.sound_pia", |r| {
-            self.sound_pia.load_state(r)
-        })?;
-        r.read_component(WB_TAG_BLITTER, "WilliamsBoard.blitter", |r| {
-            self.blitter.load_state(r)
-        })?;
-        r.read_component(WB_TAG_DAC, "WilliamsBoard.dac", |r| self.dac.load_state(r))?;
-        // I/O & timing
-        self.rom_bank = r.read_u8()?;
-        r.read_component(WB_TAG_DC_BLOCKER, "WilliamsBoard.dc_blocker", |r| {
-            self.dc_blocker.load_state(r)
-        })?;
-        r.read_component(WB_TAG_RESAMPLER, "WilliamsBoard.resampler", |r| {
-            self.resampler.load_state(r)
-        })?;
-        self.watchdog_counter = r.read_u32_le()?;
-        self.clock = r.read_u64_le()?;
-        self.rom_pia_input = r.read_u8()?;
-        // Variant state (see save_state).
-        r.read_optional(
-            WB_TAG_SRAM,
-            "WilliamsBoard.sram",
-            self.config.extra_sram_dxxx,
-            |r| r.read_bytes_into(self.main_map.region_data_mut(MainRegion::Sram)),
-        )?;
-        r.read_optional_component(WB_TAG_CVSD, "WilliamsBoard.cvsd", self.cvsd.as_mut())?;
-        r.read_optional(
-            WB_TAG_BLITTER_WINDOW,
-            "WilliamsBoard.blitter_window",
-            self.config.blitter_window_clip.is_some(),
-            |r| {
-                let on = r.read_u8()? != 0;
-                self.blitter.set_window_enable(on);
-                Ok(())
-            },
-        )?;
-        Ok(())
-    }
-}
-
 impl Default for WilliamsBoard {
     fn default() -> Self {
         Self::new()
@@ -1204,6 +1120,7 @@ impl WilliamsBoard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use phosphor_core::core::save_state::{Saveable, StateReader, StateWriter};
 
     #[test]
     fn board_save_load_round_trip() {
@@ -1398,10 +1315,10 @@ mod tests {
 
         #[test]
         fn a_standard_board_writes_none_of_the_variant_chunks() {
-            // The three per-variant components are chunks now, so a board
-            // without them writes nothing for them at all: not a discriminant,
-            // not a zero length. That is what makes absence readable, and it is
-            // what the size difference has to show.
+            // The per-variant parts are chunks, so a board without them writes
+            // nothing for them at all: not a discriminant, not a zero length.
+            // That is what makes absence readable, and it is what the size
+            // difference has to show.
             let save_len = |cfg| {
                 let board = WilliamsBoard::with_config(cfg);
                 let mut w = StateWriter::new();
@@ -1411,61 +1328,69 @@ mod tests {
             let standard = save_len(WilliamsConfig::gen1_standard());
             let sinistar = save_len(SINISTAR);
 
-            // Each chunk costs a u16 tag plus a u32 length on top of its body.
-            const FRAME: usize = 6;
-            // Serialized size of one 4KB region write (data + length prefix), so
-            // the check is robust to the writer's length-prefix format.
-            let sram_body = {
-                let mut w = StateWriter::new();
-                w.write_bytes(&[0u8; 0x1000]);
-                w.into_vec().len()
-            };
+            // A TLV field costs a u16 id plus a u32 length on top of its body,
+            // and a saved map region costs a u16 id plus a u32 length the same
+            // way. The two happen to agree, but they are different framings:
+            // the SRAM is a region inside the map's body, the CVSD a field of
+            // the board's.
+            const FIELD_FRAME: usize = 6;
+            const REGION_FRAME: usize = 6;
             let cvsd_body = {
                 let mut w = StateWriter::new();
                 Hc55516::new().save_state(&mut w);
                 w.into_vec().len()
             };
-            // ... and the blitter window-enable is a single byte.
+            // The blitter's window-enable is deliberately *not* in this sum any
+            // more: it is a plain field every board carries now, which is what
+            // TLV bought and why it stopped being conditional.
             assert_eq!(
                 sinistar - standard,
-                (FRAME + sram_body) + (FRAME + cvsd_body) + (FRAME + 1),
-                "only the SRAM, CVSD and window-enable chunks should differ"
+                (REGION_FRAME + 0x1000) + (FIELD_FRAME + cvsd_body),
+                "only the SRAM region and the CVSD field should differ"
             );
         }
 
-        /// A Sinistar save carries chunks a Joust save does not, and a reader
-        /// that lacks those components skips them by length rather than
-        /// mistaking them for the next field.
+        /// Two boards that disagree about what is fitted do not load into each
+        /// other, in *either* direction, and each refusal names what differed.
+        ///
+        /// This is stricter than the hand-written impl, which skipped a chunk
+        /// the loading board had no component for. Strict is the right way
+        /// round: a board with a CVSD and a board without are not the same
+        /// machine, and the envelope checks `machine_id` before any of this, so
+        /// the lenient case only ever arose in a test that built it on purpose.
         #[test]
-        fn a_variant_board_save_is_readable_by_a_board_without_the_variants() {
-            let mut board = WilliamsBoard::with_config(SINISTAR);
-            board.main_map.region_data_mut(MainRegion::Sram)[0] = 0xDE;
-            board.clock = 4242;
-            let mut w = StateWriter::new();
-            board.save_state(&mut w);
-            let data = w.into_vec();
+        fn boards_that_disagree_about_the_variants_refuse_each_other() {
+            let variant_save = {
+                let mut board = WilliamsBoard::with_config(SINISTAR);
+                board.main_map.region_data_mut(MainRegion::Sram)[0] = 0xDE;
+                board.clock = 4242;
+                let mut w = StateWriter::new();
+                board.save_state(&mut w);
+                w.into_vec()
+            };
+            let standard_save = {
+                let mut w = StateWriter::new();
+                WilliamsBoard::new().save_state(&mut w);
+                w.into_vec()
+            };
 
-            let mut plain = WilliamsBoard::new();
-            let mut r = StateReader::new(&data);
-            plain.load_state(&mut r).unwrap();
-
-            assert_eq!(plain.clock, 4242);
-            assert_eq!(r.remaining(), 0, "the variant chunks were not consumed");
-        }
-
-        /// The reverse must not load quietly: this board has a CVSD and the file
-        /// does not, so restoring would leave a live chip at power-on.
-        #[test]
-        fn a_standard_save_is_refused_by_a_board_that_has_the_variants() {
-            let mut w = StateWriter::new();
-            WilliamsBoard::new().save_state(&mut w);
-            let data = w.into_vec();
-
-            let mut sinistar = WilliamsBoard::with_config(SINISTAR);
-            let mut r = StateReader::new(&data);
-            let err = sinistar.load_state(&mut r).unwrap_err();
+            // A file with the components, loaded by a board that has none: the
+            // CVSD is a field this board cannot put anywhere.
+            let err = WilliamsBoard::new()
+                .load_state(&mut StateReader::new(&variant_save))
+                .unwrap_err();
             assert!(
-                err.to_string().contains("WilliamsBoard.sram"),
+                err.to_string().contains("WilliamsBoard.cvsd"),
+                "unexpected message: {err}"
+            );
+
+            // The reverse: this board has the extra SRAM and the file does not,
+            // and the map says so by region name.
+            let err = WilliamsBoard::with_config(SINISTAR)
+                .load_state(&mut StateReader::new(&standard_save))
+                .unwrap_err();
+            assert!(
+                err.to_string().contains("SRAM"),
                 "unexpected message: {err}"
             );
         }

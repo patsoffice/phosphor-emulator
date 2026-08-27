@@ -19,7 +19,7 @@
 
 mod tables;
 
-use crate::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
+use phosphor_macros::Saveable;
 use tables::*;
 
 // ---------------------------------------------------------------------------
@@ -149,7 +149,8 @@ fn opm_key_code_to_phase_step(block_freq: u32, delta: i32) -> u32 {
 
 /// One of the 32 FM operators. Holds only the dynamic state; all tuning is
 /// decoded from the register file each sample.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Saveable)]
+#[save_version(1)]
 struct Operator {
     /// 10.10 phase accumulator; the waveform index is `phase >> 10`.
     phase: u32,
@@ -177,39 +178,67 @@ impl Operator {
 // ---------------------------------------------------------------------------
 
 /// Full YM2151 (OPM) with FM synthesis, timers, and IRQ.
+#[derive(Saveable)]
+#[save_version(1)]
+#[save_tlv]
 pub struct Ym2151 {
+    #[save(id = 1)]
     regs: [u8; 256],
+    #[save(id = 2)]
     address: u8,
 
     // Timers (chip clocks) + status flags.
+    #[save(id = 3)]
     timer_a: u32,
+    #[save(id = 4)]
     timer_b: u32,
+    #[save(id = 5)]
     status: u8,
 
     // FM voice state.
+    #[save(id = 6)]
     ops: [Operator; 32],
     /// Two-sample op-1 feedback history per channel.
+    #[save(id = 7)]
     feedback: [[i32; 2]; 8],
     /// This sample's op-1 value per channel (folds into next sample's feedback).
+    #[save(id = 8)]
     feedback_in: [i32; 8],
     /// Pending key state per operator (set by register 0x08).
+    #[save(id = 9)]
     keyon: [bool; 32],
 
     // LFO + noise.
+    #[save(id = 10)]
     env_counter: u32,
+    #[save(id = 11)]
     lfo_counter: u32,
+    #[save(id = 12)]
     lfo_am: u8,
+    #[save(id = 13)]
     noise_lfsr: u32,
+    #[save(id = 14)]
     noise_counter: u8,
+    #[save(id = 15)]
     noise_state: u8,
-    /// LFO noise waveform, written one step ahead of the read position.
+    /// LFO noise waveform, written one step ahead of the read position, so a
+    /// load refills it before anything reads it.
+    #[save_skip(default = [0; 256])]
     lfo_noise_wave: [i16; 256],
 
     // Audio output: FM samples generated at the native rate, resampled on drain.
+    /// Transient resampler state: the samples not yet drained and where the
+    /// resampler had got to between them.
+    #[save_skip(default)]
     clock_acc: u32,
+    #[save_skip(default)]
     native: Vec<f32>,
+    #[save_skip(default)]
     resample_pos: f64,
+    /// Rates the chip was constructed with, not state.
+    #[save_skip]
     input_clock: u32,
+    #[save_skip]
     sample_rate: u32,
 }
 
@@ -802,73 +831,10 @@ impl Default for Ym2151 {
     }
 }
 
-impl Saveable for Ym2151 {
-    fn save_state(&self, w: &mut StateWriter) {
-        w.write_bytes(&self.regs);
-        w.write_u8(self.address);
-        w.write_u32_le(self.timer_a);
-        w.write_u32_le(self.timer_b);
-        w.write_u8(self.status);
-        for op in &self.ops {
-            w.write_u32_le(op.phase);
-            w.write_u16_le(op.env_attenuation);
-            w.write_u8(op.env_state);
-            w.write_bool(op.key_state);
-        }
-        for ch in 0..8 {
-            w.write_i32_le(self.feedback[ch][0]);
-            w.write_i32_le(self.feedback[ch][1]);
-            w.write_i32_le(self.feedback_in[ch]);
-        }
-        for &k in &self.keyon {
-            w.write_bool(k);
-        }
-        w.write_u32_le(self.env_counter);
-        w.write_u32_le(self.lfo_counter);
-        w.write_u8(self.lfo_am);
-        w.write_u32_le(self.noise_lfsr);
-        w.write_u8(self.noise_counter);
-        w.write_u8(self.noise_state);
-    }
-
-    fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
-        r.read_bytes_into(&mut self.regs)?;
-        self.address = r.read_u8()?;
-        self.timer_a = r.read_u32_le()?;
-        self.timer_b = r.read_u32_le()?;
-        self.status = r.read_u8()?;
-        for op in &mut self.ops {
-            op.phase = r.read_u32_le()?;
-            op.env_attenuation = r.read_u16_le()?;
-            op.env_state = r.read_u8()?;
-            op.key_state = r.read_bool()?;
-        }
-        for ch in 0..8 {
-            self.feedback[ch][0] = r.read_i32_le()?;
-            self.feedback[ch][1] = r.read_i32_le()?;
-            self.feedback_in[ch] = r.read_i32_le()?;
-        }
-        for k in &mut self.keyon {
-            *k = r.read_bool()?;
-        }
-        self.env_counter = r.read_u32_le()?;
-        self.lfo_counter = r.read_u32_le()?;
-        self.lfo_am = r.read_u8()?;
-        self.noise_lfsr = r.read_u32_le()?;
-        self.noise_counter = r.read_u8()?;
-        self.noise_state = r.read_u8()?;
-        // Transient resampler buffers are not saved.
-        self.lfo_noise_wave = [0; 256];
-        self.clock_acc = 0;
-        self.native.clear();
-        self.resample_pos = 0.0;
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::save_state::{Saveable, StateReader, StateWriter};
 
     fn poke(ym: &mut Ym2151, reg: u8, data: u8) {
         ym.write(0, reg); // address port

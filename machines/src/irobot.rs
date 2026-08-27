@@ -26,7 +26,6 @@ use phosphor_core::core::machine::{
     DipSwitchBank, Direction, InputConfigurable, InputControl, InputEvent, InputId, InputKind,
     MachineCore, MouseControl, Nvram, PadAxis, PadControl, Profilable, Renderable, SaveState,
 };
-use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::{AccessKind, AddressSpace16};
 use phosphor_core::core::{Bus, BusMaster, TimingConfig};
 use phosphor_core::cpu::Cpu;
@@ -36,7 +35,7 @@ use phosphor_core::device::irobot_mathbox::IrobotMathbox;
 use phosphor_core::device::pokey::Pokey;
 use phosphor_core::device::x2212::X2212;
 use phosphor_core::gfx::decode::{GfxCache, GfxLayout, decode_gfx};
-use phosphor_macros::{BusDebug, MemoryRegion};
+use phosphor_macros::{BusDebug, MemoryRegion, Saveable};
 
 use crate::disasm_registry::{DisasmCpu, DisasmRegion};
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
@@ -486,66 +485,112 @@ const IROBOT_CONTROLS: &[InputControl] = &[
 /// I, Robot's hardware, everything the 6809 talks *to*. Held apart from the CPU
 /// so a cycle dispatches at a concrete bus rather than a trait object (see
 /// `docs/designs/concrete-bus-dispatch.md`).
-#[derive(BusDebug)]
+#[derive(BusDebug, Saveable)]
+#[save_version(1)]
+#[save_tlv]
 pub struct IrobotBoard {
+    /// The address space persists its own writable regions and its page table,
+    /// so the RAM and ROM banks `apply_banking` used to replay on load come
+    /// back mapped where they were.
     #[debug_map(cpu = 0)]
+    #[save(id = 1)]
     map: AddressSpace16,
 
     // GFX + palettes.
-    char_cache: GfxCache,             // 64 × 8×8 1bpp alphanumeric chars
+    #[save_skip]
+    char_cache: GfxCache, // 64 × 8×8 1bpp alphanumeric chars
+    /// Expanded from the colour PROM, so it is rebuilt at ROM load.
+    #[save_skip]
     text_palette: [(u8, u8, u8); 32], // text-layer RGB (PROM 136029-125)
+    /// Written by the CPU through `paletteram_w`, so unlike the text palette it
+    /// is state.
+    #[save(id = 2)]
     poly_palette: [(u8, u8, u8); 64], // polygon RGB (written via paletteram_w)
 
     // PROMs retained for later phases (text-color PROM + mathbox microcode).
+    #[save_skip]
     proms: Vec<u8>, // 0x3420
 
     // AM2901 microcoded mathbox (owns the paged 0x2000-0x3FFF window memories).
+    #[save(id = 3)]
     mathbox: IrobotMathbox,
 
-    // Polygon video: two 256×256 8-bit (palette-index) buffers, double-buffered.
-    polybitmap: [Vec<u8>; 2],
-    bufsel: u8,         // current draw buffer (statwr bit 1); displayed = bufsel^1
-    vg_clear: bool,     // polygon-clear latch (statwr bit 0)
-    commbank: u8,       // comm-RAM bank read by the polygon generator (statwr bit 7)
+    /// Polygon video: two 256×256 8-bit (palette-index) buffers,
+    /// double-buffered. Boxed fixed-size arrays rather than `Vec`s: both are
+    /// allocated once at their constant size and never resize, and a fixed
+    /// array is a shape the save-state derive can encode.
+    #[save(id = 4)]
+    polybitmap: Box<[[u8; BITMAP_W * BITMAP_H]; 2]>,
+    #[save(id = 5)]
+    bufsel: u8, // current draw buffer (statwr bit 1); displayed = bufsel^1
+    #[save(id = 6)]
+    vg_clear: bool, // polygon-clear latch (statwr bit 0)
+    #[save(id = 7)]
+    commbank: u8, // comm-RAM bank read by the polygon generator (statwr bit 7)
+    #[save(id = 8)]
     irvg_running: bool, // polygon generator busy flag (status bit 6)
 
     // Control registers / bank latches.
-    out0: u8,       // 0x1180: RAM bank, mathbox page/bank, alphamap (bit 7)
-    statwr: u8,     // 0x1140: polygon/mathbox control (edge-detected)
+    #[save(id = 9)]
+    out0: u8, // 0x1180: RAM bank, mathbox page/bank, alphamap (bit 7)
+    #[save(id = 10)]
+    statwr: u8, // 0x1140: polygon/mathbox control (edge-detected)
+    #[save(id = 11)]
     rombanksel: u8, // 0x11C0: ROM bank select
 
     // Inputs (active low: 1 = released) + DIP banks.
+    #[save(id = 12)]
     in0: u8,
+    #[save(id = 13)]
     in1: u8,
+    #[save(id = 14)]
     dsw1: u8,
+    #[save(id = 15)]
     dsw2: u8,
 
     // NVRAM.
+    #[save(id = 16)]
     novram: X2212,
 
     // Analog flight stick: ADC0809 (channel 0 = Y, channel 1 = X) and the
     // current [X, Y] raw stick positions feeding it. `dir_held` tracks the four
     // digital direction keys [left, right, up, down] for self-centering.
+    #[save(id = 17)]
     adc: Adc0809,
+    /// Saved whole rather than through `position()`, so the held-key flags come
+    /// back with the position they belong to.
+    #[save(id = 18)]
     stick: [AnalogAxis; 2],
 
     // Sound: four POKEYs @ 1.512 MHz, all outputs summed to mono.
+    #[save(id = 19)]
     pokeys: [Pokey; 4],
+    /// Samples already mixed and waiting for the frontend to drain, which the
+    /// next frame refills.
+    #[save_skip(default)]
     audio_buffer: SampleRing<i16>,
 
     // Interrupts / timing.
+    #[save(id = 20)]
     irq_pending: bool,
+    #[save(id = 21)]
     firq_pending: bool,
+    #[save(id = 22)]
     prev_v32: bool,
+    #[save(id = 23)]
     clock: u64,
 }
 
 /// Atari I, Robot (1983): a 6809 beside the board it drives.
-#[derive(BusDebug)]
+#[derive(BusDebug, Saveable)]
+#[save_version(1)]
+#[save_tlv]
 pub struct IrobotSystem {
     #[debug_cpu("M6809")]
+    #[save(id = 1)]
     cpu: M6809,
     #[debug_bus]
+    #[save(id = 2)]
     pub board: IrobotBoard,
 }
 
@@ -620,7 +665,7 @@ impl IrobotBoard {
             poly_palette: [(0, 0, 0); 64],
             proms: Vec::new(),
             mathbox: IrobotMathbox::new(),
-            polybitmap: [vec![0; BITMAP_W * BITMAP_H], vec![0; BITMAP_W * BITMAP_H]],
+            polybitmap: Box::new([[0; BITMAP_W * BITMAP_H]; 2]),
             bufsel: 0,
             vg_clear: false,
             commbank: 0,
@@ -1262,76 +1307,6 @@ impl MachineCore for IrobotSystem {
     }
 
     crate::machine_clock_declaration!(TIMING, crate::irobot::clock_tree);
-}
-
-impl Saveable for IrobotSystem {
-    fn save_state(&self, w: &mut StateWriter) {
-        self.cpu.save_state(w);
-        w.write_bytes(self.board.map.region_data(Region::Ram));
-        w.write_bytes(self.board.map.region_data(Region::BankedRam));
-        w.write_bytes(self.board.map.region_data(Region::VideoRam));
-        self.board.novram.save_state(w);
-        self.board.mathbox.save_state(w);
-        self.board.adc.save_state(w);
-        for axis in &self.board.stick {
-            w.write_u8(axis.position() as u8);
-        }
-        for p in &self.board.pokeys {
-            p.save_state(w);
-        }
-        w.write_bytes(&self.board.polybitmap[0]);
-        w.write_bytes(&self.board.polybitmap[1]);
-        w.write_u8(self.board.bufsel);
-        w.write_bool(self.board.vg_clear);
-        w.write_u8(self.board.commbank);
-        w.write_bool(self.board.irvg_running);
-        w.write_u8(self.board.out0);
-        w.write_u8(self.board.statwr);
-        w.write_u8(self.board.rombanksel);
-        w.write_u8(self.board.in0);
-        w.write_u8(self.board.in1);
-        w.write_u8(self.board.dsw1);
-        w.write_u8(self.board.dsw2);
-        w.write_bool(self.board.irq_pending);
-        w.write_bool(self.board.firq_pending);
-        w.write_bool(self.board.prev_v32);
-        w.write_u64_le(self.board.clock);
-    }
-
-    fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
-        self.cpu.load_state(r)?;
-        r.read_bytes_into(self.board.map.region_data_mut(Region::Ram))?;
-        r.read_bytes_into(self.board.map.region_data_mut(Region::BankedRam))?;
-        r.read_bytes_into(self.board.map.region_data_mut(Region::VideoRam))?;
-        self.board.novram.load_state(r)?;
-        self.board.mathbox.load_state(r)?;
-        self.board.adc.load_state(r)?;
-        for axis in &mut self.board.stick {
-            axis.set_position(r.read_u8()? as i32);
-        }
-        for p in &mut self.board.pokeys {
-            p.load_state(r)?;
-        }
-        r.read_bytes_into(&mut self.board.polybitmap[0])?;
-        r.read_bytes_into(&mut self.board.polybitmap[1])?;
-        self.board.bufsel = r.read_u8()?;
-        self.board.vg_clear = r.read_bool()?;
-        self.board.commbank = r.read_u8()?;
-        self.board.irvg_running = r.read_bool()?;
-        self.board.out0 = r.read_u8()?;
-        self.board.statwr = r.read_u8()?;
-        self.board.rombanksel = r.read_u8()?;
-        self.board.in0 = r.read_u8()?;
-        self.board.in1 = r.read_u8()?;
-        self.board.dsw1 = r.read_u8()?;
-        self.board.dsw2 = r.read_u8()?;
-        self.board.irq_pending = r.read_bool()?;
-        self.board.firq_pending = r.read_bool()?;
-        self.board.prev_v32 = r.read_bool()?;
-        self.board.clock = r.read_u64_le()?;
-        self.board.apply_banking();
-        Ok(())
-    }
 }
 
 impl SaveState for IrobotSystem {

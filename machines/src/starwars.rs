@@ -23,7 +23,6 @@ use phosphor_core::core::machine::{
     InputEvent, InputId, InputKind, MachineCore, MouseControl, Nvram, PadAxis, PadControl,
     Profilable, SaveState,
 };
-use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use phosphor_core::core::watchpoint::DebugAccessSource;
 use phosphor_core::core::{
     AccessKind, AddressSpace16, Bus, BusMaster, ClockDomainName as Clk, ClockTree, DomainId,
@@ -40,7 +39,7 @@ use phosphor_core::device::slapstic::Slapstic;
 use phosphor_core::device::starwars_math::StarWarsMath;
 use phosphor_core::device::tms5220::{Tms52xxVariant, Tms5220};
 use phosphor_core::device::x2212::X2212;
-use phosphor_macros::{BusDebug, DebugTrace, MemoryRegion};
+use phosphor_macros::{BusDebug, DebugTrace, MemoryRegion, Saveable};
 
 use crate::atari_dvg::rasterize_vectors;
 use crate::registry::MachineEntry;
@@ -705,80 +704,141 @@ static ESB_MATHBOX_PROM: RomRegion = RomRegion {
 
 /// Star Wars board: two MC6809E CPUs, the AVG vector generator, the Matrix
 /// Processor, ROM banking, watchdog, periodic IRQ, and the main↔sound mailbox.
-#[derive(BusDebug, DebugTrace)]
+#[derive(BusDebug, DebugTrace, Saveable)]
+#[save_version(1)]
+#[save_tlv]
+#[save_after_load(resync_tms_clock)]
 pub(crate) struct StarWarsBoard {
     #[debug_device("AVG")]
+    #[save(id = 1)]
     pub(crate) avg: Avg,
     #[debug_device("SW-MATRIX")]
+    #[save(id = 2)]
     pub(crate) math: StarWarsMath,
+    /// The X2212 is saved whole rather than through its NVRAM bytes, so its
+    /// SRAM and EEPROM halves come back as they stood rather than both from one
+    /// copy of the bytes.
+    #[save(id = 3)]
     pub(crate) novram: X2212,
 
     /// Empire Strikes Back only: the 137412-101 Slapstic banking the $8000–$9FFF
     /// window. `None` on Star Wars (where that window is fixed program ROM).
+    ///
+    /// An `Option` field is on the wire exactly when it is fitted.
+    #[save(id = 4)]
     pub(crate) slapstic: Option<Slapstic>,
 
     // Sound board: four POKEYs (quad-decoded at $1800–$183F on the sound CPU).
+    #[save(id = 5)]
     pub(crate) pokey: [Pokey; 4],
     /// MOS6532 RIOT ($1000–$109F): bridges the TMS5220 and raises the sound IRQ.
+    #[save(id = 6)]
     pub(crate) riot: Riot6532,
     /// TMS5220 speech synthesizer, driven through the RIOT ports.
+    #[save(id = 7)]
     pub(crate) tms: Tms5220,
     /// The board's clock tree, as [`clock_tree`] declares it. Only the speech
-    /// domain is stepped here; the rest is the derivation it rides on. Save and
-    /// load are hand-written below, so the handle beside it is simply not
-    /// written rather than being marked skipped.
+    /// domain is stepped here; the rest is the derivation it rides on.
     #[debug_device("Clocks")]
+    #[save(id = 8)]
     pub(crate) clocks: ClockTree,
+    /// A handle into the clock tree, which is itself saved.
+    #[save_skip]
     pub(crate) tms_dom: DomainId,
 
+    /// The address spaces persist their own writable regions and their page
+    /// tables, so the ROM bank and the Slapstic window come back mapped where
+    /// they were rather than being replayed from `bank` on load.
     #[debug_map(cpu = 0)]
+    #[save(id = 9)]
     pub(crate) main_map: AddressSpace16,
     #[debug_map(cpu = 1)]
+    #[save(id = 10)]
     pub(crate) sound_map: AddressSpace16,
 
     // ROM banking (LS259 bit 4).
+    #[save(id = 11)]
     pub(crate) bank: u8,
 
     // Main↔sound mailbox (generic 8-bit latches with "pending" flags).
+    #[save(id = 12)]
     pub(crate) soundlatch: u8, // main → sound
+    #[save(id = 13)]
     pub(crate) soundlatch_pending: bool,
+    #[save(id = 14)]
     pub(crate) mainlatch: u8, // sound → main
+    #[save(id = 15)]
     pub(crate) mainlatch_pending: bool,
     /// Set by $46E0; the sound CPU is reset on the next `tick` (where a bus is
-    /// available to read its reset vector).
+    /// available to read its reset vector). A hand-off inside one tick, which a
+    /// save is never taken part way through.
+    #[save_skip(default)]
     pub(crate) sound_reset_pending: bool,
 
     // Periodic IRQ (main CPU) and watchdog.
+    #[save(id = 16)]
     pub(crate) irq_pending: bool,
+    #[save(id = 17)]
     pub(crate) irq_counter: u64,
+    #[save(id = 18)]
     pub(crate) watchdog_counter: u64,
+    /// Latched for the frame loop to act on, and cleared by a load so a restored
+    /// machine does not reset itself on its first frame.
+    #[save_skip(default)]
     pub(crate) watchdog_tripped: bool,
 
     // Digital inputs (active-low: a released control reads 1). IN0 is the full
     // port byte; IN1 holds only its button bits (2,4,5) — bits 6/7 are computed.
+    // Live input and operator configuration, which keep their previous
+    // treatment of surviving a load.
+    #[save_skip]
     pub(crate) in0: u8,
+    #[save_skip]
     pub(crate) in1_buttons: u8,
 
     // Flight yoke: ADC0809 + current stick position [x=yaw, y=pitch] and the
     // held digital-deflection keys [up, down, left, right].
+    #[save(id = 19)]
     pub(crate) adc: Adc0809,
+    /// Saved whole rather than through `position()`, so the held-key flags come
+    /// back with the position they belong to.
+    #[save(id = 20)]
     pub(crate) stick: [AnalogAxis; 2],
 
     // Operator DIP switches (defaults; full DIP support added later).
+    #[save_skip]
     pub(crate) dsw0: u8,
+    #[save_skip]
     pub(crate) dsw1: u8,
 
+    #[save(id = 21)]
     pub(crate) clock: u64,
 
-    // Vector display list (AVG output, refreshed when a pass over the list
-    // finishes, which for Star Wars is the HALT that ends it).
+    /// Vector display list (AVG output, refreshed when a pass over the list
+    /// finishes, which for Star Wars is the HALT that ends it). Emptied by a
+    /// load, so the next frame is drawn from the AVG's restored state rather
+    /// than resumed part way through.
+    #[save_skip(default)]
     pub(crate) display_list: Vec<VectorLine>,
 
-    // Mixed audio for the current frame, plus DC-block filter state.
+    /// Samples already mixed and waiting for the frontend to drain, which the
+    /// next frame refills.
+    #[save_skip(default)]
     pub(crate) audio_buffer: SampleRing<i16>,
-    pub(crate) audio_dc: (f32, f32),
+    /// One-pole DC-block history, previous input and previous output.
+    ///
+    /// The same filter [`DcBlocker`](phosphor_core::audio::DcBlocker) runs, but
+    /// with its pole hard-coded here rather than derived from a corner
+    /// frequency, so the two are not interchangeable without moving this
+    /// board's output. Two fields rather than a tuple because a tuple is not a
+    /// shape the save-state derive encodes.
+    #[save(id = 22)]
+    pub(crate) audio_dc_prev_in: f32,
+    #[save(id = 23)]
+    pub(crate) audio_dc_prev_out: f32,
 
     // Debug event ring (observer state — never saved in save states).
+    #[save_skip]
     #[debug_events]
     pub(crate) debug_trace: DebugTraceBuffer,
 }
@@ -866,7 +926,8 @@ impl StarWarsBoard {
             clock: 0,
             display_list: Vec::with_capacity(2048),
             audio_buffer: SampleRing::new(),
-            audio_dc: (0.0, 0.0),
+            audio_dc_prev_in: 0.0,
+            audio_dc_prev_out: 0.0,
             debug_trace: DebugTraceBuffer::new(),
         }
     }
@@ -1472,7 +1533,8 @@ impl StarWarsBoard {
         self.stick = new_yoke();
         self.push_stick();
         self.audio_buffer.clear();
-        self.audio_dc = (0.0, 0.0);
+        self.audio_dc_prev_in = 0.0;
+        self.audio_dc_prev_out = 0.0;
         self.bank = 0;
         self.main_map
             .remap_pages(0x60, 0x20, MainRegion::BankLow, 0);
@@ -1534,7 +1596,7 @@ impl StarWarsBoard {
             .max()
             .unwrap_or(0);
 
-        let (mut x1, mut y1) = self.audio_dc;
+        let (mut x1, mut y1) = (self.audio_dc_prev_in, self.audio_dc_prev_out);
         for i in 0..n {
             let pokey = POKEY_GAIN
                 * chans
@@ -1549,7 +1611,8 @@ impl StarWarsBoard {
             self.audio_buffer
                 .push((y * 2.0 * 32767.0).clamp(-32767.0, 32767.0) as i16);
         }
-        self.audio_dc = (x1, y1);
+        self.audio_dc_prev_in = x1;
+        self.audio_dc_prev_out = y1;
     }
 
     /// Copy pending audio into the frontend's buffer.
@@ -1557,134 +1620,20 @@ impl StarWarsBoard {
         self.audio_buffer.pop_front_into(buffer)
     }
 
+    /// Hand the TMS5220 its clock back from the tree after a load.
+    ///
+    /// The domain comes back at whatever rate it was running at, because the
+    /// tree saves its live ratio, but the device save-skips its own clock as
+    /// configuration, so it has to be told again.
+    fn resync_tms_clock(&mut self) {
+        let hz = self.clocks.hz(self.tms_dom) as u32;
+        self.tms.set_clock(hz);
+    }
+
     /// Whether the main CPU is at an instruction boundary. It lives on the
     /// machine, which passes it back in.
     pub(crate) fn instruction_boundaries(cpu: &M6809) -> u32 {
         cpu.at_instruction_boundary() as u32
-    }
-}
-
-// Chunk tags for this board's components, assigned explicitly because the impl
-// is hand-written. Stable for the board; a retired tag is never reused.
-//
-// The Slapstic is only on Empire Strikes Back, so its tag may be absent. Every
-// component after it is framed too, which is what lets the reader tell an
-// absent Slapstic from the first POKEY.
-const SW_TAG_AVG: u16 = 1;
-const SW_TAG_MATH: u16 = 2;
-const SW_TAG_SLAPSTIC: u16 = 3;
-const SW_TAG_POKEY: u16 = 4;
-const SW_TAG_RIOT: u16 = 5;
-const SW_TAG_TMS: u16 = 6;
-const SW_TAG_CLOCKS: u16 = 7;
-const SW_TAG_ADC: u16 = 8;
-
-impl Saveable for StarWarsBoard {
-    fn save_state(&self, w: &mut StateWriter) {
-        // The CPUs are saved by the machine, which owns them.
-        w.write_component(SW_TAG_AVG, &self.avg);
-        w.write_component(SW_TAG_MATH, &self.math);
-        w.write_optional_component(SW_TAG_SLAPSTIC, self.slapstic.as_ref());
-        w.write_tlv(SW_TAG_POKEY, |w| {
-            for p in &self.pokey {
-                p.save_state(w);
-            }
-        });
-        w.write_component(SW_TAG_RIOT, &self.riot);
-        w.write_component(SW_TAG_TMS, &self.tms);
-        w.write_component(SW_TAG_CLOCKS, &self.clocks);
-        w.write_component(SW_TAG_ADC, &self.adc);
-        w.write_u32_le(self.stick[0].position() as u32);
-        w.write_u32_le(self.stick[1].position() as u32);
-        w.write_bytes(self.novram.nvram());
-        w.write_bytes(self.main_map.region_data(MainRegion::Ram));
-        w.write_bytes(self.main_map.region_data(MainRegion::MathRamLo));
-        w.write_bytes(self.main_map.region_data(MainRegion::MathRam));
-        w.write_bytes(self.sound_map.region_data(SoundRegion::Ram));
-        w.write_u8(self.bank);
-        w.write_u8(self.soundlatch);
-        w.write_bool(self.soundlatch_pending);
-        w.write_u8(self.mainlatch);
-        w.write_bool(self.mainlatch_pending);
-        w.write_bool(self.irq_pending);
-        w.write_u64_le(self.irq_counter);
-        w.write_u64_le(self.watchdog_counter);
-        w.write_u64_le(self.clock);
-        // The DC blocker is a one-pole recursive filter, so its two state
-        // values steer every sample that follows a load.
-        w.write_f32_le(self.audio_dc.0);
-        w.write_f32_le(self.audio_dc.1);
-    }
-
-    fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
-        // The CPUs are loaded by the machine, which owns them.
-        r.read_component(SW_TAG_AVG, "StarWarsBoard.avg", |r| self.avg.load_state(r))?;
-        r.read_component(SW_TAG_MATH, "StarWarsBoard.math", |r| {
-            self.math.load_state(r)
-        })?;
-        r.read_optional_component(
-            SW_TAG_SLAPSTIC,
-            "StarWarsBoard.slapstic",
-            self.slapstic.as_mut(),
-        )?;
-        if let Some(sl) = &self.slapstic {
-            let bank = sl.current_bank() as u32;
-            self.main_map
-                .remap_pages(0x80, 0x20, MainRegion::SlapsticWindow, bank * 0x2000);
-        }
-        r.read_component(SW_TAG_POKEY, "StarWarsBoard.pokey", |r| {
-            for p in &mut self.pokey {
-                p.load_state(r)?;
-            }
-            Ok(())
-        })?;
-        r.read_component(SW_TAG_RIOT, "StarWarsBoard.riot", |r| {
-            self.riot.load_state(r)
-        })?;
-        r.read_component(SW_TAG_TMS, "StarWarsBoard.tms", |r| self.tms.load_state(r))?;
-        r.read_component(SW_TAG_CLOCKS, "StarWarsBoard.clocks", |r| {
-            self.clocks.load_state(r)
-        })?;
-        // The TMS save-skips its clock, so hand it back from the domain that
-        // just came out of the save file.
-        self.tms.set_clock(self.clocks.hz(self.tms_dom) as u32);
-        r.read_component(SW_TAG_ADC, "StarWarsBoard.adc", |r| self.adc.load_state(r))?;
-        self.stick[0].set_position(r.read_u32_le()? as i32);
-        self.stick[1].set_position(r.read_u32_le()? as i32);
-        let mut nvram = vec![0u8; self.novram.nvram().len()];
-        r.read_bytes_into(&mut nvram)?;
-        self.novram.load_nvram(&nvram);
-        r.read_bytes_into(self.main_map.region_data_mut(MainRegion::Ram))?;
-        r.read_bytes_into(self.main_map.region_data_mut(MainRegion::MathRamLo))?;
-        r.read_bytes_into(self.main_map.region_data_mut(MainRegion::MathRam))?;
-        r.read_bytes_into(self.sound_map.region_data_mut(SoundRegion::Ram))?;
-        self.bank = r.read_u8()?;
-        self.main_map.remap_pages(
-            0x60,
-            0x20,
-            if self.bank == 0 {
-                MainRegion::BankLow
-            } else {
-                MainRegion::BankHigh
-            },
-            0,
-        );
-        if self.slapstic.is_some() {
-            self.main_map
-                .remap_pages(0xA0, 0x60, MainRegion::Bank2, self.bank as u32 * 0x6000);
-        }
-        self.soundlatch = r.read_u8()?;
-        self.soundlatch_pending = r.read_bool()?;
-        self.mainlatch = r.read_u8()?;
-        self.mainlatch_pending = r.read_bool()?;
-        self.irq_pending = r.read_bool()?;
-        self.irq_counter = r.read_u64_le()?;
-        self.watchdog_counter = r.read_u64_le()?;
-        self.clock = r.read_u64_le()?;
-        self.audio_dc = (r.read_f32_le()?, r.read_f32_le()?);
-        self.watchdog_tripped = false;
-        self.display_list.clear();
-        Ok(())
     }
 }
 

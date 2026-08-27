@@ -763,9 +763,6 @@ fn pascal_to_screaming_snake(s: &str) -> String {
 /// - `#[save_skip]` — field is not saved or loaded; keeps its current value.
 /// - `#[save_skip(default)]` — not saved; set to `Default::default()` on load.
 /// - `#[save_skip(default = <expr>)]` — not saved; set to `<expr>` on load.
-/// - `#[save_elements]` — serialize `[u8; N]` per-element instead of bulk
-///   `write_bytes`/`read_bytes_into`. Use when compatibility with existing
-///   save formats that use individual `write_u8` calls is required.
 ///
 /// # Struct attributes
 ///
@@ -865,8 +862,6 @@ fn pascal_to_screaming_snake(s: &str) -> String {
 ///   framing exists to make loud.
 /// - `#[save_skip]` and its `(default)` / `(default = expr)` forms behave
 ///   exactly as they do positionally.
-/// - `#[save_elements]` is rejected: `[u8; N]` is raw bytes under TLV, so it
-///   would have no effect.
 ///
 /// ## Optional components
 ///
@@ -905,15 +900,7 @@ fn pascal_to_screaming_snake(s: &str) -> String {
 /// `#[save_version(N)]` still works, and means what it does on a struct.
 #[proc_macro_derive(
     Saveable,
-    attributes(
-        save_version,
-        save_skip,
-        save_elements,
-        save_tlv,
-        save,
-        save_retired,
-        save_after_load
-    )
+    attributes(save_version, save_skip, save_tlv, save, save_retired, save_after_load)
 )]
 pub fn derive_saveable(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -1135,8 +1122,7 @@ fn gen_positional_body(
                  has nowhere to say a component is absent, since every field is written."
             );
         }
-        let force_elements = has_save_elements(&field.attrs);
-        let (save, load) = gen_field_io(ident, &field.ty, force_elements, Encoding::Positional);
+        let (save, load) = gen_field_io(ident, &field.ty, Encoding::Positional);
 
         if delegates_to_saveable(&field.ty) {
             let tag = next_tag;
@@ -1186,13 +1172,6 @@ fn gen_tlv_body(
         }
         let ident = field.ident.as_ref().expect("named field");
         let path = format!("{struct_name}.{ident}");
-
-        if has_save_elements(&field.attrs) {
-            panic!(
-                "{path}: #[save_elements] has no meaning under #[save_tlv] \
-                 ([u8; N] is raw bytes there, since the field length is the length). Remove it."
-            );
-        }
 
         let spec = parse_save_id(&field.attrs).unwrap_or_else(|| {
             panic!("{path}: #[save_tlv] structs need #[save(id = N)] on every saved field")
@@ -1269,7 +1248,7 @@ fn gen_tlv_body(
         }
 
         fixed_count += 1;
-        let (save, load) = gen_field_io(ident, &field.ty, false, Encoding::Tlv);
+        let (save, load) = gen_field_io(ident, &field.ty, Encoding::Tlv);
         save_stmts.push((id, quote! { w.write_tlv(#id, |w| { #save }); }));
 
         arms.push(quote! {
@@ -1530,11 +1509,6 @@ impl syn::parse::Parse for SaveSkipArgs {
     }
 }
 
-/// Check if a field has the `#[save_elements]` attribute.
-fn has_save_elements(attrs: &[syn::Attribute]) -> bool {
-    attrs.iter().any(|a| a.path().is_ident("save_elements"))
-}
-
 /// Array element types written inline rather than framed as a component: a
 /// primitive, a tuple of them such as an expanded palette's `(u8, u8, u8)`, or
 /// an array of either, which is how a per-chip per-channel register file is
@@ -1566,8 +1540,7 @@ fn is_primitive_type(ty: &Type) -> bool {
 fn delegates_to_saveable(ty: &Type) -> bool {
     match ty {
         // An array delegates only when its elements do; `[u8; N]`, `[u16; N]`
-        // and `[(u8, u8, u8); N]` are inline either way, `#[save_elements]` or
-        // not.
+        // and `[(u8, u8, u8); N]` are inline.
         Type::Array(arr) => !is_inline_element_type(&arr.elem),
         Type::Path(path) => {
             if is_primitive_type(ty) {
@@ -1601,13 +1574,8 @@ enum Encoding {
 }
 
 /// Generate save and load token streams for one field of `self`.
-fn gen_field_io(
-    ident: &syn::Ident,
-    ty: &Type,
-    force_elements: bool,
-    enc: Encoding,
-) -> (TokenStream2, TokenStream2) {
-    gen_place_io(&quote! { self.#ident }, ident, ty, force_elements, enc)
+fn gen_field_io(ident: &syn::Ident, ty: &Type, enc: Encoding) -> (TokenStream2, TokenStream2) {
+    gen_place_io(&quote! { self.#ident }, ident, ty, enc)
 }
 
 /// Generate save and load token streams for the value at `place`, whose type is
@@ -1616,12 +1584,11 @@ fn gen_place_io(
     place: &TokenStream2,
     ident: &syn::Ident,
     ty: &Type,
-    force_elements: bool,
     enc: Encoding,
 ) -> (TokenStream2, TokenStream2) {
     match ty {
         // Fixed-size array: [T; N]
-        Type::Array(arr) => gen_array_io(place, ident, &arr.elem, force_elements, enc),
+        Type::Array(arr) => gen_array_io(place, ident, &arr.elem, enc),
         // Path types: primitives, Vec<u8>, or Saveable delegates
         Type::Path(path) => {
             let seg = path.path.segments.last().expect("non-empty path");
@@ -1674,7 +1641,7 @@ fn gen_place_io(
                     let inner = generic_inner_type(seg).unwrap_or_else(|| {
                         panic!("Saveable derive: field `{ident}` has a Box with no type argument")
                     });
-                    gen_place_io(&quote! { (*#place) }, ident, inner, force_elements, enc)
+                    gen_place_io(&quote! { (*#place) }, ident, inner, enc)
                 }
                 "Vec" => {
                     // Verify it's Vec<u8>
@@ -1713,19 +1680,14 @@ fn gen_place_io(
 }
 
 /// Generate save/load for `[T; N]` arrays.
-///
-/// When `force_elements` is true, `[u8; N]` is serialized per-element instead
-/// of using the bulk `write_bytes`/`read_bytes_into` path. This preserves
-/// compatibility with hand-written impls that used individual `write_u8` calls.
 fn gen_array_io(
     place: &TokenStream2,
     ident: &syn::Ident,
     elem_ty: &Type,
-    force_elements: bool,
     enc: Encoding,
 ) -> (TokenStream2, TokenStream2) {
-    // Check if element is u8 — use bulk bytes path (unless force_elements)
-    if is_type_u8(elem_ty) && !force_elements {
+    // Bytes go in bulk rather than one at a time.
+    if is_type_u8(elem_ty) {
         return match enc {
             Encoding::Positional => (
                 quote! { w.write_bytes(&#place); },
@@ -1796,6 +1758,16 @@ fn gen_array_element_io(
     // board keeps. One loop per dimension and no framing anywhere: every
     // dimension's length is fixed by the type, exactly as for a tuple.
     if let Type::Array(inner) = elem_ty {
+        // A `[u8; M]` element goes in bulk, the same as a `[u8; N]` field. The
+        // read takes exactly the element's length, so this stays correct inside
+        // a loop where reading "the rest" would not be. Without it a
+        // double-buffered bitmap would go a byte at a time.
+        if is_type_u8(&inner.elem) {
+            return (
+                quote! { w.write_raw(#var); },
+                quote! { r.read_raw_into(#var)?; },
+            );
+        }
         let next = syn::Ident::new(&format!("__v{}", depth + 1), var.span());
         let (save, load) = gen_array_element_io(ident, &next, &inner.elem, depth + 1);
         return (

@@ -120,12 +120,15 @@ pub struct WilliamsBlitter {
     // Window clip (Sinistar). When `window_enable` is set, blits into
     // [clip_address, 0xC000) are suppressed; writes below the clip or to
     // non-video RAM ($C000+, e.g. $DXXX SRAM) always proceed. `clip_address` is
-    // construction-time config and `window_enable` is driven at runtime by the
-    // $C900 register — both are save-skipped so other games' blitter saves stay
-    // byte-identical; the board restores `window_enable` (guarded by config).
+    // construction-time config, so it stays out.
     #[save_skip]
     clip_address: u16,
-    #[save_skip]
+    /// Driven at runtime by the $C900 register, so it is state and belongs
+    /// here. It used to be save-skipped and restored by the board through an
+    /// accessor, purely so that other games' blitter saves stayed
+    /// byte-identical — which is the cost TLV removes: a field carried under
+    /// its own id changes nothing about the bodies around it.
+    #[save(id = 21, default)]
     window_enable: bool,
 
     // Execution state

@@ -92,15 +92,15 @@ fn a_save_file_dumps_its_chunk_tree() {
     );
 }
 
-/// The acceptance criterion: the optional components are visible as chunks in
-/// the machine that has them and simply absent in the machine that does not.
+/// The acceptance criterion: the per-variant parts are visible as chunks in the
+/// machine that has them and simply absent in the machine that does not.
+///
+/// Both are now expressed by the types rather than by a hand-written condition
+/// — the extra SRAM is a region only Sinistar's map declares, and the CVSD is an
+/// `Option` field — but what a reader sees is unchanged.
 #[test]
 fn the_optional_components_are_visible_when_present_and_absent_when_not() {
-    const OPTIONAL: [&str; 3] = [
-        "WilliamsBoard.sram",
-        "WilliamsBoard.cvsd",
-        "WilliamsBoard.blitter_window",
-    ];
+    const OPTIONAL: [&str; 2] = ["SRAM", "WilliamsBoard.cvsd"];
 
     let joust_path = write_save("optional", "joust");
     let sinistar_path = write_save("optional", "sinistar");
@@ -114,7 +114,20 @@ fn the_optional_components_are_visible_when_present_and_absent_when_not() {
         assert!(!without.contains(&name.to_string()), "joust: {without:?}");
     }
 
-    // Everything else is shared: the two boards differ by exactly those three.
+    // The blitter's window-enable is the one that stopped being per-variant.
+    // It is only meaningful on the games with a clip window, but it is a plain
+    // field now rather than a conditional chunk the board restored through an
+    // accessor: under TLV a field carried under its own id costs the games that
+    // do not use it nothing, which is exactly what made the condition worth
+    // dropping.
+    for names in [&with, &without] {
+        assert!(
+            names.contains(&"WilliamsBlitter.window_enable".to_string()),
+            "{names:?}"
+        );
+    }
+
+    // Everything else is shared: the two boards differ by exactly those two.
     let shared: Vec<_> = with
         .iter()
         .filter(|n| !OPTIONAL.contains(&n.as_str()))
