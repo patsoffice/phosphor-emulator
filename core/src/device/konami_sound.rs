@@ -47,11 +47,11 @@
 
 use crate::audio::{AudioResampler, host_sample_rate};
 use crate::core::debug::{DebugRegister, Debuggable};
-use crate::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use crate::core::{Bus, BusMaster};
 use crate::cpu::Cpu;
 use crate::cpu::z80::Z80;
 use crate::device::{Ay8910, I8255};
+use phosphor_macros::Saveable;
 
 use super::Device;
 
@@ -61,47 +61,71 @@ const TIMER_PERIOD: u32 = 16 * 16 * 2 * 8 * 5 * 2; // 40960
 const TIMER_HALF: u32 = 16 * 16 * 2 * 8 * 5; // 20480
 
 /// Konami Scramble sound board.
+#[derive(Saveable)]
+#[save_version(1)]
+#[save_tlv]
 pub struct KonamiSound {
     // Sound CPU (Z80 @ ~1.79 MHz)
+    #[save(id = 1)]
     cpu: Z80,
     /// Everything the sound CPU talks to. Held apart from the CPU so a cycle
     /// dispatches at a concrete bus rather than a trait object -- see
     /// `docs/designs/concrete-bus-dispatch.md`.
+    #[save(id = 2)]
     bus: KonamiSoundBus,
 }
 
 /// The sound Z80's bus: PSGs, memory, the PPI interface and the timer.
+#[derive(Saveable)]
+#[save_version(1)]
+#[save_tlv]
 struct KonamiSoundBus {
     // 1-2× AY-8910 PSGs (`num_ay` selects how many are populated)
+    #[save(id = 1)]
     ay: [Ay8910; 2],
+    /// How many of the two are fitted, which is how the board is wired rather
+    /// than anything that runs.
+    #[save_skip]
     num_ay: usize,
 
     // Memory
-    rom: Vec<u8>,      // 8 KB sound ROM
+    /// The sound ROM, which `load_rom` puts back.
+    #[save_skip]
+    rom: Vec<u8>, // 8 KB sound ROM
+    #[save(id = 2)]
     ram: [u8; 0x0400], // 1 KB RAM
 
     // Command/control interface from the main board (8255 PPI on the real
     // hardware): port A out -> command latch, port B out -> control byte.
+    #[save(id = 3)]
     ppi: I8255,
+    #[save(id = 4)]
     command: u8, // latched command (8255 port A output)
+    #[save(id = 5)]
     control: u8, // 8255 port B output (bit 3 = IRQ clock, bit 4 = mute)
 
     // IRQ generation (HOLD_LINE-style: set on the control bit-3 falling edge,
     // cleared when the sound CPU reads the command latch).
+    #[save(id = 6)]
     irq_pending: bool,
+    #[save(id = 7)]
     mute: bool,
 
     // Discrete output-filter control word (latched, not modeled as audio).
+    #[save(id = 8)]
     filter: u16,
 
     // Frogger-board wiring (single AY, relocated RAM/filter, swapped AY ports,
     // and a B3/B5-swapped timer). Static config; not reset or saved.
+    #[save_skip]
     frogger: bool,
 
     // Audio resampler (mixes the AY outputs)
+    #[save(id = 9)]
     resampler: AudioResampler<i16>,
 
     // Total sound-CPU cycles (drives the timer).
+    #[save(id = 10)]
     clock: u64,
 }
 
@@ -459,51 +483,13 @@ impl Debuggable for KonamiSound {
 }
 
 // ---------------------------------------------------------------------------
-// Save state support
-// ---------------------------------------------------------------------------
-
-impl Saveable for KonamiSound {
-    fn save_state(&self, w: &mut StateWriter) {
-        w.write_version(1);
-        self.cpu.save_state(w);
-        self.bus.ay[0].save_state(w);
-        self.bus.ay[1].save_state(w);
-        self.bus.ppi.save_state(w);
-        w.write_bytes(&self.bus.ram);
-        w.write_u8(self.bus.command);
-        w.write_u8(self.bus.control);
-        w.write_bool(self.bus.irq_pending);
-        w.write_bool(self.bus.mute);
-        w.write_u16_le(self.bus.filter);
-        self.bus.resampler.save_state(w);
-        w.write_u64_le(self.bus.clock);
-    }
-
-    fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
-        r.read_version(1)?;
-        self.cpu.load_state(r)?;
-        self.bus.ay[0].load_state(r)?;
-        self.bus.ay[1].load_state(r)?;
-        self.bus.ppi.load_state(r)?;
-        r.read_bytes_into(&mut self.bus.ram)?;
-        self.bus.command = r.read_u8()?;
-        self.bus.control = r.read_u8()?;
-        self.bus.irq_pending = r.read_bool()?;
-        self.bus.mute = r.read_bool()?;
-        self.bus.filter = r.read_u16_le()?;
-        self.bus.resampler.load_state(r)?;
-        self.bus.clock = r.read_u64_le()?;
-        Ok(())
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::save_state::{Saveable, StateReader, StateWriter};
 
     /// The rate a Scramble-family board supplies: its 14.318181 MHz sound
     /// crystal over eight. Nothing here depends on the exact value, but using

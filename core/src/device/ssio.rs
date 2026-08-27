@@ -33,11 +33,11 @@
 
 use crate::audio::{AudioResampler, host_sample_rate};
 use crate::core::debug::{DebugRegister, Debuggable};
-use crate::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
 use crate::core::{Bus, BusMaster};
 use crate::cpu::Cpu;
 use crate::cpu::z80::Z80;
 use crate::device::Ay8910;
+use phosphor_macros::Saveable;
 
 use super::Device;
 
@@ -66,45 +66,68 @@ const DUTY_CYCLE_VOLUME: [u8; 16] = [
 ///
 /// Implements `Bus` for the internal Z80 CPU's memory/IO map, and provides
 /// methods for the main board to write command latches and read status/inputs.
+#[derive(Saveable)]
+#[save_version(1)]
+#[save_tlv]
 pub struct SsioBoard {
     // Sound CPU (Z80 @ 2 MHz)
+    #[save(id = 1)]
     cpu: Z80,
     /// Everything the sound CPU talks to. Held apart from the CPU so a cycle
     /// dispatches at a concrete bus rather than a trait object -- see
     /// `docs/designs/concrete-bus-dispatch.md`.
+    #[save(id = 2)]
     bus: SsioBus,
 }
 
 /// The sound Z80's bus: the two PSGs, memory, and the main-board latches.
+#[derive(Saveable)]
+#[save_version(1)]
+#[save_tlv]
 struct SsioBus {
     // 2× AY-8910 PSGs
+    #[save(id = 1)]
     ay: [Ay8910; 2],
 
     // Memory
-    rom: Vec<u8>,      // 16 KB sound ROM
+    /// The sound ROM, which `load_rom` puts back.
+    #[save_skip]
+    rom: Vec<u8>, // 16 KB sound ROM
+    #[save(id = 2)]
     ram: [u8; 0x0400], // 1 KB RAM
 
     // Communication with main CPU
+    #[save(id = 3)]
     data_latch: [u8; 4], // Command latches (main CPU writes, SSIO reads)
-    status: u8,          // Status byte (SSIO writes, main CPU reads)
+    #[save(id = 4)]
+    status: u8, // Status byte (SSIO writes, main CPU reads)
 
     // Input port routing (main CPU reads through SSIO)
+    #[save(id = 5)]
     input_ports: [u8; 5], // IP0–IP4 (active-low, idle = 0xFF)
+    #[save(id = 6)]
     dip_switches: u8,
 
     // IRQ generation
+    #[save(id = 7)]
     irq_counter: u32,
+    #[save(id = 8)]
     irq_pending: bool,
 
     // Duty-cycle volume modulation
+    #[save(id = 9)]
     duty_cycle: [[u8; 3]; 2], // Per-AY, per-channel (4-bit values)
-    overall: [u8; 2],         // Per-AY overall volume (3-bit)
+    #[save(id = 10)]
+    overall: [u8; 2], // Per-AY overall volume (3-bit)
+    #[save(id = 11)]
     mute: bool,
 
     // Audio resampler (mixes both AY outputs)
+    #[save(id = 12)]
     resampler: AudioResampler<i16>,
 
     // Clock state
+    #[save(id = 13)]
     clock: u64,
 }
 
@@ -445,67 +468,6 @@ impl Debuggable for SsioBoard {
 // Save state support
 // ---------------------------------------------------------------------------
 
-impl Saveable for SsioBoard {
-    fn save_state(&self, w: &mut StateWriter) {
-        w.write_version(1);
-        self.cpu.save_state(w);
-        self.bus.ay[0].save_state(w);
-        self.bus.ay[1].save_state(w);
-        w.write_bytes(&self.bus.ram);
-        for &b in &self.bus.data_latch {
-            w.write_u8(b);
-        }
-        w.write_u8(self.bus.status);
-        for &p in &self.bus.input_ports {
-            w.write_u8(p);
-        }
-        w.write_u8(self.bus.dip_switches);
-        w.write_u32_le(self.bus.irq_counter);
-        w.write_bool(self.bus.irq_pending);
-        for ay_idx in 0..2 {
-            for ch in 0..3 {
-                w.write_u8(self.bus.duty_cycle[ay_idx][ch]);
-            }
-        }
-        for &ov in &self.bus.overall {
-            w.write_u8(ov);
-        }
-        w.write_bool(self.bus.mute);
-        self.bus.resampler.save_state(w);
-        w.write_u64_le(self.bus.clock);
-    }
-
-    fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
-        r.read_version(1)?;
-        self.cpu.load_state(r)?;
-        self.bus.ay[0].load_state(r)?;
-        self.bus.ay[1].load_state(r)?;
-        r.read_bytes_into(&mut self.bus.ram)?;
-        for latch in &mut self.bus.data_latch {
-            *latch = r.read_u8()?;
-        }
-        self.bus.status = r.read_u8()?;
-        for port in &mut self.bus.input_ports {
-            *port = r.read_u8()?;
-        }
-        self.bus.dip_switches = r.read_u8()?;
-        self.bus.irq_counter = r.read_u32_le()?;
-        self.bus.irq_pending = r.read_bool()?;
-        for ay_idx in 0..2 {
-            for ch in 0..3 {
-                self.bus.duty_cycle[ay_idx][ch] = r.read_u8()?;
-            }
-        }
-        for ov in &mut self.bus.overall {
-            *ov = r.read_u8()?;
-        }
-        self.bus.mute = r.read_bool()?;
-        self.bus.resampler.load_state(r)?;
-        self.bus.clock = r.read_u64_le()?;
-        Ok(())
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -513,6 +475,7 @@ impl Saveable for SsioBoard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::save_state::{Saveable, StateReader, StateWriter};
 
     /// Helper: call Bus::read (disambiguates from Device::read).
     fn bus_read(ssio: &mut SsioBoard, addr: u16) -> u8 {

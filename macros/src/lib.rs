@@ -774,6 +774,12 @@ fn pascal_to_screaming_snake(s: &str) -> String {
 /// arrays of primitives or `Saveable` types (`[T; N]`), and any other type
 /// that implements `Saveable` (delegated via `save_state`/`load_state`).
 ///
+/// An array element may itself be a tuple of primitives, as an expanded
+/// palette's `[(u8, u8, u8); N]` is, or another array, as a per-chip
+/// per-channel register file's `[[u8; 3]; 2]` is. Both are written flat: every
+/// dimension's length and every tuple's arity is fixed by the type, so nothing
+/// has to carry them.
+///
 /// # Chunk framing
 ///
 /// Primitives and blobs are written inline. Every *nested component*, meaning a
@@ -1253,9 +1259,12 @@ fn has_save_elements(attrs: &[syn::Attribute]) -> bool {
 }
 
 /// Array element types written inline rather than framed as a component: a
-/// primitive, or a tuple of them such as an expanded palette's `(u8, u8, u8)`.
+/// primitive, a tuple of them such as an expanded palette's `(u8, u8, u8)`, or
+/// an array of either, which is how a per-chip per-channel register file is
+/// held.
 fn is_inline_element_type(ty: &Type) -> bool {
     match ty {
+        Type::Array(arr) => is_inline_element_type(&arr.elem),
         Type::Tuple(t) => !t.elems.is_empty() && t.elems.iter().all(is_primitive_type),
         _ => is_primitive_type(ty),
     }
@@ -1423,10 +1432,11 @@ fn gen_array_io(
     }
 
     // For other element types, generate a loop
-    let (elem_save, elem_load) = gen_array_element_io(ident, elem_ty);
+    let var = syn::Ident::new("__v0", ident.span());
+    let (elem_save, elem_load) = gen_array_element_io(ident, &var, elem_ty, 0);
     (
-        quote! { for __v in &self.#ident { #elem_save } },
-        quote! { for __v in &mut self.#ident { #elem_load } },
+        quote! { for #var in &self.#ident { #elem_save } },
+        quote! { for #var in &mut self.#ident { #elem_load } },
     )
 }
 
@@ -1464,8 +1474,29 @@ fn gen_primitive_io(place: &TokenStream2, ty: &Type) -> Option<(TokenStream2, To
     ))
 }
 
-/// Generate per-element save/load for array loops.
-fn gen_array_element_io(ident: &syn::Ident, elem_ty: &Type) -> (TokenStream2, TokenStream2) {
+/// Generate per-element save/load for array loops, for the element bound to
+/// `var` at nesting `depth`.
+///
+/// `depth` names the loop variables of a nested array apart, so `[[u8; 3]; 2]`
+/// binds `__v0` in the outer loop and `__v1` in the inner one.
+fn gen_array_element_io(
+    ident: &syn::Ident,
+    var: &syn::Ident,
+    elem_ty: &Type,
+    depth: usize,
+) -> (TokenStream2, TokenStream2) {
+    // An array of arrays, such as the per-chip per-channel duty cycles a PSG
+    // board keeps. One loop per dimension and no framing anywhere: every
+    // dimension's length is fixed by the type, exactly as for a tuple.
+    if let Type::Array(inner) = elem_ty {
+        let next = syn::Ident::new(&format!("__v{}", depth + 1), var.span());
+        let (save, load) = gen_array_element_io(ident, &next, &inner.elem, depth + 1);
+        return (
+            quote! { for #next in #var.iter() { #save } },
+            quote! { for #next in #var.iter_mut() { #load } },
+        );
+    }
+
     // A tuple of primitives, such as the `[(u8, u8, u8); N]` an expanded palette
     // is held in. Written field by field, in order, with no framing: the array's
     // length and the tuple's arity are both fixed by the type.
@@ -1474,7 +1505,7 @@ fn gen_array_element_io(ident: &syn::Ident, elem_ty: &Type) -> (TokenStream2, To
         let mut reads = Vec::new();
         for (i, ty) in tuple.elems.iter().enumerate() {
             let index = syn::Index::from(i);
-            let place = quote! { __v.#index };
+            let place = quote! { #var.#index };
             let (write, read) = gen_primitive_io(&place, ty).unwrap_or_else(|| {
                 panic!(
                     "Saveable derive supports tuples of primitives only; field `{ident}` \
@@ -1487,15 +1518,15 @@ fn gen_array_element_io(ident: &syn::Ident, elem_ty: &Type) -> (TokenStream2, To
         return (quote! { #(#writes)* }, quote! { #(#reads)* });
     }
 
-    if let Some(io) = gen_primitive_io(&quote! { *__v }, elem_ty) {
+    if let Some(io) = gen_primitive_io(&quote! { *#var }, elem_ty) {
         return io;
     }
 
     // Anything else is a nested component, framed by its parent.
     let _ = ident;
     (
-        quote! { phosphor_core::prelude::Saveable::save_state(__v, w); },
-        quote! { phosphor_core::prelude::Saveable::load_state(__v, r)?; },
+        quote! { phosphor_core::prelude::Saveable::save_state(#var, w); },
+        quote! { phosphor_core::prelude::Saveable::load_state(#var, r)?; },
     )
 }
 

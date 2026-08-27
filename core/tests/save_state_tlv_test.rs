@@ -448,6 +448,41 @@ fn a_tuple_array_is_written_flat() {
     assert_eq!(data, expected);
 }
 
+/// A register file indexed by chip and then by channel is `[[u8; 3]; 2]`, and a
+/// sound board holds several. Like a tuple array it is written flat, because
+/// both dimensions are fixed by the type.
+#[test]
+fn an_array_of_arrays_round_trips_flat() {
+    #[derive(Saveable, Default, Debug, PartialEq)]
+    #[save_version(1)]
+    #[save_tlv]
+    struct Ssio {
+        #[save(id = 1)]
+        duty_cycle: [[u8; 3]; 2],
+        #[save(id = 2)]
+        deep: [[[u16; 2]; 1]; 2],
+    }
+
+    let src = Ssio {
+        duty_cycle: [[1, 2, 3], [4, 5, 6]],
+        deep: [[[0x1234, 0x5678]], [[0x9ABC, 0xDEF0]]],
+    };
+
+    let mut out = Ssio::default();
+    load_into(&mut out, &bytes_of(&src)).unwrap();
+    assert_eq!(out, src);
+
+    let data = bytes_of(&Ssio {
+        duty_cycle: [[1, 2, 3], [4, 5, 6]],
+        ..Default::default()
+    });
+    assert_eq!(
+        &data[9..15],
+        &[1, 2, 3, 4, 5, 6],
+        "the outer array's elements follow one another with no framing"
+    );
+}
+
 /// A machine whose components are a mix loads end to end through the real
 /// envelope, checksum included.
 #[test]
