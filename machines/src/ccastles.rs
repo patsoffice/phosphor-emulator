@@ -7,7 +7,7 @@ use phosphor_core::core::machine::{
     KeyId, MachineCore, MouseControl, Nvram, PadButton, PadControl, Profilable, Renderable,
     SaveState,
 };
-use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
+
 use phosphor_core::core::{AccessKind, AddressSpace16};
 use phosphor_core::core::{Bus, BusMaster, TimingConfig};
 use phosphor_core::cpu::m6502::M6502;
@@ -16,7 +16,7 @@ use phosphor_core::cpu::{Cpu, CpuStateTrait};
 use phosphor_core::device::output_latch::OutputLatch;
 use phosphor_core::device::pokey::Pokey;
 use phosphor_core::gfx::decode::{GfxCache, GfxLayout, decode_gfx};
-use phosphor_macros::{BusDebug, MemoryRegion};
+use phosphor_macros::{BusDebug, MemoryRegion, Saveable};
 
 use crate::disasm_registry::{DisasmCpu, DisasmRegion};
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
@@ -413,27 +413,46 @@ const CCASTLES_SPRITE_LAYOUT: GfxLayout<'static> = GfxLayout {
 /// Crystal Castles' hardware, everything the 6502 talks *to*. Held apart from
 /// the CPU so a cycle dispatches at a concrete bus rather than a trait object
 /// (see `docs/designs/concrete-bus-dispatch.md`).
-#[derive(BusDebug)]
+#[derive(BusDebug, Saveable)]
+#[save_version(1)]
+#[save_tlv]
 pub struct CrystalCastlesBoard {
     #[debug_device("POKEY 1")]
+    #[save(id = 1)]
     pokey1: Pokey,
     #[debug_device("POKEY 2")]
+    #[save(id = 2)]
     pokey2: Pokey,
 
+    /// The address space persists its own writable regions (video RAM, SRAM,
+    /// sprite RAM and NVRAM) *and* its page table, which is what carries the ROM
+    /// bank. `update_rom_bank` used to be replayed on load for that.
     #[debug_map(cpu = 0)]
+    #[save(id = 3)]
     map: AddressSpace16,
 
-    gfx_rom: [u8; 0x4000],  // 16KB sprite graphics (not CPU-addressable)
+    #[save_skip]
+    gfx_rom: [u8; 0x4000], // 16KB sprite graphics (not CPU-addressable)
+    #[save_skip]
     sprite_cache: GfxCache, // Pre-decoded 256 sprites (8×16, 3bpp)
+    #[save_skip]
     sync_prom: [u8; 0x100], // VBLANK/IRQ timing
-    wp_prom: [u8; 0x100],   // Write-protect
-    pri_prom: [u8; 0x100],  // Priority compositing
+    #[save_skip]
+    wp_prom: [u8; 0x100], // Write-protect
+    #[save_skip]
+    pri_prom: [u8; 0x100], // Priority compositing
 
     // Video state
+    #[save(id = 4)]
     bitmode_addr: [u8; 2], // X,Y auto-increment latches
+    #[save(id = 5)]
     hscroll: u8,
+    #[save(id = 6)]
     vscroll: u8,
-    palette_ram: [u8; 64],           // Color RAM (64 addresses, 32 pens)
+    #[save(id = 7)]
+    palette_ram: [u8; 64], // Color RAM (64 addresses, 32 pens)
+    /// The expanded form, saved rather than replayed entry by entry on load.
+    #[save(id = 8)]
     palette_rgb: [(u8, u8, u8); 32], // Pre-computed RGB24
 
     // Output latches (LS259)
@@ -442,12 +461,14 @@ pub struct CrystalCastlesBoard {
     //   Bit 2: NVRAM store low       Bit 3: NVRAM store high
     //   Bit 4: Spare                 Bit 5: Coin counter R
     //   Bit 6: Coin counter L        Bit 7: ROM bank select
+    #[save(id = 9)]
     outlatch0: OutputLatch,
     // Latch 1 (6P) at 0x9F00: bit 0 = (data >> 3) & 1
     //   Bit 0: /AX (auto-X enable)   Bit 1: /AY (auto-Y enable)
     //   Bit 2: /XINC (X direction)    Bit 3: /YINC (Y direction)
     //   Bit 4: PLAYER2 (flip)         Bit 5: /SIRE
     //   Bit 6: BOTHRAM                Bit 7: BUF1/^BUF2 (sprite bank)
+    #[save(id = 10)]
     outlatch1: OutputLatch,
 
     // I/O state
@@ -455,25 +476,39 @@ pub struct CrystalCastlesBoard {
     //   Bit 0: Coin R       Bit 1: Coin L       Bit 2: Service
     //   Bit 3: Tilt         Bit 4: Self-test     Bit 5: VBLANK (active-high)
     //   Bit 6: Jump Left    Bit 7: Jump Right
+    #[save(id = 11)]
     in0: u8,
+    #[save(id = 12)]
     dip_switches: u8, // Read via POKEY2 ALLPOT (0x9A08)
     /// LETA0-3 (Y1, X1, Y2, X2). Only player 1's pair is driven; the player 2
     /// counters exist so the 0x9400 read can index all four uniformly.
+    #[save(id = 13)]
     trackball: [RelativeCounter; 4],
 
     // IRQ state — driven by sync PROM bit 3 rising edges (V=0,64,128,192)
+    #[save(id = 14)]
     irq_state: bool,
 
     // System timing
+    #[save(id = 15)]
     clock: u64,
+    #[save(id = 16)]
     watchdog_frame_count: u8,
 
     // Rendering
-    vblank_end: u8,           // First visible scanline (from sync PROM, typically 24)
+    #[save_skip]
+    vblank_end: u8, // First visible scanline (from sync PROM, typically 24)
+    #[save_skip]
     scanline_buffer: Vec<u8>, // 256 × 232 × 3 = 177,408 bytes (RGB24)
+    /// A load invalidates the frame rather than trusting one drawn before it.
+    #[save_skip(default)]
     scanline_buffer_valid: bool,
+    #[save_skip]
     sprite_buffer: Vec<u8>, // 256 × 256 temporary sprite layer (5-bit index)
 
+    /// Emptied on load, so audio queued before the snapshot does not play after
+    /// it. `SampleRing` has no `Default`, hence the explicit capacity.
+    #[save_skip(default = SampleRing::with_capacity(2048))]
     audio_buffer: SampleRing<i16>,
     /// The POKEYs' coupling into the amplifier.
     ///
@@ -481,15 +516,20 @@ pub struct CrystalCastlesBoard {
     /// how much they are playing. Removing it needs the running mean, not a
     /// constant: see the mixing site, where a fixed subtraction used to pin the
     /// output at the rail.
+    #[save(id = 17)]
     pokey_coupling: DcBlocker,
 }
 
 /// Atari Crystal Castles (1983): a 6502 beside the board it drives.
-#[derive(BusDebug)]
+#[derive(BusDebug, Saveable)]
+#[save_version(1)]
+#[save_tlv]
 pub struct CrystalCastlesSystem {
     #[debug_cpu("M6502")]
+    #[save(id = 1)]
     cpu: M6502,
     #[debug_bus]
+    #[save(id = 2)]
     pub board: CrystalCastlesBoard,
 }
 
@@ -1219,66 +1259,6 @@ impl InputConfigurable for CrystalCastlesSystem {
 
 crate::impl_standalone_debug!(CrystalCastlesSystem);
 
-impl Saveable for CrystalCastlesSystem {
-    fn save_state(&self, w: &mut StateWriter) {
-        self.cpu.save_state(w);
-        self.board.pokey1.save_state(w);
-        self.board.pokey2.save_state(w);
-        self.board.pokey_coupling.save_state(w);
-        w.write_bytes(self.board.map.region_data(Region::VideoRam));
-        w.write_bytes(self.board.map.region_data(Region::Sram));
-        w.write_bytes(self.board.map.region_data(Region::SpriteRam));
-        w.write_bytes(self.board.map.region_data(Region::Nvram));
-        w.write_bytes(&self.board.bitmode_addr);
-        w.write_u8(self.board.hscroll);
-        w.write_u8(self.board.vscroll);
-        w.write_bytes(&self.board.palette_ram);
-        self.board.outlatch0.save_state(w);
-        self.board.outlatch1.save_state(w);
-        w.write_u8(self.board.in0);
-        for counter in &self.board.trackball {
-            counter.save_state(w);
-        }
-        w.write_bool(self.board.irq_state);
-        w.write_u64_le(self.board.clock);
-        w.write_u8(self.board.watchdog_frame_count);
-        w.write_u8(self.board.dip_switches);
-    }
-
-    fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
-        self.cpu.load_state(r)?;
-        self.board.pokey1.load_state(r)?;
-        self.board.pokey2.load_state(r)?;
-        self.board.pokey_coupling.load_state(r)?;
-        r.read_bytes_into(self.board.map.region_data_mut(Region::VideoRam))?;
-        r.read_bytes_into(self.board.map.region_data_mut(Region::Sram))?;
-        r.read_bytes_into(self.board.map.region_data_mut(Region::SpriteRam))?;
-        r.read_bytes_into(self.board.map.region_data_mut(Region::Nvram))?;
-        r.read_bytes_into(&mut self.board.bitmode_addr)?;
-        self.board.hscroll = r.read_u8()?;
-        self.board.vscroll = r.read_u8()?;
-        r.read_bytes_into(&mut self.board.palette_ram)?;
-        self.board.outlatch0.load_state(r)?;
-        self.board.outlatch1.load_state(r)?;
-        self.board.in0 = r.read_u8()?;
-        for counter in &mut self.board.trackball {
-            counter.load_state(r)?;
-        }
-        self.board.irq_state = r.read_bool()?;
-        self.board.clock = r.read_u64_le()?;
-        self.board.watchdog_frame_count = r.read_u8()?;
-        self.board.dip_switches = r.read_u8()?;
-        // Recompute derived state
-        for i in 0..64 {
-            self.board.update_palette_entry(i);
-        }
-        self.board.update_rom_bank();
-        self.board.scanline_buffer_valid = false;
-        self.board.audio_buffer.clear();
-        Ok(())
-    }
-}
-
 impl MachineCore for CrystalCastlesSystem {
     // No gfx_sheets() override: the playfield is a 4bpp VRAM bitmap (no tile
     // cache), and the lone sprite cache colors entirely from palette color code
@@ -1427,6 +1407,42 @@ mod tests {
         // Cabinet is option 0 (mask 0x20); pick "Cocktail" (0x20).
         sys.set_dip_option(0, 0, 0x20);
         assert_eq!(sys.dip_bank_value(0), 0x25); // 0x05 preserved + cabinet bit
+    }
+
+    /// The ROM bank is page-table state, and the page table travels with the
+    /// map now rather than being replayed by `update_rom_bank` on load.
+    ///
+    /// Bit 7 of output latch 0 selects the bank, and `0xA000` is inside the
+    /// banked window. Both banks are filled with different bytes so that
+    /// reading through the window says which one is mapped: a load that did not
+    /// carry the page table would come back on bank 0.
+    #[test]
+    fn the_rom_bank_survives_a_save_and_load() {
+        let mut sys = CrystalCastlesSystem::new();
+        sys.board.map.region_data_mut(Region::RomBank0).fill(0x11);
+        sys.board.map.region_data_mut(Region::RomBank1).fill(0x22);
+
+        sys.board.outlatch0.write(7, true);
+        sys.board.update_rom_bank();
+        assert_eq!(sys.board.map.debug_read(0xA000), Some(0x22));
+
+        let data = SaveState::save_state(&sys).expect("save_state should return Some");
+
+        let mut sys2 = CrystalCastlesSystem::new();
+        sys2.board.map.region_data_mut(Region::RomBank0).fill(0x11);
+        sys2.board.map.region_data_mut(Region::RomBank1).fill(0x22);
+        assert_eq!(
+            sys2.board.map.debug_read(0xA000),
+            Some(0x11),
+            "a fresh board starts on bank 0"
+        );
+
+        SaveState::load_state(&mut sys2, &data).unwrap();
+        assert_eq!(
+            sys2.board.map.debug_read(0xA000),
+            Some(0x22),
+            "the banked window must come back pointing at bank 1"
+        );
     }
 
     #[test]
