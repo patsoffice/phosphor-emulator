@@ -154,7 +154,13 @@ fn max_depth_trims_the_tree_and_says_what_it_hid() {
 
     let shallow = components(&trimmed.stdout);
     assert!(!shallow.iter().any(|n| n.starts_with("VotraxSc01.")));
-    assert!(shallow.contains(&"GottliebSoundBoard.votrax".to_string()));
+    // The board's own fields are the depth the trim stops at, so they are still
+    // named; the sound board's contents, one level further down, are not.
+    assert!(
+        shallow.contains(&"GottliebBoard.sound".to_string()),
+        "{shallow:?}"
+    );
+    assert!(!shallow.contains(&"GottliebSoundBoard.votrax".to_string()));
     assert!(trimmed.stdout.contains("not shown"), "{}", trimmed.stdout);
 }
 
