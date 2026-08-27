@@ -442,6 +442,19 @@ zero. `Option<T>` fields, which is a per-variant component expressed as a field
 and replaces the chunk-level `read_optional` Stage A had to add by hand.
 `#[save_after_load]`, documented as a last resort.
 
+**Two more features were designed and then not built**, which is worth
+recording because the reasoning generalises. `Vec<T>` for primitive `T` and
+tuples in field position each had exactly one prospective caller, and in both
+cases the field's *type* was the actual defect: the mathbox's `Vec<u16>`s are
+allocated once at a constant size and never resize, and Star Wars' `(f32, f32)`
+is a filter's two-sample history. Fixing the types cost less than adding wire
+surface with one caller apiece. **A type the derive cannot encode is sometimes
+the type being wrong, not the derive being short.**
+
+**`#[save_elements]` is retired**, as the stage planned. Under TLV a `[u8; N]`
+is raw bytes and the field length is the length, so it could not do anything,
+and it had no users left.
+
 **"Do we need the post-load methods, or is it state we should save?"** That
 question removed most of them. Banking went with the page table. Five palette
 rebuilds went with tuple arrays. Two `refresh_dip_pots` calls went because the
@@ -451,12 +464,42 @@ deliberately does not carry: a device re-reading a clock from configuration
 back into range before something indexes with it (the Slapstic's bank, an ADC
 channel, an MB88xx RAM length).
 
-**What stays hand-written, and should.** `AddressSpace16`/`32` themselves, since
-they *are* the mechanism. `Namco51Wrapper`, a two-variant enum whose live
-variant is decided by whether a firmware ROM was found and whose LLE variant
-cannot be constructed from a file at all — a derive that built the variant the
-bytes name would be wrong. And the boards that combine accessor-backed state,
-post-load remapping and variable-length reads.
+**All 49 hand-written impls are gone.** Three remain in the tree and none of
+them is a leftover:
+
+* `AddressSpace16` and `AddressSpace32` — these *are* the mechanism. A map that
+  derived its own body would have nothing to say about which regions the CPU can
+  write, which is the whole point of the impl.
+* `Namco51Wrapper` — a two-variant enum whose live variant is decided by whether
+  a 51XX firmware ROM was found, and whose LLE variant cannot be constructed
+  from a file at all. A derive has to build the variant the bytes name; here
+  that is exactly what must not happen, so the twenty lines that check the
+  variant instead are the correct answer rather than a deferred one.
+
+The last five to convert had been classified as irreducibly bespoke, and were
+not: re-reading them after the features above landed, the accessor round-trips,
+optional components and post-load banking replays had already been answered, and
+what remained in each was a field whose type the derive could not encode. **A
+census taken before the tools existed goes stale, and the classification is the
+thing to re-check, not the conclusion drawn from it.**
+
+#### The rule from here
+
+Rev 2 framed Stage C as migrating *every* type to TLV. That is not what shipped
+and is not what should: about half the derive sites are still positional, and
+they should stay that way until something else moves them.
+
+**TLV a struct when you are changing it anyway; leave it positional otherwise.**
+Order-immunity and additive compatibility are worth their two bytes at the
+moment a struct's shape is in motion, and worth nothing to a `Pia6820` that has
+been at version 1 since the project began — 28 of 34 versioned components have
+never changed once. Stage A's chunk framing is what makes the mixture safe
+rather than merely tolerable: a positional struct nested in a TLV parent is
+framed by the parent's id, a TLV struct nested in a positional parent by the
+parent's ordinal tag, and Stage B's field count means a TLV body is
+self-delimiting wherever it lands.
+
+So a mixed codebase is the intended end state, not a half-finished sweep.
 
 ### Stage D — tooling
 
