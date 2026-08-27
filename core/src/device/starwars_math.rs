@@ -30,7 +30,7 @@
 //! `starwars_div_*`, `starwars_prng_r`).
 
 use crate::core::debug::{DebugRegister, Debuggable};
-use crate::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
+use phosphor_macros::Saveable;
 
 // Matrix processor strobe bits (IP15_8 = PROM_STR), MAME `starwars_m.cpp`.
 const LAC: u8 = 0x01; // load accumulator from RAM word (clears lsb)
@@ -50,26 +50,42 @@ const MATH_RAM_LEN: usize = 0x1000;
 const M_STOP_LIMIT: u32 = 100_000;
 
 /// Atari Star Wars Matrix Processor + divider + PRNG.
+#[derive(Saveable)]
+#[save_version(1)]
+#[save_tlv]
 pub struct StarWarsMath {
     /// Strobe bits per step (IP15_8), decoded from the mathbox PROMs.
+    ///
+    /// The decoded PROMs are reconstructed from ROM at load, so they are
+    /// configuration rather than state.
+    #[save_skip]
     prom_str: Vec<u8>,
     /// RAM-address low bits per step (IP6_0).
+    #[save_skip]
     prom_mas: Vec<u8>,
     /// Address-mode bit per step (IP7): 0 = BIC-relative, 1 = direct.
+    #[save_skip]
     prom_am: Vec<u8>,
 
     /// PROM microprogram address counter (top two bits page the counter).
+    #[save(id = 1)]
     mpa: u16,
     /// Block index counter (9 bits), addresses Math RAM in BIC-relative mode.
+    #[save(id = 2)]
     bic: u16,
     /// Datapath registers (signed 16-bit).
+    #[save(id = 3)]
     a: i16,
+    #[save(id = 4)]
     b: i16,
+    #[save(id = 5)]
     c: i16,
     /// 32-bit accumulator (only the upper 16 bits are read/written to RAM).
+    #[save(id = 6)]
     acc: i32,
 
     /// True while the matrix processor is "running" (IN1 bit 7).
+    #[save(id = 7)]
     math_run: bool,
 
     /// Diagnostic only: a recorded PRNG sequence to hand out from `$4703`
@@ -81,18 +97,26 @@ pub struct StarWarsMath {
     /// can be recorded but not recomputed. Replaying the recording puts both
     /// emulators on identical values and restores instruction-level lockstep.
     /// Never populated during normal emulation; not saved in save states.
+    #[save_skip]
     prng_replay: Vec<u8>,
+    #[save_skip]
     prng_replay_pos: usize,
     /// Remaining CPU cycles before `math_run` clears (mptime / 8).
+    #[save(id = 8)]
     busy_cycles: u32,
 
     // Restoring divider.
+    #[save(id = 9)]
     divisor: u16,
+    #[save(id = 10)]
     dividend: u16,
+    #[save(id = 11)]
     dvd_shift: u16,
+    #[save(id = 12)]
     quotient_shift: u16,
 
     /// 23-bit LFSR pseudo-random generator (taps 4 and 22, inverted feedback).
+    #[save(id = 13)]
     prng: u32,
 }
 
@@ -395,42 +419,5 @@ impl super::Device for StarWarsMath {
 
     fn tick(&mut self) {
         self.tick();
-    }
-}
-
-impl Saveable for StarWarsMath {
-    fn save_state(&self, w: &mut StateWriter) {
-        // The decoded PROMs are reconstructed from ROM at load; only dynamic
-        // state is serialized.
-        w.write_u16_le(self.mpa);
-        w.write_u16_le(self.bic);
-        w.write_u16_le(self.a as u16);
-        w.write_u16_le(self.b as u16);
-        w.write_u16_le(self.c as u16);
-        w.write_u32_le(self.acc as u32);
-        w.write_bool(self.math_run);
-        w.write_u32_le(self.busy_cycles);
-        w.write_u16_le(self.divisor);
-        w.write_u16_le(self.dividend);
-        w.write_u16_le(self.dvd_shift);
-        w.write_u16_le(self.quotient_shift);
-        w.write_u32_le(self.prng);
-    }
-
-    fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
-        self.mpa = r.read_u16_le()?;
-        self.bic = r.read_u16_le()?;
-        self.a = r.read_u16_le()? as i16;
-        self.b = r.read_u16_le()? as i16;
-        self.c = r.read_u16_le()? as i16;
-        self.acc = r.read_u32_le()? as i32;
-        self.math_run = r.read_bool()?;
-        self.busy_cycles = r.read_u32_le()?;
-        self.divisor = r.read_u16_le()?;
-        self.dividend = r.read_u16_le()?;
-        self.dvd_shift = r.read_u16_le()?;
-        self.quotient_shift = r.read_u16_le()?;
-        self.prng = r.read_u32_le()? & 0x7f_ffff;
-        Ok(())
     }
 }

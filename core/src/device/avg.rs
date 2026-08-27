@@ -82,7 +82,7 @@
 
 use super::dvg::VectorLine;
 use crate::core::debug::{DebugRegister, Debuggable};
-use crate::core::save_state::{SaveError, Saveable};
+use phosphor_macros::Saveable;
 
 /// Which game's AVG decode/color/coordinate rules to apply.
 ///
@@ -110,84 +110,120 @@ pub enum AvgVariant {
 /// The AVG runs continuously (not halt-based like DVG). Each frame is
 /// delineated by a jump to address 0, which flushes the accumulated
 /// display list. The caller triggers execution via [`Avg::go`] + [`Avg::execute`].
+#[derive(Saveable)]
+#[save_version(1)]
+#[save_tlv]
 pub struct Avg {
     /// Selected game variant (decode, color, coordinate rules).
+    #[save_skip]
     variant: AvgVariant,
 
     /// Program counter (byte address into vector memory).
+    #[save(id = 1)]
     pc: u16,
     /// 4-entry return address stack (byte addresses).
+    #[save(id = 2)]
     stack: [u16; 4],
     /// Stack pointer (only bits 1:0 used).
+    #[save(id = 3)]
     sp: u8,
 
     /// The byte (word, on Quantum) the address counter is currently presenting
     /// to the latches — refreshed before every dispatched state.
+    #[save(id = 4)]
     data: u16,
     /// 3-bit opcode latched by handler 1 (0 VCTR, 1 HALT, 2 SVEC, 3 STAT,
     /// 4 CNTR, 5 JSR, 6 RTS, 7 JMP). It also selects the PROM row, so it
     /// steers the rest of the instruction's state sequence.
+    #[save(id = 5)]
     op: u8,
     /// X delta (13-bit Tempest/Star Wars, 12-bit Quantum).
+    #[save(id = 6)]
     dvx: u16,
     /// Y delta / operand (13-bit).
+    #[save(id = 7)]
     dvy: u16,
     /// DVY bit 12 — selects scale vs color/intensity in the STAT strobe.
+    #[save(id = 8)]
     dvy12: u8,
     /// Intensity latch (4-bit) from handler 3.
+    #[save(id = 9)]
     int_latch: u8,
     /// Vector timer, loaded by normalization and binary scaling and consumed
     /// (and cleared) by strobe3, where it sets the beam's travel time.
+    #[save(id = 10)]
     timer: u16,
 
     /// Current beam X position (fixed-point, pixel << 16).
+    #[save(id = 11)]
     xpos: i32,
     /// Current beam Y position (fixed-point).
+    #[save(id = 12)]
     ypos: i32,
 
     /// Previous beam position for line segment generation (fixed-point).
+    ///
+    /// Not carried across a load: `has_prev` resets, so the next vector starts
+    /// a fresh segment rather than joining one drawn before the snapshot.
+    #[save_skip]
     prev_x: i32,
+    #[save_skip]
     prev_y: i32,
+    #[save_skip(default)]
     has_prev: bool,
 
     /// Analog scale factor (8-bit).
+    #[save(id = 13)]
     scale: u8,
     /// Binary scale factor (3-bit).
+    #[save(id = 14)]
     bin_scale: u8,
     /// Current color index (4-bit).
+    #[save(id = 15)]
     color: u8,
     /// Current intensity (4-bit).
+    #[save(id = 16)]
     intensity: u8,
 
     /// Center coordinates in fixed-point.
+    #[save_skip]
     xcenter: i32,
+    #[save_skip]
     ycenter: i32,
 
     /// DAC sign XOR values (0x200 for standard AVG).
+    #[save_skip]
     xdac_xor: u16,
+    #[save_skip]
     ydac_xor: u16,
 
     /// Axis flipping (set via $4000 write on Tempest).
+    #[save(id = 17)]
     flip_x: bool,
+    #[save(id = 18)]
     flip_y: bool,
 
     /// The halt flag, set by strobe3 on a HALT opcode and cleared by
     /// [`go`](Self::go). It is bit 4 of the PROM address, so a halted
     /// sequencer parks in the table's all-zero lower half.
+    #[save(id = 19)]
     halted: bool,
 
     /// Master-clock cycles between the GO write and the halt becoming visible,
     /// sampled on the state that raises the halt. An observable for tests and
     /// the debug UI: it is what the sequencer's own timing works out to, so a
     /// change in the PROM or in a handler's beam charge shows up here.
+    #[save(id = 20)]
     run_cycles: u32,
 
     /// Master-clock cycles consumed since the last [`go`](Self::go).
+    #[save(id = 21)]
     elapsed: u32,
 
     /// Sequencer time since the last vector was drawn, during which the beam
     /// stood still at the point that vector ended on. Handed to the next drawn
     /// segment as the dwell at its starting vertex, and reset there.
+    #[save_skip]
     idle_cycles: u32,
 
     /// Master-clock cycles owed to the sequencer but not yet spent.
@@ -197,20 +233,28 @@ pub struct Avg {
     /// strobe3 spent, and a long vector can cost far more than one slice, so
     /// this goes negative and the generator stays busy across the following
     /// slices, exactly as the beam does.
+    #[save(id = 22)]
     pending: i32,
 
     /// The 256×4 next-state PROM (low nibbles), initially the built-in
     /// [`default_state_prom`] and replaced by the game's own via
     /// [`load_state_prom`](Self::load_state_prom).
+    #[save_skip]
     state_prom: [u8; 0x100],
     /// Sequencer state latch: bits 3:0 the state, bit 4 the halt flag as it
     /// stood when the current PROM lookup was addressed.
+    #[save(id = 23)]
     state_latch: u8,
     /// Set by strobe2 when a branch targets address 0 — the frame delimiter
     /// for the games whose vector list loops forever instead of halting.
+    #[save_skip]
     frame_done: bool,
 
     /// Accumulated display list for the current frame.
+    ///
+    /// Cleared by a load: the frame is redrawn from the restored sequencer
+    /// state rather than resumed part way through.
+    #[save_skip(default)]
     display_list: Vec<VectorLine>,
 }
 
@@ -1125,76 +1169,6 @@ impl Debuggable for Avg {
                 width: 8,
             },
         ]
-    }
-}
-
-impl Saveable for Avg {
-    fn save_state(&self, w: &mut crate::core::save_state::StateWriter) {
-        w.write_u16_le(self.pc);
-        for &s in &self.stack {
-            w.write_u16_le(s);
-        }
-        w.write_u8(self.sp);
-        w.write_i32_le(self.xpos);
-        w.write_i32_le(self.ypos);
-        w.write_u8(self.scale);
-        w.write_u8(self.bin_scale);
-        w.write_u8(self.color);
-        w.write_u8(self.intensity);
-        w.write_bool(self.flip_x);
-        w.write_bool(self.flip_y);
-        w.write_bool(self.halted);
-        // The sequencer parks between runs, and where it parked decides how
-        // the next GO starts.
-        w.write_u8(self.state_latch);
-        // The generator runs in step with the CPU, so a snapshot lands part way
-        // through an instruction as often as not. Everything the handlers have
-        // latched so far has to come back with it, or the instruction in flight
-        // finishes with operands from whatever ran before the load.
-        w.write_u8(self.op);
-        w.write_u16_le(self.data);
-        w.write_u16_le(self.dvx);
-        w.write_u16_le(self.dvy);
-        w.write_u8(self.dvy12);
-        w.write_u8(self.int_latch);
-        w.write_u16_le(self.timer);
-        w.write_i32_le(self.pending);
-        w.write_u32_le(self.elapsed);
-        w.write_u32_le(self.run_cycles);
-    }
-
-    fn load_state(
-        &mut self,
-        r: &mut crate::core::save_state::StateReader,
-    ) -> Result<(), SaveError> {
-        self.pc = r.read_u16_le()?;
-        for s in &mut self.stack {
-            *s = r.read_u16_le()?;
-        }
-        self.sp = r.read_u8()?;
-        self.xpos = r.read_i32_le()?;
-        self.ypos = r.read_i32_le()?;
-        self.scale = r.read_u8()?;
-        self.bin_scale = r.read_u8()?;
-        self.color = r.read_u8()?;
-        self.intensity = r.read_u8()?;
-        self.flip_x = r.read_bool()?;
-        self.flip_y = r.read_bool()?;
-        self.halted = r.read_bool()?;
-        self.state_latch = r.read_u8()?;
-        self.op = r.read_u8()?;
-        self.data = r.read_u16_le()?;
-        self.dvx = r.read_u16_le()?;
-        self.dvy = r.read_u16_le()?;
-        self.dvy12 = r.read_u8()?;
-        self.int_latch = r.read_u8()?;
-        self.timer = r.read_u16_le()?;
-        self.pending = r.read_i32_le()?;
-        self.elapsed = r.read_u32_le()?;
-        self.run_cycles = r.read_u32_le()?;
-        self.has_prev = false;
-        self.display_list.clear();
-        Ok(())
     }
 }
 
