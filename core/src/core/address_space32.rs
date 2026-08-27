@@ -303,6 +303,14 @@ pub struct AddressSpace32 {
     map: AddressMap32,
     backing: MemoryBacking,
 
+    /// Whether [`remap_range`](Self::remap_range) has ever retargeted a range.
+    ///
+    /// Only exists so `save_state` can refuse to silently drop banking state it
+    /// has no wire format for. No board banks a 32-bit space today; the first
+    /// one to do so trips the assert rather than shipping saves that come back
+    /// pointing at the wrong bank.
+    remapped: bool,
+
     /// Exact-address watchpoint set and hit queue. There is no page table
     /// to carry per-page flags, so the hot-path zero-cost check is
     /// `watchpoints.is_empty()`.
@@ -328,6 +336,7 @@ impl AddressSpace32 {
         Self {
             map: AddressMap32::new(),
             backing: MemoryBacking::new(),
+            remapped: false,
             watchpoints: Watchpoints::new(),
             debug_cycle: 0,
             debug_pc: None,
@@ -390,7 +399,13 @@ impl AddressSpace32 {
 
     /// Retarget an existing range for bank switching (see
     /// [`AddressMap32::remap_range`]).
+    ///
+    /// **Not carried in save states.** See this type's `Saveable` impl: no board
+    /// currently banks a 32-bit space, so the wire format has no equivalent of
+    /// the 16-bit page table, and `save_state` asserts in debug builds that this
+    /// has not been called.
     pub fn remap_range(&mut self, start: u32, length: u32, target: RegionTarget) {
+        self.remapped = true;
         self.map.remap_range(start, length, target);
     }
 
@@ -977,11 +992,29 @@ impl Default for AddressSpace32 {
 }
 
 /// See [`AddressSpace16`](crate::core::address_space16::AddressSpace16)'s
-/// `Saveable` impl for the format and for why the page map is not part of it.
-/// The two bodies are identical in shape; only how a range names its backing
-/// region differs.
+/// `Saveable` impl for the region rule. The two bodies are the same shape; only
+/// how a range names its backing region differs.
+///
+/// # Mapping state is not saved here, and that is a gap
+///
+/// The 16-bit space persists its page table, because banking a window is state
+/// and nothing else records where the window currently points. This one has no
+/// equivalent: its mapping lives in per-range [`RegionTarget`]s, and
+/// [`remap_range`](AddressSpace32::remap_range) rewrites them.
+///
+/// It is unimplemented rather than decided against: **no board banks a 32-bit
+/// space today**, so a wire format for it would be speculative and untested.
+/// Rather than leave that silent, `remap_range` sets a flag and this asserts on
+/// it in debug builds, which every test runs. The first 68000 board to bank will
+/// trip the assert instead of shipping saves that come back pointing at the
+/// wrong bank.
 impl Saveable for AddressSpace32 {
     fn save_state(&self, w: &mut StateWriter) {
+        debug_assert!(
+            !self.remapped,
+            "AddressSpace32 has been remapped, and its mapping is not part of \
+             the save format; give it the equivalent of the 16-bit page table"
+        );
         w.write_version(ADDRESS_SPACE_SAVE_VERSION);
         let ids = self.saved_region_ids();
         w.write_u16_le(ids.len() as u16);

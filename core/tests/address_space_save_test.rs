@@ -16,6 +16,7 @@
 
 use phosphor_core::core::address_space::AccessKind;
 use phosphor_core::core::save_state::{SaveError, StateReader, StateWriter};
+use phosphor_core::core::watchpoint::WatchpointKind;
 use phosphor_core::core::{AddressSpace16, AddressSpace32};
 
 const RAM: u8 = 1;
@@ -94,21 +95,29 @@ fn rom_is_not_saved() {
     assert_eq!(out.region_data(ROM)[0], 0x22, "ROM bytes must not travel");
     assert_eq!(out.region_data(RAM)[0], 0xDE, "RAM bytes must");
 
-    // And the size accounts for exactly the writable regions: version + count,
-    // then six bytes of framing per region.
-    let payload: usize = [RAM, VRAM, PALETTE]
+    // And the size accounts for exactly the writable regions plus the page
+    // table: version + count, then six bytes of framing per entry.
+    let regions: usize = [RAM, VRAM, PALETTE]
         .iter()
         .map(|&id| space().region_data(id).len() + 6)
         .sum();
-    assert_eq!(data.len(), 1 + 2 + payload);
+    assert_eq!(data.len(), 1 + 2 + regions + (PAGE_TABLE_BYTES + 6));
+}
+
+/// 256 pages, each a region id and a `u32` offset.
+const PAGE_TABLE_BYTES: usize = 256 * 5;
+
+/// Entries in a saved body: the writable regions, plus the page table.
+fn entry_count(data: &[u8]) -> u16 {
+    u16::from_le_bytes([data[1], data[2]])
 }
 
 /// An I/O window has no bytes at all, so it cannot be saved even though a board
-/// might list it. The region count is the check.
+/// might list it. The entry count is the check: three regions and the page
+/// table, not four regions.
 #[test]
 fn io_regions_are_not_saved() {
-    let data = bytes_of(&filled());
-    assert_eq!(u16::from_le_bytes([data[1], data[2]]), 3);
+    assert_eq!(entry_count(&bytes_of(&filled())), 4);
 }
 
 /// A region added to the map since the save was written is *missing*, not
@@ -126,18 +135,31 @@ fn a_region_the_map_has_but_the_file_lacks_is_an_error() {
     assert!(msg.contains("absent"), "{msg}");
 }
 
-/// The other direction: a region the file has and this map does not is skipped
-/// by length, so a board that drops a region can still read old saves.
+/// The other direction, and a **narrowing** that came with the page table.
+///
+/// An unknown region's *bytes* are still skipped by length. But if that region
+/// is mapped into the address space, the page table names it, and a page naming
+/// a region this map does not have is refused: mapping it would send every read
+/// through it somewhere arbitrary.
+///
+/// So a map that differs structurally is now rejected outright rather than
+/// partially applied. That is stricter than region-skipping alone implied, and
+/// it is the right way round: two maps that disagree about what is mapped where
+/// are not the same machine. Machines that legitimately differ this way (a board
+/// variant with extra RAM) already differ by `machine_id`, which the envelope
+/// checks first.
 #[test]
-fn a_region_the_file_has_but_the_map_lacks_is_skipped() {
+fn a_map_that_maps_a_region_this_one_lacks_is_rejected() {
     let mut extra = filled();
     extra.region(6, "Extra RAM", 0x0A00, 0x0100, AccessKind::ReadWrite);
     extra.region_data_mut(6)[0] = 0x99;
     let data = bytes_of(&extra);
 
     let mut plain = space();
-    load_into(&mut plain, &data).unwrap();
-    assert_eq!(plain.region_data(RAM)[0], 0xDE);
+    let err = load_into(&mut plain, &data).unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("page 0x0A"), "{msg}");
+    assert!(msg.contains("region 6"), "{msg}");
 }
 
 /// A region that changed size is caught against its own name rather than
@@ -206,14 +228,78 @@ fn a_remapped_window_does_not_double_count_its_region() {
 
     let data = bytes_of(&banked);
     assert_eq!(
-        u16::from_le_bytes([data[1], data[2]]),
-        3,
+        entry_count(&data),
+        4,
         "remapping pages must not change which regions are saved"
     );
 
     let mut out = space();
     load_into(&mut out, &data).unwrap();
     assert_eq!(out.region_data(VRAM)[0], 0xBE);
+}
+
+// -- Banking -----------------------------------------------------------------
+
+/// **Where a window currently points is state.**
+///
+/// `remap_pages` is how a board banks, and the page table is the only record of
+/// where it points. Boards used to rebuild it from their own bank register in
+/// `load_state`, which is a call each of them had to remember to make and which
+/// runs nowhere else on the normal path. A board that forgot came back with the
+/// CPU reading through pages aimed where they were aimed before the load.
+#[test]
+fn banking_survives_a_round_trip() {
+    let mut banked = filled();
+    // Point the bottom four pages at the second 1 KB of video RAM.
+    banked.remap_pages(0x00, 0x04, VRAM, 0x100);
+    banked.region_data_mut(VRAM)[0x100] = 0x5A;
+
+    let mut out = space();
+    // The destination is unbanked, so a load that did not carry the page table
+    // would leave page 0 pointing at RAM.
+    assert_eq!(out.region_at(0x0000).map(|r| r.id), Some(RAM));
+
+    load_into(&mut out, &bytes_of(&banked)).unwrap();
+
+    assert_eq!(
+        out.region_at(0x0000).map(|r| r.id),
+        Some(VRAM),
+        "the bank window must come back pointing where it pointed"
+    );
+    assert_eq!(
+        out.debug_read(0x0000),
+        Some(0x5A),
+        "and at the right offset within it"
+    );
+}
+
+/// A page pointing at a region this map does not have would send every read
+/// through it somewhere arbitrary, so it is refused rather than mapped.
+#[test]
+fn a_page_naming_an_unknown_region_is_rejected() {
+    let mut extra = filled();
+    extra.region(9, "Foreign", 0x0B00, 0x0100, AccessKind::ReadWrite);
+    extra.remap_pages(0x00, 0x01, 9, 0);
+    let data = bytes_of(&extra);
+
+    let mut plain = space();
+    let err = load_into(&mut plain, &data).unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("page 0x00"), "{msg}");
+    assert!(msg.contains("does not have"), "{msg}");
+}
+
+/// Watchpoints belong to whoever is debugging, not to the machine, so a load
+/// leaves them where they were set rather than restoring the saved machine's.
+#[test]
+fn a_load_does_not_disturb_watchpoints() {
+    let data = bytes_of(&filled());
+
+    let mut out = space();
+    out.set_watchpoint(0, 0x0010, WatchpointKind::Write);
+    load_into(&mut out, &data).unwrap();
+
+    assert!(out.has_any_watchpoints());
 }
 
 // -- 32-bit sibling ----------------------------------------------------------

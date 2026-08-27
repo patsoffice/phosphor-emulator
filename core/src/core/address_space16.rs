@@ -1037,25 +1037,52 @@ impl AddressSpace16 {
 
 /// Version of the address-space body, independent of any board's, and shared
 /// with [`AddressSpace32`](crate::core::address_space32::AddressSpace32).
-pub(crate) const ADDRESS_SPACE_SAVE_VERSION: u8 = 1;
+///
+/// Version 2 added the page table.
+pub(crate) const ADDRESS_SPACE_SAVE_VERSION: u8 = 2;
 
-/// An address space saves the bytes the CPU can change, and nothing else.
+/// Chunk tag for the page table.
+///
+/// Every other tag in this body is a [`RegionId`], which is a `u8`, so anything
+/// above `0xFF` cannot collide with one.
+const PAGE_TABLE_TAG: u16 = 0x100;
+
+/// An address space saves the bytes the CPU can change, and where they are
+/// currently mapped.
 ///
 /// ```text
-/// body   := version:u8 | count:u16 | region{count}
-/// region := id:u16 | len:u32 | bytes
+/// body       := version:u8 | count:u16 | entry{count}
+/// entry      := tag:u16 | len:u32 | payload
+/// region     := tag < 0x100, payload = the region's bytes
+/// page table := tag = 0x100, payload = 256 x (region_id:u8 | base_offset:u32)
 /// ```
 ///
-/// Which regions those are is derived from the map rather than listed by each
+/// Which regions are saved is derived from the map rather than listed by each
 /// board: a region is saved when its [`AccessKind`] is CPU-writable and it has
 /// backing. ROM drops out because it is `ReadOnly`, and I/O because it has no
 /// bytes. Boards used to enumerate this by hand, two lines a region, which made
 /// "forgot to save a region" a silent bug with nothing to catch it.
 ///
-/// What is *not* saved is where each region is currently mapped. The page table
-/// is rebuilt by the board from its own bank register on load, which is what
-/// already happens today; saving it here as well would give two sources of truth
-/// for the same thing.
+/// # Why the page table is here
+///
+/// It is banking state. [`remap_pages`](Self::remap_pages) is how a board points
+/// a window at a different part of a region, and the page table is the only
+/// record of where it currently points.
+///
+/// It was left out at first, on the reasoning that a board rebuilds banking from
+/// its own saved bank register and that persisting it here too would give one
+/// fact two sources of truth. That was wrong, and in exactly the way this impl
+/// exists to fix. The rebuild is not free: it is a call the board has to remember
+/// to make from its `load_state`, it runs nowhere else on the normal path, and a
+/// board that forgets it comes back with the CPU reading through pages that point
+/// where they pointed before the load. That is the same silent bug as a forgotten
+/// region, one level up.
+///
+/// So the map saves its own mapping, the board's bank register stays saved as the
+/// value the game wrote, and no board needs a post-load hook to reconcile them.
+///
+/// Watchpoint flags are deliberately not restored: they belong to whoever is
+/// debugging, not to the machine, so a load leaves them where they were set.
 ///
 /// The count makes the body self-delimiting, so it is correct even inside a
 /// parent that frames nothing.
@@ -1063,10 +1090,16 @@ impl Saveable for AddressSpace16 {
     fn save_state(&self, w: &mut StateWriter) {
         w.write_version(ADDRESS_SPACE_SAVE_VERSION);
         let ids = self.saved_region_ids();
-        w.write_u16_le(ids.len() as u16);
+        w.write_u16_le(ids.len() as u16 + 1);
         for id in ids {
             w.write_tlv(id as u16, |w| w.write_raw(self.backing.region_data(id)));
         }
+        w.write_tlv(PAGE_TABLE_TAG, |w| {
+            for page in &self.map.pages {
+                w.write_u8(page.region_id);
+                w.write_u32_le(page.base_offset);
+            }
+        });
     }
 
     fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
@@ -1074,14 +1107,22 @@ impl Saveable for AddressSpace16 {
         let expected = self.saved_region_ids();
         let count = r.read_u16_le()?;
         let mut seen: Vec<RegionId> = Vec::new();
+        let mut saw_page_table = false;
 
         for i in 0..count {
             let at = r.offset();
             let Some((tag, len)) = r.read_tag_len()? else {
                 return Err(SaveError::InvalidFormat(format!(
-                    "address space declares {count} regions but ran out after {i}"
+                    "address space declares {count} entries but ran out after {i}"
                 )));
             };
+
+            if tag == PAGE_TABLE_TAG {
+                saw_page_table = true;
+                r.read_payload(tag, len, at, "page table", |r| self.load_pages(r))?;
+                continue;
+            }
+
             let id = tag as RegionId;
             // A region this build's map does not have: another configuration of
             // the same board, or one since removed. Skipping by length is what
@@ -1108,6 +1149,33 @@ impl Saveable for AddressSpace16 {
                 missing,
                 self.region_name(*missing)
             )));
+        }
+        if !saw_page_table {
+            return Err(SaveError::InvalidFormat(
+                "the page table is absent from the save".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl AddressSpace16 {
+    /// Restore page mappings, leaving each page's watch flags alone.
+    fn load_pages(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
+        for index in 0..self.map.pages.len() {
+            let region_id = r.read_u8()?;
+            let base_offset = r.read_u32_le()?;
+            // A page pointing at a region this map does not have would send
+            // every read through it somewhere arbitrary, so refuse rather than
+            // map it. UNMAPPED is always legitimate.
+            if region_id != UNMAPPED && !self.map.regions().iter().any(|d| d.id == region_id) {
+                return Err(SaveError::InvalidFormat(format!(
+                    "page {index:#04X} maps region {region_id}, which this map does not have"
+                )));
+            }
+            let page = &mut self.map.pages[index];
+            page.region_id = region_id;
+            page.base_offset = base_offset;
         }
         Ok(())
     }
