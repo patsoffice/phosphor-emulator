@@ -3,7 +3,7 @@ use phosphor_core::audio::AudioResampler;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::debug_trace::{DebugEvent, DebugEventKind, DebugTraceBuffer};
 use phosphor_core::core::machine::GfxSheet;
-use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
+
 use phosphor_core::core::watchpoint::DebugAccessSource;
 use phosphor_core::core::{AccessKind, AddressSpace16};
 use phosphor_core::core::{
@@ -16,7 +16,7 @@ use phosphor_core::device::i8257::I8257;
 use phosphor_core::device::output_latch::OutputLatch;
 use phosphor_core::gfx;
 use phosphor_core::gfx::decode::{GfxLayout, decode_gfx};
-use phosphor_macros::{BusDebug, DebugTrace, MemoryRegion};
+use phosphor_macros::{BusDebug, DebugTrace, MemoryRegion, Saveable};
 
 // ---------------------------------------------------------------------------
 // Memory map region IDs (machine-specific constants for page table dispatch)
@@ -374,60 +374,93 @@ fn step_cycle<B: Tkg04Bus>(cpus: &mut Tkg04Cpus<'_>, bus: &mut B) {
 /// Video: 32×32 tile playfield + 16×16 sprites, 2bpp, PROM palette.
 /// Audio: I8035 DAC + discrete circuits (walk, jump, stomp effects).
 /// Screen: 256×240 displayed rotated 90° CCW on vertical monitor.
-#[derive(BusDebug, DebugTrace)]
+#[derive(BusDebug, DebugTrace, Saveable)]
+#[save_version(1)]
+#[save_tlv]
 pub struct Tkg04Board {
-    // Memory maps (page-table dispatch + watchpoints + backing memory)
-    // CPU-addressable RAM/ROM storage lives in the AddressSpace16 backing store.
+    /// Memory maps (page-table dispatch + watchpoints + backing memory).
+    ///
+    /// CPU-addressable RAM/ROM storage lives in the `AddressSpace16` backing
+    /// store, and each space persists its own writable regions: work RAM,
+    /// sprite RAM and video RAM on the main map.
     #[debug_map(cpu = 0)]
+    #[save(id = 1)]
     pub(crate) main_map: AddressSpace16,
     #[debug_map(cpu = 1)]
+    #[save(id = 2)]
     pub(crate) sound_map: AddressSpace16,
+    #[save_skip]
     pub(crate) tune_rom: [u8; 0x0800], // 2KB (DK only, unused by DK Jr)
 
     // GFX ROMs
+    #[save_skip]
     pub(crate) tile_rom: [u8; 0x2000], // 8KB max (DK=4KB, DK Jr=8KB)
+    #[save_skip]
     pub(crate) sprite_rom: [u8; 0x2000], // 8KB
 
     // PROMs
+    #[save_skip]
     pub(crate) palette_prom: [u8; 0x0200], // c-2k/c-2e + c-2j/c-2f
-    pub(crate) color_prom: [u8; 0x0100],   // v-5e/v-2n
+    #[save_skip]
+    pub(crate) color_prom: [u8; 0x0100], // v-5e/v-2n
 
-    // Pre-computed palette (256 RGB entries)
+    /// Pre-computed palette (256 RGB entries), expanded from the PROMs rather
+    /// than from anything the CPU writes, so it is rebuilt at ROM load.
+    #[save_skip]
     pub(crate) palette_rgb: [(u8, u8, u8); 256],
 
     // Scanline-rendered framebuffer (256 × 240 × RGB24)
+    #[save_skip]
     pub(crate) scanline_buffer: Vec<u8>,
 
     // I/O state (active-high: 0x00 = all released)
+    #[save(id = 3)]
     pub(crate) in0: u8,
+    #[save(id = 4)]
     pub(crate) in1: u8,
+    #[save(id = 5)]
     pub(crate) in2: u8,
+    /// Operator configuration, as it was before: not part of the snapshot.
+    #[save_skip]
     pub(crate) dsw0: u8,
 
     // Control registers
+    #[save(id = 6)]
     pub(crate) sound_latch: u8,
+    #[save(id = 7)]
     pub(crate) sound_control_latch: OutputLatch,
+    #[save(id = 8)]
     pub(crate) flip_screen: bool,
+    #[save(id = 9)]
     pub(crate) sprite_bank: bool,
+    #[save(id = 10)]
     pub(crate) nmi_mask: bool,
+    #[save(id = 11)]
     pub(crate) palette_bank: u8,
 
     // DK Jr extras (always 0 for DK)
+    #[save(id = 12)]
     pub(crate) gfx_bank: u8,
+    #[save(id = 13)]
     pub(crate) sound_control_latch_4h: OutputLatch,
 
     // Pre-decoded GFX caches (from tile_rom / sprite_rom)
+    #[save_skip]
     pub(crate) tile_cache: gfx::GfxCache,
+    #[save_skip]
     pub(crate) sprite_cache: gfx::GfxCache,
 
     // Configuration (set at construction, not saved)
+    #[save_skip]
     tile_plane1_offset: usize, // 0x800 for DK (4KB tiles), 0x1000 for DK Jr (8KB)
 
     // DMA controller (i8257)
     #[debug_device("DMA")]
+    #[save(id = 14)]
     pub(crate) dma: I8257,
 
     // Sound CPU interface
+    #[save(id = 15)]
     pub(crate) sound_irq_pending: bool,
 
     /// Mirror of the sound CPU's P1/P2 port latches, refreshed at the top of
@@ -438,28 +471,38 @@ pub struct Tkg04Board {
     /// P2 bit 4 as a sound-busy status bit -- but the CPU that owns them now
     /// lives outside the bus. Derived state, so it is not saved: the next
     /// cycle re-latches it before anything can read it.
+    #[save_skip]
     pub(crate) sound_p1: u8,
+    #[save_skip]
     pub(crate) sound_p2: u8,
 
     // Audio output
     #[debug_device("DAC")]
+    #[save(id = 16)]
     pub(crate) dac: Mc1408Dac,
+    #[save(id = 17)]
     pub(crate) resampler: AudioResampler<i16>,
 
     // Timing
+    #[save(id = 18)]
     pub(crate) clock: u64,
     /// The board's clock tree, as [`clock_tree`] declares it.
     #[debug_device("Clocks")]
+    #[save(id = 19)]
     pub(crate) clocks: ClockTree,
+    #[save_skip]
     pub(crate) sound_dom: DomainId,
+    #[save(id = 20)]
     pub(crate) vblank_nmi_pending: bool,
 
     // Discrete sound: DAC stream + walk/jump/stomp effects, mixed in-circuit.
     #[debug_device("Discrete")]
+    #[save(id = 21)]
     pub(crate) sound: DkongDiscreteSound,
 
     // Debug event ring (observer state — never saved in save states)
     #[debug_events]
+    #[save_skip]
     pub(crate) debug_trace: DebugTraceBuffer,
 }
 
@@ -968,61 +1011,6 @@ impl Tkg04Board {
                 DebugEventKind::DeviceRead,
             )
         });
-    }
-}
-
-impl Saveable for Tkg04Board {
-    fn save_state(&self, w: &mut StateWriter) {
-        // The CPUs are saved by the machine, which owns them.
-        w.write_bytes(self.main_map.region_data(MainRegion::Ram));
-        w.write_bytes(self.main_map.region_data(MainRegion::SpriteRam));
-        w.write_bytes(self.main_map.region_data(MainRegion::VideoRam));
-        w.write_u8(self.in0);
-        w.write_u8(self.in1);
-        w.write_u8(self.in2);
-        w.write_u8(self.sound_latch);
-        self.sound_control_latch.save_state(w);
-        w.write_bool(self.flip_screen);
-        w.write_bool(self.sprite_bank);
-        w.write_bool(self.nmi_mask);
-        w.write_u8(self.palette_bank);
-        w.write_u8(self.gfx_bank);
-        self.sound_control_latch_4h.save_state(w);
-        self.dma.save_state(w);
-        self.dac.save_state(w);
-        self.sound.save_state(w);
-        w.write_bool(self.sound_irq_pending);
-        self.resampler.save_state(w);
-        w.write_u64_le(self.clock);
-        self.clocks.save_state(w);
-        w.write_bool(self.vblank_nmi_pending);
-    }
-
-    fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
-        // The CPUs are loaded by the machine, which owns them.
-        r.read_bytes_into(self.main_map.region_data_mut(MainRegion::Ram))?;
-        r.read_bytes_into(self.main_map.region_data_mut(MainRegion::SpriteRam))?;
-        r.read_bytes_into(self.main_map.region_data_mut(MainRegion::VideoRam))?;
-        self.in0 = r.read_u8()?;
-        self.in1 = r.read_u8()?;
-        self.in2 = r.read_u8()?;
-        self.sound_latch = r.read_u8()?;
-        self.sound_control_latch.load_state(r)?;
-        self.flip_screen = r.read_bool()?;
-        self.sprite_bank = r.read_bool()?;
-        self.nmi_mask = r.read_bool()?;
-        self.palette_bank = r.read_u8()?;
-        self.gfx_bank = r.read_u8()?;
-        self.sound_control_latch_4h.load_state(r)?;
-        self.dma.load_state(r)?;
-        self.dac.load_state(r)?;
-        self.sound.load_state(r)?;
-        self.sound_irq_pending = r.read_bool()?;
-        self.resampler.load_state(r)?;
-        self.clock = r.read_u64_le()?;
-        self.clocks.load_state(r)?;
-        self.vblank_nmi_pending = r.read_bool()?;
-        Ok(())
     }
 }
 

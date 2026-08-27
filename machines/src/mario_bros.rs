@@ -25,7 +25,7 @@ use phosphor_core::core::machine::{
     ActionRole, DipApplyTiming, DipChoice, DipOption, DipSwitchBank, Direction, InputConfigurable,
     InputControl, InputEvent, InputId, InputKind, MachineCore, Nvram, SaveState,
 };
-use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWriter};
+
 use phosphor_core::core::watchpoint::DebugAccessSource;
 use phosphor_core::core::{AccessKind, AddressSpace16};
 use phosphor_core::core::{
@@ -598,41 +598,68 @@ fn step_cycle(main: &mut Z80, sound: &mut I8035, board: &mut MarioBrosBoard) {
     board.end_cycle();
 }
 
-#[derive(BusDebug, DebugTrace)]
+#[derive(BusDebug, DebugTrace, Saveable)]
+#[save_version(1)]
+#[save_tlv]
 pub struct MarioBrosBoard {
+    /// Each address space persists its own writable regions: work RAM, NVRAM,
+    /// sprite RAM and video RAM on the main map. The sound map is all ROM, so it
+    /// carries only its page layout.
     #[debug_map(cpu = 0)]
+    #[save(id = 1)]
     pub(crate) main_map: AddressSpace16,
     #[debug_map(cpu = 1)]
+    #[save(id = 2)]
     pub(crate) sound_map: AddressSpace16,
 
     // GFX ROMs
-    pub(crate) tile_rom: [u8; 0x2000],   // gfx1 (2 planes × 4KB)
+    #[save_skip]
+    pub(crate) tile_rom: [u8; 0x2000], // gfx1 (2 planes × 4KB)
+    #[save_skip]
     pub(crate) sprite_rom: [u8; 0x6000], // gfx2 (3 planes × 8KB)
 
-    // Palette PROM (inverted half used for the default Nintendo monitor)
+    /// Palette PROM (inverted half used for the default Nintendo monitor), and
+    /// the expansion of it. Derived from ROM rather than from anything the CPU
+    /// writes, so both are rebuilt at ROM load.
+    #[save_skip]
     pub(crate) palette_prom: [u8; 0x0200],
+    #[save_skip]
     pub(crate) palette_rgb: [(u8, u8, u8); 256],
 
     // Scanline-rendered framebuffer (256 × 240 × RGB24)
+    #[save_skip]
     pub(crate) scanline_buffer: Vec<u8>,
 
     // I/O state (active-high)
+    #[save(id = 3)]
     pub(crate) in0: u8,
+    #[save(id = 4)]
     pub(crate) in1: u8,
+    /// Operator configuration, as it was before: not part of the snapshot.
+    #[save_skip]
     pub(crate) dsw: u8,
 
     // Sound command + trigger latches (MAME soundlatch[0/1/3])
-    pub(crate) sound_latch: u8,  // 0x7E00 → 8039 command (P2 bit7 select)
+    #[save(id = 5)]
+    pub(crate) sound_latch: u8, // 0x7E00 → 8039 command (P2 bit7 select)
+    #[save(id = 6)]
     pub(crate) sound_latch1: u8, // crab/turtle/fly/coin → 8039 P1 input
+    #[save(id = 7)]
     pub(crate) sound_latch3: u8, // get-coin/ice → 8039 T0/T1 inputs
 
     // LS259 control bits + scroll
+    #[save(id = 8)]
     pub(crate) flip_screen: bool,
+    #[save(id = 9)]
     pub(crate) gfx_bank: u8,
+    #[save(id = 10)]
     pub(crate) palette_bank: u8,
+    #[save(id = 11)]
     pub(crate) nmi_mask: bool,
+    #[save(id = 12)]
     pub(crate) scroll_y: u8,
 
+    #[save(id = 13)]
     pub(crate) sound_irq_pending: bool,
 
     /// Mirror of the sound CPU's P2 port latch, refreshed at the top of every
@@ -642,14 +669,17 @@ pub struct MarioBrosBoard {
     /// command source and ROM bank with it, and reads it back through `io_read`
     /// — but the CPU that owns it lives outside the bus. Derived state, so it
     /// is not saved: the next cycle re-latches it before anything can read it.
+    #[save_skip]
     pub(crate) sound_p2: u8,
 
     // Z80 DMA controller (sprite-list transfer)
+    #[save(id = 14)]
     pub(crate) dma: Z80Dma,
 
     // Audio output (8-bit DAC + coupling + resampler; the rest of the discrete
     // sound is deferred)
     #[debug_device("DAC")]
+    #[save(id = 15)]
     pub(crate) dac: Mc1408Dac,
     /// The DAC's coupling capacitor.
     ///
@@ -669,22 +699,31 @@ pub struct MarioBrosBoard {
     /// Only the coupling, not the two active filter stages around it. Those
     /// shape the tone and are part of the deferred discrete work; this is the
     /// one part needed to stop the pedestal reaching the speaker.
+    #[save(id = 16)]
     pub(crate) dac_coupling: DcBlocker,
+    #[save(id = 17)]
     pub(crate) resampler: AudioResampler<i16>,
 
     // Pre-decoded GFX caches
+    #[save_skip]
     pub(crate) tile_cache: gfx::GfxCache,
+    #[save_skip]
     pub(crate) sprite_cache: gfx::GfxCache,
 
     // Timing
+    #[save(id = 18)]
     pub(crate) clock: u64,
     /// The board's clock tree, as [`clock_tree`] declares it.
     #[debug_device("Clocks")]
+    #[save(id = 19)]
     pub(crate) clocks: ClockTree,
+    #[save_skip]
     pub(crate) sound_dom: DomainId,
+    #[save(id = 20)]
     pub(crate) vblank_nmi_pending: bool,
 
     #[debug_events]
+    #[save_skip]
     pub(crate) debug_trace: DebugTraceBuffer,
 }
 
@@ -1106,64 +1145,6 @@ impl MarioBrosBoard {
             result |= 2;
         }
         result
-    }
-}
-
-impl Saveable for MarioBrosBoard {
-    fn save_state(&self, w: &mut StateWriter) {
-        // The CPUs are saved by the machine, which owns them.
-        w.write_bytes(self.main_map.region_data(MainRegion::Ram));
-        w.write_bytes(self.main_map.region_data(MainRegion::Nvram));
-        w.write_bytes(self.main_map.region_data(MainRegion::SpriteRam));
-        w.write_bytes(self.main_map.region_data(MainRegion::VideoRam));
-        w.write_u8(self.in0);
-        w.write_u8(self.in1);
-        w.write_u8(self.sound_latch);
-        w.write_u8(self.sound_latch1);
-        w.write_u8(self.sound_latch3);
-        w.write_bool(self.flip_screen);
-        w.write_u8(self.gfx_bank);
-        w.write_u8(self.palette_bank);
-        w.write_bool(self.nmi_mask);
-        w.write_u8(self.scroll_y);
-        w.write_bool(self.sound_irq_pending);
-        self.dma.save_state(w);
-        self.dac.save_state(w);
-        // The coupling capacitor holds charge, so it is state the running game
-        // mutates: restoring without it resumes with the pedestal still on the
-        // output and takes seconds to settle again.
-        self.dac_coupling.save_state(w);
-        self.resampler.save_state(w);
-        w.write_u64_le(self.clock);
-        self.clocks.save_state(w);
-        w.write_bool(self.vblank_nmi_pending);
-    }
-
-    fn load_state(&mut self, r: &mut StateReader) -> Result<(), SaveError> {
-        // The CPUs are loaded by the machine, which owns them.
-        r.read_bytes_into(self.main_map.region_data_mut(MainRegion::Ram))?;
-        r.read_bytes_into(self.main_map.region_data_mut(MainRegion::Nvram))?;
-        r.read_bytes_into(self.main_map.region_data_mut(MainRegion::SpriteRam))?;
-        r.read_bytes_into(self.main_map.region_data_mut(MainRegion::VideoRam))?;
-        self.in0 = r.read_u8()?;
-        self.in1 = r.read_u8()?;
-        self.sound_latch = r.read_u8()?;
-        self.sound_latch1 = r.read_u8()?;
-        self.sound_latch3 = r.read_u8()?;
-        self.flip_screen = r.read_bool()?;
-        self.gfx_bank = r.read_u8()?;
-        self.palette_bank = r.read_u8()?;
-        self.nmi_mask = r.read_bool()?;
-        self.scroll_y = r.read_u8()?;
-        self.sound_irq_pending = r.read_bool()?;
-        self.dma.load_state(r)?;
-        self.dac.load_state(r)?;
-        self.dac_coupling.load_state(r)?;
-        self.resampler.load_state(r)?;
-        self.clock = r.read_u64_le()?;
-        self.clocks.load_state(r)?;
-        self.vblank_nmi_pending = r.read_bool()?;
-        Ok(())
     }
 }
 
