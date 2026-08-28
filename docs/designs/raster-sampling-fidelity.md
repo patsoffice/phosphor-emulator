@@ -1,6 +1,8 @@
 # Design: Raster Sampling Fidelity
 
-> **Status: proposed.** Successor to the closed
+> **Status: proposed; W3 done (2026-08-28) and its finding retracts one of this
+> doc's own premises. See [W3](#w3--latched-vs-live-determination-for-the-sprite-layer).**
+> Successor to the closed
 > [`mid-frame-raster-fidelity.md`](mid-frame-raster-fidelity.md) epic
 > (`phosphor-emulator-mid-frame-raster-7zzi`). That epic asked "which machines
 > exhibit a mid-frame raster effect?", measured the answer, and correctly did
@@ -49,26 +51,22 @@ The goal is not "per-scanline everywhere". It is:
 
 > **Sample each piece of video state at the rate the hardware samples it.**
 
-This subsumes per-scanline rendering and also rules it out where it would be
-wrong. `atari_system1` is the in-tree existence proof of both halves at once:
-it renders motion objects in per-scanline bands driven by a mid-frame bank
-switch, *and* it snapshots sprite RAM at vblank because the hardware's MO
-circuit reads a list captured then, not live RAM:
+This subsumes per-scanline rendering, and it would rule it out anywhere the
+hardware latched. **W3 has since established that nothing in the registry does**
+(see the W3 result below), so the principle now points the same way for every
+layer on every board.
 
-```rust
-// machines/src/atari_system1.rs:451
-/// captured at the start of vblank: a copy of the sprite RAM plus the band
-mo_shadow: Vec<u8>,
-```
-
-Rendering that board's sprites per-scanline from live RAM would introduce
-tearing a real cabinet never shows. Per-scanline is more accurate only where the
-video circuit reads live state.
+The original text here claimed `atari_system1` as the in-tree existence proof of
+a vblank-latched sprite layer, on the strength of its `mo_shadow` field. That was
+wrong: the board's motion-object path is a double-buffered horizontal line
+buffer, and `mo_shadow` compensates for our whole-frame render rather than
+modelling a circuit. The claim is retracted; the field stays until the renderer
+can do without it.
 
 ### Live-read vs latched
 
-The risk is not evenly distributed across layers, and that is what makes this
-tractable:
+The risk was thought to be concentrated in the sprite layer. It is not
+distributed anywhere, because there is no latched layer:
 
 | State | Hardware behaviour | Per-scanline verdict |
 |---|---|---|
@@ -76,11 +74,11 @@ tractable:
 | Scroll registers | Read per scanline (or continuously) | **Live** |
 | Palette RAM / PROM latch | Read per *pixel* as a lookup on the pixel value | **Live** — per-scanline is itself an approximation, but captures every case we've seen |
 | Tile / sprite bank, flip latch | Read as the beam scans | **Live** |
-| Sprite / motion-object list | **Board-specific.** Atari DMAs at vblank; some boards read live during hblank | **Must be determined per board** |
+| Sprite / motion-object list | Object list walked once per scanline off the horizontal counter, into a line buffer displayed on the next line (W3, nine boards read) | **Live**, sampled one line ahead |
 
-Nearly all the uncertainty sits in one layer. That permits taking the safe win
-now and quarantining the part that needs research, instead of auditing every
-register on every machine before touching anything.
+The remaining subtlety in the sprite row is the one-line lead, not a latch: the
+line a sprite pixel appears on was composited from the object list as it stood
+during the *previous* line.
 
 ## Current state
 
@@ -214,39 +212,128 @@ write; a targeted test asserting a mid-frame scroll write splits the background.
 
 ## W3 — Latched-vs-live determination for the sprite layer
 
-**Prerequisite for any sprite-layer per-scanline work. Research, not code.**
+**Done, 2026-08-28. Research, not code.**
 
-The prior audit traced *when the CPU writes*. That does not answer *when the
-video circuit reads*, and it is the read side that decides whether per-scanline
-sampling is correct. Determine per board, from schematics and MAME's driver:
+### The answer
 
-* Does the sprite/MO circuit read a list captured at vblank (DMA, shadow RAM,
-  double buffer), or does it read sprite RAM live during hblank per scanline?
-* If latched: at which point in the frame, and is the capture a full copy or a
-  per-line fetch?
+**No board in the registry latches its sprite list at vblank.** Every sprite
+circuit read for this item walks its object list once per scanline, in step with
+the horizontal counter, and lands the result in a line buffer that is displayed
+on the next line. Per-scanline sprite rendering from live RAM is correct on all
+of them, so the risk W4 was quarantined behind does not exist.
 
-Boards to cover: `namco_galaga` (galaga/digdug/xevious), `btime`, `mrdo`,
-`foodf`, `gottlieb`, `mcr2`, `atari_system1` (known latched — use as the
-reference), plus the already-per-scanline boards for completeness.
+The premise this epic was written on is wrong, and it is worth saying where it
+came from. `atari_system1` was taken as the in-tree existence proof of a
+vblank-latched sprite layer, on the strength of its `mo_shadow` field. Its
+hardware is a double-buffered horizontal line buffer, `mo_shadow` is a
+whole-frame-render compensation rather than a hardware model, and the board's
+own source comment says so. See "The one board that is wrong today".
 
-Record the result in a table in this doc. Two outcomes per board:
+### Method
 
-* **Live** → sprites may be rendered per-scanline from live RAM (W4).
-* **Latched** → model the latch explicitly, `mo_shadow`-style, and keep
-  whole-frame sprite compositing. **This is an accuracy improvement in its own
-  right**, independent of W4: a board that reads a vblank-captured list but
-  renders from live RAM at end-of-frame is wrong today in the opposite
-  direction, and nobody has checked.
+Schematics first, reference driver second. The decisive question turned out to
+be the same on every board and answerable from one part of the drawing: **what
+drives the object list RAM's address on the video side?** On all nine boards
+read it is the horizontal counter, through a mux against the CPU bus. A board
+that latched would instead show a DMA engine, a transfer counter driven by the
+vertical timing, or a register that triggers a copy. None appears anywhere.
 
-W3 is worth doing even if W4 never happens.
+Transcriptions, provenance, parts and net tables, and a per-board "what this
+does NOT establish", are in
+[`../schematics/sprite-list-scan.md`](../schematics/sprite-list-scan.md).
+
+### Result
+
+| Board | Machines | What drives the list address | Buffer | Verdict |
+|---|---|---|---|---|
+| `foodf` | foodf | `2H,8H,16H,32H,64H,128H,256H` via 6H/6J LS157 | odd/even, `1VX` | **Live**, 1 line ahead |
+| `namco_galaga` | galaga | Namco 04XX, clocked by `1H`/`2H`/`HSYNC`, fed `MATCH` | not located | **Live**, 1 line ahead |
+| `btime` | burgertime | `4H..80H`+`4V..80V` via LS153, shared with the tilemap | 93425 x3 | **Live**, per line |
+| `mrdo` | mrdo | LS393 counter off `HA`, via A5/B5/C5/D5 LS153 | 6148 pairs | **Live**, per line |
+| `mcr2` | shollow | `H3..H8` + `DV0..DV2` via C7/M7/N7 LS157 | 512x4 x2, swapped on `DV0` | **Live**, ≤8-line lag |
+| `gottlieb` | qbert | `FORA0..FORA5` against `VV0..VV7`, per line | "line object select RAM" | **Live**, per line |
+| `atari_system1` | marble, roadrunner | not traced; implied by the line buffer | 2149-2 x4, `ACS`/`BCS` | **Live**, 1 line ahead |
+| `namco_pac` | pacman, mspacman | 3F/3H position RAM into the 2F adder | not read | **Live**, per line |
+| `mario_bros` | mariobros | `HPO0..HPO7` into the 5M/4M counter | not read | **Live**, per line |
+
+`mcr2` is the only one that is not a plain per-line scan. Its CPU-visible sprite
+RAM (the drawing calls it the *staging RAM*) is copied into a second RAM (the
+*object RAM*) at 64 bytes per scanline, continuously, so the whole 512-byte list
+refreshes every eight lines; the object RAM is then walked per line into the
+line buffers. Still live, with a bounded lag, and still nothing resembling a
+vblank capture.
+
+### Not read
+
+* **digdug, xevious.** Same board family as galaga, and MAME treats their sprite
+  RAM identically (Dig Dug carries the same "buffered and delayed by one
+  scanline" comment). Family resemblance, not a transcription.
+* **tkg04 (dkong, dkongjr).** Nintendo, same family as `mario_bros`. Note that
+  MAME documents an 8257 DMA copying sprite data from 0x6900 to the sprite banks
+  at 0x7400: that is a CPU-commanded copy *into* the list, the same category as
+  System 1's bank swap, not the video circuit latching what it reads.
+* **galaxian_video, congo_bongo, docastle, ccastles.** Not read, and none of
+  them is blocking anything: they already render per scanline.
+* **williams, gridlee, missile, irobot.** No sprite circuit to ask about: these
+  are bitmap or framebuffer machines and the CPU draws into memory the beam
+  scans.
+* **The vector machines.** No scanline hardware.
+
+### The one board that is wrong today
+
+`atari_system1` is the only board in the tree that models a vblank latch, and it
+is the board whose hardware most clearly does not have one. SP-277 sheet 9A is
+titled, on the drawing, "Motion Object Horizontal Line Buffer", and sheet 8B
+carries "Motion Object Horizontal Line Buffer Control". Two 1K x 8 2149-2 pairs
+with separate chip selects, load lines, clear lines and address counters: one
+written while the other is displayed.
+
+Read the field's own comment (`atari_system1.rs:535`) and it does not actually
+claim a hardware latch:
+
+> Both games double-buffer the display list — they rebuild it during vblank and
+> publish it with a bank swap — so the live sprite RAM at the frame boundary
+> already holds the *next* scanout's list.
+
+That is a description of what the **software** does, and the snapshot exists
+because we render the whole frame at the frame boundary, which is at the *end*
+of vblank, after the game has already rebuilt the list. For a whole-frame
+renderer the snapshot is right and removing it would be a regression. The epic's
+prose promoted it into a claim about the circuit, and that is what needs
+retracting.
+
+What the snapshot cannot represent is a mid-frame write to the **active** MO
+bank, which changes what the beam draws from the next line on. MAME carries
+`update_partial(m_screen->vpos() + 2)` in `spriteram_w` for exactly this, gated
+on the write landing in the active bank, with the comment "Road Runner needs
+this to work". That is a second emulator's author saying Road Runner does it;
+**nobody has measured it here**, and the golden frame may not move at all. Filed
+as `phosphor-emulator-x7rn`, with the measurement as its first step. It is a
+W4-shaped fix, not a W3 one, and it is not a reason to delete `mo_shadow` before
+the renderer can do without it.
+
+### What this changes downstream
+
+* W4's sprite-layer risk is closed. Sprites may be rendered per scanline from
+  live RAM on every board here.
+* The correct sampling point is **the previous scanline**, not the current one.
+  A per-scanline sprite renderer that samples line N's state for line N is one
+  line early: a much smaller error than a whole-frame render, but still not the
+  hardware. Note that the one-line delay is already baked into some of our
+  sprite Y constants the way it is in MAME's (galaga's `sy = 256 - y + 1`), so a
+  W4 migration that adds the delay without removing the constant would double
+  it. Check the constant on each board as it moves.
+* `mcr2` needs its ≤8-line staging lag stated in the source if anyone ever
+  renders its sprites per scanline. W4 already excludes mcr2 for other reasons.
 
 ---
 
 ## W4 — Scanline-outer restructure of the tilemap layer
 
 For the remaining Tier B machines, invert the render nesting from layer-outer to
-scanline-outer for the **live-read layers only** (tilemap, scroll, palette,
-bank, flip). Sprites follow W3's per-board answer.
+scanline-outer. W3 found every layer to be live-read, sprites included, so this
+covers tilemap, scroll, palette, bank, flip **and** the sprite layer, sampling
+the object list one line ahead of the row being composited, per W3's result.
 
 ### The safety property that makes this attractive
 
@@ -313,10 +400,12 @@ cargo run --release -p phosphor-bench -- --roms <path>    # before/after, W4 onl
   board, assert only rows below the write differ. Without this, a migration can
   be byte-identical *and* still not honour mid-frame changes — the golden
   frames alone cannot distinguish the two.
-* **No vblank regression:** assert vblank-latched state (galaga's
-  `update_starfield_at_vblank`, `atari_system1`'s `mo_shadow`) is not
-  re-sampled per line after any W4 migration. This is the main way W4 could
-  introduce a new bug.
+* **No vblank regression:** assert genuinely vblank-latched state (galaga's
+  `update_starfield_at_vblank`) is not re-sampled per line after any W4
+  migration. `atari_system1`'s `mo_shadow` is *not* such a case, since W3 found
+  the hardware reads live, but it must not be re-sampled per line either while
+  the board still renders whole-frame, because the game rebuilds the list during
+  vblank. Retire it as part of the board's W4 migration, not before.
 * **Perf:** W1 and W2 need no measurement. W4 changes tile-info lookups from
   per-tile to per-tile-per-scanline (8× for 8-pixel-tall tiles — on a 36×28
   tilemap, 1008 → 8064 lookups per frame). Expected negligible; confirm with
@@ -324,9 +413,12 @@ cargo run --release -p phosphor-bench -- --roms <path>    # before/after, W4 onl
 
 ## Risks
 
-1. **W4 introduces tearing on latched sprite layers.** Mitigated by making W3 a
-   hard prerequisite for any sprite-layer change. This is the main reason not to
-   do a blanket sweep.
+1. ~~**W4 introduces tearing on latched sprite layers.**~~ **Closed by W3.**
+   There are no latched sprite layers in the registry. The residual risk is much
+   smaller and has a different shape: sampling the object list for line N
+   *at* line N rather than at line N-1 is one line early. Nine boards were read;
+   digdug, xevious and the TKG-04 boards were not, so a board outside that set
+   still deserves a look before its sprites move per scanline.
 2. **Byte-identical is not proof of correctness.** A migration that renders
    per-scanline but accidentally samples state once still passes the golden
    gate. Hence the mandatory targeted mid-frame test per work item.
@@ -336,17 +428,20 @@ cargo run --release -p phosphor-bench -- --roms <path>    # before/after, W4 onl
 
 ## Sequencing
 
-`W1 → W2 → W3 → W4`, and each is independently shippable.
+`W1 → W2 → W3 → W4`, and each is independently shippable. **W3 is done**; W1 and
+W2 are not, and W3 did not depend on them.
 
-W1 and W2 are small and fix things that are wrong now. W3 is cheap research that
-de-risks everything after it and improves accuracy on its own. W4 is the bulk of
-the labour and should not start until W3 has answered the latch question for the
-board in hand.
+W1 and W2 are small and fix things that are wrong now. W3 was cheap research
+that de-risked everything after it. W4 is the bulk of the labour, and the
+constraint it was waiting on is gone: no board needs its sprite layer left
+whole-frame on latch grounds.
 
-A reasonable stopping point is after W3: the two known-wrong cases fixed, the
-latch behaviour documented and modelled, and per-scanline adopted as the default
-for new machines — without a nine-machine restructure. W4 is worth doing, but it
-is the part to defer if effort is constrained.
+A reasonable stopping point is still after W3, now that W3 has landed: the two
+known-wrong cases fixed by W1 and W2, the read side documented, and per-scanline
+adopted as the default for new machines, without a nine-machine restructure.
+W4 is worth doing, but it is the part to defer if effort is constrained. The one
+defect W3 turned up that W4 would fix (`phosphor-emulator-x7rn`, Road Runner's
+mid-frame writes to the active MO bank) is filed and does not block anything.
 
 ## Standing convention (adopt regardless)
 
@@ -354,6 +449,12 @@ Add to `machines/CLAUDE.md`: **new raster machines render per-scanline from live
 state by default**; a whole-frame render needs a comment justifying it, and any
 state the hardware latches at vblank is modelled as an explicit snapshot rather
 than read live. This is what stops the ratio drifting back.
+
+W3 adds a corollary worth writing down with it: **a snapshot that exists to
+compensate for whole-frame rendering is not a hardware latch, and its comment
+must say which it is.** `mo_shadow` was read as the second, by this epic's own
+prose, because its comment described the first without ever naming the
+distinction.
 
 ## Open questions
 
@@ -375,8 +476,11 @@ than read live. This is what stops the ratio drifting back.
 * Prior epic: `phosphor-emulator-mid-frame-raster-7zzi` (closed),
   [`mid-frame-raster-fidelity.md`](mid-frame-raster-fidelity.md),
   [`mid-frame-raster-audit.md`](mid-frame-raster-audit.md).
-* Latch modelling reference: `machines/src/atari_system1.rs:451` (`mo_shadow`),
-  `machines/src/galaga.rs:828` (`update_starfield_at_vblank`).
+* W3's transcriptions:
+  [`../schematics/sprite-list-scan.md`](../schematics/sprite-list-scan.md).
+* Latch modelling reference: `machines/src/galaga.rs:828`
+  (`update_starfield_at_vblank`), which is a genuine vblank latch.
+  `machines/src/atari_system1.rs:547` (`mo_shadow`) is **not** one; see W3.
 * Identical index→RGB passes: `machines/src/gottlieb.rs:873`,
   `machines/src/mcr2.rs:539`.
 * Burgertime background: `machines/src/btime.rs:274` (`bnj_scroll0`), `:576`

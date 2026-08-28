@@ -48,3 +48,6 @@ section is there so that is obvious.
   on a Williams gen-1 board, and why the counter aliases rather than saturates.
 - [`williams-video-clock.md`](williams-video-clock.md) — the 12 MHz crystal and
   the chain that makes a scanline exactly 64 CPU cycles.
+- [`sprite-list-scan.md`](sprite-list-scan.md) — whether a sprite circuit reads
+  its object list as the beam scans or from a copy taken at vblank. Nine boards,
+  and the answer is the same on all of them.
