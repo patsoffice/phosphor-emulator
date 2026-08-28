@@ -160,10 +160,11 @@ is the one a reader needs to check the screen fill: 146 × 85 with
 **eight** consecutive lines per frame (256–259 and 0–3) and four lines for every
 other value.
 
-This started as "what we do today" and is now **derived from the schematic**
-(R-8731 CPU Board Logic Diagram sheet 1, in the Robotron manual at
-`arcade-museum.com/manuals-videogames/R/robotron-ds.pdf` page 9; the same sheet
-is in the Joust manual at `J/joust-dp.pdf` pages 6-7 in a poorer scan):
+This started as "what we do today" and is now **derived from the schematic**.
+The circuit is transcribed in
+[`../schematics/williams-video-counter.md`](../schematics/williams-video-counter.md),
+with its provenance and with the parts that were *not* traced named there; in
+summary:
 
 - The `$CB00` readback is **3B, an 8T97** hex tri-state buffer. Its six inputs
   are **VA8, VA9, VA10, VA11, VA12, VA13** and its six outputs are **D2 through

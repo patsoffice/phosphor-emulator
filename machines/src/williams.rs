@@ -954,6 +954,13 @@ impl WilliamsBoard {
             },
             MainRegion::IO_BANK => self.rom_bank,
             MainRegion::IO_BLITTER => 0, // write-only on real hardware
+            // Bits 8-13 of the video address counter, on data bits 2-7. The
+            // masked-off low two bits are not a mask: D0 and D1 are not driven
+            // by anything. And the counter aliases rather than saturating above
+            // line 255, because it is a free-running 74163 chain read through a
+            // plain buffer with no logic in between, so it rolls over rather
+            // than sticking at $FC. MAME models the other choice; see
+            // docs/schematics/williams-video-counter.md for the derivation.
             MainRegion::IO_VIDEO => self.current_scanline() & 0xFC,
             MainRegion::VIDEO_RAM
             | MainRegion::BANKED_ROM
