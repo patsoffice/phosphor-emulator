@@ -225,7 +225,9 @@ the live game looks right and the two paths silently disagree —
 screen mapping belongs, and it needs its own change. Tempest's entry pins the
 current, wrong-way-up frame and says so in `shows`, which still guards
 everything else about Tempest and will fail loudly when the orientation is
-corrected.
+corrected. *(Fixed 2026-08-25 under `phosphor-emulator-iitc`. It did fail
+loudly, but not until 2026-08-27: the comparison was `#[ignore]`d at the time,
+so the upright frame was only pinned when it came back on.)*
 
 **Joust, Robotron and Sinistar sit on `FACTORY SETTINGS RESTORED` from a cold
 boot** — Joust still shows it at 10,000 frames, about 166 emulated seconds.

@@ -550,8 +550,6 @@ fn updating() -> bool {
 /// renderer changes, "these nine machines moved and these thirty-one did not"
 /// is the diagnosis, and stopping at the first one hides it.
 #[test]
-#[ignore = "disabled while the vector renderer is being reworked (phosphor-emulator-ukgy); \
-            re-enable or retire it once its utility has been reviewed"]
 fn every_pinned_machine_still_draws_its_frame() {
     let mut entries = load_entries();
     let update = updating();

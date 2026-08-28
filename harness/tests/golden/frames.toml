@@ -29,16 +29,16 @@ machine = "astdelux"
 frames = 1800
 shows = "Attract mode: GAME OVER over drifting asteroids, with the 2 COINS 1 CREDIT / CREDITS 0 coin prompt and the 1980 Atari copyright."
 size = [1024, 1024]
-frame = "sha256:ad98812e857cb3f95b0c21fbaf7d0820cac36ccbd189ec1970f725b7be24c465"
-vectors = "sha256:e35fb2afc87bf9ff39edac92b05e68f8d753249918c66a58b699a6bb6675acc4"
+frame = "sha256:526451d0349f18c966279e632bc4fdc79c7ea373f3d9735c2460855f69246171"
+vectors = "sha256:f8ab5a696c0ec2eb778427765ed4da143ef9366325cb00bc0d8b813dfb8dee0a"
 
 [[frame]]
 machine = "asteroid"
 frames = 1800
 shows = "Attract mode: PUSH START over drifting asteroids with a small saucer, above the 1979 Atari copyright."
 size = [1024, 1024]
-frame = "sha256:468eb9a1fca3e204d6ebd30a4ae183eb282053d6b8ab5b87547a9f0c1e5c6e90"
-vectors = "sha256:9a585721bc7b4c0dd124070aeb921f86c429de55655c240c7115ec8da8770fef"
+frame = "sha256:0f4a88afab8c089ee8ca8621e8a9d66496c3c175b83b96f3fd1f20f0ca94804d"
+vectors = "sha256:df0270d9a5e8a026748e411e9f9715f37762b06a31111837138f630698200442"
 
 [[frame]]
 machine = "burgertime"
@@ -100,9 +100,9 @@ frame = "sha256:cff65496ba44f98b07406692ddc0958dcbf5dc59dadad70a0b826a2c2b1e8f61
 machine = "esb"
 frames = 1800
 shows = "Attract mode: the opening text crawl (IT IS A DARK TIME FOR THE REBELS...) in green over the starfield, under the red INSERT COINS / 1 COIN 1 PLAY header."
-size = [320, 330]
-frame = "sha256:5a3a805c52f0cb78205c8819671a010301e09c51844167a9ac42e7ff4b45c966"
-vectors = "sha256:1beeee4ec14a54227ee2ba1d3226c16ddb3c3ac41294b1f2964e22db2b6a5f0a"
+size = [705, 727]
+frame = "sha256:5b2dd0878218b61c5c153800bd8951e235b9aea50bdbe1475a3a0d2a76e04e1c"
+vectors = "sha256:c425d8139bc4f89a141085a516ab1b30754e2a1d25159d7ad7b307e6e83e40c4"
 
 [[frame]]
 machine = "foodf"
@@ -159,8 +159,8 @@ machine = "llander"
 frames = 1800
 shows = "Attract mode: the lunar terrain profile under the SCORE / TIME / FUEL and ALTITUDE / SPEED readouts, with INSERT COINS and X FUEL UNITS PER COIN."
 size = [1024, 1024]
-frame = "sha256:b17a74b0be9b77b52ede62ae9f97e6bc58af90005599a6f5fa5b7c3044cddd39"
-vectors = "sha256:da33d1053a2b8202b2e127ef9f70575e7c6864d4d611da689313179dc377f201"
+frame = "sha256:e1092e22a10b6118c07aa680574ca92b86984cc48347099b3774b8e8e08ac971"
+vectors = "sha256:97984b25a0762533ea349fec94664e7814e666a0c5588ed56aab1876d8a5f060"
 
 [[frame]]
 machine = "marble"
@@ -230,8 +230,8 @@ machine = "quantum"
 frames = 1800
 shows = "Attract mode: the QUANTUM title over coloured particle blobs, with INSERT COINS, the 1982 Atari copyright and the CREDIT line."
 size = [600, 900]
-frame = "sha256:b4c74bdccde52f0124992ba75ef80c8979c2f27bf510bc68e444dceb9ada83bc"
-vectors = "sha256:5574f5dd94b39e75d9c78b515f284ec50dfabf2506f0cc57ad6915f7284a922e"
+frame = "sha256:e2ed82cc584cdbbb98e98df8e59b050740729215c3e7c510beb88a4c48bfbdfc"
+vectors = "sha256:308277cfd7c8dccf8fd6336f6c834062cbe38b8fb28f3ac9928765be4e7c517b"
 
 [[frame]]
 machine = "roadrunner"
@@ -280,18 +280,18 @@ frame = "sha256:6af3e54bcc51b1f2d9262e9aa40771691a83a30d0c4c0bf969cb2f6e6e838311
 [[frame]]
 machine = "starwars"
 frames = 2400
-shows = "Attract mode: the FLIGHT INSTRUCTIONS TO RED FIVE briefing, five numbered yellow paragraphs under the green INSERT COINS header."
-size = [320, 330]
-frame = "sha256:4f60c3667dcfc8822e9595f90954972968589b2ddaacddd0044aa82c7db44a46"
-vectors = "sha256:9b2b79d98bb3f39609489737f00156065450eba34f98e92891b48b6ff8d3cee1"
+shows = "Attract mode: the FLIGHT INSTRUCTIONS TO RED FIVE briefing, five numbered red paragraphs under the blue INSERT COINS and yellow 1 COIN 1 PLAY header, over a starfield."
+size = [705, 727]
+frame = "sha256:7c48c7b2e74df1fe1ca0a0fe5af3d33997ee7f1dbf45d04743a02dd2c526d8b1"
+vectors = "sha256:b86f6889cceaf60f8c1c9082e368ad79cf6b5c70a5076f0596a1d635594986e2"
 
 [[frame]]
 machine = "tempest"
 frames = 1800
-shows = "Attract mode: the HIGH SCORES table with INSERT COINS and the 1 COIN 1 PLAY / BONUS EVERY 20000 lines. Drawn 90 degrees from upright: the raster fallback double-applies ROT270 (phosphor-emulator-iitc). The vectors hash is orientation-free and pins the real output."
-size = [570, 580]
-frame = "sha256:89e925600d5305a4d539019275af3b8b6d7787c5bb7fc47e8c1ad357f0595b20"
-vectors = "sha256:0317d87657e062c987a3a8377c04588a388ac2bd188f44da402b7f262bf47f7e"
+shows = "Attract mode: the blue tube seen head-on with a yellow flipper on its rim and coloured debris at the centre, the 10101 EJD high-score line over a red INSERT COINS, and the MCMLXXX ATARI / BONUS EVERY 20000 / CREDITS 0 / 1 COIN 1 PLAY lines. Upright since phosphor-emulator-iitc: the raster fallback no longer applies the cabinet rotation a second time."
+size = [727, 714]
+frame = "sha256:ca3477851779cc1df0bb04fd57d1b11443c065abc6d4f6f46cc1a62a00ead9e9"
+vectors = "sha256:4273902b7b11eda1dcce8b457902ca18fc81950c20d103412428f8fd11bba37d"
 
 [[frame]]
 machine = "uniwars"
