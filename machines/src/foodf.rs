@@ -56,6 +56,7 @@ use phosphor_core::gfx::decode::{GfxCache, GfxLayout, decode_gfx};
 use phosphor_core::gfx::{combine_weights, compute_resistor_weights};
 use phosphor_macros::{BusDebug, MemoryRegion, Saveable};
 
+use crate::disasm_registry::{DisasmCpu, DisasmRegion};
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
 use crate::set_bit_active_low;
 
@@ -137,6 +138,43 @@ pub static FOODF_PROGRAM_ROM: RomRegion = RomRegion {
         },
     ],
 };
+
+/// The 68000 program as it appears at `000000-00FFFF`: the eight chips loaded
+/// back-to-back by [`FOODF_PROGRAM_ROM`], then de-interleaved even/odd into a
+/// big-endian 64 KB image, the even chip supplying the high byte of each word.
+///
+/// Shared by the board's ROM load and by the disassembler's region below, which
+/// have to agree: reading the raw concatenation instead would put every word's
+/// halves 8 KB apart and disassemble to noise.
+pub fn load_program_image(rom_set: &RomSet) -> Result<Vec<u8>, RomLoadError> {
+    let chips = FOODF_PROGRAM_ROM.load(rom_set)?;
+    let mut image = vec![0u8; 0x1_0000];
+    // (dst_base, odd_chip_offset, even_chip_offset)
+    const PAIRS: [(usize, usize, usize); 4] = [
+        (0x0000, 0x0000, 0x2000),
+        (0x4000, 0x4000, 0x6000),
+        (0x8000, 0x8000, 0xA000),
+        (0xC000, 0xC000, 0xE000),
+    ];
+    for (dst, odd, even) in PAIRS {
+        for i in 0..0x2000 {
+            image[dst + 2 * i] = chips[even + i]; // even address = high byte
+            image[dst + 2 * i + 1] = chips[odd + i]; // odd address = low byte
+        }
+    }
+    Ok(image)
+}
+
+inventory::submit! {
+    DisasmRegion {
+        machine: "foodf",
+        region: "main",
+        cpu: DisasmCpu::M68000,
+        org: 0,
+        size: FOODF_PROGRAM_ROM.size as u32,
+        load: load_program_image,
+    }
+}
 
 /// Playfield tile ROM: 8 KB, 8×8 2bpp, 512 tiles.
 pub static FOODF_TILE_ROM: RomRegion = RomRegion {
@@ -427,7 +465,25 @@ pub fn clock_tree() -> phosphor_core::core::ClockTree {
 const POKEY_CLOCK_HZ: u32 = 604_800;
 const CPU_PER_POKEY: u64 = 10;
 
+/// First blanked scanline, where VBLANK rises and IRQ2 with it.
 const VBLANK_SCANLINE: u16 = 224;
+
+/// Scanlines where 32V rises, and IRQ1 with it.
+///
+/// The vertical counter's 32V tap clocks a 74LS74 with its D input grounded and
+/// its preset driven by INT3RST-, so the request is *set* by that divider's
+/// rising edge and cleared only when the program pulses digital-output bit 2.
+/// 32V is high for lines 32-63, 96-127, 160-191 and 224-255, which puts the
+/// rising edges here.
+///
+/// The last of the four coincides with [`VBLANK_SCANLINE`] by construction: the
+/// two request latches drive IPL0- and IPL1- directly, so a frame's fourth 32V
+/// edge lands on the same line as VBLANK and the CPU sees level 3 rather than
+/// two separate requests. Nothing is lost, because each handler clears only its
+/// own latch: the level-3 vector runs the VBLANK handler, which acks bit 3, and
+/// the still-pending 32V request is taken as level 1 on the very next
+/// instruction boundary.
+const SCANLINE_INT_LINES: [u16; 4] = [32, 96, 160, VBLANK_SCANLINE];
 
 const PLAYFIELD_ROWS: usize = 32;
 
@@ -649,23 +705,7 @@ impl FoodFightBoard {
     }
 
     pub fn load_rom_set(&mut self, rom_set: &RomSet) -> Result<(), RomLoadError> {
-        // Program ROM: load the eight chips back-to-back, then de-interleave the
-        // even/odd pairs into a big-endian 64 KB image (even chip = high byte).
-        let chips = FOODF_PROGRAM_ROM.load(rom_set)?;
-        let mut image = vec![0u8; 0x1_0000];
-        // (dst_base, odd_chip_offset, even_chip_offset)
-        const PAIRS: [(usize, usize, usize); 4] = [
-            (0x0000, 0x0000, 0x2000),
-            (0x4000, 0x4000, 0x6000),
-            (0x8000, 0x8000, 0xA000),
-            (0xC000, 0xC000, 0xE000),
-        ];
-        for (dst, odd, even) in PAIRS {
-            for i in 0..0x2000 {
-                image[dst + 2 * i] = chips[even + i]; // even address = high byte
-                image[dst + 2 * i + 1] = chips[odd + i]; // odd address = low byte
-            }
-        }
+        let image = load_program_image(rom_set)?;
         self.map.load_region(Region::Rom, &image);
 
         let tiles = FOODF_TILE_ROM.load(rom_set)?;
@@ -775,8 +815,7 @@ impl FoodFightBoard {
         // Raster-timed interrupts, asserted at scanline boundaries.
         if frame_cycle.is_multiple_of(TIMING.cycles_per_scanline) {
             let scanline = (frame_cycle / TIMING.cycles_per_scanline) as u16;
-            // IRQ1 fires on 32V (MAME's scanline_update_timer: 0/64/128/192).
-            if matches!(scanline, 0 | 64 | 128 | 192) {
+            if SCANLINE_INT_LINES.contains(&scanline) {
                 self.scanline_int = true;
             }
             if scanline == VBLANK_SCANLINE {
@@ -1323,6 +1362,65 @@ mod tests {
         let st = sys.get_cpu_state();
         assert_eq!(st.a[7], 0x0001_0000);
         assert_eq!(st.pc, 0x0000_0400);
+    }
+
+    /// Sweep a whole frame and record every line the 32V request is raised on.
+    ///
+    /// The counter tap clocks a 74LS74, so the request is set by 32V's rising
+    /// edge. 32V is high for lines 32-63, 96-127, 160-191 and 224-255, which
+    /// makes the four edges 32, 96, 160 and 224. Asserting the whole set rather
+    /// than a count is what distinguishes those from the falling edges at 0, 64,
+    /// 128 and 192, which are the same four events one tap-width earlier and
+    /// would pass any test that only counted them.
+    #[test]
+    fn the_scanline_interrupt_fires_on_the_rising_edges_of_32v() {
+        let mut sys = FoodFightSystem::new();
+        let cpu = M68000::new();
+        let mut fired = Vec::new();
+        for line in 0..TIMING.total_scanlines as u16 {
+            sys.board.scanline_int = false;
+            sys.board.clock = u64::from(line) * TIMING.cycles_per_scanline;
+            sys.board.begin_cycle(&cpu);
+            if sys.board.scanline_int {
+                fired.push(line);
+            }
+        }
+        assert_eq!(fired, vec![32, 96, 160, 224]);
+    }
+
+    /// The fourth 32V edge shares a line with VBLANK, and the pair is serviced
+    /// in two steps rather than one being lost.
+    ///
+    /// IL3- and IL4- drive IPL0- and IPL1- directly, so both latches set on the
+    /// same line reads as level 3. The program's level-3 vector points at its
+    /// VBLANK handler, which clears only bit 3, leaving the 32V request to be
+    /// taken as level 1 immediately afterwards. This test walks that sequence in
+    /// the order the ROM performs it.
+    #[test]
+    fn the_fourth_32v_edge_coincides_with_vblank_and_reads_as_level_3() {
+        let mut sys = FoodFightSystem::new();
+        let cpu = M68000::new();
+        sys.board.clock = u64::from(VBLANK_SCANLINE) * TIMING.cycles_per_scanline;
+        sys.board.begin_cycle(&cpu);
+
+        assert!(
+            sys.board.scanline_int,
+            "32V rises on the first blanked line"
+        );
+        assert!(sys.board.video_int, "and so does VBLANK");
+        assert_eq!(sys.board.interrupt_level(), 3, "IPL0- and IPL1- both low");
+
+        // The level-3 vector runs the VBLANK handler: bit 3 low, bit 2 left high.
+        sys.board.digital_w(0xF7);
+        assert_eq!(
+            sys.board.interrupt_level(),
+            1,
+            "the 32V request survives the VBLANK ack and is taken as level 1"
+        );
+
+        // Then the level-1 handler, which acks bit 2 and nothing else.
+        sys.board.digital_w(0xFB);
+        assert_eq!(sys.board.interrupt_level(), 0);
     }
 
     #[test]
