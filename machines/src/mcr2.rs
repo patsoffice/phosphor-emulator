@@ -635,17 +635,35 @@ impl Mcr2Board {
 
     /// Convert the indexed pixel buffer to native (unrotated) RGB24.
     ///
+    /// Every row resolves against the same palette, which is not what the
+    /// hardware does: it looks a pen up as the beam passes each pixel, so a
+    /// palette write partway down the screen colours only the rows below it.
+    /// Q*Bert's board (`gottlieb.rs`) samples the palette per scanline for
+    /// exactly that reason and this one does not, because the row a given
+    /// moment belongs to is not established here.
+    ///
+    /// This board steps in *line pairs* across an interlaced 512-line frame, and
+    /// its scanline index has never had a consumer other than the CTC triggers,
+    /// so nothing fixes where the 480 visible lines sit in the 512, nor which of
+    /// the two fields a given framebuffer row is painted in. Getting that wrong
+    /// would not blur the answer, it would comb it.
+    ///
+    /// Those two constants are not merely unfound, they are unreadable: the
+    /// vertical counter and the comparison that asserts VBLANK are both inside
+    /// the custom LSI at G12 on the CPU board, which emits `DV0..DV8` and
+    /// `VBLNK` from one package. See `docs/schematics/mcr-video-timing.md`, and
+    /// W1 in `docs/designs/raster-sampling-fidelity.md`.
+    ///
     /// The 90° rotation the cabinet needs is declared via
     /// [`orientation`](Self::orientation) and applied centrally by the frontend,
     /// so this emits pixels in native row-major order.
     pub fn render_frame(&self, buffer: &mut [u8]) {
-        let mask = self.palette_rgb.len() - 1;
-        for (i, &idx) in self.pixel_buffer.iter().enumerate() {
-            let (r, g, b) = self.palette_rgb[idx as usize & mask];
-            buffer[i * 3] = r;
-            buffer[i * 3 + 1] = g;
-            buffer[i * 3 + 2] = b;
-        }
+        gfx::resolve_indexed_rows(
+            &self.pixel_buffer,
+            NATIVE_WIDTH,
+            |_| &self.palette_rgb[..],
+            buffer,
+        );
     }
 
     /// The MCR II monitor is mounted rotated 90°. The orientation is

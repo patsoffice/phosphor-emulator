@@ -111,6 +111,9 @@ is the bulk of the labour and it is not mechanical.
 
 ## W1 — Per-scanline palette on indexed-buffer machines
 
+**Half done, 2026-08-28. `gottlieb` ships; `mcr2` is blocked on a schematic and
+the reason is at the end of this section.**
+
 **The cheapest real accuracy win in this doc, and it fixes the shollow case.**
 
 `gottlieb.rs:873` and `mcr2.rs:539` have a byte-for-byte identical final pass:
@@ -179,6 +182,74 @@ target.
 palette during vblank in all but 4 of 2400 frames). A targeted test writes the
 palette at a known active-display scanline and asserts only rows below it
 change.
+
+### What shipped, on gottlieb
+
+Built as designed, with three corrections to the plan above.
+
+* **There was no existing per-scanline hook.** The design says "the boards
+  already have a scanline boundary in `tick()`"; `mcr2` does and `gottlieb` did
+  not. Its `run_frame` was a plain cycle loop and its only frame-position test
+  was the end-of-frame render. So `gottlieb` gained `begin_scanline`,
+  `run_scanlines` and a scanline-outer `run_frame`, mirroring `mcr2`'s shape,
+  with the boundary test also in `tick` so the debugger's single-step path
+  samples too.
+* **The shared helper is `gfx::resolve_indexed_rows`** (`core/src/gfx/palette.rs`),
+  row-outer with a `palette_for_row` closure. `mcr2` calls it with a closure that
+  returns the same palette for every row, so the duplicated loop is gone and the
+  one board that samples per row and the one that does not are visibly different
+  at the call site rather than silently identical.
+* **Byte-identity was contingent, and held.** The audit's "all but 4 of 2400
+  frames" is about *when* the palette is written, and byte-identity actually
+  needs the palette *values* to be steady across the pinned frames. They are:
+  all 12 golden frames are unchanged, as are boot, save-state and audio.
+
+**The phase this creates, stated out loud.** Tiles and sprites are still
+composited once at the frame boundary, which on this board is the end of vblank;
+the palette rows come from the visible period *before* that vblank. The palette
+is now correctly phased against the beam and the other layers are not, so a
+frame where the game rewrites VRAM and palette together during vblank shows the
+new tiles against the old palette for one frame. Before this change both layers
+were sampled at the same wrong moment and were at least consistent with each
+other. This is the price of fixing one layer at a time and it goes away under
+W4; it is recorded on `palette_scanline`'s doc comment as well as here.
+
+### Why mcr2 did not ship
+
+Not effort, and not the dirty-tile renderer this section was written to sidestep.
+The design assumed a scanline index that maps to a framebuffer row. On this board
+it does not, and nothing establishes what it maps to:
+
+* The board steps in **line pairs** across an interlaced 512-line frame:
+  `cycles_per_scanline` is 317 for two lines and `total_scanlines` is 256 pairs.
+  The index has never had a consumer other than the CTC triggers, so its phase
+  against the visible area was never needed and was never fixed.
+* The framebuffer is genuinely 480 distinct rows, not 240 doubled: tiles are
+  drawn at 2× (`screen_y0 = tile_row * 16 + src_y * 2`) but sprites occupy 32
+  *consecutive* rows from an even start (`mcr2.rs:602`), so sprite graphics
+  resolve at the full interlaced line rate. Rows therefore belong to alternating
+  fields, and a per-row palette has to know which field a row is in.
+* That leaves two unknowns: where the 240 visible lines sit inside each 256-line
+  field, and which field the even rows belong to. Both are constants that would
+  have to be read off the vertical counter's blanking decode.
+
+**The decode is on no drawing, and cannot be.** Tron's manual supplies the 90010
+Super CPU Board schematic that Satan's Hollow's lacks, and it settles the
+question in the least convenient way: MCR II's counters are inside two Midway
+custom LSIs. `G12 MMC02` emits `DV0..DV8` and `VBLNK` from one package; `B12
+MMC03` does the horizontal side and `HBLNK`. The comparison that decides where
+blanking starts is inside MMC02. There is no decode to read and no gate to
+trace. Transcribed, with everything else that was searched and found clean, in
+[`../schematics/mcr-video-timing.md`](../schematics/mcr-video-timing.md).
+
+MAME does not know it either: `mcr.cpp` configures the screen with
+`set_vblank_time(ATTOSECONDS_IN_USEC(2500))` and the comment `/* not accurate */`.
+
+Guessing either constant would put the split at the wrong rows, and on an
+interlaced board a wrong guess does not blur the result, it combs it. So the
+mcr2 half is **blocked, not deferred**: it needs a source that is not a drawing
+(a logic capture on a live board, or someone's teardown of MMC02). The board
+keeps its whole-frame palette and now says so, at `mcr2.rs`'s `render_frame`.
 
 ---
 

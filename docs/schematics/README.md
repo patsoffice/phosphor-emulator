@@ -51,3 +51,6 @@ section is there so that is obvious.
 - [`sprite-list-scan.md`](sprite-list-scan.md) — whether a sprite circuit reads
   its object list as the beam scans or from a copy taken at vblank. Nine boards,
   and the answer is the same on all of them.
+- [`mcr-video-timing.md`](mcr-video-timing.md) — a negative result: MCR II's
+  H and V counters and both blanking decodes are inside custom LSIs, so the
+  blanking phase is on no drawing. Read it before hunting for one.

@@ -513,20 +513,65 @@ impl Debuggable for GottliebSoundBoard {
 /// The CPU lives on the machine and the board *is* the bus (Q*bert is the only
 /// machine on this hardware), so this takes them as separate borrows and
 /// dispatches at a concrete type.
+///
+/// This is the debugger's path: it tests the frame position on every cycle so
+/// that single-stepping still crosses scanline boundaries. A whole frame goes
+/// through [`run_scanlines`], which hoists that test out.
 #[inline]
 pub fn tick(cpu: &mut I8088, board: &mut GottliebBoard) {
+    let frame_cycle = board.clock % TIMING.cycles_per_frame();
+    if frame_cycle.is_multiple_of(TIMING.cycles_per_scanline) {
+        board.begin_scanline(frame_cycle / TIMING.cycles_per_scanline);
+    }
+    step_cycle(cpu, board);
+}
+
+/// Run `cycles` CPU cycles, scanline-outer and cycle-inner. The caller must
+/// start on a scanline boundary and pass a multiple of `cycles_per_scanline`;
+/// the debugger's off-boundary stepping goes through [`tick`] instead.
+pub fn run_scanlines(cpu: &mut I8088, board: &mut GottliebBoard, cycles: u64) {
+    debug_assert!(
+        board.clock.is_multiple_of(TIMING.cycles_per_scanline)
+            && cycles.is_multiple_of(TIMING.cycles_per_scanline),
+        "run_scanlines must start on a scanline boundary and run whole scanlines"
+    );
+    for _ in 0..cycles / TIMING.cycles_per_scanline {
+        let scanline = board.clock % TIMING.cycles_per_frame() / TIMING.cycles_per_scanline;
+        board.begin_scanline(scanline);
+        for _ in 0..TIMING.cycles_per_scanline {
+            step_cycle(cpu, board);
+        }
+    }
+}
+
+/// Run one frame's worth of cycles. Whole scanlines go through
+/// [`run_scanlines`]; a partial scanline at either end (only after the debugger
+/// has left the clock off-boundary) goes through [`tick`].
+pub fn run_frame(cpu: &mut I8088, board: &mut GottliebBoard) {
+    let scanline = TIMING.cycles_per_scanline;
+    let mut remaining = TIMING.cycles_per_frame();
+
+    let lead = ((scanline - board.clock % scanline) % scanline).min(remaining);
+    for _ in 0..lead {
+        tick(cpu, board);
+    }
+    remaining -= lead;
+
+    let whole = remaining - remaining % scanline;
+    run_scanlines(cpu, board, whole);
+    remaining -= whole;
+
+    for _ in 0..remaining {
+        tick(cpu, board);
+    }
+}
+
+/// The part of a cycle with no frame-position test in it.
+#[inline]
+fn step_cycle(cpu: &mut I8088, board: &mut GottliebBoard) {
     board.begin_cycle(cpu);
     cpu.execute_cycle(board, BusMaster::Cpu(0));
     board.end_cycle();
-}
-
-/// Run one frame's worth of cycles. The board has no scanline-boundary work --
-/// its only frame-position test is the end-of-frame render inside `end_cycle`
-/// -- so this is a plain loop.
-pub fn run_frame(cpu: &mut I8088, board: &mut GottliebBoard) {
-    for _ in 0..TIMING.cycles_per_frame() {
-        tick(cpu, board);
-    }
 }
 
 /// The speech clock is the one thing a load cannot restore from the file. The
@@ -539,7 +584,7 @@ pub fn run_frame(cpu: &mut I8088, board: &mut GottliebBoard) {
 #[derive(BusDebug, Saveable)]
 #[save_version(1)]
 #[save_tlv]
-#[save_after_load(reapply_speech_clock)]
+#[save_after_load(restore_after_load)]
 pub struct GottliebBoard {
     // Sound board (RIOT + DAC + Votrax). Its M6502 sits beside it rather than
     // inside it, so the sound CPU's cycles dispatch at a concrete type.
@@ -570,6 +615,31 @@ pub struct GottliebBoard {
     /// after a load.
     #[save(id = 5)]
     pub(crate) palette_rgb: [(u8, u8, u8); 16],
+
+    /// [`palette_rgb`](Self::palette_rgb) as it stood at the start of each
+    /// visible scanline.
+    ///
+    /// The hardware resolves pen to RGB as the beam passes each pixel, so a
+    /// palette write partway down the screen colours only the rows below it.
+    /// Sampling per scanline is itself an approximation of that (a write
+    /// mid-*line* still quantises to the line), but it captures every case
+    /// observed on this board.
+    ///
+    /// NOTE THE PHASE THIS CREATES. Tiles and sprites are still composited once,
+    /// at the frame boundary, which on this board is the end of vblank; these
+    /// rows come from the visible period *before* that vblank. So the palette is
+    /// now correctly phased against the beam while the other layers are not, and
+    /// a frame where the game rewrites VRAM and palette together during vblank
+    /// will show the new tiles against the old palette for one frame. That is
+    /// the cost of fixing one layer at a time, and it goes away when the whole
+    /// render moves per-scanline (W4 of the raster-sampling epic).
+    ///
+    /// Derived state, rebuilt every frame, so not saved: seeded from
+    /// `palette_rgb` in [`restore_after_load`](Self::restore_after_load) so the
+    /// first frame after a load resolves against a real palette rather than a
+    /// stale one.
+    #[save_skip]
+    pub(crate) palette_scanline: Vec<[(u8, u8, u8); 16]>,
 
     /// Framebuffer (256×240 palette indices), refilled by the render that runs
     /// at the end of every frame.
@@ -616,10 +686,16 @@ pub struct GottliebBoard {
 }
 
 impl GottliebBoard {
-    /// Hand the SC-01 its clocks back from the tree after a load. See the note
-    /// on the struct for why the file cannot carry them.
-    fn reapply_speech_clock(&mut self) {
+    /// Put back the derived state a load cannot carry.
+    ///
+    /// The SC-01's clocks, for the reason on the struct, and the per-scanline
+    /// palette, which is rebuilt as a frame runs and would otherwise resolve the
+    /// first post-load frame's upper rows against whatever the previous machine
+    /// had. Seeding every row from the loaded `palette_rgb` makes that first
+    /// frame behave the way the whole-frame render used to.
+    fn restore_after_load(&mut self) {
         self.sound.reapply_speech_clock();
+        self.palette_scanline.fill(self.palette_rgb);
     }
 
     pub fn new() -> Self {
@@ -632,6 +708,7 @@ impl GottliebBoard {
             sprite_cache: gfx::GfxCache::new(0, 16, 16),
             palette_ram: [0; 32],
             palette_rgb: [(0, 0, 0); 16],
+            palette_scanline: vec![[(0, 0, 0); 16]; VISIBLE_LINES as usize],
             pixel_buffer: vec![0u8; NATIVE_WIDTH * NATIVE_HEIGHT],
             video_control: 0,
             sprite_bank: 0,
@@ -819,6 +896,21 @@ impl GottliebBoard {
     // -----------------------------------------------------------------------
     // Core tick
     // -----------------------------------------------------------------------
+
+    /// Work that only happens on the first cycle of a scanline: sampling the
+    /// palette for the row the beam is about to draw.
+    ///
+    /// `scanline` is 0..256; 0..239 are visible and 240..255 are vblank, the
+    /// same split `check_interrupts` uses to raise the VBLANK NMI. Only visible
+    /// lines have a row to colour.
+    ///
+    /// Called once per scanline from [`run_scanlines`] and, for the debugger's
+    /// single-step path, from [`tick`] when the clock lands on a boundary.
+    pub(crate) fn begin_scanline(&mut self, scanline: u64) {
+        if scanline < VISIBLE_LINES {
+            self.palette_scanline[scanline as usize] = self.palette_rgb;
+        }
+    }
 
     /// Execute one CPU cycle at the I8088 clock rate (5 MHz).
     /// Per-cycle board work that runs before the CPU.
@@ -1014,17 +1106,20 @@ impl GottliebBoard {
 
     /// Convert the indexed pixel buffer to native (unrotated) RGB24.
     ///
+    /// Each row resolves against the palette that was live when the beam drew
+    /// it, from [`palette_scanline`](Self::palette_scanline), rather than
+    /// against one palette for the whole frame.
+    ///
     /// The 270° CW rotation Q*Bert's cabinet needs is declared via
     /// [`orientation`](Self::orientation) and applied centrally by the frontend,
     /// so this emits pixels in native row-major order.
     pub fn render_frame(&self, buffer: &mut [u8]) {
-        let mask = self.palette_rgb.len() - 1;
-        for (i, &idx) in self.pixel_buffer.iter().enumerate() {
-            let (r, g, b) = self.palette_rgb[idx as usize & mask];
-            buffer[i * 3] = r;
-            buffer[i * 3 + 1] = g;
-            buffer[i * 3 + 2] = b;
-        }
+        gfx::resolve_indexed_rows(
+            &self.pixel_buffer,
+            NATIVE_WIDTH,
+            |y| &self.palette_scanline[y][..],
+            buffer,
+        );
     }
 
     /// Q*Bert's monitor is mounted rotated 270° clockwise. The orientation is
@@ -1099,6 +1194,134 @@ impl Default for GottliebBoard {
 mod tests {
     use super::*;
     use phosphor_core::core::save_state::{Saveable, StateReader, StateWriter};
+
+    // -----------------------------------------------------------------------
+    // Per-scanline palette
+    // -----------------------------------------------------------------------
+
+    /// Write palette entry 1 through the real palette-RAM path, so these tests
+    /// exercise the DAC expansion rather than poking `palette_rgb`.
+    ///
+    /// Even byte is G[7:4] B[3:0]; odd byte is R[3:0]. `0x0F, 0x00` is full
+    /// blue, `0xF0, 0x00` is full green.
+    fn set_entry1(board: &mut GottliebBoard, even: u8, odd: u8) -> (u8, u8, u8) {
+        board.update_palette(2, even);
+        board.update_palette(3, odd);
+        board.palette_rgb[1]
+    }
+
+    fn row_pixel(rgb: &[u8], y: usize) -> (u8, u8, u8) {
+        let off = y * NATIVE_WIDTH * 3;
+        (rgb[off], rgb[off + 1], rgb[off + 2])
+    }
+
+    /// The behaviour W1 exists for: a palette write partway down the screen
+    /// colours only the rows below it.
+    ///
+    /// Driven through `begin_scanline` rather than the CPU so the split lands on
+    /// an exact, stated row. The companion test below is what proves the frame
+    /// loop actually calls `begin_scanline`; without it this one would pass on a
+    /// board that never sampled anything.
+    #[test]
+    fn a_mid_frame_palette_write_colours_only_the_rows_below_it() {
+        const SPLIT: usize = 100;
+        let mut board = GottliebBoard::new();
+
+        let blue = set_entry1(&mut board, 0x0F, 0x00);
+        for y in 0..SPLIT as u64 {
+            board.begin_scanline(y);
+        }
+        let green = set_entry1(&mut board, 0xF0, 0x00);
+        for y in SPLIT as u64..TIMING.total_scanlines {
+            board.begin_scanline(y);
+        }
+        assert_ne!(blue, green, "the two palettes must differ for this to test");
+
+        board.pixel_buffer.fill(1);
+        let mut rgb = vec![0u8; NATIVE_WIDTH * NATIVE_HEIGHT * 3];
+        board.render_frame(&mut rgb);
+
+        assert_eq!(row_pixel(&rgb, 0), blue, "row 0 is above the write");
+        assert_eq!(
+            row_pixel(&rgb, SPLIT - 1),
+            blue,
+            "the last row above the write keeps the old colour"
+        );
+        assert_eq!(
+            row_pixel(&rgb, SPLIT),
+            green,
+            "the first row below the write takes the new colour"
+        );
+        assert_eq!(
+            row_pixel(&rgb, NATIVE_HEIGHT - 1),
+            green,
+            "the bottom row is below the write"
+        );
+    }
+
+    /// `render_frame` reading the snapshot is only half of it: the frame loop
+    /// has to fill the snapshot. This fails if `begin_scanline` is ever dropped
+    /// from `tick` or `run_scanlines`, which would leave every row resolving
+    /// against the constructor's black palette.
+    #[test]
+    fn the_frame_loop_samples_the_palette_at_scanline_boundaries() {
+        let mut board = GottliebBoard::new();
+        let mut cpu = I8088::new();
+
+        let blue = set_entry1(&mut board, 0x0F, 0x00);
+        assert_ne!(
+            board.palette_scanline[0][1], blue,
+            "the snapshot starts stale, so the sampling below is what changes it"
+        );
+
+        // One cycle at clock 0 crosses the scanline-0 boundary.
+        tick(&mut cpu, &mut board);
+        assert_eq!(board.palette_scanline[0][1], blue, "tick() samples");
+
+        // And the hoisted loop the frame actually runs through samples too.
+        let rest = TIMING.cycles_per_scanline - board.clock;
+        for _ in 0..rest {
+            tick(&mut cpu, &mut board);
+        }
+        let green = set_entry1(&mut board, 0xF0, 0x00);
+        run_scanlines(&mut cpu, &mut board, TIMING.cycles_per_scanline);
+        assert_eq!(
+            board.palette_scanline[1][1], green,
+            "run_scanlines() samples"
+        );
+        assert_eq!(
+            board.palette_scanline[0][1], blue,
+            "and sampling scanline 1 must not disturb scanline 0"
+        );
+    }
+
+    /// Vblank has no row to colour, and writing one would run off the end of a
+    /// snapshot sized to the visible area.
+    #[test]
+    fn vblank_scanlines_have_no_row_to_sample_into() {
+        let mut board = GottliebBoard::new();
+        assert_eq!(board.palette_scanline.len(), VISIBLE_LINES as usize);
+        for y in VISIBLE_LINES..TIMING.total_scanlines {
+            board.begin_scanline(y);
+        }
+    }
+
+    /// A load restores `palette_rgb` but not the per-row snapshot, so the first
+    /// frame after one would resolve its upper rows against whatever the
+    /// previous machine had. Seeding closes that.
+    #[test]
+    fn a_load_seeds_every_row_from_the_restored_palette() {
+        let mut board = GottliebBoard::new();
+        let blue = set_entry1(&mut board, 0x0F, 0x00);
+        board.palette_scanline.fill([(9, 9, 9); 16]); // stale from another machine
+
+        board.restore_after_load();
+
+        assert!(
+            board.palette_scanline.iter().all(|row| row[1] == blue),
+            "every row seeds from the restored palette"
+        );
+    }
 
     #[test]
     fn votrax_write_sets_phoneme_and_inflection() {

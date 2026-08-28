@@ -675,8 +675,13 @@ mod tests {
         let mut sys = QbertSystem::new();
         // Tag a known native pixel and a palette entry, then confirm render_frame
         // writes it at the native row-major position (no baked rotation).
-        sys.board.palette_rgb[1] = (10, 20, 30);
+        //
+        // The palette is sampled per scanline, so the row has to have been
+        // scanned with this palette live for `render_frame` to resolve against
+        // it -- that is what `begin_scanline` stands for here.
         let (nx, ny) = (5usize, 7usize);
+        sys.board.palette_rgb[1] = (10, 20, 30);
+        sys.board.begin_scanline(ny as u64);
         sys.board.pixel_buffer[ny * 256 + nx] = 1;
         let mut buf = vec![0u8; 256 * 240 * 3];
         sys.render_frame(&mut buf);
