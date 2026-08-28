@@ -22,17 +22,27 @@ pub(crate) enum Region {
 // MCR II hardware constants
 // ---------------------------------------------------------------------------
 // Master oscillator: 19.968 MHz
-// CPU clock: 19.968 / 8 = 2.496 MHz
-// Pixel clock: 19.968 / 4 = 4.992 MHz
-// HTOTAL: 512 pixel clocks = 256 CPU cycles per scanline
-// VTOTAL: 264 lines per field
-// VISIBLE: 240 scanlines per field (480 interlaced)
-// Frame: 256 × 264 = 67584 CPU cycles per field
+// CPU clock:   19.968 / 8 = 2.496 MHz  (crystal, one LS74 halving, two more)
+// Pixel clock: 19.968 / 2 = 9.984 MHz  (HCLK, the horizontal counter's clock)
+// HTOTAL: 634 pixel clocks = 158.5 CPU cycles per scanline
+// VTOTAL: 512 lines per interlaced frame, 480 of them visible
+// Line rate: 9.984 MHz / 634 = 15,747.6 Hz, the NTSC line rate to within 0.09%
+// Frame: 634 × 512 pixel clocks = 81,152 CPU cycles = 30.757 Hz
+//
+// A SCANLINE HERE IS A LINE PAIR, and that is the whole reason this board looks
+// odd next to the others. 634 dot clocks is 158.5 CPU cycles, which no integer
+// `cycles_per_scanline` can hold. Two lines is 317 cycles exactly, so the board
+// steps in pairs: `TIMING.cycles_per_scanline` is 317 and `total_scanlines` is
+// 256 pairs. Nothing is lost, because the renderer is a dirty-gated per-tile
+// compositor that runs at the frame boundary and never consults a scanline
+// index; the only consumer of one is the CTC trigger below. A board that
+// rendered per scanline could not use this trick, and would need the frame
+// length itself to become the primitive.
 
 pub const TIMING: TimingConfig = TimingConfig {
     cpu_clock_hz: 2_496_000,  // 19.968 MHz / 8
-    cycles_per_scanline: 256, // 512 pixel clocks / 2
-    total_scanlines: 264,     // VTOTAL
+    cycles_per_scanline: 317, // 1268 pixel clocks / 4: TWO scanlines, see above
+    total_scanlines: 256,     // VTOTAL 512, counted in pairs
     // Native (pre-orientation) framebuffer: the board declares ROT90 and the
     // frontend rotates centrally, so these are the unrotated dimensions.
     display_width: NATIVE_WIDTH as u32,   // 512
@@ -43,7 +53,9 @@ pub const TIMING: TimingConfig = TimingConfig {
 /// The board's crystal and everything divided out of it.
 ///
 /// One 19.968 MHz oscillator on the main board, with the Z80 at /8 and the
-/// pixel clock at /4, plus the SSIO sound board's own clock at 2 MHz.
+/// pixel clock at /2, plus the SSIO sound board's own clock at 2 MHz. Both
+/// divisions are visible on the schematic as LS74s wired D-from-Q-bar: one
+/// halves the crystal into HCLK, and two more halve HCLK twice into the Z80.
 ///
 /// The SSIO is declared as a second *source* rather than a division of the
 /// first, because 2 MHz is not one: 19.968 over 2 is 9.984. It runs off its own
@@ -55,16 +67,24 @@ pub fn clock_tree() -> ClockTree {
     let mut t = ClockTree::new(19_968_000);
     let ssio = t.add_root(2_000_000);
     let cpu = t.add_domain(Clk::Cpu, RootId::MAIN, 1, 8); // 2.496 MHz
-    let dot = t.add_domain(Clk::Pixel, RootId::MAIN, 1, 4); // 4.992 MHz
+    let dot = t.add_domain(Clk::Pixel, RootId::MAIN, 1, 2); // 9.984 MHz (HCLK)
     t.add_domain(Clk::SoundCpu, ssio, 1, 1); // SSIO Z80 at 2 MHz
     t.set_step_domain(cpu);
-    // Pixel clock is exactly twice the CPU clock, so 512 dot clocks is exactly
-    // 256 CPU cycles.
-    t.set_raster(dot, 512, 0);
+    // The dot clock is exactly four times the CPU clock, so one 634-dot line is
+    // 158.5 CPU cycles and the 1268-dot pair the board steps in is exactly 317.
+    t.set_raster(dot, 2 * HTOTAL_DOTS, 0);
     t
 }
 
-pub const VISIBLE_LINES: u64 = 240;
+/// Dot clocks in one scanline, decoded by the net the schematic names `634`.
+pub const HTOTAL_DOTS: u32 = 634;
+
+/// Line pairs from the start of one field to the start of the next.
+///
+/// The 512-line interlaced frame is two 256-line fields, and VBLANK is decoded
+/// without the vertical counter's top bit, so it is asserted once per field.
+/// In the pair units this board steps in, that is every 128.
+const PAIRS_PER_FIELD: u64 = 128;
 
 pub fn output_sample_rate() -> u64 {
     phosphor_core::audio::host_sample_rate() as u64
@@ -399,18 +419,23 @@ impl Mcr2Board {
     /// The `bus` parameter is the game wrapper (which implements `Bus`) passed
     /// in from the wrapper's `run_frame()` / `debug_tick()`.
     /// Work that only happens on the first cycle of a scanline: the CTC's
-    /// scanline-triggered channels.
+    /// externally triggered channels.
     ///
-    /// Called once per scanline from [`run_scanlines`] and, for the debugger's
+    /// `scanline` is a line *pair* index, 0..256 across the interlaced frame.
+    ///
+    /// Channel 2 is driven by VBLANK, which the vertical counter decodes without
+    /// its top bit and so asserts once per 256-line field, twice per frame.
+    /// Channel 3 is driven by the net the schematic names `493`, a full decode
+    /// of the 9-bit vertical counter, so it fires once per frame.
+    ///
+    /// Called once per pair from [`run_scanlines`] and, for the debugger's
     /// single-step path, from [`tick`] when the clock lands on a boundary.
     fn begin_scanline(&mut self, scanline: u64) {
-        // CTC channel 2: triggered at scanlines 0 and 240 (VBLANK)
-        if scanline == 0 || scanline == VISIBLE_LINES {
+        if scanline.is_multiple_of(PAIRS_PER_FIELD) {
             self.ctc.trigger(2, true);
             self.ctc.trigger(2, false);
         }
 
-        // CTC channel 3: triggered at scanline 0 only (once per frame)
         if scanline == 0 {
             self.ctc.trigger(3, true);
             self.ctc.trigger(3, false);
@@ -654,5 +679,96 @@ impl Mcr2Board {
 impl Default for Mcr2Board {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The horizontal geometry has to land on a rate a monitor can scan.
+    ///
+    /// This is the check that anchors the whole derivation to something outside
+    /// our own constants. The dot clock and HTOTAL come from the schematic (one
+    /// LS74 halving the 19.968 MHz crystal, and the decode net named `634`), and
+    /// what makes them credible rather than merely self-consistent is that the
+    /// quotient is the NTSC line rate. Get either wrong and it is not.
+    #[test]
+    fn the_line_rate_is_the_ntsc_line_rate() {
+        const NTSC_LINE_HZ: f64 = 15_734.264;
+        let tree = clock_tree();
+        let dot = tree.find(Clk::Pixel).expect("declared pixel domain");
+        let line_hz = tree.hz(dot) as f64 / f64::from(HTOTAL_DOTS);
+        let error = (line_hz - NTSC_LINE_HZ).abs() / NTSC_LINE_HZ;
+        assert!(
+            error < 0.001,
+            "{} dot clocks at {} Hz is a {line_hz:.1} Hz line rate, \
+             {:.2}% off NTSC's {NTSC_LINE_HZ}",
+            HTOTAL_DOTS,
+            tree.hz(dot),
+            error * 100.0,
+        );
+    }
+
+    /// One `run_frame` is one interlaced frame: 512 lines, stepped as 256 pairs.
+    ///
+    /// The bound is deliberately loose and deliberately one-sided. It passes for
+    /// the ~30.76 Hz the schematic gives, and fails both for the 36.93 Hz this
+    /// board used to declare and for the 61.5 Hz it would report if a `run_frame`
+    /// were made a field instead of a frame.
+    #[test]
+    fn a_frame_is_512_lines_at_about_30_hz() {
+        assert_eq!(
+            TIMING.total_scanlines * 2,
+            512,
+            "512 lines, counted in pairs"
+        );
+        assert_eq!(TIMING.cycles_per_frame(), 81_152);
+        let hz = TIMING.frame_rate_hz();
+        assert!(
+            (30.0..31.0).contains(&hz),
+            "the frame rate is {hz:.3} Hz, outside the 30-31 Hz the schematic gives"
+        );
+    }
+
+    /// VBLANK reaches the CTC once per field and the `493` decode once per
+    /// frame, observed by counting through the device rather than by re-testing
+    /// the predicate that produces them.
+    ///
+    /// Both channels are put in counter mode so each external edge decrements a
+    /// down counter the test reads back.
+    ///
+    /// Note what this does *not* guard. The counts per `run_frame` were already
+    /// 2 and 1 before the timing was corrected; what was wrong was how much CPU
+    /// time a `run_frame` stood for, which moved both cadences 1.2x fast in Hz
+    /// without changing either count. So this test is a guard on the field split
+    /// and the trigger conditions, and the frame-length tests above are what
+    /// catch the defect this file was changed for.
+    #[test]
+    fn the_ctc_sees_vblank_twice_a_frame_and_the_493_decode_once() {
+        const START: u8 = 200;
+        // Counter mode | rising edge | time constant follows | control word.
+        const COUNTER_RISING: u8 = 0x40 | 0x10 | 0x04 | 0x01;
+
+        let mut board = Mcr2Board::new();
+        for ch in [2u8, 3] {
+            board.ctc.write(ch, COUNTER_RISING);
+            board.ctc.write(ch, START);
+        }
+
+        for pair in 0..TIMING.total_scanlines {
+            board.begin_scanline(pair);
+        }
+
+        assert_eq!(
+            START - board.ctc.read(2),
+            2,
+            "VBLANK is decoded without the counter's top bit, so twice a frame"
+        );
+        assert_eq!(
+            START - board.ctc.read(3),
+            1,
+            "493 is a full decode of the vertical counter, so once a frame"
+        );
     }
 }

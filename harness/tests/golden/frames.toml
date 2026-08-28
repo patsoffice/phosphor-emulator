@@ -265,9 +265,9 @@ frame = "sha256:fa6867437bf3fbaa929ba81d82b9fc06da68499c6b8a47136be8455ea766ddad
 [[frame]]
 machine = "shollow"
 frames = 1800
-shows = "Attract mode: the SATAN'S HOLLOW title spelled out in red bat sprites, over the 1 CREDIT PER PLAYER and Bally Midway MCMLXXXI copyright block."
+shows = "Attract mode: the SHIELD instruction screen, with THE SHIELD PROTECTS THE BASE AGAINST BOMBS above the base sprite, the gauge explanation below it, and SHIELD 11 CREDITS 0 along the bottom."
 size = [480, 512]
-frame = "sha256:4d7fd90c3f123a068234b7f69836d774caf98e5b14acdd7113b6480312f597e2"
+frame = "sha256:40a711526b0a19513899810ec1bf55fd654c209a2324592048370c7b170cf2f4"
 
 [[frame]]
 machine = "sinistar"
