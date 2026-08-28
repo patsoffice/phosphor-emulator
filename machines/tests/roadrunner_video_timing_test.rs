@@ -79,7 +79,7 @@ const RESLEN: u32 = 48;
 const MAGIC: u16 = 0x5A5A;
 const TRAPPED: u16 = 0xDEAD;
 const IRQ3_STORM: u16 = 0xDEA3;
-const FINAL_PHASE: u16 = 15;
+const FINAL_PHASE: u16 = 17;
 
 // --- Board geometry the expectations are derived from -----------------------
 //
@@ -189,18 +189,36 @@ fn font_rom() -> Vec<u8> {
     rom
 }
 
-/// The playfield and motion-object tile ROM: tile N is a solid block of pen N,
-/// for N in 1 to 4. Tile 0 is left blank.
+/// The playfield and motion-object tile ROM.
+///
+/// Tiles 1 to 4 are solid blocks of pen N. **Tile 5 is deliberately asymmetric**:
+/// pen 1 across its left four columns and pen 2 across its right four. A solid
+/// tile is its own mirror image, so nothing built from tiles 1 to 4 can say
+/// anything about horizontal flip; tile 5 swaps its halves when mirrored and is
+/// the only reason the flip assertions can fail.
 fn tile_rom() -> Vec<u8> {
     let mut rom = vec![0u8; TILE_ROM_LEN];
+    let plane_rows = |rom: &mut Vec<u8>, tile: usize, plane: usize, byte: u8| {
+        let base = plane * TILE_PLANE_STRIDE + tile * TILE_BYTES;
+        rom[base..base + TILE_BYTES].fill(byte);
+    };
     for tile in 1..=4usize {
         for plane in 0..4 {
-            if tile & (1 << plane) == 0 {
-                continue;
+            if tile & (1 << plane) != 0 {
+                plane_rows(&mut rom, tile, plane, 0xFF);
             }
-            let base = plane * TILE_PLANE_STRIDE + tile * TILE_BYTES;
-            rom[base..base + TILE_BYTES].fill(0xFF);
         }
+    }
+    // A row byte is MSB-first across x, so 0xF0 is x 0-3 and 0x0F is x 4-7.
+    plane_rows(&mut rom, 5, 0, 0xF0); // pen bit 0 on the left half
+    plane_rows(&mut rom, 5, 1, 0x0F); // pen bit 1 on the right half
+
+    // Tile 6 is the other axis: pen 1 across its top four rows and pen 2 across
+    // its bottom four, so a vertically mirrored copy is visibly upside down.
+    // Nothing on this board can produce one, and that is what it is here to pin.
+    for row in 0..8 {
+        let plane = usize::from(row >= 4);
+        rom[plane * TILE_PLANE_STRIDE + 6 * TILE_BYTES + row] = 0xFF;
     }
     rom
 }
@@ -232,7 +250,7 @@ const VB_TARGET: u16 = 16;
 
 /// The first picture phase; phases [`FIRST_SHOT_PHASE`] to 14 are captured.
 const FIRST_SHOT_PHASE: u16 = 11;
-const SHOT_COUNT: usize = 4;
+const SHOT_COUNT: usize = 6;
 
 struct Run {
     results: Vec<u8>,
@@ -306,7 +324,7 @@ fn run() -> Run {
 
     let mut frames = 0;
     let mut watchdog_ride_frames = None;
-    let mut shots: [Option<Shot>; SHOT_COUNT] = [None, None, None, None];
+    let mut shots: [Option<Shot>; SHOT_COUNT] = std::array::from_fn(|_| None);
     for _ in 0..MAX_FRAMES {
         m.run_frame();
         frames += 1;
@@ -919,6 +937,286 @@ fn a_mid_frame_playfield_write_changes_rows_the_beam_already_drew() {
             "on the frame after the write, screen row {y} must show it"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// The rest of the compositor
+//
+// Phase 15 draws every path the picture above leaves out, in bands that do not
+// overlap so one capture covers all of them. Nothing here is about *when* the
+// board draws, so none of it is affected by the whole-frame model and none of it
+// is held as a defect.
+// ---------------------------------------------------------------------------
+
+const YELLOW: (u8, u8, u8) = (254, 254, 0);
+const MAGENTA: (u8, u8, u8) = (254, 0, 254);
+
+/// Horizontal flip, on a motion object and on a playfield cell.
+///
+/// Tile 5 is pen 1 across its left four columns and pen 2 across its right four,
+/// so mirroring it swaps the halves. Solid tiles cannot show this at all: a
+/// block of one pen is its own mirror image, which is why the first picture had
+/// nothing to say about flip and why this tile exists.
+///
+/// The sprite pens resolve through the motion-object palette bank
+/// (`0x100 + pen`) and the playfield pens through its own (`0x200 + pen`), so
+/// the two rows below are also checking that a mirrored tile still lands in the
+/// right bank.
+#[test]
+fn a_mirrored_tile_swaps_its_halves_on_both_layers() {
+    let r = run();
+    r.assert_completed();
+    let s = shot(&r, 15);
+
+    // Motion objects at y 40-47: (40, 40) plain, (56, 40) mirrored.
+    assert_eq!(
+        s.pixel(41, 43),
+        WHITE,
+        "sprite, unmirrored, left half is pen 1"
+    );
+    assert_eq!(
+        s.pixel(45, 43),
+        BLUE,
+        "sprite, unmirrored, right half is pen 2"
+    );
+    assert_eq!(
+        s.pixel(57, 43),
+        BLUE,
+        "sprite, MIRRORED: the left half should now be the tile's right, pen 2. \
+         White here means word0 bit 15 did nothing."
+    );
+    assert_eq!(
+        s.pixel(61, 43),
+        WHITE,
+        "sprite, mirrored, right half is pen 1"
+    );
+
+    // Playfield cells at y 160-167: col 2 plain, col 3 mirrored.
+    assert_eq!(
+        s.pixel(17, 163),
+        RED,
+        "cell, unmirrored, left half is pen 1"
+    );
+    assert_eq!(
+        s.pixel(21, 163),
+        GREEN,
+        "cell, unmirrored, right half is pen 2"
+    );
+    assert_eq!(
+        s.pixel(25, 163),
+        GREEN,
+        "cell, MIRRORED: the left half should now be the tile's right, pen 2. \
+         Red here means the cell's bit 15 did nothing."
+    );
+    assert_eq!(s.pixel(29, 163), RED, "cell, mirrored, right half is pen 1");
+}
+
+/// A high-priority sprite blends through the translucent bank instead of drawing.
+///
+/// The merge does not put a high-priority sprite's own colour on the screen. It
+/// resolves the pixel to `0x300 + (playfield pen << 4) + sprite pen`, so the
+/// result depends on **both** layers: a pen-2 sprite over the pen-1 background is
+/// entry `0x312`, which the program paints yellow and which neither layer's own
+/// palette contains.
+///
+/// Beside it, the one pen the merge excludes: a high-priority sprite pixel whose
+/// pen is 1 draws nothing at all and the playfield shows through unchanged.
+#[test]
+fn a_high_priority_sprite_blends_through_the_translucent_bank() {
+    let r = run();
+    r.assert_completed();
+    let s = shot(&r, 15);
+
+    assert_eq!(
+        s.pixel(44, 63),
+        YELLOW,
+        "a high-priority pen-2 sprite over playfield pen 1 resolves to palette \
+         entry 0x312, not to the sprite's own colour. Blue here means it drew \
+         itself; red means it did not draw at all."
+    );
+    assert_eq!(
+        s.pixel(60, 63),
+        RED,
+        "a high-priority sprite pixel whose pen is 1 is the case the merge \
+         excludes: it must leave the playfield alone"
+    );
+}
+
+/// The `840000` mask lets the playfield stand in front of a low-priority sprite.
+///
+/// Two identical low-priority sprites of the same tile, differing only in what
+/// is behind them. `840000` bit 2 says the playfield wins for colour-0 pen 2, so
+/// the sprite over the pen-2 cell loses and the one over the pen-1 background
+/// draws normally.
+///
+/// Both halves are needed: a board that ignored the mask entirely would draw
+/// both, and one that dropped every low-priority sprite would draw neither.
+#[test]
+fn the_priority_mask_puts_chosen_playfield_pens_in_front_of_sprites() {
+    let r = run();
+    r.assert_completed();
+    let s = shot(&r, 15);
+
+    assert_eq!(
+        s.pixel(44, 83),
+        WHITE,
+        "playfield pen 1 is not in the 840000 mask, so the sprite draws over it"
+    );
+    assert_eq!(
+        s.pixel(60, 83),
+        GREEN,
+        "the same sprite over playfield pen 2, which IS in the mask, must lose to \
+         it. White here means the mask was not consulted."
+    );
+}
+
+/// The alpha layer's force-opaque bit and its colour field.
+///
+/// The cell's glyph is code 0, which is blank, so every one of its pens is 0 and
+/// a normal cell would draw nothing. Bit 13 forces it opaque anyway, and the
+/// colour field picks the palette entry: `colour * 4 + pen`, which for colour 1
+/// and pen 0 is entry 4.
+///
+/// So this fails if the opaque bit is ignored (the playfield shows through), and
+/// separately if the colour field is (entry 0 rather than 4).
+#[test]
+fn a_force_opaque_alpha_cell_paints_its_colour_over_a_blank_glyph() {
+    let r = run();
+    r.assert_completed();
+    let s = shot(&r, 15);
+
+    assert_eq!(
+        s.pixel(18, 179),
+        MAGENTA,
+        "an alpha cell with bit 13 set paints palette entry colour*4 + pen even \
+         where its glyph is transparent. Red means the opaque bit was ignored; \
+         any other colour means the colour field was."
+    );
+    assert_eq!(
+        s.pixel(18, 171),
+        RED,
+        "the row above it has no alpha cell and must be untouched, so the block \
+         is one cell tall rather than the whole column"
+    );
+}
+
+/// Compare two 8x8 blocks pixel for pixel, having first proved the left one is
+/// not blank.
+///
+/// The blank check is the point. Two identical *empty* blocks compare equal, so
+/// without it every "these two draw the same" assertion below would be a null
+/// check comparing two silences and could never fail.
+fn assert_blocks_identical(s: &Shot, a: (usize, usize), b: (usize, usize), what: &str) {
+    let drawn = (0..8)
+        .flat_map(|dy| (0..8).map(move |dx| (dx, dy)))
+        .filter(|&(dx, dy)| s.pixel(a.0 + dx, a.1 + dy) != RED)
+        .count();
+    assert!(
+        drawn > 4,
+        "{what}: the reference block at {a:?} drew only {drawn} pixels over the \
+         background, so comparing it with anything proves nothing"
+    );
+    for dy in 0..8 {
+        for dx in 0..8 {
+            assert_eq!(
+                s.pixel(a.0 + dx, a.1 + dy),
+                s.pixel(b.0 + dx, b.1 + dy),
+                "{what}: the two blocks differ at offset ({dx}, {dy})"
+            );
+        }
+    }
+}
+
+/// Neither the alpha layer nor a motion object can be flipped vertically, and
+/// the alpha layer cannot be flipped at all.
+///
+/// This pins an *absence*, which is worth doing because it is the kind of thing
+/// a later refactor adds by accident while generalising a tilemap. All three
+/// facts are in the hardware description rather than inferred:
+///
+/// - The alpha layer's tile info carries no flip flag: its only flag is
+///   force-opaque, which is a layer bit (`0x10`) well clear of the flip bits
+///   (`0x01` and `0x02`). Bits 14 and 15 of an alpha cell word are not decoded.
+/// - The playfield's flags come from cell bit 15 alone, which is `TILE_FLIPX`;
+///   there is no source for `TILE_FLIPY`.
+/// - The motion-object descriptor gives a horizontal-flip mask of `0x8000` in
+///   word 0 and a vertical-flip mask of **zero**.
+///
+/// So: the same asymmetric glyph twice, once with both spare alpha bits set, and
+/// the same vertically asymmetric sprite twice, once with every bit word 0 and
+/// word 2 do not decode set. Both pairs must be identical, and the sprite must
+/// be the right way up.
+#[test]
+fn nothing_on_this_board_flips_vertically_and_the_alpha_layer_not_at_all() {
+    let r = run();
+    r.assert_completed();
+    let s = shot(&r, 15);
+
+    // Tile 6 is pen 1 over pen 2. Upside down would be blue over white.
+    assert_eq!(s.pixel(44, 122), WHITE, "sprite tile 6, top half, is pen 1");
+    assert_eq!(
+        s.pixel(44, 126),
+        BLUE,
+        "sprite tile 6, bottom half, is pen 2. Swapped with the top means \
+         something is flipping vertically."
+    );
+    assert_blocks_identical(s, (40, 120), (56, 120), "motion object spare bits");
+
+    assert_blocks_identical(s, (48, 192), (64, 192), "alpha cell spare bits");
+}
+
+/// Scrolling moves the playfield and leaves the other two layers where they are.
+///
+/// Both scrolls go to 8. The playfield map is 512 x 512 and the visible origin is
+/// the scroll, so screen `(x, y)` shows map `(x + 8, y + 8)` and everything on
+/// the playfield moves up and left by 8. The mirrored cell pair is what makes the
+/// move unambiguous: it is the only part of the playfield that is not uniform, so
+/// a shift is a change of colour rather than a change of nothing.
+///
+/// The alpha and motion-object layers are not scrolled by these registers, and
+/// asserting they stayed put is the half that catches a scroll applied in the
+/// wrong place.
+#[test]
+fn the_scroll_registers_move_the_playfield_and_nothing_else() {
+    let r = run();
+    r.assert_completed();
+    let before = shot(&r, 15);
+    let after = shot(&r, 16);
+
+    // The unmirrored cell was at screen x 16-23, y 160-167; scrolled by 8 it is
+    // at x 8-15, y 152-159, and its pen-1 and pen-2 halves come with it.
+    assert_eq!(
+        before.pixel(9, 155),
+        RED,
+        "before the scroll this is background"
+    );
+    assert_eq!(
+        after.pixel(9, 155),
+        RED,
+        "the cell's pen-1 half should have moved here"
+    );
+    assert_eq!(
+        after.pixel(13, 155),
+        GREEN,
+        "and its pen-2 half beside it. Red here means the playfield did not move."
+    );
+    assert_eq!(
+        after.pixel(17, 155),
+        GREEN,
+        "the mirrored cell's left half, now pen 2, follows into the next 8 pixels"
+    );
+
+    // The layers the scroll registers do not reach.
+    assert_eq!(
+        after.pixel(65, 16),
+        WHITE,
+        "the alpha layer is drawn 1:1 from the origin and does not scroll"
+    );
+    assert_eq!(
+        after.pixel(44, 83),
+        WHITE,
+        "the sprite layer has its own fixed offsets and does not scroll either"
+    );
 }
 
 // ---------------------------------------------------------------------------

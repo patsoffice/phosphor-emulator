@@ -104,6 +104,12 @@ PAL_MO4     equ PAL+$208        ;                pen 4
 PAL_PF0     equ PAL+$400        ; playfield pen 0
 PAL_PF1     equ PAL+$402        ;           pen 1, the colour T6 changes mid-frame
 PAL_PF2     equ PAL+$404        ;           pen 2, what T7's cells become
+PAL_ALO     equ PAL+$008        ; alpha colour 1, pen 0: what a force-opaque cell
+                                ; paints, since colour*4 + pen = 4
+; A high-priority sprite does not draw its own colour: it blends through the
+; translucent bank at $300 + (playfield pen << 4) + sprite pen. Over the pen-1
+; background with a pen-2 sprite that is $312.
+PAL_TRANS   equ PAL+$624
 
 ; IRGB-4444: IIII RRRR GGGG BBBB, an intensity nibble scaling each component.
 C_BLACK     equ $0000
@@ -111,11 +117,43 @@ C_RED       equ $FF00
 C_GREEN     equ $F0F0
 C_BLUE      equ $F00F
 C_WHITE     equ $FFFF
+C_YELLOW    equ $FFF0
+C_MAGENTA   equ $FF0F
 
 ; A playfield cell word is flip:tile-select:code. With the synthetic PROM the
 ; high byte selects lookup entry 0 for every value, so the low byte is the tile.
 PF_TILE1    equ $0001           ; solid pen 1
 PF_TILE2    equ $0002           ; solid pen 2
+PF_TILE5    equ $0005           ; left half pen 1, right half pen 2
+PF_FLIP5    equ $8005           ; ... and mirrored, which swaps the halves
+PF_HFLIP    equ $8000           ; cell bit 15 mirrors the 8x8 tile
+                                ; tile 6 is top half pen 1, bottom half pen 2
+
+; Cells the compositor phase writes. Cell (row, col) is at PF + (row*64+col)*2.
+PF_PRIOCELL equ PF+((10*64)+7)*2   ; screen (56-63, 80-87), under a sprite
+PF_MIRROR   equ PF+((20*64)+2)*2   ; screen (16-23, 160-167)
+PF_MIRRORF  equ PF+((20*64)+3)*2   ; the mirrored one beside it
+
+; Alpha cell (22, 2): screen (16-23, 176-183). Bit 13 forces the cell opaque even
+; where its glyph is pen 0, and bits 12-10 are the colour.
+AL_OPAQUE   equ ALPHA+((22*64)+2)*2
+AL_OPAQVAL  equ $2400           ; force-opaque, colour 1, code 0 (blank glyph)
+
+; THIS BOARD'S ALPHA LAYER HAS NO FLIP, and the pair below is what says so.
+; An alpha cell word is code in bits 0-9, colour in 10-12 and the force-opaque
+; flag in 13; bits 14 and 15 do nothing. Two cells of the same asymmetric glyph,
+; one with both spare bits set, must come out pixel for pixel identical.
+;
+; Both cells are at alpha row 24, screen rows 192-199.
+AL_PLAIN    equ ALPHA+((24*64)+6)*2    ; screen columns 48-55
+AL_SPARE    equ ALPHA+((24*64)+8)*2    ; screen columns 64-71
+AL_GLYPH    equ 1                      ; 'R', asymmetric in both axes
+AL_SPAREBITS equ $C000
+
+; Colour-0 playfield pens the playfield draws in FRONT of, written to 840000. Bit
+; 2 set means a low-priority sprite loses to playfield pen 2 and still wins over
+; pen 1, which is what makes the pair of sprites below say something.
+PRIO_PENS   equ $0004
 
 ; The two cells T7 writes, one well above the beam at the moment of the write and
 ; one well below it. Cell (row, col) is at PF + (row*64 + col)*2, and covers
@@ -134,6 +172,33 @@ TEXTCELL    equ ALPHA+((2*64)+8)*2
 SPR_W0      equ $1203           ; height 4, Y 80
 SPR_W1      equ $0001           ; colour:code -> lookup entry 0, base tile 1
 SPR_W2      equ $1400           ; X 160 (160 << 5), low priority
+
+; The single-tile sprites the compositor phase adds. Same arithmetic, height 1,
+; so v = 512 - ((Y + 256 + 8) mod 512):
+;   Y 40 -> v 208 -> $1A00     Y 60 -> v 188 -> $1780     Y 80 -> v 168 -> $1500
+; word0 bit 15 mirrors the tile; word2 bit 15 makes the sprite high priority.
+SPR_Y40     equ $1A00
+SPR_Y60     equ $1780
+SPR_Y80     equ $1500
+SPR_Y120    equ $1000           ; Y 120 -> v 128
+
+; NEITHER LAYER ON THIS BOARD HAS A VERTICAL FLIP. A motion-object word0 is
+; height in bits 0-3, Y in 5-13 and the horizontal mirror in 15; word2 is X in
+; 5-13 and priority in 15. Bit 4 and bit 14 of word0, and bits 0-4 and 14 of
+; word2, are not decoded by anything. Two sprites of the same vertically
+; asymmetric tile, one with every one of those bits set, must come out identical.
+SPR_SPARE0  equ $4010
+SPR_SPARE2  equ $401F
+SPR_X40     equ $0500           ;  40 << 5
+SPR_X56     equ $0700           ;  56 << 5
+SPR_MIRROR  equ $8000           ; word0: mirror
+SPR_HIPRIO  equ $8000           ; word2: high priority
+
+; Scroll applied by the last capture. The playfield map is 512 x 512 and the
+; visible origin is the scroll, so screen (x, y) shows map (x + 8, y + 8) and
+; everything drawn on the playfield moves up and left by 8. The alpha and motion
+; object layers do not scroll, which is half of what this pins.
+SCROLL_BY   equ 8
 
 ; --- The image, and the range the CPU checksums back through the real bus ----
 
@@ -655,17 +720,100 @@ TxDone
             move.w  #14,R_PHASE
 
 ; ===========================================================================
-; Done
+; Phase 15 -- the compositor paths the first picture missed
 ;
-; Phase 14 is held for a whole frame before 15 is published. The harness reads
-; the phase once per run_frame, so a phase is only observable if it is the last
-; one written in its frame; writing 15 straight after 14 would put both at line
-; 240 of the idle frame and that capture would never be taken. This cost the
-; Williams ROM its third capture and is written down there too.
+; Every phase from here on builds its picture, then rides a whole frame before
+; publishing. The harness reads the phase once per run_frame, so a phase is only
+; observable if it is the last one written in its frame, and anything written
+; between publishing and the frame boundary lands in the capture that phase just
+; asked for. Both traps have been paid for once already, in the Williams ROM's
+; lost third capture and in T6's palette restore.
+;
+; 78lx drew one path through each layer. This draws the rest of them, in bands
+; that do not overlap so one capture covers all of it:
+;
+;   y 40-47   mirroring, motion objects. Tile 5 is pen 1 on its left half and
+;             pen 2 on its right, so a mirrored copy beside an unmirrored one
+;             swaps its halves. Solid tiles cannot show this at all, which is
+;             why tile 5 exists.
+;   y 60-67   the priority merge. A HIGH-priority sprite does not draw its own
+;             colour: it blends through the translucent bank at
+;             $300 + (playfield pen << 4) + sprite pen, so a pen-2 sprite over
+;             the pen-1 background comes out $312. Beside it, a high-priority
+;             sprite whose pen is 1 draws NOTHING at all -- the one pen the
+;             merge excludes -- and the playfield shows through.
+;   y 80-87   the other side of priority. Both sprites are low priority and
+;             identical; the left one sits over the pen-1 background and draws,
+;             the right one sits over a pen-2 cell and loses, because 840000 bit
+;             2 says the playfield stands in front of pen 2. Same sprite, two
+;             backgrounds, opposite outcomes.
+;   y 160-167 mirroring, playfield. Two adjacent cells of tile 5, one with the
+;             cell's own mirror bit set.
+;   y 120-127 no vertical flip on a motion object. Tile 6 is pen 1 over pen 2,
+;             so a vertically mirrored copy would be visibly upside down. Two
+;             sprites of it, one with every bit word0 and word2 do not decode
+;             set, must be identical.
+;   y 176-183 the alpha layer's force-opaque bit and colour field. Code 0 is the
+;             blank glyph, so every pen is 0 and nothing would draw; bit 13
+;             forces the cell opaque anyway and colour 1 makes it palette entry
+;             colour*4 + 0 = 4.
+;   y 192-199 no flip of any kind on the alpha layer. The same asymmetric glyph
+;             twice, once with both spare bits of the cell word set.
+; ===========================================================================
+            move.w  #C_YELLOW,PAL_TRANS
+            move.w  #C_MAGENTA,PAL_ALO
+            move.w  #PRIO_PENS,PRIORITY
+
+            move.w  #PF_TILE2,PF_PRIOCELL
+            move.w  #PF_TILE5,PF_MIRROR
+            move.w  #PF_FLIP5,PF_MIRRORF
+            move.w  #AL_OPAQVAL,AL_OPAQUE
+            move.w  #AL_GLYPH,AL_PLAIN
+            move.w  #AL_GLYPH+AL_SPAREBITS,AL_SPARE
+
+            lea     SprData,a0
+SprLoop
+            move.w  (a0)+,d0            ; entry number, or the terminator
+            cmpi.w  #TIMER_FLAG,d0
+            beq.s   SprDone
+            add.w   d0,d0               ; entry N's words are at N*2 within each
+            lea     MOB,a1              ; of the four $80-byte planes
+            adda.w  d0,a1
+            move.w  (a0)+,(a1)
+            move.w  (a0)+,$80(a1)
+            move.w  (a0)+,$100(a1)
+            move.w  (a0)+,$180(a1)
+            bra.s   SprLoop
+SprDone
+
+            bsr     PetDog
+            bsr     WaitVblank
+            bsr     PetDog
+            bsr     WaitVblank          ; mo_shadow now holds the new sprites
+            move.w  #15,R_PHASE
+
+; ===========================================================================
+; Phase 16 -- scroll the playfield out from under everything else
+;
+; Both scrolls to 8, so the playfield moves up and left by 8 and the alpha and
+; motion-object layers do not move at all. The write rides out a frame first: a
+; scroll written at the vblank edge would land in the capture phase 15 has just
+; asked for, the same trap the T6 palette restore fell into.
+; ===========================================================================
+            bsr     PetDog
+            bsr     WaitVblank          ; clear of the phase-15 capture
+            move.w  #SCROLL_BY,XSCROLL
+            move.w  #SCROLL_BY,YSCROLL
+            bsr     PetDog
+            bsr     WaitVblank
+            move.w  #16,R_PHASE
+
+; ===========================================================================
+; Done
 ; ===========================================================================
             bsr     PetDog
             bsr     WaitVblank
-            move.w  #15,R_PHASE
+            move.w  #17,R_PHASE
             move.w  #MAGIC,R_MAGIC
 Spin
             bsr     WaitVblank
@@ -684,6 +832,21 @@ Spin
 TextData
             dc.w    1,2,3,4,0,1,5,6,6,7,1
             dc.w    TIMER_FLAG          ; $FFFF terminator
+
+; The motion-object list phase 15 installs: entry number, then its four words.
+; Entry 0 is left alone, still the scanline timer, and still linking to 1. The
+; chain runs 1 to 7 and entry 7 links to itself, which is what ends the walk.
+SprData
+            dc.w    1, SPR_W0, SPR_W1, SPR_W2, 2                    ; the 4-tile sprite
+            dc.w    2, SPR_Y40, 5, SPR_X40, 3                       ; tile 5
+            dc.w    3, SPR_Y40+SPR_MIRROR, 5, SPR_X56, 4            ; ... mirrored
+            dc.w    4, SPR_Y60, 2, SPR_X40+SPR_HIPRIO, 5            ; translucent
+            dc.w    5, SPR_Y60, 1, SPR_X56+SPR_HIPRIO, 6            ; pen 1: draws nothing
+            dc.w    6, SPR_Y80, 1, SPR_X40, 7                       ; over pen 1: draws
+            dc.w    7, SPR_Y80, 1, SPR_X56, 8                       ; over pen 2: loses
+            dc.w    8, SPR_Y120, 6, SPR_X40, 9                      ; tile 6, plain
+            dc.w    9, SPR_Y120+SPR_SPARE0, 6, SPR_X56+SPR_SPARE2, 9 ; ... spare bits set
+            dc.w    TIMER_FLAG
 
 ; ===========================================================================
 ; Helpers

@@ -516,6 +516,73 @@ was ever rendered and the test read a screen with neither colour where it wanted
 green. The restore now rides out that frame first. This is the same class of
 mistake as the Williams phase 9/10 collision, and the same fix.
 
+## The rest of the compositor (7mee)
+
+The picture above walks one path through each layer and leaves most of the merge
+untouched. This step draws the rest, in bands that do not overlap so one capture
+covers all of them, plus one more capture with the playfield scrolled. None of it
+is about *when* the board draws, so none of it is affected by the whole-frame
+model and none of it is held as a defect.
+
+**Mirroring needs an asymmetric tile.** A solid block is its own mirror image, so
+nothing built from tiles 1 to 4 can say anything about flip. Tile 5 is pen 1
+across its left four columns and pen 2 across its right four, and swaps halves
+when mirrored. Asserted on a motion object (word 0 bit 15) and on a playfield
+cell (bit 15).
+
+**The priority merge, all three paths.** A high-priority sprite does not draw its
+own colour: the pixel resolves to `0x300 + (playfield pen << 4) + sprite pen`, so
+a pen-2 sprite over the pen-1 background is entry `0x312`, which the program
+paints a colour neither layer's own palette contains. Beside it the one pen the
+merge excludes, where a high-priority sprite pen of 1 draws nothing at all. And
+below, two identical low-priority sprites differing only in what is behind them:
+`840000` bit 2 puts the playfield in front for colour-0 pen 2, so one loses and
+the other draws.
+
+**Scroll.** Both registers to 8. The playfield moves up and left by 8 and the
+alpha and motion-object layers do not move at all, which is the half that catches
+a scroll applied in the wrong place.
+
+**The alpha layer's force-opaque bit and colour field.** A cell whose glyph is
+code 0 has every pen 0 and would draw nothing; bit 13 forces it opaque anyway and
+the colour field selects `colour * 4 + pen`.
+
+### Three flips this hardware does not have
+
+`Characters can flip too` was the question, and on this board they cannot. All
+three facts come from the hardware description rather than from our code:
+
+| Layer | horizontal | vertical | where |
+|---|---|---|---|
+| alpha | **none** | **none** | its tile info carries no flip flag at all; the only flag is force-opaque, which is a layer bit (`0x10`) clear of the flip bits (`0x01`, `0x02`) |
+| playfield | cell bit 15 | **none** | the flags argument is `(data >> 15) & 1`, which is `TILE_FLIPX`; nothing supplies `TILE_FLIPY` |
+| motion objects | word 0 bit 15 | **none** | the object descriptor gives a horizontal-flip mask of `0x8000` and a vertical-flip mask of **zero** |
+
+Our board matches all three, and the absences are now pinned, because an absence
+is exactly what a later refactor adds by accident while generalising a tilemap.
+Tile 6 is pen 1 over pen 2, vertically asymmetric, so an upside-down copy would
+be obvious; the same sprite is drawn twice, once with every bit words 0 and 2 do
+not decode set, and the two must be identical. The alpha layer gets the same
+treatment with an asymmetric glyph and both spare cell bits.
+
+**Those comparisons carry a blank check, and it is not decoration.** Two
+identical *empty* blocks compare equal, so without first proving the reference
+block drew something the assertion would be a null check comparing two silences
+and could never fail. That defect has appeared in every subsystem of this
+repository; it is not going to appear here.
+
+### Each one made to fail
+
+| Mutation | What failed |
+|---|---|
+| motion-object horizontal flip disabled | the mirrored sprite reads as unmirrored |
+| a vertical flip added on word 0 bit 14 | the two spare-bit sprites differ at offset (0, 0) |
+| an X flip added to the alpha layer on bit 15 | the two spare-bit cells differ at offset (1, 0) |
+| the merge's pen-1 exception removed | a high-priority pen-1 sprite paints over the playfield |
+| the `840000` mask ignored | the sprite over pen 2 draws instead of losing |
+| `xscroll` ignored | the playfield does not move |
+| the force-opaque bit ignored | the blank glyph draws nothing |
+
 ## What this does not cover yet
 
 The two picture assertions are `78lx` and land red until
@@ -563,6 +630,9 @@ Tracked as `phosphor-emulator-roadrunner-video-conformance-wfop`.
 3. **Done** (`78lx`) - synthetic graphics, a picture through all three layers,
    and the two picture assertions held as a ratchet against W3. Fifteen
    assertions, no arcade ROMs.
+4. **Done** (`7mee`) - the compositor paths the first picture missed: mirroring,
+   the priority merge, scroll, the alpha force-opaque bit, and the three flips
+   this hardware does not have. Twenty-one assertions in all.
 
 ## References
 
