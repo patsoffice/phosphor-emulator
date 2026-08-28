@@ -616,3 +616,215 @@ fn the_image_fills_the_program_rom_window() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// The second opinion: the same binary under MAME
+// ---------------------------------------------------------------------------
+
+/// Every figure the ROM measures, ours against MAME's, on all three machines.
+///
+/// This is the sharper of the two conformance cross-checks in the tree and it is
+/// worth saying why. The Road Runner ROM has no line counter, so every position
+/// it reports is in poll-loop iterations divided by a rate it measures in the
+/// same run, and a constant cycle difference between two cores cancels by
+/// design. Williams has a video counter at `$CB00`, so these figures are already
+/// absolute: 64 transitions, one wrap, a maximum of `$FC`, count240 at `$F0`,
+/// VA11 edges at `$20/$60/$A0/$E0` and `$40/$80/$C0`, blitter halts of `$10` and
+/// `$20` scanlines. Nothing is calibrated and nothing cancels, so every one of
+/// them is compared exactly and a disagreement is a disagreement.
+///
+/// **What it confirmed.** `T4_SLOW` is the assertion this ROM was written for:
+/// `williams.rs` discarded the cycle count `do_dma_cycle` returned, so a slow
+/// RAM-to-RAM blit halted the CPU for 16 scanlines where the datasheet's 2
+/// microseconds a byte derives 32. The fix moved robotron's and sinistar's
+/// golden frames, which can say a picture changed but not that it changed to the
+/// right thing. MAME independently reports `$20`, which is the first outside
+/// evidence that the fix was right rather than merely different.
+///
+/// **The one disagreement, and it is not settled here.** `T1_DWELL0` against
+/// `T1_DWELL4` measures how long the counter reads 0. We alias: `current_scanline()`
+/// is a `u8`, so lines 256-259 read back as 0-3 and value 0 spans eight lines
+/// against every other value's four. MAME saturates instead
+/// (`williams_v.cpp video_counter_r`: `vpos() < 0x100 ? vpos() & 0xfc : 0xfc`),
+/// so its value 0 spans four lines and `$FC` spans eight. Both frames are 260
+/// lines, so this is entirely about what `$CB00` reads on lines 256-259.
+///
+/// **The schematic says ours is right**, which is why the divergence is pinned
+/// rather than resolved by matching MAME. On R-8731 CPU board sheet 1 the
+/// `$CB00` readback is `3B`, an 8T97 buffer whose six inputs are VA8-VA13
+/// straight off the video address counter (four cascaded 74163s at 5F, 5E, 5D,
+/// 5C) and whose outputs are D2-D7, with D0 and D1 not driven at all. There is
+/// no logic between the counter and the buffer, so the CPU sees whatever the
+/// counter is counting, and a 74163 chain on a free-running clock does not stop
+/// at its maximum: it rolls over. A saturating readback would need the counter
+/// to hold, and nothing holds it. The design doc carries the full derivation.
+///
+/// So this asserts both models: ours because it is derived, MAME's because it is
+/// what MAME does and a change of mind there should be noticed rather than
+/// silently absorbed.
+#[test]
+fn mame_agrees_about_every_signal_the_rom_measures() {
+    let required = std::env::var_os("PHOSPHOR_MAME").is_some();
+    if !required {
+        eprintln!("skipping: set PHOSPHOR_MAME=1 to cross-check against MAME");
+        return;
+    }
+    // The same fallback the Road Runner cross-check uses; this crate does not
+    // depend on phosphor-harness, so `roms_dir()` is not available here.
+    let roms = std::env::var("PHOSPHOR_ROMS").unwrap_or_else(|_| {
+        format!(
+            "{}/ws/mame-runtime/roms",
+            std::env::var("HOME").unwrap_or_default()
+        )
+    });
+    let roms = std::path::PathBuf::from(roms);
+
+    for machine in MACHINES {
+        let mame = run_under_mame(machine, &roms);
+        let m = |k: &str| -> i64 {
+            *mame
+                .get(k)
+                .unwrap_or_else(|| panic!("{machine}: MAME's result block has no {k}"))
+        };
+
+        let r = run(machine);
+        r.assert_completed(machine);
+
+        assert_eq!(
+            m("R_MAGIC"),
+            i64::from(MAGIC),
+            "{machine}: MAME did not reach the magic byte, stopping at phase {}",
+            m("R_PHASE")
+        );
+
+        // Absolute figures: no calibration, no cancellation, so exact equality.
+        for (name, ours) in [
+            ("R_PHASE", r.at(R_PHASE)),
+            ("R_T1TRN", r.at(R_T1TRN)),
+            ("R_T1WRP", r.at(R_T1WRP)),
+            ("R_T1MAX", r.at(R_T1MAX)),
+            ("R_T2CNT", r.at(R_T2CNT)),
+            ("R_T2LIN", r.at(R_T2LIN)),
+            ("R_T3RCNT", r.at(R_T3RCNT)),
+            ("R_T3RLIN0", r.slice(R_T3RLIN, 4)[0]),
+            ("R_T3RLIN1", r.slice(R_T3RLIN, 4)[1]),
+            ("R_T3RLIN2", r.slice(R_T3RLIN, 4)[2]),
+            ("R_T3RLIN3", r.slice(R_T3RLIN, 4)[3]),
+            ("R_T3FCNT", r.at(R_T3FCNT)),
+            ("R_T3FLIN0", r.slice(R_T3FLIN, 3)[0]),
+            ("R_T3FLIN1", r.slice(R_T3FLIN, 3)[1]),
+            ("R_T3FLIN2", r.slice(R_T3FLIN, 3)[2]),
+            ("R_T4FST", r.at(R_T4FST)),
+            ("R_T4SLW", r.at(R_T4SLW)),
+            ("R_T5A", r.at(R_T5A)),
+            ("R_T5B", r.at(R_T5B)),
+        ] {
+            assert_eq!(
+                m(name),
+                i64::from(ours),
+                "{machine} {name}: MAME reports {}, we report {ours}. This figure \
+                 is read straight off the video counter with nothing calibrated \
+                 out, so the two are supposed to be identical.",
+                m(name)
+            );
+        }
+
+        // The counter's behaviour above line 255, which the two model
+        // differently and neither derives. Pinned on both sides so a change of
+        // mind on either cannot pass silently.
+        let (ours0, ours4) = (i64::from(r.at(R_T1DW0)), i64::from(r.at(R_T1DW4)));
+        assert!(
+            ours4 > 4 && m("R_T1DW4") > 4,
+            "{machine}: the dwell reference is too small to form a ratio"
+        );
+        assert!(
+            ours0 * 10 > ours4 * 17 && ours0 * 10 < ours4 * 23,
+            "{machine}: we dwell {ours0} at counter 0 against {ours4} at 4, a \
+             ratio of {:.2}, and about 2 is what aliasing means. If this has \
+             become 1 our counter has stopped aliasing, which is a change to the \
+             board and wants the schematic question answered rather than this \
+             assertion relaxed.",
+            ours0 as f32 / ours4 as f32
+        );
+        assert_eq!(
+            m("R_T1DW0"),
+            m("R_T1DW4"),
+            "{machine}: MAME dwells {} at counter 0 against {} at 4. It has always \
+             reported the same for both, because video_counter_r saturates at \
+             $FC above line 255 instead of aliasing to 0. If that has changed, \
+             MAME has taken a position on the open schematic question and the \
+             design doc should be updated with whatever reasoning came with it.",
+            m("R_T1DW0"),
+            m("R_T1DW4")
+        );
+    }
+}
+
+/// Run one machine's conformance image under MAME and return its result block.
+///
+/// Gated the way the drift guard is gated on `PHOSPHOR_ASM`: the caller has
+/// already established that `PHOSPHOR_MAME` is set, so a missing `mame` is a
+/// failure rather than a skip. A skip here would report green having compared
+/// nothing, which is the failure mode this repository keeps finding.
+fn run_under_mame(machine: &str, roms: &std::path::Path) -> std::collections::HashMap<String, i64> {
+    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let script = root.join("../tools/mame_williams_conformance.lua");
+    let (_, load_addr) = image_for(machine);
+    let image = root.join(if load_addr == 0xE000 {
+        "tests/roms/williams_video_e000.bin"
+    } else {
+        "tests/roms/williams_video.bin"
+    });
+    let out = std::env::temp_dir().join(format!("phosphor_williams_mame_{machine}"));
+    let _ = std::fs::remove_dir_all(&out);
+    std::fs::create_dir_all(&out).expect("create the MAME output directory");
+
+    let status = std::process::Command::new("mame")
+        .args([machine, "-rompath", roms.to_str().unwrap()])
+        .arg("-autoboot_script")
+        .arg(&script)
+        .args(["-autoboot_delay", "0"])
+        // Headless and unthrottled; the script exits the machine when the
+        // program finishes, and -str is only a backstop if it never does.
+        .args([
+            "-video",
+            "none",
+            "-sound",
+            "none",
+            "-nothrottle",
+            "-str",
+            "60",
+        ])
+        // Keep MAME's droppings out of the working tree.
+        .arg("-cfg_directory")
+        .arg(out.join("cfg"))
+        .arg("-nvram_directory")
+        .arg(out.join("nvram"))
+        .arg("-snapshot_directory")
+        .arg(&out)
+        .env("PHOSPHOR_CONFORMANCE_BIN", &image)
+        .env("PHOSPHOR_CONFORMANCE_ADDR", format!("{load_addr:#X}"))
+        .env("PHOSPHOR_CONFORMANCE_OUT", &out)
+        .status()
+        .unwrap_or_else(|e| {
+            panic!(
+                "PHOSPHOR_MAME is set, so `mame` is supposed to be on PATH, but \
+                 running it for {machine} failed: {e}. A skip here would report \
+                 green while comparing nothing."
+            )
+        });
+    assert!(status.success(), "{machine}: mame exited with {status}");
+
+    let result = out.join("mame_result.txt");
+    let text = std::fs::read_to_string(&result).unwrap_or_else(|e| {
+        panic!(
+            "{machine}: MAME ran but wrote no result block at {}: {e}. Check its \
+             output for a Lua error in tools/mame_williams_conformance.lua.",
+            result.display()
+        )
+    });
+    text.lines()
+        .filter_map(|l| l.split_once(' '))
+        .filter_map(|(k, v)| v.trim().parse().ok().map(|v| (k.to_string(), v)))
+        .collect()
+}

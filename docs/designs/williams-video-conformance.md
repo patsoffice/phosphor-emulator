@@ -158,8 +158,45 @@ is the one a reader needs to check the screen fill: 146 × 85 with
 **The video counter aliases.** `current_scanline()` returns `u8`, so scanlines
 256–259 read back as 0–3 and mask to 0. The counter therefore reads `$00` for
 **eight** consecutive lines per frame (256–259 and 0–3) and four lines for every
-other value. Whether that matches the hardware's vertical counter is a schematic
-question; T1 measures what we do.
+other value.
+
+This started as "what we do today" and is now **derived from the schematic**
+(R-8731 CPU Board Logic Diagram sheet 1, in the Robotron manual at
+`arcade-museum.com/manuals-videogames/R/robotron-ds.pdf` page 9; the same sheet
+is in the Joust manual at `J/joust-dp.pdf` pages 6-7 in a poorer scan):
+
+- The `$CB00` readback is **3B, an 8T97** hex tri-state buffer. Its six inputs
+  are **VA8, VA9, VA10, VA11, VA12, VA13** and its six outputs are **D2 through
+  D7**. D0 and D1 are not driven at all, which is where the `& $FC` comes from:
+  it is not a mask in a register, it is two data lines nobody connected.
+- Those VA lines come straight off the video address counter, which is four
+  cascaded 74163s: **5F** (its two low bits unused, then VA0, VA1), **5E**
+  (VA2-VA5), **5D** (VA6-VA9) and **5C** (VA10-VA13). The counter is clocked
+  continuously and reset once per frame.
+- **There is no logic between the counter outputs and the buffer inputs.** Six
+  wires, nothing else.
+
+That last point is what decides the aliasing question. A counter read through a
+plain buffer shows whatever it is counting; for the readback to stick at `$FC`
+past the end of the visible field, the counter itself would have to stop, and a
+74163 chain with a free-running clock does not stop. It rolls over and keeps
+counting, so the value the extra lines show is a **small** one, not the maximum.
+Our `u8` alias reproduces that; it is the right answer for a reason we did not
+originally have.
+
+MAME models it the other way. `williams_v.cpp video_counter_r` returns
+`vpos() < 0x100 ? vpos() & 0xfc : 0xfc`, so its value 0 spans four lines and
+`$FC` spans eight, which is a counter that saturates. The cross-check pins both
+models rather than asserting either, and this note is why we did not change ours
+to match.
+
+What is **not** derived is the exact line-to-value mapping. The hardware counter
+is a linear video-address counter reset once per frame, so its top six bits
+advance every 260/64 lines rather than every 4 exactly, and which lines carry
+the doubled value depends on the reset decode (VA13 through 5A into the 7411 at
+3A), which the scan does not resolve. Everything T1 asserts survives that: 64
+transitions, one wrap, a maximum of `$FC`, and value 0 dwelling about twice as
+long as its neighbour.
 
 **The scanline-256 guard is not CPU-observable.** With `if scanline != 256`,
 CB1 holds its line-224 value through line 256 and falls at line 257 instead.
@@ -469,14 +506,55 @@ new phase in the ROM rather than a relocation of the existing one.
 
 ## Running the same binary in MAME
 
-Not required, and deliberately not a gate. But the ROM is beam-synchronised and
-its verdict lives in RAM, so the identical image can be substituted for Joust's
-program ROMs (MAME warns on the CRC mismatch and runs) and the result block read
-back with a Lua script using the idiom already in `tools/mame_digdug_trace.lua`:
-`manager.machine.devices[":maincpu"].spaces["program"]:read_u8(0xB000 + n)`.
+Done, as `tools/mame_williams_conformance.lua` and
+`mame_agrees_about_every_signal_the_rom_measures`, on all three machines
+(`phosphor-emulator-gfhr`):
 
-Where the two disagree, the schematic decides, not MAME. `oyxg` is the standing
-precedent.
+```bash
+PHOSPHOR_MAME=1 PHOSPHOR_ROMS=~/ws/mame-runtime/roms \
+  cargo test -p phosphor-machines --test williams_video_timing_test mame_agrees
+```
+
+The script writes the image into MAME's `maincpu` region and soft-resets so the
+6809 re-fetches its vector out of it, the same door the Road Runner script uses.
+Two things are easier here: the region is 8-bit so `region:write_u8` needs no
+thought about the host swizzle, and the load address is a plain region offset
+that matches the CPU address (`$D000` for joust and robotron, `$E000` for
+sinistar) because the program ROM occupies the top of both.
+
+**This is the sharper of the two cross-checks in the tree.** Road Runner's ROM
+has no line counter, so every position it reports is in poll-loop iterations
+divided by a rate measured in the same run, and a constant cycle difference
+cancels by design. Here the figures are absolute, so every one is compared
+exactly.
+
+| Field | Ours | MAME |
+|---|---|---|
+| `T1_TRANS` / `T1_WRAPS` / `T1_MAX` | 64 / 1 / `$FC` | identical |
+| `T2_COUNT` / `T2_LINE` | 1 / `$F0` | identical |
+| `T3R` edges | `$20 $60 $A0 $E0` | identical |
+| `T3F` edges | `$40 $80 $C0` | identical |
+| `T4_FAST` / `T4_SLOW` | `$10` / `$20` | identical |
+| `T5_A` / `T5_B` | `$EE` / `$00` | identical |
+| `T1_DWELL0` vs `T1_DWELL4` | ratio ≈ 2 | ratio 1 |
+
+**`T4_SLOW` is why this was worth writing.** It is the assertion that found the
+blitter bug: the board discarded the cycle count `do_dma_cycle` returned, so a
+slow RAM-to-RAM blit halted the CPU for 16 scanlines where the datasheet's 2
+microseconds a byte derives 32. Fixing it moved robotron's and sinistar's golden
+frames, and a golden frame can say a picture changed but not that it changed to
+the right thing. MAME independently reporting `$20` is the first outside
+evidence that the fix was right rather than merely different.
+
+The dwell row is the counter-aliasing divergence, derived above and left
+standing. Where the two disagree the schematic decides, not MAME; `oyxg` is the
+standing precedent and this is the second time it has applied.
+
+No picture is compared. Williams renders per scanline and the picture comparison
+has its own capture hazards, which cost a day on the Road Runner side
+(`phosphor-emulator-fpgx`): if one is added here, take it with
+`screen:snapshot()` and never `screen:pixels()`, which returns the previous
+frame's pixel indices carrying the current frame's palette.
 
 ## What this does not cover
 
