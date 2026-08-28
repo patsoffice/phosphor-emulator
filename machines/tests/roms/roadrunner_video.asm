@@ -19,40 +19,70 @@
 ; records itself instead of grinding through 3.5 KB of ORI.B #0,D0.
 ;
 ; Loaded by machines/tests/roadrunner_video_timing_test.rs into a ROM-less
-; machine built with MachineEntry::create_bare, by poking the image through
-; BusDebug::write (AddressSpace32::debug_write ignores AccessKind, so the
-; ReadOnly program-ROM region takes the write). The 68000 fetches its stack
-; pointer from 0 and its program counter from 4 through the bus, so both come
-; from this image.
-;
-; THIS IS THE SKELETON STEP AND IT ASSERTS NOTHING ABOUT VIDEO. It proves the
-; loader carries to a 68000 board on AddressSpace32, that a program executes out
-; of poked ROM, and that it survives the watchdog. VBLANK, IRQ4 and the
-; placeable IRQ3 belong to the next issue.
+; machine, by poking the image through BusDebug::write (AddressSpace32's
+; debug_write ignores AccessKind, so the ReadOnly program-ROM region takes the
+; write). The 68000 fetches its stack pointer from 0 and its program counter
+; from 4 through the bus, so both come from this image.
 ;
 ; EVERY WAIT IS A POLL OF HARDWARE STATE, NEVER A DELAY LOOP, so a constant
 ; cycle offset between two implementations cancels.
+;
+; AND EVERY POSITION IS MEASURED IN ITERATIONS OF ONE SHARED POLL LOOP, never in
+; cycles or scanlines. The program has no line counter to read: this board's
+; only beam-position primitives are the VBLANK level and the motion-object timer
+; interrupt. So the loop is calibrated in the same run that uses it -- T1 counts
+; iterations across the 240 active lines, which gives iterations-per-line, and
+; every later figure is divided by that. Nothing here is compared against a
+; constant that was measured once and written down.
 ; ---------------------------------------------------------------------------
 
             cpu     68000
 
 ; --- Hardware ---------------------------------------------------------------
 
+INT3STATE   equ $2E0000         ; bit 7 = motion-object scanline interrupt (IRQ3)
+MOB         equ $A02000         ; motion-object RAM, 8 banks of 64 entries
+BANKSELECT  equ $860001         ; bit 7 = sound-CPU run, 5-3 = MO bank, 2 = PF bank
 WATCHDOG    equ $880001         ; any write clears the counter
 VBLANK_ACK  equ $8A0001         ; write acks the VBLANK IRQ4 latch
 SWITCHES    equ $F60000         ; bit 4 = VBLANK, ACTIVE LOW (0 during blank)
 
 VB_MASK     equ $0010           ; the VBLANK bit inside the word read of F60000
+INT3_MASK   equ $0080           ; the IRQ3 bit inside the word read of 2E0000
 
-; The image, and therefore the range the CPU checksums back through the real
-; bus. Fixed by p2bin's -r window; the harness computes the same sum over the
-; committed .bin file, so a load at the wrong offset or a short image moves it.
+SR_MASKON   equ $0700           ; SR interrupt mask bits, all set (level 7)
+SR_MASKOFF  equ $F8FF           ; ... and their complement, for ANDI to SR
+
+; A motion-object entry is four words in SPLIT layout: entry N's words sit
+; 0x40 words apart, at base+N, base+0x40+N, base+0x80+N and base+0xC0+N. Word 1
+; holding $FFFF marks the entry as a scanline timer rather than a sprite.
+MOB_E0_W0   equ MOB+$000
+MOB_E0_W1   equ MOB+$080
+MOB_E0_W2   equ MOB+$100
+MOB_E0_W3   equ MOB+$180
+MOB_E1_W0   equ MOB+$002
+MOB_E1_W1   equ MOB+$082
+MOB_E1_W2   equ MOB+$102
+MOB_E1_W3   equ MOB+$182
+
+TIMER_FLAG  equ $FFFF
+
+; The band a timer entry fires at is (256 - (word0 >> 5) - vsize*8 - 1) & $1FF,
+; with vsize = (word0 & $0F) + 1. Taking vsize = 1 (low nibble zero) that is
+; 247 - (word0 >> 5), so word0 = (247 - line) << 5 names the line directly.
+; Written out as literals with the arithmetic beside them, so the ROM asserts
+; against a line rather than against whatever the board computes.
+TIMER_L1    equ $16E0           ; (247 -  64) << 5 = 183 << 5  -> line 64
+TIMER_L2    equ $0AE0           ; (247 - 160) << 5 =  87 << 5  -> line 160
+
+; --- The image, and the range the CPU checksums back through the real bus ----
+
 IMGBASE     equ $000000
 IMGWORDS    equ $1000           ; 8 KB / 2
 
 ; Work RAM is 400000-401FFF (8 KB, undisplayed). Unlike Williams there is no
-; video RAM to hide scratch in, and no need: the result block and the stack both
-; live here with kilobytes to spare between them.
+; video RAM to hide scratch in, and no need: the result block, the variables and
+; the stack all live here with kilobytes to spare between them.
 STACKTOP    equ $401F00
 
 ; --- Result block ($400000, work RAM) ---------------------------------------
@@ -68,33 +98,108 @@ R_TRAP      equ RES+4           ; $DEAD if a stray exception was taken
 R_TRAPV     equ RES+6           ; ... and the 68010 frame's vector-offset word
 R_SSP       equ RES+8           ; long: A7 as cpu.reset handed it over
 R_CKSUM     equ RES+12          ; 16-bit wrapping sum of the whole image
-R_VBCOUNT   equ RES+14          ; vblank edges observed
-RESLEN      equ 16
+R_VBCOUNT   equ RES+14          ; vblank edges ridden with the watchdog strobed
+
+R_T1_BLANK  equ RES+16          ; poll iterations while VBLANK is asserted
+R_T1_ACTIVE equ RES+18          ; ... and while the display is active
+R_T1_BLANK2 equ RES+20          ; the blank again, a frame later
+
+R_T2_COUNT  equ RES+22          ; IRQ4 entries in one frame, acked at once
+R_T2_HELD   equ RES+24          ; ... with the ack deferred by one entry
+R_T2_VB     equ RES+26          ; 1 if VBLANK was asserted inside the handler
+
+R_T3_POLL_A equ RES+28          ; iterations from the vblank edge to IRQ3, line 64
+R_T3_END_A  equ RES+30          ; ... to the end of that pulse
+R_T3_POLL_B equ RES+32          ; the same measurement with the timer at line 160
+
+R_T4_CNT    equ RES+34          ; IRQ3 handler entries in one frame
+R_T4_FIRST  equ RES+36          ; loop count at the first handler entry
+
+R_T5_POLL   equ RES+38          ; line-160 pulse, with that timer installed
+                                ; mid-frame by the line-64 pulse
+
+R_TIMEOUT   equ RES+40          ; $DEAD if a wait gave up; R_PHASE says where
+
+RESLEN      equ 48
 
 MAGIC       equ $5A5A
-TRAPPED     equ $DEAD
+TRAPPED     equ $DEAD           ; R_TRAP, and R_TIMEOUT for a wait that gave up
+IRQ3STORM   equ $DEA3           ; R_TIMEOUT when IRQ3 would not stop firing
+
+; How many IRQ3 entries in one measurement are too many to be a one-scanline
+; pulse. A scanline is 456 cycles and this handler cannot be much under 60 of
+; them, so a real pulse cannot re-enter more than about eight times; a level
+; latched for the rest of a frame re-enters hundreds. The cap is an order of
+; magnitude above the first and two below the second, and it is a bound rather
+; than an expectation: nothing asserts against it, it only stops the program
+; from disappearing into an interrupt storm.
+;
+; It is needed because the obvious bound does not work. A count-based limit in
+; the polling loop cannot expire during a storm: RTE drops straight back into
+; the handler, so the loop that maintains the count never runs a single
+; iteration. Only the handler can bound the handler.
+IRQ3CAP     equ 64
 
 ; Vblank edges to survive before declaring the watchdog fed. Deliberately double
 ; the 8-frame timeout: the program cannot reach this count unless every strobe
 ; landed, because a reboot clears the result block and starts the count over.
 VB_TARGET   equ 16
 
+; --- Variables ($400100, work RAM, above the result block) ------------------
+;
+; Everything the interrupt handlers touch lives here rather than in registers,
+; so a handler cannot disturb the loop it interrupted.
+
+VARS        equ $400100
+V_COUNTER   equ VARS+0          ; the shared poll loop's iteration count
+V_IRQ4CNT   equ VARS+2
+V_ACKSKIP   equ VARS+4          ; IRQ4 entries still to pass without acking
+V_VBSEEN    equ VARS+6
+V_IRQ3CNT   equ VARS+8
+V_IRQ3FIRST equ VARS+10
+V_LIMIT     equ VARS+12         ; iterations a wait has left before giving up
+
+; EVERY WAIT IS BOUNDED, and that is a lesson rather than defensive habit. The
+; first version spun forever, so a board whose IRQ3 never released made the
+; program hang, the watchdog reboot it, and the harness report a wedge at
+; whatever phase the restarted run happened to be in. The stage that actually
+; broke was nowhere in the message. A bounded wait turns every such regression
+; into "gave up in phase N", which is the difference between a test that fails
+; and a test that says what failed.
+;
+; The bound has to be long enough for the longest honest wait (a little over one
+; frame, about 2000 iterations) and short enough to give up before the 8-frame
+; watchdog reboots and destroys the evidence. 12000 iterations is about six
+; frames in the counted loops and four in the vblank loop, which sits between
+; the two with room on both sides.
+WAITLIMIT   equ 12000
+
 ; ===========================================================================
 ; Exception vectors
 ;
 ; Vector 0 is the supervisor stack pointer and vector 1 is the entry point;
 ; cpu.reset fetches both through the bus, so they are the load-bearing halves of
-; this image. EVERY OTHER VECTOR POINTS AT A HANDLER rather than at zero, so a
-; mistake records itself instead of executing whatever happens to be at address
-; 0. That includes the autovectored interrupt levels, which are masked here but
-; will not be in the next issue.
+; this image. The two autovectors the board actually drives get handlers.
+; EVERY OTHER VECTOR POINTS AT A HANDLER rather than at zero, so a mistake
+; records itself instead of executing whatever happens to be at address 0.
+;
+; Autovector N is 24 + N, so level 3 (the motion-object scanline interrupt) is
+; vector 27 and level 4 (VBLANK) is vector 28. Levels 6 (sound response) and 2
+; (the ADC) are left on the stray handler on purpose: the sound CPU is held in
+; reset and the ADC is never started, so neither line can assert, and if one
+; does it is a finding rather than something to swallow.
 ; ===========================================================================
             org     IMGBASE
 
-            dc.l    STACKTOP            ; 0: reset SSP
-            dc.l    Reset               ; 1: reset PC
-            rept    254
-            dc.l    StrayException
+            dc.l    STACKTOP            ;  0: reset SSP
+            dc.l    Reset               ;  1: reset PC
+            rept    25
+            dc.l    StrayException      ;  2-26
+            endm
+            dc.l    Irq3Handler         ; 27: autovector level 3
+            dc.l    Irq4Handler         ; 28: autovector level 4
+            rept    227
+            dc.l    StrayException      ; 29-255
             endm
 
 ; ===========================================================================
@@ -108,6 +213,12 @@ Reset
 
             bsr     PetDog
 
+; Hold the sound CPU in reset explicitly. It is already held on a cold board, but
+; a running sound CPU latches responses and those drive IRQ6, which outranks
+; everything measured here. Bit 7 clear also selects motion-object bank 0 and
+; playfield bank 0, which is what the rest of the program assumes.
+            move.b  #0,BANKSELECT
+
 ; A zero result block must never read as a pass, so clear it deliberately.
 ; Clearing it is also what makes a watchdog reboot visible: reset() does not
 ; clear work RAM, so without this a reboot would leave a plausible
@@ -117,6 +228,13 @@ Reset
 ClrRes
             move.w  #0,(a0)+
             dbra    d0,ClrRes
+
+            lea     VARS,a0
+            moveq   #7,d0
+ClrVars
+            move.w  #0,(a0)+
+            dbra    d0,ClrVars
+            move.w  #WAITLIMIT,V_LIMIT
 
             move.l  d7,R_SSP
             move.w  #1,R_PHASE
@@ -147,7 +265,8 @@ CkLoop
 ; The watchdog is the thing that breaks a program on this board first:
 ; run_frame reboots the machine after 8 frames without a write to 880001
 ; (roadrunner.rs:773-775). Riding twice that many frames is the assertion that
-; the strobe lands.
+; the strobe lands, and the frame the harness first sees phase 4 in is the
+; assertion that one frame produces one vblank edge.
 ; ===========================================================================
             moveq   #0,d6               ; vblank edges seen
 VbLoop
@@ -165,9 +284,191 @@ VbNotFirst
             move.w  #4,R_PHASE
 
 ; ===========================================================================
+; Phase 5 -- T1: the VBLANK level, and the calibration everything else uses
+;
+; F60000 bit 4 is the live VBLANK line, active low. The board blanks from
+; scanline 240 to 261 of 262, so the expectation is 22 blanked lines against 240
+; active ones. Measured as three consecutive dwells rather than two, because a
+; ratio that is right once can be right by accident; the second blank is there
+; to show the first was not a fluke.
+;
+; R_T1_ACTIVE divided by 240 is iterations-per-line, and every position measured
+; below is divided by it. That is why the whole program shares one poll loop.
+; ===========================================================================
+            bsr     PetDog
+            lea     SWITCHES,a0
+            move.w  #VB_MASK,d1
+
+            bsr     WaitVblank          ; land on the transition into blank
+            clr.w   V_COUNTER
+            bsr     WaitSet             ; count the blank out
+            move.w  d0,R_T1_BLANK
+            clr.w   V_COUNTER
+            bsr     WaitClear           ; count the active area out
+            move.w  d0,R_T1_ACTIVE
+            clr.w   V_COUNTER
+            bsr     WaitSet             ; and the next blank
+            move.w  d0,R_T1_BLANK2
+
+            bsr     PetDog
+            move.w  #5,R_PHASE
+
+; ===========================================================================
+; Phase 6 -- T2: the VBLANK interrupt fires once a frame and is held until acked
+;
+; Two frames, differing only in whether the handler acks on its first entry.
+; With an immediate ack the level drops and the count is 1. With the ack
+; deferred by one entry the level is still asserted when RTE restores the mask,
+; so the handler is re-entered at once and the count is 2. That pair is the
+; assertion that 8A0001 is what clears the latch, and it needs both halves:
+; either count alone is satisfiable by a board that behaves the other way.
+; ===========================================================================
+            bsr     WaitVblank          ; land in the blank this frame's IRQ4 set
+            move.b  #0,VBLANK_ACK       ; ... and clear it, so the window is clean
+            clr.w   V_IRQ4CNT
+            clr.w   V_VBSEEN
+            clr.w   V_ACKSKIP           ; ack on the first entry
+            andi.w  #SR_MASKOFF,sr      ; unmask
+            bsr     WaitVblank          ; next frame's edge: IRQ4 is raised here
+            bsr     WaitSet             ; ride the blank out so the handler has run
+            ori.w   #SR_MASKON,sr       ; mask
+            move.w  V_IRQ4CNT,R_T2_COUNT
+            move.w  V_VBSEEN,R_T2_VB
+            bsr     PetDog
+
+            bsr     WaitVblank
+            move.b  #0,VBLANK_ACK
+            clr.w   V_IRQ4CNT
+            move.w  #1,V_ACKSKIP        ; pass the first entry without acking
+            andi.w  #SR_MASKOFF,sr
+            bsr     WaitVblank
+            bsr     WaitSet
+            ori.w   #SR_MASKON,sr
+            move.w  V_IRQ4CNT,R_T2_HELD
+            bsr     PetDog
+
+            move.w  #6,R_PHASE
+
+; ===========================================================================
+; Phase 7 -- T3: the programmable scanline interrupt, at line 64, poll path
+;
+; Entry 0 of motion-object bank 0 becomes a timer targeting line 64, with its
+; link pointing at entry 1 so the walk reaches it later. Entry 1 is left as a
+; non-timer for now; phase 10 turns it into one mid-frame.
+;
+; INTERRUPTS STAY MASKED HERE, AND THAT IS NOT AN OVERSIGHT. IRQ3 is a level the
+; board holds for one scanline and nothing acknowledges it: RTE lowers the mask
+; while the line is still running, so the handler is re-entered before the
+; interrupted instruction retires. With interrupts enabled the CPU spends the
+; whole scanline inside exception entry and RTE, the polling loop gets zero
+; iterations while the bit is high, and the poll path never observes the pulse
+; it is meant to be measuring. That was found by running it. The two paths
+; therefore get a frame each, and agreeing across those two frames is what makes
+; them a check on one another; the timer entry is static, so the position is the
+; same in both.
+; ===========================================================================
+            move.w  #TIMER_L1,MOB_E0_W0
+            move.w  #TIMER_FLAG,MOB_E0_W1
+            move.w  #0,MOB_E0_W2
+            move.w  #1,MOB_E0_W3        ; link to entry 1
+            move.w  #0,MOB_E1_W0
+            move.w  #0,MOB_E1_W1        ; not a timer yet
+            move.w  #0,MOB_E1_W2
+            move.w  #1,MOB_E1_W3        ; self-link terminates the walk
+
+            bsr     T3Frame
+            move.w  d0,R_T3_POLL_A
+            move.w  d1,R_T3_END_A
+
+            move.w  #7,R_PHASE
+
+; ===========================================================================
+; Phase 8 -- T3 again, at line 160
+;
+; A single placement is satisfied by an interrupt that fires at a fixed line and
+; ignores the list entirely, which is exactly the wrong thing to pin. The second
+; placement is 96 lines away and the interrupt has to move with it.
+; ===========================================================================
+            move.w  #TIMER_L2,MOB_E0_W0
+            bsr     T3Frame
+            move.w  d0,R_T3_POLL_B
+
+            move.w  #8,R_PHASE
+
+; ===========================================================================
+; Phase 9 -- T4: the same pulse down the interrupt path
+;
+; One frame with the mask down, spent counting iterations from the vblank edge
+; all the way round to the next one, so the loop has an origin the handler can
+; snapshot against. The timer is back at line 64, and the handler's first
+; snapshot has to land on the position the poll path measured in phase 7.
+;
+; The entry count is recorded but only asserted as "more than one": with no ack
+; and a handler far shorter than a scanline, re-entry is inevitable, and that
+; contrast with IRQ4's count of exactly 1 is the level-versus-ack distinction
+; seen from the interrupt side. Its exact value is a function of how long this
+; handler happens to be, which is not a property of the hardware and is not
+; something to pin.
+; ===========================================================================
+            move.w  #TIMER_L1,MOB_E0_W0
+
+            lea     SWITCHES,a0
+            move.w  #VB_MASK,d1
+            bsr     WaitVblank
+            move.b  #0,VBLANK_ACK       ; clear the latch this frame's edge set
+            clr.w   V_IRQ3CNT
+            clr.w   V_IRQ3FIRST
+            clr.w   V_ACKSKIP           ; the IRQ4 handler acks immediately
+            clr.w   V_COUNTER
+            andi.w  #SR_MASKOFF,sr
+            bsr     WaitSet             ; count the blank out
+            bsr     WaitClear           ; ... and the active area, past line 64
+            ori.w   #SR_MASKON,sr
+            move.w  V_IRQ3CNT,R_T4_CNT
+            move.w  V_IRQ3FIRST,R_T4_FIRST
+            bsr     PetDog
+
+            move.w  #9,R_PHASE
+
+; ===========================================================================
+; Phase 10 -- T5: the display list is read live, so a mid-frame edit takes
+;             effect in the same frame
+;
+; timer_irq_at_scanline reads the live sprite RAM while the compositor renders
+; from mo_shadow, a copy taken at the start of vblank. So a timer entry written
+; part way down a frame changes the interrupt in that frame and the picture only
+; in the next one.
+;
+; The interrupt half is measured here without any timing constant: entry 0's
+; line-64 interrupt is itself the trigger for the write. When it arrives, entry 1
+; is turned into a timer at line 160, and the second assertion has to appear 96
+; lines later in the same frame.
+; ===========================================================================
+            move.w  #TIMER_L1,MOB_E0_W0 ; back to line 64
+            move.w  #0,MOB_E1_W1        ; entry 1 not a timer at the frame's start
+
+            lea     SWITCHES,a0
+            move.w  #VB_MASK,d1
+            bsr     WaitVblank
+            move.b  #0,VBLANK_ACK
+
+            lea     INT3STATE,a0
+            move.w  #INT3_MASK,d1
+            clr.w   V_COUNTER
+            bsr     WaitSet             ; the line-64 pulse
+            move.w  #TIMER_L2,MOB_E1_W0 ; ... and now, mid-frame, add line 160
+            move.w  #TIMER_FLAG,MOB_E1_W1
+            bsr     WaitClear           ; ride out the line-64 pulse
+            bsr     WaitSet             ; the line-160 pulse, this same frame
+            move.w  d0,R_T5_POLL
+            bsr     PetDog
+
+            move.w  #10,R_PHASE
+
+; ===========================================================================
 ; Done
 ; ===========================================================================
-            move.w  #5,R_PHASE
+            move.w  #11,R_PHASE
             move.w  #MAGIC,R_MAGIC
 Spin
             bsr     WaitVblank
@@ -177,6 +478,30 @@ Spin
 ; ===========================================================================
 ; Helpers
 ; ===========================================================================
+
+; One IRQ3 poll-path measurement frame, with the timer entries already in place.
+; Returns the loop count at the interrupt's assertion in d0 and at its release in
+; d1, both on one origin taken at the vblank edge, so d1 - d0 is the pulse width
+; on the same scale as everything else.
+;
+; Interrupts stay masked throughout: see phase 7 for why polling and taking IRQ3
+; in the same frame cannot both work.
+T3Frame
+            lea     SWITCHES,a0
+            move.w  #VB_MASK,d1
+            bsr     WaitVblank
+
+            lea     INT3STATE,a0
+            move.w  #INT3_MASK,d1
+            clr.w   V_COUNTER
+            bsr     WaitSet
+            move.w  d0,d2               ; assertion
+            bsr     WaitClear           ; keep the same origin: no clear here
+            move.w  d0,d3               ; release
+            bsr     PetDog
+            move.w  d2,d0
+            move.w  d3,d1
+            rts
 
 ; Return on the frame's transition into vertical blank, i.e. at scanline 240.
 ; F60000 bit 4 is the live VBLANK line and is ACTIVE LOW, so "out of blank" is
@@ -188,16 +513,67 @@ Spin
 ; observable at the end of that same run_frame().
 WaitVblank
             move.l  d0,-(a7)
+            move.w  #WAITLIMIT,V_LIMIT
 WVOut
+            subq.w  #1,V_LIMIT
+            beq     WaitGaveUp
             move.w  SWITCHES,d0
             andi.w  #VB_MASK,d0
             beq.s   WVOut               ; still in blank, wait for active display
+            move.w  #WAITLIMIT,V_LIMIT
 WVIn
+            subq.w  #1,V_LIMIT
+            beq     WaitGaveUp
             move.w  SWITCHES,d0
             andi.w  #VB_MASK,d0
             bne.s   WVIn                ; wait for the edge into blank
             move.l  (a7)+,d0
             rts
+
+; THE SHARED MEASUREMENT LOOP. Count iterations in V_COUNTER until the word at
+; (a0) masked by d1 becomes non-zero, and return the count in d0. WaitClear is
+; the same loop with the branch inverted, so the two cost the same and their
+; counts are on one scale.
+;
+; The count lives in memory rather than a register so an interrupt handler can
+; snapshot the caller's position without the caller having to hand it over. The
+; caller clears V_COUNTER to set an origin; neither routine clears it, so a
+; WaitSet followed by a WaitClear measures a span from one origin.
+WaitSet
+            move.w  #WAITLIMIT,V_LIMIT
+WSLoop
+            subq.w  #1,V_LIMIT
+            beq.s   WaitGaveUp
+            addq.w  #1,V_COUNTER
+            move.w  (a0),d0
+            and.w   d1,d0
+            beq.s   WSLoop
+            move.w  V_COUNTER,d0
+            rts
+
+WaitClear
+            move.w  #WAITLIMIT,V_LIMIT
+WCLoop
+            subq.w  #1,V_LIMIT
+            beq.s   WaitGaveUp
+            addq.w  #1,V_COUNTER
+            move.w  (a0),d0
+            and.w   d1,d0
+            bne.s   WCLoop
+            move.w  V_COUNTER,d0
+            rts
+
+; A wait that ran out of patience. Records the fact and stops, holding the
+; machine up with the watchdog so the result block survives for the harness to
+; read: R_PHASE already says which stage was waiting and for what. Deliberately
+; does not return, and does not let the watchdog reboot the machine, because a
+; reboot would clear the block and the evidence with it.
+WaitGaveUp
+            ori.w   #SR_MASKON,sr
+            move.w  #TRAPPED,R_TIMEOUT
+GaveUpSpin
+            bsr     PetDog
+            bra     GaveUpSpin
 
 ; Any write to 880001 clears the watchdog counter. A byte write there becomes a
 ; read-modify-write of the word at 880000, which the board does not decode and
@@ -206,6 +582,60 @@ WVIn
 PetDog
             move.b  #0,WATCHDOG
             rts
+
+; ===========================================================================
+; Interrupt handlers
+; ===========================================================================
+
+; Level 4, VBLANK. Counts entries, notes whether the VBLANK line was actually
+; asserted when it ran, and acks at 8A0001 unless V_ACKSKIP says to pass this
+; one. Deferring the ack is what demonstrates that the latch is held rather than
+; edge-triggered: the handler is re-entered the instant RTE lowers the mask.
+Irq4Handler
+            move.l  d0,-(a7)
+            addq.w  #1,V_IRQ4CNT
+            move.w  SWITCHES,d0
+            andi.w  #VB_MASK,d0
+            bne.s   I4NotBlank
+            move.w  #1,V_VBSEEN
+I4NotBlank
+            tst.w   V_ACKSKIP
+            beq.s   I4Ack
+            subq.w  #1,V_ACKSKIP
+            bra.s   I4Done
+I4Ack
+            move.b  #0,VBLANK_ACK
+I4Done
+            move.l  (a7)+,d0
+            rte
+
+; Level 3, the motion-object scanline interrupt. Nothing acks it: the board holds
+; it for the one scanline the timer entry targets and drops it at the next line
+; boundary, so RTE lowers the mask into a still-asserted level and this is
+; re-entered without the interrupted loop advancing at all. The first entry's
+; position is therefore the only one worth recording; every later one is at the
+; same count, because the loop that maintains that count never ran in between.
+Irq3Handler
+            move.l  d0,-(a7)
+            tst.w   V_IRQ3CNT
+            bne.s   I3NotFirst
+            move.w  V_COUNTER,d0
+            move.w  d0,V_IRQ3FIRST
+I3NotFirst
+            addq.w  #1,V_IRQ3CNT
+            cmpi.w  #IRQ3CAP,V_IRQ3CNT
+            bcc     Irq3Overrun         ; unsigned >=; never returns
+            move.l  (a7)+,d0
+            rte
+
+; IRQ3 is asserted far past the one scanline it is supposed to last, and the
+; program is now living inside its own interrupt handler. Leave the exception
+; frame where it is, mask, say so, and park: an RTE here would only come
+; straight back.
+Irq3Overrun
+            ori.w   #SR_MASKON,sr
+            move.w  #IRQ3STORM,R_TIMEOUT
+            bra     GaveUpSpin
 
 ; ===========================================================================
 ; Stray exception handler

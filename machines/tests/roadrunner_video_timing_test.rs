@@ -42,7 +42,7 @@ const MACHINE: &str = "roadrunner";
 /// Frames to run before giving up. The program spends its first frame on entry
 /// and the image checksum and then rides [`VB_TARGET`] vblank edges, so twice
 /// that is a wide margin which still fails fast on a wedge.
-const MAX_FRAMES: usize = 32;
+const MAX_FRAMES: usize = 64;
 
 // --- Result block, mirroring the equates in the assembly --------------------
 
@@ -54,11 +54,40 @@ const R_TRAPV: u32 = RES + 6;
 const R_SSP: u32 = RES + 8;
 const R_CKSUM: u32 = RES + 12;
 const R_VBCOUNT: u32 = RES + 14;
-const RESLEN: u32 = 16;
+const R_T1_BLANK: u32 = RES + 16;
+const R_T1_ACTIVE: u32 = RES + 18;
+const R_T1_BLANK2: u32 = RES + 20;
+const R_T2_COUNT: u32 = RES + 22;
+const R_T2_HELD: u32 = RES + 24;
+const R_T2_VB: u32 = RES + 26;
+const R_T3_POLL_A: u32 = RES + 28;
+const R_T3_END_A: u32 = RES + 30;
+const R_T3_POLL_B: u32 = RES + 32;
+const R_T4_CNT: u32 = RES + 34;
+const R_T4_FIRST: u32 = RES + 36;
+const R_T5_POLL: u32 = RES + 38;
+const R_TIMEOUT: u32 = RES + 40;
+const RESLEN: u32 = 48;
 
 const MAGIC: u16 = 0x5A5A;
 const TRAPPED: u16 = 0xDEAD;
-const FINAL_PHASE: u16 = 5;
+const IRQ3_STORM: u16 = 0xDEA3;
+const FINAL_PHASE: u16 = 11;
+
+// --- Board geometry the expectations are derived from -----------------------
+//
+// `atari_system1::TIMING`: 262 scanlines of 456 cycles, and `VBLANK_SCANLINE`
+// is 240, so the display is active for lines 0-239 and blanked for 240-261.
+
+/// Active scanlines per frame.
+const ACTIVE_LINES: f64 = 240.0;
+/// Blanked scanlines per frame (`262 - VBLANK_SCANLINE`).
+const BLANK_LINES: f64 = 22.0;
+
+/// The scanline the first motion-object timer entry targets.
+const TIMER_LINE_A: f64 = 64.0;
+/// ... and the second, 96 lines further down.
+const TIMER_LINE_B: f64 = 160.0;
 
 /// Vector 0 of the image: the supervisor stack pointer `cpu.reset` fetches
 /// through the bus, parked in work RAM well clear of the result block.
@@ -73,6 +102,11 @@ const VB_TARGET: u16 = 16;
 struct Run {
     results: Vec<u8>,
     frames: usize,
+    /// The frame index (1-based) in which `R_PHASE` first read 4, i.e. the frame
+    /// the watchdog ride finished in. One vblank edge per frame makes this equal
+    /// to `VB_TARGET`; an edge detector that retriggered inside one blank would
+    /// finish sooner.
+    watchdog_ride_frames: Option<usize>,
 }
 
 fn peek(m: &dyn FrontendMachine, addr: u32) -> u8 {
@@ -100,16 +134,24 @@ fn run() -> Run {
     m.reset();
 
     let mut frames = 0;
+    let mut watchdog_ride_frames = None;
     for _ in 0..MAX_FRAMES {
         m.run_frame();
         frames += 1;
+        if watchdog_ride_frames.is_none() && word(&*m, R_PHASE) >= 4 {
+            watchdog_ride_frames = Some(frames);
+        }
         if word(&*m, R_MAGIC) == MAGIC {
             break;
         }
     }
 
     let results = (0..RESLEN).map(|i| peek(&*m, RES + i)).collect();
-    Run { results, frames }
+    Run {
+        results,
+        frames,
+        watchdog_ride_frames,
+    }
 }
 
 fn word(m: &dyn FrontendMachine, addr: u32) -> u16 {
@@ -133,6 +175,29 @@ impl Run {
     /// is the difference between "the loader never worked" and "the program ran
     /// and then fell over", and those two want completely different next steps.
     fn assert_completed(&self) {
+        // Checked before the magic word, because a stall is what the magic
+        // word's absence would otherwise be blamed on. The program bounds every
+        // wait and parks itself here rather than spinning until the watchdog
+        // reboots it, which is what makes R_PHASE name the stage that stalled
+        // instead of whatever the restarted run reached.
+        match self.word(R_TIMEOUT) {
+            0 => {}
+            TRAPPED => panic!(
+                "a wait gave up in phase {}: the signal it was polling for never \
+                 arrived, or never went away again. This is a stalled stage, not \
+                 a wrong number, so look at what phase {} waits on.",
+                self.word(R_PHASE),
+                self.word(R_PHASE)
+            ),
+            IRQ3_STORM => panic!(
+                "IRQ3 fired more times in phase {} than a one-scanline pulse can: \
+                 nothing acks it, so a level held longer than its line traps the \
+                 CPU in its own handler. The interrupt is not being released at \
+                 the line boundary.",
+                self.word(R_PHASE)
+            ),
+            other => panic!("unknown stall marker {other:#06X} in the result block"),
+        }
         if self.word(R_TRAP) == TRAPPED {
             panic!(
                 "the conformance program took a stray exception at phase {}: \
@@ -236,11 +301,238 @@ fn the_program_outlives_the_watchdog() {
          short of this means a strobe was missed"
     );
     assert_eq!(
-        r.frames, VB_TARGET as usize,
+        r.watchdog_ride_frames,
+        Some(VB_TARGET as usize),
         "one vblank edge per frame: the program takes its first edge in the \
-         frame it boots in and finishes on the {VB_TARGET}th, so the run should \
-         be exactly {VB_TARGET} frames. More means an edge was missed, fewer \
-         means the edge detector is retriggering inside one blank."
+         frame it boots in and publishes phase 4 on the {VB_TARGET}th, so the \
+         ride should cover exactly {VB_TARGET} frames. More means an edge was \
+         missed, fewer means the edge detector is retriggering inside one blank."
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The video signals the CPU can observe
+//
+// Every position below is a count of iterations of one shared poll loop, and
+// every expectation is that count divided by iterations-per-line, which the
+// program measures in the same run (T1's active dwell over 240 lines). There is
+// no cycle count and no fitted constant anywhere in this section: a machine
+// running at a different rate, or a poll loop of a different length, cancels.
+// ---------------------------------------------------------------------------
+
+/// Iterations of the shared poll loop per scanline, from T1's own calibration.
+fn iters_per_line(r: &Run) -> f64 {
+    let active = r.word(R_T1_ACTIVE) as f64;
+    assert!(
+        active > 100.0,
+        "the calibration dwell is {active} iterations, far too short to divide by"
+    );
+    active / ACTIVE_LINES
+}
+
+/// The VBLANK level at `F60000` bit 4 blanks 22 of the frame's 262 lines.
+///
+/// `TIMING` gives 262 scanlines and `VBLANK_SCANLINE` is 240, so the display is
+/// active for lines 0-239 and blanked for 240-261. The active dwell defines
+/// iterations-per-line, so the *assertion* is on the blank: 22 lines of it.
+///
+/// The blank is measured twice, a frame apart, because a ratio that comes out
+/// right once can come out right by accident. Both readings must agree.
+#[test]
+fn vblank_blanks_twenty_two_of_the_frames_lines() {
+    let r = run();
+    r.assert_completed();
+    let ipl = iters_per_line(&r);
+
+    let blank = r.word(R_T1_BLANK) as f64 / ipl;
+    assert!(
+        (blank - BLANK_LINES).abs() < 1.0,
+        "VBLANK is asserted for {blank:.2} scanlines; 262 total less \
+         VBLANK_SCANLINE 240 derives {BLANK_LINES}"
+    );
+    // The loop samples the beam asynchronously, so two readings of the same
+    // interval can differ by the one sample that straddles its edge, and no
+    // more. Requiring them to be identical was tried first and held only by
+    // coincidence of the loop period at the time.
+    let drift = r.word(R_T1_BLANK) as i32 - r.word(R_T1_BLANK2) as i32;
+    assert!(
+        drift.abs() <= 1,
+        "the same blank measured a frame later read {} against {}, {drift} \
+         samples apart. One sample of slack is the polling; more is the signal \
+         moving.",
+        r.word(R_T1_BLANK),
+        r.word(R_T1_BLANK2)
+    );
+}
+
+/// IRQ4 fires once a frame, during the blank, and is held until `8A0001` acks it.
+///
+/// Two frames that differ only in whether the handler acks on its first entry.
+/// With an immediate ack the level drops and the handler runs once. With the ack
+/// deferred by one entry the level is still asserted when RTE lowers the mask,
+/// so the handler is re-entered at once and runs twice.
+///
+/// Both halves are needed. A count of 1 alone is also produced by an
+/// edge-triggered interrupt that no ack could hold, and a count of 2 alone says
+/// nothing about the ack working; it is the pair that pins `8A0001` as the thing
+/// that clears the latch.
+#[test]
+fn the_vblank_interrupt_is_held_until_it_is_acked() {
+    let r = run();
+    r.assert_completed();
+    assert_eq!(
+        r.word(R_T2_COUNT),
+        1,
+        "IRQ4 entries in one frame with an immediate ack"
+    );
+    assert_eq!(
+        r.word(R_T2_HELD),
+        2,
+        "IRQ4 entries in one frame with the ack deferred by one entry. A count \
+         of 1 here means the level is not held, so nothing needs 8A0001."
+    );
+    assert_eq!(
+        r.word(R_T2_VB),
+        1,
+        "the VBLANK line should still be asserted inside the IRQ4 handler: the \
+         interrupt is raised at scanline 240, which is the first blanked line"
+    );
+}
+
+/// A motion-object timer entry raises IRQ3 at the scanline the program picks.
+///
+/// Entry 0 of the sprite list is flagged `$FFFF` in word 1, which makes it a
+/// timer rather than a sprite. The band is
+/// `(256 - (word0 >> 5) - vsize * 8 - 1) & 0x1FF`, so with `vsize` 1 the program
+/// writes `(247 - line) << 5` and names the line directly. The assertion is
+/// against that line, not against what the board computes.
+///
+/// Measured from the vblank edge at scanline 240, so a timer at line L is
+/// `22 + L` lines away.
+///
+/// **Two placements, and that is the point.** One placement is satisfied by an
+/// interrupt hard-wired to a fixed scanline that never reads the list at all,
+/// which is exactly the wrong thing to pin. The second is 96 lines away and the
+/// interrupt has to move the whole way with it.
+#[test]
+fn a_motion_object_timer_places_irq3_on_the_scanline_it_names() {
+    let r = run();
+    r.assert_completed();
+    let ipl = iters_per_line(&r);
+
+    let a = r.word(R_T3_POLL_A) as f64 / ipl;
+    let b = r.word(R_T3_POLL_B) as f64 / ipl;
+    assert!(
+        (a - (BLANK_LINES + TIMER_LINE_A)).abs() < 1.0,
+        "the timer named line {TIMER_LINE_A}, which is {} lines past the vblank \
+         edge, but IRQ3 asserted {a:.2} lines past it",
+        BLANK_LINES + TIMER_LINE_A
+    );
+    assert!(
+        (b - (BLANK_LINES + TIMER_LINE_B)).abs() < 1.0,
+        "the timer named line {TIMER_LINE_B}, which is {} lines past the vblank \
+         edge, but IRQ3 asserted {b:.2} lines past it",
+        BLANK_LINES + TIMER_LINE_B
+    );
+    assert!(
+        (b - a - (TIMER_LINE_B - TIMER_LINE_A)).abs() < 1.0,
+        "moving the timer entry {} lines down moved IRQ3 by {:.2} lines. An \
+         interrupt anchored to a fixed scanline would not move at all.",
+        TIMER_LINE_B - TIMER_LINE_A,
+        b - a
+    );
+}
+
+/// IRQ3 is a pulse one scanline wide, not a level that latches.
+///
+/// Measured as the span between the poll loop first seeing `2E0000` bit 7 set
+/// and first seeing it clear again. It reads a little **under** one line, and
+/// systematically so: the `rts`/`bsr` between the two loops is time that passes
+/// without the counter advancing, worth about one and a half iterations out of
+/// the eleven a line contains. The band is wide enough to absorb that and still
+/// separate one line from two, and from the 240 a latched level would give.
+#[test]
+fn the_scanline_interrupt_lasts_one_scanline() {
+    let r = run();
+    r.assert_completed();
+    let ipl = iters_per_line(&r);
+    let width = (r.word(R_T3_END_A) - r.word(R_T3_POLL_A)) as f64 / ipl;
+    assert!(
+        (0.5..1.5).contains(&width),
+        "IRQ3 stayed asserted for {width:.2} scanlines. A latched level would \
+         read as the rest of the frame; a width near zero would mean the poll \
+         loop is outrunning the pulse."
+    );
+}
+
+/// The interrupt path and the poll path see the same pulse in the same place.
+///
+/// The two cannot be measured in one frame. IRQ3 is a level held for a scanline
+/// that nothing acknowledges, so RTE lowers the mask back into a still-asserted
+/// interrupt and the handler is re-entered before the interrupted loop advances
+/// a single iteration; with the mask down the poll loop gets **no** iterations
+/// during the one line it is trying to observe. So the program takes a frame
+/// each, and agreeing across the two is the check that the level at `2E0000`
+/// bit 7 and the autovector at level 3 are one signal rather than two.
+///
+/// The entry count is asserted only as "more than one", which is what a level
+/// with no ack and a handler far shorter than a scanline has to produce, and is
+/// the same distinction IRQ4's count of exactly 1 makes from the other side. Its
+/// exact value is a function of this handler's length and is not a property of
+/// the board, so it is not pinned.
+#[test]
+fn irq3_arrives_where_the_status_bit_says_it_does() {
+    let r = run();
+    r.assert_completed();
+    let ipl = iters_per_line(&r);
+
+    assert!(
+        r.word(R_T4_CNT) > 1,
+        "the IRQ3 handler was entered {} times in a frame. Nothing acks IRQ3, so \
+         a level held for a whole scanline must re-enter a handler this short.",
+        r.word(R_T4_CNT)
+    );
+    let irq = r.word(R_T4_FIRST) as f64 / ipl;
+    let poll = r.word(R_T3_POLL_A) as f64 / ipl;
+    assert!(
+        (irq - poll).abs() < 1.0,
+        "the level at 2E0000 asserted {poll:.2} lines past the vblank edge and \
+         the level-3 autovector was taken at {irq:.2}. They are supposed to be \
+         the same signal."
+    );
+}
+
+/// The display list is read live, so a timer written mid-frame fires that frame.
+///
+/// `timer_irq_at_scanline` walks the live sprite RAM while the compositor
+/// renders from `mo_shadow`, a copy taken at the start of vblank. So a timer
+/// entry written part way down a frame moves the interrupt in that frame and
+/// the picture only in the next one. This is the interrupt half of that
+/// asymmetry; the picture half needs a framebuffer.
+///
+/// No timing constant is involved in placing the write: the line-64 interrupt is
+/// itself the trigger. When it arrives, entry 1 becomes a timer at line 160, and
+/// the second assertion has to appear 96 lines later in the same frame, at the
+/// same place a timer installed before the frame started would have put it.
+#[test]
+fn a_timer_written_mid_frame_moves_the_interrupt_in_that_frame() {
+    let r = run();
+    r.assert_completed();
+    let ipl = iters_per_line(&r);
+    let live = r.word(R_T5_POLL) as f64 / ipl;
+    assert!(
+        (live - (BLANK_LINES + TIMER_LINE_B)).abs() < 1.0,
+        "a timer entry installed at line {TIMER_LINE_A} of this frame, naming \
+         line {TIMER_LINE_B}, fired {live:.2} lines past the vblank edge; the \
+         list is read live, so it should fire at {}",
+        BLANK_LINES + TIMER_LINE_B
+    );
+    let pre = r.word(R_T3_POLL_B) as f64 / ipl;
+    assert!(
+        (live - pre).abs() < 1.0,
+        "the same line reached {pre:.2} lines in when the timer was installed \
+         before the frame and {live:.2} when installed during it. A list latched \
+         at the frame boundary would put the mid-frame one a whole frame later."
     );
 }
 

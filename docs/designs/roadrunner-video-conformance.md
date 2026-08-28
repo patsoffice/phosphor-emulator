@@ -10,14 +10,17 @@
 > `roadrunner_video.bin` beside it, and the harness is
 > `machines/tests/roadrunner_video_timing_test.rs`.
 >
-> This step (`uzbt`) is the skeleton: it proves the Williams loading mechanism
-> carries to a 68000 board on `AddressSpace32`, and nothing about video. The
-> CPU-observable video assertions are `m0bu`; the two picture assertions are
-> `78lx`, and they land red on purpose.
+> Landed so far: `uzbt`, the skeleton that proves the Williams loading mechanism
+> carries to a 68000 board on `AddressSpace32`, and `m0bu`, the video assertions
+> whose verdict is a word in RAM. The two picture assertions are `78lx`, and they
+> land red on purpose.
 >
 > Every figure in *Result block* below has been **measured** on a ROM-less
 > roadrunner unless marked otherwise. Where a measurement corrected this
-> document, it says so rather than being quietly rewritten.
+> document, it says so rather than being quietly rewritten. Two did: the poll
+> path and the interrupt path turned out not to fit in one frame, and a
+> count-based timeout turned out not to bound an interrupt storm. Both are under
+> *Measurements*.
 
 ## Context
 
@@ -185,7 +188,43 @@ The program writes a phase index to `R_PHASE` as each stage completes and
 | 2 | the CPU has checksummed the whole 8 KB image through the real bus |
 | 3 | the first vblank edge has been seen |
 | 4 | `VB_TARGET` vblank edges seen, with the watchdog strobed at each |
-| 5 | complete, `$5A5A` written |
+| 5 | T1, the VBLANK level and the calibration everything else divides by |
+| 6 | T2, the VBLANK interrupt with the ack immediate and then deferred |
+| 7 | T3, the scanline interrupt at line 64, poll path |
+| 8 | T3 again at line 160 |
+| 9 | T4, the same pulse down the interrupt path |
+| 10 | T5, a timer installed mid-frame by the line-64 interrupt |
+| 11 | complete, `$5A5A` written |
+
+### Everything is measured in poll-loop iterations, and the loop calibrates itself
+
+This board gives a program no line counter to read. Williams had one at `$CB00`
+and every expectation there could be stated directly in scanlines; here the only
+beam-position primitives are a level (VBLANK) and an interrupt (the
+motion-object timer). So position is counted in iterations of one shared poll
+loop, and the loop's rate is measured **in the same run that uses it**: T1 counts
+iterations across the 240 active lines, and iterations-per-line is that over 240.
+Every later figure is divided by it.
+
+That is what keeps a constant out of the file. Change the loop, change the CPU
+clock, change the emulator's cycle counts, and every ratio is unmoved. The
+measured rate is 6.508 iterations per scanline; nothing asserts against that
+number, and it is recorded here only so a reader can see the resolution the
+assertions have (about a sixth of a line).
+
+Two systematic effects follow from it and are worth stating rather than
+absorbing into a tolerance:
+
+- **Sampling.** The loop samples the beam asynchronously, so any interval reads
+  correct to within one sample. Two measurements of the same blank a frame apart
+  came out 142 and 141. Requiring them to be *identical* was tried first and
+  passed, but only by coincidence of the loop period at the time; it broke as
+  soon as the loop grew. The assertion is now one sample of slack.
+- **The gap between two waits.** `rts` and `bsr` between a `WaitSet` and the
+  `WaitClear` after it are time in which the counter does not advance, worth
+  about half a sample. Every figure measured across a call boundary reads that
+  much low, which is why the pulse width comes out at 0.92 lines rather than 1.00
+  and why the interrupt-path position sits 0.3 lines below the poll-path one.
 
 ### Result block
 
@@ -196,12 +235,25 @@ work RAM, so there is no reason to pack.
 | Address | Field | Expected | Derivation |
 |---|---|---|---|
 | `400000` | `R_MAGIC` | `$5A5A` | completion |
-| `400002` | `R_PHASE` | `5` | |
+| `400002` | `R_PHASE` | `11` | |
 | `400004` | `R_TRAP` | `$0000` | no stray exception was taken |
 | `400006` | `R_TRAPV` | `$0000` | the vector offset if one was |
 | `400008` | `R_SSP` (long) | `$00401F00` | vector 0, fetched through the bus by `cpu.reset` |
 | `40000C` | `R_CKSUM` | sum of the committed image | 4096 big-endian words, added with 16-bit wraparound |
 | `40000E` | `R_VBCOUNT` | `16` | `VB_TARGET` |
+| `400010` | `R_T1_BLANK` | 22 lines | 262 total less `VBLANK_SCANLINE` 240 |
+| `400012` | `R_T1_ACTIVE` | 240 lines | *defines* iterations-per-line |
+| `400014` | `R_T1_BLANK2` | within one sample of `R_T1_BLANK` | the same interval, a frame later |
+| `400016` | `R_T2_COUNT` | `1` | IRQ4 acked on its first entry drops the level |
+| `400018` | `R_T2_HELD` | `2` | with the ack deferred, RTE re-enters a still-asserted level |
+| `40001A` | `R_T2_VB` | `1` | IRQ4 is raised at scanline 240, the first blanked line |
+| `40001C` | `R_T3_POLL_A` | 86 lines | 22 blanked plus the timer's line 64 |
+| `40001E` | `R_T3_END_A` | `R_T3_POLL_A` + 1 line | the pulse is one scanline wide |
+| `400020` | `R_T3_POLL_B` | 182 lines | 22 plus line 160, and 96 lines past `POLL_A` |
+| `400022` | `R_T4_CNT` | more than 1 | no ack, and a handler far shorter than a line |
+| `400024` | `R_T4_FIRST` | `R_T3_POLL_A` | the autovector and the status bit are one signal |
+| `400026` | `R_T5_POLL` | `R_T3_POLL_B` | the list is read live, so a mid-frame edit lands in the same frame |
+| `400028` | `R_TIMEOUT` | `$0000` | no wait gave up and IRQ3 did not storm |
 
 `R_CKSUM` is the assertion that the *whole* image arrived at the right address:
 the CPU reads all 8 KB back through the real bus, not the debug bus, and the
@@ -267,55 +319,115 @@ stray handler instead of grinding through 3.5 KB of `ORI.B #0,D0`.
 
 All on a ROM-less `roadrunner` built with `create_bare`.
 
+### The loader (uzbt)
+
 | Field | Predicted | Measured |
 |---|---|---|
-| `R_MAGIC` | `$5A5A` | `$5A5A` |
-| `R_PHASE` | `5` | `5` |
-| `R_TRAP` | `$0000` | `$0000` |
 | `R_SSP` | `$00401F00` | `$00401F00` |
-| `R_CKSUM` | sum of the image | `$472D`, equal to the harness's sum over the committed file |
+| `R_CKSUM` | sum of the image | equal to the harness's sum over the committed file |
 | `R_VBCOUNT` | `16` | `16` |
-| frames to completion | about 16 | exactly 16 |
+| frames for the watchdog ride | about 16 | exactly 16 |
 
 The program takes its first vblank edge in the frame it boots in (entry and the
 8 KB checksum together cost roughly 160 scanlines, well short of scanline 240)
-and finishes on the sixteenth, so the run is exactly `VB_TARGET` frames. That is
-asserted alongside the count, because the count alone would also be satisfied by
-an edge detector that retriggered several times inside one blank.
+and publishes phase 4 on the sixteenth, so the ride covers exactly `VB_TARGET`
+frames. That is asserted alongside the count, because the count alone would also
+be satisfied by an edge detector that retriggered several times inside one blank.
 
 **Nothing here needed correcting after the fact.** The loader carried to
 `AddressSpace32` and the 68000 exactly as the static reading of the code said it
 would, which is the one prediction in this document that mattered.
 
-### The three guards, each made to fail once
+### The video signals (m0bu)
+
+Iterations-per-line came out 6.508. Everything else is stated in lines, which is
+that count divided out.
+
+| Field | Derived | Measured | |
+|---|---|---|---|
+| `R_T1_BLANK` | 22 lines | 21.82 | 142 iterations |
+| `R_T1_BLANK2` | within a sample of the above | 21.66 | 141 iterations |
+| `R_T2_COUNT` | 1 | 1 | ack on the first entry |
+| `R_T2_HELD` | 2 | 2 | ack deferred by one entry |
+| `R_T2_VB` | 1 | 1 | the handler ran inside the blank |
+| `R_T3_POLL_A` | 86 lines | 85.74 | timer at line 64 |
+| pulse width | 1 line | 0.92 | `END_A - POLL_A` |
+| `R_T3_POLL_B` | 182 lines | 181.92 | timer at line 160 |
+| the move | 96 lines | 96.18 | `POLL_B - POLL_A` |
+| `R_T4_FIRST` | `= POLL_A` | 85.43 | 0.31 lines apart |
+| `R_T4_CNT` | more than 1 | 3 | |
+| `R_T5_POLL` | `= POLL_B` | 181.61 | 0.31 lines apart |
+
+Every one of those landed on its derivation the first time it ran. What did not
+land the first time was the *structure* of two of the measurements, and both
+corrections are recorded here rather than smoothed over.
+
+**The poll path and the interrupt path cannot share a frame.** The first version
+measured both in one frame, on the theory that the handler could snapshot the
+polling loop's own counter and the two would agree to an iteration. It hung.
+IRQ3 is a level the board holds for one scanline and nothing acknowledges it, so
+`rte` lowers the mask back into a still-asserted interrupt and the handler is
+re-entered before the interrupted instruction retires: for the whole of that
+scanline the polling loop gets **zero** iterations, and the one pulse it exists
+to observe passes entirely inside the interrupt storm. The two paths now get a
+frame each. Since the timer entry is static, the position is the same in both,
+and agreeing across two frames is the same check the single frame was meant to
+be.
+
+**A count-based timeout cannot bound an interrupt storm.** The wedge above was
+the argument for bounding every wait, so a regression would report "gave up in
+phase N" instead of spinning until the watchdog rebooted the machine and the
+harness blamed whatever phase the restarted run reached. That works for a signal
+that never arrives. It does nothing for a signal that never leaves: the limit
+lives in the polling loop, and during a storm the polling loop does not execute.
+The handler had to bound itself, which it now does at 64 entries.
+
+### Every guard made to fail once
 
 Rule: a check that cannot fail is not a check. Each of these was broken on
 purpose and watched to fail before being trusted.
 
 1. **The watchdog assertion.** Deleting the `PetDog` call from the vblank loop
    and rebuilding: `R_VBCOUNT` reads `8`, `R_PHASE` reads `3`, `R_MAGIC` is
-   absent, and the run burns all 32 frames. That is the reboot, and it is the
-   failure mode the issue predicted: the counters restart rather than stall,
-   because entry clears the result block.
+   absent, and the run burns every frame it is given. That is the reboot, and it
+   is the failure mode the issue predicted: the counters restart rather than
+   stall, because entry clears the result block.
 2. **The drift guard.** Zeroing one byte of the committed binary at `$000406`:
    the guard reports `first difference at $000406: built 0x1F, committed 0x00`
    with the rebuild commands.
 3. **The `PHOSPHOR_ASM` trap.** Running the guard with `PATH=/nonexistent` and
    `PHOSPHOR_ASM=1` fails on the missing assembler; the same run with
    `PHOSPHOR_ASM` unset skips with a printed note. Both branches were executed.
+4. **`VBLANK_SCANLINE` moved from 240 to 220.** Three tests fail: the blank reads
+   45.77 lines against 22, and IRQ3 lands 115.57 lines past the vblank edge
+   against 86. The mid-frame timer test fails with it.
+5. **`timer_irq_at_scanline` returning true unconditionally.** Reported as
+   `IRQ3 fired more times in phase 5 than a one-scanline pulse can`, phase 5
+   being the first stage that lowers the mask.
+6. **IRQ3 latched to the end of the frame instead of one line.** The same report,
+   at phase 8, which is the stage that takes the interrupt.
 
-A fourth guard did **not** survive its first mutation and was fixed rather than
-kept: see the fill byte above.
+Two guards did **not** survive their first mutation and were fixed rather than
+kept. The image checksum was blind over its own padding, which the fill byte
+above covers. And mutations 5 and 6 originally produced a reboot loop and a
+misleading phase number, which is what the bounded waits and the handler cap
+above were added for; before them, the message named phase 3 for a defect in
+phase 8.
 
-## What this step does not cover
+## What this does not cover yet
 
-No video assertion of any kind. VBLANK's IRQ4, the placeable IRQ3 and the
-`2E0000` poll path are `m0bu`; the two picture assertions are `78lx` and land red
-until `raster-sampling-fidelity.md` W3 converts this board off whole-frame
-rendering.
+The two picture assertions are `78lx` and land red until
+`raster-sampling-fidelity.md` W3 converts this board off whole-frame rendering.
+The picture half of the read-twice asymmetry belongs with them: the interrupt
+half is measured here, and it is the half that needs no framebuffer.
 
 Nothing about the sound board, the ADC, IRQ2, the EEPROM, or the slapstic. Sprite
 and tile decode, palette derivation and orientation belong to the golden frames.
+
+The sound CPU is held in reset by an explicit write of 0 to `860001` at entry, so
+IRQ6 cannot assert; the ADC is never started, so IRQ2 cannot either. Both are
+left pointing at the stray-exception handler rather than given a stub, so if
+either does assert it is reported as a finding instead of swallowed.
 
 ## Risks
 
@@ -341,9 +453,11 @@ and tile decode, palette derivation and orientation belong to the golden frames.
 
 Tracked as `phosphor-emulator-roadrunner-video-conformance-wfop`.
 
-1. `uzbt` (this step) - design doc, skeleton ROM, harness, drift guard. No video
+1. **Done** (`uzbt`) - design doc, skeleton ROM, harness, drift guard. No video
    assertion.
-2. `m0bu` - VBLANK, IRQ4, and the placeable IRQ3, in the same ROM.
+2. **Done** (`m0bu`) - the VBLANK level, IRQ4 and its ack, the placeable IRQ3 on
+   both the poll and the interrupt path, and the interrupt half of the read-twice
+   asymmetry. Twelve assertions, no arcade ROMs.
 3. `78lx` - the two picture assertions, landed red as W3's acceptance test.
 
 ## References
