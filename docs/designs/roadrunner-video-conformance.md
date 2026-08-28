@@ -726,19 +726,61 @@ clears all of palette RAM and all of the motion-object list at entry, which took
 the difference from about 900 pixels a frame to 64. Exactly the same class of
 assumption as the sound latch above, found the same way.
 
-What remains is two things, and they are different in kind:
+What remained was two fixture bugs and two real differences. The fixture bugs
+are fixed under `phosphor-emulator-fpgx` and are written up below, because both
+of them produced pictures that looked entirely plausible.
 
-1. **A capture-alignment race, which is a fixture bug.** The ROM publishes each
-   phase at the vblank edge and MAME updates its screen on that same scanline, so
-   which side of a mid-frame write MAME's dump lands on is a coin toss. Measured
-   rather than assumed, with `PHOSPHOR_PICTURE_ALIGN=1`: our phase-11 frame
-   best-matches MAME's phase *13*, and our phase-12 frame matches MAME's phase
-   11. The fix is in the ROM, publishing a few lines into vblank rather than on
-   its first.
-2. **A residual of exactly 64 pixels**, one 8x8 cell at (0, 120), present in
-   every phase and independent of the alignment. Small, constant and
-   suspiciously cell-shaped. That is the part worth chasing, and it cannot be
-   chased until (1) stops drowning it out.
+**Fixture bug 1: the phase was published where MAME samples it.** The two
+readers of `R_PHASE` sample at different scanlines. Our harness runs a whole
+frame and reads it at line 261; MAME's frame notifier fires from
+`video_manager::frame_update`, which `screen_device::vblank_begin` calls at line
+240 because `atarisy1` sets `VIDEO_UPDATE_BEFORE_VBLANK`. A phase published at
+the vblank edge lands exactly on MAME's sampling point, so which frame MAME
+associated with it was a coin toss and came down differently per phase.
+
+The issue proposed publishing a few lines *into* vblank. That is the wrong
+direction and the measurement says so: it would put every publication after
+MAME's sample and make MAME deterministically one frame late instead of
+randomly. The publication has to happen in the **active display** of the frame
+to be captured, ahead of both readers. `WaitActive` is that primitive, and the
+rule it brings with it is that nothing else may be written during a frame a
+phase has claimed, which is why phases 12 and 13 publish immediately after their
+own mid-frame write rather than at the end of the frame.
+
+The scroll in phase 16 is the one write that is not published this way, and the
+first attempt got it wrong: written in the blank it sits within a few
+instructions of the vblank edge, which is the same race, and it cost 704 pixels.
+It now gets an uncaptured frame of its own.
+
+**Fixture bug 2: the script was reading the wrong buffer.** `screen:pixels()`
+returns `m_bitmap[m_curbitmap]` converted with the palette as it stands at the
+moment of the call. `frame_update` finishes the frame and then, still inside
+`finish_screen_updates`, `screen_device::video_output_update` binds that bitmap
+to the texture and flips `m_curbitmap` to the other buffer. Every Lua hook runs
+after that, so the dump was the *previous* frame's pixel indices carrying the
+*current* frame's palette: a picture the machine never displayed.
+
+It was found by its signature rather than by reading the source first. Tilemap
+writes appeared a frame late while palette writes appeared immediately, which no
+renderer does. Moving the hook from `add_machine_frame_notifier` to
+`register_frame_done` changed nothing, which is what proved the flip happens
+before both. `screen:snapshot()` renders the texture, so it is the frame that
+just finished; with `-snapview native` it is the screen's own 336x240 and the
+Rust side decodes the PNG.
+
+With both fixed, every phase agrees except for exactly two things:
+
+1. **A residual of 64 pixels**, an 8x8 block at x 0-7, y 121-128, in all six
+   phases. MAME draws it opaque black; we draw the playfield through it. Not
+   cell-aligned vertically, so a motion object rather than a tile, and constant
+   across phases, so not a function of anything the program does after it draws.
+   That is `phosphor-emulator-h52k`.
+2. **T7's write, in phase 13 only**, a second 64 pixels at (32, 48). MAME leaves
+   the upper cell red because the beam had passed it; we turn it green because
+   this board composites at the frame boundary. That is the W3 defect the
+   CI-safe suite already holds as a ratchet, and it is expected to stay until
+   `raster-sampling-fidelity.md` W3 lands. Worth stating plainly: **the picture
+   comparison cannot go green before W3 does.**
 
 **The playfield colour path was suspected and cleared.** Our index is
 `0x100 + (0x20 + (palcolor << (bpp - 3))) * 8 + pen`; MAME's is a gfx colorbase

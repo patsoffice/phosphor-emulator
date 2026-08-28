@@ -49,6 +49,10 @@ local IMAGE = os.getenv("PHOSPHOR_CONFORMANCE_BIN")
     or "machines/tests/roms/roadrunner_video.bin"
 local OUTDIR = os.getenv("PHOSPHOR_CONFORMANCE_OUT") or "."
 local MAX_FRAMES = tonumber(os.getenv("PHOSPHOR_CONFORMANCE_MAX") or "300")
+-- Dump every frame from the first picture phase on, not just the six the phases
+-- ask for. This is how you find out *when* MAME applies a write rather than
+-- only what it has drawn by the phase frames; it costs a 240 KB PPM per frame.
+local DUMP_ALL = os.getenv("PHOSPHOR_CONFORMANCE_DUMPALL") ~= nil
 
 -- Result block, mirroring the equates in roadrunner_video.asm.
 local RES = 0x400000
@@ -73,6 +77,7 @@ local frames = 0
 local patched = false
 local shot_taken = {}
 local finished = false
+local last_phase = -1
 
 local function log(fmt, ...)
     print(string.format("[CONF] " .. fmt, ...))
@@ -111,28 +116,33 @@ end
 -- raw parameters, so these coordinates are the same ones the Rust assertions
 -- use and no probe positions have to be restated here. Dumping the whole frame
 -- rather than sampling it is what keeps it that way.
-local function dump_frame(phase)
+--
+-- THIS USES snapshot() AND NOT pixels(), AND THAT IS NOT A STYLE CHOICE.
+-- screen:pixels() reads m_bitmap[m_curbitmap] and converts it with the palette
+-- as it stands at the moment of the call. video_manager::frame_update finishes
+-- the frame and then, still inside finish_screen_updates, screen_device::
+-- video_output_update binds that bitmap to the texture and flips m_curbitmap to
+-- the other buffer. Every Lua hook runs after that, so pixels() returns the
+-- PREVIOUS frame's pixel indices carrying the CURRENT frame's palette, which is
+-- a picture the machine never displayed.
+--
+-- It was measured rather than reasoned about. Under pixels(), MAME's dump of
+-- the frame that writes two playfield cells contained neither of them and the
+-- next frame contained one, while a palette change written the same way showed
+-- up immediately. Geometry lagging while colour did not is the signature of
+-- that hybrid. snapshot() renders the texture, which is the frame that just
+-- finished, and it agrees: at the T7 frame it shows the upper cell still red
+-- and the lower one green, which is the per-beam answer for that frame.
+--
+-- The caller passes -snapview native, so the PNG is the screen's own 336x240
+-- with no artwork or scaling, and the Rust side decodes it with the same `png`
+-- crate the golden frames use.
+local function dump_frame(phase, label)
     local screen = manager.machine.screens[":screen"]
     if not screen then return end
-    local pix, w, h = screen:pixels()
-    local rows = { string.format("P6\n%d %d\n255\n", w, h) }
-    -- rgb_t packs as 0xAARRGGBB, so on a little-endian host the bytes come out
-    -- B, G, R, A and the PPM wants R, G, B.
-    local out = {}
-    for i = 1, w * h do
-        local o = (i - 1) * 4
-        out[i] = string.char(pix:byte(o + 3), pix:byte(o + 2), pix:byte(o + 1))
-    end
-    rows[2] = table.concat(out)
-    local path = string.format("%s/mame_phase%d.ppm", OUTDIR, phase)
-    local f = io.open(path, "wb")
-    if not f then
-        log("WARNING could not write %s", path)
-        return
-    end
-    f:write(table.concat(rows))
-    f:close()
-    log("captured phase %d to %s", phase, path)
+    label = label or string.format("phase%d", phase)
+    screen:snapshot(string.format("mame_%s.png", label))
+    log("captured %s", label)
 end
 
 local function report(reason)
@@ -171,9 +181,25 @@ local function on_frame()
     local mem = manager.machine.devices[":maincpu"].spaces["program"]
     local phase = mem:read_u16(R_PHASE)
 
+    -- The frame number every phase is first seen at. The Rust side prints the
+    -- same for its own capture, and comparing the two gaps is what says whether
+    -- the two are looking at the same frame; a picture difference cannot say it.
+    if phase ~= last_phase then
+        log("frame %d: phase %d", frames, phase)
+        last_phase = phase
+    end
+
     if phase >= FIRST_SHOT_PHASE and phase <= LAST_SHOT_PHASE and not shot_taken[phase] then
         shot_taken[phase] = true
+        log("capturing phase %d at frame %d", phase, frames)
         dump_frame(phase)
+    end
+
+    -- Every frame, for working out *when* MAME applies a write rather than only
+    -- what it draws at the six phase frames. Off by default: it writes a
+    -- 240 KB PPM per frame.
+    if DUMP_ALL and phase >= FIRST_SHOT_PHASE then
+        dump_frame(phase, string.format("frame%03d", frames))
     end
 
     if mem:read_u16(R_MAGIC) == MAGIC then
@@ -188,5 +214,11 @@ local function on_frame()
 end
 
 -- The subscription has to stay referenced or it unsubscribes when collected.
+--
+-- Which of MAME's per-frame hooks this is does not matter, and that was checked
+-- rather than assumed: the buffer flip described above happens inside
+-- finish_screen_updates, which frame_update runs before frame_hook and before
+-- MACHINE_NOTIFY_FRAME alike, so moving the hook changed not one pixel. What
+-- fixed it was asking for the texture instead of the back buffer.
 _G.phosphor_conformance_sub = emu.add_machine_frame_notifier(on_frame)
 log("loaded; image %s, output %s, cap %d frames", IMAGE, OUTDIR, MAX_FRAMES)

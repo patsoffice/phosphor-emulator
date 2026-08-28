@@ -1321,11 +1321,16 @@ fn mame_agrees_about_every_signal_the_rom_measures() {
             "-str",
             "120",
         ])
-        // Keep MAME's droppings out of the working tree.
+        // Keep MAME's droppings out of the working tree. The snapshot
+        // directory matters even though this test wants no pictures: the
+        // shared script captures one per picture phase for the harness that
+        // does, and without this they land in machines/snap/.
         .arg("-cfg_directory")
         .arg(out.join("cfg"))
         .arg("-nvram_directory")
         .arg(out.join("nvram"))
+        .arg("-snapshot_directory")
+        .arg(&out)
         .env("PHOSPHOR_CONFORMANCE_BIN", &image)
         .env("PHOSPHOR_CONFORMANCE_OUT", &out)
         .status();

@@ -53,9 +53,17 @@ fn word(m: &dyn FrontendMachine, addr: u32) -> u16 {
     u16::from_be_bytes([hi, lo])
 }
 
+/// One frame of ours: which `run_frame` produced it, what `R_PHASE` read at its
+/// end, and the picture.
+struct Frame {
+    index: usize,
+    phase: u16,
+    rgb: Vec<u8>,
+}
+
 /// Run the conformance image on a machine holding the real Road Runner
 /// graphics, capturing the frame at each picture phase.
-fn run_with_real_graphics(dir: &Path) -> Vec<(u16, Vec<u8>)> {
+fn run_with_real_graphics(dir: &Path) -> Vec<Frame> {
     let entry = registry::find(MACHINE).unwrap_or_else(|| panic!("{MACHINE} is not registered"));
     let set = load_rom_set(dir.to_str().unwrap(), entry.rom_names)
         .unwrap_or_else(|e| panic!("loading the {MACHINE} ROM set from {}: {e}", dir.display()));
@@ -74,7 +82,7 @@ fn run_with_real_graphics(dir: &Path) -> Vec<(u16, Vec<u8>)> {
 
     let mut shots = Vec::new();
     let mut seen = [false; (LAST_SHOT_PHASE - FIRST_SHOT_PHASE + 1) as usize];
-    for _ in 0..MAX_FRAMES {
+    for index in 0..MAX_FRAMES {
         m.run_frame();
         let phase = word(&*m, R_PHASE);
         if (FIRST_SHOT_PHASE..=LAST_SHOT_PHASE).contains(&phase) {
@@ -84,7 +92,7 @@ fn run_with_real_graphics(dir: &Path) -> Vec<(u16, Vec<u8>)> {
                 let (w, h) = m.display_size();
                 let mut rgb = vec![0u8; w as usize * h as usize * 3];
                 m.render_frame(&mut rgb);
-                shots.push((phase, rgb));
+                shots.push(Frame { index, phase, rgb });
             }
         }
         if word(&*m, R_MAGIC) == MAGIC {
@@ -102,32 +110,49 @@ fn run_with_real_graphics(dir: &Path) -> Vec<(u16, Vec<u8>)> {
     shots
 }
 
-/// Read one of the script's PPM dumps as raw RGB.
-fn read_ppm(path: &Path) -> Vec<u8> {
-    let data = std::fs::read(path)
+/// Read one of the script's snapshots as raw RGB.
+///
+/// These are `screen:snapshot()` PNGs rather than a buffer read out through
+/// Lua, for the reason set out at length in the script: the Lua pixel accessor
+/// hands back the previous frame's indices carrying the current frame's
+/// palette. MAME is run with `-snapview native`, so the image is the screen's
+/// own 336x240 with no artwork or scaling in it.
+fn read_snapshot(path: &Path) -> Vec<u8> {
+    let file = std::fs::File::open(path)
         .unwrap_or_else(|e| panic!("reading MAME's frame at {}: {e}", path.display()));
-    // "P6\n<w> <h>\n255\n" then the pixels. Written by our own script, so the
-    // header shape is known rather than guessed; the dimensions are checked.
-    let header_end = data
-        .iter()
-        .enumerate()
-        .filter(|&(_, &b)| b == b'\n')
-        .nth(2)
-        .map(|(i, _)| i + 1)
-        .unwrap_or_else(|| panic!("{} is not the PPM the script writes", path.display()));
-    let header = String::from_utf8_lossy(&data[..header_end]).to_string();
-    let dims: Vec<usize> = header
-        .split_whitespace()
-        .filter_map(|t| t.parse().ok())
-        .collect();
+    let mut reader = png::Decoder::new(std::io::BufReader::new(file))
+        .read_info()
+        .unwrap_or_else(|e| panic!("decoding {}: {e}", path.display()));
+    let mut buf = vec![
+        0u8;
+        reader.output_buffer_size().unwrap_or_else(|| panic!(
+            "{}: decoded size does not fit in memory",
+            path.display()
+        ))
+    ];
+    let info = reader
+        .next_frame(&mut buf)
+        .unwrap_or_else(|e| panic!("decoding {}: {e}", path.display()));
     assert_eq!(
-        (dims[0], dims[1]),
+        (info.width as usize, info.height as usize),
         (WIDTH, HEIGHT),
-        "MAME dumped a {}x{} frame; this board is {WIDTH}x{HEIGHT}",
-        dims[0],
-        dims[1]
+        "MAME dumped a {}x{} frame; this board is {WIDTH}x{HEIGHT}. A size other \
+         than the screen's own means -snapview native did not take effect, and \
+         comparing a scaled image would be meaningless.",
+        info.width,
+        info.height
     );
-    data[header_end..].to_vec()
+    match info.color_type {
+        png::ColorType::Rgb => {
+            buf.truncate(info.buffer_size());
+            buf
+        }
+        png::ColorType::Rgba => buf[..info.buffer_size()]
+            .chunks_exact(4)
+            .flat_map(|p| [p[0], p[1], p[2]])
+            .collect(),
+        other => panic!("{}: unexpected colour type {other:?}", path.display()),
+    }
 }
 
 /// Every pixel of every captured frame, ours against MAME's.
@@ -144,25 +169,37 @@ fn read_ppm(path: &Path) -> Vec<u8> {
 /// `PHOSPHOR_MAME_PICTURE=1` to run it; `PHOSPHOR_MAME=1` alone runs only the
 /// result-block comparison, which does pass.
 ///
-/// Two things stand between here and a green test, and they are different
-/// kinds of thing:
+/// Two things stand between here and a green test, and after
+/// `phosphor-emulator-fpgx` neither of them is the fixture any more:
 ///
-/// 1. **A capture-alignment race, which is a fixture bug and mine.** The ROM
-///    publishes each phase at the vblank edge, and MAME updates its screen at
-///    that same scanline, so which side of the write MAME's dump lands on is a
-///    coin toss. Measured with `PHOSPHOR_PICTURE_ALIGN=1`: our phase-11 frame
-///    best-matches MAME's phase *13*, and our phase-12 frame matches MAME's
-///    phase 11. The fix is in the ROM, publishing a few lines into vblank
-///    rather than on its first line.
-/// 2. **A residual of exactly 64 pixels**, one 8x8 cell at (0, 120), present in
-///    every phase and independent of the alignment. That is small, constant and
-///    suspiciously cell-shaped, and it is the part worth chasing once the
-///    alignment stops drowning it out.
+/// 1. **A residual of exactly 64 pixels**, an 8x8 block at x 0-7, y 121-128,
+///    in every one of the six phases. MAME draws it opaque black and we draw
+///    the playfield through it. It is not cell-aligned vertically, so it is a
+///    motion object rather than a tile, and it is constant across phases, so it
+///    is not a function of anything the program does after it draws. That is
+///    `phosphor-emulator-h52k`.
+/// 2. **T7's mid-frame playfield write, phase 13 only**, a second 64 pixels at
+///    (32, 48). MAME draws the upper cell still red because the beam had passed
+///    it when the write landed; we draw it green because this board composites
+///    the whole frame at the frame boundary. That is the defect
+///    `raster-sampling-fidelity.md` W3 exists to fix, and the CI-safe suite
+///    already holds it as a ratchet. It is expected to stay until W3 lands.
 ///
-/// Clearing the machine's RAM in the ROM already took this from ~900 differing
-/// pixels a frame to 64: MAME had the real game's palette and sprite list in RAM
-/// when the program took over, and the program was only writing the entries it
-/// used. That fix is landed and is the same class of bug as the sound-latch one.
+/// Everything else that used to show up here was the fixture, and it is worth
+/// recording what it cost, because both halves reported plausible pictures:
+///
+/// - Clearing the machine's RAM in the ROM took the difference from ~900
+///   pixels a frame to 64. MAME had the real game's palette and sprite list in
+///   RAM when the program took over and the program only wrote the entries it
+///   used.
+/// - The ROM published each phase at the vblank edge, which is exactly where
+///   MAME samples, so which frame MAME associated with a phase was a coin toss
+///   and came down differently per phase. The ROM now publishes in active
+///   display. `PHOSPHOR_PICTURE_ALIGN=1` prints the frame each side captured
+///   each phase at; equal *gaps* mean the two are looking at the same frame.
+/// - The script read the screen with `screen:pixels()`, which returns the
+///   previous frame's pixel indices carrying the current frame's palette. It
+///   now takes a native snapshot instead. See the script for the mechanism.
 #[test]
 fn our_picture_matches_mames_on_the_real_graphics() {
     if std::env::var_os("PHOSPHOR_MAME_PICTURE").is_none() {
@@ -203,6 +240,14 @@ fn our_picture_matches_mames_on_the_real_graphics() {
             "-str",
             "120",
         ])
+        // `native` is what makes the snapshot the screen's own 336x240 rather
+        // than whatever the render target is showing; `read_snapshot` fails
+        // loudly on any other size rather than comparing a scaled image.
+        .args(["-snapview", "native"])
+        .arg("-snapshot_directory")
+        .arg(&out)
+        // Keep MAME's own directories inside the scratch output too, or it
+        // drops cfg/ and nvram/ into the working tree.
         .arg("-cfg_directory")
         .arg(out.join("cfg"))
         .arg("-nvram_directory")
@@ -219,6 +264,7 @@ fn our_picture_matches_mames_on_the_real_graphics() {
         });
     assert!(status.success(), "mame exited with {status}");
 
+    let align = std::env::var_os("PHOSPHOR_PICTURE_ALIGN").is_some();
     let ours = run_with_real_graphics(&dir);
     assert_eq!(
         ours.len(),
@@ -228,50 +274,42 @@ fn our_picture_matches_mames_on_the_real_graphics() {
     );
 
     if let Ok(d) = std::env::var("PHOSPHOR_PICTURE_DUMP") {
-        for (phase, rgb) in &ours {
+        for f in &ours {
             let mut out = format!("P6\n{WIDTH} {HEIGHT}\n255\n").into_bytes();
-            out.extend_from_slice(rgb);
-            std::fs::write(format!("{d}/ours_phase{phase}.ppm"), out).unwrap();
+            out.extend_from_slice(&f.rgb);
+            std::fs::write(format!("{d}/ours_phase{}.ppm", f.phase), out).unwrap();
         }
-        for (phase, _) in &ours {
+        for f in &ours {
             let _ = std::fs::copy(
-                out.join(format!("mame_phase{phase}.ppm")),
-                format!("{d}/mame_phase{phase}.ppm"),
+                out.join(format!("mame_phase{}.png", f.phase)),
+                format!("{d}/mame_phase{}.png", f.phase),
             );
         }
     }
 
-    if std::env::var_os("PHOSPHOR_PICTURE_ALIGN").is_some() {
-        for (phase, our_rgb) in &ours {
-            let mut best = Vec::new();
-            for other in FIRST_SHOT_PHASE..=LAST_SHOT_PHASE {
-                let p = out.join(format!("mame_phase{other}.ppm"));
-                if !p.exists() {
-                    continue;
-                }
-                let m = read_ppm(&p);
-                let d = our_rgb
-                    .chunks_exact(3)
-                    .zip(m.chunks_exact(3))
-                    .filter(|(a, b)| a != b)
-                    .count();
-                best.push((d, other));
-            }
-            best.sort();
-            eprintln!(
-                "our phase {phase} best matches MAME's phase {} ({} differing); \
-                 same-phase is {}",
-                best[0].1,
-                best[0].0,
-                best.iter().find(|(_, p)| p == phase).unwrap().0
-            );
-        }
+    // Are the two sides looking at the same frame at all? Each prints the frame
+    // it first saw each phase in (MAME's are the `[CONF] capturing phase N at
+    // frame M` lines above), and the answer is in the *gaps*: the two counters
+    // have different origins, because MAME counts the frame it patches and
+    // resets in, so only the spacing is comparable. Equal gaps mean both sides
+    // observed every phase in the same frame of the program, which is what
+    // `phosphor-emulator-fpgx` was about; any pixel difference left after that
+    // is two compositors disagreeing rather than two clocks.
+    if align {
+        let at: Vec<String> = ours
+            .iter()
+            .map(|f| format!("{}@{}", f.phase, f.index))
+            .collect();
+        let gaps: Vec<usize> = ours.windows(2).map(|w| w[1].index - w[0].index).collect();
+        eprintln!("we captured {}; gaps {gaps:?}", at.join(" "));
     }
 
     let mut differing = Vec::new();
-    for (phase, our_rgb) in &ours {
-        let path = out.join(format!("mame_phase{phase}.ppm"));
-        let mame_rgb = read_ppm(&path);
+    for f in &ours {
+        let phase = f.phase;
+        let our_rgb = &f.rgb;
+        let path = out.join(format!("mame_phase{phase}.png"));
+        let mame_rgb = read_snapshot(&path);
         assert_eq!(
             our_rgb.len(),
             mame_rgb.len(),

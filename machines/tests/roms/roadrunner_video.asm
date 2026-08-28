@@ -696,6 +696,7 @@ TxDone
             bsr     WaitVblank
             bsr     PetDog
             bsr     WaitVblank          ; mo_shadow now holds the sprite
+            bsr     WaitActive          ; publish inside the frame to be captured
             move.w  #11,R_PHASE
 
 ; ===========================================================================
@@ -712,13 +713,16 @@ TxDone
 ; phosphor-emulator-raster-sampling-6kae.3 and is expected to fail the day that
 ; lands. See the harness and the design doc; do not "fix" it by deleting it.
 ; ===========================================================================
+            bsr     PetDog
+            bsr     WaitVblank          ; ride out the frame phase 11 asked for:
+            bsr     WaitActive          ; nothing may be written inside it
             lea     INT3STATE,a0
             move.w  #INT3_MASK,d1
-            bsr     WaitSet             ; line 120 of the frame now starting
+            bsr     WaitSet             ; line 120 of T6's own frame
             move.w  #C_GREEN,PAL_PF1
-            bsr     PetDog
-            bsr     WaitVblank          ; ride out the frame the write is in
-            move.w  #12,R_PHASE
+            move.w  #12,R_PHASE         ; published in the frame the write is in,
+                                        ; after the write and 120 lines before
+                                        ; either reader samples
 
 ; ===========================================================================
 ; Phase 13 -- T7: write playfield cells above and below the beam
@@ -731,25 +735,28 @@ TxDone
 ;
 ; Rendered whole-frame, both change at once. Also held as a known defect.
 ; ===========================================================================
-; A WHOLE FRAME BEFORE THE PALETTE IS PUT BACK, and it has to be. Phase 12 is
-; published at the vblank edge, which is still inside the frame the harness is
-; running and will capture when it returns; anything written between there and
-; the frame boundary lands in that capture. Restoring pen 1 immediately put the
-; red back before T6's frame was ever rendered, and T6 read a screen with neither
-; colour where it wanted green. So this rides out that frame first and restores
-; in the blank of the next one, clear of the capture and clear of the frame T7
-; goes on to measure.
+; T6'S FRAME IS RIDDEN OUT BEFORE THE PALETTE GOES BACK, and it has to be.
+; Restoring pen 1 while T6's frame is still being scanned put the red back
+; before that frame was rendered, and T6 read a screen with neither colour where
+; it wanted green.
+;
+; The restore now happens on the first active line of T7's own frame rather than
+; in the preceding blank. Both readers render a frame at or after line 240, so
+; both see the restored red for the whole of it, and a write placed in the blank
+; instead would land in our render of the previous frame (we render at line 261)
+; but not in MAME's (it renders at 240), which is the same asymmetry
+; phosphor-emulator-fpgx is about.
             bsr     PetDog
-            bsr     WaitVblank
-            move.w  #C_RED,PAL_PF1      ; in the blank, before T7's frame starts
+            bsr     WaitVblank          ; ride out T6's frame
+            bsr     WaitActive          ; T7's frame starts here
+            move.w  #C_RED,PAL_PF1      ; before either reader renders it
             lea     INT3STATE,a0
             move.w  #INT3_MASK,d1
             bsr     WaitSet             ; line 120 again
             move.w  #PF_TILE2,PF_ABOVE
             move.w  #PF_TILE2,PF_BELOW
+            move.w  #13,R_PHASE         ; in the frame the writes are in
             bsr     PetDog
-            bsr     WaitVblank
-            move.w  #13,R_PHASE
 
 ; ===========================================================================
 ; Phase 14 -- the frame after, with no writes at all
@@ -758,7 +765,8 @@ TxDone
 ; is the capture that says the writes landed rather than that they landed late.
 ; ===========================================================================
             bsr     PetDog
-            bsr     WaitVblank
+            bsr     WaitVblank          ; ride out T7's frame
+            bsr     WaitActive
             move.w  #14,R_PHASE
 
 ; ===========================================================================
@@ -802,6 +810,10 @@ TxDone
 ;   y 192-199 no flip of any kind on the alpha layer. The same asymmetric glyph
 ;             twice, once with both spare bits of the cell word set.
 ; ===========================================================================
+            bsr     PetDog
+            bsr     WaitVblank          ; ride out the phase-14 capture before
+            bsr     WaitActive          ; writing anything: it is a captured frame
+
             move.w  #C_YELLOW,PAL_TRANS
             move.w  #C_MAGENTA,PAL_ALO
             move.w  #PRIO_PENS,PRIORITY
@@ -832,29 +844,47 @@ SprDone
             bsr     WaitVblank
             bsr     PetDog
             bsr     WaitVblank          ; mo_shadow now holds the new sprites
+            bsr     WaitActive
             move.w  #15,R_PHASE
 
 ; ===========================================================================
 ; Phase 16 -- scroll the playfield out from under everything else
 ;
 ; Both scrolls to 8, so the playfield moves up and left by 8 and the alpha and
-; motion-object layers do not move at all. The write rides out a frame first: a
-; scroll written at the vblank edge would land in the capture phase 15 has just
-; asked for, the same trap the T6 palette restore fell into.
+; motion-object layers do not move at all.
+;
+; THE SCROLL IS WRITTEN IN ACTIVE DISPLAY LIKE EVERYTHING ELSE, and the first
+; attempt at this fix did not, which is worth recording. Writing it in the blank
+; puts it within a few instructions of the vblank edge, and MAME renders the
+; frame at exactly that edge, so which side of MAME's render the write lands on
+; comes down to two cores that differ by 2.9% in raw rate
+; (phosphor-emulator-zi4z). That is the same race phosphor-emulator-fpgx is
+; about, and measured, it cost 704 pixels: MAME drew the frame unscrolled where
+; we drew it scrolled.
+;
+; A scroll register is one of the four writes MAME answers with
+; screen->update_partial(vpos()) (atarisy1_v.cpp xscroll_w, yscroll_w), so a
+; scroll written during active display splits MAME's frame at that line while
+; ours moves the whole frame. That is why the write gets a frame of its own,
+; which nothing captures, and the phase is published a frame later still, when
+; both sides are drawing the whole picture scrolled.
 ; ===========================================================================
             bsr     PetDog
-            bsr     WaitVblank          ; clear of the phase-15 capture
+            bsr     WaitVblank          ; still inside the phase-15 capture
+            bsr     WaitActive          ; a frame nothing captures
             move.w  #SCROLL_BY,XSCROLL
             move.w  #SCROLL_BY,YSCROLL
             bsr     PetDog
             bsr     WaitVblank
+            bsr     WaitActive          ; the first frame both sides draw scrolled
             move.w  #16,R_PHASE
 
 ; ===========================================================================
 ; Done
 ; ===========================================================================
             bsr     PetDog
-            bsr     WaitVblank
+            bsr     WaitVblank          ; ride out the phase-16 capture, so 16 is
+            bsr     WaitActive          ; the last phase written in its own frame
             move.w  #17,R_PHASE
             move.w  #MAGIC,R_MAGIC
 Spin
@@ -942,6 +972,38 @@ WVIn
             move.w  SWITCHES,d0
             andi.w  #VB_MASK,d0
             bne.s   WVIn                ; wait for the edge into blank
+            move.l  (a7)+,d0
+            rts
+
+; Return at the transition OUT of vertical blank, i.e. on the first line of
+; active display. VB_MASK is the same active-low bit, so "out of blank" is the
+; bit SET. ONLY CALL THIS FROM INSIDE THE BLANK, i.e. straight after WaitVblank:
+; called from active display it returns immediately and means nothing.
+;
+; WHY THE PICTURE PHASES PUBLISH HERE AND NOT AT THE VBLANK EDGE. R_PHASE has
+; two readers and they sample it at different scanlines. Our harness runs a
+; whole frame and reads the phase after it, at line 261. MAME's frame notifier
+; fires from video_manager::frame_update, which screen_device::vblank_begin
+; calls at line 240 because atarisy1 sets VIDEO_UPDATE_BEFORE_VBLANK; the
+; screen it dumps has just been finished for that same frame. A phase published
+; at the vblank edge therefore lands exactly on MAME's sampling point and which
+; side of it MAME comes down on is a coin toss. Measured, before this existed:
+; MAME dumped the frame after ours for phases 11, 14, 15 and 16, and the same
+; frame as ours for 12.
+;
+; Published at the start of active display instead, the write is 240 lines
+; ahead of MAME's sample and 261 ahead of ours, so both read it in the same
+; frame and both dump that frame. The cost is that nothing else may be written
+; during a frame a phase has asked for: see phosphor-emulator-fpgx.
+WaitActive
+            move.l  d0,-(a7)
+            move.w  #WAITLIMIT,V_LIMIT
+WAOut
+            subq.w  #1,V_LIMIT
+            beq     WaitGaveUp
+            move.w  SWITCHES,d0
+            andi.w  #VB_MASK,d0
+            beq.s   WAOut               ; still blanked; wait for active display
             move.l  (a7)+,d0
             rts
 
