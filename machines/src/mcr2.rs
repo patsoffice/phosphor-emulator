@@ -448,6 +448,27 @@ impl Mcr2Board {
         // Tick CTC (timer-mode channels count CPU clocks)
         self.ctc.tick();
 
+        // Channel 0's zero-count output is wired back to channel 1's CLK/TRG
+        // input, so the two cascade into one longer divider. On the schematic
+        // this is the single wire that leaves an output pin on one side of the
+        // CTC and comes back to a trigger pin on the other; it is the only
+        // feedback path on the part.
+        //
+        // `zc_output` is a one-tick pulse, so a rising and falling pair per
+        // pulse gives channel 1 exactly one edge whichever edge it selects,
+        // the same way the scanline triggers above are driven.
+        //
+        // Which channels the wire joins is the one part not legible on the
+        // schematic: the pin numbers on that scan do not match the part's
+        // pinout (the chip-enable net sits against a pin that is a trigger
+        // input on a Z80 CTC), so 0 to 1 follows the reference driver. The
+        // existence of a single ZC-to-trigger loopback is the part that is
+        // legible, and it is what makes 0 to 1 a reading rather than a guess.
+        if self.ctc.zc_output(0) {
+            self.ctc.trigger(1, true);
+            self.ctc.trigger(1, false);
+        }
+
         // Latch watchpoint attribution context (cycle + instruction PC)
         // before CPU execution — bus dispatch cannot read CPU state mid-tick.
         if self.map.debug_active() {
@@ -728,6 +749,47 @@ mod tests {
         assert!(
             (30.0..31.0).contains(&hz),
             "the frame rate is {hz:.3} Hz, outside the 30-31 Hz the schematic gives"
+        );
+    }
+
+    /// Channel 0's zero count reaches channel 1, so the two divide in series.
+    ///
+    /// Channel 0 is a timer on the CPU clock (prescale 16, time constant 3, so
+    /// a zero count every 48 cycles) and channel 1 a counter fed only by that
+    /// output. After 10 zero counts channel 1 must have counted 10.
+    ///
+    /// No MCR II game in the tree exercises this. Satan's Hollow programs
+    /// channel 1 as an auto-start timer, whose CLK/TRG input the part ignores,
+    /// so a boot cannot reach the wire and this test has to build the case
+    /// itself. That is worth stating rather than leaving the suite looking as
+    /// though a real ROM covers it.
+    #[test]
+    fn channel_0_zero_count_clocks_channel_1() {
+        const TIMER_PRESCALE_16: u8 = 0x04 | 0x02 | 0x01; // TC follows | reset | control
+        const COUNTER_RISING: u8 = 0x40 | 0x10 | 0x04 | 0x01;
+        const TICKS_PER_ZC: u64 = 16 * 3;
+
+        let mut board = Mcr2Board::new();
+        let mut cpu = Z80::new();
+
+        board.ctc.write(1, COUNTER_RISING);
+        board.ctc.write(1, 200);
+        board.ctc.write(0, TIMER_PRESCALE_16);
+        board.ctc.write(0, 3);
+
+        // Ten of channel 0's periods, driven through the board's own per-cycle
+        // path so the cascade is exercised where it actually lives.
+        for _ in 0..TICKS_PER_ZC * 10 {
+            board.begin_cycle_inner(&cpu);
+            board.end_cycle();
+        }
+        // `cpu` is only here to satisfy the debug-latch argument.
+        let _ = &mut cpu;
+
+        assert_eq!(
+            200 - board.ctc.read(1),
+            10,
+            "channel 1 counts one edge per channel 0 zero count"
         );
     }
 
