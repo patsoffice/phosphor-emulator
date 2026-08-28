@@ -346,8 +346,19 @@ whose open raster issue is furthest along. `gridlee` is the only one that
 produces a green suite on the day it lands, and the cheapest by a wide margin,
 and the weakest generalisation.
 
-This is a fork the survey should not settle on its own. It is recorded on the
-epic for a decision.
+**Decided: `roadrunner`**, filed as
+`phosphor-emulator-roadrunner-video-conformance-wfop`. The deciding argument was
+`hl4t.2` rather than cost: that issue exists to derive a shared contract from two
+examples rather than guess one from a single example, and Road Runner differs
+from Williams in every axis the harness touches, including the address space the
+loader half of the contract rests on. Pairing a counter register with a
+programmable interrupt is also what forces the synchronisation primitive to be
+the part that does not generalise, which is the conclusion `hl4t.2` predicted and
+could not have tested against a second counter-register board.
+
+Two costs were accepted with it. The picture assertions land red until W3, which
+makes them that issue's missing acceptance test rather than a defect. And this is
+the first board in the programme whose watchdog actually bites.
 
 ## Defects found while reading
 
