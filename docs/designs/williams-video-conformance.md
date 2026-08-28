@@ -535,11 +535,21 @@ Tracked as `phosphor-emulator-williams-video-conformance-itvk`.
 Only then a second board. `raster-sampling-fidelity.md` W3 lists seven:
 `namco_galaga`, `btime`, `mrdo`, `foodf`, `gottlieb`, `mcr2`, `atari_system1`.
 Williams is first because it is the only one that exposes beam position to the
-CPU, which is what makes the ROM self-synchronising. Whether any of the others
-can host one at all is `phosphor-emulator-conformance-rom-programme-hl4t.1`, and
-a first look is not encouraging: `btime` exposes an in-vblank bit
-(`btime.rs:559`), which is one edge per frame, and most of the rest expose
-nothing of the beam.
+CPU through a counter register, which is what makes the ROM self-synchronising.
+
+Whether any of the others can host one was
+`phosphor-emulator-conformance-rom-programme-hl4t.1`, now answered in
+[`conformance-rom-board-survey.md`](conformance-rom-board-survey.md). **The
+pessimism this section originally recorded was wrong**, and it was wrong in the
+instructive way: it looked for a counter register, found none, and concluded the
+beam was invisible. Two boards can name an arbitrary scanline by another route.
+`atari_system1` has a motion-object list entry that fires a one-scanline-wide
+IRQ3 wherever the program puts it, on Road Runner but not on Marble; `mcr2` has a
+Z80 CTC whose prescaler divides the board clock into exact scanlines, so a timer
+channel is a programmable scanline interrupt and its readable down counter is a
+line counter. Three more boards have interrupts wired to fixed lines, which is
+enough for the picture tests and not for the signal tests. Only `btime`,
+`gottlieb`, `mrdo` and Marble are frame-only.
 
 ## References
 
