@@ -111,8 +111,10 @@ is the bulk of the labour and it is not mechanical.
 
 ## W1 — Per-scanline palette on indexed-buffer machines
 
-**Half done, 2026-08-28. `gottlieb` ships; `mcr2` is blocked on a schematic and
-the reason is at the end of this section.**
+**Done for `gottlieb`, 2026-08-28. The `mcr2` half is split out as
+`phosphor-emulator-raster-sampling-6kae.6` and deferred, because its blanking
+phase is inside a custom LSI and is on no drawing; the reason is at the end of
+this section.**
 
 **The cheapest real accuracy win in this doc, and it fixes the shollow case.**
 
@@ -247,9 +249,13 @@ MAME does not know it either: `mcr.cpp` configures the screen with
 
 Guessing either constant would put the split at the wrong rows, and on an
 interlaced board a wrong guess does not blur the result, it combs it. So the
-mcr2 half is **blocked, not deferred**: it needs a source that is not a drawing
-(a logic capture on a live board, or someone's teardown of MMC02). The board
-keeps its whole-frame palette and now says so, at `mcr2.rs`'s `render_frame`.
+mcr2 half needs a source that is not a drawing: a logic capture on a live board
+probing `VBLNK` against the vertical counter, a teardown of MMC02, or someone
+else's published measurement of the blanking window. It is filed with that
+unblock condition as `phosphor-emulator-raster-sampling-6kae.6` and set
+**deferred** rather than left open, because nothing in this repository moves it.
+The board keeps its whole-frame palette and now says so, at `mcr2.rs`'s
+`render_frame`.
 
 ---
 
