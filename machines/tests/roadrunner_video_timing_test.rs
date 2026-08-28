@@ -255,11 +255,16 @@ const SHOT_COUNT: usize = 6;
 struct Run {
     results: Vec<u8>,
     frames: usize,
-    /// The frame index (1-based) in which `R_PHASE` first read 4, i.e. the frame
-    /// the watchdog ride finished in. One vblank edge per frame makes this equal
-    /// to `VB_TARGET`; an edge detector that retriggered inside one blank would
-    /// finish sooner.
-    watchdog_ride_frames: Option<usize>,
+    /// The frames in which `R_PHASE` first read 3 and first read 4: the first
+    /// vblank edge of the watchdog ride, and its last.
+    ///
+    /// The **span** between them is the assertion, not either one on its own.
+    /// Pinning the absolute frame of the second was tried first and encoded
+    /// something that is not a property of the board at all: how long the
+    /// program's entry sequence happens to take before it starts riding. Adding
+    /// work to entry broke it, which is exactly what it should not do.
+    ride_first: Option<usize>,
+    ride_last: Option<usize>,
     /// One frame captured per picture phase, in phase order.
     shots: [Option<Shot>; SHOT_COUNT],
 }
@@ -323,14 +328,18 @@ fn run() -> Run {
     m.reset();
 
     let mut frames = 0;
-    let mut watchdog_ride_frames = None;
+    let mut ride_first = None;
+    let mut ride_last = None;
     let mut shots: [Option<Shot>; SHOT_COUNT] = std::array::from_fn(|_| None);
     for _ in 0..MAX_FRAMES {
         m.run_frame();
         frames += 1;
         let phase = word(&*m, R_PHASE);
-        if watchdog_ride_frames.is_none() && phase >= 4 {
-            watchdog_ride_frames = Some(frames);
+        if ride_first.is_none() && phase >= 3 {
+            ride_first = Some(frames);
+        }
+        if ride_last.is_none() && phase >= 4 {
+            ride_last = Some(frames);
         }
         // Each picture phase is published at the vblank edge of the frame it
         // describes and is the last thing written in that frame, so the frame
@@ -351,7 +360,8 @@ fn run() -> Run {
     Run {
         results,
         frames,
-        watchdog_ride_frames,
+        ride_first,
+        ride_last,
         shots,
     }
 }
@@ -502,13 +512,21 @@ fn the_program_outlives_the_watchdog() {
         "vblank edges observed; the watchdog reboots at 8 frames, so anything \
          short of this means a strobe was missed"
     );
+    let (first, last) = (
+        r.ride_first.expect("the ride's first edge was never seen"),
+        r.ride_last.expect("the ride's last edge was never seen"),
+    );
     assert_eq!(
-        r.watchdog_ride_frames,
-        Some(VB_TARGET as usize),
-        "one vblank edge per frame: the program takes its first edge in the \
-         frame it boots in and publishes phase 4 on the {VB_TARGET}th, so the \
-         ride should cover exactly {VB_TARGET} frames. More means an edge was \
-         missed, fewer means the edge detector is retriggering inside one blank."
+        last - first,
+        VB_TARGET as usize - 1,
+        "one vblank edge per frame: the ride's first edge landed in frame \
+         {first} and its {VB_TARGET}th in frame {last}, spanning {} frames \
+         rather than {}. More means an edge was missed, fewer means the edge \
+         detector is retriggering inside one blank. The span is what is pinned \
+         and not the absolute frames, because how long the program's entry \
+         sequence takes before it starts riding is not a property of the board.",
+        last - first,
+        VB_TARGET - 1
     );
 }
 
@@ -1217,6 +1235,223 @@ fn the_scroll_registers_move_the_playfield_and_nothing_else() {
         WHITE,
         "the sprite layer has its own fixed offsets and does not scroll either"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The second opinion: the same binary under MAME
+// ---------------------------------------------------------------------------
+
+/// Run the identical image on MAME's Road Runner and compare the result block.
+///
+/// **Every expected value in this file is derived from our own board code**,
+/// which makes the suite a regression guard immediately and a correctness guard
+/// only once each figure has been checked against something that is not us.
+/// This is that something.
+///
+/// The ROM was built for it. It never waits on a cycle count, and every position
+/// it reports is divided by an iterations-per-line figure it measures in the
+/// same run, so a CPU core with different cycle timings cancels out. That was a
+/// design claim for three issues and this is the first thing to test it. The raw
+/// counts differ by 3%: the shared poll loop gets 1562 iterations across the 240
+/// active lines here and 1608 under MAME, because our core charges 68000 branch
+/// timings on a 68010 and the loop contains one not-taken byte branch, which the
+/// 68010 does in 6 cycles rather than 8 (`phosphor-emulator-zi4z`). Every derived
+/// figure still lands within a tenth of a scanline, which is what the
+/// calibration is for.
+///
+/// **What is compared and what is not.** Counts and identities are compared
+/// exactly. Positions are compared in scanlines, never in iterations, because
+/// the raw counts are exactly the thing the calibration exists to cancel and
+/// asserting on them would be asserting that two 68000 cores have identical
+/// cycle timings, which they do not and need not. `R_T4_CNT` is left out
+/// entirely: it counts how many times a handler re-enters inside one scanline,
+/// which is a function of how long that handler takes and is not a property of
+/// the board.
+///
+/// **The picture is not compared, and cannot be from here.** MAME is running the
+/// real graphics ROMs while this harness installs synthetic ones, so the two
+/// draw different pictures from the same writes: our alpha codes come out in the
+/// real motherboard font and our playfield cell resolves through the real PROM
+/// to a different colour entirely. Substituting the graphics would need MAME to
+/// re-decode them, and its Lua interface exposes no way to invalidate a decoded
+/// tile. The script still dumps MAME's frames beside the result block, as an
+/// artifact to look at rather than something asserted on.
+///
+/// Gated on `PHOSPHOR_MAME` the way the drift guard is gated on `PHOSPHOR_ASM`,
+/// and for the same reason: with the variable set, a missing `mame` is a failure
+/// rather than a skip, so this cannot quietly report green while comparing
+/// nothing.
+#[test]
+fn mame_agrees_about_every_signal_the_rom_measures() {
+    use std::path::PathBuf;
+    use std::process::Command;
+
+    let required = std::env::var_os("PHOSPHOR_MAME").is_some();
+    if !required {
+        eprintln!("skipping: set PHOSPHOR_MAME=1 to cross-check against MAME");
+        return;
+    }
+
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let script = manifest.join("../tools/mame_roadrunner_conformance.lua");
+    let image = manifest.join("tests/roms/roadrunner_video.bin");
+    let roms = std::env::var("PHOSPHOR_ROMS").unwrap_or_else(|_| {
+        format!(
+            "{}/ws/mame-runtime/roms",
+            std::env::var("HOME").unwrap_or_default()
+        )
+    });
+    let out = std::env::temp_dir().join("phosphor_roadrunner_mame");
+    let _ = std::fs::remove_dir_all(&out);
+    std::fs::create_dir_all(&out).expect("create the MAME output directory");
+
+    let status = Command::new("mame")
+        .args(["roadrunn", "-rompath", &roms])
+        .arg("-autoboot_script")
+        .arg(&script)
+        .args(["-autoboot_delay", "0"])
+        // Headless and unthrottled; the script exits the machine when the
+        // program finishes, and -str is only a backstop if it never does.
+        .args([
+            "-video",
+            "none",
+            "-sound",
+            "none",
+            "-nothrottle",
+            "-str",
+            "120",
+        ])
+        // Keep MAME's droppings out of the working tree.
+        .arg("-cfg_directory")
+        .arg(out.join("cfg"))
+        .arg("-nvram_directory")
+        .arg(out.join("nvram"))
+        .env("PHOSPHOR_CONFORMANCE_BIN", &image)
+        .env("PHOSPHOR_CONFORMANCE_OUT", &out)
+        .status();
+
+    let status = match status {
+        Ok(s) => s,
+        Err(e) => panic!(
+            "PHOSPHOR_MAME is set, so `mame` is supposed to be on PATH, but \
+             running it failed: {e}. A skip here would report green while \
+             comparing nothing."
+        ),
+    };
+    assert!(status.success(), "mame exited with {status}");
+
+    let result = out.join("mame_result.txt");
+    let text = std::fs::read_to_string(&result).unwrap_or_else(|e| {
+        panic!(
+            "MAME ran but wrote no result block at {}: {e}. Check its output for \
+             a Lua error in tools/mame_roadrunner_conformance.lua.",
+            result.display()
+        )
+    });
+    let mame: std::collections::HashMap<&str, i64> = text
+        .lines()
+        .filter_map(|l| l.split_once(' '))
+        .filter_map(|(k, v)| v.trim().parse().ok().map(|v| (k, v)))
+        .collect();
+    let m = |k: &str| -> i64 {
+        *mame
+            .get(k)
+            .unwrap_or_else(|| panic!("MAME's result block has no {k}:\n{text}"))
+    };
+
+    let r = run();
+    r.assert_completed();
+
+    assert_eq!(
+        m("R_TRAP"),
+        0,
+        "MAME took a stray exception the ROM did not arrange, at vector {} \
+         (offset {:#06X}), in phase {}. Ours did not.",
+        m("R_TRAPV") / 4,
+        m("R_TRAPV"),
+        m("R_PHASE")
+    );
+    assert_eq!(m("R_TIMEOUT"), 0, "a wait gave up under MAME");
+    assert_eq!(
+        m("R_MAGIC"),
+        MAGIC as i64,
+        "MAME did not reach the magic word"
+    );
+
+    // Counts and identities: no cycle dependence, so these must match exactly.
+    for (name, ours) in [
+        ("R_PHASE", r.word(R_PHASE)),
+        ("R_CKSUM", r.word(R_CKSUM)),
+        ("R_VBCOUNT", r.word(R_VBCOUNT)),
+        ("R_T2_COUNT", r.word(R_T2_COUNT)),
+        ("R_T2_HELD", r.word(R_T2_HELD)),
+        ("R_T2_VB", r.word(R_T2_VB)),
+    ] {
+        assert_eq!(
+            m(name),
+            ours as i64,
+            "{name}: MAME {} against our {ours}. This one carries no cycle \
+             dependence, so the two are supposed to be identical.",
+            m(name)
+        );
+    }
+    assert_eq!(
+        (m("R_SSP_HI") << 16) | m("R_SSP_LO"),
+        i64::from(r.long(R_SSP)),
+        "the stack pointer each core fetched from vector 0 of the same image"
+    );
+
+    // Positions, in scanlines. Each side divides by the iterations-per-line it
+    // measured for itself, which is the whole point.
+    let ours_ipl = iters_per_line(&r);
+    let mame_ipl = m("R_T1_ACTIVE") as f64 / ACTIVE_LINES;
+    for (what, ours_raw, mame_raw) in [
+        (
+            "the VBLANK dwell",
+            r.word(R_T1_BLANK) as f64,
+            m("R_T1_BLANK") as f64,
+        ),
+        (
+            "the VBLANK dwell again",
+            r.word(R_T1_BLANK2) as f64,
+            m("R_T1_BLANK2") as f64,
+        ),
+        (
+            "IRQ3 at line 64",
+            r.word(R_T3_POLL_A) as f64,
+            m("R_T3_POLL_A") as f64,
+        ),
+        (
+            "IRQ3 at line 160",
+            r.word(R_T3_POLL_B) as f64,
+            m("R_T3_POLL_B") as f64,
+        ),
+        (
+            "the level-3 autovector",
+            r.word(R_T4_FIRST) as f64,
+            m("R_T4_FIRST") as f64,
+        ),
+        (
+            "the mid-frame timer",
+            r.word(R_T5_POLL) as f64,
+            m("R_T5_POLL") as f64,
+        ),
+        (
+            "the IRQ3 pulse width",
+            (r.word(R_T3_END_A) - r.word(R_T3_POLL_A)) as f64,
+            (m("R_T3_END_A") - m("R_T3_POLL_A")) as f64,
+        ),
+    ] {
+        let ours_lines = ours_raw / ours_ipl;
+        let mame_lines = mame_raw / mame_ipl;
+        assert!(
+            (ours_lines - mame_lines).abs() < 0.5,
+            "{what}: {ours_lines:.2} scanlines here against {mame_lines:.2} under \
+             MAME. The raw counts ({ours_raw} and {mame_raw}) are expected to \
+             differ, since the two cores do not share cycle timings; the figures \
+             in scanlines are not."
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

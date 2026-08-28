@@ -52,6 +52,7 @@ BANKSELECT  equ $860001         ; bit 7 = sound-CPU run, 5-3 = MO bank, 2 = PF b
 WATCHDOG    equ $880001         ; any write clears the counter
 VBLANK_ACK  equ $8A0001         ; write acks the VBLANK IRQ4 latch
 SWITCHES    equ $F60000         ; bit 4 = VBLANK, ACTIVE LOW (0 during blank)
+SNDRESP     equ $FC0001         ; sound response; reading it acknowledges IRQ6
 
 VB_MASK     equ $0010           ; the VBLANK bit inside the word read of F60000
 INT3_MASK   equ $0080           ; the IRQ3 bit inside the word read of 2E0000
@@ -338,11 +339,25 @@ Reset
 
             bsr     PetDog
 
-; Hold the sound CPU in reset explicitly. It is already held on a cold board, but
-; a running sound CPU latches responses and those drive IRQ6, which outranks
-; everything measured here. Bit 7 clear also selects motion-object bank 0 and
-; playfield bank 0, which is what the rest of the program assumes.
-            move.b  #0,BANKSELECT
+; Hold the sound CPU in reset, and do it as a TRANSITION rather than a level.
+;
+; A running sound CPU latches responses and those drive IRQ6, which outranks
+; everything measured here. Writing 0 alone is not enough to stop it: the reset
+; line is driven from bit 7 of this latch, and a board that only acts when bit 7
+; CHANGES will do nothing at all if the latch already reads 0, which is exactly
+; what it reads from power-on. Writing $80 and then $00 forces the edge whatever
+; the latch held, and on hardware that acknowledges the sound-response latch on
+; that edge it also clears any response already waiting.
+;
+; This cost a run. Under MAME the sound CPU runs free from power-on for that
+; reason, had a response latched by the time this program took over, and IRQ6
+; fired into the stray-exception handler at the first unmask. See the design doc.
+            move.b  #$80,BANKSELECT     ; release, forcing a change on bit 7
+            move.b  #$00,BANKSELECT     ; ... then assert reset and acknowledge
+            tst.b   SNDRESP             ; drain a response the latch still holds
+
+; Bit 7 clear also selects motion-object bank 0 and playfield bank 0, which is
+; what the rest of the program assumes.
 
 ; A zero result block must never read as a pass, so clear it deliberately.
 ; Clearing it is also what makes a watchdog reboot visible: reset() does not
@@ -360,6 +375,33 @@ ClrVars
             move.w  #0,(a0)+
             dbra    d0,ClrVars
             move.w  #WAITLIMIT,V_LIMIT
+
+; CLEAR THE VIDEO RAM THIS PROGRAM DOES NOT OTHERWISE WRITE, because it cannot
+; assume the machine was cold when it took over.
+;
+; Every entry of palette RAM, and every word of the motion-object list. The
+; program writes nine palette entries and ten sprite-list entries and used to
+; leave the other 1015 and 2038 holding whatever was there. On a board that
+; powered up into this program that is zeroes; on a board that was running a game
+; first it is the game's palette and the game's sprites, and the picture then
+; depends on what was on screen beforehand. Under MAME it did: leftover motion
+; objects drew down the left edge and unwritten palette entries came out in the
+; attract mode's colours.
+;
+; The playfield and the alpha layers are filled outright in phase 11, so they
+; need nothing here.
+            lea     PAL,a0
+            move.w  #1024-1,d0
+ClrPal
+            move.w  #C_BLACK,(a0)+
+            dbra    d0,ClrPal
+
+            lea     MOB,a0
+            move.w  #2048-1,d0
+ClrMob
+            move.w  #0,(a0)+
+            dbra    d0,ClrMob
+            bsr     PetDog
 
             move.l  d7,R_SSP
             move.w  #1,R_PHASE

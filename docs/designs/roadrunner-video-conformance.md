@@ -583,6 +583,189 @@ repository; it is not going to appear here.
 | `xscroll` ignored | the playfield does not move |
 | the force-opaque bit ignored | the blank glyph draws nothing |
 
+## The second opinion: the same binary under MAME
+
+Every expected value in this suite is derived from our own board file. That makes
+it a regression guard immediately and a correctness guard only once each figure
+has been checked against something that is not us. `tools/mame_roadrunner_conformance.lua`
+is that something, and `mame_agrees_about_every_signal_the_rom_measures` is the
+comparison.
+
+The ROM was built for this. It never waits on a cycle count, and every position
+it reports is divided by an iterations-per-line figure it measures in the same
+run. That was a design claim carried through three issues without ever being
+tested; this is the test of it.
+
+### How the image gets in
+
+The same trick the Rust harness uses, by a different door. Our harness pokes the
+program-ROM region through `BusDebug`; the Lua script writes the image into
+MAME's `maincpu` memory region and soft-resets the machine so the 68010
+re-fetches its vectors out of it. A soft reset does not reload ROMs, so the patch
+survives. `region:write_u8` takes a *logical* offset and handles the host swizzle
+itself, which matters because the region is 16-bit big-endian; getting it wrong
+would byte-swap the image, and the ROM's own checksum phase is what would catch
+it.
+
+**An autoboot script is re-run on every reset, including its own.** Without a
+guard, the script patches, resets, is re-executed, patches, resets, and the
+machine never reaches its second frame. The Lua state survives a soft reset, so a
+global is enough to tell the second execution to stand down.
+
+### The result
+
+| Quantity | Ours | MAME | Derived |
+|---|---|---|---|
+| iterations across the 240 active lines | 1562 | 1608 | *(no expectation, and none possible)* |
+| VBLANK dwell | 21.82 lines | 21.79 | 22 |
+| ... measured again a frame later | 21.66 | 21.79 | same |
+| IRQ4 entries, ack immediate / deferred | 1 / 2 | 1 / 2 | 1 / 2 |
+| IRQ3 at line 64 | 85.74 lines | 85.82 | 86 |
+| IRQ3 pulse width | 0.92 lines | 0.90 | 1 |
+| IRQ3 at line 160 | 181.92 lines | 181.94 | 182 |
+| the move between them | 96.18 lines | 96.12 | 96 |
+| the level-3 autovector | 85.43 lines | 85.52 | = the poll path |
+| the mid-frame timer | 181.61 lines | 181.49 | 182 |
+| stack pointer, checksum, vblank count | identical | identical | |
+
+**The raw counts differ by 3% and every derived figure agrees to within a tenth
+of a scanline.** That is exactly the difference the calibration exists to cancel,
+and it cancels.
+
+### Why the raw counts differ, which turns out to be one instruction
+
+Not a vague "different cores round differently". The gap is 2 cycles per loop
+iteration and it has a single cause.
+
+The shared poll loop is six instructions. On the 68000's documented tables:
+
+| | cycles |
+|---|---|
+| `subq.w #1,(xxx).l` | 8 + 12 (abs.l word EA) = 20 |
+| `beq.s` **not taken** | **8** |
+| `addq.w #1,(xxx).l` | 20 |
+| `move.w (a0),d0` | 8 |
+| `and.w d1,d0` | 4 |
+| `beq.s` taken | 10 |
+| | **70** |
+
+240 active lines is 240 x 456 = 109,440 cycles, and 109,440 / 70 = 1563. We
+measure 1562.
+
+MAME charges 68 for the same six instructions, and 109,440 / 68 = 1609 against a
+measured 1608. The two cycles are the **not-taken byte branch**: MAME's Musashi
+core sets `m_cyc_bcc_notake_b` to -2 for the 68000 and to **-4** for the 68010
+against a base of 10, so a not-taken `beq.s` costs 8 on a 68000 and 6 on a
+68010 (`m68kcpu.cpp:2118`, `:2174`). The loop contains exactly one.
+
+**So MAME is the faster one here, and ours is the 68000.** Our core runs this
+board as `M68kVariant::M68010` but charges 68000 cycle counts throughout; its
+README says so in as many words, the variant gate covering only the exception
+frame and `MOVE from SR` privilege. This is the first time that documented gap
+has been measured rather than noted, and it is filed as
+`phosphor-emulator-zi4z`. It is not a conformance-ROM defect and nothing here
+depends on it, which is the whole point of dividing by a rate measured in the
+same run.
+
+Counts and identities are compared exactly; positions are compared in scanlines,
+never in iterations. `R_T4_CNT` is not compared at all: it counts how many times
+a handler re-enters inside one scanline, which is a function of how long that
+handler takes and is not a property of the board. Both cores happen to report 3.
+
+### What it found, which is the point of having it
+
+**The ROM's sound-CPU assumption was wrong, and only a warm machine could show
+it.** The program held the sound CPU in reset by writing 0 to `860001`, on the
+reasoning that a running sound CPU latches responses and those drive IRQ6, which
+outranks everything being measured. Under MAME the first run stopped at phase 5
+with `R_TRAP` set and `R_TRAPV` reading `$78`: vector 30, the level-6 autovector.
+
+The cause is that the reset line is driven from bit 7 of that latch, and MAME
+acts on it only when bit 7 *changes*. `m_bankselect` starts at 0 and
+`machine_reset` writes 0, so the change never happens, the sound CPU is never
+held, it runs the real sound ROM from power-on and latches a response. Our own
+write of 0 was likewise a no-change, so it never acknowledged anything either.
+
+The fix is in the ROM, not in either emulator: it now writes `$80` and then `$00`
+to force the edge whatever the latch held, and reads `FC0001` to drain a response
+already waiting. A conformance ROM should not depend on power-on trivia. **This
+is the stray-exception handler earning its place**: without it the failure would
+have been a wedge at an unrelated phase instead of "vector 30, phase 5".
+
+There is a real divergence underneath it, recorded rather than acted on. Our
+board drives the sound reset from the *level* of bit 7 and holds the sound CPU
+from construction; MAME drives it from the *edge* and therefore lets it run at
+power-on. A level-driven reset line is the more plausible reading of the
+hardware, which would make our side right, but that is a schematic question and
+the schematic is not to hand. Where the two disagree, the schematic decides, not
+MAME. Nothing was changed on MAME's say-so.
+
+### The picture, which is a separate and unfinished exercise
+
+The CI-safe suite installs synthetic graphics so it can run with no arcade ROMs,
+while MAME runs the real ones, so the same writes draw different pictures and
+comparing them directly is meaningless. Substituting *our* graphics into MAME is
+not possible: `gfx_element` decodes lazily and caches, and MAME's Lua exposes no
+way to invalidate a decoded tile.
+
+So it is done the other way round, in
+`harness/tests/roadrunner_mame_picture_test.rs`: the real Road Runner graphics
+are loaded into **our** board, the same image is poked over the program ROM, and
+every pixel of all six captured frames is compared. It is ROM-gated and gated on
+`PHOSPHOR_MAME_PICTURE`, separately from `PHOSPHOR_MAME`, **because it does not
+pass yet**. Tracked as `phosphor-emulator-j5wp`.
+
+It has already earned its keep by finding one thing and localising two more.
+
+**The ROM assumed a cold machine, for the second time.** It wrote the nine
+palette entries and ten sprite-list entries it used and left the other 1015 and
+2038 holding whatever was there. On our board that is zeroes; under MAME the real
+game had been running first, so unwritten palette entries came out in the attract
+mode's colours and leftover motion objects drew down the left edge. The ROM now
+clears all of palette RAM and all of the motion-object list at entry, which took
+the difference from about 900 pixels a frame to 64. Exactly the same class of
+assumption as the sound latch above, found the same way.
+
+What remains is two things, and they are different in kind:
+
+1. **A capture-alignment race, which is a fixture bug.** The ROM publishes each
+   phase at the vblank edge and MAME updates its screen on that same scanline, so
+   which side of a mid-frame write MAME's dump lands on is a coin toss. Measured
+   rather than assumed, with `PHOSPHOR_PICTURE_ALIGN=1`: our phase-11 frame
+   best-matches MAME's phase *13*, and our phase-12 frame matches MAME's phase
+   11. The fix is in the ROM, publishing a few lines into vblank rather than on
+   its first.
+2. **A residual of exactly 64 pixels**, one 8x8 cell at (0, 120), present in
+   every phase and independent of the alignment. Small, constant and
+   suspiciously cell-shaped. That is the part worth chasing, and it cannot be
+   chased until (1) stops drowning it out.
+
+**The playfield colour path was suspected and cleared.** Our index is
+`0x100 + (0x20 + (palcolor << (bpp - 3))) * 8 + pen`; MAME's is a gfx colorbase
+of 256 plus `color * granularity` with granularity 8, the same colour expression
+and the same `bpp - 3` shift (`atarisy1_v.cpp:650-651`, the 256 being the
+`gfx_element` constructor's `color_base` at `:634`). They agree exactly, and the
+structure of the two pictures matches in every frame: same glyphs, same sprite
+geometry, same positions. Only colours differ, and only where the two causes
+above explain it.
+
+### Running it
+
+Not a CI gate: MAME is not in the dev shell and the arcade ROMs are not
+redistributable. Gated on `PHOSPHOR_MAME` exactly as the drift guard is gated on
+`PHOSPHOR_ASM`, and for the same reason: with the variable set, a missing `mame`
+is a failure rather than a skip.
+
+```bash
+PHOSPHOR_MAME=1 PHOSPHOR_ROMS=~/ws/mame-runtime/roms \
+  cargo test -p phosphor-machines --test roadrunner_video_timing_test mame_agrees
+```
+
+Both branches of that gate were exercised, and the comparison itself was made to
+fail by moving `VBLANK_SCANLINE` to 232: it reports "the VBLANK dwell: 30.83
+scanlines here against 21.79 under MAME", with the raw counts printed beside it
+and a note that those are expected to differ.
+
 ## What this does not cover yet
 
 The two picture assertions are `78lx` and land red until
