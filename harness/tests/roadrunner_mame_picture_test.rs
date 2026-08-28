@@ -46,6 +46,35 @@ const MAX_FRAMES: usize = 64;
 const WIDTH: usize = 336;
 const HEIGHT: usize = 240;
 
+/// A difference that is understood, held the way `audio/expectations.toml` and
+/// the two mid-frame assertions in the CI-safe suite are held: the list can
+/// only shrink. The comparison passes while exactly these are present and fails
+/// if one grows, moves, disappears, or a new one appears, so it cannot quietly
+/// absorb a regression while a known defect is outstanding.
+struct Known {
+    phase: u16,
+    /// Pixels differing in that phase's frame.
+    pixels: usize,
+    /// Where the first of them is, in the raster order the comparison walks.
+    at: (usize, usize),
+    /// Why it is here and what makes it go away. Never "we could not work it
+    /// out"; an entry nobody can explain is a bug being pinned.
+    #[allow(dead_code)]
+    why: &'static str,
+}
+
+const KNOWN: &[Known] = &[Known {
+    phase: 13,
+    pixels: 64,
+    at: (32, 48),
+    why: "T7 writes two playfield cells at scanline 120. MAME leaves the upper \
+          one (rows 48-55) red because the beam had already passed it; we turn \
+          it green because this board composites the whole frame at the frame \
+          boundary. That is the defect raster-sampling-fidelity.md W3 exists to \
+          fix (phosphor-emulator-raster-sampling-6kae.3), and the CI-safe suite \
+          holds the same behaviour as a ratchet. When W3 lands this entry goes.",
+}];
+
 fn word(m: &dyn FrontendMachine, addr: u32) -> u16 {
     let bus = m.debug_bus().expect("machine exposes a debug bus");
     let hi = bus.read(0, addr).expect("result block is readable");
@@ -164,29 +193,18 @@ fn read_snapshot(path: &Path) -> Vec<u8> {
 /// palette conversion, and the scroll, over 80,640 pixels a frame and six
 /// frames.
 ///
-/// **THIS DOES NOT PASS YET, AND IS GATED SEPARATELY BECAUSE OF IT.** It is an
-/// open investigation tracked as `phosphor-emulator-j5wp`, not a guard. Set
-/// `PHOSPHOR_MAME_PICTURE=1` to run it; `PHOSPHOR_MAME=1` alone runs only the
-/// result-block comparison, which does pass.
+/// It passes, and it is still gated on `PHOSPHOR_MAME_PICTURE` on top of the
+/// ROM directory, because it needs `mame` on `PATH` and the arcade ROMs; CI has
+/// neither. `PHOSPHOR_MAME=1` alone runs the result-block comparison, which is
+/// a different test in `phosphor-machines`.
 ///
-/// Two things stand between here and a green test, and after
-/// `phosphor-emulator-fpgx` neither of them is the fixture any more:
+/// One difference remains and it is in `KNOWN`: T7's mid-frame playfield write
+/// in phase 13, where MAME leaves the upper cell red because the beam had
+/// passed it and we turn it green because this board composites at the frame
+/// boundary. Every other pixel of every other phase matches exactly.
 ///
-/// 1. **A residual of exactly 64 pixels**, an 8x8 block at x 0-7, y 121-128,
-///    in every one of the six phases. MAME draws it opaque black and we draw
-///    the playfield through it. It is not cell-aligned vertically, so it is a
-///    motion object rather than a tile, and it is constant across phases, so it
-///    is not a function of anything the program does after it draws. That is
-///    `phosphor-emulator-h52k`.
-/// 2. **T7's mid-frame playfield write, phase 13 only**, a second 64 pixels at
-///    (32, 48). MAME draws the upper cell still red because the beam had passed
-///    it when the write landed; we draw it green because this board composites
-///    the whole frame at the frame boundary. That is the defect
-///    `raster-sampling-fidelity.md` W3 exists to fix, and the CI-safe suite
-///    already holds it as a ratchet. It is expected to stay until W3 lands.
-///
-/// Everything else that used to show up here was the fixture, and it is worth
-/// recording what it cost, because both halves reported plausible pictures:
+/// Getting there took three fixes, and all three are worth recording because
+/// each produced a picture that looked entirely plausible:
 ///
 /// - Clearing the machine's RAM in the ROM took the difference from ~900
 ///   pixels a frame to 64. MAME had the real game's palette and sprite list in
@@ -200,12 +218,17 @@ fn read_snapshot(path: &Path) -> Vec<u8> {
 /// - The script read the screen with `screen:pixels()`, which returns the
 ///   previous frame's pixel indices carrying the current frame's palette. It
 ///   now takes a native snapshot instead. See the script for the mechanism.
+/// - The last 64 were ours: this board skipped drawing a motion-object entry
+///   flagged `0xFFFF` in word 1. That flag belongs to the scanline-interrupt
+///   comparator, which is a cartridge option, while the renderer is on the
+///   motherboard and serves cartridges that have no such comparator. See
+///   `render_motion_objects` and `phosphor-emulator-h52k`.
 #[test]
 fn our_picture_matches_mames_on_the_real_graphics() {
     if std::env::var_os("PHOSPHOR_MAME_PICTURE").is_none() {
         eprintln!(
-            "skipping: picture comparison is an open investigation \
-             (phosphor-emulator-j5wp); set PHOSPHOR_MAME_PICTURE=1 to run it"
+            "skipping: the picture comparison needs mame on PATH and the arcade \
+             ROMs; set PHOSPHOR_MAME_PICTURE=1 to run it"
         );
         return;
     }
@@ -304,7 +327,7 @@ fn our_picture_matches_mames_on_the_real_graphics() {
         eprintln!("we captured {}; gaps {gaps:?}", at.join(" "));
     }
 
-    let mut differing = Vec::new();
+    let mut wrong = Vec::new();
     for f in &ours {
         let phase = f.phase;
         let our_rgb = &f.rgb;
@@ -322,29 +345,43 @@ fn our_picture_matches_mames_on_the_real_graphics() {
             .filter(|(_, (a, b))| a != b)
             .map(|(i, (a, b))| (i % WIDTH, i / WIDTH, a.to_vec(), b.to_vec()))
             .collect::<Vec<_>>();
-        if !bad.is_empty() {
-            let (x, y, a, b) = &bad[0];
-            differing.push(format!(
-                "phase {phase}: {} of {} pixels differ, first at ({x}, {y}) \
-                 where we draw ({}, {}, {}) and MAME draws ({}, {}, {})",
-                bad.len(),
-                our_rgb.len() / 3,
-                a[0],
-                a[1],
-                a[2],
-                b[0],
-                b[1],
-                b[2],
-            ));
+
+        let seen = bad.first().map(|(x, y, _, _)| (bad.len(), *x, *y));
+        let want = KNOWN
+            .iter()
+            .find(|k| k.phase == phase)
+            .map(|k| (k.pixels, k.at.0, k.at.1));
+        if seen == want {
+            continue;
+        }
+        match (seen, want) {
+            (Some((n, x, y)), None) => {
+                let (_, _, a, b) = &bad[0];
+                wrong.push(format!(
+                    "phase {phase}: {n} pixels differ with none expected, first at \
+                     ({x}, {y}) where we draw ({}, {}, {}) and MAME draws ({}, {}, {})",
+                    a[0], a[1], a[2], b[0], b[1], b[2],
+                ));
+            }
+            (None, Some((n, x, y))) => wrong.push(format!(
+                "phase {phase}: the {n} pixels expected at ({x}, {y}) are gone. If \
+                 raster-sampling-6kae.3 has landed this is the win, and the entry \
+                 in KNOWN should be deleted rather than the assertion relaxed"
+            )),
+            (Some((n, x, y)), Some((wn, wx, wy))) => wrong.push(format!(
+                "phase {phase}: {n} pixels differ starting at ({x}, {y}), expected \
+                 {wn} starting at ({wx}, {wy})"
+            )),
+            (None, None) => {}
         }
     }
 
     assert!(
-        differing.is_empty(),
-        "our compositor and MAME's disagree about what this program draws. Both \
-         ran the same image on the same graphics ROMs, so this is a difference \
-         between the two renderers.\n  {}\nMAME's frames are in {}",
-        differing.join("\n  "),
+        wrong.is_empty(),
+        "the picture comparison moved. Both sides ran the same image on the same \
+         graphics ROMs, so a change here is the two compositors disagreeing about \
+         something new.\n  {}\nMAME's frames are in {}",
+        wrong.join("\n  "),
         out.display()
     );
 }

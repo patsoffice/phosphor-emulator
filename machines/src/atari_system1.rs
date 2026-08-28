@@ -1012,10 +1012,32 @@ impl AtariSystem1Board {
                 let w1 = word(bank_base + 0x40 + link);
                 let w2 = word(bank_base + 0x80 + link);
                 let w3 = word(bank_base + 0xC0 + link);
-                // 0xFFFF in word[1] is a scanline timer, not a sprite.
-                if w1 != 0xFFFF {
-                    self.draw_mo_entry(&mut mo, w, h, y_start, y_end, w0, w1, w2, PRIORITY_BIT);
-                }
+                // EVERY entry is drawn, including one flagged 0xFFFF in word[1].
+                // That flag is what the scanline-interrupt comparator watches
+                // for, and that comparator is on the CARTRIDGE: it exists on
+                // LSI carts 2, 3, 4 and the cockpit board and nowhere else,
+                // which is why `has_scanline_int` is a per-machine fact. This
+                // renderer is on the motherboard and serves every cartridge, so
+                // it cannot be conditioned on a feature only some of them have:
+                // on a Marble Madness board nothing whatever watches word[1],
+                // and the entry is simply a sprite. The hardware draws it and
+                // the cartridge separately takes the interrupt.
+                //
+                // We suppressed it until 2026-08-28, which contradicted the
+                // note on `timer_irq_at_scanline` saying the flag is a property
+                // of the list rather than of the cartridge. It cost 64 pixels
+                // an 8x8 block at (0, 121) in every frame of the Road Runner
+                // picture comparison against MAME (phosphor-emulator-h52k).
+                //
+                // Real games do not show the block because they park unused
+                // entries off the left edge at X 504: measured over a recorded
+                // Road Runner game, all 984 timer-entry samples sit there, as
+                // do 10,706 dormant ordinary sprites. So the parking is a
+                // general convention rather than a workaround for this, and it
+                // is why nothing noticed until a conformance ROM put a timer at
+                // X 0. What is NOT settled is the schematic itself; see the
+                // issue.
+                self.draw_mo_entry(&mut mo, w, h, y_start, y_end, w0, w1, w2, PRIORITY_BIT);
                 link = (w3 & 0x3F) as usize;
             }
         }

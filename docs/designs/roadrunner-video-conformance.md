@@ -768,19 +768,60 @@ before both. `screen:snapshot()` renders the texture, so it is the frame that
 just finished; with `-snapview native` it is the screen's own 336x240 and the
 Rust side decodes the PNG.
 
-With both fixed, every phase agrees except for exactly two things:
+With both fixed, one 64-pixel residual was left in every phase, an 8x8 block at
+x 0-7, y 121-128 that MAME drew opaque black and we did not draw at all. That
+was `phosphor-emulator-h52k` and it turned out to be ours.
 
-1. **A residual of 64 pixels**, an 8x8 block at x 0-7, y 121-128, in all six
-   phases. MAME draws it opaque black; we draw the playfield through it. Not
-   cell-aligned vertically, so a motion object rather than a tile, and constant
-   across phases, so not a function of anything the program does after it draws.
-   That is `phosphor-emulator-h52k`.
-2. **T7's write, in phase 13 only**, a second 64 pixels at (32, 48). MAME leaves
-   the upper cell red because the beam had passed it; we turn it green because
-   this board composites at the frame boundary. That is the W3 defect the
-   CI-safe suite already holds as a ratchet, and it is expected to stay until
-   `raster-sampling-fidelity.md` W3 lands. Worth stating plainly: **the picture
-   comparison cannot go green before W3 does.**
+**The residual was the motion-object timer entry.** Removing the `w1 != 0xFFFF`
+guard in `render_motion_objects` took five of the six phases to *exactly zero*
+differing pixels. The position is our own arithmetic: for the ROM's timer entry,
+word 0 `$0FE0` and word 2 `0`, `draw_mo_entry` gives
+`ypos = -127 - 256 - 8 = -391`, and `-391 & 0x1FF = 121`, `xpos = 0`.
+
+**Why the entry is drawn, and it is not because MAME draws it.** MAME does draw
+it, but by accident: `atarimo`'s config for `atarisy1` declares a special mask
+on word 1 with value `0xffff`, `render_object` wraps its drawing in
+`if (m_specialmask.mask() == 0 || m_specialmask.extract(entry) != m_specialvalue)`,
+and `m_specialmask` is never `set()` anywhere in `atarimo.cpp`. It is
+default-constructed, the first clause short-circuits, and every entry draws.
+MAME's declared intent is the opposite of its behaviour, so it is no authority
+either way.
+
+The argument that settles it is the hardware partition, and Marble Madness is
+what makes it concrete. The `0xFFFF` flag means something only to the
+scanline-interrupt comparator, and that comparator is a **cartridge** option:
+it exists on LSI carts 2, 3, 4 and the cockpit board and nowhere else, which is
+why `has_scanline_int` is per-machine. The motion-object renderer is on the
+**motherboard** and serves every cartridge. On a Marble board nothing whatever
+watches word 1, so a renderer conditioned on that value could not be the same
+renderer. It draws the entry, and the cartridge separately takes the interrupt.
+Our own note on `timer_irq_at_scanline` already said the flag is a property of
+the list rather than of the cartridge; the renderer was contradicting it.
+
+**What the real game does, and the control that matters.**
+`tools/script/examples/roadrunner_mob_timers.rhai` replays a recorded game and
+reports every timer entry's drawn position. All of them sit at X 504, which is
+-8, one tile off the left edge, so they draw nothing. That looks at first like
+the game deliberately hiding an entry it knows will be drawn, and it is not:
+the same script's control shows X 504 is simply where Road Runner parks every
+dormant sprite, 10,706 ordinary samples against 430 distinct X values for the
+sprites it actually places. The timer entries inherit the parking from the same
+clear routine. So **the real game cannot discriminate between the two
+behaviours**, which is why nothing noticed until a conformance ROM put a timer
+at X 0, and why no golden frame moved when the guard came out.
+
+What is still not derived from a schematic is whether the motherboard renderer
+has any suppression at all. The argument above says it cannot, on pain of
+Marble needing a different renderer, but the schematic has not been read. Filed.
+
+That leaves one difference, and it is expected: **T7's write, in phase 13 only**,
+64 pixels at (32, 48). MAME leaves the upper cell red because the beam had
+passed it; we turn it green because this board composites at the frame boundary.
+It is held in the comparison's `KNOWN` list the way the CI-safe suite holds the
+same behaviour as a ratchet, so the test passes on exactly that difference and
+fails if it grows, moves, disappears or is joined by another. When
+`raster-sampling-fidelity.md` W3 lands, the entry is deleted rather than the
+assertion relaxed.
 
 **The playfield colour path was suspected and cleared.** Our index is
 `0x100 + (0x20 + (palcolor << (bpp - 3))) * 8 + pen`; MAME's is a gfx colorbase
