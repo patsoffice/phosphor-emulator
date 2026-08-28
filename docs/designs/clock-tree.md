@@ -72,7 +72,7 @@ the cases that actually motivate the design:
 | Board | CPU | Video | Sound | Notes |
 |---|---|---|---|---|
 | Atari System 1 | 14.31818 / 2 = 7.159090 MHz | = CPU (pixel clock) | 14.318181 / 8 = 1.789772 MHz 6502 **and** POKEY; TMS5220 off 14.318181 / 2 | **Single crystal.** Rev 2's "3.579545 MHz POKEY on a second tree" is contradicted by `atari_system1_sound.rs:35-38,45` |
-| Williams | 4 MHz / 4 = 1 MHz E | — | — | Single crystal (`williams.rs:53`) |
+| Williams | 12 / 3 / 4 = 1 MHz E | 12 × 2/3 = 8 MHz dot, 512 dots a line | — | Single crystal. Derived from the R-8731 sheet in `../schematics/williams-video-clock.md`; the 64 cycles a scanline used to be a measured 15.6 kHz |
 | Atari DVG | 12.096 / 8 = 1.512 MHz | vector | — | Single crystal; frame budget is a chosen 60 Hz, not derived (`atari_dvg.rs:33-42`) |
 | Crystal Castles / Missile Command | 10 / 8 = 1.25 MHz | 10 / 2 = 5 MHz | — | Single crystal, 8:1 CPU:master |
 | Gottlieb System 80 | 15 / 3 = 5 MHz I8088 (`gottlieb.rs:8`) | 20 / 4 = 5 MHz pixel (`gottlieb.rs:51`) | 3.579545 / 4 = 894886 Hz 6502; Votrax VCO | **Two crystals that both land on 5 MHz** — rev 2 read one comment and called the other stale. See open questions |

@@ -56,8 +56,8 @@ const DAC_ROUTE_NUM: i32 = 1;
 const DAC_ROUTE_DEN: i32 = 4;
 
 pub const TIMING: TimingConfig = TimingConfig {
-    cpu_clock_hz: 1_000_000, // E clock = 4 MHz XTAL ÷ 4
-    cycles_per_scanline: 64, // 1 MHz / ~15.6 kHz horizontal
+    cpu_clock_hz: 1_000_000, // E clock = 12 MHz XTAL ÷ 3 ÷ 4
+    cycles_per_scanline: 64, // 64 video-address steps at 1 MHz; see clock_tree
     total_scanlines: 260,    // 260 lines per frame
     display_width: 292,      // native display width after cropping
     display_height: 240,     // native display height after cropping
@@ -66,20 +66,46 @@ pub const TIMING: TimingConfig = TimingConfig {
 
 /// The board's crystal and everything divided out of it.
 ///
-/// One 4 MHz crystal with the 6809's E clock at /4.
+/// Derived from the R-8731 CPU board logic diagram; the transcription and its
+/// provenance are in `docs/schematics/williams-video-clock.md`.
 ///
-/// No dot clock is declared, because this board does not document one:
-/// `TIMING.cycles_per_scanline` is 64 because the horizontal rate is about
-/// 15.6 kHz, which is a measured frequency rather than a division of a crystal.
-/// It is the one raster board here whose scanline count is not derived from
-/// anything, and `clock_tree_test.rs` names it for that.
+/// `CR1` is a 12 MHz crystal. Two 74LS107 flip-flops at `7K` divide it by three
+/// to 4 MHz, and the 6809E's E clock is that over four, so 1 MHz. The video
+/// address counter runs at the same 4 MHz, and its low two bits are not on the
+/// bus (`5F` drives VA0 from Q2), so the video address steps at 1 MHz: one
+/// fetch per CPU cycle, which is the interleave the whole board is built
+/// around.
+///
+/// A scanline is 64 of those steps, because the counter's within-line field is
+/// VA0-VA5 and the scanline number begins at VA6. Two independent decodes on
+/// the sheet fix that split: `$CB00` reads VA8-VA13 onto D2-D7, which is
+/// `scanline & $FC`, and `count240` is a four-input AND at `4C` over
+/// VA10-VA13, which is scanline 240 to 255.
+///
+/// So 64 steps at 1 MHz is 64 us, a 15.625 kHz line rate, and exactly **64 E
+/// cycles per scanline**. That figure used to be an approximate 15.6 kHz
+/// measured after the fact; it is now a division of the crystal.
+///
+/// The dot clock is 8 MHz, 12 MHz times two thirds, and each of the 64 fetches
+/// covers 8 pixels across the four DRAM banks, which is the 512 dots a line the
+/// horizontal decode is built on.
 pub fn clock_tree() -> phosphor_core::core::ClockTree {
     use phosphor_core::core::{ClockDomainName as Clk, ClockTree, RootId};
-    let mut t = ClockTree::new(4_000_000);
-    let cpu = t.add_domain(Clk::Cpu, RootId::MAIN, 1, 4); // 1 MHz E clock
+    let mut t = ClockTree::new(12_000_000);
+    // 12 MHz / 3 = 4 MHz at 7K, then / 4 for the 6809E's E clock.
+    let cpu = t.add_domain(Clk::Cpu, RootId::MAIN, 1, 12);
     t.set_step_domain(cpu);
+    // 12 MHz * 2/3 = the 8 MHz dot clock, 512 dots to the line.
+    let dot = t.add_domain(Clk::Pixel, RootId::MAIN, 2, 3);
+    t.set_raster(dot, HTOTAL_DOTS, 0);
     t
 }
+
+/// Dot clocks in one scanline.
+///
+/// 64 video-address steps, each covering 8 pixels fetched across the four DRAM
+/// banks. At the 8 MHz dot clock that is 64 us, a 15.625 kHz line rate.
+pub const HTOTAL_DOTS: u32 = 512;
 
 // ---------------------------------------------------------------------------
 // Shared ROM definitions (common to all Williams gen-1 games)

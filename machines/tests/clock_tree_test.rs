@@ -41,15 +41,11 @@ fn the_registry_is_not_empty() {
 /// is not vacuous: without it, a board could quietly skip
 /// `ClockTree::set_raster` and be checked for nothing. Adding to it means
 /// stating out loud that a board's scanline count rests on nothing.
-const NO_RASTER_DERIVATION: &[(&str, &str)] = &[
-    (
-        "joust",
-        "Williams gen-1 documents no dot clock; its 64 cycles per scanline come \
-         from an approximate 15.6 kHz horizontal rate",
-    ),
-    ("robotron", "same Williams board as joust"),
-    ("sinistar", "same Williams board as joust"),
-];
+/// Empty, and it has been. The three Williams machines were the last entries:
+/// their 64 cycles per scanline rested on an approximate 15.6 kHz horizontal
+/// rate until the R-8731 sheet was read, and it is now 12 MHz over three over
+/// four with a 64-step line, exact. See `docs/schematics/williams-video-clock.md`.
+const NO_RASTER_DERIVATION: &[(&str, &str)] = &[];
 
 fn declaration(entry: &registry::MachineEntry) -> ClockDeclaration {
     (entry.create_bare)()

@@ -46,3 +46,5 @@ section is there so that is obvious.
 
 - [`williams-video-counter.md`](williams-video-counter.md) — what `$CB00` reads
   on a Williams gen-1 board, and why the counter aliases rather than saturates.
+- [`williams-video-clock.md`](williams-video-clock.md) — the 12 MHz crystal and
+  the chain that makes a scanline exactly 64 CPU cycles.
