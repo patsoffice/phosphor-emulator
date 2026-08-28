@@ -553,7 +553,11 @@ impl RoadRunnerSystem {
     pub fn new() -> Self {
         let mut sys = Self {
             cpu: AtariSystem1Board::new_cpu(),
-            board: AtariSystem1Board::new(108, true),
+            // Road Runner ships on an LSI cartridge that carries the
+            // motion-object scanline-interrupt circuit, so a timer entry in the
+            // display list raises IRQ3. Marble Madness's cartridge does not, and
+            // leaves the flag off.
+            board: AtariSystem1Board::new(108, true).with_scanline_interrupt(),
             adc: Adc0809::new(),
             adc_irq_enabled: false,
             adc_start_clock: 0,

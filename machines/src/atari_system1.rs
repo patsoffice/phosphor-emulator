@@ -466,9 +466,24 @@ pub struct AtariSystem1Board {
     pub(crate) video_int: bool,
     /// Scanline motion-object interrupt (IRQ3 / "SLIP"). Asserted for the one
     /// scanline a motion-object timer entry targets; also read back at 0x2E0000
-    /// bit 7. Recomputed at every scanline boundary from the active sprite bank.
+    /// bit 7. Recomputed at every scanline boundary from the active sprite bank,
+    /// but only on a cartridge that has the circuit -- see
+    /// [`has_scanline_int`](Self::has_scanline_int).
     #[save(id = 11)]
     pub(crate) scanline_int: bool,
+    /// Whether this cartridge carries the circuit that generates IRQ3 at all.
+    ///
+    /// It is not part of the shared board: it exists on the LSI cartridges 2, 3
+    /// and 4 and on the cockpit boards, and is absent from the TTL and LSI
+    /// cartridges. Road Runner has it and Marble Madness does not, which is why
+    /// MAME splits the driver into `atarisy1r_state`, whose `update_timers`
+    /// walks the display list, and `atarisy1_state`, whose `update_timers` is an
+    /// empty function so the interrupt is never scheduled.
+    ///
+    /// Fixed at construction by [`with_scanline_interrupt`](Self::with_scanline_interrupt),
+    /// so a load rebuilds it from the factory rather than from the save.
+    #[save_skip]
+    pub(crate) has_scanline_int: bool,
     /// Analog-joystick interrupt (IRQ2). Games with an ADC0809 (Road Runner et
     /// al.) drive this from the converter's end-of-conversion line, gated by the
     /// joystick-IRQ enable; games without one (Marble) leave it false.
@@ -618,6 +633,7 @@ impl AtariSystem1Board {
             f60000_buttons: 0xFF,
             video_int: false,
             scanline_int: false,
+            has_scanline_int: false,
             int2: false,
             audio_dc: (0.0, 0.0),
             sound: AtariSystem1Sound::new(speech),
@@ -630,6 +646,18 @@ impl AtariSystem1Board {
             mo_shadow: Vec::new(),
             mo_shadow_bands: Vec::with_capacity(16),
         }
+    }
+
+    /// Declare that this cartridge carries the motion-object scanline-interrupt
+    /// circuit, so a timer entry in the display list raises IRQ3.
+    ///
+    /// Opt-in rather than opt-out because the absence is the more common case
+    /// and the safer default: a board built without it behaves like the TTL and
+    /// LSI cartridges, which never assert the line. See
+    /// [`has_scanline_int`](Self::has_scanline_int).
+    pub fn with_scanline_interrupt(mut self) -> Self {
+        self.has_scanline_int = true;
+        self
     }
 
     // -- ROM install (the game wrapper decodes its manifest and hands us images) --
@@ -750,6 +778,10 @@ impl AtariSystem1Board {
 
     /// Scanline-interrupt state read at 0x2E0000 (bit 7): set while a
     /// motion-object scanline interrupt (IRQ3) is asserted.
+    ///
+    /// The address decodes on every cartridge, so this stays mapped even where
+    /// the interrupt circuit is absent; there it reads a constant zero, because
+    /// nothing ever sets the latch behind it.
     pub(crate) fn int3_state(&self) -> u16 {
         if self.scanline_int { 0x0080 } else { 0x0000 }
     }
@@ -758,6 +790,10 @@ impl AtariSystem1Board {
     /// `scanline` — i.e. IRQ3 should be asserted there. Timer entries are flagged
     /// by 0xFFFF in word[1]; word[0] gives the height and Y, and the interrupt
     /// fires at the top of that sprite's band: `256 - (word0>>5) - vsize*8 - 1`.
+    ///
+    /// This answers what the *display list* says, which is a property of the
+    /// list and not of the cartridge. Whether the board can act on it is
+    /// [`has_scanline_int`](Self::has_scanline_int), and the caller applies it.
     pub(crate) fn timer_irq_at_scanline(&self, scanline: u16) -> bool {
         let mob = self.map.region_data(Region::Mob);
         let bank_base = ((self.bankselect >> 3) & 7) as usize * 256; // words
@@ -1104,7 +1140,7 @@ impl AtariSystem1Board {
             self.video_int = true;
             self.snapshot_motion_objects();
         }
-        self.scanline_int = self.timer_irq_at_scanline(scanline);
+        self.scanline_int = self.has_scanline_int && self.timer_irq_at_scanline(scanline);
     }
 
     /// Per-cycle board work that runs before the CPU, with no frame-position
@@ -1303,6 +1339,90 @@ impl AtariSystem1Board {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Scanline the motion-object timer entry built by [`timer_entry_board`]
+    /// targets. Any visible line works; 100 is comfortably inside the picture.
+    const TIMER_LINE: u16 = 100;
+
+    /// A board whose display list holds exactly one motion-object timer entry,
+    /// aimed at [`TIMER_LINE`].
+    ///
+    /// Entry 0 of bank 0 (`bankselect` is 0 after construction). Word 1 is the
+    /// 0xFFFF flag that marks the entry a timer rather than a sprite. Word 0
+    /// carries the height and Y that place the band: with the size nibble 0 the
+    /// height is one tile, so `256 - (word0 >> 5) - 8 - 1` is the target, and
+    /// `word0 = 147 << 5 = 0x1260` puts it on line 100. Word 3's link is 0,
+    /// pointing the list at the entry already visited, which ends the walk.
+    fn timer_entry_board(scanline_interrupt: bool) -> AtariSystem1Board {
+        let mut board = AtariSystem1Board::new(103, false);
+        if scanline_interrupt {
+            board = board.with_scanline_interrupt();
+        }
+        let mob = board.map.region_data_mut(Region::Mob);
+        mob[0x00] = 0x12; // word 0 = 0x1260
+        mob[0x01] = 0x60;
+        mob[0x80] = 0xFF; // word 0x40 = 0xFFFF: this entry is a timer
+        mob[0x81] = 0xFF;
+        board
+    }
+
+    /// The same display list on both cartridges, with opposite outcomes.
+    ///
+    /// The circuit that turns a timer entry into IRQ3 is on the LSI cartridges
+    /// 2, 3 and 4 and on the cockpit boards, and is absent from the TTL and LSI
+    /// cartridges that Marble Madness ships on. MAME splits the driver over
+    /// exactly this: `atarisy1r_state::update_timers` walks the list and
+    /// `atarisy1_state::update_timers` is an empty function.
+    ///
+    /// Asserting both halves is what makes this able to fail in both
+    /// directions: drop the gate and Marble raises an interrupt its cartridge
+    /// cannot, invert it and Road Runner loses one it depends on.
+    #[test]
+    fn the_motion_object_timer_interrupt_is_a_cartridge_option() {
+        let mut roadrunner = timer_entry_board(true);
+        roadrunner.begin_scanline(TIMER_LINE);
+        assert!(
+            roadrunner.scanline_int,
+            "an LSI-cartridge board takes IRQ3 from a timer entry"
+        );
+        assert_eq!(roadrunner.interrupt_level(), 3, "IRQ3 reaches the CPU");
+        assert_eq!(
+            roadrunner.int3_state(),
+            0x0080,
+            "and reads back at 0x2E0000"
+        );
+
+        let mut marble = timer_entry_board(false);
+        marble.begin_scanline(TIMER_LINE);
+        assert!(
+            !marble.scanline_int,
+            "a cartridge without the circuit ignores the same entry"
+        );
+        assert_eq!(marble.interrupt_level(), 0, "no interrupt reaches the CPU");
+        assert_eq!(
+            marble.int3_state(),
+            0x0000,
+            "and 0x2E0000 reads a flat zero"
+        );
+    }
+
+    /// The gate is on the cartridge, not on the line: a board that has the
+    /// circuit still only asserts on the line the entry names.
+    ///
+    /// Without this, a gate stuck off would pass the Marble half of the test
+    /// above for the wrong reason, and a `scanline_int` left latched from a
+    /// previous line would pass the Road Runner half for the wrong reason.
+    #[test]
+    fn the_timer_interrupt_lasts_one_scanline() {
+        let mut board = timer_entry_board(true);
+
+        board.begin_scanline(TIMER_LINE - 1);
+        assert!(!board.scanline_int, "not yet on the line before");
+        board.begin_scanline(TIMER_LINE);
+        assert!(board.scanline_int, "asserted on the line itself");
+        board.begin_scanline(TIMER_LINE + 1);
+        assert!(!board.scanline_int, "released on the line after");
+    }
 
     #[test]
     fn bankselect_logs_midframe_mo_bank_changes() {
