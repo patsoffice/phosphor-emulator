@@ -9,8 +9,59 @@ Arcade and system board implementations. Each machine implements the `Bus` trait
 - A machine exposes one cycle as an inherent `step_cycle() -> u32` returning the instruction-boundary mask; `impl_board_debug!`/`impl_standalone_debug!` wire it to `MachineDebug::debug_tick`
 - ROM loading goes through `rom_loader.rs` utilities (ZIP extraction is handled by the frontend's `rom_path.rs`)
 - Register it with one `crate::register_machine!(JoustSystem, "joust", &["joust"], JOUST_CONTROLS);` — wrapper type, CLI name, ROM set names, control table. The macro emits the factory and the `inventory::submit!`; don't hand-write either. Two extra arms: `new = Type::new(arg)` when the constructor takes a hardware variant, and `configs = ALL_CONFIGS` when several ROM revisions are tried in turn. A factory that does anything more (a reset after load, a non-standard loader) stays hand-written — see `starwars.rs` and `quantum.rs`
-- Video rendering is per-scanline during `run_frame()`
+- Video rendering is per-scanline during `run_frame()`. See [Video Rendering](#video-rendering) for what that commits you to
 - Optional: to make the machine's code ROMs disassemblable by the `disasm` tool, add one `inventory::submit! { DisasmRegion { ... } }` per code region (see `disasm_registry.rs` and the entries in `mario_bros.rs`) — maps a region name to its CPU, origin, and a `RomRegion` loader. Purely additive; doesn't touch `MachineEntry`/`FrontendMachine`.
+
+## Video Rendering
+
+**New raster machines render per-scanline from live state by default.** At each
+visible scanline boundary the board composites that one row out of the video
+state as it stands at that moment: tilemap RAM, colour RAM, scroll, tile and
+sprite banks, flip, palette, and layer order. `render_frame` then copies or
+resolves the finished buffer; it does not draw.
+
+Three rules follow from that default.
+
+- **A whole-frame render needs a comment saying why.** Sampling every layer once
+  at the frame boundary is a choice to render a moment the beam never drew, so
+  the reason belongs next to the code. `mcr2.rs`'s `render_frame` is the worked
+  example: its scanline index does not map to a framebuffer row and the
+  constants that would fix that are inside a custom LSI, so it renders
+  whole-frame and says so.
+- **State the hardware latches at vblank is an explicit snapshot, read from the
+  snapshot and never re-sampled per line.** `galaga.rs`'s
+  `update_starfield_at_vblank` is the reference for a genuine latch.
+- **A snapshot that exists to compensate for whole-frame rendering is not a
+  hardware latch, and its comment must say which it is.** `atari_system1.rs`'s
+  `mo_shadow` is the second kind: the board's motion objects come off a
+  double-buffered line buffer and the game publishes its list with a bank swap,
+  so the snapshot models our renderer, not the circuit. It was misread as a
+  latch for exactly as long as its comment described the behaviour without
+  naming the category. Retire that kind of snapshot when the board goes
+  per-scanline; keep it until then.
+
+Sprite lists are live-read on every board in the registry, walked once per
+scanline into a line buffer that is displayed on the *next* line, so the correct
+sampling point for row `r` is the object list as it stood at row `r - 1`. Some
+sprite Y constants already fold that one-line delay in, so check the constant
+before adding the delay a second time. The nine boards this was read from are
+transcribed in `docs/schematics/sprite-list-scan.md`.
+
+Two things a per-scanline board is expected to carry in its tests, because the
+first alone passes on a board that never samples anything:
+
+1. a test that a mid-frame write to a video register splits the picture at a
+   stated row, and
+2. a test that the frame loop actually reaches the scanline hook.
+
+The scanline hook itself is a house pattern: `begin_scanline`, `run_scanlines`,
+a scanline-outer `run_frame`, and the same boundary test in `tick` so the
+debugger's single-step path samples too. `gottlieb.rs` and `btime.rs` are the
+copies to work from. Per-row state derived from live registers is `#[save_skip]`
+and reseeded from the live value after a load, or the first post-load frame
+resolves against another machine's data.
+
+Background: `docs/designs/raster-sampling-fidelity.md`.
 
 ## Machine Traits
 
