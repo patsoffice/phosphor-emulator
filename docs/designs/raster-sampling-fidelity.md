@@ -261,6 +261,10 @@ The board keeps its whole-frame palette and now says so, at `mcr2.rs`'s
 
 ## W2 — Burgertime background scroll during active display
 
+**Done, 2026-08-28.** The confirm-first step came back the opposite way to the
+one this section was hedging against: Burger Time *does* enable the layer, the
+effect is real and visible, and it is the enable bit rather than the scroll.
+
 The audit measured 4 writes to `0x4004` at scanlines 88–91 across 4 frames.
 That register is `bnj_scroll0` (`btime.rs:274`), which drives three things in
 `draw_background` (`btime.rs:701`):
@@ -284,6 +288,51 @@ the row's value. This is the same shape as W1 and does not require restructuring
 
 **Acceptance:** golden frame unchanged for the 2396 frames with no mid-frame
 write; a targeted test asserting a mid-frame scroll write splits the background.
+
+### What the confirm step actually found
+
+Measured with `disasm trace --watch 0:0x4004:w`, over the attract loop and again
+through a coined, started run so the finding does not rest on the attract-only
+scope condition this epic exists to distrust:
+
+* **The layer is enabled.** The register takes exactly two values on this ROM
+  set, `$00` and `$13`. `$13` has bit 4 set, so `draw_background` runs.
+* **Only bit 4 ever changes.** Bits 0–1 are `3` whenever the layer is on and bit
+  2 is always `0`, so the mid-screen change is the background *enable*, not the
+  scroll this section is named for. That matters because the enable also selects
+  whether the chars are drawn transparently over the background or opaquely over
+  the backdrop, so the split is a two-layer change rather than a shifted
+  backdrop.
+* **The writes land in active display.** Attract: scanlines 88, 91 and 201.
+  Play: 45, 91 and 201. The visible window is 8..248, so all of them are inside
+  it.
+* **Value *changes* mid-screen are rarer than writes.** Most writes rewrite the
+  value already there. Over 2400 frames of coined play there were 5 changes, all
+  at scanline 91 or 201, roughly one frame in 480.
+
+### What shipped
+
+`btime` gained the same scanline hook `gottlieb` did (`begin_scanline`,
+`run_scanlines`, a scanline-outer `run_frame`, and the boundary test in `tick`
+for the debugger), sampling `bnj_scroll0` per visible row.
+
+`render_visible` then composites in **bands of constant `bnj_scroll0`** rather
+than consuming a per-row scroll inside the blitter, because this register picks
+which layers are drawn rather than just where. A frame with no mid-screen write
+is one band and one composite, exactly as before; a frame with a write is one
+composite per value, and there have never been more than two. So the common case
+costs nothing and only the rare split frame pays.
+
+**Verified by eye**, since a raster split is not a thing a hash can judge: frame
+523 of the attract loop renders with the left third of the screen lacking the
+ladder background and the rest carrying it, against frame 522 with none and 524
+with all of it. Note the split reads as a *column* boundary, not a row one: the
+cabinet is ROT270, so native row 84 of 240 becomes display column 84.
+
+Golden frames byte-identical (the pinned frame is not one of the split ones),
+boot, save-state and audio all pass, and the same phase caveat as W1 applies:
+chars and sprites still come from end-of-frame video RAM while `bnj_scroll0` now
+comes from each row's own moment.
 
 ---
 

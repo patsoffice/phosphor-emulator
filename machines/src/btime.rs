@@ -197,8 +197,22 @@ pub struct BtimeConfig {
 ///
 /// The CPUs live on the machine and the board *is* the bus, so this takes them
 /// as separate borrows and dispatches at a concrete type.
+///
+/// This is the debugger's path: it tests the frame position on every cycle so
+/// that single-stepping still crosses scanline boundaries. A whole frame goes
+/// through [`run_scanlines`], which hoists that test out.
 #[inline]
 pub fn tick(cpu: &mut M6502, sound_cpu: &mut M6502, board: &mut BtimeBoard) {
+    let frame_cycle = board.clock % TIMING.cycles_per_frame();
+    if frame_cycle.is_multiple_of(TIMING.cycles_per_scanline) {
+        board.begin_scanline(frame_cycle / TIMING.cycles_per_scanline);
+    }
+    step_cycle(cpu, sound_cpu, board);
+}
+
+/// The part of a cycle with no frame-position test in it.
+#[inline]
+fn step_cycle(cpu: &mut M6502, sound_cpu: &mut M6502, board: &mut BtimeBoard) {
     // Main CPU @ 1.5 MHz.
     board.begin_main_cycle(cpu);
     cpu.execute_cycle(board, BusMaster::Cpu(0));
@@ -212,11 +226,42 @@ pub fn tick(cpu: &mut M6502, sound_cpu: &mut M6502, board: &mut BtimeBoard) {
     board.end_cycle();
 }
 
-/// Run one frame's worth of cycles. This board has no scanline-boundary work
-/// -- the live VBLANK bit is derived from the clock when read -- so this is a
-/// plain loop.
+/// Run `cycles` CPU cycles, scanline-outer and cycle-inner. The caller must
+/// start on a scanline boundary and pass a multiple of `cycles_per_scanline`;
+/// the debugger's off-boundary stepping goes through [`tick`] instead.
+pub fn run_scanlines(cpu: &mut M6502, sound_cpu: &mut M6502, board: &mut BtimeBoard, cycles: u64) {
+    debug_assert!(
+        board.clock.is_multiple_of(TIMING.cycles_per_scanline)
+            && cycles.is_multiple_of(TIMING.cycles_per_scanline),
+        "run_scanlines must start on a scanline boundary and run whole scanlines"
+    );
+    for _ in 0..cycles / TIMING.cycles_per_scanline {
+        let scanline = board.clock % TIMING.cycles_per_frame() / TIMING.cycles_per_scanline;
+        board.begin_scanline(scanline);
+        for _ in 0..TIMING.cycles_per_scanline {
+            step_cycle(cpu, sound_cpu, board);
+        }
+    }
+}
+
+/// Run one frame's worth of cycles. Whole scanlines go through
+/// [`run_scanlines`]; a partial scanline at either end (only after the debugger
+/// has left the clock off-boundary) goes through [`tick`].
 pub fn run_frame(cpu: &mut M6502, sound_cpu: &mut M6502, board: &mut BtimeBoard) {
-    for _ in 0..TIMING.cycles_per_frame() {
+    let scanline = TIMING.cycles_per_scanline;
+    let mut remaining = TIMING.cycles_per_frame();
+
+    let lead = ((scanline - board.clock % scanline) % scanline).min(remaining);
+    for _ in 0..lead {
+        tick(cpu, sound_cpu, board);
+    }
+    remaining -= lead;
+
+    let whole = remaining - remaining % scanline;
+    run_scanlines(cpu, sound_cpu, board, whole);
+    remaining -= whole;
+
+    for _ in 0..remaining {
         tick(cpu, sound_cpu, board);
     }
 }
@@ -251,7 +296,7 @@ impl Bus for BtimeBoard {
 #[derive(BusDebug, Saveable)]
 #[save_version(1)]
 #[save_tlv]
-#[save_after_load(render)]
+#[save_after_load(restore_after_load)]
 pub struct BtimeBoard {
     /// Both maps hold only ROM, so what they persist is their page layout
     /// rather than any bytes: this board keeps its memory in plain fields
@@ -329,8 +374,8 @@ pub struct BtimeBoard {
     /// Display framebuffer (native 240×240 RGB, square pixels), refreshed once
     /// per frame at the end of run_frame. Derived output rather than state, but
     /// it cannot be rebuilt lazily either: `Renderable::render_frame` takes
-    /// `&self`. So a load redraws it, which is what `#[save_after_load(render)]`
-    /// on this struct is for.
+    /// `&self`. So a load redraws it, which is part of what
+    /// `#[save_after_load(restore_after_load)]` on this struct is for.
     #[save_skip]
     pub(crate) framebuffer: Vec<u8>,
 
@@ -351,6 +396,26 @@ pub struct BtimeBoard {
     flip_screen: bool, // 0x4002 write bit0
     #[save(id = 18)]
     bnj_scroll0: u8, // 0x4004 write (bit4 -> background enable)
+
+    /// `bnj_scroll0` as it stood at the start of each visible scanline, indexed
+    /// by output row (row `r` is native row `r + CROP_LO`, drawn during scanline
+    /// `r + CROP_LO`).
+    ///
+    /// Burger Time writes this register *during active display*: measured on
+    /// this ROM set at scanlines 88, 91 and 201, all inside the visible 8..248
+    /// window, in both the attract loop and real play. The value only ever takes
+    /// `$00` and `$13`, so what changes mid-screen is bit 4, the background
+    /// enable, and not the scroll or bank bits. On the cabinet those frames show
+    /// the rows above the write composited one way and the rows below the other;
+    /// rendering the frame with a single value shows neither.
+    ///
+    /// Sampling per scanline quantises a write to the line it lands in, the same
+    /// approximation the palette takes on `gottlieb`.
+    ///
+    /// Derived state, rebuilt every frame, so not saved: seeded from
+    /// `bnj_scroll0` by [`seed_scanline_state`](Self::seed_scanline_state).
+    #[save_skip]
+    bnj_scroll0_row: Vec<u8>,
     #[save(id = 19)]
     sound_latch: u8, // 0x4003 write — stored; sound CPU/IRQ deferred (§10)
 
@@ -437,6 +502,7 @@ impl BtimeBoard {
             main_irq: false,
             flip_screen: false,
             bnj_scroll0: 0,
+            bnj_scroll0_row: vec![0u8; VISIBLE_DIM],
             sound_latch: 0,
             // Players idle (active-low = all bits high).
             p1: 0xFF,
@@ -569,6 +635,32 @@ impl BtimeBoard {
         }
     }
 
+    /// Work that only happens on the first cycle of a scanline: sampling
+    /// `bnj_scroll0` for the row the beam is about to draw.
+    ///
+    /// `scanline` is 0..272; the visible window is 8..248, the same one
+    /// [`in_vblank`](Self::in_vblank) derives the VBLANK bit from. Only visible
+    /// lines have a row to composite.
+    ///
+    /// Called once per scanline from [`run_scanlines`] and, for the debugger's
+    /// single-step path, from [`tick`] when the clock lands on a boundary.
+    pub(crate) fn begin_scanline(&mut self, scanline: u64) {
+        let lo = CROP_LO as u64;
+        if (lo..lo + VISIBLE_DIM as u64).contains(&scanline) {
+            self.bnj_scroll0_row[(scanline - lo) as usize] = self.bnj_scroll0;
+        }
+    }
+
+    /// Put every visible row's `bnj_scroll0` back to the live value.
+    ///
+    /// Used at construction, at reset, and after a state load, where the live
+    /// register is restored but the per-row samples are not: without this the
+    /// first frame afterwards would composite its upper rows against whatever
+    /// the previous machine had.
+    pub(crate) fn seed_scanline_state(&mut self) {
+        self.bnj_scroll0_row.fill(self.bnj_scroll0);
+    }
+
     /// Board work after the CPUs' cycle: the PSGs, the clock, and the
     /// end-of-frame render.
     fn end_cycle(&mut self) {
@@ -600,6 +692,7 @@ impl BtimeBoard {
         self.ay1.reset();
         self.ay2.reset();
         self.clock = 0;
+        self.seed_scanline_state();
         // The CPUs live on the machine, which resets them against this board.
     }
 
@@ -638,6 +731,15 @@ impl BtimeBoard {
         self.framebuffer = fb;
     }
 
+    /// Put back the derived state a load cannot carry, then redraw.
+    ///
+    /// The per-row `bnj_scroll0` samples are rebuilt as a frame runs, so a load
+    /// has to seed them from the restored register before the redraw reads them.
+    fn restore_after_load(&mut self) {
+        self.seed_scanline_state();
+        self.render();
+    }
+
     /// Copy the latest framebuffer into the frontend's `buffer`.
     pub fn render_frame(&self, buffer: &mut [u8]) {
         buffer.copy_from_slice(&self.framebuffer);
@@ -670,29 +772,60 @@ impl BtimeBoard {
     /// The ROT270 the cabinet needs is declared via
     /// [`orientation`](Self::orientation) and applied centrally by the frontend,
     /// so this emits pixels in native row-major order.
+    /// Composited in bands of constant `bnj_scroll0`, because that register
+    /// picks which layers are drawn and how, and the game changes it partway
+    /// down the screen. A frame with no mid-screen write is one band and one
+    /// composite, exactly as before; a frame with a write is one composite per
+    /// value, of which there have never been more than two.
+    ///
+    /// NOTE THE PHASE THIS CREATES. Chars and sprites still come from video RAM
+    /// as it stands at the frame boundary, while `bnj_scroll0` now comes from
+    /// each row's own moment. That mixes phases the same way the per-scanline
+    /// palette does on `gottlieb`, and for the same reason: one layer at a time.
     fn render_visible(&self, buffer: &mut [u8]) {
         let mut native = vec![0u8; NATIVE_DIM * NATIVE_DIM];
-
-        if self.bnj_scroll0 & 0x10 != 0 {
-            self.draw_background(&mut native);
-            self.draw_chars(&mut native, true);
-        } else {
-            self.draw_chars(&mut native, false);
-        }
-        self.draw_sprites(&mut native);
-
-        // Crop the visible window and convert to native RGB24 (no rotation).
         let mask = self.palette_rgb.len() - 1;
-        for y in 0..VISIBLE_DIM {
-            let src = (y + CROP_LO) * NATIVE_DIM + CROP_LO;
-            for x in 0..VISIBLE_DIM {
-                let (r, g, b) = self.palette_rgb[native[src + x] as usize & mask];
-                let di = (y * VISIBLE_DIM + x) * 3;
-                buffer[di] = r;
-                buffer[di + 1] = g;
-                buffer[di + 2] = b;
+
+        let mut row = 0usize;
+        while row < VISIBLE_DIM {
+            let ctrl = self.bnj_scroll0_row[row];
+            let mut end = row + 1;
+            while end < VISIBLE_DIM && self.bnj_scroll0_row[end] == ctrl {
+                end += 1;
             }
+
+            native.fill(0);
+            self.compose_native(&mut native, ctrl);
+
+            // Crop this band's rows and convert to native RGB24 (no rotation).
+            for y in row..end {
+                let src = (y + CROP_LO) * NATIVE_DIM + CROP_LO;
+                for x in 0..VISIBLE_DIM {
+                    let (r, g, b) = self.palette_rgb[native[src + x] as usize & mask];
+                    let di = (y * VISIBLE_DIM + x) * 3;
+                    buffer[di] = r;
+                    buffer[di + 1] = g;
+                    buffer[di + 2] = b;
+                }
+            }
+
+            row = end;
         }
+    }
+
+    /// Draw the whole native buffer for one value of `bnj_scroll0`.
+    ///
+    /// Bit 4 gates the background layer and, with it, whether the chars are
+    /// drawn transparently over it or opaquely over the backdrop. Sprites do not
+    /// depend on the register and are drawn last either way.
+    fn compose_native(&self, native: &mut [u8], ctrl: u8) {
+        if ctrl & 0x10 != 0 {
+            self.draw_background(native, ctrl);
+            self.draw_chars(native, true);
+        } else {
+            self.draw_chars(native, false);
+        }
+        self.draw_sprites(native);
     }
 
     /// BurgerTime's monitor is mounted rotated 270° clockwise. The orientation
@@ -796,18 +929,20 @@ impl BtimeBoard {
     }
 
     /// Background: up to 4 columns of 16×16 tiles selected from `bg_map`,
-    /// horizontally scrolled by `(bnj_scroll0 & 3) << 8`. The four column tiles
-    /// cycle `start..start+3`, offset by `bnj_scroll0 & 0x04`.
-    fn draw_background(&self, native: &mut [u8]) {
+    /// horizontally scrolled by `(ctrl & 3) << 8`. The four column tiles
+    /// cycle `start..start+3`, offset by `ctrl & 0x04`. `ctrl` is the value of
+    /// `bnj_scroll0` for the band being composited, not necessarily the live
+    /// one: see [`render_visible`](Self::render_visible).
+    fn draw_background(&self, native: &mut [u8], ctrl: u8) {
         let mut start = if self.flip_screen { 0u8 } else { 1u8 };
         let mut tmap = [0u8; 4];
         for slot in tmap.iter_mut() {
-            *slot = start | (self.bnj_scroll0 & 0x04);
+            *slot = start | (ctrl & 0x04);
             start = (start + 1) & 0x03;
         }
 
         // The second scroll register is never written on this game, so it is 0.
-        let mut scroll: i32 = -(((self.bnj_scroll0 & 0x03) as i32) << 8);
+        let mut scroll: i32 = -(((ctrl & 0x03) as i32) << 8);
         for i in 0..5 {
             if scroll > 256 {
                 break;
@@ -1366,8 +1501,11 @@ mod tests {
             *byte = 0xFF;
         }
         b.load_gfx2(&gfx2);
-        // Enable the background layer; palette entry 9 -> blue.
+        // Enable the background layer; palette entry 9 -> blue. The register is
+        // sampled per scanline, so the rows have to have been scanned with it
+        // enabled for `render_visible` to composite against it.
         b.bnj_scroll0 = 0x10;
+        b.seed_scanline_state();
         b.bus_write(BusMaster::Cpu(0), 0x0C09, 0x3F);
 
         let mut buffer = vec![0u8; VISIBLE_DIM * VISIBLE_DIM * 3];
@@ -1376,6 +1514,120 @@ mod tests {
         // Chars are transparent over the backdrop, so the blue bg shows through.
         let has_blue = buffer.as_chunks::<3>().0.contains(&[0, 0, 0xFF]);
         assert!(has_blue, "background (palette base 8) should be visible");
+    }
+
+    // -----------------------------------------------------------------------
+    // Mid-frame bnj_scroll0
+    // -----------------------------------------------------------------------
+
+    /// A board whose background tiles are all pen 1, so palette entry 9 marks
+    /// any row the background layer reached.
+    fn board_with_visible_background() -> BtimeBoard {
+        let mut b = board();
+        let mut gfx2 = vec![0u8; 0x1800];
+        for byte in gfx2.iter_mut().take(0x0800) {
+            *byte = 0xFF;
+        }
+        b.load_gfx2(&gfx2);
+        b.bus_write(BusMaster::Cpu(0), 0x0C09, 0x3F); // entry 9 -> blue
+        b
+    }
+
+    fn row_has_blue(buffer: &[u8], y: usize) -> bool {
+        let row = &buffer[y * VISIBLE_DIM * 3..(y + 1) * VISIBLE_DIM * 3];
+        row.as_chunks::<3>().0.contains(&[0, 0, 0xFF])
+    }
+
+    /// The behaviour W2 exists for. Burger Time enables the background partway
+    /// down the screen (measured at scanline 91 on this ROM set), and the rows
+    /// above the write must not get it.
+    #[test]
+    fn a_mid_frame_background_enable_splits_the_screen() {
+        const SPLIT_SCANLINE: u64 = 91;
+        let split_row = (SPLIT_SCANLINE - CROP_LO as u64) as usize;
+
+        let mut b = board_with_visible_background();
+        b.bnj_scroll0 = 0x00;
+        for s in CROP_LO as u64..SPLIT_SCANLINE {
+            b.begin_scanline(s);
+        }
+        b.bnj_scroll0 = 0x13; // what the game actually writes
+        for s in SPLIT_SCANLINE..(CROP_LO + VISIBLE_DIM) as u64 {
+            b.begin_scanline(s);
+        }
+
+        let mut buffer = vec![0u8; VISIBLE_DIM * VISIBLE_DIM * 3];
+        b.render_visible(&mut buffer);
+
+        assert!(!row_has_blue(&buffer, 0), "row 0 is above the write");
+        assert!(
+            !row_has_blue(&buffer, split_row - 1),
+            "the last row above the write has no background"
+        );
+        assert!(
+            row_has_blue(&buffer, split_row),
+            "the first row below the write has the background"
+        );
+        assert!(
+            row_has_blue(&buffer, VISIBLE_DIM - 1),
+            "the bottom row is below the write"
+        );
+    }
+
+    /// `render_visible` reading the samples is only half of it: the frame loop
+    /// has to fill them. This fails if `begin_scanline` is ever dropped from
+    /// `tick` or `run_scanlines`, which would leave every row compositing
+    /// against the value the board was last seeded with.
+    #[test]
+    fn the_frame_loop_samples_the_register_at_scanline_boundaries() {
+        let mut b = board();
+        let mut cpu = M6502::new();
+        let mut sound = M6502::new();
+
+        // Wind to the first visible scanline, then change the register and let
+        // the hoisted loop run one more.
+        b.bnj_scroll0 = 0x00;
+        b.seed_scanline_state();
+        for _ in 0..CROP_LO as u64 * TIMING.cycles_per_scanline {
+            tick(&mut cpu, &mut sound, &mut b);
+        }
+        b.bnj_scroll0 = 0x13;
+        run_scanlines(&mut cpu, &mut sound, &mut b, TIMING.cycles_per_scanline);
+
+        assert_eq!(
+            b.bnj_scroll0_row[0], 0x13,
+            "run_scanlines() samples the first visible row"
+        );
+    }
+
+    /// Vblank has no row to composite, and writing one would run off the end of
+    /// a sample array sized to the visible window.
+    #[test]
+    fn vblank_scanlines_have_no_row_to_sample_into() {
+        let mut b = board();
+        assert_eq!(b.bnj_scroll0_row.len(), VISIBLE_DIM);
+        for s in 0..CROP_LO as u64 {
+            b.begin_scanline(s);
+        }
+        for s in (CROP_LO + VISIBLE_DIM) as u64..TIMING.total_scanlines {
+            b.begin_scanline(s);
+        }
+    }
+
+    /// A load restores bnj_scroll0 but not the per-row samples, so the redraw
+    /// that follows would composite its upper rows against a stale value.
+    #[test]
+    fn a_load_seeds_every_row_from_the_restored_register() {
+        let mut b = board();
+        b.bnj_scroll0_row.fill(0xFF); // stale from another machine
+        b.bnj_scroll0 = 0x13;
+
+        b.restore_after_load();
+
+        assert!(
+            b.bnj_scroll0_row.iter().all(|&v| v == 0x13),
+            "every row seeds from the restored register"
+        );
     }
 
     #[test]
