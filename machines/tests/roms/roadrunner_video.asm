@@ -41,7 +41,13 @@
 ; --- Hardware ---------------------------------------------------------------
 
 INT3STATE   equ $2E0000         ; bit 7 = motion-object scanline interrupt (IRQ3)
+XSCROLL     equ $800000         ; playfield scroll, both left at 0 here
+YSCROLL     equ $820000
+PRIORITY    equ $840000         ; colour-0 pens the playfield draws in front of
+PF          equ $A00000         ; playfield RAM, 64 x 64 cells of one word
 MOB         equ $A02000         ; motion-object RAM, 8 banks of 64 entries
+ALPHA       equ $A03000         ; alphanumerics RAM, 64 x 32 cells of one word
+PAL         equ $B00000         ; palette RAM, 1024 entries of one IRGB-4444 word
 BANKSELECT  equ $860001         ; bit 7 = sound-CPU run, 5-3 = MO bank, 2 = PF bank
 WATCHDOG    equ $880001         ; any write clears the counter
 VBLANK_ACK  equ $8A0001         ; write acks the VBLANK IRQ4 latch
@@ -74,6 +80,60 @@ TIMER_FLAG  equ $FFFF
 ; against a line rather than against whatever the board computes.
 TIMER_L1    equ $16E0           ; (247 -  64) << 5 = 183 << 5  -> line 64
 TIMER_L2    equ $0AE0           ; (247 - 160) << 5 =  87 << 5  -> line 160
+TIMER_L3    equ $0FE0           ; (247 - 120) << 5 = 127 << 5  -> line 120
+
+; --- The picture -----------------------------------------------------------
+;
+; The harness installs a synthetic font and tile set before the program runs; a
+; ROM-less board has no graphics at all, and without them the playfield and the
+; motion objects are every pen 0 and nothing can be drawn. The tiles are solid
+; blocks of pens 1 to 4 and the font is a handful of glyphs, both defined in
+; roadrunner_video_timing_test.rs, so the picture below is derivable rather than
+; captured.
+;
+; Palette indices, from the compositor's shared 1024-entry space: alpha at
+; colour*4 + pen, motion objects at $100 + pen, playfield at $200 + pen (the
+; synthetic PROM puts both layers in colour 0).
+
+PAL_AL1     equ PAL+$002        ; alpha colour 0, pen 1
+PAL_AL2     equ PAL+$004        ; alpha colour 0, pen 2
+PAL_MO1     equ PAL+$202        ; motion object pen 1
+PAL_MO2     equ PAL+$204        ;                pen 2
+PAL_MO3     equ PAL+$206        ;                pen 3
+PAL_MO4     equ PAL+$208        ;                pen 4
+PAL_PF0     equ PAL+$400        ; playfield pen 0
+PAL_PF1     equ PAL+$402        ;           pen 1, the colour T6 changes mid-frame
+PAL_PF2     equ PAL+$404        ;           pen 2, what T7's cells become
+
+; IRGB-4444: IIII RRRR GGGG BBBB, an intensity nibble scaling each component.
+C_BLACK     equ $0000
+C_RED       equ $FF00
+C_GREEN     equ $F0F0
+C_BLUE      equ $F00F
+C_WHITE     equ $FFFF
+
+; A playfield cell word is flip:tile-select:code. With the synthetic PROM the
+; high byte selects lookup entry 0 for every value, so the low byte is the tile.
+PF_TILE1    equ $0001           ; solid pen 1
+PF_TILE2    equ $0002           ; solid pen 2
+
+; The two cells T7 writes, one well above the beam at the moment of the write and
+; one well below it. Cell (row, col) is at PF + (row*64 + col)*2, and covers
+; screen rows row*8 to row*8+7 with both scrolls at zero.
+PF_ABOVE    equ PF+((6*64)+4)*2    ; screen rows 48-55
+PF_BELOW    equ PF+((25*64)+4)*2   ; screen rows 200-207
+
+; Where the text goes: alpha cell (2, 8), i.e. screen row 16, column 64.
+TEXTCELL    equ ALPHA+((2*64)+8)*2
+
+; The sprite: 4 tiles tall at screen (160, 80), tile codes 1 to 4 down its
+; length. draw_mo_entry reads height from word0's low nibble, the Y position from
+; word0 bits 5-13 as `-(v) - 256 - height*8` wrapped into 512, and X from word2
+; bits 5-13. So v = 512 - ((80 + 256 + 32) mod 512) = 144, and word0 is
+; (144 << 5) | 3.
+SPR_W0      equ $1203           ; height 4, Y 80
+SPR_W1      equ $0001           ; colour:code -> lookup entry 0, base tile 1
+SPR_W2      equ $1400           ; X 160 (160 << 5), low priority
 
 ; --- The image, and the range the CPU checksums back through the real bus ----
 
@@ -466,14 +526,164 @@ VbNotFirst
             move.w  #10,R_PHASE
 
 ; ===========================================================================
-; Done
+; Phase 11 -- draw a picture, and hold it long enough to be captured
+;
+; All three layers, so the capture exercises the whole compositor rather than
+; one corner of it: a playfield of solid pen 1, a line of text through the alpha
+; layer with its pen 0 left transparent so the background shows through the
+; glyphs, and one motion object whose four tiles step codes 1 to 4 down its
+; length. Every colour is written to palette RAM here, so nothing about the
+; picture depends on what the board powered up holding.
+;
+; Two vblanks before the phase is published. The compositor renders motion
+; objects from mo_shadow, which is copied at the start of vblank, so a sprite
+; written during a frame is not in the picture until the next one.
 ; ===========================================================================
+            move.w  #C_BLACK,PAL_PF0
+            move.w  #C_RED,PAL_PF1
+            move.w  #C_GREEN,PAL_PF2
+            move.w  #C_WHITE,PAL_MO1
+            move.w  #C_BLUE,PAL_MO2
+            move.w  #C_GREEN,PAL_MO3
+            move.w  #C_WHITE,PAL_MO4
+            move.w  #C_WHITE,PAL_AL1
+            move.w  #C_BLUE,PAL_AL2
+
+            move.w  #0,XSCROLL
+            move.w  #0,YSCROLL
+            move.w  #0,PRIORITY         ; no playfield pen draws in front of a sprite
+
+            lea     PF,a0               ; playfield: every cell solid pen 1
+            move.w  #(64*64)-1,d0
+PfFill
+            move.w  #PF_TILE1,(a0)+
+            dbra    d0,PfFill
+
+            lea     ALPHA,a0            ; alpha: clear to code 0, which the
+            move.w  #(64*32)-1,d0       ; synthetic font leaves fully transparent
+AlFill
+            move.w  #0,(a0)+
+            dbra    d0,AlFill
+            bsr     PetDog
+
+            lea     TextData,a0
+            lea     TEXTCELL,a1
+TxLoop
+            move.w  (a0)+,d0
+            cmpi.w  #TIMER_FLAG,d0
+            beq.s   TxDone
+            move.w  d0,(a1)+
+            bra.s   TxLoop
+TxDone
+
+            move.w  #SPR_W0,MOB_E1_W0   ; entry 1 becomes the sprite
+            move.w  #SPR_W1,MOB_E1_W1
+            move.w  #SPR_W2,MOB_E1_W2
+            move.w  #1,MOB_E1_W3
+            move.w  #TIMER_L3,MOB_E0_W0 ; entry 0 stays the timer, now at line 120
+            move.w  #TIMER_FLAG,MOB_E0_W1
+            move.w  #0,MOB_E0_W2
+            move.w  #1,MOB_E0_W3
+
+            bsr     PetDog
+            bsr     WaitVblank
+            bsr     PetDog
+            bsr     WaitVblank          ; mo_shadow now holds the sprite
             move.w  #11,R_PHASE
+
+; ===========================================================================
+; Phase 12 -- T6: change a palette entry part way down the frame
+;
+; The whole playfield is pen 1 and pen 1 is red. At the scanline the timer names
+; -- named by the interrupt, not by counting cycles -- pen 1 becomes green. On
+; hardware the rows the beam has already drawn stay red and the rest come out
+; green, one transition, at the line the interrupt fired on.
+;
+; THIS BOARD RENDERS THE WHOLE FRAME AT THE FRAME BOUNDARY, so the palette is
+; read once, after the write, and the entire picture comes out green. The
+; assertion in the harness is held as a known defect against
+; phosphor-emulator-raster-sampling-6kae.3 and is expected to fail the day that
+; lands. See the harness and the design doc; do not "fix" it by deleting it.
+; ===========================================================================
+            lea     INT3STATE,a0
+            move.w  #INT3_MASK,d1
+            bsr     WaitSet             ; line 120 of the frame now starting
+            move.w  #C_GREEN,PAL_PF1
+            bsr     PetDog
+            bsr     WaitVblank          ; ride out the frame the write is in
+            move.w  #12,R_PHASE
+
+; ===========================================================================
+; Phase 13 -- T7: write playfield cells above and below the beam
+;
+; The Joust bug class restated for a tilemap. Pen 1 is red again before the
+; frame's first line. At line 120 two cells become pen 2, which is green: one at
+; screen rows 48-55, drawn long ago, and one at 200-207, not yet reached. On
+; hardware only the lower one changes in this frame and both have changed by the
+; next.
+;
+; Rendered whole-frame, both change at once. Also held as a known defect.
+; ===========================================================================
+; A WHOLE FRAME BEFORE THE PALETTE IS PUT BACK, and it has to be. Phase 12 is
+; published at the vblank edge, which is still inside the frame the harness is
+; running and will capture when it returns; anything written between there and
+; the frame boundary lands in that capture. Restoring pen 1 immediately put the
+; red back before T6's frame was ever rendered, and T6 read a screen with neither
+; colour where it wanted green. So this rides out that frame first and restores
+; in the blank of the next one, clear of the capture and clear of the frame T7
+; goes on to measure.
+            bsr     PetDog
+            bsr     WaitVblank
+            move.w  #C_RED,PAL_PF1      ; in the blank, before T7's frame starts
+            lea     INT3STATE,a0
+            move.w  #INT3_MASK,d1
+            bsr     WaitSet             ; line 120 again
+            move.w  #PF_TILE2,PF_ABOVE
+            move.w  #PF_TILE2,PF_BELOW
+            bsr     PetDog
+            bsr     WaitVblank
+            move.w  #13,R_PHASE
+
+; ===========================================================================
+; Phase 14 -- the frame after, with no writes at all
+;
+; Both cells must be green here whichever rendering model is in force, so this
+; is the capture that says the writes landed rather than that they landed late.
+; ===========================================================================
+            bsr     PetDog
+            bsr     WaitVblank
+            move.w  #14,R_PHASE
+
+; ===========================================================================
+; Done
+;
+; Phase 14 is held for a whole frame before 15 is published. The harness reads
+; the phase once per run_frame, so a phase is only observable if it is the last
+; one written in its frame; writing 15 straight after 14 would put both at line
+; 240 of the idle frame and that capture would never be taken. This cost the
+; Williams ROM its third capture and is written down there too.
+; ===========================================================================
+            bsr     PetDog
+            bsr     WaitVblank
+            move.w  #15,R_PHASE
             move.w  #MAGIC,R_MAGIC
 Spin
             bsr     WaitVblank
             bsr     PetDog
             bra     Spin
+
+; ===========================================================================
+; Data
+; ===========================================================================
+
+; "ROAD RUNNER" as alpha cell words: code in bits 0-9, colour in 12-10, the
+; force-opaque flag in 13. Colour 0 and the flag clear, so pen 0 of each glyph
+; stays transparent and the playfield shows through the letters. The glyph codes
+; are the font the harness builds; code 0 is blank, which is also what the alpha
+; layer is cleared to.
+TextData
+            dc.w    1,2,3,4,0,1,5,6,6,7,1
+            dc.w    TIMER_FLAG          ; $FFFF terminator
 
 ; ===========================================================================
 ; Helpers

@@ -10,10 +10,12 @@
 > `roadrunner_video.bin` beside it, and the harness is
 > `machines/tests/roadrunner_video_timing_test.rs`.
 >
-> Landed so far: `uzbt`, the skeleton that proves the Williams loading mechanism
-> carries to a 68000 board on `AddressSpace32`, and `m0bu`, the video assertions
-> whose verdict is a word in RAM. The two picture assertions are `78lx`, and they
-> land red on purpose.
+> All three steps have landed: `uzbt`, the skeleton that proves the Williams
+> loading mechanism carries to a 68000 board on `AddressSpace32`; `m0bu`, the
+> video assertions whose verdict is a word in RAM; and `78lx`, a picture through
+> all three layers plus the two mid-frame assertions, which describe behaviour
+> that is **wrong on purpose** and are held as a ratchet against
+> `raster-sampling-fidelity.md` W3.
 >
 > Every figure in *Result block* below has been **measured** on a ROM-less
 > roadrunner unless marked otherwise. Where a measurement corrected this
@@ -414,6 +416,106 @@ misleading phase number, which is what the bounded waits and the handler cap
 above were added for; before them, the message named phase 3 for a defect in
 phase 8.
 
+## The picture (78lx)
+
+### The board has to be given graphics before it can draw
+
+A board built with no ROM set has no tile or font graphics at all.
+`PlayfieldGfx::empty` leaves a single blank placeholder bank, so every playfield
+and motion-object pixel decodes to pen 0 and the compositor has nothing to draw;
+the alpha cache is 512 zeroed tiles for the same reason. The signal assertions
+did not care, and the picture assertions cannot work without them.
+
+So the harness builds its own font and tile set and installs them through
+`load_alpha` and `load_gfx`, the same entry points the cartridge loader uses.
+Tile N is a solid block of pen N for N in 1 to 4; the font is eight 8x8 glyphs
+written as string art. Both are *defined* rather than captured, which is what
+keeps the expected picture derivable. It costs the registry's `create_bare`: the
+machine is constructed directly so the graphics can be installed before the
+program runs. Still no arcade ROMs, still CI-safe.
+
+The bit layouts are restated in the harness from `ALPHA_LAYOUT`
+(`atari_system1.rs:86-93`) and `tile_layout` (`:130-142`). That is a deliberate
+coupling. Get either side wrong and the picture assertions fail rather than
+quietly drawing the wrong thing.
+
+### What it draws
+
+All three layers, so the capture exercises the compositor rather than one corner
+of it:
+
+- a playfield of solid pen 1 across all 64 x 64 cells, red;
+- "ROAD RUNNER" through the alpha layer at cell (2, 8), its pen 0 left
+  transparent so the background shows through the glyphs;
+- one motion object at (160, 80), four tiles tall, stepping codes 1 to 4 so each
+  8-row band is a different pen and a different palette entry.
+
+`the_program_draws_a_picture_through_all_three_layers` pins one thing from each
+layer's own path: the playfield's PROM lookup and palette bank, the sprite's link
+walk and per-row code stepping, and the alpha layer's glyph decode and
+transparent pen 0. Without it, the two assertions below could agree about a black
+screen.
+
+### The two assertions that are supposed to fail
+
+Both mid-frame writes are placed by the motion-object timer interrupt at
+scanline 120, never by counting cycles.
+
+**T6, the palette split.** The playfield is uniformly pen 1 and pen 1 is red. At
+line 120 pen 1 becomes green. Hardware keeps the rows already scanned out red and
+turns the rest green, one transition. This board reads the palette once at the
+frame boundary, so all 240 rows come out green.
+
+**T7, the beam has already passed.** At line 120 two playfield cells become pen 2,
+which is green: one covering screen rows 48-55, drawn long before, and one
+covering 200-207, not yet reached. Hardware changes only the lower one in that
+frame and both by the next. This board changes both at once.
+
+### How they are held: a ratchet, not an ignore
+
+Each test asserts the **defect is still present** and its failure message states
+what the correct answer is, that the fix is to write that expectation, and that
+the test must not be deleted. The suite is green today,
+`raster-sampling-fidelity.md` W3 turns it red the day it lands, and the only way
+back to green is the correct expectation. This is the shape
+`harness/tests/audio/expectations.toml` already uses for the same reason: the
+list can only shrink and cannot quietly absorb a regression.
+
+`#[ignore]` was rejected because an ignored test is invisible and
+`phosphor-emulator-gn5w` is what happens when nobody comes back for one. Asserting
+the current behaviour under only a comment was rejected because nothing then
+fires when it stops being wrong.
+
+T6 orders its assertions so the diagnosis is right in both directions: no green
+at all means the write never landed, which is a broken fixture rather than a
+rendering-model question, and only then does the ratchet speak.
+
+### Both were shown to discriminate
+
+Required, and done by mutation rather than argument. `render_frame` was
+temporarily given a two-band composite: rows above line 121 rendered from a
+palette and playfield snapshot taken at scanline 0, rows below from the state at
+the frame boundary. That is the minimum change that produces the per-beam answer
+for these two writes, since both happen on one known line.
+
+Under it, T6 reports 121 rows still red against 119 green, and T7 reports its
+upper row red. Both are the correct hardware answers, both fire the ratchet, and
+both print the message telling the reader to write the real expectation. The six
+signal assertions were unaffected, which is the right pattern for a
+rendering-only mutation. Reverting restored green.
+
+Anyone revisiting whether these two tests earn their keep should redo that
+mutation rather than trust this paragraph.
+
+### One thing the sequencing cost
+
+Phase 12 is published at the vblank edge, which is still inside the frame the
+harness is running and will capture when `run_frame` returns. The first version
+restored the palette immediately afterwards, so red was back before T6's frame
+was ever rendered and the test read a screen with neither colour where it wanted
+green. The restore now rides out that frame first. This is the same class of
+mistake as the Williams phase 9/10 collision, and the same fix.
+
 ## What this does not cover yet
 
 The two picture assertions are `78lx` and land red until
@@ -458,7 +560,9 @@ Tracked as `phosphor-emulator-roadrunner-video-conformance-wfop`.
 2. **Done** (`m0bu`) - the VBLANK level, IRQ4 and its ack, the placeable IRQ3 on
    both the poll and the interrupt path, and the interrupt half of the read-twice
    asymmetry. Twelve assertions, no arcade ROMs.
-3. `78lx` - the two picture assertions, landed red as W3's acceptance test.
+3. **Done** (`78lx`) - synthetic graphics, a picture through all three layers,
+   and the two picture assertions held as a ratchet against W3. Fifteen
+   assertions, no arcade ROMs.
 
 ## References
 
