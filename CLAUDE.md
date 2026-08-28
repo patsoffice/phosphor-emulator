@@ -158,9 +158,19 @@ PHOSPHOR_GOLDEN_UPDATE=1 cargo test -p phosphor-harness --test golden_frame_test
 ```
 
 - Run it after any rendering, palette, video-timing or CPU change. It is the only test that would notice a machine drawing the wrong picture.
+- Its commonest use is the null result: a byte-identical frame is how a bus, clock or CPU refactor shows it moved no picture. That is only evidence where the change could have reached video, so say which it is. The review behind this is at the end of `docs/designs/frame-regression.md`.
 - A failure writes the actual frame to `harness/tests/golden/actual/` and prints a `disasm imgdiff` command; **look at the image** before recapturing.
 - Recapture only for an intended change, and review the resulting PNG diff — a refreshed hash with a wrong picture is worse than no test.
 - Adding a machine to the registry fails `frames_toml_covers_every_registered_machine` until it has a pin, or an `[[unpinned]]` entry saying why a frame can't be captured.
+
+**When a hash changes, validate the assumption before you recapture.** From the 2026-08-27 review, where the third and fourth of these were nearly got wrong.
+
+- **Name the mechanism first.** Point at the commit, the changed constant, or the code path that moved the picture. "Can I point at the part?" A recapture with no named cause is a regression being pinned, and the hash cannot tell an intended renderer change from a broken one.
+- **Explain the whole set, not the first machine.** Count what moved against what did not: "7 of 39, and all 7 are exactly the machines carrying a `vectors` pin" localises the cause, "some frames changed" does not. One machine you cannot account for is the finding, not noise.
+- **A changed file is not a changed picture.** Update mode rewrites all 39 reference PNGs, so `git status` includes files whose pixels are identical and whose encoding merely changed with the `png` crate. `frames.toml` says which hashes actually moved; `disasm imgdiff --threshold 0` proves content did or did not.
+- **Judge colour and geometry from a crop at full scale.** A downscaled preview of that session's Star Wars capture showed a hue change that was not there; cropping the header from both images at full scale showed the colours identical.
+- **Rewrite `shows` when the picture changes**, and check the old prose for claims the new frame refutes. Tempest's said the picture was 90 degrees off for two days after that was fixed.
+- **A timing fix usually moves the picture by moving the machine**, not by changing what the board draws: a different point in a colour cycle, a different attract screen. Say which it is in the commit, because the hash cannot.
 
 ### CPU Validation
 

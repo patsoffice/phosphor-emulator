@@ -249,6 +249,10 @@ profile the test suite uses. Across the roster that is a few minutes, which is
 why this is ROM-gated and local rather than part of every `cargo test`. It
 sits with `boot_check_test.rs`, which already spends a comparable budget.
 
+Since `ea633f7` the captures run one machine per core, so the whole roster is
+26.9 s of wall time against 173.5 s sequential. The reference PNGs are 429 KB
+of the tree after the png 0.18 re-encode in `b81e5d7`.
+
 ## What this does not do
 
 - **No tolerance.** The comparison is exact. A machine whose output legitimately
@@ -261,3 +265,111 @@ sits with `boot_check_test.rs`, which already spends a comparable budget.
 - **It does not say the frame is *right*,** only that it has not changed. The
   `shows` field and the committed PNG are what carry the human judgement that
   it was right when pinned.
+
+## Review: what the pins have actually done
+
+> Answers `phosphor-emulator-gr27`, which asked what the comparison has caught
+> against what it has cost in recaptures, and whether to re-enable, narrow or
+> retire it. Written 2026-08-27 over the twelve days from the first capture.
+> The outcome was keep both hashes and narrow nothing, and the reason is not
+> the one the issue expected.
+
+### The cost, measured
+
+Four recapture events, thirteen machine-recaptures, ten distinct machines.
+Twenty-nine of the thirty-nine pinned machines have never been recaptured at
+all.
+
+| Event | Machines | Why the picture moved |
+|---|---|---|
+| `b22534b` vector generator runs in emulated time | quantum, starwars, tempest | animation phase, and a different attract level from a moved RNG seed |
+| `9ba89f9` a slow Williams blit costs two cycles a byte | robotron, sinistar | colour-cycle phase, and a different moment of the same text screen |
+| `1461ee4` MCR II's dot clock is master/2 | shollow | the attract loop reaches the SHIELD screen instead of the title |
+| `35048ac` vector renderer rework, and iitc with it | the seven vector machines | f32 display-list coordinates, the `display_size` split, beam width, dwell, halation, vertex dots, and tempest's orientation fix |
+
+Three of the four were timing fixes, and in each the picture moved because the
+machine had got somewhere else in its attract loop, not because the board drew
+differently. That is exactly the complaint the issue was filed over, and it is
+real: a hash cannot tell those apart, and the reviewer has to.
+
+One of the thirteen, tempest, was a correction to what a machine draws.
+
+### The catches
+
+In twelve days, no comparison failure has revealed an unknown defect. Every red
+run has been a change someone had just made on purpose.
+
+Two real bugs were found *while pinning*, which is a different thing: Super
+Cobra rotated 90 degrees, fixed in `1ea6381`, and Tempest's double-applied
+`ROT270`, filed as `phosphor-emulator-iitc` and fixed nine days later. Both came
+from a human looking at 39 pictures once. That yield is spent.
+
+The i32 beam-flip overflow (`e5a16b1`) was found by a debug-build panic, and the
+Quantum runaway frame beside it by reading frame counts during that
+investigation. The pins saw neither, because the beam only leaves the screen in
+states the pinned frame does not reach.
+
+### The column the question did not have
+
+Eleven commits cite an *unchanged* golden frame as their evidence. That, not the
+failure, is what the suite is actually used for:
+
+- `98831fd` CPUs take the bus as a type parameter, `e7b1d18` and `0820f4f` the
+  concrete-bus dispatch refactor across every machine
+- `facba15` frame rendering and hashing moved into the harness, i.e. a refactor
+  of the hashing path itself
+- `671b6e6` Donkey Kong sprite fetch wrap: "All 40 golden frames pass unchanged,
+  which is the acceptance test that matters: it proves normal play never reached
+  this path"
+- `e5a16b1` the beam-flip fix, `ba9c701` the MCR CTC cascade, `d49fcd3` the last
+  hand-rolled clock accumulators
+
+A null result is only worth something when the instrument could have moved, so
+these split in two. For the bus and rendering refactors, the sprite-fetch wrap
+and the beam-flip fix, a mistake lands directly on pixels and "byte-identical"
+is a real acceptance test. For `7b2d041`, `60c1467` and `e525097`, all sound
+clocks, the commits argue structurally that sound cannot reach video, and the
+unchanged frame confirms an argument already made rather than making it.
+`27f46f0` is the honest edge: Food Fight's IRQ1 scanlines moved, its new tests
+fail against the old positions, and the picture did not move at all, so there
+the pin was simply insensitive.
+
+Roughly eight of the eleven are load-bearing. That is still more work than the
+suite has done in either of the other two columns.
+
+### Why the narrowing proposed in the issue was not done
+
+The issue suggested pinning only the `vectors` hash for the vector machines,
+since it is renderer-independent and is what the frontend draws. The history
+refutes it on both counts.
+
+It would save nothing. Across every vector recapture there has ever been, ten
+machine-recaptures over `b22534b` and `35048ac`, the frame hash and the vectors
+hash moved *together* every single time. Neither has ever moved alone. Dropping
+one would have shortened the diff by a line and avoided no recapture.
+
+And it would have cost the one real catch in the set. `phosphor-emulator-iitc`
+was a defect in `render_frame`, the raster fallback, which the vectors hash
+cannot see: it is orientation-free by construction, which is precisely why the
+old `shows` prose said it "pins the real output" while the committed picture was
+sideways.
+
+So both hashes stay. The recapture cost is not caused by having two hashes; it
+is caused by pinning a frame sampled from a free-running attract loop, and it
+would survive the narrowing untouched.
+
+### What this means for the conformance-ROM programme
+
+`phosphor-emulator-conformance-rom-programme-hl4t` argues that golden frames
+carry two jobs, pinning artwork and standing in as the timing guard, and do the
+second badly. That is right, and this review adds a third job that neither
+document named: saying that a change moved no picture at all. Conformance ROMs
+do not take that job either, because they draw their own patterns and know
+nothing about a machine's artwork.
+
+It also sharpens what the programme can expect to save. Taking the timing job
+away does not reduce the recapture cost, because a timing fix still moves the
+attract phase and still forces a recapture. What it buys is that the recapture
+stops being the only evidence: the conformance ROM says what the timing now is,
+derived, while the golden frame goes on saying only that the picture is
+different.
