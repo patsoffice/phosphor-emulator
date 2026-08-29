@@ -177,7 +177,9 @@ fn read_snapshot(path: &Path) -> Vec<u8> {
             buf
         }
         png::ColorType::Rgba => buf[..info.buffer_size()]
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .flat_map(|p| [p[0], p[1], p[2]])
             .collect(),
         other => panic!("{}: unexpected colour type {other:?}", path.display()),
@@ -339,8 +341,10 @@ fn our_picture_matches_mames_on_the_real_graphics() {
             "phase {phase}: frame sizes differ"
         );
         let bad = our_rgb
-            .chunks_exact(3)
-            .zip(mame_rgb.chunks_exact(3))
+            .as_chunks::<3>()
+            .0
+            .iter()
+            .zip(mame_rgb.as_chunks::<3>().0)
             .enumerate()
             .filter(|(_, (a, b))| a != b)
             .map(|(i, (a, b))| (i % WIDTH, i / WIDTH, a.to_vec(), b.to_vec()))

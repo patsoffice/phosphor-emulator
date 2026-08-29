@@ -479,9 +479,11 @@ fn the_reset_vectors_come_from_the_poked_image() {
 /// did, when this was first written with `-l 0x00`.
 #[test]
 fn the_whole_image_reads_back_through_the_cpu_bus() {
-    let expected = PROGRAM.chunks_exact(2).fold(0u16, |acc, w| {
-        acc.wrapping_add(u16::from_be_bytes([w[0], w[1]]))
-    });
+    let expected = PROGRAM
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .fold(0u16, |acc, w| acc.wrapping_add(u16::from_be_bytes(*w)));
     let r = run();
     r.assert_completed();
     assert_eq!(
