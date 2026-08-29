@@ -437,6 +437,17 @@ pub struct XeviousSystem {
     // palette indices; blank until the renderer lands (later M2 tasks).
     #[save_skip]
     native_buffer: Vec<u8>,
+    /// Scratch priority buffer for the shared gfx helpers, reused by every row
+    /// pass rather than zeroed afresh in each one.
+    ///
+    /// This board composites by draw order and never reads a priority back;
+    /// both helpers document `prio_buf` as write-only, writing it unconditionally
+    /// wherever they write a pixel. Under whole-frame rendering the per-pass
+    /// array cost one 288-byte zeroing per layer per frame. Drawing per row made
+    /// that once per layer *per row*, plus one per sprite tile per row instead of
+    /// one per sprite tile, which measured as most of a 13.6% regression.
+    #[save_skip]
+    prio_scratch: [u8; 288],
     // 128 indirect colours (index 0x80 is the transparent black marker).
     #[save_skip]
     palette: Vec<(u8, u8, u8)>,
@@ -523,6 +534,7 @@ impl XeviousSystem {
             bg_lut: [0; 512],
             sprite_lut: [0; 512],
             native_buffer: vec![0u8; 288 * 224],
+            prio_scratch: [0u8; 288],
             palette: vec![(0, 0, 0); 256],
         }
     }
@@ -651,33 +663,58 @@ impl XeviousSystem {
     /// deliberately does **not** fire at the start of vblank: this board writes
     /// video state during vblank, so sampling earlier would change the picture.
     fn tick_frame_boundary(&mut self) {
+        self.begin_scanline_render();
         let (cpus, mut bus) = self.split();
         namco_galaga::tick(cpus, &mut bus);
-        if self
-            .board
-            .clock
-            .is_multiple_of(namco_galaga::TIMING.cycles_per_frame())
-        {
-            self.render_video();
+    }
+
+    /// Draw the row about to be scanned, if the clock is on the boundary of a
+    /// visible one.
+    ///
+    /// The off-boundary case only arises after the debugger has single-stepped
+    /// the clock out of phase; the row is then drawn at the next boundary it
+    /// crosses, as the beam would.
+    fn begin_scanline_render(&mut self) {
+        let per_line = namco_galaga::TIMING.cycles_per_scanline;
+        if !self.board.clock.is_multiple_of(per_line) {
+            return;
+        }
+        let scanline = self.board.clock % namco_galaga::TIMING.cycles_per_frame() / per_line;
+        if scanline < 224 {
+            self.render_scanline(scanline as usize);
         }
     }
 
+    /// Draw one visible row, out of the video state as it stands at that row's
+    /// scanline boundary.
+    ///
     /// Layer order matches the hardware: opaque background, then sprites, then
     /// the transparent foreground text on top.
-    fn render_video(&mut self) {
-        self.render_background();
-        self.render_sprites();
-        self.render_foreground();
+    ///
+    /// This is the first board in the epic with real scroll registers, and they
+    /// are now read per row. Both tilemaps take their scroll from
+    /// `bg_scroll_x/y` and `fg_scroll_x/y` as those stand when the beam reaches
+    /// the row, so a mid-screen write to a scroll register splits the layer
+    /// there instead of moving the whole frame. That is the raster effect this
+    /// epic exists for, and on this board it costs nothing extra: the shared
+    /// helper already took a scroll per call.
+    fn render_scanline(&mut self, y: usize) {
+        self.render_background_row(y);
+        self.render_sprites_row(y);
+        self.render_foreground_row(y);
     }
 
     /// Draw the scrolling background tilemap (bottom, opaque layer). The 64×32
     /// tile map (512×256 px) is scrolled into the 288×224 viewport; each tile's
     /// 9-bit code, 7-bit colour, and flip come from BG video/colour RAM, and the
     /// 2bpp pen is mapped to an indirect palette index through the BG LUT.
-    fn render_background(&mut self) {
+    fn render_background_row(&mut self, screen_y: usize) {
         // Opaque 64×32 scrolled tilemap (512×256 px) into the 288-wide viewport,
         // via the shared scroll-aware index-writing helper. Pens map through the
         // background LUT; per-tile H/V flip from colour-RAM bits 6/7.
+        if self.bg_tile_cache.count() == 0 {
+            return;
+        }
         let sx0 = self.bg_scroll_x as i32 + BG_SCROLL_DX;
         let sy0 = self.bg_scroll_y as i32 + BG_SCROLL_DY;
         let bg_videoram = self.board.map.region_data(Region::BgVideoRam);
@@ -685,8 +722,8 @@ impl XeviousSystem {
         let bg_lut = &self.bg_lut;
         let bg_tile_cache = &self.bg_tile_cache;
         let native = &mut self.native_buffer;
-        let mut prio = [0u8; 288];
-        for screen_y in 0..224usize {
+        let prio = &mut self.prio_scratch;
+        {
             let row_off = screen_y * 288;
             let row = &mut native[row_off..row_off + 288];
             gfx::render_scrolled_tilemap_scanline_indexed(
@@ -715,7 +752,7 @@ impl XeviousSystem {
                 // Opaque: the background LUT gives the indirect palette index.
                 |color, pixel| Some((bg_lut[color as usize * 4 + pixel as usize], 0)),
                 row,
-                &mut prio,
+                prio,
                 0,
             );
         }
@@ -725,18 +762,21 @@ impl XeviousSystem {
     /// (512×256 px) uses the FG scroll registers; each 8×8 char is 1bpp with pen
     /// 0 transparent. The 6-bit colour code maps directly to an indirect palette
     /// entry (0-63) for the opaque pen — no lookup PROM, unlike the background.
-    fn render_foreground(&mut self) {
+    fn render_foreground_row(&mut self, screen_y: usize) {
         // Transparent 64×32 scrolled text tilemap (1bpp, pen 0 transparent) into
         // the 288-wide viewport; the 6-bit colour maps directly to an indirect
         // palette entry. Same scroll-aware helper as the background.
+        if self.char_cache.count() == 0 {
+            return;
+        }
         let sx0 = self.fg_scroll_x as i32 + FG_SCROLL_DX;
         let sy0 = self.fg_scroll_y as i32 + FG_SCROLL_DY;
         let fg_videoram = self.board.map.region_data(Region::FgVideoRam);
         let fg_colorram = self.board.map.region_data(Region::FgColorRam);
         let char_cache = &self.char_cache;
         let native = &mut self.native_buffer;
-        let mut prio = [0u8; 288];
-        for screen_y in 0..224usize {
+        let prio = &mut self.prio_scratch;
+        {
             let row_off = screen_y * 288;
             let row = &mut native[row_off..row_off + 288];
             gfx::render_scrolled_tilemap_scanline_indexed(
@@ -764,7 +804,7 @@ impl XeviousSystem {
                 // Pen 0 transparent; the colour is the indirect palette index.
                 |color, pixel| (pixel != 0).then_some((color, 0)),
                 row,
-                &mut prio,
+                prio,
                 0,
             );
         }
@@ -776,8 +816,49 @@ impl XeviousSystem {
     /// 3bpp 16×16 with optional double width/height and H/V flip; pen 0x80 is
     /// transparent. Screen origin: X = xpos - 40 (+256 when the high bit is set),
     /// Y counts up from the bottom of the visible area.
-    fn render_sprites(&mut self) {
+    /// One row of the sprite layer.
+    ///
+    /// Slots are still visited in list order, and the tiles of a double-size
+    /// slot in the same order within it, so the pixel a row ends up with is the
+    /// one the whole-frame pass produced from the same register banks: only the
+    /// *moment* they are read has moved. `draw_sprite_tile_row` rejects the
+    /// tiles that are not on this line.
+    ///
+    /// The list is read as of this row. The 04XX walks it into a line buffer
+    /// displayed on the next line, so a slot whose registers change mid-screen
+    /// would appear one row early here. That lead is deliberately not added, for
+    /// the reason W3 gives: the board's Y constants already carry it.
+    fn render_sprites_row(&mut self, y: usize) {
+        // Which slots can reach this row, decided in one pass so the loop below
+        // only pays the full decode for the handful that can.
+        //
+        // Every slot's registers are still read during this row, which is the
+        // point of the migration. What this avoids is re-taking the three region
+        // borrows for each of the 64 slots on each of the 224 rows: that is
+        // 43,000 map lookups a frame against 192 before, and it was most of a
+        // 13.6% regression when the row passes first landed. The blitter takes
+        // `&mut self`, so the borrows cannot simply be hoisted around it.
+        let mut reaches = [false; 64];
+        {
+            let sr1 = self.board.map.region_data(Region::Sr1);
+            let sr3 = self.board.map.region_data(Region::Sr3);
+            for (i, slot) in reaches.iter_mut().enumerate() {
+                let o = 0x780 + i * 2;
+                if sr3[o + 1] & 0x40 != 0 {
+                    continue; // slot disabled
+                }
+                // Every size/flip case below places its tiles at `sy` or
+                // `sy - 16`, so this is a superset of all four; deliberately
+                // loose, because a too-tight bound silently drops sprites.
+                let sy = 28 * 8 - sr1[o] as i32 - 1;
+                *slot = (sy - 16..sy + 16).contains(&(y as i32));
+            }
+        }
+
         for offs in (0..0x80usize).step_by(2) {
+            if !reaches[offs / 2] {
+                continue;
+            }
             // The sprite hardware reads one register pair from each of the three
             // SR banks at the same offset; copy the six bytes out before calling
             // the (mutably borrowing) blitter below.
@@ -813,29 +894,29 @@ impl XeviousSystem {
                     let c = base & !3;
                     let (l, r) = if flipx { (sx + 16, sx) } else { (sx, sx + 16) };
                     let (t, b) = if flipy { (sy - 16, sy) } else { (sy, sy - 16) };
-                    self.draw_sprite_tile(c, color, flipx, flipy, l, b);
-                    self.draw_sprite_tile(c + 2, color, flipx, flipy, l, t);
-                    self.draw_sprite_tile(c + 1, color, flipx, flipy, r, b);
-                    self.draw_sprite_tile(c + 3, color, flipx, flipy, r, t);
+                    self.draw_sprite_tile_row(c, color, flipx, flipy, l, b, y);
+                    self.draw_sprite_tile_row(c + 2, color, flipx, flipy, l, t, y);
+                    self.draw_sprite_tile_row(c + 1, color, flipx, flipy, r, b, y);
+                    self.draw_sprite_tile_row(c + 3, color, flipx, flipy, r, t, y);
                 }
                 (true, false) => {
                     // Double height: two tiles stacked vertically.
                     let c = base & !2;
                     let x = if flipx { sx + 16 } else { sx };
                     let (t, b) = if flipy { (sy - 16, sy) } else { (sy, sy - 16) };
-                    self.draw_sprite_tile(c, color, flipx, flipy, x, b);
-                    self.draw_sprite_tile(c + 2, color, flipx, flipy, x, t);
+                    self.draw_sprite_tile_row(c, color, flipx, flipy, x, b, y);
+                    self.draw_sprite_tile_row(c + 2, color, flipx, flipy, x, t, y);
                 }
                 (false, true) => {
                     // Double width: two tiles side by side.
                     let c = base & !1;
-                    let y = if flipy { sy - 16 } else { sy };
+                    let ty = if flipy { sy - 16 } else { sy };
                     let (l, r) = if flipx { (sx + 16, sx) } else { (sx, sx + 16) };
-                    self.draw_sprite_tile(c, color, flipx, flipy, l, y);
-                    self.draw_sprite_tile(c + 1, color, flipx, flipy, r, y);
+                    self.draw_sprite_tile_row(c, color, flipx, flipy, l, ty, y);
+                    self.draw_sprite_tile_row(c + 1, color, flipx, flipy, r, ty, y);
                 }
                 (false, false) => {
-                    self.draw_sprite_tile(base, color, flipx, flipy, sx, sy);
+                    self.draw_sprite_tile_row(base, color, flipx, flipy, sx, sy, y);
                 }
             }
         }
@@ -844,7 +925,8 @@ impl XeviousSystem {
     /// Blit one 16×16 sprite tile into the native buffer with H/V flip and
     /// per-pixel transparency (indirect pen 0x80). `sx`/`sy` are the top-left
     /// screen coordinates; off-screen pixels are clipped.
-    fn draw_sprite_tile(
+    #[allow(clippy::too_many_arguments)]
+    fn draw_sprite_tile_row(
         &mut self,
         code: u32,
         color: usize,
@@ -852,7 +934,12 @@ impl XeviousSystem {
         flipy: bool,
         sx: i32,
         sy: i32,
+        y: usize,
     ) {
+        let py = y as i32 - sy;
+        if !(0..16).contains(&py) || y >= 224 {
+            return;
+        }
         let code = code as usize;
         let color_base = (color & 0x3f) * 8;
         // Full-width clip (0..288), no tunnel wrap. 3bpp pens map through the
@@ -869,29 +956,23 @@ impl XeviousSystem {
         let native = &mut self.native_buffer;
         let is_transparent = |pixel: u8| sprite_lut[color_base + pixel as usize] == 0x80;
         let resolve = |pixel: u8| (sprite_lut[color_base + pixel as usize], 0u8);
-        let mut prio = [0u8; 288];
+        let prio = &mut self.prio_scratch;
 
-        for py in 0..16i32 {
-            let dy = sy + py;
-            if !(0..224).contains(&dy) {
-                continue;
-            }
-            let fpy = if flipy { 15 - py } else { py } as usize;
-            let row_off = dy as usize * 288;
-            let row = &mut native[row_off..row_off + 288];
-            gfx::draw_sprite_row_indexed(
-                sprite_cache,
-                code as u16,
-                fpy,
-                sx,
-                flipx,
-                is_transparent,
-                resolve,
-                row,
-                &mut prio,
-                &clip,
-            );
-        }
+        let fpy = if flipy { 15 - py } else { py } as usize;
+        let row_off = y * 288;
+        let row = &mut native[row_off..row_off + 288];
+        gfx::draw_sprite_row_indexed(
+            sprite_cache,
+            code as u16,
+            fpy,
+            sx,
+            flipx,
+            is_transparent,
+            resolve,
+            row,
+            prio,
+            &clip,
+        );
     }
 
     /// Borrow the CPUs and the bus they drive as two disjoint pieces.
@@ -1315,23 +1396,24 @@ impl MachineCore for XeviousSystem {
     }
 
     fn run_frame(&mut self) {
-        // Split once per frame-boundary run rather than per cycle: the bus view
-        // is several pointers wide, and re-forming it every cycle costs more
-        // than the dispatch it replaced. The render still happens exactly when
-        // the clock crosses a frame boundary, sampling the same video state
-        // `tick_frame_boundary` would have.
-        let cycles = namco_galaga::TIMING.cycles_per_frame();
-        let mut remaining = cycles;
+        // Scanline-outer: draw the row the beam is about to paint, then run that
+        // row's worth of cycles. The split is re-formed once per scanline rather
+        // than once per frame, which is 264 times instead of one; a per-*cycle*
+        // split cost about 6% on this board when it was measured, and this is
+        // 1/192nd of that frequency.
+        let per_line = namco_galaga::TIMING.cycles_per_scanline;
+        let mut remaining = namco_galaga::TIMING.cycles_per_frame();
         while remaining > 0 {
-            let run = (cycles - self.board.clock % cycles).min(remaining);
+            self.begin_scanline_render();
+            // A partial leading scanline only arises when the debugger has left
+            // the clock off-phase; it runs up to the next boundary and the row
+            // is drawn there.
+            let run = (per_line - self.board.clock % per_line).min(remaining);
             {
                 let (cpus, mut bus) = self.split();
                 namco_galaga::run_cycles(cpus, &mut bus, run);
             }
             remaining -= run;
-            if self.board.clock.is_multiple_of(cycles) {
-                self.render_video();
-            }
         }
     }
 
@@ -1762,13 +1844,133 @@ mod tests {
         // Cancel the fixed scroll offset so native (x,y) == tilemap (x,y).
         sys.bg_scroll_x = (-BG_SCROLL_DX) as u16;
         sys.bg_scroll_y = (-BG_SCROLL_DY) as u16;
-        sys.render_background();
+        // The board draws one row per visible scanline, so the row under test
+        // has to be scanned; these assertions are all on native row 0.
+        sys.render_background_row(0);
         assert_eq!(sys.native_buffer[0], 0x0A); // native (0,0) -> tile 0
         assert_eq!(sys.native_buffer[8], 0x0B); // native (8,0) -> tile 1
         // Scrolling +8 in X shows tilemap content 8px to the right: tile 1 at (0,0).
         sys.bg_scroll_x = (-BG_SCROLL_DX + 8) as u16;
-        sys.render_background();
+        sys.render_background_row(0);
         assert_eq!(sys.native_buffer[0], 0x0B);
+    }
+
+    // -----------------------------------------------------------------------
+    // Per-scanline rendering (W4)
+    // -----------------------------------------------------------------------
+
+    /// A system whose background tiles 0 and 1 are solid, resolving to
+    /// distinguishable palette indices, with the fixed scroll offset cancelled
+    /// so native (x, y) is tilemap (x, y).
+    fn xevious_with_solid_bg() -> XeviousSystem {
+        let mut sys = XeviousSystem::new();
+        sys.bg_tile_cache = GfxCache::new(2, 8, 8);
+        for py in 0..8 {
+            for px in 0..8 {
+                sys.bg_tile_cache.set_pixel(0, px, py, 1);
+                sys.bg_tile_cache.set_pixel(1, px, py, 1);
+            }
+        }
+        sys.bg_lut[1] = 0x0A; // colour 0, pen 1
+        sys.bg_lut[4 * 4 + 1] = 0x0B; // colour 4, pen 1
+        sys.bg_scroll_x = (-BG_SCROLL_DX) as u16;
+        sys.bg_scroll_y = (-BG_SCROLL_DY) as u16;
+        sys
+    }
+
+    /// The behavior W4 exists for on the tilemap layer: background colour RAM is
+    /// read as the beam passes, so changing it partway down the screen changes
+    /// only the rows below the write.
+    ///
+    /// The split is at row 100, which is *inside* tile row 12 (rows 96..103). A
+    /// whole-frame render draws a tile row from one snapshot and cannot produce
+    /// this picture at all.
+    #[test]
+    fn a_mid_frame_color_ram_write_changes_only_the_rows_below_it() {
+        const SPLIT: usize = 100;
+        let mut sys = xevious_with_solid_bg();
+
+        for y in 0..SPLIT {
+            sys.render_background_row(y);
+        }
+        // attr bits 2..5 are colour bits 0..3, so 0x10 selects colour 4.
+        sys.board.map.region_data_mut(Region::BgColorRam).fill(0x10);
+        for y in SPLIT..224 {
+            sys.render_background_row(y);
+        }
+
+        let px = |y: usize| sys.native_buffer[y * 288 + 100];
+        assert_eq!(px(0), 0x0A, "row 0 was drawn before the write");
+        assert_eq!(
+            px(SPLIT - 1),
+            0x0A,
+            "the last row above it keeps the old colour, mid-tile-row"
+        );
+        assert_eq!(px(SPLIT), 0x0B, "the first row below it takes the new one");
+        assert_eq!(px(223), 0x0B, "the bottom row is below it");
+    }
+
+    /// This board is the first in the epic with real scroll registers, and
+    /// per-scanline rendering makes them per-row: writing the background scroll
+    /// partway down the screen splits the layer there instead of moving the
+    /// whole frame. That is the classic raster effect.
+    #[test]
+    fn a_mid_frame_scroll_write_splits_the_background() {
+        const SPLIT: usize = 100;
+        let mut sys = xevious_with_solid_bg();
+        // Tilemap column 0 gets colour 4 in every one of the 32 map rows;
+        // everything else stays colour 0. Both tiles are solid, so the colour is
+        // what distinguishes a column.
+        let bg_color = sys.board.map.region_data_mut(Region::BgColorRam);
+        for mrow in 0..32 {
+            bg_color[mrow * 64] = 0x10;
+        }
+
+        for y in 0..SPLIT {
+            sys.render_background_row(y);
+        }
+        // Scroll left by 8: tilemap column 1 now lands at native column 0.
+        sys.bg_scroll_x = (-BG_SCROLL_DX + 8) as u16;
+        for y in SPLIT..224 {
+            sys.render_background_row(y);
+        }
+
+        let px = |y: usize| sys.native_buffer[y * 288];
+        assert_eq!(px(0), 0x0B, "above the write, cell 0 is at column 0");
+        assert_eq!(px(SPLIT - 1), 0x0B, "still, on the last row above it");
+        assert_eq!(
+            px(SPLIT),
+            0x0A,
+            "below the write the scroll has moved cell 1 into column 0"
+        );
+        assert_eq!(px(223), 0x0A, "and to the bottom of the screen");
+    }
+
+    /// `render_scanline` drawing a row is only half of it: the frame loop has to
+    /// call it. Without this the tests above would pass on a board that never
+    /// drew anything, since they drive the row passes by hand.
+    #[test]
+    fn the_frame_loop_draws_rows_at_scanline_boundaries() {
+        let mut sys = xevious_with_solid_bg();
+        sys.native_buffer.fill(0xFF);
+
+        // One cycle at clock 0 crosses the scanline-0 boundary. This is the
+        // debugger's per-cycle path.
+        sys.tick_frame_boundary();
+        assert_eq!(sys.native_buffer[100], 0x0A, "tick draws row 0");
+        assert_eq!(
+            sys.native_buffer[288 + 100],
+            0xFF,
+            "and only row 0: nothing has drawn row 1 yet"
+        );
+
+        // And the frame loop, which hoists the boundary test out.
+        sys.native_buffer.fill(0xFF);
+        sys.run_frame();
+        let undrawn = (0..224)
+            .filter(|&y| sys.native_buffer[y * 288 + 100] == 0xFF)
+            .count();
+        assert_eq!(undrawn, 0, "run_frame draws every visible row");
     }
 
     /// A tiny synthetic 3bpp sprite exercises the plane-order + RGN_FRAC(1,2)
@@ -1809,7 +2011,9 @@ mod tests {
         let sr2 = sys.board.map.region_data_mut(Region::Sr2);
         sr2[0x780] = 0; // no flip / size / bank
         sr2[0x781] = 0; // high X bit clear
-        sys.render_sprites();
+        // The sprite's top row is native row 100, and the board draws one row
+        // per visible scanline, so that is the row to scan.
+        sys.render_sprites_row(100);
         assert_eq!(sys.native_buffer[100 * 288 + 100], 0x0C);
         // Neighbour pixel is the transparent pen: background (0) preserved.
         assert_eq!(sys.native_buffer[100 * 288 + 101], 0);
@@ -1817,7 +2021,7 @@ mod tests {
         // A disabled slot (bit 6 set) draws nothing.
         sys.native_buffer.fill(0);
         sys.board.map.region_data_mut(Region::Sr3)[0x781] = 0x40;
-        sys.render_sprites();
+        sys.render_sprites_row(100);
         assert_eq!(sys.native_buffer[100 * 288 + 100], 0);
     }
 

@@ -305,4 +305,4 @@ machine = "xevious"
 frames = 1800
 shows = "Attract mode: the XEVIOUS title over the scrolling green forest, with the Solvalou below it and the 1982 Namco copyright."
 size = [224, 288]
-frame = "sha256:96d0b553f76510ef671fb64232166b34d591f4f7d87f7286cf45a3cccc875376"
+frame = "sha256:ea2352abe4c3772155c5ccaf50d46e0dfbc56973dc6642fd122834db2d22829c"

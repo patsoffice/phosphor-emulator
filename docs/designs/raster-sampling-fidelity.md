@@ -728,9 +728,59 @@ colour, so a fixture that changes colour also changes which tile is fetched. The
 first version of the test allocated a one-entry cache and indexed out of bounds
 the moment the colour changed.
 
-Four machines remain: xevious, mrdo, foodf, marble. Xevious shares this board and
-this shape, and once all three are per-scanline the row drive is common enough to
-lift onto `namco_galaga` rather than repeated three times.
+### What shipped, on namco_galaga (xevious), 2026-08-29
+
+The fifth, and the first board whose pinned frame shows a **real mid-frame
+split** rather than a one-frame phase shift. It is also the first with a
+measurable perf cost.
+
+Same shape as galaga and digdug. This board is the first in the epic with real
+scroll registers, and they are now read per row, so a scroll write partway down
+the screen splits the layer there.
+
+**The pin is a third case.** Neither byte-identical nor one frame older:
+
+| band | vs old 1799 | vs old 1800 |
+|---|---|---|
+| native rows 0-7 | **0 / 2304** | 784 / 2304 |
+| native rows 8-223 | 19284 / 62208 | **536 / 62208** |
+
+The top 8 rows carry the *previous* frame's scroll; everything below is current.
+Traced with `disasm trace --events devwrite`: frame 1800 writes `$D001` (bg
+scroll X) and `$D020` (bg scroll Y) at **scanline 8**, inside active display, so
+the beam has already painted rows 0-7. The residual 536 in the lower band is the
+sprites, whose registers are written at **scanline 231**, in vblank, so they are
+one frame older like galaga's. Both halves are what the beam sees, and together
+they account for the whole difference.
+
+**The phase was checked against the reference before believing the seam.** Our
+model puts the visible window at scanlines 0..223; the reference's namco screen
+configs agree for galaga, xevious and digdug (`set_raw(..., 264, 0, 224)`). The
+one config in that file using `264, 16, 224+16` is Bosco, which is not in this
+registry. So scanline 8 really is eight lines into active display and the seam is
+hardware behaviour, not a phase error on our side.
+
+**Perf: +6%, the largest of the epic**, and the measurement is the weakest.
+Under a quiet host the pre-migration baseline was 2.381 ms/frame (±0.7%) and the
+first migrated version 2.704 (±4.8%), so +13.6%. Two output-neutral fixes brought
+that down, each verified to move zero pixels:
+
+* a shared `prio_scratch`, because both gfx helpers document `prio_buf` as
+  write-only and the per-call `[0u8; 288]` went from once per layer per frame to
+  once per layer *per row*, plus once per sprite tile per row;
+* a single reach-pass over the 64 sprite slots' Y registers, because the loop was
+  re-taking three region borrows per slot per row: 43,000 map lookups a frame
+  against 192.
+
+A back-to-back A/B afterwards measured 2.528 against 2.688, about **+6%**, but
+the host had become noisy (±16%) and those numbers are not comparable with the
+quiet baseline. `region_data` is O(1) and the scrolled tilemap helper has no
+amortizable per-row setup, so the remainder is not yet attributed; **a profile,
+not more guessing, is the next step** if it matters. Two scrolled layers rather
+than one is the obvious suspect.
+
+Four machines remain: mrdo, foodf, marble. All three namco_galaga games are now
+per-scanline, so the row drive is ready to lift onto the board.
 
 ---
 
