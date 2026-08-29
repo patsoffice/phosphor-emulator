@@ -819,6 +819,72 @@ mod tests {
 
     const TIMING: phosphor_core::core::TimingConfig = atari_system1::TIMING;
 
+    /// Walk the beam over a whole frame's scanlines so every visible row is
+    /// drawn. The picture only exists once the beam has passed over it, so a
+    /// test that pokes video state has to scan before `render_frame` can show
+    /// it anything.
+    fn scan_frame(sys: &mut MarbleSystem) {
+        for s in 0..TIMING.total_scanlines as u16 {
+            sys.board.begin_scanline(s);
+        }
+    }
+
+    /// The W4 tests on `atari_system1` drive `begin_scanline` by hand, which
+    /// proves nothing about whether the frame loop ever calls it. This walks the
+    /// real `tick` and `run_scanlines` paths, and lives here because the bus
+    /// view they take is the game wrapper's.
+    #[test]
+    fn the_frame_loop_draws_rows_at_scanline_boundaries() {
+        const GREEN: (u8, u8, u8) = (0, 254, 0);
+        let mut sys = MarbleSystem::new();
+        let mut cache = GfxCache::new(1, 8, 8);
+        cache.set_pixel(0, 0, 0, 5);
+        sys.board.playfield.banks.push(GfxBank { cache, bpp: 4 });
+        sys.board.playfield.mo_lookup[0] = 1 << 8;
+        let palette = sys.board.map.region_data_mut(Region::Palette);
+        palette[0x105 * 2] = 0xF0;
+        palette[0x105 * 2 + 1] = 0xF0;
+
+        // Two sprites, on rows 0 and 1, so "row 0 and only row 0" is
+        // distinguishable. Entry 0 sits at y 0 and links to entry 1 at y 1.
+        let mob = sys.board.map.region_data_mut(Region::Mob);
+        mob[0] = 0x1F; // entry 0 word[0] = 0x1F00 → y 0
+        mob[1] = 0x00;
+        mob[0xC0 * 2] = 0x00; // entry 0 word[3] = link 1
+        mob[0xC0 * 2 + 1] = 0x01;
+        mob[2] = 0x1E; // entry 1 word[0] = 0x1EE0 → y 1
+        mob[3] = 0xE0;
+
+        let px = |sys: &MarbleSystem, x: usize, y: usize| {
+            let o = (y * TIMING.display_width as usize + x) * 3;
+            (
+                sys.board.framebuffer[o],
+                sys.board.framebuffer[o + 1],
+                sys.board.framebuffer[o + 2],
+            )
+        };
+
+        sys.board.framebuffer.fill(0);
+        // The visible window starts at scanline 0, so the very first cycle of a
+        // frame crosses a boundary and must draw row 0.
+        for _ in 0..TIMING.cycles_per_scanline {
+            sys.step_cycle();
+        }
+        assert_eq!(px(&sys, 0, 0), GREEN, "tick() draws row 0");
+        assert_eq!(
+            px(&sys, 0, 1),
+            (0, 0, 0),
+            "and only row 0: nothing has drawn row 1 yet"
+        );
+
+        // And the hoisted loop a whole frame actually runs through draws too.
+        {
+            let (cpu, mut bus) = sys.split();
+            atari_system1::run_scanlines(cpu, &mut bus, TIMING.cycles_per_scanline);
+        }
+        assert_eq!(px(&sys, 0, 1), GREEN, "run_scanlines() draws row 1");
+    }
+
     #[test]
     fn map_decodes_documented_windows() {
         let sys = MarbleSystem::new();
@@ -1094,6 +1160,7 @@ mod tests {
 
         let (w, h) = sys.display_size();
         let mut buf = vec![0u8; (w * h * 3) as usize];
+        scan_frame(&mut sys);
         sys.render_frame(&mut buf);
         assert_eq!(&buf[0..3], &[254, 0, 0], "opaque pen 0 → palette entry 0");
     }
@@ -1110,6 +1177,7 @@ mod tests {
 
         let (w, h) = sys.display_size();
         let mut buf = vec![0u8; (w * h * 3) as usize];
+        scan_frame(&mut sys);
         sys.render_frame(&mut buf);
         assert_eq!(&buf[0..3], &[0, 0, 0], "transparent pen 0 shows background");
     }
@@ -1164,6 +1232,7 @@ mod tests {
 
         let (w, h) = sys.display_size();
         let mut buf = vec![0u8; (w * h * 3) as usize];
+        scan_frame(&mut sys);
         sys.render_frame(&mut buf);
         // Alpha cell 0 is transparent, so the playfield pixel shows through.
         assert_eq!(&buf[0..3], &[0, 254, 0]);
@@ -1199,6 +1268,7 @@ mod tests {
 
         let (w, h) = sys.display_size();
         let mut buf = vec![0u8; (w * h * 3) as usize];
+        scan_frame(&mut sys);
         sys.render_frame(&mut buf);
         assert_eq!(
             &buf[0..3],
@@ -1221,6 +1291,7 @@ mod tests {
 
         let (w, h) = sys.display_size();
         let mut buf = vec![0u8; (w * h * 3) as usize];
+        scan_frame(&mut sys);
         sys.render_frame(&mut buf);
         assert_eq!(
             &buf[0..3],

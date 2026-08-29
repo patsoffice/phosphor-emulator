@@ -829,55 +829,43 @@ fn the_program_draws_a_picture_through_all_three_layers() {
 }
 
 // ---------------------------------------------------------------------------
-// The two assertions that are supposed to fail, and the ratchet holding them
+// The two assertions that were held as a ratchet, now collected
 // ---------------------------------------------------------------------------
 
-/// **These two tests assert behaviour that is WRONG, on purpose.**
+/// **These two tests were written in advance to assert behaviour that was WRONG
+/// on purpose, and they have been rewritten to the real expectation.**
 ///
-/// Road Runner is one of the nine render-once machines in
+/// Road Runner used to be one of the render-once machines in
 /// `docs/designs/raster-sampling-fidelity.md`: `AtariSystem1Board::render`
-/// composites the whole frame at the frame boundary out of whatever state the
-/// board holds at that moment. So a palette entry changed part way down a frame
-/// recolours the entire picture, and a playfield cell written part way down a
-/// frame appears everywhere at once, including in rows the beam drew long before
-/// the write.
+/// composited the whole frame at the frame boundary out of whatever state the
+/// board held at that moment. So a palette entry changed part way down a frame
+/// recoloured the entire picture, and a playfield cell written part way down a
+/// frame appeared everywhere at once, including in rows the beam drew long
+/// before the write.
 ///
-/// Hardware does neither. The rows already scanned out keep the old colour and
-/// the old contents; only the rows below the beam take the change. That is the
-/// whole point of `raster-sampling-fidelity.md` W3
-/// (`phosphor-emulator-raster-sampling-6kae.3`), which has no acceptance test
-/// today beyond "golden frames unchanged" -- and a golden frame cannot tell a
-/// timing fix from an attract-loop shift.
+/// Hardware does neither, and now neither does this board: W4 landed on
+/// `atari_system1` and every row is composited at its own scanline boundary out
+/// of live state. The rows already scanned out keep the old colour and the old
+/// contents; only the rows below the beam take the change.
 ///
-/// **This is that acceptance test, written in advance, in the machine's own
-/// instruction stream.** It is held as a ratchet rather than `#[ignore]`d: each
-/// test asserts the *defect* is still present, and states in its failure message
-/// what the correct answer is and that the fix is to delete the entry here. So
-/// the suite is green today, W3 turns it red the day it lands, and the only way
-/// to make it green again is to write the correct expectation.
-///
-/// The alternative shapes were considered and rejected. `#[ignore]` makes a test
-/// invisible, and `phosphor-emulator-gn5w` is what happens when nobody comes back
-/// for one. Asserting the current behaviour with only a comment saying it is
-/// wrong leaves nothing that fires when it stops being wrong.
-///
-/// **Do not delete a failing assertion here to make the suite green.** If one of
-/// these fails, either W3 landed, in which case follow the message, or something
-/// else changed what this board draws, in which case that is the finding.
-const KNOWN_DEFECTS: &str = "phosphor-emulator-raster-sampling-6kae.3";
-
-/// T6, the palette split. **Held as a known defect**, see [`KNOWN_DEFECTS`].
+/// The ratchet fired exactly as designed. Before the rewrite below, the first of
+/// these reported "121 rows kept the red they were drawn with and 119 came out
+/// green" and the second reported "screen row 50 is RED", which are the two
+/// correct answers stated in the messages the tests carried. Both are now
+/// asserted positively, so they discriminate in the other direction: a
+/// regression back to whole-frame compositing turns them red again.
+/// T6, the palette split.
 ///
 /// The playfield is uniformly pen 1 and pen 1 is red. At scanline 120, named by
 /// the motion-object timer interrupt rather than by counting cycles, pen 1
 /// becomes green.
 ///
-/// Correct: rows above the write stay red, rows below come out green, one
-/// transition, within a row or two of the line the interrupt named.
-/// What this board does: the palette is read once at the frame boundary, so
-/// every row is green and no red survives anywhere.
+/// The rows above the write keep the red they were drawn with and the rows below
+/// come out green, with exactly one transition, within a row or two of the line
+/// the interrupt named. The palette is read where each row resolves, so this is
+/// the whole of the mechanism.
 #[test]
-fn a_mid_frame_palette_write_recolours_the_whole_frame() {
+fn a_mid_frame_palette_write_splits_the_picture_at_the_beam() {
     let r = run();
     r.assert_completed();
     let s = shot(&r, 12);
@@ -885,47 +873,56 @@ fn a_mid_frame_palette_write_recolours_the_whole_frame() {
     let reds = (0..240).filter(|&y| s.pixel(PROBE_X, y) == RED).count();
     let greens = (0..240).filter(|&y| s.pixel(PROBE_X, y) == GREEN).count();
 
-    // Ordered so the diagnosis is right in both directions. No green at all
-    // means the write never happened, which is a broken fixture and not a
-    // rendering model; some green and some red means the beam is being tracked,
-    // which is the ratchet firing.
+    // Ordered so the diagnosis is right in both directions: no green means the
+    // write never landed (a broken fixture), no red means the board went back
+    // to reading the palette once for the whole frame.
     assert!(
         greens > 0,
         "no row is green, so the mid-frame palette write never landed at all. \
          That is a broken fixture rather than a rendering-model question."
     );
-    assert_eq!(
-        reds,
-        0,
-        "KNOWN DEFECT ({KNOWN_DEFECTS}): {reds} rows kept the red they were drawn \
-         with and {greens} came out green, so this board is now sampling the \
-         palette as the beam passes. THAT IS THE CORRECT BEHAVIOUR and this \
-         assertion is the acceptance test for it. Replace this test with the real \
-         expectation: rows 0 to about {} red, rows about {} to 239 green, exactly \
-         one transition. Do not delete it.",
-        TIMER_LINE_C - 1,
-        TIMER_LINE_C + 1
+    assert!(
+        reds > 0,
+        "no row kept its red, so the palette is being read once for the whole \
+         frame again rather than as the beam passes."
     );
     assert_eq!(
-        greens, 240,
-        "under whole-frame rendering every row takes the new colour; {greens} did"
+        reds + greens,
+        240,
+        "every row is one colour or the other: {reds} red, {greens} green"
+    );
+
+    // One transition, at the line the timer interrupt named. The band is two
+    // lines wide because the interrupt names the line and the handler's write
+    // lands a little after it.
+    let first_green = (0..240).find(|&y| s.pixel(PROBE_X, y) == GREEN).unwrap();
+    assert!(
+        (TIMER_LINE_C - 1..=TIMER_LINE_C + 2).contains(&first_green),
+        "the split lands at the scanline the timer named: first green row is \
+         {first_green}, timer line is {TIMER_LINE_C}"
+    );
+    assert!(
+        (0..first_green).all(|y| s.pixel(PROBE_X, y) == RED),
+        "every row above the split kept its red"
+    );
+    assert!(
+        (first_green..240).all(|y| s.pixel(PROBE_X, y) == GREEN),
+        "every row below the split took the new colour: exactly one transition"
     );
 }
 
-/// T7, the beam has already passed. **Held as a known defect**, see
-/// [`KNOWN_DEFECTS`].
+/// T7, the beam has already passed.
 ///
 /// At scanline 120, again named by the timer interrupt, two playfield cells
 /// become pen 2, which is green: one covering screen rows 48-55, drawn long
 /// before, and one covering 200-207, not yet reached.
 ///
-/// Correct: in the frame of the write only the lower row changes; on the next
-/// frame both have. Get the render order wrong in either direction and one of
-/// the two captures is wrong, which is what makes this discriminate rather than
-/// merely observe.
-/// What this board does: both change in the frame of the write.
+/// In the frame of the write only the lower row changes; on the next frame both
+/// have. Get the render order wrong in either direction and one of the two
+/// captures is wrong, which is what makes this discriminate rather than merely
+/// observe.
 #[test]
-fn a_mid_frame_playfield_write_changes_rows_the_beam_already_drew() {
+fn a_mid_frame_playfield_write_spares_the_rows_the_beam_already_drew() {
     let r = run();
     r.assert_completed();
 
@@ -934,21 +931,18 @@ fn a_mid_frame_playfield_write_changes_rows_the_beam_already_drew() {
         during.pixel(PROBE_X, T7_BELOW_Y),
         GREEN,
         "screen row {T7_BELOW_Y} was written before the beam reached it, so it \
-         must show the change on this frame under any rendering model. Red here \
-         means the write never landed."
+         must show the change on this frame. Red here means the write never \
+         landed."
     );
     assert_eq!(
         during.pixel(PROBE_X, T7_ABOVE_Y),
-        GREEN,
-        "KNOWN DEFECT ({KNOWN_DEFECTS}): screen row {T7_ABOVE_Y} is RED, which \
-         means the beam drew it before the write and the frame kept what it drew. \
-         THAT IS THE CORRECT BEHAVIOUR and this assertion is the acceptance test \
-         for it. Replace this test with the real expectation: row {T7_ABOVE_Y} \
-         stays red in this capture and is green in the next one. Do not delete it."
+        RED,
+        "screen row {T7_ABOVE_Y} was drawn long before the write, so this frame \
+         must keep what the beam drew. Green here means the board is compositing \
+         the whole frame at the boundary again."
     );
 
-    // True under either model, and the reason it is here: it is what separates
-    // "the write landed late" from "the write never landed at all".
+    // What separates "the write landed late" from "the write never landed".
     let after = shot(&r, 14);
     for y in [T7_ABOVE_Y, T7_BELOW_Y] {
         assert_eq!(

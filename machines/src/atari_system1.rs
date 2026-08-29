@@ -328,6 +328,12 @@ pub fn clock_tree() -> phosphor_core::core::ClockTree {
 /// First scanline of vertical blank (`vbstart`); VBLANK asserts IRQ4 here.
 pub(crate) const VBLANK_SCANLINE: u16 = 240;
 
+/// Native visible raster. There is no vertical offset on this board: the beam
+/// draws native row `n` during scanline `n`, and [`VBLANK_SCANLINE`] onward is
+/// blanked.
+const VISIBLE_WIDTH: usize = TIMING.display_width as usize; // 336
+const VISIBLE_HEIGHT: usize = TIMING.display_height as usize; // 240
+
 // ---------------------------------------------------------------------------
 // AtariSystem1Board
 // ---------------------------------------------------------------------------
@@ -524,29 +530,26 @@ pub struct AtariSystem1Board {
     #[save(id = 16)]
     pub(crate) watchdog_count: u8,
 
-    /// Per-frame log of motion-object bank switches as `(scanline, mo_bank)`,
-    /// sorted by scanline with the frame's starting bank at scanline 0. The game
-    /// reprograms the MO bank mid-frame (e.g. Road Runner), so the compositor
-    /// renders each scanline band with the bank that was live there — mirroring
-    /// the hardware's beam-time bank select. Rebuilt every frame; not saved.
-    #[save_skip]
-    mo_bank_changes: Vec<(u16, u8)>,
-
-    /// Motion-object state as it stood when the beam finished the visible area,
-    /// captured at the start of vblank: a copy of the sprite RAM plus the band
-    /// log for those scanlines. Both games double-buffer the display list —
-    /// they rebuild it during vblank and publish it with a bank swap — so the
-    /// live sprite RAM at the frame boundary already holds the *next* scanout's
-    /// list. Rendering from this snapshot keeps the sprite RAM and the bands
-    /// paired with the frame they actually describe. Empty until the first
-    /// vblank (a direct render without stepping falls back to live state).
+    /// Display framebuffer (native 336x240 RGB), filled one row at a time as
+    /// the beam reaches each visible scanline.
     ///
-    /// Rebuilt at the next vblank, one frame after a load, which is why the old
-    /// hand-written impl left it out too.
+    /// A row holds what the beam drew on that line, out of the playfield RAM,
+    /// the scroll registers, the *live* motion-object RAM and bank, the alpha
+    /// RAM and the palette as they stood at that line's boundary.
+    ///
+    /// This is what retired `mo_shadow`. That field held a copy of the sprite
+    /// RAM taken at the start of vblank, and it was correct for a whole-frame
+    /// render: the frame boundary is at the *end* of vblank, by which point the
+    /// game has rebuilt its display list into the back bank and swapped, so the
+    /// live RAM described the next frame rather than the one being presented.
+    /// A row drawn while the beam is on it has no such problem — the list it
+    /// reads is the list the beam saw — so the snapshot, its band log and the
+    /// per-band compositing that consumed them are all gone.
+    ///
+    /// Derived output, so not saved, and not seeded after a load: the rows of
+    /// the next frame overwrite every one of them.
     #[save_skip]
-    mo_shadow: Vec<u8>,
-    #[save_skip]
-    mo_shadow_bands: Vec<(u16, u8)>,
+    pub(crate) framebuffer: Vec<u8>,
 }
 
 impl AtariSystem1Board {
@@ -642,9 +645,7 @@ impl AtariSystem1Board {
             audio_buffer: SampleRing::with_capacity(2048),
             clock: 0,
             watchdog_count: 0,
-            mo_bank_changes: Vec::with_capacity(16),
-            mo_shadow: Vec::new(),
-            mo_shadow_bands: Vec::with_capacity(16),
+            framebuffer: vec![0u8; VISIBLE_WIDTH * VISIBLE_HEIGHT * 3],
         }
     }
 
@@ -732,23 +733,15 @@ impl AtariSystem1Board {
     /// (1 = run, 0 = hold); bit 2 selects the playfield tile bank; bits 5-3
     /// select the motion-object bank.
     fn bankselect_w(&mut self, data: u8) {
-        let old_mo = (self.bankselect >> 3) & 7;
         self.bankselect = data;
         self.sound.set_reset(data & 0x80 == 0);
 
-        // Record a mid-frame motion-object bank change so the compositor renders
-        // each scanline band with its live bank. The change takes effect on the
-        // next scanline (the beam has already drawn the current one), matching
-        // the hardware's partial-render-then-switch behavior.
-        let new_mo = (self.bankselect >> 3) & 7;
-        if new_mo != old_mo {
-            let frame_cycle = self.clock % TIMING.cycles_per_frame();
-            let line = (frame_cycle / TIMING.cycles_per_scanline) as u16 + 1;
-            match self.mo_bank_changes.last_mut() {
-                Some(last) if last.0 == line => last.1 = new_mo,
-                _ => self.mo_bank_changes.push((line, new_mo)),
-            }
-        }
+        // A mid-frame motion-object bank change used to be logged here as a
+        // `(scanline, bank)` band for the whole-frame compositor to replay.
+        // Nothing needs logging now: each row reads the live bank when it is
+        // drawn, and a row is drawn at the *start* of its scanline, so a write
+        // during scanline N is first seen by row N+1 — which is the same
+        // one-line delay the band log applied by hand.
     }
 
     /// True while the beam is in vertical blank (scanline ≥ `VBLANK_SCANLINE`).
@@ -858,77 +851,105 @@ impl AtariSystem1Board {
     // Rendering (full-frame compositor)
     // -----------------------------------------------------------------------
 
-    /// Render the current frame as palette indices, then resolve to RGB. The
-    /// layers composite the way the hardware merges them: the 64×64 playfield
-    /// tilemap is the opaque background, motion objects merge over it with
-    /// priority/translucency, and the 64×32 alpha (text/HUD) tilemap draws on
-    /// top (transparent pen 0 unless the cell forces layer 0). Working in the
+    /// Copy the latest framebuffer into the frontend's `buffer`.
+    ///
+    /// This does not draw. Each visible row was composited at its own scanline
+    /// boundary in [`render_scanline`](Self::render_scanline) as the beam
+    /// reached it.
+    pub fn render(&self, buffer: &mut [u8]) {
+        buffer.copy_from_slice(&self.framebuffer);
+    }
+
+    /// Draw one visible scanline into the framebuffer, out of the video state
+    /// as it stands at that line's boundary.
+    ///
+    /// The layers composite the way the hardware merges them: the 64×64
+    /// playfield tilemap is the opaque background, motion objects merge over it
+    /// with priority/translucency, and the 64×32 alpha (text/HUD) tilemap draws
+    /// on top (transparent pen 0 unless the cell forces layer 0). Working in the
     /// shared 1024-entry palette-index space (alpha 0x000 / motion 0x100 /
     /// playfield 0x200 / translucent 0x300) is what lets the priority merge
-    /// inspect playfield pens — so the compositor builds an index buffer and
-    /// only converts to RGB at the end.
-    pub fn render(&self, buffer: &mut [u8]) {
-        let w = TIMING.display_width as usize;
-        let h = TIMING.display_height as usize;
+    /// inspect playfield pens, so the row is built as indices and resolved once
+    /// at the end.
+    ///
+    /// Every register the layers read is read here — the scroll pair, the
+    /// playfield and motion-object bank selects, the priority-pen mask and the
+    /// palette — so a mid-frame write to any of them splits the picture at the
+    /// row it lands on. Road Runner reprograms the motion-object bank mid-frame
+    /// and that is now simply a live read.
+    ///
+    /// **No sprite sampling lead is added.** W3 established from the SP-277
+    /// sheets that the object path is a doubled horizontal line buffer, so the
+    /// list for row `r` is read while the beam is on row `r - 1`; but the
+    /// `ypos` expression below carries no such term, the sheets do not
+    /// establish the buffers' phase (only that they alternate), and the
+    /// reference driver's own +2 is documented there as a kludge over the +1 it
+    /// calls correct. Adding a lead would move every sprite pixel on the
+    /// strength of that, so the constant is left as it was.
+    ///
+    /// No empty-cache guard: `alpha_cache` is allocated at full size in
+    /// [`new`](Self::new) and the playfield banks are looked up with `get`,
+    /// which already yields `None` on a board that never loaded ROMs.
+    fn render_scanline(&mut self, sy: usize) {
+        let mut index = [0u16; VISIBLE_WIDTH];
+        self.draw_playfield_row(&mut index, sy);
+        self.draw_motion_objects_row(&mut index, sy);
+        self.draw_alpha_row(&mut index, sy);
 
-        // Decode the IRGB-4444 palette (1024 entries) for this frame.
+        // Resolve to RGB against the palette as it stands on this row. The
+        // one-entry memo is worth having because a tilemap row holds long runs
+        // of one index, and it keeps this from decoding 336 IRGB words a row.
         let pal = self.map.region_data(Region::Palette);
-        let mut palette_rgb = [(0u8, 0u8, 0u8); 1024];
-        for (i, slot) in palette_rgb.iter_mut().enumerate() {
-            let raw = u16::from_be_bytes([pal[i * 2], pal[i * 2 + 1]]);
-            *slot = irgb4444_to_rgb(raw);
-        }
-
-        // Layer 1: playfield → a per-pixel palette-index buffer.
-        let mut index = vec![0u16; w * h];
-        self.render_playfield(&mut index, w, h);
-
-        // Layer 2: motion objects, merged over the playfield.
-        self.render_motion_objects(&mut index, w, h);
-
-        // Layer 3: alpha on top, then resolve every pixel to RGB.
-        let alpha = self.map.region_data(Region::Alpha);
-        for sy in 0..h {
-            for sx in 0..w {
-                let mut idx = index[sy * w + sx];
-
-                // Alpha (text/HUD), drawn 1:1 from the origin.
-                let a_cell = (sy / 8) * 64 + (sx / 8);
-                let a_data = u16::from_be_bytes([alpha[a_cell * 2], alpha[a_cell * 2 + 1]]);
-                let a_code = (a_data & 0x3FF) as usize;
-                let a_color = ((a_data >> 10) & 0x07) as usize;
-                let a_opaque = a_data & 0x2000 != 0;
-                let a_pen = self.alpha_cache.pixel(a_code & 0x1FF, sx % 8, sy % 8);
-                if a_pen != 0 || a_opaque {
-                    idx = (a_color * 4 + a_pen as usize) as u16;
-                }
-
-                let (r, g, b) = palette_rgb[idx as usize & 0x3FF];
-                let o = (sy * w + sx) * 3;
-                buffer[o] = r;
-                buffer[o + 1] = g;
-                buffer[o + 2] = b;
+        let out = sy * VISIBLE_WIDTH * 3;
+        let mut last = usize::MAX;
+        let mut rgb = (0u8, 0u8, 0u8);
+        for (x, &idx) in index.iter().enumerate() {
+            let i = idx as usize & 0x3FF;
+            if i != last {
+                last = i;
+                rgb = irgb4444_to_rgb(u16::from_be_bytes([pal[i * 2], pal[i * 2 + 1]]));
             }
+            let o = out + x * 3;
+            self.framebuffer[o] = rgb.0;
+            self.framebuffer[o + 1] = rgb.1;
+            self.framebuffer[o + 2] = rgb.2;
         }
     }
 
-    /// Rasterise the 64×64 playfield tilemap into a palette-index buffer. Each
-    /// 8×8 cell carries a flip/tile-select word; the PROM remap yields the gfx
-    /// bank, tile code, and colour. The map is 512×512 and wraps; the visible
+    /// Rasterise one row of the 64×64 playfield tilemap into the index row.
+    ///
+    /// Each 8×8 cell carries a flip/tile-select word; the PROM remap yields the
+    /// gfx bank, tile code and colour. The map is 512×512 and wraps; the visible
     /// origin is the X/Y scroll. The index is `0x200 + colour*8 + pen` — the
-    /// playfield palette bank (see [`render`](Self::render)).
-    fn render_playfield(&self, index: &mut [u16], w: usize, h: usize) {
+    /// playfield palette bank.
+    ///
+    /// The map row and the line inside the tile are fixed by `sy`, so they come
+    /// out of the loop, and the cell word, its PROM lookup and the tile's
+    /// 8-pixel line are fetched once per tile column rather than once per pixel:
+    /// 42 fetches a row instead of 336. Cached on the cell index, so the scroll
+    /// wrap at 512 needs no case of its own.
+    fn draw_playfield_row(&self, index: &mut [u16; VISIBLE_WIDTH], sy: usize) {
         let pf_ram = self.map.region_data(Region::Playfield);
         // Playfield tile bank from the 0x860001 control latch (bit 2).
         let tile_bank = ((self.bankselect >> 2) & 1) as usize;
         let xscroll = self.xscroll as usize;
         let yscroll = self.yscroll as usize;
 
-        for sy in 0..h {
-            for sx in 0..w {
-                let src_x = (sx + xscroll) & 0x1FF;
-                let src_y = (sy + yscroll) & 0x1FF;
-                let pf_cell = (src_y / 8) * 64 + (src_x / 8);
+        let src_y = (sy + yscroll) & 0x1FF;
+        let row_base = (src_y / 8) * 64;
+        let ty = src_y % 8;
+
+        let mut cached_cell = usize::MAX;
+        let mut hflip = false;
+        let mut pal_base = 0usize;
+        let mut line: Option<&[u8]> = None;
+
+        for (sx, out) in index.iter_mut().enumerate() {
+            let src_x = (sx + xscroll) & 0x1FF;
+            let pf_cell = row_base + src_x / 8;
+
+            if pf_cell != cached_cell {
+                cached_cell = pf_cell;
                 let pf_data = u16::from_be_bytes([pf_ram[pf_cell * 2], pf_ram[pf_cell * 2 + 1]]);
                 let lookup =
                     self.playfield.lookup[(pf_data >> 8) as usize & 0x7F | (tile_bank << 7)];
@@ -936,14 +957,49 @@ impl AtariSystem1Board {
                 let code = (((lookup & 0xFF) as usize) << 8) | (pf_data & 0xFF) as usize;
                 let palcolor = ((lookup >> 12) & 0x0F) as usize;
                 // Bit 15 of the cell word horizontally mirrors the 8×8 tile.
-                let hflip = pf_data & 0x8000 != 0;
-
-                if let Some(bank) = self.playfield.banks.get(bank_id) {
-                    let tx = if hflip { 7 - src_x % 8 } else { src_x % 8 };
-                    let pen = bank.cache.pixel(code % bank.cache.count(), tx, src_y % 8);
+                hflip = pf_data & 0x8000 != 0;
+                line = self.playfield.banks.get(bank_id).map(|bank| {
                     let color = 0x20 + (palcolor << (bank.bpp - 3));
-                    index[sy * w + sx] = ((0x100 + color * 8 + pen as usize) & 0x3FF) as u16;
-                }
+                    pal_base = 0x100 + color * 8;
+                    bank.cache.row_slice(code % bank.cache.count(), ty)
+                });
+            }
+
+            if let Some(line) = line {
+                let tx = if hflip { 7 - src_x % 8 } else { src_x % 8 };
+                *out = ((pal_base + line[tx] as usize) & 0x3FF) as u16;
+            }
+        }
+    }
+
+    /// Draw one row of the 64×32 alpha (text/HUD) tilemap over the index row.
+    ///
+    /// Drawn 1:1 from the origin, transparent on pen 0 unless the cell's bit 13
+    /// forces it opaque. Same per-tile fetch as the playfield: 42 cell words a
+    /// row instead of 336.
+    fn draw_alpha_row(&self, index: &mut [u16; VISIBLE_WIDTH], sy: usize) {
+        let alpha = self.map.region_data(Region::Alpha);
+        let row_base = (sy / 8) * 64;
+        let ty = sy % 8;
+
+        let mut cached_cell = usize::MAX;
+        let mut opaque = false;
+        let mut pal_base = 0usize;
+        let mut line: &[u8] = &[];
+
+        for (sx, out) in index.iter_mut().enumerate() {
+            let a_cell = row_base + sx / 8;
+            if a_cell != cached_cell {
+                cached_cell = a_cell;
+                let a_data = u16::from_be_bytes([alpha[a_cell * 2], alpha[a_cell * 2 + 1]]);
+                let a_code = (a_data & 0x3FF) as usize;
+                opaque = a_data & 0x2000 != 0;
+                pal_base = ((a_data >> 10) & 0x07) as usize * 4;
+                line = self.alpha_cache.row_slice(a_code & 0x1FF, ty);
+            }
+            let pen = line[sx % 8];
+            if pen != 0 || opaque {
+                *out = (pal_base + pen as usize) as u16;
             }
         }
     }
@@ -964,54 +1020,38 @@ impl AtariSystem1Board {
     /// pen is 1; a low-priority sprite draws over the playfield unless that pixel
     /// is one of colour 0's priority pens (the 0x840000 mask), which lets the
     /// playfield stand in front of sprites.
-    fn render_motion_objects(&self, index: &mut [u16], w: usize, h: usize) {
+    fn draw_motion_objects_row(&self, index: &mut [u16; VISIBLE_WIDTH], sy: usize) {
         const TRANSPARENT: u16 = 0xFFFF;
         const PRIORITY_BIT: u16 = 0x1000; // mobitmap priority flag (shift 12)
 
-        let mut mo = vec![TRANSPARENT; w * h];
-
-        // Draw from the vblank snapshot: the sprite RAM and band log as they
-        // stood when the beam finished the visible area, before the game
-        // rebuilt the list for the next frame. Without a snapshot — a direct
-        // render that never stepped the board (unit tests) — fall back to live
-        // state, and to the current bank when no bands were logged either.
-        let live = self.map.region_data(Region::Mob);
-        let mob: &[u8] = if self.mo_shadow.is_empty() {
-            live
-        } else {
-            &self.mo_shadow
-        };
+        // Read the LIVE sprite RAM and the LIVE bank. There is no snapshot and
+        // no band log any more: the row is drawn while the beam is on it, so
+        // the list it reads is the list the beam saw, and a write to the active
+        // bank partway down the screen changes the rows below it the way the
+        // hardware does.
+        let mob = self.map.region_data(Region::Mob);
         let word = |wi: usize| u16::from_be_bytes([mob[wi * 2], mob[wi * 2 + 1]]);
+        let bank_base = ((self.bankselect >> 3) & 7) as usize * 256; // words
 
-        let fallback = [(0u16, (self.bankselect >> 3) & 7)];
-        let logged = if self.mo_shadow.is_empty() {
-            &self.mo_bank_changes
-        } else {
-            &self.mo_shadow_bands
-        };
-        let bands: &[(u16, u8)] = if logged.is_empty() { &fallback } else { logged };
-
-        for (bi, &(start_line, bank)) in bands.iter().enumerate() {
-            let y_start = start_line as usize;
-            let y_end = bands
-                .get(bi + 1)
-                .map_or(h, |&(next, _)| (next as usize).min(h));
-            if y_start >= y_end {
-                continue; // zero-height or off-screen (vblank) band
+        let mut mo = [TRANSPARENT; VISIBLE_WIDTH];
+        let mut visited = [false; 64];
+        let mut link = 0usize;
+        for _ in 0..56 {
+            if visited[link] {
+                break;
             }
-            let bank_base = bank as usize * 256; // words
+            visited[link] = true;
+            let w0 = word(bank_base + link);
+            let w3 = word(bank_base + 0xC0 + link);
 
-            let mut visited = [false; 64];
-            let mut link = 0usize;
-            for _ in 0..56 {
-                if visited[link] {
-                    break;
-                }
-                visited[link] = true;
-                let w0 = word(bank_base + link);
+            // Word[0] carries both the Y position and the height, so whether
+            // this entry is on this line is decidable before the other two
+            // words are read and the PROM is consulted. The link still has to
+            // be followed either way — the list is a chain, not an array, which
+            // is why this is an early-out rather than an index.
+            if let Some(ty) = Self::mo_row_of(w0, sy) {
                 let w1 = word(bank_base + 0x40 + link);
                 let w2 = word(bank_base + 0x80 + link);
-                let w3 = word(bank_base + 0xC0 + link);
                 // EVERY entry is drawn, including one flagged 0xFFFF in word[1].
                 // That flag is what the scanline-interrupt comparator watches
                 // for, and that comparator is on the CARTRIDGE: it exists on
@@ -1027,7 +1067,8 @@ impl AtariSystem1Board {
                 // note on `timer_irq_at_scanline` saying the flag is a property
                 // of the list rather than of the cartridge. It cost 64 pixels
                 // an 8x8 block at (0, 121) in every frame of the Road Runner
-                // picture comparison against MAME (phosphor-emulator-h52k).
+                // picture comparison against a reference capture
+                // (phosphor-emulator-h52k).
                 //
                 // Real games do not show the block because they park unused
                 // entries off the left edge at X 504: measured over a recorded
@@ -1037,12 +1078,12 @@ impl AtariSystem1Board {
                 // is why nothing noticed until a conformance ROM put a timer at
                 // X 0. What is NOT settled is the schematic itself; see the
                 // issue.
-                self.draw_mo_entry(&mut mo, w, h, y_start, y_end, w0, w1, w2, PRIORITY_BIT);
-                link = (w3 & 0x3F) as usize;
+                self.draw_mo_entry_row(&mut mo, w0, w1, w2, ty, PRIORITY_BIT);
             }
+            link = (w3 & 0x3F) as usize;
         }
 
-        // Merge the sprite bitmap over the playfield.
+        // Merge the sprite row over the playfield row.
         let priority_pens = self.priority_pens;
         for (dst, &m) in index.iter_mut().zip(mo.iter()) {
             if m == TRANSPARENT {
@@ -1062,23 +1103,35 @@ impl AtariSystem1Board {
         }
     }
 
-    /// Rasterise one motion object (1 tile wide, `height` tiles tall) into the
-    /// sprite index buffer `mo`, honouring horizontal flip and the transparent
-    /// pen 0. Only rows within the scanline band `[y_start, y_end)` are written,
-    /// so a sprite that straddles a mid-frame bank switch is cut at the boundary
-    /// like the real beam. The palette index is `0x100 + palcolor*16 + pen`, with
-    /// the priority flag OR'd in for the merge step.
-    #[allow(clippy::too_many_arguments)]
-    fn draw_mo_entry(
+    /// Which pixel row of the object described by `w0` falls on screen row
+    /// `sy`, or `None` when the object does not cross that line.
+    ///
+    /// The sprite layer has a fixed yscroll of 256 and no xscroll, and
+    /// positions wrap in a 512×512 space, so this is the placement the
+    /// whole-frame renderer computed per object, inverted to answer one row.
+    fn mo_row_of(w0: u16, sy: usize) -> Option<usize> {
+        let height = ((w0 & 0x000F) as usize) + 1;
+        let mut ypos = -(((w0 >> 5) & 0x1FF) as i32) - 256 - (height as i32) * 8;
+        ypos &= 0x1FF;
+        if ypos >= VISIBLE_HEIGHT as i32 {
+            ypos -= 512;
+        }
+        let dy = sy as i32 - ypos;
+        (dy >= 0 && dy < (height * 8) as i32).then_some(dy as usize)
+    }
+
+    /// Rasterise the one line of a motion object that falls on this row into
+    /// the sprite index row, honouring horizontal flip and the transparent pen
+    /// 0. `ty` is that line within the object, from [`mo_row_of`](Self::mo_row_of).
+    /// The palette index is `0x100 + palcolor*16 + pen`, with the priority flag
+    /// OR'd in for the merge step.
+    fn draw_mo_entry_row(
         &self,
-        mo: &mut [u16],
-        w: usize,
-        h: usize,
-        y_start: usize,
-        y_end: usize,
+        mo: &mut [u16; VISIBLE_WIDTH],
         w0: u16,
         w1: u16,
         w2: u16,
+        ty: usize,
         prio: u16,
     ) {
         let ml = self.playfield.mo_lookup[(w1 >> 8) as usize];
@@ -1089,43 +1142,26 @@ impl AtariSystem1Board {
         let base_code = (((ml & 0xFF) as usize) << 8) | (w1 & 0xFF) as usize;
         let pal_base = 0x100 + ((ml >> 12) & 0x0F) * 16;
         let prio_flag = if w2 & 0x8000 != 0 { prio } else { 0 };
-
-        let height = ((w0 & 0x000F) as usize) + 1;
         let hflip = w0 & 0x8000 != 0;
-        // Sprite layer: xscroll 0, yscroll 256; positions wrap in 512×512.
+
         let mut xpos = ((w2 >> 5) & 0x1FF) as i32;
-        let mut ypos = -(((w0 >> 5) & 0x1FF) as i32) - 256 - (height as i32) * 8;
-        xpos &= 0x1FF;
-        ypos &= 0x1FF;
-        if xpos >= w as i32 {
+        if xpos >= VISIBLE_WIDTH as i32 {
             xpos -= 512;
         }
-        if ypos >= h as i32 {
-            ypos -= 512;
-        }
 
-        let count = bank.cache.count();
-        for ty in 0..height {
-            let code = (base_code + ty) % count;
-            for py in 0..8usize {
-                let dy = ypos + (ty * 8 + py) as i32;
-                // Clip to the screen and to this band's scanline range.
-                if dy < y_start as i32 || dy >= y_end as i32 {
-                    continue;
-                }
-                for px in 0..8usize {
-                    let dx = xpos + px as i32;
-                    if dx < 0 || dx >= w as i32 {
-                        continue;
-                    }
-                    let tx = if hflip { 7 - px } else { px };
-                    let pen = bank.cache.pixel(code, tx, py);
-                    if pen == 0 {
-                        continue; // transparent pen
-                    }
-                    mo[dy as usize * w + dx as usize] = (pal_base + pen as u16) | prio_flag;
-                }
+        // One tile of the object's vertical stack, and one line of that tile.
+        let code = (base_code + ty / 8) % bank.cache.count();
+        let line = bank.cache.row_slice(code, ty % 8);
+        for px in 0..8usize {
+            let dx = xpos + px as i32;
+            if dx < 0 || dx >= VISIBLE_WIDTH as i32 {
+                continue;
             }
+            let pen = line[if hflip { 7 - px } else { px }];
+            if pen == 0 {
+                continue; // transparent pen
+            }
+            mo[dx as usize] = (pal_base + pen as u16) | prio_flag;
         }
     }
 
@@ -1147,22 +1183,21 @@ impl AtariSystem1Board {
     ///
     /// Called once per scanline from [`run_scanlines`] and, for the debugger's
     /// single-step path, from [`tick`] when the clock lands on a boundary.
-    fn begin_scanline(&mut self, scanline: u16) {
-        // Start a fresh motion-object bank log for the new frame, seeded with
-        // the bank in effect at scanline 0 (carried from the previous frame).
-        if scanline == 0 {
-            self.mo_bank_changes.clear();
-            self.mo_bank_changes.push((0, (self.bankselect >> 3) & 7));
-        }
-
+    pub(crate) fn begin_scanline(&mut self, scanline: u16) {
         // VBLANK raises IRQ4 on the first blanked line; IRQ3 tracks whether a
         // motion-object timer targets this line (a one-scanline pulse, like the
         // int3/int3off timer pair).
         if scanline == VBLANK_SCANLINE {
             self.video_int = true;
-            self.snapshot_motion_objects();
         }
         self.scanline_int = self.has_scanline_int && self.timer_irq_at_scanline(scanline);
+
+        // The row the beam is about to draw. The motion-object snapshot that
+        // used to be taken here is gone: a row drawn on its own scanline reads
+        // the list the beam saw, so there is nothing to preserve for later.
+        if (scanline as usize) < VISIBLE_HEIGHT {
+            self.render_scanline(scanline as usize);
+        }
     }
 
     /// Per-cycle board work that runs before the CPU, with no frame-position
@@ -1183,23 +1218,6 @@ impl AtariSystem1Board {
         }
 
         self.clock += 1;
-    }
-
-    /// Latch the motion-object state the beam just scanned out, at the moment
-    /// vblank begins. The game spends vblank rebuilding the display list into
-    /// the back bank and then swaps banks to publish it, so by the time the
-    /// frame boundary comes round the live sprite RAM and bank describe the
-    /// *next* frame. See [`mo_shadow`](Self::mo_shadow).
-    fn snapshot_motion_objects(&mut self) {
-        let mob = self.map.region_data(Region::Mob);
-        if self.mo_shadow.len() == mob.len() {
-            self.mo_shadow.copy_from_slice(mob);
-        } else {
-            self.mo_shadow = mob.to_vec();
-        }
-        self.mo_shadow_bands.clear();
-        self.mo_shadow_bands
-            .extend_from_slice(&self.mo_bank_changes);
     }
 
     /// Report the number of main-CPU instruction boundaries this tick (0 or 1)
@@ -1259,9 +1277,8 @@ impl AtariSystem1Board {
         self.int2 = false;
         self.audio_dc = (0.0, 0.0);
         self.watchdog_count = 0;
-        self.mo_bank_changes.clear();
-        self.mo_shadow.clear();
-        self.mo_shadow_bands.clear();
+        // The framebuffer is not cleared: the next frame's rows overwrite every
+        // one of them as the beam reaches them.
     }
 
     // -----------------------------------------------------------------------
@@ -1446,35 +1463,35 @@ mod tests {
         assert!(!board.scanline_int, "released on the line after");
     }
 
-    #[test]
-    fn bankselect_logs_midframe_mo_bank_changes() {
-        let mut board = AtariSystem1Board::new(103, false);
-        // Frame start seeds the log with the current MO bank at scanline 0.
-        board.mo_bank_changes = vec![(0, 0)];
+    // -----------------------------------------------------------------------
+    // Per-scanline rendering (W4)
+    // -----------------------------------------------------------------------
 
-        // Move the beam to ~scanline 100 and switch the MO bank (bits 5-3):
-        // 0x10 → MO bank 2. The change takes effect on the next line (101).
-        board.clock = 100 * TIMING.cycles_per_scanline;
-        board.bankselect_w(0x10);
-        assert_eq!(board.mo_bank_changes, vec![(0, 0), (101, 2)]);
+    const GREEN: (u8, u8, u8) = (0, 254, 0);
 
-        // A second switch on the same line replaces rather than appends.
-        board.bankselect_w(0x18); // MO bank 3
-        assert_eq!(board.mo_bank_changes, vec![(0, 0), (101, 3)]);
-
-        // A write that leaves the MO bank unchanged (only the playfield bank bit
-        // toggles) is not logged.
-        board.bankselect_w(0x18 | 0x04);
-        assert_eq!(board.mo_bank_changes, vec![(0, 0), (101, 3)]);
+    /// Walk the beam over a whole frame's scanlines so every visible row is
+    /// drawn. The picture only exists once the beam has passed over it, so a
+    /// test that pokes video state has to scan before it can look.
+    fn scan_frame(board: &mut AtariSystem1Board) {
+        for s in 0..TIMING.total_scanlines as u16 {
+            board.begin_scanline(s);
+        }
     }
 
-    #[test]
-    fn motion_objects_follow_midframe_bank_switch() {
-        let mut board = AtariSystem1Board::new(103, false);
-        let w = TIMING.display_width as usize;
+    fn px(board: &AtariSystem1Board, x: usize, y: usize) -> (u8, u8, u8) {
+        let o = (y * VISIBLE_WIDTH + x) * 3;
+        (
+            board.framebuffer[o],
+            board.framebuffer[o + 1],
+            board.framebuffer[o + 2],
+        )
+    }
 
-        // One gfx bank (id 1) with a pen-5 top-left pixel; MO colour byte 0 maps
-        // entries to it.
+    /// A board with one gfx bank whose tile 0 has a pen-5 pixel at its top-left
+    /// corner, and a palette in which the motion-object index for that pen is
+    /// pure green.
+    fn board_with_one_green_sprite_pen() -> AtariSystem1Board {
+        let mut board = AtariSystem1Board::new(103, false);
         let mut cache = GfxCache::new(1, 8, 8);
         cache.set_pixel(0, 0, 0, 5);
         board.playfield.banks.push(GfxBank { cache, bpp: 4 });
@@ -1484,6 +1501,23 @@ mod tests {
         let palette = board.map.region_data_mut(Region::Palette);
         palette[0x105 * 2] = 0xF0;
         palette[0x105 * 2 + 1] = 0xF0;
+        board
+    }
+
+    /// The motion-object bank is read live by each row, so switching it partway
+    /// down the screen shows one bank's list above the switch and the other's
+    /// below.
+    ///
+    /// This replaces two tests. `bankselect_logs_midframe_mo_bank_changes`
+    /// asserted the `(scanline, bank)` band log that the whole-frame compositor
+    /// replayed; that log is gone, because a row reads the live bank when it is
+    /// drawn. The one-line delay it used to apply by hand falls out of the
+    /// structure instead — a row is drawn at the *start* of its scanline, so a
+    /// write during scanline N is first seen by row N+1 — and that is what the
+    /// middle two assertions below pin.
+    #[test]
+    fn a_mid_frame_mo_bank_switch_changes_only_the_rows_below_it() {
+        let mut board = board_with_one_green_sprite_pen();
 
         // A sprite in MO bank 0 at screen y=0, and one in MO bank 1 at y=200
         // (word[0] encodes Y; words 1-3 = 0 → colour/code 0, no prio, link 0).
@@ -1493,136 +1527,126 @@ mod tests {
         mob[0x200] = 0x06; // bank 1 entry 0 word[0] = 0x0600 → y 200
         mob[0x201] = 0x00;
 
-        // The frame showed bank 0 up top, then switched to bank 1 at line 120.
-        board.mo_bank_changes = vec![(0, 0), (120, 1)];
-
-        let (dw, dh) = TIMING.display_size();
-        let mut buf = vec![0u8; (dw * dh * 3) as usize];
-        board.render_frame(&mut buf);
-
-        let px = |x: usize, y: usize| {
-            let o = (y * w + x) * 3;
-            (buf[o], buf[o + 1], buf[o + 2])
-        };
-        // Both sprites appear — each in the band whose bank holds it. (Before the
-        // per-band fix, only the final bank rendered, dropping the top sprite.)
-        assert_eq!(px(0, 0), (0, 254, 0), "bank-0 sprite shows in the top band");
-        assert_eq!(
-            px(0, 200),
-            (0, 254, 0),
-            "bank-1 sprite shows in the bottom band"
-        );
-    }
-
-    #[test]
-    fn motion_objects_render_from_the_vblank_snapshot() {
-        // Both System 1 games double-buffer the display list: they rebuild it
-        // during vblank and publish it by swapping the MO bank. Rendering at the
-        // frame boundary therefore sees sprite RAM that already describes the
-        // *next* scanout, so the compositor must draw from the state latched
-        // when vblank began — otherwise it draws the half-built back buffer with
-        // the pre-publish bank and the sprites vanish.
-        let mut board = AtariSystem1Board::new(103, false);
-        let w = TIMING.display_width as usize;
-
-        let mut cache = GfxCache::new(1, 8, 8);
-        cache.set_pixel(0, 0, 0, 5);
-        board.playfield.banks.push(GfxBank { cache, bpp: 4 });
-        board.playfield.mo_lookup[0] = 1 << 8;
-
-        // Sprite pen 5, palcolor 0 → motion palette index 0x105 = pure green.
-        let palette = board.map.region_data_mut(Region::Palette);
-        palette[0x105 * 2] = 0xF0;
-        palette[0x105 * 2 + 1] = 0xF0;
-
-        // The list the beam actually scanned out: one sprite at y=0 in bank 0.
-        let mob = board.map.region_data_mut(Region::Mob);
-        mob[0] = 0x1F; // bank 0 entry 0 word[0] = 0x1F00 → y 0
-        mob[1] = 0x00;
-        board.mo_bank_changes = vec![(0, 0)];
-
-        // Vblank begins: latch that state.
-        board.snapshot_motion_objects();
-
-        // Now the game rebuilds the list for the next frame — it tears down
-        // bank 0's entry and stages a new sprite in bank 1 at y=200 — and
-        // publishes it by swapping the live MO bank to 1.
-        let mob = board.map.region_data_mut(Region::Mob);
-        mob[0] = 0x00;
-        mob[1] = 0x00;
-        mob[0x200] = 0x06; // bank 1 entry 0 word[0] = 0x0600 → y 200
-        mob[0x201] = 0x00;
+        // Scan the top of the frame on bank 0, switch at scanline 120, finish.
+        for s in 0..120u16 {
+            board.begin_scanline(s);
+        }
+        board.clock = 120 * TIMING.cycles_per_scanline;
         board.bankselect_w(0x08); // MO bank 1
+        for s in 120..TIMING.total_scanlines as u16 {
+            board.begin_scanline(s);
+        }
 
-        let (dw, dh) = TIMING.display_size();
-        let mut buf = vec![0u8; (dw * dh * 3) as usize];
-        board.render_frame(&mut buf);
-
-        let px = |x: usize, y: usize| {
-            let o = (y * w + x) * 3;
-            (buf[o], buf[o + 1], buf[o + 2])
-        };
         assert_eq!(
-            px(0, 0),
-            (0, 254, 0),
-            "the scanned-out sprite draws from the vblank snapshot"
+            px(&board, 0, 0),
+            GREEN,
+            "the bank-0 sprite drew before the switch"
         );
         assert_eq!(
-            px(0, 200),
-            (0, 0, 0),
-            "the list staged during vblank belongs to the next frame, not this one"
+            px(&board, 0, 200),
+            GREEN,
+            "the bank-1 sprite draws after it"
         );
     }
 
-    /// Companion to [`motion_objects_render_from_the_vblank_snapshot`], which
-    /// latches the snapshot by hand and so only covers the compositor half of
-    /// the double-buffer fix. This one drives the beam across the start of
-    /// vblank and checks `tick` takes the snapshot itself — drop that call and
-    /// the shadow stays empty, the compositor falls back to live state, and the
-    /// sprites vanish exactly as they did originally.
+    /// A write to the ACTIVE motion-object bank during active display changes
+    /// what the beam draws from the next line on. This is
+    /// `phosphor-emulator-x7rn`, which W3 opened against the whole-frame
+    /// renderer: drawing the frame from one vblank snapshot made such a write
+    /// invisible until the following frame. Road Runner depends on it.
     #[test]
-    fn vblank_tick_latches_the_motion_object_snapshot() {
-        let mut sys = crate::marble::MarbleSystem::new();
+    fn a_mid_frame_write_to_the_active_mo_bank_changes_only_the_rows_below_it() {
+        let mut board = board_with_one_green_sprite_pen();
 
-        let mut cache = GfxCache::new(1, 8, 8);
-        cache.set_pixel(0, 0, 0, 5);
-        sys.board.playfield.banks.push(GfxBank { cache, bpp: 4 });
-        sys.board.playfield.mo_lookup[0] = 1 << 8;
+        // Entry 0 of the active bank places a sprite at y=0; entry 1 is unused
+        // and entry 0 links to it, so the list is 0 -> 1 -> 1 (terminates).
+        let mob = board.map.region_data_mut(Region::Mob);
+        mob[0] = 0x1F; // word[0] = 0x1F00 → y 0
+        mob[1] = 0x00;
+        mob[0xC0 * 2] = 0x00; // entry 0 word[3] = link 1
+        mob[0xC0 * 2 + 1] = 0x01;
 
-        let palette = sys.board.map.region_data_mut(Region::Palette);
-        palette[0x105 * 2] = 0xF0;
-        palette[0x105 * 2 + 1] = 0xF0;
+        for s in 0..120u16 {
+            board.begin_scanline(s);
+        }
+        // Mid-frame, the game rewrites entry 1 of the *active* bank to place a
+        // second sprite at y=200. On hardware the beam picks it up below here.
+        let mob = board.map.region_data_mut(Region::Mob);
+        mob[2] = 0x06; // entry 1 word[0] = 0x0600 → y 200
+        mob[3] = 0x00;
+        for s in 120..TIMING.total_scanlines as u16 {
+            board.begin_scanline(s);
+        }
 
-        // The list the beam is scanning out: one sprite at y=0 in bank 0.
-        let mob = sys.board.map.region_data_mut(Region::Mob);
+        assert_eq!(
+            px(&board, 0, 0),
+            GREEN,
+            "the sprite that was already in the list drew at the top"
+        );
+        assert_eq!(
+            px(&board, 0, 200),
+            GREEN,
+            "the sprite written mid-frame draws below the write"
+        );
+    }
+
+    /// What the retired `mo_shadow` existed to guarantee, expressed against the
+    /// structure that replaced it.
+    ///
+    /// Both System 1 games double-buffer the display list in software: they
+    /// rebuild it during vblank and publish it by swapping the MO bank. A
+    /// whole-frame render at the frame boundary therefore saw sprite RAM that
+    /// already described the *next* scanout, which is why it needed a snapshot
+    /// taken when vblank began. Rows drawn on their own scanlines need no
+    /// snapshot: by the time the game rebuilds the list, the beam has passed.
+    /// The concern is the same — the picture must show the list the beam
+    /// scanned out — and this asserts it end to end.
+    #[test]
+    fn the_picture_holds_the_list_the_beam_scanned_out_not_the_one_staged_after() {
+        let mut board = board_with_one_green_sprite_pen();
+
+        // The list the beam scans out: one sprite at y=0 in bank 0.
+        let mob = board.map.region_data_mut(Region::Mob);
         mob[0] = 0x1F;
         mob[1] = 0x00;
-        sys.board.mo_bank_changes = vec![(0, 0)];
+        scan_frame(&mut board);
 
-        // Park the beam one cycle short of vblank, then step across it so the
-        // scanline boundary that latches the snapshot actually runs.
-        sys.board.clock = VBLANK_SCANLINE as u64 * TIMING.cycles_per_scanline - 1;
-        for _ in 0..2 {
-            sys.step_cycle();
-        }
-        assert!(
-            !sys.board.mo_shadow.is_empty(),
-            "entering vblank must latch the motion-object state"
-        );
-
-        // The game now tears down bank 0 and publishes a rebuilt list in bank 1.
-        let mob = sys.board.map.region_data_mut(Region::Mob);
+        // Now the game does what it does in vblank: tear down bank 0's entry,
+        // stage a new sprite in bank 1, and publish by swapping the bank.
+        let mob = board.map.region_data_mut(Region::Mob);
         mob[0] = 0x00;
         mob[1] = 0x00;
-        sys.board.bankselect_w(0x08);
+        mob[0x200] = 0x06;
+        mob[0x201] = 0x00;
+        board.bankselect_w(0x08);
 
-        let (dw, dh) = TIMING.display_size();
-        let mut buf = vec![0u8; (dw * dh * 3) as usize];
-        sys.board.render_frame(&mut buf);
         assert_eq!(
-            &buf[0..3],
-            &[0, 254, 0],
-            "the sprite the beam scanned out still draws after the bank swap"
+            px(&board, 0, 0),
+            GREEN,
+            "the sprite the beam scanned out is still what the frame shows"
+        );
+        assert_eq!(
+            px(&board, 0, 200),
+            (0, 0, 0),
+            "the list staged afterwards belongs to the next frame, not this one"
+        );
+    }
+
+    /// A blanked line has no row to draw, and drawing one would run off the end
+    /// of a framebuffer sized to the visible window.
+    #[test]
+    fn blanking_scanlines_have_no_row_to_draw() {
+        let mut board = board_with_one_green_sprite_pen();
+        let mob = board.map.region_data_mut(Region::Mob);
+        mob[0] = 0x1F;
+        mob[1] = 0x00;
+        board.framebuffer.fill(0);
+        for s in VBLANK_SCANLINE..TIMING.total_scanlines as u16 {
+            board.begin_scanline(s);
+        }
+        assert!(
+            board.framebuffer.iter().all(|&c| c == 0),
+            "the blanked lines drew nothing"
         );
     }
 
@@ -1630,7 +1654,6 @@ mod tests {
     fn playfield_tile_horizontal_flip() {
         // Bit 15 of a playfield cell word mirrors its 8×8 tile left-to-right.
         let mut board = AtariSystem1Board::new(103, false);
-        let w = TIMING.display_width as usize;
 
         // One real gfx bank (index 1 — banks[0] is the blank placeholder) whose
         // tile 0 has a single pen-5 pixel at its left edge (x=0, y=0).
@@ -1649,15 +1672,9 @@ mod tests {
         let pf = board.map.region_data_mut(Region::Playfield);
         pf[2] = 0x80; // cell 1 word high byte → hflip
 
-        let (dw, dh) = TIMING.display_size();
-        let mut buf = vec![0u8; (dw * dh * 3) as usize];
-        board.render_frame(&mut buf);
+        scan_frame(&mut board);
 
-        let px = |x: usize, y: usize| {
-            let o = (y * w + x) * 3;
-            (buf[o], buf[o + 1], buf[o + 2])
-        };
-        const GREEN: (u8, u8, u8) = (0, 254, 0);
+        let px = |x: usize, y: usize| px(&board, x, y);
         // Unflipped cell: the pen stays at the tile's left edge.
         assert_eq!(px(0, 0), GREEN, "unflipped pen at left edge");
         assert_ne!(px(7, 0), GREEN, "unflipped right edge is blank");

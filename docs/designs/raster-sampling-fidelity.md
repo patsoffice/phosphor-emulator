@@ -405,7 +405,13 @@ vblank capture.
   scans.
 * **The vector machines.** No scanline hardware.
 
-### The one board that is wrong today
+### The one board that was wrong
+
+> **Closed 2026-08-29 by W4's migration of `atari_system1`.** `mo_shadow` is
+> gone, sprites are read live per row, and `phosphor-emulator-x7rn` went with
+> it. Kept because the reasoning below is what set that work up, and because the
+> retraction in the middle of it still stands. What the last paragraph asked for
+> — the measurement — is in "What shipped, on atari_system1" under W4.
 
 `atari_system1` is the only board in the tree that models a vblank latch, and it
 is the board whose hardware most clearly does not have one. SP-277 sheet 9A is
@@ -1034,6 +1040,93 @@ The frame-loop test picks up what that gave away, asserting the real loop
 reaches scanline 32 and raises the request.
 
 Two machines remain: marble, plus the boards W5 turned up.
+
+### What shipped, on atari_system1 (marble and roadrunner), 2026-08-29
+
+The eighth and last of this work item's own list, both machines on the board at
+once, and the one where `mo_shadow` retires. It is also the board that showed
+the epic's model was still incomplete.
+
+**A fourth case: one layer moves and the other does not.** The pins are neither
+byte-identical, nor one frame older, nor split by a mid-frame write. Marble's
+pin is byte-identical and Road Runner's moves by 14612 pixels spread over all
+240 rows, and the *same* change produced both.
+
+The reason is that the old renderer sampled **two different moments in one
+picture**:
+
+* motion objects came from `mo_shadow`, snapshotted at the **start** of vblank,
+  which is the list the beam had just scanned out — correct for the frame;
+* everything else — playfield, scroll, alpha, palette — was read live at the
+  **frame boundary**, the *end* of vblank, by which point the game had already
+  published the next frame's values.
+
+Per-scanline rendering puts every layer at the beam, so the sprite layer does
+not move at all and the playfield moves back by one vblank wherever the game
+scrolls. Marble's attract playfield does not scroll, so nothing moves; Road
+Runner's does.
+
+**Measured, and the mechanism traced rather than inferred.** Road Runner writes
+its X scroll once a frame at **scanline 241, inside vblank**, stepping
+`0x11D → 0x11A → 0x117` — three pixels a frame. The beam of frame 1800 reads
+what vblank 1799 published, `0x11A`; the old render read it after vblank 1800
+published `0x117`. A three-pixel shift of the playfield is the whole 14612-pixel
+difference, and by eye the two pictures are the same scene with the canyon and
+road three pixels apart, the alpha text and the character unmoved.
+
+| comparison | marble | roadrunner |
+|---|---|---|
+| new 1800 vs old 1800 | **0 / 80640** | 14612, all 240 rows |
+| new 1800 vs old 1799 | 467, in three 17-row bands | 207, rows 96-125 only |
+| control: old 1799 vs old 1800 | 467 | 14798 |
+
+The two residuals against `old 1799` are the sprite layer being one publish
+newer than *that* frame's snapshot, which is right: marble's three 17-row bands
+are its three animating objects, and Road Runner's rows 96-125 is its character.
+Every band is accounted for.
+
+**`mo_shadow` is gone, and so is the machinery around it**:
+`snapshot_motion_objects`, `mo_shadow_bands`, the `mo_bank_changes` band log,
+and the per-band compositing loop that replayed them. A row reads the live
+sprite RAM and the live bank when it is drawn. The one-line delay the band log
+applied by hand (`line + 1`) now falls out of the structure, because a row is
+drawn at the *start* of its scanline and a write during scanline N is first seen
+by row N+1.
+
+**`phosphor-emulator-x7rn` is fixed by the same change.** A write to the active
+motion-object bank during active display now changes the rows below it, which no
+whole-frame render could show. That issue predicted this exactly: "once the
+board renders sprites per scanline from live RAM, the snapshot and this bug both
+go away together."
+
+**The ratchet in `roadrunner_video_timing_test.rs` fired as designed.** Two tests
+written in advance against a conformance ROM asserted the *defect* and carried
+the correct answer in their failure messages. They came back with "121 rows kept
+the red they were drawn with and 119 came out green" and "screen row 50 is RED"
+— the two stated correct answers — and are now rewritten to assert the split
+positively, so they discriminate in the other direction. That is an independent
+confirmation of this work from a source that knew nothing about how it would be
+implemented.
+
+**Perf: about -5% on marble and -3 to -4% on Road Runner**, on two back-to-back
+A/B pairs (marble 3.265 → 3.092 and 3.225 → 3.053; roadrunner 3.456 → 3.305 and
+3.484 → 3.368 ms/frame), the second pair on a quiet host at ±0.7% to ±4.4%.
+Marble's -5.3% is identical across both pairs. Render collapses from 0.69 to
+0.013 ms/frame and emulation rises from 2.55 to 3.05.
+
+Three per-frame allocations went away — a 161 KB index buffer, a 161 KB motion
+bitmap and the `mo_shadow` copy of the whole MO region — along with the
+1024-entry palette decode (now a one-entry memo on the palette index) and the
+per-pixel playfield and alpha cell fetches, which became per tile. Against that,
+the motion-object list is a linked chain and cannot be indexed, so it is walked
+once per row instead of once per band; the early-out reads `word[0]`, which
+carries both Y and height, and decides the row before touching the rest.
+
+No sprite sampling lead was added. W3 established from the SP-277 sheets that
+the object path is a doubled horizontal line buffer, so the list for row `r` is
+read while the beam is on `r - 1`; but the `ypos` expression carries no such
+term, the sheets do not establish the buffers' phase, and the reference driver's
+own `+2` is documented there as a kludge over the `+1` it calls correct.
 
 ---
 

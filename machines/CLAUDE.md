@@ -37,12 +37,17 @@ Three rules follow from that default.
   a snapshot of this kind.
 - **A snapshot that exists to compensate for whole-frame rendering is not a
   hardware latch, and its comment must say which it is.** `atari_system1.rs`'s
-  `mo_shadow` is the second kind: the board's motion objects come off a
+  `mo_shadow` was the second kind: the board's motion objects come off a
   double-buffered line buffer and the game publishes its list with a bank swap,
-  so the snapshot models our renderer, not the circuit. It was misread as a
+  so the snapshot modelled our renderer, not the circuit. It was misread as a
   latch for exactly as long as its comment described the behavior without
-  naming the category. Retire that kind of snapshot when the board goes
-  per-scanline; keep it until then.
+  naming the category. It is gone now, retired with that board's per-scanline
+  migration — which is the rule: retire this kind of snapshot when the board
+  goes per-scanline, keep it until then. Its removal is also a warning about
+  what such a snapshot costs while it lives. It made the picture sample **two
+  different moments** — sprites from the start of vblank, playfield and scroll
+  from the frame boundary at the end of it — and nothing said so, because each
+  half was defensible on its own.
 
 Sprite lists are live-read on every board in the registry, walked once per
 scanline into a line buffer that is displayed on the *next* line, so the correct
