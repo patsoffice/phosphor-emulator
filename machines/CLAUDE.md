@@ -16,7 +16,7 @@ Arcade and system board implementations. Each machine implements the `Bus` trait
 
 **New raster machines render per-scanline from live state by default.** At each
 visible scanline boundary the board composites that one row out of the video
-state as it stands at that moment: tilemap RAM, colour RAM, scroll, tile and
+state as it stands at that moment: tilemap RAM, color RAM, scroll, tile and
 sprite banks, flip, palette, and layer order. `render_frame` then copies or
 resolves the finished buffer; it does not draw.
 
@@ -36,7 +36,7 @@ Three rules follow from that default.
   `mo_shadow` is the second kind: the board's motion objects come off a
   double-buffered line buffer and the game publishes its list with a bank swap,
   so the snapshot models our renderer, not the circuit. It was misread as a
-  latch for exactly as long as its comment described the behaviour without
+  latch for exactly as long as its comment described the behavior without
   naming the category. Retire that kind of snapshot when the board goes
   per-scanline; keep it until then.
 

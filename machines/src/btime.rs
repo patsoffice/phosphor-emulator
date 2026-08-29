@@ -296,7 +296,11 @@ impl Bus for BtimeBoard {
 #[derive(BusDebug, Saveable)]
 #[save_version(1)]
 #[save_tlv]
-#[save_after_load(restore_after_load)]
+// No `save_after_load` hook. There used to be one, to seed the per-row
+// `bnj_scroll0` samples and redraw; both are gone now that the picture is drawn
+// row by row as the beam passes. The framebuffer holds whatever was last drawn
+// until the next frame's rows overwrite it, which is the same contract
+// `gottlieb`'s index buffer has.
 pub struct BtimeBoard {
     /// Both maps hold only ROM, so what they persist is their page layout
     /// rather than any bytes: this board keeps its memory in plain fields
@@ -371,11 +375,23 @@ pub struct BtimeBoard {
     #[save_skip]
     bg_map: [u8; 0x0800], // background tilemap selector ROM
 
-    /// Display framebuffer (native 240×240 RGB, square pixels), refreshed once
-    /// per frame at the end of run_frame. Derived output rather than state, but
-    /// it cannot be rebuilt lazily either: `Renderable::render_frame` takes
-    /// `&self`. So a load redraws it, which is part of what
-    /// `#[save_after_load(restore_after_load)]` on this struct is for.
+    /// Display framebuffer (native 240×240 RGB, square pixels), filled one row
+    /// at a time as the beam reaches each visible scanline.
+    ///
+    /// A row therefore holds what the beam drew on that line, out of the video
+    /// RAM, color RAM, `bnj_scroll0`, flip latch and palette as they stood at
+    /// that line's boundary. Burger Time writes `bnj_scroll0` *during active
+    /// display*, measured on this ROM set at scanlines 88, 91 and 201, all
+    /// inside the visible 8..248 window, in both the attract loop and real play,
+    /// so rows above such a write genuinely differ from rows below it.
+    ///
+    /// Consequence worth knowing: the picture a completed frame presents does
+    /// *not* contain that frame's own vblank writes, because the beam had
+    /// already passed. The whole-frame render this replaced did contain them.
+    ///
+    /// Derived output, so not saved. It is not seeded after a load either: the
+    /// rows of the next frame overwrite every one of them, and there is no
+    /// moment a load could reconstruct a picture from.
     #[save_skip]
     pub(crate) framebuffer: Vec<u8>,
 
@@ -397,25 +413,6 @@ pub struct BtimeBoard {
     #[save(id = 18)]
     bnj_scroll0: u8, // 0x4004 write (bit4 -> background enable)
 
-    /// `bnj_scroll0` as it stood at the start of each visible scanline, indexed
-    /// by output row (row `r` is native row `r + CROP_LO`, drawn during scanline
-    /// `r + CROP_LO`).
-    ///
-    /// Burger Time writes this register *during active display*: measured on
-    /// this ROM set at scanlines 88, 91 and 201, all inside the visible 8..248
-    /// window, in both the attract loop and real play. The value only ever takes
-    /// `$00` and `$13`, so what changes mid-screen is bit 4, the background
-    /// enable, and not the scroll or bank bits. On the cabinet those frames show
-    /// the rows above the write composited one way and the rows below the other;
-    /// rendering the frame with a single value shows neither.
-    ///
-    /// Sampling per scanline quantises a write to the line it lands in, the same
-    /// approximation the palette takes on `gottlieb`.
-    ///
-    /// Derived state, rebuilt every frame, so not saved: seeded from
-    /// `bnj_scroll0` by [`seed_scanline_state`](Self::seed_scanline_state).
-    #[save_skip]
-    bnj_scroll0_row: Vec<u8>,
     #[save(id = 19)]
     sound_latch: u8, // 0x4003 write — stored; sound CPU/IRQ deferred (§10)
 
@@ -502,7 +499,6 @@ impl BtimeBoard {
             main_irq: false,
             flip_screen: false,
             bnj_scroll0: 0,
-            bnj_scroll0_row: vec![0u8; VISIBLE_DIM],
             sound_latch: 0,
             // Players idle (active-low = all bits high).
             p1: 0xFF,
@@ -518,7 +514,8 @@ impl BtimeBoard {
             clock: 0,
         };
         board.rebuild_palette();
-        board.render();
+        // No initial render: the framebuffer stays black until the beam draws
+        // its first frame, because there is no moment before that to draw.
         board
     }
 
@@ -644,25 +641,18 @@ impl BtimeBoard {
     ///
     /// Called once per scanline from [`run_scanlines`] and, for the debugger's
     /// single-step path, from [`tick`] when the clock lands on a boundary.
-    pub(crate) fn begin_scanline(&mut self, scanline: u64) {
+    /// Public because the picture only exists once the beam has passed over it:
+    /// a caller that wants a frame without running CPU cycles (the integration
+    /// tests) has to step the beam itself. Vblank lines are ignored here, so
+    /// walking `0..total_scanlines` draws exactly the visible rows.
+    pub fn begin_scanline(&mut self, scanline: u64) {
         let lo = CROP_LO as u64;
         if (lo..lo + VISIBLE_DIM as u64).contains(&scanline) {
-            self.bnj_scroll0_row[(scanline - lo) as usize] = self.bnj_scroll0;
+            self.render_scanline(scanline as usize);
         }
     }
 
-    /// Put every visible row's `bnj_scroll0` back to the live value.
-    ///
-    /// Used at construction, at reset, and after a state load, where the live
-    /// register is restored but the per-row samples are not: without this the
-    /// first frame afterwards would composite its upper rows against whatever
-    /// the previous machine had.
-    pub(crate) fn seed_scanline_state(&mut self) {
-        self.bnj_scroll0_row.fill(self.bnj_scroll0);
-    }
-
-    /// Board work after the CPUs' cycle: the PSGs, the clock, and the
-    /// end-of-frame render.
+    /// Board work after the CPUs' cycle: the PSGs and the clock.
     fn end_cycle(&mut self) {
         // Both AY-3-8910s @ 1.5 MHz (once per main tick).
         self.ay1.tick();
@@ -670,16 +660,9 @@ impl BtimeBoard {
 
         self.clock += 1;
 
-        // Refresh the cached framebuffer whenever this cycle completed a frame.
-        // Rendering here rather than after `run_frame`'s loop means the
-        // debugger's `debug_tick()` path (which never calls `run_frame`) also
-        // refreshes the picture. Firing on the frame's *last* cycle samples the
-        // same video state the old end-of-loop render saw, so output is
-        // byte-identical — note this board writes video state during vblank, so
-        // rendering at the vblank boundary instead would change the picture.
-        if self.clock.is_multiple_of(TIMING.cycles_per_frame()) {
-            self.render();
-        }
+        // No frame-boundary render here any more: each visible row is drawn at
+        // its own scanline boundary in `begin_scanline`, which both
+        // `run_scanlines` and the debugger's `tick` reach.
     }
 
     pub fn reset(&mut self) {
@@ -692,7 +675,8 @@ impl BtimeBoard {
         self.ay1.reset();
         self.ay2.reset();
         self.clock = 0;
-        self.seed_scanline_state();
+        // The framebuffer is not cleared: the next frame's rows overwrite every
+        // one of them as the beam reaches them.
         // The CPUs live on the machine, which resets them against this board.
     }
 
@@ -722,24 +706,6 @@ impl BtimeBoard {
 
     // --- Capability-trait helpers (called by the game wrapper) ---
 
-    /// Refresh the display framebuffer from current video state. Called once per
-    /// frame at the end of `run_frame`. Draws the visible 240×240 native square
-    /// raster; the frontend applies the 3:4 aspect (see TIMING.display_aspect).
-    pub fn render(&mut self) {
-        let mut fb = std::mem::take(&mut self.framebuffer);
-        self.render_visible(&mut fb);
-        self.framebuffer = fb;
-    }
-
-    /// Put back the derived state a load cannot carry, then redraw.
-    ///
-    /// The per-row `bnj_scroll0` samples are rebuilt as a frame runs, so a load
-    /// has to seed them from the restored register before the redraw reads them.
-    fn restore_after_load(&mut self) {
-        self.seed_scanline_state();
-        self.render();
-    }
-
     /// Copy the latest framebuffer into the frontend's `buffer`.
     pub fn render_frame(&self, buffer: &mut [u8]) {
         buffer.copy_from_slice(&self.framebuffer);
@@ -765,67 +731,48 @@ impl BtimeBoard {
         n1
     }
 
-    /// Render the visible frame: draw the native 256×256 layers into a
-    /// palette-index buffer, crop the visible [8,248)² window, and convert it to
-    /// native (unrotated) RGB24 in `buffer` (240×240, square pixels).
+    /// Draw one visible scanline into the framebuffer, out of the video state as
+    /// it stands at that line's boundary.
+    ///
+    /// `y` is a native row in `[CROP_LO, CROP_LO + VISIBLE_DIM)`; native row `n`
+    /// is drawn during scanline `n`, and lands at output row `n - CROP_LO`.
+    ///
+    /// The layers run in the board's order for this one row. `bnj_scroll0` bit 4
+    /// gates the background and, with it, whether the chars are drawn
+    /// transparently over it or opaquely over the backdrop, so a mid-screen
+    /// write to that register changes both layers from that row down. Sprites do
+    /// not depend on the register and are drawn last either way.
+    ///
+    /// The palette is read here too, so a palette write partway down the screen
+    /// colors only the rows below it, the same way `gottlieb` does it.
     ///
     /// The ROT270 the cabinet needs is declared via
     /// [`orientation`](Self::orientation) and applied centrally by the frontend,
     /// so this emits pixels in native row-major order.
-    /// Composited in bands of constant `bnj_scroll0`, because that register
-    /// picks which layers are drawn and how, and the game changes it partway
-    /// down the screen. A frame with no mid-screen write is one band and one
-    /// composite, exactly as before; a frame with a write is one composite per
-    /// value, of which there have never been more than two.
-    ///
-    /// NOTE THE PHASE THIS CREATES. Chars and sprites still come from video RAM
-    /// as it stands at the frame boundary, while `bnj_scroll0` now comes from
-    /// each row's own moment. That mixes phases the same way the per-scanline
-    /// palette does on `gottlieb`, and for the same reason: one layer at a time.
-    fn render_visible(&self, buffer: &mut [u8]) {
-        let mut native = vec![0u8; NATIVE_DIM * NATIVE_DIM];
-        let mask = self.palette_rgb.len() - 1;
+    fn render_scanline(&mut self, y: usize) {
+        // One native scanline of palette indices, backdrop (pen 0) first.
+        let mut row = [0u8; NATIVE_DIM];
 
-        let mut row = 0usize;
-        while row < VISIBLE_DIM {
-            let ctrl = self.bnj_scroll0_row[row];
-            let mut end = row + 1;
-            while end < VISIBLE_DIM && self.bnj_scroll0_row[end] == ctrl {
-                end += 1;
-            }
-
-            native.fill(0);
-            self.compose_native(&mut native, ctrl);
-
-            // Crop this band's rows and convert to native RGB24 (no rotation).
-            for y in row..end {
-                let src = (y + CROP_LO) * NATIVE_DIM + CROP_LO;
-                for x in 0..VISIBLE_DIM {
-                    let (r, g, b) = self.palette_rgb[native[src + x] as usize & mask];
-                    let di = (y * VISIBLE_DIM + x) * 3;
-                    buffer[di] = r;
-                    buffer[di + 1] = g;
-                    buffer[di + 2] = b;
-                }
-            }
-
-            row = end;
-        }
-    }
-
-    /// Draw the whole native buffer for one value of `bnj_scroll0`.
-    ///
-    /// Bit 4 gates the background layer and, with it, whether the chars are
-    /// drawn transparently over it or opaquely over the backdrop. Sprites do not
-    /// depend on the register and are drawn last either way.
-    fn compose_native(&self, native: &mut [u8], ctrl: u8) {
+        let ctrl = self.bnj_scroll0;
         if ctrl & 0x10 != 0 {
-            self.draw_background(native, ctrl);
-            self.draw_chars(native, true);
+            self.draw_background_row(&mut row, ctrl, y);
+            self.draw_chars_row(&mut row, true, y);
         } else {
-            self.draw_chars(native, false);
+            self.draw_chars_row(&mut row, false, y);
         }
-        self.draw_sprites(native);
+        self.draw_sprites_row(&mut row, y);
+
+        // Crop to the visible [8,248) columns and resolve against the palette as
+        // it stands now.
+        let mask = self.palette_rgb.len() - 1;
+        let out = (y - CROP_LO) * VISIBLE_DIM * 3;
+        for x in 0..VISIBLE_DIM {
+            let (r, g, b) = self.palette_rgb[row[x + CROP_LO] as usize & mask];
+            let di = out + x * 3;
+            self.framebuffer[di] = r;
+            self.framebuffer[di + 1] = g;
+            self.framebuffer[di + 2] = b;
+        }
     }
 
     /// BurgerTime's monitor is mounted rotated 270° clockwise. The orientation
@@ -834,13 +781,16 @@ impl BtimeBoard {
         phosphor_core::core::machine::Orientation::ROT270
     }
 
-    /// Blit one tile from `cache` into the native index buffer at (`sx`,`sy`),
-    /// clipping to the 256×256 native area. `transparent` skips pen 0; otherwise
-    /// every pixel (including 0) is written. Final index is `pal_base + pixel`.
+    /// Blit the one line of tile `code` that crosses native row `y` into `row`,
+    /// for a tile whose top-left corner is at (`sx`,`sy`).
+    ///
+    /// Clips to the 256-pixel native width. `transparent` skips pen 0;
+    /// otherwise every pixel (including 0) is written. Final index is
+    /// `pal_base + pixel`. A tile that does not cross `y` writes nothing, which
+    /// is how the row passes below reject the tiles that are not on this line.
     #[allow(clippy::too_many_arguments)]
-    fn blit_tile(
-        &self,
-        native: &mut [u8],
+    fn blit_tile_row(
+        row: &mut [u8; NATIVE_DIM],
         cache: &GfxCache,
         code: usize,
         sx: i32,
@@ -849,91 +799,120 @@ impl BtimeBoard {
         flipy: bool,
         pal_base: usize,
         transparent: bool,
+        y: usize,
     ) {
         if code >= cache.count() {
             return;
         }
         let w = cache.width();
         let h = cache.height();
-        for ty in 0..h {
-            let dy = sy + ty as i32;
-            if !(0..NATIVE_DIM as i32).contains(&dy) {
+        let ty = y as i32 - sy;
+        if !(0..h as i32).contains(&ty) {
+            return;
+        }
+        let py = if flipy {
+            h - 1 - ty as usize
+        } else {
+            ty as usize
+        };
+        for tx in 0..w {
+            let dx = sx + tx as i32;
+            if !(0..NATIVE_DIM as i32).contains(&dx) {
                 continue;
             }
-            let py = if flipy { h - 1 - ty } else { ty };
-            for tx in 0..w {
-                let dx = sx + tx as i32;
-                if !(0..NATIVE_DIM as i32).contains(&dx) {
-                    continue;
-                }
-                let px = if flipx { w - 1 - tx } else { tx };
-                let pixel = cache.pixel(code, px, py);
-                if transparent && pixel == 0 {
-                    continue;
-                }
-                native[dy as usize * NATIVE_DIM + dx as usize] = (pal_base + pixel as usize) as u8;
+            let px = if flipx { w - 1 - tx } else { tx };
+            let pixel = cache.pixel(code, px, py);
+            if transparent && pixel == 0 {
+                continue;
             }
+            row[dx as usize] = (pal_base + pixel as usize) as u8;
         }
     }
 
     /// Chars: 32×32 grid, `code = videoram[off] + 256*(colorram[off] & 3)`,
     /// transposed `x = 31 - off/32`, `y = off % 32`.
-    fn draw_chars(&self, native: &mut [u8], transparent: bool) {
-        for off in 0..0x400 {
-            let mut x = 31 - (off / 32);
-            let mut y = off % 32;
-            let code = self.videoram[off] as usize + 256 * (self.colorram[off] as usize & 3);
+    ///
+    /// Only the one grid row that covers native row `y` is visited, 32 cells
+    /// rather than all 1024. The cell's top edge is `8 * (off % 32)`, or
+    /// `8 * (31 - off % 32)` flipped, so the grid row is fixed by `y` and only
+    /// the column varies. Cells are still visited in ascending column order,
+    /// which is the order the whole-frame pass used within a row, though chars
+    /// tile without overlap so it cannot matter.
+    fn draw_chars_row(&self, row: &mut [u8; NATIVE_DIM], transparent: bool, y: usize) {
+        let cy = if self.flip_screen { 31 - y / 8 } else { y / 8 };
+        for col in 0..32usize {
+            let off = col * 32 + cy;
+            let mut x = 31 - col;
             if self.flip_screen {
                 x = 31 - x;
-                y = 31 - y;
             }
-            self.blit_tile(
-                native,
+            let code = self.videoram[off] as usize + 256 * (self.colorram[off] as usize & 3);
+            Self::blit_tile_row(
+                row,
                 &self.chars,
                 code,
                 8 * x as i32,
-                8 * y as i32,
+                8 * cy as i32,
                 self.flip_screen,
                 self.flip_screen,
                 0,
                 transparent,
+                y,
             );
         }
     }
 
     /// Sprites: 8 hardware sprites, attributes interleaved 0x20 apart in video
     /// RAM; drawn twice for ±256 wrap.
-    fn draw_sprites(&self, native: &mut [u8]) {
+    ///
+    /// All eight are visited per row and `blit_tile_row` rejects the ones that
+    /// are not on this line: eight entries is not worth an index for.
+    ///
+    /// The list is read as of this row. The board's map RAM is walked per line
+    /// into a line buffer that is displayed on the *next* line, so a sprite whose
+    /// attributes change mid-screen would appear one row early here. That
+    /// one-line lead is deliberately not modeled: `y -= 1` below is a position
+    /// constant, and the epic's W3 note warns that folding the lead in on top of
+    /// a constant that already carries it doubles the delay.
+    fn draw_sprites_row(&self, row: &mut [u8; NATIVE_DIM], y: usize) {
         for i in 0..8 {
             let off = i * 0x80;
             if self.videoram[off] & 0x01 == 0 {
                 continue;
             }
             let mut x = 240 - self.videoram[off + 0x60] as i32;
-            let mut y = 240 - self.videoram[off + 0x40] as i32;
+            let mut sy = 240 - self.videoram[off + 0x40] as i32;
             let mut flipx = self.videoram[off] & 0x04 != 0;
             let mut flipy = self.videoram[off] & 0x02 != 0;
             if self.flip_screen {
                 x = 240 - x;
-                y = 240 - y; // sprite_y_adjust_flip_screen = 0
+                sy = 240 - sy; // sprite_y_adjust_flip_screen = 0
                 flipx = !flipx;
                 flipy = !flipy;
             }
-            y -= 1; // sprite_y_adjust = 1
+            sy -= 1; // sprite_y_adjust = 1
             let code = self.videoram[off + 0x20] as usize;
-            self.blit_tile(native, &self.sprites, code, x, y, flipx, flipy, 0, true);
+            Self::blit_tile_row(row, &self.sprites, code, x, sy, flipx, flipy, 0, true, y);
             // Wrap-around copy.
-            let y2 = y + if self.flip_screen { -256 } else { 256 };
-            self.blit_tile(native, &self.sprites, code, x, y2, flipx, flipy, 0, true);
+            let sy2 = sy + if self.flip_screen { -256 } else { 256 };
+            Self::blit_tile_row(row, &self.sprites, code, x, sy2, flipx, flipy, 0, true, y);
         }
     }
 
     /// Background: up to 4 columns of 16×16 tiles selected from `bg_map`,
     /// horizontally scrolled by `(ctrl & 3) << 8`. The four column tiles
-    /// cycle `start..start+3`, offset by `ctrl & 0x04`. `ctrl` is the value of
-    /// `bnj_scroll0` for the band being composited, not necessarily the live
-    /// one: see [`render_visible`](Self::render_visible).
-    fn draw_background(&self, native: &mut [u8], ctrl: u8) {
+    /// cycle `start..start+3`, offset by `ctrl & 0x04`. `ctrl` is `bnj_scroll0`
+    /// as it stood when this row was drawn.
+    ///
+    /// As for chars, only the one tile row covering native row `y` is visited:
+    /// 16 tiles per 0x100 block rather than 256. Blocks are still visited in
+    /// ascending order, which matters here because they are drawn opaquely and
+    /// a later block overwrites an earlier one where the scroll overlaps them.
+    fn draw_background_row(&self, row: &mut [u8; NATIVE_DIM], ctrl: u8, y: usize) {
+        let Some(ty) = Self::bg_tile_row(y, self.flip_screen) else {
+            return;
+        };
+
         let mut start = if self.flip_screen { 0u8 } else { 1u8 };
         let mut tmap = [0u8; 4];
         for slot in tmap.iter_mut() {
@@ -949,29 +928,48 @@ impl BtimeBoard {
             }
             if scroll >= -256 {
                 let tileoffset = tmap[i & 3] as usize * 0x100;
-                for off in 0..0x100usize {
-                    let mut x = 240 - (16 * (off / 16) as i32 + scroll) - 1;
-                    let mut y = 16 * (off % 16) as i32;
+                for col in 0..16usize {
+                    let off = col * 16 + ty;
+                    let mut x = 240 - (16 * col as i32 + scroll) - 1;
+                    let mut sy = 16 * ty as i32;
                     if self.flip_screen {
                         x = 240 - x;
-                        y = 240 - y;
+                        sy = 240 - sy;
                     }
                     let code = self.bg_map[tileoffset + off] as usize;
-                    self.blit_tile(
-                        native,
+                    Self::blit_tile_row(
+                        row,
                         &self.bg_tiles,
                         code,
                         x,
-                        y,
+                        sy,
                         self.flip_screen,
                         self.flip_screen,
                         BG_PALETTE_BASE,
                         false,
+                        y,
                     );
                 }
             }
             scroll += 256;
         }
+    }
+
+    /// Which of the 16 tile rows in a background column block covers native row
+    /// `y`, or `None` if none does.
+    ///
+    /// A tile's top edge is `16 * (off % 16)` unflipped, and `240 - 16 * (off %
+    /// 16)` flipped. Unflipped that inverts to `y / 16`; flipped it is the one
+    /// multiple of 16 in `[240 - y, 240 - y + 16)`, which is what the ceiling
+    /// division computes. The flipped case can select a row outside `0..16`,
+    /// hence the `Option`.
+    fn bg_tile_row(y: usize, flip: bool) -> Option<usize> {
+        let k = if flip {
+            (240 - y as i32 + 15).div_euclid(16)
+        } else {
+            (y / 16) as i32
+        };
+        (0..16).contains(&k).then_some(k as usize)
     }
 
     // --- Bus (master-dispatched: Cpu(0) = main, Cpu(1) = sound) ---
@@ -1442,8 +1440,19 @@ mod tests {
 
     // --- Renderer (layers + ROT270) ---
     //
-    // These target the square logical image (render_visible, 240×240); the
-    // display-aspect stretch is covered separately below.
+    // These target the square logical image (240×240); the display-aspect
+    // stretch is covered separately below.
+    //
+    // The board draws one row per visible scanline, so a test that wants a whole
+    // picture has to walk the beam over it. `scan_frame` is that walk, and it is
+    // deliberately the only way these tests get a frame: there is no
+    // whole-frame render to call any more.
+
+    fn scan_frame(b: &mut BtimeBoard) {
+        for s in CROP_LO as u64..(CROP_LO + VISIBLE_DIM) as u64 {
+            b.begin_scanline(s);
+        }
+    }
 
     fn pixel(buffer: &[u8], row: usize, col: usize) -> (u8, u8, u8) {
         let i = (row * VISIBLE_DIM + col) * 3;
@@ -1454,11 +1463,10 @@ mod tests {
     fn render_default_frame_is_backdrop_white() {
         // No gfx loaded: every char is code 0 / all-pen-0, drawn opaque (bg
         // disabled) -> palette entry 0, which decodes to white (ram 0 inverted).
-        let b = board();
-        let mut buffer = vec![0u8; VISIBLE_DIM * VISIBLE_DIM * 3];
-        b.render_visible(&mut buffer);
+        let mut b = board();
+        scan_frame(&mut b);
         assert!(
-            buffer.iter().all(|&c| c == 0xFF),
+            b.framebuffer.iter().all(|&c| c == 0xFF),
             "frame should be all white"
         );
     }
@@ -1478,18 +1486,14 @@ mod tests {
         // Place char 1 at video RAM offset 495 (char cell x=16, y=15).
         b.videoram[495] = 1;
 
-        let mut buffer = vec![0u8; VISIBLE_DIM * VISIBLE_DIM * 3];
-        b.render_visible(&mut buffer);
+        scan_frame(&mut b);
 
-        // render_visible now emits native (unrotated) pixels: the char occupies
-        // native cols 128..135 × rows 120..127, i.e. crop rows 112..119 ×
-        // cols 120..127 after subtracting CROP_LO=8. ROT270 is applied centrally.
-        assert_eq!(pixel(&buffer, 115, 123), (0xFF, 0, 0), "char center is red");
-        assert_eq!(
-            pixel(&buffer, 10, 10),
-            (0xFF, 0xFF, 0xFF),
-            "elsewhere white"
-        );
+        // The rows emit native (unrotated) pixels: the char occupies native
+        // cols 128..135 × rows 120..127, i.e. crop rows 112..119 × cols
+        // 120..127 after subtracting CROP_LO=8. ROT270 is applied centrally.
+        let buffer = &b.framebuffer;
+        assert_eq!(pixel(buffer, 115, 123), (0xFF, 0, 0), "char center is red");
+        assert_eq!(pixel(buffer, 10, 10), (0xFF, 0xFF, 0xFF), "elsewhere white");
     }
 
     #[test]
@@ -1501,18 +1505,15 @@ mod tests {
             *byte = 0xFF;
         }
         b.load_gfx2(&gfx2);
-        // Enable the background layer; palette entry 9 -> blue. The register is
-        // sampled per scanline, so the rows have to have been scanned with it
-        // enabled for `render_visible` to composite against it.
+        // Enable the background layer; palette entry 9 -> blue. Rows are drawn
+        // as the beam passes, so the register has to be set before the scan.
         b.bnj_scroll0 = 0x10;
-        b.seed_scanline_state();
         b.bus_write(BusMaster::Cpu(0), 0x0C09, 0x3F);
 
-        let mut buffer = vec![0u8; VISIBLE_DIM * VISIBLE_DIM * 3];
-        b.render_visible(&mut buffer);
+        scan_frame(&mut b);
 
         // Chars are transparent over the backdrop, so the blue bg shows through.
-        let has_blue = buffer.as_chunks::<3>().0.contains(&[0, 0, 0xFF]);
+        let has_blue = b.framebuffer.as_chunks::<3>().0.contains(&[0, 0, 0xFF]);
         assert!(has_blue, "background (palette base 8) should be visible");
     }
 
@@ -1556,77 +1557,169 @@ mod tests {
             b.begin_scanline(s);
         }
 
-        let mut buffer = vec![0u8; VISIBLE_DIM * VISIBLE_DIM * 3];
-        b.render_visible(&mut buffer);
-
-        assert!(!row_has_blue(&buffer, 0), "row 0 is above the write");
+        let buffer = &b.framebuffer;
+        assert!(!row_has_blue(buffer, 0), "row 0 is above the write");
         assert!(
-            !row_has_blue(&buffer, split_row - 1),
+            !row_has_blue(buffer, split_row - 1),
             "the last row above the write has no background"
         );
         assert!(
-            row_has_blue(&buffer, split_row),
+            row_has_blue(buffer, split_row),
             "the first row below the write has the background"
         );
         assert!(
-            row_has_blue(&buffer, VISIBLE_DIM - 1),
+            row_has_blue(buffer, VISIBLE_DIM - 1),
             "the bottom row is below the write"
         );
     }
 
-    /// `render_visible` reading the samples is only half of it: the frame loop
-    /// has to fill them. This fails if `begin_scanline` is ever dropped from
-    /// `tick` or `run_scanlines`, which would leave every row compositing
-    /// against the value the board was last seeded with.
+    /// The tilemap half of W4: video RAM is read as the beam passes it, so
+    /// rewriting a char partway down the screen changes only the rows below the
+    /// write.
+    ///
+    /// The split is at native row 100, which is *inside* char row 12 (rows
+    /// 96..103). A whole-frame render draws a char row from one snapshot and
+    /// cannot produce this picture at all.
     #[test]
-    fn the_frame_loop_samples_the_register_at_scanline_boundaries() {
+    fn a_mid_frame_vram_write_changes_only_the_rows_below_it() {
+        const SPLIT_SCANLINE: u64 = 100;
+        let split_row = (SPLIT_SCANLINE - CROP_LO as u64) as usize;
+
         let mut b = board();
-        let mut cpu = M6502::new();
-        let mut sound = M6502::new();
-
-        // Wind to the first visible scanline, then change the register and let
-        // the hoisted loop run one more.
-        b.bnj_scroll0 = 0x00;
-        b.seed_scanline_state();
-        for _ in 0..CROP_LO as u64 * TIMING.cycles_per_scanline {
-            tick(&mut cpu, &mut sound, &mut b);
+        // char 1 = solid pen 1, char 2 = solid pen 2.
+        let mut gfx1 = vec![0u8; 0x6000];
+        for byte in gfx1.iter_mut().skip(8).take(8) {
+            *byte = 0xFF; // char 1, plane 0
         }
-        b.bnj_scroll0 = 0x13;
-        run_scanlines(&mut cpu, &mut sound, &mut b, TIMING.cycles_per_scanline);
+        for byte in gfx1.iter_mut().skip(0x2010).take(8) {
+            *byte = 0xFF; // char 2, plane 1
+        }
+        b.load_gfx1(&gfx1);
+        b.bus_write(BusMaster::Cpu(0), 0x0C01, 0xF8); // entry 1 -> red
+        b.bus_write(BusMaster::Cpu(0), 0x0C02, 0x3F); // entry 2 -> blue
 
+        b.videoram.fill(1);
+        for s in CROP_LO as u64..SPLIT_SCANLINE {
+            b.begin_scanline(s);
+        }
+        b.videoram.fill(2);
+        for s in SPLIT_SCANLINE..(CROP_LO + VISIBLE_DIM) as u64 {
+            b.begin_scanline(s);
+        }
+
+        let red = (0xFF, 0, 0);
+        let blue = (0, 0, 0xFF);
+        let buffer = &b.framebuffer;
         assert_eq!(
-            b.bnj_scroll0_row[0], 0x13,
-            "run_scanlines() samples the first visible row"
+            pixel(buffer, 0, 100),
+            red,
+            "row 0 was drawn before the write"
+        );
+        assert_eq!(
+            pixel(buffer, split_row - 1, 100),
+            red,
+            "the last row above the write keeps the old char, mid-char-row"
+        );
+        assert_eq!(
+            pixel(buffer, split_row, 100),
+            blue,
+            "the first row below the write takes the new char"
+        );
+        assert_eq!(
+            pixel(buffer, VISIBLE_DIM - 1, 100),
+            blue,
+            "the bottom row is below the write"
         );
     }
 
-    /// Vblank has no row to composite, and writing one would run off the end of
-    /// a sample array sized to the visible window.
+    /// The tests above drive `begin_scanline` by hand, which proves nothing
+    /// about whether the frame loop ever calls it. Without this one they would
+    /// all pass on a board that never drew anything, so this walks the real
+    /// `tick` and `run_scanlines` paths and checks the picture changed.
     #[test]
-    fn vblank_scanlines_have_no_row_to_sample_into() {
-        let mut b = board();
-        assert_eq!(b.bnj_scroll0_row.len(), VISIBLE_DIM);
+    fn the_frame_loop_draws_rows_at_scanline_boundaries() {
+        let mut b = board_with_visible_background();
+        let mut cpu = M6502::new();
+        let mut sound = M6502::new();
+        b.framebuffer.fill(0);
+
+        // Wind through vblank to the last line before the visible window. The
+        // debugger's per-cycle path is the one being exercised here.
+        b.bnj_scroll0 = 0x13;
+        for _ in 0..CROP_LO as u64 * TIMING.cycles_per_scanline {
+            tick(&mut cpu, &mut sound, &mut b);
+        }
+        assert!(
+            b.framebuffer.iter().all(|&c| c == 0),
+            "tick() drew nothing during vblank"
+        );
+
+        // One more scanline through tick(), which crosses the first visible
+        // boundary and must draw row 0 and only row 0.
+        for _ in 0..TIMING.cycles_per_scanline {
+            tick(&mut cpu, &mut sound, &mut b);
+        }
+        assert!(row_has_blue(&b.framebuffer, 0), "tick() draws row 0");
+        assert!(
+            !row_has_blue(&b.framebuffer, 1),
+            "and only row 0: nothing has drawn row 1 yet"
+        );
+
+        // And the hoisted loop the frame actually runs through draws too.
+        run_scanlines(&mut cpu, &mut sound, &mut b, TIMING.cycles_per_scanline);
+        assert!(
+            row_has_blue(&b.framebuffer, 1),
+            "run_scanlines() draws row 1"
+        );
+    }
+
+    /// Vblank has no row to draw, and drawing one would run off the end of a
+    /// framebuffer sized to the visible window.
+    #[test]
+    fn vblank_scanlines_have_no_row_to_draw() {
+        let mut b = board_with_visible_background();
+        b.bnj_scroll0 = 0x13;
+        b.framebuffer.fill(0);
         for s in 0..CROP_LO as u64 {
             b.begin_scanline(s);
         }
         for s in (CROP_LO + VISIBLE_DIM) as u64..TIMING.total_scanlines {
             b.begin_scanline(s);
         }
+        assert!(b.framebuffer.iter().all(|&c| c == 0), "vblank drew nothing");
     }
 
-    /// A load restores bnj_scroll0 but not the per-row samples, so the redraw
-    /// that follows would composite its upper rows against a stale value.
+    /// A load restores `bnj_scroll0` and leaves the framebuffer alone, so the
+    /// picture has to come back from the rows the *next* frame draws.
+    ///
+    /// This replaces a test that asserted a load seeded the per-row
+    /// `bnj_scroll0` samples. Those samples are gone: rows read the live
+    /// register when they are drawn, so what needs proving now is that a
+    /// restored register reaches the picture with no stale per-row state in
+    /// between.
     #[test]
-    fn a_load_seeds_every_row_from_the_restored_register() {
-        let mut b = board();
-        b.bnj_scroll0_row.fill(0xFF); // stale from another machine
-        b.bnj_scroll0 = 0x13;
+    fn a_load_restores_the_register_the_next_frames_rows_read() {
+        let mut saved = board_with_visible_background();
+        saved.bnj_scroll0 = 0x13; // background on
+        let mut w = StateWriter::new();
+        saved.save_state(&mut w);
+        let bytes = w.into_vec();
 
-        b.restore_after_load();
+        let mut b = board_with_visible_background();
+        b.bnj_scroll0 = 0x00; // background off, and a picture drawn without it
+        scan_frame(&mut b);
+        assert!(
+            !row_has_blue(&b.framebuffer, 0),
+            "no background before load"
+        );
+
+        let mut r = StateReader::new(&bytes);
+        b.load_state(&mut r).unwrap();
+        scan_frame(&mut b);
 
         assert!(
-            b.bnj_scroll0_row.iter().all(|&v| v == 0x13),
-            "every row seeds from the restored register"
+            row_has_blue(&b.framebuffer, 0),
+            "the frame after a load draws from the restored register"
         );
     }
 
@@ -1652,13 +1745,12 @@ mod tests {
         );
         assert_eq!(TIMING.display_aspect(), Some((3, 4)), "3:4 portrait hint");
 
-        let mut vis = vec![0u8; VISIBLE_DIM * VISIBLE_DIM * 3];
-        b.render_visible(&mut vis);
-        b.render(); // refresh the framebuffer from current state
+        scan_frame(&mut b);
+        let vis = b.framebuffer.clone();
         let mut disp = vec![0u8; (w * h * 3) as usize];
         b.render_frame(&mut disp);
 
-        // render_frame emits the visible square verbatim — no vertical stretch.
+        // render_frame emits the visible square verbatim, no vertical stretch.
         assert_eq!(disp, vis, "framebuffer is the native 240×240 visible image");
     }
 }

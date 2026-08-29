@@ -662,9 +662,9 @@ static QBERT_SPRITE_LAYOUT: GfxLayout<'static> = GfxLayout {
     char_increment: 256,
 };
 
-// Q*Bert has no colour PROM: its palette is 16 entries of RAM written by the
+// Q*Bert has no color PROM: its palette is 16 entries of RAM written by the
 // CPU, so there is nothing to hand the viewer and it falls back to a grayscale
-// ramp. The shape of a sprite is readable; its colours are not.
+// ramp. The shape of a sprite is readable; its colors are not.
 inventory::submit! {
     crate::gfx_registry::GfxRegion {
         machine: "qbert",

@@ -165,10 +165,23 @@ fn render(sys: &BurgertimeSystem) -> Vec<u8> {
     buf
 }
 
+/// Walk the beam over a whole frame so every visible row gets drawn.
+///
+/// The board draws one row per visible scanline out of the video state as it
+/// stands at that moment, so there is no picture until the beam has been over
+/// it. `begin_scanline` ignores the vblank lines itself, so sweeping the whole
+/// frame draws exactly the visible rows.
+fn scan(sys: &mut BurgertimeSystem) {
+    for s in 0..phosphor_machines::btime::TIMING.total_scanlines {
+        sys.board.begin_scanline(s);
+    }
+}
+
 #[test]
 fn default_palette_renders_white() {
-    // palette_ram = 0 -> inverted 0xFF -> white backdrop (rendered in new()).
-    let sys = BurgertimeSystem::new();
+    // palette_ram = 0 -> inverted 0xFF -> white backdrop.
+    let mut sys = BurgertimeSystem::new();
+    scan(&mut sys);
     assert!(render(&sys).iter().all(|&c| c == 0xFF));
 }
 
@@ -177,7 +190,7 @@ fn palette_write_changes_rendered_color() {
     let mut sys = BurgertimeSystem::new();
     // Entry 0 = 0xFF -> inverted 0x00 -> black.
     sys.bus_write(CPU, 0x0C00, 0xFF);
-    sys.board.render();
+    scan(&mut sys);
     assert!(
         render(&sys)
             .as_chunks::<3>()
@@ -188,7 +201,7 @@ fn palette_write_changes_rendered_color() {
 
     // Entry 0 = 0xF8 -> inverted 0x07 -> R=7 only -> pure red.
     sys.bus_write(CPU, 0x0C00, 0xF8);
-    sys.board.render();
+    scan(&mut sys);
     assert!(
         render(&sys)
             .as_chunks::<3>()

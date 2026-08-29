@@ -645,7 +645,7 @@ pub struct GottliebBoard {
     ///
     /// This is now in phase with the rest of the picture: tiles and sprites are
     /// composited into [`pixel_buffer`](Self::pixel_buffer) at the same scanline
-    /// boundary that fills this row's entry, so a row's colours and its pixels
+    /// boundary that fills this row's entry, so a row's colors and its pixels
     /// come from the same moment. They did not between W1 and W4 of the
     /// raster-sampling epic, when only the palette had moved.
     ///
@@ -1414,7 +1414,7 @@ mod tests {
         ram[2] = 255; // 255 ^ 255 == code 0
     }
 
-    /// The behaviour W4 exists for on the tilemap layer: video RAM is read as
+    /// The behavior W4 exists for on the tilemap layer: video RAM is read as
     /// the beam passes it, so rewriting the map partway down the screen changes
     /// only the rows below the write.
     ///

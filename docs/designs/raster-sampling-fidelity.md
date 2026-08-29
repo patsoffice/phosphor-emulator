@@ -546,7 +546,7 @@ The first of the eight, and the one that settled the fork above.
 order, and runs `render_tiles_scanline` and `render_sprites_scanline` in that
 order out of live video RAM, sprite RAM and the sprite bank. The frame-boundary
 render in `end_cycle` is gone; `render_frame` only resolves indices to RGB. The
-phase mismatch W1 opened on this board is closed: a row's colours and its pixels
+phase mismatch W1 opened on this board is closed: a row's colors and its pixels
 now come from the same moment.
 
 **The pin moved, and the mechanism was proven rather than assumed.** With the
@@ -586,7 +586,69 @@ complexity at 0.6%; revisit if a later board shows more.
   schematic. `qbert` gained `disasm gfxview` regions along the way, which is
   what proved the all-zero slots draw a blank sprite and these five do not.
 
-Seven machines remain: galaga, digdug, xevious, mrdo, burgertime, foodf, marble.
+### What shipped, on btime (burgertime), 2026-08-29
+
+The second of the eight, and the one that shows a W4 migration does not have to
+move a pin.
+
+`begin_scanline` now draws instead of sampling. `render_scanline` builds one
+256-pixel native row out of the live `bnj_scroll0`, video RAM, color RAM, flip
+latch and palette, then crops it to the visible `[8,248)` columns and resolves it
+into the framebuffer. The band compositing W2 introduced is gone, and so is the
+per-row `bnj_scroll0` sample array it fed: a row reads the register when it is
+drawn. The palette came along for free, since the row resolves where it is drawn,
+so a palette write partway down the screen now colors only the rows below it.
+
+Two loops needed an index rather than a filter, or the row passes would have cost
+240x the whole-frame ones:
+
+* **Chars.** A cell's top edge is `8 * (off % 32)`, so the grid row is fixed by
+  the native row and only the column varies. 32 cells per row instead of 1024.
+* **Background.** Same shape at 16 pixels, via `bg_tile_row`, which inverts the
+  flipped case (`240 - 16k`) as the one multiple of 16 in `[240 - y, 240 - y +
+  16)`. 16 tiles per column block instead of 256.
+
+Sprites keep the full eight-entry sweep; `blit_tile_row` rejects the ones that
+are not on the line, and eight is not worth an index for.
+
+**The pin did not move. Byte-identical at frames 1200, 1799 and 1800**, 0 of
+57600 pixels each, against a control confirming the game is animating (176
+pixels between old 1799 and old 1800). No recapture.
+
+**Why it did not move, measured rather than assumed.** This board's frame
+boundary is the end of scanline 271, so the old whole-frame render fired after
+the *trailing* vblank; the new rows are drawn from scanline 8 onward. The two can
+only differ for state written after the row that displays it. Traced with
+`disasm trace --watch` on the sprite table through the X/Y-swap mirror, Burger
+Time's per-frame updates land at scanlines 9, 29, 30, 31, 55 and 56, at the top
+of *active display*, and every object is written before the beam reaches the row
+it occupies. So the beam sees what the frame-boundary render saw.
+
+That is a property of this game's update timing on this ROM set, not a
+guarantee, and W2 already found the counterexample on the same board:
+`bnj_scroll0` is written at scanlines 88, 91 and 201, which do split the picture,
+on frames the golden pin does not sample. The mid-frame test still proves the
+split.
+
+**Perf:** 1.264 ms/frame before, 1.254 after. Inside the ±2.3% and ±3.7%
+run-to-run spread, so no measurable change. The row passes add per-row work and
+take away a 64 KB `native` allocation and a full 256x256 draw per frame, of which
+only 240x240 was ever cropped out.
+
+**The test that had to be replaced, not weakened.**
+`a_load_seeds_every_row_from_the_restored_register` asserted a load seeded the
+per-row `bnj_scroll0` samples. Those samples no longer exist, so the test was
+replaced by one that saves a board with the background on, loads it into a board
+drawn with the background off, and asserts the next scan draws the background:
+the same concern (a restored register reaches the picture with no stale per-row
+state between) expressed against the structure that now exists. The board's
+`save_after_load` hook is gone with it.
+
+`begin_scanline` also became `pub`: the picture only exists once the beam has
+passed, so an integration test that wants a frame without running CPU cycles has
+to step the beam itself.
+
+Six machines remain: galaga, digdug, xevious, mrdo, foodf, marble.
 
 ---
 
@@ -601,7 +663,7 @@ cargo run --release -p phosphor-bench -- --roms <path>    # before/after, W4 onl
 
 * **Golden frames are the primary gate and must not be recaptured** for W1 and
   W2. Both were expected to be byte-identical on the pinned frames and both
-  were; a diff there means the migration changed behaviour on a frame where the
+  were; a diff there means the migration changed behavior on a frame where the
   hardware did not.
 * **W4 is the exception, and it is not a loophole.** Its pins are expected to
   move by exactly one frame and no more. Recapture only after the three checks
