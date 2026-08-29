@@ -910,6 +910,53 @@ candidates rather than the slots. A profile comes before choosing between them.
 
 Three machines remain: foodf, marble, plus the boards W5 turned up.
 
+### Row passes iterate tiles, not pixels (mrdo, 2026-08-29)
+
+Raised by the owner from the sprite side immediately after the migration above,
+then widened by them to the tilemaps, which turned out to be where the cost
+was. Filed as `phosphor-emulator-3me5`; the tilemap half is done on mrdo and the
+sprite half and the other boards are not.
+
+`draw_tilemaps_row` now caches the map fetch and the decoded 8-pixel tile line
+until the column index moves, and hoists what the row fixes. `by` depends only
+on `ey` and the Y scroll, so `(by / 8) * 32` and `by & 7` never varied along the
+row at all; the attribute byte, the code byte and the tile's line
+(`GfxCache::row_slice`) now come once per tile. Two layers x 240 pixels x 192
+rows = 92,160 map fetches a frame becomes about 11,900.
+
+**Cached on the column index, not on a span**, which is the part worth copying.
+Span arithmetic would have to special-case the flipscreen mirror
+(`ex = 255 - ax`, so the source walks *backwards* along the row) and the
+scrolled background's wrap at 256. Comparing this pixel's column index against
+the previous one is correct in both, with neither case appearing in the code.
+
+**Output-neutral, verified**: 0 of 46080 pixels against the pin recaptured
+minutes earlier, and the golden suite passes with no recapture.
+
+The reversed walk is what a cache like this is most able to get wrong, and
+nothing covered it — before the optimization either.
+`flipscreen_mirrors_the_tilemaps_across_both_axes` closes that: the visible
+window is symmetric under the 255-complement (x 8..248 maps onto itself, and so
+does y 32..224), so the flipped picture must be the *exact* 180° rotation of the
+unflipped one, asserted pixel by pixel over the whole frame. Sprites are
+excluded because the hardware does not flip them. Falsified by dropping the flip
+from the column sampling.
+
+**Perf: -4.2% and -2.4%** on two back-to-back A/B pairs at 15 and 21 repetitions
+(1.296 → 1.241 and 1.242 → 1.207 ms/frame), host spreads ±6.7% to ±59.8%. Both
+pairs negative, so a real improvement whose magnitude the host cannot resolve —
+the same position the migration's own +1.7%/+4.4% was left in, and the two
+nearly cancel: against the whole-frame renderer this board started the day with,
+per-scanline rendering plus this costs about nothing.
+
+That cancellation is not attribution. It is consistent with the per-pixel map
+fetch being the dominant cost, which is what the 92,160-against-12,288 count
+predicted, but a profile is still what would prove it and still has not been
+run. The rule went into `machines/CLAUDE.md`: a row pass iterates the units that
+vary along the row, and must not precompute a per-frame index of live state,
+because that is a latch and it reintroduces what per-scanline rendering exists
+to remove.
+
 ---
 
 ## Testing

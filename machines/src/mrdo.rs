@@ -800,6 +800,28 @@ impl MrdoBoard {
         let ay = ny + VISIBLE_TOP_LINE as usize;
         let ey = if flip { 255 - ay } else { ay };
 
+        // Fixed for the whole row: both maps' grid row, and which line inside
+        // the tile that row lands on. Only the column varies along the row, so
+        // these come out of the per-pixel loop.
+        let by = (ey + sy) & 0xff;
+        let bg_row_base = (by / 8) * 32;
+        let bg_py = by & 7;
+        let fg_row_base = (ey / 8) * 32;
+        let fg_py = ey & 7;
+
+        // A tile's identity changes only every 8 pixels, so the map fetch and
+        // the decode of its 8-pixel line are cached until the column index
+        // moves. That is 30 to 31 fetches per layer per row rather than 240.
+        // Cached on the *column index* rather than on a span, which is what
+        // keeps this correct in both directions: with flipscreen the source
+        // walks backwards (ex = 255 - ax), and the scrolled BG wraps at 256.
+        let mut bg_col = usize::MAX;
+        let mut bg_attr = 0u8;
+        let mut bg_line: &[u8] = &[];
+        let mut fg_col = usize::MAX;
+        let mut fg_attr = 0u8;
+        let mut fg_line: &[u8] = &[];
+
         for (nx, p) in row.iter_mut().enumerate() {
             let ax = nx + VISIBLE_LEFT_COL;
             let ex = if flip { 255 - ax } else { ax };
@@ -813,25 +835,34 @@ impl MrdoBoard {
             // transparent.
             {
                 let bx = (ex + sx) & 0xff;
-                let by = (ey + sy) & 0xff;
-                let bidx = (by / 8) * 32 + bx / 8;
-                let battr = bgram[bidx];
-                let bcode = bgram[bidx + 0x400] as usize + ((battr as usize & 0x80) << 1);
-                let bval = self.bg_cache.pixel(bcode, bx & 7, by & 7);
-                if bval != 0 || battr & 0x40 != 0 {
-                    *p = (battr as u16 & 0x3f) * 4 + bval as u16;
+                let col = bx / 8;
+                if col != bg_col {
+                    bg_col = col;
+                    let bidx = bg_row_base + col;
+                    bg_attr = bgram[bidx];
+                    let bcode = bgram[bidx + 0x400] as usize + ((bg_attr as usize & 0x80) << 1);
+                    bg_line = self.bg_cache.row_slice(bcode, bg_py);
+                }
+                let bval = bg_line[bx & 7];
+                if bval != 0 || bg_attr & 0x40 != 0 {
+                    *p = (bg_attr as u16 & 0x3f) * 4 + bval as u16;
                 }
             }
 
             // FG tilemap (gfx1), fixed; same force-layer-0 rule. The
             // priority-flagged tiles around the logo mask off the BG rainbow.
             {
-                let fidx = (ey / 8) * 32 + ex / 8;
-                let fattr = fgram[fidx];
-                let fcode = fgram[fidx + 0x400] as usize + ((fattr as usize & 0x80) << 1);
-                let fval = self.fg_cache.pixel(fcode, ex & 7, ey & 7);
-                if fval != 0 || fattr & 0x40 != 0 {
-                    *p = (fattr as u16 & 0x3f) * 4 + fval as u16;
+                let col = ex / 8;
+                if col != fg_col {
+                    fg_col = col;
+                    let fidx = fg_row_base + col;
+                    fg_attr = fgram[fidx];
+                    let fcode = fgram[fidx + 0x400] as usize + ((fg_attr as usize & 0x80) << 1);
+                    fg_line = self.fg_cache.row_slice(fcode, fg_py);
+                }
+                let fval = fg_line[ex & 7];
+                if fval != 0 || fg_attr & 0x40 != 0 {
+                    *p = (fg_attr as u16 & 0x3f) * 4 + fval as u16;
                 }
             }
         }
@@ -1836,6 +1867,61 @@ mod tests {
             sys.board.framebuffer.iter().all(|&c| c == 0),
             "the blanking lines drew nothing"
         );
+    }
+
+    /// Cocktail flip mirrors both tilemaps 180°, which the row pass gets by
+    /// sampling `255 - ax` — so with the flip on, the source walks *backwards*
+    /// along the row. That reversed walk is the case the per-tile cache in
+    /// `draw_tilemaps_row` is most able to get wrong, and nothing covered it.
+    ///
+    /// The visible window is symmetric under the 255-complement (x 8..248 maps
+    /// onto itself, and so does y 32..224), so the flipped picture must be the
+    /// exact 180° rotation of the unflipped one — not merely similar. Sprites
+    /// are excluded because the hardware does not flip them.
+    #[test]
+    fn flipscreen_mirrors_the_tilemaps_across_both_axes() {
+        let mut sys = MrdoSystem::new();
+        sys.board.fg_rom[0..8].fill(0xFF); // tile 0: every pixel value 2
+        sys.board.decode_gfx_roms();
+        // Distinct color per pen, so a mirror is distinguishable from a copy.
+        for (i, c) in sys.board.palette_rgb.iter_mut().enumerate() {
+            let i = i as u8;
+            *c = (i, i.wrapping_mul(3), i.wrapping_mul(7));
+        }
+        {
+            // A different color code in every cell. Bits 6 and 7 stay clear, so
+            // the tile code is 0 throughout and only the color varies.
+            let fg = sys.board.main_map.region_data_mut(MainRegion::FgVideoRam);
+            for (idx, cell) in fg[0..0x400].iter_mut().enumerate() {
+                *cell = (idx % 0x40) as u8;
+            }
+        }
+
+        scan_frame(&mut sys.board);
+        let unflipped = sys.board.framebuffer.clone();
+        sys.board.flipscreen = true;
+        scan_frame(&mut sys.board);
+        let flipped = &sys.board.framebuffer;
+
+        // The picture has to be non-uniform, or the mirror below proves nothing.
+        assert!(
+            unflipped
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .any(|&px| px != unflipped[0..3]),
+            "the fixture drew more than one color"
+        );
+
+        for ny in 0..VISIBLE_HEIGHT {
+            for nx in 0..VISIBLE_WIDTH {
+                assert_eq!(
+                    pixel(flipped, nx, ny),
+                    pixel(&unflipped, VISIBLE_WIDTH - 1 - nx, VISIBLE_HEIGHT - 1 - ny),
+                    "flipped ({nx},{ny}) is the unflipped picture rotated 180°"
+                );
+            }
+        }
     }
 
     #[test]

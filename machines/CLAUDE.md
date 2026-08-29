@@ -65,6 +65,19 @@ copies to work from. Per-row state derived from live registers is `#[save_skip]`
 and reseeded from the live value after a load, or the first post-load frame
 resolves against another machine's data.
 
+**A row pass iterates the units that vary along the row**, and every board this
+was got wrong on paid for it in the profile. A tilemap row crosses about 32
+tiles, not 240 pixels: fetch the map cell and its 8-pixel line once per tile
+(`GfxCache::row_slice`) and index it, rather than refetching per pixel — and
+hoist the grid row and the line inside the tile, which `y` alone fixes. A sprite
+pass walks the whole list but takes its vertical range test on the slot's Y byte
+before decoding anything else, so a slot not on the line costs one read. The
+shared helpers in `phosphor-core`'s `gfx::tilemap` already have the tile-outer
+shape; `mrdo.rs`'s `draw_tilemaps_row` is the worked example for a board that
+cannot use them directly. What a row pass must **not** do is precompute a
+per-frame index of live state — that is a latch, and it reintroduces exactly
+what per-scanline rendering exists to remove.
+
 Background: `docs/designs/raster-sampling-fidelity.md`.
 
 ## Machine Traits
