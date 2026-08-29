@@ -648,7 +648,63 @@ state between) expressed against the structure that now exists. The board's
 passed, so an integration test that wants a frame without running CPU cycles has
 to step the beam itself.
 
-Six machines remain: galaga, digdug, xevious, mrdo, foodf, marble.
+### What shipped, on namco_galaga (galaga), 2026-08-29
+
+The third of the eight, and the one that had to answer this doc's own
+no-vblank-regression clause.
+
+The board already had the house hook (`begin_scanline`, `run_scanlines`, the
+boundary test in `tick`); what was whole-frame was the render, which lives on
+each game wrapper rather than the board. `GalagaSystem` gained
+`begin_scanline_render`, called from the frame loop and from
+`tick_frame_boundary` for the debugger, and `render_scanline` runs backdrop,
+starfield, sprites and tilemap for one row. `run_frame` is scanline-outer and
+re-forms the CPU/bus split 264 times a frame instead of once; a per-*cycle*
+split cost about 6% on this board when it was measured, and this is 1/192nd of
+that frequency.
+
+**`update_starfield_at_vblank` was an empty function.** This doc cited it as the
+latch-modelling reference and the work item's acceptance criteria named it as
+one of the two things that must not become per-line. Its body was four lines of
+comment saying nothing further was needed. There was no latch to preserve, so it
+is deleted, and what replaces it is a real one.
+
+**The real once-a-frame state is `star_frame`.** The starfield is a free-running
+shift register whose output position is a function of how many times it has been
+clocked since the frame began: `pre_vis` (which the scroll index perturbs by -4
+to +3) then 224 rows of 256 clocks, then `post_vis`. Reading the scroll index
+per row would not recolour a row, it would move every star below it. Whether the
+05XX re-reads its control latch per line is on no drawing, because the Galaga
+video sheet names 4M as the starfield generator and it is a Namco custom LSI:
+the same dead end MMC02 is for `mcr2`. So the four control bits are latched at
+row 0, exactly reproducing the whole-frame semantics including the register not
+advancing at all on a frame where the field is disabled, and the question is
+left open rather than guessed at. Rule: can I point at the part? Not here.
+
+**The pin moved by exactly one frame, proven.** New frame 1800 is byte-identical
+to the old code's frame 1799 (0 of 64512 pixels), and differs from old 1800 by
+217 pixels, which are *the same 217* that separate old 1799 from old 1800. Most
+of them are stars: the field scrolls every frame, so a one-frame shift moves all
+of it. The LFSR sequence survived the split into pre/row/post exactly, which was
+the part most able to go wrong. Recaptured after review; `shows` needed no
+rewrite.
+
+**Perf, and the first board where the cost is visible at all.** 2.266 ms/frame
+before, 2.289 after: **+1.0%**, against a ±1.8% and ±1.9% spread at nine
+repetitions. The first attempt measured +2.8%, because the 64 sprite slots were
+being decoded 224 times each to draw at most 32 rows of any one of them. A
+Y-range early-out on the slot, taken after the attribute bytes are read so the
+per-row sampling is unchanged, brought it to +1.0%. Worth carrying to the
+remaining boards: the row passes want an index or an early-out wherever a layer
+iterates a list.
+
+Note the sprite Y already carries W3's one-line line-buffer delay as `256 - y +
+1`, so no sampling lead was added on top of it.
+
+Five machines remain: digdug, xevious, mrdo, foodf, marble. Dig Dug and Xevious
+share this board and this shape, and once all three are per-scanline the
+backdrop/starfield/sprite/tilemap drive is common enough to lift onto
+`namco_galaga` rather than repeated three times.
 
 ---
 
@@ -675,9 +731,13 @@ cargo run --release -p phosphor-bench -- --roms <path>    # before/after, W4 onl
   board, assert only rows below the write differ. Without this, a migration can
   be byte-identical *and* still not honour mid-frame changes — the golden
   frames alone cannot distinguish the two.
-* **No vblank regression:** assert genuinely vblank-latched state (galaga's
-  `update_starfield_at_vblank`) is not re-sampled per line after any W4
-  migration. `atari_system1`'s `mo_shadow` is *not* such a case, since W3 found
+* **No vblank regression:** assert genuinely once-a-frame state is not
+  re-sampled per line after any W4 migration. On galaga that is `star_frame`,
+  the starfield control latch, and the test is
+  `the_starfield_controls_are_not_resampled_per_line`. It is *not*
+  `update_starfield_at_vblank`, which this doc named until the galaga migration
+  found it was an empty function; see that section.
+  `atari_system1`'s `mo_shadow` is *not* such a case either, since W3 found
   the hardware reads live, but it must not be re-sampled per line either while
   the board still renders whole-frame, because the game rebuilds the list during
   vblank. Retire it as part of the board's W4 migration, not before.
@@ -756,9 +816,11 @@ distinction.
   [`mid-frame-raster-audit.md`](mid-frame-raster-audit.md).
 * W3's transcriptions:
   [`../schematics/sprite-list-scan.md`](../schematics/sprite-list-scan.md).
-* Latch modelling reference: `machines/src/galaga.rs:828`
-  (`update_starfield_at_vblank`), which is a genuine vblank latch.
-  `machines/src/atari_system1.rs:547` (`mo_shadow`) is **not** one; see W3.
+* Once-a-frame state reference: `galaga`'s `star_frame`, the starfield control
+  latch, with the reason it cannot be read per row on the field itself.
+  `update_starfield_at_vblank` used to be cited here and was an empty function;
+  it is deleted. `machines/src/atari_system1.rs` (`mo_shadow`) is a
+  whole-frame-render compensation rather than a hardware latch; see W3.
 * Identical index→RGB passes: `machines/src/gottlieb.rs:873`,
   `machines/src/mcr2.rs:539`.
 * Burgertime background: `machines/src/btime.rs:274` (`bnj_scroll0`), `:576`

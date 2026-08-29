@@ -42,6 +42,18 @@ const STARFIELD_X_LIMIT: u16 = 256 + STARFIELD_X_OFFSET;
 
 const SPEED_X_CYCLE_COUNT_OFFSET: [i32; 8] = [0, 1, 2, 3, -4, -3, -2, -1];
 
+/// The starfield control latch as it stood at the top of the visible area.
+///
+/// See [`GalagaSystem::star_frame`] for why this layer is sampled once a frame
+/// while every other layer on this board is read per row.
+#[derive(Clone, Copy, Default)]
+struct StarFrame {
+    enabled: bool,
+    scroll_x: u8,
+    set_a: u8,
+    set_b: u8,
+}
+
 // Pre-visible line counts × 256 cycles/line, indexed by scroll_y (always 0 for Galaga)
 const PRE_VIS_CYCLE_COUNT: [i32; 8] = [
     22 * 256,
@@ -377,6 +389,30 @@ pub struct GalagaSystem {
     // Starfield generator state (Namco 05XX)
     star_lfsr: u16,
 
+    /// The four starfield control bits as they stood when the beam reached the
+    /// first visible line, held for the rest of the frame.
+    ///
+    /// This is the one layer on this board that is NOT read per row, and the
+    /// reason is that nothing establishes it may be. The starfield is a
+    /// free-running shift register whose output position is a function of how
+    /// many times it has been clocked since the frame began: `pre_vis` (which
+    /// the scroll index perturbs by -4..+3) then 224 rows of 256, then
+    /// `post_vis`. Reading the scroll index per row would change how far the
+    /// register had advanced by the *next* row, so it does not merely recolour
+    /// a row, it moves every star below it.
+    ///
+    /// Whether the 05XX re-reads its control latch per line is not on any
+    /// drawing: the Galaga video sheet names 4M as the starfield generator and
+    /// it is a Namco custom LSI, the same dead end MMC02 is for `mcr2` (see
+    /// `docs/schematics/mcr-video-timing.md`). So this keeps exactly the
+    /// whole-frame semantics the board had before it drew per row, including
+    /// the LFSR not advancing at all on a frame where the field is disabled,
+    /// and the question is left open rather than guessed at.
+    ///
+    /// Derived per frame, so not saved; re-sampled at the next row 0.
+    #[save_skip]
+    star_frame: StarFrame,
+
     // Star palette (64 colors, computed at ROM load)
     #[save_skip]
     star_palette: [(u8, u8, u8); 64],
@@ -449,6 +485,7 @@ impl GalagaSystem {
             starfield_enabled: false,
 
             star_lfsr: LFSR_SEED,
+            star_frame: StarFrame::default(),
 
             star_palette: [(0, 0, 0); 64],
             combined_palette: vec![(0, 0, 0); 128],
@@ -587,75 +624,109 @@ impl GalagaSystem {
     // Full-frame video rendering
     // -----------------------------------------------------------------------
 
-    fn render_video(&mut self) {
-        // 1. Fill with black background.  Galaga palette entry 0 is NOT black
-        //    (PROM byte 0 = 0xF6 → near-white), so we use an index in the
-        //    unused padding range (96-127) which is always (0,0,0).
+    /// Draw one visible row, out of the video state as it stands at that row's
+    /// scanline boundary.
+    ///
+    /// The layers run in the board's order for this one row: backdrop,
+    /// starfield, sprites, tilemap. Video RAM, the three sprite attribute RAMs
+    /// and the colour LUTs are all read here rather than once at the frame
+    /// boundary, so a write partway down the screen affects only the rows below
+    /// it. The starfield is the exception, and says why on
+    /// [`star_frame`](Self::star_frame).
+    fn render_scanline(&mut self, y: usize) {
+        // Galaga palette entry 0 is NOT black (PROM byte 0 = 0xF6 → near-white),
+        // so the backdrop is an index in the unused padding range (96-127),
+        // which is always (0,0,0).
         const BACKGROUND_PEN: u8 = 96;
-        self.native_buffer.fill(BACKGROUND_PEN);
 
-        // 2. Starfield (background)
-        self.render_starfield();
-
-        // 3. Sprites (middle layer)
-        self.render_sprites();
-
-        // 4. Tilemap (foreground, on top)
-        self.render_tilemap();
-    }
-
-    fn render_starfield(&mut self) {
-        if !self.starfield_enabled {
-            return;
+        if y == 0 {
+            self.begin_starfield_frame();
         }
 
+        let row_off = y * 288;
+        self.native_buffer[row_off..row_off + 288].fill(BACKGROUND_PEN);
+
+        self.render_starfield_row(y);
+        self.render_sprites_row(y);
+        self.render_tilemap_row(y);
+
+        if y as u16 == VISIBLE_LINES - 1 {
+            self.end_starfield_frame();
+        }
+    }
+
+    /// Latch the starfield controls for this frame and clock the generator
+    /// through the pre-visible part of the raster.
+    ///
+    /// The scroll index only ever reaches the picture here, as a perturbation of
+    /// -4..+3 on how far the shift register has advanced before the first
+    /// visible pixel. That is what makes the field appear to scroll.
+    fn begin_starfield_frame(&mut self) {
+        self.star_frame = StarFrame {
+            enabled: self.starfield_enabled,
+            scroll_x: self.starfield_scroll_x,
+            set_a: self.star_set_a,
+            set_b: self.star_set_b,
+        };
+        if !self.star_frame.enabled {
+            return;
+        }
         // Galaga: scroll_y is always 0 (SCROLL_Y pins tied to ground)
-        let scroll_y_index: usize = 0;
-
-        let pre_vis = (PRE_VIS_CYCLE_COUNT[scroll_y_index]
-            + SPEED_X_CYCLE_COUNT_OFFSET[self.starfield_scroll_x as usize])
+        let pre_vis = (PRE_VIS_CYCLE_COUNT[0]
+            + SPEED_X_CYCLE_COUNT_OFFSET[self.star_frame.scroll_x as usize])
             as u32;
-        let post_vis = POST_VIS_CYCLE_COUNT[scroll_y_index] as u32;
-
-        // Advance LFSR during pre-visible portion
         for _ in 0..pre_vis {
             self.star_lfsr = Self::lfsr_next(self.star_lfsr);
         }
+    }
 
-        // Visible portion: 224 lines × 256 pixels
-        for y in 0..VISIBLE_LINES {
-            for x in STARFIELD_X_OFFSET..(STARFIELD_PIXEL_WIDTH + STARFIELD_X_OFFSET) {
-                if (self.star_lfsr & LFSR_HIT_MASK) == LFSR_HIT_VALUE {
-                    let star_set = ((self.star_lfsr >> 10) & 1) as u8
-                        | (((self.star_lfsr >> 8) & 1) << 1) as u8;
-
-                    if (self.star_set_a == star_set || self.star_set_b == star_set)
-                        && x < STARFIELD_X_LIMIT
-                    {
-                        let dx = x as usize;
-                        let dy = y as usize;
-                        if dx < 288 && dy < 224 {
-                            let color = (((self.star_lfsr >> 5) & 0x7)
-                                | ((self.star_lfsr << 3) & 0x18)
-                                | ((self.star_lfsr << 2) & 0x20))
-                                as u8;
-                            let color = (!color) & 0x3F;
-                            // Star colors start at index 32 in combined palette
-                            self.native_buffer[dy * 288 + dx] = 32 + color;
-                        }
-                    }
-                }
-                self.star_lfsr = Self::lfsr_next(self.star_lfsr);
-            }
+    /// Clock the generator through the post-visible part of the raster, so the
+    /// next frame starts where the hardware's would.
+    fn end_starfield_frame(&mut self) {
+        if !self.star_frame.enabled {
+            return;
         }
-
-        // Advance LFSR during post-visible portion
-        for _ in 0..post_vis {
+        for _ in 0..POST_VIS_CYCLE_COUNT[0] as u32 {
             self.star_lfsr = Self::lfsr_next(self.star_lfsr);
         }
     }
 
-    fn render_tilemap(&mut self) {
+    /// One row of the starfield: 256 shift-register clocks, drawn where they
+    /// hit.
+    ///
+    /// The register is clocked for every pixel of the row whether or not a star
+    /// lands, because its position in the sequence is the picture. A row is
+    /// therefore not independent of the rows above it, which is why this layer
+    /// keeps a per-frame latch while the others read live.
+    fn render_starfield_row(&mut self, y: usize) {
+        if !self.star_frame.enabled {
+            return;
+        }
+        for x in STARFIELD_X_OFFSET..(STARFIELD_PIXEL_WIDTH + STARFIELD_X_OFFSET) {
+            if (self.star_lfsr & LFSR_HIT_MASK) == LFSR_HIT_VALUE {
+                let star_set =
+                    ((self.star_lfsr >> 10) & 1) as u8 | (((self.star_lfsr >> 8) & 1) << 1) as u8;
+
+                if (self.star_frame.set_a == star_set || self.star_frame.set_b == star_set)
+                    && x < STARFIELD_X_LIMIT
+                {
+                    let dx = x as usize;
+                    if dx < 288 && y < 224 {
+                        let color = (((self.star_lfsr >> 5) & 0x7)
+                            | ((self.star_lfsr << 3) & 0x18)
+                            | ((self.star_lfsr << 2) & 0x20))
+                            as u8;
+                        let color = (!color) & 0x3F;
+                        // Star colors start at index 32 in combined palette
+                        self.native_buffer[y * 288 + dx] = 32 + color;
+                    }
+                }
+            }
+            self.star_lfsr = Self::lfsr_next(self.star_lfsr);
+        }
+    }
+
+    fn render_tilemap_row(&mut self, scanline: usize) {
         // 36×28 foreground tilemap of 8×8 chars, composited on top of the star +
         // sprite layers via the shared index-writing scanline helper. The Namco
         // offset never reaches 0x400 within the visible grid, and this tilemap has
@@ -667,13 +738,19 @@ impl GalagaSystem {
             tile_width: 8,
             tile_height: 8,
         };
+        // A cache with no entries has no pixels to index, which a board built
+        // without graphics ROMs would otherwise walk into once every scanline
+        // draws.
+        if self.char_cache.count() == 0 {
+            return;
+        }
         // Split borrows: closures read VRAM + LUT, the helper writes native_buffer.
         let video_ram = self.board.map.region_data(Region::VideoRam);
         let char_lut = &self.char_lut;
         let char_cache = &self.char_cache;
         let native = &mut self.native_buffer;
         let mut prio = [0u8; 288];
-        for scanline in 0..224 {
+        {
             let row_off = scanline * 288;
             let row = &mut native[row_off..row_off + 288];
             phosphor_core::gfx::render_tilemap_scanline_indexed(
@@ -701,7 +778,21 @@ impl GalagaSystem {
         }
     }
 
-    fn render_sprites(&mut self) {
+    /// One row of the sprite layer.
+    ///
+    /// Slots are still visited in list order, and the two-by-two tile grid in
+    /// the same order within a slot, so the pixel a row ends up with is the one
+    /// the whole-frame pass produced from the same attribute RAM: only the
+    /// *moment* the RAM is read has moved. `draw_sprite_tile_row` rejects the
+    /// tiles that are not on this line.
+    ///
+    /// The list is read as of this row. The 04XX walks it into a line buffer
+    /// displayed on the next line, so a slot whose attributes change mid-screen
+    /// would appear one row early here. That lead is deliberately not added:
+    /// `raw_sy` below is `256 - y + 1`, and the `+ 1` is already the one-line
+    /// delay, so folding it in again would double it (W3 of the raster-sampling
+    /// epic).
+    fn render_sprites_row(&mut self, y: usize) {
         // Tile offset table for 2×2 grid: [row][col]
         const GFX_OFFS: [[usize; 2]; 2] = [[0, 1], [2, 3]];
 
@@ -731,6 +822,16 @@ impl GalagaSystem {
             let sy = (raw_sy - 16 * sizey as i32) & 0xFF;
             let sy = sy - 32; // fix wraparound (same as MAME)
 
+            // Reject the slot before walking its 2x2 grid. Without this the grid
+            // loop and the per-tile setup in `draw_sprite_tile_row` run 224 times
+            // per slot to draw at most 32 rows of it. The attribute bytes above
+            // are still read on every row, which is the point of the migration;
+            // only the work that cannot produce a pixel is skipped.
+            let slot_h = 16 * (1 + sizey) as i32;
+            if !(sy..sy + slot_h).contains(&(y as i32)) {
+                continue;
+            }
+
             for gy in 0..=sizey {
                 for gx in 0..=sizex {
                     let tile_code = sprite
@@ -739,13 +840,16 @@ impl GalagaSystem {
                     let tile_sx = sx + (gx as i32) * 16;
                     let tile_sy = sy + (gy as i32) * 16;
 
-                    self.draw_sprite_tile(tile_code, color, tile_sx, tile_sy, flipx, flipy);
+                    self.draw_sprite_tile_row(tile_code, color, tile_sx, tile_sy, flipx, flipy, y);
                 }
             }
         }
     }
 
-    fn draw_sprite_tile(
+    /// Blit the one line of a sprite tile that crosses row `y`, or nothing if it
+    /// does not cross it.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_sprite_tile_row(
         &mut self,
         code: usize,
         color: usize,
@@ -753,12 +857,18 @@ impl GalagaSystem {
         sy: i32,
         flipx: bool,
         flipy: bool,
+        y: usize,
     ) {
         if code >= self.sprite_cache.count() {
             return;
         }
 
         let tile_h = 16usize;
+        let py = y as i32 - sy;
+        if !(0..tile_h as i32).contains(&py) {
+            return;
+        }
+        let py = py as usize;
         // Clip to the visible area (columns 16..272), no tunnel wrap.
         let clip = phosphor_core::gfx::SpriteClip {
             x_min: 16,
@@ -777,60 +887,53 @@ impl GalagaSystem {
         let resolve = |pixel: u8| (sprite_lut[(color * 4 + pixel as usize) & 0xFF] & 0x0F, 0u8);
         let mut prio = [0u8; 288];
 
-        for py in 0..tile_h {
-            let screen_y = sy + py as i32;
-            if !(0..224).contains(&screen_y) {
-                continue;
-            }
-            let src_py = if flipy { tile_h - 1 - py } else { py };
-            let row_off = screen_y as usize * 288;
-            let row = &mut native[row_off..row_off + 288];
-            phosphor_core::gfx::draw_sprite_row_indexed(
-                sprite_cache,
-                code as u16,
-                src_py,
-                sx,
-                flipx,
-                is_transparent,
-                resolve,
-                row,
-                &mut prio,
-                &clip,
-            );
+        if y >= 224 {
+            return;
         }
+        let src_py = if flipy { tile_h - 1 - py } else { py };
+        let row_off = y * 288;
+        let row = &mut native[row_off..row_off + 288];
+        phosphor_core::gfx::draw_sprite_row_indexed(
+            sprite_cache,
+            code as u16,
+            src_py,
+            sx,
+            flipx,
+            is_transparent,
+            resolve,
+            row,
+            &mut prio,
+            &clip,
+        );
     }
 
-    /// Advance one CPU cycle, refreshing the cached framebuffer whenever that
-    /// cycle completes a frame.
+    /// Advance one CPU cycle, drawing the row the beam is about to paint
+    /// whenever that cycle starts a visible scanline.
     ///
-    /// The render lives here rather than after `run_frame`'s loop so that the
-    /// debugger's `debug_tick()` path refreshes the picture too (it never calls
-    /// `run_frame`, which is why render-once machines showed a frozen image).
-    ///
-    /// The hook fires on the *last* cycle of the frame — the same video state
-    /// the old end-of-loop render sampled — so output is byte-identical. It
-    /// deliberately does **not** fire at the start of vblank: this board writes
-    /// video state during vblank, so sampling earlier would change the picture.
+    /// This is the debugger's path: it tests the frame position on every cycle
+    /// so that single-stepping still crosses scanline boundaries. A whole frame
+    /// goes through [`MachineCore::run_frame`], which hoists that test out.
     fn tick_frame_boundary(&mut self) {
+        self.begin_scanline_render();
         let (cpus, mut bus) = self.split();
         namco_galaga::tick(cpus, &mut bus);
-        if self
-            .board
-            .clock
-            .is_multiple_of(namco_galaga::TIMING.cycles_per_frame())
-        {
-            self.update_starfield_at_vblank();
-            self.render_video();
-        }
     }
 
-    /// Update starfield scroll parameters at vblank (called at end of frame).
-    fn update_starfield_at_vblank(&mut self) {
-        // Starfield scroll is read from the video latch at vblank time.
-        // In Galaga, SCROLL_Y is tied to ground, so only X scrolling applies.
-        // The latch values are already stored by write_video_latch().
-        // Nothing additional needed — the latch state is consumed by render_starfield()
-        // on the next frame.
+    /// Draw the row about to be scanned, if the clock is on the boundary of a
+    /// visible one.
+    ///
+    /// The off-boundary case only arises after the debugger has single-stepped
+    /// the clock out of phase; the row is then drawn at the next boundary it
+    /// crosses, as the beam would.
+    fn begin_scanline_render(&mut self) {
+        let per_line = namco_galaga::TIMING.cycles_per_scanline;
+        if !self.board.clock.is_multiple_of(per_line) {
+            return;
+        }
+        let scanline = self.board.clock % namco_galaga::TIMING.cycles_per_frame() / per_line;
+        if scanline < VISIBLE_LINES as u64 {
+            self.render_scanline(scanline as usize);
+        }
     }
 }
 
@@ -1208,27 +1311,24 @@ impl MachineCore for GalagaSystem {
     }
 
     fn run_frame(&mut self) {
-        // Split once per frame-boundary run rather than per cycle: the bus view
-        // is several pointers wide, and re-forming it every cycle costs more
-        // than the dispatch it replaced (measured: ~6% on this board).
-        //
-        // The render still happens exactly when the clock crosses a frame
-        // boundary — the last cycle of a whole frame, or mid-call if the
-        // debugger left the clock off-phase — so the video state it samples is
-        // the same one `tick_frame_boundary` sampled.
-        let cycles = namco_galaga::TIMING.cycles_per_frame();
-        let mut remaining = cycles;
+        // Scanline-outer: draw the row the beam is about to paint, then run that
+        // row's worth of cycles. The split is re-formed once per scanline rather
+        // than once per frame, which is 264 times instead of one; a per-*cycle*
+        // split cost ~6% on this board when it was measured, and this is 1/192nd
+        // of that frequency.
+        let per_line = namco_galaga::TIMING.cycles_per_scanline;
+        let mut remaining = namco_galaga::TIMING.cycles_per_frame();
         while remaining > 0 {
-            let run = (cycles - self.board.clock % cycles).min(remaining);
+            self.begin_scanline_render();
+            // A partial leading scanline only arises when the debugger has left
+            // the clock off-phase; it runs up to the next boundary and the row
+            // is drawn there.
+            let run = (per_line - self.board.clock % per_line).min(remaining);
             {
                 let (cpus, mut bus) = self.split();
                 namco_galaga::run_cycles(cpus, &mut bus, run);
             }
             remaining -= run;
-            if self.board.clock.is_multiple_of(cycles) {
-                self.update_starfield_at_vblank();
-                self.render_video();
-            }
         }
     }
 
@@ -1519,6 +1619,129 @@ mod dip_tests {
         assert_eq!(sys.orientation(), Orientation::ROT90);
         assert!(sys.orientation().swaps_axes());
         assert_eq!(sys.display_aspect(), Some((3, 4)));
+    }
+
+    // -----------------------------------------------------------------------
+    // Per-scanline rendering (W4)
+    // -----------------------------------------------------------------------
+
+    /// A system whose chars 1 and 2 are solid, resolving to distinguishable
+    /// palette indices, so a video RAM cell marks the rows it reached.
+    fn galaga_with_solid_chars() -> GalagaSystem {
+        let mut sys = GalagaSystem::new();
+        sys.char_cache = GfxCache::new(4, 8, 8);
+        for py in 0..8 {
+            for px in 0..8 {
+                sys.char_cache.set_pixel(1, px, py, 1);
+                sys.char_cache.set_pixel(2, px, py, 2);
+            }
+        }
+        // Colour 0: pen 1 -> LUT 1, pen 2 -> LUT 2, everything else transparent.
+        sys.char_lut = [0x0F; 256];
+        sys.char_lut[1] = 0x01;
+        sys.char_lut[2] = 0x02;
+        let vram = sys.board.map.region_data_mut(Region::VideoRam);
+        vram[..0x400].fill(1); // every cell is char 1
+        vram[0x400..0x800].fill(0); // colour 0
+        sys
+    }
+
+    fn scan_rows(sys: &mut GalagaSystem, rows: std::ops::Range<usize>) {
+        for y in rows {
+            sys.render_scanline(y);
+        }
+    }
+
+    /// The behavior W4 exists for on the tilemap layer: video RAM is read as the
+    /// beam passes it, so rewriting a cell partway down the screen changes only
+    /// the rows below the write.
+    ///
+    /// The split is at row 100, which is *inside* char row 12 (rows 96..103). A
+    /// whole-frame render draws a char row from one snapshot and cannot produce
+    /// this picture at all.
+    #[test]
+    fn a_mid_frame_vram_write_changes_only_the_rows_below_it() {
+        const SPLIT: usize = 100;
+        let mut sys = galaga_with_solid_chars();
+
+        scan_rows(&mut sys, 0..SPLIT);
+        sys.board.map.region_data_mut(Region::VideoRam)[..0x400].fill(2);
+        scan_rows(&mut sys, SPLIT..224);
+
+        let px = |y: usize| sys.native_buffer[y * 288 + 100];
+        assert_eq!(px(0), 0x11, "row 0 was drawn before the write");
+        assert_eq!(
+            px(SPLIT - 1),
+            0x11,
+            "the last row above the write keeps the old char, mid-char-row"
+        );
+        assert_eq!(
+            px(SPLIT),
+            0x12,
+            "the first row below the write takes the new char"
+        );
+        assert_eq!(px(223), 0x12, "the bottom row is below the write");
+    }
+
+    /// The acceptance criterion this work item was written with: state sampled
+    /// once a frame must NOT become per-line. The starfield is that state here,
+    /// because the shift register's position is a function of how many times it
+    /// has been clocked since the frame began, so re-reading the controls per
+    /// row would move every star below the change rather than recolour a row.
+    ///
+    /// Clearing the enable bit mid-frame must therefore leave the rows below it
+    /// alone until the next frame latches it.
+    #[test]
+    fn the_starfield_controls_are_not_resampled_per_line() {
+        let mut sys = GalagaSystem::new();
+        sys.starfield_enabled = true;
+        sys.star_set_a = 0;
+        sys.star_set_b = 1;
+
+        scan_rows(&mut sys, 0..100);
+        // If this reached the picture, every row below would lose its stars.
+        sys.starfield_enabled = false;
+        scan_rows(&mut sys, 100..224);
+
+        assert!(
+            sys.star_frame.enabled,
+            "the frame's latch keeps the value it had at row 0"
+        );
+        let stars_below = sys.native_buffer[150 * 288..224 * 288]
+            .iter()
+            .filter(|&&p| (32..96).contains(&p))
+            .count();
+        assert!(
+            stars_below > 0,
+            "rows below a mid-frame disable still carry the frame's starfield"
+        );
+    }
+
+    /// `render_scanline` drawing a row is only half of it: the frame loop has to
+    /// call it. Without this the tests above would pass on a board that never
+    /// drew anything, since they drive `render_scanline` by hand.
+    #[test]
+    fn the_frame_loop_draws_rows_at_scanline_boundaries() {
+        let mut sys = galaga_with_solid_chars();
+        sys.native_buffer.fill(0xFF);
+
+        // One cycle at clock 0 crosses the scanline-0 boundary. This is the
+        // debugger's per-cycle path.
+        sys.tick_frame_boundary();
+        assert_eq!(sys.native_buffer[100], 0x11, "tick draws row 0");
+        assert_eq!(
+            sys.native_buffer[288 + 100],
+            0xFF,
+            "and only row 0: nothing has drawn row 1 yet"
+        );
+
+        // And the frame loop, which hoists the boundary test out.
+        sys.native_buffer.fill(0xFF);
+        sys.run_frame();
+        let undrawn = (0..224)
+            .filter(|&y| sys.native_buffer[y * 288 + 100] == 0xFF)
+            .count();
+        assert_eq!(undrawn, 0, "run_frame draws every visible row");
     }
 
     #[test]

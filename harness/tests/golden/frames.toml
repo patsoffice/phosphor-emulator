@@ -123,7 +123,7 @@ machine = "galaga"
 frames = 1800
 shows = "Attract mode: the GALAGA score-advance table over the starfield, with the enemy types beside their values and the 800-point flagship."
 size = [224, 288]
-frame = "sha256:6a0eda16e08b1b154a30ebfeeb36ba2519820e370e2b82fd4050b6ba0cf3870a"
+frame = "sha256:3d534a03da1602df992323297eeb584ff7d0125501dd6ddd8bd3012b574c0d43"
 
 [[frame]]
 machine = "galaxian"

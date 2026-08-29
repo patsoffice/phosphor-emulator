@@ -28,9 +28,13 @@ Three rules follow from that default.
   example: its scanline index does not map to a framebuffer row and the
   constants that would fix that are inside a custom LSI, so it renders
   whole-frame and says so.
-- **State the hardware latches at vblank is an explicit snapshot, read from the
-  snapshot and never re-sampled per line.** `galaga.rs`'s
-  `update_starfield_at_vblank` is the reference for a genuine latch.
+- **State that cannot be read per row is an explicit snapshot, read from the
+  snapshot and never re-sampled per line.** `galaga.rs`'s `star_frame` is the
+  reference: the starfield's shift register is positioned by how many times it
+  has been clocked since the frame began, so re-reading the scroll index per row
+  would move every star below it rather than recolour one row. Its doc comment
+  says what is and is not established about the part, which is the standard for
+  a snapshot of this kind.
 - **A snapshot that exists to compensate for whole-frame rendering is not a
   hardware latch, and its comment must say which it is.** `atari_system1.rs`'s
   `mo_shadow` is the second kind: the board's motion objects come off a
