@@ -13,6 +13,7 @@ use phosphor_core::core::machine::{
 };
 use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
+use phosphor_core::gfx::GfxLayout;
 use phosphor_macros::Saveable;
 
 use crate::gottlieb::{self, GottliebBoard};
@@ -640,6 +641,55 @@ crate::impl_map_debug_trace!(QbertSystem, board.map);
 // ---------------------------------------------------------------------------
 
 crate::register_machine!(QbertSystem, "qbert", &["qbert"], QBERT_CONTROLS);
+
+// ---------------------------------------------------------------------------
+// Graphics viewer regions
+// ---------------------------------------------------------------------------
+
+/// The sprite decode `gottlieb::decode_gfx` builds at load time, restated as a
+/// `'static` layout for `disasm gfxview`.
+///
+/// The plane offsets there are computed from the ROM length (`(3 - p) * len/4 *
+/// 8`); this region is a fixed 0x8000 bytes, so they are the constants below.
+/// Both must describe the same decode: a divergence would show up as a viewer
+/// that disagrees with the screen.
+static QBERT_SPRITE_LAYOUT: GfxLayout<'static> = GfxLayout {
+    plane_offsets: &[0x30000, 0x20000, 0x10000, 0],
+    x_offsets: &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+    y_offsets: &[
+        0, 16, 32, 48, 64, 80, 96, 112, 128, 144, 160, 176, 192, 208, 224, 240,
+    ],
+    char_increment: 256,
+};
+
+// Q*Bert has no colour PROM: its palette is 16 entries of RAM written by the
+// CPU, so there is nothing to hand the viewer and it falls back to a grayscale
+// ramp. The shape of a sprite is readable; its colours are not.
+inventory::submit! {
+    crate::gfx_registry::GfxRegion {
+        machine: "qbert",
+        region: "sprites",
+        count: 256, // 0x8000 bytes / 128 bytes per 16x16 4bpp sprite
+        width: 16,
+        height: 16,
+        layout: &QBERT_SPRITE_LAYOUT,
+        load: |rs| QBERT_SPRITE_ROM.load(rs),
+        palette: None,
+    }
+}
+
+inventory::submit! {
+    crate::gfx_registry::GfxRegion {
+        machine: "qbert",
+        region: "tiles",
+        count: 256, // 0x2000 bytes / 32 bytes per 8x8 4bpp tile
+        width: 8,
+        height: 8,
+        layout: &gottlieb::GOTTLIEB_TILE_LAYOUT,
+        load: |rs| QBERT_TILE_ROM.load(rs),
+        palette: None,
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Tests

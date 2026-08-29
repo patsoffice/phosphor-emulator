@@ -106,7 +106,7 @@ const TILE_COLS: usize = 32;
 const TILE_ROWS: usize = 30;
 
 // GfxLayout for Gottlieb 8×8 4bpp packed tiles (also used for charram re-decode)
-const GOTTLIEB_TILE_LAYOUT: GfxLayout<'static> = GfxLayout {
+pub(crate) const GOTTLIEB_TILE_LAYOUT: GfxLayout<'static> = GfxLayout {
     plane_offsets: &[3, 2, 1, 0],
     x_offsets: &[0, 4, 8, 12, 16, 20, 24, 28],
     y_offsets: &[0, 32, 64, 96, 128, 160, 192, 224],
@@ -625,14 +625,11 @@ pub struct GottliebBoard {
     /// mid-*line* still quantises to the line), but it captures every case
     /// observed on this board.
     ///
-    /// NOTE THE PHASE THIS CREATES. Tiles and sprites are still composited once,
-    /// at the frame boundary, which on this board is the end of vblank; these
-    /// rows come from the visible period *before* that vblank. So the palette is
-    /// now correctly phased against the beam while the other layers are not, and
-    /// a frame where the game rewrites VRAM and palette together during vblank
-    /// will show the new tiles against the old palette for one frame. That is
-    /// the cost of fixing one layer at a time, and it goes away when the whole
-    /// render moves per-scanline (W4 of the raster-sampling epic).
+    /// This is now in phase with the rest of the picture: tiles and sprites are
+    /// composited into [`pixel_buffer`](Self::pixel_buffer) at the same scanline
+    /// boundary that fills this row's entry, so a row's colours and its pixels
+    /// come from the same moment. They did not between W1 and W4 of the
+    /// raster-sampling epic, when only the palette had moved.
     ///
     /// Derived state, rebuilt every frame, so not saved: seeded from
     /// `palette_rgb` in [`restore_after_load`](Self::restore_after_load) so the
@@ -641,8 +638,14 @@ pub struct GottliebBoard {
     #[save_skip]
     pub(crate) palette_scanline: Vec<[(u8, u8, u8); 16]>,
 
-    /// Framebuffer (256×240 palette indices), refilled by the render that runs
-    /// at the end of every frame.
+    /// Framebuffer (256×240 palette indices), filled one row at a time as the
+    /// beam reaches each visible scanline. A row therefore holds what the beam
+    /// drew on that line, out of the video RAM, sprite RAM, sprite bank and
+    /// layer-order bit as they stood at that line's boundary.
+    ///
+    /// Consequence worth knowing: the picture a completed frame presents does
+    /// *not* contain that frame's own vblank writes, because the beam had
+    /// already passed. The whole-frame render this replaced did contain them.
     #[save_skip]
     pub(crate) pixel_buffer: Vec<u8>,
 
@@ -897,18 +900,32 @@ impl GottliebBoard {
     // Core tick
     // -----------------------------------------------------------------------
 
-    /// Work that only happens on the first cycle of a scanline: sampling the
-    /// palette for the row the beam is about to draw.
+    /// Work that only happens on the first cycle of a scanline: drawing the row
+    /// the beam is about to paint, out of the video state as it stands now.
     ///
     /// `scanline` is 0..256; 0..239 are visible and 240..255 are vblank, the
     /// same split `check_interrupts` uses to raise the VBLANK NMI. Only visible
-    /// lines have a row to colour.
+    /// lines have a row to draw.
     ///
     /// Called once per scanline from [`run_scanlines`] and, for the debugger's
     /// single-step path, from [`tick`] when the clock lands on a boundary.
     pub(crate) fn begin_scanline(&mut self, scanline: u64) {
-        if scanline < VISIBLE_LINES {
-            self.palette_scanline[scanline as usize] = self.palette_rgb;
+        if scanline >= VISIBLE_LINES {
+            return;
+        }
+        let y = scanline as usize;
+        self.palette_scanline[y] = self.palette_rgb;
+
+        // The wrapper splits "gfx" out of its frame total using `last_render`,
+        // which used to be one frame-boundary render. It is now 240 of them, so
+        // start the sum at the top of the visible area and add each row to it.
+        let started = self.profiling.then(std::time::Instant::now);
+        if y == 0 {
+            self.last_render = std::time::Duration::ZERO;
+        }
+        self.render_scanline(y);
+        if let Some(started) = started {
+            self.last_render += started.elapsed();
         }
     }
 
@@ -946,45 +963,41 @@ impl GottliebBoard {
         self.clock += 1;
         self.watchdog_counter = self.watchdog_counter.wrapping_add(1);
 
-        // Refresh the cached framebuffer whenever this cycle completed a frame.
-        // Rendering here rather than after `run_frame`'s loop means the
-        // debugger's `debug_tick()` path (which never calls `run_frame`) also
-        // refreshes the picture. Firing on the frame's *last* cycle samples the
-        // same video state the old end-of-loop render saw, so output is
-        // byte-identical — note this board writes palette during vblank, so
-        // rendering at the vblank boundary instead would change the picture.
-        if self.clock.is_multiple_of(TIMING.cycles_per_frame()) {
-            let started = self.profiling.then(std::time::Instant::now);
-            self.render_frame_internal();
-            if let Some(started) = started {
-                self.last_render = started.elapsed();
-            }
-        }
+        // No frame-boundary render here any more: each visible row is
+        // composited at its own scanline boundary in `begin_scanline`, which
+        // both `run_scanlines` and the debugger's `tick` reach.
     }
 
     // -----------------------------------------------------------------------
     // Frame rendering
     // -----------------------------------------------------------------------
 
-    /// Render the full frame into the indexed pixel buffer.
-    pub fn render_frame_internal(&mut self) {
+    /// Draw one visible row into the indexed pixel buffer, out of the video
+    /// state as it stands at that row's scanline boundary.
+    ///
+    /// Layer *order* is itself a live register on this board: `video_control`
+    /// bit 0 picks sprites-behind-tiles, and it is read per row here rather than
+    /// once per frame, so a mid-screen write to it swaps the order from that row
+    /// down.
+    fn render_scanline(&mut self, y: usize) {
         let bg_priority = self.video_control & 0x01 != 0;
 
         // Clear to background (palette index 0)
-        self.pixel_buffer.fill(0);
+        let row_off = y * NATIVE_WIDTH;
+        self.pixel_buffer[row_off..row_off + NATIVE_WIDTH].fill(0);
 
         if bg_priority {
             // Background priority: sprites behind tiles
-            self.render_sprites();
-            self.render_tiles();
+            self.render_sprites_scanline(y);
+            self.render_tiles_scanline(y);
         } else {
             // Normal: tiles behind sprites
-            self.render_tiles();
-            self.render_sprites();
+            self.render_tiles_scanline(y);
+            self.render_sprites_scanline(y);
         }
     }
 
-    /// Render tiles from video RAM into the indexed pixel buffer.
+    /// Render one row of tiles from video RAM into the indexed pixel buffer.
     ///
     /// Each tile selects one of two 8×8 caches (ROM vs char-RAM) by its code and
     /// the gfxchar latches. `render_tilemap_scanline_indexed` renders from a
@@ -993,12 +1006,12 @@ impl GottliebBoard {
     /// without overlap, so the two passes are independent and pixel-identical to
     /// the original single-pass select. The decoded pixel is the palette index
     /// directly (pen 0 transparent); there is no colour attribute.
-    fn render_tiles(&mut self) {
-        self.render_tile_layer(true); // ROM-char tiles
-        self.render_tile_layer(false); // char-RAM tiles
+    fn render_tiles_scanline(&mut self, y: usize) {
+        self.render_tile_layer_scanline(y, true); // ROM-char tiles
+        self.render_tile_layer_scanline(y, false); // char-RAM tiles
     }
 
-    fn render_tile_layer(&mut self, is_rom: bool) {
+    fn render_tile_layer_scanline(&mut self, scanline: usize, is_rom: bool) {
         let config = gfx::TilemapConfig {
             cols: TILE_COLS,
             rows: TILE_ROWS,
@@ -1013,57 +1026,78 @@ impl GottliebBoard {
         } else {
             &self.charram_cache
         };
-        let count = cache.count().max(1);
-        let pixel_buffer = &mut self.pixel_buffer;
-        let mut prio = [0u8; NATIVE_WIDTH];
-        for scanline in 0..NATIVE_HEIGHT {
-            let row_off = scanline * NATIVE_WIDTH;
-            let row = &mut pixel_buffer[row_off..row_off + NATIVE_WIDTH];
-            gfx::render_tilemap_scanline_indexed(
-                &config,
-                cache,
-                scanline,
-                |col, trow| {
-                    let tile_index = trow * TILE_COLS + col;
-                    let code = video_ram[tile_index & 0x3FF] as usize;
-                    let use_rom = if code & 0x80 != 0 {
-                        gfxcharhi
-                    } else {
-                        gfxcharlo
-                    };
-                    if use_rom == is_rom {
-                        let cache_code = if is_rom {
-                            code % count
-                        } else {
-                            (code & 0x7F) % count
-                        };
-                        gfx::TileInfo::new(cache_code as u16, 1) // attr 1 = this cache
-                    } else {
-                        gfx::TileInfo::new(0, 0) // attr 0 = skip (other cache)
-                    }
-                },
-                // Skip tiles owned by the other cache; pen 0 is transparent. The
-                // decoded pixel value is the palette index.
-                |attr, pixel| (attr != 0 && pixel != 0).then_some((pixel, 0)),
-                row,
-                &mut prio,
-                0,
-            );
+        // A cache with no entries has no pixels to index. Q*Bert leaves the ROM
+        // cache empty (both gfxchar latches select char RAM), and a board built
+        // without graphics ROMs leaves both empty.
+        let count = cache.count();
+        if count == 0 {
+            return;
         }
+        let row_off = scanline * NATIVE_WIDTH;
+        let row = &mut self.pixel_buffer[row_off..row_off + NATIVE_WIDTH];
+        // Scratch, because this board's resolver always returns priority 0 and
+        // nothing reads it back.
+        let mut prio = [0u8; NATIVE_WIDTH];
+        gfx::render_tilemap_scanline_indexed(
+            &config,
+            cache,
+            scanline,
+            |col, trow| {
+                let tile_index = trow * TILE_COLS + col;
+                let code = video_ram[tile_index & 0x3FF] as usize;
+                let use_rom = if code & 0x80 != 0 {
+                    gfxcharhi
+                } else {
+                    gfxcharlo
+                };
+                if use_rom == is_rom {
+                    let cache_code = if is_rom {
+                        code % count
+                    } else {
+                        (code & 0x7F) % count
+                    };
+                    gfx::TileInfo::new(cache_code as u16, 1) // attr 1 = this cache
+                } else {
+                    gfx::TileInfo::new(0, 0) // attr 0 = skip (other cache)
+                }
+            },
+            // Skip tiles owned by the other cache; pen 0 is transparent. The
+            // decoded pixel value is the palette index.
+            |attr, pixel| (attr != 0 && pixel != 0).then_some((pixel, 0)),
+            row,
+            &mut prio,
+            0,
+        );
     }
 
-    /// Render sprites from sprite RAM into the indexed pixel buffer.
+    /// Render one row of sprites from sprite RAM into the indexed pixel buffer.
     ///
     /// 16×16 sprites, no flip; the decoded pixel is the palette index (pen 0
-    /// transparent). Composited by draw order (render_frame_internal picks the
+    /// transparent). Composited by draw order (`render_scanline` picks the
     /// tiles/sprites order from the background-priority bit), so no priority
     /// buffer is used.
-    fn render_sprites(&mut self) {
+    ///
+    /// Entries are still visited in list order within the row, so the pixel a
+    /// row ends up with is the one the whole-frame pass produced from the same
+    /// sprite RAM: only the *moment* the RAM is read has moved.
+    ///
+    /// The list is read as of this row. The hardware's line-object RAM is filled
+    /// during the *previous* line and displayed on this one, so a sprite whose
+    /// entry changes mid-screen would appear one row early here. That one-line
+    /// lead is deliberately not modelled: `sy - 13` is a position constant, and
+    /// the epic's W3 note warns that folding the lead in on top of a constant
+    /// that already carries it doubles the delay. Tracked separately.
+    fn render_sprites_scanline(&mut self, y: usize) {
         let sprite_ram = self.map.region_data(Region::SpriteRam);
         let sprite_cache = &self.sprite_cache;
-        let sprite_count = sprite_cache.count().max(1);
+        // As for tiles: no entries, no pixels to index.
+        let sprite_count = sprite_cache.count();
+        if sprite_count == 0 {
+            return;
+        }
         let sprite_bank = self.sprite_bank;
-        let pixel_buffer = &mut self.pixel_buffer;
+        let row_off = y * NATIVE_WIDTH;
+        let row = &mut self.pixel_buffer[row_off..row_off + NATIVE_WIDTH];
         let clip = gfx::SpriteClip {
             x_min: 0,
             x_max: NATIVE_WIDTH as i32,
@@ -1079,28 +1113,24 @@ impl GottliebBoard {
 
             let sx = sx_raw as i32 - 4;
             let sy = sy_raw as i32 - 13;
+            let py = y as i32 - sy;
+            if !(0..16).contains(&py) {
+                continue;
+            }
             let code = ((255 ^ code_raw) as usize + 256 * sprite_bank as usize) % sprite_count;
 
-            for py in 0..16usize {
-                let screen_y = sy + py as i32;
-                if screen_y < 0 || screen_y >= NATIVE_HEIGHT as i32 {
-                    continue;
-                }
-                let row_off = screen_y as usize * NATIVE_WIDTH;
-                let row = &mut pixel_buffer[row_off..row_off + NATIVE_WIDTH];
-                gfx::draw_sprite_row_indexed(
-                    sprite_cache,
-                    code as u16,
-                    py,
-                    sx,
-                    false,
-                    |pixel| pixel == 0,
-                    |pixel| (pixel, 0u8),
-                    row,
-                    &mut prio,
-                    &clip,
-                );
-            }
+            gfx::draw_sprite_row_indexed(
+                sprite_cache,
+                code as u16,
+                py as usize,
+                sx,
+                false,
+                |pixel| pixel == 0,
+                |pixel| (pixel, 0u8),
+                row,
+                &mut prio,
+                &clip,
+            );
         }
     }
 
@@ -1320,6 +1350,158 @@ mod tests {
         assert!(
             board.palette_scanline.iter().all(|row| row[1] == blue),
             "every row seeds from the restored palette"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Per-scanline tiles, sprites and layer order (W4)
+    // -----------------------------------------------------------------------
+
+    /// Fill char-RAM tile `code` solid with pen `pen`. `gfxcharlo`/`gfxcharhi`
+    /// are false on a bare board, so every map code resolves out of this cache.
+    fn solid_char_tile(board: &mut GottliebBoard, code: usize, pen: u8) {
+        for py in 0..8 {
+            for px in 0..8 {
+                board.charram_cache.set_pixel(code, px, py, pen);
+            }
+        }
+    }
+
+    /// Give the board a solid 16×16 sprite in code 0 and park it at the top-left
+    /// of the visible area, covering rows 0..16.
+    fn solid_sprite0(board: &mut GottliebBoard, pen: u8) {
+        board.sprite_cache = gfx::GfxCache::new(1, 16, 16);
+        for py in 0..16 {
+            for px in 0..16 {
+                board.sprite_cache.set_pixel(0, px, py, pen);
+            }
+        }
+        let ram = board.map.region_data_mut(Region::SpriteRam);
+        ram[0] = 13; // sy - 13 == 0
+        ram[1] = 4; //  sx -  4 == 0
+        ram[2] = 255; // 255 ^ 255 == code 0
+    }
+
+    /// The behaviour W4 exists for on the tilemap layer: video RAM is read as
+    /// the beam passes it, so rewriting the map partway down the screen changes
+    /// only the rows below the write.
+    ///
+    /// The split is deliberately at row 100, which is *inside* tile row 12 (rows
+    /// 96..103). A whole-frame render draws a tile row from one snapshot and
+    /// could not produce this picture at all.
+    #[test]
+    fn a_mid_frame_vram_write_changes_only_the_rows_below_it() {
+        const SPLIT: usize = 100;
+        let mut board = GottliebBoard::new();
+        solid_char_tile(&mut board, 1, 1);
+        solid_char_tile(&mut board, 2, 2);
+
+        board.map.region_data_mut(Region::VideoRam).fill(1);
+        for y in 0..SPLIT as u64 {
+            board.begin_scanline(y);
+        }
+        board.map.region_data_mut(Region::VideoRam).fill(2);
+        for y in SPLIT as u64..VISIBLE_LINES {
+            board.begin_scanline(y);
+        }
+
+        let px = |y: usize| board.pixel_buffer[y * NATIVE_WIDTH];
+        assert_eq!(px(0), 1, "row 0 was drawn before the write");
+        assert_eq!(
+            px(SPLIT - 1),
+            1,
+            "the last row above the write keeps the old tile, mid-tile-row"
+        );
+        assert_eq!(
+            px(SPLIT),
+            2,
+            "the first row below the write takes the new tile"
+        );
+        assert_eq!(px(NATIVE_HEIGHT - 1), 2, "the bottom row is below it");
+    }
+
+    /// Layer order is a live register on this board (`video_control` bit 0), and
+    /// per-scanline rendering makes it per-row. Rows above a mid-screen write
+    /// composite in the old order, rows below in the new one.
+    #[test]
+    fn a_mid_frame_layer_order_write_swaps_priority_only_below_it() {
+        const SPLIT: usize = 8;
+        let mut board = GottliebBoard::new();
+        solid_char_tile(&mut board, 1, 1);
+        solid_sprite0(&mut board, 2);
+        board.map.region_data_mut(Region::VideoRam).fill(1);
+
+        // Normal order: tiles first, so the sprite wins where they overlap.
+        board.video_control = 0;
+        for y in 0..SPLIT as u64 {
+            board.begin_scanline(y);
+        }
+        // Background priority: sprites first, so the tile covers them.
+        board.video_control = 1;
+        for y in SPLIT as u64..16 {
+            board.begin_scanline(y);
+        }
+
+        let px = |y: usize| board.pixel_buffer[y * NATIVE_WIDTH];
+        assert_eq!(px(0), 2, "sprite over tile above the write");
+        assert_eq!(px(SPLIT - 1), 2, "still sprite on the last row above it");
+        assert_eq!(px(SPLIT), 1, "tile over sprite from the write down");
+        assert_eq!(px(15), 1, "and to the bottom of the sprite");
+    }
+
+    /// `render_frame` resolving a per-row buffer is only half of it: the frame
+    /// loop has to *draw* the rows. This fails if `begin_scanline` stops
+    /// compositing, or is dropped from `tick`/`run_scanlines`, which would leave
+    /// the picture at whatever the buffer last held.
+    #[test]
+    fn the_frame_loop_draws_rows_at_scanline_boundaries() {
+        let mut board = GottliebBoard::new();
+        let mut cpu = I8088::new();
+        solid_char_tile(&mut board, 1, 1);
+        board.map.region_data_mut(Region::VideoRam).fill(1);
+        board.pixel_buffer.fill(0xFF);
+
+        // One cycle at clock 0 crosses the scanline-0 boundary.
+        tick(&mut cpu, &mut board);
+        assert_eq!(board.pixel_buffer[0], 1, "tick() draws row 0");
+        assert_eq!(
+            board.pixel_buffer[NATIVE_WIDTH], 0xFF,
+            "and only row 0: nothing has drawn row 1 yet"
+        );
+
+        // And the hoisted loop the frame actually runs through draws too.
+        let rest = TIMING.cycles_per_scanline - board.clock;
+        for _ in 0..rest {
+            tick(&mut cpu, &mut board);
+        }
+        board.map.region_data_mut(Region::VideoRam).fill(2);
+        solid_char_tile(&mut board, 2, 2);
+        run_scanlines(&mut cpu, &mut board, TIMING.cycles_per_scanline);
+        assert_eq!(
+            board.pixel_buffer[NATIVE_WIDTH],
+            2,
+            "run_scanlines() draws row 1"
+        );
+        assert_eq!(
+            board.pixel_buffer[0], 1,
+            "and drawing row 1 must not disturb row 0"
+        );
+    }
+
+    /// Vblank has no row to draw, and drawing one would run off the end of a
+    /// framebuffer sized to the visible area.
+    #[test]
+    fn vblank_scanlines_have_no_row_to_draw() {
+        let mut board = GottliebBoard::new();
+        solid_char_tile(&mut board, 1, 1);
+        board.map.region_data_mut(Region::VideoRam).fill(1);
+        board.pixel_buffer.fill(0xFF);
+        for y in VISIBLE_LINES..TIMING.total_scanlines {
+            board.begin_scanline(y);
+        }
+        assert!(
+            board.pixel_buffer.iter().all(|&p| p == 0xFF),
+            "vblank drew nothing"
         );
     }
 

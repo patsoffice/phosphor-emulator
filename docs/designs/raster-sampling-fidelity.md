@@ -461,16 +461,47 @@ scanline-outer. W3 found every layer to be live-read, sprites included, so this
 covers tilemap, scroll, palette, bank, flip **and** the sprite layer, sampling
 the object list one line ahead of the row being composited, per W3's result.
 
-### The safety property that makes this attractive
+### The safety property that was claimed here, and why it is false
 
-The audit establishes that these machines do not write video registers during
-active display in the measured window. Therefore per-scanline rendering must
-produce **byte-identical output** on every golden-frame pin. `golden_frame_test`
-(SHA-256 of the oriented frame for every registered machine) becomes an exact
-regression gate: **any hash change is a bug, not an expected improvement, and
-must not be recaptured.** That is an unusually strong position for a
-correctness refactor — the accuracy guarantee is obtained at zero output risk,
-verified by tests that already exist.
+> **Retracted, 2026-08-29, by the first board migrated. Kept, struck, because
+> two work items were planned against it.**
+
+The original claim: the audit establishes that these machines do not write video
+registers during active display, therefore per-scanline rendering must produce
+~~byte-identical output on every golden-frame pin~~, and ~~any hash change is a
+bug and must not be recaptured~~.
+
+That holds for one reading of "per-scanline" and not the other, and the
+distinction was never drawn:
+
+* **(a) Sample per scanline, composite at the frame boundary.** Byte-identical
+  whenever nothing changed mid-visible-period. This is what W1 and W2 shipped,
+  and both were byte-identical exactly as promised. It does not scale to the
+  tilemap: you cannot snapshot video RAM 240 times a frame.
+* **(b) Genuinely composite row `r` when the beam is at row `r`.** This is what
+  "invert the nesting" means, and it **cannot** be byte-identical. Every board
+  here composited at the frame boundary, which is the *end* of vblank, so the
+  presented picture contained that frame's own vblank writes. Under (b) the beam
+  has already passed, so it does not. The picture goes **one vblank older**,
+  which is what the beam actually drew, and every pin whose game animates during
+  vblank moves.
+
+W4 is (b). The pins are expected to move, they are reviewed by eye before
+recapture, and the hash is a change-detector rather than a correctness oracle
+for this work item. What replaces it as the correctness argument is below.
+
+### What proves a moved pin right, since the hash cannot
+
+Per board, all three:
+
+1. **The picture, by eye**, before recapture: before/after/imgdiff.
+2. **The mechanism, proven not assumed.** If the only change is the sampling
+   moment, then the new frame `N` must equal the *old* frame `N-1` exactly,
+   wherever the game confines its video writes to vblank. That is a decisive,
+   cheap check: capture `N-1` with the old code and diff at threshold 0.
+3. **The test pair** W1 and W2 established: one test that a mid-frame write
+   splits the picture at a stated row, one test that the frame loop reaches the
+   hook. Each made to fail once before being kept.
 
 ### Per-machine shape
 
@@ -506,6 +537,57 @@ rather than layer passes and will need more care.
 * **Machines already rendering per-scanline** — the 19 listed in the prior
   audit. No action.
 
+### What shipped, on gottlieb (qbert), 2026-08-29
+
+The first of the eight, and the one that settled the fork above.
+
+`begin_scanline` now draws the row as well as sampling the palette:
+`render_scanline` clears the row, reads `video_control` bit 0 for the layer
+order, and runs `render_tiles_scanline` and `render_sprites_scanline` in that
+order out of live video RAM, sprite RAM and the sprite bank. The frame-boundary
+render in `end_cycle` is gone; `render_frame` only resolves indices to RGB. The
+phase mismatch W1 opened on this board is closed: a row's colours and its pixels
+now come from the same moment.
+
+**The pin moved, and the mechanism was proven rather than assumed.** With the
+new code, frame 1800 is **byte-identical to the old code's frame 1799**: 0 of
+61440 pixels differ at threshold 0. Against the old frame 1800 it differs by
+150 pixels (0.24%), and every one of them is on the three animating sprites;
+pyramid, title and discs are untouched. So the restructure changed the sampling
+moment and nothing else, exactly as (b) predicts. `shows` needed no rewrite:
+nothing it claims about the frame's content is refuted.
+
+**Perf, from `phosphor-bench --machine qbert --frames 900 --warmup 1800
+--reps 5` in release:** 2.838 ms/frame before, 2.855 after. **+0.6%**, against a
+run-to-run spread of ±2.2% and ±2.9%, so it is not distinguishable from zero at
+this sample size.
+
+Note the cost model in "Testing" below does not apply to this board. Its tile
+pass was *already* scanline-inner, so tile-info lookups did not increase at all.
+The added work is the sprite list: 64 entries walked once per visible row rather
+than once per frame, 15360 loop iterations of which almost all `continue`
+immediately. A per-row candidate list would remove it and is not worth the
+complexity at 0.6%; revisit if a later board shows more.
+
+**Two things the migration turned up that the plan did not predict:**
+
+* **Empty graphics caches now panic.** `count().max(1)` was papering over a
+  zero-entry cache, harmless while nothing rendered on a bare board and an
+  out-of-bounds index once every scanline draws. Both tile and sprite passes now
+  return early on an empty cache. Q*Bert leaves the ROM tile cache empty in
+  normal operation, so this is not only a test-only path.
+* **A pre-existing sprite bug became visible.** Five sprite slots are parked at
+  `(0, 0)` with live codes, and `sy - 13` / `sx - 4` put their bottom-right
+  corner inside the framebuffer at native `(0..5, 0..2)`. It is in the previous
+  reference PNG too, so W4 did not cause it. Filed as `phosphor-emulator-z04w`
+  rather than fixed, because the reference emulator hides it behind a constant
+  its own source calls a guess, and the board's real object-enable term
+  (`ENBUF`, gated with VBLANK and HBLANK) is not in the transcribed part of the
+  schematic. `qbert` gained `disasm gfxview` regions along the way, which is
+  what proved the all-zero slots draw a blank sprite and these five do not.
+
+Seven machines remain: galaga, digdug, xevious, mrdo, burgertime, foodf, marble.
+
 ---
 
 ## Testing
@@ -517,10 +599,15 @@ cargo clippy --all-features --all-targets
 cargo run --release -p phosphor-bench -- --roms <path>    # before/after, W4 only
 ```
 
-* **Golden frames are the primary gate and must not be recaptured** for W1, W2
-  or W4. Every one of these changes is expected to be byte-identical on the
-  pinned frames; a diff means the migration changed behaviour on a frame where
-  the hardware did not.
+* **Golden frames are the primary gate and must not be recaptured** for W1 and
+  W2. Both were expected to be byte-identical on the pinned frames and both
+  were; a diff there means the migration changed behaviour on a frame where the
+  hardware did not.
+* **W4 is the exception, and it is not a loophole.** Its pins are expected to
+  move by exactly one frame and no more. Recapture only after the three checks
+  in "What proves a moved pin right" have all passed, and say in the commit
+  which frame the new picture equals. A pin that moves by something other than
+  one frame of animation is a bug, not a recapture.
 * **Per-work-item targeted tests** proving the mid-frame case: write the
   register at a known active-display scanline on a synthetic or ROM-booted
   board, assert only rows below the write differ. Without this, a migration can
@@ -547,7 +634,10 @@ cargo run --release -p phosphor-bench -- --roms <path>    # before/after, W4 onl
    still deserves a look before its sprites move per scanline.
 2. **Byte-identical is not proof of correctness.** A migration that renders
    per-scanline but accidentally samples state once still passes the golden
-   gate. Hence the mandatory targeted mid-frame test per work item.
+   gate. Hence the mandatory targeted mid-frame test per work item. Under W4 the
+   converse also bites: the gate now *always* fails on an animating pin, so it
+   can no longer distinguish the intended one-frame shift from a real
+   regression. That is what the equals-the-old-frame-`N-1` check is for.
 3. **W2 may be a non-issue.** Guarded by the confirm-first step.
 4. **Scope creep into the per-scanline machines.** The 19 already-correct boards
    are out of scope; W3's research covers them only for completeness.
