@@ -444,9 +444,13 @@ the drawing's own.
 
 ### What it does NOT establish
 
-- Sheets 1 and 3 were not read, so the graphics fetch and the line RAM itself
-  were not seen; only the selection stage on sheet 2.
-- Whether the line RAM is double buffered.
+- Sheet 1 was not read.
+- Whether the line RAM on sheet 2 is double buffered. The line *buffer* on sheet
+  3 is: two 93422s, one written while the other is read.
+
+Sheet 3, the enable pulse E6 generates, and what the position constants are made
+of were read later, in
+[`qbert-object-enable.md`](qbert-object-enable.md).
 
 ---
 

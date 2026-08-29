@@ -223,7 +223,7 @@ machine = "qbert"
 frames = 1800
 shows = "Attract mode: the Q*bert title and CHANGE TO: colour key over the full pyramid, with Q*bert, two red balls and the disc platforms."
 size = [240, 256]
-frame = "sha256:a132d6386778395b8b9c83b7006a72f4d4e454919ff5c3d8f6f25e0632b6f4c1"
+frame = "sha256:e2d6fa77bbd453549e1858584799cb0ec824f3bdfb386368d10a215ddc92dc2b"
 
 [[frame]]
 machine = "quantum"

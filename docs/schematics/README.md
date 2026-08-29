@@ -51,6 +51,9 @@ section is there so that is obvious.
 - [`sprite-list-scan.md`](sprite-list-scan.md) — whether a sprite circuit reads
   its object list as the beam scans or from a copy taken at vblank. Nine boards,
   and the answer is the same on all of them.
+- [`qbert-object-enable.md`](qbert-object-enable.md), what enables one Gottlieb
+  System 80 object on one line: why an enable and not a clip is what keeps a
+  parked object off the screen, and what `sy_raw - 13` is made of.
 - [`mcr-video-timing.md`](mcr-video-timing.md) — a negative result: MCR II's
   H and V counters and both blanking decodes are inside custom LSIs, so the
   blanking phase is on no drawing. Read it before hunting for one.

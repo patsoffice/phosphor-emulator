@@ -101,6 +101,24 @@ pub fn output_sample_rate() -> u64 {
 pub const NATIVE_WIDTH: usize = 256;
 pub const NATIVE_HEIGHT: usize = 240;
 
+/// Lines between an object being entered into the line RAM and the row it is
+/// drawn on.
+///
+/// The board scans its 64-entry object list once per line and appends the
+/// objects on that line to a 32-slot line RAM; the graphics fetch reads that
+/// into one of two line buffers while the other is displayed. Two stages, so
+/// the row displayed on line `y` was scanned two lines before it.
+///
+/// These are the same two lines that `sy_raw - 13` already carries. The
+/// vertical adder matches when the top nibble of `FOY + VV` is all ones, and
+/// the position register inverts (`FOY = !sy_raw`, the same inversion applied
+/// by hand to the object code below), which puts the object's top row at
+/// `sy_raw - 15`; the pipeline moves it down to `sy_raw - 13`. Nothing here
+/// re-applies the delay to the position, only to the enable.
+///
+/// `docs/schematics/qbert-object-enable.md`.
+const OBJECT_SCAN_LEAD: u64 = 2;
+
 // Tilemap dimensions (32×32 grid, only 32×30 visible)
 const TILE_COLS: usize = 32;
 const TILE_ROWS: usize = 30;
@@ -1081,13 +1099,27 @@ impl GottliebBoard {
     /// row ends up with is the one the whole-frame pass produced from the same
     /// sprite RAM: only the *moment* the RAM is read has moved.
     ///
-    /// The list is read as of this row. The hardware's line-object RAM is filled
-    /// during the *previous* line and displayed on this one, so a sprite whose
-    /// entry changes mid-screen would appear one row early here. That one-line
-    /// lead is deliberately not modelled: `sy - 13` is a position constant, and
-    /// the epic's W3 note warns that folding the lead in on top of a constant
-    /// that already carries it doubles the delay. Tracked separately.
+    /// The list is read as of this row. The hardware scans it
+    /// [`OBJECT_SCAN_LEAD`] lines earlier, so a sprite whose entry changes
+    /// mid-screen appears two rows late here. That lead is deliberately not
+    /// modelled in the *position*: `sy - 13` is a position constant that
+    /// already carries it, and folding it in twice would double the delay. It
+    /// is modelled in the *enable*, which is a separate term.
     fn render_sprites_scanline(&mut self, y: usize) {
+        // No objects are entered into the line RAM during either blanking
+        // interval: the enable pulse is an 8-input NAND of the vertical adder's
+        // top nibble with /VBLANK and /HBLANK (E6). A row whose scan line falls
+        // in vertical blank therefore displays an empty object buffer, which
+        // with 240 visible lines of 256 is rows 0 and 1, scanned at 254 and
+        // 255. Clipping to the framebuffer is not the same thing: without this,
+        // an object parked at (0, 0) with a live code, which is how the game
+        // says "not on screen", leaks its bottom rows into the corner.
+        let scan_line =
+            (y as u64 + TIMING.total_scanlines - OBJECT_SCAN_LEAD) % TIMING.total_scanlines;
+        if scan_line >= VISIBLE_LINES {
+            return;
+        }
+
         let sprite_ram = self.map.region_data(Region::SpriteRam);
         let sprite_cache = &self.sprite_cache;
         // As for tiles: no entries, no pixels to index.
@@ -1443,10 +1475,55 @@ mod tests {
         }
 
         let px = |y: usize| board.pixel_buffer[y * NATIVE_WIDTH];
-        assert_eq!(px(0), 2, "sprite over tile above the write");
+        // Rows 0 and 1 carry no objects at all on this board, so the first row
+        // the sprite can win on is 2. See `objects_are_not_entered_during_vblank`.
+        assert_eq!(px(2), 2, "sprite over tile above the write");
         assert_eq!(px(SPLIT - 1), 2, "still sprite on the last row above it");
         assert_eq!(px(SPLIT), 1, "tile over sprite from the write down");
         assert_eq!(px(15), 1, "and to the bottom of the sprite");
+    }
+
+    /// The object list is scanned [`OBJECT_SCAN_LEAD`] lines ahead of the row it
+    /// draws, and the scan is gated by both blanking signals, so the rows whose
+    /// scan lines land in vertical blank carry no objects at all.
+    ///
+    /// This is what keeps an object parked at (0, 0) with a live code, which is
+    /// how a game on this board says "not on screen", out of the corner of the
+    /// picture. Clipping to the framebuffer does not: `sy_raw - 13` leaves three
+    /// of that object's rows inside the visible area.
+    ///
+    /// Both halves have to hold. Gating every row would pass the first two
+    /// assertions and fail the rest; gating nothing fails the first two. The
+    /// second pass separates "these two scan lines are blanked" from "the first
+    /// two rows of the framebuffer are never drawn", which would look identical
+    /// on the first pass alone. And only objects are gated: the tilemap has no
+    /// such term, which is what rows 0 and 1 showing the tile pen says.
+    #[test]
+    fn objects_are_not_entered_during_vertical_blank() {
+        let px = |b: &GottliebBoard, y: usize| b.pixel_buffer[y * NATIVE_WIDTH];
+        let mut board = GottliebBoard::new();
+        solid_char_tile(&mut board, 1, 1);
+        solid_sprite0(&mut board, 2); // parked over rows 0..16
+        board.map.region_data_mut(Region::VideoRam).fill(1);
+        for y in 0..VISIBLE_LINES {
+            board.begin_scanline(y);
+        }
+
+        assert_eq!(px(&board, 0), 1, "row 0 is scanned at line 254, in vblank");
+        assert_eq!(px(&board, 1), 1, "row 1 is scanned at line 255, in vblank");
+        assert_eq!(px(&board, 2), 2, "row 2 is scanned at line 0, and draws");
+        assert_eq!(px(&board, 15), 2, "and so does the object's last row");
+
+        // Move the same object down the screen. The gate is on the scan line,
+        // not on the top of the framebuffer, so all sixteen rows draw.
+        board.map.region_data_mut(Region::SpriteRam)[0] = 13 + 100;
+        board.pixel_buffer.fill(0);
+        for y in 0..VISIBLE_LINES {
+            board.begin_scanline(y);
+        }
+        assert_eq!(px(&board, 99), 1, "the row above the object is tile only");
+        assert_eq!(px(&board, 100), 2, "the object's first row draws at 100");
+        assert_eq!(px(&board, 115), 2, "and its last at 115");
     }
 
     /// `render_frame` resolving a per-row buffer is only half of it: the frame
@@ -1478,8 +1555,7 @@ mod tests {
         solid_char_tile(&mut board, 2, 2);
         run_scanlines(&mut cpu, &mut board, TIMING.cycles_per_scanline);
         assert_eq!(
-            board.pixel_buffer[NATIVE_WIDTH],
-            2,
+            board.pixel_buffer[NATIVE_WIDTH], 2,
             "run_scanlines() draws row 1"
         );
         assert_eq!(
