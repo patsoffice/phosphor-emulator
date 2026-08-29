@@ -908,8 +908,6 @@ to both layers: a row pass should iterate the units that vary along the row,
 which for a tilemap is 32 tiles rather than 240 pixels and for sprites is the
 candidates rather than the slots. A profile comes before choosing between them.
 
-Three machines remain: foodf, marble, plus the boards W5 turned up.
-
 ### Row passes iterate tiles, not pixels (mrdo, 2026-08-29)
 
 Raised by the owner from the sprite side immediately after the migration above,
@@ -956,6 +954,86 @@ run. The rule went into `machines/CLAUDE.md`: a row pass iterates the units that
 vary along the row, and must not precompute a per-frame index of live state,
 because that is a latch and it reintroduces what per-scanline rendering exists
 to remove.
+
+### What shipped, on foodf, 2026-08-29
+
+The seventh, the second of the two "per-pixel whole-frame loop" boards, and the
+first in the epic that is **faster** after the migration rather than slower.
+
+Written row-outer *and* tile-outer from the start, per the rule the previous
+entry added, so this one commit carries both changes and its number is their
+sum. mrdo's separate measurements are the reference for how the two decompose.
+
+`begin_scanline` now does both kinds of scanline-boundary work: the raster
+interrupt latches, which used to re-test the frame position inside `begin_cycle`
+on every cycle, and the row. `render_scanline` composites the playfield and then
+the sprites into one 256-pixel row and resolves it into a persistent
+framebuffer; `render` only copies. `run_scanlines` hoists the boundary test and
+`run_frame` is scanline-outer.
+
+Three whole-frame scratch structures are gone. The old render allocated
+`vec![0u8; 256*224]` for the playfield pens and `vec![false; 256*224]` for the
+sprite priority mask on **every frame** — 114 KB of allocation and zeroing —
+plus it fetched the playfield map word once per pixel. All three are per row
+now: two 256-byte stack arrays and 32 map fetches a row instead of 256.
+
+**The `claimed` mask is per row, and that is exact rather than an
+approximation.** Food Fight's sprites use first-opaque-pixel-wins priority, so
+the mask matters; but a claim is indexed by pixel and every pixel a sprite
+writes on a line belongs to that line, so claims never cross rows. The sprite
+pass also inverts the placement instead of walking all 16 of a sprite's rows and
+discarding 15: `dy = (ypos + row) & 0xFF` has exactly one solution for `row`, so
+asking which row lands on this scanline is one modular subtraction.
+
+**The pin did not move — and the usual check could not have told us that.**
+Old frame 1799 and old frame 1800 are byte-identical, so "new N equals old N-1"
+and "new N equals old N" say the same thing at the pin and neither would mean
+anything. Mapping the cadence first is what made the result readable: old 1798
+against old 1799 differs by 1131 pixels, so **frame 1799 is the discriminator**,
+and there:
+
+| comparison | result |
+|---|---|
+| new 1799 vs old 1798 | **0 / 57344** |
+| new 1799 vs old 1799 | 1131 / 57344 |
+| new 1800 vs old 1800 | 0 / 57344 |
+
+Exactly one frame older, proven against a 1131-pixel control, and the pin
+happens to sit inside a static pair so it does not move. No recapture.
+
+**Why, traced not assumed.** On frame 1799 the object list is written at
+scanlines 224 and 228 and the palette at 228 — all inside vertical blanking,
+which starts at 224 — so the beam had already passed. The playfield is not
+written at all in frames 1798-1800, and the probe for it was verified to fire
+(it does, during the RAM self-test at frames 17-19) before that emptiness was
+read as a measurement.
+
+**But this board does write a live-read video register during active display**,
+which is worth knowing even though it does not split the picture here.
+`digital_w` sets the flip latch on every call, and the IRQ1 handler calls it
+from inside the visible window — measured at scanlines 10, 53, 116 and 181 of
+frame 1799. It writes bit 0 clear every time, so the flip never changes and no
+seam appears. This is the board in the epic most built to be reprogrammed
+mid-frame (IRQ1 fires at scanlines 32, 96 and 160), and it declines to.
+
+**Perf: -11.3% and -11.1%** on two back-to-back A/B pairs at 15 and 21
+repetitions (1.833 → 1.625 and 1.844 → 1.639 ms/frame). The first well-resolved
+number in the epic: both pairs agree in sign *and* magnitude, and the gap is far
+outside the 0.6% wobble between the two "before" runs. Render falls from 0.309
+to 0.008 ms/frame and emulation rises 1.52 to 1.62.
+
+Attributed as far as the counts allow: the two per-frame heap allocations and
+the per-pixel map fetch are the removals, and they are large. The sprite pass is
+not a win and may be a small loss — it gains a per-row candidate test (48 slots
+x 224 rows) that the whole-frame version did not need, and pays it back only on
+sprites parked off-screen, which the old code decoded in full.
+
+Two existing tests moved rather than weakened: both drove `begin_cycle` to
+observe the 32V interrupt latch, and now drive `begin_scanline`, where it lives.
+The frame-loop test picks up what that gave away, asserting the real loop
+reaches scanline 32 and raises the request.
+
+Two machines remain: marble, plus the boards W5 turned up.
 
 ---
 

@@ -487,6 +487,12 @@ const SCANLINE_INT_LINES: [u16; 4] = [32, 96, 160, VBLANK_SCANLINE];
 
 const PLAYFIELD_ROWS: usize = 32;
 
+/// Native visible raster. There is no vertical offset on this board: the beam
+/// draws native row `n` during scanline `n`, and everything from
+/// [`VBLANK_SCANLINE`] to `total_scanlines` is blanked.
+const VISIBLE_WIDTH: usize = TIMING.display_width as usize; // 256
+const VISIBLE_HEIGHT: usize = TIMING.display_height as usize; // 224
+
 // ---------------------------------------------------------------------------
 // FoodFightSystem
 // ---------------------------------------------------------------------------
@@ -573,6 +579,24 @@ pub struct FoodFightBoard {
     /// DC must be tracked and removed rather than a fixed midpoint assumed.
     #[save(id = 15)]
     dc_blocker: DcBlocker,
+
+    /// Display framebuffer (native 256x224 RGB), filled one row at a time as
+    /// the beam reaches each visible scanline.
+    ///
+    /// A row holds what the beam drew on that line, out of the playfield RAM,
+    /// sprite RAM, the palette and the flip latch as they stood at that line's
+    /// boundary. This board raises IRQ1 three times inside the visible window
+    /// (scanlines 32, 96 and 160), so it is built to be reprogrammed mid-frame
+    /// and rows above such a write genuinely differ from rows below it.
+    ///
+    /// Consequence worth knowing: the picture a completed frame presents does
+    /// *not* contain that frame's own vblank writes, because the beam had
+    /// already passed. The whole-frame render this replaced did contain them.
+    ///
+    /// Derived output, so not saved, and not seeded after a load: the rows of
+    /// the next frame overwrite every one of them.
+    #[save_skip]
+    pub(crate) framebuffer: Vec<u8>,
 }
 
 /// Atari Food Fight (1983): a 68000 beside the board it drives.
@@ -588,13 +612,67 @@ pub struct FoodFightSystem {
     pub board: FoodFightBoard,
 }
 
-/// One CPU cycle: the board's raster interrupts and POKEYs, then the 68000
-/// against the board, which *is* the bus.
+/// One CPU cycle: the scanline boundary, the POKEYs, then the 68000 against the
+/// board, which *is* the bus.
+///
+/// This is the debugger's path: it tests the frame position on every cycle so
+/// that single-stepping still crosses scanline boundaries. A whole frame goes
+/// through [`run_scanlines`], which hoists that test out.
 #[inline]
 pub fn tick(cpu: &mut M68000, board: &mut FoodFightBoard) {
+    let frame_cycle = board.clock % TIMING.cycles_per_frame();
+    if frame_cycle.is_multiple_of(TIMING.cycles_per_scanline) {
+        board.begin_scanline(frame_cycle / TIMING.cycles_per_scanline);
+    }
+    step_cycle(cpu, board);
+}
+
+/// The part of a cycle with no scanline-boundary test in it.
+#[inline]
+fn step_cycle(cpu: &mut M68000, board: &mut FoodFightBoard) {
     board.begin_cycle(cpu);
     cpu.execute_cycle(board, BusMaster::Cpu(0));
     board.clock += 1;
+}
+
+/// Run `cycles` CPU cycles, scanline-outer and cycle-inner. The caller must
+/// start on a scanline boundary and pass a multiple of `cycles_per_scanline`;
+/// the debugger's off-boundary stepping goes through [`tick`] instead.
+pub fn run_scanlines(cpu: &mut M68000, board: &mut FoodFightBoard, cycles: u64) {
+    debug_assert!(
+        board.clock.is_multiple_of(TIMING.cycles_per_scanline)
+            && cycles.is_multiple_of(TIMING.cycles_per_scanline),
+        "run_scanlines must start on a scanline boundary and run whole scanlines"
+    );
+    for _ in 0..cycles / TIMING.cycles_per_scanline {
+        let scanline = board.clock % TIMING.cycles_per_frame() / TIMING.cycles_per_scanline;
+        board.begin_scanline(scanline);
+        for _ in 0..TIMING.cycles_per_scanline {
+            step_cycle(cpu, board);
+        }
+    }
+}
+
+/// Run one frame's worth of CPU cycles. Whole scanlines go through
+/// [`run_scanlines`]; a partial scanline at either end (only after the debugger
+/// has left the clock off-boundary) goes through [`tick`].
+pub fn run_frame(cpu: &mut M68000, board: &mut FoodFightBoard) {
+    let scanline = TIMING.cycles_per_scanline;
+    let mut remaining = TIMING.cycles_per_frame();
+
+    let lead = ((scanline - board.clock % scanline) % scanline).min(remaining);
+    for _ in 0..lead {
+        tick(cpu, board);
+    }
+    remaining -= lead;
+
+    let whole = remaining - remaining % scanline;
+    run_scanlines(cpu, board, whole);
+    remaining -= whole;
+
+    for _ in 0..remaining {
+        tick(cpu, board);
+    }
 }
 
 impl FoodFightSystem {
@@ -699,6 +777,7 @@ impl FoodFightBoard {
             watchdog_count: 0,
             audio_buffer: SampleRing::with_capacity(2048),
             dc_blocker: DcBlocker::new(phosphor_core::audio::host_sample_rate()),
+            framebuffer: vec![0u8; VISIBLE_WIDTH * VISIBLE_HEIGHT * 3],
         };
         sys.refresh_dip_pots();
         sys
@@ -806,23 +885,35 @@ impl FoodFightBoard {
         }
     }
 
-    /// Board work that leads a CPU cycle: the raster interrupt latches, the
-    /// POKEYs on their divider, and the debugger's attribution latch.
-    fn begin_cycle(&mut self, cpu: &M68000) {
-        let cycles_per_frame = TIMING.cycles_per_frame();
-        let frame_cycle = self.clock % cycles_per_frame;
-
-        // Raster-timed interrupts, asserted at scanline boundaries.
-        if frame_cycle.is_multiple_of(TIMING.cycles_per_scanline) {
-            let scanline = (frame_cycle / TIMING.cycles_per_scanline) as u16;
-            if SCANLINE_INT_LINES.contains(&scanline) {
-                self.scanline_int = true;
-            }
-            if scanline == VBLANK_SCANLINE {
-                self.video_int = true;
-            }
+    /// Board work that only happens on the first cycle of a scanline: the
+    /// raster interrupt latches, and compositing the row the beam is about to
+    /// draw.
+    ///
+    /// Both were already scanline-boundary work; the interrupts used to test
+    /// the frame position again inside [`begin_cycle`], on every cycle, which
+    /// is exactly the test [`run_scanlines`] exists to hoist out.
+    ///
+    /// `scanline` is 0..259 and the visible window is `[0, 224)`, so walking
+    /// `0..total_scanlines` draws exactly the visible rows. Public because the
+    /// picture only exists once the beam has passed over it: a caller that
+    /// wants a frame without running CPU cycles has to step the beam itself.
+    pub fn begin_scanline(&mut self, scanline: u64) {
+        let line = scanline as u16;
+        if SCANLINE_INT_LINES.contains(&line) {
+            self.scanline_int = true;
+        }
+        if line == VBLANK_SCANLINE {
+            self.video_int = true;
         }
 
+        if (scanline as usize) < VISIBLE_HEIGHT {
+            self.render_scanline(scanline as usize);
+        }
+    }
+
+    /// Board work that leads a CPU cycle: the POKEYs on their divider and the
+    /// debugger's attribution latch.
+    fn begin_cycle(&mut self, cpu: &M68000) {
         // POKEY runs at master/20 = one tick per 10 CPU cycles.
         if self.clock.is_multiple_of(CPU_PER_POKEY) {
             for p in &mut self.pokey {
@@ -838,38 +929,91 @@ impl FoodFightBoard {
     }
 
     // -----------------------------------------------------------------------
-    // Rendering (full-frame compositor, read from current state)
+    // Rendering (per scanline, from the state as it stands at each row)
     // -----------------------------------------------------------------------
 
+    /// Copy the latest framebuffer into the frontend's `buffer`.
+    ///
+    /// This does not draw. Each visible row was composited at its own scanline
+    /// boundary in [`render_scanline`](Self::render_scanline) as the beam
+    /// reached it.
     fn render(&self, buffer: &mut [u8]) {
-        let w = TIMING.display_width as usize;
-        let h = TIMING.display_height as usize;
-        // Playfield pen value (0-3) per screen pixel — used for sprite priority.
-        let mut pf_pen = vec![0u8; w * h];
+        buffer.copy_from_slice(&self.framebuffer);
+    }
 
+    /// Draw one visible scanline into the framebuffer, out of the video state
+    /// as it stands at that line's boundary.
+    ///
+    /// `sy` is a native row in `[0, VISIBLE_HEIGHT)`, drawn during the scanline
+    /// of the same number. The playfield covers every pixel of the row (its pen
+    /// 0 is opaque), so there is no backdrop fill; sprites then composite over
+    /// it. Both layers read the palette and the flip latch here, so a mid-frame
+    /// write to either splits the picture at the row it lands on — which this
+    /// board is built to do, raising IRQ1 at scanlines 32, 96 and 160.
+    ///
+    /// No empty-cache guard: unlike the other boards in this epic, both caches
+    /// are allocated at full size in [`FoodFightBoard::new`] and merely filled
+    /// by `load_rom_set`, so a bare board indexes zeroes rather than panicking.
+    ///
+    /// No sprite sampling lead is added either. W3's line-buffer delay would
+    /// put row `r`'s objects one line earlier, but this board's `ypos` carries
+    /// no such term and the schematic reading (`docs/schematics/
+    /// sprite-list-scan.md`) does not establish the buffer's alternation, so
+    /// the existing constant is left exactly as it was.
+    fn render_scanline(&mut self, sy: usize) {
+        // The row's playfield pens (0-3), kept for the sprite priority test.
+        let mut pf_pen = [0u8; VISIBLE_WIDTH];
+        let mut pixels = [(0u8, 0u8, 0u8); VISIBLE_WIDTH];
+
+        self.draw_playfield_row(&mut pixels, &mut pf_pen, sy);
+        self.draw_sprites_row(&mut pixels, &pf_pen, sy);
+
+        let out = sy * VISIBLE_WIDTH * 3;
+        for (x, &(r, g, b)) in pixels.iter().enumerate() {
+            let o = out + x * 3;
+            self.framebuffer[o] = r;
+            self.framebuffer[o + 1] = g;
+            self.framebuffer[o + 2] = b;
+        }
+    }
+
+    /// Composite the playfield into one native row.
+    ///
+    /// The tilemap is column-scan (`index = col * rows + row`) and scrolls left
+    /// by 8 pixels, with cocktail flip mirroring the source coordinates. The
+    /// grid row and the line inside the tile are fixed by `sy`, so they come
+    /// out of the loop; the map word and the tile's 8-pixel line are fetched
+    /// once per tile column rather than once per pixel, which is 32 fetches a
+    /// row instead of 256.
+    ///
+    /// Cached on the column index rather than on a span, so the flipped case
+    /// (which walks the source backwards) and the scroll's wrap at 256 need no
+    /// special case of their own.
+    fn draw_playfield_row(
+        &self,
+        pixels: &mut [(u8, u8, u8); VISIBLE_WIDTH],
+        pf_pen: &mut [u8; VISIBLE_WIDTH],
+        sy: usize,
+    ) {
         let playfield = self.map.region_data(Region::Playfield);
         let flip = self.playfield_flip;
 
-        for sy in 0..h {
-            for sx in 0..w {
-                // Apply screen flip (cocktail) by mirroring source coords.
-                let dx = if flip { w - 1 - sx } else { sx };
-                let dy = if flip { h - 1 - sy } else { sy };
+        let dy = if flip { VISIBLE_HEIGHT - 1 - sy } else { sy };
+        let tile_row = dy / 8; // no vertical scroll
+        let py = if flip { 7 - (dy % 8) } else { dy % 8 };
 
-                // Playfield scrolls left by 8 pixels (set_scrollx(-8)).
-                let src_x = (dx as i32 - 8).rem_euclid(256) as usize;
-                let src_y = dy; // no vertical scroll
+        let mut cached_col = usize::MAX;
+        let mut color = 0usize;
+        let mut line: &[u8] = &[];
 
-                let tile_col = src_x / 8;
-                let tile_row = src_y / 8;
-                let mut px = src_x % 8;
-                let mut py = src_y % 8;
-                if flip {
-                    px = 7 - px;
-                    py = 7 - py;
-                }
+        for (sx, (p, pen_out)) in pixels.iter_mut().zip(pf_pen.iter_mut()).enumerate() {
+            let dx = if flip { VISIBLE_WIDTH - 1 - sx } else { sx };
+            // Playfield scrolls left by 8 pixels.
+            let src_x = (dx as i32 - 8).rem_euclid(256) as usize;
+            let tile_col = src_x / 8;
 
-                // Column-scan tilemap order: index = col * rows + row.
+            if tile_col != cached_col {
+                cached_col = tile_col;
                 let mem = tile_col * PLAYFIELD_ROWS + tile_row;
                 let word = if mem * 2 + 1 < playfield.len() {
                     u16::from_be_bytes([playfield[mem * 2], playfield[mem * 2 + 1]])
@@ -877,28 +1021,38 @@ impl FoodFightBoard {
                     0
                 };
                 let code = ((word & 0xFF) | ((word >> 7) & 0x100)) as usize;
-                let color = ((word >> 8) & 0x3F) as usize;
-                let pen = self.tile_cache.pixel(code & 0x1FF, px, py);
-                pf_pen[sy * w + sx] = pen;
-
-                let pal = (color * 4 + pen as usize) & 0xFF;
-                let (r, g, b) = self.palette_rgb[pal];
-                let o = (sy * w + sx) * 3;
-                buffer[o] = r;
-                buffer[o + 1] = g;
-                buffer[o + 2] = b;
+                color = ((word >> 8) & 0x3F) as usize;
+                line = self.tile_cache.row_slice(code & 0x1FF, py);
             }
-        }
 
-        // Sprites: MAME draws motion-object words 0x20..0x80 front-to-back
-        // (offs 0x7E down to 0x20) with `prio_transpen`, whose priority bitmap
-        // makes the *first* opaque pixel written win — a later (lower-offset)
-        // sprite cannot overwrite a pixel an earlier (higher-offset) one already
-        // claimed. So higher offsets sit on top. We replicate that with a
-        // per-pixel "claimed" mask rather than plain painter's overwrite, which
-        // would otherwise invert the layering of overlapping objects (e.g. it
-        // drew Charley's blue head over his yellow hair).
-        let mut claimed = vec![false; w * h];
+            let px = if flip { 7 - (src_x % 8) } else { src_x % 8 };
+            let pen = line[px];
+            *pen_out = pen;
+            *p = self.palette_rgb[(color * 4 + pen as usize) & 0xFF];
+        }
+    }
+
+    /// Composite the sprites that cross native row `sy` into `pixels`.
+    ///
+    /// Motion-object words 0x20..0x80 are walked front-to-back (0x7E down to
+    /// 0x20) with first-opaque-pixel-wins priority: a later (lower-offset)
+    /// sprite cannot overwrite a pixel an earlier (higher-offset) one already
+    /// claimed, so higher offsets sit on top. The `claimed` mask that
+    /// implements it is per row because a claim never crosses one — it is
+    /// indexed by pixel, and every pixel a sprite writes on this line belongs
+    /// to this line.
+    ///
+    /// Rather than walking all 16 of a sprite's rows and discarding 15, this
+    /// inverts the placement to ask which single row lands on `sy`: the wrap at
+    /// 256 and the flip make that one modular subtraction, so a sprite not on
+    /// this line costs two word reads and a comparison.
+    fn draw_sprites_row(
+        &self,
+        pixels: &mut [(u8, u8, u8); VISIBLE_WIDTH],
+        pf_pen: &[u8; VISIBLE_WIDTH],
+        sy: usize,
+    ) {
+        let flip = self.playfield_flip;
         let sprites = self.map.region_data(Region::SpriteRam);
         let read_word = |i: usize| -> u16 {
             if i * 2 + 1 < sprites.len() {
@@ -907,55 +1061,55 @@ impl FoodFightBoard {
                 0
             }
         };
+
+        // The screen row this line came from before the flip was applied.
+        let want = if flip { 255 - sy } else { sy };
+        let mut claimed = [false; VISIBLE_WIDTH];
+
         for offs in (0x20..0x80).step_by(2).rev() {
             let data1 = read_word(offs);
             let data2 = read_word(offs + 1);
+            let ypos = ((0xFFu16.wrapping_sub(data2).wrapping_sub(16)) & 0xFF) as usize;
+
+            // `dy = (ypos + row) & 0xFF` has exactly one solution for `row` in
+            // 0..256; the sprite is on this line only if it lands in 0..16.
+            let row = (want + 256 - ypos) & 0xFF;
+            if row >= 16 {
+                continue;
+            }
+
             let pict = (data1 & 0xFF) as usize;
             let color = ((data1 >> 8) & 0x1F) as usize;
             let xpos = ((data2 >> 8) & 0xFF) as usize;
-            let ypos = ((0xFFu16.wrapping_sub(data2).wrapping_sub(16)) & 0xFF) as usize;
             let hflip = (data1 >> 15) & 1 != 0;
             let vflip = (data1 >> 14) & 1 != 0;
             let pri = (data1 >> 13) & 1 != 0;
+            let sr = if vflip { 15 - row } else { row };
 
-            for row in 0..16usize {
-                for col in 0..16usize {
-                    let sc = if hflip { 15 - col } else { col };
-                    let sr = if vflip { 15 - row } else { row };
-                    let pen = self.sprite_cache.pixel(pict, sc, sr);
-                    if pen == 0 {
-                        continue; // transparent
-                    }
-                    let mut dx = (xpos + col) & 0xFF;
-                    let mut dy = (ypos + row) & 0xFF;
-                    if flip {
-                        dx = 255 - dx;
-                        dy = 255 - dy;
-                    }
-                    if dx >= w || dy >= h {
-                        continue;
-                    }
-                    let i = dy * w + dx;
-                    // First opaque sprite pixel claims the location (MAME's
-                    // prio_transpen first-wins); later sprites cannot overwrite.
-                    if claimed[i] {
-                        continue;
-                    }
-                    claimed[i] = true;
-                    // Priority (MAME prio_transpen, pmask = pri*2): pri=0 always
-                    // draws over the playfield; pri=1 is hidden behind non-
-                    // transparent playfield pixels (pen != 0). A blocked pri=1
-                    // pixel still claims the location, matching MAME.
-                    if pri && pf_pen[i] != 0 {
-                        continue;
-                    }
-                    let pal = (color * 4 + pen as usize) & 0xFF;
-                    let (r, g, b) = self.palette_rgb[pal];
-                    let o = i * 3;
-                    buffer[o] = r;
-                    buffer[o + 1] = g;
-                    buffer[o + 2] = b;
+            for col in 0..16usize {
+                let sc = if hflip { 15 - col } else { col };
+                let pen = self.sprite_cache.pixel(pict, sc, sr);
+                if pen == 0 {
+                    continue; // transparent
                 }
+                // `dx` is masked to 8 bits and the display is 256 wide, so it
+                // is always on screen; only the row needed a range test.
+                let dx = (xpos + col) & 0xFF;
+                let dx = if flip { 255 - dx } else { dx };
+
+                // First opaque sprite pixel claims the location; later sprites
+                // cannot overwrite it.
+                if claimed[dx] {
+                    continue;
+                }
+                claimed[dx] = true;
+                // Priority: pri=0 always draws over the playfield; pri=1 is
+                // hidden behind non-transparent playfield pixels (pen != 0). A
+                // blocked pri=1 pixel still claims the location.
+                if pri && pf_pen[dx] != 0 {
+                    continue;
+                }
+                pixels[dx] = self.palette_rgb[(color * 4 + pen as usize) & 0xFF];
             }
         }
     }
@@ -1140,9 +1294,7 @@ impl MachineCore for FoodFightSystem {
     }
 
     fn run_frame(&mut self) {
-        for _ in 0..TIMING.cycles_per_frame() {
-            tick(&mut self.cpu, &mut self.board);
-        }
+        run_frame(&mut self.cpu, &mut self.board);
 
         // Watchdog: Food Fight uses an 8-VBLANK timeout. The game strobes the
         // watchdog reset register each frame; if it stops, reboot.
@@ -1375,12 +1527,10 @@ mod tests {
     #[test]
     fn the_scanline_interrupt_fires_on_the_rising_edges_of_32v() {
         let mut sys = FoodFightSystem::new();
-        let cpu = M68000::new();
         let mut fired = Vec::new();
         for line in 0..TIMING.total_scanlines as u16 {
             sys.board.scanline_int = false;
-            sys.board.clock = u64::from(line) * TIMING.cycles_per_scanline;
-            sys.board.begin_cycle(&cpu);
+            sys.board.begin_scanline(u64::from(line));
             if sys.board.scanline_int {
                 fired.push(line);
             }
@@ -1399,9 +1549,7 @@ mod tests {
     #[test]
     fn the_fourth_32v_edge_coincides_with_vblank_and_reads_as_level_3() {
         let mut sys = FoodFightSystem::new();
-        let cpu = M68000::new();
-        sys.board.clock = u64::from(VBLANK_SCANLINE) * TIMING.cycles_per_scanline;
-        sys.board.begin_cycle(&cpu);
+        sys.board.begin_scanline(u64::from(VBLANK_SCANLINE));
 
         assert!(
             sys.board.scanline_int,
@@ -1421,6 +1569,204 @@ mod tests {
         // Then the level-1 handler, which acks bit 2 and nothing else.
         sys.board.digital_w(0xFB);
         assert_eq!(sys.board.interrupt_level(), 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Per-scanline rendering (W4)
+    // -----------------------------------------------------------------------
+
+    const BLUE: (u8, u8, u8) = (0, 0, 0xFF);
+    const RED: (u8, u8, u8) = (0xFF, 0, 0);
+
+    /// The native row the split is put at, and the one before it. Native row
+    /// 100 is *inside* playfield tile row 12 (rows 96..103), a picture a
+    /// whole-frame render cannot produce at all.
+    const SPLIT_ROW: usize = 100;
+
+    fn pixel(buffer: &[u8], nx: usize, ny: usize) -> (u8, u8, u8) {
+        let o = (ny * VISIBLE_WIDTH + nx) * 3;
+        (buffer[o], buffer[o + 1], buffer[o + 2])
+    }
+
+    /// A board whose playfield paints one flat color per cell.
+    ///
+    /// The tile cache is all zeroes on a board that never loaded ROMs, so every
+    /// pen is 0 and the palette index is `color * 4` — which makes the map
+    /// word's color field the only thing that shows, and that is exactly what
+    /// these tests vary. Sprite RAM is zeroed, which puts `ypos` at 239 and no
+    /// sprite on any visible line.
+    fn board_with_flat_playfield() -> FoodFightSystem {
+        let mut sys = FoodFightSystem::new();
+        sys.board.palette_rgb[4] = BLUE; // color 1, pen 0
+        sys.board.palette_rgb[8] = RED; // color 2, pen 0
+        sys
+    }
+
+    /// Write one 16-bit word into every cell of the 32x32 column-scan map.
+    fn fill_playfield(sys: &mut FoodFightSystem, word: u16) {
+        let pf = sys.board.map.region_data_mut(Region::Playfield);
+        for cell in pf.chunks_exact_mut(2) {
+            cell.copy_from_slice(&word.to_be_bytes());
+        }
+    }
+
+    /// The tilemap half of W4: playfield RAM is read as the beam passes it, so
+    /// rewriting it partway down the screen changes only the rows below.
+    #[test]
+    fn a_mid_frame_playfield_write_changes_only_the_rows_below_it() {
+        let mut sys = board_with_flat_playfield();
+        fill_playfield(&mut sys, 0x0100); // color 1
+        for s in 0..SPLIT_ROW as u64 {
+            sys.board.begin_scanline(s);
+        }
+        fill_playfield(&mut sys, 0x0200); // color 2
+        for s in SPLIT_ROW as u64..VISIBLE_HEIGHT as u64 {
+            sys.board.begin_scanline(s);
+        }
+
+        let buffer = &sys.board.framebuffer;
+        assert_eq!(
+            pixel(buffer, 100, 0),
+            BLUE,
+            "row 0 was drawn before the write"
+        );
+        assert_eq!(
+            pixel(buffer, 100, SPLIT_ROW - 1),
+            BLUE,
+            "the last row above the write keeps the old cell, mid-tile-row"
+        );
+        assert_eq!(
+            pixel(buffer, 100, SPLIT_ROW),
+            RED,
+            "the first row below the write takes the new cell"
+        );
+        assert_eq!(
+            pixel(buffer, 100, VISIBLE_HEIGHT - 1),
+            RED,
+            "the bottom row is below the write"
+        );
+    }
+
+    /// The register this board actually writes during active display.
+    ///
+    /// `digital_w` sets the flip latch on every call, and the IRQ1 handler calls
+    /// it from inside the visible window — traced on this ROM set at scanlines
+    /// 10, 53, 116 and 181 of frame 1799. It happens to write bit 0 clear every
+    /// time, so the picture does not split in the attract loop; this is the
+    /// picture it would produce if it ever did.
+    #[test]
+    fn a_mid_frame_flip_write_mirrors_only_the_rows_below_it() {
+        let mut sys = board_with_flat_playfield();
+        // Top 14 tile rows color 1, the rest color 2, so the map is asymmetric
+        // top to bottom and a mirror is distinguishable from a copy.
+        {
+            let pf = sys.board.map.region_data_mut(Region::Playfield);
+            for col in 0..32usize {
+                for row in 0..32usize {
+                    let word: u16 = if row < 14 { 0x0100 } else { 0x0200 };
+                    let mem = col * PLAYFIELD_ROWS + row;
+                    pf[mem * 2..mem * 2 + 2].copy_from_slice(&word.to_be_bytes());
+                }
+            }
+        }
+
+        sys.board.playfield_flip = false;
+        for s in 0..SPLIT_ROW as u64 {
+            sys.board.begin_scanline(s);
+        }
+        sys.board.playfield_flip = true;
+        for s in SPLIT_ROW as u64..VISIBLE_HEIGHT as u64 {
+            sys.board.begin_scanline(s);
+        }
+
+        let buffer = &sys.board.framebuffer;
+        assert_eq!(
+            pixel(buffer, 100, 0),
+            BLUE,
+            "row 0 is unflipped: source row 0, in the top band"
+        );
+        assert_eq!(
+            pixel(buffer, 100, SPLIT_ROW - 1),
+            BLUE,
+            "row 99 is still unflipped: source row 99, tile row 12"
+        );
+        assert_eq!(
+            pixel(buffer, 100, SPLIT_ROW),
+            RED,
+            "row 100 is flipped: source row 123, tile row 15, in the bottom band"
+        );
+        assert_eq!(
+            pixel(buffer, 100, VISIBLE_HEIGHT - 1),
+            BLUE,
+            "the bottom row is flipped onto source row 0, which is the top band"
+        );
+    }
+
+    /// The tests above drive `begin_scanline` by hand, which proves nothing
+    /// about whether the frame loop ever calls it. Without this one they would
+    /// both pass on a board that never drew anything, so this walks the real
+    /// `tick` and `run_scanlines` paths.
+    ///
+    /// It also covers the interrupt latch, which moved into `begin_scanline`
+    /// from `begin_cycle`: the 32V test above now drives the hook directly, so
+    /// this is what ties it back to the frame position.
+    #[test]
+    fn the_frame_loop_draws_rows_at_scanline_boundaries() {
+        let mut sys = board_with_flat_playfield();
+        fill_playfield(&mut sys, 0x0100);
+        sys.board.framebuffer.fill(0);
+
+        // The visible window starts at scanline 0 on this board, so the very
+        // first cycle of a frame crosses a boundary and must draw row 0.
+        for _ in 0..TIMING.cycles_per_scanline {
+            tick(&mut sys.cpu, &mut sys.board);
+        }
+        assert_eq!(
+            pixel(&sys.board.framebuffer, 100, 0),
+            BLUE,
+            "tick() draws row 0"
+        );
+        assert_eq!(
+            pixel(&sys.board.framebuffer, 100, 1),
+            (0, 0, 0),
+            "and only row 0: nothing has drawn row 1 yet"
+        );
+
+        // And the hoisted loop a whole frame actually runs through draws too.
+        run_scanlines(&mut sys.cpu, &mut sys.board, TIMING.cycles_per_scanline);
+        assert_eq!(
+            pixel(&sys.board.framebuffer, 100, 1),
+            BLUE,
+            "run_scanlines() draws row 1"
+        );
+
+        // The same loop is what raises 32V, which used to be tested through
+        // `begin_cycle` on every cycle.
+        sys.board.scanline_int = false;
+        // Two scanlines have run, so this carries the loop up to and including
+        // the boundary at scanline 32.
+        let through_32 = 33 * TIMING.cycles_per_scanline - sys.board.clock;
+        run_scanlines(&mut sys.cpu, &mut sys.board, through_32);
+        assert!(
+            sys.board.scanline_int,
+            "the frame loop reached scanline 32 and raised 32V"
+        );
+    }
+
+    /// A blanked line has no row to draw, and drawing one would run off the end
+    /// of a framebuffer sized to the visible window.
+    #[test]
+    fn blanking_scanlines_have_no_row_to_draw() {
+        let mut sys = board_with_flat_playfield();
+        fill_playfield(&mut sys, 0x0100);
+        sys.board.framebuffer.fill(0);
+        for s in VISIBLE_HEIGHT as u64..TIMING.total_scanlines {
+            sys.board.begin_scanline(s);
+        }
+        assert!(
+            sys.board.framebuffer.iter().all(|&c| c == 0),
+            "the blanked lines drew nothing"
+        );
     }
 
     #[test]
