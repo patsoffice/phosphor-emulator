@@ -13,7 +13,7 @@ use phosphor_core::gfx::decode::{GfxLayout, decode_gfx};
 use phosphor_macros::{MemoryRegion, Saveable};
 
 use crate::namco_galaga::{
-    self, GALAGA_SPRITE_LAYOUT, GalagaCpus, NamcoGalagaBoard, NamcoGalagaBus,
+    self, GALAGA_SPRITE_LAYOUT, GalagaCpus, NamcoGalagaBoard, NamcoGalagaBus, ScanlineGame,
 };
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
 
@@ -906,34 +906,25 @@ impl GalagaSystem {
             &clip,
         );
     }
+}
 
-    /// Advance one CPU cycle, drawing the row the beam is about to paint
-    /// whenever that cycle starts a visible scanline.
-    ///
-    /// This is the debugger's path: it tests the frame position on every cycle
-    /// so that single-stepping still crosses scanline boundaries. A whole frame
-    /// goes through [`MachineCore::run_frame`], which hoists that test out.
-    fn tick_frame_boundary(&mut self) {
-        self.begin_scanline_render();
-        let (cpus, mut bus) = self.split();
-        namco_galaga::tick(cpus, &mut bus);
+/// The beam drive lives on the shared board; this supplies only what is Galaga's
+/// own. The delegating bodies name `GalagaSystem::` explicitly because the
+/// inherent methods and the trait methods share their names: inherent resolution
+/// would pick the right one anyway, but not visibly.
+impl ScanlineGame for GalagaSystem {
+    type Bus<'a> = GalagaBus<'a>;
+
+    fn split(&mut self) -> (&mut GalagaCpus, GalagaBus<'_>) {
+        GalagaSystem::split(self)
     }
 
-    /// Draw the row about to be scanned, if the clock is on the boundary of a
-    /// visible one.
-    ///
-    /// The off-boundary case only arises after the debugger has single-stepped
-    /// the clock out of phase; the row is then drawn at the next boundary it
-    /// crosses, as the beam would.
-    fn begin_scanline_render(&mut self) {
-        let per_line = namco_galaga::TIMING.cycles_per_scanline;
-        if !self.board.clock.is_multiple_of(per_line) {
-            return;
-        }
-        let scanline = self.board.clock % namco_galaga::TIMING.cycles_per_frame() / per_line;
-        if scanline < VISIBLE_LINES as u64 {
-            self.render_scanline(scanline as usize);
-        }
+    fn board(&self) -> &NamcoGalagaBoard {
+        &self.board
+    }
+
+    fn render_scanline(&mut self, y: usize) {
+        GalagaSystem::render_scanline(self, y);
     }
 }
 
@@ -978,7 +969,9 @@ pub(crate) fn write_annotation(addr: u16) -> WriteAnnotation {
 }
 
 /// The Galaga bus: the shared board plus the starfield latch the Z80 writes.
-struct GalagaBus<'a> {
+///
+/// Crate-visible because it is this game's `ScanlineGame::Bus`.
+pub(crate) struct GalagaBus<'a> {
     board: &'a mut NamcoGalagaBoard,
     starfield_scroll_x: &'a mut u8,
     star_set_a: &'a mut u8,
@@ -1311,25 +1304,7 @@ impl MachineCore for GalagaSystem {
     }
 
     fn run_frame(&mut self) {
-        // Scanline-outer: draw the row the beam is about to paint, then run that
-        // row's worth of cycles. The split is re-formed once per scanline rather
-        // than once per frame, which is 264 times instead of one; a per-*cycle*
-        // split cost ~6% on this board when it was measured, and this is 1/192nd
-        // of that frequency.
-        let per_line = namco_galaga::TIMING.cycles_per_scanline;
-        let mut remaining = namco_galaga::TIMING.cycles_per_frame();
-        while remaining > 0 {
-            self.begin_scanline_render();
-            // A partial leading scanline only arises when the debugger has left
-            // the clock off-phase; it runs up to the next boundary and the row
-            // is drawn there.
-            let run = (per_line - self.board.clock % per_line).min(remaining);
-            {
-                let (cpus, mut bus) = self.split();
-                namco_galaga::run_cycles(cpus, &mut bus, run);
-            }
-            remaining -= run;
-        }
+        self.run_frame_scanline_outer();
     }
 
     fn reset(&mut self) {

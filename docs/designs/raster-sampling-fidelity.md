@@ -779,8 +779,41 @@ amortizable per-row setup, so the remainder is not yet attributed; **a profile,
 not more guessing, is the next step** if it matters. Two scrolled layers rather
 than one is the obvious suspect.
 
-Four machines remain: mrdo, foodf, marble. All three namco_galaga games are now
-per-scanline, so the row drive is ready to lift onto the board.
+### The namco_galaga row drive, lifted onto the board (W6, 2026-08-29)
+
+With all three games per-scanline, `begin_scanline_render`, `tick_frame_boundary`
+and the scanline-outer `run_frame` were identical in `galaga.rs`, `digdug.rs` and
+`xevious.rs` down to the comments. They are now provided methods on
+`namco_galaga::ScanlineGame`, and each game supplies only `render_scanline`,
+`split` and `board`.
+
+The obstacle was that the renderer lives on the game wrapper while the clock and
+the tick loop live on the board, and `run_cycles` is generic over the *bus view*
+rather than the wrapper, so the board could not reach a game's renderer. A
+generic associated type (`type Bus<'a>: NamcoGalagaBus`) closes that: each game
+names its own bus view, which is why the three bus structs became `pub(crate)`
+and the trait itself is `pub(crate)` rather than `pub`.
+
+`render_scanline` stays per game and should: the layer sets and orders genuinely
+differ (galaga is backdrop, starfield, sprites, tilemap; digdug is opaque
+background, foreground, sprites, with no backdrop fill; xevious is background,
+sprites, foreground, with two scrolled layers).
+
+**Verified as a pure refactor.** All three golden pins byte-identical, nothing
+recaptured. The frame-loop half of each game's W4 test pair still fails when the
+now-*shared* drive is made to draw every row, so one mutation falsifies all three
+at once, which is the evidence that the lifted code is the code under test.
+
+**Perf: no measurable change, and the measurement is the story.** A back-to-back
+A/B put galaga at +7.3% and digdug at +7.4%, consistent enough to look real. A
+tighter A/B on galaga (21 repetitions instead of 9) put the same comparison at
+**-2.8%**. Two pairs disagreeing in sign means the host cannot resolve a
+difference of that size, not that the refactor is free and not that it costs 7%;
+the honest reading is that nothing was measured. The generated code is
+monomorphized per game and the pins are byte-identical, which is the stronger
+argument here anyway.
+
+Three machines remain: mrdo, foodf, marble, plus the boards W5 turned up.
 
 ---
 

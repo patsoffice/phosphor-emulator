@@ -15,7 +15,7 @@ use phosphor_core::gfx::decode::{GfxLayout, decode_gfx};
 use phosphor_macros::{MemoryRegion, Saveable};
 
 use crate::namco_galaga::{
-    self, GALAGA_SPRITE_LAYOUT, GalagaCpus, NamcoGalagaBoard, NamcoGalagaBus,
+    self, GALAGA_SPRITE_LAYOUT, GalagaCpus, NamcoGalagaBoard, NamcoGalagaBus, ScanlineGame,
 };
 use crate::namco_pac::PACMAN_TILE_LAYOUT;
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
@@ -707,40 +707,6 @@ impl DigDugSystem {
     // Full-frame video rendering (no raster effects in Dig Dug)
     // -----------------------------------------------------------------------
 
-    /// Advance one CPU cycle, refreshing the cached framebuffer whenever that
-    /// cycle completes a frame.
-    ///
-    /// The render lives here rather than after `run_frame`'s loop so that the
-    /// debugger's `debug_tick()` path refreshes the picture too (it never calls
-    /// `run_frame`, which is why render-once machines showed a frozen image).
-    ///
-    /// The hook fires on the *last* cycle of the frame — the same video state
-    /// the old end-of-loop render sampled — so output is byte-identical. It
-    /// deliberately does **not** fire at the start of vblank: this board writes
-    /// video state during vblank, so sampling earlier would change the picture.
-    fn tick_frame_boundary(&mut self) {
-        self.begin_scanline_render();
-        let (cpus, mut bus) = self.split();
-        namco_galaga::tick(cpus, &mut bus);
-    }
-
-    /// Draw the row about to be scanned, if the clock is on the boundary of a
-    /// visible one.
-    ///
-    /// The off-boundary case only arises after the debugger has single-stepped
-    /// the clock out of phase; the row is then drawn at the next boundary it
-    /// crosses, as the beam would.
-    fn begin_scanline_render(&mut self) {
-        let per_line = namco_galaga::TIMING.cycles_per_scanline;
-        if !self.board.clock.is_multiple_of(per_line) {
-            return;
-        }
-        let scanline = self.board.clock % namco_galaga::TIMING.cycles_per_frame() / per_line;
-        if scanline < 224 {
-            self.render_scanline(scanline as usize);
-        }
-    }
-
     /// Draw one visible row, out of the video state as it stands at that row's
     /// scanline boundary.
     ///
@@ -1030,6 +996,26 @@ impl DigDugSystem {
     }
 }
 
+/// The beam drive lives on the shared board; this supplies only what is Dig
+/// Dug's own. The delegating bodies name `DigDugSystem::` explicitly because the
+/// inherent methods and the trait methods share their names: inherent resolution
+/// would pick the right one anyway, but not visibly.
+impl ScanlineGame for DigDugSystem {
+    type Bus<'a> = DigDugBus<'a>;
+
+    fn split(&mut self) -> (&mut GalagaCpus, DigDugBus<'_>) {
+        DigDugSystem::split(self)
+    }
+
+    fn board(&self) -> &NamcoGalagaBoard {
+        &self.board
+    }
+
+    fn render_scanline(&mut self, y: usize) {
+        DigDugSystem::render_scanline(self, y);
+    }
+}
+
 impl Default for DigDugSystem {
     fn default() -> Self {
         Self::new()
@@ -1073,7 +1059,9 @@ pub(crate) fn write_annotation(addr: u16) -> WriteAnnotation {
 
 /// The Dig Dug bus: the shared board plus the video latch and the high-score
 /// EAROM the Z80s write.
-struct DigDugBus<'a> {
+///
+/// Crate-visible because it is this game's `ScanlineGame::Bus`.
+pub(crate) struct DigDugBus<'a> {
     board: &'a mut NamcoGalagaBoard,
     earom: &'a mut Er2055,
     bg_select: &'a mut u8,
@@ -1420,25 +1408,7 @@ impl MachineCore for DigDugSystem {
     }
 
     fn run_frame(&mut self) {
-        // Scanline-outer: draw the row the beam is about to paint, then run that
-        // row's worth of cycles. The split is re-formed once per scanline rather
-        // than once per frame, which is 264 times instead of one; a per-*cycle*
-        // split cost about 6% on this board when it was measured, and this is
-        // 1/192nd of that frequency.
-        let per_line = namco_galaga::TIMING.cycles_per_scanline;
-        let mut remaining = namco_galaga::TIMING.cycles_per_frame();
-        while remaining > 0 {
-            self.begin_scanline_render();
-            // A partial leading scanline only arises when the debugger has left
-            // the clock off-phase; it runs up to the next boundary and the row
-            // is drawn there.
-            let run = (per_line - self.board.clock % per_line).min(remaining);
-            {
-                let (cpus, mut bus) = self.split();
-                namco_galaga::run_cycles(cpus, &mut bus, run);
-            }
-            remaining -= run;
-        }
+        self.run_frame_scanline_outer();
     }
 
     fn reset(&mut self) {

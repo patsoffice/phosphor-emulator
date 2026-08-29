@@ -492,6 +492,97 @@ pub fn tick<B: NamcoGalagaBus>(cpus: &mut GalagaCpus, bus: &mut B) {
     step_cpus(cpus, bus, gate);
 }
 
+/// A game on this board that draws its picture one row at a time.
+///
+/// The three games differ in their layers and in the bus view they hand the
+/// CPUs, but not in how the beam drives them. Before this trait, the clock test,
+/// the debugger's per-cycle path and the scanline-outer frame loop were
+/// duplicated in `galaga.rs`, `digdug.rs` and `xevious.rs` identically, down to
+/// the comments. Those three are the provided methods here; a game supplies only
+/// what is genuinely its own.
+///
+/// The renderer lives on the game wrapper while the clock and the tick loop live
+/// on the board, and [`run_cycles`] is generic over the *bus view* rather than
+/// the wrapper, so the board cannot reach a game's renderer directly. That is
+/// what [`Self::Bus`] and [`Self::split`] are for.
+pub(crate) trait ScanlineGame {
+    /// The bus view this game hands the CPUs.
+    ///
+    /// Different per game because the register sets differ: Galaga's starfield
+    /// latch, Dig Dug's EAROM and background selector, Xevious's four scroll
+    /// registers.
+    type Bus<'a>: NamcoGalagaBus
+    where
+        Self: 'a;
+
+    /// Borrow the CPUs and the bus they drive as two disjoint pieces, so a
+    /// cycle dispatches at a concrete type.
+    fn split(&mut self) -> (&mut GalagaCpus, Self::Bus<'_>);
+
+    /// The shared board, for its clock.
+    fn board(&self) -> &NamcoGalagaBoard;
+
+    /// Draw one visible row out of the video state as it stands at this moment.
+    ///
+    /// `y` is `0..224`. This is the only part of the drive a game writes.
+    fn render_scanline(&mut self, y: usize);
+
+    /// Draw the row about to be scanned, if the clock is on the boundary of a
+    /// visible one.
+    ///
+    /// The off-boundary case only arises after the debugger has single-stepped
+    /// the clock out of phase; the row is then drawn at the next boundary it
+    /// crosses, as the beam would.
+    fn begin_scanline_render(&mut self) {
+        let per_line = TIMING.cycles_per_scanline;
+        let clock = self.board().clock;
+        if !clock.is_multiple_of(per_line) {
+            return;
+        }
+        let scanline = clock % TIMING.cycles_per_frame() / per_line;
+        if scanline < VISIBLE_LINES {
+            self.render_scanline(scanline as usize);
+        }
+    }
+
+    /// Advance one CPU cycle, drawing the row the beam is about to paint
+    /// whenever that cycle starts a visible scanline.
+    ///
+    /// This is the debugger's path: it tests the frame position on every cycle
+    /// so that single-stepping still crosses scanline boundaries. A whole frame
+    /// goes through [`Self::run_frame_scanline_outer`], which hoists that test
+    /// out.
+    fn tick_frame_boundary(&mut self) {
+        self.begin_scanline_render();
+        let (cpus, mut bus) = self.split();
+        tick(cpus, &mut bus);
+    }
+
+    /// Run one frame, scanline-outer: draw the row the beam is about to paint,
+    /// then run that row's worth of cycles.
+    ///
+    /// The CPU/bus split is re-formed once per scanline rather than once per
+    /// frame, which is 264 times instead of one; a per-*cycle* split cost about
+    /// 6% on this board when it was measured, and this is 1/192nd of that
+    /// frequency.
+    fn run_frame_scanline_outer(&mut self) {
+        let per_line = TIMING.cycles_per_scanline;
+        let mut remaining = TIMING.cycles_per_frame();
+        while remaining > 0 {
+            self.begin_scanline_render();
+            // A partial leading scanline only arises when the debugger has left
+            // the clock off-phase; it runs up to the next boundary and the row
+            // is drawn there.
+            let run = (per_line - self.board().clock % per_line).min(remaining);
+            {
+                let (cpus, mut bus) = self.split();
+                run_cycles(cpus, &mut bus, run);
+            }
+            remaining -= run;
+        }
+    }
+}
+
 /// The three CPUs' half of a cycle, plus the post-CPU board work.
 #[inline]
 fn step_cpus<B: NamcoGalagaBus>(cpus: &mut GalagaCpus, bus: &mut B, gate: CycleGate) {
