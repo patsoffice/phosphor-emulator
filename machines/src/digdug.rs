@@ -719,29 +719,49 @@ impl DigDugSystem {
     /// deliberately does **not** fire at the start of vblank: this board writes
     /// video state during vblank, so sampling earlier would change the picture.
     fn tick_frame_boundary(&mut self) {
+        self.begin_scanline_render();
         let (cpus, mut bus) = self.split();
         namco_galaga::tick(cpus, &mut bus);
-        if self
-            .board
-            .clock
-            .is_multiple_of(namco_galaga::TIMING.cycles_per_frame())
-        {
-            self.render_video();
+    }
+
+    /// Draw the row about to be scanned, if the clock is on the boundary of a
+    /// visible one.
+    ///
+    /// The off-boundary case only arises after the debugger has single-stepped
+    /// the clock out of phase; the row is then drawn at the next boundary it
+    /// crosses, as the beam would.
+    fn begin_scanline_render(&mut self) {
+        let per_line = namco_galaga::TIMING.cycles_per_scanline;
+        if !self.board.clock.is_multiple_of(per_line) {
+            return;
+        }
+        let scanline = self.board.clock % namco_galaga::TIMING.cycles_per_frame() / per_line;
+        if scanline < 224 {
+            self.render_scanline(scanline as usize);
         }
     }
 
-    fn render_video(&mut self) {
+    /// Draw one visible row, out of the video state as it stands at that row's
+    /// scanline boundary.
+    ///
+    /// The layers run in the board's order for this one row. The playfield ROM,
+    /// its bank and disable latches, video RAM, the three sprite attribute RAMs
+    /// and the colour LUTs are all read here rather than once at the frame
+    /// boundary, so a write partway down the screen affects only the rows below
+    /// it. There is no backdrop fill: the background tilemap is opaque and
+    /// covers every pixel of the row.
+    fn render_scanline(&mut self, y: usize) {
         // Layer 1: Background tilemap
-        self.render_background();
+        self.render_background_row(y);
 
         // Layer 2: Foreground text (1bpp, transparent pen 0)
-        self.render_foreground();
+        self.render_foreground_row(y);
 
         // Layer 3: Sprites
-        self.render_sprites();
+        self.render_sprites_row(y);
     }
 
-    fn render_background(&mut self) {
+    fn render_background_row(&mut self, scanline: usize) {
         // Opaque 36×28 background tilemap of 8×8 tiles, codes read from the
         // playfield ROM, pens looked up through bg_lut. Rendered per-scanline via
         // the shared index-writing helper (native indexed buffer, no priority).
@@ -751,6 +771,12 @@ impl DigDugSystem {
             tile_width: 8,
             tile_height: 8,
         };
+        // A cache with no entries has no pixels to index, which a board built
+        // without graphics ROMs would otherwise walk into once every scanline
+        // draws.
+        if self.bg_tile_cache.count() == 0 {
+            return;
+        }
         // Split borrows: closures read the ROM/LUT, the helper writes native_buffer.
         let playfield_rom = &self.playfield_rom;
         let bg_lut = &self.bg_lut;
@@ -760,7 +786,7 @@ impl DigDugSystem {
         let bg_color_bank = self.bg_color_bank;
         let native = &mut self.native_buffer;
         let mut prio = [0u8; 288];
-        for scanline in 0..224 {
+        {
             let row_off = scanline * 288;
             let row = &mut native[row_off..row_off + 288];
             gfx::render_tilemap_scanline_indexed(
@@ -795,7 +821,7 @@ impl DigDugSystem {
         }
     }
 
-    fn render_foreground(&mut self) {
+    fn render_foreground_row(&mut self, scanline: usize) {
         // 1bpp text tilemap: pen 0 transparent, pen 1 -> the tile's color group.
         // The Namco offset never reaches 0x400 within the visible grid, so no
         // per-tile skip is needed. Rendered per-scanline via the shared helper.
@@ -805,12 +831,15 @@ impl DigDugSystem {
             tile_width: 8,
             tile_height: 8,
         };
+        if self.char_cache.count() == 0 {
+            return;
+        }
         let video_ram = self.board.map.region_data(Region::VideoRam);
         let char_cache = &self.char_cache;
         let tx_color_mode = self.tx_color_mode;
         let native = &mut self.native_buffer;
         let mut prio = [0u8; 288];
-        for scanline in 0..224 {
+        {
             let row_off = scanline * 288;
             let row = &mut native[row_off..row_off + 288];
             gfx::render_tilemap_scanline_indexed(
@@ -837,7 +866,20 @@ impl DigDugSystem {
         }
     }
 
-    fn render_sprites(&mut self) {
+    /// One row of the sprite layer.
+    ///
+    /// Slots are still visited in list order, and the tile grid in the same
+    /// order within a slot, so the pixel a row ends up with is the one the
+    /// whole-frame pass produced from the same attribute RAM: only the *moment*
+    /// the RAM is read has moved.
+    ///
+    /// The list is read as of this row. The 04XX walks it into a line buffer
+    /// displayed on the next line, so a slot whose attributes change mid-screen
+    /// would appear one row early here. That lead is deliberately not added:
+    /// `raw_sy` below is `256 - y + 1` and the `+ 1` is already the one-line
+    /// delay, so folding it in again would double it (W3 of the raster-sampling
+    /// epic).
+    fn render_sprites_row(&mut self, y: usize) {
         // Sprites are at obj_ram[0x380..], pos_ram[0x380..], flp_ram[0x380..]
         // Step 2, 64 entries (but last few are often unused)
         // Draw in reverse order (lower index = higher priority on top)
@@ -885,6 +927,15 @@ impl DigDugSystem {
 
             let grid = if size { 2 } else { 1 };
 
+            // Reject the slot before walking its grid. Without this the grid
+            // loop and the per-tile setup in `draw_sprite_tile_row` run 224
+            // times per slot to draw at most 32 rows of it. The attribute bytes
+            // above are still read on every row, which is the point of the
+            // migration; only the work that cannot produce a pixel is skipped.
+            if !(sy..sy + 16 * grid as i32).contains(&(y as i32)) {
+                continue;
+            }
+
             for gy in 0..grid {
                 for gx in 0..grid {
                     let tile_code = if size {
@@ -900,15 +951,26 @@ impl DigDugSystem {
                     let tile_sx = (sx + (gx as i32) * 16) & 0xFF;
                     let tile_sy = sy + (gy as i32) * 16;
 
-                    self.draw_sprite_tile(tile_code, color, tile_sx, tile_sy, flipx, flipy);
+                    self.draw_sprite_tile_row(tile_code, color, tile_sx, tile_sy, flipx, flipy, y);
                     // Wraparound: draw again at x+256 for sprites crossing screen edge
-                    self.draw_sprite_tile(tile_code, color, tile_sx + 0x100, tile_sy, flipx, flipy);
+                    self.draw_sprite_tile_row(
+                        tile_code,
+                        color,
+                        tile_sx + 0x100,
+                        tile_sy,
+                        flipx,
+                        flipy,
+                        y,
+                    );
                 }
             }
         }
     }
 
-    fn draw_sprite_tile(
+    /// Blit the one line of a sprite tile that crosses row `y`, or nothing if it
+    /// does not cross it.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_sprite_tile_row(
         &mut self,
         code: usize,
         color: usize,
@@ -916,10 +978,16 @@ impl DigDugSystem {
         sy: i32,
         flipx: bool,
         flipy: bool,
+        y: usize,
     ) {
         if code >= self.sprite_cache.count() {
             return;
         }
+        let py = y as i32 - sy;
+        if !(0..16).contains(&py) || y >= 224 {
+            return;
+        }
+        let py = py as usize;
 
         // Clip to the visible area (columns 2..34, i.e. pixels 16..272); no tunnel
         // wrap (render_sprites handles the +0x100 second copy itself). Sprite pens
@@ -944,27 +1012,21 @@ impl DigDugSystem {
         };
         let mut prio = [0u8; 288];
 
-        for py in 0..16usize {
-            let screen_y = sy + py as i32;
-            if !(0..224).contains(&screen_y) {
-                continue;
-            }
-            let src_py = if flipy { 15 - py } else { py };
-            let row_off = screen_y as usize * 288;
-            let row = &mut native[row_off..row_off + 288];
-            gfx::draw_sprite_row_indexed(
-                sprite_cache,
-                code as u16,
-                src_py,
-                sx,
-                flipx,
-                is_transparent,
-                resolve,
-                row,
-                &mut prio,
-                &clip,
-            );
-        }
+        let src_py = if flipy { 15 - py } else { py };
+        let row_off = y * 288;
+        let row = &mut native[row_off..row_off + 288];
+        gfx::draw_sprite_row_indexed(
+            sprite_cache,
+            code as u16,
+            src_py,
+            sx,
+            flipx,
+            is_transparent,
+            resolve,
+            row,
+            &mut prio,
+            &clip,
+        );
     }
 }
 
@@ -1358,23 +1420,24 @@ impl MachineCore for DigDugSystem {
     }
 
     fn run_frame(&mut self) {
-        // Split once per frame-boundary run rather than per cycle: the bus view
-        // is several pointers wide, and re-forming it every cycle costs more
-        // than the dispatch it replaced. The render still happens exactly when
-        // the clock crosses a frame boundary, sampling the same video state
-        // `tick_frame_boundary` would have.
-        let cycles = namco_galaga::TIMING.cycles_per_frame();
-        let mut remaining = cycles;
+        // Scanline-outer: draw the row the beam is about to paint, then run that
+        // row's worth of cycles. The split is re-formed once per scanline rather
+        // than once per frame, which is 264 times instead of one; a per-*cycle*
+        // split cost about 6% on this board when it was measured, and this is
+        // 1/192nd of that frequency.
+        let per_line = namco_galaga::TIMING.cycles_per_scanline;
+        let mut remaining = namco_galaga::TIMING.cycles_per_frame();
         while remaining > 0 {
-            let run = (cycles - self.board.clock % cycles).min(remaining);
+            self.begin_scanline_render();
+            // A partial leading scanline only arises when the debugger has left
+            // the clock off-phase; it runs up to the next boundary and the row
+            // is drawn there.
+            let run = (per_line - self.board.clock % per_line).min(remaining);
             {
                 let (cpus, mut bus) = self.split();
                 namco_galaga::run_cycles(cpus, &mut bus, run);
             }
             remaining -= run;
-            if self.board.clock.is_multiple_of(cycles) {
-                self.render_video();
-            }
         }
     }
 
@@ -1770,6 +1833,100 @@ mod tests {
         assert_eq!(sys.orientation(), Orientation::ROT90);
         assert!(sys.orientation().swaps_axes());
         assert_eq!(sys.display_aspect(), Some((3, 4)));
+    }
+
+    // -----------------------------------------------------------------------
+    // Per-scanline rendering (W4)
+    // -----------------------------------------------------------------------
+
+    /// A system whose background tiles are solid pen 1, so the playfield ROM
+    /// byte at a cell decides which palette index its rows get. The background
+    /// layer is opaque, which makes it the cleanest one to watch.
+    ///
+    /// Note the playfield byte is both the tile code and, in its high nibble,
+    /// the colour, so 0x00 and 0x10 are two different tiles as well as two
+    /// different colours; both have to exist in the cache.
+    fn digdug_with_solid_bg() -> DigDugSystem {
+        let mut sys = DigDugSystem::new();
+        sys.bg_tile_cache = gfx::GfxCache::new(256, 8, 8);
+        for code in [0x00usize, 0x10] {
+            for py in 0..8 {
+                for px in 0..8 {
+                    sys.bg_tile_cache.set_pixel(code, px, py, 1);
+                }
+            }
+        }
+        // bg_lut is indexed colour*4 + pen; the tile colour is (code >> 4).
+        // Colour 0 pen 1 -> index 1, colour 1 pen 1 -> index 2.
+        sys.bg_lut = [0; 256];
+        sys.bg_lut[1] = 1;
+        sys.bg_lut[4 + 1] = 2;
+        sys.bg_disable = false;
+        sys.bg_color_bank = 0;
+        sys.bg_select = 0;
+        sys
+    }
+
+    fn scan_rows(sys: &mut DigDugSystem, rows: std::ops::Range<usize>) {
+        for y in rows {
+            sys.render_scanline(y);
+        }
+    }
+
+    /// The behavior W4 exists for on the tilemap layer: the playfield is read as
+    /// the beam passes it, so changing a cell partway down the screen changes
+    /// only the rows below the write.
+    ///
+    /// The split is at row 100, which is *inside* tile row 12 (rows 96..103). A
+    /// whole-frame render draws a tile row from one snapshot and cannot produce
+    /// this picture at all.
+    #[test]
+    fn a_mid_frame_playfield_change_affects_only_the_rows_below_it() {
+        const SPLIT: usize = 100;
+        let mut sys = digdug_with_solid_bg();
+        sys.playfield_rom = vec![0x00; 0x1000]; // every cell colour 0
+
+        scan_rows(&mut sys, 0..SPLIT);
+        sys.playfield_rom.fill(0x10); // colour 1 from here down
+        scan_rows(&mut sys, SPLIT..224);
+
+        let px = |y: usize| sys.native_buffer[y * 288 + 100];
+        assert_eq!(px(0), 1, "row 0 was drawn before the change");
+        assert_eq!(
+            px(SPLIT - 1),
+            1,
+            "the last row above it keeps the old colour, mid-tile-row"
+        );
+        assert_eq!(px(SPLIT), 2, "the first row below it takes the new colour");
+        assert_eq!(px(223), 2, "the bottom row is below it");
+    }
+
+    /// `render_scanline` drawing a row is only half of it: the frame loop has to
+    /// call it. Without this the test above would pass on a board that never
+    /// drew anything, since it drives `render_scanline` by hand.
+    #[test]
+    fn the_frame_loop_draws_rows_at_scanline_boundaries() {
+        let mut sys = digdug_with_solid_bg();
+        sys.playfield_rom = vec![0x00; 0x1000];
+        sys.native_buffer.fill(0xFF);
+
+        // One cycle at clock 0 crosses the scanline-0 boundary. This is the
+        // debugger's per-cycle path.
+        sys.tick_frame_boundary();
+        assert_eq!(sys.native_buffer[100], 1, "tick draws row 0");
+        assert_eq!(
+            sys.native_buffer[288 + 100],
+            0xFF,
+            "and only row 0: nothing has drawn row 1 yet"
+        );
+
+        // And the frame loop, which hoists the boundary test out.
+        sys.native_buffer.fill(0xFF);
+        sys.run_frame();
+        let undrawn = (0..224)
+            .filter(|&y| sys.native_buffer[y * 288 + 100] == 0xFF)
+            .count();
+        assert_eq!(undrawn, 0, "run_frame draws every visible row");
     }
 
     #[test]

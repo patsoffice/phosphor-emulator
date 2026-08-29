@@ -701,10 +701,36 @@ iterates a list.
 Note the sprite Y already carries W3's one-line line-buffer delay as `256 - y +
 1`, so no sampling lead was added on top of it.
 
-Five machines remain: digdug, xevious, mrdo, foodf, marble. Dig Dug and Xevious
-share this board and this shape, and once all three are per-scanline the
-backdrop/starfield/sprite/tilemap drive is common enough to lift onto
-`namco_galaga` rather than repeated three times.
+### What shipped, on namco_galaga (digdug), 2026-08-29
+
+The fourth, and the first one that was genuinely mechanical: the same
+`begin_scanline_render` / `render_scanline` shape as galaga, deliberately
+written to match line for line so the three can be lifted onto the board later.
+
+Background, foreground and sprites all became row passes; the sprite slot got
+galaga's Y-range early-out; both tilemap passes got the empty-cache guard. There
+is no backdrop fill, because Dig Dug's background tilemap is opaque and covers
+every pixel of the row. No starfield here, so no once-a-frame state at all: every
+layer on this machine is read live per row.
+
+**The pin moved by exactly one frame, proven.** New frame 1800 is byte-identical
+to the old code's frame 1799 (0 of 64512 pixels), and the 619 pixels that differ
+from old 1800 are *the same 619* that separate old 1799 from old 1800. By eye
+they are the flashing namco logo and the animating characters. Recaptured;
+`shows` needed no rewrite.
+
+**Perf:** 3.169 ms/frame before, 3.196 after, **+0.9%**, against ±2.8% and ±3.5%
+at nine repetitions. Consistent with galaga's +1.0%, and inside the noise here.
+
+One trap worth recording for the next board, hit while writing the test: on this
+machine the playfield byte is *both* the tile code and, in its high nibble, the
+colour, so a fixture that changes colour also changes which tile is fetched. The
+first version of the test allocated a one-entry cache and indexed out of bounds
+the moment the colour changed.
+
+Four machines remain: xevious, mrdo, foodf, marble. Xevious shares this board and
+this shape, and once all three are per-scanline the row drive is common enough to
+lift onto `namco_galaga` rather than repeated three times.
 
 ---
 

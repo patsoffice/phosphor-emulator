@@ -66,7 +66,7 @@ machine = "digdug"
 frames = 1800
 shows = "Attract mode: the DIG DUG title over the namco logo, with Dig Dug, Pooka and Fygar lined up on the yellow field."
 size = [224, 288]
-frame = "sha256:bc511502ae48fa0766ba87bfee63d4474bf902920e63a1034fa90540ea518353"
+frame = "sha256:4b763923d1d8318e5dc8eac6169cdc099f656c8e67aa2d6be0ea10260a84be13"
 
 [[frame]]
 machine = "dkong"
