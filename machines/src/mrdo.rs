@@ -101,13 +101,20 @@ pub fn clock_tree() -> phosphor_core::core::ClockTree {
     t
 }
 
-/// Native (pre-rotation) visible raster: MAME visarea x 8..248, y 32..224.
+/// Native (pre-rotation) visible raster: visarea x 8..248, y 32..224.
 pub const VISIBLE_WIDTH: usize = 240;
 pub const VISIBLE_HEIGHT: usize = 192;
 
-/// Scanline at which the once-per-frame VBLANK IRQ is asserted (start of the
-/// vertical blanking interval, just past the visible area y 32..224).
-const VBLANK_IRQ_LINE: u64 = 224;
+/// First visible column of the 256-pixel native line. Absolute x = `nx + 8`.
+const VISIBLE_LEFT_COL: usize = 8;
+
+/// First visible scanline. Native row `n` is drawn during scanline
+/// `n + VISIBLE_TOP_LINE`, so absolute y = `ny + 32`.
+const VISIBLE_TOP_LINE: u64 = 32;
+
+/// Scanline at which the once-per-frame VBLANK IRQ is asserted: the first line
+/// past the visible window, which is where vertical blanking begins.
+const VBLANK_IRQ_LINE: u64 = VISIBLE_TOP_LINE + VISIBLE_HEIGHT as u64;
 
 /// Both SN76489 PSGs and the CPU share the 8.2 MHz/2 clock; the tone/noise
 /// generators advance at chip_clock / 16.
@@ -377,12 +384,27 @@ fn mrdo_protection_output(data: u8) -> u8 {
 // MrdoBoard
 // ---------------------------------------------------------------------------
 
-/// One CPU cycle (≈4.1 MHz): the VBLANK IRQ edge, the Z80, then the PSGs.
+/// One CPU cycle (≈4.1 MHz): the scanline boundary, the VBLANK IRQ edge, the
+/// Z80, then the PSGs.
 ///
 /// The CPU lives on the machine and the board *is* the bus, so this takes them
 /// as separate borrows and dispatches at a concrete type.
+///
+/// This is the debugger's path: it tests the frame position on every cycle so
+/// that single-stepping still crosses scanline boundaries. A whole frame goes
+/// through [`run_scanlines`], which hoists that test out.
 #[inline]
 pub fn tick(cpu: &mut Z80, board: &mut MrdoBoard) {
+    let frame_cycle = board.clock % TIMING.cycles_per_frame();
+    if frame_cycle.is_multiple_of(TIMING.cycles_per_scanline) {
+        board.begin_scanline(frame_cycle / TIMING.cycles_per_scanline);
+    }
+    step_cycle(cpu, board);
+}
+
+/// The part of a cycle with no scanline-boundary test in it.
+#[inline]
+fn step_cycle(cpu: &mut Z80, board: &mut MrdoBoard) {
     board.begin_cycle(cpu);
 
     // `irq0_line_hold` acknowledgement: the CPU takes the interrupt at an
@@ -396,10 +418,42 @@ pub fn tick(cpu: &mut Z80, board: &mut MrdoBoard) {
     board.end_cycle();
 }
 
-/// Run one frame's worth of CPU cycles. Mr. Do! renders whole-frame, so there
-/// is no per-scanline work to interleave.
+/// Run `cycles` CPU cycles, scanline-outer and cycle-inner. The caller must
+/// start on a scanline boundary and pass a multiple of `cycles_per_scanline`;
+/// the debugger's off-boundary stepping goes through [`tick`] instead.
+pub fn run_scanlines(cpu: &mut Z80, board: &mut MrdoBoard, cycles: u64) {
+    debug_assert!(
+        board.clock.is_multiple_of(TIMING.cycles_per_scanline)
+            && cycles.is_multiple_of(TIMING.cycles_per_scanline),
+        "run_scanlines must start on a scanline boundary and run whole scanlines"
+    );
+    for _ in 0..cycles / TIMING.cycles_per_scanline {
+        let scanline = board.clock % TIMING.cycles_per_frame() / TIMING.cycles_per_scanline;
+        board.begin_scanline(scanline);
+        for _ in 0..TIMING.cycles_per_scanline {
+            step_cycle(cpu, board);
+        }
+    }
+}
+
+/// Run one frame's worth of CPU cycles. Whole scanlines go through
+/// [`run_scanlines`]; a partial scanline at either end (only after the debugger
+/// has left the clock off-boundary) goes through [`tick`].
 pub fn run_frame(cpu: &mut Z80, board: &mut MrdoBoard) {
-    for _ in 0..TIMING.cycles_per_frame() {
+    let scanline = TIMING.cycles_per_scanline;
+    let mut remaining = TIMING.cycles_per_frame();
+
+    let lead = ((scanline - board.clock % scanline) % scanline).min(remaining);
+    for _ in 0..lead {
+        tick(cpu, board);
+    }
+    remaining -= lead;
+
+    let whole = remaining - remaining % scanline;
+    run_scanlines(cpu, board, whole);
+    remaining -= whole;
+
+    for _ in 0..remaining {
         tick(cpu, board);
     }
 }
@@ -494,6 +548,21 @@ pub struct MrdoBoard {
     pub(crate) clock: u64,
     #[save(id = 16)]
     pub(crate) vblank_irq_pending: bool,
+
+    /// Display framebuffer (native 240×192 RGB), filled one row at a time as
+    /// the beam reaches each visible scanline.
+    ///
+    /// A row holds what the beam drew on that line, out of the two video RAMs,
+    /// sprite RAM, the BG scroll registers and the flip latch as they stood at
+    /// that line's boundary. The picture a completed frame presents therefore
+    /// does *not* contain that frame's own vblank writes: the beam had already
+    /// passed. The whole-frame render this replaced did contain them.
+    ///
+    /// Derived output, so not saved, and not seeded after a load either: the
+    /// rows of the next frame overwrite every one of them, and there is no
+    /// moment a load could reconstruct a picture from.
+    #[save_skip]
+    pub(crate) framebuffer: Vec<u8>,
 }
 
 impl Default for MrdoBoard {
@@ -534,6 +603,7 @@ impl MrdoBoard {
             audio: AudioResampler::new(TIMING.cpu_clock_hz, output_sample_rate()),
             clock: 0,
             vblank_irq_pending: false,
+            framebuffer: vec![0u8; VISIBLE_WIDTH * VISIBLE_HEIGHT * 3],
         }
     }
 
@@ -630,121 +700,189 @@ impl MrdoBoard {
         self.audio.fill_audio(buffer)
     }
 
-    /// Render one frame into `buffer` (192×240 RGB24, ROT270).
+    /// Copy the latest framebuffer into the frontend's `buffer` (240×192 RGB24
+    /// native; the cabinet's ROT270 is applied centrally by the frontend).
     ///
-    /// Composites the native 240×192 visible raster (MAME visarea x 8..248,
-    /// y 32..224) into a pen-index buffer — fill pen 0, then the scrollable BG
-    /// tilemap, the fixed FG tilemap, and sprites, all transparent on pen 0
-    /// (per `screen_update_mrdo`) — then resolves pens through the palette while
-    /// rotating 270°. Mr. Do! takes a single VBLANK IRQ with no mid-frame raster
-    /// effects, so a whole-frame render matches the hardware.
+    /// This does not draw. Each visible row was composited at its own scanline
+    /// boundary in [`render_scanline`](Self::render_scanline) as the beam
+    /// reached it.
     pub fn render_frame(&self, buffer: &mut [u8]) {
-        // GFX ROMs not decoded yet (e.g. a freshly-constructed machine before
-        // `load_rom_set`) — emit a black frame rather than indexing empty caches.
+        buffer.copy_from_slice(&self.framebuffer);
+    }
+
+    /// Work that only happens on the first cycle of a scanline: compositing the
+    /// row the beam is about to draw.
+    ///
+    /// `scanline` is 0..262 and the visible window is `[32, 224)`; only visible
+    /// lines have a row to draw, so walking `0..total_scanlines` draws exactly
+    /// the visible rows and nothing else.
+    ///
+    /// Called once per scanline from [`run_scanlines`] and, for the debugger's
+    /// single-step path, from [`tick`] when the clock lands on a boundary.
+    /// Public because the picture only exists once the beam has passed over it:
+    /// a caller that wants a frame without running CPU cycles (the integration
+    /// tests) has to step the beam itself.
+    pub fn begin_scanline(&mut self, scanline: u64) {
+        let top = VISIBLE_TOP_LINE;
+        if (top..top + VISIBLE_HEIGHT as u64).contains(&scanline) {
+            self.render_scanline((scanline - top) as usize);
+        }
+    }
+
+    /// Draw one visible scanline into the framebuffer, out of the video state as
+    /// it stands at that line's boundary.
+    ///
+    /// `ny` is a native row in `[0, VISIBLE_HEIGHT)`, drawn during scanline
+    /// `ny + VISIBLE_TOP_LINE`. The layers run in the board's order for this one
+    /// row — backdrop pen 0, the scrollable BG tilemap, the fixed FG tilemap,
+    /// then sprites — and every register they read is read here, so a mid-frame
+    /// write to the BG scroll registers or the flip latch splits the picture at
+    /// the row it lands on.
+    ///
+    /// The palette is resolved here too, so it is the palette as of this row.
+    /// On this board that is a formality: the palette comes from PROMs and the
+    /// CPU cannot change it.
+    ///
+    /// **Sprite sampling point.** W3 established that a sprite circuit of this
+    /// shape scans its object list into a line buffer displayed on the *next*
+    /// line, so the list for row `r` is the one that stood at row `r - 1`. This
+    /// board's `256 - rawY` carries no such lead, unlike `galaga`'s
+    /// `256 - y + 1`, and none is added here: the object sheet shows two pairs
+    /// of 6148s on the output path, which is a line buffer's shape, but which
+    /// pair buffers and how the two alternate was read as chips rather than as a
+    /// traced path (`docs/schematics/sprite-list-scan.md`). Adding a one-line
+    /// lead would move every sprite pixel on the strength of a guess, so the
+    /// constant is left as it was and the question stays open.
+    fn render_scanline(&mut self, ny: usize) {
+        // GFX ROMs not decoded yet (a bare board, before `load_rom_set`): leave
+        // the row as it was rather than indexing an empty cache. `GfxCache::
+        // pixel` indexes a `Vec`, so a zero-entry cache is a panic and not a
+        // zero, and this went unnoticed while only a whole-frame render — which
+        // had this same guard — could reach it. `decode_gfx_roms` fills all
+        // three caches together, so `fg_cache` answers for the other two.
         if self.fg_cache.count() == 0 {
-            buffer.fill(0);
             return;
         }
 
+        // One native row of palette indices, backdrop (pen 0) first.
+        let mut row = [0u16; VISIBLE_WIDTH];
+
+        self.draw_tilemaps_row(&mut row, ny);
+        self.draw_sprites_row(&mut row, ny);
+
+        let out = ny * VISIBLE_WIDTH * 3;
+        for (x, &p) in row.iter().enumerate() {
+            let (r, g, b) = self.palette_rgb[p as usize];
+            let di = out + x * 3;
+            self.framebuffer[di] = r;
+            self.framebuffer[di + 1] = g;
+            self.framebuffer[di + 2] = b;
+        }
+    }
+
+    /// Composite the BG and FG tilemaps into one native row.
+    ///
+    /// Both are 32×32 grids of 8×8 tiles read straight out of video RAM, so a
+    /// row's grid row is fixed by `ny` and only the column varies; the per-pixel
+    /// tile lookup below is what the whole-frame renderer did too, and a row
+    /// pass does not multiply it.
+    ///
+    /// `set_flip_all` mirrors both tilemaps 180° in cocktail mode, so the
+    /// mirrored coordinate is what is sampled. Sprites are NOT flipped by the
+    /// hardware (the game writes cocktail-adjusted sprite data itself).
+    fn draw_tilemaps_row(&self, row: &mut [u16; VISIBLE_WIDTH], ny: usize) {
         let bgram = self.main_map.region_data(MainRegion::BgVideoRam);
         let fgram = self.main_map.region_data(MainRegion::FgVideoRam);
-        let sprram = self.main_map.region_data(MainRegion::SpriteRam);
         let flip = self.flipscreen;
         let sx = self.bg_scroll_x as usize;
         let sy = self.bg_scroll_y as usize;
 
-        let mut pen = vec![0u16; VISIBLE_WIDTH * VISIBLE_HEIGHT];
+        let ay = ny + VISIBLE_TOP_LINE as usize;
+        let ey = if flip { 255 - ay } else { ay };
 
-        // Tilemaps. `set_flip_all` mirrors both tilemaps 180° in cocktail mode;
-        // we sample the mirrored coordinate. Sprites are NOT flipped by the
-        // hardware (the game writes cocktail-adjusted sprite data itself).
-        for ny in 0..VISIBLE_HEIGHT {
-            for nx in 0..VISIBLE_WIDTH {
-                let ax = nx + 8;
-                let ay = ny + 32;
-                let (ex, ey) = if flip { (255 - ax, 255 - ay) } else { (ax, ay) };
-                let mut p = 0u16;
+        for (nx, p) in row.iter_mut().enumerate() {
+            let ax = nx + VISIBLE_LEFT_COL;
+            let ex = if flip { 255 - ax } else { ax };
 
-                // BG tilemap (gfx2), scrolled; source = (screen + scroll) & 0xff.
-                // A pixel is opaque when its value is non-zero, OR when the tile
-                // carries the TILE_FORCE_LAYER0 attribute (attr bit 6) — MAME
-                // defines `TILE_FORCE_LAYER0 == TILEMAP_PIXEL_LAYER0`, i.e. "no
-                // transparency", so a forced tile's value-0 pixels draw pen
-                // `color*4` too. This is how the scrolling rainbow band shows all
-                // its colors while ordinary value-0 pixels (dug maze corridors)
-                // stay transparent.
-                {
-                    let bx = (ex + sx) & 0xff;
-                    let by = (ey + sy) & 0xff;
-                    let bidx = (by / 8) * 32 + bx / 8;
-                    let battr = bgram[bidx];
-                    let bcode = bgram[bidx + 0x400] as usize + ((battr as usize & 0x80) << 1);
-                    let bval = self.bg_cache.pixel(bcode, bx & 7, by & 7);
-                    if bval != 0 || battr & 0x40 != 0 {
-                        p = (battr as u16 & 0x3f) * 4 + bval as u16;
-                    }
+            // BG tilemap (gfx2), scrolled; source = (screen + scroll) & 0xff.
+            // A pixel is opaque when its value is non-zero, OR when the tile
+            // carries the force-layer-0 attribute (attr bit 6), which means "no
+            // transparency", so such a tile's value-0 pixels draw pen `color*4`
+            // too. This is how the scrolling rainbow band shows all its colors
+            // while ordinary value-0 pixels (dug maze corridors) stay
+            // transparent.
+            {
+                let bx = (ex + sx) & 0xff;
+                let by = (ey + sy) & 0xff;
+                let bidx = (by / 8) * 32 + bx / 8;
+                let battr = bgram[bidx];
+                let bcode = bgram[bidx + 0x400] as usize + ((battr as usize & 0x80) << 1);
+                let bval = self.bg_cache.pixel(bcode, bx & 7, by & 7);
+                if bval != 0 || battr & 0x40 != 0 {
+                    *p = (battr as u16 & 0x3f) * 4 + bval as u16;
                 }
+            }
 
-                // FG tilemap (gfx1), fixed; same TILE_FORCE_LAYER0 rule. The
-                // priority-flagged tiles around the logo mask off the BG rainbow.
-                {
-                    let fidx = (ey / 8) * 32 + ex / 8;
-                    let fattr = fgram[fidx];
-                    let fcode = fgram[fidx + 0x400] as usize + ((fattr as usize & 0x80) << 1);
-                    let fval = self.fg_cache.pixel(fcode, ex & 7, ey & 7);
-                    if fval != 0 || fattr & 0x40 != 0 {
-                        p = (fattr as u16 & 0x3f) * 4 + fval as u16;
-                    }
+            // FG tilemap (gfx1), fixed; same force-layer-0 rule. The
+            // priority-flagged tiles around the logo mask off the BG rainbow.
+            {
+                let fidx = (ey / 8) * 32 + ex / 8;
+                let fattr = fgram[fidx];
+                let fcode = fgram[fidx + 0x400] as usize + ((fattr as usize & 0x80) << 1);
+                let fval = self.fg_cache.pixel(fcode, ex & 7, ey & 7);
+                if fval != 0 || fattr & 0x40 != 0 {
+                    *p = (fattr as u16 & 0x3f) * 4 + fval as u16;
                 }
-
-                pen[ny * VISIBLE_WIDTH + nx] = p;
             }
         }
+    }
 
-        // Sprites: 64 entries of 4 bytes, drawn high→low, skipped when the raw Y
-        // byte is 0. Screen Y = 256 - rawY; screen X is direct. Sprite pens live
-        // at palette base 0x100 (color 0-15, 2bpp).
+    /// Composite the sprites that cross native row `ny` into `row`.
+    ///
+    /// 64 entries of 4 bytes, walked high→low so a lower-numbered slot draws
+    /// over a higher one, and skipped when the raw Y byte is 0. Screen Y =
+    /// 256 - rawY; screen X is direct. Sprite pens live at palette base 0x100
+    /// (color 0-15, 2bpp).
+    ///
+    /// The vertical range test is taken as soon as the slot's Y byte is read,
+    /// so a slot that is not on this line costs one byte read rather than a
+    /// decode: 64 slots × 192 rows is the whole per-frame cost of the pass.
+    fn draw_sprites_row(&self, row: &mut [u16; VISIBLE_WIDTH], ny: usize) {
+        let sprram = self.main_map.region_data(MainRegion::SpriteRam);
+        let nyi = ny as i32;
+
         for offs in (0..0x100).step_by(4).rev() {
-            if sprram[offs + 1] == 0 {
+            let raw_y = sprram[offs + 1];
+            if raw_y == 0 {
                 continue;
             }
+            // Top of the 16-pixel sprite in native rows.
+            let top = 256 - raw_y as i32 - VISIBLE_TOP_LINE as i32;
+            let py = nyi - top;
+            if !(0..16).contains(&py) {
+                continue;
+            }
+
             let code = sprram[offs] as usize & 0x7f;
             let attr = sprram[offs + 2];
             let color = (attr & 0x0f) as u16;
             let flipx = attr & 0x10 != 0;
             let flipy = attr & 0x20 != 0;
             let sxp = sprram[offs + 3] as i32;
-            let syp = 256 - sprram[offs + 1] as i32;
-            for py in 0..16i32 {
-                let ry = if flipy { 15 - py } else { py };
-                let nyi = syp + py - 32;
-                if !(0..VISIBLE_HEIGHT as i32).contains(&nyi) {
+
+            let ry = if flipy { 15 - py } else { py } as usize;
+            for px in 0..16i32 {
+                let nxi = sxp + px - VISIBLE_LEFT_COL as i32;
+                if !(0..VISIBLE_WIDTH as i32).contains(&nxi) {
                     continue;
                 }
-                for px in 0..16i32 {
-                    let rx = if flipx { 15 - px } else { px };
-                    let val = self.sprite_cache.pixel(code, rx as usize, ry as usize);
-                    if val == 0 {
-                        continue;
-                    }
-                    let nxi = sxp + px - 8;
-                    if !(0..VISIBLE_WIDTH as i32).contains(&nxi) {
-                        continue;
-                    }
-                    pen[nyi as usize * VISIBLE_WIDTH + nxi as usize] =
-                        0x100 + color * 4 + val as u16;
+                let rx = if flipx { 15 - px } else { px };
+                let val = self.sprite_cache.pixel(code, rx as usize, ry);
+                if val == 0 {
+                    continue;
                 }
+                row[nxi as usize] = 0x100 + color * 4 + val as u16;
             }
-        }
-
-        // Resolve each pen through the RGB palette into native row-major order.
-        // The ROT270 the cabinet needs is declared via `orientation` and applied
-        // centrally by the frontend, not baked here.
-        for (i, &p) in pen.iter().enumerate() {
-            let (r, g, b) = self.palette_rgb[p as usize];
-            buffer[i * 3] = r;
-            buffer[i * 3 + 1] = g;
-            buffer[i * 3 + 2] = b;
         }
     }
 
@@ -778,6 +916,8 @@ impl MrdoBoard {
             .fill(0);
         self.main_map.region_data_mut(MainRegion::SpriteRam).fill(0);
         self.main_map.region_data_mut(MainRegion::WorkRam).fill(0);
+        // The framebuffer is not cleared: the next frame's rows overwrite every
+        // one of them as the beam reaches them.
     }
 
     /// The interrupt lines this board drives. Named to avoid shadowing
@@ -1443,6 +1583,15 @@ mod tests {
         (ny * VISIBLE_WIDTH + nx) * 3
     }
 
+    /// Walk the beam over a whole frame's scanlines so every visible row is
+    /// drawn. The picture only exists once the beam has passed over it, so a
+    /// test that pokes video state has to scan before it can look.
+    fn scan_frame(board: &mut MrdoBoard) {
+        for s in 0..TIMING.total_scanlines {
+            board.begin_scanline(s);
+        }
+    }
+
     #[test]
     fn render_frame_draws_fg_tile_native() {
         let mut sys = MrdoSystem::new();
@@ -1461,6 +1610,7 @@ mod tests {
             fg[idx + 0x400] = 0x00; // code 0
         }
         let mut buf = vec![0u8; VISIBLE_WIDTH * VISIBLE_HEIGHT * 3];
+        scan_frame(&mut sys.board);
         sys.board.render_frame(&mut buf);
         // Abs (8,32) is native (0,0); that pixel should be the tile's red pen.
         let di = out_offset(0, 0);
@@ -1482,10 +1632,210 @@ mod tests {
             spr[3] = 40; // screenX = 40
         }
         let mut buf = vec![0u8; VISIBLE_WIDTH * VISIBLE_HEIGHT * 3];
+        scan_frame(&mut sys.board);
         sys.board.render_frame(&mut buf);
         // At least one sprite pixel should be green somewhere in the output.
         let any_green = buf.as_chunks::<3>().0.contains(&[0u8, 180, 0]);
         assert!(any_green, "sprite pixel not found in output");
+    }
+
+    // -----------------------------------------------------------------------
+    // Per-scanline rendering (W4)
+    // -----------------------------------------------------------------------
+
+    const BLUE: (u8, u8, u8) = (0, 0, 0xFF);
+    const RED: (u8, u8, u8) = (0xFF, 0, 0);
+
+    fn pixel(buffer: &[u8], nx: usize, ny: usize) -> (u8, u8, u8) {
+        let di = out_offset(nx, ny);
+        (buffer[di], buffer[di + 1], buffer[di + 2])
+    }
+
+    fn row_has_blue(buffer: &[u8], ny: usize) -> bool {
+        let row = &buffer[ny * VISIBLE_WIDTH * 3..(ny + 1) * VISIBLE_WIDTH * 3];
+        row.as_chunks::<3>().0.contains(&[0, 0, 0xFF])
+    }
+
+    /// A machine whose FG tilemap covers the screen in one solid color, so
+    /// palette entry 6 marks any row the foreground layer reached.
+    fn system_with_visible_fg() -> MrdoSystem {
+        let mut sys = MrdoSystem::new();
+        sys.board.fg_rom[0..8].fill(0xFF); // tile 0: every pixel value 2
+        sys.board.decode_gfx_roms();
+        sys.board.palette_rgb[6] = BLUE; // color 1, pixel 2
+        sys.board.palette_rgb[10] = RED; // color 2, pixel 2
+        let fg = sys.board.main_map.region_data_mut(MainRegion::FgVideoRam);
+        fg[0..0x400].fill(0x01); // every cell: color 1, code 0
+        sys
+    }
+
+    /// The tilemap half of W4: video RAM is read as the beam passes it, so
+    /// rewriting a cell's attribute partway down the screen changes only the
+    /// rows below the write.
+    ///
+    /// The split is at native row 100 (scanline 132), which is *inside* char
+    /// row 16 (native rows 96..103). A whole-frame render draws a char row from
+    /// one snapshot and cannot produce this picture at all.
+    #[test]
+    fn a_mid_frame_vram_write_changes_only_the_rows_below_it() {
+        const SPLIT_ROW: usize = 100;
+        let top = VISIBLE_TOP_LINE;
+
+        let mut sys = system_with_visible_fg();
+        for s in top..top + SPLIT_ROW as u64 {
+            sys.board.begin_scanline(s);
+        }
+        {
+            let fg = sys.board.main_map.region_data_mut(MainRegion::FgVideoRam);
+            fg[0..0x400].fill(0x02); // color 2 -> pen 10
+        }
+        for s in top + SPLIT_ROW as u64..top + VISIBLE_HEIGHT as u64 {
+            sys.board.begin_scanline(s);
+        }
+
+        let buffer = &sys.board.framebuffer;
+        assert_eq!(
+            pixel(buffer, 100, 0),
+            BLUE,
+            "row 0 was drawn before the write"
+        );
+        assert_eq!(
+            pixel(buffer, 100, SPLIT_ROW - 1),
+            BLUE,
+            "the last row above the write keeps the old attribute, mid-char-row"
+        );
+        assert_eq!(
+            pixel(buffer, 100, SPLIT_ROW),
+            RED,
+            "the first row below the write takes the new attribute"
+        );
+        assert_eq!(
+            pixel(buffer, 100, VISIBLE_HEIGHT - 1),
+            RED,
+            "the bottom row is below the write"
+        );
+    }
+
+    /// The raster effect this epic exists for. Mr. Do! writes the BG scroll
+    /// registers during active display — traced on this ROM set at scanline 145
+    /// of frame 3 — and the rows above such a write must keep the old scroll.
+    ///
+    /// The BG map is 32x32 and this fixture splits it by *column*, so the
+    /// distinguishing attribute has to be written in all 32 map rows: a row-0
+    /// assertion would pass with only cell 0 set and a row-100 one would not.
+    #[test]
+    fn a_mid_frame_scroll_write_splits_the_background() {
+        const SPLIT_ROW: usize = 100;
+        let top = VISIBLE_TOP_LINE;
+
+        let mut sys = MrdoSystem::new();
+        // BG tile 0 is all pixel value 0, so the force-layer-0 attribute (bit 6)
+        // is what makes it opaque and the tile's color alone paints the row.
+        // The FG is left transparent: attr 0 everywhere, and an all-zero
+        // fg_rom.
+        sys.board.decode_gfx_roms();
+        sys.board.palette_rgb[4] = BLUE; // color 1, pixel 0
+        sys.board.palette_rgb[8] = RED; // color 2, pixel 0
+        {
+            let bg = sys.board.main_map.region_data_mut(MainRegion::BgVideoRam);
+            for r in 0..32 {
+                for c in 0..32 {
+                    bg[r * 32 + c] = if c < 16 { 0x41 } else { 0x42 };
+                }
+            }
+        }
+
+        // Native x 0 is absolute x 8. With no scroll that samples map column 1
+        // (color 1); scrolled by 128 it samples column 17 (color 2).
+        sys.board.bg_scroll_x = 0;
+        for s in top..top + SPLIT_ROW as u64 {
+            sys.board.begin_scanline(s);
+        }
+        sys.board.bg_scroll_x = 128;
+        for s in top + SPLIT_ROW as u64..top + VISIBLE_HEIGHT as u64 {
+            sys.board.begin_scanline(s);
+        }
+
+        let buffer = &sys.board.framebuffer;
+        assert_eq!(
+            pixel(buffer, 0, 0),
+            BLUE,
+            "row 0 was drawn before the write"
+        );
+        assert_eq!(
+            pixel(buffer, 0, SPLIT_ROW - 1),
+            BLUE,
+            "the last row above the write keeps the old scroll, mid-tile-row"
+        );
+        assert_eq!(
+            pixel(buffer, 0, SPLIT_ROW),
+            RED,
+            "the first row below the write takes the new scroll"
+        );
+        assert_eq!(
+            pixel(buffer, 0, VISIBLE_HEIGHT - 1),
+            RED,
+            "the bottom row is below the write"
+        );
+    }
+
+    /// The tests above drive `begin_scanline` by hand, which proves nothing
+    /// about whether the frame loop ever calls it. Without this one they would
+    /// both pass on a board that never drew anything, so this walks the real
+    /// `tick` and `run_scanlines` paths and checks the picture changed.
+    #[test]
+    fn the_frame_loop_draws_rows_at_scanline_boundaries() {
+        let mut sys = system_with_visible_fg();
+        sys.board.framebuffer.fill(0);
+
+        // Wind through the top blanking lines to the last one before the
+        // visible window. The debugger's per-cycle path is what this exercises.
+        for _ in 0..VISIBLE_TOP_LINE * TIMING.cycles_per_scanline {
+            tick(&mut sys.cpu, &mut sys.board);
+        }
+        assert!(
+            sys.board.framebuffer.iter().all(|&c| c == 0),
+            "tick() drew nothing during the top blanking lines"
+        );
+
+        // One more scanline through tick(), which crosses the first visible
+        // boundary and must draw row 0 and only row 0.
+        for _ in 0..TIMING.cycles_per_scanline {
+            tick(&mut sys.cpu, &mut sys.board);
+        }
+        assert!(
+            row_has_blue(&sys.board.framebuffer, 0),
+            "tick() draws row 0"
+        );
+        assert!(
+            !row_has_blue(&sys.board.framebuffer, 1),
+            "and only row 0: nothing has drawn row 1 yet"
+        );
+
+        // And the hoisted loop a whole frame actually runs through draws too.
+        run_scanlines(&mut sys.cpu, &mut sys.board, TIMING.cycles_per_scanline);
+        assert!(
+            row_has_blue(&sys.board.framebuffer, 1),
+            "run_scanlines() draws row 1"
+        );
+    }
+
+    /// A blanking line has no row to draw, and drawing one would run off the
+    /// end of a framebuffer sized to the visible window.
+    #[test]
+    fn blanking_scanlines_have_no_row_to_draw() {
+        let mut sys = system_with_visible_fg();
+        sys.board.framebuffer.fill(0);
+        for s in 0..VISIBLE_TOP_LINE {
+            sys.board.begin_scanline(s);
+        }
+        for s in VISIBLE_TOP_LINE + VISIBLE_HEIGHT as u64..TIMING.total_scanlines {
+            sys.board.begin_scanline(s);
+        }
+        assert!(
+            sys.board.framebuffer.iter().all(|&c| c == 0),
+            "the blanking lines drew nothing"
+        );
     }
 
     #[test]

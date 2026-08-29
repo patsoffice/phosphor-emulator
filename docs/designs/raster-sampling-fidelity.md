@@ -815,6 +815,101 @@ argument here anyway.
 
 Three machines remain: mrdo, foodf, marble, plus the boards W5 turned up.
 
+### What shipped, on mrdo, 2026-08-29
+
+The sixth, and the first of the two boards this doc warned would "need more
+care" for being per-pixel whole-frame loops rather than layer passes. It needed
+less than the warning suggested: because the loop was already per-pixel, its
+tile lookups did not multiply when the nesting inverted, and the restructure was
+the same shape as the others.
+
+The board gained the house hook it did not have — `tick` tests the scanline
+boundary, `run_scanlines` hoists that test out, `run_frame` is scanline-outer,
+and `begin_scanline` draws. `render_scanline` builds one 240-pixel native row of
+pen indices out of the live BG and FG video RAM, sprite RAM, the two BG scroll
+registers and the flip latch, then resolves it against the palette into a
+persistent framebuffer. `render_frame` only copies. The `vec![0u16; 240*192]`
+the whole-frame render allocated each time is gone, replaced by a `[u16; 240]`
+per row.
+
+`VBLANK_IRQ_LINE` is now derived as `VISIBLE_TOP_LINE + VISIBLE_HEIGHT` rather
+than written as 224. Same value, but the relation it encodes — the IRQ fires on
+the first line past the visible window — is what `begin_scanline`'s guard also
+depends on, and the two should not be able to drift apart.
+
+**The pin moved by exactly one frame, proven.** New frame 1800 is byte-identical
+to the old code's frame 1799 (0 of 46080 pixels), and differs from old 1800 by
+73 pixels, which are *the same 73* that separate old 1799 from old 1800. By eye
+they are Mr. Do himself, one pixel further along beside the 1000-point bonus;
+title, INSTRUCTION, the cherry field and the score line are untouched.
+Recaptured, one hash in `frames.toml`, one of 39 machines moved, and `shows`
+needed no rewrite.
+
+**Why it moved by exactly one frame, traced not assumed.** Mr. Do! takes one
+VBLANK IRQ at scanline 224 and does its whole per-frame video update inside the
+first two lines of vertical blanking: `disasm trace --watch` puts frame 1800's
+writes at `$9000` on **scanline 224** and `$900C` on **scanline 225**, sprite
+slots 0..3 only, with no write to either tilemap, either scroll register or the
+flip latch anywhere in frames 1799 or 1800. The last visible row is drawn at
+scanline 223, so the beam had passed before the first write landed. That is the
+whole 73-pixel difference and there is nothing left over.
+
+**The watchpoint blind spot did *not* bite here, and it was checked rather than
+assumed.** The scroll registers at `$F000`/`$F800` are decoded in this board's
+`Bus` impl and belong to no mapped region, which is the shape that returned
+silence on xevious (`phosphor-emulator-gcny`). Here it does not: `watch_write`
+is called on the raw address before the decode, so the probe sees them. The
+positive control proves it — over frames 0..200 the trace shows `$F800` written
+once a frame from `pc=701E`. So the empty result over frames 1700..1801 is a
+measurement and not a blind spot.
+
+**Mr. Do! does write its scroll during active display**, just not on the pinned
+frame: the same trace puts a `$F800` write at **scanline 145** of frame 3, well
+inside the visible window. Like Burger Time, this board's byte-for-byte agreement
+is a property of what the attract loop happens to be doing at frame 1800, not a
+property of the migration.
+
+**No sprite sampling lead was added, and the constant does not carry one.**
+Galaga folds W3's one-line line-buffer delay into `256 - y + 1`; this board's
+`256 - rawY` does not. The object sheet shows two pairs of 6148s on the output
+path, which is a line buffer's shape, but which pair buffers and how the two
+alternate was read as chips rather than as a traced path
+(`docs/schematics/sprite-list-scan.md`). Adding a lead would move every sprite
+pixel on the strength of a guess, so the constant is left alone and the question
+stays open. Can I point at the part? Not for the alternation.
+
+**The empty-cache guard moved rather than multiplied.** The whole-frame render
+already had one; it is now at the top of `render_scanline`, where a bare board
+reaches it 192 times a frame instead of once. It is load-bearing, not defensive:
+`boots_and_runs_frames_without_panicking` (and the registry-wide
+`machine_contract_test`, which runs frames on ROM-less machines) fails with
+`index out of bounds: the len is 0` when it is removed. A separate guard on the
+sprite pass was written and then deleted: with an empty cache the sprite RAM is
+also all zeros, every slot's Y byte is 0 and the pass returns before it can
+index anything, so nothing could ever trip it. A check that cannot fail is not a
+check.
+
+**Perf: a small real cost whose size the host could not resolve.** Two
+back-to-back A/B pairs, `--frames 900 --warmup 1800`: at 9 repetitions 1.237 →
+1.292 ms/frame (**+4.4%**, spreads ±4.3% and ±10.1%), at 15 repetitions 1.246 →
+1.267 (**+1.7%**, spreads ±15.5% and ±11.8%). Both pairs positive, so unlike the
+W6 measurement this is not "nothing was measured" — but a 2.6x disagreement in
+magnitude against spreads that wide means the number is bounded, not known. The
+internal split moves as expected and is the clearer signal: render drops from
+0.215 to 0.005 ms/frame (it is a `memcpy` now) while emulation rises from 1.03
+to 1.27, because the drawing moved inside `run_frame`.
+
+Not attributed, and worth saying where it is *not*: the per-row sprite sweep is
+64 slots x 192 rows = 12,288 Y-byte reads a frame, against the two tilemaps'
+92,160 per-pixel map fetches — and that second figure did not change in the
+migration, because the whole-frame loop was per-pixel too. Filed as
+`phosphor-emulator-3me5`, raised by the owner from the sprite side and widened
+to both layers: a row pass should iterate the units that vary along the row,
+which for a tilemap is 32 tiles rather than 240 pixels and for sprites is the
+candidates rather than the slots. A profile comes before choosing between them.
+
+Three machines remain: foodf, marble, plus the boards W5 turned up.
+
 ---
 
 ## Testing
