@@ -1,0 +1,107 @@
+{
+  "modules": {
+    "dkongjr jump voice: two-source frequency control, VCO, chopper": {
+      "ports": {
+        "to mixer": { "direction": "output", "bits": [20] }
+      },
+      "cells": {
+        "u6J": {
+          "type": "6J.12 = /SOUND1",
+          "port_directions": { "6H bit 1": "output" },
+          "connections": { "6H bit 1": [2] },
+          "attributes": {}
+        },
+        "u6Ltap": {
+          "type": "6L.1 = 4020 b11",
+          "port_directions": { "from walk voice": "output" },
+          "connections": { "from walk voice": [3] },
+          "attributes": {}
+        },
+        "u4K": {
+          "type": "4K LS123a",
+          "port_directions": {
+            "trig (2), A (1) low": "input",
+            "R9 47k / C15 22u (15,14)": "input",
+            "Q (13)": "output"
+          },
+          "connections": {
+            "trig (2), A (1) low": [2],
+            "R9 47k / C15 22u (15,14)": ["1"],
+            "Q (13)": [10]
+          },
+          "attributes": {}
+        },
+        "u7Na": {
+          "type": "7N LS04a",
+          "port_directions": { "in (5)": "input", "out (6)": "output" },
+          "connections": { "in (5)": [10], "out (6)": [11] },
+          "attributes": {}
+        },
+        "u7Nb": {
+          "type": "7N LS04b",
+          "port_directions": { "in (3)": "input", "out (4)": "output" },
+          "connections": { "in (3)": [3], "out (4)": [12] },
+          "attributes": {}
+        },
+        "uFC": {
+          "type": "FC node C24",
+          "port_directions": {
+            "via R13 47k": "input",
+            "via R12 10k": "input",
+            "to 8L.1": "output"
+          },
+          "connections": {
+            "via R13 47k": [11],
+            "via R12 10k": [12],
+            "to 8L.1": [13]
+          },
+          "attributes": {}
+        },
+        "u8L": {
+          "type": "8L LS629",
+          "port_directions": {
+            "FC (1)": "input",
+            "RNG (14) R35 1k": "input",
+            "C22 220n (12,13)": "input",
+            "EN (11) low": "input",
+            "Y (10)": "output"
+          },
+          "connections": {
+            "FC (1)": [13],
+            "RNG (14) R35 1k": ["1"],
+            "C22 220n (12,13)": ["1"],
+            "EN (11) low": ["0"],
+            "Y (10)": [14]
+          },
+          "attributes": {}
+        },
+        "uQ3": {
+          "type": "Q3 2SC1815",
+          "port_directions": {
+            "base via R26 10k": "input",
+            "R7 100k to gnd": "input",
+            "collector": "output"
+          },
+          "connections": {
+            "base via R26 10k": [14],
+            "R7 100k to gnd": ["0"],
+            "collector": [15]
+          },
+          "attributes": {}
+        },
+        "uRC": {
+          "type": "R27 R28 C28",
+          "port_directions": { "from collector": "input", "out": "output" },
+          "connections": { "from collector": [15], "out": [16] },
+          "attributes": {}
+        },
+        "uFilt": {
+          "type": "C23 R19 C21",
+          "port_directions": { "in": "input", "out": "output" },
+          "connections": { "in": [16], "out": [20] },
+          "attributes": {}
+        }
+      }
+    }
+  }
+}

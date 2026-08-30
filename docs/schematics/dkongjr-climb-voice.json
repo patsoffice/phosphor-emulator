@@ -1,0 +1,127 @@
+{
+  "modules": {
+    "dkongjr climbing voice: 16-bit LFSR, one-shot gate, chopper": {
+      "ports": {
+        "to mixer": { "direction": "output", "bits": [30] }
+      },
+      "cells": {
+        "u7Pb": {
+          "type": "7P LS629b",
+          "port_directions": {
+            "FC (1) to gnd": "input",
+            "RNG (14) R34 1k": "input",
+            "C20 120n (12,13)": "input",
+            "EN (11) low": "input",
+            "Y (10) approx 710 Hz": "output"
+          },
+          "connections": {
+            "FC (1) to gnd": ["0"],
+            "RNG (14) R34 1k": ["1"],
+            "C20 120n (12,13)": ["1"],
+            "EN (11) low": ["0"],
+            "Y (10) approx 710 Hz": [2]
+          },
+          "attributes": {}
+        },
+        "u3J": {
+          "type": "3J LS164",
+          "port_directions": {
+            "CK (8)": "input",
+            "A,B (1,2)": "input",
+            "CLR (9)": "input",
+            "QC (5) = b2": "output",
+            "QH (13) = b7": "output"
+          },
+          "connections": {
+            "CK (8)": [2],
+            "A,B (1,2)": [10],
+            "CLR (9)": ["1"],
+            "QC (5) = b2": [3],
+            "QH (13) = b7": [4]
+          },
+          "attributes": {}
+        },
+        "u4J": {
+          "type": "4J LS164",
+          "port_directions": {
+            "CK (8)": "input",
+            "A,B (1,2)": "input",
+            "CLR (9)": "input",
+            "QH (13) = b15": "output"
+          },
+          "connections": {
+            "CK (8)": [2],
+            "A,B (1,2)": [4],
+            "CLR (9)": ["1"],
+            "QH (13) = b15": [5]
+          },
+          "attributes": {}
+        },
+        "uXOR": {
+          "type": "LS86 XOR",
+          "port_directions": {
+            "in (10,9) = b2,b15": "input",
+            "out (8) = noise": "output"
+          },
+          "connections": {
+            "in (10,9) = b2,b15": [3, 5],
+            "out (8) = noise": [6]
+          },
+          "attributes": {}
+        },
+        "u7N": {
+          "type": "7N LS04",
+          "port_directions": { "in (13)": "input", "out (12)": "output" },
+          "connections": { "in (13)": [6], "out (12)": [10] },
+          "attributes": {}
+        },
+        "u6J": {
+          "type": "6J.4 = /SOUND2",
+          "port_directions": { "6H bit 2": "output" },
+          "connections": { "6H bit 2": [7] },
+          "attributes": {}
+        },
+        "u8N": {
+          "type": "8N LS123",
+          "port_directions": {
+            "trig (2), A (1) low": "input",
+            "R17 47k / C27 22u (15,14)": "input",
+            "Q (13)": "output"
+          },
+          "connections": {
+            "trig (2), A (1) low": [7],
+            "R17 47k / C27 22u (15,14)": ["1"],
+            "Q (13)": [8]
+          },
+          "attributes": {}
+        },
+        "uQ2": {
+          "type": "Q2 2SC1815",
+          "port_directions": {
+            "noise in": "input",
+            "gate from 8N via R24 4k7": "input",
+            "collector": "output"
+          },
+          "connections": {
+            "noise in": [6],
+            "gate from 8N via R24 4k7": [8],
+            "collector": [20]
+          },
+          "attributes": {}
+        },
+        "uRC": {
+          "type": "C29 R18 D1",
+          "port_directions": { "from collector": "input", "out": "output" },
+          "connections": { "from collector": [20], "out": [21] },
+          "attributes": {}
+        },
+        "uFilt": {
+          "type": "C30 R2 C25",
+          "port_directions": { "in": "input", "out": "output" },
+          "connections": { "in": [21], "out": [30] },
+          "attributes": {}
+        }
+      }
+    }
+  }
+}

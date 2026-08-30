@@ -1,0 +1,159 @@
+{
+  "modules": {
+    "dkongjr walking voice: tap mux, VCO pair, output gate": {
+      "ports": {
+        "to mixer via R3 100k": { "direction": "output", "bits": [23] }
+      },
+      "cells": {
+        "u6J": {
+          "type": "6J.2 = /SOUND0",
+          "port_directions": { "6H bit 0": "output" },
+          "connections": { "6H bit 0": [2] },
+          "attributes": {}
+        },
+        "u5Jb": {
+          "type": "5J.12 = /SOUND7",
+          "port_directions": { "6H bit 7": "output" },
+          "connections": { "6H bit 7": [3] },
+          "attributes": {}
+        },
+        "u4K": {
+          "type": "4K LS123b",
+          "port_directions": {
+            "trig (10)": "input",
+            "R8 47k / C14 4u7 (6,7)": "input",
+            "Q (5)": "output"
+          },
+          "connections": {
+            "trig (10)": [2],
+            "R8 47k / C14 4u7 (6,7)": ["1"],
+            "Q (5)": [10]
+          },
+          "attributes": {}
+        },
+        "u4F": {
+          "type": "4F LS04",
+          "port_directions": {
+            "in (11)": "input",
+            "out (10)": "output"
+          },
+          "connections": {
+            "in (11)": [10],
+            "out (10)": [11]
+          },
+          "attributes": {}
+        },
+        "u5Ka": {
+          "type": "5K LS629a",
+          "port_directions": {
+            "FC (2)": "input",
+            "RNG (14) R33 1k": "input",
+            "C18 22n (12,13)": "input",
+            "Y (7)": "output"
+          },
+          "connections": {
+            "FC (2)": [11],
+            "RNG (14) R33 1k": ["1"],
+            "C18 22n (12,13)": ["1"],
+            "Y (7)": [12]
+          },
+          "attributes": {}
+        },
+        "u5Kb": {
+          "type": "5K LS629b",
+          "port_directions": {
+            "FC (1)": "input",
+            "RNG (14) R33 1k": "input",
+            "C19 4n7 (12,13)": "input",
+            "Y (10)": "output"
+          },
+          "connections": {
+            "FC (1)": [20],
+            "RNG (14) R33 1k": ["1"],
+            "C19 4n7 (12,13)": ["1"],
+            "Y (10)": [13]
+          },
+          "attributes": {}
+        },
+        "u6L": {
+          "type": "6L 4020",
+          "port_directions": {
+            "CK (10)": "input",
+            "RES (11)": "input",
+            "b6 (6)": "output",
+            "b3 (7)": "output",
+            "b12 (2)": "output",
+            "b11 (1)": "output"
+          },
+          "connections": {
+            "CK (10)": [13],
+            "RES (11)": ["0"],
+            "b6 (6)": [14],
+            "b3 (7)": [15],
+            "b12 (2)": [16],
+            "b11 (1)": [17]
+          },
+          "attributes": {}
+        },
+        "u6K": {
+          "type": "6K LS157",
+          "port_directions": {
+            "S (1)": "input",
+            "1A,1B (2,3)": "input",
+            "2A,2B (5,6)": "input",
+            "3A,3B (11,10)": "input",
+            "1Y (4)": "output",
+            "2Y (7)": "output",
+            "3Y (9)": "output"
+          },
+          "connections": {
+            "S (1)": [3],
+            "1A,1B (2,3)": ["0", 12],
+            "2A,2B (5,6)": [14, 15],
+            "3A,3B (11,10)": [16, 17],
+            "1Y (4)": [18],
+            "2Y (7)": [19],
+            "3Y (9)": [21]
+          },
+          "attributes": {}
+        },
+        "u5J": {
+          "type": "5J LS04",
+          "port_directions": {
+            "in (9)": "input",
+            "out (8)": "output"
+          },
+          "connections": {
+            "in (9)": [21],
+            "out (8)": [20]
+          },
+          "attributes": {}
+        },
+        "u6N": {
+          "type": "6N LS86",
+          "port_directions": {
+            "in (1,2)": "input",
+            "out (3)": "output"
+          },
+          "connections": {
+            "in (1,2)": [18, 19],
+            "out (3)": [22]
+          },
+          "attributes": {}
+        },
+        "u5N": {
+          "type": "5N LS00",
+          "port_directions": {
+            "in (13,12)": "input",
+            "out (11)": "output"
+          },
+          "connections": {
+            "in (13,12)": [10, 22],
+            "out (11)": [23]
+          },
+          "attributes": {}
+        }
+      }
+    }
+  }
+}

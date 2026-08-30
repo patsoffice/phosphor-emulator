@@ -88,3 +88,9 @@ section is there so that is obvious.
 - [`mcr-video-timing.md`](mcr-video-timing.md) — a negative result: MCR II's
   H and V counters and both blanking decodes are inside custom LSIs, so the
   blanking phase is on no drawing. Read it before hunting for one.
+- [`dkongjr-sound-sources.md`](dkongjr-sound-sources.md), what generates Donkey
+  Kong Jr.'s effect tones. Four voices off five 74LS629 VCO halves, a 4020 tap
+  mux and a 16-bit LFSR, sharing not one source with the 555s the emulator plays
+  for it today. Three of the four are transcribed as netlists. The one thing
+  still missing is a frequency law for the LS629, which its datasheet does not
+  give.
