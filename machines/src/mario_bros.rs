@@ -45,7 +45,7 @@ use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
 use crate::set_bit_active_high;
 use crate::tkg04::{
     DARLINGTON_BIAS_R, DARLINGTON_RESISTORS, EMITTER_BIAS_R, EMITTER_RESISTORS,
-    compute_tkg04_channel,
+    compute_tkg04_channel, normalize_tkg04_palette,
 };
 use crate::z80dma::Z80Dma;
 
@@ -393,20 +393,12 @@ fn mario_palette_rgb(palette_prom: &[u8]) -> [(u8, u8, u8); 256] {
         *entry = (r, g, b);
     }
 
-    let max_val = raw
-        .iter()
-        .flat_map(|&(r, g, b)| [r, g, b])
-        .fold(0.0f64, f64::max);
-    let scale = if max_val > 0.0 { 255.0 / max_val } else { 1.0 };
-    let mut out = [(0u8, 0u8, 0u8); 256];
-    for (o, &(r, g, b)) in out.iter_mut().zip(raw.iter()) {
-        *o = (
-            (r * scale).round().min(255.0) as u8,
-            (g * scale).round().min(255.0) as u8,
-            (b * scale).round().min(255.0) as u8,
-        );
-    }
-    out
+    // TMA1 carries the same resistor network and the same amplifier asymmetry as
+    // the two Donkey Kong boards, so it gets the same per-channel black level and
+    // gain. No pen is decoder-forced black here: TMA1 has one 82S42 at 4P holding
+    // all eight bits, where the Donkey Kong boards split them across two 4-bit
+    // MB7052s behind a color decoder.
+    normalize_tkg04_palette(&raw, |_| false)
 }
 
 // ---------------------------------------------------------------------------

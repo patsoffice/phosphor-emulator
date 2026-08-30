@@ -62,19 +62,43 @@
 //! P11, a TV Audio tap, and a dashed box around the amplifier meaning optional
 //! parts (note 2 on both Nintendo Co. sheets).
 //!
-//! One block on the Donkey Kong and Donkey Kong Jr. sheets looks like sound and
-//! is not: the transistor cluster at the top right (C828P, Q15-Q17, VR3/VR4,
-//! R104-R112) is the RGB video output stage.
+//! COLOR IS SHARED, which is the opposite of the sound and worth stating for
+//! that reason: reading one board's color network tells you the other two. The
+//! transistor cluster at the top right of the Donkey Kong and Donkey Kong Jr.
+//! sheets (C828P, Q15-Q17, VR3/VR4, R104-R112) looks like sound and is not, it
+//! is this. Read from Donkey Kong sheet 3, Donkey Kong Jr. sheet 5 and
+//! `TMA1-CPU`, all three at the pages in the table above.
+//!
+//! Identical on all three: resistor ladders of {1 kΩ, 470 Ω, 220 Ω} on the two
+//! 3-bit channels and {470 Ω, 220 Ω} on 2-bit blue, biased 470/470/680 Ω, each
+//! node through 100 Ω into its amplifier and out through 68 Ω. The amplifiers
+//! are deliberately asymmetric: red and green run an NPN into an A564 PNP
+//! (Donkey Kong and Donkey Kong Jr. Q9 into Q13 and Q10 into Q14, Mario Bros.
+//! Q5 into Q7 and Q8 into Q9) whose base-emitter drops cancel, while blue has
+//! the NPN alone (Q11, and Mario Bros. Q6). Blue therefore sits 0.7 V above the
+//! other two for its whole range. That pedestal is real and belongs in the
+//! model; what cancels it is the monitor's per-channel black-level restoration,
+//! which is why `normalize_tkg04_palette` is shared by all three boards.
+//!
+//! What differs is only the lookup feeding those ladders. The Nintendo Co.
+//! boards use two MB7052 256x4 PROMs at 2F and 2E behind a color decoder that
+//! forces pens `& 3 == 0` black; Mario Bros. uses one 82S42 512x8 at 4P with no
+//! such rule and a different bit order. The Nintendo Co. boards also add a
+//! dashed video amplifier block per channel with a 1 kΩ trimmer (VR3/VR4/VR5 on
+//! Donkey Kong, VR2/VR3/VR4 on Donkey Kong Jr.); Mario Bros. has none and runs
+//! straight to the connector.
 //!
 //! WHAT THIS DOES NOT ESTABLISH. On none of the three was the path from a
 //! main-CPU sound write to an individual effect traced end to end; on Donkey
 //! Kong the LS138 at 1C is visible feeding the effect section, but its enable
 //! was not followed back. Only the CPU sheets were read, and on the two
 //! Nintendo Co. packages only their right halves in detail. Every video sheet,
-//! the monitor sheet and every power supply sheet is unread. Nothing above is a
-//! transcription: it is a parts census taken to establish that the three sound
-//! sections differ, and the values quoted are those legible without tracing a
-//! net.
+//! the monitor sheet and every power supply sheet is unread. The sound sections
+//! are a parts census rather than a transcription, taken to establish that the
+//! three differ, and the values quoted are those legible without tracing a net.
+//! The color network was traced far enough to place every resistor and
+//! transistor named above, but the PROM address lines were not followed, so
+//! which pen a given tile or sprite attribute selects is not established here.
 //!
 //! [dk-tkg4u.pdf]: https://www.arcade-museum.com/manuals-videogames/D/dk-tkg4u.pdf
 //! [dkjr.pdf]: https://www.arcade-museum.com/manuals-videogames/D/DKJr.pdf
@@ -262,8 +286,8 @@ pub(crate) fn compute_tkg04_channel(
 /// `palette_prom` must be at least 512 bytes: the c-2k/c-2e PROM at `[0..256]`
 /// and c-2j/c-2f at `[256..512]`. Uses the MAME-compatible resistor-network
 /// model (TTL levels, Darlington/emitter amps, SANYO EZV20 monitor inversion),
-/// with the color-decoder NOR forcing pens `& 0x03 == 0` to black, then
-/// normalizes so the brightest component reaches 255.
+/// with the color-decoder NOR forcing pens `& 0x03 == 0` to black, then hands
+/// the result to [`normalize_tkg04_palette`].
 ///
 /// Shared by [`Tkg04Board::build_palette`] and each machine's gfxview
 /// `GfxRegion` palette hook so the runtime and offline paths never diverge.
@@ -304,21 +328,69 @@ pub(crate) fn compute_tkg04_palette(palette_prom: &[u8]) -> [(u8, u8, u8); 256] 
         *entry = (r, g, b);
     }
 
-    // Normalize palette range so maximum component reaches 255
-    // (matches MAME's palette.normalize_range)
-    let max_val = raw
-        .iter()
-        .flat_map(|&(r, g, b)| [r, g, b])
-        .fold(0.0f64, f64::max);
-    let scale = if max_val > 0.0 { 255.0 / max_val } else { 1.0 };
+    normalize_tkg04_palette(&raw, |i| (i & 0x03) == 0x00)
+}
+
+/// Set each channel's black level and gain independently, and quantize to 8-bit.
+///
+/// `forced_black` marks pens a board's color decoder pins to black; those are
+/// written as black and excluded from the range, because they are not a channel
+/// output and their zeros would otherwise drag every channel's minimum to 0 and
+/// defeat the black-level adjustment. A board with no such rule passes
+/// `|_| false`.
+///
+/// # Why per channel and not one global scale
+///
+/// The three channels do not reach the monitor on a common baseline. Red and
+/// green leave an NPN into an A564 PNP whose base-emitter drops cancel (Donkey
+/// Kong and Donkey Kong Jr.: Q9 into Q13, Q10 into Q14; Mario Bros.: Q5 into Q7,
+/// Q8 into Q9), while blue has only the NPN (Q11, and Mario Bros.' Q6), so blue
+/// sits a whole 0.7 V follower drop above the other two along its entire range.
+/// That pedestal is in the hardware and [`compute_tkg04_channel`] reproduces it
+/// correctly; what removes it is the monitor, which DC-restores each channel to
+/// black during the back porch, which is inherently per channel. A single
+/// global gain cannot subtract a per-channel offset.
+///
+/// Donkey Kong is where the difference is visible rather than merely wrong. A
+/// pen with every PROM bit inactive came out (4, 4, 56) instead of black, which
+/// put a dark blue rectangle over the ladders in attract mode: the board's solid
+/// mask sprites, whose whole job is to hide Kong behind the girder as he climbs.
+///
+/// All three boards carry the same network, so they share this: ladders of
+/// {1 kΩ, 470 Ω, 220 Ω} on the two 3-bit channels and {470 Ω, 220 Ω} on the
+/// 2-bit blue, biased 470/470/680, into the amplifiers above.
+pub(crate) fn normalize_tkg04_palette(
+    raw: &[(f64, f64, f64); 256],
+    forced_black: impl Fn(usize) -> bool,
+) -> [(u8, u8, u8); 256] {
+    let mut lo = [f64::MAX; 3];
+    let mut hi = [f64::MIN; 3];
+    for (i, &(r, g, b)) in raw.iter().enumerate() {
+        if forced_black(i) {
+            continue;
+        }
+        for (channel, v) in [r, g, b].into_iter().enumerate() {
+            lo[channel] = lo[channel].min(v);
+            hi[channel] = hi[channel].max(v);
+        }
+    }
+
+    let normalize = |v: f64, channel: usize| -> u8 {
+        let span = hi[channel] - lo[channel];
+        if span <= 0.0 {
+            return 0;
+        }
+        (((v - lo[channel]) / span) * 255.0)
+            .round()
+            .clamp(0.0, 255.0) as u8
+    };
 
     let mut out = [(0u8, 0u8, 0u8); 256];
-    for (o, &(r, g, b)) in out.iter_mut().zip(raw.iter()) {
-        *o = (
-            (r * scale).round().min(255.0) as u8,
-            (g * scale).round().min(255.0) as u8,
-            (b * scale).round().min(255.0) as u8,
-        );
+    for (i, (o, &(r, g, b))) in out.iter_mut().zip(raw.iter()).enumerate() {
+        if forced_black(i) {
+            continue;
+        }
+        *o = (normalize(r, 0), normalize(g, 1), normalize(b, 2));
     }
     out
 }

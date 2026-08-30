@@ -73,7 +73,7 @@ machine = "dkong"
 frames = 1800
 shows = "Attract mode: the DONKEY KONG title in blue block letters with Kong beneath it and the 1981 Nintendo of America copyright."
 size = [224, 256]
-frame = "sha256:4d8ad70ab09cc893b6904c793edc24cb5cfe853a61d06f16f878e1097b096eb3"
+frame = "sha256:38da556efd94fc99c750eb8a3a6b023ef045e78e31fdfd705b7a49e6c6a903ad"
 
 [[frame]]
 machine = "docastle"
@@ -174,7 +174,7 @@ machine = "mariobros"
 frames = 1800
 shows = "Attract demo: the platform level with Mario and Luigi mid-run, the POW block, a shellcreeper on the top floor, and the two pipes."
 size = [256, 224]
-frame = "sha256:125ae22f893b78fd36b941df7d0e1e0722f6293dc7460c3075a4f3d1403ce07a"
+frame = "sha256:f703d9b08fd9e3a28901fbebf3e84927e1ef5bd21a33200071bc7473ecced702"
 
 [[frame]]
 machine = "missile"
