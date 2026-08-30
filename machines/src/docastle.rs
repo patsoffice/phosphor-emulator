@@ -946,6 +946,24 @@ pub struct DocastleBoard {
     pub(crate) main_irq_pending: bool,
     #[save(id = 15)]
     pub(crate) sub_irq_pending: bool,
+
+    /// Display framebuffer (native 240x192 RGB, pre-rotation), filled one row
+    /// at a time as the beam reaches each visible scanline.
+    ///
+    /// A row holds what the beam drew on that line, out of video RAM, colour
+    /// RAM, sprite RAM and the flip latch as they stood at that line's
+    /// boundary. This replaced a whole-frame render whose doc comment asserted
+    /// "there are no mid-frame raster effects on this board" with nothing
+    /// behind it; the three games on it had never been audited at all.
+    ///
+    /// Consequence worth knowing: the picture a completed frame presents does
+    /// *not* contain that frame's own vblank writes, because the beam had
+    /// already passed. The whole-frame render this replaced did contain them.
+    ///
+    /// Derived output, so not saved, and not seeded after a load: the rows of
+    /// the next frame overwrite every one of them.
+    #[save_skip]
+    pub(crate) framebuffer: Vec<u8>,
 }
 
 impl DocastleBoard {
@@ -989,6 +1007,7 @@ impl DocastleBoard {
             clock: 0,
             main_irq_pending: false,
             sub_irq_pending: false,
+            framebuffer: vec![0u8; VISIBLE_WIDTH * VISIBLE_HEIGHT * 3],
         }
     }
 
@@ -1121,11 +1140,16 @@ impl DocastleBoard {
     // -----------------------------------------------------------------------
 
     /// Work that only happens on the first cycle of a scanline: the VBLANK IRQ
-    /// to the main CPU and the sub CPU's periodic raster IRQ.
+    /// to the main CPU, the sub CPU's periodic raster IRQ, and compositing the
+    /// row the beam is about to draw.
     ///
     /// Called once per scanline from [`run_scanlines`] and, for the debugger's
     /// single-step path, from [`tick`] when the clock lands on a boundary.
-    fn begin_scanline(&mut self, line: u64) {
+    /// Public because the picture only exists once the beam has passed over it:
+    /// a caller that wants a frame without running CPU cycles has to step the
+    /// beam itself. Blanked lines are ignored, so walking `0..total_scanlines`
+    /// draws exactly the visible rows.
+    pub fn begin_scanline(&mut self, line: u64) {
         if line == VBLANK_IRQ_LINE {
             self.main_irq_pending = true;
         }
@@ -1133,6 +1157,12 @@ impl DocastleBoard {
             && (line - SUB_IRQ_FIRST_LINE).is_multiple_of(SUB_IRQ_LINE_PERIOD)
         {
             self.sub_irq_pending = true;
+        }
+
+        // The visible window is scanlines 0..192, which is also where the
+        // VBLANK IRQ line sits.
+        if line < VBLANK_IRQ_LINE {
+            self.render_scanline(line as usize);
         }
     }
 
@@ -1188,82 +1218,162 @@ impl DocastleBoard {
     // Video
     // -----------------------------------------------------------------------
 
-    /// Render one frame into `buffer` (240×192 RGB24, pre-rotation).
+    /// Copy the latest framebuffer into the frontend's `buffer` (240×192 RGB24,
+    /// pre-rotation; each variant declares its own orientation).
+    ///
+    /// This does not draw. Each visible row was composited at its own scanline
+    /// boundary in [`render_scanline`](Self::render_scanline) as the beam
+    /// reached it.
+    pub fn render_frame(&self, buffer: &mut [u8]) {
+        buffer.copy_from_slice(&self.framebuffer);
+    }
+
+    /// Draw one visible scanline into the framebuffer, out of the video state
+    /// as it stands at that line's boundary.
     ///
     /// Composition order matches the hardware: the tilemap is laid down opaque,
     /// sprites go over it, then the tilemap's "priority" half of the pens
     /// (selected by the variant's transparency mask) is drawn again on top.
-    /// There are no mid-frame raster effects on this board, so rendering the
-    /// whole frame at once is equivalent to per-scanline output.
-    pub fn render_frame(&self, buffer: &mut [u8]) {
+    ///
+    /// The doc comment this replaced asserted that "there are no mid-frame
+    /// raster effects on this board, so rendering the whole frame at once is
+    /// equivalent to per-scanline output". Nothing had measured that — these
+    /// three games appear in neither list of the audit that preceded this work
+    /// — and it is no longer load-bearing either way: video RAM, colour RAM,
+    /// sprite RAM and the flip latch are all read on the row that displays
+    /// them, so a write partway down the screen splits the picture there.
+    ///
+    /// No sprite sampling lead is added. The prior work established that a
+    /// sprite circuit of this shape scans its object list into a line buffer
+    /// displayed on the *next* line, so the list for row `r` is the one that
+    /// stood at row `r - 1`; this board's `sy - 32` carries no such term and
+    /// nothing establishes its phase, so the constant is left as it was.
+    fn render_scanline(&mut self, ny: usize) {
+        // GFX ROMs not decoded yet (a bare board, before `load_rom_set`):
+        // leave the row alone rather than indexing an empty cache. `GfxCache::
+        // pixel` indexes a `Vec`, so a zero-entry cache is a panic and not a
+        // zero. `decode_gfx_roms` fills both caches together, so `tile_cache`
+        // answers for the sprites too.
         if self.tile_cache.count() == 0 {
-            buffer.fill(0);
             return;
         }
 
-        let videoram = self.main_map.region_data(MainRegion::VideoRam);
-        let colorram = self.main_map.region_data(MainRegion::ColorRam);
-        let spriteram = self.main_map.region_data(MainRegion::SpriteRam);
         let transmask = self.variant.map().fg_transmask;
-        let flip = self.flipscreen;
 
-        let mut pen = vec![0u16; VISIBLE_WIDTH * VISIBLE_HEIGHT];
-        // Tile pixel value per screen pixel, kept for the second tilemap pass.
-        let mut tile_val = vec![0u8; VISIBLE_WIDTH * VISIBLE_HEIGHT];
-        let mut tile_pen = vec![0u16; VISIBLE_WIDTH * VISIBLE_HEIGHT];
+        // One native row of palette indices, plus the tile pixel value and tile
+        // pen the front pass needs to redo its half of the tilemap.
+        let mut pen = [0u16; VISIBLE_WIDTH];
+        let mut tile_val = [0u8; VISIBLE_WIDTH];
+        let mut tile_pen = [0u16; VISIBLE_WIDTH];
 
-        // Opaque tilemap pass.
-        for ny in 0..VISIBLE_HEIGHT {
-            for nx in 0..VISIBLE_WIDTH {
-                let ax = nx + VISIBLE_X_ORIGIN as usize;
-                // Cocktail flip mirrors the tilemap about the visible centre;
-                // sampling the mirrored coordinate is the same thing.
-                let (tx, ty) = if flip {
-                    (255 - ax, 255 - (ny + TILEMAP_Y_OFFSET))
-                } else {
-                    (ax, ny + TILEMAP_Y_OFFSET)
-                };
-                let idx = (ty / 8) * 32 + tx / 8;
-                let attr = colorram[idx];
-                // Attribute bit 5 is the 256-tile bank select.
-                let code = videoram[idx] as usize + 8 * (attr as usize & 0x20);
-                let color = (attr & 0x1f) as u16;
-                let val = self.tile_cache.pixel(code, tx & 7, ty & 7);
-                let i = ny * VISIBLE_WIDTH + nx;
-                tile_val[i] = val;
-                tile_pen[i] = color * 16 + val as u16;
-                pen[i] = tile_pen[i];
-            }
-        }
-
-        self.draw_sprites(spriteram, &mut pen);
+        self.draw_tilemap_row(&mut pen, &mut tile_val, &mut tile_pen, ny);
+        self.draw_sprites_row(&mut pen, ny);
 
         // Front tilemap pass: pens whose transparency bit is clear are redrawn
         // over the sprites.
-        for i in 0..pen.len() {
-            if (transmask >> tile_val[i]) & 1 == 0 {
-                pen[i] = tile_pen[i];
+        for x in 0..VISIBLE_WIDTH {
+            if (transmask >> tile_val[x]) & 1 == 0 {
+                pen[x] = tile_pen[x];
             }
         }
 
-        for (i, &p) in pen.iter().enumerate() {
+        let out = ny * VISIBLE_WIDTH * 3;
+        for (x, &p) in pen.iter().enumerate() {
             let (r, g, b) = self.palette_rgb[p as usize];
-            buffer[i * 3] = r;
-            buffer[i * 3 + 1] = g;
-            buffer[i * 3 + 2] = b;
+            let o = out + x * 3;
+            self.framebuffer[o] = r;
+            self.framebuffer[o + 1] = g;
+            self.framebuffer[o + 2] = b;
         }
     }
 
-    /// Draw the 128 sprites, highest entry first.
+    /// Lay the opaque tilemap down across one native row.
+    ///
+    /// The grid row and the line inside the tile are fixed by `ny`, so they come
+    /// out of the loop, and the two map bytes and the tile's 8-pixel line are
+    /// fetched once per tile column rather than once per pixel: 30 or 31 fetches
+    /// a row instead of 240. Cached on the cell index, which is what keeps it
+    /// correct under cocktail flip, where the source walks backwards.
+    fn draw_tilemap_row(
+        &self,
+        pen: &mut [u16; VISIBLE_WIDTH],
+        tile_val: &mut [u8; VISIBLE_WIDTH],
+        tile_pen: &mut [u16; VISIBLE_WIDTH],
+        ny: usize,
+    ) {
+        let videoram = self.main_map.region_data(MainRegion::VideoRam);
+        let colorram = self.main_map.region_data(MainRegion::ColorRam);
+        let flip = self.flipscreen;
+
+        // Cocktail flip mirrors the tilemap about the visible centre; sampling
+        // the mirrored coordinate is the same thing.
+        let ty = if flip {
+            255 - (ny + TILEMAP_Y_OFFSET)
+        } else {
+            ny + TILEMAP_Y_OFFSET
+        };
+        let row_base = (ty / 8) * 32;
+        let sub_y = ty & 7;
+
+        let mut cached_col = usize::MAX;
+        let mut color = 0u16;
+        let mut line: &[u8] = &[];
+
+        for (nx, ((p, tv), tp)) in pen
+            .iter_mut()
+            .zip(tile_val.iter_mut())
+            .zip(tile_pen.iter_mut())
+            .enumerate()
+        {
+            let ax = nx + VISIBLE_X_ORIGIN as usize;
+            let tx = if flip { 255 - ax } else { ax };
+            let col = tx / 8;
+
+            if col != cached_col {
+                cached_col = col;
+                let idx = row_base + col;
+                let attr = colorram[idx];
+                // Attribute bit 5 is the 256-tile bank select.
+                let code = videoram[idx] as usize + 8 * (attr as usize & 0x20);
+                color = (attr & 0x1f) as u16;
+                line = self.tile_cache.row_slice(code, sub_y);
+            }
+
+            let val = line[tx & 7];
+            *tv = val;
+            *tp = color * 16 + val as u16;
+            *p = *tp;
+        }
+    }
+
+    /// Draw the sprites that cross native row `ny`, highest entry first.
     ///
     /// Only pens 8-15 are non-transparent. Pens 8-14 paint; pen 15 paints
     /// nothing but still claims the pixel, so it punches sprite-shaped holes
     /// that later (lower-numbered, higher-priority) sprites cannot draw into.
-    fn draw_sprites(&self, spriteram: &[u8], pen: &mut [u16]) {
-        let mut claimed = vec![false; VISIBLE_WIDTH * VISIBLE_HEIGHT];
+    /// The `claimed` mask is per row because a claim never crosses one: it is
+    /// indexed by pixel, and every pixel a sprite writes on this line belongs
+    /// to this line.
+    ///
+    /// The vertical range test is taken as soon as the slot's Y byte is read,
+    /// so a sprite not on this line costs one byte read rather than a decode.
+    fn draw_sprites_row(&self, pen: &mut [u16; VISIBLE_WIDTH], ny: usize) {
+        let spriteram = self.main_map.region_data(MainRegion::SpriteRam);
+        let flip = self.flipscreen;
+        let mut claimed = [false; VISIBLE_WIDTH];
+        let nyi = ny as i32;
 
         for offs in (0..SPRITE_RAM_LEN).step_by(4).rev() {
             let mut sy = spriteram[offs] as i32 - 32;
+            if flip {
+                sy = 176 - sy;
+            }
+            // Which of the sprite's 16 rows lands on this line, if any.
+            let py = nyi - sy;
+            if !(0..16).contains(&py) {
+                continue;
+            }
+
             let mut sx = ((spriteram[offs + 1] as i32 + 8) & 0xff) - 8;
             let attr = spriteram[offs + 2];
             let code = spriteram[offs + 3] as usize;
@@ -1271,35 +1381,28 @@ impl DocastleBoard {
             let mut flipx = attr & 0x40 != 0;
             let mut flipy = attr & 0x80 != 0;
 
-            if self.flipscreen {
+            if flip {
                 sx = 240 - sx;
-                sy = 176 - sy;
                 flipx = !flipx;
                 flipy = !flipy;
             }
 
-            for py in 0..16i32 {
-                let ny = sy + py;
-                if !(0..VISIBLE_HEIGHT as i32).contains(&ny) {
+            let ry = if flipy { 15 - py } else { py } as usize;
+            for px in 0..16i32 {
+                let nx = sx + px - VISIBLE_X_ORIGIN;
+                if !(0..VISIBLE_WIDTH as i32).contains(&nx) {
                     continue;
                 }
-                let ry = if flipy { 15 - py } else { py } as usize;
-                for px in 0..16i32 {
-                    let nx = sx + px - VISIBLE_X_ORIGIN;
-                    if !(0..VISIBLE_WIDTH as i32).contains(&nx) {
-                        continue;
-                    }
-                    let rx = if flipx { 15 - px } else { px } as usize;
-                    let val = self.sprite_cache.pixel(code, rx, ry);
-                    if val < 8 {
-                        continue;
-                    }
-                    let i = ny as usize * VISIBLE_WIDTH + nx as usize;
-                    if val != 15 && !claimed[i] {
-                        pen[i] = color * 16 + val as u16;
-                    }
-                    claimed[i] = true;
+                let rx = if flipx { 15 - px } else { px } as usize;
+                let val = self.sprite_cache.pixel(code, rx, ry);
+                if val < 8 {
+                    continue;
                 }
+                let i = nx as usize;
+                if val != 15 && !claimed[i] {
+                    pen[i] = color * 16 + val as u16;
+                }
+                claimed[i] = true;
             }
         }
     }
@@ -2282,6 +2385,15 @@ mod tests {
         }
     }
 
+    /// Walk the beam over a whole frame's scanlines so every visible row is
+    /// drawn. The picture only exists once the beam has passed over it, so a
+    /// test that pokes video state has to scan before it can look.
+    fn scan_frame(board: &mut DocastleBoard) {
+        for s in 0..TIMING.total_scanlines {
+            board.begin_scanline(s);
+        }
+    }
+
     #[test]
     fn timing_is_sane() {
         assert_eq!(TIMING.cpu_clock_hz, 4_000_000);
@@ -2390,6 +2502,7 @@ mod tests {
         sys.board.main_map.region_data_mut(MainRegion::ColorRam)[idx] = 0x01;
 
         let mut buf = vec![0u8; VISIBLE_WIDTH * VISIBLE_HEIGHT * 3];
+        scan_frame(&mut sys.board);
         sys.board.render_frame(&mut buf);
         assert_eq!((buf[0], buf[1], buf[2]), (10, 20, 30));
     }
@@ -2419,6 +2532,7 @@ mod tests {
         }
 
         let mut buf = vec![0u8; VISIBLE_WIDTH * VISIBLE_HEIGHT * 3];
+        scan_frame(&mut sys.board);
         sys.board.render_frame(&mut buf);
         // The mask claimed the pixel first, so the pen-14 sprite behind it does
         // not paint — and pen 15 never paints either.
@@ -2426,6 +2540,7 @@ mod tests {
 
         // Remove the mask: now the visible sprite paints.
         sys.board.main_map.region_data_mut(MainRegion::SpriteRam)[4] = 0;
+        scan_frame(&mut sys.board);
         sys.board.render_frame(&mut buf);
         assert_eq!((buf[0], buf[1], buf[2]), (1, 2, 3));
     }
@@ -2456,6 +2571,7 @@ mod tests {
             }
 
             let mut buf = vec![0u8; VISIBLE_WIDTH * VISIBLE_HEIGHT * 3];
+            scan_frame(&mut sys.board);
             sys.board.render_frame(&mut buf);
             assert_eq!(
                 (buf[0], buf[1], buf[2]),
@@ -2464,6 +2580,138 @@ mod tests {
                 variant.id()
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Per-scanline rendering (W4/W5)
+    // -----------------------------------------------------------------------
+
+    const BLUE: (u8, u8, u8) = (0, 0, 0xFF);
+    const RED: (u8, u8, u8) = (0xFF, 0, 0);
+
+    fn pixel(board: &DocastleBoard, nx: usize, ny: usize) -> (u8, u8, u8) {
+        let o = (ny * VISIBLE_WIDTH + nx) * 3;
+        (
+            board.framebuffer[o],
+            board.framebuffer[o + 1],
+            board.framebuffer[o + 2],
+        )
+    }
+
+    /// A machine whose tilemap covers the screen in one flat colour: tile 0 is
+    /// every pixel value 0xF, so the colour code in colour RAM is the only
+    /// thing that varies and `pen = colour * 16 + 15`.
+    fn system_with_flat_tilemap() -> DocastleSystem {
+        let mut sys = DocastleSystem::new(DocastleVariant::Docastle);
+        sys.board.tile_rom[..32].fill(0xFF);
+        sys.board.decode_gfx_roms();
+        sys.board.palette_rgb[0x1F] = BLUE; // colour 1
+        sys.board.palette_rgb[0x2F] = RED; // colour 2
+        sys.board
+            .main_map
+            .region_data_mut(MainRegion::ColorRam)
+            .fill(0x01);
+        sys
+    }
+
+    /// The tilemap half of W4: colour RAM is read as the beam passes it, so
+    /// rewriting it partway down the screen changes only the rows below.
+    ///
+    /// The split is at native row 100, which is *inside* tile row 16 (native
+    /// rows 96..103, since screen row 0 samples tilemap row 32). A whole-frame
+    /// render draws a tile row from one snapshot and cannot produce this
+    /// picture at all.
+    ///
+    /// The old renderer's doc comment claimed "there are no mid-frame raster
+    /// effects on this board". That is false, and Mr. Do's Wild Ride is the
+    /// counterexample: traced on this ROM set, it writes video RAM at `$B35C`
+    /// — tile row 26, which is native rows 176..183 — at **scanline 41**, well
+    /// inside active display, on the frame its golden pin samples. The beam has
+    /// not reached row 176 by then, so both renderers happen to agree there;
+    /// move the same write below the beam and only the per-scanline one is
+    /// right. That is what this test pins.
+    #[test]
+    fn a_mid_frame_color_ram_write_changes_only_the_rows_below_it() {
+        const SPLIT_ROW: usize = 100;
+        let mut sys = system_with_flat_tilemap();
+
+        for s in 0..SPLIT_ROW as u64 {
+            sys.board.begin_scanline(s);
+        }
+        sys.board
+            .main_map
+            .region_data_mut(MainRegion::ColorRam)
+            .fill(0x02);
+        for s in SPLIT_ROW as u64..VISIBLE_HEIGHT as u64 {
+            sys.board.begin_scanline(s);
+        }
+
+        let b = &sys.board;
+        assert_eq!(pixel(b, 100, 0), BLUE, "row 0 was drawn before the write");
+        assert_eq!(
+            pixel(b, 100, SPLIT_ROW - 1),
+            BLUE,
+            "the last row above the write keeps the old colour, mid-tile-row"
+        );
+        assert_eq!(
+            pixel(b, 100, SPLIT_ROW),
+            RED,
+            "the first row below the write takes the new colour"
+        );
+        assert_eq!(
+            pixel(b, 100, VISIBLE_HEIGHT - 1),
+            RED,
+            "the bottom row is below the write"
+        );
+    }
+
+    /// The test above drives `begin_scanline` by hand, which proves nothing
+    /// about whether the frame loop ever calls it. This walks the real `tick`
+    /// and `run_scanlines` paths.
+    #[test]
+    fn the_frame_loop_draws_rows_at_scanline_boundaries() {
+        let mut sys = system_with_flat_tilemap();
+        sys.board.framebuffer.fill(0);
+
+        // The visible window starts at scanline 0 on this board, so the very
+        // first cycle of a frame crosses a boundary and must draw row 0.
+        for _ in 0..TIMING.cycles_per_scanline {
+            tick(&mut sys.main_cpu, &mut sys.sub_cpu, &mut sys.board);
+        }
+        assert_eq!(pixel(&sys.board, 100, 0), BLUE, "tick() draws row 0");
+        assert_eq!(
+            pixel(&sys.board, 100, 1),
+            (0, 0, 0),
+            "and only row 0: nothing has drawn row 1 yet"
+        );
+
+        // And the hoisted loop a whole frame actually runs through draws too.
+        run_scanlines(
+            &mut sys.main_cpu,
+            &mut sys.sub_cpu,
+            &mut sys.board,
+            TIMING.cycles_per_scanline,
+        );
+        assert_eq!(
+            pixel(&sys.board, 100, 1),
+            BLUE,
+            "run_scanlines() draws row 1"
+        );
+    }
+
+    /// A blanked line has no row to draw, and drawing one would run off the end
+    /// of a framebuffer sized to the visible window.
+    #[test]
+    fn blanking_scanlines_have_no_row_to_draw() {
+        let mut sys = system_with_flat_tilemap();
+        sys.board.framebuffer.fill(0);
+        for s in VBLANK_IRQ_LINE..TIMING.total_scanlines {
+            sys.board.begin_scanline(s);
+        }
+        assert!(
+            sys.board.framebuffer.iter().all(|&c| c == 0),
+            "the blanked lines drew nothing"
+        );
     }
 
     #[test]
@@ -2752,6 +3000,7 @@ mod tests {
                 (VISIBLE_WIDTH as u32, VISIBLE_HEIGHT as u32)
             );
             let mut buf = vec![0u8; VISIBLE_WIDTH * VISIBLE_HEIGHT * 3];
+            scan_frame(&mut sys.board);
             sys.board.render_frame(&mut buf);
         }
     }

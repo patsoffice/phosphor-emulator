@@ -1128,6 +1128,85 @@ read while the beam is on `r - 1`; but the `ypos` expression carries no such
 term, the sheets do not establish the buffers' phase, and the reference driver's
 own `+2` is documented there as a kludge over the `+1` it calls correct.
 
+### What shipped, on docastle (docastle, dorunrun, dowild), 2026-08-29
+
+The first of W5's five, three games on one board, and **the board that proves
+why W5 existed**. Its `render_frame` doc comment asserted:
+
+> There are no mid-frame raster effects on this board, so rendering the whole
+> frame at once is equivalent to per-scanline output.
+
+Nothing had ever measured that, and it is **false**. Mr. Do's Wild Ride writes
+video RAM at `$B35C` — tile row 26, which is native rows 176..183 — **inside
+active display, every frame**: scanlines 39, 40, 39, 41 and 41 on frames 1796
+to 1800. A claim of that shape is exactly what an audit is for, and these three
+games appeared in neither of the audit's two lists.
+
+The board already had the house hook; what was whole-frame was the render.
+`begin_scanline` now draws as well as raising the two interrupts,
+`render_scanline` composites the opaque tilemap, the sprites and the front
+tilemap pass into one 240-pixel row, and `render_frame` only copies. Four
+per-frame allocations went away — `pen`, `tile_val`, `tile_pen` and the
+sprites' `claimed` mask, all `VISIBLE_WIDTH * VISIBLE_HEIGHT` — and became
+240-entry stack arrays per row. The tilemap fetch is per tile column, so 30 map
+reads a row rather than 240.
+
+**All three pins moved, and the three decompose differently.**
+
+| | new vs old N-1 | new vs old N | control (old N-1 vs old N) |
+|---|---|---|---|
+| docastle (1800) | **0 / 46080** | 122 | 122 |
+| dorunrun (2400) | **0 / 46080** | 805 | 805 |
+| dowild (1800) | 20 | 269 | 289 |
+
+docastle and dorunrun are exactly one frame older, against controls that prove
+each is animating. **dowild is a third case and its 20-pixel residual is the
+finding**, not noise. Decomposed by row band, its control has four:
+
+| band | matches |
+|---|---|
+| rows 12-23 (74 px) | old 1799 — one frame older |
+| rows 33-47 (119 px) | old 1799 — one frame older |
+| rows 75-88 (76 px) | old 1799 — one frame older |
+| **rows 177-182 (20 px)** | **old 1800 — current** |
+
+Three bands are sprite-driven and their updates run from scanline 192 onward,
+inside vblank, so the beam saw the previous frame's list. The fourth is tile row
+26, written at scanline 41 — before the beam reaches row 176, so the beam sees
+the *new* tile and the row is current. `74 + 119 + 76 = 269` and `+ 20 = 289`:
+both halves are what the beam sees and together they account for the whole
+control with nothing left over.
+
+Note what that band does *not* show. Because the write lands above the beam,
+the whole-frame render happened to agree there; the two models only separate
+when such a write lands *below* it. That is what the mid-frame test pins, and
+why the test's value does not depend on the pin having moved in that band.
+
+**Perf: nothing was measured, and the two pairs disagreeing is the reason to
+say so.** Pair 1 (900 frames, 15 reps) put docastle at +0.1%, dorunrun at +2.4%
+and dowild at **+7.0%** (2.780 → 2.975 ms/frame). Pair 2, rerunning the two that
+bracket that range, put docastle at **-1.3%** and dowild at **-0.2%** (2.805 →
+2.799). Both machines measured twice changed sign, so dowild's +7% did not
+reproduce and this host cannot resolve a difference of that size here. dorunrun
+was measured once and is uncorroborated.
+
+What is structural rather than measured: `render` collapses from 0.17 to 0.004
+ms/frame on all three, which is the copy replacing the draw; four per-frame
+full-screen allocations are gone; and the tilemap fetch dropped from 240 to
+about 30 map reads a row. Against that there is a fixed new cost — 128 sprite
+slots tested once per row, 24,576 Y-byte reads a frame, where the whole-frame
+pass spent 16 iterations on a parked slot and no more. That is
+`phosphor-emulator-3me5`'s sprite half and it is the plausible reason a
+sprite-heavy board could cost more here, but the measurement does not support
+attributing anything to it, and it should not be quoted as if it did.
+
+Three existing render tests now scan the beam before they look, rather than
+being weakened, and the pre-existing `sub_irq_fires_eight_times_per_frame`
+turns out to double as a frame-loop check: cutting the frame loop's calls into
+`begin_scanline` fails it alongside the new one.
+
+Two machines remain: irobot's alphanumeric overlay, and nothing else.
+
 ---
 
 ## Testing

@@ -80,21 +80,21 @@ machine = "docastle"
 frames = 1800
 shows = "Attract mode: the TODAY'S RANKING / BEST 10 table, ten green name rows on black inside the purple brick border."
 size = [192, 240]
-frame = "sha256:8642a37340e74a060f571449ab1ea86adc6e77cfe4c68bc6b1754802353fc757"
+frame = "sha256:cdf53079eb3b7b929fe668732a14bcfc755ee333fc4de1d6450d1e1f42075adc"
 
 [[frame]]
 machine = "dorunrun"
 frames = 2400
 shows = "Attract mode: the DO! RUN RUN title in shaded block letters over INSERT COIN / 1 COIN 1 PLAY and the Universal 1984 copyright."
 size = [240, 192]
-frame = "sha256:1ab0235facad6de06d8eac73b7c6e20b8088637b38c76f25bf10d0cc41df9416"
+frame = "sha256:75d26359fea41ff0cb925aa216d875838c63d0e3e83ea7fa98c9a368d45ccfcf"
 
 [[frame]]
 machine = "dowild"
 frames = 1800
 shows = "Attract demo: the first course, its yellow track loops with coloured balls rolling, the GOAL flag top right, and the bonus and scene counters."
 size = [240, 192]
-frame = "sha256:cff65496ba44f98b07406692ddc0958dcbf5dc59dadad70a0b826a2c2b1e8f61"
+frame = "sha256:0440cf2ec8f7562a89ce7a0f291cf7678fe02a6586ef77a1e898d3ca2c051e44"
 
 [[frame]]
 machine = "esb"
