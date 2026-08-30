@@ -52,7 +52,7 @@ machine = "ccastles"
 frames = 1800
 shows = "Attract mode: the isometric first castle, the red bonus-timer bar top left, and the CRYSTAL CASTLES / 1983 Atari copyright panel."
 size = [256, 232]
-frame = "sha256:193512f12df70ff841ef8b91dd15ceafc5e02a4544586e11c4c756c4c7c653b0"
+frame = "sha256:39ff4e58f61aeaaf8d92f89627fca75ad94e9ed258b786885fd42667f99c14ab"
 
 [[frame]]
 machine = "congobongo"

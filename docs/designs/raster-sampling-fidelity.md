@@ -1287,12 +1287,63 @@ no version of per-row rendering that avoids that, and about 1% is what it costs.
 All 40 registered machines are accounted for. Every board that renders a raster
 picture from live state now composites it row by row as the beam passes:
 gottlieb, btime, namco_galaga (galaga, digdug, xevious), mrdo, foodf,
-atari_system1 (marble, roadrunner), docastle (docastle, dorunrun, dowild) and
-irobot's overlay, on top of the 18 that already did. `mcr2` stays out by
-`phosphor-emulator-raster-sampling-6kae.6`, the seven vector machines have no
-scanline hardware, and `ccastles` remains the one partial case — it composites
-its bitmap per scanline but still renders all sprites once at scanline 0, which
-W5 recorded as the obvious next candidate.
+atari_system1 (marble, roadrunner), docastle (docastle, dorunrun, dowild),
+irobot's overlay and ccastles' sprite layer, on top of the 18 that already did.
+`mcr2` stays out by `phosphor-emulator-raster-sampling-6kae.6`, and the seven
+vector machines have no scanline hardware.
+
+### What shipped, on ccastles, 2026-08-29
+
+W5's "lesser finding", and the cleanest result in the epic. This board already
+composited its **bitmap** per scanline, but rendered all 40 sprites once at
+scanline 0 into a 256x256 buffer and composited that snapshot into every row
+below — sample-once-composite-late, which is better than rendering at the frame
+boundary and still a latch the hardware does not have.
+
+`render_sprites_to_buffer` and its 64 KB buffer are gone, replaced by
+`sprite_row(hw_scanline)`, called for the line being drawn. The placement
+inverts rather than writing all 16 rows and letting the buffer sort it out:
+`(hw_scanline - sy) & 0xFF` has one solution and the sprite is on the line only
+if it lands in `0..16`.
+
+**The pin moved by 68 pixels on a frame where nothing was animating**, which is
+what makes this the cleanest measurement here. Frames 1790 through 1800 are
+byte-identical to each other under the old code, so there is no animation near
+the pin and no phase shift available to confuse the reading. The 68 pixels are
+purely the fix.
+
+Traced: Crystal Castles rewrites its object list **during active display**,
+walking down sprite RAM as the frame goes — `$8E00` at hardware scanline 115,
+`$8E20` at 124, `$8E40` at 138, `$8E80` at 155, `$8E9C` at 162. The two changed
+bands are screen rows 182-189 and 191-198, hardware lines 206-222, **below every
+one of those writes**. The old snapshot was taken at scanline 0, so those rows
+drew the pre-rewrite list; the beam sees the post-rewrite list. These are writes
+to the *active* MOB buffer (nothing was written at `$8F00` and up), so it is the
+same shape as the Road Runner defect closed as `phosphor-emulator-x7rn`, on a
+different board. By eye it is the small character sprite at the base of the
+castle; `shows` needed no rewrite.
+
+**Falsified against the real old code rather than a synthetic mutation.** HEAD's
+implementation was put back, the new test added to it with the
+`render_sprites_to_buffer()` call the old frame loop made at scanline 0, and run:
+it fails on exactly the second assertion — the sprite's new place below the write
+— with the first passing. An `ast-grep` mutation tried first broke sprite
+positioning wholesale and failed both assertions for the wrong reason, which is
+weaker evidence.
+
+**Perf: about -1%, weakly resolved.** Two pairs at 15 and 21 repetitions: 1.173 →
+1.154 (-1.6%) and 1.153 → 1.142 (-1.0%). Both negative and roughly consistent,
+but the run-to-run spread (±3.2% to ±8.2%) is larger than the effect, so this is
+better read as "no measurable cost" than as a measured gain. The plausible
+source is the 64 KB buffer fill that happened every frame and no longer does.
+
+Two things deliberately left undone. This is now the only converted board that
+still tests the frame position on every cycle inside `begin_cycle` rather than
+carrying the house `begin_scanline`/`run_scanlines`/`run_frame` trio; that is not
+the defect W5 named, it would have confounded this measurement, and
+`phosphor-emulator-f3yv` should pick this board up as an eighth. And
+`render_scanline_to_buffer` still does a `region_data(VideoRam)` lookup inside
+its per-pixel loop, which is a free win belonging to an optimization commit.
 
 Two follow-ups are open and both were raised by the owner during the work:
 `phosphor-emulator-3me5` (a row pass should iterate the units that vary along

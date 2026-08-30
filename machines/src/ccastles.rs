@@ -503,8 +503,6 @@ pub struct CrystalCastlesBoard {
     /// A load invalidates the frame rather than trusting one drawn before it.
     #[save_skip(default)]
     scanline_buffer_valid: bool,
-    #[save_skip]
-    sprite_buffer: Vec<u8>, // 256 × 256 temporary sprite layer (5-bit index)
 
     /// Emptied on load, so audio queued before the snapshot does not play after
     /// it. `SampleRing` has no `Default`, hence the explicit capacity.
@@ -643,7 +641,6 @@ impl CrystalCastlesBoard {
             vblank_end: 24,
             scanline_buffer: vec![0u8; 256 * 232 * 3],
             scanline_buffer_valid: false,
-            sprite_buffer: vec![0u8; 256 * 256],
 
             audio_buffer: SampleRing::with_capacity(2048),
             pokey_coupling: DcBlocker::new(phosphor_core::audio::host_sample_rate()),
@@ -837,16 +834,25 @@ impl CrystalCastlesBoard {
     /// Render all sprites from the active MOB buffer into the sprite buffer.
     ///
     /// Called once per frame at VBLANK start. The sprite buffer is a 256×256
-    /// array of 5-bit pixel indices (color_base | pixel_value), with 0x0F
-    /// meaning transparent (no sprite).
+    /// row of 5-bit pixel indices (color_base | pixel_value), with 0x0F meaning
+    /// transparent (no sprite).
+    ///
+    /// **Read live, at the line that displays it.** This used to fill a whole
+    /// 256x256 buffer once at scanline 0 and composite that snapshot into every
+    /// row below, which is the sample-once-composite-late pattern: better than
+    /// rendering at the frame boundary, and still a latch the hardware does not
+    /// have. The prior audit established that no board in this registry latches
+    /// its object list, so the list a row draws is the list that stood when the
+    /// beam was on it, and a write partway down the screen moves the sprites
+    /// below it.
     ///
     /// Sprite RAM format (4 bytes per sprite, 40 sprites max):
     ///   [offs+0] = sprite code (which, 0-255)
     ///   [offs+1] = Y position (displayed at 256 - 16 - value)
     ///   [offs+2] = bit 7: color group (0 or 1, selects palette 0-7 or 8-15)
     ///   [offs+3] = X position
-    fn render_sprites_to_buffer(&mut self) {
-        self.sprite_buffer.fill(0x0F);
+    fn sprite_row(&self, hw_scanline: u8) -> [u8; 256] {
+        let mut row = [0x0Fu8; 256];
 
         // Select active MOB buffer (outlatch1 bit 7: BUF1/BUF2)
         let buf_offset: usize = if self.outlatch1.bit(7) { 0x100 } else { 0x00 };
@@ -855,30 +861,38 @@ impl CrystalCastlesBoard {
 
         // 40 sprites: 160 bytes / 4 bytes per sprite
         for offs in (0..160).step_by(4) {
-            let which = sprites[buf_offset + offs];
             let sy = 256u16
                 .wrapping_sub(16)
                 .wrapping_sub(sprites[buf_offset + offs + 1] as u16);
+
+            // Which of the sprite's 16 rows lands on this line, if any. The
+            // whole-frame pass wrote `dy = (sy + row) & 0xFF` for every row and
+            // let the buffer sort it out; this inverts that to answer one line,
+            // so a sprite not on it costs one byte read and a comparison.
+            let r_idx = (hw_scanline as u16).wrapping_sub(sy) & 0xFF;
+            if r_idx >= 16 {
+                continue;
+            }
+
+            let which = sprites[buf_offset + offs];
             let color_base = (sprites[buf_offset + offs + 2] >> 7) * 8;
             let sx = sprites[buf_offset + offs + 3] as u16;
+            let r = if flip { 15 - r_idx } else { r_idx };
 
-            for row in 0..16u16 {
-                for col in 0..8u16 {
-                    let r = if flip { 15 - row } else { row };
-                    let c = if flip { 7 - col } else { col };
-                    let pixel = self
-                        .sprite_cache
-                        .pixel(which as usize, c as usize, r as usize);
-                    if pixel == 7 {
-                        continue; // transparent pen
-                    }
-
-                    let dy = sy.wrapping_add(row) & 0xFF;
-                    let dx = sx.wrapping_add(col) & 0xFF;
-                    self.sprite_buffer[(dy as usize) * 256 + (dx as usize)] = color_base | pixel;
+            for col in 0..8u16 {
+                let c = if flip { 7 - col } else { col };
+                let pixel = self
+                    .sprite_cache
+                    .pixel(which as usize, c as usize, r as usize);
+                if pixel == 7 {
+                    continue; // transparent pen
                 }
+                let dx = sx.wrapping_add(col) & 0xFF;
+                row[dx as usize] = color_base | pixel;
             }
         }
+
+        row
     }
 
     // -----------------------------------------------------------------------
@@ -930,15 +944,17 @@ impl CrystalCastlesBoard {
         let src_base = effy * 128;
         let row_offset = screen_y * 256 * 3;
 
-        for x in 0..256usize {
+        // The object list as it stands on this line, not a snapshot taken at
+        // the top of the frame.
+        let sprite_row = self.sprite_row(hw_scanline);
+
+        // Sprite pixel for this line (screen-space, not scrolled).
+        for (x, &mopix) in sprite_row.iter().enumerate() {
             let effx = self.hscroll.wrapping_add((x as u8) ^ flip) as usize;
 
             // Read 4bpp bitmap pixel (2 pixels per byte: low nibble = even, high = odd)
             let vram = self.map.region_data(Region::VideoRam);
             let pix = (vram[src_base + effx / 2] >> ((effx & 1) * 4)) & 0x0F;
-
-            // Read sprite pixel from sprite buffer (screen-space, not scrolled)
-            let mopix = self.sprite_buffer[hw_scanline as usize * 256 + x];
 
             // Priority PROM lookup
             let prindex: u8 = 0x40 | ((mopix & 7) << 2) | ((mopix & 8) >> 2) | ((pix & 8) >> 3);
@@ -986,12 +1002,9 @@ impl CrystalCastlesBoard {
                 self.irq_state = true;
             }
 
-            // Render sprites once at VBLANK start (scanline 0)
-            if scanline == 0 {
-                self.render_sprites_to_buffer();
-            }
-
-            // Render visible scanlines (composites bitmap + sprites)
+            // Render visible scanlines. The sprite layer is read inside, for
+            // this line only; there is no longer a whole-frame sprite pass at
+            // scanline 0 to composite a snapshot from.
             self.render_scanline_to_buffer(scanline);
         }
 
@@ -1314,7 +1327,7 @@ impl MachineCore for CrystalCastlesSystem {
         self.board.in0 = 0xDF;
         self.board.scanline_buffer.fill(0);
         self.board.scanline_buffer_valid = false;
-        self.board.sprite_buffer.fill(0);
+
         self.board.audio_buffer.clear();
 
         self.cpu.reset(&mut self.board, BusMaster::Cpu(0));
@@ -1663,11 +1676,10 @@ mod tests {
         sprites[2] = 0; // color group 0
         sprites[3] = 100; // X = 100
 
-        sys.board.render_sprites_to_buffer();
-
-        // All transparent → sprite buffer should remain 0x0F everywhere
-        assert_eq!(sys.board.sprite_buffer[100 * 256 + 100], 0x0F);
-        assert_eq!(sys.board.sprite_buffer[100 * 256 + 107], 0x0F);
+        // All transparent → the sprite row stays 0x0F across the sprite.
+        let row = sys.board.sprite_row(100);
+        assert_eq!(row[100], 0x0F);
+        assert_eq!(row[107], 0x0F);
     }
 
     #[test]
@@ -1692,10 +1704,12 @@ mod tests {
         sprites[2] = 0x80; // color group 1 → color_base = 8
         sprites[3] = 50; // X
 
-        sys.board.render_sprites_to_buffer();
-
         // Sprite pixel 0 of row 0 should be at (50, 200): color_base(8) | 5 = 13
-        assert_eq!(sys.board.sprite_buffer[200 * 256 + 50], 13);
+        assert_eq!(sys.board.sprite_row(200)[50], 13);
+        // And it belongs to that line alone: the line above the sprite has
+        // nothing on it, which the whole-frame buffer could not have shown
+        // without indexing a different row of the same snapshot.
+        assert_eq!(sys.board.sprite_row(199)[50], 0x0F);
     }
 
     #[test]
@@ -1715,8 +1729,8 @@ mod tests {
         // videoram[24 * 128 + 0] low nibble = 5
         sys.board.map.region_data_mut(Region::VideoRam)[24 * 128] = 0x05;
 
-        // Sprite buffer clear (transparent)
-        sys.board.sprite_buffer.fill(0x0F);
+        // No sprites in sprite RAM, so every sprite pixel on the line is the
+        // transparent 0x0F the priority PROM entry below is chosen for.
 
         // Set a priority PROM that selects bitmap (bit 1 = 0) and no bit 4 (bit 0 = 0)
         // For transparent sprite (mopix=0x0F): prindex = 0x40 | (7<<2) | (8>>2) | (5>>3)
@@ -1730,6 +1744,124 @@ mod tests {
         assert_eq!(sys.board.scanline_buffer[0], 255); // R
         assert_eq!(sys.board.scanline_buffer[1], 255); // G
         assert_eq!(sys.board.scanline_buffer[2], 255); // B
+    }
+
+    // -----------------------------------------------------------------------
+    // Per-scanline sprite sampling
+    // -----------------------------------------------------------------------
+
+    const RED: (u8, u8, u8) = (0xFF, 0, 0);
+
+    /// A board whose sprite 0 is solid pixel value 5 everywhere, with the
+    /// priority PROM entry for that pixel selecting the sprite over the bitmap
+    /// and palette index 5 coloured red. Where no sprite covers a pixel the
+    /// sprite layer reads 0x0F, whose PROM entry is left at 0 so the (all-zero)
+    /// bitmap wins and the pixel stays black.
+    fn board_with_one_red_sprite() -> CrystalCastlesSystem {
+        let mut sys = CrystalCastlesSystem::new();
+        sys.board.sync_prom[..24].fill(0x01);
+        sys.board.sync_prom[24..].fill(0x00);
+        sys.board.vblank_end = 24;
+
+        // p0 = 1, p1 = 0, p2 = 1 -> pixel value 5.
+        sys.board.gfx_rom[0..0x2000].fill(0x0F);
+        sys.board.gfx_rom[0x2000..0x4000].fill(0x0F);
+        sys.board.decode_sprite_cache();
+
+        // mopix 5, bitmap pixel 0 -> prindex 0x40 | (5 << 2) = 0x54.
+        sys.board.pri_prom[0x54] = 0x02; // bit 1 set: select the sprite
+        sys.board.palette_rgb[5] = RED;
+        sys.board.palette_rgb[0] = (0, 0, 0);
+        sys
+    }
+
+    fn pixel(sys: &CrystalCastlesSystem, x: usize, screen_y: usize) -> (u8, u8, u8) {
+        let o = (screen_y * 256 + x) * 3;
+        (
+            sys.board.scanline_buffer[o],
+            sys.board.scanline_buffer[o + 1],
+            sys.board.scanline_buffer[o + 2],
+        )
+    }
+
+    /// **The defect this board was left with, and the acceptance test for
+    /// fixing it.** The bitmap was already composited per scanline, but the
+    /// object list was sampled once at scanline 0 into a whole-frame buffer and
+    /// that snapshot composited into every row below — better than rendering at
+    /// the frame boundary, and still a latch the hardware does not have.
+    ///
+    /// Moving a sprite partway down the frame must therefore leave it drawn
+    /// where the beam already passed it AND draw it at its new place below.
+    /// Under the snapshot it could only ever appear in one of the two.
+    #[test]
+    fn a_mid_frame_sprite_write_moves_only_the_rows_below_it() {
+        let mut sys = board_with_one_red_sprite();
+        {
+            let spr = sys.board.map.region_data_mut(Region::SpriteRam);
+            spr[0] = 0; // code
+            spr[1] = 180; // sy = 240 - 180 = 60, so hw lines 60..76
+            spr[2] = 0; // colour group 0
+            spr[3] = 50; // x
+        }
+
+        // Beam runs down to hw line 100, drawing the sprite at hw 60..76.
+        for s in 24..100u16 {
+            sys.board.render_scanline_to_buffer(s as u8);
+        }
+        // The game moves it to hw lines 160..176, below the beam.
+        sys.board.map.region_data_mut(Region::SpriteRam)[1] = 80; // sy = 160
+        for s in 100..256u16 {
+            sys.board.render_scanline_to_buffer(s as u8);
+        }
+
+        // screen_y = hw - vblank_end(24).
+        assert_eq!(
+            pixel(&sys, 50, 36),
+            RED,
+            "the beam had already drawn the sprite at its old place"
+        );
+        assert_eq!(
+            pixel(&sys, 50, 136),
+            RED,
+            "and draws it at its new place below the write. A snapshot taken at \
+             scanline 0 cannot put it here."
+        );
+        assert_eq!(
+            pixel(&sys, 50, 100),
+            (0, 0, 0),
+            "and nowhere between: the sprite is 16 lines tall in each place"
+        );
+    }
+
+    /// The test above drives `render_scanline_to_buffer` by hand, which proves
+    /// nothing about whether the frame loop reaches it. This walks the real
+    /// `tick` path and checks the picture appears.
+    #[test]
+    fn the_frame_loop_draws_rows_at_scanline_boundaries() {
+        let mut sys = board_with_one_red_sprite();
+        {
+            let spr = sys.board.map.region_data_mut(Region::SpriteRam);
+            spr[0] = 0;
+            spr[1] = 180; // hw lines 60..76 -> screen rows 36..52
+            spr[2] = 0;
+            spr[3] = 50;
+        }
+        sys.board.scanline_buffer.fill(0);
+
+        // Run up to and including hw line 60, which is where the sprite starts.
+        for _ in 0..61 * TIMING.cycles_per_scanline {
+            tick(&mut sys.cpu, &mut sys.board);
+        }
+        assert_eq!(
+            pixel(&sys, 50, 36),
+            RED,
+            "the frame loop reached hw line 60 and drew it"
+        );
+        assert_eq!(
+            pixel(&sys, 50, 37),
+            (0, 0, 0),
+            "and no further: hw line 61 has not been drawn yet"
+        );
     }
 
     #[test]
