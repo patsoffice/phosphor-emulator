@@ -1025,6 +1025,24 @@ impl Default for DkongDiscreteSound {
     }
 }
 
+impl crate::tkg04::Tkg04Sound for DkongDiscreteSound {
+    fn write_sound_bit(&mut self, bit: u8, value: bool) {
+        self.write_sound_bit(bit, value);
+    }
+    fn set_discharge(&mut self, value: bool) {
+        self.set_discharge(value);
+    }
+    fn feed_dac(&mut self, sample: i16) {
+        self.feed_dac(sample);
+    }
+    fn fill_audio(&mut self, out: &mut [i16]) -> usize {
+        self.fill_audio(out)
+    }
+    fn reset(&mut self) {
+        self.reset();
+    }
+}
+
 impl phosphor_core::device::Device for DkongDiscreteSound {
     fn name(&self) -> &'static str {
         "DK Discrete"

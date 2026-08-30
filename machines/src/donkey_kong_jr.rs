@@ -9,6 +9,7 @@ use phosphor_core::cpu::i8035::I8035;
 use phosphor_core::cpu::z80::Z80;
 use phosphor_macros::{BusDebug, Saveable};
 
+use crate::dkongjr_sound::DkongJrDiscreteSound;
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
 use crate::set_bit_active_high;
 use crate::tkg04::{self, MainRegion, SoundRegion, Tkg04Board, Tkg04Bus, Tkg04Cpus};
@@ -172,6 +173,13 @@ pub struct DkongJrSystem {
 
     #[debug_bus]
     pub board: Tkg04Board,
+
+    /// The discrete effect circuit. It lives here rather than on the board
+    /// because it is this game's: Donkey Kong Jr. shares the TKG-04's DAC, sound
+    /// CPU and amplifier with Donkey Kong and not one source part of its four
+    /// effect voices.
+    #[debug_device("Discrete")]
+    pub sound: DkongJrDiscreteSound,
 }
 
 impl Default for DkongJrSystem {
@@ -186,6 +194,7 @@ impl DkongJrSystem {
             cpu: Z80::new(),
             sound_cpu: I8035::new(),
             board: Tkg04Board::new(0x1000), // 8KB tile ROM → plane 1 at 0x1000
+            sound: DkongJrDiscreteSound::new(),
         }
     }
 
@@ -197,7 +206,7 @@ impl DkongJrSystem {
                 main: &mut self.cpu,
                 sound: &mut self.sound_cpu,
             },
-            DkongJrBus(&mut self.board),
+            DkongJrBus(&mut self.board, &mut self.sound),
         )
     }
 
@@ -261,12 +270,19 @@ impl DkongJrSystem {
 /// The Donkey Kong Jr bus: the shared board behind DK Jr's address decoding.
 /// A newtype for the same reason as [`crate::donkey_kong`]'s — the decode is
 /// game-specific, the state behind it is all board.
-struct DkongJrBus<'a>(&'a mut Tkg04Board);
+struct DkongJrBus<'a>(&'a mut Tkg04Board, &'a mut DkongJrDiscreteSound);
 
 impl Tkg04Bus for DkongJrBus<'_> {
+    type Sound = DkongJrDiscreteSound;
+
     #[inline]
     fn board(&mut self) -> &mut Tkg04Board {
         self.0
+    }
+
+    #[inline]
+    fn parts(&mut self) -> (&mut Tkg04Board, &mut DkongJrDiscreteSound) {
+        (self.0, self.1)
     }
 }
 
@@ -339,14 +355,27 @@ impl Bus for DkongJrBus<'_> {
                         // 74LS259 sound control latch (dev_6h): addr bits 0-2 select bit
                         0x7D00..=0x7D07 => {
                             let bit = (addr & 0x07) as u8;
-                            self.0.write_sound_control_bit(bit, data & 1 != 0);
+                            let value = data & 1 != 0;
+                            self.0.write_sound_control_bit(bit, value);
+                            // Bits 0-2 trigger walking, jump and climbing; bit 7
+                            // picks which pair of counter taps the walking voice
+                            // uses, so the same trigger makes two pitches. Bits
+                            // 3-6 reach the sound CPU rather than this circuit.
+                            self.1.write_sound_bit(bit, value);
                         }
 
                         // ls259.5h latch (0x7D80-0x7D87)
                         // 0x7D80 also triggers sound CPU IRQ
                         0x7D80 => {
                             self.0.sound_irq_pending = data != 0;
+                            self.1.write_latch_5h_bit(0, data & 1 != 0);
                         }
+
+                        // Bit 1 is the falling voice's enable. Unlike the other
+                        // three effects it is a level rather than a trigger:
+                        // there is no one-shot on its part of the drawing, and
+                        // the game holds it for the length of the fall.
+                        0x7D81 => self.1.write_latch_5h_bit(1, data & 1 != 0),
 
                         0x7D82 => self.0.flip_screen = (data & 1) != 0,
                         0x7D83 => self.0.sprite_bank = (data & 1) != 0,
@@ -475,7 +504,11 @@ impl Bus for DkongJrBus<'_> {
 // Machine traits (MachineCore + capabilities)
 // ---------------------------------------------------------------------------
 
-crate::impl_board_delegation!(DkongJrSystem, board, tkg04::TIMING, orientation);
+// Audio comes from the game's own sound device rather than from the board, so
+// the three delegation impls are spelled out instead of taken together.
+crate::impl_board_renderable!(DkongJrSystem, board, tkg04::TIMING, orientation);
+crate::impl_board_audio!(DkongJrSystem, sound);
+crate::impl_board_debug!(DkongJrSystem, board, tkg04::TIMING);
 
 impl InputConfigurable for DkongJrSystem {
     fn input_controls(&self) -> &'static [InputControl] {
@@ -523,6 +556,7 @@ impl MachineCore for DkongJrSystem {
 
     fn reset(&mut self) {
         self.board.reset();
+        self.sound.reset();
         self.board.dsw0 = 0x80; // upright cabinet, 3 lives, 10000 bonus, 1 coin/1 play
         let (cpus, mut bus) = self.split();
         cpus.main.reset(&mut bus, BusMaster::Cpu(0));

@@ -105,7 +105,6 @@
 //! [marioborspak.pdf]: https://www.arcade-museum.com/manuals-videogames/M/marioborspak.pdf
 //! [MarioBros.pdf]: https://www.arcade-museum.com/manuals-videogames/M/MarioBros.pdf
 
-use crate::dkong_sound::DkongDiscreteSound;
 use phosphor_core::audio::AudioResampler;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::debug_trace::{DebugEvent, DebugEventKind, DebugTraceBuffer};
@@ -429,7 +428,36 @@ impl Tkg04Cpus<'_> {
 /// [`tick`] is generic over this trait, so every access the CPUs make resolves
 /// to a direct call rather than a vtable entry.
 pub trait Tkg04Bus: Bus<Address = u16, Data = u8> {
+    /// The game's discrete sound device. An associated type rather than a trait
+    /// object, so the cycle tail's call into it is a direct one.
+    type Sound: Tkg04Sound;
     fn board(&mut self) -> &mut Tkg04Board;
+    /// Board and sound device together, which the cycle tail needs at once: it
+    /// reads a DAC sample off the board and hands it straight to the device.
+    fn parts(&mut self) -> (&mut Tkg04Board, &mut Self::Sound);
+}
+
+/// The discrete sound device a TKG-04 game drives.
+///
+/// The BOARD DOES NOT OWN ONE, and that is the point of this trait. Donkey Kong
+/// and Donkey Kong Jr. put entirely different circuits behind the same latch and
+/// the same DAC: two voltage-controlled 555 astables and a shift-register chain
+/// on one, five 74LS629 oscillator halves and a ripple counter on the other,
+/// with not one source part in common. The board is what they share — the
+/// DAC-08, the sound CPU, the latches, the amplifier — so the board carries the
+/// DAC stream and the decay line, and the game carries the circuit those feed.
+///
+/// Modelled on `machines/CLAUDE.md`'s board-wrapper pattern: shared hardware on
+/// the board, game-specific behavior on the wrapper.
+pub trait Tkg04Sound {
+    /// A bit of the 74LS259 sound-control latch changed.
+    fn write_sound_bit(&mut self, bit: u8, value: bool);
+    /// The sound CPU's DAC signal-decay line.
+    fn set_discharge(&mut self, value: bool);
+    /// One box-filtered DAC sample, which also advances the circuit.
+    fn feed_dac(&mut self, sample: i16);
+    fn fill_audio(&mut self, out: &mut [i16]) -> usize;
+    fn reset(&mut self);
 }
 
 /// One CPU cycle of a TKG-04 machine: board work, the Z80, then the sound CPU
@@ -511,7 +539,8 @@ fn step_cycle<B: Tkg04Bus>(cpus: &mut Tkg04Cpus<'_>, bus: &mut B) {
         cpus.sound.execute_cycle(bus, BusMaster::Cpu(1));
     }
 
-    bus.board().end_cycle();
+    let (board, sound) = bus.parts();
+    board.end_cycle(sound);
 }
 
 /// Shared hardware for the Nintendo TKG-04 arcade platform.
@@ -650,11 +679,6 @@ pub struct Tkg04Board {
     #[save(id = 20)]
     pub(crate) vblank_nmi_pending: bool,
 
-    // Discrete sound: DAC stream + walk/jump/stomp effects, mixed in-circuit.
-    #[debug_device("Discrete")]
-    #[save(id = 21)]
-    pub(crate) sound: DkongDiscreteSound,
-
     // Debug event ring (observer state — never saved in save states)
     #[debug_events]
     #[save_skip]
@@ -704,7 +728,6 @@ impl Tkg04Board {
             clocks,
             sound_dom,
             vblank_nmi_pending: false,
-            sound: DkongDiscreteSound::new(),
             debug_trace: DebugTraceBuffer::new(),
         }
     }
@@ -973,17 +996,22 @@ impl Tkg04Board {
     }
 
     /// Board work after the CPUs' cycle: the audio tail and the clock advance.
-    fn end_cycle(&mut self) {
+    ///
+    /// The DAC box filter is the board's — the DAC-08 is board hardware, shared
+    /// by both games — but what it feeds is the game's circuit, so the device
+    /// arrives as an argument rather than as a field.
+    fn end_cycle<S: Tkg04Sound + ?Sized>(&mut self, sound: &mut S) {
         // Box-filter the DAC (3.072 MHz → 44.1 kHz); each produced sample drives
-        // one step of the discrete circuit, which sums it with the effects.
+        // one output sample's worth of the discrete circuit, which sums it with
+        // the effects.
         if let Some(dac_avg) = self.resampler.tick_sample(self.dac.sample_i16()) {
             // P2 bit 7 is the DAC's signal-decay line. The sound CPU drops it
             // when a sample finishes, and the board fades the DAC out over a
             // ~100 ms time constant rather than cutting it — so the tail of
             // every sound decays instead of ending on a step. Leaving it undriven
             // is audible as clicks where the steps land and silence between.
-            self.sound.set_discharge(self.sound_p2 & 0x80 == 0);
-            self.sound.feed_dac(dac_avg);
+            sound.set_discharge(self.sound_p2 & 0x80 == 0);
+            sound.feed_dac(dac_avg);
         }
 
         self.clock += 1;
@@ -1010,14 +1038,6 @@ impl Tkg04Board {
     }
 
     // -----------------------------------------------------------------------
-    // Audio
-    // -----------------------------------------------------------------------
-
-    pub fn fill_audio(&mut self, buffer: &mut [i16]) -> usize {
-        self.sound.fill_audio(buffer)
-    }
-
-    // -----------------------------------------------------------------------
     // Reset
     // -----------------------------------------------------------------------
 
@@ -1040,7 +1060,6 @@ impl Tkg04Board {
         self.clocks.reset();
         self.resampler.reset();
         self.dac.reset();
-        self.sound.reset();
 
         self.in0 = 0x00;
         self.in1 = 0x00;
@@ -1081,12 +1100,14 @@ impl Tkg04Board {
     }
 
     /// Write a single bit to the 74LS259 sound control latch (0x7D00-0x7D07).
+    ///
+    /// The latch is the board's — the sound CPU reads two of its bits back on
+    /// T0 and T1 — but which bits mean what to a sound circuit is the game's, so
+    /// the wrapper forwards to its own device beside this call rather than the
+    /// board doing it here. The two games do not even use the same set: Donkey
+    /// Kong drives bits 0 to 2, Donkey Kong Jr. bits 0 to 2 and 7.
     pub fn write_sound_control_bit(&mut self, bit: u8, value: bool) {
         self.sound_control_latch.write(bit, value);
-        // Forward bits 0-2 to the discrete sound device (walk/jump/stomp).
-        if bit < 3 {
-            self.sound.write_sound_bit(bit, value);
-        }
     }
 
     /// Record a main-bus write event from a game wrapper's `Bus::write`.

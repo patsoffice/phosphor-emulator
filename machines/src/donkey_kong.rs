@@ -11,6 +11,7 @@ use phosphor_macros::{BusDebug, Saveable};
 
 use phosphor_core::gfx::decode::GfxLayout;
 
+use crate::dkong_sound::DkongDiscreteSound;
 use crate::gfx_registry::GfxRegion;
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
 use crate::set_bit_active_high;
@@ -391,6 +392,12 @@ pub struct DkongSystem {
 
     #[debug_bus]
     pub board: Tkg04Board,
+
+    /// The discrete effect circuit. It lives here rather than on the board
+    /// because it is this game's, not the TKG-04's: Donkey Kong Jr. runs
+    /// entirely different parts behind the same latch and the same DAC.
+    #[debug_device("Discrete")]
+    pub sound: DkongDiscreteSound,
 }
 
 impl Default for DkongSystem {
@@ -405,6 +412,7 @@ impl DkongSystem {
             cpu: Z80::new(),
             sound_cpu: I8035::new(),
             board: Tkg04Board::new(0x800), // 4KB tile ROM → plane 1 at 0x800
+            sound: DkongDiscreteSound::new(),
         }
     }
 
@@ -417,7 +425,7 @@ impl DkongSystem {
                 main: &mut self.cpu,
                 sound: &mut self.sound_cpu,
             },
-            DkongBus(&mut self.board),
+            DkongBus(&mut self.board, &mut self.sound),
         )
     }
 
@@ -484,12 +492,19 @@ impl DkongSystem {
 /// Nothing but the board is on this bus — the wrapper is a newtype so the
 /// game-specific decode has somewhere to live without the machine (which owns
 /// the CPUs) implementing `Bus` itself.
-struct DkongBus<'a>(&'a mut Tkg04Board);
+struct DkongBus<'a>(&'a mut Tkg04Board, &'a mut DkongDiscreteSound);
 
 impl Tkg04Bus for DkongBus<'_> {
+    type Sound = DkongDiscreteSound;
+
     #[inline]
     fn board(&mut self) -> &mut Tkg04Board {
         self.0
+    }
+
+    #[inline]
+    fn parts(&mut self) -> (&mut Tkg04Board, &mut DkongDiscreteSound) {
+        (self.0, self.1)
     }
 }
 
@@ -557,7 +572,14 @@ impl Bus for DkongBus<'_> {
                         // 74LS259 sound control latch: addr bits 0-2 select bit
                         0x7D00..=0x7D07 => {
                             let bit = (addr & 0x07) as u8;
-                            self.0.write_sound_control_bit(bit, data & 1 != 0);
+                            let value = data & 1 != 0;
+                            self.0.write_sound_control_bit(bit, value);
+                            // Bits 0-2 are walk, jump and stomp. The rest of the
+                            // latch reaches the sound CPU rather than this
+                            // circuit.
+                            if bit < 3 {
+                                self.1.write_sound_bit(bit, value);
+                            }
                         }
 
                         // Sound CPU IRQ trigger
@@ -695,7 +717,11 @@ impl Bus for DkongBus<'_> {
 // Machine traits (MachineCore + capabilities)
 // ---------------------------------------------------------------------------
 
-crate::impl_board_delegation!(DkongSystem, board, tkg04::TIMING, orientation);
+// Audio comes from the game's own sound device rather than from the board, so
+// the three delegation impls are spelled out instead of taken together.
+crate::impl_board_renderable!(DkongSystem, board, tkg04::TIMING, orientation);
+crate::impl_board_audio!(DkongSystem, sound);
+crate::impl_board_debug!(DkongSystem, board, tkg04::TIMING);
 
 impl InputConfigurable for DkongSystem {
     fn input_controls(&self) -> &'static [InputControl] {
@@ -738,6 +764,7 @@ impl MachineCore for DkongSystem {
 
     fn reset(&mut self) {
         self.board.reset();
+        self.sound.reset();
         self.board.dsw0 = 0x80; // upright cabinet, 3 lives, 7000 bonus, 1 coin/1 play
         let (cpus, mut bus) = self.split();
         cpus.main.reset(&mut bus, BusMaster::Cpu(0));

@@ -187,7 +187,9 @@ flowchart TB
 ## What it does NOT establish
 
 - **A usable 74LS629 frequency law.** See the section below; the datasheet does
-  not supply one, and this is now the single thing blocking the model.
+  not supply one. This was the single thing blocking the model and is no longer:
+  `ls629_vco` in `phosphor-core` interpolates a measured surface in the two pin
+  voltages, and the four oscillators here are the calibration for it.
 - **The LS157's fourth channel.** 6K pins 2 and 3 were read as ground and the
   5K pin 7 output, which makes the mux's first channel a gate rather than a
   selector, but that pair was the least legible connection on the sheet.
@@ -197,6 +199,18 @@ flowchart TB
   its bits is read back by the sound CPU, but its role was not traced.
 - **Levels.** The mixer leg resistors are recorded but the relative loudness of
   the four voices was not derived.
+- **What else is on the summing node.** The reading stops at the mixer's leg
+  resistors, and there is at least one more part immediately after them. Building
+  the model and comparing it against an independent implementation of the same
+  board showed all five captures with their fundamental right to within 2 to
+  10 percent and their spectral centroid two to four times too high, in the same
+  direction, on voices sharing no source part. One error common to five
+  independent voices is downstream of all of them, and a 0.01 uF capacitor across
+  the summing node accounts for it: against the five legs in parallel, 9.2 k, it
+  is a 1738 Hz low-pass on the whole mix. That value comes from the other
+  implementation rather than from the drawing. **Sheet 5 needs re-reading at the
+  mixer**, both to confirm it and to see whether the 1 uF the same source places
+  at the amplifier's input is a second coupling capacitor in series with C13.
 
 ## What the 74LS629 datasheet does and does not give
 
