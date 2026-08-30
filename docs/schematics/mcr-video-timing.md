@@ -60,6 +60,20 @@ flowchart LR
 | `HBLNK` | B12.12 (label partly cut on the scan) |
 | `VBLNK`, `HBLNK` | J2.9, J2.8, out to the monitor |
 
+`G12`'s numbers are at least self-consistent: on a 24 pin package the second
+side is pins 13 to 24, and the ten outputs read here run contiguously down 23
+to 14 with the inputs on 1 to 5 at the other end. That is what an output bank
+looks like, which is weak evidence the digits were read correctly and none at
+all about what is behind them. `B12` and `J2` have too few pins recorded to
+check, and neither part has a datasheet to check against.
+
+There is no netlist beside this file even though it has pin numbers, which the
+other excerpts use as the test. Two reasons. The pinout is seven rows and a
+drawing would restate it rather than add to it. More importantly `B12`'s output
+labels are cut off on the scan and their identity is inferred from what the
+Video Gen board consumes, as recorded below; a drawing has one voice and would
+put that inference on the page in the same weight as the pins that were read.
+
 ## What it establishes
 
 - The vertical counter is nine bits (`DV0`..`DV8`), which matches a 512-line

@@ -55,6 +55,15 @@ The consequence for the emulator: sprite state is sampled per scanline, one line
 ahead of where it is displayed. Per-scanline rendering from live RAM is correct;
 a vblank snapshot is not.
 
+The diagram above is deliberately the only one, and carries no refs or pin
+numbers. Each board below has a net table that could be drawn instead, but nine
+board-specific drawings would argue against the thing this file exists to show,
+which is that the nine are one shape. The tables also sit a level above the
+other excerpts': they name a pin by its function, `6H.1A` rather than a number,
+and several rows name only a sheet, so for much of each board there is no ref
+to draw. The per-board evidence is the table, and the shared shape is the
+picture.
+
 ---
 
 ## Food Fight (`foodf`)
@@ -104,6 +113,15 @@ This board is the clearest of the nine and is the one to read first.
 | `MATCH` | 3C output, into sheet 8B's LS21 with 1H, 2H, 8H |
 | `ODDLD-`, `ODDCLR-`, `EVENLD-`, `EVENCLR-` | sheet 8A LS157 outputs |
 | `ODDCLK`, `EVENCLK`, `ODDCS-`, `EVENCS-` | sheet 8A LS157 outputs |
+
+The bit correspondence below is not a second reading, it falls out of this
+table: each `BA` and the `H` bit it pairs with sit on the A and B inputs of the
+same 74LS157 channel, `BA1` and `2H` on `6H` channel 1, `BA2` and `8H` on
+channel 4, `BA3` and `16H` on channel 2, `BA4` and `32H` on channel 3, then
+`BA5`, `BA6`, `BA7` against `64H`, `128H`, `256H` on `6J` channels 1, 4 and 2.
+All seven pair within a channel, which a misread would not do seven times.
+`OBJRAM-` on `6H.1` and `6J.1` is the part's select pin, so the mux select is
+consistent with the channel reading too.
 
 ### What it establishes
 
