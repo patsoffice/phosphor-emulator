@@ -56,6 +56,13 @@
             # watching. Lives here so the check runs in the same shell as the
             # build rather than needing an ad-hoc `cargo install`.
             pkgs.cargo-audit
+            # Renders the netlists in docs/schematics to the SVGs committed
+            # beside them, via docs/schematics/render.sh. Auto-places and
+            # auto-routes through ELK, so a circuit excerpt is written as nets
+            # and never as coordinates. Chosen over KiCad, whose schematic side
+            # has no scripting API and whose file format would put every symbol
+            # placement and wire segment in the diff by hand.
+            pkgs.netlistsvg
           ] ++ linuxPkgs;
 
           LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath ([
