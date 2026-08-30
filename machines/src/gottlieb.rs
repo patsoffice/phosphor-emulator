@@ -867,7 +867,7 @@ impl GottliebBoard {
 
     /// Update a palette entry from a palette RAM write.
     ///
-    /// Even byte: G[7:4] B[3:0]. Odd byte: xxxx R[3:0].
+    /// Even byte: `G[7:4] B[3:0]`. Odd byte: `xxxx R[3:0]`.
     /// Uses resistor-weighted DAC (2000/1000/470/240Ω + 180Ω pulldown)
     /// matching MAME's `compute_resistor_weights` / `combine_weights`.
     pub fn update_palette(&mut self, offset: usize, data: u8) {

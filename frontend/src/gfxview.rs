@@ -1,7 +1,8 @@
 //! Interactive charset / sprite GFX viewer.
 //!
 //! Displays the tile/sprite sheets a machine exposes via
-//! [`MachineCore::gfx_sheets`] — the caches it already decoded from ROM. Any
+//! [`MachineCore::gfx_sheets`](phosphor_core::core::machine::MachineCore::gfx_sheets)
+//! — the caches it already decoded from ROM. Any
 //! working tile-based machine is viewable "for free"; no per-machine
 //! registration. Compositing reuses [`phosphor_core::gfx::render_sheet`], the
 //! same code the offline `disasm gfxview` PNG export uses, so the two stay

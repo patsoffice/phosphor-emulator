@@ -751,7 +751,8 @@ impl GalaxianVideo {
     /// The cabinet is mounted rotated 90°. A cocktail flip mirrors the *native*
     /// (pre-rotation) framebuffer, which — because the rotation transposes the
     /// axes — appears swapped in the rotated output: a native X-mirror becomes
-    /// an output Y-mirror and vice-versa. Composing with [`Orientation::ROT90`]
+    /// an output Y-mirror and vice-versa. Composing with
+    /// [`Orientation::ROT90`](phosphor_core::core::machine::Orientation::ROT90)
     /// (`SWAP_XY | FLIP_X`) therefore XORs `FLIP_Y` for `flip_x` and `FLIP_X`
     /// for `flip_y`. Both flips set ⇒ `ROT270` (ROT90 + 180° cocktail).
     pub fn orientation(&self) -> phosphor_core::core::machine::Orientation {

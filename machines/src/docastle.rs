@@ -13,7 +13,7 @@
 //! - **Two Z80s @ 4 MHz.** `main` runs the game; `sub` owns the inputs and the
 //!   sound chips. They talk through a single bidirectional latch that asserts
 //!   the main CPU's `WAIT` input on every access, which is what keeps the two
-//!   `LDIR` block transfers in lockstep (see [`DocastleBoard::tick`]).
+//!   `LDIR` block transfers in lockstep (see [`tick`]).
 //! - A third Z80 on the real board is a pass-through doorway in front of sprite
 //!   RAM; it copies 0x200 bytes from the main CPU to the sprite chip unmodified,
 //!   so this emulation has the main CPU write sprite RAM directly.

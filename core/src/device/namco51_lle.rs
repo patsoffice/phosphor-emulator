@@ -9,12 +9,15 @@ use phosphor_macros::Saveable;
 /// joystick remapping, and input multiplexing autonomously.
 ///
 /// I/O port wiring (active-low from cabinet switches):
-///   K port ← data from 06XX (command/data writes from Z80)
-///   R0 ← IN0[3:0] (P1 joystick: Left, Down, Right, Up)
-///   R1 ← IN0[7:4] (P2 joystick: Left, Down, Right, Up)
-///   R2 ← IN1[3:0] (P1 Fire, P2 Fire, Start1, Start2)
-///   R3 ← IN1[7:4] (Coin1, Coin2, Service, Test)
-///   O port → data to 06XX (read responses to Z80)
+///
+/// ```text
+/// K port ← data from 06XX (command/data writes from Z80)
+/// R0 ← IN0[3:0] (P1 joystick: Left, Down, Right, Up)
+/// R1 ← IN0[7:4] (P2 joystick: Left, Down, Right, Up)
+/// R2 ← IN1[3:0] (P1 Fire, P2 Fire, Start1, Start2)
+/// R3 ← IN1[7:4] (Coin1, Coin2, Service, Test)
+/// O port → data to 06XX (read responses to Z80)
+/// ```
 #[derive(Saveable)]
 #[save_version(1)]
 #[save_tlv]

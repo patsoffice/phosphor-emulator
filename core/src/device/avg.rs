@@ -109,7 +109,7 @@ pub enum AvgVariant {
 ///
 /// The AVG runs continuously (not halt-based like DVG). Each frame is
 /// delineated by a jump to address 0, which flushes the accumulated
-/// display list. The caller triggers execution via [`Avg::go`] + [`Avg::execute`].
+/// display list. The caller triggers execution via [`Avg::go`] + [`Avg::step`].
 #[derive(Saveable)]
 #[save_version(1)]
 #[save_tlv]
@@ -432,7 +432,7 @@ impl Avg {
         self.halted
     }
 
-    /// Master-clock cycles the last [`execute`](Self::execute) spent between
+    /// Master-clock cycles the last [`step`](Self::step) spent between
     /// the GO write and raising the halt — the window over which the hardware
     /// holds VG_HALT low and a polling game has to wait.
     pub fn run_cycles(&self) -> u32 {

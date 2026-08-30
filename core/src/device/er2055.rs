@@ -13,9 +13,9 @@ use phosphor_macros::Saveable;
 ///
 /// | C1 | C2 | Mode  | Action                                          |
 /// |----|----|-------|-------------------------------------------------|
-/// |  1 |  x | Read  | Falling clock: data register ← rom[address]     |
-/// |  0 |  0 | Write | rom[address] &= data register (destructive AND) |
-/// |  0 |  1 | Erase | rom[address] ← 0xFF                             |
+/// |  1 |  x | Read  | Falling clock: data register ← `rom[address]`   |
+/// |  0 |  0 | Write | `rom[address]` &= data register (destructive AND) |
+/// |  0 |  1 | Erase | `rom[address]` ← 0xFF                           |
 ///
 /// The write uses AND because the real device requires a separate erase
 /// cycle before writing. Without erase, bits can only be cleared (1→0).

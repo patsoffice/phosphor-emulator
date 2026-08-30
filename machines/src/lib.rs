@@ -1,3 +1,7 @@
+// Doc links to private items are allowed on purpose; see the same allow in
+// phosphor-core's lib.rs for why.
+#![allow(rustdoc::private_intra_doc_links)]
+
 /// Active-high bit manipulation: set bit on press, clear on release.
 pub(crate) fn set_bit_active_high(reg: &mut u8, bit: u8, pressed: bool) {
     if pressed {

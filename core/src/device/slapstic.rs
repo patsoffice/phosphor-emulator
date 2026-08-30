@@ -372,7 +372,7 @@ impl Slapstic {
     /// access the CPU drives — data reads/writes *and* instruction prefetches —
     /// anywhere, not just inside the window, because the secret sequences are
     /// armed by `test_any` patterns that can land in RAM/stack or in prefetched
-    /// code. Read [`current_bank`] afterwards for the bank the window presents.
+    /// code. Read [`Self::current_bank`] afterwards for the bank the window presents.
     ///
     /// Mirrors `atari_slapstic_device::*::test()`, parameterized by the chip's
     /// [`SlapsticConfig`] (matchers, `alt_shift`, and the 101/102 quirks).

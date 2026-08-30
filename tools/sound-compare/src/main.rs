@@ -8,9 +8,11 @@
 //! Comparison itself lives in `disasm audiodiff`, which already owns the metrics
 //! and the WAV I/O; this produces the captures that go into it.
 //!
-//!   sndcmp targets
-//!   sndcmp scenarios [TARGET]
-//!   sndcmp capture dkong/stomp --out /tmp/stomp.wav [--probe walk]
+//! ```text
+//! sndcmp targets
+//! sndcmp scenarios [TARGET]
+//! sndcmp capture dkong/stomp --out /tmp/stomp.wav [--probe walk]
+//! ```
 //!
 //! MAME stays outside this boundary on purpose: `sndcmp` knows nothing of Lua,
 //! device tags or memory spaces, so the same scenario can be compared against a

@@ -6,7 +6,7 @@
 //! the requested observers:
 //!
 //! **Frame loop** (`--events`/`--watch` only) — runs whole frames and drains,
-//! per frame, the board's [`DebugTrace`] event ring (`--events <kinds|all>`:
+//! per frame, the board's [`DebugTrace`](phosphor_core::core::debug_trace::DebugTrace) event ring (`--events <kinds|all>`:
 //! device writes, bank switches, interrupt edges, watchdog kicks, …) and the
 //! watchpoint hit queue (`--watch <cpu:addr:kind>`). Records are merged and
 //! emitted cycle-sorted. Bounded memory.
@@ -913,7 +913,8 @@ fn run_cycle_loop(cl: CycleLoop) -> Result<String, String> {
 /// Parse a `--events` value into the shared [`EventFilter`].
 ///
 /// The grammar and the kind tokens live in `phosphor-core` alongside
-/// [`DebugEventKind`], so `--events devwrite,bank` and the debugger panel's
+/// [`DebugEventKind`](phosphor_core::core::debug_trace::DebugEventKind), so
+/// `--events devwrite,bank` and the debugger panel's
 /// filter checkboxes agree on what a kind is called. This wrapper only
 /// re-labels the "empty list" error with the flag that produced it.
 fn parse_event_kinds(spec: &str) -> Result<EventFilter, String> {

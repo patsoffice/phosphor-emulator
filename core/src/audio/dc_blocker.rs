@@ -42,7 +42,7 @@ impl DcBlocker {
     /// boards sit in the same region.
     pub const DEFAULT_CUTOFF_HZ: f32 = 10.0;
 
-    /// A blocker at [`DEFAULT_CUTOFF_HZ`] for the given sample rate.
+    /// A blocker at [`Self::DEFAULT_CUTOFF_HZ`] for the given sample rate.
     pub fn new(sample_rate: u32) -> Self {
         Self::with_cutoff(Self::DEFAULT_CUTOFF_HZ, sample_rate)
     }

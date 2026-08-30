@@ -180,7 +180,7 @@ fn step_cycle(cpu: &mut Z80, board: &mut Mcr2Board) {
 /// Screen: 512×480 interlaced, displayed rotated 90° CW on vertical monitor.
 ///
 /// The board is everything the Z80 talks *to* — Satan's Hollow is the only
-/// machine on it, so the board implements [`Bus`] itself and the CPU lives on
+/// machine on it, so the board implements [`Bus`](phosphor_core::core::Bus) itself and the CPU lives on
 /// the machine.
 #[derive(BusDebug, Saveable)]
 #[save_version(1)]

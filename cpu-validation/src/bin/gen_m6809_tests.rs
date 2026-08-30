@@ -347,7 +347,7 @@ fn build_ram(memory: &[u8; 0x10000], addresses: &BTreeSet<u16>) -> Vec<(u16, u8)
 }
 
 /// Check if an indexed postbyte is a defined addressing mode per the M6809 datasheet.
-/// Undefined modes: 0x07, 0x0A, 0x0E; ,R+ and ,-R with indirect; [n16] with non-zero
+/// Undefined modes: 0x07, 0x0A, 0x0E; ,R+ and ,-R with indirect; `[n16]` with non-zero
 /// register bits or without indirect.
 fn is_valid_indexed_postbyte(postbyte: u8) -> bool {
     if postbyte & 0x80 == 0 {

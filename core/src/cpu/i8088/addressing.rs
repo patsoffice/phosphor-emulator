@@ -6,14 +6,17 @@
 //! field selects a register directly.
 //!
 //! The 8 memory modes (mod=00, no displacement unless direct):
-//!   rm=000: [BX+SI]
-//!   rm=001: [BX+DI]
-//!   rm=010: [BP+SI]  (default segment SS)
-//!   rm=011: [BP+DI]  (default segment SS)
-//!   rm=100: [SI]
-//!   rm=101: [DI]
-//!   rm=110: [disp16] (direct addressing; default segment DS)
-//!   rm=111: [BX]
+//!
+//! ```text
+//! rm=000: [BX+SI]
+//! rm=001: [BX+DI]
+//! rm=010: [BP+SI]  (default segment SS)
+//! rm=011: [BP+DI]  (default segment SS)
+//! rm=100: [SI]
+//! rm=101: [DI]
+//! rm=110: [disp16] (direct addressing; default segment DS)
+//! rm=111: [BX]
+//! ```
 //!
 //! mod=01: add sign-extended 8-bit displacement
 //! mod=10: add 16-bit displacement

@@ -10,8 +10,8 @@
 //!
 //! # Reference
 //!
-//! https://6502disassembly.com/va-battlezone/mathbox.html
-//! https://github.com/historicalsource/battlezone/blob/main/MBUDOC.DOC
+//! - <https://6502disassembly.com/va-battlezone/mathbox.html>
+//! - <https://github.com/historicalsource/battlezone/blob/main/MBUDOC.DOC>
 
 use crate::core::debug::{DebugRegister, Debuggable};
 use phosphor_macros::Saveable;

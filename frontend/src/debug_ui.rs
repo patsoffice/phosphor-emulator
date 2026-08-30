@@ -680,7 +680,10 @@ fn draw_register_grid(ui: &mut egui::Ui, id: &str, registers: &[DebugRegister]) 
 /// Build the debug UI layout. Called as the closure argument to Video::present_with_debug().
 ///
 /// Layout:
-///   [Game] | [Controls col] | [CPU 0 col] | [CPU 1 col] | ...
+///
+/// ```text
+/// [Game] | [Controls col] | [CPU 0 col] | [CPU 1 col] | ...
+/// ```
 ///
 /// Each CPU column shows registers at the top and a tabbed disassembly/memory
 /// viewer below.
@@ -1008,7 +1011,7 @@ fn hex_input_ok(s: &str) -> bool {
     t.is_empty() || u32::from_str_radix(t, 16).is_ok()
 }
 
-/// The active step-CPU's name as a header suffix (" — <cpu>"), shown only on
+/// The active step-CPU's name as a header suffix (`" — <cpu>"`), shown only on
 /// multi-CPU machines so it's clear which CPU's space breakpoints/watchpoints
 /// target (they follow the "Step target" radio via `step_cpu`).
 fn active_cpu_suffix(state: &DebugState) -> String {

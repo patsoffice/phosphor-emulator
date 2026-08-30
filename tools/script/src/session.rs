@@ -8,9 +8,12 @@
 //!
 //! Every accessor routes through the machine's existing debug traits, exactly
 //! as the `disasm trace` cycle loop and the frontend's `debug_ui` already do:
-//! reads go through [`MachineDebug::debug_bus`] → [`BusDebug::read`];
-//! `pc`/`regs`/`disasm` go through [`BusDebug::cpus`] →
-//! [`DebugCpu`]/[`Debuggable`]. Machines without debug support yield
+//! reads go through [`MachineDebug::debug_bus`](phosphor_core::core::machine::MachineDebug::debug_bus)
+//! → [`BusDebug::read`](phosphor_core::core::debug::BusDebug::read);
+//! `pc`/`regs`/`disasm` go through
+//! [`BusDebug::cpus`](phosphor_core::core::debug::BusDebug::cpus) →
+//! [`DebugCpu`](phosphor_core::core::debug::DebugCpu)/[`Debuggable`](phosphor_core::core::debug::Debuggable).
+//! Machines without debug support yield
 //! `None`/empty, so scripts can check.
 
 use std::collections::HashMap;

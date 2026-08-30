@@ -82,7 +82,7 @@ enum Region {
 /// even-byte/odd-byte `ROM_LOAD16_BYTE` chip).
 ///
 /// Concatenation order in the loaded buffer:
-///   [301][302][303][204][305][306][307][208]
+///   `[301][302][303][204][305][306][307][208]`
 /// Pairs (high-byte = even chip, low-byte = odd chip):
 ///   301/302 → 0x0000, 303/204 → 0x4000, 305/306 → 0x8000, 307/208 → 0xC000
 pub static FOODF_PROGRAM_ROM: RomRegion = RomRegion {
@@ -890,7 +890,7 @@ impl FoodFightBoard {
     /// draw.
     ///
     /// Both were already scanline-boundary work; the interrupts used to test
-    /// the frame position again inside [`begin_cycle`], on every cycle, which
+    /// the frame position again inside [`Self::begin_cycle`], on every cycle, which
     /// is exactly the test [`run_scanlines`] exists to hoist out.
     ///
     /// `scanline` is 0..259 and the visible window is `[0, 224)`, so walking

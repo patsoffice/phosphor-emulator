@@ -53,7 +53,7 @@ struct Cli {
     #[arg(long, short)]
     list: bool,
 
-    /// Run with no window: capture <out>.png (final frame) + <out>.wav (audio),
+    /// Run with no window: capture OUT.png (final frame) + OUT.wav (audio),
     /// then exit. For screenshots, audio capture, and machine bring-up.
     #[arg(long)]
     headless: bool,
@@ -62,7 +62,7 @@ struct Cli {
     #[arg(long, default_value_t = 600)]
     frames: u32,
 
-    /// Output path prefix for --headless captures (writes <out>.png/.wav).
+    /// Output path prefix for --headless captures (writes OUT.png/.wav).
     #[arg(long, default_value = "/tmp/phosphor_capture")]
     out: String,
 

@@ -32,7 +32,7 @@ pub struct DisplaySettings {
     ///
     /// The one figure in the beam model with no derivation behind it, and so the
     /// one most worth putting in a viewer's hands. See
-    /// [`HALATION_FRACTION`](crate::device::dvg::HALATION_FRACTION).
+    /// [`crate::device::dvg::HALATION_FRACTION`].
     pub halation: f32,
 }
 
@@ -54,7 +54,7 @@ impl DisplaySettings {
     };
 
     /// The same settings with the glow off, for a renderer that cannot afford
-    /// it. See [`HALATION_OFF`](crate::device::dvg::HALATION_OFF).
+    /// it. See [`crate::device::dvg::HALATION_OFF`].
     pub fn without_halation(self) -> Self {
         Self {
             halation: HALATION_OFF,

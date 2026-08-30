@@ -234,7 +234,7 @@ impl<T: Sample> AudioResampler<T> {
     /// from the same average. Either way the anti-alias filter smooths the
     /// result, so the count of output samples per second of input is exact
     /// while the values are filtered rather than held. (The single-step
-    /// [`tick_sample`] only supports downsampling.)
+    /// [`Self::tick_sample`] only supports downsampling.)
     #[inline]
     pub fn tick(&mut self, sample: T) {
         T::accum_add(&mut self.sample_accum, sample);
@@ -263,7 +263,7 @@ impl<T: Sample> AudioResampler<T> {
     /// returns it without pushing it to the buffer.
     ///
     /// Use this when you need to post-process (e.g., mix with another source)
-    /// before calling [`push_sample`]. Advances stage one by a single step, so
+    /// before calling [`Self::push_sample`]. Advances stage one by a single step, so
     /// it is only correct when the input clock is faster than the intermediate
     /// rate — every caller drives it from a CPU clock.
     #[inline]
@@ -289,7 +289,7 @@ impl<T: Sample> AudioResampler<T> {
 
     /// Manually push a sample to the output buffer.
     ///
-    /// Use after [`tick_sample`] returns `Some` and you've mixed or
+    /// Use after [`Self::tick_sample`] returns `Some` and you've mixed or
     /// post-processed the resampled sample. The sample goes straight to the
     /// queue — it is already at the output rate, so it bypasses both stages.
     #[inline]

@@ -7,21 +7,24 @@ use phosphor_macros::Saveable;
 /// multiplexing. We emulate the external behavior directly.
 ///
 /// I/O ports (active-low, directly from cabinet switches):
-///   IN0[3:0] = P1 joystick {Left, Down, Right, Up}
-///   IN0[7:4] = P2 joystick {Left, Down, Right, Up}
-///   IN1[0]   = P1 Fire
-///   IN1[1]   = P2 Fire
-///   IN1[2]   = Start1
-///   IN1[3]   = Start2
-///   IN1[4]   = Coin1
-///   IN1[5]   = Coin2
-///   IN1[6]   = Service
-///   IN1[7]   = Test/Service Mode
+///
+/// ```text
+/// IN0[3:0] = P1 joystick {Left, Down, Right, Up}
+/// IN0[7:4] = P2 joystick {Left, Down, Right, Up}
+/// IN1[0]   = P1 Fire
+/// IN1[1]   = P2 Fire
+/// IN1[2]   = Start1
+/// IN1[3]   = Start2
+/// IN1[4]   = Coin1
+/// IN1[5]   = Coin2
+/// IN1[6]   = Service
+/// IN1[7]   = Test/Service Mode
+/// ```
 ///
 /// Commands (written via 06xx):
 ///   0x00: nop
-///   0x01 + 4 args: set coinage (coins_per_credit[0], creds_per_coin[0],
-///                                coins_per_credit[1], creds_per_coin[1])
+///   0x01 + 4 args: set coinage (`coins_per_credit[0]`, `creds_per_coin[0]`,
+///                                `coins_per_credit[1]`, `creds_per_coin[1]`)
 ///   0x02: enter credit mode
 ///   0x03: disable joystick remapping
 ///   0x04: enable joystick remapping

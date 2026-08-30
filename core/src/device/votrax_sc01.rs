@@ -340,7 +340,7 @@ impl VotraxSc01 {
     ///
     /// On the Gottlieb sound/speech board the SC-01's clock is a VCO driven
     /// by the speech-clock DAC, so the host retunes it at runtime. Phoneme
-    /// durations are paced by the rate at which [`tick`](Self::tick) is called
+    /// durations are paced by the rate at which [`tick`](crate::device::Device::tick) is called
     /// (the host's responsibility), while this updates the derived sample
     /// (`sclock`) and capacitor (`cclock`) clocks, the resampler input rate,
     /// and the switched-capacitor filters so formant pitch tracks the clock.
