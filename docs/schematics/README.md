@@ -22,10 +22,15 @@ transcription nobody checks.
     both its pin number and its net. The drawing then states the net table
     instead of paraphrasing it.
   - **A mermaid diagram** when it is not, which is most of them. An architecture
-    shared across boards has no pin numbers by design; a derivation carries
-    values and conclusions rather than nets; grouped blocks need subgraphs,
-    which netlistsvg has no concept of. Mermaid also follows the reader's theme,
-    where a committed SVG carries its own background.
+    shared across boards has no pin numbers by design; grouped blocks need
+    subgraphs, which netlistsvg has no concept of. Mermaid also follows the
+    reader's theme, where a committed SVG carries its own background.
+
+  What decides it is the reading and not the circuit. A netlist is worth its
+  file only where the transcription recorded pins, and a real circuit read off
+  sheet labels has nothing for one to draw:
+  [`williams-video-clock.md`](williams-video-clock.md) is that case, and says so
+  under its confidence heading.
 
   The choice is per diagram and not per file, and one file can want both.
   [`qbert-object-enable.md`](qbert-object-enable.md) is the case: a netlist for

@@ -117,3 +117,17 @@ read at legible size and are stated with confidence. The step from those to "64
 cycles" is arithmetic on them, and it is checked twice: once against the dot
 clock over 512, and once by the clock-tree test recomputing
 `cycles_per_scanline` from the declaration.
+
+The two pin-level rows also pass a check against the parts' pinouts, which is
+the cheap way to catch a misread digit. `4C`'s inputs 5, 4, 2 and 1 with its
+output on 6 are exactly the first gate of a 7421, and `7J`'s three pairs 1-2,
+3-4 and 5-6 are all real 74LS04 inverters, input odd and output even. Neither
+says the right chip was read, only that the digits within it are coherent.
+
+There is no netlist beside this file, unlike the counter and the Q*bert enable.
+Three of the six rows below carry no pin numbers at all, and they are the
+oscillator and the dividers, which is what this file is about: `7K`'s taps were
+read from sheet labels rather than traced, `7G`'s role was not traced, and
+`7J`'s three inverters have no recorded order, so drawing them in a chain would
+assert something the reading does not support. What is left with pins on it is
+`5F` and `4C`, which the `count240` row states in one line.
