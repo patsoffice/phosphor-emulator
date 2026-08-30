@@ -1,0 +1,164 @@
+{
+  "modules": {
+    "qbert object enable: vertical select, blanking decode, ENBUF": {
+      "ports": {
+        "/HBLANK": { "direction": "input", "bits": [45] }
+      },
+      "cells": {
+        "uF16": {
+          "type": "F16 counter lo",
+          "port_directions": {
+            "A..D (3,4,5,6)": "input",
+            "LD, ET via R55": "input",
+            "QA..QD V0..V3": "output",
+            "CO (15)": "output"
+          },
+          "connections": {
+            "A..D (3,4,5,6)": ["0", "0", "0", "0"],
+            "LD, ET via R55": ["1"],
+            "QA..QD V0..V3": [10, 11, 12, 13],
+            "CO (15)": [18]
+          },
+          "attributes": {}
+        },
+        "uD17": {
+          "type": "D17 counter hi",
+          "port_directions": {
+            "A..D (3,4,5,6)": "input",
+            "CL, EP, LD via R56": "input",
+            "ET (10)": "input",
+            "QA..QD V4..V7": "output"
+          },
+          "connections": {
+            "A..D (3,4,5,6)": ["0", "0", "0", "0"],
+            "CL, EP, LD via R56": ["1"],
+            "ET (10)": [18],
+            "QA..QD V4..V7": [14, 15, 16, 17]
+          },
+          "attributes": {}
+        },
+        "uE17": {
+          "type": "E17 74LS20",
+          "port_directions": {
+            "in (9,10,12,13) V4..V7": "input",
+            "/VBLANK out (8)": "output"
+          },
+          "connections": {
+            "in (9,10,12,13) V4..V7": [14, 15, 16, 17],
+            "/VBLANK out (8)": [19]
+          },
+          "attributes": {}
+        },
+        "uE4": {
+          "type": "E4 93419",
+          "port_directions": {
+            "FOY0..3 (inverting)": "output",
+            "FOY4..7 (inverting)": "output"
+          },
+          "connections": {
+            "FOY0..3 (inverting)": [28, 29, 30, 31],
+            "FOY4..7 (inverting)": [32, 33, 34, 35]
+          },
+          "attributes": {}
+        },
+        "uF5": {
+          "type": "F5 74LS283",
+          "port_directions": {
+            "A1..A4 (5,3,14,12) FOY0..3": "input",
+            "B1..B4 (6,2,15,11) VV0..3": "input",
+            "C0 (7)": "input",
+            "S1 (4) FRBD0": "output",
+            "S2 (1) FRBD1": "output",
+            "S3 (13) FRBD2": "output",
+            "S4 (10) FRBD3": "output",
+            "C4 (9)": "output"
+          },
+          "connections": {
+            "A1..A4 (5,3,14,12) FOY0..3": [28, 29, 30, 31],
+            "B1..B4 (6,2,15,11) VV0..3": [10, 11, 12, 13],
+            "C0 (7)": ["0"],
+            "S1 (4) FRBD0": [37],
+            "S2 (1) FRBD1": [38],
+            "S3 (13) FRBD2": [39],
+            "S4 (10) FRBD3": [40],
+            "C4 (9)": [36]
+          },
+          "attributes": {}
+        },
+        "uE5": {
+          "type": "E5 74LS283",
+          "port_directions": {
+            "A1..A4 FOY4..7": "input",
+            "B1..B4 VV4..7": "input",
+            "C0 (7)": "input",
+            "S1 (4)": "output",
+            "S2 (1)": "output",
+            "S3 (13)": "output",
+            "S4 (10)": "output"
+          },
+          "connections": {
+            "A1..A4 FOY4..7": [32, 33, 34, 35],
+            "B1..B4 VV4..7": [14, 15, 16, 17],
+            "C0 (7)": [36],
+            "S1 (4)": [41],
+            "S2 (1)": [42],
+            "S3 (13)": [43],
+            "S4 (10)": [44]
+          },
+          "attributes": {}
+        },
+        "uE6": {
+          "type": "E6 74LS30",
+          "port_directions": {
+            "in (12) S1": "input",
+            "in (2) S2": "input",
+            "in (1) S2": "input",
+            "in (4) S3": "input",
+            "in (3) S3": "input",
+            "in (5) S4": "input",
+            "in (11) /VBLANK": "input",
+            "in (6) /HBLANK": "input",
+            "/ENBUF out (8)": "output"
+          },
+          "connections": {
+            "in (12) S1": [41],
+            "in (2) S2": [42],
+            "in (1) S2": [42],
+            "in (4) S3": [43],
+            "in (3) S3": [43],
+            "in (5) S4": [44],
+            "in (11) /VBLANK": [19],
+            "in (6) /HBLANK": [45],
+            "/ENBUF out (8)": [46]
+          },
+          "attributes": {}
+        },
+        "uJ7": {
+          "type": "J7 74LS04",
+          "port_directions": {
+            "in (13) /ENBUF": "input",
+            "out (12) ENBUF": "output"
+          },
+          "connections": {
+            "in (13) /ENBUF": [46],
+            "out (12) ENBUF": [47]
+          },
+          "attributes": {}
+        },
+        "uG6": {
+          "type": "G6 74LS161",
+          "port_directions": {
+            "EP (7)": "input",
+            "ET (10)": "input"
+          },
+          "connections": {
+            "EP (7)": [47],
+            "ET (10)": [47]
+          },
+          "attributes": {}
+        }
+      },
+      "netnames": {}
+    }
+  }
+}

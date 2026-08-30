@@ -9,11 +9,14 @@
 # symbol or routes a wire. It does emit an SVG that needs two fixes before it
 # can go in a document:
 #
-#   - No viewBox. Input port labels are drawn to the left of x=0 and the
-#     leftmost one is otherwise clipped. PAD has to exceed the longest label in
-#     the first column, which is 6px per character at the 10px monospace the
-#     default skin uses. Raise it per diagram if a label loses its first
-#     letters; there is no measurement here that would do it automatically.
+#   - No viewBox. The layout width covers the boxes and wires but not the text
+#     around them: input port labels are drawn left of x=0, and a cell's type
+#     is centered over a 30px box, so a long one on the leftmost or rightmost
+#     cell overhangs both ends. PAD is applied to both sides at 6px per
+#     character, the 10px monospace the default skin uses. Keep type strings
+#     short (a ref and a part number, with the role left to the parts table)
+#     and the default holds; raise PAD if a label still loses its ends, because
+#     nothing here measures the text.
 #
 #   - No background. The geometry lives entirely in the file's <style> block,
 #     which strokes black on a transparent ground, so the drawing disappears
@@ -32,7 +35,7 @@ for json in *.json; do
     NR == 1 {
       match($0, /width="[0-9.]+"/);  w = substr($0, RSTART + 7, RLENGTH - 8)
       match($0, /height="[0-9.]+"/); h = substr($0, RSTART + 8, RLENGTH - 9)
-      vw = w + pad + 8
+      vw = w + 2 * pad
       vh = h + 16
       sub(/width="[0-9.]+" height="[0-9.]+"/,
           "width=\"" vw "\" height=\"" vh "\" viewBox=\"-" pad " -8 " vw " " vh "\"")

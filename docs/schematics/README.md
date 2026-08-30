@@ -26,6 +26,12 @@ transcription nobody checks.
     values and conclusions rather than nets; grouped blocks need subgraphs,
     which netlistsvg has no concept of. Mermaid also follows the reader's theme,
     where a committed SVG carries its own background.
+
+  The choice is per diagram and not per file, and one file can want both.
+  [`qbert-object-enable.md`](qbert-object-enable.md) is the case: a netlist for
+  the gate, where counting eight NAND inputs off the drawing is the whole
+  argument, and a block diagram for the pipeline downstream of it, where the
+  stages are the point and the pin numbers are already in the tables.
 - **A net table**, `net -> ref.pin`, for the connections the behaviour turns on.
 - **What it establishes**, stated as conclusions.
 - **What it does NOT establish**, which is the half that keeps the format

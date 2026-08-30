@@ -25,19 +25,34 @@ that places an object horizontally. Sheet 1 was not read. Gottlieb labelled the
 functional blocks, and the block names quoted below are the drawing's own,
 including its spelling of "DISENABLE COUNTER".
 
-## The path
+## The enable
+
+The gate itself, at pin level, from the first two net tables below.
+
+![The vertical select, the blanking decode and ENBUF](qbert-object-enable.svg)
+
+Generated from [`qbert-object-enable.json`](qbert-object-enable.json) by
+[`render.sh`](render.sh). Every port carries its pin number, so `E6`'s eight
+inputs can be counted off the drawing: that is the claim this file exists to
+support and it is the one thing a block diagram cannot show.
+
+Two departures from the net tables, both deliberate. `VV0..7` is drawn straight
+from the vertical counter, which is what the sum's B inputs are labeled; whether
+it is really `V` or `V - 1` through the `E16` latch was not traced, and is under
+"does not establish" below. `E16` itself is not drawn, because its clock was not
+traced and it sits outside the enable path. `FRBD0..3` leave `F5` labeled but
+unwired, because their destination is in the next diagram rather than this one.
+
+## The path to the pixel
+
+Everything downstream of `ENBUF`, as blocks. The stages are the point here and
+the pin numbers are in the tables, so this one stays a block diagram.
 
 ```mermaid
 flowchart TB
   subgraph scan["line N: object scan, 64 entries"]
-    E4["E4 93419<br/>vert position register<br/>inverting outputs"] -->|"FOY0..7"| ADD
-    VV(["VV0..7<br/>vertical counter"]) --> ADD
-    ADD["F5 + E5 74LS283<br/>FOY + VV, C0 grounded"] -->|"sum bits 4..7"| E6
-    VB(["/VBLANK<br/>E17 = NAND V4..V7"]) --> E6
-    HB(["/HBLANK"]) --> E6
-    E6["E6 74LS30<br/>8-input NAND"] -->|"/ENBUF"| J7["J7 74LS04"]
-    J7 -->|"ENBUF"| G6["G6 74LS161 + G8 74LS74<br/>line RAM address counter<br/>loads 0 at HBLANK"]
-    ADD -->|"sum bits 0..3 = row in object"| MUX
+    ENB(["ENBUF<br/>from the enable above"]) --> G6["G6 74LS161 + G8 74LS74<br/>line RAM address counter<br/>loads 0 at HBLANK"]
+    ROW(["FRBD0..3<br/>row within the object"]) --> MUX
     E12["E1-2, E2-3 93415<br/>horiz position, object select<br/>inverting outputs"] --> MUX
     MUX["G1, G2, G5 74LS157<br/>real data vs all-ones idle"] --> LRAM
     G6 -->|"FBA0..4, 32 slots"| LRAM["H1..H4, J1..J6 74S189<br/>line object position + select RAM"]
