@@ -1,0 +1,24 @@
+schema = 1
+id = "dkongjr/jump"
+target = "dkongjr-discrete"
+duration_s = 5.0
+description = "One jump, triggered once and allowed to decay completely"
+
+# The game's three-frame pulse again. The one-shot it starts is 465 ms wide and
+# the control capacitor takes 355 ms to slew, so the note is still moving long
+# after the trigger has gone -- which is why a single isolated trigger is the
+# only useful measurement here. Re-pulsing would overlap decays and destroy both
+# the envelope and the integrated energy.
+[[action]]
+at_s = 2.0
+control = "jump"
+value = true
+
+[[action]]
+at_s = 2.05
+control = "jump"
+value = false
+
+[analysis]
+start_s = 1.95
+end_s = 5.0

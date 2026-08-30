@@ -1,0 +1,24 @@
+schema = 1
+id = "dkongjr/walk"
+target = "dkongjr-discrete"
+duration_s = 5.0
+description = "One footstep, 6H bit 7 low, triggered the way the game triggers it"
+
+# Three frames, which is exactly what the game asserts for every footstep --
+# measured over 3000 frames of recorded play in
+# tools/script/examples/dkongjr_sound_trace.rhai, not assumed. The one-shot it
+# starts is 99 ms wide, so the pulse width does not set the length of the sound;
+# holding the line instead would be a state the game never produces.
+[[action]]
+at_s = 2.0
+control = "walk"
+value = true
+
+[[action]]
+at_s = 2.05
+control = "walk"
+value = false
+
+[analysis]
+start_s = 1.95
+end_s = 5.0

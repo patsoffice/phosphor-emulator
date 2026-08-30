@@ -1,0 +1,19 @@
+schema = 1
+id = "dkongjr/climb"
+target = "dkongjr-discrete"
+duration_s = 5.0
+description = "One climb, triggered once and allowed to decay completely"
+
+[[action]]
+at_s = 2.0
+control = "climb"
+value = true
+
+[[action]]
+at_s = 2.05
+control = "climb"
+value = false
+
+[analysis]
+start_s = 1.95
+end_s = 5.0

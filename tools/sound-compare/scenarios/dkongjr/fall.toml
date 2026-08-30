@@ -1,0 +1,28 @@
+schema = 1
+id = "dkongjr/fall"
+target = "dkongjr-discrete"
+duration_s = 5.0
+description = "One fall: the only voice on this board driven by a level, held the way the game holds it"
+
+# HELD, and that is a fact about the board rather than a modelled limitation.
+# Falling is the one voice with no one-shot anywhere near it: its NAND is opened
+# by the enable itself, so it sounds for exactly as long as the line is held and
+# its oscillator slides down the whole time (C26's 47 uF against 30 k is about a
+# second). The game holds it for 86 frames, measured, so that is what this does.
+#
+# The distinction matters because the design doc's standing warning is the
+# opposite case -- a scenario that has to hold a line because the MODEL cannot
+# express a pulse. This is not that, and it does not expire.
+[[action]]
+at_s = 2.0
+control = "fall"
+value = true
+
+[[action]]
+at_s = 3.4333
+control = "fall"
+value = false
+
+[analysis]
+start_s = 1.95
+end_s = 5.0

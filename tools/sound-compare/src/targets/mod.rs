@@ -2,4 +2,5 @@
 
 pub mod asteroids;
 pub mod dkong;
+pub mod dkongjr;
 pub mod galaxian;

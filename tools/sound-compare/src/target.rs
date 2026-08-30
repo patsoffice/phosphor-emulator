@@ -64,6 +64,7 @@ pub type CreateFn = fn(probe: Option<&str>) -> Result<Box<dyn SoundTarget>, Stri
 static ALL: &[&TargetSpec] = &[
     &crate::targets::asteroids::SPEC,
     &crate::targets::dkong::SPEC,
+    &crate::targets::dkongjr::SPEC,
     &crate::targets::galaxian::SPEC,
 ];
 

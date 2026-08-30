@@ -1,0 +1,30 @@
+schema = 1
+id = "dkongjr/walk-hi"
+target = "dkongjr-discrete"
+duration_s = 5.0
+description = "The same footstep with 6H bit 7 held, which reselects the counter taps"
+
+# Walking has two scenarios because one latch bit gives it two sounds. Bit 7
+# drives the LS157's select pin, swapping the 4020 taps the voice beats against
+# (divide-by-16 and 4096 for one, 128 and 8192 for the other) and grounding the
+# tone channel, so this is a different voice rather than the same one
+# transposed. The game holds the bit for tens to hundreds of frames, so it is
+# set before the trigger and left alone.
+[[action]]
+at_s = 0.0
+control = "walk-pitch"
+value = true
+
+[[action]]
+at_s = 2.0
+control = "walk"
+value = true
+
+[[action]]
+at_s = 2.05
+control = "walk"
+value = false
+
+[analysis]
+start_s = 1.95
+end_s = 5.0
