@@ -1,3 +1,86 @@
+//! Nintendo TKG-04 board (Z80 + I8035 + DMA), shared by Donkey Kong, Donkey
+//! Kong Jr. and Mario Bros.
+//!
+//! # Schematics
+//!
+//! All three games are drawn, in three packages that share almost no
+//! conventions with each other. Their sound sections are three different
+//! designs rather than revisions of one, which is the fact this section mainly
+//! exists to record: see "Sound is per game" below before assuming anything in
+//! [`crate::dkong_sound`] generalizes.
+//!
+//! | Game | Drawing | Source | Page |
+//! |---|---|---|---|
+//! | Donkey Kong | `TKG4-14-CPU`, sheet 3 | [dk-tkg4u.pdf] | pp29-30, read |
+//! | Donkey Kong | `TKG4-14-VIDEO`, sheet 4 | [dk-tkg4u.pdf] | pp31-32, unread |
+//! | DK Jr. | `Donkey Kong Junior CPU P.C. Board`, sheet 5 | [dkjr.pdf] | pp30-31, read |
+//! | DK Jr. | `Donkey Kong Junior Video P.C. Board`, sheet 4 | [dkjr.pdf] | pp28-29, unread |
+//! | Mario Bros. | `TMA1-CPU` | [marioborspak.pdf] | p39, read |
+//! | Mario Bros. | `TMA1-VIDEO` | [marioborspak.pdf] | p40, unread |
+//!
+//! Read 2026-08-30. Every package also carries power supply sheets, which are
+//! omitted here because nothing on this board needs them.
+//!
+//! HOW THE SCANS ARE LAID OUT, because no two agree and each cost a pass.
+//!
+//! - Donkey Kong (pp23-32) and Donkey Kong Jr. (pp24-31) are Nintendo Co. Ltd.
+//!   drawings with numbered sheets, 300 dpi 1-bit and no text layer, so nothing
+//!   in them is searchable. Their large sheets are each cut across two PDF
+//!   pages, left half then right half, so a sheet number and a PDF page never
+//!   agree.
+//! - Donkey Kong's contents page lists two video monitor sheets, "20-EZV" (5)
+//!   and "20-EZV(R-B)" (6), that are not in its file. Donkey Kong Jr.'s package
+//!   does carry the monitor, as its sheet 3 at pp26-27.
+//! - Mario Bros. is a Nintendo of America drawing with lettered sheets, and
+//!   there are two scans. Prefer [marioborspak.pdf]: whole sheets, one per page,
+//!   600 dpi. [MarioBros.pdf] is the same drawings at roughly 430 dpi with each
+//!   sheet split in two, which puts the walk oscillators (p51) on a different
+//!   page from the filter chain they feed (p52).
+//!
+//! SOUND IS PER GAME. The three boards share an output stage and nothing else.
+//!
+//! - Donkey Kong: analog tone sources. An NE556 dual timer (R42 47 kΩ / R43
+//!   27 kΩ / C28 33 nF, and R40 47 kΩ / R41 27 kΩ / C27 47 nF), two 4049
+//!   inverter oscillators, and envelope networks on Q1-Q7 2SC1815 with 1S553
+//!   steering diodes. Music through a DAC-08 at 8K off an MB8884 (8035) at 7H,
+//!   command latch LS75 x2 at 4H/4F, two 2716 at 3H/3F. This is the drawing
+//!   behind the 555 constants in [`crate::dkong_sound`].
+//! - Donkey Kong Jr.: digital tone sources. No NE556 and no 4049 anywhere. Two
+//!   74LS629 VCOs (5K and 8L), a 4020 ripple counter at 6L, an LS157 at 6K
+//!   selecting counter taps, and an LS123 one-shot at 4K, with only Q1/Q3/Q4
+//!   2SC1815 and small RC slewing the control voltages. Same DAC-08 at 8K and
+//!   MB8884 at 7H, but one 2732 at 3H behind an LS373 at 3F.
+//! - Mario Bros.: 74LS629 again, different circuit. Both halves in one package
+//!   at 4K, control voltages slewed by R64 20 kΩ / C43 3.3 µF and R65 10 kΩ /
+//!   C44 3.3 µF, timing caps C39 4.7 nF and C40 22 nF, driven by a 4020B at 3H
+//!   and a 74123 at 4L (C41 4.7 µF, R61 47 kΩ). Its filter chain is two LM3900
+//!   Norton sections at 3M rather than an MB3614, and its music DAC is a
+//!   discrete resistor ladder (MXR1 / RM7) off a 374 latch at 3K, not a DAC-08.
+//!   These are the walk/skid oscillators [`crate::mario_bros`] currently defers.
+//!
+//! Common to all three: an MB3712 power amplifier with VR1 10 kΩ into SPEAKER
+//! P11, a TV Audio tap, and a dashed box around the amplifier meaning optional
+//! parts (note 2 on both Nintendo Co. sheets).
+//!
+//! One block on the Donkey Kong and Donkey Kong Jr. sheets looks like sound and
+//! is not: the transistor cluster at the top right (C828P, Q15-Q17, VR3/VR4,
+//! R104-R112) is the RGB video output stage.
+//!
+//! WHAT THIS DOES NOT ESTABLISH. On none of the three was the path from a
+//! main-CPU sound write to an individual effect traced end to end; on Donkey
+//! Kong the LS138 at 1C is visible feeding the effect section, but its enable
+//! was not followed back. Only the CPU sheets were read, and on the two
+//! Nintendo Co. packages only their right halves in detail. Every video sheet,
+//! the monitor sheet and every power supply sheet is unread. Nothing above is a
+//! transcription: it is a parts census taken to establish that the three sound
+//! sections differ, and the values quoted are those legible without tracing a
+//! net.
+//!
+//! [dk-tkg4u.pdf]: https://www.arcade-museum.com/manuals-videogames/D/dk-tkg4u.pdf
+//! [dkjr.pdf]: https://www.arcade-museum.com/manuals-videogames/D/DKJr.pdf
+//! [marioborspak.pdf]: https://www.arcade-museum.com/manuals-videogames/M/marioborspak.pdf
+//! [MarioBros.pdf]: https://www.arcade-museum.com/manuals-videogames/M/MarioBros.pdf
+
 use crate::dkong_sound::DkongDiscreteSound;
 use phosphor_core::audio::AudioResampler;
 use phosphor_core::core::bus::InterruptState;
