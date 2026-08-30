@@ -215,6 +215,32 @@ pub struct CmosInverter {
     pub input_clamp: f64,
 }
 
+/// One half of a 74LS629 dual voltage-controlled oscillator, as a board wires
+/// it. Every field is a designator off the drawing; see
+/// [`ls629_vco`](DiscreteCircuitBuilder::ls629_vco).
+///
+/// The fields are named rather than positional because four resistors and
+/// capacitors in a row are easy to transpose, and a transposition here is a
+/// wrong pitch rather than a compile error.
+#[derive(Clone, Copy, Debug)]
+pub struct Ls629 {
+    /// Timing capacitor across CX1/CX2 (farads). The pins carry nothing else, so
+    /// this is the one component that is unambiguously the oscillator's own.
+    pub c: f64,
+    /// Series resistance from whatever drives the frequency-control pin (ohms).
+    /// Not a filter: it divides against the pin's own impedance, so it sets how
+    /// much of the driving voltage arrives.
+    pub r_freq: f64,
+    /// Capacitance from the frequency-control pin to ground (farads), `0.0` for
+    /// none. With `r_freq` this is what makes a pitch slew rather than step.
+    pub c_freq_in: f64,
+    /// Voltage at whatever drives the range pin (volts), before `r_rng`.
+    pub v_rng: f64,
+    /// Series resistance into the range pin (ohms), `0.0` when it is tied
+    /// straight to a rail.
+    pub r_rng: f64,
+}
+
 impl LfsrSpec {
     /// The shape this framework used before the shift direction was explicit:
     /// shifting toward bit 0, feedback uninverted, output from bit 0.
@@ -1110,6 +1136,59 @@ impl DiscreteCircuitBuilder {
                 ratio: r_bias / (r_bias + r),
                 v_cap: 0.0,
                 v_mid_prev: 0.0,
+            },
+            ClockDomain::BoardCycle,
+        )
+    }
+
+    /// One 74LS629 voltage-controlled oscillator half, from the parts a board
+    /// wires around it. **The returned node's value is the oscillator's
+    /// frequency in hertz, not its output.** Wrap it in a
+    /// [`variable_square`](Self::variable_square) where the board uses the
+    /// waveform; read it as a rate where the board only counts its edges.
+    ///
+    /// That split is not a convenience. The '629 is specified to 20 MHz and
+    /// boards use it there: on a Donkey Kong Jr. board one half runs to 59 kHz
+    /// purely to clock a ripple counter, which no simulation rate this framework
+    /// can afford would represent as a square. A rate can be counted exactly at
+    /// any simulation rate; a square cannot.
+    ///
+    /// The part is a constant-current relaxation oscillator with no external
+    /// timing resistor, so `c` alone sets the scale and the two pin voltages set
+    /// the rate. Both pins have about 90 kΩ of their own impedance, so a series
+    /// resistor into either one is a divider and belongs in the model —
+    /// `r_freq` is not a filter, and `r_rng` matters even though the range pin
+    /// usually sits on a rail. Note the sense of the range input, which is the
+    /// easiest thing here to get backwards: raising it *lowers* the frequency.
+    ///
+    /// The enable pin is not modelled. Every instance across the two boards that
+    /// use this grounds it, so all of them free-run; a board that switches one
+    /// wants a gate at the point the circuit actually gates, which is not here.
+    ///
+    /// The rate itself comes from a measured surface rather than an equation —
+    /// the part is non-linear and even non-monotonic below 1 V, and its
+    /// datasheet publishes no law for this member of the family. See
+    /// [`derive::ls629_frequency`] for what that surface is and whose
+    /// measurements stand behind it.
+    pub fn ls629_vco(&mut self, name: &str, fc_src: impl Into<NodeId>, part: Ls629) -> NodeId {
+        assert!(part.c > 0.0, "a 74LS629 needs a timing capacitor");
+        let dt = 1.0 / self.sim_rate as f64;
+        let pin_r = derive::LS629_PIN_R;
+        // A capacitor on the control pin charges through the series resistor in
+        // parallel with the pin's own impedance, not through the resistor alone.
+        let freq_in_exp = (part.c_freq_in > 0.0).then(|| {
+            let r = part.r_freq * pin_r / (part.r_freq + pin_r);
+            derive::rc_charge_exp(r, part.c_freq_in, dt)
+        });
+        self.push_node(
+            name,
+            NodeKind::Ls629Vco {
+                fc_src: fc_src.into(),
+                v_rng: part.v_rng * pin_r / (part.r_rng + pin_r),
+                v_freq_scale: pin_r / (part.r_freq + pin_r),
+                freq_in_exp,
+                c_scale: derive::LS629_REF_C / part.c,
+                v_cap: 0.0,
             },
             ClockDomain::BoardCycle,
         )

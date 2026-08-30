@@ -298,6 +298,33 @@ pub(crate) enum NodeKind {
         v_cap: f64,
         v_mid_prev: f64,
     },
+    /// One 74LS629 voltage-controlled oscillator half.
+    ///
+    /// **This node's value is a frequency in hertz, not a waveform.** The part's
+    /// characterization yields a rate; what a board does with that rate is a
+    /// separate question, and the two boards using it answer it differently. A
+    /// half whose output is a signal becomes a [`NodeKind::VariableSquare`] read
+    /// from this node; a half that only clocks a counter is read as a rate
+    /// directly, which is what lets a 59 kHz oscillator drive a counter exactly
+    /// at a simulation rate that could not carry it as a square.
+    Ls629Vco {
+        fc_src: NodeId,
+        /// Range voltage as it arrives at the pin, already divided by its series
+        /// resistor against the pin impedance. No board modulates this, so it is
+        /// a constant rather than a node.
+        v_rng: f64,
+        /// `LS629_PIN_R / (r_freq + LS629_PIN_R)`: how the control voltage
+        /// divides on its way in.
+        v_freq_scale: f64,
+        /// Per-step charge fraction of the capacitor from the control pin to
+        /// ground, through the series resistor in parallel with the pin
+        /// impedance. `None` when the board fits no such capacitor.
+        freq_in_exp: Option<f64>,
+        /// `LS629_REF_C / c`: the timing capacitor scales the characterized rate.
+        c_scale: f64,
+        /// The control pin's capacitor voltage, when there is one.
+        v_cap: f64,
+    },
     /// Binary counter clocked by another node's rising edges, output taken from
     /// its top bit — a divide-by-`divisor` square with even duty.
     ///
@@ -380,6 +407,7 @@ impl NodeKind {
             }
             NodeKind::VariableSquare { freq_src, .. }
             | NodeKind::VariableTriangle { freq_src, .. } => out.push(freq_src.index()),
+            NodeKind::Ls629Vco { fc_src, .. } => out.push(fc_src.index()),
             NodeKind::Multiply { a, b } => {
                 out.push(a.index());
                 out.push(b.index());
@@ -881,6 +909,21 @@ impl NodeKind {
                 *v_mid_prev = v_mid;
                 v_out
             }
+            NodeKind::Ls629Vco {
+                fc_src,
+                v_rng,
+                v_freq_scale,
+                freq_in_exp,
+                c_scale,
+                v_cap,
+            } => {
+                let mut v_fc = values[fc_src.index()] * *v_freq_scale;
+                if let Some(exp) = freq_in_exp {
+                    *v_cap += (v_fc - *v_cap) * *exp;
+                    v_fc = *v_cap;
+                }
+                super::derive::ls629_frequency(v_fc, *v_rng) * *c_scale
+            }
             NodeKind::EdgeDivider {
                 clock_src,
                 divisor,
@@ -988,6 +1031,7 @@ impl NodeKind {
                 *y2 = 0.0;
             }
             NodeKind::RcDisc5 { cap_v, .. } | NodeKind::RcIntegrate { cap_v, .. } => *cap_v = 0.0,
+            NodeKind::Ls629Vco { v_cap, .. } => *v_cap = 0.0,
             NodeKind::EdgeDivider {
                 count, level, last, ..
             } => {
@@ -1059,9 +1103,9 @@ impl NodeKind {
                 w.write_f64_le(*y1);
                 w.write_f64_le(*y2);
             }
-            NodeKind::RcDisc5 { cap_v, .. } | NodeKind::RcIntegrate { cap_v, .. } => {
-                w.write_f64_le(*cap_v)
-            }
+            NodeKind::RcDisc5 { cap_v, .. }
+            | NodeKind::RcIntegrate { cap_v, .. }
+            | NodeKind::Ls629Vco { v_cap: cap_v, .. } => w.write_f64_le(*cap_v),
             NodeKind::EdgeDivider {
                 count, level, last, ..
             } => {
@@ -1133,9 +1177,9 @@ impl NodeKind {
                 *y1 = r.read_f64_le()?;
                 *y2 = r.read_f64_le()?;
             }
-            NodeKind::RcDisc5 { cap_v, .. } | NodeKind::RcIntegrate { cap_v, .. } => {
-                *cap_v = r.read_f64_le()?
-            }
+            NodeKind::RcDisc5 { cap_v, .. }
+            | NodeKind::RcIntegrate { cap_v, .. }
+            | NodeKind::Ls629Vco { v_cap: cap_v, .. } => *cap_v = r.read_f64_le()?,
             NodeKind::EdgeDivider {
                 count, level, last, ..
             } => {

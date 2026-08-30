@@ -1191,3 +1191,246 @@ fn save_load_preserves_analog_555_state() {
     assert_eq!(na, nb);
     assert_eq!(a[..na], bb[..nb]);
 }
+
+// -- 74LS629 VCO ------------------------------------------------------------
+
+/// One bench-measured oscillator: the parts around it, and the nine control
+/// voltages and frequencies measured through it.
+struct Ls629Bench {
+    what: &'static str,
+    part: Ls629,
+    points: [(f64, f64); 9],
+}
+
+/// The four 74LS629 halves on a Donkey Kong Jr. sound board that were measured
+/// on a breadboard in 2010, with the parts each one is wired to. The endpoints
+/// of each sweep are the measured output levels of the 74LS04 driving it, which
+/// is why they are 0.13-0.15 V and 4.14-4.16 V rather than 0 V and 5 V.
+///
+/// These measurements are not ours; see `derive::ls629_frequency`. They are the
+/// only check on that surface, because the '629's own datasheet publishes no
+/// frequency law for it.
+fn ls629_bench() -> [Ls629Bench; 4] {
+    [
+        Ls629Bench {
+            what: "5K pin 7, walking's tone (C18 22n, R10 10k, C17 3.3u, R33 1k)",
+            part: Ls629 {
+                c: 22e-9,
+                r_freq: 10_000.0,
+                c_freq_in: 0.0,
+                v_rng: 5.0,
+                r_rng: 1_000.0,
+            },
+            points: [
+                (0.151, 3_139.0),
+                (0.25, 2_883.0),
+                (0.5, 2_820.0),
+                (0.75, 3_336.0),
+                (1.0, 3_805.0),
+                (2.0, 6_498.0),
+                (3.0, 9_796.0),
+                (4.0, 13_440.0),
+                (4.14, 13_980.0),
+            ],
+        },
+        Ls629Bench {
+            what: "5K pin 10, walking's counter clock (C19 4.7n, R11 20k, C16 3.3u, R33 1k)",
+            part: Ls629 {
+                c: 4.7e-9,
+                r_freq: 20_000.0,
+                c_freq_in: 0.0,
+                v_rng: 5.0,
+                r_rng: 1_000.0,
+            },
+            points: [
+                (0.135, 14_450.0),
+                (0.25, 13_320.0),
+                (0.5, 12_980.0),
+                (0.75, 15_150.0),
+                (1.0, 17_270.0),
+                (2.0, 28_230.0),
+                (3.0, 41_910.0),
+                (4.0, 56_950.0),
+                (4.15, 59_400.0),
+            ],
+        },
+        Ls629Bench {
+            what: "8L pin 10, the jump voice (C22 220n, R13 47k || R12 10k, R35 1k)",
+            part: Ls629 {
+                c: 0.22e-6,
+                // The two inverters feeding this pin arrive through their own
+                // resistors, so the pin sees them in parallel.
+                r_freq: 47_000.0 * 10_000.0 / 57_000.0,
+                c_freq_in: 0.0,
+                v_rng: 5.0,
+                r_rng: 1_000.0,
+            },
+            points: [
+                (0.151, 313.0),
+                (0.25, 288.0),
+                (0.5, 275.0),
+                (0.75, 324.0),
+                (1.0, 370.0),
+                (2.0, 635.0),
+                (3.0, 965.0),
+                (4.0, 1_325.0),
+                (4.14, 1_378.0),
+            ],
+        },
+        Ls629Bench {
+            what: "7P pin 7, the falling voice (C37 120n, R14 30k, C26 47u, R34 1k)",
+            part: Ls629 {
+                c: 0.12e-6,
+                r_freq: 30_000.0,
+                c_freq_in: 0.0,
+                v_rng: 5.0,
+                r_rng: 1_000.0,
+            },
+            points: [
+                (0.134, 570.0),
+                (0.25, 538.0),
+                (0.5, 489.0),
+                (0.75, 560.0),
+                (1.0, 636.0),
+                (2.0, 1_003.0),
+                (3.0, 1_484.0),
+                (4.0, 2_016.0),
+                (4.16, 2_111.0),
+            ],
+        },
+    ]
+}
+
+/// Modelled frequency of one oscillator held at a fixed control voltage.
+fn ls629_freq_at(part: Ls629, v_control: f64) -> f64 {
+    let mut b = builder_1to1(RATE);
+    let fc = b.constant("FC", v_control);
+    let vco = b.ls629_vco("VCO", fc, part);
+    let mut c = b.build();
+    // Enough steps for a control-pin capacitor to settle, if one is fitted.
+    step_n(&mut c, 400_000);
+    c.value(vco)
+}
+
+/// The residual against all four measured oscillators, in percent, modelled
+/// minus measured. Written down because the surface is a global fit over the
+/// whole '62x family rather than a fit to any one of these circuits, so the
+/// error is real, systematic, and worth knowing the shape of before reading
+/// anything into a pitch this model produces.
+///
+/// ```text
+///   control V   0.13-0.15   0.25    0.5    0.75      1      2      3      4  4.1-4.2
+///   5K pin 7        +12.5  +19.0  +19.1    +5.1   +0.9   -1.2   +1.3   +0.8    +0.5
+///   5K pin 10       +15.5  +21.3  +21.0    +6.5   +0.3   -3.0   -0.2   +0.5    +0.2
+///   8L pin 10       +12.7  +19.0  +22.2    +8.6   +4.6   +3.0   +4.8   +4.1    +3.9
+///   7P pin 7        +15.2  +18.2  +25.8   +11.5   +3.7   -1.3   +0.4   +1.2    +0.8
+/// ```
+///
+/// Two things follow, and the second is the one that matters for the boards.
+///
+/// The error is a *band*, not a scale: within 5 % from 1 V up, and up to 26 %
+/// high below it. The low end is where the surface is least constrained and
+/// where the part's own datasheet warns the output may be unstable, so this is
+/// the family's difficult region rather than a fitting mistake.
+///
+/// But every one of these oscillators is driven by a 74LS04 and so spends
+/// almost all its time at one *end* of the sweep, not in the middle: the
+/// endpoints above are the measured output levels of that inverter. So the
+/// residual in play is +0.2 % to +3.9 % with the control line high, and +12.5 %
+/// to +15.5 % with it low. The middle columns are passed through while a
+/// control capacitor slews, not sat in. Only the 8L half is out by more than a
+/// percent or two at the top of its range, and it is out by about 4 %
+/// throughout, which is a fixed sharpness in the jump voice rather than a
+/// distortion of its sweep.
+#[test]
+fn ls629_matches_the_bench_measurements() {
+    for bench in ls629_bench() {
+        for (v, measured) in bench.points {
+            let modelled = ls629_freq_at(bench.part, v);
+            let error = (modelled - measured) / measured;
+            // Per band, so a regression in either is visible on its own and the
+            // low-voltage gap is recorded rather than buried in one loose bound.
+            let bound = if v >= 1.0 { 0.05 } else { 0.26 };
+            assert!(
+                error.abs() <= bound,
+                "{}: {v} V modelled {modelled:.0} Hz vs measured {measured:.0} Hz \
+                 ({:+.1} %, bound {:.0} %)",
+                bench.what,
+                error * 100.0,
+                bound * 100.0,
+            );
+        }
+    }
+}
+
+#[test]
+fn ls629_series_resistors_are_dividers_not_decoration() {
+    // The check that the pin impedance is modelled at all. R10 and R11 differ
+    // only in value, and the two oscillators they feed differ by far more than
+    // their capacitors alone explain: dropping the divider would make the ratio
+    // of these two frequencies exactly the ratio of their capacitors.
+    let bench = ls629_bench();
+    let (a, b) = (bench[0].part, bench[1].part);
+    let (fa, fb) = (ls629_freq_at(a, 4.0), ls629_freq_at(b, 4.0));
+    let cap_ratio = a.c / b.c;
+    let measured_ratio = fb / fa;
+    assert!(
+        (measured_ratio - cap_ratio).abs() > 0.3,
+        "the 20 k series resistor moved nothing: ratio {measured_ratio:.3} \
+         against the capacitors' {cap_ratio:.3}"
+    );
+    // And the direction: more series resistance is less control voltage at the
+    // pin, so a lower frequency once the capacitors are divided out.
+    assert!(measured_ratio < cap_ratio);
+}
+
+#[test]
+fn ls629_range_input_lowers_the_frequency() {
+    // The sense of the range pin, which is the one thing about this part that
+    // is easy to invert: it sets the threshold the timing capacitor runs down
+    // to, so more range voltage is a longer ramp and a slower oscillator.
+    let base = ls629_bench()[0].part;
+    let low = ls629_freq_at(Ls629 { v_rng: 1.0, ..base }, 2.0);
+    let high = ls629_freq_at(Ls629 { v_rng: 5.0, ..base }, 2.0);
+    assert!(
+        high < low,
+        "raising range from 1 V to 5 V moved {low:.0} Hz to {high:.0} Hz"
+    );
+}
+
+#[test]
+fn ls629_control_capacitor_slews_without_moving_the_settled_pitch() {
+    // C17 and its kind are what make a pitch glide rather than step. They must
+    // not change where it arrives: a capacitor to ground is not a divider.
+    let mut bare = ls629_bench()[0].part;
+    bare.c_freq_in = 0.0;
+    let slewed = Ls629 {
+        c_freq_in: 3.3e-6,
+        ..bare
+    };
+
+    let settled_bare = ls629_freq_at(bare, 4.14);
+    let settled_slewed = ls629_freq_at(slewed, 4.14);
+    assert!(
+        (settled_bare - settled_slewed).abs() / settled_bare < 1e-6,
+        "{settled_bare:.1} Hz settled against {settled_slewed:.1} Hz"
+    );
+
+    // And that it takes time to get there. τ = (10k || 90k) · 3.3 µF ≈ 30 ms, so
+    // one millisecond in the oscillator is nowhere near its final pitch while
+    // the bare one is there on the first step.
+    let mut b = builder_1to1(RATE);
+    let fc = b.constant("FC", 4.14);
+    let bare_id = b.ls629_vco("BARE", fc, bare);
+    let slewed_id = b.ls629_vco("SLEWED", fc, slewed);
+    let mut c = b.build();
+    c.tick(1);
+    assert!((c.value(bare_id) - settled_bare).abs() / settled_bare < 1e-9);
+    step_n(&mut c, RATE as usize / 1_000);
+    let early = c.value(slewed_id);
+    assert!(
+        early < settled_slewed * 0.5,
+        "after 1 ms the slewed oscillator was already at {early:.0} Hz of \
+         {settled_slewed:.0} Hz"
+    );
+}

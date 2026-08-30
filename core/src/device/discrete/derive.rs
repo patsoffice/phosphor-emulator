@@ -77,6 +77,67 @@ pub(crate) fn cmos_transfer_curve(gate: &super::CmosInverter) -> (f64, f64) {
     (a, b)
 }
 
+/// The '629's frequency-control and range pins' own input impedance, about
+/// 90 kΩ (the datasheet's 70 kΩ + 20 kΩ internal divider, confirmed on the
+/// bench). A board's series resistor into either pin therefore divides against
+/// this, so a '629's rate depends on that resistor as much as on the voltage
+/// driving it — which is why [`ls629_vco`] takes both.
+///
+/// [`ls629_vco`]: super::DiscreteCircuitBuilder::ls629_vco
+pub(crate) const LS629_PIN_R: f64 = 90_000.0;
+
+/// The timing capacitance [`ls629_frequency`] was characterized at. A different
+/// CX scales the whole curve inversely: the current source is fixed, so the time
+/// to run the cap down to the threshold is proportional to its value.
+pub(crate) const LS629_REF_C: f64 = 0.1e-6;
+
+/// Output frequency of one 74LS629 oscillator half at [`LS629_REF_C`], from the
+/// voltages *at* its frequency-control and range pins.
+///
+/// The part is a constant-current relaxation oscillator: the control voltage
+/// modulates a current source that runs the timing capacitor down, and the range
+/// voltage sets the threshold it runs down to. Raising range therefore *lowers*
+/// the frequency, which is the sense most easily got backwards.
+///
+/// The ideal law that description implies — `i = v_fc·(20k/90k)/600Ω`, so
+/// `f ∝ v_fc/C` — does not hold: the part is markedly non-linear below about 1 V
+/// and non-monotonic, dipping to a minimum near 0.5 V before rising again. So
+/// what is evaluated here is an empirical surface in the two pin voltages, a
+/// quartic in control times an affine term in range.
+///
+/// **These ten coefficients are not ours.** They are a least-squares fit to
+/// bench measurements of real '629 devices, made in 2009 and published with an
+/// open-source discrete-audio device library; both of that library's independent
+/// oscillator implementations run this same surface. Nothing here is derived
+/// from the datasheet, which publishes frequency against control voltage for the
+/// '625, '626 and '627 only and gives the '629 nothing but three corner points
+/// of frequency against external capacitance. What the surface reproduces on
+/// this repository's own circuits, and where it does not, is asserted in
+/// `ls629_matches_the_bench_measurements` in `tests.rs`.
+pub(crate) fn ls629_frequency(v_fc: f64, v_rng: f64) -> f64 {
+    const K: [f64; 10] = [
+        1.990_476_902_479_628_3e3,
+        1.207_005_921_398_340_7e3,
+        1.326_698_557_956_110_8e3,
+        -1.550_097_982_592_269_8e2,
+        2.818_453_626_693_817,
+        -2.350_342_158_274_455_6e2,
+        -3.383_678_670_452_779e2,
+        -1.356_913_670_325_867e2,
+        2.991_457_545_381_918_8e0,
+        1.685_556_908_617_317,
+    ];
+    let v2 = v_fc * v_fc;
+    let v3 = v2 * v_fc;
+    let v4 = v3 * v_fc;
+    let poly = K[0] + K[1] * v_fc + K[2] * v2 + K[3] * v3 + K[4] * v4;
+    let poly_rng = K[5] + K[6] * v_fc + K[7] * v2 + K[8] * v3 + K[9] * v4;
+    // The surface is only characterized over the pins' 0 V to 5 V input range,
+    // and a quartic leaves it fast on either side. A negative frequency would be
+    // a silently wrong oscillator rather than a loud one, so floor it.
+    (poly + v_rng * poly_rng).max(0.0)
+}
+
 /// NE555 astable charge/discharge fractions per simulation step.
 ///
 /// The cap charges through `r1 + r2` and discharges through `r2` alone, which
