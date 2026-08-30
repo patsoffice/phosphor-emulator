@@ -1,0 +1,129 @@
+{
+  "modules": {
+    "williams gen-1 video counter and $CB00 readback": {
+      "ports": {
+        "video clock": { "direction": "input", "bits": [2] },
+        "$CB00 decode": { "direction": "input", "bits": [26] },
+        "D7": { "direction": "output", "bits": [25] },
+        "D6": { "direction": "output", "bits": [24] },
+        "D5": { "direction": "output", "bits": [23] },
+        "D4": { "direction": "output", "bits": [22] },
+        "D3": { "direction": "output", "bits": [21] },
+        "D2": { "direction": "output", "bits": [20] }
+      },
+      "cells": {
+        "u5F": {
+          "type": "5F 74163",
+          "port_directions": {
+            "CLK": "input",
+            "Q2 (12) VA0": "output",
+            "Q3 (11) VA1": "output",
+            "TC": "output"
+          },
+          "connections": {
+            "CLK": [2],
+            "Q2 (12) VA0": [6],
+            "Q3 (11) VA1": [7],
+            "TC": [3]
+          },
+          "attributes": {}
+        },
+        "u5E": {
+          "type": "5E 74163",
+          "port_directions": {
+            "EN": "input",
+            "Q0 (14) VA2": "output",
+            "Q1 (13) VA3": "output",
+            "Q2 (12) VA4": "output",
+            "Q3 (11) VA5": "output",
+            "TC": "output"
+          },
+          "connections": {
+            "EN": [3],
+            "Q0 (14) VA2": [8],
+            "Q1 (13) VA3": [9],
+            "Q2 (12) VA4": [10],
+            "Q3 (11) VA5": [11],
+            "TC": [4]
+          },
+          "attributes": {}
+        },
+        "u5D": {
+          "type": "5D 74163",
+          "port_directions": {
+            "EN": "input",
+            "Q0 (14) VA6": "output",
+            "Q1 (13) VA7": "output",
+            "Q2 (12) VA8": "output",
+            "Q3 (11) VA9": "output",
+            "TC": "output"
+          },
+          "connections": {
+            "EN": [4],
+            "Q0 (14) VA6": [12],
+            "Q1 (13) VA7": [13],
+            "Q2 (12) VA8": [14],
+            "Q3 (11) VA9": [15],
+            "TC": [5]
+          },
+          "attributes": {}
+        },
+        "u5C": {
+          "type": "5C 74163",
+          "port_directions": {
+            "EN": "input",
+            "Q0 (14) VA10": "output",
+            "Q1 (13) VA11": "output",
+            "Q2 (12) VA12": "output",
+            "Q3 (11) VA13": "output"
+          },
+          "connections": {
+            "EN": [5],
+            "Q0 (14) VA10": [16],
+            "Q1 (13) VA11": [17],
+            "Q2 (12) VA12": [18],
+            "Q3 (11) VA13": [19]
+          },
+          "attributes": {}
+        },
+        "u3B": {
+          "type": "3B 8T97",
+          "port_directions": {
+            "OE (1)": "input",
+            "OE (15)": "input",
+            "VA13 in (2)": "input",
+            "VA12 in (14)": "input",
+            "VA11 in (4)": "input",
+            "VA10 in (12)": "input",
+            "VA9 in (6)": "input",
+            "VA8 in (10)": "input",
+            "out (3) D7": "output",
+            "out (13) D6": "output",
+            "out (5) D5": "output",
+            "out (11) D4": "output",
+            "out (7) D3": "output",
+            "out (9) D2": "output"
+          },
+          "connections": {
+            "OE (1)": [26],
+            "OE (15)": [26],
+            "VA13 in (2)": [19],
+            "VA12 in (14)": [18],
+            "VA11 in (4)": [17],
+            "VA10 in (12)": [16],
+            "VA9 in (6)": [15],
+            "VA8 in (10)": [14],
+            "out (3) D7": [25],
+            "out (13) D6": [24],
+            "out (5) D5": [23],
+            "out (11) D4": [22],
+            "out (7) D3": [21],
+            "out (9) D2": [20]
+          },
+          "attributes": {}
+        }
+      },
+      "netnames": {}
+    }
+  }
+}

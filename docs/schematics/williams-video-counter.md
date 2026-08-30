@@ -22,21 +22,16 @@ because the limit is the scan and not the render. Robotron's is clean at 400.
 
 ## The circuit
 
-```mermaid
-flowchart LR
-  CLK([video clock]) --> C5F
-  C5F["5F 74163<br/>Q2→VA0, Q3→VA1"] -- TC --> C5E
-  C5E["5E 74163<br/>Q0..Q3 → VA2..VA5"] -- TC --> C5D
-  C5D["5D 74163<br/>Q0..Q3 → VA6..VA9"] -- TC --> C5C
-  C5C["5C 74163<br/>Q0..Q3 → VA10..VA13"]
-  C5C --> VAB
-  C5D --> VAB
-  C5E --> VAB
-  C5F --> VAB
-  VAB["video address bus<br/>VA0..VA13"] -- "VA8..VA13 only" --> B3B
-  B3B["3B 8T97<br/>hex tri-state buffer"] --> DB["data bus D2..D7<br/>D0, D1 not driven"]
-  DEC(["$CB00 address decode"]) -. "enables, pins 1 and 15" .-> B3B
-```
+![The 74163 counter chain and the 8T97 readback buffer](williams-video-counter.svg)
+
+Generated from [`williams-video-counter.json`](williams-video-counter.json) with
+`netlistsvg`; that file is the source, the SVG is committed output. Every port
+is labeled with its pin number and its net, so the drawing carries the same
+information as the net tables below rather than paraphrasing them.
+
+`TC` and `EN` are the two labels with no pin number, because the cascade pins
+were not read from the drawing. `VA0` through `VA7` are labeled on the counters
+that produce them but have no wire drawn, because where they go was not traced.
 
 ## Parts
 
