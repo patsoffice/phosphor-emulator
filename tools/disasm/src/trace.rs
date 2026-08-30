@@ -21,6 +21,15 @@
 //! Both loops emit human `text` or machine-diffable `jsonl`, and `--from-frame
 //! N` seeks cheaply (runs fast to N with the observers off, then arms them) so
 //! long runs need not emit from frame 0.
+//!
+//! **An empty `--watch` result is a stated result, not silence.** Every spec's
+//! hit count is written to stderr when the run ends, and a spec that fired zero
+//! times gets the machine's CPU roster with it. A watch is easy to address to a
+//! CPU that never touches the address — on a three-Z80 board like `xevious` the
+//! scroll latch is written by CPU 1, and a `0:` watch returns nothing over 1801
+//! frames, which reads exactly like "this game never writes its scroll". The
+//! count and the roster are what tell those two apart; the summary goes to
+//! stderr so it can never land inside a `jsonl` body or an `--out` file.
 
 use std::collections::VecDeque;
 use std::io::{BufWriter, Write};
@@ -121,12 +130,102 @@ impl<'a> TraceOptions<'a> {
 
 /// A parsed `--watch cpu:addr:kind[:cond]` request (may set two watchpoints
 /// for `rw`; both share the condition).
+///
+/// `cpu` is kept as the raw token and resolved against the booted machine by
+/// [`resolve_watch_specs`], the same way `--cpu` and `--break-pc` are. Parsing
+/// it as a bare index here is what let `--watch '9:0xD001:w'` be accepted on a
+/// machine with three CPUs and report success with no output
+/// (`phosphor-emulator-gcny`).
 struct WatchSpec {
+    cpu: String,
+    addr: u32,
+    read: bool,
+    write: bool,
+    condition: WatchpointCondition,
+}
+
+/// A [`WatchSpec`] with its CPU token resolved to an index on the booted
+/// machine.
+#[derive(Debug)]
+struct ResolvedWatch {
     cpu: usize,
     addr: u32,
     read: bool,
     write: bool,
     condition: WatchpointCondition,
+}
+
+/// How many times each resolved watch actually fired.
+///
+/// Kept so a run can report `0 hits` as a *result* rather than as silence. A
+/// watchpoint that never fires and a watchpoint addressed to a CPU that never
+/// touches the address produce identical output otherwise, which is the whole
+/// of `phosphor-emulator-gcny`.
+#[derive(Default)]
+struct WatchTally {
+    reads: Vec<usize>,
+    writes: Vec<usize>,
+}
+
+impl WatchTally {
+    fn new(specs: &[ResolvedWatch]) -> Self {
+        Self {
+            reads: vec![0; specs.len()],
+            writes: vec![0; specs.len()],
+        }
+    }
+
+    /// Attribute one hit to every spec that asked for it.
+    fn note(&mut self, specs: &[ResolvedWatch], hit: &WatchpointHit) {
+        for (i, s) in specs.iter().enumerate() {
+            if s.cpu != hit.cpu_index || s.addr != hit.addr {
+                continue;
+            }
+            match hit.kind {
+                WatchpointKind::Read if s.read => self.reads[i] += 1,
+                WatchpointKind::Write if s.write => self.writes[i] += 1,
+                _ => {}
+            }
+        }
+    }
+}
+
+/// One line per watch spec: what it asked for and how many times it fired.
+///
+/// A spec that fired zero times gets the CPU roster appended, because the
+/// commonest cause of an empty watch is the right address on the wrong CPU —
+/// measured on `xevious`, where the scroll latch at `$D001` is written by CPU 1
+/// and a `0:` watch is silent over 1801 frames.
+fn watch_summary(specs: &[ResolvedWatch], tally: &WatchTally, names: &[String]) -> Vec<String> {
+    let roster = || {
+        let list: Vec<String> = names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| format!("{i}={n}"))
+            .collect();
+        format!("machine has {} CPU(s): {}", names.len(), list.join(", "))
+    };
+    let mut lines = Vec::new();
+    for (i, s) in specs.iter().enumerate() {
+        let name = names.get(s.cpu).map(String::as_str).unwrap_or("?");
+        for (want, n, kind) in [
+            (s.read, tally.reads[i], "r"),
+            (s.write, tally.writes[i], "w"),
+        ] {
+            if !want {
+                continue;
+            }
+            let mut line = format!(
+                "watch: {}:${:04X}:{kind} (cpu {}) -> {n} hit(s)",
+                s.cpu, s.addr, name
+            );
+            if n == 0 {
+                line.push_str(&format!("; {}", roster()));
+            }
+            lines.push(line);
+        }
+    }
+    lines
 }
 
 /// One observed record, tagged by which stream produced it.
@@ -339,9 +438,17 @@ pub fn run_trace(opts: TraceOptions<'_>) -> Result<String, String> {
     }
     let cycles_per_frame = harness.machine_mut().cycles_per_frame();
 
-    // Resolve CPU names/indices against the booted machine's bus (cycle mode).
+    // Resolve CPU names/indices against the booted machine's bus.
     let traced = resolve_cpu_specs(&mut harness, &cpu_specs)?;
     let breaks = resolve_break_specs(&mut harness, &break_specs)?;
+    let watches = resolve_watch_specs(&mut harness, &watch_specs)?;
+    // Kept for the end-of-run summary, which names the CPUs when a watch that
+    // asked for hits got none.
+    let watch_cpu_names = if watches.is_empty() {
+        Vec::new()
+    } else {
+        cpu_names(&mut harness)?
+    };
 
     // Seek: run fast to the observation window with observers still off.
     for _ in 0..from_frame {
@@ -352,7 +459,7 @@ pub fn run_trace(opts: TraceOptions<'_>) -> Result<String, String> {
     if event_filter.is_some() {
         harness.machine_mut().set_trace_enabled(true);
     }
-    for w in &watch_specs {
+    for w in &watches {
         if w.read {
             harness.machine_mut().set_watchpoint_cond(
                 w.cpu,
@@ -370,10 +477,11 @@ pub fn run_trace(opts: TraceOptions<'_>) -> Result<String, String> {
             );
         }
     }
+    let mut tally = WatchTally::new(&watches);
 
     let hang_watch = hang.then(|| HangWatch::new(format));
 
-    if cycle_mode {
+    let result = if cycle_mode {
         run_cycle_loop(CycleLoop {
             harness: &mut harness,
             from_frame,
@@ -387,6 +495,8 @@ pub fn run_trace(opts: TraceOptions<'_>) -> Result<String, String> {
             event_filter: &event_filter,
             format,
             out,
+            watches: &watches,
+            tally: &mut tally,
         })
     } else {
         run_frame_loop(FrameLoop {
@@ -399,8 +509,19 @@ pub fn run_trace(opts: TraceOptions<'_>) -> Result<String, String> {
             stop_on_hang,
             format,
             out,
+            watches: &watches,
+            tally: &mut tally,
         })
+    };
+
+    // Report every watch's hit count, zero included, on stderr: it is metadata
+    // about the probe rather than trace data, so it must not land in the middle
+    // of a JSONL body or a file the caller is about to parse.
+    for line in watch_summary(&watches, &tally, &watch_cpu_names) {
+        eprintln!("{line}");
     }
+
+    result
 }
 
 /// Parameters for [`run_frame_loop`] (grouped to keep the arg list sane).
@@ -414,6 +535,8 @@ struct FrameLoop<'a> {
     stop_on_hang: bool,
     format: TraceFormat,
     out: Option<&'a Path>,
+    watches: &'a [ResolvedWatch],
+    tally: &'a mut WatchTally,
 }
 
 /// The frame loop: run whole frames and collect the event ring + watchpoint
@@ -430,6 +553,8 @@ fn run_frame_loop(fl: FrameLoop) -> Result<String, String> {
         stop_on_hang,
         format,
         out,
+        watches,
+        tally,
     } = fl;
 
     // Watchpoint hits are drained every frame (the pending queue is shallow);
@@ -443,6 +568,7 @@ fn run_frame_loop(fl: FrameLoop) -> Result<String, String> {
         harness.run_frame();
 
         while let Some(hit) = harness.machine_mut().take_watchpoint_hit() {
+            tally.note(watches, &hit);
             records.push(Record::Watch(hit));
         }
 
@@ -523,6 +649,8 @@ struct CycleLoop<'a> {
     event_filter: &'a Option<EventFilter>,
     format: TraceFormat,
     out: Option<&'a Path>,
+    watches: &'a [ResolvedWatch],
+    tally: &'a mut WatchTally,
 }
 
 /// Max instruction length across all supported CPUs (M68000 `MOVE.L #,abs.l`).
@@ -568,6 +696,8 @@ fn run_cycle_loop(cl: CycleLoop) -> Result<String, String> {
         event_filter,
         format,
         out,
+        watches,
+        tally,
     } = cl;
 
     if cycles_per_frame == 0 {
@@ -696,6 +826,7 @@ fn run_cycle_loop(cl: CycleLoop) -> Result<String, String> {
         let mut watch_fired = false;
         while let Some(hit) = harness.machine_mut().take_watchpoint_hit() {
             watch_fired = true;
+            tally.note(watches, &hit);
             let f = hit.cycle / cycles_per_frame;
             lines.push(render_record(&Record::Watch(hit), f, format));
         }
@@ -817,10 +948,11 @@ fn parse_watch_spec(part: &str) -> Result<WatchSpec, String> {
             "bad watch spec '{part}'; expected cpu:addr:kind[:cond] (e.g. 0:0x87cf:w or 0:0x4000:w:=4E5F)"
         ));
     }
-    let cpu = fields[0]
-        .trim()
-        .parse::<usize>()
-        .map_err(|_| format!("bad cpu index '{}' in watch spec '{part}'", fields[0]))?;
+    let cpu = fields[0].trim();
+    if cpu.is_empty() {
+        return Err(format!("missing cpu in watch spec '{part}'"));
+    }
+    let cpu = cpu.to_string();
     let addr = crate::parse_u32_auto(fields[1])
         .map_err(|e| format!("bad address in watch spec '{part}': {e}"))?;
     let (read, write) = match fields[2].trim().to_ascii_lowercase().as_str() {
@@ -1229,6 +1361,36 @@ fn resolve_cpu_specs(harness: &mut Harness, specs: &[CpuSpec]) -> Result<Vec<Tra
         .collect()
 }
 
+/// Resolve each `--watch` spec's CPU token against the booted machine.
+///
+/// Shares [`resolve_cpu_token`] with `--cpu` and `--break-pc`, so an
+/// out-of-range index is an error rather than a watchpoint nobody can trip, and
+/// a CPU *name* works here too.
+fn resolve_watch_specs(
+    harness: &mut Harness,
+    specs: &[WatchSpec],
+) -> Result<Vec<ResolvedWatch>, String> {
+    if specs.is_empty() {
+        return Ok(Vec::new());
+    }
+    let names = cpu_names(harness)?;
+    specs.iter().map(|s| resolve_watch(s, &names)).collect()
+}
+
+/// The pure half of [`resolve_watch_specs`], against an already-known CPU
+/// roster.
+fn resolve_watch(spec: &WatchSpec, names: &[String]) -> Result<ResolvedWatch, String> {
+    resolve_cpu_token(&spec.cpu, names)
+        .map_err(|e| format!("{e} (in watch spec for ${:04X})", spec.addr))
+        .map(|cpu| ResolvedWatch {
+            cpu,
+            addr: spec.addr,
+            read: spec.read,
+            write: spec.write,
+            condition: spec.condition,
+        })
+}
+
 fn resolve_break_specs(
     harness: &mut Harness,
     specs: &[(String, u32)],
@@ -1510,12 +1672,12 @@ mod tests {
     #[test]
     fn watch_spec_kinds() {
         let r = parse_watch_spec("0:0x87cf:w").unwrap();
-        assert_eq!(r.cpu, 0);
+        assert_eq!(r.cpu, "0");
         assert_eq!(r.addr, 0x87CF);
         assert!(!r.read && r.write);
 
         let rw = parse_watch_spec("1:0x4000:rw").unwrap();
-        assert_eq!(rw.cpu, 1);
+        assert_eq!(rw.cpu, "1");
         assert_eq!(rw.addr, 0x4000);
         assert!(rw.read && rw.write);
 
@@ -1526,11 +1688,124 @@ mod tests {
         assert_eq!(r.condition, WatchpointCondition::Always);
 
         assert!(parse_watch_spec("0:0x10").is_err()); // too few fields
-        assert!(parse_watch_spec("x:0x10:r").is_err()); // bad cpu
+        assert!(parse_watch_spec(":0x10:r").is_err()); // missing cpu
         assert!(parse_watch_spec("0:zz:r").is_err()); // bad addr
         assert!(parse_watch_spec("0:0x10:x").is_err()); // bad kind
         assert!(parse_watch_spec("0:0x10:w:junk").is_err()); // bad condition
         assert!(parse_watch_spec("0:0x10:w:=1:extra").is_err()); // too many fields
+    }
+
+    fn names2() -> Vec<String> {
+        vec!["Z80 Main".to_string(), "Z80 Sub".to_string()]
+    }
+
+    fn hit(cpu_index: usize, addr: u32, kind: WatchpointKind) -> WatchpointHit {
+        WatchpointHit {
+            cpu_index,
+            source: DebugAccessSource::Cpu(cpu_index),
+            cycle: 0,
+            pc: None,
+            addr,
+            kind,
+            phase: WatchpointPhase::Before,
+            value: 0,
+            width: 1,
+            region: None,
+            device: None,
+        }
+    }
+
+    fn spec(cpu: &str, addr: u32, kind: &str) -> WatchSpec {
+        parse_watch_spec(&format!("{cpu}:{addr}:{kind}")).unwrap()
+    }
+
+    /// `phosphor-emulator-gcny`, the sharpest form: a CPU index that cannot
+    /// exist used to be accepted, arm nothing, and exit 0 with no output.
+    ///
+    /// The check moved from parse time to resolve time, where the machine's
+    /// real CPU roster is known — which is also what lets a *name* work.
+    #[test]
+    fn a_watch_on_a_cpu_that_does_not_exist_is_an_error() {
+        let names = names2();
+
+        let err = resolve_watch(&spec("9", 0xD001, "w"), &names).unwrap_err();
+        assert!(
+            err.contains("out of range") && err.contains("D001"),
+            "the error names the bad index and the spec it came from: {err}"
+        );
+
+        let err = resolve_watch(&spec("nosuch", 0xD001, "w"), &names).unwrap_err();
+        assert!(err.contains("unknown cpu"), "{err}");
+
+        // In-range index and CPU name both resolve, and to the same CPU.
+        assert_eq!(resolve_watch(&spec("1", 0x10, "w"), &names).unwrap().cpu, 1);
+        assert_eq!(
+            resolve_watch(&spec("z80 sub", 0x10, "w"), &names)
+                .unwrap()
+                .cpu,
+            1
+        );
+    }
+
+    /// The form that actually bit: an in-range but wrong CPU index. Nothing can
+    /// reject that up front — the fix is that a watch which fired zero times
+    /// says so, and says which CPUs exist.
+    ///
+    /// Measured on xevious, where `$D001` is written by CPU 1 and a `0:` watch
+    /// is silent over 1801 frames.
+    #[test]
+    fn a_watch_that_never_fires_reports_zero_hits_and_names_the_cpus() {
+        let names = names2();
+        let watches = vec![
+            resolve_watch(&spec("0", 0xD001, "w"), &names).unwrap(),
+            resolve_watch(&spec("1", 0xD001, "w"), &names).unwrap(),
+        ];
+        let mut tally = WatchTally::new(&watches);
+
+        // Only CPU 1 ever writes it.
+        tally.note(&watches, &hit(1, 0xD001, WatchpointKind::Write));
+        tally.note(&watches, &hit(1, 0xD001, WatchpointKind::Write));
+
+        let lines = watch_summary(&watches, &tally, &names);
+        assert_eq!(lines.len(), 2, "one line per watched kind: {lines:?}");
+
+        assert!(
+            lines[0].contains("0 hit(s)") && lines[0].contains("machine has 2 CPU(s)"),
+            "a zero-hit watch reports the count AND the roster: {}",
+            lines[0]
+        );
+        assert!(
+            lines[0].contains("1=Z80 Sub"),
+            "the roster names the CPU that would have worked: {}",
+            lines[0]
+        );
+        assert!(
+            lines[1].contains("2 hit(s)") && !lines[1].contains("machine has"),
+            "a watch that fired reports its count and no roster: {}",
+            lines[1]
+        );
+    }
+
+    /// A hit is attributed only to the spec that asked for that CPU, address
+    /// and kind — otherwise the summary would launder a hit on one CPU into
+    /// evidence for a watch on another, which is the very confusion this is
+    /// meant to end.
+    #[test]
+    fn hits_are_attributed_only_to_the_spec_that_asked_for_them() {
+        let names = names2();
+        let watches = vec![
+            resolve_watch(&spec("0", 0x10, "w"), &names).unwrap(),
+            resolve_watch(&spec("1", 0x10, "w"), &names).unwrap(),
+            resolve_watch(&spec("0", 0x20, "w"), &names).unwrap(),
+            resolve_watch(&spec("0", 0x10, "r"), &names).unwrap(),
+        ];
+        let mut tally = WatchTally::new(&watches);
+        tally.note(&watches, &hit(0, 0x10, WatchpointKind::Write));
+
+        assert_eq!(tally.writes[0], 1, "the matching spec counted it");
+        assert_eq!(tally.writes[1], 0, "not the one on another cpu");
+        assert_eq!(tally.writes[2], 0, "not the one on another address");
+        assert_eq!(tally.reads[3], 0, "not the one on the other kind");
     }
 
     #[test]
