@@ -1205,7 +1205,101 @@ being weakened, and the pre-existing `sub_irq_fires_eight_times_per_frame`
 turns out to double as a frame-loop check: cutting the frame loop's calls into
 `begin_scanline` fails it alongside the new one.
 
-Two machines remain: irobot's alphanumeric overlay, and nothing else.
+### What shipped, on irobot, 2026-08-29
+
+The last board in the epic, and the only **partial** migration: the
+alphanumeric overlay moved, the polygon layer did not, and that asymmetry is
+the point rather than a compromise.
+
+W5 called this correctly. The polygon layer is a genuine hardware double
+buffer — the generator fills `polybitmap[bufsel]` while the display reads
+`polybitmap[bufsel ^ 1]` — so its contents are latched by the circuit and a row
+simply reads whichever buffer the display is pointed at. The alphanumeric layer
+has no such latch; it comes straight out of video RAM. Only the second one is a
+live read, and only it moved.
+
+The board had no scanline hook at all, so it gained the whole house pattern.
+The 32V IRQ edge moved into `begin_scanline` from `begin_cycle`, where it had
+been re-testing the frame position on every cycle. `render_scanline` resolves
+one row of the displayed polygon buffer through the palette, then composites
+that row's 32 character cells over it from live video RAM; `render` only copies.
+
+**Reading `bufsel` per row is a real change and is not free of consequence.**
+The display circuit follows the select line, so a mid-frame swap would show the
+old buffer above and the new below, where the old code read the select once at
+the frame boundary. Traced: `$1140` *is* written during active display — at
+scanlines 125 and 126 of frame 1799 — but bit 1 holds the same value across
+those writes, so the selection does not change there and no seam appears. The
+swaps land in blanking, scanlines 234 to 249. That is the same shape as foodf's
+flip latch: a live-read register written mid-frame carrying an unchanging value.
+
+**The pin did not move, and the pin's own frames could not have shown that.**
+Old 1799 and old 1800 are byte-identical, so both cases predict the same thing
+there — foodf's trap again. Frame 1799 is the discriminator:
+
+| comparison | result |
+|---|---|
+| control: old 1798 vs old 1799 | 3913 / 59392 (6.59%) |
+| **new 1799 vs old 1798** | **0 / 59392** |
+| new 1799 vs old 1799 | 3913 / 59392 |
+| new 1800 vs old 1800 | 0 / 59392 |
+
+Exactly one frame older, proven against a real control, with the pin sitting
+inside a static pair. No recapture.
+
+**A constant discrepancy found and deliberately not "fixed".** This board
+declares `display_height = 232` but `VBLANK_LINE = 224`, and the status port
+reports VBLANK from 224. The two disagree and always did. The framebuffer and
+every golden pin are built on the 232, so that is what the beam follows here;
+reconciling them would change either what the machine draws or what it reports,
+and doing that under cover of a rendering migration is exactly the kind of
+silent change this epic exists to avoid. Recorded, not changed.
+
+**The test worth copying is the inverse one.**
+`a_mid_frame_write_to_the_polygon_draw_buffer_changes_nothing` asserts that
+scribbling over `polybitmap[bufsel]` partway down the frame changes nothing on
+screen. Every other test in this epic pins that a layer *does* follow the beam;
+this one pins that a layer *does not*, and it exists so that a later change
+cannot quietly "fix" the polygon layer into a live read the way the overlay
+legitimately is. It is falsified by changing the displayed buffer from
+`bufsel ^ 1` to `bufsel`.
+
+**Perf: about +1%, and this one is actually resolved.** Two back-to-back A/B
+pairs at 15 and 21 repetitions: 2.351 → 2.376 (**+1.1%**) and 2.359 → 2.378
+(**+0.8%**), spreads ±1.2% to ±4.1%. Both pairs agree in sign *and* magnitude
+and the two before-runs are 0.3% apart, which is the opposite of docastle's
+result and worth the contrast. Render collapses from 0.084 to 0.005 ms/frame;
+emulation rises 2.27 to 2.37.
+
+Attributed, and it is the one board in the epic where the migration costs
+something structural rather than paying for itself. Everywhere else the
+whole-frame code fetched tilemap cells **per pixel**, so going row-outer with a
+per-tile fetch was a large win. Here the old text pass was already tile-outer
+and whole-frame — 29 tile rows x 32 cells = 928 cell reads a frame, the minimum
+possible — and a row pass necessarily re-reads each cell once per line it
+covers: 232 x 32 = 7424. Same pixel count, eight times the cell reads. There is
+no version of per-row rendering that avoids that, and about 1% is what it costs.
+
+---
+
+## The epic is complete
+
+All 40 registered machines are accounted for. Every board that renders a raster
+picture from live state now composites it row by row as the beam passes:
+gottlieb, btime, namco_galaga (galaga, digdug, xevious), mrdo, foodf,
+atari_system1 (marble, roadrunner), docastle (docastle, dorunrun, dowild) and
+irobot's overlay, on top of the 18 that already did. `mcr2` stays out by
+`phosphor-emulator-raster-sampling-6kae.6`, the seven vector machines have no
+scanline hardware, and `ccastles` remains the one partial case — it composites
+its bitmap per scanline but still renders all sprites once at scanline 0, which
+W5 recorded as the obvious next candidate.
+
+Two follow-ups are open and both were raised by the owner during the work:
+`phosphor-emulator-3me5` (a row pass should iterate the units that vary along
+the row, tilemaps done on two boards, sprites not started) and
+`phosphor-emulator-f3yv` (seven hand-written copies of the scanline drive that
+should collapse into one trait, deliberately sequenced after this epic so the
+shape is final).
 
 ---
 

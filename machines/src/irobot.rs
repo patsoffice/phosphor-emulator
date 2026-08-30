@@ -579,6 +579,22 @@ pub struct IrobotBoard {
     prev_v32: bool,
     #[save(id = 23)]
     clock: u64,
+
+    /// Display framebuffer (native 256x232 RGB), filled one row at a time as
+    /// the beam reaches each visible scanline.
+    ///
+    /// Only the **alphanumeric overlay** is a live read here. The polygon layer
+    /// underneath it is a genuine hardware double buffer — the generator fills
+    /// `polybitmap[bufsel]` while the display reads `polybitmap[bufsel ^ 1]` —
+    /// and that indirection stays exactly as it was. What changed is that a row
+    /// resolves the displayed buffer and overlays the text from live video RAM
+    /// at the moment the beam is on it, rather than the whole frame doing both
+    /// at the frame boundary.
+    ///
+    /// Derived output, so not saved, and not seeded after a load: the rows of
+    /// the next frame overwrite every one of them.
+    #[save_skip]
+    pub(crate) framebuffer: Vec<u8>,
 }
 
 /// Atari I, Robot (1983): a 6809 beside the board it drives.
@@ -594,13 +610,67 @@ pub struct IrobotSystem {
     pub board: IrobotBoard,
 }
 
-/// One CPU cycle: the board's per-scanline IRQ, the 6809 against the board
-/// (which *is* the bus), then the four POKEYs.
+/// One CPU cycle: the scanline boundary, the 6809 against the board (which *is*
+/// the bus), then the four POKEYs.
+///
+/// This is the debugger's path: it tests the frame position on every cycle so
+/// that single-stepping still crosses scanline boundaries. A whole frame goes
+/// through [`run_scanlines`], which hoists that test out.
 #[inline]
 pub fn tick(cpu: &mut M6809, board: &mut IrobotBoard) {
+    let frame_cycle = board.clock % TIMING.cycles_per_frame();
+    if frame_cycle.is_multiple_of(TIMING.cycles_per_scanline) {
+        board.begin_scanline(frame_cycle / TIMING.cycles_per_scanline);
+    }
+    step_cycle(cpu, board);
+}
+
+/// The part of a cycle with no scanline-boundary test in it.
+#[inline]
+fn step_cycle(cpu: &mut M6809, board: &mut IrobotBoard) {
     board.begin_cycle(cpu);
     cpu.execute_cycle(board, BusMaster::Cpu(0));
     board.end_cycle();
+}
+
+/// Run `cycles` CPU cycles, scanline-outer and cycle-inner. The caller must
+/// start on a scanline boundary and pass a multiple of `cycles_per_scanline`;
+/// the debugger's off-boundary stepping goes through [`tick`] instead.
+pub fn run_scanlines(cpu: &mut M6809, board: &mut IrobotBoard, cycles: u64) {
+    debug_assert!(
+        board.clock.is_multiple_of(TIMING.cycles_per_scanline)
+            && cycles.is_multiple_of(TIMING.cycles_per_scanline),
+        "run_scanlines must start on a scanline boundary and run whole scanlines"
+    );
+    for _ in 0..cycles / TIMING.cycles_per_scanline {
+        let scanline = board.clock % TIMING.cycles_per_frame() / TIMING.cycles_per_scanline;
+        board.begin_scanline(scanline);
+        for _ in 0..TIMING.cycles_per_scanline {
+            step_cycle(cpu, board);
+        }
+    }
+}
+
+/// Run one frame's worth of CPU cycles. Whole scanlines go through
+/// [`run_scanlines`]; a partial scanline at either end (only after the debugger
+/// has left the clock off-boundary) goes through [`tick`].
+pub fn run_frame(cpu: &mut M6809, board: &mut IrobotBoard) {
+    let scanline = TIMING.cycles_per_scanline;
+    let mut remaining = TIMING.cycles_per_frame();
+
+    let lead = ((scanline - board.clock % scanline) % scanline).min(remaining);
+    for _ in 0..lead {
+        tick(cpu, board);
+    }
+    remaining -= lead;
+
+    let whole = remaining - remaining % scanline;
+    run_scanlines(cpu, board, whole);
+    remaining -= whole;
+
+    for _ in 0..remaining {
+        tick(cpu, board);
+    }
 }
 
 /// I, Robot's two stick channels. Their electrical ranges are genuinely
@@ -686,6 +756,10 @@ impl IrobotBoard {
             firq_pending: false,
             prev_v32: false,
             clock: 0,
+            framebuffer: vec![
+                0u8;
+                TIMING.display_width as usize * TIMING.display_height as usize * 3
+            ],
         };
         // Seed the ADC with the centered stick so the analog axes read neutral
         // before any input even if the host never calls reset().
@@ -906,20 +980,38 @@ impl IrobotBoard {
 
     /// Board work that leads a CPU cycle: the 32V interrupt edge and the
     /// debugger's access-attribution latch.
-    fn begin_cycle(&mut self, cpu: &M6809) {
-        let frame_cycle = self.clock % TIMING.cycles_per_frame();
-
-        if frame_cycle.is_multiple_of(TIMING.cycles_per_scanline) {
-            let scanline = frame_cycle / TIMING.cycles_per_scanline;
-            // Maskable IRQ follows 32V (line counter bit 5); assert on its
-            // rising edge and let the handler clear it via 0x1100.
-            let v32 = scanline & 32 != 0;
-            if v32 && !self.prev_v32 {
-                self.irq_pending = true;
-            }
-            self.prev_v32 = v32;
+    /// Work that only happens on the first cycle of a scanline: the 32V IRQ
+    /// edge and compositing the row the beam is about to draw.
+    ///
+    /// The interrupt used to re-test the frame position inside
+    /// [`begin_cycle`](Self::begin_cycle) on every cycle, which is exactly the
+    /// test [`run_scanlines`] exists to hoist out.
+    ///
+    /// Public because the picture only exists once the beam has passed over it:
+    /// a caller that wants a frame without running CPU cycles has to step the
+    /// beam itself. Blanked lines are ignored, so walking `0..total_scanlines`
+    /// draws exactly the visible rows.
+    pub fn begin_scanline(&mut self, scanline: u64) {
+        // Maskable IRQ follows 32V (line counter bit 5); assert on its rising
+        // edge and let the handler clear it via 0x1100.
+        let v32 = scanline & 32 != 0;
+        if v32 && !self.prev_v32 {
+            self.irq_pending = true;
         }
+        self.prev_v32 = v32;
 
+        // The visible window is scanlines 0..232, the declared display height.
+        // Note this board's status VBLANK flag rises at line 224 instead
+        // (`VBLANK_LINE`), eight lines earlier; the two constants disagree and
+        // always did. The display size is what the framebuffer and every golden
+        // pin are built on, so it is what the beam follows here, and squaring
+        // the two is left alone rather than changed under cover of this work.
+        if (scanline as usize) < TIMING.display_height as usize {
+            self.render_scanline(scanline as usize);
+        }
+    }
+
+    fn begin_cycle(&mut self, cpu: &M6809) {
         if self.map.has_any_watchpoints() {
             let pc = cpu.at_instruction_boundary().then_some(cpu.pc as u32);
             self.map.latch_access_context(self.clock, pc);
@@ -1114,48 +1206,79 @@ impl IrobotBoard {
         }
     }
 
-    /// Render the displayed polygon buffer through the polygon palette, then
-    /// composite the alphanumeric tile layer (transparent pen 0) on top. Tile
-    /// color = `((data & 0xC0) >> 6) | (alphamap >> 4)`; the char gfx is 1bpp.
+    /// Copy the latest framebuffer into the frontend's `buffer`.
+    ///
+    /// This does not draw. Each visible row was composited at its own scanline
+    /// boundary in [`render_scanline`](Self::render_scanline) as the beam
+    /// reached it.
     fn render(&self, buffer: &mut [u8]) {
+        buffer.copy_from_slice(&self.framebuffer);
+    }
+
+    /// Draw one visible scanline: the displayed polygon buffer through the
+    /// polygon palette, then the alphanumeric tile layer (transparent pen 0)
+    /// composited on top. Tile color = `((data & 0xC0) >> 6) | (alphamap >> 4)`;
+    /// the char gfx is 1bpp.
+    ///
+    /// **Only the overlay is a live read, and that is the whole point of this
+    /// board's migration.** The polygon layer underneath is a genuine hardware
+    /// double buffer: the generator fills `polybitmap[bufsel]` while the display
+    /// reads `polybitmap[bufsel ^ 1]`, so its contents are latched by the
+    /// hardware and a row simply reads the buffer the display is pointed at.
+    /// That indirection is unchanged. The alphanumeric layer has no such latch —
+    /// it comes straight out of video RAM — so it is read on the row that shows
+    /// it, and a write partway down the screen now splits the text there.
+    ///
+    /// Reading `bufsel` per row rather than once per frame is a real change and
+    /// it is the correct one: the display circuit follows the select line, so a
+    /// mid-frame swap shows the old buffer above and the new one below. Traced
+    /// on this ROM set, the control register at `0x1140` *is* written during
+    /// active display — scanlines 125 and 126 of frame 1799 — but bit 1 holds
+    /// the same value across those writes, so the selection does not actually
+    /// change there and no seam appears. The swaps themselves land in blanking,
+    /// at scanlines 234 to 249.
+    fn render_scanline(&mut self, y: usize) {
         let w = TIMING.display_width as usize;
-        let h = TIMING.display_height as usize;
+        let mut row = [(0u8, 0u8, 0u8); 256];
 
         // Displayed polygon buffer is the one not currently being drawn into.
         let poly = &self.polybitmap[(self.bufsel ^ 1) as usize];
-        for y in 0..h {
-            for x in 0..w {
-                let (r, g, b) = self.poly_palette[poly[(y << 8) + x] as usize & 0x3f];
-                let off = (y * w + x) * 3;
-                buffer[off] = r;
-                buffer[off + 1] = g;
-                buffer[off + 2] = b;
-            }
+        for (x, p) in row.iter_mut().enumerate().take(w) {
+            *p = self.poly_palette[poly[(y << 8) + x] as usize & 0x3f];
         }
 
-        if self.char_cache.count() == 0 {
-            return;
-        }
-        let vram = self.map.region_data(Region::VideoRam);
-        let alphamap = ((self.out0 & 0x80) >> 4) as usize;
-        for ty in 0..(h / 8) {
+        // The alphanumeric overlay. Guarded rather than unconditional: the char
+        // ROM is decoded at load, so a bare board has an empty cache and
+        // `GfxCache::pixel` indexes a `Vec`. The polygon layer above still
+        // draws, which is what the whole-frame render did too.
+        if self.char_cache.count() != 0 {
+            let vram = self.map.region_data(Region::VideoRam);
+            let alphamap = ((self.out0 & 0x80) >> 4) as usize;
+            let ty = y / 8;
+            let py = y % 8;
+            // One tile row: 32 cells, each contributing 8 pixels of this line,
+            // rather than the whole 32x29 grid.
             for tx in 0..32usize {
                 let data = vram[ty * 32 + tx] as usize;
                 let code = data & 0x3f;
                 let color = ((data & 0xc0) >> 6) | alphamap;
-                for py in 0..8 {
-                    for px in 0..8 {
-                        if self.char_cache.pixel(code, px, py) == 0 {
-                            continue; // transparent
-                        }
-                        let (r, g, b) = self.text_palette[(color * 2 + 1) & 0x1f];
-                        let off = ((ty * 8 + py) * w + (tx * 8 + px)) * 3;
-                        buffer[off] = r;
-                        buffer[off + 1] = g;
-                        buffer[off + 2] = b;
+                let rgb = self.text_palette[(color * 2 + 1) & 0x1f];
+                let line = self.char_cache.row_slice(code, py);
+                for (px, &pen) in line.iter().enumerate().take(8) {
+                    if pen == 0 {
+                        continue; // transparent
                     }
+                    row[tx * 8 + px] = rgb;
                 }
             }
+        }
+
+        let out = y * w * 3;
+        for (x, &(r, g, b)) in row.iter().enumerate().take(w) {
+            let off = out + x * 3;
+            self.framebuffer[off] = r;
+            self.framebuffer[off + 1] = g;
+            self.framebuffer[off + 2] = b;
         }
     }
 }
@@ -1262,9 +1385,7 @@ impl MachineCore for IrobotSystem {
     }
 
     fn run_frame(&mut self) {
-        for _ in 0..TIMING.cycles_per_frame() {
-            tick(&mut self.cpu, &mut self.board);
-        }
+        run_frame(&mut self.cpu, &mut self.board);
         self.board.mix_audio();
     }
 
@@ -1786,6 +1907,15 @@ mod tests {
         );
     }
 
+    /// Walk the beam over a whole frame's scanlines so every visible row is
+    /// drawn. The picture only exists once the beam has passed over it, so a
+    /// test that pokes video state has to scan before it can look.
+    fn scan_frame(sys: &mut IrobotSystem) {
+        for s in 0..TIMING.total_scanlines {
+            sys.board.begin_scanline(s);
+        }
+    }
+
     #[test]
     fn render_draws_polygon_through_palette() {
         let mut sys = IrobotSystem::new();
@@ -1794,6 +1924,7 @@ mod tests {
         sys.board.polybitmap[1][(50 << 8) + 60] = 7;
         let (w, h) = sys.display_size();
         let mut buf = vec![0u8; (w * h * 3) as usize];
+        scan_frame(&mut sys);
         sys.render_frame(&mut buf);
         let off = (50 * w as usize + 60) * 3;
         assert_eq!(&buf[off..off + 3], &[10, 20, 30]);
@@ -1810,9 +1941,159 @@ mod tests {
         sys.board.polybitmap[1].fill(4);
         let (w, h) = sys.display_size();
         let mut buf = vec![0u8; (w * h * 3) as usize];
+        scan_frame(&mut sys);
         sys.render_frame(&mut buf);
         // Tile (0,0) is opaque text everywhere → text color wins over polygon.
         assert_eq!(&buf[0..3], &[200, 10, 20]);
+    }
+
+    // -----------------------------------------------------------------------
+    // Per-scanline rendering (W5)
+    // -----------------------------------------------------------------------
+
+    const BLUE: (u8, u8, u8) = (0, 0, 0xFF);
+    const RED: (u8, u8, u8) = (0xFF, 0, 0);
+
+    fn pixel(sys: &IrobotSystem, x: usize, y: usize) -> (u8, u8, u8) {
+        let w = TIMING.display_width as usize;
+        let o = (y * w + x) * 3;
+        (
+            sys.board.framebuffer[o],
+            sys.board.framebuffer[o + 1],
+            sys.board.framebuffer[o + 2],
+        )
+    }
+
+    /// A machine whose alphanumeric layer is opaque everywhere, so the tile
+    /// data byte's colour field is the only thing that varies.
+    fn system_with_opaque_text() -> IrobotSystem {
+        let mut sys = IrobotSystem::new();
+        sys.board.char_cache = decode_gfx(&[0xFFu8; 0x800], 0, 64, &CHAR_LAYOUT);
+        // Tile data 0x00 -> colour 0 -> text_palette[1]; 0x40 -> colour 1 ->
+        // text_palette[3].
+        sys.board.text_palette[1] = BLUE;
+        sys.board.text_palette[3] = RED;
+        sys
+    }
+
+    /// The live-read half of this board. The alphanumeric overlay comes
+    /// straight out of video RAM with no latch anywhere, so rewriting it
+    /// partway down the screen changes only the rows below the write.
+    ///
+    /// The split is at native row 100, which is *inside* character row 12 (rows
+    /// 96..103). A whole-frame render draws a character row from one snapshot
+    /// and cannot produce this picture at all.
+    #[test]
+    fn a_mid_frame_video_ram_write_changes_only_the_rows_below_it() {
+        const SPLIT_ROW: usize = 100;
+        let mut sys = system_with_opaque_text();
+
+        sys.board.map.region_data_mut(Region::VideoRam).fill(0x00);
+        for s in 0..SPLIT_ROW as u64 {
+            sys.board.begin_scanline(s);
+        }
+        sys.board.map.region_data_mut(Region::VideoRam).fill(0x40);
+        for s in SPLIT_ROW as u64..TIMING.display_height as u64 {
+            sys.board.begin_scanline(s);
+        }
+
+        assert_eq!(
+            pixel(&sys, 100, 0),
+            BLUE,
+            "row 0 was drawn before the write"
+        );
+        assert_eq!(
+            pixel(&sys, 100, SPLIT_ROW - 1),
+            BLUE,
+            "the last row above the write keeps the old cell, mid-character-row"
+        );
+        assert_eq!(
+            pixel(&sys, 100, SPLIT_ROW),
+            RED,
+            "the first row below the write takes the new cell"
+        );
+        assert_eq!(
+            pixel(&sys, 100, TIMING.display_height as usize - 1),
+            RED,
+            "the bottom row is below the write"
+        );
+    }
+
+    /// The polygon layer is the other half, and it must NOT behave that way.
+    ///
+    /// It is a genuine hardware double buffer — the generator fills
+    /// `polybitmap[bufsel]` while the display reads `polybitmap[bufsel ^ 1]` —
+    /// so writing into the buffer being drawn into changes nothing on screen
+    /// however far down the frame it happens. This is the assertion that stops
+    /// a future change from "fixing" the polygon layer into a live read the way
+    /// the overlay legitimately is.
+    #[test]
+    fn a_mid_frame_write_to_the_polygon_draw_buffer_changes_nothing() {
+        let mut sys = IrobotSystem::new();
+        sys.board.poly_palette[4] = BLUE;
+        sys.board.poly_palette[7] = RED;
+        // bufsel 0, so the DISPLAYED buffer is index 1 and the DRAW buffer is 0.
+        sys.board.bufsel = 0;
+        sys.board.polybitmap[1].fill(4);
+
+        for s in 0..100u64 {
+            sys.board.begin_scanline(s);
+        }
+        // Mid-frame, the generator scribbles all over the buffer it is drawing
+        // into. The beam is reading the other one.
+        sys.board.polybitmap[0].fill(7);
+        for s in 100..TIMING.display_height as u64 {
+            sys.board.begin_scanline(s);
+        }
+
+        for y in [0usize, 99, 100, TIMING.display_height as usize - 1] {
+            assert_eq!(
+                pixel(&sys, 100, y),
+                BLUE,
+                "row {y} shows the displayed buffer, not the one being drawn into"
+            );
+        }
+    }
+
+    /// The tests above drive `begin_scanline` by hand, which proves nothing
+    /// about whether the frame loop ever calls it. This walks the real `tick`
+    /// and `run_scanlines` paths.
+    #[test]
+    fn the_frame_loop_draws_rows_at_scanline_boundaries() {
+        let mut sys = system_with_opaque_text();
+        sys.board.map.region_data_mut(Region::VideoRam).fill(0x00);
+        sys.board.framebuffer.fill(0);
+
+        // The visible window starts at scanline 0, so the very first cycle of a
+        // frame crosses a boundary and must draw row 0.
+        for _ in 0..TIMING.cycles_per_scanline {
+            tick(&mut sys.cpu, &mut sys.board);
+        }
+        assert_eq!(pixel(&sys, 100, 0), BLUE, "tick() draws row 0");
+        assert_eq!(
+            pixel(&sys, 100, 1),
+            (0, 0, 0),
+            "and only row 0: nothing has drawn row 1 yet"
+        );
+
+        // And the hoisted loop a whole frame actually runs through draws too.
+        run_scanlines(&mut sys.cpu, &mut sys.board, TIMING.cycles_per_scanline);
+        assert_eq!(pixel(&sys, 100, 1), BLUE, "run_scanlines() draws row 1");
+    }
+
+    /// A blanked line has no row to draw, and drawing one would run off the end
+    /// of a framebuffer sized to the visible window.
+    #[test]
+    fn blanking_scanlines_have_no_row_to_draw() {
+        let mut sys = system_with_opaque_text();
+        sys.board.framebuffer.fill(0);
+        for s in TIMING.display_height as u64..TIMING.total_scanlines {
+            sys.board.begin_scanline(s);
+        }
+        assert!(
+            sys.board.framebuffer.iter().all(|&c| c == 0),
+            "the blanked lines drew nothing"
+        );
     }
 
     #[test]
@@ -2092,6 +2373,7 @@ mod tests {
         // Rendering into a correctly-sized buffer must not panic.
         let (w, h) = sys.display_size();
         let mut buf = vec![0u8; (w * h * 3) as usize];
+        scan_frame(&mut sys);
         sys.render_frame(&mut buf);
     }
 }
