@@ -77,6 +77,34 @@ pub(crate) fn cmos_transfer_curve(gate: &super::CmosInverter) -> (f64, f64) {
     (a, b)
 }
 
+/// Output pulse width of a 74LS123-family retriggerable monostable, in seconds,
+/// from its external timing resistor (ohms), capacitor (farads) and the way the
+/// board wires the charge path.
+///
+/// `tW = K·Rext·Cext`. What K is depends on the circuit, not on the part:
+///
+/// - [`Ls123Charge::Direct`] is the datasheet's own configuration, Rext straight
+///   to Vcc, where it gives K as nominally 0.45 for `Cext ≥ 1000 pF` and says
+///   K's variation with Rext is negligible from 5 kΩ to 260 kΩ.
+/// - [`Ls123Charge::DiodeFed`] puts a diode between the resistor and the timing
+///   capacitor, which changes the charge path and shortens the pulse to about
+///   0.25·R·C. That figure is empirical and not ours; the datasheet has no
+///   equation for this arrangement, and indeed advises against it.
+///
+/// The distinction is worth a parameter because it is nearly a factor of two on
+/// the same components, and because the datasheet's advice does not predict what
+/// boards do: the Nintendo boards modelled here fit the diode on every one of
+/// their one-shots with electrolytic timing capacitors, which is exactly the
+/// case the datasheet says not to. Read the connection, not the bill of
+/// materials.
+pub(crate) fn ls123_pulse_width(charge: super::Ls123Charge, ohms: f64, farads: f64) -> f64 {
+    let k = match charge {
+        super::Ls123Charge::Direct => 0.45,
+        super::Ls123Charge::DiodeFed => 0.25,
+    };
+    k * ohms * farads
+}
+
 /// The '629's frequency-control and range pins' own input impedance, about
 /// 90 kΩ (the datasheet's 70 kΩ + 20 kΩ internal divider, confirmed on the
 /// bench). A board's series resistor into either pin therefore divides against

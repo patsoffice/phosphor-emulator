@@ -5,7 +5,7 @@
 //! in the `NodeId` references inside each kind and is fixed once the circuit is
 //! built; everything mutated at runtime is serialized by `save_runtime`.
 
-use super::{ClockDomain, CustomComponent, Feed555, FilterMode, NodeId, Output555};
+use super::{ClockDomain, CustomComponent, Feed555, FilterMode, LogicOp, NodeId, Output555};
 use crate::core::save_state::{SaveError, StateReader, StateWriter};
 
 /// One node in the circuit graph: a primitive kind plus per-node scheduler
@@ -53,7 +53,8 @@ pub(crate) enum NodeKind {
     FixedTriangle { freq: f64, phase: f64 },
     /// Triangle wave whose frequency (Hz) comes from another node.
     VariableTriangle { freq_src: NodeId, phase: f64 },
-    /// Linear-feedback-shift-register noise, internally clocked at `freq` (Hz).
+    /// Linear-feedback-shift-register noise, clocked at `freq` (Hz) or, when
+    /// `freq_src` is set, at the rate carried by that node.
     LfsrNoise {
         lfsr: u32,
         seed: u32,
@@ -67,6 +68,9 @@ pub(crate) enum NodeKind {
         /// Emit the feedback term rather than bit 0.
         output_feedback: bool,
         freq: f64,
+        /// A node carrying the clock rate in hertz, for a register clocked by a
+        /// modelled oscillator rather than by a number. Overrides `freq`.
+        freq_src: Option<NodeId>,
         clock_acc: f64,
     },
     /// A fixed value.
@@ -298,6 +302,63 @@ pub(crate) enum NodeKind {
         v_cap: f64,
         v_mid_prev: f64,
     },
+    /// A node reserved before its source exists, so a feedback loop spanning
+    /// several nodes can be named. Passes its source through unchanged.
+    Feedback { src: Option<NodeId> },
+    /// Retriggerable monostable (74LS123 and kin): a rising edge on `src`
+    /// starts, or restarts, a fixed-width output pulse.
+    ///
+    /// Retriggerable is the whole character. A game that pulses its trigger
+    /// faster than the width gets one continuous output, not a train, and the
+    /// width then never appears in the sound at all.
+    Ls123 {
+        src: NodeId,
+        /// Output pulse width in seconds.
+        width: f64,
+        /// Seconds left of the current pulse.
+        remaining: f64,
+        /// Previous trigger value, for edge detection.
+        last: f64,
+    },
+    /// Ripple counter clocked by a *frequency* rather than by a waveform: the
+    /// node named by `freq_src` carries hertz, and the count advances by that
+    /// many edges per second.
+    ///
+    /// Taking a rate rather than edges is what lets a counter be clocked far
+    /// above the simulation rate, which is the case on the boards that use one:
+    /// a 59 kHz clock is meaningless as a square at any rate this framework can
+    /// afford and exact as a rate at every rate. Read individual stages with
+    /// [`NodeKind::BitDecode`]; the node's own value is the count.
+    RippleCounter {
+        freq_src: NodeId,
+        /// Wraps at `1 << stages`.
+        mask: u32,
+        count: u32,
+        /// Fractional clock carried between steps.
+        clock_acc: f64,
+    },
+    /// One bit of another node's integer value, as 0.0 or 1.0.
+    BitDecode { src: NodeId, bit: u8 },
+    /// Two-to-one selector (74LS157 and kin): `high_src` while `sel_src` is
+    /// above half a logic level, `low_src` otherwise.
+    Select {
+        sel_src: NodeId,
+        low_src: NodeId,
+        high_src: NodeId,
+    },
+    /// A logic level rendered as the two voltages a real gate actually drives.
+    ///
+    /// Worth spelling out rather than scaling by a supply rail: what a TTL gate
+    /// puts out is neither 0 V nor 5 V, and where the destination is an
+    /// oscillator's control pin the difference between 0 V and 0.15 V is a
+    /// different pitch rather than a rounding error.
+    LogicLevels {
+        src: NodeId,
+        v_low: f64,
+        v_high: f64,
+    },
+    /// A two-input logic gate over 0/1 levels, output 0.0 or 1.0.
+    LogicGate { gate: LogicOp, a: NodeId, b: NodeId },
     /// One 74LS629 voltage-controlled oscillator half.
     ///
     /// **This node's value is a frequency in hertz, not a waveform.** The part's
@@ -407,7 +468,29 @@ impl NodeKind {
             }
             NodeKind::VariableSquare { freq_src, .. }
             | NodeKind::VariableTriangle { freq_src, .. } => out.push(freq_src.index()),
+            NodeKind::LfsrNoise {
+                freq_src: Some(src),
+                ..
+            } => out.push(src.index()),
             NodeKind::Ls629Vco { fc_src, .. } => out.push(fc_src.index()),
+            NodeKind::Ls123 { src, .. }
+            | NodeKind::BitDecode { src, .. }
+            | NodeKind::LogicLevels { src, .. } => out.push(src.index()),
+            NodeKind::RippleCounter { freq_src, .. } => out.push(freq_src.index()),
+            NodeKind::Feedback { src: Some(src) } => out.push(src.index()),
+            NodeKind::Select {
+                sel_src,
+                low_src,
+                high_src,
+            } => {
+                out.push(sel_src.index());
+                out.push(low_src.index());
+                out.push(high_src.index());
+            }
+            NodeKind::LogicGate { a, b, .. } => {
+                out.push(a.index());
+                out.push(b.index());
+            }
             NodeKind::Multiply { a, b } => {
                 out.push(a.index());
                 out.push(b.index());
@@ -492,9 +575,14 @@ impl NodeKind {
                 invert_feedback,
                 output_feedback,
                 freq,
+                freq_src,
                 clock_acc,
                 ..
             } => {
+                let rate = match freq_src {
+                    Some(src) => values[src.index()],
+                    None => *freq,
+                };
                 let advance = |state: u32| {
                     super::lfsr_advance(
                         state,
@@ -508,7 +596,7 @@ impl NodeKind {
                 // Read before the loop as well, so a step that carries no clock
                 // edge still reports the feedback of the current state.
                 let mut feedback = advance(*lfsr).1;
-                *clock_acc += *freq * dt;
+                *clock_acc += rate * dt;
                 while *clock_acc >= 1.0 {
                     *clock_acc -= 1.0;
                     let (next, fb) = advance(*lfsr);
@@ -924,6 +1012,78 @@ impl NodeKind {
                 }
                 super::derive::ls629_frequency(v_fc, *v_rng) * *c_scale
             }
+            NodeKind::Feedback { src } => match src {
+                Some(s) => values[s.index()],
+                None => 0.0,
+            },
+            NodeKind::Ls123 {
+                src,
+                width,
+                remaining,
+                last,
+            } => {
+                let cur = values[src.index()];
+                if cur > 0.5 && *last <= 0.5 {
+                    // Retrigger restarts the full width rather than extending
+                    // it, which is what the part does and what makes a burst of
+                    // triggers one pulse instead of several.
+                    *remaining = *width;
+                }
+                *last = cur;
+                if *remaining > 0.0 {
+                    *remaining -= dt;
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+            NodeKind::RippleCounter {
+                freq_src,
+                mask,
+                count,
+                clock_acc,
+            } => {
+                let freq = values[freq_src.index()];
+                *clock_acc += freq * dt;
+                // A clock far above the simulation rate carries several edges
+                // into one step; that is the point of taking a rate.
+                while *clock_acc >= 1.0 {
+                    *clock_acc -= 1.0;
+                    *count = (*count + 1) & *mask;
+                }
+                *count as f64
+            }
+            NodeKind::BitDecode { src, bit } => {
+                let v = values[src.index()];
+                f64::from((v.max(0.0) as u32 >> *bit) & 1)
+            }
+            NodeKind::Select {
+                sel_src,
+                low_src,
+                high_src,
+            } => {
+                if values[sel_src.index()] > 0.5 {
+                    values[high_src.index()]
+                } else {
+                    values[low_src.index()]
+                }
+            }
+            NodeKind::LogicLevels { src, v_low, v_high } => {
+                if values[src.index()] > 0.5 {
+                    *v_high
+                } else {
+                    *v_low
+                }
+            }
+            NodeKind::LogicGate { gate, a, b } => {
+                let a = values[a.index()] > 0.5;
+                let b = values[b.index()] > 0.5;
+                let out = match gate {
+                    LogicOp::Xor => a ^ b,
+                    LogicOp::Nand => !(a && b),
+                };
+                f64::from(out)
+            }
             NodeKind::EdgeDivider {
                 clock_src,
                 divisor,
@@ -1032,6 +1192,23 @@ impl NodeKind {
             }
             NodeKind::RcDisc5 { cap_v, .. } | NodeKind::RcIntegrate { cap_v, .. } => *cap_v = 0.0,
             NodeKind::Ls629Vco { v_cap, .. } => *v_cap = 0.0,
+            NodeKind::Ls123 {
+                remaining, last, ..
+            } => {
+                *remaining = 0.0;
+                *last = 0.0;
+            }
+            NodeKind::RippleCounter {
+                count, clock_acc, ..
+            } => {
+                *count = 0;
+                *clock_acc = 0.0;
+            }
+            NodeKind::BitDecode { .. }
+            | NodeKind::Select { .. }
+            | NodeKind::LogicLevels { .. }
+            | NodeKind::LogicGate { .. }
+            | NodeKind::Feedback { .. } => {}
             NodeKind::EdgeDivider {
                 count, level, last, ..
             } => {
@@ -1106,6 +1283,23 @@ impl NodeKind {
             NodeKind::RcDisc5 { cap_v, .. }
             | NodeKind::RcIntegrate { cap_v, .. }
             | NodeKind::Ls629Vco { v_cap: cap_v, .. } => w.write_f64_le(*cap_v),
+            NodeKind::Ls123 {
+                remaining, last, ..
+            } => {
+                w.write_f64_le(*remaining);
+                w.write_f64_le(*last);
+            }
+            NodeKind::RippleCounter {
+                count, clock_acc, ..
+            } => {
+                w.write_u32_le(*count);
+                w.write_f64_le(*clock_acc);
+            }
+            NodeKind::BitDecode { .. }
+            | NodeKind::Select { .. }
+            | NodeKind::LogicLevels { .. }
+            | NodeKind::LogicGate { .. }
+            | NodeKind::Feedback { .. } => {}
             NodeKind::EdgeDivider {
                 count, level, last, ..
             } => {
@@ -1180,6 +1374,23 @@ impl NodeKind {
             NodeKind::RcDisc5 { cap_v, .. }
             | NodeKind::RcIntegrate { cap_v, .. }
             | NodeKind::Ls629Vco { v_cap: cap_v, .. } => *cap_v = r.read_f64_le()?,
+            NodeKind::Ls123 {
+                remaining, last, ..
+            } => {
+                *remaining = r.read_f64_le()?;
+                *last = r.read_f64_le()?;
+            }
+            NodeKind::RippleCounter {
+                count, clock_acc, ..
+            } => {
+                *count = r.read_u32_le()?;
+                *clock_acc = r.read_f64_le()?;
+            }
+            NodeKind::BitDecode { .. }
+            | NodeKind::Select { .. }
+            | NodeKind::LogicLevels { .. }
+            | NodeKind::LogicGate { .. }
+            | NodeKind::Feedback { .. } => {}
             NodeKind::EdgeDivider {
                 count, level, last, ..
             } => {

@@ -215,6 +215,29 @@ pub struct CmosInverter {
     pub input_clamp: f64,
 }
 
+/// How a board wires a 74LS123's charge path, which decides its pulse width as
+/// much as the resistor and capacitor do. See
+/// [`ls123`](DiscreteCircuitBuilder::ls123).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Ls123Charge {
+    /// Timing resistor straight to Vcc: the datasheet's own configuration.
+    Direct,
+    /// Timing resistor to Vcc through a diode whose cathode drives the timing
+    /// pin, which is how the Nintendo boards wire theirs. Roughly half the pulse
+    /// width of [`Direct`](Self::Direct) for the same parts.
+    DiodeFed,
+}
+
+/// A two-input logic gate. Only the shapes a modelled board actually contains
+/// are here; add one when a board needs it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum LogicOp {
+    /// Exclusive OR, e.g. a 74LS86 section.
+    Xor,
+    /// NAND, e.g. a 74LS00 section.
+    Nand,
+}
+
 /// One half of a 74LS629 dual voltage-controlled oscillator, as a board wires
 /// it. Every field is a designator off the drawing; see
 /// [`ls629_vco`](DiscreteCircuitBuilder::ls629_vco).
@@ -535,6 +558,31 @@ impl DiscreteCircuitBuilder {
 
     /// LFSR noise generator clocked internally at `freq` (Hz).
     pub fn lfsr_noise(&mut self, name: &str, freq: f64, spec: LfsrSpec) -> NodeId {
+        self.lfsr_inner(name, freq, None, spec)
+    }
+
+    /// LFSR noise generator clocked at the rate carried by `freq_src`, for a
+    /// register whose clock is a modelled oscillator rather than a number.
+    ///
+    /// Reach for this rather than measuring the oscillator once and passing the
+    /// hertz: a noise source's rate is the whole of its character, and a
+    /// hard-coded one silently stops tracking the parts it came from.
+    pub fn lfsr_noise_clocked(
+        &mut self,
+        name: &str,
+        freq_src: impl Into<NodeId>,
+        spec: LfsrSpec,
+    ) -> NodeId {
+        self.lfsr_inner(name, 0.0, Some(freq_src.into()), spec)
+    }
+
+    fn lfsr_inner(
+        &mut self,
+        name: &str,
+        freq: f64,
+        freq_src: Option<NodeId>,
+        spec: LfsrSpec,
+    ) -> NodeId {
         assert!(
             spec.width >= 1 && spec.width <= 32,
             "LFSR width out of range"
@@ -560,6 +608,7 @@ impl DiscreteCircuitBuilder {
                 invert_feedback: spec.invert_feedback,
                 output_feedback: spec.output == LfsrOutput::Feedback,
                 freq,
+                freq_src,
                 clock_acc: 0.0,
             },
             ClockDomain::BoardCycle,
@@ -1141,6 +1190,187 @@ impl DiscreteCircuitBuilder {
         )
     }
 
+    /// Reserve a node whose source is wired later with
+    /// [`connect`](Self::connect), so a feedback loop spanning several nodes can
+    /// be named.
+    ///
+    /// [`next_id`](Self::next_id) covers a node that reads itself, which is the
+    /// only loop a builder can express by ordering alone. A real board's loops
+    /// are longer: Donkey Kong Jr.'s walking voice runs an oscillator into a
+    /// counter, a counter tap through a multiplexer and an inverter, and that
+    /// back into the same oscillator's frequency control, so every node in the
+    /// ring needs one that does not exist yet. Reserve the ring's cut point,
+    /// build forward, then connect.
+    ///
+    /// The cut becomes a back-edge with the usual one-step delay. `build` panics
+    /// if a reserved node was never connected, since a silently dead node would
+    /// leave the loop open and the voice merely wrong.
+    pub fn feedback_node(&mut self, name: &str) -> NodeId {
+        self.push_node(
+            name,
+            NodeKind::Feedback { src: None },
+            ClockDomain::BoardCycle,
+        )
+    }
+
+    /// Wire the source of a node reserved by
+    /// [`feedback_node`](Self::feedback_node).
+    pub fn connect(&mut self, node: impl Into<NodeId>, src: impl Into<NodeId>) {
+        let id = node.into();
+        match &mut self.nodes[id.index()].kind {
+            NodeKind::Feedback { src: slot } => {
+                assert!(slot.is_none(), "feedback node connected twice");
+                *slot = Some(src.into());
+            }
+            _ => panic!("connect expects a node made by feedback_node"),
+        }
+    }
+
+    /// Retriggerable monostable built from a 74LS123's timing components: a
+    /// rising edge on `trigger_src` drives the output high for `K·r·c` seconds,
+    /// and another edge inside that window restarts it.
+    ///
+    /// **`charge` is not a detail — it is nearly a factor of two on the same two
+    /// components.** The datasheet's `tW = 0.45·Rext·Cext` describes its own
+    /// configuration, the resistor tied straight to Vcc; a board that charges
+    /// the capacitor through a diode instead gets about 0.25·R·C. See
+    /// [`Ls123Charge`].
+    ///
+    /// This was got wrong once here, in the way that is easy to defend at the
+    /// time: the datasheet's constant was taken because it is the datasheet's,
+    /// and it also says the diode "is not needed for electrolytic capacitance
+    /// application and should not be used on the LS122 and LS123" — and these
+    /// are electrolytics. The boards fit the diode anyway. A Donkey Kong Jr.
+    /// footstep came out 99 ms against the board's 57 ms, which is audible
+    /// immediately and measures as a wrong attack rather than a wrong spectrum.
+    pub fn ls123(
+        &mut self,
+        name: &str,
+        trigger_src: impl Into<NodeId>,
+        charge: Ls123Charge,
+        r: f64,
+        c: f64,
+    ) -> NodeId {
+        self.push_node(
+            name,
+            NodeKind::Ls123 {
+                src: trigger_src.into(),
+                width: derive::ls123_pulse_width(charge, r, c),
+                remaining: 0.0,
+                last: 0.0,
+            },
+            ClockDomain::BoardCycle,
+        )
+    }
+
+    /// Ripple counter (4020 and kin) clocked by the *frequency* on `freq_src`,
+    /// counting modulo `1 << stages`. The node's value is the count; read one
+    /// stage with [`bit_decode`](Self::bit_decode).
+    ///
+    /// Taking a rate rather than a waveform is deliberate: a board reaches for a
+    /// counter precisely when its clock is too fast to be interesting on its
+    /// own, and 59 kHz cannot be a square at any simulation rate this framework
+    /// can afford. Pair it with [`ls629_vco`](Self::ls629_vco), which produces
+    /// exactly such a rate.
+    pub fn ripple_counter(
+        &mut self,
+        name: &str,
+        freq_src: impl Into<NodeId>,
+        stages: u8,
+    ) -> NodeId {
+        assert!(
+            (1..=31).contains(&stages),
+            "ripple counter needs 1 to 31 stages"
+        );
+        self.push_node(
+            name,
+            NodeKind::RippleCounter {
+                freq_src: freq_src.into(),
+                mask: (1u32 << stages) - 1,
+                count: 0,
+                clock_acc: 0.0,
+            },
+            ClockDomain::BoardCycle,
+        )
+    }
+
+    /// One stage of a counter: bit `bit` of `src`'s integer value, as 0.0 or 1.0.
+    /// Stage `n` of a ripple counter is a divide-by-`2^(n+1)` square.
+    pub fn bit_decode(&mut self, name: &str, src: impl Into<NodeId>, bit: u8) -> NodeId {
+        self.push_node(
+            name,
+            NodeKind::BitDecode {
+                src: src.into(),
+                bit,
+            },
+            ClockDomain::BoardCycle,
+        )
+    }
+
+    /// Two-to-one selector (74LS157 and kin): `high_src` while `sel_src` is a
+    /// logic one, `low_src` otherwise.
+    pub fn select(
+        &mut self,
+        name: &str,
+        sel_src: impl Into<NodeId>,
+        low_src: impl Into<NodeId>,
+        high_src: impl Into<NodeId>,
+    ) -> NodeId {
+        self.push_node(
+            name,
+            NodeKind::Select {
+                sel_src: sel_src.into(),
+                low_src: low_src.into(),
+                high_src: high_src.into(),
+            },
+            ClockDomain::BoardCycle,
+        )
+    }
+
+    /// Render a logic level as the two voltages a real gate drives, `v_low` and
+    /// `v_high`.
+    ///
+    /// Use this wherever a gate's output is an *analog* input to something else,
+    /// which on these boards it usually is. A TTL output is not 0 V and 5 V, and
+    /// where it lands on an oscillator's control pin the difference between 0 V
+    /// and 0.15 V is a different pitch rather than a rounding error.
+    pub fn logic_levels(
+        &mut self,
+        name: &str,
+        src: impl Into<NodeId>,
+        v_low: f64,
+        v_high: f64,
+    ) -> NodeId {
+        self.push_node(
+            name,
+            NodeKind::LogicLevels {
+                src: src.into(),
+                v_low,
+                v_high,
+            },
+            ClockDomain::BoardCycle,
+        )
+    }
+
+    /// A two-input logic gate over 0/1 levels.
+    pub fn logic_gate(
+        &mut self,
+        name: &str,
+        gate: LogicOp,
+        a: impl Into<NodeId>,
+        b: impl Into<NodeId>,
+    ) -> NodeId {
+        self.push_node(
+            name,
+            NodeKind::LogicGate {
+                gate,
+                a: a.into(),
+                b: b.into(),
+            },
+            ClockDomain::BoardCycle,
+        )
+    }
+
     /// One 74LS629 voltage-controlled oscillator half, from the parts a board
     /// wires around it. **The returned node's value is the oscillator's
     /// frequency in hertz, not its output.** Wrap it in a
@@ -1291,6 +1521,15 @@ impl DiscreteCircuitBuilder {
 
     /// Freeze the topology, computing the evaluation order.
     pub fn build(self) -> DiscreteCircuit {
+        // A reserved node nobody connected is an open feedback loop, which does
+        // not fail: the voice simply runs with a dead source and sounds wrong.
+        for (i, node) in self.nodes.iter().enumerate() {
+            assert!(
+                !matches!(node.kind, NodeKind::Feedback { src: None }),
+                "feedback node '{}' was never connected",
+                self.names[i]
+            );
+        }
         let n = self.nodes.len();
         let eval_order = topo_order(&self.nodes);
         DiscreteCircuit {
