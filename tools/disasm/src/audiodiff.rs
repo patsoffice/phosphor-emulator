@@ -447,6 +447,43 @@ pub fn compare(
         20.0 * gain.max(1e-10).log10()
     );
     opt_row(&mut s, "  onset (s)", aa.level.onset_s, ba.level.onset_s, 3);
+
+    // Every decay number below is measured inside ONE event, and these three
+    // rows are how a reader knows which one. A capture holding a train of
+    // footsteps used to have its decay measured across the whole train, which
+    // is a number that moves when the steps' relative loudness moves and not
+    // when the envelope does. The count is the row to check first: if the two
+    // sides found different numbers of events, they are not decaying
+    // differently, they are triggering differently, and the T20 delta below is
+    // not the difference to chase.
+    row(
+        &mut s,
+        "  events",
+        aa.level.events.count() as f64,
+        ba.level.events.count() as f64,
+        0,
+    );
+    opt_row(
+        &mut s,
+        "  event spacing (s)",
+        aa.level.events.spacing_s,
+        ba.level.events.spacing_s,
+        3,
+    );
+    row(
+        &mut s,
+        "  event window (s)",
+        aa.level.event_window_s,
+        ba.level.event_window_s,
+        3,
+    );
+    opt_row(
+        &mut s,
+        "  attack (s)",
+        aa.level.attack_s,
+        ba.level.attack_s,
+        4,
+    );
     opt_row(
         &mut s,
         "  decay T20 (s)",
@@ -478,6 +515,16 @@ pub fn compare(
         "  decay fit r2",
         aa.level.decay_tau_s.map(|(_, r)| r),
         ba.level.decay_tau_s.map(|(_, r)| r),
+        3,
+    );
+    // Per-event, where AC RMS above is per-capture: over a train the two answer
+    // different questions and only this one is comparable between captures that
+    // hold different numbers of events.
+    row(
+        &mut s,
+        "  event energy",
+        aa.level.event_energy,
+        ba.level.event_energy,
         3,
     );
 
@@ -786,6 +833,28 @@ pub fn describe(capture: &Capture, label: &str) -> String {
         a.spectrum.rolloff_hz,
         a.spectrum.flatness,
         a.spectrum.fundamental_hz
+    );
+    // The event line before the decay numbers, not after, because it is what
+    // says whether they describe one effect or a train of them.
+    let fmt = |v: Option<f64>, p: usize| match v {
+        Some(v) => format!("{v:.*}", p),
+        None => "-".to_string(),
+    };
+    let _ = writeln!(
+        s,
+        "  events {} spaced {} s  window {:.3} s  attack {} s",
+        a.level.events.count(),
+        fmt(a.level.events.spacing_s, 3),
+        a.level.event_window_s,
+        fmt(a.level.attack_s, 4)
+    );
+    let _ = writeln!(
+        s,
+        "  per event: T20 {} s  T40 {} s  tau {} s (r2 {})",
+        fmt(a.level.decay_t20_s, 3),
+        fmt(a.level.decay_t40_s, 3),
+        fmt(a.level.decay_tau_s.map(|(t, _)| t), 3),
+        fmt(a.level.decay_tau_s.map(|(_, r)| r), 3)
     );
     let bands: Vec<String> = a
         .spectrum

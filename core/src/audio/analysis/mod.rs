@@ -21,7 +21,10 @@
 //!   silence are defects in the recording or the model, not differences to
 //!   explain.
 //! - [`Level`] — how loud, and how does that change over time? Attack and decay
-//!   live here, and a windowed spectrum averages them away.
+//!   live here, and a windowed spectrum averages them away. Its decay numbers
+//!   are measured inside a single isolated event, with [`Events`] reporting how
+//!   many the capture held: over a train of footsteps the whole-capture version
+//!   silently measures the train's amplitude profile instead.
 //! - [`Spectrum`] — what does it sound like? Centroid, flatness and band ratios
 //!   separate a filter error from a mix error from a gain error.
 //! - [`Discontinuity`] — does one sample do something the rest of the waveform
@@ -37,8 +40,8 @@ mod level;
 mod spectrum;
 
 pub use level::{
-    Discontinuity, Integrity, Level, dc_offset, decay_time, integrated_energy, onset_index, rms,
-    rms_dbfs, rms_envelope,
+    Discontinuity, Events, Integrity, Level, ONSET_HOP_S, dc_offset, decay_time, integrated_energy,
+    onset_index, onset_indices, rms, rms_dbfs, rms_envelope,
 };
 pub use spectrum::{
     BAND_EDGES_HZ, Peak, Spectrum, band_energy_ratios, dominant_peaks, envelope_alignment,

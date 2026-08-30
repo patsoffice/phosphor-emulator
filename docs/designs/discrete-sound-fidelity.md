@@ -361,7 +361,7 @@ then diff two spectrograms.
 | Group | Contents |
 |---|---|
 | Signal integrity | DC offset, peak dBFS, clipping fraction, crest factor, leading activity |
-| Level and time | AC RMS dBFS, integrated squared energy, RMS envelope, attack time, T20/T40 decay, duration above threshold |
+| Level and time | AC RMS dBFS, integrated squared energy, RMS envelope, event count and spacing, and — per isolated event — attack time, energy, T20/T40 decay, fitted tau with r², duration above threshold |
 | Frequency and timbre | fundamental (spectral + autocorrelation), dominant peaks, centroid, rolloff, flatness, band-energy ratios, harmonic ratios |
 | Distance | multi-resolution log-magnitude STFT distance, envelope L1 |
 | Alignment | onset detection, envelope cross-correlation within a bound |
@@ -370,6 +370,18 @@ Short arcade effects rarely have the dynamic range for a reliable T60, so
 several decay summaries beat one nominal number. Pitch combines spectral and
 autocorrelation estimates — a single largest FFT bin is unstable for swept tones
 and noisy resonances.
+
+**Every decay number is measured inside one isolated event, not across the
+capture.** A capture usually holds several: a walk enable held for two seconds
+gives an onset pulse and a release pulse, and gameplay gives a train of them.
+Measured across the whole capture, T20 reported the distance between the first
+and last event — 2.045 s on the `dkong/walk` capture, where the event itself has
+a T20 of 0.055 s and a 24 ms time constant fitting at r² 0.992. That number was
+not merely imprecise; it moved when the events' relative loudness moved and
+stayed put when the envelope changed, which is the opposite of what a decay
+metric is for. The reported event count and spacing are what let a reader check
+that the isolation found what they think it found — a count of 1 where a train
+was expected means the numbers beside it are the train's.
 
 This part is largely a *port*: `compare_wav.py` already computes band energy,
 centroid, flatness, envelope and spectrogram. The design work is the alignment
