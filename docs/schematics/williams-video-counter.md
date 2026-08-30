@@ -114,3 +114,16 @@ The twelve nets in the readback table were read from a 400 dpi render at
 legible size and are stated with confidence. Everything under "does not
 establish" is either inference or unread, and is marked as such rather than
 smoothed into the same voice.
+
+One check on the transcription rather than on the board. `3B`'s twelve pins
+have to fall into the 8T97's six buffers, which are the pin pairs (2, 3),
+(4, 5), (6, 7), (10, 9), (12, 11) and (14, 13); the second three are numbered
+output before input, which is the part's mirrored layout and not a slip here.
+Every row above lands on one of those pairs: VA13 enters at 2 and leaves at 3,
+VA12 at 14 and 13, VA11 at 4 and 5, VA10 at 12 and 11, VA9 at 6 and 7, VA8 at
+10 and 9. A misread digit would have to land on a valid pair six times to
+survive that, so the readback mapping is as firm as the reading of it.
+
+The counters pass the same check: `Q3` through `Q0` on a 74163 are pins 11 to
+14 descending, which is what all four stages show. It says nothing about
+whether the right chip was read, only that the digits within it are coherent.
