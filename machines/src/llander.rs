@@ -1,3 +1,21 @@
+//! Lunar Lander (Atari, 1979), on the shared Atari DVG vector board.
+//!
+//! # Schematics
+//!
+//! | Drawing | Source | Pages |
+//! |---|---|---|
+//! | `POWER INPUTS AND OUTPUTS 034230-XX A`, sheet 1 side B | `arcade-museum.com/manuals-videogames/L/Lunar-Lander-DP136-3rd-Printing-Missing-Sheet-01-Side-A.pdf` | PDF p1 |
+//! | `VECTOR GENERATOR SCHEMATIC 034230-XX A`, sheet 2 sides A and B | same | PDF p2, p3 |
+//!
+//! Only the audio block on sheet 1 side B has been read; it is transcribed in
+//! [`docs/schematics/llander-audio-output.md`](../../docs/schematics/llander-audio-output.md).
+//! The vector generator sheets were not read.
+//!
+//! **Sheet 1 side A is missing from this scan**, as its filename says. That is
+//! the sheet carrying the address decode, so the `AUDIO` strobe that clocks the
+//! sound latch and the `0x3E00` noise-reset strobe are known from the memory map
+//! and not from any drawing. Do not go looking for them in this PDF.
+
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
     ActionRole, DipApplyTiming, DipChoice, DipOption, DipSwitchBank, InputConfigurable,

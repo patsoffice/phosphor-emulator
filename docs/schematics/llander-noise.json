@@ -1,0 +1,83 @@
+{
+  "modules": {
+    "llander noise: a 16-bit XNOR LFSR from an OR and two NANDs": {
+      "ports": {
+        "12KHZ": { "direction": "input", "bits": [2] },
+        "NOISERESET": { "direction": "input", "bits": [3] },
+        "noise to P5 4066": { "direction": "output", "bits": [12] }
+      },
+      "cells": {
+        "uM6": {
+          "type": "M6 LS164",
+          "port_directions": {
+            "A,B (1,2)": "input",
+            "CK (8)": "input",
+            "CLR (9)": "input",
+            "QG (12)": "output",
+            "QH (13)": "output"
+          },
+          "connections": {
+            "A,B (1,2)": [10, 10],
+            "CK (8)": [2],
+            "CLR (9)": [3],
+            "QG (12)": [11],
+            "QH (13)": [13]
+          },
+          "attributes": {}
+        },
+        "uM7": {
+          "type": "M7 LS164",
+          "port_directions": {
+            "A,B (1,2)": "input",
+            "CK (8)": "input",
+            "CLR (9)": "input",
+            "QG (12)": "output"
+          },
+          "connections": {
+            "A,B (1,2)": [13, 13],
+            "CK (8)": [2],
+            "CLR (9)": [3],
+            "QG (12)": [12]
+          },
+          "attributes": {}
+        },
+        "uM5": {
+          "type": "M5 LS32",
+          "port_directions": {
+            "in (12,13)": "input",
+            "out (11)": "output"
+          },
+          "connections": {
+            "in (12,13)": [12, 11],
+            "out (11)": [14]
+          },
+          "attributes": {}
+        },
+        "uN6a": {
+          "type": "N6 LS00a",
+          "port_directions": {
+            "in (2,1)": "input",
+            "out (3)": "output"
+          },
+          "connections": {
+            "in (2,1)": [12, 11],
+            "out (3)": [15]
+          },
+          "attributes": {}
+        },
+        "uN6b": {
+          "type": "N6 LS00b",
+          "port_directions": {
+            "in (12,13)": "input",
+            "out (11)": "output"
+          },
+          "connections": {
+            "in (12,13)": [15, 14],
+            "out (11)": [10]
+          },
+          "attributes": {}
+        }
+      }
+    }
+  }
+}

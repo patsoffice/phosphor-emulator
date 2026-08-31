@@ -88,6 +88,12 @@ section is there so that is obvious.
 - [`mcr-video-timing.md`](mcr-video-timing.md) — a negative result: MCR II's
   H and V counters and both blanking decodes are inside custom LSIs, so the
   blanking phase is on no drawing. Read it before hunting for one.
+- [`llander-audio-output.md`](llander-audio-output.md) — Lunar Lander's four
+  sounds, and the thing a netlist comparison cannot see: the three resistors that
+  set the thrust volume are the same three that set the noise filter's corner, so
+  quieter thrust is darker thrust. Also derives the 89.5 Hz / Q 7.6 band-pass
+  from its six component values, which is what confirms the reference's two magic
+  numbers are the circuit rather than a fit.
 - [`dkongjr-sound-sources.md`](dkongjr-sound-sources.md), what generates Donkey
   Kong Jr.'s effect tones. Four voices off five 74LS629 VCO halves, a 4020 tap
   mux and a 16-bit LFSR, sharing not one source with the 555s the emulator plays
