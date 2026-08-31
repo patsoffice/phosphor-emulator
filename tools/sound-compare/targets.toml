@@ -496,9 +496,29 @@ gap in the way Pac-Man's is, because nothing establishes what the board did."""
 id = "irobot-output"
 machines = ["irobot"]
 device = "machines/src/irobot.rs"
-status = "unexamined"
+status = "partial"
 notes = """
-POKEY with no coupling or filter stage modelled."""
+EXAMINED. CPU PCB SP-251 sheet 4A, transcribed at
+docs/schematics/irobot-audio-output.md.
+
+THE FIRST ENTRY IN THIS SWEEP WHERE A CONSTANT WE ALREADY HAD IS RIGHT. The four
+POKEY outputs on the 4E quad-POKEY, pins 28, 29, 27 and 21, are tied DIRECTLY
+together with no summing resistors. Four equal-impedance outputs shorted together
+average, so `mix_audio`'s `* 0.25` is what the board does. The comment beside it
+credits the reference emulator's routing, which is true but is not the reason it
+is correct; recorded because "borrowed and happens to be right" and "derived from
+the board" read identically in code and are different claims.
+
+WHAT IS NOT MODELLED is everything after that node: C9 0.22 uF shunting the
+paralleled output to ground; a gain stage of about -4.5 (R20 1k against R19 220)
+on an LM324; C8 0.22 uF coupling into a unity inverter; and then a second unity
+inverter, so that AUD1 and AUD2 leave on connector pins 8 and 9 as A DIFFERENTIAL
+PAIR where irobot.rs is mono. The LM324 runs single-supply on +10.3 V with an
+AUD5V mid-rail bias from R276 100k and C31 0.47 uF, so its clipping is asymmetric
+about that bias rather than about zero.
+
+Neither capacitor's corner is established: both depend on impedances not on this
+sheet. phosphor-emulator-2u1j."""
 
 [[target]]
 id = "missile-output"

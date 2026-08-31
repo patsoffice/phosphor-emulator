@@ -1,0 +1,76 @@
+{
+  "modules": {
+    "I Robot audio: four paralleled POKEY outputs into a differential pair": {
+      "ports": {
+        "AUD1 (J pin 8)": { "direction": "output", "bits": [60] },
+        "AUD2 (J pin 9)": { "direction": "output", "bits": [61] }
+      },
+      "cells": {
+        "u4E": {
+          "type": "4E CI/O quad POKEY",
+          "port_directions": {
+            "AUD1 (28)": "output",
+            "AUD2 (29)": "output",
+            "AUD3 (27)": "output",
+            "AUD4 (21)": "output"
+          },
+          "connections": {
+            "AUD1 (28)": [10],
+            "AUD2 (29)": [10],
+            "AUD3 (27)": [10],
+            "AUD4 (21)": [10]
+          },
+          "attributes": {}
+        },
+        "bias": {
+          "type": "R276 100k / C31 0.47u",
+          "port_directions": { "+5V": "input", "AUD5V": "output" },
+          "connections": { "+5V": [1], "AUD5V": [5] },
+          "attributes": {}
+        },
+        "u11Ca": {
+          "type": "11C LM324a",
+          "port_directions": {
+            "in (9) C9 0.22u, R19 220": "input",
+            "ref (10) AUD5V": "input",
+            "out (8) R20 1k fb": "output"
+          },
+          "connections": {
+            "in (9) C9 0.22u, R19 220": [10],
+            "ref (10) AUD5V": [5],
+            "out (8) R20 1k fb": [20]
+          },
+          "attributes": {}
+        },
+        "u11Cb": {
+          "type": "11C LM324b",
+          "port_directions": {
+            "in (2) C8 0.22u, R24 39k": "input",
+            "ref (3) AUD5V": "input",
+            "out (1) R23 39k fb": "output"
+          },
+          "connections": {
+            "in (2) C8 0.22u, R24 39k": [20],
+            "ref (3) AUD5V": [5],
+            "out (1) R23 39k fb": [61]
+          },
+          "attributes": {}
+        },
+        "u11Cc": {
+          "type": "11C LM324c",
+          "port_directions": {
+            "in (13) R22 39k": "input",
+            "ref (12) AUD5V": "input",
+            "out (14) R21 39k fb": "output"
+          },
+          "connections": {
+            "in (13) R22 39k": [61],
+            "ref (12) AUD5V": [5],
+            "out (14) R21 39k fb": [60]
+          },
+          "attributes": {}
+        }
+      }
+    }
+  }
+}

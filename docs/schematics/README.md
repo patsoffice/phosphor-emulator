@@ -88,6 +88,11 @@ section is there so that is obvious.
 - [`mcr-video-timing.md`](mcr-video-timing.md) — a negative result: MCR II's
   H and V counters and both blanking decodes are inside custom LSIs, so the
   blanking phase is on no drawing. Read it before hunting for one.
+- [`irobot-audio-output.md`](irobot-audio-output.md) — I, Robot's four POKEY
+  outputs are wired straight together, which is why the model's `* 0.25` is
+  right; everything after that node is not modelled, including a differential
+  output pair. The one entry in this sweep that CONFIRMED a constant rather than
+  refuting one.
 - [`ssio-audio-output.md`](ssio-audio-output.md) — Midway's Super Sound I/O, as
   used by Satan's Hollow. Its duty-cycle volume is an analog chopper with RC
   smoothing where the model has a lookup of the average; its six channels sum

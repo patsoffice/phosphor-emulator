@@ -1,6 +1,23 @@
 //! Atari I, Robot (1983) — the first arcade game rendered with real-time
 //! filled 3D polygons.
 //!
+//! # Schematics
+//!
+//! | Drawing | Source | Pages |
+//! |---|---|---|
+//! | `I, ROBOT CPU PCB`, SP-251 sheets 2B-6A | `irobot_schematics.zip`, `IROBOT_*.bmp` | sheet 4A carries the audio |
+//! | `I, ROBOT Video PCB`, sheets 6B-11A | same | not read |
+//! | Mathbox PCB, sheet 11B | same | not read |
+//!
+//! The audio output on sheet 4A is transcribed in
+//! [`docs/schematics/irobot-audio-output.md`](../../docs/schematics/irobot-audio-output.md).
+//! The scans are rotated 90 degrees: landscape content on a portrait bitmap.
+//!
+//! The four POKEY outputs are tied directly together on the board, which is why
+//! `mix_audio`'s `* 0.25` is correct. What is NOT modelled is everything after
+//! that node: a 0.22 uF shunt, about 13 dB of gain, a coupling capacitor, and a
+//! differential output pair where this is mono. See `phosphor-emulator-2u1j`.
+//!
 //! Hardware (per MAME `src/mame/atari/irobot{,_m,_v}.cpp`):
 //! - Main CPU: MC6809E @ 12.096 MHz / 8 = 1.512 MHz
 //! - Mathbox: a microcoded AM2901 bit-slice coprocessor (3D transform + display
