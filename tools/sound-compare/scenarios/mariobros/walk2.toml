@@ -1,0 +1,17 @@
+schema = 1
+id = "mariobros/walk2"
+target = "mariobros-discrete"
+duration_s = 5.0
+description = "One Luigi footstep, fired once and allowed to decay completely"
+
+# ONE action, not a pair, because the hardware has no line to release. The
+# board ANDs this address decode with the write strobe straight into a 74123,
+# so a write IS the footstep and writing zero afterwards would be a second one.
+[[action]]
+at_s = 2.0
+control = "walk2"
+value = true
+
+[analysis]
+start_s = 1.95
+end_s = 5.0

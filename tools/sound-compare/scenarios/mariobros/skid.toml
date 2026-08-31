@@ -1,0 +1,22 @@
+schema = 1
+id = "mariobros/skid"
+target = "mariobros-discrete"
+duration_s = 5.0
+description = "One skid; the only voice on this board driven by a level"
+
+# The skid line is a real level, so it asserts and releases. Its 74123 fires on
+# the edge, so the hold length sets when the line returns rather than how long
+# the voice lasts.
+[[action]]
+at_s = 2.0
+control = "skid"
+value = true
+
+[[action]]
+at_s = 2.05
+control = "skid"
+value = false
+
+[analysis]
+start_s = 1.95
+end_s = 5.0
