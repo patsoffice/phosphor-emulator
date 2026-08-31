@@ -78,14 +78,32 @@ trap 'rm -rf "$WORK"' EXIT
 # on the discrete device moves a capture by 6 dB. So the effects chain needs no
 # disabling, but a stray cfg is still able to scale a reference silently, and a
 # scratch directory is what rules that out.
+#
+# EACH RUN GETS ITS OWN cfg DIRECTORY, not one shared across the three. MAME
+# WRITES a cfg on exit as well as reading one, so a single directory means the
+# first run executes with no cfg and the two after it execute with whatever the
+# first one left behind. The three runs are then not the same experiment, and
+# the two checks are being made against a machine the base capture was not taken
+# from.
+#
+# That is not theoretical. On Lunar Lander the presence of the cfg moves the
+# thrust capture by 53 dB, reproducibly and in both directions, with nothing in
+# the command line to say so. The regime with no cfg is the correct one: its
+# output is exactly linear in the three-bit throttle (439.1, 878.6, 1757.6,
+# 3076.1 RMS for data 1, 2, 4, 7), which is what the netlist multiplies, and the
+# other regime is not. What the cfg carries that does this was not isolated;
+# what matters here is that the answer depends on it at all, so every run starts
+# from the same clean state.
 run() { # $1 = SND_VERIFY value ("" for the real schedule), $2 = output wav,
         # the rest are passed through to MAME
   local mode=$1; shift
   local out=$1; shift
+  local cfg="$WORK/cfg-${mode:-base}"
+  rm -rf "$cfg"
   SND_VERIFY=$mode "$MAME" "$MACHINE" \
     -rompath "$ROMS" -nothrottle -video none -sound none \
     -samplerate "$SIM_RATE" \
-    -cfg_directory "$WORK/cfg" -snapshot_directory "$WORK/snap" \
+    -cfg_directory "$cfg" -snapshot_directory "$WORK/snap" \
     -autoboot_script "$DRIVER" -wavwrite "$out" "$@" >"$WORK/log" 2>&1 \
     || { echo "  mame failed for mode '${mode:-real}':"; sed -n '1,5p' "$WORK/log"; exit 1; }
 }
@@ -119,6 +137,27 @@ fail=0
 #   AST_EFFECT=ship-fire SND_SKIP_S=0.9 verify-reference.sh drive_asteroid_single.lua asteroid
 SKIP_S=${SND_SKIP_S:-2.0}
 
+# How loud the driven capture has to be before this script believes the window
+# holds an effect, and how quiet the null one has to be to count as silence. One
+# number does both jobs: what it really says is "anything below this is noise".
+#
+# The default of 0.01 of full scale is far below any effect worth capturing on
+# the boards done so far, and above their idle noise floors. Lunar Lander is the
+# exception that made it a variable rather than a literal. Its two alert tones
+# are the quietest things any of these boards mixes -- the netlist gives them a
+# relative level of 9.2 against the explosion's 1000, and a 9.2 peak-to-peak
+# square through a mixer normalised by the leg sum lands at 0.0057 of full scale
+# -- so the default refuses a reference that is behaving exactly as the drawing
+# says it should. Lower it for a genuinely quiet voice:
+#
+#   LL_EFFECT=tone-3k SND_MIN_PEAK=0.002 verify-reference.sh \
+#       drive_llander_single.lua llander -seconds_to_run 4
+#
+# Lower it only with a reason of that shape. The threshold is what stops the
+# null check comparing two silences and passing for any driver at all, so
+# turning it down to make a run go green is the failure mode it exists to catch.
+MIN_PEAK=${SND_MIN_PEAK:-0.01}
+
 peak() {
   python3 - "$1" "$SKIP_S" <<'PY'
 import sys, wave, struct
@@ -138,14 +177,14 @@ null_peak=$(peak "$WORK/null.wav")
 # game actually holds their latch line put the whole event before this window,
 # and both peaks went to zero while the check went on reporting ok. A check that
 # cannot fail is not a check.
-if awk "BEGIN{exit !($base_peak < 0.01)}"; then
-  echo "  FAIL null         driven peak $base_peak from ${SKIP_S}s on: the window"
-  echo "                    holds no effect, so the null comparison is between two"
-  echo "                    silences. Move it with SND_SKIP_S."
+if awk "BEGIN{exit !($base_peak < $MIN_PEAK)}"; then
+  echo "  FAIL null         driven peak $base_peak from ${SKIP_S}s on, under the"
+  echo "                    $MIN_PEAK floor: the window holds no effect, so the null"
+  echo "                    comparison is between two silences. Move the window with"
+  echo "                    SND_SKIP_S, or lower the floor with SND_MIN_PEAK if the"
+  echo "                    voice is genuinely this quiet."
   fail=1
-# 0.01 of full scale is far below any effect worth capturing and above the
-# board's idle noise floor.
-elif awk "BEGIN{exit !($null_peak < 0.01)}"; then
+elif awk "BEGIN{exit !($null_peak < $MIN_PEAK)}"; then
   echo "  ok   null         peak $null_peak with nothing asserted (driven: $base_peak)"
 else
   echo "  FAIL null         peak $null_peak with NOTHING asserted, against $base_peak driven."
