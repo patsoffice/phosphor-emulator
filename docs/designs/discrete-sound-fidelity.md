@@ -16,14 +16,19 @@
 Three separate efforts converged on the same problem from different heights.
 
 **The manual rig** (`tools/sound-reference/`) is what actually fixed the
-Galaxian voices. It is three files per board in three languages: a MAME autoboot
+Galaxian voices. It was three files per board in three languages: a MAME autoboot
 Lua that pokes sound registers on a timeline, a `machines/examples/*_capture.rs`
 that drives the Phosphor device on what is meant to be the same timeline, and
 `analyze_wav.py` (108 lines) that segments both captures and prints a dominant
-peak, a centroid and an RMS per window. Four boards have all three parts;
-`xevious_capture.rs` has no Lua counterpart. `compare_wav.py` (210 lines) was
-added later and already covers band energy, centroid, flatness, an RMS envelope
-and a spectrogram for *same-session* comparisons.
+peak, a centroid and an RMS per window. Four boards had all three parts;
+`xevious_capture.rs` had no Lua counterpart at all. `compare_wav.py` (210 lines)
+was added later and already covers band energy, centroid, flatness, an RMS
+envelope and a spectrogram for *same-session* comparisons.
+
+The Lua half survives and is still how a reference is produced. The other two are
+gone as of Phase 7, along with the hand-syncing between three copies of one
+timeline that was the rig's real defect; `compare_wav.py` stays for exploratory
+one-offs on the same-session question, which nothing else answers.
 
 **`phosphor-emulator-audiodiff-76wx`** observed that none of this can ever
 become a gate: it needs numpy, a nix-shell whose setup takes a README section,
@@ -463,8 +468,16 @@ callbacks, so trigger edges are exact and independent of any producer's frame
 rate.
 
 This replaces all three hand-synced copies of the old timeline. The
-`machines/examples/*_capture.rs` binaries are deleted as each board migrates,
-and `analyze_wav.py` goes with the last one.
+`machines/examples/*_capture.rs` binaries were deleted as each board migrated,
+and `analyze_wav.py` went with the last of them in Phase 7.
+
+One copy of the timeline remains hand-synced, and it is worth saying so plainly:
+the MAME Lua driver's schedule is written to match its scenario's by eye, and
+nothing checks that it does. What makes that tolerable rather than the same
+defect again is that the two sides are now verified independently -- `sndcmp
+verify` on ours, `verify-reference.sh` on MAME's -- so a driver that has drifted
+off its scenario shows up as a comparison that disagrees on onset, which is the
+first line of the report.
 
 ### Adapters
 
@@ -902,6 +915,97 @@ Four specific traps, each of which cost real time here:
 - **A centroid shift through a filter is not a filter comparison.** The same
   filter produces different centroid shifts on two different input spectra. To
   compare two chains, measure each one's own input-to-output magnitude ratio.
+
+### A normalization error and a modelling error do not look alike
+
+Lunar Lander's first comparison put every voice between 19 and 26 dB below the
+reference. That reads as catastrophic and was nearly free to fix, because of a
+pattern worth naming: **the shape was already right.** Band shares agreed to 0.14
+percentage points, the centroid to 0.8 Hz on 89.6, crest factor to 0.2, attack to
+2 ms, envelope alignment to exactly zero.
+
+A model that is wrong moves the shape. A model that is right and scaled wrong
+moves only the level. So a large level delta with a small shape delta is a
+*normalization* question, and normalization has an answer that is not a fit: on a
+board like this one it is the mixer's own leg sum, which is on the drawing.
+
+The cause was one convention, applied wrongly in two places twelve lines apart.
+Mixer leg levels are PEAK-TO-PEAK swings -- what a logic gate on the far end of a
+resistor produces -- and the code applied them to a `fixed_square` that swings
+plus-or-minus one, which is already 2 peak-to-peak. That made the tones exactly
+6 dB hot. The same mistake at the output stage, where the netlist's divisor is
+`65534/sum` against ours of `32767/sum`, made the whole board a further 6 dB
+down, on top of a fitted 14347 that stood where the leg sum belonged. Correcting
+both put all five voices within 0.44 dB.
+
+Three things generalise.
+
+- **A fitted output normalization hides a whole board.** 14347 had a comment
+  saying it was tuned against a capture, which is exactly the disguise this
+  document warns about elsewhere, and it had no counterpart anywhere. *Can I
+  point at the part?* answered it: the mixer normalizes by the sum of what feeds
+  it.
+- **The fix arrived in two steps and the intermediate looked wrong.** After
+  correcting only the output divisor, every voice sat at a uniform -6.0 dB. A
+  uniform residual across four voices with different topologies is not four
+  coincidences; it is one factor, and it was the same convention one stage
+  further out. **A residual that is identical across unrelated voices is a
+  property of the path they share.**
+- **Pin the ratio and the absolute separately.** A test on the ratio of two
+  voices is blind to an output-stage error, because that moves both together; a
+  test on the absolute is blind to a balance error. Both defects here were
+  invisible to one of the two. `the_voices_keep_the_mixers_balance` asserts both.
+
+And one thing that did NOT generalise: matching the reference exactly meant
+inheriting its clipping. The netlist's normalization drives the explosion into
+9.9 % clipped samples, ours into 9.5 %, and the board clips at neither -- its
+noise legs swing about 11 V peak-to-peak differential against roughly 20 V
+available. **Agreeing with the reference is not the objective**, and where the
+drawing says the reference is hot, the drawing wins. Recorded rather than fixed,
+because the honest fix is the drawing's leg resistors and not another scalar.
+
+### Contamination through a shared source is invisible to the null check
+
+The exclusivity rule above says to park the CPU and treat "the game is quiet
+here" as a claim needing evidence. Lunar Lander showed that *parking* is also a
+claim needing evidence, and that the existing checks cannot supply it.
+
+This board takes a periodic NMI at about 246 Hz, gated on the self-test switch.
+A driver that sets the program counter once per frame therefore does not hold the
+CPU: the NMI vectors into the game's handler four times between our writes. The
+game then strobes the noise shift register's reset, and a strong periodic
+component through a band-pass with a Q of 7.6 is 45 dB of "thrust" that the
+circuit never made.
+
+**Both checks passed on that capture, and the null run was exactly 0.0.** Not
+approximately: bit-exact digital silence. The reason is structural rather than
+bad luck. The null run gates every voice off, and the contamination arrives
+through a source *shared* between voices, so the gate it would come through is
+shut. This is the Asteroids chopped-latch lesson one level in: a shared source is
+contaminated the same way a shared latch is, and null cannot see either.
+
+- **Check the park, do not claim it.** Read the program counter back at the start
+  of the next frame, before re-parking, and fail the capture if it moved. Two
+  lines, and it is the only thing that caught this.
+- **Say so on success too.** A check that speaks only on failure cannot be told
+  apart from one that never ran, which matters here because the mechanism that
+  disables the NMI is a port write whose effect is one frame late and which fails
+  silently if made before the ports are live.
+- **Give every MAME run its own cfg directory.** MAME writes a cfg on exit as
+  well as reading one, so run two of the same game does not start where run one
+  did. Here that moved a capture by 53 dB with nothing in the command line to say
+  so, and it made the contaminated and clean regimes look like a driver edit. The
+  general form: **a reference tool with persistent state has a hidden input**,
+  and `verify-reference.sh` sharing one cfg across its base, null and nudge runs
+  meant its two checks were made against a machine the capture under test did not
+  come from.
+
+Which capture was right was settled by neither check but by arithmetic off the
+netlist: the correct regime's output is exactly linear in the three-bit throttle
+(439.1, 878.6, 1757.6, 3076.1 RMS for data 1, 2, 4, 7), because a linear multiply
+is what the netlist does. That is the same move as Galaxian's melody frequency --
+**find a quantity computable from the reference's own structure and check the
+reference against it** -- and it is the only one of these that scales.
 
 ### The reference records the mix, not the mix you hear
 
@@ -1699,11 +1803,27 @@ snapping and the identifiability analysis. The trigger for revisiting: a
 residual that has survived a node dump and a schematic reading, which has not
 happened yet on either board.
 
-**Phase 7 — Remaining implemented devices.** Congo Bongo (including comparison
-against MAME's samples and any original recordings), Galaxian and the shared
-family board, Asteroids, Lunar Lander, Donkey Kong Jr., Moon Cresta. Delete
-`analyze_wav.py` and the last capture examples. Mechanical once DK sets the
-pattern.
+**Phase 7 — Remaining implemented devices.** Congo Bongo, Galaxian and the
+shared family board, Asteroids, Lunar Lander, Donkey Kong Jr., Moon Cresta.
+Delete `analyze_wav.py` and the last capture examples. Expected to be mechanical
+once DK set the pattern; it was not, for two reasons worth carrying forward.
+
+**Congo Bongo's premise was wrong.** This phase listed it first, and this
+document described its comparison as being "against MAME's samples and any
+original recordings" -- a different KIND of reference, which would exercise the
+claim that the tool does not care where a WAV came from. The board does not play
+samples. It synthesizes all five voices in analog hardware, and the reference
+emulator plays recorded WAVs because it never modelled the circuit. The
+generalisation is the same one as "read the reference implementation before
+measuring", turned around: **an emulator's implementation choice is not evidence
+about the hardware.** It is what somebody did instead of reading the drawing.
+That target is now `blocked` in the catalog, with the rebuild as its own issue,
+because there is no reference to compare against at all.
+
+**Lunar Lander was not mechanical either**, but in the good direction: it was a
+25 dB level error in which every voice's shape was already right, and the cause
+was one convention applied wrongly twice. See "A normalization error and a
+modelling error do not look alike" below.
 
 **Phase 8 — Missing discrete paths, built with the tooling in hand.** Asteroids
 Deluxe latch paths, Mario Bros. walk/skid, Namco 54XX output for Galaga and

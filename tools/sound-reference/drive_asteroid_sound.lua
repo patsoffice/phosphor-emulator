@@ -2,7 +2,13 @@
 -- Asteroids attract mode is silent, so we don't need to halt the CPU: just
 -- drive the discrete sound inputs directly on a timeline. Each effect is held
 -- for a 2 s window so a -wavwrite capture can be segmented by time and analysed
--- for ground-truth pitch (see analyze_wav.py and tools/sound-reference/README.md).
+-- by ear or for spectral shape (see tools/sound-reference/README.md).
+--
+-- FOR ANYTHING THAT IS A LEVEL, AN ENVELOPE OR A DECAY, use
+-- drive_asteroid_single.lua instead. The windows here run back to back, so no
+-- single event is isolated and adjacent windows share a boundary the analysis
+-- has to guess at. The Python analyzer that used to segment this capture by time
+-- has been deleted along with the rest of that rig.
 --
 -- Run (from the MAME working dir, e.g. ~/mame):
 --   mame asteroid -nothrottle -seconds_to_run 18 -video none \

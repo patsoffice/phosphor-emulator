@@ -297,8 +297,9 @@ choice from that metadata.
   (run frames, screenshot, print PC); the basis for end-to-end validation
   against `disasm frameshot`.
 - [`examples/coin_start.rhai`](examples/coin_start.rhai) — an imperative input
-  timeline that generalizes the hard-coded
-  `machines/examples/asteroid_capture.rs`.
+  timeline. It generalizes what the hard-coded `machines/examples/*_capture.rs`
+  binaries did before they were deleted; a sound timeline now belongs in a
+  `sndcmp` scenario instead, and this is for input.
 
 ## Packaging
 

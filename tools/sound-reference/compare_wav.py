@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Compare two captures of the same session — ours against a MAME reference.
 
-`analyze_wav.py` answers "what is the centroid of each effect" for a
-*register-driven* timeline, where the windows are known in advance. This answers
-a different question: given two recordings of the *same gameplay*, where do they
+`disasm audiodiff` answers "how do these two captures of one effect differ", for
+a *register-driven* scenario whose window is declared in advance, and it is the
+documented path for anything repeatable. This answers a different question, which
+is why it survived the rig it came from: given two recordings of the *same
+gameplay*, where do they
 differ, and in what way?
 
 That question is what a discrete-sound migration actually runs into. A netlist

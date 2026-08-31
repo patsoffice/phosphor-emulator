@@ -216,10 +216,12 @@ skip. Anything after the ROM load is the machine's own behavior and fails
 normally.
 
 The five capture programs (`asteroid_capture`, `dkong_capture`,
-`llander_capture`, `xevious_capture`, `galaxian_capture`) are not promoted.
-They dump a WAV or PNG for an external analyzer and have no pass/fail
-verdict to move; asserting on their pixel content is the golden-frame
-epic's job.
+`llander_capture`, `xevious_capture`, `galaxian_capture`) were not promoted.
+They dumped a WAV for an external analyzer and had no pass/fail verdict to
+move. They have since been deleted rather than promoted: their timelines are
+committed as `sndcmp` scenarios, and `sndcmp capture` drives any registered
+device through one without a per-board binary. The `*_boot_check.rs` examples
+beside them are a different thing and remain.
 
 ### The save-state exerciser, again, on a booted machine
 

@@ -1,178 +1,175 @@
 # Sound reference capture rig
 
-Tools for comparing Phosphor's discrete sound output against MAME's, by driving
-both through an identical timeline of register writes and measuring the result.
-Born out of the Asteroids migration — see the case study in
+MAME autoboot Lua that drives a board's sound hardware on a known timeline, so a
+`-wavwrite` capture can be compared against Phosphor's. This directory is now the
+**reference half only**. The Phosphor half and the comparison both live
+elsewhere:
+
+```bash
+# Phosphor side: drive the device through a committed scenario
+cargo run -p phosphor-sound-compare -- capture llander/thrust --out /tmp/ours.wav
+
+# Reference side: the matching Lua driver, at 192 kHz, resampled to meet it
+LL_EFFECT=thrust mame llander -rompath ~/ws/mame-runtime/roms -nothrottle \
+    -seconds_to_run 4 -video none -samplerate 192000 \
+    -autoboot_script tools/sound-reference/drive_llander_single.lua \
+    -wavwrite /tmp/ref192.wav
+ffmpeg -i /tmp/ref192.wav -af aresample=44100:resampler=soxr /tmp/ref.wav
+
+# Compare
+cargo run -p phosphor-disasm --bin disasm -- \
+    audiodiff /tmp/ours.wav /tmp/ref.wav --range-b 0.95:3.0
+```
+
+The timeline is committed once, as a scenario under
+[`tools/sound-compare/scenarios/`](../sound-compare/scenarios/), and the driver
+here matches it by hand. That is one copy fewer than the rig this replaced, which
+kept the timeline in three places -- a Lua driver, a Rust capture example and a
+Python analyzer's segment list -- with nothing checking them against each other.
+See [docs/designs/discrete-sound-fidelity.md](../../docs/designs/discrete-sound-fidelity.md),
+and the case study in
 [docs/debugging-asteroids-discrete-sound.md](../../docs/debugging-asteroids-discrete-sound.md).
 
-> **Use `disasm audiodiff` for anything repeatable.** The Python analyzers below
-> are superseded for measurement:
->
-> ```bash
-> disasm audiodiff ours.wav mame.wav --png spec.png   # compare, exit non-zero past tolerance
-> disasm audiodiff ours.wav                           # describe one capture
-> ```
->
-> It measures everything `analyze_wav.py` and `compare_wav.py` do — level, DC,
-> clipping, centroid, flatness, band energy, decay — plus onset, crest factor,
-> harmonic ratios and a multi-resolution STFT distance, and it is tested
-> ([`core/src/audio/analysis/`](../../core/src/audio/analysis/)) where the Python
-> never was. It needs no numpy and no nix-shell, and because it *gates* it can
-> run in CI, which is the thing the Python could never do.
->
-> The Lua drivers here are still the way to produce a MAME reference, and the
-> Python remains fine for exploratory one-offs where editing a script beats
-> rebuilding. It is no longer the documented path for anything you intend to
-> repeat. See
-> [docs/designs/discrete-sound-fidelity.md](../../docs/designs/discrete-sound-fidelity.md).
+## Four rules, each of which was learned by getting it wrong
+
+**`sndcmp capture` already writes the analysis window.** Its output starts at the
+scenario's `analysis.start_s`, not at zero. Re-ranging it with `--range` shifts
+the span and silently compares two different moments. Range the REFERENCE, with
+`--range-b`, as above.
+
+**Capture at 192 kHz and band-limit afterwards.** MAME's discrete engine
+simulates a netlist at the audio sample rate, so a capture's rate is also its
+simulation rate: at the 48 kHz default a few-kHz square has its edges quantised
+to 20.8 us and the capture carries broadband hash the circuit does not produce.
+Two Galaxian voices were written up as having residuals that were entirely this,
+and one nearly bought a rebuild of a noise source that was already right. Raising
+the rate raises the capture BANDWIDTH as well, so resample both sides to a common
+rate before comparing anything. Note this is a property of the discrete engine
+specifically; a board on the netlist solver has its own internal timestep and its
+output rate is only an output rate.
+
+**Absolute level is a calibration, not a measurement.** Both the discrete engine
+and the netlist subsystem apply a hand-chosen output multiplier, so comparing
+dBFS compares two independent calibrations. Compare crest factor, band shares,
+attack, decay and centroid, and treat level as calibration unless you can point
+at what sets it. Lunar Lander is the case where you can: its mixer normalizes by
+the sum of its leg levels, which is on the drawing, and correcting ours to that
+moved every voice from 25 dB out to within 0.44 dB.
+
+**Run MAME from a scratch directory, and give every run its own cfg.** MAME
+writes a `cfg` on exit as well as reading one, so a second run of the same game
+does not start where the first did. On Lunar Lander the presence of a cfg moves
+the thrust capture by 53 dB, reproducibly, with nothing in the command line to
+say so. `verify-reference.sh` gives each of its three runs a fresh cfg directory
+for exactly this reason; a hand-rolled capture loop must do the same. Running
+from the repo root also drops `cfg/` and `snap/` into the working tree.
 
 ## Contents
 
-- `drive_asteroid_sound.lua` / `drive_llander_sound.lua` / `drive_dkong_sound.lua`
-  — MAME autoboot Lua that pokes a board's sound registers on a timeline (one
-  effect per window). The Atari boards have silent attract modes so they just
-  drive the registers; the DK driver parks the main Z80 in a spin loop to isolate
-  the discrete walk/jump/stomp from the DAC music.
-- `drive_asteroid_single.lua` / `drive_galaxian_single.lua` /
-  `drive_dkong_single.lua` — the same boards driven ONE effect at a time, on the
-  timeline of the matching `sndcmp` scenario under
-  [`tools/sound-compare/scenarios/`](../sound-compare/scenarios/). Select the
-  voice with `AST_EFFECT` / `GAL_EFFECT` / `DK_EFFECT`. Use these for anything
-  that is a level or a decay: the multi-effect drivers above put their windows
-  back to back, so no single event is isolated and neither an envelope nor an
-  integrated energy can be recovered from them.
-- `verify-reference.sh` — proves a driver responds to its own timeline before
-  anything is measured against it. A driver has to honour `SND_VERIFY` for the
-  checks to mean anything, and one that does not cannot be checked at all. Run it
-  after touching a driver. Both Asteroids drivers, both Galaxian ones and
-  `drive_dkong_single.lua` honour it; `drive_dkong_sound.lua`,
-  `drive_llander_sound.lua` and `drive_dkong_gameplay.lua` do not yet, so nothing
-  measured against those three is verified.
+### Single-effect drivers, on a scenario's timeline
 
-  An effect that does not run to the end of its capture needs `SND_SKIP_S` moved
-  onto the event, or the null check compares the driven silence after it against
-  the null silence and passes for any driver at all. It now refuses that rather
-  than reporting ok, which is how it was caught: the two Asteroids fire voices
-  are pulsed to the fourteen frames the game holds their latch line, so they are
-  over by 1.23 s and the default 2.0 s window held nothing.
+Use these for anything that is a level, an envelope or a decay.
 
-  ```
-  AST_EFFECT=ship-fire SND_SKIP_S=0.9 \
-    tools/sound-reference/verify-reference.sh \
-    tools/sound-reference/drive_asteroid_single.lua asteroid -seconds_to_run 3
-  ```
-- `analyze_wav.py` — segments a capture by time and prints, per effect, the
-  dominant FFT peak and the spectral centroid (DC removed). Reads WAVs with the
-  stdlib `wave` module; needs only `numpy`. Pass `--llander` / `--dkong` /
-  `--galaxian` (or `--segments=a:b:label,...`) to select a board's timeline.
-- The Phosphor side lives in the `machines/examples/` capture binaries
-  ([`asteroid_capture.rs`](../../machines/examples/asteroid_capture.rs),
-  [`llander_capture.rs`](../../machines/examples/llander_capture.rs),
-  [`dkong_capture.rs`](../../machines/examples/dkong_capture.rs)), which drive the
-  device through the same timeline.
+| driver | machine | select with |
+|---|---|---|
+| `drive_asteroid_single.lua` | `asteroid` | `AST_EFFECT` |
+| `drive_dkong_single.lua` | `dkong` | `DK_EFFECT` |
+| `drive_dkongjr_single.lua` | `dkongjr` | `DKJR_EFFECT` |
+| `drive_galaxian_single.lua` | `galaxian` | `GAL_EFFECT` |
+| `drive_llander_single.lua` | `llander` | `LL_EFFECT` |
+| `drive_mario_single.lua` | `mariobros` | `MARIO_EFFECT` |
 
-## Running the analyzer (numpy)
+Each drives ONE voice, asserted once, on the timeline of the matching scenario
+under `tools/sound-compare/scenarios/`, and each honours `SND_VERIFY`.
 
-The analyzer needs numpy. On **NixOS** a `pip`-installed wheel fails at import
-(its bundled C extensions can't find `libstdc++.so.6` / `libz.so.1`), so use the
-nix-provided, properly-linked Python. Drop into a shell that has numpy and then
-run the `python3 …` commands below as-is:
+### Multi-effect drivers, for a listen
 
-```bash
-# NixOS (preferred): a nixpkgs python with numpy already wired up.
-nix-shell -p 'python3.withPackages(ps: [ps.numpy])'
+`drive_asteroid_sound.lua`, `drive_dkong_sound.lua`, `drive_galaxian_sound.lua`,
+`drive_llander_sound.lua`, `drive_dkong_gameplay.lua`.
 
-# Elsewhere: a venv works — then prefix the python3 calls with /tmp/sndvenv/bin/.
-python3 -m venv /tmp/sndvenv && /tmp/sndvenv/bin/pip install -q numpy
+These walk several voices through 2 s windows back to back. That is fine for
+hearing whether a board sounds right and useless for measuring one: no single
+event is isolated, and two adjacent windows share a boundary the analysis has to
+guess at. The Python analyzer that used to segment them by time is gone, and with
+it the only reason to prefer them.
+
+`drive_dkong_sound.lua`, `drive_llander_sound.lua` and `drive_dkong_gameplay.lua`
+do not honour `SND_VERIFY`, so nothing measured against those three is verified.
+For Lunar Lander use `drive_llander_single.lua`, which does, and which also parks
+the CPU where the older driver does not.
+
+### `verify-reference.sh`
+
+Proves a driver responds to its own timeline before anything is measured against
+it. Run it after touching a driver. A driver has to honour `SND_VERIFY` for the
+checks to mean anything, and one that does not cannot be checked at all.
+
+```
+LL_EFFECT=thrust tools/sound-reference/verify-reference.sh \
+    tools/sound-reference/drive_llander_single.lua llander -seconds_to_run 4
 ```
 
-## Usage
+Two knobs, and both exist because the check refused a valid reference once:
+
+- `SND_SKIP_S` moves the measurement window onto the event. An effect that is
+  over before the default 2.0 s leaves the window holding nothing, and the null
+  check then compares two silences and passes for any driver at all. It refuses
+  that rather than reporting ok, which is how it was caught: the two Asteroids
+  fire voices are pulsed to the fourteen frames the game holds their latch line,
+  so they are over by 1.23 s.
+- `SND_MIN_PEAK` lowers the floor for a genuinely quiet voice. Lunar Lander's two
+  alert tones sit at 0.0057 of full scale, which is what their 9.2 leg level
+  against the explosion's 1000 comes to, and the default floor of 0.01 refused
+  them. Lower it only for a reason of that shape.
+
+### What the two checks CANNOT see
+
+Both are relative, and neither is a check on exclusivity:
+
+- **null** removes the stimulus and requires silence.
+- **sensitivity** moves the schedule 30 ms and requires the capture to change.
+
+A board running at half speed passes both. A capture chopped at the frame rate by
+the game clearing a latch passes both. And contamination arriving through a
+SHARED SOURCE passes both, because the null run has every voice gated off: on
+Lunar Lander the game strobing the noise register's reset put a strong periodic
+component through a band-pass with a Q of 7.6, and the null capture was still
+exactly 0.0.
+
+So a driver that parks the CPU should **check that the CPU stayed parked** rather
+than claiming it. `drive_llander_single.lua` reads the program counter back each
+frame and says so at the end, pass or fail; that is two lines and it is the only
+thing that caught the above. The cheap detector otherwise is that a capture
+modulated at the machine's frame rate is contaminated, since no voice on these
+boards is periodic at 60 Hz on its own.
+
+### `compare_wav.py`
+
+Kept for exploratory one-offs, where editing a script beats rebuilding. It
+answers a different question from `audiodiff`: given two recordings of the same
+*gameplay*, where do they diverge. It is not the documented path for anything you
+intend to repeat, and it needs numpy:
 
 ```bash
-# 1. MAME reference (run from the MAME working dir with the asteroid romset)
-mame asteroid -nothrottle -seconds_to_run 18 -video none \
-     -autoboot_script $(pwd)/tools/sound-reference/drive_asteroid_sound.lua \
-     -wavwrite /tmp/asteroid_ref.wav
-
-# 2. Phosphor capture (writes /tmp/phosphor_asteroid.wav)
-cargo run -p phosphor-machines --example asteroid_capture
-
-# 3. Compare (from a numpy-capable shell — see above)
-python3 tools/sound-reference/analyze_wav.py \
-    /tmp/asteroid_ref.wav /tmp/phosphor_asteroid.wav
+nix-shell -p 'python3.withPackages(ps: [ps.numpy ps.matplotlib])'
 ```
-
-Lunar Lander is the same flow with the `llander` driver/example and `--llander`:
-
-```bash
-mame llander -nothrottle -seconds_to_run 12 -video none \
-     -autoboot_script $(pwd)/tools/sound-reference/drive_llander_sound.lua \
-     -wavwrite /tmp/llander_ref.wav
-cargo run -p phosphor-machines --example llander_capture
-python3 tools/sound-reference/analyze_wav.py --llander \
-    /tmp/llander_ref.wav /tmp/llander_phosphor.wav
-```
-
-Galaxian uses the `galaxian` driver/example and `--galaxian`. The Lua parks the
-main Z80 (so the running game stops writing its own sound registers) and pets the
-watchdog, then drives the discrete board's registers (pitch 0x7800, LFO
-0x6004-7, sound latch 0x6800-7) one voice per window: tune, wolf-whistle, fire,
-hit:
-
-```bash
-mame galaxian -nothrottle -seconds_to_run 10 -video none \
-     -autoboot_script $(pwd)/tools/sound-reference/drive_galaxian_sound.lua \
-     -wavwrite /tmp/galaxian_ref.wav
-cargo run -p phosphor-machines --example galaxian_capture
-python3 tools/sound-reference/analyze_wav.py --galaxian \
-    /tmp/galaxian_ref.wav /tmp/galaxian_phosphor.wav
-```
-
-The two tables should line up per effect (compare the centroid column; the single
-peak bin is unstable for swept tones).
-
-## When the per-effect table isn't enough
-
-The centroid/RMS table is a fast first pass, but it averages over a window and so
-misses two things that the ear hears immediately: **decay length** and
-**tonal-vs-noisy character**. The Galaxian pass needed all of the following.
-
-- **Spectrograms — look, don't just measure.** When a sound is "wrong" but the
-  centroids match, render a spectrogram and *view it*. A bell/ring shows as a few
-  steady horizontal lines; an explosion as a broadband vertical wash; a melody as
-  stepped/swept lines. `matplotlib`'s `specgram` plus the `Read` of the PNG is the
-  single most useful tool here. (NixOS: `nix-shell -p
-  'python3.withPackages(ps: [ps.numpy ps.matplotlib])'`.)
-
-- **Spectral flatness** separates a tone from noise where the centroid can't:
-  `flatness = geomean(power) / mean(power)` over the band — ~0 for a pure tone,
-  toward 1 for white noise. An explosion that reads as a low centroid but a near-0
-  flatness is ringing like a bell, not rumbling like noise.
-
-- **Verify the noise is actually white.** A wrongly-tapped LFSR can collapse to a
-  tiny period and buzz like a pitched tone instead of hissing. Check the period
-  before trusting it as a noise source — e.g. for the framework's
-  `lfsr_noise(width, (tap_a, tap_b), seed)`, taps `(16, 13)` give a period of
-  **28** (a ~280 Hz buzz) while `(11, 0)` give the full 2^17-1 white sequence.
-
-- **Recorded reference samples.** Some effects are better judged against the
-  original recorded MAME *samples* (the `samples/<game>.zip` WAVs MAME shipped
-  before discrete emulation) than against a discrete capture. Galaxian's
-  `shot.wav` / `death.wav` pinned the shoot as a ~0.6 s bright noise burst and the
-  explosion as a ~2.5 s dark (~630 Hz) noise rumble — durations the windowed table
-  never showed. Compare the WAV length and the RMS *envelope over time*, not just
-  the steady-state spectrum.
-
-- **Isolate an always-on voice.** Galaxian's melody note generator is always
-  running, so at idle the game parks its pitch latch high enough that the note
-  clock is ultrasonic (silent). Reproduce that in the timeline (park the pitch at
-  `0xFF`) so a constant background voice doesn't bleed into the other windows — and
-  make sure the emulated device treats that ultrasonic case as silent rather than
-  aliasing it down into an audible tone.
 
 ## Adapting to another board
 
-For Lunar Lander, Donkey Kong, etc.: copy the Lua driver and swap the register
-map + timeline, change the `SEGMENTS` list in `analyze_wav.py` to match, and add a
-sibling capture example. Notes on MAME 0.287 gotchas (silent attract, deprecated
+Write the scenario first, under `tools/sound-compare/scenarios/<target>/`, then
+an adapter under `tools/sound-compare/src/targets/`, then copy the nearest
+`*_single.lua` and swap the register map. Keep the driver's timeline and the
+scenario's identical by hand and say in the driver which scenario it matches.
+
+Then, before believing a single number:
+
+1. `cargo run -p phosphor-sound-compare -- verify <scenario>` for our side.
+2. `verify-reference.sh` for MAME's.
+3. Check something computable from the schematic alone -- a divider output, a
+   counter tap, a fixed oscillator -- lands where the schematic puts it, on BOTH
+   sides. A spectral comparison cannot tell "the model is wrong" from "the model
+   is being run wrong", and Galaxian shipped every voice an octave low because
+   nothing asked.
+
+Notes on MAME Lua gotchas (silent attract modes, deprecated
 `emu.register_start`, empty `sound_map` node routing) are in the case study.

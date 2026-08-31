@@ -7,6 +7,23 @@
 > Phosphor's output. The pivot immediately surfaced two real bugs that ears had
 > missed. The tooling built along the way is reusable for every future board.
 
+> **THE TOOLING DESCRIBED HERE IS RETIRED, and the story is kept because the
+> reasoning is.** `analyze_wav.py` and the `machines/examples/*_capture.rs`
+> binaries are gone; the timeline they hand-synced between three files is now one
+> committed scenario, driven on our side by `sndcmp` and on MAME's by a
+> single-effect Lua driver, and compared by `disasm audiodiff`. Every command in
+> this document that names a deleted file is history, not instructions. The
+> current path is in
+> [`tools/sound-reference/README.md`](../tools/sound-reference/README.md).
+>
+> Two of the conclusions below have also been overtaken by later work. The
+> per-effect table this rig produced came from a driver that did NOT park the
+> main CPU, on the reasoning that a silent attract mode is not writing sound
+> registers; that turned out to be false, and five of the eight Asteroids voices
+> were captured as one short burst per frame. And the numbers are read as
+> absolute levels in places where MAME's output multiplier makes that meaningless.
+> See `docs/designs/discrete-sound-fidelity.md`.
+
 ## Context
 
 Asteroids generates sound from a discrete analog board — seven effect paths
@@ -117,10 +134,10 @@ machine ran but the recorder saw nothing in some configurations.
 
 ### The analyzer
 
-A small [Python analyzer](../tools/sound-reference/analyze_wav.py) segments the
-capture by time and reports, per effect, the **dominant FFT peak** and the
-**spectral centroid** (a robust "brightness/where-the-energy-sits" measure that
-survives swept tones better than a single peak bin).
+A small Python analyzer (`analyze_wav.py`, since deleted) segmented the capture
+by time and reported, per effect, the **dominant FFT peak** and the **spectral
+centroid** (a robust "brightness/where-the-energy-sits" measure that survives
+swept tones better than a single peak bin).
 
 ```
 mame asteroid -nothrottle -seconds_to_run 18 -video none \
@@ -128,6 +145,11 @@ mame asteroid -nothrottle -seconds_to_run 18 -video none \
      -wavwrite /tmp/asteroid_ref.wav
 python3 tools/sound-reference/analyze_wav.py /tmp/asteroid_ref.wav
 ```
+
+Segmenting one capture of eight back-to-back windows is the part that did not
+survive. `disasm audiodiff` measures all of the above and more, per capture, and
+the timeline now lives in a committed scenario rather than in this script's
+segment list.
 
 ### MAME ground truth
 
@@ -158,9 +180,12 @@ wrong. Opposite diagnoses.
 ## Closing the loop: compare Phosphor to MAME
 
 Ground truth for MAME isn't enough — we need an apples-to-apples comparison.
-[`machines/examples/asteroid_capture.rs`](../machines/examples/asteroid_capture.rs)
-drives `AsteroidsDiscreteSound` through the **identical timeline** and writes a
-WAV, analyzed by the same script:
+`machines/examples/asteroid_capture.rs` (since deleted) drove
+`AsteroidsDiscreteSound` through what was meant to be the **identical timeline**
+and wrote a WAV, analyzed by the same script. "Meant to be" is doing work in that
+sentence: keeping this file's timeline in step with the Lua driver's and the
+analyzer's segment list was manual, and it is why a scenario is one committed
+file now.
 
 ```
 cargo run -p phosphor-machines --example asteroid_capture
@@ -232,32 +257,38 @@ tone; the spectral content is the same.)
    Phosphor and MAME emit the *same timeline* so one analyzer compares them. It
    converted "sounds wrong" into a numeric diff.
 
-## Reproducing / reusing the rig
+## Reproducing this today
 
-- [`tools/sound-reference/drive_asteroid_sound.lua`](../tools/sound-reference/drive_asteroid_sound.lua)
-  — MAME Lua driver (timeline of register pokes)
-- [`tools/sound-reference/analyze_wav.py`](../tools/sound-reference/analyze_wav.py)
-  — per-effect peak + centroid (stdlib `wave` + `numpy`; run from a venv)
-- [`machines/examples/asteroid_capture.rs`](../machines/examples/asteroid_capture.rs)
-  — Phosphor capture through the same timeline
+The three-part rig this section used to list is gone, and so is the hand-syncing
+between its parts that was its main defect. The equivalent now:
 
-```
-# MAME reference
-mame asteroid -nothrottle -seconds_to_run 18 -video none \
-     -autoboot_script tools/sound-reference/drive_asteroid_sound.lua \
-     -wavwrite /tmp/asteroid_ref.wav
-# Phosphor
-cargo run -p phosphor-machines --example asteroid_capture
+```bash
+# Phosphor side, from the committed scenario
+cargo run -p phosphor-sound-compare -- capture asteroids/thrust --out /tmp/ours.wav
+
+# MAME side, on the same timeline, one voice at a time, main CPU parked
+AST_EFFECT=thrust mame asteroid -rompath ~/ws/mame-runtime/roms -nothrottle \
+    -seconds_to_run 4 -video none -samplerate 192000 \
+    -autoboot_script tools/sound-reference/drive_asteroid_single.lua \
+    -wavwrite /tmp/ref192.wav
+ffmpeg -i /tmp/ref192.wav -af aresample=44100:resampler=soxr /tmp/ref.wav
+
 # Compare
-python3 tools/sound-reference/analyze_wav.py /tmp/asteroid_ref.wav /tmp/phosphor_asteroid.wav
+cargo run -p phosphor-disasm --bin disasm -- \
+    audiodiff /tmp/ours.wav /tmp/ref.wav --range-b 0.95:3.0
 ```
+
+Three of the differences are the point rather than housekeeping. The driver
+**parks the main CPU**, because the game clears the audio latch as housekeeping
+about 0.3 ms after this driver sets it and every latch-driven voice above was
+captured chopped. It drives **one voice** rather than eight back to back, because
+adjacent windows share a boundary the analysis has to guess at and no envelope
+survives that. And it captures at **192 kHz**, because MAME's discrete engine
+simulates at the audio rate and a 48 kHz capture reports its own edge
+quantisation as circuit content.
 
 See [`tools/sound-reference/README.md`](../tools/sound-reference/README.md) for
-the full rig and how to adapt it to other boards.
-
-This is the design doc's "reference probe tests" in practice. **Lunar Lander
-(phase 4) and the Donkey Kong migration (phase 5) can reuse the whole rig** —
-swap the driver's register map and the analyzer's segment list.
+the current rig and how to adapt it to another board.
 
 ## Open threads
 
