@@ -475,11 +475,22 @@ carries the audio sheet is not known and would be the cheapest place to start.""
 id = "gridlee-output"
 machines = ["gridlee"]
 device = "machines/src/gridlee.rs"
-status = "unexamined"
+status = "blocked"
+reason = """
+Gridlee was never released, so there is no manual and no schematic to read, and
+there is not going to be one. `unexamined` would be wrong: it says nobody has
+looked yet, which implies looking would help.
+
+This is the one entry that can never reach `validated` by the route every other
+entry takes. If it is ever to move, it needs a different kind of evidence
+entirely -- a surviving board, a photograph of one, or a recording made from
+hardware -- and none of those is a schematic reading."""
 notes = """
-POKEY with no coupling or filter stage modelled. Gridlee is an unreleased
-prototype, so a drawing may not exist at all; if that turns out to be the case
-this becomes `blocked` with that as the reason rather than staying here."""
+POKEY with no coupling or filter stage modelled.
+
+What the code does is therefore all anyone has. Worth stating plainly so the next
+reader does not go looking: the absence of an analog stage here is not a known
+gap in the way Pac-Man's is, because nothing establishes what the board did."""
 
 [[target]]
 id = "irobot-output"
