@@ -1,9 +1,31 @@
 //! Lunar Lander (1979) discrete sound, built on the [`DiscreteCircuit`]
-//! framework. Models MAME's `llander_discrete` netlist (asteroid.cpp): a shared
-//! 12 kHz LFSR noise source drives both the band-passed rocket thrust and the
-//! crash explosion (which reuses the 3-bit thrust value as its volume), plus
-//! two fixed alert tones (3 kHz / 6 kHz). The board talks to it with hardware
-//! intent (`write_sound_register`, `pulse_noise_reset`).
+//! framework.
+//!
+//! A pair of 74LS164 shift registers form a 16-bit XNOR noise source clocked at
+//! 12 kHz. Its output feeds three analog switches whose resistors set the rocket
+//! thrust's volume, a resonant band-pass at 89.5 Hz makes the rumble, a fourth
+//! switch adds the crash explosion from the same node, and two fixed squares at
+//! 3 kHz and 6 kHz are the low-fuel and slam alerts. All four sum into an LM324
+//! mixer whose leg resistors set their balance. The board talks to this with
+//! hardware intent (`write_sound_register`, `pulse_noise_reset`).
+//!
+//! Transcribed from the drawing in
+//! [`docs/schematics/llander-audio-output.md`](../../docs/schematics/llander-audio-output.md).
+//! Every component value named below is from that sheet.
+//!
+//! # Known residual
+//!
+//! **The throttle's three resistors also set the noise filter's corner**, and
+//! that is not modelled here: this builds one fixed 71 Hz corner (the value all
+//! three switches closed give) and then multiplies by a linear volume. On the
+//! board, closing only the 15k leg moves the corner to 10.6 Hz, so quieter
+//! thrust is also darker thrust, and the volume law is compressed rather than
+//! linear -- throttle 1 sits about 2.6 dB above where a linear DAC puts it.
+//!
+//! This cannot be found by comparison, which is why it is written down here. The
+//! reference netlist has the identical gap, so both sides agree to 0.15
+//! percentage points on every band at every throttle setting, and both are
+//! wrong in the same way. Only the drawing says so.
 
 use phosphor_core::core::debug::{DebugRegister, Debuggable};
 use phosphor_core::core::save_state::{SaveError, StateReader, StateWriter};
@@ -19,19 +41,26 @@ use crate::atari_dvg::TIMING;
 // Shared 12 kHz LFSR noise (custom escape-hatch component)
 // ---------------------------------------------------------------------------
 
-/// MAME `llander_lfsr`: 16-bit XNOR LFSR (taps 6 and 14), clocked at 12 kHz,
-/// output taken from bit 14, resettable by the noise-reset pulse. It feeds both
-/// the thrust and explosion paths, so it lives on the framework's `Custom`
-/// escape hatch (the built-in `lfsr_noise` node can't be reset). Input:
-/// `[noise_reset 0/1]`.
+/// The 16-bit shift register at M6 and M7, clocked at 12 kHz, with XNOR
+/// feedback from bits 6 and 14 and its output taken from bit 14.
+///
+/// Those two taps are M6's QG and M7's QG on the drawing, and the XNOR is built
+/// from an LS32 and two LS00 sections rather than an XNOR gate; the truth table
+/// is in the transcription. A shift register with the wrong feedback does not
+/// fail, it runs a different and usually far shorter polynomial, which is why
+/// the taps are worth stating.
+///
+/// It feeds both the thrust and explosion paths, so it lives on the framework's
+/// `Custom` escape hatch (the built-in `lfsr_noise` node can't be reset).
+/// Input: `[noise_reset 0/1]`.
 struct LanderNoise {
     lfsr: u16,
     clock_acc: f64,
 }
 
 impl LanderNoise {
-    // Reset value 0, matching MAME. (For an XNOR LFSR the *all-ones* state is the
-    // lock state; 0 is the natural running seed.)
+    // For an XNOR register the ALL-ONES state is the lock state, so 0 is the
+    // natural running seed. `NOISERESET` is the active-low clear on both LS164s.
     const SEED: u16 = 0;
 }
 
@@ -87,18 +116,29 @@ struct LunarLanderInputs {
 // Circuit construction
 // ---------------------------------------------------------------------------
 
-/// MAME relative mix levels (`llander_discrete`): tones 9.2 each, explosion
-/// 1000, thrust 600 (the explosion path multiplies the shared noise*throttle by
-/// `LVL_EXPLOSION / LVL_THRUST`).
+/// Mixer leg levels, as PEAK-TO-PEAK swings, which is what a logic-gate output
+/// on the far end of a resistor is.
+///
+/// Each is the leg's input swing times its resistor ratio into the summing amp.
+/// The two noise legs go through R28 6.8k into R31 10k and appear on BOTH board
+/// outputs in antiphase, so they carry a factor of two the tones do not: the
+/// tones go through R29 and R30, 390k each, into R34 10k and appear on one
+/// output only. That is where the 65-to-1 ratio between a tone and the thrust
+/// comes from, and it is the drawing's, not a choice.
 const LVL_TONE: f64 = 9.2;
 const LVL_THRUST: f64 = 600.0;
 const LVL_EXPLOSION: f64 = 1000.0;
 
-// Gains tuned to captured llander references (tools/sound-reference) for the
-// thrust/explosion/tone RMS balance and overall level. THRUST_IN_GAIN sets the
-// noise·throttle amplitude feeding the unfiltered explosion path; the thrust
-// band-pass instead takes the normalized throttle·noise, and THRUST_OUT_GAIN
-// supplies its post-filter make-up + trim.
+// STILL FITTED, both of them, and both should come out of the drawing.
+//
+// THRUST_IN_GAIN sets the noise*throttle amplitude feeding the unfiltered
+// explosion path; the thrust band-pass instead takes the normalized
+// throttle*noise, and THRUST_OUT_GAIN supplies its post-filter make-up. The
+// board has no counterpart for either: the explosion leg is R21 1.5k in series
+// with C91 47nF, and the thrust leg is R28 6.8k, so their ratio is set by two
+// resistors and a coupling capacitor rather than by these two numbers. The
+// output normalization that used to sit beside them has been replaced by the
+// mixer's own leg sum; these two have not. See phosphor-emulator-b72s.
 const THRUST_IN_GAIN: f64 = 2400.0; // explosion noise * throttle amplitude
 const THRUST_OUT_GAIN: f64 = 18.7; // post-band-pass make-up + trim
 const OUTPUT_GAIN: f64 = 1.0 / LunarLanderDiscreteSound::MIX_FULL_SCALE;
@@ -157,13 +197,20 @@ fn build_circuit() -> (DiscreteCircuit, LunarLanderInputs) {
     let thrust_explod = b.low_pass_hz("THRUST_EXPLOD", te_sum, 560.0);
 
     // --- Alert tones (quiet relative to thrust/explosion) ---
+    // The leg levels are PEAK-TO-PEAK swings, because that is what the gate
+    // output on the other end of the 390k resistor is: a TTL high and a TTL low.
+    // `fixed_square` swings +/-1, which is already 2 peak-to-peak, so the gain
+    // that produces a 9.2 peak-to-peak leg is half the level and not the level.
+    // Getting this wrong made both tones exactly 6 dB hot against the thrust,
+    // which measured as a 6.4 dB balance error once the mixer normalization
+    // above was corrected.
     let tone3k = b.fixed_square("TONE3K", 3_000.0);
     let tone3k_g = b.multiply("TONE3K_G", tone3k, tone3k_en);
-    let tone3k_out = b.gain("TONE3K_OUT", tone3k_g, LVL_TONE);
+    let tone3k_out = b.gain("TONE3K_OUT", tone3k_g, LVL_TONE / 2.0);
 
     let tone6k = b.fixed_square("TONE6K", 6_000.0);
     let tone6k_g = b.multiply("TONE6K_G", tone6k, tone6k_en);
-    let tone6k_out = b.gain("TONE6K_OUT", tone6k_g, LVL_TONE);
+    let tone6k_out = b.gain("TONE6K_OUT", tone6k_g, LVL_TONE / 2.0);
 
     // --- Final mix ---
     let mix = b.add("MIX", &[tone3k_out, tone6k_out, thrust_explod]);
@@ -204,12 +251,25 @@ pub struct LunarLanderDiscreteSound {
 }
 
 impl LunarLanderDiscreteSound {
-    /// The `MIX` sum that renders as a full-scale output sample.
+    /// The `MIX` sum that renders as a full-scale output sample: the sum of the
+    /// mixer's four leg levels, which is what "all four voices at once" comes
+    /// to.
     ///
-    /// Exposed so a per-stage probe can be read at the same scale the mixer
-    /// puts it at. A probe divided by anything else is measuring its own
+    /// Derived rather than chosen. The number that used to be here was 14347,
+    /// with a comment saying it had been tuned against a capture, and it put
+    /// the whole board 25 dB below the reference with every voice's SHAPE
+    /// already correct. That is the signature of a normalization error rather
+    /// than a modelling one, and 14347 had no counterpart anywhere on the
+    /// drawing or in the mixer.
+    ///
+    /// Also exposed so a per-stage probe can be read at the same scale the
+    /// mixer puts it at. A probe divided by anything else is measuring its own
     /// normalization rather than the voice's share of the mix.
-    pub const MIX_FULL_SCALE: f64 = 14_347.0;
+    /// Halved because the leg levels are peak-to-peak, as the tone gain below
+    /// says: their sum is the mix's whole swing, so full scale is half of it.
+    /// The same convention, missed in both places, is why the first correction
+    /// left every voice uniformly 6 dB short.
+    pub const MIX_FULL_SCALE: f64 = (2.0 * LVL_TONE + LVL_THRUST + LVL_EXPLOSION) / 2.0;
 
     pub fn new() -> Self {
         let (circuit, ids) = build_circuit();
@@ -399,6 +459,80 @@ mod tests {
             run_frame(&mut s);
         }
         assert!(ac_rms(&mut s) > 150.0, "explosion should be audible");
+    }
+
+    /// The mixer's balance, which is the thing the leg levels decide and the
+    /// thing that was wrong.
+    ///
+    /// Two separate claims, because volume is two separate questions here and
+    /// the two defects this replaced were one of each.
+    ///
+    /// The RATIO of two voices is what the mixer legs set, and an output-stage
+    /// change cannot move it. Note that it is NOT the ratio of the leg levels:
+    /// a tone leg is 9.2 against the thrust's 600, but the thrust is
+    /// band-passed noise whose RMS sits far below its leg level while a square
+    /// wave's RMS is its level, so the measured ratio is about 24 dB and not
+    /// the 36 dB the levels alone suggest. Both sides of the reference
+    /// comparison agree on 24: ours 23.9, the netlist's 24.4.
+    ///
+    /// The ABSOLUTE level is what the output normalization sets, and the ratio
+    /// is blind to it because it moves both voices together. So it is pinned
+    /// separately and loosely.
+    ///
+    /// This exists because the two defects it would have caught both measured
+    /// as plausible sound. The tones were 6 dB hot against the thrust from a
+    /// peak-to-peak level driving a plus-or-minus-one square, and the whole
+    /// board was a further 25 dB down from the same convention at the output
+    /// stage. Neither is audible as "wrong" on its own.
+    #[test]
+    fn the_voices_keep_the_mixers_balance() {
+        let level = |reg: u8| -> f64 {
+            let mut s = LunarLanderDiscreteSound::new();
+            s.write_sound_register(reg);
+            // Settle past the power-on transient and the band-pass ring-up.
+            for _ in 0..30 {
+                run_frame(&mut s);
+            }
+            let mut discard = vec![0i16; 1 << 16];
+            while s.fill_audio(&mut discard) > 0 {}
+            for _ in 0..30 {
+                run_frame(&mut s);
+            }
+            ac_rms(&mut s)
+        };
+
+        let thrust = level(0x07);
+        let tone = level(0x10);
+        let db = |a: f64, b: f64| 20.0 * (a / b).log10();
+
+        // Full thrust against one alert tone. The window allows for the noise
+        // voice's RMS not being settled to better than about half a decibel,
+        // and is tight enough that the 6 dB tone error this replaced fails it.
+        let thrust_over_tone = db(thrust, tone);
+        assert!(
+            (22.0..28.0).contains(&thrust_over_tone),
+            "thrust sits {thrust_over_tone:.1} dB over a tone; the reference puts it at 24.4"
+        );
+
+        // And the absolute, which the ratio cannot see. Full thrust lands near
+        // -21 dBFS; the wrong output normalization put it at -46.
+        let thrust_dbfs = 20.0 * (thrust / 32767.0).log10();
+        assert!(
+            (-26.0..-16.0).contains(&thrust_dbfs),
+            "full thrust measures {thrust_dbfs:.1} dBFS; the reference puts it at -21.0"
+        );
+
+        // The throttle is a linear multiply, so a third of it is a third of the
+        // level. This is the check that would fail if the volume DAC were ever
+        // rebuilt as the board's three switched resistors, which is NOT linear
+        // and is the residual recorded against this device.
+        let quarter = level(0x02);
+        let ratio = db(thrust, quarter);
+        let linear = 20.0 * (7.0f64 / 2.0).log10();
+        assert!(
+            (ratio - linear).abs() < 1.0,
+            "throttle 7 over throttle 2 measured {ratio:.2} dB, a linear DAC gives {linear:.2}"
+        );
     }
 
     #[test]

@@ -132,7 +132,7 @@ id = "llander-discrete"
 machines = ["llander"]
 device = "machines/src/llander_sound.rs"
 adapter = "llander-discrete"
-status = "implemented-unvalidated"
+status = "implemented-needs-validation"
 scenarios = [
   "llander/thrust",
   "llander/thrust-low",
@@ -141,8 +141,18 @@ scenarios = [
   "llander/tone-6k",
 ]
 notes = """
-Adapter and scenarios exist; the comparison against the reference has not been
-run yet, so this is still `implemented-unvalidated`. Phase 7 item 4."""
+All five voices within 0.44 dB of the reference on level, and within 0.15
+percentage points on every band. The whole board had been 25 dB down: the output
+normalization was a fitted 14347 where the mixer's own leg sum is the answer, and
+the same peak-to-peak convention was missed again on the tone gain, which put the
+tones a further 6 dB out of balance. Both are now derived from the drawing,
+transcribed at docs/schematics/llander-audio-output.md.
+
+Residuals, none of them findable by comparison because the reference shares them:
+the throttle's three resistors also set the noise filter's corner, so the board's
+quieter thrust is darker and its volume law is not linear; two make-up gains are
+still fitted; and the explosion clips 9.5 % of samples where the reference clips
+9.9 %, which the board would not. All three in phosphor-emulator-b72s."""
 
 [[target]]
 id = "congo-percussion"
