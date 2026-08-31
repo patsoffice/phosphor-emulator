@@ -1,0 +1,104 @@
+{
+  "modules": {
+    "SSIO: one of six channels, duty-cycle volume chopped in analog": {
+      "ports": {
+        "AY channel": { "direction": "input", "bits": [2] },
+        "duty code": { "direction": "input", "bits": [3] },
+        "L AUDIO": { "direction": "output", "bits": [60] },
+        "R AUDIO": { "direction": "output", "bits": [61] }
+      },
+      "cells": {
+        "uF10": {
+          "type": "F10 74LS191",
+          "port_directions": {
+            "D-A (18,19,20,21)": "input",
+            "CK (14)": "input",
+            "MAX/MIN (12)": "output"
+          },
+          "connections": {
+            "D-A (18,19,20,21)": [3],
+            "CK (14)": [4],
+            "MAX/MIN (12)": [10]
+          },
+          "attributes": {}
+        },
+        "uC8": {
+          "type": "C8 7407",
+          "port_directions": {
+            "in (13)": "input",
+            "out (12) RM8 1.8k to +12": "output"
+          },
+          "connections": { "in (13)": [10], "out (12) RM8 1.8k to +12": [11] },
+          "attributes": {}
+        },
+        "uD7a": {
+          "type": "D7 4066a",
+          "port_directions": {
+            "in (1) via R176 5.6k": "input",
+            "ctrl (13)": "input",
+            "out (2) C150 2.2n to gnd": "output"
+          },
+          "connections": {
+            "in (1) via R176 5.6k": [2],
+            "ctrl (13)": [11],
+            "out (2) C150 2.2n to gnd": [20]
+          },
+          "attributes": {}
+        },
+        "uD7b": {
+          "type": "D7 4066b",
+          "port_directions": {
+            "in (11) via R202 5.6k": "input",
+            "ctrl (12)": "input",
+            "out (10) C156 2.2n to gnd": "output"
+          },
+          "connections": {
+            "in (11) via R202 5.6k": [20],
+            "ctrl (12)": [11],
+            "out (10) C156 2.2n to gnd": [22]
+          },
+          "attributes": {}
+        },
+        "uL10a": {
+          "type": "L10 MC3403",
+          "port_directions": {
+            "in (5) R218/R219 33k": "input",
+            "out (7)": "output"
+          },
+          "connections": { "in (5) R218/R219 33k": [22], "out (7)": [30] },
+          "attributes": {}
+        },
+        "uL10sum": {
+          "type": "L10 MC3403 sum",
+          "port_directions": {
+            "legs C164 1u / R223 13k": "input",
+            "OPTIONAL SPEECH": "input",
+            "out (14) R224 27k, C165 330p": "output"
+          },
+          "connections": {
+            "legs C164 1u / R223 13k": [30],
+            "OPTIONAL SPEECH": [31],
+            "out (14) R224 27k, C165 330p": [50]
+          },
+          "attributes": {}
+        },
+        "uD3": {
+          "type": "D3 LM3900",
+          "port_directions": {
+            "in R179 24k": "input",
+            "RV12/RVR/RVS": "input",
+            "L out R155 10k": "output",
+            "R out R156 10k": "output"
+          },
+          "connections": {
+            "in R179 24k": [50],
+            "RV12/RVR/RVS": [51],
+            "L out R155 10k": [60],
+            "R out R156 10k": [61]
+          },
+          "attributes": {}
+        }
+      }
+    }
+  }
+}

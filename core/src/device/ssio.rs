@@ -1,5 +1,23 @@
 //! Midway SSIO (Super Sound I/O) sound board.
 //!
+//! # Schematics
+//!
+//! | Drawing | Source | Pages |
+//! |---|---|---|
+//! | `SCHEMATIC DRAWING, SUPER SOUND I/O`, `A084-90913-E000`, sheet 9-15 | `arcade-museum.com/manuals-videogames/T/Tron.pdf` | PDF p128 |
+//!
+//! Transcribed in
+//! [`docs/schematics/ssio-audio-output.md`](../../../docs/schematics/ssio-audio-output.md).
+//! Read from Tron's manual because the board is shared across MCR II and no
+//! Satan's Hollow scan was located; sheet numbers differ per manual, so the
+//! part number is the stable name.
+//!
+//! **The analog half of this board is not modelled.** The duty-cycle volume is
+//! an analog chopper with RC smoothing, where [`DUTY_CYCLE_VOLUME`] below is a
+//! lookup of its average; the six channels sum through 13k legs into a 27k
+//! amplifier rather than as `(s0 + s1) / 2`; and the board's output is stereo
+//! where this is mono. See `phosphor-emulator-cg2f`.
+//!
 //! Self-contained Z80 + 2×AY-8910 sound board used across Midway's MCR I, II,
 //! and III arcade platforms. The main CPU communicates via 4-byte command latches
 //! and a status byte. Input ports (coins, joystick, DIP switches) are also routed

@@ -88,6 +88,12 @@ section is there so that is obvious.
 - [`mcr-video-timing.md`](mcr-video-timing.md) — a negative result: MCR II's
   H and V counters and both blanking decodes are inside custom LSIs, so the
   blanking phase is on no drawing. Read it before hunting for one.
+- [`ssio-audio-output.md`](ssio-audio-output.md) — Midway's Super Sound I/O, as
+  used by Satan's Hollow. Its duty-cycle volume is an analog chopper with RC
+  smoothing where the model has a lookup of the average; its six channels sum
+  through weighted legs rather than as an average of two chips; and the board is
+  stereo where the model is mono. Also records that sheet numbers in these
+  manuals are per-package, so the part number is the stable name.
 - [`qbert-sound-output.md`](qbert-sound-output.md) — Q*Bert's Sound/Speech A6
   output stage. Two of its apparent gaps were already modelled; the real one is
   that the DAC-to-speech balance is two trimmers with two coupling capacitors

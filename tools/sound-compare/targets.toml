@@ -559,13 +559,33 @@ POKEY through a DcBlocker."""
 [[target]]
 id = "mcr2-output"
 machines = ["shollow"]
-device = "machines/src/satans_hollow.rs"
-status = "unexamined"
+device = "core/src/device/ssio.rs"
+status = "partial"
 notes = """
-The Super Sound I/O board's output, forwarded with no analog stage. Sheet 9-10
-of the Satan's Hollow manual is the Super Sound I/O drawing and is already
-identified in phosphor-emulator-aih3, so this one has a known source and only
-wants reading."""
+EXAMINED. Super Sound I/O schematic A084-90913-E000, transcribed at
+docs/schematics/ssio-audio-output.md. `partial` because the duty-cycle
+attenuation IS modelled, as its average; nothing else on the analog half is.
+
+THE DUTY-CYCLE VOLUME IS AN ANALOG CHOPPER. A 74LS191 loaded with four bits
+drives a 7407 that gates two 4066 sections in series with the channel's audio,
+with 5.6k resistors and 2.2 nF capacitors either side. `DUTY_CYCLE_VOLUME` in
+ssio.rs is a sixteen-entry lookup of that chopper's mean, which has neither the
+smoothing nor the residue of the chopping.
+
+THE MIX IS NOT AN AVERAGE. Six channels, three per AY, each through an MC3403
+with 33k legs, then 1 uF coupling and 13k into a summing MC3403 with 27k feedback
+and a 330 pF pole. ssio.rs computes `(s0 + s1) / 2` over the two chips.
+
+THE BOARD IS STEREO. Connector J3 carries L AUDIO and R AUDIO from two LM3900
+sections, each through 10k with 1.2k to ground; ssio.rs is mono. Volume is a
+remote analog control on RV12/RVR/RVS with an optional 1k pot, not the boolean
+`mute` the model has.
+
+Read from TRON's manual, PDF p128, not Satan's Hollow's: the board is shared
+across MCR II and no Satan's Hollow scan was located. Note that
+phosphor-emulator-aih3 cites this as "sheet 9-10", which is Satan's Hollow's
+numbering; in Tron's package the same drawing is 9-15. Sheet numbers are per
+manual and are not a stable way to name one. phosphor-emulator-cg2f."""
 
 [[target]]
 id = "tempest-output"
