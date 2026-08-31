@@ -1,0 +1,113 @@
+{
+  "modules": {
+    "mario skid voice: counter clocked by a VCO that a counter tap tunes": {
+      "ports": {
+        "to mixer via R41 100k": { "direction": "output", "bits": [27] }
+      },
+      "cells": {
+        "uEN": {
+          "type": "7F07 bit 0",
+          "port_directions": { "skid enable": "output" },
+          "connections": { "skid enable": [20] },
+          "attributes": {}
+        },
+        "u4L": {
+          "type": "4L 74123a",
+          "port_directions": {
+            "trig B (2)": "input",
+            "CLR (3)": "input",
+            "R61 47k / D10 / C41 4u7 (14,15)": "input",
+            "Q (13)": "output"
+          },
+          "connections": {
+            "trig B (2)": [20],
+            "CLR (3)": ["1"],
+            "R61 47k / D10 / C41 4u7 (14,15)": ["1"],
+            "Q (13)": [21]
+          },
+          "attributes": {}
+        },
+        "u4Ja": {
+          "type": "4J 7404a",
+          "port_directions": { "in (9)": "input", "out (8)": "output" },
+          "connections": { "in (9)": [21], "out (8)": [22] },
+          "attributes": {}
+        },
+        "uRCa": {
+          "type": "R65 10k / C44 3u3",
+          "port_directions": { "in": "input", "FC node": "output" },
+          "connections": { "in": [22], "FC node": [23] },
+          "attributes": {}
+        },
+        "u4Ka": {
+          "type": "4K 629a",
+          "port_directions": {
+            "FC (1)": "input",
+            "CX C40 22n (12,13)": "input",
+            "Y (10)": "output"
+          },
+          "connections": {
+            "FC (1)": [23],
+            "CX C40 22n (12,13)": ["1"],
+            "Y (10)": [24]
+          },
+          "attributes": {}
+        },
+        "u4Kb": {
+          "type": "4K 629b",
+          "port_directions": {
+            "FC (2)": "input",
+            "CX C39 4n7 (4,5)": "input",
+            "Y (7)": "output"
+          },
+          "connections": {
+            "FC (2)": [26],
+            "CX C39 4n7 (4,5)": ["1"],
+            "Y (7)": [25]
+          },
+          "attributes": {}
+        },
+        "u3H": {
+          "type": "3H 4020B",
+          "port_directions": {
+            "CK (10)": "input",
+            "RES (11)": "input",
+            "Q4 (7)": "output",
+            "Q12 (1)": "output"
+          },
+          "connections": {
+            "CK (10)": [25],
+            "RES (11)": ["0"],
+            "Q4 (7)": [28],
+            "Q12 (1)": [29]
+          },
+          "attributes": {}
+        },
+        "u4Jb": {
+          "type": "4J 7404b",
+          "port_directions": { "in (3)": "input", "out (4)": "output" },
+          "connections": { "in (3)": [29], "out (4)": [30] },
+          "attributes": {}
+        },
+        "uRCb": {
+          "type": "R64 20k / C43 3u3",
+          "port_directions": { "in": "input", "FC node": "output" },
+          "connections": { "in": [30], "FC node": [26] },
+          "attributes": {}
+        },
+        "u1K": {
+          "type": "1K 7486",
+          "port_directions": { "a": "input", "b": "input", "y": "output" },
+          "connections": { "a": [28], "b": [24], "y": [31] },
+          "attributes": {}
+        },
+        "u2K": {
+          "type": "2K 7408",
+          "port_directions": { "a": "input", "b": "input", "y": "output" },
+          "connections": { "a": [21], "b": [31], "y": [27] },
+          "attributes": {}
+        }
+      }
+    }
+  }
+}

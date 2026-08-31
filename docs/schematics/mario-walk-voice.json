@@ -1,0 +1,93 @@
+{
+  "modules": {
+    "mario walk voice: one-shot, shared control node, VCO pair, output gate": {
+      "ports": {
+        "to mixer via R20 22k": { "direction": "output", "bits": [17] }
+      },
+      "cells": {
+        "uWR": {
+          "type": "7C00H (WR)",
+          "port_directions": { "write strobe": "output" },
+          "connections": { "write strobe": [2] },
+          "attributes": {}
+        },
+        "u2H": {
+          "type": "2H 74123a",
+          "port_directions": {
+            "trig B (2)": "input",
+            "R17 27k / D7 / C14 4u7 (14,15)": "input",
+            "Q (13)": "output",
+            "Qbar (4)": "output"
+          },
+          "connections": {
+            "trig B (2)": [2],
+            "R17 27k / D7 / C14 4u7 (14,15)": ["1"],
+            "Q (13)": [10],
+            "Qbar (4)": [11]
+          },
+          "attributes": {}
+        },
+        "u1H": {
+          "type": "1H 7404a",
+          "port_directions": { "in (11)": "input", "out (10)": "output" },
+          "connections": { "in (11)": [11], "out (10)": [12] },
+          "attributes": {}
+        },
+        "uRC": {
+          "type": "R6 4k7 / C3 10u",
+          "port_directions": { "in": "input", "FC node": "output" },
+          "connections": { "in": [12], "FC node": [13] },
+          "attributes": {}
+        },
+        "u1J": {
+          "type": "1J 629a",
+          "port_directions": {
+            "FC (1)": "input",
+            "RNG (14)": "input",
+            "ENbar (11)": "input",
+            "CX C6 3n9 (12,13)": "input",
+            "Y (10)": "output"
+          },
+          "connections": {
+            "FC (1)": [13],
+            "RNG (14)": ["1"],
+            "ENbar (11)": ["0"],
+            "CX C6 3n9 (12,13)": ["1"],
+            "Y (10)": [14]
+          },
+          "attributes": {}
+        },
+        "u2J": {
+          "type": "2J 629a",
+          "port_directions": {
+            "FC (1)": "input",
+            "RNG (14)": "input",
+            "ENbar (11)": "input",
+            "CX C17 22n (12,13)": "input",
+            "Y (10)": "output"
+          },
+          "connections": {
+            "FC (1)": [13],
+            "RNG (14)": ["1"],
+            "ENbar (11)": ["0"],
+            "CX C17 22n (12,13)": ["1"],
+            "Y (10)": [15]
+          },
+          "attributes": {}
+        },
+        "u1K": {
+          "type": "1K 7486",
+          "port_directions": { "a": "input", "b": "input", "y": "output" },
+          "connections": { "a": [14], "b": [15], "y": [16] },
+          "attributes": {}
+        },
+        "u2K": {
+          "type": "2K 7408",
+          "port_directions": { "a": "input", "b": "input", "y": "output" },
+          "connections": { "a": [10], "b": [16], "y": [17] },
+          "attributes": {}
+        }
+      }
+    }
+  }
+}
