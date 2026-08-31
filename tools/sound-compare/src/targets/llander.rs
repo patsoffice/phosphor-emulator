@@ -394,14 +394,20 @@ mod tests {
             let mut t = new_target();
             t.set_control("explosion", Value::Bool(true)).unwrap();
             let rate = t.sample_rate() as usize;
-            (0..rate / 4).map(|_| t.step().unsigned_abs()).max().unwrap()
+            (0..rate / 4)
+                .map(|_| t.step().unsigned_abs())
+                .max()
+                .unwrap()
         };
         let loud = {
             let mut t = new_target();
             t.set_control("thrust-data", Value::Number(7.0)).unwrap();
             t.set_control("explosion", Value::Bool(true)).unwrap();
             let rate = t.sample_rate() as usize;
-            (0..rate / 4).map(|_| t.step().unsigned_abs()).max().unwrap()
+            (0..rate / 4)
+                .map(|_| t.step().unsigned_abs())
+                .max()
+                .unwrap()
         };
         assert!(
             loud > quiet * 4,
