@@ -1,3 +1,23 @@
+//! Namco Pac-Man board, shared by Pac-Man and Ms. Pac-Man.
+//!
+//! # Schematics
+//!
+//! | Drawing | Source | Pages |
+//! |---|---|---|
+//! | `PAC-MAN` game logic schematic, Midway | `arcade-museum.com/manuals-videogames/P/Pacman-Troubleshooting-Guide-Part1.pdf` | PDF p22 (left), p23 (right) |
+//!
+//! The audio output stage on p23 is transcribed in
+//! [`docs/schematics/pacman-audio-output.md`](../../docs/schematics/pacman-audio-output.md).
+//! **None of it is modelled here**: `fill_audio` forwards the WSG and stops,
+//! where the board multiplies sample by volume through two switched resistor
+//! networks, filters the result, and drives two speakers off an LM1877. See
+//! `phosphor-emulator-ga9p`.
+//!
+//! PREFER THIS SCAN. `arcade-museum.com/manuals-videogames/P/pac-man_p2.pdf`,
+//! which this file used to be cited against, splits the same schematic across
+//! PDF p2 and p1 in reverse order and then cuts p1 mid-component at its right
+//! edge, so the audio is on no page of it. All 35 of its pages were checked.
+
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::debug_trace::{DebugEvent, DebugEventKind, DebugTraceBuffer};
 use phosphor_core::core::machine::{

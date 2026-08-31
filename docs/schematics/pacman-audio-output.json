@@ -1,0 +1,125 @@
+{
+  "modules": {
+    "pacman audio: a 4-bit sample DAC multiplied by a 4-bit switched-resistor volume": {
+      "ports": {
+        "SOUND ON": { "direction": "input", "bits": [2] },
+        "F SPEAKER": { "direction": "output", "bits": [40] },
+        "H SPEAKER": { "direction": "output", "bits": [41] }
+      },
+      "cells": {
+        "u1M": {
+          "type": "1M MB7052 PM1-3",
+          "port_directions": { "waveform D0-D3": "output" },
+          "connections": { "waveform D0-D3": [3] },
+          "attributes": {}
+        },
+        "u2M": {
+          "type": "2M 74LS273",
+          "port_directions": {
+            "D (from 1M)": "input",
+            "CLR (1)": "input",
+            "5Q (12) R9 470": "output",
+            "6Q (15) R8 1k": "output",
+            "7Q (16) R7 2.2k": "output",
+            "8Q (19) R6 4.7k": "output",
+            "1Q (2) vol MSB": "output",
+            "2Q (5)": "output",
+            "3Q (6)": "output",
+            "4Q (9) vol LSB": "output"
+          },
+          "connections": {
+            "D (from 1M)": [3],
+            "CLR (1)": [2],
+            "5Q (12) R9 470": [10],
+            "6Q (15) R8 1k": [10],
+            "7Q (16) R7 2.2k": [10],
+            "8Q (19) R6 4.7k": [10],
+            "1Q (2) vol MSB": [11],
+            "2Q (5)": [12],
+            "3Q (6)": [13],
+            "4Q (9) vol LSB": [14]
+          },
+          "attributes": {}
+        },
+        "u1Na": {
+          "type": "1N 4066a",
+          "port_directions": {
+            "in (4)": "input",
+            "ctrl (5)": "input",
+            "out (3) R2 10k": "output"
+          },
+          "connections": {
+            "in (4)": [10],
+            "ctrl (5)": [11],
+            "out (3) R2 10k": [20]
+          },
+          "attributes": {}
+        },
+        "u1Nb": {
+          "type": "1N 4066b",
+          "port_directions": {
+            "in (1)": "input",
+            "ctrl (13)": "input",
+            "out (2) R1 22k": "output"
+          },
+          "connections": {
+            "in (1)": [10],
+            "ctrl (13)": [12],
+            "out (2) R1 22k": [20]
+          },
+          "attributes": {}
+        },
+        "u1Nc": {
+          "type": "1N 4066c",
+          "port_directions": {
+            "in (11)": "input",
+            "ctrl (12)": "input",
+            "out (10) R3 47k": "output"
+          },
+          "connections": {
+            "in (11)": [10],
+            "ctrl (12)": [13],
+            "out (10) R3 47k": [20]
+          },
+          "attributes": {}
+        },
+        "u1Nd": {
+          "type": "1N 4066d",
+          "port_directions": {
+            "in (8)": "input",
+            "ctrl (6)": "input",
+            "out (9) R4 100k": "output"
+          },
+          "connections": {
+            "in (8)": [10],
+            "ctrl (6)": [14],
+            "out (9) R4 100k": [20]
+          },
+          "attributes": {}
+        },
+        "filt": {
+          "type": "C1 10n / R96 22k / 10k pot / C46 100n",
+          "port_directions": { "SOUND": "input", "to 11A": "output" },
+          "connections": { "SOUND": [20], "to 11A": [30] },
+          "attributes": {}
+        },
+        "u11A": {
+          "type": "11A LM1877",
+          "port_directions": {
+            "in (6) R92 100k": "input",
+            "out (2) R95 100k fb": "output",
+            "in (9) C48 4u7": "input",
+            "out (13) R93 100k fb": "output"
+          },
+          "connections": {
+            "in (6) R92 100k": [30],
+            "out (2) R95 100k fb": [40],
+            "in (9) C48 4u7": [30],
+            "out (13) R93 100k fb": [41]
+          },
+          "attributes": {}
+        }
+      }
+    }
+  }
+}
