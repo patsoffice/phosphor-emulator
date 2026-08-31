@@ -158,12 +158,30 @@ still fitted; and the explosion clips 9.5 % of samples where the reference clips
 id = "congo-percussion"
 machines = ["congobongo"]
 device = "machines/src/congo_sound.rs"
-status = "implemented-unvalidated"
+status = "blocked"
+reason = """
+There is no reference capture to compare against, and there cannot be one from
+an emulator: the reference plays recorded WAVs because it never modelled this
+circuit. Comparing against those measures whoever made the recordings. The
+reference here is the drawing, so the next step is a rebuild and not a
+comparison, and `implemented-needs-validation` is unreachable until one exists.
+Tracked as phosphor-emulator-7z54."""
 notes = """
-Phase 7 item 1, and first in that phase's order because its reference is a
-different kind: the board plays samples, so comparing it exercises the claim
-that the tooling does not care where a WAV came from. That ordering rationale
-has not been re-checked against the code."""
+THE PHASE'S ORDERING RATIONALE FOR THIS TARGET WAS FALSE, and this row is where
+that is recorded. It was listed first on the grounds that its reference is a
+different kind, sample playback, which would exercise the claim that the tooling
+does not care where a WAV came from.
+
+The board does not play samples. Sound Board 834-5168 sheet 2 has all five voices
+as analog circuits: four identical drum channels, each a 7416 open-collector
+inverter into a diode-and-RC envelope shaper into a ringing multiple-feedback
+band-pass on a 3614, plus a separate gorilla built from two 4538B monostables and
+an HM5837 noise IC. Transcribed at docs/schematics/congo-percussion.md, including
+the four mixing resistors that set the balance.
+
+The emulator's implementation choice was read as evidence about the hardware.
+Reading the drawing took twenty minutes; the belief had been in the plan for
+weeks."""
 
 [[target]]
 id = "atari-system1-audio"
@@ -174,7 +192,11 @@ notes = """
 THE REASON THIS FILE EXISTS. An implemented discrete device with no adapter, no
 scenarios, and no mention in any phase of the epic. It was not deferred or
 blocked; it was simply never written down, and stayed invisible until someone
-listed the sound devices by hand."""
+listed the sound devices by hand.
+
+Now owned by phosphor-emulator-irx4 rather than by no one. It was deliberately
+NOT adopted into Phase 7, whose six items it is not one of; the point of this row
+was to make it visible, and giving it an issue is what that visibility was for."""
 
 # ---------------------------------------------------------------------------
 # Board shared with a modelled machine, variant coverage missing

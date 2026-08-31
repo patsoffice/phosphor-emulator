@@ -1,5 +1,19 @@
 //! Sega Congo Bongo (1983) — Zaxxon-family hardware.
 //!
+//! # Schematics
+//!
+//! | Drawing | Source | Pages |
+//! |---|---|---|
+//! | `Sound Board 834-5168 rev A`, sheets 1 and 2 of 2 | `arcade-museum.com/manuals-videogames/C/congobongo5.PDF` | PDF pp15-16 and pp17-18 |
+//!
+//! Only the sound board has been read, and it is transcribed in
+//! [`docs/schematics/congo-percussion.md`](../../docs/schematics/congo-percussion.md).
+//! Each sheet is spread across two PDF pages. The five percussion voices are
+//! **analog circuits on this board**, not sample playback; see that file, and
+//! `phosphor-emulator-7z54` for the rebuild.
+//!
+//! No drawing has been located for the CPU, video or sprite boards.
+//!
 //! Hardware (per MAME `src/mame/sega/zaxxon.cpp`, the `congo` set):
 //! - Main CPU: Z80 @ MASTER_CLOCK/16 = 48.66 MHz / 16 ≈ 3.041 MHz
 //! - Sound CPU: Z80 @ 4 MHz, with a ~244 Hz periodic IRQ (`SOUND_CLOCK/16/16/16/4`)
