@@ -1,0 +1,23 @@
+schema = 1
+id = "llander/tone-3k"
+target = "llander-discrete"
+duration_s = 3.0
+description = "3 kHz low-fuel alert tone, held for two seconds"
+
+# The board's low-fuel warning, and its self-test ROM/RAM pass indicator. A
+# hard-gated fixed square: the gate gives digital silence when it closes, so it
+# is asserted and held rather than pulsed.
+#
+# This is one of the two quantities on this board computable from the drawing
+# alone, which makes it the first thing to check before any other comparison is
+# read as evidence about the circuit. If this measures anywhere but 3 kHz on
+# either side, the harness or the driver is running the board at the wrong rate
+# and every other number in the set is about that instead.
+[[action]]
+at_s = 1.0
+control = "tone-3k"
+value = true
+
+[analysis]
+start_s = 0.95
+end_s = 3.0

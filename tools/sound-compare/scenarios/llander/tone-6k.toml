@@ -1,0 +1,19 @@
+schema = 1
+id = "llander/tone-6k"
+target = "llander-discrete"
+duration_s = 3.0
+description = "6 kHz slam and self-test alert tone, held for two seconds"
+
+# The coin-door slam alarm, and the self-test's "that switch is stuck" tone. The
+# same circuit as the 3 kHz alert on its own 390k mixer leg, so it is captured
+# separately: the two share a gate package and a summing node, and a level error
+# in the shared part looks identical to a level error in either tone until both
+# are measured.
+[[action]]
+at_s = 1.0
+control = "tone-6k"
+value = true
+
+[analysis]
+start_s = 0.95
+end_s = 3.0

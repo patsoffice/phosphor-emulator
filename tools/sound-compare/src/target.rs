@@ -66,6 +66,7 @@ static ALL: &[&TargetSpec] = &[
     &crate::targets::dkong::SPEC,
     &crate::targets::dkongjr::SPEC,
     &crate::targets::galaxian::SPEC,
+    &crate::targets::llander::SPEC,
     &crate::targets::mariobros::SPEC,
 ];
 

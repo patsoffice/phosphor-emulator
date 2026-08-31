@@ -1,0 +1,30 @@
+schema = 1
+id = "llander/thrust"
+target = "llander-discrete"
+duration_s = 3.0
+description = "Rocket thrust at full throttle, held for two seconds"
+
+# Full throttle: all three volume bits on. On the board that is all three
+# analog switches closed, which is the ONE case where the source resistance
+# feeding the noise low-pass is the 2247 ohms both the netlist and this model
+# assume. Every other throttle value is a different corner, which is what
+# llander/thrust-low exists to show.
+[[action]]
+at_s = 1.0
+control = "thrust-data"
+value = 7
+
+# THE WINDOW MUST CONTAIN THE VOLUME EDGE. The noise source free-runs and the
+# throttle only scales it, so a window opening after the edge holds no trace of
+# WHEN it moved: the capture is byte-identical whether the throttle opened at
+# 1.0 s or 1.03 s, and `sndcmp verify`'s sensitivity check fails it. Correctly.
+# Starting 50 ms early makes the band-pass's ring-up part of what is measured,
+# which is also the honest thing to measure on a resonant voice, and matches
+# asteroids/thrust.
+#
+# Held to the end of the run rather than released inside it. Releasing gives
+# digital silence after the ring-down, and a window carrying a second of that
+# reports the silence rather than the effect.
+[analysis]
+start_s = 0.95
+end_s = 3.0

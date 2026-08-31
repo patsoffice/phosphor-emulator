@@ -1,0 +1,30 @@
+schema = 1
+id = "llander/thrust-low"
+target = "llander-discrete"
+duration_s = 3.0
+description = "Rocket thrust at its lowest throttle, held for two seconds"
+
+# THIS IS THE SCENARIO THAT CAN SHOW THE MISSING MECHANISM, and it is the reason
+# there are two thrust scenarios rather than one.
+#
+# The board's throttle is not a DAC feeding a fixed filter. It is three analog
+# switches putting 15k, 8.2k and 3.9k in parallel between the noise source and a
+# 1 uF capacitor, so the SAME resistors set the volume and the noise low-pass
+# corner. All three closed is 2247 ohms and a 71 Hz corner; this scenario closes
+# only the 15k, which is a 10.6 Hz corner. On the board, quieter thrust is also
+# darker thrust.
+#
+# Neither the netlist nor this model has that: both filter at a fixed 71 Hz and
+# then multiply by a linear volume. The prediction, if the model is missing it,
+# is that our low throttle measures BRIGHTER than the board's while the full
+# throttle agrees. See docs/schematics/llander-audio-output.md.
+[[action]]
+at_s = 1.0
+control = "thrust-data"
+value = 1
+
+# As llander/thrust: the window must contain the edge, and the voice is held
+# rather than released.
+[analysis]
+start_s = 0.95
+end_s = 3.0

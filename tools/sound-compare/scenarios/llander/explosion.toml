@@ -1,0 +1,34 @@
+schema = 1
+id = "llander/explosion"
+target = "llander-discrete"
+duration_s = 3.0
+description = "Crash explosion over full throttle, which is the only way the board makes one"
+
+# THE THROTTLE IS PART OF THE STIMULUS, not a setup action, and it is not
+# optional. The explosion's analog switch takes its signal from the SAME node
+# the three throttle switches drive, so the throttle bits are the explosion's
+# volume: enabling the explosion with the throttle at zero gives digital
+# silence, not a quiet explosion. The netlist says the same thing by
+# multiplying the explosion by the thrust data.
+#
+# The consequence is that the board cannot make an explosion in isolation. The
+# thrust path has no gate of its own -- the switches ARE its gate -- so anything
+# that opens the explosion also opens the thrust. What isolates the two here is
+# the `explosion` probe, not the timeline.
+[[action]]
+at_s = 0.5
+control = "thrust-data"
+value = 7
+
+[[action]]
+at_s = 1.0
+control = "explosion"
+value = true
+
+# Opens 50 ms before the explosion's edge and after the thrust has settled, so
+# the window carries the step from thrust alone to thrust plus explosion. That
+# step is the measurement: it is the only thing in the capture that belongs to
+# the explosion leg rather than to the throttle.
+[analysis]
+start_s = 0.95
+end_s = 3.0

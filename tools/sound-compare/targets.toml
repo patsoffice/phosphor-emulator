@@ -131,10 +131,18 @@ edge-quantisation cause as Donkey Kong Jr.'s falling voice."""
 id = "llander-discrete"
 machines = ["llander"]
 device = "machines/src/llander_sound.rs"
+adapter = "llander-discrete"
 status = "implemented-unvalidated"
+scenarios = [
+  "llander/thrust",
+  "llander/thrust-low",
+  "llander/explosion",
+  "llander/tone-3k",
+  "llander/tone-6k",
+]
 notes = """
-Thrust, explosion and the two fixed tones exist as a device and have never been
-measured against anything. Phase 7 item 4."""
+Adapter and scenarios exist; the comparison against the reference has not been
+run yet, so this is still `implemented-unvalidated`. Phase 7 item 4."""
 
 [[target]]
 id = "congo-percussion"

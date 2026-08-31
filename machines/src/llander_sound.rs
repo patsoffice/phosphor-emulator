@@ -101,7 +101,7 @@ const LVL_EXPLOSION: f64 = 1000.0;
 // supplies its post-filter make-up + trim.
 const THRUST_IN_GAIN: f64 = 2400.0; // explosion noise * throttle amplitude
 const THRUST_OUT_GAIN: f64 = 18.7; // post-band-pass make-up + trim
-const OUTPUT_GAIN: f64 = 1.0 / 14347.0;
+const OUTPUT_GAIN: f64 = 1.0 / LunarLanderDiscreteSound::MIX_FULL_SCALE;
 
 fn build_circuit() -> (DiscreteCircuit, LunarLanderInputs) {
     let mut b = DiscreteCircuitBuilder::new(
@@ -204,6 +204,13 @@ pub struct LunarLanderDiscreteSound {
 }
 
 impl LunarLanderDiscreteSound {
+    /// The `MIX` sum that renders as a full-scale output sample.
+    ///
+    /// Exposed so a per-stage probe can be read at the same scale the mixer
+    /// puts it at. A probe divided by anything else is measuring its own
+    /// normalization rather than the voice's share of the mix.
+    pub const MIX_FULL_SCALE: f64 = 14_347.0;
+
     pub fn new() -> Self {
         let (circuit, ids) = build_circuit();
         Self {
@@ -242,6 +249,12 @@ impl LunarLanderDiscreteSound {
     /// Output sample rate in Hz.
     pub fn sample_rate(&self) -> u32 {
         self.circuit.sample_rate()
+    }
+
+    /// The built circuit, so the `sndcmp` adapter can render one named node
+    /// instead of the mix.
+    pub fn circuit(&self) -> &DiscreteCircuit {
+        &self.circuit
     }
 
     pub fn reset(&mut self) {
