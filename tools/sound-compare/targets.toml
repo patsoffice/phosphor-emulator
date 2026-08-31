@@ -123,10 +123,6 @@ discipline in the scenarios is assumed rather than traced: see
 phosphor-emulator-mario-trigger-discipline-vv4z. Centroid residual is the same
 edge-quantisation cause as Donkey Kong Jr.'s falling voice."""
 
-# ---------------------------------------------------------------------------
-# Implemented, never compared
-# ---------------------------------------------------------------------------
-
 [[target]]
 id = "llander-discrete"
 machines = ["llander"]
@@ -153,6 +149,10 @@ the throttle's three resistors also set the noise filter's corner, so the board'
 quieter thrust is darker and its volume law is not linear; two make-up gains are
 still fitted; and the explosion clips 9.5 % of samples where the reference clips
 9.9 %, which the board would not. All three in phosphor-emulator-b72s."""
+
+# ---------------------------------------------------------------------------
+# Implemented, but no comparison
+# ---------------------------------------------------------------------------
 
 [[target]]
 id = "congo-percussion"
@@ -199,19 +199,76 @@ NOT adopted into Phase 7, whose six items it is not one of; the point of this ro
 was to make it visible, and giving it an issue is what that visibility was for."""
 
 # ---------------------------------------------------------------------------
-# Board shared with a modelled machine, variant coverage missing
+# Board shared with a modelled machine
 # ---------------------------------------------------------------------------
 
 [[target]]
 id = "galaxian-family-variants"
-machines = ["mooncrst", "pisces", "uniwars", "scramble", "scobra"]
+machines = ["pisces", "uniwars"]
+device = "core/src/device/galaxian_sound.rs"
+adapter = "galaxian-discrete"
+status = "implemented-needs-validation"
+scenarios = [
+  "galaxian/background",
+  "galaxian/fire",
+  "galaxian/hit",
+  "galaxian/melody",
+]
+notes = """
+PHASE 7 ITEM 6, AND THE ANSWER IS THAT THESE TWO NEED NO SCENARIOS OF THEIR OWN.
+That was the thing to establish, and inventing four near-duplicate rows to fill
+the column would have been the wrong outcome.
+
+Pisces and UniWar S wrap the same GalaxianBoard, which owns the same
+GalaxianSound, and the reference builds them by calling galaxian() and changing
+only the memory map. The analog board is identical, so a scenario here would
+drive the same device through the same controls to the same samples as
+galaxian/*. They are listed against Galaxian's four scenarios rather than given
+copies.
+
+What would justify a variant scenario is a variant that drives the device into a
+region Galaxian's scenarios never reach -- a pitch outside the tested range, say.
+That is a question about the game program rather than the board, and it has not
+been traced for either. Recorded as unexamined, not as absent.
+
+The other three machines this row used to name have moved. Moon Cresta has a
+different mixer and is now its own entry; Scramble and Scobra are not on this
+board at all."""
+
+[[target]]
+id = "mooncrst-mixer"
+machines = ["mooncrst"]
 device = "core/src/device/galaxian_sound.rs"
 adapter = "galaxian-discrete"
 status = "partial"
+scenarios = [
+  "galaxian/background",
+  "galaxian/fire",
+  "galaxian/hit",
+  "galaxian/melody",
+]
 notes = """
-These run the Galaxian sound board through the same device and adapter, so the
-voices are covered, but none has a scenario of its own and the ways their sound
-programs differ from Galaxian's have not been established. Phase 7 item 6."""
+MOON CRESTA IS NOT GALAXIAN'S SOUND BOARD, and this is the difference Phase 7
+item 6 existed to find. Everything up to the mixer is shared; the mixer is not.
+
+Galaxian sums in two stages, a five-way pre-mix into a three-way final mix, with
+the background and melody group entering through R34 5.1k and a 10k load at the
+output. Moon Cresta sums all seven legs in ONE stage, puts that group through
+R34 15k, and has no load resistor. So its background and melody sit about 9 dB
+down against its hit and fire, and its overall level is higher.
+
+Read off the drawing, not inferred: Gremlin `MOON CRESTA SCHEMATIC ELECTRONICS
+MODIFIED` 97332-P, Main I.C. Board sheet 3, in
+arcade-museum.com/manuals-videogames/M/moon-cresta-manual.pdf at PDF p23, where
+R34 is labelled 15K and all seven legs meet one node into R42 22k and C39. The
+reference netlist agrees, importing Galaxian's and replacing only the mixing
+stage.
+
+`core/src/device/galaxian_sound.rs` hard-codes 5.1k and the two-stage
+arrangement, so Moon Cresta currently plays Galaxian's mix. `partial` for that
+reason: the voices are right and the balance is not. The four scenarios listed
+are Galaxian's, which drive the identical voice hardware and would show the
+mixer difference the moment the device models it. phosphor-emulator-3m0n."""
 
 # ---------------------------------------------------------------------------
 # Not modelled at all
@@ -240,4 +297,10 @@ machines = ["scramble", "scobra", "frogger"]
 status = "missing"
 notes = """
 The discrete output-filter controls. Filter selection is latched but nothing
-models what it switches. Phase 8 item 4."""
+models what it switches. Phase 8 item 4.
+
+This is the ONLY analog path these three boards have, and the row that used to
+put Scramble and Scobra on the Galaxian sound board was simply wrong. They run
+`KonamiSound`: a second Z80 with two AY-8910s behind an 8255 PPI, which is not a
+discrete board and belongs in this catalog only for the filters that follow it.
+Nothing had checked; `machines/src/scramble.rs` names the device in its imports."""
