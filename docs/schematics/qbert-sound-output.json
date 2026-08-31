@@ -1,0 +1,130 @@
+{
+  "modules": {
+    "qbert sound/speech A6 output: two DACs, two trimmers, one LM379S": {
+      "ports": {
+        "AUDIO OUT": { "direction": "output", "bits": [60] }
+      },
+      "cells": {
+        "u11": {
+          "type": "U11 74LS75",
+          "port_directions": { "DB0-DB3 (2,3,6,7)": "input", "Q1-Q4": "output" },
+          "connections": { "DB0-DB3 (2,3,6,7)": [2], "Q1-Q4": [10] },
+          "attributes": {}
+        },
+        "u18": {
+          "type": "U18 74LS75",
+          "port_directions": { "DB4-DB7 (2,3,6,7)": "input", "Q1-Q4": "output" },
+          "connections": { "DB4-DB7 (2,3,6,7)": [3], "Q1-Q4": [11] },
+          "attributes": {}
+        },
+        "u10D": {
+          "type": "U10D strobe 3+B",
+          "port_directions": { "in (11,12)": "input", "G (13)": "output" },
+          "connections": { "in (11,12)": [4], "G (13)": [12] },
+          "attributes": {}
+        },
+        "u19": {
+          "type": "U19 MC1408",
+          "port_directions": {
+            "lo nibble": "input",
+            "hi nibble": "input",
+            "G": "input",
+            "Iout (4) R4 5.6k": "output"
+          },
+          "connections": {
+            "lo nibble": [10],
+            "hi nibble": [11],
+            "G": [12],
+            "Iout (4) R4 5.6k": [20]
+          },
+          "attributes": {}
+        },
+        "u7": {
+          "type": "U7 74LS75",
+          "port_directions": { "DB0-DB3 (2,3,6,7)": "input", "Q1-Q4": "output" },
+          "connections": { "DB0-DB3 (2,3,6,7)": [2], "Q1-Q4": [13] },
+          "attributes": {}
+        },
+        "u8": {
+          "type": "U8 74LS75",
+          "port_directions": { "DB4-DB7 (2,3,6,7)": "input", "Q1-Q4": "output" },
+          "connections": { "DB4-DB7 (2,3,6,7)": [3], "Q1-Q4": [14] },
+          "attributes": {}
+        },
+        "u10A": {
+          "type": "U10A strobe 1+9",
+          "port_directions": { "in (2,3)": "input", "G (1)": "output" },
+          "connections": { "in (2,3)": [5], "G (1)": [15] },
+          "attributes": {}
+        },
+        "u20": {
+          "type": "U20 MC1408",
+          "port_directions": {
+            "lo nibble": "input",
+            "hi nibble": "input",
+            "G": "input",
+            "Iout (4) R12 5.6k": "output"
+          },
+          "connections": {
+            "lo nibble": [13],
+            "hi nibble": [14],
+            "G": [15],
+            "Iout (4) R12 5.6k": [21]
+          },
+          "attributes": {}
+        },
+        "u21": {
+          "type": "U21 LM741",
+          "port_directions": { "in (2)": "input", "out (6) R7 10k": "output" },
+          "connections": { "in (2)": [20], "out (6) R7 10k": [30] },
+          "attributes": {}
+        },
+        "vco": {
+          "type": "Q1 2N2222A / Q2 2N2907A / C22 300p",
+          "port_directions": { "FREQ ADJ in": "input", "VOICE CLOCK": "output" },
+          "connections": { "FREQ ADJ in": [30], "VOICE CLOCK": [31] },
+          "attributes": {}
+        },
+        "u14": {
+          "type": "U14 SC01",
+          "port_directions": { "clock": "input", "audio": "output" },
+          "connections": { "clock": [31], "audio": [40] },
+          "attributes": {}
+        },
+        "u22": {
+          "type": "U22 LM741",
+          "port_directions": {
+            "in (2) AMPLITUDE ADJ R13 10k": "input",
+            "out (6)": "output"
+          },
+          "connections": { "in (2) AMPLITUDE ADJ R13 10k": [21], "out (6)": [41] },
+          "attributes": {}
+        },
+        "r15": {
+          "type": "R15 10k / C31 47n (src NOT traced)",
+          "port_directions": { "in": "input", "wiper": "output" },
+          "connections": { "in": [41], "wiper": [50] },
+          "attributes": {}
+        },
+        "r16": {
+          "type": "R16 10k / C32 47n (src NOT traced)",
+          "port_directions": { "in": "input", "wiper": "output" },
+          "connections": { "in": [40], "wiper": [50] },
+          "attributes": {}
+        },
+        "u23": {
+          "type": "U23 LM379S",
+          "port_directions": {
+            "in (9,14) R18 100k": "input",
+            "out (10) C36 470u": "output"
+          },
+          "connections": {
+            "in (9,14) R18 100k": [50],
+            "out (10) C36 470u": [60]
+          },
+          "attributes": {}
+        }
+      }
+    }
+  }
+}

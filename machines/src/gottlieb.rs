@@ -10,6 +10,21 @@
 //! - **Screen**: 256×240 visible, 318×256 total, ~61.42 Hz, 5 MHz pixel clock
 //! - **Video**: 32×32 tilemap (8×8, 4bpp packed) + 64 sprites (16×16, 4bpp planar)
 //! - **Palette**: 16 colors × 2 bytes = 32 bytes palette RAM (4-bit RGB)
+//! # Schematics
+//!
+//! | Drawing | Source | Pages |
+//! |---|---|---|
+//! | `Logic Board Assy. (A1)` sheet 2 of 3 | `arcade-museum.com/manuals-videogames/Q/QBertInstructionManual483.pdf` | PDF p16 |
+//! | `Sound/Speech Assy. (A6)` schematic | same | PDF p19 (manual pp27-29) |
+//! | `Primary Power/Filter Board/Interconnection` | same | PDF p20 (manual pp30-32) |
+//!
+//! The sound board's output stage is transcribed in
+//! [`docs/schematics/qbert-sound-output.md`](../../docs/schematics/qbert-sound-output.md).
+//! Note the sound assembly is **A6**, not A5. The DAC and the speech each have
+//! their own 10k trimmer and 0.047 uF coupling capacitor AHEAD of the summing
+//! node, which is not what the `32000.0` in `fill_audio` and the single
+//! post-sum coupling below model. See `phosphor-emulator-i8y7`.
+//!
 //! - **Sound**: MC1408 DAC + Votrax SC-01A speech synthesizer
 //! - **I/O**: MOS 6532 RIOT (128B RAM, 2 ports, timer, edge detect)
 //! - **NMI**: VBLANK → main CPU NMI; RIOT IRQ → sound CPU IRQ; Votrax A/R → sound CPU NMI

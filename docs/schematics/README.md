@@ -88,6 +88,15 @@ section is there so that is obvious.
 - [`mcr-video-timing.md`](mcr-video-timing.md) — a negative result: MCR II's
   H and V counters and both blanking decodes are inside custom LSIs, so the
   blanking phase is on no drawing. Read it before hunting for one.
+- [`qbert-sound-output.md`](qbert-sound-output.md) — Q*Bert's Sound/Speech A6
+  output stage. Two of its apparent gaps were already modelled; the real one is
+  that the DAC-to-speech balance is two trimmers with two coupling capacitors
+  ahead of the sum, where the model has one constant and one capacitor behind it.
+- [`pacman-audio-output.md`](pacman-audio-output.md) — Pac-Man multiplies sample
+  by volume in ANALOG, through two switched resistor networks, and neither is an
+  exact binary ladder. Also a filter whose corner moves with the volume code, and
+  two speakers where the emulator is mono. None of it modelled. Includes which
+  Pac-Man scan to use and which one is cut mid-component.
 - [`llander-audio-output.md`](llander-audio-output.md) — Lunar Lander's four
   sounds, and the thing a netlist comparison cannot see: the three resistors that
   set the thrust volume are the same three that set the noise filter's corner, so
