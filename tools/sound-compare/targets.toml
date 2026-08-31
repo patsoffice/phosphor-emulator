@@ -1,0 +1,203 @@
+# Coverage catalog: every discrete or board-level analog audio path in the
+# project, whether or not anything models it yet.
+#
+# This file exists because the plan kept losing things. `atari-system1-audio`
+# below is the worked example: an implemented discrete device with no adapter,
+# no scenarios and no mention in any phase of the epic, which nobody noticed
+# until someone listed the sound devices and compared. A catalog that has to
+# name a status for every path makes that a visible row rather than an absence.
+#
+# STATUSES, and what each one is claiming:
+#
+#   missing                       the board has an analog path and we model none
+#                                 of it
+#   partial                       some of the path is modelled
+#   implemented-unvalidated       a device exists but nothing has ever compared
+#                                 it against a reference
+#   implemented-needs-validation  compared against a reference, residuals
+#                                 recorded, but not signed off against the
+#                                 schematic
+#   validated                     compared AND schematic-reviewed
+#   blocked                       `reason` required
+#
+# NOTHING IS `validated` YET, deliberately. Several entries below have had far
+# more work than that sounds: Donkey Kong and Asteroids were both rebuilt from
+# their schematics stage by stage. But `validated` is a claim that someone
+# checked the model against the drawing and signed it off, and promoting an
+# entry is that person's to do rather than a bookkeeping default. A status that
+# gets handed out by whoever last touched the file is worth nothing.
+#
+# `scenarios` lists ids that must exist in scenarios/. `adapter` is the sndcmp
+# target id, present only where one is registered in src/targets/. Both are
+# checked by the tests in src/catalog.rs.
+
+schema = 1
+
+# ---------------------------------------------------------------------------
+# Implemented and compared
+# ---------------------------------------------------------------------------
+
+[[target]]
+id = "asteroids-discrete"
+machines = ["asteroid"]
+device = "machines/src/asteroids_sound.rs"
+adapter = "asteroids-discrete"
+status = "implemented-needs-validation"
+scenarios = [
+  "asteroids/thump",
+  "asteroids/thrust",
+  "asteroids/explosion",
+  "asteroids/life",
+  "asteroids/saucer",
+  "asteroids/saucer-large",
+  "asteroids/saucer-fire",
+  "asteroids/ship-fire",
+]
+notes = """
+Rebuilt from the schematic voice by voice. Thrust is the open question: see
+phosphor-emulator-asteroids-sound-postprocessing-hm4t. Its fire voices match
+above 150 Hz on every metric, with a low-frequency pedestal the board has and
+the reference does not, which is documented rather than fitted away."""
+
+[[target]]
+id = "dkong-discrete"
+machines = ["dkong"]
+device = "machines/src/dkong_sound.rs"
+adapter = "dkong-discrete"
+status = "implemented-needs-validation"
+scenarios = ["dkong/walk", "dkong/jump", "dkong/stomp"]
+notes = """
+All three effects and the music built from the board rather than fitted. Walk
+carries a labelled trade: closing a 13-point gap below 150 Hz cost brightness in
+the band a previously fitted filter had been holding up. Shipped labelled rather
+than re-fitted."""
+
+[[target]]
+id = "dkongjr-discrete"
+machines = ["dkongjr"]
+device = "machines/src/dkongjr_sound.rs"
+adapter = "dkongjr-discrete"
+status = "implemented-needs-validation"
+scenarios = [
+  "dkongjr/walk",
+  "dkongjr/walk-hi",
+  "dkongjr/jump",
+  "dkongjr/climb",
+  "dkongjr/fall",
+]
+notes = """
+Four voices where the board previously played Donkey Kong's three. Walk and jump
+within tolerance on every metric. Residuals: climbing's onset steps where the
+board's does not, and falling's centroid is high for the reason in
+phosphor-emulator-discrete-square-edge-quantisation-jtn3. The summing node's
+0.01 uF capacitor is from an independent netlist rather than the drawing and
+wants confirming."""
+
+[[target]]
+id = "galaxian-discrete"
+machines = ["galaxian"]
+device = "core/src/device/galaxian_sound.rs"
+adapter = "galaxian-discrete"
+status = "implemented-needs-validation"
+scenarios = [
+  "galaxian/background",
+  "galaxian/fire",
+  "galaxian/hit",
+  "galaxian/melody",
+]
+notes = """
+Two of its three reported residuals turned out to be the reference's own
+simulation rate rather than the model. References for this board must be
+captured at 192 kHz and band-limited afterwards."""
+
+[[target]]
+id = "mariobros-discrete"
+machines = ["mariobros"]
+device = "machines/src/mario_sound.rs"
+adapter = "mariobros-discrete"
+status = "implemented-needs-validation"
+scenarios = ["mariobros/walk1", "mariobros/walk2", "mariobros/skid"]
+notes = """
+Two footsteps, the skid, and the music through two LM3900 sections. The trigger
+discipline in the scenarios is assumed rather than traced: see
+phosphor-emulator-mario-trigger-discipline-vv4z. Centroid residual is the same
+edge-quantisation cause as Donkey Kong Jr.'s falling voice."""
+
+# ---------------------------------------------------------------------------
+# Implemented, never compared
+# ---------------------------------------------------------------------------
+
+[[target]]
+id = "llander-discrete"
+machines = ["llander"]
+device = "machines/src/llander_sound.rs"
+status = "implemented-unvalidated"
+notes = """
+Thrust, explosion and the two fixed tones exist as a device and have never been
+measured against anything. Phase 7 item 4."""
+
+[[target]]
+id = "congo-percussion"
+machines = ["congobongo"]
+device = "machines/src/congo_sound.rs"
+status = "implemented-unvalidated"
+notes = """
+Phase 7 item 1, and first in that phase's order because its reference is a
+different kind: the board plays samples, so comparing it exercises the claim
+that the tooling does not care where a WAV came from. That ordering rationale
+has not been re-checked against the code."""
+
+[[target]]
+id = "atari-system1-audio"
+machines = ["marble", "roadrunner"]
+device = "machines/src/atari_system1_sound.rs"
+status = "implemented-unvalidated"
+notes = """
+THE REASON THIS FILE EXISTS. An implemented discrete device with no adapter, no
+scenarios, and no mention in any phase of the epic. It was not deferred or
+blocked; it was simply never written down, and stayed invisible until someone
+listed the sound devices by hand."""
+
+# ---------------------------------------------------------------------------
+# Board shared with a modelled machine, variant coverage missing
+# ---------------------------------------------------------------------------
+
+[[target]]
+id = "galaxian-family-variants"
+machines = ["mooncrst", "pisces", "uniwars", "scramble", "scobra"]
+device = "core/src/device/galaxian_sound.rs"
+adapter = "galaxian-discrete"
+status = "partial"
+notes = """
+These run the Galaxian sound board through the same device and adapter, so the
+voices are covered, but none has a scenario of its own and the ways their sound
+programs differ from Galaxian's have not been established. Phase 7 item 6."""
+
+# ---------------------------------------------------------------------------
+# Not modelled at all
+# ---------------------------------------------------------------------------
+
+[[target]]
+id = "astdelux-discrete"
+machines = ["astdelux"]
+status = "missing"
+notes = """
+Explosion and latch paths mixed with the board's POKEYs. The register writes are
+stubbed; the POKEYs work. Phase 8 item 1."""
+
+[[target]]
+id = "namco-54xx-explosion"
+machines = ["galaga", "xevious"]
+status = "missing"
+notes = """
+The MB8844's digital output plus the analog DAC, filter and mixer behind it.
+Commands sent through the 06XX chip-select are discarded today and explosions
+are silent. Phase 8 item 3; see also phosphor-emulator-uxi9."""
+
+[[target]]
+id = "konami-output-filters"
+machines = ["scramble", "scobra", "frogger"]
+status = "missing"
+notes = """
+The discrete output-filter controls. Filter selection is latched but nothing
+models what it switches. Phase 8 item 4."""

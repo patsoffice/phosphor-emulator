@@ -19,6 +19,7 @@
 //! MAME capture, a hardware recording, another emulator, or a previous revision
 //! of this one.
 
+mod catalog;
 mod scenario;
 mod target;
 mod targets;
@@ -44,8 +45,19 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// List the sound targets that can be driven, with their controls and probes.
-    Targets,
+    /// Show the coverage catalog: every discrete audio path in the project and
+    /// how far along it is, including the ones nothing models yet.
+    ///
+    /// With an id, show that entry in full, plus its controls and probes where
+    /// an adapter exists.
+    Targets {
+        /// A catalog id, or an adapter id. Omit for the whole plan.
+        id: Option<String>,
+        /// List the registered adapters with their controls and probes instead,
+        /// which is what this command used to print.
+        #[arg(long)]
+        adapters: bool,
+    },
     /// List the available scenarios, optionally for one target.
     Scenarios {
         /// Only scenarios for this target id.
@@ -92,7 +104,7 @@ fn main() -> ExitCode {
 
 fn run(cmd: Command) -> Result<String, String> {
     match cmd {
-        Command::Targets => Ok(list_targets()),
+        Command::Targets { id, adapters } => targets_cmd(id.as_deref(), adapters),
         Command::Scenarios { target } => list_scenarios(target.as_deref()),
         Command::Verify { scenario } => verify_cmd(scenario.as_deref()),
         Command::Capture {
@@ -136,6 +148,69 @@ fn verify_cmd(id: Option<&str>) -> Result<String, String> {
             ids.len()
         ))
     }
+}
+
+/// The catalog, one entry of it, or the adapter listing.
+///
+/// The plan is the default because it is the view that includes what is NOT
+/// modelled, and that is the half a list generated from the adapters can never
+/// show.
+fn targets_cmd(id: Option<&str>, adapters: bool) -> Result<String, String> {
+    use std::fmt::Write;
+    if adapters {
+        return Ok(list_targets());
+    }
+    let catalog = catalog::Catalog::load()?;
+    let Some(id) = id else {
+        return Ok(catalog::render(&catalog));
+    };
+
+    // Accept either a catalog id or an adapter id, since the two coincide for
+    // most entries and telling them apart is not the caller's job.
+    let entry = catalog
+        .find(id)
+        .or_else(|| {
+            catalog
+                .targets
+                .iter()
+                .find(|t| t.adapter.as_deref() == Some(id))
+        })
+        .ok_or_else(|| {
+            let known: Vec<&str> = catalog.targets.iter().map(|t| t.id.as_str()).collect();
+            format!("unknown catalog id {id:?}; known: {}", known.join(", "))
+        })?;
+
+    let mut s = String::new();
+    let _ = writeln!(s, "{}  [{}]", entry.id, entry.status.as_str());
+    let _ = writeln!(s, "  machines:  {}", entry.machines.join(", "));
+    if let Some(d) = &entry.device {
+        let _ = writeln!(s, "  device:    {d}");
+    }
+    if let Some(r) = &entry.reason {
+        let _ = writeln!(s, "  blocked:   {r}");
+    }
+    if entry.scenarios.is_empty() {
+        let _ = writeln!(s, "  scenarios: none");
+    } else {
+        let _ = writeln!(s, "  scenarios: {}", entry.scenarios.join(", "));
+    }
+    if let Some(n) = &entry.notes {
+        let _ = writeln!(s, "\n{}", n.trim());
+    }
+    if let Some(a) = &entry.adapter
+        && let Some(t) = target::find(a)
+    {
+        let _ = writeln!(s, "\nadapter {}\n  {}", t.id, t.description);
+        let _ = writeln!(s, "  controls:");
+        for c in t.controls {
+            let _ = writeln!(s, "    {:<12} {}", c.name, c.description);
+        }
+        let _ = writeln!(s, "  probes:");
+        for p in t.probes {
+            let _ = writeln!(s, "    {:<12} {}", p.name, p.description);
+        }
+    }
+    Ok(s)
 }
 
 fn list_targets() -> String {
