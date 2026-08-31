@@ -236,6 +236,8 @@ pub enum LogicOp {
     Xor,
     /// NAND, e.g. a 74LS00 section.
     Nand,
+    /// AND, e.g. a 7408 section.
+    And,
 }
 
 /// One half of a 74LS629 dual voltage-controlled oscillator, as a board wires

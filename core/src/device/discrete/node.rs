@@ -1081,6 +1081,7 @@ impl NodeKind {
                 let out = match gate {
                     LogicOp::Xor => a ^ b,
                     LogicOp::Nand => !(a && b),
+                    LogicOp::And => a && b,
                 };
                 f64::from(out)
             }
