@@ -1,3 +1,23 @@
+//! Williams 2nd-generation board, shared by Joust, Robotron and Sinistar.
+//!
+//! # Schematics
+//!
+//! | Drawing | Source | Pages |
+//! |---|---|---|
+//! | `D-8224-3006 Sound Board Logic Diagram`, rev A Dec 1982 | `arcade-museum.com/manuals-videogames/J/joust-dp.pdf` | PDF p16 |
+//! | Sound Board Assembly Drawing | same | PDF p15 |
+//! | CPU Board Logic Diagram, sheets 1-2 | same | PDF p5, p6 |
+//!
+//! Only the sound board has been read, and it is transcribed in
+//! [`docs/schematics/williams-audio-output.md`](../../docs/schematics/williams-audio-output.md).
+//! The sheets are landscape on portrait pages and read rotated. Video timing is
+//! covered separately by `docs/schematics/williams-video-clock.md` and
+//! `williams-video-counter.md`, which carry their own provenance.
+//!
+//! Read from Joust's drawing set; all three machines share the gen-1 sound
+//! board, but only Joust's was seen, and Sinistar's CVSD speech board is not on
+//! that sheet.
+
 use phosphor_core::audio::{AudioResampler, DcBlocker};
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::debug_trace::{DebugEvent, DebugEventKind, DebugTraceBuffer};
@@ -419,6 +439,14 @@ pub struct WilliamsBoard {
     pub(crate) cvsd: Option<Hc55516>,
     /// Output coupling capacitor. Runs at the 1 MHz DAC update rate, before
     /// the downsampler, so the pedestal never reaches the resampler.
+    ///
+    /// ITS CORNER IS A DEFAULT, NOT THE BOARD'S. `DcBlocker::new` takes
+    /// `DEFAULT_CUTOFF_HZ`, a round 10 Hz. The D-8224 has two couplings: C14
+    /// 1000 uF into an 8 ohm speaker, which computes to 19.9 Hz, and C12 1 uF
+    /// ahead of the power amplifier, whose corner needs IC1's input impedance
+    /// and is not on the sheet. See
+    /// [`docs/schematics/williams-audio-output.md`](../../docs/schematics/williams-audio-output.md)
+    /// and `phosphor-emulator-tesw`.
     #[save(id = 8)]
     dc_blocker: DcBlocker,
     #[save(id = 9)]

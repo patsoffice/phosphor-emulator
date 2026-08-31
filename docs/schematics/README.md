@@ -88,6 +88,10 @@ section is there so that is obvious.
 - [`mcr-video-timing.md`](mcr-video-timing.md) — a negative result: MCR II's
   H and V counters and both blanking decodes are inside custom LSIs, so the
   blanking phase is on no drawing. Read it before hunting for one.
+- [`williams-audio-output.md`](williams-audio-output.md) — the D-8224 sound
+  board, shared by Joust, Robotron and Sinistar. Its output coupling computes to
+  19.9 Hz from C14 and an 8 ohm speaker, where the model takes a round 10 Hz
+  default; and there are two couplings, not one.
 - [`irobot-audio-output.md`](irobot-audio-output.md) — I, Robot's four POKEY
   outputs are wired straight together, which is why the model's `* 0.25` is
   right; everything after that node is not modelled, including a differential

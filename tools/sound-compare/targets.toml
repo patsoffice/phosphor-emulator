@@ -334,12 +334,33 @@ Nothing had checked; `machines/src/scramble.rs` names the device in its imports.
 id = "williams-output"
 machines = ["joust", "robotron", "sinistar"]
 device = "machines/src/williams.rs"
-status = "unexamined"
+status = "partial"
 notes = """
-The 6800 sound board's DAC through an AudioResampler and one shared DcBlocker.
-What the board puts between that DAC and the speaker has not been read. The
-gen-1 Williams sound board is a DAC into an op-amp stage, so there is very
-likely a filter here that nothing models."""
+EXAMINED. D-8224-3006 sound board schematic, transcribed at
+docs/schematics/williams-audio-output.md. One reading covers all three machines,
+since they share the gen-1 board.
+
+THE COUPLING CORNER IS A DEFAULT WHERE THE BOARD GIVES A NUMBER. `williams.rs`
+builds `DcBlocker::new(1_000_000)`, taking DEFAULT_CUTOFF_HZ, a round 10 Hz
+picked to be "low enough to pass the whole audible band untouched". The board has
+TWO couplings: C14 1000 uF into an 8 ohm speaker, which is 19.9 Hz and is
+computable, and C12 1 uF ahead of the power amplifier, whose corner needs IC1's
+input impedance and is not computable from this sheet. `DcBlocker::with_cutoff`
+already exists, so the first is a one-line change from a default to a derived
+value. Neither is a large effect on most material; that is the honest framing.
+
+ALSO UNMODELLED: Q2, a 2N4401, on the MC1408's current output with R26 3.3k and
+C29 10 uF, so the DAC does not drive the amplifier directly; an EXTERNAL volume
+control on connector J4 through R11 5.6k and R12 1k, where the model has no
+volume at all; IC1's gain of about 100 from R17 220 against R16 2.2, which is
+calibration but also sets where the board clips; and an R14 1 ohm / C30 0.1 uF
+Zobel across the speaker.
+
+NOT ESTABLISHED: IC1's part number. Its pinout is the shape of an LM377/LM378
+family amplifier but the legend was not legible at 500 dpi, which is why C12's
+corner is not computed. Also unread: whether Robotron and Sinistar carry the same
+board revision, and where Sinistar's CVSD speech joins, which is not on this
+sheet. phosphor-emulator-tesw."""
 
 [[target]]
 id = "btime-output"
