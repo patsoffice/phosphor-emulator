@@ -1605,8 +1605,8 @@ mod tests {
     /// Write one 16-bit word into every cell of the 32x32 column-scan map.
     fn fill_playfield(sys: &mut FoodFightSystem, word: u16) {
         let pf = sys.board.map.region_data_mut(Region::Playfield);
-        for cell in pf.chunks_exact_mut(2) {
-            cell.copy_from_slice(&word.to_be_bytes());
+        for cell in pf.as_chunks_mut::<2>().0 {
+            *cell = word.to_be_bytes();
         }
     }
 
