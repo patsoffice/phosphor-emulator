@@ -4,7 +4,8 @@
 //! - Main CPU: Z80 @ 4 MHz (8 MHz XTAL / 2)
 //! - Sound CPU: Mitsubishi M58715 (8049-clone, runs from external ROM ⇒
 //!   functionally an I8039) @ 11 MHz, driving an 8-bit DAC
-//! - Discrete analog sound (Mario/Luigi walk + skid) — **deferred**, silent here
+//! - Discrete analog sound: Mario/Luigi footsteps and the skid, and the two
+//!   LM3900 sections the DAC's music passes through, in [`crate::mario_sound`]
 //! - Video: 32×32 8×8 2bpp tilemap + 256 16×16 3bpp sprites, single 512-byte
 //!   palette PROM, ROT0 (horizontal), 256×224 visible
 //! - Sprite list moved by a Z80 DMA controller (I/O port 0x00)
@@ -14,11 +15,12 @@
 //! patterns. The notable differences are: no screen rotation, 3bpp sprites, a
 //! single palette PROM, a vertical scroll register, and the Z80 DMA.
 //!
-//! **Deferred:** discrete walk/skid analog sound; faithful cocktail flip-screen
-//! pixel offsets (flip is approximated as a 180° rotation and is unused on the
-//! upright cabinet this set targets).
+//! **Deferred:** faithful cocktail flip-screen pixel offsets (flip is
+//! approximated as a 180° rotation and is unused on the upright cabinet this set
+//! targets).
 
-use phosphor_core::audio::{AudioResampler, DcBlocker};
+use crate::mario_sound::MarioDiscreteSound;
+use phosphor_core::audio::AudioResampler;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::debug_trace::{DebugEvent, DebugEventKind, DebugTraceBuffer};
 use phosphor_core::core::machine::{
@@ -128,14 +130,10 @@ pub const VBLANK_END: usize = 16; // first visible scanline
 pub const SOUND_TICK_NUM: u32 = 11;
 pub const SOUND_TICK_DEN: u32 = 60;
 
-/// Corner of the DAC's coupling capacitor, in Hz.
-///
-/// From the parts: a 1 µF capacitor between the DAC amplifier's output and the
-/// filter stage that follows it, working into roughly 1.1 MΩ of series
-/// resistance. `1/(2π·1.11e6·1e-6)` is 0.143 Hz, which is far below anything
-/// audible and is the point: this capacitor exists to strip the unipolar
-/// ladder's pedestal, not to shape the sound.
-const DAC_COUPLING_HZ: f32 = 0.143;
+// The DAC's coupling capacitor lives in `crate::mario_sound` now, along with the
+// two active filter stages it sits between. It used to be modelled here on its
+// own, as the one part of the board's analog audio worth having without the
+// rest; that is no longer the trade.
 
 // ---------------------------------------------------------------------------
 // ROM definitions ("mario" parent set)
@@ -668,8 +666,8 @@ pub struct MarioBrosBoard {
     #[save(id = 14)]
     pub(crate) dma: Z80Dma,
 
-    // Audio output (8-bit DAC + coupling + resampler; the rest of the discrete
-    // sound is deferred)
+    // Audio output: the 8-bit DAC and its box filter, feeding the discrete
+    // circuit that owns the music filtering and the three effect voices.
     #[debug_device("DAC")]
     #[save(id = 15)]
     pub(crate) dac: Mc1408Dac,
@@ -688,13 +686,13 @@ pub struct MarioBrosBoard {
     /// about 1.1 MΩ, which is a 0.14 Hz corner. That is a coupling capacitor
     /// doing nothing but removing the pedestal, which is what this models.
     ///
-    /// Only the coupling, not the two active filter stages around it. Those
-    /// shape the tone and are part of the deferred discrete work; this is the
-    /// one part needed to stop the pedestal reaching the speaker.
-    #[save(id = 16)]
-    pub(crate) dac_coupling: DcBlocker,
     #[save(id = 17)]
     pub(crate) resampler: AudioResampler<i16>,
+    /// The board's analog audio: the two footstep voices, the skid, the music
+    /// filter and the mixer that joins them.
+    #[debug_device("Discrete")]
+    #[save(id = 21)]
+    pub(crate) sound: MarioDiscreteSound,
 
     // Pre-decoded GFX caches
     #[save_skip]
@@ -752,8 +750,8 @@ impl MarioBrosBoard {
             sound_p2: 0,
             dma: Z80Dma::new(),
             dac: Mc1408Dac::new(),
-            dac_coupling: DcBlocker::with_cutoff(DAC_COUPLING_HZ, output_sample_rate() as u32),
             resampler: AudioResampler::new(TIMING.cpu_clock_hz, output_sample_rate()),
+            sound: MarioDiscreteSound::new(),
             tile_cache: gfx::GfxCache::new(0, 8, 8),
             sprite_cache: gfx::GfxCache::new(0, 16, 16),
             clock: 0,
@@ -959,18 +957,15 @@ impl MarioBrosBoard {
 
     /// Board work after the CPUs' cycle: the audio tail and the clock advance.
     fn end_cycle(&mut self) {
-        // Audio: 8-bit DAC, through its coupling capacitor, resampled to the
-        // output rate. (The rest of the discrete sound is deferred.)
+        // Box-filter the DAC to the output rate; each produced sample drives one
+        // output sample's worth of the discrete circuit, which owns the music
+        // filtering, the three discrete voices and the mixer that joins them.
         //
-        // Coupled after the resampler's box filter rather than before it: the
-        // capacitor sits at the far end of the board's DAC amplifier, so it
-        // removes the pedestal from the averaged signal that reaches the
-        // speaker, and running it once per output sample rather than once per
-        // CPU cycle is both cheaper and what its 0.14 Hz corner describes.
+        // This used to end at a bare 0.14 Hz coupling capacitor, with a comment
+        // saying the two active filter stages around it were deferred. They are
+        // in the circuit now, along with everything they mix into.
         if let Some(avg) = self.resampler.tick_sample(self.dac.sample_i16()) {
-            let coupled = self.dac_coupling.process(avg as f32);
-            self.resampler
-                .push_sample(coupled.clamp(i16::MIN as f32, i16::MAX as f32) as i16);
+            self.sound.feed_dac(avg);
         }
 
         self.clock += 1;
@@ -1004,7 +999,7 @@ impl MarioBrosBoard {
     }
 
     pub fn fill_audio(&mut self, buffer: &mut [i16]) -> usize {
-        self.resampler.fill_audio(buffer)
+        self.sound.fill_audio(buffer)
     }
 
     // -----------------------------------------------------------------------
@@ -1077,7 +1072,9 @@ impl MarioBrosBoard {
                     self.sound_latch1 &= !mask;
                 }
             }
-            7 => {} // skid → discrete (deferred)
+            // Skid. Unlike the two footsteps this really is a level, so it is
+            // the one discrete trigger on this board that carries its data bit.
+            7 => self.sound.set_skid(bit),
             _ => {}
         }
     }
@@ -1268,8 +1265,14 @@ impl Bus for MarioBrosBoard {
                     | MainRegion::VIDEO_RAM => self.main_map.write_backing(addr, data),
                     MainRegion::IO_PORTS => match addr {
                         // 0x7C00 / 0x7C80 are reads (inputs); writes trigger the
-                        // Mario/Luigi walk discrete sounds (deferred → ignored).
-                        0x7C00 | 0x7C80 => {}
+                        // Mario/Luigi footsteps. THE WRITE ITSELF IS THE
+                        // TRIGGER: the board ANDs this address decode with the
+                        // write strobe and runs it straight into a 74123, so
+                        // the data byte does not reach the circuit at all and
+                        // writing zero fires a footstep. The drawing names
+                        // these inputs `7C00H(WR)` and `7C80H(WR)`.
+                        0x7C00 => self.sound.strobe_walk(0),
+                        0x7C80 => self.sound.strobe_walk(1),
                         0x7D00 => self.scroll_y = data,
                         0x7E00 => self.sound_latch = data,
                         0x7E80..=0x7E87 => {
@@ -1702,6 +1705,33 @@ mod tests {
         assert!(sys.board.flip_screen);
         assert_eq!(sys.board.palette_bank, 1);
         assert!(sys.board.nmi_mask);
+    }
+
+    /// A WRITE OF ZERO TO 0x7C00 IS A FOOTSTEP.
+    ///
+    /// The board ANDs this address decode with the write strobe and runs that
+    /// into a 74123's trigger, so the data byte never reaches the circuit. This
+    /// is the one fact about Mario Bros.'s sound most likely to be "corrected"
+    /// back into a latch by someone reading the decode later, which is why it is
+    /// asserted with the value that would make a latch silent.
+    #[test]
+    fn a_write_of_zero_to_the_walk_line_still_fires_a_footstep() {
+        let mut sys = MarioBrosSystem::new();
+        // Settle the coupling capacitors, then discard, so what is measured is
+        // the footstep and not the board's power-on step.
+        for _ in 0..88_200 {
+            sys.board.sound.feed_dac(0);
+        }
+        let mut discard = vec![0i16; 1 << 18];
+        while sys.board.sound.fill_audio(&mut discard) > 0 {}
+
+        sys.bus_write(BusMaster::Cpu(0), 0x7C00, 0x00);
+        for _ in 0..44_100 {
+            sys.board.sound.feed_dac(0);
+        }
+        let n = sys.board.sound.fill_audio(&mut discard);
+        let peak = discard[..n].iter().map(|v| v.abs()).max().unwrap_or(0);
+        assert!(peak > 0, "writing 0x00 to 0x7C00 produced silence");
     }
 
     #[test]

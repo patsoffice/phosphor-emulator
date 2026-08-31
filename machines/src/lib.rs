@@ -676,6 +676,7 @@ pub mod llander;
 pub mod llander_sound;
 pub mod marble;
 pub mod mario_bros;
+pub mod mario_sound;
 pub mod mcr2;
 pub mod missile_command;
 pub mod mooncresta;
