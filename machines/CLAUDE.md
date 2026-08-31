@@ -10,6 +10,15 @@ Arcade and system board implementations. Each machine implements the `Bus` trait
 - ROM loading goes through `rom_loader.rs` utilities (ZIP extraction is handled by the frontend's `rom_path.rs`)
 - Register it with one `crate::register_machine!(JoustSystem, "joust", &["joust"], JOUST_CONTROLS);` — wrapper type, CLI name, ROM set names, control table. The macro emits the factory and the `inventory::submit!`; don't hand-write either. Two extra arms: `new = Type::new(arg)` when the constructor takes a hardware variant, and `configs = ALL_CONFIGS` when several ROM revisions are tried in turn. A factory that does anything more (a reset after load, a non-standard loader) stays hand-written — see `starwars.rs` and `quantum.rs`
 - Video rendering is per-scanline during `run_frame()`. See [Video Rendering](#video-rendering) for what that commits you to
+- **Give the machine a row in `tools/sound-compare/targets.toml`.** A new machine
+  cannot land without one: `every_registered_machine_is_catalogued` fails until
+  it has one, which is deliberate. The row records what the board does between
+  its sound chips and the speaker, and if nobody has looked, the honest status is
+  `unexamined` with notes saying what the code does today. Do NOT reach for
+  `partial` because a shared `DcBlocker` is applied; that claims a review nobody
+  did, and the whole point of the file is that a status is a claim. This is the
+  class of gap that is invisible otherwise, because the sound-chip tests pass
+  whether or not the board around the chip is a wire
 - Optional: to make the machine's code ROMs disassemblable by the `disasm` tool, add one `inventory::submit! { DisasmRegion { ... } }` per code region (see `disasm_registry.rs` and the entries in `mario_bros.rs`) — maps a region name to its CPU, origin, and a `RomRegion` loader. Purely additive; doesn't touch `MachineEntry`/`FrontendMachine`.
 
 ## Video Rendering

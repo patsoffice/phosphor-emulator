@@ -28,6 +28,18 @@ const SOURCE: &str = include_str!("../targets.toml");
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Status {
+    /// Nobody has checked what this board's analog audio path is.
+    ///
+    /// THE OTHER SIX STATUSES ARE ABOUT MODELLING; THIS ONE IS ABOUT REVIEW,
+    /// and they are different axes. A board where a shared coupling stage is
+    /// applied and no drawing has ever been read is *technically* `partial`,
+    /// but calling it that claims a review that did not happen, and a status
+    /// handed out on a guess is the failure this whole file exists to prevent.
+    ///
+    /// So an entry starts here and leaves only when someone reads the board's
+    /// drawing. `notes` is required and must say what the code does today, so
+    /// the row carries the evidence for its own claim rather than an adjective.
+    Unexamined,
     /// The board has an analog path and we model none of it.
     Missing,
     /// Some of the path is modelled.
@@ -46,6 +58,7 @@ pub enum Status {
 impl Status {
     pub fn as_str(self) -> &'static str {
         match self {
+            Status::Unexamined => "unexamined",
             Status::Missing => "missing",
             Status::Partial => "partial",
             Status::ImplementedUnvalidated => "implemented-unvalidated",
@@ -145,6 +158,7 @@ pub fn render(catalog: &Catalog) -> String {
 
     let mut counts: Vec<(&str, usize)> = Vec::new();
     for s in [
+        Status::Unexamined,
         Status::Missing,
         Status::Partial,
         Status::ImplementedUnvalidated,
@@ -301,6 +315,29 @@ mod tests {
                 Status::Blocked => {
                     assert!(t.reason.is_some(), "{} is blocked without a reason", t.id)
                 }
+                // `unexamined` is the one status that claims NOTHING has been
+                // reviewed, so the thing it must carry is a description of the
+                // unreviewed state. Without that it is an empty row that makes
+                // the machine look accounted for.
+                //
+                // It must also not claim a comparison. An adapter or a scenario
+                // means somebody drove this path, which is incompatible with
+                // nobody having looked at it, and would let a row sit here
+                // while quietly holding evidence it should have been promoted
+                // on.
+                Status::Unexamined => {
+                    assert!(
+                        t.notes.is_some(),
+                        "{} is unexamined without notes; say what the code does today",
+                        t.id
+                    );
+                    assert!(
+                        t.adapter.is_none() && t.scenarios.is_empty(),
+                        "{} is unexamined but has an adapter or scenarios, which means \
+                         somebody did look at it",
+                        t.id
+                    );
+                }
                 Status::Missing => assert!(
                     t.device.is_none(),
                     "{} is `missing` but names a device, {:?}",
@@ -368,6 +405,48 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// And the direction that makes the catalog an INVENTORY rather than a
+    /// list of things somebody happened to look at.
+    ///
+    /// `every_named_machine_is_registered` above stops the catalog naming a
+    /// machine that does not exist. It cannot stop the far more likely failure,
+    /// which is a machine nobody has ever examined: the sound chip is emulated,
+    /// its tests pass, the board around it is a wire, and there is no row saying
+    /// so because nobody wrote one. That gap is invisible by construction.
+    ///
+    /// So every registered machine must appear in some entry, and a machine
+    /// nobody has looked at gets an `unexamined` row saying what the code does
+    /// today. That is a reviewed claim; an absent row is not, and the two are
+    /// indistinguishable without this check.
+    ///
+    /// WHAT THIS CHECK DOES NOT CATCH: a machine can appear in one entry while a
+    /// DIFFERENT path on the same board goes unrecorded. Galaga and Xevious were
+    /// exactly that case, catalogued for their 54XX explosion circuit while
+    /// nothing said anything about their output stage, and they satisfied this
+    /// test throughout. Per-machine presence is the weakest useful invariant,
+    /// not a completeness proof.
+    #[test]
+    fn every_registered_machine_is_catalogued() {
+        let c = catalog();
+        let catalogued: BTreeSet<&str> = c
+            .targets
+            .iter()
+            .flat_map(|t| t.machines.iter().map(String::as_str))
+            .collect();
+        let missing: Vec<&str> = phosphor_machines::registry::all()
+            .iter()
+            .map(|m| m.name)
+            .filter(|n| !catalogued.contains(n))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "{} registered machine(s) appear in no catalog entry, so nobody has \
+             recorded whether they have an analog audio path:\n  {}",
+            missing.len(),
+            missing.join("\n  ")
+        );
     }
 
     #[test]

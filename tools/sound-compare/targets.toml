@@ -9,6 +9,8 @@
 #
 # STATUSES, and what each one is claiming:
 #
+#   unexamined                    nobody has checked what this board's analog
+#                                 path is; `notes` says what the code does today
 #   missing                       the board has an analog path and we model none
 #                                 of it
 #   partial                       some of the path is modelled
@@ -27,9 +29,17 @@
 # entry is that person's to do rather than a bookkeeping default. A status that
 # gets handed out by whoever last touched the file is worth nothing.
 #
+# THE FIRST SIX ARE ABOUT MODELLING; `unexamined` IS ABOUT REVIEW, and they are
+# different axes. A board where a shared coupling stage is applied and no drawing
+# has ever been read is technically `partial`, but calling it that claims a
+# review nobody did. Every entry below the "Unexamined" heading is there because
+# a machine exists and nothing has been established about its analog path -- not
+# because anything is known to be wrong.
+#
 # `scenarios` lists ids that must exist in scenarios/. `adapter` is the sndcmp
 # target id, present only where one is registered in src/targets/. Both are
-# checked by the tests in src/catalog.rs.
+# checked by the tests in src/catalog.rs, which also require that every
+# REGISTERED MACHINE appears in some entry here.
 
 schema = 1
 
@@ -304,3 +314,252 @@ put Scramble and Scobra on the Galaxian sound board was simply wrong. They run
 `KonamiSound`: a second Z80 with two AY-8910s behind an 8255 PPI, which is not a
 discrete board and belongs in this catalog only for the filters that follow it.
 Nothing had checked; `machines/src/scramble.rs` names the device in its imports."""
+
+# ---------------------------------------------------------------------------
+# Unexamined: a machine exists, nobody has read its board's audio drawing
+#
+# Filed by phosphor-emulator-discrete-sound-fidelity-l5r3.10, which swept the
+# registry rather than the source tree. Each row records what the code does
+# today, from reading the code, and claims NOTHING about what the board does.
+# Moving one off `unexamined` means reading a drawing.
+#
+# The recurring pattern to be sceptical of: many of these apply the shared
+# `DcBlocker`, a one-pole coupling capacitor. That is a real part on most of
+# these boards, but the value is generic and nobody has checked it against a
+# schematic, nor whether the board also has the filter and amplifier stages that
+# usually accompany it. A coupling cap alone is not an output stage.
+# ---------------------------------------------------------------------------
+
+[[target]]
+id = "williams-output"
+machines = ["joust", "robotron", "sinistar"]
+device = "machines/src/williams.rs"
+status = "unexamined"
+notes = """
+The 6800 sound board's DAC through an AudioResampler and one shared DcBlocker.
+What the board puts between that DAC and the speaker has not been read. The
+gen-1 Williams sound board is a DAC into an op-amp stage, so there is very
+likely a filter here that nothing models."""
+
+[[target]]
+id = "btime-output"
+machines = ["burgertime"]
+device = "machines/src/btime.rs"
+status = "unexamined"
+notes = """
+Two AY-3-8910s summed, then one DcBlocker, with a comment already saying the
+capacitor sits between the chips and the amplifier rather than inside either.
+That much is reasoned; the capacitor's value and whatever else is on the board
+between the sum and the speaker are not."""
+
+[[target]]
+id = "ccastles-output"
+machines = ["ccastles"]
+device = "machines/src/ccastles.rs"
+status = "unexamined"
+notes = """
+Two POKEYs through a SampleRing and a DcBlocker. Atari boards of this era
+generally put a filter and a summing amplifier after the POKEYs; none of that
+has been looked for."""
+
+[[target]]
+id = "docastle-output"
+machines = ["docastle", "dorunrun", "dowild"]
+device = "machines/src/docastle.rs"
+status = "unexamined"
+notes = """
+Four SN76489As through an AudioResampler and a DcBlocker. Four chips summing
+into one output is a mixer, and its resistors decide the balance between them;
+nothing here is from a drawing."""
+
+[[target]]
+id = "namco-galaga-output"
+machines = ["digdug", "galaga", "xevious"]
+device = "machines/src/namco_galaga.rs"
+status = "unexamined"
+notes = """
+The Namco WSG's output path on the Galaga board, with no coupling or filter
+stage modelled at all. Separate from `namco-54xx-explosion`, which is about the
+explosion circuit on the same board: Galaga and Xevious were catalogued for that
+one path and nothing had ever recorded this one, which is precisely the gap the
+per-machine check cannot see. Dig Dug shares the board but has 51XX and 53XX
+rather than the 54XX, so it appears here and not there."""
+
+[[target]]
+id = "namco-pac-output"
+machines = ["pacman", "mspacman"]
+status = "missing"
+notes = """
+EXAMINED AND FOUND SUBSTANTIAL. The first entry moved off `unexamined`, and it
+came off as `missing` rather than `partial`: the board's whole analog path is
+absent from the model, which forwards the WSG and stops.
+
+THE SAMPLE-TIMES-VOLUME MULTIPLY IS ANALOG, done with two switched resistor
+networks, and this is the same shape of finding as Lunar Lander's throttle. The
+74LS273 at 2M holds two four-bit fields: 5Q-8Q drive R9 470, R8 1k, R7 2.2k and
+R6 4.7k into one summing node, and 1Q-4Q gate four 4066 sections that tap that
+node through R2 10k, R1 22k, R3 47k and R4 100k. Neither ladder is exactly
+binary. Normalised to the largest leg, both run 1 : 0.47 : 0.21 : 0.10 where an
+exact ladder gives 1 : 0.5 : 0.25 : 0.125, so a model computing `sample * volume`
+in integer arithmetic is wrong by an amount that grows as either field gets
+small, which is most of a decaying note.
+
+Also unmodelled: C1 10 nF at the summing output, whose corner MOVES WITH THE
+VOLUME CODE because the volume code decides which resistors are in circuit; the
+22k-into-10k-pot volume network; and an LM1877 driving TWO speaker connectors,
+where the emulator is mono. `SOUND ON` is the latch's CLR, so muting zeroes the
+sample and the volume together rather than muting downstream.
+
+Transcribed at docs/schematics/pacman-audio-output.md, from the troubleshooting
+guide rather than the manual the board file used to cite. Tracked as
+phosphor-emulator-ga9p. The first measurement wants no reference capture at all:
+the ladder deviation is arithmetic against the transcribed table.
+
+Superseded notes, kept because the mistake in them is instructive:
+
+The Namco WSG straight to the speaker: `fill_audio` forwards the chip and
+nothing else. The WSG's raw waveform output is a stepped 4-bit wave and the
+board does not present it that way, so an output filter is the specific thing to
+look for here.
+
+EXAMINED, AND THE SCAN DOES NOT CONTAIN THE ANSWER. This is a negative result,
+recorded so the next reader does not repeat the search.
+
+The scan phosphor-emulator-aih3 cites for this board,
+arcade-museum.com/manuals-videogames/P/pac-man_p2.pdf, holds the game logic
+schematic across TWO pages, in reverse order: PDF p2 is the left half (manual
+page 32, with the Z80 at 6B) and PDF p1 is the middle, continuing where p2 is
+cut. PDF p1 is then itself CUT MID-COMPONENT at its right edge -- the 5L 74LS139,
+the 4N 2114, the 4H 8T245 and the 5S 284 custom IC are all sliced through -- so a
+third portion of the sheet is missing, and that is where the sound custom IC's
+output and the amplifier are drawn.
+
+All 35 pages were checked, not just the cited one. The rest is assembly drawings
+(pp3-5), three small daughter boards (Z-80 sync bus controller, V-RAM addresser,
+credit multiplier), cabinet wiring, and the Electrohome monitor's own schematics
+and parts lists. No audio sheet anywhere.
+
+What IS established, from the chip list on manual page 35: the game board carries
+an LM377 dual audio amplifier. The assembly drawing at PDF p3 places it near R91,
+a 10K "T" volume pot, with C48 4.7 uF, C49 47 uF tantalum, C50 0.0047 uF mylar
+and C51 330 uF around it. A 4.7 nF mylar capacitor in an audio path is a filter
+rather than decoupling. So there is certainly a stage here and the model has none
+of it, but HOW those parts connect is not on any page of this scan.
+
+One correction, since this row briefly said otherwise: R28, R29 and the 2N3391A
+are NOT audio. Tracing them on PDF p2 puts them in the power-on reset circuit
+with D1 and D6. They were read off an assembly drawing without tracing, which is
+the mistake this file exists to make visible rather than to commit."""
+
+[[target]]
+id = "atari-vector-pokey-output"
+machines = ["starwars", "esb"]
+device = "machines/src/starwars.rs"
+status = "unexamined"
+notes = """
+POKEY plus TMS5220 speech, with a DcBlocker. Two sources summing means a mixer
+with its own balance, and speech and effects are unlikely to arrive at the
+speaker at the same level by accident."""
+
+[[target]]
+id = "foodf-output"
+machines = ["foodf"]
+device = "machines/src/foodf.rs"
+status = "unexamined"
+notes = """
+POKEY through a DcBlocker. SP-229 sheets 7B, 8A and 8B are already recorded as
+read for this board's VIDEO in phosphor-emulator-aih3; whether the same package
+carries the audio sheet is not known and would be the cheapest place to start."""
+
+[[target]]
+id = "gridlee-output"
+machines = ["gridlee"]
+device = "machines/src/gridlee.rs"
+status = "unexamined"
+notes = """
+POKEY with no coupling or filter stage modelled. Gridlee is an unreleased
+prototype, so a drawing may not exist at all; if that turns out to be the case
+this becomes `blocked` with that as the reason rather than staying here."""
+
+[[target]]
+id = "irobot-output"
+machines = ["irobot"]
+device = "machines/src/irobot.rs"
+status = "unexamined"
+notes = """
+POKEY with no coupling or filter stage modelled."""
+
+[[target]]
+id = "missile-output"
+machines = ["missile"]
+device = "machines/src/missile_command.rs"
+status = "unexamined"
+notes = """
+POKEY through a DcBlocker."""
+
+[[target]]
+id = "mrdo-output"
+machines = ["mrdo"]
+device = "machines/src/mrdo.rs"
+status = "unexamined"
+notes = """
+SN76489A output through a DcBlocker. The board's main PCB object sheet is
+already recorded as read for video; the audio section has not been."""
+
+[[target]]
+id = "gottlieb-output"
+machines = ["qbert"]
+device = "machines/src/gottlieb.rs"
+status = "partial"
+notes = """
+EXAMINED. Sound/Speech Assy. A6 schematic, transcribed at
+docs/schematics/qbert-sound-output.md. `partial` because two of the three things
+that looked like gaps turned out to be modelled already, and the third is real.
+
+ALREADY MODELLED, and worth recording so nobody re-finds it: both MC1408s are
+accounted for. U19 and U20 are each an 8-bit DAC off a pair of 74LS75 latches
+with its own strobe; one is the audio DAC and the other steers the SC-01's clock,
+and gottlieb.rs has `Mc1408Dac` for the first and a clock-rate function for the
+second. The post-sum coupling capacitor is modelled too, with a comment that
+already reasons correctly about why it belongs after the sum.
+
+THE GAP IS THE MIX. The two sources do not arrive at the amplifier as a plain
+sum: each has its own 10k trimmer (R15, R16) with its own 0.047 uF coupling
+capacitor (C31, C32), and the two wipers meet at a node feeding R18 100k into a
+U23 LM379S on +30 V. So the DAC-to-speech balance is TWO PARTS, where the model
+has the literal 32000.0 it scales the Votrax by, and each leg is AC-coupled
+BEFORE the sum where the model couples once after it. Those are not the same
+filter. The cabinet adds a 100 ohm 2 W volume control into a 4 ohm 5 W speaker.
+
+Not traced: which source drives which trimmer, and what the two LM741 inverters
+around the voice-clock oscillator do to the levels. The model's linear
+"plus or minus 5.5 kHz per DAC step" is a straight-line fit to a transistor
+oscillator whose parts are on this sheet and were not worked out.
+phosphor-emulator-i8y7."""
+
+[[target]]
+id = "quantum-output"
+machines = ["quantum"]
+device = "machines/src/quantum.rs"
+status = "unexamined"
+notes = """
+POKEY through a DcBlocker."""
+
+[[target]]
+id = "mcr2-output"
+machines = ["shollow"]
+device = "machines/src/satans_hollow.rs"
+status = "unexamined"
+notes = """
+The Super Sound I/O board's output, forwarded with no analog stage. Sheet 9-10
+of the Satan's Hollow manual is the Super Sound I/O drawing and is already
+identified in phosphor-emulator-aih3, so this one has a known source and only
+wants reading."""
+
+[[target]]
+id = "tempest-output"
+machines = ["tempest"]
+device = "machines/src/tempest.rs"
+status = "unexamined"
+notes = """
+POKEY with no coupling or filter stage modelled."""

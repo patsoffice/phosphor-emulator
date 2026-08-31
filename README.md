@@ -284,6 +284,34 @@ imgdiff`. See [docs/designs/frame-regression.md](docs/designs/frame-regression.m
 > machines may be better served by the display-list hash alone, which is
 > renderer-independent.
 
+### Discrete Audio Coverage (`tools/sound-compare/targets.toml`)
+
+The audio counterpart to the golden frames, and a plan rather than a gate: every
+discrete or board-level analog audio path in the project, whether or not anything
+models it yet.
+
+```bash
+# The whole plan, on one screen
+cargo run -p phosphor-sound-compare -- targets
+
+# One entry in full, with its controls and probes where an adapter exists
+cargo run -p phosphor-sound-compare -- targets llander-discrete
+```
+
+Each row carries a status, and the statuses mean different things on purpose.
+Six of them describe how far *modelling* has got, from `missing` through
+`implemented-needs-validation` to `validated`. The seventh, `unexamined`,
+describes how far *review* has got: the machine exists, its sound chips are
+emulated, and nobody has read the board's drawing to find out what sits between
+them and the speaker. That is the commonest state and the easiest to mistake for
+completeness, because the chip tests all pass either way.
+
+This file is the source of truth for audio coverage, so it is not duplicated
+here. Tests in `src/catalog.rs` keep it honest: every registered machine must
+appear in some entry, every registered adapter must be catalogued, a status
+claiming a comparison must have the scenarios to back it, and nothing may be
+`validated` without a schematic review. Nothing is `validated` today.
+
 ### Tools (`tools/`)
 
 Standalone command-line utilities built on the core crates.
