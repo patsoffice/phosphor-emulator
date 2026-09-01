@@ -112,6 +112,12 @@ section is there so that is obvious.
   exact binary ladder. Also a filter whose corner moves with the volume code, and
   two speakers where the emulator is mono. None of it modelled. Includes which
   Pac-Man scan to use and which one is cut mid-component.
+- [`namco-galaga-audio-output.md`](namco-galaga-audio-output.md) — the Galaga
+  board's WSG output, read from both a Galaga and a Dig Dug package. It is the
+  Pac-Man circuit down to the resistor values, but the two games load it
+  differently, so they do not share a volume law: one linear multiply cannot be
+  right for both. Also where the sample ladder's one large nonlinearity sits,
+  which is at the waveform's zero crossing.
 - [`llander-audio-output.md`](llander-audio-output.md) — Lunar Lander's four
   sounds, and the thing a netlist comparison cannot see: the three resistors that
   set the thrust volume are the same three that set the noise filter's corner, so

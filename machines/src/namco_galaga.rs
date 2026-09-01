@@ -1,3 +1,29 @@
+//! Namco Galaga hardware: three Z80s, a discrete-TTL WSG, and Namco's custom
+//! I/O MCUs. Shared by Galaga, Dig Dug, Xevious and Bosconian.
+//!
+//! # Schematics
+//!
+//! | Drawing | Source | Pages |
+//! |---|---|---|
+//! | `GALAGA CPU PC`, Midway A084-91414-A000 | `arcade-museum.com/manuals-videogames/G/galaga3.pdf` | p23 whole sheet, p24 right half larger |
+//! | `Dig Dug CPU PCB`, Atari SP-203 sheet 5A | `arcade-museum.com/manuals-videogames/D/digdugsp.pdf` | p18 left half, p17 right half |
+//! | `Regulator/Audio II PCB`, Atari 035435-05 | same | p5, and it is cut at the right edge before the amplifier |
+//!
+//! The Atari package prints each wide sheet across two PDF pages **in reverse
+//! order**, and its contents page numbers the audio drawing 4C where the title
+//! block says 5A. Name a drawing by its part number.
+//!
+//! The WSG's output stage is transcribed in
+//! [`docs/schematics/namco-galaga-audio-output.md`](../../docs/schematics/namco-galaga-audio-output.md).
+//! It is the Pac-Man circuit down to the resistor values: the sample-times-volume
+//! multiply is two switched resistor networks, not arithmetic, and neither is an
+//! exact binary ladder. What is specific to this board is that **Galaga and Dig
+//! Dug load that DAC differently**, so they do not share a volume law, and one
+//! linear multiply cannot be right for both. Nothing after the WSG is modelled:
+//! not the divider, not the shunt capacitor whose corner moves with the volume
+//! code, and not the differential output either board leaves on. See
+//! `phosphor-emulator-enst`.
+
 use phosphor_core::core::address_space16::{AddressSpace16, WriteAnnotation};
 use phosphor_core::core::debug_trace::{DebugEvent, DebugEventKind};
 use phosphor_core::core::machine::{
@@ -1353,6 +1379,12 @@ impl NamcoGalagaBoard {
     // Audio
     // -----------------------------------------------------------------------
 
+    /// Forward the WSG, and nothing else.
+    ///
+    /// The board puts a switched-resistor multiply, a volume-dependent divider,
+    /// a volume-dependent low-pass and a differential output stage between the
+    /// WSG's latch and the cabinet; none of it is here. See the module header
+    /// and `phosphor-emulator-enst`.
     pub fn fill_audio(&mut self, buffer: &mut [i16]) -> usize {
         self.wsg.fill_audio(buffer)
     }

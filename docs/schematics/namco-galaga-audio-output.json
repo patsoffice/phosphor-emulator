@@ -1,0 +1,147 @@
+{
+  "modules": {
+    "Dig Dug audio: a 4-bit sample DAC multiplied by a 4-bit switched-resistor volume": {
+      "ports": {
+        "CLR (1) R74": { "direction": "input", "bits": [2] },
+        "AUDIO 1 (C)": { "direction": "output", "bits": [40] },
+        "AUDIO 2 (D)": { "direction": "output", "bits": [41] }
+      },
+      "cells": {
+        "u2P": {
+          "type": "2P 136007-X10",
+          "port_directions": { "D3-D0 sample": "output" },
+          "connections": { "D3-D0 sample": [3] },
+          "attributes": {}
+        },
+        "u3N": {
+          "type": "3N 82S25",
+          "port_directions": { "DO1-DO4 volume": "output" },
+          "connections": { "DO1-DO4 volume": [4] },
+          "attributes": {}
+        },
+        "u1L": {
+          "type": "1L 74LS273",
+          "port_directions": {
+            "5D-8D (from 2P)": "input",
+            "1D-4D (volume)": "input",
+            "CLR (1)": "input",
+            "5Q (12) R97 470": "output",
+            "6Q (15) R98 1k": "output",
+            "7Q (16) R99 2.2k": "output",
+            "8Q (19) R100 4.7k": "output",
+            "1Q (2) vol MSB": "output",
+            "2Q (5)": "output",
+            "3Q (6)": "output",
+            "4Q (9) vol LSB": "output"
+          },
+          "connections": {
+            "5D-8D (from 2P)": [3],
+            "1D-4D (volume)": [4],
+            "CLR (1)": [2],
+            "5Q (12) R97 470": [10],
+            "6Q (15) R98 1k": [10],
+            "7Q (16) R99 2.2k": [10],
+            "8Q (19) R100 4.7k": [10],
+            "1Q (2) vol MSB": [11],
+            "2Q (5)": [12],
+            "3Q (6)": [13],
+            "4Q (9) vol LSB": [14]
+          },
+          "attributes": {}
+        },
+        "u2La": {
+          "type": "2L 4066a",
+          "port_directions": {
+            "in (11)": "input",
+            "ctrl (12)": "input",
+            "out (10) R104 10k": "output"
+          },
+          "connections": {
+            "in (11)": [10],
+            "ctrl (12)": [11],
+            "out (10) R104 10k": [20]
+          },
+          "attributes": {}
+        },
+        "u2Lb": {
+          "type": "2L 4066b",
+          "port_directions": {
+            "in (8)": "input",
+            "ctrl (6)": "input",
+            "out (9) R103 22k": "output"
+          },
+          "connections": {
+            "in (8)": [10],
+            "ctrl (6)": [12],
+            "out (9) R103 22k": [20]
+          },
+          "attributes": {}
+        },
+        "u2Lc": {
+          "type": "2L 4066c",
+          "port_directions": {
+            "in (4)": "input",
+            "ctrl (5)": "input",
+            "out (3) R102 47k": "output"
+          },
+          "connections": {
+            "in (4)": [10],
+            "ctrl (5)": [13],
+            "out (3) R102 47k": [20]
+          },
+          "attributes": {}
+        },
+        "u2Ld": {
+          "type": "2L 4066d",
+          "port_directions": {
+            "in (1)": "input",
+            "ctrl (13)": "input",
+            "out (2) R101 100k": "output"
+          },
+          "connections": {
+            "in (1)": [10],
+            "ctrl (13)": [14],
+            "out (2) R101 100k": [20]
+          },
+          "attributes": {}
+        },
+        "bias": {
+          "type": "R105 10k +5V, R108 10k gnd",
+          "port_directions": { "node": "input" },
+          "connections": { "node": [20] },
+          "attributes": {}
+        },
+        "filt": {
+          "type": "C14 10n to gnd",
+          "port_directions": { "node": "input" },
+          "connections": { "node": [20] },
+          "attributes": {}
+        },
+        "u3Da": {
+          "type": "3D/E LM324a",
+          "port_directions": {
+            "in (2) C13 220n R107 10k": "input",
+            "out (1) R106 100k fb": "output"
+          },
+          "connections": {
+            "in (2) C13 220n R107 10k": [20],
+            "out (1) R106 100k fb": [40]
+          },
+          "attributes": {}
+        },
+        "u3Db": {
+          "type": "3D/E LM324b",
+          "port_directions": {
+            "in (13) R109 100k": "input",
+            "out (14) R110 100k fb": "output"
+          },
+          "connections": {
+            "in (13) R109 100k": [40],
+            "out (14) R110 100k fb": [41]
+          },
+          "attributes": {}
+        }
+      }
+    }
+  }
+}

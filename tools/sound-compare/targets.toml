@@ -396,15 +396,52 @@ nothing here is from a drawing."""
 [[target]]
 id = "namco-galaga-output"
 machines = ["digdug", "galaga", "xevious"]
-device = "machines/src/namco_galaga.rs"
-status = "unexamined"
+status = "missing"
 notes = """
-The Namco WSG's output path on the Galaga board, with no coupling or filter
-stage modelled at all. Separate from `namco-54xx-explosion`, which is about the
-explosion circuit on the same board: Galaga and Xevious were catalogued for that
-one path and nothing had ever recorded this one, which is precisely the gap the
-per-machine check cannot see. Dig Dug shares the board but has 51XX and 53XX
-rather than the 54XX, so it appears here and not there."""
+EXAMINED, ON TWO DRAWINGS, AND IT IS THE PAC-MAN CIRCUIT. Off `unexamined` as
+`missing`: the model forwards the WSG and stops, so none of the analog path is
+present.
+
+THE SAMPLE-TIMES-VOLUME MULTIPLY IS ANALOG here too, and the values are
+identical to `namco-pac-output`. The 74LS273 at 1L holds two four-bit fields:
+5Q-8Q drive R97 470, R98 1k, R99 2.2k and R100 4.7k into ONE node, and 1Q-4Q
+gate four 4066 sections that tap that node through 10k, 22k, 47k and 100k.
+Which field is which is settled by the data source: 5D-8D come from the
+136007-X10 PROM addressed 32 samples by 8 waveforms, which is the model's
+256-byte waveform ROM.
+
+THE TWO GAMES DO NOT SHARE A VOLUME LAW, which is the finding a single reading
+would have missed. The switched conductance is one arm of a divider and the
+other arm differs: Dig Dug ties the node to +5V and ground through 10k each, so
+the transfer is G/(G+200uS); Galaga runs it into R19 10k at an LM324's virtual
+ground, so it is 1/(R_legs+10k). Normalised to full scale, both are louder than
+a linear multiply at low volume codes, Dig Dug by up to 3.7 dB and Galaga by up
+to 6.6 dB. One linear multiply cannot be right for both.
+
+The sample ladder's deviation is not a level error but a KINK AT MID-SCALE: the
+7-to-8 step is +0.82 LSB of DNL, and `wave_nibble - 8` puts the signed zero
+crossing exactly there, so it is an odd-harmonic mechanism on every cycle.
+
+Also unmodelled: a shunt capacitor at the node on each board whose corner MOVES
+WITH THE VOLUME CODE, 3.3 to 6.0 kHz on Dig Dug and 8 to 20 kHz on Galaga; a
+differential output pair on Dig Dug and an MB3730 bridge amplifier on Galaga,
+where the model is mono; and the three voices reaching the node as a 96 kHz time
+multiplex averaged by that capacitor, where the model sums them instantaneously.
+
+NOTE FOR THE 54XX ROW: on Galaga the WSG and two 54XX filter outputs sum at one
+LM324 inverting node, R19 10k against R21 33k and R36 33k. The junction belongs
+to neither row alone.
+
+Transcribed at docs/schematics/namco-galaga-audio-output.md, from the Galaga
+Midway CPU PC sheet and the Dig Dug Atari SP-203 sheet 5A. Tracked as
+phosphor-emulator-enst. Xevious is in this row and NO Xevious drawing was read;
+its output stage is still unexamined.
+
+Separate from `namco-54xx-explosion`, which is about the explosion circuit on the
+same board: Galaga and Xevious were catalogued for that one path and nothing had
+ever recorded this one, which is precisely the gap the per-machine check cannot
+see. Dig Dug shares the board but has 51XX and 53XX rather than the 54XX, so it
+appears here and not there."""
 
 [[target]]
 id = "namco-pac-output"
