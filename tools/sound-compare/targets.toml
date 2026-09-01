@@ -581,10 +581,30 @@ sheet. phosphor-emulator-2u1j."""
 [[target]]
 id = "missile-output"
 machines = ["missile"]
-device = "machines/src/missile_command.rs"
-status = "unexamined"
+status = "missing"
 notes = """
-POKEY through a DcBlocker."""
+EXAMINED. Off `unexamined` as `missing`: the model applies a shared `DcBlocker`
+and a scale, and the board's whole analog path is absent.
+
+POKEY pin 37 sits on R38 10k to +5V and C70 0.1 uF to ground, a low-pass. Then
+N10 LM324 section a as a unity follower (pin 6 tied to pin 7; C75 is across the
++12/-5 supplies, not in the feedback), then two inverting sections at -1 each,
+producing AUD 1 on J20 pin E and AUD 2 on J20 pin S. THE GAME PCB EMITS AN
+ANTIPHASE PAIR and the model is mono. Nothing on the game PCB is AC-coupled: the
+op-amps run split supplies with their + inputs at ground.
+
+The pair drives the Regulator/Audio II PCB 035435-02, which Tempest also uses,
+where each channel is a 1k-against-11k divider (-20.8 dB), a C6 0.22 uF coupling,
+a TDA2002A at 1 + 220/10 = 23, a Boucherot cell, and a 1000 uF output coupling
+into its own speaker: 19.9 Hz for a nominal 8 ohms. TWO SPEAKERS.
+
+The `DcBlocker` here does correspond to a real part, C6 and C15, but they are on
+the Regulator/Audio II board; the comment in `missile_command.rs` reads as though
+the capacitor were on the game PCB, and it is not.
+
+Transcribed with Tempest at docs/schematics/atari-pokey-audio-output.md. Tracked
+as phosphor-emulator-hd8n. The schematics are a Drawing Package Supplement
+appended to MissileCommand.pdf at PDF pages 59-63, after three manuals."""
 
 [[target]]
 id = "mrdo-output"
@@ -668,7 +688,32 @@ manual and are not a stable way to name one. phosphor-emulator-cg2f."""
 [[target]]
 id = "tempest-output"
 machines = ["tempest"]
-device = "machines/src/tempest.rs"
-status = "unexamined"
+status = "missing"
 notes = """
-POKEY with no coupling or filter stage modelled."""
+EXAMINED. Off `unexamined` as `missing`: `(pokey1 + pokey2) * 0.5` and nothing
+else, no filter and no DC removal.
+
+Both POKEYs are on the auxiliary PCB, at B/C2 and C/D2. Each pin 37 sits on 10k
+to +5V and 0.015 uF mylar to ground. MISSILE COMMAND'S SAME NETWORK USES 0.1 uF,
+6.7 times larger, so the two games' POKEY outputs are filtered very differently
+at source and both are modelled as no filter. Same family, two laws, which is the
+second time this sweep has found that.
+
+The two are summed passively through equal R32/R33 330k into R34 22k, then K6
+LM324 section a amplifies by 1 + 100k/10k = 11, giving AUD+; section b inverts it
+through C27 0.1 uF and R35 100k, giving AUD-. Antiphase pair, two speakers, and
+the model is mono. THE MODEL HAS NO DC REMOVAL where the board has C27 and the
+0.22 uF at each amplifier input.
+
+CONFIRMED RATHER THAN REFUTED: the equal 330k legs mean the two POKEYs are
+weighted 1:1, which is what `* 0.5` encodes. The board's factor is 0.647 per
+POKEY, not 0.5, but nothing in the model calibrates an absolute level.
+
+Shares the Regulator/Audio II PCB 035435-02 with Missile Command, here at
+revision E, whose only audio difference found is the output coupling: 3300 uF
+against Missile's 1000 uF, so 6.0 Hz against 19.9 Hz into a nominal 8 ohms.
+
+Transcribed with Missile Command at docs/schematics/atari-pokey-audio-output.md.
+Tracked as phosphor-emulator-hd8n. NOTE FOR THE NEXT READER: the arcade-museum
+Tempest.pdf is the operation manual and has NO schematics; all 60 pages were
+checked. The schematics are a separate Drawing Package Supplement."""

@@ -1,0 +1,74 @@
+{
+  "modules": {
+    "Tempest audio: two POKEYs summed through equal resistors, then an antiphase pair": {
+      "ports": {
+        "AUD+ OUT (5)": { "direction": "output", "bits": [4] },
+        "AUD- OUT (D)": { "direction": "output", "bits": [5] }
+      },
+      "cells": {
+        "uBC2": {
+          "type": "B/C2 POKEY",
+          "port_directions": { "AUD (37)": "output" },
+          "connections": { "AUD (37)": [1] },
+          "attributes": {}
+        },
+        "load1": {
+          "type": "R4 10k, C10 15n",
+          "port_directions": { "POKAU1": "input" },
+          "connections": { "POKAU1": [1] },
+          "attributes": {}
+        },
+        "uCD2": {
+          "type": "C/D2 POKEY",
+          "port_directions": { "AUD (37)": "output" },
+          "connections": { "AUD (37)": [2] },
+          "attributes": {}
+        },
+        "load2": {
+          "type": "R3 10k, C9 15n",
+          "port_directions": { "POKAU2": "input" },
+          "connections": { "POKAU2": [2] },
+          "attributes": {}
+        },
+        "sum": {
+          "type": "R32 330k, R33 330k, R34 22k",
+          "port_directions": {
+            "POKAU1": "input",
+            "POKAU2": "input",
+            "to K6 (10)": "output"
+          },
+          "connections": {
+            "POKAU1": [1],
+            "POKAU2": [2],
+            "to K6 (10)": [3]
+          },
+          "attributes": {}
+        },
+        "uK6a": {
+          "type": "K6 LM324a",
+          "port_directions": {
+            "in (10) +": "input",
+            "out (8) R36 10k R38 100k": "output"
+          },
+          "connections": {
+            "in (10) +": [3],
+            "out (8) R36 10k R38 100k": [4]
+          },
+          "attributes": {}
+        },
+        "uK6b": {
+          "type": "K6 LM324b",
+          "port_directions": {
+            "in (6) C27 100n R35 100k": "input",
+            "out (7) R37 100k fb": "output"
+          },
+          "connections": {
+            "in (6) C27 100n R35 100k": [4],
+            "out (7) R37 100k fb": [5]
+          },
+          "attributes": {}
+        }
+      }
+    }
+  }
+}

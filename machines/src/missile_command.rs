@@ -1,3 +1,22 @@
+//! Atari Missile Command (1980).
+//!
+//! # Schematics
+//!
+//! | Drawing | Source | Pages |
+//! |---|---|---|
+//! | `Missile Command` 035467-XX rev D, sheet 2 side B | `arcade-museum.com/manuals-videogames/M/MissileCommand.pdf` | PDF p63, `Input and Output Circuitry` carries the POKEY |
+//! | `Regulator/Audio II PCB` 035435-02 rev B | same | PDF p60, sheet 1 side A |
+//!
+//! That PDF is three manuals in one and the Drawing Package Supplement is
+//! appended at the end, PDF pages 59 to 63.
+//!
+//! The audio path is transcribed with Tempest's, which shares the amplifier
+//! board, in
+//! [`docs/schematics/atari-pokey-audio-output.md`](../../docs/schematics/atari-pokey-audio-output.md).
+//! None of it is modelled: a 10k/0.1 uF load network at the POKEY, a follower,
+//! an antiphase output pair, and two TDA2002A channels driving two speakers. See
+//! `phosphor-emulator-hd8n`.
+
 use phosphor_core::audio::{DcBlocker, SampleRing};
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::input::{DrainPolicy, RelativeCounter};
@@ -385,6 +404,11 @@ pub struct MissileCommandBoard {
     /// The output coupling capacitor. POKEY's output is unipolar and sits at
     /// zero when idle, so it needs the DC removed rather than a fixed midpoint
     /// subtracted — see [`DcBlocker`].
+    ///
+    /// The capacitor this stands for is C6 and C15 on the Regulator/Audio II
+    /// PCB, not anything on the game PCB: the path from POKEY pin 37 to the
+    /// AUDIO1 and AUDIO2 connector pins is DC-coupled throughout, on op-amps
+    /// running split supplies with their non-inverting inputs at ground.
     #[save(id = 15)]
     dc_blocker: DcBlocker,
 }

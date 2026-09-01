@@ -1,3 +1,25 @@
+//! Atari Tempest (1981).
+//!
+//! # Schematics
+//!
+//! | Drawing | Source | Pages |
+//! |---|---|---|
+//! | `Tempest` 037585-01 rev B, sheet 3 side B | `gauck.com/arcade/Tempest/Atari Tempest Schematic.pdf` | PDF p6, `Player Inputs and Audio Output` carries both POKEYs |
+//! | `Regulator Audio II PCB` 035435-02 rev E | same | PDF p2, sheet 1 side A |
+//!
+//! `arcade-museum.com/manuals-videogames/T/Tempest.pdf` is the operation manual
+//! and has NO schematics; all 60 of its pages were checked. The schematics are
+//! the separate Drawing Package Supplement above.
+//!
+//! The audio path is transcribed with Missile Command's, which shares the
+//! amplifier board, in
+//! [`docs/schematics/atari-pokey-audio-output.md`](../../docs/schematics/atari-pokey-audio-output.md).
+//! The `* 0.5` below is the board's 1:1 weighting, confirmed: the two POKEYs
+//! reach one node through equal 330k legs. What is NOT modelled is everything
+//! else: a 10k/0.015 uF load network per POKEY, a gain of 11, an antiphase
+//! output pair with a coupling capacitor in one leg, and two TDA2002A channels
+//! driving two speakers. See `phosphor-emulator-hd8n`.
+
 use phosphor_core::audio::SampleRing;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::input::{DrainPolicy, RelativeCounter};
@@ -708,7 +730,13 @@ impl MachineCore for TempestSystem {
             }
         }
 
-        // Mix dual POKEY audio
+        // Mix dual POKEY audio.
+        //
+        // The 1:1 weighting is the board's: R32 and R33 are both 330k into R34
+        // 22k. Its absolute factor is 0.647 per POKEY rather than 0.5, but
+        // nothing here calibrates an output level. Everything else the board
+        // does between these two chips and the speakers is missing; see the
+        // module header.
         let samples1 = self.io.pokey1.drain_audio();
         let samples2 = self.io.pokey2.drain_audio();
         let len = samples1.len().min(samples2.len());

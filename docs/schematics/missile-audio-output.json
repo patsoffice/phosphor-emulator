@@ -1,0 +1,103 @@
+{
+  "modules": {
+    "Missile Command audio: one POKEY, an antiphase pair, and two TDA2002A channels": {
+      "ports": {
+        "SPKR 1": { "direction": "output", "bits": [7] },
+        "SPKR 2": { "direction": "output", "bits": [10] }
+      },
+      "cells": {
+        "uPokey": {
+          "type": "C012294-01 POKEY",
+          "port_directions": { "AUD (37)": "output" },
+          "connections": { "AUD (37)": [1] },
+          "attributes": {}
+        },
+        "load": {
+          "type": "R38 10k, C70 100n",
+          "port_directions": { "AUD node": "input" },
+          "connections": { "AUD node": [1] },
+          "attributes": {}
+        },
+        "uN10a": {
+          "type": "N10 LM324a",
+          "port_directions": {
+            "in (5) +": "input",
+            "out (7) tied to (6)": "output"
+          },
+          "connections": { "in (5) +": [1], "out (7) tied to (6)": [2] },
+          "attributes": {}
+        },
+        "uN10b": {
+          "type": "N10 LM324b",
+          "port_directions": {
+            "in (2) R100 10k": "input",
+            "out (1) R99 10k fb": "output"
+          },
+          "connections": { "in (2) R100 10k": [2], "out (1) R99 10k fb": [3] },
+          "attributes": {}
+        },
+        "uN10c": {
+          "type": "N10 LM324c",
+          "port_directions": {
+            "in (13) R71 10k": "input",
+            "out (14) R70 10k fb": "output"
+          },
+          "connections": { "in (13) R71 10k": [3], "out (14) R70 10k fb": [4] },
+          "attributes": {}
+        },
+        "harness": {
+          "type": "J20 to J7",
+          "port_directions": {
+            "AUDIO1 (J20 E)": "input",
+            "AUDIO2 (J20 S)": "input",
+            "ch1 (J7 9)": "output",
+            "ch2 (J7 B)": "output"
+          },
+          "connections": {
+            "AUDIO1 (J20 E)": [3],
+            "AUDIO2 (J20 S)": [4],
+            "ch1 (J7 9)": [5],
+            "ch2 (J7 B)": [8]
+          },
+          "attributes": {}
+        },
+        "in1": {
+          "type": "R14 10k, R27 1k, C6 220n",
+          "port_directions": { "from J7 9": "input", "to Q5 (1)": "output" },
+          "connections": { "from J7 9": [5], "to Q5 (1)": [6] },
+          "attributes": {}
+        },
+        "uQ5": {
+          "type": "Q5 TDA2002A",
+          "port_directions": {
+            "in (1) C7 1n gnd": "input",
+            "out (4) R9 220 R11 10 fb": "output"
+          },
+          "connections": {
+            "in (1) C7 1n gnd": [6],
+            "out (4) R9 220 R11 10 fb": [7]
+          },
+          "attributes": {}
+        },
+        "in2": {
+          "type": "R13 10k, R28 1k, C15 220n",
+          "port_directions": { "from J7 B": "input", "to Q7 (1)": "output" },
+          "connections": { "from J7 B": [8], "to Q7 (1)": [9] },
+          "attributes": {}
+        },
+        "uQ7": {
+          "type": "Q7 TDA2002A",
+          "port_directions": {
+            "in (1) C16 1n gnd": "input",
+            "out (4) R21 220 R30 10 fb": "output"
+          },
+          "connections": {
+            "in (1) C16 1n gnd": [9],
+            "out (4) R21 220 R30 10 fb": [10]
+          },
+          "attributes": {}
+        }
+      }
+    }
+  }
+}
