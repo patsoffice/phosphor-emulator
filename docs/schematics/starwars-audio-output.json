@@ -1,0 +1,132 @@
+{
+  "modules": {
+    "Star Wars Sound PCB: five unequal legs, an analog delay, and a stereo matrix": {
+      "ports": {
+        "LEFT AUDIO (H 7)": { "direction": "output", "bits": [30] },
+        "RIGHT AUDIO (F 6)": { "direction": "output", "bits": [31] }
+      },
+      "cells": {
+        "u5D": {
+          "type": "5D POKEY C I/O 0",
+          "port_directions": { "OUT (37) CO0": "output" },
+          "connections": { "OUT (37) CO0": [1] },
+          "attributes": {}
+        },
+        "u4D": {
+          "type": "4D POKEY C I/O 1",
+          "port_directions": { "OUT (37) CO1": "output" },
+          "connections": { "OUT (37) CO1": [2] },
+          "attributes": {}
+        },
+        "u3D": {
+          "type": "3D POKEY C I/O 2",
+          "port_directions": { "OUT (37) CO2": "output" },
+          "connections": { "OUT (37) CO2": [3] },
+          "attributes": {}
+        },
+        "u2D": {
+          "type": "2D POKEY C I/O 3",
+          "port_directions": { "OUT (37) CO3": "output" },
+          "connections": { "OUT (37) CO3": [4] },
+          "attributes": {}
+        },
+        "u1CD": {
+          "type": "1C/D TMS-5220",
+          "port_directions": { "OUT (8) R18 1800": "output" },
+          "connections": { "OUT (8) R18 1800": [5] },
+          "attributes": {}
+        },
+        "buf0": {
+          "type": "4C R20 1k C29 1n",
+          "port_directions": { "CO0": "input", "out": "output" },
+          "connections": { "CO0": [1], "out": [11] },
+          "attributes": {}
+        },
+        "buf1": {
+          "type": "4C R22 1k C33 1n",
+          "port_directions": { "CO1": "input", "out": "output" },
+          "connections": { "CO1": [2], "out": [12] },
+          "attributes": {}
+        },
+        "buf2": {
+          "type": "3C R24 1k C35 1n",
+          "port_directions": { "CO2": "input", "out": "output" },
+          "connections": { "CO2": [3], "out": [13] },
+          "attributes": {}
+        },
+        "buf3": {
+          "type": "3C R26 1k C39 1n",
+          "port_directions": { "CO3": "input", "out": "output" },
+          "connections": { "CO3": [4], "out": [14] },
+          "attributes": {}
+        },
+        "bufS": {
+          "type": "4C follower C41 100n R28 100k",
+          "port_directions": { "SPEECH": "input", "out": "output" },
+          "connections": { "SPEECH": [5], "out": [15] },
+          "attributes": {}
+        },
+        "sum": {
+          "type": "4C summer R30 12k",
+          "port_directions": {
+            "R21 47k C32": "input",
+            "R23 47k C34": "input",
+            "R25 82k C38": "input",
+            "R27 82k C40": "input",
+            "R29 15k C42": "input",
+            "SUM (8)": "output"
+          },
+          "connections": {
+            "R21 47k C32": [11],
+            "R23 47k C34": [12],
+            "R25 82k C38": [13],
+            "R27 82k C40": [14],
+            "R29 15k C42": [15],
+            "SUM (8)": [20]
+          },
+          "attributes": {}
+        },
+        "filt": {
+          "type": "3C filter R39 R40 12k",
+          "port_directions": { "SUM": "input", "AUD C51 470n": "output" },
+          "connections": { "SUM": [20], "AUD C51 470n": [21] },
+          "attributes": {}
+        },
+        "delay": {
+          "type": "3B R5106 BBD 37.8kHz",
+          "port_directions": { "AUD": "input", "delayed": "output" },
+          "connections": { "AUD": [21], "delayed": [22] },
+          "attributes": {}
+        },
+        "left": {
+          "type": "2B R50 47k",
+          "port_directions": {
+            "delayed R48 22k": "input",
+            "AUD R49 22k": "input",
+            "out (7) R51 2k2": "output"
+          },
+          "connections": {
+            "delayed R48 22k": [22],
+            "AUD R49 22k": [21],
+            "out (7) R51 2k2": [30]
+          },
+          "attributes": {}
+        },
+        "right": {
+          "type": "2B R55 47k",
+          "port_directions": {
+            "delayed R52 22k to (9)": "input",
+            "AUD R53 22k to (10) R54 47k": "input",
+            "out (8) R56 2k2": "output"
+          },
+          "connections": {
+            "delayed R52 22k to (9)": [22],
+            "AUD R53 22k to (10) R54 47k": [21],
+            "out (8) R56 2k2": [31]
+          },
+          "attributes": {}
+        }
+      }
+    }
+  }
+}

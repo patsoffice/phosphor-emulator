@@ -365,13 +365,44 @@ sheet. phosphor-emulator-tesw."""
 [[target]]
 id = "btime-output"
 machines = ["burgertime"]
-device = "machines/src/btime.rs"
-status = "unexamined"
+status = "missing"
 notes = """
-Two AY-3-8910s summed, then one DcBlocker, with a comment already saying the
-capacitor sits between the chips and the amplifier rather than inside either.
-That much is reasoned; the capacitor's value and whatever else is on the board
-between the sum and the speaker are not."""
+EXAMINED. Off `unexamined` as `missing`, and the finding is structural rather
+than a filter value.
+
+THE BOARD DOES NOT SUM THE TWO CHIPS. Each AY-3-8910 brings its three analog
+channels out on pins 4, 3 and 38. Five of the six tie to one bus. The sixth,
+9F's channel A, CROSSES THAT BUS WITHOUT CONNECTING and goes off alone into a
+two-pole multiple-feedback band-pass, then back into the mixer at higher level
+and OPPOSITE POLARITY, its path being inverted twice where the bus path is
+inverted once. The crossing was checked at pixel level: 9F channel A passes the
+bus vertical with no dot, and 9F channel B one wire below meets it with a solid
+one.
+
+That is not expressible today, and not because of an omission in this board
+file: `Ay8910::fill_audio` already sums a chip's three channels internally, so
+the per-channel outputs the board needs do not exist at the device boundary.
+
+THE FILTER IS A BAND-PASS, NOT A LOW-PASS. R51 1k, R50 10k to ground, C27 and
+C28 0.068 uF, R49 4.7k feedback: f0 1.13 kHz, Q 1.14, gain at f0 -2.35. The same
+parts read as a low-pass give a corner near 500 Hz, which is what a first pass
+produced and it was wrong.
+
+THE COUPLING CAPACITOR IS C21 100 uF, which this note used to say was not on a
+schematic to hand. Into a nominal 8 ohm speaker that is 199 Hz, twenty times the
+`DcBlocker`'s shared 10 Hz default. Also unmodelled: a VR1 10k volume pot, the
+1181 power amplifier, and a ferrite bead with two capacitors at the speaker pin.
+
+CONFIRMED RATHER THAN REFUTED: coupling AFTER the sum is right. C25 and C21 are
+both between the chips and the speaker and neither is inside either chip, which
+is what the old comment reasoned without a drawing. Its corner is wrong; its
+position is not. Also, VR1 does NOT move a filter corner, which is worth
+recording because the volume control does on four other boards in this sweep.
+
+Transcribed at docs/schematics/btime-audio-output.md. Tracked as
+phosphor-emulator-jenz. The scan is
+archive.org/items/arcademanual_BurgerTime/BurgerTime.pdf, sheet 9-3 across PDF
+pages 68-70, with the audio on page 69."""
 
 [[target]]
 id = "ccastles-output"
@@ -386,12 +417,38 @@ has been looked for."""
 [[target]]
 id = "docastle-output"
 machines = ["docastle", "dorunrun", "dowild"]
-device = "machines/src/docastle.rs"
-status = "unexamined"
+status = "missing"
 notes = """
-Four SN76489As through an AudioResampler and a DcBlocker. Four chips summing
-into one output is a mixer, and its resistors decide the balance between them;
-nothing here is from a drawing."""
+EXAMINED, BUT ONLY MR. DO'S CASTLE. Off `unexamined` as `missing`. Universal
+8302 sheet No. 4, which is printed rotated 90 degrees on its page. Do Run Run and
+Mr. Do's Wild Ride are in this row and share the device file, and NEITHER board's
+drawing was read; Galaga and Dig Dug turned out not to share their output stage
+despite sharing a board family, so do not assume these three do.
+
+THE ROW'S OWN QUESTION IS ANSWERED, and the answer confirms the model: the four
+chips reach one node through four EQUAL 1.5k legs, so the balance is 1:1 and the
+plain sum is right in ratio. Node source impedance 375 ohms plus the chips' own.
+
+WHAT IS MISSING is everything after that node. A FIXED LOW SHELF worth about
+22 dB: 22k in series, with 2k + 0.22 uF to ground beyond it, flat at DC, falling
+from about 30 Hz, flat again above about 362 Hz at 2k/24k. In the band these
+chips use that reads as roughly 10 dB more bass than treble, and it is the
+largest single thing absent. Then a 1K B-taper pot wired as a RHEOSTAT from the
+summing node to ground, the cabinet volume. Then 4.7 uF into an MB3730 whose pins
+5 and 6 drive SP(+) and SP(-) through 4.7 ohm and 0.1 uF Boucherot cells: A
+BRIDGE INTO ONE SPEAKER, where the model is mono. Same power amplifier part as
+Galaga's Midway board.
+
+THE VOLUME CONTROL DOES NOT MOVE THE SHELF, since it sits before the 22k that
+dominates the shelf's series arm. Worth recording as the exception: on Pac-Man,
+Lunar Lander, Galaga and Dig Dug the control setting does move a corner.
+
+The `DcBlocker`'s position after the sum is right again; its corner cannot be
+computed from this sheet, because 4.7 uF works against the MB3730's input
+impedance and that is not on it.
+
+Transcribed at docs/schematics/docastle-audio-output.md. Tracked as
+phosphor-emulator-2926."""
 
 [[target]]
 id = "namco-galaga-output"
@@ -512,12 +569,46 @@ the mistake this file exists to make visible rather than to commit."""
 [[target]]
 id = "atari-vector-pokey-output"
 machines = ["starwars", "esb"]
-device = "machines/src/starwars.rs"
-status = "unexamined"
+status = "missing"
 notes = """
-POKEY plus TMS5220 speech, with a DcBlocker. Two sources summing means a mixer
-with its own balance, and speech and effects are unlikely to arrive at the
-speaker at the same level by accident."""
+EXAMINED, AND IT IS THE LARGEST GAP THIS SWEEP HAS FOUND. Off `unexamined` as
+`missing`. Atari SP-225 sheets 16A and 16B, the cleanest drawings in the phase.
+Only Star Wars was read; The Empire Strikes Back is in this row, runs on the
+same device file, and had no drawing read.
+
+The row's own guess was right: the mixer has its own balance and speech does not
+arrive at the same level by accident. It is worse than that.
+
+THE FOUR POKEYS ARE NOT WEIGHTED EQUALLY. Into an inverting summer with R30 12k
+feedback, CO0 and CO1 come through 47k (gain -0.2553) and CO2 and CO3 through
+82k (-0.1463). Two chips are 4.84 dB louder than the other two, where the model
+uses one `POKEY_GAIN` of 0.20 for all four. That 0.20 is the MEAN of the board's
+four legs (0.2008), so the constant is right about the ensemble and wrong about
+every individual chip.
+
+SPEECH IS HOTTER ON THE BOARD. Its leg is 15k, gain -0.8, which against the
+POKEY mean is 3.98 where the model's 0.50/0.20 is 2.5: about 4.05 dB.
+
+EACH LEG HAS ITS OWN HIGH-PASS, one 0.1 uF per leg into the virtual ground:
+33.9 Hz on the 47k legs, 19.4 Hz on the 82k legs, 106.1 Hz on speech. The model's
+single 35 Hz block matches the 47k legs and is THREE TIMES TOO LOW FOR SPEECH.
+
+THERE IS AN ANALOG DELAY LINE, an R5106 bucket-brigade clocked at 37.8 kHz by a
+556, with an active filter either side of it. Unmodelled entirely.
+
+STAR WARS IS STEREO BY CONSTRUCTION. Two TL084 sections give LEFT = -(D + A) and
+RIGHT = -(D - A) at gains matched to 2.136, where D is the delayed signal and A
+the dry: the dry lands entirely in the difference channel and the delayed
+entirely in the sum. A difference matrix built out of one op-amp's two inputs.
+The model is mono.
+
+Each POKEY is loaded by a TRANSIMPEDANCE AMPLIFIER at a virtual ground, 1k with
+1000 pF, which is a third distinct POKEY interface in this sweep after Missile
+Command's 10k/0.1 uF and Tempest's 10k/0.015 uF.
+
+Transcribed at docs/schematics/starwars-audio-output.md. Tracked as
+phosphor-emulator-82zr. The schematics are PDF pages 114-147 of the
+arcade-museum StarWars.pdf, with all the audio on 142 and 143."""
 
 [[target]]
 id = "foodf-output"
@@ -609,11 +700,37 @@ appended to MissileCommand.pdf at PDF pages 59-63, after three manuals."""
 [[target]]
 id = "mrdo-output"
 machines = ["mrdo"]
-device = "machines/src/mrdo.rs"
-status = "unexamined"
+status = "missing"
 notes = """
-SN76489A output through a DcBlocker. The board's main PCB object sheet is
-already recorded as read for video; the audio section has not been."""
+EXAMINED. Off `unexamined` as `missing`. Universal 8201 sheet 1 (printed rotated
+90 degrees) and the separate `SOUND AMPLIFIER DIAGRAM AND PARTS LOCATION`.
+
+CONFIRMED: the two SN76489s reach an inverting summing amplifier through equal
+R8/R9 100k legs with R10 100k feedback, so the balance is 1:1 and the plain sum
+is the board's law.
+
+A COMMENT CORRECTION RATHER THAN A CODE ONE. `mrdo.rs` applies one `DcBlocker`
+to the sum and says the capacitor sits between the chips and the amplifier. On
+the board the coupling is C5 and C6, ONE PER CHIP, AHEAD of the summing
+resistors. By superposition that is the same filter, so the output is right and
+only the stated reason is wrong.
+
+THE DOMINANT HIGH-PASS IS NOT NEAR THE CHIPS. It is C1 470 uF in one speaker leg,
+42.3 Hz into a nominal 8 ohm speaker. The per-chip coupling is 1.59 Hz.
+
+Also missing: R101 1k out of the main board, then on the Sound Amplifier Unit an
+R3 10k / R4 51k / VR1 1k attenuator that throws away about 34 dB before the
+amplifier, C4 4.7 uF coupling, and an MB3730 driving S1 and S2 AS A BRIDGE with
+a 4.7 ohm and 0.1 uF Boucherot cell on each output. The model is mono.
+
+MR. DO AND MR. DO'S CASTLE DO NOT SHARE AN OUTPUT STAGE, despite one
+manufacturer, one year apart and the same MB3730 part. Castle mixes passively
+into a 22 dB shelf on the main board; Mr. Do mixes in an op-amp and puts the
+amplifier on a separate unit behind a 51k attenuator. Third time in this sweep
+that a shared family has not meant a shared output stage.
+
+Transcribed at docs/schematics/mrdo-audio-output.md. Tracked as
+phosphor-emulator-4056."""
 
 [[target]]
 id = "gottlieb-output"

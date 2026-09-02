@@ -11,6 +11,23 @@
 //! banking, the watchdog, the periodic IRQ, the main/sound mailbox latches, the
 //! AVG/matrix wiring, the POKEY/RIOT/TMS5220 sound, the ADC0809 flight yoke, and
 //! the X2212 NVRAM), loads the ROM set, and registers the machine.
+//!
+//! # Schematics
+//!
+//! | Drawing | Source | Pages |
+//! |---|---|---|
+//! | `STAR WARS Sound PCB`, Atari SP-225 sheets 16A and 16B | `arcade-museum.com/manuals-videogames/S/StarWars.pdf` | PDF pp. 142 and 143; the package runs 114-147 |
+//!
+//! The audio output is transcribed in
+//! [`docs/schematics/starwars-audio-output.md`](../../docs/schematics/starwars-audio-output.md),
+//! and it is the largest gap the Phase 9 audit found. **The four POKEYs are not
+//! weighted equally**: two reach the summing amplifier through 47k and two
+//! through 82k, 4.84 dB apart, where `end_frame_audio` uses one constant for all
+//! four. **There is a bucket-brigade analog delay line** clocked at 37.8 kHz.
+//! **And the board is stereo on purpose**, its two output amplifiers forming a
+//! difference matrix that puts the dry signal in one channel and the delayed
+//! signal in both. Only Star Wars's drawing was read; `esb` shares this file and
+//! had none. See `phosphor-emulator-82zr`.
 
 use phosphor_core::audio::SampleRing;
 use phosphor_core::core::bus::InterruptState;
@@ -1585,6 +1602,14 @@ impl StarWarsBoard {
     /// Drain the four POKEYs, mix (with a one-pole DC-blocking high-pass), and
     /// queue signed-16-bit samples for the frontend. Called once per frame.
     pub(crate) fn end_frame_audio(&mut self) {
+        // Both constants are borrowed route gains, and the schematic has since
+        // been read against them. The board's summing amplifier gives CO0 and
+        // CO1 -0.2553 (47k legs) and CO2 and CO3 -0.1463 (82k legs), so 0.20 is
+        // the MEAN of the four and no POKEY actually has it: the ensemble level
+        // is right and the 4.84 dB spread between the pairs is missing. Speech
+        // is -0.8 on a 15k leg, which against that mean is 3.98 where 0.50/0.20
+        // is 2.5, so the board's speech sits about 4 dB hotter. See the module
+        // header and `phosphor-emulator-82zr`.
         const POKEY_GAIN: f32 = 0.20; // MAME per-POKEY route gain
         const SPEECH_GAIN: f32 = 0.50; // MAME TMS5220 route gain
         let chans: [Vec<f32>; 4] = std::array::from_fn(|i| self.pokey[i].drain_audio());
@@ -1605,6 +1630,12 @@ impl StarWarsBoard {
                     .sum::<f32>();
             let x = pokey + SPEECH_GAIN * speech.get(i).copied().unwrap_or(0.0);
             // DC block (cutoff ≈ 35 Hz) then scale/clamp to i16.
+            //
+            // The board has no shared corner: each of the five summing legs
+            // carries its own 0.1 uF, giving 33.9 Hz on the two 47k legs, 19.4 Hz
+            // on the two 82k ones and 106.1 Hz on speech. This 35 Hz matches the
+            // 47k pair and is three times too low for the speech leg, whose
+            // corner is high enough to thin a voice on purpose.
             let y = x - x1 + 0.995 * y1;
             x1 = x;
             y1 = y;

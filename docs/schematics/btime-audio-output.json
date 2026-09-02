@@ -1,0 +1,85 @@
+{
+  "modules": {
+    "BurgerTime audio: five AY channels bussed, one band-passed and remixed": {
+      "ports": {
+        "J6 15 SPEAKER +": { "direction": "output", "bits": [7] }
+      },
+      "cells": {
+        "u10F": {
+          "type": "10F AY-3-8910",
+          "port_directions": { "A (4), B (3), C (38)": "output" },
+          "connections": { "A (4), B (3), C (38)": [2] },
+          "attributes": {}
+        },
+        "u9F": {
+          "type": "9F AY-3-8910",
+          "port_directions": {
+            "A (4)": "output",
+            "B (3), C (38)": "output"
+          },
+          "connections": { "A (4)": [1], "B (3), C (38)": [2] },
+          "attributes": {}
+        },
+        "load9F": {
+          "type": "R52 1k",
+          "port_directions": { "9F A": "input" },
+          "connections": { "9F A": [1] },
+          "attributes": {}
+        },
+        "loadBus": {
+          "type": "R48 1k",
+          "port_directions": { "bus": "input" },
+          "connections": { "bus": [2] },
+          "attributes": {}
+        },
+        "u15Ja": {
+          "type": "15J 4558a band-pass",
+          "port_directions": {
+            "in R51 1k, R50 10k": "input",
+            "out C27 C28 68n, R49 4.7k": "output"
+          },
+          "connections": {
+            "in R51 1k, R50 10k": [1],
+            "out C27 C28 68n, R49 4.7k": [3]
+          },
+          "attributes": {}
+        },
+        "u15Jb": {
+          "type": "15J 4558b mixer",
+          "port_directions": {
+            "band (6) R46 100k": "input",
+            "bus (6) R47 100k": "input",
+            "out (7) R45 10k fb": "output"
+          },
+          "connections": {
+            "band (6) R46 100k": [3],
+            "bus (6) R47 100k": [2],
+            "out (7) R45 10k fb": [4]
+          },
+          "attributes": {}
+        },
+        "vol": {
+          "type": "C25 10u, VR1 10k",
+          "port_directions": { "from 15J": "input", "wiper": "output" },
+          "connections": { "from 15J": [4], "wiper": [5] },
+          "attributes": {}
+        },
+        "u14H": {
+          "type": "14H 1181",
+          "port_directions": {
+            "in (3)": "input",
+            "out (5) C22 4u7 boot": "output"
+          },
+          "connections": { "in (3)": [5], "out (5) C22 4u7 boot": [6] },
+          "attributes": {}
+        },
+        "outc": {
+          "type": "C21 100u, FB1",
+          "port_directions": { "from 14H": "input", "to J6": "output" },
+          "connections": { "from 14H": [6], "to J6": [7] },
+          "attributes": {}
+        }
+      }
+    }
+  }
+}

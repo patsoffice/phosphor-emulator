@@ -9,6 +9,24 @@
 //! | `dorunrun` | Do! Run Run         | split 0000-1FFF + 4000-9FFF | ROT0 |
 //! | `dowild`   | Mr. Do's Wild Ride  | split (as `dorunrun`) | ROT0   |
 //!
+//! # Schematics
+//!
+//! | Drawing | Source | Pages |
+//! |---|---|---|
+//! | `Mr. Do's CASTLE`, Universal 8302, `Main Circuit Board Schematic Diagram (No. 4)` | `arcade-museum.com/manuals-videogames/M/MrDosCastle.pdf` | PDF p16, printed rotated 90 degrees |
+//!
+//! Sheets No. 1 to No. 3 are PDF pages 13 to 15 and carry no audio. **Only Mr.
+//! Do's Castle's board was read**; Do! Run Run's and Mr. Do's Wild Ride's were
+//! not, and sharing a family is not evidence of sharing an output stage.
+//!
+//! The audio output is transcribed in
+//! [`docs/schematics/docastle-audio-output.md`](../../docs/schematics/docastle-audio-output.md).
+//! The four chips reach one node through four EQUAL 1.5k legs, so the 1:1 sum
+//! below is the board's. What is not modelled is what follows: a fixed low shelf
+//! worth about 22 dB between 30 Hz and 362 Hz, a 1k volume rheostat, and an
+//! MB3730 driving one speaker as a bridge where this is mono. See
+//! `phosphor-emulator-2926`.
+//!
 //! Hardware:
 //! - **Two Z80s @ 4 MHz.** `main` runs the game; `sub` owns the inputs and the
 //!   sound chips. They talk through a single bidirectional latch that asserts
@@ -1201,6 +1219,11 @@ impl DocastleBoard {
         // Coupled after the box filter, once per output sample: the capacitor
         // sits between the chips and the amplifier, so what it strips the
         // offset from is the summed signal on its way to the speaker.
+        //
+        // The schematic has since been read and the position is confirmed: the
+        // 4.7 uF into the MB3730's pin 1 is exactly there. Its corner is not,
+        // because 4.7 uF works against that amplifier's input impedance and the
+        // sheet does not give it. See the module header.
         if let Some(avg) = self.audio.tick_sample(mix) {
             let coupled = self.sn_coupling.process(avg as f32);
             self.audio

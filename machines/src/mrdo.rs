@@ -1,5 +1,21 @@
 //! Universal "Mr. Do!" (1982) — Universal 8201 single-Z80 board.
 //!
+//! # Schematics
+//!
+//! | Drawing | Source | Pages |
+//! |---|---|---|
+//! | `MR. DO!`, Universal 8201, main board sheet 1 | `arcade-museum.com/manuals-videogames/M/mrdo_2.pdf` | PDF p7, sound at top right, sheet printed rotated 90 degrees |
+//! | `SOUND AMPLIFIER DIAGRAM AND PARTS LOCATION` | same | PDF p12, upright |
+//!
+//! The audio output is transcribed in
+//! [`docs/schematics/mrdo-audio-output.md`](../../docs/schematics/mrdo-audio-output.md).
+//! The two chips are summed 1:1 through equal 100k legs, so the sum below is the
+//! board's. What is not modelled is R101 1k, a separate Sound Amplifier Unit
+//! whose input attenuator throws away about 34 dB before an MB3730, a volume
+//! pot, and a bridge output into one speaker where this is mono. Read it beside
+//! `docastle-audio-output.md`: same manufacturer, same power amplifier part,
+//! different output stage. See `phosphor-emulator-4056`.
+//!
 //! Hardware (per MAME `src/mame/universal/mrdo.cpp`, the Taito `mrdot` set):
 //! - CPU: Z80 @ 8.2 MHz / 2 ≈ 4.1 MHz, one VBLANK IRQ per frame (`irq0_line_hold`)
 //! - Sound: 2× SN76489 @ 4.1 MHz, byte-mapped at 0x9801 / 0x9802
@@ -538,6 +554,15 @@ pub struct MrdoBoard {
     /// themselves are not modelled wrongly: a unipolar swing is what the silicon
     /// does, and the same omission accounted for twelve machines across five
     /// different sound parts before this one.
+    ///
+    /// The schematic has since been read and it corrects the description above,
+    /// not the behavior. The board's coupling is C5 and C6, ONE PER CHIP, ahead
+    /// of the summing resistors rather than after the sum. By superposition one
+    /// high-pass on `a + b` is the same filter as one on each, so this is right
+    /// where it stands; it is only the account of where the part sits that was
+    /// wrong. The board's per-chip corner is 1.59 Hz, and the high-pass that
+    /// actually shapes anything is C1 470 uF in the speaker leg at 42.3 Hz. See
+    /// the module header.
     #[save(id = 13)]
     pub(crate) sn_coupling: DcBlocker,
     #[save(id = 14)]

@@ -1,0 +1,68 @@
+{
+  "modules": {
+    "Mr. Do's Castle audio: four SN76489As summed equally, then a low shelf": {
+      "ports": {
+        "SP (+) L": { "direction": "output", "bits": [7] },
+        "SP (-) M": { "direction": "output", "bits": [8] }
+      },
+      "cells": {
+        "uR9": {
+          "type": "R9 SN76489AN",
+          "port_directions": { "out (7) 1.5k": "output" },
+          "connections": { "out (7) 1.5k": [1] },
+          "attributes": {}
+        },
+        "uN9": {
+          "type": "N9 SN76489AN",
+          "port_directions": { "out (7) 1.5k": "output" },
+          "connections": { "out (7) 1.5k": [1] },
+          "attributes": {}
+        },
+        "uNP9": {
+          "type": "NP9 SN76489AN",
+          "port_directions": { "out (7) 1.5k": "output" },
+          "connections": { "out (7) 1.5k": [1] },
+          "attributes": {}
+        },
+        "uP9": {
+          "type": "P9 SN76489AN",
+          "port_directions": { "out (7) 1.5k": "output" },
+          "connections": { "out (7) 1.5k": [1] },
+          "attributes": {}
+        },
+        "vol": {
+          "type": "1KB rheostat to gnd",
+          "port_directions": { "sum node": "input" },
+          "connections": { "sum node": [1] },
+          "attributes": {}
+        },
+        "shelf": {
+          "type": "22k, 2k + 220n to gnd",
+          "port_directions": { "sum node": "input", "node A": "output" },
+          "connections": { "sum node": [1], "node A": [2] },
+          "attributes": {}
+        },
+        "couple": {
+          "type": "4u7 in, 100n to gnd",
+          "port_directions": { "node A": "input", "to MB3730 (1)": "output" },
+          "connections": { "node A": [2], "to MB3730 (1)": [3] },
+          "attributes": {}
+        },
+        "uMB3730": {
+          "type": "MB3730 bridge",
+          "port_directions": {
+            "in (1), gain (2) 22u gnd": "input",
+            "out (5) 4R7 + 100n": "output",
+            "out (6) 4R7 + 100n": "output"
+          },
+          "connections": {
+            "in (1), gain (2) 22u gnd": [3],
+            "out (5) 4R7 + 100n": [7],
+            "out (6) 4R7 + 100n": [8]
+          },
+          "attributes": {}
+        }
+      }
+    }
+  }
+}

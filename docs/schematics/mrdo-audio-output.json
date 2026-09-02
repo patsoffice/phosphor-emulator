@@ -1,0 +1,87 @@
+{
+  "modules": {
+    "Mr. Do audio: two SN76489s coupled then summed, and a separate amplifier unit": {
+      "ports": {
+        "S1": { "direction": "output", "bits": [8] },
+        "S2": { "direction": "output", "bits": [9] }
+      },
+      "cells": {
+        "uH1": {
+          "type": "H1 SN76489",
+          "port_directions": { "OUT (7) C5 1u NP": "output" },
+          "connections": { "OUT (7) C5 1u NP": [1] },
+          "attributes": {}
+        },
+        "uJ1": {
+          "type": "J1 SN76489",
+          "port_directions": { "OUT (7) C6 1u NP": "output" },
+          "connections": { "OUT (7) C6 1u NP": [2] },
+          "attributes": {}
+        },
+        "uE1": {
+          "type": "E1 LM324a summer",
+          "port_directions": {
+            "H1 via R8 100k": "input",
+            "J1 via R9 100k": "input",
+            "bias (3)": "input",
+            "out (1) R10 100k fb": "output"
+          },
+          "connections": {
+            "H1 via R8 100k": [1],
+            "J1 via R9 100k": [2],
+            "bias (3)": [10],
+            "out (1) R10 100k fb": [3]
+          },
+          "attributes": {}
+        },
+        "bias": {
+          "type": "R6 10k, R7 10k, C21 10u",
+          "port_directions": { "mid-rail": "output" },
+          "connections": { "mid-rail": [10] },
+          "attributes": {}
+        },
+        "uE1b": {
+          "type": "LM324b follower",
+          "port_directions": {
+            "in (12)": "input",
+            "out (14) tied to (13)": "output"
+          },
+          "connections": { "in (12)": [3], "out (14) tied to (13)": [4] },
+          "attributes": {}
+        },
+        "outR": {
+          "type": "R101 1k to L",
+          "port_directions": { "from LM324": "input", "Sound Out L": "output" },
+          "connections": { "from LM324": [4], "Sound Out L": [5] },
+          "attributes": {}
+        },
+        "ampin": {
+          "type": "R3 10k, R4 51k, VR1 1k",
+          "port_directions": { "P1": "input", "wiper": "output" },
+          "connections": { "P1": [5], "wiper": [6] },
+          "attributes": {}
+        },
+        "couple": {
+          "type": "C4 4u7",
+          "port_directions": { "wiper": "input", "to IC1 (1)": "output" },
+          "connections": { "wiper": [6], "to IC1 (1)": [7] },
+          "attributes": {}
+        },
+        "uIC1": {
+          "type": "IC1 MB3730",
+          "port_directions": {
+            "in (1), gain (2) C3 22u": "input",
+            "out (5) R1 4R7 C5 100n": "output",
+            "out (6) R2 4R7 C6 100n, C1 470u": "output"
+          },
+          "connections": {
+            "in (1), gain (2) C3 22u": [7],
+            "out (5) R1 4R7 C5 100n": [8],
+            "out (6) R2 4R7 C6 100n, C1 470u": [9]
+          },
+          "attributes": {}
+        }
+      }
+    }
+  }
+}

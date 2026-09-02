@@ -12,6 +12,22 @@
 //! bit, the coin IRQ, the frame loop, and the sound subsystem (a second M6502 @
 //! 500 kHz driving two AY-3-8910s @ 1.5 MHz, with the command latch IRQ and the
 //! scanline-gated NMI). The game boots, plays, and has sound.
+//!
+//! # Schematics
+//!
+//! | Drawing | Source | Pages |
+//! |---|---|---|
+//! | `SCHEMATIC DWG SOUND I/O BURGER-TIME`, Bally Midway M051-00333-B007, sheet 9-3 | `archive.org/items/arcademanual_BurgerTime/BurgerTime.pdf` | PDF pp. 68-70, audio on 69 |
+//! | Sheet 9-5, the other board | same | PDF pp. 74-76, no audio |
+//!
+//! The audio output is transcribed in
+//! [`docs/schematics/btime-audio-output.md`](../../docs/schematics/btime-audio-output.md).
+//! **The board does not sum the two chips.** Five of the six analog channels tie
+//! to one bus; 9F's channel A crosses that bus without connecting and goes
+//! through its own band-pass at 1.13 kHz before being remixed inverted and
+//! louder. `fill_audio` below adds the two chip outputs, and [`Ay8910`] has
+//! already summed each chip's three channels, so the board's shape is not
+//! expressible at that boundary. See `phosphor-emulator-jenz`.
 
 use phosphor_core::audio::DcBlocker;
 use phosphor_core::core::bus::InterruptState;
@@ -331,9 +347,13 @@ pub struct BtimeBoard {
     /// is its reference implementation's. What was missing is the analog side
     /// between the chips and the speaker, which no board using this part can do
     /// without: a loudspeaker cannot reproduce DC and the amplifier would sit
-    /// off centre. The exact capacitor is not on a schematic to hand, so the
-    /// corner is the shared default, which is honest for a part whose only job
-    /// is to remove an offset.
+    /// off centre.
+    ///
+    /// The schematic has since been read, and it settles two things. The
+    /// POSITION reasoned above is right: C25 10 uF and C21 100 uF are both
+    /// between the chips and the speaker, and neither is inside either chip. The
+    /// CORNER is wrong: C21 into a nominal 8 ohm speaker is about 199 Hz, where
+    /// this runs at the shared 10 Hz default. See the module header.
     #[save(id = 5)]
     ay_coupling: DcBlocker,
     #[save(id = 6)]

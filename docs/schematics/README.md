@@ -112,6 +112,26 @@ section is there so that is obvious.
   exact binary ladder. Also a filter whose corner moves with the volume code, and
   two speakers where the emulator is mono. None of it modelled. Includes which
   Pac-Man scan to use and which one is cut mid-component.
+- [`starwars-audio-output.md`](starwars-audio-output.md) — the largest gap the
+  audit found. Five sources reach one summing amplifier through five different
+  resistors, so the four POKEYs are not equally weighted; there is a
+  bucket-brigade analog delay line; and the two output amplifiers form a
+  difference matrix, putting the dry signal in one channel and the delayed
+  signal in both. Star Wars is stereo on purpose and the emulator is mono.
+- [`mrdo-audio-output.md`](mrdo-audio-output.md) — Mr. Do's two SN76489s are
+  coupled per chip and summed in an op-amp, and its amplifier is a separate unit
+  behind a 34 dB attenuator. Read with the Mr. Do's Castle file: same
+  manufacturer, same power amplifier part, different output stage.
+- [`docastle-audio-output.md`](docastle-audio-output.md) — Mr. Do's Castle mixes
+  its four SN76489As through four equal resistors, which confirms the model's
+  plain sum and answers the question its catalog row asked. What follows is a
+  fixed 22 dB low shelf, a volume rheostat that for once does not move it, and a
+  bridge output into one speaker.
+- [`btime-audio-output.md`](btime-audio-output.md) — BurgerTime's Sound I/O board
+  does not sum its two AY-3-8910s. Five of the six channels share a bus and the
+  sixth is band-passed and remixed inverted, which the emulator cannot express
+  because the device has already summed each chip's channels. Includes the two
+  connections that were wrong on a first pass at ordinary magnification.
 - [`atari-pokey-audio-output.md`](atari-pokey-audio-output.md) — Missile Command
   and Tempest from POKEY to speaker. Two catalog rows that turn out to share an
   amplifier board, and whose POKEY load capacitors differ by 6.7 times where the
