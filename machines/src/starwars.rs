@@ -16,20 +16,27 @@
 //!
 //! | Drawing | Source | Pages |
 //! |---|---|---|
-//! | `STAR WARS Sound PCB`, Atari SP-225 sheets 16A and 16B | `arcade-museum.com/manuals-videogames/S/StarWars.pdf` | PDF pp. 142 and 143; the package runs 114-147 |
+//! | `STAR WARS Sound PCB`, Atari SP-225 sheets 16A and 16B | `arcade-museum.com/manuals-videogames/S/StarWars.pdf` | PDF pp. 142 and 143 |
+//! | `STAR WARS Sound PCB`, SP-225 sheet 15B, `Address Decoders` | same | PDF p. 141, for the 1/2 3J LS139 that names the four POKEY selects |
 //!
 //! The audio output is transcribed in
 //! [`docs/schematics/starwars-audio-output.md`](../../docs/schematics/starwars-audio-output.md),
-//! and it is the largest gap the Phase 9 audit found. **The four POKEYs are not
-//! weighted equally**: two reach the summing amplifier through 47k and two
-//! through 82k, 4.84 dB apart, where `end_frame_audio` uses one constant for all
-//! four. **There is a bucket-brigade analog delay line** clocked at 37.8 kHz.
-//! **And the board is stereo on purpose**, its two output amplifiers forming a
-//! difference matrix that puts the dry signal in one channel and the delayed
-//! signal in both. Only Star Wars's drawing was read; `esb` shares this file and
-//! had none. See `phosphor-emulator-82zr`.
+//! and it is the largest gap the Phase 9 audit found.
+//!
+//! **Sheet 16A's summing amplifier is now modelled**, in [`AUDIO_LEGS`] and
+//! [`StarWarsBoard::end_frame_audio`]: five sources, five different resistors,
+//! five different coupling capacitors, where this file previously had one gain
+//! for all four POKEYs and one shared 35 Hz DC block. The mapping from the
+//! sheet's `C I/O n` to this model's `pokey[n]` runs **backwards**, which is
+//! what sheet 15B settles.
+//!
+//! Still unmodelled, and still the larger half: **a bucket-brigade analog delay
+//! line** clocked at 37.8 kHz, and **a stereo difference matrix** that puts the
+//! dry signal in one channel and the delayed signal in both. This output is
+//! mono. Only Star Wars's drawing was read; `esb` shares this file and had
+//! none. See `phosphor-emulator-82zr`.
 
-use phosphor_core::audio::SampleRing;
+use phosphor_core::audio::{DcBlocker, SampleRing};
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::debug_trace::{DebugEvent, DebugEventKind, DebugTraceBuffer};
 use phosphor_core::core::display::display_settings;
@@ -842,23 +849,128 @@ pub(crate) struct StarWarsBoard {
     /// next frame refills.
     #[save_skip(default)]
     pub(crate) audio_buffer: SampleRing<i16>,
-    /// One-pole DC-block history, previous input and previous output.
+    /// The summing amplifier's five series capacitors, in [`AUDIO_LEGS`] order.
     ///
-    /// The same filter [`DcBlocker`](phosphor_core::audio::DcBlocker) runs, but
-    /// with its pole hard-coded here rather than derived from a corner
-    /// frequency, so the two are not interchangeable without moving this
-    /// board's output. Two fields rather than a tuple because a tuple is not a
-    /// shape the save-state derive encodes.
+    /// One per leg because the board has one per leg: C32, C34, C38, C40 and
+    /// C42 are each 0.1 uF in series with that leg's resistor into the virtual
+    /// ground, so each source arrives with its own high-pass and there is no
+    /// shared corner to model. This replaces a single hard-coded 35 Hz pole,
+    /// which matched the two 47k legs and was three times too low for speech.
     #[save(id = 22)]
-    pub(crate) audio_dc_prev_in: f32,
-    #[save(id = 23)]
-    pub(crate) audio_dc_prev_out: f32,
+    pub(crate) audio_legs: [DcBlocker; AUDIO_LEGS.len()],
 
     // Debug event ring (observer state — never saved in save states).
     #[save_skip]
     #[debug_events]
     pub(crate) debug_trace: DebugTraceBuffer,
 }
+
+/// One leg of the sound board's summing amplifier.
+///
+/// Sheet 16A: five sources reach the inverting input of a TL084 at 1/4 4C with
+/// **R30 12k** of feedback, each through its own series resistor and its own
+/// **0.1 uF**. The resistor sets that source's gain, `R30 / R`, and the
+/// capacitor sets that source's high-pass corner, `1 / (2*pi*R*C)`. The two are
+/// the same resistor, so on this board **a quieter source is also passed
+/// further down** — they cannot be chosen independently and are not modelled
+/// independently here.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct AudioLeg {
+    /// Series resistance into the virtual ground, in ohms. The reference
+    /// designator is in the comment on each entry of [`AUDIO_LEGS`]; it is not
+    /// a field because nothing outside a test would read it.
+    pub(crate) ohms: f32,
+}
+
+impl AudioLeg {
+    /// Inverting gain magnitude, `R30 / R`.
+    ///
+    /// The sign is dropped: all five legs invert together, so the polarity is
+    /// common to the whole mix and cancels against the stages after it. It
+    /// would matter if the board's stereo difference matrix were modelled,
+    /// which it is not.
+    const fn gain(self) -> f32 {
+        SUM_FEEDBACK_OHMS / self.ohms
+    }
+
+    /// High-pass corner from the leg's series capacitor, in Hz.
+    fn corner_hz(self) -> f32 {
+        1.0 / (std::f32::consts::TAU * self.ohms * LEG_COUPLING_FARADS)
+    }
+}
+
+/// R30, the summing amplifier's feedback resistor.
+const SUM_FEEDBACK_OHMS: f32 = 12_000.0;
+
+/// C32, C34, C38, C40 and C42 are all 0.1 uF. One constant because the board
+/// uses one value; if a revision ever differs, this moves into [`AudioLeg`].
+const LEG_COUPLING_FARADS: f32 = 100e-9;
+
+/// Scale from the summing amplifier's output into `i16`, and the one number in
+/// this path that is **not** a board quantity.
+///
+/// Nothing on these sheets calibrates an absolute level: that is set by the
+/// power amplifier and the cabinet volume, and neither is on them. So this is
+/// derived rather than chosen — the reciprocal of the largest leg gain, which
+/// is the most any single source can contribute. Speech, on the 15k leg,
+/// therefore reaches full scale on its own and no further, which is exactly the
+/// headroom the previous constants gave it (`0.50 * 2.0` was also 1.0).
+///
+/// **The consequence is that the four POKEYs now sit about 4.08 dB below where
+/// they were**, and that is worth stating rather than discovering. It is the
+/// same 4.08 dB by which the board's speech is hotter than this model's was;
+/// only the *ratio* between them is a fact, so which side moves is free, and
+/// moving the POKEYs is what keeps the loudest source from clipping. Anchoring
+/// the POKEYs instead was measured on a recorded session and took the clipped
+/// fraction from 0.10% to 1.02%, past what `audio_sanity_test` allows.
+fn output_scale() -> f32 {
+    1.0 / AUDIO_LEGS
+        .iter()
+        .map(|leg| leg.gain())
+        .fold(f32::MIN_POSITIVE, f32::max)
+}
+
+/// The five legs, **in the order the model's sources are mixed**: `pokey[0]`
+/// through `pokey[3]`, then the TMS5220.
+///
+/// # Why `pokey[0]` is the 82k leg and not the 47k one
+///
+/// The sheets name the four chips' outputs `CO0` to `CO3` and their selects
+/// `C I/O 0` to `C I/O 3`, and 16A is self-consistent about which is which:
+/// 5D takes `C I/O 0` and emits `CO0`, 4D `C I/O 1` and `CO1`, 3D `C I/O 2` and
+/// `CO2`, 2D `C I/O 3` and `CO3`. What decides the mapping to this model's
+/// index is sheet **15B**, `Address Decoders`, where the 1/2 3J LS139 generates
+/// those four selects — and **it runs backwards**:
+///
+/// | `(SA4, SA3)` | LS139 output | pin | net | chip | out | leg |
+/// |---|---|---|---|---|---|---|
+/// | 0, 0 | Y0 | 4 | `C I/O 3` | 2D | `CO3` | R27 82k |
+/// | 0, 1 | Y1 | 5 | `C I/O 2` | 3D | `CO2` | R25 82k |
+/// | 1, 0 | Y2 | 6 | `C I/O 1` | 4D | `CO1` | R23 47k |
+/// | 1, 1 | Y3 | 7 | `C I/O 0` | 5D | `CO0` | R21 47k |
+///
+/// `SA3` is the LS139's A input and `SA4` its B, so the select value is
+/// `SA4*2 + SA3`, which is exactly the index
+/// [`StarWarsBoard::quad_pokey_decode`] computes. The drawing labels its own
+/// outputs 3, 2, 1, 0 at pins 7, 6, 5, 4 — the real LS139 pinout — so the net
+/// *names* descend as the select value ascends, and `pokey[n]` is the chip the
+/// sheet calls `C I/O (3 - n)`.
+///
+/// Assuming `C I/O n` were `pokey[n]` would put the loud pair and the quiet
+/// pair the wrong way round, and would sound entirely plausible. This is the
+/// one connection the whole gain table turns on and it was read at pixel level.
+pub(crate) const AUDIO_LEGS: [AudioLeg; 5] = [
+    // pokey[0] -> C I/O 3 -> 2D -> CO3
+    AudioLeg { ohms: 82_000.0 }, // R27
+    // pokey[1] -> C I/O 2 -> 3D -> CO2
+    AudioLeg { ohms: 82_000.0 }, // R25
+    // pokey[2] -> C I/O 1 -> 4D -> CO1
+    AudioLeg { ohms: 47_000.0 }, // R23
+    // pokey[3] -> C I/O 0 -> 5D -> CO0
+    AudioLeg { ohms: 47_000.0 }, // R21
+    // TMS5220 speech, buffered by 1/4 4C through C41 0.1 uF and R28 100k.
+    AudioLeg { ohms: 15_000.0 }, // R29
+];
 
 /// IN0 bit 5: unused, and wired active-high rather than active-low like the
 /// rest of the port, so it reads 0 at rest. Every other bit is a control that
@@ -943,8 +1055,9 @@ impl StarWarsBoard {
             clock: 0,
             display_list: Vec::with_capacity(2048),
             audio_buffer: SampleRing::new(),
-            audio_dc_prev_in: 0.0,
-            audio_dc_prev_out: 0.0,
+            audio_legs: AUDIO_LEGS.map(|leg| {
+                DcBlocker::with_cutoff(leg.corner_hz(), phosphor_core::audio::host_sample_rate())
+            }),
             debug_trace: DebugTraceBuffer::new(),
         }
     }
@@ -1550,8 +1663,9 @@ impl StarWarsBoard {
         self.stick = new_yoke();
         self.push_stick();
         self.audio_buffer.clear();
-        self.audio_dc_prev_in = 0.0;
-        self.audio_dc_prev_out = 0.0;
+        for leg in &mut self.audio_legs {
+            leg.reset();
+        }
         self.bank = 0;
         self.main_map
             .remap_pages(0x60, 0x20, MainRegion::BankLow, 0);
@@ -1599,19 +1713,31 @@ impl StarWarsBoard {
         Some(&self.display_list)
     }
 
-    /// Drain the four POKEYs, mix (with a one-pole DC-blocking high-pass), and
-    /// queue signed-16-bit samples for the frontend. Called once per frame.
+    /// Drain the four POKEYs and the speech chip, run the sound board's summing
+    /// amplifier, and queue signed-16-bit samples for the frontend. Called once
+    /// per frame.
+    ///
+    /// This is sheet 16A's `SUM` node and stops there. Everything on sheet 16B
+    /// — the active filter, the R5106 bucket-brigade delay line and the stereo
+    /// difference matrix that makes `LEFT AUDIO` and `RIGHT AUDIO` — is still
+    /// unmodelled, and the output here is mono. See `phosphor-emulator-82zr`.
     pub(crate) fn end_frame_audio(&mut self) {
-        // Both constants are borrowed route gains, and the schematic has since
-        // been read against them. The board's summing amplifier gives CO0 and
-        // CO1 -0.2553 (47k legs) and CO2 and CO3 -0.1463 (82k legs), so 0.20 is
-        // the MEAN of the four and no POKEY actually has it: the ensemble level
-        // is right and the 4.84 dB spread between the pairs is missing. Speech
-        // is -0.8 on a 15k leg, which against that mean is 3.98 where 0.50/0.20
-        // is 2.5, so the board's speech sits about 4 dB hotter. See the module
-        // header and `phosphor-emulator-82zr`.
-        const POKEY_GAIN: f32 = 0.20; // MAME per-POKEY route gain
-        const SPEECH_GAIN: f32 = 0.50; // MAME TMS5220 route gain
+        // Each source is coupled by its own capacitor and scaled by its own leg,
+        // per [`AUDIO_LEGS`]. Two consequences worth stating where the code is:
+        //
+        //  - There is NO shared DC block any more, and there should not be. The
+        //    five per-leg high-passes are the board's only coupling before this
+        //    node, so each source is centred on its own corner: 19.4 Hz on the
+        //    two 82k legs, 33.9 Hz on the two 47k ones and 106.1 Hz on speech.
+        //    The 35 Hz pole this replaced matched the 47k pair and was three
+        //    times too low for the speech leg, whose corner thins a voice on
+        //    purpose.
+        //  - The board's speech-to-effects ratio is 3.98 where this model's was
+        //    2.5, about 4.08 dB, and [`output_scale`] pays for that out of the
+        //    POKEYs rather than out of the speech, so the mix as a whole is
+        //    about 4.08 dB quieter than it was. Only the ratio is a board fact;
+        //    see that function for why the level went that way and not the
+        //    other.
         let chans: [Vec<f32>; 4] = std::array::from_fn(|i| self.pokey[i].drain_audio());
         let speech = self.tms.drain_audio();
         let n = chans
@@ -1621,29 +1747,26 @@ impl StarWarsBoard {
             .max()
             .unwrap_or(0);
 
-        let (mut x1, mut y1) = (self.audio_dc_prev_in, self.audio_dc_prev_out);
+        let scale = output_scale();
         for i in 0..n {
-            let pokey = POKEY_GAIN
-                * chans
-                    .iter()
-                    .map(|c| c.get(i).copied().unwrap_or(0.0))
-                    .sum::<f32>();
-            let x = pokey + SPEECH_GAIN * speech.get(i).copied().unwrap_or(0.0);
-            // DC block (cutoff ≈ 35 Hz) then scale/clamp to i16.
-            //
-            // The board has no shared corner: each of the five summing legs
-            // carries its own 0.1 uF, giving 33.9 Hz on the two 47k legs, 19.4 Hz
-            // on the two 82k ones and 106.1 Hz on speech. This 35 Hz matches the
-            // 47k pair and is three times too low for the speech leg, whose
-            // corner is high enough to thin a voice on purpose.
-            let y = x - x1 + 0.995 * y1;
-            x1 = x;
-            y1 = y;
+            let sample = |src: &[f32]| src.get(i).copied().unwrap_or(0.0);
+            let sources = [
+                sample(&chans[0]),
+                sample(&chans[1]),
+                sample(&chans[2]),
+                sample(&chans[3]),
+                sample(&speech),
+            ];
+            let sum: f32 = self
+                .audio_legs
+                .iter_mut()
+                .zip(AUDIO_LEGS)
+                .zip(sources)
+                .map(|((coupling, leg), x)| leg.gain() * coupling.process(x))
+                .sum();
             self.audio_buffer
-                .push((y * 2.0 * 32767.0).clamp(-32767.0, 32767.0) as i16);
+                .push((sum * scale * 32767.0).clamp(-32767.0, 32767.0) as i16);
         }
-        self.audio_dc_prev_in = x1;
-        self.audio_dc_prev_out = y1;
     }
 
     /// Copy pending audio into the frontend's buffer.
@@ -2500,6 +2623,73 @@ mod tests {
         assert_eq!(StarWarsBoard::quad_pokey_decode(0x07), (0, 7));
         // Bit 5 of the offset adds 8 to the register (control lines).
         assert_eq!(StarWarsBoard::quad_pokey_decode(0x28), (1, 8));
+    }
+
+    /// The summing amplifier's five legs, held against SP-225 sheet 16A.
+    ///
+    /// This is the arithmetic the audit derived, pinned so that editing a
+    /// resistor value has to be a deliberate act. It also pins the mapping the
+    /// whole table turns on: `pokey[0]` and `pokey[1]` are the **82k** legs,
+    /// because sheet 15B's LS139 names its outputs backwards against the select
+    /// value. See [`AUDIO_LEGS`].
+    #[test]
+    fn the_summing_amplifier_matches_the_schematic() {
+        let expected = [
+            // designator, ohms, gain (R30/R), corner Hz (1/2*pi*R*C)
+            ("R27", 82_000.0, 0.146_341, 19.409),
+            ("R25", 82_000.0, 0.146_341, 19.409),
+            ("R23", 47_000.0, 0.255_319, 33.863),
+            ("R21", 47_000.0, 0.255_319, 33.863),
+            ("R29", 15_000.0, 0.800_000, 106.103),
+        ];
+        for (leg, (r, ohms, gain, corner)) in AUDIO_LEGS.iter().zip(expected) {
+            assert_eq!(leg.ohms, ohms, "{r}");
+            assert!(
+                (leg.gain() - gain).abs() < 1e-5,
+                "{r}: gain {} != {gain}",
+                leg.gain()
+            );
+            assert!(
+                (leg.corner_hz() - corner).abs() < 0.01,
+                "{r}: corner {} != {corner}",
+                leg.corner_hz()
+            );
+        }
+
+        // The two pairs are 4.84 dB apart, which is the finding item 1 exists
+        // for, and the four together are within 0.04 dB of the uniform 0.20
+        // this replaced — 0.20 was their mean, so the ensemble level does not
+        // move and only the distribution does.
+        let spread = 20.0 * (AUDIO_LEGS[3].gain() / AUDIO_LEGS[0].gain()).log10();
+        assert!((spread - 4.84).abs() < 0.01, "pair spread {spread} dB");
+        let ensemble: f32 = AUDIO_LEGS[..4].iter().map(|l| l.gain()).sum();
+        assert!(
+            (20.0 * (ensemble / 0.80).log10()).abs() < 0.04,
+            "POKEY ensemble moved: {ensemble} against 0.80"
+        );
+
+        // Speech against the POKEY mean: the board is 3.98 where the old
+        // 0.50/0.20 was 2.5, about 4.05 dB hotter.
+        let ratio = AUDIO_LEGS[4].gain() / (ensemble / 4.0);
+        assert!((ratio - 3.983).abs() < 0.01, "speech ratio {ratio}");
+        assert!((20.0 * (ratio / 2.5).log10() - 4.05).abs() < 0.01);
+    }
+
+    /// Silence in, silence out. Each leg is a coupling capacitor, and the whole
+    /// point of one is that a constant input — including an idle POKEY's zero —
+    /// settles to zero rather than to a rail.
+    #[test]
+    fn an_idle_board_produces_silence() {
+        let mut board = StarWarsBoard::new();
+        for _ in 0..8 {
+            board.end_frame_audio();
+        }
+        let mut out = vec![0i16; 4096];
+        let n = board.audio_buffer.pop_front_into(&mut out);
+        assert!(
+            out[..n].iter().all(|&s| s == 0),
+            "an idle board emitted a non-zero sample"
+        );
     }
 
     #[test]

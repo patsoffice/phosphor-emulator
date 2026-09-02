@@ -18,8 +18,9 @@ gain constants that can be held directly against the board's resistor ratios.
 |---|---|
 | Drawing | `STAR WARS Sound PCB`, Atari SP-225 sheet 16A, 2nd printing, (c) Atari Inc. 1983 |
 | Drawing | `STAR WARS Sound PCB`, SP-225 sheet 16B, same printing |
-| Read from | `arcade-museum.com/manuals-videogames/S/StarWars.pdf`, PDF pages 142 and 143, a 433 dpi scan |
-| Transcribed | 2026-09-01 |
+| Drawing | `STAR WARS Sound PCB`, SP-225 sheet 15B, `Address Decoders`, added 2026-09-02 |
+| Read from | `arcade-museum.com/manuals-videogames/S/StarWars.pdf`, PDF pages 142, 143 and 141, a 433 dpi scan |
+| Transcribed | 2026-09-01, extended 2026-09-02 |
 
 The schematics run from PDF page 114 to 147 and these two sheets carry all of the
 audio. They are the cleanest drawings in this sweep: typeset block titles, one
@@ -30,10 +31,23 @@ holds the filter, the delay and the two output amplifiers.
 
 ## What the model does today
 
-`StarWarsBoard::end_frame_audio` sums the four POKEYs with a single
-`POKEY_GAIN = 0.20`, adds the TMS5220 with `SPEECH_GAIN = 0.50`, runs one
-one-pole DC block at about 35 Hz, and scales to `i16`. Both constants are
-commented as route gains taken from the reference emulator.
+**Updated 2026-09-02.** `StarWarsBoard::end_frame_audio` now models this sheet's
+summing amplifier: five legs with the resistors and capacitors below, in
+`AUDIO_LEGS`. It previously summed the four POKEYs with a single
+`POKEY_GAIN = 0.20`, added the TMS5220 with `SPEECH_GAIN = 0.50`, and ran one
+one-pole DC block at about 35 Hz — both constants commented as route gains taken
+from the reference emulator.
+
+Everything on sheet 16B is still unmodelled and the output is still mono, so the
+delay line and the stereo matrix below remain the larger half of the gap.
+
+One consequence of restoring the board's ratios is worth recording here rather
+than only in the code. The board's speech-to-effects ratio is 4.08 dB hotter
+than the model's was, and nothing on either sheet sets an absolute level — that
+is the power amplifier and the cabinet volume, neither of which is drawn. The
+model pays for the ratio out of the POKEYs, scaling so that the loudest single
+leg reaches full scale and no further; anchoring the POKEYs instead was measured
+on a recorded session and took the clipped fraction from 0.10% to 1.02%.
 
 ## The chain
 
@@ -73,6 +87,36 @@ Three things follow, and all three are things the model does not have.
 - **Speech sits higher against the effects on the board than in the model.**
   Board: `0.8 / 0.2008` = 3.98. Model: `0.50 / 0.20` = 2.5. The board's speech is
   **about 4.05 dB louder relative to the POKEYs** than the model's.
+
+## Which chip is which, and it is not the obvious answer
+
+Read on 2026-09-02, when the model's gain table needed it. Sheet 16A is
+self-consistent — 5D takes `C I/O 0` and emits `CO0`, 4D `C I/O 1` and `CO1`, 3D
+`C I/O 2` and `CO2`, 2D `C I/O 3` and `CO3` — so the question is only what
+selects each chip. That is sheet **15B**, `Address Decoders`, where the **1/2 3J
+LS139** generates the four selects, and **it runs backwards**:
+
+| `(SA4, SA3)` | LS139 output | pin | net | chip | out | leg |
+|---|---|---|---|---|---|---|
+| 0, 0 | Y0 | 4 | `C I/O 3` | 2D | `CO3` | R27 82k |
+| 0, 1 | Y1 | 5 | `C I/O 2` | 3D | `CO2` | R25 82k |
+| 1, 0 | Y2 | 6 | `C I/O 1` | 4D | `CO1` | R23 47k |
+| 1, 1 | Y3 | 7 | `C I/O 0` | 5D | `CO0` | R21 47k |
+
+`SA3` is the LS139's A input on pin 2 and `SA4` its B on pin 3, so the select
+value is `SA4*2 + SA3`. The drawing labels its own outputs `3`, `2`, `1`, `0`
+against pins 7, 6, 5, 4, which is the real 74LS139 pinout, so the net *names*
+descend as the select value ascends.
+
+**So the sheet's `C I/O n` is the chip selected by address value `3 - n`**, and
+anything indexing the four POKEYs by `(SA4, SA3)` gets the 82k pair first. The
+natural assumption puts the loud pair and the quiet pair the wrong way round,
+and would sound entirely plausible. Both the pin numbers and the output labels
+were checked at pixel level, because the whole gain table turns on them.
+
+The one-line summary for the enable above it: `C I/O` itself comes from a second
+LS139 half at 1/2 2J on `SA12` and `SA11`, asserted at `SA12 = SA11 = 1`, which
+is the `$1800` base the sound CPU uses.
 
 The per-leg capacitors also mean each source has **its own** high-pass rather
 than one shared corner. The model's single 35 Hz block happens to match the two
@@ -138,6 +182,10 @@ The model is mono and has no delay, so it can produce neither channel.
 - Each POKEY is loaded by a **transimpedance amplifier at a virtual ground**,
   which is a third distinct POKEY interface in this sweep after Missile
   Command's 10k with 0.1 uF and Tempest's 10k with 0.015 uF.
+- **`pokey[0]` and `pokey[1]` are the 82k legs, not the 47k ones.** Sheet 15B's
+  LS139 names its outputs backwards against the select value, so an index
+  computed from `(SA4, SA3)` reaches the chips in the order `C I/O 3`, `2`, `1`,
+  `0`. This is the fact item 1 of the issue was blocked on.
 - **There is a bucket-brigade analog delay line clocked at 37.8 kHz**, with an
   active filter before it and another after it. None of it is modelled.
 - **Star Wars is stereo by construction**, with the dry signal in the difference
@@ -145,12 +193,6 @@ The model is mono and has no delay, so it can produce neither channel.
 
 ## What it does NOT establish
 
-- **Which of the model's `pokey[0..3]` is the sheet's `C I/O 0`.** The board
-  names its own chip selects `C I/O 0 P` through `C I/O 3 P` and the outputs
-  `CO0` to `CO3`, so the sheet is self-consistent, but `quad_pokey_decode`'s
-  index was not traced back to 5D, 4D, 3D and 2D. It has to be settled before
-  the two weights can be assigned, and it is the same question BurgerTime left
-  open.
 - **The delay time.** The R5106's stage count was not read off the drawing and
   its datasheet was not consulted, so the 37.8 kHz clock alone does not give a
   delay in milliseconds.
