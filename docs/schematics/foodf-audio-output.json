@@ -1,0 +1,88 @@
+{
+  "modules": {
+    "Food Fight audio: three POKEYs summed through equal resistors, then an antiphase pair": {
+      "ports": {
+        "AUDIO+ (P1-N)": { "direction": "output", "bits": [5] },
+        "AUDIO- (P1-12)": { "direction": "output", "bits": [6] }
+      },
+      "cells": {
+        "u11KL": {
+          "type": "11K/L POKEY",
+          "port_directions": { "AUD (37)": "output" },
+          "connections": { "AUD (37)": [1] },
+          "attributes": {}
+        },
+        "load1": {
+          "type": "R73 910, C54 15n",
+          "port_directions": { "AUD (37)": "input" },
+          "connections": { "AUD (37)": [1] },
+          "attributes": {}
+        },
+        "u11LM": {
+          "type": "11L/M POKEY",
+          "port_directions": { "AUD (37)": "output" },
+          "connections": { "AUD (37)": [2] },
+          "attributes": {}
+        },
+        "load2": {
+          "type": "R72 910, C53 15n",
+          "port_directions": { "AUD (37)": "input" },
+          "connections": { "AUD (37)": [2] },
+          "attributes": {}
+        },
+        "u11N": {
+          "type": "11N POKEY",
+          "port_directions": { "AUD (37)": "output" },
+          "connections": { "AUD (37)": [3] },
+          "attributes": {}
+        },
+        "load3": {
+          "type": "R74 910, C55 15n",
+          "port_directions": { "AUD (37)": "input" },
+          "connections": { "AUD (37)": [3] },
+          "attributes": {}
+        },
+        "sum": {
+          "type": "R70/R69/R71 330k, R68 22k",
+          "port_directions": {
+            "from 11K/L": "input",
+            "from 11L/M": "input",
+            "from 11N": "input",
+            "to 11/12J (10)": "output"
+          },
+          "connections": {
+            "from 11K/L": [1],
+            "from 11L/M": [2],
+            "from 11N": [3],
+            "to 11/12J (10)": [4]
+          },
+          "attributes": {}
+        },
+        "u11_12Jc": {
+          "type": "11/12J LM324c",
+          "port_directions": {
+            "in (10) +": "input",
+            "out (8) R46 10k R47 100k": "output"
+          },
+          "connections": {
+            "in (10) +": [4],
+            "out (8) R46 10k R47 100k": [5]
+          },
+          "attributes": {}
+        },
+        "u11_12Jb": {
+          "type": "11/12J LM324b",
+          "port_directions": {
+            "in (6) C48 100n R49 100k": "input",
+            "out (7) R248 100k fb": "output"
+          },
+          "connections": {
+            "in (6) C48 100n R49 100k": [5],
+            "out (7) R248 100k fb": [6]
+          },
+          "attributes": {}
+        }
+      }
+    }
+  }
+}

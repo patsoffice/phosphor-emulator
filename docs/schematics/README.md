@@ -149,6 +149,19 @@ section is there so that is obvious.
   quieter thrust is darker thrust. Also derives the 89.5 Hz / Q 7.6 band-pass
   from its six component values, which is what confirms the reference's two magic
   numbers are the circuit rather than a fit.
+- [`foodf-audio-output.md`](foodf-audio-output.md) — Food Fight's three POKEYs are
+  summed through equal 330k legs, which confirms the model's `/ 3.0`, into the
+  same gain-of-11 stage Tempest uses. Its POKEY load is 910 ohm where Tempest and
+  Missile Command use 10k. Also carries the cross-board table: six different Atari
+  POKEY interfaces, and the one amplifier board five of those games share.
+- [`quantum-audio-output.md`](quantum-audio-output.md) — Quantum's two POKEYs do
+  not reach the mixer through the same circuit. One passes an extra inverting
+  stage that is a low-pass at 32.9 Hz, so it arrives inverted and about 30 dB down
+  at 1 kHz, where the model mixes the pair equally.
+- [`ccastles-audio-output.md`](ccastles-audio-output.md) — Crystal Castles mixes
+  its two POKEYs 1:1 with a coupling capacitor per chip, which by superposition
+  makes the model's single DC block right in position as well as in ratio. What is
+  missing is a gain of 4.55 per chip, an antiphase pair, and two speakers.
 - [`dkongjr-sound-sources.md`](dkongjr-sound-sources.md), what generates Donkey
   Kong Jr.'s effect tones. Four voices off five 74LS629 VCO halves, a 4020 tap
   mux and a 16-bit LFSR, sharing not one source with the 555s the emulator plays

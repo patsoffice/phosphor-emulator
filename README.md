@@ -303,8 +303,17 @@ Six of them describe how far *modelling* has got, from `missing` through
 `implemented-needs-validation` to `validated`. The seventh, `unexamined`,
 describes how far *review* has got: the machine exists, its sound chips are
 emulated, and nobody has read the board's drawing to find out what sits between
-them and the speaker. That is the commonest state and the easiest to mistake for
-completeness, because the chip tests all pass either way.
+them and the speaker. It is the state easiest to mistake for completeness,
+because the chip tests all pass either way.
+
+**No row is `unexamined` any more.** Every entry has either had a board drawing
+read against it, transcribed in [docs/schematics/](docs/schematics/) with a
+modelling issue filed for what it found, or carries a documented blocker. That
+says nothing about how much is *modelled*: most rows are `missing`, and reaching
+`validated` is separate work. Four machines also ride on a row read on a sibling
+board — `xevious`, `dorunrun`, `dowild` and `esb` — and those rows say so, because
+three times in this audit a shared board family has not meant a shared output
+stage.
 
 This file is the source of truth for audio coverage, so it is not duplicated
 here. Tests in `src/catalog.rs` keep it honest: every registered machine must

@@ -407,12 +407,43 @@ pages 68-70, with the audio on page 69."""
 [[target]]
 id = "ccastles-output"
 machines = ["ccastles"]
-device = "machines/src/ccastles.rs"
-status = "unexamined"
+status = "missing"
 notes = """
-Two POKEYs through a SampleRing and a DcBlocker. Atari boards of this era
-generally put a filter and a summing amplifier after the POKEYs; none of that
-has been looked for."""
+EXAMINED. Atari SP-241 sheet 8B, block `Audio Output`, and sheet 2A for the
+amplifier board, transcribed at docs/schematics/ccastles-audio-output.md. The
+row's own guess was right: there IS a summing amplifier after the POKEYs, and it
+is now read.
+
+TWO OF THE MODEL'S THREE CLAIMS ARE CONFIRMED, which is why this is the smallest
+of the three Atari rows read in this pass.
+
+- THE 1:1 SUM IS THE BOARD'S. R121 and R122 are both 100k into R123 62k, so
+  `samples1 + samples2` weights the two chips exactly as the board does. Eighth
+  confirmation in this sweep.
+- THE COUPLING CAPACITOR IS REAL AND IN THE PLACE THE COMMENT SAYS. C31 and C37,
+  0.22 uF, sit ONE PER CHIP ahead of the summing resistors rather than one behind
+  the sum, but both work into 100k, so both corners are 7.23 Hz and by
+  superposition one high-pass on `a + b` is the same filter as one on each. Only
+  the corner is off: 7.23 Hz against the DcBlocker's 10 Hz default. Same shape as
+  Mr. Do's finding.
+
+WHAT IS MISSING is a voltage gain of about 4.55 per chip (220 ohm into a virtual
+ground at the net AREF with 1k of feedback, package 5B on a +12 V single supply);
+an antiphase output pair through R130 and R133 2.2k to J20; and the
+Regulator/Audio II PCB 035435-01 rev F, two TDA2002A channels into two speakers
+where this model is mono.
+
+A NEGATIVE WORTH KEEPING: C30 and C35, 0.01 uF at each POKEY pin, are a low-pass
+at AT LEAST 72.3 kHz, because R108 runs into a virtual ground. Missile Command's
+same two parts in the same two places sit at least 159 Hz. Do not model this one.
+
+NOT READ: which of pokey1 and pokey2 is 3D, which does not matter here because
+the two chains are identical part for part. No measurement.
+
+SCAN NOTE. The schematics are the last third of CCastles.pdf, not a separate
+package: page 63 is the supplement cover, sheet 1A is page 64, each side advances
+one page. Crystal-Castles-2board-schematic.pdf is a different two-page drawing of
+the two-board revision and carries no audio. Both were checked."""
 
 [[target]]
 id = "docastle-output"
@@ -613,12 +644,46 @@ arcade-museum StarWars.pdf, with all the audio on 142 and 143."""
 [[target]]
 id = "foodf-output"
 machines = ["foodf"]
-device = "machines/src/foodf.rs"
-status = "unexamined"
+status = "missing"
 notes = """
-POKEY through a DcBlocker. SP-229 sheets 7B, 8A and 8B are already recorded as
-read for this board's VIDEO in phosphor-emulator-aih3; whether the same package
-carries the audio sheet is not known and would be the cheapest place to start."""
+EXAMINED. THE ROW'S OWN QUESTION IS ANSWERED: SP-229 does carry the audio sheet.
+The same package whose sheets 7B, 8A and 8B were read for this board's VIDEO
+under phosphor-emulator-aih3 carries sheet 10A, `Food Fight Sound`, which is the
+whole of the game PCB's audio, and sheet 2B for the amplifier board. Nothing else
+had to be fetched. Transcribed at docs/schematics/foodf-audio-output.md.
+
+CONFIRMED: the three POKEYs are mixed 1:1:1. R70, R69 and R71 are all 330k into
+one node with R68 22k to ground, so each chip reaches the node at exactly 1/18
+before a non-inverting gain of 11, and `(s0 + s1 + s2) / 3.0` is the board's
+ratio. Seventh confirmation in this sweep.
+
+THE FINDING IS THE LOAD, AND IT IS A FOURTH DISTINCT ATARI POKEY INTERFACE. Each
+pin 37 sits on 910 ohm to +5 V and 0.015 uF mylar to ground, a low-pass at AT
+LEAST 11.66 kHz. Missile Command's is at least 159 Hz and Tempest's at least
+1061 Hz on the same capacitor value. One chip, four laws, none modelled.
+
+THE SUMMING STAGE IS TEMPEST'S, resistor for resistor, with a third leg: 330k
+legs, 22k to ground, 10k and 100k around an LM324 for a gain of 11. First time in
+this sweep a shared family HAS predicted a shared stage, and the part that
+differs is the same part that differed between Missile Command and Tempest.
+
+ALSO MISSING: the antiphase pair is asymmetric, because `AUDIO+` is DC-coupled
+back to pin 37 while `AUDIO-` goes through C48 0.1 uF and R49 100k at 15.92 Hz,
+and one DcBlocker at 10 Hz stands in for both; and the Regulator/Audio II PCB
+035435-01 rev G, two TDA2002A channels into two speakers where this model is
+mono. The model's DcBlocker does correspond to a real part, C6 or C15 on that
+amplifier board, exactly as on Missile Command.
+
+FIVE GAMES IN THIS CATALOG NOW END IN A REGULATOR/AUDIO II PCB: Missile Command,
+Tempest, Quantum, Food Fight and Crystal Castles. The audio half is the same
+circuit on all five and only the output coupling capacitor moves, 1000 uF on
+Missile Command's rev B and 3300 uF on every later revision read. Worth modelling
+once rather than five times.
+
+NOT READ: which of pokey[0..2] is 11K/L. The sheet names the selects AUDIO 2,
+AUDIO 1 and AUDIO 0 but they were not traced through the address decoder on sheet
+5B. Nothing here depends on it, unlike Star Wars: all three legs and all three
+loads are identical. No measurement."""
 
 [[target]]
 id = "gridlee-output"
@@ -766,10 +831,39 @@ phosphor-emulator-i8y7."""
 [[target]]
 id = "quantum-output"
 machines = ["quantum"]
-device = "machines/src/quantum.rs"
-status = "unexamined"
+status = "missing"
 notes = """
-POKEY through a DcBlocker."""
+EXAMINED. Atari SP-221 sheet 9A, block `Audio Output`, and sheet 2A for the
+amplifier board, transcribed at docs/schematics/quantum-audio-output.md.
+
+THE TWO POKEYS DO NOT REACH THE MIXER THROUGH THE SAME CIRCUIT, so the model's
+`(s0 + s1) * 0.5` is wrong in balance, in polarity and in spectrum at once, and
+no single constant can express it.
+
+Both chips land on a transimpedance amplifier, pin 37 into an LM324's inverting
+input with 1k of feedback and the net AREF on the non-inverting input. Then 2/3B
+goes C79 0.1 uF into R206 220k straight to the mixer, while 2/3D goes through an
+EXTRA INVERTING STAGE whose feedback is R212 220k in parallel with C80 0.022 uF.
+That is a low-pass at 32.88 Hz with a passband gain of -1, so 2/3D arrives
+INVERTED and -10.1 dB at 100 Hz, -22.5 dB at 440 Hz and -29.7 dB at 1 kHz. The
+mixer legs themselves ARE equal, R206 and R213 both 220k into R207 220k, so the
+asymmetry is entirely in that extra stage.
+
+WHICH OF pokey[0] AND pokey[1] IS 2/3D IS NOT ESTABLISHED and it blocks the rest,
+because it decides which chip loses its top four octaves. Same question BurgerTime
+and Star Wars left open, and unlike Food Fight and Crystal Castles it cannot be
+shrugged off here.
+
+ALSO MISSING: every coupling on the board is 0.1 uF into 220k, so every high-pass
+is 7.23 Hz where the model has one DcBlocker at 10 Hz; a symmetric antiphase pair
+on connector pins 13 and 12; and the Regulator/Audio II PCB 035435-02 rev F, two
+TDA2002A channels into two speakers where this model is mono.
+
+A DRAWING INCONSISTENCY, RECORDED AND NOT RESOLVED. AREF computes to +5 V from
+R204 220k alone, while package 3C is drawn with +5 V on pin 4, which an LM324
+cannot reconcile. Crystal Castles uses the same AREF scheme on +12 V, where it is
+unremarkable, so Quantum's pin 4 label is the likelier error. It changes none of
+the AC results. No measurement."""
 
 [[target]]
 id = "mcr2-output"

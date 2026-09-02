@@ -12,6 +12,25 @@
 //! `AddressSpace32`, the 6502 → `M68000`, and the bitmap pipeline → a tilemap +
 //! sprite pipeline.
 //!
+//! # Schematics
+//!
+//! | Drawing | Source | Pages |
+//! |---|---|---|
+//! | `Food Fight Sound`, Atari SP-229 sheet 10A, 2nd printing | `arcarc.xmission.com/PDF_Arcade_Atari_Kee/Food_Fight/Food_Fight_SP-229_2nd_Printing.pdf` | PDF p19, the whole of the game PCB's audio |
+//! | `Regulator/Audio II PCB` 035435-01 rev G, SP-229 sheet 2B | same | PDF p4 |
+//!
+//! Sheets are stored rotated 90 degrees. Sheet numbering is regular: sheet 1A is
+//! PDF page 1 and each side advances one page. The same package carries the video
+//! sheets 7B, 8A and 8B already read for this board.
+//!
+//! The audio output is transcribed in
+//! [`docs/schematics/foodf-audio-output.md`](../../docs/schematics/foodf-audio-output.md).
+//! The three POKEYs reach one node through equal 330k legs, so the `/ 3.0` below
+//! is the board's 1:1:1 weighting, confirmed. What is NOT modelled is everything
+//! else: a 910 ohm / 0.015 uF load per POKEY, a non-inverting gain of 11, an
+//! antiphase output pair whose two halves do not share a corner, and two TDA2002A
+//! channels driving two speakers. See `phosphor-emulator-034y`.
+//!
 //! Hardware reference: MAME `src/mame/atari/foodf.cpp`.
 //!
 //! ## Memory map (word bus, big-endian; base windows only, mirrors ignored)
@@ -1310,9 +1329,20 @@ impl MachineCore for FoodFightSystem {
         let len = s0.len().min(s1.len()).min(s2.len());
         let blocker = &mut self.board.dc_blocker;
         self.board.audio_buffer.extend((0..len).map(|i| {
-            // All three POKEYs are unipolar [0, 1] and idle at *zero*, so the
-            // board's coupling capacitor is what centres the mix. Subtracting a
-            // fixed 0.5 instead mapped silence to -32767 and pinned the output.
+            // All three POKEYs are unipolar [0, 1] and idle at *zero*, so a
+            // coupling capacitor is what centres the mix. Subtracting a fixed
+            // 0.5 instead mapped silence to -32767 and pinned the output.
+            //
+            // The capacitor is real but it is two connectors away: sheet 10A is
+            // DC-coupled from pin 37 to `AUDIO+`, and the first series capacitor
+            // in that path is C6 or C15, 0.22 uF, at the Regulator/Audio II
+            // board's amplifier input. Missile Command is the same arrangement.
+            // The `AUDIO-` half of the pair does have one on the game PCB, C48
+            // 0.1 uF into R49 100k at 15.9 Hz, so the two halves of the antiphase
+            // pair do not share a corner. One `DcBlocker` stands in for all of it.
+            //
+            // The `/ 3.0` is the board's: R70, R69 and R71 are all 330k into one
+            // node with R68 22k to ground, so the three chips are mixed 1:1:1.
             let mixed = (s0[i] + s1[i] + s2[i]) / 3.0;
             (blocker.process(mixed) * 2.0 * 32767.0).clamp(i16::MIN as f32, i16::MAX as f32) as i16
         }));

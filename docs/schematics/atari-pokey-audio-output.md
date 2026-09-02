@@ -9,6 +9,12 @@ the path: the same **Regulator/Audio II PCB, 035435-02**, at two revisions. What
 they do not share is the first half, and the difference between the two POKEY
 load networks is a factor of 6.7 in one capacitor.
 
+Three Atari POKEY boards read after this one — Quantum, Food Fight and Crystal
+Castles — all end in the same Regulator/Audio II PCB, and all three load pin 37
+differently again. The amplifier half below is therefore the shared one, worth
+modelling once; the table of the six interfaces is in
+[`foodf-audio-output.md`](foodf-audio-output.md).
+
 ## Provenance
 
 | | |

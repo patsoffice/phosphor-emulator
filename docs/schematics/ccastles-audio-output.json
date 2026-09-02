@@ -1,0 +1,74 @@
+{
+  "modules": {
+    "Crystal Castles audio: two POKEYs amplified, summed 1:1, then an antiphase pair": {
+      "ports": {
+        "AUDIO 1 (J20 W)": { "direction": "output", "bits": [5] },
+        "AUDIO 2 (J20 19)": { "direction": "output", "bits": [6] }
+      },
+      "cells": {
+        "u3D": {
+          "type": "3D POKEY",
+          "port_directions": { "AUD (37)": "output" },
+          "connections": { "AUD (37)": [1] },
+          "attributes": {}
+        },
+        "u5Ba": {
+          "type": "5B LM324a R109 1k",
+          "port_directions": {
+            "in (2) C30 10n R108 220": "input",
+            "out (1) AREF on (3)": "output"
+          },
+          "connections": {
+            "in (2) C30 10n R108 220": [1],
+            "out (1) AREF on (3)": [2]
+          },
+          "attributes": {}
+        },
+        "u3B": {
+          "type": "3B POKEY",
+          "port_directions": { "AUD (37)": "output" },
+          "connections": { "AUD (37)": [3] },
+          "attributes": {}
+        },
+        "u5Bc": {
+          "type": "5B LM324c R120 1k",
+          "port_directions": {
+            "in (9) C35 10n R119 220": "input",
+            "out (8) AREF on (10)": "output"
+          },
+          "connections": {
+            "in (9) C35 10n R119 220": [3],
+            "out (8) AREF on (10)": [4]
+          },
+          "attributes": {}
+        },
+        "u5Bd": {
+          "type": "5B LM324d R123 62k",
+          "port_directions": {
+            "in (13) C31 220n R121 100k": "input",
+            "in (13) C37 220n R122 100k": "input",
+            "out (14) AUD1 R130 2k2": "output"
+          },
+          "connections": {
+            "in (13) C31 220n R121 100k": [2],
+            "in (13) C37 220n R122 100k": [4],
+            "out (14) AUD1 R130 2k2": [5]
+          },
+          "attributes": {}
+        },
+        "u5Bb": {
+          "type": "5B LM324b R132 100k",
+          "port_directions": {
+            "in (6) R131 100k": "input",
+            "out (7) AUD2 R133 2k2": "output"
+          },
+          "connections": {
+            "in (6) R131 100k": [5],
+            "out (7) AUD2 R133 2k2": [6]
+          },
+          "attributes": {}
+        }
+      }
+    }
+  }
+}

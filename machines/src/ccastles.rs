@@ -1,3 +1,27 @@
+//! Atari Crystal Castles (1983) — 6502 with a bitmapped playfield and a trackball.
+//!
+//! # Schematics
+//!
+//! | Drawing | Source | Pages |
+//! |---|---|---|
+//! | `Crystal Castles PCB`, Atari SP-241 sheet 8B, 2nd printing | `arcade-museum.com/manuals-videogames/C/CCastles.pdf` | PDF p79, block `Audio Output` |
+//! | `Regulator/Audio II PCB` 035435-01 rev F, SP-241 sheet 2A | same | PDF p66 |
+//!
+//! The schematics are the last third of the operators manual, not a separate
+//! package: page 63 is the supplement cover, sheet 1A is page 64, and each side
+//! advances one page. `Crystal-Castles-2board-schematic.pdf` is a different,
+//! two-page drawing of the two-board revision and carries no audio.
+//!
+//! The audio output is transcribed in
+//! [`docs/schematics/ccastles-audio-output.md`](../../docs/schematics/ccastles-audio-output.md).
+//! The two POKEYs are summed 1:1 through equal 100k legs, so the plain sum below
+//! is the board's ratio, confirmed; and the coupling capacitor this file's comment
+//! reasons about is real, one per chip ahead of the sum, which by superposition is
+//! the same filter as one behind it. Only its corner differs: 7.23 Hz on the board
+//! against the 10 Hz default. What is NOT modelled is a voltage gain of about 4.55
+//! per chip, an antiphase output pair, and two TDA2002A channels driving two
+//! speakers. See `phosphor-emulator-fd0d`.
+
 use phosphor_core::audio::{DcBlocker, SampleRing};
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::input::{DrainPolicy, RelativeCounter};
@@ -1308,6 +1332,16 @@ impl MachineCore for CrystalCastlesSystem {
         // A coupling capacitor centres on the mean the chips actually produce
         // instead of an assumed one, which is also what the board has between
         // them and the amplifier.
+        //
+        // Read against sheet 8B, that is right in position as well as in
+        // principle, with one correction. The board's couplings are C31 and C37,
+        // 0.22 uF, ONE PER CHIP and ahead of the summing resistors rather than
+        // one behind the sum. Both work into 100k, so both corners are 7.23 Hz,
+        // and by superposition one high-pass on `a + b` is the same filter as one
+        // on each. Only the corner differs from the 10 Hz default here.
+        //
+        // The plain sum is the board's ratio too: R121 and R122 are both 100k
+        // into R123 62k, so the two chips are mixed 1:1.
         let coupling = &mut self.board.pokey_coupling;
         self.board.audio_buffer.extend((0..len).map(|i| {
             let mixed = coupling.process(samples1[i] + samples2[i]);

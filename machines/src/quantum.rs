@@ -11,6 +11,25 @@
 //! tilemap/sprite pipeline for a color vector pipeline driven by the shared
 //! [`Avg`] device, exactly as [`crate::tempest`] does for the 6502 AVG board.
 //!
+//! # Schematics
+//!
+//! | Drawing | Source | Pages |
+//! |---|---|---|
+//! | `Quantum PCB`, Atari SP-221 sheet 9A, 1st printing | `arcade-museum.com/manuals-videogames/Q/quantum-sp221.pdf` | PDF p17, block `Audio Output` |
+//! | `Regulator/Audio II PCB` 035435-02 rev F, SP-221 sheet 2A | same | PDF p3 |
+//!
+//! Sheets are stored rotated 270 degrees. Sheet numbering is regular: sheet 1A is
+//! PDF page 1 and each side advances one page.
+//!
+//! The audio output is transcribed in
+//! [`docs/schematics/quantum-audio-output.md`](../../docs/schematics/quantum-audio-output.md).
+//! The `* 0.5` below is NOT the board's law. Both POKEYs land on a transimpedance
+//! amplifier, but only one goes straight to the mixer: the other passes an extra
+//! inverting stage whose feedback is 220k in parallel with 0.022 uF, a low-pass at
+//! 32.9 Hz, so it arrives inverted and about 30 dB down at 1 kHz. Also unmodelled:
+//! 7.23 Hz couplings throughout, an antiphase output pair, and two TDA2002A
+//! channels driving two speakers. See `phosphor-emulator-1fvt`.
+//!
 //! Hardware reference: MAME `src/mame/atari/quantum.cpp`.
 //!
 //! ## Memory map (word bus, big-endian; base windows, mirrors ignored)
@@ -850,9 +869,19 @@ impl MachineCore for QuantumSystem {
         let len = s0.len().min(s1.len());
         let blocker = &mut self.board.dc_blocker;
         self.board.audio_buffer.extend((0..len).map(|i| {
-            // Both POKEYs are unipolar [0, 1] and idle at *zero*, so the board's
-            // coupling capacitor is what centres the mix. Subtracting a fixed
-            // 0.5 instead mapped silence to -32767 and pinned the output.
+            // Both POKEYs are unipolar [0, 1] and idle at *zero*, so a coupling
+            // capacitor is what centres the mix. Subtracting a fixed 0.5 instead
+            // mapped silence to -32767 and pinned the output. The board has
+            // several, all 0.1 uF into 220k, so every high-pass on it is 7.23 Hz
+            // against this blocker's 10 Hz default.
+            //
+            // The `* 0.5` is NOT the board's law, though: only one of the two
+            // chips goes straight from its transimpedance buffer to the mixer.
+            // The other passes an extra inverting stage whose feedback is R212
+            // 220k in parallel with C80 0.022 uF, a low-pass at 32.9 Hz, so it
+            // arrives inverted and about 30 dB down at 1 kHz. Which chip that is
+            // has not been traced back to `pokey[0]` and `pokey[1]`, and that is
+            // the first question in `phosphor-emulator-1fvt`.
             let mixed = (s0[i] + s1[i]) * 0.5;
             (blocker.process(mixed) * 2.0 * 32767.0).clamp(i16::MIN as f32, i16::MAX as f32) as i16
         }));

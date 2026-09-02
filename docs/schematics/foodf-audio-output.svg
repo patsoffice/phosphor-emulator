@@ -1,0 +1,135 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:s="https://github.com/nturley/netlistsvg" width="1113" height="339" viewBox="-40 -8 1113 339">
+  <style>svg {
+    stroke:#000;
+    fill:none;
+  }
+  text {
+    fill:#000;
+    stroke:none;
+    font-size:10px;
+    font-weight: bold;
+    font-family: "Courier New", monospace;
+  }
+  .nodelabel {
+    text-anchor: middle;
+  }
+  .inputPortLabel {
+    text-anchor: end;
+  }
+  .splitjoinBody {
+    fill:#000;
+  }</style>
+  <rect x="-40" y="-8" width="1113" height="339" fill="#fff" stroke="none"/>
+  <g s:type="generic" transform="translate(12,22)" s:width="30" s:height="40" id="cell_u11KL">
+    <text x="15" y="-4" class="nodelabel cell_u11KL" s:attribute="ref">11K/L POKEY</text>
+    <rect width="30" height="20" s:generic="body" class="cell_u11KL"/>
+    <g transform="translate(30,10)" s:x="30" s:y="10" s:pid="out0" id="port_u11KL~AUD (37)">
+      <text x="5" y="-4" style="fill:#000; stroke:none" class="cell_u11KL">AUD (37)</text>
+    </g>
+  </g>
+  <g s:type="generic" transform="translate(986,22)" s:width="30" s:height="40" id="cell_load1">
+    <text x="15" y="-4" class="nodelabel cell_load1" s:attribute="ref">R73 910, C54 15n</text>
+    <rect width="30" height="20" s:generic="body" class="cell_load1"/>
+    <g transform="translate(0,10)" s:x="0" s:y="10" s:pid="in0" id="port_load1~AUD (37)">
+      <text x="-3" y="-4" class="inputPortLabel cell_load1">AUD (37)</text>
+    </g>
+  </g>
+  <g s:type="generic" transform="translate(12,109.5)" s:width="30" s:height="40" id="cell_u11LM">
+    <text x="15" y="-4" class="nodelabel cell_u11LM" s:attribute="ref">11L/M POKEY</text>
+    <rect width="30" height="20" s:generic="body" class="cell_u11LM"/>
+    <g transform="translate(30,10)" s:x="30" s:y="10" s:pid="out0" id="port_u11LM~AUD (37)">
+      <text x="5" y="-4" style="fill:#000; stroke:none" class="cell_u11LM">AUD (37)</text>
+    </g>
+  </g>
+  <g s:type="generic" transform="translate(986,288)" s:width="30" s:height="40" id="cell_load2">
+    <text x="15" y="-4" class="nodelabel cell_load2" s:attribute="ref">R72 910, C53 15n</text>
+    <rect width="30" height="20" s:generic="body" class="cell_load2"/>
+    <g transform="translate(0,10)" s:x="0" s:y="10" s:pid="in0" id="port_load2~AUD (37)">
+      <text x="-3" y="-4" class="inputPortLabel cell_load2">AUD (37)</text>
+    </g>
+  </g>
+  <g s:type="generic" transform="translate(12,220)" s:width="30" s:height="40" id="cell_u11N">
+    <text x="15" y="-4" class="nodelabel cell_u11N" s:attribute="ref">11N POKEY</text>
+    <rect width="30" height="20" s:generic="body" class="cell_u11N"/>
+    <g transform="translate(30,10)" s:x="30" s:y="10" s:pid="out0" id="port_u11N~AUD (37)">
+      <text x="5" y="-4" style="fill:#000; stroke:none" class="cell_u11N">AUD (37)</text>
+    </g>
+  </g>
+  <g s:type="generic" transform="translate(986,220)" s:width="30" s:height="40" id="cell_load3">
+    <text x="15" y="-4" class="nodelabel cell_load3" s:attribute="ref">R74 910, C55 15n</text>
+    <rect width="30" height="20" s:generic="body" class="cell_load3"/>
+    <g transform="translate(0,10)" s:x="0" s:y="10" s:pid="in0" id="port_load3~AUD (37)">
+      <text x="-3" y="-4" class="inputPortLabel cell_load3">AUD (37)</text>
+    </g>
+  </g>
+  <g s:type="generic" transform="translate(188,89.5)" s:width="30" s:height="40" id="cell_sum">
+    <text x="15" y="-4" class="nodelabel cell_sum" s:attribute="ref">R70/R69/R71 330k, R68 22k</text>
+    <rect width="30" height="60" s:generic="body" class="cell_sum"/>
+    <g transform="translate(0,10)" s:x="0" s:y="10" s:pid="in0" id="port_sum~from 11K/L">
+      <text x="-3" y="-4" class="inputPortLabel cell_sum">from 11K/L</text>
+    </g>
+    <g transform="translate(0,30)" s:x="0" s:y="10" s:pid="in0" id="port_sum~from 11L/M">
+      <text x="-3" y="-4" class="inputPortLabel cell_sum">from 11L/M</text>
+    </g>
+    <g transform="translate(0,50)" s:x="0" s:y="10" s:pid="in0" id="port_sum~from 11N">
+      <text x="-3" y="-4" class="inputPortLabel cell_sum">from 11N</text>
+    </g>
+    <g transform="translate(30,10)" s:x="30" s:y="10" s:pid="out0" id="port_sum~to 11/12J (10)">
+      <text x="5" y="-4" style="fill:#000; stroke:none" class="cell_sum">to 11/12J (10)</text>
+    </g>
+  </g>
+  <g s:type="generic" transform="translate(394,89.5)" s:width="30" s:height="40" id="cell_u11_12Jc">
+    <text x="15" y="-4" class="nodelabel cell_u11_12Jc" s:attribute="ref">11/12J LM324c</text>
+    <rect width="30" height="20" s:generic="body" class="cell_u11_12Jc"/>
+    <g transform="translate(0,10)" s:x="0" s:y="10" s:pid="in0" id="port_u11_12Jc~in (10) +">
+      <text x="-3" y="-4" class="inputPortLabel cell_u11_12Jc">in (10) +</text>
+    </g>
+    <g transform="translate(30,10)" s:x="30" s:y="10" s:pid="out0" id="port_u11_12Jc~out (8) R46 10k R47 100k">
+      <text x="5" y="-4" style="fill:#000; stroke:none" class="cell_u11_12Jc">out (8) R46 10k R47 100k</text>
+    </g>
+  </g>
+  <g s:type="generic" transform="translate(750,154.5)" s:width="30" s:height="40" id="cell_u11_12Jb">
+    <text x="15" y="-4" class="nodelabel cell_u11_12Jb" s:attribute="ref">11/12J LM324b</text>
+    <rect width="30" height="20" s:generic="body" class="cell_u11_12Jb"/>
+    <g transform="translate(0,10)" s:x="0" s:y="10" s:pid="in0" id="port_u11_12Jb~in (6) C48 100n R49 100k">
+      <text x="-3" y="-4" class="inputPortLabel cell_u11_12Jb">in (6) C48 100n R49 100k</text>
+    </g>
+    <g transform="translate(30,10)" s:x="30" s:y="10" s:pid="out0" id="port_u11_12Jb~out (7) R248 100k fb">
+      <text x="5" y="-4" style="fill:#000; stroke:none" class="cell_u11_12Jb">out (7) R248 100k fb</text>
+    </g>
+  </g>
+  <g s:type="outputExt" transform="translate(943,90)" s:width="30" s:height="20" id="cell_AUDIO+ (P1-N)">
+    <text x="15" y="-4" class="nodelabel cell_AUDIO+ (P1-N)" s:attribute="ref">AUDIO+ (P1-N)</text>
+    <s:alias val="$_outputExt_"/>
+    <path d="M30,0 L30,20 L15,20 L0,10 L15,0 Z" class="cell_AUDIO+ (P1-N)"/>
+    <g s:x="0" s:y="10" s:pid="A"/>
+  </g>
+  <g s:type="outputExt" transform="translate(937,155)" s:width="30" s:height="20" id="cell_AUDIO- (P1-12)">
+    <text x="15" y="-4" class="nodelabel cell_AUDIO- (P1-12)" s:attribute="ref">AUDIO- (P1-12)</text>
+    <s:alias val="$_outputExt_"/>
+    <path d="M30,0 L30,20 L15,20 L0,10 L15,0 Z" class="cell_AUDIO- (P1-12)"/>
+    <g s:x="0" s:y="10" s:pid="A"/>
+  </g>
+  <line x1="43" x2="986" y1="32.5" y2="32.5" class="net_1"/>
+  <line x1="43" x2="102" y1="32.5" y2="32.5" class="net_1"/>
+  <line x1="102" x2="102" y1="32.5" y2="100" class="net_1"/>
+  <circle cx="102" cy="32.5" r="2" style="fill:#000" class="net_1"/>
+  <line x1="102" x2="188" y1="100" y2="100" class="net_1"/>
+  <line x1="43" x2="102" y1="120" y2="120" class="net_2"/>
+  <line x1="102" x2="102" y1="120" y2="298.5" class="net_2"/>
+  <circle cx="102" cy="120" r="2" style="fill:#000" class="net_2"/>
+  <line x1="102" x2="986" y1="298.5" y2="298.5" class="net_2"/>
+  <line x1="43" x2="188" y1="120" y2="120" class="net_2"/>
+  <line x1="43" x2="986" y1="230.5" y2="230.5" class="net_3"/>
+  <line x1="43" x2="112" y1="230.5" y2="230.5" class="net_3"/>
+  <line x1="112" x2="112" y1="230.5" y2="140" class="net_3"/>
+  <circle cx="112" cy="230.5" r="2" style="fill:#000" class="net_3"/>
+  <line x1="112" x2="188" y1="140" y2="140" class="net_3"/>
+  <line x1="219" x2="394" y1="100" y2="100" class="net_4"/>
+  <line x1="425" x2="580" y1="100" y2="100" class="net_5"/>
+  <line x1="580" x2="580" y1="100" y2="165" class="net_5"/>
+  <circle cx="580" cy="100" r="2" style="fill:#000" class="net_5"/>
+  <line x1="580" x2="750" y1="165" y2="165" class="net_5"/>
+  <line x1="425" x2="943" y1="100" y2="100" class="net_5"/>
+  <line x1="781" x2="937" y1="165" y2="165" class="net_6"/>
+</svg>

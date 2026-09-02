@@ -1,0 +1,86 @@
+{
+  "modules": {
+    "Quantum audio: two POKEYs, one of them band-limited and inverted before the mixer": {
+      "ports": {
+        "AUDIO+ (13)": { "direction": "output", "bits": [6] },
+        "AUDIO- (12)": { "direction": "output", "bits": [7] }
+      },
+      "cells": {
+        "u23B": {
+          "type": "2/3B POKEY",
+          "port_directions": { "AUD (37)": "output" },
+          "connections": { "AUD (37)": [1] },
+          "attributes": {}
+        },
+        "u3Ab": {
+          "type": "3A LM324b R205 1k",
+          "port_directions": {
+            "in (6) - AREF on (5)": "input",
+            "out (7)": "output"
+          },
+          "connections": {
+            "in (6) - AREF on (5)": [1],
+            "out (7)": [2]
+          },
+          "attributes": {}
+        },
+        "u23D": {
+          "type": "2/3D POKEY",
+          "port_directions": { "AUD (37)": "output" },
+          "connections": { "AUD (37)": [3] },
+          "attributes": {}
+        },
+        "u3Cc": {
+          "type": "3C LM324c R210 1k",
+          "port_directions": {
+            "in (9) - AREF on (10)": "input",
+            "out (8)": "output"
+          },
+          "connections": {
+            "in (9) - AREF on (10)": [3],
+            "out (8)": [4]
+          },
+          "attributes": {}
+        },
+        "u3Cb": {
+          "type": "3C LM324b R212 220k C80 22n",
+          "port_directions": {
+            "in (6) C55 100n R211 220k": "input",
+            "out (7) LP 32.9 Hz": "output"
+          },
+          "connections": {
+            "in (6) C55 100n R211 220k": [4],
+            "out (7) LP 32.9 Hz": [5]
+          },
+          "attributes": {}
+        },
+        "u3Ac": {
+          "type": "3A LM324c R207 220k",
+          "port_directions": {
+            "in (9) C79 100n R206 220k": "input",
+            "in (9) C81 100n R213 220k": "input",
+            "out (8) AUD1": "output"
+          },
+          "connections": {
+            "in (9) C79 100n R206 220k": [2],
+            "in (9) C81 100n R213 220k": [5],
+            "out (8) AUD1": [6]
+          },
+          "attributes": {}
+        },
+        "u3Aa": {
+          "type": "3A LM324a R209 220k",
+          "port_directions": {
+            "in (2) R208 220k": "input",
+            "out (1) AUD 2": "output"
+          },
+          "connections": {
+            "in (2) R208 220k": [6],
+            "out (1) AUD 2": [7]
+          },
+          "attributes": {}
+        }
+      }
+    }
+  }
+}
