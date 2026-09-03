@@ -361,7 +361,11 @@ pub fn run(
         .vector_display_list()
         .map(|_| crate::vector_gl::VectorRenderer::new());
 
-    let audio_state = crate::audio::init(&sdl_audio, machine.audio_sample_rate());
+    let audio_state = crate::audio::init(
+        &sdl_audio,
+        machine.audio_sample_rate(),
+        machine.audio_channels(),
+    );
     let mut audio_started = false;
     // Say each once. These are standing conditions, not per-frame events.
     let mut audio_overrun_reported = false;
@@ -379,7 +383,16 @@ pub fn run(
     // orientation, keeping the common path zero-copy.
     let mut framebuffer = vec![0u8; buffer_size];
     let mut oriented = vec![0u8; buffer_size];
-    let mut audio_scratch = vec![0i16; 2048];
+    // Sized for a frame of the machine's audio with room to spare, so the drain
+    // loop below normally completes in one pass. It is correctness-neutral —
+    // the loop runs until the machine is empty whatever this holds — but a
+    // buffer that fits keeps the common path to a single call.
+    let mut audio_scratch =
+        vec![
+            0i16;
+            ((machine.audio_sample_rate() as usize * machine.audio_channels() as usize) / 30)
+                .clamp(2048, 1 << 16)
+        ];
     // Optional live-gameplay audio recording: tee every produced sample here and
     // write the WAV on exit. `Some` only when `--record-wav` was passed.
     let mut audio_recording: Option<Vec<i16>> = record_wav.map(|_| Vec::new());
@@ -1146,14 +1159,32 @@ pub fn run(
 
         // Drain audio samples only when a full frame was executed
         if frame_executed && let Some((ref device, ref ring, _)) = audio_state {
-            let n = machine.fill_audio(&mut audio_scratch);
-            if n > 0 {
+            // Drain the machine's ring EMPTY, not one scratch buffer's worth.
+            //
+            // A single `fill_audio` per frame silently caps the frontend at
+            // `audio_scratch.len()` samples per frame. That was invisible while
+            // every machine was mono and a frame's audio fitted, and it broke
+            // the moment one did not: Star Wars at 44.1 kHz stereo produces
+            // about 2205 samples per frame against a 2048-sample scratch, so
+            // the frontend delivered 93% of what the sound card consumed and
+            // underran continuously while the machine's own ring overflowed.
+            //
+            // Every other consumer in the tree — the harness, `disasm`, the
+            // script session — already loops. This is the one that did not.
+            let mut n = machine.fill_audio(&mut audio_scratch);
+            let mut produced = 0usize;
+            while n > 0 {
+                produced += n;
                 if let Some(rec) = audio_recording.as_mut() {
                     rec.extend_from_slice(&audio_scratch[..n]);
                 }
                 // Lock-free: the callback never waits on this thread. A short
                 // write means the sound card is behind, which the ring counts.
                 ring.push_slice(&audio_scratch[..n]);
+                n = machine.fill_audio(&mut audio_scratch);
+            }
+            let n = produced;
+            if n > 0 {
                 // Hold playback until the ring is half full. Starting with a
                 // nearly-empty ring guarantees the callback underruns until the
                 // emulator gets ahead; a prefill costs ~90 ms of startup delay
@@ -1591,7 +1622,8 @@ pub fn run(
     // Flush any recorded gameplay audio to the requested WAV.
     if let (Some(path), Some(rec)) = (record_wav, audio_recording) {
         let rate = machine.audio_sample_rate();
-        match crate::headless::write_wav(&rec, rate, path) {
+        let channels = machine.audio_channels();
+        match crate::headless::write_wav(&rec, rate, channels, path) {
             Ok(()) => println!("recorded {} samples @ {rate} Hz to {path}", rec.len()),
             Err(e) => eprintln!("failed to write {path}: {e}"),
         }

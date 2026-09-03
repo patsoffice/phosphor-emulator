@@ -43,8 +43,9 @@ pub fn run(machine: &mut dyn FrontendMachine, frames: u32, out: &str) {
 
     if !audio.is_empty() {
         let rate = machine.audio_sample_rate();
+        let channels = machine.audio_channels();
         let wav_path = format!("{out}.wav");
-        match write_wav(&audio, rate, &wav_path) {
+        match write_wav(&audio, rate, channels, &wav_path) {
             Ok(()) => println!(
                 "headless: wrote {wav_path} ({} samples @ {rate} Hz)",
                 audio.len()
@@ -63,9 +64,14 @@ fn write_png(rgb24: &[u8], width: u32, height: u32, path: &str) -> io::Result<()
     writer.write_image_data(rgb24).map_err(io::Error::other)
 }
 
-/// Write mono 16-bit PCM as a canonical 44-byte-header WAV.
-pub(crate) fn write_wav(samples: &[i16], rate: u32, path: &str) -> io::Result<()> {
+/// Write interleaved 16-bit PCM as a canonical 44-byte-header WAV.
+///
+/// `channels` comes from the machine. A stereo capture written with a mono
+/// header plays at half speed with the channels alternating.
+pub(crate) fn write_wav(samples: &[i16], rate: u32, channels: u32, path: &str) -> io::Result<()> {
     let mut f = BufWriter::new(File::create(Path::new(path))?);
+    let channels = channels.clamp(1, 2) as u16;
+    let block_align = channels * 2;
     let data_bytes = (samples.len() * 2) as u32;
     f.write_all(b"RIFF")?;
     f.write_all(&(36 + data_bytes).to_le_bytes())?;
@@ -73,10 +79,10 @@ pub(crate) fn write_wav(samples: &[i16], rate: u32, path: &str) -> io::Result<()
     f.write_all(b"fmt ")?;
     f.write_all(&16u32.to_le_bytes())?; // fmt chunk size
     f.write_all(&1u16.to_le_bytes())?; // PCM
-    f.write_all(&1u16.to_le_bytes())?; // mono
+    f.write_all(&channels.to_le_bytes())?; // channels
     f.write_all(&rate.to_le_bytes())?;
-    f.write_all(&(rate * 2).to_le_bytes())?; // byte rate
-    f.write_all(&2u16.to_le_bytes())?; // block align
+    f.write_all(&(rate * block_align as u32).to_le_bytes())?; // byte rate
+    f.write_all(&block_align.to_le_bytes())?; // block align
     f.write_all(&16u16.to_le_bytes())?; // bits per sample
     f.write_all(b"data")?;
     f.write_all(&data_bytes.to_le_bytes())?;

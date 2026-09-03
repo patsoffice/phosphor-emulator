@@ -3,11 +3,19 @@ use std::sync::atomic::{AtomicBool, AtomicI16, AtomicU64, AtomicUsize, Ordering}
 
 use sdl2::audio::{AudioCallback, AudioDevice, AudioSpecDesired};
 
-/// Number of samples over which to fade in/out (~5.8 ms at 44.1 kHz).
-const FADE_SAMPLES: u32 = 256;
+/// Number of frames over which to fade in/out (~5.8 ms at 44.1 kHz).
+///
+/// Frames, not samples: a stereo machine's fade must last the same *time* as a
+/// mono one's, not half of it.
+const FADE_FRAMES: u32 = 256;
 
-/// Capacity of the transport ring, in samples — about 186 ms at 44.1 kHz.
-const RING_CAPACITY: usize = 8192;
+/// Capacity of the transport ring, in frames — about 186 ms at 44.1 kHz.
+///
+/// Frames for the same reason. The prefill below waits for half of this before
+/// starting playback, and that margin is a duration: sizing the ring in samples
+/// would silently halve it for a stereo machine, which is exactly the margin
+/// that absorbs frame-time jitter.
+const RING_CAPACITY_FRAMES: usize = 8192;
 
 // ---------------------------------------------------------------------------
 // Lock-free transport
@@ -194,6 +202,9 @@ pub(crate) struct AudioPlayer {
     /// Last sample value — held on underrun to avoid pops.
     last_sample: i16,
     fade_in_pos: u32,
+    /// [`FADE_FRAMES`] scaled by the channel count, so the fade lasts the same
+    /// time on a stereo machine as on a mono one.
+    fade_samples: u32,
     fading_out: Arc<AtomicBool>,
     fade_out_pos: u32,
 }
@@ -213,13 +224,13 @@ impl AudioCallback for AudioPlayer {
                 self.last_sample
             };
 
-            if self.fade_in_pos < FADE_SAMPLES {
-                let gain = self.fade_in_pos as f32 / FADE_SAMPLES as f32;
+            if self.fade_in_pos < self.fade_samples {
+                let gain = self.fade_in_pos as f32 / self.fade_samples as f32;
                 *sample = (raw as f32 * gain) as i16;
                 self.fade_in_pos += 1;
             } else if self.fading_out.load(Ordering::Relaxed) {
-                if self.fade_out_pos < FADE_SAMPLES {
-                    let gain = 1.0 - (self.fade_out_pos as f32 / FADE_SAMPLES as f32);
+                if self.fade_out_pos < self.fade_samples {
+                    let gain = 1.0 - (self.fade_out_pos as f32 / self.fade_samples as f32);
                     *sample = (raw as f32 * gain) as i16;
                     self.fade_out_pos += 1;
                 } else {
@@ -281,28 +292,38 @@ pub fn granted_output_rate(sdl_audio: &sdl2::AudioSubsystem, preferred: u32) -> 
 ///
 /// `sample_rate` is expected to be the rate [`granted_output_rate`] already
 /// negotiated, so the device opens at exactly what the machine is producing.
+/// `channels` is the machine's [`audio_channels`], 1 for almost every board and
+/// 2 for the one that is genuinely stereo. The transport below carries a flat
+/// stream of samples either way, because that is what SDL wants: a stereo
+/// machine writes interleaved frames and the callback hands them straight on.
+///
+/// [`audio_channels`]: phosphor_core::core::machine::AudioSource::audio_channels
 pub fn init(
     sdl_audio: &sdl2::AudioSubsystem,
     sample_rate: u32,
+    channels: u32,
 ) -> Option<(AudioDevice<AudioPlayer>, AudioRing, FadeOut)> {
     if sample_rate == 0 {
         return None;
     }
 
-    let ring: AudioRing = Arc::new(SpscRing::new(RING_CAPACITY));
+    let channels = channels.clamp(1, 2);
+    let ring: AudioRing = Arc::new(SpscRing::new(RING_CAPACITY_FRAMES * channels as usize));
     let fade_out: FadeOut = Arc::new(AtomicBool::new(false));
 
     let desired_spec = AudioSpecDesired {
         freq: Some(sample_rate as i32),
-        channels: Some(1),
+        channels: Some(channels as u8),
         samples: Some(1024), // ~23.2 ms at 44100 Hz
     };
 
+    let fade_samples = FADE_FRAMES * channels;
     let device = sdl_audio
         .open_playback(None, &desired_spec, |_| AudioPlayer {
             ring: Arc::clone(&ring),
             last_sample: 0,
             fade_in_pos: 0,
+            fade_samples,
             fading_out: Arc::clone(&fade_out),
             fade_out_pos: 0,
         })
@@ -330,7 +351,7 @@ pub fn init(
 /// Duration to sleep after signalling fade-out, allowing the callback
 /// to ramp down before the device is paused.
 pub fn fade_out_duration() -> std::time::Duration {
-    // FADE_SAMPLES at 44100 Hz ≈ 5.8 ms; round up to 10 ms for safety.
+    // FADE_FRAMES at 44100 Hz ≈ 5.8 ms; round up to 10 ms for safety.
     std::time::Duration::from_millis(10)
 }
 
@@ -342,6 +363,22 @@ mod tests {
     fn capacity_rounds_up_to_a_power_of_two() {
         assert_eq!(SpscRing::new(1000).capacity(), 1024);
         assert_eq!(SpscRing::new(8192).capacity(), 8192);
+    }
+
+    /// The transport must hold the same *duration* whatever the channel count.
+    ///
+    /// The ring is sized in frames and allocated in samples, and the prefill
+    /// that keeps the callback from starving waits for half of it. Sizing it in
+    /// samples instead halves that margin for a stereo machine, which is a
+    /// jitter margin quietly disappearing rather than a visible failure.
+    #[test]
+    fn the_ring_holds_the_same_duration_in_mono_and_stereo() {
+        let ms = |channels: usize| {
+            let ring = SpscRing::new(RING_CAPACITY_FRAMES * channels);
+            (ring.capacity() / channels) as f64 * 1000.0 / 44_100.0
+        };
+        assert!((ms(1) - ms(2)).abs() < 1e-9, "{} vs {}", ms(1), ms(2));
+        assert!((ms(1) - 185.8).abs() < 0.5, "{} ms", ms(1));
     }
 
     #[test]
