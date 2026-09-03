@@ -4,10 +4,12 @@ What Atari's Star Wars Sound PCB does between its four POKEYs, its speech chip
 and the cabinet. Read for `phosphor-emulator-discrete-sound-fidelity-l5r3.10`,
 the project-wide audit. The model is `machines/src/starwars.rs`.
 
-This is the largest gap the sweep has found. The board has **an analog delay
-line** and **a deliberate stereo matrix**, and the model has neither; and the
-five sources it mixes arrive at the summing amplifier through five different
-resistors, where the model uses two constants.
+This was the largest gap the sweep found, and it is now closed. The board has
+**an analog delay line** and **a deliberate stereo matrix**, and the model had
+neither; the five sources it mixes arrive at the summing amplifier through five
+different resistors, where the model used two constants; and two Butterworth
+sections at 3.47 kHz that nothing corresponded to make the whole board much
+darker than the emulator was.
 
 It is also the first board in this sweep where the model has explicit per-source
 gain constants that can be held directly against the board's resistor ratios.
@@ -31,23 +33,31 @@ holds the filter, the delay and the two output amplifiers.
 
 ## What the model does today
 
-**Updated 2026-09-02.** `StarWarsBoard::end_frame_audio` now models this sheet's
-summing amplifier: five legs with the resistors and capacitors below, in
-`AUDIO_LEGS`. It previously summed the four POKEYs with a single
-`POKEY_GAIN = 0.20`, added the TMS5220 with `SPEECH_GAIN = 0.50`, and ran one
-one-pole DC block at about 35 Hz — both constants commented as route gains taken
-from the reference emulator.
+**Updated 2026-09-02, and both sheets are now modelled.**
+`StarWarsBoard::end_frame_audio` runs the five summing legs, both Sallen-Key
+sections, the 512-stage delay with its swept clock, and the stereo matrix, and
+the machine declares two channels. It previously summed the four POKEYs with a
+single `POKEY_GAIN = 0.20`, added the TMS5220 with `SPEECH_GAIN = 0.50`, ran one
+one-pole DC block at about 35 Hz, and emitted mono.
 
-Everything on sheet 16B is still unmodelled and the output is still mono, so the
-delay line and the stereo matrix below remain the larger half of the gap.
+Two things about level are worth recording here rather than only in the code,
+because neither is a board fact and both change what the emulator sounds like.
 
-One consequence of restoring the board's ratios is worth recording here rather
-than only in the code. The board's speech-to-effects ratio is 4.08 dB hotter
-than the model's was, and nothing on either sheet sets an absolute level — that
-is the power amplifier and the cabinet volume, neither of which is drawn. The
-model pays for the ratio out of the POKEYs, scaling so that the loudest single
-leg reaches full scale and no further; anchoring the POKEYs instead was measured
-on a recorded session and took the clipped fraction from 0.10% to 1.02%.
+- The board's speech-to-effects ratio is 4.08 dB hotter than the model's was.
+  Nothing on either sheet sets an absolute level — that is the power amplifier
+  and the cabinet volume, neither of which is drawn — so the model pays for the
+  ratio out of the POKEYs. Anchoring the POKEYs instead was measured on a
+  recorded session and took the clipped fraction from 0.10% to 1.02%.
+- A source now reaches each output **twice**, dry and delayed, so the scale
+  reserves a factor of two for the pair. That was left out on a first pass, on
+  the argument that the two only add for a sustained tone at a multiple of
+  `1/delay`; measuring said otherwise, taking clipping from 0.10% to 0.58% and
+  the RMS up 2.5 dB. With the factor in, clipping is 0.009%.
+
+What is still **not** modelled: the R5106 samples at half its clock and this
+does not, because the 3.47 kHz sections either side make that inaudible; and
+`C51` into the delay line's 68k bias network is a 5 Hz high-pass, left out as
+below the band rather than modelled and ignored.
 
 ## The chain
 
@@ -124,20 +134,64 @@ than one shared corner. The model's single 35 Hz block happens to match the two
 **three times too low for speech**, whose leg rolls off below 106 Hz. That last
 one is in a range where it audibly thins a voice, and it looks deliberate.
 
-## The analog delay, which is not modelled at all
+## The two filters are Butterworth, and the arithmetic says so
 
-Sheet 16B takes `SUM` into an active filter around a TL084 at 3C, built from R39
-and R40 12k with C48, C49 and C50 all 0.0027 uF, and out through C51 0.47 uF as
-the net **`AUD`**, with an `AUDIO T.P.` test point at TP8.
+Read properly on 2026-09-02, when the model needed them. Sheet 16B has the same
+section twice: R39/R40 12k with C48, C49 and C50 in the `Filter` box between
+`SUM` and `AUD`, and R46/R47 12k with C56, C57 and C58 after the delay line.
 
-`AUD` then drives an **R5106 bucket-brigade delay line** at 3B, clocked at
-**37.8 kHz** by a 556 in the `Delay Clock` block, with R44 100 and C53/C54 on its
-supply, C55 0.1 uF and R45 470k on its output, and a further TL084 stage through
-R46 and R47 12k with C56, C57 and C58 0.0027 uF smoothing the clock out of the
-recovered signal.
+The paired capacitors are the thing to notice. **C48 and C49 are in parallel**,
+both from the R39/R40 node to the op-amp's output, and the op-amp's inverting
+input is tied to that output — a unity-gain follower. So the section is a
+Sallen-Key low-pass with a bridging capacitor of 0.0054 uF and a shunt one of
+0.0027 uF against equal 12k resistors:
 
-An analog delay is the whole reason this board sounds the way it does, and
-nothing in the model corresponds to any part of it.
+```text
+f0 = 1 / (2*pi*sqrt(R1*R2*C1*C2))     = 3473 Hz
+Q  = sqrt(R1*R2*C1*C2) / (C2*(R1+R2)) = 0.7071
+```
+
+`Q = 1/sqrt(2)` is **exactly Butterworth**, which is what equal resistors and
+`C1 = 2*C2` always give. The board got there by using one capacitor value and
+doubling it, and two identical parts in parallel is usually that.
+
+The dry path passes one of these sections and the delayed path passes two, so
+**this board is far darker than an unfiltered POKEY mix**. It is the largest
+audible difference the whole audit has produced.
+
+## The delay line, its 512 stages, and a clock that sweeps
+
+`AUD` drives an **R5106 bucket-brigade delay line** at 3B through C51 0.47 uF,
+with R44 100 and C53/C54 on its supply, R41 68k and R42 12k biasing `VBB` through
+R43 1500 and C52, and C55 0.1 uF with R45 470k recovering its output.
+
+**The stage count is on none of the drawings.** The schematic prints only
+`R5106`; the `Sound PCB Assembly Parts List` on **page 84 of the same manual**
+calls 3B a `512 Delay Line Integrated Circuit`, Atari part **137310-001**. That
+is what turns a clock into a time: `512 / (2 * 37.8 kHz)` = **6.77 ms**.
+
+The `Delay Clock` box is where the transcription was thinnest, and it is not one
+oscillator but two halves of a 556 with an op-amp between them.
+
+- **The second half is the clock.** R33 4700, R34 4700 and C46 0.0027 uF give
+  `1.44 / ((R33 + 2*R34) * C46)` = **37.8 kHz**, which is the figure printed on
+  the sheet. Derived, not taken on trust.
+- **The first half is an LFO, and its square output is unused.** R31 560k, R32
+  560k and C43 0.1 uF give **8.57 Hz**, and pin 5, `OUT`, is marked **`n.c.`**.
+  What the board taps is the **timing capacitor itself**, which ramps between
+  `Vcc/3` and `2*Vcc/3` — a 4 V triangle, and the sheet labels that net `8Hz`
+  with a triangle symbol.
+- **It modulates the clock.** `1/4 2B` buffers the triangle, R35 2.2k against
+  R38 470 divides it to 0.176, and C47 couples it onto the second half's
+  control-voltage pin, which otherwise sits at `2/3 Vcc`. Working the 555's
+  charge time for `8 +/- 0.352` V gives **35.5 kHz to 40.3 kHz**, so the delay
+  sweeps **6.36 ms to 7.23 ms** at 8.57 Hz.
+- **The game switches it.** `PA3` drives Q4 2N3904 through R37 10k, and Q4's
+  collector shunts the modulation node through R36 15 ohm. PA3 high collapses
+  the divider to 0.7% and pins the clock; PA3 low lets it sweep.
+
+So this is not a fixed delay, it is a **flanger under program control**, which
+is a different thing to model and a different thing to hear.
 
 ## Star Wars is stereo, and the matrix is deliberate
 
@@ -168,7 +222,14 @@ entirely in the difference channel and the delayed signal entirely in the sum.**
 That is a difference matrix, built on purpose out of one op-amp's two inputs, and
 it is what makes the cabinet sound wide.
 
-The model is mono and has no delay, so it can produce neither channel.
+The model now produces both, and the cancellation is what its test measures:
+recovering `left + right` and `left - right` and cross-correlating them peaks at
+the delay line's length, which checks the matrix and the 512 stages at once.
+
+**Nothing downstream may average the two channels.** `left + right` is the delay
+line alone, with the dry signal gone entirely, so a naive fold to mono does not
+approximate this board — it removes half of it. That is why `AudioSource` grew a
+channel count rather than the board folding itself.
 
 ## What it establishes
 
@@ -193,12 +254,16 @@ The model is mono and has no delay, so it can produce neither channel.
 
 ## What it does NOT establish
 
-- **The delay time.** The R5106's stage count was not read off the drawing and
-  its datasheet was not consulted, so the 37.8 kHz clock alone does not give a
-  delay in milliseconds.
-- **The filter's exact response.** R39, R40 and the three 0.0027 uF capacitors
-  are an active filter of a shape that was not worked out carefully enough to
-  quote a corner; the values are recorded so someone can.
+- **The triangle's exact shape.** A 555's timing capacitor charges and
+  discharges exponentially, not linearly. Between `Vcc/3` and `2*Vcc/3` the
+  curve is shallow and the sheet's own symbol for the net is a triangle, so the
+  model uses one; that approximates the *shape* of the sweep, not its extent.
+- **The 555's control-voltage law.** The 35.5-40.3 kHz range above is the
+  textbook charge-time equation with `Vc` substituted for `2/3 Vcc`. It was not
+  checked against a datasheet curve or a measurement.
+- **What `PA3` is for.** That it gates the modulation is read off the circuit;
+  what the game actually uses it for, and how often, is not — no sound ROM was
+  disassembled.
 - **The Empire Strikes Back.** It is in the same catalog row and runs on
   `starwars.rs`, and no ESB drawing was read. It is a conversion on this PCB set,
   which makes sharing likely, but three times in this sweep a shared board family

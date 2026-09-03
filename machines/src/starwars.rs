@@ -36,7 +36,7 @@
 //! mono. Only Star Wars's drawing was read; `esb` shares this file and had
 //! none. See `phosphor-emulator-82zr`.
 
-use phosphor_core::audio::{DcBlocker, SampleRing};
+use phosphor_core::audio::{Biquad, DcBlocker, SampleRing};
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::debug_trace::{DebugEvent, DebugEventKind, DebugTraceBuffer};
 use phosphor_core::core::display::display_settings;
@@ -858,6 +858,20 @@ pub(crate) struct StarWarsBoard {
     /// which matched the two 47k legs and was three times too low for speech.
     #[save(id = 22)]
     pub(crate) audio_legs: [DcBlocker; AUDIO_LEGS.len()],
+    /// Sheet 16B's `Filter` box: the Sallen-Key section between `SUM` and `AUD`.
+    #[save(id = 24)]
+    pub(crate) audio_pre_filter: Biquad,
+    /// The same section again, after the delay line.
+    #[save(id = 25)]
+    pub(crate) audio_post_filter: Biquad,
+    /// The R5106 at 3B.
+    #[save(id = 26)]
+    pub(crate) audio_delay: BucketBrigade,
+    /// Phase of the 8.57 Hz triangle the first half of the 556 at 3A produces
+    /// on its timing capacitor, in turns. Only the phase is state; the shape is
+    /// recomputed from it.
+    #[save(id = 27)]
+    pub(crate) audio_lfo_phase: f32,
 
     // Debug event ring (observer state — never saved in save states).
     #[save_skip]
@@ -911,23 +925,37 @@ const LEG_COUPLING_FARADS: f32 = 100e-9;
 ///
 /// Nothing on these sheets calibrates an absolute level: that is set by the
 /// power amplifier and the cabinet volume, and neither is on them. So this is
-/// derived rather than chosen — the reciprocal of the largest leg gain, which
-/// is the most any single source can contribute. Speech, on the 15k leg,
-/// therefore reaches full scale on its own and no further, which is exactly the
-/// headroom the previous constants gave it (`0.50 * 2.0` was also 1.0).
+/// derived rather than chosen — **the most any single source can put into one
+/// channel**, which is the largest leg gain, through the output amplifier's
+/// [`MATRIX_GAIN`], by **both** paths at once. A source reaches each output
+/// twice, once dry and once delayed, hence the factor of two.
 ///
-/// **The consequence is that the four POKEYs now sit about 4.08 dB below where
-/// they were**, and that is worth stating rather than discovering. It is the
-/// same 4.08 dB by which the board's speech is hotter than this model's was;
-/// only the *ratio* between them is a fact, so which side moves is free, and
-/// moving the POKEYs is what keeps the loudest source from clipping. Anchoring
-/// the POKEYs instead was measured on a recorded session and took the clipped
-/// fraction from 0.10% to 1.02%, past what `audio_sanity_test` allows.
+/// That factor was left out on a first pass, on the reasoning that a dry signal
+/// and a copy of itself 6.8 ms later only add when the source is a sustained
+/// tone at a multiple of `1/delay`. **The measurement said otherwise**: over a
+/// recorded session it took the clipped fraction from 0.10% to 0.58% and the
+/// RMS up 2.5 dB, so the two paths align far more of the time than that
+/// argument allowed. The reasoning was wrong and the factor is here.
+///
+/// Two consequences worth stating rather than discovering.
+///
+/// - **The four POKEYs sit about 4.08 dB below where they were** before the
+///   summing amplifier was modelled. That is the same 4.08 dB by which the
+///   board's speech is hotter than this model's was; only the *ratio* between
+///   them is a fact, so which side moves is free, and moving the POKEYs is what
+///   keeps the loudest source from clipping. Anchoring the POKEYs instead took
+///   the clipped fraction to 1.02%, past what `audio_sanity_test` allows.
+/// - **The delay costs a further 6 dB of level**, because a channel now has to
+///   hold two copies of the loudest source. Recovering it would mean clipping
+///   the sum, which is the one thing an emulated output must not do that the
+///   board does not.
 fn output_scale() -> f32 {
-    1.0 / AUDIO_LEGS
+    let loudest_leg = AUDIO_LEGS
         .iter()
         .map(|leg| leg.gain())
-        .fold(f32::MIN_POSITIVE, f32::max)
+        .fold(f32::MIN_POSITIVE, f32::max);
+    // Dry plus delayed: the same source reaches the output twice.
+    1.0 / (2.0 * loudest_leg * MATRIX_GAIN)
 }
 
 /// The five legs, **in the order the model's sources are mixed**: `pokey[0]`
@@ -971,6 +999,161 @@ pub(crate) const AUDIO_LEGS: [AudioLeg; 5] = [
     // TMS5220 speech, buffered by 1/4 4C through C41 0.1 uF and R28 100k.
     AudioLeg { ohms: 15_000.0 }, // R29
 ];
+
+// ---------------------------------------------------------------------------
+// Sheet 16B: the filter, the delay line, and the stereo matrix
+// ---------------------------------------------------------------------------
+
+/// The `Filter` and the post-delay section, which are the same circuit twice.
+///
+/// Both are unity-gain Sallen-Key sections with equal resistors: R39/R40 12k
+/// against C48+C49 and C50 in the `Filter` box, R46/R47 12k against C56+C57 and
+/// C58 after the delay line. The paired 0.0027 uF capacitors are in parallel, so
+/// the bridging capacitor is 0.0054 uF and the shunt one 0.0027 uF.
+///
+/// A Sallen-Key section with equal resistors and `C1 = 2*C2` is exactly
+/// Butterworth, and the arithmetic below says so rather than asserting it:
+///
+/// ```text
+/// f0 = 1 / (2*pi*sqrt(R1*R2*C1*C2)) = 3473 Hz
+/// Q  = sqrt(R1*R2*C1*C2) / (C2*(R1+R2)) = 0.7071
+/// ```
+///
+/// The board reached it by using one capacitor value and doubling it, which is
+/// worth recognising: two identical parts in parallel usually means the designer
+/// wanted twice a value they already had on the board.
+const SK_RESISTOR_OHMS: f32 = 12_000.0;
+/// C48 + C49, and C56 + C57: the bridging capacitor, twice the shunt one.
+const SK_BRIDGE_FARADS: f32 = 5.4e-9;
+/// C50, and C58: the shunt capacitor to ground.
+const SK_SHUNT_FARADS: f32 = 2.7e-9;
+
+/// Corner of both Sallen-Key sections, about 3473 Hz.
+fn sk_corner_hz() -> f32 {
+    let rc = SK_RESISTOR_OHMS * SK_RESISTOR_OHMS * SK_BRIDGE_FARADS * SK_SHUNT_FARADS;
+    1.0 / (std::f32::consts::TAU * rc.sqrt())
+}
+
+/// Quality factor of both Sallen-Key sections, about 0.7071 — Butterworth.
+fn sk_q() -> f32 {
+    let rc = SK_RESISTOR_OHMS * SK_RESISTOR_OHMS * SK_BRIDGE_FARADS * SK_SHUNT_FARADS;
+    rc.sqrt() / (SK_SHUNT_FARADS * (SK_RESISTOR_OHMS + SK_RESISTOR_OHMS))
+}
+
+/// Stages in the R5106 bucket-brigade delay line at 3B.
+///
+/// **Read from the parts list, not the schematic.** The drawing prints only
+/// `R5106`; the `Sound PCB Assembly Parts List` on page 84 of the same manual
+/// calls 3B a `512 Delay Line Integrated Circuit`, Atari part 137310-001. That
+/// is what turns the clock frequency into a delay time, and it was the open
+/// question the transcription recorded.
+const BBD_STAGES: f32 = 512.0;
+
+/// Nominal delay-clock frequency, from the second half of the 556 at 3A.
+///
+/// A 555 astable with R33 4700, R34 4700 and C46 0.0027 uF runs at
+/// `1.44 / ((R33 + 2*R34) * C46)` = 37.8 kHz, which is the figure printed
+/// against `RCK` on the sheet. Deriving it rather than taking the label is what
+/// makes the modulated case below trustworthy.
+const DELAY_CLOCK_HZ: f32 = 37_825.0;
+
+/// Sweep of the delay clock when the modulation is enabled, as a fraction.
+///
+/// The first half of the same 556 runs at `1.44 / ((R31 + 2*R32) * C43)` =
+/// 8.57 Hz, and **its square output at pin 5 is `n.c.`** — what the board uses
+/// is the timing capacitor itself, tapped off C43 and labelled `8Hz` with a
+/// triangle symbol on the sheet. A 555's timing capacitor ramps between `Vcc/3`
+/// and `2*Vcc/3`, so that is a 4 V peak-to-peak triangle on the +12 V rail.
+///
+/// `1/4 2B` buffers it, R35 2.2k against R38 470 divides it to 0.176, and C47
+/// couples the result onto the second timer's control-voltage pin, which
+/// otherwise sits at `2/3 Vcc`. Working the 555's charge time through for a
+/// control voltage of `8 +/- 0.352` V gives 35.5 kHz to 40.3 kHz, so the clock
+/// swings about `+/-6.4%` and the delay with it.
+const DELAY_SWEEP: f32 = 0.064;
+
+/// Rate of that sweep, from R31, R32 and C43.
+const DELAY_LFO_HZ: f32 = 8.571;
+
+/// Gain of each output amplifier, `R50 / R48` and `R55 / R52`, both 47k over
+/// 22k. The two channels are matched to three figures, which is what makes the
+/// matrix below cancel as exactly as it does.
+const MATRIX_GAIN: f32 = 47.0 / 22.0;
+
+/// The R5106 bucket-brigade delay line, as a fractional-delay ring.
+///
+/// A BBD is a chain of sample-and-hold stages that pass charge along on each
+/// clock phase, so its delay is `stages / (2 * clock)` and moves when the clock
+/// does. That is the whole point here: the clock is swept, so the read point
+/// slides continuously and lands between host samples, which is why this
+/// interpolates rather than indexing.
+///
+/// The device also samples at `clock / 2`, about 18.9 kHz, and the Sallen-Key
+/// sections either side of it at 3.47 kHz are what keep anything near that
+/// away from it. Modelling the sampling itself would add nothing this side of
+/// those filters, so this does not.
+#[derive(Debug, Clone)]
+pub(crate) struct BucketBrigade {
+    ring: Vec<f32>,
+    write: usize,
+}
+
+impl BucketBrigade {
+    /// A line long enough for the slowest clock the sweep reaches, with room to
+    /// interpolate past it.
+    fn new(sample_rate: u32) -> Self {
+        let longest = BBD_STAGES / (2.0 * DELAY_CLOCK_HZ * (1.0 - DELAY_SWEEP));
+        let len = (longest * sample_rate as f32).ceil() as usize + 4;
+        Self {
+            ring: vec![0.0; len.max(8)],
+            write: 0,
+        }
+    }
+
+    /// Push one sample and read the output `delay_samples` behind it, linearly
+    /// interpolated between the two neighbouring slots.
+    fn process(&mut self, x: f32, delay_samples: f32) -> f32 {
+        let len = self.ring.len();
+        self.ring[self.write] = x;
+        self.write = (self.write + 1) % len;
+
+        let d = delay_samples.clamp(1.0, (len - 2) as f32);
+        let whole = d.floor();
+        let frac = d - whole;
+        let back = whole as usize;
+        let i0 = (self.write + len - back - 1) % len;
+        let i1 = (i0 + len - 1) % len;
+        self.ring[i0] * (1.0 - frac) + self.ring[i1] * frac
+    }
+
+    fn reset(&mut self) {
+        self.ring.fill(0.0);
+        self.write = 0;
+    }
+}
+
+/// The ring is live state, so a save state carries it. Its length is derived
+/// from the sample rate at construction, exactly as the filters' coefficients
+/// are, so only the contents and the write cursor go on the wire.
+impl phosphor_core::core::save_state::Saveable for BucketBrigade {
+    fn save_state(&self, w: &mut phosphor_core::core::save_state::StateWriter) {
+        w.write_u32_le(self.write as u32);
+        for s in &self.ring {
+            w.write_f32_le(*s);
+        }
+    }
+
+    fn load_state(
+        &mut self,
+        r: &mut phosphor_core::core::save_state::StateReader,
+    ) -> Result<(), phosphor_core::core::save_state::SaveError> {
+        self.write = r.read_u32_le()? as usize % self.ring.len().max(1);
+        for i in 0..self.ring.len() {
+            self.ring[i] = r.read_f32_le()?;
+        }
+        Ok(())
+    }
+}
 
 /// IN0 bit 5: unused, and wired active-high rather than active-low like the
 /// rest of the port, so it reads 0 at rest. Every other bit is a control that
@@ -1058,6 +1241,18 @@ impl StarWarsBoard {
             audio_legs: AUDIO_LEGS.map(|leg| {
                 DcBlocker::with_cutoff(leg.corner_hz(), phosphor_core::audio::host_sample_rate())
             }),
+            audio_pre_filter: Biquad::low_pass(
+                sk_corner_hz(),
+                sk_q(),
+                phosphor_core::audio::host_sample_rate(),
+            ),
+            audio_post_filter: Biquad::low_pass(
+                sk_corner_hz(),
+                sk_q(),
+                phosphor_core::audio::host_sample_rate(),
+            ),
+            audio_delay: BucketBrigade::new(phosphor_core::audio::host_sample_rate()),
+            audio_lfo_phase: 0.0,
             debug_trace: DebugTraceBuffer::new(),
         }
     }
@@ -1666,6 +1861,10 @@ impl StarWarsBoard {
         for leg in &mut self.audio_legs {
             leg.reset();
         }
+        self.audio_pre_filter.reset();
+        self.audio_post_filter.reset();
+        self.audio_delay.reset();
+        self.audio_lfo_phase = 0.0;
         self.bank = 0;
         self.main_map
             .remap_pages(0x60, 0x20, MainRegion::BankLow, 0);
@@ -1717,10 +1916,25 @@ impl StarWarsBoard {
     /// amplifier, and queue signed-16-bit samples for the frontend. Called once
     /// per frame.
     ///
-    /// This is sheet 16A's `SUM` node and stops there. Everything on sheet 16B
-    /// — the active filter, the R5106 bucket-brigade delay line and the stereo
-    /// difference matrix that makes `LEFT AUDIO` and `RIGHT AUDIO` — is still
-    /// unmodelled, and the output here is mono. See `phosphor-emulator-82zr`.
+    /// The whole of sheets 16A and 16B, from the five summing legs through the
+    /// filter, the R5106 delay line and the two output amplifiers, queued as
+    /// **interleaved stereo** frames.
+    ///
+    /// Writing `D` for the delayed signal and `A` for the dry `AUD`, the two
+    /// output amplifiers at 2B produce
+    ///
+    /// ```text
+    /// LEFT  = -(D + A) * MATRIX_GAIN
+    /// RIGHT = -(D - A) * MATRIX_GAIN
+    /// ```
+    ///
+    /// which is a difference matrix built out of one op-amp's two inputs: the
+    /// dry signal lands entirely in the difference of the channels and the
+    /// delayed signal entirely in their sum. **`left + right` is therefore
+    /// `-2D` and cancels the dry signal completely**, which is why
+    /// [`audio_channels`](phosphor_core::core::machine::AudioSource::audio_channels)
+    /// exists and why nothing downstream may average the two to get "the
+    /// sound".
     pub(crate) fn end_frame_audio(&mut self) {
         // Each source is coupled by its own capacitor and scaled by its own leg,
         // per [`AUDIO_LEGS`]. Two consequences worth stating where the code is:
@@ -1748,6 +1962,14 @@ impl StarWarsBoard {
             .unwrap_or(0);
 
         let scale = output_scale();
+        let rate = phosphor_core::audio::host_sample_rate().max(1) as f32;
+        // PA3 drives Q4's base through R37 10k, and Q4's collector shunts the
+        // modulation node through R36 15 ohm against R38 470. High is therefore
+        // OFF: the divider collapses to 0.7% and the clock sits at its nominal
+        // 37.8 kHz. Low leaves the 8.57 Hz triangle driving the control pin.
+        let sweeping = self.riot.pa_output() & 0x08 == 0;
+        let lfo_step = DELAY_LFO_HZ / rate;
+
         for i in 0..n {
             let sample = |src: &[f32]| src.get(i).copied().unwrap_or(0.0);
             let sources = [
@@ -1764,8 +1986,38 @@ impl StarWarsBoard {
                 .zip(sources)
                 .map(|((coupling, leg), x)| leg.gain() * coupling.process(x))
                 .sum();
-            self.audio_buffer
-                .push((sum * scale * 32767.0).clamp(-32767.0, 32767.0) as i16);
+
+            // Sheet 16B. `SUM` through the Sallen-Key section is `AUD`, which
+            // is both the dry signal and the delay line's input; C51 0.47 uF
+            // into the R5106's 68k bias network is a 5 Hz high-pass and is left
+            // out as inaudible rather than modelled and then ignored.
+            let dry = self.audio_pre_filter.process(sum);
+
+            // The timing capacitor's triangle, as a signed unit ramp. A 555
+            // charges and discharges exponentially rather than linearly, but
+            // between Vcc/3 and 2Vcc/3 the curve is shallow and the sheet's own
+            // symbol for this net is a triangle. Recorded as an approximation
+            // because it sets the shape of the sweep, not its extent.
+            self.audio_lfo_phase = (self.audio_lfo_phase + lfo_step).fract();
+            let triangle = 4.0 * (self.audio_lfo_phase - 0.5).abs() - 1.0;
+            let clock = if sweeping {
+                DELAY_CLOCK_HZ * (1.0 + DELAY_SWEEP * triangle)
+            } else {
+                DELAY_CLOCK_HZ
+            };
+            let delayed = self.audio_post_filter.process(
+                self.audio_delay
+                    .process(dry, BBD_STAGES / (2.0 * clock) * rate),
+            );
+
+            // The two output amplifiers. The common `-1` is dropped: it is
+            // shared by both channels, so it is a speaker-wiring question and
+            // not something either channel carries on its own.
+            let gain = MATRIX_GAIN * scale * 32767.0;
+            let left = ((delayed + dry) * gain).clamp(-32767.0, 32767.0) as i16;
+            let right = ((delayed - dry) * gain).clamp(-32767.0, 32767.0) as i16;
+            self.audio_buffer.push(left);
+            self.audio_buffer.push(right);
         }
     }
 
@@ -1907,7 +2159,9 @@ impl Bus for StarWarsBoard {
 }
 
 crate::impl_board_renderable!(StarWarsSystem, board, TIMING, vector_field, vectors);
-crate::impl_board_audio!(StarWarsSystem, board);
+// Stereo, and not by choice: sheet 16B's two output amplifiers are a difference
+// matrix. See [`StarWarsBoard::end_frame_audio`].
+crate::impl_board_audio!(StarWarsSystem, board, 2);
 
 // `MachineDebug` is hand-written rather than macro-generated because this
 // board overrides `set_debug_entropy`, which the delegation macro has no arm
@@ -2675,6 +2929,106 @@ mod tests {
         assert!((20.0 * (ratio / 2.5).log10() - 4.05).abs() < 0.01);
     }
 
+    /// Sheet 16B's two Sallen-Key sections, held against the drawing.
+    ///
+    /// Equal resistors with a bridging capacitor twice the shunt one is exactly
+    /// Butterworth, and this pins that rather than leaving it as a remark.
+    #[test]
+    fn the_sallen_key_sections_are_butterworth_at_3473_hz() {
+        assert!(
+            (sk_corner_hz() - 3473.0).abs() < 1.0,
+            "corner {}",
+            sk_corner_hz()
+        );
+        assert!(
+            (sk_q() - std::f32::consts::FRAC_1_SQRT_2).abs() < 1e-4,
+            "Q {}",
+            sk_q()
+        );
+        // The Butterworth condition itself, so a future edit to one capacitor
+        // cannot quietly detune the pair.
+        assert_eq!(SK_BRIDGE_FARADS, 2.0 * SK_SHUNT_FARADS);
+    }
+
+    /// The delay line's length, and the sweep the modulated clock gives it.
+    ///
+    /// 512 stages at `stages / (2 * clock)` is 6.77 ms nominal, sweeping about
+    /// 6.35 to 7.21 ms when the 8.57 Hz triangle is driving the control pin.
+    #[test]
+    fn the_delay_line_is_512_stages_and_sweeps() {
+        let ms = |clock: f32| BBD_STAGES / (2.0 * clock) * 1000.0;
+        assert!((ms(DELAY_CLOCK_HZ) - 6.769).abs() < 0.01);
+        assert!((ms(DELAY_CLOCK_HZ * (1.0 + DELAY_SWEEP)) - 6.362).abs() < 0.01);
+        assert!((ms(DELAY_CLOCK_HZ * (1.0 - DELAY_SWEEP)) - 7.232).abs() < 0.01);
+    }
+
+    /// **The difference matrix and the delay time, in one measurement.**
+    ///
+    /// `left + right` is twice the delayed signal and `left - right` is twice
+    /// the dry one, so recovering both and cross-correlating them must peak at
+    /// exactly the delay line's length. That checks three things at once: that
+    /// the two channels really are a matrix and not a duplicated mono stream,
+    /// that the delay is 512 stages at 37.8 kHz, and that PA3 gates the sweep.
+    ///
+    /// It drives POKEY noise rather than a tone, because a periodic source
+    /// correlates with itself at every multiple of its period and would give no
+    /// unique peak to find.
+    #[test]
+    fn the_channels_are_a_matrix_whose_two_halves_are_the_delay_apart() {
+        let mut board = StarWarsBoard::new();
+        // PA3 high shuts the modulation off through Q4, pinning the clock at
+        // its nominal 37.8 kHz. With the sweep running the correlation peak
+        // smears across the 6.36-7.23 ms the delay covers.
+        board.sound_write(0x1081, 0x08); // RIOT DDRA: PA3 an output
+        board.sound_write(0x1080, 0x08); // PA3 high
+        board.sound_write(0x1827, 0x03); // POKEY 0 SKCTL: polys out of reset
+        board.sound_write(0x1800, 0x20); // POKEY 0 AUDF1
+        board.sound_write(0x1801, 0x0F); // AUDC1: full volume, poly noise
+        for _ in 0..TIMING.cycles_per_frame() * 6 {
+            for p in &mut board.pokey {
+                p.tick();
+            }
+        }
+        board.end_frame_audio();
+
+        let mut out = vec![0i16; 1 << 18];
+        let n = board.fill_audio(&mut out);
+        assert_eq!(n % 2, 0, "a stereo machine must emit whole frames");
+        let frames: Vec<(f32, f32)> = out[..n]
+            .chunks_exact(2)
+            .skip(1024) // past the filters' settling window
+            .map(|f| (f[0] as f32, f[1] as f32))
+            .collect();
+        assert!(frames.len() > 4096, "not enough audio to judge: {}", n / 2);
+
+        // The two channels must actually differ: a mono board wired to both
+        // outputs would satisfy everything else in this file.
+        assert!(
+            frames.iter().filter(|(l, r)| l != r).count() > frames.len() / 2,
+            "left and right are the same signal"
+        );
+
+        let delayed: Vec<f32> = frames.iter().map(|(l, r)| l + r).collect();
+        let dry: Vec<f32> = frames.iter().map(|(l, r)| l - r).collect();
+
+        let rate = phosphor_core::audio::host_sample_rate() as f32;
+        let expected = BBD_STAGES / (2.0 * DELAY_CLOCK_HZ) * rate;
+        let search = (expected * 2.0) as usize;
+        let span = frames.len() - search;
+        let (best, score) = (0..search)
+            .map(|lag| {
+                let c: f32 = (0..span).map(|i| dry[i] * delayed[i + lag]).sum();
+                (lag, c)
+            })
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+            .unwrap();
+        assert!(score > 0.0, "no correlation between the two halves");
+        assert!(
+            (best as f32 - expected).abs() < 4.0,
+            "delay measured {best} samples, expected {expected:.1}"
+        );
+    }
+
     /// Silence in, silence out. Each leg is a coupling capacitor, and the whole
     /// point of one is that a constant input — including an idle POKEY's zero —
     /// settles to zero rather than to a rail.
@@ -2696,6 +3050,13 @@ mod tests {
     fn pokey_writes_produce_audio() {
         let mut board = StarWarsBoard::new();
         // Program POKEY 0 channel 1: a mid frequency at full volume/tone.
+        //
+        // SKCTL first. It resets to 0, which holds the polynomial counters in
+        // reset and makes every channel silent whatever else is programmed, so
+        // without this the board emits a buffer full of zeros. This assertion
+        // used to be `!is_empty()`, which that buffer satisfies — the test was
+        // passing on silence.
+        board.sound_write(0x1827, 0x03); // SKCTL: polys out of reset
         board.sound_write(0x1800, 0x40); // AUDF1
         board.sound_write(0x1801, 0xAF); // AUDC1: volume 0xF, pure tone
         // Tick a frame's worth of sound cycles, then drain.
@@ -2705,9 +3066,15 @@ mod tests {
             }
         }
         board.end_frame_audio();
+        let mut out = vec![0i16; 1 << 16];
+        let n = board.fill_audio(&mut out);
         assert!(
-            !board.audio_buffer.is_empty(),
+            n > 0,
             "an active POKEY channel should generate audio samples"
+        );
+        assert!(
+            out[..n].iter().any(|&s| s != 0),
+            "an active POKEY channel should generate a non-zero signal"
         );
     }
 
