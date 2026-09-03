@@ -167,8 +167,13 @@ pub trait Renderable {
 /// Machines without audio hardware can skip implementing this trait
 /// (defaults produce silence with a zero sample rate).
 pub trait AudioSource {
-    /// Fill the buffer with mono i16 PCM samples at the machine's native
-    /// sample rate. Returns the number of samples written.
+    /// Fill the buffer with i16 PCM samples at the machine's native sample
+    /// rate, and return the number of **samples** written.
+    ///
+    /// A machine with [`audio_channels`](Self::audio_channels) of 2 writes
+    /// interleaved frames, left sample first, and the count it returns is
+    /// samples rather than frames — so it is always even for such a machine.
+    /// Almost every board is mono and can ignore the distinction.
     fn fill_audio(&mut self, _buffer: &mut [i16]) -> usize {
         0 // default: silence
     }
@@ -176,6 +181,18 @@ pub trait AudioSource {
     /// Native audio sample rate in Hz (e.g., 894886 / some divisor).
     fn audio_sample_rate(&self) -> u32 {
         0
+    }
+
+    /// Channels per frame: 1 for mono, 2 for interleaved stereo.
+    ///
+    /// Nearly every arcade board is mono and the default is what they want.
+    /// Star Wars is not, and the reason is worth knowing before folding a
+    /// stereo machine down: its two channels are a **difference matrix**, so
+    /// `left + right` cancels the dry signal completely and leaves only the
+    /// board's delay line. Averaging the two to get "the sound" would silence
+    /// half of it. Take one channel, or keep both.
+    fn audio_channels(&self) -> u32 {
+        1
     }
 }
 

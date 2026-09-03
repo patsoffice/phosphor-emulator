@@ -366,8 +366,9 @@ fn measure(dir: &Path, machine: &str) -> Option<(Integrity, Fixture)> {
     };
 
     let rate = harness.machine().audio_sample_rate().max(1) as usize;
+    let channels = harness.machine().audio_channels().max(1) as usize;
     let mut audio: Vec<i16> = Vec::new();
-    let mut chunk = vec![0i16; rate];
+    let mut chunk = vec![0i16; rate * channels];
     for frame in 0..frames {
         harness.run_frame();
         let m = harness.machine_mut();
@@ -389,7 +390,19 @@ fn measure(dir: &Path, machine: &str) -> Option<(Integrity, Fixture)> {
     if audio.is_empty() {
         return None;
     }
-    Some((Integrity::measure(&pcm_to_f64(&audio)), fixture))
+
+    // Measure ONE channel of a stereo machine, not the interleaved stream. DC,
+    // clipping and silence would survive the muxing, but a muxed stream is not
+    // a signal and the first spectral check anyone adds here would measure an
+    // artefact. Taking the left channel rather than averaging is deliberate:
+    // Star Wars's two channels are a difference matrix, so averaging them
+    // cancels the dry signal and would report the delay line on its own.
+    let channel: Vec<i16> = if channels > 1 {
+        audio.iter().step_by(channels).copied().collect()
+    } else {
+        audio
+    };
+    Some((Integrity::measure(&pcm_to_f64(&channel)), fixture))
 }
 
 // ---------------------------------------------------------------------------

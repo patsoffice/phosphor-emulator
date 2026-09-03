@@ -201,12 +201,21 @@ macro_rules! impl_board_audio {
     };
     // Standard: delegate to board
     ($type:ty, $board:ident) => {
+        crate::impl_board_audio!($type, $board, 1);
+    };
+    // Stereo: the same delegation, declaring the board's channel count. Star
+    // Wars is the only board that needs it, because its two output amplifiers
+    // form a difference matrix rather than driving one signal twice.
+    ($type:ty, $board:ident, $channels:literal) => {
         impl phosphor_core::core::machine::AudioSource for $type {
             fn fill_audio(&mut self, buffer: &mut [i16]) -> usize {
                 self.$board.fill_audio(buffer)
             }
             fn audio_sample_rate(&self) -> u32 {
                 phosphor_core::audio::host_sample_rate()
+            }
+            fn audio_channels(&self) -> u32 {
+                $channels
             }
         }
     };

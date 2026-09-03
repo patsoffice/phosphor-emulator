@@ -141,7 +141,8 @@ impl DebugSession {
             .take()
             .ok_or_else(|| "capture_audio() was never called".to_string())?;
         let rate = self.harness.machine().audio_sample_rate();
-        write_wav_16(path, &samples, rate).map_err(|e| format!("writing {path}: {e}"))?;
+        let channels = self.harness.machine().audio_channels();
+        write_wav_16(path, &samples, rate, channels).map_err(|e| format!("writing {path}: {e}"))?;
         Ok(samples.len())
     }
 
@@ -600,12 +601,18 @@ fn write_png(path: &Path, rgb24: &[u8], width: u32, height: u32) -> std::io::Res
     Ok(())
 }
 
-/// Write 16-bit mono PCM as a WAV.
+/// Write 16-bit PCM as a WAV, at `channels` channels interleaved.
 ///
 /// Hand-rolled rather than shared with `disasm`: this crate does not depend on
 /// that binary, and the header is fourteen fields.
-fn write_wav_16(path: &str, samples: &[i16], rate: u32) -> std::io::Result<()> {
+///
+/// The channel count has to come from the machine rather than being assumed:
+/// writing a stereo capture with a mono header would play it at half speed with
+/// the two channels alternating, and Star Wars is a stereo machine.
+fn write_wav_16(path: &str, samples: &[i16], rate: u32, channels: u32) -> std::io::Result<()> {
     use std::io::Write;
+    let channels = channels.clamp(1, 2) as u16;
+    let block_align = channels * 2;
     let data_len = (samples.len() * 2) as u32;
     let mut f = std::io::BufWriter::new(std::fs::File::create(path)?);
     f.write_all(b"RIFF")?;
@@ -614,10 +621,10 @@ fn write_wav_16(path: &str, samples: &[i16], rate: u32) -> std::io::Result<()> {
     f.write_all(b"fmt ")?;
     f.write_all(&16u32.to_le_bytes())?;
     f.write_all(&1u16.to_le_bytes())?;
-    f.write_all(&1u16.to_le_bytes())?;
+    f.write_all(&channels.to_le_bytes())?;
     f.write_all(&rate.to_le_bytes())?;
-    f.write_all(&(rate * 2).to_le_bytes())?;
-    f.write_all(&2u16.to_le_bytes())?;
+    f.write_all(&(rate * block_align as u32).to_le_bytes())?;
+    f.write_all(&block_align.to_le_bytes())?;
     f.write_all(&16u16.to_le_bytes())?;
     f.write_all(b"data")?;
     f.write_all(&data_len.to_le_bytes())?;

@@ -710,7 +710,7 @@ fn run_frameshot(
     path: &str,
 ) -> Result<String, String> {
     let mut harness = Harness::build(machine, path, nvram, coin_at, &[], &[])?;
-    let (audio, rate) = run_capturing_audio(&mut harness, frames);
+    let (audio, rate, channels) = run_capturing_audio(&mut harness, frames);
     let machine_box = harness.machine_mut();
 
     // Render native, then apply the machine's declared orientation centrally —
@@ -737,7 +737,8 @@ fn run_frameshot(
     // Optionally write the whole run's audio as a WAV (for offline analysis /
     // comparison against a MAME `-wavwrite` capture).
     if let Some(ap) = audio_out {
-        write_wav(ap, &audio, rate).map_err(|e| format!("writing audio {}: {e}", ap.display()))?;
+        write_wav(ap, &audio, rate, channels)
+            .map_err(|e| format!("writing audio {}: {e}", ap.display()))?;
         msg.push_str(&format!(
             "audio: wrote {n_audio} samples -> {}\n",
             ap.display()
@@ -786,10 +787,11 @@ fn run_frameshot(
 /// samples (`core/src/audio/ring.rs`). A loop that runs to completion and only
 /// then drains therefore keeps the last three seconds and silently discards
 /// everything before, which for a typical 1800-3100 frame capture is most of it.
-fn run_capturing_audio(harness: &mut Harness, frames: usize) -> (Vec<i16>, u32) {
+fn run_capturing_audio(harness: &mut Harness, frames: usize) -> (Vec<i16>, u32, u32) {
     let rate = harness.machine().audio_sample_rate();
+    let channels = harness.machine().audio_channels();
     let mut audio: Vec<i16> = Vec::new();
-    let mut chunk = vec![0i16; (rate as usize).max(1)];
+    let mut chunk = vec![0i16; (rate as usize * channels.max(1) as usize).max(1)];
     for _ in 0..frames {
         harness.run_frame();
         let machine = harness.machine_mut();
@@ -801,7 +803,7 @@ fn run_capturing_audio(harness: &mut Harness, frames: usize) -> (Vec<i16>, u32) 
             audio.extend_from_slice(&chunk[..n]);
         }
     }
-    (audio, rate)
+    (audio, rate, channels)
 }
 
 // ---------------------------------------------------------------------------
@@ -837,7 +839,7 @@ fn run_replay(
     let frames = frames.unwrap_or(span);
 
     let mut harness = Harness::from_movie(roms, movie)?;
-    let (audio, rate) = run_capturing_audio(&mut harness, frames);
+    let (audio, rate, channels) = run_capturing_audio(&mut harness, frames);
 
     let machine_box = harness.machine_mut();
     let (w, h, buf) = render_oriented(machine_box);
@@ -859,7 +861,8 @@ fn run_replay(
     );
 
     if let Some(ap) = audio_out {
-        write_wav(ap, &audio, rate).map_err(|e| format!("writing audio {}: {e}", ap.display()))?;
+        write_wav(ap, &audio, rate, channels)
+            .map_err(|e| format!("writing audio {}: {e}", ap.display()))?;
         msg.push_str(&format!(
             "audio: wrote {} samples -> {}\n",
             audio.len(),
@@ -1020,9 +1023,15 @@ fn run_movie_check(movie_path: &Path, frames: Option<usize>, roms: &str) -> Resu
     Ok(msg)
 }
 
-/// Write 16-bit mono PCM samples as a WAV file.
-fn write_wav(path: &Path, samples: &[i16], rate: u32) -> std::io::Result<()> {
+/// Write 16-bit interleaved PCM samples as a WAV file.
+///
+/// `channels` comes from the machine that produced the samples. A stereo
+/// capture written with a mono header plays at half speed with the channels
+/// alternating, which is a confusing way to discover that a board is stereo.
+fn write_wav(path: &Path, samples: &[i16], rate: u32, channels: u32) -> std::io::Result<()> {
     use std::io::Write;
+    let channels = channels.clamp(1, 2) as u16;
+    let block_align = channels * 2;
     let data_len = (samples.len() * 2) as u32;
     let mut f = std::io::BufWriter::new(std::fs::File::create(path)?);
     f.write_all(b"RIFF")?;
@@ -1031,10 +1040,10 @@ fn write_wav(path: &Path, samples: &[i16], rate: u32) -> std::io::Result<()> {
     f.write_all(b"fmt ")?;
     f.write_all(&16u32.to_le_bytes())?; // PCM fmt chunk size
     f.write_all(&1u16.to_le_bytes())?; // audio format: PCM
-    f.write_all(&1u16.to_le_bytes())?; // channels: mono
+    f.write_all(&channels.to_le_bytes())?; // channels
     f.write_all(&rate.to_le_bytes())?; // sample rate
-    f.write_all(&(rate * 2).to_le_bytes())?; // byte rate
-    f.write_all(&2u16.to_le_bytes())?; // block align
+    f.write_all(&(rate * block_align as u32).to_le_bytes())?; // byte rate
+    f.write_all(&block_align.to_le_bytes())?; // block align
     f.write_all(&16u16.to_le_bytes())?; // bits per sample
     f.write_all(b"data")?;
     f.write_all(&data_len.to_le_bytes())?;
