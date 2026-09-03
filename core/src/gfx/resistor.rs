@@ -135,6 +135,157 @@ pub fn pal_nbit(value: u8, bits: u32) -> u8 {
     result
 }
 
+// ---------------------------------------------------------------------------
+// TTL DAC into an amplifier and an inverting monitor
+// ---------------------------------------------------------------------------
+
+/// Ladder and bias for the two 3-bit channels driven through a Darlington pair.
+pub const DARLINGTON_RESISTORS: [f64; 3] = [1000.0, 470.0, 220.0];
+/// Pullup bias to VCC for [`DARLINGTON_RESISTORS`].
+pub const DARLINGTON_BIAS_R: f64 = 470.0;
+/// Ladder for the 2-bit channel driven through an emitter follower alone.
+pub const EMITTER_RESISTORS: [f64; 2] = [470.0, 220.0];
+/// Pullup bias to VCC for [`EMITTER_RESISTORS`].
+pub const EMITTER_BIAS_R: f64 = 680.0;
+
+/// Compute one color channel through a TTL-driven DAC, an amplifier stage and
+/// an inverting monitor input.
+///
+/// This is a *different physical model* from the three above, and the reason it
+/// exists is that they do not fit. The others treat a PROM output as an ideal
+/// voltage source into a resistor network. Here the PROM's own output stage is
+/// part of the circuit: an MB7052 drives its ladder to real TTL levels through a
+/// real source impedance, the ladder sits on a VCC pullup bias rather than a
+/// pulldown, and what the ladder feeds is a transistor amplifier and then a
+/// monitor that inverts and clips. Modelling that as a divider gets the black
+/// level wrong, which is visible rather than merely inaccurate — see
+/// [`normalize_palette_per_channel`].
+///
+/// `raw_bits` are non-inverted PROM bit values: `0.0` is TTL low (the active
+/// state, since the chain inverts) and `1.0` is TTL high. Returns a raw
+/// floating-point intensity, *not* clamped to 0-255, for
+/// [`normalize_palette_per_channel`] to scale.
+///
+/// # Which boards
+///
+/// Nintendo's, through a Sanyo EZV20 monitor: the TKG-04 board that Donkey Kong
+/// and Donkey Kong Jr. run on, and Mario Bros., which has its own board and
+/// shares only this. That distinction is why this lives here rather than in a
+/// machine file — Mario Bros. used to reach across into `tkg04.rs` for it, which
+/// read as though it ran on that board.
+pub fn compute_ttl_dac_channel(
+    raw_bits: &[f64],
+    resistors: &[f64],
+    bias_r: f64,
+    is_darlington: bool,
+) -> f64 {
+    const VCC: f64 = 5.0;
+    const V_BIAS: f64 = 5.0;
+    const V_OL: f64 = 0.05; // TTL low output voltage
+    const V_OH: f64 = 4.0; // TTL high output voltage
+    const TTL_H_RES: f64 = 50.0; // TTL high-state output impedance (Ω)
+
+    let mut r_total: f64 = 0.0;
+    let mut v: f64 = 0.0;
+
+    // First pass: low inputs (raw bit = 0, PROM output driving to vOL)
+    for (&bit, &r) in raw_bits.iter().zip(resistors) {
+        if r != 0.0 && bit == 0.0 {
+            r_total += 1.0 / r;
+            v += V_OL / r;
+        }
+    }
+
+    // Bias pullup to VCC
+    r_total += 1.0 / bias_r;
+    v += V_BIAS / bias_r;
+
+    // Second pass: high inputs (raw bit = 1, TTL high through R + output impedance)
+    for (&bit, &r) in raw_bits.iter().zip(resistors) {
+        if r != 0.0 && bit != 0.0 {
+            let r_eff = r + TTL_H_RES;
+            r_total += 1.0 / r_eff;
+            v += V_OH / r_eff;
+        }
+    }
+
+    // Node voltage (Thévenin equivalent)
+    let v_node = v / r_total;
+
+    // Amplifier stage
+    let v_amp = if is_darlington {
+        v_node.max(0.7) // Darlington: minimum output ≈ 0.7 V
+    } else {
+        (v_node - 0.7).max(0.0) // Emitter follower: base-emitter drop ≈ 0.7 V
+    };
+
+    // SANYO EZV20 monitor: inverting circuit with diode clipping
+    let v_inv = VCC - v_amp;
+    let v_clip = (v_inv - 0.7).clamp(0.0, VCC - 1.4);
+    v_clip / (VCC - 1.4) * 255.0
+}
+
+/// Scale a raw palette to 0-255 **per channel**, from the range the palette
+/// itself spans.
+///
+/// `forced_black` marks pens a board writes as black by some rule outside the
+/// DAC. Those are excluded from the range as well as from the output, because
+/// they are not a channel output and their zeros would otherwise drag every
+/// channel's minimum to 0 and defeat the black-level adjustment. A board with no
+/// such rule passes `|_| false`.
+///
+/// # Why per channel and not one global scale
+///
+/// The three channels do not reach the monitor on a common baseline. Red and
+/// green leave an NPN into an A564 PNP whose base-emitter drops cancel (Donkey
+/// Kong and Donkey Kong Jr.: Q9 into Q13, Q10 into Q14; Mario Bros.: Q5 into Q7,
+/// Q8 into Q9), while blue has only the NPN (Q11, and Mario Bros.' Q6), so blue
+/// sits a whole 0.7 V follower drop above the other two along its entire range.
+/// That pedestal is in the hardware and [`compute_ttl_dac_channel`] reproduces
+/// it correctly; what removes it is the monitor, which DC-restores each channel
+/// to black during the back porch, which is inherently per channel. A single
+/// global gain cannot subtract a per-channel offset.
+///
+/// Donkey Kong is where the difference is visible rather than merely wrong. A
+/// pen with every PROM bit inactive came out (4, 4, 56) instead of black, which
+/// put a dark blue rectangle over the ladders in attract mode: the board's solid
+/// mask sprites, whose whole job is to hide Kong behind the girder as he climbs.
+pub fn normalize_palette_per_channel(
+    raw: &[(f64, f64, f64); 256],
+    forced_black: impl Fn(usize) -> bool,
+) -> [(u8, u8, u8); 256] {
+    let mut lo = [f64::MAX; 3];
+    let mut hi = [f64::MIN; 3];
+    for (i, &(r, g, b)) in raw.iter().enumerate() {
+        if forced_black(i) {
+            continue;
+        }
+        for (channel, v) in [r, g, b].into_iter().enumerate() {
+            lo[channel] = lo[channel].min(v);
+            hi[channel] = hi[channel].max(v);
+        }
+    }
+
+    let normalize = |v: f64, channel: usize| -> u8 {
+        let span = hi[channel] - lo[channel];
+        if span <= 0.0 {
+            return 0;
+        }
+        (((v - lo[channel]) / span) * 255.0)
+            .round()
+            .clamp(0.0, 255.0) as u8
+    };
+
+    let mut out = [(0u8, 0u8, 0u8); 256];
+    for (i, (o, &(r, g, b))) in out.iter_mut().zip(raw.iter()).enumerate() {
+        if forced_black(i) {
+            continue;
+        }
+        *o = (normalize(r, 0), normalize(g, 1), normalize(b, 2));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

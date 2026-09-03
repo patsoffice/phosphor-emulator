@@ -45,10 +45,9 @@ use crate::disasm_registry::{DisasmCpu, DisasmRegion};
 use crate::gfx_registry::GfxRegion;
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
 use crate::set_bit_active_high;
-use crate::tkg04::{
-    DARLINGTON_BIAS_R, DARLINGTON_RESISTORS, EMITTER_BIAS_R, EMITTER_RESISTORS,
-    compute_tkg04_channel, normalize_tkg04_palette,
-};
+// The palette DAC model comes from core, not from `tkg04.rs`. Mario Bros. has
+// its own board and shares only the color network with the TKG-04 games; this
+// used to be a machine-to-machine import that read as though it ran on theirs.
 use crate::z80dma::Z80Dma;
 
 // ---------------------------------------------------------------------------
@@ -385,9 +384,24 @@ fn mario_palette_rgb(palette_prom: &[u8]) -> [(u8, u8, u8); 256] {
             ((v >> 4) & 1) as f64,
         ];
         let b_bits = [(v & 1) as f64, ((v >> 1) & 1) as f64];
-        let r = compute_tkg04_channel(&r_bits, &DARLINGTON_RESISTORS, DARLINGTON_BIAS_R, true);
-        let g = compute_tkg04_channel(&g_bits, &DARLINGTON_RESISTORS, DARLINGTON_BIAS_R, true);
-        let b = compute_tkg04_channel(&b_bits, &EMITTER_RESISTORS, EMITTER_BIAS_R, false);
+        let r = gfx::compute_ttl_dac_channel(
+            &r_bits,
+            &gfx::DARLINGTON_RESISTORS,
+            gfx::DARLINGTON_BIAS_R,
+            true,
+        );
+        let g = gfx::compute_ttl_dac_channel(
+            &g_bits,
+            &gfx::DARLINGTON_RESISTORS,
+            gfx::DARLINGTON_BIAS_R,
+            true,
+        );
+        let b = gfx::compute_ttl_dac_channel(
+            &b_bits,
+            &gfx::EMITTER_RESISTORS,
+            gfx::EMITTER_BIAS_R,
+            false,
+        );
         *entry = (r, g, b);
     }
 
@@ -396,7 +410,7 @@ fn mario_palette_rgb(palette_prom: &[u8]) -> [(u8, u8, u8); 256] {
     // gain. No pen is decoder-forced black here: TMA1 has one 82S42 at 4P holding
     // all eight bits, where the Donkey Kong boards split them across two 4-bit
     // MB7052s behind a color decoder.
-    normalize_tkg04_palette(&raw, |_| false)
+    gfx::normalize_palette_per_channel(&raw, |_| false)
 }
 
 // ---------------------------------------------------------------------------

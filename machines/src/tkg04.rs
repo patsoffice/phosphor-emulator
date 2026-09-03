@@ -78,7 +78,10 @@
 //! the NPN alone (Q11, and Mario Bros. Q6). Blue therefore sits 0.7 V above the
 //! other two for its whole range. That pedestal is real and belongs in the
 //! model; what cancels it is the monitor's per-channel black-level restoration,
-//! which is why `normalize_tkg04_palette` is shared by all three boards.
+//! which is why `gfx::normalize_palette_per_channel` is shared by all three
+//! boards. It and `gfx::compute_ttl_dac_channel` live in `phosphor-core` rather
+//! than here, because Mario Bros. shares this color model and does NOT run on
+//! this board.
 //!
 //! What differs is only the lookup feeding those ladders. The Nintendo Co.
 //! boards use two MB7052 256x4 PROMs at 2F and 2E behind a color decoder that
@@ -206,79 +209,10 @@ pub const NATIVE_WIDTH: usize = 256;
 pub const NATIVE_HEIGHT: usize = 240;
 pub const VBLANK_END: usize = 16; // first visible scanline
 
-// Resistor networks for palette PROM decoding (MB7052 TTL output PROMs).
-// Signal chain: PROM → resistor DAC → Darlington/emitter amp → SANYO EZV20 monitor.
-// Darlington amplifier (R and G): 1kΩ/470Ω/220Ω DAC with 470Ω pullup bias to VCC.
-// Emitter follower (B): 470Ω/220Ω DAC with 680Ω pullup bias to VCC.
-// These are `pub(crate)` because Mario Bros. (machines/src/mario_bros.rs) shares
-// the same Nintendo monitor/amplifier model (Sanyo EZV20, Darlington/emitter
-// stages) — only its PROM bit layout differs.
-pub(crate) const DARLINGTON_RESISTORS: [f64; 3] = [1000.0, 470.0, 220.0];
-pub(crate) const DARLINGTON_BIAS_R: f64 = 470.0;
-pub(crate) const EMITTER_RESISTORS: [f64; 2] = [470.0, 220.0];
-pub(crate) const EMITTER_BIAS_R: f64 = 680.0;
-
-/// Compute a single color channel using the TKG-04 hardware signal chain.
-///
-/// Models the physical circuit: MB7052 PROM with TTL output levels drives a
-/// resistor DAC network with a VCC pullup bias resistor.  The DAC output feeds
-/// a Darlington or emitter-follower amplifier stage, then an inverting SANYO
-/// EZV20 monitor input circuit with ≈0.7 V diode drops.
-///
-/// `raw_bits` contains non-inverted PROM bit values (0.0 = TTL low/active,
-/// 1.0 = TTL high/inactive).  The function returns a raw floating-point
-/// intensity (not yet clamped to 0–255) suitable for palette normalization.
-pub(crate) fn compute_tkg04_channel(
-    raw_bits: &[f64],
-    resistors: &[f64],
-    bias_r: f64,
-    is_darlington: bool,
-) -> f64 {
-    const VCC: f64 = 5.0;
-    const V_BIAS: f64 = 5.0;
-    const V_OL: f64 = 0.05; // TTL low output voltage
-    const V_OH: f64 = 4.0; // TTL high output voltage
-    const TTL_H_RES: f64 = 50.0; // TTL high-state output impedance (Ω)
-
-    let mut r_total: f64 = 0.0;
-    let mut v: f64 = 0.0;
-
-    // First pass: low inputs (raw bit = 0, PROM output driving to vOL)
-    for (&bit, &r) in raw_bits.iter().zip(resistors) {
-        if r != 0.0 && bit == 0.0 {
-            r_total += 1.0 / r;
-            v += V_OL / r;
-        }
-    }
-
-    // Bias pullup to VCC
-    r_total += 1.0 / bias_r;
-    v += V_BIAS / bias_r;
-
-    // Second pass: high inputs (raw bit = 1, TTL high through R + output impedance)
-    for (&bit, &r) in raw_bits.iter().zip(resistors) {
-        if r != 0.0 && bit != 0.0 {
-            let r_eff = r + TTL_H_RES;
-            r_total += 1.0 / r_eff;
-            v += V_OH / r_eff;
-        }
-    }
-
-    // Node voltage (Thévenin equivalent)
-    let v_node = v / r_total;
-
-    // Amplifier stage
-    let v_amp = if is_darlington {
-        v_node.max(0.7) // Darlington: minimum output ≈ 0.7 V
-    } else {
-        (v_node - 0.7).max(0.0) // Emitter follower: base-emitter drop ≈ 0.7 V
-    };
-
-    // SANYO EZV20 monitor: inverting circuit with diode clipping
-    let v_inv = VCC - v_amp;
-    let v_clip = (v_inv - 0.7).clamp(0.0, VCC - 1.4);
-    v_clip / (VCC - 1.4) * 255.0
-}
+// The palette DAC model — the resistor ladders, the TTL/amplifier/monitor chain
+// and the per-channel normalization — lives in `phosphor_core::gfx::resistor`,
+// not here. Mario Bros. shares it and does NOT run on this board, so keeping it
+// in this file made that machine import from this one and read as though it did.
 
 /// Compute the 256-entry RGB palette from the two 256-byte color PROMs.
 ///
@@ -286,7 +220,7 @@ pub(crate) fn compute_tkg04_channel(
 /// and c-2j/c-2f at `[256..512]`. Uses the MAME-compatible resistor-network
 /// model (TTL levels, Darlington/emitter amps, SANYO EZV20 monitor inversion),
 /// with the color-decoder NOR forcing pens `& 0x03 == 0` to black, then hands
-/// the result to [`normalize_tkg04_palette`].
+/// the result to [`gfx::normalize_palette_per_channel`].
 ///
 /// Shared by [`Tkg04Board::build_palette`] and each machine's gfxview
 /// `GfxRegion` palette hook so the runtime and offline paths never diverge.
@@ -300,7 +234,7 @@ pub(crate) fn compute_tkg04_palette(palette_prom: &[u8]) -> [(u8, u8, u8); 256] 
         }
 
         // Raw (non-inverted) PROM bytes — inversion is handled by the
-        // TTL output model inside compute_tkg04_channel.
+        // TTL output model inside `gfx::compute_ttl_dac_channel`.
         let c2k = palette_prom[i]; // first PROM (c-2k / c-2e)
         let c2j = palette_prom[0x100 + i]; // second PROM (c-2j / c-2f)
 
@@ -310,7 +244,12 @@ pub(crate) fn compute_tkg04_palette(palette_prom: &[u8]) -> [(u8, u8, u8); 256] 
             ((c2j >> 2) & 1) as f64,
             ((c2j >> 3) & 1) as f64,
         ];
-        let r = compute_tkg04_channel(&r_bits, &DARLINGTON_RESISTORS, DARLINGTON_BIAS_R, true);
+        let r = gfx::compute_ttl_dac_channel(
+            &r_bits,
+            &gfx::DARLINGTON_RESISTORS,
+            gfx::DARLINGTON_BIAS_R,
+            true,
+        );
 
         // Green: c-2k bits 2-3 + c-2j bit 0, Darlington amp
         let g_bits = [
@@ -318,80 +257,26 @@ pub(crate) fn compute_tkg04_palette(palette_prom: &[u8]) -> [(u8, u8, u8); 256] 
             ((c2k >> 3) & 1) as f64,
             (c2j & 1) as f64,
         ];
-        let g = compute_tkg04_channel(&g_bits, &DARLINGTON_RESISTORS, DARLINGTON_BIAS_R, true);
+        let g = gfx::compute_ttl_dac_channel(
+            &g_bits,
+            &gfx::DARLINGTON_RESISTORS,
+            gfx::DARLINGTON_BIAS_R,
+            true,
+        );
 
         // Blue: 2 bits from c-2k (bits 0-1), emitter follower
         let b_bits = [(c2k & 1) as f64, ((c2k >> 1) & 1) as f64];
-        let b = compute_tkg04_channel(&b_bits, &EMITTER_RESISTORS, EMITTER_BIAS_R, false);
+        let b = gfx::compute_ttl_dac_channel(
+            &b_bits,
+            &gfx::EMITTER_RESISTORS,
+            gfx::EMITTER_BIAS_R,
+            false,
+        );
 
         *entry = (r, g, b);
     }
 
-    normalize_tkg04_palette(&raw, |i| (i & 0x03) == 0x00)
-}
-
-/// Set each channel's black level and gain independently, and quantize to 8-bit.
-///
-/// `forced_black` marks pens a board's color decoder pins to black; those are
-/// written as black and excluded from the range, because they are not a channel
-/// output and their zeros would otherwise drag every channel's minimum to 0 and
-/// defeat the black-level adjustment. A board with no such rule passes
-/// `|_| false`.
-///
-/// # Why per channel and not one global scale
-///
-/// The three channels do not reach the monitor on a common baseline. Red and
-/// green leave an NPN into an A564 PNP whose base-emitter drops cancel (Donkey
-/// Kong and Donkey Kong Jr.: Q9 into Q13, Q10 into Q14; Mario Bros.: Q5 into Q7,
-/// Q8 into Q9), while blue has only the NPN (Q11, and Mario Bros.' Q6), so blue
-/// sits a whole 0.7 V follower drop above the other two along its entire range.
-/// That pedestal is in the hardware and [`compute_tkg04_channel`] reproduces it
-/// correctly; what removes it is the monitor, which DC-restores each channel to
-/// black during the back porch, which is inherently per channel. A single
-/// global gain cannot subtract a per-channel offset.
-///
-/// Donkey Kong is where the difference is visible rather than merely wrong. A
-/// pen with every PROM bit inactive came out (4, 4, 56) instead of black, which
-/// put a dark blue rectangle over the ladders in attract mode: the board's solid
-/// mask sprites, whose whole job is to hide Kong behind the girder as he climbs.
-///
-/// All three boards carry the same network, so they share this: ladders of
-/// {1 kΩ, 470 Ω, 220 Ω} on the two 3-bit channels and {470 Ω, 220 Ω} on the
-/// 2-bit blue, biased 470/470/680, into the amplifiers above.
-pub(crate) fn normalize_tkg04_palette(
-    raw: &[(f64, f64, f64); 256],
-    forced_black: impl Fn(usize) -> bool,
-) -> [(u8, u8, u8); 256] {
-    let mut lo = [f64::MAX; 3];
-    let mut hi = [f64::MIN; 3];
-    for (i, &(r, g, b)) in raw.iter().enumerate() {
-        if forced_black(i) {
-            continue;
-        }
-        for (channel, v) in [r, g, b].into_iter().enumerate() {
-            lo[channel] = lo[channel].min(v);
-            hi[channel] = hi[channel].max(v);
-        }
-    }
-
-    let normalize = |v: f64, channel: usize| -> u8 {
-        let span = hi[channel] - lo[channel];
-        if span <= 0.0 {
-            return 0;
-        }
-        (((v - lo[channel]) / span) * 255.0)
-            .round()
-            .clamp(0.0, 255.0) as u8
-    };
-
-    let mut out = [(0u8, 0u8, 0u8); 256];
-    for (i, (o, &(r, g, b))) in out.iter_mut().zip(raw.iter()).enumerate() {
-        if forced_black(i) {
-            continue;
-        }
-        *o = (normalize(r, 0), normalize(g, 1), normalize(b, 2));
-    }
-    out
+    gfx::normalize_palette_per_channel(&raw, |i| (i & 0x03) == 0x00)
 }
 
 // ---------------------------------------------------------------------------
