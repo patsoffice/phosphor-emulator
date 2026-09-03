@@ -125,6 +125,14 @@ pub const NATIVE_HEIGHT: usize = 240;
 pub const VBLANK_END: usize = 16; // first visible scanline
 pub const VISIBLE_LINES: u64 = 240; // lines rendered (top VBLANK_END clipped on output)
 
+/// The foreground/text layer: 32x32 of 8x8 tiles covering the whole raster.
+const FG_TILEMAP: gfx::TilemapConfig = gfx::TilemapConfig {
+    cols: 32,
+    rows: 32,
+    tile_width: 8,
+    tile_height: 8,
+};
+
 // Sound section: a second Z80 @ 4 MHz with two SN76489A PSGs (4 MHz and 1 MHz)
 // and an i8255 PPI. The sound CPU takes a periodic IRQ at SOUND_CLOCK/16/16/16/4
 // ≈ 244 Hz (one IRQ every 16384 sound cycles).
@@ -1083,31 +1091,32 @@ impl CongoBongoBoard {
         let pal_offset =
             ((self.latch2 >> 1) & 1) as usize * 0x80 + ((self.latch2 >> 7) & 1) as usize * 0x100;
 
-        let row = abs_y / 8;
-        let py = abs_y % 8;
         let buf_start = abs_y * NATIVE_WIDTH * 3;
         let buf = &mut self.scanline_buffer[buf_start..buf_start + NATIVE_WIDTH * 3];
 
-        for col in 0..32 {
-            let idx = row * 32 + col;
-            // The 0x1000 fg ROM only decodes 256 tiles; the fg-bank high bit has
-            // no ROM behind it on this set, so wrap rather than index past it.
-            let code = (video_ram[idx] as usize + (fg_bank << 8)) % tile_count;
-            let color = (color_ram[idx] & 0x1f) as usize;
-            let base = color * 8 + pal_offset;
-            let screen_x = col * 8;
-            for px in 0..8 {
-                let pen = tiles.pixel(code, px, py);
-                if pen == 0 {
-                    continue; // transparent — lower layers show through
-                }
-                let (r, g, b) = palette[(base + pen as usize) & 0x1FF];
-                let off = (screen_x + px) * 3;
-                buf[off] = r;
-                buf[off + 1] = g;
-                buf[off + 2] = b;
-            }
-        }
+        gfx::render_tilemap_scanline(
+            &FG_TILEMAP,
+            tiles,
+            abs_y,
+            |col, row| {
+                let idx = row * FG_TILEMAP.cols + col;
+                // The 0x1000 fg ROM only decodes 256 tiles; the fg-bank high bit
+                // has no ROM behind it on this set, so wrap rather than index
+                // past it.
+                let code = (video_ram[idx] as usize + (fg_bank << 8)) % tile_count;
+                gfx::TileInfo::new(code as u16, color_ram[idx] & 0x1f)
+            },
+            |attr, pen| {
+                // Pen 0 is transparent, which is what lets the background and
+                // the sprites drawn before this show through.
+                (pen != 0).then(|| {
+                    let base = attr as usize * 8 + pal_offset;
+                    palette[(base + pen as usize) & 0x1FF]
+                })
+            },
+            buf,
+            0,
+        );
     }
 
     // -----------------------------------------------------------------------
