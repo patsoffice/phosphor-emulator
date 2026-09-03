@@ -211,6 +211,35 @@ br sync --flush-only                            # Export to issues.jsonl for com
 - `br` never auto-commits — run `br sync --flush-only`, then commit `.beads/` yourself.
 - Check `br ready --json` at the start of a session to see what's actionable.
 
+### Writing Style
+
+Applies to everything written here: code comments, doc comments, Markdown under
+`docs/`, commit messages, and beads issue titles, descriptions and close reasons.
+
+- **No em dashes.** Not `—`, and not `--` standing in for one. Use a colon when
+  the second half explains the first, a semicolon when the halves are
+  independent, parentheses for an aside, or two sentences. En dashes stay where
+  they mean a range (`0x0000–0x03FF`, `pp15-16`).
+- **American spelling**, without exception: color, behavior, modeled, modeling,
+  center, analog, catalog, normalize, localize.
+- **Do not retrofit either rule into already-committed text.** A commit that
+  rewrites prose to fix a dash is noise in the blame, and the rules exist to
+  govern what gets added from here on. Fix them only in lines a change is
+  already touching for another reason.
+
+Both rules are easy to break while writing at length, and easiest to break in
+exactly the places that matter most: a long doc comment, a commit body, an issue
+close reason. Check the diff before committing rather than trusting the draft.
+Two passes over the added lines catch both:
+
+```bash
+sak git diff | sak fs grep '^\+.*—' -
+sak git diff | sak fs grep '^\+.*(behaviour|modelled|modelling|centre|colour|analogue|localise|recognise)' -
+```
+
+The words that actually slip in emulator prose are `modelled`, `modelling`,
+`behaviour` and `centre`.
+
 ### Commit Style
 
 - Prefix: `feat:`, `fix:`, `refactor:`, `test:`, `docs:`
