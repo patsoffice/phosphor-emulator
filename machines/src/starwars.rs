@@ -2994,8 +2994,12 @@ mod tests {
         let mut out = vec![0i16; 1 << 18];
         let n = board.fill_audio(&mut out);
         assert_eq!(n % 2, 0, "a stereo machine must emit whole frames");
+        // `as_chunks` returns (whole chunks, remainder); the assert above says
+        // the remainder is empty, so `.0` is everything.
         let frames: Vec<(f32, f32)> = out[..n]
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .skip(1024) // past the filters' settling window
             .map(|f| (f[0] as f32, f[1] as f32))
             .collect();
