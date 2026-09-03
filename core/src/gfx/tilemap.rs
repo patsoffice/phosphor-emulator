@@ -145,73 +145,25 @@ pub fn render_tilemap_scanline_indexed<F, G>(
     }
 }
 
-/// Render one scanline of a **scrolled** tilemap into an RGB24 buffer.
-///
-/// Generalizes [`render_tilemap_scanline`] to a map larger than the viewport
-/// with pixel scroll offsets: the fixed-grid helper is the `scroll_x == 0 &&
-/// scroll_y == 0 && map == viewport` special case. The map is `map_cols ×
-/// map_rows` tiles of `tile_w × tile_h`; the source pixel for screen column `sx`
-/// is `tx = (sx + scroll_x) mod (map_cols·tile_w)` (and likewise `ty` for the
-/// row), so it wraps toroidally. The caller computes `scroll_x`/`scroll_y` (its
-/// scroll-register semantics and any per-line row-scroll by passing a different
-/// value each scanline). `tile_info_fn(map_col, map_row)` is called once per tile
-/// column crossed (it must be a pure function of the map cell); `resolve_color_fn`
-/// returns `None` for transparent pixels. Per-tile flip is applied as in
-/// [`render_tilemap_scanline`].
-#[allow(clippy::too_many_arguments)]
-pub fn render_scrolled_tilemap_scanline<F, G>(
-    tiles: &GfxCache,
-    map_cols: usize,
-    map_rows: usize,
-    tile_w: usize,
-    tile_h: usize,
-    scroll_x: i32,
-    scroll_y: i32,
-    viewport_w: usize,
-    scanline: usize,
-    tile_info_fn: F,
-    resolve_color_fn: G,
-    buffer: &mut [u8],
-    x_offset: usize,
-) where
-    F: Fn(usize, usize) -> TileInfo,
-    G: Fn(u8, u8) -> Option<(u8, u8, u8)>,
-{
-    let map_w = (map_cols * tile_w) as i32;
-    let map_h = (map_rows * tile_h) as i32;
-    let ty = (scanline as i32 + scroll_y).rem_euclid(map_h) as usize;
-    let map_row = ty / tile_h;
-    let py = ty % tile_h;
-
-    let mut cur_col = usize::MAX;
-    let mut info = TileInfo::default();
-    let mut src_py = py;
-    for sx in 0..viewport_w {
-        let tx = (sx as i32 + scroll_x).rem_euclid(map_w) as usize;
-        let map_col = tx / tile_w;
-        if map_col != cur_col {
-            info = tile_info_fn(map_col, map_row);
-            src_py = if info.flip_y { tile_h - 1 - py } else { py };
-            cur_col = map_col;
-        }
-        let px = tx % tile_w;
-        let src_px = if info.flip_x { tile_w - 1 - px } else { px };
-        let pixel = tiles.pixel(info.code as usize, src_px, src_py);
-        if let Some((r, g, b)) = resolve_color_fn(info.attr, pixel) {
-            let off = (x_offset + sx) * 3;
-            buffer[off] = r;
-            buffer[off + 1] = g;
-            buffer[off + 2] = b;
-        }
-    }
-}
-
 /// Render one scanline of a **scrolled** tilemap into a persistent indexed buffer
-/// plus a priority buffer — the index/priority sibling of
-/// [`render_scrolled_tilemap_scanline`] (see it for the scroll/wrap addressing).
+/// plus a priority buffer.
+///
+/// Generalizes [`render_tilemap_scanline_indexed`] to a map larger than the
+/// viewport with pixel scroll offsets: the fixed-grid helper is the
+/// `scroll_x == 0 && scroll_y == 0 && map == viewport` special case. The map is
+/// `map_cols × map_rows` tiles of `tile_w × tile_h`; the source pixel for screen
+/// column `sx` is `tx = (sx + scroll_x) mod (map_cols·tile_w)` (and likewise
+/// `ty` for the row), so it wraps toroidally. The caller computes
+/// `scroll_x`/`scroll_y`, including any per-line row-scroll, by passing a
+/// different value each scanline. `tile_info_fn(map_col, map_row)` is called
+/// once per tile column crossed (it must be a pure function of the map cell).
+/// Per-tile flip is applied as in [`render_tilemap_scanline`].
 ///
 /// `resolve_index_fn(attr, pixel)` returns `Some((index, priority))` for an
 /// opaque pixel (written to `index_buf`/`prio_buf`) or `None` for transparency.
+///
+/// There is no RGB sibling of this. One was built on spec and deleted for never
+/// acquiring a caller; see the module docs.
 #[allow(clippy::too_many_arguments)]
 pub fn render_scrolled_tilemap_scanline_indexed<F, G>(
     tiles: &GfxCache,
@@ -330,10 +282,13 @@ mod tests {
         assert_eq!(index_buf, vec![4, 3, 2, 1]);
     }
 
+    /// The scrolled helper at zero scroll with map == viewport must agree with
+    /// the fixed-grid one, since that is the special case it generalizes.
+    ///
+    /// Was written against the RGB pair; rewritten against the indexed pair when
+    /// the RGB scrolled helper was deleted for having no callers.
     #[test]
     fn scrolled_matches_fixed_grid_at_zero_scroll() {
-        // With scroll 0 and map == viewport, the scrolled helper must equal the
-        // fixed-grid helper. 2x1 tilemap, 4x2 tiles.
         let config = TilemapConfig {
             cols: 2,
             rows: 1,
@@ -349,12 +304,21 @@ mod tests {
             }
         }
         let info = |col: usize, _row: usize| TileInfo::new(col as u16, col as u8);
-        let resolve = |_a: u8, pv: u8| Some((pv, pv, pv));
+        let resolve = |_a: u8, pv: u8| Some((pv, 0));
 
-        let mut fixed = vec![0u8; 8 * 3];
-        render_tilemap_scanline(&config, &cache, 1, info, resolve, &mut fixed, 0);
-        let mut scrolled = vec![0u8; 8 * 3];
-        render_scrolled_tilemap_scanline(
+        let (mut fixed, mut fixed_prio) = (vec![0u8; 8], vec![0u8; 8]);
+        render_tilemap_scanline_indexed(
+            &config,
+            &cache,
+            1,
+            info,
+            resolve,
+            &mut fixed,
+            &mut fixed_prio,
+            0,
+        );
+        let (mut scrolled, mut scrolled_prio) = (vec![0u8; 8], vec![0u8; 8]);
+        render_scrolled_tilemap_scanline_indexed(
             &cache,
             2,
             1,
@@ -367,6 +331,7 @@ mod tests {
             info,
             resolve,
             &mut scrolled,
+            &mut scrolled_prio,
             0,
         );
         assert_eq!(fixed, scrolled);

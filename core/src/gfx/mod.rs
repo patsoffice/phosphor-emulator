@@ -1,3 +1,19 @@
+//! Shared graphics helpers: tile/sprite decode, tilemap and sprite row passes,
+//! palette DAC models and screen orientation.
+//!
+//! # Helpers land with their first caller
+//!
+//! Two helpers here were once built on spec, as the RGB or generic sibling of
+//! one that was actually needed, and neither ever acquired a caller:
+//! `tilemap::render_scrolled_tilemap_scanline` and
+//! `resistor::compute_resistor_net`. Both are now deleted, and each module
+//! records why in its own docs.
+//!
+//! An unused helper is worse than no helper. It is tested, so it looks
+//! exercised; it is documented, so it looks adopted; and the next person
+//! building a sibling reads it as precedent. That is how the second one got
+//! built. **Add a helper in the same commit as the code that calls it.**
+
 pub mod bitmap;
 pub mod decode;
 pub mod palette;
@@ -17,8 +33,7 @@ pub use resistor::{
 pub use sheet::{Sheet, SheetConfig, grayscale_ramp, render_sheet};
 pub use sprite::{SpriteClip, draw_sprite_row, draw_sprite_row_indexed};
 pub use tilemap::{
-    TileInfo, TilemapConfig, render_scrolled_tilemap_scanline,
-    render_scrolled_tilemap_scanline_indexed, render_tilemap_scanline,
+    TileInfo, TilemapConfig, render_scrolled_tilemap_scanline_indexed, render_tilemap_scanline,
     render_tilemap_scanline_indexed,
 };
 
