@@ -463,12 +463,30 @@ impl Bus for AsteroidsDeluxeBus<'_> {
                     ((self.in1 >> offset) & 1) << 7
                 }
 
-                // DSW1: 0x2800–0x2803 — 74LS253 dual 4:1 multiplexer (same as Asteroids).
+                // R5: 0x2800-0x2803, a 74LS253 dual 4:1 multiplexer.
+                //
+                // AB0 and AB1 pick one of the four toggle PAIRS, and the two
+                // halves of the mux put that pair on DB0 and DB1: the drawing
+                // package's `OPTIONS INPUT CIRCUITRY` says "switch toggles 1, 3,
+                // 5 and 7 are read on data line DB0 and toggles 2, 4, 6 and 8
+                // are read on DB1". So each address returns its pair as a plain
+                // two-bit field, which is why every site in the ROM that reads
+                // one masks it with `AND #$03`.
+                //
+                // It used to return the second toggle on DB7. That put every
+                // EVEN toggle where the ROM's mask throws it away, so half the
+                // bank reached nothing: French and Spanish were unselectable,
+                // and so was half of every other option. Toggle inputs are "on"
+                // when pulled to ground, which is the closed-reads-0 sense the
+                // bank table already carried.
+                // AB0/AB1 count the pairs DOWNWARDS: 0x2800 selects toggles 7-8
+                // and 0x2803 selects toggles 1-2. Measured, not guessed. With
+                // the pairs ascending, setting the Language bits moved the bonus
+                // threshold and setting the Bonus Life bits changed the language,
+                // which is the same two options swapped end for end.
                 0x2800..=0x2803 => {
-                    let offset = (addr & 3) as u8;
-                    let bit0 = (self.dip_switches >> (offset * 2)) & 1;
-                    let bit7 = (self.dip_switches >> (offset * 2 + 1)) & 1;
-                    bit0 | (bit7 << 7)
+                    let pair = 6 - (addr & 3) as u8 * 2;
+                    (self.dip_switches >> pair) & 0x03
                 }
 
                 // POKEY: 0x2C00–0x2C0F
@@ -973,6 +991,40 @@ mod tests {
         // Bonus Life is option 4 (mask 0xC0); pick "None" (0xC0).
         sys.set_dip_option(0, 4, 0xC0);
         assert_eq!(sys.dip_bank_value(0), 0xC0);
+    }
+
+    /// What the 74LS253 puts on the bus for each of R5's four toggle pairs.
+    ///
+    /// The pattern is chosen so a single read distinguishes all three ways this
+    /// decode has been wrong. `0xE4` is the four pairs holding 3, 2, 1, 0 from
+    /// the top of the byte down, so the four addresses must read 3, 2, 1, 0:
+    ///
+    /// * putting the second toggle of a pair on DB7 instead of DB1 makes every
+    ///   read 0x00 or 0x81, because the ROM masks with `AND #$03`;
+    /// * counting the pairs upwards instead of downwards reads 0, 1, 2, 3, which
+    ///   is Language and Bonus Life swapped end for end.
+    ///
+    /// Both were live at once, so R5 delivered one working option out of five.
+    #[test]
+    fn the_dip_mux_reads_pairs_from_the_top_of_the_byte_down() {
+        let mut sys = AsteroidsDeluxeSystem::new();
+        sys.set_dip_bank_value(0, 0b11_10_01_00);
+        for (offset, expect) in [(0, 3), (1, 2), (2, 1), (3, 0)] {
+            let got = sys.bus_read(BusMaster::Cpu(0), 0x2800 + offset);
+            assert_eq!(got, expect, "read of 0x{:04X}", 0x2800 + offset);
+        }
+
+        // Only DB0 and DB1 are driven; nothing else on the byte is.
+        sys.set_dip_bank_value(0, 0xFF);
+        for offset in 0..4 {
+            let got = sys.bus_read(BusMaster::Cpu(0), 0x2800 + offset);
+            assert_eq!(
+                got,
+                0x03,
+                "read of 0x{:04X} with every toggle set",
+                0x2800 + offset
+            );
+        }
     }
 
     /// L8 reaches the CPU only through the POKEY's pot inputs, so setting the
