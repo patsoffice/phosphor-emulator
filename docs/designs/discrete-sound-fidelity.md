@@ -1839,6 +1839,21 @@ the catalog. Add a catalog check to the machine-development checklist and keep
 the README roadmap synchronized. "All discrete sounds" is complete only when
 every catalog entry is `validated` or carries a documented blocker.
 
+**Done, and the last sentence is now somebody else's epic.** The audit closed
+with `unexamined` at zero: every catalog row has had a drawing read against it or
+carries a documented blocker, fifteen boards are transcribed under
+[`docs/schematics/`](../schematics/), and each finding has an issue. None of that
+*models* anything, which is the distinction this document's phase list did not
+draw. Two epics carry the rest, and neither belongs here because this one is the
+tooling:
+
+- **`phosphor-emulator-fuqb`, board-level analog audio paths.** Owns the sentence
+  above verbatim: done when every catalog row is `validated` or blocked. One
+  child is finished, Star Wars, and it is the worked example.
+- **`phosphor-emulator-x8ac`, discrete simulation accuracy.** The primitives
+  underneath, where a defect is wrong on every machine that uses it rather than
+  on one board.
+
 ## Risks
 
 - **Overfitting to MAME.** The central risk. Addressed by the reference policy,
