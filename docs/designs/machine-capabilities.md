@@ -287,14 +287,27 @@ capability refactor as larger semantic changes. **Both are now implemented**
 > - `set_dip_option` has a metadata-aware default that merges the chosen value
 >   into the bank byte using the option's `mask`, so machines usually implement
 >   only the three byte accessors.
-> - Each bank is one byte — a single physical ≤8-switch DIP package read at one
->   address. Machines with two switch banks expose two banks (Tempest, Dig Dug,
->   Galaga). `DipChoice` / `DipOption` / `DipApplyTiming` match the proposal.
-> - 12 of the 13 DIP-bearing machines ship real tables whose option defaults
->   reconstruct the historical power-on bytes. Satan's Hollow's SSIO sound-board
->   DIP is left unmodelled (firmware-interpreted coinage with no documented
->   per-bit layout); Missile Command and Asteroids Deluxe currently expose one
->   of their two physical banks. Each has a follow-up issue.
+> - Each bank is one byte: a single physical ≤8-switch DIP package, usually read
+>   at one address. Machines with two switch banks expose two banks (Tempest, Dig
+>   Dug, Galaga). `DipChoice` / `DipOption` / `DipApplyTiming` match the proposal.
+> - "Read at one address" is the common case and not the rule. Missile Command's
+>   R8 and Asteroids Deluxe's L8 are each wired one toggle per POKEY pot line, so
+>   the game reads them by running a pot scan rather than by loading a byte. Those
+>   banks keep a hand-written `DipSwitches` impl whose setter re-drives the pots,
+>   because a macro-generated one cannot; reset re-drives them too, since the
+>   switches are wiring rather than state. `quantum.rs` is the older precedent for
+>   a setter with a side effect.
+> - **A bank on the pots must have its bit sense measured, not inferred.** Both
+>   boards carry a second, byte-read bank, and on Missile Command the two disagree
+>   while on Asteroids Deluxe they agree, which means neither outcome could have
+>   been predicted from the other bank, and on Asteroids Deluxe agreeing at the
+>   byte requires the *opposite* wiring at the pots. Both were settled by driving
+>   the bank and reading the game's own decoding off the screen.
+> - 13 of the 13 DIP-bearing machines ship real tables whose option defaults
+>   reconstruct the historical power-on bytes, and every physical bank is now
+>   modeled. Satan's Hollow's SSIO sound-board DIP remains unmodeled (firmware-
+>   interpreted coinage with no documented per-bit layout) and has a follow-up
+>   issue.
 
 DIP switches should be a frontend capability with default empty behavior,
 similar to NVRAM but with structured metadata and mutation:

@@ -1,7 +1,39 @@
+//! Atari Asteroids Deluxe (1980).
+//!
+//! # Documentation
+//!
+//! | Document | Source | Pages |
+//! |---|---|---|
+//! | `Asteroids Deluxe` operator manual TM-143, 1st printing | `arcade-museum.com/manuals-videogames/A/AsteroidsDeluxe.man.pdf` | 46 pages; see the figure list below |
+//! | `Asteroids Deluxe Cabaret` drawing package supplement | `arcade-museum.com/manuals-videogames/A/AstDlx-Cabaret-sp.pdf` | 8 sheets |
+//!
+//! **The manual's printed page numbers run four behind its PDF pages**, so
+//! Figure 8 is printed page 11 and PDF page 15. PDF pages are used throughout
+//! here. The figures that describe this board's operator switches:
+//!
+//! | Figure | PDF page | What it gives |
+//! |---|---|---|
+//! | 6, `Self-Test Procedure` | 11-12 | The four decoded fields behind each digit of the self-test's option display; the naming authority for both switch banks |
+//! | 7, `Game Option Settings` | 13 | R5's eight toggles, one option per row, factory settings marked |
+//! | 8, `Game Price Settings` | 15 | L8's eight toggles as twelve complete recipes, cabinet/door type against bonus scheme |
+//! | 9, `Coin Counter Option Settings` | 17 | **Not L8.** A separate 4-toggle switch at M12 wiring coin mechanisms to counters; it never reaches the CPU |
+//!
+//! Figure 6 is the one that makes the L8 table tractable: Figure 8 gives whole
+//! eight-toggle recipes and never says which toggle carries which meaning, so on
+//! its own it would only support modeling the bank as opaque byte recipes. See
+//! [`ASTDELUX_L8_DERIVATION`].
+//!
+//! The drawing package is a different PDF and does **not** show L8 anywhere. Its
+//! Sheet 2 Side B (PDF p7) has `OPTIONS INPUT CIRCUITRY`, which is R5: eight
+//! switches shorting to ground against 10k pull-ups into a P5 LS253, so a closed
+//! R5 toggle reads low. That sense does not transfer to L8, which is wired to the
+//! POKEY pot lines instead; see
+//! [`refresh_dip_pots`](AsteroidsDeluxeSystem::refresh_dip_pots).
+
 use phosphor_core::audio::SampleRing;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
-    ActionRole, AudioSource, DipApplyTiming, DipChoice, DipOption, DipSwitchBank,
+    ActionRole, AudioSource, DipApplyTiming, DipChoice, DipOption, DipSwitchBank, DipSwitches,
     InputConfigurable, InputControl, InputEvent, InputId, InputKind, MachineCore, Nvram,
     Profilable, SaveState,
 };
@@ -83,6 +115,14 @@ pub const INPUT_FIRE: u8 = 4;
 pub const INPUT_SHIELD: u8 = 5;
 pub const INPUT_ROT_LEFT: u8 = 6;
 pub const INPUT_ROT_RIGHT: u8 = 7;
+
+// NO SELF-TEST CONTROL, DELIBERATELY. The cabinet has the switch and IN0 bit 7
+// is where the mux comment says it lands, but driving that bit does not produce
+// a self-test display: the screen stays black through 3000 frames and the 6502's
+// PC pins at 0x7DF8, sampled identically six times over while attract-mode PCs
+// roam. The routine is waiting on something this board does not yet model. A
+// control bound to a key that freezes the game is worse than none, so it is left
+// out until the underlying gap is fixed.
 
 /// Typed logical controls. `InputId`s reuse the `INPUT_*` numbering; default
 /// bindings mirror the legacy name-matched defaults (thrust = "P1 Up", shield =
@@ -195,9 +235,28 @@ pub struct AsteroidsDeluxeSystem {
     // I/O — active-HIGH inputs (default 0x00 = all released)
     in0: u8,
     in1: u8,
-    /// DIP switches (R5): default 0x00 (English, 2-4 ships, easy, 10K bonus).
+    /// DIP switches (R5, the LEFT switch assembly): default 0x00, which is the
+    /// manual's factory setting throughout, being English, 2-4 ships, 1-play
+    /// minimum and a bonus ship every 10,000. Read as a byte through the 74LS253
+    /// at 0x2800.
     #[save_skip]
     dip_switches: u8,
+    /// DIP switches (L8, the CENTER switch assembly): the coinage bank, read
+    /// through the POKEY's pot inputs rather than as a byte. See
+    /// [`refresh_dip_pots`](Self::refresh_dip_pots).
+    ///
+    /// **Default 0xFF, not 0x00.** A set bit here is an *open* toggle, and an
+    /// open toggle leaves its pot line low, so 0xFF is the byte that reproduces
+    /// undriven pots and it is what this machine has been running on all along.
+    /// Defaulting to 0x00 would have driven all eight lines high and quietly
+    /// changed the game's price from 50c to free play.
+    ///
+    /// 0xFF is a switch assembly straight out of the bag: every toggle open. It
+    /// decodes as 2 coins for 1 play with no bonus coins, which is Figure 8's
+    /// "50c per play / no bonus" column, and as right mech x6 and center mech
+    /// x2, which are settings no Figure 8 recipe uses.
+    #[save_skip]
+    dip_l8: u8,
 
     // EAROM (ER2055): 64-byte non-volatile RAM for high scores
     earom: Er2055,
@@ -237,7 +296,7 @@ impl AsteroidsDeluxeSystem {
     }
 
     pub fn new() -> Self {
-        Self {
+        let mut sys = Self {
             cpu: M6502::new(),
             // Asteroids Deluxe: VROM at DVG 0x0800, size 0x1000
             board: AtariDvgBoard::new(Self::build_map(), 0x0800, 0x1000),
@@ -245,8 +304,42 @@ impl AsteroidsDeluxeSystem {
             in0: 0x00,
             in1: 0x00,
             dip_switches: 0x00,
+            dip_l8: 0xFF,
             earom: Er2055::new(),
             audio_buffer: SampleRing::with_capacity(1024),
+        };
+        sys.refresh_dip_pots();
+        sys
+    }
+
+    /// Drive the L8 DIP switches onto the POKEY's pot inputs.
+    ///
+    /// L8's eight toggles are wired one per pot line rather than onto a byte the
+    /// CPU can read directly, so the game reads them the long way round: strobe
+    /// POTGO, poll ALLPOT until the scan finishes, then read POT0-7. That this is
+    /// the path was settled by watching which POKEY offsets the ROM reads: it
+    /// touches 0x00-0x08, which is the full scan.
+    ///
+    /// **A closed (On) toggle drives its line HIGH, so a set bit, meaning an
+    /// open toggle, leaves the line low.** That is backwards from the obvious
+    /// reading and backwards from Missile Command's pot-wired bank, where a
+    /// closed switch drives high, so it was measured rather than assumed: the
+    /// game prints its decoded price on the attract screen, and stepping the
+    /// bank through all four Game Price values reproduces all four of the
+    /// manual's prices only under this sense. Under the opposite one the
+    /// power-on machine would read free play, where it has always shown
+    /// `2 COINS 1 CREDIT`. The tests at the bottom of this file record the
+    /// seven bytes that were driven and what the screen said to each.
+    fn refresh_dip_pots(&mut self) {
+        for n in 0..8 {
+            // A set bit is an OPEN toggle, and an open toggle leaves its pot
+            // line low. See the doc comment above for how that was measured.
+            let level = if self.dip_l8 & (1 << n) != 0 {
+                0x00
+            } else {
+                0x80
+            };
+            self.pokey.set_pot_input(n, level);
         }
     }
 
@@ -517,6 +610,10 @@ impl MachineCore for AsteroidsDeluxeSystem {
     fn reset(&mut self) {
         self.board.reset();
         self.pokey.reset();
+        // The pots are wiring, not state: a reset must leave the DIP switches
+        // still driving them, exactly as the cabinet's do. `Pokey::reset` clears
+        // the pot inputs, so this has to come after it.
+        self.refresh_dip_pots();
         let (cpu, mut bus) = self.split();
         cpu.reset(&mut bus, BusMaster::Cpu(0));
     }
@@ -537,116 +634,309 @@ impl Nvram for AsteroidsDeluxeSystem {
 }
 
 impl Profilable for AsteroidsDeluxeSystem {}
-/// DIP switch metadata for Asteroids Deluxe's game-options DIP (the R5 bank
-/// read through the 74LS253 mux at 0x2800-0x2803; the separate coinage bank is
-/// not emulated). Choice bits and labels follow MAME's `astdelux` R5 layout;
-/// option defaults OR to the historical 0x00.
-const ASTDELUX_DIP_BANKS: &[DipSwitchBank] = &[DipSwitchBank {
-    name: "DSW1",
-    options: &[
-        DipOption {
-            name: "Language",
-            mask: 0x03,
-            apply: DipApplyTiming::Immediate,
-            choices: &[
-                DipChoice {
-                    label: "English",
-                    value: 0x00,
-                },
-                DipChoice {
-                    label: "German",
-                    value: 0x01,
-                },
-                DipChoice {
-                    label: "French",
-                    value: 0x02,
-                },
-                DipChoice {
-                    label: "Spanish",
-                    value: 0x03,
-                },
-            ],
-        },
-        DipOption {
-            name: "Lives",
-            mask: 0x0C,
-            apply: DipApplyTiming::Immediate,
-            choices: &[
-                DipChoice {
-                    label: "2-4",
-                    value: 0x00,
-                },
-                DipChoice {
-                    label: "3-5",
-                    value: 0x04,
-                },
-                DipChoice {
-                    label: "4-6",
-                    value: 0x08,
-                },
-                DipChoice {
-                    label: "5-7",
-                    value: 0x0C,
-                },
-            ],
-        },
-        DipOption {
-            name: "Minimum Plays",
-            mask: 0x10,
-            apply: DipApplyTiming::Immediate,
-            choices: &[
-                DipChoice {
-                    label: "1",
-                    value: 0x00,
-                },
-                DipChoice {
-                    label: "2",
-                    value: 0x10,
-                },
-            ],
-        },
-        DipOption {
-            name: "Difficulty",
-            mask: 0x20,
-            apply: DipApplyTiming::Immediate,
-            choices: &[
-                DipChoice {
-                    label: "Easy",
-                    value: 0x00,
-                },
-                DipChoice {
-                    label: "Hard",
-                    value: 0x20,
-                },
-            ],
-        },
-        DipOption {
-            name: "Bonus Life",
-            mask: 0xC0,
-            apply: DipApplyTiming::Immediate,
-            choices: &[
-                DipChoice {
-                    label: "10000",
-                    value: 0x00,
-                },
-                DipChoice {
-                    label: "12000",
-                    value: 0x40,
-                },
-                DipChoice {
-                    label: "15000",
-                    value: 0x80,
-                },
-                DipChoice {
-                    label: "None",
-                    value: 0xC0,
-                },
-            ],
-        },
-    ],
-}];
+/// The two operator switch assemblies on the Asteroids Deluxe PCB.
+///
+/// Both tables are transcribed from the operator manual, which describes them
+/// twice over: once as toggle positions (Figure 7 for R5, Figure 8 for L8) and
+/// once as the decoded fields the game prints on its own self-test screen
+/// (Figure 6). The two descriptions agree, which is what makes the field
+/// decomposition below an assertion of the manual's rather than an invention.
+/// See [`ASTDELUX_L8_DERIVATION`] for the arithmetic.
+///
+/// Both banks decode the same way: toggle *n* is bit *n* - 1, and a closed (On)
+/// toggle reads as 0. For R5 that is the schematic's doing: its switches short
+/// to ground against 10k pull-ups into the P5 mux. For L8 it was measured off
+/// the running game rather than carried across, since two banks on one board are
+/// free to disagree and Missile Command's two do. Note that agreeing at the byte
+/// costs L8 the opposite wiring at the pots; see
+/// [`refresh_dip_pots`](AsteroidsDeluxeSystem::refresh_dip_pots).
+const ASTDELUX_DIP_BANKS: &[DipSwitchBank] = &[
+    DipSwitchBank {
+        name: "R5 (Game Options)",
+        options: &[
+            DipOption {
+                name: "Language",
+                mask: 0x03,
+                apply: DipApplyTiming::Immediate,
+                choices: &[
+                    DipChoice {
+                        label: "English",
+                        value: 0x00,
+                    },
+                    DipChoice {
+                        label: "German",
+                        value: 0x01,
+                    },
+                    DipChoice {
+                        label: "French",
+                        value: 0x02,
+                    },
+                    DipChoice {
+                        label: "Spanish",
+                        value: 0x03,
+                    },
+                ],
+            },
+            DipOption {
+                name: "Lives",
+                mask: 0x0C,
+                apply: DipApplyTiming::Immediate,
+                choices: &[
+                    DipChoice {
+                        label: "2-4",
+                        value: 0x00,
+                    },
+                    DipChoice {
+                        label: "3-5",
+                        value: 0x04,
+                    },
+                    DipChoice {
+                        label: "4-6",
+                        value: 0x08,
+                    },
+                    DipChoice {
+                        label: "5-7",
+                        value: 0x0C,
+                    },
+                ],
+            },
+            DipOption {
+                name: "Minimum Plays",
+                mask: 0x10,
+                apply: DipApplyTiming::Immediate,
+                choices: &[
+                    DipChoice {
+                        label: "1",
+                        value: 0x00,
+                    },
+                    DipChoice {
+                        label: "2",
+                        value: 0x10,
+                    },
+                ],
+            },
+            // NOT IN THE MANUAL. Figure 7 marks toggle 6 `Not Used`, and Figure 6
+            // agrees from the other side: this bit lands in the self-test's
+            // minimum-plays digit, whose legend reads `0 or 2 = 1-play minimum,
+            // 1 or 3 = 2-play minimum`, the 2s bit provably changing nothing.
+            // Left in place because removing it is a behavior question for the R5
+            // bank rather than part of adding L8; tracked separately.
+            DipOption {
+                name: "Difficulty",
+                mask: 0x20,
+                apply: DipApplyTiming::Immediate,
+                choices: &[
+                    DipChoice {
+                        label: "Easy",
+                        value: 0x00,
+                    },
+                    DipChoice {
+                        label: "Hard",
+                        value: 0x20,
+                    },
+                ],
+            },
+            DipOption {
+                name: "Bonus Life",
+                mask: 0xC0,
+                apply: DipApplyTiming::Immediate,
+                choices: &[
+                    DipChoice {
+                        label: "10000",
+                        value: 0x00,
+                    },
+                    DipChoice {
+                        label: "12000",
+                        value: 0x40,
+                    },
+                    DipChoice {
+                        label: "15000",
+                        value: 0x80,
+                    },
+                    DipChoice {
+                        label: "None",
+                        value: 0xC0,
+                    },
+                ],
+            },
+        ],
+    },
+    DipSwitchBank {
+        name: "L8 (Coinage)",
+        options: &[
+            DipOption {
+                name: "Game Price",
+                mask: 0x03,
+                apply: DipApplyTiming::Immediate,
+                choices: &[
+                    DipChoice {
+                        label: "Free Play",
+                        value: 0x00,
+                    },
+                    DipChoice {
+                        label: "1 Coin/2 Plays",
+                        value: 0x01,
+                    },
+                    DipChoice {
+                        label: "1 Coin/1 Play",
+                        value: 0x02,
+                    },
+                    DipChoice {
+                        label: "2 Coins/1 Play",
+                        value: 0x03,
+                    },
+                ],
+            },
+            DipOption {
+                name: "Right Coin Mech",
+                mask: 0x0C,
+                apply: DipApplyTiming::Immediate,
+                choices: &[
+                    DipChoice {
+                        label: "x1",
+                        value: 0x00,
+                    },
+                    DipChoice {
+                        label: "x4",
+                        value: 0x04,
+                    },
+                    DipChoice {
+                        label: "x5",
+                        value: 0x08,
+                    },
+                    DipChoice {
+                        label: "x6",
+                        value: 0x0C,
+                    },
+                ],
+            },
+            // Figure 6: "Both these settings affect the left mech in a 2-mech door."
+            DipOption {
+                name: "Center Coin Mech",
+                mask: 0x10,
+                apply: DipApplyTiming::Immediate,
+                choices: &[
+                    DipChoice {
+                        label: "x1",
+                        value: 0x00,
+                    },
+                    DipChoice {
+                        label: "x2",
+                        value: 0x10,
+                    },
+                ],
+            },
+            // A "coin" is 25c in the U.S. and 1 DM in Germany, so these read as
+            // counts rather than as cash. Figure 6 spells the field out as
+            // "0, 5, 6 or 7 = No bonus coins", so four of the eight values are the
+            // same setting; all four are listed because the power-on byte lands on
+            // 7, and an option the default cannot name fails the table validator.
+            DipOption {
+                name: "Coin Bonus Adder",
+                mask: 0xE0,
+                apply: DipApplyTiming::Immediate,
+                choices: &[
+                    DipChoice {
+                        label: "None",
+                        value: 0x00,
+                    },
+                    DipChoice {
+                        label: "Every 2 Coins, +1",
+                        value: 0x20,
+                    },
+                    DipChoice {
+                        label: "Every 4 Coins, +1",
+                        value: 0x40,
+                    },
+                    DipChoice {
+                        label: "Every 4 Coins, +2",
+                        value: 0x60,
+                    },
+                    DipChoice {
+                        label: "Every 5 Coins, +1",
+                        value: 0x80,
+                    },
+                    DipChoice {
+                        label: "None (5)",
+                        value: 0xA0,
+                    },
+                    DipChoice {
+                        label: "None (6)",
+                        value: 0xC0,
+                    },
+                    DipChoice {
+                        label: "None (7)",
+                        value: 0xE0,
+                    },
+                ],
+            },
+        ],
+    },
+];
 
-crate::impl_dip_switches!(AsteroidsDeluxeSystem, ASTDELUX_DIP_BANKS, dip_switches);
+/// Why L8 is modeled as four fields rather than as twelve whole-byte recipes.
+///
+/// Figure 8 alone would not support the decomposition. It is a grid of coin-door
+/// type against bonus scheme, and each cell gives a *complete* eight-toggle
+/// recipe, "Straight 25c Door, 50c per play, no bonus" and so on. Nothing in it
+/// says which toggles carry which meaning, so reading fields out of it would be
+/// inference dressed up as transcription.
+///
+/// Figure 6 supplies the missing half. The self-test prints four digits, and its
+/// legend names them: Coin Bonus Adder, Center Mech Multiplier, Right Mech
+/// Multiplier, Game Price, with the values each digit can take. Those are the
+/// fields, asserted by the manual outright.
+///
+/// The two figures then check against each other, and every one of Figure 8's
+/// twelve recipes lands exactly, which is what rules out an off-by-one in the
+/// toggle-to-bit mapping or a flipped sense:
+///
+/// | Figure 8 cell | byte | Game Price | Bonus Adder | arithmetic |
+/// |---|---|---|---|---|
+/// | 50c, no bonus | 0x03 | 3 = 2 coins/play | 0 = none | n/a |
+/// | 50c, $1.00 = 3 plays | 0x63 | 3 = 2 coins/play | 3 = every 4 coins, +2 | $1.00 = 4 coins, +2 = 6 = 3 plays |
+/// | 50c, $.50/$.75/$1.00 = 1/2/3 plays | 0x23 | 3 = 2 coins/play | 1 = every 2 coins, +1 | 2 -> 3 = 1 play; 3 -> 4 = 2; 4 -> 6 = 3 |
+/// | 25c, no bonus | 0x02 | 2 = 1 coin/play | 0 = none | n/a |
+/// | 25c, $.50 = 3 plays | 0x22 | 2 = 1 coin/play | 1 = every 2 coins, +1 | $.50 = 2 coins, +1 = 3 = 3 plays |
+/// | 25c, $1.00 = 5 plays | 0x42 | 2 = 1 coin/play | 2 = every 4 coins, +1 | $1.00 = 4 coins, +1 = 5 = 5 plays |
+///
+/// The 25c/$1.00-door rows are the same six with bit 2 set, which is Right Mech
+/// x4, a dollar slot counting as four quarters. Toggles 4 and 5 are On in all
+/// twelve, so Figure 8 asserts nothing about them and Figure 6 is the only
+/// source for the x5/x6 and center-mech settings.
+///
+/// This is a doc-only item; the tests below check the same six rows.
+#[allow(dead_code)]
+const ASTDELUX_L8_DERIVATION: () = ();
+
+/// R5 is read directly at 0x2800 through the 74LS253. L8 reaches the CPU through
+/// the POKEY's pot inputs, so setting it has to re-drive them: the same shape as
+/// `quantum.rs` and `missile_command.rs`, which is why this is hand-written
+/// rather than `impl_dip_switches!`.
+impl DipSwitches for AsteroidsDeluxeSystem {
+    fn dip_banks(&self) -> &'static [DipSwitchBank] {
+        ASTDELUX_DIP_BANKS
+    }
+
+    fn dip_bank_value(&self, bank: usize) -> u8 {
+        match bank {
+            0 => self.dip_switches,
+            1 => self.dip_l8,
+            _ => 0,
+        }
+    }
+
+    fn set_dip_bank_value(&mut self, bank: usize, value: u8) {
+        match bank {
+            0 => self.dip_switches = value,
+            1 => {
+                self.dip_l8 = value;
+                self.refresh_dip_pots();
+            }
+            _ => {}
+        }
+    }
+}
 crate::impl_board_debug_trace!(AsteroidsDeluxeSystem, board);
 
 // ---------------------------------------------------------------------------
@@ -664,14 +954,17 @@ crate::register_machine!(
 mod tests {
     use super::*;
     use crate::atari_dvg::Region;
-    use phosphor_core::core::machine::DipSwitches;
     use phosphor_core::cpu::CpuStateTrait;
 
     #[test]
     fn dip_default_and_metadata() {
         let sys = AsteroidsDeluxeSystem::new();
         assert_eq!(sys.dip_bank_value(0), 0x00);
-        crate::assert_dip_banks_valid(sys.dip_banks(), &[sys.dip_bank_value(0)]);
+        assert_eq!(sys.dip_bank_value(1), 0xFF);
+        crate::assert_dip_banks_valid(
+            sys.dip_banks(),
+            &[sys.dip_bank_value(0), sys.dip_bank_value(1)],
+        );
     }
 
     #[test]
@@ -680,6 +973,154 @@ mod tests {
         // Bonus Life is option 4 (mask 0xC0); pick "None" (0xC0).
         sys.set_dip_option(0, 4, 0xC0);
         assert_eq!(sys.dip_bank_value(0), 0xC0);
+    }
+
+    /// L8 reaches the CPU only through the POKEY's pot inputs, so setting the
+    /// bank has to re-drive them. Without that the switches are settable and
+    /// have no effect, which is the failure this bank exists to fix.
+    #[test]
+    fn setting_l8_drives_the_pokey_pots() {
+        let mut sys = AsteroidsDeluxeSystem::new();
+        // The power-on byte is all toggles open, which is every pot line low:
+        // exactly the undriven state this machine ran on before the bank
+        // existed. A default of 0x00 would drive all eight high instead.
+        for n in 0..8 {
+            assert_eq!(sys.pokey.pot_input(n), 0x00, "pot {n} at power-on");
+        }
+
+        // Figure 8's "25c per play, Straight 25c Door, $1.00 = 5 plays". A set
+        // bit is an open toggle, so it drives its line LOW.
+        sys.set_dip_bank_value(1, 0x42);
+        for n in 0..8 {
+            let expect = if 0x42 & (1 << n) != 0 { 0x00 } else { 0x80 };
+            assert_eq!(sys.pokey.pot_input(n), expect, "pot {n} after set");
+        }
+
+        // And a reset must not drop the wiring on the floor. `Pokey::reset`
+        // clears the pot inputs, so this fails if the refresh runs before it.
+        sys.reset();
+        assert_eq!(sys.pokey.pot_input(1), 0x00);
+        assert_eq!(sys.pokey.pot_input(6), 0x00);
+        assert_eq!(sys.pokey.pot_input(0), 0x80);
+    }
+
+    /// Figure 8's twelve toggle recipes against the four fields Figure 6 names.
+    ///
+    /// This is the check that makes the decomposition a transcription rather
+    /// than an inference: the recipes and the field legend are independent
+    /// tables in the manual, and every row has to reproduce exactly.
+    #[test]
+    fn l8_choices_reproduce_the_manual_price_recipes() {
+        let l8 = &ASTDELUX_DIP_BANKS[1];
+        assert_eq!(l8.name, "L8 (Coinage)");
+
+        let choice = |option: &str, label: &str| -> u8 {
+            let o = l8.options.iter().find(|o| o.name == option).unwrap();
+            o.choices.iter().find(|c| c.label == label).unwrap().value
+        };
+
+        let price_50c = choice("Game Price", "2 Coins/1 Play");
+        let price_25c = choice("Game Price", "1 Coin/1 Play");
+        let straight_door = choice("Right Coin Mech", "x1");
+        let dollar_door = choice("Right Coin Mech", "x4");
+        let no_bonus = choice("Coin Bonus Adder", "None");
+        let every_2_plus_1 = choice("Coin Bonus Adder", "Every 2 Coins, +1");
+        let every_4_plus_1 = choice("Coin Bonus Adder", "Every 4 Coins, +1");
+        let every_4_plus_2 = choice("Coin Bonus Adder", "Every 4 Coins, +2");
+
+        // Toggle n is bit n-1 and a closed (On) toggle reads 0, so a recipe's
+        // byte is the sum of the bits its *open* toggles claim.
+        let recipe = |open: &[u8]| -> u8 { open.iter().fold(0u8, |b, t| b | 1 << (t - 1)) };
+
+        // --- 50c per play, Straight 25c Door (Figure 8, upper block, row 1) ---
+        assert_eq!(price_50c | straight_door | no_bonus, recipe(&[2, 1]));
+        assert_eq!(
+            price_50c | straight_door | every_4_plus_2,
+            recipe(&[7, 6, 2, 1]),
+            "$1.00 = 3 plays"
+        );
+        assert_eq!(
+            price_50c | straight_door | every_2_plus_1,
+            recipe(&[6, 2, 1]),
+            "$.50/$.75/$1.00 = 1/2/3 plays"
+        );
+
+        // --- 25c per play, Straight 25c Door (Figure 8, lower block, row 1) ---
+        assert_eq!(price_25c | straight_door | no_bonus, recipe(&[2]));
+        assert_eq!(
+            price_25c | straight_door | every_2_plus_1,
+            recipe(&[6, 2]),
+            "$.50 = 3 plays"
+        );
+        assert_eq!(
+            price_25c | straight_door | every_4_plus_1,
+            recipe(&[7, 2]),
+            "$1.00 = 5 plays"
+        );
+
+        // The 25c/$1.00-door rows are the six above with toggle 3 opened, which
+        // is Right Mech x4: a dollar slot counting as four quarters.
+        assert_eq!(dollar_door, recipe(&[3]));
+
+        // Toggles 4 and 5 are On in all twelve recipes, so every byte above
+        // leaves bits 3 and 4 clear.
+        for byte in [
+            price_50c | straight_door | no_bonus,
+            price_25c | dollar_door | every_4_plus_1,
+        ] {
+            assert_eq!(byte & 0x18, 0, "toggles 4 and 5 are On throughout Figure 8");
+        }
+    }
+
+    /// What the running game printed for each byte that was driven into it.
+    ///
+    /// The table above is the manual's; this is the machine's own reading of it,
+    /// taken off the attract screen, which prints the decoded price and, after
+    /// coins, the credit count, end to end through the real POKEY pot scan. Each
+    /// row was a prediction before it was an observation, and the polarity is
+    /// what they collectively pin: under the opposite sense every one inverts.
+    ///
+    /// | bank | Figure 8 cell | screen said |
+    /// |---|---|---|
+    /// | 0xFF | (power-on, all toggles open) | `2 COINS 1 CREDIT` |
+    /// | 0x02 | 25c/play, straight door, no bonus | `1 COIN 1 CREDIT`; 2 coins -> `CREDITS 2` |
+    /// | 0x01 | n/a | `1 COIN 2 CREDITS` |
+    /// | 0x00 | n/a | no price line and no credit line, which is free play |
+    /// | 0x22 | 25c/play, `$.50 = 3 plays` | 2 coins -> `CREDITS 3` |
+    /// | 0x42 | 25c/play, `$1.00 = 5 plays` | 4 coins -> `CREDITS 5` |
+    /// | 0x63 | 50c/play, `$1.00 = 3 plays` | 4 coins -> `CREDITS 3` |
+    ///
+    /// The last three are the Coin Bonus Adder doing arithmetic the manual
+    /// states in cash and the game does in coins. Not covered: the two mech
+    /// multipliers, since this machine models one coin input and there is no
+    /// right or center mech to multiply.
+    #[test]
+    fn l8_bytes_match_what_the_game_displayed() {
+        let sys = AsteroidsDeluxeSystem::new();
+        assert_eq!(sys.dip_bank_value(1), 0xFF);
+
+        let l8 = &ASTDELUX_DIP_BANKS[1];
+        let selected = |byte: u8, option: &str| -> &str {
+            let o = l8.options.iter().find(|o| o.name == option).unwrap();
+            let slice = byte & o.mask;
+            o.choices.iter().find(|c| c.value == slice).unwrap().label
+        };
+
+        // 0xFF, the power-on byte: what the attract screen has always shown.
+        assert_eq!(selected(0xFF, "Game Price"), "2 Coins/1 Play");
+        assert_eq!(selected(0xFF, "Coin Bonus Adder"), "None (7)");
+        // The whole Game Price field, all four of them read off the screen.
+        assert_eq!(selected(0x02, "Game Price"), "1 Coin/1 Play");
+        assert_eq!(selected(0x01, "Game Price"), "1 Coin/2 Plays");
+        assert_eq!(selected(0x00, "Game Price"), "Free Play");
+        // The three bonus recipes, each checked by counting credits.
+        assert_eq!(selected(0x22, "Coin Bonus Adder"), "Every 2 Coins, +1");
+        assert_eq!(selected(0x42, "Coin Bonus Adder"), "Every 4 Coins, +1");
+        assert_eq!(selected(0x63, "Coin Bonus Adder"), "Every 4 Coins, +2");
+        // ...all three at the price the same screen reported.
+        assert_eq!(selected(0x22, "Game Price"), "1 Coin/1 Play");
+        assert_eq!(selected(0x42, "Game Price"), "1 Coin/1 Play");
+        assert_eq!(selected(0x63, "Game Price"), "2 Coins/1 Play");
     }
 
     #[test]
