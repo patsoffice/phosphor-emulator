@@ -733,12 +733,32 @@ const ASTDELUX_DIP_BANKS: &[DipSwitchBank] = &[
                     },
                 ],
             },
-            // NOT IN THE MANUAL. Figure 7 marks toggle 6 `Not Used`, and Figure 6
-            // agrees from the other side: this bit lands in the self-test's
-            // minimum-plays digit, whose legend reads `0 or 2 = 1-play minimum,
-            // 1 or 3 = 2-play minimum`, the 2s bit provably changing nothing.
-            // Left in place because removing it is a behavior question for the R5
-            // bank rather than part of adding L8; tracked separately.
+            // TOGGLE 6, WHICH THE MANUAL CALLS `Not Used` AND THE ROM READS
+            // ANYWAY. Figure 7 prints `Not Used` in its column and Figure 6's
+            // minimum-plays legend (`0 or 2 = 1-play minimum, 1 or 3 = 2-play
+            // minimum`) implies the same. Both are wrong about the code, which
+            // reads this bit at three separate sites. Scanning the whole program
+            // ROM for absolute reads of the mux found them all:
+            //
+            //   0x6982  LDA $2801 / AND #$02 / ORA #$04 / CLC / ADC $02F0 /
+            //           TAY / CMP #$0A ... so the bit shifts an index by 2 and
+            //           the result is clamped below 10.
+            //   0x7C09  LDA $2801 / AND #$02 / STA $FB / STA $FD, at game setup.
+            //   0x7EC1  read alongside toggle 5 and drawn as its own digit.
+            //
+            // Note `AND #$02` at the first two: those sites take DB1 ALONE, so
+            // the pair is not one two-bit field in the game logic even though
+            // the self-test prints it as one digit. Confirmed to reach the
+            // running game rather than just the code: 0x00, 0x10, 0x20 and 0x30
+            // give four games that diverge by frame 200 and stay diverged
+            // through frame 2400, and 0x30 differs from 0x10.
+            //
+            // KEPT, therefore, and the manual is the thing that is incomplete.
+            // The NAME is the part still unconfirmed: what is measured is an
+            // index shifted by 2 and a value latched at setup, which is
+            // difficulty-shaped, but nothing read so far labels it. A clamped
+            // table offset with two of its range unused is consistent with more
+            // levels having been planned than shipped.
             DipOption {
                 name: "Difficulty",
                 mask: 0x20,
