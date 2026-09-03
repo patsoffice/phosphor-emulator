@@ -10,10 +10,12 @@
 //! resamplers.
 
 pub mod analysis;
+mod biquad;
 mod dc_blocker;
 pub mod fir;
 mod ring;
 
+pub use biquad::Biquad;
 pub use dc_blocker::DcBlocker;
 pub use fir::DecimatingFir;
 pub use ring::SampleRing;
