@@ -21,7 +21,7 @@ SDL2-based display, audio, and input handling. This is the only crate with exter
 - `vector_gl.rs` - OpenGL vector display renderer (for DVG/AVG machines)
 - `gfxview.rs` - Interactive charset/sprite viewer (`--gfxview`), showing the sheets a machine exposes via `MachineCore::gfx_sheets` — the caches it already decoded from ROM, so any tile-based machine is viewable with no per-machine registration
 - `screenshot.rs` - Writes an RGB24 framebuffer to a timestamped PNG (F12)
-- `headless.rs` - Windowless capture: run N frames, write the final framebuffer to a PNG and produced audio to a WAV, for bring-up and regression checks without SDL. The frame-stepping/ROM-loading half lives in `phosphor-harness`
+- `headless.rs` - Windowless capture: run N frames, write the final framebuffer to a PNG and produced audio to a WAV, for bring-up and regression checks without SDL. The frame-stepping/ROM-loading half lives in `phosphor-harness`. Takes `--movie` too, and binds it exactly as `emulator.rs` does (deliver, run, advance), which is what makes this the way to verify an audio change against a recorded session: it is the only path that exercises the frontend's own drain loop without SDL. Without a movie a capture only ever sees attract mode, and the failure is quiet rather than loud, so a bad movie is fatal here rather than a warning. `--frames` defaults to the movie's own length
 
 ROM path resolution (directory / ZIP / loose files) lives in the shared `phosphor-harness` crate (`load_rom_set`), used here and by the disasm tools.
 

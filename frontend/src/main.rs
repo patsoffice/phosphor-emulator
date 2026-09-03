@@ -58,9 +58,10 @@ struct Cli {
     #[arg(long)]
     headless: bool,
 
-    /// Frames to run in --headless mode (default 600 ≈ 10 s).
-    #[arg(long, default_value_t = 600)]
-    frames: u32,
+    /// Frames to run in --headless mode. Defaults to the movie's length when
+    /// --movie is given, otherwise 600 (≈ 10 s).
+    #[arg(long)]
+    frames: Option<u32>,
 
     /// Output path prefix for --headless captures (writes OUT.png/.wav).
     #[arg(long, default_value = "/tmp/phosphor_capture")]
@@ -74,9 +75,12 @@ struct Cli {
     /// Replay a recorded input movie (`.phmi`) instead of taking live input.
     ///
     /// Resets to power-on and plays the session back in the window, with sound
-    /// and the debugger available — so a bug that only appears behind a coin and
+    /// and the debugger available, so a bug that only appears behind a coin and
     /// three minutes of play can be reached and then inspected. Live game input
     /// is ignored while a movie plays.
+    ///
+    /// Combines with --headless to capture that session's picture and audio to
+    /// a file rather than watching it.
     #[arg(long, value_name = "PATH")]
     movie: Option<std::path::PathBuf>,
 
@@ -234,9 +238,18 @@ fn main() {
 
     machine.reset();
 
-    // Headless capture short-circuits the SDL main loop entirely.
+    // Headless capture short-circuits the SDL main loop entirely. It takes the
+    // movie too: replaying one is the only way to capture audio from anything
+    // past attract mode.
     if cli.headless {
-        headless::run(machine.as_mut(), cli.frames, &cli.out);
+        headless::run(
+            machine.as_mut(),
+            cli.frames,
+            &cli.out,
+            cli.movie.as_deref(),
+            &machine_name,
+            rom_digest,
+        );
         return;
     }
 
