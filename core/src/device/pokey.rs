@@ -693,6 +693,15 @@ impl Pokey {
         }
     }
 
+    /// The level currently driven onto a pot line (0-7), or 0 for a bad index.
+    ///
+    /// Boards that wire DIP switches to the pot lines rather than to a readable
+    /// byte need this to assert the switches are actually driving something: the
+    /// failure it catches is a bank that is settable and has no effect.
+    pub fn pot_input(&self, pot: usize) -> u8 {
+        self.pot_input.get(pot).copied().unwrap_or(0)
+    }
+
     /// Set the keyboard code register (called by board logic).
     pub fn set_kbcode(&mut self, code: u8) {
         self.kbcode = code;

@@ -22,9 +22,9 @@ use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::input::{DrainPolicy, RelativeCounter};
 use phosphor_core::core::machine::{
     ActionRole, AnalogAxisKind, AudioSource, AxisSign, DefaultBinding, DipApplyTiming, DipChoice,
-    DipOption, DipSwitchBank, Direction, InputConfigurable, InputControl, InputEvent, InputId,
-    InputKind, KeyId, MachineCore, MouseControl, PadAxis, PadButton, PadControl, Renderable,
-    SaveState,
+    DipOption, DipSwitchBank, DipSwitches, Direction, InputConfigurable, InputControl, InputEvent,
+    InputId, InputKind, KeyId, MachineCore, MouseControl, PadAxis, PadButton, PadControl,
+    Renderable, SaveState,
 };
 use phosphor_core::core::{AccessKind, AddressSpace16};
 use phosphor_core::core::{Bus, BusMaster, TimingConfig};
@@ -106,6 +106,9 @@ pub const INPUT_TRACK_L: u8 = 6;
 pub const INPUT_TRACK_R: u8 = 7;
 pub const INPUT_TRACK_U: u8 = 8;
 pub const INPUT_TRACK_D: u8 = 9;
+// 10 and 11 are the analog trackball axes below, so the digital run continues
+// at 12 rather than at 10.
+pub const INPUT_SELFTEST: u8 = 12;
 
 // ---------------------------------------------------------------------------
 // Analog axis IDs (trackball)
@@ -235,6 +238,14 @@ const MISSILE_CONTROLS: &[InputControl] = &[
         ],
     },
     InputControl {
+        id: InputId(INPUT_SELFTEST as u16),
+        stable_name: "self_test",
+        label: "Self-Test",
+        kind: InputKind::Service,
+        player: None,
+        default_bindings: &[DefaultBinding::Key(KeyId::T)],
+    },
+    InputControl {
         id: CTRL_TRACKBALL_X,
         stable_name: "trackball_x",
         label: "Trackball X",
@@ -341,10 +352,21 @@ pub struct MissileCommandBoard {
     //   Bit 0: Fire Right (active-low, normally 1)
     #[save(id = 4)]
     in1: u8,
-    // DIP switches at 0x4A00 (pricing options). Operator configuration, which
+    // R10 DIP switches at 0x4A00 (pricing options). Operator configuration, which
     // survives a load the way the switches on a cabinet do.
     #[save_skip]
     dip_switches: u8,
+    /// R8 DIP switches (game options), read through the POKEY's pot inputs
+    /// rather than as a byte — see [`MissileCommandBoard::refresh_dip_pots`].
+    ///
+    /// **The two banks do not share a bit sense.** R10 reads a closed (On)
+    /// switch as 0; at the pots a closed switch reads as 1. Confirmed on the
+    /// game's own self-test screen: with these pots undriven the options display
+    /// reads `7 CITIES` and shows no bonus-city line, which is toggles 1, 2, 5,
+    /// 6 and 7 all *open*. Carrying R10's sense across would have inverted every
+    /// option in this bank.
+    #[save_skip]
+    dip_r8: u8,
     // CTRLD: bit 0 of output latch (0x4800 write) — selects trackball vs switches at 0x4800 read
     #[save(id = 5)]
     ctrld: bool,
@@ -485,12 +507,18 @@ impl MissileCommandSystem {
 
 impl MissileCommandBoard {
     pub fn new() -> Self {
-        Self {
+        let mut board = Self {
             pokey: Pokey::with_clock(1_250_000, phosphor_core::audio::host_sample_rate()),
             map: Self::build_map(),
             in0: 0xFF,          // All buttons released (active-low: 1 = not pressed)
             in1: 0x67, // Fire buttons released (bits 0-2 = 1), test/tilt released (bits 5-6 = 1), VBLANK off
             dip_switches: 0x00, // Default DIP: 1 coin/1 play, English, standard options
+            // 0x00 is what the game already saw when these pots were undriven:
+            // 7 cities, bonus credit for 4 coins, large Trak-Ball, no bonus city.
+            // Three of those four are the manual's factory setting; the bonus
+            // city is not (factory is every 10,000, which is 0x70). Keeping 0x00
+            // preserves the behaviour this machine has always had.
+            dip_r8: 0x00,
             ctrld: false,
             palette: [0; 8],
             trackball_x: new_track_counter(),
@@ -506,6 +534,31 @@ impl MissileCommandBoard {
             scanline_buffer_valid: false,
             audio_buffer: SampleRing::with_capacity(1024),
             dc_blocker: DcBlocker::new(phosphor_core::audio::host_sample_rate()),
+        };
+        board.refresh_dip_pots();
+        board
+    }
+
+    /// Drive the R8 DIP switches onto the POKEY's pot inputs.
+    ///
+    /// R8's eight toggles are wired one per pot line rather than onto a byte
+    /// the CPU can read directly, so the game reads them the long way round:
+    /// strobe POTGO, poll ALLPOT until the scan finishes, then read POT0-7. That
+    /// this is the path, and not the ALLPOT shortcut `ccastles.rs` uses, was
+    /// settled by watching which POKEY offsets the ROM actually reads — it
+    /// touches 0x00-0x08, which is the full scan.
+    ///
+    /// A closed switch drives its line high, so a set bit becomes a full-scale
+    /// pot reading. See [`dip_r8`](Self::dip_r8) for why that is the opposite of
+    /// the R10 byte's sense and how it was confirmed.
+    fn refresh_dip_pots(&mut self) {
+        for n in 0..8 {
+            let level = if self.dip_r8 & (1 << n) != 0 {
+                0x80
+            } else {
+                0x00
+            };
+            self.pokey.set_pot_input(n, level);
         }
     }
 
@@ -1003,6 +1056,10 @@ impl InputConfigurable for MissileCommandSystem {
                 INPUT_FIRE_LEFT => set_bit_active_low(&mut self.board.in1, 2, pressed), // Left fire
                 INPUT_FIRE_CENTER => set_bit_active_low(&mut self.board.in1, 1, pressed), // Center fire
                 INPUT_FIRE_RIGHT => set_bit_active_low(&mut self.board.in1, 0, pressed), // Right fire
+                // IN1 bit 6 = self-test (active-low). The cabinet's switch is on
+                // the coin door; holding it enters the option display the
+                // operator manual's Figure 6 describes.
+                INPUT_SELFTEST => set_bit_active_low(&mut self.board.in1, 6, pressed),
 
                 // Trackball directions
                 INPUT_TRACK_L => self.board.trackball_x.set_held(false, pressed),
@@ -1075,6 +1132,9 @@ impl MachineCore for MissileCommandSystem {
         self.board.scanline_buffer_valid = false;
         self.board.audio_buffer.clear();
         self.board.dc_blocker.reset();
+        // The pots are wiring, not state: a reset must leave the DIP switches
+        // still driving them, exactly as the cabinet's do.
+        self.board.refresh_dip_pots();
 
         self.cpu.reset(&mut self.board, BusMaster::Cpu(0));
     }
@@ -1102,112 +1162,254 @@ crate::impl_default_frontend_capabilities!(MissileCommandSystem);
 /// The separate R8 game-options bank (cities, bonus city, cabinet) is not
 /// emulated as a settable byte. Choice bits and labels follow MAME's `missile`
 /// R10 layout; option defaults OR to the historical 0x00.
-const MISSILE_DIP_BANKS: &[DipSwitchBank] = &[DipSwitchBank {
-    name: "R10 (Pricing)",
-    options: &[
-        DipOption {
-            name: "Coinage",
-            mask: 0x03,
-            apply: DipApplyTiming::Immediate,
-            choices: &[
-                DipChoice {
-                    label: "1 Coin/1 Credit",
-                    value: 0x00,
-                },
-                DipChoice {
-                    label: "2 Coins/1 Credit",
-                    value: 0x01,
-                },
-                DipChoice {
-                    label: "Free Play",
-                    value: 0x02,
-                },
-                DipChoice {
-                    label: "1 Coin/2 Credits",
-                    value: 0x03,
-                },
-            ],
-        },
-        DipOption {
-            name: "Right Coin",
-            mask: 0x0C,
-            apply: DipApplyTiming::Immediate,
-            choices: &[
-                DipChoice {
-                    label: "x1",
-                    value: 0x00,
-                },
-                DipChoice {
-                    label: "x4",
-                    value: 0x04,
-                },
-                DipChoice {
-                    label: "x5",
-                    value: 0x08,
-                },
-                DipChoice {
-                    label: "x6",
-                    value: 0x0C,
-                },
-            ],
-        },
-        DipOption {
-            name: "Center Coin",
-            mask: 0x10,
-            apply: DipApplyTiming::Immediate,
-            choices: &[
-                DipChoice {
-                    label: "x1",
-                    value: 0x00,
-                },
-                DipChoice {
-                    label: "x2",
-                    value: 0x10,
-                },
-            ],
-        },
-        DipOption {
-            name: "Language",
-            mask: 0x60,
-            apply: DipApplyTiming::Immediate,
-            choices: &[
-                DipChoice {
-                    label: "English",
-                    value: 0x00,
-                },
-                DipChoice {
-                    label: "French",
-                    value: 0x20,
-                },
-                DipChoice {
-                    label: "German",
-                    value: 0x40,
-                },
-                DipChoice {
-                    label: "Spanish",
-                    value: 0x60,
-                },
-            ],
-        },
-        DipOption {
-            name: "Unknown",
-            mask: 0x80,
-            apply: DipApplyTiming::Immediate,
-            choices: &[
-                DipChoice {
-                    label: "On",
-                    value: 0x00,
-                },
-                DipChoice {
-                    label: "Off",
-                    value: 0x80,
-                },
-            ],
-        },
-    ],
-}];
+const MISSILE_DIP_BANKS: &[DipSwitchBank] = &[
+    DipSwitchBank {
+        name: "R10 (Pricing)",
+        options: &[
+            DipOption {
+                name: "Coinage",
+                mask: 0x03,
+                apply: DipApplyTiming::Immediate,
+                choices: &[
+                    DipChoice {
+                        label: "1 Coin/1 Credit",
+                        value: 0x00,
+                    },
+                    DipChoice {
+                        label: "2 Coins/1 Credit",
+                        value: 0x01,
+                    },
+                    DipChoice {
+                        label: "Free Play",
+                        value: 0x02,
+                    },
+                    DipChoice {
+                        label: "1 Coin/2 Credits",
+                        value: 0x03,
+                    },
+                ],
+            },
+            DipOption {
+                name: "Right Coin",
+                mask: 0x0C,
+                apply: DipApplyTiming::Immediate,
+                choices: &[
+                    DipChoice {
+                        label: "x1",
+                        value: 0x00,
+                    },
+                    DipChoice {
+                        label: "x4",
+                        value: 0x04,
+                    },
+                    DipChoice {
+                        label: "x5",
+                        value: 0x08,
+                    },
+                    DipChoice {
+                        label: "x6",
+                        value: 0x0C,
+                    },
+                ],
+            },
+            DipOption {
+                name: "Center Coin",
+                mask: 0x10,
+                apply: DipApplyTiming::Immediate,
+                choices: &[
+                    DipChoice {
+                        label: "x1",
+                        value: 0x00,
+                    },
+                    DipChoice {
+                        label: "x2",
+                        value: 0x10,
+                    },
+                ],
+            },
+            DipOption {
+                name: "Language",
+                mask: 0x60,
+                apply: DipApplyTiming::Immediate,
+                choices: &[
+                    DipChoice {
+                        label: "English",
+                        value: 0x00,
+                    },
+                    DipChoice {
+                        label: "French",
+                        value: 0x20,
+                    },
+                    DipChoice {
+                        label: "German",
+                        value: 0x40,
+                    },
+                    DipChoice {
+                        label: "Spanish",
+                        value: 0x60,
+                    },
+                ],
+            },
+            DipOption {
+                name: "Unknown",
+                mask: 0x80,
+                apply: DipApplyTiming::Immediate,
+                choices: &[
+                    DipChoice {
+                        label: "On",
+                        value: 0x00,
+                    },
+                    DipChoice {
+                        label: "Off",
+                        value: 0x80,
+                    },
+                ],
+            },
+        ],
+    },
+    DipSwitchBank {
+        name: "R8 (Game Options)",
+        options: &[
+            DipOption {
+                name: "Cities",
+                mask: 0x03,
+                apply: DipApplyTiming::Immediate,
+                choices: &[
+                    DipChoice {
+                        label: "7",
+                        value: 0x00,
+                    },
+                    DipChoice {
+                        label: "5",
+                        value: 0x01,
+                    },
+                    DipChoice {
+                        label: "4",
+                        value: 0x02,
+                    },
+                    DipChoice {
+                        label: "6",
+                        value: 0x03,
+                    },
+                ],
+            },
+            DipOption {
+                name: "Bonus Credit",
+                mask: 0x04,
+                apply: DipApplyTiming::Immediate,
+                choices: &[
+                    DipChoice {
+                        label: "1 credit for 4 coins",
+                        value: 0x00,
+                    },
+                    DipChoice {
+                        label: "None",
+                        value: 0x04,
+                    },
+                ],
+            },
+            DipOption {
+                name: "Trak-Ball Size",
+                mask: 0x08,
+                apply: DipApplyTiming::Immediate,
+                choices: &[
+                    DipChoice {
+                        label: "Large (upright)",
+                        value: 0x00,
+                    },
+                    DipChoice {
+                        label: "Mini",
+                        value: 0x08,
+                    },
+                ],
+            },
+            DipOption {
+                name: "Bonus City",
+                mask: 0x70,
+                apply: DipApplyTiming::Immediate,
+                choices: &[
+                    DipChoice {
+                        label: "None",
+                        value: 0x00,
+                    },
+                    DipChoice {
+                        label: "Every 8,000",
+                        value: 0x10,
+                    },
+                    DipChoice {
+                        label: "Every 20,000",
+                        value: 0x20,
+                    },
+                    DipChoice {
+                        label: "Every 18,000",
+                        value: 0x30,
+                    },
+                    DipChoice {
+                        label: "Every 15,000",
+                        value: 0x40,
+                    },
+                    DipChoice {
+                        label: "Every 14,000",
+                        value: 0x50,
+                    },
+                    DipChoice {
+                        label: "Every 12,000",
+                        value: 0x60,
+                    },
+                    DipChoice {
+                        label: "Every 10,000",
+                        value: 0x70,
+                    },
+                ],
+            },
+            DipOption {
+                name: "Toggle 8 (unused)",
+                mask: 0x80,
+                apply: DipApplyTiming::Immediate,
+                choices: &[
+                    DipChoice {
+                        label: "Off",
+                        value: 0x00,
+                    },
+                    DipChoice {
+                        label: "On",
+                        value: 0x80,
+                    },
+                ],
+            },
+        ],
+    },
+];
 
-crate::impl_dip_switches!(MissileCommandSystem, MISSILE_DIP_BANKS, board.dip_switches);
+/// Two banks, and only one of them is a plain byte read.
+///
+/// R10 is read directly at 0x4A00. R8 reaches the CPU through the POKEY's pot
+/// inputs, so setting it has to re-drive them — the same shape as `quantum.rs`,
+/// which is why this is hand-written rather than `impl_dip_switches!`.
+impl DipSwitches for MissileCommandSystem {
+    fn dip_banks(&self) -> &'static [DipSwitchBank] {
+        MISSILE_DIP_BANKS
+    }
+
+    fn dip_bank_value(&self, bank: usize) -> u8 {
+        match bank {
+            0 => self.board.dip_switches,
+            1 => self.board.dip_r8,
+            _ => 0,
+        }
+    }
+
+    fn set_dip_bank_value(&mut self, bank: usize, value: u8) {
+        match bank {
+            0 => self.board.dip_switches = value,
+            1 => {
+                self.board.dip_r8 = value;
+                self.board.refresh_dip_pots();
+            }
+            _ => {}
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Machine registry
@@ -1230,7 +1432,11 @@ mod tests {
     fn dip_default_and_metadata() {
         let sys = MissileCommandSystem::new();
         assert_eq!(sys.dip_bank_value(0), 0x00);
-        crate::assert_dip_banks_valid(sys.dip_banks(), &[sys.dip_bank_value(0)]);
+        assert_eq!(sys.dip_bank_value(1), 0x00);
+        crate::assert_dip_banks_valid(
+            sys.dip_banks(),
+            &[sys.dip_bank_value(0), sys.dip_bank_value(1)],
+        );
     }
 
     #[test]
@@ -1239,6 +1445,60 @@ mod tests {
         // Language is option 3 (mask 0x60); pick "German" (0x40).
         sys.set_dip_option(0, 3, 0x40);
         assert_eq!(sys.dip_bank_value(0), 0x40);
+    }
+
+    /// R8 reaches the CPU only through the POKEY's pot inputs, so setting the
+    /// bank has to re-drive them. Without that the switches are settable and
+    /// have no effect, which is the failure this bank existed to fix.
+    #[test]
+    fn setting_r8_drives_the_pokey_pots() {
+        let mut sys = MissileCommandSystem::new();
+        // Undriven default: every pot low.
+        for n in 0..8 {
+            assert_eq!(sys.board.pokey.pot_input(n), 0x00, "pot {n} at reset");
+        }
+
+        // The manual's factory setting: 6 cities and a bonus city every 10,000.
+        sys.set_dip_bank_value(1, 0x73);
+        for n in 0..8 {
+            let expect = if 0x73 & (1 << n) != 0 { 0x80 } else { 0x00 };
+            assert_eq!(sys.board.pokey.pot_input(n), expect, "pot {n} after set");
+        }
+
+        // And a reset must not drop the wiring on the floor.
+        sys.reset();
+        assert_eq!(sys.board.pokey.pot_input(0), 0x80);
+        assert_eq!(sys.board.pokey.pot_input(4), 0x80);
+        assert_eq!(sys.board.pokey.pot_input(3), 0x00);
+    }
+
+    /// The two banks do not share a bit sense, and the table encodes that.
+    ///
+    /// Both figures below were read off the game's own self-test screen: 0x00
+    /// shows `7 CITIES` with no bonus-city line, and 0x73 shows `6 CITIES` and
+    /// `BONUS CITY EVERY 10000 POINTS`, which is what the operator manual marks
+    /// as the factory setting.
+    #[test]
+    fn r8_choices_match_the_self_test_display() {
+        let banks = MISSILE_DIP_BANKS;
+        let r8 = &banks[1];
+        assert_eq!(r8.name, "R8 (Game Options)");
+
+        let choice = |option: &str, label: &str| -> u8 {
+            let o = r8.options.iter().find(|o| o.name == option).unwrap();
+            o.choices.iter().find(|c| c.label == label).unwrap().value
+        };
+        // Undriven pots read 0, and the game calls that 7 cities and no bonus.
+        assert_eq!(choice("Cities", "7"), 0x00);
+        assert_eq!(choice("Bonus City", "None"), 0x00);
+        // The factory setting the manual marks, and the screen confirmed.
+        assert_eq!(
+            choice("Cities", "6") | choice("Bonus City", "Every 10,000"),
+            0x73
+        );
+        // Toggle 4 open is the large upright Trak-Ball, which the manual says
+        // the switch "must be off" for. That falls out of the default.
+        assert_eq!(choice("Trak-Ball Size", "Large (upright)"), 0x00);
     }
 
     #[test]
@@ -1440,10 +1700,15 @@ mod tests {
     fn input_controls_include_analog_axes() {
         let sys = MissileCommandSystem::new();
         let controls = sys.input_controls();
-        assert_eq!(controls.len(), 12); // 10 digital + 2 analog axes
+        assert_eq!(controls.len(), 13); // 10 digital + self-test + 2 analog axes
         assert!(
             controls.iter().any(|c| c.stable_name == "trackball_x"
                 && matches!(c.kind, InputKind::AnalogAxis { .. }))
+        );
+        assert!(
+            controls
+                .iter()
+                .any(|c| c.stable_name == "self_test" && matches!(c.kind, InputKind::Service))
         );
     }
 }

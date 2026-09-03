@@ -21,7 +21,8 @@ fn test_display_size() {
 fn test_input_map_has_all_buttons() {
     let sys = MissileCommandSystem::new();
     let controls = sys.input_controls();
-    assert_eq!(controls.len(), 12); // coin + 2 start + 3 fire + 4 trackball + 2 analog axes
+    // coin + 2 start + 3 fire + 4 trackball + self-test + 2 analog axes
+    assert_eq!(controls.len(), 13);
     for control in controls {
         assert!(!control.label.is_empty());
     }
