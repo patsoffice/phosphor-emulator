@@ -1,17 +1,37 @@
 //! Resistor-weighted DAC palette computation.
 //!
 //! Many arcade machines generate RGB palette values by driving resistor networks
-//! from PROM data. This module provides two computation models:
+//! from PROM data. Three models live here, in increasing order of how much of
+//! the circuit they take seriously. Each has real callers; a fourth was deleted
+//! for having none (see the note at the end).
 //!
-//! - **Linear weights** ([`compute_resistor_weights`] + [`combine_weights`]):
-//!   Pre-compute per-bit weights auto-scaled so all-bits-on = 255, then combine
-//!   via linear sum. Works well when the pulldown resistance is large relative to
-//!   the DAC resistors (e.g., Namco Pac-Man, Crystal Castles).
+//! - **Linear weights** ([`compute_resistor_weights`] + [`combine_weights`]).
+//!   Per-bit weights auto-scaled so all-bits-on = 255, combined by linear sum.
+//!   Each bit is approximated against the pulldown alone, ignoring the loading
+//!   of the other bits, which is close enough when the pulldown is large
+//!   relative to the DAC resistors. Namco Pac-Man, Crystal Castles.
 //!
-//! - **Exact voltage divider** ([`compute_resistor_net`]): Computes the actual
-//!   conductance ratio for each combination of bits, including the pulldown.
-//!   Physically accurate but NOT auto-scaled to 255. Used when the pulldown is
-//!   strong enough that the linear approximation breaks down (e.g., DK/TKG-04).
+//! - **Thevenin per-bit weights** ([`compute_resnet_weights`]). Each bit against
+//!   the parallel combination of the pulldown and every *other* bit, so the bits
+//!   load each other. Galaxian.
+//!
+//! - **TTL output stage into an amplifier** ([`compute_ttl_dac_channel`] +
+//!   [`normalize_palette_per_channel`]). Not a divider at all: the PROM's own
+//!   output levels and source impedance are part of the circuit, the ladder
+//!   sits on a pullup bias rather than a pulldown, and what it feeds is a
+//!   transistor amplifier and a monitor that inverts and clips. Nintendo's
+//!   TKG-04 boards and Mario Bros.
+//!
+//! # A model that was deleted
+//!
+//! `compute_resistor_net` computed an exact conductance ratio for a fixed bit
+//! vector. It had zero callers for its whole life. It was built for the DK
+//! family, this doc claimed DK/TKG-04 used it, and its only two tests were named
+//! after that board — none of which was true: DK uses the TTL model above,
+//! because a divider gets its black level wrong. An unused helper with a
+//! confident doc comment reads as production code that merely has not been
+//! adopted yet, which is what caused a second one to be built. Recorded here so
+//! it is not built a third time.
 
 /// Compute per-bit weights for a resistor-weighted DAC, auto-scaled so that
 /// all-bits-on produces 255.
@@ -49,24 +69,6 @@ pub fn combine_weights(weights: &[f64], bits: &[u8]) -> u8 {
     val.round().min(255.0) as u8
 }
 
-/// Compute an 8-bit color value from the exact resistor voltage divider.
-///
-/// Unlike the linear weight model, this accounts for the nonlinear interaction
-/// between the pulldown and active-bit conductances. The result is NOT auto-scaled:
-/// all-bits-on gives a value < 255 when a pulldown is present.
-///
-/// `bits` contains the analog drive level for each resistor (typically 0.0 or 1.0).
-/// `resistors` contains the corresponding resistance values in ohms.
-/// `pulldown` is the pulldown resistance to ground in ohms.
-///
-/// Formula: `V = sum(bit_i/R_i) / (sum(bit_i/R_i) + 1/pulldown)`, scaled to 0–255.
-pub fn compute_resistor_net(bits: &[f64], resistors: &[f64], pulldown: f64) -> u8 {
-    let active: f64 = bits.iter().zip(resistors).map(|(b, r)| b / r).sum();
-    let total = active + 1.0 / pulldown;
-    let voltage = if total > 0.0 { active / total } else { 0.0 };
-    (voltage * 255.0).round().min(255.0) as u8
-}
-
 /// Compute resistor-network per-bit weights, treating each bit as a Thevenin
 /// voltage divider with every *other* bit grounded.
 ///
@@ -77,11 +79,8 @@ pub fn compute_resistor_net(bits: &[f64], resistors: &[f64], pulldown: f64) -> u
 /// (optionally applying a shared cross-network autoscale). A resistance of `0.0`
 /// marks an absent/open connection (treated as a `1e12 Ω` conductance floor).
 ///
-/// This differs from the two simpler models:
-/// - [`compute_resistor_weights`] approximates each bit independently against
-///   only the pulldown, ignoring the loading of the other bits.
-/// - [`compute_resistor_net`] returns a single value for a fixed bit vector,
-///   not per-bit weights for linear combination.
+/// This differs from [`compute_resistor_weights`], which approximates each bit
+/// independently against only the pulldown, ignoring the loading of the others.
 pub fn compute_resnet_weights(resistors: &[f64], pulldown: f64, max: f64) -> Vec<f64> {
     // Open connection => 1e12 Ω conductance floor.
     let pd_g = if pulldown == 0.0 {
@@ -367,33 +366,58 @@ mod tests {
         assert_eq!(combine_weights(&w, &[1, 1, 1]), 255);
     }
 
+    /// The TKG-04 chain the module doc describes, at the two ends of its range.
+    ///
+    /// Replaces two tests that fed the same board's resistor values to
+    /// `compute_resistor_net`, a model that board does not use. They passed and
+    /// proved nothing about it.
     #[test]
-    fn tkg04_darlington_3bit_match() {
-        // TKG-04 Darlington: 1K/470/220Ω + 470Ω pulldown, all bits on → 200
-        assert_eq!(
-            compute_resistor_net(&[1.0, 1.0, 1.0], &[1000.0, 470.0, 220.0], 470.0),
-            200
+    fn ttl_dac_spans_its_range_and_bottoms_out_black() {
+        // Every PROM bit inactive is TTL high, which the chain inverts to black.
+        let dark = compute_ttl_dac_channel(
+            &[1.0, 1.0, 1.0],
+            &DARLINGTON_RESISTORS,
+            DARLINGTON_BIAS_R,
+            true,
         );
-        // All bits off → 0
-        assert_eq!(
-            compute_resistor_net(&[0.0, 0.0, 0.0], &[1000.0, 470.0, 220.0], 470.0),
-            0
+        let bright = compute_ttl_dac_channel(
+            &[0.0, 0.0, 0.0],
+            &DARLINGTON_RESISTORS,
+            DARLINGTON_BIAS_R,
+            true,
         );
-        // Single bit (weakest, 1KΩ)
-        assert_eq!(
-            compute_resistor_net(&[1.0, 0.0, 0.0], &[1000.0, 470.0, 220.0], 470.0),
-            82
+        assert!(
+            bright > dark,
+            "chain inverts: {bright} should exceed {dark}"
+        );
+        assert!(dark >= 0.0, "clipped at black, got {dark}");
+
+        // The emitter channel carries the 0.7 V follower pedestal the Darlington
+        // channels do not, which is why normalization is per channel.
+        let emitter =
+            compute_ttl_dac_channel(&[0.0, 0.0], &EMITTER_RESISTORS, EMITTER_BIAS_R, false);
+        let darlington =
+            compute_ttl_dac_channel(&[0.0, 0.0], &DARLINGTON_RESISTORS, DARLINGTON_BIAS_R, true);
+        assert!(
+            emitter != darlington,
+            "the two amplifier stages should not agree"
         );
     }
 
+    /// The property the per-channel normalization exists for: a channel sitting
+    /// on a pedestal still reaches black, so Donkey Kong's mask sprites are
+    /// black rather than dark blue.
     #[test]
-    fn tkg04_emitter_2bit_match() {
-        // TKG-04 Emitter follower: 470/220Ω + 680Ω pulldown, all bits on → 209
-        assert_eq!(
-            compute_resistor_net(&[1.0, 1.0], &[470.0, 220.0], 680.0),
-            209
-        );
-        assert_eq!(compute_resistor_net(&[0.0, 0.0], &[470.0, 220.0], 680.0), 0);
+    fn normalization_puts_each_channel_s_own_minimum_at_black() {
+        let mut raw = [(0.0, 0.0, 0.0); 256];
+        for (i, e) in raw.iter_mut().enumerate() {
+            let v = i as f64;
+            // Blue rides 56 units above the other two, as the follower leaves it.
+            *e = (v, v, v + 56.0);
+        }
+        let out = normalize_palette_per_channel(&raw, |_| false);
+        assert_eq!(out[0], (0, 0, 0), "the darkest pen must be black");
+        assert_eq!(out[255], (255, 255, 255));
     }
 
     #[test]

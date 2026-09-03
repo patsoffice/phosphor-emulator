@@ -11,8 +11,8 @@ pub use decode::{GfxCache, GfxLayout, decode_gfx};
 pub use palette::resolve_indexed_rows;
 pub use resistor::{
     DARLINGTON_BIAS_R, DARLINGTON_RESISTORS, EMITTER_BIAS_R, EMITTER_RESISTORS, combine_weights,
-    compute_resistor_net, compute_resistor_weights, compute_resnet_weights,
-    compute_ttl_dac_channel, normalize_palette_per_channel, pal_nbit,
+    compute_resistor_weights, compute_resnet_weights, compute_ttl_dac_channel,
+    normalize_palette_per_channel, pal_nbit,
 };
 pub use sheet::{Sheet, SheetConfig, grayscale_ramp, render_sheet};
 pub use sprite::{SpriteClip, draw_sprite_row, draw_sprite_row_indexed};
