@@ -27,18 +27,18 @@ reason = "The machine's ROM table names a revision (djr1-c_5b_f-2.5b) that neith
 [[frame]]
 machine = "astdelux"
 frames = 1800
-shows = "Attract mode: GAME OVER over drifting asteroids, with the 2 COINS 1 CREDIT / CREDITS 0 coin prompt and the 1980 Atari copyright."
+shows = "Attract mode: GAME OVER over drifting asteroids, with the 2 COINS 1 CREDIT / CREDITS 0 coin prompt and the 1980 Atari copyright. The words are what this pins; the rubble is a demo game and moves whenever the machine's state evolves differently. It last moved when RAMSEL began swapping the two 256-byte SRAMs it had been ignoring, which changes where the demo keeps its working state and so where the asteroids drift, and changes none of the text."
 size = [1024, 1024]
-frame = "sha256:c8aaeccd5662c36a651890bafc11afb0e1b384dd1d7ee3a38937b68f040e2398"
-vectors = "sha256:0db794f5086eed233157acefc886740bed441e4fccfa0c1d126cc2188330c4fd"
+frame = "sha256:526451d0349f18c966279e632bc4fdc79c7ea373f3d9735c2460855f69246171"
+vectors = "sha256:f8ab5a696c0ec2eb778427765ed4da143ef9366325cb00bc0d8b813dfb8dee0a"
 
 [[frame]]
 machine = "asteroid"
 frames = 1800
-shows = "Attract mode: PUSH START over drifting asteroids with a small saucer, above the 1979 Atari copyright."
+shows = "Attract mode: 1 COIN 1 PLAY over drifting asteroids with a small saucer, above the 1979 Atari copyright. It read PUSH START until the option mux was fixed, because the broken decode delivered the Language toggle as the coinage setting and the game saw Free Play; the default byte is the manual's suggested 1 coin / 1 play."
 size = [1024, 1024]
-frame = "sha256:0f4a88afab8c089ee8ca8621e8a9d66496c3c175b83b96f3fd1f20f0ca94804d"
-vectors = "sha256:df0270d9a5e8a026748e411e9f9715f37762b06a31111837138f630698200442"
+frame = "sha256:948a0a289cc650abd7223a15567e0fc010b8f8033aa12e49d890acd2778553ca"
+vectors = "sha256:12ba865cff123bd01be9d7699f2b0447e7ab2ab0af8ade526edbb97fda7fba4d"
 
 [[frame]]
 machine = "burgertime"
@@ -157,10 +157,10 @@ frame = "sha256:5129c5c150136ddf04c9ac408fd8dcf2f74ea281a6b3863fe70344037ed78132
 [[frame]]
 machine = "llander"
 frames = 1800
-shows = "Attract mode: the lunar terrain profile under the SCORE / TIME / FUEL and ALTITUDE / SPEED readouts, with INSERT COINS and X FUEL UNITS PER COIN."
+shows = "Attract mode: the lunar terrain profile under the SCORE / TIME / FUEL and ALTITUDE / SPEED readouts, with INSERT COINS and 750 FUEL UNITS PER COIN. It read a literal X until the option mux was fixed and the undriven data-bus bits were made to float high, which this ROM depends on because its fuel routine reads 0x2800 without masking. 750 is the default byte's setting, and the game's own self-test prints the same number."
 size = [1024, 1024]
-frame = "sha256:e1092e22a10b6118c07aa680574ca92b86984cc48347099b3774b8e8e08ac971"
-vectors = "sha256:97984b25a0762533ea349fec94664e7814e666a0c5588ed56aab1876d8a5f060"
+frame = "sha256:02cd8455627abc60f096d12036b3b52f7dd808a2e428d22f3fde6e3b8e5edda0"
+vectors = "sha256:90f8bfdf7cb8c4f81994d2854ca195fe2be5a0fbef4318515acbeb5967f48204"
 
 [[frame]]
 machine = "marble"

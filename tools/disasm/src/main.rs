@@ -183,6 +183,13 @@ enum Command {
         /// Write the full run's audio to this path as a 16-bit mono WAV.
         #[arg(long)]
         audio_out: Option<PathBuf>,
+        /// Set operator DIP switches before running: comma-separated
+        /// `<option>=<choice>` entries using the machine's published names
+        /// (e.g. `Coinage=Free Play`, `Self-Test=On`). `bank<N>=<value>` sets a
+        /// whole bank byte. An unknown name is an error listing what is
+        /// available. The same syntax `trace` takes.
+        #[arg(long)]
+        dip: Option<String>,
         /// ROM set: a `.zip` archive or a directory of loose ROM files.
         path: String,
     },
@@ -554,6 +561,7 @@ fn run_command(cmd: Command) -> Result<String, String> {
             dump_nvram,
             coin_at,
             audio_out,
+            dip,
             path,
         } => run_frameshot(
             &machine,
@@ -564,6 +572,7 @@ fn run_command(cmd: Command) -> Result<String, String> {
             dump_nvram.as_deref(),
             coin_at,
             audio_out.as_deref(),
+            dip.as_deref(),
             &path,
         ),
         Command::Trace {
@@ -707,9 +716,15 @@ fn run_frameshot(
     dump_nvram: Option<&Path>,
     coin_at: Option<usize>,
     audio_out: Option<&Path>,
+    dip: Option<&str>,
     path: &str,
 ) -> Result<String, String> {
     let mut harness = Harness::build(machine, path, nvram, coin_at, &[], &[])?;
+    // Before the first frame, so a switch that only takes effect at boot (a
+    // self-test toggle, say) is already set when the machine looks at it.
+    if let Some(spec) = dip {
+        trace::apply_dip_string(&mut harness, spec)?;
+    }
     let (audio, rate, channels) = run_capturing_audio(&mut harness, frames);
     let machine_box = harness.machine_mut();
 

@@ -7,14 +7,39 @@
 //! | `POWER INPUTS AND OUTPUTS 034230-XX A`, sheet 1 side B | `arcade-museum.com/manuals-videogames/L/Lunar-Lander-DP136-3rd-Printing-Missing-Sheet-01-Side-A.pdf` | PDF p1 |
 //! | `VECTOR GENERATOR SCHEMATIC 034230-XX A`, sheet 2 sides A and B | same | PDF p2, p3 |
 //!
-//! Only the audio block on sheet 1 side B has been read; it is transcribed in
+//! Two blocks have been read. The audio block on sheet 1 side B is transcribed
+//! in
 //! [`docs/schematics/llander-audio-output.md`](../../docs/schematics/llander-audio-output.md).
+//! `OPTIONS INPUT CIRCUITRY`, top left of sheet 2 side A, is the source for the
+//! DSW1 decode at 0x2800-0x2803: an LS253 at N8 with the 8-position switch SW2
+//! at P8 wired toggle 1 to 1C3, 3 to 1C2, 5 to 1C1 and 7 to 1C0 (all reaching
+//! DB0 through 1Y), and toggle 2 to 2C3, 4 to 2C2, 6 to 2C1 and 8 to 2C0
+//! (reaching DB1). Since a '253 selects Cn with n = (B,A) = (AB1,AB0), the
+//! pairs count DOWN: 0x2800 reads toggles 7-8 and 0x2803 reads toggles 1-2. The
+//! block also states that toggle inputs are on when pulled to ground, which is
+//! why an ON toggle reads 0. This wiring is identical to Asteroids', but it was
+//! read here rather than assumed to carry over.
+//!
 //! The vector generator sheets were not read.
 //!
 //! **Sheet 1 side A is missing from this scan**, as its filename says. That is
 //! the sheet carrying the address decode, so the `AUDIO` strobe that clocks the
 //! sound latch and the `0x3E00` noise-reset strobe are known from the memory map
 //! and not from any drawing. Do not go looking for them in this PDF.
+//!
+//! # Manual
+//!
+//! | Document | Source | Pages |
+//! |---|---|---|
+//! | `Operation, Maintenance and Service Manual` TM-136 1st printing | `arcade-museum.com/manuals-videogames/L/Lunar-Lander-TM136-1st-Printing.pdf` | PDF p15 (printed p10) |
+//!
+//! `Operator Option Switch Settings` on that page describes the toggles, but it
+//! does **not** describe this ROM and [`LLANDER_DIP_BANKS`] deliberately
+//! disagrees with it. The 1st printing lists four fuel amounts on toggles 7-8
+//! and marks toggle 6 unused; the game's own option routine reads the toggle
+//! 5-6 pair, rotates it left twice and merges it into the toggle 7-8 pair, so
+//! the fuel amount is three toggles and eight values and free play is toggle 6.
+//! Believe the routine.
 
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
@@ -26,7 +51,7 @@ use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
 use phosphor_macros::Saveable;
 
-use crate::atari_dvg::{self, AtariDvgBoard, AtariDvgBus, Region};
+use crate::atari_dvg::{self, AtariDvgBoard, AtariDvgBus, DSW_UNDRIVEN, Region};
 use crate::llander_sound::LunarLanderDiscreteSound;
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
 use crate::{set_bit_active_high, set_bit_active_low};
@@ -344,6 +369,13 @@ impl AtariDvgBus for LunarLanderBus<'_> {
     fn board(&mut self) -> &mut AtariDvgBoard {
         self.board
     }
+
+    /// Drive TEST, which gates the 250 Hz NMI off while the self-test switch is
+    /// on. IN0 bit 1 is the switch, active LOW on this board.
+    #[inline]
+    fn begin_cycle(&mut self) {
+        self.board.test_asserted = self.in0 & 0x02 == 0;
+    }
 }
 
 impl Bus for LunarLanderBus<'_> {
@@ -401,12 +433,25 @@ impl Bus for LunarLanderBus<'_> {
                     ((self.in1 >> offset) & 1) << 7
                 }
 
-                // DSW1: 0x2800–0x2803 — 74LS253 dual 4:1 multiplexer.
+                // DSW1: 0x2800-0x2803, a 74LS253 dual 4:1 multiplexer reading
+                // the option bank two toggles at a time.
+                //
+                // Each read puts the odd toggle of a pair on DB0 and the even
+                // toggle on DB1, and AB0/AB1 count the pairs DOWNWARDS: 0x2800
+                // selects toggles 7-8 and 0x2803 selects toggles 1-2. So byte
+                // bit n carries toggle n+1.
+                //
+                // This used to return the second toggle of each pair on DB7 and
+                // count the pairs upwards. Every ROM site that reads one of
+                // these addresses masks with `AND #$03`, so the DB7 half was
+                // discarded and every EVEN toggle reached nothing; the ascending
+                // count then swapped the first option with the last. The same
+                // expression was wrong the same two ways on the Deluxe board,
+                // where the corrected decode was measured against the running
+                // game option by option.
                 0x2800..=0x2803 => {
-                    let offset = (addr & 3) as u8;
-                    let bit0 = (self.dip_switches >> (offset * 2)) & 1;
-                    let bit7 = (self.dip_switches >> (offset * 2 + 1)) & 1;
-                    bit0 | (bit7 << 7)
+                    let pair = 6 - (addr & 3) as u8 * 2;
+                    DSW_UNDRIVEN | ((self.dip_switches >> pair) & 0x03)
                 }
 
                 // Thrust pedal: 0x2C00 — analog value 0x00–0xFE.
@@ -550,117 +595,172 @@ impl SaveState for LunarLanderSystem {
 
 impl phosphor_core::core::machine::Nvram for LunarLanderSystem {}
 impl phosphor_core::core::machine::Profilable for LunarLanderSystem {}
-/// DIP switch metadata for Lunar Lander's DSW1 byte (read bit-paired through
-/// the 74LS253 mux at 0x2800-0x2803). Choice bits and labels follow MAME's
-/// `llander` layout; option defaults OR to the historical 0x80 (750 fuel units
-/// per coin). Fuel Units Per Coin spans the non-contiguous mask 0xD0.
-const LLANDER_DIP_BANKS: &[DipSwitchBank] = &[DipSwitchBank {
-    name: "DSW1",
-    options: &[
-        DipOption {
-            name: "Right Coin",
-            mask: 0x03,
-            apply: DipApplyTiming::Immediate,
-            choices: &[
-                DipChoice {
-                    label: "x1",
-                    value: 0x00,
-                },
-                DipChoice {
-                    label: "x4",
-                    value: 0x01,
-                },
-                DipChoice {
-                    label: "x5",
-                    value: 0x02,
-                },
-                DipChoice {
-                    label: "x6",
-                    value: 0x03,
-                },
-            ],
-        },
-        DipOption {
-            name: "Language",
-            mask: 0x0C,
-            apply: DipApplyTiming::Immediate,
-            choices: &[
-                DipChoice {
-                    label: "English",
-                    value: 0x00,
-                },
-                DipChoice {
-                    label: "French",
-                    value: 0x04,
-                },
-                DipChoice {
-                    label: "Spanish",
-                    value: 0x08,
-                },
-                DipChoice {
-                    label: "German",
-                    value: 0x0C,
-                },
-            ],
-        },
-        DipOption {
-            name: "Coinage",
-            mask: 0x20,
-            apply: DipApplyTiming::Immediate,
-            choices: &[
-                DipChoice {
-                    label: "Normal",
-                    value: 0x00,
-                },
-                DipChoice {
-                    label: "Free Play",
-                    value: 0x20,
-                },
-            ],
-        },
-        DipOption {
-            name: "Fuel Units Per Coin",
-            mask: 0xD0,
-            apply: DipApplyTiming::Immediate,
-            choices: &[
-                DipChoice {
-                    label: "450",
-                    value: 0x00,
-                },
-                DipChoice {
-                    label: "1100",
-                    value: 0x10,
-                },
-                DipChoice {
-                    label: "600",
-                    value: 0x40,
-                },
-                DipChoice {
-                    label: "1300",
-                    value: 0x50,
-                },
-                DipChoice {
-                    label: "750",
-                    value: 0x80,
-                },
-                DipChoice {
-                    label: "1550",
-                    value: 0x90,
-                },
-                DipChoice {
-                    label: "900",
-                    value: 0xC0,
-                },
-                DipChoice {
-                    label: "1800",
-                    value: 0xD0,
-                },
-            ],
-        },
-    ],
-}];
+/// DIP switch metadata for Lunar Lander's DSW1 byte, the 8-toggle switch at
+/// PCB position P8, read two toggles at a time through the 74LS253 mux at
+/// 0x2800-0x2803.
+///
+/// Byte bit *n* carries toggle *n+1*, and a toggle reads 0 when it is ON
+/// (closed to ground) and 1 when OFF.
+///
+/// The default 0x80 is 750 fuel units per coin, normal coinage, English, and
+/// the right mech registering one credit per coin.
+///
+/// `Operator Option Switch Settings` (TM-136 1st printing, printed page 10)
+/// describes only four fuel amounts on toggles 7-8 and marks toggle 6 unused.
+/// **Do not follow it here.** The game's own option routine reads the toggle
+/// 5-6 pair, rotates it left twice and merges it into the toggle 7-8 pair, so
+/// the fuel amount is three toggles and eight values, and free play is toggle
+/// 6. The 1st-printing table does not describe what this ROM does.
+const LLANDER_DIP_BANKS: &[DipSwitchBank] = &[
+    DipSwitchBank {
+        name: "DSW1",
+        options: &[
+            DipOption {
+                name: "Right Coin",
+                mask: 0x03,
+                apply: DipApplyTiming::Immediate,
+                choices: &[
+                    DipChoice {
+                        label: "x1",
+                        value: 0x00,
+                    },
+                    DipChoice {
+                        label: "x4",
+                        value: 0x01,
+                    },
+                    DipChoice {
+                        label: "x5",
+                        value: 0x02,
+                    },
+                    DipChoice {
+                        label: "x6",
+                        value: 0x03,
+                    },
+                ],
+            },
+            DipOption {
+                name: "Language",
+                mask: 0x0C,
+                apply: DipApplyTiming::Immediate,
+                choices: &[
+                    DipChoice {
+                        label: "English",
+                        value: 0x00,
+                    },
+                    DipChoice {
+                        label: "French",
+                        value: 0x04,
+                    },
+                    DipChoice {
+                        label: "Spanish",
+                        value: 0x08,
+                    },
+                    DipChoice {
+                        label: "German",
+                        value: 0x0C,
+                    },
+                ],
+            },
+            // Toggle 6.
+            DipOption {
+                name: "Coinage",
+                mask: 0x20,
+                apply: DipApplyTiming::Immediate,
+                choices: &[
+                    DipChoice {
+                        label: "Normal",
+                        value: 0x00,
+                    },
+                    DipChoice {
+                        label: "Free Play",
+                        value: 0x20,
+                    },
+                ],
+            },
+            // Toggles 5, 7 and 8, which is why the mask is not contiguous: the
+            // fuel amount is three toggles with the free-play toggle sitting in
+            // the middle of them. The game combines them by rotating the toggle
+            // 5-6 read left twice and merging it with the toggle 7-8 read, so
+            // toggle 5 contributes the high step and 7-8 the low two.
+            DipOption {
+                name: "Fuel Units Per Coin",
+                mask: 0xD0,
+                apply: DipApplyTiming::Immediate,
+                choices: &[
+                    DipChoice {
+                        label: "450",
+                        value: 0x00,
+                    },
+                    DipChoice {
+                        label: "600",
+                        value: 0x40,
+                    },
+                    DipChoice {
+                        label: "750",
+                        value: 0x80,
+                    },
+                    DipChoice {
+                        label: "900",
+                        value: 0xC0,
+                    },
+                    DipChoice {
+                        label: "1100",
+                        value: 0x10,
+                    },
+                    DipChoice {
+                        label: "1300",
+                        value: 0x50,
+                    },
+                    DipChoice {
+                        label: "1550",
+                        value: 0x90,
+                    },
+                    DipChoice {
+                        label: "1800",
+                        value: 0xD0,
+                    },
+                ],
+            },
+        ],
+    },
+    LLANDER_SERVICE_BANK,
+];
 
-crate::impl_dip_switches!(LunarLanderSystem, LLANDER_DIP_BANKS, dip_switches);
+/// The self-test switch, which is not one of the eight option toggles.
+///
+/// It is a maintained slide switch on a bracket inside the coin door, read with
+/// the player inputs on IN0 bit 1 rather than through the option port. It
+/// belongs beside the option bank because it is a switch an operator sets and
+/// leaves set, not a button: the self-test screen is where the option toggles
+/// are read back, so it is held on while they are adjusted.
+///
+/// This bit is active LOW, so the choice values are inverted against the
+/// Asteroids and Deluxe boards, whose switch is IN0 bit 7 and active HIGH.
+const LLANDER_SERVICE_BANK: DipSwitchBank = DipSwitchBank {
+    name: "Service",
+    options: &[DipOption {
+        name: "Self-Test",
+        mask: 0x02,
+        apply: DipApplyTiming::Immediate,
+        choices: &[
+            DipChoice {
+                label: "Off",
+                value: 0x02,
+            },
+            DipChoice {
+                label: "On",
+                value: 0x00,
+            },
+        ],
+    }],
+};
+
+crate::impl_dip_switches!(
+    LunarLanderSystem,
+    LLANDER_DIP_BANKS,
+    dip_switches & 0xFF,
+    in0 & 0x02,
+);
 crate::impl_board_debug_trace!(LunarLanderSystem, board);
 
 // ---------------------------------------------------------------------------
@@ -680,16 +780,105 @@ mod tests {
     fn dip_default_and_metadata() {
         let sys = LunarLanderSystem::new();
         assert_eq!(sys.dip_bank_value(0), 0x80); // 750 fuel units per coin
-        crate::assert_dip_banks_valid(sys.dip_banks(), &[sys.dip_bank_value(0)]);
+        crate::assert_dip_banks_valid(
+            sys.dip_banks(),
+            &[sys.dip_bank_value(0), sys.dip_bank_value(1)],
+        );
+        // The self-test switch is active LOW and powers on released.
+        assert_eq!(sys.dip_bank_value(1), 0x02);
     }
 
     #[test]
     fn set_dip_option_masks_only_its_bits() {
         let mut sys = LunarLanderSystem::new();
         // Language is option 1 (mask 0x0C); pick "German" (0x0C). The Fuel bit
-        // 0x80 (in the 0xD0 mask) must be preserved.
+        // 0x80 must be preserved.
         sys.set_dip_option(0, 1, 0x0C);
         assert_eq!(sys.dip_bank_value(0), 0x8C);
+    }
+
+    /// The option mux hands the CPU two toggles per read, odd toggle on DB0 and
+    /// even on DB1, with the pairs counted DOWN from the top of the byte.
+    ///
+    /// The pattern distinguishes both ways this decode has been wrong. `0xE4`
+    /// holds 3, 2, 1, 0 in its four pairs from the top down, so the four
+    /// addresses must read 3, 2, 1, 0:
+    ///
+    /// * returning the second toggle of a pair on DB7 instead of DB1 makes
+    ///   every read 0x00 or 0x81, because the ROM masks with `AND #$03`;
+    /// * counting the pairs upwards reads 0, 1, 2, 3, which swaps the fuel
+    ///   setting with the right coin mech end for end.
+    ///
+    /// The six bits the mux never drives float high, so every read carries
+    /// `0xFC`. That is load-bearing on this machine rather than cosmetic: the
+    /// fuel routine reads 0x2800 without masking it.
+    #[test]
+    fn the_dip_mux_reads_pairs_from_the_top_of_the_byte_down() {
+        let mut sys = LunarLanderSystem::new();
+        sys.set_dip_bank_value(0, 0b11_10_01_00);
+        for (offset, expect) in [(0, 3), (1, 2), (2, 1), (3, 0)] {
+            let got = sys.bus_read(BusMaster::Cpu(0), 0x2800 + offset);
+            assert_eq!(
+                got,
+                DSW_UNDRIVEN | expect,
+                "read of 0x{:04X}",
+                0x2800 + offset
+            );
+        }
+
+        // Only DB0 and DB1 carry a toggle; the rest read high either way.
+        sys.set_dip_bank_value(0, 0x00);
+        for offset in 0..4 {
+            let got = sys.bus_read(BusMaster::Cpu(0), 0x2800 + offset);
+            assert_eq!(
+                got,
+                DSW_UNDRIVEN,
+                "read of 0x{:04X} with every toggle clear",
+                0x2800 + offset
+            );
+        }
+    }
+
+    /// The option layout follows the game's own routine, not the 1st-printing
+    /// manual: free play is toggle 6, and the fuel amount spans toggles 5, 7
+    /// and 8, which is why its mask is not contiguous and it has eight choices.
+    #[test]
+    fn the_fuel_option_spans_three_toggles_around_the_free_play_one() {
+        let banks = LunarLanderSystem::new().dip_banks();
+        let by_name = |name: &str| {
+            banks[0]
+                .options
+                .iter()
+                .find(|o| o.name == name)
+                .unwrap_or_else(|| panic!("no {name} option"))
+        };
+        assert_eq!(by_name("Coinage").mask, 0x20, "free play is toggle 6");
+        let fuel = by_name("Fuel Units Per Coin");
+        assert_eq!(fuel.mask, 0xD0, "fuel is toggles 5, 7 and 8");
+        assert_eq!(fuel.choices.len(), 8);
+        assert_eq!(
+            fuel.mask & by_name("Coinage").mask,
+            0,
+            "the free-play toggle sits between the fuel toggles without overlapping"
+        );
+    }
+
+    /// The power-on byte is 750 fuel units per coin, normal coinage, English,
+    /// and the right mech registering one credit per coin.
+    #[test]
+    fn the_default_byte_reads_back_as_its_options() {
+        let mut sys = LunarLanderSystem::new();
+        assert_eq!(sys.dip_bank_value(0), 0x80);
+        // 0x2800 is toggles 7-8, down to 0x2803 for toggles 1-2.
+        for (offset, expect, what) in [
+            (0, 0b10, "fuel toggles 7-8"),
+            (1, 0b00, "toggle 5 fuel step clear, toggle 6 normal coinage"),
+            (2, 0b00, "English"),
+            (3, 0b00, "right coin mech: 1 credit per coin"),
+        ] {
+            let got = sys.bus_read(BusMaster::Cpu(0), 0x2800 + offset);
+            assert_eq!(got, DSW_UNDRIVEN | expect, "{what}");
+        }
     }
 
     #[test]

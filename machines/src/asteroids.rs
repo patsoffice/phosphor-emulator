@@ -1,3 +1,31 @@
+//! Asteroids (Atari, 1979), on the shared Atari DVG vector board.
+//!
+//! # Schematics
+//!
+//! | Drawing | Source | Pages |
+//! |---|---|---|
+//! | `OPTIONS INPUT CIRCUITRY`, sheet 2 side B, DP-143-02 3rd printing | `arcade-museum.com/manuals-videogames/A/Asteroids-sp.pdf` | PDF p7 |
+//!
+//! Only that block has been read. It is the source for the DSW1 decode at
+//! 0x2800-0x2803: an LS253 at P6 with the 8-position switch R6 wired toggle
+//! 1 to 1C3, 3 to 1C2, 5 to 1C1 and 7 to 1C0 (all reaching DB0 through 1Y),
+//! and toggle 2 to 2C3, 4 to 2C2, 6 to 2C1 and 8 to 2C0 (reaching DB1). Since
+//! a '253 selects Cn with n = (B,A) = (AB1,AB0), the pairs count DOWN: 0x2800
+//! reads toggles 7-8 and 0x2803 reads toggles 1-2. The block also states that
+//! toggle inputs are on when pulled to ground, which is why an ON toggle
+//! reads 0.
+//!
+//! # Manual
+//!
+//! | Document | Source | Pages |
+//! |---|---|---|
+//! | `Operation, Maintenance and Service Manual` TM-143 3rd printing | `arcade-museum.com/manuals-videogames/A/Asteroids.pdf` | PDF p13 (printed p7) |
+//!
+//! `Figure 7 Option Switch Settings` on that page is the source for
+//! [`ASTEROIDS_DIP_BANKS`]: which toggle carries which option, the On/Off
+//! pattern for every choice, and the suggested settings the power-on byte
+//! encodes.
+
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
     ActionRole, DipApplyTiming, DipChoice, DipOption, DipSwitchBank, InputConfigurable,
@@ -9,7 +37,7 @@ use phosphor_core::cpu::Cpu;
 use phosphor_macros::Saveable;
 
 use crate::asteroids_sound::AsteroidsDiscreteSound;
-use crate::atari_dvg::{self, AtariDvgBoard, AtariDvgBus, Region};
+use crate::atari_dvg::{self, AtariDvgBoard, AtariDvgBus, DSW_UNDRIVEN, Region, ramsel_addr};
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
 use crate::set_bit_active_high;
 use phosphor_core::cpu::m6502::M6502;
@@ -177,6 +205,9 @@ pub struct AsteroidsSystem {
     /// DIP switches: default 0x84 (English, 3 lives, 1 coin/1 credit).
     #[save_skip]
     dip_switches: u8,
+    /// RAMSEL, from output-latch bit 2: swaps the two 256-byte SRAMs over the
+    /// 0x0200-0x02FF and 0x0300-0x03FF windows.
+    ramsel: bool,
 }
 
 impl AsteroidsSystem {
@@ -218,6 +249,7 @@ impl AsteroidsSystem {
             in0: 0x00,
             in1: 0x00,
             dip_switches: 0x84, // English, 3 lives, 1C/1C
+            ramsel: false,
         }
     }
 
@@ -232,6 +264,7 @@ impl AsteroidsSystem {
                 in0: self.in0,
                 in1: self.in1,
                 dip_switches: self.dip_switches,
+                ramsel: &mut self.ramsel,
             },
         )
     }
@@ -282,12 +315,22 @@ struct AsteroidsBus<'a> {
     in0: u8,
     in1: u8,
     dip_switches: u8,
+    /// Borrowed rather than copied: the CPU writes RAMSEL through the output
+    /// latch mid-frame and the new value has to outlive the bus view.
+    ramsel: &'a mut bool,
 }
 
 impl AtariDvgBus for AsteroidsBus<'_> {
     #[inline]
     fn board(&mut self) -> &mut AtariDvgBoard {
         self.board
+    }
+
+    /// Drive TEST, which gates the 250 Hz NMI off while the self-test switch is
+    /// on. IN0 bit 7 is the switch, active HIGH on this board.
+    #[inline]
+    fn begin_cycle(&mut self) {
+        self.board.test_asserted = self.in0 & 0x80 != 0;
     }
 }
 
@@ -303,7 +346,8 @@ impl Bus for AsteroidsBus<'_> {
         let addr = addr & 0x7FFF; // 15-bit address bus
 
         let data = match self.board.map.page(addr).region_id {
-            Region::RAM | Region::VECTOR_RAM | Region::VECTOR_ROM | Region::PROGRAM_ROM => {
+            Region::RAM => self.board.map.read_backing(ramsel_addr(addr, *self.ramsel)),
+            Region::VECTOR_RAM | Region::VECTOR_ROM | Region::PROGRAM_ROM => {
                 self.board.map.read_backing(addr)
             }
 
@@ -341,13 +385,25 @@ impl Bus for AsteroidsBus<'_> {
                     ((self.in1 >> offset) & 1) << 7
                 }
 
-                // DSW1: 0x2800–0x2803 — 74LS253 dual 4:1 multiplexer.
-                // A0–A1 select a pair of DIP switch bits: even bit → D0, odd bit → D7.
+                // DSW1: 0x2800-0x2803, a 74LS253 dual 4:1 multiplexer reading
+                // the option bank two toggles at a time.
+                //
+                // Each read puts the odd toggle of a pair on DB0 and the even
+                // toggle on DB1, and AB0/AB1 count the pairs DOWNWARDS: 0x2800
+                // selects toggles 7-8 and 0x2803 selects toggles 1-2. So byte
+                // bit n carries toggle n+1.
+                //
+                // This used to return the second toggle of each pair on DB7 and
+                // count the pairs upwards. Every ROM site that reads one of
+                // these addresses masks with `AND #$03`, so the DB7 half was
+                // discarded and every EVEN toggle reached nothing; the ascending
+                // count then swapped the first option with the last. The same
+                // expression was wrong the same two ways on the Deluxe board,
+                // where the corrected decode was measured against the running
+                // game option by option.
                 0x2800..=0x2803 => {
-                    let offset = (addr & 3) as u8;
-                    let bit0 = (self.dip_switches >> (offset * 2)) & 1;
-                    let bit7 = (self.dip_switches >> (offset * 2 + 1)) & 1;
-                    bit0 | (bit7 << 7)
+                    let pair = 6 - (addr & 3) as u8 * 2;
+                    DSW_UNDRIVEN | ((self.dip_switches >> pair) & 0x03)
                 }
 
                 _ => 0,
@@ -367,11 +423,19 @@ impl Bus for AsteroidsBus<'_> {
         self.board.trace_main_write(addr, data);
 
         match self.board.map.page(addr).region_id {
-            Region::RAM | Region::VECTOR_RAM => self.board.map.write_backing(addr, data),
+            Region::RAM => self
+                .board
+                .map
+                .write_backing(ramsel_addr(addr, *self.ramsel), data),
+            Region::VECTOR_RAM => self.board.map.write_backing(addr, data),
 
             Region::IO => match addr {
                 0x3000 => self.board.trigger_dvg(),
-                0x3200 => { /* output latch stub */ }
+                // Output latch (LS174 at N11). Only RAMSEL is modeled: bit 2
+                // selects which of the two 256-byte SRAMs answers which half of
+                // 0x0200-0x03FF. The lamp and coin-counter bits are outputs
+                // nothing here reads back.
+                0x3200 => *self.ramsel = data & 0x04 != 0,
                 0x3400 => self.board.watchdog_frame_count = 0,
                 0x3600 => self.sound.write_explosion(data),
                 0x3A00 => self.sound.write_thump(data),
@@ -480,116 +544,161 @@ impl SaveState for AsteroidsSystem {
 
 impl phosphor_core::core::machine::Nvram for AsteroidsSystem {}
 impl phosphor_core::core::machine::Profilable for AsteroidsSystem {}
-/// DIP switch metadata for Asteroids' DSW1 byte (read bit-paired through the
-/// 74LS253 mux at 0x2800-0x2803). Choice bits and labels follow MAME's
-/// `asteroid` layout; option defaults OR to the historical 0x84 (English,
-/// 3 lives, 1 coin/1 credit).
-const ASTEROIDS_DIP_BANKS: &[DipSwitchBank] = &[DipSwitchBank {
-    name: "DSW1",
-    options: &[
-        DipOption {
-            name: "Language",
-            mask: 0x03,
-            apply: DipApplyTiming::Immediate,
-            choices: &[
-                DipChoice {
-                    label: "English",
-                    value: 0x00,
-                },
-                DipChoice {
-                    label: "German",
-                    value: 0x01,
-                },
-                DipChoice {
-                    label: "French",
-                    value: 0x02,
-                },
-                DipChoice {
-                    label: "Spanish",
-                    value: 0x03,
-                },
-            ],
-        },
-        DipOption {
-            name: "Lives",
-            mask: 0x04,
-            apply: DipApplyTiming::Immediate,
-            choices: &[
-                DipChoice {
-                    label: "4",
-                    value: 0x00,
-                },
-                DipChoice {
-                    label: "3",
-                    value: 0x04,
-                },
-            ],
-        },
-        DipOption {
-            name: "Center Mech",
-            mask: 0x08,
-            apply: DipApplyTiming::Immediate,
-            choices: &[
-                DipChoice {
-                    label: "x1",
-                    value: 0x00,
-                },
-                DipChoice {
-                    label: "x2",
-                    value: 0x08,
-                },
-            ],
-        },
-        DipOption {
-            name: "Right Mech",
-            mask: 0x30,
-            apply: DipApplyTiming::Immediate,
-            choices: &[
-                DipChoice {
-                    label: "x1",
-                    value: 0x00,
-                },
-                DipChoice {
-                    label: "x4",
-                    value: 0x10,
-                },
-                DipChoice {
-                    label: "x5",
-                    value: 0x20,
-                },
-                DipChoice {
-                    label: "x6",
-                    value: 0x30,
-                },
-            ],
-        },
-        DipOption {
-            name: "Coinage",
-            mask: 0xC0,
-            apply: DipApplyTiming::Immediate,
-            choices: &[
-                DipChoice {
-                    label: "Free Play",
-                    value: 0x00,
-                },
-                DipChoice {
-                    label: "1 Coin/2 Credits",
-                    value: 0x40,
-                },
-                DipChoice {
-                    label: "1 Coin/1 Credit",
-                    value: 0x80,
-                },
-                DipChoice {
-                    label: "2 Coins/1 Credit",
-                    value: 0xC0,
-                },
-            ],
-        },
-    ],
-}];
+/// DIP switch metadata for Asteroids' DSW1 byte, the 8-toggle switch read two
+/// toggles at a time through the 74LS253 mux at 0x2800-0x2803.
+///
+/// Transcribed from `Figure 7 Option Switch Settings` (TM-143 3rd printing,
+/// printed page 7). Byte bit *n* carries toggle *n+1*, and a toggle reads 0 when
+/// it is ON and 1 when OFF: the manual states that sense directly, since the
+/// self-test shows an ON toggle as `0` and an OFF toggle as `1`. Each choice
+/// value below is that figure's On/Off column read as a binary number.
+///
+/// The default 0x84 is the manual's own suggested setting, whose photograph is
+/// captioned "toggles 1, 2, 4-7 on, and toggles 3 and 8 off": English, a
+/// 3-ship game, both coin mechs at x1, and one coin for one play.
+const ASTEROIDS_DIP_BANKS: &[DipSwitchBank] = &[
+    DipSwitchBank {
+        name: "DSW1",
+        options: &[
+            DipOption {
+                name: "Language",
+                mask: 0x03,
+                apply: DipApplyTiming::Immediate,
+                choices: &[
+                    DipChoice {
+                        label: "English",
+                        value: 0x00,
+                    },
+                    DipChoice {
+                        label: "German",
+                        value: 0x01,
+                    },
+                    DipChoice {
+                        label: "French",
+                        value: 0x02,
+                    },
+                    DipChoice {
+                        label: "Spanish",
+                        value: 0x03,
+                    },
+                ],
+            },
+            DipOption {
+                name: "Lives",
+                mask: 0x04,
+                apply: DipApplyTiming::Immediate,
+                choices: &[
+                    DipChoice {
+                        label: "4",
+                        value: 0x00,
+                    },
+                    DipChoice {
+                        label: "3",
+                        value: 0x04,
+                    },
+                ],
+            },
+            DipOption {
+                name: "Center Mech",
+                mask: 0x08,
+                apply: DipApplyTiming::Immediate,
+                choices: &[
+                    DipChoice {
+                        label: "x1",
+                        value: 0x00,
+                    },
+                    DipChoice {
+                        label: "x2",
+                        value: 0x08,
+                    },
+                ],
+            },
+            DipOption {
+                name: "Right Mech",
+                mask: 0x30,
+                apply: DipApplyTiming::Immediate,
+                choices: &[
+                    DipChoice {
+                        label: "x1",
+                        value: 0x00,
+                    },
+                    DipChoice {
+                        label: "x4",
+                        value: 0x10,
+                    },
+                    DipChoice {
+                        label: "x5",
+                        value: 0x20,
+                    },
+                    DipChoice {
+                        label: "x6",
+                        value: 0x30,
+                    },
+                ],
+            },
+            DipOption {
+                name: "Coinage",
+                mask: 0xC0,
+                apply: DipApplyTiming::Immediate,
+                choices: &[
+                    DipChoice {
+                        label: "Free Play",
+                        value: 0x00,
+                    },
+                    DipChoice {
+                        label: "1 Coin/2 Credits",
+                        value: 0x40,
+                    },
+                    DipChoice {
+                        label: "1 Coin/1 Credit",
+                        value: 0x80,
+                    },
+                    DipChoice {
+                        label: "2 Coins/1 Credit",
+                        value: 0xC0,
+                    },
+                ],
+            },
+        ],
+    },
+    SELF_TEST_BANK,
+];
 
-crate::impl_dip_switches!(AsteroidsSystem, ASTEROIDS_DIP_BANKS, dip_switches);
+/// The self-test switch, which is not one of the eight option toggles.
+///
+/// It is a maintained slide switch on a bracket inside the coin door, read with
+/// the player inputs through the IN0 multiplexer on bit 7 rather than through
+/// the option port. It belongs here anyway because it is a switch an operator
+/// sets and leaves set, not a button: the self-test screen is where the option
+/// toggles are read back, so it is held on while they are adjusted.
+///
+/// Bit 7 of IN0 is active HIGH on this board and on the Deluxe; Lunar Lander's
+/// is bit 1 and active LOW.
+const SELF_TEST_BANK: DipSwitchBank = DipSwitchBank {
+    name: "Service",
+    options: &[DipOption {
+        name: "Self-Test",
+        mask: 0x80,
+        apply: DipApplyTiming::Immediate,
+        choices: &[
+            DipChoice {
+                label: "Off",
+                value: 0x00,
+            },
+            DipChoice {
+                label: "On",
+                value: 0x80,
+            },
+        ],
+    }],
+};
+
+crate::impl_dip_switches!(
+    AsteroidsSystem,
+    ASTEROIDS_DIP_BANKS,
+    dip_switches & 0xFF,
+    in0 & 0x80,
+);
 crate::impl_board_debug_trace!(AsteroidsSystem, board);
 
 // ---------------------------------------------------------------------------
@@ -614,7 +723,12 @@ mod tests {
     fn dip_default_and_metadata() {
         let sys = AsteroidsSystem::new();
         assert_eq!(sys.dip_bank_value(0), 0x84); // English, 3 lives, 1C/1C
-        crate::assert_dip_banks_valid(sys.dip_banks(), &[sys.dip_bank_value(0)]);
+        crate::assert_dip_banks_valid(
+            sys.dip_banks(),
+            &[sys.dip_bank_value(0), sys.dip_bank_value(1)],
+        );
+        // The self-test switch powers on released.
+        assert_eq!(sys.dip_bank_value(1), 0x00);
     }
 
     #[test]
@@ -623,6 +737,68 @@ mod tests {
         // Coinage is option 4 (mask 0xC0); pick "2 Coins/1 Credit" (0xC0).
         sys.set_dip_option(0, 4, 0xC0);
         assert_eq!(sys.dip_bank_value(0), 0xC4); // 0x84 low bits kept, top two set
+    }
+
+    /// The option mux hands the CPU two toggles per read, odd toggle on DB0 and
+    /// even on DB1, with the pairs counted DOWN from the top of the byte.
+    ///
+    /// The pattern distinguishes both ways this decode has been wrong. `0xE4`
+    /// holds 3, 2, 1, 0 in its four pairs from the top down, so the four
+    /// addresses must read 3, 2, 1, 0:
+    ///
+    /// * returning the second toggle of a pair on DB7 instead of DB1 makes
+    ///   every read 0x00 or 0x81, because the ROM masks with `AND #$03`;
+    /// * counting the pairs upwards reads 0, 1, 2, 3, which swaps Coinage with
+    ///   Language end for end.
+    ///
+    /// Both were live at once here, which left the game reading its Language
+    /// toggle as the coinage setting.
+    #[test]
+    fn the_dip_mux_reads_pairs_from_the_top_of_the_byte_down() {
+        let mut sys = AsteroidsSystem::new();
+        sys.set_dip_bank_value(0, 0b11_10_01_00);
+        for (offset, expect) in [(0, 3), (1, 2), (2, 1), (3, 0)] {
+            let got = sys.bus_read(BusMaster::Cpu(0), 0x2800 + offset);
+            assert_eq!(
+                got,
+                DSW_UNDRIVEN | expect,
+                "read of 0x{:04X}",
+                0x2800 + offset
+            );
+        }
+
+        // Only DB0 and DB1 carry a toggle; the six the mux never drives float
+        // high.
+        sys.set_dip_bank_value(0, 0x00);
+        for offset in 0..4 {
+            let got = sys.bus_read(BusMaster::Cpu(0), 0x2800 + offset);
+            assert_eq!(
+                got,
+                DSW_UNDRIVEN,
+                "read of 0x{:04X} with every toggle clear",
+                0x2800 + offset
+            );
+        }
+    }
+
+    /// The power-on byte is the manual's suggested setting, and each option
+    /// lands on the toggles Figure 7 assigns it. 0x84 is "toggles 1, 2, 4-7 on,
+    /// and toggles 3 and 8 off" with ON reading as 0, so the four mux addresses
+    /// see Coinage=1C/1C, Right Mech=x1, Ships=3 with Center Mech=x1, English.
+    #[test]
+    fn the_default_byte_is_the_manuals_suggested_setting() {
+        let mut sys = AsteroidsSystem::new();
+        assert_eq!(sys.dip_bank_value(0), 0x84);
+        // 0x2800 is toggles 7-8 (Coinage), down to 0x2803 for toggles 1-2.
+        for (offset, expect, what) in [
+            (0, 0b10, "coinage: 1 coin / 1 play"),
+            (1, 0b00, "right coin mech x1"),
+            (2, 0b01, "3-ship game, center mech x1"),
+            (3, 0b00, "English"),
+        ] {
+            let got = sys.bus_read(BusMaster::Cpu(0), 0x2800 + offset);
+            assert_eq!(got, DSW_UNDRIVEN | expect, "{what}");
+        }
     }
 
     #[test]

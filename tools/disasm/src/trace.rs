@@ -1139,6 +1139,15 @@ fn parse_dip_specs(spec: &str) -> Result<Vec<DipSpec>, String> {
     Ok(specs)
 }
 
+/// Parse and apply a `--dip` string against a booted machine.
+///
+/// The entry point for commands other than `trace` that take the same flag, so
+/// one syntax and one set of error messages serve all of them.
+pub(crate) fn apply_dip_string(harness: &mut Harness, spec: &str) -> Result<(), String> {
+    let specs = parse_dip_specs(spec)?;
+    apply_dip_specs(harness, &specs)
+}
+
 /// Apply parsed `--dip` entries to the booted machine.
 ///
 /// Runs after boot because the DIP table is a property of the machine (Star

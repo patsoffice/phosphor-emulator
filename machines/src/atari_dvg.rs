@@ -45,6 +45,40 @@ pub const TIMING: TimingConfig = TimingConfig {
 
 pub const NMI_PERIOD_CYCLES: u64 = TIMING.cpu_clock_hz / 250;
 
+/// The bits an option-switch read leaves undriven, which float high.
+///
+/// The option bank is read through a 74LS253 that drives only two outputs onto
+/// the data bus: 1Y onto DB0 (the odd toggle of the selected pair) and 2Y onto
+/// DB1 (the even one). Nothing drives DB2-DB7, and they are pulled up, so they
+/// read as ones.
+///
+/// This is not cosmetic. Most sites in these ROMs mask the read with `AND #$03`
+/// and cannot tell, but Lunar Lander's option routine reads 0x2800 *unmasked*
+/// and folds it into the fuel amount, so returning zeros there silently
+/// collapsed eight fuel settings down to two.
+pub const DSW_UNDRIVEN: u8 = 0xFC;
+
+/// Route a RAM address through the RAMSEL bank select.
+///
+/// Asteroids and Asteroids Deluxe put two 256-byte SRAMs behind one select
+/// line: with RAMSEL low the first answers 0x0200-0x02FF and the second
+/// 0x0300-0x03FF, and with it high the two swap over. Everything below 0x0200
+/// is unaffected, and Lunar Lander has no such banking at all.
+///
+/// Swapping two adjacent 256-byte windows is one address bit, so the crossover
+/// is `addr ^ 0x0100` rather than a pair of separate backing stores. The self
+/// test walks both banks and reports `Bank Error` if writing one window can be
+/// read back through the other, which is exactly what happened while the select
+/// line went nowhere.
+#[inline]
+pub fn ramsel_addr(addr: u16, ramsel: bool) -> u16 {
+    if ramsel && (0x0200..0x0400).contains(&addr) {
+        addr ^ 0x0100
+    } else {
+        addr
+    }
+}
+
 /// The board's crystal and everything divided out of it.
 ///
 /// One 12.096 MHz crystal with the 6502 on a divide-by-eight. The DVG is not
@@ -133,6 +167,22 @@ pub struct AtariDvgBoard {
     #[save(id = 6)]
     pub(crate) watchdog_frame_count: u8,
 
+    /// The self-test switch's TEST line, which gates the 250 Hz NMI off.
+    ///
+    /// The NMI counter's description on the drawing package says it plainly:
+    /// the interrupt is disabled by RESET at power-up and by TEST during
+    /// self-test. Without the TEST half the self-test routine is interrupted
+    /// about four times a frame by a handler it never returns from, so the
+    /// stack marches down six bytes per NMI, wraps out of page one in a
+    /// fraction of a second, and the machine resets in a loop with a black
+    /// screen. That is what made the self-test switch look like it did nothing
+    /// on all three of these boards.
+    ///
+    /// Re-driven from the game's own input byte every cycle, so it is derived
+    /// state rather than something to save.
+    #[save_skip]
+    pub(crate) test_asserted: bool,
+
     /// Vector display, cleared by a load: the frame is redrawn from the
     /// restored generator state rather than resumed part way through.
     #[save_skip(default)]
@@ -164,6 +214,7 @@ impl AtariDvgBoard {
             clock: 0,
             nmi_counter: 0,
             nmi_pending: false,
+            test_asserted: false,
             watchdog_frame_count: 0,
             display_list: Vec::with_capacity(512),
             vrom_dvg_offset,
@@ -174,11 +225,14 @@ impl AtariDvgBoard {
 
     /// Per-cycle board work that runs before the CPU.
     fn begin_cycle(&mut self, cpu: &M6502) {
-        // NMI generation: 3 KHz / 12 ≈ 250 Hz
+        // NMI generation: 3 KHz / 12 ≈ 250 Hz, gated by TEST.
+        //
+        // The counter keeps running while TEST holds the interrupt off, because
+        // the hardware gate is on the interrupt line and not on the divider.
         self.nmi_counter += 1;
         if self.nmi_counter >= NMI_PERIOD_CYCLES {
             self.nmi_counter = 0;
-            self.nmi_pending = true;
+            self.nmi_pending = !self.test_asserted;
             if self.debug_trace.enabled() {
                 self.debug_trace.record(DebugEvent {
                     cpu_index: Some(0),

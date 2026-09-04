@@ -44,7 +44,7 @@ use phosphor_core::device::Er2055;
 use phosphor_core::device::pokey::Pokey;
 use phosphor_macros::Saveable;
 
-use crate::atari_dvg::{self, AtariDvgBoard, AtariDvgBus, Region};
+use crate::atari_dvg::{self, AtariDvgBoard, AtariDvgBus, DSW_UNDRIVEN, Region, ramsel_addr};
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
 use crate::set_bit_active_high;
 use phosphor_core::cpu::m6502::M6502;
@@ -116,13 +116,17 @@ pub const INPUT_SHIELD: u8 = 5;
 pub const INPUT_ROT_LEFT: u8 = 6;
 pub const INPUT_ROT_RIGHT: u8 = 7;
 
-// NO SELF-TEST CONTROL, DELIBERATELY. The cabinet has the switch and IN0 bit 7
-// is where the mux comment says it lands, but driving that bit does not produce
-// a self-test display: the screen stays black through 3000 frames and the 6502's
-// PC pins at 0x7DF8, sampled identically six times over while attract-mode PCs
-// roam. The routine is waiting on something this board does not yet model. A
-// control bound to a key that freezes the game is worse than none, so it is left
-// out until the underlying gap is fixed.
+// The self-test switch is a DIP-style toggle rather than one of the controls
+// below, because it is a maintained switch an operator sets and leaves set, not
+// a button. See the `Service` bank at the end of `ASTDELUX_DIP_BANKS`.
+//
+// It used to be left out entirely, on the finding that driving IN0 bit 7 froze
+// the game with a black screen and the PC pinned. That was real, and the cause
+// was not this board's option decode: the 250 Hz NMI kept firing during the
+// self-test, whose routine never returns from the handler, so the stack marched
+// down six bytes per interrupt and wrapped out of page one in a fraction of a
+// second. The drawing package says the interrupt is disabled by TEST during
+// self-test; the board now models that gate, and the routine runs.
 
 /// Typed logical controls. `InputId`s reuse the `INPUT_*` numbering; default
 /// bindings mirror the legacy name-matched defaults (thrust = "P1 Up", shield =
@@ -258,6 +262,11 @@ pub struct AsteroidsDeluxeSystem {
     #[save_skip]
     dip_l8: u8,
 
+    /// RAMSEL, from audio-latch Q4: swaps the two 256-byte SRAMs over the
+    /// 0x0200-0x02FF and 0x0300-0x03FF windows. Asteroids carries the same
+    /// select on its output latch instead; this board's outlatch is not fitted.
+    ramsel: bool,
+
     // EAROM (ER2055): 64-byte non-volatile RAM for high scores
     earom: Er2055,
 
@@ -305,6 +314,7 @@ impl AsteroidsDeluxeSystem {
             in1: 0x00,
             dip_switches: 0x00,
             dip_l8: 0xFF,
+            ramsel: false,
             earom: Er2055::new(),
             audio_buffer: SampleRing::with_capacity(1024),
         };
@@ -355,6 +365,7 @@ impl AsteroidsDeluxeSystem {
                 in0: self.in0,
                 in1: self.in1,
                 dip_switches: self.dip_switches,
+                ramsel: &mut self.ramsel,
             },
         )
     }
@@ -406,6 +417,9 @@ struct AsteroidsDeluxeBus<'a> {
     in0: u8,
     in1: u8,
     dip_switches: u8,
+    /// Borrowed rather than copied: the CPU writes RAMSEL through the audio
+    /// latch mid-frame and the new value has to outlive the bus view.
+    ramsel: &'a mut bool,
 }
 
 impl AtariDvgBus for AsteroidsDeluxeBus<'_> {
@@ -414,9 +428,12 @@ impl AtariDvgBus for AsteroidsDeluxeBus<'_> {
         self.board
     }
 
+    /// The POKEY's clock, plus TEST, which gates the 250 Hz NMI off while the
+    /// self-test switch is on. IN0 bit 7 is the switch, active HIGH here.
     #[inline]
     fn begin_cycle(&mut self) {
         self.pokey.tick();
+        self.board.test_asserted = self.in0 & 0x80 != 0;
     }
 }
 
@@ -432,7 +449,8 @@ impl Bus for AsteroidsDeluxeBus<'_> {
         let addr = addr & 0x7FFF; // 15-bit address bus
 
         let data = match self.board.map.page(addr).region_id {
-            Region::RAM | Region::VECTOR_RAM | Region::VECTOR_ROM | Region::PROGRAM_ROM => {
+            Region::RAM => self.board.map.read_backing(ramsel_addr(addr, *self.ramsel)),
+            Region::VECTOR_RAM | Region::VECTOR_ROM | Region::PROGRAM_ROM => {
                 self.board.map.read_backing(addr)
             }
 
@@ -486,7 +504,7 @@ impl Bus for AsteroidsDeluxeBus<'_> {
                 // which is the same two options swapped end for end.
                 0x2800..=0x2803 => {
                     let pair = 6 - (addr & 3) as u8 * 2;
-                    (self.dip_switches >> pair) & 0x03
+                    DSW_UNDRIVEN | ((self.dip_switches >> pair) & 0x03)
                 }
 
                 // POKEY: 0x2C00–0x2C0F
@@ -522,7 +540,11 @@ impl Bus for AsteroidsDeluxeBus<'_> {
         self.board.trace_main_write(addr, data);
 
         match self.board.map.page(addr).region_id {
-            Region::RAM | Region::VECTOR_RAM => self.board.map.write_backing(addr, data),
+            Region::RAM => self
+                .board
+                .map
+                .write_backing(ramsel_addr(addr, *self.ramsel), data),
+            Region::VECTOR_RAM => self.board.map.write_backing(addr, data),
 
             Region::IO => match addr {
                 // POKEY: 0x2C00–0x2C0F
@@ -559,7 +581,20 @@ impl Bus for AsteroidsDeluxeBus<'_> {
                     self.earom.write_control(clock, cs1, c1, c2);
                 }
 
-                0x3C00..=0x3C07 => { /* audio latch stub */ }
+                // Audio latch (LS259). Addressable: the low three address bits
+                // pick the output and the value is data bit 7, not bit 0. Only
+                // Q4, RAMSEL, is modeled; the rest are lamps, coin counters and
+                // sound enables that nothing here reads back.
+                //
+                // Asteroids carries RAMSEL on its output latch at 0x3200
+                // instead, as a plain byte write with the select on bit 2. The
+                // two boards differ because this one is not fitted with that
+                // latch at all.
+                0x3C00..=0x3C07 => {
+                    if addr & 0x07 == 4 {
+                        *self.ramsel = data & 0x80 != 0;
+                    }
+                }
                 0x3E00 => { /* noise reset stub */ }
                 _ => {}
             },
@@ -932,6 +967,30 @@ const ASTDELUX_DIP_BANKS: &[DipSwitchBank] = &[
             },
         ],
     },
+    // The self-test switch, which is not one of the option toggles: it is a
+    // maintained slide switch inside the coin door, read with the player inputs
+    // on IN0 bit 7 (active HIGH here) rather than through the option port. It
+    // belongs beside the option banks because it is a switch an operator sets
+    // and leaves set while reading the toggles back off the self-test screen,
+    // which is where Figure 6's four digits are displayed.
+    DipSwitchBank {
+        name: "Service",
+        options: &[DipOption {
+            name: "Self-Test",
+            mask: 0x80,
+            apply: DipApplyTiming::Immediate,
+            choices: &[
+                DipChoice {
+                    label: "Off",
+                    value: 0x00,
+                },
+                DipChoice {
+                    label: "On",
+                    value: 0x80,
+                },
+            ],
+        }],
+    },
 ];
 
 /// Why L8 is modeled as four fields rather than as twelve whole-byte recipes.
@@ -982,6 +1041,9 @@ impl DipSwitches for AsteroidsDeluxeSystem {
         match bank {
             0 => self.dip_switches,
             1 => self.dip_l8,
+            // The self-test switch shares IN0 with live player inputs, so this
+            // bank reads and writes just its bit.
+            2 => self.in0 & 0x80,
             _ => 0,
         }
     }
@@ -993,6 +1055,7 @@ impl DipSwitches for AsteroidsDeluxeSystem {
                 self.dip_l8 = value;
                 self.refresh_dip_pots();
             }
+            2 => self.in0 = (self.in0 & !0x80) | (value & 0x80),
             _ => {}
         }
     }
@@ -1021,9 +1084,15 @@ mod tests {
         let sys = AsteroidsDeluxeSystem::new();
         assert_eq!(sys.dip_bank_value(0), 0x00);
         assert_eq!(sys.dip_bank_value(1), 0xFF);
+        // The self-test switch is active HIGH here and powers on released.
+        assert_eq!(sys.dip_bank_value(2), 0x00);
         crate::assert_dip_banks_valid(
             sys.dip_banks(),
-            &[sys.dip_bank_value(0), sys.dip_bank_value(1)],
+            &[
+                sys.dip_bank_value(0),
+                sys.dip_bank_value(1),
+                sys.dip_bank_value(2),
+            ],
         );
     }
 
@@ -1053,17 +1122,24 @@ mod tests {
         sys.set_dip_bank_value(0, 0b11_10_01_00);
         for (offset, expect) in [(0, 3), (1, 2), (2, 1), (3, 0)] {
             let got = sys.bus_read(BusMaster::Cpu(0), 0x2800 + offset);
-            assert_eq!(got, expect, "read of 0x{:04X}", 0x2800 + offset);
+            assert_eq!(
+                got,
+                DSW_UNDRIVEN | expect,
+                "read of 0x{:04X}",
+                0x2800 + offset
+            );
         }
 
-        // Only DB0 and DB1 are driven; nothing else on the byte is.
-        sys.set_dip_bank_value(0, 0xFF);
+        // Only DB0 and DB1 carry a toggle; the six the mux never drives float
+        // high. Every read site in this ROM masks with `AND #$03` so it cannot
+        // tell, but the board still presents them.
+        sys.set_dip_bank_value(0, 0x00);
         for offset in 0..4 {
             let got = sys.bus_read(BusMaster::Cpu(0), 0x2800 + offset);
             assert_eq!(
                 got,
-                0x03,
-                "read of 0x{:04X} with every toggle set",
+                DSW_UNDRIVEN,
+                "read of 0x{:04X} with every toggle clear",
                 0x2800 + offset
             );
         }
