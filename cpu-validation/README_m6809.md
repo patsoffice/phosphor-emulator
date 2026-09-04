@@ -30,9 +30,46 @@ indexed postbyte `0x9F` — `[n]`, extended indirect.
 
 Table 2 (Indexed Addressing Mode) of the MC6809E datasheet lists extended
 indirect, postbyte `10011111`, as **+5 cycles / +2 bytes**. Phosphor charges 5;
-the reference core charges 8. Per the project rule that the datasheet wins over
-the reference on timings, phosphor is correct here and the vectors are not
-regenerated to match.
+the reference core charges 8.
+
+The reference's mistake is visible in its own source. `m_index_cycle_em`
+(`cross-validation/mame0148/src/emu/cpu/m6809/6809tbl.c`) is a hand-written
+256-entry table whose row `0x8X` holds the non-indirect adders and matches the
+datasheet everywhere: `,R+` 2, `,R++` 3, `,R` 0, `n8,R` 1, `n16,R` 4, `D,R` 4,
+`n16,PCR` 5. Row `0x9X` is that row plus 3, the cost of one indirection. The
+non-indirect codes with no mode behind them (`0x87`, `0x8A`, `0x8E`) are left at
+0, but slot `0x8F` was filled in with 5, which is the datasheet's adder for the
+*indirect* form `[n]`. The +3 then lands on a number that already includes it,
+so `0x9F` comes out at 8. Two further slots disagree with their own sibling
+rows (`0xCF` is 3 where the other non-indirect rows say 5, `0xF0` is 4 where the
+other indirect rows say 5), so this is not a carefully derived table.
+
+A current MAME (0.289) agrees with the datasheet. Its 6809 is an unrelated,
+cycle-stepped core generated from `src/devices/cpu/m6809/m6809.lst`, and it was
+measured rather than read: a program injected into Star Wars main RAM at `$0100`
+with `X = $0200`, traced with `{tracelog "tc=%d ",totalcycles}` so each
+instruction boundary carries a cycle count.
+
+| instruction | MAME 0.289 | datasheet | 2013 reference |
+|---|---|---|---|
+| `LDA ,X` | 4 | 4 | 4 |
+| `LDA 5,X` | 5 | 5 | 5 |
+| `LDA $0010,X` | 8 | 8 | 8 |
+| `LDA [,X]` | 7 | 7 | 7 |
+| `LDA [$0010,X]` | 11 | 11 | 11 |
+| `LDA $0200,PCR` | 9 | 9 | 9 |
+| `LDA [$0200,PCR]` | 12 | 12 | 12 |
+| `LDA [$0200]` | **9** | **9** | **12** |
+
+Seven of the eight are modes where the two candidate answers agree, so they
+calibrate the measurement. `[n16,PCR]` is in the list because it is a mode that
+really does cost 12, which is what makes the 9 on `[n]` a result rather than an
+artifact of a rig that could only ever report 9. Phosphor's own bus trace for
+`a6 9f` is 9 cycles in the same order the current core uses: postbyte, two
+offset reads, a `$FFFF` don't-care, two indirect reads, a second don't-care,
+then the data read.
+
+Phosphor is correct here and the vectors are not regenerated to match.
 
 The divergence scales with how often a random postbyte lands on `0x9F`
 (~4/1,000 per indexed opcode), so the exact per-opcode counts shift each time
