@@ -29,8 +29,8 @@ machine = "astdelux"
 frames = 1800
 shows = "Attract mode: GAME OVER over drifting asteroids, with the 2 COINS 1 CREDIT / CREDITS 0 coin prompt and the 1980 Atari copyright."
 size = [1024, 1024]
-frame = "sha256:526451d0349f18c966279e632bc4fdc79c7ea373f3d9735c2460855f69246171"
-vectors = "sha256:f8ab5a696c0ec2eb778427765ed4da143ef9366325cb00bc0d8b813dfb8dee0a"
+frame = "sha256:c8aaeccd5662c36a651890bafc11afb0e1b384dd1d7ee3a38937b68f040e2398"
+vectors = "sha256:0db794f5086eed233157acefc886740bed441e4fccfa0c1d126cc2188330c4fd"
 
 [[frame]]
 machine = "asteroid"
@@ -290,8 +290,8 @@ machine = "tempest"
 frames = 1800
 shows = "Attract mode: the blue tube seen head-on with a yellow flipper on its rim and coloured debris at the centre, the 10101 EJD high-score line over a red INSERT COINS, and the MCMLXXX ATARI / BONUS EVERY 20000 / CREDITS 0 / 1 COIN 1 PLAY lines. Upright since phosphor-emulator-iitc: the raster fallback no longer applies the cabinet rotation a second time."
 size = [727, 714]
-frame = "sha256:ca3477851779cc1df0bb04fd57d1b11443c065abc6d4f6f46cc1a62a00ead9e9"
-vectors = "sha256:4273902b7b11eda1dcce8b457902ca18fc81950c20d103412428f8fd11bba37d"
+frame = "sha256:adfa670a794b101015c946ffd5eed7fc9a9b73bab89407efa45d1ad4a37aaae5"
+vectors = "sha256:6f5aab44070094d67771c8c423afcc6ab61238776b2f7ea7411ada9c5f5d9373"
 
 [[frame]]
 machine = "uniwars"

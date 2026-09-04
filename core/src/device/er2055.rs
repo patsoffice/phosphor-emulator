@@ -50,7 +50,12 @@ const CS2: u8 = 0x10;
 impl Er2055 {
     pub fn new() -> Self {
         Self {
-            rom_data: [0xFF; 64], // MAME defaults to 0xFF
+            // Powers on all zero, NOT all ones, and the difference is the whole
+            // reason high scores never worked. A table of 0xFF decodes as
+            // impossibly high scores, so nothing a player does ever qualifies,
+            // so the game never writes one, so the table stays 0xFF. Starting
+            // from zero, any score beats the table and the game writes.
+            rom_data: [0x00; 64],
             address: 0,
             data: 0,
             control_state: 0,
@@ -236,10 +241,16 @@ impl super::Device for Er2055 {
 mod tests {
     use super::*;
 
+    /// The power-on fill, which is not the erased state and must not be.
+    ///
+    /// Erase leaves 0xFF, so all-ones is a table the games read as impossibly
+    /// high scores: nothing qualifies, so nothing is ever saved, so it stays
+    /// that way. All-zero is what a reference implementation's saved NVRAM
+    /// holds, and it is what lets a first score qualify and be written.
     #[test]
-    fn new_defaults_to_ff() {
+    fn new_powers_on_all_zero() {
         let earom = Er2055::new();
-        assert!(earom.rom_data.iter().all(|&b| b == 0xFF));
+        assert!(earom.rom_data.iter().all(|&b| b == 0x00));
     }
 
     #[test]
@@ -265,13 +276,18 @@ mod tests {
     fn write_without_erase_is_destructive_and() {
         let mut earom = Er2055::new();
 
-        // Write 0xF0 to address 10
+        // Erase first: the part powers on all zero, and a write can only clear
+        // bits, so without an erase nothing can ever be stored.
         earom.set_address(10);
+        earom.set_control(true, true, false, true); // erase mode
+        assert_eq!(earom.rom_data[10], 0xFF);
+
+        // Write 0xF0
         earom.set_data(0xF0);
         earom.set_control(true, true, false, false); // write mode
         assert_eq!(earom.rom_data[10], 0xF0); // 0xFF & 0xF0
 
-        // Write 0x0F without erase — result is AND
+        // Write 0x0F without erasing again: the result is the AND.
         earom.set_data(0x0F);
         // Need to change state to trigger update_state again
         earom.set_control(true, true, true, false); // standby first
@@ -300,9 +316,10 @@ mod tests {
         let mut earom = Er2055::new();
         earom.set_address(0);
         earom.set_data(0x55);
-        // CS1=0 → not selected, write won't happen
-        earom.set_control(false, true, false, false);
-        assert_eq!(earom.rom_data[0], 0xFF); // unchanged
+        // CS1=0 → not selected, so neither the write nor an erase happens
+        earom.set_control(false, true, false, true); // would erase if selected
+        earom.set_control(false, true, false, false); // would write if selected
+        assert_eq!(earom.rom_data[0], 0x00); // unchanged from power-on
     }
 
     #[test]

@@ -492,8 +492,18 @@ impl Bus for AsteroidsDeluxeBus<'_> {
                 // POKEY: 0x2C00–0x2C0F
                 0x2C00..=0x2C0F => self.pokey.read(addr & 0x0F),
 
-                // EAROM data read: 0x2C40–0x2C7F
-                0x2C40..=0x2C7F => self.earom.read(addr & 0x3F),
+                // EAROM data read: 0x2C40-0x2C7F returns the DATA REGISTER, not
+                // the storage array at the address in the low bits.
+                //
+                // The game's read cycle, traced off the running ROM, is: latch
+                // the address with a write to 0x3200+n, pulse the control port
+                // 0x08 / 0x09 / 0x08 so the falling clock loads the register,
+                // then read 0x2C40 -- offset ZERO, whatever n was. Indexing the
+                // array by the low address bits therefore returned rom[0] for
+                // every entry in the table, which is invisible while the array
+                // is uniform (it powers on all 0xFF) and wrong the moment it is
+                // not. `tempest.rs` had this right and this board did not.
+                0x2C40..=0x2C7F => self.earom.data(),
 
                 _ => 0,
             },
@@ -530,9 +540,21 @@ impl Bus for AsteroidsDeluxeBus<'_> {
                 // EAROM control: 0x3A00
                 // Bit 0: CK (clock), Bit 1: !C1, Bit 2: C2, Bit 3: CS1
                 0x3A00 => {
+                    // Bit 0 CK, bit 2 inverted is C1, bit 1 is C2, bit 3 CS1 --
+                    // the same assignment `tempest.rs` uses, and NOT the one
+                    // this board carried, which had C1 and C2 the other way up.
+                    //
+                    // The swap is invisible on a read, since the game holds both
+                    // bits low and either inversion then gives C1 = 1. It
+                    // decides write from erase, so only a save exercised it, and
+                    // a save is what exposed it: after a high score the EAROM
+                    // held 0xFF across exactly the 21 cells the table occupies,
+                    // which is the erase value. The erase landed and the write
+                    // did not, because the game's write value has bit 2 set and
+                    // bit 1 clear, which the old decode read as standby.
                     let clock = data & 0x01 != 0;
-                    let c1 = data & 0x02 == 0; // bit 1 inverted
-                    let c2 = data & 0x04 != 0; // bit 2
+                    let c1 = data & 0x04 == 0;
+                    let c2 = data & 0x02 != 0;
                     let cs1 = data & 0x08 != 0;
                     self.earom.write_control(clock, cs1, c1, c2);
                 }
@@ -1265,29 +1287,74 @@ mod tests {
         assert_eq!(sys2.board.map.region_data(Region::VectorRom)[0], 0x00);
     }
 
+    /// The EAROM read cycle exactly as the game drives it, which is the thing
+    /// that was broken: the port hands back the data register, and the address
+    /// only ever reaches the chip through the 0x3200 latch.
+    ///
+    /// Traced off the running ROM. For each entry it wants, the game writes the
+    /// address to 0x3200+n, pulses 0x3A00 with 0x08 / 0x09 / 0x08 so the falling
+    /// clock loads the register, and then reads 0x2C40 -- offset zero, whatever
+    /// n was. Indexing the array by the read address returned rom[0] every time.
+    #[test]
+    fn the_earom_read_cycle_returns_the_addressed_byte() {
+        let mut sys = AsteroidsDeluxeSystem::new();
+        // A pattern where every cell differs, so returning the wrong one shows.
+        let mut table = [0u8; 64];
+        for (i, b) in table.iter_mut().enumerate() {
+            *b = i as u8 ^ 0x5A;
+        }
+        sys.earom.load_from(&table);
+
+        let read_entry = |sys: &mut AsteroidsDeluxeSystem, n: u16| -> u8 {
+            sys.bus_write(BusMaster::Cpu(0), 0x3200 + n, 0x08);
+            sys.bus_write(BusMaster::Cpu(0), 0x3A00, 0x08);
+            sys.bus_write(BusMaster::Cpu(0), 0x3A00, 0x09);
+            sys.bus_write(BusMaster::Cpu(0), 0x3A00, 0x08);
+            let got = sys.bus_read(BusMaster::Cpu(0), 0x2C40);
+            sys.bus_write(BusMaster::Cpu(0), 0x3A00, 0x00);
+            got
+        };
+
+        for n in [0u16, 1, 5, 20, 63] {
+            assert_eq!(
+                read_entry(&mut sys, n),
+                table[n as usize],
+                "EAROM entry {n}"
+            );
+        }
+
+        // The failure this replaces, stated as its own assertion: entry 0 and
+        // entry 20 must not read alike.
+        assert_ne!(read_entry(&mut sys, 0), read_entry(&mut sys, 20));
+    }
+
     #[test]
     fn earom_write_read() {
         let mut sys = AsteroidsDeluxeSystem::new();
 
-        // Latch address 0x05 with data 0xAB
-        sys.bus_write(BusMaster::Cpu(0), 0x3205, 0xAB);
+        // $3A00 bits: 0 = CK, 1 = C2, 2 = C1 inverted, 3 = CS1. So with CS1
+        // held, 0x08 is read, 0x0C is write and 0x0E is erase.
+        //
+        // This test used to assert the OTHER assignment, and passed against
+        // code that had the same two bits swapped, so the pair agreed with each
+        // other and not with the board. What broke the tie was a save on the
+        // running game leaving 0xFF, the erase value, across the whole table.
+        sys.bus_write(BusMaster::Cpu(0), 0x3205, 0xAB); // latch address 5, data
 
-        // Astdelux $3A00 bits: 0=CK, 1=!C1, 2=C2, 3=CS1
+        sys.bus_write(BusMaster::Cpu(0), 0x3A00, 0x0F); // erase, clock high
+        sys.bus_write(BusMaster::Cpu(0), 0x3A00, 0x0E); // erase, clock low
+        assert_eq!(sys.earom.read(5), 0xFF, "erase leaves all ones");
 
-        // Erase address 5: C1=0(bit1=1), C2=1(bit2=1), CS1=1(bit3=1)
-        sys.bus_write(BusMaster::Cpu(0), 0x3A00, 0x0F); // clock high
-        sys.bus_write(BusMaster::Cpu(0), 0x3A00, 0x0E); // clock low
+        sys.bus_write(BusMaster::Cpu(0), 0x3A00, 0x0D); // write, clock high
+        sys.bus_write(BusMaster::Cpu(0), 0x3A00, 0x0C); // write, clock low
+        assert_eq!(
+            sys.earom.read(5),
+            0xAB,
+            "the write must land; leaving 0xFF here is the high-score bug"
+        );
 
-        // Write 0xAB: C1=0(bit1=1), C2=0(bit2=0), CS1=1(bit3=1)
-        sys.bus_write(BusMaster::Cpu(0), 0x3A00, 0x0B); // clock high
-        sys.bus_write(BusMaster::Cpu(0), 0x3A00, 0x0A); // clock low
-
-        // Read: C1=1(bit1=0), CS1=1(bit3=1), falling edge loads data register
-        sys.bus_write(BusMaster::Cpu(0), 0x3A00, 0x09); // clock high
-        sys.bus_write(BusMaster::Cpu(0), 0x3A00, 0x08); // falling edge → read
-
-        // Read data register
-        let val = sys.bus_read(BusMaster::Cpu(0), 0x2C45);
-        assert_eq!(val, 0xAB);
+        sys.bus_write(BusMaster::Cpu(0), 0x3A00, 0x09); // read, clock high
+        sys.bus_write(BusMaster::Cpu(0), 0x3A00, 0x08); // falling edge loads it
+        assert_eq!(sys.bus_read(BusMaster::Cpu(0), 0x2C40), 0xAB);
     }
 }
