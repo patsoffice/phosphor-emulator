@@ -166,7 +166,7 @@ const STARWARS_CONTROLS: &[InputControl] = &[
             direction: Direction::Up,
         },
         player: Some(1),
-        default_bindings: crate::input_defaults::P1_UP,
+        default_bindings: crate::input_defaults::P1_UP_NO_STICK,
     },
     InputControl {
         id: InputId(INPUT_YOKE_DOWN as u16),
@@ -176,7 +176,7 @@ const STARWARS_CONTROLS: &[InputControl] = &[
             direction: Direction::Down,
         },
         player: Some(1),
-        default_bindings: crate::input_defaults::P1_DOWN,
+        default_bindings: crate::input_defaults::P1_DOWN_NO_STICK,
     },
     InputControl {
         id: InputId(INPUT_YOKE_LEFT as u16),
@@ -186,7 +186,7 @@ const STARWARS_CONTROLS: &[InputControl] = &[
             direction: Direction::Left,
         },
         player: Some(1),
-        default_bindings: crate::input_defaults::P1_LEFT,
+        default_bindings: crate::input_defaults::P1_LEFT_NO_STICK,
     },
     InputControl {
         id: InputId(INPUT_YOKE_RIGHT as u16),
@@ -196,7 +196,7 @@ const STARWARS_CONTROLS: &[InputControl] = &[
             direction: Direction::Right,
         },
         player: Some(1),
-        default_bindings: crate::input_defaults::P1_RIGHT,
+        default_bindings: crate::input_defaults::P1_RIGHT_NO_STICK,
     },
     InputControl {
         id: CTRL_YOKE_X,
@@ -206,12 +206,17 @@ const STARWARS_CONTROLS: &[InputControl] = &[
             axis: AnalogAxisKind::X,
         },
         player: Some(1),
-        // Right stick, not left: the shared direction defaults (P1_LEFT/RIGHT)
-        // already bind LeftX as signed digital, and those assign the yoke
-        // absolutely — one stick driving both would fight itself.
+        // THE LEFT STICK, because that is the stick a flight yoke is. It used
+        // to be the right one, to dodge the shared P1_LEFT/RIGHT defaults which
+        // bind LeftX as signed digital and drive the same axis through
+        // `set_held`, full deflection or nothing. Dodging it left the yoke
+        // reading as eight directions under the stick players actually use,
+        // with the analog range parked on a stick nobody reaches for. The
+        // digital controls now use the `_NO_STICK` defaults instead, so the
+        // left stick is free and this axis owns it.
         default_bindings: &[
             DefaultBinding::Mouse(MouseControl::AxisX),
-            DefaultBinding::Pad(PadControl::FullAxis(PadAxis::RightX)),
+            DefaultBinding::Pad(PadControl::FullAxis(PadAxis::LeftX)),
         ],
     },
     InputControl {
@@ -224,7 +229,7 @@ const STARWARS_CONTROLS: &[InputControl] = &[
         player: Some(1),
         default_bindings: &[
             DefaultBinding::Mouse(MouseControl::AxisY),
-            DefaultBinding::Pad(PadControl::FullAxis(PadAxis::RightY)),
+            DefaultBinding::Pad(PadControl::FullAxis(PadAxis::LeftY)),
         ],
     },
 ];

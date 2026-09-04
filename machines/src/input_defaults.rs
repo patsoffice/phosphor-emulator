@@ -38,6 +38,20 @@ pub const P1_DOWN: &[D] = &[
     D::Pad(P::Axis(PA::LeftY, AxisSign::Positive)),
 ];
 
+// Player 1 directions for a machine whose real control is ANALOG: the same keys
+// and D-pad as above, deliberately WITHOUT the left analog stick.
+//
+// On those boards the stick belongs to the analog axis control, which assigns
+// the ADC absolutely. Binding it here as well puts both on one physical axis,
+// and the digital path wins by snapping the ADC to its endpoints: the stick
+// reads as eight directions and the analog range is unreachable. Give the axis
+// control `PadControl::FullAxis(PadAxis::LeftX/LeftY)` and use these for the
+// keyboard and D-pad fallback. See `starwars.rs` and `foodf.rs`.
+pub const P1_LEFT_NO_STICK: &[D] = &[D::Key(K::Left), D::Pad(P::Button(PB::DPadLeft))];
+pub const P1_RIGHT_NO_STICK: &[D] = &[D::Key(K::Right), D::Pad(P::Button(PB::DPadRight))];
+pub const P1_UP_NO_STICK: &[D] = &[D::Key(K::Up), D::Pad(P::Button(PB::DPadUp))];
+pub const P1_DOWN_NO_STICK: &[D] = &[D::Key(K::Down), D::Pad(P::Button(PB::DPadDown))];
+
 // Player 2 joystick directions: WASD-style keys, plus the same pad controls
 // player 1 gets. The frontend scopes pad bindings to the owning player's slot,
 // so these reach player 2's controller rather than fighting player 1's.

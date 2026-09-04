@@ -63,7 +63,8 @@ use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
     ActionRole, AnalogAxisKind, AudioSource, DefaultBinding, DipApplyTiming, DipChoice, DipOption,
     DipSwitchBank, Direction, InputConfigurable, InputControl, InputEvent, InputId, InputKind,
-    KeyId, MachineCore, MouseControl, Nvram, Profilable, Renderable, SaveState,
+    KeyId, MachineCore, MouseControl, Nvram, PadAxis, PadControl, Profilable, Renderable,
+    SaveState,
 };
 use phosphor_core::core::{AccessKind, AddressSpace32};
 use phosphor_core::core::{Bus, BusMaster, TimingConfig};
@@ -367,7 +368,7 @@ const FOODF_CONTROLS: &[InputControl] = &[
             direction: Direction::Left,
         },
         player: Some(1),
-        default_bindings: crate::input_defaults::P1_LEFT,
+        default_bindings: crate::input_defaults::P1_LEFT_NO_STICK,
     },
     InputControl {
         id: InputId(INPUT_P1_RIGHT as u16),
@@ -377,7 +378,7 @@ const FOODF_CONTROLS: &[InputControl] = &[
             direction: Direction::Right,
         },
         player: Some(1),
-        default_bindings: crate::input_defaults::P1_RIGHT,
+        default_bindings: crate::input_defaults::P1_RIGHT_NO_STICK,
     },
     InputControl {
         id: InputId(INPUT_P1_UP as u16),
@@ -387,7 +388,7 @@ const FOODF_CONTROLS: &[InputControl] = &[
             direction: Direction::Up,
         },
         player: Some(1),
-        default_bindings: crate::input_defaults::P1_UP,
+        default_bindings: crate::input_defaults::P1_UP_NO_STICK,
     },
     InputControl {
         id: InputId(INPUT_P1_DOWN as u16),
@@ -397,7 +398,7 @@ const FOODF_CONTROLS: &[InputControl] = &[
             direction: Direction::Down,
         },
         player: Some(1),
-        default_bindings: crate::input_defaults::P1_DOWN,
+        default_bindings: crate::input_defaults::P1_DOWN_NO_STICK,
     },
     InputControl {
         id: InputId(INPUT_SELFTEST as u16),
@@ -415,7 +416,20 @@ const FOODF_CONTROLS: &[InputControl] = &[
             axis: AnalogAxisKind::X,
         },
         player: Some(1),
-        default_bindings: &[DefaultBinding::Mouse(MouseControl::AxisX)],
+        // THE LEFT STICK, because that is the stick this board's control is.
+        // Food Fight's is a true analog stick read through an ADC0809, so the
+        // pad's left stick assigns it directly and gets the whole range.
+        //
+        // Which is only possible because the digital directions below use the
+        // `_NO_STICK` defaults. The shared P1_LEFT/RIGHT bind LeftX as signed
+        // digital as well, and that path drives the SAME ADC channel through
+        // `update_p1_stick`, which produces only 0x00, 0x7F or 0xFF. With both
+        // on one axis the digital half wins and the stick reads as eight
+        // directions, which is what it did.
+        default_bindings: &[
+            DefaultBinding::Mouse(MouseControl::AxisX),
+            DefaultBinding::Pad(PadControl::FullAxis(PadAxis::LeftX)),
+        ],
     },
     InputControl {
         id: CTRL_P1_STICK_Y,
@@ -425,7 +439,10 @@ const FOODF_CONTROLS: &[InputControl] = &[
             axis: AnalogAxisKind::Y,
         },
         player: Some(1),
-        default_bindings: &[DefaultBinding::Mouse(MouseControl::AxisY)],
+        default_bindings: &[
+            DefaultBinding::Mouse(MouseControl::AxisY),
+            DefaultBinding::Pad(PadControl::FullAxis(PadAxis::LeftY)),
+        ],
     },
     InputControl {
         id: CTRL_P2_STICK_X,
@@ -1288,7 +1305,25 @@ impl InputConfigurable for FoodFightSystem {
                     apply(&mut self.board.stick[0], delta);
                 }
             }
-            InputEvent::Absolute { .. } => {}
+            // Pad stick sets an absolute position on the ADC channel. Center is
+            // 0x7F and both directions scale by the upper half-span, so full
+            // deflection reaches 0x00 and 0xFF, the same endpoints the digital
+            // direction keys drive. Without this arm a pad stick did nothing at
+            // all and the digital fallback was the only thing moving the stick.
+            InputEvent::Absolute { id, value } => {
+                let level = |v: f32| {
+                    ((0x7F as f32) + v.clamp(-1.0, 1.0) * 0x80 as f32).clamp(0.0, 255.0) as u8
+                };
+                if id == CTRL_P1_STICK_X {
+                    self.board.stick[3] = level(value);
+                } else if id == CTRL_P1_STICK_Y {
+                    self.board.stick[1] = level(value);
+                } else if id == CTRL_P2_STICK_X {
+                    self.board.stick[2] = level(value);
+                } else if id == CTRL_P2_STICK_Y {
+                    self.board.stick[0] = level(value);
+                }
+            }
         }
     }
 }
@@ -1503,6 +1538,85 @@ mod tests {
         let sys = FoodFightSystem::new();
         assert_eq!(sys.dip_bank_value(0), 0x00);
         crate::assert_dip_banks_valid(sys.dip_banks(), &[sys.dip_bank_value(0)]);
+    }
+
+    /// The stick is analog, and a pad stick must reach the whole ADC range.
+    ///
+    /// Absolute events used to be dropped on the floor, so the only thing that
+    /// ever moved the stick was the digital direction path, which produces
+    /// three values per axis. Two axes of three values is eight directions plus
+    /// center, which is what a real analog stick felt like on this board.
+    #[test]
+    fn a_pad_stick_reaches_positions_the_digital_path_cannot() {
+        let mut sys = FoodFightSystem::new();
+        let stick_x = |sys: &FoodFightSystem| sys.board.stick[3];
+
+        // Endpoints and center match what the direction keys drive.
+        for (value, expect) in [(-1.0, 0x00), (0.0, 0x7F), (1.0, 0xFF)] {
+            sys.handle_input(InputEvent::Absolute {
+                id: CTRL_P1_STICK_X,
+                value,
+            });
+            assert_eq!(stick_x(&sys), expect, "deflection {value}");
+        }
+
+        // And the range in between, which is the part the digital path cannot
+        // express at all. Four partial deflections, four distinct positions.
+        let mut seen = Vec::new();
+        for value in [-0.75, -0.25, 0.25, 0.75] {
+            sys.handle_input(InputEvent::Absolute {
+                id: CTRL_P1_STICK_X,
+                value,
+            });
+            seen.push(stick_x(&sys));
+        }
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(
+            seen.len(),
+            4,
+            "partial deflections must be distinct: {seen:?}"
+        );
+        assert!(seen.iter().all(|&v| v != 0x00 && v != 0x7F && v != 0xFF));
+    }
+
+    /// The keyboard and D-pad fallback is unchanged: both still drive the stick
+    /// to full deflection, because `_NO_STICK` drops only the analog axis from
+    /// those bindings and keeps the key and the D-pad button.
+    #[test]
+    fn the_digital_directions_still_deflect_fully() {
+        let mut sys = FoodFightSystem::new();
+        let press = |sys: &mut FoodFightSystem, id: u8, pressed: bool| {
+            sys.handle_input(InputEvent::Button {
+                id: InputId(id as u16),
+                pressed,
+            });
+        };
+        press(&mut sys, INPUT_P1_LEFT, true);
+        assert_eq!(sys.board.stick[3], 0x00);
+        press(&mut sys, INPUT_P1_LEFT, false);
+        assert_eq!(sys.board.stick[3], 0x7F);
+        press(&mut sys, INPUT_P1_RIGHT, true);
+        assert_eq!(sys.board.stick[3], 0xFF);
+
+        for control in ["p1_left", "p1_right", "p1_up", "p1_down"] {
+            let c = FOODF_CONTROLS
+                .iter()
+                .find(|c| c.stable_name == control)
+                .unwrap();
+            assert!(
+                c.default_bindings
+                    .iter()
+                    .any(|b| matches!(b, DefaultBinding::Pad(PadControl::Button(_)))),
+                "{control} keeps its D-pad button"
+            );
+            assert!(
+                !c.default_bindings
+                    .iter()
+                    .any(|b| matches!(b, DefaultBinding::Pad(PadControl::Axis(..)))),
+                "{control} must not also claim the analog stick"
+            );
+        }
     }
 
     #[test]
