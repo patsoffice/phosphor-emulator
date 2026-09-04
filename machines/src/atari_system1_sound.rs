@@ -121,8 +121,13 @@ impl Speech {
         self.clocks.hz(self.tms_dom) as u32
     }
 
-    /// Step the TMS at its (variable) master clock for one sound-CPU cycle.
+    /// Step the speech section for one sound-CPU cycle: the VIA at phase 2, and
+    /// the TMS at its own (variable) master clock.
+    ///
+    /// The 6522 shares the sound 6502's bus and takes its phase 2 from the same
+    /// clock, so its timers advance once per call rather than through a domain.
     fn tick(&mut self) {
+        self.via.tick();
         if self.clocks.tick(self.tms_dom) {
             self.tms.tick();
         }
