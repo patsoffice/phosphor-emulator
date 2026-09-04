@@ -5,7 +5,7 @@ name: CI
 # `check` is the gate. It runs on every push and pull request, must stay fast,
 # and is pinned to the same rustc the Nix dev shell provides so that "clippy is
 # clean locally" and "clippy is clean in CI" mean the same thing. It does NOT
-# fetch the SingleStepTests submodules; without them the six single-step
+# fetch the SingleStepTests submodules; without them the eight single-step
 # validators skip (see `require_test_data` in cpu-validation/src/lib.rs),
 # reporting success while validating nothing — which is fine here, and is
 # exactly why `validate` exists.
@@ -23,8 +23,8 @@ name: CI
 # red run means something real, and dependency updates are exactly when it
 # should be consulted. Same check locally: `nix develop -c cargo audit`.
 #
-# `validate` fetches the submodules, generates the M6800/M6809 vectors, and
-# runs all 7.1M of them with PHOSPHOR_REQUIRE_VECTORS set, so a missing set is
+# `validate` fetches the submodules, generates the four locally-produced vector
+# sets, and runs all 7.6M with PHOSPHOR_REQUIRE_VECTORS set, so a missing set is
 # a failure there rather than the skip it is everywhere else. It is scheduled
 # rather than per-push because the submodules are large and the run is long. A
 # permanently-skipping validator in `check` is only safe while `validate` is
@@ -152,7 +152,7 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
 
   validate:
-    name: CPU validation (7.1M vectors)
+    name: CPU validation (7.6M vectors)
     # Long and bandwidth-heavy; not worth running per push.
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
@@ -166,9 +166,11 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Generate M6800 and M6809 vectors
-        # These two suites are generated rather than vendored;
-        # cpu-validation/test_data is gitignored in full.
+      - name: Generate M6800, M6809, I8035 and MB88xx vectors
+        # These four suites are generated rather than vendored;
+        # cpu-validation/test_data is gitignored in full. Every generator here
+        # needs a line: the validators require their vectors in this job, so a
+        # suite with no generate step fails it rather than skipping quietly.
         #
         # No working-directory needed: the generators resolve their output
         # against CARGO_MANIFEST_DIR, so they write where the validators read
@@ -179,6 +181,8 @@ jobs:
         run: |
           cargo run --release --locked -p phosphor-cpu-validation --bin gen_m6800_tests -- all
           cargo run --release --locked -p phosphor-cpu-validation --bin gen_m6809_tests -- all
+          cargo run --release --locked -p phosphor-cpu-validation --bin gen_i8035_tests -- all
+          cargo run --release --locked -p phosphor-cpu-validation --bin gen_mb88xx_tests -- all
 
       - name: Run single-step validators
         # This job's whole value is that it does not skip, so require the

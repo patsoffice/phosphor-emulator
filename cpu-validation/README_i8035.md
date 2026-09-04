@@ -154,8 +154,19 @@ but excluded from test generation.
 
 ## Self-Validation
 
-Phosphor also validates against its own test vectors as a Rust integration test:
+Phosphor also validates against its own test vectors as a Rust integration test,
+`tests/i8035_single_step_test.rs`:
 
 ```bash
-cargo test -p phosphor-cpu-validation
+cargo test -p phosphor-cpu-validation --test i8035_single_step_test
 ```
+
+It replays every case, asserting registers, internal RAM, external memory, the
+tick count and the per-cycle bus trace, and reports failures per opcode file so
+one bad opcode does not hide the rest.
+
+Note what it is worth. The vectors come from the CPU they are replayed against,
+so generating and running them in one sitting makes most of it a round trip. Its
+value is that `test_data/` persists across commits, so a working copy checks new
+code against vectors the previous code produced. The oracle proper is the C++
+cross-validator above, which runs an unrelated core over the same files.

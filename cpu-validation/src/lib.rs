@@ -85,6 +85,133 @@ fn vectors_available(dir: &std::path::Path, how_to_obtain: &str, required: bool)
     false
 }
 
+// --- Vector suite harness ---
+
+/// Mismatches found while replaying one test case.
+///
+/// Collected rather than asserted so that a case reports every field that moved
+/// instead of only the first, which is the difference between "CC and the last
+/// two bus cycles" and three separate debugging rounds.
+#[derive(Default)]
+pub struct Mismatches(Vec<String>);
+
+impl Mismatches {
+    /// Record `actual` against `expected`, naming the field.
+    pub fn check<T: PartialEq + std::fmt::Debug>(
+        &mut self,
+        actual: T,
+        expected: T,
+        what: std::fmt::Arguments<'_>,
+    ) {
+        if actual != expected {
+            self.0
+                .push(format!("{what}: got {actual:?} expected {expected:?}"));
+        }
+    }
+
+    /// `None` when nothing mismatched, otherwise one line naming the case.
+    pub fn into_report(self, case_name: &str) -> Option<String> {
+        if self.0.is_empty() {
+            None
+        } else {
+            Some(format!("{case_name}: {}", self.0.join("; ")))
+        }
+    }
+}
+
+/// Replay every vector in a suite directory, reporting failures per opcode file.
+///
+/// `run_case` returns `None` for a pass and a description of the mismatches for
+/// a failure. Collecting rather than panicking on the first one is what keeps a
+/// single bad opcode from hiding every opcode that sorts after it, which matters
+/// when a suite is hundreds of files.
+///
+/// Returns without running anything when the vectors are absent and optional.
+/// See [`require_test_data`] for why that is a skip rather than a failure, and
+/// for the flag that turns it into one.
+pub fn run_vector_suite<T, F>(suite: &str, how_to_obtain: &str, mut run_case: F)
+where
+    T: serde::de::DeserializeOwned,
+    F: FnMut(&T) -> Option<String>,
+{
+    /// Failing cases quoted per opcode file; the rest are counted only.
+    const EXAMPLES_PER_FILE: usize = 3;
+
+    let dir = vector_dir(suite);
+    if !require_test_data(&dir, how_to_obtain) {
+        return;
+    }
+
+    let mut json_files: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("failed to read {}: {e}", dir.display()))
+        .filter_map(|entry| {
+            let path = entry.ok()?.path();
+            (path.extension().and_then(|e| e.to_str()) == Some("json")).then_some(path)
+        })
+        .collect();
+    json_files.sort();
+
+    // A directory that exists but holds no vectors would otherwise pass here
+    // for the same reason a missing one used to: nothing ran, and nothing said so.
+    assert!(
+        !json_files.is_empty(),
+        "no JSON vectors in {}: {how_to_obtain}",
+        dir.display()
+    );
+
+    let mut total_cases = 0;
+    // (opcode file stem, failed, total, first few descriptions)
+    let mut failing: Vec<(String, usize, usize, Vec<String>)> = Vec::new();
+
+    for path in &json_files {
+        let json = std::fs::read_to_string(path)
+            .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
+        let cases: Vec<T> = serde_json::from_str(&json)
+            .unwrap_or_else(|e| panic!("failed to parse {}: {e}", path.display()));
+        assert!(!cases.is_empty(), "{} holds no cases", path.display());
+
+        let mut failed = 0;
+        let mut examples = Vec::new();
+        for case in &cases {
+            if let Some(msg) = run_case(case) {
+                failed += 1;
+                if examples.len() < EXAMPLES_PER_FILE {
+                    examples.push(msg);
+                }
+            }
+        }
+        if failed > 0 {
+            let stem = path.file_stem().unwrap().to_string_lossy().into_owned();
+            failing.push((stem, failed, cases.len(), examples));
+        }
+        total_cases += cases.len();
+    }
+
+    if !failing.is_empty() {
+        let failed_cases: usize = failing.iter().map(|(_, n, _, _)| n).sum();
+        let mut report = format!(
+            "{} of {} opcode files failed ({failed_cases} of {total_cases} cases):\n",
+            failing.len(),
+            json_files.len(),
+        );
+        for (stem, failed, total, examples) in &failing {
+            report.push_str(&format!("\n  {stem}: {failed}/{total} failed\n"));
+            for example in examples {
+                report.push_str(&format!("    {example}\n"));
+            }
+            if *failed > examples.len() {
+                report.push_str(&format!("    ... and {} more\n", failed - examples.len()));
+            }
+        }
+        panic!("{report}");
+    }
+
+    eprintln!(
+        "Validated {total_cases} tests across {} opcode files",
+        json_files.len()
+    );
+}
+
 // --- TracingBus: flat 64KB memory with cycle-by-cycle recording ---
 
 #[derive(Clone, Copy, Debug, PartialEq)]
