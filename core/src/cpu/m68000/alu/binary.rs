@@ -15,9 +15,20 @@
 //! handlers here run.
 
 use super::super::M68000;
-use super::super::addressing::{AccessResult, Ea, Size, ea_cycles, sext16};
+use super::super::addressing::{AccessResult, Ea, Size, ea_internal, sext16};
 use super::super::flags::SrFlag;
 use crate::core::{Bus16, BusMaster};
+
+/// Internal time for the `Dn ⟵ Dn op <ea>` forms.
+///
+/// Everything these instructions do on the bus is counted as it happens, so
+/// what is left to declare is the time off it: a long ALU pass takes two clocks
+/// a word one does not, plus whatever the addressing mode spends computing its
+/// address. The destination forms need no equivalent, because their extra write
+/// is a transfer and pays for itself.
+fn src_form_internal(size: Size, mode: u8, reg: u8) -> u32 {
+    (if size == Size::Long { 2 } else { 0 }) + ea_internal(mode, reg)
+}
 
 /// Decode the two-bit size field used by opmodes and immediates
 /// (00 = byte, 01 = word, 10 = long; 11 is never a size).
@@ -72,7 +83,7 @@ impl M68000 {
                 let size = size_from_bits(opmode).unwrap();
                 // Byte reads from An are illegal encodings
                 if size == Size::Byte && ea_mode == 1 {
-                    self.finish(4);
+                    self.finish_from_bus(0);
                     return Ok(());
                 }
                 let src = self.decode_ea(bus, master, ea_mode, ea_reg, size);
@@ -86,15 +97,14 @@ impl M68000 {
                 self.set_flag(SrFlag::X, self.flag_is_set(SrFlag::C));
                 self.d[dn] = (a & !size.mask()) | result;
 
-                let base = if size == Size::Long { 6 } else { 4 };
-                self.finish(base + ea_cycles(ea_mode, ea_reg, size));
+                self.finish_from_bus(src_form_internal(size, ea_mode, ea_reg));
             }
             // <ea> ⟵ <ea> op Dn (memory-alterable destinations only;
             // Dn/An here encode ADDX/SUBX, routed by the caller)
             4..=6 => {
                 let size = size_from_bits(opmode).unwrap();
                 if ea_mode < 2 || (ea_mode == 7 && ea_reg >= 2) {
-                    self.finish(4); // illegal destination
+                    self.finish_from_bus(0); // illegal destination
                     return Ok(());
                 }
                 let dst = self.decode_ea(bus, master, ea_mode, ea_reg, size);
@@ -108,8 +118,9 @@ impl M68000 {
                 self.set_flag(SrFlag::X, self.flag_is_set(SrFlag::C));
                 self.ea_write(bus, master, dst, size, result)?;
 
-                let base = if size == Size::Long { 12 } else { 8 };
-                self.finish(base + ea_cycles(ea_mode, ea_reg, size));
+                // The read and the write are both counted transfers, so this
+                // form declares only the mode's own address arithmetic.
+                self.finish_from_bus(ea_internal(ea_mode, ea_reg));
             }
             // ADDA/SUBA: An ⟵ An op <ea> (word sign-extends, no flags)
             _ => {
@@ -128,8 +139,11 @@ impl M68000 {
                     a.wrapping_sub(value)
                 };
 
-                let base = if size == Size::Long { 6 } else { 8 };
-                self.finish(base + ea_cycles(ea_mode, ea_reg, size));
+                // ADDA/SUBA hold the full 32-bit register whatever the operand
+                // size, and a word source costs two clocks more off the bus
+                // than a long one: it has to be sign-extended before the add.
+                let alu = if size == Size::Long { 2 } else { 4 };
+                self.finish_from_bus(alu + ea_internal(ea_mode, ea_reg));
             }
         }
         Ok(())
@@ -156,15 +170,14 @@ impl M68000 {
             0..=2 => {
                 let size = size_from_bits(opmode).unwrap();
                 if size == Size::Byte && ea_mode == 1 {
-                    self.finish(4); // byte read from An is illegal
+                    self.finish_from_bus(0); // byte read from An is illegal
                     return Ok(());
                 }
                 let src = self.decode_ea(bus, master, ea_mode, ea_reg, size);
                 let b = self.ea_read(bus, master, src, size)?;
                 self.sub_with_flags(size, self.d[dn], b);
 
-                let base = if size == Size::Long { 6 } else { 4 };
-                self.finish(base + ea_cycles(ea_mode, ea_reg, size));
+                self.finish_from_bus(src_form_internal(size, ea_mode, ea_reg));
             }
             3 | 7 => {
                 let size = if opmode == 3 { Size::Word } else { Size::Long };
@@ -177,10 +190,12 @@ impl M68000 {
                 };
                 self.sub_with_flags(Size::Long, self.a[dn], value);
 
-                self.finish(6 + ea_cycles(ea_mode, ea_reg, size));
+                // CMPA compares at the full width whatever the source size, and
+                // pays two clocks for that pass however the operand arrived.
+                self.finish_from_bus(2 + ea_internal(ea_mode, ea_reg));
             }
             // CMPM / EOR — routed by execute_instruction before this runs
-            _ => self.finish(4),
+            _ => self.finish_from_bus(0),
         }
         Ok(())
     }
@@ -209,7 +224,7 @@ impl M68000 {
             0..=2 => {
                 let size = size_from_bits(opmode).unwrap();
                 if ea_mode == 1 {
-                    self.finish(4);
+                    self.finish_from_bus(0);
                     return Ok(());
                 }
                 let src = self.decode_ea(bus, master, ea_mode, ea_reg, size);
@@ -218,8 +233,7 @@ impl M68000 {
                 self.set_flags_logical(size, result);
                 self.d[dn] = (self.d[dn] & !size.mask()) | result;
 
-                let base = if size == Size::Long { 6 } else { 4 };
-                self.finish(base + ea_cycles(ea_mode, ea_reg, size));
+                self.finish_from_bus(src_form_internal(size, ea_mode, ea_reg));
             }
             // <ea> ⟵ <ea> op Dn. Only EOR allows a Dn destination here
             // (AND/OR register destinations encode ABCD/SBCD/EXG and are
@@ -228,7 +242,7 @@ impl M68000 {
                 let size = size_from_bits(opmode).unwrap();
                 let dn_dest_ok = op == LogicalOp::Eor && ea_mode == 0;
                 if (ea_mode < 2 && !dn_dest_ok) || (ea_mode == 7 && ea_reg >= 2) {
-                    self.finish(4);
+                    self.finish_from_bus(0);
                     return Ok(());
                 }
                 let dst = self.decode_ea(bus, master, ea_mode, ea_reg, size);
@@ -237,17 +251,20 @@ impl M68000 {
                 self.set_flags_logical(size, result);
                 self.ea_write(bus, master, dst, size, result)?;
 
-                let base = if ea_mode == 0 {
-                    if size == Size::Long { 8 } else { 4 }
-                } else if size == Size::Long {
-                    12
+                // EOR is the one logical instruction with a register
+                // destination, and it makes no operand transfer at all there:
+                // its whole cost beyond the opcode fetch is the ALU pass, four
+                // clocks at long and none at word. A memory destination reads
+                // and writes, and both are counted.
+                let internal = if ea_mode == 0 {
+                    if size == Size::Long { 4 } else { 0 }
                 } else {
-                    8
+                    ea_internal(ea_mode, ea_reg)
                 };
-                self.finish(base + ea_cycles(ea_mode, ea_reg, size));
+                self.finish_from_bus(internal);
             }
             // Opmodes 011/111 (MULx/DIVx) are routed by the caller
-            _ => self.finish(4),
+            _ => self.finish_from_bus(0),
         }
         Ok(())
     }
@@ -282,7 +299,9 @@ impl M68000 {
             };
             let dst = Ea::Mem(self.a[rx as usize]);
             self.ea_write(bus, master, dst, size, result)?;
-            self.finish(if size == Size::Long { 30 } else { 18 });
+            // Two operand reads and a write, all counted. The two clocks left
+            // are the predecrement, charged once however wide the operands are.
+            self.finish_from_bus(2);
         } else {
             let a = self.d[rx as usize];
             let b = self.d[ry as usize];
@@ -292,7 +311,9 @@ impl M68000 {
                 self.subx_with_flags(size, a, b)
             };
             self.d[rx as usize] = (a & !size.mask()) | result;
-            self.finish(if size == Size::Long { 8 } else { 4 });
+            // Registers only: the opcode fetch is the whole bus cost, and a
+            // long pass adds four clocks the word one does not.
+            self.finish_from_bus(if size == Size::Long { 4 } else { 0 });
         }
         Ok(())
     }
@@ -341,7 +362,9 @@ impl M68000 {
         let dst = self.decode_ea(bus, master, 3, ax, size);
         let a = self.ea_read(bus, master, dst, size)?;
         self.sub_with_flags(size, a, b);
-        self.finish(if size == Size::Long { 20 } else { 12 });
+        // Two postincrement reads and nothing else: no write, and no address
+        // arithmetic off the bus, so the transfers are the whole cost.
+        self.finish_from_bus(0);
         Ok(())
     }
 
@@ -432,7 +455,8 @@ impl M68000 {
                 self.sbcd_core(b, a)
             };
             self.ea_write(bus, master, dst, Size::Byte, result)?;
-            self.finish(18);
+            // Two reads and a write, plus the predecrement's two clocks.
+            self.finish_from_bus(2);
         } else {
             let a = self.d[rx as usize];
             let b = self.d[ry as usize];
@@ -442,7 +466,9 @@ impl M68000 {
                 self.sbcd_core(b, a)
             };
             self.d[rx as usize] = (a & !0xFF) | result;
-            self.finish(6);
+            // Registers only: the opcode fetch, plus two clocks in the decimal
+            // correction adder.
+            self.finish_from_bus(2);
         }
         Ok(())
     }
@@ -461,7 +487,7 @@ impl M68000 {
         let ea_mode = ((opcode >> 3) & 7) as u8;
         let ea_reg = (opcode & 7) as u8;
         if ea_mode == 1 || (ea_mode == 7 && ea_reg >= 2) {
-            self.finish(4);
+            self.finish_from_bus(0);
             return Ok(());
         }
         let ea = self.decode_ea(bus, master, ea_mode, ea_reg, Size::Byte);
@@ -469,8 +495,15 @@ impl M68000 {
         let result = self.sbcd_core(operand, 0);
         self.ea_write(bus, master, ea, Size::Byte, result)?;
 
-        let base = if ea_mode == 0 { 6 } else { 8 };
-        self.finish(base + ea_cycles(ea_mode, ea_reg, Size::Byte));
+        // A register destination makes no operand transfer, so its two clocks
+        // in the correction adder are all that is left; a memory one reads and
+        // writes, both counted, leaving only the mode's address arithmetic.
+        let internal = if ea_mode == 0 {
+            2
+        } else {
+            ea_internal(ea_mode, ea_reg)
+        };
+        self.finish_from_bus(internal);
         Ok(())
     }
 
@@ -486,19 +519,21 @@ impl M68000 {
         master: BusMaster,
     ) -> AccessResult<()> {
         let Some(size) = size_from_bits(opcode >> 6) else {
-            self.finish(4); // TAS / ILLEGAL are routed by the caller
+            self.finish_from_bus(0); // TAS / ILLEGAL are routed by the caller
             return Ok(());
         };
         let ea_mode = ((opcode >> 3) & 7) as u8;
         let ea_reg = (opcode & 7) as u8;
         if ea_mode == 1 || (ea_mode == 7 && ea_reg >= 2) {
-            self.finish(4);
+            self.finish_from_bus(0);
             return Ok(());
         }
         let ea = self.decode_ea(bus, master, ea_mode, ea_reg, size);
         let value = self.ea_read(bus, master, ea, size)?;
         self.set_flags_logical(size, value);
-        self.finish(4 + ea_cycles(ea_mode, ea_reg, size));
+        // TST reads and sets flags: one operand transfer, no write, nothing
+        // off the bus beyond the mode's own address arithmetic.
+        self.finish_from_bus(ea_internal(ea_mode, ea_reg));
         Ok(())
     }
 
@@ -572,23 +607,22 @@ impl M68000 {
             }
         }
 
-        let base = match (op, mem, long) {
-            (0x0C00, false, false) => 8,
-            (0x0C00, false, true) => 14,
-            (0x0C00, true, false) => 8,
-            (0x0C00, true, true) => 12,
-            (_, false, false) => 8,
-            (_, false, true) => 16,
-            (_, true, false) => 12,
-            (_, true, true) => 20,
+        // The immediate's extension words and the destination's accesses are
+        // all counted transfers. What is left is the ALU pass, and it shows
+        // only at long size with a register destination: CMPI discards its
+        // result and pays two clocks, the rest write theirs back and pay four.
+        // A memory destination hides the pass inside the transfers it is
+        // already making, so nothing is left but the mode's own arithmetic.
+        let internal = if mem {
+            ea_internal(ea_mode, ea_reg)
+        } else if !long {
+            0
+        } else if op == 0x0C00 {
+            2
+        } else {
+            4
         };
-        self.finish(
-            base + if mem {
-                ea_cycles(ea_mode, ea_reg, size)
-            } else {
-                0
-            },
-        );
+        self.finish_from_bus(internal);
         Ok(true)
     }
 
@@ -616,7 +650,7 @@ impl M68000 {
 
         if ea_mode == 1 {
             if size == Size::Byte {
-                self.finish(4); // ADDQ.b to An is illegal
+                self.finish_from_bus(0); // ADDQ.b to An is illegal
                 return Ok(());
             }
             let reg = ea_reg as usize;
@@ -625,11 +659,13 @@ impl M68000 {
             } else {
                 self.a[reg].wrapping_add(data)
             };
-            self.finish(8);
+            // An destination: no operand transfer, and the full-width add costs
+            // four clocks off the bus whichever size the opcode names.
+            self.finish_from_bus(4);
             return Ok(());
         }
         if ea_mode == 7 && ea_reg >= 2 {
-            self.finish(4); // PC-relative/immediate destinations are illegal
+            self.finish_from_bus(0); // PC-relative/immediate destinations are illegal
             return Ok(());
         }
 
@@ -643,19 +679,15 @@ impl M68000 {
         self.set_flag(SrFlag::X, self.flag_is_set(SrFlag::C));
         self.ea_write(bus, master, dst, size, result)?;
 
-        let base = match (ea_mode == 0, size == Size::Long) {
-            (true, false) => 4,
-            (true, true) => 8,
-            (false, false) => 8,
-            (false, true) => 12,
+        // A register destination makes no operand transfer, so only the long
+        // ALU pass shows; a memory one reads and writes, both counted, leaving
+        // the mode's address arithmetic.
+        let internal = if ea_mode == 0 {
+            if size == Size::Long { 4 } else { 0 }
+        } else {
+            ea_internal(ea_mode, ea_reg)
         };
-        self.finish(
-            base + if ea_mode == 0 {
-                0
-            } else {
-                ea_cycles(ea_mode, ea_reg, size)
-            },
-        );
+        self.finish_from_bus(internal);
         Ok(())
     }
 }
