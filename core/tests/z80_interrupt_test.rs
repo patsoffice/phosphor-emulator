@@ -1,5 +1,5 @@
 use phosphor_core::core::{BusMaster, BusMasterComponent};
-use phosphor_core::cpu::Cpu;
+use phosphor_core::cpu::CpuControl;
 use phosphor_core::cpu::z80::Z80;
 mod common;
 use common::TestBus;

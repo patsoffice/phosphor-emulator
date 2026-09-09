@@ -26,8 +26,8 @@ pub use registers::SegReg;
 use crate::core::bus::InterruptState;
 use crate::core::component::BusMasterComponent;
 use crate::core::{Bus, BusMaster};
-use crate::cpu::Cpu;
 use crate::cpu::state::CpuStateTrait;
+use crate::cpu::{Cpu, CpuControl};
 use crate::prelude::Saveable;
 
 /// The longest byte sequence the loader can be asked to hold.
@@ -4459,26 +4459,18 @@ impl I8088 {
 // Trait implementations
 // ---------------------------------------------------------------------------
 
-impl BusMasterComponent for I8088 {
+impl<B: Bus<Address = u32, Data = u8> + ?Sized> BusMasterComponent<B> for I8088 {
     type Address = u32;
     type Data = u8;
 
-    fn tick_with_bus<B: Bus<Address = u32, Data = u8> + ?Sized>(
-        &mut self,
-        bus: &mut B,
-        master: BusMaster,
-    ) -> bool {
+    fn tick_with_bus(&mut self, bus: &mut B, master: BusMaster) -> bool {
         self.execute_cycle(bus, master);
         self.retired
     }
 }
 
-impl Cpu for I8088 {
-    fn reset<B: Bus<Address = Self::Address, Data = Self::Data> + ?Sized>(
-        &mut self,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
+impl<B: Bus<Address = u32, Data = u8> + ?Sized> Cpu<B> for I8088 {
+    fn reset(&mut self, bus: &mut B, master: BusMaster) {
         self.ax = 0;
         self.bx = 0;
         self.cx = 0;
@@ -4517,7 +4509,9 @@ impl Cpu for I8088 {
         let _first = bus.read(master, 0xFFFF0);
         // IP stays at 0; CS stays at 0xFFFF. Execution will proceed from FFFF:0000.
     }
+}
 
+impl CpuControl for I8088 {
     fn signal_interrupt(&mut self, _int: InterruptState) {
         // External interrupt lines are handled in check_interrupts via the bus
     }

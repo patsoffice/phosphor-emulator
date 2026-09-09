@@ -9,7 +9,7 @@ mod unary;
 
 use crate::core::{Bus, BusMaster, bus::InterruptState, component::BusMasterComponent};
 use crate::cpu::{
-    Cpu,
+    Cpu, CpuControl,
     state::{CpuStateTrait, M6502State},
 };
 use crate::prelude::Saveable;
@@ -606,33 +606,27 @@ impl M6502 {
     }
 }
 
-impl BusMasterComponent for M6502 {
+impl<B: Bus<Address = u16, Data = u8> + ?Sized> BusMasterComponent<B> for M6502 {
     type Address = u16;
     type Data = u8;
 
-    fn tick_with_bus<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        bus: &mut B,
-        master: BusMaster,
-    ) -> bool {
+    fn tick_with_bus(&mut self, bus: &mut B, master: BusMaster) -> bool {
         self.execute_cycle(bus, master);
         matches!(self.state, ExecState::Fetch)
     }
 }
 
-impl Cpu for M6502 {
-    fn reset<B: Bus<Address = Self::Address, Data = Self::Data> + ?Sized>(
-        &mut self,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
+impl<B: Bus<Address = u16, Data = u8> + ?Sized> Cpu<B> for M6502 {
+    fn reset(&mut self, bus: &mut B, master: BusMaster) {
         self.sp = 0xFD;
         self.p = 0x24;
         let lo = bus.read(master, 0xFFFC);
         let hi = bus.read(master, 0xFFFD);
         self.pc = u16::from_le_bytes([lo, hi]);
     }
+}
 
+impl CpuControl for M6502 {
     fn signal_interrupt(&mut self, _int: InterruptState) {}
 
     fn is_sleeping(&self) -> bool {

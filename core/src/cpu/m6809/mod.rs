@@ -7,7 +7,7 @@ mod transfer;
 
 use crate::core::{Bus, BusMaster, bus::InterruptState, component::BusMasterComponent};
 use crate::cpu::{
-    Cpu,
+    Cpu, CpuControl,
     state::{CpuStateTrait, M6809State},
 };
 use phosphor_macros::Saveable;
@@ -716,34 +716,28 @@ impl M6809 {
     }
 }
 
-impl BusMasterComponent for M6809 {
+impl<B: Bus<Address = u16, Data = u8> + ?Sized> BusMasterComponent<B> for M6809 {
     type Address = u16;
     type Data = u8;
 
-    fn tick_with_bus<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        bus: &mut B,
-        master: BusMaster,
-    ) -> bool {
+    fn tick_with_bus(&mut self, bus: &mut B, master: BusMaster) -> bool {
         self.execute_cycle(bus, master);
         // Return true if instruction boundary reached
         matches!(self.state, ExecState::Fetch)
     }
 }
 
-impl Cpu for M6809 {
-    fn reset<B: Bus<Address = Self::Address, Data = Self::Data> + ?Sized>(
-        &mut self,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
+impl<B: Bus<Address = u16, Data = u8> + ?Sized> Cpu<B> for M6809 {
+    fn reset(&mut self, bus: &mut B, master: BusMaster) {
         self.cc = CcFlag::I as u8 | CcFlag::F as u8; // IRQ/FIRQ masked
         let hi = bus.read(master, 0xFFFE);
         let lo = bus.read(master, 0xFFFF);
         self.pc = u16::from_be_bytes([hi, lo]);
         self.reset_cycles = RESET_SEQUENCE_CYCLES;
     }
+}
 
+impl CpuControl for M6809 {
     fn signal_interrupt(&mut self, _int: InterruptState) {
         // Latch interrupts for sampling at instruction boundary
     }

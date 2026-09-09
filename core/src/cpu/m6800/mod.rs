@@ -6,7 +6,7 @@ mod stack;
 
 use crate::core::{Bus, BusMaster, bus::InterruptState, component::BusMasterComponent};
 use crate::cpu::{
-    Cpu,
+    Cpu, CpuControl,
     state::{CpuStateTrait, M6800State},
 };
 use crate::prelude::Saveable;
@@ -695,32 +695,26 @@ impl M6800 {
     }
 }
 
-impl BusMasterComponent for M6800 {
+impl<B: Bus<Address = u16, Data = u8> + ?Sized> BusMasterComponent<B> for M6800 {
     type Address = u16;
     type Data = u8;
 
-    fn tick_with_bus<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        bus: &mut B,
-        master: BusMaster,
-    ) -> bool {
+    fn tick_with_bus(&mut self, bus: &mut B, master: BusMaster) -> bool {
         self.execute_cycle(bus, master);
         matches!(self.state, ExecState::Fetch)
     }
 }
 
-impl Cpu for M6800 {
-    fn reset<B: Bus<Address = Self::Address, Data = Self::Data> + ?Sized>(
-        &mut self,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
+impl<B: Bus<Address = u16, Data = u8> + ?Sized> Cpu<B> for M6800 {
+    fn reset(&mut self, bus: &mut B, master: BusMaster) {
         self.cc = CcFlag::I as u8 | CC_UNUSED_BITS;
         let hi = bus.read(master, 0xFFFE);
         let lo = bus.read(master, 0xFFFF);
         self.pc = u16::from_be_bytes([hi, lo]);
     }
+}
 
+impl CpuControl for M6800 {
     fn signal_interrupt(&mut self, _int: InterruptState) {
         // Latch interrupts for sampling at instruction boundary
     }

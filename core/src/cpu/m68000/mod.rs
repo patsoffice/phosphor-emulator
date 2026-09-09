@@ -27,7 +27,7 @@ pub use flags::SrFlag;
 
 use crate::core::{Bus, BusMaster, bus::InterruptState, component::BusMasterComponent};
 use crate::cpu::{
-    Cpu,
+    Cpu, CpuControl,
     state::{CpuStateTrait, M68000State},
 };
 use crate::prelude::Saveable;
@@ -425,26 +425,18 @@ impl M68000 {
 // Trait implementations
 // ---------------------------------------------------------------------------
 
-impl BusMasterComponent for M68000 {
+impl<B: Bus<Address = u32, Data = u16> + ?Sized> BusMasterComponent<B> for M68000 {
     type Address = u32;
     type Data = u16;
 
-    fn tick_with_bus<B: Bus<Address = u32, Data = u16> + ?Sized>(
-        &mut self,
-        bus: &mut B,
-        master: BusMaster,
-    ) -> bool {
+    fn tick_with_bus(&mut self, bus: &mut B, master: BusMaster) -> bool {
         self.execute_cycle(bus, master);
         matches!(self.state, ExecState::Fetch)
     }
 }
 
-impl Cpu for M68000 {
-    fn reset<B: Bus<Address = Self::Address, Data = Self::Data> + ?Sized>(
-        &mut self,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
+impl<B: Bus<Address = u32, Data = u16> + ?Sized> Cpu<B> for M68000 {
+    fn reset(&mut self, bus: &mut B, master: BusMaster) {
         // Reset enters supervisor mode with trace off and interrupts masked,
         // then loads SSP from vector 0 and PC from vector 1.
         self.sr = 0x2700; // S=1, T=0, interrupt mask = 7
@@ -460,7 +452,9 @@ impl Cpu for M68000 {
             .read_long_at(bus, master, 0x0000_0004)
             .expect("vector 1 is aligned");
     }
+}
 
+impl CpuControl for M68000 {
     fn signal_interrupt(&mut self, _int: InterruptState) {
         // Interrupts are sampled from the bus at instruction boundaries
         // (execute_cycle), not pushed through this entry point.

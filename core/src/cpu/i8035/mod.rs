@@ -5,7 +5,7 @@ mod load_store;
 
 use crate::core::{Bus, BusMaster, bus::InterruptState, component::BusMasterComponent};
 use crate::cpu::{
-    Cpu,
+    Cpu, CpuControl,
     state::{CpuStateTrait, I8035State},
 };
 
@@ -707,26 +707,18 @@ impl I8035 {
     }
 }
 
-impl BusMasterComponent for I8035 {
+impl<B: Bus<Address = u16, Data = u8> + ?Sized> BusMasterComponent<B> for I8035 {
     type Address = u16;
     type Data = u8;
 
-    fn tick_with_bus<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        bus: &mut B,
-        master: BusMaster,
-    ) -> bool {
+    fn tick_with_bus(&mut self, bus: &mut B, master: BusMaster) -> bool {
         self.execute_cycle(bus, master);
         matches!(self.state, ExecState::Fetch)
     }
 }
 
-impl Cpu for I8035 {
-    fn reset<B: Bus<Address = Self::Address, Data = Self::Data> + ?Sized>(
-        &mut self,
-        _bus: &mut B,
-        _master: BusMaster,
-    ) {
+impl<B: Bus<Address = u16, Data = u8> + ?Sized> Cpu<B> for I8035 {
+    fn reset(&mut self, _bus: &mut B, _master: BusMaster) {
         self.pc = 0;
         self.psw = 0;
         self.a11 = false;
@@ -742,7 +734,9 @@ impl Cpu for I8035 {
         self.timer_irq_pending = false;
         self.state = ExecState::Fetch;
     }
+}
 
+impl CpuControl for I8035 {
     fn signal_interrupt(&mut self, _int: InterruptState) {
         // Interrupts are sampled at instruction boundary via check_interrupts
     }

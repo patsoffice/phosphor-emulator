@@ -3,7 +3,6 @@
 //! Provides flat-bus systems with no I/O devices — just a CPU and RAM.
 
 use phosphor_core::core::bus::InterruptState;
-use phosphor_core::core::component::BusMasterComponent;
 use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
 use phosphor_core::cpu::i8035::I8035;
@@ -27,7 +26,7 @@ pub struct FlatBus16 {
 
 pub struct SimpleSystem<C>
 where
-    C: Cpu + BusMasterComponent<Address = u16, Data = u8> + 'static,
+    C: Cpu<FlatBus16> + 'static,
 {
     pub cpu: C,
     bus: FlatBus16,
@@ -36,7 +35,7 @@ where
 
 impl<C> Default for SimpleSystem<C>
 where
-    C: Cpu + Default + BusMasterComponent<Address = u16, Data = u8> + 'static,
+    C: Cpu<FlatBus16> + Default + 'static,
 {
     fn default() -> Self {
         Self::new()
@@ -45,7 +44,7 @@ where
 
 impl<C> SimpleSystem<C>
 where
-    C: Cpu + Default + BusMasterComponent<Address = u16, Data = u8> + 'static,
+    C: Cpu<FlatBus16> + Default + 'static,
 {
     pub fn new() -> Self {
         Self {
@@ -58,7 +57,7 @@ where
 
 impl<C> SimpleSystem<C>
 where
-    C: Cpu + BusMasterComponent<Address = u16, Data = u8> + 'static,
+    C: Cpu<FlatBus16> + 'static,
 {
     pub fn tick(&mut self) {
         self.cpu.tick_with_bus(&mut self.bus, BusMaster::Cpu(0));
@@ -137,7 +136,7 @@ pub struct FlatBus32 {
 
 pub struct SimpleSystem32<C>
 where
-    C: Cpu + BusMasterComponent<Address = u32, Data = u8> + 'static,
+    C: Cpu<FlatBus32> + 'static,
 {
     pub cpu: C,
     bus: FlatBus32,
@@ -146,7 +145,7 @@ where
 
 impl<C> Default for SimpleSystem32<C>
 where
-    C: Cpu + Default + BusMasterComponent<Address = u32, Data = u8> + 'static,
+    C: Cpu<FlatBus32> + Default + 'static,
 {
     fn default() -> Self {
         Self::new()
@@ -155,7 +154,7 @@ where
 
 impl<C> SimpleSystem32<C>
 where
-    C: Cpu + Default + BusMasterComponent<Address = u32, Data = u8> + 'static,
+    C: Cpu<FlatBus32> + Default + 'static,
 {
     pub fn new() -> Self {
         Self {
@@ -170,7 +169,7 @@ where
 
 impl<C> SimpleSystem32<C>
 where
-    C: Cpu + BusMasterComponent<Address = u32, Data = u8> + 'static,
+    C: Cpu<FlatBus32> + 'static,
 {
     pub fn tick(&mut self) {
         self.cpu.tick_with_bus(&mut self.bus, BusMaster::Cpu(0));
@@ -247,7 +246,7 @@ pub struct FlatBus68k {
 
 pub struct SimpleSystem68k<C>
 where
-    C: Cpu + BusMasterComponent<Address = u32, Data = u16> + 'static,
+    C: Cpu<FlatBus68k> + 'static,
 {
     pub cpu: C,
     bus: FlatBus68k,
@@ -256,7 +255,7 @@ where
 
 impl<C> Default for SimpleSystem68k<C>
 where
-    C: Cpu + Default + BusMasterComponent<Address = u32, Data = u16> + 'static,
+    C: Cpu<FlatBus68k> + Default + 'static,
 {
     fn default() -> Self {
         Self::new()
@@ -265,7 +264,7 @@ where
 
 impl<C> SimpleSystem68k<C>
 where
-    C: Cpu + Default + BusMasterComponent<Address = u32, Data = u16> + 'static,
+    C: Cpu<FlatBus68k> + Default + 'static,
 {
     pub fn new() -> Self {
         Self {
@@ -280,7 +279,7 @@ where
 
 impl<C> SimpleSystem68k<C>
 where
-    C: Cpu + BusMasterComponent<Address = u32, Data = u16> + 'static,
+    C: Cpu<FlatBus68k> + 'static,
 {
     pub fn tick(&mut self) {
         self.cpu.tick_with_bus(&mut self.bus, BusMaster::Cpu(0));

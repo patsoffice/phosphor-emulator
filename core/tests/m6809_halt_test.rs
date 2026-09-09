@@ -1,5 +1,5 @@
 use phosphor_core::core::{Bus, BusMaster, BusMasterComponent, bus::InterruptState};
-use phosphor_core::cpu::Cpu;
+use phosphor_core::cpu::CpuControl;
 use phosphor_core::cpu::m6809::M6809;
 
 /// Test bus with controllable halt line (simulates TSC/DMA halting).

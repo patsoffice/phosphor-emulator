@@ -8,7 +8,7 @@ mod stack;
 
 use crate::core::{Bus, BusMaster, bus::InterruptState, component::BusMasterComponent};
 use crate::cpu::{
-    Cpu,
+    Cpu, CpuControl,
     state::{CpuStateTrait, Z80State},
 };
 use crate::prelude::Saveable;
@@ -843,27 +843,19 @@ impl Z80 {
     }
 }
 
-impl BusMasterComponent for Z80 {
+impl<B: Bus<Address = u16, Data = u8> + ?Sized> BusMasterComponent<B> for Z80 {
     type Address = u16;
     type Data = u8;
 
-    fn tick_with_bus<B: Bus<Address = u16, Data = u8> + ?Sized>(
-        &mut self,
-        bus: &mut B,
-        master: BusMaster,
-    ) -> bool {
+    fn tick_with_bus(&mut self, bus: &mut B, master: BusMaster) -> bool {
         self.execute_cycle(bus, master);
         // Instruction boundary: at Fetch AND not mid-prefix (DD/FD set prefix_pending)
         matches!(self.state, ExecState::Fetch) && !self.prefix_pending
     }
 }
 
-impl Cpu for Z80 {
-    fn reset<B: Bus<Address = Self::Address, Data = Self::Data> + ?Sized>(
-        &mut self,
-        _bus: &mut B,
-        _master: BusMaster,
-    ) {
+impl<B: Bus<Address = u16, Data = u8> + ?Sized> Cpu<B> for Z80 {
+    fn reset(&mut self, _bus: &mut B, _master: BusMaster) {
         self.pc = 0x0000;
         self.a = 0xFF;
         self.f = 0xFF;
@@ -872,7 +864,9 @@ impl Cpu for Z80 {
         self.r = 0;
         self.im = 0;
     }
+}
 
+impl CpuControl for Z80 {
     fn signal_interrupt(&mut self, _int: InterruptState) {}
 
     fn is_sleeping(&self) -> bool {

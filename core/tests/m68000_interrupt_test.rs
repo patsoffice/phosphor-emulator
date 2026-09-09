@@ -8,7 +8,7 @@ mod common;
 
 use common::TestBus68k;
 use phosphor_core::core::{BusMaster, BusMasterComponent};
-use phosphor_core::cpu::Cpu;
+use phosphor_core::cpu::CpuControl;
 use phosphor_core::cpu::m68000::{M68000, SrFlag};
 
 const M: BusMaster = BusMaster::Cpu(0);

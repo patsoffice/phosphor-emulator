@@ -1,24 +1,31 @@
+use crate::core::BusMaster;
 use crate::core::component::BusMasterComponent;
-use crate::core::{Bus, BusMaster};
 
-/// Generic CPU interface
-pub trait Cpu: BusMasterComponent + CpuStateTrait {
-    /// Reset the CPU and fetch the reset vector from the bus (matching real hardware).
-    ///
-    /// Generic over the bus for the same reason [`BusMasterComponent`] is: a
-    /// board that holds its CPU beside its bus passes a borrowed view here,
-    /// whose lifetime an associated `dyn Bus` type could not name.
-    fn reset<B: Bus<Address = Self::Address, Data = Self::Data> + ?Sized>(
-        &mut self,
-        bus: &mut B,
-        master: BusMaster,
-    );
-
+/// The parts of a CPU that have nothing to do with its bus.
+///
+/// Split out from [`Cpu`] because that trait is parameterized by the bus type:
+/// a method that never mentions the bus would otherwise be uncallable without
+/// naming one, and there is nothing for the compiler to infer it from. These
+/// two are properties of the core alone.
+pub trait CpuControl {
     /// Signal a specific interrupt line (implementation-defined)
     fn signal_interrupt(&mut self, int: crate::core::bus::InterruptState);
 
     /// Query if CPU is halted internally (CWAI, WAI, STOP instruction)
     fn is_sleeping(&self) -> bool;
+}
+
+/// Generic CPU interface
+pub trait Cpu<B: ?Sized>: BusMasterComponent<B> + CpuStateTrait + CpuControl {
+    /// Reset the CPU and fetch the reset vector from the bus (matching real hardware).
+    ///
+    /// The bus is a parameter of the trait for the same two reasons it is on
+    /// [`BusMasterComponent`]: a board that holds its CPU beside its bus passes
+    /// a borrowed view here, whose lifetime an associated `dyn Bus` type could
+    /// not name; and a core that needs more of its bus than
+    /// [`Bus`](crate::core::Bus) alone provides has to be able to say so where
+    /// it implements this.
+    fn reset(&mut self, bus: &mut B, master: BusMaster);
 }
 
 // Disassembly support

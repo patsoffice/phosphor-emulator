@@ -1,6 +1,6 @@
 use phosphor_core::core::{Bus, BusMaster, BusMasterComponent, bus::InterruptState};
-use phosphor_core::cpu::Cpu;
 use phosphor_core::cpu::m6809::{CcFlag, M6809};
+use phosphor_core::cpu::{Cpu, CpuControl};
 
 /// One recorded bus cycle: the address driven, and whether it was a write.
 /// A cycle with no bus access at all leaves no entry.

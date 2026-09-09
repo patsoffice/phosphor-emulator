@@ -8,7 +8,7 @@
 /// - NMI: 1 (fetch boundary) + 9 interrupt = 10 cycles (edge-triggered)
 /// - IRQ: 1 (fetch boundary) + 9 interrupt = 10 cycles (level, masked by I)
 use phosphor_core::core::{Bus, BusMaster, BusMasterComponent, bus::InterruptState};
-use phosphor_core::cpu::Cpu;
+use phosphor_core::cpu::CpuControl;
 use phosphor_core::cpu::m6800::{CcFlag, M6800};
 
 mod common;
