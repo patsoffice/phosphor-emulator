@@ -345,19 +345,22 @@ today's atomic core, and that is M1. The number they produce is the evidence the
 
 **Run the ladder against both vector sets**, for the reason under
 [There are two independent vector sets](#there-are-two-independent-vector-sets-and-that-is-the-strongest-fact-here).
-Ingesting `SingleStepTests/m68000` costs a decoder for its `.json.bin` format
-and a reconciliation for its `m_au`-derived PC, and both are M1 tasks. What it
-buys is that the standard becomes falsifiable: the harness reports agreement
-against each set separately, and **a third figure for the cases where the two
-sets disagree with each other**. That third figure is the one to watch. It is
-where the manuals, the die and two implementations do not line up, and it is the
-only place in this design where reading the microcode is mandatory rather than
-merely the right instinct.
+What it buys is that the standard becomes falsifiable rather than
+self-confirming.
 
-If ingesting the second set turns out to cost more than M1 can carry, say so and
-defer it to M2 rather than dropping it. What must not happen is the ladder
-running against one generated trace for the whole conversion, because that is
-the check-that-cannot-fail shape with extra steps.
+**Correction, from building it: a per-case cross-set diff is impossible.** The
+first draft of this section called for "a third figure for the cases where the
+two sets disagree with each other". There are no such cases. The two suites were
+generated separately from different random states and share no vector: `680x0`
+opens `NOP` with `pc` 3072 and the name `4e71 [NOP] 1`, `m68000` with `pc`
+911852 and the name `000 NOP 4e71`. Nothing in one has a counterpart in the
+other.
+
+What is comparable is **our agreement rate per instruction file, set beside set**.
+Where our rate against one suite differs materially from our rate against the
+other for the same instruction, the two oracles are saying different things
+about it. That is the cross-set signal, at the only resolution the corpora
+allow, and the gate reports the rows that differ by five points or more.
 
 **Three anti-vacuity rules, each of which the I8088 conversion learned by
 getting it wrong.** They are in this document rather than left implicit because
@@ -380,6 +383,66 @@ the aggregate stops moving. For the I8088 the split that mattered was empty
 queue against prefetched, and it was a fifteenfold gap hiding inside a single
 number. The natural splits here are supervisor against user, memory-touching
 against register-only, and word-aligned against odd.
+
+## M1 as built, and what it measured
+
+**Landed 2026-09-08.** The gate exists and no CPU code changed. Two rungs only:
+`length`, and the transfer kinds in order. Rungs 3 to 6 compare *when* a cycle
+runs, and an atomic core has no answer, so reporting them now would produce a
+structural zero that reads like a timing result.
+
+| population | cases | length | kinds | mean delta |
+|---|---|---|---|---|
+| **680x0**, all | 1,000,060 | **81.88%** | **58.38%** | +0.47 |
+| ... touches memory | 612,693 | 72.92% | 33.01% | +0.31 |
+| ... registers only | 387,367 | 96.06% | 98.50% | +0.73 |
+| **m68000**, all | 317,500 | **77.75%** | **55.35%** | -1.14 |
+| ... touches memory | 199,886 | 66.92% | 30.49% | -2.20 |
+| ... registers only | 117,614 | 96.15% | 97.60% | +0.66 |
+
+**The population split is the result, not the aggregate.** Register-only
+instructions are already near-exact on both suites, 96% on length and 98% on
+kinds, because there is no bus ordering to get wrong and the documented table is
+right. Everything touching memory collapses to a third on kinds. The gap the
+conversion has to close is entirely in the operand path, which is what M2 and M4
+are, and the aggregates would have hidden that behind one number.
+
+**The mean delta is small while the exact rate is not, which is the signature of
+errors canceling.** +0.47 clocks on 680x0 against 81.88% exact: the misses run
+in both directions and very nearly sum away. Any future report that quotes only
+a mean here is quoting two mistakes agreeing to look like none.
+
+**Two findings about the corpora, both from running them.**
+
+- **The pinned `680x0` snapshot contains no user-mode vectors at all.** Zero of
+  1,000,060 have the S bit clear, where its README implies about 1%. The
+  classification is not the suspect: the same code splits `m68000` 158,841
+  supervisor to 158,659 user. So privilege-dependent behavior is unexercised by
+  that suite and covered roughly half the time by the other, which is a second
+  concrete reason to keep both.
+- **`STOP` found a latent harness bug on its first run.** `stopped` and `halted`
+  are sticky and no register load clears them, so one case executing `STOP`
+  parked the CPU for every case after it: 17 files of the `m68000` corpus, from
+  `STOP.json.bin` onward, reported a clean 0.00% for a reason having nothing to
+  do with timing. The gate now starts each case from a fresh CPU and asserts
+  that no case hits the tick limit, because a case that never ran is not a case
+  that disagreed. The `680x0` set has no `STOP` vectors, which is why its
+  coverage had never exposed this.
+
+**Where the two suites disagree**, 47 instructions by five points or more. The
+largest are worth naming, and none is explained yet:
+
+- `RESET`, `MOVEtoUSP` and `MOVEfromUSP` read 100% on kinds against `680x0` and
+  about 50% against `m68000`. These are privileged, and `m68000` is half
+  user-mode where `680x0` is none, so the obvious reading is that this is the
+  coverage difference above rather than an oracle disagreement. **Unverified:**
+  the test that would settle it is the per-file supervisor split, which the gate
+  does not yet report.
+- `RTE` and `MOVEtoCCR` read **0.00% on kinds against both suites**. That is not
+  a disagreement between oracles, it is this core being wrong the same way
+  twice, and `MOVE to CCR` is not even privileged.
+- `MOVE.w` and `MOVE.l` sit near 17% on kinds on both.
+- `CHK` and `MULU` are the worst length rows, 21% and 13% on `680x0`.
 
 ## Decision 4: byte strobes are not a separate project
 

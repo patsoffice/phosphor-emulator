@@ -1120,8 +1120,9 @@ impl<'de> Deserialize<'de> for BusTxn {
             fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<BusTxn, A::Error> {
                 macro_rules! next {
                     ($t:ty, $what:expr) => {
-                        seq.next_element::<$t>()?
-                            .ok_or_else(|| A::Error::custom(concat!("transaction missing ", $what)))?
+                        seq.next_element::<$t>()?.ok_or_else(|| {
+                            A::Error::custom(concat!("transaction missing ", $what))
+                        })?
                     };
                 }
 
@@ -1308,6 +1309,98 @@ impl Bus for TracingBus68k {
         let i = (addr & 0x00FF_FFFE) as usize;
         self.memory[i..i + 2].copy_from_slice(&data.to_be_bytes());
         self.dirty_writes.push(i as u32);
+    }
+
+    fn is_halted_for(&self, _master: BusMaster) -> bool {
+        false
+    }
+
+    fn check_interrupts(&mut self, _target: BusMaster) -> InterruptState {
+        InterruptState::default()
+    }
+}
+
+/// One access this emulator made, in the order it made it.
+///
+/// Deliberately *not* shaped like [`BusTxn`]. This core drives the bus a word
+/// at a time, so it has no byte transfers and no clock positions to record; a
+/// struct that could express those would invite writing a comparison that
+/// quietly credits this core with resolution it does not have.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OurAccess {
+    pub write: bool,
+    /// The word address presented to the bus.
+    pub addr: u32,
+    pub data: u16,
+}
+
+/// [`TracingBus68k`] with an access log, for comparing this core's bus activity
+/// against a recorded trace.
+///
+/// Recording is off until [`Self::start_recording`], so the harness's own
+/// setup writes never enter the log.
+pub struct RecordingBus68k {
+    pub memory: Box<[u8]>,
+    pub dirty_writes: Vec<u32>,
+    pub log: Vec<OurAccess>,
+    recording: bool,
+}
+
+impl RecordingBus68k {
+    pub fn new() -> Self {
+        Self {
+            memory: vec![0; 0x100_0000].into_boxed_slice(),
+            dirty_writes: Vec::new(),
+            log: Vec::new(),
+            recording: false,
+        }
+    }
+
+    /// Begin a fresh recording for one test case.
+    pub fn start_recording(&mut self) {
+        self.log.clear();
+        self.recording = true;
+    }
+
+    pub fn stop_recording(&mut self) {
+        self.recording = false;
+    }
+}
+
+impl Default for RecordingBus68k {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Bus for RecordingBus68k {
+    type Address = u32;
+    type Data = u16;
+
+    fn read(&mut self, _master: BusMaster, addr: u32) -> u16 {
+        let i = (addr & 0x00FF_FFFE) as usize;
+        let data = u16::from_be_bytes([self.memory[i], self.memory[i + 1]]);
+        if self.recording {
+            self.log.push(OurAccess {
+                write: false,
+                addr: i as u32,
+                data,
+            });
+        }
+        data
+    }
+
+    fn write(&mut self, _master: BusMaster, addr: u32, data: u16) {
+        let i = (addr & 0x00FF_FFFE) as usize;
+        self.memory[i..i + 2].copy_from_slice(&data.to_be_bytes());
+        self.dirty_writes.push(i as u32);
+        if self.recording {
+            self.log.push(OurAccess {
+                write: true,
+                addr: i as u32,
+                data,
+            });
+        }
     }
 
     fn is_halted_for(&self, _master: BusMaster) -> bool {

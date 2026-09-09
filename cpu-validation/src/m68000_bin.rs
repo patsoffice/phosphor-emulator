@@ -250,11 +250,10 @@ fn read_test(r: &mut Reader) -> Result<M68000BinTestCase> {
 
     r.section(MAGIC_NAME, "name")?;
     let len = r.u32()? as usize;
-    let name = String::from_utf8(r.take(len)?.to_vec())
-        .map_err(|e| DecodeError {
-            offset: r.pos,
-            what: format!("name is not UTF-8: {e}"),
-        })?;
+    let name = String::from_utf8(r.take(len)?.to_vec()).map_err(|e| DecodeError {
+        offset: r.pos,
+        what: format!("name is not UTF-8: {e}"),
+    })?;
 
     let initial = read_state(r)?;
     let final_state = read_state(r)?;
@@ -299,10 +298,7 @@ pub fn decode(bytes: &[u8]) -> Result<Vec<M68000BinTestCase>> {
     if r.pos != bytes.len() {
         return Err(DecodeError {
             offset: r.pos,
-            what: format!(
-                "{} trailing bytes after {count} tests",
-                bytes.len() - r.pos
-            ),
+            what: format!("{} trailing bytes after {count} tests", bytes.len() - r.pos),
         });
     }
 
@@ -414,7 +410,11 @@ mod tests {
         assert_eq!(tc.execution_pc(), 911848);
 
         let ram = &tc.case.initial.ram;
-        let hi = ram.iter().find(|&&(a, _)| a == tc.execution_pc()).unwrap().1;
+        let hi = ram
+            .iter()
+            .find(|&&(a, _)| a == tc.execution_pc())
+            .unwrap()
+            .1;
         let lo = ram
             .iter()
             .find(|&&(a, _)| a == tc.execution_pc() | 1)
