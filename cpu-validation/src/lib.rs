@@ -2,6 +2,8 @@ use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::{Bus, BusMaster};
 use serde::{Deserialize, Serialize};
 
+pub mod m68000_bin;
+
 // --- Test-data availability ---
 
 /// Setting this to anything turns a missing vector directory from a skip into a

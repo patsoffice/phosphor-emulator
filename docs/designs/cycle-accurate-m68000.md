@@ -152,10 +152,22 @@ superset of the one we already read**, adding UDS and LDS after the data word
 and the two extra kinds. So the harness work is a decoder and a widened record,
 not a second harness.
 
-**`length` tiles here too**, verified: that `MOVE.b` is 18 clocks against
-transactions of 2, 4, 4, 4 and 4. But `length` is read from the container rather
-than summed, and the decoder counts tests that report zero cycles, so there is a
-zero-length population to find and account for rather than to average away.
+**`length` tiles here too, measured over the whole corpus.** Decoding all 127
+files gives 317,500 cases, and **every one of them tiles**: no case's
+transactions sum to anything but its recorded `length`, and none reports zero
+clocks. `length` is stored in the container rather than derived from the trace,
+so the two could have disagreed and do not. The corpus is smaller than
+`680x0`'s, 2,500 cases per file against roughly 8,000, so it trades depth per
+instruction for the wider instruction coverage above.
+
+**And the `TAS` caveat is worse than the README implies.** Across all 317,500
+cases the kind histogram is 832,245 reads, 562,558 writes, 333,171 idle spans,
+53,160 read address errors and 2,446 write address errors. **There is not one
+`t` entry in the corpus.** The set does not merely get the indivisible
+read-modify-write timing wrong, it never emits the cycle kind at all, so
+`680x0` is the only source for what `TAS` does on the bus. That is a concrete
+instance of the rule above: on this one instruction the stronger-provenance set
+is not an authority at all.
 
 **The discipline this buys, and it is the reason to take both.** A single
 generated oracle has the failure mode this project keeps writing down: the
