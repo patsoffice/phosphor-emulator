@@ -189,6 +189,12 @@ impl M68000 {
                     self.state = ExecState::Stopped;
                     return;
                 }
+                // Cleared before the interrupt check, not after it: an
+                // interrupt is charged from the transfers its own entry
+                // sequence makes, and would otherwise inherit the count of
+                // whatever instruction happened to run before it.
+                self.transfers = 0;
+
                 // Sample interrupts at the instruction boundary.
                 let ints = bus.check_interrupts(master);
                 if let Some(level) = self.pending_interrupt(ints) {
@@ -197,7 +203,6 @@ impl M68000 {
                 }
 
                 self.instr_pc = self.pc;
-                self.transfers = 0;
                 if self.pc & 1 != 0 {
                     // Defensive: control transfers fault before loading an
                     // odd PC, but external state (a bad reset vector, a

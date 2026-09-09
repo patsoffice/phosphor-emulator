@@ -62,7 +62,9 @@ impl M68000 {
     ) -> AccessResult<()> {
         let vector = 32 + (opcode & 0xF) as u8;
         self.exception(bus, master, vector, self.pc)?;
-        self.finish(38);
+        // The opcode and exception entry's five transfers are counted; the
+        // fourteen left are the entry sequence's own thinking time.
+        self.finish_from_bus(14);
         Ok(())
     }
 
@@ -76,9 +78,9 @@ impl M68000 {
     ) -> AccessResult<()> {
         if self.flag_is_set(SrFlag::V) {
             self.exception(bus, master, 7, self.pc)?;
-            self.finish(34);
+            self.finish_from_bus(10);
         } else {
-            self.finish(4);
+            self.finish_from_bus(0);
         }
         Ok(())
     }
@@ -95,7 +97,7 @@ impl M68000 {
         vector: u8,
     ) -> AccessResult<()> {
         self.exception(bus, master, vector, self.instr_pc)?;
-        self.finish(34);
+        self.finish_from_bus(10);
         Ok(())
     }
 
@@ -111,7 +113,7 @@ impl M68000 {
             return Ok(true);
         }
         self.exception(bus, master, 8, self.instr_pc)?;
-        self.finish(34);
+        self.finish_from_bus(10);
         Ok(false)
     }
 
@@ -151,7 +153,9 @@ impl M68000 {
             let ccr = combine(self.sr & 0x00FF, imm & 0x00FF);
             self.sr = (self.sr & 0xFF00) | (ccr & 0x001F);
         }
-        self.finish(20);
+        // The opcode and the immediate word are counted; twelve clocks are
+        // spent settling the mode the write may just have changed.
+        self.finish_from_bus(12);
         Ok(())
     }
 
@@ -177,7 +181,9 @@ impl M68000 {
         }
         self.write_sr(sr);
         self.set_pc_checked(pc)?;
-        self.finish(20);
+        // Every popped word is a counted transfer, including the 68010's
+        // format word, so the longer frame costs its own four clocks.
+        self.finish_from_bus(4);
         Ok(())
     }
 
@@ -196,6 +202,18 @@ impl M68000 {
         let imm = self.read_imm_word(bus, master);
         self.write_sr(imm);
         self.stopped = true;
+        // One of two sites still charged a flat documented total, and for the
+        // same reason as the other: its transfers do not correspond to the
+        // part's.
+        //
+        // A supervisor STOP is recorded at four clocks with *no bus cycles at
+        // all*: its opcode and immediate word both came out of the prefetch
+        // queue, so the documented four already excludes them. This core
+        // fetches both from the bus, so charging four clocks each would count
+        // them twice and put STOP at eight. Measured: doing so costs the
+        // m68000 corpus 0.39 points, all of it here.
+        //
+        // It becomes ordinary once M3 gives the core a queue to fetch from.
         self.finish(4);
         Ok(())
     }
@@ -213,7 +231,9 @@ impl M68000 {
         if !self.privilege_check(bus, master)? {
             return Ok(());
         }
-        self.finish(132);
+        // RESET asserts its line for 124 clocks and does nothing on the bus
+        // besides its own fetch.
+        self.finish_from_bus(128);
         Ok(())
     }
 
@@ -255,7 +275,9 @@ impl M68000 {
             return;
         }
         self.set_interrupt_mask(level);
-        self.finish(44);
+        // No opcode is fetched: the entry sequence's own five transfers are
+        // the whole bus cost, leaving the recognition and vector arithmetic.
+        self.finish_from_bus(24);
     }
 
     /// Address-error (vector 3) entry with the 68000 seven-word group-0
@@ -301,6 +323,22 @@ impl M68000 {
         self.pc = self
             .read_long_at(bus, master, 3 * 4)
             .expect("vector 3 is aligned");
+        // The other site still charged a flat documented total, and the reason
+        // is worth keeping: charging this one from the bus was tried and
+        // measured, and it cost the 680x0 corpus 4.56 points on cycle count,
+        // all of it here.
+        //
+        // The recorded traces say why. An address error is fifty clocks: eleven
+        // transfers and six idle. Seven of those transfers are the frame and
+        // two the vector, which this core does make; the other two are
+        // prefetches at the *new* PC, which it does not. Meanwhile the fetches
+        // this core made before the fault are outside the recording's window,
+        // because the part took them from its queue. So neither side's transfer
+        // count is a subset of the other's, and no constant added to ours
+        // reproduces the fifty.
+        //
+        // That is a prefetch problem wearing a timing problem's clothes, and it
+        // resolves in M3 rather than here.
         self.finish(50);
     }
 }

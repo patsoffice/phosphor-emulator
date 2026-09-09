@@ -18,16 +18,22 @@ use crate::core::{Bus16, BusMaster};
 
 /// Documented JMP timing per control addressing mode (M68000UM table 8-1);
 /// JSR is uniformly 8 cycles more for the return-address push.
-fn jump_cycles(mode: u8, reg: u8) -> u32 {
+/// Clocks a jump spends off the bus computing its target, by addressing mode.
+///
+/// Irregular in a way the operand modes are not, because a jump has no operand
+/// transfer to overlap the work with: `(An)` has nothing to fetch and so pays
+/// all four clocks of the load, `abs.l` pays none because its two extension
+/// words cover it, and the indexed modes pay six for the index add on top.
+fn jump_internal(mode: u8, reg: u8) -> u32 {
     match mode & 7 {
-        2 => 8,  // (An)
-        5 => 10, // d16(An)
-        6 => 14, // d8(An,Xn)
+        2 => 4, // (An)
+        5 => 2, // d16(An)
+        6 => 6, // d8(An,Xn)
         _ => match reg & 7 {
-            0 => 10, // abs.w
-            1 => 12, // abs.l
-            2 => 10, // d16(PC)
-            _ => 14, // d8(PC,Xn)
+            0 => 2, // abs.w
+            1 => 0, // abs.l
+            2 => 2, // d16(PC)
+            _ => 6, // d8(PC,Xn)
         },
     }
 }
@@ -80,15 +86,19 @@ impl M68000 {
             1 => {
                 self.push_long(bus, master, self.pc)?;
                 self.set_pc_checked(base.wrapping_add(disp))?;
-                self.finish(18);
+                // A taken branch costs the same whichever displacement it
+                // used, so the byte form, having one fetch fewer, spends four
+                // more clocks off the bus than the word form does.
+                self.finish_from_bus(if word_form { 2 } else { 6 });
             }
             // BRA (condition 0 encodes T) and taken Bcc
             _ if self.cc_true(cond) => {
                 self.set_pc_checked(base.wrapping_add(disp))?;
-                self.finish(10);
+                self.finish_from_bus(if word_form { 2 } else { 6 });
             }
-            // Not taken: the word form pays for its extension-word fetch
-            _ => self.finish(if word_form { 12 } else { 8 }),
+            // Not taken: nothing is redirected, and the two forms differ only
+            // by the extension word, which counts itself.
+            _ => self.finish_from_bus(4),
         }
         Ok(())
     }
@@ -110,17 +120,21 @@ impl M68000 {
         let disp = sext16(self.read_imm_word(bus, master));
         let cond = ((opcode >> 8) & 0xF) as u8;
         if self.cc_true(cond) {
-            self.finish(12);
+            // Condition satisfied: the loop is abandoned without touching the
+            // counter, and the displacement word has already been fetched.
+            self.finish_from_bus(4);
             return Ok(());
         }
         let reg = (opcode & 7) as usize;
         let counter = (self.d[reg] as u16).wrapping_sub(1);
         self.d[reg] = (self.d[reg] & 0xFFFF_0000) | counter as u32;
         if counter == 0xFFFF {
-            self.finish(14);
+            // Counter ran out: two clocks more than the looping case, spent
+            // recognizing the underflow rather than redirecting.
+            self.finish_from_bus(6);
         } else {
             self.set_pc_checked(base.wrapping_add(disp))?;
-            self.finish(10);
+            self.finish_from_bus(2);
         }
         Ok(())
     }
@@ -143,7 +157,7 @@ impl M68000 {
         // Control addressing only: register direct, (An)+/-(An), and #imm
         // are illegal here (the exception lands with full illegal coverage).
         if !(matches!(ea_mode, 2 | 5 | 6) || (ea_mode == 7 && ea_reg < 4)) {
-            self.finish(4);
+            self.finish_from_bus(0);
             return Ok(());
         }
         // The size only governs operand access, which never happens for an
@@ -158,7 +172,9 @@ impl M68000 {
         if call {
             self.push_long(bus, master, return_pc)?;
         }
-        self.finish(jump_cycles(ea_mode, ea_reg) + if call { 8 } else { 0 });
+        // JSR's push is two counted transfers, so a call and a jump spend the
+        // same time off the bus.
+        self.finish_from_bus(jump_internal(ea_mode, ea_reg));
         Ok(())
     }
 
@@ -172,7 +188,9 @@ impl M68000 {
     ) -> AccessResult<()> {
         let target = self.pop_long(bus, master)?;
         self.set_pc_checked(target)?;
-        self.finish(16);
+        // The opcode and the long pop are counted; four clocks are left to
+        // redirect to the popped address.
+        self.finish_from_bus(4);
         Ok(())
     }
 
@@ -191,7 +209,8 @@ impl M68000 {
         self.sr = (self.sr & 0xFF00) | (ccr & 0x001F);
         let target = self.pop_long(bus, master)?;
         self.set_pc_checked(target)?;
-        self.finish(20);
+        // As RTS, plus the counted word pop that restored the flags.
+        self.finish_from_bus(4);
         Ok(())
     }
 }

@@ -6,7 +6,7 @@
 //! out-of-bounds CHK enters vector 6.
 
 use super::super::M68000;
-use super::super::addressing::{AccessResult, Size, ea_cycles, sext16};
+use super::super::addressing::{AccessResult, Size, ea_internal, sext16};
 use super::super::flags::SrFlag;
 use crate::core::{Bus16, BusMaster};
 
@@ -26,7 +26,9 @@ impl M68000 {
         }
         let ea = self.decode_ea(bus, master, ea_mode, ea_reg, Size::Word);
         let value = self.ea_read(bus, master, ea, Size::Word)? as u16;
-        Ok(Some((value, ea_cycles(ea_mode, ea_reg, Size::Word))))
+        // The extension words and the operand read are counted transfers; only
+        // the mode's own address arithmetic is left for the caller to declare.
+        Ok(Some((value, ea_internal(ea_mode, ea_reg))))
     }
 
     /// MULU.w / MULS.w <ea>,Dn — 16 × 16 → 32-bit product into the full Dn.
@@ -41,7 +43,7 @@ impl M68000 {
         signed: bool,
     ) -> AccessResult<()> {
         let Some((src, ea_time)) = self.muldiv_operand(opcode, bus, master)? else {
-            self.finish(4);
+            self.finish_from_bus(0);
             return Ok(());
         };
         let dn = ((opcode >> 9) & 7) as usize;
@@ -55,9 +57,11 @@ impl M68000 {
         self.d[dn] = product;
         self.set_flags_logical(Size::Long, product);
 
-        // Documented worst case is 38 + 2n internal cycles; the data-dependent
-        // refinement can land with cycle-exact timing work.
-        self.finish(70 + ea_time);
+        // The multiply runs entirely off the bus. Documented worst case is
+        // 38 + 2n internal cycles and this charges the worst case flat; the
+        // data-dependent refinement is its own piece of work, and it is a
+        // change to this number alone now that nothing else is folded into it.
+        self.finish_from_bus(66 + ea_time);
         Ok(())
     }
 
@@ -76,7 +80,7 @@ impl M68000 {
         signed: bool,
     ) -> AccessResult<()> {
         let Some((src, ea_time)) = self.muldiv_operand(opcode, bus, master)? else {
-            self.finish(4);
+            self.finish_from_bus(0);
             return Ok(());
         };
         let dn = ((opcode >> 9) & 7) as usize;
@@ -91,8 +95,12 @@ impl M68000 {
             self.set_flag(SrFlag::Z, false);
             self.set_flag(SrFlag::V, false);
             self.set_flag(SrFlag::C, false);
+            // Exception entry pushes the frame and fetches the vector, five
+            // transfers on the 68000 and six on the 68010, all counted. So the
+            // longer frame now costs its four clocks by itself rather than
+            // needing a variant-gated constant here.
             self.exception(bus, master, 5, self.instr_pc)?;
-            self.finish(42 + ea_time);
+            self.finish_from_bus(18 + ea_time);
             return Ok(());
         }
 
@@ -102,7 +110,7 @@ impl M68000 {
             if dst == 0x8000_0000 && divisor == -1 {
                 self.d[dn] = 0;
                 self.set_flags_logical(Size::Long, 0);
-                self.finish(158 + ea_time);
+                self.finish_from_bus(154 + ea_time);
                 return Ok(());
             }
             let quotient = (dst as i32) / divisor;
@@ -119,7 +127,7 @@ impl M68000 {
                 self.set_flag(SrFlag::V, true);
                 self.set_flag(SrFlag::C, false);
             }
-            self.finish(158 + ea_time);
+            self.finish_from_bus(154 + ea_time);
         } else {
             let quotient = dst / src as u32;
             let remainder = dst % src as u32;
@@ -135,7 +143,7 @@ impl M68000 {
                 self.set_flag(SrFlag::V, true);
                 self.set_flag(SrFlag::C, false);
             }
-            self.finish(140 + ea_time);
+            self.finish_from_bus(136 + ea_time);
         }
         Ok(())
     }
@@ -154,7 +162,7 @@ impl M68000 {
         master: BusMaster,
     ) -> AccessResult<()> {
         let Some((bound, ea_time)) = self.muldiv_operand(opcode, bus, master)? else {
-            self.finish(4);
+            self.finish_from_bus(0);
             return Ok(());
         };
         let dn = ((opcode >> 9) & 7) as usize;
@@ -166,10 +174,13 @@ impl M68000 {
         self.set_flag(SrFlag::C, false);
         if src < 0 || src > bound {
             self.set_flag(SrFlag::N, src < 0);
+            // As the divide's zero trap: the frame push and vector fetch are
+            // counted, so only the recognition time is declared.
             self.exception(bus, master, 6, self.pc)?;
-            self.finish(44 + ea_time);
+            self.finish_from_bus(20 + ea_time);
         } else {
-            self.finish(10 + ea_time);
+            // In bounds: the comparison itself, and nothing more.
+            self.finish_from_bus(6 + ea_time);
         }
         Ok(())
     }

@@ -113,6 +113,13 @@ pub(crate) enum Ea {
 /// *source* operand (M68000UM table 8-1): the extension-word fetches plus
 /// the operand read. Long operands add one extra word transaction (4 cycles)
 /// over byte/word for every memory mode.
+///
+/// **No instruction charges from this any more.** Cycle counts come from the
+/// transfers an instruction makes plus [`ea_internal`], and this survives as
+/// the documented total those two have to add back up to. The test at the
+/// bottom of this file is what checks they do, which is the only thing keeping
+/// the split honest against the manual.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn ea_cycles(mode: u8, reg: u8, size: Size) -> u32 {
     let long = matches!(size, Size::Long);
     let bw_l = |bw: u32, l: u32| if long { l } else { bw };
