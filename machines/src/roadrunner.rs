@@ -19,7 +19,7 @@ use phosphor_core::core::machine::{
     InputId, InputKind, MachineCore, MouseControl, Nvram, Profilable, SaveState,
 };
 
-use phosphor_core::core::{Bus, BusMaster};
+use phosphor_core::core::{Bus, Bus16, BusMaster};
 use phosphor_core::cpu::Cpu;
 use phosphor_core::cpu::state::M68000State;
 use phosphor_core::device::adc0809::Adc0809;
@@ -746,6 +746,36 @@ impl Bus for RoadRunnerBus<'_> {
         // Drive the board's IRQ2 line from the ADC before it resolves priority.
         self.board.set_int2(self.adc_irq());
         self.board.bus_check_interrupts(target)
+    }
+}
+
+impl Bus16 for RoadRunnerBus<'_> {
+    fn read_byte(&mut self, master: BusMaster, addr: u32) -> u8 {
+        // The ADC hangs off D0-D7, so only LDS selects it. An upper-half
+        // transfer neither returns data nor restarts a conversion, which is
+        // the side effect that matters: the read is what drops EOC.
+        if (0xF4_0000..=0xF4_001F).contains(&addr) {
+            if addr & 1 == 0 {
+                return 0xFF;
+            }
+            let value = self.adc.data_r();
+            self.adc_start(((addr >> 1) & 0x0F) as u16);
+            self.board.note_read(master, addr, 0xFF00 | value as u16);
+            return value;
+        }
+        self.board.bus_read_byte(master, addr)
+    }
+
+    fn write_byte(&mut self, master: BusMaster, addr: u32, data: u8) {
+        // Same gating on the write side: LDS selects the channel latch, and an
+        // upper-half transfer starts no conversion.
+        if (0xF4_0000..=0xF4_001F).contains(&addr) {
+            if addr & 1 == 0 {
+                return;
+            }
+            self.adc_start(((addr >> 1) & 0x0F) as u16);
+        }
+        self.board.bus_write_byte(master, addr, data);
     }
 }
 

@@ -12,14 +12,14 @@
 use super::M68000;
 use super::addressing::{AccessResult, Size, ea_cycles};
 use super::flags::SrFlag;
-use crate::core::{Bus, BusMaster};
+use crate::core::{Bus16, BusMaster};
 
 impl M68000 {
     /// BTST / BCHG / BCLR / BSET `<bit>,<ea>` — `oo` bits 7-6 select the
     /// operation (00/01/10/11). BTST accepts any data source, including
     /// PC-relative and (dynamic form only) immediate; the three modifying
     /// ops need a data-alterable destination.
-    pub(crate) fn op_bitop<B: Bus<Address = u32, Data = u16> + ?Sized>(
+    pub(crate) fn op_bitop<B: Bus16 + ?Sized>(
         &mut self,
         opcode: u16,
         bus: &mut B,

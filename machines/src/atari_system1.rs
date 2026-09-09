@@ -48,7 +48,7 @@ use phosphor_core::audio::SampleRing;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::{AccessKind, AddressSpace32};
 use phosphor_core::core::{
-    Bus, BusMaster, ClockDomainName as Clk, ClockTree, DomainId, TimingConfig,
+    Bus16, BusMaster, ClockDomainName as Clk, ClockTree, DomainId, TimingConfig, select_byte,
 };
 use phosphor_core::cpu::m68000::{M68kVariant, M68000};
 use phosphor_core::device::slapstic::Slapstic;
@@ -344,7 +344,7 @@ const VISIBLE_HEIGHT: usize = TIMING.display_height as usize; // 240
 /// [`tick`] is generic over this trait, so every access the 68010 makes — this
 /// is a word-wide 24-bit bus — resolves to a direct call rather than a vtable
 /// entry.
-pub trait AtariSystem1Bus: Bus<Address = u32, Data = u16> {
+pub trait AtariSystem1Bus: Bus16 {
     fn board(&mut self) -> &mut AtariSystem1Board;
 }
 
@@ -1372,6 +1372,98 @@ impl AtariSystem1Board {
             irq_vector: 0xFF,
             ..Default::default()
         }
+    }
+
+    /// Read one byte, with the strobe implied by the address's low bit.
+    ///
+    /// The 68010 drives no A0: it puts an even address on the bus and asserts
+    /// UDS for the even byte or LDS for the odd one. Every byte-wide part on
+    /// this board hangs off D0-D7, so it answers at odd addresses only.
+    pub(crate) fn bus_read_byte(&mut self, master: BusMaster, addr: u32) -> u8 {
+        match addr {
+            // Word-wide ROM, RAM and video memory: the bus carries the whole
+            // word and the strobe selects a half of it.
+            0x00_0000..=0x08_7FFF
+            | 0x2E_0000..=0x2E_0001
+            | 0x40_0000..=0x40_1FFF
+            | 0x90_0000..=0x9F_FFFF
+            | 0xA0_0000..=0xA0_3FFF
+            | 0xB0_0000..=0xB0_07FF
+            | 0xF6_0000..=0xF6_0003 => {
+                let word = self.bus_read(master, addr & !1);
+                select_byte(word, addr)
+            }
+            // The 2804 EEPROM sits on the lower half.
+            0xF0_0000..=0xF0_03FF if addr & 1 != 0 => self.eeprom[((addr >> 1) & 0x1FF) as usize],
+            // The main latch the sound board writes, a single odd byte address.
+            0xFC_0000..=0xFC_0001 if addr & 1 != 0 => self.sound.read_response(),
+            _ => 0xFF,
+        }
+    }
+
+    /// Write one byte, with the strobe implied by the address's low bit.
+    ///
+    /// Everything that is not memory here is either a byte-wide part on D0-D7
+    /// or a strobe that fires on the access rather than on its data. The
+    /// difference matters: a strobe answers either half, a byte-wide part only
+    /// answers LDS.
+    pub(crate) fn bus_write_byte(&mut self, master: BusMaster, addr: u32, data: u8) {
+        self.map.watch_write(0, master, addr, data as u32, 1);
+        match addr {
+            0x00_0000..=0x07_FFFF => {} // fixed ROM, ignore
+            0x08_0000..=0x08_7FFF => {} // slapstic window: bank state driven by observe
+            // Word-wide memory: patch the byte this strobe selects and leave
+            // the other alone. A read-modify-write is honest here; it is RAM.
+            0x40_0000..=0x40_1FFF
+            | 0x90_0000..=0x9F_FFFF
+            | 0xA0_0000..=0xA0_3FFF
+            | 0xB0_0000..=0xB0_07FF => {
+                let word_addr = addr & !1;
+                let word = self.map.read_bus_word_be(word_addr);
+                let merged = if addr & 1 != 0 {
+                    (word & 0xFF00) | data as u16
+                } else {
+                    (word & 0x00FF) | ((data as u16) << 8)
+                };
+                self.map.write_bus_word_be(word_addr, merged);
+            }
+            // Word-wide registers: a byte transfer drives only its own half, so
+            // the other half of the latched value keeps what it had.
+            0x80_0000..=0x80_0001 => self.xscroll = merge_byte(self.xscroll, addr, data),
+            0x82_0000..=0x82_0001 => self.yscroll = merge_byte(self.yscroll, addr, data),
+            0x84_0000..=0x84_0001 => {
+                self.priority_pens = merge_byte(self.priority_pens, addr, data)
+            }
+            // Strobes: the access itself is the event, so either half does it.
+            0x88_0000..=0x88_0001 => self.watchdog_count = 0, // watchdog reset
+            0x8A_0000..=0x8A_0001 => self.video_int = false,  // VBLANK IRQ4 ack
+            0x8C_0000..=0x8C_0001 => self.eeprom_unlocked = true, // EEPROM unlock
+            // Byte-wide parts on D0-D7: LDS only.
+            0x86_0000..=0x86_0001 => {
+                if addr & 1 != 0 {
+                    self.bankselect_w(data);
+                }
+            }
+            // 2804 writes are gated by the unlock latch and re-lock after one byte.
+            0xF0_0000..=0xF0_03FF if self.eeprom_unlocked && addr & 1 != 0 => {
+                self.eeprom[((addr >> 1) & 0x1FF) as usize] = data;
+                self.eeprom_unlocked = false;
+                self.eeprom_writes += 1;
+            }
+            0xF8_0000..=0xF8_0001 => {} // Sound latch (RoadBlasters only)
+            0xFE_0000..=0xFE_0001 if addr & 1 != 0 => self.sound.write_command(data),
+            _ => {}
+        }
+    }
+}
+
+/// Replace the half of `word` that a byte transfer at `addr` drives.
+#[inline]
+fn merge_byte(word: u16, addr: u32, data: u8) -> u16 {
+    if addr & 1 != 0 {
+        (word & 0xFF00) | data as u16
+    } else {
+        (word & 0x00FF) | ((data as u16) << 8)
     }
 }
 

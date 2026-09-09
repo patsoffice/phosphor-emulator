@@ -17,7 +17,7 @@
 use super::super::M68000;
 use super::super::addressing::{AccessResult, Ea, Size, ea_cycles, sext16};
 use super::super::flags::SrFlag;
-use crate::core::{Bus, BusMaster};
+use crate::core::{Bus16, BusMaster};
 
 /// Decode the two-bit size field used by opmodes and immediates
 /// (00 = byte, 01 = word, 10 = long; 11 is never a size).
@@ -54,7 +54,7 @@ impl M68000 {
     /// Flags: N/Z/V/C from the sized result and **X = C** (arithmetic rule).
     /// ADDA/SUBA set no flags at all and operate on the full 32-bit address
     /// register after sign-extending a word operand.
-    pub(crate) fn op_add_sub<B: Bus<Address = u32, Data = u16> + ?Sized>(
+    pub(crate) fn op_add_sub<B: Bus16 + ?Sized>(
         &mut self,
         opcode: u16,
         bus: &mut B,
@@ -141,7 +141,7 @@ impl M68000 {
     /// never altered** (the one arithmetic op that leaves X alone). CMPA
     /// sign-extends a word operand and compares the full 32-bit An.
     /// Opmodes 100-110 encode CMPM/EOR and land in M2.
-    pub(crate) fn op_cmp<B: Bus<Address = u32, Data = u16> + ?Sized>(
+    pub(crate) fn op_cmp<B: Bus16 + ?Sized>(
         &mut self,
         opcode: u16,
         bus: &mut B,
@@ -192,7 +192,7 @@ impl M68000 {
     ///
     /// Flags: N/Z from the sized result, V/C cleared, **X untouched**
     /// (the logical rule).
-    pub(crate) fn op_logical<B: Bus<Address = u32, Data = u16> + ?Sized>(
+    pub(crate) fn op_logical<B: Bus16 + ?Sized>(
         &mut self,
         opcode: u16,
         bus: &mut B,
@@ -259,7 +259,7 @@ impl M68000 {
     /// and set to C on the way out; Z is cleared by a non-zero result but
     /// never set (multi-precision chains report zero only if every limb
     /// was zero).
-    pub(crate) fn op_addx_subx<B: Bus<Address = u32, Data = u16> + ?Sized>(
+    pub(crate) fn op_addx_subx<B: Bus16 + ?Sized>(
         &mut self,
         opcode: u16,
         bus: &mut B,
@@ -302,7 +302,7 @@ impl M68000 {
     /// time, so a fault on an odd address leaves An decremented by only 2
     /// (hardware-verified; ordinary predecrement EAs like CLR.l move An by
     /// the full operand size before the high-first access).
-    fn addx_predec_read<B: Bus<Address = u32, Data = u16> + ?Sized>(
+    fn addx_predec_read<B: Bus16 + ?Sized>(
         &mut self,
         bus: &mut B,
         master: BusMaster,
@@ -325,7 +325,7 @@ impl M68000 {
     ///
     /// Flags: N/Z/V/C from `dst - src`; the result is discarded and **X is
     /// never altered** (the CMP rule, not the extended rule).
-    pub(crate) fn op_cmpm<B: Bus<Address = u32, Data = u16> + ?Sized>(
+    pub(crate) fn op_cmpm<B: Bus16 + ?Sized>(
         &mut self,
         opcode: u16,
         bus: &mut B,
@@ -410,7 +410,7 @@ impl M68000 {
     ///
     /// Flags: extended rule (X consumed and set to decimal carry/borrow,
     /// Z never set); N and V follow the hardware's undefined behavior.
-    pub(crate) fn op_bcd<B: Bus<Address = u32, Data = u16> + ?Sized>(
+    pub(crate) fn op_bcd<B: Bus16 + ?Sized>(
         &mut self,
         opcode: u16,
         bus: &mut B,
@@ -452,7 +452,7 @@ impl M68000 {
     /// data-alterable EA.
     ///
     /// Flags: same extended/undefined rules as SBCD.
-    pub(crate) fn op_nbcd<B: Bus<Address = u32, Data = u16> + ?Sized>(
+    pub(crate) fn op_nbcd<B: Bus16 + ?Sized>(
         &mut self,
         opcode: u16,
         bus: &mut B,
@@ -479,7 +479,7 @@ impl M68000 {
     /// must be data-alterable (An, PC-relative, and immediate are illegal).
     ///
     /// Flags: N/Z from the operand, V/C cleared, **X untouched**.
-    pub(crate) fn op_tst<B: Bus<Address = u32, Data = u16> + ?Sized>(
+    pub(crate) fn op_tst<B: Bus16 + ?Sized>(
         &mut self,
         opcode: u16,
         bus: &mut B,
@@ -513,7 +513,7 @@ impl M68000 {
     /// Returns `Ok(false)` if the opcode is not one of the immediate forms
     /// handled here (the to-CCR/to-SR variants and bit ops are routed by
     /// the caller).
-    pub(crate) fn op_imm_alu<B: Bus<Address = u32, Data = u16> + ?Sized>(
+    pub(crate) fn op_imm_alu<B: Bus16 + ?Sized>(
         &mut self,
         opcode: u16,
         bus: &mut B,
@@ -599,7 +599,7 @@ impl M68000 {
     /// rule). An An destination behaves like ADDA/SUBA: the full 32-bit
     /// register is adjusted regardless of the word/long size bits and no
     /// flags are set (byte size with An is an illegal encoding).
-    pub(crate) fn op_addq_subq<B: Bus<Address = u32, Data = u16> + ?Sized>(
+    pub(crate) fn op_addq_subq<B: Bus16 + ?Sized>(
         &mut self,
         opcode: u16,
         bus: &mut B,

@@ -17,7 +17,7 @@ pub mod watchpoint;
 pub use address_space::{AccessKind, DebugRead, DebugWrite, MemoryBacking, RegionId, UNMAPPED};
 pub use address_space16::{AddressMap16, AddressSpace16, PageEntry, RegionDescriptor};
 pub use address_space32::{AddressMap32, AddressRegion32, AddressSpace32, RegionTarget};
-pub use bus::{Bus, BusMaster, InterruptState};
+pub use bus::{Bus, Bus16, BusMaster, InterruptState, rmw_byte, select_byte};
 pub use clock::ClockDivider;
 pub use clock_tree::{
     ClockDomain, ClockDomainName, ClockTree, DomainId, DomainInfo, FrameParams, Raster, RootId,

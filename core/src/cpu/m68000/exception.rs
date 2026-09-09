@@ -14,7 +14,7 @@
 use super::M68000;
 use super::addressing::{AccessResult, AddressError};
 use super::flags::SrFlag;
-use crate::core::{Bus, BusMaster, bus::InterruptState};
+use crate::core::{Bus16, BusMaster, bus::InterruptState};
 use crate::cpu::flags::detect_rising_edge;
 
 impl M68000 {
@@ -25,7 +25,7 @@ impl M68000 {
     /// A misaligned supervisor stack makes the frame push itself fault; the
     /// error propagates so the address-error entry (and from there the
     /// double-fault halt) takes over.
-    pub(crate) fn exception<B: Bus<Address = u32, Data = u16> + ?Sized>(
+    pub(crate) fn exception<B: Bus16 + ?Sized>(
         &mut self,
         bus: &mut B,
         master: BusMaster,
@@ -54,7 +54,7 @@ impl M68000 {
     /// frame PC is the following instruction.
     ///
     /// Flags: none directly (exception entry sets S, clears T). 38 cycles.
-    pub(crate) fn op_trap<B: Bus<Address = u32, Data = u16> + ?Sized>(
+    pub(crate) fn op_trap<B: Bus16 + ?Sized>(
         &mut self,
         opcode: u16,
         bus: &mut B,
@@ -69,7 +69,7 @@ impl M68000 {
     /// TRAPV (0x4E76): trap to vector 7 if V is set, otherwise continue.
     ///
     /// Flags: none. 34 cycles taken, 4 not taken.
-    pub(crate) fn op_trapv<B: Bus<Address = u32, Data = u16> + ?Sized>(
+    pub(crate) fn op_trapv<B: Bus16 + ?Sized>(
         &mut self,
         bus: &mut B,
         master: BusMaster,
@@ -88,7 +88,7 @@ impl M68000 {
     /// unexecuted opcode itself.
     ///
     /// Flags: none. 34 cycles.
-    pub(crate) fn op_illegal<B: Bus<Address = u32, Data = u16> + ?Sized>(
+    pub(crate) fn op_illegal<B: Bus16 + ?Sized>(
         &mut self,
         bus: &mut B,
         master: BusMaster,
@@ -102,7 +102,7 @@ impl M68000 {
     /// Verify supervisor privilege for a privileged instruction. In user
     /// mode the privilege-violation exception (vector 8) is entered with
     /// the frame PC at the unexecuted instruction, and false is returned.
-    pub(crate) fn privilege_check<B: Bus<Address = u32, Data = u16> + ?Sized>(
+    pub(crate) fn privilege_check<B: Bus16 + ?Sized>(
         &mut self,
         bus: &mut B,
         master: BusMaster,
@@ -129,7 +129,7 @@ impl M68000 {
     ///
     /// Flags: per the operation, on the five CCR bits (and the system byte
     /// for the SR forms). 20 cycles.
-    pub(crate) fn op_sr_imm<B: Bus<Address = u32, Data = u16> + ?Sized>(
+    pub(crate) fn op_sr_imm<B: Bus16 + ?Sized>(
         &mut self,
         opcode: u16,
         bus: &mut B,
@@ -162,7 +162,7 @@ impl M68000 {
     /// format-error (vector 14) check.
     ///
     /// Flags: the whole SR is restored from the frame. 20 cycles.
-    pub(crate) fn op_rte<B: Bus<Address = u32, Data = u16> + ?Sized>(
+    pub(crate) fn op_rte<B: Bus16 + ?Sized>(
         &mut self,
         bus: &mut B,
         master: BusMaster,
@@ -185,7 +185,7 @@ impl M68000 {
     /// instruction execution until an interrupt (or reset) arrives.
     ///
     /// Flags: the whole SR is loaded. 4 cycles.
-    pub(crate) fn op_stop<B: Bus<Address = u32, Data = u16> + ?Sized>(
+    pub(crate) fn op_stop<B: Bus16 + ?Sized>(
         &mut self,
         bus: &mut B,
         master: BusMaster,
@@ -205,7 +205,7 @@ impl M68000 {
     /// instruction is a long supervisor no-op; CPU state is unaffected.
     ///
     /// Flags: none. 132 cycles.
-    pub(crate) fn op_reset_instruction<B: Bus<Address = u32, Data = u16> + ?Sized>(
+    pub(crate) fn op_reset_instruction<B: Bus16 + ?Sized>(
         &mut self,
         bus: &mut B,
         master: BusMaster,
@@ -235,7 +235,7 @@ impl M68000 {
     /// supplied one (`irq_vector` other than 0xFF, the bus default).
     ///
     /// 44 cycles.
-    pub(crate) fn enter_interrupt<B: Bus<Address = u32, Data = u16> + ?Sized>(
+    pub(crate) fn enter_interrupt<B: Bus16 + ?Sized>(
         &mut self,
         bus: &mut B,
         master: BusMaster,
@@ -266,7 +266,7 @@ impl M68000 {
     /// above R/W, I/N, and the function code; the stacked PC follows the
     /// per-fault rules recorded in [`AddressError`]. A fault while pushing
     /// this frame is a double bus fault: the processor halts. 50 cycles.
-    pub(crate) fn enter_address_error<B: Bus<Address = u32, Data = u16> + ?Sized>(
+    pub(crate) fn enter_address_error<B: Bus16 + ?Sized>(
         &mut self,
         bus: &mut B,
         master: BusMaster,

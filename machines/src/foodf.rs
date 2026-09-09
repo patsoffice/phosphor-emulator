@@ -67,7 +67,7 @@ use phosphor_core::core::machine::{
     SaveState,
 };
 use phosphor_core::core::{AccessKind, AddressSpace32};
-use phosphor_core::core::{Bus, BusMaster, TimingConfig};
+use phosphor_core::core::{Bus, Bus16, BusMaster, TimingConfig, select_byte};
 use phosphor_core::cpu::m68000::M68000;
 use phosphor_core::cpu::state::M68000State;
 use phosphor_core::cpu::{Cpu, CpuStateTrait};
@@ -1226,6 +1226,124 @@ impl Bus for FoodFightBoard {
             // 0xFF ⇒ the 68000 core autovectors (vector 24 + level).
             irq_vector: 0xFF,
             ..Default::default()
+        }
+    }
+}
+
+/// Which half of the data bus a byte address selects.
+///
+/// The 68000 drives no A0. It puts an even address on the bus and asserts UDS
+/// for the even byte (D8-D15) or LDS for the odd one (D0-D7). Every byte-wide
+/// peripheral on this board hangs off **D0-D7**, so it answers only at odd
+/// addresses and a UDS transfer never reaches it at all.
+#[inline]
+fn is_lower_half(addr: u32) -> bool {
+    addr & 1 != 0
+}
+
+impl Bus16 for FoodFightBoard {
+    fn read_byte(&mut self, master: BusMaster, addr: u32) -> u8 {
+        match addr {
+            // Memory and the word-wide ports: the containing word is what the
+            // bus carries, and the strobe picks a half out of it.
+            0x00_0000..=0x00_FFFF
+            | 0x01_4000..=0x01_BFFF
+            | 0x01_C000..=0x01_C0FF
+            | 0x80_0000..=0x80_07FF
+            | 0x94_8000..=0x94_81FF => {
+                let word = self.read(master, addr & !1);
+                select_byte(word, addr)
+            }
+            // The watchdog resets on any access to its address, so either
+            // strobe does it; nothing drives data back.
+            0x95_8000..=0x95_81FF => {
+                self.watchdog_count = 0;
+                0xFF
+            }
+            // Byte-wide parts on D0-D7. An upper-half transfer does not select
+            // them, so nothing drives the bus and it reads as all ones, the
+            // same as an undecoded address.
+            0x90_0000..=0x90_01FF if is_lower_half(addr) => {
+                self.nvram[((addr >> 1) & 0xFF) as usize]
+            }
+            0x94_0000..=0x94_01FF if is_lower_half(addr) => {
+                0xFF - self.stick[self.adc_channel as usize]
+            }
+            0xA4_0000..=0xA4_001F if is_lower_half(addr) => {
+                self.pokey[1].read(((addr >> 1) & 0x0F) as u16)
+            }
+            0xA8_0000..=0xA8_001F if is_lower_half(addr) => {
+                self.pokey[0].read(((addr >> 1) & 0x0F) as u16)
+            }
+            0xAC_0000..=0xAC_001F if is_lower_half(addr) => {
+                self.pokey[2].read(((addr >> 1) & 0x0F) as u16)
+            }
+            _ => 0xFF,
+        }
+    }
+
+    fn write_byte(&mut self, master: BusMaster, addr: u32, data: u8) {
+        self.map.watch_write(0, master, addr, data as u32, 1);
+        match addr {
+            0x00_0000..=0x00_FFFF => {} // ROM, ignore
+            // RAM and the tilemap are word-wide memory, so a byte transfer
+            // patches exactly the byte its strobe selects and leaves the other
+            // alone. This is the one place a read-modify-write is honest.
+            0x01_4000..=0x01_BFFF | 0x01_C000..=0x01_C0FF | 0x80_0000..=0x80_07FF => {
+                let word_addr = addr & !1;
+                let word = self.map.read_bus_word_be(word_addr);
+                let merged = if is_lower_half(addr) {
+                    (word & 0xFF00) | data as u16
+                } else {
+                    (word & 0x00FF) | ((data as u16) << 8)
+                };
+                self.map.write_bus_word_be(word_addr, merged);
+            }
+            // Byte-wide parts on D0-D7: selected only when LDS is asserted, so
+            // an upper-half transfer does not reach them at all. The digital
+            // output and the ADC channel latch are single byte addresses on the
+            // real map, both odd.
+            0x90_0000..=0x90_01FF => {
+                if is_lower_half(addr) {
+                    self.nvram[((addr >> 1) & 0xFF) as usize] = data;
+                }
+            }
+            0x94_4000..=0x94_4007 => {
+                if is_lower_half(addr) {
+                    self.adc_channel = ((addr >> 1) & 0x07) as u8;
+                }
+            }
+            0x94_8000..=0x94_81FF => {
+                if is_lower_half(addr) {
+                    self.digital_w(data);
+                }
+            }
+            // The palette is word-wide, but only the low eight bits reach the
+            // color circuit, so an upper-half transfer changes nothing.
+            0x95_0000..=0x95_01FF => {
+                if is_lower_half(addr) {
+                    let idx = ((addr >> 1) & 0xFF) as usize;
+                    self.palette_ram[idx] = data;
+                    self.update_palette_entry(idx);
+                }
+            }
+            0x95_4000..=0x95_41FF => {} // NVRAM recall: no-op (persistent)
+            // A strobe, not a data write: either half triggers it.
+            0x95_8000..=0x95_81FF => self.watchdog_count = 0,
+            0xA4_0000..=0xA4_001F => {
+                if is_lower_half(addr) {
+                    self.pokey[1].write(((addr >> 1) & 0x0F) as u16, data);
+                }
+            }
+            0xA8_0000..=0xA8_001F => {
+                if is_lower_half(addr) {
+                    self.pokey[0].write(((addr >> 1) & 0x0F) as u16, data);
+                }
+            }
+            0xAC_0000..=0xAC_001F if is_lower_half(addr) => {
+                self.pokey[2].write(((addr >> 1) & 0x0F) as u16, data)
+            }
+            _ => {}
         }
     }
 }

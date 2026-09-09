@@ -3,7 +3,7 @@
 //! Provides flat-bus systems with no I/O devices — just a CPU and RAM.
 
 use phosphor_core::core::bus::InterruptState;
-use phosphor_core::core::{Bus, BusMaster};
+use phosphor_core::core::{Bus, Bus16, BusMaster};
 use phosphor_core::cpu::Cpu;
 use phosphor_core::cpu::i8035::I8035;
 use phosphor_core::cpu::i8088::I8088;
@@ -344,6 +344,18 @@ impl Bus for FlatBus68k {
 
     fn check_interrupts(&mut self, _target: BusMaster) -> InterruptState {
         InterruptState::default()
+    }
+}
+
+/// Nothing but RAM here, so a byte transfer touches exactly its own byte and
+/// there is no phantom read to avoid.
+impl Bus16 for FlatBus68k {
+    fn read_byte(&mut self, _master: BusMaster, addr: u32) -> u8 {
+        self.ram[(addr & 0x00FF_FFFF) as usize]
+    }
+
+    fn write_byte(&mut self, _master: BusMaster, addr: u32, data: u8) {
+        self.ram[(addr & 0x00FF_FFFF) as usize] = data;
     }
 }
 

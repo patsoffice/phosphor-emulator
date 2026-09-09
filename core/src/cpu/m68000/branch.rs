@@ -14,7 +14,7 @@
 
 use super::M68000;
 use super::addressing::{AccessResult, AddressError, Ea, Size, sext8, sext16};
-use crate::core::{Bus, BusMaster};
+use crate::core::{Bus16, BusMaster};
 
 /// Documented JMP timing per control addressing mode (M68000UM table 8-1);
 /// JSR is uniformly 8 cycles more for the return-address push.
@@ -58,7 +58,7 @@ impl M68000 {
     ///
     /// Flags: none.
     /// Cycles: taken 10 (BSR 18); not taken 8 (byte) / 12 (word).
-    pub(crate) fn op_bcc<B: Bus<Address = u32, Data = u16> + ?Sized>(
+    pub(crate) fn op_bcc<B: Bus16 + ?Sized>(
         &mut self,
         opcode: u16,
         bus: &mut B,
@@ -100,7 +100,7 @@ impl M68000 {
     ///
     /// Flags: none.
     /// Cycles: condition true 12; loop taken 10; counter expired 14.
-    pub(crate) fn op_dbcc<B: Bus<Address = u32, Data = u16> + ?Sized>(
+    pub(crate) fn op_dbcc<B: Bus16 + ?Sized>(
         &mut self,
         opcode: u16,
         bus: &mut B,
@@ -131,7 +131,7 @@ impl M68000 {
     /// EA is decoded.
     ///
     /// Flags: none.
-    pub(crate) fn op_jmp_jsr<B: Bus<Address = u32, Data = u16> + ?Sized>(
+    pub(crate) fn op_jmp_jsr<B: Bus16 + ?Sized>(
         &mut self,
         opcode: u16,
         bus: &mut B,
@@ -165,7 +165,7 @@ impl M68000 {
     /// RTS (0x4E75): pop the return address into PC.
     ///
     /// Flags: none. 16 cycles.
-    pub(crate) fn op_rts<B: Bus<Address = u32, Data = u16> + ?Sized>(
+    pub(crate) fn op_rts<B: Bus16 + ?Sized>(
         &mut self,
         bus: &mut B,
         master: BusMaster,
@@ -182,7 +182,7 @@ impl M68000 {
     ///
     /// Flags: X/N/Z/V/C loaded from the stacked word (only the five
     /// implemented CCR bits; the system byte is untouched). 20 cycles.
-    pub(crate) fn op_rtr<B: Bus<Address = u32, Data = u16> + ?Sized>(
+    pub(crate) fn op_rtr<B: Bus16 + ?Sized>(
         &mut self,
         bus: &mut B,
         master: BusMaster,

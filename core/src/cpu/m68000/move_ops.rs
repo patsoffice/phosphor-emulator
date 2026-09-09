@@ -3,7 +3,7 @@
 
 use super::M68000;
 use super::addressing::{AccessResult, Ea, Size, ea_cycles, sext8, sext16};
-use crate::core::{Bus, BusMaster};
+use crate::core::{Bus16, BusMaster};
 
 /// Destination effective-address time for MOVE (M68000UM table 8-2). Same as
 /// the source table except `-(An)`, which overlaps its decrement with the
@@ -23,7 +23,7 @@ impl M68000 {
     /// Flags (MOVE): N and Z from the moved value, V and C cleared,
     /// X untouched (data movement never alters X). MOVEA sets no flags and
     /// sign-extends a word source to the full address register.
-    pub(crate) fn op_move<B: Bus<Address = u32, Data = u16> + ?Sized>(
+    pub(crate) fn op_move<B: Bus16 + ?Sized>(
         &mut self,
         opcode: u16,
         bus: &mut B,
@@ -158,7 +158,7 @@ impl M68000 {
     /// reg→mem, 111 long reg→mem.
     ///
     /// Flags: none. 16 cycles (word) / 24 (long).
-    pub(crate) fn op_movep<B: Bus<Address = u32, Data = u16> + ?Sized>(
+    pub(crate) fn op_movep<B: Bus16 + ?Sized>(
         &mut self,
         opcode: u16,
         bus: &mut B,
@@ -196,7 +196,7 @@ impl M68000 {
     /// made it privileged).
     ///
     /// Flags: none. 6 cycles to Dn, 8 + EA to memory.
-    pub(crate) fn op_move_from_sr<B: Bus<Address = u32, Data = u16> + ?Sized>(
+    pub(crate) fn op_move_from_sr<B: Bus16 + ?Sized>(
         &mut self,
         opcode: u16,
         bus: &mut B,
@@ -231,7 +231,7 @@ impl M68000 {
     /// only the five implemented CCR bits stick.
     ///
     /// Flags: X/N/Z/V/C all loaded. 12 cycles + EA.
-    pub(crate) fn op_move_to_ccr<B: Bus<Address = u32, Data = u16> + ?Sized>(
+    pub(crate) fn op_move_to_ccr<B: Bus16 + ?Sized>(
         &mut self,
         opcode: u16,
         bus: &mut B,
@@ -254,7 +254,7 @@ impl M68000 {
     /// from a word data source, routing the S bit through the SP swap.
     ///
     /// Flags: the whole SR is loaded. 12 cycles + EA.
-    pub(crate) fn op_move_to_sr<B: Bus<Address = u32, Data = u16> + ?Sized>(
+    pub(crate) fn op_move_to_sr<B: Bus16 + ?Sized>(
         &mut self,
         opcode: u16,
         bus: &mut B,
@@ -281,7 +281,7 @@ impl M68000 {
     /// (bit 3 selects the direction).
     ///
     /// Flags: none. 4 cycles.
-    pub(crate) fn op_move_usp<B: Bus<Address = u32, Data = u16> + ?Sized>(
+    pub(crate) fn op_move_usp<B: Bus16 + ?Sized>(
         &mut self,
         opcode: u16,
         bus: &mut B,

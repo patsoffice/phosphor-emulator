@@ -8,12 +8,12 @@
 use super::super::M68000;
 use super::super::addressing::{AccessResult, Size, ea_cycles, sext16};
 use super::super::flags::SrFlag;
-use crate::core::{Bus, BusMaster};
+use crate::core::{Bus16, BusMaster};
 
 impl M68000 {
     /// Read the word source operand shared by MULx/DIVx/CHK. Returns `None`
     /// for the illegal An source mode.
-    fn muldiv_operand<B: Bus<Address = u32, Data = u16> + ?Sized>(
+    fn muldiv_operand<B: Bus16 + ?Sized>(
         &mut self,
         opcode: u16,
         bus: &mut B,
@@ -33,7 +33,7 @@ impl M68000 {
     ///
     /// Flags: N/Z from the 32-bit product, V/C cleared (a 16×16 multiply
     /// cannot overflow 32 bits), **X untouched**.
-    pub(crate) fn op_mul<B: Bus<Address = u32, Data = u16> + ?Sized>(
+    pub(crate) fn op_mul<B: Bus16 + ?Sized>(
         &mut self,
         opcode: u16,
         bus: &mut B,
@@ -68,7 +68,7 @@ impl M68000 {
     /// large for 16 bits) V is set and Dn and the other flags are left
     /// unchanged. **X untouched** in every case. Division by zero leaves Dn
     /// and the flags alone and takes the vector-5 exception.
-    pub(crate) fn op_div<B: Bus<Address = u32, Data = u16> + ?Sized>(
+    pub(crate) fn op_div<B: Bus16 + ?Sized>(
         &mut self,
         opcode: u16,
         bus: &mut B,
@@ -147,7 +147,7 @@ impl M68000 {
     /// matching its observed behavior); N is set/cleared only on the trap
     /// paths (negative/too-large) and otherwise keeps its old value.
     /// **X untouched**.
-    pub(crate) fn op_chk<B: Bus<Address = u32, Data = u16> + ?Sized>(
+    pub(crate) fn op_chk<B: Bus16 + ?Sized>(
         &mut self,
         opcode: u16,
         bus: &mut B,

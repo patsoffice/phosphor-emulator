@@ -1,4 +1,4 @@
-use phosphor_core::core::{Bus, BusMaster, bus::InterruptState};
+use phosphor_core::core::{Bus, Bus16, BusMaster, bus::InterruptState, rmw_byte, select_byte};
 
 /// Minimal bus for testing: flat 64KB read/write memory, no peripherals.
 #[allow(dead_code)] // not every test binary that includes `common` uses it
@@ -102,5 +102,18 @@ impl Bus for TestBus68k {
             irq_vector: self.irq_vector,
             ..Default::default()
         }
+    }
+}
+
+/// Flat RAM, so the read-modify-write really is what the hardware would do:
+/// there is nothing here that reacts to being read.
+impl Bus16 for TestBus68k {
+    fn read_byte(&mut self, master: BusMaster, addr: u32) -> u8 {
+        let word = self.read(master, addr & !1);
+        select_byte(word, addr)
+    }
+
+    fn write_byte(&mut self, master: BusMaster, addr: u32, data: u8) {
+        rmw_byte(self, master, addr, data);
     }
 }

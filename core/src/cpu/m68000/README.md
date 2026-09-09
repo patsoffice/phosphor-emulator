@@ -109,10 +109,13 @@ other CPU in the workspace uses this instantiation; `SimpleSystem68k`,
 `TestBus68k`, and `TracingBus68k` provide word-bus harnesses.
 
 - Longs are two word transactions, high word first.
-- Byte reads fetch the containing word and select the UDS/LDS half. **Byte
-  writes read-modify-write the containing word** — correct for RAM and
-  state validation, not faithful for side-effecting memory-mapped
-  registers. Revisit if a real machine needs strobe-accurate byte writes.
+- **A byte access is one transaction with one strobe.** The part has no A0
+  pin: it puts the address on the bus and asserts UDS for the even byte
+  (D8-D15) or LDS for the odd one (D0-D7). A byte write drives one half and
+  performs no read, so a write-only register sees exactly one access, and a
+  device wired to the other half is not accessed at all. The `Bus16` trait
+  carries this; its byte methods are required rather than provided, so no
+  bus can inherit a read-modify-write by forgetting to override one.
 - Word/long access at an odd address aborts the instruction at the
   faulting access and enters the vector-3 address-error exception, exactly
   like hardware (see Exceptions below). Branch/jump/return targets at odd

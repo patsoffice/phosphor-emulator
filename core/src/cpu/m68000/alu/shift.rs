@@ -19,7 +19,7 @@ use super::super::M68000;
 use super::super::addressing::{AccessResult, Size, ea_cycles};
 use super::super::flags::SrFlag;
 use super::binary::size_from_bits;
-use crate::core::{Bus, BusMaster};
+use crate::core::{Bus16, BusMaster};
 
 /// Shift type from bits 4-3 (register forms) or 10-9 (memory forms).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -176,7 +176,7 @@ impl M68000 {
 
     /// Memory-form shift/rotate (line 0xE, size bits 11, type in bits
     /// 10-9): one word at a memory-alterable EA, shifted by exactly one bit.
-    pub(crate) fn op_shift_mem<B: Bus<Address = u32, Data = u16> + ?Sized>(
+    pub(crate) fn op_shift_mem<B: Bus16 + ?Sized>(
         &mut self,
         opcode: u16,
         bus: &mut B,

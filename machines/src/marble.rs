@@ -16,7 +16,7 @@ use phosphor_core::core::machine::{
     AnalogAxisKind, DefaultBinding, Direction, InputConfigurable, InputControl, InputEvent,
     InputId, InputKind, MachineCore, MouseControl, Nvram, Profilable, SaveState,
 };
-use phosphor_core::core::{Bus, BusMaster};
+use phosphor_core::core::{Bus, Bus16, BusMaster, select_byte};
 use phosphor_core::cpu::Cpu;
 use phosphor_core::cpu::state::M68000State;
 
@@ -666,6 +666,30 @@ impl Bus for MarbleBus<'_> {
 
     fn check_interrupts(&mut self, target: BusMaster) -> InterruptState {
         self.board.bus_check_interrupts(target)
+    }
+}
+
+impl Bus16 for MarbleBus<'_> {
+    fn read_byte(&mut self, master: BusMaster, addr: u32) -> u8 {
+        match addr {
+            // The trackball counters are a word-wide port: the bus carries the
+            // whole word and the strobe picks a half.
+            0xF2_0000..=0xF2_0007 => {
+                let v = self.trackball_read(addr & !1);
+                self.board.note_read(master, addr, v);
+                select_byte(v, addr)
+            }
+            // Marble has no ADC; the window reads as an open lower half.
+            0xF4_0000..=0xF4_001F => {
+                self.board.note_read(master, addr, 0x00FF);
+                0xFF
+            }
+            _ => self.board.bus_read_byte(master, addr),
+        }
+    }
+
+    fn write_byte(&mut self, master: BusMaster, addr: u32, data: u8) {
+        self.board.bus_write_byte(master, addr, data);
     }
 }
 

@@ -12,12 +12,12 @@
 //!
 //! - **Word**: one transaction. **Long**: two transactions (big-endian, high
 //!   word first).
-//! - **Byte**: the containing word is read and the high (even address / UDS)
-//!   or low (odd address / LDS) byte selected. Byte *writes*
-//!   read-modify-write the containing word. This is correct for RAM (and for
-//!   state-comparison validation, since the other byte is preserved) but not
-//!   faithful for write-only or side-effecting memory-mapped registers —
-//!   revisit if a real machine needs strobe-accurate byte writes.
+//! - **Byte**: one transaction with one strobe. The part has no A0 pin: it
+//!   puts the address on the bus and asserts UDS for the even byte (D8-D15) or
+//!   LDS for the odd one (D0-D7). A byte write therefore drives one half and
+//!   reads nothing, and a device wired to the other half is not accessed at
+//!   all. The bus carries this through [`crate::core::Bus16`], whose byte
+//!   methods each bus must implement rather than inherit.
 //! - **Odd word/long addresses** raise an [`AddressError`] that propagates
 //!   out of the instruction handler, aborting the instruction at the
 //!   faulting access exactly like hardware (side effects already applied
@@ -29,7 +29,7 @@
 //! only when driven onto the bus.
 
 use super::M68000;
-use crate::core::{Bus, BusMaster};
+use crate::core::{Bus16, BusMaster};
 
 /// Operand size of an instruction.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -159,7 +159,7 @@ impl M68000 {
     }
 
     /// Read one word at `addr`; odd addresses raise the address error.
-    pub(crate) fn read_word_at<B: Bus<Address = u32, Data = u16> + ?Sized>(
+    pub(crate) fn read_word_at<B: Bus16 + ?Sized>(
         &mut self,
         bus: &mut B,
         master: BusMaster,
@@ -174,7 +174,7 @@ impl M68000 {
     }
 
     /// Write one word at `addr`; odd addresses raise the address error.
-    pub(crate) fn write_word_at<B: Bus<Address = u32, Data = u16> + ?Sized>(
+    pub(crate) fn write_word_at<B: Bus16 + ?Sized>(
         &mut self,
         bus: &mut B,
         master: BusMaster,
@@ -191,7 +191,7 @@ impl M68000 {
     }
 
     /// Read a long word as two word transactions (big-endian, high first).
-    pub(crate) fn read_long_at<B: Bus<Address = u32, Data = u16> + ?Sized>(
+    pub(crate) fn read_long_at<B: Bus16 + ?Sized>(
         &mut self,
         bus: &mut B,
         master: BusMaster,
@@ -203,7 +203,7 @@ impl M68000 {
     }
 
     /// Write a long word as two word transactions (big-endian, high first).
-    pub(crate) fn write_long_at<B: Bus<Address = u32, Data = u16> + ?Sized>(
+    pub(crate) fn write_long_at<B: Bus16 + ?Sized>(
         &mut self,
         bus: &mut B,
         master: BusMaster,
@@ -214,51 +214,42 @@ impl M68000 {
         self.write_word_at(bus, master, addr.wrapping_add(2), data as u16)
     }
 
-    /// Read one byte: fetch the containing word and select the high byte
-    /// (even address / UDS) or low byte (odd address / LDS).
-    pub(crate) fn read_byte_at<B: Bus<Address = u32, Data = u16> + ?Sized>(
+    /// Read one byte as a single bus cycle, asserting UDS for an even address
+    /// and LDS for an odd one.
+    ///
+    /// The address pins carry the exact byte address, which is what an
+    /// address-snooping device on the bus sees.
+    pub(crate) fn read_byte_at<B: Bus16 + ?Sized>(
         &mut self,
         bus: &mut B,
         master: BusMaster,
         addr: u32,
     ) -> u8 {
-        // The chip's address pins see the exact (possibly odd) byte address,
-        // even though our 16-bit backing store is read word-aligned.
-        bus.observe_data_access(master, self.mask_addr(addr), false);
-        let word = bus.read(master, self.mask_addr(addr & !1));
-        if addr & 1 == 0 {
-            (word >> 8) as u8
-        } else {
-            word as u8
-        }
+        let a = self.mask_addr(addr);
+        bus.observe_data_access(master, a, false);
+        bus.read_byte(master, a)
     }
 
-    /// Write one byte by read-modify-writing the containing word (see the
-    /// module docs for the MMIO caveat).
-    pub(crate) fn write_byte_at<B: Bus<Address = u32, Data = u16> + ?Sized>(
+    /// Write one byte as a single bus cycle, asserting the one strobe that byte
+    /// sits behind.
+    ///
+    /// The part performs no read here. It puts the word address on the bus,
+    /// drives the byte onto the half its strobe selects, and that is the whole
+    /// transfer: a device wired to the other half is not accessed at all.
+    pub(crate) fn write_byte_at<B: Bus16 + ?Sized>(
         &mut self,
         bus: &mut B,
         master: BusMaster,
         addr: u32,
         data: u8,
     ) {
-        let word_addr = self.mask_addr(addr & !1);
-        // The real 68010 performs a byte write as a single bus cycle, so the
-        // chip sees exactly one access at the byte address. The word read below
-        // is an emulation artifact of merging into our 16-bit store and is NOT
-        // observed; only the byte write itself is.
-        bus.observe_data_access(master, self.mask_addr(addr), true);
-        let word = bus.read(master, word_addr);
-        let merged = if addr & 1 == 0 {
-            (word & 0x00FF) | ((data as u16) << 8)
-        } else {
-            (word & 0xFF00) | data as u16
-        };
-        bus.write(master, word_addr, merged);
+        let a = self.mask_addr(addr);
+        bus.observe_data_access(master, a, true);
+        bus.write_byte(master, a, data);
     }
 
     /// Push a word onto the active stack (A7 predecrements by 2).
-    pub(crate) fn push_word<B: Bus<Address = u32, Data = u16> + ?Sized>(
+    pub(crate) fn push_word<B: Bus16 + ?Sized>(
         &mut self,
         bus: &mut B,
         master: BusMaster,
@@ -269,7 +260,7 @@ impl M68000 {
     }
 
     /// Push a long word onto the active stack (A7 predecrements by 4).
-    pub(crate) fn push_long<B: Bus<Address = u32, Data = u16> + ?Sized>(
+    pub(crate) fn push_long<B: Bus16 + ?Sized>(
         &mut self,
         bus: &mut B,
         master: BusMaster,
@@ -280,7 +271,7 @@ impl M68000 {
     }
 
     /// Pop a word from the active stack (A7 postincrements by 2).
-    pub(crate) fn pop_word<B: Bus<Address = u32, Data = u16> + ?Sized>(
+    pub(crate) fn pop_word<B: Bus16 + ?Sized>(
         &mut self,
         bus: &mut B,
         master: BusMaster,
@@ -291,7 +282,7 @@ impl M68000 {
     }
 
     /// Pop a long word from the active stack (A7 postincrements by 4).
-    pub(crate) fn pop_long<B: Bus<Address = u32, Data = u16> + ?Sized>(
+    pub(crate) fn pop_long<B: Bus16 + ?Sized>(
         &mut self,
         bus: &mut B,
         master: BusMaster,
@@ -305,7 +296,7 @@ impl M68000 {
     /// (the prefetch primitive). PC is invariantly even — every control
     /// transfer to an odd address faults before it is fetched from — so
     /// this access cannot raise an address error.
-    pub(crate) fn read_imm_word<B: Bus<Address = u32, Data = u16> + ?Sized>(
+    pub(crate) fn read_imm_word<B: Bus16 + ?Sized>(
         &mut self,
         bus: &mut B,
         master: BusMaster,
@@ -363,7 +354,7 @@ impl M68000 {
     /// Decode a 6-bit effective-address field (`mode`, `reg`) for an operand
     /// of `size`, fetching extension words and applying postincrement /
     /// predecrement side effects.
-    pub(crate) fn decode_ea<B: Bus<Address = u32, Data = u16> + ?Sized>(
+    pub(crate) fn decode_ea<B: Bus16 + ?Sized>(
         &mut self,
         bus: &mut B,
         master: BusMaster,
@@ -451,7 +442,7 @@ impl M68000 {
     /// Read an operand of `size` through a resolved [`Ea`]. Register and
     /// immediate operands are masked to the operand size; sign extension is
     /// the consumer's job (MOVEA/ADDA/CMPA).
-    pub(crate) fn ea_read<B: Bus<Address = u32, Data = u16> + ?Sized>(
+    pub(crate) fn ea_read<B: Bus16 + ?Sized>(
         &mut self,
         bus: &mut B,
         master: BusMaster,
@@ -478,7 +469,7 @@ impl M68000 {
     /// Byte/word writes to Dn preserve the upper register bits; word writes
     /// to An sign-extend to the full 32 bits (address registers have no
     /// partial-width writes).
-    pub(crate) fn ea_write<B: Bus<Address = u32, Data = u16> + ?Sized>(
+    pub(crate) fn ea_write<B: Bus16 + ?Sized>(
         &mut self,
         bus: &mut B,
         master: BusMaster,

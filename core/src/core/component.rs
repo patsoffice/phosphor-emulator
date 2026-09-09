@@ -3,7 +3,7 @@ use super::bus::BusMaster;
 /// Extension for components that act as bus masters (CPUs, DMA controllers)
 ///
 /// The bus is a parameter of the *trait* rather than of the method, so a
-/// component dispatches to whatever concrete bus it is handed and the optimiser
+/// component dispatches to whatever concrete bus it is handed and the optimizer
 /// can see through the call, and so an implementor can **narrow what it demands
 /// of that bus**. A bound written on the method could only ever be the one this
 /// trait declared, which every implementor would then be stuck with: the M68000

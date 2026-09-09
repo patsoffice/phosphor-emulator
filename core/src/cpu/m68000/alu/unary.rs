@@ -9,7 +9,7 @@ use super::super::M68000;
 use super::super::addressing::{AccessResult, Size, ea_cycles, sext8, sext16};
 use super::super::flags::SrFlag;
 use super::binary::size_from_bits;
-use crate::core::{Bus, BusMaster};
+use crate::core::{Bus16, BusMaster};
 
 /// Which line-0x4 read-modify-write operation to perform.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -32,7 +32,7 @@ impl M68000 {
     /// any non-zero operand); NEGX consumes X as borrow-in and follows the
     /// multi-precision Z rule (never set); NOT and CLR follow the logical
     /// rule (N/Z, V/C cleared, **X untouched**).
-    pub(crate) fn op_unary<B: Bus<Address = u32, Data = u16> + ?Sized>(
+    pub(crate) fn op_unary<B: Bus16 + ?Sized>(
         &mut self,
         opcode: u16,
         bus: &mut B,
@@ -118,7 +118,7 @@ impl M68000 {
     ///
     /// Flags: N/Z from the value *before* bit 7 is set, V/C cleared,
     /// **X untouched**.
-    pub(crate) fn op_tas<B: Bus<Address = u32, Data = u16> + ?Sized>(
+    pub(crate) fn op_tas<B: Bus16 + ?Sized>(
         &mut self,
         opcode: u16,
         bus: &mut B,
@@ -151,7 +151,7 @@ impl M68000 {
     /// Data-alterable destination only.
     ///
     /// Flags: none (Scc never alters the CCR).
-    pub(crate) fn op_scc<B: Bus<Address = u32, Data = u16> + ?Sized>(
+    pub(crate) fn op_scc<B: Bus16 + ?Sized>(
         &mut self,
         opcode: u16,
         bus: &mut B,

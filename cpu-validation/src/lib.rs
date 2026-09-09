@@ -1,5 +1,5 @@
 use phosphor_core::core::bus::InterruptState;
-use phosphor_core::core::{Bus, BusMaster};
+use phosphor_core::core::{Bus, Bus16, BusMaster, rmw_byte, select_byte};
 use serde::{Deserialize, Serialize};
 
 pub mod m68000_bin;
@@ -1320,6 +1320,19 @@ impl Bus for TracingBus68k {
     }
 }
 
+/// Flat RAM: the read-modify-write is what the hardware would do here, since
+/// nothing in this bus reacts to being read.
+impl Bus16 for TracingBus68k {
+    fn read_byte(&mut self, master: BusMaster, addr: u32) -> u8 {
+        let word = self.read(master, addr & !1);
+        select_byte(word, addr)
+    }
+
+    fn write_byte(&mut self, master: BusMaster, addr: u32, data: u8) {
+        rmw_byte(self, master, addr, data);
+    }
+}
+
 /// One access this emulator made, in the order it made it.
 ///
 /// Deliberately *not* shaped like [`BusTxn`]. This core drives the bus a word
@@ -1329,9 +1342,12 @@ impl Bus for TracingBus68k {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OurAccess {
     pub write: bool,
-    /// The word address presented to the bus.
+    /// The address presented to the bus: the word address for a word transfer,
+    /// the exact byte address for a byte one.
     pub addr: u32,
     pub data: u16,
+    /// True for a single-strobe byte transfer, false for a full word.
+    pub byte: bool,
 }
 
 /// [`TracingBus68k`] with an access log, for comparing this core's bus activity
@@ -1385,6 +1401,7 @@ impl Bus for RecordingBus68k {
                 write: false,
                 addr: i as u32,
                 data,
+                byte: false,
             });
         }
         data
@@ -1399,6 +1416,7 @@ impl Bus for RecordingBus68k {
                 write: true,
                 addr: i as u32,
                 data,
+                byte: false,
             });
         }
     }
@@ -1409,6 +1427,44 @@ impl Bus for RecordingBus68k {
 
     fn check_interrupts(&mut self, _target: BusMaster) -> InterruptState {
         InterruptState::default()
+    }
+}
+
+/// Byte accesses are logged as **one** transfer each, which is the point.
+///
+/// Going through [`rmw_byte`] here would log a read and a write for every byte
+/// write and put this bus back to reporting the very shape the strobes exist to
+/// remove, so the memory is patched directly instead. The backing store is flat
+/// RAM, so nothing is lost by not reading first.
+impl Bus16 for RecordingBus68k {
+    fn read_byte(&mut self, master: BusMaster, addr: u32) -> u8 {
+        let i = (addr & 0x00FF_FFFF) as usize;
+        let data = self.memory[i];
+        if self.recording {
+            self.log.push(OurAccess {
+                write: false,
+                addr: addr & 0x00FF_FFFF,
+                data: data as u16,
+                byte: true,
+            });
+        }
+        let _ = master;
+        data
+    }
+
+    fn write_byte(&mut self, master: BusMaster, addr: u32, data: u8) {
+        let i = (addr & 0x00FF_FFFF) as usize;
+        self.memory[i] = data;
+        self.dirty_writes.push((i & !1) as u32);
+        if self.recording {
+            self.log.push(OurAccess {
+                write: true,
+                addr: addr & 0x00FF_FFFF,
+                data: data as u16,
+                byte: true,
+            });
+        }
+        let _ = master;
     }
 }
 

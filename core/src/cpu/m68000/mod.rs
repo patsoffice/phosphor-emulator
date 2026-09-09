@@ -25,7 +25,7 @@ use alu::binary::LogicalOp;
 use alu::unary::UnaryOp;
 pub use flags::SrFlag;
 
-use crate::core::{Bus, BusMaster, bus::InterruptState, component::BusMasterComponent};
+use crate::core::{Bus16, BusMaster, bus::InterruptState, component::BusMasterComponent};
 use crate::cpu::{
     Cpu, CpuControl,
     state::{CpuStateTrait, M68000State},
@@ -168,11 +168,7 @@ impl M68000 {
     }
 
     /// Execute one bus cycle.
-    pub fn execute_cycle<B: Bus<Address = u32, Data = u16> + ?Sized>(
-        &mut self,
-        bus: &mut B,
-        master: BusMaster,
-    ) {
+    pub fn execute_cycle<B: Bus16 + ?Sized>(&mut self, bus: &mut B, master: BusMaster) {
         match self.state {
             ExecState::Fetch => {
                 if self.halted {
@@ -260,7 +256,7 @@ impl M68000 {
     /// here as they are implemented.
     /// Returns the [`addressing::AddressError`] of the access that aborted
     /// the instruction, if any; the caller enters the vector-3 exception.
-    fn execute_instruction<B: Bus<Address = u32, Data = u16> + ?Sized>(
+    fn execute_instruction<B: Bus16 + ?Sized>(
         &mut self,
         opcode: u16,
         bus: &mut B,
@@ -425,7 +421,7 @@ impl M68000 {
 // Trait implementations
 // ---------------------------------------------------------------------------
 
-impl<B: Bus<Address = u32, Data = u16> + ?Sized> BusMasterComponent<B> for M68000 {
+impl<B: Bus16 + ?Sized> BusMasterComponent<B> for M68000 {
     type Address = u32;
     type Data = u16;
 
@@ -435,7 +431,7 @@ impl<B: Bus<Address = u32, Data = u16> + ?Sized> BusMasterComponent<B> for M6800
     }
 }
 
-impl<B: Bus<Address = u32, Data = u16> + ?Sized> Cpu<B> for M68000 {
+impl<B: Bus16 + ?Sized> Cpu<B> for M68000 {
     fn reset(&mut self, bus: &mut B, master: BusMaster) {
         // Reset enters supervisor mode with trace off and interrupts masked,
         // then loads SSP from vector 0 and PC from vector 1.
@@ -518,7 +514,7 @@ impl DebugCpu for M68000 {
 /// byte memory served 16 bits at a time at even addresses.
 #[cfg(test)]
 pub(crate) mod test_support {
-    use crate::core::{Bus, BusMaster, bus::InterruptState};
+    use crate::core::{Bus, Bus16, BusMaster, bus::InterruptState};
 
     pub(crate) struct WordBus {
         pub(crate) memory: Vec<u8>,
@@ -558,6 +554,17 @@ pub(crate) mod test_support {
 
         fn check_interrupts(&mut self, _target: BusMaster) -> InterruptState {
             InterruptState::default()
+        }
+    }
+
+    /// Flat RAM: a byte transfer touches its own byte and nothing else.
+    impl Bus16 for WordBus {
+        fn read_byte(&mut self, _master: BusMaster, addr: u32) -> u8 {
+            self.memory[(addr & 0xFFFF) as usize]
+        }
+
+        fn write_byte(&mut self, _master: BusMaster, addr: u32, data: u8) {
+            self.memory[(addr & 0xFFFF) as usize] = data;
         }
     }
 }

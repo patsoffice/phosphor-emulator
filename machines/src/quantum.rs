@@ -65,7 +65,7 @@ use phosphor_core::core::machine::{
     MachineCore, MouseControl, Nvram, Profilable, Renderable, SaveState,
 };
 use phosphor_core::core::{AccessKind, AddressSpace32};
-use phosphor_core::core::{Bus, BusMaster, TimingConfig};
+use phosphor_core::core::{Bus, Bus16, BusMaster, TimingConfig, select_byte};
 use phosphor_core::cpu::m68000::M68000;
 use phosphor_core::cpu::state::M68000State;
 use phosphor_core::cpu::{Cpu, CpuStateTrait};
@@ -738,6 +738,89 @@ impl Bus for QuantumBoard {
             // 0xFF ⇒ the 68000 core autovectors (vector 25 for level 1).
             irq_vector: 0xFF,
             ..Default::default()
+        }
+    }
+}
+
+/// The 68000 drives no A0: it asserts UDS for the even byte of a word and LDS
+/// for the odd one. The two POKEYs and the NVRAM are the only byte-wide parts
+/// here and all three hang off D0-D7, so they answer at odd addresses only and
+/// an upper-half transfer never selects them.
+impl Bus16 for QuantumBoard {
+    fn read_byte(&mut self, master: BusMaster, addr: u32) -> u8 {
+        match addr {
+            // Word-wide memory and ports: the bus carries the whole word and
+            // the strobe picks a half out of it.
+            0x00_0000..=0x01_3FFF
+            | 0x01_8000..=0x01_CFFF
+            | 0x80_0000..=0x80_1FFF
+            | 0x94_0000..=0x94_0001
+            | 0x94_8000..=0x94_8001 => {
+                let word = self.read(master, addr & !1);
+                select_byte(word, addr)
+            }
+            // Byte-wide parts on D0-D7. An upper-half transfer does not select
+            // them, so nothing drives the bus and it reads as all ones, the
+            // same as an undecoded address.
+            0x84_0000..=0x84_001F if addr & 1 != 0 => {
+                self.pokey[0].read(((addr >> 1) & 0x0F) as u16)
+            }
+            0x84_0020..=0x84_003F if addr & 1 != 0 => {
+                self.pokey[1].read(((addr >> 1) & 0x0F) as u16)
+            }
+            0x90_0000..=0x90_01FF if addr & 1 != 0 => self.nvram[((addr >> 1) & 0xFF) as usize],
+            _ => 0xFF,
+        }
+    }
+
+    fn write_byte(&mut self, master: BusMaster, addr: u32, data: u8) {
+        self.map.watch_write(0, master, addr, data as u32, 1);
+        match addr {
+            0x00_0000..=0x01_3FFF => {} // ROM, ignore
+            // Word-wide RAM: patch the byte the strobe selects, leave the other
+            // alone. A read-modify-write is honest here because it is memory.
+            0x01_8000..=0x01_CFFF | 0x80_0000..=0x80_1FFF => {
+                let word_addr = addr & !1;
+                let word = self.map.read_bus_word_be(word_addr);
+                let merged = if addr & 1 != 0 {
+                    (word & 0xFF00) | data as u16
+                } else {
+                    (word & 0x00FF) | ((data as u16) << 8)
+                };
+                self.map.write_bus_word_be(word_addr, merged);
+            }
+            // Byte-wide parts on D0-D7: selected only when LDS is asserted, so
+            // an upper-half transfer does not reach them at all.
+            0x84_0000..=0x84_001F => {
+                if addr & 1 != 0 {
+                    self.pokey[0].write(((addr >> 1) & 0x0F) as u16, data);
+                }
+            }
+            0x84_0020..=0x84_003F => {
+                if addr & 1 != 0 {
+                    self.pokey[1].write(((addr >> 1) & 0x0F) as u16, data);
+                }
+            }
+            0x90_0000..=0x90_01FF => {
+                if addr & 1 != 0 {
+                    self.nvram[((addr >> 1) & 0xFF) as usize] = data;
+                }
+            }
+            // Word-wide parts. The address decode selects them; the color RAM
+            // keeps only the low byte the AVG reads, and the rest are strobes
+            // that fire on the access rather than on its data, so either half
+            // triggers them exactly as a word write does.
+            0x95_0000..=0x95_001F => {
+                if addr & 1 != 0 {
+                    self.color_ram[((addr >> 1) & 0x0F) as usize] = data;
+                }
+            }
+            0x95_8000..=0x95_8001 => self.led_w(data),
+            0x96_0000..=0x96_0001 => {} // NVRAM recall: no-op (persistent)
+            0x96_8000..=0x96_8001 => self.avg.reset(),
+            0x97_0000..=0x97_0001 => self.trigger_avg(),
+            0x97_8000..=0x97_8001 => self.watchdog_count = 0,
+            _ => {}
         }
     }
 }

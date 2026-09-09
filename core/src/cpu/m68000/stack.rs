@@ -9,7 +9,7 @@
 
 use super::M68000;
 use super::addressing::{AccessResult, Ea, Size, sext16};
-use crate::core::{Bus, BusMaster};
+use crate::core::{Bus16, BusMaster};
 
 /// Documented LEA timing per control addressing mode (M68000UM table 8-1);
 /// PEA is uniformly 8 cycles more for the long push.
@@ -33,7 +33,7 @@ impl M68000 {
     /// into An or push it onto the stack.
     ///
     /// Flags: none.
-    pub(crate) fn op_lea_pea<B: Bus<Address = u32, Data = u16> + ?Sized>(
+    pub(crate) fn op_lea_pea<B: Bus16 + ?Sized>(
         &mut self,
         opcode: u16,
         bus: &mut B,
@@ -67,7 +67,7 @@ impl M68000 {
     /// also the stack pointer doing the pushing.
     ///
     /// Flags: none. 16 cycles.
-    pub(crate) fn op_link<B: Bus<Address = u32, Data = u16> + ?Sized>(
+    pub(crate) fn op_link<B: Bus16 + ?Sized>(
         &mut self,
         opcode: u16,
         bus: &mut B,
@@ -94,7 +94,7 @@ impl M68000 {
     /// increment is overwritten by the load).
     ///
     /// Flags: none. 12 cycles.
-    pub(crate) fn op_unlk<B: Bus<Address = u32, Data = u16> + ?Sized>(
+    pub(crate) fn op_unlk<B: Bus16 + ?Sized>(
         &mut self,
         opcode: u16,
         bus: &mut B,
@@ -138,7 +138,7 @@ impl M68000 {
     /// at the final incremented address (the fetched value is discarded).
     ///
     /// Flags: none.
-    pub(crate) fn op_movem<B: Bus<Address = u32, Data = u16> + ?Sized>(
+    pub(crate) fn op_movem<B: Bus16 + ?Sized>(
         &mut self,
         opcode: u16,
         bus: &mut B,
