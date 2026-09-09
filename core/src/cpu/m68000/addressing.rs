@@ -132,6 +132,27 @@ pub(crate) fn ea_cycles(mode: u8, reg: u8, size: Size) -> u32 {
     }
 }
 
+/// The clocks an addressing mode spends *away* from the bus.
+///
+/// [`ea_cycles`] is a mode's documented total, and every transfer inside it is
+/// four clocks, so whatever is left over is address arithmetic the part does
+/// with the bus idle. There are only two such costs on this machine: two clocks
+/// to predecrement an address register, and two to add an index register. Every
+/// other mode computes its address inside time it is already spending on a
+/// transfer, which is why its documented cost is a whole number of bus cycles.
+///
+/// This is the half of the timing table that survives once cycle counts are
+/// charged from bus activity rather than looked up: the transfers are counted
+/// as they happen, and this is what has to be added to them.
+pub(crate) fn ea_internal(mode: u8, reg: u8) -> u32 {
+    match mode & 7 {
+        4 => 2,                 // -(An): the predecrement
+        6 => 2,                 // d8(An,Xn): the index add
+        7 if reg & 7 == 3 => 2, // d8(PC,Xn): likewise
+        _ => 0,
+    }
+}
+
 /// Sign-extend a byte to 32 bits.
 #[inline]
 pub(crate) fn sext8(v: u8) -> u32 {
@@ -170,6 +191,7 @@ impl M68000 {
         }
         let a = self.mask_addr(addr);
         bus.observe_data_access(master, a, false);
+        self.transfers += 1;
         Ok(bus.read(master, a))
     }
 
@@ -186,6 +208,7 @@ impl M68000 {
         }
         let a = self.mask_addr(addr);
         bus.observe_data_access(master, a, true);
+        self.transfers += 1;
         bus.write(master, a, data);
         Ok(())
     }
@@ -227,6 +250,7 @@ impl M68000 {
     ) -> u8 {
         let a = self.mask_addr(addr);
         bus.observe_data_access(master, a, false);
+        self.transfers += 1;
         bus.read_byte(master, a)
     }
 
@@ -245,6 +269,7 @@ impl M68000 {
     ) {
         let a = self.mask_addr(addr);
         bus.observe_data_access(master, a, true);
+        self.transfers += 1;
         bus.write_byte(master, a, data);
     }
 
@@ -302,6 +327,7 @@ impl M68000 {
         master: BusMaster,
     ) -> u16 {
         debug_assert!(self.pc & 1 == 0, "instruction stream PC must be even");
+        self.transfers += 1;
         let word = bus.read(master, self.mask_addr(self.pc));
         self.pc = self.pc.wrapping_add(2);
         // Run the prefetch one word ahead of the consumption pointer, presenting
@@ -505,6 +531,40 @@ mod tests {
     use super::*;
 
     const M: BusMaster = BusMaster::Cpu(0);
+
+    /// Every addressing mode's documented cost, less the clocks it spends away
+    /// from the bus, must be a whole number of four-clock transfers.
+    ///
+    /// This is the consistency check on splitting [`ea_cycles`] into transfers
+    /// plus [`ea_internal`]. If a mode ever fails it, the split is wrong for
+    /// that mode and any instruction charging its time from bus activity would
+    /// silently mis-time it. The recorded traces say the same thing from the
+    /// other side: no case in either corpus has a length shorter than four
+    /// clocks per transfer.
+    #[test]
+    fn every_mode_costs_a_whole_number_of_bus_cycles_plus_its_internal_time() {
+        for size in [Size::Byte, Size::Word, Size::Long] {
+            for mode in 0..8u8 {
+                // Mode 7 selects one of five encodings by register; the others
+                // ignore it.
+                let regs: &[u8] = if mode == 7 { &[0, 1, 2, 3, 4] } else { &[0] };
+                for &reg in regs {
+                    let total = ea_cycles(mode, reg, size);
+                    let internal = ea_internal(mode, reg);
+                    assert!(
+                        total >= internal,
+                        "mode {mode} reg {reg} {size:?}: internal {internal} exceeds total {total}"
+                    );
+                    assert_eq!(
+                        (total - internal) % 4,
+                        0,
+                        "mode {mode} reg {reg} {size:?}: {total} less {internal} internal \
+                         is not a whole number of four-clock transfers"
+                    );
+                }
+            }
+        }
+    }
 
     fn setup() -> (M68000, WordBus) {
         (M68000::new(), WordBus::new())

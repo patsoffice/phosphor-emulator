@@ -2,18 +2,8 @@
 //! data movement instructions.
 
 use super::M68000;
-use super::addressing::{AccessResult, Ea, Size, ea_cycles, sext8, sext16};
+use super::addressing::{AccessResult, Ea, Size, ea_cycles, ea_internal, sext8, sext16};
 use crate::core::{Bus16, BusMaster};
-
-/// Destination effective-address time for MOVE (M68000UM table 8-2). Same as
-/// the source table except `-(An)`, which overlaps its decrement with the
-/// write and costs the same as `(An)`.
-fn move_dest_cycles(mode: u8, reg: u8, size: Size) -> u32 {
-    match mode & 7 {
-        4 => ea_cycles(2, reg, size),
-        m => ea_cycles(m, reg, size),
-    }
-}
 
 impl M68000 {
     /// MOVE <ea>,<ea> and MOVEA <ea>,An — lines 0x1 (byte), 0x2 (long),
@@ -114,9 +104,20 @@ impl M68000 {
             }
         }
 
-        let cycles =
-            4 + ea_cycles(src_mode, src_reg, size) + move_dest_cycles(dst_mode, dst_reg, size);
-        self.finish(cycles);
+        // Charged from the transfers this actually made, not from the table.
+        // MOVE's own internal time is nil: the opcode fetch and every operand
+        // access are bus cycles, and the only clocks it spends off the bus are
+        // the address arithmetic of its two modes. A predecrement *destination*
+        // is the documented exception: the part overlaps the decrement with the
+        // write it is already committed to, so it costs its transfer and no
+        // more, where the same mode as a *source* pays two clocks for it.
+        let internal = ea_internal(src_mode, src_reg)
+            + if dst_mode & 7 == 4 {
+                0
+            } else {
+                ea_internal(dst_mode, dst_reg)
+            };
+        self.finish_from_bus(internal);
         Ok(())
     }
 
@@ -330,10 +331,36 @@ mod tests {
     // destination-cycle quirk.
     use super::*;
 
+    /// A predecrement *destination* costs MOVE nothing beyond its write.
+    ///
+    /// As a source, `-(An)` spends two clocks decrementing before it can put
+    /// an address on the bus. As a destination it does not: the part overlaps
+    /// the decrement with the write it is already committed to, so the mode
+    /// costs exactly its one transfer. That is why the destination side of
+    /// `op_move` contributes no internal time for mode 4 while the source side
+    /// contributes two, and it is the one asymmetry in MOVE's timing.
     #[test]
-    fn move_dest_predecrement_costs_same_as_indirect() {
-        assert_eq!(move_dest_cycles(4, 0, Size::Word), 4);
-        assert_eq!(move_dest_cycles(4, 0, Size::Long), 8);
-        assert_eq!(move_dest_cycles(5, 0, Size::Word), 8);
+    fn a_predecrement_destination_costs_nothing_beyond_its_write() {
+        assert_eq!(
+            ea_internal(4, 0),
+            2,
+            "as a source it pays for the decrement"
+        );
+
+        // The destination arm zeroes exactly that, and nothing else.
+        let dest_internal = |mode: u8, reg: u8| {
+            if mode & 7 == 4 {
+                0
+            } else {
+                ea_internal(mode, reg)
+            }
+        };
+        assert_eq!(dest_internal(4, 0), 0, "as a destination it does not");
+        assert_eq!(dest_internal(2, 0), 0, "(An) never had internal time");
+        assert_eq!(
+            dest_internal(6, 0),
+            2,
+            "an indexed destination still pays for its index add"
+        );
     }
 }

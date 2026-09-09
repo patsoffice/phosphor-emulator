@@ -107,6 +107,15 @@ pub struct M68000 {
     /// Resynced to `pc` whenever the queue is flushed (branch/jump/exception).
     #[save_skip(default)]
     pub(crate) prefetch_pc: u32,
+    /// Bus transfers the instruction now executing has performed.
+    ///
+    /// Every transfer on this part is four clocks at immediate DTACK, so an
+    /// instruction's time is four clocks per transfer plus whatever it spends
+    /// away from the bus. Instructions timed through [`Self::finish_from_bus`]
+    /// charge from this count rather than from a table total, which is what
+    /// stops a right total from hiding wrong bus activity.
+    #[save_skip(default)]
+    pub(crate) transfers: u32,
 }
 
 impl Default for M68000 {
@@ -133,6 +142,7 @@ impl M68000 {
             opcode: 0,
             instr_pc: 0,
             prefetch_pc: 0,
+            transfers: 0,
         }
     }
 
@@ -187,6 +197,7 @@ impl M68000 {
                 }
 
                 self.instr_pc = self.pc;
+                self.transfers = 0;
                 if self.pc & 1 != 0 {
                     // Defensive: control transfers fault before loading an
                     // odd PC, but external state (a bad reset vector, a
@@ -246,6 +257,22 @@ impl M68000 {
         } else {
             ExecState::Execute(total_cycles - 1)
         };
+    }
+
+    /// Complete an instruction, charging four clocks for every bus transfer it
+    /// actually performed plus `internal` clocks away from the bus.
+    ///
+    /// This is the same arithmetic the part does, and it is what the recorded
+    /// traces show: their entries tile each instruction's length, every
+    /// transfer is four clocks at immediate DTACK, and no case in either
+    /// corpus has a length shorter than four clocks per transfer.
+    ///
+    /// The point of charging this way rather than from a documented total is
+    /// that the total can be right while the bus activity underneath it is
+    /// wrong, which is two errors agreeing to look like none. Here a wrong
+    /// transfer count cannot hide: it moves the clock count with it.
+    pub(crate) fn finish_from_bus(&mut self, internal: u32) {
+        self.finish(4 * self.transfers + internal);
     }
 
     /// Decode and execute one instruction, leaving `self.state` either back
