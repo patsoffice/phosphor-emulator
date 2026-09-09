@@ -902,10 +902,31 @@ pub struct M68000TestCase {
     pub initial: M68000Regs,
     #[serde(rename = "final")]
     pub final_state: M68000Regs,
-    /// Documented execution length in clock cycles (not compared yet:
-    /// the harness is state-only).
+    /// Execution length in clock cycles.
     pub length: u32,
-    // `transactions` (per-cycle bus trace) is present but unused
+    /// The per-cycle bus trace: every transfer and every idle gap, in order,
+    /// tiling the instruction exactly. The state-only gate ignores this; the
+    /// per-cycle gate is built on it.
+    #[serde(default)]
+    pub transactions: BusTrace,
+}
+
+impl M68000TestCase {
+    /// Total clocks accounted for by the trace.
+    pub fn traced_clocks(&self) -> u32 {
+        self.transactions.iter().map(|t| t.clocks).sum()
+    }
+
+    /// Whether the trace tiles the recorded length exactly.
+    ///
+    /// This is the harness's own check on its oracle rather than a check on
+    /// this emulator, and it has to hold before any positional comparison
+    /// means anything: entries that do not tile cannot say which clock a bus
+    /// cycle starts on. `length` is stored alongside the trace rather than
+    /// derived from it in both suites, so the two can disagree.
+    pub fn tiles(&self) -> bool {
+        self.traced_clocks() == self.length
+    }
 }
 
 /// Full 68000 register file + memory state (initial and final use the same
@@ -964,6 +985,210 @@ impl M68000Regs {
         } else {
             self.usp
         }
+    }
+}
+
+/// What the 68000 was doing on the bus for the span of one recorded entry.
+///
+/// The two suites agree on the first four and only the `m68000` set emits the
+/// last two. An address error still runs its bus cycle on the real part: AS is
+/// simply never asserted, so the transfer is not committed. The set records
+/// those cycles rather than dropping them so an address error is recognizable
+/// from the trace alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BusTxnKind {
+    /// The bus is idle for the recorded number of clocks.
+    Idle,
+    /// A read transfer.
+    Read,
+    /// A write transfer.
+    Write,
+    /// The indivisible read-modify-write cycle `TAS` runs.
+    Tas,
+    /// A read that faulted on an odd address; AS never asserted.
+    ReadAddressError,
+    /// A write that faulted on an odd address; AS never asserted.
+    WriteAddressError,
+}
+
+/// The width of one transfer. The 68000 selects a byte with one of the two
+/// data strobes and a word with both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TxnSize {
+    Byte,
+    Word,
+}
+
+/// One entry of a recorded bus trace.
+///
+/// The entries tile the instruction exactly: their clocks sum to the case's
+/// `length`, so the trace fixes not only which cycles ran but where each one
+/// starts. Idle entries carry only `clocks`; everything else is meaningful
+/// solely on a transfer.
+///
+/// **The two suites post `addr` differently and the difference is not
+/// cosmetic.** The `680x0` set posts the unaligned byte address and leaves the
+/// strobe to be inferred from bit 0. The `m68000` set posts the true word
+/// address and carries UDS and LDS as separate signals, which is what the part
+/// does: it has no A0 pin. [`Self::byte_address`] resolves both to the byte the
+/// transfer actually touched, so a comparison never has to care which set it
+/// came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BusTxn {
+    pub kind: BusTxnKind,
+    /// Duration in clock cycles.
+    pub clocks: u32,
+    /// Function code FC2..FC0: which address space the transfer names.
+    pub fc: u32,
+    /// The address posted on the bus, as the source suite posts it.
+    pub addr: u32,
+    pub size: TxnSize,
+    /// The value on the data bus, as the source suite posts it. See
+    /// [`Self::byte_value`] for why this is not directly comparable.
+    pub data: u32,
+    /// Upper data strobe, set when the even byte is selected. The `680x0` set
+    /// does not record it and it is derived from the address there.
+    pub uds: bool,
+    /// Lower data strobe, set when the odd byte is selected.
+    pub lds: bool,
+}
+
+impl BusTxn {
+    /// True when this entry is a transfer rather than idle time.
+    pub fn is_transfer(&self) -> bool {
+        self.kind != BusTxnKind::Idle
+    }
+
+    /// The byte address the transfer actually touched.
+    ///
+    /// A word transfer names its even base. A byte transfer names the even byte
+    /// under UDS and the odd one under LDS, which is how the part addresses a
+    /// half without an A0 pin.
+    pub fn byte_address(&self) -> u32 {
+        match self.size {
+            TxnSize::Word => self.addr & !1,
+            TxnSize::Byte if self.lds && !self.uds => (self.addr & !1) | 1,
+            TxnSize::Byte => self.addr & !1,
+        }
+    }
+
+    /// The byte a byte-sized transfer carried, normalized out of its bus half.
+    ///
+    /// The `m68000` set posts the data bus as the part drives it, so the byte
+    /// `0xB3` reads `0xB300` under UDS and `0x00B3` under LDS. The `680x0` set
+    /// normalizes to 0..255 instead. Comparing the raw field across the two
+    /// would fail every odd-address access for the wrong reason.
+    pub fn byte_value(&self) -> u8 {
+        if self.uds && !self.lds {
+            (self.data >> 8) as u8
+        } else {
+            self.data as u8
+        }
+    }
+}
+
+/// A recorded trace's entries, in order.
+///
+/// The clocks sum to the case's `length`. [`M68000TestCase::tiles`] is the
+/// self-check on that, and it is asserted rather than assumed: a trace whose
+/// entries do not tile its length cannot place a bus cycle in time, so every
+/// positional comparison built on it would be meaningless.
+pub type BusTrace = Vec<BusTxn>;
+
+/// Deserialize one trace entry from either suite's array encoding.
+///
+/// `["n", 4]` is idle. A transfer is
+/// `[kind, clocks, fc, addr, size, data]` in the `680x0` set and
+/// `[kind, clocks, fc, addr, size, data, uds, lds]` in the `m68000` set. The
+/// two extra fields are read when present, and derived from the posted
+/// address's low bit when absent, so both encodings land in the same struct.
+impl<'de> Deserialize<'de> for BusTxn {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use serde::de::{Error, IgnoredAny, SeqAccess, Visitor};
+
+        struct TxnVisitor;
+
+        impl<'de> Visitor<'de> for TxnVisitor {
+            type Value = BusTxn;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a bus transaction array of 2, 6 or 8 elements")
+            }
+
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<BusTxn, A::Error> {
+                macro_rules! next {
+                    ($t:ty, $what:expr) => {
+                        seq.next_element::<$t>()?
+                            .ok_or_else(|| A::Error::custom(concat!("transaction missing ", $what)))?
+                    };
+                }
+
+                let tag = next!(String, "kind");
+                let clocks = next!(u32, "clock count");
+
+                let kind = match tag.as_str() {
+                    "n" => {
+                        // Drain so a trailing element cannot pass unnoticed.
+                        while seq.next_element::<IgnoredAny>()?.is_some() {}
+                        return Ok(BusTxn {
+                            kind: BusTxnKind::Idle,
+                            clocks,
+                            fc: 0,
+                            addr: 0,
+                            size: TxnSize::Word,
+                            data: 0,
+                            uds: false,
+                            lds: false,
+                        });
+                    }
+                    "r" => BusTxnKind::Read,
+                    "w" => BusTxnKind::Write,
+                    "t" => BusTxnKind::Tas,
+                    "re" => BusTxnKind::ReadAddressError,
+                    "we" => BusTxnKind::WriteAddressError,
+                    other => {
+                        return Err(A::Error::custom(format!(
+                            "unknown transaction kind {other:?}"
+                        )));
+                    }
+                };
+
+                let fc = next!(u32, "function code");
+                let addr = next!(u32, "address");
+                let size_tag = next!(String, "size");
+                let size = match size_tag.as_str() {
+                    ".w" => TxnSize::Word,
+                    ".b" => TxnSize::Byte,
+                    other => return Err(A::Error::custom(format!("unknown size {other:?}"))),
+                };
+                let data = next!(u32, "data");
+
+                // The m68000 set records the strobes; the 680x0 set does not,
+                // and posts the odd byte address in their place.
+                let (uds, lds) = match (seq.next_element::<u32>()?, seq.next_element::<u32>()?) {
+                    (Some(u), Some(l)) => (u != 0, l != 0),
+                    _ => match size {
+                        TxnSize::Word => (true, true),
+                        TxnSize::Byte if addr & 1 != 0 => (false, true),
+                        TxnSize::Byte => (true, false),
+                    },
+                };
+                while seq.next_element::<IgnoredAny>()?.is_some() {}
+
+                Ok(BusTxn {
+                    kind,
+                    clocks,
+                    fc,
+                    addr,
+                    size,
+                    data,
+                    uds,
+                    lds,
+                })
+            }
+        }
+
+        d.deserialize_seq(TxnVisitor)
     }
 }
 
@@ -1282,5 +1507,157 @@ mod tests {
         )
         .expect("test case parses");
         assert!(tc.cycles.is_empty());
+    }
+
+    // --- 68000 bus trace parsing ---
+    //
+    // Two suites encode the same events differently, and the whole value of
+    // having both is lost if the parser quietly normalizes one into the other's
+    // mistakes. Every row below is a real recorded entry, and the pair of
+    // `MOVE.b` rows is the point: the same byte, on opposite halves of the bus,
+    // from the two different encodings.
+
+    fn txn(json: &str) -> BusTxn {
+        serde_json::from_str(json).expect("transaction parses")
+    }
+
+    /// The `680x0` encoding: six fields, no strobes, byte value normalized to
+    /// 0..255, and the odd byte address posted directly.
+    #[test]
+    fn a_680x0_byte_read_infers_its_strobe_from_the_posted_address() {
+        let t = txn(r#"["r", 4, 5, 8480815, ".b", 49]"#);
+        assert_eq!(t.kind, BusTxnKind::Read);
+        assert_eq!(t.clocks, 4);
+        assert_eq!(t.size, TxnSize::Byte);
+        // 8480815 is odd, so the transfer is on the lower half.
+        assert!(t.lds && !t.uds);
+        assert_eq!(t.byte_address(), 8480815);
+        assert_eq!(t.byte_value(), 49);
+    }
+
+    /// The `m68000` encoding of an upper-half byte read: eight fields, the true
+    /// (even) word address, and the byte sitting in the high half of the data
+    /// bus exactly as the part drives it.
+    #[test]
+    fn an_m68000_uds_byte_read_carries_its_value_in_the_upper_half() {
+        let t = txn(r#"["r", 4, 1, 4272488, ".b", 45824, 1, 0]"#);
+        assert!(t.uds && !t.lds);
+        assert_eq!(t.addr & 1, 0, "the part cannot post an odd address");
+        assert_eq!(t.byte_address(), 4272488);
+        // 45824 is 0xB300: the byte is 0xB3, not 0x00.
+        assert_eq!(t.byte_value(), 0xB3);
+    }
+
+    /// The matching write from the same recorded case, on the *lower* half. The
+    /// posted address is still even and only LDS says the odd byte was touched,
+    /// which is the whole reason `byte_address` exists.
+    #[test]
+    fn an_m68000_lds_byte_write_touches_the_odd_byte_of_an_even_address() {
+        let t = txn(r#"["w", 4, 1, 12788194, ".b", 179, 0, 1]"#);
+        assert!(t.lds && !t.uds);
+        assert_eq!(t.addr & 1, 0);
+        assert_eq!(t.byte_address(), 12788195, "LDS selects the odd byte");
+        assert_eq!(t.byte_value(), 0xB3);
+    }
+
+    /// And the two encodings agree once normalized, which is what makes a
+    /// cross-suite comparison possible at all. Reading the raw `data` field
+    /// instead would make these two disagree by a byte swap.
+    #[test]
+    fn the_two_encodings_of_the_same_byte_normalize_to_the_same_value() {
+        let uds_half = txn(r#"["r", 4, 1, 4272488, ".b", 45824, 1, 0]"#);
+        let lds_half = txn(r#"["w", 4, 1, 12788194, ".b", 179, 0, 1]"#);
+        assert_eq!(uds_half.byte_value(), lds_half.byte_value());
+        assert_ne!(
+            uds_half.data, lds_half.data,
+            "the raw fields differ; only the normalized bytes match"
+        );
+    }
+
+    /// Idle time carries a duration and nothing else. Treating its zeroed
+    /// address as a real one is the 68000 equivalent of reading an address off
+    /// a cycle with no ALE.
+    #[test]
+    fn an_idle_entry_is_a_duration_and_not_a_transfer() {
+        let t = txn(r#"["n", 122]"#);
+        assert_eq!(t.kind, BusTxnKind::Idle);
+        assert_eq!(t.clocks, 122);
+        assert!(!t.is_transfer());
+    }
+
+    /// A word transfer asserts both strobes and names its even base.
+    #[test]
+    fn a_word_transfer_asserts_both_strobes() {
+        let t = txn(r#"["r", 4, 6, 3076, ".w", 1657]"#);
+        assert_eq!(t.size, TxnSize::Word);
+        assert!(t.uds && t.lds);
+        assert_eq!(t.byte_address(), 3076);
+    }
+
+    /// The `m68000` set's two extra kinds. These are bus cycles the part runs
+    /// with AS never asserted, so the transfer is not committed; dropping them
+    /// would lose the only trace-level evidence that an address error happened.
+    #[test]
+    fn the_address_error_kinds_parse_and_are_transfers() {
+        let r = txn(r#"["re", 4, 1, 100, ".w", 0, 1, 1]"#);
+        let w = txn(r#"["we", 4, 1, 100, ".w", 0, 1, 1]"#);
+        assert_eq!(r.kind, BusTxnKind::ReadAddressError);
+        assert_eq!(w.kind, BusTxnKind::WriteAddressError);
+        assert!(r.is_transfer() && w.is_transfer());
+    }
+
+    /// An unknown kind is an error rather than a silently dropped entry: a new
+    /// cycle type appearing upstream must stop the gate, not shorten its traces.
+    #[test]
+    fn an_unknown_transaction_kind_does_not_parse() {
+        assert!(serde_json::from_str::<BusTxn>(r#"["x", 4, 1, 100, ".w", 0]"#).is_err());
+    }
+
+    /// A trace tiles its case's length, and a case whose entries do not sum to
+    /// it is detectable. This is the harness's check on its oracle rather than
+    /// on the emulator, so it has to be able to fail: the second half proves it
+    /// does.
+    #[test]
+    fn a_trace_tiles_its_length_and_a_short_one_is_caught() {
+        let mut tc: M68000TestCase = serde_json::from_str(
+            r#"{
+                "name": "4e71 [NOP] 1",
+                "initial": {"d0":0,"d1":0,"d2":0,"d3":0,"d4":0,"d5":0,"d6":0,"d7":0,
+                    "a0":0,"a1":0,"a2":0,"a3":0,"a4":0,"a5":0,"a6":0,
+                    "usp":0,"ssp":2048,"sr":9985,"pc":3072,"prefetch":[20081,10835],"ram":[]},
+                "final": {"d0":0,"d1":0,"d2":0,"d3":0,"d4":0,"d5":0,"d6":0,"d7":0,
+                    "a0":0,"a1":0,"a2":0,"a3":0,"a4":0,"a5":0,"a6":0,
+                    "usp":0,"ssp":2048,"sr":9985,"pc":3074,"prefetch":[10835,1657],"ram":[]},
+                "length": 4,
+                "transactions": [["r", 4, 6, 3076, ".w", 1657]]
+            }"#,
+        )
+        .expect("test case parses");
+
+        assert_eq!(tc.traced_clocks(), 4);
+        assert!(tc.tiles());
+
+        tc.transactions[0].clocks = 2;
+        assert!(!tc.tiles(), "a trace that no longer sums must be rejected");
+    }
+
+    /// And a 68000 case with no trace still parses, so the state-only gate does
+    /// not become dependent on the per-cycle field being present.
+    #[test]
+    fn a_68000_case_without_a_trace_still_parses() {
+        let tc: M68000TestCase = serde_json::from_str(
+            r#"{
+                "name": "no trace",
+                "initial": {"d0":0,"d1":0,"d2":0,"d3":0,"d4":0,"d5":0,"d6":0,"d7":0,
+                    "a0":0,"a1":0,"a2":0,"a3":0,"a4":0,"a5":0,"a6":0,
+                    "usp":0,"ssp":0,"sr":0,"pc":0,"prefetch":[0,0],"ram":[]},
+                "final": {"d0":0,"d1":0,"d2":0,"d3":0,"d4":0,"d5":0,"d6":0,"d7":0,
+                    "a0":0,"a1":0,"a2":0,"a3":0,"a4":0,"a5":0,"a6":0,
+                    "usp":0,"ssp":0,"sr":0,"pc":0,"prefetch":[0,0],"ram":[]},
+                "length": 0
+            }"#,
+        )
+        .expect("test case parses");
+        assert!(tc.transactions.is_empty());
     }
 }
