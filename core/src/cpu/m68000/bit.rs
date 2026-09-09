@@ -10,7 +10,7 @@
 //! N/V/C/X are never touched.
 
 use super::M68000;
-use super::addressing::{AccessResult, Size, ea_cycles};
+use super::addressing::{AccessResult, Size, ea_internal};
 use super::flags::SrFlag;
 use crate::core::{Bus16, BusMaster};
 
@@ -39,7 +39,7 @@ impl M68000 {
             (true, true) => 5,
         };
         if ea_mode == 1 || (ea_mode == 7 && ea_reg >= reg7_limit) {
-            self.finish(4); // illegal encoding
+            self.finish_from_bus(0); // illegal encoding
             return Ok(());
         }
 
@@ -49,7 +49,8 @@ impl M68000 {
         } else {
             self.read_imm_word(bus, master) as u32
         };
-        let static_extra = if dynamic { 0 } else { 4 };
+        // The static form's extension word used to be charged here as a
+        // constant; it is a transfer now and counts itself.
 
         if ea_mode == 0 {
             // Dn destination: long operation, bit number mod 32
@@ -63,13 +64,16 @@ impl M68000 {
                 3 => old | mask,  // BSET
                 _ => old,         // BTST
             };
-            // BCLR Dn pays two extra cycles over BCHG/BSET
-            let base = match op {
-                0 => 6,
-                2 => 10,
-                _ => 8,
+            // A register destination makes no operand transfer: the opcode
+            // fetch, plus the static form's extension word, are the whole bus
+            // cost. What is left is the bit operation itself, and BCLR takes
+            // four clocks longer than BTST because it has to invert its mask.
+            let internal = match op {
+                0 => 2, // BTST
+                2 => 6, // BCLR
+                _ => 4, // BCHG / BSET
             };
-            self.finish(base + static_extra);
+            self.finish_from_bus(internal);
         } else {
             // Memory (or immediate, for dynamic BTST): byte operation mod 8
             let mask = 1u32 << (bit_number & 7);
@@ -85,8 +89,10 @@ impl M68000 {
                 self.ea_write(bus, master, ea, Size::Byte, new)?;
             }
 
-            let base = if is_btst { 4 } else { 8 };
-            self.finish(base + static_extra + ea_cycles(ea_mode, ea_reg, Size::Byte));
+            // In memory the operation is a byte read, and a write for
+            // everything but BTST. Both are counted, as is the static form's
+            // extension word, leaving only the mode's address arithmetic.
+            self.finish_from_bus(ea_internal(ea_mode, ea_reg));
         }
         Ok(())
     }

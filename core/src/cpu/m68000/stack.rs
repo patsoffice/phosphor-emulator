@@ -11,22 +11,6 @@ use super::M68000;
 use super::addressing::{AccessResult, Ea, Size, sext16};
 use crate::core::{Bus16, BusMaster};
 
-/// Documented LEA timing per control addressing mode (M68000UM table 8-1);
-/// PEA is uniformly 8 cycles more for the long push.
-fn lea_cycles(mode: u8, reg: u8) -> u32 {
-    match mode & 7 {
-        2 => 4,  // (An)
-        5 => 8,  // d16(An)
-        6 => 12, // d8(An,Xn)
-        _ => match reg & 7 {
-            0 => 8,  // abs.w
-            1 => 12, // abs.l
-            2 => 8,  // d16(PC)
-            _ => 12, // d8(PC,Xn)
-        },
-    }
-}
-
 impl M68000 {
     /// LEA `<ea>`,An (line 0x4, bits 8-6 = 111) and PEA `<ea>` (0x4848-
     /// 0x487B): resolve a control-mode effective address and either load it
@@ -44,7 +28,7 @@ impl M68000 {
         let ea_reg = (opcode & 7) as u8;
         // Control addressing only — same legality rule as JMP/JSR.
         if !(matches!(ea_mode, 2 | 5 | 6) || (ea_mode == 7 && ea_reg < 4)) {
-            self.finish(4); // illegal encoding
+            self.finish_from_bus(0); // illegal encoding
             return Ok(());
         }
         let Ea::Mem(addr) = self.decode_ea(bus, master, ea_mode, ea_reg, Size::Word) else {
@@ -55,7 +39,12 @@ impl M68000 {
         } else {
             self.a[((opcode >> 9) & 7) as usize] = addr;
         }
-        self.finish(lea_cycles(ea_mode, ea_reg) + if push { 8 } else { 0 });
+        // LEA computes an address and reads no operand, so its extension words
+        // are the whole bus cost, and PEA's long push adds two more transfers.
+        // The indexed modes cost four clocks off the bus rather than the two an
+        // operand mode pays: LEA has no transfer to hide the index add behind.
+        let indexed = ea_mode & 7 == 6 || (ea_mode & 7 == 7 && ea_reg & 7 == 3);
+        self.finish_from_bus(if indexed { 4 } else { 0 });
         Ok(())
     }
 
@@ -83,7 +72,9 @@ impl M68000 {
         self.push_long(bus, master, value)?;
         self.a[reg] = self.a[7];
         self.a[7] = self.a[7].wrapping_add(disp);
-        self.finish(16);
+        // The opcode, the displacement word and the long push are the whole
+        // cost; the register shuffling happens inside them.
+        self.finish_from_bus(0);
         Ok(())
     }
 
@@ -104,7 +95,8 @@ impl M68000 {
         self.a[7] = self.a[reg];
         let value = self.pop_long(bus, master)?;
         self.a[reg] = value;
-        self.finish(12);
+        // The opcode and the long pop, and nothing besides.
+        self.finish_from_bus(0);
         Ok(())
     }
 
@@ -160,7 +152,7 @@ impl M68000 {
             matches!(ea_mode, 2 | 4 | 5 | 6) || (ea_mode == 7 && ea_reg < 2)
         };
         if !valid {
-            self.finish(4); // illegal encoding
+            self.finish_from_bus(0); // illegal encoding
             return Ok(());
         }
         let mask = self.read_imm_word(bus, master);
@@ -238,22 +230,20 @@ impl M68000 {
             }
         }
 
-        // Documented timing: a per-register transfer cost on top of a
-        // per-mode setup cost (loads pay one extra read ahead of the
-        // transfers).
-        let per_reg = if size == Size::Long { 8 } else { 4 } * mask.count_ones();
-        let base = match ea_mode {
-            2..=4 => 8,
-            5 => 12,
-            6 => 14,
-            _ => match ea_reg {
-                0 => 12,
-                1 => 16,
-                2 => 12,
-                _ => 14,
-            },
-        } + if to_registers { 4 } else { 0 };
-        self.finish(base + per_reg);
+        // The opcode, the register mask word, the mode's extension words and
+        // one transfer per register half are all counted, which is everything
+        // the documented per-register cost used to express.
+        //
+        // Two things are left. An indexed mode pays two clocks for its index
+        // add, as everywhere else. And a load pays four more, because the part
+        // reads one operand *beyond* the registers it transfers and discards
+        // it. This core does not run that read, so the four clocks are declared
+        // here rather than counted: the total is right and the transfer count
+        // is one short on every MOVEM load, which is a real difference from the
+        // part and shows up on the gate's count rung rather than its length one.
+        let indexed = ea_mode & 7 == 6 || (ea_mode & 7 == 7 && ea_reg & 7 == 3);
+        let internal = if indexed { 2 } else { 0 } + if to_registers { 4 } else { 0 };
+        self.finish_from_bus(internal);
         Ok(())
     }
 }

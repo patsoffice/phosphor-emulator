@@ -16,7 +16,7 @@
 //!   changed at any point during the shift.
 
 use super::super::M68000;
-use super::super::addressing::{AccessResult, Size, ea_cycles};
+use super::super::addressing::{AccessResult, Size, ea_internal};
 use super::super::flags::SrFlag;
 use super::binary::size_from_bits;
 use crate::core::{Bus16, BusMaster};
@@ -169,8 +169,10 @@ impl M68000 {
         let result = self.shift_core(size, kind, left, count, src);
         self.d[reg] = (src & !size.mask()) | result;
 
-        let base = if size == Size::Long { 8 } else { 6 };
-        self.finish(base + 2 * count);
+        // Registers only: the opcode fetch is the whole bus cost. Everything
+        // else is the shifter, which takes two clocks per bit position and a
+        // fixed setup that is two clocks longer at long size.
+        self.finish_from_bus(if size == Size::Long { 4 } else { 2 } + 2 * count);
         Ok(())
     }
 
@@ -187,7 +189,7 @@ impl M68000 {
         let ea_mode = ((opcode >> 3) & 7) as u8;
         let ea_reg = (opcode & 7) as u8;
         if ea_mode < 2 || (ea_mode == 7 && ea_reg >= 2) {
-            self.finish(4);
+            self.finish_from_bus(0);
             return Ok(());
         }
 
@@ -196,7 +198,10 @@ impl M68000 {
         let result = self.shift_core(Size::Word, kind, left, 1, src);
         self.ea_write(bus, master, ea, Size::Word, result)?;
 
-        self.finish(8 + ea_cycles(ea_mode, ea_reg, Size::Word));
+        // The memory forms shift by exactly one, so there is no per-bit cost:
+        // the read and the write are counted and nothing is left but the
+        // mode's own address arithmetic.
+        self.finish_from_bus(ea_internal(ea_mode, ea_reg));
         Ok(())
     }
 }

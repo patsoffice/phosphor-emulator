@@ -311,7 +311,7 @@ impl M68000 {
             // ORI/ANDI/SUBI/ADDI/EORI/CMPI
             0x0 => {
                 if !self.op_imm_alu(opcode, bus, master)? {
-                    self.finish(4);
+                    self.finish_from_bus(0);
                 }
                 Ok(())
             }
@@ -439,7 +439,8 @@ impl M68000 {
     /// Bounded 4-cycle no-op: NOP itself and the unassigned encodings
     /// inside implemented lines.
     fn op_nop(&mut self) -> addressing::AccessResult<()> {
-        self.finish(4);
+        // The opcode fetch is the whole instruction.
+        self.finish_from_bus(0);
         Ok(())
     }
 }

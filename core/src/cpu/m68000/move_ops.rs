@@ -2,7 +2,7 @@
 //! data movement instructions.
 
 use super::M68000;
-use super::addressing::{AccessResult, Ea, Size, ea_cycles, ea_internal, sext8, sext16};
+use super::addressing::{AccessResult, Ea, Size, ea_internal, sext8, sext16};
 use crate::core::{Bus16, BusMaster};
 
 impl M68000 {
@@ -32,7 +32,7 @@ impl M68000 {
         // Byte access to an address register is an illegal encoding
         // (MOVE.b An,<ea> / MOVEA.b); treated as a bounded NOP.
         if size == Size::Byte && (src_mode == 1 || dst_mode == 1) {
-            self.finish(4);
+            self.finish_from_bus(0);
             return Ok(());
         }
 
@@ -130,7 +130,7 @@ impl M68000 {
         let value = sext8(opcode as u8);
         self.d[reg] = value;
         self.set_flags_logical(Size::Long, value);
-        self.finish(4);
+        self.finish_from_bus(0);
         Ok(())
     }
 
@@ -144,7 +144,7 @@ impl M68000 {
         let value = self.d[reg].rotate_left(16);
         self.d[reg] = value;
         self.set_flags_logical(Size::Long, value);
-        self.finish(4);
+        self.finish_from_bus(0);
         Ok(())
     }
 
@@ -188,7 +188,9 @@ impl M68000 {
             let mask = if long { 0xFFFF_FFFF } else { 0x0000_FFFF };
             self.d[dn] = (self.d[dn] & !mask) | (value & mask);
         }
-        self.finish(if long { 24 } else { 16 });
+        // MOVEP is all bus and no thinking: the opcode, the displacement word,
+        // and one byte transfer per register byte. Nothing is left over.
+        self.finish_from_bus(0);
         Ok(())
     }
 
@@ -212,7 +214,7 @@ impl M68000 {
         let ea_mode = ((opcode >> 3) & 7) as u8;
         let ea_reg = (opcode & 7) as u8;
         if ea_mode == 1 || (ea_mode == 7 && ea_reg >= 2) {
-            self.finish(4); // illegal destination
+            self.finish_from_bus(0); // illegal destination
             return Ok(());
         }
         let dst = self.decode_ea(bus, master, ea_mode, ea_reg, Size::Word);
@@ -220,11 +222,14 @@ impl M68000 {
         // the R/W bit of an address-error frame) — hardware-verified.
         let _ = self.ea_read(bus, master, dst, Size::Word)?;
         self.ea_write(bus, master, dst, Size::Word, self.sr as u32)?;
-        self.finish(if ea_mode == 0 {
-            6
+        // A register destination transfers nothing, leaving two clocks to read
+        // the status register out; a memory one reads and writes, both counted.
+        let internal = if ea_mode == 0 {
+            2
         } else {
-            8 + ea_cycles(ea_mode, ea_reg, Size::Word)
-        });
+            ea_internal(ea_mode, ea_reg)
+        };
+        self.finish_from_bus(internal);
         Ok(())
     }
 
@@ -241,13 +246,15 @@ impl M68000 {
         let ea_mode = ((opcode >> 3) & 7) as u8;
         let ea_reg = (opcode & 7) as u8;
         if ea_mode == 1 {
-            self.finish(4); // address-register source is illegal
+            self.finish_from_bus(0); // address-register source is illegal
             return Ok(());
         }
         let src = self.decode_ea(bus, master, ea_mode, ea_reg, Size::Word);
         let value = self.ea_read(bus, master, src, Size::Word)? as u16;
         self.sr = (self.sr & 0xFF00) | (value & 0x001F);
-        self.finish(12 + ea_cycles(ea_mode, ea_reg, Size::Word));
+        // One word read, counted. The eight clocks left are the part loading
+        // the status register and settling the mode it may just have changed.
+        self.finish_from_bus(8 + ea_internal(ea_mode, ea_reg));
         Ok(())
     }
 
@@ -267,13 +274,15 @@ impl M68000 {
         let ea_mode = ((opcode >> 3) & 7) as u8;
         let ea_reg = (opcode & 7) as u8;
         if ea_mode == 1 {
-            self.finish(4); // address-register source is illegal
+            self.finish_from_bus(0); // address-register source is illegal
             return Ok(());
         }
         let src = self.decode_ea(bus, master, ea_mode, ea_reg, Size::Word);
         let value = self.ea_read(bus, master, src, Size::Word)? as u16;
         self.write_sr(value);
-        self.finish(12 + ea_cycles(ea_mode, ea_reg, Size::Word));
+        // One word read, counted. The eight clocks left are the part loading
+        // the status register and settling the mode it may just have changed.
+        self.finish_from_bus(8 + ea_internal(ea_mode, ea_reg));
         Ok(())
     }
 
@@ -297,7 +306,7 @@ impl M68000 {
         } else {
             self.usp = self.a[reg];
         }
-        self.finish(4);
+        self.finish_from_bus(0);
         Ok(())
     }
 
@@ -314,11 +323,12 @@ impl M68000 {
             0x11 => std::mem::swap(&mut self.d[rx], &mut self.a[ry]),
             // 10000 (opmode 6, EA mode 0) is an unassigned encoding
             _ => {
-                self.finish(4);
+                self.finish_from_bus(0);
                 return Ok(());
             }
         }
-        self.finish(6);
+        // Registers only: the opcode fetch, plus two clocks to swap them.
+        self.finish_from_bus(2);
         Ok(())
     }
 }
