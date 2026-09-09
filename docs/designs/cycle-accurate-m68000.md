@@ -502,6 +502,101 @@ only check.
 **The four boards are unmoved**: golden frames, boot, save-state and audio all
 pass, so removing the phantom read changed no picture, no sound and no boot.
 
+## M3 as built: the queue, and where the refill goes
+
+**Landed 2026-09-09.** Two words in `core/src/cpu/m68000/prefetch.rs`, refilled
+behind every consumed word and discarded by every control transfer.
+`prefetch_pc` is gone, `pc` is private, and the hypothesis this milestone was
+written on held: the whole memory-touching count gap was queue-shaped.
+
+| rung | M2 | M3 |
+|---|---|---|
+| **680x0** length | 81.88% | **88.34%** |
+| ... transfer kinds | 67.24% | **98.51%** |
+| ... transfer count | 71.60% | **98.87%** |
+| ... final PC and queue | - | **100.00%** |
+| **m68000** length | 77.75% | **78.66%** |
+| ... transfer kinds | 64.03% | **98.14%** |
+| ... transfer count | 68.94% | **99.15%** |
+| ... final PC and queue | - | **99.61%** |
+
+**Where the refill goes was read off the traces, not assumed**, with
+`m68000_trace_shapes` reducing every recorded case to its ordered bus activity
+so the rule could be derived from 1.3 million cases rather than from a handful.
+It has two halves. A word is normally consumed by refilling the hole first, so
+`ADDI.b #, (d16, A7)` records two program reads before its operand read and a
+third before its write. But **an instruction about to discard the queue does not
+refill it**: a taken `Bcc` with a word displacement is ten clocks, which is two
+transfers, and both of them are at the target. Refilling there would make it
+three transfers and twelve clocks, so the branch family consumes without
+refilling and the trailing refill lands at the finish.
+
+Placement is then a per-family declaration: `MOVE` refills after its write,
+except to `-(An)` where the decrement gives the prefetch a slot; the
+read-modify-write families refill before theirs; `JSR` fetches one word at the
+target, pushes, then fetches the second; `PEA` refills before its push; `STOP`
+consumes without refilling at all and finishes without one.
+
+**The two sites M2 left on the table became ordinary, which was the stated test
+of whether this milestone worked.** Address-error entry is fifty clocks: eleven
+transfers and six idle, and the two transfers that were missing are the refills
+at the handler. `STOP` is four clocks and no bus cycle, because both its words
+came out of the queue and the part stops before refilling.
+
+**The residual is named rather than described.** The gate reports its own
+misses by shape pair: `TAS`'s indivisible cycle (it records one transfer where
+this core makes two), `MOVEM`'s trailing read, the long `ADDX`/`SUBX` refill
+that sits *between* the two write words, and the rarer `PEA`/`MOVE` absolute
+forms whose refills bunch one slot differently. All are M5's.
+
+**Splitting the faulting cases out is what explained the length rung**, and it
+also found a disagreement between the corpora worth recording: on cases ending
+in an address error, `680x0` records six clocks of internal time and no cycle
+for the aborted access while `m68000` records ten and the aborted cycle as well,
+a difference of exactly eight clocks. This core matches `680x0` and the manual,
+so it scores 56.74% there and 0.00% against the other set, at a mean of -8.91
+clocks. On cases that complete, the two corpora agree with each other and with
+this core: 95.19% and 95.36%.
+
+**Two defects the queue exposed**, neither of them a timing question:
+
+- `Scc` reads its destination before writing it. This core said the opposite in
+  a comment and charged the missing transfer as time off the bus, so the total
+  was right with the wrong activity underneath it, which is the exact failure
+  `finish_from_bus` exists to prevent.
+- `UNLK` moved A7 to An *before* the pop, so an odd An made the exception frame
+  push itself fault and this core halted on a double bus fault where the part
+  takes an ordinary address error. 530 cases of the microcode-derived corpus
+  record the frame written on the stack the instruction started with. The
+  documentation-derived corpus has no such case, which is why it read 100% on
+  that instruction throughout.
+
+**Road Runner's golden frame moved, and the mechanism is one line.** Not the
+Slapstic: restoring the old snoop position leaves the new frame unchanged, and
+so does re-reading each instruction word at consumption time instead of taking
+it from the queue, so neither what that board's protection sees nor what the
+CPU executes has changed. It is the **two fetches that fill an empty queue after
+reset**. They cost the first instruction eight clocks it never used to pay,
+which shifts the machine's phase against video timing once, at boot, and its
+attract animation lands one step further along. Filling the queue inside `reset`,
+where the clocks are charged to no instruction, restores the previous frame
+byte for byte after 1800 frames, which is both how the mechanism was identified
+and a model of a part that starts with a queue it never fetched. The
+recapture is scoped to that machine; 38 of 39 frames are unchanged.
+
+**Throughput**, against the M1 baseline, same protocol:
+
+| machine | M1 emul ms/f | M3 emul ms/f | change | real time |
+|---|---|---|---|---|
+| foodf | 1.594 | 1.638 | +2.8% | 10.01x |
+| quantum | 1.862 | 1.863 | +0.1% | 4.69x |
+| marble | 3.026 | 3.054 | +0.9% | 5.45x |
+| roadrunner | 3.310 | 3.370 | +1.8% | 4.94x |
+
+Road Runner still binds and is now 2.47x above the floor rather than 2.52x. The
+queue costs about two percent, which is the first real cost this conversion has
+paid.
+
 ## Decision 4: byte strobes are not a separate project
 
 `phosphor-emulator-contained-fidelity-np9x.1` says a 68000 byte write should be
