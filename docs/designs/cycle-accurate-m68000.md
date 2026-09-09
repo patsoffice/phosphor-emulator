@@ -444,6 +444,64 @@ largest are worth naming, and none is explained yet:
 - `MOVE.w` and `MOVE.l` sit near 17% on kinds on both.
 - `CHK` and `MULU` are the worst length rows, 21% and 13% on `680x0`.
 
+## M2 so far: the byte strobes, and what the contract cost
+
+**Landed 2026-09-09.** The first half of M2. The four-clock bus cycle is still
+ahead; this is the byte-strobe half, which closes np9x.1.
+
+**The contract had to move first, and not the way Decision 4 assumed.**
+`Bus16` with required methods collides with `BusMasterComponent`, which fixes
+its own bus bound and is a supertrait of `Cpu`: the M68000 must implement it,
+so its entry point received a `B: Bus` that could not be asked for byte
+methods, and an impl cannot narrow a trait method's bound. Putting the byte
+methods on `Bus` itself would have reached 166 impls, about 161 of them 8-bit
+buses where a strobe means nothing. So the bus moved from a method parameter to
+a **trait** parameter on `BusMasterComponent` and `Cpu`, which is where a bound
+belongs if implementors are to differ. That landed as its own commit, with no
+behavior change and 141 suites green.
+
+It forced one further split, and the compiler found it rather than review:
+`signal_interrupt` and `is_sleeping` never mention the bus, so on a
+bus-parameterized trait they became uncallable with nothing to infer `B` from.
+They are properties of the core alone and are now `CpuControl`.
+
+**What the audit found.** Every byte-wide part on all four boards hangs off
+D0-D7, so it answers at odd addresses only and a UDS transfer never selects it:
+the NVRAM, ADC channel latch and three POKEYs on Food Fight; the two POKEYs and
+NVRAM on Quantum; the EEPROM, bank select, sound latch and ADC on Atari System
+1. The exception is the strobed registers, which fire on either half because
+the access is the event rather than its data: the watchdogs, the VBLANK
+acknowledge, the EEPROM unlock. Getting that distinction backwards was a real
+mistake made and caught here: the first draft gated the strobes behind the
+odd-address test too, which would have made a byte write to the watchdog do
+nothing.
+
+**The measurement.**
+
+| rung | before | after |
+|---|---|---|
+| Transfer kinds, 680x0 | 58.38% | **67.24%** |
+| ... touches memory | 33.01% | **47.48%** |
+| Transfer kinds, m68000 | 55.35% | **64.03%** |
+| ... touches memory | 30.49% | **44.28%** |
+| Cycle count, both | 81.88% / 77.75% | **unchanged** |
+
+**Cycle count not moving is the check, not a disappointment.** Removing a
+phantom read changes the *sequence* of transfers, not what the documented table
+charges, so a core whose timing still comes from that table should score
+exactly the same on rung 1. It did, to the digit. Register-only cases did not
+move either, having no byte operands.
+
+**np9x.1's acceptance is pinned by six tests, and they were made to fail.**
+Restoring the read-modify-write fails the three that pin the write path and
+leaves the byte read, the preserved neighbor and the word write passing, which
+is the discrimination wanted: the neighbor test passes under a read-modify-write
+precisely because RAM hides the phantom read, and that is why it cannot be the
+only check.
+
+**The four boards are unmoved**: golden frames, boot, save-state and audio all
+pass, so removing the phantom read changed no picture, no sound and no boot.
+
 ## Decision 4: byte strobes are not a separate project
 
 `phosphor-emulator-contained-fidelity-np9x.1` says a 68000 byte write should be
