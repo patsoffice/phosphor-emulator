@@ -96,10 +96,24 @@ enum ExecState {
 }
 ```
 
-Per-cycle bus traces and exact prefetch behavior are not modeled. Cycle
-counts follow the documented tables approximately — good enough for
-real-time pacing and the state-only validation gate; refine if a machine
-needs cycle-exact timing.
+**What an instruction costs is charged from what it does on the bus**, not
+looked up: four clocks for every transfer it performs plus a declared internal
+time, through `finish_from_bus`. A wrong transfer count therefore moves the
+clock count with it and cannot hide behind a right total.
+
+**The prefetch queue is real** (`prefetch.rs`): two words, holding the word at
+`pc` and the word after it, refilled behind every word consumed and discarded by
+every control transfer. An instruction does not fetch its own opcode; it refills
+behind it, which is why the recorded traces contain no opcode fetch and why a
+taken branch costs the two fetches at its target. `pc` is private so that every
+control transfer has to declare its flush through `set_pc_flush`: a taken branch
+with a zero displacement lands where execution would have gone anyway, so no
+comparison of addresses can tell a flush from a fall-through.
+
+What is still not modeled is *when* within an instruction each transfer runs.
+The effect is applied atomically and the transfers are made in the order the
+interpreter makes them, which is right for most families and measurably wrong
+for a few (see the gate's residual: `TAS`, `MOVEM`, the long `ADDX`/`SUBX`).
 
 ### Word bus
 

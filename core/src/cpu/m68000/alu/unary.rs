@@ -40,13 +40,13 @@ impl M68000 {
         op: UnaryOp,
     ) -> AccessResult<()> {
         let Some(size) = size_from_bits(opcode >> 6) else {
-            self.finish_from_bus(0); // size 11 encodes the MOVE from/to SR/CCR group
+            self.finish_from_bus(bus, master, 0); // size 11 encodes the MOVE from/to SR/CCR group
             return Ok(());
         };
         let ea_mode = ((opcode >> 3) & 7) as u8;
         let ea_reg = (opcode & 7) as u8;
         if ea_mode == 1 || (ea_mode == 7 && ea_reg >= 2) {
-            self.finish_from_bus(0);
+            self.finish_from_bus(bus, master, 0);
             return Ok(());
         }
 
@@ -69,7 +69,7 @@ impl M68000 {
                 0
             }
         };
-        self.ea_write(bus, master, ea, size, result)?;
+        self.ea_write_rmw(bus, master, ea, size, result)?;
 
         // A register destination makes no operand transfer, so only the long
         // ALU pass is left; a memory one reads and writes, both counted.
@@ -78,7 +78,7 @@ impl M68000 {
         } else {
             ea_internal(ea_mode, ea_reg)
         };
-        self.finish_from_bus(internal);
+        self.finish_from_bus(bus, master, internal);
         Ok(())
     }
 
@@ -87,7 +87,12 @@ impl M68000 {
     ///
     /// Flags: logical rule — N/Z from the extended result, V/C cleared,
     /// X untouched.
-    pub(crate) fn op_ext(&mut self, opcode: u16) -> AccessResult<()> {
+    pub(crate) fn op_ext<B: Bus16 + ?Sized>(
+        &mut self,
+        opcode: u16,
+        bus: &mut B,
+        master: BusMaster,
+    ) -> AccessResult<()> {
         let reg = (opcode & 7) as usize;
         if opcode & 0x0040 != 0 {
             // EXT.l: word -> long
@@ -100,7 +105,7 @@ impl M68000 {
             self.d[reg] = (self.d[reg] & !0xFFFF) | value;
             self.set_flags_logical(Size::Word, value);
         }
-        self.finish_from_bus(0);
+        self.finish_from_bus(bus, master, 0);
         Ok(())
     }
 
@@ -122,13 +127,13 @@ impl M68000 {
         let ea_mode = ((opcode >> 3) & 7) as u8;
         let ea_reg = (opcode & 7) as u8;
         if ea_mode == 1 || (ea_mode == 7 && ea_reg >= 2) {
-            self.finish_from_bus(0); // illegal destination
+            self.finish_from_bus(bus, master, 0); // illegal destination
             return Ok(());
         }
         let ea = self.decode_ea(bus, master, ea_mode, ea_reg, Size::Byte);
         let value = self.ea_read(bus, master, ea, Size::Byte)?;
         self.set_flags_logical(Size::Byte, value);
-        self.ea_write(bus, master, ea, Size::Byte, value | 0x80)?;
+        self.ea_write_rmw(bus, master, ea, Size::Byte, value | 0x80)?;
 
         // TAS in memory is an indivisible read-modify-write: the part holds the
         // bus across both halves rather than running two ordinary cycles, and
@@ -141,7 +146,7 @@ impl M68000 {
         } else {
             6 + ea_internal(ea_mode, ea_reg)
         };
-        self.finish_from_bus(internal);
+        self.finish_from_bus(bus, master, internal);
         Ok(())
     }
 
@@ -159,25 +164,32 @@ impl M68000 {
         let ea_mode = ((opcode >> 3) & 7) as u8;
         let ea_reg = (opcode & 7) as u8;
         if ea_mode == 7 && ea_reg >= 2 {
-            self.finish_from_bus(0);
+            self.finish_from_bus(bus, master, 0);
             return Ok(());
         }
         let cond = ((opcode >> 8) & 0xF) as u8;
         let taken = self.cc_true(cond);
         let ea = self.decode_ea(bus, master, ea_mode, ea_reg, Size::Byte);
-        self.ea_write(bus, master, ea, Size::Byte, if taken { 0xFF } else { 0x00 })?;
+        // Scc reads its destination before writing it, like the other
+        // read-modify-write forms. This core used to say the opposite in a
+        // comment here and charge the missing transfer as time off the bus, so
+        // the total came out right with the wrong activity underneath it: the
+        // trace records `Scc -(A5)` as a read, a program read and a write, at
+        // fourteen clocks, which is three transfers and the predecrement.
+        if ea_mode != 0 {
+            let _ = self.ea_read(bus, master, ea, Size::Byte)?;
+        }
+        self.ea_write_rmw(bus, master, ea, Size::Byte, if taken { 0xFF } else { 0x00 })?;
 
-        // Scc only writes: unlike the read-modify-write instructions it never
-        // reads its destination, so four of the clocks the table charges for a
-        // memory form are time off the bus rather than a transfer. In a
-        // register the whole cost is the condition test, and a true one takes
-        // two clocks longer than a false one.
+        // In a register the whole cost is the condition test, and a true one
+        // takes two clocks longer than a false one. A memory form is all bus
+        // besides its addressing mode's own arithmetic.
         let internal = if ea_mode == 0 {
             if taken { 2 } else { 0 }
         } else {
-            4 + ea_internal(ea_mode, ea_reg)
+            ea_internal(ea_mode, ea_reg)
         };
-        self.finish_from_bus(internal);
+        self.finish_from_bus(bus, master, internal);
         Ok(())
     }
 }

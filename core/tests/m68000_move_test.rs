@@ -15,7 +15,7 @@ const M: BusMaster = BusMaster::Cpu(0);
 /// CPU at PC=0x1000 with the given opcode words loaded there.
 fn setup(words: &[u16]) -> (M68000, TestBus68k) {
     let mut cpu = M68000::new();
-    cpu.pc = 0x1000;
+    cpu.set_pc_flush(0x1000);
     let mut bus = TestBus68k::new();
     let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_be_bytes()).collect();
     bus.load(0x1000, &bytes);
@@ -54,7 +54,7 @@ fn move_w_dn_to_dn_sets_n_clears_vc_keeps_x() {
     assert!(!flag(&cpu, SrFlag::V), "MOVE clears V");
     assert!(!flag(&cpu, SrFlag::C), "MOVE clears C");
     assert!(flag(&cpu, SrFlag::X), "MOVE never touches X");
-    assert_eq!(cpu.pc, 0x1002);
+    assert_eq!(cpu.pc(), 0x1002);
 }
 
 #[test]
@@ -141,7 +141,7 @@ fn move_w_from_displacement() {
     bus.load(0x4000, &[0x12, 0x34]);
     step(&mut cpu, &mut bus);
     assert_eq!(cpu.d[0] & 0xFFFF, 0x1234);
-    assert_eq!(cpu.pc, 0x1004, "one extension word consumed");
+    assert_eq!(cpu.pc(), 0x1004, "one extension word consumed");
 }
 
 #[test]
@@ -166,7 +166,7 @@ fn move_w_from_absolute_short_and_long() {
     bus.load(0x12_3456, &[0xBE, 0xEF]);
     step(&mut cpu, &mut bus);
     assert_eq!(cpu.d[0] & 0xFFFF, 0xBEEF);
-    assert_eq!(cpu.pc, 0x1006, "two extension words consumed");
+    assert_eq!(cpu.pc(), 0x1006, "two extension words consumed");
 }
 
 #[test]
@@ -194,7 +194,7 @@ fn move_from_immediate_all_sizes() {
     step(&mut cpu, &mut bus);
     assert_eq!(cpu.d[0] & 0xFF, 0x80);
     assert!(flag(&cpu, SrFlag::N));
-    assert_eq!(cpu.pc, 0x1004);
+    assert_eq!(cpu.pc(), 0x1004);
 
     let (mut cpu, mut bus) = setup(&[0x303C, 0x1234]); // MOVE.w #$1234,D0
     step(&mut cpu, &mut bus);
@@ -203,7 +203,7 @@ fn move_from_immediate_all_sizes() {
     let (mut cpu, mut bus) = setup(&[0x203C, 0xDEAD, 0xBEEF]); // MOVE.l #$DEADBEEF,D0
     step(&mut cpu, &mut bus);
     assert_eq!(cpu.d[0], 0xDEAD_BEEF);
-    assert_eq!(cpu.pc, 0x1006);
+    assert_eq!(cpu.pc(), 0x1006);
 }
 
 // ---------------------------------------------------------------------------
@@ -359,7 +359,7 @@ fn moveq_sign_extends_negative_literal() {
     assert!(!flag(&cpu, SrFlag::V), "MOVEQ clears V");
     assert!(!flag(&cpu, SrFlag::C), "MOVEQ clears C");
     assert!(flag(&cpu, SrFlag::X), "MOVEQ never touches X");
-    assert_eq!(cpu.pc, 0x1002);
+    assert_eq!(cpu.pc(), 0x1002);
 }
 
 #[test]
@@ -505,7 +505,7 @@ fn movep_odd_base_address_and_no_flags() {
         "bytes at odd addresses, two apart"
     );
     assert_eq!(cpu.sr & 0x1F, 0x1F, "MOVEP never alters the CCR");
-    assert_eq!(cpu.pc, 0x1004);
+    assert_eq!(cpu.pc(), 0x1004);
 }
 
 #[test]

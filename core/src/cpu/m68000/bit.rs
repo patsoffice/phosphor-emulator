@@ -39,7 +39,7 @@ impl M68000 {
             (true, true) => 5,
         };
         if ea_mode == 1 || (ea_mode == 7 && ea_reg >= reg7_limit) {
-            self.finish_from_bus(0); // illegal encoding
+            self.finish_from_bus(bus, master, 0); // illegal encoding
             return Ok(());
         }
 
@@ -73,7 +73,7 @@ impl M68000 {
                 2 => 6, // BCLR
                 _ => 4, // BCHG / BSET
             };
-            self.finish_from_bus(internal);
+            self.finish_from_bus(bus, master, internal);
         } else {
             // Memory (or immediate, for dynamic BTST): byte operation mod 8
             let mask = 1u32 << (bit_number & 7);
@@ -86,13 +86,13 @@ impl M68000 {
                     2 => old & !mask,
                     _ => old | mask,
                 };
-                self.ea_write(bus, master, ea, Size::Byte, new)?;
+                self.ea_write_rmw(bus, master, ea, Size::Byte, new)?;
             }
 
             // In memory the operation is a byte read, and a write for
             // everything but BTST. Both are counted, as is the static form's
             // extension word, leaving only the mode's address arithmetic.
-            self.finish_from_bus(ea_internal(ea_mode, ea_reg));
+            self.finish_from_bus(bus, master, ea_internal(ea_mode, ea_reg));
         }
         Ok(())
     }

@@ -14,7 +14,7 @@ const M: BusMaster = BusMaster::Cpu(0);
 
 fn setup(words: &[u16]) -> (M68000, TestBus68k) {
     let mut cpu = M68000::new();
-    cpu.pc = 0x1000;
+    cpu.set_pc_flush(0x1000);
     let mut bus = TestBus68k::new();
     let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_be_bytes()).collect();
     bus.load(0x1000, &bytes);
@@ -193,7 +193,7 @@ fn andi_b_immediate_to_register() {
     step(&mut cpu, &mut bus);
     assert_eq!(cpu.d[0] & 0xFF, 0x05);
     assert_logical_flags(&cpu, true, false, false, "ANDI.b");
-    assert_eq!(cpu.pc, 0x1004);
+    assert_eq!(cpu.pc(), 0x1004);
 }
 
 #[test]
@@ -213,7 +213,7 @@ fn eori_l_immediate_to_register() {
     step(&mut cpu, &mut bus);
     assert_eq!(cpu.d[0], 0x7FFF_FFFF);
     assert_logical_flags(&cpu, false, false, false, "EORI.l");
-    assert_eq!(cpu.pc, 0x1006, "two immediate extension words consumed");
+    assert_eq!(cpu.pc(), 0x1006, "two immediate extension words consumed");
 }
 
 #[test]
@@ -224,7 +224,7 @@ fn andi_to_ccr_encoding_is_not_executed_as_andi() {
     cpu.sr = 0x271F;
     step(&mut cpu, &mut bus);
     assert_eq!(cpu.sr, 0x2700, "ANDI #0,CCR clears the CCR");
-    assert_eq!(cpu.pc, 0x1004, "immediate word consumed");
+    assert_eq!(cpu.pc(), 0x1004, "immediate word consumed");
 }
 
 // ---------------------------------------------------------------------------

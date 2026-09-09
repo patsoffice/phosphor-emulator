@@ -46,7 +46,11 @@ impl M68000 {
         }
         self.push_long(bus, master, pushed_pc)?;
         self.push_word(bus, master, old_sr)?;
-        self.pc = self.read_long_at(bus, master, vector as u32 * 4)?;
+        let handler = self.read_long_at(bus, master, vector as u32 * 4)?;
+        // Loading the vector is a control transfer and discards the queue; the
+        // two words at the handler are fetched by the finish, and they are why
+        // exception entry costs two transfers more than its frame and vector.
+        self.set_pc_flush(handler);
         Ok(())
     }
 
@@ -62,9 +66,17 @@ impl M68000 {
     ) -> AccessResult<()> {
         let vector = 32 + (opcode & 0xF) as u8;
         self.exception(bus, master, vector, self.pc)?;
-        // The opcode and exception entry's five transfers are counted; the
-        // fourteen left are the entry sequence's own thinking time.
-        self.finish_from_bus(14);
+        // Exception entry's seven transfers are counted: three frame words,
+        // the two-word vector, and the two refills at the handler. Six clocks
+        // are left, which puts TRAP at 34 and agrees with the other group-2
+        // entries: the illegal-instruction and privilege-violation vectors are
+        // also seven transfers and six, and TRAPV taken is eight and two.
+        //
+        // The manual says 38. Both corpora record 34, independently generated,
+        // and where they agree against this core the rule is that this core is
+        // wrong; the four clocks were this instruction's alone, because the
+        // sibling entries above already came out at 34.
+        self.finish_from_bus(bus, master, 6);
         Ok(())
     }
 
@@ -77,10 +89,15 @@ impl M68000 {
         master: BusMaster,
     ) -> AccessResult<()> {
         if self.flag_is_set(SrFlag::V) {
+            // The refill behind the opcode precedes the frame, as CHK's does:
+            // TRAPV taken is recorded as a program read, three frame writes,
+            // the vector, and two refills, and it is eight transfers where
+            // TRAP, which traps without testing anything, is seven.
+            self.refill_prefetch(bus, master);
             self.exception(bus, master, 7, self.pc)?;
-            self.finish_from_bus(10);
+            self.finish_from_bus(bus, master, 2);
         } else {
-            self.finish_from_bus(0);
+            self.finish_from_bus(bus, master, 0);
         }
         Ok(())
     }
@@ -97,7 +114,7 @@ impl M68000 {
         vector: u8,
     ) -> AccessResult<()> {
         self.exception(bus, master, vector, self.instr_pc)?;
-        self.finish_from_bus(10);
+        self.finish_from_bus(bus, master, 6);
         Ok(())
     }
 
@@ -113,16 +130,32 @@ impl M68000 {
             return Ok(true);
         }
         self.exception(bus, master, 8, self.instr_pc)?;
-        self.finish_from_bus(10);
+        self.finish_from_bus(bus, master, 6);
         Ok(false)
     }
 
     /// Load a full status-register value: route the S bit through the
     /// stack-pointer swap and mask the bits the 68000 does not implement
     /// (only T, S, the interrupt mask, and the CCR exist).
+    ///
+    /// **Writing the status register discards the prefetch queue.** The queued
+    /// words were fetched in the old privilege state, and the recorded traces
+    /// show the part fetching two words afterwards where an ordinary
+    /// instruction fetches one: `MOVE.w D3, SR` is two program reads for one
+    /// word consumed, and `ANDI to SR` is three for two. The CCR-only forms do
+    /// the same, sharing the microcode, so [`Self::write_ccr`] flushes too.
     pub(crate) fn write_sr(&mut self, value: u16) {
         self.set_supervisor(value & SrFlag::S as u16 != 0);
         self.sr = value & 0xA71F;
+        self.flush_prefetch();
+    }
+
+    /// Load the five implemented condition-code bits, leaving the system byte
+    /// alone. Discards the prefetch queue for the reason [`Self::write_sr`]
+    /// gives.
+    pub(crate) fn write_ccr(&mut self, value: u16) {
+        self.sr = (self.sr & 0xFF00) | (value & 0x001F);
+        self.flush_prefetch();
     }
 
     /// ANDI/ORI/EORI to CCR (0x023C/0x003C/0x0A3C) and to SR
@@ -150,12 +183,12 @@ impl M68000 {
         if to_sr {
             self.write_sr(combine(self.sr, imm));
         } else {
-            let ccr = combine(self.sr & 0x00FF, imm & 0x00FF);
-            self.sr = (self.sr & 0xFF00) | (ccr & 0x001F);
+            self.write_ccr(combine(self.sr & 0x00FF, imm & 0x00FF));
         }
-        // The opcode and the immediate word are counted; twelve clocks are
-        // spent settling the mode the write may just have changed.
-        self.finish_from_bus(12);
+        // Three transfers: the refill behind the immediate word, then the two
+        // at the refetch the status-register write forces. Eight clocks are
+        // left, spent settling the mode the write may just have changed.
+        self.finish_from_bus(bus, master, 8);
         Ok(())
     }
 
@@ -182,8 +215,10 @@ impl M68000 {
         self.write_sr(sr);
         self.set_pc_checked(pc)?;
         // Every popped word is a counted transfer, including the 68010's
-        // format word, so the longer frame costs its own four clocks.
-        self.finish_from_bus(4);
+        // format word, so the longer frame costs its own four clocks. The two
+        // refills at the resumed address are the rest of the twenty, and
+        // nothing is left over.
+        self.finish_from_bus(bus, master, 0);
         Ok(())
     }
 
@@ -199,22 +234,16 @@ impl M68000 {
         if !self.privilege_check(bus, master)? {
             return Ok(());
         }
-        let imm = self.read_imm_word(bus, master);
+        // Both of STOP's words come out of the queue and neither is refilled:
+        // a supervisor STOP is recorded at four clocks with no bus cycle at
+        // all, and its recorded final state has PC and the queue exactly where
+        // they started. The part stops before issuing the refill, so this is
+        // the one instruction that finishes without one. It was charged a flat
+        // documented total until the queue existed to say why.
+        let imm = self.read_imm_word_no_refill(bus, master);
         self.write_sr(imm);
         self.stopped = true;
-        // One of two sites still charged a flat documented total, and for the
-        // same reason as the other: its transfers do not correspond to the
-        // part's.
-        //
-        // A supervisor STOP is recorded at four clocks with *no bus cycles at
-        // all*: its opcode and immediate word both came out of the prefetch
-        // queue, so the documented four already excludes them. This core
-        // fetches both from the bus, so charging four clocks each would count
-        // them twice and put STOP at eight. Measured: doing so costs the
-        // m68000 corpus 0.39 points, all of it here.
-        //
-        // It becomes ordinary once M3 gives the core a queue to fetch from.
-        self.finish(4);
+        self.finish_without_refill(4);
         Ok(())
     }
 
@@ -233,7 +262,7 @@ impl M68000 {
         }
         // RESET asserts its line for 124 clocks and does nothing on the bus
         // besides its own fetch.
-        self.finish_from_bus(128);
+        self.finish_from_bus(bus, master, 128);
         Ok(())
     }
 
@@ -275,9 +304,11 @@ impl M68000 {
             return;
         }
         self.set_interrupt_mask(level);
-        // No opcode is fetched: the entry sequence's own five transfers are
-        // the whole bus cost, leaving the recognition and vector arithmetic.
-        self.finish_from_bus(24);
+        // No instruction runs: the entry sequence's own seven transfers are
+        // the whole bus cost, three frame words, the vector and the two
+        // refills at the handler, leaving the recognition and the vector
+        // arithmetic.
+        self.finish_from_bus(bus, master, 16);
     }
 
     /// Address-error (vector 3) entry with the 68000 seven-word group-0
@@ -320,25 +351,20 @@ impl M68000 {
             self.halted = true;
             return;
         }
-        self.pc = self
+        let handler = self
             .read_long_at(bus, master, 3 * 4)
             .expect("vector 3 is aligned");
-        // The other site still charged a flat documented total, and the reason
-        // is worth keeping: charging this one from the bus was tried and
-        // measured, and it cost the 680x0 corpus 4.56 points on cycle count,
-        // all of it here.
+        self.set_pc_flush(handler);
+        // Fifty clocks, and every one of them is now accounted for by
+        // mechanism: eleven transfers and six idle. Seven transfers are the
+        // group-0 frame, two the vector, and two the refills at the handler
+        // that the flush above makes the finish issue.
         //
-        // The recorded traces say why. An address error is fifty clocks: eleven
-        // transfers and six idle. Seven of those transfers are the frame and
-        // two the vector, which this core does make; the other two are
-        // prefetches at the *new* PC, which it does not. Meanwhile the fetches
-        // this core made before the fault are outside the recording's window,
-        // because the part took them from its queue. So neither side's transfer
-        // count is a subset of the other's, and no constant added to ours
-        // reproduces the fifty.
-        //
-        // That is a prefetch problem wearing a timing problem's clothes, and it
-        // resolves in M3 rather than here.
-        self.finish(50);
+        // This site charged a flat documented total until M3, and the two
+        // missing prefetches were exactly why: charging it from the bus without
+        // them cost the 680x0 corpus 4.56 points, because neither side's
+        // transfer count was a subset of the other's. The queue is what makes
+        // the two counts the same count.
+        self.finish_from_bus(bus, master, 6);
     }
 }

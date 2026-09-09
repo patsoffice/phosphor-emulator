@@ -15,7 +15,7 @@ const M: BusMaster = BusMaster::Cpu(0);
 
 fn setup(words: &[u16]) -> (M68000, TestBus68k) {
     let mut cpu = M68000::new();
-    cpu.pc = 0x1000;
+    cpu.set_pc_flush(0x1000);
     let mut bus = TestBus68k::new();
     let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_be_bytes()).collect();
     bus.load(0x1000, &bytes);
@@ -113,7 +113,7 @@ fn divu_quotient_low_remainder_high() {
     assert!(!cpu.flag_is_set(SrFlag::N));
     assert!(!cpu.flag_is_set(SrFlag::Z));
     assert!(!cpu.flag_is_set(SrFlag::V));
-    assert_eq!(cpu.pc, 0x1002, "no exception taken");
+    assert_eq!(cpu.pc(), 0x1002, "no exception taken");
 }
 
 #[test]
@@ -124,7 +124,7 @@ fn divu_overflow_sets_v_and_preserves_dn() {
     step(&mut cpu, &mut bus);
     assert_eq!(cpu.d[0], 0x0001_0000, "Dn unchanged on overflow");
     assert!(cpu.flag_is_set(SrFlag::V));
-    assert_eq!(cpu.pc, 0x1002, "overflow is not a trap");
+    assert_eq!(cpu.pc(), 0x1002, "overflow is not a trap");
 }
 
 #[test]
@@ -136,7 +136,7 @@ fn divu_by_zero_takes_exception_and_preserves_dn() {
     cpu.d[0] = 1234;
     cpu.d[1] = 0;
     step(&mut cpu, &mut bus);
-    assert_eq!(cpu.pc, 0x4000, "vector-5 handler entered");
+    assert_eq!(cpu.pc(), 0x4000, "vector-5 handler entered");
     assert_eq!(cpu.d[0], 1234, "Dn unchanged");
     assert_eq!(cpu.sr & 0xF, 0, "N/Z/V/C cleared (hardware-verified)");
     assert_eq!(cpu.a[7], 0x1FFA, "frame pushed");
@@ -203,7 +203,7 @@ fn chk_in_bounds_does_not_trap() {
     cpu.d[0] = 50;
     cpu.d[1] = 100; // bound
     step(&mut cpu, &mut bus);
-    assert_eq!(cpu.pc, 0x1002, "0 <= 50 <= 100: no trap");
+    assert_eq!(cpu.pc(), 0x1002, "0 <= 50 <= 100: no trap");
     assert!(!cpu.flag_is_set(SrFlag::Z));
 }
 
@@ -215,7 +215,7 @@ fn chk_negative_traps_with_n_set() {
     cpu.d[0] = 0xFFFF; // -1
     cpu.d[1] = 100;
     step(&mut cpu, &mut bus);
-    assert_eq!(cpu.pc, 0x4000, "negative value traps");
+    assert_eq!(cpu.pc(), 0x4000, "negative value traps");
     assert!(cpu.flag_is_set(SrFlag::N), "N set on the negative path");
 }
 
@@ -228,7 +228,7 @@ fn chk_above_bound_traps_with_n_clear() {
     cpu.d[0] = 101;
     cpu.d[1] = 100;
     step(&mut cpu, &mut bus);
-    assert_eq!(cpu.pc, 0x4000, "above bound traps");
+    assert_eq!(cpu.pc(), 0x4000, "above bound traps");
     assert!(
         !cpu.flag_is_set(SrFlag::N),
         "N cleared on the too-large path"
@@ -241,6 +241,6 @@ fn chk_zero_sets_z() {
     cpu.d[0] = 0;
     cpu.d[1] = 100;
     step(&mut cpu, &mut bus);
-    assert_eq!(cpu.pc, 0x1002, "in bounds: no trap");
+    assert_eq!(cpu.pc(), 0x1002, "in bounds: no trap");
     assert!(cpu.flag_is_set(SrFlag::Z), "Z from the checked word");
 }

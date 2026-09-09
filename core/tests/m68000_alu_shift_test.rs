@@ -16,7 +16,7 @@ const M: BusMaster = BusMaster::Cpu(0);
 
 fn setup(words: &[u16]) -> (M68000, TestBus68k) {
     let mut cpu = M68000::new();
-    cpu.pc = 0x1000;
+    cpu.set_pc_flush(0x1000);
     let mut bus = TestBus68k::new();
     let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_be_bytes()).collect();
     bus.load(0x1000, &bytes);

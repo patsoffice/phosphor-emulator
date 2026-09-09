@@ -153,7 +153,12 @@ impl M68000 {
 
     /// Register-form shift/rotate (line 0xE, size bits 00-10): immediate
     /// count 1-8 or a register count modulo 64, any size, Dn destination.
-    pub(crate) fn op_shift_reg(&mut self, opcode: u16) -> AccessResult<()> {
+    pub(crate) fn op_shift_reg<B: Bus16 + ?Sized>(
+        &mut self,
+        opcode: u16,
+        bus: &mut B,
+        master: BusMaster,
+    ) -> AccessResult<()> {
         let size = size_from_bits(opcode >> 6).unwrap();
         let left = opcode & 0x0100 != 0;
         let kind = ShiftKind::from_bits(opcode >> 3);
@@ -172,7 +177,11 @@ impl M68000 {
         // Registers only: the opcode fetch is the whole bus cost. Everything
         // else is the shifter, which takes two clocks per bit position and a
         // fixed setup that is two clocks longer at long size.
-        self.finish_from_bus(if size == Size::Long { 4 } else { 2 } + 2 * count);
+        self.finish_from_bus(
+            bus,
+            master,
+            if size == Size::Long { 4 } else { 2 } + 2 * count,
+        );
         Ok(())
     }
 
@@ -189,19 +198,19 @@ impl M68000 {
         let ea_mode = ((opcode >> 3) & 7) as u8;
         let ea_reg = (opcode & 7) as u8;
         if ea_mode < 2 || (ea_mode == 7 && ea_reg >= 2) {
-            self.finish_from_bus(0);
+            self.finish_from_bus(bus, master, 0);
             return Ok(());
         }
 
         let ea = self.decode_ea(bus, master, ea_mode, ea_reg, Size::Word);
         let src = self.ea_read(bus, master, ea, Size::Word)?;
         let result = self.shift_core(Size::Word, kind, left, 1, src);
-        self.ea_write(bus, master, ea, Size::Word, result)?;
+        self.ea_write_rmw(bus, master, ea, Size::Word, result)?;
 
         // The memory forms shift by exactly one, so there is no per-bit cost:
         // the read and the write are counted and nothing is left but the
         // mode's own address arithmetic.
-        self.finish_from_bus(ea_internal(ea_mode, ea_reg));
+        self.finish_from_bus(bus, master, ea_internal(ea_mode, ea_reg));
         Ok(())
     }
 }

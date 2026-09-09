@@ -28,13 +28,18 @@ impl M68000 {
         let ea_reg = (opcode & 7) as u8;
         // Control addressing only — same legality rule as JMP/JSR.
         if !(matches!(ea_mode, 2 | 5 | 6) || (ea_mode == 7 && ea_reg < 4)) {
-            self.finish_from_bus(0); // illegal encoding
+            self.finish_from_bus(bus, master, 0); // illegal encoding
             return Ok(());
         }
         let Ea::Mem(addr) = self.decode_ea(bus, master, ea_mode, ea_reg, Size::Word) else {
             unreachable!("control addressing modes always resolve to memory");
         };
         if push {
+            // PEA refills before it pushes: the trace records `PEA (A0)` as a
+            // program read and then two writes, and `PEA (xxx).w` as a program
+            // read, two writes, and a program read. LEA has nothing after its
+            // decode, so its refill lands at the finish either way.
+            self.refill_prefetch(bus, master);
             self.push_long(bus, master, addr)?;
         } else {
             self.a[((opcode >> 9) & 7) as usize] = addr;
@@ -44,7 +49,7 @@ impl M68000 {
         // The indexed modes cost four clocks off the bus rather than the two an
         // operand mode pays: LEA has no transfer to hide the index add behind.
         let indexed = ea_mode & 7 == 6 || (ea_mode & 7 == 7 && ea_reg & 7 == 3);
-        self.finish_from_bus(if indexed { 4 } else { 0 });
+        self.finish_from_bus(bus, master, if indexed { 4 } else { 0 });
         Ok(())
     }
 
@@ -74,7 +79,7 @@ impl M68000 {
         self.a[7] = self.a[7].wrapping_add(disp);
         // The opcode, the displacement word and the long push are the whole
         // cost; the register shuffling happens inside them.
-        self.finish_from_bus(0);
+        self.finish_from_bus(bus, master, 0);
         Ok(())
     }
 
@@ -92,11 +97,22 @@ impl M68000 {
         master: BusMaster,
     ) -> AccessResult<()> {
         let reg = (opcode & 7) as usize;
-        self.a[7] = self.a[reg];
-        let value = self.pop_long(bus, master)?;
+        // The frame address is read *before* A7 is moved to it, so an odd An
+        // faults with the supervisor stack still where it was.
+        //
+        // Setting A7 first is what this did until the microcode-derived corpus
+        // caught it: 530 of its UNLK cases fault on an odd An, and every one of
+        // them records the group-0 frame written on the stack the instruction
+        // started with. Pushing it on the odd An instead made the frame push
+        // fault too, so this core halted on a double bus fault where the part
+        // takes an ordinary address error. The 680x0 corpus has no such case,
+        // which is why it read 100% on this instruction throughout.
+        let frame = self.a[reg];
+        let value = self.read_long_at(bus, master, frame)?;
+        self.a[7] = frame.wrapping_add(4);
         self.a[reg] = value;
-        // The opcode and the long pop, and nothing besides.
-        self.finish_from_bus(0);
+        // The long pop and the refill behind the opcode, and nothing besides.
+        self.finish_from_bus(bus, master, 0);
         Ok(())
     }
 
@@ -152,7 +168,7 @@ impl M68000 {
             matches!(ea_mode, 2 | 4 | 5 | 6) || (ea_mode == 7 && ea_reg < 2)
         };
         if !valid {
-            self.finish_from_bus(0); // illegal encoding
+            self.finish_from_bus(bus, master, 0); // illegal encoding
             return Ok(());
         }
         let mask = self.read_imm_word(bus, master);
@@ -243,7 +259,7 @@ impl M68000 {
         // part and shows up on the gate's count rung rather than its length one.
         let indexed = ea_mode & 7 == 6 || (ea_mode & 7 == 7 && ea_reg & 7 == 3);
         let internal = if indexed { 2 } else { 0 } + if to_registers { 4 } else { 0 };
-        self.finish_from_bus(internal);
+        self.finish_from_bus(bus, master, internal);
         Ok(())
     }
 }

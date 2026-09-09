@@ -34,15 +34,18 @@ fn load_initial(cpu: &mut M68000, bus: &mut TracingBus68k, st: &M68000Regs, load
     cpu.usp = st.usp;
     cpu.ssp = st.ssp;
     cpu.sr = st.sr;
-    cpu.pc = st.pc;
+    cpu.set_pc_flush(st.pc);
+    // The queue starts where the recording says it does, so the instruction
+    // executes the words the vector says the part had already fetched.
+    cpu.load_prefetch_queue(st.prefetch);
 
     for &(addr, val) in &st.ram {
         let a = addr & ADDR_MASK;
         bus.memory[a as usize] = val;
         loaded.push(a);
     }
-    // The instruction stream lives in the prefetch queue and is not
-    // necessarily present in ram[]: place the two prefetched words at PC.
+    // The queued words are also placed in memory: they are not necessarily
+    // present in ram[], and the refills this instruction makes read past them.
     for (i, &word) in st.prefetch.iter().enumerate() {
         let a = (st.pc.wrapping_add(2 * i as u32)) & ADDR_MASK & !1;
         bus.memory[a as usize] = (word >> 8) as u8;
@@ -138,7 +141,7 @@ fn compare_final(tc: &M68000TestCase, cpu: &M68000, bus: &TracingBus68k) -> Outc
     }
 
     check!(cpu.sr, fin.sr, "SR");
-    check!(cpu.pc, fin.pc, "PC");
+    check!(cpu.pc(), fin.pc, "PC");
 
     for &(addr, expected) in &fin.ram {
         let actual = bus.memory[(addr & ADDR_MASK) as usize];

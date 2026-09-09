@@ -9,8 +9,11 @@
 //!
 //! Execution is modeled at the instruction level (like the i8088): the full
 //! instruction is decoded and applied atomically on its first cycle, then the
-//! remaining documented cycles are burned as bus-idle wait states. Per-cycle
-//! bus traces and exact prefetch behavior are not modeled.
+//! remaining cycles are burned as bus-idle wait states. The bus activity itself
+//! is modeled: byte accesses are strobed, every transfer costs four clocks, and
+//! instruction words come out of a real two-word prefetch queue
+//! ([`prefetch`]). What is not modeled yet is *when* within an instruction each
+//! transfer runs.
 
 pub(crate) mod addressing;
 mod alu;
@@ -20,6 +23,7 @@ mod disasm;
 mod exception;
 pub mod flags;
 mod move_ops;
+mod prefetch;
 mod stack;
 use alu::binary::LogicalOp;
 use alu::unary::UnaryOp;
@@ -74,7 +78,16 @@ pub struct M68000 {
     pub usp: u32,
     /// Inactive supervisor stack pointer (valid while in user mode).
     pub ssp: u32,
-    pub pc: u32,
+    /// Address of the instruction word the part is about to execute, which is
+    /// also the address of `prefetch[0]`.
+    ///
+    /// Private, and deliberately: a control transfer must discard the prefetch
+    /// queue, and the only way to guarantee that is for every write to go
+    /// through [`Self::set_pc_flush`] (or the straight-line advance the queue
+    /// itself makes). Inferring the flush from PC moving does not work, because
+    /// a taken branch with a zero displacement lands where execution would have
+    /// gone anyway and the part still flushes. Read it with [`Self::pc`].
+    pc: u32,
     /// Status register: high byte = system byte (T, S, interrupt mask),
     /// low byte = condition code register (X N Z V C).
     pub sr: u16,
@@ -99,14 +112,23 @@ pub struct M68000 {
     /// that point at the faulting instruction push this value.
     #[save_skip(default)]
     pub(crate) instr_pc: u32,
-    /// Address the instruction-prefetch has presented to the bus observer so
-    /// far. Held one word ahead of the consumption pointer (`pc`) so that
-    /// address-bus snoops — e.g. an Atari Slapstic, which the game arms by
-    /// *prefetching* an instruction at a magic address — see prefetch fetches
-    /// in hardware order, ahead of the current instruction's data operands.
-    /// Resynced to `pc` whenever the queue is flushed (branch/jump/exception).
+    /// The instruction prefetch queue: the word at `pc` and the word after it.
+    ///
+    /// Not serialized, and it does not need to be, for the reason the i8088's
+    /// queue is not: a save state is taken at an instruction boundary, and a
+    /// queue that comes back empty is refilled from `pc` before the next word
+    /// is consumed. The words are the same words; the only difference is that
+    /// their fetches happen after the load rather than before the save, which
+    /// is the same thing a flush does. See [`prefetch`].
     #[save_skip(default)]
-    pub(crate) prefetch_pc: u32,
+    pub(crate) prefetch: [u16; 2],
+    /// How many of the two queue slots hold a fetched word.
+    ///
+    /// A hole only ever forms at the top, so this is a length rather than a
+    /// pair of validity bits: slot 0 is the word at `pc` and slot 1 the word at
+    /// `pc + 2`, and consuming shifts down.
+    #[save_skip(default)]
+    pub(crate) prefetch_len: u8,
     /// Bus transfers the instruction now executing has performed.
     ///
     /// Every transfer on this part is four clocks at immediate DTACK, so an
@@ -141,7 +163,8 @@ impl M68000 {
             state: ExecState::Fetch,
             opcode: 0,
             instr_pc: 0,
-            prefetch_pc: 0,
+            prefetch: [0; 2],
+            prefetch_len: 0,
             transfers: 0,
         }
     }
@@ -149,6 +172,41 @@ impl M68000 {
     /// Returns true when the CPU is at an instruction boundary (ready to fetch).
     pub fn at_instruction_boundary(&self) -> bool {
         matches!(self.state, ExecState::Fetch)
+    }
+
+    /// The address of the instruction word about to be executed.
+    #[inline]
+    pub fn pc(&self) -> u32 {
+        self.pc
+    }
+
+    /// Load a new PC and discard the prefetch queue.
+    ///
+    /// This is what a control transfer does, and it is the only way to move PC
+    /// other than consuming a word out of the queue. Callers inside the core
+    /// go through [`Self::set_pc_checked`], which faults on an odd target
+    /// first; this is the raw form, for reset and for a test or harness
+    /// planting a starting address.
+    #[inline]
+    pub fn set_pc_flush(&mut self, target: u32) {
+        self.pc = target;
+        self.flush_prefetch();
+    }
+
+    /// The two words currently in the prefetch queue, and how many are live.
+    ///
+    /// Exposed for the per-cycle gate, which seeds the queue from a vector's
+    /// recorded `prefetch` pair and compares ours against the recorded final
+    /// pair afterwards.
+    pub fn prefetch_queue(&self) -> ([u16; 2], u8) {
+        (self.prefetch, self.prefetch_len)
+    }
+
+    /// Seed the queue with two already-fetched words, as if the part had
+    /// prefetched them from `pc` and `pc + 2`.
+    pub fn load_prefetch_queue(&mut self, words: [u16; 2]) {
+        self.prefetch = words;
+        self.prefetch_len = 2;
     }
 
     /// Mask an effective address to the physical address-bus width.
@@ -216,17 +274,13 @@ impl M68000 {
                     self.enter_address_error(bus, master, fault);
                     return;
                 }
-                // Resync the prefetch tracker after any non-sequential PC
-                // change (branch/jump/RTS/exception) or at first fetch: the
-                // real prefetch queue is flushed and refills from the new PC.
-                // After a straight-line instruction the tracker is left exactly
-                // one word ahead, so this is a no-op then.
-                if self.prefetch_pc != self.pc.wrapping_add(2) {
-                    self.prefetch_pc = self.pc;
-                }
-                // Fetch the opcode word and execute the instruction
-                // atomically; an odd word/long access aborts the
+                // Take the opcode out of the prefetch queue and execute the
+                // instruction atomically; an odd word/long access aborts the
                 // instruction at the fault, exactly like hardware.
+                //
+                // In steady state the queue is already full here and this
+                // costs no bus cycle at all, which is why the recorded traces
+                // contain no fetch of the instruction's own opcode.
                 let opcode = self.read_imm_word(bus, master);
                 self.opcode = opcode;
                 if let Err(fault) = self.execute_instruction(opcode, bus, master) {
@@ -264,8 +318,22 @@ impl M68000 {
         };
     }
 
-    /// Complete an instruction, charging four clocks for every bus transfer it
-    /// actually performed plus `internal` clocks away from the bus.
+    /// Complete an instruction, refilling the prefetch queue and charging four
+    /// clocks for every bus transfer it performed plus `internal` clocks away
+    /// from the bus.
+    ///
+    /// **The refill is part of finishing.** An instruction leaves the queue one
+    /// word short for every word it consumed, and the part fills it back up
+    /// before the next instruction runs, so those fetches belong to this
+    /// instruction and are charged to it. That is the whole reason a taken
+    /// branch costs more than the instruction it branches over: the two words
+    /// at the target are fetched here.
+    ///
+    /// Placing the refill last is the default rather than the universal rule.
+    /// `MOVE` records its refill after its write, which is what this does; the
+    /// read-modify-write families record it before, and say so by calling
+    /// [`Self::refill_prefetch`] themselves before the write. Once they have,
+    /// the fill here has nothing left to do.
     ///
     /// This is the same arithmetic the part does, and it is what the recorded
     /// traces show: their entries tile each instruction's length, every
@@ -276,7 +344,24 @@ impl M68000 {
     /// that the total can be right while the bus activity underneath it is
     /// wrong, which is two errors agreeing to look like none. Here a wrong
     /// transfer count cannot hide: it moves the clock count with it.
-    pub(crate) fn finish_from_bus(&mut self, internal: u32) {
+    pub(crate) fn finish_from_bus<B: Bus16 + ?Sized>(
+        &mut self,
+        bus: &mut B,
+        master: BusMaster,
+        internal: u32,
+    ) {
+        self.fill_prefetch(bus, master);
+        self.finish(4 * self.transfers + internal);
+    }
+
+    /// Complete an instruction that leaves the prefetch queue as it found it.
+    ///
+    /// `STOP` is the only user and the recorded trace is why: a supervisor
+    /// `STOP` is four clocks with no bus cycle at all, and its recorded final
+    /// state has the queue and PC exactly where they started. The part stops
+    /// before issuing the refill, so charging one here would put `STOP` at
+    /// eight clocks and fetch a word nothing executes.
+    pub(crate) fn finish_without_refill(&mut self, internal: u32) {
         self.finish(4 * self.transfers + internal);
     }
 
@@ -316,7 +401,7 @@ impl M68000 {
             // ORI/ANDI/SUBI/ADDI/EORI/CMPI
             0x0 => {
                 if !self.op_imm_alu(opcode, bus, master)? {
-                    self.finish_from_bus(0);
+                    self.finish_from_bus(bus, master, 0);
                 }
                 Ok(())
             }
@@ -341,11 +426,13 @@ impl M68000 {
                 // NBCD (size bits 00); SWAP and PEA (M4) share sub-op 0x8
                 0x8 if opcode & 0x00C0 == 0 => self.op_nbcd(opcode, bus, master),
                 // SWAP Dn (PEA takes the other EA modes of this encoding)
-                0x8 if opcode & 0x00F8 == 0x0040 => self.op_swap(opcode),
+                0x8 if opcode & 0x00F8 == 0x0040 => self.op_swap(opcode, bus, master),
                 0x8 if opcode & 0x00C0 == 0x0040 => self.op_lea_pea(opcode, bus, master, true),
                 // EXT.w / EXT.l (EA mode bits 000); other modes with bit 7
                 // set are the MOVEM store direction
-                0x8 if opcode & 0x0038 == 0 && opcode & 0x0080 != 0 => self.op_ext(opcode),
+                0x8 if opcode & 0x0038 == 0 && opcode & 0x0080 != 0 => {
+                    self.op_ext(opcode, bus, master)
+                }
                 0x8 if opcode & 0x0080 != 0 => self.op_movem(opcode, bus, master, false),
                 // ILLEGAL is the one architecturally-guaranteed illegal
                 // encoding (a TAS hole); the other size-11 encodings of
@@ -367,17 +454,17 @@ impl M68000 {
                         0x4E58..=0x4E5F => self.op_unlk(opcode, bus, master),
                         0x4E60..=0x4E6F => self.op_move_usp(opcode, bus, master),
                         0x4E70 => self.op_reset_instruction(bus, master),
-                        0x4E71 => self.op_nop(), // NOP
+                        0x4E71 => self.op_nop(bus, master), // NOP
                         0x4E72 => self.op_stop(bus, master),
                         0x4E73 => self.op_rte(bus, master),
                         0x4E75 => self.op_rts(bus, master),
                         0x4E76 => self.op_trapv(bus, master),
                         0x4E77 => self.op_rtr(bus, master),
-                        _ => self.op_nop(),
+                        _ => self.op_nop(bus, master),
                     },
-                    _ => self.op_nop(),
+                    _ => self.op_nop(bus, master),
                 },
-                _ => self.op_nop(),
+                _ => self.op_nop(bus, master),
             },
             // Size bits 11 on line 0x5 split into DBcc (EA mode 001 = An)
             // and Scc (everything else); the other sizes are ADDQ/SUBQ
@@ -387,13 +474,13 @@ impl M68000 {
             // BRA / BSR / Bcc
             0x6 => self.op_bcc(opcode, bus, master),
             // MOVEQ (bit 8 set is unassigned on the 68000)
-            0x7 if opcode & 0x0100 == 0 => self.op_moveq(opcode),
+            0x7 if opcode & 0x0100 == 0 => self.op_moveq(opcode, bus, master),
             // OR / DIVU / DIVS / SBCD plus the illegal PACK/UNPK slots
             0x8 => match opmode {
                 3 => self.op_div(opcode, bus, master, false),
                 7 => self.op_div(opcode, bus, master, true),
                 4 if ea_mode < 2 => self.op_bcd(opcode, bus, master, false),
-                5 | 6 if ea_mode < 2 => self.op_nop(), // illegal (PACK/UNPK on 68020+)
+                5 | 6 if ea_mode < 2 => self.op_nop(bus, master), // illegal (PACK/UNPK on 68020+)
                 _ => self.op_logical(opcode, bus, master, LogicalOp::Or),
             },
             // SUB / SUBA / SUBX
@@ -412,7 +499,7 @@ impl M68000 {
                 3 => self.op_mul(opcode, bus, master, false),
                 7 => self.op_mul(opcode, bus, master, true),
                 4 if ea_mode < 2 => self.op_bcd(opcode, bus, master, true),
-                5 | 6 if ea_mode < 2 => self.op_exg(opcode),
+                5 | 6 if ea_mode < 2 => self.op_exg(opcode, bus, master),
                 _ => self.op_logical(opcode, bus, master, LogicalOp::And),
             },
             // ADD / ADDA / ADDX
@@ -427,25 +514,29 @@ impl M68000 {
                 if opcode & 0x0800 == 0 {
                     self.op_shift_mem(opcode, bus, master)
                 } else {
-                    self.op_nop()
+                    self.op_nop(bus, master)
                 }
             }
-            0xE => self.op_shift_reg(opcode),
+            0xE => self.op_shift_reg(opcode, bus, master),
             // Line-A and line-F opcodes are unassigned on the 68000 and
             // vector through their dedicated exceptions
             0xA => self.op_illegal(bus, master, 10),
             0xF => self.op_illegal(bus, master, 11),
             // Remaining unassigned encodings inside implemented lines stay
             // bounded NOPs
-            _ => self.op_nop(),
+            _ => self.op_nop(bus, master),
         }
     }
 
     /// Bounded 4-cycle no-op: NOP itself and the unassigned encodings
     /// inside implemented lines.
-    fn op_nop(&mut self) -> addressing::AccessResult<()> {
-        // The opcode fetch is the whole instruction.
-        self.finish_from_bus(0);
+    fn op_nop<B: Bus16 + ?Sized>(
+        &mut self,
+        bus: &mut B,
+        master: BusMaster,
+    ) -> addressing::AccessResult<()> {
+        // Refilling the queue behind the opcode is the whole instruction.
+        self.finish_from_bus(bus, master, 0);
         Ok(())
     }
 }
@@ -477,9 +568,22 @@ impl<B: Bus16 + ?Sized> Cpu<B> for M68000 {
         self.a[7] = self
             .read_long_at(bus, master, 0x0000_0000)
             .expect("vector 0 is aligned");
-        self.pc = self
+        let entry = self
             .read_long_at(bus, master, 0x0000_0004)
             .expect("vector 1 is aligned");
+        // Reset leaves the queue empty, so the first instruction pays for two
+        // fetches to fill it, which is what the part does coming out of reset:
+        // it reads the two vectors and then prefetches two instruction words
+        // before executing anything.
+        //
+        // Those eight clocks are the whole reason Road Runner's golden frame
+        // moved at M3. They shift the machine's phase against video timing once,
+        // at boot, and its attract animation lands one step further along.
+        // Filling the queue here instead, where the clocks would not be charged
+        // to any instruction, restores the previous frame exactly. That is how
+        // the mechanism was identified, and it is also a model of a part that
+        // starts with a queue it never fetched.
+        self.set_pc_flush(entry);
     }
 }
 

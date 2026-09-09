@@ -324,30 +324,35 @@ impl M68000 {
         Ok(value)
     }
 
-    /// Fetch one extension word from the instruction stream and advance PC
-    /// (the prefetch primitive). PC is invariantly even — every control
-    /// transfer to an odd address faults before it is fetched from — so
-    /// this access cannot raise an address error.
+    /// Take one word out of the prefetch queue and advance PC.
+    ///
+    /// The opcode and every extension word come through here. It is not a bus
+    /// read: the word was fetched into the queue earlier, and what this costs
+    /// is the refill behind it (see [`super::prefetch`]). PC is invariantly
+    /// even (every control transfer to an odd address faults before it is
+    /// fetched from), so this cannot raise an address error.
     pub(crate) fn read_imm_word<B: Bus16 + ?Sized>(
         &mut self,
         bus: &mut B,
         master: BusMaster,
     ) -> u16 {
         debug_assert!(self.pc & 1 == 0, "instruction stream PC must be even");
-        self.transfers += 1;
-        let word = bus.read(master, self.mask_addr(self.pc));
-        self.pc = self.pc.wrapping_add(2);
-        // Run the prefetch one word ahead of the consumption pointer, presenting
-        // each upcoming instruction-stream address to the bus observer. This is
-        // what lets an address-bus snoop (Slapstic) see a prefetched fetch
-        // *before* this instruction's data operands — the hardware ordering the
-        // copy protection relies on. Only the address matters to the observer,
-        // so no second memory read is performed.
-        while self.prefetch_pc < self.pc.wrapping_add(2) {
-            bus.observe_data_access(master, self.mask_addr(self.prefetch_pc), false);
-            self.prefetch_pc = self.prefetch_pc.wrapping_add(2);
-        }
-        word
+        self.take_word(bus, master)
+    }
+
+    /// Take one word out of the queue without refilling behind it, for an
+    /// instruction that is about to flush the queue anyway.
+    ///
+    /// See [`super::prefetch`] for the recorded costs this comes from: a taken
+    /// `Bcc` with a word displacement is ten clocks and two transfers, and both
+    /// of those transfers are at the branch target.
+    pub(crate) fn read_imm_word_no_refill<B: Bus16 + ?Sized>(
+        &mut self,
+        bus: &mut B,
+        master: BusMaster,
+    ) -> u16 {
+        debug_assert!(self.pc & 1 == 0, "instruction stream PC must be even");
+        self.take_word_no_refill(bus, master)
     }
 
     /// The postincrement/predecrement step for `(An)+` / `-(An)`: the
@@ -395,6 +400,46 @@ impl M68000 {
         reg: u8,
         size: Size,
     ) -> Ea {
+        self.decode_ea_inner(bus, master, mode, reg, size, true)
+    }
+
+    /// As [`Self::decode_ea`], for an instruction that will discard the
+    /// prefetch queue as soon as the address is resolved.
+    ///
+    /// `JMP` and `JSR` are the users. Their extension words come out of the
+    /// queue with no refill behind them, because the words behind them are on
+    /// the path not taken: `JMP (d16, An)` is ten clocks, which is two
+    /// transfers, and both are at the target.
+    pub(crate) fn decode_ea_no_refill<B: Bus16 + ?Sized>(
+        &mut self,
+        bus: &mut B,
+        master: BusMaster,
+        mode: u8,
+        reg: u8,
+        size: Size,
+    ) -> Ea {
+        self.decode_ea_inner(bus, master, mode, reg, size, false)
+    }
+
+    /// One extension word, refilling behind it or not as the caller declares.
+    #[inline]
+    fn ext_word<B: Bus16 + ?Sized>(&mut self, bus: &mut B, master: BusMaster, refill: bool) -> u16 {
+        if refill {
+            self.read_imm_word(bus, master)
+        } else {
+            self.read_imm_word_no_refill(bus, master)
+        }
+    }
+
+    fn decode_ea_inner<B: Bus16 + ?Sized>(
+        &mut self,
+        bus: &mut B,
+        master: BusMaster,
+        mode: u8,
+        reg: u8,
+        size: Size,
+        refill: bool,
+    ) -> Ea {
         let reg = (reg & 7) as usize;
         match mode & 7 {
             // Dn — data register direct
@@ -416,12 +461,12 @@ impl M68000 {
             }
             // d16(An) — indirect with 16-bit signed displacement
             5 => {
-                let disp = sext16(self.read_imm_word(bus, master));
+                let disp = sext16(self.ext_word(bus, master, refill));
                 Ea::Mem(self.a[reg].wrapping_add(disp))
             }
             // d8(An,Xn) — indirect with index register and 8-bit displacement
             6 => {
-                let ext = self.read_imm_word(bus, master);
+                let ext = self.ext_word(bus, master, refill);
                 let addr = self.a[reg]
                     .wrapping_add(sext8(ext as u8))
                     .wrapping_add(self.index_value(ext));
@@ -430,23 +475,23 @@ impl M68000 {
             // Mode 7 submodes, selected by the register field
             _ => match reg {
                 // abs.w — sign-extended 16-bit absolute address
-                0 => Ea::Mem(sext16(self.read_imm_word(bus, master))),
+                0 => Ea::Mem(sext16(self.ext_word(bus, master, refill))),
                 // abs.l — full 32-bit absolute address (two words, high first)
                 1 => {
-                    let hi = self.read_imm_word(bus, master) as u32;
-                    let lo = self.read_imm_word(bus, master) as u32;
+                    let hi = self.ext_word(bus, master, refill) as u32;
+                    let lo = self.ext_word(bus, master, refill) as u32;
                     Ea::Mem((hi << 16) | lo)
                 }
                 // d16(PC) — PC-relative; base is the extension word address
                 2 => {
                     let base = self.pc;
-                    let disp = sext16(self.read_imm_word(bus, master));
+                    let disp = sext16(self.ext_word(bus, master, refill));
                     Ea::Mem(base.wrapping_add(disp))
                 }
                 // d8(PC,Xn) — PC-relative with index; same base convention
                 3 => {
                     let base = self.pc;
-                    let ext = self.read_imm_word(bus, master);
+                    let ext = self.ext_word(bus, master, refill);
                     let addr = base
                         .wrapping_add(sext8(ext as u8))
                         .wrapping_add(self.index_value(ext));
@@ -455,11 +500,11 @@ impl M68000 {
                 // #imm — 1 extension word for byte/word, 2 for long
                 4 => {
                     let value = match size {
-                        Size::Byte => self.read_imm_word(bus, master) as u32 & 0xFF,
-                        Size::Word => self.read_imm_word(bus, master) as u32,
+                        Size::Byte => self.ext_word(bus, master, refill) as u32 & 0xFF,
+                        Size::Word => self.ext_word(bus, master, refill) as u32,
                         Size::Long => {
-                            let hi = self.read_imm_word(bus, master) as u32;
-                            let lo = self.read_imm_word(bus, master) as u32;
+                            let hi = self.ext_word(bus, master, refill) as u32;
+                            let lo = self.ext_word(bus, master, refill) as u32;
                             (hi << 16) | lo
                         }
                     };
@@ -495,6 +540,31 @@ impl M68000 {
             },
             Ea::Imm(v) => v & size.mask(),
         })
+    }
+
+    /// Write an operand through a resolved [`Ea`], refilling the prefetch
+    /// queue first.
+    ///
+    /// This is where the read-modify-write families put their last refill, and
+    /// the traces are unambiguous about it: `CLR.w (A4)` records an operand
+    /// read, then a program read, then its write, and `NEG.l (A5)+` records the
+    /// program read before *both* words of its long write. `MOVE` is the
+    /// exception and writes through [`Self::ea_write`] instead, because it
+    /// records its refill after the write; so does `MOVEP`, which has no
+    /// program read of its own between its byte writes.
+    ///
+    /// A register destination writes nothing to the bus, so the refill lands in
+    /// the same place it would have anyway: at the end of the instruction.
+    pub(crate) fn ea_write_rmw<B: Bus16 + ?Sized>(
+        &mut self,
+        bus: &mut B,
+        master: BusMaster,
+        ea: Ea,
+        size: Size,
+        value: u32,
+    ) -> AccessResult<()> {
+        self.refill_prefetch(bus, master);
+        self.ea_write(bus, master, ea, size, value)
     }
 
     /// Write an operand of `size` through a resolved [`Ea`].
@@ -624,7 +694,7 @@ mod tests {
     #[test]
     fn odd_word_access_raises_address_error() {
         let (mut cpu, mut bus) = setup();
-        cpu.pc = 0x0C04; // pretend one extension word was consumed
+        cpu.set_pc_flush(0x0C04); // pretend one extension word was consumed
         let err = cpu.read_word_at(&mut bus, M, 0x1001).unwrap_err();
         assert_eq!(err.addr, 0x1001);
         assert!(!err.write);
@@ -641,7 +711,7 @@ mod tests {
     #[test]
     fn read_imm_word_advances_pc() {
         let (mut cpu, mut bus) = setup();
-        cpu.pc = 0x1000;
+        cpu.set_pc_flush(0x1000);
         bus.load(0x1000, &[0x4E, 0x71]);
         assert_eq!(cpu.read_imm_word(&mut bus, M), 0x4E71);
         assert_eq!(cpu.pc, 0x1002);
@@ -711,7 +781,7 @@ mod tests {
     fn decode_displacement_16() {
         let (mut cpu, mut bus) = setup();
         cpu.a[0] = 0x3000;
-        cpu.pc = 0x1000;
+        cpu.set_pc_flush(0x1000);
         bus.load(0x1000, &[0x00, 0x10]); // +0x10
         assert_eq!(
             cpu.decode_ea(&mut bus, M, 5, 0, Size::Word),
@@ -720,7 +790,7 @@ mod tests {
         assert_eq!(cpu.pc, 0x1002, "one extension word consumed");
 
         // Negative displacement
-        cpu.pc = 0x1000;
+        cpu.set_pc_flush(0x1000);
         bus.load(0x1000, &[0xFF, 0xF0]); // -0x10
         assert_eq!(
             cpu.decode_ea(&mut bus, M, 5, 0, Size::Word),
@@ -733,7 +803,7 @@ mod tests {
         let (mut cpu, mut bus) = setup();
         cpu.a[0] = 0x3000;
         cpu.d[2] = 0xFFFF_FFF0; // low word = -0x10 when sign-extended
-        cpu.pc = 0x1000;
+        cpu.set_pc_flush(0x1000);
         // Brief extension: D2.w index (D/A=0, reg=2, W/L=0), disp8 = +4
         bus.load(0x1000, &[0x20, 0x04]);
         assert_eq!(
@@ -747,7 +817,7 @@ mod tests {
         let (mut cpu, mut bus) = setup();
         cpu.a[0] = 0x0010_0000;
         cpu.d[2] = 0x0000_1000;
-        cpu.pc = 0x1000;
+        cpu.set_pc_flush(0x1000);
         // Brief extension: D2.l index (W/L=1), disp8 = 0
         bus.load(0x1000, &[0x28, 0x00]);
         assert_eq!(
@@ -761,7 +831,7 @@ mod tests {
         let (mut cpu, mut bus) = setup();
         cpu.a[0] = 0x3000;
         cpu.a[3] = 0x0000_0100;
-        cpu.pc = 0x1000;
+        cpu.set_pc_flush(0x1000);
         // Brief extension: A3.l index (D/A=1, reg=3, W/L=1), disp8 = -2
         bus.load(0x1000, &[0xB8, 0xFE]);
         assert_eq!(
@@ -775,7 +845,7 @@ mod tests {
         let (mut cpu, mut bus) = setup();
         cpu.a[1] = 0x3000;
         cpu.d[0] = 0;
-        cpu.pc = 0x1000;
+        cpu.set_pc_flush(0x1000);
         // D0.w index = 0, disp8 = -0x80 (most negative)
         bus.load(0x1000, &[0x00, 0x80]);
         assert_eq!(
@@ -789,7 +859,7 @@ mod tests {
         let (mut cpu, mut bus) = setup();
         cpu.a[0] = 0x3000;
         cpu.d[1] = 0x10;
-        cpu.pc = 0x1000;
+        cpu.set_pc_flush(0x1000);
         // D1.l index with scale bits = 3 (×8 on 68020+): 68000 ignores scale
         bus.load(0x1000, &[0x1E, 0x00]);
         assert_eq!(
@@ -802,7 +872,7 @@ mod tests {
         cpu.variant = super::super::M68kVariant::M68020;
         cpu.a[0] = 0x3000;
         cpu.d[1] = 0x10;
-        cpu.pc = 0x1000;
+        cpu.set_pc_flush(0x1000);
         bus.load(0x1000, &[0x1E, 0x00]);
         assert_eq!(
             cpu.decode_ea(&mut bus, M, 6, 0, Size::Word),
@@ -815,7 +885,7 @@ mod tests {
     #[test]
     fn decode_absolute_short_sign_extends() {
         let (mut cpu, mut bus) = setup();
-        cpu.pc = 0x1000;
+        cpu.set_pc_flush(0x1000);
         bus.load(0x1000, &[0x20, 0x00]);
         assert_eq!(
             cpu.decode_ea(&mut bus, M, 7, 0, Size::Word),
@@ -824,7 +894,7 @@ mod tests {
 
         // $8000 sign-extends to the full $FFFF8000 (the bus masks to
         // $FF8000 on access; JMP/LEA would see all 32 bits)
-        cpu.pc = 0x1000;
+        cpu.set_pc_flush(0x1000);
         bus.load(0x1000, &[0x80, 0x00]);
         assert_eq!(
             cpu.decode_ea(&mut bus, M, 7, 0, Size::Word),
@@ -835,7 +905,7 @@ mod tests {
     #[test]
     fn decode_absolute_long() {
         let (mut cpu, mut bus) = setup();
-        cpu.pc = 0x1000;
+        cpu.set_pc_flush(0x1000);
         bus.load(0x1000, &[0x00, 0x12, 0x34, 0x56]);
         assert_eq!(
             cpu.decode_ea(&mut bus, M, 7, 1, Size::Word),
@@ -847,7 +917,7 @@ mod tests {
     #[test]
     fn decode_pc_relative_base_is_extension_word_address() {
         let (mut cpu, mut bus) = setup();
-        cpu.pc = 0x1000; // extension word lives here
+        cpu.set_pc_flush(0x1000); // extension word lives here
         bus.load(0x1000, &[0x01, 0x00]); // +0x100
         assert_eq!(
             cpu.decode_ea(&mut bus, M, 7, 2, Size::Word),
@@ -858,7 +928,7 @@ mod tests {
     #[test]
     fn decode_pc_indexed() {
         let (mut cpu, mut bus) = setup();
-        cpu.pc = 0x1000;
+        cpu.set_pc_flush(0x1000);
         cpu.d[4] = 0x20;
         // Brief extension: D4.l index, disp8 = +6; base = 0x1000
         bus.load(0x1000, &[0x48, 0x06]);
@@ -871,7 +941,7 @@ mod tests {
     #[test]
     fn decode_immediate_by_size() {
         let (mut cpu, mut bus) = setup();
-        cpu.pc = 0x1000;
+        cpu.set_pc_flush(0x1000);
         bus.load(0x1000, &[0x12, 0x34]);
         assert_eq!(
             cpu.decode_ea(&mut bus, M, 7, 4, Size::Byte),
@@ -880,13 +950,13 @@ mod tests {
         );
         assert_eq!(cpu.pc, 0x1002);
 
-        cpu.pc = 0x1000;
+        cpu.set_pc_flush(0x1000);
         assert_eq!(
             cpu.decode_ea(&mut bus, M, 7, 4, Size::Word),
             Ea::Imm(0x1234)
         );
 
-        cpu.pc = 0x1000;
+        cpu.set_pc_flush(0x1000);
         bus.load(0x1000, &[0x12, 0x34, 0x56, 0x78]);
         assert_eq!(
             cpu.decode_ea(&mut bus, M, 7, 4, Size::Long),

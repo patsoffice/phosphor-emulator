@@ -16,7 +16,7 @@ const M: BusMaster = BusMaster::Cpu(0);
 
 fn setup(words: &[u16]) -> (M68000, TestBus68k) {
     let mut cpu = M68000::new();
-    cpu.pc = 0x1000;
+    cpu.set_pc_flush(0x1000);
     cpu.a[7] = 0x2000;
     let mut bus = TestBus68k::new();
     let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_be_bytes()).collect();
@@ -49,7 +49,7 @@ fn move_from_sr_is_unprivileged_on_68000() {
     cpu.set_flag(SrFlag::C, true);
     step(&mut cpu, &mut bus);
     assert_eq!(cpu.d[0] & 0xFFFF, 0x0701, "user-mode SR readable (68000)");
-    assert_eq!(cpu.pc, 0x1002, "no privilege violation");
+    assert_eq!(cpu.pc(), 0x1002, "no privilege violation");
 }
 
 #[test]
@@ -62,7 +62,7 @@ fn move_from_sr_is_privileged_on_68010() {
     enter_user_mode(&mut cpu);
     cpu.d[0] = 0xDEAD;
     step(&mut cpu, &mut bus);
-    assert_eq!(cpu.pc, 0x4000, "privilege violation vectored");
+    assert_eq!(cpu.pc(), 0x4000, "privilege violation vectored");
     assert_eq!(cpu.d[0], 0xDEAD, "SR not written to the destination");
 }
 
@@ -73,7 +73,7 @@ fn move_from_sr_in_supervisor_mode_still_works_on_68010() {
     cpu.set_flag(SrFlag::C, true);
     step(&mut cpu, &mut bus);
     assert_eq!(cpu.d[0] & 0xFFFF, 0x2701, "supervisor reads SR normally");
-    assert_eq!(cpu.pc, 0x1002, "no violation in supervisor mode");
+    assert_eq!(cpu.pc(), 0x1002, "no violation in supervisor mode");
 }
 
 #[test]
@@ -101,7 +101,7 @@ fn move_to_sr_in_user_mode_violates() {
     bus.load(8 * 4, &0x4000u32.to_be_bytes()); // vector 8 handler
     enter_user_mode(&mut cpu);
     step(&mut cpu, &mut bus);
-    assert_eq!(cpu.pc, 0x4000, "privilege violation vector");
+    assert_eq!(cpu.pc(), 0x4000, "privilege violation vector");
     assert_eq!(cpu.a[7], 0x1FFA, "frame on the supervisor stack");
     let pc = u32::from_be_bytes([
         bus.memory[0x1FFC],
@@ -148,7 +148,7 @@ fn ori_to_sr_in_user_mode_violates() {
     bus.load(8 * 4, &0x4000u32.to_be_bytes());
     enter_user_mode(&mut cpu);
     step(&mut cpu, &mut bus);
-    assert_eq!(cpu.pc, 0x4000, "privilege violation");
+    assert_eq!(cpu.pc(), 0x4000, "privilege violation");
 }
 
 // ---------------------------------------------------------------------------
@@ -174,7 +174,7 @@ fn move_usp_in_user_mode_violates() {
     bus.load(8 * 4, &0x4000u32.to_be_bytes());
     enter_user_mode(&mut cpu);
     step(&mut cpu, &mut bus);
-    assert_eq!(cpu.pc, 0x4000);
+    assert_eq!(cpu.pc(), 0x4000);
 }
 
 // ---------------------------------------------------------------------------
@@ -190,9 +190,9 @@ fn trap_rte_round_trip() {
     cpu.set_flag(SrFlag::C, true);
 
     step(&mut cpu, &mut bus);
-    assert_eq!(cpu.pc, 0x4000, "into the handler");
+    assert_eq!(cpu.pc(), 0x4000, "into the handler");
     step(&mut cpu, &mut bus);
-    assert_eq!(cpu.pc, 0x1002, "RTE resumes after the TRAP");
+    assert_eq!(cpu.pc(), 0x1002, "RTE resumes after the TRAP");
     assert_eq!(cpu.a[7], 0x2000, "stack balanced");
     assert!(cpu.flag_is_set(SrFlag::C), "CCR restored from the frame");
 }
@@ -205,7 +205,7 @@ fn rte_returns_to_user_mode() {
     cpu.a[7] = 0x1FFA;
     bus.load(0x1FFA, &[0x00, 0x10, 0x00, 0x00, 0x30, 0x00]);
     step(&mut cpu, &mut bus);
-    assert_eq!(cpu.pc, 0x3000);
+    assert_eq!(cpu.pc(), 0x3000);
     assert!(!cpu.flag_is_set(SrFlag::S), "dropped to user mode");
     assert_eq!(cpu.a[7], 0x8000, "USP active");
     assert_eq!(cpu.ssp, 0x2000, "SSP above the consumed frame");
@@ -218,7 +218,7 @@ fn rte_in_user_mode_violates() {
     bus.load(8 * 4, &0x4000u32.to_be_bytes());
     enter_user_mode(&mut cpu);
     step(&mut cpu, &mut bus);
-    assert_eq!(cpu.pc, 0x4000);
+    assert_eq!(cpu.pc(), 0x4000);
 }
 
 // ---------------------------------------------------------------------------
@@ -230,7 +230,7 @@ fn stop_loads_sr_and_sleeps() {
     let (mut cpu, mut bus) = setup(&[0x4E72, 0x2300]); // STOP #$2300
     step(&mut cpu, &mut bus);
     assert_eq!(cpu.sr, 0x2300, "immediate loaded into SR");
-    assert_eq!(cpu.pc, 0x1004);
+    assert_eq!(cpu.pc(), 0x1004);
     assert!(cpu.is_sleeping(), "waiting for an interrupt");
 }
 
@@ -240,7 +240,7 @@ fn stop_in_user_mode_violates() {
     bus.load(8 * 4, &0x4000u32.to_be_bytes());
     enter_user_mode(&mut cpu);
     step(&mut cpu, &mut bus);
-    assert_eq!(cpu.pc, 0x4000);
+    assert_eq!(cpu.pc(), 0x4000);
     assert!(!cpu.is_sleeping(), "violation, not a stop");
 }
 
@@ -248,14 +248,14 @@ fn stop_in_user_mode_violates() {
 fn reset_instruction_is_long_supervisor_noop() {
     let (mut cpu, mut bus) = setup(&[0x4E70]); // RESET
     step(&mut cpu, &mut bus);
-    assert_eq!(cpu.pc, 0x1002, "CPU state unaffected");
+    assert_eq!(cpu.pc(), 0x1002, "CPU state unaffected");
     assert_eq!(cpu.sr, 0x2700);
 
     let (mut cpu, mut bus) = setup(&[0x4E70]);
     bus.load(8 * 4, &0x4000u32.to_be_bytes());
     enter_user_mode(&mut cpu);
     step(&mut cpu, &mut bus);
-    assert_eq!(cpu.pc, 0x4000, "privileged in user mode");
+    assert_eq!(cpu.pc(), 0x4000, "privileged in user mode");
 }
 
 #[test]
@@ -263,6 +263,6 @@ fn nop_advances_pc_only() {
     let (mut cpu, mut bus) = setup(&[0x4E71]); // NOP
     cpu.sr = (cpu.sr & 0xFF00) | 0x1F;
     step(&mut cpu, &mut bus);
-    assert_eq!(cpu.pc, 0x1002);
+    assert_eq!(cpu.pc(), 0x1002);
     assert_eq!(cpu.sr & 0x1F, 0x1F);
 }

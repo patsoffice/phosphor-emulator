@@ -15,7 +15,7 @@ const M: BusMaster = BusMaster::Cpu(0);
 
 fn setup(words: &[u16]) -> (M68000, TestBus68k) {
     let mut cpu = M68000::new();
-    cpu.pc = 0x1000;
+    cpu.set_pc_flush(0x1000);
     cpu.a[7] = 0x2000;
     let mut bus = TestBus68k::new();
     let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_be_bytes()).collect();
@@ -42,7 +42,7 @@ fn interrupt_taken_when_level_above_mask() {
     bus.load((24 + 3) * 4, &0x4000u32.to_be_bytes()); // autovector level 3
     bus.irq_level = 3;
     step(&mut cpu, &mut bus);
-    assert_eq!(cpu.pc, 0x4000, "level 3 > mask 2: taken");
+    assert_eq!(cpu.pc(), 0x4000, "level 3 > mask 2: taken");
     assert_eq!(cpu.interrupt_mask(), 3, "mask raised to the taken level");
     assert_eq!(cpu.a[7], 0x1FFA, "frame pushed");
     let pushed_pc = u32::from_be_bytes([
@@ -60,7 +60,7 @@ fn interrupt_masked_at_or_below_mask_level() {
     cpu.set_interrupt_mask(3);
     bus.irq_level = 3;
     step(&mut cpu, &mut bus);
-    assert_eq!(cpu.pc, 0x1002, "level 3 at mask 3: not taken, NOP ran");
+    assert_eq!(cpu.pc(), 0x1002, "level 3 at mask 3: not taken, NOP ran");
     assert_eq!(cpu.a[7], 0x2000, "nothing pushed");
 }
 
@@ -73,13 +73,13 @@ fn level_7_is_edge_triggered() {
     bus.load(0x4000, &[0x4E, 0x71, 0x4E, 0x71]); // handler: NOPs
     bus.irq_level = 7;
     step(&mut cpu, &mut bus);
-    assert_eq!(cpu.pc, 0x4000, "NMI taken despite mask 7");
+    assert_eq!(cpu.pc(), 0x4000, "NMI taken despite mask 7");
 
     // Level 7 held: no retrigger on later boundaries
     step(&mut cpu, &mut bus);
-    assert_eq!(cpu.pc, 0x4002, "handler NOP ran, no re-entry");
+    assert_eq!(cpu.pc(), 0x4002, "handler NOP ran, no re-entry");
     step(&mut cpu, &mut bus);
-    assert_eq!(cpu.pc, 0x4004, "still no re-entry while level 7 holds");
+    assert_eq!(cpu.pc(), 0x4004, "still no re-entry while level 7 holds");
 }
 
 #[test]
@@ -90,7 +90,7 @@ fn device_supplied_vector_overrides_autovector() {
     bus.irq_level = 2;
     bus.irq_vector = 0x40;
     step(&mut cpu, &mut bus);
-    assert_eq!(cpu.pc, 0x5000, "device vector used instead of 24+2");
+    assert_eq!(cpu.pc(), 0x5000, "device vector used instead of 24+2");
 }
 
 #[test]
@@ -131,7 +131,7 @@ fn stop_wakes_on_interrupt() {
     bus.irq_level = 5;
     step(&mut cpu, &mut bus);
     assert!(!cpu.is_sleeping());
-    assert_eq!(cpu.pc, 0x4000, "woke into the level-5 handler");
+    assert_eq!(cpu.pc(), 0x4000, "woke into the level-5 handler");
     let pushed_pc = u32::from_be_bytes([
         bus.memory[0x1FFC],
         bus.memory[0x1FFD],
@@ -151,7 +151,7 @@ fn odd_jump_target_takes_vector_3_with_full_frame() {
     cpu.a[0] = 0x3001;
     bus.load(3 * 4, &0x4000u32.to_be_bytes());
     step(&mut cpu, &mut bus);
-    assert_eq!(cpu.pc, 0x4000, "vector 3 handler entered");
+    assert_eq!(cpu.pc(), 0x4000, "vector 3 handler entered");
     assert_eq!(cpu.a[7], 0x2000 - 14, "seven-word group-0 frame");
 
     let m = &bus.memory;
@@ -171,10 +171,10 @@ fn odd_jump_target_takes_vector_3_with_full_frame() {
 #[test]
 fn odd_pc_fetch_takes_vector_3() {
     let (mut cpu, mut bus) = setup(&[]);
-    cpu.pc = 0x1001;
+    cpu.set_pc_flush(0x1001);
     bus.load(3 * 4, &0x4000u32.to_be_bytes());
     step(&mut cpu, &mut bus);
-    assert_eq!(cpu.pc, 0x4000);
+    assert_eq!(cpu.pc(), 0x4000);
     assert_eq!(cpu.a[7], 0x2000 - 14, "frame pushed for the fetch fault");
 }
 
@@ -185,7 +185,7 @@ fn odd_write_aborts_instruction_and_records_write_fault() {
     cpu.d[0] = 0x1234;
     bus.load(3 * 4, &0x4000u32.to_be_bytes());
     step(&mut cpu, &mut bus);
-    assert_eq!(cpu.pc, 0x4000);
+    assert_eq!(cpu.pc(), 0x4000);
     let status = u16::from_be_bytes([bus.memory[0x1FF2], bus.memory[0x1FF3]]);
     assert_eq!(status & 0x10, 0, "R/W bit clear for a write fault");
     assert_eq!(

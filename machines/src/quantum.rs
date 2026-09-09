@@ -628,7 +628,7 @@ impl QuantumBoard {
         self.step_avg();
 
         if self.map.has_any_watchpoints() {
-            let pc = cpu.at_instruction_boundary().then_some(cpu.pc);
+            let pc = cpu.at_instruction_boundary().then_some(cpu.pc());
             self.map.latch_access_context(self.clock, pc);
         }
     }

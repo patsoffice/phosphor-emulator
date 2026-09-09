@@ -115,7 +115,7 @@ fn run_one(program: &[u8], setup: impl FnOnce(&mut M68000, &mut CountingBus)) ->
     let mut cpu = M68000::new();
     let mut bus = CountingBus::new();
     bus.load(0, program);
-    cpu.pc = 0;
+    cpu.set_pc_flush(0);
     setup(&mut cpu, &mut bus);
 
     bus.log.clear();

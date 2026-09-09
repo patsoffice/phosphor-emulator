@@ -43,7 +43,7 @@ impl M68000 {
         signed: bool,
     ) -> AccessResult<()> {
         let Some((src, ea_time)) = self.muldiv_operand(opcode, bus, master)? else {
-            self.finish_from_bus(0);
+            self.finish_from_bus(bus, master, 0);
             return Ok(());
         };
         let dn = ((opcode >> 9) & 7) as usize;
@@ -61,7 +61,7 @@ impl M68000 {
         // 38 + 2n internal cycles and this charges the worst case flat; the
         // data-dependent refinement is its own piece of work, and it is a
         // change to this number alone now that nothing else is folded into it.
-        self.finish_from_bus(66 + ea_time);
+        self.finish_from_bus(bus, master, 66 + ea_time);
         Ok(())
     }
 
@@ -80,7 +80,7 @@ impl M68000 {
         signed: bool,
     ) -> AccessResult<()> {
         let Some((src, ea_time)) = self.muldiv_operand(opcode, bus, master)? else {
-            self.finish_from_bus(0);
+            self.finish_from_bus(bus, master, 0);
             return Ok(());
         };
         let dn = ((opcode >> 9) & 7) as usize;
@@ -100,7 +100,7 @@ impl M68000 {
             // longer frame now costs its four clocks by itself rather than
             // needing a variant-gated constant here.
             self.exception(bus, master, 5, self.instr_pc)?;
-            self.finish_from_bus(18 + ea_time);
+            self.finish_from_bus(bus, master, 18 + ea_time);
             return Ok(());
         }
 
@@ -110,7 +110,7 @@ impl M68000 {
             if dst == 0x8000_0000 && divisor == -1 {
                 self.d[dn] = 0;
                 self.set_flags_logical(Size::Long, 0);
-                self.finish_from_bus(154 + ea_time);
+                self.finish_from_bus(bus, master, 154 + ea_time);
                 return Ok(());
             }
             let quotient = (dst as i32) / divisor;
@@ -127,7 +127,7 @@ impl M68000 {
                 self.set_flag(SrFlag::V, true);
                 self.set_flag(SrFlag::C, false);
             }
-            self.finish_from_bus(154 + ea_time);
+            self.finish_from_bus(bus, master, 154 + ea_time);
         } else {
             let quotient = dst / src as u32;
             let remainder = dst % src as u32;
@@ -143,7 +143,7 @@ impl M68000 {
                 self.set_flag(SrFlag::V, true);
                 self.set_flag(SrFlag::C, false);
             }
-            self.finish_from_bus(136 + ea_time);
+            self.finish_from_bus(bus, master, 136 + ea_time);
         }
         Ok(())
     }
@@ -162,9 +162,16 @@ impl M68000 {
         master: BusMaster,
     ) -> AccessResult<()> {
         let Some((bound, ea_time)) = self.muldiv_operand(opcode, bus, master)? else {
-            self.finish_from_bus(0);
+            self.finish_from_bus(bus, master, 0);
             return Ok(());
         };
+        // The refill behind the opcode is issued before the bounds test, so it
+        // precedes the exception frame when the test fails: the trace records
+        // `CHK D0, D4` trapping as a program read, three frame writes, the
+        // vector, and the two refills at the handler. An instruction that runs
+        // to a trap still prefetches; one that never runs, like a privilege
+        // violation, does not.
+        self.refill_prefetch(bus, master);
         let dn = ((opcode >> 9) & 7) as usize;
         let src = sext16(self.d[dn] as u16) as i32;
         let bound = sext16(bound) as i32;
@@ -174,13 +181,21 @@ impl M68000 {
         self.set_flag(SrFlag::C, false);
         if src < 0 || src > bound {
             self.set_flag(SrFlag::N, src < 0);
-            // As the divide's zero trap: the frame push and vector fetch are
-            // counted, so only the recognition time is declared.
+            // Eight transfers for a register source, and eight clocks left over.
+            //
+            // The memory source forms that consume no extension word land two
+            // clocks long: `CHK (A0)+, D2` is recorded at 42 and comes out at
+            // 44. The recorded internal is 8 for a register or extension-word
+            // source and 6 for `(An)`, `(An)+` and `-(An)`, and nothing in the
+            // bus activity distinguishes those two groups, so the difference is
+            // inside the entry sequence rather than in this instruction. It
+            // belongs to M5 with the rest of exception entry, and a constant
+            // fitted here would only hide it.
             self.exception(bus, master, 6, self.pc)?;
-            self.finish_from_bus(20 + ea_time);
+            self.finish_from_bus(bus, master, 8 + ea_time);
         } else {
             // In bounds: the comparison itself, and nothing more.
-            self.finish_from_bus(6 + ea_time);
+            self.finish_from_bus(bus, master, 6 + ea_time);
         }
         Ok(())
     }

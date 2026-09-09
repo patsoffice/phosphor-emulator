@@ -15,7 +15,7 @@ const M: BusMaster = BusMaster::Cpu(0);
 
 fn setup(words: &[u16]) -> (M68000, TestBus68k) {
     let mut cpu = M68000::new();
-    cpu.pc = 0x1000;
+    cpu.set_pc_flush(0x1000);
     let mut bus = TestBus68k::new();
     let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_be_bytes()).collect();
     bus.load(0x1000, &bytes);
@@ -76,7 +76,7 @@ fn btst_static_form() {
     bus.load(0x3000, &[0x08]);
     step(&mut cpu, &mut bus);
     assert!(!cpu.flag_is_set(SrFlag::Z), "bit 3 is set");
-    assert_eq!(cpu.pc, 0x1004, "bit-number extension word consumed");
+    assert_eq!(cpu.pc(), 0x1004, "bit-number extension word consumed");
 }
 
 #[test]
@@ -160,7 +160,7 @@ fn static_bset_memory_via_displacement() {
     step(&mut cpu, &mut bus);
     assert_eq!(&bus.memory[0x3000..0x3002], &[0x00, 0x40]);
     assert!(cpu.flag_is_set(SrFlag::Z), "bit was clear before");
-    assert_eq!(cpu.pc, 0x1006, "bit number + displacement words consumed");
+    assert_eq!(cpu.pc(), 0x1006, "bit number + displacement words consumed");
 }
 
 #[test]

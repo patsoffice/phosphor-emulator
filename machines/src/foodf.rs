@@ -959,7 +959,7 @@ impl FoodFightBoard {
 
         // Latch watchpoint attribution context before CPU execution.
         if self.map.debug_active() {
-            let pc = cpu.at_instruction_boundary().then_some(cpu.pc);
+            let pc = cpu.at_instruction_boundary().then_some(cpu.pc());
             self.map.latch_access_context(self.clock, pc);
         }
     }

@@ -814,10 +814,12 @@ impl AtariSystem1Board {
 
     /// Read a word from the slapstic-banked window (080000-087FFF) using the
     /// bank the slapstic currently presents. The state machine is driven
-    /// separately by [`Slapstic::test`] on every *data* access (see
-    /// [`bus_observe_data_access`](Self::bus_observe_data_access)); opcode
-    /// prefetches read through without perturbing it. The window is mirrored ×4,
-    /// so the bank offset is just the low 13 bits of the address.
+    /// separately by [`Slapstic::test`] on every address the CPU drives (see
+    /// [`bus_observe_data_access`](Self::bus_observe_data_access)), operand
+    /// accesses and instruction prefetches alike, which is what the protection
+    /// depends on: the game arms it by prefetching at a magic address. The
+    /// window is mirrored ×4, so the bank offset is just the low 13 bits of the
+    /// address.
     fn slapstic_read(&self, addr: u32) -> u16 {
         let bank = self.slapstic.current_bank() as usize;
         let base = bank * 0x2000 + (addr as usize & 0x1FFE);
@@ -1205,7 +1207,7 @@ impl AtariSystem1Board {
     fn begin_cycle_inner(&mut self, cpu: &M68000) {
         // Latch watchpoint attribution context before CPU execution.
         if self.map.debug_active() {
-            let pc = cpu.at_instruction_boundary().then_some(cpu.pc);
+            let pc = cpu.at_instruction_boundary().then_some(cpu.pc());
             self.map.latch_access_context(self.clock, pc);
         }
     }

@@ -32,7 +32,7 @@ impl M68000 {
         // Byte access to an address register is an illegal encoding
         // (MOVE.b An,<ea> / MOVEA.b); treated as a bounded NOP.
         if size == Size::Byte && (src_mode == 1 || dst_mode == 1) {
-            self.finish_from_bus(0);
+            self.finish_from_bus(bus, master, 0);
             return Ok(());
         }
 
@@ -62,8 +62,14 @@ impl M68000 {
             // (hardware-verified; same pattern as the ADDX/SUBX operands).
             // Predecrement-destination faults also stack the current PC,
             // one word later than other operand faults.
+            // A predecrement destination is the one MOVE that refills *before*
+            // its write rather than after it: `MOVE.w (A1)+, -(A1)` is recorded
+            // as a read, a program read and a write, where the same instruction
+            // to `(A4)` is a read, a write and a program read. The decrement
+            // gives the prefetch a slot the other destination modes do not.
             (4, Size::Long) => {
                 let reg = dst_reg as usize;
+                self.refill_prefetch(bus, master);
                 let lo_first = (|| {
                     self.a[reg] = self.a[reg].wrapping_sub(2);
                     self.write_word_at(bus, master, self.a[reg], value as u16)?;
@@ -77,7 +83,7 @@ impl M68000 {
             }
             (4, _) => {
                 let dst = self.decode_ea(bus, master, dst_mode, dst_reg, size);
-                self.ea_write(bus, master, dst, size, value)
+                self.ea_write_rmw(bus, master, dst, size, value)
                     .map_err(|mut e| {
                         e.stacked_pc = e.stacked_pc.wrapping_add(2);
                         e
@@ -117,7 +123,7 @@ impl M68000 {
             } else {
                 ea_internal(dst_mode, dst_reg)
             };
-        self.finish_from_bus(internal);
+        self.finish_from_bus(bus, master, internal);
         Ok(())
     }
 
@@ -125,12 +131,17 @@ impl M68000 {
     /// to 32 bits and writes the full data register.
     ///
     /// Flags: N and Z from the 32-bit result, V and C cleared, X untouched.
-    pub(crate) fn op_moveq(&mut self, opcode: u16) -> AccessResult<()> {
+    pub(crate) fn op_moveq<B: Bus16 + ?Sized>(
+        &mut self,
+        opcode: u16,
+        bus: &mut B,
+        master: BusMaster,
+    ) -> AccessResult<()> {
         let reg = ((opcode >> 9) & 7) as usize;
         let value = sext8(opcode as u8);
         self.d[reg] = value;
         self.set_flags_logical(Size::Long, value);
-        self.finish_from_bus(0);
+        self.finish_from_bus(bus, master, 0);
         Ok(())
     }
 
@@ -139,12 +150,17 @@ impl M68000 {
     ///
     /// Flags: N and Z from the full 32-bit result (N = new bit 31), V and C
     /// cleared, X untouched (data-movement rule).
-    pub(crate) fn op_swap(&mut self, opcode: u16) -> AccessResult<()> {
+    pub(crate) fn op_swap<B: Bus16 + ?Sized>(
+        &mut self,
+        opcode: u16,
+        bus: &mut B,
+        master: BusMaster,
+    ) -> AccessResult<()> {
         let reg = (opcode & 7) as usize;
         let value = self.d[reg].rotate_left(16);
         self.d[reg] = value;
         self.set_flags_logical(Size::Long, value);
-        self.finish_from_bus(0);
+        self.finish_from_bus(bus, master, 0);
         Ok(())
     }
 
@@ -190,7 +206,7 @@ impl M68000 {
         }
         // MOVEP is all bus and no thinking: the opcode, the displacement word,
         // and one byte transfer per register byte. Nothing is left over.
-        self.finish_from_bus(0);
+        self.finish_from_bus(bus, master, 0);
         Ok(())
     }
 
@@ -214,14 +230,16 @@ impl M68000 {
         let ea_mode = ((opcode >> 3) & 7) as u8;
         let ea_reg = (opcode & 7) as u8;
         if ea_mode == 1 || (ea_mode == 7 && ea_reg >= 2) {
-            self.finish_from_bus(0); // illegal destination
+            self.finish_from_bus(bus, master, 0); // illegal destination
             return Ok(());
         }
         let dst = self.decode_ea(bus, master, ea_mode, ea_reg, Size::Word);
         // The 68000 reads the destination before rewriting it (visible as
         // the R/W bit of an address-error frame) — hardware-verified.
         let _ = self.ea_read(bus, master, dst, Size::Word)?;
-        self.ea_write(bus, master, dst, Size::Word, self.sr as u32)?;
+        // A read-modify-write like the ALU's, and it refills where they do:
+        // the trace records read, program read, write.
+        self.ea_write_rmw(bus, master, dst, Size::Word, self.sr as u32)?;
         // A register destination transfers nothing, leaving two clocks to read
         // the status register out; a memory one reads and writes, both counted.
         let internal = if ea_mode == 0 {
@@ -229,7 +247,7 @@ impl M68000 {
         } else {
             ea_internal(ea_mode, ea_reg)
         };
-        self.finish_from_bus(internal);
+        self.finish_from_bus(bus, master, internal);
         Ok(())
     }
 
@@ -246,15 +264,17 @@ impl M68000 {
         let ea_mode = ((opcode >> 3) & 7) as u8;
         let ea_reg = (opcode & 7) as u8;
         if ea_mode == 1 {
-            self.finish_from_bus(0); // address-register source is illegal
+            self.finish_from_bus(bus, master, 0); // address-register source is illegal
             return Ok(());
         }
         let src = self.decode_ea(bus, master, ea_mode, ea_reg, Size::Word);
         let value = self.ea_read(bus, master, src, Size::Word)? as u16;
-        self.sr = (self.sr & 0xFF00) | (value & 0x001F);
-        // One word read, counted. The eight clocks left are the part loading
-        // the status register and settling the mode it may just have changed.
-        self.finish_from_bus(8 + ea_internal(ea_mode, ea_reg));
+        self.write_ccr(value);
+        // The flag write discards the queue, so the finish refills two words
+        // rather than one: `MOVE.w D3, CCR` is two program reads for the one
+        // word it consumed. Four clocks are left, the part loading the
+        // register and settling the mode it may just have changed.
+        self.finish_from_bus(bus, master, 4 + ea_internal(ea_mode, ea_reg));
         Ok(())
     }
 
@@ -274,15 +294,15 @@ impl M68000 {
         let ea_mode = ((opcode >> 3) & 7) as u8;
         let ea_reg = (opcode & 7) as u8;
         if ea_mode == 1 {
-            self.finish_from_bus(0); // address-register source is illegal
+            self.finish_from_bus(bus, master, 0); // address-register source is illegal
             return Ok(());
         }
         let src = self.decode_ea(bus, master, ea_mode, ea_reg, Size::Word);
         let value = self.ea_read(bus, master, src, Size::Word)? as u16;
         self.write_sr(value);
-        // One word read, counted. The eight clocks left are the part loading
-        // the status register and settling the mode it may just have changed.
-        self.finish_from_bus(8 + ea_internal(ea_mode, ea_reg));
+        // As MOVE to CCR: the status-register write discards the queue and the
+        // finish refills both words.
+        self.finish_from_bus(bus, master, 4 + ea_internal(ea_mode, ea_reg));
         Ok(())
     }
 
@@ -306,7 +326,7 @@ impl M68000 {
         } else {
             self.usp = self.a[reg];
         }
-        self.finish_from_bus(0);
+        self.finish_from_bus(bus, master, 0);
         Ok(())
     }
 
@@ -314,7 +334,12 @@ impl M68000 {
     /// 32-bit registers — Dx,Dy / Ax,Ay / Dx,Ay.
     ///
     /// Flags: none. 6 cycles.
-    pub(crate) fn op_exg(&mut self, opcode: u16) -> AccessResult<()> {
+    pub(crate) fn op_exg<B: Bus16 + ?Sized>(
+        &mut self,
+        opcode: u16,
+        bus: &mut B,
+        master: BusMaster,
+    ) -> AccessResult<()> {
         let rx = ((opcode >> 9) & 7) as usize;
         let ry = (opcode & 7) as usize;
         match (opcode >> 3) & 0x1F {
@@ -323,12 +348,12 @@ impl M68000 {
             0x11 => std::mem::swap(&mut self.d[rx], &mut self.a[ry]),
             // 10000 (opmode 6, EA mode 0) is an unassigned encoding
             _ => {
-                self.finish_from_bus(0);
+                self.finish_from_bus(bus, master, 0);
                 return Ok(());
             }
         }
         // Registers only: the opcode fetch, plus two clocks to swap them.
-        self.finish_from_bus(2);
+        self.finish_from_bus(bus, master, 2);
         Ok(())
     }
 }
