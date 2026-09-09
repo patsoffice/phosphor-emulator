@@ -14,3 +14,7 @@
 	path = cpu-validation/test_data/680x0
 	url = https://github.com/SingleStepTests/680x0.git
 	ignore = dirty
+[submodule "cpu-validation/test_data/m68000"]
+	path = cpu-validation/test_data/m68000
+	url = https://github.com/SingleStepTests/m68000.git
+	ignore = dirty
