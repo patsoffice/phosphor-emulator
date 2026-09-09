@@ -57,6 +57,13 @@ struct CaseResult {
     /// Ours minus the recording, in clocks.
     length_delta: i64,
     kinds_exact: bool,
+    /// Whether we ran the same *number* of transfers, order aside.
+    count_exact: bool,
+    /// Ours minus the recording, in transfers.
+    count_delta: i64,
+    /// What the recording's own clocks say the instruction spent away from the
+    /// bus: `length` less four clocks for each transfer it ran.
+    recorded_internal: i64,
     /// The case could not be run at all (it hit the tick limit).
     ran: bool,
 }
@@ -150,10 +157,19 @@ fn run_case(
     let result = if timed_out {
         CaseResult::default()
     } else {
+        let recorded = recorded_kinds(tc);
+        let ours = our_kinds(&bus.log);
+        // Every transfer on this part is four clocks with immediate DTACK, and
+        // the recording's entries tile its length, so whatever is left over is
+        // the time the instruction spent away from the bus.
+        let recorded_internal = tc.length as i64 - 4 * recorded.len() as i64;
         CaseResult {
             length_exact: ticks == tc.length,
             length_delta: ticks as i64 - tc.length as i64,
-            kinds_exact: our_kinds(&bus.log) == recorded_kinds(tc),
+            kinds_exact: ours == recorded,
+            count_exact: ours.len() == recorded.len(),
+            count_delta: ours.len() as i64 - recorded.len() as i64,
+            recorded_internal,
             ran: true,
         }
     };
@@ -180,7 +196,12 @@ struct Tally {
     ran: usize,
     length_exact: usize,
     kinds_exact: usize,
+    count_exact: usize,
     length_delta_sum: i64,
+    count_delta_sum: i64,
+    /// Cases whose recorded internal time is negative, which would mean the
+    /// four-clock transfer model does not hold for them.
+    impossible_internal: usize,
 }
 
 impl Tally {
@@ -206,7 +227,14 @@ impl Tally {
         if r.kinds_exact {
             self.kinds_exact += 1;
         }
+        if r.count_exact {
+            self.count_exact += 1;
+        }
+        if r.recorded_internal < 0 {
+            self.impossible_internal += 1;
+        }
         self.length_delta_sum += r.length_delta;
+        self.count_delta_sum += r.count_delta;
     }
 
     fn pct(part: usize, whole: usize) -> f64 {
@@ -223,6 +251,18 @@ impl Tally {
 
     fn kinds_pct(&self) -> f64 {
         Self::pct(self.kinds_exact, self.cases)
+    }
+
+    fn count_pct(&self) -> f64 {
+        Self::pct(self.count_exact, self.cases)
+    }
+
+    fn mean_count_delta(&self) -> f64 {
+        if self.ran == 0 {
+            0.0
+        } else {
+            self.count_delta_sum as f64 / self.ran as f64
+        }
     }
 
     fn mean_delta(&self) -> f64 {
@@ -277,8 +317,8 @@ impl Populations {
 fn report(label: &str, p: &Populations) {
     eprintln!("\n{label}");
     eprintln!(
-        "  {:<16} {:>9} {:>9} {:>9} {:>9} {:>9}",
-        "population", "cases", "length", "kinds", "mean d", "timeout"
+        "  {:<16} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>8}",
+        "population", "cases", "length", "kinds", "count", "mean d", "mean dN", "timeout"
     );
     for (name, t) in [
         ("all", &p.all),
@@ -288,15 +328,25 @@ fn report(label: &str, p: &Populations) {
         ("registers only", &p.registers_only),
     ] {
         eprintln!(
-            "  {:<16} {:>9} {:>8.2}% {:>8.2}% {:>9.2} {:>9}",
+            "  {:<16} {:>9} {:>8.2}% {:>8.2}% {:>8.2}% {:>9.2} {:>9.2} {:>8}",
             name,
             t.cases,
             t.length_pct(),
             t.kinds_pct(),
+            t.count_pct(),
             t.mean_delta(),
+            t.mean_count_delta(),
             t.timed_out()
         );
     }
+    // Every transfer is four clocks with immediate DTACK, so `length` less four
+    // per transfer is the instruction's internal time and cannot be negative.
+    // If it ever is, the four-clock model is wrong for that case and the whole
+    // basis for charging time from bus activity goes with it.
+    eprintln!(
+        "  cases whose recorded length is less than four clocks per transfer: {}",
+        p.all.impossible_internal
+    );
 }
 
 // ---------------------------------------------------------------------------
