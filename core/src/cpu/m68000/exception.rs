@@ -42,16 +42,53 @@ impl M68000 {
         // number × 4. RTE consumes it. (The 68010 group-0 bus/address-error
         // frame is the larger format $8 and is not modeled — see README.)
         if self.uses_long_exception_frame() {
+            // The 68010's order is not sourced from anything: its frame has no
+            // recorded trace and no microcode listing in reach, so it keeps the
+            // straightforward high-to-low push rather than borrowing the
+            // 68000's order below on the assumption that they match.
             self.push_word(bus, master, vector as u16 * 4)?;
+            self.push_long(bus, master, pushed_pc)?;
+            self.push_word(bus, master, old_sr)?;
+        } else {
+            self.push_short_frame(bus, master, pushed_pc, old_sr)?;
         }
-        self.push_long(bus, master, pushed_pc)?;
-        self.push_word(bus, master, old_sr)?;
         let handler = self.read_long_at(bus, master, vector as u32 * 4)?;
         // Loading the vector is a control transfer and discards the queue; the
         // two words at the handler are fetched by the finish, and they are why
         // exception entry costs two transfers more than its frame and vector.
         self.set_pc_flush(handler);
         Ok(())
+    }
+
+    /// Push the 68000's three-word exception frame, in the order the part
+    /// drives the writes rather than the order the words sit in.
+    ///
+    /// The frame is SR at the lowest address then the PC above it, but the part
+    /// does not write it downwards. It writes **the low half of the PC first**,
+    /// at `sp - 2`, then SR at `sp - 6`, then the high half at `sp - 4`. Three
+    /// words, three addresses, one order that is none of the obvious ones.
+    ///
+    /// The stack pointer reaches its final value on the *second* write, not the
+    /// first, so a frame that faults on its first write leaves A7 exactly as it
+    /// was. That is why the decrement is placed between the writes here.
+    ///
+    /// Nothing above rung 4 of the per-cycle gate can see any of this: the
+    /// addresses, the values and the transfer count are identical whichever
+    /// order they are driven in, and so is the memory afterwards. It is visible
+    /// to a device that watches the address bus, which is the reason to get it
+    /// right rather than merely the reason it was found.
+    fn push_short_frame<B: Bus16 + ?Sized>(
+        &mut self,
+        bus: &mut B,
+        master: BusMaster,
+        pushed_pc: u32,
+        old_sr: u16,
+    ) -> AccessResult<()> {
+        let sp = self.a[7];
+        self.write_word_at(bus, master, sp.wrapping_sub(2), pushed_pc as u16)?;
+        self.a[7] = sp.wrapping_sub(6);
+        self.write_word_at(bus, master, sp.wrapping_sub(6), old_sr)?;
+        self.write_word_at(bus, master, sp.wrapping_sub(4), (pushed_pc >> 16) as u16)
     }
 
     /// TRAP #n (0x4E40-0x4E4F): unconditional trap to vector 32 + n. The
