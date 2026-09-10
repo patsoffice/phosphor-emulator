@@ -29,7 +29,9 @@ use alu::binary::LogicalOp;
 use alu::unary::UnaryOp;
 pub use flags::SrFlag;
 
-use crate::core::{Bus16, BusMaster, bus::InterruptState, component::BusMasterComponent};
+use crate::core::{
+    Bus16, BusMaster, BusSignals, bus::InterruptState, component::BusMasterComponent,
+};
 use crate::cpu::{
     Cpu, CpuControl,
     state::{CpuStateTrait, M68000State},
@@ -216,6 +218,34 @@ impl M68000 {
         match self.variant {
             M68kVariant::M68000 | M68kVariant::M68010 => addr & 0x00FF_FFFF,
             M68kVariant::M68020 | M68kVariant::M68030 => addr,
+        }
+    }
+
+    /// The cycle descriptor for an instruction-stream transfer.
+    ///
+    /// Program space, at whatever privilege the part is running at *now*: the
+    /// privilege is read here rather than once per instruction because
+    /// exception entry and `RTE` move it mid-instruction, and the cycles either
+    /// side of the move name different address spaces.
+    #[inline]
+    pub(crate) fn program_cycle(&self, is_write: bool) -> BusSignals {
+        BusSignals {
+            is_write,
+            program: true,
+            supervisor: self.flag_is_set(SrFlag::S),
+            byte: false,
+        }
+    }
+
+    /// The cycle descriptor for an operand transfer. See
+    /// [`Self::program_cycle`] for why privilege is sampled per transfer.
+    #[inline]
+    pub(crate) fn data_cycle(&self, is_write: bool, byte: bool) -> BusSignals {
+        BusSignals {
+            is_write,
+            program: false,
+            supervisor: self.flag_is_set(SrFlag::S),
+            byte,
         }
     }
 
@@ -710,6 +740,81 @@ pub(crate) mod test_support {
 mod tests {
     use super::test_support::WordBus;
     use super::*;
+    use crate::core::Bus;
+
+    /// A bus that keeps what the part drove on FC2..FC0 with each address.
+    struct FcBus {
+        inner: WordBus,
+        seen: Vec<(u32, u8)>,
+    }
+
+    impl Bus for FcBus {
+        type Address = u32;
+        type Data = u16;
+        fn read(&mut self, m: BusMaster, addr: u32) -> u16 {
+            self.inner.read(m, addr)
+        }
+        fn write(&mut self, m: BusMaster, addr: u32, data: u16) {
+            self.inner.write(m, addr, data);
+        }
+        fn is_halted_for(&self, _m: BusMaster) -> bool {
+            false
+        }
+        fn check_interrupts(&mut self, _t: BusMaster) -> InterruptState {
+            InterruptState::default()
+        }
+        fn observe_bus_cycle(&mut self, _m: BusMaster, addr: u32, signals: BusSignals) {
+            self.seen.push((addr, signals.function_code()));
+        }
+    }
+
+    impl Bus16 for FcBus {
+        fn read_byte(&mut self, m: BusMaster, addr: u32) -> u8 {
+            self.inner.read_byte(m, addr)
+        }
+        fn write_byte(&mut self, m: BusMaster, addr: u32, data: u8) {
+            self.inner.write_byte(m, addr, data);
+        }
+    }
+
+    /// An instruction word is fetched from program space and an operand from
+    /// data space, at whatever privilege the part is running at.
+    ///
+    /// The 68000 drives these on three pins beside the address, and nothing
+    /// downstream can reconstruct them: two cycles at the same address with the
+    /// same direction name different address spaces depending only on which
+    /// unit inside the part asked for them.
+    #[test]
+    fn transfers_name_program_and_data_space() {
+        // MOVE.w (A0), D0: one operand read, then the refill behind the opcode.
+        for (supervisor, data_fc, program_fc) in [(true, 5, 6), (false, 1, 2)] {
+            let mut cpu = M68000::new();
+            let mut bus = FcBus {
+                inner: WordBus::new(),
+                seen: Vec::new(),
+            };
+            bus.inner.load(0x1000, &[0x30, 0x10, 0x4E, 0x71]);
+            cpu.set_flag(SrFlag::S, supervisor);
+            cpu.a[0] = 0x2000;
+            cpu.set_pc_flush(0x1000);
+
+            while !cpu.tick_with_bus(&mut bus, BusMaster::Cpu(0)) {}
+
+            assert_eq!(
+                bus.seen,
+                vec![
+                    // Filling the empty queue: two program fetches.
+                    (0x1000, program_fc),
+                    (0x1002, program_fc),
+                    // The operand, in data space.
+                    (0x2000, data_fc),
+                    // The refill behind the consumed opcode.
+                    (0x1004, program_fc),
+                ],
+                "supervisor = {supervisor}"
+            );
+        }
+    }
 
     #[test]
     fn new_state() {

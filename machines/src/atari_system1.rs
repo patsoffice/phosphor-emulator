@@ -48,7 +48,8 @@ use phosphor_core::audio::SampleRing;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::{AccessKind, AddressSpace32};
 use phosphor_core::core::{
-    Bus16, BusMaster, ClockDomainName as Clk, ClockTree, DomainId, TimingConfig, select_byte,
+    Bus16, BusMaster, BusSignals, ClockDomainName as Clk, ClockTree, DomainId, TimingConfig,
+    select_byte,
 };
 use phosphor_core::cpu::m68000::{M68kVariant, M68000};
 use phosphor_core::device::slapstic::Slapstic;
@@ -815,7 +816,7 @@ impl AtariSystem1Board {
     /// Read a word from the slapstic-banked window (080000-087FFF) using the
     /// bank the slapstic currently presents. The state machine is driven
     /// separately by [`Slapstic::test`] on every address the CPU drives (see
-    /// [`bus_observe_data_access`](Self::bus_observe_data_access)), operand
+    /// [`bus_observe_cycle`](Self::bus_observe_cycle)), operand
     /// accesses and instruction prefetches alike, which is what the protection
     /// depends on: the game arms it by prefetching at a magic address. The
     /// window is mirrored ×4, so the bank offset is just the low 13 bits of the
@@ -1291,18 +1292,22 @@ impl AtariSystem1Board {
         false
     }
 
-    /// The slapstic snoops the address bus of every access the CPU drives — data
-    /// reads/writes *and* instruction prefetches (the protection arms itself by
-    /// prefetching code at magic addresses) — anywhere in the map, since its
+    /// The slapstic snoops the address bus of every cycle the CPU drives: data
+    /// reads and writes *and* instruction prefetches (the protection arms itself
+    /// by prefetching code at magic addresses), anywhere in the map, since its
     /// `test_any` patterns can land in RAM, and at the exact byte address (so
     /// consecutive byte accesses present distinct odd/even addresses, like the
-    /// real chip's pins). Read/write is irrelevant: the PAL only decodes address
-    /// lines.
-    pub(crate) fn bus_observe_data_access(
+    /// real chip's pins).
+    ///
+    /// Everything [`BusSignals`] carries is irrelevant here, and that is a fact
+    /// about the part rather than an omission: the chip is a PAL that decodes
+    /// address lines and nothing else. It cannot tell a read from a write, a
+    /// program fetch from an operand access, or supervisor from user.
+    pub(crate) fn bus_observe_cycle(
         &mut self,
         _master: BusMaster,
         addr: u32,
-        _is_write: bool,
+        _signals: BusSignals,
     ) {
         self.slapstic.test(addr);
     }
@@ -1310,9 +1315,9 @@ impl AtariSystem1Board {
     /// Shared read decode. Game-specific input windows (F20000 trackballs,
     /// F40000 ADC) are handled by the wrapper before it forwards here.
     pub(crate) fn bus_read(&mut self, master: BusMaster, addr: u32) -> u16 {
-        // The slapstic state machine is driven by `bus_observe_data_access`
-        // (called by the CPU for data accesses only); a read here just returns
-        // the bank it currently presents.
+        // The slapstic state machine is driven by `bus_observe_cycle` (called by
+        // the CPU for every cycle it drives); a read here just returns the bank
+        // it currently presents.
         let val = match addr {
             // Backed ROM / RAM windows.
             0x00_0000..=0x07_FFFF

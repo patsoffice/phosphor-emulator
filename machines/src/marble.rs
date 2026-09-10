@@ -16,7 +16,7 @@ use phosphor_core::core::machine::{
     AnalogAxisKind, DefaultBinding, Direction, InputConfigurable, InputControl, InputEvent,
     InputId, InputKind, MachineCore, MouseControl, Nvram, Profilable, SaveState,
 };
-use phosphor_core::core::{Bus, Bus16, BusMaster, select_byte};
+use phosphor_core::core::{Bus, Bus16, BusMaster, BusSignals, select_byte};
 use phosphor_core::cpu::Cpu;
 use phosphor_core::cpu::state::M68000State;
 
@@ -640,8 +640,8 @@ impl Bus for MarbleBus<'_> {
         self.board.bus_is_halted_for(master)
     }
 
-    fn observe_data_access(&mut self, master: BusMaster, addr: u32, is_write: bool) {
-        self.board.bus_observe_data_access(master, addr, is_write);
+    fn observe_bus_cycle(&mut self, master: BusMaster, addr: u32, signals: BusSignals) {
+        self.board.bus_observe_cycle(master, addr, signals);
     }
 
     fn read(&mut self, master: BusMaster, addr: u32) -> u16 {
@@ -842,6 +842,17 @@ mod tests {
     use phosphor_core::gfx::decode::GfxCache;
 
     const TIMING: phosphor_core::core::TimingConfig = atari_system1::TIMING;
+
+    /// A supervisor data read, which is what the CPU drives when it touches the
+    /// slapstic window for an operand. The chip decodes address lines only, so
+    /// nothing in here reaches it; the tests below still name a real cycle
+    /// rather than an arbitrary one, so they stay honest if that ever changes.
+    const SNOOPED_READ: BusSignals = BusSignals {
+        is_write: false,
+        program: false,
+        supervisor: true,
+        byte: false,
+    };
 
     /// Walk the beam over a whole frame's scanlines so every visible row is
     /// drawn. The picture only exists once the beam has passed over it, so a
@@ -1370,11 +1381,11 @@ mod tests {
         for b in 0..4u8 {
             sys.board.slapstic_rom[b as usize * 0x2000] = 0x10 + b;
         }
-        // The CPU snoops each data access onto the slapstic via
-        // `observe_data_access`, then performs the read; reproduce that pairing.
+        // The CPU snoops each cycle onto the slapstic via `observe_bus_cycle`,
+        // then performs the read; reproduce that pairing.
         let read = |sys: &mut MarbleSystem, a| {
             let mut bus = sys.split().1;
-            bus.observe_data_access(BusMaster::Cpu(0), a, false);
+            bus.observe_bus_cycle(BusMaster::Cpu(0), a, SNOOPED_READ);
             bus.read(BusMaster::Cpu(0), a)
         };
 
@@ -1428,13 +1439,13 @@ mod tests {
         sys.board.eeprom[0x30] = 0x99;
         // Drive the slapstic to a non-default bank so its state is exercised.
         // Bank 1's select offset is 0x50 (word) → byte address 0x0800A0. The
-        // CPU snoops accesses onto the chip via `observe_data_access`.
+        // CPU snoops cycles onto the chip via `observe_bus_cycle`.
         sys.split()
             .1
-            .observe_data_access(BusMaster::Cpu(0), 0x08_0000, false); // arm
+            .observe_bus_cycle(BusMaster::Cpu(0), 0x08_0000, SNOOPED_READ); // arm
         sys.split()
             .1
-            .observe_data_access(BusMaster::Cpu(0), 0x08_00A0, false); // select bank 1
+            .observe_bus_cycle(BusMaster::Cpu(0), 0x08_00A0, SNOOPED_READ); // select bank 1
         assert_eq!(sys.board.slapstic.current_bank(), 1);
         sys.board.xscroll = 0x1234;
         sys.board.bankselect = 0x5A;

@@ -19,7 +19,7 @@ use phosphor_core::core::machine::{
     InputId, InputKind, MachineCore, MouseControl, Nvram, Profilable, SaveState,
 };
 
-use phosphor_core::core::{Bus, Bus16, BusMaster};
+use phosphor_core::core::{Bus, Bus16, BusMaster, BusSignals};
 use phosphor_core::cpu::Cpu;
 use phosphor_core::cpu::state::M68000State;
 use phosphor_core::device::adc0809::Adc0809;
@@ -715,8 +715,8 @@ impl Bus for RoadRunnerBus<'_> {
         self.board.bus_is_halted_for(master)
     }
 
-    fn observe_data_access(&mut self, master: BusMaster, addr: u32, is_write: bool) {
-        self.board.bus_observe_data_access(master, addr, is_write);
+    fn observe_bus_cycle(&mut self, master: BusMaster, addr: u32, signals: BusSignals) {
+        self.board.bus_observe_cycle(master, addr, signals);
     }
 
     fn read(&mut self, master: BusMaster, addr: u32) -> u16 {

@@ -65,7 +65,7 @@ impl M68000 {
             return;
         }
         let addr = self.mask_addr(self.pc.wrapping_add(2 * u32::from(self.prefetch_len)));
-        bus.observe_data_access(master, addr, false);
+        bus.observe_bus_cycle(master, addr, self.program_cycle(false));
         self.transfers += 1;
         self.prefetch[usize::from(self.prefetch_len)] = bus.read(master, addr);
         self.prefetch_len += 1;
@@ -206,7 +206,7 @@ mod tests {
             fn check_interrupts(&mut self, _t: BusMaster) -> crate::core::bus::InterruptState {
                 crate::core::bus::InterruptState::default()
             }
-            fn observe_data_access(&mut self, _m: BusMaster, addr: u32, _w: bool) {
+            fn observe_bus_cycle(&mut self, _m: BusMaster, addr: u32, _s: crate::core::BusSignals) {
                 self.seen.push(addr);
             }
         }

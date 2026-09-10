@@ -8,6 +8,47 @@ pub enum BusMaster {
                 // blit_pixel reading from m_vram[] instead of the address space)
 }
 
+/// The control lines a master drives alongside the address for one bus cycle.
+///
+/// On the 68000 these are literal pins: R/W, the function code on FC2..FC0, and
+/// the two data strobes. A device that decodes address lines alone ignores all
+/// of them, and the Atari Slapstic is that device. What needs them is a
+/// comparison against a recorded per-cycle trace, whose entries carry the
+/// function code and the strobes, neither of which is recoverable from the
+/// address.
+///
+/// The privilege bit in particular cannot be inferred from outside. `RTE`,
+/// `MOVE to SR` and exception entry all change it *during* an instruction, so
+/// the cycles before and after the change name different address spaces, and a
+/// consumer reading the status register at the instruction boundary would be
+/// asking a question whose answer has already moved.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct BusSignals {
+    /// A write cycle rather than a read.
+    pub is_write: bool,
+    /// Program space (an instruction word) rather than data space.
+    pub program: bool,
+    /// Supervisor privilege rather than user.
+    pub supervisor: bool,
+    /// One byte behind a single strobe, rather than a full word behind both.
+    pub byte: bool,
+}
+
+impl BusSignals {
+    /// The 68000 function code FC2..FC0 this cycle drives: 1 user data,
+    /// 2 user program, 5 supervisor data, 6 supervisor program.
+    ///
+    /// FC2 is the privilege bit and FC1/FC0 select the space, which is why
+    /// program and data differ by exactly one in each privilege pair. The
+    /// remaining codes (0, 3, 4 and 7) name the CPU space the part uses for
+    /// interrupt acknowledge, and nothing here drives one.
+    pub fn function_code(self) -> u8 {
+        let privilege = if self.supervisor { 4 } else { 0 };
+        let space = if self.program { 2 } else { 1 };
+        privilege | space
+    }
+}
+
 /// Generic bus interface supporting halt/arbitration (TSC, RDY, BUSREQ, etc.)
 pub trait Bus {
     type Address: Copy + Into<u64>; // u16 for 8-bit, u32 for 16/32-bit
@@ -28,14 +69,25 @@ pub trait Bus {
         self.write(master, addr, data)
     }
 
-    /// Observe a *data* bus access (read or write) at its exact address before
-    /// it is resolved. Opcode prefetches are excluded. The default is a no-op;
-    /// machines with address-sequence-sensitive hardware on the bus (e.g. an
-    /// Atari Slapstic, which snoops every address line) override this to drive
-    /// that hardware's state machine. `addr` is the precise byte address — for
-    /// a byte access this is the unaligned address, matching what the chip's
-    /// address pins actually see.
-    fn observe_data_access(&mut self, _master: BusMaster, _addr: Self::Address, _is_write: bool) {}
+    /// Observe one bus cycle at its exact address, before it is resolved.
+    ///
+    /// Every transfer a master drives comes through here, instruction
+    /// prefetches included: the Atari Slapstic arms itself by watching the
+    /// program *fetch* at a magic address, so a hook that saw only operand
+    /// accesses would miss the thing it exists for. The default is a no-op;
+    /// machines with address-sequence-sensitive hardware on the bus override
+    /// it to drive that hardware's state machine.
+    ///
+    /// `addr` is the precise byte address, so consecutive byte accesses present
+    /// distinct odd and even addresses exactly as the part's pins do.
+    /// [`BusSignals`] carries what the part drives alongside the address.
+    fn observe_bus_cycle(
+        &mut self,
+        _master: BusMaster,
+        _addr: Self::Address,
+        _signals: BusSignals,
+    ) {
+    }
 
     /// Check if the bus is halted for this master (TSC/RDY/BUSREQ).
     /// Returns true if the master must pause before the next bus cycle.

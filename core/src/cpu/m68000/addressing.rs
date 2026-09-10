@@ -197,7 +197,7 @@ impl M68000 {
             return Err(self.operand_fault(addr, false));
         }
         let a = self.mask_addr(addr);
-        bus.observe_data_access(master, a, false);
+        bus.observe_bus_cycle(master, a, self.data_cycle(false, false));
         self.transfers += 1;
         Ok(bus.read(master, a))
     }
@@ -214,7 +214,7 @@ impl M68000 {
             return Err(self.operand_fault(addr, true));
         }
         let a = self.mask_addr(addr);
-        bus.observe_data_access(master, a, true);
+        bus.observe_bus_cycle(master, a, self.data_cycle(true, false));
         self.transfers += 1;
         bus.write(master, a, data);
         Ok(())
@@ -256,7 +256,7 @@ impl M68000 {
         addr: u32,
     ) -> u8 {
         let a = self.mask_addr(addr);
-        bus.observe_data_access(master, a, false);
+        bus.observe_bus_cycle(master, a, self.data_cycle(false, true));
         self.transfers += 1;
         bus.read_byte(master, a)
     }
@@ -275,7 +275,7 @@ impl M68000 {
         data: u8,
     ) {
         let a = self.mask_addr(addr);
-        bus.observe_data_access(master, a, true);
+        bus.observe_bus_cycle(master, a, self.data_cycle(true, true));
         self.transfers += 1;
         bus.write_byte(master, a, data);
     }
