@@ -19,14 +19,56 @@ use super::super::addressing::{AccessResult, Ea, Size, ea_internal, sext16};
 use super::super::flags::SrFlag;
 use crate::core::{Bus16, BusMaster};
 
-/// Internal time for the `Dn ⟵ Dn op <ea>` forms.
+/// Whether an addressing mode fetches its operand from memory.
 ///
-/// Everything these instructions do on the bus is counted as it happens, so
-/// what is left to declare is the time off it: a long ALU pass takes two clocks
-/// a word one does not, plus whatever the addressing mode spends computing its
-/// address. The destination forms need no equivalent, because their extra write
-/// is a transfer and pays for itself.
+/// Data and address register direct do not, and neither does an immediate: its
+/// words come out of the prefetch queue, which was filled before the
+/// instruction started. Everything else runs a data bus cycle to get its value.
+pub(crate) fn operand_from_memory(mode: u8, reg: u8) -> bool {
+    !matches!((mode & 7, reg & 7), (0, _) | (1, _) | (7, 4))
+}
+
+/// Internal time for a `Dn ⟵ Dn op <ea>` form that *stores* its result.
+///
+/// The ALU is 16 bits wide, so a long operation is two passes: the low word,
+/// then the high word with carry. What varies is whether the high-word pass
+/// gets a step of its own, and that is decided by where the operand came from.
+///
+/// - **Operand from memory**: the two operand reads occupy their own cycles,
+///   the low pass runs free alongside them, and the high pass shares its step
+///   with the prefetch. Two clocks are left over, for the step that places the
+///   result.
+/// - **Operand from a register or the queue**: there are no operand reads, the
+///   prefetch runs on its own step, and the high pass then needs a step of its
+///   own before the result can be placed on the step after. Four clocks.
+///
+/// A word operation has one pass and neither case costs anything.
+///
+/// **`CMP` is the control that makes this a mechanism rather than a fitted
+/// number.** It runs the same two passes over the same operands and has no
+/// result to place, so its high pass shares the prefetch's step whichever way
+/// the operand arrived, and it costs two clocks either way. That is why it has
+/// [`cmp_form_internal`] rather than sharing this one. `EOR`'s register
+/// destination in `op_logical` reached the same four independently, and before
+/// any of this was measured.
 fn src_form_internal(size: Size, mode: u8, reg: u8) -> u32 {
+    let alu = match (size, operand_from_memory(mode, reg)) {
+        (Size::Long, true) => 2,
+        (Size::Long, false) => 4,
+        _ => 0,
+    };
+    alu + ea_internal(mode, reg)
+}
+
+/// Internal time for `CMP`'s source form, which discards its result.
+///
+/// Two clocks at long whatever the operand, where [`src_form_internal`] pays
+/// four for an operand that is not from memory. Having no result to place,
+/// the comparison folds its high-word pass into the same step as the prefetch
+/// in both cases, so the step that separates them never appears. Measured as
+/// well as read: `CMP.l D2,D3` is six clocks and `ADD.l D2,D3` is eight, one
+/// bus transfer each.
+fn cmp_form_internal(size: Size, mode: u8, reg: u8) -> u32 {
     (if size == Size::Long { 2 } else { 0 }) + ea_internal(mode, reg)
 }
 
@@ -140,9 +182,19 @@ impl M68000 {
                 };
 
                 // ADDA/SUBA hold the full 32-bit register whatever the operand
-                // size, and a word source costs two clocks more off the bus
-                // than a long one: it has to be sign-extended before the add.
-                let alu = if size == Size::Long { 2 } else { 4 };
+                // size, so both forms run the long two-pass add and store it.
+                //
+                // A word source pays four regardless: it is sign-extended to 32
+                // bits before the add, and its single bus cycle has only one
+                // pass to hide. A long source is [`src_form_internal`]'s rule
+                // exactly, and for the same reason: two clocks when the operand
+                // came from memory as two bus cycles, four when it was already
+                // in a register or the queue.
+                let alu = if size == Size::Long && operand_from_memory(ea_mode, ea_reg) {
+                    2
+                } else {
+                    4
+                };
                 self.finish_from_bus(bus, master, alu + ea_internal(ea_mode, ea_reg));
             }
         }
@@ -177,7 +229,7 @@ impl M68000 {
                 let b = self.ea_read(bus, master, src, size)?;
                 self.sub_with_flags(size, self.d[dn], b);
 
-                self.finish_from_bus(bus, master, src_form_internal(size, ea_mode, ea_reg));
+                self.finish_from_bus(bus, master, cmp_form_internal(size, ea_mode, ea_reg));
             }
             3 | 7 => {
                 let size = if opmode == 3 { Size::Word } else { Size::Long };
@@ -661,6 +713,22 @@ impl M68000 {
             };
             // An destination: no operand transfer, and the full-width add costs
             // four clocks off the bus whichever size the opcode names.
+            //
+            // The word and long encodings run the identical sequence on this
+            // part: a low-word add, the prefetch, a high-word add with carry,
+            // and the register write, the last two costing two clocks each.
+            // Nothing in it is conditioned on the size bits, because ADDQ and
+            // SUBQ to an address register always operate on the full 32 bits.
+            //
+            // THE TWO CORPORA DISAGREE HERE AND THIS FOLLOWS THE SEQUENCE. The
+            // documentation-derived set records the long form at six clocks
+            // rather than eight, on 380 ADDQ and 351 SUBQ cases, every one of
+            // them short by exactly two. The microcode-derived set records
+            // eight, agrees with this core on every such case, and matches the
+            // part's own sequence above. Two clocks were nearly taken off this
+            // line on the strength of a residual that was uniform, large and
+            // one-sided, which is what a wrong constant looks like; it took the
+            // third source to show the constant was right and the corpus wrong.
             self.finish_from_bus(bus, master, 4);
             return Ok(());
         }

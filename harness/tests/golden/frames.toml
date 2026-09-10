@@ -238,7 +238,7 @@ machine = "roadrunner"
 frames = 1800
 shows = "Attract mode: the canyon backdrop with the striped road, a character mid-road, the BEWARE OF STEEL SHOT IN BIRDSEED banner and the 1985 Atari Games / Warner Bros. copyrights."
 size = [336, 240]
-frame = "sha256:f0df2401e4a266a5f89d41583edc517e8c643d034c390a5f3d0719d98bcb9aca"
+frame = "sha256:8f3161250886cd462c7933088c4c94b89a7b35405a7d4de4154a91527290d62a"
 
 [[frame]]
 machine = "robotron"
