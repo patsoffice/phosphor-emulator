@@ -8,19 +8,31 @@
 //! prints is how far that is from the part, and it is the evidence the
 //! conversion decision is taken on. See `docs/designs/cycle-accurate-m68000.md`.
 //!
-//! # Two rungs, and why only two
-//!
-//! The design doc's ladder has six rungs, widening from a total to a full
-//! positional comparison. Only the first two can mean anything against an
-//! atomic core:
+//! # The rungs
 //!
 //! 1. **`length`**: our clock count against the recording's.
-//! 2. **Transfer kinds and order**: reads and writes in sequence, durations and
-//!    positions ignored.
+//! 2. **Transfer kinds and order**: reads and writes in sequence, positions
+//!    ignored.
+//! 3. **Positions**: every transfer starts on the clock the recording starts it
+//!    on.
+//! 4. **Operands**: address, size and data, per transfer.
+//! 5. **Function code**: program against data, supervisor against user.
+//! 6. **Final PC and prefetch queue**, asserted rather than reported.
 //!
-//! Rungs 3 to 6 compare *when* a cycle runs, and an atomic core has no answer.
-//! Reporting them now would produce a number that says "0%" for a structural
-//! reason rather than a timing one, which reads like a measurement and is not.
+//! Rungs 3, 4 and 5 are conditioned on rung 2 and reported as a share of *all*
+//! cases, which makes each rung an upper bound on the next: comparing a
+//! position element by element against a sequence that is not the same sequence
+//! would pair transfers that are not counterparts and report their
+//! disagreement as a positional error.
+//!
+//! **Rung 3 is the one an atomic core cannot answer**, and until M4 this gate
+//! did not report it for that reason: a core that applies an instruction's
+//! whole effect on one clock puts every transfer on clock zero, so the number
+//! would have said "0%" for a structural reason rather than a timing one. It is
+//! reported now because the structure is changing underneath it, and what it
+//! reads before the change is the baseline the change is measured against. The
+//! cases it passes today are the ones whose recorded activity is a single
+//! transfer at clock zero, and that is not an achievement, it is arithmetic.
 //!
 //! # Two suites, and what can and cannot be compared across them
 //!
@@ -37,7 +49,7 @@ use std::io::Read;
 use phosphor_core::core::{BusMaster, BusMasterComponent};
 use phosphor_core::cpu::m68000::M68000;
 use phosphor_cpu_validation::{
-    BusTxnKind, M68000Regs, M68000TestCase, OurAccess, RecordingBus68k, m68000_bin,
+    BusTxnKind, M68000Regs, M68000TestCase, RecordingBus68k, TxnSize, m68000_bin,
 };
 
 const ADDR_MASK: u32 = 0x00FF_FFFF;
@@ -57,10 +69,14 @@ struct CaseResult {
     /// Ours minus the recording, in clocks.
     length_delta: i64,
     kinds_exact: bool,
+    /// Rung 3: every transfer starts on the clock the recording starts it on.
+    positions_exact: bool,
+    /// Rung 4: address, size and data agree on every transfer.
+    operands_exact: bool,
+    /// Rung 5: the function code agrees on every transfer.
+    fc_exact: bool,
     /// Whether we ran the same *number* of transfers, order aside.
     count_exact: bool,
-    /// Ours minus the recording, in transfers.
-    count_delta: i64,
     /// Our PC at the boundary against the recorded one.
     pc_exact: bool,
     /// Both queue words against the recorded final pair (rung 6).
@@ -84,6 +100,9 @@ struct CaseResult {
     /// For a case whose transfer sequence differs: the recorded shape and
     /// ours, so the residual can be counted by shape rather than described.
     mismatch: Option<(String, String)>,
+    /// For a case whose sequence matches but whose transfers do not: the first
+    /// transfer that differs and the field it differs in.
+    operand_fault: Option<String>,
 }
 
 fn load_initial(
@@ -123,24 +142,57 @@ fn load_initial(
     }
 }
 
-/// The recorded transfer sequence, as read/write kinds in order.
+/// One recorded transfer, reduced to the things this core can be asked about.
 ///
-/// Idle spans drop out (an atomic core has none to compare) and so do the two
-/// address-error kinds, which are cycles the part runs with AS never asserted:
-/// no transfer is committed, and this core does not run them at all.
-fn recorded_kinds(tc: &M68000TestCase) -> Vec<bool> {
-    tc.transactions
-        .iter()
-        .filter_map(|t| match t.kind {
-            BusTxnKind::Read | BusTxnKind::Tas => Some(false),
-            BusTxnKind::Write => Some(true),
-            BusTxnKind::Idle | BusTxnKind::ReadAddressError | BusTxnKind::WriteAddressError => None,
-        })
-        .collect()
+/// The duration is not among them, and that is a fact rather than an omission:
+/// every transfer this part makes is four clocks at immediate DTACK, which M2
+/// checked against all 1,317,560 cases of both corpora, so a duration says
+/// nothing a position does not already say. The position does say something,
+/// and the entries' exact tiling of `length` is what fixes it.
+struct RecordedTxn {
+    /// The clock this transfer starts on, counted from the instruction's first.
+    start: u32,
+    write: bool,
+    /// The byte the transfer touched, resolved out of whichever way its suite
+    /// posts the address.
+    addr: u32,
+    /// One byte behind a single strobe rather than a word behind both.
+    byte: bool,
+    data: u16,
+    /// The function code FC2..FC0 the part drove with the address.
+    fc: u8,
 }
 
-fn our_kinds(log: &[OurAccess]) -> Vec<bool> {
-    log.iter().map(|a| a.write).collect()
+/// The recorded transfers, in order, each with the clock it starts on.
+///
+/// Idle spans and the two address-error kinds drop out of the *sequence*: a
+/// cycle run with the address strobe never asserted commits no transfer, and
+/// this core does not run one. They stay in the running clock total, because
+/// they are time the part spent and every transfer behind them starts that
+/// much later. Dropping them from the total instead would have moved every
+/// position after an address error by the width of the aborted cycle.
+fn recorded_transfers(tc: &M68000TestCase) -> Vec<RecordedTxn> {
+    let mut out = Vec::with_capacity(tc.transactions.len());
+    let mut clock = 0;
+    for t in &tc.transactions {
+        match t.kind {
+            BusTxnKind::Read | BusTxnKind::Write | BusTxnKind::Tas => out.push(RecordedTxn {
+                start: clock,
+                write: t.kind == BusTxnKind::Write,
+                addr: t.byte_address() & ADDR_MASK,
+                byte: t.size == TxnSize::Byte,
+                data: if t.size == TxnSize::Byte {
+                    t.byte_value() as u16
+                } else {
+                    t.data as u16
+                },
+                fc: t.fc as u8,
+            }),
+            BusTxnKind::Idle | BusTxnKind::ReadAddressError | BusTxnKind::WriteAddressError => {}
+        }
+        clock += t.clocks;
+    }
+    out
 }
 
 /// A transfer sequence as a printable string: `R` read, `W` write.
@@ -189,9 +241,14 @@ fn run_case(
     load_initial(cpu, bus, &tc.initial, execution_pc, &mut loaded);
 
     bus.start_recording();
+    // The clock is published to the bus *before* each tick, so every access the
+    // CPU makes during that tick is stamped with the clock it happened on. That
+    // stamp is the whole of rung 3 on our side: the recording's positions come
+    // from its entries tiling `length`, and this is the counterpart.
     let mut ticks: u32 = 0;
     let mut timed_out = false;
     loop {
+        bus.clock = ticks;
         ticks += 1;
         if cpu.tick_with_bus(bus, BusMaster::Cpu(0)) {
             break;
@@ -206,8 +263,52 @@ fn run_case(
     let result = if timed_out {
         CaseResult::default()
     } else {
-        let recorded = recorded_kinds(tc);
-        let ours = our_kinds(&bus.log);
+        let recorded = recorded_transfers(tc);
+        let recorded_shape: Vec<bool> = recorded.iter().map(|t| t.write).collect();
+        let our_shape: Vec<bool> = bus.log.iter().map(|a| a.write).collect();
+        let kinds_exact = our_shape == recorded_shape;
+        // Rungs 3, 4 and 5 refine rung 2 rather than standing beside it.
+        // Comparing a position, an address or a function code element by
+        // element only means anything once the two sequences are the same
+        // sequence; against a differing one it would pair up transfers that are
+        // not counterparts and report their disagreement as a positional error.
+        // So each is conditioned on rung 2, which also makes each rung an upper
+        // bound on the next and gives the ladder a self-check.
+        let paired = || bus.log.iter().zip(recorded.iter());
+        let positions_exact = kinds_exact && paired().all(|(a, b)| a.clock == b.start);
+        let operands_exact = kinds_exact
+            && paired().all(|(a, b)| a.addr == b.addr && a.byte == b.byte && a.data == b.data);
+        let fc_exact = kinds_exact && paired().all(|(a, b)| a.fc == b.fc);
+        // The first transfer that disagrees, named by the field that disagrees.
+        // A rate says how much of rung 4 is left; this says what to look at, and
+        // the distinction between a wrong address, a wrong width and a wrong
+        // value is the whole diagnosis: the first is an addressing defect, the
+        // second a strobe defect, and the third often neither, because a value
+        // read out of memory the harness never seeded is a fault in the harness.
+        let operand_fault = (kinds_exact && !operands_exact).then(|| {
+            let (i, (a, b)) = paired()
+                .enumerate()
+                .find(|(_, (a, b))| a.addr != b.addr || a.byte != b.byte || a.data != b.data)
+                .expect("a differing transfer, since the rung failed");
+            let field = if a.addr != b.addr {
+                "addr"
+            } else if a.byte != b.byte {
+                "size"
+            } else {
+                "data"
+            };
+            format!(
+                "{field} at transfer {i}: recorded {}{} {:#08x}={:#06x} ours {}{} {:#08x}={:#06x}",
+                if b.write { "W" } else { "R" },
+                if b.byte { ".b" } else { ".w" },
+                b.addr,
+                b.data,
+                if a.write { "W" } else { "R" },
+                if a.byte { ".b" } else { ".w" },
+                a.addr,
+                a.data,
+            )
+        });
         // Every transfer on this part is four clocks with immediate DTACK, and
         // the recording's entries tile its length, so whatever is left over is
         // the time the instruction spent away from the bus.
@@ -231,16 +332,19 @@ fn run_case(
         CaseResult {
             length_exact: ticks == tc.length,
             length_delta: ticks as i64 - tc.length as i64,
-            kinds_exact: ours == recorded,
-            count_exact: ours.len() == recorded.len(),
-            count_delta: ours.len() as i64 - recorded.len() as i64,
+            kinds_exact,
+            positions_exact,
+            operands_exact,
+            fc_exact,
+            count_exact: our_shape.len() == recorded_shape.len(),
             pc_exact: cpu.pc() == final_pc,
             prefetch_exact: queue_len == 2 && queue == tc.final_state.prefetch,
             invariant_holds,
             stream_written,
             recorded_internal,
             ran: true,
-            mismatch: (ours != recorded).then(|| (shape_of(&recorded), shape_of(&ours))),
+            mismatch: (!kinds_exact).then(|| (shape_of(&recorded_shape), shape_of(&our_shape))),
+            operand_fault,
         }
     };
 
@@ -266,6 +370,9 @@ struct Tally {
     ran: usize,
     length_exact: usize,
     kinds_exact: usize,
+    positions_exact: usize,
+    operands_exact: usize,
+    fc_exact: usize,
     count_exact: usize,
     pc_exact: usize,
     prefetch_exact: usize,
@@ -275,7 +382,17 @@ struct Tally {
     /// over its own instruction stream.
     invariant_untestable: usize,
     length_delta_sum: i64,
-    count_delta_sum: i64,
+    /// The extreme clock deltas seen, so a group whose errors cancel is not
+    /// reported as a group that is nearly right.
+    ///
+    /// `ADD.l`'s `An` source group is why this exists: it is exact on none of
+    /// its 771 cases and its mean is -0.03, which reads like a rounding
+    /// artifact and is in fact two populations of equal size missing in
+    /// opposite directions. A mean is the wrong summary for a residual and can
+    /// only be trusted once the range says the group is one population.
+    /// `None` until a case has been counted, so an all-negative group is not
+    /// reported as reaching zero because zero is what the field started at.
+    length_delta_range: Option<(i64, i64)>,
     /// Cases whose recorded internal time is negative, which would mean the
     /// four-clock transfer model does not hold for them.
     impossible_internal: usize,
@@ -304,6 +421,15 @@ impl Tally {
         if r.kinds_exact {
             self.kinds_exact += 1;
         }
+        if r.positions_exact {
+            self.positions_exact += 1;
+        }
+        if r.operands_exact {
+            self.operands_exact += 1;
+        }
+        if r.fc_exact {
+            self.fc_exact += 1;
+        }
         if r.count_exact {
             self.count_exact += 1;
         }
@@ -323,7 +449,10 @@ impl Tally {
             self.impossible_internal += 1;
         }
         self.length_delta_sum += r.length_delta;
-        self.count_delta_sum += r.count_delta;
+        self.length_delta_range = Some(match self.length_delta_range {
+            Some((lo, hi)) => (lo.min(r.length_delta), hi.max(r.length_delta)),
+            None => (r.length_delta, r.length_delta),
+        });
     }
 
     fn pct(part: usize, whole: usize) -> f64 {
@@ -342,6 +471,18 @@ impl Tally {
         Self::pct(self.kinds_exact, self.cases)
     }
 
+    fn positions_pct(&self) -> f64 {
+        Self::pct(self.positions_exact, self.cases)
+    }
+
+    fn operands_pct(&self) -> f64 {
+        Self::pct(self.operands_exact, self.cases)
+    }
+
+    fn fc_pct(&self) -> f64 {
+        Self::pct(self.fc_exact, self.cases)
+    }
+
     fn count_pct(&self) -> f64 {
         Self::pct(self.count_exact, self.cases)
     }
@@ -352,14 +493,6 @@ impl Tally {
 
     fn prefetch_pct(&self) -> f64 {
         Self::pct(self.prefetch_exact, self.cases)
-    }
-
-    fn mean_count_delta(&self) -> f64 {
-        if self.ran == 0 {
-            0.0
-        } else {
-            self.count_delta_sum as f64 / self.ran as f64
-        }
     }
 
     fn mean_delta(&self) -> f64 {
@@ -450,16 +583,18 @@ impl Populations {
 fn report(label: &str, p: &Populations) {
     eprintln!("\n{label}");
     eprintln!(
-        "  {:<16} {:>9} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>7}",
+        "  {:<16} {:>9} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>7}",
         "population",
         "cases",
         "length",
         "kinds",
         "count",
+        "clocks",
+        "operand",
+        "fc",
         "pc",
         "queue",
         "mean d",
-        "mean dN",
         "timeout"
     );
     for (name, t) in [
@@ -472,16 +607,19 @@ fn report(label: &str, p: &Populations) {
         ("completed", &p.completed),
     ] {
         eprintln!(
-            "  {:<16} {:>9} {:>7.2}% {:>7.2}% {:>7.2}% {:>7.2}% {:>7.2}% {:>8.2} {:>8.2} {:>7}",
+            "  {:<16} {:>9} {:>7.2}% {:>7.2}% {:>7.2}% {:>7.2}% {:>7.2}% {:>7.2}% \
+             {:>7.2}% {:>7.2}% {:>8.2} {:>7}",
             name,
             t.cases,
             t.length_pct(),
             t.kinds_pct(),
             t.count_pct(),
+            t.positions_pct(),
+            t.operands_pct(),
+            t.fc_pct(),
             t.pc_pct(),
             t.prefetch_pct(),
             t.mean_delta(),
-            t.mean_count_delta(),
             t.timed_out()
         );
     }
@@ -504,9 +642,95 @@ fn report(label: &str, p: &Populations) {
 // The two corpora
 // ---------------------------------------------------------------------------
 
-/// Per-file tallies, so the two suites can be set side by side and the weakest
-/// rows named rather than described.
-type FileRates = std::collections::BTreeMap<String, Tally>;
+/// The addressing mode an instruction's EA field names.
+///
+/// The opcode word is `initial.prefetch[0]`, by the invariant every case
+/// asserts: the queue holds the word at PC, and the word at PC is the
+/// instruction about to run. Taking it from there rather than from the case's
+/// name is what makes this work on both suites, whose names are formatted
+/// differently (`5e4a [ADD.w Q, A2] 1` against `001 STOP # 4e72`).
+///
+/// Bits 5..0 are where every instruction with an EA carries the field.
+fn ea_mode_label(opcode: u16) -> &'static str {
+    match ((opcode >> 3) & 7, opcode & 7) {
+        (0, _) => "Dn",
+        (1, _) => "An",
+        (2, _) => "(An)",
+        (3, _) => "(An)+",
+        (4, _) => "-(An)",
+        (5, _) => "(d16,An)",
+        (6, _) => "(d8,An,Xn)",
+        (7, 0) => "(xxx).w",
+        (7, 1) => "(xxx).l",
+        (7, 2) => "(d16,PC)",
+        (7, 3) => "(d8,PC,Xn)",
+        (7, 4) => "#imm",
+        _ => "mode 7.5+",
+    }
+}
+
+/// The group one case belongs to: its addressing mode and the opcode's bits
+/// 8..6.
+///
+/// The second half is there because grouping by addressing mode alone mixes
+/// populations that have nothing to do with each other. Bits 8..6 are the
+/// opmode on the ALU lines, which selects direction and size; the destination
+/// mode on the `MOVE` lines; and part of the sub-op on line 4. On every one of
+/// them it is a structural field, and leaving it out is what put `ADD.l`'s
+/// source form, its destination form and `ADDX.l` into one row labeled `Dn`,
+/// where the row's rate was an average over three different instructions.
+fn case_group(opcode: u16) -> String {
+    format!("{} op{}", ea_mode_label(opcode), (opcode >> 6) & 7)
+}
+
+/// One vector file's rates, whole and split by addressing mode.
+///
+/// The split is the instrument M4 turns on. A row that is right on transfer
+/// count and wrong on clock count has the right bus activity and the wrong
+/// internal time, and the aggregate cannot say which of its addressing modes is
+/// responsible: a mean of -0.82 clocks is not any mode being wrong by -0.82,
+/// it is a *subset* of them being wrong by a whole number and the rest being
+/// right. Grouping separates the two readings. A residual uniform across every
+/// mode is a wrong constant; one that splits by something structural is a
+/// missing mechanism, and only the second is worth a milestone.
+#[derive(Default)]
+struct FileTally {
+    all: Tally,
+    by_mode: std::collections::BTreeMap<String, Tally>,
+    /// Up to a few named cases per group that missed on clock count, with the
+    /// delta each missed by. A group's rate says how much is left and its range
+    /// says whether it is one population; only a case name says what to read.
+    examples: std::collections::BTreeMap<String, Vec<(String, i64)>>,
+}
+
+impl FileTally {
+    fn add(&mut self, tc: &M68000TestCase, r: &CaseResult) {
+        self.all.add(r);
+        // Completed cases only. A case that ends in an address error spends
+        // most of its length inside exception entry, which belongs to no
+        // addressing mode, so counting one under its mode's row reports the
+        // entry sequence's timing as if it were the mode's. That is not a
+        // theoretical contamination: it is why `ADDA.l`'s `-(An)`, `(d8,An,Xn)`
+        // and `(d8,PC,Xn)` rows first read about half exact with a mean of -1,
+        // which is not any mode being wrong by one clock, it is two populations
+        // averaged. Exception-entry timing is M5's and has its own split in the
+        // population table.
+        if !is_address_error(tc) {
+            let group = case_group(tc.initial.prefetch[0]);
+            self.by_mode.entry(group.clone()).or_default().add(r);
+            if r.ran && !r.length_exact {
+                let e = self.examples.entry(group).or_default();
+                if e.len() < 3 {
+                    e.push((tc.name.clone(), r.length_delta));
+                }
+            }
+        }
+    }
+}
+
+/// Per-file tallies, so the two suites can be set side by side and every row
+/// named rather than described.
+type FileRates = std::collections::BTreeMap<String, FileTally>;
 
 /// Transfer-sequence mismatches counted by (recorded shape, our shape).
 ///
@@ -547,6 +771,48 @@ fn report_queue_failures(label: &str, failures: &QueueFailures) {
     }
 }
 
+/// Rung 4's residual, counted by which field disagrees and on which
+/// instruction, with an example transfer for each.
+type OperandFaults = std::collections::BTreeMap<(String, String), (usize, String)>;
+
+fn note_operand_fault(into: &mut OperandFaults, instr: &str, name: &str, r: &CaseResult) {
+    let Some(fault) = &r.operand_fault else {
+        return;
+    };
+    let field = fault.split(' ').next().unwrap_or("?").to_string();
+    let e = into
+        .entry((instr.to_string(), field))
+        .or_insert_with(|| (0, format!("{name}: {fault}")));
+    e.0 += 1;
+}
+
+fn report_operand_faults(label: &str, faults: &OperandFaults) {
+    if faults.is_empty() {
+        eprintln!("\n{label}: every matching transfer sequence agrees on address, size and data");
+        return;
+    }
+    let total: usize = faults.values().map(|(n, _)| n).sum();
+    // Grouped by field first, because the three fields fail for unrelated
+    // reasons and a list ordered by volume would interleave them.
+    let mut by_field: std::collections::BTreeMap<&str, Vec<(&String, usize, &String)>> =
+        Default::default();
+    for ((instr, field), (n, example)) in faults {
+        by_field
+            .entry(field.as_str())
+            .or_default()
+            .push((instr, *n, example));
+    }
+    eprintln!("\n{label}: {total} cases whose transfers agree in order but not in content");
+    for (field, mut rows) in by_field {
+        rows.sort_by_key(|(_, n, _)| std::cmp::Reverse(*n));
+        let sum: usize = rows.iter().map(|(_, n, _)| n).sum();
+        eprintln!("  {field}: {sum} cases across {} instructions", rows.len());
+        for (instr, n, example) in rows.iter().take(8) {
+            eprintln!("    {instr:<14} {n:>7}  e.g. {example}");
+        }
+    }
+}
+
 fn note_mismatch(into: &mut ShapeMismatches, instr: &str, r: &CaseResult) {
     if let Some((recorded, ours)) = &r.mismatch {
         let e = into
@@ -559,37 +825,110 @@ fn note_mismatch(into: &mut ShapeMismatches, instr: &str, r: &CaseResult) {
 /// Strip a vector file's name down to the instruction it covers, so the same
 /// instruction can be found in both suites. `680x0` uses `ADD.b.json.gz` and
 /// `m68000` uses `ADD.b.json.bin`.
-/// The instructions this core agrees with least, so a residual is named.
+/// Every vector file's rates, weakest first.
 ///
-/// Reported on transfer order and on clock count separately, because they fail
-/// for different reasons: a wrong order is a placement error inside an
-/// instruction whose bus activity is right, and a wrong length with a right
-/// count is an internal time that does not match.
-fn weakest_rows(label: &str, rates: &FileRates) {
-    let mut rows: Vec<_> = rates
+/// Enumerated rather than topped-and-tailed, deliberately. A "twelve weakest"
+/// list answers which rows are worst and silently drops the question of how
+/// many rows are imperfect at all, and a residual that has been described
+/// rather than counted is the thing this ladder exists to prevent. The rows
+/// below the perfect ones are the milestone's work list, and the count of
+/// perfect ones is the part that has to keep not moving.
+fn per_file_rows(label: &str, rates: &FileRates) {
+    let mut rows: Vec<_> = rates.iter().map(|(name, f)| (name, &f.all)).collect();
+    rows.sort_by(|a, b| {
+        a.1.length_pct()
+            .total_cmp(&b.1.length_pct())
+            .then(a.1.kinds_pct().total_cmp(&b.1.kinds_pct()))
+            .then(a.0.cmp(b.0))
+    });
+    let perfect = rows
         .iter()
-        .map(|(name, t)| {
-            (
-                t.kinds_pct(),
-                t.count_pct(),
-                t.prefetch_pct(),
-                t.length_pct(),
-                t.mean_delta(),
-                name,
-            )
-        })
-        .collect();
-
-    rows.sort_by(|a, b| a.0.total_cmp(&b.0));
-    eprintln!("\n{label}: the twelve weakest instructions on transfer order");
-    for (kinds, count, queue, _, _, name) in rows.iter().take(12) {
-        eprintln!("  {name:<14} kinds {kinds:6.2}%  count {count:6.2}%  queue {queue:6.2}%");
+        .filter(|(_, t)| t.length_exact == t.cases && t.kinds_exact == t.cases)
+        .count();
+    eprintln!(
+        "\n{label}: every instruction, weakest first ({perfect} of {} exact on both length \
+         and transfer order)",
+        rows.len()
+    );
+    eprintln!(
+        "  {:<14} {:>7} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8}",
+        "instruction", "cases", "length", "kinds", "count", "clocks", "operand", "fc", "mean d"
+    );
+    for (name, t) in &rows {
+        eprintln!(
+            "  {:<14} {:>7} {:>7.2}% {:>7.2}% {:>7.2}% {:>7.2}% {:>7.2}% {:>7.2}% {:>+8.2}",
+            name,
+            t.cases,
+            t.length_pct(),
+            t.kinds_pct(),
+            t.count_pct(),
+            t.positions_pct(),
+            t.operands_pct(),
+            t.fc_pct(),
+            t.mean_delta()
+        );
     }
+}
 
-    rows.sort_by(|a, b| a.3.total_cmp(&b.3));
-    eprintln!("\n{label}: the twelve weakest instructions on clock count");
-    for (_, count, _, length, mean, name) in rows.iter().take(12) {
-        eprintln!("  {name:<14} length {length:6.2}%  count {count:6.2}%  mean d {mean:+6.2}");
+/// The clock-count residual of every imperfect row, grouped by addressing mode.
+///
+/// This is the reading M4's issue asks for before a constant is touched. A row
+/// whose modes all miss by the same amount is one wrong number; a row where
+/// some modes are exact and others miss by two clocks is a mechanism that only
+/// some modes reach, and the mean over the row is an average of the two that
+/// describes neither.
+fn by_addressing_mode(label: &str, rates: &FileRates) {
+    // A row is listed when any of its *completed* groups is imperfect. Judging
+    // on the whole-row rate instead would list every row that only fails on its
+    // address errors and then show it as all-exact underneath, which reads like
+    // an instrument fault.
+    let imperfect: Vec<_> = rates
+        .iter()
+        .filter(|(_, f)| f.by_mode.values().any(|t| t.length_exact != t.cases))
+        .collect();
+    eprintln!(
+        "\n{label}: clock-count residual by addressing mode and opcode field, completed \
+         cases only, for the {} rows with an imperfect group",
+        imperfect.len()
+    );
+    for (name, f) in imperfect {
+        let completed: usize = f.by_mode.values().map(|t| t.cases).sum();
+        let exact: usize = f.by_mode.values().map(|t| t.length_exact).sum();
+        eprintln!(
+            "  {name}: {exact} of {completed} completed cases exact ({} counting its address \
+             errors)",
+            f.all.cases
+        );
+        let mut modes: Vec<_> = f.by_mode.iter().collect();
+        modes.sort_by(|a, b| a.1.length_pct().total_cmp(&b.1.length_pct()));
+        for (mode, t) in modes {
+            // A group missing by one constant amount is a wrong number and can
+            // be fixed by changing it. A group whose deltas span a range is a
+            // mechanism, and changing a number would only move where its two
+            // halves sit. The range is what tells them apart, so it is the
+            // verdict rather than an extra column.
+            let flag = match t.length_delta_range {
+                _ if t.length_exact == t.cases => "exact".to_string(),
+                Some((lo, hi)) if lo == hi => format!("all miss by {lo:+}"),
+                Some((lo, hi)) => format!("spread {lo:+} to {hi:+}"),
+                None => "no cases".to_string(),
+            };
+            eprintln!(
+                "      {mode:<18} {:>6} cases  length {:>6.2}%  count {:>6.2}%  \
+                 mean d {:>+6.2}  {flag}",
+                t.cases,
+                t.length_pct(),
+                t.count_pct(),
+                t.mean_delta()
+            );
+            if t.length_exact != t.cases {
+                if let Some(examples) = f.examples.get(mode) {
+                    for (name, delta) in examples {
+                        eprintln!("          {delta:+4}  {name}");
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -614,13 +953,17 @@ fn instruction_of(filename: &str) -> String {
         .to_string()
 }
 
-fn run_680x0(
-    cpu: &mut M68000,
-    bus: &mut RecordingBus68k,
-    rates: &mut FileRates,
-    shapes: &mut ShapeMismatches,
-    queue_failures: &mut QueueFailures,
-) -> Populations {
+/// Everything a corpus run accumulates besides the population tallies: one
+/// bundle per suite, so the two are never accidentally crossed.
+#[derive(Default)]
+struct Reports {
+    rates: FileRates,
+    shapes: ShapeMismatches,
+    queue: QueueFailures,
+    faults: OperandFaults,
+}
+
+fn run_680x0(cpu: &mut M68000, bus: &mut RecordingBus68k, out: &mut Reports) -> Populations {
     let dir = phosphor_cpu_validation::vector_dir("680x0/68000/v1");
     let mut pops = Populations::default();
 
@@ -641,28 +984,23 @@ fn run_680x0(
         let tests: Vec<M68000TestCase> = serde_json::from_str(&json).expect("parse a vector file");
 
         let instr = instruction_of(&name);
-        let mut file_tally = Tally::default();
+        let mut file_tally = FileTally::default();
         for tc in &tests {
             // This suite's pc is the execution point.
             let r = run_case(tc, tc.initial.pc, tc.final_state.pc, cpu, bus);
             pops.add(tc, &r);
-            file_tally.add(&r);
-            note_mismatch(shapes, &instr, &r);
-            note_queue_failure(queue_failures, &instr, &tc.name, &r);
+            file_tally.add(tc, &r);
+            note_mismatch(&mut out.shapes, &instr, &r);
+            note_queue_failure(&mut out.queue, &instr, &tc.name, &r);
+            note_operand_fault(&mut out.faults, &instr, &tc.name, &r);
         }
-        rates.insert(instr, file_tally);
+        out.rates.insert(instr, file_tally);
     }
 
     pops
 }
 
-fn run_m68000(
-    cpu: &mut M68000,
-    bus: &mut RecordingBus68k,
-    rates: &mut FileRates,
-    shapes: &mut ShapeMismatches,
-    queue_failures: &mut QueueFailures,
-) -> Populations {
+fn run_m68000(cpu: &mut M68000, bus: &mut RecordingBus68k, out: &mut Reports) -> Populations {
     let dir = phosphor_cpu_validation::vector_dir("m68000/v1");
     let mut pops = Populations::default();
 
@@ -678,7 +1016,7 @@ fn run_m68000(
         let tests = m68000_bin::decode_file(&entry.path()).expect("decode a vector file");
 
         let instr = instruction_of(&name);
-        let mut file_tally = Tally::default();
+        let mut file_tally = FileTally::default();
         for t in &tests {
             // This suite's pc leads the execution point by one prefetch, in the
             // final state as well as the initial one.
@@ -689,11 +1027,12 @@ fn run_m68000(
                 .wrapping_sub(phosphor_cpu_validation::m68000_bin::PC_PREFETCH_LEAD);
             let r = run_case(&t.case, t.execution_pc(), final_pc, cpu, bus);
             pops.add(&t.case, &r);
-            file_tally.add(&r);
-            note_mismatch(shapes, &instr, &r);
-            note_queue_failure(queue_failures, &instr, &t.case.name, &r);
+            file_tally.add(&t.case, &r);
+            note_mismatch(&mut out.shapes, &instr, &r);
+            note_queue_failure(&mut out.queue, &instr, &t.case.name, &r);
+            note_operand_fault(&mut out.faults, &instr, &t.case.name, &r);
         }
-        rates.insert(instr, file_tally);
+        out.rates.insert(instr, file_tally);
     }
 
     pops
@@ -723,38 +1062,21 @@ fn test_m68000_cycle_gate() {
     let mut cpu = M68000::new();
     let mut bus = RecordingBus68k::new();
 
-    let mut rates_680x0 = FileRates::new();
-    let mut rates_m68000 = FileRates::new();
-    let mut shapes_680x0 = ShapeMismatches::new();
-    let mut shapes_m68000 = ShapeMismatches::new();
-    let mut queue_680x0 = QueueFailures::new();
-    let mut queue_m68000 = QueueFailures::new();
+    let mut out_680x0 = Reports::default();
+    let mut out_m68000 = Reports::default();
 
-    let pops_680x0 = run_680x0(
-        &mut cpu,
-        &mut bus,
-        &mut rates_680x0,
-        &mut shapes_680x0,
-        &mut queue_680x0,
-    );
-    let pops_m68000 = run_m68000(
-        &mut cpu,
-        &mut bus,
-        &mut rates_m68000,
-        &mut shapes_m68000,
-        &mut queue_m68000,
-    );
+    let pops_680x0 = run_680x0(&mut cpu, &mut bus, &mut out_680x0);
+    let pops_m68000 = run_m68000(&mut cpu, &mut bus, &mut out_m68000);
 
     report("680x0 (documentation-derived)", &pops_680x0);
     report("m68000 (microcode-derived)", &pops_m68000);
 
-    for (label, rates, shapes, queue) in [
-        ("680x0", &rates_680x0, &shapes_680x0, &queue_680x0),
-        ("m68000", &rates_m68000, &shapes_m68000, &queue_m68000),
-    ] {
-        weakest_rows(label, rates);
-        residual_shapes(label, shapes);
-        report_queue_failures(label, queue);
+    for (label, out) in [("680x0", &out_680x0), ("m68000", &out_m68000)] {
+        per_file_rows(label, &out.rates);
+        by_addressing_mode(label, &out.rates);
+        residual_shapes(label, &out.shapes);
+        report_operand_faults(label, &out.faults);
+        report_queue_failures(label, &out.queue);
     }
 
     // Where our agreement rate against one suite differs materially from our
@@ -762,10 +1084,11 @@ fn test_m68000_cycle_gate() {
     // saying different things about that instruction. The suites share no
     // cases, so this rate comparison is the only cross-set signal available.
     let mut divergent: Vec<(f64, String)> = Vec::new();
-    for (instr, tally_a) in &rates_680x0 {
-        let Some(tally_b) = rates_m68000.get(instr) else {
+    for (instr, file_a) in &out_680x0.rates {
+        let Some(file_b) = out_m68000.rates.get(instr) else {
             continue;
         };
+        let (tally_a, tally_b) = (&file_a.all, &file_b.all);
         let (len_a, kinds_a, n_a) = (tally_a.length_pct(), tally_a.kinds_pct(), tally_a.cases);
         let (len_b, kinds_b, n_b) = (tally_b.length_pct(), tally_b.kinds_pct(), tally_b.cases);
         let gap = (len_a - len_b).abs().max((kinds_a - kinds_b).abs());
@@ -789,9 +1112,10 @@ fn test_m68000_cycle_gate() {
         eprintln!("{line}");
     }
 
-    let only_m68000: Vec<_> = rates_m68000
+    let only_m68000: Vec<_> = out_m68000
+        .rates
         .keys()
-        .filter(|k| !rates_680x0.contains_key(*k))
+        .filter(|k| !out_680x0.rates.contains_key(*k))
         .cloned()
         .collect();
     eprintln!("\ncovered only by m68000: {}", only_m68000.join(", "));
@@ -842,7 +1166,7 @@ fn test_m68000_cycle_gate() {
     // This core retires STOP, so its PC is past the immediate. Asserting the
     // *set of instructions* rather than a rate is what keeps this from becoming
     // a tolerance that hides the next regression.
-    let unexpected: Vec<&String> = queue_m68000.keys().filter(|k| *k != "STOP").collect();
+    let unexpected: Vec<&String> = out_m68000.queue.keys().filter(|k| *k != "STOP").collect();
     assert!(
         unexpected.is_empty(),
         "m68000: instructions other than STOP end with a different PC or queue: {unexpected:?}"

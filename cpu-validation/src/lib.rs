@@ -1,5 +1,5 @@
 use phosphor_core::core::bus::InterruptState;
-use phosphor_core::core::{Bus, Bus16, BusMaster, rmw_byte, select_byte};
+use phosphor_core::core::{Bus, Bus16, BusMaster, BusSignals, rmw_byte, select_byte};
 use serde::{Deserialize, Serialize};
 
 pub mod m68000_bin;
@@ -1053,6 +1053,19 @@ pub struct BusTxn {
     pub uds: bool,
     /// Lower data strobe, set when the odd byte is selected.
     pub lds: bool,
+    /// Whether `data` is the raw data bus as the part drove it, so a byte sits
+    /// in the half its strobe selects, or has already been normalized to
+    /// 0..255 by the suite that recorded it.
+    ///
+    /// This cannot be inferred from `uds`/`lds`, which is why it is stored. The
+    /// `680x0` set records no strobes at all and they are derived here from the
+    /// posted address, so a `680x0` byte at an even address is indistinguishable
+    /// from a genuine UDS transfer, and shifting its already-normalized value
+    /// down by eight yields zero. That is not hypothetical: it is what the first
+    /// run of the operand rung reported, as 89,507 cases across 24 instructions
+    /// whose byte transfers agreed on address and disagreed on value, every one
+    /// of them at an even address.
+    pub data_bus_positioned: bool,
 }
 
 impl BusTxn {
@@ -1080,8 +1093,12 @@ impl BusTxn {
     /// `0xB3` reads `0xB300` under UDS and `0x00B3` under LDS. The `680x0` set
     /// normalizes to 0..255 instead. Comparing the raw field across the two
     /// would fail every odd-address access for the wrong reason.
+    ///
+    /// The shift is conditioned on [`Self::data_bus_positioned`] and not on the
+    /// strobes alone, because the `680x0` set's strobes are derived from its
+    /// address and so cannot say which convention its data is in.
     pub fn byte_value(&self) -> u8 {
-        if self.uds && !self.lds {
+        if self.data_bus_positioned && self.uds && !self.lds {
             (self.data >> 8) as u8
         } else {
             self.data as u8
@@ -1142,6 +1159,7 @@ impl<'de> Deserialize<'de> for BusTxn {
                             data: 0,
                             uds: false,
                             lds: false,
+                            data_bus_positioned: false,
                         });
                     }
                     "r" => BusTxnKind::Read,
@@ -1167,15 +1185,18 @@ impl<'de> Deserialize<'de> for BusTxn {
                 let data = next!(u32, "data");
 
                 // The m68000 set records the strobes; the 680x0 set does not,
-                // and posts the odd byte address in their place.
-                let (uds, lds) = match (seq.next_element::<u32>()?, seq.next_element::<u32>()?) {
-                    (Some(u), Some(l)) => (u != 0, l != 0),
-                    _ => match size {
-                        TxnSize::Word => (true, true),
-                        TxnSize::Byte if addr & 1 != 0 => (false, true),
-                        TxnSize::Byte => (true, false),
-                    },
-                };
+                // and posts the odd byte address in their place. Whether they
+                // were recorded is also what says how `data` is positioned, so
+                // it is kept rather than discarded once the strobes are known.
+                let (uds, lds, data_bus_positioned) =
+                    match (seq.next_element::<u32>()?, seq.next_element::<u32>()?) {
+                        (Some(u), Some(l)) => (u != 0, l != 0, true),
+                        _ => match size {
+                            TxnSize::Word => (true, true, false),
+                            TxnSize::Byte if addr & 1 != 0 => (false, true, false),
+                            TxnSize::Byte => (true, false, false),
+                        },
+                    };
                 while seq.next_element::<IgnoredAny>()?.is_some() {}
 
                 Ok(BusTxn {
@@ -1187,6 +1208,7 @@ impl<'de> Deserialize<'de> for BusTxn {
                     data,
                     uds,
                     lds,
+                    data_bus_positioned,
                 })
             }
         }
@@ -1335,10 +1357,12 @@ impl Bus16 for TracingBus68k {
 
 /// One access this emulator made, in the order it made it.
 ///
-/// Deliberately *not* shaped like [`BusTxn`]. This core drives the bus a word
-/// at a time, so it has no byte transfers and no clock positions to record; a
-/// struct that could express those would invite writing a comparison that
-/// quietly credits this core with resolution it does not have.
+/// This now carries everything a [`BusTxn`] does except the duration, which is
+/// fixed at four clocks for every transfer this part makes. It did not always:
+/// while the core was atomic there were no clock positions and no function
+/// codes to record, and the struct deliberately could not express them so that
+/// no comparison could quietly credit this core with resolution it did not
+/// have. The core reports both now, so the gate can ask for them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OurAccess {
     pub write: bool,
@@ -1348,6 +1372,15 @@ pub struct OurAccess {
     pub data: u16,
     /// True for a single-strobe byte transfer, false for a full word.
     pub byte: bool,
+    /// The clock this transfer started on, counted from the first clock of the
+    /// instruction. This is what rung 3 compares.
+    pub clock: u32,
+    /// The function code FC2..FC0 the part drove: 1 user data, 2 user program,
+    /// 5 supervisor data, 6 supervisor program. Zero means the transfer arrived
+    /// without the CPU announcing a cycle for it, which is not a code the part
+    /// can drive and so shows up as a mismatch rather than as a plausible
+    /// value.
+    pub fc: u8,
 }
 
 /// [`TracingBus68k`] with an access log, for comparing this core's bus activity
@@ -1359,7 +1392,19 @@ pub struct RecordingBus68k {
     pub memory: Box<[u8]>,
     pub dirty_writes: Vec<u32>,
     pub log: Vec<OurAccess>,
+    /// The clock the harness is currently ticking the CPU on, counted from the
+    /// first clock of the instruction. Every logged access is stamped with it.
+    pub clock: u32,
     recording: bool,
+    /// The cycle the CPU announced but has not yet performed.
+    ///
+    /// The 68000 presents its function code and strobes with the address,
+    /// before the transfer resolves, so this bus takes delivery of them one
+    /// call early and attaches them to the transfer that follows. Taken rather
+    /// than copied: a transfer arriving without an announcement gets no
+    /// function code instead of the previous transfer's, which is the
+    /// difference between a visible fault and a plausible one.
+    pending: Option<BusSignals>,
 }
 
 impl RecordingBus68k {
@@ -1368,18 +1413,27 @@ impl RecordingBus68k {
             memory: vec![0; 0x100_0000].into_boxed_slice(),
             dirty_writes: Vec::new(),
             log: Vec::new(),
+            clock: 0,
             recording: false,
+            pending: None,
         }
     }
 
     /// Begin a fresh recording for one test case.
     pub fn start_recording(&mut self) {
         self.log.clear();
+        self.clock = 0;
+        self.pending = None;
         self.recording = true;
     }
 
     pub fn stop_recording(&mut self) {
         self.recording = false;
+    }
+
+    /// The function code of the announced-but-unperformed cycle, consumed.
+    fn take_fc(&mut self) -> u8 {
+        self.pending.take().map_or(0, |c| c.function_code())
     }
 }
 
@@ -1396,12 +1450,15 @@ impl Bus for RecordingBus68k {
     fn read(&mut self, _master: BusMaster, addr: u32) -> u16 {
         let i = (addr & 0x00FF_FFFE) as usize;
         let data = u16::from_be_bytes([self.memory[i], self.memory[i + 1]]);
+        let (clock, fc) = (self.clock, self.take_fc());
         if self.recording {
             self.log.push(OurAccess {
                 write: false,
                 addr: i as u32,
                 data,
                 byte: false,
+                clock,
+                fc,
             });
         }
         data
@@ -1411,12 +1468,15 @@ impl Bus for RecordingBus68k {
         let i = (addr & 0x00FF_FFFE) as usize;
         self.memory[i..i + 2].copy_from_slice(&data.to_be_bytes());
         self.dirty_writes.push(i as u32);
+        let (clock, fc) = (self.clock, self.take_fc());
         if self.recording {
             self.log.push(OurAccess {
                 write: true,
                 addr: i as u32,
                 data,
                 byte: false,
+                clock,
+                fc,
             });
         }
     }
@@ -1427,6 +1487,10 @@ impl Bus for RecordingBus68k {
 
     fn check_interrupts(&mut self, _target: BusMaster) -> InterruptState {
         InterruptState::default()
+    }
+
+    fn observe_bus_cycle(&mut self, _master: BusMaster, _addr: u32, signals: BusSignals) {
+        self.pending = Some(signals);
     }
 }
 
@@ -1440,12 +1504,15 @@ impl Bus16 for RecordingBus68k {
     fn read_byte(&mut self, master: BusMaster, addr: u32) -> u8 {
         let i = (addr & 0x00FF_FFFF) as usize;
         let data = self.memory[i];
+        let (clock, fc) = (self.clock, self.take_fc());
         if self.recording {
             self.log.push(OurAccess {
                 write: false,
                 addr: addr & 0x00FF_FFFF,
                 data: data as u16,
                 byte: true,
+                clock,
+                fc,
             });
         }
         let _ = master;
@@ -1456,12 +1523,15 @@ impl Bus16 for RecordingBus68k {
         let i = (addr & 0x00FF_FFFF) as usize;
         self.memory[i] = data;
         self.dirty_writes.push((i & !1) as u32);
+        let (clock, fc) = (self.clock, self.take_fc());
         if self.recording {
             self.log.push(OurAccess {
                 write: true,
                 addr: addr & 0x00FF_FFFF,
                 data: data as u16,
                 byte: true,
+                clock,
+                fc,
             });
         }
         let _ = master;
@@ -1684,6 +1754,31 @@ mod tests {
         assert!(t.lds && !t.uds);
         assert_eq!(t.byte_address(), 8480815);
         assert_eq!(t.byte_value(), 49);
+    }
+
+    /// The same encoding at an *even* address, which is the case the suite's
+    /// normalization and the part's strobes disagree about.
+    ///
+    /// The derived strobes say UDS, and a genuine UDS transfer carries its byte
+    /// in the upper half of the data bus. This one does not, because the suite
+    /// already normalized it, and nothing in `uds`/`lds` can tell the two apart.
+    /// Without [`BusTxn::data_bus_positioned`] this returns zero for every
+    /// even-address byte in the corpus, and the test above passes anyway
+    /// because an odd address takes the other branch.
+    #[test]
+    fn a_680x0_byte_at_an_even_address_is_already_normalized() {
+        let t = txn(r#"["r", 4, 5, 8480814, ".b", 49]"#);
+        assert!(t.uds && !t.lds, "an even byte address derives UDS");
+        assert!(
+            !t.data_bus_positioned,
+            "this suite normalizes its byte data"
+        );
+        assert_eq!(t.byte_address(), 8480814);
+        assert_eq!(
+            t.byte_value(),
+            49,
+            "the value is posted, not bus-positioned"
+        );
     }
 
     /// The `m68000` encoding of an upper-half byte read: eight fields, the true

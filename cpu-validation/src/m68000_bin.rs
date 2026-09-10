@@ -18,7 +18,8 @@
 //! - **The posted address is the true word address**, with UDS and LDS carried
 //!   as separate signals. The part has no A0 pin, so this is what the bus shows.
 //! - **Byte data is bus-positioned**: `0xB3` reads `0xB300` under UDS and
-//!   `0x00B3` under LDS. [`crate::BusTxn::byte_value`] normalizes it.
+//!   `0x00B3` under LDS. [`crate::BusTxn::byte_value`] normalizes it, which is
+//!   why every transaction decoded here sets `data_bus_positioned`.
 //! - **`pc` is the next prefetch address**, four ahead of where the case starts
 //!   executing. [`M68000BinTestCase::execution_pc`] resolves it.
 //!
@@ -204,6 +205,7 @@ fn read_transactions(r: &mut Reader) -> Result<(Vec<BusTxn>, u32)> {
                 data: 0,
                 uds: false,
                 lds: false,
+                data_bus_positioned: true,
             });
             continue;
         }
@@ -239,6 +241,9 @@ fn read_transactions(r: &mut Reader) -> Result<(Vec<BusTxn>, u32)> {
             data,
             uds,
             lds,
+            // This suite posts the data bus as the part drives it, which is
+            // what its own README describes and what the decode tests assert.
+            data_bus_positioned: true,
         });
     }
 
