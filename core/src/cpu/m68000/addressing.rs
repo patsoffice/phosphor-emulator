@@ -232,6 +232,31 @@ impl M68000 {
         Ok(((hi as u32) << 16) | lo as u32)
     }
 
+    /// Write a long word as two word transactions, **low half first**, at the
+    /// higher address and then the lower one.
+    ///
+    /// This is what the read-modify-write families do, and it is not a quirk of
+    /// one addressing mode: the part reads a long destination upwards and
+    /// writes it back downwards, for a plain indirect, a displacement and a
+    /// predecrement alike. The address register that walked up during the read
+    /// is still pointing at the second word when the result is ready, so the
+    /// write starts from there and steps back.
+    ///
+    /// Only the order differs. The addresses, the values, the transfer count
+    /// and the memory afterwards are identical either way, so nothing but a
+    /// per-transfer comparison against a recorded trace, or a device watching
+    /// the address bus, can tell the two apart.
+    pub(crate) fn write_long_low_half_first<B: Bus16 + ?Sized>(
+        &mut self,
+        bus: &mut B,
+        master: BusMaster,
+        addr: u32,
+        data: u32,
+    ) -> AccessResult<()> {
+        self.write_word_at(bus, master, addr.wrapping_add(2), data as u16)?;
+        self.write_word_at(bus, master, addr, (data >> 16) as u16)
+    }
+
     /// Write a long word as two word transactions (big-endian, high first).
     pub(crate) fn write_long_at<B: Bus16 + ?Sized>(
         &mut self,
@@ -564,7 +589,16 @@ impl M68000 {
         value: u32,
     ) -> AccessResult<()> {
         self.refill_prefetch(bus, master);
-        self.ea_write(bus, master, ea, size, value)
+        // A long result goes back low half first: see
+        // [`Self::write_long_low_half_first`] for why, and why only a
+        // per-transfer comparison can see it. `MOVE` does not come through
+        // here, and its own destination order is its business.
+        match ea {
+            Ea::Mem(addr) if size == Size::Long => {
+                self.write_long_low_half_first(bus, master, addr, value)
+            }
+            _ => self.ea_write(bus, master, ea, size, value),
+        }
     }
 
     /// Write an operand of `size` through a resolved [`Ea`].
