@@ -597,6 +597,190 @@ Road Runner still binds and is now 2.47x above the floor rather than 2.52x. The
 queue costs about two percent, which is the first real cost this conversion has
 paid.
 
+## M4 as built: the loader, the bus unit, and a body that runs twice
+
+**Landed 2026-09-11.** Rungs 3, 4 and 5 are reported for the first time, and
+rung 3 goes from the structural zero an atomic core has to give to 76.86% and
+72.14%.
+
+| rung | M3 | M4 |
+|---|---|---|
+| **680x0** length | 88.34% | **89.11%** |
+| ... on cases that complete | 95.19% | **96.12%** |
+| ... transfer kinds | 98.51% | 98.51% |
+| ... transfer count | 98.87% | 98.87% |
+| ... **positions in clocks** | - | **76.86%** |
+| ... positions, completed | - | **93.51%** |
+| ... positions, >1 data transaction | - | **54.98%** |
+| ... address, size and data | - | **79.90%** |
+| ... function code | - | **98.06%** |
+| **m68000** length | 78.66% | **79.40%** |
+| ... positions in clocks | - | **72.14%** |
+| ... positions, completed | - | **87.46%** |
+
+Three things do the work, and only the third was in the plan's shape.
+
+**The loader** takes the opcode before the body runs, burns the addressing
+mode's arithmetic in front of it, issues the refill behind the opcode on a clock
+of its own, and drives the trailing refills one per four clocks afterwards. It
+needs **no staging buffer**, which is the discovery that made it small: taking a
+word out of the queue fills the hole before it pops, so a body that finds the
+queue full issues nothing and takes the word the loader fetched.
+
+**The bus unit** takes a cycle nothing in the instruction waits on and runs it
+later: a write, whose value is already decided, and a queue refill. `CLR.w (A4)`
+is the case to read it by, recorded as three cycles on clocks 0, 4 and 8 and
+issued from a body that runs on one.
+
+**A body that suspends and runs again** is what reaches an operand *read*, which
+cannot be handed over because the body is about to use what it returns. A cycle
+the body has not run before, arriving on a clock that already has one, unwinds
+the body: the registers go back, the clocks of the cycles it did run are spent,
+and the body runs again with those cycles served from a log instead of the bus.
+It reaches the next one having made no access twice and runs it on a clock of
+its own.
+
+### What the plan got wrong
+
+**The loader's ceiling was lower than the milestone needed, and saying so in
+advance is what made that visible.** The issue names `read_imm_word` as the seam
+and the i8088's loader as the shape, and both were right as far as they went.
+But the gate splits the corpus by data-transfer count, because a per-clock queue
+in front of an atomic executor cannot put two data transfers on two clocks:
+526,777 cases of 1,000,060 make at most one, so the aggregate ceiling for the
+loader alone is about 52%. The loader reached 37.93%. Everything above that came
+from the executor ceasing to be atomic, which the issue's own warning against a
+generic operand pipeline reads as a thing to avoid.
+
+**The mechanism is not per family, and the acceptance asked for one family per
+commit.** What moved eleven points of rung 3 is four lines in two access
+primitives and a state the loader already had a sibling of. The per-family work
+was the *exceptions*: where internal time sits relative to a fetch, declared at
+the call site the way M3 declared refill placement.
+
+**The fold-in rows were not waiting for the pipeline.** `ADDA.l`, `SUBA.l` and
+`SUBX.w` were folded into this milestone because their sub-clock mean deltas
+said a subset of addressing modes was two clocks short and only a pipeline could
+say which. They were fixed before the pipeline existed, by a by-addressing-mode
+instrument and one mechanism: **a long ALU pass costs two more clocks when its
+operand is not from memory.** The ALU is 16 bits, so a long operation is two
+passes; with a memory operand the high pass shares a step with the prefetch,
+without one it needs a step of its own. `CMP` is the control that makes this a
+mechanism rather than a fitted number: same two passes, no result to place, two
+clocks either way, and it stayed exact through the change.
+
+**A table that states where internal time sits cannot be checked the way the
+other two were.** `extension_words` and `suppresses_refill` are asserted against
+what the executor actually did, on all 1,083,864 completed cases, before
+anything uses them. `leading_internal` cannot be: the executor does not place
+internal time anywhere, so there is nothing to compare against and any check
+would measure the shape of this core's code. Rung 3 is its check. An attempt at
+a direct one was written, run, rejected on 22,337 cases in 26 shapes, and thrown
+away; it earned its keep first by finding two real errors in the table.
+
+### The instrument, again
+
+M1's lesson was that a population split is the result and the aggregate hides
+it. M4's is the same lesson one level down: **a rate says how much is left and a
+shape list says which instructions, and neither says how many different things
+are wrong.** Rung 3's residual is now classified by the first clock that
+disagrees, which separates a transfer bunched onto the clock of the one before
+it (a body running two bus cycles in one tick, which needs suspension) from a
+transfer on a clock of its own that is merely early (a placement question, which
+does not). Both print as two lists of numbers that differ.
+
+That classification is what made the milestone finishable rather than open
+ended. Of 328,853 misses before the suspension work, 178,038 were cases that
+fault, which sum to the address-error population and are exception entry, all of
+it M5's. Of the 150,815 on cases that complete, **115,692 were one mechanism**.
+After it they are 8,302, and every one of the 160 largest remaining shapes,
+covering 161,056 of 216,555 misses, is exception entry or mul/div.
+
+### Three corpus disagreements, all settled at the microcode
+
+None fitted, and the rule that produced all three is **go to the die-extracted
+microcode first, not to the corpora**.
+
+- **`ADDQ.l`/`SUBQ.l` to `An`** read +2 on 731 cases of the
+  documentation-derived corpus: uniform, large, one sided, and
+  indistinguishable from a real defect. The part runs the identical sequence for
+  the word and long encodings at eight clocks, and the microcode-derived corpus
+  agrees with this core on every such case. Two clocks were nearly taken off a
+  correct line.
+- **A PC-relative operand is fetched from program space.** This one *lowered* a
+  reported number, 98.51% to 98.06% on rung 5, because that corpus is what is
+  wrong.
+- **`LINK A7`** is two against two and stays as it is, because changing it fails
+  1005 state vectors. The reason is in `stack.rs` and the residual is reported
+  rather than hidden.
+
+### Four defects no earlier rung could see
+
+All four are invisible to the state gate and to rungs 1 and 2: same addresses,
+same values, same count, same memory afterwards.
+
+- The exception frame is written **PC low, SR, PC high**, at `sp-2`, `sp-6`,
+  `sp-4`, with the stack pointer reaching its final value on the *second* write,
+  so a frame that faults on its first leaves A7 untouched.
+- A long read-modify-write result is written **low half first**: the part reads
+  a long destination upwards and writes it back downwards, on a plain indirect,
+  a displacement and a predecrement alike. Checked on three modes, because the
+  first example found was a predecrement and that invites the wrong rule.
+- The function code must be **latched when a cycle is handed over**, not read
+  when it runs. A `BSR` that pushes in user mode and then faults would otherwise
+  report its push at supervisor privilege, because the exception got there first.
+- **A jump pays for address arithmetic every other instruction gets free.**
+  `LEA (d16,An),An` adds the displacement in the same microcode step that puts
+  the next fetch's address on the bus, so the add costs nothing; `JMP (d16,An)`
+  cannot, because the address that add produces *is* the next fetch's address.
+
+### Throughput, and a warning about the earlier numbers in this document
+
+**The M1 and M3 tables above were measured on a different machine.** The tree
+moved hosts during M4, so their absolute figures are not comparable with
+anything below and the percentages beside them are the ones to read. A fresh M3
+baseline was taken on the new host for this comparison, from the M3 commit in a
+worktree, same protocol.
+
+| machine | M3 emul ms/f | M4 emul ms/f | change | real time |
+|---|---|---|---|---|
+| foodf | 0.808 | 1.132 | +40.1% | 14.49x |
+| quantum | 1.009 | 1.370 | +35.8% | 9.42x |
+| marble | 1.685 | 2.101 | +24.7% | 7.93x |
+| roadrunner | 2.000 | 2.374 | +18.7% | 7.02x |
+
+Road Runner still binds, at 3.5x the 2x floor. **The epic's prediction held**:
+this core had no overcount to reclaim the way the i8088 did, so every clock of
+bus modeling is added cost, and this is the milestone that added the most. Road
+Runner's 18.7% arrived in two pieces, each measured on the same host: the loader
+and the bus unit cost 13.3% against the M3 baseline, and the suspending body a
+further 6.4% on top of that. The jump and `PEA` placement changes after it read
+1.5% the other way, which is inside the run-to-run spread and not a saving.
+
+### What is left, and whose it is
+
+Rung 3's residual is 216,555 cases on the documentation-derived corpus, and all
+but about a quarter of it is in two M5 families:
+
+- **Exception entry**, 178,038 cases, which is the whole faulting side. Its
+  frame writes are driven together rather than one per four clocks, because
+  entry reached from the state machine has no body to unwind and `flush_pending`
+  puts them all on one clock. Making it resumable the way a body is, is the
+  obvious move and is M5's.
+- **mul/div**, whose data-dependent internal time is measured and named:
+  +47.76 clocks mean on `DIVU`, +68.28 on `DIVS`.
+- On cases that complete, 12,757 remain on a clock of their own but early,
+  10,978 with the first transfer early, 8,302 with a read still bunched onto a
+  read, and 5,702 with a write bunched onto a write. The read-on-read ones are
+  the refills a body drives itself, which do not suspend: `refill_prefetch` is
+  infallible and making it suspend means making `take_word` and `read_imm_word`
+  fallible, across every call site.
+
+`MOVEM` is capped rather than excluded: sixteen cycles of one body can be given
+back to a later run of it, which covers every instruction but `MOVEM.l`, whose
+long form moves up to thirty-two words. Past the limit it keeps running with its
+remaining cycles on one clock, which is where all of them used to be.
+
 ## Decision 4: byte strobes are not a separate project
 
 `phosphor-emulator-contained-fidelity-np9x.1` says a 68000 byte write should be
