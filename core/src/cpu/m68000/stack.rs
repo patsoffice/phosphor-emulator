@@ -39,7 +39,14 @@ impl M68000 {
             // program read and then two writes, and `PEA (xxx).w` as a program
             // read, two writes, and a program read. LEA has nothing after its
             // decode, so its refill lands at the finish either way.
-            self.refill_prefetch(bus, master);
+            //
+            // Handed to the bus unit rather than driven, so the address
+            // arithmetic that precedes it can be placed in front of it. An
+            // indexed `PEA` spends two clocks putting the address together
+            // *between* its two fetches, exactly as `LEA` does, and a refill
+            // the body drives itself leaves the finish nowhere to put them.
+            let signals = self.program_cycle(false);
+            self.hand_over(bus, master, super::PendingCycle::Refill { signals });
             self.push_long(bus, master, addr)?;
         } else {
             self.a[((opcode >> 9) & 7) as usize] = addr;
