@@ -100,6 +100,7 @@ impl M68000 {
         if self.prefetch_len == 0 {
             self.refill_prefetch(bus, master);
         }
+        self.words_without_refill = self.words_without_refill.saturating_add(1);
         self.pop_prefetch()
     }
 

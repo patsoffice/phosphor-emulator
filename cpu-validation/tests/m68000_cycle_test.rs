@@ -108,6 +108,10 @@ struct CaseResult {
     /// loader built on the table would fetch the wrong number of words.
     words_consumed: u32,
     words_predicted: u32,
+    /// The same for the words taken without a refill behind them, which a
+    /// loader also has to know from the opcode before it fetches anything.
+    no_refill_actual: u32,
+    no_refill_predicted: u32,
 }
 
 fn load_initial(
@@ -228,6 +232,23 @@ fn predicted_words(tc: &M68000TestCase) -> u32 {
         return 1;
     }
     1 + u32::from(m68000::format::extension_words(opcode))
+}
+
+/// How many of this case's extension words a loader should take without
+/// refilling behind them.
+///
+/// Zero unless the instruction is one that discards the queue, and zero for
+/// those too when the encoding has no extension word: a byte-displacement
+/// `Bcc` suppresses nothing because it consumes nothing.
+fn predicted_words_without_refill(tc: &M68000TestCase) -> u32 {
+    let opcode = tc.initial.prefetch[0];
+    if !m68000::format::suppresses_refill(opcode) {
+        return 0;
+    }
+    if m68000::format::privileged(opcode) && !tc.initial.is_supervisor() {
+        return 0;
+    }
+    u32::from(m68000::format::extension_words(opcode))
 }
 
 /// The word memory holds at `addr`, read behind the bus's back so the check
@@ -365,6 +386,8 @@ fn run_case(
             operand_fault,
             words_consumed: cpu.words_consumed(),
             words_predicted: predicted_words(tc),
+            no_refill_actual: cpu.words_without_refill(),
+            no_refill_predicted: predicted_words_without_refill(tc),
         }
     };
 
@@ -846,11 +869,18 @@ fn note_word_count(
     tc: &M68000TestCase,
     r: &CaseResult,
 ) {
-    if !r.ran || is_address_error(tc) || r.words_consumed == r.words_predicted {
+    if !r.ran || is_address_error(tc) {
         return;
     }
+    let (predicted, actual, what) = if r.words_consumed != r.words_predicted {
+        (r.words_predicted, r.words_consumed, "words")
+    } else if r.no_refill_actual != r.no_refill_predicted {
+        (r.no_refill_predicted, r.no_refill_actual, "unrefilled")
+    } else {
+        return;
+    };
     let e = into
-        .entry((instr.to_string(), r.words_predicted, r.words_consumed))
+        .entry((format!("{instr} {what}"), predicted, actual))
         .or_insert_with(|| (0, name.to_string()));
     e.0 += 1;
 }

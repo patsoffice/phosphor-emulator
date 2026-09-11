@@ -289,3 +289,32 @@ fn line_alu(opcode: u16, opmode: u16, ea_mode: u8, ea_reg: u8) -> u8 {
         _ => ea_words(ea_mode, ea_reg, size_from_bits(opmode)),
     }
 }
+
+/// Whether `opcode` consumes its extension words *without* refilling behind
+/// them, because its next act is to discard the queue.
+///
+/// The recorded costs are what say so, and they are unambiguous: a taken `Bcc`
+/// with a word displacement is ten clocks, which is two transfers, and both of
+/// them are at the branch target. Refilling behind the displacement would make
+/// it three transfers and twelve clocks. The words behind a control transfer
+/// are on the path not taken and the part does not fetch them.
+///
+/// A loader has to ask this before it issues anything, because it is hoisting
+/// exactly those fetches out of the instruction body. The four bodies that
+/// declare it today are the branch family, `DBcc`, `JMP`/`JSR` and `STOP`.
+pub fn suppresses_refill(opcode: u16) -> bool {
+    match (opcode >> 12) & 0xF {
+        // Bcc, BRA and BSR, whose word form takes a displacement word.
+        0x6 => true,
+        // DBcc is the size-11 encoding of line 5 with an An effective address.
+        0x5 => (opcode >> 6) & 3 == 3 && (opcode >> 3) & 7 == 1,
+        0x4 => match opcode {
+            // STOP consumes its immediate and halts without refilling at all.
+            0x4E72 => true,
+            // JMP and JSR resolve a control-transfer address.
+            0x4E80..=0x4EFF => matches!((opcode >> 6) & 3, 2 | 3),
+            _ => false,
+        },
+        _ => false,
+    }
+}

@@ -153,6 +153,15 @@ pub struct M68000 {
     /// compiled out to be affordable and would then check nothing.
     #[save_skip(default)]
     pub(crate) words_consumed: u32,
+    /// Of those, how many were taken without refilling behind them, because
+    /// the instruction was about to discard the queue.
+    ///
+    /// Keeps [`format::suppresses_refill`] honest for the same reason
+    /// [`Self::words_consumed`] keeps the word count honest: a loader hoists
+    /// exactly these fetches out of the instruction bodies, so the table and
+    /// the bodies have to agree about which instructions make them.
+    #[save_skip(default)]
+    pub(crate) words_without_refill: u32,
 }
 
 impl Default for M68000 {
@@ -182,7 +191,14 @@ impl M68000 {
             prefetch_len: 0,
             transfers: 0,
             words_consumed: 0,
+            words_without_refill: 0,
         }
+    }
+
+    /// Of the words the instruction that just retired consumed, how many it
+    /// took without refilling behind them.
+    pub fn words_without_refill(&self) -> u32 {
+        self.words_without_refill
     }
 
     /// Words the instruction that just retired took out of the prefetch queue,
@@ -306,6 +322,7 @@ impl M68000 {
                 // whatever instruction happened to run before it.
                 self.transfers = 0;
                 self.words_consumed = 0;
+                self.words_without_refill = 0;
 
                 // Sample interrupts at the instruction boundary.
                 let ints = bus.check_interrupts(master);
