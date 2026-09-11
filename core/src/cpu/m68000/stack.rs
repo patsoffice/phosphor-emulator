@@ -57,8 +57,27 @@ impl M68000 {
     /// updated stack pointer), then advance SP by the sign-extended
     /// displacement (normally negative, reserving locals).
     ///
-    /// LINK A7 pushes the *decremented* A7 — the register being pushed is
-    /// also the stack pointer doing the pushing.
+    /// `LINK A7` pushes the *decremented* A7: the register being pushed is also
+    /// the stack pointer doing the pushing, and the decrement lands first.
+    ///
+    /// **THE SOURCES DISAGREE ABOUT THIS ONE ENCODING AND THE DISAGREEMENT IS
+    /// UNRESOLVED.** It is two against two, so nothing here is fitted to either
+    /// pair, and the value below is the one the regression net demands:
+    ///
+    /// - The documentation-derived corpus pushes `A7 - 4`, on 1005 vectors, and
+    ///   they are part of the state gate. So does the manual's own description,
+    ///   which sequences the instruction as `SP - 4 -> SP` and *then*
+    ///   `An -> (SP)`, making the two the same register at the moment of the
+    ///   push.
+    /// - The microcode-derived corpus pushes `A7`, on 326 cases. So does the
+    ///   part's own sequence, which latches An one step before it computes the
+    ///   destination address, so the value driven is the one the instruction
+    ///   started with.
+    ///
+    /// Changing it to `A7` was tried and fails 1005 state vectors, which is why
+    /// it stands. The per-cycle gate reports the 326 cases against it as a
+    /// rung-4 data residual rather than hiding them, and this is the note that
+    /// stops the residual being read as a defect and quietly fitted.
     ///
     /// Flags: none. 16 cycles.
     pub(crate) fn op_link<B: Bus16 + ?Sized>(
@@ -69,6 +88,8 @@ impl M68000 {
     ) -> AccessResult<()> {
         let reg = (opcode & 7) as usize;
         let disp = sext16(self.read_imm_word(bus, master));
+        // See the doc comment: A7 is the one register whose pushed value the
+        // sources do not agree on, and this follows the state gate.
         let value = if reg == 7 {
             self.a[7].wrapping_sub(4)
         } else {
