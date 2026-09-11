@@ -600,23 +600,25 @@ paid.
 ## M4 as built: the loader, the bus unit, and a body that runs twice
 
 **Landed 2026-09-11.** Rungs 3, 4 and 5 are reported for the first time, and
-rung 3 goes from the structural zero an atomic core has to give to 76.86% and
-72.14%.
+rung 3 goes from the structural zero an atomic core has to give to 76.91% and
+72.20%.
 
 | rung | M3 | M4 |
 |---|---|---|
 | **680x0** length | 88.34% | **89.11%** |
 | ... on cases that complete | 95.19% | **96.12%** |
-| ... transfer kinds | 98.51% | 98.51% |
+| ... transfer kinds | 98.51% | **98.59%** |
+| ... transfer kinds, on cases that fault | 99.97% | **99.9994%** |
 | ... transfer count | 98.87% | 98.87% |
-| ... **positions in clocks** | - | **76.86%** |
-| ... positions, completed | - | **93.51%** |
-| ... positions, >1 data transaction | - | **54.98%** |
-| ... address, size and data | - | **79.90%** |
-| ... function code | - | **98.06%** |
+| ... **positions in clocks** | - | **76.91%** |
+| ... positions, completed | - | **93.58%** |
+| ... positions, >1 data transaction | - | **55.10%** |
+| ... address, size and data | - | **79.98%** |
+| ... function code | - | **98.14%** |
 | **m68000** length | 78.66% | **79.40%** |
-| ... positions in clocks | - | **72.14%** |
-| ... positions, completed | - | **87.46%** |
+| ... transfer kinds | 98.14% | **98.23%** |
+| ... positions in clocks | - | **72.20%** |
+| ... positions, completed | - | **87.53%** |
 
 Three things do the work, and only the third was in the plan's shape.
 
@@ -696,6 +698,20 @@ it M5's. Of the 150,815 on cases that complete, **115,692 were one mechanism**.
 After it they are 8,302, and every one of the 160 largest remaining shapes,
 covering 161,056 of 216,555 misses, is exception entry or mul/div.
 
+**Rung 2's report was hiding this milestone's last item, and the defect was in
+the key.** A transfer-sequence mismatch was counted by the shape pair alone, so
+one shape was one row however many instructions reached it, labelled with
+whichever vector file had been read first. `MOVEM.l` sorts before `MOVE.w`:
+every `MOVE` case sharing a shape with `MOVEM` was counted under `MOVEM`'s name
+and the `MOVE` rows never appeared at all. What looked like 45 shapes was 62.
+The rows also carried no example case, and a shape pair does not say which
+encoding reached it: the same mnemonic runs different sequences for different
+source modes, so reading a row without one invites fixing the wrong half, which
+is what the first attempt at `MOVE` did. Both are the same lesson as M1's
+population split and M4's own by-addressing-mode instrument, at a third place:
+**an aggregate keyed on too little is not a measurement of the thing it
+names.**
+
 ### Three corpus disagreements, all settled at the microcode
 
 None fitted, and the rule that produced all three is **go to the die-extracted
@@ -744,18 +760,18 @@ worktree, same protocol.
 
 | machine | M3 emul ms/f | M4 emul ms/f | change | real time |
 |---|---|---|---|---|
-| foodf | 0.808 | 1.132 | +40.1% | 14.49x |
-| quantum | 1.009 | 1.370 | +35.8% | 9.42x |
-| marble | 1.685 | 2.101 | +24.7% | 7.93x |
-| roadrunner | 2.000 | 2.374 | +18.7% | 7.02x |
+| foodf | 0.808 | 1.134 | +40.3% | 14.47x |
+| quantum | 1.009 | 1.392 | +38.0% | 9.31x |
+| marble | 1.685 | 2.117 | +25.6% | 7.87x |
+| roadrunner | 2.000 | 2.400 | +20.0% | 6.94x |
 
 Road Runner still binds, at 3.5x the 2x floor. **The epic's prediction held**:
 this core had no overcount to reclaim the way the i8088 did, so every clock of
 bus modeling is added cost, and this is the milestone that added the most. Road
-Runner's 18.7% arrived in two pieces, each measured on the same host: the loader
+Runner's 20.0% arrived in two pieces, each measured on the same host: the loader
 and the bus unit cost 13.3% against the M3 baseline, and the suspending body a
-further 6.4% on top of that. The jump and `PEA` placement changes after it read
-1.5% the other way, which is inside the run-to-run spread and not a saving.
+further 6.4% on top of that. The placement commits after those read within the
+run-to-run spread in both directions and are not a cost or a saving.
 
 ### What is left, and whose it is
 
@@ -780,6 +796,27 @@ but about a quarter of it is in two M5 families:
 back to a later run of it, which covers every instruction but `MOVEM.l`, whose
 long form moves up to thirty-two words. Past the limit it keeps running with its
 remaining cycles on one clock, which is where all of them used to be.
+
+**Rung 2 is finished for this milestone's families.** Its residual is 14,084
+cases in 48 shapes, and what remains is `TAS`, the long `ADDX`/`SUBX` refill
+that sits between the two write words, and `MOVEM`'s trailing read: the three
+M3 named and M5 owns. `PEA` and `MOVE` were this milestone's and are exact:
+
+- **`MOVE` to an absolute long destination, from a memory source**, reads the
+  second address word, forms the address from it and the first, writes, and only
+  then prefetches again. The shared decode took both words first, which is the
+  right count in the wrong order. A register or immediate source does read both
+  up front, which is the same condition the stacked-PC rule beside it already
+  turns on rather than a second rule.
+- **`PEA` refills before it pushes, except from an absolute address.** The other
+  control modes have address arithmetic and the part slots the prefetch into a
+  step it is already spending on it; an absolute address arrives ready to use in
+  its extension words, so there is no such step before the push and the fetch
+  falls through to the one at the end of the instruction. That is the jump's
+  leading time seen from the other side.
+
+Both are exact on every rung on both corpora now, and the faulting path's
+transfer sequence with them: one case of 178,089 differs and it is a `MOVEM`.
 
 ## Decision 4: byte strobes are not a separate project
 
