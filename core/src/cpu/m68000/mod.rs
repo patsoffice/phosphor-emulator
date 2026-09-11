@@ -62,6 +62,18 @@ pub(crate) enum ExecState {
     /// already been decoded and its effect applied on the first cycle;
     /// remaining cycles are bus-idle wait states.
     Execute(u32),
+    /// Waiting to issue the instruction's trailing prefetch.
+    ///
+    /// The refill behind the last word an instruction consumed is not part of
+    /// applying its effect: the part issues it after the operand cycles are
+    /// done, and the recorded traces put it there. `delay` counts the clocks
+    /// still to pass before it runs, and `tail` is the instruction's remaining
+    /// length once it has.
+    ///
+    /// This is the first thing in this core to happen on a clock of its own
+    /// rather than on the instruction's first, and it is the reason rung 3 can
+    /// report anything above the cases that make a single transfer.
+    TrailingRefill { delay: u32, tail: u32 },
     /// STOP instruction executed, waiting for an interrupt.
     Stopped,
     /// Halted by a double bus fault or external HALT; only reset recovers.
@@ -365,6 +377,19 @@ impl M68000 {
                     self.state = ExecState::Execute(remaining - 1);
                 }
             }
+            ExecState::TrailingRefill { delay, tail } => {
+                let remaining = delay - 1;
+                if remaining == 0 {
+                    // This clock is the one the part drives the refill on.
+                    self.fill_prefetch(bus, master);
+                    self.finish(tail);
+                } else {
+                    self.state = ExecState::TrailingRefill {
+                        delay: remaining,
+                        tail,
+                    };
+                }
+            }
             ExecState::Stopped => {
                 // STOP: only an interrupt (or external reset) resumes.
                 let ints = bus.check_interrupts(master);
@@ -421,8 +446,35 @@ impl M68000 {
         master: BusMaster,
         internal: u32,
     ) {
-        self.fill_prefetch(bus, master);
-        self.finish(4 * self.transfers + internal);
+        // Nothing owed: a read-modify-write family has already refilled at its
+        // own declared point, so there is no trailing fetch to place.
+        let owed = u32::from(2 - self.prefetch_len);
+        if owed == 0 {
+            self.finish(4 * self.transfers + internal);
+            return;
+        }
+
+        // The transfers the instruction has already made occupy the clocks
+        // before this one, four each, so the refill belongs on the clock after
+        // the last of them. They all happen on one clock today, which is what
+        // makes them wrong and this right: their *count* is correct even where
+        // their positions are not, so the refill's position is correct now and
+        // stays correct when they are spread out later.
+        let made = self.transfers;
+        let total = 4 * (made + owed) + internal;
+        debug_assert!(
+            total >= 4 * made,
+            "an instruction cannot be shorter than the transfers it made"
+        );
+        if made == 0 {
+            self.fill_prefetch(bus, master);
+            self.finish(total);
+            return;
+        }
+        self.state = ExecState::TrailingRefill {
+            delay: 4 * made,
+            tail: total - 4 * made,
+        };
     }
 
     /// Complete an instruction that leaves the prefetch queue as it found it.
