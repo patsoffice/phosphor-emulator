@@ -65,6 +65,9 @@ pub(crate) enum ExecState {
     /// Burning an addressing mode's arithmetic before the instruction's first
     /// bus cycle. See [`format::leading_internal`].
     Lead(u32),
+    /// Waiting out the refill the loader issued behind the opcode, before the
+    /// instruction itself runs.
+    LoadWait(u32),
     /// Waiting to issue the instruction's trailing prefetch.
     ///
     /// The refill behind the last word an instruction consumed is not part of
@@ -179,12 +182,21 @@ pub struct M68000 {
     pub(crate) words_without_refill: u32,
     /// Clocks of address arithmetic burned before this instruction's first bus
     /// cycle, from [`format::leading_internal`].
-    ///
-    /// Remembered so the finish can subtract what has already been spent: the
-    /// internal time an instruction declares is its whole internal time, and
-    /// the part of it burned up front must not be charged twice.
     #[save_skip(default)]
     pub(crate) lead_burned: u32,
+    /// The clock the instruction body ran on, counted from the instruction's
+    /// first.
+    ///
+    /// Zero once, and no longer: the loader spends clocks in front of the body
+    /// now, on address arithmetic and on the refill behind the opcode. The
+    /// finish measures from here rather than from zero, which is what keeps an
+    /// instruction's length the same while its transfers move.
+    #[save_skip(default)]
+    pub(crate) exec_clock: u32,
+    /// Transfers already made when the body started, so the ones the body
+    /// itself makes can be counted apart from the loader's.
+    #[save_skip(default)]
+    pub(crate) pre_exec_transfers: u32,
 }
 
 impl Default for M68000 {
@@ -216,6 +228,8 @@ impl M68000 {
             words_consumed: 0,
             words_without_refill: 0,
             lead_burned: 0,
+            exec_clock: 0,
+            pre_exec_transfers: 0,
         }
     }
 
@@ -388,11 +402,18 @@ impl M68000 {
                     self.state = ExecState::Lead(lead - 1);
                     return;
                 }
-                self.run_instruction(bus, master);
+                self.begin_instruction(bus, master, 0);
             }
             ExecState::Lead(remaining) => {
                 if remaining > 0 {
                     self.state = ExecState::Lead(remaining - 1);
+                } else {
+                    self.begin_instruction(bus, master, self.lead_burned);
+                }
+            }
+            ExecState::LoadWait(remaining) => {
+                if remaining > 0 {
+                    self.state = ExecState::LoadWait(remaining - 1);
                 } else {
                     self.run_instruction(bus, master);
                 }
@@ -430,12 +451,48 @@ impl M68000 {
         }
     }
 
-    /// Decode and run the instruction whose opcode is at the head of the queue.
+    /// Take the opcode and, where the instruction has a word behind it, issue
+    /// that word's refill on a clock of its own before the body runs.
     ///
-    /// Called once the leading address arithmetic, if any, has been burned.
-    fn run_instruction<B: Bus16 + ?Sized>(&mut self, bus: &mut B, master: BusMaster) {
-        let opcode = self.read_imm_word(bus, master);
+    /// This is the loader. It exists because the refill behind the opcode is a
+    /// bus cycle the part drives *before* it does anything with the operand,
+    /// and a body that runs atomically cannot put it there by itself.
+    ///
+    /// **It needs no staging buffer, and that is the whole reason it is this
+    /// small.** Taking a word out of the queue fills the hole first and pops
+    /// second, so a body that finds the queue already full issues nothing and
+    /// simply takes the word the loader fetched for it. Only the second and
+    /// later extension words are still fetched by the body, and they are the
+    /// ones a staging buffer would be for.
+    ///
+    /// `base` is the clock the loader starts on, after any leading arithmetic.
+    fn begin_instruction<B: Bus16 + ?Sized>(&mut self, bus: &mut B, master: BusMaster, base: u32) {
+        let opcode = self.take_opcode();
         self.opcode = opcode;
+
+        // An instruction about to discard the queue does not refill behind the
+        // words it consumes, and a privileged instruction in user mode consumes
+        // none at all: the part settles privilege before its first prefetch.
+        let words = if format::privileged(opcode) && !self.flag_is_set(SrFlag::S) {
+            0
+        } else {
+            format::words_before_operand(opcode)
+        };
+        if words == 0 || format::suppresses_refill(opcode) {
+            self.exec_clock = base;
+            self.run_instruction(bus, master);
+            return;
+        }
+
+        self.refill_prefetch(bus, master);
+        self.exec_clock = base + 4;
+        self.state = ExecState::LoadWait(3);
+    }
+
+    /// Run the instruction body, whose opcode the loader has already taken.
+    fn run_instruction<B: Bus16 + ?Sized>(&mut self, bus: &mut B, master: BusMaster) {
+        self.pre_exec_transfers = self.transfers;
+        let opcode = self.opcode;
         if let Err(fault) = self.execute_instruction(opcode, bus, master) {
             self.enter_address_error(bus, master, fault);
         }
@@ -484,41 +541,43 @@ impl M68000 {
         master: BusMaster,
         internal: u32,
     ) {
+        // The instruction's whole length: four clocks for every transfer it
+        // makes, the refill it still owes included, plus its time off the bus.
+        // This is unchanged by anything the loader does, which is the point:
+        // the loader moves transfers around inside the instruction, it does not
+        // make the instruction longer or shorter.
+        let owed = u32::from(2 - self.prefetch_len);
+        let full = 4 * (self.transfers + owed) + internal;
+
+        // Everything is measured from the clock the body ran on, because the
+        // loader has already spent clocks in front of it. Saturating rather
+        // than asserting: a wrong row in `leading_internal` would otherwise
+        // underflow here, and the symptom should be a rung-3 miss on that row
+        // rather than a panic on a board.
+        let from_body = full.saturating_sub(self.exec_clock);
+
         // Nothing owed: a read-modify-write family has already refilled at its
         // own declared point, so there is no trailing fetch to place.
-        // `internal` is the instruction's whole time away from the bus, and the
-        // leading arithmetic has already been spent out of it, so what is left
-        // to charge is the remainder. Saturating rather than asserting: a row
-        // of `leading_internal` that claims more than an instruction declares
-        // would otherwise underflow, and the symptom should be a rung-3 miss on
-        // that row, not a panic on a board.
-        let internal = internal.saturating_sub(self.lead_burned);
-        let owed = u32::from(2 - self.prefetch_len);
         if owed == 0 {
-            self.finish(4 * self.transfers + internal);
+            self.finish(from_body);
             return;
         }
 
-        // The transfers the instruction has already made occupy the clocks
-        // before this one, four each, so the refill belongs on the clock after
-        // the last of them. They all happen on one clock today, which is what
-        // makes them wrong and this right: their *count* is correct even where
-        // their positions are not, so the refill's position is correct now and
-        // stays correct when they are spread out later.
-        let made = self.transfers;
-        let total = 4 * (made + owed) + internal;
-        debug_assert!(
-            total >= 4 * made,
-            "an instruction cannot be shorter than the transfers it made"
-        );
-        if made == 0 {
+        // The transfers the *body* made occupy the clocks after it started,
+        // four each, so the refill belongs on the clock after the last of them.
+        // They all still happen on one clock, which is what makes them wrong
+        // and this right: their count is correct even where their positions are
+        // not, so the refill lands correctly now and stays correct when they
+        // are spread out later.
+        let delay = 4 * (self.transfers - self.pre_exec_transfers);
+        if delay == 0 {
             self.fill_prefetch(bus, master);
-            self.finish(total);
+            self.finish(from_body);
             return;
         }
         self.state = ExecState::TrailingRefill {
-            delay: 4 * made,
-            tail: total - 4 * made,
+            delay,
+            tail: from_body.saturating_sub(delay),
         };
     }
 

@@ -104,6 +104,16 @@ impl M68000 {
         self.pop_prefetch()
     }
 
+    /// Take the opcode out of the queue, leaving the hole for the loader to
+    /// fill on a clock of its own.
+    ///
+    /// Not [`Self::take_word_no_refill`], which counts the word as one the
+    /// instruction deliberately consumed without a refill. This hole *is*
+    /// refilled; the loader is only choosing when.
+    pub(crate) fn take_opcode(&mut self) -> u16 {
+        self.pop_prefetch()
+    }
+
     /// Shift the queue down by one word and advance `pc` past it.
     ///
     /// The caller has already ensured slot 0 holds a fetched word.

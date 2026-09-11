@@ -443,3 +443,43 @@ pub fn leading_internal(opcode: u16) -> u8 {
         _ => 0,
     }
 }
+
+/// How many words the instruction consumes *before* it touches an operand.
+///
+/// This is what decides whether a loader may issue the refill behind the opcode
+/// in front of the instruction body. The refill is not owed to the opcode as
+/// such: the part fetches it while taking the next word, so an instruction that
+/// reads an operand before taking another word has not refilled anything by the
+/// time that read happens, and an instruction that faults on that read never
+/// refills at all.
+///
+/// For every encoding but `MOVE` the answer is all of them, because the
+/// extension words, the immediate and `MOVEM`'s mask are all consumed before the
+/// first operand cycle. `MOVE` is the one instruction with two effective
+/// addresses, and its destination's words are consumed *after* the source has
+/// been read, so only the source's count here.
+///
+/// Getting this wrong is visible and was: counting `MOVE`'s destination words
+/// put an extra read in front of the exception frame on 1,023 recorded cases
+/// that fault on a source read, which is a transfer the part had not made.
+pub fn words_before_operand(opcode: u16) -> u8 {
+    match (opcode >> 12) & 0xF {
+        0x1..=0x3 => {
+            let size = match (opcode >> 12) & 3 {
+                1 => Size::Byte,
+                3 => Size::Word,
+                _ => Size::Long,
+            };
+            let src_mode = ((opcode >> 3) & 7) as u8;
+            let src_reg = (opcode & 7) as u8;
+            let dst_mode = ((opcode >> 6) & 7) as u8;
+            // A byte access to an address register is illegal and consumes
+            // nothing, matching `extension_words`.
+            if size == Size::Byte && (src_mode == 1 || dst_mode == 1) {
+                return 0;
+            }
+            ea_words(src_mode, src_reg, size)
+        }
+        _ => extension_words(opcode),
+    }
+}
