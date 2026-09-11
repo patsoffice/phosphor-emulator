@@ -2,7 +2,7 @@
 //! data movement instructions.
 
 use super::M68000;
-use super::addressing::{AccessResult, Ea, Size, ea_internal, sext8, sext16};
+use super::addressing::{AccessResult, AddressError, Ea, Size, ea_internal, sext8, sext16};
 use crate::core::{Bus16, BusMaster};
 
 impl M68000 {
@@ -76,17 +76,21 @@ impl M68000 {
                     self.a[reg] = self.a[reg].wrapping_sub(2);
                     self.write_word_at(bus, master, self.a[reg], (value >> 16) as u16)
                 })();
-                lo_first.map_err(|mut e| {
-                    e.stacked_pc = e.stacked_pc.wrapping_add(2);
-                    e
+                lo_first.map_err(|e| {
+                    e.map_fault(|f| AddressError {
+                        stacked_pc: f.stacked_pc.wrapping_add(2),
+                        ..f
+                    })
                 })?;
             }
             (4, _) => {
                 let dst = self.decode_ea(bus, master, dst_mode, dst_reg, size);
                 self.ea_write_rmw(bus, master, dst, size, value)
-                    .map_err(|mut e| {
-                        e.stacked_pc = e.stacked_pc.wrapping_add(2);
-                        e
+                    .map_err(|e| {
+                        e.map_fault(|f| AddressError {
+                            stacked_pc: f.stacked_pc.wrapping_add(2),
+                            ..f
+                        })
                     })?;
             }
             // MOVE from a *memory* source to abs.l interleaves the write
@@ -96,13 +100,18 @@ impl M68000 {
             (7, _) if dst_reg == 1 => {
                 let src_is_mem = src_mode >= 2 && !(src_mode == 7 && src_reg == 4);
                 let dst = self.decode_ea(bus, master, dst_mode, dst_reg, size);
-                self.ea_write(bus, master, dst, size, value)
-                    .map_err(|mut e| {
+                self.ea_write(bus, master, dst, size, value).map_err(|e| {
+                    e.map_fault(|f| {
                         if src_is_mem {
-                            e.stacked_pc = e.stacked_pc.wrapping_sub(2);
+                            AddressError {
+                                stacked_pc: f.stacked_pc.wrapping_sub(2),
+                                ..f
+                            }
+                        } else {
+                            f
                         }
-                        e
-                    })?;
+                    })
+                })?;
             }
             _ => {
                 let dst = self.decode_ea(bus, master, dst_mode, dst_reg, size);
@@ -199,7 +208,7 @@ impl M68000 {
             let mut value = 0u32;
             for i in 0..bytes {
                 let addr = base.wrapping_add(2 * i);
-                value = (value << 8) | self.read_byte_at(bus, master, addr) as u32;
+                value = (value << 8) | self.read_byte_at(bus, master, addr)? as u32;
             }
             let mask = if long { 0xFFFF_FFFF } else { 0x0000_FFFF };
             self.d[dn] = (self.d[dn] & !mask) | (value & mask);

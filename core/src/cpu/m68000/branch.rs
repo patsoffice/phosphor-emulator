@@ -13,7 +13,7 @@
 //! from the hardware-derived test vectors).
 
 use super::M68000;
-use super::addressing::{AccessResult, AddressError, Ea, Size, sext8, sext16};
+use super::addressing::{Abort, AccessResult, AddressError, Ea, Size, sext8, sext16};
 use crate::core::{Bus16, BusMaster};
 
 /// Documented JMP timing per control addressing mode (M68000UM table 8-1);
@@ -56,12 +56,12 @@ impl M68000 {
     #[inline]
     pub(crate) fn set_pc_checked(&mut self, target: u32) -> AccessResult<()> {
         if target & 1 != 0 {
-            return Err(AddressError {
+            return Err(Abort::Fault(AddressError {
                 addr: target,
                 write: false,
                 program: true,
                 stacked_pc: target.wrapping_sub(4),
-            });
+            }));
         }
         self.set_pc_flush(target);
         Ok(())

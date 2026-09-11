@@ -64,6 +64,12 @@ impl M68000 {
         if self.prefetch_len >= 2 {
             return;
         }
+        // Already fetched on an earlier attempt at this body: the word goes
+        // back into the hole the unwind reopened, and the bus is not asked
+        // again. This is why an extension-word fetch is safe to unwind past.
+        if self.replay_refill() {
+            return;
+        }
         // A fetch the body wants *now* cannot overtake cycles it handed over
         // earlier, and it needs the word before it can go on, so anything
         // outstanding runs first. See `M68000::flush_pending`.
@@ -71,8 +77,11 @@ impl M68000 {
         let addr = self.mask_addr(self.pc.wrapping_add(2 * u32::from(self.prefetch_len)));
         bus.observe_bus_cycle(master, addr, self.program_cycle(false));
         self.transfers += 1;
-        self.prefetch[usize::from(self.prefetch_len)] = bus.read(master, addr);
+        self.tick_cycles += 1;
+        let word = bus.read(master, addr);
+        self.prefetch[usize::from(self.prefetch_len)] = word;
         self.prefetch_len += 1;
+        self.log_cycle(super::ReplayedCycle::Refill(word));
     }
 
     /// Fill the queue to both words.

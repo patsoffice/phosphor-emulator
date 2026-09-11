@@ -85,6 +85,62 @@ pub(crate) enum PendingCycle {
 /// The longest is `MOVEP.l`, which writes four bytes and then refills.
 const MAX_PENDING: usize = 8;
 
+/// A bus cycle a body has already run, kept so that running the body again
+/// gives it back rather than asking the bus a second time.
+///
+/// See [`M68000::run_body`] for why a body runs more than once, and
+/// [`M68000::must_suspend`] for what stops it.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum ReplayedCycle {
+    /// A word read, and what the bus returned.
+    Read(u16),
+    /// A byte read.
+    ReadByte(u8),
+    /// A queue refill, and the word it fetched. Replaying it puts the word
+    /// back into the hole: the queue is unwound with the rest of the body's
+    /// state, and the fetch behind it must not happen twice.
+    Refill(u16),
+    /// A write handed to the bus unit. It may already have been driven, so
+    /// replaying must neither queue it again nor drive it, and there is
+    /// nothing to give back.
+    Handed,
+}
+
+/// Cycles of one body that can be given back to a later run of it.
+///
+/// Sixteen covers every instruction outside `MOVEM`, whose long form moves up
+/// to thirty-two words. Past the limit the body keeps running and its cycles
+/// keep happening; what stops is suspending, because a cycle that is not
+/// recorded cannot be replayed and running it twice would be a second access
+/// to the bus. `MOVEM` therefore gets clocks of its own for its first sixteen
+/// words and the rest on one, which is where it already was, and it is M5's.
+const MAX_REPLAY: usize = 16;
+
+/// The body's state as the body first found it, so an attempt that suspends
+/// can be unwound and run again from the top.
+///
+/// Everything an instruction body writes is here. What is deliberately *not*
+/// here is what belongs to the bus rather than to the body: the transfer
+/// count, the cycles handed to the bus unit, and the replay log itself. Those
+/// record cycles that really happened, and unwinding the body does not unhappen
+/// them.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct BodyState {
+    d: [u32; 8],
+    a: [u32; 8],
+    usp: u32,
+    ssp: u32,
+    pc: u32,
+    sr: u16,
+    prefetch: [u16; 2],
+    prefetch_len: u8,
+    words_consumed: u32,
+    words_without_refill: u32,
+    ea_program_space: bool,
+    stopped: bool,
+    halted: bool,
+}
+
 /// Execution state machine for multi-cycle instructions.
 #[derive(Clone, Debug)]
 pub(crate) enum ExecState {
@@ -100,6 +156,9 @@ pub(crate) enum ExecState {
     /// Waiting out the refill the loader issued behind the opcode, before the
     /// instruction itself runs.
     LoadWait(u32),
+    /// Waiting out the clocks of the bus cycles the body ran on its last
+    /// attempt, before running it again. See [`M68000::run_body`].
+    BodyWait(u32),
     /// Waiting to issue the instruction's trailing prefetch.
     ///
     /// The refill behind the last word an instruction consumed is not part of
@@ -255,6 +314,28 @@ pub struct M68000 {
     pub(crate) pending_len: u8,
     #[save_skip(default)]
     pub(crate) pending_pos: u8,
+    /// The body's state before it first ran, restored whenever it suspends.
+    #[save_skip(default)]
+    pub(crate) body: BodyState,
+    /// The bus cycles the body has run so far, in the order it ran them.
+    #[save_skip(default = [ReplayedCycle::Handed; MAX_REPLAY])]
+    pub(crate) replay: [ReplayedCycle; MAX_REPLAY],
+    /// How many of `replay` are live, and how far the current attempt has
+    /// walked through them.
+    #[save_skip(default)]
+    pub(crate) replay_len: u8,
+    #[save_skip(default)]
+    pub(crate) replay_pos: u8,
+    /// Bus cycles driven on this clock. One is all the part can drive, so a
+    /// body that wants a second one suspends instead.
+    #[save_skip(default)]
+    pub(crate) tick_cycles: u32,
+    /// Whether an instruction body is running, and can therefore be unwound.
+    ///
+    /// Exception entry reached from the state machine rather than from a body
+    /// has nowhere to unwind to, so it drives its cycles where it stands.
+    #[save_skip(default)]
+    pub(crate) in_body: bool,
 }
 
 impl Default for M68000 {
@@ -299,6 +380,157 @@ impl M68000 {
             }; MAX_PENDING],
             pending_len: 0,
             pending_pos: 0,
+            body: BodyState::default(),
+            replay: [ReplayedCycle::Handed; MAX_REPLAY],
+            replay_len: 0,
+            replay_pos: 0,
+            tick_cycles: 0,
+            in_body: false,
+        }
+    }
+
+    /// The body's state as it stands, to unwind to if it suspends.
+    fn capture_body_state(&self) -> BodyState {
+        BodyState {
+            d: self.d,
+            a: self.a,
+            usp: self.usp,
+            ssp: self.ssp,
+            pc: self.pc,
+            sr: self.sr,
+            prefetch: self.prefetch,
+            prefetch_len: self.prefetch_len,
+            words_consumed: self.words_consumed,
+            words_without_refill: self.words_without_refill,
+            ea_program_space: self.ea_program_space,
+            stopped: self.stopped,
+            halted: self.halted,
+        }
+    }
+
+    /// Unwind the body to where it started, leaving what the bus has already
+    /// done alone.
+    fn restore_body_state(&mut self) {
+        let b = self.body;
+        self.d = b.d;
+        self.a = b.a;
+        self.usp = b.usp;
+        self.ssp = b.ssp;
+        self.pc = b.pc;
+        self.sr = b.sr;
+        self.prefetch = b.prefetch;
+        self.prefetch_len = b.prefetch_len;
+        self.words_consumed = b.words_consumed;
+        self.words_without_refill = b.words_without_refill;
+        self.ea_program_space = b.ea_program_space;
+        self.stopped = b.stopped;
+        self.halted = b.halted;
+    }
+
+    /// Whether the bus cycle the body is about to run has to wait for a clock
+    /// of its own.
+    ///
+    /// The part drives one cycle every four clocks and overlaps none of them,
+    /// so the first cycle of a clock goes ahead and a second one does not. The
+    /// body has no way to wait, so it is unwound and run again instead.
+    ///
+    /// Two things switch this off. Outside a body there is nothing to unwind
+    /// to. And once the log is full the cycles past it are not recorded, so
+    /// running the body again would drive them a second time; past that point
+    /// the body runs to the end with its remaining cycles on one clock, which
+    /// is where every cycle used to be.
+    #[inline]
+    pub(crate) fn must_suspend(&self) -> bool {
+        self.in_body && self.tick_cycles > 0 && usize::from(self.replay_len) < MAX_REPLAY
+    }
+
+    /// The cycle at the cursor, if this attempt has not caught up with what
+    /// earlier attempts already ran.
+    #[inline]
+    fn replayed(&self) -> Option<ReplayedCycle> {
+        (self.replay_pos < self.replay_len).then(|| self.replay[usize::from(self.replay_pos)])
+    }
+
+    /// Give back the word a word read returned on an earlier attempt.
+    ///
+    /// A body is deterministic in its own state and in what the bus gave it,
+    /// and both are reproduced exactly, so the cycles come back in the order
+    /// they went in. A mismatch is a body reading something neither of those
+    /// covers; the assertion names it, and the release build falls through to
+    /// a real access rather than returning a word from the wrong cycle.
+    #[inline]
+    fn replay_read(&mut self) -> Option<u16> {
+        match self.replayed()? {
+            ReplayedCycle::Read(word) => {
+                self.replay_pos += 1;
+                Some(word)
+            }
+            other => {
+                debug_assert!(false, "replay expected a word read, found {other:?}");
+                None
+            }
+        }
+    }
+
+    /// Give back the byte a byte read returned on an earlier attempt.
+    #[inline]
+    fn replay_read_byte(&mut self) -> Option<u8> {
+        match self.replayed()? {
+            ReplayedCycle::ReadByte(byte) => {
+                self.replay_pos += 1;
+                Some(byte)
+            }
+            other => {
+                debug_assert!(false, "replay expected a byte read, found {other:?}");
+                None
+            }
+        }
+    }
+
+    /// Give back the word a queue refill fetched on an earlier attempt, putting
+    /// it back into the hole the unwind reopened.
+    #[inline]
+    fn replay_refill(&mut self) -> bool {
+        match self.replayed() {
+            Some(ReplayedCycle::Refill(word)) => {
+                self.replay_pos += 1;
+                self.prefetch[usize::from(self.prefetch_len)] = word;
+                self.prefetch_len += 1;
+                true
+            }
+            Some(other) => {
+                debug_assert!(false, "replay expected a refill, found {other:?}");
+                false
+            }
+            None => false,
+        }
+    }
+
+    /// Skip a handover the body made on an earlier attempt. The cycle is
+    /// already on the bus unit's list or already driven; either way it must not
+    /// be queued twice.
+    #[inline]
+    fn replay_handed(&mut self) -> bool {
+        match self.replayed() {
+            Some(ReplayedCycle::Handed) => {
+                self.replay_pos += 1;
+                true
+            }
+            Some(other) => {
+                debug_assert!(false, "replay expected a handover, found {other:?}");
+                false
+            }
+            None => false,
+        }
+    }
+
+    /// Record a cycle this attempt has just run.
+    #[inline]
+    fn log_cycle(&mut self, cycle: ReplayedCycle) {
+        if usize::from(self.replay_len) < MAX_REPLAY {
+            self.replay[usize::from(self.replay_len)] = cycle;
+            self.replay_len += 1;
+            self.replay_pos = self.replay_len;
         }
     }
 
@@ -315,12 +547,18 @@ impl M68000 {
         master: BusMaster,
         cycle: PendingCycle,
     ) {
+        // Handed over on an earlier attempt at this body: it is on the list
+        // already, or already driven, and either way this is not a new cycle.
+        if self.replay_handed() {
+            return;
+        }
         if usize::from(self.pending_len) >= MAX_PENDING {
             self.flush_pending(bus, master);
         }
         self.pending[usize::from(self.pending_len)] = cycle;
         self.pending_len += 1;
         self.transfers += 1;
+        self.log_cycle(ReplayedCycle::Handed);
     }
 
     /// Drive every cycle still outstanding, immediately and in order.
@@ -347,6 +585,16 @@ impl M68000 {
         master: BusMaster,
         cycle: PendingCycle,
     ) {
+        // A refill driven while the body can still suspend would put a word in
+        // the queue that the unwind then throws away, and the body would fetch
+        // it again. Nothing hands one over before its last read: the
+        // read-modify-write families hand theirs over after both, and the
+        // finish hands its own over once the body is done.
+        debug_assert!(
+            !(self.in_body && matches!(cycle, PendingCycle::Refill { .. })),
+            "a refill driven while the body can still suspend would be unwound"
+        );
+        self.tick_cycles += 1;
         match cycle {
             PendingCycle::Refill { signals } => {
                 if self.prefetch_len < 2 {
@@ -559,6 +807,13 @@ impl M68000 {
                     self.run_instruction(bus, master);
                 }
             }
+            ExecState::BodyWait(remaining) => {
+                if remaining > 0 {
+                    self.state = ExecState::BodyWait(remaining - 1);
+                } else {
+                    self.run_body(bus, master);
+                }
+            }
             ExecState::Execute(remaining) => {
                 if remaining <= 1 {
                     self.state = ExecState::Fetch;
@@ -629,12 +884,53 @@ impl M68000 {
         self.state = ExecState::LoadWait(3);
     }
 
-    /// Run the instruction body, whose opcode the loader has already taken.
+    /// Start the instruction body, whose opcode the loader has already taken.
     fn run_instruction<B: Bus16 + ?Sized>(&mut self, bus: &mut B, master: BusMaster) {
         self.pre_exec_transfers = self.transfers;
-        let opcode = self.opcode;
-        if let Err(fault) = self.execute_instruction(opcode, bus, master) {
-            self.enter_address_error(bus, master, fault);
+        self.replay_len = 0;
+        self.body = self.capture_body_state();
+        self.run_body(bus, master);
+    }
+
+    /// Run the body once.
+    ///
+    /// **A body can run more than once, and each run is one clock's worth of
+    /// bus activity.** The part drives one bus cycle every four clocks; a body
+    /// written as straight-line code drives all of its cycles in one call and
+    /// cannot wait between them. So a cycle it has not run before, arriving on
+    /// a clock that already has one, unwinds the body instead: the registers go
+    /// back to where the body found them, the clocks of the cycles it did run
+    /// are spent, and the body runs again. The second run finds those cycles in
+    /// the log and is given their values back without touching the bus, so it
+    /// reaches the next one having made no access twice, and runs it on a clock
+    /// of its own.
+    ///
+    /// The log is what makes this safe rather than clever. Nothing is read
+    /// twice, so a device with a side effect on read sees one access; nothing
+    /// is written twice, because writes go to the bus unit and the log says
+    /// which are already there; and the addresses cannot drift, because they
+    /// are recomputed from restored registers and replayed words.
+    ///
+    /// What this costs is one run of the body per bus cycle the body runs
+    /// itself, which for almost every instruction is one or two.
+    fn run_body<B: Bus16 + ?Sized>(&mut self, bus: &mut B, master: BusMaster) {
+        self.replay_pos = 0;
+        self.tick_cycles = 0;
+        self.in_body = true;
+        let outcome = self.execute_instruction(self.opcode, bus, master);
+        self.in_body = false;
+        match outcome {
+            Ok(()) => {}
+            Err(addressing::Abort::Suspend) => {
+                self.restore_body_state();
+                // The clocks of the cycles this attempt did run. They are spent
+                // here rather than charged at the finish, which is what keeps
+                // the instruction the same length while its transfers move.
+                let span = 4 * self.tick_cycles.max(1);
+                self.exec_clock += span;
+                self.state = ExecState::BodyWait(span - 1);
+            }
+            Err(addressing::Abort::Fault(fault)) => self.enter_address_error(bus, master, fault),
         }
     }
 
@@ -720,6 +1016,9 @@ impl M68000 {
         internal: u32,
         internal_first: bool,
     ) {
+        // The body is done. What follows is the bus unit's, and it neither
+        // suspends nor unwinds.
+        self.in_body = false;
         // Whatever the body handed over is still to run, and so is the refill
         // it leaves owed. They go on one list in that order, because that is
         // the order the part drives them: an instruction's write precedes the
@@ -744,13 +1043,12 @@ impl M68000 {
             return;
         }
 
-        // The cycles the body ran *itself* occupy the clocks after it started,
+        // The cycles the body ran on *this* clock occupy the clocks after it,
         // four each, so the first handed-over cycle belongs on the clock after
-        // the last of them. Those are still bunched onto one clock, which is
-        // what makes them wrong and this right: their count is correct even
-        // where their positions are not.
-        let ran_in_body = (self.transfers - self.pre_exec_transfers) - u32::from(self.pending_len);
-        let mut delay = 4 * ran_in_body;
+        // the last of them. Only this clock's are counted: the ones the body
+        // ran on earlier attempts are already inside `exec_clock`, spent when
+        // each of those attempts unwound.
+        let mut delay = 4 * self.tick_cycles;
         if internal_first {
             // Whatever of the internal time was not already burned up front as
             // address arithmetic runs here, ahead of the fetches it computes.
@@ -801,6 +1099,7 @@ impl M68000 {
     /// before issuing the refill, so charging one here would put `STOP` at
     /// eight clocks and fetch a word nothing executes.
     pub(crate) fn finish_without_refill(&mut self, internal: u32) {
+        self.in_body = false;
         self.finish(4 * self.transfers + internal);
     }
 
@@ -1223,6 +1522,117 @@ mod tests {
                 "supervisor = {supervisor}"
             );
         }
+    }
+
+    /// A bus that keeps the clock each cycle was driven on, counting one clock
+    /// per tick the way a board does.
+    struct ClockBus {
+        inner: WordBus,
+        clock: u32,
+        seen: Vec<(u32, u32, bool)>,
+    }
+
+    impl Bus for ClockBus {
+        type Address = u32;
+        type Data = u16;
+        fn read(&mut self, m: BusMaster, addr: u32) -> u16 {
+            self.inner.read(m, addr)
+        }
+        fn write(&mut self, m: BusMaster, addr: u32, data: u16) {
+            self.inner.write(m, addr, data);
+        }
+        fn is_halted_for(&self, _m: BusMaster) -> bool {
+            false
+        }
+        fn check_interrupts(&mut self, _t: BusMaster) -> InterruptState {
+            InterruptState::default()
+        }
+        fn observe_bus_cycle(&mut self, _m: BusMaster, addr: u32, signals: BusSignals) {
+            self.seen.push((self.clock, addr, signals.is_write));
+        }
+    }
+
+    impl Bus16 for ClockBus {
+        fn read_byte(&mut self, m: BusMaster, addr: u32) -> u8 {
+            self.inner.read_byte(m, addr)
+        }
+        fn write_byte(&mut self, m: BusMaster, addr: u32, data: u8) {
+            self.inner.write_byte(m, addr, data);
+        }
+    }
+
+    /// Run one instruction from a full queue, returning the clock each bus
+    /// cycle was driven on and how long the instruction took.
+    fn cycles_of(program: &[u8], setup: impl FnOnce(&mut M68000)) -> (Vec<(u32, u32, bool)>, u32) {
+        let mut cpu = M68000::new();
+        let mut bus = ClockBus {
+            inner: WordBus::new(),
+            clock: 0,
+            seen: Vec::new(),
+        };
+        bus.inner.load(0x1000, program);
+        cpu.set_pc_flush(0x1000);
+        setup(&mut cpu);
+        // Seed the queue the way the part reaches an instruction: already
+        // holding the two words at PC, so the fetches this counts are the
+        // instruction's own.
+        cpu.fill_prefetch(&mut bus, BusMaster::Cpu(0));
+        bus.seen.clear();
+
+        let mut ticks = 0;
+        loop {
+            bus.clock = ticks;
+            ticks += 1;
+            if cpu.tick_with_bus(&mut bus, BusMaster::Cpu(0)) {
+                break;
+            }
+            assert!(ticks < 200, "the instruction must retire");
+        }
+        (bus.seen, ticks)
+    }
+
+    /// Two operand reads in a row are two bus cycles four clocks apart, not two
+    /// accesses on one clock.
+    ///
+    /// The part drives one cycle every four clocks and has nothing to do
+    /// between the halves of a long read: its microcode reads the high word,
+    /// spends four clocks, and reads the low word. `UNLK A0` is the smallest
+    /// instruction that shows it whole, at twelve clocks and three cycles:
+    /// the two halves of the long at (A0), then the refill behind the opcode.
+    ///
+    /// This is what an instruction body running in one tick cannot do, and the
+    /// reason a body is unwound and run again: see [`M68000::run_body`].
+    #[test]
+    fn the_two_halves_of_a_long_read_are_four_clocks_apart() {
+        // UNLK A0 = 0x4E58, then a word for the refill to fetch.
+        let (seen, ticks) = cycles_of(&[0x4E, 0x58, 0x4E, 0x71, 0x00, 0x00], |cpu| {
+            cpu.a[0] = 0x2000;
+        });
+        assert_eq!(
+            seen,
+            vec![(0, 0x2000, false), (4, 0x2002, false), (8, 0x1004, false),],
+            "the long's two words, then the refill, one every four clocks"
+        );
+        assert_eq!(ticks, 12, "spreading the reads must not change the length");
+    }
+
+    /// Unwinding a body must not make it access the bus twice.
+    ///
+    /// The bus is asked for exactly as many cycles as the instruction has, and
+    /// each at its own address: a body that re-ran its earlier reads for real
+    /// would still produce the right register state, because the memory has not
+    /// changed, and only the access count would say so.
+    #[test]
+    fn a_body_that_runs_again_does_not_access_the_bus_again() {
+        // MOVE.l (A0)+, D0 = 0x2018: two operand reads and one refill.
+        let (seen, _) = cycles_of(&[0x20, 0x18, 0x4E, 0x71, 0x00, 0x00], |cpu| {
+            cpu.a[0] = 0x2000;
+        });
+        assert_eq!(
+            seen,
+            vec![(0, 0x2000, false), (4, 0x2002, false), (8, 0x1004, false),],
+            "three cycles for a three-cycle instruction, however often the body ran"
+        );
     }
 
     #[test]

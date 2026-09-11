@@ -12,7 +12,7 @@
 //! all timing in this core).
 
 use super::M68000;
-use super::addressing::{AccessResult, AddressError};
+use super::addressing::{Abort, AccessResult, AddressError};
 use super::flags::SrFlag;
 use crate::core::{Bus16, BusMaster, bus::InterruptState};
 use crate::cpu::flags::detect_rising_edge;
@@ -344,10 +344,20 @@ impl M68000 {
             24 + level
         };
         let pushed_pc = self.pc;
-        if let Err(fault) = self.exception(bus, master, vector, pushed_pc) {
+        match self.exception(bus, master, vector, pushed_pc) {
+            Ok(()) => {}
             // Misaligned supervisor stack: the entry itself address-errors.
-            self.enter_address_error(bus, master, fault);
-            return;
+            Err(Abort::Fault(fault)) => {
+                self.enter_address_error(bus, master, fault);
+                return;
+            }
+            // Interrupt recognition runs from the state machine, not from a
+            // body, so there is nothing to unwind to and nothing asks it to:
+            // `M68000::must_suspend` is false outside a body.
+            Err(Abort::Suspend) => {
+                debug_assert!(false, "exception entry cannot suspend outside a body");
+                return;
+            }
         }
         self.set_interrupt_mask(level);
         // No instruction runs: the entry sequence's own seven transfers are

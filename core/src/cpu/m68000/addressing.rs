@@ -89,7 +89,37 @@ pub(crate) struct AddressError {
     pub(crate) stacked_pc: u32,
 }
 
-pub(crate) type AccessResult<T> = Result<T, AddressError>;
+/// Why an instruction body stopped short of finishing.
+///
+/// Two quite different things, and the difference is whether the instruction
+/// is over. A fault ends it where the part ends it. A suspension does not end
+/// anything: the body asked for a bus cycle it has not run before, and the
+/// part drives one cycle every four clocks, so the body is unwound and run
+/// again once that cycle has had a clock of its own. See
+/// [`M68000::run_body`](super::M68000::run_body).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Abort {
+    /// The access faulted on an odd address.
+    Fault(AddressError),
+    /// The body wants a bus cycle that cannot share this clock.
+    Suspend,
+}
+
+impl Abort {
+    /// Rework the fault this carries, if it is one.
+    ///
+    /// A suspension passes through untouched. It is not a statement about an
+    /// address and has no PC to stack, so the hardware-verified `stacked_pc`
+    /// adjustments the `MOVE` destinations make must not reach it.
+    pub(crate) fn map_fault(self, f: impl FnOnce(AddressError) -> AddressError) -> Self {
+        match self {
+            Abort::Fault(e) => Abort::Fault(f(e)),
+            Abort::Suspend => Abort::Suspend,
+        }
+    }
+}
+
+pub(crate) type AccessResult<T> = Result<T, Abort>;
 
 /// A resolved operand location.
 ///
@@ -177,13 +207,13 @@ impl M68000 {
     /// stacked PC is the current PC minus one word (empirical rule — it
     /// tracks how many extension words the instruction had consumed).
     #[inline]
-    fn operand_fault(&self, addr: u32, write: bool) -> AddressError {
-        AddressError {
+    fn operand_fault(&self, addr: u32, write: bool) -> Abort {
+        Abort::Fault(AddressError {
             addr,
             write,
             program: false,
             stacked_pc: self.pc.wrapping_sub(2),
-        }
+        })
     }
 
     /// Read one word at `addr`; odd addresses raise the address error.
@@ -213,6 +243,17 @@ impl M68000 {
         if addr & 1 != 0 {
             return Err(self.operand_fault(addr, false));
         }
+        // Already run on an earlier attempt at this body: give back the word
+        // the bus returned then rather than asking the bus twice.
+        if let Some(word) = self.replay_read() {
+            return Ok(word);
+        }
+        // The part drives one bus cycle every four clocks. If this body has
+        // already driven one on this clock, this read belongs on the next, and
+        // the only way to put it there is to unwind and run again.
+        if self.must_suspend() {
+            return Err(Abort::Suspend);
+        }
         // A read cannot overtake a cycle the instruction has already decided
         // on, so anything outstanding is driven first. It loses its clock and
         // keeps its order, which is the right way round: a wrong position is a
@@ -226,7 +267,10 @@ impl M68000 {
         };
         bus.observe_bus_cycle(master, a, cycle);
         self.transfers += 1;
-        Ok(bus.read(master, a))
+        self.tick_cycles += 1;
+        let word = bus.read(master, a);
+        self.log_cycle(super::ReplayedCycle::Read(word));
+        Ok(word)
     }
 
     /// Write one word at `addr`; odd addresses raise the address error.
@@ -326,12 +370,14 @@ impl M68000 {
     ///
     /// The address pins carry the exact byte address, which is what an
     /// address-snooping device on the bus sees.
+    /// A byte access cannot fault, but it can suspend, which is the only reason
+    /// this is fallible: see [`Abort`].
     pub(crate) fn read_byte_at<B: Bus16 + ?Sized>(
         &mut self,
         bus: &mut B,
         master: BusMaster,
         addr: u32,
-    ) -> u8 {
+    ) -> AccessResult<u8> {
         self.read_byte_in(bus, master, addr, false)
     }
 
@@ -342,7 +388,13 @@ impl M68000 {
         master: BusMaster,
         addr: u32,
         program: bool,
-    ) -> u8 {
+    ) -> AccessResult<u8> {
+        if let Some(byte) = self.replay_read_byte() {
+            return Ok(byte);
+        }
+        if self.must_suspend() {
+            return Err(Abort::Suspend);
+        }
         self.flush_pending(bus, master);
         let a = self.mask_addr(addr);
         let cycle = if program {
@@ -354,7 +406,10 @@ impl M68000 {
         };
         bus.observe_bus_cycle(master, a, cycle);
         self.transfers += 1;
-        bus.read_byte(master, a)
+        self.tick_cycles += 1;
+        let byte = bus.read_byte(master, a);
+        self.log_cycle(super::ReplayedCycle::ReadByte(byte));
+        Ok(byte)
     }
 
     /// Write one byte as a single bus cycle, asserting the one strobe that byte
@@ -649,7 +704,7 @@ impl M68000 {
                 // read that follows must not inherit it.
                 let program = std::mem::take(&mut self.ea_program_space);
                 match size {
-                    Size::Byte => self.read_byte_in(bus, master, addr, program) as u32,
+                    Size::Byte => self.read_byte_in(bus, master, addr, program)? as u32,
                     Size::Word => self.read_word_in(bus, master, addr, program)? as u32,
                     Size::Long => self.read_long_in(bus, master, addr, program)?,
                 }
@@ -812,9 +867,13 @@ mod tests {
     fn byte_read_selects_high_or_low_byte() {
         let (mut cpu, mut bus) = setup();
         bus.load(0x1000, &[0xAB, 0xCD]);
-        assert_eq!(cpu.read_byte_at(&mut bus, M, 0x1000), 0xAB, "even = UDS");
         assert_eq!(
-            cpu.read_byte_at(&mut bus, M, 0x1001),
+            cpu.read_byte_at(&mut bus, M, 0x1000).unwrap(),
+            0xAB,
+            "even = UDS"
+        );
+        assert_eq!(
+            cpu.read_byte_at(&mut bus, M, 0x1001).unwrap(),
             0xCD,
             "odd = LDS, byte access is never misaligned"
         );
@@ -836,16 +895,20 @@ mod tests {
     fn odd_word_access_raises_address_error() {
         let (mut cpu, mut bus) = setup();
         cpu.set_pc_flush(0x0C04); // pretend one extension word was consumed
-        let err = cpu.read_word_at(&mut bus, M, 0x1001).unwrap_err();
+        let fault = |abort: Abort| match abort {
+            Abort::Fault(e) => e,
+            Abort::Suspend => panic!("an odd address is a fault, not a suspension"),
+        };
+        let err = fault(cpu.read_word_at(&mut bus, M, 0x1001).unwrap_err());
         assert_eq!(err.addr, 0x1001);
         assert!(!err.write);
         assert!(!err.program);
         assert_eq!(err.stacked_pc, 0x0C02, "operand faults stack PC - 2");
 
-        let err = cpu.write_word_at(&mut bus, M, 0x1001, 0).unwrap_err();
+        let err = fault(cpu.write_word_at(&mut bus, M, 0x1001, 0).unwrap_err());
         assert!(err.write);
 
-        let err = cpu.read_long_at(&mut bus, M, 0x1003).unwrap_err();
+        let err = fault(cpu.read_long_at(&mut bus, M, 0x1003).unwrap_err());
         assert_eq!(err.addr, 0x1003, "the first (odd) word transaction faults");
     }
 
