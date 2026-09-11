@@ -17,6 +17,40 @@ use super::flags::SrFlag;
 use crate::core::{Bus16, BusMaster, bus::InterruptState};
 use crate::cpu::flags::detect_rising_edge;
 
+/// What the access that address-errors costs before entry begins.
+///
+/// **The part does not check the address first.** It puts the access on the
+/// bus, spends the four clocks a bus cycle takes, and only then finds the
+/// address odd, at which point it spends four more recognizing the fault and
+/// entering. Eight clocks, on every fault, before any of exception entry's
+/// fifty. The cycle commits nothing, because the address strobe is never
+/// asserted, so it is time with no transfer and no observer sees it: nothing
+/// is presented to the bus here, only charged.
+///
+/// **The two corpora disagree about this and the disagreement is exactly these
+/// eight clocks.** The documentation-derived set charges nothing for the
+/// aborted access and records six clocks of internal time; the
+/// microcode-derived set charges the cycle and records ten. That is not the
+/// manual against the microcode, because the manual's figure is for entry
+/// alone and says nothing about the attempt: it is one generated
+/// implementation omitting a mechanism the die-extracted one has, and the
+/// mechanism is readable a step at a time.
+///
+/// **Adopting it makes one reported number worse and it is labeled rather than
+/// hidden.** Against the documentation-derived corpus it takes the
+/// address-error population from exact on all 178,089 cases to exact on two,
+/// and the aggregate clock rate from 96.81% to 79.00%; against the
+/// microcode-derived one it takes the same population from 0.00% to exact on
+/// all 55,607 and the aggregate from 79.40% to 96.91%. That is the only floor
+/// in this conversion that has come down, and it comes down because the
+/// mechanism is readable and the rate is not the thing being optimized.
+///
+/// The two cases that do not move are both `MOVEM.l` loads, which suspend past
+/// the replay cap and have already spent more clocks than their own length, so
+/// the finish saturates rather than adding these eight. That is the cap, not
+/// this constant.
+const ABORTED_ACCESS_CLOCKS: u32 = 8;
+
 impl M68000 {
     /// Enter an exception: push the stack frame on the supervisor stack and
     /// vector to the handler. `pushed_pc` is the PC value the frame stores
@@ -437,6 +471,10 @@ impl M68000 {
         // or a branch displacement end two or six clocks short, and both
         // corpora agreed on which: 77,019 cases and 22,032, exactly the shapes
         // whose internal time is not zero.
-        self.finish_from_bus(bus, master, 6 + self.internal_spent);
+        self.finish_from_bus(
+            bus,
+            master,
+            6 + ABORTED_ACCESS_CLOCKS + self.internal_spent,
+        );
     }
 }

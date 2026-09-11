@@ -748,6 +748,11 @@ struct Populations {
     /// aborted cycle as well, a difference of exactly eight clocks on every
     /// such case. Without this split that disagreement is invisible inside a
     /// single length rate.
+    ///
+    /// **M5 resolved it against the microcode, which charges the attempt.** So
+    /// this population is exact against `m68000` and misses by a flat eight
+    /// against `680x0`, and the delta histogram beside the table is what makes
+    /// the difference between a disagreement and a defect readable.
     address_error: Tally,
     completed: Tally,
     /// Cases whose recorded trace makes at most one *data* transfer.
@@ -1727,19 +1732,25 @@ fn test_m68000_cycle_gate() {
     // --- Rung 1 on the faulting path, asserted rather than floored -----------
     //
     // Every case that ends in an address error is exact on clock count against
-    // the documentation-derived corpus, all 178,089 of them, and the delta
-    // histogram beside the population table is what says so: one bucket at
-    // zero rather than a rate that rounds to 100. An equality assertion is safe
-    // here for that reason and is the stronger check, because this population
-    // is one mechanism and a single case sliding off it is a defect rather than
-    // a residual.
+    // the microcode-derived corpus, all 55,607 of them, and the delta histogram
+    // beside the population table is what says so: one bucket at zero rather
+    // than a rate that rounds to 100. An equality assertion is safe for that
+    // reason and is the stronger check, because this population is one
+    // mechanism and a single case sliding off it is a defect rather than a
+    // residual. Watched failing twice on the way here, at 0 of 55,607 and then
+    // at 31,879.
     //
-    // It was watched failing at 101,070 of 178,089 before an aborted
-    // instruction was charged the internal time it had already spent.
+    // **The other corpus reads 2 of 178,089 on the same population and that is
+    // not a regression.** The two disagree about what the access that faults
+    // costs, by exactly eight clocks on every case, and the microcode settles
+    // it: see `ABORTED_ACCESS_CLOCKS`. The histogram is what keeps that
+    // readable, because a single bucket at +8 is a corpus disagreement and a
+    // spread would be a defect. The two exact cases are `MOVEM.l` loads whose
+    // finish saturates past the replay cap.
     assert_eq!(
-        pops_680x0.address_error.length_exact, pops_680x0.address_error.ran,
-        "680x0: {} address-error cases disagree on clock count",
-        pops_680x0.address_error.ran - pops_680x0.address_error.length_exact
+        pops_m68000.address_error.length_exact, pops_m68000.address_error.ran,
+        "m68000: {} address-error cases disagree on clock count",
+        pops_m68000.address_error.ran - pops_m68000.address_error.length_exact
     );
 
     // --- Floors that ratchet -------------------------------------------------
@@ -1759,7 +1770,15 @@ fn test_m68000_cycle_gate() {
     // touch no memory, which were already near-exact before any of this, so a
     // floor on the aggregate alone would not notice the operand path regressing.
     let floors = [
-        ("680x0 length", pops_680x0.all.length_pct(), 96.80),
+        // **The one floor in this conversion that has come down.** It stood at
+        // 96.80 for the length of one commit, with the faulting population
+        // exact against this corpus. Charging the aborted access what the
+        // microcode charges it takes that population to zero here and to exact
+        // against the other corpus, and the two cannot both be satisfied: the
+        // disagreement is a constant eight clocks and the microcode settles it.
+        // Lowered deliberately and labeled, rather than the change being
+        // declined to keep a number up. See `ABORTED_ACCESS_CLOCKS`.
+        ("680x0 length", pops_680x0.all.length_pct(), 78.99),
         ("680x0 kinds", pops_680x0.all.kinds_pct(), 98.58),
         ("680x0 count", pops_680x0.all.count_pct(), 98.86),
         ("680x0 positions", pops_680x0.all.positions_pct(), 76.90),
@@ -1793,7 +1812,7 @@ fn test_m68000_cycle_gate() {
             pops_m68000.address_error.kinds_pct(),
             99.99,
         ),
-        ("m68000 length", pops_m68000.all.length_pct(), 79.39),
+        ("m68000 length", pops_m68000.all.length_pct(), 96.90),
         ("m68000 kinds", pops_m68000.all.kinds_pct(), 98.22),
         ("m68000 count", pops_m68000.all.count_pct(), 99.14),
         ("m68000 positions", pops_m68000.all.positions_pct(), 72.19),
