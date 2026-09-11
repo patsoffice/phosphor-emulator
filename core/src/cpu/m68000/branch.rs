@@ -16,33 +16,6 @@ use super::M68000;
 use super::addressing::{Abort, AccessResult, AddressError, Ea, Size, sext8, sext16};
 use crate::core::{Bus16, BusMaster};
 
-/// Documented JMP timing per control addressing mode (M68000UM table 8-1);
-/// JSR is uniformly 8 cycles more for the return-address push.
-/// Clocks a jump spends off the bus computing its target, by addressing mode.
-///
-/// Irregular in a way the operand modes are not, because a jump has no operand
-/// transfer to overlap the work with: `abs.l` pays nothing because its two
-/// extension words cover the work, and the indexed modes pay six for the index
-/// add on top.
-///
-/// `(An)` reads zero here where it once read four, and the prefetch queue is
-/// why: the jump's two transfers are now the refills at the target, where
-/// before they were the opcode fetch alone. Every other mode is unchanged,
-/// because its extension words and the target refills come to the same count.
-fn jump_internal(mode: u8, reg: u8) -> u32 {
-    match mode & 7 {
-        2 => 0, // (An)
-        5 => 2, // d16(An)
-        6 => 6, // d8(An,Xn)
-        _ => match reg & 7 {
-            0 => 2, // abs.w
-            1 => 0, // abs.l
-            2 => 2, // d16(PC)
-            _ => 6, // d8(PC,Xn)
-        },
-    }
-}
-
 impl M68000 {
     /// Load a new PC and discard the prefetch queue; an odd target raises the
     /// address error a real 68000 takes on the target fetch (program-space
@@ -204,8 +177,10 @@ impl M68000 {
         // JSR's push is two counted transfers, so a call and a jump spend the
         // same time off the bus. That time is the address arithmetic and runs
         // before the fetches it computes: `JMP (d16, An)` is two clocks working
-        // out the target and then its two program reads.
-        self.finish_from_bus_address_first(bus, master, jump_internal(ea_mode, ea_reg));
+        // out the target and then its two program reads. The loader has already
+        // burned it, from the same function, so nothing is left to place here.
+        let internal = u32::from(super::format::jump_internal(opcode));
+        self.finish_from_bus_address_first(bus, master, internal);
         Ok(())
     }
 

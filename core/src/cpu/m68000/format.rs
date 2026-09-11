@@ -423,6 +423,12 @@ fn resolves_address_before_first_fetch(opcode: u16) -> bool {
 /// row here makes that rung worse rather than better, on the cases it touches
 /// and nowhere else.
 pub fn leading_internal(opcode: u16) -> u8 {
+    // A jump works its target out with the bus idle, and all of it precedes
+    // the fetch, so its whole internal time is leading time. See
+    // [`jump_internal`].
+    if (0x4E80..=0x4EFF).contains(&opcode) {
+        return jump_internal(opcode);
+    }
     if extended_arithmetic(opcode) {
         // Only some of these predecrement, and the EA field cannot tell them
         // apart: an `An` field means `-(Ay)` for ADDX, SUBX, ABCD and SBCD,
@@ -441,6 +447,46 @@ pub fn leading_internal(opcode: u16) -> u8 {
         (4, _) | (6, _) => 2, // -(An) and d8(An,Xn)
         (7, 3) => 2,          // d8(PC,Xn)
         _ => 0,
+    }
+}
+
+/// Clocks `JMP` or `JSR` spends off the bus working its target out, all of
+/// which precede its first fetch.
+///
+/// **A jump pays for address arithmetic that every other instruction gets
+/// free**, and the reason is visible one microcode step at a time.
+/// `LEA (d16,An),An` adds the displacement to the address register in the same
+/// step that puts the *next* fetch's address on the bus, so the add costs
+/// nothing. `JMP (d16,An)` cannot: the address that add produces **is** the
+/// next fetch's address, so the step that computes it cannot also drive it, and
+/// it costs a step. Two clocks for a displacement add, two more for an index
+/// add, two for sign-extending an 8-bit displacement or a short absolute
+/// address, and nothing at all for a long absolute address, which arrives ready
+/// to use in its two extension words.
+///
+/// This is one function rather than a constant in the loader and another in the
+/// body, because the two have to agree exactly: the loader burns this in front
+/// of the instruction and the finish charges what is left, and a disagreement
+/// would show up as a clock the instruction never spends or spends twice.
+///
+/// Illegal modes read zero. `JMP D0` is not a jump and the body treats it as a
+/// bounded no-op, so burning time in front of it would be time the part does
+/// not spend.
+pub fn jump_internal(opcode: u16) -> u8 {
+    let mode = ((opcode >> 3) & 7) as u8;
+    let reg = (opcode & 7) as u8;
+    match mode {
+        2 => 0, // (An)
+        5 => 2, // d16(An)
+        6 => 6, // d8(An,Xn)
+        7 => match reg {
+            0 => 2, // abs.w
+            1 => 0, // abs.l
+            2 => 2, // d16(PC)
+            3 => 6, // d8(PC,Xn)
+            _ => 0, // not a control mode
+        },
+        _ => 0, // register direct, postincrement, predecrement: not control
     }
 }
 
