@@ -7,13 +7,17 @@
 //! uses `Address = u32` (24-bit physical address space on the 68000) and
 //! `Data = u16` (one bus transaction = one word at an even address).
 //!
-//! Execution is modeled at the instruction level (like the i8088): the full
-//! instruction is decoded and applied atomically on its first cycle, then the
-//! remaining cycles are burned as bus-idle wait states. The bus activity itself
-//! is modeled: byte accesses are strobed, every transfer costs four clocks, and
+//! **Execution is no longer atomic, and where each bus cycle lands is part of
+//! the model.** Byte accesses are strobed, every transfer costs four clocks,
 //! instruction words come out of a real two-word prefetch queue
-//! ([`prefetch`]). What is not modeled yet is *when* within an instruction each
-//! transfer runs.
+//! ([`prefetch`]), and three things put the transfers on the clocks the part
+//! puts them on: a loader that takes the opcode and drives the refills around
+//! the body, a bus unit that runs the cycles nothing is waiting on, and a body
+//! that suspends and runs again to reach an operand read. See
+//! [`M68000::run_body`], [`PendingCycle`] and `docs/designs/cycle-accurate-m68000.md`.
+//!
+//! What is still charged rather than placed is the data-dependent internal time
+//! of `MULx` and `DIVx`, and `MOVEM`'s cycles past the replay cap.
 
 pub(crate) mod addressing;
 mod alu;
@@ -78,12 +82,35 @@ pub(crate) enum PendingCycle {
         byte: bool,
         signals: BusSignals,
     },
+    /// Microcode steps that drive nothing, holding the bus idle for `clocks`
+    /// before the next cycle on the list.
+    ///
+    /// The list is the part's own sequence handed to the bus unit, and the
+    /// part's sequence has steps in it that make no access. Without them every
+    /// gap in a recorded trace would have to be a gap at the front or the back,
+    /// and exception entry has one in the middle: its two fetches at the
+    /// handler are six clocks apart, not four, because a step sits between
+    /// them.
+    Idle { clocks: u32 },
+}
+
+impl PendingCycle {
+    /// How long this entry occupies the bus unit. Every transfer is four clocks
+    /// at immediate DTACK; an idle step is however long its microcode steps
+    /// are.
+    fn clocks(self) -> u32 {
+        match self {
+            PendingCycle::Idle { clocks } => clocks,
+            _ => 4,
+        }
+    }
 }
 
 /// Cycles one instruction can have outstanding at once.
 ///
-/// The longest is `MOVEP.l`, which writes four bytes and then refills.
-const MAX_PENDING: usize = 8;
+/// Exception entry is the longest: an aborted instruction's own outstanding
+/// writes, then the idle step in front of the frame, then seven frame words.
+const MAX_PENDING: usize = 12;
 
 /// A bus cycle a body has already run, kept so that running the body again
 /// gives it back rather than asking the bus a second time.
@@ -142,6 +169,22 @@ pub(crate) struct BodyState {
     halted: bool,
 }
 
+/// What [`M68000::run_body`] runs when it runs again.
+///
+/// **Exception entry is a body in its own right, and it has to be.** The
+/// instruction that faulted is over, so there is nothing left to unwind it to;
+/// without a body of its own the entry drove all eleven of its cycles on one
+/// clock, which is the whole faulting side of the per-cycle gate's position
+/// rung. Giving it a state capture and a replay log of its own costs nothing at
+/// run time and makes it suspend exactly the way an instruction does.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum BodyKind {
+    /// The decoded instruction.
+    Instruction,
+    /// Address-error entry, carrying the fault it is stacking a frame for.
+    AddressError(addressing::AddressError),
+}
+
 /// Execution state machine for multi-cycle instructions.
 #[derive(Clone, Debug)]
 pub(crate) enum ExecState {
@@ -160,6 +203,17 @@ pub(crate) enum ExecState {
     /// Waiting out the clocks of the bus cycles the body ran on its last
     /// attempt, before running it again. See [`M68000::run_body`].
     BodyWait(u32),
+    /// Driving the cycles a suspended body handed over, one every four clocks,
+    /// before running the body again.
+    ///
+    /// A body that has handed over writes and then wants to read cannot have
+    /// the read first: the part drives them in the order it decided them. The
+    /// cheap answer is to drive the whole list at once and let the read follow
+    /// on the same clock, and that is what this core did; it is also why an
+    /// exception frame's writes all landed together. The part gives each of
+    /// them a clock, so the body waits for the list to drain and then runs
+    /// again, reaching the read on a clock of its own.
+    DrainPending { delay: u32 },
     /// Waiting to issue the instruction's trailing prefetch.
     ///
     /// The refill behind the last word an instruction consumed is not part of
@@ -345,12 +399,13 @@ pub struct M68000 {
     /// body that wants a second one suspends instead.
     #[save_skip(default)]
     pub(crate) tick_cycles: u32,
-    /// Whether an instruction body is running, and can therefore be unwound.
-    ///
-    /// Exception entry reached from the state machine rather than from a body
-    /// has nowhere to unwind to, so it drives its cycles where it stands.
+    /// Whether a body is running, and can therefore be unwound.
     #[save_skip(default)]
     pub(crate) in_body: bool,
+    /// Which body [`Self::run_body`] runs: the instruction, or the exception
+    /// entry that replaced it when the instruction faulted.
+    #[save_skip(default = BodyKind::Instruction)]
+    pub(crate) body_kind: BodyKind,
 }
 
 impl Default for M68000 {
@@ -402,6 +457,7 @@ impl M68000 {
             replay_pos: 0,
             tick_cycles: 0,
             in_body: false,
+            body_kind: BodyKind::Instruction,
         }
     }
 
@@ -459,7 +515,17 @@ impl M68000 {
     /// is where every cycle used to be.
     #[inline]
     pub(crate) fn must_suspend(&self) -> bool {
-        self.in_body && self.tick_cycles > 0 && usize::from(self.replay_len) < MAX_REPLAY
+        self.can_suspend() && self.tick_cycles > 0
+    }
+
+    /// Whether the body can be unwound at all.
+    ///
+    /// Outside a body there is nothing to unwind to, and once the log is full
+    /// the cycles past it are not recorded, so running the body again would
+    /// drive them a second time.
+    #[inline]
+    pub(crate) fn can_suspend(&self) -> bool {
+        self.in_body && usize::from(self.replay_len) < MAX_REPLAY
     }
 
     /// The cycle at the cursor, if this attempt has not caught up with what
@@ -595,6 +661,77 @@ impl M68000 {
         self.log_cycle(ReplayedCycle::Handed);
     }
 
+    /// Put clocks the part spends without driving anything onto the bus unit's
+    /// list, so the cycles behind them land that much later.
+    ///
+    /// Not a transfer, so nothing is counted and the instruction's length is
+    /// unchanged: the clocks are already in the internal time its finish
+    /// declares. This only says *where* in the sequence they fall. It is
+    /// replayed like a handover, so a body that runs again does not add them
+    /// twice.
+    pub(crate) fn defer_idle<B: Bus16 + ?Sized>(
+        &mut self,
+        bus: &mut B,
+        master: BusMaster,
+        clocks: u32,
+    ) {
+        // A step of no clocks is not a step. `TRAPV` asks for one, because it
+        // is the one exception source with no idle in front of its frame, and
+        // an entry of zero width would schedule the cycle behind it for a clock
+        // that never arrives.
+        if clocks == 0 {
+            return;
+        }
+        if self.replay_handed() {
+            return;
+        }
+        if usize::from(self.pending_len) >= MAX_PENDING {
+            self.flush_pending(bus, master);
+        }
+        self.pending[usize::from(self.pending_len)] = PendingCycle::Idle { clocks };
+        self.pending_len += 1;
+        self.log_cycle(ReplayedCycle::Handed);
+    }
+
+    /// Spend internal time *and* put it on the bus unit's list, for a body that
+    /// spends clocks part way through its own sequence.
+    ///
+    /// Two statements about the same clocks, and both are needed. One says they
+    /// are already spent if the instruction goes on to fault, which is the only
+    /// thing the abort path can charge them from. The other says where in the
+    /// sequence they fall, so the cycles behind them land that much later.
+    pub(crate) fn spend_idle<B: Bus16 + ?Sized>(
+        &mut self,
+        bus: &mut B,
+        master: BusMaster,
+        clocks: u32,
+    ) {
+        self.spend_internal(clocks);
+        self.defer_idle(bus, master, clocks);
+    }
+
+    /// The clocks every outstanding entry occupies, and the last one's alone.
+    fn outstanding_clocks(&self) -> (u32, u32) {
+        let live = &self.pending[usize::from(self.pending_pos)..usize::from(self.pending_len)];
+        let total = live.iter().map(|c| c.clocks()).sum();
+        (total, live.last().map_or(0, |c| c.clocks()))
+    }
+
+    /// Of the outstanding entries, the clocks that drive nothing.
+    ///
+    /// A finish that places internal time in front of its fetches must not
+    /// place the part of it the body already put on the list, or the same
+    /// clocks are spent twice.
+    fn outstanding_idle(&self) -> u32 {
+        self.pending[usize::from(self.pending_pos)..usize::from(self.pending_len)]
+            .iter()
+            .filter_map(|c| match c {
+                PendingCycle::Idle { clocks } => Some(*clocks),
+                _ => None,
+            })
+            .sum()
+    }
+
     /// Drive every cycle still outstanding, immediately and in order.
     ///
     /// The escape hatch for a body that needs the bus back before the bus unit
@@ -628,8 +765,14 @@ impl M68000 {
             !(self.in_body && matches!(cycle, PendingCycle::Refill { .. })),
             "a refill driven while the body can still suspend would be unwound"
         );
+        // An idle step drives nothing and occupies no clock of the bus unit's,
+        // so it does not make the next cycle a second one on this clock.
+        if matches!(cycle, PendingCycle::Idle { .. }) {
+            return;
+        }
         self.tick_cycles += 1;
         match cycle {
+            PendingCycle::Idle { .. } => unreachable!("returned above"),
             PendingCycle::Refill { signals } => {
                 if self.prefetch_len < 2 {
                     let addr =
@@ -767,6 +910,19 @@ impl M68000 {
 
     /// Execute one bus cycle.
     pub fn execute_cycle<B: Bus16 + ?Sized>(&mut self, bus: &mut B, master: BusMaster) {
+        // Cycles driven belong to the clock, not to whatever drove them.
+        //
+        // Two things turned on this. An instruction that faults hands over to
+        // exception entry *inside this call*, and the clock it faulted on may
+        // already carry the cycle it faulted after: `RTS` reads the second half
+        // of its return address and then finds it odd, and the entry behind it
+        // must not reuse that clock. And interrupt entry never runs through a
+        // body at all, so zeroing this inside one left it counting cycles from
+        // whenever a body last ran, which is not a number about this clock.
+        // That second one is what moved Road Runner's golden frame: its
+        // interrupt handler's two fetches were placed from an accumulated
+        // count, and they now land where the part lands them.
+        self.tick_cycles = 0;
         match self.state {
             ExecState::Fetch => {
                 if self.halted {
@@ -805,7 +961,7 @@ impl M68000 {
                         program: true,
                         stacked_pc: self.pc,
                     };
-                    self.enter_address_error(bus, master, fault);
+                    self.begin_address_error(bus, master, fault);
                     return;
                 }
                 // Take the opcode out of the prefetch queue and execute the
@@ -848,6 +1004,14 @@ impl M68000 {
                     self.state = ExecState::BodyWait(remaining - 1);
                 } else {
                     self.run_body(bus, master);
+                }
+            }
+            ExecState::DrainPending { delay } => {
+                let remaining = delay - 1;
+                if remaining == 0 {
+                    self.drain_one_pending(bus, master);
+                } else {
+                    self.state = ExecState::DrainPending { delay: remaining };
                 }
             }
             ExecState::Execute(remaining) => {
@@ -923,7 +1087,28 @@ impl M68000 {
     /// Start the instruction body, whose opcode the loader has already taken.
     fn run_instruction<B: Bus16 + ?Sized>(&mut self, bus: &mut B, master: BusMaster) {
         self.pre_exec_transfers = self.transfers;
+        self.body_kind = BodyKind::Instruction;
         self.replay_len = 0;
+        self.body = self.capture_body_state();
+        self.run_body(bus, master);
+    }
+
+    /// Start exception entry as a body of its own, with its own state capture
+    /// and its own replay log.
+    ///
+    /// The instruction is over: what it did to the registers stands, and what
+    /// this unwinds to is the state the fault left. The log starts empty
+    /// because the instruction's cycles are behind it and none of them may be
+    /// replayed into the entry.
+    fn begin_address_error<B: Bus16 + ?Sized>(
+        &mut self,
+        bus: &mut B,
+        master: BusMaster,
+        fault: addressing::AddressError,
+    ) {
+        self.body_kind = BodyKind::AddressError(fault);
+        self.replay_len = 0;
+        self.replay_pos = 0;
         self.body = self.capture_body_state();
         self.run_body(bus, master);
     }
@@ -951,22 +1136,63 @@ impl M68000 {
     /// itself, which for almost every instruction is one or two.
     fn run_body<B: Bus16 + ?Sized>(&mut self, bus: &mut B, master: BusMaster) {
         self.replay_pos = 0;
-        self.tick_cycles = 0;
         self.in_body = true;
-        let outcome = self.execute_instruction(self.opcode, bus, master);
+        let outcome = match self.body_kind {
+            BodyKind::Instruction => self.execute_instruction(self.opcode, bus, master),
+            BodyKind::AddressError(fault) => self.address_error_body(bus, master, fault),
+        };
         self.in_body = false;
         match outcome {
             Ok(()) => {}
             Err(addressing::Abort::Suspend) => {
                 self.restore_body_state();
-                // The clocks of the cycles this attempt did run. They are spent
+                // The clocks of the cycles this attempt did run, and of the
+                // ones it handed over and is still waiting on. They are spent
                 // here rather than charged at the finish, which is what keeps
                 // the instruction the same length while its transfers move.
-                let span = 4 * self.tick_cycles.max(1);
+                let (outstanding, _) = self.outstanding_clocks();
+                let span = (4 * self.tick_cycles + outstanding).max(4);
                 self.exec_clock += span;
-                self.state = ExecState::BodyWait(span - 1);
+                if outstanding == 0 {
+                    self.state = ExecState::BodyWait(span - 1);
+                    return;
+                }
+                // The cycles this attempt drove occupy the clocks after it, so
+                // the first outstanding one belongs on the clock after the last
+                // of them, and on *this* clock when there were none.
+                let delay = 4 * self.tick_cycles;
+                if delay == 0 {
+                    self.drain_one_pending(bus, master);
+                } else {
+                    self.state = ExecState::DrainPending { delay };
+                }
             }
-            Err(addressing::Abort::Fault(fault)) => self.enter_address_error(bus, master, fault),
+            Err(addressing::Abort::Fault(fault)) => {
+                // Only an instruction can reach here. The entry body catches
+                // its own frame faults, because a fault there is a double bus
+                // fault and halts rather than entering again.
+                debug_assert!(
+                    matches!(self.body_kind, BodyKind::Instruction),
+                    "exception entry must not propagate a fault"
+                );
+                self.begin_address_error(bus, master, fault);
+            }
+        }
+    }
+
+    /// Drive one cycle of a suspended body's outstanding list, and either queue
+    /// the one after it or let the body run again four clocks later.
+    fn drain_one_pending<B: Bus16 + ?Sized>(&mut self, bus: &mut B, master: BusMaster) {
+        let cycle = self.pending[usize::from(self.pending_pos)];
+        self.pending_pos += 1;
+        self.drive_pending_cycle(bus, master, cycle);
+        let width = cycle.clocks();
+        if self.pending_pos < self.pending_len {
+            self.state = ExecState::DrainPending { delay: width };
+        } else {
+            self.pending_len = 0;
+            self.pending_pos = 0;
+            self.state = ExecState::BodyWait(width - 1);
         }
     }
 
@@ -1087,15 +1313,18 @@ impl M68000 {
         let mut delay = 4 * self.tick_cycles;
         if internal_first {
             // Whatever of the internal time was not already burned up front as
-            // address arithmetic runs here, ahead of the fetches it computes.
-            delay += internal.saturating_sub(self.lead_burned);
+            // address arithmetic, nor already placed on the list by the body,
+            // runs here ahead of the fetches it computes.
+            delay += internal
+                .saturating_sub(self.lead_burned)
+                .saturating_sub(self.outstanding_idle());
         }
-        // Each outstanding cycle is its own bus cycle four clocks after the
-        // last, so `tail` is measured from the clock the *final* one runs on.
-        let outstanding = u32::from(self.pending_len - self.pending_pos);
+        // Each outstanding entry occupies its own clocks, one after the last,
+        // so `tail` is measured from the clock the *final* one runs on.
+        let (outstanding, last) = self.outstanding_clocks();
         let tail = from_body
             .saturating_sub(delay)
-            .saturating_sub(4 * (outstanding - 1));
+            .saturating_sub(outstanding - last);
         if delay == 0 {
             self.drive_next_pending(bus, master, tail);
             return;
@@ -1110,7 +1339,10 @@ impl M68000 {
         self.pending_pos += 1;
         self.drive_pending_cycle(bus, master, cycle);
         if self.pending_pos < self.pending_len {
-            self.state = ExecState::TrailingRefill { delay: 4, tail };
+            self.state = ExecState::TrailingRefill {
+                delay: cycle.clocks(),
+                tail,
+            };
         } else {
             self.pending_len = 0;
             self.pending_pos = 0;

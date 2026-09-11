@@ -1781,16 +1781,16 @@ fn test_m68000_cycle_gate() {
         ("680x0 length", pops_680x0.all.length_pct(), 78.99),
         ("680x0 kinds", pops_680x0.all.kinds_pct(), 98.58),
         ("680x0 count", pops_680x0.all.count_pct(), 98.86),
-        ("680x0 positions", pops_680x0.all.positions_pct(), 76.90),
+        ("680x0 positions", pops_680x0.all.positions_pct(), 78.28),
         (
             "680x0 positions, completed",
             pops_680x0.completed.positions_pct(),
-            93.57,
+            95.24,
         ),
         (
             "680x0 positions, >1 data transaction",
             pops_680x0.several_data_txns.positions_pct(),
-            55.09,
+            57.99,
         ),
         ("680x0 operands", pops_680x0.all.operands_pct(), 79.97),
         ("680x0 function codes", pops_680x0.all.fc_pct(), 98.13),
@@ -1815,16 +1815,29 @@ fn test_m68000_cycle_gate() {
         ("m68000 length", pops_m68000.all.length_pct(), 96.90),
         ("m68000 kinds", pops_m68000.all.kinds_pct(), 98.22),
         ("m68000 count", pops_m68000.all.count_pct(), 99.14),
-        ("m68000 positions", pops_m68000.all.positions_pct(), 72.19),
+        ("m68000 positions", pops_m68000.all.positions_pct(), 95.48),
+        // **The number M5's exception-entry work exists to move**, and it had
+        // no floor because it had no value: a structural 0.00% while entry
+        // drove all eleven of its cycles on one clock. It is floored against
+        // the microcode-derived corpus alone, because the other one omits the
+        // eight clocks the aborted access costs and so puts every transfer
+        // behind the fault eight clocks earlier than this core does. That is
+        // the corpus disagreement, not a placement error, and floors on the
+        // 680x0 faulting population would measure it rather than this core.
+        (
+            "m68000 positions, address error",
+            pops_m68000.address_error.positions_pct(),
+            97.14,
+        ),
         (
             "m68000 positions, completed",
             pops_m68000.completed.positions_pct(),
-            87.52,
+            95.13,
         ),
         (
             "m68000 positions, >1 data transaction",
             pops_m68000.several_data_txns.positions_pct(),
-            48.14,
+            93.51,
         ),
         ("m68000 operands", pops_m68000.all.operands_pct(), 80.60),
         ("m68000 function codes", pops_m68000.all.fc_pct(), 98.02),

@@ -255,10 +255,17 @@ impl M68000 {
             return Err(Abort::Suspend);
         }
         // A read cannot overtake a cycle the instruction has already decided
-        // on, so anything outstanding is driven first. It loses its clock and
-        // keeps its order, which is the right way round: a wrong position is a
-        // rung-3 miss, a wrong order is a wrong program.
-        self.flush_pending(bus, master);
+        // on. Where the body can be unwound, it waits for the outstanding ones
+        // to drain and runs again, so each of them keeps its own clock; where
+        // it cannot, they are driven here and lose their clocks rather than
+        // their order, because a wrong position is a rung-3 miss and a wrong
+        // order is a wrong program.
+        if self.pending_pos < self.pending_len {
+            if self.can_suspend() {
+                return Err(Abort::Suspend);
+            }
+            self.flush_pending(bus, master);
+        }
         let a = self.mask_addr(addr);
         let cycle = if program {
             self.program_cycle(false)
@@ -395,7 +402,14 @@ impl M68000 {
         if self.must_suspend() {
             return Err(Abort::Suspend);
         }
-        self.flush_pending(bus, master);
+        // See [`Self::read_word_in`] for why an outstanding list is waited out
+        // rather than flushed wherever the body can be unwound.
+        if self.pending_pos < self.pending_len {
+            if self.can_suspend() {
+                return Err(Abort::Suspend);
+            }
+            self.flush_pending(bus, master);
+        }
         let a = self.mask_addr(addr);
         let cycle = if program {
             let mut c = self.program_cycle(false);

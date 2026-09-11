@@ -59,18 +59,28 @@ impl M68000 {
     /// A misaligned supervisor stack makes the frame push itself fault; the
     /// error propagates so the address-error entry (and from there the
     /// double-fault halt) takes over.
+    ///
+    /// `lead` is the clocks the part spends between the instruction and the
+    /// first frame write, and it is the caller's because it belongs to the path
+    /// that reached the entry rather than to the entry: **four** for `TRAP`,
+    /// the illegal and privilege vectors, a zero divide and `CHK`, all of which
+    /// come through the same two setup steps; **six** for an interrupt, which
+    /// spends one more working the vector number out; and **none at all** for
+    /// `TRAPV`, whose fetch does the setup those steps would.
     pub(crate) fn exception<B: Bus16 + ?Sized>(
         &mut self,
         bus: &mut B,
         master: BusMaster,
         vector: u8,
         pushed_pc: u32,
+        lead: u32,
     ) -> AccessResult<()> {
-        // Anything the aborted instruction handed over runs before the frame
-        // does. The part committed those cycles; what it does not do is
-        // interleave them with the entry sequence, and the entry is about to
-        // change the privilege they would be driven at.
-        self.flush_pending(bus, master);
+        // The steps between the instruction and the frame, which drive nothing
+        // and are `lead` clocks of the entry's own. They go on the bus unit's
+        // list rather than being burned here, because anything the aborted
+        // instruction handed over is still on that list in front of them: the
+        // part drives those first, then spends these, then writes the frame.
+        self.defer_idle(bus, master, lead);
         let old_sr = self.sr;
         self.set_supervisor(true);
         self.set_flag(SrFlag::T, false);
@@ -93,10 +103,25 @@ impl M68000 {
         }
         let handler = self.read_long_at(bus, master, vector as u32 * 4)?;
         // Loading the vector is a control transfer and discards the queue; the
-        // two words at the handler are fetched by the finish, and they are why
+        // two words at the handler are fetched afterwards, and they are why
         // exception entry costs two transfers more than its frame and vector.
         self.set_pc_flush(handler);
+        self.queue_handler_prefetch(bus, master);
         Ok(())
+    }
+
+    /// The two fetches at the handler, which are **six clocks apart, not
+    /// four**.
+    ///
+    /// A step that drives nothing sits between them: the part has the first
+    /// word and spends two clocks on it before putting the second address on
+    /// the bus. Every entry does this, whatever reached it, which is why it
+    /// lives here rather than at seven call sites. The first is handed over and
+    /// the second is left to the finish, which owes whatever the flush emptied.
+    fn queue_handler_prefetch<B: Bus16 + ?Sized>(&mut self, bus: &mut B, master: BusMaster) {
+        let signals = self.program_cycle(false);
+        self.hand_over(bus, master, super::PendingCycle::Refill { signals });
+        self.defer_idle(bus, master, 2);
     }
 
     /// Push the 68000's three-word exception frame, in the order the part
@@ -141,7 +166,7 @@ impl M68000 {
         master: BusMaster,
     ) -> AccessResult<()> {
         let vector = 32 + (opcode & 0xF) as u8;
-        self.exception(bus, master, vector, self.pc)?;
+        self.exception(bus, master, vector, self.pc, 4)?;
         // Exception entry's seven transfers are counted: three frame words,
         // the two-word vector, and the two refills at the handler. Six clocks
         // are left, which puts TRAP at 34 and agrees with the other group-2
@@ -170,7 +195,13 @@ impl M68000 {
             // the vector, and two refills, and it is eight transfers where
             // TRAP, which traps without testing anything, is seven.
             self.refill_prefetch(bus, master);
-            self.exception(bus, master, 7, self.pc)?;
+            // **TRAPV alone has no idle step in front of its frame**, and its
+            // refill is why: the part uses the step that fetches to do the
+            // setup every other source spends two steps on, so the first frame
+            // write follows the fetch immediately. Recorded as a program read
+            // on clock 0 and a write on clock 4, where `TRAP` writes on 4 and
+            // has nothing on 0.
+            self.exception(bus, master, 7, self.pc, 0)?;
             self.finish_from_bus(bus, master, 2);
         } else {
             self.finish_from_bus(bus, master, 0);
@@ -189,7 +220,7 @@ impl M68000 {
         master: BusMaster,
         vector: u8,
     ) -> AccessResult<()> {
-        self.exception(bus, master, vector, self.instr_pc)?;
+        self.exception(bus, master, vector, self.instr_pc, 4)?;
         self.finish_from_bus(bus, master, 6);
         Ok(())
     }
@@ -205,7 +236,7 @@ impl M68000 {
         if self.flag_is_set(SrFlag::S) {
             return Ok(true);
         }
-        self.exception(bus, master, 8, self.instr_pc)?;
+        self.exception(bus, master, 8, self.instr_pc, 4)?;
         self.finish_from_bus(bus, master, 6);
         Ok(false)
     }
@@ -378,11 +409,15 @@ impl M68000 {
             24 + level
         };
         let pushed_pc = self.pc;
-        match self.exception(bus, master, vector, pushed_pc) {
+        // Six clocks in front of the frame rather than four: interrupt
+        // recognition spends a step working the vector number out that no other
+        // source needs. Nothing measures this, because neither corpus records
+        // an interrupt, so it is taken from the part's sequence and left there.
+        match self.exception(bus, master, vector, pushed_pc, 6) {
             Ok(()) => {}
             // Misaligned supervisor stack: the entry itself address-errors.
             Err(Abort::Fault(fault)) => {
-                self.enter_address_error(bus, master, fault);
+                self.begin_address_error(bus, master, fault);
                 return;
             }
             // Interrupt recognition runs from the state machine, not from a
@@ -409,17 +444,19 @@ impl M68000 {
     /// above R/W, I/N, and the function code; the stacked PC follows the
     /// per-fault rules recorded in [`AddressError`]. A fault while pushing
     /// this frame is a double bus fault: the processor halts. 50 cycles.
-    pub(crate) fn enter_address_error<B: Bus16 + ?Sized>(
+    pub(crate) fn address_error_body<B: Bus16 + ?Sized>(
         &mut self,
         bus: &mut B,
         master: BusMaster,
         fault: AddressError,
-    ) {
-        // Anything the aborted instruction handed over runs before the frame
-        // does. The part committed those cycles; what it does not do is
-        // interleave them with the entry sequence, and the entry is about to
-        // change the privilege they would be driven at.
-        self.flush_pending(bus, master);
+    ) -> AccessResult<()> {
+        // Anything the aborted instruction handed over is still on the bus
+        // unit's list and runs before the frame does, each on a clock of its
+        // own. Behind them go the clocks of the access that faulted and the
+        // two steps the entry spends before its first write, which is why
+        // `BSR`'s two pushes land twelve clocks ahead of the frame rather than
+        // four.
+        self.defer_idle(bus, master, ABORTED_ACCESS_CLOCKS + 4);
         let old_sr = self.sr;
         self.set_supervisor(true);
         self.set_flag(SrFlag::T, false);
@@ -440,16 +477,21 @@ impl M68000 {
             .and_then(|()| self.push_word(bus, master, opcode))
             .and_then(|()| self.push_long(bus, master, fault.addr))
             .and_then(|()| self.push_word(bus, master, status));
-        if frame.is_err() {
+        match frame {
+            Ok(()) => {}
             // Address error during address-error processing: double bus
             // fault; only an external reset recovers.
-            self.halted = true;
-            return;
+            Err(Abort::Fault(_)) => {
+                self.halted = true;
+                return Ok(());
+            }
+            // A suspension is not a fault and must reach the caller, which
+            // unwinds this body and runs it again.
+            Err(suspend) => return Err(suspend),
         }
-        let handler = self
-            .read_long_at(bus, master, 3 * 4)
-            .expect("vector 3 is aligned");
+        let handler = self.read_long_at(bus, master, 3 * 4)?;
         self.set_pc_flush(handler);
+        self.queue_handler_prefetch(bus, master);
         // Fifty clocks of entry, and every one of them is accounted for by
         // mechanism: eleven transfers and six idle. Seven transfers are the
         // group-0 frame, two the vector, and two the refills at the handler
@@ -476,5 +518,6 @@ impl M68000 {
             master,
             6 + ABORTED_ACCESS_CLOCKS + self.internal_spent,
         );
+        Ok(())
     }
 }

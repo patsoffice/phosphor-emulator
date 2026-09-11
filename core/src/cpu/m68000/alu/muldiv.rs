@@ -99,7 +99,7 @@ impl M68000 {
             // transfers on the 68000 and six on the 68010, all counted. So the
             // longer frame now costs its four clocks by itself rather than
             // needing a variant-gated constant here.
-            self.exception(bus, master, 5, self.instr_pc)?;
+            self.exception(bus, master, 5, self.instr_pc, 4)?;
             self.finish_from_bus(bus, master, 18 + ea_time);
             return Ok(());
         }
@@ -191,7 +191,7 @@ impl M68000 {
             // inside the entry sequence rather than in this instruction. It
             // belongs to M5 with the rest of exception entry, and a constant
             // fitted here would only hide it.
-            self.exception(bus, master, 6, self.pc)?;
+            self.exception(bus, master, 6, self.pc, 4)?;
             self.finish_from_bus(bus, master, 8 + ea_time);
         } else {
             // In bounds: the comparison itself, and nothing more.
