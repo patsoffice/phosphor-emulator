@@ -984,7 +984,7 @@ fn report_position_faults(label: &str, faults: &PositionFaults) {
          in {} shapes",
         faults.len()
     );
-    for ((instr, recorded, ours), n) in rows.iter().take(16) {
+    for ((instr, recorded, ours), n) in rows.iter().take(28) {
         eprintln!("  {n:>8}  {instr:<12} recorded [{recorded}]  ours [{ours}]");
     }
 }

@@ -48,8 +48,14 @@ impl M68000 {
         // are the whole bus cost, and PEA's long push adds two more transfers.
         // The indexed modes cost four clocks off the bus rather than the two an
         // operand mode pays: LEA has no transfer to hide the index add behind.
+        //
+        // Both halves of that four run before a fetch rather than after one.
+        // The part indexes for two clocks, fetches the extension word, spends
+        // two more placing the address in the register, and only then fetches
+        // again: `LEA (d8,An,Xn),An` is recorded with its two program reads on
+        // clocks two and eight, not two and six.
         let indexed = ea_mode & 7 == 6 || (ea_mode & 7 == 7 && ea_reg & 7 == 3);
-        self.finish_from_bus(bus, master, if indexed { 4 } else { 0 });
+        self.finish_from_bus_address_first(bus, master, if indexed { 4 } else { 0 });
         Ok(())
     }
 
