@@ -669,18 +669,33 @@ fn ea_mode_label(opcode: u16) -> &'static str {
     }
 }
 
-/// The group one case belongs to: its addressing mode and the opcode's bits
-/// 8..6.
+/// The group one case belongs to: the opcode's line, its bits 8..6, and its
+/// addressing mode.
 ///
-/// The second half is there because grouping by addressing mode alone mixes
-/// populations that have nothing to do with each other. Bits 8..6 are the
-/// opmode on the ALU lines, which selects direction and size; the destination
-/// mode on the `MOVE` lines; and part of the sub-op on line 4. On every one of
-/// them it is a structural field, and leaving it out is what put `ADD.l`'s
-/// source form, its destination form and `ADDX.l` into one row labeled `Dn`,
-/// where the row's rate was an average over three different instructions.
+/// All three are needed, and each was added because leaving it out mixed
+/// populations that have nothing to do with each other.
+///
+/// - **Bits 8..6** are the opmode on the ALU lines, which selects direction and
+///   size; the destination mode on the `MOVE` lines; part of the sub-op on line
+///   4. Without them `ADD.l`'s source form and its destination form share a row.
+/// - **The line** is needed because a vector file is named for a *mnemonic
+///   family*, not an encoding: `ADD.l.json.gz` contains line 5 `ADDQ.l` cases
+///   as well as line D `ADD.l` ones, and those agree in bits 8..6 and 5..3 while
+///   being different instructions. That collision is why `An op2` first read as
+///   one group spanning -2 to +2 clocks: it was `ADD.l An,Dn` at -2 and
+///   `ADDQ.l #,An` at +2, averaged into a mean of -0.03 that described neither.
+///
+/// What is deliberately *not* in the key is any register number. A group is a
+/// shape of instruction, and if a residual ever splits by which register an
+/// instruction names, that is worth finding out by other means rather than by
+/// growing this key until every case is its own group.
 fn case_group(opcode: u16) -> String {
-    format!("{} op{}", ea_mode_label(opcode), (opcode >> 6) & 7)
+    format!(
+        "line {:X} op{} {}",
+        opcode >> 12,
+        (opcode >> 6) & 7,
+        ea_mode_label(opcode)
+    )
 }
 
 /// One vector file's rates, whole and split by addressing mode.
@@ -914,7 +929,7 @@ fn by_addressing_mode(label: &str, rates: &FileRates) {
                 None => "no cases".to_string(),
             };
             eprintln!(
-                "      {mode:<18} {:>6} cases  length {:>6.2}%  count {:>6.2}%  \
+                "      {mode:<26} {:>6} cases  length {:>6.2}%  count {:>6.2}%  \
                  mean d {:>+6.2}  {flag}",
                 t.cases,
                 t.length_pct(),
