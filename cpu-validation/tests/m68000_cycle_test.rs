@@ -108,6 +108,16 @@ struct CaseResult {
     /// with the loader placing several things per instruction that is the only
     /// question worth asking of a miss.
     position_fault: Option<(String, String)>,
+    /// The mechanism behind that miss, named from the first clock that
+    /// disagrees rather than from the instruction it happened in.
+    ///
+    /// A shape list says which instructions are wrong and a rate says how much
+    /// is left; neither says how many *different* things are wrong. This does:
+    /// a transfer that landed on the clock of the one before it is a body that
+    /// ran two bus cycles in one tick, and that is a different defect from a
+    /// transfer that is merely shifted, however similar the two shape lists
+    /// look. See [`classify_position_fault`].
+    position_class: Option<&'static str>,
     /// For a case whose sequence matches but whose function codes do not: the
     /// first transfer that differs, with both codes.
     fc_fault: Option<String>,
@@ -213,6 +223,106 @@ fn recorded_transfers(tc: &M68000TestCase) -> Vec<RecordedTxn> {
         clock += t.clocks;
     }
     out
+}
+
+/// Name the mechanism behind one rung-3 miss, from the first transfer whose
+/// clock disagrees.
+///
+/// The distinction that matters is **bunching**: a transfer on the same clock
+/// as the one before it was run by a body that did two bus cycles inside one
+/// tick, and the fix for that is suspending the body. A transfer that is on a
+/// clock of its own but the wrong one is a placement or internal-time question
+/// and has nothing to do with suspension. Reading a shape list cannot tell
+/// those apart, because both print as two lists of numbers that differ.
+///
+/// The kinds of the bunched pair are part of the class, because the three
+/// combinations have different answers: a write behind a write is a bus unit
+/// driving its list too fast, a read behind a read cannot be handed to the bus
+/// unit at all, and a read behind a write is an ordering flush.
+fn classify_position_fault(ours: &[(bool, u32)], recorded: &[(bool, u32)]) -> &'static str {
+    let Some(i) = (0..ours.len()).find(|&i| ours[i].1 != recorded[i].1) else {
+        return "no disagreement";
+    };
+    if i == 0 {
+        return if ours[0].1 < recorded[0].1 {
+            "first transfer early"
+        } else {
+            "first transfer late"
+        };
+    }
+    if ours[i].1 == ours[i - 1].1 {
+        return match (ours[i - 1].0, ours[i].0) {
+            (false, false) => "read bunched onto a read",
+            (true, false) => "read bunched onto a write",
+            (false, true) => "write bunched onto a read",
+            (true, true) => "write bunched onto a write",
+        };
+    }
+    if ours[i].1 < recorded[i].1 {
+        "on its own clock, early"
+    } else {
+        "on its own clock, late"
+    }
+}
+
+#[cfg(test)]
+mod classifier_tests {
+    use super::classify_position_fault;
+
+    /// `(kind, clock)` pairs from a printed shape list like `R0 R4 R8`.
+    fn list(s: &str) -> Vec<(bool, u32)> {
+        s.split_whitespace()
+            .map(|t| {
+                let (k, c) = t.split_at(1);
+                (k == "W", c.parse().expect("a clock"))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_second_read_on_the_first_read_s_clock_is_named_as_bunching() {
+        // UNLK: the two halves of a long operand read, run in one tick.
+        assert_eq!(
+            classify_position_fault(&list("R0 R0 R8"), &list("R0 R4 R8")),
+            "read bunched onto a read"
+        );
+        // SBCD: the source and destination byte reads, run in one tick, with
+        // the write after them already on its recorded clock.
+        assert_eq!(
+            classify_position_fault(&list("R2 R2 R10 W14"), &list("R2 R6 R10 W14")),
+            "read bunched onto a read"
+        );
+    }
+
+    #[test]
+    fn a_transfer_on_a_clock_of_its_own_is_not_named_as_bunching() {
+        // PEA: both reads are on clocks of their own and the second is two
+        // clocks early, which is internal time missing between them rather
+        // than a body running two cycles at once. Calling this bunching would
+        // have put a placement question in with the suspension ones.
+        assert_eq!(
+            classify_position_fault(&list("R2 R6 W12 W16"), &list("R2 R8 W12 W16")),
+            "on its own clock, early"
+        );
+        assert_eq!(
+            classify_position_fault(&list("R0 R4 R8"), &list("R0 R4 R8")),
+            "no disagreement"
+        );
+    }
+
+    #[test]
+    fn the_first_transfer_is_classified_apart_from_the_ones_behind_it() {
+        // Nothing precedes transfer 0, so it cannot be bunched onto anything
+        // and the class has to say which direction it moved instead.
+        assert_eq!(
+            classify_position_fault(&list("R0 R4"), &list("R2 R6")),
+            "first transfer early"
+        );
+        assert_eq!(
+            classify_position_fault(&list("W4 W8"), &list("W2 W6")),
+            "first transfer late"
+        );
+    }
 }
 
 /// A transfer sequence as a printable string: `R` read, `W` write.
@@ -354,6 +464,11 @@ fn run_case(
                 a.fc
             )
         });
+        let position_class = (kinds_exact && !positions_exact).then(|| {
+            let ours: Vec<(bool, u32)> = bus.log.iter().map(|a| (a.write, a.clock)).collect();
+            let theirs: Vec<(bool, u32)> = recorded.iter().map(|t| (t.write, t.start)).collect();
+            classify_position_fault(&ours, &theirs)
+        });
         let position_fault = (kinds_exact && !positions_exact).then(|| {
             (
                 clock_list(&|| {
@@ -436,6 +551,7 @@ fn run_case(
             ran: true,
             mismatch: (!kinds_exact).then(|| (shape_of(&recorded_shape), shape_of(&our_shape))),
             position_fault,
+            position_class,
             fc_fault,
             operand_fault,
             words_consumed: cpu.words_consumed(),
@@ -971,6 +1087,37 @@ fn note_position_fault(into: &mut PositionFaults, instr: &str, r: &CaseResult) {
     }
 }
 
+/// Rung 3's residual counted by mechanism, split by whether the case ends in an
+/// address error.
+///
+/// The split is not decoration. Half of this rung's residual on the
+/// documentation-derived corpus is cases that fault, and those spend their
+/// clocks inside exception entry, where a position is a statement about the
+/// frame rather than about the instruction. Counting the two together lets a
+/// change to one look like a change to the other.
+type PositionClasses = std::collections::BTreeMap<(bool, &'static str), usize>;
+
+fn note_position_class(into: &mut PositionClasses, faulted: bool, r: &CaseResult) {
+    if let Some(class) = r.position_class {
+        *into.entry((faulted, class)).or_insert(0) += 1;
+    }
+}
+
+fn report_position_classes(label: &str, classes: &PositionClasses) {
+    let total: usize = classes.values().sum();
+    if total == 0 {
+        eprintln!("\n{label}: no rung-3 miss to classify");
+        return;
+    }
+    eprintln!("\n{label}: {total} rung-3 misses by mechanism");
+    let mut rows: Vec<_> = classes.iter().collect();
+    rows.sort_by_key(|(_, n)| std::cmp::Reverse(**n));
+    for ((faulted, class), n) in rows {
+        let where_ = if *faulted { "faults" } else { "completes" };
+        eprintln!("  {n:>8}  {where_:<10} {class}");
+    }
+}
+
 fn report_position_faults(label: &str, faults: &PositionFaults) {
     if faults.is_empty() {
         eprintln!("\n{label}: every matching transfer sequence is on the recorded clocks");
@@ -1213,6 +1360,7 @@ struct Reports {
     queue: QueueFailures,
     faults: OperandFaults,
     positions: PositionFaults,
+    position_classes: PositionClasses,
     fcs: FcFaults,
     words: WordCountFaults,
 }
@@ -1248,6 +1396,7 @@ fn run_680x0(cpu: &mut M68000, bus: &mut RecordingBus68k, out: &mut Reports) -> 
             note_queue_failure(&mut out.queue, &instr, &tc.name, &r);
             note_operand_fault(&mut out.faults, &instr, &tc.name, &r);
             note_position_fault(&mut out.positions, &instr, &r);
+            note_position_class(&mut out.position_classes, is_address_error(tc), &r);
             note_fc_fault(&mut out.fcs, &instr, &tc.name, &r);
             note_word_count(&mut out.words, &instr, &tc.name, tc, &r);
         }
@@ -1289,6 +1438,7 @@ fn run_m68000(cpu: &mut M68000, bus: &mut RecordingBus68k, out: &mut Reports) ->
             note_queue_failure(&mut out.queue, &instr, &t.case.name, &r);
             note_operand_fault(&mut out.faults, &instr, &t.case.name, &r);
             note_position_fault(&mut out.positions, &instr, &r);
+            note_position_class(&mut out.position_classes, is_address_error(&t.case), &r);
             note_fc_fault(&mut out.fcs, &instr, &t.case.name, &r);
             note_word_count(&mut out.words, &instr, &t.case.name, &t.case, &r);
         }
@@ -1335,6 +1485,7 @@ fn test_m68000_cycle_gate() {
         per_file_rows(label, &out.rates);
         by_addressing_mode(label, &out.rates);
         residual_shapes(label, &out.shapes);
+        report_position_classes(label, &out.position_classes);
         report_position_faults(label, &out.positions);
         report_fc_faults(label, &out.fcs);
         report_operand_faults(label, &out.faults);
