@@ -62,6 +62,9 @@ pub(crate) enum ExecState {
     /// already been decoded and its effect applied on the first cycle;
     /// remaining cycles are bus-idle wait states.
     Execute(u32),
+    /// Burning an addressing mode's arithmetic before the instruction's first
+    /// bus cycle. See [`format::leading_internal`].
+    Lead(u32),
     /// Waiting to issue the instruction's trailing prefetch.
     ///
     /// The refill behind the last word an instruction consumed is not part of
@@ -174,6 +177,14 @@ pub struct M68000 {
     /// the bodies have to agree about which instructions make them.
     #[save_skip(default)]
     pub(crate) words_without_refill: u32,
+    /// Clocks of address arithmetic burned before this instruction's first bus
+    /// cycle, from [`format::leading_internal`].
+    ///
+    /// Remembered so the finish can subtract what has already been spent: the
+    /// internal time an instruction declares is its whole internal time, and
+    /// the part of it burned up front must not be charged twice.
+    #[save_skip(default)]
+    pub(crate) lead_burned: u32,
 }
 
 impl Default for M68000 {
@@ -204,6 +215,7 @@ impl M68000 {
             transfers: 0,
             words_consumed: 0,
             words_without_refill: 0,
+            lead_burned: 0,
         }
     }
 
@@ -335,6 +347,7 @@ impl M68000 {
                 self.transfers = 0;
                 self.words_consumed = 0;
                 self.words_without_refill = 0;
+                self.lead_burned = 0;
 
                 // Sample interrupts at the instruction boundary.
                 let ints = bus.check_interrupts(master);
@@ -364,10 +377,24 @@ impl M68000 {
                 // In steady state the queue is already full here and this
                 // costs no bus cycle at all, which is why the recorded traces
                 // contain no fetch of the instruction's own opcode.
-                let opcode = self.read_imm_word(bus, master);
-                self.opcode = opcode;
-                if let Err(fault) = self.execute_instruction(opcode, bus, master) {
-                    self.enter_address_error(bus, master, fault);
+                // The part spends an addressing mode's arithmetic before the
+                // bus cycle that mode causes, so where that is the first cycle
+                // of the instruction it is burned here, ahead of everything.
+                // The queue already holds the opcode, so peeking costs nothing.
+                self.fill_prefetch(bus, master);
+                let lead = u32::from(format::leading_internal(self.prefetch[0]));
+                if lead > 0 {
+                    self.lead_burned = lead;
+                    self.state = ExecState::Lead(lead - 1);
+                    return;
+                }
+                self.run_instruction(bus, master);
+            }
+            ExecState::Lead(remaining) => {
+                if remaining > 0 {
+                    self.state = ExecState::Lead(remaining - 1);
+                } else {
+                    self.run_instruction(bus, master);
                 }
             }
             ExecState::Execute(remaining) => {
@@ -400,6 +427,17 @@ impl M68000 {
             ExecState::Halted => {
                 // Only an external reset recovers from a halt.
             }
+        }
+    }
+
+    /// Decode and run the instruction whose opcode is at the head of the queue.
+    ///
+    /// Called once the leading address arithmetic, if any, has been burned.
+    fn run_instruction<B: Bus16 + ?Sized>(&mut self, bus: &mut B, master: BusMaster) {
+        let opcode = self.read_imm_word(bus, master);
+        self.opcode = opcode;
+        if let Err(fault) = self.execute_instruction(opcode, bus, master) {
+            self.enter_address_error(bus, master, fault);
         }
     }
 
@@ -448,6 +486,13 @@ impl M68000 {
     ) {
         // Nothing owed: a read-modify-write family has already refilled at its
         // own declared point, so there is no trailing fetch to place.
+        // `internal` is the instruction's whole time away from the bus, and the
+        // leading arithmetic has already been spent out of it, so what is left
+        // to charge is the remainder. Saturating rather than asserting: a row
+        // of `leading_internal` that claims more than an instruction declares
+        // would otherwise underflow, and the symptom should be a rung-3 miss on
+        // that row, not a panic on a board.
+        let internal = internal.saturating_sub(self.lead_burned);
         let owed = u32::from(2 - self.prefetch_len);
         if owed == 0 {
             self.finish(4 * self.transfers + internal);

@@ -318,3 +318,128 @@ pub fn suppresses_refill(opcode: u16) -> bool {
         _ => false,
     }
 }
+
+/// The extended-arithmetic encodings, whose low six bits name registers rather
+/// than an addressing mode: `ADDX`, `SUBX`, `ABCD`, `SBCD`, `CMPM` and `EXG`.
+fn extended_arithmetic(opcode: u16) -> bool {
+    let opmode = (opcode >> 6) & 7;
+    let ea_mode = ((opcode >> 3) & 7) as u8;
+    if !(4..=6).contains(&opmode) {
+        return false;
+    }
+    match (opcode >> 12) & 0xF {
+        0x8 | 0x9 | 0xC | 0xD => ea_mode < 2,
+        0xB => ea_mode == 1, // CMPM
+        _ => false,
+    }
+}
+
+/// Whether `opcode` resolves an address *before* it fetches anything.
+///
+/// Most encodings do. Three groups do not, and they are the whole difficulty:
+///
+/// - The line 0 immediate forms fetch their literal first, so the destination's
+///   address arithmetic lands between two fetches instead of in front of them.
+/// - The static bit operations fetch their bit number the same way.
+/// - `MOVEM` fetches its register mask the same way.
+///
+/// Everything else with an effective address resolves it first, `MOVE`'s source
+/// included, and the instructions whose low six bits are a displacement, a
+/// literal, a register pair or a vector number resolve nothing at all.
+fn resolves_address_before_first_fetch(opcode: u16) -> bool {
+    let opmode = (opcode >> 6) & 7;
+    let ea_mode = ((opcode >> 3) & 7) as u8;
+    match (opcode >> 12) & 0xF {
+        0x0 => {
+            // The CCR and SR immediates name no address, and the ALU
+            // immediates and static bit ops fetch a word before resolving one.
+            if opcode & 0x0100 == 0 {
+                return false;
+            }
+            ea_mode != 1 // mode 1 here is MOVEP, whose An is not an EA
+        }
+        // MOVE and MOVEA resolve their source before fetching.
+        0x1..=0x3 => true,
+        0x4 => {
+            // MOVEM fetches its mask first; the one-word specials, ILLEGAL,
+            // SWAP and EXT name no address at all.
+            !(opcode & 0xFB80 == 0x4880
+                || (0x4E40..=0x4E7F).contains(&opcode)
+                || opcode == 0x4AFC
+                || opcode & 0x0FF8 == 0x0840
+                || opcode & 0x0FB8 == 0x0880)
+        }
+        // DBcc's low bits are its counter register.
+        0x5 => !(opmode & 3 == 3 && ea_mode == 1),
+        // Branch displacements and MOVEQ literals.
+        0x6 | 0x7 => false,
+        0x8 | 0x9 | 0xB | 0xC | 0xD => !extended_arithmetic(opcode),
+        // Only the memory shift form resolves an address.
+        0xE => opmode & 3 == 3 && opcode & 0x0800 == 0,
+        // Lines A and F carry a vector.
+        _ => false,
+    }
+}
+
+/// Clocks the part spends on address arithmetic before its first bus cycle.
+///
+/// Two addressing modes cost time no transfer hides: the predecrement, and the
+/// index add that `d8(An,Xn)` and `d8(PC,Xn)` perform. The part spends them
+/// immediately before the bus cycle the mode itself causes, which for an
+/// instruction that resolves its address first is the front of the
+/// instruction, and for one that fetches a literal first is *not*. A loader
+/// burning this up front has to ask which, and that is the whole of
+/// [`resolves_address_before_first_fetch`].
+///
+/// The extended-arithmetic memory forms are the other trap and go the other
+/// way: `ADDX -(Ay),-(Ax)` encodes its operands with an EA field of 001, which
+/// reads as a plain address register and resolves nothing, while the
+/// instruction really does perform two predecrements and really does spend the
+/// clocks. The encoding does not say what the instruction does.
+///
+/// # Why this one is not cross-checked the way its neighbors are
+///
+/// [`extension_words`] and [`suppresses_refill`] are asserted against what the
+/// executor did, on every case of both corpora, before anything uses them.
+/// This cannot be: it says *where* internal time sits, and the executor does
+/// not place internal time anywhere. It charges the whole of it at the end, so
+/// there is nothing to compare against and any check would be measuring the
+/// shape of this core's code rather than the part's sequence.
+///
+/// An attempt at one was written and thrown away for exactly that reason. It
+/// recorded the first effective address each instruction resolved, which agrees
+/// with this table only where the implementation happens to resolve addresses
+/// in the order the part does: it read 2 for a static bit operation and for
+/// `MOVEM`, both of which fetch a word before resolving anything, and 0 for
+/// the long `ADDX` memory form, which resolves its operands without going
+/// through the shared decode at all.
+///
+/// It did earn its keep before being deleted. It found two real errors here
+/// that survived a reading of the opcode map: `EXG`, whose `An` field is a
+/// plain register, and `CMPM`, whose `An` field is a *post*increment.
+///
+/// **Rung 3 of the per-cycle gate is the check.** Internal time in the wrong
+/// place moves transfers off the clocks the recording puts them on, so a wrong
+/// row here makes that rung worse rather than better, on the cases it touches
+/// and nowhere else.
+pub fn leading_internal(opcode: u16) -> u8 {
+    if extended_arithmetic(opcode) {
+        // Only some of these predecrement, and the EA field cannot tell them
+        // apart: an `An` field means `-(Ay)` for ADDX, SUBX, ABCD and SBCD,
+        // `(Ay)+` for CMPM, and a plain register for EXG.
+        let predecrements = match (opcode >> 12) & 0xF {
+            0x9 | 0xD => (opcode >> 3) & 7 == 1, // SUBX, ADDX
+            0x8 | 0xC => (opcode >> 6) & 7 == 4 && (opcode >> 3) & 7 == 1, // SBCD, ABCD
+            _ => false,                          // CMPM postincrements; EXG does neither
+        };
+        return if predecrements { 2 } else { 0 };
+    }
+    if !resolves_address_before_first_fetch(opcode) {
+        return 0;
+    }
+    match ((opcode >> 3) & 7, opcode & 7) {
+        (4, _) | (6, _) => 2, // -(An) and d8(An,Xn)
+        (7, 3) => 2,          // d8(PC,Xn)
+        _ => 0,
+    }
+}
