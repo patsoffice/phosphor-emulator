@@ -1801,7 +1801,20 @@ fn test_m68000_cycle_gate() {
             pops_680x0.several_data_txns.positions_pct(),
             57.86,
         ),
-        ("680x0 operands", pops_680x0.all.operands_pct(), 79.54),
+        // **Rung 4 read 0.00% on every case that faults, on both corpora, from
+        // the day M4 first reported it until the group-0 frame was written in
+        // the part's order.** 178,089 cases and 55,607, every one differing on
+        // the address of a transfer and none on anything else, which is what a
+        // whole frame written downwards looks like from here. What is left
+        // against this corpus is `RTE` and `RTR`, which it records reading the
+        // stack in an order the part does not use: see
+        // `M68000::pop_status_and_pc`.
+        ("680x0 operands", pops_680x0.all.operands_pct(), 96.54),
+        (
+            "680x0 operands, address error",
+            pops_680x0.address_error.operands_pct(),
+            95.45,
+        ),
         ("680x0 function codes", pops_680x0.all.fc_pct(), 97.71),
         // The faulting path's transfer *sequence*, which M4 finished. One case
         // of 178,089 still differs and it is a `MOVEM`, whose trailing read is
@@ -1848,7 +1861,18 @@ fn test_m68000_cycle_gate() {
             pops_m68000.several_data_txns.positions_pct(),
             94.32,
         ),
-        ("m68000 operands", pops_m68000.all.operands_pct(), 81.02),
+        // This corpus's faulting population reaches only 28.07%, and the
+        // difference is `data` rather than `addr`: its `pc` is the generator's
+        // next-prefetch address, which runs ahead of the execution point, and
+        // the gate can reconcile that for the initial and final states but not
+        // for a PC the instruction writes into a frame. Its own README names
+        // the convention. Floored where it stands rather than chased.
+        ("m68000 operands", pops_m68000.all.operands_pct(), 85.93),
+        (
+            "m68000 operands, address error",
+            pops_m68000.address_error.operands_pct(),
+            28.06,
+        ),
         ("m68000 function codes", pops_m68000.all.fc_pct(), 98.44),
     ];
     for (name, actual, floor) in floors {

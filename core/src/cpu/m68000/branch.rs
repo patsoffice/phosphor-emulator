@@ -222,9 +222,8 @@ impl M68000 {
         bus: &mut B,
         master: BusMaster,
     ) -> AccessResult<()> {
-        let ccr = self.pop_word(bus, master)?;
+        let (ccr, target) = self.pop_status_and_pc(bus, master)?;
         self.sr = (self.sr & 0xFF00) | (ccr & 0x001F);
-        let target = self.pop_long(bus, master)?;
         self.set_pc_checked(target)?;
         // As RTS, plus the counted word pop that restored the flags.
         self.finish_from_bus(bus, master, 0);

@@ -155,6 +155,81 @@ impl M68000 {
         self.write_word_at(bus, master, sp.wrapping_sub(4), (pushed_pc >> 16) as u16)
     }
 
+    /// Pop a status word and a return address off the supervisor stack.
+    ///
+    /// **Straight upwards, `sp` then `sp + 2` then `sp + 4`, and the corpora
+    /// disagree about that.** The documentation-derived set records the high
+    /// half of the PC being read first, which would make this the mirror of the
+    /// interleave [`Self::push_group0_frame`] writes downwards in, and it is
+    /// tempting for exactly that reason. The part does not: its three steps
+    /// take their address from `sp` and then from a register incremented by two
+    /// each time, with the word at `sp` becoming the status register. The
+    /// microcode-derived set agrees with the part.
+    ///
+    /// This was written the other way round first, from a dump of the corpus
+    /// rather than from the part, and reverted when the microcode was read. It
+    /// costs 16,130 cases on rung 4 against that corpus, which is the price of
+    /// being right.
+    pub(crate) fn pop_status_and_pc<B: Bus16 + ?Sized>(
+        &mut self,
+        bus: &mut B,
+        master: BusMaster,
+    ) -> AccessResult<(u16, u32)> {
+        let status = self.pop_word(bus, master)?;
+        let pc = self.pop_long(bus, master)?;
+        Ok((status, pc))
+    }
+
+    /// Push the seven-word group-0 frame, in the order the part drives the
+    /// writes rather than the order the words sit in.
+    ///
+    /// **It is [`Self::push_short_frame`]'s interleave, twice.** A long goes
+    /// down low half first at the higher address, then the part writes the word
+    /// two below where the long's high half belongs, and only then fills the
+    /// high half in. Applied to the PC and the status register, then to the
+    /// access address and the status word, with the instruction register on its
+    /// own between them:
+    ///
+    /// ```text
+    ///   sp-2   PC low        sp-8   instruction register
+    ///   sp-6   SR            sp-10  access address low
+    ///   sp-4   PC high       sp-14  status word
+    ///                        sp-12  access address high
+    /// ```
+    ///
+    /// Nothing below rung 4 of the per-cycle gate can see this: the addresses,
+    /// the values and the count are identical whichever order they are driven
+    /// in, and so is the memory afterwards. Writing them downwards is what left
+    /// that rung reading **0.00% on every case that faults**, on both corpora,
+    /// from the day it was first reported: 178,089 cases and 55,607, every one
+    /// of them differing on the address of a transfer and none on anything
+    /// else.
+    ///
+    /// A7 reaches its final value before the second write, as it does in the
+    /// short frame. Where exactly is unobservable here: `sp` is even whenever
+    /// the first write lands, so either all seven succeed or the first faults
+    /// and the double bus fault halts the part.
+    fn push_group0_frame<B: Bus16 + ?Sized>(
+        &mut self,
+        bus: &mut B,
+        master: BusMaster,
+        fault: &AddressError,
+        old_sr: u16,
+        ir: u16,
+        status: u16,
+    ) -> AccessResult<()> {
+        let sp = self.a[7];
+        let (pc, addr) = (fault.stacked_pc, fault.addr);
+        self.write_word_at(bus, master, sp.wrapping_sub(2), pc as u16)?;
+        self.a[7] = sp.wrapping_sub(14);
+        self.write_word_at(bus, master, sp.wrapping_sub(6), old_sr)?;
+        self.write_word_at(bus, master, sp.wrapping_sub(4), (pc >> 16) as u16)?;
+        self.write_word_at(bus, master, sp.wrapping_sub(8), ir)?;
+        self.write_word_at(bus, master, sp.wrapping_sub(10), addr as u16)?;
+        self.write_word_at(bus, master, sp.wrapping_sub(14), status)?;
+        self.write_word_at(bus, master, sp.wrapping_sub(12), (addr >> 16) as u16)
+    }
+
     /// TRAP #n (0x4E40-0x4E4F): unconditional trap to vector 32 + n. The
     /// frame PC is the following instruction.
     ///
@@ -317,8 +392,7 @@ impl M68000 {
         if !self.privilege_check(bus, master)? {
             return Ok(());
         }
-        let sr = self.pop_word(bus, master)?;
-        let pc = self.pop_long(bus, master)?;
+        let (sr, pc) = self.pop_status_and_pc(bus, master)?;
         if self.uses_long_exception_frame() {
             let _format = self.pop_word(bus, master)?;
         }
@@ -471,13 +545,7 @@ impl M68000 {
             | if fault.program { 0x08 } else { 0 }
             | fc;
         let opcode = self.opcode;
-        let frame = self
-            .push_long(bus, master, fault.stacked_pc)
-            .and_then(|()| self.push_word(bus, master, old_sr))
-            .and_then(|()| self.push_word(bus, master, opcode))
-            .and_then(|()| self.push_long(bus, master, fault.addr))
-            .and_then(|()| self.push_word(bus, master, status));
-        match frame {
+        match self.push_group0_frame(bus, master, &fault, old_sr, opcode, status) {
             Ok(()) => {}
             // Address error during address-error processing: double bus
             // fault; only an external reset recovers.
