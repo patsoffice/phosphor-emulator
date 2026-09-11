@@ -1614,20 +1614,52 @@ fn test_m68000_cycle_gate() {
     // --- Floors that ratchet -------------------------------------------------
     //
     // Set to what this milestone measured, so any regression fails and any
-    // improvement is a deliberate edit here. They are floors on rungs 1 and 2,
-    // and the residual behind each is named in the milestone's issue comment:
-    // TAS's indivisible cycle, MOVEM's trailing read, the mul/div data-dependent
-    // timing, and exception-entry internal time, all of which are M5.
-    // Each is the measured rate rounded *down* to two places: the reported
-    // figure is rounded to nearest, so a floor set from it fails against the
-    // run it was taken from.
+    // improvement is a deliberate edit here. The residual behind each is named
+    // in the milestone's issue comment: TAS's indivisible cycle, MOVEM's
+    // trailing read, the mul/div data-dependent timing, and exception entry,
+    // all of which are M5. Each is the measured rate rounded *down* to two
+    // places: the reported figure is rounded to nearest, so a floor set from it
+    // fails against the run it was taken from.
+    //
+    // **Rungs 3, 4 and 5 have floors from M4 on.** A rung that is reported but
+    // not floored can slide back to where it started without failing anything,
+    // and rung 3 is the rung this conversion exists to move. Its population
+    // splits are floored too: the aggregate can be held up by the cases that
+    // touch no memory, which were already near-exact before any of this, so a
+    // floor on the aggregate alone would not notice the operand path regressing.
     let floors = [
-        ("680x0 length", pops_680x0.all.length_pct(), 88.33),
+        ("680x0 length", pops_680x0.all.length_pct(), 89.10),
         ("680x0 kinds", pops_680x0.all.kinds_pct(), 98.50),
         ("680x0 count", pops_680x0.all.count_pct(), 98.86),
-        ("m68000 length", pops_m68000.all.length_pct(), 78.65),
+        ("680x0 positions", pops_680x0.all.positions_pct(), 76.85),
+        (
+            "680x0 positions, completed",
+            pops_680x0.completed.positions_pct(),
+            93.50,
+        ),
+        (
+            "680x0 positions, >1 data transaction",
+            pops_680x0.several_data_txns.positions_pct(),
+            54.97,
+        ),
+        ("680x0 operands", pops_680x0.all.operands_pct(), 79.89),
+        ("680x0 function codes", pops_680x0.all.fc_pct(), 98.05),
+        ("m68000 length", pops_m68000.all.length_pct(), 79.39),
         ("m68000 kinds", pops_m68000.all.kinds_pct(), 98.13),
         ("m68000 count", pops_m68000.all.count_pct(), 99.14),
+        ("m68000 positions", pops_m68000.all.positions_pct(), 72.13),
+        (
+            "m68000 positions, completed",
+            pops_m68000.completed.positions_pct(),
+            87.45,
+        ),
+        (
+            "m68000 positions, >1 data transaction",
+            pops_m68000.several_data_txns.positions_pct(),
+            48.03,
+        ),
+        ("m68000 operands", pops_m68000.all.operands_pct(), 80.52),
+        ("m68000 function codes", pops_m68000.all.fc_pct(), 97.94),
     ];
     for (name, actual, floor) in floors {
         assert!(
