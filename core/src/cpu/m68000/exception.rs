@@ -224,8 +224,11 @@ impl M68000 {
         }
         // Three transfers: the refill behind the immediate word, then the two
         // at the refetch the status-register write forces. Eight clocks are
-        // left, spent settling the mode the write may just have changed.
-        self.finish_from_bus(bus, master, 8);
+        // left, spent settling the mode the write may just have changed, and
+        // they run *between* the two: the part's sequence is the immediate's
+        // fetch, four two-clock steps, then the refetch. So the recorded
+        // clocks are 0, 12 and 16, not 0, 4 and 8.
+        self.finish_from_bus_address_first(bus, master, 8);
         Ok(())
     }
 
@@ -298,8 +301,9 @@ impl M68000 {
             return Ok(());
         }
         // RESET asserts its line for 124 clocks and does nothing on the bus
-        // besides its own fetch.
-        self.finish_from_bus(bus, master, 128);
+        // besides its own fetch, which comes *after* the line is released: the
+        // recorded trace puts that single transfer on clock 128.
+        self.finish_from_bus_address_first(bus, master, 128);
         Ok(())
     }
 

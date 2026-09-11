@@ -274,7 +274,9 @@ impl M68000 {
         // rather than one: `MOVE.w D3, CCR` is two program reads for the one
         // word it consumed. Four clocks are left, the part loading the
         // register and settling the mode it may just have changed.
-        self.finish_from_bus(bus, master, 4 + ea_internal(ea_mode, ea_reg));
+        // Those four clocks run before the refetch, not after it: the part's
+        // sequence is two two-clock steps and then its two program reads.
+        self.finish_from_bus_address_first(bus, master, 4 + ea_internal(ea_mode, ea_reg));
         Ok(())
     }
 
@@ -302,7 +304,9 @@ impl M68000 {
         self.write_sr(value);
         // As MOVE to CCR: the status-register write discards the queue and the
         // finish refills both words.
-        self.finish_from_bus(bus, master, 4 + ea_internal(ea_mode, ea_reg));
+        // Those four clocks run before the refetch, not after it: the part's
+        // sequence is two two-clock steps and then its two program reads.
+        self.finish_from_bus_address_first(bus, master, 4 + ea_internal(ea_mode, ea_reg));
         Ok(())
     }
 

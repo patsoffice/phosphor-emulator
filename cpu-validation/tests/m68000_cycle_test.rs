@@ -100,6 +100,14 @@ struct CaseResult {
     /// For a case whose transfer sequence differs: the recorded shape and
     /// ours, so the residual can be counted by shape rather than described.
     mismatch: Option<(String, String)>,
+    /// For a case whose sequence matches but whose transfers land on the wrong
+    /// clocks: the recorded positions against ours.
+    ///
+    /// A rung-3 rate says how much is left and the population split says
+    /// whether it is reachable at all; neither says *which* clock is wrong, and
+    /// with the loader placing several things per instruction that is the only
+    /// question worth asking of a miss.
+    position_fault: Option<(String, String)>,
     /// For a case whose sequence matches but whose transfers do not: the first
     /// transfer that differs and the field it differs in.
     operand_fault: Option<String>,
@@ -318,6 +326,31 @@ fn run_case(
         let operands_exact = kinds_exact
             && paired().all(|(a, b)| a.addr == b.addr && a.byte == b.byte && a.data == b.data);
         let fc_exact = kinds_exact && paired().all(|(a, b)| a.fc == b.fc);
+        // The clocks each side put its transfers on, rendered with the kind so
+        // a misplaced prefetch is distinguishable from a misplaced operand.
+        let clock_list = |render: &dyn Fn() -> Vec<(char, u32)>| {
+            render()
+                .into_iter()
+                .map(|(k, c)| format!("{k}{c}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        let position_fault = (kinds_exact && !positions_exact).then(|| {
+            (
+                clock_list(&|| {
+                    recorded
+                        .iter()
+                        .map(|t| (if t.write { 'W' } else { 'R' }, t.start))
+                        .collect()
+                }),
+                clock_list(&|| {
+                    bus.log
+                        .iter()
+                        .map(|a| (if a.write { 'W' } else { 'R' }, a.clock))
+                        .collect()
+                }),
+            )
+        });
         // The first transfer that disagrees, named by the field that disagrees.
         // A rate says how much of rung 4 is left; this says what to look at, and
         // the distinction between a wrong address, a wrong width and a wrong
@@ -383,6 +416,7 @@ fn run_case(
             recorded_internal,
             ran: true,
             mismatch: (!kinds_exact).then(|| (shape_of(&recorded_shape), shape_of(&our_shape))),
+            position_fault,
             operand_fault,
             words_consumed: cpu.words_consumed(),
             words_predicted: predicted_words(tc),
@@ -905,6 +939,36 @@ fn report_word_counts(label: &str, faults: &WordCountFaults) {
     }
 }
 
+/// Rung 3's residual, counted by which clocks disagree, keyed by instruction
+/// and by the pair of position lists.
+type PositionFaults = std::collections::BTreeMap<(String, String, String), usize>;
+
+fn note_position_fault(into: &mut PositionFaults, instr: &str, r: &CaseResult) {
+    if let Some((recorded, ours)) = &r.position_fault {
+        *into
+            .entry((instr.to_string(), recorded.clone(), ours.clone()))
+            .or_insert(0) += 1;
+    }
+}
+
+fn report_position_faults(label: &str, faults: &PositionFaults) {
+    if faults.is_empty() {
+        eprintln!("\n{label}: every matching transfer sequence is on the recorded clocks");
+        return;
+    }
+    let total: usize = faults.values().sum();
+    let mut rows: Vec<_> = faults.iter().collect();
+    rows.sort_by_key(|(_, n)| std::cmp::Reverse(**n));
+    eprintln!(
+        "\n{label}: {total} cases whose transfers are in the right order on the wrong clocks, \
+         in {} shapes",
+        faults.len()
+    );
+    for ((instr, recorded, ours), n) in rows.iter().take(16) {
+        eprintln!("  {n:>8}  {instr:<12} recorded [{recorded}]  ours [{ours}]");
+    }
+}
+
 /// Rung 4's residual, counted by which field disagrees and on which
 /// instruction, with an example transfer for each.
 type OperandFaults = std::collections::BTreeMap<(String, String), (usize, String)>;
@@ -1093,6 +1157,7 @@ struct Reports {
     shapes: ShapeMismatches,
     queue: QueueFailures,
     faults: OperandFaults,
+    positions: PositionFaults,
     words: WordCountFaults,
 }
 
@@ -1126,6 +1191,7 @@ fn run_680x0(cpu: &mut M68000, bus: &mut RecordingBus68k, out: &mut Reports) -> 
             note_mismatch(&mut out.shapes, &instr, &r);
             note_queue_failure(&mut out.queue, &instr, &tc.name, &r);
             note_operand_fault(&mut out.faults, &instr, &tc.name, &r);
+            note_position_fault(&mut out.positions, &instr, &r);
             note_word_count(&mut out.words, &instr, &tc.name, tc, &r);
         }
         out.rates.insert(instr, file_tally);
@@ -1165,6 +1231,7 @@ fn run_m68000(cpu: &mut M68000, bus: &mut RecordingBus68k, out: &mut Reports) ->
             note_mismatch(&mut out.shapes, &instr, &r);
             note_queue_failure(&mut out.queue, &instr, &t.case.name, &r);
             note_operand_fault(&mut out.faults, &instr, &t.case.name, &r);
+            note_position_fault(&mut out.positions, &instr, &r);
             note_word_count(&mut out.words, &instr, &t.case.name, &t.case, &r);
         }
         out.rates.insert(instr, file_tally);
@@ -1210,6 +1277,7 @@ fn test_m68000_cycle_gate() {
         per_file_rows(label, &out.rates);
         by_addressing_mode(label, &out.rates);
         residual_shapes(label, &out.shapes);
+        report_position_faults(label, &out.positions);
         report_operand_faults(label, &out.faults);
         report_word_counts(label, &out.words);
         report_queue_failures(label, &out.queue);
