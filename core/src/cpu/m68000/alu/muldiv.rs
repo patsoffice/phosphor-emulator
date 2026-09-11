@@ -165,13 +165,16 @@ impl M68000 {
             self.finish_from_bus(bus, master, 0);
             return Ok(());
         };
-        // The refill behind the opcode is issued before the bounds test, so it
-        // precedes the exception frame when the test fails: the trace records
-        // `CHK D0, D4` trapping as a program read, three frame writes, the
-        // vector, and the two refills at the handler. An instruction that runs
-        // to a trap still prefetches; one that never runs, like a privilege
-        // violation, does not.
-        self.refill_prefetch(bus, master);
+        // **CHK does not refill behind its opcode before it traps**, and the
+        // two corpora disagree about that. The documentation-derived one
+        // records `CHK D0, D4` trapping as a program read, three frame writes,
+        // the vector and two refills at the handler, eight transfers; the
+        // microcode-derived one records seven, with no read in front. The part
+        // settles it: the compare runs, and if it traps the sequence goes
+        // straight from the test to the frame with no fetch between. Refilling
+        // there would fetch a word the trap is about to discard, which is the
+        // same reason a taken branch does not.
+        //
         let dn = ((opcode >> 9) & 7) as usize;
         let src = sext16(self.d[dn] as u16) as i32;
         let bound = sext16(bound) as i32;
@@ -179,23 +182,42 @@ impl M68000 {
         self.set_flag(SrFlag::Z, src as u16 == 0);
         self.set_flag(SrFlag::V, false);
         self.set_flag(SrFlag::C, false);
+        // **The part decides this in two steps and the second costs two
+        // clocks**, so what a `CHK` costs depends on which step caught it.
+        //
+        // The first step subtracts the value from the bound and traps on the
+        // result's sign *or its overflow*. That is not the same as "the value
+        // is above the bound": the two part company on exactly the operand
+        // pairs whose 16-bit subtract overflows, and those cases are what was
+        // left over when this was first written as a comparison. Only if that
+        // step does not trap does a second one, two clocks later, look at the
+        // value's own sign. In bounds reaches the second step too, which is why
+        // it is six either way.
+        //
+        // Invisible to every rung but the first, because all three paths run
+        // the same bus cycles; worth four clocks on a third of `CHK`'s cases
+        // and two more on a twelfth of them.
+        let (value, limit) = (src as u16, bound as u16);
+        let diff = limit.wrapping_sub(value);
+        let negative = diff & 0x8000 != 0;
+        let overflowed = ((limit & !value & !diff) | (!limit & value & diff)) & 0x8000 != 0;
+        let compare = if negative || overflowed { 4 } else { 6 };
+        self.spend_idle(bus, master, compare);
+
         if src < 0 || src > bound {
             self.set_flag(SrFlag::N, src < 0);
-            // Eight transfers for a register source, and eight clocks left over.
-            //
-            // The memory source forms that consume no extension word land two
-            // clocks long: `CHK (A0)+, D2` is recorded at 42 and comes out at
-            // 44. The recorded internal is 8 for a register or extension-word
-            // source and 6 for `(An)`, `(An)+` and `-(An)`, and nothing in the
-            // bus activity distinguishes those two groups, so the difference is
-            // inside the entry sequence rather than in this instruction. It
-            // belongs to M5 with the rest of exception entry, and a constant
-            // fitted here would only hide it.
+            // Seven transfers for a register source: three frame words, the
+            // two-word vector and the two refills at the handler, with no fetch
+            // in front. What is left is the comparison above, four of the
+            // entry's own before the frame, and two between the handler's two
+            // fetches.
             self.exception(bus, master, 6, self.pc, 4)?;
-            self.finish_from_bus(bus, master, 8 + ea_time);
+            self.finish_from_bus(bus, master, compare + 6 + ea_time);
         } else {
-            // In bounds: the comparison itself, and nothing more.
-            self.finish_from_bus(bus, master, 6 + ea_time);
+            // In bounds: both steps, then the fetch behind the opcode. They run
+            // first, which is why this finishes ahead of its refill rather than
+            // behind it.
+            self.finish_from_bus_address_first(bus, master, compare + ea_time);
         }
         Ok(())
     }

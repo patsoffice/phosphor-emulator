@@ -1778,22 +1778,31 @@ fn test_m68000_cycle_gate() {
         // disagreement is a constant eight clocks and the microcode settles it.
         // Lowered deliberately and labeled, rather than the change being
         // declined to keep a number up. See `ABORTED_ACCESS_CLOCKS`.
-        ("680x0 length", pops_680x0.all.length_pct(), 78.99),
-        ("680x0 kinds", pops_680x0.all.kinds_pct(), 98.58),
-        ("680x0 count", pops_680x0.all.count_pct(), 98.86),
-        ("680x0 positions", pops_680x0.all.positions_pct(), 78.28),
+        // **Two of this corpus's rungs are now held down by one instruction,
+        // and it is `CHK`.** It records a refill in front of a trapping `CHK`
+        // that the part does not make, and it compensates with four clocks less
+        // internal time, so its *total* is right and its bus activity is not.
+        // That is the two-errors-cancelling shape this ladder exists to catch,
+        // and following the microcode costs 0.43 points of transfer kinds, the
+        // same of operands, and 0.42 of transfer count and function codes here,
+        // while taking `CHK` to exact on every rung against the other corpus.
+        // See `M68000::op_chk`.
+        ("680x0 length", pops_680x0.all.length_pct(), 79.17),
+        ("680x0 kinds", pops_680x0.all.kinds_pct(), 98.15),
+        ("680x0 count", pops_680x0.all.count_pct(), 98.44),
+        ("680x0 positions", pops_680x0.all.positions_pct(), 78.19),
         (
             "680x0 positions, completed",
             pops_680x0.completed.positions_pct(),
-            95.24,
+            95.13,
         ),
         (
             "680x0 positions, >1 data transaction",
             pops_680x0.several_data_txns.positions_pct(),
-            57.99,
+            57.86,
         ),
-        ("680x0 operands", pops_680x0.all.operands_pct(), 79.97),
-        ("680x0 function codes", pops_680x0.all.fc_pct(), 98.13),
+        ("680x0 operands", pops_680x0.all.operands_pct(), 79.54),
+        ("680x0 function codes", pops_680x0.all.fc_pct(), 97.71),
         // The faulting path's transfer *sequence*, which M4 finished. One case
         // of 178,089 still differs and it is a `MOVEM`, whose trailing read is
         // the residual M3 named and M5 owns. Floored rather than asserted
@@ -1812,10 +1821,10 @@ fn test_m68000_cycle_gate() {
             pops_m68000.address_error.kinds_pct(),
             99.99,
         ),
-        ("m68000 length", pops_m68000.all.length_pct(), 96.90),
-        ("m68000 kinds", pops_m68000.all.kinds_pct(), 98.22),
-        ("m68000 count", pops_m68000.all.count_pct(), 99.14),
-        ("m68000 positions", pops_m68000.all.positions_pct(), 95.48),
+        ("m68000 length", pops_m68000.all.length_pct(), 97.19),
+        ("m68000 kinds", pops_m68000.all.kinds_pct(), 98.63),
+        ("m68000 count", pops_m68000.all.count_pct(), 99.56),
+        ("m68000 positions", pops_m68000.all.positions_pct(), 95.96),
         // **The number M5's exception-entry work exists to move**, and it had
         // no floor because it had no value: a structural 0.00% while entry
         // drove all eleven of its cycles on one clock. It is floored against
@@ -1832,15 +1841,15 @@ fn test_m68000_cycle_gate() {
         (
             "m68000 positions, completed",
             pops_m68000.completed.positions_pct(),
-            95.13,
+            95.71,
         ),
         (
             "m68000 positions, >1 data transaction",
             pops_m68000.several_data_txns.positions_pct(),
-            93.51,
+            94.32,
         ),
-        ("m68000 operands", pops_m68000.all.operands_pct(), 80.60),
-        ("m68000 function codes", pops_m68000.all.fc_pct(), 98.02),
+        ("m68000 operands", pops_m68000.all.operands_pct(), 81.02),
+        ("m68000 function codes", pops_m68000.all.fc_pct(), 98.44),
     ];
     for (name, actual, floor) in floors {
         assert!(
