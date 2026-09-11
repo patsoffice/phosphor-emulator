@@ -53,6 +53,38 @@ pub enum M68kVariant {
     M68030 = 3,
 }
 
+/// A bus cycle the execution unit has handed over to be run on a later clock.
+///
+/// Only cycles nothing in the instruction is waiting on can be handed over: a
+/// write, whose value the part has already decided, and a queue refill, which
+/// no instruction reads back within itself. An operand *read* cannot, because
+/// the body is about to use what it returns, which is the whole reason the
+/// remaining rung-3 residual is shaped the way it is.
+/// The function code travels with the cycle, latched when it was handed over
+/// rather than read when it runs. The part drives FC2..FC0 with the address, so
+/// it is decided by whatever issued the cycle; asking the status register later
+/// asks a question whose answer may have moved, and it does: a `BSR` that
+/// pushes in user mode and then faults would otherwise report its push at
+/// supervisor privilege, because the exception got there first.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum PendingCycle {
+    /// Fill the next hole in the prefetch queue. The address is deliberately
+    /// *not* latched: it is wherever the queue's hole is when the cycle runs.
+    Refill { signals: BusSignals },
+    /// Drive `data` at `addr`, as a byte behind one strobe or a full word.
+    Write {
+        addr: u32,
+        data: u16,
+        byte: bool,
+        signals: BusSignals,
+    },
+}
+
+/// Cycles one instruction can have outstanding at once.
+///
+/// The longest is `MOVEP.l`, which writes four bytes and then refills.
+const MAX_PENDING: usize = 8;
+
 /// Execution state machine for multi-cycle instructions.
 #[derive(Clone, Debug)]
 pub(crate) enum ExecState {
@@ -81,7 +113,11 @@ pub(crate) enum ExecState {
     /// branch fetches both words at its target, and driving them on the same
     /// clock is the difference between the whole branch family reading 0% on
     /// positions and reading correctly.
-    TrailingRefill { delay: u32, owed: u32, tail: u32 },
+    ///
+    /// The queue also holds whatever the body handed over rather than ran
+    /// itself, so this is the bus unit working through a list, not a refill
+    /// with a delay in front of it.
+    TrailingRefill { delay: u32, tail: u32 },
     /// STOP instruction executed, waiting for an interrupt.
     Stopped,
     /// Halted by a double bus fault or external HALT; only reset recovers.
@@ -203,6 +239,22 @@ pub struct M68000 {
     /// formed from PC. Set by `decode_ea` and taken by `ea_read`.
     #[save_skip(default)]
     pub(crate) ea_program_space: bool,
+    /// Cycles the body handed to the bus unit, in the order it handed them
+    /// over, waiting for their clocks.
+    #[save_skip(default = [PendingCycle::Refill {
+        signals: BusSignals {
+            is_write: false,
+            program: true,
+            supervisor: true,
+            byte: false,
+        },
+    }; MAX_PENDING])]
+    pub(crate) pending: [PendingCycle; MAX_PENDING],
+    /// How many of `pending` are live, and how many have been driven.
+    #[save_skip(default)]
+    pub(crate) pending_len: u8,
+    #[save_skip(default)]
+    pub(crate) pending_pos: u8,
 }
 
 impl Default for M68000 {
@@ -237,6 +289,88 @@ impl M68000 {
             exec_clock: 0,
             pre_exec_transfers: 0,
             ea_program_space: false,
+            pending: [PendingCycle::Refill {
+                signals: BusSignals {
+                    is_write: false,
+                    program: true,
+                    supervisor: true,
+                    byte: false,
+                },
+            }; MAX_PENDING],
+            pending_len: 0,
+            pending_pos: 0,
+        }
+    }
+
+    /// Hand a bus cycle to the bus unit, to run on its own clock later.
+    ///
+    /// A full list is drained first rather than refused. Refusing would have
+    /// the caller drive the new cycle at once while older ones were still
+    /// waiting, which puts them on the bus in the wrong order, and a wrong
+    /// order is a wrong program where a wrong clock is only a wrong clock.
+    /// `MOVEM` is what reaches the limit, moving up to sixteen registers.
+    pub(crate) fn hand_over<B: Bus16 + ?Sized>(
+        &mut self,
+        bus: &mut B,
+        master: BusMaster,
+        cycle: PendingCycle,
+    ) {
+        if usize::from(self.pending_len) >= MAX_PENDING {
+            self.flush_pending(bus, master);
+        }
+        self.pending[usize::from(self.pending_len)] = cycle;
+        self.pending_len += 1;
+        self.transfers += 1;
+    }
+
+    /// Drive every cycle still outstanding, immediately and in order.
+    ///
+    /// The escape hatch for a body that needs the bus back before the bus unit
+    /// would have got to them: an operand read cannot overtake a write the
+    /// instruction has already decided on, so the writes go first, on this
+    /// clock, and their positions are lost rather than their order.
+    pub(crate) fn flush_pending<B: Bus16 + ?Sized>(&mut self, bus: &mut B, master: BusMaster) {
+        while self.pending_pos < self.pending_len {
+            let cycle = self.pending[usize::from(self.pending_pos)];
+            self.pending_pos += 1;
+            self.drive_pending_cycle(bus, master, cycle);
+        }
+        self.pending_len = 0;
+        self.pending_pos = 0;
+    }
+
+    /// Run one handed-over cycle. The transfer was counted when it was handed
+    /// over, so this does not count it again.
+    fn drive_pending_cycle<B: Bus16 + ?Sized>(
+        &mut self,
+        bus: &mut B,
+        master: BusMaster,
+        cycle: PendingCycle,
+    ) {
+        match cycle {
+            PendingCycle::Refill { signals } => {
+                if self.prefetch_len < 2 {
+                    let addr =
+                        self.mask_addr(self.pc.wrapping_add(2 * u32::from(self.prefetch_len)));
+                    bus.observe_bus_cycle(master, addr, signals);
+                    self.prefetch[usize::from(self.prefetch_len)] = bus.read(master, addr);
+                    self.prefetch_len += 1;
+                }
+            }
+            PendingCycle::Write {
+                addr,
+                data,
+                byte,
+                signals,
+            } => {
+                let a = self.mask_addr(addr);
+                bus.observe_bus_cycle(master, a, signals);
+                if byte {
+                    bus.write_byte(master, a, data as u8);
+                } else {
+                    bus.write(master, a, data);
+                }
+            }
         }
     }
 
@@ -432,15 +566,14 @@ impl M68000 {
                     self.state = ExecState::Execute(remaining - 1);
                 }
             }
-            ExecState::TrailingRefill { delay, owed, tail } => {
+            ExecState::TrailingRefill { delay, tail } => {
                 let remaining = delay - 1;
                 if remaining == 0 {
-                    // This clock is the one the part drives a refill on.
-                    self.drive_refill(bus, master, owed, tail);
+                    // This clock is one the part drives a bus cycle on.
+                    self.drive_next_pending(bus, master, tail);
                 } else {
                     self.state = ExecState::TrailingRefill {
                         delay: remaining,
-                        owed,
                         tail,
                     };
                 }
@@ -587,8 +720,16 @@ impl M68000 {
         internal: u32,
         internal_first: bool,
     ) {
-        let owed = u32::from(2 - self.prefetch_len);
-        let full = 4 * (self.transfers + owed) + internal;
+        // Whatever the body handed over is still to run, and so is the refill
+        // it leaves owed. They go on one list in that order, because that is
+        // the order the part drives them: an instruction's write precedes the
+        // fetch behind the word it consumed.
+        let owed = u32::from(2 - self.prefetch_len) - u32::from(self.refills_pending());
+        for _ in 0..owed {
+            let signals = self.program_cycle(false);
+            self.hand_over(bus, master, PendingCycle::Refill { signals });
+        }
+        let full = 4 * self.transfers + internal;
 
         // Everything is measured from the clock the body ran on, because the
         // loader has already spent clocks in front of it. Saturating rather
@@ -597,57 +738,59 @@ impl M68000 {
         // rather than a panic on a board.
         let from_body = full.saturating_sub(self.exec_clock);
 
-        // Nothing owed: a read-modify-write family has already refilled at its
-        // own declared point, so there is no trailing fetch to place.
-        if owed == 0 {
+        // Nothing outstanding: the body ran every cycle itself.
+        if self.pending_len == 0 {
             self.finish(from_body);
             return;
         }
 
-        // The transfers the *body* made occupy the clocks after it started,
-        // four each, so the refill belongs on the clock after the last of them.
-        // They all still happen on one clock, which is what makes them wrong
-        // and this right: their count is correct even where their positions are
-        // not, so the refill lands correctly now and stays correct when they
-        // are spread out later.
-        let mut delay = 4 * (self.transfers - self.pre_exec_transfers);
+        // The cycles the body ran *itself* occupy the clocks after it started,
+        // four each, so the first handed-over cycle belongs on the clock after
+        // the last of them. Those are still bunched onto one clock, which is
+        // what makes them wrong and this right: their count is correct even
+        // where their positions are not.
+        let ran_in_body = (self.transfers - self.pre_exec_transfers) - u32::from(self.pending_len);
+        let mut delay = 4 * ran_in_body;
         if internal_first {
             // Whatever of the internal time was not already burned up front as
             // address arithmetic runs here, ahead of the fetches it computes.
             delay += internal.saturating_sub(self.lead_burned);
         }
-        // Each owed refill is its own bus cycle four clocks after the last, so
-        // `tail` is measured from the clock the *final* one runs on.
+        // Each outstanding cycle is its own bus cycle four clocks after the
+        // last, so `tail` is measured from the clock the *final* one runs on.
+        let outstanding = u32::from(self.pending_len - self.pending_pos);
         let tail = from_body
             .saturating_sub(delay)
-            .saturating_sub(4 * (owed - 1));
+            .saturating_sub(4 * (outstanding - 1));
         if delay == 0 {
-            self.drive_refill(bus, master, owed, tail);
+            self.drive_next_pending(bus, master, tail);
             return;
         }
-        self.state = ExecState::TrailingRefill { delay, owed, tail };
+        self.state = ExecState::TrailingRefill { delay, tail };
     }
 
-    /// Drive one owed refill on this clock, and either queue the next or end
-    /// the instruction.
-    fn drive_refill<B: Bus16 + ?Sized>(
-        &mut self,
-        bus: &mut B,
-        master: BusMaster,
-        owed: u32,
-        tail: u32,
-    ) {
-        self.refill_prefetch(bus, master);
-        match owed - 1 {
-            0 => self.finish(tail),
-            left => {
-                self.state = ExecState::TrailingRefill {
-                    delay: 4,
-                    owed: left,
-                    tail,
-                }
-            }
+    /// Drive the next outstanding cycle on this clock, and either queue the one
+    /// after it or end the instruction.
+    fn drive_next_pending<B: Bus16 + ?Sized>(&mut self, bus: &mut B, master: BusMaster, tail: u32) {
+        let cycle = self.pending[usize::from(self.pending_pos)];
+        self.pending_pos += 1;
+        self.drive_pending_cycle(bus, master, cycle);
+        if self.pending_pos < self.pending_len {
+            self.state = ExecState::TrailingRefill { delay: 4, tail };
+        } else {
+            self.pending_len = 0;
+            self.pending_pos = 0;
+            self.finish(tail);
         }
+    }
+
+    /// How many refills the body has already handed over, so the finish does
+    /// not ask for them twice.
+    fn refills_pending(&self) -> u8 {
+        self.pending[usize::from(self.pending_pos)..usize::from(self.pending_len)]
+            .iter()
+            .filter(|c| matches!(c, PendingCycle::Refill { .. }))
+            .count() as u8
     }
 
     /// Complete an instruction that leaves the prefetch queue as it found it.

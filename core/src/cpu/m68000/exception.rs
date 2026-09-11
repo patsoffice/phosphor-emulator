@@ -32,6 +32,11 @@ impl M68000 {
         vector: u8,
         pushed_pc: u32,
     ) -> AccessResult<()> {
+        // Anything the aborted instruction handed over runs before the frame
+        // does. The part committed those cycles; what it does not do is
+        // interleave them with the entry sequence, and the entry is about to
+        // change the privilege they would be driven at.
+        self.flush_pending(bus, master);
         let old_sr = self.sr;
         self.set_supervisor(true);
         self.set_flag(SrFlag::T, false);
@@ -366,6 +371,11 @@ impl M68000 {
         master: BusMaster,
         fault: AddressError,
     ) {
+        // Anything the aborted instruction handed over runs before the frame
+        // does. The part committed those cycles; what it does not do is
+        // interleave them with the entry sequence, and the entry is about to
+        // change the privilege they would be driven at.
+        self.flush_pending(bus, master);
         let old_sr = self.sr;
         self.set_supervisor(true);
         self.set_flag(SrFlag::T, false);

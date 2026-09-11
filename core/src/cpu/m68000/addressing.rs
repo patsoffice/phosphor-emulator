@@ -213,6 +213,11 @@ impl M68000 {
         if addr & 1 != 0 {
             return Err(self.operand_fault(addr, false));
         }
+        // A read cannot overtake a cycle the instruction has already decided
+        // on, so anything outstanding is driven first. It loses its clock and
+        // keeps its order, which is the right way round: a wrong position is a
+        // rung-3 miss, a wrong order is a wrong program.
+        self.flush_pending(bus, master);
         let a = self.mask_addr(addr);
         let cycle = if program {
             self.program_cycle(false)
@@ -235,10 +240,23 @@ impl M68000 {
         if addr & 1 != 0 {
             return Err(self.operand_fault(addr, true));
         }
+        // Handed to the bus unit where there is room: nothing in the
+        // instruction is waiting on a write, so the body carries on and the
+        // cycle runs on the clock the part would drive it on. The fault check
+        // above stays here, because the address is known now and an abort has
+        // to happen where the instruction can still see it.
         let a = self.mask_addr(addr);
-        bus.observe_bus_cycle(master, a, self.data_cycle(true, false));
-        self.transfers += 1;
-        bus.write(master, a, data);
+        let signals = self.data_cycle(true, false);
+        self.hand_over(
+            bus,
+            master,
+            super::PendingCycle::Write {
+                addr: a,
+                data,
+                byte: false,
+                signals,
+            },
+        );
         Ok(())
     }
 
@@ -325,6 +343,7 @@ impl M68000 {
         addr: u32,
         program: bool,
     ) -> u8 {
+        self.flush_pending(bus, master);
         let a = self.mask_addr(addr);
         let cycle = if program {
             let mut c = self.program_cycle(false);
@@ -352,9 +371,17 @@ impl M68000 {
         data: u8,
     ) {
         let a = self.mask_addr(addr);
-        bus.observe_bus_cycle(master, a, self.data_cycle(true, true));
-        self.transfers += 1;
-        bus.write_byte(master, a, data);
+        let signals = self.data_cycle(true, true);
+        self.hand_over(
+            bus,
+            master,
+            super::PendingCycle::Write {
+                addr: a,
+                data: u16::from(data),
+                byte: true,
+                signals,
+            },
+        );
     }
 
     /// Push a word onto the active stack (A7 predecrements by 2).
@@ -652,7 +679,11 @@ impl M68000 {
         size: Size,
         value: u32,
     ) -> AccessResult<()> {
-        self.refill_prefetch(bus, master);
+        // Handed over rather than driven, so it lands on its own clock between
+        // the operand read and the write: `CLR.w (A4)` is recorded as a read,
+        // a program read and a write, on clocks 0, 4 and 8.
+        let signals = self.program_cycle(false);
+        self.hand_over(bus, master, super::PendingCycle::Refill { signals });
         // A long result goes back low half first: see
         // [`Self::write_long_low_half_first`] for why, and why only a
         // per-transfer comparison can see it. `MOVE` does not come through
@@ -753,7 +784,16 @@ mod tests {
         bus.load(0x1000, &[0x12, 0x34]);
         assert_eq!(cpu.read_word_at(&mut bus, M, 0x1000).unwrap(), 0x1234);
 
+        // A write is handed to the bus unit rather than driven, so memory does
+        // not change until that unit runs the cycle. Inside an instruction the
+        // finish drives it; here the test has to say so.
         cpu.write_word_at(&mut bus, M, 0x2000, 0xBEEF).unwrap();
+        assert_eq!(
+            &bus.memory[0x2000..0x2002],
+            &[0, 0],
+            "the cycle has not run yet"
+        );
+        cpu.flush_pending(&mut bus, M);
         assert_eq!(&bus.memory[0x2000..0x2002], &[0xBE, 0xEF]);
     }
 
@@ -764,6 +804,7 @@ mod tests {
         assert_eq!(cpu.read_long_at(&mut bus, M, 0x1000).unwrap(), 0x1234_5678);
 
         cpu.write_long_at(&mut bus, M, 0x2000, 0xDEAD_BEEF).unwrap();
+        cpu.flush_pending(&mut bus, M);
         assert_eq!(&bus.memory[0x2000..0x2004], &[0xDE, 0xAD, 0xBE, 0xEF]);
     }
 
@@ -784,8 +825,10 @@ mod tests {
         let (mut cpu, mut bus) = setup();
         bus.load(0x1000, &[0xAB, 0xCD]);
         cpu.write_byte_at(&mut bus, M, 0x1000, 0x11);
+        cpu.flush_pending(&mut bus, M);
         assert_eq!(&bus.memory[0x1000..0x1002], &[0x11, 0xCD]);
         cpu.write_byte_at(&mut bus, M, 0x1001, 0x22);
+        cpu.flush_pending(&mut bus, M);
         assert_eq!(&bus.memory[0x1000..0x1002], &[0x11, 0x22]);
     }
 

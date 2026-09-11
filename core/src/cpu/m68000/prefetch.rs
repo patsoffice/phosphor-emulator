@@ -64,6 +64,10 @@ impl M68000 {
         if self.prefetch_len >= 2 {
             return;
         }
+        // A fetch the body wants *now* cannot overtake cycles it handed over
+        // earlier, and it needs the word before it can go on, so anything
+        // outstanding runs first. See `M68000::flush_pending`.
+        self.flush_pending(bus, master);
         let addr = self.mask_addr(self.pc.wrapping_add(2 * u32::from(self.prefetch_len)));
         bus.observe_bus_cycle(master, addr, self.program_cycle(false));
         self.transfers += 1;
