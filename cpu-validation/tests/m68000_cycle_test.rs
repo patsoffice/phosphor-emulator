@@ -526,6 +526,23 @@ struct Populations {
     /// single length rate.
     address_error: Tally,
     completed: Tally,
+    /// Cases whose recorded trace makes at most one *data* transfer.
+    ///
+    /// This is the ceiling on rung 3 for any core whose executor is still
+    /// atomic, and it is reported so the ceiling is on the record before the
+    /// work rather than discovered after it. An atomic executor applies its
+    /// whole effect on one clock, so it cannot put two data transfers on two
+    /// different clocks without ceasing to be atomic. Where a case makes one or
+    /// none, every other clock in it belongs to the prefetch queue, and a
+    /// per-clock prefetch unit can place those with the executor untouched.
+    ///
+    /// So a per-clock queue in front of an atomic executor should drive this
+    /// row towards 100% on rung 3 and leave the row below it near zero, and
+    /// the aggregate should land near this row's share of the corpus. Coming
+    /// out much above that would mean something is being credited that has not
+    /// been built.
+    at_most_one_data_txn: Tally,
+    several_data_txns: Tally,
 }
 
 /// Whether a recorded case ends in an address error.
@@ -577,6 +594,11 @@ impl Populations {
         } else {
             self.completed.add(r);
         }
+        if data_transfers <= 1 {
+            self.at_most_one_data_txn.add(r);
+        } else {
+            self.several_data_txns.add(r);
+        }
     }
 }
 
@@ -605,6 +627,8 @@ fn report(label: &str, p: &Populations) {
         ("registers only", &p.registers_only),
         ("address error", &p.address_error),
         ("completed", &p.completed),
+        ("<=1 data txn", &p.at_most_one_data_txn),
+        (">1 data txn", &p.several_data_txns),
     ] {
         eprintln!(
             "  {:<16} {:>9} {:>7.2}% {:>7.2}% {:>7.2}% {:>7.2}% {:>7.2}% {:>7.2}% \
