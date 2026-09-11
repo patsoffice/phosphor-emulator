@@ -984,13 +984,21 @@ impl FileTally {
 /// named rather than described.
 type FileRates = std::collections::BTreeMap<String, FileTally>;
 
-/// Transfer-sequence mismatches counted by (recorded shape, our shape).
+/// Transfer-sequence mismatches counted by (instruction, recorded shape, our
+/// shape).
 ///
 /// The residual this milestone leaves is a placement residual, and this is what
 /// measures it: which sequences we still get in the wrong order, and how many
 /// cases each accounts for. Reporting "some orders are wrong" instead would be
 /// the mistake the ladder exists to prevent.
-type ShapeMismatches = std::collections::BTreeMap<(String, String), (usize, String)>;
+///
+/// **The instruction is part of the key, and keying without it hid a residual
+/// this milestone had been asked to fix.** A shape like eleven reads against
+/// ten is one row of this map however many instructions reach it, and the row
+/// was labelled with whichever vector file happened to be read first. `MOVEM.l`
+/// sorts before `MOVE.w`, so every `MOVE` case sharing a shape with it was
+/// counted under its name and the `MOVE` rows never appeared at all.
+type ShapeMismatches = std::collections::BTreeMap<(String, String, String), (usize, String)>;
 
 /// The first few cases per instruction whose final queue or PC disagrees.
 ///
@@ -1213,11 +1221,11 @@ fn report_operand_faults(label: &str, faults: &OperandFaults) {
     }
 }
 
-fn note_mismatch(into: &mut ShapeMismatches, instr: &str, r: &CaseResult) {
+fn note_mismatch(into: &mut ShapeMismatches, instr: &str, name: &str, r: &CaseResult) {
     if let Some((recorded, ours)) = &r.mismatch {
         let e = into
-            .entry((recorded.clone(), ours.clone()))
-            .or_insert_with(|| (0, instr.to_string()));
+            .entry((instr.to_string(), recorded.clone(), ours.clone()))
+            .or_insert_with(|| (0, name.to_string()));
         e.0 += 1;
     }
 }
@@ -1339,8 +1347,12 @@ fn residual_shapes(label: &str, shapes: &ShapeMismatches) {
         "\n{label}: transfer sequences that differ, {total} cases in {} shapes",
         shapes.len()
     );
-    for ((recorded, ours), (n, example)) in rows.iter().take(15) {
-        eprintln!("  {n:>8}  recorded {recorded:<22} ours {ours:<22} e.g. {example}");
+    // With an example case, because a shape pair does not say which encoding
+    // reached it and the answer is usually a fact about the addressing mode:
+    // the same mnemonic runs different sequences for different source modes,
+    // and reading a row without one invites fixing the wrong half.
+    for ((instr, recorded, ours), (n, example)) in rows.iter().take(20) {
+        eprintln!("  {n:>8}  {instr:<12} recorded {recorded:<22} ours {ours:<22} e.g. {example}");
     }
 }
 
@@ -1392,7 +1404,7 @@ fn run_680x0(cpu: &mut M68000, bus: &mut RecordingBus68k, out: &mut Reports) -> 
             let r = run_case(tc, tc.initial.pc, tc.final_state.pc, cpu, bus);
             pops.add(tc, &r);
             file_tally.add(tc, &r);
-            note_mismatch(&mut out.shapes, &instr, &r);
+            note_mismatch(&mut out.shapes, &instr, &tc.name, &r);
             note_queue_failure(&mut out.queue, &instr, &tc.name, &r);
             note_operand_fault(&mut out.faults, &instr, &tc.name, &r);
             note_position_fault(&mut out.positions, &instr, &r);
@@ -1434,7 +1446,7 @@ fn run_m68000(cpu: &mut M68000, bus: &mut RecordingBus68k, out: &mut Reports) ->
             let r = run_case(&t.case, t.execution_pc(), final_pc, cpu, bus);
             pops.add(&t.case, &r);
             file_tally.add(&t.case, &r);
-            note_mismatch(&mut out.shapes, &instr, &r);
+            note_mismatch(&mut out.shapes, &instr, &t.case.name, &r);
             note_queue_failure(&mut out.queue, &instr, &t.case.name, &r);
             note_operand_fault(&mut out.faults, &instr, &t.case.name, &r);
             note_position_fault(&mut out.positions, &instr, &r);
@@ -1629,37 +1641,55 @@ fn test_m68000_cycle_gate() {
     // floor on the aggregate alone would not notice the operand path regressing.
     let floors = [
         ("680x0 length", pops_680x0.all.length_pct(), 89.10),
-        ("680x0 kinds", pops_680x0.all.kinds_pct(), 98.50),
+        ("680x0 kinds", pops_680x0.all.kinds_pct(), 98.58),
         ("680x0 count", pops_680x0.all.count_pct(), 98.86),
-        ("680x0 positions", pops_680x0.all.positions_pct(), 76.85),
+        ("680x0 positions", pops_680x0.all.positions_pct(), 76.90),
         (
             "680x0 positions, completed",
             pops_680x0.completed.positions_pct(),
-            93.50,
+            93.57,
         ),
         (
             "680x0 positions, >1 data transaction",
             pops_680x0.several_data_txns.positions_pct(),
-            54.97,
+            55.09,
         ),
-        ("680x0 operands", pops_680x0.all.operands_pct(), 79.89),
-        ("680x0 function codes", pops_680x0.all.fc_pct(), 98.05),
+        ("680x0 operands", pops_680x0.all.operands_pct(), 79.97),
+        ("680x0 function codes", pops_680x0.all.fc_pct(), 98.13),
+        // The faulting path's transfer *sequence*, which M4 finished. One case
+        // of 178,089 still differs and it is a `MOVEM`, whose trailing read is
+        // the residual M3 named and M5 owns. Floored rather than asserted
+        // equal, because the report prints this as 100.00% and it is 99.9994%:
+        // a rate reaches its printed ceiling before it reaches its real one,
+        // and an assertion of 100.0 fails against the run it was taken from.
+        // What is left on this path is entirely *when* the transfers happen,
+        // which is exception entry.
+        (
+            "680x0 kinds, address error",
+            pops_680x0.address_error.kinds_pct(),
+            99.99,
+        ),
+        (
+            "m68000 kinds, address error",
+            pops_m68000.address_error.kinds_pct(),
+            99.99,
+        ),
         ("m68000 length", pops_m68000.all.length_pct(), 79.39),
-        ("m68000 kinds", pops_m68000.all.kinds_pct(), 98.13),
+        ("m68000 kinds", pops_m68000.all.kinds_pct(), 98.22),
         ("m68000 count", pops_m68000.all.count_pct(), 99.14),
-        ("m68000 positions", pops_m68000.all.positions_pct(), 72.13),
+        ("m68000 positions", pops_m68000.all.positions_pct(), 72.19),
         (
             "m68000 positions, completed",
             pops_m68000.completed.positions_pct(),
-            87.45,
+            87.52,
         ),
         (
             "m68000 positions, >1 data transaction",
             pops_m68000.several_data_txns.positions_pct(),
-            48.03,
+            48.14,
         ),
-        ("m68000 operands", pops_m68000.all.operands_pct(), 80.52),
-        ("m68000 function codes", pops_m68000.all.fc_pct(), 97.94),
+        ("m68000 operands", pops_m68000.all.operands_pct(), 80.60),
+        ("m68000 function codes", pops_m68000.all.fc_pct(), 98.02),
     ];
     for (name, actual, floor) in floors {
         assert!(

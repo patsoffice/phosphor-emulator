@@ -862,7 +862,7 @@ impl M68000 {
     ///
     /// `base` is the clock the loader starts on, after any leading arithmetic.
     fn begin_instruction<B: Bus16 + ?Sized>(&mut self, bus: &mut B, master: BusMaster, base: u32) {
-        let opcode = self.take_opcode();
+        let opcode = self.take_word_deferred_refill();
         self.opcode = opcode;
 
         // An instruction about to discard the queue does not refill behind the

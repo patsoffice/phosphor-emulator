@@ -117,13 +117,22 @@ impl M68000 {
         self.pop_prefetch()
     }
 
-    /// Take the opcode out of the queue, leaving the hole for the loader to
+    /// Take a word out of the queue, leaving the hole for whoever called to
     /// fill on a clock of its own.
     ///
     /// Not [`Self::take_word_no_refill`], which counts the word as one the
     /// instruction deliberately consumed without a refill. This hole *is*
-    /// refilled; the loader is only choosing when.
-    pub(crate) fn take_opcode(&mut self) -> u16 {
+    /// refilled; the caller is only choosing when, and
+    /// [`format::suppresses_refill`](super::format::suppresses_refill) must go
+    /// on saying so.
+    ///
+    /// Two callers. The loader takes the opcode this way and issues the refill
+    /// behind it on the next clock. And `MOVE` to an absolute long destination
+    /// takes the second of its two address words this way, because the part
+    /// writes with the address that word completes *before* prefetching again:
+    /// the refill behind it is handed over after the write rather than driven
+    /// in front of it.
+    pub(crate) fn take_word_deferred_refill(&mut self) -> u16 {
         self.pop_prefetch()
     }
 

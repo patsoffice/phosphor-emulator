@@ -97,9 +97,35 @@ impl M68000 {
             // with the second address-word fetch, so a faulting write
             // stacks a PC one word earlier; register and immediate sources
             // fetch both address words up front (hardware-verified).
+            //
+            // **The interleave is in the transfers too, and it is the same
+            // memory-source condition rather than a second rule.** With a
+            // memory source the part reads the second address word, forms the
+            // address from it and the first, writes, and only then prefetches
+            // again: `MOVE.w (A0),(xxx).l` is its operand read, one program
+            // read, the write, and two more program reads. With a register or
+            // immediate source both address words are read before the write:
+            // `MOVE.w D2,(xxx).l` is two program reads, the write, and one
+            // more.
+            //
+            // So a memory source takes the second word with its refill
+            // deferred and hands that refill over *after* the write, and
+            // anything else goes through the shared decode unchanged. Applying
+            // the deferral to both was tried and is why the condition is
+            // spelled out: it put the write one slot early on every register
+            // and immediate source, which rung 2 reported at once.
+            //
+            // PC advances by the same two words either way, which is what
+            // leaves the stacked-PC rule below alone.
             (7, _) if dst_reg == 1 => {
                 let src_is_mem = src_mode >= 2 && !(src_mode == 7 && src_reg == 4);
-                let dst = self.decode_ea(bus, master, dst_mode, dst_reg, size);
+                let dst = if src_is_mem {
+                    let high = u32::from(self.read_imm_word(bus, master));
+                    let low = u32::from(self.take_word_deferred_refill());
+                    Ea::Mem((high << 16) | low)
+                } else {
+                    self.decode_ea(bus, master, dst_mode, dst_reg, size)
+                };
                 self.ea_write(bus, master, dst, size, value).map_err(|e| {
                     e.map_fault(|f| {
                         if src_is_mem {
@@ -112,6 +138,12 @@ impl M68000 {
                         }
                     })
                 })?;
+                if src_is_mem {
+                    // The hole behind the second address word, filled after the
+                    // write rather than in front of it.
+                    let signals = self.program_cycle(false);
+                    self.hand_over(bus, master, super::PendingCycle::Refill { signals });
+                }
             }
             _ => {
                 let dst = self.decode_ea(bus, master, dst_mode, dst_reg, size);

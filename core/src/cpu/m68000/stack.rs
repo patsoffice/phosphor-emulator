@@ -35,18 +35,34 @@ impl M68000 {
             unreachable!("control addressing modes always resolve to memory");
         };
         if push {
-            // PEA refills before it pushes: the trace records `PEA (A0)` as a
-            // program read and then two writes, and `PEA (xxx).w` as a program
-            // read, two writes, and a program read. LEA has nothing after its
-            // decode, so its refill lands at the finish either way.
+            // **PEA refills before it pushes, except from an absolute address.**
+            // Read off all seven of the part's control-mode sequences rather
+            // than from one of them: `(An)` is a program read and two writes;
+            // the displacement and indexed modes, and both PC-relative ones,
+            // are two program reads and two writes; and the two absolute modes
+            // alone put their last program read *after* the writes, at
+            // `(xxx).w` a read, two writes and a read, and at `(xxx).l` two
+            // reads, two writes and a read.
             //
-            // Handed to the bus unit rather than driven, so the address
-            // arithmetic that precedes it can be placed in front of it. An
-            // indexed `PEA` spends two clocks putting the address together
-            // *between* its two fetches, exactly as `LEA` does, and a refill
-            // the body drives itself leaves the finish nowhere to put them.
-            let signals = self.program_cycle(false);
-            self.hand_over(bus, master, super::PendingCycle::Refill { signals });
+            // The other modes have address arithmetic to do and the part slots
+            // the prefetch into a step it is already spending on that. An
+            // absolute address arrives ready to use in its extension words, so
+            // there is no such step before the push and the fetch falls through
+            // to the one at the end of the instruction. That is the same
+            // mechanism as the jump's leading time, seen from the other side.
+            //
+            // Where it goes first it is handed to the bus unit rather than
+            // driven, so the address arithmetic that precedes it can be placed
+            // in front of it: an indexed `PEA` spends two clocks putting the
+            // address together *between* its two fetches, exactly as `LEA`
+            // does, and a refill the body drives itself leaves the finish
+            // nowhere to put them. Where it goes last, the finish owes it
+            // anyway and issues it behind the writes with no help from here.
+            let absolute = ea_mode == 7 && (ea_reg == 0 || ea_reg == 1);
+            if !absolute {
+                let signals = self.program_cycle(false);
+                self.hand_over(bus, master, super::PendingCycle::Refill { signals });
+            }
             self.push_long(bus, master, addr)?;
         } else {
             self.a[((opcode >> 9) & 7) as usize] = addr;
