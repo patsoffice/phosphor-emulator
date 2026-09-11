@@ -44,6 +44,7 @@
 //! rate against the other for the same instruction, the two oracles disagree
 //! about that instruction, and that is the divergence worth chasing.
 
+use std::collections::BTreeMap;
 use std::io::Read;
 
 use phosphor_core::core::{BusMaster, BusMasterComponent};
@@ -606,6 +607,15 @@ struct Tally {
     /// `None` until a case has been counted, so an all-negative group is not
     /// reported as reaching zero because zero is what the field started at.
     length_delta_range: Option<(i64, i64)>,
+    /// How many cases missed by each amount.
+    ///
+    /// A range says a group is one population or two; it does not say how the
+    /// cases are distributed between the ends, and for a residual that is
+    /// supposed to be one constant that is the whole question. The address-error
+    /// population is what this was built for: a corpus disagreement worth
+    /// resolving is one where every case misses by the same amount, and one
+    /// where the amounts are spread is a mechanism hiding behind an average.
+    length_deltas: BTreeMap<i64, usize>,
     /// Cases whose recorded internal time is negative, which would mean the
     /// four-clock transfer model does not hold for them.
     impossible_internal: usize,
@@ -662,6 +672,7 @@ impl Tally {
             self.impossible_internal += 1;
         }
         self.length_delta_sum += r.length_delta;
+        *self.length_deltas.entry(r.length_delta).or_default() += 1;
         self.length_delta_range = Some(match self.length_delta_range {
             Some((lo, hi)) => (lo.min(r.length_delta), hi.max(r.length_delta)),
             None => (r.length_delta, r.length_delta),
@@ -873,6 +884,36 @@ fn report(label: &str, p: &Populations) {
          does not apply: {}",
         p.all.invariant_untestable
     );
+    report_length_deltas("address error", &p.address_error);
+}
+
+/// How one population's clock misses are distributed, rather than averaged.
+///
+/// A mean over a population that is 57% exact says nothing about the 43%, and a
+/// range says only where the ends are. This says how many cases sit at each
+/// amount, which is the difference between "one constant, so a corpus
+/// disagreement to resolve" and "a spread, so a mechanism to find".
+fn report_length_deltas(name: &str, t: &Tally) {
+    if t.ran == 0 {
+        return;
+    }
+    let mut rows: Vec<_> = t.length_deltas.iter().map(|(d, n)| (*n, *d)).collect();
+    rows.sort_by_key(|&(n, d)| (std::cmp::Reverse(n), d));
+    let shown = rows.len().min(8);
+    let listed: usize = rows[..shown].iter().map(|(n, _)| n).sum();
+    let body = rows[..shown]
+        .iter()
+        .map(|(n, d)| format!("{d:+} x {n}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    eprintln!(
+        "  {name} clock deltas, commonest first: {body}{}",
+        if shown < rows.len() {
+            format!(" (+{} more values, {} cases)", rows.len() - shown, t.ran - listed)
+        } else {
+            String::new()
+        }
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -983,6 +1024,62 @@ impl FileTally {
 /// Per-file tallies, so the two suites can be set side by side and every row
 /// named rather than described.
 type FileRates = std::collections::BTreeMap<String, FileTally>;
+
+/// Address-error cases grouped by the shape of the instruction that faulted.
+///
+/// The by-addressing-mode report deliberately excludes these, because an
+/// aborted instruction spends most of its length inside exception entry and
+/// counting that under a mode reports the entry sequence as if it were the
+/// mode's. That exclusion left the faulting side with no breakdown at all: a
+/// single rate and a single mean over 178,089 cases, which is how a residual
+/// that is really two separate things reads as one blurred one. This is the
+/// same key the completed side uses, applied to the population the completed
+/// side throws away.
+/// Each group keeps a few named cases per delta it missed by, because a group
+/// that splits two ways cannot be read from its counts: the question is what
+/// separates the halves, and only a case says.
+type FaultGroups = std::collections::BTreeMap<String, (Tally, BTreeMap<i64, Vec<String>>)>;
+
+fn note_fault_group(into: &mut FaultGroups, tc: &M68000TestCase, r: &CaseResult) {
+    if !is_address_error(tc) {
+        return;
+    }
+    let e = into
+        .entry(case_group(tc.initial.prefetch[0]))
+        .or_default();
+    e.0.add(r);
+    if r.ran {
+        let names = e.1.entry(r.length_delta).or_default();
+        if names.len() < 2 {
+            names.push(tc.name.clone());
+        }
+    }
+}
+
+fn report_fault_groups(label: &str, groups: &FaultGroups) {
+    let inexact: Vec<_> = groups
+        .iter()
+        .filter(|(_, (t, _))| t.length_exact < t.ran)
+        .collect();
+    if inexact.is_empty() {
+        eprintln!("\n{label}: every address-error case is exact on clock count");
+        return;
+    }
+    let missed: usize = inexact.iter().map(|(_, (t, _))| t.ran - t.length_exact).sum();
+    eprintln!(
+        "\n{label}: address-error clock residual by instruction shape, \
+         {missed} cases in {} groups",
+        inexact.len()
+    );
+    let mut rows: Vec<_> = inexact.into_iter().collect();
+    rows.sort_by_key(|(_, (t, _))| std::cmp::Reverse(t.ran - t.length_exact));
+    for (group, (t, names)) in rows.iter().take(20) {
+        report_length_deltas(&format!("{group:<24} {:>6}", t.ran), t);
+        for (delta, cases) in names.iter() {
+            eprintln!("      {delta:+3}  e.g. {}", cases.join(" | "));
+        }
+    }
+}
 
 /// Transfer-sequence mismatches counted by (instruction, recorded shape, our
 /// shape).
@@ -1375,6 +1472,7 @@ struct Reports {
     position_classes: PositionClasses,
     fcs: FcFaults,
     words: WordCountFaults,
+    fault_groups: FaultGroups,
 }
 
 fn run_680x0(cpu: &mut M68000, bus: &mut RecordingBus68k, out: &mut Reports) -> Populations {
@@ -1411,6 +1509,7 @@ fn run_680x0(cpu: &mut M68000, bus: &mut RecordingBus68k, out: &mut Reports) -> 
             note_position_class(&mut out.position_classes, is_address_error(tc), &r);
             note_fc_fault(&mut out.fcs, &instr, &tc.name, &r);
             note_word_count(&mut out.words, &instr, &tc.name, tc, &r);
+            note_fault_group(&mut out.fault_groups, tc, &r);
         }
         out.rates.insert(instr, file_tally);
     }
@@ -1453,6 +1552,7 @@ fn run_m68000(cpu: &mut M68000, bus: &mut RecordingBus68k, out: &mut Reports) ->
             note_position_class(&mut out.position_classes, is_address_error(&t.case), &r);
             note_fc_fault(&mut out.fcs, &instr, &t.case.name, &r);
             note_word_count(&mut out.words, &instr, &t.case.name, &t.case, &r);
+            note_fault_group(&mut out.fault_groups, &t.case, &r);
         }
         out.rates.insert(instr, file_tally);
     }
@@ -1496,6 +1596,7 @@ fn test_m68000_cycle_gate() {
     for (label, out) in [("680x0", &out_680x0), ("m68000", &out_m68000)] {
         per_file_rows(label, &out.rates);
         by_addressing_mode(label, &out.rates);
+        report_fault_groups(label, &out.fault_groups);
         residual_shapes(label, &out.shapes);
         report_position_classes(label, &out.position_classes);
         report_position_faults(label, &out.positions);
@@ -1623,6 +1724,24 @@ fn test_m68000_cycle_gate() {
         "m68000: instructions other than STOP end with a different PC or queue: {unexpected:?}"
     );
 
+    // --- Rung 1 on the faulting path, asserted rather than floored -----------
+    //
+    // Every case that ends in an address error is exact on clock count against
+    // the documentation-derived corpus, all 178,089 of them, and the delta
+    // histogram beside the population table is what says so: one bucket at
+    // zero rather than a rate that rounds to 100. An equality assertion is safe
+    // here for that reason and is the stronger check, because this population
+    // is one mechanism and a single case sliding off it is a defect rather than
+    // a residual.
+    //
+    // It was watched failing at 101,070 of 178,089 before an aborted
+    // instruction was charged the internal time it had already spent.
+    assert_eq!(
+        pops_680x0.address_error.length_exact, pops_680x0.address_error.ran,
+        "680x0: {} address-error cases disagree on clock count",
+        pops_680x0.address_error.ran - pops_680x0.address_error.length_exact
+    );
+
     // --- Floors that ratchet -------------------------------------------------
     //
     // Set to what this milestone measured, so any regression fails and any
@@ -1640,7 +1759,7 @@ fn test_m68000_cycle_gate() {
     // touch no memory, which were already near-exact before any of this, so a
     // floor on the aggregate alone would not notice the operand path regressing.
     let floors = [
-        ("680x0 length", pops_680x0.all.length_pct(), 89.10),
+        ("680x0 length", pops_680x0.all.length_pct(), 96.80),
         ("680x0 kinds", pops_680x0.all.kinds_pct(), 98.58),
         ("680x0 count", pops_680x0.all.count_pct(), 98.86),
         ("680x0 positions", pops_680x0.all.positions_pct(), 76.90),

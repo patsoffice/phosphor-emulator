@@ -136,6 +136,7 @@ pub(crate) struct BodyState {
     prefetch_len: u8,
     words_consumed: u32,
     words_without_refill: u32,
+    internal_spent: u32,
     ea_program_space: bool,
     stopped: bool,
     halted: bool,
@@ -281,6 +282,20 @@ pub struct M68000 {
     /// cycle, from [`format::leading_internal`].
     #[save_skip(default)]
     pub(crate) lead_burned: u32,
+    /// Clocks this instruction has spent away from the bus so far.
+    ///
+    /// **Only the abort path reads this, and only the abort path needs it.** An
+    /// instruction that runs to its end declares its whole internal time at the
+    /// finish, which is where the length comes from; one that address-errors
+    /// never reaches its finish, and the clocks it had already spent are still
+    /// spent. The part computes an address, drives the access, and only then
+    /// finds it odd.
+    ///
+    /// It starts at whatever the loader burned in front of the instruction and
+    /// grows as a body declares time it spends before an access that can fault.
+    /// See [`Self::spend_internal`].
+    #[save_skip(default)]
+    pub(crate) internal_spent: u32,
     /// The clock the instruction body ran on, counted from the instruction's
     /// first.
     ///
@@ -367,6 +382,7 @@ impl M68000 {
             words_consumed: 0,
             words_without_refill: 0,
             lead_burned: 0,
+            internal_spent: 0,
             exec_clock: 0,
             pre_exec_transfers: 0,
             ea_program_space: false,
@@ -402,6 +418,7 @@ impl M68000 {
             prefetch_len: self.prefetch_len,
             words_consumed: self.words_consumed,
             words_without_refill: self.words_without_refill,
+            internal_spent: self.internal_spent,
             ea_program_space: self.ea_program_space,
             stopped: self.stopped,
             halted: self.halted,
@@ -422,6 +439,7 @@ impl M68000 {
         self.prefetch_len = b.prefetch_len;
         self.words_consumed = b.words_consumed;
         self.words_without_refill = b.words_without_refill;
+        self.internal_spent = b.internal_spent;
         self.ea_program_space = b.ea_program_space;
         self.stopped = b.stopped;
         self.halted = b.halted;
@@ -522,6 +540,22 @@ impl M68000 {
             }
             None => false,
         }
+    }
+
+    /// Declare `clocks` of internal time the body has spent at this point in
+    /// its sequence, ahead of an access that could fault.
+    ///
+    /// This does not lengthen the instruction: a body still declares its whole
+    /// internal time at its finish, and that is what the length comes from.
+    /// What this changes is the *aborted* case, where there is no finish and
+    /// the clocks already spent would otherwise vanish. Declaring at the point
+    /// of spending rather than tabulating per opcode is deliberate: where the
+    /// arithmetic sits relative to the fetches is a fact about each family's
+    /// sequence, and a table that tried to state it was written, checked,
+    /// rejected on 22,337 cases and thrown away during M4.
+    #[inline]
+    pub(crate) fn spend_internal(&mut self, clocks: u32) {
+        self.internal_spent += clocks;
     }
 
     /// Record a cycle this attempt has just run.
@@ -751,6 +785,7 @@ impl M68000 {
                 self.words_consumed = 0;
                 self.words_without_refill = 0;
                 self.lead_burned = 0;
+                self.internal_spent = 0;
 
                 // Sample interrupts at the instruction boundary.
                 let ints = bus.check_interrupts(master);
@@ -788,6 +823,7 @@ impl M68000 {
                 let lead = u32::from(format::leading_internal(self.prefetch[0]));
                 if lead > 0 {
                     self.lead_burned = lead;
+                    self.internal_spent = lead;
                     self.state = ExecState::Lead(lead - 1);
                     return;
                 }

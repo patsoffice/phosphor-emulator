@@ -77,12 +77,18 @@ impl M68000 {
             // happens before the flush, which is the order the trace records:
             // two writes, then the two refills at the target.
             1 => {
+                // The two clocks come first, before the push: the part works
+                // the return address and the new stack pointer out in a step of
+                // its own and only then drives the first write. A push that
+                // faults has still spent them.
+                self.spend_internal(2);
                 self.push_long(bus, master, self.pc)?;
                 self.set_pc_checked(base.wrapping_add(disp))?;
                 self.finish_from_bus_address_first(bus, master, 2);
             }
             // BRA (condition 0 encodes T) and taken Bcc
             _ if self.cc_true(cond) => {
+                self.spend_internal(2);
                 self.set_pc_checked(base.wrapping_add(disp))?;
                 self.finish_from_bus_address_first(bus, master, 2);
             }
@@ -127,6 +133,9 @@ impl M68000 {
             // recognizing the underflow rather than redirecting.
             self.finish_from_bus_address_first(bus, master, 6);
         } else {
+            // The condition test and the target add are one step, spent before
+            // the fetch at the target, so a fault there has still spent them.
+            self.spend_internal(2);
             self.set_pc_checked(base.wrapping_add(disp))?;
             self.finish_from_bus_address_first(bus, master, 2);
         }

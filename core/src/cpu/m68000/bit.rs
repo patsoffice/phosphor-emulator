@@ -77,6 +77,15 @@ impl M68000 {
         } else {
             // Memory (or immediate, for dynamic BTST): byte operation mod 8
             let mask = 1u32 << (bit_number & 7);
+            // The static form fetches its bit number before it resolves an
+            // address, so the mode's arithmetic runs here rather than in front
+            // of the instruction, and the loader has not burned it. The dynamic
+            // form takes its bit number out of a register and resolves first,
+            // so the loader has. Either way the clocks are spent before the
+            // operand read and an aborted one has still spent them.
+            if !dynamic {
+                self.spend_internal(ea_internal(ea_mode, ea_reg));
+            }
             let ea = self.decode_ea(bus, master, ea_mode, ea_reg, Size::Byte);
             let old = self.ea_read(bus, master, ea, Size::Byte)?;
             self.set_flag(SrFlag::Z, old & mask == 0);

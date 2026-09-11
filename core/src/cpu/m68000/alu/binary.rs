@@ -621,9 +621,13 @@ impl M68000 {
             return Ok(false);
         }
 
-        // Immediate data precedes the destination extension words.
+        // Immediate data precedes the destination extension words, so the
+        // destination's address arithmetic runs *after* that fetch rather than
+        // in front of the instruction: the loader has not burned it, and an
+        // aborted operand access has still spent it.
         let imm = self.decode_ea(bus, master, 7, 4, size);
         let b = self.ea_read(bus, master, imm, size)?;
+        self.spend_internal(ea_internal(ea_mode, ea_reg));
         let dst = self.decode_ea(bus, master, ea_mode, ea_reg, size);
         let a = self.ea_read(bus, master, dst, size)?;
 

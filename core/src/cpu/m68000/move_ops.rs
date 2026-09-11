@@ -36,8 +36,24 @@ impl M68000 {
             return Ok(());
         }
 
+        // MOVE's own internal time is nil: the opcode fetch and every operand
+        // access are bus cycles, and the only clocks it spends off the bus are
+        // the address arithmetic of its two modes. A predecrement *destination*
+        // is the documented exception: the part overlaps the decrement with the
+        // write it is already committed to, so it costs its transfer and no
+        // more, where the same mode as a *source* pays two clocks for it.
+        let dst_internal = if dst_mode & 7 == 4 {
+            0
+        } else {
+            ea_internal(dst_mode, dst_reg)
+        };
+
         let src = self.decode_ea(bus, master, src_mode, src_reg, size);
         let value = self.ea_read(bus, master, src, size)?;
+        // The destination's arithmetic runs between the source read and the
+        // write, so a faulting write has already spent it. The source's ran
+        // before the instruction's first cycle and the loader burned it there.
+        self.spend_internal(dst_internal);
 
         // MOVE sets the flags from the value before the destination write
         // (visible in the SR an aborted destination write stacks). MOVEA
@@ -152,19 +168,7 @@ impl M68000 {
         }
 
         // Charged from the transfers this actually made, not from the table.
-        // MOVE's own internal time is nil: the opcode fetch and every operand
-        // access are bus cycles, and the only clocks it spends off the bus are
-        // the address arithmetic of its two modes. A predecrement *destination*
-        // is the documented exception: the part overlaps the decrement with the
-        // write it is already committed to, so it costs its transfer and no
-        // more, where the same mode as a *source* pays two clocks for it.
-        let internal = ea_internal(src_mode, src_reg)
-            + if dst_mode & 7 == 4 {
-                0
-            } else {
-                ea_internal(dst_mode, dst_reg)
-            };
-        self.finish_from_bus(bus, master, internal);
+        self.finish_from_bus(bus, master, ea_internal(src_mode, src_reg) + dst_internal);
         Ok(())
     }
 

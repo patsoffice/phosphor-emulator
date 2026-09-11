@@ -222,6 +222,17 @@ impl M68000 {
             return Ok(());
         }
         let mask = self.read_imm_word(bus, master);
+        // The register mask precedes the mode's extension words, so an indexed
+        // MOVEM adds its index after that fetch rather than in front of the
+        // instruction, and the loader has not burned it. A predecrement store
+        // is the exception both ways: the part folds its first decrement into
+        // the write it is already committed to, which is why the internal time
+        // declared at the finish counts only an index add.
+        self.spend_internal(if ea_mode == 6 || (ea_mode == 7 && ea_reg == 3) {
+            2
+        } else {
+            0
+        });
 
         if ea_mode == 4 {
             // Predecrement store: reversed mask, descending addresses. The

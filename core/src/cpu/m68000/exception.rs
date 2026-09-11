@@ -416,7 +416,7 @@ impl M68000 {
             .read_long_at(bus, master, 3 * 4)
             .expect("vector 3 is aligned");
         self.set_pc_flush(handler);
-        // Fifty clocks, and every one of them is now accounted for by
+        // Fifty clocks of entry, and every one of them is accounted for by
         // mechanism: eleven transfers and six idle. Seven transfers are the
         // group-0 frame, two the vector, and two the refills at the handler
         // that the flush above makes the finish issue.
@@ -426,6 +426,17 @@ impl M68000 {
         // them cost the 680x0 corpus 4.56 points, because neither side's
         // transfer count was a subset of the other's. The queue is what makes
         // the two counts the same count.
-        self.finish_from_bus(bus, master, 6);
+        //
+        // **The aborted instruction's own internal time is part of the length
+        // too, and only this site can add it.** The part computes an address,
+        // drives the access, and only then finds it odd, so those clocks are
+        // spent whatever happens next; a body that runs to its end declares
+        // them at its finish, and an aborted one never reaches that.
+        // `internal_spent` is the record of them. Leaving it out made every
+        // faulting instruction with a predecrement, an index add, a jump target
+        // or a branch displacement end two or six clocks short, and both
+        // corpora agreed on which: 77,019 cases and 22,032, exactly the shapes
+        // whose internal time is not zero.
+        self.finish_from_bus(bus, master, 6 + self.internal_spent);
     }
 }
