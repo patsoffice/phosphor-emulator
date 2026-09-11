@@ -47,7 +47,7 @@
 use std::io::Read;
 
 use phosphor_core::core::{BusMaster, BusMasterComponent};
-use phosphor_core::cpu::m68000::M68000;
+use phosphor_core::cpu::m68000::{self, M68000};
 use phosphor_cpu_validation::{
     BusTxnKind, M68000Regs, M68000TestCase, RecordingBus68k, TxnSize, m68000_bin,
 };
@@ -103,6 +103,11 @@ struct CaseResult {
     /// For a case whose sequence matches but whose transfers do not: the first
     /// transfer that differs and the field it differs in.
     operand_fault: Option<String>,
+    /// Words the executor took out of the queue, against what the length table
+    /// predicted from the opcode alone. Equal on every completed case, or a
+    /// loader built on the table would fetch the wrong number of words.
+    words_consumed: u32,
+    words_predicted: u32,
 }
 
 fn load_initial(
@@ -210,6 +215,19 @@ fn shape_of(kinds: &[bool]) -> String {
         .map(|c| c[0].to_string())
         .collect::<Vec<_>>()
         .join(".")
+}
+
+/// How many words out of the queue a loader should expect this case to consume:
+/// the opcode, plus the extension words the encoding names.
+///
+/// A privileged instruction executed in user mode consumes only its opcode,
+/// because the part settles privilege at decode and vectors without running.
+fn predicted_words(tc: &M68000TestCase) -> u32 {
+    let opcode = tc.initial.prefetch[0];
+    if m68000::format::privileged(opcode) && !tc.initial.is_supervisor() {
+        return 1;
+    }
+    1 + u32::from(m68000::format::extension_words(opcode))
 }
 
 /// The word memory holds at `addr`, read behind the bus's back so the check
@@ -345,6 +363,8 @@ fn run_case(
             ran: true,
             mismatch: (!kinds_exact).then(|| (shape_of(&recorded_shape), shape_of(&our_shape))),
             operand_fault,
+            words_consumed: cpu.words_consumed(),
+            words_predicted: predicted_words(tc),
         }
     };
 
@@ -810,6 +830,51 @@ fn report_queue_failures(label: &str, failures: &QueueFailures) {
     }
 }
 
+/// Where the length table and the executor disagree about how many words an
+/// instruction is, counted by opcode shape with an example.
+///
+/// Only completed cases are asked. An instruction that aborts on an address
+/// error stops consuming words at the faulting access, so it legitimately takes
+/// fewer than its encoding names, and counting those would bury the real
+/// disagreements under a much larger population of correct ones.
+type WordCountFaults = std::collections::BTreeMap<(String, u32, u32), (usize, String)>;
+
+fn note_word_count(
+    into: &mut WordCountFaults,
+    instr: &str,
+    name: &str,
+    tc: &M68000TestCase,
+    r: &CaseResult,
+) {
+    if !r.ran || is_address_error(tc) || r.words_consumed == r.words_predicted {
+        return;
+    }
+    let e = into
+        .entry((instr.to_string(), r.words_predicted, r.words_consumed))
+        .or_insert_with(|| (0, name.to_string()));
+    e.0 += 1;
+}
+
+fn report_word_counts(label: &str, faults: &WordCountFaults) {
+    if faults.is_empty() {
+        eprintln!("\n{label}: the length table agrees with the executor on every completed case");
+        return;
+    }
+    let total: usize = faults.values().map(|(n, _)| n).sum();
+    eprintln!(
+        "\n{label}: {total} completed cases where the length table and the executor disagree, \
+         in {} shapes",
+        faults.len()
+    );
+    let mut rows: Vec<_> = faults.iter().collect();
+    rows.sort_by_key(|(_, (n, _))| std::cmp::Reverse(*n));
+    for ((instr, predicted, actual), (n, example)) in rows.iter().take(25) {
+        eprintln!(
+            "  {instr:<14} {n:>7}  table says {predicted} words, executor took {actual}  e.g. {example}"
+        );
+    }
+}
+
 /// Rung 4's residual, counted by which field disagrees and on which
 /// instruction, with an example transfer for each.
 type OperandFaults = std::collections::BTreeMap<(String, String), (usize, String)>;
@@ -960,11 +1025,9 @@ fn by_addressing_mode(label: &str, rates: &FileRates) {
                 t.count_pct(),
                 t.mean_delta()
             );
-            if t.length_exact != t.cases {
-                if let Some(examples) = f.examples.get(mode) {
-                    for (name, delta) in examples {
-                        eprintln!("          {delta:+4}  {name}");
-                    }
+            if let Some(examples) = f.examples.get(mode).filter(|_| t.length_exact != t.cases) {
+                for (name, delta) in examples {
+                    eprintln!("          {delta:+4}  {name}");
                 }
             }
         }
@@ -1000,6 +1063,7 @@ struct Reports {
     shapes: ShapeMismatches,
     queue: QueueFailures,
     faults: OperandFaults,
+    words: WordCountFaults,
 }
 
 fn run_680x0(cpu: &mut M68000, bus: &mut RecordingBus68k, out: &mut Reports) -> Populations {
@@ -1032,6 +1096,7 @@ fn run_680x0(cpu: &mut M68000, bus: &mut RecordingBus68k, out: &mut Reports) -> 
             note_mismatch(&mut out.shapes, &instr, &r);
             note_queue_failure(&mut out.queue, &instr, &tc.name, &r);
             note_operand_fault(&mut out.faults, &instr, &tc.name, &r);
+            note_word_count(&mut out.words, &instr, &tc.name, tc, &r);
         }
         out.rates.insert(instr, file_tally);
     }
@@ -1070,6 +1135,7 @@ fn run_m68000(cpu: &mut M68000, bus: &mut RecordingBus68k, out: &mut Reports) ->
             note_mismatch(&mut out.shapes, &instr, &r);
             note_queue_failure(&mut out.queue, &instr, &t.case.name, &r);
             note_operand_fault(&mut out.faults, &instr, &t.case.name, &r);
+            note_word_count(&mut out.words, &instr, &t.case.name, &t.case, &r);
         }
         out.rates.insert(instr, file_tally);
     }
@@ -1115,6 +1181,7 @@ fn test_m68000_cycle_gate() {
         by_addressing_mode(label, &out.rates);
         residual_shapes(label, &out.shapes);
         report_operand_faults(label, &out.faults);
+        report_word_counts(label, &out.words);
         report_queue_failures(label, &out.queue);
     }
 
@@ -1171,6 +1238,31 @@ fn test_m68000_cycle_gate() {
     assert_eq!(
         timeouts, 0,
         "{timeouts} cases hit the {TICK_LIMIT}-tick limit; their rates are not measurements"
+    );
+
+    // --- The length table, against the executor, with no tolerance -----------
+    //
+    // `format::extension_words` is a second statement of something the
+    // instruction bodies already know, which is the shape that drifts. It is
+    // asserted here rather than reported because a per-clock loader will fetch
+    // exactly what it says: a row that is wrong by one word would issue a bus
+    // cycle the part never runs, or miss one it does, and the symptom would
+    // surface as a timing residual a long way from the table.
+    //
+    // Both corpora, every case that completes. An instruction aborted by an
+    // address error stops consuming at the faulting access and is excluded;
+    // a privileged instruction in user mode consumes only its opcode, which
+    // `predicted_words` accounts for.
+    let word_faults: usize = out_680x0
+        .words
+        .values()
+        .chain(out_m68000.words.values())
+        .map(|(n, _)| n)
+        .sum();
+    assert_eq!(
+        word_faults, 0,
+        "{word_faults} completed cases where the length table and the executor disagree \
+         about how many words the instruction is"
     );
 
     // --- The queue's own invariant, with no tolerance ------------------------

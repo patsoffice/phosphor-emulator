@@ -112,6 +112,7 @@ impl M68000 {
         self.prefetch[0] = self.prefetch[1];
         self.prefetch_len -= 1;
         self.pc = self.pc.wrapping_add(2);
+        self.words_consumed = self.words_consumed.saturating_add(1);
         word
     }
 }

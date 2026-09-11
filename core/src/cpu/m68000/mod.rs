@@ -22,6 +22,7 @@ mod branch;
 mod disasm;
 mod exception;
 pub mod flags;
+pub mod format;
 mod move_ops;
 mod prefetch;
 mod stack;
@@ -140,6 +141,18 @@ pub struct M68000 {
     /// stops a right total from hiding wrong bus activity.
     #[save_skip(default)]
     pub(crate) transfers: u32,
+    /// Words the instruction now executing has taken out of the queue,
+    /// including its opcode.
+    ///
+    /// This exists to keep [`format::extension_words`] honest. That table says
+    /// in advance what this counts afterwards, and the two must agree on every
+    /// encoding or a per-clock loader built on the table fetches the wrong
+    /// number of words. Counting here rather than asserting here is deliberate:
+    /// the comparison belongs in the gate, where it runs over both corpora at
+    /// full speed, instead of in the hot path where it would have to be
+    /// compiled out to be affordable and would then check nothing.
+    #[save_skip(default)]
+    pub(crate) words_consumed: u32,
 }
 
 impl Default for M68000 {
@@ -168,7 +181,17 @@ impl M68000 {
             prefetch: [0; 2],
             prefetch_len: 0,
             transfers: 0,
+            words_consumed: 0,
         }
+    }
+
+    /// Words the instruction that just retired took out of the prefetch queue,
+    /// including its opcode. One more than its extension-word count.
+    ///
+    /// Exposed for the per-cycle gate, which checks it against what
+    /// [`format::extension_words`] predicted from the opcode alone.
+    pub fn words_consumed(&self) -> u32 {
+        self.words_consumed
     }
 
     /// Returns true when the CPU is at an instruction boundary (ready to fetch).
@@ -282,6 +305,7 @@ impl M68000 {
                 // sequence makes, and would otherwise inherit the count of
                 // whatever instruction happened to run before it.
                 self.transfers = 0;
+                self.words_consumed = 0;
 
                 // Sample interrupts at the instruction boundary.
                 let ints = bus.check_interrupts(master);
