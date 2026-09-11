@@ -108,6 +108,9 @@ struct CaseResult {
     /// with the loader placing several things per instruction that is the only
     /// question worth asking of a miss.
     position_fault: Option<(String, String)>,
+    /// For a case whose sequence matches but whose function codes do not: the
+    /// first transfer that differs, with both codes.
+    fc_fault: Option<String>,
     /// For a case whose sequence matches but whose transfers do not: the first
     /// transfer that differs and the field it differs in.
     operand_fault: Option<String>,
@@ -335,6 +338,22 @@ fn run_case(
                 .collect::<Vec<_>>()
                 .join(" ")
         };
+        // Which transfer named the wrong address space, and what each side
+        // called it. The codes are 1 user data, 2 user program, 5 supervisor
+        // data, 6 supervisor program, so the pair says at a glance whether the
+        // disagreement is about the space or about the privilege.
+        let fc_fault = (kinds_exact && !fc_exact).then(|| {
+            let (i, (a, b)) = paired()
+                .enumerate()
+                .find(|(_, (a, b))| a.fc != b.fc)
+                .expect("a differing transfer, since the rung failed");
+            format!(
+                "transfer {i} ({}): recorded fc{} ours fc{}",
+                if b.write { "write" } else { "read" },
+                b.fc,
+                a.fc
+            )
+        });
         let position_fault = (kinds_exact && !positions_exact).then(|| {
             (
                 clock_list(&|| {
@@ -417,6 +436,7 @@ fn run_case(
             ran: true,
             mismatch: (!kinds_exact).then(|| (shape_of(&recorded_shape), shape_of(&our_shape))),
             position_fault,
+            fc_fault,
             operand_fault,
             words_consumed: cpu.words_consumed(),
             words_predicted: predicted_words(tc),
@@ -969,6 +989,41 @@ fn report_position_faults(label: &str, faults: &PositionFaults) {
     }
 }
 
+/// Rung 5's residual, counted by instruction and by the pair of codes.
+type FcFaults = std::collections::BTreeMap<(String, String), (usize, String)>;
+
+fn note_fc_fault(into: &mut FcFaults, instr: &str, name: &str, r: &CaseResult) {
+    let Some(fault) = &r.fc_fault else {
+        return;
+    };
+    // Key on the codes rather than the transfer index, so one mechanism is one
+    // row however many different instructions reach it.
+    let codes = fault
+        .split_once("): ")
+        .map_or(fault.clone(), |(_, rest)| rest.to_string());
+    let e = into
+        .entry((instr.to_string(), codes))
+        .or_insert_with(|| (0, format!("{name}: {fault}")));
+    e.0 += 1;
+}
+
+fn report_fc_faults(label: &str, faults: &FcFaults) {
+    if faults.is_empty() {
+        eprintln!("\n{label}: every matching transfer names the recorded address space");
+        return;
+    }
+    let total: usize = faults.values().map(|(n, _)| n).sum();
+    let mut rows: Vec<_> = faults.iter().collect();
+    rows.sort_by_key(|(_, (n, _))| std::cmp::Reverse(*n));
+    eprintln!(
+        "\n{label}: {total} cases naming the wrong address space, in {} shapes",
+        faults.len()
+    );
+    for ((instr, codes), (n, example)) in rows.iter().take(12) {
+        eprintln!("  {n:>7}  {instr:<12} {codes}  e.g. {example}");
+    }
+}
+
 /// Rung 4's residual, counted by which field disagrees and on which
 /// instruction, with an example transfer for each.
 type OperandFaults = std::collections::BTreeMap<(String, String), (usize, String)>;
@@ -1158,6 +1213,7 @@ struct Reports {
     queue: QueueFailures,
     faults: OperandFaults,
     positions: PositionFaults,
+    fcs: FcFaults,
     words: WordCountFaults,
 }
 
@@ -1192,6 +1248,7 @@ fn run_680x0(cpu: &mut M68000, bus: &mut RecordingBus68k, out: &mut Reports) -> 
             note_queue_failure(&mut out.queue, &instr, &tc.name, &r);
             note_operand_fault(&mut out.faults, &instr, &tc.name, &r);
             note_position_fault(&mut out.positions, &instr, &r);
+            note_fc_fault(&mut out.fcs, &instr, &tc.name, &r);
             note_word_count(&mut out.words, &instr, &tc.name, tc, &r);
         }
         out.rates.insert(instr, file_tally);
@@ -1232,6 +1289,7 @@ fn run_m68000(cpu: &mut M68000, bus: &mut RecordingBus68k, out: &mut Reports) ->
             note_queue_failure(&mut out.queue, &instr, &t.case.name, &r);
             note_operand_fault(&mut out.faults, &instr, &t.case.name, &r);
             note_position_fault(&mut out.positions, &instr, &r);
+            note_fc_fault(&mut out.fcs, &instr, &t.case.name, &r);
             note_word_count(&mut out.words, &instr, &t.case.name, &t.case, &r);
         }
         out.rates.insert(instr, file_tally);
@@ -1278,6 +1336,7 @@ fn test_m68000_cycle_gate() {
         by_addressing_mode(label, &out.rates);
         residual_shapes(label, &out.shapes);
         report_position_faults(label, &out.positions);
+        report_fc_faults(label, &out.fcs);
         report_operand_faults(label, &out.faults);
         report_word_counts(label, &out.words);
         report_queue_failures(label, &out.queue);

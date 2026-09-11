@@ -199,6 +199,10 @@ pub struct M68000 {
     /// itself makes can be counted apart from the loader's.
     #[save_skip(default)]
     pub(crate) pre_exec_transfers: u32,
+    /// The effective address just resolved names program space, because it was
+    /// formed from PC. Set by `decode_ea` and taken by `ea_read`.
+    #[save_skip(default)]
+    pub(crate) ea_program_space: bool,
 }
 
 impl Default for M68000 {
@@ -232,6 +236,7 @@ impl M68000 {
             lead_burned: 0,
             exec_clock: 0,
             pre_exec_transfers: 0,
+            ea_program_space: false,
         }
     }
 

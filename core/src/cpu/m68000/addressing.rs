@@ -193,11 +193,33 @@ impl M68000 {
         master: BusMaster,
         addr: u32,
     ) -> AccessResult<u16> {
+        self.read_word_in(bus, master, addr, false)
+    }
+
+    /// As [`Self::read_word_at`], naming program space rather than data.
+    ///
+    /// Only an operand reached through a PC-relative mode does this. The
+    /// address is formed from PC, so the part drives the program function code
+    /// for it, exactly as it does for a prefetch: `ADD.w (d16,PC),D0` reads its
+    /// operand at code 6 in supervisor mode and 2 in user, where the same
+    /// instruction through `(An)` reads at 5 and 1.
+    fn read_word_in<B: Bus16 + ?Sized>(
+        &mut self,
+        bus: &mut B,
+        master: BusMaster,
+        addr: u32,
+        program: bool,
+    ) -> AccessResult<u16> {
         if addr & 1 != 0 {
             return Err(self.operand_fault(addr, false));
         }
         let a = self.mask_addr(addr);
-        bus.observe_bus_cycle(master, a, self.data_cycle(false, false));
+        let cycle = if program {
+            self.program_cycle(false)
+        } else {
+            self.data_cycle(false, false)
+        };
+        bus.observe_bus_cycle(master, a, cycle);
         self.transfers += 1;
         Ok(bus.read(master, a))
     }
@@ -227,8 +249,20 @@ impl M68000 {
         master: BusMaster,
         addr: u32,
     ) -> AccessResult<u32> {
-        let hi = self.read_word_at(bus, master, addr)?;
-        let lo = self.read_word_at(bus, master, addr.wrapping_add(2))?;
+        self.read_long_in(bus, master, addr, false)
+    }
+
+    /// As [`Self::read_long_at`], in the space the caller names. Both halves
+    /// name the same one.
+    fn read_long_in<B: Bus16 + ?Sized>(
+        &mut self,
+        bus: &mut B,
+        master: BusMaster,
+        addr: u32,
+        program: bool,
+    ) -> AccessResult<u32> {
+        let hi = self.read_word_in(bus, master, addr, program)?;
+        let lo = self.read_word_in(bus, master, addr.wrapping_add(2), program)?;
         Ok(((hi as u32) << 16) | lo as u32)
     }
 
@@ -280,8 +314,26 @@ impl M68000 {
         master: BusMaster,
         addr: u32,
     ) -> u8 {
+        self.read_byte_in(bus, master, addr, false)
+    }
+
+    /// As [`Self::read_byte_at`], in the space the caller names.
+    fn read_byte_in<B: Bus16 + ?Sized>(
+        &mut self,
+        bus: &mut B,
+        master: BusMaster,
+        addr: u32,
+        program: bool,
+    ) -> u8 {
         let a = self.mask_addr(addr);
-        bus.observe_bus_cycle(master, a, self.data_cycle(false, true));
+        let cycle = if program {
+            let mut c = self.program_cycle(false);
+            c.byte = true;
+            c
+        } else {
+            self.data_cycle(false, true)
+        };
+        bus.observe_bus_cycle(master, a, cycle);
         self.transfers += 1;
         bus.read_byte(master, a)
     }
@@ -465,6 +517,12 @@ impl M68000 {
         size: Size,
         refill: bool,
     ) -> Ea {
+        // A PC-relative operand is fetched from PROGRAM space, because its
+        // address is formed from PC. Recorded here rather than carried in the
+        // resolved `Ea`, which would put a second variant through every match
+        // on it for a property only the read that immediately follows can use.
+        // `ea_read` takes it and clears it, so nothing else can inherit it.
+        self.ea_program_space = mode & 7 == 7 && matches!(reg & 7, 2 | 3);
         let reg = (reg & 7) as usize;
         match mode & 7 {
             // Dn — data register direct
@@ -558,11 +616,17 @@ impl M68000 {
                 debug_assert!(size != Size::Byte, "byte access to An is illegal");
                 self.a[r] & size.mask()
             }
-            Ea::Mem(addr) => match size {
-                Size::Byte => self.read_byte_at(bus, master, addr) as u32,
-                Size::Word => self.read_word_at(bus, master, addr)? as u32,
-                Size::Long => self.read_long_at(bus, master, addr)?,
-            },
+            Ea::Mem(addr) => {
+                // Taken, not copied: only the operand the decode just resolved
+                // may be a program-space fetch, and a stack pop or a vector
+                // read that follows must not inherit it.
+                let program = std::mem::take(&mut self.ea_program_space);
+                match size {
+                    Size::Byte => self.read_byte_in(bus, master, addr, program) as u32,
+                    Size::Word => self.read_word_in(bus, master, addr, program)? as u32,
+                    Size::Long => self.read_long_in(bus, master, addr, program)?,
+                }
+            }
             Ea::Imm(v) => v & size.mask(),
         })
     }
