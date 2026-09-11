@@ -106,16 +106,18 @@ impl M68000 {
             1 => {
                 self.push_long(bus, master, self.pc)?;
                 self.set_pc_checked(base.wrapping_add(disp))?;
-                self.finish_from_bus(bus, master, 2);
+                self.finish_from_bus_address_first(bus, master, 2);
             }
             // BRA (condition 0 encodes T) and taken Bcc
             _ if self.cc_true(cond) => {
                 self.set_pc_checked(base.wrapping_add(disp))?;
-                self.finish_from_bus(bus, master, 2);
+                self.finish_from_bus_address_first(bus, master, 2);
             }
             // Not taken: nothing is redirected, and the queue is refilled from
-            // where execution already was.
-            _ => self.finish_from_bus(bus, master, 4),
+            // where execution already was. The idle still comes first, which is
+            // the part testing the condition and then declining: four clocks,
+            // then the single refill.
+            _ => self.finish_from_bus_address_first(bus, master, 4),
         }
         Ok(())
     }
@@ -141,7 +143,7 @@ impl M68000 {
         if self.cc_true(cond) {
             // Condition satisfied: the loop is abandoned without touching the
             // counter, and the displacement word has already been fetched.
-            self.finish_from_bus(bus, master, 4);
+            self.finish_from_bus_address_first(bus, master, 4);
             return Ok(());
         }
         let reg = (opcode & 7) as usize;
@@ -150,10 +152,10 @@ impl M68000 {
         if counter == 0xFFFF {
             // Counter ran out: two clocks more than the looping case, spent
             // recognizing the underflow rather than redirecting.
-            self.finish_from_bus(bus, master, 6);
+            self.finish_from_bus_address_first(bus, master, 6);
         } else {
             self.set_pc_checked(base.wrapping_add(disp))?;
-            self.finish_from_bus(bus, master, 2);
+            self.finish_from_bus_address_first(bus, master, 2);
         }
         Ok(())
     }
@@ -200,8 +202,10 @@ impl M68000 {
             self.push_long(bus, master, return_pc)?;
         }
         // JSR's push is two counted transfers, so a call and a jump spend the
-        // same time off the bus.
-        self.finish_from_bus(bus, master, jump_internal(ea_mode, ea_reg));
+        // same time off the bus. That time is the address arithmetic and runs
+        // before the fetches it computes: `JMP (d16, An)` is two clocks working
+        // out the target and then its two program reads.
+        self.finish_from_bus_address_first(bus, master, jump_internal(ea_mode, ea_reg));
         Ok(())
     }
 

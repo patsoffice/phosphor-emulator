@@ -548,6 +548,40 @@ impl M68000 {
         // This is unchanged by anything the loader does, which is the point:
         // the loader moves transfers around inside the instruction, it does not
         // make the instruction longer or shorter.
+        self.finish_from_bus_inner(bus, master, internal, false);
+    }
+
+    /// Complete an instruction whose internal time runs *before* its trailing
+    /// refill rather than after it.
+    ///
+    /// The distinction is mechanical, not a per-family quirk to be tabulated:
+    /// a branch cannot fetch at its target until it has finished working out
+    /// the target, so its address arithmetic precedes both fetches. An `ADD.l`
+    /// with a register operand runs its prefetch first and its two ALU passes
+    /// after, because those passes have nothing to do with where the next fetch
+    /// goes. **Internal time that computes the next fetch address precedes the
+    /// fetch; arithmetic on data follows it.**
+    ///
+    /// Taken from the part's own sequence rather than fitted. A branch with a
+    /// byte displacement computes its target and then goes one of two ways: two
+    /// clocks and two fetches when taken, or two clocks, two more, and a single
+    /// fetch when not. Ten and eight, with the idle first in both.
+    pub(crate) fn finish_from_bus_address_first<B: Bus16 + ?Sized>(
+        &mut self,
+        bus: &mut B,
+        master: BusMaster,
+        internal: u32,
+    ) {
+        self.finish_from_bus_inner(bus, master, internal, true);
+    }
+
+    fn finish_from_bus_inner<B: Bus16 + ?Sized>(
+        &mut self,
+        bus: &mut B,
+        master: BusMaster,
+        internal: u32,
+        internal_first: bool,
+    ) {
         let owed = u32::from(2 - self.prefetch_len);
         let full = 4 * (self.transfers + owed) + internal;
 
@@ -571,7 +605,12 @@ impl M68000 {
         // and this right: their count is correct even where their positions are
         // not, so the refill lands correctly now and stays correct when they
         // are spread out later.
-        let delay = 4 * (self.transfers - self.pre_exec_transfers);
+        let mut delay = 4 * (self.transfers - self.pre_exec_transfers);
+        if internal_first {
+            // Whatever of the internal time was not already burned up front as
+            // address arithmetic runs here, ahead of the fetches it computes.
+            delay += internal.saturating_sub(self.lead_burned);
+        }
         // Each owed refill is its own bus cycle four clocks after the last, so
         // `tail` is measured from the clock the *final* one runs on.
         let tail = from_body
