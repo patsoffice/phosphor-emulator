@@ -73,13 +73,15 @@ pub(crate) enum ExecState {
     /// The refill behind the last word an instruction consumed is not part of
     /// applying its effect: the part issues it after the operand cycles are
     /// done, and the recorded traces put it there. `delay` counts the clocks
-    /// still to pass before it runs, and `tail` is the instruction's remaining
-    /// length once it has.
+    /// still to pass before the next one runs, `owed` is how many are left, and
+    /// `tail` is the instruction's remaining length from the last one's clock.
     ///
-    /// This is the first thing in this core to happen on a clock of its own
-    /// rather than on the instruction's first, and it is the reason rung 3 can
-    /// report anything above the cases that make a single transfer.
-    TrailingRefill { delay: u32, tail: u32 },
+    /// **Two are owed whenever the instruction discarded the queue**, and they
+    /// are two bus cycles four clocks apart rather than one event: a taken
+    /// branch fetches both words at its target, and driving them on the same
+    /// clock is the difference between the whole branch family reading 0% on
+    /// positions and reading correctly.
+    TrailingRefill { delay: u32, owed: u32, tail: u32 },
     /// STOP instruction executed, waiting for an interrupt.
     Stopped,
     /// Halted by a double bus fault or external HALT; only reset recovers.
@@ -425,15 +427,15 @@ impl M68000 {
                     self.state = ExecState::Execute(remaining - 1);
                 }
             }
-            ExecState::TrailingRefill { delay, tail } => {
+            ExecState::TrailingRefill { delay, owed, tail } => {
                 let remaining = delay - 1;
                 if remaining == 0 {
-                    // This clock is the one the part drives the refill on.
-                    self.fill_prefetch(bus, master);
-                    self.finish(tail);
+                    // This clock is the one the part drives a refill on.
+                    self.drive_refill(bus, master, owed, tail);
                 } else {
                     self.state = ExecState::TrailingRefill {
                         delay: remaining,
+                        owed,
                         tail,
                     };
                 }
@@ -570,15 +572,38 @@ impl M68000 {
         // not, so the refill lands correctly now and stays correct when they
         // are spread out later.
         let delay = 4 * (self.transfers - self.pre_exec_transfers);
+        // Each owed refill is its own bus cycle four clocks after the last, so
+        // `tail` is measured from the clock the *final* one runs on.
+        let tail = from_body
+            .saturating_sub(delay)
+            .saturating_sub(4 * (owed - 1));
         if delay == 0 {
-            self.fill_prefetch(bus, master);
-            self.finish(from_body);
+            self.drive_refill(bus, master, owed, tail);
             return;
         }
-        self.state = ExecState::TrailingRefill {
-            delay,
-            tail: from_body.saturating_sub(delay),
-        };
+        self.state = ExecState::TrailingRefill { delay, owed, tail };
+    }
+
+    /// Drive one owed refill on this clock, and either queue the next or end
+    /// the instruction.
+    fn drive_refill<B: Bus16 + ?Sized>(
+        &mut self,
+        bus: &mut B,
+        master: BusMaster,
+        owed: u32,
+        tail: u32,
+    ) {
+        self.refill_prefetch(bus, master);
+        match owed - 1 {
+            0 => self.finish(tail),
+            left => {
+                self.state = ExecState::TrailingRefill {
+                    delay: 4,
+                    owed: left,
+                    tail,
+                }
+            }
+        }
     }
 
     /// Complete an instruction that leaves the prefetch queue as it found it.
