@@ -765,7 +765,25 @@ worktree, same protocol.
 | marble | 1.685 | 2.117 | +25.6% | 7.87x |
 | roadrunner | 2.000 | 2.400 | +20.0% | 6.94x |
 
-Road Runner still binds, at 3.5x the 2x floor. **The epic's prediction held**:
+**And the same milestone measured back on the original host**, which is the one
+[Performance](#performance) took the M1 baseline on and the one the 2x floor was
+argued against. Two runs agreeing within 0.4%, same protocol:
+
+| machine | M1 emul ms/f | M4 emul ms/f | change | real time |
+|---|---|---|---|---|
+| foodf | 1.594 | 2.137 | +34.1% | 7.68x |
+| quantum | 1.862 | 2.434 | +30.7% | 4.05x |
+| marble | 3.026 | 3.865 | +27.7% | 4.31x |
+| roadrunner | 3.310 | 3.987 | **+20.5%** | **4.18x** |
+
+That is the whole conversion's cost, M1 through M4, against the baseline the bar
+was set on: Road Runner binds at **4.18x**, 2.09x above the floor, having spent
+about a fifth of an emulation budget that was allowed to grow by 152%. The two
+hosts disagree by a uniform factor of roughly 1.8 and agree on the shape, which
+is the point of quoting percentages rather than milliseconds across them.
+
+Road Runner still binds, at 3.5x the 2x floor on the newer host. **The epic's
+prediction held**:
 this core had no overcount to reclaim the way the i8088 did, so every clock of
 bus modeling is added cost, and this is the milestone that added the most. Road
 Runner's 20.0% arrived in two pieces, each measured on the same host: the loader
@@ -1203,4 +1221,9 @@ rather than shipped quietly.
   roadrunner are unchanged, or changed with a named mechanism and an image that
   was looked at.
 - `phosphor-bench` on all four boards at each milestone, against the M1 baseline
-  above, with the 2x floor as the stated bar.
+  above, with the 2x floor as the stated bar. **A comparison names its host, and
+  a delta is only quoted between two figures measured on the same one.** The
+  tree moved machines during M4 and the two disagree by a uniform factor of
+  about 1.8, so a milestone benched on one host and read against a baseline from
+  the other would report a conversion that costs nothing, or one that costs
+  twice what it does. The 2x floor itself is absolute and survives the move.
