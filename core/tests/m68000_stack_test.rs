@@ -252,6 +252,128 @@ fn movem_postincrement_base_in_list_keeps_final_address() {
     assert_eq!(cpu.a[0], 0x3004, "increment wins over the loaded value");
 }
 
+/// A bus that says which tick each access arrived on.
+///
+/// The part drives one bus cycle every four clocks and overlaps none of them,
+/// so a transfer sharing a tick with another is a transfer the hardware would
+/// have put four clocks later. Counting per tick is the only way to see that:
+/// the access list alone is identical either way, which is exactly how
+/// `MOVEM.l`'s long lists ran sixteen transfers on one clock while every
+/// register ended up with the right value.
+struct PerTickBus {
+    inner: TestBus68k,
+    tick: usize,
+    /// One entry per access: the tick it happened on and where it went.
+    log: Vec<(usize, u32)>,
+}
+
+impl PerTickBus {
+    fn new() -> Self {
+        Self {
+            inner: TestBus68k::new(),
+            tick: 0,
+            log: Vec::new(),
+        }
+    }
+
+    /// The accesses at or above `from`, which the test programs use for
+    /// operands alone, so instruction fetches are left out.
+    fn operands(&self, from: u32) -> Vec<(usize, u32)> {
+        self.log
+            .iter()
+            .copied()
+            .filter(|(_, a)| *a >= from)
+            .collect()
+    }
+
+    /// The largest number of those accesses any one tick carried.
+    fn busiest_tick(&self, from: u32) -> usize {
+        let ticks = self.operands(from);
+        ticks
+            .iter()
+            .map(|(t, _)| ticks.iter().filter(|(u, _)| u == t).count())
+            .max()
+            .unwrap_or(0)
+    }
+}
+
+impl phosphor_core::core::Bus for PerTickBus {
+    type Address = u32;
+    type Data = u16;
+
+    fn read(&mut self, master: BusMaster, addr: u32) -> u16 {
+        self.log.push((self.tick, addr));
+        self.inner.read(master, addr)
+    }
+
+    fn write(&mut self, master: BusMaster, addr: u32, data: u16) {
+        self.log.push((self.tick, addr));
+        self.inner.write(master, addr, data);
+    }
+
+    fn is_halted_for(&self, master: BusMaster) -> bool {
+        self.inner.is_halted_for(master)
+    }
+
+    fn check_interrupts(&mut self, target: BusMaster) -> phosphor_core::core::bus::InterruptState {
+        self.inner.check_interrupts(target)
+    }
+}
+
+impl phosphor_core::core::Bus16 for PerTickBus {
+    fn read_byte(&mut self, master: BusMaster, addr: u32) -> u8 {
+        self.log.push((self.tick, addr));
+        self.inner.read_byte(master, addr)
+    }
+
+    fn write_byte(&mut self, master: BusMaster, addr: u32, data: u8) {
+        self.log.push((self.tick, addr));
+        self.inner.write_byte(master, addr, data);
+    }
+}
+
+#[test]
+fn movem_l_load_of_every_register_places_each_transfer_on_its_own_clock() {
+    // MOVEM.l (A0)+,D0-D7/A0-A7: the longest transfer this instruction set has.
+    // Sixteen registers, two words each, plus the read past the block, plus the
+    // refills behind the opcode and the mask: 35 transfers, and the part drives
+    // one every four clocks.
+    let mut cpu = M68000::new();
+    cpu.set_pc_flush(0x1000);
+    let mut bus = PerTickBus::new();
+    bus.inner.load(0x1000, &[0x4C, 0xD8, 0xFF, 0xFF]);
+    // Distinguishable words, so a register loaded from the wrong place or a
+    // read given back from the wrong cycle shows up as a value rather than as
+    // a count.
+    let block: Vec<u8> = (0..66u8).collect();
+    bus.inner.load(0x3000, &block);
+    cpu.a[0] = 0x3000;
+
+    let mut ticks = 0;
+    while !cpu.tick_with_bus(&mut bus, M) {
+        bus.tick += 1;
+        ticks += 1;
+        assert!(ticks < 400, "instruction did not complete");
+    }
+
+    assert_eq!(
+        bus.operands(0x3000).len(),
+        33,
+        "thirty-two operand words and the read past the block"
+    );
+    assert_eq!(
+        bus.busiest_tick(0x3000),
+        1,
+        "the part drives one cycle every four clocks, and this instruction has \
+         twice as many transfers as the replay log has room for"
+    );
+    // The registers are what says the commits kept their values through every
+    // unwind: D0 takes the first long, A6 the fifteenth, and A7 the sixteenth.
+    assert_eq!(cpu.d[0], 0x0001_0203);
+    assert_eq!(cpu.a[6], 0x3839_3A3B);
+    assert_eq!(cpu.a[7], 0x3C3D_3E3F);
+}
+
 #[test]
 fn movem_load_pc_relative_and_no_flags() {
     // MOVEM.w $100(PC),D0 — mask word precedes the displacement word

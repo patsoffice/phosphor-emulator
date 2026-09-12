@@ -417,6 +417,12 @@ pub struct M68000 {
     /// entry that replaced it when the instruction faulted.
     #[save_skip(default = BodyKind::Instruction)]
     pub(crate) body_kind: BodyKind,
+    /// Where a `MOVEM` load has got to, when one is part way through its list.
+    ///
+    /// Outside [`BodyState`] on purpose: the unwind must not restore it, or the
+    /// cursor would go back to the top with the registers. See [`stack::MovemLoad`].
+    #[save_skip(default)]
+    pub(crate) movem_load: Option<stack::MovemLoad>,
 }
 
 impl Default for M68000 {
@@ -470,6 +476,7 @@ impl M68000 {
             tick_cycles: 0,
             in_body: false,
             body_kind: BodyKind::Instruction,
+            movem_load: None,
         }
     }
 
@@ -491,6 +498,26 @@ impl M68000 {
             stopped: self.stopped,
             halted: self.halted,
         }
+    }
+
+    /// Declare that what the body has done so far really happened, so a later
+    /// unwind lands here rather than at the top of the instruction.
+    ///
+    /// **One user, and it needs no more.** A `MOVEM` load has transferred a
+    /// register: the value is in the register file, the word came off the bus
+    /// once, and neither can be taken back. Re-capturing the state keeps it
+    /// through the next unwind, and emptying the replay log is what keeps the
+    /// log bounded by one register rather than by the whole list, which is the
+    /// difference between a load that places every transfer and one that runs
+    /// out of log at sixteen. See [`stack::MovemLoad`].
+    ///
+    /// Nothing else may commit part way through. An instruction that is not
+    /// re-entrant would be run again from the top against a state it had
+    /// already advanced.
+    pub(crate) fn commit_body_state(&mut self) {
+        self.body = self.capture_body_state();
+        self.replay_len = 0;
+        self.replay_pos = 0;
     }
 
     /// Unwind the body to where it started, leaving what the bus has already
@@ -1102,6 +1129,10 @@ impl M68000 {
     fn run_instruction<B: Bus16 + ?Sized>(&mut self, bus: &mut B, master: BusMaster) {
         self.pre_exec_transfers = self.transfers;
         self.body_kind = BodyKind::Instruction;
+        // A new instruction starts with no cursor, whatever the last one left:
+        // a `MOVEM` load that faulted part way through its list never reaches
+        // the line that clears its own.
+        self.movem_load = None;
         self.replay_len = 0;
         self.body = self.capture_body_state();
         self.run_body(bus, master);
