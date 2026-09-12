@@ -350,7 +350,9 @@ impl M68000 {
                 self.subx_with_flags(size, a, b)
             };
             let dst = Ea::Mem(self.a[rx as usize]);
-            self.ea_write_rmw(bus, master, dst, size, result)?;
+            // The refill goes between the two words of a long result here, not
+            // in front of both: see [`Self::ea_write_rmw_refill_between`].
+            self.ea_write_rmw_refill_between(bus, master, dst, size, result)?;
             // Two operand reads and a write, all counted. The two clocks left
             // are the predecrement, charged once however wide the operands are.
             self.finish_from_bus(bus, master, 2);

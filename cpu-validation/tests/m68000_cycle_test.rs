@@ -1828,19 +1828,28 @@ fn test_m68000_cycle_gate() {
         // same of operands, and 0.42 of transfer count and function codes here,
         // while taking `CHK` to exact on every rung against the other corpus.
         // See `M68000::op_chk`.
+        // **Rung 2 is now `TAS` alone on this corpus, and `TAS` is what the
+        // other corpus disqualifies itself for.** `ADDX.l`/`SUBX.l` put their
+        // refill between their two write words from `phosphor-emulator-7wmg`,
+        // which took both instructions to 100.00% on kinds against both
+        // corpora and moved the kinds aggregate here by 0.28 of a point. The
+        // count rung did not move at all, which is the shape that issue was
+        // filed on: the transfer count and the total length were both already
+        // right and only the order was wrong, so nothing but a sequence
+        // comparison could see it.
         ("680x0 length", pops_680x0.all.length_pct(), 81.72),
-        ("680x0 kinds", pops_680x0.all.kinds_pct(), 99.28),
+        ("680x0 kinds", pops_680x0.all.kinds_pct(), 99.56),
         ("680x0 count", pops_680x0.all.count_pct(), 99.56),
-        ("680x0 positions", pops_680x0.all.positions_pct(), 80.21),
+        ("680x0 positions", pops_680x0.all.positions_pct(), 80.49),
         (
             "680x0 positions, completed",
             pops_680x0.completed.positions_pct(),
-            97.59,
+            97.93,
         ),
         (
             "680x0 positions, >1 data transaction",
             pops_680x0.several_data_txns.positions_pct(),
-            58.85,
+            59.44,
         ),
         // **Rung 4 read 0.00% on every case that faults, on both corpora, from
         // the day M4 first reported it until the group-0 frame was written in
@@ -1850,7 +1859,7 @@ fn test_m68000_cycle_gate() {
         // against this corpus is `RTE` and `RTR`, which it records reading the
         // stack in an order the part does not use: see
         // `M68000::pop_status_and_pc`.
-        ("680x0 operands", pops_680x0.all.operands_pct(), 97.67),
+        ("680x0 operands", pops_680x0.all.operands_pct(), 97.95),
         (
             "680x0 operands, address error",
             pops_680x0.address_error.operands_pct(),
@@ -1866,7 +1875,7 @@ fn test_m68000_cycle_gate() {
         // exact against the microcode-derived corpus, where the whole loop of a
         // PC-relative load is recorded in program space. One mechanism, two
         // signs: the rung that went down is the one measuring the corpus.
-        ("680x0 function codes", pops_680x0.all.fc_pct(), 98.82),
+        ("680x0 function codes", pops_680x0.all.fc_pct(), 99.10),
         // The faulting path's transfer *sequence*, which M4 finished. One case
         // of 178,089 still differs and it is a `MOVEM`, whose trailing read is
         // the residual M3 named and M5 owns. Floored rather than asserted
@@ -1886,7 +1895,7 @@ fn test_m68000_cycle_gate() {
             99.99,
         ),
         ("m68000 length", pops_m68000.all.length_pct(), 99.78),
-        ("m68000 kinds", pops_m68000.all.kinds_pct(), 99.06),
+        ("m68000 kinds", pops_m68000.all.kinds_pct(), 99.33),
         // **This corpus disqualifies itself on `TAS` and says so.** Its README
         // excludes `TAS` and `TRAPV` from what it verifies as good, and names
         // the read-modify-write timing as the reason. It records `TAS` as two
@@ -1896,7 +1905,7 @@ fn test_m68000_cycle_gate() {
         // every rung over there. The one instruction in this conversion where
         // the stronger-provenance set is the weaker authority.
         ("m68000 count", pops_m68000.all.count_pct(), 99.33),
-        ("m68000 positions", pops_m68000.all.positions_pct(), 97.38),
+        ("m68000 positions", pops_m68000.all.positions_pct(), 97.65),
         // **The number M5's exception-entry work exists to move**, and it had
         // no floor because it had no value: a structural 0.00% while entry
         // drove all eleven of its cycles on one clock. It is floored against
@@ -1913,12 +1922,12 @@ fn test_m68000_cycle_gate() {
         (
             "m68000 positions, completed",
             pops_m68000.completed.positions_pct(),
-            97.44,
+            97.76,
         ),
         (
             "m68000 positions, >1 data transaction",
             pops_m68000.several_data_txns.positions_pct(),
-            95.19,
+            95.70,
         ),
         // This corpus's faulting population reaches only 28.07%, and the
         // difference is `data` rather than `addr`: its `pc` is the generator's
@@ -1926,17 +1935,28 @@ fn test_m68000_cycle_gate() {
         // the gate can reconcile that for the initial and final states but not
         // for a PC the instruction writes into a frame. Its own README names
         // the convention. Floored where it stands rather than chased.
-        ("m68000 operands", pops_m68000.all.operands_pct(), 86.36),
+        ("m68000 operands", pops_m68000.all.operands_pct(), 86.63),
         (
             "m68000 operands, address error",
             pops_m68000.address_error.operands_pct(),
             28.06,
         ),
-        // Raised from 98.84 with `MOVEM`'s list: the only row left here is
-        // `TRAPV`, and it differs in the supervisor bit rather than the space,
-        // which is the S-bit oddity this corpus's own README excludes `TRAPV`
-        // from what it verifies for.
-        ("m68000 function codes", pops_m68000.all.fc_pct(), 98.87),
+        // Raised from 98.84 with `MOVEM`'s list and again from 98.87 with the
+        // `ADDX.l`/`SUBX.l` refill: the only row left here is `TRAPV`, and it
+        // differs in the supervisor bit rather than the space, which is the
+        // S-bit oddity this corpus's own README excludes `TRAPV` from what it
+        // verifies for.
+        //
+        // **The second raise came without an address-space fix, and that is
+        // what the ladder being nested looks like.** The residual shape list
+        // holds the same 623 `TRAPV` cases in the same one shape before and
+        // after. What changed is that 834 `ADDX.l`/`SUBX.l` cases whose
+        // transfers were in the wrong order could not be aligned
+        // transfer-by-transfer at all, so they could not be exact on function
+        // code or operand either. Fixing a rung-2 miss releases the rungs
+        // behind it for those cases, which is why the operand floors moved
+        // here too and why a rung's rate is never only about its own rung.
+        ("m68000 function codes", pops_m68000.all.fc_pct(), 99.13),
     ];
     for (name, actual, floor) in floors {
         assert!(

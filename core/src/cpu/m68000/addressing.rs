@@ -814,6 +814,48 @@ impl M68000 {
         }
     }
 
+    /// As [`Self::ea_write_rmw`], but with the refill *between* the two words
+    /// of a long write instead of in front of both.
+    ///
+    /// The `-(Ay),-(Ax)` long forms of `ADDX` and `SUBX` are the only
+    /// instructions that record this. `ADDX.l -(A2), -(A3)` is four operand
+    /// reads, the low result word, a program read, then the high word:
+    ///
+    /// ```text
+    /// R . R . R . R . W . R . W
+    /// ```
+    ///
+    /// Every other read-modify-write family puts the refill in front of both
+    /// words, which is what `NEG.l (A5)+` records, so this is not a rule to
+    /// generalize from these two instructions. The word and byte forms are not
+    /// affected: their write is one transaction and the refill sits in front of
+    /// it, which [`Self::ea_write_rmw`] already does.
+    ///
+    /// The destination address is even by the time this is reached, because an
+    /// odd one faults at the operand read (the predecrement reads the same
+    /// address first), so there is no faulting order to preserve here.
+    pub(crate) fn ea_write_rmw_refill_between<B: Bus16 + ?Sized>(
+        &mut self,
+        bus: &mut B,
+        master: BusMaster,
+        ea: Ea,
+        size: Size,
+        value: u32,
+    ) -> AccessResult<()> {
+        match ea {
+            Ea::Mem(addr) if size == Size::Long => {
+                // Low half first, as every long result written through the
+                // read-modify-write path is: see
+                // [`Self::write_long_low_half_first`].
+                self.write_word_at(bus, master, addr.wrapping_add(2), value as u16)?;
+                let signals = self.program_cycle(false);
+                self.hand_over(bus, master, super::PendingCycle::Refill { signals });
+                self.write_word_at(bus, master, addr, (value >> 16) as u16)
+            }
+            _ => self.ea_write_rmw(bus, master, ea, size, value),
+        }
+    }
+
     /// Write an operand of `size` through a resolved [`Ea`].
     ///
     /// Byte/word writes to Dn preserve the upper register bits; word writes
