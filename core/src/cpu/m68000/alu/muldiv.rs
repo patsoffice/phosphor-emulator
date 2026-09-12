@@ -57,11 +57,29 @@ impl M68000 {
         self.d[dn] = product;
         self.set_flags_logical(Size::Long, product);
 
-        // The multiply runs entirely off the bus. Documented worst case is
-        // 38 + 2n internal cycles and this charges the worst case flat; the
-        // data-dependent refinement is its own piece of work, and it is a
-        // change to this number alone now that nothing else is folded into it.
-        self.finish_from_bus(bus, master, 66 + ea_time);
+        // **The multiply runs off the bus and its length depends on the source
+        // bits, one microcode step at a time.** The part walks the source from
+        // the bottom, spending two clocks on each of the sixteen bits, and two
+        // more wherever it has something to add. What "something to add" means
+        // is the whole difference between the two forms:
+        //
+        // - `MULU` looks at one bit and adds where it is set, so it pays for
+        //   every one in the source.
+        // - `MULS` looks at the bit *and the one below it*, adds on `01`,
+        //   subtracts on `10`, and does neither on `00` or `11`. So it pays for
+        //   every place the source changes value, counting an implicit zero
+        //   below bit 0, which is what `src ^ (src << 1)` counts.
+        //
+        // Four clocks of the loop's fixed part are the fetch behind the opcode
+        // and are counted as a transfer, leaving thirty-four here. Charging the
+        // worst case flat, as this did, made `MULU` and `MULS` right on the one
+        // source in 65,536 that has every bit set.
+        let steps = if signed {
+            (src ^ (src << 1)).count_ones()
+        } else {
+            src.count_ones()
+        };
+        self.finish_from_bus(bus, master, 34 + 2 * steps + ea_time);
         Ok(())
     }
 

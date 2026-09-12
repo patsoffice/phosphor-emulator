@@ -1787,7 +1787,7 @@ fn test_m68000_cycle_gate() {
         // same of operands, and 0.42 of transfer count and function codes here,
         // while taking `CHK` to exact on every rung against the other corpus.
         // See `M68000::op_chk`.
-        ("680x0 length", pops_680x0.all.length_pct(), 79.86),
+        ("680x0 length", pops_680x0.all.length_pct(), 80.85),
         ("680x0 kinds", pops_680x0.all.kinds_pct(), 99.28),
         ("680x0 count", pops_680x0.all.count_pct(), 99.56),
         ("680x0 positions", pops_680x0.all.positions_pct(), 79.24),
@@ -1834,7 +1834,7 @@ fn test_m68000_cycle_gate() {
             pops_m68000.address_error.kinds_pct(),
             99.99,
         ),
-        ("m68000 length", pops_m68000.all.length_pct(), 97.86),
+        ("m68000 length", pops_m68000.all.length_pct(), 98.82),
         ("m68000 kinds", pops_m68000.all.kinds_pct(), 99.06),
         // **This corpus disqualifies itself on `TAS` and says so.** Its README
         // excludes `TAS` and `TRAPV` from what it verifies as good, and names
