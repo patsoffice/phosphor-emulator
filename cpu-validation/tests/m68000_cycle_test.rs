@@ -1191,14 +1191,21 @@ fn report_word_counts(label: &str, faults: &WordCountFaults) {
 }
 
 /// Rung 3's residual, counted by which clocks disagree, keyed by instruction
-/// and by the pair of position lists.
-type PositionFaults = std::collections::BTreeMap<(String, String, String), usize>;
+/// and by the pair of position lists, with an example case for each.
+///
+/// **The example is the part that makes a row decidable**, and this was the one
+/// residual reporter without one. A pair of clock lists says two sequences
+/// differ; it does not say which encoding produced them, and one instruction
+/// name covers twelve addressing modes whose microcode is twelve different
+/// sequences. Naming a case lets the row be read against the part.
+type PositionFaults = std::collections::BTreeMap<(String, String, String), (usize, String)>;
 
-fn note_position_fault(into: &mut PositionFaults, instr: &str, r: &CaseResult) {
+fn note_position_fault(into: &mut PositionFaults, instr: &str, name: &str, r: &CaseResult) {
     if let Some((recorded, ours)) = &r.position_fault {
-        *into
+        let e = into
             .entry((instr.to_string(), recorded.clone(), ours.clone()))
-            .or_insert(0) += 1;
+            .or_insert_with(|| (0, name.to_string()));
+        e.0 += 1;
     }
 }
 
@@ -1238,16 +1245,16 @@ fn report_position_faults(label: &str, faults: &PositionFaults) {
         eprintln!("\n{label}: every matching transfer sequence is on the recorded clocks");
         return;
     }
-    let total: usize = faults.values().sum();
+    let total: usize = faults.values().map(|(n, _)| n).sum();
     let mut rows: Vec<_> = faults.iter().collect();
-    rows.sort_by_key(|(_, n)| std::cmp::Reverse(**n));
+    rows.sort_by_key(|(_, (n, _))| std::cmp::Reverse(*n));
     eprintln!(
         "\n{label}: {total} cases whose transfers are in the right order on the wrong clocks, \
          in {} shapes",
         faults.len()
     );
-    for ((instr, recorded, ours), n) in rows.iter().take(28) {
-        eprintln!("  {n:>8}  {instr:<12} recorded [{recorded}]  ours [{ours}]");
+    for ((instr, recorded, ours), (n, example)) in rows.iter().take(28) {
+        eprintln!("  {n:>8}  {instr:<12} recorded [{recorded}]  ours [{ours}]  e.g. {example}");
     }
 }
 
@@ -1515,7 +1522,7 @@ fn run_680x0(cpu: &mut M68000, bus: &mut RecordingBus68k, out: &mut Reports) -> 
             note_mismatch(&mut out.shapes, &instr, &tc.name, &r);
             note_queue_failure(&mut out.queue, &instr, &tc.name, &r);
             note_operand_fault(&mut out.faults, &instr, &tc.name, &r);
-            note_position_fault(&mut out.positions, &instr, &r);
+            note_position_fault(&mut out.positions, &instr, &tc.name, &r);
             note_position_class(&mut out.position_classes, is_address_error(tc), &r);
             note_fc_fault(&mut out.fcs, &instr, &tc.name, &r);
             note_word_count(&mut out.words, &instr, &tc.name, tc, &r);
@@ -1558,7 +1565,7 @@ fn run_m68000(cpu: &mut M68000, bus: &mut RecordingBus68k, out: &mut Reports) ->
             note_mismatch(&mut out.shapes, &instr, &t.case.name, &r);
             note_queue_failure(&mut out.queue, &instr, &t.case.name, &r);
             note_operand_fault(&mut out.faults, &instr, &t.case.name, &r);
-            note_position_fault(&mut out.positions, &instr, &r);
+            note_position_fault(&mut out.positions, &instr, &t.case.name, &r);
             note_position_class(&mut out.position_classes, is_address_error(&t.case), &r);
             note_fc_fault(&mut out.fcs, &instr, &t.case.name, &r);
             note_word_count(&mut out.words, &instr, &t.case.name, &t.case, &r);
