@@ -1790,16 +1790,16 @@ fn test_m68000_cycle_gate() {
         ("680x0 length", pops_680x0.all.length_pct(), 79.86),
         ("680x0 kinds", pops_680x0.all.kinds_pct(), 99.28),
         ("680x0 count", pops_680x0.all.count_pct(), 99.56),
-        ("680x0 positions", pops_680x0.all.positions_pct(), 79.10),
+        ("680x0 positions", pops_680x0.all.positions_pct(), 79.24),
         (
             "680x0 positions, completed",
             pops_680x0.completed.positions_pct(),
-            96.24,
+            96.41,
         ),
         (
             "680x0 positions, >1 data transaction",
             pops_680x0.several_data_txns.positions_pct(),
-            58.34,
+            58.64,
         ),
         // **Rung 4 read 0.00% on every case that faults, on both corpora, from
         // the day M4 first reported it until the group-0 frame was written in
@@ -1845,7 +1845,7 @@ fn test_m68000_cycle_gate() {
         // every rung over there. The one instruction in this conversion where
         // the stronger-provenance set is the weaker authority.
         ("m68000 count", pops_m68000.all.count_pct(), 99.33),
-        ("m68000 positions", pops_m68000.all.positions_pct(), 96.19),
+        ("m68000 positions", pops_m68000.all.positions_pct(), 96.32),
         // **The number M5's exception-entry work exists to move**, and it had
         // no floor because it had no value: a structural 0.00% while entry
         // drove all eleven of its cycles on one clock. It is floored against
@@ -1862,12 +1862,12 @@ fn test_m68000_cycle_gate() {
         (
             "m68000 positions, completed",
             pops_m68000.completed.positions_pct(),
-            95.98,
+            96.15,
         ),
         (
             "m68000 positions, >1 data transaction",
             pops_m68000.several_data_txns.positions_pct(),
-            94.74,
+            95.01,
         ),
         // This corpus's faulting population reaches only 28.07%, and the
         // difference is `data` rather than `addr`: its `pc` is the generator's

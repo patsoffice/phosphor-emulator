@@ -108,9 +108,19 @@ impl PendingCycle {
 
 /// Cycles one instruction can have outstanding at once.
 ///
-/// Exception entry is the longest: an aborted instruction's own outstanding
-/// writes, then the idle step in front of the frame, then seven frame words.
-const MAX_PENDING: usize = 12;
+/// **`MOVEM.l` sets this, at thirty-two words plus its two fetches.** Nothing
+/// in the part corresponds to a limit here: the execution unit decides a write
+/// and the bus unit drives it, and a store decides all of them before any has
+/// run. A list too short to hold them is not a smaller queue, it is a flush,
+/// and a flush puts every cycle it drains onto one clock. Raising this from
+/// twelve took `MOVEM.l` from 9.63% to 26.53% on the position rung against the
+/// documentation-derived corpus and from 43.20% to 60.24% against the other,
+/// with no other rung moving.
+///
+/// Exception entry is the only other user of the depth: an aborted
+/// instruction's own outstanding writes, then the idle step in front of the
+/// frame, then seven frame words.
+const MAX_PENDING: usize = 40;
 
 /// A bus cycle a body has already run, kept so that running the body again
 /// gives it back rather than asking the bus a second time.
