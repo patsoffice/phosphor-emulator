@@ -47,7 +47,9 @@ impl M68000 {
     /// instruction — before branching.
     ///
     /// Flags: none.
-    /// Cycles: taken 10 (BSR 18); not taken 8 (byte) / 12 (word).
+    /// Cycles: taken 10 (BSR 18); not taken 8 (byte) / 12 (word) on the 68000,
+    /// and 6 / 10 on the 68010 (datasheet-derived; see
+    /// [`M68000::by_variant`]).
     pub(crate) fn op_bcc<B: Bus16 + ?Sized>(
         &mut self,
         opcode: u16,
@@ -97,7 +99,15 @@ impl M68000 {
             // where execution already was. The idle still comes first, which is
             // the part testing the condition and then declining: four clocks,
             // then the single refill.
-            _ => self.finish_from_bus_address_first(bus, master, 4),
+            //
+            // **The 68010 declines two clocks faster**, on both displacement
+            // forms: Table 9-15 against Table 8-9, 8(1/0) to 6(1/0) for a byte
+            // and 12(2/0) to 10(2/0) for a word. One transfer and two, so the
+            // difference is internal time in both. This is the row
+            // `phosphor-emulator-zi4z` measured on a real image before there
+            // was a source for it: 1562 loop iterations against 1608, which is
+            // two clocks on the one not-taken byte branch in the loop.
+            _ => self.finish_from_bus_address_first(bus, master, self.by_variant(4, 2)),
         }
         Ok(())
     }
@@ -108,7 +118,20 @@ impl M68000 {
     /// counter wrapped from 0 to -1.
     ///
     /// Flags: none.
-    /// Cycles: condition true 12; loop taken 10; counter expired 14.
+    /// Cycles: condition true 12; loop taken 10; counter expired 14. On the
+    /// 68010, 10, 10 and 16: the first is faster and the last is slower
+    /// (datasheet-derived; see [`M68000::by_variant`]).
+    ///
+    /// **The 68010's loop mode is not modeled.** A two-word loop, a loopable
+    /// instruction followed by a `DBcc` with a displacement of -4, is held in
+    /// the prefetch queue and re-executed from it with no instruction fetches
+    /// at all: Table 9-3 records 10(0/1) for a continued loop moving `Dn` to
+    /// `(An)`, zero read cycles. That is a bus sequence this core has no way to
+    /// express, not a clock count, so it is carried as a named open question on
+    /// `phosphor-emulator-cycle-accurate-m68000-5y6e.7` rather than
+    /// approximated. Nothing reaches it by accident: without the mode, a
+    /// 68010 running such a loop fetches where the part would not, which costs
+    /// clocks rather than changing a result.
     pub(crate) fn op_dbcc<B: Bus16 + ?Sized>(
         &mut self,
         opcode: u16,
@@ -123,7 +146,10 @@ impl M68000 {
         if self.cc_true(cond) {
             // Condition satisfied: the loop is abandoned without touching the
             // counter, and the displacement word has already been fetched.
-            self.finish_from_bus_address_first(bus, master, 4);
+            //
+            // Two clocks faster on the 68010: Table 9-15 gives 10(2/0) against
+            // Table 8-9's 12(2/0).
+            self.finish_from_bus_address_first(bus, master, self.by_variant(4, 2));
             return Ok(());
         }
         let reg = (opcode & 7) as usize;
@@ -132,7 +158,13 @@ impl M68000 {
         if counter == 0xFFFF {
             // Counter ran out: two clocks more than the looping case, spent
             // recognizing the underflow rather than redirecting.
-            self.finish_from_bus_address_first(bus, master, 6);
+            //
+            // **THE 68010 IS SLOWER HERE, not faster**, and it is the one row
+            // in this pass that goes the other way: Table 9-15 gives 16(3/0)
+            // against Table 8-9's 14(3/0). Worth stating because a pass that
+            // assumed the newer part is quicker everywhere would have got this
+            // backwards and had three rows agree with it.
+            self.finish_from_bus_address_first(bus, master, self.by_variant(6, 8));
         } else {
             // The condition test and the target add are one step, spent before
             // the fetch at the target, so a fault there has still spent them

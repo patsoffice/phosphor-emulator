@@ -941,6 +941,38 @@ impl M68000 {
         !matches!(self.variant, M68kVariant::M68000)
     }
 
+    /// Pick a clock count by variant, where the 68010 spends a different amount
+    /// of internal time than the 68000 for the same instruction.
+    ///
+    /// **There is no 68010 oracle**, and this is the whole reason the timing
+    /// here is written the way it is. Neither vector suite covers a 68010:
+    /// SingleStepTests publishes the 68000 only, and the microcode-level
+    /// implementation the stronger suite is generated from instantiates the
+    /// 68000, the 68008 and the MCU variants and no 68010. So every number
+    /// below comes from the M68000 User's Manual, Section 9, "MC68010
+    /// Instruction Execution Times", and is **datasheet-derived rather than
+    /// oracle-backed**. Each call site names its table.
+    ///
+    /// **THE DELTA IS TAKEN AS THE DIFFERENCE BETWEEN TWO ROWS OF THE SAME
+    /// MANUAL, NEVER AS THE 68010 ROW'S ABSOLUTE.** That is not fussiness: the
+    /// manual's own accounting disagrees with silicon in places. Its `DBcc`
+    /// with an expired counter is 14(3/0) for the 68000, three read cycles,
+    /// where the microcode-derived corpus records two and this core matches it
+    /// on all 2,500 cases. Its `RTR` goes 20(2/0) to 20(5/0) between the two
+    /// sections, which is an erratum being corrected and not a part that
+    /// changed. Section 8's absolutes are therefore not a safe base, while the
+    /// *difference* between Section 8 and Section 9 is computed in one
+    /// accounting and survives both problems.
+    ///
+    /// So the rule at every site is: keep what this core does for the 68000,
+    /// which the per-cycle gate has verified against the microcode, and add the
+    /// manual's difference to it. A row where the manual's two sections agree
+    /// gets no gate at all.
+    #[inline]
+    pub(crate) fn by_variant(&self, m68000: u32, m68010: u32) -> u32 {
+        if self.is_68010_plus() { m68010 } else { m68000 }
+    }
+
     /// Whether this variant stacks the 68010+ four-word exception frame: a
     /// format/vector-offset word above the 68000 SR+PC short frame. The
     /// 68000 has no such word; RTE on the 68010+ pops and discards it.
@@ -1114,7 +1146,9 @@ impl M68000 {
         } else {
             format::words_before_operand(opcode)
         };
-        if words == 0 || format::suppresses_refill(opcode) {
+        let suppressed = format::suppresses_refill(opcode)
+            || (self.is_68010_plus() && format::suppresses_refill_68010(opcode));
+        if words == 0 || suppressed {
             self.exec_clock = base;
             self.run_instruction(bus, master);
             return;

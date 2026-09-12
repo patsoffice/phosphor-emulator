@@ -136,6 +136,10 @@ fn run_with_real_graphics(dir: &Path) -> Vec<Frame> {
          the machine and not about the comparison.",
         word(&*m, R_PHASE)
     );
+    eprintln!(
+        "poll-loop iterations across the 240 active lines: {}",
+        word(&*m, 0x40_0012)
+    );
     shots
 }
 

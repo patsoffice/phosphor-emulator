@@ -167,7 +167,7 @@ machine = "marble"
 frames = 1800
 shows = "Attract mode: the MARBLE MADNESS logo over the TROUBLEMAKERS high-score table, with a red and a blue marble on the black field."
 size = [336, 240]
-frame = "sha256:23ab1e12d79177704100daca44d6b849cf1265f11b4e9bb9bde5109b3b07ff7e"
+frame = "sha256:6dc8ff83aeb4f676aab81e04ec81165854bce8edac37f33d2bc767463cf20acd"
 
 [[frame]]
 machine = "mariobros"
@@ -238,7 +238,7 @@ machine = "roadrunner"
 frames = 1800
 shows = "Attract mode: the canyon backdrop with the striped road, a character mid-road, the BEWARE OF STEEL SHOT IN BIRDSEED banner and the 1985 Atari Games / Warner Bros. copyrights."
 size = [336, 240]
-frame = "sha256:0dc850a1a8f0627bd45cc034b73f37cf38ab2cf24f99ec8e5b1aa30b24d49861"
+frame = "sha256:7a36590057e63d4eb809cdc3d3300288fc835ee0f8bed7001738d0e3959bcd41"
 
 [[frame]]
 machine = "robotron"

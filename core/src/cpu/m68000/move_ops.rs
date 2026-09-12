@@ -42,8 +42,23 @@ impl M68000 {
         // is the documented exception: the part overlaps the decrement with the
         // write it is already committed to, so it costs its transfer and no
         // more, where the same mode as a *source* pays two clocks for it.
+        //
+        // **The 68010 does not overlap it when the source is a register and
+        // the size is long**, and that is the only cell of the move tables
+        // where the two parts differ. Table 9-4 gives a `Dn` or `An` source to
+        // `-(An)` as 14(1/2) where Table 8-3 gives 12(1/2); every memory source
+        // to the same destination agrees between the sections, and the whole of
+        // the byte and word table agrees (Table 9-2 against 8-2, all 108
+        // cells). One cell of 108 is exactly the kind of row a spot check
+        // misses, and it was found by diffing the two sections rather than by
+        // looking for it.
         let dst_internal = if dst_mode & 7 == 4 {
-            0
+            let register_source = matches!(src_mode & 7, 0 | 1);
+            if size == Size::Long && register_source {
+                self.by_variant(0, 2)
+            } else {
+                0
+            }
         } else {
             ea_internal(dst_mode, dst_reg)
         };
@@ -287,8 +302,13 @@ impl M68000 {
         self.ea_write_rmw(bus, master, dst, Size::Word, self.sr as u32)?;
         // A register destination transfers nothing, leaving two clocks to read
         // the status register out; a memory one reads and writes, both counted.
+        //
+        // **The 68010 reads it out for free**: Table 9-18 gives MOVE from SR to
+        // a register as 4(1/0) against Table 8-12's 6(1/0). Its memory form
+        // carries the nonfetching annotation, which is not applied here for the
+        // reason `op_scc` gives.
         let internal = if ea_mode == 0 {
-            2
+            self.by_variant(2, 0)
         } else {
             ea_internal(ea_mode, ea_reg)
         };
@@ -359,7 +379,9 @@ impl M68000 {
     /// between an address register and the parked user stack pointer
     /// (bit 3 selects the direction).
     ///
-    /// Flags: none. 4 cycles.
+    /// Flags: none. 4 cycles, and 6 on the 68010: Table 9-18 gives both
+    /// directions as 6(1/0) against Table 8-12's 4(1/0), one of the two rows in
+    /// this variant's delta where the 68010 is the slower part.
     pub(crate) fn op_move_usp<B: Bus16 + ?Sized>(
         &mut self,
         opcode: u16,
@@ -375,7 +397,7 @@ impl M68000 {
         } else {
             self.usp = self.a[reg];
         }
-        self.finish_from_bus(bus, master, 0);
+        self.finish_from_bus(bus, master, self.by_variant(0, 2));
         Ok(())
     }
 

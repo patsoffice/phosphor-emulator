@@ -377,7 +377,16 @@ impl M68000 {
             // In bounds: both steps, then the fetch behind the opcode. They run
             // first, which is why this finishes ahead of its refill rather than
             // behind it.
-            self.finish_from_bus_address_first(bus, master, compare + ea_time);
+            //
+            // In bounds always reaches the second step, so the six below is the
+            // `compare` this path computed; stated as a literal because it is
+            // the manual's row rather than this core's arithmetic. **The 68010
+            // spends two clocks fewer**: Table 9-18 gives CHK with no trap as
+            // 8(1/0)+ against Table 8-12's 10(1/0)+. The trapping path is not
+            // touched here: its cost is an exception-table row, and those are
+            // carried as an open question.
+            debug_assert_eq!(compare, 6, "in bounds reaches both decision steps");
+            self.finish_from_bus_address_first(bus, master, self.by_variant(6, 4) + ea_time);
         }
         Ok(())
     }

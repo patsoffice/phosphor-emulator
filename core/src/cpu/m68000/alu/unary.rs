@@ -50,8 +50,31 @@ impl M68000 {
             return Ok(());
         }
 
+        // **CLR does not read its destination on the 68010**, and this is the
+        // one row of the variant's delta that changes what happens on the bus
+        // rather than how long it takes. The 68000 reads the destination before
+        // clearing it, which is visible in the R/W bit of an address-error
+        // frame and is why the manual charges CLR a *fetching* effective
+        // address. Section 9 pulls CLR out into a table of its own, Table 9-10,
+        // for exactly this reason: CLR.w (An) is 8(1/1) there, one write and no
+        // read, against the 68000's 8(1/1) plus a fetching EA of 4(1/0).
+        //
+        // So on a 68010 this core was making an access the part does not make,
+        // at the destination address, which a write-only or side-effecting
+        // register would see. NEG, NEGX and NOT keep their read: Table 9-9
+        // leaves all three with a fetching EA, unchanged from Table 8-6.
+        //
+        // A consequence worth naming: an odd destination now faults on the
+        // write rather than on the read, so the frame's R/W bit differs from a
+        // 68000's. That follows from not making the read and there is no oracle
+        // for it either way.
+        let clr_without_fetch = op == UnaryOp::Clr && self.is_68010_plus();
         let ea = self.decode_ea(bus, master, ea_mode, ea_reg, size);
-        let dst = self.ea_read(bus, master, ea, size)?;
+        let dst = if clr_without_fetch {
+            0 // CLR's result does not depend on what was there
+        } else {
+            self.ea_read(bus, master, ea, size)?
+        };
         let result = match op {
             UnaryOp::Negx => self.subx_with_flags(size, 0, dst),
             UnaryOp::Neg => {
@@ -78,6 +101,15 @@ impl M68000 {
         } else {
             ea_internal(ea_mode, ea_reg)
         };
+        // An indexed mode costs two clocks more of address arithmetic when its
+        // operand is not fetched, which Table 9-1 states directly: the indexed
+        // byte/word EA is 10(2/0) fetching and 8(1/0) not, so eight clocks of
+        // bus becomes four and the arithmetic goes from two clocks to four.
+        // With this, the transfer count and the clock count above reproduce
+        // every one of Table 9-10's eighteen cells; without it, the two indexed
+        // rows alone come out two clocks short.
+        let indexed = ea_mode == 6 || (ea_mode == 7 && ea_reg == 3);
+        let internal = internal + if clr_without_fetch && indexed { 2 } else { 0 };
         self.finish_from_bus(bus, master, internal);
         Ok(())
     }
@@ -194,8 +226,23 @@ impl M68000 {
         // In a register the whole cost is the condition test, and a true one
         // takes two clocks longer than a false one. A memory form is all bus
         // besides its addressing mode's own arithmetic.
+        //
+        // **The 68010 costs the same either way in a register**: Table 9-9
+        // gives 4(1/0) for both the true and false byte cases where Table 8-6
+        // gives 6(1/0) for true and 4(1/0) for false, so the condition stops
+        // being worth two clocks.
+        //
+        // Its memory forms are marked as using the nonfetching effective
+        // address calculation, which would mean `Scc` stops reading its
+        // destination. That row is NOT applied here: the manual tabulates it
+        // only as an annotation on a `+`, with no absolute for any composite
+        // mode to check the reading against, and the same annotation appears on
+        // `TAS`, where a read-modify-write cannot stop reading. `CLR` is the
+        // one instruction the manual gives its own table of absolutes for, and
+        // that is where the nonfetching destination is modeled. Carried as a
+        // named open question on the M6 issue.
         let internal = if ea_mode == 0 {
-            if taken { 2 } else { 0 }
+            if taken { self.by_variant(2, 0) } else { 0 }
         } else {
             ea_internal(ea_mode, ea_reg)
         };

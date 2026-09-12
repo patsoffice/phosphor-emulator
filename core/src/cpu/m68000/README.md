@@ -230,10 +230,54 @@ code from a vector table at address 0:
 - **`MOVE from SR` privileged** — vectors to the privilege handler from
   user mode (the 68000 leaves it unprivileged).
 
-Everything else is byte-for-byte the 68000. The following 68010 additions
-are **not** implemented; none are exercised by a supervisor-mode game that
-leaves VBR at 0, but Phase 1 boot bring-up should watch for them and split
-out a follow-up if the ROM hits one:
+Every instruction's *result* is otherwise byte-for-byte the 68000's. What
+differs besides the two behaviors above is timing, and one access:
+
+**The 68010's timing delta is datasheet-derived and not oracle-backed**, and
+that distinction is worth more than the numbers. Neither vector suite covers a
+68010 and neither can be extended to: SingleStepTests publishes the 68000 only,
+and the microcode-level implementation the per-cycle suite is generated from
+instantiates the 68000, the 68008 and the MCU variants. So the rows below come
+from the M68000 User's Manual, Section 9, "MC68010 Instruction Execution
+Times", and `core/tests/m68010_timing_test.rs` is the only check they have.
+
+Every row is **the difference between Section 8 and Section 9**, applied to what
+this core does for the 68000, rather than Section 9's absolute. The manual's own
+accounting disagrees with silicon in places (its `DBcc` with an expired counter
+claims three read cycles where the microcode records two, and its `RTR` read
+count changes between the sections with no change to the part), so its
+absolutes are not a safe base while its differences are. See
+`M68000::by_variant`.
+
+- Not-taken `Bcc`, 8 to 6 clocks for a byte displacement and 12 to 10 for a
+  word. `DBcc` with the condition true, 12 to 10. **`DBcc` with an expired
+  counter, 14 to 16, and both `MOVE USP` directions, 4 to 6: the 68010 is the
+  slower part on those three rows.**
+- `Scc` true in a register, 6 to 4. `MOVE from SR` to a register, 6 to 4. `CHK`
+  in bounds, 10 to 8. `RESET`, 132 to 130.
+- `ANDI`/`EORI`/`ORI` to CCR or SR, 20 to 16, which is one fetch and not a
+  constant: the 68010 does not refill behind the immediate word, because the
+  status-register write discards the queue.
+- `MOVE.l` from a register to `-(An)`, 12 to 14. One cell of the 108 in the
+  move long table, and the only one.
+- **`CLR` does not read its destination**, which is the one row that changes the
+  bus rather than the clock. The 68000 reads before clearing; Section 9 gives
+  `CLR` a table of its own (9-10) because the 68010 does not, so a write-only
+  register is no longer read by a 68010 here.
+
+Two 68010 differences are **carried as named open questions** rather than
+approximated, on
+`phosphor-emulator-cycle-accurate-m68000-5y6e.7`:
+
+- **Loop mode.** A two-word loop is held in the queue and re-executed from it
+  with no instruction fetches at all: Table 9-3 records 10(0/1) for a continued
+  loop, zero read cycles. That is a bus sequence this core cannot express today,
+  not a number, and nothing reaches it by accident.
+- **The format $8 group-0 frame**, below.
+
+The following 68010 additions are **not** implemented; none are exercised by a
+supervisor-mode game that leaves VBR at 0, and that deferral is restated here
+rather than left implicit now that the variant carries its own timing:
 
 - **VBR (vector base register)** — fixed at 0. Vectors are fetched from
   `vector × 4` with no VBR offset.

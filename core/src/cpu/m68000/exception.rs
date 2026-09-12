@@ -345,7 +345,7 @@ impl M68000 {
     /// the whole status register. The SR forms are privileged.
     ///
     /// Flags: per the operation, on the five CCR bits (and the system byte
-    /// for the SR forms). 20 cycles.
+    /// for the SR forms). 20 cycles, and 16 on the 68010.
     pub(crate) fn op_sr_imm<B: Bus16 + ?Sized>(
         &mut self,
         opcode: u16,
@@ -356,7 +356,23 @@ impl M68000 {
         if to_sr && !self.privilege_check(bus, master)? {
             return Ok(());
         }
-        let imm = self.read_imm_word(bus, master);
+        // **The 68010 does not refill behind the immediate word**, and the
+        // manual's numbers say so in a way that names the mechanism rather than
+        // a constant: Table 9-18 gives these forms as 16(2/0) against Table
+        // 8-12's 20(3/0), which is one fetch fewer and exactly four clocks
+        // fewer. The word it skips is one the flush below would throw away, so
+        // this is the rule `prefetch` already states for an instruction about
+        // to discard the queue, applied by the newer part in one more place.
+        //
+        // Read as the difference between the two sections, not as the 68010
+        // absolute: `MOVE to SR` is 12(2/0) in both, so the flush and its
+        // two-word refetch are common to both parts and it is only this extra
+        // refill that goes.
+        let imm = if self.is_68010_plus() {
+            self.read_imm_word_no_refill(bus, master)
+        } else {
+            self.read_imm_word(bus, master)
+        };
         let combine = |a: u16, b: u16| match opcode & 0x0F00 {
             0x0200 => a & b, // ANDI
             0x0A00 => a ^ b, // EORI
@@ -435,7 +451,8 @@ impl M68000 {
     /// clocks. Devices are not wired to the line in this core yet, so the
     /// instruction is a long supervisor no-op; CPU state is unaffected.
     ///
-    /// Flags: none. 132 cycles.
+    /// Flags: none. 132 cycles, and 130 on the 68010: Table 9-18 gives
+    /// 130(1/0) against Table 8-12's 132(1/0), the line held two clocks less.
     pub(crate) fn op_reset_instruction<B: Bus16 + ?Sized>(
         &mut self,
         bus: &mut B,
@@ -446,8 +463,9 @@ impl M68000 {
         }
         // RESET asserts its line for 124 clocks and does nothing on the bus
         // besides its own fetch, which comes *after* the line is released: the
-        // recorded trace puts that single transfer on clock 128.
-        self.finish_from_bus_address_first(bus, master, 128);
+        // recorded trace puts that single transfer on clock 128. The 68010
+        // holds the line two clocks less.
+        self.finish_from_bus_address_first(bus, master, self.by_variant(128, 126));
         Ok(())
     }
 

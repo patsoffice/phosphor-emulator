@@ -319,6 +319,31 @@ pub fn suppresses_refill(opcode: u16) -> bool {
     }
 }
 
+/// The encodings that suppress the refill on a 68010 but not on a 68000.
+///
+/// **Datasheet-derived, and derived as a difference.** The M68000 User's Manual
+/// gives `ANDI`, `EORI` and `ORI` to CCR or SR as 20(3/0) in Table 8-12 and
+/// 16(2/0) in Table 9-18: one read fewer and exactly four clocks fewer, which
+/// is one bus cycle. The three transfers on the 68000 are the refill behind the
+/// opcode and the two at the refetch the status-register write forces, and that
+/// is verified against the microcode-derived corpus. The refetch cannot be what
+/// goes, because the queue has to end holding two words. So the cycle the
+/// 68010 does not make is the refill behind the opcode, which makes this the
+/// rule [`suppresses_refill`] already states, applied by the newer part in one
+/// more place: a word behind an instruction that is about to discard the queue
+/// is a word on the path not taken.
+///
+/// `MOVE to SR` is 12(2/0) in both sections, which is the check on that
+/// reading: the flush and its two-word refetch are common to both parts, so
+/// what differs here is the refill and nothing else.
+///
+/// Kept apart from [`suppresses_refill`] rather than folded in with a variant
+/// argument, because that function is the 68000 table the per-cycle gate holds
+/// the executor to and it should go on meaning exactly that.
+pub fn suppresses_refill_68010(opcode: u16) -> bool {
+    matches!(opcode, 0x003C | 0x007C | 0x023C | 0x027C | 0x0A3C | 0x0A7C)
+}
+
 /// The extended-arithmetic encodings, whose low six bits name registers rather
 /// than an addressing mode: `ADDX`, `SUBX`, `ABCD`, `SBCD`, `CMPM` and `EXG`.
 fn extended_arithmetic(opcode: u16) -> bool {
