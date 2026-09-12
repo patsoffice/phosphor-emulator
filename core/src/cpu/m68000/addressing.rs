@@ -233,7 +233,7 @@ impl M68000 {
     /// for it, exactly as it does for a prefetch: `ADD.w (d16,PC),D0` reads its
     /// operand at code 6 in supervisor mode and 2 in user, where the same
     /// instruction through `(An)` reads at 5 and 1.
-    fn read_word_in<B: Bus16 + ?Sized>(
+    pub(crate) fn read_word_in<B: Bus16 + ?Sized>(
         &mut self,
         bus: &mut B,
         master: BusMaster,
@@ -323,7 +323,7 @@ impl M68000 {
 
     /// As [`Self::read_long_at`], in the space the caller names. Both halves
     /// name the same one.
-    fn read_long_in<B: Bus16 + ?Sized>(
+    pub(crate) fn read_long_in<B: Bus16 + ?Sized>(
         &mut self,
         bus: &mut B,
         master: BusMaster,

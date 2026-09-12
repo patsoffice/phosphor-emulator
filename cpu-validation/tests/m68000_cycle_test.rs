@@ -1828,7 +1828,17 @@ fn test_m68000_cycle_gate() {
             pops_680x0.address_error.operands_pct(),
             95.45,
         ),
-        ("680x0 function codes", pops_680x0.all.fc_pct(), 98.84),
+        // **Down 0.01 of a point on purpose**, and the second floor in this
+        // conversion to come down. This corpus records every PC-relative
+        // operand read at the data function code; the part drives the program
+        // code, because the address was formed from PC. That disagreement was
+        // resolved against the part in M4 and stands here at 4,422 cases in 34
+        // shapes, every one of them `recorded fc5 ours fc6`. Extending it to
+        // `MOVEM`'s list adds 236 cases to the same row and takes 83 cases to
+        // exact against the microcode-derived corpus, where the whole loop of a
+        // PC-relative load is recorded in program space. One mechanism, two
+        // signs: the rung that went down is the one measuring the corpus.
+        ("680x0 function codes", pops_680x0.all.fc_pct(), 98.82),
         // The faulting path's transfer *sequence*, which M4 finished. One case
         // of 178,089 still differs and it is a `MOVEM`, whose trailing read is
         // the residual M3 named and M5 owns. Floored rather than asserted
@@ -1894,7 +1904,11 @@ fn test_m68000_cycle_gate() {
             pops_m68000.address_error.operands_pct(),
             28.06,
         ),
-        ("m68000 function codes", pops_m68000.all.fc_pct(), 98.84),
+        // Raised from 98.84 with `MOVEM`'s list: the only row left here is
+        // `TRAPV`, and it differs in the supervisor bit rather than the space,
+        // which is the S-bit oddity this corpus's own README excludes `TRAPV`
+        // from what it verifies for.
+        ("m68000 function codes", pops_m68000.all.fc_pct(), 98.87),
     ];
     for (name, actual, floor) in floors {
         assert!(

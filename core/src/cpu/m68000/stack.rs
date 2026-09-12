@@ -265,13 +265,21 @@ impl M68000 {
             }
             self.a[reg] = addr;
         } else {
-            let mut addr = if ea_mode == 3 {
-                self.a[ea_reg as usize]
+            let (mut addr, program) = if ea_mode == 3 {
+                (self.a[ea_reg as usize], false)
             } else {
                 let Ea::Mem(base) = self.decode_ea(bus, master, ea_mode, ea_reg, size) else {
                     unreachable!("MOVEM EA modes always resolve to memory");
                 };
-                base
+                // **A PC-relative list is read from program space, and so is
+                // every word of it**, the one past the block included: the part
+                // drives the whole loop through the same space it formed the
+                // address in. Taken here rather than left to a single read
+                // because the loop makes many, and because `ea_read` (which is
+                // what clears this everywhere else) is not what MOVEM reads
+                // through. Only a load can name a PC mode, so the store
+                // direction has no equivalent.
+                (base, std::mem::take(&mut self.ea_program_space))
             };
             for r in 0..16 {
                 if mask & (1 << r) == 0 {
@@ -287,8 +295,8 @@ impl M68000 {
                         self.a[ea_reg as usize] = addr.wrapping_add(2);
                     }
                     let value = match size {
-                        Size::Word => sext16(self.read_word_at(bus, master, addr)?),
-                        _ => self.read_long_at(bus, master, addr)?,
+                        Size::Word => sext16(self.read_word_in(bus, master, addr, program)?),
+                        _ => self.read_long_in(bus, master, addr, program)?,
                     };
                     self.set_movem_reg(r, value);
                 } else {
@@ -313,7 +321,7 @@ impl M68000 {
             // made the total right and left the transfer count one short on
             // every load.
             if to_registers {
-                self.read_word_at(bus, master, addr)?;
+                self.read_word_in(bus, master, addr, program)?;
             }
             if ea_mode == 3 {
                 // Postincrement: the base ends at the final address, even
