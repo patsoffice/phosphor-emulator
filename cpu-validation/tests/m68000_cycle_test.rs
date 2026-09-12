@@ -615,7 +615,10 @@ struct Tally {
     /// population is what this was built for: a corpus disagreement worth
     /// resolving is one where every case misses by the same amount, and one
     /// where the amounts are spread is a mechanism hiding behind an average.
-    length_deltas: BTreeMap<i64, usize>,
+    /// Each bucket carries a case that landed in it, because a bucket holding
+    /// two cases of a hundred and seventy-eight thousand is a finding and a
+    /// count alone cannot say which two.
+    length_deltas: BTreeMap<i64, (usize, String)>,
     /// Cases whose recorded internal time is negative, which would mean the
     /// four-clock transfer model does not hold for them.
     impossible_internal: usize,
@@ -632,7 +635,7 @@ impl Tally {
         self.cases - self.ran
     }
 
-    fn add(&mut self, r: &CaseResult) {
+    fn add(&mut self, r: &CaseResult, name: &str) {
         self.cases += 1;
         if !r.ran {
             return;
@@ -672,7 +675,11 @@ impl Tally {
             self.impossible_internal += 1;
         }
         self.length_delta_sum += r.length_delta;
-        *self.length_deltas.entry(r.length_delta).or_default() += 1;
+        let bucket = self
+            .length_deltas
+            .entry(r.length_delta)
+            .or_insert_with(|| (0, name.to_string()));
+        bucket.0 += 1;
         self.length_delta_range = Some(match self.length_delta_range {
             Some((lo, hi)) => (lo.min(r.length_delta), hi.max(r.length_delta)),
             None => (r.length_delta, r.length_delta),
@@ -799,11 +806,12 @@ fn is_address_error(tc: &M68000TestCase) -> bool {
 
 impl Populations {
     fn add(&mut self, tc: &M68000TestCase, r: &CaseResult) {
-        self.all.add(r);
+        let name = tc.name.as_str();
+        self.all.add(r, name);
         if tc.initial.is_supervisor() {
-            self.supervisor.add(r);
+            self.supervisor.add(r, name);
         } else {
-            self.user.add(r);
+            self.user.add(r, name);
         }
         // A case whose recording has any transfer beyond its instruction
         // fetches reaches memory for an operand.
@@ -814,19 +822,19 @@ impl Populations {
             .filter(|t| t.is_transfer() && t.fc & 1 != 0)
             .count();
         if data_transfers > 0 || transfers > 2 {
-            self.touches_memory.add(r);
+            self.touches_memory.add(r, name);
         } else {
-            self.registers_only.add(r);
+            self.registers_only.add(r, name);
         }
         if is_address_error(tc) {
-            self.address_error.add(r);
+            self.address_error.add(r, name);
         } else {
-            self.completed.add(r);
+            self.completed.add(r, name);
         }
         if data_transfers <= 1 {
-            self.at_most_one_data_txn.add(r);
+            self.at_most_one_data_txn.add(r, name);
         } else {
-            self.several_data_txns.add(r);
+            self.several_data_txns.add(r, name);
         }
     }
 }
@@ -902,13 +910,25 @@ fn report_length_deltas(name: &str, t: &Tally) {
     if t.ran == 0 {
         return;
     }
-    let mut rows: Vec<_> = t.length_deltas.iter().map(|(d, n)| (*n, *d)).collect();
-    rows.sort_by_key(|&(n, d)| (std::cmp::Reverse(n), d));
+    let mut rows: Vec<_> = t
+        .length_deltas
+        .iter()
+        .map(|(d, (n, example))| (*n, *d, example))
+        .collect();
+    rows.sort_by_key(|&(n, d, _)| (std::cmp::Reverse(n), d));
     let shown = rows.len().min(8);
-    let listed: usize = rows[..shown].iter().map(|(n, _)| n).sum();
+    let listed: usize = rows[..shown].iter().map(|(n, _, _)| n).sum();
+    // A bucket small enough to be a finding rather than a population names one
+    // of its cases. The threshold is what keeps the common rows readable.
     let body = rows[..shown]
         .iter()
-        .map(|(n, d)| format!("{d:+} x {n}"))
+        .map(|(n, d, example)| {
+            if *n <= 4 {
+                format!("{d:+} x {n} (e.g. {example})")
+            } else {
+                format!("{d:+} x {n}")
+            }
+        })
         .collect::<Vec<_>>()
         .join(", ");
     eprintln!(
@@ -1007,7 +1027,8 @@ struct FileTally {
 
 impl FileTally {
     fn add(&mut self, tc: &M68000TestCase, r: &CaseResult) {
-        self.all.add(r);
+        let name = tc.name.as_str();
+        self.all.add(r, name);
         // Completed cases only. A case that ends in an address error spends
         // most of its length inside exception entry, which belongs to no
         // addressing mode, so counting one under its mode's row reports the
@@ -1019,7 +1040,7 @@ impl FileTally {
         // population table.
         if !is_address_error(tc) {
             let group = case_group(tc.initial.prefetch[0]);
-            self.by_mode.entry(group.clone()).or_default().add(r);
+            self.by_mode.entry(group.clone()).or_default().add(r, name);
             if r.ran && !r.length_exact {
                 let e = self.examples.entry(group).or_default();
                 if e.len() < 3 {
@@ -1054,7 +1075,7 @@ fn note_fault_group(into: &mut FaultGroups, tc: &M68000TestCase, r: &CaseResult)
         return;
     }
     let e = into.entry(case_group(tc.initial.prefetch[0])).or_default();
-    e.0.add(r);
+    e.0.add(r, &tc.name);
     if r.ran {
         let names = e.1.entry(r.length_delta).or_default();
         if names.len() < 2 {
@@ -1757,8 +1778,15 @@ fn test_m68000_cycle_gate() {
     // costs, by exactly eight clocks on every case, and the microcode settles
     // it: see `ABORTED_ACCESS_CLOCKS`. The histogram is what keeps that
     // readable, because a single bucket at +8 is a corpus disagreement and a
-    // spread would be a defect. The two exact cases are `MOVEM.l` loads whose
-    // finish saturates past the replay cap.
+    // spread would be a defect.
+    //
+    // The two exact cases are `DBcc D6, #`, which the histogram now names. They
+    // were recorded here as `MOVEM.l` loads saturating past the replay cap,
+    // which was a guess and was wrong: they are unchanged by the cursor that
+    // removed that cap, established by running the gate with and without it.
+    // The microcode-derived corpus is exact on every one of its 55,607 faulting
+    // cases, `DBcc` included, so what these two are is that corpus's own
+    // eight-clock convention not reaching them.
     assert_eq!(
         pops_m68000.address_error.length_exact,
         pops_m68000.address_error.ran,
