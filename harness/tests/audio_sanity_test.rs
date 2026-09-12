@@ -402,6 +402,16 @@ fn measure(dir: &Path, machine: &str) -> Option<(Integrity, Fixture)> {
     } else {
         audio
     };
+    // The samples that were measured, for anyone who needs to hear them or put
+    // them through `disasm audiodiff`. Written here rather than reconstructed
+    // later so that the capture and the measurement cannot disagree about which
+    // samples they describe. See [`common::audio_wav_dir`].
+    if let Some(dir) = common::audio_wav_dir() {
+        let path = dir.join(format!("{machine}.wav"));
+        if let Err(e) = common::write_wav(&path, &channel, rate as u32) {
+            eprintln!("{machine}: could not write {}: {e}", path.display());
+        }
+    }
     Some((Integrity::measure(&pcm_to_f64(&channel)), fixture))
 }
 

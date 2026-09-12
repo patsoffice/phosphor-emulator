@@ -105,22 +105,35 @@ max_silent_fraction = 0.999
 # it. Established by stashing that change alone: 13 of 13 without it, 12 of 13
 # with it. Nothing in the audio path changed.
 #
-# **Which of two things this is has not been established, and they have opposite
-# answers.** The same commit moved this machine's golden frame by 34 pixels of
-# 80,640, all on the animated character, because the attract demo reaches a
-# different point in 1800 frames once the divide costs what the part charges.
-# So either the machine is now genuinely driving its audio into clipping, which
-# is a defect here, or the capture window lands on a louder passage than it did,
-# which is the fixture measuring itself. That second failure is what this file's
-# header describes for the 23 machines once listed as silent.
+# **MEASURED, and the two candidate answers are now settled separately.** The
+# captures either side of that commit were written out and compared with
+# `disasm audiodiff`.
+#
+# The window did NOT move. Both captures have the same onset to the
+# millisecond, the same nine events at the same 0.833 s spacing, the same
+# attack, the same T20 decay, an envelope alignment of 0.000 s, the same
+# largest discontinuity within 0.1 ms, and event energies 0.1% apart. Whatever
+# this machine is playing, it is playing the same sequence at the same times.
+#
+# The level did rise, and not as gain: AC RMS +2.88 dB, and the band energies,
+# which are scale-invariant, moved by up to 11.7 points, with 400-1000 Hz
+# gaining what 0-150 Hz and 1000-3000 Hz lost. The same events are being played
+# over denser simultaneous content.
+#
+# **And it was already at the rail before the change.** Peak was 0.00 dBFS on
+# both sides, and clipping went 0.350% to 1.029% against a 1.00% tolerance:
+# this board's mix crossed the line by 0.029 of a percentage point, having
+# already been at a third of it. So the rail-pinning is a property of the Atari
+# System 1 audio path, which is unmodeled analog rather than a CPU defect, and
+# the divide fix is what made it visible. That path is
+# phosphor-emulator-irx4's.
 #
 # Entered as a defect rather than as correct because a `correct` entry has to
-# state a hardware reason and there is none to state. This is the conservative
-# of the two: the ratchet asserts the machine is still like this and fails the
-# moment it stops being, so it cannot become a silent skip. The issue holds how
-# to settle it.
+# state a hardware reason, and "the mix reaches the rail" is a reason to model
+# the output stage, not a reason to accept the reading. The ratchet asserts the
+# machine is still like this and fails the moment it stops being.
 [[known_defect]]
 machine = "roadrunner"
 clipping = true
-reason = "Reads as pinned at the rail only after DIVU and DIVS took their real per-operand internal time, with no change to the audio path; not yet established whether the level really rose or the attract capture window moved onto a louder passage."
+reason = "The mix reaches the rail on 1.03% of samples against a 1.00% tolerance, having been at 0.35% before DIVU and DIVS took their real internal time. Measured either side with audiodiff: identical event timeline, so not the capture window, and +2.88 dB with an 11.7 point band shift, so not gain. The output stage is unmodeled analog, phosphor-emulator-irx4."
 issue = "phosphor-emulator-idaz"

@@ -106,6 +106,52 @@ where
     out
 }
 
+/// Where the audio suite should write the captures it measures, if anywhere.
+///
+/// **A measurement nobody can listen to is not evidence.** The audio suite
+/// reduces ten seconds of a machine to three numbers, which is the right thing
+/// for a gate and the wrong thing for an investigation: when a machine starts
+/// reporting a defect, the question is always whether the waveform changed or
+/// the window moved onto a different passage, and no reduction answers that.
+/// Setting `PHOSPHOR_AUDIO_WAV_DIR` writes exactly the samples the suite
+/// measured, so the same capture can go to `disasm audiodiff` or to a speaker.
+///
+/// Allowed dead: this module is compiled into every ROM-gated suite and only
+/// the audio one calls this.
+#[allow(dead_code)]
+pub fn audio_wav_dir() -> Option<std::path::PathBuf> {
+    let dir = std::env::var_os("PHOSPHOR_AUDIO_WAV_DIR")?;
+    let dir = std::path::PathBuf::from(dir);
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir)
+}
+
+/// Write 16-bit mono PCM as a WAV. Allowed dead for the same reason as
+/// [`audio_wav_dir`].
+#[allow(dead_code)]
+pub fn write_wav(path: &std::path::Path, samples: &[i16], rate: u32) -> std::io::Result<()> {
+    use std::io::Write;
+    let data_len = (samples.len() * 2) as u32;
+    let mut f = std::io::BufWriter::new(std::fs::File::create(path)?);
+    f.write_all(b"RIFF")?;
+    f.write_all(&(36 + data_len).to_le_bytes())?;
+    f.write_all(b"WAVE")?;
+    f.write_all(b"fmt ")?;
+    f.write_all(&16u32.to_le_bytes())?;
+    f.write_all(&1u16.to_le_bytes())?; // PCM
+    f.write_all(&1u16.to_le_bytes())?; // mono
+    f.write_all(&rate.to_le_bytes())?;
+    f.write_all(&(rate * 2).to_le_bytes())?; // byte rate
+    f.write_all(&2u16.to_le_bytes())?; // block align
+    f.write_all(&16u16.to_le_bytes())?; // bits
+    f.write_all(b"data")?;
+    f.write_all(&data_len.to_le_bytes())?;
+    for s in samples {
+        f.write_all(&s.to_le_bytes())?;
+    }
+    f.flush()
+}
+
 // ---------------------------------------------------------------------------
 // The fan-out itself, checked without needing a ROM
 //
