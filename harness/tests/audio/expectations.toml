@@ -99,3 +99,28 @@ max_silent_fraction = 0.999
 # and their clipping went with the offset. Worth knowing for what remains: an
 # offset of this shape is the analog side missing, not the chip being modelled
 # wrongly, and both chips match their reference implementations exactly.
+
+# Road Runner's output reads as rail-pinned from the commit that gave DIVU and
+# DIVS their real data-dependent internal time, and passed on the commit before
+# it. Established by stashing that change alone: 13 of 13 without it, 12 of 13
+# with it. Nothing in the audio path changed.
+#
+# **Which of two things this is has not been established, and they have opposite
+# answers.** The same commit moved this machine's golden frame by 34 pixels of
+# 80,640, all on the animated character, because the attract demo reaches a
+# different point in 1800 frames once the divide costs what the part charges.
+# So either the machine is now genuinely driving its audio into clipping, which
+# is a defect here, or the capture window lands on a louder passage than it did,
+# which is the fixture measuring itself. That second failure is what this file's
+# header describes for the 23 machines once listed as silent.
+#
+# Entered as a defect rather than as correct because a `correct` entry has to
+# state a hardware reason and there is none to state. This is the conservative
+# of the two: the ratchet asserts the machine is still like this and fails the
+# moment it stops being, so it cannot become a silent skip. The issue holds how
+# to settle it.
+[[known_defect]]
+machine = "roadrunner"
+clipping = true
+reason = "Reads as pinned at the rail only after DIVU and DIVS took their real per-operand internal time, with no change to the audio path; not yet established whether the level really rose or the attract capture window moved onto a louder passage."
+issue = "phosphor-emulator-idaz"

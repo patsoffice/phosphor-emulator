@@ -83,6 +83,129 @@ impl M68000 {
         Ok(())
     }
 
+    /// Clocks `DIVU` spends off the bus, walked one microcode step at a time.
+    ///
+    /// **This is a restoring division and its length is the loop, not a
+    /// table.** The part shifts the remainder up by one, tries the divisor
+    /// against it, and keeps or restores the result:
+    ///
+    /// - Where the remainder's top bit was already set, the shift carries it
+    ///   past sixteen bits and the divisor must fit, so the part does not test:
+    ///   **four clocks**.
+    /// - Where it was not and the trial subtract succeeds: **six**.
+    /// - Where it was not and the subtract borrows, the old remainder has to be
+    ///   put back, which is a step of its own: **eight**.
+    ///
+    /// The last of the sixteen passes always costs six, having no next pass to
+    /// choose a shift for. Six clocks of setup precede all of it, and the
+    /// overflow exit is taken from that setup before the loop runs at all,
+    /// which is why an overflowing `DIVU` is ten clocks and one transfer.
+    ///
+    /// **The worst case is the check that this is the right shape.** Fifteen
+    /// passes that all restore, plus six for the last and six of setup, is 132,
+    /// and 132 plus the one transfer is the 136 this core charged flat. A model
+    /// off by a step anywhere would not land on that number.
+    fn divu_internal(dividend: u32, divisor: u16) -> u32 {
+        // dvur1, dvum2, dvum3: latch the operands, try the divisor against the
+        // high half, and take the overflow exit if it fits.
+        let mut clocks = 6;
+        let mut rem = dividend >> 16;
+        if rem >= u32::from(divisor) {
+            return clocks;
+        }
+        let divisor = u32::from(divisor);
+        let mut low = dividend as u16;
+        for pass in 0..16 {
+            let top_was_set = rem & 0x8000 != 0;
+            rem = (rem << 1) | u32::from(low >> 15);
+            low <<= 1;
+            if pass == 15 {
+                // The last pass places the remainder instead of choosing a
+                // shift, and costs the same either way.
+                clocks += 6;
+                if top_was_set || rem >= divisor {
+                    rem -= divisor;
+                }
+            } else if top_was_set {
+                clocks += 4;
+                rem -= divisor;
+            } else if rem >= divisor {
+                clocks += 6;
+                rem -= divisor;
+            } else {
+                clocks += 8;
+            }
+        }
+        clocks
+    }
+
+    /// Clocks `DIVS` spends off the bus, walked the same way.
+    ///
+    /// **The same restoring loop on the absolute values, with sign work either
+    /// side of it.** The part takes the divisor's sign first and negates it if
+    /// it has to, then the dividend's, which costs a step more because the
+    /// negation is two halves with a borrow between them. Then the loop, which
+    /// differs from `DIVU`'s only in shifting before it subtracts rather than
+    /// after, so it has no case where the top bit already set makes the
+    /// subtract certain: **six clocks where the subtract succeeds and eight
+    /// where it has to be put back**, with the last of the sixteen always six.
+    ///
+    /// The tail puts the signs back on the quotient and the remainder, and what
+    /// it costs depends on which signs there were:
+    ///
+    /// ```text
+    ///   divisor +, dividend +   six     divisor -, dividend +   eight
+    ///   divisor +, dividend -   ten     divisor -, dividend -   eight
+    /// ```
+    ///
+    /// An overflow found *before* the loop skips all of it, which is the whole
+    /// difference between an overflowing `DIVS` and a working one. An overflow
+    /// found after it costs the same as a result, because the step that
+    /// notices drives the same fetch either way.
+    fn divs_internal(dividend: u32, divisor: u16) -> u32 {
+        let dividend_negative = dividend & 0x8000_0000 != 0;
+        let divisor_negative = divisor & 0x8000 != 0;
+        // Two steps to take the divisor's sign, one to take the dividend's, and
+        // one more to finish the dividend's negation, which is a long.
+        let mut clocks = 10 + if dividend_negative { 4 } else { 2 };
+
+        let magnitude = if dividend_negative {
+            (dividend as i32).wrapping_neg() as u32
+        } else {
+            dividend
+        };
+        let divisor = u32::from(if divisor_negative {
+            (divisor as i16).wrapping_neg() as u16
+        } else {
+            divisor
+        });
+
+        // The same trial against the high half, and the same early exit.
+        let mut rem = magnitude >> 16;
+        if rem >= divisor {
+            return clocks;
+        }
+        clocks += 2;
+        let mut low = magnitude as u16;
+        for pass in 0..16 {
+            rem = (rem << 1) | u32::from(low >> 15);
+            low <<= 1;
+            let fits = rem >= divisor;
+            if fits {
+                rem -= divisor;
+            }
+            clocks += if pass == 15 || fits { 6 } else { 8 };
+        }
+
+        clocks
+            + 4
+            + match (divisor_negative, dividend_negative) {
+                (false, false) => 2,
+                (false, true) => 6,
+                (true, _) => 4,
+            }
+    }
+
     /// DIVU.w / DIVS.w <ea>,Dn — 32 ÷ 16 → 16-bit quotient in the low word
     /// of Dn, 16-bit remainder in the high word.
     ///
@@ -113,12 +236,14 @@ impl M68000 {
             self.set_flag(SrFlag::Z, false);
             self.set_flag(SrFlag::V, false);
             self.set_flag(SrFlag::C, false);
-            // Exception entry pushes the frame and fetches the vector, five
-            // transfers on the 68000 and six on the 68010, all counted. So the
-            // longer frame now costs its four clocks by itself rather than
-            // needing a variant-gated constant here.
+            // Four clocks of the divide's own before it can tell: it latches
+            // the operands and tries the divisor against the high half, and the
+            // zero shows up as that trial's result. Then the entry's own four
+            // in front of the frame and two between the handler's fetches,
+            // which is ten and not the eighteen this charged.
+            self.spend_idle(bus, master, 4);
             self.exception(bus, master, 5, self.instr_pc, 4)?;
-            self.finish_from_bus(bus, master, 18 + ea_time);
+            self.finish_from_bus(bus, master, 10 + ea_time);
             return Ok(());
         }
 
@@ -128,7 +253,11 @@ impl M68000 {
             if dst == 0x8000_0000 && divisor == -1 {
                 self.d[dn] = 0;
                 self.set_flags_logical(Size::Long, 0);
-                self.finish_from_bus(bus, master, 154 + ea_time);
+                self.finish_from_bus_address_first(
+                bus,
+                master,
+                Self::divs_internal(dst, src) + ea_time,
+            );
                 return Ok(());
             }
             let quotient = (dst as i32) / divisor;
@@ -145,7 +274,11 @@ impl M68000 {
                 self.set_flag(SrFlag::V, true);
                 self.set_flag(SrFlag::C, false);
             }
-            self.finish_from_bus(bus, master, 154 + ea_time);
+            self.finish_from_bus_address_first(
+                bus,
+                master,
+                Self::divs_internal(dst, src) + ea_time,
+            );
         } else {
             let quotient = dst / src as u32;
             let remainder = dst % src as u32;
@@ -161,7 +294,16 @@ impl M68000 {
                 self.set_flag(SrFlag::V, true);
                 self.set_flag(SrFlag::C, false);
             }
-            self.finish_from_bus(bus, master, 136 + ea_time);
+            // **A divide fetches after its loop, where a multiply fetches
+            // before.** The part's multiply issues the refill behind the opcode
+            // in the step that starts the loop; its divide has no such step and
+            // issues it in the one that ends, so all of the loop's time runs in
+            // front of that fetch.
+            self.finish_from_bus_address_first(
+                bus,
+                master,
+                Self::divu_internal(dst, src) + ea_time,
+            );
         }
         Ok(())
     }
