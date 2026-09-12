@@ -375,6 +375,7 @@ pub struct M68000 {
             program: true,
             supervisor: true,
             byte: false,
+            rmw: false,
         },
     }; MAX_PENDING])]
     pub(crate) pending: [PendingCycle; MAX_PENDING],
@@ -442,12 +443,7 @@ impl M68000 {
             pre_exec_transfers: 0,
             ea_program_space: false,
             pending: [PendingCycle::Refill {
-                signals: BusSignals {
-                    is_write: false,
-                    program: true,
-                    supervisor: true,
-                    byte: false,
-                },
+                signals: BusSignals { is_write: false, program: true, supervisor: true, byte: false, rmw: false },
             }; MAX_PENDING],
             pending_len: 0,
             pending_pos: 0,
@@ -877,6 +873,7 @@ impl M68000 {
             program: true,
             supervisor: self.flag_is_set(SrFlag::S),
             byte: false,
+            rmw: false,
         }
     }
 
@@ -889,6 +886,7 @@ impl M68000 {
             program: false,
             supervisor: self.flag_is_set(SrFlag::S),
             byte,
+            rmw: false,
         }
     }
 

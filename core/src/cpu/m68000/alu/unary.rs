@@ -6,7 +6,7 @@
 //! 0x48C0) but operates on a data register only.
 
 use super::super::M68000;
-use super::super::addressing::{AccessResult, Size, ea_internal, sext8, sext16};
+use super::super::addressing::{AccessResult, Ea, Size, ea_internal, sext8, sext16};
 use super::super::flags::SrFlag;
 use super::binary::size_from_bits;
 use crate::core::{Bus16, BusMaster};
@@ -111,10 +111,15 @@ impl M68000 {
 
     /// TAS <ea> (0x4AC0, line 0x4 sub-op 0xA size bits 11): test-and-set —
     /// read the byte operand, set the flags from it, write it back with
-    /// bit 7 set. On hardware this is one indivisible read-modify-write bus
-    /// cycle; this core's two transactions are equivalent for a single bus
-    /// master. Data-alterable destination only (0x4AFC is ILLEGAL, routed
+    /// bit 7 set. Data-alterable destination only (0x4AFC is ILLEGAL, routed
     /// before this handler).
+    ///
+    /// **In memory this is one bus cycle, not two**, and it is the only
+    /// instruction on the part that drives one: the address strobe is held
+    /// across the read and the write so no other master can get between the
+    /// test and the set. Ten clocks, where two ordinary transfers would be
+    /// eight, because the part spends two between the halves. See
+    /// [`M68000::read_modify_write_byte`].
     ///
     /// Flags: N/Z from the value *before* bit 7 is set, V/C cleared,
     /// **X untouched**.
@@ -131,22 +136,27 @@ impl M68000 {
             return Ok(());
         }
         let ea = self.decode_ea(bus, master, ea_mode, ea_reg, Size::Byte);
-        let value = self.ea_read(bus, master, ea, Size::Byte)?;
-        self.set_flags_logical(Size::Byte, value);
-        self.ea_write_rmw(bus, master, ea, Size::Byte, value | 0x80)?;
-
-        // TAS in memory is an indivisible read-modify-write: the part holds the
-        // bus across both halves rather than running two ordinary cycles, and
-        // the recorded traces show it as one ten-clock `t` transaction. This
-        // core still runs a read and a write, so it reaches the same total by a
-        // different route: two transfers plus the six clocks the held bus costs
-        // beyond them. Modelling the indivisible cycle itself waits for M5.
-        let internal = if ea_mode == 0 {
-            0
-        } else {
-            6 + ea_internal(ea_mode, ea_reg)
+        if ea_mode == 0 {
+            // A register destination touches no bus at all: the read, the test
+            // and the write-back are internal, and the opcode's own refill is
+            // the whole cost.
+            let value = self.ea_read(bus, master, ea, Size::Byte)?;
+            self.set_flags_logical(Size::Byte, value);
+            self.ea_write(bus, master, ea, Size::Byte, value | 0x80)?;
+            self.finish_from_bus(bus, master, 0);
+            return Ok(());
+        }
+        let Ea::Mem(addr) = ea else {
+            unreachable!("the register form returned above and no other mode is legal here")
         };
-        self.finish_from_bus(bus, master, internal);
+        let value = self.read_modify_write_byte(bus, master, addr, |byte| byte | 0x80)?;
+        self.set_flags_logical(Size::Byte, u32::from(value));
+
+        // Two transfers, the held cycle and the refill behind the opcode, and
+        // six clocks left: two inside the cycle and four the part spends before
+        // it issues the fetch. They run ahead of that fetch, which is why the
+        // refill lands ten clocks after the cycle starts rather than four.
+        self.finish_from_bus_address_first(bus, master, 6 + ea_internal(ea_mode, ea_reg));
         Ok(())
     }
 

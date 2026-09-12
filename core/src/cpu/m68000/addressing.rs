@@ -453,6 +453,55 @@ impl M68000 {
         );
     }
 
+    /// Read a byte and write one back inside a single indivisible bus cycle.
+    ///
+    /// **This is one cycle, not two, and that is what `TAS` is for.** The part
+    /// holds the address strobe across both halves so no other master can take
+    /// the bus between the test and the set, and the recorded traces show it as
+    /// a single ten-clock transaction of its own kind. Ten rather than eight
+    /// because the part spends two clocks between the halves working out what
+    /// to write.
+    ///
+    /// So the cycle is announced once, before the read, and the write inside it
+    /// announces nothing: a board watching the bus sees one cycle carrying the
+    /// `rmw` signal. Both accesses are real, because the part really does read
+    /// and really does write, and a device with a side effect on either sees
+    /// exactly the one it would see from hardware.
+    ///
+    /// `modify` is given the byte that was read and returns the byte to write.
+    pub(crate) fn read_modify_write_byte<B: Bus16 + ?Sized>(
+        &mut self,
+        bus: &mut B,
+        master: BusMaster,
+        addr: u32,
+        modify: impl FnOnce(u8) -> u8,
+    ) -> AccessResult<u8> {
+        // Replayed as a read: the value it returned is all a later attempt
+        // needs, and the write inside it must not happen twice.
+        if let Some(byte) = self.replay_read_byte() {
+            return Ok(byte);
+        }
+        if self.must_suspend() {
+            return Err(Abort::Suspend);
+        }
+        if self.pending_pos < self.pending_len {
+            if self.can_suspend() {
+                return Err(Abort::Suspend);
+            }
+            self.flush_pending(bus, master);
+        }
+        let a = self.mask_addr(addr);
+        let mut signals = self.data_cycle(false, true);
+        signals.rmw = true;
+        bus.observe_bus_cycle(master, a, signals);
+        self.transfers += 1;
+        self.tick_cycles += 1;
+        let byte = bus.read_byte(master, a);
+        bus.write_byte(master, a, modify(byte));
+        self.log_cycle(super::ReplayedCycle::ReadByte(byte));
+        Ok(byte)
+    }
+
     /// Push a word onto the active stack (A7 predecrements by 2).
     pub(crate) fn push_word<B: Bus16 + ?Sized>(
         &mut self,

@@ -1405,6 +1405,9 @@ pub struct RecordingBus68k {
     /// function code instead of the previous transfer's, which is the
     /// difference between a visible fault and a plausible one.
     pending: Option<BusSignals>,
+    /// The word address of an announced read-modify-write cycle, until its
+    /// write half arrives. See [`Self::observe_bus_cycle`].
+    rmw_at: Option<u32>,
 }
 
 impl RecordingBus68k {
@@ -1416,6 +1419,7 @@ impl RecordingBus68k {
             clock: 0,
             recording: false,
             pending: None,
+            rmw_at: None,
         }
     }
 
@@ -1424,6 +1428,7 @@ impl RecordingBus68k {
         self.log.clear();
         self.clock = 0;
         self.pending = None;
+        self.rmw_at = None;
         self.recording = true;
     }
 
@@ -1489,7 +1494,13 @@ impl Bus for RecordingBus68k {
         InterruptState::default()
     }
 
-    fn observe_bus_cycle(&mut self, _master: BusMaster, _addr: u32, signals: BusSignals) {
+    fn observe_bus_cycle(&mut self, _master: BusMaster, addr: u32, signals: BusSignals) {
+        // An indivisible read-modify-write is announced once and then performs
+        // two accesses, so the write half arrives with no announcement of its
+        // own. Remembering where the cycle was is what lets the write be
+        // recognized as part of it rather than mistaken for a transfer that
+        // forgot to announce itself, which is a real fault this bus reports.
+        self.rmw_at = signals.rmw.then_some(addr & 0x00FF_FFFE);
         self.pending = Some(signals);
     }
 }
@@ -1523,6 +1534,18 @@ impl Bus16 for RecordingBus68k {
         let i = (addr & 0x00FF_FFFF) as usize;
         self.memory[i] = data;
         self.dirty_writes.push((i & !1) as u32);
+        // The write half of an indivisible read-modify-write is inside the
+        // cycle the read already logged, so it adds no entry of its own. What
+        // it does is carry the value: the recordings' `t` entry holds the byte
+        // the part *wrote*, which is the last thing on the data bus before the
+        // strobe is released, so the cycle already logged takes it.
+        if self.rmw_at.take() == Some((i & !1) as u32) {
+            let _ = master;
+            if let Some(cycle) = self.log.last_mut() {
+                cycle.data = data as u16;
+            }
+            return;
+        }
         let (clock, fc) = (self.clock, self.take_fc());
         if self.recording {
             self.log.push(OurAccess {

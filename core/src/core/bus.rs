@@ -32,6 +32,16 @@ pub struct BusSignals {
     pub supervisor: bool,
     /// One byte behind a single strobe, rather than a full word behind both.
     pub byte: bool,
+    /// An indivisible read-modify-write: the address strobe is held across the
+    /// read *and* the write that follows it, so the two are one bus cycle and
+    /// no other master can take the bus between them.
+    ///
+    /// `TAS` is the only instruction that drives one, which is the whole point
+    /// of `TAS`: the test and the set cannot be separated by another master.
+    /// The read announces the cycle and the write inside it announces nothing,
+    /// so a consumer counting cycles counts one. Ten clocks rather than the
+    /// usual four, because the part spends two between the halves.
+    pub rmw: bool,
 }
 
 impl BusSignals {

@@ -1787,14 +1787,14 @@ fn test_m68000_cycle_gate() {
         // same of operands, and 0.42 of transfer count and function codes here,
         // while taking `CHK` to exact on every rung against the other corpus.
         // See `M68000::op_chk`.
-        ("680x0 length", pops_680x0.all.length_pct(), 79.17),
-        ("680x0 kinds", pops_680x0.all.kinds_pct(), 98.15),
-        ("680x0 count", pops_680x0.all.count_pct(), 98.44),
-        ("680x0 positions", pops_680x0.all.positions_pct(), 78.19),
+        ("680x0 length", pops_680x0.all.length_pct(), 79.86),
+        ("680x0 kinds", pops_680x0.all.kinds_pct(), 98.84),
+        ("680x0 count", pops_680x0.all.count_pct(), 99.12),
+        ("680x0 positions", pops_680x0.all.positions_pct(), 78.87),
         (
             "680x0 positions, completed",
             pops_680x0.completed.positions_pct(),
-            95.13,
+            95.96,
         ),
         (
             "680x0 positions, >1 data transaction",
@@ -1809,13 +1809,13 @@ fn test_m68000_cycle_gate() {
         // against this corpus is `RTE` and `RTR`, which it records reading the
         // stack in an order the part does not use: see
         // `M68000::pop_status_and_pc`.
-        ("680x0 operands", pops_680x0.all.operands_pct(), 96.54),
+        ("680x0 operands", pops_680x0.all.operands_pct(), 97.22),
         (
             "680x0 operands, address error",
             pops_680x0.address_error.operands_pct(),
             95.45,
         ),
-        ("680x0 function codes", pops_680x0.all.fc_pct(), 97.71),
+        ("680x0 function codes", pops_680x0.all.fc_pct(), 98.40),
         // The faulting path's transfer *sequence*, which M4 finished. One case
         // of 178,089 still differs and it is a `MOVEM`, whose trailing read is
         // the residual M3 named and M5 owns. Floored rather than asserted
@@ -1834,9 +1834,17 @@ fn test_m68000_cycle_gate() {
             pops_m68000.address_error.kinds_pct(),
             99.99,
         ),
-        ("m68000 length", pops_m68000.all.length_pct(), 97.19),
+        ("m68000 length", pops_m68000.all.length_pct(), 97.86),
         ("m68000 kinds", pops_m68000.all.kinds_pct(), 98.63),
-        ("m68000 count", pops_m68000.all.count_pct(), 99.56),
+        // **This corpus disqualifies itself on `TAS` and says so.** Its README
+        // excludes `TAS` and `TRAPV` from what it verifies as good, and names
+        // the read-modify-write timing as the reason. It records `TAS` as two
+        // ordinary transfers where the part drives one held cycle and the other
+        // corpus records that cycle as its own kind, so modeling the part
+        // costs 0.66 points of transfer count here and takes `TAS` to exact on
+        // every rung over there. The one instruction in this conversion where
+        // the stronger-provenance set is the weaker authority.
+        ("m68000 count", pops_m68000.all.count_pct(), 98.90),
         ("m68000 positions", pops_m68000.all.positions_pct(), 95.96),
         // **The number M5's exception-entry work exists to move**, and it had
         // no floor because it had no value: a structural 0.00% while entry

@@ -852,6 +852,7 @@ mod tests {
         program: false,
         supervisor: true,
         byte: false,
+        rmw: false,
     };
 
     /// Walk the beam over a whole frame's scanlines so every visible row is
