@@ -233,7 +233,7 @@ SDL2 + egui windowed frontend — external dependencies: SDL2, zip, egui:
 - **Z80** — 1604 opcodes, 1,604,000 test vectors, validated against [SingleStepTests/z80](https://github.com/SingleStepTests/z80) with full register/flag/timing verification. See [cpu-validation/README_z80.md](cpu-validation/README_z80.md).
 - **I8035** — 229 opcodes, 229,000 test vectors, cross-validated against [mame4all](https://github.com/ValveSoftware/steamlink-sdk/tree/master/examples/mame4all) MCS-48. See [cpu-validation/README_i8035.md](cpu-validation/README_i8035.md).
 - **I8088** — 279 opcodes, 2,577,000 test vectors, validated against [SingleStepTests/8088](https://github.com/SingleStepTests/8088) with full register/flag/memory verification. See [cpu-validation/README_i8088.md](cpu-validation/README_i8088.md).
-- **M68000** — complete instruction set (74 mnemonics), 1,000,058 test vectors (every file, every vector incl. address-error aborts), validated against [SingleStepTests/680x0](https://github.com/SingleStepTests/680x0) with register/flag/memory (state-only) verification. See [core/src/cpu/m68000/README.md](core/src/cpu/m68000/README.md).
+- **M68000**: complete instruction set (74 mnemonics), validated against two independently generated suites: [SingleStepTests/680x0](https://github.com/SingleStepTests/680x0) for state, 1,000,058 vectors (every file, every vector incl. address-error aborts), and [SingleStepTests/m68000](https://github.com/SingleStepTests/m68000) for the per-cycle bus trace, 99.79% exact on instruction length and 97.39% on transfer placement. The 68010 variant's timing is datasheet-derived and has no oracle. See [core/src/cpu/m68000/README.md](core/src/cpu/m68000/README.md).
 
 ### Cross-Validation (`cross-validation/`)
 

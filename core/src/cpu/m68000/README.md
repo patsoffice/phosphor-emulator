@@ -3,8 +3,9 @@
 Per-clock emulation of the Motorola 68000: 16-bit data bus, 32-bit registers,
 big-endian, 24-bit address space. Validated against two independently generated
 vector suites, one for state and one for the per-cycle bus trace (see
-[Validation](#validation)). Architected so the 68010/68020/68030 can be layered
-on later via the `M68kVariant` gate; only 68000 behavior is implemented.
+[Validation](#validation)). The 68010 is implemented behind the `M68kVariant`
+gate, behavior and timing both, with the 68020/68030 layerable on the same gate
+later.
 
 **Status: instruction set complete; timing per-clock.** Every 68000 instruction
 is implemented and every vector of the state suite is compared, the exact
@@ -13,9 +14,9 @@ covers the full instruction set in Motorola syntax.
 
 The per-clock conversion is tracked as its own epic
 (`docs/designs/cycle-accurate-m68000.md`), whose milestones are also numbered
-M1 to M7 and are **not** the M1-M7 of the original implementation: M1 to M5 of
-that epic have landed, M6 is the 68010 timing delta and M7 is board
-integration.
+M1 to M7 and are **not** the M1-M7 of the original implementation. All seven
+have landed: the conversion is complete on the four boards that run this core,
+and what is left is the residual list below rather than a milestone.
 
 ## Status
 
@@ -51,12 +52,12 @@ full rules; every instruction doc comment states which rule it follows.
 |------------|------------------------------------------|---------------------------------------------------------------------------|
 | Move       | MOVE, MOVEA, MOVEQ, MOVEP, SWAP, EXG     | All source/dest EA modes; MOVEP moves alternating peripheral bytes        |
 | Arithmetic | ADD/A/I/Q, SUB/A/I/Q                     | Both directions; ADDA/SUBA full-width, no flags; ADDQ data 1-8; X = C     |
-| Compare    | CMP, CMPA, CMPI, CMPM, TST, CHK          | Flags only; never alter X; CHK trap entry lands in M5                     |
+| Compare    | CMP, CMPA, CMPI, CMPM, TST, CHK          | Flags only; never alter X; CHK decides in two steps and does not refill   |
 | Logical    | AND, ANDI, OR, ORI, EOR, EORI, NOT       | N/Z set, V/C cleared, X untouched                                         |
 | Extended   | ADDX, SUBX, NEGX                         | Consume X as carry/borrow-in; Z cleared but never set                     |
 | BCD        | ABCD, SBCD, NBCD                         | Hardware-exact undefined N/V/C (per-nibble correction adder)              |
 | Unary      | NEG, CLR, EXT, Scc, TAS                  | Scc never alters the CCR; TAS sets bit 7 after testing                    |
-| Mul/Div    | MULU, MULS, DIVU, DIVS                   | Divide overflow: V set, C cleared, N/Z/Dn unchanged; ÷0 trap lands in M5  |
+| Mul/Div    | MULU, MULS, DIVU, DIVS                   | Divide overflow: V set, C cleared, N/Z/Dn unchanged; per-operand loops    |
 | Shifts     | ASL, ASR, LSL, LSR, ROL, ROR, ROXL, ROXR | Register count mod 64; one-bit memory forms; ROL/ROR never touch X        |
 | Branches   | BRA, BSR, Bcc, DBcc                      | 8/16-bit displacements from the word after the opcode; all 14 conditions  |
 | Jumps      | JMP, JSR, RTS, RTR                       | Control EA modes; RTR restores the five CCR bits; none alter the CCR else |
@@ -151,8 +152,9 @@ land on one clock (`phosphor-emulator-d31l`); `ADDX.l`/`SUBX.l` put their refill
 in front of both write words where the part puts it between them
 (`phosphor-emulator-7wmg`); and the bit operations on a `Dn` destination are
 data-dependent in a way this core does not yet model
-(`phosphor-emulator-4sdm`). The 68010's timing delta is not built at all: a
-68010 currently charges 68000 timings.
+(`phosphor-emulator-4sdm`). The 68010 charges its own timing, from the manual
+rather than from an oracle, with two differences carried as open questions: see
+"68010 support".
 
 ### Word bus
 

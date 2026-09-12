@@ -1065,6 +1065,117 @@ reconciles that for the initial and final states and cannot for a value in
 memory. That is why the faulting population reads 28.07% there while reading
 95.46% on the other corpus, and it is floored where it stands.
 
+## M6 as built: the 68010 charges its own timing
+
+Landed in `b0f9dc3`, whose message carries the row-by-row record along with the
+`phosphor-emulator-cycle-accurate-m68000-5y6e.7` comments. Eleven timing rows
+and one access, each citing its Section 9 table at the code: not-taken `Bcc`
+byte and word, `DBcc` condition-true and counter-expired, `Scc` true in a
+register, `MOVE from SR` to a register, `MOVE USP` both directions, `CHK` in
+bounds, `RESET`, the `ANDI`/`EORI`/`ORI` to CCR and SR group, `MOVE.l` register
+to `-(An)`, and `CLR` losing its destination read.
+
+**The delta is the difference between Sections 8 and 9, never Section 9's
+absolute**, because the manual's own accounting is wrong where we can check it:
+its `DBcc` with an expired counter claims three read cycles where the
+microcode-derived corpus records two and this core matches the corpus on all
+2,500 cases. One manual's internal difference is a safe base; its absolutes are
+not.
+
+Two rows turned out to be mechanisms rather than constants, which is what the
+`n(r/w)` columns bought. The immediate-to-CCR group is 20(3/0) against 16(2/0),
+one read fewer and exactly one bus cycle fewer, so what goes is the refill
+behind the immediate word: a rule this core already had, applied by the newer
+part in one more place, with `MOVE to SR` staying 12(2/0) in both sections as
+the check on that reading. And `CLR` does not read its destination, which a
+board can see: a 68010 here was making an access the part does not make, at the
+destination address.
+
+**Three rows go the other way and the 68010 is the slower part**: `DBcc` with an
+expired counter, and both `MOVE USP` directions. Worth stating, because a pass
+assuming the newer part is quicker everywhere would have had eight rows agree
+with it and these three silently wrong.
+
+Loop mode and the format $8 group-0 frame are carried as named open questions
+with their datasheet rows recorded in the issue. Loop mode is a bus sequence
+this core cannot express rather than a clock count: Table 9-3's continued-loop
+column reads 10(0/1), zero read cycles, because the two-word loop is held in the
+queue and re-executed from it. `MOVEC`, `MOVES`, `RTD` and `MOVE from CCR` stay
+bounded NOPs, and that deferral is now stated in the README rather than left
+implicit.
+
+**The generated differential net was not built, and the reason changed.** The
+argument against trusting one stands, but the manual gives `n(r/w)` per row on
+the same four-clock model this core uses, so it already constrains the transfer
+count and the internal time separately, which is the whole property the net was
+wanted for. What a generated net would add over that is intra-instruction
+placement, the one thing a table-driven generator is weakest at.
+
+The 68000 is untouched: both corpora read digit for digit what they read at M5's
+close, and the state gate is exactly 1,000,058 of 1,000,060. Nineteen
+per-instruction tests in `core/tests/m68010_timing_test.rs` run the same
+instruction on both variants, so each asserts a difference rather than a number,
+and three exist to fail if a delta is applied too widely.
+
+## M7 as built: the boards, and what the conversion cost
+
+**Correctness first, and nothing moved.** The four boards were already carrying
+M6, whose two golden-frame pins had been recaptured scoped at that milestone
+(marble and roadrunner, the two 68010 boards, with foodf and quantum unmoved).
+M7 re-ran the sweeps rather than trusting that: 12 golden-frame tests including
+`every_pinned_machine_still_draws_its_frame` and
+`reference_pngs_match_their_hashes`, 13 audio-sanity tests including
+`no_machine_emits_newly_defective_audio` and `every_known_defect_is_still_present`,
+7 boot checks with `marble_madness_boots_its_68010` and
+`road_runner_boots_its_68010` among them, 7 ROM-backed save-state round trips,
+24 movie tests, and the Road Runner MAME-picture comparison. All green, so **no
+frame needed a mechanism named at this milestone**, and the recapture that did
+happen belongs to M6.
+
+### Throughput, and the host again
+
+**This milestone was measured on the newer host**, the one the tree moved to
+during M4, not the one the M1 baseline and the 2x floor were argued on. The
+recorded M1 figures are therefore not comparable and the percentages are the
+ones to read, exactly as the M4 section warns. So the M1 and M5 commits were
+re-measured here in worktrees rather than trusting a recorded figure. Same
+protocol throughout: release, 600 frames, 1800 warmup, fastest of five reps, two
+runs of each configuration, and the fastest run per machine taken, which is the
+same stable estimator the bench applies across reps.
+
+| machine | CPU | M1 emul ms/f | M5 emul ms/f | M6 emul ms/f | M5 to M6 | M1 to M6 | real time |
+|---|---|---|---|---|---|---|---|
+| foodf | 68000 | 0.946 | 1.199 | 1.195 | -0.3% | +26.3% | 13.72x |
+| quantum | 68000 | 1.196 | 1.446 | 1.451 | +0.3% | +21.3% | 9.00x |
+| marble | 68010 | 1.735 | 2.186 | 2.193 | +0.3% | +26.4% | 7.60x |
+| roadrunner | 68010 | 2.038 | 2.511 | 2.535 | **+1.0%** | **+24.4%** | **6.57x** |
+
+**Road Runner still binds, at 6.57x real time, which is 3.3x above the 2x
+floor.** On this host the floor allows emulation to grow about 4.1x from M1;
+the whole conversion spent 24.4% of that.
+
+Two things in this table are worth more than the headline.
+
+- **The two 68000 boards did not move from M5 to M6 and the two 68010 boards
+  did.** That is an independent corroboration of M6's own check that no delta
+  leaked into the 68000 path, and it comes from a different instrument than the
+  vector gate. A first, noisier pair of runs put Road Runner's figure at +1.9%
+  with per-machine spreads of +/-2.6% to +/-4.6%; the cleaner pair, spreads
+  +/-0.5% to +/-0.6%, put it at +1.0%. The larger number was noise, not a larger
+  cost, and the sign is what survived both.
+- **Road Runner's +24.4% here lands on the +24.0% recorded for M1 to M5 on the
+  original host.** The percentages travel between hosts for the binding machine
+  even though the absolutes do not, which is the claim the M4 section made and
+  the first chance anyone has had to check it. foodf and quantum did **not**
+  travel as well, coming in at +26.3% and +21.3% against +37.9% and +36.2%
+  there: the newer host absorbs the conversion better on the lighter boards. So
+  quote percentages across hosts for the machine that binds and re-measure for
+  the others.
+
+**The epic's prediction held to the end.** This core had no overcount to reclaim
+the way the I8088 did, so every clock of bus modeling was added cost and the
+conversion never once ran faster than it started.
+
 ## Decision 4: byte strobes are not a separate project
 
 `phosphor-emulator-contained-fidelity-np9x.1` says a 68000 byte write should be
@@ -1381,11 +1492,13 @@ from M2 on, with the ROM-gated suites run.
   exception entry and the address-error abort, one family per commit. Landed:
   see [M5 as built](#m5-as-built-the-awkward-instructions-and-exception-entry-as-a-body).
 - **M6. The 68010 delta.** Absorbs `phosphor-emulator-zi4z`. Datasheet-derived,
-  variant-gated, labeled in the README as not oracle-backed. Includes generating
-  68010 vectors and running them as a divergence report, never as a gate.
+  variant-gated, labeled in the README as not oracle-backed. Landed: see
+  [M6 as built](#m6-as-built-the-68010-charges-its-own-timing). The generated
+  68010 vectors in this bullet's original scope were deliberately not built, and
+  that section says why.
 - **M7. Board integration.** Golden frames and audio on all four boards, bench
-  against the M1 baseline, README status lines updated on the core and on the
-  machines.
+  against the M1 baseline, README status lines updated. Landed: see
+  [M7 as built](#m7-as-built-the-boards-and-what-the-conversion-cost).
 
 ## Recommendation
 
