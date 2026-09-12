@@ -1,15 +1,21 @@
 # Motorola 68000 CPU
 
-Instruction-level emulation of the Motorola 68000 — 16-bit data bus, 32-bit
-registers, big-endian, 24-bit address space. Validated against
-[SingleStepTests/680x0](https://github.com/SingleStepTests/680x0)
-(state-only). Architected so the 68010/68020/68030 can be layered on later
-via the `M68kVariant` gate; only 68000 behavior is implemented.
+Per-clock emulation of the Motorola 68000: 16-bit data bus, 32-bit registers,
+big-endian, 24-bit address space. Validated against two independently generated
+vector suites, one for state and one for the per-cycle bus trace (see
+[Validation](#validation)). Architected so the 68010/68020/68030 can be layered
+on later via the `M68kVariant` gate; only 68000 behavior is implemented.
 
-**Status: complete (M1-M7).** Every 68000 instruction is implemented and
-every vector of the SingleStepTests suite is compared (the exact
-mid-instruction address-error abort included). The debugger-facing
-disassembler (M6) covers the full instruction set in Motorola syntax.
+**Status: instruction set complete; timing per-clock.** Every 68000 instruction
+is implemented and every vector of the state suite is compared, the exact
+mid-instruction address-error abort included. The debugger-facing disassembler
+covers the full instruction set in Motorola syntax.
+
+The per-clock conversion is tracked as its own epic
+(`docs/designs/cycle-accurate-m68000.md`), whose milestones are also numbered
+M1 to M7 and are **not** the M1-M7 of the original implementation: M1 to M5 of
+that epic have landed, M6 is the 68010 timing delta and M7 is board
+integration.
 
 ## Status
 
@@ -17,9 +23,10 @@ disassembler (M6) covers the full instruction set in Motorola syntax.
 |------------------|--------------------------------------------------------|
 | Instructions     | complete (74 mnemonics)                                |
 | Addressing modes | 12 of 12                                               |
-| Integration tests| 259 (+ 48 unit tests)                                  |
-| Validation       | 1,000,058/1,000,060 SingleStepTests vectors (124 files)|
-| Timing           | Approximate documented cycle counts (state-accurate)   |
+| Integration tests| 320 (+ 57 unit tests)                                  |
+| State validation | 1,000,058/1,000,060 SingleStepTests vectors (124 files)|
+| Timing           | Per-clock, one bus cycle per four clocks               |
+| Timing validation| 99.79% exact on length, 97.39% on transfer placement   |
 
 ## Registers
 
@@ -81,20 +88,48 @@ All 12 of the 68000's effective-address modes are decoded by
 
 ## Architecture
 
-### Execution model: atomic, not per-cycle
+### Execution model: one tick is one clock, and a body can run twice
 
-Instructions decode and apply their full effect on the first cycle
-(i8088-style), then burn the remaining documented cycles as bus-idle wait
-states via `ExecState::Execute(n)`:
+One `tick()` is one clock of the 68000, and the part drives one bus cycle every
+four clocks and overlaps none of them. A loader takes the opcode out of the
+prefetch queue and burns the addressing mode's arithmetic in front of the
+instruction body; a bus unit runs the cycles nothing in the instruction waits on
+(a write, whose value is already decided, and a queue refill) one per four
+clocks behind it:
 
 ```rust
 enum ExecState {
-    Fetch,        // ready to fetch the next opcode
-    Execute(u32), // burning remaining documented cycles
-    Stopped,      // STOP executed, waiting for an interrupt
-    Halted,       // double bus fault / external halt
+    Fetch,                  // ready to take the next opcode from the queue
+    Lead(u32),              // an addressing mode's arithmetic, before any cycle
+    LoadWait(u32),          // waiting out the refill behind the opcode
+    BodyWait(u32),          // waiting out the cycles the body's last run made
+    DrainPending { .. },    // running the cycles a suspended body handed over
+    TrailingRefill { .. },  // the refills the instruction still owes
+    Execute(u32),           // internal time with nothing on the bus
+    Stopped,                // STOP executed, waiting for an interrupt
+    Halted,                 // double bus fault / external halt
 }
 ```
+
+**An instruction body that needs a second bus cycle is unwound and run again.**
+A body is straight-line code and cannot wait in the middle of itself, so a cycle
+it has not run before, arriving on a clock that already has one, restores the
+registers to where the body found them, spends the clocks of the cycles it did
+run, and runs the body again. The second run is served its earlier cycles from a
+replay log instead of from the bus, so it reaches the next one having made no
+access twice and runs it on a clock of its own. Nothing is read twice, so a
+device with a read side effect sees one access; nothing is written twice,
+because writes go to the bus unit and the log says which are already there.
+
+`MOVEM`'s load direction is the exception, and the only one: it moves up to
+thirty-two words, more than the log holds, so it **commits** instead. Each
+register it loads is declared real, the body state is re-captured with it and
+the log is emptied, and a cursor outside that state says which register to
+re-enter at. See `stack::MovemLoad`.
+
+Exception entry is a body in its own right, with its own state capture and
+replay log, because the instruction that faulted is over and there is nothing
+left to unwind it to.
 
 **What an instruction costs is charged from what it does on the bus**, not
 looked up: four clocks for every transfer it performs plus a declared internal
@@ -110,10 +145,14 @@ control transfer has to declare its flush through `set_pc_flush`: a taken branch
 with a zero displacement lands where execution would have gone anyway, so no
 comparison of addresses can tell a flush from a fall-through.
 
-What is still not modeled is *when* within an instruction each transfer runs.
-The effect is applied atomically and the transfers are made in the order the
-interpreter makes them, which is right for most families and measurably wrong
-for a few (see the gate's residual: `TAS`, `MOVEM`, the long `ADDX`/`SUBX`).
+What is left is named rather than described, and each piece has an issue: a
+queue refill the body drives itself cannot suspend, so two program reads can
+land on one clock (`phosphor-emulator-d31l`); `ADDX.l`/`SUBX.l` put their refill
+in front of both write words where the part puts it between them
+(`phosphor-emulator-7wmg`); and the bit operations on a `Dn` destination are
+data-dependent in a way this core does not yet model
+(`phosphor-emulator-4sdm`). The 68010's timing delta is not built at all: a
+68010 currently charges 68000 timings.
 
 ### Word bus
 
@@ -211,8 +250,13 @@ out a follow-up if the ROM hits one:
 
 ```text
 core/src/cpu/m68000/
-  mod.rs         -- M68000 struct, M68kVariant, ExecState, dispatch, reset, traits
+  mod.rs         -- M68000 struct, M68kVariant, ExecState, the loader, the bus
+                    unit, the body replay log, dispatch, reset, traits
   flags.rs       -- SrFlag, interrupt mask, set_supervisor SP-swap, cc_true
+  prefetch.rs    -- the two-word queue: refill, flush, and where a refill goes
+  format.rs      -- per-encoding tables the loader needs before the body runs:
+                    extension words, which fetches are suppressed, leading
+                    internal time
   addressing.rs  -- Size/Ea, decode_ea, sized word-bus access, ea_cycles
   move_ops.rs    -- MOVE, MOVEA, MOVEQ, MOVEP, SWAP, EXG, MOVE SR/CCR/USP
   alu.rs         -- shared flag cores: add/sub, extended addx/subx, logical
@@ -234,17 +278,37 @@ core/src/cpu/m68000/
 ```bash
 cargo test -p phosphor-core            # unit + per-group integration tests
 cargo test -p phosphor-cpu-validation --release --test m68000_single_step_test
+cargo test -p phosphor-cpu-validation --release --test m68000_cycle_test
 ```
 
-The TomHarte/SingleStepTests 680x0 suite is the correctness gate
-(state-only: registers, SR, PC, RAM; cycles and bus transactions are not
-compared). Every file is enabled and every vector is compared. Result:
-**1,000,058 passed, 0 failed** across all 124 files — including every
-address-error, divide-by-zero, CHK-trap, and privilege-violation vector.
-The only two skips are known-bad vectors in ASL.b whose expected state is
-unrelated to the executed instruction (suite generation glitches).
+**Two suites, generated independently, and they check different things.** A
+single generated oracle has the failure mode where subject and standard come
+from the same place, with nothing to distinguish a correct implementation from
+one that agrees with its source's mistakes. Where the two agree and this core
+differs, this core is wrong. Where they disagree, the question is settled
+against the part's own microcode, and the reason is recorded at the code it
+governs, never as a fitted constant.
 
-The suite's vectors capture real-hardware behavior for the "undefined"
+- **`SingleStepTests/680x0` is the state gate** (registers, SR, PC, RAM;
+  documentation-derived, verified by use). Every file is enabled and every
+  vector compared: **1,000,058 passed, 0 failed** across all 124 files,
+  including every address-error, divide-by-zero, CHK-trap and
+  privilege-violation vector. The only two skips are known-bad vectors in ASL.b
+  whose expected state is unrelated to the executed instruction (suite
+  generation glitches).
+- **`SingleStepTests/m68000` is the per-cycle gate**, generated from a
+  microcode-level implementation of the part, and it carries the bus trace:
+  each instruction's total clock count and its ordered transactions with
+  explicit idle time. The gate compares six rungs, each with a ratcheting
+  floor: clock count, transfer kinds, transfer count, the clock each transfer
+  lands on, its address, size and data, and its function code. Its `pc` is the
+  generator's next-prefetch address, which runs ahead of the execution point
+  and is reconciled rather than compared directly.
+
+Both gates are reported split by population, because an aggregate held up by
+the cases that touch no memory says nothing about the ones that do.
+
+The state suite's vectors capture real-hardware behavior for the "undefined"
 flag cases, and this core matches them exactly: the BCD instructions model
 the per-nibble correction adder, divide overflow sets V and clears C while
 leaving N/Z and the register untouched, and ASR with a count past the
@@ -256,5 +320,7 @@ win.
 
 - [M68000 User's Manual (M68000UM)](https://www.nxp.com/docs/en/reference-manual/MC68000UM.pdf) — instruction set, timing tables
 - [M68000 Family Programmer's Reference Manual (M68000PRM)](https://www.nxp.com/docs/en/reference-manual/M68000PRM.pdf) — per-instruction flag semantics
-- [SingleStepTests/680x0](https://github.com/SingleStepTests/680x0) — validation vectors (submodule at `cpu-validation/test_data/680x0`)
-- [docs/designs/m68000-emulator.md](../../../../docs/designs/m68000-emulator.md) — design doc and milestone roadmap
+- [SingleStepTests/680x0](https://github.com/SingleStepTests/680x0): state vectors (submodule at `cpu-validation/test_data/680x0`)
+- [SingleStepTests/m68000](https://github.com/SingleStepTests/m68000): per-cycle bus traces (submodule at `cpu-validation/test_data/m68000`)
+- [docs/designs/m68000-emulator.md](../../../../docs/designs/m68000-emulator.md): design doc and milestone roadmap
+- [docs/designs/cycle-accurate-m68000.md](../../../../docs/designs/cycle-accurate-m68000.md): the per-clock conversion, its oracles and each milestone as built
