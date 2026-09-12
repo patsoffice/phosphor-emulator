@@ -836,6 +836,235 @@ M3 named and M5 owns. `PEA` and `MOVE` were this milestone's and are exact:
 Both are exact on every rung on both corpora now, and the faulting path's
 transfer sequence with them: one case of 178,089 differs and it is a `MOVEM`.
 
+## M5 as built: the awkward instructions, and exception entry as a body
+
+**Landed 2026-09-12.** The families that do not fit the operand pipeline, plus
+the faulting side, which had read a structural zero on rung 3 since M4 first
+reported it.
+
+| rung | M4 | M5 |
+|---|---|---|
+| **m68000** length | 79.40% | **99.79%** |
+| ... on cases that fault | 0.00% | **100.00%** |
+| ... transfer kinds | 98.23% | **99.07%** |
+| ... transfer count | 99.15% | **99.34%** |
+| ... **positions in clocks** | 72.20% | **97.39%** |
+| ... positions, on cases that fault | 0.00% | **97.15%** |
+| ... positions, completed | 87.53% | **97.45%** |
+| ... positions, >1 data transaction | - | **95.20%** |
+| ... address, size and data | 80.61% | **86.37%** |
+| ... function code | 98.03% | **98.88%** |
+| ... **mean clock delta** | -0.60 | **+0.00** |
+| **680x0** length | 89.11% | 81.73% |
+| ... positions in clocks | 76.91% | **80.22%** |
+| ... address, size and data | 79.98% | **97.68%** |
+| ... function code | 98.14% | 98.83% |
+
+**The microcode-derived corpus is the one to read for length and positions
+now.** The other omits the eight clocks an aborted access costs, on every one of
+its 178,089 faulting cases, so its aggregates are lower by construction and its
+faulting population cannot reach 100% however right this core gets. Both are
+still reported and both still have floors; the 680x0 length figure going *down*
+across this milestone is that disagreement being resolved against the part, not
+a regression, and is recorded at the floor it lowered.
+
+### Exception entry is a body in its own right
+
+The instruction that faulted is over, so there is nothing to unwind to, and
+without a body of its own the entry drove all eleven of its cycles on one clock.
+Four mechanisms, and the whole faulting side of rung 3 depends on them:
+
+- entry gets its own state capture and replay log (`BodyKind`);
+- a read **waits** for the outstanding list to drain rather than flushing it,
+  wherever the body can be unwound;
+- the bus unit's list carries steps that drive nothing (`PendingCycle::Idle`),
+  because entry has a gap in the middle: its two fetches at the handler are six
+  clocks apart, not four;
+- cycles driven belong to the **clock**, not to whatever drove them.
+  `tick_cycles` is zeroed at the top of `execute_cycle`. Interrupt entry never
+  runs through a body, and zeroing that count inside one is what moved a golden
+  frame.
+
+Where the idle steps fall is per source and taken from the part: four in front
+of the frame for `TRAP`, the illegal and privilege vectors, a zero divide and
+`CHK`; six for an interrupt; none for `TRAPV`, whose fetch does the setup those
+steps would; twelve for an address error.
+
+**The group-0 frame is written in the part's order**, which is the short frame's
+interleave twice: sp-2, sp-6, sp-4, sp-8, sp-10, sp-14, sp-12, with the
+instruction register alone between the two halves. Rung 4 had read 0.00% on
+every faulting case on both corpora until this was found, and it was this one
+defect: the seven-word frame was being written downwards.
+
+### The families, and what the part said about each
+
+- **`MULU`/`MULS` and `DIVU`/`DIVS`** charged their worst case flat. Both are
+  loops whose trip count depends on the data, transcribed one microcode step at
+  a time: a multiply costs two clocks per one bit in its source, and a restoring
+  divide costs six clocks a pass where the subtract takes and eight where the
+  old remainder has to be put back. A divide fetches *after* its loop where a
+  multiply fetches before, because the part's multiply issues the refill in the
+  step that starts the loop and its divide has no such step.
+- **`TAS` is one held bus cycle**, ten clocks of read, two clocks, write, and
+  then the prefetch: fourteen in all, not a read and a separate write.
+  `BusSignals` gained an `rmw` flag and the recording bus folds the write half
+  into the announced cycle.
+- **`MOVEM` loads read one word past the block** and throw it away, both sizes.
+  The part's loop runs one read ahead of itself, so a list of n registers costs
+  n + 1 reads and the last is never stored. It is a real access at a real
+  address, which a device mapped just past the block can see.
+- **A PC-relative `MOVEM` reads its whole list from program space**, not just
+  the extension word that formed the address.
+- **`MOVEP` and the three BCD instructions needed nothing.** They were read
+  against the microcode and already exact: `MOVEP.w`, `MOVEP.l`, `ABCD`, `SBCD`
+  and `NBCD` each read 100.00% on all six rungs on both corpora. Reading the
+  part first is what turned two of M5's six families into a null result instead
+  of a change; the reverse order would have produced edits in search of a
+  number.
+
+### A load that resumes, because a load cannot be replayed
+
+`MOVEM.l` moves up to thirty-two words and the replay log holds sixteen, so past
+the sixteenth the body could not suspend and the rest of the list ran on one
+clock. **A cursor alone cannot fix that**: the unwind restores the register
+file, so skipping the registers already transferred would lose their values.
+
+So the load **commits**. Once a register is loaded, `commit_body_state`
+re-captures the body state and empties the log, and `MovemLoad` (outside
+`BodyState`, because the unwind must not restore it) says which register to
+re-enter at. The log then never holds more than one register's worth of cycles
+and every transfer can suspend however long the list is.
+
+Raising the cap was the alternative and was rejected twice over: the log is
+walked from the top on every attempt, so a thirty-two word load would cost a
+quadratic number of replay steps on the core whose throughput binds this
+conversion, and sixteen would still be a limit where the part has none.
+`MOVEM.w` does not move and should not, at sixteen transfers for sixteen
+registers; a change that had moved the word form too would have been changing
+something other than the cap.
+
+### Six corpus disagreements, all resolved at the microcode
+
+Each has its reason where the code is, and none of them is a fitted constant:
+
+1. **The aborted access costs its bus cycle and four clocks more**
+   (`ABORTED_ACCESS_CLOCKS`). Nothing reaches the bus, since the address strobe
+   is never asserted. The manual's fifty is for entry alone and says nothing
+   about the attempt. One constant with a mechanism is a disagreement; the four
+   buckets it replaced were a defect.
+2. **`CHK` does not refill in front of its trap**, and it decides in two steps:
+   the first traps on the sign *or the overflow* of bound minus value, the
+   second, two clocks later, on the value's own sign (`op_chk`). The other
+   corpus records the refill and compensates with four clocks less internal
+   time, so `CHK`'s total is right there and its bus activity is not, which is
+   the two-errors-cancelling shape this ladder exists to catch.
+3. **`TAS` is one indivisible cycle** (`read_modify_write_byte`).
+4. **`DIVS` has a late overflow band** the documentation-derived corpus does not
+   model: where the quotient's magnitude lands between 32768 and 65535 the part
+   cannot tell before the loop, so it runs all sixteen passes and reports the
+   overflow in its tail (`divs_internal`).
+5. **`RTE` and `RTR` pop straight upwards** (`pop_status_and_pc`).
+6. **A PC-relative operand is read from program space**, extended this milestone
+   to `MOVEM`'s list. The documentation-derived corpus records the data code on
+   4,658 cases in 36 shapes, every one of them `recorded fc5 ours fc6`.
+
+A mistake worth keeping on the record: `RTE` and `RTR` were changed to pop the
+high half first, from a dump of the documentation-derived corpus rather than
+from the part, and reverted when the microcode was read. That corpus was wrong,
+and the rule this project states most emphatically is the one that would have
+caught it before the edit rather than after.
+
+### The instrument, again
+
+Two additions, and they are what made the faulting side decidable. The
+address-error population had one rate and one mean over 178,089 cases, and the
+mean read -0.92 on a population that was 57% exact, which is not any case being
+wrong by -0.92.
+
+- **A clock-delta histogram per population**, commonest first. It said 0, -2,
+  -6 and -4 where the mean said -0.92, which is the difference between one
+  corpus disagreement and a defect hiding behind an average. Small buckets name
+  a case, and that immediately corrected an attribution recorded in M4: the two
+  documentation-derived faulting cases that are exact where the other 178,087
+  are eight out were written down as `MOVEM.l` loads saturating past the replay
+  cap, and they are `DBcc`. Established by running the gate with and without the
+  cursor that removed that cap: the same two cases, in the same bucket, either
+  way.
+- **Address-error cases grouped by instruction shape**, with named examples,
+  because the by-addressing-mode report deliberately excludes them and that left
+  the whole faulting side with no breakdown at all. The groups named the
+  mechanism in one run: -6 was `JMP` and `JSR` with an index, -2 was `CLR`,
+  `ASL`, `MOVEfromSR`, `ADDX`, `SUBX` and `JSR` with a displacement, 0 was
+  `MOVEM`.
+- **Rung-3 rows name a case.** A pair of clock lists says two sequences differ;
+  it does not say which encoding produced them, and one instruction name covers
+  twelve addressing modes whose microcode is twelve different sequences.
+
+### Throughput
+
+Measured on the original host, the one the M1 baseline and the 2x floor were
+argued on, established by measuring the M4 commit here in a worktree rather than
+trusting the recorded figure: the delta being looked for is about 2.5%, which is
+the same size as the gap between the two hosts. Two runs of each, agreeing
+within 1%, fastest rep of five, 600 frames, 1800 warmup.
+
+| machine | M1 emul ms/f | M4 emul ms/f | M5 emul ms/f | M4 to M5 | M1 to M5 | real time |
+|---|---|---|---|---|---|---|
+| foodf | 1.594 | 2.139 | 2.198 | +2.8% | +37.9% | 7.46x |
+| quantum | 1.862 | 2.427 | 2.536 | +4.5% | +36.2% | 3.91x |
+| marble | 3.026 | 3.882 | 3.957 | +1.9% | +30.8% | 4.21x |
+| roadrunner | 3.310 | 4.007 | 4.106 | **+2.5%** | **+24.0%** | **4.06x** |
+
+Road Runner binds at **4.06x** against the 2x floor, so M6 and M7 have 2.03x of
+headroom. This milestone added a suspending exception-entry body, a longer
+pending list, per-operand multiply and divide loops and a resuming `MOVEM`, for
+2.5% of the binding machine's emulation time; the whole conversion has now spent
+about a quarter of a budget that was allowed to grow by 152%.
+
+**The `capture_body_state` skip was measured and not built.** The plan was to
+skip the body-state capture for bodies that cannot suspend. Its ceiling was
+measured first, by making the capture cost *twice* as much rather than by
+skipping it unsoundly, which keeps the program correct and so measures the same
+program: one capture is worth 2.8% of foodf's emulation time and 1.2% of Road
+Runner's. So the whole optimization can return at most 1.2% on the machine that
+binds, and only for the fraction of instructions that cannot suspend. Collecting
+it needs a per-encoding predicate for "makes at most one operand read", whose
+hard cases are the `-(An),-(An)` forms of `ADDX`, `SUBX`, `CMPM`, `ABCD` and
+`SBCD`, encoded with the same EA-mode field their register forms use. That is
+the artifact M4 wrote, checked, rejected on 22,337 cases and threw away. Not
+worth its risk at 1.2%, and the number is recorded here so it is not re-derived.
+
+### What is left, and whose it is
+
+Rung 3's residual on the microcode-derived corpus is 5,329 cases in 264 shapes,
+and it is three mechanisms:
+
+- **2,231 cases are a body-driven refill that cannot suspend**, so two program
+  reads land on one clock. `refill_prefetch` is infallible, and making it
+  suspend means making `take_word`, `read_imm_word` and `fill_prefetch` fallible
+  across every call site. It also blocks placing internal time that sits between
+  two fetches, which is why an indexed `MOVEM`'s two-clock index add is still at
+  the end of the instruction rather than in the middle, on 588 cases:
+  `defer_idle`'s entry is discarded by the `flush_pending` the next refill
+  performs. `phosphor-emulator-d31l`.
+- **2,437 cases have every transfer on a clock of its own but two clocks early**,
+  and 661 more have the first transfer early or late. It is a two-clock shift in
+  one direction or the other: `MOVEtoSR` two late, the bit operations and
+  `MOVE.b` two early. `phosphor-emulator-4sdm` owns the bit-operation half, and
+  `MOVEM`'s 588 indexed cases sit in this class rather than beside it.
+
+Rung 2's residual is `TAS` on the corpus whose README disqualifies it for `TAS`,
+and **834 cases of `ADDX.l`/`SUBX.l`**, which put their refill between their two
+write words where this core puts it in front of both:
+`phosphor-emulator-7wmg`.
+
+Rung 4's residual on that corpus is 40,323 cases and it is a convention, not a
+defect: its `pc` is the generator's next-prefetch address, so a PC an
+instruction writes into memory differs from ours by the prefetch lead. The gate
+reconciles that for the initial and final states and cannot for a value in
+memory. That is why the faulting population reads 28.07% there while reading
+95.46% on the other corpus, and it is floored where it stands.
+
 ## Decision 4: byte strobes are not a separate project
 
 `phosphor-emulator-contained-fidelity-np9x.1` says a 68000 byte write should be
@@ -1149,7 +1378,8 @@ from M2 on, with the ROM-gated suites run.
 - **M4. The operand pipeline.** Per-clock operand accesses; instruction bodies
   become pure compute. Widen to rungs 4 and 5.
 - **M5. The awkward set and exceptions.** `MOVEM`, mul/div, `MOVEP`, BCD, `TAS`,
-  exception entry and the address-error abort, one family per commit.
+  exception entry and the address-error abort, one family per commit. Landed:
+  see [M5 as built](#m5-as-built-the-awkward-instructions-and-exception-entry-as-a-body).
 - **M6. The 68010 delta.** Absorbs `phosphor-emulator-zi4z`. Datasheet-derived,
   variant-gated, labeled in the README as not oracle-backed. Includes generating
   68010 vectors and running them as a divergence report, never as a gate.
@@ -1227,3 +1457,12 @@ rather than shipped quietly.
   about 1.8, so a milestone benched on one host and read against a baseline from
   the other would report a conversion that costs nothing, or one that costs
   twice what it does. The 2x floor itself is absolute and survives the move.
+  **Measure the previous milestone's commit on the host in hand rather than
+  quoting its recorded figure**, in a worktree, back to back with the new one.
+  From M5: the delta being looked for was 2.5% and the gap between the two hosts
+  was the same size, so the recorded number could not have told the two apart
+  even though it happened to agree.
+- **Measure an optimization's ceiling before building it.** The way to do that
+  without measuring a different program is to make the suspect work cost twice
+  as much rather than to remove it unsoundly. M5's `capture_body_state` skip was
+  measured that way, came out at 1.2% on the binding machine, and was not built.
