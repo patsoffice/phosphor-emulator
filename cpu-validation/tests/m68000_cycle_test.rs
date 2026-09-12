@@ -1837,7 +1837,14 @@ fn test_m68000_cycle_gate() {
         // filed on: the transfer count and the total length were both already
         // right and only the order was wrong, so nothing but a sequence
         // comparison could see it.
-        ("680x0 length", pops_680x0.all.length_pct(), 81.72),
+        // **Raised from 81.72 by the bit operations' data dependence**
+        // (`phosphor-emulator-4sdm`): `BCHG`, `BCLR` and `BSET` on a data
+        // register cost two clocks less when the addressed bit is in the lower
+        // word, which Table 8-8 says by asterisking those cells as maxima. All
+        // three went to 100.00% on length against both corpora. This aggregate
+        // stays low because this corpus's faulting population is a whole
+        // eight clocks out by its own convention, which is the row above.
+        ("680x0 length", pops_680x0.all.length_pct(), 81.91),
         ("680x0 kinds", pops_680x0.all.kinds_pct(), 99.56),
         ("680x0 count", pops_680x0.all.count_pct(), 99.56),
         ("680x0 positions", pops_680x0.all.positions_pct(), 80.49),
@@ -1894,7 +1901,14 @@ fn test_m68000_cycle_gate() {
             pops_m68000.address_error.kinds_pct(),
             99.99,
         ),
-        ("m68000 length", pops_m68000.all.length_pct(), 99.78),
+        // **99.98%, raised from 99.78 by the same change.** What is left on
+        // this rung is essentially one encoding: `BTST Dn,#imm`, which both
+        // corpora record at 10 clocks where the manual composes 8 from Table
+        // 8-8's 4(1/0)+ and Table 8-1's immediate 4(1/0), and where this core
+        // charges the manual's figure. Filed rather than fitted, because it is
+        // the manual that disagrees with both corpora and 4sdm's scope was the
+        // data dependence.
+        ("m68000 length", pops_m68000.all.length_pct(), 99.97),
         ("m68000 kinds", pops_m68000.all.kinds_pct(), 99.33),
         // **This corpus disqualifies itself on `TAS` and says so.** Its README
         // excludes `TAS` and `TRAPV` from what it verifies as good, and names

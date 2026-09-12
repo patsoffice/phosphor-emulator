@@ -165,9 +165,9 @@ vectors = "sha256:90f8bfdf7cb8c4f81994d2854ca195fe2be5a0fbef4318515acbeb5967f482
 [[frame]]
 machine = "marble"
 frames = 1800
-shows = "Attract mode: the MARBLE MADNESS logo over the TROUBLEMAKERS high-score table, with a red and a blue marble on the black field."
+shows = "Attract mode: the MARBLE MADNESS logo over the TROUBLEMAKERS high-score table, with a red and a blue marble on the black field. The logo, the table and its ten scores are what this pins; the two marbles are rolling and sit wherever the machine's timing has carried them by this frame, so they move whenever the CPU's clock accounting changes. They last moved when the bit operations on a data register stopped charging Table 8-8's asterisked maximum unconditionally, which changed no text and rolled the marbles a little further."
 size = [336, 240]
-frame = "sha256:6dc8ff83aeb4f676aab81e04ec81165854bce8edac37f33d2bc767463cf20acd"
+frame = "sha256:e7289330dcc74eec9733a9bb78751236dfec977a40290fb9a7235acea34044f9"
 
 [[frame]]
 machine = "mariobros"
@@ -236,9 +236,9 @@ vectors = "sha256:308277cfd7c8dccf8fd6336f6c834062cbe38b8fb28f3ac9928765be4e7c51
 [[frame]]
 machine = "roadrunner"
 frames = 1800
-shows = "Attract mode: the canyon backdrop with the striped road, a character mid-road, the BEWARE OF STEEL SHOT IN BIRDSEED banner and the 1985 Atari Games / Warner Bros. copyrights."
+shows = "Attract mode: the canyon backdrop with the striped road, a character mid-road, the BEWARE OF STEEL SHOT IN BIRDSEED banner and the 1985 Atari Games / Warner Bros. copyrights. The backdrop, the banner, the CREDITS line and both copyrights are what this pins; the character is running and lands wherever the machine's timing has carried it, so it moves whenever the CPU's clock accounting changes. It last moved 37 pixels of 80,640 when the bit operations on a data register stopped charging Table 8-8's asterisked maximum unconditionally."
 size = [336, 240]
-frame = "sha256:7a36590057e63d4eb809cdc3d3300288fc835ee0f8bed7001738d0e3959bcd41"
+frame = "sha256:7ceb29884c83680b16395ffcbb5d69cb5f795a2fc23b87fb2013e10a532411a9"
 
 [[frame]]
 machine = "robotron"

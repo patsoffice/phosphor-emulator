@@ -132,8 +132,22 @@ max_silent_fraction = 0.999
 # state a hardware reason, and "the mix reaches the rail" is a reason to model
 # the output stage, not a reason to accept the reading. The ratchet asserts the
 # machine is still like this and fails the moment it stops being.
-[[known_defect]]
-machine = "roadrunner"
-clipping = true
-reason = "The mix reaches the rail on 1.03% of samples against a 1.00% tolerance, having been at 0.35% before DIVU and DIVS took their real internal time. Measured either side with audiodiff: identical event timeline, so not the capture window, and +2.88 dB with an 11.7 point band shift, so not gain. The output stage is unmodeled analog, phosphor-emulator-irx4."
-issue = "phosphor-emulator-idaz"
+#
+# **THE ENTRY IS GONE BECAUSE THE RATCHET FIRED, AND WHAT MOVED WAS THE
+# MACHINE, NOT THE OUTPUT STAGE.** Clipping fell from 1.029% to 0.70% when the
+# bit operations on a data register stopped charging their documented maximum
+# unconditionally (`phosphor-emulator-4sdm`, Table 8-8's asterisk). Nothing in
+# the audio path changed again, and the mix still peaks at 0.00 dBFS, so the
+# rail is still being reached: it is reached on fewer samples because a
+# slightly quicker 68010 feeds the sound board on slightly different clocks.
+#
+# That is the same sensitivity that put this reading over the line in the first
+# place, now pointing the other way, and it is the reason the figure is quoted
+# with its history rather than on its own. 0.70% sits between the 0.35% this
+# board read before the divide fix and the 1.03% it read after, so half the
+# movement that commit caused has come back from an unrelated timing change.
+# **The unmodeled analog output stage is untouched and is still
+# phosphor-emulator-irx4's**, and phosphor-emulator-idaz still owns the
+# question of what this board should actually read. The defect is delisted
+# because it no longer reproduces, which is what the ratchet asks, and not
+# because anyone modeled the thing that causes it.
