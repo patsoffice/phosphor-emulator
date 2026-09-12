@@ -300,6 +300,21 @@ impl M68000 {
                 }
                 addr = addr.wrapping_add(size.bytes());
             }
+            // **A load reads one word past the block and throws it away.** The
+            // part's loop runs one read ahead of itself: each iteration stores
+            // the word the previous one fetched into a register and issues the
+            // next fetch, so a list of n registers costs n + 1 reads and the
+            // last of them is never stored. It is a real access at a real
+            // address, which a device mapped just past the block can see, and
+            // it is the same single word for both sizes because the long form
+            // reads two words per register and still runs one ahead.
+            //
+            // This was declared as four clocks of internal time before, which
+            // made the total right and left the transfer count one short on
+            // every load.
+            if to_registers {
+                self.read_word_at(bus, master, addr)?;
+            }
             if ea_mode == 3 {
                 // Postincrement: the base ends at the final address, even
                 // when it was itself in the load list
@@ -311,16 +326,12 @@ impl M68000 {
         // one transfer per register half are all counted, which is everything
         // the documented per-register cost used to express.
         //
-        // Two things are left. An indexed mode pays two clocks for its index
-        // add, as everywhere else. And a load pays four more, because the part
-        // reads one operand *beyond* the registers it transfers and discards
-        // it. This core does not run that read, so the four clocks are declared
-        // here rather than counted: the total is right and the transfer count
-        // is one short on every MOVEM load, which is a real difference from the
-        // part and shows up on the gate's count rung rather than its length one.
+        // One thing is left: an indexed mode pays two clocks for its index add,
+        // as everywhere else. The read past the block that a load makes is a
+        // counted transfer now rather than four clocks declared here, so it
+        // costs its own time and appears in the trace where the part puts it.
         let indexed = ea_mode & 7 == 6 || (ea_mode & 7 == 7 && ea_reg & 7 == 3);
-        let internal = if indexed { 2 } else { 0 } + if to_registers { 4 } else { 0 };
-        self.finish_from_bus(bus, master, internal);
+        self.finish_from_bus(bus, master, if indexed { 2 } else { 0 });
         Ok(())
     }
 }

@@ -1788,18 +1788,18 @@ fn test_m68000_cycle_gate() {
         // while taking `CHK` to exact on every rung against the other corpus.
         // See `M68000::op_chk`.
         ("680x0 length", pops_680x0.all.length_pct(), 79.86),
-        ("680x0 kinds", pops_680x0.all.kinds_pct(), 98.84),
-        ("680x0 count", pops_680x0.all.count_pct(), 99.12),
-        ("680x0 positions", pops_680x0.all.positions_pct(), 78.87),
+        ("680x0 kinds", pops_680x0.all.kinds_pct(), 99.28),
+        ("680x0 count", pops_680x0.all.count_pct(), 99.56),
+        ("680x0 positions", pops_680x0.all.positions_pct(), 79.10),
         (
             "680x0 positions, completed",
             pops_680x0.completed.positions_pct(),
-            95.96,
+            96.24,
         ),
         (
             "680x0 positions, >1 data transaction",
             pops_680x0.several_data_txns.positions_pct(),
-            57.86,
+            58.34,
         ),
         // **Rung 4 read 0.00% on every case that faults, on both corpora, from
         // the day M4 first reported it until the group-0 frame was written in
@@ -1809,13 +1809,13 @@ fn test_m68000_cycle_gate() {
         // against this corpus is `RTE` and `RTR`, which it records reading the
         // stack in an order the part does not use: see
         // `M68000::pop_status_and_pc`.
-        ("680x0 operands", pops_680x0.all.operands_pct(), 97.22),
+        ("680x0 operands", pops_680x0.all.operands_pct(), 97.67),
         (
             "680x0 operands, address error",
             pops_680x0.address_error.operands_pct(),
             95.45,
         ),
-        ("680x0 function codes", pops_680x0.all.fc_pct(), 98.40),
+        ("680x0 function codes", pops_680x0.all.fc_pct(), 98.84),
         // The faulting path's transfer *sequence*, which M4 finished. One case
         // of 178,089 still differs and it is a `MOVEM`, whose trailing read is
         // the residual M3 named and M5 owns. Floored rather than asserted
@@ -1835,7 +1835,7 @@ fn test_m68000_cycle_gate() {
             99.99,
         ),
         ("m68000 length", pops_m68000.all.length_pct(), 97.86),
-        ("m68000 kinds", pops_m68000.all.kinds_pct(), 98.63),
+        ("m68000 kinds", pops_m68000.all.kinds_pct(), 99.06),
         // **This corpus disqualifies itself on `TAS` and says so.** Its README
         // excludes `TAS` and `TRAPV` from what it verifies as good, and names
         // the read-modify-write timing as the reason. It records `TAS` as two
@@ -1844,8 +1844,8 @@ fn test_m68000_cycle_gate() {
         // costs 0.66 points of transfer count here and takes `TAS` to exact on
         // every rung over there. The one instruction in this conversion where
         // the stronger-provenance set is the weaker authority.
-        ("m68000 count", pops_m68000.all.count_pct(), 98.90),
-        ("m68000 positions", pops_m68000.all.positions_pct(), 95.96),
+        ("m68000 count", pops_m68000.all.count_pct(), 99.33),
+        ("m68000 positions", pops_m68000.all.positions_pct(), 96.19),
         // **The number M5's exception-entry work exists to move**, and it had
         // no floor because it had no value: a structural 0.00% while entry
         // drove all eleven of its cycles on one clock. It is floored against
@@ -1862,12 +1862,12 @@ fn test_m68000_cycle_gate() {
         (
             "m68000 positions, completed",
             pops_m68000.completed.positions_pct(),
-            95.71,
+            95.98,
         ),
         (
             "m68000 positions, >1 data transaction",
             pops_m68000.several_data_txns.positions_pct(),
-            94.32,
+            94.74,
         ),
         // This corpus's faulting population reaches only 28.07%, and the
         // difference is `data` rather than `addr`: its `pc` is the generator's
@@ -1875,13 +1875,13 @@ fn test_m68000_cycle_gate() {
         // the gate can reconcile that for the initial and final states but not
         // for a PC the instruction writes into a frame. Its own README names
         // the convention. Floored where it stands rather than chased.
-        ("m68000 operands", pops_m68000.all.operands_pct(), 85.93),
+        ("m68000 operands", pops_m68000.all.operands_pct(), 86.36),
         (
             "m68000 operands, address error",
             pops_m68000.address_error.operands_pct(),
             28.06,
         ),
-        ("m68000 function codes", pops_m68000.all.fc_pct(), 98.44),
+        ("m68000 function codes", pops_m68000.all.fc_pct(), 98.84),
     ];
     for (name, actual, floor) in floors {
         assert!(
