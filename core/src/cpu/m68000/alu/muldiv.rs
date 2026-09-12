@@ -254,10 +254,10 @@ impl M68000 {
                 self.d[dn] = 0;
                 self.set_flags_logical(Size::Long, 0);
                 self.finish_from_bus_address_first(
-                bus,
-                master,
-                Self::divs_internal(dst, src) + ea_time,
-            );
+                    bus,
+                    master,
+                    Self::divs_internal(dst, src) + ea_time,
+                );
                 return Ok(());
             }
             let quotient = (dst as i32) / divisor;

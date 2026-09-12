@@ -914,7 +914,11 @@ fn report_length_deltas(name: &str, t: &Tally) {
     eprintln!(
         "  {name} clock deltas, commonest first: {body}{}",
         if shown < rows.len() {
-            format!(" (+{} more values, {} cases)", rows.len() - shown, t.ran - listed)
+            format!(
+                " (+{} more values, {} cases)",
+                rows.len() - shown,
+                t.ran - listed
+            )
         } else {
             String::new()
         }
@@ -1049,9 +1053,7 @@ fn note_fault_group(into: &mut FaultGroups, tc: &M68000TestCase, r: &CaseResult)
     if !is_address_error(tc) {
         return;
     }
-    let e = into
-        .entry(case_group(tc.initial.prefetch[0]))
-        .or_default();
+    let e = into.entry(case_group(tc.initial.prefetch[0])).or_default();
     e.0.add(r);
     if r.ran {
         let names = e.1.entry(r.length_delta).or_default();
@@ -1070,7 +1072,10 @@ fn report_fault_groups(label: &str, groups: &FaultGroups) {
         eprintln!("\n{label}: every address-error case is exact on clock count");
         return;
     }
-    let missed: usize = inexact.iter().map(|(_, (t, _))| t.ran - t.length_exact).sum();
+    let missed: usize = inexact
+        .iter()
+        .map(|(_, (t, _))| t.ran - t.length_exact)
+        .sum();
     eprintln!(
         "\n{label}: address-error clock residual by instruction shape, \
          {missed} cases in {} groups",
@@ -1748,7 +1753,8 @@ fn test_m68000_cycle_gate() {
     // spread would be a defect. The two exact cases are `MOVEM.l` loads whose
     // finish saturates past the replay cap.
     assert_eq!(
-        pops_m68000.address_error.length_exact, pops_m68000.address_error.ran,
+        pops_m68000.address_error.length_exact,
+        pops_m68000.address_error.ran,
         "m68000: {} address-error cases disagree on clock count",
         pops_m68000.address_error.ran - pops_m68000.address_error.length_exact
     );

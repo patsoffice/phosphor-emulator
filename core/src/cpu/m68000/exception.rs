@@ -581,11 +581,7 @@ impl M68000 {
         // or a branch displacement end two or six clocks short, and both
         // corpora agreed on which: 77,019 cases and 22,032, exactly the shapes
         // whose internal time is not zero.
-        self.finish_from_bus(
-            bus,
-            master,
-            6 + ABORTED_ACCESS_CLOCKS + self.internal_spent,
-        );
+        self.finish_from_bus(bus, master, 6 + ABORTED_ACCESS_CLOCKS + self.internal_spent);
         Ok(())
     }
 }

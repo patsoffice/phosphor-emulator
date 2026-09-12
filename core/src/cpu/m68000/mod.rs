@@ -453,7 +453,13 @@ impl M68000 {
             pre_exec_transfers: 0,
             ea_program_space: false,
             pending: [PendingCycle::Refill {
-                signals: BusSignals { is_write: false, program: true, supervisor: true, byte: false, rmw: false },
+                signals: BusSignals {
+                    is_write: false,
+                    program: true,
+                    supervisor: true,
+                    byte: false,
+                    rmw: false,
+                },
             }; MAX_PENDING],
             pending_len: 0,
             pending_pos: 0,
