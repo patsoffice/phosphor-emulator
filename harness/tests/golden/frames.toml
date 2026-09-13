@@ -236,9 +236,9 @@ vectors = "sha256:308277cfd7c8dccf8fd6336f6c834062cbe38b8fb28f3ac9928765be4e7c51
 [[frame]]
 machine = "roadrunner"
 frames = 1800
-shows = "Attract mode: the canyon backdrop with the striped road, a character mid-road, the BEWARE OF STEEL SHOT IN BIRDSEED banner and the 1985 Atari Games / Warner Bros. copyrights. The backdrop, the banner, the CREDITS line and both copyrights are what this pins; the character is running and lands wherever the machine's timing has carried it, so it moves whenever the CPU's clock accounting changes. It last moved 37 pixels of 80,640 when the bit operations on a data register stopped charging Table 8-8's asterisked maximum unconditionally."
+shows = "Attract mode: the canyon backdrop with the striped road, a character mid-road, the BEWARE OF STEEL SHOT IN BIRDSEED banner and the 1985 Atari Games / Warner Bros. copyrights. The backdrop, the banner, the CREDITS line and both copyrights are what this pins; the character is running and lands wherever the machine's timing has carried it, so it moves whenever the CPU's clock accounting changes. It moved 37 pixels of 80,640 when the bit operations on a data register stopped charging Table 8-8's asterisked maximum unconditionally, and 28 more when BCLR to memory took the two extra clocks Table 9-14 gives it on the 68010. Marble Madness moved with the first of those and not the second, so the two System 1 games differ in which of these instructions their attract loops lean on."
 size = [336, 240]
-frame = "sha256:7ceb29884c83680b16395ffcbb5d69cb5f795a2fc23b87fb2013e10a532411a9"
+frame = "sha256:1c53c3977b9228cafb8077c978166b3d928691a0fd202358ea29c1266ba318ea"
 
 [[frame]]
 machine = "robotron"

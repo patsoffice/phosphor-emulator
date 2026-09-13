@@ -492,3 +492,77 @@ fn chk_in_bounds_is_two_clocks_faster_on_the_68010() {
     assert_eq!(m68000, Cost::n(10, 1, 0));
     assert_eq!(m68010, Cost::n(8, 1, 0));
 }
+
+// ---------------------------------------------------------------------------
+// Table 9-14 against Table 8-8: BCLR to memory, and only BCLR
+// ---------------------------------------------------------------------------
+
+#[test]
+fn bclr_to_memory_is_two_clocks_slower_on_the_68010() {
+    // BCLR D1,(A0): Table 8-8 8(1/1)+ and Table 9-14 10(1/1)+, plus (An) byte
+    // at 4(1/0) from Table 8-1, so 12(2/1) against 14(2/1). Missed by M6's
+    // delta and filed as phosphor-emulator-9zmn.
+    let (m68000, m68010) = both(&[0x0390], |cpu, bus| {
+        cpu.a[0] = 0x3000;
+        cpu.d[1] = 3;
+        bus.inner.load(0x3000, &[0xFF]);
+    });
+    assert_eq!(m68000, Cost::n(12, 2, 1));
+    assert_eq!(m68010, Cost::n(14, 2, 1));
+}
+
+#[test]
+fn static_bclr_to_memory_is_also_two_clocks_slower() {
+    // BCLR #3,(A0): Table 8-8 12(2/1)+ and Table 9-14 14(2/1)+, so 16(3/1)
+    // against 18(3/1) once (An) is added. Both forms move, which is what says
+    // the difference is the operation rather than the bit number's source.
+    let (m68000, m68010) = both(&[0x0890, 0x0003], |cpu, bus| {
+        cpu.a[0] = 0x3000;
+        bus.inner.load(0x3000, &[0xFF]);
+    });
+    assert_eq!(m68000, Cost::n(16, 3, 1));
+    assert_eq!(m68010, Cost::n(18, 3, 1));
+}
+
+#[test]
+fn the_other_bit_ops_to_memory_cost_the_same_on_both_parts() {
+    // **The controls, and they are what make the row above a BCLR rule.**
+    // BCHG, BSET and BTST byte to memory are identical in Table 8-8 and Table
+    // 9-14: 8(1/1)+, 8(1/1)+ and 4(1/0)+. A delta applied to the memory
+    // destination generally, rather than to BCLR, fails here.
+    for (opcode, name, cost) in [
+        (0x0350u16, "BCHG D1,(A0)", Cost::n(12, 2, 1)),
+        (0x03D0, "BSET D1,(A0)", Cost::n(12, 2, 1)),
+        (0x0310, "BTST D1,(A0)", Cost::n(8, 2, 0)),
+    ] {
+        let (m68000, m68010) = both(&[opcode], |cpu, bus| {
+            cpu.a[0] = 0x3000;
+            cpu.d[1] = 3;
+            bus.inner.load(0x3000, &[0xFF]);
+        });
+        assert_eq!(m68000, cost, "{name} on the 68000");
+        assert_eq!(m68010, m68000, "{name} must not move with the variant");
+    }
+}
+
+#[test]
+fn the_bit_ops_on_a_register_cost_the_same_on_both_parts() {
+    // The register forms are identical in the two tables, asterisks included,
+    // so the data-dependent split from phosphor-emulator-4sdm applies to both
+    // parts and none of these rows is variant-gated. Asserted with the bit in
+    // the lower word, where that split makes the cost two less than the
+    // documented maximum.
+    for (opcode, name, cost) in [
+        (0x0340u16, "BCHG D1,D0", Cost::n(6, 1, 0)),
+        (0x0380, "BCLR D1,D0", Cost::n(8, 1, 0)),
+        (0x03C0, "BSET D1,D0", Cost::n(6, 1, 0)),
+        (0x0300, "BTST D1,D0", Cost::n(6, 1, 0)),
+    ] {
+        let (m68000, m68010) = both(&[opcode], |cpu, _| {
+            cpu.d[0] = 0x5555_5555;
+            cpu.d[1] = 3;
+        });
+        assert_eq!(m68000, cost, "{name} on the 68000");
+        assert_eq!(m68010, m68000, "{name} must not move with the variant");
+    }
+}

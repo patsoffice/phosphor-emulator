@@ -85,6 +85,19 @@ impl M68000 {
             // the 68010's behavior too and is deliberately not variant-gated.
             // See `phosphor-emulator-4sdm`.
             //
+            // **TABLE 9-14 ALSO ASTERISKS `BTST`'s DYNAMIC REGISTER CELL,
+            // 6(1/0)*, AND THAT IS NOT IMPLEMENTED.** Taken at face value it
+            // would say `BTST` on a data register became data-dependent on the
+            // 68010 having been fixed on the 68000. Three things say it is a
+            // typesetting error instead: the static register cell beside it,
+            // 10(2/0), is *not* asterisked in the same table, and the two
+            // differ only in where the bit number comes from rather than in
+            // what is done to the register; both cells are unasterisked in
+            // Table 8-8; and this manual has demonstrable errata in exactly
+            // this area, its `RTR` read count changing between the sections
+            // with no change to the part. No 68010 oracle exists to settle it.
+            // Recorded rather than guessed, in `phosphor-emulator-9zmn`.
+            //
             // The cost with the bit in the lower word, which is the documented
             // figure less the asterisked two clocks.
             let base = match op {
@@ -122,7 +135,24 @@ impl M68000 {
             // In memory the operation is a byte read, and a write for
             // everything but BTST. Both are counted, as is the static form's
             // extension word, leaving only the mode's address arithmetic.
-            self.finish_from_bus(bus, master, ea_internal(ea_mode, ea_reg));
+            //
+            // **BCLR TO MEMORY IS TWO CLOCKS SLOWER ON THE 68010, AND IT IS
+            // THE ONLY BYTE ROW IN EITHER TABLE THAT MOVES.** Table 8-8 gives
+            // 8(1/1)+ dynamic and 12(2/1)+ static; Table 9-14 gives 10(1/1)+
+            // and 14(2/1)+. Same transfer counts, two more clocks, both forms.
+            // BCHG, BSET and BTST byte to memory are identical in the two
+            // tables, which is what makes this a BCLR rule rather than a
+            // memory-destination one, and the register forms of all four are
+            // identical too. The difference matches what BCLR already costs
+            // over BCHG and BSET on a register, where it has to invert its
+            // mask: the newer part appears to pay that in the memory form as
+            // well, where the 68000 absorbed it.
+            //
+            // Taken as the difference between the two sections rather than as
+            // Section 9's absolute, per `by_variant`. Missed by M6's delta and
+            // filed as `phosphor-emulator-9zmn`.
+            let bclr_memory = if op == 2 { self.by_variant(0, 2) } else { 0 };
+            self.finish_from_bus(bus, master, ea_internal(ea_mode, ea_reg) + bclr_memory);
         }
         Ok(())
     }
