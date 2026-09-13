@@ -63,7 +63,7 @@ impl M68000 {
             ea_internal(dst_mode, dst_reg)
         };
 
-        let src = self.decode_ea(bus, master, src_mode, src_reg, size);
+        let src = self.decode_ea(bus, master, src_mode, src_reg, size)?;
         let value = self.ea_read(bus, master, src, size)?;
         // The destination's arithmetic runs between the source read and the
         // write, so a faulting write has already spent it. The source's ran
@@ -100,7 +100,7 @@ impl M68000 {
             // gives the prefetch a slot the other destination modes do not.
             (4, Size::Long) => {
                 let reg = dst_reg as usize;
-                self.refill_prefetch(bus, master);
+                self.refill_prefetch(bus, master)?;
                 let lo_first = (|| {
                     self.a[reg] = self.a[reg].wrapping_sub(2);
                     self.write_word_at(bus, master, self.a[reg], value as u16)?;
@@ -115,7 +115,7 @@ impl M68000 {
                 })?;
             }
             (4, _) => {
-                let dst = self.decode_ea(bus, master, dst_mode, dst_reg, size);
+                let dst = self.decode_ea(bus, master, dst_mode, dst_reg, size)?;
                 self.ea_write_rmw(bus, master, dst, size, value)
                     .map_err(|e| {
                         e.map_fault(|f| AddressError {
@@ -151,11 +151,11 @@ impl M68000 {
             (7, _) if dst_reg == 1 => {
                 let src_is_mem = src_mode >= 2 && !(src_mode == 7 && src_reg == 4);
                 let dst = if src_is_mem {
-                    let high = u32::from(self.read_imm_word(bus, master));
+                    let high = u32::from(self.read_imm_word(bus, master)?);
                     let low = u32::from(self.take_word_deferred_refill());
                     Ea::Mem((high << 16) | low)
                 } else {
-                    self.decode_ea(bus, master, dst_mode, dst_reg, size)
+                    self.decode_ea(bus, master, dst_mode, dst_reg, size)?
                 };
                 self.ea_write(bus, master, dst, size, value).map_err(|e| {
                     e.map_fault(|f| {
@@ -177,7 +177,7 @@ impl M68000 {
                 }
             }
             _ => {
-                let dst = self.decode_ea(bus, master, dst_mode, dst_reg, size);
+                let dst = self.decode_ea(bus, master, dst_mode, dst_reg, size)?;
                 self.ea_write(bus, master, dst, size, value)?;
             }
         }
@@ -245,7 +245,7 @@ impl M68000 {
         let an = (opcode & 7) as usize;
         let long = opcode & 0x0040 != 0;
         let to_memory = opcode & 0x0080 != 0;
-        let disp = sext16(self.read_imm_word(bus, master));
+        let disp = sext16(self.read_imm_word(bus, master)?);
         let base = self.a[an].wrapping_add(disp);
         let bytes: u32 = if long { 4 } else { 2 };
 
@@ -293,7 +293,7 @@ impl M68000 {
             self.finish_from_bus(bus, master, 0); // illegal destination
             return Ok(());
         }
-        let dst = self.decode_ea(bus, master, ea_mode, ea_reg, Size::Word);
+        let dst = self.decode_ea(bus, master, ea_mode, ea_reg, Size::Word)?;
         // The 68000 reads the destination before rewriting it (visible as
         // the R/W bit of an address-error frame) — hardware-verified.
         let _ = self.ea_read(bus, master, dst, Size::Word)?;
@@ -332,7 +332,7 @@ impl M68000 {
             self.finish_from_bus(bus, master, 0); // address-register source is illegal
             return Ok(());
         }
-        let src = self.decode_ea(bus, master, ea_mode, ea_reg, Size::Word);
+        let src = self.decode_ea(bus, master, ea_mode, ea_reg, Size::Word)?;
         let value = self.ea_read(bus, master, src, Size::Word)? as u16;
         self.write_ccr(value);
         // The flag write discards the queue, so the finish refills two words
@@ -364,7 +364,7 @@ impl M68000 {
             self.finish_from_bus(bus, master, 0); // address-register source is illegal
             return Ok(());
         }
-        let src = self.decode_ea(bus, master, ea_mode, ea_reg, Size::Word);
+        let src = self.decode_ea(bus, master, ea_mode, ea_reg, Size::Word)?;
         let value = self.ea_read(bus, master, src, Size::Word)? as u16;
         self.write_sr(value);
         // As MOVE to CCR: the status-register write discards the queue and the

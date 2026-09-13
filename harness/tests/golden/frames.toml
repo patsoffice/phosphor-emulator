@@ -228,10 +228,10 @@ frame = "sha256:e2d6fa77bbd453549e1858584799cb0ec824f3bdfb386368d10a215ddc92dc2b
 [[frame]]
 machine = "quantum"
 frames = 1800
-shows = "Attract mode: the QUANTUM title over coloured particle blobs, with INSERT COINS, the 1982 Atari copyright and the CREDIT line."
+shows = "Attract mode: the QUANTUM title over colored particle blobs, with INSERT COINS, the 1982 Atari copyright and the CREDIT line. The title, the four text lines and the score are what this pins; the blobs and specks drift and sit wherever the machine's timing has carried them, so they move whenever the CPU's clock accounting changes, and the vector list hash moves with them. They last moved 589 pixels of 540,000 when a queue refill the body drives itself learned to suspend, which gave a second refill in one instruction a clock of its own."
 size = [600, 900]
-frame = "sha256:e2ed82cc584cdbbb98e98df8e59b050740729215c3e7c510beb88a4c48bfbdfc"
-vectors = "sha256:308277cfd7c8dccf8fd6336f6c834062cbe38b8fb28f3ac9928765be4e7c517b"
+frame = "sha256:e692f5969b859bc8fb40d34986d79945dc5feb44e92daa1a350aa90fd880edb1"
+vectors = "sha256:12bba9ee200715224c472cf4227c1c781ed8bf7dafb7894f9f549a8c292890f1"
 
 [[frame]]
 machine = "roadrunner"

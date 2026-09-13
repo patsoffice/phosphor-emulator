@@ -69,7 +69,7 @@ impl M68000 {
         // 68000's. That follows from not making the read and there is no oracle
         // for it either way.
         let clr_without_fetch = op == UnaryOp::Clr && self.is_68010_plus();
-        let ea = self.decode_ea(bus, master, ea_mode, ea_reg, size);
+        let ea = self.decode_ea(bus, master, ea_mode, ea_reg, size)?;
         let dst = if clr_without_fetch {
             0 // CLR's result does not depend on what was there
         } else {
@@ -167,7 +167,7 @@ impl M68000 {
             self.finish_from_bus(bus, master, 0); // illegal destination
             return Ok(());
         }
-        let ea = self.decode_ea(bus, master, ea_mode, ea_reg, Size::Byte);
+        let ea = self.decode_ea(bus, master, ea_mode, ea_reg, Size::Byte)?;
         if ea_mode == 0 {
             // A register destination touches no bus at all: the read, the test
             // and the write-back are internal, and the opcode's own refill is
@@ -211,7 +211,7 @@ impl M68000 {
         }
         let cond = ((opcode >> 8) & 0xF) as u8;
         let taken = self.cc_true(cond);
-        let ea = self.decode_ea(bus, master, ea_mode, ea_reg, Size::Byte);
+        let ea = self.decode_ea(bus, master, ea_mode, ea_reg, Size::Byte)?;
         // Scc reads its destination before writing it, like the other
         // read-modify-write forms. This core used to say the opposite in a
         // comment here and charge the missing transfer as time off the bus, so

@@ -24,7 +24,7 @@ impl M68000 {
         if ea_mode == 1 {
             return Ok(None);
         }
-        let ea = self.decode_ea(bus, master, ea_mode, ea_reg, Size::Word);
+        let ea = self.decode_ea(bus, master, ea_mode, ea_reg, Size::Word)?;
         let value = self.ea_read(bus, master, ea, Size::Word)? as u16;
         // The extension words and the operand read are counted transfers; only
         // the mode's own address arithmetic is left for the caller to declare.

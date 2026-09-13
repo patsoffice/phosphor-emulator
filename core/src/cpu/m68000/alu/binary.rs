@@ -128,7 +128,7 @@ impl M68000 {
                     self.finish_from_bus(bus, master, 0);
                     return Ok(());
                 }
-                let src = self.decode_ea(bus, master, ea_mode, ea_reg, size);
+                let src = self.decode_ea(bus, master, ea_mode, ea_reg, size)?;
                 let b = self.ea_read(bus, master, src, size)?;
                 let a = self.d[dn];
                 let result = if is_add {
@@ -149,7 +149,7 @@ impl M68000 {
                     self.finish_from_bus(bus, master, 0); // illegal destination
                     return Ok(());
                 }
-                let dst = self.decode_ea(bus, master, ea_mode, ea_reg, size);
+                let dst = self.decode_ea(bus, master, ea_mode, ea_reg, size)?;
                 let a = self.ea_read(bus, master, dst, size)?;
                 let b = self.d[dn];
                 let result = if is_add {
@@ -167,7 +167,7 @@ impl M68000 {
             // ADDA/SUBA: An ⟵ An op <ea> (word sign-extends, no flags)
             _ => {
                 let size = if opmode == 3 { Size::Word } else { Size::Long };
-                let src = self.decode_ea(bus, master, ea_mode, ea_reg, size);
+                let src = self.decode_ea(bus, master, ea_mode, ea_reg, size)?;
                 let value = self.ea_read(bus, master, src, size)?;
                 let value = if size == Size::Word {
                     sext16(value as u16)
@@ -225,7 +225,7 @@ impl M68000 {
                     self.finish_from_bus(bus, master, 0); // byte read from An is illegal
                     return Ok(());
                 }
-                let src = self.decode_ea(bus, master, ea_mode, ea_reg, size);
+                let src = self.decode_ea(bus, master, ea_mode, ea_reg, size)?;
                 let b = self.ea_read(bus, master, src, size)?;
                 self.sub_with_flags(size, self.d[dn], b);
 
@@ -233,7 +233,7 @@ impl M68000 {
             }
             3 | 7 => {
                 let size = if opmode == 3 { Size::Word } else { Size::Long };
-                let src = self.decode_ea(bus, master, ea_mode, ea_reg, size);
+                let src = self.decode_ea(bus, master, ea_mode, ea_reg, size)?;
                 let value = self.ea_read(bus, master, src, size)?;
                 let value = if size == Size::Word {
                     sext16(value as u16)
@@ -279,7 +279,7 @@ impl M68000 {
                     self.finish_from_bus(bus, master, 0);
                     return Ok(());
                 }
-                let src = self.decode_ea(bus, master, ea_mode, ea_reg, size);
+                let src = self.decode_ea(bus, master, ea_mode, ea_reg, size)?;
                 let b = self.ea_read(bus, master, src, size)?;
                 let result = op.apply(self.d[dn], b) & size.mask();
                 self.set_flags_logical(size, result);
@@ -297,7 +297,7 @@ impl M68000 {
                     self.finish_from_bus(bus, master, 0);
                     return Ok(());
                 }
-                let dst = self.decode_ea(bus, master, ea_mode, ea_reg, size);
+                let dst = self.decode_ea(bus, master, ea_mode, ea_reg, size)?;
                 let a = self.ea_read(bus, master, dst, size)?;
                 let result = op.apply(a, self.d[dn]) & size.mask();
                 self.set_flags_logical(size, result);
@@ -391,7 +391,7 @@ impl M68000 {
             let hi = self.read_word_at(bus, master, self.a[reg])?;
             Ok(((hi as u32) << 16) | lo as u32)
         } else {
-            let ea = self.decode_ea(bus, master, 4, reg as u8, size);
+            let ea = self.decode_ea(bus, master, 4, reg as u8, size)?;
             self.ea_read(bus, master, ea, size)
         }
     }
@@ -411,9 +411,9 @@ impl M68000 {
         let size = size_from_bits(opcode >> 6).unwrap();
 
         // Source postincrements first, then the destination.
-        let src = self.decode_ea(bus, master, 3, ay, size);
+        let src = self.decode_ea(bus, master, 3, ay, size)?;
         let b = self.ea_read(bus, master, src, size)?;
-        let dst = self.decode_ea(bus, master, 3, ax, size);
+        let dst = self.decode_ea(bus, master, 3, ax, size)?;
         let a = self.ea_read(bus, master, dst, size)?;
         self.sub_with_flags(size, a, b);
         // Two postincrement reads and nothing else: no write, and no address
@@ -499,9 +499,9 @@ impl M68000 {
         let mem = opcode & 0x0008 != 0;
 
         if mem {
-            let src = self.decode_ea(bus, master, 4, ry, Size::Byte);
+            let src = self.decode_ea(bus, master, 4, ry, Size::Byte)?;
             let b = self.ea_read(bus, master, src, Size::Byte)?;
-            let dst = self.decode_ea(bus, master, 4, rx, Size::Byte);
+            let dst = self.decode_ea(bus, master, 4, rx, Size::Byte)?;
             let a = self.ea_read(bus, master, dst, Size::Byte)?;
             let result = if is_add {
                 self.abcd_core(b, a)
@@ -544,7 +544,7 @@ impl M68000 {
             self.finish_from_bus(bus, master, 0);
             return Ok(());
         }
-        let ea = self.decode_ea(bus, master, ea_mode, ea_reg, Size::Byte);
+        let ea = self.decode_ea(bus, master, ea_mode, ea_reg, Size::Byte)?;
         let operand = self.ea_read(bus, master, ea, Size::Byte)?;
         let result = self.sbcd_core(operand, 0);
         self.ea_write_rmw(bus, master, ea, Size::Byte, result)?;
@@ -582,7 +582,7 @@ impl M68000 {
             self.finish_from_bus(bus, master, 0);
             return Ok(());
         }
-        let ea = self.decode_ea(bus, master, ea_mode, ea_reg, size);
+        let ea = self.decode_ea(bus, master, ea_mode, ea_reg, size)?;
         let value = self.ea_read(bus, master, ea, size)?;
         self.set_flags_logical(size, value);
         // TST reads and sets flags: one operand transfer, no write, nothing
@@ -627,10 +627,10 @@ impl M68000 {
         // destination's address arithmetic runs *after* that fetch rather than
         // in front of the instruction: the loader has not burned it, and an
         // aborted operand access has still spent it.
-        let imm = self.decode_ea(bus, master, 7, 4, size);
+        let imm = self.decode_ea(bus, master, 7, 4, size)?;
         let b = self.ea_read(bus, master, imm, size)?;
         self.spend_internal(ea_internal(ea_mode, ea_reg));
-        let dst = self.decode_ea(bus, master, ea_mode, ea_reg, size);
+        let dst = self.decode_ea(bus, master, ea_mode, ea_reg, size)?;
         let a = self.ea_read(bus, master, dst, size)?;
 
         let mem = ea_mode != 0;
@@ -743,7 +743,7 @@ impl M68000 {
             return Ok(());
         }
 
-        let dst = self.decode_ea(bus, master, ea_mode, ea_reg, size);
+        let dst = self.decode_ea(bus, master, ea_mode, ea_reg, size)?;
         let a = self.ea_read(bus, master, dst, size)?;
         let result = if is_sub {
             self.sub_with_flags(size, a, data)

@@ -47,7 +47,7 @@ impl M68000 {
         let bit_number = if dynamic {
             self.d[((opcode >> 9) & 7) as usize]
         } else {
-            self.read_imm_word(bus, master) as u32
+            self.read_imm_word(bus, master)? as u32
         };
         // The static form's extension word used to be charged here as a
         // constant; it is a transfer now and counts itself.
@@ -120,7 +120,7 @@ impl M68000 {
             if !dynamic {
                 self.spend_internal(ea_internal(ea_mode, ea_reg));
             }
-            let ea = self.decode_ea(bus, master, ea_mode, ea_reg, Size::Byte);
+            let ea = self.decode_ea(bus, master, ea_mode, ea_reg, Size::Byte)?;
             let old = self.ea_read(bus, master, ea, Size::Byte)?;
             self.set_flag(SrFlag::Z, old & mask == 0);
             if !is_btst {

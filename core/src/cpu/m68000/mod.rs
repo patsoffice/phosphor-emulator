@@ -1048,7 +1048,7 @@ impl M68000 {
                 // bus cycle that mode causes, so where that is the first cycle
                 // of the instruction it is burned here, ahead of everything.
                 // The queue already holds the opcode, so peeking costs nothing.
-                self.fill_prefetch(bus, master);
+                self.fill_prefetch_outside_body(bus, master);
                 let lead = u32::from(format::leading_internal(self.prefetch[0]));
                 if lead > 0 {
                     self.lead_burned = lead;
@@ -1154,7 +1154,7 @@ impl M68000 {
             return;
         }
 
-        self.refill_prefetch(bus, master);
+        self.refill_prefetch_outside_body(bus, master);
         self.exec_clock = base + 4;
         self.state = ExecState::LoadWait(3);
     }
@@ -1923,7 +1923,7 @@ mod tests {
         // Seed the queue the way the part reaches an instruction: already
         // holding the two words at PC, so the fetches this counts are the
         // instruction's own.
-        cpu.fill_prefetch(&mut bus, BusMaster::Cpu(0));
+        cpu.fill_prefetch(&mut bus, BusMaster::Cpu(0)).unwrap();
         bus.seen.clear();
 
         let mut ticks = 0;

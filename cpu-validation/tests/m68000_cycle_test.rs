@@ -1828,6 +1828,15 @@ fn test_m68000_cycle_gate() {
         // same of operands, and 0.42 of transfer count and function codes here,
         // while taking `CHK` to exact on every rung against the other corpus.
         // See `M68000::op_chk`.
+        // **Every position floor below moved with `phosphor-emulator-d31l`**,
+        // which made `refill_prefetch` suspend like any other access the body
+        // drives. While it was infallible it called `flush_pending` and drove
+        // on the clock it stood on, so a second refill in one body attempt
+        // landed on the first one's clock. The classifier's "read bunched onto
+        // a read" row, 2,231 cases here at M5's close, is now absent from both
+        // corpora, and rung-3 misses on the microcode-derived set went 5,329 to
+        // 3,926. It cost 2.2% of Road Runner's emulation time, which is the
+        // price of four instruction-stream primitives becoming fallible.
         // **Rung 2 is now `TAS` alone on this corpus, and `TAS` is what the
         // other corpus disqualifies itself for.** `ADDX.l`/`SUBX.l` put their
         // refill between their two write words from `phosphor-emulator-7wmg`,
@@ -1847,16 +1856,16 @@ fn test_m68000_cycle_gate() {
         ("680x0 length", pops_680x0.all.length_pct(), 81.91),
         ("680x0 kinds", pops_680x0.all.kinds_pct(), 99.56),
         ("680x0 count", pops_680x0.all.count_pct(), 99.56),
-        ("680x0 positions", pops_680x0.all.positions_pct(), 80.49),
+        ("680x0 positions", pops_680x0.all.positions_pct(), 80.81),
         (
             "680x0 positions, completed",
             pops_680x0.completed.positions_pct(),
-            97.93,
+            98.32,
         ),
         (
             "680x0 positions, >1 data transaction",
             pops_680x0.several_data_txns.positions_pct(),
-            59.44,
+            60.10,
         ),
         // **Rung 4 read 0.00% on every case that faults, on both corpora, from
         // the day M4 first reported it until the group-0 frame was written in
@@ -1919,7 +1928,7 @@ fn test_m68000_cycle_gate() {
         // every rung over there. The one instruction in this conversion where
         // the stronger-provenance set is the weaker authority.
         ("m68000 count", pops_m68000.all.count_pct(), 99.33),
-        ("m68000 positions", pops_m68000.all.positions_pct(), 97.65),
+        ("m68000 positions", pops_m68000.all.positions_pct(), 98.09),
         // **The number M5's exception-entry work exists to move**, and it had
         // no floor because it had no value: a structural 0.00% while entry
         // drove all eleven of its cycles on one clock. It is floored against
@@ -1931,17 +1940,17 @@ fn test_m68000_cycle_gate() {
         (
             "m68000 positions, address error",
             pops_m68000.address_error.positions_pct(),
-            97.14,
+            97.91,
         ),
         (
             "m68000 positions, completed",
             pops_m68000.completed.positions_pct(),
-            97.76,
+            98.13,
         ),
         (
             "m68000 positions, >1 data transaction",
             pops_m68000.several_data_txns.positions_pct(),
-            95.70,
+            96.53,
         ),
         // This corpus's faulting population reaches only 28.07%, and the
         // difference is `data` rather than `addr`: its `pc` is the generator's

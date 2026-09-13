@@ -269,7 +269,7 @@ impl M68000 {
             // TRAPV taken is recorded as a program read, three frame writes,
             // the vector, and two refills, and it is eight transfers where
             // TRAP, which traps without testing anything, is seven.
-            self.refill_prefetch(bus, master);
+            self.refill_prefetch(bus, master)?;
             // **TRAPV alone has no idle step in front of its frame**, and its
             // refill is why: the part uses the step that fetches to do the
             // setup every other source spends two steps on, so the first frame
@@ -369,9 +369,9 @@ impl M68000 {
         // two-word refetch are common to both parts and it is only this extra
         // refill that goes.
         let imm = if self.is_68010_plus() {
-            self.read_imm_word_no_refill(bus, master)
+            self.read_imm_word_no_refill(bus, master)?
         } else {
-            self.read_imm_word(bus, master)
+            self.read_imm_word(bus, master)?
         };
         let combine = |a: u16, b: u16| match opcode & 0x0F00 {
             0x0200 => a & b, // ANDI
@@ -440,7 +440,7 @@ impl M68000 {
         // they started. The part stops before issuing the refill, so this is
         // the one instruction that finishes without one. It was charged a flat
         // documented total until the queue existed to say why.
-        let imm = self.read_imm_word_no_refill(bus, master);
+        let imm = self.read_imm_word_no_refill(bus, master)?;
         self.write_sr(imm);
         self.stopped = true;
         self.finish_without_refill(4);

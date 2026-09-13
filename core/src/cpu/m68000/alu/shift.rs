@@ -202,7 +202,7 @@ impl M68000 {
             return Ok(());
         }
 
-        let ea = self.decode_ea(bus, master, ea_mode, ea_reg, Size::Word);
+        let ea = self.decode_ea(bus, master, ea_mode, ea_reg, Size::Word)?;
         let src = self.ea_read(bus, master, ea, Size::Word)?;
         let result = self.shift_core(Size::Word, kind, left, 1, src);
         self.ea_write_rmw(bus, master, ea, Size::Word, result)?;

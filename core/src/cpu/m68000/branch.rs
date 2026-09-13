@@ -67,7 +67,7 @@ impl M68000 {
             // are at the target. Refilling here would make it three and
             // twelve. Not taking the branch costs the same either way, because
             // the refill it skips here is one the finish has to make anyway.
-            sext16(self.read_imm_word_no_refill(bus, master))
+            sext16(self.read_imm_word_no_refill(bus, master)?)
         } else {
             // disp8 == 0xFF selects a 32-bit displacement on 68020+ only;
             // the 68000 takes it as -1.
@@ -141,7 +141,7 @@ impl M68000 {
         let base = self.pc;
         // No refill behind the displacement, for the reason `Bcc` gives: the
         // loop branch may discard the queue, and a taken DBcc is ten clocks.
-        let disp = sext16(self.read_imm_word_no_refill(bus, master));
+        let disp = sext16(self.read_imm_word_no_refill(bus, master)?);
         let cond = ((opcode >> 8) & 0xF) as u8;
         if self.cc_true(cond) {
             // Condition satisfied: the loop is abandoned without touching the
@@ -201,7 +201,7 @@ impl M68000 {
         // address-only decode; control modes have no side effects. The
         // extension words come out of the queue with no refill behind them:
         // the jump is about to discard it.
-        let Ea::Mem(target) = self.decode_ea_no_refill(bus, master, ea_mode, ea_reg, Size::Word)
+        let Ea::Mem(target) = self.decode_ea_no_refill(bus, master, ea_mode, ea_reg, Size::Word)?
         else {
             unreachable!("control addressing modes always resolve to memory");
         };
@@ -214,7 +214,7 @@ impl M68000 {
             // address is pushed, and the second after it: the trace records
             // JSR as a program read, two writes, and a program read. BSR is
             // the other way round because it pushes before it branches.
-            self.refill_prefetch(bus, master);
+            self.refill_prefetch(bus, master)?;
             self.push_long(bus, master, return_pc)?;
         }
         // JSR's push is two counted transfers, so a call and a jump spend the

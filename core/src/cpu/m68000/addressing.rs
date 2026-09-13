@@ -557,7 +557,7 @@ impl M68000 {
         &mut self,
         bus: &mut B,
         master: BusMaster,
-    ) -> u16 {
+    ) -> AccessResult<u16> {
         debug_assert!(self.pc & 1 == 0, "instruction stream PC must be even");
         self.take_word(bus, master)
     }
@@ -572,7 +572,7 @@ impl M68000 {
         &mut self,
         bus: &mut B,
         master: BusMaster,
-    ) -> u16 {
+    ) -> AccessResult<u16> {
         debug_assert!(self.pc & 1 == 0, "instruction stream PC must be even");
         self.take_word_no_refill(bus, master)
     }
@@ -621,7 +621,7 @@ impl M68000 {
         mode: u8,
         reg: u8,
         size: Size,
-    ) -> Ea {
+    ) -> AccessResult<Ea> {
         self.decode_ea_inner(bus, master, mode, reg, size, true)
     }
 
@@ -639,13 +639,18 @@ impl M68000 {
         mode: u8,
         reg: u8,
         size: Size,
-    ) -> Ea {
+    ) -> AccessResult<Ea> {
         self.decode_ea_inner(bus, master, mode, reg, size, false)
     }
 
     /// One extension word, refilling behind it or not as the caller declares.
     #[inline]
-    fn ext_word<B: Bus16 + ?Sized>(&mut self, bus: &mut B, master: BusMaster, refill: bool) -> u16 {
+    fn ext_word<B: Bus16 + ?Sized>(
+        &mut self,
+        bus: &mut B,
+        master: BusMaster,
+        refill: bool,
+    ) -> AccessResult<u16> {
         if refill {
             self.read_imm_word(bus, master)
         } else {
@@ -661,7 +666,7 @@ impl M68000 {
         reg: u8,
         size: Size,
         refill: bool,
-    ) -> Ea {
+    ) -> AccessResult<Ea> {
         // A PC-relative operand is fetched from PROGRAM space, because its
         // address is formed from PC. Recorded here rather than carried in the
         // resolved `Ea`, which would put a second variant through every match
@@ -669,7 +674,7 @@ impl M68000 {
         // `ea_read` takes it and clears it, so nothing else can inherit it.
         self.ea_program_space = mode & 7 == 7 && matches!(reg & 7, 2 | 3);
         let reg = (reg & 7) as usize;
-        match mode & 7 {
+        Ok(match mode & 7 {
             // Dn — data register direct
             0 => Ea::DataReg(reg),
             // An — address register direct
@@ -689,12 +694,12 @@ impl M68000 {
             }
             // d16(An) — indirect with 16-bit signed displacement
             5 => {
-                let disp = sext16(self.ext_word(bus, master, refill));
+                let disp = sext16(self.ext_word(bus, master, refill)?);
                 Ea::Mem(self.a[reg].wrapping_add(disp))
             }
             // d8(An,Xn) — indirect with index register and 8-bit displacement
             6 => {
-                let ext = self.ext_word(bus, master, refill);
+                let ext = self.ext_word(bus, master, refill)?;
                 let addr = self.a[reg]
                     .wrapping_add(sext8(ext as u8))
                     .wrapping_add(self.index_value(ext));
@@ -703,23 +708,23 @@ impl M68000 {
             // Mode 7 submodes, selected by the register field
             _ => match reg {
                 // abs.w — sign-extended 16-bit absolute address
-                0 => Ea::Mem(sext16(self.ext_word(bus, master, refill))),
+                0 => Ea::Mem(sext16(self.ext_word(bus, master, refill)?)),
                 // abs.l — full 32-bit absolute address (two words, high first)
                 1 => {
-                    let hi = self.ext_word(bus, master, refill) as u32;
-                    let lo = self.ext_word(bus, master, refill) as u32;
+                    let hi = self.ext_word(bus, master, refill)? as u32;
+                    let lo = self.ext_word(bus, master, refill)? as u32;
                     Ea::Mem((hi << 16) | lo)
                 }
                 // d16(PC) — PC-relative; base is the extension word address
                 2 => {
                     let base = self.pc;
-                    let disp = sext16(self.ext_word(bus, master, refill));
+                    let disp = sext16(self.ext_word(bus, master, refill)?);
                     Ea::Mem(base.wrapping_add(disp))
                 }
                 // d8(PC,Xn) — PC-relative with index; same base convention
                 3 => {
                     let base = self.pc;
-                    let ext = self.ext_word(bus, master, refill);
+                    let ext = self.ext_word(bus, master, refill)?;
                     let addr = base
                         .wrapping_add(sext8(ext as u8))
                         .wrapping_add(self.index_value(ext));
@@ -728,11 +733,11 @@ impl M68000 {
                 // #imm — 1 extension word for byte/word, 2 for long
                 4 => {
                     let value = match size {
-                        Size::Byte => self.ext_word(bus, master, refill) as u32 & 0xFF,
-                        Size::Word => self.ext_word(bus, master, refill) as u32,
+                        Size::Byte => self.ext_word(bus, master, refill)? as u32 & 0xFF,
+                        Size::Word => self.ext_word(bus, master, refill)? as u32,
                         Size::Long => {
-                            let hi = self.ext_word(bus, master, refill) as u32;
-                            let lo = self.ext_word(bus, master, refill) as u32;
+                            let hi = self.ext_word(bus, master, refill)? as u32;
+                            let lo = self.ext_word(bus, master, refill)? as u32;
                             (hi << 16) | lo
                         }
                     };
@@ -742,7 +747,7 @@ impl M68000 {
                 // lands in M5); decode as immediate-zero to stay deterministic
                 _ => Ea::Imm(0),
             },
-        }
+        })
     }
 
     /// Read an operand of `size` through a resolved [`Ea`]. Register and
@@ -1022,7 +1027,7 @@ mod tests {
         let (mut cpu, mut bus) = setup();
         cpu.set_pc_flush(0x1000);
         bus.load(0x1000, &[0x4E, 0x71]);
-        assert_eq!(cpu.read_imm_word(&mut bus, M), 0x4E71);
+        assert_eq!(cpu.read_imm_word(&mut bus, M).unwrap(), 0x4E71);
         assert_eq!(cpu.pc, 0x1002);
     }
 
@@ -1031,8 +1036,14 @@ mod tests {
     #[test]
     fn decode_register_direct_modes() {
         let (mut cpu, mut bus) = setup();
-        assert_eq!(cpu.decode_ea(&mut bus, M, 0, 3, Size::Word), Ea::DataReg(3));
-        assert_eq!(cpu.decode_ea(&mut bus, M, 1, 5, Size::Long), Ea::AddrReg(5));
+        assert_eq!(
+            cpu.decode_ea(&mut bus, M, 0, 3, Size::Word).unwrap(),
+            Ea::DataReg(3)
+        );
+        assert_eq!(
+            cpu.decode_ea(&mut bus, M, 1, 5, Size::Long).unwrap(),
+            Ea::AddrReg(5)
+        );
     }
 
     #[test]
@@ -1040,7 +1051,7 @@ mod tests {
         let (mut cpu, mut bus) = setup();
         cpu.a[2] = 0x3000;
         assert_eq!(
-            cpu.decode_ea(&mut bus, M, 2, 2, Size::Word),
+            cpu.decode_ea(&mut bus, M, 2, 2, Size::Word).unwrap(),
             Ea::Mem(0x3000)
         );
         assert_eq!(cpu.a[2], 0x3000, "plain indirect must not adjust An");
@@ -1051,7 +1062,7 @@ mod tests {
         let (mut cpu, mut bus) = setup();
         for (size, step) in [(Size::Byte, 1), (Size::Word, 2), (Size::Long, 4)] {
             cpu.a[1] = 0x3000;
-            let ea = cpu.decode_ea(&mut bus, M, 3, 1, size);
+            let ea = cpu.decode_ea(&mut bus, M, 3, 1, size).unwrap();
             assert_eq!(ea, Ea::Mem(0x3000), "address is pre-increment value");
             assert_eq!(cpu.a[1], 0x3000 + step, "step for {size:?}");
         }
@@ -1062,7 +1073,7 @@ mod tests {
         let (mut cpu, mut bus) = setup();
         for (size, step) in [(Size::Byte, 1), (Size::Word, 2), (Size::Long, 4)] {
             cpu.a[1] = 0x3000;
-            let ea = cpu.decode_ea(&mut bus, M, 4, 1, size);
+            let ea = cpu.decode_ea(&mut bus, M, 4, 1, size).unwrap();
             assert_eq!(
                 ea,
                 Ea::Mem(0x3000 - step),
@@ -1076,12 +1087,12 @@ mod tests {
     fn a7_byte_postincrement_and_predecrement_step_by_two() {
         let (mut cpu, mut bus) = setup();
         cpu.a[7] = 0x3000;
-        let ea = cpu.decode_ea(&mut bus, M, 3, 7, Size::Byte);
+        let ea = cpu.decode_ea(&mut bus, M, 3, 7, Size::Byte).unwrap();
         assert_eq!(ea, Ea::Mem(0x3000));
         assert_eq!(cpu.a[7], 0x3002, "A7 byte (An)+ keeps SP word-aligned");
 
         cpu.a[7] = 0x3000;
-        let ea = cpu.decode_ea(&mut bus, M, 4, 7, Size::Byte);
+        let ea = cpu.decode_ea(&mut bus, M, 4, 7, Size::Byte).unwrap();
         assert_eq!(ea, Ea::Mem(0x2FFE));
         assert_eq!(cpu.a[7], 0x2FFE, "A7 byte -(An) keeps SP word-aligned");
     }
@@ -1093,7 +1104,7 @@ mod tests {
         cpu.set_pc_flush(0x1000);
         bus.load(0x1000, &[0x00, 0x10]); // +0x10
         assert_eq!(
-            cpu.decode_ea(&mut bus, M, 5, 0, Size::Word),
+            cpu.decode_ea(&mut bus, M, 5, 0, Size::Word).unwrap(),
             Ea::Mem(0x3010)
         );
         assert_eq!(cpu.pc, 0x1002, "one extension word consumed");
@@ -1102,7 +1113,7 @@ mod tests {
         cpu.set_pc_flush(0x1000);
         bus.load(0x1000, &[0xFF, 0xF0]); // -0x10
         assert_eq!(
-            cpu.decode_ea(&mut bus, M, 5, 0, Size::Word),
+            cpu.decode_ea(&mut bus, M, 5, 0, Size::Word).unwrap(),
             Ea::Mem(0x2FF0)
         );
     }
@@ -1116,7 +1127,7 @@ mod tests {
         // Brief extension: D2.w index (D/A=0, reg=2, W/L=0), disp8 = +4
         bus.load(0x1000, &[0x20, 0x04]);
         assert_eq!(
-            cpu.decode_ea(&mut bus, M, 6, 0, Size::Word),
+            cpu.decode_ea(&mut bus, M, 6, 0, Size::Word).unwrap(),
             Ea::Mem(0x3000 - 0x10 + 4)
         );
     }
@@ -1130,7 +1141,7 @@ mod tests {
         // Brief extension: D2.l index (W/L=1), disp8 = 0
         bus.load(0x1000, &[0x28, 0x00]);
         assert_eq!(
-            cpu.decode_ea(&mut bus, M, 6, 0, Size::Word),
+            cpu.decode_ea(&mut bus, M, 6, 0, Size::Word).unwrap(),
             Ea::Mem(0x0010_1000)
         );
     }
@@ -1144,7 +1155,7 @@ mod tests {
         // Brief extension: A3.l index (D/A=1, reg=3, W/L=1), disp8 = -2
         bus.load(0x1000, &[0xB8, 0xFE]);
         assert_eq!(
-            cpu.decode_ea(&mut bus, M, 6, 0, Size::Word),
+            cpu.decode_ea(&mut bus, M, 6, 0, Size::Word).unwrap(),
             Ea::Mem(0x3000 + 0x100 - 2)
         );
     }
@@ -1158,7 +1169,7 @@ mod tests {
         // D0.w index = 0, disp8 = -0x80 (most negative)
         bus.load(0x1000, &[0x00, 0x80]);
         assert_eq!(
-            cpu.decode_ea(&mut bus, M, 6, 1, Size::Word),
+            cpu.decode_ea(&mut bus, M, 6, 1, Size::Word).unwrap(),
             Ea::Mem(0x3000 - 0x80)
         );
     }
@@ -1172,7 +1183,7 @@ mod tests {
         // D1.l index with scale bits = 3 (×8 on 68020+): 68000 ignores scale
         bus.load(0x1000, &[0x1E, 0x00]);
         assert_eq!(
-            cpu.decode_ea(&mut bus, M, 6, 0, Size::Word),
+            cpu.decode_ea(&mut bus, M, 6, 0, Size::Word).unwrap(),
             Ea::Mem(0x3010)
         );
 
@@ -1184,7 +1195,7 @@ mod tests {
         cpu.set_pc_flush(0x1000);
         bus.load(0x1000, &[0x1E, 0x00]);
         assert_eq!(
-            cpu.decode_ea(&mut bus, M, 6, 0, Size::Word),
+            cpu.decode_ea(&mut bus, M, 6, 0, Size::Word).unwrap(),
             Ea::Mem(0x3000 + (0x10 << 3))
         );
     }
@@ -1197,7 +1208,7 @@ mod tests {
         cpu.set_pc_flush(0x1000);
         bus.load(0x1000, &[0x20, 0x00]);
         assert_eq!(
-            cpu.decode_ea(&mut bus, M, 7, 0, Size::Word),
+            cpu.decode_ea(&mut bus, M, 7, 0, Size::Word).unwrap(),
             Ea::Mem(0x2000)
         );
 
@@ -1206,7 +1217,7 @@ mod tests {
         cpu.set_pc_flush(0x1000);
         bus.load(0x1000, &[0x80, 0x00]);
         assert_eq!(
-            cpu.decode_ea(&mut bus, M, 7, 0, Size::Word),
+            cpu.decode_ea(&mut bus, M, 7, 0, Size::Word).unwrap(),
             Ea::Mem(0xFFFF_8000)
         );
     }
@@ -1217,7 +1228,7 @@ mod tests {
         cpu.set_pc_flush(0x1000);
         bus.load(0x1000, &[0x00, 0x12, 0x34, 0x56]);
         assert_eq!(
-            cpu.decode_ea(&mut bus, M, 7, 1, Size::Word),
+            cpu.decode_ea(&mut bus, M, 7, 1, Size::Word).unwrap(),
             Ea::Mem(0x0012_3456)
         );
         assert_eq!(cpu.pc, 0x1004, "two extension words consumed");
@@ -1229,7 +1240,7 @@ mod tests {
         cpu.set_pc_flush(0x1000); // extension word lives here
         bus.load(0x1000, &[0x01, 0x00]); // +0x100
         assert_eq!(
-            cpu.decode_ea(&mut bus, M, 7, 2, Size::Word),
+            cpu.decode_ea(&mut bus, M, 7, 2, Size::Word).unwrap(),
             Ea::Mem(0x1100)
         );
     }
@@ -1242,7 +1253,7 @@ mod tests {
         // Brief extension: D4.l index, disp8 = +6; base = 0x1000
         bus.load(0x1000, &[0x48, 0x06]);
         assert_eq!(
-            cpu.decode_ea(&mut bus, M, 7, 3, Size::Word),
+            cpu.decode_ea(&mut bus, M, 7, 3, Size::Word).unwrap(),
             Ea::Mem(0x1026)
         );
     }
@@ -1253,7 +1264,7 @@ mod tests {
         cpu.set_pc_flush(0x1000);
         bus.load(0x1000, &[0x12, 0x34]);
         assert_eq!(
-            cpu.decode_ea(&mut bus, M, 7, 4, Size::Byte),
+            cpu.decode_ea(&mut bus, M, 7, 4, Size::Byte).unwrap(),
             Ea::Imm(0x34),
             "byte immediate is the low byte of one extension word"
         );
@@ -1261,14 +1272,14 @@ mod tests {
 
         cpu.set_pc_flush(0x1000);
         assert_eq!(
-            cpu.decode_ea(&mut bus, M, 7, 4, Size::Word),
+            cpu.decode_ea(&mut bus, M, 7, 4, Size::Word).unwrap(),
             Ea::Imm(0x1234)
         );
 
         cpu.set_pc_flush(0x1000);
         bus.load(0x1000, &[0x12, 0x34, 0x56, 0x78]);
         assert_eq!(
-            cpu.decode_ea(&mut bus, M, 7, 4, Size::Long),
+            cpu.decode_ea(&mut bus, M, 7, 4, Size::Long).unwrap(),
             Ea::Imm(0x1234_5678)
         );
         assert_eq!(cpu.pc, 0x1004);
@@ -1278,7 +1289,7 @@ mod tests {
     fn decode_keeps_full_32_bit_address_and_bus_access_masks() {
         let (mut cpu, mut bus) = setup();
         cpu.a[0] = 0xFF12_3456;
-        let ea = cpu.decode_ea(&mut bus, M, 2, 0, Size::Word);
+        let ea = cpu.decode_ea(&mut bus, M, 2, 0, Size::Word).unwrap();
         assert_eq!(ea, Ea::Mem(0xFF12_3456), "EA computed at full width");
         // mask_addr (separately unit-tested) truncates to 24 bits at the
         // word/byte access layer, so reads through the full-width EA work.

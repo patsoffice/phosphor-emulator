@@ -73,7 +73,7 @@ impl M68000 {
             self.finish_from_bus(bus, master, 0); // illegal encoding
             return Ok(());
         }
-        let Ea::Mem(addr) = self.decode_ea(bus, master, ea_mode, ea_reg, Size::Word) else {
+        let Ea::Mem(addr) = self.decode_ea(bus, master, ea_mode, ea_reg, Size::Word)? else {
             unreachable!("control addressing modes always resolve to memory");
         };
         if push {
@@ -158,7 +158,7 @@ impl M68000 {
         master: BusMaster,
     ) -> AccessResult<()> {
         let reg = (opcode & 7) as usize;
-        let disp = sext16(self.read_imm_word(bus, master));
+        let disp = sext16(self.read_imm_word(bus, master)?);
         // See the doc comment: A7 is the one register whose pushed value the
         // sources do not agree on, and this follows the state gate.
         let value = if reg == 7 {
@@ -270,7 +270,7 @@ impl M68000 {
             self.finish_from_bus(bus, master, 0); // illegal encoding
             return Ok(());
         }
-        let mask = self.read_imm_word(bus, master);
+        let mask = self.read_imm_word(bus, master)?;
         // The register mask precedes the mode's extension words, so an indexed
         // MOVEM adds its index after that fetch rather than in front of the
         // instruction, and the loader has not burned it. A predecrement store
@@ -318,7 +318,7 @@ impl M68000 {
             let (addr, program) = if ea_mode == 3 {
                 (self.a[ea_reg as usize], false)
             } else {
-                let Ea::Mem(base) = self.decode_ea(bus, master, ea_mode, ea_reg, size) else {
+                let Ea::Mem(base) = self.decode_ea(bus, master, ea_mode, ea_reg, size)? else {
                     unreachable!("MOVEM EA modes always resolve to memory");
                 };
                 // **A PC-relative list is read from program space, and so is

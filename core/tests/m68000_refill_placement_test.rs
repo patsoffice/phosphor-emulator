@@ -246,3 +246,80 @@ fn neg_l_keeps_its_refill_in_front_of_both_write_words() {
         "still low half first, which is the RMW write order either way"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Two refills in one instruction land on separate clocks
+// ---------------------------------------------------------------------------
+
+/// Clocks at which each access was driven, relative to the instruction's first.
+fn access_clocks(program: &[u16], setup: impl FnOnce(&mut M68000, &mut OrderedBus)) -> Vec<u32> {
+    let mut cpu = M68000::new();
+    cpu.set_pc_flush(PROGRAM);
+    let mut bus = OrderedBus::new();
+    let mut words = vec![0x4E71]; // NOP, to reach the steady state
+    words.extend_from_slice(program);
+    let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_be_bytes()).collect();
+    bus.load(PROGRAM, &bytes);
+    setup(&mut cpu, &mut bus);
+
+    let mut guard = 0;
+    while !cpu.tick_with_bus(&mut bus, M) {
+        guard += 1;
+        assert!(guard < 100, "the priming NOP did not complete");
+    }
+
+    // One tick is one clock. Record the clock each access was driven on by
+    // watching the log grow.
+    bus.log.clear();
+    let mut clocks = Vec::new();
+    let mut seen = 0;
+    for clock in 0..400u32 {
+        let done = cpu.tick_with_bus(&mut bus, M);
+        while seen < bus.log.len() {
+            clocks.push(clock);
+            seen += 1;
+        }
+        if done {
+            break;
+        }
+    }
+    clocks
+}
+
+#[test]
+fn two_program_reads_in_one_instruction_do_not_share_a_clock() {
+    // `MOVEM.l #, (xxx).l` consumes three instruction-stream words before its
+    // first write: the opcode, the register mask and two address words. The
+    // refills behind them are three separate program reads, and the part drives
+    // one bus cycle every four clocks, so they are four clocks apart.
+    //
+    // **This is `phosphor-emulator-d31l`.** While `refill_prefetch` was
+    // infallible it could not suspend, so the second and third refills were
+    // driven on one clock and every transfer behind them was early. The
+    // recorded trace is [R0 R4 R8 W24 ...] and this core produced
+    // [R0 R4 R4 W24 ...] on 2,231 cases of the microcode-derived corpus.
+    let clocks = access_clocks(&[0x48F9, 0x0000, 0x4000, 0x0001], |cpu, _| {
+        cpu.d[0] = 0x1234_5678;
+    });
+
+    assert!(
+        clocks.len() >= 3,
+        "expected at least three accesses, got {clocks:?}"
+    );
+    let leading = &clocks[..3];
+    assert_eq!(
+        leading,
+        [0, 4, 8],
+        "the three leading program reads take a clock each, four apart"
+    );
+
+    // And no two accesses anywhere in the instruction share a clock, which is
+    // the general form of the same rule.
+    for pair in clocks.windows(2) {
+        assert_ne!(
+            pair[0], pair[1],
+            "two bus cycles on clock {} in {clocks:?}",
+            pair[0]
+        );
+    }
+}
