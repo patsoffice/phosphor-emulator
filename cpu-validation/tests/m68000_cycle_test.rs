@@ -1853,7 +1853,7 @@ fn test_m68000_cycle_gate() {
         // three went to 100.00% on length against both corpora. This aggregate
         // stays low because this corpus's faulting population is a whole
         // eight clocks out by its own convention, which is the row above.
-        ("680x0 length", pops_680x0.all.length_pct(), 81.91),
+        ("680x0 length", pops_680x0.all.length_pct(), 81.92),
         ("680x0 kinds", pops_680x0.all.kinds_pct(), 99.56),
         ("680x0 count", pops_680x0.all.count_pct(), 99.56),
         ("680x0 positions", pops_680x0.all.positions_pct(), 80.81),
@@ -1910,14 +1910,20 @@ fn test_m68000_cycle_gate() {
             pops_m68000.address_error.kinds_pct(),
             99.99,
         ),
-        // **99.98%, raised from 99.78 by the same change.** What is left on
-        // this rung is essentially one encoding: `BTST Dn,#imm`, which both
-        // corpora record at 10 clocks where the manual composes 8 from Table
-        // 8-8's 4(1/0)+ and Table 8-1's immediate 4(1/0), and where this core
-        // charges the manual's figure. Filed rather than fitted, because it is
-        // the manual that disagrees with both corpora and 4sdm's scope was the
-        // data dependence.
-        ("m68000 length", pops_m68000.all.length_pct(), 99.97),
+        // **THIS CORPUS IS NOW EXACT ON INSTRUCTION LENGTH**, 317,500 of
+        // 317,500, having been 81.88% when the atomic core was first measured
+        // against it at M1. The last encoding to go was `BTST Dn,#imm`
+        // (`phosphor-emulator-cvux`), which both corpora record at 10 clocks
+        // where the manual composes 8 from Table 8-8's 4(1/0)+ and Table 8-1's
+        // immediate 4(1/0): an operand out of the prefetch queue runs no data
+        // bus cycle, so the test needs a step of its own.
+        //
+        // Floored at 99.99 rather than asserted equal to 100, for the reason
+        // the faulting rows above give: a rate reaches its printed ceiling
+        // before it reaches its real one, and an assertion of 100.0 fails
+        // against the run it was taken from. The delta histogram beside the
+        // population table is what says this is a true zero.
+        ("m68000 length", pops_m68000.all.length_pct(), 99.99),
         ("m68000 kinds", pops_m68000.all.kinds_pct(), 99.33),
         // **This corpus disqualifies itself on `TAS` and says so.** Its README
         // excludes `TAS` and `TRAPV` from what it verifies as good, and names

@@ -152,7 +152,38 @@ impl M68000 {
             // Section 9's absolute, per `by_variant`. Missed by M6's delta and
             // filed as `phosphor-emulator-9zmn`.
             let bclr_memory = if op == 2 { self.by_variant(0, 2) } else { 0 };
-            self.finish_from_bus(bus, master, ea_internal(ea_mode, ea_reg) + bclr_memory);
+            // **AN IMMEDIATE OPERAND COSTS TWO CLOCKS MORE, AND HERE THE
+            // MANUAL IS THE ONE THAT IS WRONG.** `BTST Dn,#imm` is the only
+            // bit operation that can take an immediate, and both corpora
+            // record it at 10 clocks with two reads: 138 cases on the
+            // documentation-derived set and 58 on the microcode-derived one,
+            // every one of them 10 with no spread. Composing the manual's own
+            // tables gives 8, from Table 8-8's 4(1/0)+ for a byte `BTST` to
+            // memory plus Table 8-1's 4(1/0) for `#<data>`, and 8 is what this
+            // core charged.
+            //
+            // Two independently generated traces agreeing against a composed
+            // figure is the case the epic's two-source rule settles against
+            // the manual, and the nine other `BTST` memory modes are the
+            // control that says the composition is otherwise right: (An) 8,
+            // (An)+ 8, -(An) 10, (d16,An) 12, (d8,An,Xn) 14, abs.w 12, abs.l
+            // 16, (d16,PC) 12 and (d8,PC,Xn) 14, all exact. Immediate is the
+            // single mode where the two disagree.
+            //
+            // The mechanism is one this core already models elsewhere: an
+            // operand out of the prefetch queue runs no data bus cycle, so
+            // there is no transfer for the test to happen inside and it needs
+            // a step of its own. `src_form_internal` in `alu/binary.rs`
+            // charges a long `ADD` four clocks for a register or queue operand
+            // against two for one from memory, for the same reason, with `CMP`
+            // as the control that made it a mechanism rather than a fitted
+            // number. See `phosphor-emulator-cvux`.
+            let queue_operand = if ea_mode == 7 && ea_reg == 4 { 2 } else { 0 };
+            self.finish_from_bus(
+                bus,
+                master,
+                ea_internal(ea_mode, ea_reg) + bclr_memory + queue_operand,
+            );
         }
         Ok(())
     }

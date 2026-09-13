@@ -33,6 +33,17 @@ struct Cost {
     writes: usize,
 }
 
+impl Cost {
+    /// The manual's `n(r/w)`: total clocks, read cycles, write cycles.
+    fn n(clocks: u32, reads: usize, writes: usize) -> Self {
+        Self {
+            clocks,
+            reads,
+            writes,
+        }
+    }
+}
+
 struct CountingBus {
     memory: Vec<u8>,
     reads: usize,
@@ -242,6 +253,85 @@ fn the_68010_splits_the_same_way_because_table_9_14_asterisks_the_same_rows() {
             low.clocks,
             measure(M68kVariant::M68000, &[opcode], 3).clocks,
             "{name} is not a variant difference: Table 9-14 matches Table 8-8"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// An immediate operand has no bus cycle for the test to hide behind
+// ---------------------------------------------------------------------------
+
+/// Measure a `BTST` against a memory or immediate operand.
+fn btst_against(program: &[u16], setup: impl FnOnce(&mut M68000, &mut CountingBus)) -> Cost {
+    let mut cpu = M68000::new();
+    cpu.set_pc_flush(PROGRAM);
+    let mut bus = CountingBus::new();
+    let mut words = vec![0x4E71]; // NOP, to reach the steady state
+    words.extend_from_slice(program);
+    let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_be_bytes()).collect();
+    bus.memory[PROGRAM as usize..PROGRAM as usize + bytes.len()].copy_from_slice(&bytes);
+    cpu.d[1] = 3;
+    setup(&mut cpu, &mut bus);
+
+    let mut guard = 0;
+    while !cpu.tick_with_bus(&mut bus, M) {
+        guard += 1;
+        assert!(guard < 100, "the priming NOP did not complete");
+    }
+    let (reads, writes) = (bus.reads, bus.writes);
+    let mut clocks = 0;
+    loop {
+        clocks += 1;
+        assert!(clocks < 200, "instruction did not complete");
+        if cpu.tick_with_bus(&mut bus, M) {
+            break;
+        }
+    }
+    Cost {
+        clocks,
+        reads: bus.reads - reads,
+        writes: bus.writes - writes,
+    }
+}
+
+#[test]
+fn btst_against_an_immediate_costs_two_clocks_more_than_the_manual_composes() {
+    // BTST D1,#imm. **Both corpora record 10(2/0) and the manual composes 8**,
+    // from Table 8-8's 4(1/0)+ plus Table 8-1's 4(1/0) for #<data>, which is
+    // what this core charged. Two independently generated traces agreeing
+    // against a composed figure settles it against the manual: 138 cases on
+    // one corpus and 58 on the other, every one at 10 with no spread.
+    //
+    // The mechanism is the one `src_form_internal` already models for ADD: an
+    // operand out of the prefetch queue runs no data bus cycle, so the test
+    // needs a step of its own. See phosphor-emulator-cvux.
+    let cost = btst_against(&[0x033C, 0x0004], |_, _| {});
+    assert_eq!(cost, Cost::n(10, 2, 0), "BTST D1,#imm is 10(2/0)");
+}
+
+#[test]
+fn btst_against_memory_still_matches_the_composed_figure() {
+    // **The controls, and they are what make the row above an immediate rule
+    // rather than a BTST one.** Every other BTST operand mode matches Table
+    // 8-8's 4(1/0)+ plus its Table 8-1 effective-address time exactly, and a
+    // change applied to BTST generally rather than to the immediate mode fails
+    // here.
+    for (program, name, clocks, reads) in [
+        (vec![0x0311u16], "BTST D1,(A0)", 8, 2),
+        (vec![0x0319], "BTST D1,(A0)+", 8, 2),
+        (vec![0x0321], "BTST D1,-(A0)", 10, 2),
+        (vec![0x0328, 0x0002], "BTST D1,(d16,A0)", 12, 3),
+        (vec![0x0330, 0x0002], "BTST D1,(d8,A0,Xn)", 14, 3),
+        (vec![0x0338, 0x3000], "BTST D1,(xxx).w", 12, 3),
+        (vec![0x0339, 0x0000, 0x3000], "BTST D1,(xxx).l", 16, 4),
+    ] {
+        let cost = btst_against(&program, |cpu, _| {
+            cpu.a[0] = 0x3000;
+        });
+        assert_eq!(
+            cost,
+            Cost::n(clocks, reads, 0),
+            "{name} must keep the composed figure"
         );
     }
 }
