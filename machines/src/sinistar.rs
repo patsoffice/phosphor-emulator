@@ -1,6 +1,7 @@
 use phosphor_core::core::machine::{
     ActionRole, DefaultBinding, Direction, InputConfigurable, InputControl, InputEvent, InputId,
-    InputKind, KeyId, MachineCore, Nvram, PadButton, PadControl, Profilable, Renderable, SaveState,
+    InputKind, KeyId, MachineCore, Nvram, Orientation, PadButton, PadControl, Profilable,
+    Renderable, SaveState,
 };
 use phosphor_core::core::{Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
@@ -420,38 +421,33 @@ impl Default for SinistarSystem {
 // Machine traits
 // ---------------------------------------------------------------------------
 
-// Audio and debug delegate to the board; Renderable is hand-written below to
-// apply Sinistar's ROT270 monitor rotation (the shared board renders in the
-// raw landscape raster used by the ROT0 games like Joust).
+// Audio and debug delegate to the board. Renderable is hand-written only because
+// Sinistar's cabinet turns the monitor and its board-mates do not: it renders the
+// same landscape raster as Joust and Robotron and differs from them in the
+// orientation it declares and the aspect that follows from it.
 crate::impl_board_audio!(SinistarSystem, board);
 crate::impl_board_debug!(SinistarSystem, board, williams::TIMING);
 
 impl Renderable for SinistarSystem {
-    /// Portrait, after the 270-degree rotation (the board raster is landscape).
+    /// The board's landscape raster, which is what `render_frame` fills. The
+    /// cabinet's rotation is declared rather than baked in, so this is the
+    /// native size and the height is the line count.
     fn display_size(&self) -> (u32, u32) {
-        let (w, h) = williams::TIMING.display_size();
-        (h, w)
+        williams::TIMING.display_size()
     }
 
     fn display_aspect(&self) -> Option<(u32, u32)> {
         Some((3, 4)) // rotated cabinet: portrait 3:4
     }
 
-    /// Rotate the board's landscape raster 270 degrees clockwise into the
-    /// portrait output buffer: `dst(dx, dy) = src(x = sw-1-dy, y = dx)`.
+    /// The monitor is turned a quarter turn; the board is the same one Joust and
+    /// Robotron leave upright.
+    fn orientation(&self) -> Orientation {
+        Orientation::ROT270
+    }
+
     fn render_frame(&self, buffer: &mut [u8]) {
-        let sw = williams::TIMING.display_width as usize; // 292 (raster width)
-        let sh = williams::TIMING.display_height as usize; // 240 (raster height)
-        let dw = sh; // portrait width
-        let src = &self.board.scanline_buffer;
-        for dy in 0..sw {
-            let sx = sw - 1 - dy;
-            for dx in 0..sh {
-                let s = (dx * sw + sx) * 3;
-                let d = (dy * dw + dx) * 3;
-                buffer[d..d + 3].copy_from_slice(&src[s..s + 3]);
-            }
-        }
+        self.board.render_frame(buffer);
     }
 }
 
@@ -612,23 +608,36 @@ mod tests {
     }
 
     #[test]
-    fn render_rotates_270_into_portrait() {
+    fn declares_rot270_and_renders_the_board_raster_unrotated() {
         let mut sys = SinistarSystem::new();
         let sw = williams::TIMING.display_width as usize; // 292
         let sh = williams::TIMING.display_height as usize; // 240
 
-        // Display is portrait (raster w/h swapped).
-        assert_eq!(sys.display_size(), (sh as u32, sw as u32));
+        // Native is the board's landscape raster, so the height is the line
+        // count. The portrait cabinet is a declared orientation, not a rotation
+        // baked into the pixels.
+        assert_eq!(sys.display_size(), (sw as u32, sh as u32));
+        assert_eq!(sys.orientation(), Orientation::ROT270);
+        assert!(sys.orientation().swaps_axes());
 
         // Mark the source top-left pixel (x=0, y=0).
         sys.board.scanline_buffer[0] = 0x11;
         sys.board.scanline_buffer[1] = 0x22;
         sys.board.scanline_buffer[2] = 0x33;
 
-        let mut out = vec![0u8; sh * sw * 3];
-        sys.render_frame(&mut out);
+        let mut native = vec![0u8; sw * sh * 3];
+        sys.render_frame(&mut native);
+        assert_eq!(
+            &native[0..3],
+            &[0x11, 0x22, 0x33],
+            "render_frame emits the landscape raster untouched"
+        );
 
-        // ROT270: src(0,0) lands at dst(dx=0, dy=sw-1) — bottom-left of portrait.
+        // Applying the declared orientation reproduces exactly what render_frame
+        // used to bake in: src(0,0) at the bottom-left of the portrait image.
+        // This is the equivalence the pinned golden frame also checks.
+        let mut out = vec![0u8; sh * sw * 3];
+        phosphor_core::gfx::apply_orientation(&native, &mut out, sw, sh, Orientation::ROT270);
         let d = (sw - 1) * sh * 3;
         assert_eq!(&out[d..d + 3], &[0x11, 0x22, 0x33]);
     }

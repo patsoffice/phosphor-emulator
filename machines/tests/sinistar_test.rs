@@ -1,16 +1,21 @@
 //! Integration tests for Sinistar: the boot smoke test plus the machine-trait
-//! surface (portrait ROT270 display, inputs, render sizing). Save-state
-//! round-trips are covered by the shared harness in `save_state_tests.rs`.
+//! surface (native landscape raster under a declared ROT270, inputs, render
+//! sizing). Save-state round-trips are covered by the shared harness in
+//! `save_state_tests.rs`.
 
-use phosphor_core::core::machine::{InputConfigurable, MachineCore, Renderable};
+use phosphor_core::core::machine::{InputConfigurable, MachineCore, Orientation, Renderable};
 use phosphor_machines::SinistarSystem;
 use phosphor_machines::williams;
 
 #[test]
-fn display_is_portrait_after_rot270() {
+fn renders_native_landscape_under_a_declared_rot270() {
     let sys = SinistarSystem::new();
-    // The board raster is 292x240 landscape; Sinistar presents it rotated.
-    assert_eq!(sys.display_size(), (240, 292));
+    // The board raster is 292x240 landscape and Sinistar renders it as such;
+    // the turned cabinet is a declared orientation the frontend applies, not a
+    // rotation baked into the pixels. So the height here is the line count.
+    assert_eq!(sys.display_size(), (292, 240));
+    assert_eq!(sys.orientation(), Orientation::ROT270);
+    // Still presented portrait, which is what the aspect describes.
     assert_eq!(sys.display_aspect(), Some((3, 4)));
 }
 
@@ -55,7 +60,7 @@ fn boots_and_runs_frames_without_panicking() {
         "clock should advance one frame of cycles per run_frame"
     );
 
-    // Render the final frame into the portrait buffer without panicking.
+    // Render the final frame into the native buffer without panicking.
     let (w, h) = sys.display_size();
     let mut buf = vec![0u8; (w * h * 3) as usize];
     sys.render_frame(&mut buf);
