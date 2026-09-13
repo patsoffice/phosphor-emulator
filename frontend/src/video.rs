@@ -15,6 +15,14 @@ pub struct Video {
     native_width: u32,
     native_height: u32,
     rgba_buffer: Vec<u8>,
+    crt: crate::crt_gl::CrtRenderer,
+    /// Whether the CRT stage is carrying the picture, and whether that has been
+    /// said. A pass-through stage draws exactly what the direct upload drew, so
+    /// a stage that silently never engaged is indistinguishable from one that
+    /// works. Say each transition once; these are standing conditions, not
+    /// per-frame events.
+    crt_active: bool,
+    crt_fallback_reported: bool,
     start_time: Instant,
     fullscreen: bool,
 }
@@ -89,15 +97,46 @@ impl Video {
             native_width,
             native_height,
             rgba_buffer,
+            crt: crate::crt_gl::CrtRenderer::new(),
+            crt_active: false,
+            crt_fallback_reported: false,
             start_time: Instant::now(),
             fullscreen,
         }
     }
 
-    /// Convert an RGB24 framebuffer to RGBA8 and upload to the game texture.
+    /// Put an RGB24 framebuffer into the texture egui draws.
+    ///
+    /// Normally this runs the frame through [`crate::crt_gl::CrtRenderer`],
+    /// which renders into that texture rather than uploading pixels into it. The
+    /// direct upload below is the fallback for two cases: the painter has not
+    /// yet allocated the texture, which is true until it has painted once, and a
+    /// framebuffer that will not complete.
+    ///
+    /// Once the CRT stage takes over, the texture must never be marked dirty
+    /// again: `Painter::upload_user_textures` re-uploads a dirty texture's CPU
+    /// pixels at the start of the next paint, which would overwrite what the
+    /// stage rendered. Uploading is therefore the fallback's job alone.
     pub fn update_game_texture(&mut self, rgb24: &[u8]) {
         let pixel_count = (self.native_width * self.native_height) as usize;
         debug_assert_eq!(rgb24.len(), pixel_count * 3);
+
+        if let Some(out_tex) = self.painter.get_raw_gl_texture_id(&self.game_texture_id)
+            && self
+                .crt
+                .present(rgb24, self.native_width, self.native_height, out_tex)
+        {
+            if !self.crt_active {
+                self.crt_active = true;
+                eprintln!("CRT stage active: drawing through the presentation framebuffer");
+            }
+            return;
+        }
+
+        if self.crt_active && !self.crt_fallback_reported {
+            self.crt_fallback_reported = true;
+            eprintln!("CRT stage unavailable: falling back to direct texture upload");
+        }
 
         for i in 0..pixel_count {
             self.rgba_buffer[i * 4] = rgb24[i * 3];

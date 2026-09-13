@@ -5,6 +5,7 @@ use phosphor_machines::registry;
 mod audio;
 mod config;
 mod console_ui;
+mod crt_gl;
 mod debug_ui;
 mod emulator;
 mod gfxview;

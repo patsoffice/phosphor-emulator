@@ -101,7 +101,7 @@ void main() {
 
 /// Fullscreen pass: one oversized triangle generated from the vertex index, so
 /// it needs no vertex buffer at all, just a bound (empty) VAO.
-const FULLSCREEN_VERTEX_SRC: &str = r#"
+pub(crate) const FULLSCREEN_VERTEX_SRC: &str = r#"
 #version 150
 out vec2 uv;
 void main() {
@@ -631,7 +631,7 @@ unsafe fn create_shader_program() -> gl::types::GLuint {
     unsafe { link_program(VERTEX_SHADER_SRC, FRAGMENT_SHADER_SRC) }
 }
 
-unsafe fn link_program(vertex_src: &str, fragment_src: &str) -> gl::types::GLuint {
+pub(crate) unsafe fn link_program(vertex_src: &str, fragment_src: &str) -> gl::types::GLuint {
     unsafe {
         let vs = compile_shader(vertex_src, gl::VERTEX_SHADER);
         let fs = compile_shader(fragment_src, gl::FRAGMENT_SHADER);
