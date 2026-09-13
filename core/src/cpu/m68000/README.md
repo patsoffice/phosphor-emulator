@@ -27,7 +27,7 @@ and what is left is the residual list below rather than a milestone.
 | Integration tests| 320 (+ 57 unit tests)                                  |
 | State validation | 1,000,058/1,000,060 SingleStepTests vectors (124 files)|
 | Timing           | Per-clock, one bus cycle per four clocks               |
-| Timing validation| 99.98% exact on length, 97.66% on transfer placement   |
+| Timing validation| 100% exact on length, 98.48% on transfer placement     |
 
 ## Registers
 
@@ -146,21 +146,36 @@ control transfer has to declare its flush through `set_pc_flush`: a taken branch
 with a zero displacement lands where execution would have gone anyway, so no
 comparison of addresses can tell a flush from a fall-through.
 
-What is left is named rather than described, and each piece has an issue: a
-queue refill the body drives itself cannot suspend, so two program reads can
-land on one clock (`phosphor-emulator-d31l`), which is the whole of what remains
-on transfer placement; and `BTST` with an immediate source is recorded by both
-corpora at 10 clocks where the manual composes 8 and this core charges the
-manual's figure (`phosphor-emulator-cvux`), which is essentially the whole of
-what remains on length.
+**126 of the 127 instructions in the per-cycle suite are exact on both clock
+count and transfer order.** The exception is `TAS`, and it is the corpus rather
+than this core: that suite's own README excludes `TAS` from what it verifies,
+naming the read-modify-write timing as the reason, and the other suite records
+the held cycle this core drives. Instruction length is exact on every one of
+its 317,500 cases, having read 81.88% when the atomic core was first measured
+against it.
 
-Two residuals that used to be listed here are fixed. `ADDX.l`/`SUBX.l` put
-their refill between the two words of their write, as the part does, rather
-than in front of both. And the bit operations on a `Dn` destination charge
-Table 8-8's asterisked maximum only when the addressed bit is in the upper
-word, which is what "Indicates maximum value" means: a bit in the lower word
-costs two clocks less, and `BTST`, whose cells carry no asterisk, is fixed
-either way.
+What remains is transfer placement, at 98.48%, and it is a scatter rather than
+a mechanism: about 2,730 cases, most of them a transfer that runs on a clock of
+its own one slot earlier than recorded. No single named defect accounts for it,
+which is why nothing here claims one.
+
+Five residuals that used to be listed here are fixed, and each is worth knowing
+when reading the timing code:
+
+- `ADDX.l`/`SUBX.l` put their refill *between* the two words of their write, as
+  the part does, rather than in front of both.
+- The bit operations on a `Dn` destination charge Table 8-8's asterisked
+  maximum only when the addressed bit is in the upper word, which is what
+  "Indicates maximum value" means; `BTST`, whose cells carry no asterisk, is
+  fixed either way.
+- `BTST` against an immediate costs two clocks more than the manual composes,
+  because an operand out of the queue runs no bus cycle for the test to happen
+  inside.
+- A queue refill the body drives itself **suspends**, so two program reads in
+  one instruction take separate clocks.
+- A suspension with only an idle step outstanding is charged that step's clocks
+  rather than a whole bus cycle, which is what lets internal time be *placed*
+  between two fetches instead of declared at the end.
 
 The 68010 charges its own timing, from the manual rather than from an oracle,
 with three differences carried as open questions: see "68010 support".
