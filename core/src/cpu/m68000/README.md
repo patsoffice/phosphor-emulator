@@ -27,7 +27,7 @@ and what is left is the residual list below rather than a milestone.
 | Integration tests| 320 (+ 57 unit tests)                                  |
 | State validation | 1,000,058/1,000,060 SingleStepTests vectors (124 files)|
 | Timing           | Per-clock, one bus cycle per four clocks               |
-| Timing validation| 99.79% exact on length, 97.39% on transfer placement   |
+| Timing validation| 99.98% exact on length, 97.66% on transfer placement   |
 
 ## Registers
 
@@ -148,13 +148,22 @@ comparison of addresses can tell a flush from a fall-through.
 
 What is left is named rather than described, and each piece has an issue: a
 queue refill the body drives itself cannot suspend, so two program reads can
-land on one clock (`phosphor-emulator-d31l`); `ADDX.l`/`SUBX.l` put their refill
-in front of both write words where the part puts it between them
-(`phosphor-emulator-7wmg`); and the bit operations on a `Dn` destination are
-data-dependent in a way this core does not yet model
-(`phosphor-emulator-4sdm`). The 68010 charges its own timing, from the manual
-rather than from an oracle, with two differences carried as open questions: see
-"68010 support".
+land on one clock (`phosphor-emulator-d31l`), which is the whole of what remains
+on transfer placement; and `BTST` with an immediate source is recorded by both
+corpora at 10 clocks where the manual composes 8 and this core charges the
+manual's figure (`phosphor-emulator-cvux`), which is essentially the whole of
+what remains on length.
+
+Two residuals that used to be listed here are fixed. `ADDX.l`/`SUBX.l` put
+their refill between the two words of their write, as the part does, rather
+than in front of both. And the bit operations on a `Dn` destination charge
+Table 8-8's asterisked maximum only when the addressed bit is in the upper
+word, which is what "Indicates maximum value" means: a bit in the lower word
+costs two clocks less, and `BTST`, whose cells carry no asterisk, is fixed
+either way.
+
+The 68010 charges its own timing, from the manual rather than from an oracle,
+with three differences carried as open questions: see "68010 support".
 
 ### Word bus
 
@@ -266,16 +275,34 @@ absolutes are not a safe base while its differences are. See
   bus rather than the clock. The 68000 reads before clearing; Section 9 gives
   `CLR` a table of its own (9-10) because the 68010 does not, so a write-only
   register is no longer read by a 68010 here.
+- **`BCLR` to memory, 8 to 10 clocks for the dynamic form and 12 to 14 for the
+  static one.** The only byte row of Table 9-14 that moves: `BCHG`, `BSET` and
+  `BTST` to memory are identical across the two sections, and so are the
+  register forms of all four, which is what makes this a `BCLR` rule rather
+  than a memory-destination one. It matches what `BCLR` already costs over
+  `BCHG` and `BSET` on a register, where it inverts its mask; the newer part
+  appears to pay that in the memory form too. Missed by the original delta
+  pass and found by re-reading both tables for a different reason
+  (`phosphor-emulator-9zmn`).
 
-Two 68010 differences are **carried as named open questions** rather than
-approximated, on
-`phosphor-emulator-cycle-accurate-m68000-5y6e.7`:
+Three 68010 differences are **carried as named open questions** rather than
+approximated, the first two on
+`phosphor-emulator-cycle-accurate-m68000-5y6e.7` and the third on
+`phosphor-emulator-9zmn`:
 
 - **Loop mode.** A two-word loop is held in the queue and re-executed from it
   with no instruction fetches at all: Table 9-3 records 10(0/1) for a continued
   loop, zero read cycles. That is a bus sequence this core cannot express today,
   not a number, and nothing reaches it by accident.
 - **The format $8 group-0 frame**, below.
+- **`BTST`'s asterisk.** Table 9-14 marks `BTST` long, register, dynamic as
+  6(1/0)* where Table 8-8 gives 6(1/0), which would mean `BTST` on a data
+  register became data-dependent on the 68010 having been fixed on the 68000.
+  Treated as a typesetting error and not implemented: the static register cell
+  beside it is *not* asterisked in the same table and differs only in where the
+  bit number comes from, both cells are unasterisked in Table 8-8, and this
+  manual has errata in exactly this area. If a 68010 oracle ever appears, this
+  is the first row to check.
 
 The following 68010 additions are **not** implemented; none are exercised by a
 supervisor-mode game that leaves VBR at 0, and that deferral is restated here

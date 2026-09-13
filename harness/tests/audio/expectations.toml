@@ -147,7 +147,9 @@ max_silent_fraction = 0.999
 # board read before the divide fix and the 1.03% it read after, so half the
 # movement that commit caused has come back from an unrelated timing change.
 # **The unmodeled analog output stage is untouched and is still
-# phosphor-emulator-irx4's**, and phosphor-emulator-idaz still owns the
-# question of what this board should actually read. The defect is delisted
-# because it no longer reproduces, which is what the ratchet asks, and not
-# because anyone modeled the thing that causes it.
+# phosphor-emulator-irx4's**, which now owns the question of what this board
+# should actually read: phosphor-emulator-idaz closed against it once this
+# third reading showed the figure moving with main-CPU timing in both
+# directions while the peak stayed at the rail throughout. The defect is
+# delisted because it no longer reproduces, which is what the ratchet asks,
+# and not because anyone modeled the thing that causes it.
