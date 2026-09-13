@@ -6,10 +6,10 @@ use phosphor_core::core::machine::Renderable;
 use phosphor_core::core::watchpoint::DebugAccessSource;
 use phosphor_core::core::{Bus, BusMaster, TimingConfig};
 use phosphor_core::cpu::m6502::M6502;
-use phosphor_core::device::dvg::{
-    BEAM_CUTOFF_SIGMAS, Dvg, MIN_CYCLES_PER_UNIT, MIN_SIGMA_PIXELS, VectorLine, beam_sigma_units,
-    halation_sigma_units, raster_size_for_field,
+use phosphor_core::device::crt::{
+    BEAM_CUTOFF_SIGMAS, MIN_SIGMA_PIXELS, beam_sigma_units, halation_sigma_units,
 };
+use phosphor_core::device::dvg::{Dvg, MIN_CYCLES_PER_UNIT, VectorLine, raster_size_for_field};
 use phosphor_macros::{BusDebug, DebugTrace, MemoryRegion, Saveable};
 
 // ---------------------------------------------------------------------------
@@ -931,7 +931,7 @@ mod tests {
     /// The beam rasterizer, on its own, without a machine around it.
     mod beam {
         use super::*;
-        use phosphor_core::device::dvg::HALATION_OFF;
+        use phosphor_core::device::crt::HALATION_OFF;
 
         const W: u32 = 256;
         const H: u32 = 256;

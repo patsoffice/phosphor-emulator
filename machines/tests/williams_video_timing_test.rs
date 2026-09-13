@@ -51,20 +51,6 @@ fn image_for(machine: &str) -> (&'static [u8], u32) {
 
 /// Whether the machine's `render_frame` rotates the board's raster.
 ///
-/// Sinistar's cabinet stands the monitor on its side, so its `render_frame`
-/// turns the landscape raster 270 degrees into a 240x292 portrait buffer
-/// (`sinistar.rs:442`). Every assertion in this file is about the raster the
-/// board draws, which is what the scanline and column arithmetic describes, so
-/// the rotation is undone on read rather than being baked into the expected
-/// coordinates. Getting this wrong is not subtle: it read row 0 as row 239 and
-/// failed both picture tests in opposite directions.
-fn is_rotated(machine: &str) -> bool {
-    machine == "sinistar"
-}
-
-/// The board's raster width, before any cabinet rotation.
-const RASTER_W: usize = 292;
-
 /// Frames to run before giving up on the program reaching its end. The script
 /// spends roughly one frame per phase plus three for the screen fill; 64 is a
 /// wide margin that still fails fast when the CPU wedges.
@@ -126,29 +112,22 @@ struct Shot {
     #[allow(dead_code)]
     h: usize,
     rgb: Vec<u8>,
-    /// The frame came out of a `render_frame` that rotated the raster.
-    rotated: bool,
 }
 
 impl Shot {
-    fn pixel(&self, x: usize, y: usize) -> (u8, u8, u8) {
-        let i = (y * self.w + x) * 3;
-        (self.rgb[i], self.rgb[i + 1], self.rgb[i + 2])
-    }
-
     /// A pixel of the **board's raster**, whatever the cabinet does with it.
     ///
-    /// Sinistar's rotation is `dst(dx, dy) = src(x = 291 - dy, y = dx)`, so
-    /// reading raster `(x, y)` means asking for `dst(y, 291 - x)`. Every
-    /// assertion here is written in raster coordinates because that is what the
-    /// scanline and VRAM-column arithmetic is about; the cabinet's orientation
-    /// is a separate concern with its own tests.
+    /// Every Williams machine's `render_frame` now emits that raster directly,
+    /// so this is a plain index. Sinistar used to turn it 270 degrees into a
+    /// portrait buffer, and this reader undid the rotation so the assertions
+    /// could stay in the raster coordinates the scanline and column arithmetic
+    /// is about. It declares `Orientation::ROT270` instead now, which the
+    /// frontend and the frame harness apply centrally, so there is nothing left
+    /// to undo here. Getting that compensation wrong was not subtle: it read row
+    /// 0 as row 239 and failed both picture tests in opposite directions.
     fn raster(&self, x: usize, y: usize) -> (u8, u8, u8) {
-        if self.rotated {
-            self.pixel(y, RASTER_W - 1 - x)
-        } else {
-            self.pixel(x, y)
-        }
+        let i = (y * self.w + x) * 3;
+        (self.rgb[i], self.rgb[i + 1], self.rgb[i + 2])
     }
 }
 
@@ -159,7 +138,7 @@ fn peek(m: &dyn FrontendMachine, addr: u32) -> u8 {
         .unwrap_or_else(|| panic!("{addr:#06X} is not readable through the debug bus"))
 }
 
-fn render(m: &mut dyn FrontendMachine, rotated: bool) -> Shot {
+fn render(m: &mut dyn FrontendMachine) -> Shot {
     let (w, h) = m.display_size();
     let mut rgb = vec![0u8; w as usize * h as usize * 3];
     m.render_frame(&mut rgb);
@@ -167,14 +146,12 @@ fn render(m: &mut dyn FrontendMachine, rotated: bool) -> Shot {
         w: w as usize,
         h: h as usize,
         rgb,
-        rotated,
     }
 }
 
 fn run(machine: &str) -> Run {
     let entry = registry::find(machine).unwrap_or_else(|| panic!("{machine} is not registered"));
     let mut m = (entry.create_bare)();
-    let rotated = is_rotated(machine);
 
     {
         let bus = m
@@ -204,7 +181,7 @@ fn run(machine: &str) -> Run {
         if (7..=9).contains(&phase) {
             let slot = (phase - 7) as usize;
             if shots[slot].is_none() {
-                shots[slot] = Some(render(&mut *m, rotated));
+                shots[slot] = Some(render(&mut *m));
             }
         }
         if peek(&*m, R_MAGIC) == MAGIC {

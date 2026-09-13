@@ -53,6 +53,7 @@ pub mod adc0809;
 pub mod avg;
 pub mod ay8910;
 pub mod cmos_ram;
+pub mod crt;
 pub mod dac;
 pub mod discrete;
 pub mod dvg;

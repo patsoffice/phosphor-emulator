@@ -83,64 +83,13 @@ pub struct VectorLine {
 }
 
 // ---------------------------------------------------------------------------
-// The beam, as the renderers need to know it
+// What this generator contributes to the beam
 //
-// Both the CPU rasterizer and the frontend's GL path draw the same beam, so the
-// figures it is described by live here beside [`VectorLine`] rather than being
-// written down twice and drifting apart.
+// The tube's own figures (the spot, the faceplate, halation, and the sigmas
+// derived from them) are in [`super::crt`], because they describe the display
+// rather than whatever is sweeping it. What is left here is the part that is
+// this generator's: how fast its deflection hardware can move the beam.
 // ---------------------------------------------------------------------------
-
-/// Long axis of a 19 inch 4:3 viewable area, in millimetres.
-///
-/// Every figure below is a length on the glass, so they are all expressed
-/// against this and converted into whatever units a generator uses.
-pub const TUBE_LONG_AXIS_MM: f32 = 360.0;
-
-/// Focused beam spot diameter, in millimetres.
-///
-/// The Atari colour XY monitors are 19 inch shadow-mask tubes, the same family
-/// as the raster monitors of the era, and two things bound the spot: the mask
-/// pitch, about 0.6 mm, below which nothing is resolvable, and the focused spot
-/// itself at about 0.7 mm.
-pub const BEAM_SPOT_MM: f32 = 0.7;
-
-/// Focused beam spot diameter as a fraction of the tube's long axis.
-///
-/// Works out at about 1.1 units on Tempest's 580, 1.8 on Quantum's 900, and 2.0
-/// on the DVG's 1024.
-pub const BEAM_SPOT_FRACTION: f32 = BEAM_SPOT_MM / TUBE_LONG_AXIS_MM;
-
-/// Faceplate thickness of a 19 inch CRT, in millimetres.
-pub const FACEPLATE_MM: f32 = 11.0;
-
-/// Refractive index of CRT faceplate glass.
-pub const FACEPLATE_INDEX: f32 = 1.54;
-
-/// Fraction of a spot's light that leaves the tube as halation rather than
-/// directly.
-///
-/// This is the one figure here that is not derived. The others are lengths on
-/// the glass; this is an optical efficiency that depends on how isotropically
-/// the phosphor emits, the aluminium backing behind it, the glass tint and any
-/// anti-reflective coating, none of which we have numbers for.
-///
-/// So it is set by eye, which is the only instrument we have for it: 0.15 read
-/// as slightly too much glow against the core, and 0.07 is where it was left.
-/// Both are inside the range measured CRT spot profiles show. This is the
-/// natural thing for a viewer to want on a slider, and the value here is only
-/// the default it should start from.
-pub const HALATION_FRACTION: f32 = 0.07;
-
-/// Halation for a renderer that has to composite it over the whole frame on the
-/// CPU, where it is not worth its cost.
-///
-/// The skirt is wide, so compositing it is proportional to the pixel count
-/// rather than to the number of vectors, and it measured at four to five times
-/// the beam sweep itself: on Asteroids' 1024 by 1024 field, 2.7 ms per frame
-/// became 13.5, against 0.4 ms to emulate the machine. The GPU does the same
-/// blur for nothing, so the frontend's path has it and the CPU rasterizer that
-/// serves screenshots and the debug panel does not.
-pub const HALATION_OFF: f32 = 0.0;
 
 /// The fewest master-clock cycles the beam can spend crossing one unit of the
 /// display: its top speed, and so the reference the brightness control is set
@@ -158,45 +107,7 @@ pub const HALATION_OFF: f32 = 0.0;
 /// the beam really does.
 pub const MIN_CYCLES_PER_UNIT: f32 = 16.0 * 65536.0 / (511.0 * 255.0);
 
-/// A Gaussian's standard deviation for a given full width at half maximum:
-/// `FWHM = 2*sqrt(2*ln 2)*sigma`.
-pub const FWHM_TO_SIGMA: f32 = 1.0 / 2.354_82;
-
-/// Where the beam profile is cut off, in sigmas.
-///
-/// Truncating leaves a step the height of the profile there, so it has to fall
-/// below one level of an 8-bit channel: 3 sigma is 1.1% of the peak and would
-/// show as a faint edge, 3.5 is 0.2% and rounds away.
-pub const BEAM_CUTOFF_SIGMAS: f32 = 3.5;
-
-/// Floor on the rendered spot's sigma, in output pixels.
-///
-/// Not a taste value: a Gaussian sampled on a unit grid has a residual ripple of
-/// about `2*exp(-2*pi^2*sigma^2)` depending on where its centre falls between
-/// samples, which is the spot aliasing against the grid. That ripple is a
-/// brightness that varies with the angle of the line, so sigma has to stay where
-/// it is negligible: 0.4 gives 8%, 0.5 gives 1.5%, 0.6 gives 0.2%.
-///
-/// This is a property of the output grid, not of the tube. Rasterizing at
-/// display-list resolution hits it (Tempest's physical spot is just under it, so
-/// it draws a touch wide); drawing at window resolution usually does not.
-pub const MIN_SIGMA_PIXELS: f32 = 0.6;
-
-/// The smallest raster long axis, in pixels, on which the tube's spot is still
-/// representable.
-///
-/// A generator's coordinate units have no size of their own, so the spot's size
-/// in *raster* pixels depends only on how many pixels the long axis has:
-/// `sigma_px = raster_long * BEAM_SPOT_FRACTION * FWHM_TO_SIGMA`, with the
-/// generator's own extent cancelling out. Setting that equal to
-/// [`MIN_SIGMA_PIXELS`], below which the spot aliases against the grid, gives
-/// about 727 pixels.
-///
-/// So this is a floor and not a quality target: under it the beam has to be
-/// drawn wider than the tube's, and detail is lost that the generator computed.
-/// Above it there is more to gain, and how much more is a cost decision that
-/// belongs with the rest of the display settings.
-pub const MIN_RASTER_LONG_AXIS: f32 = MIN_SIGMA_PIXELS / (BEAM_SPOT_FRACTION * FWHM_TO_SIGMA);
+use super::crt::MIN_RASTER_LONG_AXIS;
 
 /// How many pixels to rasterize a vector field of this extent into.
 ///
@@ -211,32 +122,6 @@ pub fn raster_size_for_field(field_w: u32, field_h: u32) -> (u32, u32) {
         (field_w as f32 * scale).round() as u32,
         (field_h as f32 * scale).round() as u32,
     )
-}
-
-/// The beam's sigma in a generator's own coordinate units.
-///
-/// `long_axis_units` is the larger of the generator's two display dimensions,
-/// which is the one that maps onto the tube's long axis.
-pub fn beam_sigma_units(long_axis_units: f32) -> f32 {
-    long_axis_units * BEAM_SPOT_FRACTION * FWHM_TO_SIGMA
-}
-
-/// The halation skirt's sigma in a generator's own coordinate units.
-///
-/// The phosphor emits into the faceplate in every direction. Light steeper than
-/// the critical angle cannot leave the front surface, so it reflects back,
-/// crosses the glass again and re-emerges a distance away: for thickness `t` and
-/// index `n`, at a radius of `2*t*tan(asin(1/n))`. With an 11 mm faceplate at
-/// n = 1.54 that is about 19 mm, or 5% of the tube's long axis, and it is why a
-/// bright vector sits in a broad glow rather than ending at its own edge.
-///
-/// The ring is treated as a Gaussian skirt of that scale rather than as a ring,
-/// which is what the sum over all the emission angles and depths looks like from
-/// the front.
-pub fn halation_sigma_units(long_axis_units: f32) -> f32 {
-    let critical_angle = (1.0 / FACEPLATE_INDEX).asin();
-    let radius_mm = 2.0 * FACEPLATE_MM * critical_angle.tan();
-    long_axis_units * radius_mm / TUBE_LONG_AXIS_MM
 }
 
 use crate::prelude::Saveable;

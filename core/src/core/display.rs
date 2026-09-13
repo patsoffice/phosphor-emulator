@@ -12,7 +12,7 @@
 //! else, which is why it can be a process-wide value rather than something
 //! threaded through a machine: one viewer, one screen, one set of preferences.
 
-use crate::device::dvg::{HALATION_FRACTION, HALATION_OFF};
+use crate::device::crt::{HALATION_FRACTION, HALATION_OFF};
 
 /// The knobs a viewer has, as deviations from what was measured off the tube.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -32,7 +32,7 @@ pub struct DisplaySettings {
     ///
     /// The one figure in the beam model with no derivation behind it, and so the
     /// one most worth putting in a viewer's hands. See
-    /// [`crate::device::dvg::HALATION_FRACTION`].
+    /// [`crate::device::crt::HALATION_FRACTION`].
     pub halation: f32,
 }
 
@@ -54,7 +54,7 @@ impl DisplaySettings {
     };
 
     /// The same settings with the glow off, for a renderer that cannot afford
-    /// it. See [`crate::device::dvg::HALATION_OFF`].
+    /// it. See [`crate::device::crt::HALATION_OFF`].
     pub fn without_halation(self) -> Self {
         Self {
             halation: HALATION_OFF,

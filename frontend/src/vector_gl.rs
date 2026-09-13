@@ -19,9 +19,10 @@ use std::mem;
 use std::ptr;
 
 use phosphor_core::core::display::display_settings;
-use phosphor_core::device::dvg::{
-    BEAM_CUTOFF_SIGMAS, MIN_SIGMA_PIXELS, VectorLine, beam_sigma_units, halation_sigma_units,
+use phosphor_core::device::crt::{
+    BEAM_CUTOFF_SIGMAS, MIN_SIGMA_PIXELS, beam_sigma_units, halation_sigma_units,
 };
+use phosphor_core::device::dvg::VectorLine;
 
 /// Intensity-to-brightness lookup table (4-bit, 0 = invisible).
 /// Matches the table in `atari_dvg.rs` for identical visual output.
