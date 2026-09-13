@@ -270,9 +270,21 @@ void main() {
 ///
 /// What it costs, because it is a real cost and not a rounding error: light is
 /// no longer conserved, by `1 + (G-1)*f` over a broad lit area, which at the
-/// default is about 2.8 times. The vector machines never show that, because
-/// vector content has no broad lit areas. A raster screen does, and a board with
-/// a bright background will clip where one with a dark background looks right.
+/// default is about 2.8 times. Anything brighter than the reciprocal of that,
+/// around 35% of full scale, therefore clips.
+///
+/// The vector machines never show this, because vector content has no broad lit
+/// areas. Raster boards do, and how much glow a board can take depends on how
+/// bright its content is, which is why no single value is right for all of them.
+/// The default suits a dark board: Donkey Kong and Pac-Man were judged right at
+/// the measured 0.07. The Atari System 1 boards were not, their backgrounds
+/// being mid-tone rather than dark, and Marble Madness and Road Runner were
+/// settled at about 0.04 as per-machine overrides in `state.toml`.
+///
+/// That the setting has to vary with content at all is the symptom rather than
+/// the arrangement working. Conserved halation would not vary: the blur of a
+/// broad lit area is that area, so flat regions return to unity at any fraction
+/// and only sparse content looks faint. See `phosphor-emulator-npvm`.
 const HALO_GAIN_OVER_CONSERVED: f32 = 27.0;
 
 /// The offscreen targets the halation pass needs: the core at presentation
