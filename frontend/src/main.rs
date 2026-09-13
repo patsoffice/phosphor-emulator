@@ -9,6 +9,7 @@ mod crt_gl;
 mod debug_ui;
 mod emulator;
 mod gfxview;
+mod gl_util;
 mod headless;
 mod host_keys;
 mod input;

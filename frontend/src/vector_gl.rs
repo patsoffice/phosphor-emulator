@@ -11,10 +11,9 @@
 //! resolution, which is also what lets it use the tube's real spot size: the
 //! CPU rasterizer in `atari_dvg.rs` works at display-list resolution, where the
 //! spot can fall below what the grid can represent. The two share their figures
-//! (see `phosphor_core::device::dvg`) and the same peak convention, so they
+//! (see `phosphor_core::device::crt`) and the same peak convention, so they
 //! agree about what they are drawing.
 
-use std::ffi::CString;
 use std::mem;
 use std::ptr;
 
@@ -23,6 +22,10 @@ use phosphor_core::device::crt::{
     BEAM_CUTOFF_SIGMAS, MIN_SIGMA_PIXELS, beam_sigma_units, halation_sigma_units,
 };
 use phosphor_core::device::dvg::VectorLine;
+
+use crate::gl_util::{
+    FULLSCREEN_VERTEX_SRC, HALO_BLUR_FRAGMENT_SRC, HALO_TARGET_SIGMA, link_program,
+};
 
 /// Intensity-to-brightness lookup table (4-bit, 0 = invisible).
 /// Matches the table in `atari_dvg.rs` for identical visual output.
@@ -100,44 +103,6 @@ void main() {
 }
 "#;
 
-/// Fullscreen pass: one oversized triangle generated from the vertex index, so
-/// it needs no vertex buffer at all, just a bound (empty) VAO.
-pub(crate) const FULLSCREEN_VERTEX_SRC: &str = r#"
-#version 150
-out vec2 uv;
-void main() {
-    vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2));
-    uv = p;
-    gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
-}
-"#;
-
-/// One axis of the halation blur.
-///
-/// The taps are fixed and the weights come from a sigma uniform, so the
-/// reduced-resolution target is sized to keep sigma near the radius this can
-/// cover. Normalising by the weight sum makes the pass conserve energy whatever
-/// sigma works out to, including at the edges where taps fall outside.
-const HALO_BLUR_FRAGMENT_SRC: &str = r#"
-#version 150
-in vec2 uv;
-out vec4 color;
-uniform sampler2D src;
-uniform vec2 tap_step;
-uniform float inv_two_sigma_sq;
-void main() {
-    vec3 sum = vec3(0.0);
-    float weight_sum = 0.0;
-    for (int i = -12; i <= 12; i++) {
-        float f = float(i);
-        float w = exp(-f * f * inv_two_sigma_sq);
-        sum += texture(src, uv + tap_step * f).rgb * w;
-        weight_sum += w;
-    }
-    color = vec4(sum / weight_sum, 1.0);
-}
-"#;
-
 /// Add the halation field over the core, scaled by the fraction of light that
 /// took the long way out. Drawn with additive blending, so this is the `f*halo`
 /// half of the composite; the core was already drawn scaled by `1 - f`.
@@ -151,13 +116,6 @@ void main() {
     color = vec4(texture(src, uv).rgb * amount, 1.0);
 }
 "#;
-
-/// Sigma to aim for in the reduced-resolution halation field, in its own pixels.
-///
-/// The blur covers 12 taps either side, so this keeps the profile comfortably
-/// inside them while leaving the field small enough that two blur passes over it
-/// are nothing.
-const HALO_TARGET_SIGMA: f32 = 3.4;
 
 /// Offscreen targets for the halation field: two, to ping-pong the separable
 /// blur between.
@@ -607,56 +565,8 @@ impl Drop for VectorRenderer {
 // GL helpers
 // ---------------------------------------------------------------------------
 
-unsafe fn compile_shader(src: &str, shader_type: gl::types::GLenum) -> gl::types::GLuint {
-    unsafe {
-        let shader = gl::CreateShader(shader_type);
-        let c_src = CString::new(src).unwrap();
-        gl::ShaderSource(shader, 1, &c_src.as_ptr(), ptr::null());
-        gl::CompileShader(shader);
-
-        let mut success = gl::FALSE as gl::types::GLint;
-        gl::GetShaderiv(shader, gl::COMPILE_STATUS, &mut success);
-        if success != gl::TRUE as gl::types::GLint {
-            let mut len = 0;
-            gl::GetShaderiv(shader, gl::INFO_LOG_LENGTH, &mut len);
-            let mut buf = vec![0u8; len as usize];
-            gl::GetShaderInfoLog(shader, len, ptr::null_mut(), buf.as_mut_ptr() as *mut _);
-            let msg = String::from_utf8_lossy(&buf);
-            panic!("Shader compilation failed: {msg}");
-        }
-        shader
-    }
-}
-
 unsafe fn create_shader_program() -> gl::types::GLuint {
     unsafe { link_program(VERTEX_SHADER_SRC, FRAGMENT_SHADER_SRC) }
-}
-
-pub(crate) unsafe fn link_program(vertex_src: &str, fragment_src: &str) -> gl::types::GLuint {
-    unsafe {
-        let vs = compile_shader(vertex_src, gl::VERTEX_SHADER);
-        let fs = compile_shader(fragment_src, gl::FRAGMENT_SHADER);
-
-        let program = gl::CreateProgram();
-        gl::AttachShader(program, vs);
-        gl::AttachShader(program, fs);
-        gl::LinkProgram(program);
-
-        let mut success = gl::FALSE as gl::types::GLint;
-        gl::GetProgramiv(program, gl::LINK_STATUS, &mut success);
-        if success != gl::TRUE as gl::types::GLint {
-            let mut len = 0;
-            gl::GetProgramiv(program, gl::INFO_LOG_LENGTH, &mut len);
-            let mut buf = vec![0u8; len as usize];
-            gl::GetProgramInfoLog(program, len, ptr::null_mut(), buf.as_mut_ptr() as *mut _);
-            let msg = String::from_utf8_lossy(&buf);
-            panic!("Shader link failed: {msg}");
-        }
-
-        gl::DeleteShader(vs);
-        gl::DeleteShader(fs);
-        program
-    }
 }
 
 unsafe fn create_vertex_objects(
