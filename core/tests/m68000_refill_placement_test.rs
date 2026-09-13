@@ -323,3 +323,58 @@ fn two_program_reads_in_one_instruction_do_not_share_a_clock() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// An indexed MOVEM's index add falls between its two fetches
+// ---------------------------------------------------------------------------
+
+#[test]
+fn an_indexed_movem_spends_its_index_add_between_its_two_fetches() {
+    // `MOVEM.w D0/D1,(d8,A0,Xn)`. The register mask is fetched, then the part
+    // spends two clocks adding the index, and only then fetches the mode's
+    // extension word. The reference emulation's per-cycle listing charges
+    // exactly that: `alu_ext`, `m_icount -= 2`, then the extension-word read.
+    //
+    // **This is `phosphor-emulator-eemf`.** Declaring those two clocks at the
+    // finish instead left them at the end of the instruction and put every
+    // transfer after the mask two clocks early: recorded [R0 R6 W22 ...]
+    // against ours [R0 R4 W20 ...] on 588 cases.
+    let bus = run_one(&[0x48B0, 0x0003, 0x0010], |cpu, _| {
+        cpu.a[0] = OPERANDS;
+        cpu.d[0] = 0x10; // even index, so the destination does not fault
+    });
+
+    assert_eq!(
+        bus.shape(),
+        "P.P.W.W.P",
+        "the mask fetch, the extension fetch, two result words, then the refill"
+    );
+
+    // The placement is the point: four clocks between the first two fetches
+    // would mean the index add had not been spent between them.
+    let clocks = access_clocks(&[0x48B0, 0x0003, 0x0010], |cpu, _| {
+        cpu.a[0] = OPERANDS;
+        cpu.d[0] = 0x10;
+    });
+    assert_eq!(
+        clocks[1] - clocks[0],
+        6,
+        "two clocks of index add sit between the two fetches, not four \
+         clocks of nothing: got {clocks:?}"
+    );
+}
+
+#[test]
+fn a_non_indexed_movem_has_no_gap_between_its_two_fetches() {
+    // The control: `MOVEM.w D0/D1,(d16,A0)` has no index to add, so its two
+    // fetches are an ordinary bus cycle apart. **A gap inserted for every
+    // MOVEM rather than for the indexed modes fails here.**
+    let clocks = access_clocks(&[0x48A8, 0x0003, 0x0010], |cpu, _| {
+        cpu.a[0] = OPERANDS;
+    });
+    assert_eq!(
+        clocks[1] - clocks[0],
+        4,
+        "four clocks, one bus cycle, no index add: got {clocks:?}"
+    );
+}

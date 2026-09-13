@@ -277,11 +277,32 @@ impl M68000 {
         // is the exception both ways: the part folds its first decrement into
         // the write it is already committed to, which is why the internal time
         // declared at the finish counts only an index add.
-        self.spend_internal(if ea_mode == 6 || (ea_mode == 7 && ea_reg == 3) {
+        // **The index add is declared AND placed: two clocks between the two
+        // fetches, not two clocks at the end.** The reference emulation's
+        // per-cycle listing is explicit about the order, charging two clocks
+        // between the index extension and the extension-word read:
+        //
+        //     alu_ext(m_dbin);
+        //     m_icount -= 2;
+        //     ...
+        //     m_edb = m_opcodes.read_interruptible(m_aob & ~1);
+        //
+        // `spend_internal` accounts for the clocks, which is what an aborted
+        // instruction needs, and `defer_idle` says where they fall. Declaring
+        // without placing left them at the finish and put every transfer after
+        // the mask two clocks early: `MOVEM.l (d8, A4, Xn)` recorded
+        // [R0 R6 W22 ...] against ours [R0 R4 W20 ...]. See
+        // `phosphor-emulator-eemf`, and note that this only became possible
+        // once a body-driven refill could suspend (`phosphor-emulator-d31l`)
+        // *and* `run_body` stopped rounding an idle-only suspension up to a
+        // whole bus cycle.
+        let index_add = if ea_mode == 6 || (ea_mode == 7 && ea_reg == 3) {
             2
         } else {
             0
-        });
+        };
+        self.spend_internal(index_add);
+        self.defer_idle(bus, master, index_add);
 
         if ea_mode == 4 {
             // Predecrement store: reversed mask, descending addresses. The

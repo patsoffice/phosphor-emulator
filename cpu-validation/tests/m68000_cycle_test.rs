@@ -1856,16 +1856,26 @@ fn test_m68000_cycle_gate() {
         ("680x0 length", pops_680x0.all.length_pct(), 81.92),
         ("680x0 kinds", pops_680x0.all.kinds_pct(), 99.56),
         ("680x0 count", pops_680x0.all.count_pct(), 99.56),
-        ("680x0 positions", pops_680x0.all.positions_pct(), 80.81),
+        // **Raised again by `phosphor-emulator-eemf`**, which placed `MOVEM`'s
+        // indexed index add between its two fetches instead of declaring it at
+        // the finish. The blocker was not `MOVEM`'s: `run_body` rounded an
+        // idle-only suspension up to a whole bus cycle, charging two clocks
+        // that never elapsed, so placing the idle made the instruction two
+        // clocks short. Removing that floor took `MOVEM.l` and `MOVEM.w` to
+        // 100.00% on both length and placement against the microcode-derived
+        // corpus, and **improved the faulting population too**, from 97.92% to
+        // 98.98%, because exception entry places idle steps by the same
+        // mechanism and was paying the same rounding.
+        ("680x0 positions", pops_680x0.all.positions_pct(), 81.01),
         (
             "680x0 positions, completed",
             pops_680x0.completed.positions_pct(),
-            98.32,
+            98.56,
         ),
         (
             "680x0 positions, >1 data transaction",
             pops_680x0.several_data_txns.positions_pct(),
-            60.10,
+            60.52,
         ),
         // **Rung 4 read 0.00% on every case that faults, on both corpora, from
         // the day M4 first reported it until the group-0 frame was written in
@@ -1934,7 +1944,7 @@ fn test_m68000_cycle_gate() {
         // every rung over there. The one instruction in this conversion where
         // the stronger-provenance set is the weaker authority.
         ("m68000 count", pops_m68000.all.count_pct(), 99.33),
-        ("m68000 positions", pops_m68000.all.positions_pct(), 98.09),
+        ("m68000 positions", pops_m68000.all.positions_pct(), 98.47),
         // **The number M5's exception-entry work exists to move**, and it had
         // no floor because it had no value: a structural 0.00% while entry
         // drove all eleven of its cycles on one clock. It is floored against
@@ -1946,17 +1956,17 @@ fn test_m68000_cycle_gate() {
         (
             "m68000 positions, address error",
             pops_m68000.address_error.positions_pct(),
-            97.91,
+            98.97,
         ),
         (
             "m68000 positions, completed",
             pops_m68000.completed.positions_pct(),
-            98.13,
+            98.36,
         ),
         (
             "m68000 positions, >1 data transaction",
             pops_m68000.several_data_txns.positions_pct(),
-            96.53,
+            97.23,
         ),
         // This corpus's faulting population reaches only 28.07%, and the
         // difference is `data` rather than `addr`: its `pc` is the generator's

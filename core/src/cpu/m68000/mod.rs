@@ -1230,7 +1230,19 @@ impl M68000 {
                 // here rather than charged at the finish, which is what keeps
                 // the instruction the same length while its transfers move.
                 let (outstanding, _) = self.outstanding_clocks();
-                let span = (4 * self.tick_cycles + outstanding).max(4);
+                // **The floor is for a suspension with nothing to wait on, and
+                // it must not round an idle step up to a bus cycle.** A body
+                // that drove nothing and has nothing outstanding would spend no
+                // clocks and suspend again on the same clock forever, so it is
+                // charged a bus cycle to guarantee progress. An outstanding
+                // entry already guarantees it, and an idle step is shorter than
+                // a transfer: rounding its two clocks up to four charges the
+                // instruction two clocks it never spends, and the finish then
+                // subtracts them from the time it has left. That is worth two
+                // clocks of every indexed `MOVEM` and is why the index add
+                // could not be placed before (`phosphor-emulator-eemf`).
+                let span = 4 * self.tick_cycles + outstanding;
+                let span = if span == 0 { 4 } else { span };
                 self.exec_clock += span;
                 if outstanding == 0 {
                     self.state = ExecState::BodyWait(span - 1);
