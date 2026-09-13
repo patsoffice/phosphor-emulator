@@ -79,7 +79,6 @@ pub fn run(
         );
     }
 
-    let (w, h) = machine.display_size();
     let mut audio: Vec<i16> = Vec::new();
     let mut buf = vec![0i16; 8192];
 
@@ -103,16 +102,20 @@ pub fn run(
         }
     }
 
-    let mut rgb = vec![0u8; (w * h * 3) as usize];
-    machine.render_frame(&mut rgb);
+    // Through the harness helper, which is the one definition of "the frame this
+    // cabinet displays" and is what the golden pins hash, so a capture taken here
+    // can be compared against one. Rendering straight into a native-sized buffer
+    // wrote the picture a quarter turn off for every machine with a rotated
+    // monitor, and silently, since the dimensions it printed agreed with it.
+    let (dw, dh, rgb) = phosphor_harness::render_oriented(machine);
 
     let png_path = format!("{out}.png");
-    match write_png(&rgb, w, h, &png_path) {
+    match write_png(&rgb, dw, dh, &png_path) {
         Ok(()) => {
             let lit = rgb.chunks(3).filter(|p| *p != [0, 0, 0]).count();
             println!(
-                "headless: wrote {png_path} ({w}x{h}, {lit}/{} lit pixels)",
-                w * h
+                "headless: wrote {png_path} ({dw}x{dh}, {lit}/{} lit pixels)",
+                dw * dh
             );
         }
         Err(e) => eprintln!("headless: PNG write failed: {e}"),

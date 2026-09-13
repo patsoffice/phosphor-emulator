@@ -17,33 +17,48 @@
 //! open debug panel drops that machine back onto the CPU rasterizer. The same
 //! FBO handoff removes that fallback; see `phosphor-emulator-pu41`.
 //!
-//! # This stage is a pass-through
+//! # The stage owns the cabinet's rotation
 //!
-//! It samples the source and writes it out unchanged, so the picture is
-//! identical to the one the direct upload produced. That is deliberate: the
-//! plumbing lands first and provably moves no pixel, and the beam profile,
-//! scanlines and halation arrive on top of it. A change that rewires the
-//! presentation path *and* changes what is drawn gives nothing to bisect when
-//! the picture is wrong.
+//! The source texture is the machine's *native* raster, the one `render_frame`
+//! fills, and the pass turns it into the displayed image. That is the whole
+//! reason this is worth building: a scanline has to be derived along the tube's
+//! line axis, and on a rotated cabinet that is not the screen's. Rotating on the
+//! CPU first, as the frontend used to, would hand the beam model a texture whose
+//! rows are columns on the 22 raster machines with a turned monitor.
 //!
-//! Rotation is also still applied on the CPU before the upload, as it was. It
-//! moves onto the GPU with the beam profile, because scanlines have to be
-//! derived in the tube's axes rather than the screen's, and that move takes the
-//! FPS overlay with it.
+//! It is also one rotation rather than two. A double-applied ROT270 is what
+//! `phosphor-emulator-iitc` was, and the shape that allows it is a transform
+//! living in two places.
+//!
+//! The beam profile itself is still to come: this samples the source and writes
+//! it out unchanged apart from the orientation, so the picture matches what the
+//! CPU rotate and direct upload produced.
 
 use std::ffi::CString;
 
+use phosphor_core::core::machine::Orientation;
+
 use crate::vector_gl::{FULLSCREEN_VERTEX_SRC, link_program};
 
-/// Sample and write. The beam model replaces this body; everything around it
-/// stays as it is.
-const PASSTHROUGH_FRAGMENT_SRC: &str = r#"
+/// Orient, sample, write. The beam model goes between the sample and the write;
+/// everything around it stays as it is.
+///
+/// The transform is the inverse of `phosphor_core::gfx::apply_orientation`,
+/// which maps a source pixel forward to its destination and is the reference a
+/// fragment shader has to run backwards. Inverting its three cases gives, for an
+/// output coordinate pair scaled to 0..1, a mirror on each flipped axis followed
+/// by a component swap, in that order. Mirroring in normalized coordinates lands
+/// exactly on texel centers: `1 - (i + 0.5)/n` is `((n - 1 - i) + 0.5)/n`.
+const ORIENT_FRAGMENT_SRC: &str = r#"
 #version 150
 in vec2 uv;
 out vec4 color;
 uniform sampler2D src;
+uniform vec2 flip;
+uniform bool swap_xy;
 void main() {
-    color = vec4(texture(src, uv).rgb, 1.0);
+    vec2 c = mix(uv, vec2(1.0) - uv, flip);
+    color = vec4(texture(src, swap_xy ? c.yx : c.xy).rgb, 1.0);
 }
 "#;
 
@@ -51,6 +66,8 @@ pub struct CrtRenderer {
     program: gl::types::GLuint,
     vao: gl::types::GLuint,
     src_uniform: gl::types::GLint,
+    flip_uniform: gl::types::GLint,
+    swap_uniform: gl::types::GLint,
     /// The machine's frame as uploaded each frame. Owned here.
     src_tex: gl::types::GLuint,
     src_size: (u32, u32),
@@ -65,9 +82,14 @@ pub struct CrtRenderer {
 impl CrtRenderer {
     pub fn new() -> Self {
         unsafe {
-            let program = link_program(FULLSCREEN_VERTEX_SRC, PASSTHROUGH_FRAGMENT_SRC);
-            let name = CString::new("src").expect("literal has no interior nul");
-            let src_uniform = gl::GetUniformLocation(program, name.as_ptr());
+            let program = link_program(FULLSCREEN_VERTEX_SRC, ORIENT_FRAGMENT_SRC);
+            let uniform = |name: &str| {
+                let name = CString::new(name).expect("literal has no interior nul");
+                gl::GetUniformLocation(program, name.as_ptr())
+            };
+            let src_uniform = uniform("src");
+            let flip_uniform = uniform("flip");
+            let swap_uniform = uniform("swap_xy");
 
             let mut vao = 0;
             gl::GenVertexArrays(1, &mut vao);
@@ -91,6 +113,8 @@ impl CrtRenderer {
                 program,
                 vao,
                 src_uniform,
+                flip_uniform,
+                swap_uniform,
                 src_tex,
                 src_size: (0, 0),
                 fbo,
@@ -99,31 +123,48 @@ impl CrtRenderer {
         }
     }
 
-    /// Render `rgb24` into `out_tex`, the texture egui will draw.
+    /// Render the machine's native frame into `out_tex`, the texture egui draws,
+    /// applying `orientation` on the way.
+    ///
+    /// `src` is the size of the buffer `render_frame` fills and `dst` is the
+    /// displayed size, which is `src` with the axes swapped when the orientation
+    /// swaps them.
     ///
     /// Returns false when the framebuffer will not complete, leaving `out_tex`
-    /// untouched so the caller can fall back to uploading pixels into it
-    /// directly. A driver that refuses the attachment should cost the picture,
-    /// not the session.
+    /// untouched so the caller can fall back to orienting and uploading on the
+    /// CPU. A driver that refuses the attachment should cost the picture, not the
+    /// session.
     pub fn present(
         &mut self,
         rgb24: &[u8],
-        width: u32,
-        height: u32,
+        src: (u32, u32),
+        dst: (u32, u32),
+        orientation: Orientation,
         out_tex: gl::types::GLuint,
     ) -> bool {
-        debug_assert_eq!(rgb24.len(), (width as usize) * (height as usize) * 3);
+        let (src_w, src_h) = src;
+        let (dst_w, dst_h) = dst;
+        debug_assert_eq!(rgb24.len(), (src_w as usize) * (src_h as usize) * 3);
+        debug_assert_eq!(
+            if orientation.swaps_axes() {
+                (src_h, src_w)
+            } else {
+                (src_w, src_h)
+            },
+            dst,
+            "displayed size must be the native size under the declared orientation"
+        );
         unsafe {
             if !self.attach(out_tex) {
                 return false;
             }
-            self.upload_source(rgb24, width, height);
+            self.upload_source(rgb24, src_w, src_h);
 
             let mut viewport = [0i32; 4];
             gl::GetIntegerv(gl::VIEWPORT, viewport.as_mut_ptr());
 
             gl::BindFramebuffer(gl::FRAMEBUFFER, self.fbo);
-            gl::Viewport(0, 0, width as i32, height as i32);
+            gl::Viewport(0, 0, dst_w as i32, dst_h as i32);
             // egui leaves these on from its own pass. None of them belong in a
             // straight copy, and paint_jobs re-enables what it needs next frame.
             gl::Disable(gl::SCISSOR_TEST);
@@ -134,6 +175,12 @@ impl CrtRenderer {
             gl::ActiveTexture(gl::TEXTURE0);
             gl::BindTexture(gl::TEXTURE_2D, self.src_tex);
             gl::Uniform1i(self.src_uniform, 0);
+            gl::Uniform2f(
+                self.flip_uniform,
+                orientation.flip_x() as i32 as f32,
+                orientation.flip_y() as i32 as f32,
+            );
+            gl::Uniform1i(self.swap_uniform, orientation.swaps_axes() as i32);
 
             // One oversized triangle, its vertices computed from gl_VertexID, so
             // there is no vertex buffer to keep. The bound VAO is still required
@@ -214,6 +261,96 @@ impl Drop for CrtRenderer {
             gl::DeleteTextures(1, &self.src_tex);
             gl::DeleteVertexArrays(1, &self.vao);
             gl::DeleteProgram(self.program);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use phosphor_core::gfx::apply_orientation;
+
+    /// `ORIENT_FRAGMENT_SRC`'s transform, written out in Rust.
+    ///
+    /// Kept line for line equivalent to the shader so the mapping can be checked
+    /// without a GL context. Nearest filtering makes the sampled texel the floor
+    /// of the scaled coordinate, which is what the indexing here reproduces.
+    fn shader_source_texel(
+        out: (u32, u32),
+        dst: (u32, u32),
+        src: (u32, u32),
+        o: Orientation,
+    ) -> (u32, u32) {
+        let u = (out.0 as f32 + 0.5) / dst.0 as f32;
+        let v = (out.1 as f32 + 0.5) / dst.1 as f32;
+        let c = (
+            if o.flip_x() { 1.0 - u } else { u },
+            if o.flip_y() { 1.0 - v } else { v },
+        );
+        let (s, t) = if o.swaps_axes() {
+            (c.1, c.0)
+        } else {
+            (c.0, c.1)
+        };
+        (
+            (s * src.0 as f32).floor() as u32,
+            (t * src.1 as f32).floor() as u32,
+        )
+    }
+
+    /// The shader runs `apply_orientation` backwards: the CPU function maps a
+    /// source pixel forward to where it lands, a fragment shader asks what lands
+    /// on a given output pixel. Getting that inverse subtly wrong is how a
+    /// picture comes out mirrored rather than obviously broken, and it is the
+    /// same class of error as the double-applied ROT270 in
+    /// `phosphor-emulator-iitc`, so pin it against the real function.
+    ///
+    /// Non-square and odd dimensions on purpose: a square source hides a
+    /// transpose and an even one hides some off-by-ones.
+    #[test]
+    fn the_shader_transform_inverts_apply_orientation() {
+        const W: usize = 7;
+        const H: usize = 5;
+
+        // Every pixel distinguishable, so a wrong source lands on a wrong value.
+        let mut src = vec![0u8; W * H * 3];
+        for y in 0..H {
+            for x in 0..W {
+                let i = (y * W + x) * 3;
+                src[i] = (x + 1) as u8;
+                src[i + 1] = (y + 1) as u8;
+                src[i + 2] = 0x5A;
+            }
+        }
+
+        // All eight flag combinations, not just the named rotations: `compose`
+        // can produce any of them from a cocktail flip over a rotated cabinet.
+        for bits in 0..8u8 {
+            let o = Orientation::from_bits(bits);
+            let (dw, dh) = if o.swaps_axes() { (H, W) } else { (W, H) };
+
+            let mut dst = vec![0u8; dw * dh * 3];
+            apply_orientation(&src, &mut dst, W, H, o);
+
+            for oy in 0..dh {
+                for ox in 0..dw {
+                    let (sx, sy) = shader_source_texel(
+                        (ox as u32, oy as u32),
+                        (dw as u32, dh as u32),
+                        (W as u32, H as u32),
+                        o,
+                    );
+                    let sampled = &src[(sy as usize * W + sx as usize) * 3..][..3];
+                    let expected = &dst[(oy * dw + ox) * 3..][..3];
+                    assert_eq!(
+                        sampled,
+                        expected,
+                        "orientation {:#05b} at output ({ox},{oy}): shader reads source \
+                         ({sx},{sy}), which is not what apply_orientation put there",
+                        o.bits()
+                    );
+                }
+            }
         }
     }
 }

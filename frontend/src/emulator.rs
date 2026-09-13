@@ -319,6 +319,8 @@ pub fn run(
     let mut video = Video::new(
         &sdl_video,
         "Phosphor Emulator",
+        width,
+        height,
         disp_w,
         disp_h,
         win_w,
@@ -377,12 +379,11 @@ pub fn run(
     let mut audio_fault_baseline = (0u64, 0u64);
 
     let buffer_size = (width * height * 3) as usize;
-    // Native buffer that `render_frame` fills, plus a second buffer for the
-    // post-orientation image (same pixel count, axes possibly swapped). The
-    // second buffer is only touched when the machine declares a non-NORMAL
-    // orientation, keeping the common path zero-copy.
+    // The native buffer `render_frame` fills. There is no second, oriented
+    // buffer any more: the CRT stage applies the machine's declared orientation
+    // on the GPU, and the two capture paths that need an oriented frame on the
+    // CPU go through the harness helper, which allocates its own.
     let mut framebuffer = vec![0u8; buffer_size];
-    let mut oriented = vec![0u8; buffer_size];
     // Sized for a frame of the machine's audio with room to spare, so the drain
     // loop below normally completes in one pass. It is correctness-neutral —
     // the loop runs until the machine is empty whatever this holds — but a
@@ -1027,11 +1028,17 @@ pub fn run(
 
                 // Screenshot
                 Event::KeyDown { repeat: false, .. } if hot == Some(HostAction::Screenshot) => {
-                    machine.render_frame(&mut framebuffer);
+                    // Through the harness helper, which is the one definition of
+                    // "the frame this cabinet displays" and is what the golden
+                    // pins hash. This used to render straight into the native
+                    // buffer and write it at native dimensions, which is the
+                    // picture turned a quarter turn on every machine with a
+                    // rotated monitor.
+                    let (sw, sh, shot) = phosphor_harness::render_oriented(machine);
                     match crate::screenshot::save_screenshot(
-                        &framebuffer,
-                        width,
-                        height,
+                        &shot,
+                        sw,
+                        sh,
                         screenshot_dir,
                         machine_name,
                     ) {
@@ -1284,31 +1291,12 @@ pub fn run(
                         view_aspect,
                         rot,
                         |ctx| {
-                            let label = |ui: &mut egui::Ui, text: &str| {
-                                ui.label(
-                                    egui::RichText::new(text)
-                                        .color(egui::Color32::WHITE)
-                                        .background_color(egui::Color32::from_black_alpha(160))
-                                        .monospace(),
-                                );
-                            };
-                            egui::Window::new("fps_overlay")
-                                .title_bar(false)
-                                .resizable(false)
-                                .fixed_pos(egui::pos2(4.0, 4.0))
-                                .frame(egui::Frame::NONE)
-                                .show(ctx, |ui| {
-                                    ui.set_min_width(120.0);
-                                    if let Some(ref f) = fps {
-                                        label(ui, f);
-                                    }
-                                    if let Some(ref s) = stats {
-                                        label(ui, s);
-                                    }
-                                    if paused {
-                                        label(ui, "PAUSED");
-                                    }
-                                });
+                            crate::overlay::draw_overlay(
+                                ctx,
+                                fps.as_deref(),
+                                stats.as_deref(),
+                                paused,
+                            );
                         },
                     );
                 } else {
@@ -1327,45 +1315,12 @@ pub fn run(
                 // Raster machine (or debug/profiler mode): CPU framebuffer path.
                 machine.render_frame(&mut framebuffer);
 
-                // Apply the machine's declared orientation centrally. NORMAL is
-                // the zero-copy common path: unmigrated machines bake rotation
-                // into render_frame and return NORMAL, so `framebuffer` is already
-                // the displayed image. Migrated machines render native and let
-                // `apply_orientation` produce the displayed (post-rotation) buffer.
-                let orient = machine.orientation();
-                let display_fb: &mut [u8] = if orient == Orientation::NORMAL {
-                    &mut framebuffer
-                } else {
-                    phosphor_core::gfx::apply_orientation(
-                        &framebuffer,
-                        &mut oriented,
-                        width as usize,
-                        height as usize,
-                        orient,
-                    );
-                    &mut oriented
-                };
-
-                // FPS / PAUSED overlay onto the displayed buffer (only when no
-                // side panels are active). PAUSED shows independent of FPS.
-                if (show_fps || debug_state.global_paused || movie_status.is_some())
-                    && !debug_state.active
-                    && !profile_state.active
-                {
-                    let stats = overlay_stats_with_movie(
-                        show_fps.then(|| machine.overlay_stats()).flatten(),
-                        movie_status.as_deref(),
-                    );
-                    crate::overlay::draw_overlay(
-                        display_fb,
-                        disp_w as usize,
-                        show_fps.then_some(fps_text.as_str()),
-                        stats.as_deref(),
-                        debug_state.global_paused,
-                    );
-                }
-
-                video.update_game_texture(display_fb);
+                // Hand over the *native* raster and let the CRT stage orient it.
+                // The rotation used to happen here, on the CPU, before the
+                // upload, which left the texture in screen space; a scanline
+                // derived from that runs along the wrong axis on every machine
+                // with a turned monitor. One transform, on the GPU, at the end.
+                video.update_game_texture(&framebuffer, machine.orientation());
 
                 if any_panel_open(
                     &debug_state,
@@ -1503,7 +1458,17 @@ pub fn run(
                         }
                     }
                 } else {
-                    video.present_game_only(view_aspect);
+                    // FPS / PAUSED over the picture. PAUSED shows independent
+                    // of the FPS readout.
+                    let fps = show_fps.then(|| fps_text.clone());
+                    let stats = overlay_stats_with_movie(
+                        show_fps.then(|| machine.overlay_stats()).flatten(),
+                        movie_status.as_deref(),
+                    );
+                    let paused = debug_state.global_paused;
+                    video.present_game_only(view_aspect, |ctx| {
+                        crate::overlay::draw_overlay(ctx, fps.as_deref(), stats.as_deref(), paused);
+                    });
                 }
             }
             last_render_time = Instant::now();

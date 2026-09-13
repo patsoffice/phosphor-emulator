@@ -3,6 +3,7 @@ use std::time::Instant;
 use egui_backend::painter::Painter;
 use egui_backend::{DpiScaling, EguiStateHandler, ShaderVersion};
 use egui_sdl2_gl as egui_backend;
+use phosphor_core::core::machine::Orientation;
 use sdl2::video::{GLContext, GLProfile, Window};
 
 pub struct Video {
@@ -12,9 +13,18 @@ pub struct Video {
     egui_state: EguiStateHandler,
     egui_ctx: egui::Context,
     game_texture_id: egui::TextureId,
+    /// The raster `render_frame` fills, which is what the CRT stage samples.
     native_width: u32,
     native_height: u32,
+    /// The picture as displayed: the native pair with the axes swapped when the
+    /// machine's orientation swaps them. The game texture and the CRT stage's
+    /// framebuffer are this size.
+    display_width: u32,
+    display_height: u32,
     rgba_buffer: Vec<u8>,
+    /// Scratch for the CPU fallback's orientation pass. Untouched while the CRT
+    /// stage is carrying the picture.
+    oriented: Vec<u8>,
     crt: crate::crt_gl::CrtRenderer,
     /// Whether the CRT stage is carrying the picture, and whether that has been
     /// said. A pass-through stage draws exactly what the direct upload drew, so
@@ -28,17 +38,22 @@ pub struct Video {
 }
 
 impl Video {
-    /// Create a new Video with separate texture and window dimensions.
+    /// Create a new Video with separate native, texture and window dimensions.
     ///
-    /// `native_width`/`native_height` define the framebuffer texture size.
-    /// `window_width`/`window_height` define the initial window size (may differ
-    /// for rotated displays, e.g. portrait vector games).
+    /// `native_width`/`native_height` are the raster the machine renders, which
+    /// the CRT stage samples. `display_width`/`display_height` are that raster as
+    /// displayed, which sizes the game texture. They differ whenever the
+    /// machine's orientation swaps its axes. `window_width`/`window_height`
+    /// define the initial window size, which additionally carries the tube's
+    /// aspect correction.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         sdl_video: &sdl2::VideoSubsystem,
         title: &str,
         native_width: u32,
         native_height: u32,
+        display_width: u32,
+        display_height: u32,
         window_width: u32,
         window_height: u32,
         scale: u32,
@@ -76,13 +91,13 @@ impl Video {
         let egui_ctx = egui::Context::default();
 
         // Create initial game texture (black with full alpha)
-        let pixel_count = (native_width * native_height) as usize;
+        let pixel_count = (display_width * display_height) as usize;
         let mut rgba_buffer = vec![0u8; pixel_count * 4];
         for chunk in rgba_buffer.as_chunks_mut::<4>().0 {
             chunk[3] = 255;
         }
         let game_texture_id = painter.new_user_texture_rgba8(
-            (native_width as usize, native_height as usize),
+            (display_width as usize, display_height as usize),
             rgba_buffer.clone(),
             false, // nearest-neighbor for crisp pixels
         );
@@ -96,7 +111,10 @@ impl Video {
             game_texture_id,
             native_width,
             native_height,
+            display_width,
+            display_height,
             rgba_buffer,
+            oriented: vec![0u8; pixel_count * 3],
             crt: crate::crt_gl::CrtRenderer::new(),
             crt_active: false,
             crt_fallback_reported: false,
@@ -105,26 +123,37 @@ impl Video {
         }
     }
 
-    /// Put an RGB24 framebuffer into the texture egui draws.
+    /// Put the machine's *native* RGB24 frame into the texture egui draws,
+    /// applying `orientation` on the way.
     ///
     /// Normally this runs the frame through [`crate::crt_gl::CrtRenderer`],
     /// which renders into that texture rather than uploading pixels into it. The
-    /// direct upload below is the fallback for two cases: the painter has not
-    /// yet allocated the texture, which is true until it has painted once, and a
+    /// CPU path below is the fallback for two cases: the painter has not yet
+    /// allocated the texture, which is true until it has painted once, and a
     /// framebuffer that will not complete.
     ///
     /// Once the CRT stage takes over, the texture must never be marked dirty
     /// again: `Painter::upload_user_textures` re-uploads a dirty texture's CPU
     /// pixels at the start of the next paint, which would overwrite what the
     /// stage rendered. Uploading is therefore the fallback's job alone.
-    pub fn update_game_texture(&mut self, rgb24: &[u8]) {
-        let pixel_count = (self.native_width * self.native_height) as usize;
-        debug_assert_eq!(rgb24.len(), pixel_count * 3);
+    ///
+    /// The fallback orients through `phosphor_core::gfx::apply_orientation`,
+    /// which is the same function the harness applies when it hashes a frame.
+    /// That makes it the reference rather than a second implementation: the
+    /// shader's transform is the inverse of this one, and the two agreeing is
+    /// what the fallback is worth beyond robustness.
+    pub fn update_game_texture(&mut self, native_rgb24: &[u8], orientation: Orientation) {
+        let native_pixels = (self.native_width * self.native_height) as usize;
+        debug_assert_eq!(native_rgb24.len(), native_pixels * 3);
 
         if let Some(out_tex) = self.painter.get_raw_gl_texture_id(&self.game_texture_id)
-            && self
-                .crt
-                .present(rgb24, self.native_width, self.native_height, out_tex)
+            && self.crt.present(
+                native_rgb24,
+                (self.native_width, self.native_height),
+                (self.display_width, self.display_height),
+                orientation,
+                out_tex,
+            )
         {
             if !self.crt_active {
                 self.crt_active = true;
@@ -135,13 +164,26 @@ impl Video {
 
         if self.crt_active && !self.crt_fallback_reported {
             self.crt_fallback_reported = true;
-            eprintln!("CRT stage unavailable: falling back to direct texture upload");
+            eprintln!("CRT stage unavailable: falling back to a CPU orient and upload");
         }
 
-        for i in 0..pixel_count {
-            self.rgba_buffer[i * 4] = rgb24[i * 3];
-            self.rgba_buffer[i * 4 + 1] = rgb24[i * 3 + 1];
-            self.rgba_buffer[i * 4 + 2] = rgb24[i * 3 + 2];
+        let displayed: &[u8] = if orientation == Orientation::NORMAL {
+            native_rgb24
+        } else {
+            phosphor_core::gfx::apply_orientation(
+                native_rgb24,
+                &mut self.oriented,
+                self.native_width as usize,
+                self.native_height as usize,
+                orientation,
+            );
+            &self.oriented
+        };
+
+        for i in 0..(self.display_width * self.display_height) as usize {
+            self.rgba_buffer[i * 4] = displayed[i * 3];
+            self.rgba_buffer[i * 4 + 1] = displayed[i * 3 + 1];
+            self.rgba_buffer[i * 4 + 2] = displayed[i * 3 + 2];
             // alpha stays 255 from initialization
         }
 
@@ -151,7 +193,11 @@ impl Video {
 
     /// Render the game at the target display `aspect` (no debug panels),
     /// letterboxed with black bars when the window doesn't match the aspect.
-    pub fn present_game_only(&mut self, aspect: f32) {
+    ///
+    /// `overlay_fn` draws the FPS / PAUSED layer over the picture. It runs
+    /// inside the same egui pass, which is also what keeps input events drained
+    /// on the frames where it draws nothing.
+    pub fn present_game_only(&mut self, aspect: f32, overlay_fn: impl FnOnce(&egui::Context)) {
         unsafe {
             gl::ClearColor(0.0, 0.0, 0.0, 1.0);
             gl::Clear(gl::COLOR_BUFFER_BIT);
@@ -171,6 +217,7 @@ impl Video {
                     ui.image(egui::load::SizedTexture::new(tex_id, size));
                 });
             });
+        overlay_fn(&self.egui_ctx);
 
         self.finish_frame();
     }
