@@ -99,7 +99,13 @@ impl Video {
         let game_texture_id = painter.new_user_texture_rgba8(
             (display_width as usize, display_height as usize),
             rgba_buffer.clone(),
-            false, // nearest-neighbor for crisp pixels
+            // Linear. The CRT stage renders this at the presentation resolution
+            // rather than the machine's, so it is no longer a pixel grid being
+            // magnified: it is a picture of a beam, already carrying the spot's
+            // own softness, and egui only has to fit it to the letterbox. The
+            // nearest-neighbour this replaced existed to keep magnified pixels
+            // crisp, which is the job the beam profile has taken over.
+            true,
         );
 
         Self {
@@ -123,8 +129,38 @@ impl Video {
         }
     }
 
+    /// How many pixels the CRT stage should draw into.
+    ///
+    /// The displayed picture, scaled up until it fills the window, because the
+    /// machine's own resolution has nowhere to put a scanline: 224 output pixels
+    /// for 224 lines floors the spot into invisibility. This is what decides how
+    /// finely the beam is resolved, so it follows the presentation surface
+    /// rather than being a factor someone picked, and a bigger window shows a
+    /// finer beam rather than merely a larger one.
+    ///
+    /// The window is not user-resizable, so in practice `--scale` sets this, and
+    /// the panel-driven resizes and fullscreen move it afterwards. A scale too
+    /// small to resolve the pitch is the case the grid floor exists for: the
+    /// scanlines wash out rather than alias.
+    ///
+    /// Capped at the window rather than fitted to the letterbox: egui may hand
+    /// the image a smaller box once side panels take their share, and rendering
+    /// a little large and letting it minify is better than tracking a box this
+    /// call cannot see. The aspect is the displayed one, so the letterbox only
+    /// ever scales it.
+    fn presentation_size(&self) -> (u32, u32) {
+        let (win_w, win_h) = self.window.size();
+        let scale = (win_w as f32 / self.display_width as f32)
+            .min(win_h as f32 / self.display_height as f32)
+            .max(1.0);
+        (
+            ((self.display_width as f32 * scale).round() as u32).max(1),
+            ((self.display_height as f32 * scale).round() as u32).max(1),
+        )
+    }
+
     /// Put the machine's *native* RGB24 frame into the texture egui draws,
-    /// applying `orientation` on the way.
+    /// applying `orientation` and the beam profile on the way.
     ///
     /// Normally this runs the frame through [`crate::crt_gl::CrtRenderer`],
     /// which renders into that texture rather than uploading pixels into it. The
@@ -146,12 +182,14 @@ impl Video {
         let native_pixels = (self.native_width * self.native_height) as usize;
         debug_assert_eq!(native_rgb24.len(), native_pixels * 3);
 
+        let settings = phosphor_core::core::display::display_settings();
         if let Some(out_tex) = self.painter.get_raw_gl_texture_id(&self.game_texture_id)
             && self.crt.present(
                 native_rgb24,
                 (self.native_width, self.native_height),
-                (self.display_width, self.display_height),
+                self.presentation_size(),
                 orientation,
+                &settings,
                 out_tex,
             )
         {
