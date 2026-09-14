@@ -416,8 +416,8 @@ pub fn run(
     // Profiler state
     let mut profile_state = crate::profile::ProfileState::new();
 
-    // Input settings panel (Tab to toggle); only meaningful for machines with
-    // typed controls.
+    // Input settings panel (Shift+F1 to toggle); only meaningful for machines
+    // with typed controls.
     let mut settings_state = SettingsState::default();
     let has_typed_controls = !machine.input_controls().is_empty();
 
@@ -896,7 +896,7 @@ pub fn run(
                     );
                 }
 
-                // Tab: Toggle input settings panel (machines with typed controls)
+                // Shift+F1: Toggle input settings panel (machines with typed controls)
                 Event::KeyDown { repeat: false, .. }
                     if has_typed_controls && hot == Some(HostAction::ToggleSettingsPanel) =>
                 {

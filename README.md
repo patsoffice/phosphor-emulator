@@ -68,6 +68,7 @@ ROMs are matched by CRC32 checksum, so any MAME ROM naming convention works.
 | 6                | Service                                       |
 | Mouse            | Trackball (Crystal Castles, Missile Command)  |
 | F1               | Toggle Debug Panel                            |
+| Shift + F1       | Toggle Input Bindings Panel                   |
 | F3               | Reset Machine (reset button)                  |
 | Shift + F3       | Hard Reset (power cycle, rebuild from ROM)    |
 | F5               | Pause / Resume                                |
@@ -81,7 +82,6 @@ ROMs are matched by CRC32 checksum, so any MAME ROM naming convention works.
 | F12              | Screenshot                                    |
 | Shift + F12      | Record Input Movie                            |
 | Scroll Lock      | Toggle Mouse Grab                             |
-| Tab              | Toggle Input Bindings Panel                   |
 | \`               | Toggle DIP Switches Panel                     |
 | Ctrl + \`        | Toggle Script Console                         |
 | ?                | Toggle Key Legend                             |
@@ -104,8 +104,12 @@ available here as `--gfxview`), Shift + F4 (rewind) and F9 (frameskip). F8
 through Shift + F10 carry the debugger instead of MAME's frameskip, which is
 the one deliberate divergence.
 
-Every key above is rebindable in the settings panel (Tab), and `?` lists the
-live bindings — emulator, debugger, and game — so the table is a starting
+MAME opens its menu with Tab, and the bindings panel is the nearest thing here,
+but it is on Shift + F1 instead: these panels are docked beside the game rather
+than modal, so Tab has to stay free to move focus between their widgets.
+
+Every key above is rebindable in the settings panel (Shift + F1), and `?` lists
+the live bindings (emulator, debugger, and game), so the table is a starting
 point rather than the authority.
 
 Game controllers are auto-mapped (D-pad, left stick, face buttons, right stick for twin-stick games). Place a [gamecontrollerdb.txt](https://github.com/mdqinc/SDL_GameControllerDB) in the working directory or `~/.config/phosphor/` for broader controller support.
@@ -218,7 +222,7 @@ SDL2 + egui windowed frontend — external dependencies: SDL2, zip, egui:
 - **ROM path resolution** — loads from MAME ZIP files, rompath directories, or extracted loose files
 - SDL2 window with GPU-scaled texture rendering (VSync frame timing)
 - **Debug panel** (F1 or `--debug`) — egui side panel showing all CPU and device registers, step/cycle/continue controls (works on both 16-bit and 24-bit-bus machines, including the MC68000 games Food Fight and Quantum)
-- Keyboard, game controller, and mouse input bound from each machine's typed `InputConfigurable` controls; rebindable in the settings panel (Tab) and persisted per machine
+- Keyboard, game controller, and mouse input bound from each machine's typed `InputConfigurable` controls; rebindable in the settings panel (Shift + F1) and persisted per machine
 - **Display panel** (Shift+`` ` ``) — brightness, focus and halation, applied live while the picture is in front of you. 1.0 is what was measured off the tube rather than the middle of a slider; see [Vector Displays](#vector-displays)
 - **Vector rendering** — the display list is drawn on the GPU as a swept beam with its real spot size and faceplate glow, at window resolution rather than at the generator's coordinate resolution
 - Quick save/load (F6/F7), debug overlay with FPS and machine stats (F11), mouse grab for trackball games (Scroll Lock)

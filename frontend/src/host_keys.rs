@@ -160,7 +160,7 @@ impl HostChord {
 /// the debugger takes `F8` and the three shifted keys above rather than leaving
 /// a whole run of function keys idle. That is the layout's one real divergence.
 ///
-/// Two more deviations worth stating rather than discovering:
+/// Three more deviations worth stating rather than discovering:
 ///
 /// - MAME's `F6`/`F7` prompt for a save slot and put the quick variants on
 ///   `Shift+F6`/`Shift+F7`. There is one slot here, so the single quick save and
@@ -169,6 +169,16 @@ impl HostChord {
 ///   which needs modifiers [`HostChord`] deliberately does not model.
 ///   `ScrollLock` is MAME's "toggle UI controls", the nearest surviving idea of
 ///   which side owns the input device, and no game wants the key.
+/// - `Tab` is MAME's menu key and the settings panel sat there, but `Tab` is
+///   already spoken for: every SDL event reaches egui before the hotkey match,
+///   so it moves focus between the widgets of whichever panel is open *and*
+///   toggled the settings panel underneath. MAME's menu is a modal screen with
+///   nothing to tab through, so it does not have that problem to inherit. The
+///   panel is on `Shift+F1` instead, beside the debug panel on `F1` the way the
+///   display panel sits beside the DIP panel on `` ` ``, and `Tab` is left to
+///   egui and the machine. Note this is not the focused-text-field collision
+///   [`survives_text_entry`] handles: focus movement is not text entry, so it
+///   fired whether or not a field had focus.
 ///
 /// The debugger's four keys sit on `F8` and `Shift+F8`/`F9`/`F10`: run/pause on
 /// the bare key with its steps shifted directly above, reading left to right in
@@ -188,7 +198,7 @@ pub const DEFAULTS: &[(HostAction, HostChord)] = &[
     (HostAction::ToggleDebugPanel, HostChord::bare(Scancode::F1)),
     (
         HostAction::ToggleSettingsPanel,
-        HostChord::bare(Scancode::Tab),
+        HostChord::shift(Scancode::F1),
     ),
     (HostAction::ToggleDipPanel, HostChord::bare(Scancode::Grave)),
     // Shift+` for the display knobs, beside the DIP panel on bare `: both are
@@ -528,6 +538,52 @@ mod tests {
         }
     }
 
+    /// `Tab` belongs to egui, which moves focus between the widgets of an open
+    /// panel with it. Every SDL event reaches egui before the hotkey match, so
+    /// a hotkey here does not replace that navigation, it fires on top of it.
+    /// The settings panel was on `Tab` and did exactly that.
+    #[test]
+    fn tab_is_left_to_panel_navigation() {
+        let b = HostBindings::default();
+        for chord in [
+            HostChord::bare(Scancode::Tab),
+            HostChord::shift(Scancode::Tab),
+        ] {
+            assert_eq!(
+                b.action_for(chord),
+                None,
+                "{} must reach egui, not a hotkey",
+                chord_label(chord)
+            );
+        }
+    }
+
+    /// The four panels read as a group: each pair is one key, the bare form for
+    /// the panel you open more often and the shifted form for its neighbor.
+    #[test]
+    fn the_panel_toggles_pair_up() {
+        let b = HostBindings::default();
+        for (action, chord) in [
+            (HostAction::ToggleDebugPanel, HostChord::bare(Scancode::F1)),
+            (
+                HostAction::ToggleSettingsPanel,
+                HostChord::shift(Scancode::F1),
+            ),
+            (HostAction::ToggleDipPanel, HostChord::bare(Scancode::Grave)),
+            (
+                HostAction::ToggleDisplayPanel,
+                HostChord::shift(Scancode::Grave),
+            ),
+        ] {
+            assert_eq!(
+                b.key_for(action),
+                Some(chord),
+                "{action:?} must sit on {}",
+                chord_label(chord)
+            );
+        }
+    }
+
     #[test]
     fn a_chord_matches_its_modifier_state_exactly() {
         // The whole point of chords: the shifted and unshifted forms of one key
@@ -677,11 +733,11 @@ mod tests {
     #[test]
     fn conflicts_report_machine_shadowing_but_not_debugger_keys() {
         let b = HostBindings::default();
-        // A machine binding Tab and ` loses both to the frontend.
-        let found = conflicts(&b, &[Scancode::Tab, Scancode::Grave, Scancode::F8]);
+        // A machine binding ` and / loses both to the frontend.
+        let found = conflicts(&b, &[Scancode::Grave, Scancode::Slash, Scancode::F8]);
         let actions: Vec<HostAction> = found.iter().map(|(a, _)| *a).collect();
-        assert!(actions.contains(&HostAction::ToggleSettingsPanel));
         assert!(actions.contains(&HostAction::ToggleDipPanel));
+        assert!(actions.contains(&HostAction::ToggleKeyLegend));
         // F8 only runs/pauses while the debugger is open, so it is not a
         // conflict: the machine keeps it the rest of the time.
         assert!(!actions.contains(&HostAction::ToggleDebugPause));
