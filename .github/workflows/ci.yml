@@ -135,13 +135,23 @@ jobs:
     # manual runs are enough to keep the lockfile honest.
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
-    # audit-check reports through a check run, which the default read-only
-    # token cannot create: the step failed with "Resource not accessible by
-    # integration" while the audit itself had found nothing. Without this the
-    # job goes red on a permissions error and looks like an advisory.
+    # audit-check needs two write scopes, and has failed for want of each of
+    # them in turn with the same unhelpful "Resource not accessible by
+    # integration" while the audit itself found nothing. Both times the job went
+    # red on a permissions error and looked exactly like an advisory.
+    #
+    # It reports findings through a check run, which the default read-only token
+    # cannot create. That is `checks`.
+    #
+    # It also opens an issue when it has warnings to report, which only started
+    # happening when the first unmaintained crate turned up in the tree. That is
+    # `issues`. Granting it is the point rather than a formality: the warnings
+    # are about crates several levels up somebody else's dependency tree, so an
+    # issue is the only place they will be seen at all.
     permissions:
       contents: read
       checks: write
+      issues: write
     steps:
       - uses: actions/checkout@v4
 
