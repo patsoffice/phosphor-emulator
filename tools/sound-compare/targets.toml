@@ -934,17 +934,30 @@ id = "toobin-output"
 machines = ["toobin"]
 status = "unexamined"
 notes = """
-NOBODY HAS LOOKED. Toobin' landed as a video-only board and there is no sound
-model at all to describe an output stage for: the machine declares `no_audio`,
-so what the code does today is emit silence.
+NOBODY HAS LOOKED AT THE OUTPUT STAGE. The chips now run: machines/src/atari_jsa.rs
+models the JSA-I board, a 6502 with a YM2151 and a POKEY on their own 3.579545
+MHz crystal, and the main board drives it through the real command and response
+latches. What has NOT been read off any schematic is the analog path between
+those two chips and the speaker, which is why this stays `unexamined` rather
+than moving up the ladder.
 
-The hardware is a JSA-I sound board: a 6502, a YM2151 and a stereo pair of
-POKEYs, with no speech fitted on this game. The main board's command latch at
-0xFF8100 is modeled as drained the instant it is written, and the response
-latch at 0xFF9800 reads back all ones, so the main program's handshake
-completes against nothing. That stub is the reason the status bit for "sound
-command pending" never sets, and it is a placeholder, not a reading of the
-circuit.
+What the code does today, in full:
 
-Promote this row only after the JSA-I board exists and its output stage has
-actually been read off a schematic. Tracked under phosphor-emulator-jg18."""
+- the POKEY and the YM2151 are summed as `pokey * pokey_vol + ym * ym_vol * 3.0`
+- `pokey_vol` and `ym_vol` come from the board's own mix register at the sound
+  CPU's 0x2A06, four steps for the POKEY and eight for the YM. That much IS a
+  board function rather than a fitted constant, read off the register layout
+- the 3.0 on the FM is a fitted listening gain, not a measured ratio
+- one shared DcBlocker at the default corner removes the POKEY's unipolar DC,
+  then the sum is scaled by 2.0 and clamped
+
+That is a wire with two volume taps on it. The board is STEREO and the model is
+mono: the FM's two channels are routed to separate speakers on real hardware and
+the POKEY sits at 0.40 into both, none of which is modeled. There is no filter,
+no mixing network, no coupling capacitor and no amplifier stage.
+
+The mix register's low bit is documented as a low-pass filter enable and is
+latched but not acted on, because the filter it switches has not been read.
+
+Promote this row only after someone reads the JSA-I drawing. Tracked under
+phosphor-emulator-jg18."""

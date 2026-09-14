@@ -24,6 +24,7 @@
 //! drained so the main program's handshake never stalls. See the module's
 //! `sound_w`/`sound_r` for exactly what is stubbed.
 
+use phosphor_core::audio::{DcBlocker, SampleRing};
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
     ActionRole, DefaultBinding, InputConfigurable, InputControl, InputEvent, InputId, InputKind,
@@ -31,13 +32,15 @@ use phosphor_core::core::machine::{
 };
 use phosphor_core::core::{AccessKind, AddressSpace32};
 use phosphor_core::core::{
-    Bus, Bus16, BusMaster, BusSignals, ClockDomainName as Clk, ClockTree, TimingConfig, select_byte,
+    Bus, Bus16, BusMaster, BusSignals, ClockDomainName as Clk, ClockTree, DomainId, TimingConfig,
+    select_byte,
 };
 use phosphor_core::cpu::Cpu;
 use phosphor_core::cpu::m68000::{M68kVariant, M68000};
 use phosphor_core::gfx::decode::{GfxCache, GfxLayout, decode_gfx};
 use phosphor_macros::{BusDebug, MemoryRegion, Saveable};
 
+use crate::atari_jsa::{AtariJsa1, JsaPokey};
 use crate::disasm_registry::{DisasmCpu, DisasmRegion};
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
 
@@ -318,6 +321,19 @@ pub static TOOBIN_MO_ROM: RomRegion = RomRegion {
     ],
 };
 
+/// JSA-I sound board program: one 64 KB chip. Its low 16 KB are the four pages
+/// the sound CPU's banked window selects between and the rest is its fixed ROM,
+/// which [`AtariJsa1::load_rom`] splits.
+pub static TOOBIN_SOUND_ROM: RomRegion = RomRegion {
+    size: 0x10000,
+    entries: &[RomEntry {
+        name: "1141-2k.061",
+        size: 0x10000,
+        offset: 0x0000,
+        crc32: &[0xc0dcce1a],
+    }],
+};
+
 /// Alphanumerics character ROM: 1024 tiles, 8×8, 2bpp.
 pub static TOOBIN_ALPHA_ROM: RomRegion = RomRegion {
     size: 0x4000,
@@ -411,16 +427,25 @@ pub const TIMING: TimingConfig = TimingConfig {
     display_aspect: Some((3, 4)),
 };
 
-/// The board's crystal and what is divided out of it.
+/// The board's two crystals and what is divided out of each.
 ///
-/// Only the two domains this module actually drives are declared. The sound
-/// board has its own 3.579545 MHz crystal and is not modeled yet, so declaring
-/// its domains here would claim hardware that does not run.
+/// The main board runs off 32 MHz: the 68010 at a quarter of it and the dot
+/// clock at half. The JSA-I sound board has its own 3.579545 MHz crystal, so
+/// its parts keep no fixed ratio to the main CPU at all: the sound 6502 and its
+/// POKEY take half of that crystal and the YM2151 takes all of it. Stepping the
+/// sound CPU off the main CPU is therefore a fractional divide, which the clock
+/// tree's phase accumulator carries rather than any integer counter.
 pub fn clock_tree() -> ClockTree {
     use phosphor_core::core::RootId;
     let mut t = ClockTree::new(32_000_000);
     let cpu = t.add_domain(Clk::Cpu, RootId::MAIN, 1, 4); // 8 MHz 68010
     let dot = t.add_domain(Clk::Pixel, RootId::MAIN, 1, 2); // 16 MHz dot clock
+
+    let sound_xtal = t.add_root(3_579_545);
+    t.add_domain(Clk::SoundCpu, sound_xtal, 1, 2); // 1.789772 MHz 6502
+    t.add_domain(Clk::Pokey, sound_xtal, 1, 2); // POKEY shares the sound CPU's rate
+    t.add_domain(Clk::Psg, sound_xtal, 1, 1); // YM2151, twice the sound CPU
+
     t.set_step_domain(cpu);
     t.set_raster(dot, 640, 0);
     t
@@ -538,9 +563,6 @@ pub struct ToobinBoard {
     /// Scanline interrupt latch (IRQ1), held until acked.
     #[save(id = 7)]
     pub(crate) scanline_int: bool,
-    /// Sound interrupt latch (IRQ2). Never set while the sound board is stubbed.
-    #[save(id = 8)]
-    pub(crate) sound_int: bool,
 
     /// EEPROM: 2048 bytes, each on the low half of a word, gated by
     /// [`Self::eeprom_unlocked`].
@@ -556,6 +578,28 @@ pub struct ToobinBoard {
     /// Service / self-test switch, active low (bit 12 of the status port).
     #[save(id = 12)]
     pub(crate) service: bool,
+
+    /// JSA-I sound board: a 6502 with a YM2151 and a POKEY, on its own crystal.
+    /// It also carries this game's coin switches.
+    #[debug_device("Sound")]
+    #[save(id = 18)]
+    pub(crate) sound: AtariJsa1,
+    /// The board's clock tree, as [`clock_tree`] declares it, stepped in
+    /// main-CPU cycles.
+    #[debug_device("Clocks")]
+    #[save(id = 19)]
+    clocks: ClockTree,
+    /// A handle into the clock tree, which is itself saved.
+    #[save_skip]
+    sound_dom: DomainId,
+    /// Removes the POKEY's unipolar DC from the mix, the way the cabinet's
+    /// AC-coupled amplifier does. Two samples of filter history, which a load
+    /// re-establishes within a sample or two of resuming.
+    #[save_skip]
+    dc_blocker: DcBlocker,
+    /// Samples already mixed and waiting for the frontend to drain.
+    #[save_skip]
+    audio_buffer: SampleRing<i16>,
 
     #[save(id = 13)]
     pub(crate) clock: u64,
@@ -626,8 +670,18 @@ impl ToobinBoard {
     }
 
     pub fn new() -> Self {
+        let clocks = clock_tree();
+        let sound_dom = clocks
+            .find(Clk::SoundCpu)
+            .expect("clock tree declares a sound CPU domain");
+        let rate = phosphor_core::audio::host_sample_rate() as u32;
         Self {
             map: Self::build_map(),
+            sound: AtariJsa1::new(JsaPokey::Fitted),
+            clocks,
+            sound_dom,
+            dc_blocker: DcBlocker::new(rate),
+            audio_buffer: SampleRing::with_capacity(2048),
             playfield_gfx: GfxCache::new(PLAYFIELD_TILE_COUNT, 8, 8),
             mo_gfx: GfxCache::new(MO_TILE_COUNT, 16, 16),
             alpha_gfx: GfxCache::new(ALPHA_TILE_COUNT, 8, 8),
@@ -637,7 +691,6 @@ impl ToobinBoard {
             intensity: 31,
             interrupt_scan: 0,
             scanline_int: false,
-            sound_int: false,
             eeprom: vec![0xFF; 0x800],
             eeprom_unlocked: false,
             buttons: 0xFFFF,
@@ -992,7 +1045,29 @@ impl ToobinBoard {
     }
 
     fn end_cycle(&mut self) {
+        // The sound board is on its own crystal, so its cycles land on a
+        // fractional divide of the main CPU's rather than every Nth one.
+        if self.clocks.tick(self.sound_dom) {
+            self.sound.tick();
+        }
         self.clock += 1;
+    }
+
+    /// Drain the sound board's mixed audio, strip the POKEY's DC, then scale and
+    /// clamp to signed 16-bit into the pending buffer. Called once per frame.
+    pub fn end_frame_audio(&mut self) {
+        let mut samples = self.sound.drain_audio();
+        self.dc_blocker.process_slice(&mut samples);
+        self.audio_buffer.extend(
+            samples
+                .iter()
+                .map(|&y| (y * 2.0 * 32767.0).clamp(-32767.0, 32767.0) as i16),
+        );
+    }
+
+    /// Copy pending audio into the frontend's buffer.
+    pub fn fill_audio(&mut self, buffer: &mut [i16]) -> usize {
+        self.audio_buffer.pop_front_into(buffer)
     }
 
     pub fn instruction_boundaries(cpu: &M68000) -> u32 {
@@ -1008,13 +1083,16 @@ impl ToobinBoard {
 
     /// Reset everything but the CPU. The EEPROM is non-volatile and survives.
     pub fn reset(&mut self) {
+        self.sound.reset();
+        self.clocks.reset();
+        self.dc_blocker.reset();
+        self.audio_buffer.clear();
         self.xscroll = 0;
         self.yscroll = 0;
         self.slip = 0;
         self.intensity = 31;
         self.interrupt_scan = 0;
         self.scanline_int = false;
-        self.sound_int = false;
         self.eeprom_unlocked = false;
         self.buttons = 0xFFFF;
         self.service = false;
@@ -1059,8 +1137,8 @@ impl ToobinBoard {
     ///
     /// Every bit is active low. Bit 15 falls during horizontal blank and bit 14
     /// during vertical blank; bit 13 falls while a sound command is latched and
-    /// unread, which with no sound board is never; bit 12 is the service and
-    /// self-test switch.
+    /// the sound CPU has not collected it; bit 12 is the service and self-test
+    /// switch, which the sound board reads back on its own port as well.
     fn read_status(&self) -> u16 {
         let mut v = 0xFFFFu16;
         if self.in_hblank() {
@@ -1069,17 +1147,26 @@ impl ToobinBoard {
         if self.in_vblank() {
             v &= !0x4000;
         }
+        if self.sound.command_pending() {
+            v &= !0x2000;
+        }
         if self.service {
             v &= !0x1000;
         }
         v
     }
 
+    /// The sound board has a response the main CPU has not collected, which is
+    /// what holds its interrupt line down.
+    pub(crate) fn sound_int(&self) -> bool {
+        self.sound.response_pending()
+    }
+
     /// Interrupt level the 68010 sees. The scanline and sound lines are wired to
     /// autovector levels 1 and 2, and to level 3 together, so both at once is a
     /// level 3 rather than the higher of the two.
     pub(crate) fn interrupt_level(&self) -> u8 {
-        match (self.scanline_int, self.sound_int) {
+        match (self.scanline_int, self.sound_int()) {
             (true, true) => 3,
             (false, true) => 2,
             (true, false) => 1,
@@ -1096,16 +1183,15 @@ impl ToobinBoard {
     fn write_register(&mut self, reg: u32, data: u16, byte: u8) {
         match reg {
             REG_WATCHDOG => self.watchdog_count = 0,
-            // Sound command latch. With no sound board the latch is modeled as
-            // drained the instant it is written: the status port's handshake bit
-            // therefore never sticks, which is what would otherwise park the
-            // main program in a wait loop.
-            REG_SOUND_COMMAND => {}
+            // Sound command latch, which also pulses the sound CPU's NMI.
+            REG_SOUND_COMMAND => self.sound.write_command(byte),
             REG_INTENSITY => self.intensity = !byte & 0x1F,
             REG_INTERRUPT_SCAN => self.interrupt_scan = data & 0x1FF,
             REG_SLIP => self.slip = data,
             REG_SCANLINE_INT_ACK => self.scanline_int = false,
-            REG_SOUND_RESET => {}
+            // A strobe, not a latch: the sound CPU reboots rather than being
+            // held down, and any response it had not delivered goes with it.
+            REG_SOUND_RESET => self.sound.reset_pulse(),
             REG_EEPROM_ENABLE => self.eeprom_unlocked = true,
             REG_XSCROLL => self.xscroll = data,
             REG_YSCROLL => self.yscroll = data,
@@ -1138,8 +1224,9 @@ impl ToobinBoard {
             _ if REGISTER_BLOCK.contains(&a) => match a & REGISTER_SELECT {
                 REG_SWITCHES => self.read_buttons(),
                 REG_STATUS => self.read_status(),
-                // Sound response latch: silent board, so nothing answers.
-                REG_SOUND_RESPONSE => 0xFFFF,
+                // Reading the response latch clears its flag, which drops the
+                // sound board's interrupt line.
+                REG_SOUND_RESPONSE => 0xFF00 | self.sound.read_response() as u16,
                 _ => 0xFFFF,
             },
             _ => 0xFFFF,
@@ -1385,6 +1472,8 @@ const BIT_P2_THROW: u8 = 9;
 
 // Control ids.
 const CTRL_SERVICE: InputId = InputId(0);
+const CTRL_COIN1: InputId = InputId(11);
+const CTRL_COIN2: InputId = InputId(12);
 const CTRL_P1_LEFT_FWD: InputId = InputId(1);
 const CTRL_P1_LEFT_BACK: InputId = InputId(2);
 const CTRL_P1_RIGHT_FWD: InputId = InputId(3);
@@ -1398,10 +1487,28 @@ const CTRL_P2_THROW: InputId = InputId(10);
 
 use phosphor_core::core::machine::{KeyId as K, PadButton as PB, PadControl as P};
 
-/// Toobin' has no coin switch on the main board's switch port: coins are read by
-/// the sound board, which is not modeled yet, so the control table carries the
-/// paddles, the throw buttons and the service switch only.
+/// Toobin' has no start buttons: a credit is spent by paddling off, so the coin
+/// switches and the two players' controls are the whole panel. The coin
+/// switches are on the sound board rather than the main board's switch port.
 const TOOBIN_CONTROLS: &[InputControl] = &[
+    InputControl {
+        id: CTRL_COIN1,
+        stable_name: "coin1",
+        label: "Coin 1",
+        kind: InputKind::Coin,
+        player: None,
+        default_bindings: crate::input_defaults::COIN,
+    },
+    InputControl {
+        id: CTRL_COIN2,
+        stable_name: "coin2",
+        label: "Coin 2",
+        kind: InputKind::Coin,
+        player: None,
+        // Coin 1 takes the shared default and the service switch takes Num6, so
+        // the second mech gets the next key along rather than either of those.
+        default_bindings: &[DefaultBinding::Key(K::Num7)],
+    },
     InputControl {
         id: CTRL_SERVICE,
         stable_name: "service",
@@ -1568,6 +1675,9 @@ impl ToobinSystem {
         let alpha = TOOBIN_ALPHA_ROM.load(rom_set)?;
         self.board.load_alpha_gfx(&alpha);
 
+        let sound = TOOBIN_SOUND_ROM.load(rom_set)?;
+        self.board.sound.load_rom(&sound);
+
         // The reset vectors live in the program ROM, so the CPU has to be reset
         // again now that there is something to fetch them from.
         self.reset();
@@ -1576,6 +1686,12 @@ impl ToobinSystem {
 
     pub fn clock(&self) -> u64 {
         self.board.clock()
+    }
+
+    /// (sound-CPU cycles run, command pending, response pending) for headless
+    /// bring-up diagnostics.
+    pub fn sound_debug(&self) -> (u64, bool, bool) {
+        self.board.sound.debug_state()
     }
 
     /// Step one cycle, returning the instruction-boundary mask the debugger
@@ -1597,7 +1713,7 @@ impl Default for ToobinSystem {
 // Capability traits
 // ---------------------------------------------------------------------------
 
-crate::impl_board_delegation!(ToobinSystem, board, TIMING, no_audio, orientation);
+crate::impl_board_delegation!(ToobinSystem, board, TIMING, orientation);
 
 impl ToobinBoard {
     /// The cabinet monitor is mounted rotated a quarter turn, and the rotation
@@ -1620,6 +1736,8 @@ impl MachineCore for ToobinSystem {
         if self.board.advance_watchdog() {
             self.reset();
         }
+
+        self.board.end_frame_audio();
     }
 
     fn reset(&mut self) {
@@ -1640,7 +1758,19 @@ impl InputConfigurable for ToobinSystem {
         };
         let bit = match id {
             CTRL_SERVICE => {
+                // The same switch reaches both boards: the main board reads it
+                // on its status port and the sound board on its own I/O port.
                 self.board.service = pressed;
+                self.board.sound.set_self_test(pressed);
+                return;
+            }
+            // Coin mechs are wired to the sound board.
+            CTRL_COIN1 => {
+                self.board.sound.set_coin(0, pressed);
+                return;
+            }
+            CTRL_COIN2 => {
+                self.board.sound.set_coin(1, pressed);
                 return;
             }
             CTRL_P1_LEFT_FWD => BIT_P1_LEFT_FWD,
@@ -1697,6 +1827,18 @@ inventory::submit! {
         load: load_maincpu_image,
     }
 }
+inventory::submit! {
+    DisasmRegion {
+        machine: "toobin",
+        region: "sound",
+        cpu: DisasmCpu::M6502,
+        // The fixed half of the sound chip, which is where the program lives;
+        // the low 16 KB are the four banked pages and are not linear code.
+        org: 0x4000,
+        size: 0xC000,
+        load: |rs| TOOBIN_SOUND_ROM.load(rs).map(|v| v[0x4000..0x10000].to_vec()),
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -1730,6 +1872,30 @@ mod tests {
 
     /// White, and not exempt from the intensity control: bit 15 clear.
     const WHITE: u16 = 0x7FFF;
+
+    /// A minimal sound-board program: write one byte to the response latch and
+    /// then spin. Enough to raise the sound board's interrupt line the way the
+    /// real board does, without standing in a whole sound program.
+    ///
+    /// The NMI and IRQ vectors point at an RTI because both fire on their own:
+    /// a command raises the NMI and the board's periodic interrupt runs free.
+    fn responder_sound_rom() -> Vec<u8> {
+        let mut image = vec![0xFFu8; 0x10000];
+        let prog: &[u8] = &[
+            0xA9, 0x99, //       LDA #$99
+            0x8D, 0x02, 0x2A, // STA $2A02   the response latch
+            0x4C, 0x05, 0xF0, // JMP $F005   spin
+        ];
+        image[0xF000..0xF000 + prog.len()].copy_from_slice(prog);
+        image[0xF040] = 0x40; // RTI
+        image[0xFFFA] = 0x40; // NMI   -> 0xF040
+        image[0xFFFB] = 0xF0;
+        image[0xFFFC] = 0x00; // RESET -> 0xF000
+        image[0xFFFD] = 0xF0;
+        image[0xFFFE] = 0x40; // IRQ   -> 0xF040
+        image[0xFFFF] = 0xF0;
+        image
+    }
 
     /// The frame loop reaches the scanline hook for every visible row.
     ///
@@ -1843,10 +2009,25 @@ mod tests {
         assert!(sys.board.scanline_int);
         assert_eq!(sys.board.interrupt_level(), 1);
 
-        sys.board.sound_int = true;
+        // The sound line is the sound board's uncollected response, so raise it
+        // by letting the sound CPU actually write one rather than poking a flag.
+        sys.board.sound.load_rom(&responder_sound_rom());
+        sys.board.sound.reset_pulse();
+        for _ in 0..200 {
+            sys.board.sound.tick();
+        }
+        assert!(sys.board.sound_int(), "the response raises the sound line");
         assert_eq!(sys.board.interrupt_level(), 3, "both lines make a level 3");
+
         sys.board.scanline_int = false;
         assert_eq!(sys.board.interrupt_level(), 2);
+
+        sys.board.sound.read_response();
+        assert_eq!(
+            sys.board.interrupt_level(),
+            0,
+            "collecting it drops the line"
+        );
     }
 
     /// The EEPROM accepts exactly one byte per unlock and then re-locks itself.

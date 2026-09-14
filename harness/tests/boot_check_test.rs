@@ -384,6 +384,80 @@ fn road_runner_boots_its_68010_and_fills_video_ram() {
     );
 }
 
+/// Toobin's sound board is on its own crystal and its coin switches are on that
+/// board, so nothing about it is reachable from the main board's ports. This
+/// checks the three things that would each fail silently: that the sound 6502 is
+/// actually stepping, that a coin gets through to it, and that the mix reaching
+/// the speaker is not flat.
+///
+/// The picture test cannot see any of this. Toobin' drew a correct attract
+/// screen for a whole commit while its sound board did not exist at all.
+#[test]
+fn toobin_runs_its_sound_board_and_makes_sound() {
+    let Some(dir) = roms() else { return };
+    let Some(rom_set) = rom_set(&dir, "toobin") else {
+        return;
+    };
+    use phosphor_core::core::machine::{
+        AudioSource, InputConfigurable, InputEvent, InputId, MachineCore,
+    };
+
+    let mut sys = phosphor_machines::toobin::ToobinSystem::new();
+    sys.load_rom_set(&rom_set).expect("toobin ROM load");
+    sys.reset();
+
+    const FRAMES: u32 = 600;
+    for _ in 0..FRAMES {
+        sys.run_frame();
+    }
+
+    // The sound CPU runs at 1.789772 MHz off its own crystal while the frame
+    // rate comes from the main board's, so the expected count is a ratio
+    // between two unrelated oscillators rather than a division of one.
+    let (sound_cycles, _, _) = sys.sound_debug();
+    let expected = (1_789_772.0 / 60.0961538 * FRAMES as f64) as u64;
+    assert!(
+        sound_cycles.abs_diff(expected) < expected / 100,
+        "toobin sound CPU ran {sound_cycles} cycles in {FRAMES} frames, expected about {expected}"
+    );
+
+    // Coin up and let the board react. The coin switch is on the sound board,
+    // so this only reaches the game if that board is wired through.
+    let coin = sys
+        .input_controls()
+        .iter()
+        .find(|c| c.stable_name == "coin1")
+        .expect("toobin has a coin control")
+        .id;
+    press(&mut sys, coin, true);
+    for _ in 0..8 {
+        sys.run_frame();
+    }
+    press(&mut sys, coin, false);
+
+    let mut peak = 0i32;
+    for _ in 0..240 {
+        sys.run_frame();
+        let mut buf = [0i16; 4096];
+        let n = sys.fill_audio(&mut buf);
+        for &s in &buf[..n] {
+            peak = peak.max((s as i32).abs());
+        }
+    }
+    assert!(
+        peak > 256,
+        "toobin produced no audible output after a coin (peak sample {peak})"
+    );
+
+    fn press<M: phosphor_core::core::machine::InputConfigurable>(
+        sys: &mut M,
+        id: InputId,
+        pressed: bool,
+    ) {
+        sys.handle_input(InputEvent::Button { id, pressed });
+    }
+}
+
 /// The Galaxian family shares one video engine with per-game GFX banking, so a
 /// blank frame on any one of them points at that game's bank wiring rather
 /// than at the shared renderer.
