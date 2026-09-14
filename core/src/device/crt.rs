@@ -167,20 +167,41 @@ pub fn beam_sigma_lines(lines: f32) -> f32 {
 
 /// The halation skirt's sigma in a generator's own coordinate units.
 ///
-/// The phosphor emits into the faceplate in every direction. Light steeper than
-/// the critical angle cannot leave the front surface, so it reflects back,
-/// crosses the glass again and re-emerges a distance away: for thickness `t` and
-/// index `n`, at a radius of `2*t*tan(asin(1/n))`. With an 11 mm faceplate at
-/// n = 1.54 that is about 19 mm, or 5% of the tube's long axis, and it is why a
-/// bright vector sits in a broad glow rather than ending at its own edge.
+/// The phosphor emits into the faceplate in every direction. A ray leaving at
+/// angle `theta` to the normal partially reflects at the front surface, bounces
+/// off the aluminium backing and re-emerges a lateral distance
+/// `2*t*tan(theta)` from where it started. That is why a bright feature sits in
+/// a broad glow rather than ending at its own edge.
 ///
-/// The ring is treated as a Gaussian skirt of that scale rather than as a ring,
-/// which is what the sum over all the emission angles and depths looks like from
-/// the front.
+/// # The width is a second moment, not the cutoff
+///
+/// `2*t*tan(asin(1/n))` is the offset for a ray at exactly the critical angle,
+/// which is the *widest* any ray goes: about 19 mm on an 11 mm faceplate at
+/// n = 1.54. This used to return that figure as though it were a standard
+/// deviation, which spread the skirt about twice as wide as the optics do and
+/// made a conserved glow far too faint to see.
+///
+/// Isotropic emission puts power `sin(theta) d(theta)` into the annulus at each
+/// radius, so the surface brightness works out at
+///
+/// ```text
+/// B(r) = sin(theta) d(theta) / (2*pi*r*dr) = cos^3(theta) / (8*pi*t^2)
+/// ```
+///
+/// which is a filled disc, brightest in the middle and falling only to
+/// `cos^3(theta_c)`, about 0.44, at the rim before cutting off. Taking its
+/// second moment and matching a Gaussian's `<r^2> = 2*sigma^2` gives 8.73 mm,
+/// or 2.4% of the tube's long axis. Treating the result as a Gaussian is still
+/// an approximation of a disc, but of the right width.
 pub fn halation_sigma_units(long_axis_units: f32) -> f32 {
-    let critical_angle = (1.0 / FACEPLATE_INDEX).asin();
-    let radius_mm = 2.0 * FACEPLATE_MM * critical_angle.tan();
-    long_axis_units * radius_mm / TUBE_LONG_AXIS_MM
+    // Integrals over the emission angles, both in closed form: the numerator is
+    // `4*t^2 * integral(tan^2 * sin)` and the denominator `integral(sin)`, each
+    // taken from the normal out to the critical angle.
+    let cos_c = (1.0 - 1.0 / (FACEPLATE_INDEX * FACEPLATE_INDEX)).sqrt();
+    let mean_square =
+        4.0 * FACEPLATE_MM * FACEPLATE_MM * ((1.0 / cos_c + cos_c) - 2.0) / (1.0 - cos_c);
+    let sigma_mm = (mean_square / 2.0).sqrt();
+    long_axis_units * sigma_mm / TUBE_LONG_AXIS_MM
 }
 
 #[cfg(test)]
@@ -212,6 +233,33 @@ mod tests {
         assert!(
             coverage(224.0) < 1.0 && coverage(480.0) > 1.0,
             "the model has to separate these two, not merely scale between them"
+        );
+    }
+
+    /// The skirt is a second moment of the real angular distribution, not the
+    /// cutoff radius it used to be taken for. Pinned because the difference is a
+    /// factor of 2.15 that both renderers had been compensating for by drawing
+    /// the glow brighter than the light they were spreading.
+    #[test]
+    fn the_halation_skirt_is_about_half_the_radius_it_reaches() {
+        // The widest a ray goes: the offset at exactly the critical angle.
+        let critical = (1.0f32 / FACEPLATE_INDEX).asin();
+        let max_radius = 2.0 * FACEPLATE_MM * critical.tan();
+        assert!(
+            (max_radius - 18.78).abs() < 0.02,
+            "the cutoff radius should be about 19 mm, was {max_radius}"
+        );
+
+        // Expressed against the long axis, so a unit here is a millimetre.
+        let sigma = halation_sigma_units(TUBE_LONG_AXIS_MM);
+        assert!(
+            (sigma - 8.73).abs() < 0.02,
+            "the equivalent sigma should be about 8.7 mm, was {sigma}"
+        );
+        assert!(
+            (max_radius / sigma - 2.15).abs() < 0.02,
+            "and the cutoff should be 2.15 times it, was {}",
+            max_radius / sigma
         );
     }
 

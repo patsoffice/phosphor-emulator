@@ -362,12 +362,11 @@ void main() {
 /// Where the number comes from, and it is worth reading because two attempts to
 /// derive it both failed and the failures are informative.
 ///
-/// The skirt's width was suspect: `halation_sigma_units` uses the offset for a
-/// ray at exactly the critical angle, which is the widest any ray goes, as a
-/// Gaussian sigma. Working the real profile out gives a filled disc whose
-/// equivalent sigma is 2.15 times narrower, so the code's skirt is too wide and
-/// correcting it would strengthen the glow for free. It accounts for 2.15 of
-/// this, and no more.
+/// The skirt's width was suspect, and was wrong: `halation_sigma_units` had been
+/// returning the offset for a ray at exactly the critical angle, the widest any
+/// ray goes, as though it were a standard deviation. That is corrected now, and
+/// it accounted for 2.15 of this figure, which came down from 15 to 7 when the
+/// skirt narrowed. No more than that, though: a factor of seven is still here.
 ///
 /// Blooming was the other candidate: the spot grows with beam current, so a
 /// bright feature is written wider. That is real and is modeled here, but it
@@ -399,7 +398,7 @@ void main() {
 /// That a multiplier is riding on the picture at all is the price of the glow
 /// being visible. Conserved halation cannot clip, because the blur of a broad
 /// lit area is that area, and it also cannot be seen.
-const HALO_GAIN_OVER_CONSERVED: f32 = 15.0;
+const HALO_GAIN_OVER_CONSERVED: f32 = 7.0;
 
 /// The offscreen targets the halation pass needs: the core at presentation
 /// resolution, and two small fields to ping-pong the separable blur between.
