@@ -53,10 +53,12 @@
 //! 19 mm away. It is taken out of the core rather than added on top, because
 //! that is where it went.
 //!
-//! Not modeled yet: the spot's width along the sweep. That axis is a convolution
-//! rather than a sum, because the beam moves continuously along a line instead
-//! of landing on discrete spots, so it softens edges without adding structure.
-//! See `phosphor-emulator-rkcy`.
+//! The spot has a width along the sweep too, and that axis works differently: a
+//! convolution rather than a sum, because the beam moves continuously along a
+//! line instead of landing on discrete positions. It turns each pixel boundary
+//! into a ramp and adds no structure, which is why scanlines have no counterpart
+//! running the other way. Its width comes from the pixel pitch on *that* axis,
+//! which is not the line pitch, because arcade pixels are not square.
 
 use std::ffi::CString;
 
@@ -64,7 +66,7 @@ use phosphor_core::core::display::DisplaySettings;
 use phosphor_core::core::machine::Orientation;
 use phosphor_core::device::crt::{
     BEAM_CUTOFF_SIGMAS, MIN_SIGMA_PIXELS, SPOT_GROWTH_AT_FULL_DRIVE, beam_sigma_lines,
-    halation_sigma_units,
+    beam_sigma_units, halation_sigma_units,
 };
 
 use crate::gl_util::{
@@ -101,6 +103,8 @@ struct BeamProfile {
     /// Half-width of the summation, in lines. Sized for the widest the spot
     /// gets, since a dimmer sample only needs fewer taps than it is given.
     taps: i32,
+    /// Width of the ramp at a pixel boundary along the sweep, in source pixels.
+    sweep_ramp: f32,
     /// Scales the summed profile so a full-intensity picture reaches full white
     /// at a line's center, then applies the brightness control.
     gain: f32,
@@ -111,9 +115,31 @@ impl BeamProfile {
     /// line axis is drawn into, and `halo_sigma_px` the halation skirt's width in
     /// those same pixels, which decides how much of the core's light the glow
     /// takes away from where it was.
-    fn derive(lines: u32, out_px: u32, halo_sigma_px: f32, settings: &DisplaySettings) -> Self {
+    fn derive(
+        lines: u32,
+        sweep: u32,
+        out_px: u32,
+        halo_sigma_px: f32,
+        settings: &DisplaySettings,
+    ) -> Self {
         let lines = lines.max(1) as f32;
         let sigma = beam_sigma_lines(lines) * settings.focus.max(0.0);
+
+        // The same round spot measured against the *other* axis. Along the sweep
+        // a pixel is the tube's long axis over the pixel count, which is what
+        // `beam_sigma_units` returns, and it is not `beam_sigma_lines`: that one
+        // is measured against the line pitch on the short axis. Arcade pixels are
+        // not square, so the two differ, and using one for both would be the
+        // aspect error this epic warns about in a new place. Pac-Man's spot is
+        // 0.25 of a line pitch and 0.24 of a pixel along the sweep; Marble
+        // Madness' 336 columns make it 0.28 there against 0.25 vertically.
+        //
+        // The ramp is set so its slope at the boundary matches the error
+        // function the convolution really produces, which is `sigma * sqrt(TAU)`.
+        // Derived rather than chosen: a wider ramp would blur across the pixel
+        // and a narrower one would leave a step the spot does not have.
+        let sweep_sigma = beam_sigma_units(sweep.max(1) as f32) * settings.focus.max(0.0);
+        let sweep_ramp = (sweep_sigma * std::f32::consts::TAU.sqrt()).clamp(1e-4, 1.0);
 
         // The floor is a property of the output grid rather than of the tube, so
         // it is applied in output pixels and converted back. Below it a Gaussian
@@ -190,6 +216,7 @@ impl BeamProfile {
             sigma,
             bloom_var,
             taps,
+            sweep_ramp,
             gain,
         }
     }
@@ -235,12 +262,38 @@ uniform sampler2D src;
 uniform vec2 flip;
 uniform bool swap_xy;
 uniform float lines;
+uniform float sweep;
+uniform float sweep_ramp;
 uniform float sigma;
 uniform float bloom_var;
 uniform float gain;
 uniform int taps;
 
 const float INV_SQRT_TAU = 0.39894228;
+
+// Where to read along the line, with the spot's width along the sweep folded in.
+//
+// Nothing here sums, because nothing along a line is discrete: the beam moves
+// continuously and the video signal modulates it, so a source pixel is an
+// interval of time rather than a dot. The light at a point is that piecewise
+// constant signal convolved with the spot, which turns each pixel boundary from
+// a step into a ramp and adds no structure of its own. That asymmetry against
+// the line axis is the whole reason scanlines exist and have no counterpart
+// running the other way.
+//
+// The ramp is done by bending the coordinate rather than by taking taps. At
+// these resolutions the spot is about a quarter of a source pixel, so a tap loop
+// would give every neighbour a weight of essentially zero and come out
+// indistinguishable from nearest sampling: the effect is entirely in the
+// boundary, not in the neighbours. Bending the sample position and letting
+// linear filtering do the interpolation puts the transition exactly where the
+// convolution puts it, for one texture read.
+float sweep_position(float x) {
+    float t = x * sweep;
+    float base = floor(t - 0.5);
+    float g = t - 0.5 - base;
+    return (base + 0.5 + clamp((g - 0.5) / sweep_ramp + 0.5, 0.0, 1.0)) / sweep;
+}
 
 void main() {
     vec2 c = mix(uv, vec2(1.0) - uv, flip);
@@ -250,12 +303,13 @@ void main() {
     // is emitted at its center, k + 0.5.
     float y = s.y * lines;
     float center = floor(y);
+    float x = sweep_position(s.x);
 
     vec3 sum = vec3(0.0);
     for (int k = -taps; k <= taps; ++k) {
         float row = center + float(k);
         float d = y - (row + 0.5);
-        vec3 lit = texture(src, vec2(s.x, (row + 0.5) / lines)).rgb;
+        vec3 lit = texture(src, vec2(x, (row + 0.5) / lines)).rgb;
 
         // Each gun carries its own current, so each channel has its own spot.
         // Area with drive, diameter with its root.
@@ -365,6 +419,8 @@ pub struct CrtRenderer {
     flip_uniform: gl::types::GLint,
     swap_uniform: gl::types::GLint,
     lines_uniform: gl::types::GLint,
+    sweep_uniform: gl::types::GLint,
+    sweep_ramp_uniform: gl::types::GLint,
     sigma_uniform: gl::types::GLint,
     bloom_var_uniform: gl::types::GLint,
     gain_uniform: gl::types::GLint,
@@ -408,6 +464,8 @@ impl CrtRenderer {
             let flip_uniform = uniform("flip");
             let swap_uniform = uniform("swap_xy");
             let lines_uniform = uniform("lines");
+            let sweep_uniform = uniform("sweep");
+            let sweep_ramp_uniform = uniform("sweep_ramp");
             let sigma_uniform = uniform("sigma");
             let bloom_var_uniform = uniform("bloom_var");
             let gain_uniform = uniform("gain");
@@ -419,11 +477,15 @@ impl CrtRenderer {
             let mut src_tex = 0;
             gl::GenTextures(1, &mut src_tex);
             gl::BindTexture(gl::TEXTURE_2D, src_tex);
-            // Nearest, for the same reason the direct upload used it: the source
-            // is an exact pixel grid and nothing here wants it interpolated. The
-            // beam profile will do its own sampling from these texels.
-            gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MIN_FILTER, gl::NEAREST as i32);
-            gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MAG_FILTER, gl::NEAREST as i32);
+            // Linear, so the sweep axis can bend its sample position into a
+            // pixel boundary and have the hardware interpolate across it. The
+            // line axis is unaffected by the choice: it is always sampled at
+            // `(row + 0.5) / lines`, an exact texel center, where linear
+            // filtering returns that texel and nothing else. Only the sweep
+            // coordinate ever lands between texels, which is the one that wants
+            // interpolating.
+            gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MIN_FILTER, gl::LINEAR as i32);
+            gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_MAG_FILTER, gl::LINEAR as i32);
             gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_WRAP_S, gl::CLAMP_TO_EDGE as i32);
             gl::TexParameteri(gl::TEXTURE_2D, gl::TEXTURE_WRAP_T, gl::CLAMP_TO_EDGE as i32);
             gl::BindTexture(gl::TEXTURE_2D, 0);
@@ -458,6 +520,8 @@ impl CrtRenderer {
                 flip_uniform,
                 swap_uniform,
                 lines_uniform,
+                sweep_uniform,
+                sweep_ramp_uniform,
                 sigma_uniform,
                 bloom_var_uniform,
                 gain_uniform,
@@ -523,7 +587,7 @@ impl CrtRenderer {
         // drawn because it decides how much gain the core needs to hold its peak
         // against what the glow takes away.
         let halo_sigma_px = halation_sigma_units(out_w.max(out_h) as f32);
-        let beam = BeamProfile::derive(lines, out_px_along_lines, halo_sigma_px, settings);
+        let beam = BeamProfile::derive(lines, src_w, out_px_along_lines, halo_sigma_px, settings);
 
         unsafe {
             if !self.out.attach(out_tex, out) {
@@ -576,6 +640,8 @@ impl CrtRenderer {
             );
             gl::Uniform1i(self.swap_uniform, orientation.swaps_axes() as i32);
             gl::Uniform1f(self.lines_uniform, lines as f32);
+            gl::Uniform1f(self.sweep_uniform, src_w as f32);
+            gl::Uniform1f(self.sweep_ramp_uniform, beam.sweep_ramp);
             gl::Uniform1f(self.sigma_uniform, beam.sigma);
             gl::Uniform1f(self.bloom_var_uniform, beam.bloom_var);
             // Full energy here. The split between what leaves directly and what
@@ -872,8 +938,8 @@ mod tests {
         let settings = no_glow(1.0);
         // Four output pixels per line, comfortably clear of the grid floor, so
         // this measures the tube rather than the window.
-        let low = BeamProfile::derive(224, 224 * 4, HALO_SIGMA_PX, &settings);
-        let high = BeamProfile::derive(480, 480 * 4, HALO_SIGMA_PX, &settings);
+        let low = BeamProfile::derive(224, 288, 224 * 4, HALO_SIGMA_PX, &settings);
+        let high = BeamProfile::derive(480, 512, 480 * 4, HALO_SIGMA_PX, &settings);
 
         // A line's center is at k + 0.5, the gap between two lines at k.
         for beam in [&low, &high] {
@@ -904,7 +970,7 @@ mod tests {
     /// cannot express.
     #[test]
     fn scanlines_are_deeper_on_dim_content_than_on_bright() {
-        let beam = BeamProfile::derive(224, 224 * 4, HALO_SIGMA_PX, &no_glow(1.0));
+        let beam = BeamProfile::derive(224, 288, 224 * 4, HALO_SIGMA_PX, &no_glow(1.0));
 
         // Ratio of the gap to the line's own center, at each drive.
         let contrast = |lit: f32| brightness_at(&beam, 10.0, lit) / brightness_at(&beam, 10.5, lit);
@@ -928,7 +994,7 @@ mod tests {
     /// fall between output pixels and would crawl as the window was resized.
     #[test]
     fn one_output_pixel_per_line_washes_the_scanlines_out_instead_of_aliasing() {
-        let beam = BeamProfile::derive(224, 224, HALO_SIGMA_PX, &no_glow(1.0));
+        let beam = BeamProfile::derive(224, 288, 224, HALO_SIGMA_PX, &no_glow(1.0));
         let trough = brightness(&beam, 10.0);
         let peak = brightness(&beam, 10.5);
         assert!(
@@ -951,8 +1017,8 @@ mod tests {
             halation,
             ..DisplaySettings::MEASURED
         };
-        let off = BeamProfile::derive(224, 224 * 4, HALO_SIGMA_PX, &settings(0.0));
-        let on = BeamProfile::derive(224, 224 * 4, HALO_SIGMA_PX, &settings(0.3));
+        let off = BeamProfile::derive(224, 288, 224 * 4, HALO_SIGMA_PX, &settings(0.0));
+        let on = BeamProfile::derive(224, 288, 224 * 4, HALO_SIGMA_PX, &settings(0.3));
 
         assert!(
             on.gain > off.gain,
@@ -969,14 +1035,50 @@ mod tests {
         );
     }
 
+    /// The sweep axis is measured against its own pixel pitch, not the line
+    /// pitch, because arcade pixels are not square. Using one figure for both
+    /// axes is the aspect error this epic warns about, and it would be invisible
+    /// on a board whose pixels happen to be near enough square.
+    ///
+    /// Marble Madness is the case that separates them: 336 columns across the
+    /// tube's long axis against 240 lines down its short one, which makes a
+    /// pixel 1.07 mm wide and 1.13 mm tall. The same round spot therefore covers
+    /// a twentieth more of the sweep than of the pitch.
+    #[test]
+    fn the_sweep_ramp_follows_the_pixel_pitch_along_the_sweep() {
+        let settings = no_glow(1.0);
+        let square_ish = BeamProfile::derive(224, 288, 224 * 4, HALO_SIGMA_PX, &settings);
+        let wide = BeamProfile::derive(240, 336, 240 * 4, HALO_SIGMA_PX, &settings);
+
+        // More columns across the same glass means a narrower pixel, so the spot
+        // covers more of it and the boundary ramp is wider in pixel units.
+        assert!(
+            wide.sweep_ramp > square_ish.sweep_ramp,
+            "336 columns should ramp over more of a pixel than 288 do: {} against {}",
+            wide.sweep_ramp,
+            square_ish.sweep_ramp
+        );
+
+        // And it is not the line figure wearing a different name. Marble's
+        // vertical spot is 0.264 of a line pitch and its horizontal one 0.277 of
+        // a pixel, which is the pixel aspect 1.125/1.071 and nothing else.
+        let vertical = beam_sigma_lines(240.0);
+        let horizontal = beam_sigma_units(336.0);
+        assert!(
+            (horizontal / vertical - 1.050).abs() < 0.005,
+            "the two axes should differ by exactly the pixel aspect: \
+             {horizontal} against {vertical}"
+        );
+    }
+
     /// Focus is the control that actually differs between real monitors, since
     /// tube size cancels out of a figure expressed per pitch. Softening the spot
     /// has to fill the gaps in, which is what a badly adjusted cabinet looked
     /// like.
     #[test]
     fn a_softer_focus_fills_the_gaps_between_lines() {
-        let sharp = BeamProfile::derive(224, 224 * 4, HALO_SIGMA_PX, &no_glow(1.0));
-        let soft = BeamProfile::derive(224, 224 * 4, HALO_SIGMA_PX, &no_glow(2.0));
+        let sharp = BeamProfile::derive(224, 288, 224 * 4, HALO_SIGMA_PX, &no_glow(1.0));
+        let soft = BeamProfile::derive(224, 288, 224 * 4, HALO_SIGMA_PX, &no_glow(2.0));
         assert!(
             brightness(&soft, 10.0) > brightness(&sharp, 10.0) + 0.2,
             "turning the focus control up should wash the scanlines out"
