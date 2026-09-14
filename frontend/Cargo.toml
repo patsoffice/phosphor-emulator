@@ -26,3 +26,5 @@ toml = "1"
 serde = { version = "1", features = ["derive"] }
 dirs = "6"
 png = "0.18"
+log.workspace = true
+env_logger.workspace = true

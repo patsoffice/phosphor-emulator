@@ -13,6 +13,7 @@ mod gl_util;
 mod headless;
 mod host_keys;
 mod input;
+mod logging;
 mod movie;
 mod overlay;
 mod profile;
@@ -98,6 +99,8 @@ struct Cli {
 
 fn main() {
     let cli = Cli::parse();
+    // Before config::load(), which warns through the logger on a bad file.
+    logging::init();
     let config = config::load();
 
     if cli.list {
@@ -157,7 +160,7 @@ fn main() {
             }
             // No audio device (headless CI, no sound card). Video still works;
             // the machine keeps the default rate and its samples go nowhere.
-            Err(e) => eprintln!("Note: no audio device ({e}); running without sound."),
+            Err(e) => log::warn!("no audio device ({e}); running without sound"),
         }
         sdl
     });
@@ -320,7 +323,7 @@ fn main() {
     if let Some(data) = machine.save_nvram()
         && let Err(e) = std::fs::write(&nvram_path, data)
     {
-        eprintln!("Warning: failed to save NVRAM: {e}");
+        log::warn!("failed to save NVRAM: {e}");
     }
 }
 

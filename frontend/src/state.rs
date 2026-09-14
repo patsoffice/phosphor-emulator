@@ -198,7 +198,7 @@ pub fn save(state: &State) {
     if let Ok(contents) = toml::to_string_pretty(state)
         && let Err(e) = std::fs::write(dir.join("state.toml"), contents)
     {
-        eprintln!("Warning: failed to save state: {e}");
+        log::warn!("failed to save state: {e}");
     }
 }
 

@@ -335,10 +335,9 @@ pub fn init(
     // rather than drifting silently.
     let granted = device.spec().freq as u32;
     if granted != sample_rate {
-        eprintln!(
-            "Warning: audio device opened at {granted} Hz but the machine was \
-             built for {sample_rate} Hz; playback will be off-pitch by \
-             {:.1}%.",
+        log::warn!(
+            "audio device opened at {granted} Hz but the machine was built for \
+             {sample_rate} Hz; playback will be off-pitch by {:.1}%",
             (granted as f64 / sample_rate as f64 - 1.0) * 100.0
         );
     }

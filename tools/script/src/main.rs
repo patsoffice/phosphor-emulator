@@ -49,6 +49,9 @@ enum Command {
 }
 
 fn main() -> ExitCode {
+    // Defaults to `error`, so a script's stdout stays clean; `RUST_LOG=debug`
+    // surfaces what the machine under the script is reporting.
+    env_logger::init();
     let cli = Cli::parse();
     match run_command(cli.command) {
         Ok(out) => {

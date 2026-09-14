@@ -41,7 +41,7 @@ pub fn load() -> Config {
     };
     match std::fs::read_to_string(&path) {
         Ok(contents) => toml::from_str(&contents).unwrap_or_else(|e| {
-            eprintln!("Warning: invalid config at {}: {e}", path.display());
+            log::warn!("invalid config at {}: {e}", path.display());
             Config::default()
         }),
         Err(_) => Config::default(),

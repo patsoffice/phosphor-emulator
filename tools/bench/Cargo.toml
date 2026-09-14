@@ -13,3 +13,4 @@ path = "src/main.rs"
 # object without naming phosphor-core here.
 phosphor-harness = { path = "../../harness" }
 clap = { version = "4", features = ["derive"] }
+env_logger.workspace = true

@@ -209,8 +209,16 @@ fn ms_per_frame(d: Duration, frames: u64) -> f64 {
 }
 
 fn main() {
+    // Defaults to `error`; `RUST_LOG=debug` surfaces what the machines report
+    // while they run. Deliberately not used for the warning below.
+    env_logger::init();
     let args = Args::parse();
 
+    // Stays on `eprintln!` rather than `log::warn!` on purpose: a `RUST_LOG`
+    // that happened to be set to `error` would silence it, and a debug-build
+    // benchmark whose warning was silenced is a wrong number presented as a
+    // right one. The numbers are the whole product here, so this one has to be
+    // unsuppressible.
     if cfg!(debug_assertions) {
         eprintln!(
             "warning: this is a debug build; the numbers below measure a different \

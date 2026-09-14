@@ -211,6 +211,47 @@ br sync --flush-only                            # Export to issues.jsonl for com
 - `br` never auto-commits — run `br sync --flush-only`, then commit `.beads/` yourself.
 - Check `br ready --json` at the start of a session to see what's actionable.
 
+### Diagnostics and Logging
+
+Runtime diagnostics go through the `log` facade, not `eprintln!`. `log` and
+`env_logger` are pinned in `[workspace.dependencies]`; a crate opts in with
+`log.workspace = true`, and **only a binary** may add `env_logger` and install a
+subscriber.
+
+- `error!`: an operation the user asked for did not happen.
+- `warn!`: degraded, but emulation carries on (no audio device, a GL stage that
+  fell back, a config file that would not parse).
+- `info!`: confirmation of a user action. Shown by default in the frontend.
+- `debug!`: internal state a developer would want. Off by default.
+- `trace!`: per-frame or hotter. The workspace sets `release_max_level_debug`,
+  so `trace!` is compiled out of release builds at the call site and leaves
+  nothing for the hot loop to branch on. Anything per-cycle or per-instruction
+  belongs at this level and no higher.
+
+Guard a record whose *arguments* cost something with `log::log_enabled!` rather
+than relying on the level check inside the macro, which happens after the
+arguments are evaluated.
+
+Three things deliberately stay on `eprintln!`, and a conversion should not
+sweep them up:
+
+- **Fatal usage errors** in a `main` that then exits (an unknown machine, a
+  missing ROM path). These are the program's usage output rather than
+  diagnostics: they must not be suppressible by `RUST_LOG`, and they read as
+  prose rather than as a record.
+- **A warning that invalidates the tool's own output**, such as
+  `phosphor-bench`'s debug-build notice. A `RUST_LOG=error` that silenced it
+  would leave a wrong number presented as a right one.
+- **Tests and examples.** `cargo test` already captures `eprintln!` per test and
+  replays it only for the test that failed, which is better than anything a
+  global subscriber gives you. ROM-gated skip messages in particular must print
+  without a logger being initialized.
+
+The split between stdout and stderr in the CLI tools is also deliberate: results
+that a script might parse go to stdout via `println!`, and everything about the
+run goes to stderr. Logging does not change that; it only replaces the stderr
+half where the message is a diagnostic.
+
 ### Writing Style
 
 Applies to everything written here: code comments, doc comments, Markdown under

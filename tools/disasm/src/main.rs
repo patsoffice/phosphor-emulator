@@ -489,6 +489,10 @@ impl From<DisasmCpu> for CpuArg {
 }
 
 fn main() -> ExitCode {
+    // Silent unless RUST_LOG says otherwise: this tool's stdout is parsed, and
+    // env_logger defaults to `error`. `RUST_LOG=debug` opens up whatever the
+    // core and machine crates have to say about the ROM being disassembled.
+    env_logger::init();
     let cli = Cli::parse();
     match run_command(cli.command) {
         Ok(out) => {

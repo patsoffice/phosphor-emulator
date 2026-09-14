@@ -7,6 +7,36 @@ default-members = ["core", "machines", "frontend"]
 exclude = ["tools/marty-probe"]
 resolver = "2"
 
+[workspace.dependencies]
+# Diagnostics go through the `log` facade rather than `eprintln!`, so that a
+# library crate can report without deciding where the report goes and a user
+# can widen or silence it with RUST_LOG. `log` is already in the tree via SDL2
+# and egui, so the facade itself costs nothing new.
+#
+# `release_max_level_debug` compiles `trace!` out of release builds entirely,
+# at the call site, leaving nothing to branch on. That is the level to reach
+# for in a per-cycle or per-instruction path, where even a disabled record is
+# an atomic load the hot loop does not need. `debug!` survives into release on
+# purpose: it is what makes `RUST_LOG=debug phosphor …` useful when someone
+# reports a bug against a release binary.
+log = { version = "0.4", features = ["release_max_level_debug"] }
+# Only the binaries pick an implementation; library crates must not.
+#
+# Both default features that cost anything are left off.
+#
+# `regex` governs only the optional `RUST_LOG=module/pattern` message filter,
+# which falls back to a substring match without it, and would pull
+# regex-automata and aho-corasick into a tree with no other use for them.
+# Filtering by module path and level is unaffected.
+#
+# `humantime` only stamps each line with a wall-clock time, and in 0.11 it
+# brings all of `jiff` to do it. Emulator diagnostics are read live in a
+# terminal, next to the frame they describe; the timestamp is not worth the
+# tree. `auto-color` is free, since clap already puts anstream here.
+env_logger = { version = "0.11", default-features = false, features = [
+    "auto-color",
+] }
+
 # Optimize workspace crates in dev builds for real-time emulation speed
 # while keeping debug info and fast incremental compilation.
 [profile.dev.package."*"]

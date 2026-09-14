@@ -195,11 +195,11 @@ impl ProfileState {
     pub fn stop(&mut self) {
         self.active = false;
         match self.recorder.write_to_file() {
-            Ok(path) => eprintln!(
+            Ok(path) => log::info!(
                 "Profile trace written: {path} ({} events)",
                 self.recorder.events.len()
             ),
-            Err(e) => eprintln!("Failed to write profile trace: {e}"),
+            Err(e) => log::error!("failed to write profile trace: {e}"),
         }
     }
 

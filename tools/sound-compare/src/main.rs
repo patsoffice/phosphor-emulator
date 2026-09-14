@@ -90,6 +90,9 @@ enum Command {
 }
 
 fn main() -> ExitCode {
+    // Defaults to `error`; `RUST_LOG=debug` surfaces the sound chips' own
+    // reporting alongside the comparison.
+    env_logger::init();
     match run(Cli::parse().command) {
         Ok(out) => {
             print!("{out}");

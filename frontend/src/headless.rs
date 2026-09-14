@@ -118,7 +118,7 @@ pub fn run(
                 dw * dh
             );
         }
-        Err(e) => eprintln!("headless: PNG write failed: {e}"),
+        Err(e) => log::error!("headless: PNG write failed: {e}"),
     }
 
     if !audio.is_empty() {
@@ -130,7 +130,7 @@ pub fn run(
                 "headless: wrote {wav_path} ({} samples @ {rate} Hz)",
                 audio.len()
             ),
-            Err(e) => eprintln!("headless: WAV write failed: {e}"),
+            Err(e) => log::error!("headless: WAV write failed: {e}"),
         }
     }
 }

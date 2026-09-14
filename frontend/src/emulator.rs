@@ -272,15 +272,15 @@ pub fn run(
     for path in &db_paths {
         if path.exists() {
             match controller_subsystem.load_mappings(path) {
-                Ok(n) => eprintln!("Loaded {n} controller mappings from {}", path.display()),
-                Err(e) => eprintln!("Failed to load {}: {e}", path.display()),
+                Ok(n) => log::debug!("loaded {n} controller mappings from {}", path.display()),
+                Err(e) => log::warn!("failed to load {}: {e}", path.display()),
             }
         }
     }
     let mut controllers: Vec<sdl2::controller::GameController> = Vec::new();
     let num_joysticks = joystick_subsystem.num_joysticks().unwrap_or(0);
     if num_joysticks == 0 {
-        eprintln!("No joysticks detected");
+        log::debug!("no joysticks detected");
     }
     for i in 0..num_joysticks {
         let name = joystick_subsystem
@@ -288,13 +288,13 @@ pub fn run(
             .unwrap_or_else(|_| "unknown".into());
         if controller_subsystem.is_game_controller(i) {
             if let Ok(gc) = controller_subsystem.open(i) {
-                eprintln!("Controller {i}: {}", gc.name());
+                log::debug!("controller {i}: {}", gc.name());
                 controllers.push(gc);
             } else {
-                eprintln!("Controller {i}: {name} (failed to open)");
+                log::warn!("controller {i}: {name} (failed to open)");
             }
         } else {
-            eprintln!("Joystick {i}: {name} (not in controller database)");
+            log::debug!("joystick {i}: {name} (not in controller database)");
         }
     }
 
@@ -350,8 +350,8 @@ pub fn run(
             .map(crate::host_keys::chord_label)
             .unwrap_or_else(|| "unbound".to_string());
         for (action, key) in crate::host_keys::conflicts(&host_bindings, &machine_keys) {
-            eprintln!(
-                "Note: {key:?} is the '{}' hotkey, so {machine_name} cannot see it. \
+            log::warn!(
+                "{key:?} is the '{}' hotkey, so {machine_name} cannot see it. \
                  Rebind either side in the settings panel ({panel_key}).",
                 action.label()
             );
@@ -503,7 +503,7 @@ pub fn run(
                 eprintln!("binding movie {}: {e}", p.display());
                 std::process::exit(1);
             });
-        eprintln!(
+        log::info!(
             "Movie: replaying {frames} frame(s), {records} record(s) from {}",
             p.display()
         );
@@ -550,7 +550,7 @@ pub fn run(
             // rebuild raises no fresh KeyDown, so it would be dead until
             // released and pressed again.
             pending_resync = true;
-            eprintln!("Hard reset: machine rebuilt from ROM");
+            log::info!("Hard reset: machine rebuilt from ROM");
         }
 
         if arm_requested {
@@ -566,7 +566,7 @@ pub fn run(
             movie_capture.arm_fresh(&mut *fresh, nvram, dip);
             *session.borrow_mut() = DebugSession::from_machine(fresh);
             debug_state.frame_count = 0;
-            eprintln!("{}", movie_capture.armed_message());
+            log::info!("{}", movie_capture.armed_message());
         }
 
         let mut sess = session.borrow_mut();
@@ -734,15 +734,19 @@ pub fn run(
                     ..
                 } => {
                     let chord = HostChord::from_event(*sc, *keymod);
-                    // `PHOSPHOR_KEY_DEBUG=1` prints what each press resolved to.
-                    // A hotkey that does the wrong thing is otherwise invisible
-                    // from outside: a chord that loses its modifier resolves to
-                    // a real, different action and that action runs normally,
-                    // which looks like the binding table being wrong rather
-                    // than the modifier never arriving.
-                    if std::env::var_os("PHOSPHOR_KEY_DEBUG").is_some() {
+                    // `RUST_LOG=phosphor_frontend::emulator=debug` prints what
+                    // each press resolved to. A hotkey that does the wrong
+                    // thing is otherwise invisible from outside: a chord that
+                    // loses its modifier resolves to a real, different action
+                    // and that action runs normally, which looks like the
+                    // binding table being wrong rather than the modifier never
+                    // arriving.
+                    //
+                    // `log_enabled!` guards the `mod_state()` round trip to
+                    // SDL, which is not free and runs on every key event.
+                    if log::log_enabled!(log::Level::Debug) {
                         let live = sdl_context.keyboard().mod_state();
-                        eprintln!(
+                        log::debug!(
                             "key: {:?} event_mod={:?} live_mod={:?} -> chord(shift={}) -> {:?}",
                             sc,
                             *keymod,
@@ -858,7 +862,7 @@ pub fn run(
                 // there; stopping writes the file.
                 Event::KeyDown { repeat: false, .. } if hot == Some(HostAction::MovieRecord) => {
                     if movie_capture.is_recording() {
-                        eprintln!("{}", movie_capture.stop());
+                        log::info!("{}", movie_capture.stop());
                     } else {
                         // Deferred: arming rebuilds the machine from ROM, which
                         // cannot happen while it is borrowed for this frame.
@@ -870,11 +874,11 @@ pub fn run(
                 Event::KeyDown { repeat: false, .. } if hot == Some(HostAction::QuickSave) => {
                     if let Some(data) = machine.save_state() {
                         match std::fs::write(save_path, &data) {
-                            Ok(()) => eprintln!("Save state written ({} bytes)", data.len()),
-                            Err(e) => eprintln!("Save state failed: {e}"),
+                            Ok(()) => log::info!("Save state written ({} bytes)", data.len()),
+                            Err(e) => log::error!("save state failed: {e}"),
                         }
                     } else {
-                        eprintln!("Save states not supported for this machine");
+                        log::warn!("save states not supported for this machine");
                     }
                 }
 
@@ -883,15 +887,15 @@ pub fn run(
                     match std::fs::read(save_path) {
                         Ok(data) => match machine.load_state(&data) {
                             Ok(()) => {
-                                eprintln!("Save state loaded");
+                                log::info!("Save state loaded");
                                 // Port bits live inside the snapshot, so the
                                 // restored state can contradict what is physically
                                 // held right now.
                                 needs_resync = true;
                             }
-                            Err(e) => eprintln!("Load state failed: {e}"),
+                            Err(e) => log::error!("load state failed: {e}"),
                         },
-                        Err(e) => eprintln!("No save file found: {e}"),
+                        Err(e) => log::warn!("no save file found: {e}"),
                     }
                 }
 
@@ -1036,7 +1040,7 @@ pub fn run(
                 // Toggle global pause (frontend-level control, not a game input)
                 Event::KeyDown { repeat: false, .. } if hot == Some(HostAction::TogglePause) => {
                     debug_state.global_paused = !debug_state.global_paused;
-                    eprintln!(
+                    log::info!(
                         "{}",
                         if debug_state.global_paused {
                             "Paused"
@@ -1062,22 +1066,22 @@ pub fn run(
                         screenshot_dir,
                         machine_name,
                     ) {
-                        Ok(path) => eprintln!("Screenshot saved: {}", path.display()),
-                        Err(e) => eprintln!("Screenshot failed: {e}"),
+                        Ok(path) => log::info!("Screenshot saved: {}", path.display()),
+                        Err(e) => log::error!("screenshot failed: {e}"),
                     }
                 }
 
                 // Controller hotplug
                 Event::ControllerDeviceAdded { which, .. } => {
                     if let Ok(gc) = controller_subsystem.open(which) {
-                        eprintln!("Controller connected: {}", gc.name());
+                        log::info!("Controller connected: {}", gc.name());
                         controllers.push(gc);
                     }
                 }
 
                 Event::ControllerDeviceRemoved { which, .. } => {
                     controllers.retain(|c| c.instance_id() != which);
-                    eprintln!("Controller disconnected");
+                    log::info!("Controller disconnected");
                     // An unplugged pad sends no button-up for whatever it was
                     // holding. Clear everything, then re-assert from the pads
                     // that are still connected.
@@ -1246,19 +1250,19 @@ pub fn run(
                         // and the overrun is the expected consequence.
                         if ring.dropped() > audio_fault_baseline.0 && !audio_overrun_reported {
                             audio_overrun_reported = true;
-                            eprintln!(
-                                "Note: audio ring overran ({} samples) — the \
-                                 emulator is producing faster than the sound \
-                                 card consumes. Expected while unthrottled.",
+                            log::warn!(
+                                "audio ring overran ({} samples): the emulator \
+                                 is producing faster than the sound card \
+                                 consumes. Expected while unthrottled.",
                                 ring.dropped() - audio_fault_baseline.0
                             );
                         }
                         if ring.starved() > audio_fault_baseline.1 && !audio_underrun_reported {
                             audio_underrun_reported = true;
-                            eprintln!(
-                                "Note: audio ring underran ({} samples) — the \
-                                 sound card is consuming faster than the \
-                                 emulator produces.",
+                            log::warn!(
+                                "audio ring underran ({} samples): the sound \
+                                 card is consuming faster than the emulator \
+                                 produces.",
                                 ring.starved() - audio_fault_baseline.1
                             );
                         }
@@ -1583,7 +1587,7 @@ pub fn run(
     // A session quit while recording still gets its movie: the in-memory records
     // are the only copy, so dropping them would silently discard the take.
     if movie_capture.is_recording() {
-        eprintln!("{}", movie_capture.stop());
+        log::info!("{}", movie_capture.stop());
     }
 
     // Reclaim the machine from the session (drop the console handle so the Rc is
@@ -1628,7 +1632,7 @@ pub fn run(
         let channels = machine.audio_channels();
         match crate::headless::write_wav(&rec, rate, channels, path) {
             Ok(()) => println!("recorded {} samples @ {rate} Hz to {path}", rec.len()),
-            Err(e) => eprintln!("failed to write {path}: {e}"),
+            Err(e) => log::error!("failed to write {path}: {e}"),
         }
     }
 

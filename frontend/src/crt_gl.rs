@@ -604,8 +604,8 @@ impl CrtRenderer {
             if glowing && !self.halo_reported {
                 self.halo_reported = true;
                 let (hw, hh) = self.targets.as_ref().map_or((0, 0), |t| t.halo_size);
-                eprintln!(
-                    "Halation active: fraction {halation:.3}, field {hw}x{hh} from {out_w}x{out_h}"
+                log::debug!(
+                    "halation active: fraction {halation:.3}, field {hw}x{hh} from {out_w}x{out_h}"
                 );
             }
 

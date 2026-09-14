@@ -13,3 +13,4 @@ phosphor-machines = { path = "../../machines" }
 phosphor-harness = { path = "../../harness" }
 clap = { version = "4", features = ["derive"] }
 png = "0.18"
+env_logger.workspace = true

@@ -205,14 +205,14 @@ impl Video {
         {
             if !self.crt_active {
                 self.crt_active = true;
-                eprintln!("CRT stage active: drawing through the presentation framebuffer");
+                log::debug!("CRT stage active: drawing through the presentation framebuffer");
             }
             return;
         }
 
         if self.crt_active && !self.crt_fallback_reported {
             self.crt_fallback_reported = true;
-            eprintln!("CRT stage unavailable: falling back to a CPU orient and upload");
+            log::warn!("CRT stage unavailable: falling back to a CPU orient and upload");
         }
 
         let displayed: &[u8] = if orientation == Orientation::NORMAL {
@@ -397,9 +397,10 @@ impl Video {
             }
             if !self.vector_texture_reported {
                 self.vector_texture_reported = true;
-                eprintln!(
-                    "Vector beam drawn into the panel texture: {}x{}, no CPU fallback",
-                    out.0, out.1
+                log::debug!(
+                    "vector beam drawn into the panel texture: {}x{}, no CPU fallback",
+                    out.0,
+                    out.1
                 );
             }
             let mut viewport = [0i32; 4];
