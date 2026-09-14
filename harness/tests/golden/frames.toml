@@ -294,6 +294,13 @@ frame = "sha256:adfa670a794b101015c946ffd5eed7fc9a9b73bab89407efa45d1ad4a37aaae5
 vectors = "sha256:6f5aab44070094d67771c8c423afcc6ab61238776b2f7ea7411ada9c5f5d9373"
 
 [[frame]]
+machine = "toobin"
+frames = 1800
+shows = "Attract demo: the Colorado stretch of river, tan banks either side of blue water, with the tuber riding his inner tube mid-channel and a life ring above him. The red and yellow INSERT COIN / SCORE x1 panels sit in the top corners with the COLORADO banner between them, and the bottom carries the 1,000 score gate on its striped poles, a treasure chest on the left, the TO CLASS 2 signpost on the right, both Next Patch 100000 panels and the CREDITS 0 / INSERT COIN line. The panels, the banner, the signpost and the bank outlines are what this pins; the tuber, the ring and the chest are a running demo and land wherever the machine's timing has carried them."
+size = [384, 512]
+frame = "sha256:94247711b3be27a42f791433d34e03eb05df4caa7514856b2c3418bf79f7755e"
+
+[[frame]]
 machine = "uniwars"
 frames = 1800
 shows = "Attract mode: the alien formation assembling into a single row over the starfield, under the 1UP / TOP SCORE header."
