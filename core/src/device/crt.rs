@@ -38,6 +38,24 @@ pub const TUBE_SHORT_AXIS_MM: f32 = TUBE_LONG_AXIS_MM * 3.0 / 4.0;
 /// itself at about 0.7 mm.
 pub const BEAM_SPOT_MM: f32 = 0.7;
 
+/// How much wider the spot is at full drive than the focused figure above.
+///
+/// A harder-driven beam is a fatter one. Electron optics can only deliver so
+/// much current density to the screen (Langmuir's limit: the cathode's emission
+/// density and the beam's convergence angle bound it), so more current needs
+/// more area to land in, and the spot's *area* grows with drive while its
+/// diameter grows with the root of it. That is the form; this figure is the
+/// scale, the ratio of the spot at peak white to the spot at the modest current
+/// a datasheet quotes its focused size at.
+///
+/// **Not derived.** It is the ratio of two beam currents and no number here
+/// fixes it. It is written down as one physical quantity rather than dialed in,
+/// which is the whole reason it is worth preferring to a gain on the halation
+/// skirt: that gain is linear in the light, so it lifts dim content as much as
+/// bright, which is not what a tube does, and it multiplies broad lit areas
+/// until they clip. This does neither. See `phosphor-emulator-v28u`.
+pub const SPOT_GROWTH_AT_FULL_DRIVE: f32 = 2.0;
+
 /// Focused beam spot diameter as a fraction of the tube's long axis.
 ///
 /// Works out at about 1.1 units on Tempest's 580, 1.8 on Quantum's 900, and 2.0

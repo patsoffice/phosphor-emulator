@@ -35,9 +35,13 @@
 //! A line of the raster is the tube's spot swept along, and the picture at a
 //! point is the sum of the lines near it. Whether that leaves a visible gap
 //! between lines is not a setting: it falls out of the spot measured against the
-//! line pitch, so the 224-line boards dip to about a quarter between lines and
-//! Satan's Hollow at 480 does not dip at all. See
+//! line pitch, so a 224-line board has gaps and Satan's Hollow at 480 does not,
+//! its spot being wider than its pitch. See
 //! `phosphor_core::device::crt::beam_sigma_lines`.
+//!
+//! How deep those gaps run depends on the picture, because the spot grows with
+//! beam current: a dim raster is written with a tight spot and keeps crisp
+//! scanlines, a bright one widens and washes them out.
 //!
 //! Because the gap has to be drawn somewhere, the stage renders at the
 //! presentation resolution rather than the machine's. A 288x224 framebuffer has
@@ -59,7 +63,8 @@ use std::ffi::CString;
 use phosphor_core::core::display::DisplaySettings;
 use phosphor_core::core::machine::Orientation;
 use phosphor_core::device::crt::{
-    BEAM_CUTOFF_SIGMAS, MIN_SIGMA_PIXELS, beam_sigma_lines, halation_sigma_units,
+    BEAM_CUTOFF_SIGMAS, MIN_SIGMA_PIXELS, SPOT_GROWTH_AT_FULL_DRIVE, beam_sigma_lines,
+    halation_sigma_units,
 };
 
 use crate::gl_util::{
@@ -75,12 +80,26 @@ use crate::gl_util::{
 /// expensive by dragging a slider.
 const MAX_TAPS: i32 = 8;
 
+/// The drive the tube's focused spot figure is taken to describe.
+///
+/// A spot size is quoted at some operating current, and the interesting thing
+/// about a datasheet's is that it is neither cutoff nor peak white: it is the
+/// tube doing ordinary work. Half scale says that without pretending to more
+/// precision than "somewhere in the middle", and what it buys is that the beam
+/// sharpens below it and blooms above it rather than only doing one of the two.
+const NOMINAL_DRIVE: f32 = 0.5;
+
 /// The beam profile for one machine, worked out on the CPU so the shader carries
 /// no derivation of its own.
 struct BeamProfile {
-    /// `1 / (2 * sigma^2)`, with sigma in line pitches.
-    inv_two_sigma_sq: f32,
-    /// Half-width of the summation, in lines.
+    /// The spot at zero drive, in line pitches: the focused figure, which is the
+    /// narrowest it ever is.
+    sigma: f32,
+    /// `K^2 - 1`, where `K` is the spot's growth at full drive. The shader wants
+    /// it in this form because it works in area.
+    bloom_var: f32,
+    /// Half-width of the summation, in lines. Sized for the widest the spot
+    /// gets, since a dimmer sample only needs fewer taps than it is given.
     taps: i32,
     /// Scales the summed profile so a full-intensity picture reaches full white
     /// at a line's center, then applies the brightness control.
@@ -106,8 +125,16 @@ impl BeamProfile {
         let px_per_line = (out_px as f32 / lines).max(f32::MIN_POSITIVE);
         let sigma = (sigma * px_per_line).max(MIN_SIGMA_PIXELS) / px_per_line;
 
-        let inv_two_sigma_sq = 1.0 / (2.0 * sigma * sigma);
-        let taps = ((BEAM_CUTOFF_SIGMAS * sigma).ceil() as i32).clamp(1, MAX_TAPS);
+        // The measured spot is what the tube does at a nominal drive, not at
+        // cutoff, so it is anchored at half scale and the beam sharpens below
+        // that and blooms above it. Anchoring at zero instead would widen every
+        // intensity and wash the scanlines out of the whole picture rather than
+        // out of its bright parts.
+        let growth = SPOT_GROWTH_AT_FULL_DRIVE.max(1.0);
+        let bloom_var = growth * growth - 1.0;
+        let sigma = sigma / (1.0 + bloom_var * NOMINAL_DRIVE).sqrt();
+        let sigma_max = sigma * growth;
+        let taps = ((BEAM_CUTOFF_SIGMAS * sigma_max).ceil() as i32).clamp(1, MAX_TAPS);
 
         // A full-intensity picture is every line at 1.0, so the profile summed
         // over a line's center is what a fully lit screen reaches there. Divide
@@ -120,8 +147,18 @@ impl BeamProfile {
         // the gaps are real, exactly as it did on the tube. Peak-at-full-white
         // and total-light-conserved cannot both hold while the pitch varies, and
         // the same choice is already made for the vector beam.
+        // The weights carry unit area now, so a wider spot spreads its light
+        // rather than adding any, and a broad lit area blooms into itself and
+        // comes back unchanged. The normalization is taken at full drive, which
+        // is the state a fully lit screen is in, so that screen still peaks at
+        // full white. Dimmer content is drawn with a tighter spot and so keeps
+        // crisper scanlines, which is what a tube does.
+        let inv_two_sigma_max_sq = 1.0 / (2.0 * sigma_max * sigma_max);
         let peak: f32 = (-taps..=taps)
-            .map(|k| (-(k as f32) * (k as f32) * inv_two_sigma_sq).exp())
+            .map(|k| {
+                (-(k as f32) * (k as f32) * inv_two_sigma_max_sq).exp()
+                    / (sigma_max * std::f32::consts::TAU.sqrt())
+            })
             .sum();
 
         // Halation takes its fraction out of the core and spreads it across
@@ -143,14 +180,15 @@ impl BeamProfile {
         // light now rises with the fraction. Peak-at-full-white and
         // total-light-conserved cannot both hold while the fraction varies, and
         // the peak is the one a viewer judges the setting by.
-        let sigma_px = sigma * px_per_line;
+        let sigma_px = sigma_max * px_per_line;
         let halation = settings.halation.clamp(0.0, 1.0);
         let peak_share = (1.0 - halation)
             + halation * (sigma_px / halo_sigma_px.max(f32::MIN_POSITIVE)).min(1.0);
         let gain = settings.brightness.max(0.0) / (peak * peak_share.max(f32::MIN_POSITIVE));
 
         Self {
-            inv_two_sigma_sq,
+            sigma,
+            bloom_var,
             taps,
             gain,
         }
@@ -197,9 +235,13 @@ uniform sampler2D src;
 uniform vec2 flip;
 uniform bool swap_xy;
 uniform float lines;
-uniform float inv_two_sigma_sq;
+uniform float sigma;
+uniform float bloom_var;
 uniform float gain;
 uniform int taps;
+
+const float INV_SQRT_TAU = 0.39894228;
+
 void main() {
     vec2 c = mix(uv, vec2(1.0) - uv, flip);
     vec2 s = swap_xy ? c.yx : c.xy;
@@ -213,8 +255,16 @@ void main() {
     for (int k = -taps; k <= taps; ++k) {
         float row = center + float(k);
         float d = y - (row + 0.5);
-        sum += texture(src, vec2(s.x, (row + 0.5) / lines)).rgb
-             * exp(-d * d * inv_two_sigma_sq);
+        vec3 lit = texture(src, vec2(s.x, (row + 0.5) / lines)).rgb;
+
+        // Each gun carries its own current, so each channel has its own spot.
+        // Area with drive, diameter with its root.
+        vec3 sig = sigma * sqrt(vec3(1.0) + bloom_var * lit);
+
+        // Unit area, so widening spreads the light rather than adding any. That
+        // is what keeps a broad lit area unchanged when it blooms: it blooms
+        // into itself.
+        sum += lit * exp(-(d * d) / (2.0 * sig * sig)) * INV_SQRT_TAU / sig;
     }
     color = vec4(sum * gain, 1.0);
 }
@@ -255,18 +305,30 @@ void main() {
 /// back at a few parts in a thousand. Conserved halation can be derived or it
 /// can be seen, and at the width `halation_sigma_units` gives, not both.
 ///
-/// Where the number comes from. A gain of 14 makes a raster glow match the
-/// vector renderer's, which is the reference this picture is judged against;
-/// that renderer draws its glow source as a wide blob at constant peak rather
-/// than as the picture, so it carries far more light than the tube puts there,
-/// and the inflation is measured in `phosphor-emulator-npvm`. Against that, a
-/// skirt about 1.9 times conserved was the strength settled on by eye.
+/// Where the number comes from, and it is worth reading because two attempts to
+/// derive it both failed and the failures are informative.
 ///
-/// This is set so that `HALATION_FRACTION`, the measured default, produces that
-/// strength: `1.9 / 0.07`. So the slider still means the fraction of light that
-/// halates and still starts where the tube's own figure puts it, and the one
-/// judgment sits here in a single place instead of being dialed into the slider
-/// per machine.
+/// The skirt's width was suspect: `halation_sigma_units` uses the offset for a
+/// ray at exactly the critical angle, which is the widest any ray goes, as a
+/// Gaussian sigma. Working the real profile out gives a filled disc whose
+/// equivalent sigma is 2.15 times narrower, so the code's skirt is too wide and
+/// correcting it would strengthen the glow for free. It accounts for 2.15 of
+/// this, and no more.
+///
+/// Blooming was the other candidate: the spot grows with beam current, so a
+/// bright feature is written wider. That is real and is modeled here, but it
+/// happens at the spot's scale, tens of microns to a millimetre. The glow this
+/// number produces is at the skirt's scale, about 10 mm. Two orders of magnitude
+/// apart, so blooming cannot be what this stands for. Tried and looked at: with
+/// this at 1.0 and blooming on, no glow is visible at the measured fraction.
+///
+/// So this is a judgment about how the picture should look, and not a stand-in
+/// for a mechanism nobody has found yet. It is set so `HALATION_FRACTION`, the
+/// measured default, produces the strength settled on by eye across four boards,
+/// bright and dark, which is a skirt about 1.05 times conserved. The slider
+/// therefore still means the fraction of light that halates and still starts
+/// where the tube's own figure puts it, and the one aesthetic call sits here in
+/// a single named place rather than in a per-machine override.
 ///
 /// What it costs, because it is a real cost and not a rounding error: light is
 /// no longer conserved, by `1 + (G-1)*f` over a broad lit area, which at the
@@ -274,18 +336,16 @@ void main() {
 /// around 35% of full scale, therefore clips.
 ///
 /// The vector machines never show this, because vector content has no broad lit
-/// areas. Raster boards do, and how much glow a board can take depends on how
-/// bright its content is, which is why no single value is right for all of them.
-/// The default suits a dark board: Donkey Kong and Pac-Man were judged right at
-/// the measured 0.07. The Atari System 1 boards were not, their backgrounds
-/// being mid-tone rather than dark, and Marble Madness and Road Runner were
-/// settled at about 0.04 as per-machine overrides in `state.toml`.
+/// areas. Raster boards do, so a board with a bright background is the one that
+/// sets the ceiling: Donkey Kong, Marble Madness, Road Runner and BurgerTime
+/// were all judged right at a skirt about 1.05 times conserved, which is what
+/// the default gives, and past roughly twice that the Atari System 1 backgrounds
+/// wash out while a dark board still looks fine.
 ///
-/// That the setting has to vary with content at all is the symptom rather than
-/// the arrangement working. Conserved halation would not vary: the blur of a
-/// broad lit area is that area, so flat regions return to unity at any fraction
-/// and only sparse content looks faint. See `phosphor-emulator-npvm`.
-const HALO_GAIN_OVER_CONSERVED: f32 = 27.0;
+/// That a multiplier is riding on the picture at all is the price of the glow
+/// being visible. Conserved halation cannot clip, because the blur of a broad
+/// lit area is that area, and it also cannot be seen.
+const HALO_GAIN_OVER_CONSERVED: f32 = 15.0;
 
 /// The offscreen targets the halation pass needs: the core at presentation
 /// resolution, and two small fields to ping-pong the separable blur between.
@@ -305,7 +365,8 @@ pub struct CrtRenderer {
     flip_uniform: gl::types::GLint,
     swap_uniform: gl::types::GLint,
     lines_uniform: gl::types::GLint,
-    inv_two_sigma_sq_uniform: gl::types::GLint,
+    sigma_uniform: gl::types::GLint,
+    bloom_var_uniform: gl::types::GLint,
     gain_uniform: gl::types::GLint,
     taps_uniform: gl::types::GLint,
     /// Size of the attached texture as this stage last set it, so a window
@@ -354,7 +415,8 @@ impl CrtRenderer {
             let flip_uniform = uniform("flip");
             let swap_uniform = uniform("swap_xy");
             let lines_uniform = uniform("lines");
-            let inv_two_sigma_sq_uniform = uniform("inv_two_sigma_sq");
+            let sigma_uniform = uniform("sigma");
+            let bloom_var_uniform = uniform("bloom_var");
             let gain_uniform = uniform("gain");
             let taps_uniform = uniform("taps");
 
@@ -403,7 +465,8 @@ impl CrtRenderer {
                 flip_uniform,
                 swap_uniform,
                 lines_uniform,
-                inv_two_sigma_sq_uniform,
+                sigma_uniform,
+                bloom_var_uniform,
                 gain_uniform,
                 taps_uniform,
                 out_size: (0, 0),
@@ -522,7 +585,8 @@ impl CrtRenderer {
             );
             gl::Uniform1i(self.swap_uniform, orientation.swaps_axes() as i32);
             gl::Uniform1f(self.lines_uniform, lines as f32);
-            gl::Uniform1f(self.inv_two_sigma_sq_uniform, beam.inv_two_sigma_sq);
+            gl::Uniform1f(self.sigma_uniform, beam.sigma);
+            gl::Uniform1f(self.bloom_var_uniform, beam.bloom_var);
             // Full energy here. The split between what leaves directly and what
             // goes the long way round is applied at the composite, not to the
             // light being emitted.
@@ -832,17 +896,27 @@ mod tests {
     }
 
     /// `BEAM_FRAGMENT_SRC`'s summation, in Rust, for a source lit uniformly to
-    /// full intensity. Returns what one output pixel at `y` line pitches down
-    /// the raster ends up at.
-    fn brightness(beam: &BeamProfile, y: f32) -> f32 {
+    /// `lit`. Returns what one output pixel at `y` line pitches down the raster
+    /// ends up at.
+    ///
+    /// The spot's width depends on `lit`, which is the whole of the bloom model,
+    /// so this takes it rather than assuming full drive.
+    fn brightness_at(beam: &BeamProfile, y: f32, lit: f32) -> f32 {
+        let sigma = beam.sigma * (1.0 + beam.bloom_var * lit).sqrt();
         let center = y.floor();
         (-beam.taps..=beam.taps)
             .map(|k| {
                 let d = y - (center + k as f32 + 0.5);
-                (-d * d * beam.inv_two_sigma_sq).exp()
+                lit * (-(d * d) / (2.0 * sigma * sigma)).exp()
+                    / (sigma * std::f32::consts::TAU.sqrt())
             })
             .sum::<f32>()
             * beam.gain
+    }
+
+    /// The common case: a source lit to full intensity.
+    fn brightness(beam: &BeamProfile, y: f32) -> f32 {
+        brightness_at(beam, y, 1.0)
     }
 
     /// What the epic exists to produce, and the result that decided its shape:
@@ -868,13 +942,38 @@ mod tests {
         let high_trough = brightness(&high, 10.0);
 
         assert!(
-            (low_trough - 0.256).abs() < 0.01,
-            "224 lines: the gap between lines should fall to about a quarter, was {low_trough}"
+            low_trough < 0.65,
+            "224 lines: there should be a real gap between lines, was {low_trough}"
         );
         assert!(
-            high_trough > 0.97,
+            high_trough > 0.95,
             "480 lines: the spot is wider than the pitch, so there should be no \
              gap to see, but the trough was {high_trough}"
+        );
+    }
+
+    /// The bloom's signature, and the reason it was built: how deep the gaps run
+    /// depends on how hard the gun is being driven. A dim picture is written
+    /// with a tight spot and keeps crisp scanlines; a bright one widens the spot
+    /// and washes them out, which is what a tube does and what a fixed profile
+    /// cannot express.
+    #[test]
+    fn scanlines_are_deeper_on_dim_content_than_on_bright() {
+        let beam = BeamProfile::derive(224, 224 * 4, HALO_SIGMA_PX, &no_glow(1.0));
+
+        // Ratio of the gap to the line's own center, at each drive.
+        let contrast = |lit: f32| brightness_at(&beam, 10.0, lit) / brightness_at(&beam, 10.5, lit);
+
+        let dim = contrast(0.25);
+        let bright = contrast(1.0);
+        assert!(
+            dim < 0.25,
+            "a quarter-lit raster should keep deep scanlines, was {dim}"
+        );
+        assert!(
+            bright > dim + 0.25,
+            "a fully lit raster drives the gun harder, so its spot is wider and \
+             its scanlines shallower: {bright} against {dim}"
         );
     }
 
