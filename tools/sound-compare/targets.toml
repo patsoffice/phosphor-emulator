@@ -959,5 +959,7 @@ no mixing network, no coupling capacitor and no amplifier stage.
 The mix register's low bit is documented as a low-pass filter enable and is
 latched but not acted on, because the filter it switches has not been read.
 
-Promote this row only after someone reads the JSA-I drawing. Tracked under
-phosphor-emulator-jg18."""
+Promote this row only after someone reads the JSA-I drawing, and say then which
+of those points it settled. Tracked as phosphor-emulator-fuqb.1, which carries
+the full reading of what is and is not modeled here; phosphor-emulator-jg18
+added the board itself."""
