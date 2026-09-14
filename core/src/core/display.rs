@@ -3,10 +3,22 @@
 //! These are properties of the tube and of how it is set up, not of the
 //! generator feeding it, so they are not vector-specific: a raster CRT has a
 //! brightness control, a focus control and a faceplate that halates, exactly as
-//! a vector one does. The vector renderers read them today; a raster path
-//! wanting the same treatment reads the same values, and knobs that only make
-//! sense for one kind of display (scanline depth, shadow mask) belong here
-//! beside them rather than in a parallel set.
+//! a vector one does. Both renderers read the same three values.
+//!
+//! This once said that knobs making sense for only one kind of display, such as
+//! scanline depth or a shadow mask, would belong here beside them. The raster
+//! renderer arrived and wanted none, which is worth writing down because the
+//! obvious thing to do was add them.
+//!
+//! A mask control has nothing to control: at arcade resolutions one emulated
+//! pixel spans one to two and a half mask triads, so the mask sits below the
+//! pixel grid and cannot resolve stripes on any board in the registry. A
+//! scanline depth control would be a second name for focus, since the gap
+//! between lines is whatever the spot does not cover, and how deep the gaps run
+//! already varies with the picture on its own: the beam widens with drive, so a
+//! bright raster washes its own scanlines out.
+//!
+//! Three controls, each one a thing an operator could reach on a real cabinet.
 //!
 //! None of this touches emulation. It changes how a frame is drawn and nothing
 //! else, which is why it can be a process-wide value rather than something
@@ -17,15 +29,23 @@ use crate::device::crt::{HALATION_FRACTION, HALATION_OFF};
 /// The knobs a viewer has, as deviations from what was measured off the tube.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DisplaySettings {
-    /// The brightness control. 1.0 is where an operator would set it: a
-    /// full-intensity vector drawn at the beam's top speed reads full white and
-    /// no further. Above that, more of the picture saturates and blooms.
+    /// The brightness control. 1.0 is where an operator would set it: the
+    /// brightest thing the machine can draw reads full white and no further, a
+    /// full-intensity vector at the beam's top speed or a fully lit raster along
+    /// the center of a line. Above that, more of the picture saturates and
+    /// blooms.
     pub brightness: f32,
 
     /// The focus control, as a multiple of the tube's measured spot. 1.0 is the
     /// 0.7 mm spot of a well adjusted 19 inch tube; higher is a softer picture.
     /// A renderer will not draw a spot finer than its own grid can represent,
     /// whatever this says.
+    ///
+    /// On a raster machine this is also the scanline control, and the reason
+    /// there is not a separate one: the gap between lines is whatever the spot
+    /// does not cover, so widening the spot fills it in. Focus is also the
+    /// control that genuinely varied between real monitors, since a figure
+    /// expressed per line pitch barely moves with tube size.
     pub focus: f32,
 
     /// Fraction of a spot's light that leaves as halation rather than directly.

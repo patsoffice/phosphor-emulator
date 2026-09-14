@@ -440,26 +440,34 @@ pub fn draw_display_panel(ctx: &egui::Context, state: &mut SettingsState) {
                 .striped(true)
                 .show(ui, |ui| {
                     ui.label("Brightness").on_hover_text(
-                        "The monitor's brightness control. At 1.0 a full-intensity \
-                             vector drawn at the beam's top speed reaches full white and \
-                             no further; above that, more of the picture saturates and blooms.",
+                        "The monitor's brightness control. At 1.0 the brightest thing \
+                         the machine can draw reaches full white and no further: a \
+                         full-intensity vector at the beam's top speed, or a fully lit \
+                         raster along the center of a line. Above that, more of the \
+                         picture saturates and blooms.",
                     );
                     ui.add(egui::Slider::new(&mut state.display.brightness, 0.1..=3.0));
                     ui.end_row();
 
                     ui.label("Focus").on_hover_text(
                         "Spot size, as a multiple of the tube's own. 1.0 is the 0.7 mm \
-                         spot of a well adjusted 19 inch tube. A renderer will not draw \
-                         a spot finer than its grid can represent, whatever this says.",
+                         spot of a well adjusted 19 inch tube, and turning it up is what \
+                         a badly adjusted one looked like. On a raster machine this is \
+                         also the scanline control, because the gap between lines is \
+                         whatever the spot does not cover: soften it far enough and the \
+                         gaps fill in. A renderer will not draw a spot finer than its \
+                         grid can represent, whatever this says.",
                     );
                     ui.add(egui::Slider::new(&mut state.display.focus, 0.5..=4.0));
                     ui.end_row();
 
                     ui.label("Halation").on_hover_text(
                         "How much of each spot's light leaves by way of the faceplate \
-                         rather than straight out, which is the broad glow around a \
-                         bright vector. This is the one figure in the model with no \
-                         derivation behind it, so it is the one most worth your eye.",
+                         rather than straight out, which is the broad glow around \
+                         anything bright. This is the figure in the model with no \
+                         derivation behind it, so it is the one most worth your eye. A \
+                         board with a bright background takes less of it than a dark \
+                         one before it washes out.",
                     );
                     ui.add(egui::Slider::new(&mut state.display.halation, 0.0..=0.4));
                     ui.end_row();
