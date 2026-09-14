@@ -732,7 +732,27 @@ pub fn run(
                     scancode: Some(sc),
                     keymod,
                     ..
-                } => host_bindings.action_for(HostChord::from_event(*sc, *keymod)),
+                } => {
+                    let chord = HostChord::from_event(*sc, *keymod);
+                    // `PHOSPHOR_KEY_DEBUG=1` prints what each press resolved to.
+                    // A hotkey that does the wrong thing is otherwise invisible
+                    // from outside: a chord that loses its modifier resolves to
+                    // a real, different action and that action runs normally,
+                    // which looks like the binding table being wrong rather
+                    // than the modifier never arriving.
+                    if std::env::var_os("PHOSPHOR_KEY_DEBUG").is_some() {
+                        let live = sdl_context.keyboard().mod_state();
+                        eprintln!(
+                            "key: {:?} event_mod={:?} live_mod={:?} -> chord(shift={}) -> {:?}",
+                            sc,
+                            *keymod,
+                            live,
+                            chord.shift,
+                            host_bindings.action_for(chord)
+                        );
+                    }
+                    host_bindings.action_for(chord)
+                }
                 _ => None,
             };
 
