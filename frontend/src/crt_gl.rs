@@ -68,7 +68,7 @@ use phosphor_core::device::crt::{
 };
 
 use crate::gl_util::{
-    FULLSCREEN_VERTEX_SRC, HALO_BLUR_FRAGMENT_SRC, HALO_TARGET_SIGMA, link_program,
+    FULLSCREEN_VERTEX_SRC, HALO_BLUR_FRAGMENT_SRC, HALO_TARGET_SIGMA, TextureTarget, link_program,
 };
 
 /// Ceiling on the profile's half-width, in taps.
@@ -369,18 +369,11 @@ pub struct CrtRenderer {
     bloom_var_uniform: gl::types::GLint,
     gain_uniform: gl::types::GLint,
     taps_uniform: gl::types::GLint,
-    /// Size of the attached texture as this stage last set it, so a window
-    /// resize reallocates it and an unchanged one costs nothing.
-    out_size: (u32, u32),
     /// The machine's frame as uploaded each frame. Owned here.
     src_tex: gl::types::GLuint,
     src_size: (u32, u32),
-    /// The framebuffer the pass draws through. Owned here; its color attachment
-    /// is not, so dropping this deletes the framebuffer and leaves the texture.
-    fbo: gl::types::GLuint,
-    /// The texture egui draws, borrowed from the painter and attached to `fbo`.
-    /// Tracked only to avoid re-attaching an unchanged one every frame.
-    attached: Option<gl::types::GLuint>,
+    /// Where the finished picture lands: the texture egui draws.
+    out: TextureTarget,
 
     blur_program: gl::types::GLuint,
     blur_src_uniform: gl::types::GLint,
@@ -469,11 +462,9 @@ impl CrtRenderer {
                 bloom_var_uniform,
                 gain_uniform,
                 taps_uniform,
-                out_size: (0, 0),
                 src_tex,
                 src_size: (0, 0),
-                fbo,
-                attached: None,
+                out: TextureTarget::new(),
                 blur_program,
                 blur_src_uniform,
                 blur_step_uniform,
@@ -535,7 +526,7 @@ impl CrtRenderer {
         let beam = BeamProfile::derive(lines, out_px_along_lines, halo_sigma_px, settings);
 
         unsafe {
-            if !self.attach(out_tex, out) {
+            if !self.out.attach(out_tex, out) {
                 return false;
             }
             self.upload_source(rgb24, src_w, src_h);
@@ -572,7 +563,7 @@ impl CrtRenderer {
             // there is no glow, and into the core target when the composite is
             // going to need it twice.
             let core = self.targets.as_ref().map(|t| (t.core_fbo, t.core_tex));
-            gl::BindFramebuffer(gl::FRAMEBUFFER, core.map_or(self.fbo, |c| c.0));
+            gl::BindFramebuffer(gl::FRAMEBUFFER, core.map_or(self.out.fbo(), |c| c.0));
             gl::Viewport(0, 0, out_w as i32, out_h as i32);
 
             gl::UseProgram(self.program);
@@ -633,7 +624,7 @@ impl CrtRenderer {
                 }
 
                 // Pass four: put the two back together into egui's texture.
-                gl::BindFramebuffer(gl::FRAMEBUFFER, self.fbo);
+                gl::BindFramebuffer(gl::FRAMEBUFFER, self.out.fbo());
                 gl::Viewport(0, 0, out_w as i32, out_h as i32);
                 gl::UseProgram(self.composite_program);
                 gl::Uniform1i(self.composite_core_uniform, 0);
@@ -775,51 +766,6 @@ impl CrtRenderer {
         }
     }
 
-    /// Point the framebuffer at the texture egui draws, sized to `out`.
-    ///
-    /// The texture belongs to egui's painter, which allocated it at the
-    /// machine's displayed size to upload pixels into. This stage renders into
-    /// it instead, at the presentation resolution, so it is reallocated here and
-    /// again whenever the window changes. The painter's own record of its size
-    /// goes stale, which is harmless: that field is read only when uploading a
-    /// dirty texture, and a texture this stage is driving is never dirty. Should
-    /// the stage ever fall back, the upload reallocates it to the painter's size
-    /// and the two agree again.
-    unsafe fn attach(&mut self, out_tex: gl::types::GLuint, out: (u32, u32)) -> bool {
-        if self.attached == Some(out_tex) && self.out_size == out {
-            return true;
-        }
-        unsafe {
-            gl::BindTexture(gl::TEXTURE_2D, out_tex);
-            gl::TexImage2D(
-                gl::TEXTURE_2D,
-                0,
-                gl::RGBA8 as i32,
-                out.0 as i32,
-                out.1 as i32,
-                0,
-                gl::RGBA,
-                gl::UNSIGNED_BYTE,
-                std::ptr::null(),
-            );
-            gl::BindTexture(gl::TEXTURE_2D, 0);
-
-            gl::BindFramebuffer(gl::FRAMEBUFFER, self.fbo);
-            gl::FramebufferTexture2D(
-                gl::FRAMEBUFFER,
-                gl::COLOR_ATTACHMENT0,
-                gl::TEXTURE_2D,
-                out_tex,
-                0,
-            );
-            let complete = gl::CheckFramebufferStatus(gl::FRAMEBUFFER) == gl::FRAMEBUFFER_COMPLETE;
-            gl::BindFramebuffer(gl::FRAMEBUFFER, 0);
-            self.attached = complete.then_some(out_tex);
-            self.out_size = out;
-            complete
-        }
-    }
-
     unsafe fn upload_source(&mut self, rgb24: &[u8], width: u32, height: u32) {
         unsafe {
             gl::BindTexture(gl::TEXTURE_2D, self.src_tex);
@@ -861,7 +807,6 @@ impl Drop for CrtRenderer {
     fn drop(&mut self) {
         self.drop_targets();
         unsafe {
-            gl::DeleteFramebuffers(1, &self.fbo);
             gl::DeleteTextures(1, &self.src_tex);
             gl::DeleteVertexArrays(1, &self.vao);
             gl::DeleteProgram(self.program);

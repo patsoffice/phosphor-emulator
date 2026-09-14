@@ -1312,15 +1312,33 @@ pub fn run(
                     );
                 }
             } else {
-                // Raster machine (or debug/profiler mode): CPU framebuffer path.
-                machine.render_frame(&mut framebuffer);
+                // A raster machine, or a vector one with a panel open. The panels
+                // lay out around a texture, so the vector renderer draws into one
+                // rather than at the window; it used to be dropped for the CPU
+                // rasterizer here, which is a dimmer picture with halation off,
+                // shown exactly when someone is looking closely.
+                let drew_vectors = match (vector_renderer.as_mut(), machine.vector_display_list()) {
+                    (Some(renderer), Some(lines)) => {
+                        let ds = machine
+                            .vector_field_size()
+                            .unwrap_or_else(|| machine.display_size());
+                        let rot = orientation_degrees(machine.orientation());
+                        video.render_vectors_to_texture(renderer, lines, ds, view_aspect, rot)
+                    }
+                    _ => false,
+                };
 
-                // Hand over the *native* raster and let the CRT stage orient it.
-                // The rotation used to happen here, on the CPU, before the
-                // upload, which left the texture in screen space; a scanline
-                // derived from that runs along the wrong axis on every machine
-                // with a turned monitor. One transform, on the GPU, at the end.
-                video.update_game_texture(&framebuffer, machine.orientation());
+                if !drew_vectors {
+                    machine.render_frame(&mut framebuffer);
+
+                    // Hand over the *native* raster and let the CRT stage orient
+                    // it. The rotation used to happen here, on the CPU, before
+                    // the upload, which left the texture in screen space; a
+                    // scanline derived from that runs along the wrong axis on
+                    // every machine with a turned monitor. One transform, on the
+                    // GPU, at the end.
+                    video.update_game_texture(&framebuffer, machine.orientation());
+                }
 
                 if any_panel_open(
                     &debug_state,

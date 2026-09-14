@@ -59,6 +59,7 @@ flat out vec4 f_segment;
 uniform vec2 display_half_size;
 uniform int rotation;
 uniform float energy_scale;
+uniform bool flip_y;
 void main() {
     // Vector coordinates: 0..display_size, Y=0 at bottom.
     // NDC: -1..1, Y=-1 at bottom (matches vector convention).
@@ -67,6 +68,14 @@ void main() {
     // Net transform: negate X to match AVG beam-to-screen mapping.
     if (rotation == 270) {
         ndc = vec2(ndc.x, -ndc.y);
+    }
+    // Drawing into a texture rather than at the window. GL puts texel row 0 at
+    // the bottom, where NDC y is -1, and egui draws texel row 0 at the top of
+    // the quad, so the picture arrives upside down unless it is turned over
+    // here. The window has no such disagreement, which is why this is a
+    // property of the target and not of the machine.
+    if (flip_y) {
+        ndc.y = -ndc.y;
     }
     gl_Position = vec4(ndc, 0.0, 1.0);
     // Halation takes its share out of the core, so the core is drawn scaled by
@@ -152,6 +161,7 @@ pub struct VectorRenderer {
     vbo: gl::types::GLuint,
     uniform_half_size: gl::types::GLint,
     uniform_rotation: gl::types::GLint,
+    uniform_flip_y: gl::types::GLint,
     uniform_inv_two_sigma_sq: gl::types::GLint,
     uniform_energy_scale: gl::types::GLint,
     vertex_buf: Vec<Vertex>,
@@ -174,6 +184,10 @@ impl VectorRenderer {
         let (vao, vbo) = unsafe { create_vertex_objects(program) };
         let uniform_half_size = unsafe {
             let name = std::ffi::CString::new("display_half_size").unwrap();
+            gl::GetUniformLocation(program, name.as_ptr())
+        };
+        let uniform_flip_y = unsafe {
+            let name = std::ffi::CString::new("flip_y").unwrap();
             gl::GetUniformLocation(program, name.as_ptr())
         };
         let uniform_rotation = unsafe {
@@ -208,6 +222,7 @@ impl VectorRenderer {
             vbo,
             uniform_half_size,
             uniform_rotation,
+            uniform_flip_y,
             uniform_inv_two_sigma_sq,
             uniform_energy_scale,
             // Six vertices per vector, and a busy frame runs to a couple of
@@ -376,6 +391,9 @@ impl VectorRenderer {
     /// fill. `display_w`/`display_h` are the vector coordinate space dimensions
     /// (e.g. 1024×1024 for DVG, 580×570 for Tempest AVG).
     /// `rotation` is the screen-level rotation in degrees (0 or 270).
+    /// `target` is the framebuffer the beam lands in: 0 for the window, or one
+    /// wrapping the texture egui draws, which is what lets a debug panel lay out
+    /// around a vector machine without dropping it onto the CPU rasterizer.
     #[allow(clippy::too_many_arguments)]
     pub fn render(
         &mut self,
@@ -386,6 +404,7 @@ impl VectorRenderer {
         display_w: u32,
         display_h: u32,
         rotation: i32,
+        target: gl::types::GLuint,
     ) {
         // Centered sub-viewport at the target display aspect (letterbox the
         // beam field rather than stretch it to fill the window).
@@ -464,6 +483,8 @@ impl VectorRenderer {
                     gl::UseProgram(self.program);
                     gl::Uniform2f(self.uniform_half_size, half_size.0, half_size.1);
                     gl::Uniform1i(self.uniform_rotation, rotation);
+                    gl::Uniform1i(self.uniform_flip_y, (target != 0) as i32);
+                    gl::Uniform1i(self.uniform_flip_y, (target != 0) as i32);
                     // Full energy here: the (1-f)/f split is applied when the
                     // two are composited, not when the glow's source is drawn.
                     // Brightness scales both, being the control in front of them.
@@ -491,18 +512,21 @@ impl VectorRenderer {
                         gl::DrawArrays(gl::TRIANGLES, 0, 3);
                     }
 
-                    gl::BindFramebuffer(gl::FRAMEBUFFER, 0);
+                    // Back to wherever the core is being drawn, which is not
+                    // necessarily the window any more.
+                    gl::BindFramebuffer(gl::FRAMEBUFFER, target);
                 }
             }
         }
 
-        // Pass two: the core, straight to the screen as before.
+        // Pass two: the core, into whatever target was asked for.
         self.build_quads(lines, radius);
         if self.vertex_buf.is_empty() {
             return;
         }
 
         unsafe {
+            gl::BindFramebuffer(gl::FRAMEBUFFER, target);
             gl::Viewport(vp_x, vp_y, vp_w as i32, vp_h as i32);
             gl::UseProgram(self.program);
             gl::Uniform2f(self.uniform_half_size, half_size.0, half_size.1);

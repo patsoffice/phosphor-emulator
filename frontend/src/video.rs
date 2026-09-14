@@ -26,6 +26,10 @@ pub struct Video {
     /// stage is carrying the picture.
     oriented: Vec<u8>,
     crt: crate::crt_gl::CrtRenderer,
+    /// Where the vector renderer draws when a panel needs the picture as a
+    /// texture. Separate from the CRT stage's own target only because a machine
+    /// is one kind or the other and never both.
+    vector_target: crate::gl_util::TextureTarget,
     /// Whether the CRT stage is carrying the picture, and whether that has been
     /// said. A pass-through stage draws exactly what the direct upload drew, so
     /// a stage that silently never engaged is indistinguishable from one that
@@ -33,6 +37,10 @@ pub struct Video {
     /// per-frame events.
     crt_active: bool,
     crt_fallback_reported: bool,
+    /// Said once when the vector beam first reaches the panel texture. A path
+    /// that never engaged falls back to the CPU rasterizer, which draws the same
+    /// scene and so looks like success; this is how the two are told apart.
+    vector_texture_reported: bool,
     start_time: Instant,
     fullscreen: bool,
 }
@@ -122,8 +130,10 @@ impl Video {
             rgba_buffer,
             oriented: vec![0u8; pixel_count * 3],
             crt: crate::crt_gl::CrtRenderer::new(),
+            vector_target: crate::gl_util::TextureTarget::new(),
             crt_active: false,
             crt_fallback_reported: false,
+            vector_texture_reported: false,
             start_time: Instant::now(),
             fullscreen,
         }
@@ -333,6 +343,7 @@ impl Video {
             display_size.0,
             display_size.1,
             rotation,
+            0,
         );
 
         // Run a minimal egui pass for overlay text on top of the vectors.
@@ -340,6 +351,86 @@ impl Video {
         self.egui_ctx.begin_pass(self.egui_state.input.take());
         overlay_fn(&self.egui_ctx);
         self.finish_frame();
+    }
+
+    /// Draw the beam into the texture egui hands to `ui.image`, rather than at
+    /// the window.
+    ///
+    /// This is what lets a vector machine keep its own renderer while a debug
+    /// panel is open. egui lays the panels out around a texture, so a renderer
+    /// that draws at the window has nothing to give it, and the frontend used to
+    /// answer that by falling back to the CPU rasterizer: a second, dimmer
+    /// picture, with halation switched off because it cannot afford it, shown
+    /// precisely when someone is looking closely.
+    ///
+    /// Returns false if the framebuffer will not complete, leaving the caller to
+    /// fall back as before.
+    pub fn render_vectors_to_texture(
+        &mut self,
+        renderer: &mut crate::vector_gl::VectorRenderer,
+        lines: &[phosphor_core::device::dvg::VectorLine],
+        display_size: (u32, u32),
+        view_aspect: f32,
+        rotation: i32,
+    ) -> bool {
+        // Sized to the *displayed* aspect rather than to the machine's raster,
+        // which is what `presentation_size` gives and what a raster machine
+        // wants. The vector renderer letterboxes to `view_aspect` itself, and
+        // egui letterboxes the texture again on the way to the screen, so a
+        // target at any other aspect gets corrected twice and comes out
+        // squeezed. At this aspect the renderer's own letterbox finds nothing to
+        // do and egui's is the only one.
+        let (win_w, win_h) = self.window.size();
+        let fitted =
+            crate::emulator::fit_aspect(egui::vec2(win_w as f32, win_h as f32), view_aspect).0;
+        let out = (
+            (fitted.x.round() as u32).max(1),
+            (fitted.y.round() as u32).max(1),
+        );
+
+        let Some(tex) = self.painter.get_raw_gl_texture_id(&self.game_texture_id) else {
+            return false;
+        };
+        unsafe {
+            if !self.vector_target.attach(tex, out) {
+                return false;
+            }
+            if !self.vector_texture_reported {
+                self.vector_texture_reported = true;
+                eprintln!(
+                    "Vector beam drawn into the panel texture: {}x{}, no CPU fallback",
+                    out.0, out.1
+                );
+            }
+            let mut viewport = [0i32; 4];
+            gl::GetIntegerv(gl::VIEWPORT, viewport.as_mut_ptr());
+
+            gl::BindFramebuffer(gl::FRAMEBUFFER, self.vector_target.fbo());
+            gl::Viewport(0, 0, out.0 as i32, out.1 as i32);
+            // egui leaves the scissor on, which would clip the beam to whatever
+            // rectangle it last drew.
+            gl::Disable(gl::SCISSOR_TEST);
+            gl::ClearColor(0.0, 0.0, 0.0, 1.0);
+            gl::Clear(gl::COLOR_BUFFER_BIT);
+
+            // The target already carries the display's aspect, so the renderer's
+            // own letterboxing finds nothing to do and the beam fills it. egui
+            // does the letterboxing now, the same as for a raster machine.
+            renderer.render(
+                lines,
+                out.0,
+                out.1,
+                view_aspect,
+                display_size.0,
+                display_size.1,
+                rotation,
+                self.vector_target.fbo(),
+            );
+
+            gl::BindFramebuffer(gl::FRAMEBUFFER, 0);
+            gl::Viewport(viewport[0], viewport[1], viewport[2], viewport[3]);
+        }
+        true
     }
 
     /// Return the current window position.

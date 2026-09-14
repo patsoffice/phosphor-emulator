@@ -68,6 +68,87 @@ void main() {
 /// kernel and this figure moves with it.
 pub(crate) const HALO_TARGET_SIGMA: f32 = 3.4;
 
+/// A framebuffer that draws into the texture egui hands to `ui.image`.
+///
+/// Both renderers need this and for the same reason: egui lays the debug panels
+/// out around a texture, so a renderer that draws at the window has nothing to
+/// give it and gets dropped for a CPU fallback. Rendering into the texture
+/// instead is what removes that.
+///
+/// The texture belongs to egui's painter, which allocated it at the machine's
+/// displayed size in order to upload pixels into it. Rendering into it instead
+/// means resizing it here, and the painter's own record of its size goes stale.
+/// That is harmless as long as the texture is never marked dirty again, since
+/// the size is read only when uploading; should a caller ever fall back to
+/// uploading, the upload reallocates to the painter's size and the two agree.
+pub(crate) struct TextureTarget {
+    fbo: gl::types::GLuint,
+    attached: Option<gl::types::GLuint>,
+    size: (u32, u32),
+}
+
+impl TextureTarget {
+    pub(crate) fn new() -> Self {
+        let mut fbo = 0;
+        unsafe { gl::GenFramebuffers(1, &mut fbo) };
+        Self {
+            fbo,
+            attached: None,
+            size: (0, 0),
+        }
+    }
+
+    /// The framebuffer to bind. Only meaningful after a successful `attach`.
+    pub(crate) fn fbo(&self) -> gl::types::GLuint {
+        self.fbo
+    }
+
+    /// Size `tex` to `size` and point the framebuffer at it, if that is not
+    /// already so. False means the framebuffer will not complete and the caller
+    /// should leave `tex` alone and do whatever it does without one.
+    pub(crate) unsafe fn attach(&mut self, tex: gl::types::GLuint, size: (u32, u32)) -> bool {
+        if self.attached == Some(tex) && self.size == size {
+            return true;
+        }
+        unsafe {
+            gl::BindTexture(gl::TEXTURE_2D, tex);
+            gl::TexImage2D(
+                gl::TEXTURE_2D,
+                0,
+                gl::RGBA8 as i32,
+                size.0 as i32,
+                size.1 as i32,
+                0,
+                gl::RGBA,
+                gl::UNSIGNED_BYTE,
+                ptr::null(),
+            );
+            gl::BindTexture(gl::TEXTURE_2D, 0);
+
+            gl::BindFramebuffer(gl::FRAMEBUFFER, self.fbo);
+            gl::FramebufferTexture2D(
+                gl::FRAMEBUFFER,
+                gl::COLOR_ATTACHMENT0,
+                gl::TEXTURE_2D,
+                tex,
+                0,
+            );
+            let complete = gl::CheckFramebufferStatus(gl::FRAMEBUFFER) == gl::FRAMEBUFFER_COMPLETE;
+            gl::BindFramebuffer(gl::FRAMEBUFFER, 0);
+            self.attached = complete.then_some(tex);
+            self.size = size;
+            complete
+        }
+    }
+}
+
+impl Drop for TextureTarget {
+    fn drop(&mut self) {
+        // The framebuffer is ours; its color attachment is egui's.
+        unsafe { gl::DeleteFramebuffers(1, &self.fbo) };
+    }
+}
+
 pub(crate) unsafe fn compile_shader(
     src: &str,
     shader_type: gl::types::GLenum,
