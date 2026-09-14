@@ -784,10 +784,24 @@ impl ToobinBoard {
         let mut mo = [MO_TRANSPARENT; VISIBLE_WIDTH];
         self.draw_motion_objects_row(&mut mo, sy);
 
-        // Merge the objects over the playfield. The rule the PAL implements is
-        // that an object pixel loses only to a playfield pixel that is both in
-        // a raised priority category and has pen bit 3 set; everywhere else the
-        // object wins.
+        // Merge the objects over the playfield.
+        //
+        // THIS RULE IS NOT VERIFIED. The real decision is made in a PAL, and it
+        // takes more inputs than the two used here: the object's own priority
+        // and its pixel bit 3, the playfield's priority and its pixel bit 3,
+        // the two alpha pixel bits, and a term for the object pixel being
+        // wholly transparent. What is implemented below is a reduction of that:
+        // an object pixel loses only where the playfield pixel is both in a
+        // raised priority category and has pen bit 3 set, and wins everywhere
+        // else.
+        //
+        // Two things follow that are worth knowing before trusting it. The
+        // object's own priority plays no part, which is at least consistent
+        // with the object list carrying no priority field at all. But the alpha
+        // layer's pixels ARE an input to the PAL, and this renderer draws the
+        // alpha strictly last and unconditionally on top, so any case where the
+        // alpha changes how the other two layers combine is not modeled.
+        // Tracked as phosphor-emulator-jg18.2.
         for x in 0..VISIBLE_WIDTH {
             let m = mo[x];
             if m != MO_TRANSPARENT && (pf_priority[x] == 0 || pf[x] & 0x08 == 0) {
