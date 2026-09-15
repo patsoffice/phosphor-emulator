@@ -967,8 +967,14 @@ MODELED, with every constant taken off the board:
 
 STILL NOT MODELED:
 
-- Stereo. The mix is downmixed to mono, which loses only the POKEY's left/right
-  placement, since that is the one thing that differs between the channels.
+- Stereo, and the collapse is OURS rather than the board's, in two places. The
+  Ym2151 core already returns a single stream: it sums all eight FM channels and
+  never reads their per-channel left/right enable bits, so the FM's panning is
+  gone before this board model sees a sample. On top of that the two channel
+  mixers become one here. Recovering any of it starts in the YM2151 core.
+  Measured aside: Toobin' holds both CT pins set on every one of 2400 frames, so
+  the routing this DOES model is inert for this game and the POKEY is always on
+  both speakers.
 - Absolute level. The board's RATIO is now right; whether our YM2151 and POKEY
   cores sit at the same relative scale as the chips do is unchecked, and that is
   what would turn the ratio into a calibrated level.

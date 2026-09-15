@@ -69,13 +69,24 @@
 //! accident of the design rather than an intent and is flagged in the
 //! transcription for a second reading.
 //!
-//! **What is still approximate.** The mix is downmixed to mono, which loses
-//! only the POKEY's left/right placement, since that is the one thing that
-//! differs between the two channels. The volume codes, the routing and the
-//! filter switch are sampled once per drain rather than per sample. And the
-//! absolute level assumes our YM2151 and POKEY cores sit at the same relative
-//! scale as the chips do, which nobody has checked: the board's ratio is right,
-//! the two cores' agreement with it is not established.
+//! **The board is stereo and this is mono, and the collapse is ours.** It
+//! happens in two places, not one. `Ym2151::drain_audio` already returns a
+//! single stream: it sums all eight FM channels and does not look at their
+//! per-channel left/right enable bits at all, so the FM's own panning is gone
+//! before this module sees a sample. On top of that, the two channel mixers
+//! here become one, with the POKEY present at full gain if it reaches either
+//! speaker. Recovering any of it starts in the YM2151 core, not here.
+//!
+//! The `CT1`/`CT2` gating above is therefore correct but inert on Toobin',
+//! which holds both pins set for every frame measured, so the POKEY is always
+//! on both speakers and never muted. It is modeled for the other JSA-I games
+//! and because a mute is not a thing to discover later.
+//!
+//! **What else is approximate.** The volume codes, the routing and the filter
+//! switch are sampled once per drain rather than per sample. And the absolute
+//! level assumes our YM2151 and POKEY cores sit at the same relative scale as
+//! the chips do, which nobody has checked: the board's ratio is right, the two
+//! cores' agreement with it is not established.
 
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::{Bus, BusMaster};
@@ -448,9 +459,8 @@ impl AtariJsa1 {
     /// `docs/schematics/toobin-audio-output.md`, rather than fitted: the volume
     /// ladders are binary-weighted switches summing into a virtual ground, so
     /// each is linear in its code, and the two feedback resistors fix the ratio
-    /// between them. **Downmixed to mono**, which loses only where the two
-    /// speakers carry different content, and the only thing that differs
-    /// between them is which one the POKEY reaches.
+    /// between them. The board's two channels become one here, and the FM's own
+    /// panning was already gone before that: see the module header.
     ///
     /// The volume codes, the routing and the filter switch are sampled once per
     /// drain rather than per sample, so a change to any of them inside a frame

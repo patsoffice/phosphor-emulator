@@ -93,9 +93,20 @@ left/right volume. The stereo placement the program actually controls is which
 side `PS` lands on, through `CT1`/`CT2`.
 
 **That is a mute path.** With both `CT1` and `CT2` clear, the POKEY and speech
-reach neither speaker regardless of their volume codes. A model that ignores
-`CT1`/`CT2` cannot reproduce that, and `phosphor-core`'s `Ym2151` does not
-expose those pins today.
+reach neither speaker regardless of their volume codes. `Ym2151` gained
+`ct1()`/`ct2()` for this and `atari_jsa.rs` gates on them.
+
+Measured on Toobin', **both pins are set on every one of 2400 frames**, coined
+up and in attract alike. So the game never pans the POKEY and never mutes it,
+and the gating is inert here. It is modeled for the rest of the JSA-I catalog,
+and because a mute is a bad thing to find out about later.
+
+**Where the stereo is actually lost is worth being exact about, because it is
+not only the downmix in `atari_jsa.rs`.** `Ym2151::drain_audio` returns a single
+stream: it sums all eight FM channels and never looks at their per-channel
+left/right enable bits. The FM's own panning is therefore gone before the board
+model sees a sample, and recovering any of this starts in the YM2151 core rather
+than in the board.
 
 ## The gain ratio, and a fitted constant that happens to be right
 
