@@ -77,10 +77,16 @@
 //! here become one, with the POKEY present at full gain if it reaches either
 //! speaker. Recovering any of it starts in the YM2151 core, not here.
 //!
-//! The `CT1`/`CT2` gating above is therefore correct but inert on Toobin',
-//! which holds both pins set for every frame measured, so the POKEY is always
-//! on both speakers and never muted. It is modeled for the other JSA-I games
-//! and because a mute is not a thing to discover later.
+//! **On Toobin' specifically, none of that costs anything, because the game
+//! never uses the stereo the board offers.** Measured across 2950 frames of a
+//! recorded session covering attract, a coin and real play: all eight FM
+//! channels sit centered (both enables set) in every frame, and `CT1`/`CT2` are
+//! both set in every frame. Both sources are therefore identical on the two
+//! speakers, and the mono sum is what the board produces rather than an
+//! approximation of it. The `CT1`/`CT2` gating above is correct and inert here;
+//! it is modeled for the rest of the JSA-I catalog, and because a mute is not a
+//! thing to discover later. One session is not a proof for every screen the
+//! game has, but 2950 frames with zero variation is strong.
 //!
 //! **What else is approximate.** The volume codes, the routing and the filter
 //! switch are sampled once per drain rather than per sample. And the absolute

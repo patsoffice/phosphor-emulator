@@ -972,9 +972,13 @@ STILL NOT MODELED:
   never reads their per-channel left/right enable bits, so the FM's panning is
   gone before this board model sees a sample. On top of that the two channel
   mixers become one here. Recovering any of it starts in the YM2151 core.
-  Measured aside: Toobin' holds both CT pins set on every one of 2400 frames, so
-  the routing this DOES model is inert for this game and the POKEY is always on
-  both speakers.
+
+  BUT IT COSTS TOOBIN' NOTHING, measured over 2950 frames of recorded play
+  covering attract, a coin and real gameplay: all eight FM channels are centered
+  in every frame, and CT1/CT2 are both set in every frame. Both sources are
+  identical on the two speakers, so the mono sum is what this board produces
+  rather than an approximation of it. The stereo work is for the rest of the
+  JSA-I catalog, not for this game.
 - Absolute level. The board's RATIO is now right; whether our YM2151 and POKEY
   cores sit at the same relative scale as the chips do is unchecked, and that is
   what would turn the ratio into a calibrated level.

@@ -96,10 +96,20 @@ side `PS` lands on, through `CT1`/`CT2`.
 reach neither speaker regardless of their volume codes. `Ym2151` gained
 `ct1()`/`ct2()` for this and `atari_jsa.rs` gates on them.
 
-Measured on Toobin', **both pins are set on every one of 2400 frames**, coined
-up and in attract alike. So the game never pans the POKEY and never mutes it,
-and the gating is inert here. It is modeled for the rest of the JSA-I catalog,
-and because a mute is a bad thing to find out about later.
+**Toobin' never uses the stereo this board offers.** Measured across 2950 frames
+of a recorded session covering attract, a coin and real play
+(`harness/tests/golden/movies/toobin-1789430195.phmi`):
+
+| Signal | Over 2950 frames |
+|---|---|
+| `CT1`, `CT2` | both set, every frame |
+| FM per-channel left/right enables | all eight channels centered, every frame |
+
+So both sources are identical on the two speakers, and a mono sum is what the
+board produces rather than an approximation of it. The gating is correct and
+inert here; it is modeled for the rest of the JSA-I catalog, and because a mute
+is a bad thing to find out about later. One session is not a proof for every
+screen the game has, but 2950 frames with zero variation is strong.
 
 **Where the stereo is actually lost is worth being exact about, because it is
 not only the downmix in `atari_jsa.rs`.** `Ym2151::drain_audio` returns a single
