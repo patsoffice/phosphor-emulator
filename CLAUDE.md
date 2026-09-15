@@ -275,11 +275,32 @@ Two passes over the added lines catch both:
 
 ```bash
 sak git diff | sak fs grep '^\+.*—' -
-sak git diff | sak fs grep '^\+.*(behaviour|modelled|modelling|centre|colour|analogue|localise|recognise)' -
+sak git diff | sak fs grep -i '^\+.*(behaviour|colour|favour|flavour|honour|labour|neighbour|rumour|humour|armour|vapour|odour|centre|metre|litre|fibre|calibre|lustre|spectre|theatre|labell|modell|travell|cancell|signall|levell|totall|fuell|marvell|normalis|initialis|optimis|recognis|utilis|localis|summaris|standardis|prioritis|minimis|maximis|synchronis|serialis|sanitis|organis[ei]|analys(e|ing)|emphasis(e|ing)|defence|offence|pretence|licence|practise|analogue|grey|whilst|amongst|sceptic)' -
 ```
 
+That second pattern is long because it covers the *rules* that produce British
+spellings rather than a handful of remembered words: `-our` for `-or`, `-re` for
+`-er`, a doubled `l` before a suffix, `-ise`/`-isation` for `-ize`/`-ization`,
+and `-ce` for `-se` in nouns. A short list only catches what somebody already
+noticed, which is how `labelling` went through a check that was watching
+`modelled`.
+
 The words that actually slip in emulator prose are `modelled`, `modelling`,
-`behaviour` and `centre`.
+`behaviour`, `centre` and `labelling`, and the whole `-ise` family in longer
+prose.
+
+Three notes on the pattern, so it is maintained rather than replaced:
+
+- The awkward `analys(e|ing)`, `emphasis(e|ing)` and `organis[ei]` spellings are
+  deliberate. Their bare stems are substrings of `analysis`, `emphasis` and
+  `organism`, which are correct everywhere and would report on every commit
+  until somebody deleted the whole check.
+- `catalogue`, `programme` and `dialogue` are **not** in it. The first two are
+  already load-bearing in this repo (`every_registered_machine_is_catalogued`, a
+  beads issue id), and all three are defensible in American English, so flagging
+  them would cost more than it caught.
+- Run it **before each commit**, not once over a batch. It reads added lines
+  only, so a stale run says nothing about what you just wrote.
 
 ### Commit Style
 
