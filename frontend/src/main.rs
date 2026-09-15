@@ -75,6 +75,19 @@ struct Cli {
     #[arg(long, value_name = "PATH")]
     record_wav: Option<String>,
 
+    /// Record this session to an input movie (`.phmi`) at PATH.
+    ///
+    /// Arms from power-on before the first frame and writes the file when you
+    /// quit, so a whole session needs no keypress but the one that closes the
+    /// window. The `Shift+F12` hotkey does the same thing mid-session and stops
+    /// on a second press; this exists because a session you meant to record
+    /// from the start should not depend on catching it, and because that hotkey
+    /// does not currently arrive on macOS (phosphor-emulator-jg18.3).
+    ///
+    /// Replay with `--movie`, or `disasm replay` / `disasm movie check`.
+    #[arg(long, value_name = "PATH", conflicts_with = "movie")]
+    record: Option<std::path::PathBuf>,
+
     /// Replay a recorded input movie (`.phmi`) instead of taking live input.
     ///
     /// Resets to power-on and plays the session back in the window, with sound
@@ -246,6 +259,13 @@ fn main() {
     // Headless capture short-circuits the SDL main loop entirely. It takes the
     // movie too: replaying one is the only way to capture audio from anything
     // past attract mode.
+    // Recording needs live input to record, which headless has none of. Fail
+    // rather than run for minutes and write an empty movie.
+    if cli.headless && cli.record.is_some() {
+        eprintln!("--record needs live input; it cannot be combined with --headless");
+        std::process::exit(2);
+    }
+
     if cli.headless {
         headless::run(
             machine.as_mut(),
@@ -274,6 +294,7 @@ fn main() {
         cli.no_mouse_grab,
         cli.record_wav.as_deref(),
         cli.movie.as_deref(),
+        cli.record.as_deref(),
         &|| create_from_first_rom_set(entry, &rom_path).0,
         &mut state,
     );

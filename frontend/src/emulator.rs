@@ -244,6 +244,9 @@ pub fn run(
     no_mouse_grab: bool,
     record_wav: Option<&str>,
     movie_path: Option<&Path>,
+    // `--record PATH`: arm an input-movie recording before the first frame and
+    // write it there on exit.
+    record_movie_path: Option<&Path>,
     // `rebuild_machine` builds a machine from ROM exactly as the harness does.
     // Arming a movie recording needs one: `reset()` is a reset button, not a
     // power cycle, so recording on a reset live machine starts somewhere replay
@@ -485,6 +488,9 @@ pub fn run(
     console_scope.push("m", Rc::clone(&session));
 
     let mut movie_capture = crate::movie::MovieCapture::new(movie_dir, machine_name, rom_digest);
+    if let Some(path) = record_movie_path {
+        movie_capture.set_output_path(path);
+    }
 
     // Playback binds before the first frame, resetting to power-on: a movie
     // carries no save state and replays only from there. A bad movie is fatal
@@ -514,7 +520,13 @@ pub fn run(
     // iteration. The rebuild cannot
     // happen in the event handler: the machine is borrowed out of the session
     // for the whole loop body, and arming has to replace it wholesale.
-    let mut arm_requested = false;
+    //
+    // `--record` arms through this same flag rather than a path of its own, so
+    // a recording started from the command line and one started from the hotkey
+    // begin identically: both rebuild from ROM, which is what makes the
+    // starting state something replay can reconstruct. Setting it here means
+    // the first serviced iteration arms, before any frame has run.
+    let mut arm_requested = record_movie_path.is_some();
 
     // Same deferral, for the same reason: a hard reset replaces the machine
     // wholesale and cannot run while it is borrowed for the frame.

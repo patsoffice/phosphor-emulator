@@ -69,6 +69,10 @@ pub struct MovieCapture {
     machine_name: String,
     rom_digest: [u8; 32],
     recorder: Option<MovieRecorder>,
+    /// Where `--record` was told to put the file, overriding the generated name
+    /// under `dir`. `None` for a recording armed from the hotkey, which has
+    /// nowhere to have been told about.
+    output: Option<PathBuf>,
 }
 
 impl MovieCapture {
@@ -78,7 +82,14 @@ impl MovieCapture {
             machine_name: machine_name.to_string(),
             rom_digest,
             recorder: None,
+            output: None,
         }
+    }
+
+    /// Write the next finished recording to `path` rather than to a generated
+    /// name under the movies directory.
+    pub fn set_output_path(&mut self, path: &Path) {
+        self.output = Some(path.to_path_buf());
     }
 
     pub fn is_recording(&self) -> bool {
@@ -175,14 +186,25 @@ impl MovieCapture {
         let unmapped = rec.unmapped();
         let movie = rec.finish();
 
-        if let Err(e) = std::fs::create_dir_all(&self.dir) {
-            return format!("Movie: cannot create {}: {e}", self.dir.display());
+        // An explicit `--record PATH` wins; otherwise a timestamped name under
+        // the movies directory. Either way the parent has to exist first, and
+        // for an explicit path that parent is the user's, not ours to invent
+        // beyond creating it.
+        let path = match &self.output {
+            Some(p) => p.clone(),
+            None => {
+                let stamp = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                self.dir.join(format!("{}-{stamp}.phmi", self.machine_name))
+            }
+        };
+        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty())
+            && let Err(e) = std::fs::create_dir_all(parent)
+        {
+            return format!("Movie: cannot create {}: {e}", parent.display());
         }
-        let stamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let path = self.dir.join(format!("{}-{stamp}.phmi", self.machine_name));
         let tmp = path.with_extension("phmi.tmp");
 
         if let Err(e) = std::fs::write(&tmp, movie.encode()) {
@@ -382,5 +404,60 @@ mod tests {
         let tee = Recording::new(&mut spy, &mut rec);
         assert_eq!(tee.input_controls().len(), 1);
         assert_eq!(tee.input_controls()[0].stable_name, "coin");
+    }
+
+    /// `--record PATH` must put the movie exactly where it was told, creating
+    /// the parent if it has to. The default hotkey path generates a timestamped
+    /// name under the movies directory instead, and both have to keep working.
+    #[test]
+    fn an_explicit_output_path_is_where_the_movie_lands() {
+        let base = std::env::temp_dir().join(format!(
+            "phosphor_movie_test_{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let movies = base.join("movies");
+        let wanted = base.join("nested").join("session.phmi");
+
+        // Explicit path: lands there, and the nested parent is created.
+        let mut cap = MovieCapture::new(&movies, "toobin", [7; 32]);
+        cap.set_output_path(&wanted);
+        cap.recorder = Some(MovieRecorder::new(
+            "toobin",
+            [7; 32],
+            CONTROLS,
+            Vec::new(),
+            None,
+        ));
+        cap.advance_frame();
+        let msg = cap.stop();
+        assert!(wanted.is_file(), "{msg}");
+        assert!(msg.contains(&wanted.display().to_string()), "{msg}");
+        assert!(!cap.is_recording(), "stopping clears the recorder");
+        // And no stray temporary is left beside it.
+        assert!(!wanted.with_extension("phmi.tmp").exists());
+
+        // No explicit path: a generated name under the movies directory.
+        let mut cap = MovieCapture::new(&movies, "toobin", [7; 32]);
+        cap.recorder = Some(MovieRecorder::new(
+            "toobin",
+            [7; 32],
+            CONTROLS,
+            Vec::new(),
+            None,
+        ));
+        let msg = cap.stop();
+        let generated: Vec<_> = std::fs::read_dir(&movies)
+            .expect("movies dir was created")
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(generated.len(), 1, "{generated:?} ({msg})");
+        assert!(generated[0].starts_with("toobin-"), "{generated:?}");
+        assert!(generated[0].ends_with(".phmi"), "{generated:?}");
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
