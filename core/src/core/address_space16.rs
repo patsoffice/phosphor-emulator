@@ -804,6 +804,7 @@ impl AddressSpace16 {
             width: 1,
             region: self.region_at(addr).map(|r| r.name),
             device,
+            dropped_after: 0,
         }
     }
 

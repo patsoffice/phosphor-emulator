@@ -1722,6 +1722,7 @@ mod tests {
             width: 1,
             region: None,
             device: None,
+            dropped_after: 0,
         }
     }
 
@@ -1894,6 +1895,7 @@ mod tests {
             width: 1,
             region: Some("sharedram"),
             device: None,
+            dropped_after: 0,
         };
         let line = render_text(&Record::Watch(h), 3100);
         assert!(line.contains("mem wr $87CF=$32 [sharedram]"), "{line}");
@@ -1914,6 +1916,7 @@ mod tests {
             width: 1,
             region: None,
             device: None,
+            dropped_after: 0,
         };
         let line = render_jsonl(&Record::Watch(h), 2);
         assert!(line.contains("\"frame\":2"), "{line}");

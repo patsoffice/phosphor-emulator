@@ -202,7 +202,8 @@ Set a watchpoint on an address, run frames or step, then drain the hits. The
 | `m.hits()` | — | `[Map]` — drains the collected hits |
 
 Each hit is a map: `cpu`, `addr`, `kind`, `value`, `width`, `pc` (`-1` if
-unknown), `cycle`, `source`, `region`.
+unknown), `cycle`, `source`, `region`, and `dropped` (how many hits were lost
+right after this one because the machine's queue was full; see below).
 
 **Watch all CPUs by default.** `watch*` set on *every* CPU, because watchpoints
 are scoped per CPU and on multi-CPU boards a video/scroll register is often
@@ -213,15 +214,26 @@ deliberately. `hits()` accumulates across a whole run (hits are drained after
 each frame/step so a hot address doesn't overflow the machine's 64-entry queue);
 a single frame can still drop hits past 64, so `step()` gives exact capture.
 
-**Past 64 in a frame the queue drops the *oldest* hit**, which corrupts ordering
-rather than truncating it, and nothing in the returned data says so. Two things
-follow. Record the busiest frame (`m.hits().len()` per `run_frames(1)`) and say
-whether it reached 64, so a result is claimed complete only when it is. And when
-it does reach 64, partition the traffic with a *condition* rather than reaching
-for `step()`: the condition is evaluated in the address space, so a filtered
-watchpoint never queues the hits it excludes. Sweeping one machine per slice and
-merging the runs on each hit's `cycle` reconstructs the full ordered stream, at a
-few seconds a slice.
+**Past 64 in a frame the queue stops accepting hits, and `dropped` says so.**
+What survives is the oldest 64, in the order they fired, so a capture is always
+a correct *prefix*; the hit it stopped at carries a nonzero `dropped` counting
+what was lost right after it. Summing `dropped` over a run is how a script tells
+a complete capture from a truncated one, without measuring the busiest frame by
+hand:
+
+```rhai
+let kept = 0; let lost = 0;
+for f in 0..900 {
+    m.run_frames(1);
+    for h in m.hits() { kept += 1; lost += h.dropped; }
+}
+print(`${kept} kept, ${lost} lost`);      // lost == 0 means the capture is whole
+```
+
+When `lost` is not zero, partition the traffic with a *condition* rather than
+reaching for `step()`: the condition is evaluated in the address space, so a
+filtered watchpoint never queues the hits it excludes. Sweep one machine per
+slice and merge the runs on each hit's `cycle`, at a few seconds a slice.
 
 ```rhai
 // One slice: only address-latch writes whose top three bits are `top`.
@@ -229,8 +241,10 @@ m.watch_bits(0x2000, "write", 0xE0, top);
 for f in 0..900 { m.run_frames(1); for h in m.hits() { print(`${h.cycle} ${h.value}`); } }
 ```
 
-Reading Toobin's YM2151 register selects this way recovered 3824 writes where a
-single unconditioned watch reported 3693 and silently reordered the rest.
+Both routes agree on Toobin's YM2151 register selects: a single unconditioned
+watch keeps 3693 and reports 131 dropped, and eight conditioned slices recover
+all 3824 with every slice under the cap. The 3693 it kept are the first 3693 of
+the 3824, in order.
 
 ```rhai
 m.run_frames(3100);

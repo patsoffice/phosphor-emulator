@@ -184,12 +184,32 @@ pub struct WatchpointHit {
     pub region: Option<&'static str>,
     /// Name of the device that owns the address, when known.
     pub device: Option<&'static str>,
+    /// How many hits were discarded immediately *after* this one because the
+    /// queue was full when they fired. Zero on every hit but the last one in a
+    /// queue that overflowed.
+    ///
+    /// This is how a caller tells a complete capture from a truncated one. It
+    /// rides on the hit rather than living behind an accessor of its own because
+    /// the hit is what already travels the whole way out, through `BusDebug`,
+    /// `MachineDebug` and the script session, to `hits()`. A parallel counter
+    /// would have to be threaded through every one of those and through the
+    /// three hand-written `BusDebug` impls besides.
+    pub dropped_after: u32,
 }
 
-/// Maximum queued hits before the oldest are dropped.
+/// Maximum queued hits before further hits are dropped.
 ///
-/// Bounds memory if the debugger stops polling while a hot address is
-/// watched. Newest hits win, matching the old single-slot behavior.
+/// Bounds memory if the debugger stops polling while a hot address is watched.
+///
+/// **The queue keeps the OLDEST and discards what does not fit**, recording the
+/// loss in [`WatchpointHit::dropped_after`] on the hit it stopped at. It used to
+/// do the opposite, on the reasoning that the newest hits win and that this
+/// matched an older single-slot design. That was right for an interactive
+/// debugger, which drains after every tick and never fills this queue, and wrong
+/// for everything else: dropping the oldest leaves a caller holding a
+/// full-looking list whose beginning is missing, so a question about *order* is
+/// answered wrongly rather than incompletely. Keeping the oldest makes what
+/// survives a correct prefix.
 const MAX_PENDING_HITS: usize = 64;
 
 /// A set of exact-address watchpoints plus a FIFO queue of hits.
@@ -400,15 +420,23 @@ impl Watchpoints {
             width,
             region: None,
             device: None,
+            dropped_after: 0,
         });
         true
     }
 
     /// Queue an externally constructed hit (for boards that populate
     /// richer metadata than `check_read`/`check_write`).
+    ///
+    /// A hit that does not fit is discarded and counted on the last one that
+    /// did, so the queue is always a correct prefix of what fired and always
+    /// says how much it is missing. See [`MAX_PENDING_HITS`].
     pub fn push_hit(&mut self, hit: WatchpointHit) {
         if self.pending_hits.len() >= MAX_PENDING_HITS {
-            self.pending_hits.pop_front();
+            if let Some(last) = self.pending_hits.back_mut() {
+                last.dropped_after = last.dropped_after.saturating_add(1);
+            }
+            return;
         }
         self.pending_hits.push_back(hit);
     }
@@ -501,17 +529,56 @@ mod tests {
         assert!(wp.take_hit().is_none());
     }
 
+    /// A full queue keeps the oldest hits and says how many it lost.
+    ///
+    /// The point is the *order*. This used to drop the oldest, which left a
+    /// caller with a full-looking list whose beginning was missing and nothing
+    /// to say so, so a question about order got a wrong answer rather than an
+    /// incomplete one. Now what survives is a correct prefix, and the hit it
+    /// stopped at carries the count.
     #[test]
-    fn queue_drops_oldest_when_full() {
+    fn a_full_queue_keeps_the_oldest_and_counts_what_it_dropped() {
+        const OVERFLOW: u32 = 8;
         let mut wp = Watchpoints::new();
         wp.set(0, 0x1000, WatchpointKind::Write);
 
-        for i in 0..(MAX_PENDING_HITS as u32 + 8) {
+        for i in 0..(MAX_PENDING_HITS as u32 + OVERFLOW) {
             wp.check_write(0, DebugAccessSource::Unknown, 0, None, 0x1000, i, 1);
         }
         assert_eq!(wp.pending_hits(), MAX_PENDING_HITS);
-        // Oldest hits were dropped; the first remaining is hit #8
-        assert_eq!(wp.take_hit().unwrap().value, 8);
+
+        // The queue is hits 0..64 in the order they fired.
+        for i in 0..MAX_PENDING_HITS as u32 {
+            let hit = wp.take_hit().unwrap();
+            assert_eq!(hit.value, i, "hit {i} is not where it fired");
+            let expected = if i == MAX_PENDING_HITS as u32 - 1 {
+                OVERFLOW
+            } else {
+                0
+            };
+            assert_eq!(
+                hit.dropped_after, expected,
+                "the loss is recorded on the hit it stopped at, and nowhere else"
+            );
+        }
+        assert!(wp.take_hit().is_none());
+    }
+
+    /// A queue that never fills reports no loss, so a caller can read
+    /// `dropped_after` as "this capture is complete" rather than having to
+    /// measure the busiest frame by hand.
+    #[test]
+    fn a_queue_with_room_reports_no_loss() {
+        let mut wp = Watchpoints::new();
+        wp.set(0, 0x1000, WatchpointKind::Write);
+
+        for i in 0..8u32 {
+            wp.check_write(0, DebugAccessSource::Unknown, 0, None, 0x1000, i, 1);
+        }
+        assert_eq!(wp.pending_hits(), 8);
+        while let Some(hit) = wp.take_hit() {
+            assert_eq!(hit.dropped_after, 0);
+        }
     }
 
     #[test]

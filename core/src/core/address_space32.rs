@@ -815,6 +815,7 @@ impl AddressSpace32 {
             width,
             region: self.map.region_at(addr).map(|r| r.name),
             device,
+            dropped_after: 0,
         }
     }
 

@@ -386,6 +386,10 @@ fn hit_to_map(hit: &WatchpointHit) -> Dynamic {
     map.insert("cycle".into(), (hit.cycle as i64).into());
     map.insert("source".into(), source_str(hit.source).into());
     map.insert("region".into(), hit.region.unwrap_or("").into());
+    // Nonzero only where the machine's queue filled and discarded what fired
+    // next, which is the one thing a script cannot otherwise tell from a
+    // complete capture.
+    map.insert("dropped".into(), (i64::from(hit.dropped_after)).into());
     Dynamic::from_map(map)
 }
 

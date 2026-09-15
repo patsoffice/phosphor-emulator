@@ -139,6 +139,7 @@ impl BusDebug for StubBus {
                 width: 1,
                 region: None,
                 device: None,
+                dropped_after: 0,
             });
         }
     }
