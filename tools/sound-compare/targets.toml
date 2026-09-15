@@ -932,34 +932,45 @@ checked. The schematics are a separate Drawing Package Supplement."""
 [[target]]
 id = "toobin-output"
 machines = ["toobin"]
-status = "unexamined"
+device = "machines/src/atari_jsa.rs"
+status = "partial"
 notes = """
-NOBODY HAS LOOKED AT THE OUTPUT STAGE. The chips now run: machines/src/atari_jsa.rs
-models the JSA-I board, a 6502 with a YM2151 and a POKEY on their own 3.579545
-MHz crystal, and the main board drives it through the real command and response
-latches. What has NOT been read off any schematic is the analog path between
-those two chips and the speaker, which is why this stays `unexamined` rather
-than moving up the ladder.
+EXAMINED. Off `unexamined` as `partial`: the board is transcribed in
+docs/schematics/toobin-audio-output.md from SP-320 sheets 21 and 22, and the
+volume law it establishes is the one the model already implements. Everything
+after the volume taps is still missing.
 
-What the code does today, in full:
+CONFIRMED RATHER THAN REFUTED, which is the unusual part here:
 
-- the POKEY and the YM2151 are summed as `pokey * pokey_vol + ym * ym_vol * 3.0`
-- `pokey_vol` and `ym_vol` come from the board's own mix register at the sound
-  CPU's 0x2A06, four steps for the POKEY and eight for the YM. That much IS a
-  board function rather than a fitted constant, read off the register layout
-- the 3.0 on the FM is a fitted listening gain, not a measured ratio
-- one shared DcBlocker at the default corner removes the POKEY's unipolar DC,
-  then the sum is scaled by 2.0 and clamped
+- The mix register's field layout is exact, bit for bit. The 5F LS273 gives
+  speech volume on D7:D6, POKEY on D5:D4, YM2151 on D3:D1 and the low-pass
+  enable on D0, which is what atari_jsa.rs decodes.
+- All three volume ladders are binary-weighted CD4066 switches summing into an
+  LM324 virtual ground, so gain is proportional to the code and `code / max` is
+  the board's law rather than an approximation of it. This is NOT the Namco case
+  where the selected conductance was one arm of a divider and the law came out
+  non-linear.
+- The fitted 3.0 on the FM sits on the board's own ratio. At full volume codes
+  the YM ladder gives a gain of 2.80 into the channel mixer and the POKEY path
+  gives 0.94, so the board is about 3.0 : 1. TREAT THAT AS LUCK UNTIL THE TWO
+  CORES ARE LEVELED: the figures are only comparable if our YM2151 and POKEY
+  normalize like the chips do, which nobody has checked.
 
-That is a wire with two volume taps on it. The board is STEREO and the model is
-mono: the FM's two channels are routed to separate speakers on real hardware and
-the POKEY sits at 0.40 into both, none of which is modeled. There is no filter,
-no mixing network, no coupling capacitor and no amplifier stage.
+STILL MISSING, now with numbers:
 
-The mix register's low bit is documented as a low-pass filter enable and is
-latched but not acted on, because the filter it switches has not been read.
+- STEREO, AND THE ROUTING IS PROGRAM-CONTROLLED. The POKEY and speech are summed
+  first into one signal, which is injected into the left and right mixers
+  through 12k legs gated by the YM2151's own CT1 and CT2 pins. With both clear
+  the POKEY reaches neither speaker whatever its volume code, so this is a mute
+  path and not only a placement. phosphor-core's Ym2151 does not expose CT1/CT2,
+  so this needs a core change before it can be modeled at all.
+- THE SWITCHED LOW-PASS. A fixed pole near 6.0 kHz from 0.0022 uF across the 12k
+  feedback, plus a shunt that moves from 13.3 kHz to 3.6 kHz when a 2N3904
+  switches a second 0.0027 uF in. Its base is driven from the mix register's LPF
+  bit OR from YM0, the bottom bit of the YM volume, wired-OR through two 1k
+  resistors. The model latches LPF and applies no filter.
+- The DcBlocker is still the shared default corner rather than this board's
+  coupling.
 
-Promote this row only after someone reads the JSA-I drawing, and say then which
-of those points it settled. Tracked as phosphor-emulator-fuqb.1, which carries
-the full reading of what is and is not modeled here; phosphor-emulator-jg18
-added the board itself."""
+Promote to `implemented-needs-validation` only with an adapter and scenarios.
+Tracked as phosphor-emulator-fuqb.1."""

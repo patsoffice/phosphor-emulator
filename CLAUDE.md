@@ -274,6 +274,7 @@ close reason. Check the diff before committing rather than trusting the draft.
 Two passes over the added lines catch both:
 
 ```bash
+git add -A -N   # or a NEW FILE is invisible to both passes below
 sak git diff | sak fs grep '^\+.*—' -
 sak git diff | sak fs grep -i '^\+.*(behaviour|colour|favour|flavour|honour|labour|neighbour|rumour|humour|armour|vapour|odour|centre|metre|litre|fibre|calibre|lustre|spectre|theatre|labell|modell|travell|cancell|signall|levell|totall|fuell|marvell|normalis|initialis|optimis|recognis|utilis|localis|summaris|standardis|prioritis|minimis|maximis|synchronis|serialis|sanitis|organis[ei]|analys(e|ing)|emphasis(e|ing)|defence|offence|pretence|licence|practise|analogue|grey|whilst|amongst|sceptic)' -
 ```
@@ -301,6 +302,16 @@ Three notes on the pattern, so it is maintained rather than replaced:
   them would cost more than it caught.
 - Run it **before each commit**, not once over a batch. It reads added lines
   only, so a stale run says nothing about what you just wrote.
+- The `git add -A -N` is not optional. `git diff` does not show untracked files
+  at all, so a whole new doc goes through both passes untouched and reports
+  clean. That is how `levelling` reached a committed
+  `docs/schematics/toobin-audio-output.md` in the same session that widened this
+  list to catch it.
+- **Do not append anything to these two lines, and do not redirect their
+  stderr.** A check that prints nothing is indistinguishable from a check that
+  passed. Piping the result through a stage that rejects its arguments (`sak fs
+  cut -c` is not a thing) under a `2>/dev/null` produces a confident, silent,
+  permanent all-clear.
 
 ### Commit Style
 

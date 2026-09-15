@@ -44,6 +44,30 @@
 //! modeled: no game in the registry fits one. The strobes it would use are
 //! decoded and ignored, and the port bit that reports the speech chip ready
 //! reads low, which is what an empty socket gives.
+//!
+//! ## What the analog side does, and what this does instead
+//!
+//! The board is transcribed in `docs/schematics/toobin-audio-output.md`. Two
+//! things it establishes are not modeled here and are worth knowing before
+//! trusting the mix:
+//!
+//! - **The output is stereo, and the routing is program-controlled.** The
+//!   POKEY and the speech socket are summed first into one signal, which is
+//!   then injected into the left and right mixers through legs gated by the
+//!   YM2151's own `CT1` and `CT2` output pins. With both clear the POKEY
+//!   reaches neither speaker whatever its volume code, so this is a mute path
+//!   and not only a placement. `phosphor-core`'s `Ym2151` does not expose those
+//!   pins, so modeling it needs a change there first.
+//! - **There is a switched low-pass on each channel.** A fixed pole near 6 kHz,
+//!   plus a shunt that moves from about 13.3 kHz to about 3.6 kHz when a
+//!   transistor switches a second capacitor in. That transistor is driven from
+//!   the mix register's `LPF` bit **or** from `YM0`, the bottom bit of the YM
+//!   volume, wired-OR through two 1k resistors. This board latches `LPF` and
+//!   applies no filter at all.
+//!
+//! What the volume ladders do is right in shape: all three are binary-weighted
+//! into a virtual ground, so gain is proportional to the code and `code / max`
+//! is the board's law rather than an approximation of it.
 
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::{Bus, BusMaster};
@@ -278,9 +302,10 @@ impl AtariJsa1 {
         self.bus.reset_pending = true;
     }
 
-    /// Press or release a coin switch (`index` 0 through 2 for coins 1 to 3).
+    /// Press or release a coin switch (`index` 0 through 3 for coins 1 to 4).
+    /// The board carries four mechs; a cabinet need not fit them all.
     pub fn set_coin(&mut self, index: u8, pressed: bool) {
-        let mask = 1u8 << (index & 0x07);
+        let mask = 1u8 << (index & 0x03);
         if pressed {
             self.bus.coin_inputs |= mask;
         } else {
@@ -402,8 +427,18 @@ impl Jsa1Bus {
         if self.self_test {
             v |= 0x80;
         }
-        // Bits 2 and 3 read low here and no program is known to test them.
-        v | (self.coin_inputs & 0x03)
+        // Bits 3 through 0 are FOUR coin switches, not two. Sheet 22 of the
+        // board's schematic package buffers COIN4 through COIN1 onto D3-D0,
+        // each pulled up by 1k to VCC with 0.1 uF to ground and closing to
+        // ground. This used to mask to two on the belief that D3 was a tied
+        // +5V, which is what the part of the port nobody had read looked like
+        // from the outside.
+        //
+        // The polarity here is the non-inverting reading of the buffer at 5J,
+        // whose designator is ambiguous in the available scan and which the
+        // board's own parts list would settle. It is the reading the sound
+        // program's polling works under. See docs/schematics/toobin-audio-output.md.
+        v | (self.coin_inputs & 0x0F)
     }
 
     /// The `/WRIO` latch: ROM bank, coin counters and the YM2151 reset line.
