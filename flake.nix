@@ -63,6 +63,14 @@
             # has no scripting API and whose file format would put every symbol
             # placement and wire segment in the diff by hand.
             pkgs.netlistsvg
+            # Reads the scanned operator manuals the schematics in
+            # docs/schematics are transcribed from: `pdfinfo` for the page
+            # count, `pdftoppm` to render a sheet to an image worth looking at,
+            # `pdftotext` for the parts lists. Those manuals are the source for
+            # every audio-output and video-timing reading in the tree, and
+            # without this the only way to open one is an ad-hoc `brew install`
+            # outside the pinned shell.
+            pkgs.poppler-utils
           ] ++ linuxPkgs;
 
           LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath ([
