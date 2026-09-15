@@ -15,6 +15,12 @@ use syn::{DeriveInput, Expr, Fields, Type, parse_macro_input};
 ///   `#[debug_map(cpu = N)]` field's `debug_read`/`debug_write`.
 /// - `#[debug_cpu("Name", read = "method", write = "method")]` — explicit version:
 ///   names `&self` / `&mut self` methods on the struct for side-effect-free memory access.
+/// - `#[debug_cpu("Name", index = N)]` overrides the positional CPU index,
+///   for a CPU that a `#[debug_bus]` parent merges in below its own. The whole
+///   merged tree shares one index space, so a sound board that is always the
+///   second CPU on the machines that carry it declares `index = 1` here in the
+///   same way its address space declares `#[debug_map(cpu = 1)]`. Combinable
+///   with `read`/`write`.
 /// - `#[debug_map(cpu = N)]` — field is an `AddressSpace16` or `AddressSpace32`
 ///   linked to CPU index N. Generates watchpoint routing, `peek`
 ///   (backed/I/O/unmapped semantics via `debug_peek`), and (when linked to a
@@ -29,7 +35,8 @@ use syn::{DeriveInput, Expr, Fields, Type, parse_macro_input};
 ///   concrete type. Local entries come first, so a `#[debug_cpu]` here keeps
 ///   index 0 and the nested board's devices follow.
 ///
-/// CPU index assignment is positional: first `#[debug_cpu]` is index 0, etc.
+/// CPU index assignment is positional: first `#[debug_cpu]` is index 0, etc.,
+/// unless `index = N` says otherwise.
 /// Device indices for `write_device_register` / `reset_device` match `devices()` order.
 #[proc_macro_derive(BusDebug, attributes(debug_device, debug_cpu, debug_map, debug_bus))]
 pub fn derive_bus_debug(input: TokenStream) -> TokenStream {
@@ -48,12 +55,7 @@ pub fn derive_bus_debug(input: TokenStream) -> TokenStream {
     // order. `accessor` is the `self.field` (or `self.field[i]` for array
     // device fields) token stream, so device indices match `devices()` order.
     let mut device_entries: Vec<(syn::LitStr, TokenStream2, bool)> = Vec::new();
-    let mut cpu_entries: Vec<(
-        syn::LitStr,
-        syn::Ident,
-        Option<syn::LitStr>,
-        Option<syn::LitStr>,
-    )> = Vec::new(); // (name, field_ident, read_method?, write_method?)
+    let mut cpu_entries: Vec<CpuEntry> = Vec::new();
     let mut map_entries: Vec<MapEntry> = Vec::new(); // (cpu_index, field_ident, is_32) for AddressSpace fields
     let mut bus_field: Option<syn::Ident> = None; // #[debug_bus] — nested BusDebug to merge
 
@@ -91,7 +93,13 @@ pub fn derive_bus_debug(input: TokenStream) -> TokenStream {
                     .expect("debug_cpu expects: (\"Name\") or (\"Name\", read = \"method\", write = \"method\")");
                 // CPUs appear in both devices() and cpus()
                 device_entries.push((args.name.clone(), quote! { self.#field_ident }, false));
-                cpu_entries.push((args.name, field_ident.clone(), args.read, args.write));
+                cpu_entries.push(CpuEntry {
+                    index: args.index.unwrap_or(cpu_entries.len()),
+                    name: args.name,
+                    field_ident: field_ident.clone(),
+                    read: args.read,
+                    write: args.write,
+                });
             } else if attr.path().is_ident("debug_map") {
                 // #[debug_map(cpu = N)] — field is an AddressSpace{16,32} linked
                 // to CPU index N. The address width is inferred from the field
@@ -112,16 +120,18 @@ pub fn derive_bus_debug(input: TokenStream) -> TokenStream {
     });
 
     // Generate cpus() body
-    let cpu_items = cpu_entries.iter().map(|(name, ident, _, _)| {
+    let cpu_items = cpu_entries.iter().map(|entry| {
+        let (name, ident) = (&entry.name, &entry.field_ident);
         quote! { (#name, &self.#ident as &dyn phosphor_core::core::debug::DebugCpu) }
     });
 
     // A CPU whose memory access is neither given explicitly nor served by a
     // local map must be reachable through a #[debug_bus] field — otherwise the
     // debugger would silently read nothing for it.
-    for (i, (_, _, read_method, _)) in cpu_entries.iter().enumerate() {
+    for entry in &cpu_entries {
+        let i = entry.index;
         assert!(
-            read_method.is_some()
+            entry.read.is_some()
                 || map_entries.iter().any(|m| m.cpu_index == i)
                 || bus_field.is_some(),
             "debug_cpu at index {i} has no read/write methods, no matching #[debug_map(cpu = {i})], and no #[debug_bus] field"
@@ -135,8 +145,7 @@ pub fn derive_bus_debug(input: TokenStream) -> TokenStream {
     // serves debug reads. Indices with neither fall through to `#[debug_bus]`.
     let explicit: Vec<(usize, &syn::LitStr, &syn::LitStr)> = cpu_entries
         .iter()
-        .enumerate()
-        .filter_map(|(i, (_, _, read, write))| Some((i, read.as_ref()?, write.as_ref()?)))
+        .filter_map(|entry| Some((entry.index, entry.read.as_ref()?, entry.write.as_ref()?)))
         .collect();
     let mapped: Vec<&MapEntry> = map_entries
         .iter()
@@ -512,11 +521,24 @@ pub fn derive_bus_debug(input: TokenStream) -> TokenStream {
     TokenStream::from(expanded)
 }
 
-/// Parsed arguments for `#[debug_cpu("Name")]` or `#[debug_cpu("Name", read = "method", write = "method")]`.
+/// Collected info for a `#[debug_cpu]` field.
+struct CpuEntry {
+    /// Index this CPU answers to, which is positional unless `index = N`
+    /// overrode it.
+    index: usize,
+    name: syn::LitStr,
+    field_ident: syn::Ident,
+    read: Option<syn::LitStr>,
+    write: Option<syn::LitStr>,
+}
+
+/// Parsed arguments for `#[debug_cpu("Name")]`, with optional
+/// `read = "method", write = "method"` and `index = N`.
 struct CpuArgs {
     name: syn::LitStr,
     read: Option<syn::LitStr>,
     write: Option<syn::LitStr>,
+    index: Option<usize>,
 }
 
 impl syn::parse::Parse for CpuArgs {
@@ -529,6 +551,7 @@ impl syn::parse::Parse for CpuArgs {
                 name,
                 read: None,
                 write: None,
+                index: None,
             });
         }
 
@@ -536,19 +559,20 @@ impl syn::parse::Parse for CpuArgs {
 
         let mut read = None;
         let mut write = None;
+        let mut index = None;
 
         while !input.is_empty() {
             let key: syn::Ident = input.parse()?;
             input.parse::<syn::Token![=]>()?;
-            let value: syn::LitStr = input.parse()?;
 
             match key.to_string().as_str() {
-                "read" => read = Some(value),
-                "write" => write = Some(value),
+                "read" => read = Some(input.parse::<syn::LitStr>()?),
+                "write" => write = Some(input.parse::<syn::LitStr>()?),
+                "index" => index = Some(input.parse::<syn::LitInt>()?.base10_parse()?),
                 other => {
                     return Err(syn::Error::new(
                         key.span(),
-                        format!("unknown attribute `{other}`, expected `read` or `write`"),
+                        format!("unknown attribute `{other}`, expected `read`, `write` or `index`"),
                     ));
                 }
             }
@@ -563,7 +587,12 @@ impl syn::parse::Parse for CpuArgs {
             return Err(input.error("both `read` and `write` must be specified, or neither"));
         }
 
-        Ok(CpuArgs { name, read, write })
+        Ok(CpuArgs {
+            name,
+            read,
+            write,
+            index,
+        })
     }
 }
 

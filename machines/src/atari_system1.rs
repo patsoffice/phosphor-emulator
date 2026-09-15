@@ -507,7 +507,13 @@ pub struct AtariSystem1Board {
     audio_dc: (f32, f32),
 
     /// M6502 sound board (POKEY + YM2151 + optional speech + inter-CPU latches).
+    ///
+    /// Both attributes, for two different views of the same board: the device
+    /// entry is its latches (`CMD`, `RESP`, the `YM_*` rows), and `#[debug_bus]`
+    /// merges the tree it derives for itself, which is how its 6502 becomes
+    /// CPU 1 and its address space becomes CPU 1's.
     #[debug_device("Sound")]
+    #[debug_bus]
     #[save(id = 13)]
     pub(crate) sound: AtariSystem1Sound,
     /// Sound CPU runs at 1/4 the main CPU rate.
@@ -1223,13 +1229,14 @@ impl AtariSystem1Board {
         self.clock += 1;
     }
 
-    /// Report the number of main-CPU instruction boundaries this tick (0 or 1)
-    /// for the debugger's step accounting.
-    /// Report the number of main-CPU instruction boundaries this tick (0 or 1)
-    /// for the debugger's step accounting. The CPU lives on the machine, which
-    /// passes it back in.
-    pub fn instruction_boundaries(cpu: &M68000) -> u32 {
-        u32::from(cpu.at_instruction_boundary())
+    /// Which CPUs are between instructions, in `cpus()` order: the 68010 in bit
+    /// 0, the sound board's 6502 in bit 1. The debugger's "step instruction"
+    /// ticks until the bit for its step target is set, so a CPU listed in
+    /// `cpus()` but missing from this mask is a CPU that cannot be stepped.
+    ///
+    /// The CPUs live on the machine, which passes them back in.
+    pub fn instruction_boundaries(cpu: &M68000, sound: &AtariSystem1Sound) -> u32 {
+        u32::from(cpu.at_instruction_boundary()) | (u32::from(sound.at_instruction_boundary()) << 1)
     }
 
     /// Advance the per-frame watchdog. System 1 reboots after 8 VBLANKs without a

@@ -213,6 +213,25 @@ deliberately. `hits()` accumulates across a whole run (hits are drained after
 each frame/step so a hot address doesn't overflow the machine's 64-entry queue);
 a single frame can still drop hits past 64, so `step()` gives exact capture.
 
+**Past 64 in a frame the queue drops the *oldest* hit**, which corrupts ordering
+rather than truncating it, and nothing in the returned data says so. Two things
+follow. Record the busiest frame (`m.hits().len()` per `run_frames(1)`) and say
+whether it reached 64, so a result is claimed complete only when it is. And when
+it does reach 64, partition the traffic with a *condition* rather than reaching
+for `step()`: the condition is evaluated in the address space, so a filtered
+watchpoint never queues the hits it excludes. Sweeping one machine per slice and
+merging the runs on each hit's `cycle` reconstructs the full ordered stream, at a
+few seconds a slice.
+
+```rhai
+// One slice: only address-latch writes whose top three bits are `top`.
+m.watch_bits(0x2000, "write", 0xE0, top);
+for f in 0..900 { m.run_frames(1); for h in m.hits() { print(`${h.cycle} ${h.value}`); } }
+```
+
+Reading Toobin's YM2151 register selects this way recovered 3824 writes where a
+single unconditioned watch reported 3693 and silently reordered the rest.
+
 ```rhai
 m.run_frames(3100);
 m.watch(0x9100, "write");

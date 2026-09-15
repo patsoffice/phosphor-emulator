@@ -581,7 +581,13 @@ pub struct ToobinBoard {
 
     /// JSA-I sound board: a 6502 with a YM2151 and a POKEY, on its own crystal.
     /// It also carries this game's coin switches.
+    ///
+    /// Both attributes, for two different views of the same board: the device
+    /// entry is its latches (`MIX`, `BANK`, the `YM_*` rows), and `#[debug_bus]`
+    /// merges the tree it derives for itself, which is how its 6502 becomes
+    /// CPU 1 and its address space becomes CPU 1's.
     #[debug_device("Sound")]
+    #[debug_bus]
     #[save(id = 18)]
     pub(crate) sound: AtariJsa1,
     /// The board's clock tree, as [`clock_tree`] declares it, stepped in
@@ -1127,8 +1133,14 @@ impl ToobinBoard {
         self.audio_buffer.pop_front_into(buffer)
     }
 
-    pub fn instruction_boundaries(cpu: &M68000) -> u32 {
-        u32::from(cpu.at_instruction_boundary())
+    /// Which CPUs are between instructions, in `cpus()` order: the 68010 in bit
+    /// 0, the sound board's 6502 in bit 1. The debugger's "step instruction"
+    /// ticks until the bit for its step target is set, so a CPU listed in
+    /// `cpus()` but missing from this mask is a CPU that cannot be stepped.
+    ///
+    /// The CPUs live on the machine, which passes them back in.
+    pub fn instruction_boundaries(cpu: &M68000, sound: &AtariJsa1) -> u32 {
+        u32::from(cpu.at_instruction_boundary()) | (u32::from(sound.at_instruction_boundary()) << 1)
     }
 
     /// Advance the per-frame watchdog. The board reboots after eight vertical
@@ -1763,7 +1775,7 @@ impl ToobinSystem {
     pub fn step_cycle(&mut self) -> u32 {
         let (cpu, mut bus) = self.split();
         tick(cpu, &mut bus);
-        ToobinBoard::instruction_boundaries(&self.cpu)
+        ToobinBoard::instruction_boundaries(&self.cpu, &self.board.sound)
     }
 }
 
@@ -1959,6 +1971,36 @@ mod tests {
         image[0xFFFE] = 0x40; // IRQ   -> 0xF040
         image[0xFFFF] = 0xF0;
         image
+    }
+
+    /// Every CPU the debug bus lists can be stepped.
+    ///
+    /// The debugger's "step instruction" ticks until the bit for its step target
+    /// is set, so a CPU that appears in `cpus()` but never in the mask hangs the
+    /// debugger outright rather than failing. That is exactly what registering
+    /// the sound 6502 would have caused, because the mask was the main CPU's
+    /// boundary widened to a `u32` and nothing else.
+    #[test]
+    fn every_listed_cpu_reaches_the_instruction_boundary_mask() {
+        use phosphor_core::core::debug::BusDebug;
+
+        let mut sys = blank_machine();
+        sys.board.sound.load_rom(&responder_sound_rom());
+        sys.reset();
+
+        let cpus = sys.cpus().len();
+        assert_eq!(cpus, 2, "the 68010 and the sound board's 6502");
+
+        // One main-CPU frame is far more than either CPU needs to finish an
+        // instruction; the bound is what turns a hang into a failure.
+        let mut seen = 0u32;
+        for _ in 0..TIMING.cycles_per_frame() {
+            seen |= sys.step_cycle();
+            if seen == (1 << cpus) - 1 {
+                return;
+            }
+        }
+        panic!("mask reached {seen:#b} in a frame, with {cpus} CPUs listed");
     }
 
     /// The frame loop reaches the scanline hook for every visible row.

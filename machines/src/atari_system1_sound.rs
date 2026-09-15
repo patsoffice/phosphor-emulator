@@ -23,20 +23,32 @@
 //! IRQ = YM2151 timer (or POKEY); NMI = a new command from the main CPU.
 
 use phosphor_core::core::bus::InterruptState;
-use phosphor_core::core::{Bus, BusMaster, ClockDomainName as Clk, ClockTree, DomainId};
+use phosphor_core::core::{
+    AccessKind, AddressSpace16, Bus, BusMaster, ClockDomainName as Clk, ClockTree, DomainId,
+};
 use phosphor_core::cpu::Cpu;
 use phosphor_core::cpu::m6502::M6502;
 use phosphor_core::device::pokey::Pokey;
 use phosphor_core::device::tms5220::Tms5220;
 use phosphor_core::device::via6522::Via6522;
 use phosphor_core::device::ym2151::Ym2151;
-use phosphor_macros::Saveable;
+use phosphor_macros::{BusDebug, MemoryRegion, Saveable};
 
 /// Sound CPU clock: 14.318181 MHz / 8 = 1.789772 MHz. POKEY runs at the same
 /// rate; the YM2151 runs at /4 = twice the sound CPU, so its timers advance two
 /// chip clocks per sound-CPU cycle.
 pub const SOUND_CLOCK_HZ: u32 = 1_789_772;
 const YM_CLOCKS_PER_TICK: u32 = 2;
+
+/// Debug index of the sound 6502 within the System 1 machines that carry this
+/// board.
+///
+/// Every one of them is a 68010 (index 0) plus this board, and the board already
+/// names itself [`BusMaster::Cpu(1)`](BusMaster) on every bus access, so the
+/// index is a property of its place in those machines. The same fact is what
+/// `#[debug_map(cpu = 1)]` and `#[debug_cpu(..., index = 1)]` below state to the
+/// derive; all three move together.
+pub const SOUND_CPU_INDEX: usize = 1;
 
 fn audio_sample_rate_hz() -> u32 {
     phosphor_core::audio::host_sample_rate() as u32
@@ -192,30 +204,64 @@ impl Speech {
     }
 }
 
-#[derive(Saveable)]
+/// Regions of the sound 6502's 64 KB space.
+///
+/// The I/O windows carry no bytes; they are here so a watchpoint hit and a
+/// memory viewer can name what answers at an address instead of reporting it
+/// unmapped. Decode inside `Io` is finer than a region can be (four latches
+/// picked out of address bits 4 through 6), which is what the `Bus` impl below
+/// still does by hand.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, MemoryRegion)]
+pub enum Region {
+    Ram = 1,
+    /// The SNDEXT window, mapped only on the boards that fit speech.
+    Speech = 2,
+    Io = 3,
+    Rom = 4,
+}
+
+#[derive(BusDebug, Saveable)]
 #[save_version(1)]
 #[save_tlv]
 pub struct AtariSystem1Sound {
+    /// `index = 1` is [`SOUND_CPU_INDEX`] spelled as a literal, which is what
+    /// the attribute parser takes.
+    ///
+    /// `BusDebug` is derived here rather than left to the machine: the sound
+    /// 6502 is a field of *this* struct, so a derive running on the main board
+    /// could never see it, and until it did, `cpu_count()` was 1 and every
+    /// per-CPU debug call reached only the 68010. The machine merges this tree
+    /// in with `#[debug_bus]` on its own `sound` field.
+    #[debug_cpu("M6502 (sound)", index = 1)]
     #[save(id = 1)]
     cpu: M6502,
     /// Everything the sound CPU talks to. Held apart from the CPU so a cycle
     /// dispatches at a concrete bus rather than a trait object -- see
     /// `docs/designs/concrete-bus-dispatch.md`.
+    #[debug_bus]
     #[save(id = 2)]
     bus: AtariSystem1SoundBus,
 }
 
 /// The sound 6502's bus: POKEY, YM2151, optional speech, memory, and the
 /// inter-CPU latches.
-#[derive(Saveable)]
-#[save_version(1)]
+///
+/// Version 2 moved RAM and ROM into the address space, so id 1 is now the
+/// space's own body rather than a flat 4 KB of RAM.
+#[derive(BusDebug, Saveable)]
+#[save_version(2)]
 #[save_tlv]
 struct AtariSystem1SoundBus {
+    /// RAM, ROM, and named (byte-less) entries for the I/O windows.
+    ///
+    /// This is what carries watchpoints and the write-event ring on the sound
+    /// side: before it, `watch_cpu`, `hits()` and `events()` could not see a
+    /// single sound-CPU access, because the bus indexed plain arrays and there
+    /// was nothing between the CPU and the bytes to observe it.
+    #[debug_map(cpu = 1)]
     #[save(id = 1)]
-    sound_ram: Box<[u8; 0x1000]>,
-    /// ROM mapped at 0x4000-0xFFFF (0x4000-0x7FFF is empty on marble).
-    #[save_skip]
-    sound_rom: Box<[u8; 0xC000]>,
+    map: AddressSpace16,
     #[save(id = 2)]
     pokey: Pokey,
     #[save(id = 3)]
@@ -270,8 +316,7 @@ impl AtariSystem1Sound {
         Self {
             cpu: M6502::new(),
             bus: AtariSystem1SoundBus {
-                sound_ram: Box::new([0; 0x1000]),
-                sound_rom: Box::new([0xFF; 0xC000]),
+                map: AtariSystem1SoundBus::build_map(speech),
                 pokey: Pokey::with_clock(SOUND_CLOCK_HZ, audio_sample_rate_hz()),
                 ym: Ym2151::new(),
                 speech: speech.then(Speech::new),
@@ -291,8 +336,9 @@ impl AtariSystem1Sound {
 
     /// Load the 64 KB sound region; its 0x4000-0xFFFF window maps to ROM.
     pub fn load_rom(&mut self, sound_image: &[u8]) {
-        let src = &sound_image[0x4000..0x10000];
-        self.bus.sound_rom.copy_from_slice(src);
+        self.bus
+            .map
+            .load_region(Region::Rom, &sound_image[0x4000..0x10000]);
     }
 
     pub fn reset(&mut self) {
@@ -377,6 +423,18 @@ impl AtariSystem1Sound {
             self.bus.reset_pending = false;
             self.cpu.reset(&mut self.bus, BusMaster::Cpu(1));
         }
+        // Bus dispatch cannot read CPU state while the CPU is mid-cycle, so the
+        // cycle and instruction address a hit is attributed to are latched here.
+        // The cycle is the board's own, which is the only clock a sound-CPU
+        // access has: this board runs off its own divider of the master crystal
+        // and is frozen outright while the main CPU holds it in reset.
+        if self.bus.map.debug_active() {
+            let pc = self
+                .cpu
+                .at_instruction_boundary()
+                .then_some(self.cpu.pc as u32);
+            self.bus.map.latch_access_context(self.bus.clock, pc);
+        }
         self.cpu.execute_cycle(&mut self.bus, BusMaster::Cpu(1));
         self.bus.pokey.tick();
         self.bus.ym.tick(YM_CLOCKS_PER_TICK);
@@ -417,6 +475,17 @@ impl AtariSystem1Sound {
         out
     }
 
+    /// Whether the sound 6502 is between instructions.
+    ///
+    /// The machine folds this into the bit-1 position of the instruction-boundary
+    /// mask its `debug_tick` returns, which is what the debugger's "step
+    /// instruction" waits on. Without it, selecting the sound CPU as the step
+    /// target waits on a bit that is never set. It reports false while the main
+    /// CPU holds the board in reset, because a frozen CPU reaches no boundary.
+    pub fn at_instruction_boundary(&self) -> bool {
+        !self.bus.held_reset && self.cpu.at_instruction_boundary()
+    }
+
     /// (held_reset, sound-CPU cycles run, command_pending, response_pending) —
     /// headless bring-up diagnostics.
     pub fn debug_state(&self) -> (bool, u64, bool, bool) {
@@ -437,6 +506,83 @@ impl Default for AtariSystem1Sound {
 }
 
 impl AtariSystem1SoundBus {
+    /// Lay out the sound CPU's space, with the mirrors folded out.
+    ///
+    /// The board decodes on single address bits, so RAM answers again at
+    /// `0x2000` and the I/O block again at `0x3800`; both are declared as
+    /// mirrors so a hit or a trace event resolves to the region rather than to
+    /// an address nobody named. The two 2 KB holes at `0x1100` and `0x3000`
+    /// stay unmapped, which is what they read back as.
+    ///
+    /// ROM fills with `0xFF` rather than the zeroes an allocation gives,
+    /// because that is what an unpopulated socket reads back as (marble leaves
+    /// `0x4000-0x7FFF` empty) and what a board built before its ROM is loaded
+    /// has to boot through.
+    fn build_map(speech: bool) -> AddressSpace16 {
+        let mut map = AddressSpace16::new();
+        map.region(
+            Region::Ram,
+            "Sound RAM",
+            0x0000,
+            0x1000,
+            AccessKind::ReadWrite,
+        )
+        .region(Region::Io, "Sound I/O", 0x1800, 0x0800, AccessKind::Io)
+        .region(
+            Region::Rom,
+            "Sound ROM",
+            0x4000,
+            0xC000,
+            AccessKind::ReadOnly,
+        )
+        .mirror(0x2000, 0x0000, 0x1000)
+        .mirror(0x3800, 0x1800, 0x0800);
+        // Only a board that fits the TMS5220 and its VIA decodes the window; on
+        // marble it is open bus, and saying so is the point of leaving it out.
+        if speech {
+            map.region(
+                Region::Speech,
+                "Speech (VIA6522)",
+                0x1000,
+                0x0100,
+                AccessKind::Io,
+            );
+        }
+        map.region_data_mut(Region::Rom).fill(0xFF);
+        map
+    }
+
+    /// The read decode, without the watchpoint check the `Bus` impl wraps it in.
+    /// Split out so the check happens on one path whichever arm answered.
+    fn read_inner(&mut self, addr: u16) -> u8 {
+        if addr >= 0x4000 {
+            return self.map.read_backing(addr);
+        }
+        // Speech window (VIA6522 bridge to the TMS5220), present only on speech
+        // games. The board wires the TMS status onto the VIA's port pins.
+        if let Some(speech) = &mut self.speech
+            && (0x1000..=0x100F).contains(&addr)
+        {
+            return speech.read(addr & 0x0F);
+        }
+        if addr & 0x1800 == 0x1800 {
+            match addr & 0x70 {
+                0x00 => self.ym.read(addr & 1),
+                0x10 => {
+                    self.command_pending = false; // reading the latch acknowledges it
+                    self.soundlatch
+                }
+                0x20 => self.read_1820(),
+                0x70 => self.pokey.read(addr & 0x0F),
+                _ => 0xFF,
+            }
+        } else if addr & 0x1000 == 0 {
+            self.map.read_backing(addr)
+        } else {
+            0xFF
+        }
+    }
+
     /// The 0x1820 status port: coin inputs, plus the buffer-full flags.
     fn read_1820(&self) -> u8 {
         // Coins (bits 0-2, active-low) and bit 7 idle high; a pressed coin mech
@@ -462,36 +608,15 @@ impl Bus for AtariSystem1SoundBus {
         false
     }
 
-    fn read(&mut self, _master: BusMaster, addr: u16) -> u8 {
-        if addr >= 0x4000 {
-            return self.sound_rom[(addr - 0x4000) as usize];
-        }
-        // Speech window (VIA6522 bridge to the TMS5220), present only on speech
-        // games. The board wires the TMS status onto the VIA's port pins.
-        if let Some(speech) = &mut self.speech
-            && (0x1000..=0x100F).contains(&addr)
-        {
-            return speech.read(addr & 0x0F);
-        }
-        if addr & 0x1800 == 0x1800 {
-            match addr & 0x70 {
-                0x00 => self.ym.read(addr & 1),
-                0x10 => {
-                    self.command_pending = false; // reading the latch acknowledges it
-                    self.soundlatch
-                }
-                0x20 => self.read_1820(),
-                0x70 => self.pokey.read(addr & 0x0F),
-                _ => 0xFF,
-            }
-        } else if addr & 0x1000 == 0 {
-            self.sound_ram[(addr & 0x0FFF) as usize]
-        } else {
-            0xFF
-        }
+    fn read(&mut self, master: BusMaster, addr: u16) -> u8 {
+        let data = self.read_inner(addr);
+        self.map.watch_read(SOUND_CPU_INDEX, master, addr, data);
+        data
     }
 
-    fn write(&mut self, _master: BusMaster, addr: u16, data: u8) {
+    fn write(&mut self, master: BusMaster, addr: u16, data: u8) {
+        // Before the side effect, so a hit's metadata snapshot is pre-write.
+        self.map.watch_write(SOUND_CPU_INDEX, master, addr, data);
         if addr >= 0x4000 {
             return; // ROM
         }
@@ -518,7 +643,7 @@ impl Bus for AtariSystem1SoundBus {
                 _ => {}
             }
         } else if addr & 0x1000 == 0 {
-            self.sound_ram[(addr & 0x0FFF) as usize] = data;
+            self.map.write_backing(addr, data);
         }
     }
 
@@ -534,13 +659,28 @@ impl Bus for AtariSystem1SoundBus {
 }
 
 impl phosphor_core::core::debug::Debuggable for AtariSystem1Sound {
+    /// The board's own latches, then the YM2151's, prefixed `YM_`: the same
+    /// shape the JSA-I board presents, because it is the same question asked of
+    /// the successor board.
+    ///
+    /// The chip's are folded in rather than left to a device entry of their own
+    /// because the bus debug tree names one device per board field, and a board
+    /// that hides its chips is a board no script can ask anything about. The
+    /// POKEY is deliberately not folded: its eleven rows are all sound, and
+    /// nothing about this board reinterprets them the way `CT1` and `CT2` are
+    /// reinterpreted on the JSA-I.
     fn debug_registers(&self) -> Vec<phosphor_core::core::debug::DebugRegister> {
         use phosphor_core::core::debug::DebugRegister;
-        vec![
+        let mut regs = vec![
             DebugRegister {
                 name: "SND_CLK",
                 value: self.bus.clock,
                 width: 32,
+            },
+            DebugRegister {
+                name: "OUTLATCH",
+                value: self.bus.outlatch as u64,
+                width: 8,
             },
             DebugRegister {
                 name: "CMD",
@@ -557,7 +697,24 @@ impl phosphor_core::core::debug::Debuggable for AtariSystem1Sound {
                 value: u64::from(self.bus.held_reset),
                 width: 1,
             },
-        ]
+        ];
+        // Prefixed against a fixed table rather than by formatting a string.
+        // `DebugRegister::name` is a `&'static str`, and a script polling this
+        // once a frame would leak a fresh allocation every time it asked.
+        regs.extend(self.bus.ym.debug_registers().into_iter().map(|r| {
+            let name = match r.name {
+                "ADDR" => "YM_ADDR",
+                "STATUS" => "YM_STATUS",
+                "CTRL" => "YM_CTRL",
+                "IRQ" => "YM_IRQ",
+                "CT1" => "YM_CT1",
+                "CT2" => "YM_CT2",
+                "PAN" => "YM_PAN",
+                other => other,
+            };
+            DebugRegister { name, ..r }
+        }));
+        regs
     }
 }
 
@@ -609,6 +766,126 @@ mod tests {
         for _ in 0..cycles {
             snd.tick();
         }
+    }
+
+    /// The board answers for CPU 1 across the whole debug surface.
+    ///
+    /// It is one test rather than four because the three things it checks are
+    /// one fact: the machine's index space reaches into this board. A board that
+    /// listed the CPU but served no memory for it would disassemble garbage, and
+    /// one that served memory under no CPU would have nothing to disassemble
+    /// with.
+    #[test]
+    fn the_sound_cpu_is_reachable_as_cpu_one() {
+        use phosphor_core::core::debug::BusDebug;
+
+        let snd = board_with_echo_program();
+
+        let cpus = snd.cpus();
+        assert_eq!(cpus.len(), 1, "the board contributes exactly its own CPU");
+        assert_eq!(cpus[0].0, "M6502 (sound)");
+
+        // Reads are answered at index 1 and nowhere else, which is what keeps
+        // the main board's CPU 0 from being shadowed when the trees merge.
+        assert_eq!(snd.read(SOUND_CPU_INDEX, 0x8000), Some(0x58));
+        assert_eq!(snd.read(0, 0x8000), None);
+
+        // The reset vector the echo program installs, read the way a script
+        // reads it.
+        let lo = snd.read(SOUND_CPU_INDEX, 0xFFFC).unwrap();
+        let hi = snd.read(SOUND_CPU_INDEX, 0xFFFD).unwrap();
+        assert_eq!(u16::from_le_bytes([lo, hi]), 0x8000);
+
+        // RAM answers through its mirror at 0x2000 as well as at its base.
+        assert_eq!(snd.read(SOUND_CPU_INDEX, 0x2000), Some(0x00));
+        // I/O reads back as I/O rather than as a byte no chip presented, and
+        // the hole the board does not decode reads back as unmapped.
+        assert_eq!(
+            snd.peek(SOUND_CPU_INDEX, 0x1800),
+            phosphor_core::core::DebugRead::Io
+        );
+        assert_eq!(
+            snd.peek(SOUND_CPU_INDEX, 0x3000),
+            phosphor_core::core::DebugRead::Unmapped
+        );
+        assert!(snd.memory_map(SOUND_CPU_INDEX).is_some());
+    }
+
+    /// A CPU the debug bus lists has to reach the instruction-boundary mask, or
+    /// the debugger's "step instruction" waits on a bit that never sets and
+    /// hangs. On this board the answer is conditional: it reports no boundary
+    /// while the main CPU holds it down, because a frozen CPU reaches none.
+    #[test]
+    fn the_sound_cpu_reaches_an_instruction_boundary_once_released() {
+        let mut snd = board_with_echo_program();
+
+        assert!(snd.debug_state().0, "starts held in reset");
+        run(&mut snd, 100);
+        assert!(
+            !snd.at_instruction_boundary(),
+            "held down, so it reaches no boundary to step to"
+        );
+
+        snd.set_reset(false);
+        // Far more than one 6502 instruction; the bound is what turns a hang in
+        // the debugger into a failure here.
+        let mut reached = false;
+        for _ in 0..100 {
+            snd.tick();
+            reached |= snd.at_instruction_boundary();
+        }
+        assert!(reached, "released, so it steps");
+    }
+
+    /// A watchpoint on the YM2151's address latch catches the sound program
+    /// selecting a register, with the board's own cycle and the sound CPU's PC.
+    ///
+    /// This is the whole point of routing the bus through an address space: none
+    /// of it fired before, because there was nothing between the CPU and the
+    /// bytes to observe the access.
+    #[test]
+    fn a_watchpoint_catches_the_sound_program_writing_the_ym() {
+        use phosphor_core::core::debug::BusDebug;
+        use phosphor_core::core::watchpoint::WatchpointKind;
+
+        let mut image = vec![0xFFu8; 0x10000];
+        // STA $1800 in a loop, so the latch is written once per pass.
+        let prog: &[u8] = &[
+            0xA9, 0x1B, // LDA #$1B
+            0x8D, 0x00, 0x18, // STA $1800
+            0x4C, 0x00, 0x80, // JMP $8000
+        ];
+        image[0x8000..0x8000 + prog.len()].copy_from_slice(prog);
+        image[0xFFFC] = 0x00;
+        image[0xFFFD] = 0x80;
+
+        let mut snd = AtariSystem1Sound::new(false);
+        snd.load_rom(&image);
+        snd.set_reset(false); // the main CPU releases the sound CPU
+
+        snd.set_watchpoint(SOUND_CPU_INDEX, 0x1800, WatchpointKind::Write);
+        run(&mut snd, 200);
+
+        let hit = snd
+            .take_watchpoint_hit()
+            .expect("the store to the address latch fires the watchpoint");
+        assert_eq!(hit.cpu_index, SOUND_CPU_INDEX);
+        assert_eq!(hit.addr, 0x1800);
+        assert_eq!(hit.value, 0x1B);
+        assert_eq!(hit.region, Some("Sound I/O"), "named by the region map");
+        assert_eq!(
+            hit.pc,
+            Some(0x8002),
+            "the STA's own address, from the context the board latches"
+        );
+        assert!(hit.cycle > 0, "stamped with the board's own clock");
+
+        // A watchpoint set on CPU 0 is a different address space and must not
+        // catch this board's accesses.
+        snd.clear_all_watchpoints();
+        snd.set_watchpoint(0, 0x1800, WatchpointKind::Write);
+        run(&mut snd, 200);
+        assert!(snd.take_watchpoint_hit().is_none());
     }
 
     #[test]
@@ -691,7 +968,7 @@ mod tests {
         let mut snd = board_with_echo_program();
         snd.set_reset(false);
         run(&mut snd, 30);
-        snd.bus.sound_ram[0x100] = 0x77;
+        snd.bus.map.region_data_mut(Region::Ram)[0x100] = 0x77;
         snd.bus.soundlatch = 0x12;
         snd.bus.command_pending = true;
 
@@ -702,7 +979,7 @@ mod tests {
         let mut snd2 = board_with_echo_program();
         let mut r = StateReader::new(&bytes);
         snd2.load_state(&mut r).unwrap();
-        assert_eq!(snd2.bus.sound_ram[0x100], 0x77);
+        assert_eq!(snd2.bus.map.region_data(Region::Ram)[0x100], 0x77);
         assert_eq!(snd2.bus.soundlatch, 0x12);
         assert!(snd2.bus.command_pending);
     }

@@ -95,15 +95,26 @@
 //! cores' agreement with it is not established.
 
 use phosphor_core::core::bus::InterruptState;
-use phosphor_core::core::{Bus, BusMaster};
+use phosphor_core::core::{AccessKind, AddressSpace16, Bus, BusMaster};
 use phosphor_core::cpu::Cpu;
 use phosphor_core::cpu::m6502::M6502;
 use phosphor_core::device::pokey::Pokey;
 use phosphor_core::device::ym2151::Ym2151;
-use phosphor_macros::Saveable;
+use phosphor_macros::{BusDebug, MemoryRegion, Saveable};
 
 /// Sound CPU and POKEY clock: 3.579545 MHz / 2.
 pub const SOUND_CLOCK_HZ: u32 = 1_789_772;
+
+/// Debug index of the sound 6502 within the machine that carries this board.
+///
+/// Every JSA-I game in the registry is one 68010 (index 0) plus this board, and
+/// the board already names itself [`BusMaster::Cpu(1)`](BusMaster) on every bus
+/// access, so the index is a property of the board's place in those machines
+/// rather than something a host passes in. It is the same fact that
+/// `#[debug_map(cpu = 1)]` and `#[debug_cpu(..., index = 1)]` below state to the
+/// derive; a machine that put a second main CPU at index 1 would have to revisit
+/// all three together.
+pub const SOUND_CPU_INDEX: usize = 1;
 
 /// The YM2151 takes the whole crystal, twice the sound CPU's rate, so it
 /// advances two chip clocks for every sound-CPU cycle.
@@ -185,6 +196,37 @@ impl OnePole {
 /// never writes the register audible rather than silent.
 const MIX_FULL: u8 = 0xFE;
 
+// ---------------------------------------------------------------------------
+// Sound-CPU address space
+// ---------------------------------------------------------------------------
+
+/// Regions of the sound 6502's 64 KB space.
+///
+/// The three I/O windows carry no bytes; they are here so a watchpoint hit and a
+/// memory viewer can name what answers at an address instead of reporting it
+/// unmapped. Decode inside them is finer than a region can be (the I/O block
+/// picks a latch out of three address bits), which is what the `Bus` impl below
+/// still does by hand.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, MemoryRegion)]
+pub enum Region {
+    Ram = 1,
+    Ym = 2,
+    Io = 3,
+    Pokey = 4,
+    /// The four 4 KB pages the `0x3000` window selects between. Registered as
+    /// backing without a mapping of its own: [`Jsa1Bus::select_bank`] points the
+    /// window's pages at one of them, which is also how a load restores the
+    /// selection (the map saves its own page table).
+    BankPages = 5,
+    /// Fixed ROM from `0x4000` up.
+    Rom = 6,
+}
+
+/// First page of the banked window, and how many pages it spans.
+const BANK_WINDOW_PAGE: u8 = 0x30;
+const BANK_WINDOW_PAGES: u8 = 0x10;
+
 /// Which optional parts this particular board carries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum JsaPokey {
@@ -195,14 +237,24 @@ pub enum JsaPokey {
 }
 
 /// The JSA-I sound board.
-#[derive(Saveable)]
+///
+/// `BusDebug` is derived rather than left to the machine that owns the board:
+/// the sound 6502 is a field of *this* struct, so a derive running on the main
+/// board could never see it, and until it did, `cpu_count()` was 1 and every
+/// per-CPU debug call reached only the 68010. The machine merges this tree in
+/// with `#[debug_bus]` on its own `sound` field.
+#[derive(BusDebug, Saveable)]
 #[save_version(1)]
 #[save_tlv]
 pub struct AtariJsa1 {
+    /// `index = 1` is [`SOUND_CPU_INDEX`] spelled as a literal, which is what
+    /// the attribute parser takes.
+    #[debug_cpu("M6502 (sound)", index = 1)]
     #[save(id = 1)]
     cpu: M6502,
     /// Everything the sound CPU talks to. Held apart from the CPU so a cycle
     /// dispatches at a concrete bus rather than a trait object.
+    #[debug_bus]
     #[save(id = 2)]
     bus: Jsa1Bus,
 
@@ -224,18 +276,22 @@ pub struct AtariJsa1 {
     shunt_closed_a: f32,
 }
 
-#[derive(Saveable)]
-#[save_version(1)]
+/// Version 2 moved RAM and both ROM windows into the address space, so id 1 is
+/// now the space's own body rather than a flat 8 KB of RAM.
+#[derive(BusDebug, Saveable)]
+#[save_version(2)]
 #[save_tlv]
 struct Jsa1Bus {
+    /// RAM, the two ROM windows, and named (byte-less) entries for the three
+    /// I/O windows.
+    ///
+    /// This is what carries watchpoints and the write-event ring on the sound
+    /// side: before it, `watch_cpu`, `hits()` and `events()` could not see a
+    /// single sound-CPU access, because the bus indexed plain arrays and there
+    /// was nothing between the CPU and the bytes to observe it.
+    #[debug_map(cpu = 1)]
     #[save(id = 1)]
-    ram: Box<[u8; 0x2000]>,
-    /// Fixed ROM at `0x4000-0xFFFF`.
-    #[save_skip]
-    rom: Box<[u8; 0xC000]>,
-    /// The four 4 KB pages the `0x3000` window selects between.
-    #[save_skip]
-    bank_pages: Box<[u8; 0x4000]>,
+    map: AddressSpace16,
     /// Which page the window currently presents.
     #[save(id = 2)]
     bank: u8,
@@ -310,9 +366,7 @@ impl AtariJsa1 {
             shunt_closed_a: OnePole::coefficient(SHUNT_CLOSED_HZ, rate),
             cpu: M6502::new(),
             bus: Jsa1Bus {
-                ram: Box::new([0; 0x2000]),
-                rom: Box::new([0xFF; 0xC000]),
-                bank_pages: Box::new([0xFF; 0x4000]),
+                map: Jsa1Bus::build_map(),
                 bank: 0,
                 pokey: (pokey == JsaPokey::Fitted)
                     .then(|| Pokey::with_clock(SOUND_CLOCK_HZ, audio_sample_rate_hz())),
@@ -343,8 +397,12 @@ impl AtariJsa1 {
         if image.len() < 0x10000 {
             return;
         }
-        self.bus.bank_pages.copy_from_slice(&image[0x0000..0x4000]);
-        self.bus.rom.copy_from_slice(&image[0x4000..0x10000]);
+        self.bus
+            .map
+            .load_region(Region::BankPages, &image[0x0000..0x4000]);
+        self.bus
+            .map
+            .load_region(Region::Rom, &image[0x4000..0x10000]);
     }
 
     pub fn reset(&mut self) {
@@ -356,7 +414,7 @@ impl AtariJsa1 {
             pokey.reset();
         }
         self.bus.ym.reset();
-        self.bus.bank = 0;
+        self.bus.select_bank(0);
         self.bus.soundlatch = 0;
         self.bus.command_pending = false;
         self.bus.mainlatch = 0;
@@ -444,6 +502,18 @@ impl AtariJsa1 {
         if self.bus.irq_counter >= IRQ_PERIOD_CYCLES {
             self.bus.irq_counter = 0;
             self.bus.timed_int = true;
+        }
+
+        // Bus dispatch cannot read CPU state while the CPU is mid-cycle, so the
+        // cycle and instruction address a hit is attributed to are latched here.
+        // The cycle is the board's own, which is the only clock a sound-CPU
+        // access has: this board runs off its own crystal.
+        if self.bus.map.debug_active() {
+            let pc = self
+                .cpu
+                .at_instruction_boundary()
+                .then_some(self.cpu.pc as u32);
+            self.bus.map.latch_access_context(self.bus.clock, pc);
         }
 
         self.cpu.execute_cycle(&mut self.bus, BusMaster::Cpu(1));
@@ -554,6 +624,16 @@ impl AtariJsa1 {
         }
     }
 
+    /// Whether the sound 6502 is between instructions.
+    ///
+    /// The machine folds this into the bit-1 position of the instruction-boundary
+    /// mask its `debug_tick` returns, which is what the debugger's "step
+    /// instruction" waits on. Without it, selecting the sound CPU as the step
+    /// target waits on a bit that is never set.
+    pub fn at_instruction_boundary(&self) -> bool {
+        self.cpu.at_instruction_boundary()
+    }
+
     /// Which of the four ROM pages the `0x3000` window presents.
     pub fn bank(&self) -> u8 {
         self.bus.bank
@@ -577,6 +657,50 @@ impl Default for AtariJsa1 {
 }
 
 impl Jsa1Bus {
+    /// Lay out the sound CPU's space. Both ROM windows fill with `0xFF` rather
+    /// than the zeroes an allocation gives, because that is what an unpopulated
+    /// socket reads back as and what a board built before its ROM is loaded has
+    /// to boot through.
+    fn build_map() -> AddressSpace16 {
+        let mut map = AddressSpace16::new();
+        map.region(
+            Region::Ram,
+            "Sound RAM",
+            0x0000,
+            0x2000,
+            AccessKind::ReadWrite,
+        )
+        .region(Region::Ym, "YM2151", 0x2000, 0x0800, AccessKind::Io)
+        .region(Region::Io, "Board I/O", 0x2800, 0x0400, AccessKind::Io)
+        .region(Region::Pokey, "POKEY", 0x2C00, 0x0400, AccessKind::Io)
+        .backing_region(Region::BankPages, "Banked sound ROM", 0x4000)
+        .region(
+            Region::Rom,
+            "Sound ROM",
+            0x4000,
+            0xC000,
+            AccessKind::ReadOnly,
+        );
+        map.region_data_mut(Region::BankPages).fill(0xFF);
+        map.region_data_mut(Region::Rom).fill(0xFF);
+        map.remap_pages(BANK_WINDOW_PAGE, BANK_WINDOW_PAGES, Region::BankPages, 0);
+        map
+    }
+
+    /// Point the `0x3000` window at one of the four pages, and record which.
+    ///
+    /// The page table is part of what the address space saves, so a load
+    /// restores the window without this being called again.
+    fn select_bank(&mut self, bank: u8) {
+        self.bank = bank & 3;
+        self.map.remap_pages(
+            BANK_WINDOW_PAGE,
+            BANK_WINDOW_PAGES,
+            Region::BankPages,
+            u32::from(self.bank) * 0x1000,
+        );
+    }
+
     /// The `/RDIO` port: coin switches, the two handshake flags and self-test.
     fn read_rdio(&self) -> u8 {
         // Bit 6 idles high and falls while a command is waiting, which is the
@@ -611,7 +735,7 @@ impl Jsa1Bus {
     /// The `/WRIO` latch: ROM bank, coin counters and the YM2151 reset line.
     fn write_wrio(&mut self, data: u8) {
         self.wrio = data;
-        self.bank = (data >> 6) & 3;
+        self.select_bank(data >> 6);
         // Bit 0 is the YM2151's reset, active low. Bits 1 through 3 are the
         // speech chip's strobes and pitch select, which no board here fits.
         if data & 0x01 == 0 {
@@ -628,9 +752,9 @@ impl Bus for Jsa1Bus {
         false
     }
 
-    fn read(&mut self, _master: BusMaster, addr: u16) -> u8 {
-        match addr {
-            0x0000..=0x1FFF => self.ram[addr as usize],
+    fn read(&mut self, master: BusMaster, addr: u16) -> u8 {
+        let data = match addr {
+            0x0000..=0x1FFF => self.map.read_backing(addr),
             0x2000..=0x27FF => self.ym.read(addr & 1),
             // The I/O block decodes on address bits 1, 2 and 9 only, so each
             // strobe answers across a wide span of the window.
@@ -649,17 +773,20 @@ impl Bus for Jsa1Bus {
                 _ => 0xFF,
             },
             0x2C00..=0x2C0F => self.pokey.as_mut().map_or(0xFF, |p| p.read(addr & 0x0F)),
-            0x3000..=0x3FFF => {
-                self.bank_pages[(self.bank as usize) * 0x1000 + (addr & 0x0FFF) as usize]
-            }
-            0x4000..=0xFFFF => self.rom[(addr - 0x4000) as usize],
+            // The banked window and the fixed ROM are one arm: the page table
+            // resolves the window to whichever page is selected.
+            0x3000..=0xFFFF => self.map.read_backing(addr),
             _ => 0xFF,
-        }
+        };
+        self.map.watch_read(SOUND_CPU_INDEX, master, addr, data);
+        data
     }
 
-    fn write(&mut self, _master: BusMaster, addr: u16, data: u8) {
+    fn write(&mut self, master: BusMaster, addr: u16, data: u8) {
+        // Before the side effect, so a hit's metadata snapshot is pre-write.
+        self.map.watch_write(SOUND_CPU_INDEX, master, addr, data);
         match addr {
-            0x0000..=0x1FFF => self.ram[addr as usize] = data,
+            0x0000..=0x1FFF => self.map.write_backing(addr, data),
             0x2000..=0x27FF => self.ym.write(addr & 1, data),
             0x2800..=0x2BFF => match addr & 0x206 {
                 0x006 => self.timed_int = false,
@@ -1039,6 +1166,94 @@ mod tests {
         jsa.write_command(0x33);
         run(&mut jsa, 400);
         assert_eq!(jsa.read_response(), 0x33);
+    }
+
+    /// The board answers for CPU 1 across the whole debug surface.
+    ///
+    /// It is one test rather than four because the three things it checks are
+    /// one fact: the machine's index space reaches into this board. A board that
+    /// listed the CPU but served no memory for it would disassemble garbage, and
+    /// one that served memory under no CPU would have nothing to disassemble
+    /// with.
+    #[test]
+    fn the_sound_cpu_is_reachable_as_cpu_one() {
+        use phosphor_core::core::debug::BusDebug;
+
+        let jsa = board_with_echo_program();
+
+        let cpus = jsa.cpus();
+        assert_eq!(cpus.len(), 1, "the board contributes exactly its own CPU");
+        assert_eq!(cpus[0].0, "M6502 (sound)");
+
+        // Reads are answered at index 1 and nowhere else, which is what keeps
+        // the main board's CPU 0 from being shadowed when the trees merge.
+        assert_eq!(jsa.read(SOUND_CPU_INDEX, 0xF000), Some(0xAD));
+        assert_eq!(jsa.read(0, 0xF000), None);
+
+        // The reset vector the echo program installs, read the way a script
+        // reads it.
+        let lo = jsa.read(SOUND_CPU_INDEX, 0xFFFC).unwrap();
+        let hi = jsa.read(SOUND_CPU_INDEX, 0xFFFD).unwrap();
+        assert_eq!(u16::from_le_bytes([lo, hi]), 0xF000);
+
+        // I/O reads back as I/O rather than as a byte the chip never presented.
+        assert_eq!(
+            jsa.peek(SOUND_CPU_INDEX, 0x2000),
+            phosphor_core::core::DebugRead::Io
+        );
+        assert!(jsa.memory_map(SOUND_CPU_INDEX).is_some());
+    }
+
+    /// A watchpoint on the YM2151's address latch catches the sound program
+    /// selecting a register, with the board's own cycle and the sound CPU's PC.
+    ///
+    /// This is the whole point of routing the bus through an address space: none
+    /// of it fired before, because there was nothing between the CPU and the
+    /// bytes to observe the access.
+    #[test]
+    fn a_watchpoint_catches_the_sound_program_writing_the_ym() {
+        use phosphor_core::core::debug::BusDebug;
+        use phosphor_core::core::watchpoint::WatchpointKind;
+
+        let mut jsa = AtariJsa1::new(JsaPokey::Fitted);
+        let mut image = vec![0xFFu8; 0x10000];
+        // STA $2000 in a loop, so the latch is written once per pass.
+        let prog: &[u8] = &[
+            0xA9, 0x1B, // LDA #$1B
+            0x8D, 0x00, 0x20, // STA $2000
+            0x4C, 0x00, 0xF0, // JMP $F000
+        ];
+        image[0xF000..0xF000 + prog.len()].copy_from_slice(prog);
+        image[0xFFFC] = 0x00;
+        image[0xFFFD] = 0xF0;
+        image[0xFFFE] = 0x40; // IRQ -> an RTI, since the periodic interrupt fires
+        image[0xFFFF] = 0xF0;
+        image[0xF040] = 0x40;
+        jsa.load_rom(&image);
+
+        jsa.set_watchpoint(SOUND_CPU_INDEX, 0x2000, WatchpointKind::Write);
+        run(&mut jsa, 200);
+
+        let hit = jsa
+            .take_watchpoint_hit()
+            .expect("the store to the address latch fires the watchpoint");
+        assert_eq!(hit.cpu_index, SOUND_CPU_INDEX);
+        assert_eq!(hit.addr, 0x2000);
+        assert_eq!(hit.value, 0x1B);
+        assert_eq!(hit.region, Some("YM2151"), "named by the region map");
+        assert_eq!(
+            hit.pc,
+            Some(0xF002),
+            "the STA's own address, from the context the board latches"
+        );
+        assert!(hit.cycle > 0, "stamped with the board's own clock");
+
+        // A watchpoint set on CPU 0 is a different address space and must not
+        // catch this board's accesses.
+        jsa.clear_all_watchpoints();
+        jsa.set_watchpoint(0, 0x2000, WatchpointKind::Write);
+        run(&mut jsa, 200);
+        assert!(jsa.take_watchpoint_hit().is_none());
     }
 
     #[test]
