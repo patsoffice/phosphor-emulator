@@ -184,7 +184,12 @@ pub struct ScrambleBoard {
     #[save(id = 2)]
     pub(crate) video: GalaxianVideo,
 
+    /// Both attributes, for two different views of the same board: the device
+    /// entry is its latches (`COMMAND`, `CONTROL`, `FILTER`), and `#[debug_bus]`
+    /// merges the tree it derives for itself, which is how its Z80 becomes CPU 1
+    /// and its address space becomes CPU 1's.
     #[debug_device("Konami Sound")]
+    #[debug_bus]
     #[save(id = 3)]
     pub(crate) sound: KonamiSound,
 
@@ -465,10 +470,17 @@ impl ScrambleBoard {
         self.map.region_data_mut(Region::ObjRam).fill(0);
     }
 
-    /// Whether the CPU is at an instruction boundary. It lives on the machine,
-    /// which passes it back in.
-    pub fn instruction_boundaries(cpu: &Z80) -> u32 {
+    /// Which CPUs are between instructions, in `cpus()` order: the main Z80 in
+    /// bit 0, the Konami sound board's Z80 in bit 1. The debugger's "step
+    /// instruction" ticks until the bit for its step target is set, so a CPU
+    /// listed in `cpus()` but missing from this mask is a CPU that cannot be
+    /// stepped.
+    ///
+    /// The main CPU lives on the machine, which passes it back in; the sound
+    /// CPU is this board's own.
+    pub fn instruction_boundaries(&self, cpu: &Z80) -> u32 {
         u32::from(cpu.at_instruction_boundary())
+            | (u32::from(self.sound.at_instruction_boundary()) << 1)
     }
 
     // -----------------------------------------------------------------------
@@ -1026,7 +1038,7 @@ impl ScrambleSystem {
     /// Advance one CPU cycle, returning the instruction-boundary mask.
     pub fn step_cycle(&mut self) -> u32 {
         tick(&mut self.cpu, &mut self.board);
-        ScrambleBoard::instruction_boundaries(&self.cpu)
+        self.board.instruction_boundaries(&self.cpu)
     }
 
     /// Read the CPU-facing bus, side effects and all. Distinct from the
@@ -1357,7 +1369,7 @@ impl ScobraSystem {
     /// Advance one CPU cycle, returning the instruction-boundary mask.
     pub fn step_cycle(&mut self) -> u32 {
         tick(&mut self.cpu, &mut self.board);
-        ScrambleBoard::instruction_boundaries(&self.cpu)
+        self.board.instruction_boundaries(&self.cpu)
     }
 
     /// Read the CPU-facing bus, side effects and all. Distinct from the
@@ -1443,6 +1455,30 @@ crate::register_machine!(ScobraSystem, "scobra", &["scobra"], SCRAMBLE_CONTROLS)
 mod tests {
     use super::*;
     use phosphor_core::core::machine::DipSwitches;
+
+    /// Every CPU the debug bus lists can be stepped.
+    ///
+    /// The debugger's "step instruction" ticks until the bit for its step target
+    /// is set, so a CPU that appears in `cpus()` but never in the mask hangs the
+    /// debugger outright rather than failing. Registering the Konami board's Z80
+    /// without widening this mask would have done exactly that.
+    #[test]
+    fn every_listed_cpu_reaches_the_instruction_boundary_mask() {
+        use phosphor_core::core::debug::BusDebug;
+
+        let mut sys = ScrambleSystem::new();
+        let cpus = sys.cpus().len();
+        assert_eq!(cpus, 2, "the main Z80 and the sound board's");
+
+        let mut seen = 0u32;
+        for _ in 0..TIMING.cycles_per_frame() {
+            seen |= sys.step_cycle();
+            if seen == (1 << cpus) - 1 {
+                return;
+            }
+        }
+        panic!("mask reached {seen:#b} in a frame, with {cpus} CPUs listed");
+    }
 
     /// The sound board runs its crystal's rate, not a rounded one.
     ///

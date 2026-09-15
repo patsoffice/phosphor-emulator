@@ -47,11 +47,11 @@
 
 use crate::audio::{AudioResampler, host_sample_rate};
 use crate::core::debug::{DebugRegister, Debuggable};
-use crate::core::{Bus, BusMaster};
+use crate::core::{AccessKind, AddressSpace16, Bus, BusMaster};
 use crate::cpu::Cpu;
 use crate::cpu::z80::Z80;
 use crate::device::{Ay8910, I8255};
-use phosphor_macros::Saveable;
+use phosphor_macros::{BusDebug, MemoryRegion, Saveable};
 
 use super::Device;
 
@@ -60,24 +60,62 @@ const TIMER_PERIOD: u32 = 16 * 16 * 2 * 8 * 5 * 2; // 40960
 /// The point in the period where the final divide-by-2 high bit (B7) is set.
 const TIMER_HALF: u32 = 16 * 16 * 2 * 8 * 5; // 20480
 
+/// Debug index of the sound Z80 on the machines that carry this board.
+///
+/// Scramble, Super Cobra and Frogger are each one main Z80 (index 0) plus this
+/// board, so the index is a property of its place in those machines rather than
+/// something a host passes in. It is the same fact that `#[debug_map(cpu = 1)]`
+/// and `#[debug_cpu(..., index = 1)]` below state to the derive; all three move
+/// together.
+pub const SOUND_CPU_INDEX: usize = 1;
+
+/// Regions of the sound Z80's memory space.
+///
+/// The Z80's separate I/O space is where the AY-8910s answer, and an
+/// `AddressSpace16` covers memory only, so the PSG registers are not reachable
+/// through this map. They are reachable as the board's own device registers.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, MemoryRegion)]
+pub enum Region {
+    Rom = 1,
+    Ram = 2,
+    /// The discrete output-filter latch, which carries its data in the address
+    /// rather than on the data bus.
+    Filter = 3,
+}
+
 /// Konami Scramble sound board.
-#[derive(Saveable)]
+///
+/// `BusDebug` is derived rather than left to the machine that owns the board:
+/// the sound Z80 is a field of *this* struct, so a derive running on the main
+/// board could never see it, and until it did, `cpu_count()` was 1 on all three
+/// machines and every per-CPU debug call reached only the main Z80. The machine
+/// merges this tree in with `#[debug_bus]` on its own `sound` field.
+#[derive(BusDebug, Saveable)]
 #[save_version(1)]
 #[save_tlv]
 pub struct KonamiSound {
     // Sound CPU (Z80 @ ~1.79 MHz)
+    //
+    // `index = 1` is `SOUND_CPU_INDEX` spelled as a literal, which is what the
+    // attribute parser takes.
+    #[debug_cpu("Z80 Sound", index = 1)]
     #[save(id = 1)]
     cpu: Z80,
     /// Everything the sound CPU talks to. Held apart from the CPU so a cycle
     /// dispatches at a concrete bus rather than a trait object -- see
     /// `docs/designs/concrete-bus-dispatch.md`.
+    #[debug_bus]
     #[save(id = 2)]
     bus: KonamiSoundBus,
 }
 
 /// The sound Z80's bus: PSGs, memory, the PPI interface and the timer.
-#[derive(Saveable)]
-#[save_version(1)]
+///
+/// Version 2 moved RAM and ROM into the address space, so id 2 is now the
+/// space's own body rather than a flat 1 KB of RAM.
+#[derive(BusDebug, Saveable)]
+#[save_version(2)]
 #[save_tlv]
 struct KonamiSoundBus {
     // 1-2× AY-8910 PSGs (`num_ay` selects how many are populated)
@@ -89,11 +127,18 @@ struct KonamiSoundBus {
     num_ay: usize,
 
     // Memory
-    /// The sound ROM, which `load_rom` puts back.
-    #[save_skip]
-    rom: Vec<u8>, // 8 KB sound ROM
+    /// The 8 KB ROM, the 1 KB RAM and its mirrors, and a named entry for the
+    /// filter latch. Where RAM and the latch sit is the one thing the Frogger
+    /// wiring moves, so the map is built from that flag rather than decoded from
+    /// it on every access.
+    ///
+    /// This is what carries watchpoints and the write-event ring on the sound
+    /// side: before it, `watch_cpu`, `hits()` and `events()` could not see a
+    /// single sound-CPU access, because the bus indexed plain arrays and there
+    /// was nothing between the CPU and the bytes to observe it.
+    #[debug_map(cpu = 1)]
     #[save(id = 2)]
-    ram: [u8; 0x0400], // 1 KB RAM
+    map: AddressSpace16,
 
     // Command/control interface from the main board (8255 PPI on the real
     // hardware): port A out -> command latch, port B out -> control byte.
@@ -146,8 +191,7 @@ impl KonamiSound {
             bus: KonamiSoundBus {
                 ay: [Ay8910::new(cpu_clock_hz), Ay8910::new(cpu_clock_hz)],
                 num_ay: num_ay.clamp(1, 2),
-                rom: vec![0; 0x2000],
-                ram: [0; 0x0400],
+                map: KonamiSoundBus::build_map(false),
                 ppi: I8255::new(),
                 command: 0,
                 control: 0,
@@ -167,6 +211,9 @@ impl KonamiSound {
     pub fn new_frogger(cpu_clock_hz: u64) -> Self {
         let mut board = Self::new(1, cpu_clock_hz);
         board.bus.frogger = true;
+        // RAM and the filter latch move, so the map is rebuilt rather than
+        // patched: where they sit is how the board is wired, not state.
+        board.bus.map = KonamiSoundBus::build_map(true);
         board
     }
 
@@ -185,8 +232,19 @@ impl KonamiSound {
 
     /// Load sound ROM data (up to 8 KB).
     pub fn load_rom(&mut self, data: &[u8]) {
-        let len = data.len().min(self.bus.rom.len());
-        self.bus.rom[..len].copy_from_slice(&data[..len]);
+        let region = self.bus.map.region_data_mut(Region::Rom);
+        let len = data.len().min(region.len());
+        region[..len].copy_from_slice(&data[..len]);
+    }
+
+    /// Whether the sound Z80 is between instructions.
+    ///
+    /// The machine folds this into the bit-1 position of the
+    /// instruction-boundary mask its `debug_tick` returns, which is what the
+    /// debugger's "step instruction" waits on. Without it, selecting the sound
+    /// CPU as the step target waits on a bit that is never set.
+    pub fn at_instruction_boundary(&self) -> bool {
+        self.cpu.at_instruction_boundary()
     }
 
     // -----------------------------------------------------------------------
@@ -226,7 +284,20 @@ impl KonamiSound {
         let timer = b.timer();
         b.ay[0].set_port_b(timer);
 
-        self.cpu.execute_cycle(&mut self.bus, BusMaster::Cpu(0));
+        // Bus dispatch cannot read CPU state while the CPU is mid-cycle, so the
+        // cycle and instruction address a hit is attributed to are latched here.
+        // The cycle is the board's own, which is the only clock a sound-CPU
+        // access has.
+        if self.bus.map.debug_active() {
+            let pc = self
+                .cpu
+                .at_instruction_boundary()
+                .then_some(u32::from(self.cpu.pc));
+            self.bus.map.latch_access_context(self.bus.clock, pc);
+        }
+
+        self.cpu
+            .execute_cycle(&mut self.bus, BusMaster::Cpu(SOUND_CPU_INDEX));
 
         let b = &mut self.bus;
         b.ay[0].tick();
@@ -263,11 +334,12 @@ impl KonamiSound {
 
     /// Reset the board to power-on state.
     pub fn reset(&mut self) {
-        self.cpu.reset(&mut self.bus, BusMaster::Cpu(0));
+        self.cpu
+            .reset(&mut self.bus, BusMaster::Cpu(SOUND_CPU_INDEX));
         self.bus.ay[0].reset();
         self.bus.ay[1].reset();
         self.bus.ppi.reset();
-        self.bus.ram = [0; 0x0400];
+        self.bus.map.region_data_mut(Region::Ram).fill(0);
         self.bus.command = 0;
         self.bus.control = 0;
         self.bus.irq_pending = false;
@@ -282,37 +354,78 @@ impl KonamiSound {
 // Bus implementation (sound Z80's memory + I/O map)
 // ---------------------------------------------------------------------------
 
+impl KonamiSoundBus {
+    /// Lay out the sound Z80's memory space for one of the two wirings.
+    ///
+    /// The 1 KB RAM is decoded on ten address lines and answers repeatedly
+    /// across its window, so the repeats are declared as mirrors: a watchpoint
+    /// is set on the address the CPU puts on the bus, and the program is free to
+    /// use any of them.
+    fn build_map(frogger: bool) -> AddressSpace16 {
+        // Frogger relocates RAM to 0x4000-0x5FFF and the filter latch to
+        // 0x6000-0x7FFF; the standard board has them at 0x8000 and 0x9000.
+        let (ram_base, ram_window, filter_base, filter_len) = if frogger {
+            (0x4000u16, 0x2000u32, 0x6000u16, 0x2000u32)
+        } else {
+            (0x8000u16, 0x1000u32, 0x9000u16, 0x1000u32)
+        };
+
+        let mut map = AddressSpace16::new();
+        map.region(
+            Region::Rom,
+            "Sound ROM",
+            0x0000,
+            0x2000,
+            AccessKind::ReadOnly,
+        )
+        .region(
+            Region::Ram,
+            "Sound RAM",
+            ram_base,
+            0x0400,
+            AccessKind::ReadWrite,
+        )
+        .region(
+            Region::Filter,
+            "Filter latch",
+            filter_base,
+            filter_len,
+            AccessKind::Io,
+        );
+        let mut mirror = ram_base + 0x0400;
+        while u32::from(mirror - ram_base) < ram_window {
+            map.mirror(mirror, ram_base, 0x0400);
+            mirror += 0x0400;
+        }
+        map
+    }
+
+    /// True if `addr` lands in the RAM window, mirrors included.
+    #[inline]
+    fn is_ram(&self, addr: u16) -> bool {
+        self.map.page(addr).region_id == Region::RAM
+    }
+}
+
 impl Bus for KonamiSoundBus {
     type Address = u16;
     type Data = u8;
 
-    fn read(&mut self, _master: BusMaster, addr: u16) -> u8 {
-        if addr <= 0x1FFF {
-            return self.rom[addr as usize];
-        }
-        // Frogger relocates RAM to 0x4000–0x5FFF (0x4000-0x43FF mirror 0x1C00);
-        // the standard board has it at 0x8000–0x8FFF (0x8000-0x83FF mirrored).
-        let ram = if self.frogger {
-            0x4000..=0x5FFF
-        } else {
-            0x8000..=0x8FFF
+    fn read(&mut self, master: BusMaster, addr: u16) -> u8 {
+        let data = match self.map.page(addr).region_id {
+            Region::ROM | Region::RAM => self.map.read_backing(addr),
+            _ => 0xFF,
         };
-        if ram.contains(&addr) {
-            return self.ram[(addr & 0x03FF) as usize];
-        }
-        0xFF
+        self.map.watch_read(SOUND_CPU_INDEX, master, addr, data);
+        data
     }
 
-    fn write(&mut self, _master: BusMaster, addr: u16, data: u8) {
-        // RAM and the discrete-filter latch both move on the Frogger board.
-        let (ram, filter) = if self.frogger {
-            (0x4000..=0x5FFF, 0x6000..=0x7FFF)
-        } else {
-            (0x8000..=0x8FFF, 0x9000..=0x9FFF)
-        };
-        if ram.contains(&addr) {
-            self.ram[(addr & 0x03FF) as usize] = data;
-        } else if filter.contains(&addr) {
+    fn write(&mut self, master: BusMaster, addr: u16, data: u8) {
+        // Before the side effect, so a hit's metadata snapshot is pre-write.
+        self.map.watch_write(SOUND_CPU_INDEX, master, addr, data);
+        if self.is_ram(addr) {
+            self.map.write_backing(addr, data);
+        } else if self.map.page(addr).region_id == Region::FILTER {
             // The *offset* carries the filter bits (6 per AY). Not modeled as
             // audio; latched for debug/state.
             self.filter = addr & 0x0FFF;
@@ -489,6 +602,7 @@ impl Debuggable for KonamiSound {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::DebugRead;
     use crate::core::save_state::{Saveable, StateReader, StateWriter};
 
     /// The rate a Scramble-family board supplies: its 14.318181 MHz sound
@@ -497,22 +611,137 @@ mod tests {
     const TEST_CPU_CLOCK: u64 = 14_318_181 / 8;
 
     fn bus_read(b: &mut KonamiSound, addr: u16) -> u8 {
-        Bus::read(&mut b.bus, BusMaster::Cpu(0), addr)
+        Bus::read(&mut b.bus, BusMaster::Cpu(SOUND_CPU_INDEX), addr)
     }
     fn bus_write(b: &mut KonamiSound, addr: u16, data: u8) {
-        Bus::write(&mut b.bus, BusMaster::Cpu(0), addr, data);
+        Bus::write(&mut b.bus, BusMaster::Cpu(SOUND_CPU_INDEX), addr, data);
     }
     fn io_read(b: &mut KonamiSound, addr: u16) -> u8 {
-        Bus::io_read(&mut b.bus, BusMaster::Cpu(0), addr)
+        Bus::io_read(&mut b.bus, BusMaster::Cpu(SOUND_CPU_INDEX), addr)
     }
     fn io_write(b: &mut KonamiSound, addr: u16, data: u8) {
-        Bus::io_write(&mut b.bus, BusMaster::Cpu(0), addr, data);
+        Bus::io_write(&mut b.bus, BusMaster::Cpu(SOUND_CPU_INDEX), addr, data);
     }
 
     /// Configure the 8255 (port A + B output) the way the main board does.
     fn init_ppi(b: &mut KonamiSound) {
         // Control word: mode 0, ports A & B output, port C input. 0x80 | 0x09.
         b.ppi_write(3, 0x89);
+    }
+
+    /// The board answers for CPU 1 across the whole debug surface.
+    ///
+    /// It is one test rather than four because the things it checks are one
+    /// fact: the machine's index space reaches into this board. A board that
+    /// listed the CPU but served no memory for it would disassemble garbage, and
+    /// one that served memory under no CPU would have nothing to disassemble
+    /// with.
+    #[test]
+    fn the_sound_cpu_is_reachable_as_cpu_one() {
+        use crate::core::debug::BusDebug;
+
+        let mut b = KonamiSound::new(2, TEST_CPU_CLOCK);
+        b.load_rom(&[0xC3, 0x34, 0x12]); // JP $1234, at the Z80's reset address
+
+        let cpus = b.cpus();
+        assert_eq!(cpus.len(), 1, "the board contributes exactly its own CPU");
+        assert_eq!(cpus[0].0, "Z80 Sound");
+
+        // Reads are answered at index 1 and nowhere else, which is what keeps
+        // the main board's CPU 0 from being shadowed when the trees merge.
+        assert_eq!(b.read(SOUND_CPU_INDEX, 0x0000), Some(0xC3));
+        assert_eq!(b.read(0, 0x0000), None);
+
+        // RAM is backed and readable; the 1 KB answers again through its
+        // mirrors, which is how the program is free to use any of them.
+        assert_eq!(b.read(SOUND_CPU_INDEX, 0x8000), Some(0x00));
+        assert_eq!(b.read(SOUND_CPU_INDEX, 0x8400), Some(0x00));
+
+        // The filter latch is I/O, and the gap between the ROM and the RAM is
+        // not decoded at all.
+        assert_eq!(b.peek(SOUND_CPU_INDEX, 0x9000), DebugRead::Io);
+        assert_eq!(b.peek(SOUND_CPU_INDEX, 0x3000), DebugRead::Unmapped);
+        assert!(b.memory_map(SOUND_CPU_INDEX).is_some());
+    }
+
+    /// Frogger's board relocates RAM and the filter latch, and the map is built
+    /// from that wiring rather than decoding it per access, so this is what
+    /// checks the two layouts did not get crossed.
+    #[test]
+    fn the_frogger_wiring_moves_ram_and_the_filter_latch() {
+        use crate::core::debug::BusDebug;
+
+        let b = KonamiSound::new_frogger(TEST_CPU_CLOCK);
+        // RAM at 0x4000 with mirrors across 0x2000, filter at 0x6000.
+        assert_eq!(b.read(SOUND_CPU_INDEX, 0x4000), Some(0x00));
+        assert_eq!(b.read(SOUND_CPU_INDEX, 0x5C00), Some(0x00), "last mirror");
+        assert_eq!(b.peek(SOUND_CPU_INDEX, 0x6000), DebugRead::Io);
+        // And the standard board's addresses are not decoded here.
+        assert_eq!(b.peek(SOUND_CPU_INDEX, 0x8000), DebugRead::Unmapped);
+        assert_eq!(b.peek(SOUND_CPU_INDEX, 0x9000), DebugRead::Unmapped);
+    }
+
+    /// A watchpoint catches the sound program writing its RAM, with the board's
+    /// own cycle and the sound CPU's PC.
+    ///
+    /// This is the whole point of routing the bus through an address space: none
+    /// of it fired before, because there was nothing between the CPU and the
+    /// bytes to observe the access.
+    #[test]
+    fn a_watchpoint_catches_the_sound_program_writing_ram() {
+        use crate::core::debug::BusDebug;
+        use crate::core::watchpoint::WatchpointKind;
+
+        let mut b = KonamiSound::new(2, TEST_CPU_CLOCK);
+        // LD A,$5A ; LD ($8000),A ; HALT
+        b.load_rom(&[0x3E, 0x5A, 0x32, 0x00, 0x80, 0x76]);
+        b.reset();
+
+        b.set_watchpoint(SOUND_CPU_INDEX, 0x8000, WatchpointKind::Write);
+        for _ in 0..200 {
+            b.tick();
+        }
+
+        let hit = b
+            .take_watchpoint_hit()
+            .expect("the store to RAM fires the watchpoint");
+        assert_eq!(hit.cpu_index, SOUND_CPU_INDEX);
+        assert_eq!(hit.addr, 0x8000);
+        assert_eq!(hit.value, 0x5A);
+        assert_eq!(hit.region, Some("Sound RAM"), "named by the region map");
+        assert_eq!(
+            hit.pc,
+            Some(0x0002),
+            "the LD's own address, from the context the board latches"
+        );
+        assert!(hit.cycle > 0, "stamped with the board's own clock");
+
+        // A watchpoint set on CPU 0 is a different address space and must not
+        // catch this board's accesses.
+        b.clear_all_watchpoints();
+        b.reset();
+        b.set_watchpoint(0, 0x8000, WatchpointKind::Write);
+        for _ in 0..200 {
+            b.tick();
+        }
+        assert!(b.take_watchpoint_hit().is_none());
+    }
+
+    /// A CPU the debug bus lists has to reach the instruction-boundary mask, or
+    /// the debugger's "step instruction" waits on a bit that never sets and
+    /// hangs.
+    #[test]
+    fn the_sound_cpu_reaches_an_instruction_boundary() {
+        let mut b = KonamiSound::new(2, TEST_CPU_CLOCK);
+        b.load_rom(&[0x00, 0x00, 0x00, 0x00]); // NOPs
+        b.reset();
+
+        let mut reached = false;
+        for _ in 0..100 {
+            b.tick();
+            reached |= b.at_instruction_boundary();
+        }
+        assert!(reached, "the sound CPU can be stepped");
     }
 
     #[test]
@@ -533,7 +762,7 @@ mod tests {
 
         // tick() presents the command on AY0 port A; the sound CPU reads it by
         // latching register 14 (port A, an input — R7 bit 6 = 0 at reset).
-        b.bus.rom[0] = 0x76; // HALT
+        b.bus.map.region_data_mut(Region::Rom)[0] = 0x76; // HALT
         b.tick();
         io_write(&mut b, 0x40, 14); // AY0 address latch = register 14
         assert_eq!(io_read(&mut b, 0x80), 0x5A);
@@ -618,7 +847,7 @@ mod tests {
     #[test]
     fn timer_advances_and_is_bounded() {
         let mut b = KonamiSound::new(2, TEST_CPU_CLOCK);
-        b.bus.rom[0] = 0x76; // HALT, so the CPU doesn't run off into garbage
+        b.bus.map.region_data_mut(Region::Rom)[0] = 0x76; // HALT, so the CPU doesn't run off into garbage
         let t0 = b.bus.timer();
         for _ in 0..6000 {
             b.tick();

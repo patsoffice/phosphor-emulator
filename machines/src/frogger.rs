@@ -355,7 +355,7 @@ impl FroggerSystem {
     /// Advance one CPU cycle, returning the instruction-boundary mask.
     pub fn step_cycle(&mut self) -> u32 {
         scramble::tick(&mut self.cpu, &mut self.board);
-        ScrambleBoard::instruction_boundaries(&self.cpu)
+        self.board.instruction_boundaries(&self.cpu)
     }
 
     /// Read the CPU-facing bus, side effects and all. Distinct from the
