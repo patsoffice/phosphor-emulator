@@ -786,27 +786,44 @@ impl ToobinBoard {
 
         // Merge the objects over the playfield.
         //
-        // THIS RULE IS NOT VERIFIED. The real decision is made in a PAL, and it
-        // takes more inputs than the two used here: the object's own priority
-        // and its pixel bit 3, the playfield's priority and its pixel bit 3,
-        // the two alpha pixel bits, and a term for the object pixel being
-        // wholly transparent. What is implemented below is a reduction of that:
-        // an object pixel loses only where the playfield pixel is both in a
-        // raised priority category and has pen bit 3 set, and wins everywhere
-        // else.
+        // THE RULE ITSELF IS STILL NOT VERIFIED, but the circuit around it is,
+        // off sheet 15 of the board's schematic package. The decision is a
+        // 16L8A PAL at 7E whose inputs are: the two object priority bits, the
+        // object's pixel bit 3, a term gating all four object pixel bits
+        // together (so, "this object pixel is transparent"), the two alpha
+        // pixel bits, the playfield's pixel bit 3 and its two priority bits.
+        // A PAL is a programmed part, so its equations are not on the sheet and
+        // cannot be read off it; what the sheet settles is everything around
+        // them.
         //
-        // Two things follow that are worth knowing before trusting it. The
-        // object's own priority plays no part here, and that is NOT because the
-        // list lacks one: the board's memory map labels word 3's low nibble
-        // M.O. PRIORITY. That same nibble is what this renderer uses to pick
-        // the object's palette, which the display list settles in its favor,
-        // since all sixteen object palettes are populated with distinct colors
-        // and a pure priority field would leave fifteen of them dead. So the
-        // open question is not which one it is but whether some of its bits
-        // ALSO reach the PAL as the priority input. But the alpha
-        // layer's pixels ARE an input to the PAL, and this renderer draws the
-        // alpha strictly last and unconditionally on top, so any case where the
-        // alpha changes how the other two layers combine is not modeled.
+        // What it settles matters more than it sounds. The PAL's outputs drive
+        // the SELECT lines of 4-to-1 multiplexers that pick one of the CPU, the
+        // alpha layer, the objects or the playfield as the color RAM address.
+        // So the merge is a SELECTION of one layer per pixel and never a blend,
+        // which is the shape implemented here and below. The same muxes fix the
+        // color RAM layout this renderer already assumes: object color and pen
+        // land in address bits 7-4 and 3-0, alpha color and pen in 5-2 and 1-0,
+        // with the layer's bank in bits 9-8.
+        //
+        // Two readings that the display list, rather than the sheet, settles:
+        //
+        // - The object priority bits reach the PAL but TOOBIN' NEVER DRIVES
+        //   THEM. Measured over 1507 list entries sampled across 3000 frames,
+        //   word 3 bits 5 and 4 are zero in every one, and word 2's whole top
+        //   byte is zero in every one. So ignoring object priority is right for
+        //   this game, and is a thing to revisit for any other board that ends
+        //   up on this renderer. The same survey is why word 3's low nibble is
+        //   read as the palette here despite the memory map labeling it
+        //   M.O. PRIORITY: it takes three distinct values across the run, while
+        //   the nibble the map calls M.O. PALETTE never leaves zero.
+        //
+        // - The alpha pixel bits being a PAL input is most likely just the
+        //   alpha transparency test, which this renderer already applies by
+        //   drawing the alpha last with pen 0 transparent. That is a reading,
+        //   not a proof: it is the simplest use of those two inputs consistent
+        //   with a layer-select PAL, and nothing rules out their also steering
+        //   the playfield-versus-object choice underneath opaque alpha.
+        //
         // Tracked as phosphor-emulator-jg18.2.
         for x in 0..VISIBLE_WIDTH {
             let m = mo[x];
@@ -930,6 +947,26 @@ impl ToobinBoard {
     /// describes a rectangle of up to 8×8 tiles of 16×16 pixels. The vertical
     /// range test is taken on word 0 alone, before the other words are read, so
     /// an entry that is not on this line costs one word fetch.
+    ///
+    /// **This row is drawn from the list as it stands on this line, and the
+    /// board's object path is a line ahead of that.** Sheet 13 of the schematic
+    /// package settles the mechanism: there are two line-buffer SRAMs, 13J and
+    /// 14J, each with its own address counters and write strobe, their controls
+    /// gated by `1V` and `/1V`. One is filled while the other is displayed and
+    /// they trade places every scanline, so what the beam shows on a line was
+    /// scanned during the line before it.
+    ///
+    /// No lead is applied here all the same, and that is deliberate rather than
+    /// an oversight. The vertical match on sheet 7 is a pair of LS283 adders
+    /// computing `V + MOV` against a constant gated with `/384V`, and the
+    /// placement below is that same relation solved for the object's top line.
+    /// Whether the constant already absorbs the buffer swap cannot be read off
+    /// the sheet at the resolution available, and `machines/CLAUDE.md` warns
+    /// specifically that some boards' sprite Y constants fold the delay in
+    /// already. Adding a lead on top of one that is already there would move
+    /// every object pixel a line the wrong way, and the golden frame cannot
+    /// tell the two apart. Settle it with a conformance ROM, not by guessing:
+    /// phosphor-emulator-jg18.2.
     fn draw_motion_objects_row(&self, mo: &mut [u16; VISIBLE_WIDTH], sy: usize) {
         let ram = self.map.region_data(Region::Mob);
         let word = |wi: usize| u16::from_be_bytes([ram[wi * 2], ram[wi * 2 + 1]]);
