@@ -343,6 +343,44 @@ impl DebugSession {
             .map_or(0, |bus| bus.cpus().len())
     }
 
+    /// The names of every device on the bus, in the order the board declares
+    /// them.
+    ///
+    /// CPUs appear here too: they implement `Debuggable` like anything else.
+    pub fn device_names(&mut self) -> Vec<String> {
+        self.harness
+            .machine_mut()
+            .debug_bus()
+            .map_or_else(Vec::new, |bus| {
+                bus.devices()
+                    .into_iter()
+                    .map(|(name, _)| name.to_string())
+                    .collect()
+            })
+    }
+
+    /// One device's registers as `(name, value)` pairs, selected by the name
+    /// [`device_names`](Self::device_names) reports. Empty for an unknown name
+    /// or a machine without debug support.
+    ///
+    /// Matched on the name rather than an index because the index is an
+    /// accident of declaration order, and a script that hard-codes one breaks
+    /// silently the next time a board grows a device.
+    pub fn device_registers(&mut self, device: &str) -> Vec<(String, u64)> {
+        let Some(bus) = self.harness.machine_mut().debug_bus() else {
+            return Vec::new();
+        };
+        bus.devices()
+            .into_iter()
+            .find(|(name, _)| *name == device)
+            .map_or_else(Vec::new, |(_, d)| {
+                d.debug_registers()
+                    .into_iter()
+                    .map(|r| (r.name.to_string(), r.value))
+                    .collect()
+            })
+    }
+
     /// Set a watchpoint at `addr` on **every** CPU, returning the number of CPUs
     /// watched.
     ///

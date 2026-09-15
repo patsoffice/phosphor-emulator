@@ -84,11 +84,34 @@ struct StubBus {
     poked: std::collections::HashMap<u32, u8>,
     watched_writes: Vec<u32>,
     hits: VecDeque<WatchpointHit>,
+    sound: StubDevice,
+}
+
+/// A device with two registers, so the device bindings have something to find.
+#[derive(Default)]
+struct StubDevice;
+
+impl Debuggable for StubDevice {
+    fn debug_registers(&self) -> Vec<phosphor_core::core::debug::DebugRegister> {
+        use phosphor_core::core::debug::DebugRegister;
+        vec![
+            DebugRegister {
+                name: "MIX",
+                value: 0xFE,
+                width: 8,
+            },
+            DebugRegister {
+                name: "BANK",
+                value: 2,
+                width: 2,
+            },
+        ]
+    }
 }
 
 impl BusDebug for StubBus {
     fn devices(&self) -> Vec<(&str, &dyn Debuggable)> {
-        Vec::new()
+        vec![("Sound", &self.sound)]
     }
     fn cpus(&self) -> Vec<(&str, &dyn DebugCpu)> {
         vec![("cpu0", &self.cpu)]
@@ -319,6 +342,7 @@ pub fn stub_machine(has_debug: bool) -> (Box<dyn FrontendMachine>, Rc<RefCell<Re
             poked: std::collections::HashMap::new(),
             watched_writes: Vec::new(),
             hits: VecDeque::new(),
+            sound: StubDevice,
         },
         has_debug,
         trace_on: false,

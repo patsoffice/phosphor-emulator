@@ -125,6 +125,27 @@ fn register_machine(engine: &mut Engine) {
             .unwrap_or_default()
     });
 
+    // --- Devices ---
+    // Every `Debuggable` on the board, which is the only way a script reaches
+    // state that is not memory and not a CPU register: a sound board's mix
+    // latch, a bank select, an inter-CPU handshake flag. Without these a
+    // question like "does this game ever pan the FM" needs accessors compiled
+    // into the tree and then removed again.
+    engine.register_fn("devices", |m: &mut Machine| -> Array {
+        m.borrow_mut()
+            .device_names()
+            .into_iter()
+            .map(Dynamic::from)
+            .collect()
+    });
+    engine.register_fn("device_registers", |m: &mut Machine, device: &str| -> Map {
+        let mut map = Map::new();
+        for (name, value) in m.borrow_mut().device_registers(device) {
+            map.insert(name.into(), Dynamic::from(value as i64));
+        }
+        map
+    });
+
     // --- Audio capture ---
     // `capture_audio()` starts accumulating, `write_audio(path)` stops and
     // writes a 16-bit mono WAV. Driving real input on a schedule is the only way
@@ -729,6 +750,33 @@ mod tests {
                 .unwrap(),
             1
         );
+    }
+
+    /// Devices are the only script-visible route to state that is neither
+    /// memory nor a CPU register: a sound board's mix latch, a bank select, an
+    /// FM chip's routing pins.
+    #[test]
+    fn device_bindings_list_and_read_registers() {
+        let (engine, mut scope, _m) = engine_with_m(true);
+
+        let names = engine
+            .eval_with_scope::<Array>(&mut scope, "m.devices()")
+            .unwrap();
+        assert_eq!(names.len(), 1);
+        assert_eq!(names[0].clone().into_string().unwrap(), "Sound");
+
+        let regs = engine
+            .eval_with_scope::<Map>(&mut scope, r#"m.device_registers("Sound")"#)
+            .unwrap();
+        assert_eq!(regs["MIX"].as_int().unwrap(), 0xFE);
+        assert_eq!(regs["BANK"].as_int().unwrap(), 2);
+
+        // An unknown name is an empty map rather than an error: a script that
+        // sweeps several boards should be able to ask without guarding.
+        let none = engine
+            .eval_with_scope::<Map>(&mut scope, r#"m.device_registers("nope")"#)
+            .unwrap();
+        assert!(none.is_empty());
     }
 
     #[test]

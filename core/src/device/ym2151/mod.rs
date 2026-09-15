@@ -847,6 +847,66 @@ impl Default for Ym2151 {
     }
 }
 
+impl crate::core::debug::Debuggable for Ym2151 {
+    /// What a board's debugger and a script can see of this chip.
+    ///
+    /// Deliberately not the whole 256-byte register file: the useful state is
+    /// the timer/IRQ pair a sound program idles on, and the two things a BOARD
+    /// wires up rather than hears. `CT1` and `CT2` are general-purpose output
+    /// pins with no sound of their own, and `PAN` is the per-channel left/right
+    /// enables, two bits a channel from register 0x20 upward.
+    ///
+    /// Those last two are here because the question "does this game ever pan
+    /// anything" had no answer from outside the crate, and answering it meant
+    /// compiling accessors into three crates and taking them out again.
+    fn debug_registers(&self) -> Vec<crate::core::debug::DebugRegister> {
+        use crate::core::debug::DebugRegister;
+        let mut pan = 0u64;
+        for ch in 0..8 {
+            pan |= ((self.regs[0x20 + ch] >> 6) as u64 & 3) << (ch * 2);
+        }
+        vec![
+            DebugRegister {
+                name: "ADDR",
+                value: self.address as u64,
+                width: 8,
+            },
+            DebugRegister {
+                name: "STATUS",
+                value: self.status as u64,
+                width: 8,
+            },
+            DebugRegister {
+                name: "CTRL",
+                value: self.regs[REG_CONTROL] as u64,
+                width: 8,
+            },
+            DebugRegister {
+                name: "IRQ",
+                value: u64::from(self.irq()),
+                width: 1,
+            },
+            DebugRegister {
+                name: "CT1",
+                value: u64::from(self.ct1()),
+                width: 1,
+            },
+            DebugRegister {
+                name: "CT2",
+                value: u64::from(self.ct2()),
+                width: 1,
+            },
+            // Two bits per channel, channel 0 in the low pair. 3 is centered,
+            // 1 and 2 are panned, 0 is a silenced channel.
+            DebugRegister {
+                name: "PAN",
+                value: pan,
+                width: 16,
+            },
+        ]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

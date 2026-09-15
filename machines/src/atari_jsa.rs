@@ -707,9 +707,17 @@ impl phosphor_core::device::Device for AtariJsa1 {
 }
 
 impl phosphor_core::core::debug::Debuggable for AtariJsa1 {
+    /// The board's own latches, then the YM2151's, prefixed `YM_`.
+    ///
+    /// The chip's are folded in rather than left to a device entry of their own
+    /// because the bus debug tree names one device per board field, and a board
+    /// that hides its chips is a board no script can ask anything about. `CT1`
+    /// and `CT2` in particular are not sound at all here: they gate the POKEY's
+    /// route to each speaker, so they are board state that happens to live in
+    /// the FM chip's register file.
     fn debug_registers(&self) -> Vec<phosphor_core::core::debug::DebugRegister> {
         use phosphor_core::core::debug::DebugRegister;
-        vec![
+        let mut regs = vec![
             DebugRegister {
                 name: "SND_CLK",
                 value: self.bus.clock,
@@ -740,7 +748,24 @@ impl phosphor_core::core::debug::Debuggable for AtariJsa1 {
                 value: self.bus.mainlatch as u64,
                 width: 8,
             },
-        ]
+        ];
+        // Prefixed against a fixed table rather than by formatting a string.
+        // `DebugRegister::name` is a `&'static str`, and a script polling this
+        // once a frame would leak a fresh allocation every time it asked.
+        regs.extend(self.bus.ym.debug_registers().into_iter().map(|r| {
+            let name = match r.name {
+                "ADDR" => "YM_ADDR",
+                "STATUS" => "YM_STATUS",
+                "CTRL" => "YM_CTRL",
+                "IRQ" => "YM_IRQ",
+                "CT1" => "YM_CT1",
+                "CT2" => "YM_CT2",
+                "PAN" => "YM_PAN",
+                other => other,
+            };
+            DebugRegister { name, ..r }
+        }));
+        regs
     }
 }
 

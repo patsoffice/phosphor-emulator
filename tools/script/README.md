@@ -105,6 +105,8 @@ method maps 1:1 onto a `DebugSession` accessor. The one remaining gap is
 | `m.id()` | `machine_id` | `String` — machine's short id |
 | `m.display_size()` | `display_size` | `[int; 2]` — native `[width, height]` |
 | `m.cpu_count()` | `cpu_count` | `int` — number of CPUs on the debug bus |
+| `m.devices()` | `devices` | `[String]`: every device on the bus, in declaration order |
+| `m.device_registers(name)` | `device_registers` | `Map`: that device's registers; empty map for an unknown name |
 
 `input`/`input_axis`/`input_relative` take a machine's **stable control name**
 (e.g. galaga's `coin1`, `p1_start`); see a machine's `input_controls()` for the
@@ -126,6 +128,30 @@ memory-viewer poke would be). It is an explicit *debug* write, distinct from the
 legitimate machine inputs `input` drives — and it records a
 `DebugAccessSource::Frontend` event, so with tracing on a poke shows up in
 `events()` tagged `frontend`, never masquerading as a hardware store.
+
+### Devices
+
+`devices()` lists what the board declares and `device_registers(name)` reads
+one. This is the only route to state that is **neither memory nor a CPU
+register**: a sound board's mix latch, a ROM bank select, an inter-CPU handshake
+flag, an FM chip's routing pins.
+
+```rhai
+m.run_frames(600);
+let r = m.device_registers("Sound");
+print(`mix=${r["MIX"]} bank=${r["BANK"]} pan=${r["YM_PAN"]}`);
+```
+
+Selected by name rather than index, because the index is an accident of
+declaration order and a script that hard-codes one breaks silently the next time
+a board grows a device. An unknown name gives an empty map rather than an error,
+so a script sweeping several machines can ask without guarding.
+
+What a device exposes is its own `Debuggable::debug_registers`, so the answer to
+"why can't I see X" is usually that the device has not been asked to show it.
+That is worth fixing in the device rather than working around in the script:
+these bindings exist because answering "does this game ever pan the FM" once
+required accessors compiled into three crates and then removed again.
 
 ### Input movies
 
