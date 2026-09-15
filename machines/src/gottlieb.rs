@@ -60,6 +60,33 @@ pub(crate) enum Region {
     ProgramRom = 6,
 }
 
+/// Debug index of the sound 6502 on a System 80 machine.
+///
+/// The I8088 is index 0 and this board is the only other CPU, and the sound
+/// board already names itself [`BusMaster::Cpu(1)`](BusMaster) on every bus
+/// access, so the index is a property of its place in the machine. It is the
+/// same fact that `#[debug_map(cpu = 1)]` and `#[debug_cpu(..., index = 1)]`
+/// below state to the derive; all three move together.
+pub(crate) const SOUND_CPU_INDEX: usize = 1;
+
+/// Regions of the sound 6502's space, a separate id space from [`Region`]
+/// because it is a separate map.
+///
+/// Everything but the ROM is I/O: the only RAM the sound CPU has is the 128
+/// bytes inside the RIOT, which is device state reached through the chip rather
+/// than backing anything addresses. The windows are here so a watchpoint hit and
+/// a memory viewer can name what answers at an address instead of reporting it
+/// unmapped.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, MemoryRegion)]
+pub(crate) enum SoundRegion {
+    Riot = 1,
+    Dac = 2,
+    Votrax = 3,
+    SpeechClock = 4,
+    Rom = 5,
+}
+
 // ---------------------------------------------------------------------------
 // Timing constants
 // ---------------------------------------------------------------------------
@@ -186,13 +213,19 @@ const RESISTOR_DAC: [u8; 16] = [
 /// The Votrax SC-01A speech synthesizer is mapped at 0x2000 in the
 /// sound CPU address space. Its A/R (articulate/request) output is
 /// wired to RIOT Port B bit 7. A/R rising edge triggers sound CPU NMI.
-#[derive(Saveable)]
+/// `BusDebug` is derived here, not just on [`GottliebBoard`], because this
+/// struct *is* the sound CPU's bus: the address space that carries its
+/// watchpoints has to live where its accesses happen. The outer board merges
+/// this tree in with `#[debug_bus]`.
+#[derive(BusDebug, Saveable)]
 // v4: the two ClockDividers became a ClockTree living here.
 //
 // Bumped to 5 by the move to field TLV. This struct is the reason it is worth
 // doing: four bumps in its life, three of them a component being added to or
 // taken out of the middle of the body, which is exactly what TLV absorbs.
-#[save_version(5)]
+//
+// v6 added the sound CPU's address space.
+#[save_version(6)]
 #[save_tlv]
 pub(crate) struct GottliebSoundBoard {
     #[save(id = 1)]
@@ -217,8 +250,19 @@ pub(crate) struct GottliebSoundBoard {
     /// what the board has.
     #[save(id = 5)]
     output_coupling: DcBlocker,
-    #[save_skip]
-    sound_rom: Vec<u8>, // 8KB (mapped at 0x6000-0x7FFF in 15-bit space)
+    /// The sound CPU's 64 KB space: the 8 KB ROM at `0x6000`, named entries for
+    /// the four I/O windows, and the mirror of the whole 15-bit map into the top
+    /// half (A15 is not decoded, which is how the reset vector at `0xFFFC`
+    /// reaches the end of the ROM).
+    ///
+    /// Holds only ROM, so what it persists is its page layout rather than any
+    /// bytes, the same as this machine's main map. It is also what carries
+    /// watchpoints and the write-event ring on the sound side: before it, the
+    /// bus indexed a plain `Vec` and there was nothing between the CPU and the
+    /// bytes to observe an access.
+    #[debug_map(cpu = 1)]
+    #[save(id = 10)]
+    map: AddressSpace16,
     #[save(id = 6)]
     clock: u64,
     /// Previous A/R state for edge detection (NMI on rising edge).
@@ -244,6 +288,52 @@ pub(crate) struct GottliebSoundBoard {
 }
 
 impl GottliebSoundBoard {
+    /// Lay out the sound CPU's space.
+    ///
+    /// A15 is not decoded, so the 15-bit map answers twice over the 6502's 64 KB
+    /// and the mirror is declared rather than left to the `addr & 0x7FFF` the
+    /// `Bus` impl applies: a watchpoint is set on the address the CPU puts on the
+    /// bus, and the reset vector is one of those top-half addresses.
+    ///
+    /// ROM fills with `0xFF` rather than the zeroes an allocation gives, because
+    /// that is what an unpopulated socket reads back as and what a board built
+    /// before its ROM is loaded has to boot through.
+    fn build_map() -> AddressSpace16 {
+        let mut map = AddressSpace16::new();
+        map.region(SoundRegion::Riot, "RIOT", 0x0000, 0x1000, AccessKind::Io)
+            .region(
+                SoundRegion::Dac,
+                "MC1408 DAC",
+                0x1000,
+                0x1000,
+                AccessKind::Io,
+            )
+            .region(
+                SoundRegion::Votrax,
+                "Votrax SC-01",
+                0x2000,
+                0x1000,
+                AccessKind::Io,
+            )
+            .region(
+                SoundRegion::SpeechClock,
+                "Speech clock DAC",
+                0x3000,
+                0x1000,
+                AccessKind::Io,
+            )
+            .region(
+                SoundRegion::Rom,
+                "Sound ROM",
+                0x6000,
+                0x2000,
+                AccessKind::ReadOnly,
+            )
+            .mirror(0x8000, 0x0000, 0x8000);
+        map.region_data_mut(SoundRegion::Rom).fill(0xFF);
+        map
+    }
+
     fn new() -> Self {
         let clocks = clock_tree();
         let sound_dom = clocks.find(Clk::SoundCpu).expect("declared sound domain");
@@ -259,7 +349,7 @@ impl GottliebSoundBoard {
             votrax: VotraxSc01::new(VOTRAX_NOMINAL_CLOCK_HZ),
             resampler: AudioResampler::new(sound_hz, output_sample_rate()),
             output_coupling: DcBlocker::new(output_sample_rate() as u32),
-            sound_rom: vec![0xFF; 0x2000],
+            map: Self::build_map(),
             clock: 0,
             votrax_ar_prev: true,
             votrax_nmi: false,
@@ -314,8 +404,9 @@ impl GottliebSoundBoard {
 
     /// Load sound ROM data (up to 8KB, mapped at 0x6000-0x7FFF).
     fn load_rom(&mut self, data: &[u8]) {
-        let len = data.len().min(self.sound_rom.len());
-        self.sound_rom[..len].copy_from_slice(&data[..len]);
+        let region = self.map.region_data_mut(SoundRegion::Rom);
+        let len = data.len().min(region.len());
+        region[..len].copy_from_slice(&data[..len]);
     }
 
     /// Load the Votrax SC-01 internal phoneme ROM (512 bytes).
@@ -351,6 +442,15 @@ impl GottliebSoundBoard {
             self.votrax_nmi = true;
         }
         self.votrax_ar_prev = ar;
+
+        // Bus dispatch cannot read CPU state while the CPU is mid-cycle, so the
+        // cycle and instruction address a hit is attributed to are latched here.
+        // The cycle is the sound board's own, which is the only clock a
+        // sound-CPU access has: it is a domain of its own in the clock tree.
+        if self.map.debug_active() {
+            let pc = cpu.at_instruction_boundary().then_some(cpu.pc as u32);
+            self.map.latch_access_context(self.clock, pc);
+        }
 
         // Execute one M6502 cycle
         cpu.execute_cycle(self, BusMaster::Cpu(1));
@@ -419,26 +519,31 @@ impl Bus for GottliebSoundBoard {
     type Address = u16;
     type Data = u8;
 
-    fn read(&mut self, _master: BusMaster, addr: u16) -> u8 {
-        let addr = addr & 0x7FFF;
-        match addr {
+    fn read(&mut self, master: BusMaster, addr: u16) -> u8 {
+        // Watched and traced at the address the CPU put on the bus; the map's
+        // mirror resolves the top half to the region that answered.
+        let data = match addr & 0x7FFF {
             // RIOT: 0x0000-0x0FFF (mirrored). A9 selects RAM vs I/O registers.
-            0x0000..=0x0FFF => {
-                if addr & 0x200 != 0 {
-                    self.riot.read_io((addr & 0x1F) as u8)
+            a @ 0x0000..=0x0FFF => {
+                if a & 0x200 != 0 {
+                    self.riot.read_io((a & 0x1F) as u8)
                 } else {
-                    self.riot.read_ram((addr & 0x7F) as u8)
+                    self.riot.read_ram((a & 0x7F) as u8)
                 }
             }
 
             // Sound ROM: 0x6000-0x7FFF
-            0x6000..=0x7FFF => self.sound_rom[(addr - 0x6000) as usize],
+            0x6000..=0x7FFF => self.map.read_backing(addr),
 
             _ => 0xFF,
-        }
+        };
+        self.map.watch_read(SOUND_CPU_INDEX, master, addr, data);
+        data
     }
 
-    fn write(&mut self, _master: BusMaster, addr: u16, data: u8) {
+    fn write(&mut self, master: BusMaster, addr: u16, data: u8) {
+        // Before the side effect, so a hit's metadata snapshot is pre-write.
+        self.map.watch_write(SOUND_CPU_INDEX, master, addr, data);
         let addr = addr & 0x7FFF;
         match addr {
             // RIOT: 0x0000-0x0FFF
@@ -621,9 +726,19 @@ fn step_cycle(cpu: &mut I8088, board: &mut GottliebBoard) {
 pub struct GottliebBoard {
     // Sound board (RIOT + DAC + Votrax). Its M6502 sits beside it rather than
     // inside it, so the sound CPU's cycles dispatch at a concrete type.
+    //
+    // `index = 1` is `SOUND_CPU_INDEX` spelled as a literal, which is what the
+    // attribute parser takes. Positional would make this CPU 0, but the I8088 on
+    // the game wrapper holds that: the wrapper merges this board in with
+    // `#[debug_bus]`, and the merged tree is one index space.
+    #[debug_cpu("M6502 Sound", index = 1)]
     #[save(id = 1)]
     pub(crate) sound_cpu: M6502,
+    /// Both attributes, for two different views of the same board: the device
+    /// entry is its registers, and `#[debug_bus]` merges the tree it derives for
+    /// itself, which is how the sound CPU's address space becomes CPU 1's.
     #[debug_device("Sound Board")]
+    #[debug_bus]
     #[save(id = 2)]
     pub(crate) sound: GottliebSoundBoard,
 
@@ -1252,8 +1367,16 @@ impl GottliebBoard {
 
     /// Whether the CPU is at an instruction boundary. It lives on the machine,
     /// which passes it back in.
-    pub fn instruction_boundaries(cpu: &I8088) -> u32 {
+    /// Which CPUs are between instructions, in `cpus()` order: the I8088 in bit
+    /// 0, the sound board's 6502 in bit 1. The debugger's "step instruction"
+    /// ticks until the bit for its step target is set, so a CPU listed in
+    /// `cpus()` but missing from this mask is a CPU that cannot be stepped.
+    ///
+    /// The main CPU lives on the machine, which passes it back in; the sound
+    /// CPU is this board's own.
+    pub fn instruction_boundaries(&self, cpu: &I8088) -> u32 {
         u32::from(cpu.at_instruction_boundary())
+            | (u32::from(self.sound_cpu.at_instruction_boundary()) << 1)
     }
 }
 
@@ -1271,6 +1394,152 @@ impl Default for GottliebBoard {
 mod tests {
     use super::*;
     use phosphor_core::core::save_state::{Saveable, StateReader, StateWriter};
+
+    // -----------------------------------------------------------------------
+    // Sound-CPU debug surface
+    // -----------------------------------------------------------------------
+
+    /// A board whose sound ROM holds a loop that writes the DAC through the
+    /// *mirror*, which is where the real sound program addresses it from.
+    ///
+    /// The ROM occupies 0x6000-0x7FFF of the 15-bit map, so a program at 0x7000
+    /// sits at ROM offset 0x1000 and is reached at 0xF000 in the top half. Its
+    /// vectors are the 6502's, at the very top of the mirror.
+    fn board_with_sound_program() -> GottliebBoard {
+        let mut board = GottliebBoard::new();
+        let mut rom = vec![0xFFu8; 0x2000];
+        let prog: &[u8] = &[
+            0xA9, 0x5A, //       LDA #$5A
+            0x8D, 0x00, 0x90, // STA $9000   the DAC, through the mirror
+            0x4C, 0x00, 0xF0, // JMP $F000
+        ];
+        rom[0x1000..0x1000 + prog.len()].copy_from_slice(prog);
+        rom[0x1FFC] = 0x00; // RESET -> 0xF000
+        rom[0x1FFD] = 0xF0;
+        board.load_sound_rom(&rom);
+        board.reset_sound();
+        board
+    }
+
+    /// Advance the sound board by `cycles` of its own clock, without running the
+    /// main CPU. The sound 6502 is a field of the board and the bus it drives is
+    /// another, so this is the same disjoint borrow `end_cycle` takes.
+    fn run_sound(board: &mut GottliebBoard, cycles: usize) {
+        for _ in 0..cycles {
+            board.sound.tick(&mut board.sound_cpu);
+        }
+    }
+
+    /// The sound CPU answers for CPU 1 across the whole debug surface.
+    ///
+    /// It is one test rather than four because the things it checks are one
+    /// fact: the machine's index space reaches the sound side. A board that
+    /// listed the CPU but served no memory for it would disassemble garbage, and
+    /// one that served memory under no CPU would have nothing to disassemble
+    /// with.
+    #[test]
+    fn the_sound_cpu_is_reachable_as_cpu_one() {
+        use phosphor_core::core::debug::BusDebug;
+
+        let board = board_with_sound_program();
+
+        let cpus = board.cpus();
+        assert_eq!(cpus.len(), 1, "the board contributes exactly its own CPU");
+        assert_eq!(cpus[0].0, "M6502 Sound");
+
+        // Unlike the Atari sound boards, this board serves BOTH maps: the I8088
+        // lives on the game wrapper but its address space is here too. So the
+        // check is that the two indices reach different spaces, not that index 0
+        // reaches nothing. 0x7000 is the sound program in one and the (still
+        // unloaded) main program ROM in the other.
+        assert_eq!(board.read(SOUND_CPU_INDEX, 0x7000), Some(0xA9));
+        assert_eq!(
+            board.read(0, 0x7000),
+            Some(0x00),
+            "index 0 is the I8088's own map, not the sound CPU's"
+        );
+
+        // A15 is not decoded: the same byte answers in the top half, and the
+        // reset vector is read from there.
+        assert_eq!(board.read(SOUND_CPU_INDEX, 0xF000), Some(0xA9));
+        let lo = board.read(SOUND_CPU_INDEX, 0xFFFC).unwrap();
+        let hi = board.read(SOUND_CPU_INDEX, 0xFFFD).unwrap();
+        assert_eq!(u16::from_le_bytes([lo, hi]), 0xF000);
+
+        // I/O reads back as I/O rather than as a byte no chip presented, in
+        // both halves.
+        assert_eq!(
+            board.peek(SOUND_CPU_INDEX, 0x1000),
+            phosphor_core::core::DebugRead::Io
+        );
+        assert_eq!(
+            board.peek(SOUND_CPU_INDEX, 0x9000),
+            phosphor_core::core::DebugRead::Io
+        );
+        assert!(board.memory_map(SOUND_CPU_INDEX).is_some());
+    }
+
+    /// A watchpoint on the DAC catches the sound program driving it, at the
+    /// mirrored address the program actually uses.
+    ///
+    /// The mirror is the point. Q*Bert's sound program runs out of the top half
+    /// and writes the DAC at 0x9000; a watch on the 0x1000 the memory map
+    /// documents catches nothing, and would have looked like the watchpoint not
+    /// working rather than like the program using the other half.
+    #[test]
+    fn a_watchpoint_catches_the_sound_program_driving_the_dac() {
+        use phosphor_core::core::debug::BusDebug;
+        use phosphor_core::core::watchpoint::WatchpointKind;
+
+        let mut board = board_with_sound_program();
+        board.set_watchpoint(SOUND_CPU_INDEX, 0x9000, WatchpointKind::Write);
+        run_sound(&mut board, 200);
+
+        let hit = board
+            .take_watchpoint_hit()
+            .expect("the store to the DAC fires the watchpoint");
+        assert_eq!(hit.cpu_index, SOUND_CPU_INDEX);
+        assert_eq!(hit.addr, 0x9000);
+        assert_eq!(hit.value, 0x5A);
+        assert_eq!(
+            hit.region,
+            Some("MC1408 DAC"),
+            "the mirrored page resolves to the region that answered"
+        );
+        assert_eq!(
+            hit.pc,
+            Some(0xF002),
+            "the STA's own address, from the context the board latches"
+        );
+        assert!(hit.cycle > 0, "stamped with the sound board's own clock");
+
+        // A watchpoint set on CPU 0 is a different address space and must not
+        // catch this board's accesses.
+        board.clear_all_watchpoints();
+        board.set_watchpoint(0, 0x9000, WatchpointKind::Write);
+        run_sound(&mut board, 200);
+        assert!(board.take_watchpoint_hit().is_none());
+    }
+
+    /// Every CPU the debug bus lists can be stepped.
+    ///
+    /// The debugger's "step instruction" ticks until the bit for its step target
+    /// is set, so a CPU that appears in `cpus()` but never in the mask hangs the
+    /// debugger outright rather than failing.
+    #[test]
+    fn every_listed_cpu_reaches_the_instruction_boundary_mask() {
+        let mut board = board_with_sound_program();
+        let mut cpu = I8088::new();
+        let mut seen = 0u32;
+        for _ in 0..TIMING.cycles_per_frame() {
+            tick(&mut cpu, &mut board);
+            seen |= board.instruction_boundaries(&cpu);
+            if seen == 0b11 {
+                return;
+            }
+        }
+        panic!("mask reached {seen:#b} in a frame, with 2 CPUs listed");
+    }
 
     // -----------------------------------------------------------------------
     // Per-scanline palette

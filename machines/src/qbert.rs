@@ -256,11 +256,11 @@ impl QbertSystem {
         }
     }
 
-    /// One CPU cycle. Returns 1 at an instruction boundary (for the debugger,
-    /// which steps instructions rather than cycles).
+    /// One CPU cycle, returning the instruction-boundary mask the debugger steps
+    /// instructions with: bit 0 the I8088, bit 1 the sound board's 6502.
     pub fn step_cycle(&mut self) -> u32 {
         gottlieb::tick(&mut self.cpu, &mut self.board);
-        GottliebBoard::instruction_boundaries(&self.cpu)
+        self.board.instruction_boundaries(&self.cpu)
     }
 
     /// Read the CPU-facing bus, side effects and all. Distinct from the
