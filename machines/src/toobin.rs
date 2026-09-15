@@ -796,8 +796,14 @@ impl ToobinBoard {
         // else.
         //
         // Two things follow that are worth knowing before trusting it. The
-        // object's own priority plays no part, which is at least consistent
-        // with the object list carrying no priority field at all. But the alpha
+        // object's own priority plays no part here, and that is NOT because the
+        // list lacks one: the board's memory map labels word 3's low nibble
+        // M.O. PRIORITY. That same nibble is what this renderer uses to pick
+        // the object's palette, which the display list settles in its favor,
+        // since all sixteen object palettes are populated with distinct colors
+        // and a pure priority field would leave fifteen of them dead. So the
+        // open question is not which one it is but whether some of its bits
+        // ALSO reach the PAL as the priority input. But the alpha
         // layer's pixels ARE an input to the PAL, and this renderer draws the
         // alpha strictly last and unconditionally on top, so any case where the
         // alpha changes how the other two layers combine is not modeled.
