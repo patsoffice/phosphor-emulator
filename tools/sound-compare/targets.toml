@@ -935,40 +935,45 @@ machines = ["toobin"]
 device = "machines/src/atari_jsa.rs"
 status = "partial"
 notes = """
-EXAMINED. Off `unexamined` as `partial`: the board is transcribed in
-docs/schematics/toobin-audio-output.md from SP-320 sheets 21 and 22, and the
-volume law it establishes is the one the model already implements. Everything
-after the volume taps is still missing.
+EXAMINED AND BUILT FROM THE DRAWING. Transcribed at
+docs/schematics/toobin-audio-output.md from SP-320 sheets 21 and 22, and
+machines/src/atari_jsa.rs now implements the output stage rather than a wire
+with two volume taps on it. `partial` and not higher because the board is
+stereo and the model downmixes to mono, and because nothing has been compared
+against a reference.
 
-CONFIRMED RATHER THAN REFUTED, which is the unusual part here:
+MODELED, with every constant taken off the board:
 
-- The mix register's field layout is exact, bit for bit. The 5F LS273 gives
-  speech volume on D7:D6, POKEY on D5:D4, YM2151 on D3:D1 and the low-pass
-  enable on D0, which is what atari_jsa.rs decodes.
-- All three volume ladders are binary-weighted CD4066 switches summing into an
-  LM324 virtual ground, so gain is proportional to the code and `code / max` is
-  the board's law rather than an approximation of it. This is NOT the Namco case
-  where the selected conductance was one arm of a divider and the law came out
-  non-linear.
-- The fitted 3.0 on the FM sits on the board's own ratio. At full volume codes
-  the YM ladder gives a gain of 2.80 into the channel mixer and the POKEY path
-  gives 0.94, so the board is about 3.0 : 1. TREAT THAT AS LUCK UNTIL THE TWO
-  CORES ARE LEVELED: the figures are only comparable if our YM2151 and POKEY
-  normalize like the chips do, which nobody has checked.
+- Both volume ladders. They are binary-weighted CD4066 switches summing into an
+  LM324 virtual ground, so each is linear in its code, and the two feedback
+  resistors fix the ratio between the sources: 12k/30k per step for the YM2151,
+  reaching 2.80 at code 7, and 47k/150k per step for the POKEY, reaching 0.94 at
+  code 3. This RETIRED a fitted 3.0 that had been standing in for that ratio.
+  The fitted value turned out to be within a percent of the board's, which is
+  luck and is recorded as luck.
+- The POKEY's routing, which is a mute and not only a placement. The POKEY and
+  speech are summed first, then injected into each channel through a 12k leg
+  gated by one of the YM2151's CT1/CT2 pins. Clearing both takes the POKEY off
+  both speakers at any volume code. Ym2151 gained ct1()/ct2() accessors for
+  this, and harness/tests/boot_check_test.rs asserts the game actually drives
+  them, since a mute here is invisible in a mixed buffer.
+- The switched low-pass, as two cascaded one-pole sections: a fixed 6.0 kHz pole
+  across the output amplifier's 12k feedback, and a shunt that moves from
+  13.3 kHz to 3.6 kHz when a transistor switches a second 0.0027 uF in. Its base
+  is driven from the mix register's LPF bit OR from YM0, the bottom bit of the
+  YM volume field, so the corner also drops whenever that code is odd. That
+  second path looks like an accident of the design and is flagged in the
+  transcription for a second reading.
 
-STILL MISSING, now with numbers:
+STILL NOT MODELED:
 
-- STEREO, AND THE ROUTING IS PROGRAM-CONTROLLED. The POKEY and speech are summed
-  first into one signal, which is injected into the left and right mixers
-  through 12k legs gated by the YM2151's own CT1 and CT2 pins. With both clear
-  the POKEY reaches neither speaker whatever its volume code, so this is a mute
-  path and not only a placement. phosphor-core's Ym2151 does not expose CT1/CT2,
-  so this needs a core change before it can be modeled at all.
-- THE SWITCHED LOW-PASS. A fixed pole near 6.0 kHz from 0.0022 uF across the 12k
-  feedback, plus a shunt that moves from 13.3 kHz to 3.6 kHz when a 2N3904
-  switches a second 0.0027 uF in. Its base is driven from the mix register's LPF
-  bit OR from YM0, the bottom bit of the YM volume, wired-OR through two 1k
-  resistors. The model latches LPF and applies no filter.
+- Stereo. The mix is downmixed to mono, which loses only the POKEY's left/right
+  placement, since that is the one thing that differs between the channels.
+- Absolute level. The board's RATIO is now right; whether our YM2151 and POKEY
+  cores sit at the same relative scale as the chips do is unchecked, and that is
+  what would turn the ratio into a calibrated level.
+- The volume codes, the routing and the filter switch are sampled once per drain
+  rather than per sample.
 - The DcBlocker is still the shared default corner rather than this board's
   coupling.
 

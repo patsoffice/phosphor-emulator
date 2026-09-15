@@ -45,29 +45,37 @@
 //! decoded and ignored, and the port bit that reports the speech chip ready
 //! reads low, which is what an empty socket gives.
 //!
-//! ## What the analog side does, and what this does instead
+//! ## The analog output stage
 //!
-//! The board is transcribed in `docs/schematics/toobin-audio-output.md`. Two
-//! things it establishes are not modeled here and are worth knowing before
-//! trusting the mix:
+//! Transcribed in `docs/schematics/toobin-audio-output.md` and modeled here,
+//! with gains taken off the board rather than fitted by ear.
 //!
-//! - **The output is stereo, and the routing is program-controlled.** The
-//!   POKEY and the speech socket are summed first into one signal, which is
-//!   then injected into the left and right mixers through legs gated by the
-//!   YM2151's own `CT1` and `CT2` output pins. With both clear the POKEY
-//!   reaches neither speaker whatever its volume code, so this is a mute path
-//!   and not only a placement. `phosphor-core`'s `Ym2151` does not expose those
-//!   pins, so modeling it needs a change there first.
-//! - **There is a switched low-pass on each channel.** A fixed pole near 6 kHz,
-//!   plus a shunt that moves from about 13.3 kHz to about 3.6 kHz when a
-//!   transistor switches a second capacitor in. That transistor is driven from
-//!   the mix register's `LPF` bit **or** from `YM0`, the bottom bit of the YM
-//!   volume, wired-OR through two 1k resistors. This board latches `LPF` and
-//!   applies no filter at all.
+//! All three volume ladders are binary-weighted CD4066 switches summing into an
+//! LM324 virtual ground, so each is linear in its code and the two feedback
+//! resistors fix the ratio between the sources: the YM2151 reaches 2.80 at code
+//! 7 and the POKEY 0.94 at code 3.
 //!
-//! What the volume ladders do is right in shape: all three are binary-weighted
-//! into a virtual ground, so gain is proportional to the code and `code / max`
-//! is the board's law rather than an approximation of it.
+//! **The POKEY's route is program-controlled, and can be a mute.** The POKEY and
+//! the speech socket are summed first into one signal, which is then injected
+//! into the left and right channel mixers through legs gated by the YM2151's own
+//! `CT1` and `CT2` output pins. Clearing both takes the POKEY off *both*
+//! speakers whatever its volume code says.
+//!
+//! **Each channel has a switched low-pass.** A fixed pole near 6 kHz, plus a
+//! shunt that moves from about 13.3 kHz to about 3.6 kHz when a transistor
+//! switches a second capacitor in. Its base is driven from the mix register's
+//! `LPF` bit **or** from `YM0`, the bottom bit of the YM volume field, so the
+//! corner also drops whenever that code is odd. That second path looks like an
+//! accident of the design rather than an intent and is flagged in the
+//! transcription for a second reading.
+//!
+//! **What is still approximate.** The mix is downmixed to mono, which loses
+//! only the POKEY's left/right placement, since that is the one thing that
+//! differs between the two channels. The volume codes, the routing and the
+//! filter switch are sampled once per drain rather than per sample. And the
+//! absolute level assumes our YM2151 and POKEY cores sit at the same relative
+//! scale as the chips do, which nobody has checked: the board's ratio is right,
+//! the two cores' agreement with it is not established.
 
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::{Bus, BusMaster};
@@ -94,6 +102,63 @@ const IRQ_PERIOD_CYCLES: u32 = 7168;
 
 fn audio_sample_rate_hz() -> u32 {
     phosphor_core::audio::host_sample_rate() as u32
+}
+
+// ---------------------------------------------------------------------------
+// The analog output stage, from docs/schematics/toobin-audio-output.md
+// ---------------------------------------------------------------------------
+
+/// The YM2151 ladder's gain per volume step into a channel mixer: its smallest
+/// leg is 30k against the mixer's 12k feedback, and the ladder is
+/// binary-weighted, so the gain is linear in the code and reaches 2.80 at 7.
+const YM_GAIN_PER_STEP: f32 = 12.0 / 30.0;
+
+/// The POKEY ladder's gain per volume step: 150k smallest leg against the
+/// summing amplifier's 47k feedback, then unity through the 12k leg into each
+/// channel. Reaches 0.94 at code 3.
+const POKEY_GAIN_PER_STEP: f32 = 47.0 / 150.0;
+
+/// Fixed pole across the output amplifier's 12k feedback: 0.0022 uF, 6.0 kHz.
+const FIXED_POLE_HZ: f32 = 6030.0;
+
+/// The shunt at the output amplifier's input node with the switch open: 12k
+/// against 0.001 uF.
+const SHUNT_OPEN_HZ: f32 = 13_260.0;
+
+/// The same shunt once the transistor switches a second 0.0027 uF in parallel,
+/// so 12k against 0.0037 uF.
+const SHUNT_CLOSED_HZ: f32 = 3585.0;
+
+/// One-pole RC section, which is what each of this board's two filter stages
+/// is. Kept private here rather than in `phosphor-core`'s audio module: it is
+/// the low-pass counterpart of `DcBlocker` and belongs beside it if a second
+/// board ever needs one, but adding public API for a single user is worse.
+///
+/// The coefficient is passed per call rather than stored, because one of the
+/// two sections switches its corner at runtime and has to do that without
+/// discarding the state that makes it a filter.
+#[derive(Clone, Copy, Debug, Default)]
+struct OnePole {
+    y: f32,
+}
+
+impl OnePole {
+    /// `1 - exp(-2*pi*fc/fs)`, the exact step response of an RC section rather
+    /// than a bilinear approximation of it.
+    fn coefficient(cutoff_hz: f32, sample_rate: u32) -> f32 {
+        let fs = sample_rate.max(1) as f32;
+        (1.0 - (-std::f32::consts::TAU * cutoff_hz / fs).exp()).clamp(0.0, 1.0)
+    }
+
+    #[inline]
+    fn process(&mut self, x: f32, a: f32) -> f32 {
+        self.y += a * (x - self.y);
+        self.y
+    }
+
+    fn reset(&mut self) {
+        self.y = 0.0;
+    }
 }
 
 /// Mix-register value that selects full volume on every source.
@@ -123,6 +188,23 @@ pub struct AtariJsa1 {
     /// dispatches at a concrete bus rather than a trait object.
     #[save(id = 2)]
     bus: Jsa1Bus,
+
+    /// The two one-pole sections of the output stage, and their coefficients.
+    ///
+    /// The coefficients depend on the host sample rate, so they are computed
+    /// once at construction rather than being constants. The state is filter
+    /// history, which a load re-establishes within a few samples of resuming,
+    /// so none of this is saved.
+    #[save_skip]
+    shunt_pole: OnePole,
+    #[save_skip]
+    fixed_pole: OnePole,
+    #[save_skip]
+    fixed_a: f32,
+    #[save_skip]
+    shunt_open_a: f32,
+    #[save_skip]
+    shunt_closed_a: f32,
 }
 
 #[derive(Saveable)]
@@ -202,7 +284,13 @@ struct Jsa1Bus {
 
 impl AtariJsa1 {
     pub fn new(pokey: JsaPokey) -> Self {
+        let rate = audio_sample_rate_hz();
         Self {
+            shunt_pole: OnePole::default(),
+            fixed_pole: OnePole::default(),
+            fixed_a: OnePole::coefficient(FIXED_POLE_HZ, rate),
+            shunt_open_a: OnePole::coefficient(SHUNT_OPEN_HZ, rate),
+            shunt_closed_a: OnePole::coefficient(SHUNT_CLOSED_HZ, rate),
             cpu: M6502::new(),
             bus: Jsa1Bus {
                 ram: Box::new([0; 0x2000]),
@@ -243,6 +331,10 @@ impl AtariJsa1 {
     }
 
     pub fn reset(&mut self) {
+        // Clear the output filter's history so a loud passage before the reset
+        // cannot bleed a settling transient into the frames after it.
+        self.shunt_pole.reset();
+        self.fixed_pole.reset();
         if let Some(pokey) = &mut self.bus.pokey {
             pokey.reset();
         }
@@ -345,20 +437,34 @@ impl AtariJsa1 {
         self.bus.clock += 1;
     }
 
-    /// Drain and mix the board's audio through the mix register's volume steps.
+    /// Drain and mix the board's audio the way the board mixes it.
     ///
     /// The POKEY output is unipolar, sitting at 0 for silence, and the YM2151's
     /// is bipolar; both resample to the host rate, so they line up sample for
     /// sample. The result still carries the POKEY's DC, which the machine
     /// removes before output.
+    ///
+    /// Gains are the board's, derived in
+    /// `docs/schematics/toobin-audio-output.md`, rather than fitted: the volume
+    /// ladders are binary-weighted switches summing into a virtual ground, so
+    /// each is linear in its code, and the two feedback resistors fix the ratio
+    /// between them. **Downmixed to mono**, which loses only where the two
+    /// speakers carry different content, and the only thing that differs
+    /// between them is which one the POKEY reaches.
+    ///
+    /// The volume codes, the routing and the filter switch are sampled once per
+    /// drain rather than per sample, so a change to any of them inside a frame
+    /// takes effect at the next frame boundary. That is the same approximation
+    /// the volumes were already under.
     pub fn drain_audio(&mut self) -> Vec<f32> {
-        /// FM mix gain. The YM core normalizes its eight-channel sum to full
-        /// scale, so typical music sits well below 1.0; lift it to a healthy
-        /// level in the mix. Tunable by ear.
-        const YM_MIX: f32 = 3.0;
-
-        let ym_vol = self.ym_volume() * YM_MIX;
-        let pokey_vol = self.pokey_volume();
+        let ym_gain = self.ym_gain();
+        // The POKEY reaches a speaker only through a leg gated by one of the
+        // YM2151's CT pins. With both clear it reaches neither, whatever its
+        // volume code says, so this is a mute and not a pan.
+        let (ct1, ct2) = self.pokey_route();
+        let pokey_gain = if ct1 || ct2 { self.pokey_gain() } else { 0.0 };
+        let shunt_a = self.shunt_coefficient();
+        let fixed_a = self.fixed_a;
 
         let ym = self.bus.ym.drain_audio();
         let pokey = self
@@ -371,20 +477,65 @@ impl AtariJsa1 {
         let n = pokey.len().max(ym.len());
         let mut out = vec![0.0f32; n];
         for (i, slot) in out.iter_mut().enumerate() {
-            *slot = pokey.get(i).copied().unwrap_or(0.0) * pokey_vol
-                + ym.get(i).copied().unwrap_or(0.0) * ym_vol;
+            let mixed = pokey.get(i).copied().unwrap_or(0.0) * pokey_gain
+                + ym.get(i).copied().unwrap_or(0.0) * ym_gain;
+            // Two cascaded one-pole sections, in the order the board has them:
+            // the switched shunt at the output amplifier's input node, then the
+            // fixed pole across its feedback.
+            let shunted = self.shunt_pole.process(mixed, shunt_a);
+            *slot = self.fixed_pole.process(shunted, fixed_a);
         }
         out
     }
 
-    /// POKEY volume from the mix register: four steps, bits 4 and 5.
-    pub fn pokey_volume(&self) -> f32 {
-        ((self.bus.mix >> 4) & 3) as f32 / 3.0
+    /// POKEY volume code from the mix register: four steps, bits 4 and 5.
+    pub fn pokey_code(&self) -> u8 {
+        (self.bus.mix >> 4) & 3
     }
 
-    /// YM2151 volume from the mix register: eight steps, bits 1 through 3.
-    pub fn ym_volume(&self) -> f32 {
-        ((self.bus.mix >> 1) & 7) as f32 / 7.0
+    /// YM2151 volume code from the mix register: eight steps, bits 1 through 3.
+    pub fn ym_code(&self) -> u8 {
+        (self.bus.mix >> 1) & 7
+    }
+
+    /// The POKEY's gain into a channel mixer, as the board sets it.
+    ///
+    /// Its ladder sums into the 47k feedback of the summing amplifier, one step
+    /// per 150k leg, and the result reaches each channel through a 12k leg into
+    /// a 12k feedback, which is unity. So the whole path is `47k / 150k` per
+    /// volume step, reaching 0.94 at code 3.
+    pub fn pokey_gain(&self) -> f32 {
+        POKEY_GAIN_PER_STEP * self.pokey_code() as f32
+    }
+
+    /// The YM2151's gain into a channel mixer, as the board sets it: its ladder
+    /// sums into a 12k feedback one step per 30k leg, so `12k / 30k` per step,
+    /// reaching 2.80 at code 7.
+    pub fn ym_gain(&self) -> f32 {
+        YM_GAIN_PER_STEP * self.ym_code() as f32
+    }
+
+    /// The YM2151's `CT1` and `CT2` pins, which on this board gate whether the
+    /// POKEY reaches the left and the right speaker. Clearing both mutes it.
+    pub fn pokey_route(&self) -> (bool, bool) {
+        (self.bus.ym.ct1(), self.bus.ym.ct2())
+    }
+
+    /// The shunt pole's coefficient for the switch position the board is in.
+    ///
+    /// A transistor switches a second capacitor across the output amplifier's
+    /// input node, and its base is driven from the mix register's `LPF` bit OR
+    /// from `YM0`, the bottom bit of the YM volume field, wired through two 1k
+    /// resistors. So the corner drops whenever the program asks for the filter
+    /// *or* the YM volume code happens to be odd. The second of those looks
+    /// like an accident of the design rather than an intent, and is flagged in
+    /// `docs/schematics/toobin-audio-output.md` for a second reading.
+    fn shunt_coefficient(&self) -> f32 {
+        if self.bus.mix & 0x03 != 0 {
+            self.shunt_closed_a
+        } else {
+            self.shunt_open_a
+        }
     }
 
     /// Which of the four ROM pages the `0x3000` window presents.
@@ -740,24 +891,82 @@ mod tests {
         assert!(!jsa.bus.timed_int);
     }
 
-    /// The mix register scales both sources, which is the program's only control
-    /// over the balance between the FM and the POKEY.
+    /// The mix register sets both volume codes, and each code maps to the gain
+    /// the board's ladder actually gives it.
     #[test]
     fn the_mix_register_sets_both_volumes() {
         let mut jsa = AtariJsa1::new(JsaPokey::Fitted);
 
         // Powers up at full so a board that never writes it is still audible.
-        assert_eq!(jsa.ym_volume(), 1.0);
-        assert_eq!(jsa.pokey_volume(), 1.0);
+        assert_eq!(jsa.ym_code(), 7);
+        assert_eq!(jsa.pokey_code(), 3);
+        // The two feedback resistors fix the ratio between the sources, and at
+        // full codes the board is about 3 to 1 in the FM's favor.
+        assert!((jsa.ym_gain() - 2.80).abs() < 0.01, "{}", jsa.ym_gain());
+        assert!(
+            (jsa.pokey_gain() - 0.94).abs() < 0.01,
+            "{}",
+            jsa.pokey_gain()
+        );
 
         jsa.bus.write(BusMaster::Cpu(1), 0x2A06, 0x00);
-        assert_eq!(jsa.ym_volume(), 0.0);
-        assert_eq!(jsa.pokey_volume(), 0.0);
+        assert_eq!(jsa.ym_gain(), 0.0);
+        assert_eq!(jsa.pokey_gain(), 0.0);
 
-        // POKEY at 2 of 3, YM at 4 of 7.
+        // POKEY at 2 of 3, YM at 4 of 7. Both ladders are linear in the code.
         jsa.bus.write(BusMaster::Cpu(1), 0x2A06, 0x20 | 0x08);
-        assert_eq!(jsa.pokey_volume(), 2.0 / 3.0);
-        assert_eq!(jsa.ym_volume(), 4.0 / 7.0);
+        assert_eq!(jsa.pokey_code(), 2);
+        assert_eq!(jsa.ym_code(), 4);
+        assert!((jsa.pokey_gain() - 2.0 * POKEY_GAIN_PER_STEP).abs() < 1e-6);
+        assert!((jsa.ym_gain() - 4.0 * YM_GAIN_PER_STEP).abs() < 1e-6);
+    }
+
+    /// The POKEY reaches a speaker only through legs gated by the YM2151's CT
+    /// pins, so clearing both is a mute however the volume is set. This is the
+    /// one part of the output stage that can silence a source outright, which
+    /// is why it is worth a test rather than a comment.
+    #[test]
+    fn clearing_both_ct_pins_mutes_the_pokey() {
+        let mut jsa = AtariJsa1::new(JsaPokey::Fitted);
+
+        // YM2151 register 0x1B carries CT2 in bit 7 and CT1 in bit 6.
+        let set_ct = |jsa: &mut AtariJsa1, v: u8| {
+            jsa.bus.write(BusMaster::Cpu(1), 0x2000, 0x1B);
+            jsa.bus.write(BusMaster::Cpu(1), 0x2001, v);
+        };
+
+        set_ct(&mut jsa, 0x00);
+        assert_eq!(jsa.pokey_route(), (false, false));
+
+        set_ct(&mut jsa, 0x40);
+        assert_eq!(jsa.pokey_route(), (true, false), "CT1 only");
+        set_ct(&mut jsa, 0x80);
+        assert_eq!(jsa.pokey_route(), (false, true), "CT2 only");
+        set_ct(&mut jsa, 0xC0);
+        assert_eq!(jsa.pokey_route(), (true, true));
+    }
+
+    /// The shunt's corner drops when the program asks for the filter, and also
+    /// whenever the YM volume code is odd, because the bottom bit of that field
+    /// is wired to the same transistor base.
+    #[test]
+    fn the_low_pass_switches_on_lpf_or_an_odd_ym_code() {
+        let mut jsa = AtariJsa1::new(JsaPokey::Fitted);
+        let open = jsa.shunt_open_a;
+        let closed = jsa.shunt_closed_a;
+        assert!(closed < open, "the closed switch is the lower corner");
+
+        // Even YM code, filter off.
+        jsa.bus.write(BusMaster::Cpu(1), 0x2A06, 0x04);
+        assert_eq!(jsa.shunt_coefficient(), open);
+
+        // Filter bit alone.
+        jsa.bus.write(BusMaster::Cpu(1), 0x2A06, 0x05);
+        assert_eq!(jsa.shunt_coefficient(), closed);
+
+        // Odd YM code alone, with the filter bit clear.
+        jsa.bus.write(BusMaster::Cpu(1), 0x2A06, 0x02);
+        assert_eq!(jsa.shunt_coefficient(), closed, "YM0 reaches the same base");
     }
 
     /// A board with no POKEY fitted reads its window as open bus and takes

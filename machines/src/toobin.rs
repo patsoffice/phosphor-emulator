@@ -1751,6 +1751,13 @@ impl ToobinSystem {
         self.board.sound.debug_state()
     }
 
+    /// The sound board's POKEY routing, as the YM2151's `CT1`/`CT2` pins set
+    /// it. Exposed because clearing both is a mute, which no amount of
+    /// listening to a mixed buffer would localize.
+    pub fn pokey_route(&self) -> (bool, bool) {
+        self.board.sound.pokey_route()
+    }
+
     /// Step one cycle, returning the instruction-boundary mask the debugger
     /// counts with.
     pub fn step_cycle(&mut self) -> u32 {

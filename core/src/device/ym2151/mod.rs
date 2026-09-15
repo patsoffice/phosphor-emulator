@@ -801,6 +801,22 @@ impl Ym2151 {
             || (self.status & STATUS_TIMER_B != 0 && ctrl & CTRL_IRQEN_B != 0)
     }
 
+    /// The `CT1` output pin: register 0x1B bit 6.
+    ///
+    /// `CT1` and `CT2` are general-purpose output pins that have nothing to do
+    /// with the chip's sound. A board wires them to whatever it likes and the
+    /// sound program drives them by writing this register. The Atari JSA-I
+    /// gates the POKEY's route to each speaker with the pair, so on that board
+    /// clearing both mutes the POKEY however its volume is set.
+    pub fn ct1(&self) -> bool {
+        self.regs[0x1B] & 0x40 != 0
+    }
+
+    /// The `CT2` output pin: register 0x1B bit 7. See [`ct1`](Self::ct1).
+    pub fn ct2(&self) -> bool {
+        self.regs[0x1B] & 0x80 != 0
+    }
+
     /// Drain accumulated FM audio, resampled from the native FM rate
     /// (`input_clock / 64`) to the host sample rate by linear interpolation.
     pub fn drain_audio(&mut self) -> Vec<f32> {

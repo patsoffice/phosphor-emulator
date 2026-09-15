@@ -436,8 +436,11 @@ fn toobin_runs_its_sound_board_and_makes_sound() {
     press(&mut sys, coin, false);
 
     let mut peak = 0i32;
+    let mut routed = false;
     for _ in 0..240 {
         sys.run_frame();
+        let (ct1, ct2) = sys.pokey_route();
+        routed |= ct1 || ct2;
         let mut buf = [0i16; 4096];
         let n = sys.fill_audio(&mut buf);
         for &s in &buf[..n] {
@@ -447,6 +450,14 @@ fn toobin_runs_its_sound_board_and_makes_sound() {
     assert!(
         peak > 256,
         "toobin produced no audible output after a coin (peak sample {peak})"
+    );
+    // The POKEY reaches a speaker only through legs gated by the YM2151's CT
+    // pins, so a program that never drives them would leave it muted and the
+    // peak above would be the FM alone. That is not a failure any listening
+    // test localizes, which is why it is asserted rather than assumed.
+    assert!(
+        routed,
+        "toobin never routed the POKEY to a speaker: CT1 and CT2 both stayed clear"
     );
 
     fn press<M: phosphor_core::core::machine::InputConfigurable>(
