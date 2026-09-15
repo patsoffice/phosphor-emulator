@@ -609,6 +609,14 @@ impl Bus for AtariSystem1SoundBus {
     }
 
     fn read(&mut self, master: BusMaster, addr: u16) -> u8 {
+        // Fast path: RAM (and its 0x2000 mirror) and ROM, when nothing is
+        // observing. Every other address is either an I/O region with no bytes
+        // behind it or one of the two holes the board does not decode, so
+        // `fast_read` declines and `read_inner` answers. See
+        // `AddressSpace16::fast_read`.
+        if let Some(data) = self.map.fast_read(addr) {
+            return data;
+        }
         let data = self.read_inner(addr);
         self.map.watch_read(SOUND_CPU_INDEX, master, addr, data);
         data

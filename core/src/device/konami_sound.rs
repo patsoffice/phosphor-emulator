@@ -412,6 +412,13 @@ impl Bus for KonamiSoundBus {
     type Data = u8;
 
     fn read(&mut self, master: BusMaster, addr: u16) -> u8 {
+        // Fast path: ROM and RAM, which is everything this bus answers at all.
+        // The filter latch is write-only I/O with no bytes behind it and the
+        // rest of the space is undecoded, so `fast_read` declines and the open
+        // bus below answers. See `AddressSpace16::fast_read`.
+        if let Some(data) = self.map.fast_read(addr) {
+            return data;
+        }
         let data = match self.map.page(addr).region_id {
             Region::ROM | Region::RAM => self.map.read_backing(addr),
             _ => 0xFF,

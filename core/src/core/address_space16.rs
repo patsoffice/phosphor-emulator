@@ -537,6 +537,40 @@ impl AddressSpace16 {
         self.debug_write(addr, data);
     }
 
+    /// The whole of a backed read, or `None` if this access needs the board's
+    /// full path.
+    ///
+    /// `None` means one of three things, and a caller must fall through to its
+    /// normal decode for all of them: the address is I/O or unmapped (no bytes
+    /// behind it), a watchpoint is armed somewhere in this space, or the
+    /// write-event trace is on. So the fast path is taken only when it is
+    /// indistinguishable from the slow one, which is what makes it safe to skip
+    /// the watchpoint and trace calls the slow path makes.
+    ///
+    /// This exists to be **inlined into a board's `Bus::read`**, which the
+    /// board's own decode is generally too large to be. A board that dispatches
+    /// at a concrete bus (see `docs/designs/concrete-bus-dispatch.md`) then pays
+    /// a page lookup and a load for a ROM fetch, instead of a call into a
+    /// function with a match arm per region. A trait object could never do this.
+    ///
+    /// A board whose trace buffer is its own field rather than this map's has to
+    /// test that itself; this can only answer for the observers it owns.
+    ///
+    /// There is deliberately no `fast_write` counterpart. Writes are a small
+    /// fraction of bus traffic next to instruction fetches, so the same shortcut
+    /// buys far less, and a write shortcut keyed on "is this address backed"
+    /// would happily patch ROM: backed is not the same as writable, and the
+    /// distinction lives in each board's decode rather than in the page table.
+    #[inline(always)]
+    pub fn fast_read(&self, addr: u16) -> Option<u8> {
+        if self.debug_active() {
+            return None;
+        }
+        let page = self.page(addr);
+        self.backing
+            .read_region_offset(page.region_id, self.map.region_offset(addr))
+    }
+
     /// Read a byte from backing memory (hot-path version).
     ///
     /// Only call on addresses mapped to regions with backing (RAM/ROM).
@@ -1301,6 +1335,80 @@ mod tests {
     const RAM: RegionId = 1;
     const ROM: RegionId = 2;
     const IO: RegionId = 3;
+
+    /// The fast path answers for backed memory and declines for everything a
+    /// board must decode itself.
+    #[test]
+    fn fast_read_answers_only_for_backed_memory() {
+        let mut map = AddressSpace16::new();
+        map.region(RAM, "RAM", 0x0000, 0x1000, AccessKind::ReadWrite)
+            .region(ROM, "ROM", 0x1000, 0x1000, AccessKind::ReadOnly)
+            .region(IO, "I/O", 0x2000, 0x0100, AccessKind::Io);
+        map.region_data_mut(RAM)[0x42] = 0xAB;
+        map.region_data_mut(ROM)[0x10] = 0xCD;
+
+        assert_eq!(map.fast_read(0x0042), Some(0xAB), "RAM");
+        assert_eq!(map.fast_read(0x1010), Some(0xCD), "ROM is backed too");
+        assert_eq!(map.fast_read(0x2000), None, "I/O has no bytes behind it");
+        assert_eq!(map.fast_read(0x8000), None, "unmapped");
+    }
+
+    /// **The fallback condition, which is the whole safety of the fast path.**
+    ///
+    /// Taking it while a watchpoint is armed would skip the check that fires the
+    /// watchpoint, and taking it while the trace is on would drop the event.
+    /// Either would be a debugger regression that nothing else here would catch,
+    /// because both paths return the same byte: the difference is only in what
+    /// they record.
+    #[test]
+    fn fast_read_declines_whenever_an_observer_is_armed() {
+        let mut map = AddressSpace16::new();
+        map.region(RAM, "RAM", 0x0000, 0x1000, AccessKind::ReadWrite);
+        map.region_data_mut(RAM)[0x42] = 0xAB;
+        assert_eq!(map.fast_read(0x0042), Some(0xAB));
+
+        // A watchpoint anywhere in the space, not just on this address: the
+        // board's slow path is what routes an access to the watchpoint check,
+        // and the check itself decides which addresses fire.
+        map.set_watchpoint(0, 0x0999, WatchpointKind::Write);
+        assert_eq!(
+            map.fast_read(0x0042),
+            None,
+            "a watchpoint elsewhere still forces the full path"
+        );
+        map.clear_all_watchpoints();
+        assert_eq!(map.fast_read(0x0042), Some(0xAB), "and releases it again");
+
+        // The write-event trace, likewise.
+        map.set_trace_enabled(true);
+        assert_eq!(map.fast_read(0x0042), None, "tracing forces the full path");
+        map.set_trace_enabled(false);
+        assert_eq!(map.fast_read(0x0042), Some(0xAB));
+    }
+
+    /// The fast path and the slow path return the same byte for every address in
+    /// the space, which is what makes taking either one unobservable.
+    #[test]
+    fn fast_read_agrees_with_debug_read_everywhere() {
+        let mut map = AddressSpace16::new();
+        map.region(RAM, "RAM", 0x0000, 0x1000, AccessKind::ReadWrite)
+            .region(ROM, "ROM", 0x1000, 0x1000, AccessKind::ReadOnly)
+            .region(IO, "I/O", 0x2000, 0x0100, AccessKind::Io);
+        for (i, b) in map.region_data_mut(RAM).iter_mut().enumerate() {
+            *b = i as u8;
+        }
+        for (i, b) in map.region_data_mut(ROM).iter_mut().enumerate() {
+            *b = (i ^ 0x5A) as u8;
+        }
+
+        for addr in 0..=u16::MAX {
+            assert_eq!(
+                map.fast_read(addr),
+                map.debug_read(addr),
+                "fast and slow disagree at {addr:#06X}"
+            );
+        }
+    }
 
     #[test]
     fn new_map_is_all_unmapped() {

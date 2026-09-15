@@ -451,7 +451,18 @@ impl Bus for NamcoPacBoard {
 
     #[inline]
     fn read(&mut self, _master: BusMaster, addr: u16) -> u8 {
-        self.bus_read_common(addr & 0x7FFF)
+        let addr = addr & 0x7FFF;
+        // Fast path: a backed read with nothing observing, inlined here because
+        // `bus_read_common` is too large to be. It falls through for I/O, for
+        // the bus float, and whenever a watchpoint or either trace is armed, so
+        // the two paths are never distinguishable. The board's trace buffer is
+        // its own field rather than the map's, so that flag is tested here.
+        if !self.debug_trace.enabled()
+            && let Some(data) = self.map.fast_read(addr)
+        {
+            return data;
+        }
+        self.bus_read_common(addr)
     }
 
     #[inline]
@@ -1109,6 +1120,78 @@ impl NamcoPacBoard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Wherever the fast path answers, it answers with what the full decode
+    /// would have returned, for every address in the space.
+    ///
+    /// This is the guard that belongs on each board that adopts `fast_read`,
+    /// because the map-level equivalence test cannot see a board that folds a
+    /// mirror by hand instead of declaring it. Gottlieb's main bus does exactly
+    /// that (`read_backing(0x3000 + (addr & 0xFF))` for a 256-byte sprite RAM
+    /// declared as a 2 KB region), so a blanket fast path there would read the
+    /// wrong byte and nothing in `AddressSpace16`'s own tests would notice. This
+    /// board folds only A15, and it folds it before either path.
+    #[test]
+    fn the_fast_path_never_disagrees_with_the_full_decode() {
+        let mut board = NamcoPacBoard::new();
+        // Distinguishable bytes, so an off-by-a-mirror lands on a different one.
+        for (i, b) in board
+            .map
+            .region_data_mut(Region::Rom)
+            .iter_mut()
+            .enumerate()
+        {
+            *b = (i ^ 0x5A) as u8;
+        }
+        for (i, b) in board
+            .map
+            .region_data_mut(Region::VideoRam)
+            .iter_mut()
+            .enumerate()
+        {
+            *b = (i ^ 0xA5) as u8;
+        }
+        for (i, b) in board
+            .map
+            .region_data_mut(Region::Ram)
+            .iter_mut()
+            .enumerate()
+        {
+            *b = (i ^ 0x3C) as u8;
+        }
+
+        for addr in 0..0x8000u16 {
+            if let Some(fast) = board.map.fast_read(addr) {
+                assert_eq!(
+                    fast,
+                    board.bus_read_common(addr),
+                    "fast path disagrees at {addr:#06X}"
+                );
+            }
+        }
+    }
+
+    /// With a watchpoint armed the fast path must decline for every address, so
+    /// the board's full decode runs and the watchpoint gets its chance to fire.
+    #[test]
+    fn an_armed_watchpoint_takes_the_whole_board_off_the_fast_path() {
+        use phosphor_core::core::watchpoint::WatchpointKind;
+
+        let mut board = NamcoPacBoard::new();
+        assert!(
+            board.map.fast_read(0x0000).is_some(),
+            "ROM is on the fast path to begin with"
+        );
+
+        board.map.set_watchpoint(0, 0x4C00, WatchpointKind::Write);
+        for addr in 0..0x8000u16 {
+            assert_eq!(
+                board.map.fast_read(addr),
+                None,
+                "fast path still taken at {addr:#06X} with a watchpoint armed"
+            );
+        }
+    }
 
     mod debug_events {
         use super::*;

@@ -753,6 +753,12 @@ impl Bus for Jsa1Bus {
     }
 
     fn read(&mut self, master: BusMaster, addr: u16) -> u8 {
+        // Fast path: RAM and both ROM windows, when nothing is observing. Every
+        // other address is an I/O region with no bytes behind it, so `fast_read`
+        // declines and the decode below answers. See `AddressSpace16::fast_read`.
+        if let Some(data) = self.map.fast_read(addr) {
+            return data;
+        }
         let data = match addr {
             0x0000..=0x1FFF => self.map.read_backing(addr),
             0x2000..=0x27FF => self.ym.read(addr & 1),

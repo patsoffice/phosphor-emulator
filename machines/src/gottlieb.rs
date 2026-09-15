@@ -520,6 +520,14 @@ impl Bus for GottliebSoundBoard {
     type Data = u8;
 
     fn read(&mut self, master: BusMaster, addr: u16) -> u8 {
+        // Fast path: the ROM window and its mirror, when nothing is observing.
+        // The RIOT, DAC, Votrax and speech-clock windows are all I/O regions
+        // with no bytes behind them, so `fast_read` declines and the decode
+        // below answers; that matters here beyond speed, because a RIOT read has
+        // side effects. See `AddressSpace16::fast_read`.
+        if let Some(data) = self.map.fast_read(addr) {
+            return data;
+        }
         // Watched and traced at the address the CPU put on the bus; the map's
         // mirror resolves the top half to the region that answered.
         let data = match addr & 0x7FFF {
