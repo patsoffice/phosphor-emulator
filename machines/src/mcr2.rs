@@ -5,7 +5,7 @@
 //!
 //! | Drawing | Source | Pages |
 //! |---|---|---|
-//! | Video Gen `A084-91399-A941`, sheet 9-8 | Satan's Hollow Parts and Operating Manual | PDF p104, read |
+//! | Video Gen `A084-91399-A941`, sheet 9-8 | `archive.org/details/arcademanual_satans-hollow` | PDF p104, read |
 //! | Clock tree, sheet 9-6 | same | read |
 //! | Super CPU `A084-90010-C000`, sheet 9-11 | `arcade-museum.com/manuals-videogames/T/Tron.pdf` | PDF pp115-116, read |
 //! | Video Gen `A084-91399-A941`, as Tron's sheet 9-13 | same | pp121-122, searched |
@@ -19,10 +19,16 @@
 //! [`docs/schematics/sprite-list-scan.md`](../../docs/schematics/sprite-list-scan.md)
 //! for the object path.
 //!
-//! **No URL is recorded for the Satan's Hollow scan**, only its title and the
-//! page. The first two rows above are therefore not findable the way the issue
-//! that asked for this section (`phosphor-emulator-aih3`) requires, and supplying
-//! that link is outstanding work rather than an omission here.
+//! **The Satan's Hollow scan is the archive.org item, not an arcade-museum PDF**,
+//! which is why it took a second pass to name: the two rows above were recorded
+//! for two years with a manual title and a page number and no link at all. The
+//! schematics section opens at `page/n67/mode/2up` in that item's viewer.
+//!
+//! One caution on that page anchor. archive.org numbers leaves from zero (`n67` is
+//! the sixty-eighth image), while the page numbers in the rows above are PDF pages
+//! from the downloaded file, and the two do not agree. Treat `n67` as "where the
+//! schematics start" and the row numbers as what to use once the PDF is in hand;
+//! the exact correspondence has not been checked.
 //!
 //! **Name a drawing by its part number, not its sheet number.** Sheet numbers in
 //! these manuals are per package: the Video Gen drawing is sheet 9-8 in Satan's

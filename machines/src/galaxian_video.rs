@@ -2,32 +2,19 @@
 //!
 //! # Schematics
 //!
-//! **Four scans located, none of them read yet.** Recorded so the search does not
-//! have to be repeated. Nothing in this file currently rests on a drawing.
+//! **This engine has no package of its own, and should not grow one.** It is a
+//! shared subsystem rather than a board, so the drawings that cover it are the
+//! per-game packages, each recorded in that game's own file:
+//! [`crate::galaxian`], [`crate::mooncresta`], [`crate::scramble`] and
+//! [`crate::frogger`]. [`crate::pisces`] records that no package was found for
+//! Pisces or UniWar S. Nothing in this file currently rests on a drawing, and none
+//! of those packages has been opened yet.
 //!
-//! | Game | Source | Schematics at |
-//! |---|---|---|
-//! | Galaxian | `arcade-museum.com/manuals-videogames/G/Galaxian.pdf` | from PDF p24 |
-//! | Moon Cresta | `arcade-museum.com/manuals-videogames/M/Moon-Cresta.pdf` | from PDF p19 |
-//! | Scramble | `arcade-museum.com/manuals-videogames/S/Scramble.pdf` | from PDF p7 |
-//! | Frogger | `arcade-museum.com/manuals-videogames/F/frogger-schematics.pdf` | whole file |
-//!
-//! Located 2026-09-16. No sheet in any of them has been opened, so no sheet
-//! numbers, page offsets or scan quality notes are recorded, and the four rows
-//! above should not be read as implying otherwise.
-//!
-//! **No scan has been located for Pisces or UniWar S, and both were searched
-//! for.** They are the two bootleg-lineage sets on this engine ([`crate::pisces`]
-//! covers both), and a drawing for either may simply not exist. Recorded as a
-//! result rather than left as a hole in the table: anything needed about those
-//! two has to come from the base-Galaxian sheets above plus their ROM and PROM
-//! differences.
-//!
-//! The questions worth taking to these drawings first, since this engine's
-//! trickiest parts are the ones a reference driver states without deriving: the
-//! starfield LFSR's taps and its scroll gating, the eight missile/shell dots'
-//! position and enable decode, and the resistor weights behind the 32-entry
-//! palette PROM.
+//! What belongs here instead is the list of **this engine's** unread questions, so
+//! whoever opens one of those packages knows what to look for. Its trickiest parts
+//! are the ones a reference driver states without deriving: the starfield LFSR's
+//! taps and its scroll gating, the eight missile/shell dots' position and enable
+//! decode, and the resistor weights behind the 32-entry palette PROM.
 //!
 //! Shared video hardware for the Galaxian → Scramble → Frogger lineage
 //! (Namco/Konami, 1979+). A single 256×256 tile playfield is composited with

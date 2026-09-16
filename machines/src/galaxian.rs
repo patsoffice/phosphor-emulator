@@ -1,5 +1,21 @@
 //! Galaxian hardware board (Namco, 1979).
 //!
+//! # Schematics
+//!
+//! | Drawing | Source | Pages |
+//! |---|---|---|
+//! | `Galaxian` manual, schematics section | `arcade-museum.com/manuals-videogames/G/Galaxian.pdf` | from PDF p24, **unread** |
+//!
+//! Located 2026-09-16 and not opened, so no sheet numbers, page offsets or scan
+//! quality are recorded and the row should not be read as implying otherwise.
+//! Nothing in this file currently rests on a drawing.
+//!
+//! This package covers the whole game, so it is the drawing for the board defined
+//! here **and** for the parts of it that live elsewhere: the shared video engine in
+//! [`crate::galaxian_video`] and the discrete sound board in [`GalaxianSound`].
+//! The other games on this board carry their own packages in their own files
+//! ([`crate::mooncresta`]), or record that none was found ([`crate::pisces`]).
+//!
 //! Shared base for the Galaxian → Scramble → Frogger lineage's simplest tier:
 //! a single Zilog Z80 @ 3.072 MHz driving the [`crate::galaxian_video`] engine
 //! and the [`GalaxianSound`] discrete sound board, with a 74LS259-style

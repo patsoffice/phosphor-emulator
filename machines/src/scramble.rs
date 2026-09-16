@@ -1,5 +1,24 @@
 //! Scramble hardware (Konami, 1981).
 //!
+//! # Schematics
+//!
+//! | Drawing | Source | Pages |
+//! |---|---|---|
+//! | `Scramble` manual, schematics section | `arcade-museum.com/manuals-videogames/S/Scramble.pdf` | from PDF p7, **unread** |
+//!
+//! Located 2026-09-16 and not opened, so no sheet numbers, page offsets or scan
+//! quality are recorded. Nothing in this file currently rests on a drawing.
+//!
+//! Covering the whole game, this is the drawing for everything the board defined
+//! here owns and not just its video: the Konami sound board ([`KonamiSound`]: a
+//! second Z80 with two AY-8910s) and both 8255 PPIs are on it, and those have no
+//! other documented source. The shared video engine is in
+//! [`crate::galaxian_video`].
+//!
+//! Frogger reuses this board and has its own package; see [`crate::frogger`]. **No
+//! package is recorded for Scobra**, which this file also serves, and no search for
+//! one has been logged.
+//!
 //! Tier-2 anchor of the Galaxian family: a Galaxian-derived video board (the
 //! shared [`crate::galaxian_video`] engine plus the Scramble blue background and
 //! blinking stars) driven by a main Z80, with the Konami sound board

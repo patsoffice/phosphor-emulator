@@ -1,5 +1,23 @@
 //! Frogger (Konami, 1981).
 //!
+//! # Schematics
+//!
+//! | Drawing | Source | Pages |
+//! |---|---|---|
+//! | `Frogger` schematics | `arcade-museum.com/manuals-videogames/F/frogger-schematics.pdf` | whole file, **unread** |
+//!
+//! Located 2026-09-16 and not opened, so no sheet numbers, page offsets or scan
+//! quality are recorded. Nothing in this file currently rests on a drawing. Unlike
+//! the other packages in this family the file is schematics alone rather than a
+//! manual with a drawings section, so there is no page offset to find.
+//!
+//! This is the package to open for the video extras this file models (the
+//! half-screen color-split background, the color-code rotation, and the
+//! column-scroll / sprite-Y nibble swap), and for the single-AY variant of the
+//! Konami sound board. The board it reuses is [`crate::scramble::ScrambleBoard`]
+//! and has its own package; the shared video engine is in
+//! [`crate::galaxian_video`].
+//!
 //! A Scramble-family board: the shared [`crate::galaxian_video`] engine plus the
 //! Frogger video extras (a half-screen blue color-split background, a tile/sprite
 //! color-code rotation, and the column-scroll / sprite-Y nibble swap), a main Z80,

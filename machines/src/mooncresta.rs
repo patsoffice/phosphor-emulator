@@ -1,5 +1,21 @@
 //! Moon Cresta (Nichibutsu, 1980) — a base-Galaxian follow-on.
 //!
+//! # Schematics
+//!
+//! | Drawing | Source | Pages |
+//! |---|---|---|
+//! | `Moon Cresta` manual, schematics section | `arcade-museum.com/manuals-videogames/M/Moon-Cresta.pdf` | from PDF p19, **unread** |
+//!
+//! Located 2026-09-16 and not opened, so no sheet numbers, page offsets or scan
+//! quality are recorded. Nothing in this file currently rests on a drawing.
+//!
+//! Worth having separately from Galaxian's rather than deferring to it: this is a
+//! Nichibutsu package for a different manufacturer's build of the same board, so
+//! it is the place to settle the per-game quirks this file models (the two-bank
+//! GFX ROM and its bank latch, the color PROM, and the program ROM encryption),
+//! none of which a Namco Galaxian drawing would show. See [`crate::galaxian`] for
+//! the shared board's own package.
+//!
 //! Same [`GalaxianBoard`] hardware as Galaxian (Z80 @ 3.072 MHz, tilemap +
 //! sprites + starfield + discrete sound). The differences are all per-game
 //! quirks: a larger 16 KB program, an 8 KB two-bank GFX ROM selected by the

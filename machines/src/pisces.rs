@@ -1,5 +1,17 @@
 //! Pisces (Subelectro) and UniWar S (Irem) — base-Galaxian follow-ons.
 //!
+//! # Schematics
+//!
+//! **No package has been located for either game, and both were searched for.**
+//! Recorded as a result rather than left as a silence: these are the two
+//! bootleg-lineage sets on this board, and a drawing for either may simply never
+//! have been printed.
+//!
+//! So anything needed about these two has to come from the base-Galaxian package
+//! in [`crate::galaxian`] plus their ROM and PROM differences, which is exactly
+//! what this file models. Where the two diverge from stock Galaxian (the Pisces
+//! GFX-bank scheme, the DIP layouts) there is no drawing to check against.
+//!
 //! Both run on the stock [`GalaxianBoard`] with the Pisces GFX-bank scheme
 //! ([`GfxBankMode::Pisces`]: `gfxbank[0]` is the high tile/sprite code bit,
 //! doubling the GFX). They differ only in ROM maps and DIP layout, so a single
