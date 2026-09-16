@@ -16,6 +16,7 @@ use phosphor_core::cpu::Cpu;
 use phosphor_core::gfx::GfxLayout;
 use phosphor_macros::Saveable;
 
+use crate::disasm_registry::{DisasmCpu, DisasmRegion};
 use crate::gottlieb::{self, GottliebBoard};
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
 use crate::set_bit_active_high;
@@ -641,6 +642,42 @@ crate::impl_map_debug_trace!(QbertSystem, board.map);
 // ---------------------------------------------------------------------------
 
 crate::register_machine!(QbertSystem, "qbert", &["qbert"], QBERT_CONTROLS);
+
+// ---------------------------------------------------------------------------
+// Disassembly regions
+// ---------------------------------------------------------------------------
+//
+// The origins are where each image sits in its CPU's space, not where it sits
+// in the ROM file, because that is what a relative branch in the listing
+// resolves against.
+
+// The main 8088's program ROM. `load_program_rom` puts the image at the END of
+// the 0x6000-0xFFFF region, so a 24 KB ROM occupies 0xA000 upward and the reset
+// vector at the top of the space is the last bytes of the file.
+inventory::submit! {
+    DisasmRegion {
+        machine: "qbert",
+        region: "main",
+        cpu: DisasmCpu::I8088,
+        org: 0x1_0000 - QBERT_PROGRAM_ROM.size as u32,
+        size: QBERT_PROGRAM_ROM.size as u32,
+        load: |rs| QBERT_PROGRAM_ROM.load(rs),
+    }
+}
+
+// The sound board's 6502 ROM, which the board maps at 0x6000. A15 is not
+// decoded on that side, which is how the reset vector at 0xFFFC reaches the
+// end of this 8 KB image.
+inventory::submit! {
+    DisasmRegion {
+        machine: "qbert",
+        region: "sound",
+        cpu: DisasmCpu::M6502,
+        org: 0x6000,
+        size: QBERT_SOUND_ROM.size as u32,
+        load: |rs| QBERT_SOUND_ROM.load(rs),
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Graphics viewer regions

@@ -20,6 +20,7 @@ use crate::rom_loader::{RomLoadError, RomSet};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DisasmCpu {
     I8035,
+    I8088,
     Z80,
     M6809,
     M6800,
@@ -33,6 +34,7 @@ impl DisasmCpu {
     pub fn name(self) -> &'static str {
         match self {
             DisasmCpu::I8035 => "i8035",
+            DisasmCpu::I8088 => "i8088",
             DisasmCpu::Z80 => "z80",
             DisasmCpu::M6809 => "m6809",
             DisasmCpu::M6800 => "m6800",

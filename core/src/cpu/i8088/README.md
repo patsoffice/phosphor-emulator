@@ -150,6 +150,17 @@ immediate) using the length table in `format.rs`, and runs the instruction when
 the last byte arrives. A control transfer flushes the queue on the following
 T-state, which is what a taken branch costs.
 
+`disasm.rs` reads that same table, and deliberately so. A disassembler needs
+exactly what the loader needs: whether a ModR/M byte follows, what displacement
+it implies, and how many immediate bytes come after. A second copy of those
+rules would be a second thing to get wrong, and only one of the two is
+validated: `format.rs` is checked against 2,797,000 hardware vectors, because a
+length it gets wrong desynchronizes the instruction stream and shows up as a
+wrong IP. A length the disassembler got wrong on its own would be reported by
+nobody, and every line after the drift would be fiction that still looks like
+code. So the disassembler adds only mnemonics and operand text; if it ever needs
+a length `format.rs` does not give it, that is a bug to fix in `format.rs`.
+
 ```rust
 enum Biu {
     Idle,                            // queue full, nothing to do

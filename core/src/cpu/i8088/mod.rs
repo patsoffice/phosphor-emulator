@@ -14,6 +14,7 @@ pub(crate) mod access;
 pub mod addressing;
 pub mod alu;
 pub mod decode;
+pub mod disasm;
 pub mod execute;
 pub mod flags;
 pub(crate) mod format;
@@ -4662,18 +4663,10 @@ impl crate::core::debug::DebugCpu for I8088 {
 
     fn debug_disassemble(
         &self,
-        _addr: u32,
+        addr: u32,
         bytes: &[u8],
     ) -> crate::cpu::disasm::DisassembledInstruction {
-        // Stub disassembler: show raw opcode byte. Full x86 disassembly TBD.
-        let opcode = if bytes.is_empty() { 0 } else { bytes[0] };
-        crate::cpu::disasm::DisassembledInstruction {
-            mnemonic: "DB",
-            operands: format!("${opcode:02X}"),
-            byte_len: 1,
-            bytes: [opcode, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            target_addr: None,
-        }
+        <Self as crate::cpu::disasm::Disassemble>::disassemble(addr, bytes)
     }
 }
 

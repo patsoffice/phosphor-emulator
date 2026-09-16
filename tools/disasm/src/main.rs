@@ -24,7 +24,7 @@ use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use phosphor_core::cpu::{Disassemble, hex_bytes};
-use phosphor_core::cpu::{I8035, M6502, M6800, M6809, M68000, Mb88xx, Z80};
+use phosphor_core::cpu::{I8035, I8088, M6502, M6800, M6809, M68000, Mb88xx, Z80};
 use phosphor_core::gfx::decode::decode_gfx;
 use phosphor_machines::disasm_registry::{self, DisasmCpu};
 use phosphor_machines::gfx_registry;
@@ -466,6 +466,7 @@ struct RangeArgs {
 #[value(rename_all = "lower")]
 enum CpuArg {
     I8035,
+    I8088,
     Z80,
     M6809,
     M6800,
@@ -478,6 +479,7 @@ impl From<DisasmCpu> for CpuArg {
     fn from(c: DisasmCpu) -> Self {
         match c {
             DisasmCpu::I8035 => CpuArg::I8035,
+            DisasmCpu::I8088 => CpuArg::I8088,
             DisasmCpu::Z80 => CpuArg::Z80,
             DisasmCpu::M6809 => CpuArg::M6809,
             DisasmCpu::M6800 => CpuArg::M6800,
@@ -1486,6 +1488,7 @@ fn dispatch(
         CpuArg::M6502 => run::<M6502>(data, org, start, end, count),
         CpuArg::M68000 => run::<M68000>(data, org, start, end, count),
         CpuArg::Mb88xx => run::<Mb88xx>(data, org, start, end, count),
+        CpuArg::I8088 => run::<I8088>(data, org, start, end, count),
     }
 }
 
@@ -1658,6 +1661,7 @@ mod tests {
             CpuArg::M6502,
             CpuArg::M68000,
             CpuArg::Mb88xx,
+            CpuArg::I8088,
         ] {
             // Should produce at least one line and never panic.
             let out = dispatch(cpu, &[0x00, 0x00, 0x00, 0x00], 0, 0, None, Some(1));
