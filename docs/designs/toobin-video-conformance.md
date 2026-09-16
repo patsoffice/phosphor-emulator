@@ -357,25 +357,26 @@ band landed at cell row 50, off the bottom of a 48-row screen, and the column
 read the cleared map. A probe without a control would have reported the object's
 241 on its own and looked entirely convincing.
 
-## What is left
+## Where this stopped, and why
 
-The instrument works, the graphics are in, the priority sweep runs and the lead
-is measured. One thing remains.
+`phosphor-emulator-jg18.2` is closed and so is the Toobin' epic. Everything the
+issue asked is measured. **The one step not taken is a second opinion, and that
+was a decision rather than an omission.**
 
-1. **The MAME second opinion.** Everything the sweep asserts is derived from our
-   own merge rule, so it guards against regression and not against being wrong.
-   `tools/mame_roadrunner_conformance.lua` is the pattern: write the image into
-   MAME's `maincpu` region, soft-reset so the 68010 re-fetches its vectors, and
-   guard against the autoboot script re-running on its own reset. The ROM was
-   built for this, which is why it addresses `FFC000` and `FF8000` rather than
-   the masked space our debug bus uses.
+The obvious candidate was MAME, running this same image: the ROM was built for
+it, which is why it addresses `FFC000` and `FF8000` rather than the masked space
+our debug bus uses, and `tools/mame_roadrunner_conformance.lua` is the working
+pattern (write the image into MAME's `maincpu` region, soft-reset so the 68010
+re-fetches its vectors, guard against the autoboot script re-running on its own
+reset). Two things argued against spending the day:
 
-**Be honest about what that second opinion can be worth here.** There is no PAL
-dump in any of the three ROM sets, so MAME's rule is a reverse engineering of the
-same sheet we have. Agreement means two independent readings concur, which is
-real evidence and is not verification; disagreement means one of us is wrong and
-the picture says which. The only thing that would be ground truth is a dump of
-the 7E PAL, and it does not exist.
+**It could not have been ground truth.** There is no PAL dump in any of the three
+ROM sets, checked: `toobin`, `toobin1` and `toobin2` are one board at three
+program revisions, 28 of 34 files byte-identical, every file a `.061` mask ROM,
+and MAME's own listing shows only `maincpu`, `jsa:cpu`, `tiles`, `sprites` and
+`chars`. So MAME's rule is a reverse engineering of the same sheet we have.
+Agreement would mean two independent readings concur, which is real evidence and
+is not verification.
 
 **And the stakes are small, which was measured before any of this was built.**
 Over 3000 frames of recorded play, mutating the merge rule and counting changed
@@ -401,10 +402,18 @@ documentation of behavior rather than as a bug hunt. One caveat worth keeping: a
 small pixel count is not the same as an invisible one, and nobody has checked
 whether those 26,057 pixels cluster on one object's outline or scatter.
 
+**What the suite is therefore worth, stated plainly so nobody has to infer it.**
+It pins our behavior across all 96 combinations of the PAL's live inputs and the
+object path's lead at zero, in a form a reader can check cell by cell, and it
+runs in CI without arcade ROMs. It does not establish that any of that matches
+the board. Anyone who later gets a dump of the 7E PAL has an instrument waiting
+that will tell them the answer in one run; short of that, the honest word for
+this is documented, not verified, and the tests say so in their own text.
+
 ## References
 
 - `docs/designs/roadrunner-video-conformance.md`, the pattern this follows
 - `docs/designs/williams-video-conformance.md`, the proof of concept
 - `docs/designs/conformance-rom-board-survey.md`
-- `phosphor-emulator-jg18.2`, the two questions
+- `phosphor-emulator-jg18.2`, closed, which carries every measurement
 - `phosphor-emulator-conformance-rom-programme-hl4t`, the programme

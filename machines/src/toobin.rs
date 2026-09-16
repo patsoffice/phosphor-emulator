@@ -847,14 +847,25 @@ impl ToobinBoard {
         //   M.O. PRIORITY: it takes three distinct values across the run, while
         //   the nibble the map calls M.O. PALETTE never leaves zero.
         //
-        // - The alpha pixel bits being a PAL input is most likely just the
-        //   alpha transparency test, which this renderer already applies by
-        //   drawing the alpha last with pen 0 transparent. That is a reading,
-        //   not a proof: it is the simplest use of those two inputs consistent
-        //   with a layer-select PAL, and nothing rules out their also steering
-        //   the playfield-versus-object choice underneath opaque alpha.
+        // - The alpha pixel bits being a PAL input is just the alpha
+        //   transparency test, which this renderer applies by drawing the alpha
+        //   last with pen 0 transparent. Swept deliberately rather than
+        //   reasoned about: an opaque alpha pen wins in all 72 cells where it is
+        //   set, over both object pens and all four playfield priorities.
         //
-        // Tracked as phosphor-emulator-jg18.2.
+        // WHAT THE SHIPPED RULE IGNORES, AND WHAT THAT COSTS. LBPIX3, the
+        // object pen's bit 3, is a PAL input and is not read below. The
+        // conformance ROM drives it both ways in every other combination and it
+        // changes the pen, never the layer; mutating the rule to honor it moves
+        // 0.0044% of pixels over 3000 frames of recorded play, about nine a
+        // frame. The whole playfield-priority test below is worth 0.016%.
+        //
+        // The 16L8A's own equations are still unknown and no dump of it exists
+        // in any of the three ROM sets, so nothing here is verified against the
+        // part. What IS pinned is the behavior, cell by cell, in
+        // machines/tests/toobin_video_timing_test.rs, over all 96 combinations
+        // of the live inputs including the two priority values Toobin' never
+        // produces. See docs/designs/toobin-video-conformance.md.
         for x in 0..VISIBLE_WIDTH {
             let m = mo[x];
             if m != MO_TRANSPARENT && (pf_priority[x] == 0 || pf[x] & 0x08 == 0) {
@@ -995,8 +1006,23 @@ impl ToobinBoard {
     /// specifically that some boards' sprite Y constants fold the delay in
     /// already. Adding a lead on top of one that is already there would move
     /// every object pixel a line the wrong way, and the golden frame cannot
-    /// tell the two apart. Settle it with a conformance ROM, not by guessing:
-    /// phosphor-emulator-jg18.2.
+    /// tell the two apart.
+    ///
+    /// **The lead this renderer applies is measured, and it is zero.** A
+    /// conformance ROM makes two writes from one scanline interrupt, one to the
+    /// object list and one to the playfield map, and reads back the row each
+    /// change first reaches: both land on the very next row, so this path reads
+    /// the list at the same row the playfield reads its map. The playfield is
+    /// the control, since it has no line buffer and a shared answer would have
+    /// been the handler's own latency rather than a property of either path.
+    /// `machines/tests/toobin_video_timing_test.rs`, and
+    /// `docs/designs/toobin-video-conformance.md` for why the probe measures a
+    /// latency rather than a position: a position can only be checked against an
+    /// oracle, and this renderer's own answer is the thing in question.
+    ///
+    /// So what remains open is not our behavior, which is now pinned, but
+    /// whether the board's match constant absorbs the swap. That needs a
+    /// reference this project does not have.
     fn draw_motion_objects_row(&self, mo: &mut [u16; VISIBLE_WIDTH], sy: usize) {
         let ram = self.map.region_data(Region::Mob);
         let word = |wi: usize| u16::from_be_bytes([ram[wi * 2], ram[wi * 2 + 1]]);
