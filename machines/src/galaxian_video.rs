@@ -16,7 +16,12 @@
 //! numbers, page offsets or scan quality notes are recorded, and the four rows
 //! above should not be read as implying otherwise.
 //!
-//! No scan has been located for Pisces.
+//! **No scan has been located for Pisces or UniWar S, and both were searched
+//! for.** They are the two bootleg-lineage sets on this engine ([`crate::pisces`]
+//! covers both), and a drawing for either may simply not exist. Recorded as a
+//! result rather than left as a hole in the table: anything needed about those
+//! two has to come from the base-Galaxian sheets above plus their ROM and PROM
+//! differences.
 //!
 //! The questions worth taking to these drawings first, since this engine's
 //! trickiest parts are the ones a reference driver states without deriving: the

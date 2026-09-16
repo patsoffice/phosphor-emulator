@@ -13,6 +13,12 @@
 //! order**, and its contents page numbers the audio drawing 4C where the title
 //! block says 5A. Name a drawing by its part number.
 //!
+//! **No scan has been located for Xevious, and it was searched for.** So the
+//! three rows above cover Galaga and Dig Dug only, and nothing here should be
+//! read as covering Xevious: where the two documented boards differ, Xevious is
+//! unverified against a drawing. Bosconian shares the board too and is not in the
+//! catalog. Recorded as a result rather than left as a silence in the table.
+//!
 //! The WSG's output stage is transcribed in
 //! [`docs/schematics/namco-galaga-audio-output.md`](../../docs/schematics/namco-galaga-audio-output.md).
 //! It is the Pac-Man circuit down to the resistor values: the sample-times-volume
