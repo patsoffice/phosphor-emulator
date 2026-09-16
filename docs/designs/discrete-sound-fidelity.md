@@ -834,6 +834,51 @@ respond perfectly to its own timeline and still be reporting its own
 discretisation, and a residual that shrinks when you refine the reference was
 never the model's.
 
+### Price a suspected cause before building the fix for it
+
+The centroid residual on the two Nintendo boards was attributed to edge
+quantization in `variable_square`, in enough detail to be convincing: the
+primitive really does place its edges on simulation-step boundaries, a 39 kHz
+oscillator really does get only 4.9 steps per period at 192 kHz, and the five
+out-of-tolerance metrics really were all centroids on the two boards with the
+fastest oscillators. The argument was right about the mechanism and wrong about
+the magnitude, and nothing in it was checked against a number first.
+
+**The check costs one build.** Raising `SIM_RATE` is a strict upper bound on
+what any amount of edge-placement work can buy, because a simulation fine enough
+to put every edge within a fraction of a step has nothing left to quantize. Four
+times the rate moved nothing:
+
+| Mario Bros. walk 1 | 192 kHz | 768 kHz | reference |
+|---|---|---|---|
+| as shipped | 113.1 Hz | 110.1 Hz | 30 Hz |
+| with sub-step edges | 109.1 Hz | 109.3 Hz | |
+
+Donkey Kong Jr.'s fall behaves the same way: 1417 Hz, 1415 Hz with sub-step
+edges, 1414 Hz at four times the rate, against a reference of 941 Hz. So
+quantization is worth about 3 % of these centroids and the gap is a factor of
+four. Whatever the residual is, it is not this.
+
+A full implementation was written before that was measured: fractional edge
+positions on the square sources, combination through `logic_gate` and `select`,
+and a time-average at `logic_levels` where logic becomes a voltage. It works (at
+192 kHz it lands within 0.2 Hz of what four times the rate gives, which is
+exactly what a correct sub-step model should do) and it was reverted anyway,
+because it costs **17 % of the frame on Mario Bros. and 22 % on Donkey Kong
+Jr.** for that 3 %. Most of that price is not the arithmetic but the step loop:
+every node on every board pays a branch and a slice load per step so that a
+handful of nodes on two boards can carry the extra state.
+
+Two things to take from it:
+
+- **An upper-bound experiment is usually cheaper than the fix**, and it is the
+  one that tells you whether to start. Here it was one constant and one build,
+  against a day of implementation.
+- **The residual was measured, not merely believed.** The five centroids were
+  reproduced to a tenth of a hertz before anything was changed, which is what
+  made the negative result trustworthy rather than a suspicion that the fix had
+  been built wrong.
+
 ### Establish that a metric is stable before drawing anything from it
 
 Donkey Kong's walk produced four different conclusions from one set of captures,
