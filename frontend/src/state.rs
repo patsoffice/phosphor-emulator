@@ -162,15 +162,37 @@ impl State {
     /// machines whose CLI name differs from `machine_id` (e.g. `asteroid` vs
     /// `asteroids`) the migrated entry keeps the old key and is simply never
     /// matched again — an acceptable reset for an auto-generated file.
+    /// **A legacy entry never overwrites one already in `machines`.** It fills a
+    /// gap or it is dropped.
+    ///
+    /// This used to assign unconditionally, so a file carrying both shapes for
+    /// one machine had its current bindings and DIPs replaced by the stale
+    /// top-level ones. That is migration destroying the newer of two values,
+    /// which is the one direction a migration must never go: the `machines`
+    /// section is what the current version writes, and the legacy maps are what
+    /// something older left behind.
+    ///
+    /// Both shapes at once is not a state this program produces, since `save`
+    /// never writes the legacy maps. It is reachable by hand-editing, and the
+    /// cost of being wrong is somebody's rebinds, so the safe precedence is
+    /// cheaper than the argument about whether anyone can get there.
     fn migrate(&mut self) {
         for (id, bindings) in self.legacy_input_bindings.drain() {
-            if !bindings.is_empty() {
-                self.machines.entry(id).or_default().input_bindings = bindings;
+            if bindings.is_empty() {
+                continue;
+            }
+            let entry = self.machines.entry(id).or_default();
+            if entry.input_bindings.is_empty() {
+                entry.input_bindings = bindings;
             }
         }
         for (id, dips) in self.legacy_dip_switches.drain() {
-            if !dips.is_empty() {
-                self.machines.entry(id).or_default().dip_switches = dips;
+            if dips.is_empty() {
+                continue;
+            }
+            let entry = self.machines.entry(id).or_default();
+            if entry.dip_switches.is_empty() {
+                entry.dip_switches = dips;
             }
         }
     }
@@ -313,6 +335,80 @@ mod tests {
         assert!(out.contains("[machines.joust]"));
         assert!(!out.contains("[input_bindings]"));
         assert!(!out.contains("[dip_switches]"));
+    }
+
+    /// A file carrying both shapes keeps the current one. The legacy maps fill
+    /// gaps and never overwrite.
+    ///
+    /// This is the case the migration got wrong: it assigned unconditionally, so
+    /// the stale top-level entry replaced the live one and a user's rebinds went
+    /// back to whatever they had been before the last migration. The fixture is a
+    /// literal old-format string rather than something built by the serializer,
+    /// because a round trip that constructs its own input cannot fail.
+    #[test]
+    fn a_legacy_entry_never_overwrites_a_current_one() {
+        let both = r#"
+            [machines.joust]
+            dip_switches = [99]
+            input_bindings = [{ control = "p1_fire", input = "Key:Z" }]
+
+            [machines.pacman]
+            dip_switches = [7]
+
+            [dip_switches]
+            joust = [3]
+            pacman = [11]
+
+            [input_bindings]
+            joust = [{ control = "p1_fire", input = "Key:Space" }]
+            pacman = [{ control = "p1_up", input = "Key:Up" }]
+        "#;
+        let mut state: State = toml::from_str(both).unwrap();
+        state.migrate();
+
+        // Joust had both fields already; neither moves.
+        let joust = state.machine("joust").expect("joust entry");
+        assert_eq!(joust.dip_switches, vec![99]);
+        assert_eq!(joust.input_bindings, vec![binding("p1_fire", "Key:Z")]);
+
+        // Pac-Man had only DIPs, so the legacy bindings fill the gap and the
+        // DIPs it already had survive. Filling a gap is the whole point of a
+        // migration; overwriting is not.
+        let pacman = state.machine("pacman").expect("pacman entry");
+        assert_eq!(pacman.dip_switches, vec![7]);
+        assert_eq!(pacman.input_bindings, vec![binding("p1_up", "Key:Up")]);
+
+        assert!(state.legacy_input_bindings.is_empty());
+        assert!(state.legacy_dip_switches.is_empty());
+    }
+
+    /// A file in the current shape alone passes through untouched, and one with
+    /// neither shape produces no entries at all.
+    ///
+    /// The second half is what says `migrate` is not inventing machines: an
+    /// `or_default()` reached on an empty legacy map would leave behind entries
+    /// nobody asked for, and `set_machine` would then keep writing them out.
+    #[test]
+    fn migration_leaves_a_current_file_alone_and_invents_nothing() {
+        let current = r#"
+            window_x = 10
+
+            [machines.joust]
+            dip_switches = [99]
+        "#;
+        let mut state: State = toml::from_str(current).unwrap();
+        state.migrate();
+        assert_eq!(state.machine("joust").unwrap().dip_switches, vec![99]);
+        assert_eq!(state.machines.len(), 1);
+
+        let neither = "window_x = 10\nwindow_y = 20\n";
+        let mut state: State = toml::from_str(neither).unwrap();
+        state.migrate();
+        assert!(
+            state.machines.is_empty(),
+            "migration invented {} machine entries from a file with none",
+            state.machines.len()
+        );
     }
 
     /// Empty legacy entries do not create empty `machines` entries.
