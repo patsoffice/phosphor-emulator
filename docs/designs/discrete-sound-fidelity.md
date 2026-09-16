@@ -879,6 +879,73 @@ Two things to take from it:
   made the negative result trustworthy rather than a suspicion that the fix had
   been built wrong.
 
+### The answer, and why raising the rate was looking in the wrong place
+
+The residual above turned out not to be in the circuit at all. It is in the
+output resampler, and the reason the upper-bound experiment came back empty is
+that raising the simulation rate did not change the thing that was wrong.
+
+`AudioResampler`'s stage one is a Bresenham box filter from the input rate down
+to an intermediate rate of `fir::DECIMATION * host_sample_rate()`, which is
+176400 at a 44.1 kHz host. Mario Bros. and Donkey Kong Jr. are the only two
+boards in the tree that call `with_sim_rate`, and both pass 192000. That ratio is
+1.0884, so the box averages one input sample most of the time and two every
+eleventh or so: its impulse response alternates between a 1-sample and a 2-sample
+average at an irregular rate, and each output lands on a timebase that jitters by
+up to one input period. Both are broadband noise that rises toward Nyquist, and
+both are **exactly zero when the ratio is a whole number**.
+
+192000 is four times 48000. The constant was chosen as four times a plausible
+host rate, and the host rate is 44100.
+
+| sim rate | ratio | box | Mario walk 1 | DK Jr. fall |
+|---|---|---|---|---|
+| 176400 | 1.0000 | 1 | 53.1 Hz | 964.7 Hz |
+| 192000 (shipped) | 1.0884 | 1 and 2 | 113.1 Hz | 1417.2 Hz |
+| 352800 | 2.0000 | 2 | 48.0 Hz | 952.9 Hz |
+| 384000 | 2.1769 | 2 and 3 | 110.5 Hz | 1413.6 Hz |
+| 768000 | 4.3537 | | 110.1 Hz | 1414.5 Hz |
+| reference | | | 26.6 Hz | 941.8 Hz |
+
+**Resolution does not appear in that table.** 176400 is lower than the shipped
+rate and closes most of the gap; 384000 is higher than 352800 and reopens all of
+it. The 768 kHz row is the upper-bound experiment from the section above, and it
+moved nothing because 768000/176400 is 4.354: it was still incommensurate and was
+measuring the same artifact at a finer step. An upper bound is only an upper
+bound on the mechanism you had in mind.
+
+The cleanest control changes nothing about the simulation at all. Leaving
+`SIM_RATE` at 192000 and setting the host rate to 48000, which makes that same
+constant exactly four times the intermediate rate, moves Mario walk 1 from 113.1
+to 49.7 and the fall from 1417.2 to 954.8. On a 48 kHz host these two boards were
+always correct.
+
+Three things to take from it, past the specific bug:
+
+- **A spectrum that rises toward Nyquist is not a circuit.** Our walk 1 ran 2 to
+  3 times the board below 3 kHz and 7 to 49 times above it, with band energy
+  climbing from 8 kHz to 20 kHz where the board's was flat. Nothing downstream of
+  a 1059 Hz single-pole low-pass can do that. The shape said "resampler" before
+  any experiment did, and reading the shape is cheaper than reasoning about the
+  netlist.
+- **The suspects were the two boards that opted out of the default.** Every other
+  board runs `sim_rate == output_rate` and is commensurate by construction. When
+  a defect lands on exactly the set that took an unusual code path, the path is
+  the first place to look, ahead of what those boards have in common as hardware.
+  Both readings were available here (the two fastest oscillators, and the two
+  `with_sim_rate` callers) and the hardware one was taken first.
+- **Test the mechanism in isolation once you have a candidate.** Stage one driven
+  with a pure tone gives exactly 0.000 % out-of-band energy at every frequency
+  when the ratio is whole, against 8.1 % at 39 kHz and 24.0 % at 60 kHz at the
+  shipped rate. That is the whole argument for why it is these two boards, whose
+  oscillators reach 39 kHz and 75 kHz, and it needs no board to demonstrate.
+
+What is left afterward is a real but different residual, and only on Mario: the
+two Donkey Kong Jr. metrics land inside tolerance, while walk 1, walk 2 and the
+skid stay high with a flat 2 to 3 times excess from 40 Hz to 5 kHz and no rise
+toward Nyquist. Tracked in the issues rather than here, along with the skid's
+reference figure, which does not re-derive.
+
 ### Establish that a metric is stable before drawing anything from it
 
 Donkey Kong's walk produced four different conclusions from one set of captures,
