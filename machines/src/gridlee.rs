@@ -1,3 +1,23 @@
+//! Videa Gridlee (1982): 6809, a packed bitmap, 32 hardware sprites and a
+//! trackball. The board's own summary and memory map are on [`GridleeBoard`].
+//!
+//! # Schematics
+//!
+//! **There is no drawing for this board and there never will be one.** Gridlee
+//! was never released as a product, so no operator's manual and no schematic
+//! package was ever printed. This is not a scan nobody has found yet: there is
+//! nothing to find, and anyone who goes looking is wasting the afternoon.
+//!
+//! That makes this the one board in the catalog where the paper ceiling is
+//! permanent. Everything here rests on the reference driver and on the ROMs
+//! themselves, and where a hardware question comes up it cannot be settled by
+//! reading a sheet. The recourse is measurement against the ROMs, which are at
+//! least freely distributable, or a capture from surviving hardware.
+//!
+//! The section is present rather than omitted so a sweep for `# Schematics`
+//! across the board files finds an answer here instead of a silence, and so the
+//! next person reads "never drawn" rather than "not located yet".
+
 use phosphor_core::audio::SampleRing;
 use phosphor_core::core::bus::InterruptState;
 use phosphor_core::core::machine::{
