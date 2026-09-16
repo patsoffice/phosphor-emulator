@@ -371,7 +371,13 @@ fn load_maincpu_image(rom_set: &RomSet) -> Result<Vec<u8>, RomLoadError> {
 /// 0x80000-byte region, at bit offsets 0 and 4 within a nibble pair. The board
 /// numbers planes most-significant first, so the list is reversed for
 /// `decode_gfx`, whose plane 0 is pen bit 0.
-const PLAYFIELD_LAYOUT: GfxLayout<'static> = GfxLayout {
+///
+/// Public because `machines/tests/toobin_video_timing_test.rs` encodes a
+/// synthetic tile set against it. A ROM-less board has no graphics, so the
+/// conformance ROM's picture phases have nothing to composite until one is
+/// installed, and the test builds one by inverting `decode_gfx` against this
+/// layout rather than hand-rolling bytes that could drift from it.
+pub const PLAYFIELD_LAYOUT: GfxLayout<'static> = GfxLayout {
     plane_offsets: &[4, 0, 0x20_0000 + 4, 0x20_0000],
     x_offsets: &[0, 1, 2, 3, 8, 9, 10, 11],
     y_offsets: &[0, 16, 32, 48, 64, 80, 96, 112],
@@ -383,7 +389,7 @@ const PLAYFIELD_TILE_COUNT: usize = 0x4000;
 
 /// Motion-object tiles: 16×16, four bitplanes, two per half of the 0x200000-byte
 /// region. Same most-significant-first plane order as the playfield.
-const MO_LAYOUT: GfxLayout<'static> = GfxLayout {
+pub const MO_LAYOUT: GfxLayout<'static> = GfxLayout {
     plane_offsets: &[4, 0, 0x80_0000 + 4, 0x80_0000],
     x_offsets: &[0, 1, 2, 3, 8, 9, 10, 11, 16, 17, 18, 19, 24, 25, 26, 27],
     y_offsets: &[
@@ -398,7 +404,7 @@ const MO_TILE_COUNT: usize = 0x4000;
 
 /// Alpha tiles: 8×8, two bitplanes at bit offsets 0 and 4, reversed for
 /// `decode_gfx`.
-const ALPHA_LAYOUT: GfxLayout<'static> = GfxLayout {
+pub const ALPHA_LAYOUT: GfxLayout<'static> = GfxLayout {
     plane_offsets: &[4, 0],
     x_offsets: &[0, 1, 2, 3, 8, 9, 10, 11],
     y_offsets: &[0, 16, 32, 48, 64, 80, 96, 112],
@@ -728,6 +734,24 @@ impl ToobinBoard {
     }
 
     // -- Accessors used by tests and the debugger ----------------------------
+
+    /// The decoded tile caches.
+    ///
+    /// `machines/tests/toobin_video_timing_test.rs` installs a synthetic tile
+    /// set and reads it back through these, so a tile that lands at the wrong
+    /// code or a pen that does not survive the plane split fails there rather
+    /// than silently making a picture phase measure nothing.
+    pub fn playfield_gfx(&self) -> &GfxCache {
+        &self.playfield_gfx
+    }
+
+    pub fn mo_gfx(&self) -> &GfxCache {
+        &self.mo_gfx
+    }
+
+    pub fn alpha_gfx(&self) -> &GfxCache {
+        &self.alpha_gfx
+    }
 
     pub fn clock(&self) -> u64 {
         self.clock

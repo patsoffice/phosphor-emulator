@@ -30,8 +30,116 @@
 //! loop; what the assembly learned is recorded there, next to the loop.
 
 use phosphor_core::core::machine::FrontendMachine;
+use phosphor_core::gfx::GfxLayout;
 use phosphor_machines::registry;
-use phosphor_machines::toobin::ToobinSystem;
+use phosphor_machines::toobin::{ALPHA_LAYOUT, MO_LAYOUT, PLAYFIELD_LAYOUT, ToobinSystem};
+
+// --- Synthetic graphics -----------------------------------------------------
+//
+// A ROM-less board has no tiles at all, so every playfield, object and alpha
+// pixel decodes to pen 0 and the compositor has nothing to composite. The
+// picture phases need a tile set, and this builds one.
+//
+// **The encoder is deliberately the exact inverse of `decode_gfx`**, walking the
+// same plane, x and y offsets and setting the bit where the decoder reads it.
+// That is the point and also the limit, and both should be stated.
+//
+// What it guarantees: pixel (x, y) of tile N really does decode to the pen this
+// file asked for. That is the only property the picture phases need, because
+// what they are testing is what the *compositor* does with known pens.
+//
+// What it cannot catch: an error in `decode_gfx` itself, or in the three layout
+// constants, since encoding and decoding would cancel. Those are pinned
+// elsewhere, by the golden frame against the real ROM set, which is the test
+// that would notice the board decoding its actual graphics wrongly. Writing the
+// bytes out by hand instead would not fix that either; it would only add a
+// second place for the layout to drift from.
+
+/// Build a graphics ROM whose decode is exactly `tiles`.
+///
+/// `tiles[n]` is tile `n` as `width * height` pen values in row-major order.
+fn encode_gfx(tiles: &[Vec<u8>], layout: &GfxLayout, len: usize) -> Vec<u8> {
+    let mut rom = vec![0u8; len];
+    let width = layout.x_offsets.len();
+    for (code, tile) in tiles.iter().enumerate() {
+        let code_bits = code * layout.char_increment;
+        for (py, &y_off) in layout.y_offsets.iter().enumerate() {
+            for (px, &x_off) in layout.x_offsets.iter().enumerate() {
+                let pen = tile[py * width + px];
+                for (p, &plane_off) in layout.plane_offsets.iter().enumerate() {
+                    if pen >> p & 1 == 0 {
+                        continue;
+                    }
+                    let bit_pos = code_bits + plane_off + x_off + y_off;
+                    let byte = bit_pos / 8;
+                    assert!(
+                        byte < len,
+                        "tile {code} pixel ({px},{py}) plane {p} lands at byte \
+                         {byte}, past the {len}-byte region this layout was \
+                         given"
+                    );
+                    rom[byte] |= 1 << (7 - (bit_pos & 7));
+                }
+            }
+        }
+    }
+    rom
+}
+
+/// A tile of one pen throughout.
+fn solid(pen: u8, w: usize, h: usize) -> Vec<u8> {
+    vec![pen; w * h]
+}
+
+/// Playfield tile set: pen 0, a pen with bit 3 clear, and one with it set.
+///
+/// The two nonzero pens are what let a test cell drive `PFPIX3`, which is the
+/// playfield input the shipped merge rule reads.
+const PF_TILE_BLANK: u16 = 0;
+const PF_TILE_LO: u16 = 1; // pen 2, bit 3 clear
+const PF_TILE_HI: u16 = 2; // pen 10, bit 3 set
+const PF_PEN_LO: u16 = 2;
+const PF_PEN_HI: u16 = 10;
+
+fn playfield_rom() -> Vec<u8> {
+    let tiles = vec![
+        solid(0, 8, 8),
+        solid(PF_PEN_LO as u8, 8, 8),
+        solid(PF_PEN_HI as u8, 8, 8),
+    ];
+    encode_gfx(&tiles, &PLAYFIELD_LAYOUT, 0x8_0000)
+}
+
+/// Object tile set: transparent, a pen with bit 3 clear, and one with it set.
+///
+/// `LBPIX3` is a PAL input the shipped merge ignores entirely, so the two
+/// nonzero pens are what a sweep needs to tell whether it does anything.
+const MO_TILE_BLANK: u16 = 0;
+const MO_TILE_LO: u16 = 1; // pen 5, bit 3 clear
+const MO_TILE_HI: u16 = 2; // pen 13, bit 3 set
+const MO_PEN_LO: u16 = 5;
+const MO_PEN_HI: u16 = 13;
+
+fn mo_rom() -> Vec<u8> {
+    let tiles = vec![
+        solid(0, 16, 16),
+        solid(MO_PEN_LO as u8, 16, 16),
+        solid(MO_PEN_HI as u8, 16, 16),
+    ];
+    encode_gfx(&tiles, &MO_LAYOUT, 0x20_0000)
+}
+
+/// Alpha tile set: one solid tile per 2bpp pen, so a cell's tile code *is* its
+/// `ANPIX1:0`. Pen 0 is the transparent one.
+fn alpha_rom() -> Vec<u8> {
+    let tiles = vec![
+        solid(0, 8, 8),
+        solid(1, 8, 8),
+        solid(2, 8, 8),
+        solid(3, 8, 8),
+    ];
+    encode_gfx(&tiles, &ALPHA_LAYOUT, 0x4000)
+}
 
 /// The assembled test program, a flat 8 KB image loaded at `0x000000`.
 ///
@@ -155,7 +263,13 @@ fn run() -> Run {
     // is what fails if the name this file is about stops being registered.
     registry::find(MACHINE).unwrap_or_else(|| panic!("{MACHINE} is not registered"));
 
-    let mut m: Box<dyn FrontendMachine> = Box::new(ToobinSystem::new());
+    let mut sys = ToobinSystem::new();
+    // The same entry points the real ROM loader uses, so the graphics go in the
+    // way a cartridge's would. Still no arcade ROMs, still CI-safe.
+    sys.board.load_playfield_gfx(&playfield_rom());
+    sys.board.load_mo_gfx(&mo_rom());
+    sys.board.load_alpha_gfx(&alpha_rom());
+    let mut m: Box<dyn FrontendMachine> = Box::new(sys);
     {
         let bus = m
             .debug_bus_mut()
@@ -493,6 +607,186 @@ fn the_scanline_latch_is_cleared_by_its_acknowledge() {
              back into the handler."
         );
     }
+}
+
+// --- The synthetic graphics themselves --------------------------------------
+
+/// The encoder and the board's decoder agree, checked through the board rather
+/// than against a second copy of the arithmetic.
+///
+/// This is not the round trip proving itself: it installs the tile set through
+/// `load_*_gfx`, the same entry point the real ROM loader uses, and then reads
+/// pens back out of the decoded cache. What it catches is a tile set that lands
+/// at the wrong code, a region sized too small for a layout's plane offsets, or
+/// a pen that does not survive the plane split. Those are exactly the mistakes
+/// that would make a picture phase measure nothing while looking fine.
+#[test]
+fn the_synthetic_tiles_decode_to_the_pens_they_were_built_from() {
+    let mut sys = ToobinSystem::new();
+    sys.board.load_playfield_gfx(&playfield_rom());
+    sys.board.load_mo_gfx(&mo_rom());
+    sys.board.load_alpha_gfx(&alpha_rom());
+
+    let check = |layer: &str, cache: &phosphor_core::gfx::GfxCache, code: u16, pen: u16| {
+        let size = cache.row_slice(code as usize, 0).len();
+        for y in 0..size {
+            for x in 0..size {
+                let got = u16::from(cache.row_slice(code as usize, y)[x]);
+                assert_eq!(
+                    got, pen,
+                    "{layer} tile {code} pixel ({x},{y}) decoded to pen {got}, \
+                     not the {pen} it was encoded as"
+                );
+            }
+        }
+    };
+
+    let pf = sys.board.playfield_gfx();
+    check("playfield", pf, PF_TILE_BLANK, 0);
+    check("playfield", pf, PF_TILE_LO, PF_PEN_LO);
+    check("playfield", pf, PF_TILE_HI, PF_PEN_HI);
+
+    let mo = sys.board.mo_gfx();
+    check("object", mo, MO_TILE_BLANK, 0);
+    check("object", mo, MO_TILE_LO, MO_PEN_LO);
+    check("object", mo, MO_TILE_HI, MO_PEN_HI);
+
+    let al = sys.board.alpha_gfx();
+    for pen in 0..4u16 {
+        check("alpha", al, pen, pen);
+    }
+}
+
+/// Pens differing only in bit 3 must survive as distinct pens.
+///
+/// The whole point of the object tile pair is to drive `LBPIX3`, the PAL input
+/// the shipped merge ignores. If the two pens collapsed to the same value
+/// through a plane-order mistake, a sweep over them would report "no difference"
+/// for a reason that has nothing to do with the board.
+#[test]
+fn the_tile_pairs_differ_in_exactly_the_bit_the_sweep_drives() {
+    assert_eq!(
+        PF_PEN_LO ^ PF_PEN_HI,
+        0x08,
+        "the playfield pens must differ in bit 3 and nothing else"
+    );
+    assert_eq!(
+        MO_PEN_LO ^ MO_PEN_HI,
+        0x08,
+        "the object pens must differ in bit 3 and nothing else"
+    );
+    assert_eq!(PF_PEN_LO & 0x08, 0, "PF_PEN_LO must have bit 3 clear");
+    assert_eq!(MO_PEN_LO & 0x08, 0, "MO_PEN_LO must have bit 3 clear");
+}
+
+// --- The readout channel ----------------------------------------------------
+//
+// The picture phases have to report WHICH PALETTE ENTRY the compositor chose,
+// because that is exactly what the priority PAL selects: its outputs drive the
+// multiplexers that pick one layer's color and pen as the color RAM address.
+// A test that only checked "the object is on top" would be reading back less
+// than the hardware decides.
+//
+// So the palette is loaded with an identity code rather than with colors: entry
+// `i` gets the low five bits of `i` in red and the next five in green, with bit
+// 15 set so the global intensity control cannot scale them. Rendering then
+// hands back the index itself, and the layer is the range it falls in:
+// playfield below 0x100, object 0x100-0x1FF, alpha 0x200 and up.
+
+/// The palette word that encodes `index` as a readable color.
+fn index_color(index: u16) -> u16 {
+    0x8000 | (index & 0x1F) << 10 | ((index >> 5) & 0x1F) << 5
+}
+
+/// `ToobinBoard::palette_rgb`'s component scaling, which the readout inverts.
+///
+/// Five bits scale to eight by `(c * 224) >> 5` with a 38-count pedestal on
+/// everything but zero, so the 32 steps land on 0 and then 45 to 255 in sevens.
+/// Injective, which is what makes the inverse exact rather than a nearest match.
+fn component(c: u16) -> u8 {
+    let v = (u32::from(c & 0x1F) * 224) >> 5;
+    if v != 0 { (v + 38) as u8 } else { 0 }
+}
+
+/// Recover the palette index from a rendered pixel.
+fn decode_index(r: u8, g: u8) -> u16 {
+    let find = |v: u8| -> u16 {
+        (0..32u16)
+            .find(|&c| component(c) == v)
+            .unwrap_or_else(|| panic!("{v} is not one of the 32 component steps"))
+    };
+    find(r) | find(g) << 5
+}
+
+#[test]
+fn the_palette_index_survives_the_round_trip_through_a_rendered_pixel() {
+    // Every index the sweep can produce, through the same scaling the renderer
+    // applies. Checked before any of it is used to read a picture, because an
+    // index that aliased would make two layers indistinguishable in the result
+    // rather than failing.
+    for i in 0..1024u16 {
+        let w = index_color(i);
+        let (r, g) = (component(w >> 10), component(w >> 5));
+        assert_eq!(
+            decode_index(r, g),
+            i,
+            "index {i} encodes to {w:#06X} and reads back wrong"
+        );
+    }
+}
+
+#[test]
+fn a_rendered_pixel_reports_which_layer_won() {
+    let mut sys = ToobinSystem::new();
+    sys.board.load_playfield_gfx(&playfield_rom());
+    sys.board.load_mo_gfx(&mo_rom());
+    sys.board.load_alpha_gfx(&alpha_rom());
+    let mut m: Box<dyn FrontendMachine> = Box::new(sys);
+
+    // Region bases as the debug bus addresses them, which is the masked space.
+    const PF: u32 = 0xC0_0000;
+    const ALPHA: u32 = 0xC0_8000;
+    const PAL: u32 = 0xC1_0000;
+
+    {
+        let bus = m.debug_bus_mut().expect("debug bus");
+        let mut poke = |addr: u32, w: u16| {
+            bus.write(0, addr, (w >> 8) as u8);
+            bus.write(0, addr + 1, w as u8);
+        };
+        for i in 0..1024u16 {
+            poke(PAL + u32::from(i) * 2, index_color(i));
+        }
+        // Playfield cell 0: color 0, priority 0, the bit-3-clear tile.
+        poke(PF, 0x0000);
+        poke(PF + 2, PF_TILE_LO);
+        // Alpha cell 0 transparent for the first look.
+        poke(ALPHA, 0x0000);
+    }
+    m.run_frame();
+    let (w, h) = m.display_size();
+    let mut rgb = vec![0u8; w as usize * h as usize * 3];
+    m.render_frame(&mut rgb);
+    assert_eq!(
+        decode_index(rgb[0], rgb[1]),
+        PF_PEN_LO,
+        "with nothing above it the playfield's own pen should reach the screen"
+    );
+
+    // Now put an opaque alpha cell over the same pixel.
+    {
+        let bus = m.debug_bus_mut().expect("debug bus");
+        bus.write(0, ALPHA, 0x00);
+        bus.write(0, ALPHA + 1, 0x01); // tile 1 = solid pen 1
+    }
+    m.run_frame();
+    m.render_frame(&mut rgb);
+    assert_eq!(
+        decode_index(rgb[0], rgb[1]),
+        0x200 + 1,
+        "an opaque alpha pen should win, and should report in the alpha's own \
+         range of the color RAM"
+    );
 }
 
 // --- The drift guard --------------------------------------------------------
