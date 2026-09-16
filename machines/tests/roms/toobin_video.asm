@@ -122,6 +122,10 @@ R_SND       equ RES+40          ; level-2 or level-3 entries: the sound board
                                 ; asserting when this program expects silence
 R_TIMEOUT   equ RES+42          ; $DEAD if a wait gave up; R_PHASE says where
 
+R_LEAD_LINE equ RES+44          ; the line the lead probe rewrites its two lists
+                                ; at, published so the harness reads it from here
+                                ; rather than keeping its own copy
+
 RESLEN      equ 48
 
 MAGIC       equ $5A5A
@@ -167,6 +171,64 @@ SWEEP_CELLS equ 96
 SWEEP_COLS  equ 12
 SWEEP_PITCH equ 16
 
+; The object tile set carries eight consecutive codes per pen, because an
+; entry's tiles are numbered base + column*height + row and the lead probe is one
+; object eight tiles tall. A single word rewritten in its list entry then changes
+; the pen down its whole length, which is what an interrupt handler can afford.
+MO_STRIDE   equ 8
+MO_BLANK    equ 0
+MO_LO       equ MO_STRIDE            ; solid pen 5, bit 3 clear
+MO_HI       equ MO_STRIDE*2          ; solid pen 13, bit 3 set
+
+PF_LO       equ 1                    ; solid pen 2, bit 3 clear
+PF_HI       equ 2                    ; solid pen 10, bit 3 set
+
+; --- The object sampling lead ------------------------------------------------
+;
+; Sheet 13 settles that this board has TWO line-buffer SRAMs whose controls are
+; gated against 1V and /1V, so one is filled while the other is displayed and
+; they trade every scanline: what the beam shows on a line was scanned during the
+; line before it. What the sheet does not settle, at the resolution it was read
+; at, is whether the vertical match constant on sheet 7 already absorbs that, and
+; machines/CLAUDE.md warns that adding the delay a second time moves every object
+; pixel the wrong way.
+;
+; SO THE PROBE IS A LATENCY, NOT A POSITION. Asking "is this object on the right
+; row" can only be answered against an oracle, and our own answer is the thing
+; under test. Asking "how many rows after a write to the list does the change
+; appear" is answerable here, and it is the same quantity: a path that scans a
+; line ahead cannot show a change on the very next line, because that line was
+; already scanned.
+;
+; The playfield gets the identical probe in the same interrupt, as the control.
+; It has no line buffer, so the difference between the two answers is the object
+; path's lead, and a shared answer is not the handler's own latency showing up in
+; both.
+LEAD_LINE   equ 240                  ; where the interrupt makes both writes
+LEAD_MOY    equ 200                  ; the probe object's top line
+LEAD_MOX    equ 300                  ; ... and its left edge, clear of the sweep
+LEAD_PFX    equ 400                  ; the playfield probe's column, in pixels
+
+; The probe object is entry SWEEP_CELLS, the one past the sweep's chain.
+PROBE_MO    equ MOB+(SWEEP_CELLS*8)
+PROBE_MOW1  equ PROBE_MO+2
+
+; Its word 0. The board computes the top line as -(Y) - height*16 wrapped to
+; nine bits, so with the absolute flag set and height 8 that is
+; Y = (-LEAD_MOY - 128) & $1FF = 184, and 184 << 6 is the field's place.
+PROBE_W0    equ $8000|(((-LEAD_MOY-128)&$1FF)<<6)|((8-1)<<3)|(1-1)
+PROBE_W3    equ LEAD_MOX<<6
+
+; The two playfield cells the probe rewrites, covering rows 240 to 255 of the
+; column at LEAD_PFX. A cell is two words and the map is 128 wide.
+PROBE_PFA   equ PF+((((LEAD_LINE/8)*128)+(LEAD_PFX/8))*4)+2
+PROBE_PFB   equ PF+(((((LEAD_LINE/8)+1)*128)+(LEAD_PFX/8))*4)+2
+
+; The band of the probe column painted before the interrupt, so there is
+; something to change: cell rows 25 through 35, which is rows 200 to 287.
+LEAD_PFTOP  equ 25
+LEAD_PFROWS equ 11
+
 ; --- Variables (FFC100, work RAM, above the result block) -------------------
 ;
 ; Everything the interrupt handlers touch lives here rather than in registers,
@@ -178,6 +240,10 @@ V_IRQ1CNT   equ VARS+2
 V_IRQ1FIRST equ VARS+4
 V_LIMIT     equ VARS+6          ; iterations a wait has left before giving up
 V_SNDCNT    equ VARS+8
+V_PROBE     equ VARS+10         ; nonzero once the lead probe is armed, which is
+                                ; what tells the scanline handler to make its two
+                                ; writes. T3 and T4 run with this clear, so their
+                                ; handler is the one they were measured with.
 VARLEN      equ 16
 
 ; EVERY WAIT IS BOUNDED. A wait that spins forever makes the watchdog reboot the
@@ -592,7 +658,7 @@ CellLoop
             move.w  d6,512(a0)
             move.w  d6,516(a0)
             move.w  d1,d6
-            addq.w  #1,d6               ; tile 1 has pen bit 3 clear, tile 2 set
+            addi.w  #PF_LO,d6           ; PF_LO has pen bit 3 clear, PF_HI set
             move.w  d6,2(a0)
             move.w  d6,6(a0)
             move.w  d6,514(a0)
@@ -635,19 +701,16 @@ CellLoop
             ori.w   #$8000,d6           ; absolute, width 1, height 1
             move.w  d6,0(a0)
 
-; Word 1 is the tile, and the object index is the tile code directly: 0 is the
-; all-transparent tile, 1 has pen bit 3 clear and 2 has it set.
-            move.w  d3,2(a0)
+; Word 1 is the tile. Each pen owns MO_STRIDE consecutive codes, so the object
+; index scales into the set: 0 is transparent, 1 has pen bit 3 clear, 2 set.
+            move.w  d3,d6
+            lsl.w   #3,d6               ; times MO_STRIDE
+            move.w  d6,2(a0)
 
-; Word 2 is the link. The last entry points back at the first, which the walk
-; has already visited, so the chain terminates there rather than running on
-; through 160 entries of whatever the list held.
+; Word 2 is the link, always to the next entry. The chain runs on past the sweep
+; into the lead probe at entry SWEEP_CELLS, which is what closes it.
             move.w  d7,d6
             addq.w  #1,d6
-            cmpi.w  #SWEEP_CELLS,d6
-            bne.s   CellLink
-            moveq   #0,d6
-CellLink
             move.w  d6,4(a0)
 
 ; Word 3 is the X position in bits 15-6, with the palette in the low nibble.
@@ -688,18 +751,101 @@ CellLink
             bsr     WaitVblank
             bsr     PetDog
 
+            move.w  #9,R_PHASE
+
+; ===========================================================================
+; Phase 10 -- the object sampling lead
+;
+; See the LEAD_ equates for why this is a latency and not a position. Two writes
+; are made from one scanline interrupt at LEAD_LINE: one to the object list and
+; one to the playfield map. The row each change first reaches is read off the
+; screen by the harness, and the DIFFERENCE between them is the object path's
+; lead over the playfield's. A shared answer is the handler's own latency rather
+; than anything about a line buffer, which is why the control is there.
+;
+; THE WRITES ARE UNDONE AT EVERY VBLANK, so the transition happens once a frame
+; forever and the harness can read any frame it likes. Left one-shot the picture
+; would carry the changed state from the second frame on and there would be no
+; edge to find.
+; ===========================================================================
+
+; Paint the playfield probe's column, cell rows LEAD_PFTOP up, so the interrupt
+; has something to change.
+            lea     PF,a0
+            moveq   #0,d6
+; LEAD_PFTOP is a CELL row, not a block row, so the stride is 128 cells of four
+; bytes and not twice that. The sweep's loop above shifts by ten because its row
+; index counts 16-pixel blocks, which are two cell rows each; copying that shift
+; here put the band at cell row 50, off the bottom of a 48-row screen, and the
+; control column then read the cleared map instead of failing.
+            move.w  #LEAD_PFTOP,d6
+            lsl.l   #8,d6
+            lsl.l   #1,d6               ; cell row * 128 wide * 4 bytes
+            adda.l  d6,a0
+            adda.l  #(LEAD_PFX/8)*4,a0
+            move.w  #LEAD_PFROWS-1,d0
+LeadPfPaint
+            move.w  #0,(a0)             ; color 0, priority 0
+            move.w  #PF_LO,2(a0)
+            adda.l  #128*4,a0           ; the next cell row down the column
+            dbra    d0,LeadPfPaint
+
+; The probe object: eight tiles tall, one wide, placed absolutely, in the pen
+; with bit 3 clear. Entry SWEEP_CELLS, which the sweep's chain runs into, and its
+; link closes the chain back at entry 0.
+            lea     PROBE_MO,a0
+            move.w  #PROBE_W0,0(a0)
+            move.w  #MO_LO,2(a0)
+            move.w  #0,4(a0)
+            move.w  #PROBE_W3,6(a0)
+            bsr     PetDog
+
+; Arm it. The ack after the wait is the same ordering ScanlineTest needs and for
+; the same reason: the beam crosses LEAD_LINE while the arming is being set up.
+            ori.w   #SR_MASKON,sr
+            move.w  #LEAD_LINE,INTSCAN
+            move.w  #LEAD_LINE,R_LEAD_LINE
+            bsr     WaitVblank
+            move.w  #0,SCANACK
+            move.w  #1,V_PROBE
+            andi.w  #$F8FF,sr
+
+; Two frames with the probe running before saying so, for the same reason the
+; sweep waits two: the first is the one the setup raced.
+            bsr     WaitVblank
+            bsr     LeadRestore
+            bsr     PetDog
+            bsr     WaitVblank
+            bsr     LeadRestore
+            bsr     PetDog
+            move.w  #10,R_PHASE
+
 ; ===========================================================================
 ; Done
 ; ===========================================================================
             move.w  V_SNDCNT,R_SND
             bsr     PetDog
-            move.w  #9,R_PHASE
+            move.w  #11,R_PHASE
             move.w  #MAGIC,R_MAGIC
 
+; The idle loop is what keeps the probe repeating: every vertical blank it puts
+; both lists back to the pen with bit 3 clear, and the interrupt sets them to the
+; pen with it set at LEAD_LINE. Nothing else is touched, so the sweep above stays
+; standing and the whole picture is stable frame to frame.
 Idle
             bsr     WaitVblank
+            bsr     LeadRestore
             bsr     PetDog
             bra     Idle
+
+; Put both probe targets back to their pre-interrupt state. Called from the
+; vertical blank, which is past every visible row, so it cannot itself show up in
+; the picture.
+LeadRestore
+            move.w  #MO_LO,PROBE_MOW1
+            move.w  #PF_LO,PROBE_PFA
+            move.w  #PF_LO,PROBE_PFB
+            rts
 
 ; ===========================================================================
 ; Subroutines
@@ -859,6 +1005,18 @@ Irq1Handler
 I1NotFirst
             addq.w  #1,V_IRQ1CNT
             move.w  #0,SCANACK
+
+; The lead probe's two writes, made as close together as one handler can put
+; them so neither can be blamed for the other's row. Guarded rather than
+; unconditional: T3 and T4 run with V_PROBE clear, so they are measured with the
+; handler they were always measured with, and the snapshot above happens before
+; this in any case.
+            tst.w   V_PROBE
+            beq.s   I1NoProbe
+            move.w  #MO_HI,PROBE_MOW1
+            move.w  #PF_HI,PROBE_PFA
+            move.w  #PF_HI,PROBE_PFB
+I1NoProbe
             cmpi.w  #IRQ1CAP,V_IRQ1CNT
             bcc     Irq1Overrun         ; unsigned >=; never returns
             move.l  (a7)+,d0

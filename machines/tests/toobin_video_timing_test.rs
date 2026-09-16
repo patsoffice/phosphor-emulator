@@ -114,18 +114,27 @@ fn playfield_rom() -> Vec<u8> {
 ///
 /// `LBPIX3` is a PAL input the shipped merge ignores entirely, so the two
 /// nonzero pens are what a sweep needs to tell whether it does anything.
+///
+/// **Each pen gets eight consecutive codes, not one.** An entry's tiles are
+/// numbered `base + column * height + row`, so an object eight tiles tall reads
+/// eight consecutive codes down its single column. The lead probe needs exactly
+/// that: one tall object whose whole length changes pen when a single word of
+/// its list entry is rewritten. A one-tile-per-pen set would make that eight
+/// writes in an interrupt handler instead of one.
+const MO_TILE_STRIDE: u16 = 8;
 const MO_TILE_BLANK: u16 = 0;
-const MO_TILE_LO: u16 = 1; // pen 5, bit 3 clear
-const MO_TILE_HI: u16 = 2; // pen 13, bit 3 set
+const MO_TILE_LO: u16 = MO_TILE_STRIDE; // pen 5, bit 3 clear
+const MO_TILE_HI: u16 = MO_TILE_STRIDE * 2; // pen 13, bit 3 set
 const MO_PEN_LO: u16 = 5;
 const MO_PEN_HI: u16 = 13;
 
 fn mo_rom() -> Vec<u8> {
-    let tiles = vec![
-        solid(0, 16, 16),
-        solid(MO_PEN_LO as u8, 16, 16),
-        solid(MO_PEN_HI as u8, 16, 16),
-    ];
+    let mut tiles = Vec::new();
+    for pen in [0, MO_PEN_LO as u8, MO_PEN_HI as u8] {
+        for _ in 0..MO_TILE_STRIDE {
+            tiles.push(solid(pen, 16, 16));
+        }
+    }
     encode_gfx(&tiles, &MO_LAYOUT, 0x20_0000)
 }
 
@@ -195,6 +204,7 @@ const R_T4_POS: u32 = RES + 36;
 const R_T4_CNT: u32 = RES + 38;
 const R_SND: u32 = RES + 40;
 const R_TIMEOUT: u32 = RES + 42;
+const R_LEAD_LINE: u32 = RES + 44;
 const RESLEN: u32 = 48;
 
 const MAGIC: u16 = 0x5A5A;
@@ -202,7 +212,7 @@ const TRAPPED: u16 = 0xDEAD;
 const IRQ_STORM: u16 = 0xDEA1;
 
 /// The phase the program publishes last, before the magic word.
-const FINAL_PHASE: u16 = 9;
+const FINAL_PHASE: u16 = 11;
 
 /// Vector 0 of the image: the supervisor stack pointer `cpu.reset` fetches
 /// through the bus, parked in work RAM well clear of the result block.
@@ -1031,6 +1041,179 @@ fn the_sweep_actually_drove_all_four_priority_values() {
         pf_wins > 0,
         "no cell had the playfield beat an opaque object, so the priority \
          mechanism was never exercised"
+    );
+}
+
+// --- The object sampling lead -----------------------------------------------
+//
+// Sheet 13 settles that this board has two line-buffer SRAMs gated against `1V`
+// and `/1V`, so one is filled while the other is displayed and what the beam
+// shows on a line was scanned during the line before it. What it does not settle
+// is whether the vertical match constant on sheet 7 already absorbs that, and
+// `machines/CLAUDE.md` warns that adding the delay twice moves every object
+// pixel the wrong way.
+//
+// **So the probe is a latency, not a position.** "Is this object on the right
+// row" can only be answered against an oracle, and our own answer is the thing
+// under test. "How many rows after a write to the list does the change appear"
+// is answerable here, and it is the same quantity: a path that scans a line
+// ahead cannot show a change on the very next line, because that line was
+// already scanned.
+//
+// The playfield takes the identical probe in the same interrupt as the control.
+// It has no line buffer, so the difference between the two is the object path's
+// lead; a shared answer is the handler's own latency turning up in both, which
+// is exactly what a single probe could not tell apart.
+
+/// The probe object's left edge and top line, mirroring the assembly.
+const LEAD_MOX: usize = 300;
+const LEAD_MOY: usize = 200;
+/// The playfield probe's column in pixels.
+const LEAD_PFX: usize = 400;
+/// Rows the painted playfield band covers, from `LEAD_PFTOP * 8`.
+const LEAD_PF_TOP: usize = 25 * 8;
+const LEAD_PF_ROWS: usize = 11 * 8;
+
+/// The first row at or below `from` where the sampled column stops reading
+/// `before`, and what it reads there.
+fn first_change(
+    rgb: &[u8],
+    w: usize,
+    x: usize,
+    from: usize,
+    to: usize,
+    before: u16,
+) -> (usize, u16) {
+    for y in from..to {
+        let o = (y * w + x) * 3;
+        let index = decode_index(rgb[o], rgb[o + 1]);
+        if index != before {
+            return (y, index);
+        }
+    }
+    panic!(
+        "column {x} never changed from {before:#05X} between rows {from} and \
+         {to}. The probe writes once a frame and is undone at every vertical \
+         blank, so a column that never changes means the interrupt never made \
+         its writes."
+    );
+}
+
+struct Lead {
+    line: usize,
+    mo_row: usize,
+    mo_index: u16,
+    pf_row: usize,
+    pf_index: u16,
+}
+
+fn lead() -> Lead {
+    let (m, run) = run_machine();
+    run.assert_completed();
+    let (w, h) = m.display_size();
+    let mut rgb = vec![0u8; w as usize * h as usize * 3];
+    m.render_frame(&mut rgb);
+    let w = w as usize;
+    let line = usize::from(run.word(R_LEAD_LINE));
+    assert!(
+        line > LEAD_MOY && line < LEAD_MOY + 128,
+        "the probe line {line} is not inside the probe object's 128 rows"
+    );
+    // Sampled in the middle of each probe, clear of every edge.
+    let (mo_row, mo_index) = first_change(
+        &rgb,
+        w,
+        LEAD_MOX + 8,
+        LEAD_MOY,
+        LEAD_MOY + 128,
+        0x100 + MO_PEN_LO,
+    );
+    let (pf_row, pf_index) = first_change(
+        &rgb,
+        w,
+        LEAD_PFX + 4,
+        LEAD_PF_TOP,
+        LEAD_PF_TOP + LEAD_PF_ROWS,
+        PF_PEN_LO,
+    );
+    Lead {
+        line,
+        mo_row,
+        mo_index,
+        pf_row,
+        pf_index,
+    }
+}
+
+#[test]
+fn a_mid_frame_write_reaches_the_very_next_row_on_both_paths() {
+    let l = lead();
+    // The interrupt latch is set at the start of its line and that line is
+    // composited immediately, before the CPU runs, so the handler's writes
+    // cannot reach the line they fired on. The next row is the earliest
+    // possible, and anything later is a path that had already read ahead.
+    assert_eq!(
+        l.pf_row,
+        l.line + 1,
+        "the playfield changed at row {} for a write made during row {}. This \
+         is the control: the playfield has no line buffer, so anything but the \
+         next row is the handler being slower than a scanline rather than \
+         anything about the object path.",
+        l.pf_row,
+        l.line
+    );
+    assert_eq!(
+        l.mo_row,
+        l.line + 1,
+        "the object changed at row {} for a write made during row {}, against \
+         the playfield's row {}.",
+        l.mo_row,
+        l.line,
+        l.pf_row
+    );
+}
+
+#[test]
+fn the_object_path_reads_the_list_no_earlier_than_the_playfield_reads_its_map() {
+    let l = lead();
+    // THIS IS THE MEASUREMENT jg18.2 ASKED FOR, as a single number. Zero means
+    // our renderer applies no lead: it reads the object list live at the row it
+    // is drawing, exactly as it reads the playfield map. One would mean a lead
+    // is already modeled and adding another would double it.
+    //
+    // What it does NOT say is what the board does. The sheet establishes the
+    // line buffers are real; whether sheet 7's match constant absorbs them is
+    // still open, and that needs an oracle this file does not have.
+    let object_lead = l.mo_row as isize - l.pf_row as isize;
+    assert_eq!(
+        object_lead, 0,
+        "the object path showed a mid-frame list change {} row(s) after the \
+         playfield showed the same-instant map change (object row {}, playfield \
+         row {}, both written during row {}). A nonzero lead here is a real \
+         difference between the two paths in this renderer.",
+        object_lead, l.mo_row, l.pf_row, l.line
+    );
+}
+
+#[test]
+fn both_probes_changed_to_the_pen_they_were_pointed_at() {
+    let l = lead();
+    // Guards against a change that is real but is not the one asked for: a
+    // shifted object, a palette write landing somewhere unintended, or a column
+    // that ran off its painted band and read the cleared map instead.
+    assert_eq!(
+        l.mo_index,
+        0x100 + MO_PEN_HI,
+        "the object column changed to {:#05X} rather than to the bit-3-set \
+         object pen, so the row it changed at is not measuring the write the \
+         handler made",
+        l.mo_index
+    );
+    assert_eq!(
+        l.pf_index, PF_PEN_HI,
+        "the playfield column changed to {:#05X} rather than to the bit-3-set \
+         playfield pen",
+        l.pf_index
     );
 }
 

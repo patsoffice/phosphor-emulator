@@ -6,9 +6,10 @@ the board it is running on and writes its verdict into work RAM.
 Status: **the loader, the signals and the layer-priority sweep are in the tree
 and passing.** The sweep documents the compositor's behavior across all 96
 combinations of the PAL's live inputs and found nothing wrong, which was the
-expected outcome; the second jg18.2 question, the object sampling lead, is not
-answered. The last section says exactly what is left and what the sweep can and
-cannot be worth without a PAL dump.
+expected outcome, and the object sampling lead is measured at zero rows against
+a same-instant playfield control. Both jg18.2 questions now have numbers. The
+last section says what is left and what any of it can be worth without a PAL
+dump.
 
 ## Why this board
 
@@ -95,8 +96,9 @@ program counter vectors to the stray handler.
 | 6 | T2, the HBLANK level and its share of a line |
 | 7 | T3, the scanline interrupt at line 100 |
 | 8 | T4, the same at line 300 |
-| 9 | the layer-priority sweep is painted and a frame has been composited with it |
-| 10 | complete, `$5A5A` written |
+| 9 | the layer-priority sweep is painted and a frame composited with it |
+| 10 | the object sampling lead probe is armed and repeating once a frame |
+| 11 | complete, `$5A5A` written |
 
 Every wait polls hardware state, never a cycle count, and every position is
 counted in iterations of one shared poll loop whose rate T1 measures in the same
@@ -300,19 +302,67 @@ The drift guard re-assembles the source and byte-compares, and fails rather than
 skips when `PHOSPHOR_ASM` is set, which the dev shell exports. CI has no dev
 shell and skips with a printed note.
 
+## The object sampling lead
+
+Phase 10 is the second jg18.2 question, and the design turns on one choice.
+
+**It measures a latency, not a position.** Asking "is this object on the right
+row" can only be answered against an oracle, and our own answer is the thing
+under test, so a conformance ROM cannot ask it. Asking "how many rows after a
+write to the list does the change appear" is answerable here without one, and it
+is the same quantity: a path that scans a line ahead cannot show a change on the
+very next line, because that line was already scanned.
+
+One scanline interrupt at line 240 makes two writes as close together as a
+handler can put them: one to the object list, changing a 128-row-tall object's
+tile, and one to the playfield map, changing two cells of a painted column. The
+playfield is the control. It has no line buffer, so the *difference* between the
+two answers is the object path's lead, and a shared answer is the handler's own
+latency turning up in both rather than anything about a line buffer. A single
+probe could not tell those apart.
+
+The writes are undone at every vertical blank, so the transition happens once a
+frame forever and the harness can read any frame. Left one-shot, the picture
+would carry the changed state from the second frame on and there would be no edge
+to find.
+
+| | measured |
+|---|---|
+| write made during row | 240 |
+| playfield change first visible | row 241 |
+| object change first visible | row 241 |
+| **object path's lead over the playfield's** | **0 rows** |
+
+Both reach the very next row, which is the earliest possible: the interrupt latch
+is set at the start of its line and that line is composited immediately, before
+the CPU runs, so the handler cannot reach the line it fired on.
+
+**So this renderer applies no lead at all.** It reads the object list live at the
+row it is drawing, exactly as it reads the playfield map. That is now a measured
+fact rather than an inference from reading `draw_motion_objects_row`, and it is
+the number a MAME run would be compared against.
+
+**It does not say what the board does.** Sheet 13 establishes the two line
+buffers are real and trade every scanline. Whether sheet 7's vertical match
+constant already absorbs them is still open and still needs an oracle. What has
+changed is that the question now has a shape a second implementation can answer
+in one number, instead of a shape that required reading a schematic at a
+resolution nobody had.
+
+The control earned its place immediately. Its first run reported the playfield
+changing at row 200 for a write at row 240, which is impossible and which was an
+address bug: `LEAD_PFTOP` is a cell row and the paint loop had been given the
+sweep's stride, which counts 16-pixel blocks and is therefore twice as long. The
+band landed at cell row 50, off the bottom of a 48-row screen, and the column
+read the cleared map. A probe without a control would have reported the object's
+241 on its own and looked entirely convincing.
+
 ## What is left
 
-The instrument works, the graphics are in, and the priority sweep runs. Two
-things remain.
+The instrument works, the graphics are in, the priority sweep runs and the lead
+is measured. One thing remains.
 
-1. **The object sampling lead**, the second jg18.2 question, still untouched.
-   The pieces for it exist now: place an object at a known Y and use the
-   scanline interrupt, known good to a fifth of a line, to change something the
-   object's row depends on at a chosen line. Whether the change lands on that row
-   or the one after it is the one-line delay, measured rather than assumed. Do
-   not add a lead on a guess: `machines/CLAUDE.md` warns that some boards' sprite
-   Y constants fold the delay in already.
-2. **The MAME second opinion.** Everything the sweep asserts is derived from our
+1. **The MAME second opinion.** Everything the sweep asserts is derived from our
    own merge rule, so it guards against regression and not against being wrong.
    `tools/mame_roadrunner_conformance.lua` is the pattern: write the image into
    MAME's `maincpu` region, soft-reset so the 68010 re-fetches its vectors, and
