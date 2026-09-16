@@ -71,3 +71,58 @@ impl Debuggable for Namco53 {
         }]
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn successive_reads_alternate_between_the_two_dip_banks() {
+        // The Z80 sees one byte per read and the chip cycles between them, so
+        // a board that read once would get DSWA forever and never see DSWB.
+        let mut c = Namco53::new();
+        assert_eq!(c.read(0xA1, 0xB2), 0xA1);
+        assert_eq!(c.read(0xA1, 0xB2), 0xB2);
+        assert_eq!(c.read(0xA1, 0xB2), 0xA1, "the sequence wraps after two");
+        assert_eq!(c.read(0xA1, 0xB2), 0xB2);
+    }
+
+    #[test]
+    fn the_values_are_read_live_rather_than_latched() {
+        // The MCU samples its R ports each cycle, so a DIP changed between
+        // reads is visible on the next one. Latching at reset would freeze the
+        // settings a service menu is meant to be able to change.
+        let mut c = Namco53::new();
+        assert_eq!(c.read(0x11, 0x22), 0x11);
+        assert_eq!(c.read(0x33, 0x44), 0x44, "bank B, with the new value");
+        assert_eq!(c.read(0x55, 0x66), 0x55);
+    }
+
+    #[test]
+    fn the_sequence_index_is_the_whole_of_the_state() {
+        let mut c = Namco53::new();
+        assert_eq!(c.read_index, 0);
+        c.read(0, 0);
+        assert_eq!(c.read_index, 1);
+        c.read(0, 0);
+        assert_eq!(c.read_index, 0, "two reads is a full cycle");
+    }
+
+    #[test]
+    fn reset_returns_the_sequence_to_the_first_bank() {
+        // A reset mid-sequence has to resume at DSWA, or every later read is
+        // off by one and the two banks are swapped for the rest of the run.
+        let mut c = Namco53::new();
+        c.read(0xA1, 0xB2);
+        assert_eq!(c.read_index, 1);
+        c.reset();
+        assert_eq!(c.read_index, 0);
+        assert_eq!(c.read(0xA1, 0xB2), 0xA1);
+    }
+
+    #[test]
+    fn it_powers_up_ready_to_return_the_first_bank() {
+        let mut c = Namco53::default();
+        assert_eq!(c.read(0xA1, 0xB2), 0xA1);
+    }
+}

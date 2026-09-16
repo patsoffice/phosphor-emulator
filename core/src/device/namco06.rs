@@ -216,3 +216,259 @@ impl Debuggable for Namco06 {
         ]
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The 06XX on the Namco boards divides a 1.536 MHz clock, which is 64
+    /// CPU cycles per base tick at 3.072 MHz.
+    const DIV: u32 = 64;
+
+    fn chip() -> Namco06 {
+        Namco06::new(DIV)
+    }
+
+    // --- The control register --------------------------------------------
+
+    #[test]
+    fn the_control_register_reads_back_what_was_written() {
+        let mut c = chip();
+        c.ctrl_write(0x5B, 0);
+        assert_eq!(c.ctrl_read(), 0x5B);
+    }
+
+    #[test]
+    fn the_low_four_bits_select_chips_independently() {
+        let mut c = chip();
+        for n in 0..4u8 {
+            c.ctrl_write(1 << n, 0);
+            for m in 0..4u8 {
+                assert_eq!(c.chip_select(m), m == n, "select {n}, asked about {m}");
+            }
+        }
+        // More than one at a time is legal: the 06XX broadcasts to each
+        // selected chip rather than arbitrating between them.
+        c.ctrl_write(0b1010, 0);
+        assert!(c.chip_select(1) && c.chip_select(3));
+        assert!(!c.chip_select(0) && !c.chip_select(2));
+    }
+
+    #[test]
+    fn bit_four_is_the_read_direction() {
+        let mut c = chip();
+        c.ctrl_write(0x01, 0);
+        assert!(!c.is_read_mode());
+        c.ctrl_write(0x11, 0);
+        assert!(c.is_read_mode());
+    }
+
+    // --- The timer -------------------------------------------------------
+
+    #[test]
+    fn a_zero_divider_stops_the_timer_and_drops_nmi() {
+        // The divider field doubles as the run control, so writing zero to it
+        // is how a board turns the NMI source off. It has to clear the output
+        // as well: a timer stopped with NMI still asserted would leave the
+        // CPU taking an interrupt that nothing will ever release.
+        let mut c = chip();
+        c.ctrl_write(0x20, 0);
+        for _ in 0..DIV * 4 {
+            c.tick();
+        }
+        assert!(c.timer_running());
+
+        c.ctrl_write(0x00, 0);
+        assert!(!c.timer_running());
+        assert!(!c.nmi_output(), "stopping the timer left NMI asserted");
+        assert!(!c.timer_state());
+    }
+
+    #[test]
+    fn a_stopped_timer_does_not_advance() {
+        let mut c = chip();
+        c.ctrl_write(0x00, 0);
+        let before = c.timer_counter();
+        for _ in 0..1000 {
+            c.tick();
+        }
+        assert_eq!(c.timer_counter(), before);
+        assert!(!c.nmi_output());
+    }
+
+    #[test]
+    fn the_divider_field_sets_the_half_period() {
+        // Each step of the field doubles the period, and the stored value is a
+        // half period because the output toggles rather than pulsing.
+        let mut c = chip();
+        for shifts in 1..8u8 {
+            c.ctrl_write(shifts << 5, 0);
+            assert_eq!(
+                c.timer_period(),
+                (DIV * (1 << shifts)) / 2,
+                "divider field {shifts}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_first_tick_is_aligned_to_the_next_base_clock_edge() {
+        // The 06XX counts its own clock, not the CPU's, so a control write
+        // part way through a base period waits only for the remainder. Writing
+        // exactly on an edge waits a whole period rather than firing at once.
+        let mut c = chip();
+        c.ctrl_write(0x20, 0);
+        assert_eq!(c.timer_counter(), DIV, "on an edge, a full period");
+        c.ctrl_write(0x20, 1);
+        assert_eq!(c.timer_counter(), DIV - 1, "one cycle in, one less to wait");
+        c.ctrl_write(0x20, u64::from(DIV) - 1);
+        assert_eq!(c.timer_counter(), 1, "one cycle short of the edge");
+    }
+
+    #[test]
+    fn the_nmi_output_follows_the_two_phase_timer() {
+        // It is a level, not a pulse: asserted through the active half of the
+        // cycle and released through the other. The board's edge detector is
+        // what turns it into discrete interrupts.
+        let mut c = chip();
+        c.ctrl_write(0x20, 0);
+        let half = c.timer_period();
+
+        // The alignment tick, then the first toggle into the active phase.
+        for _ in 0..DIV {
+            c.tick();
+        }
+        assert!(c.timer_state(), "the first toggle enters the active phase");
+        assert!(c.nmi_output());
+
+        for _ in 0..half {
+            c.tick();
+        }
+        assert!(!c.timer_state(), "the second toggle leaves it");
+        assert!(!c.nmi_output(), "NMI is released on the other phase");
+
+        for _ in 0..half {
+            c.tick();
+        }
+        assert!(c.nmi_output(), "and asserted again on the next");
+    }
+
+    #[test]
+    fn read_mode_suppresses_only_the_first_nmi() {
+        // Setting up a read arms the timer without wanting the interrupt that
+        // the first toggle would otherwise raise. Suppressing every one of
+        // them instead would stop the transfer after a single byte.
+        let mut c = chip();
+        c.ctrl_write(0x30, 0); // read mode, divider 1
+        assert!(c.read_stretch());
+        let half = c.timer_period();
+
+        for _ in 0..DIV {
+            c.tick();
+        }
+        assert!(c.timer_state(), "the timer still toggled");
+        assert!(!c.nmi_output(), "but the first NMI was suppressed");
+        assert!(!c.read_stretch(), "and the suppression is spent");
+
+        for _ in 0..half * 2 {
+            c.tick();
+        }
+        assert!(c.nmi_output(), "the second one is not suppressed");
+    }
+
+    #[test]
+    fn chip_select_waits_a_base_tick_behind_the_nmi() {
+        // Both fire together on the board. Our per-cycle model would let the
+        // MCU see its select before the Z80 has serviced the NMI and written
+        // the command, so the select is held off for one 06XX tick to give the
+        // Z80 the head start the real timeslice scheduler gives it.
+        let mut c = chip();
+        c.ctrl_write(0x41, 0); // chip 0 selected, divider field 2
+        assert_eq!(c.timer_period(), DIV * 2, "a half period of two base ticks");
+
+        for _ in 0..DIV {
+            c.tick();
+        }
+        assert!(c.nmi_output(), "NMI is up");
+        assert!(!c.chip_select_active(0), "the select is still held off");
+
+        for _ in 0..DIV {
+            c.tick();
+        }
+        assert!(c.chip_select_active(0), "and arrives a base tick later");
+        // A chip that was never selected stays unselected throughout.
+        assert!(!c.chip_select_active(1));
+    }
+
+    #[test]
+    fn chip_select_is_inactive_through_the_idle_phase() {
+        let mut c = chip();
+        c.ctrl_write(0x41, 0);
+        for _ in 0..DIV * 2 {
+            c.tick();
+        }
+        assert!(c.chip_select_active(0));
+        for _ in 0..DIV * 2 {
+            c.tick();
+        }
+        assert!(
+            !c.chip_select_active(0),
+            "the select follows the active phase, not the selection bit alone"
+        );
+    }
+
+    #[test]
+    fn at_the_fastest_divider_the_head_start_consumes_the_whole_active_phase() {
+        // THIS DOCUMENTS CURRENT BEHAVIOR AND IS NOT AN ENDORSEMENT OF IT.
+        //
+        // The chip-select head start is one base tick, and at divider field 1
+        // the whole active phase is also one base tick, so the delay expires on
+        // the same cycle the phase ends and `chip_select_active` is never true.
+        // A board that drove the 06XX at its fastest divider would therefore
+        // never see a select at all.
+        //
+        // That is a property of the compensation rather than of the part: on
+        // hardware the select and the NMI assert together, and the delay exists
+        // only because our per-cycle model would otherwise let the MCU win a
+        // race the real timeslice scheduler gives to the Z80. Whether any game
+        // uses this divider is unmeasured, which is why this is written down
+        // rather than either fixed or dismissed.
+        let mut c = chip();
+        c.ctrl_write(0x21, 0); // chip 0, divider field 1
+        assert_eq!(c.timer_period(), DIV, "the active phase is one base tick");
+        for _ in 0..DIV * 4 {
+            c.tick();
+            assert!(
+                !c.chip_select_active(0),
+                "a select appeared at the fastest divider, so this test is \
+                 stale and the behavior it documents has changed"
+            );
+        }
+        // The NMI still works; it is only the select that is starved.
+        assert!(c.timer_running());
+    }
+
+    // --- Reset ------------------------------------------------------------
+
+    #[test]
+    fn reset_stops_the_timer_and_clears_every_output() {
+        let mut c = chip();
+        c.ctrl_write(0x3F, 0);
+        for _ in 0..DIV * 3 {
+            c.tick();
+        }
+        assert!(c.timer_running());
+
+        c.reset();
+        assert_eq!(c.ctrl_read(), 0);
+        assert!(!c.timer_running());
+        assert!(!c.nmi_output());
+        assert!(!c.timer_state());
+        assert!(!c.read_stretch());
+        assert_eq!(c.timer_counter(), 0);
+        assert_eq!(c.timer_period(), 0);
+        for n in 0..4u8 {
+            assert!(!c.chip_select(n), "chip {n} still selected after reset");
+        }
+    }
+}

@@ -97,3 +97,133 @@ impl Debuggable for Namco51Lle {
         self.mcu.debug_registers()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- The port wiring, which is this wrapper's whole job ---------------
+    //
+    // The 51XX itself is an MB8843 running its own firmware, and that CPU has
+    // its own tests. What lives here is the mapping from two cabinet input
+    // bytes onto four 4-bit R ports, and the shared O register the Z80 and the
+    // MCU pass bytes through. A transposition in either is invisible in a
+    // running game except as inputs that do the wrong thing.
+
+    #[test]
+    fn the_two_input_bytes_split_into_four_nibbles_in_order() {
+        let mut c = Namco51Lle::new();
+        c.update_inputs(0x21, 0x43);
+        assert_eq!(c.mcu.r_input[0], 0x1, "IN0 low: P1 joystick");
+        assert_eq!(c.mcu.r_input[1], 0x2, "IN0 high: P2 joystick");
+        assert_eq!(c.mcu.r_input[2], 0x3, "IN1 low: fire and start");
+        assert_eq!(c.mcu.r_input[3], 0x4, "IN1 high: coins and test");
+    }
+
+    #[test]
+    fn each_nibble_is_masked_to_four_bits() {
+        // The R ports are four bits wide. A byte leaking through would put
+        // cabinet switches on lines the MCU reads as something else.
+        let mut c = Namco51Lle::new();
+        c.update_inputs(0xFF, 0xFF);
+        for port in 0..4 {
+            assert_eq!(c.mcu.r_input[port], 0x0F, "port {port}");
+        }
+    }
+
+    #[test]
+    fn the_inputs_are_independent_of_each_other() {
+        // Walk one bit at a time across both bytes and check it lands on
+        // exactly one line of one port. This is what catches a transposition
+        // that a single all-ones write cannot.
+        let mut c = Namco51Lle::new();
+        for bit in 0..16u32 {
+            let (in0, in1) = if bit < 8 {
+                (1u8 << bit, 0u8)
+            } else {
+                (0u8, 1u8 << (bit - 8))
+            };
+            c.update_inputs(in0, in1);
+            let port = (bit / 4) as usize;
+            let line = 1u8 << (bit % 4);
+            for p in 0..4 {
+                let want = if p == port { line } else { 0 };
+                assert_eq!(c.mcu.r_input[p], want, "bit {bit} showed up on port {p}");
+            }
+        }
+    }
+
+    #[test]
+    fn inputs_are_resampled_on_every_update_rather_than_latched() {
+        let mut c = Namco51Lle::new();
+        c.update_inputs(0xFF, 0xFF);
+        c.update_inputs(0x00, 0x00);
+        for port in 0..4 {
+            assert_eq!(c.mcu.r_input[port], 0, "port {port} held a stale value");
+        }
+    }
+
+    // --- The shared O register --------------------------------------------
+
+    #[test]
+    fn a_write_lands_where_the_mcu_reads_it_back() {
+        // The Z80 writes and the MCU reads the same register; this is the
+        // whole command path into the chip. Writing the MCU's own OUTO latch
+        // instead would leave the command where nothing looks for it.
+        let mut c = Namco51Lle::new();
+        c.write(0x37);
+        assert_eq!(c.mcu.port_o, 0x37);
+        assert_eq!(c.read(), 0x37, "and the Z80 reads the same register back");
+    }
+
+    #[test]
+    fn a_write_replaces_the_previous_command() {
+        let mut c = Namco51Lle::new();
+        c.write(0x01);
+        c.write(0x02);
+        assert_eq!(c.read(), 0x02);
+    }
+
+    // --- Reset --------------------------------------------------------------
+
+    #[test]
+    fn reset_returns_the_mcu_to_power_on() {
+        let mut c = Namco51Lle::new();
+        // A ROM of NOPs, so stepping is well defined without the real
+        // firmware, which is not redistributable and not needed here.
+        c.load_rom(&[0u8; 1024]);
+        c.update_inputs(0xFF, 0xFF);
+        c.write(0x5A);
+        // Ten, not sixty-four: the MB88xx program counter is six bits wide
+        // within a page, so a multiple of 64 single-cycle instructions wraps it
+        // back to zero and the fixture would look like it had never run.
+        for _ in 0..10 {
+            c.tick();
+        }
+        assert_ne!(c.mcu.pc, 0, "the fixture did not actually run");
+
+        c.reset();
+        assert_eq!(c.mcu.pc, 0, "reset did not return the MCU to its entry");
+        assert_eq!(
+            c.read(),
+            0,
+            "reset left a stale command in the shared O register, which the \
+             MCU would read as the Z80's first word after power-on"
+        );
+    }
+
+    #[test]
+    fn reset_keeps_the_firmware_rom() {
+        // The ROM is a mask inside the package. A reset line does not erase
+        // it, and a reset that did would leave the chip executing zeroes with
+        // nothing able to reload it.
+        let mut c = Namco51Lle::new();
+        let mut rom = [0u8; 1024];
+        rom[0] = 0xAB;
+        rom[1023] = 0xCD;
+        c.load_rom(&rom);
+        c.reset();
+        assert_eq!(c.mcu.peek_rom(0), 0xAB);
+        assert_eq!(c.mcu.peek_rom(1023), 0xCD);
+    }
+}

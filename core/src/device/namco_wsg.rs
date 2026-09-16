@@ -143,8 +143,20 @@ impl NamcoWsg {
             self.resampler.tick(0);
             return;
         }
+        let mixed = self.mix();
+        // Scale to i16 range. Each voice max: 7 * 15 = 105. Three voices: 315.
+        // Scale so max output uses ~75% of i16 range.
+        self.resampler.tick((mixed * 80) as i16);
+    }
 
-        // Sum contributions from all voices
+    /// Advance every voice one step and return their summed, volume-scaled
+    /// sample, before the output scaling and the resampler.
+    ///
+    /// Split out of [`Self::tick`] so the synthesis can be asserted directly.
+    /// Reading it back through `fill_audio` instead would put a windowed-sinc
+    /// filter and its group delay between the test and the thing under test,
+    /// which is a poor way to ask what sample a waveform position holds.
+    fn mix(&mut self) -> i32 {
         let mut mixed: i32 = 0;
         for voice in &mut self.voices {
             if voice.volume == 0 {
@@ -161,10 +173,7 @@ impl NamcoWsg {
 
             mixed += sample * voice.volume as i32;
         }
-
-        // Scale to i16 range. Each voice max: 7 * 15 = 105. Three voices: 315.
-        // Scale so max output uses ~75% of i16 range.
-        self.resampler.tick((mixed * 80) as i16);
+        mixed
     }
 
     /// Drain audio samples into the provided buffer. Returns number of samples written.
@@ -257,5 +266,365 @@ impl Debuggable for NamcoWsg {
                 width: 8,
             },
         ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A WSG with a waveform PROM whose eight tables are each a recognizable
+    /// ramp, so a sample's value says which waveform and which position it came
+    /// from.
+    ///
+    /// Waveform `w`, position `p`, holds `(w + p) & 0x0F`. The nibble mask is
+    /// the PROM's own: only the low four bits of each byte are wired.
+    fn wsg() -> NamcoWsg {
+        let mut w = NamcoWsg::new(3_072_000);
+        let mut rom = [0u8; 256];
+        for wave in 0..8 {
+            for pos in 0..32 {
+                // The high nibble is deliberately garbage, to catch a decode
+                // that reads the whole byte instead of masking.
+                rom[wave * 32 + pos] = 0xF0 | (((wave + pos) & 0x0F) as u8);
+            }
+        }
+        w.load_waveform_rom(&rom);
+        w
+    }
+
+    /// Write a channel's four frequency nibbles, low first.
+    fn set_freq(w: &mut NamcoWsg, ch: usize, nibbles: [u8; 4]) {
+        let base = 0x11 + ch * 5;
+        for (i, n) in nibbles.iter().enumerate() {
+            w.write((base + i) as u16, *n);
+        }
+    }
+
+    // --- The register contract ------------------------------------------
+
+    #[test]
+    fn each_channel_takes_its_volume_from_its_own_register() {
+        let mut w = wsg();
+        w.write(0x15, 3);
+        w.write(0x1A, 7);
+        w.write(0x1F, 11);
+        assert_eq!(w.voices[0].volume, 3);
+        assert_eq!(w.voices[1].volume, 7);
+        assert_eq!(w.voices[2].volume, 11);
+    }
+
+    #[test]
+    fn each_channel_takes_its_waveform_from_its_own_register() {
+        let mut w = wsg();
+        w.write(0x05, 1);
+        w.write(0x0A, 2);
+        w.write(0x0F, 3);
+        assert_eq!(w.voices[0].waveform_select, 1);
+        assert_eq!(w.voices[1].waveform_select, 2);
+        assert_eq!(w.voices[2].waveform_select, 3);
+    }
+
+    #[test]
+    fn the_waveform_select_keeps_only_three_bits() {
+        // Eight waveforms live in a 256-byte PROM, so a fourth bit would index
+        // past the end of it.
+        let mut w = wsg();
+        w.write(0x05, 0x0F);
+        assert_eq!(w.voices[0].waveform_select, 7);
+    }
+
+    #[test]
+    fn channel_zero_has_twenty_frequency_bits_and_the_others_sixteen() {
+        // This is the asymmetry the register map exists to express: channel 0
+        // gets an extra low nibble at 0x10 that channels 1 and 2 do not have,
+        // so the same four nibbles mean a value sixteen times larger on the
+        // other two channels.
+        let mut w = wsg();
+        set_freq(&mut w, 0, [1, 0, 0, 0]);
+        set_freq(&mut w, 1, [1, 0, 0, 0]);
+        assert_eq!(w.voices[0].frequency, 0x10);
+        assert_eq!(w.voices[1].frequency, 0x10);
+
+        // ... and only channel 0 responds to 0x10 at all.
+        w.write(0x10, 0x0F);
+        assert_eq!(w.voices[0].frequency, 0x1F);
+        assert_eq!(w.voices[1].frequency, 0x10, "0x10 is channel 0's alone");
+    }
+
+    #[test]
+    fn the_frequency_nibbles_stack_into_one_value() {
+        let mut w = wsg();
+        w.write(0x10, 0x1);
+        set_freq(&mut w, 0, [0x2, 0x3, 0x4, 0x5]);
+        assert_eq!(w.voices[0].frequency, 0x54321);
+
+        set_freq(&mut w, 2, [0xF, 0xE, 0xD, 0xC]);
+        assert_eq!(w.voices[2].frequency, 0xCDEF0);
+    }
+
+    #[test]
+    fn a_write_keeps_only_the_low_nibble() {
+        // The bus is four bits wide; the high nibble of a byte written here is
+        // not connected to anything.
+        let mut w = wsg();
+        w.write(0x15, 0xF3);
+        assert_eq!(w.voices[0].volume, 3);
+        w.write(0x10, 0xFA);
+        assert_eq!(w.voices[0].frequency, 0x0A);
+    }
+
+    #[test]
+    fn the_offset_wraps_into_the_thirty_two_register_window() {
+        // The register file is 32 nibbles and the board does not decode above
+        // it, so a mirrored address reaches the same register.
+        let mut w = wsg();
+        w.write(0x15, 5);
+        assert_eq!(w.voices[0].volume, 5);
+        w.write(0x35, 9);
+        assert_eq!(w.voices[0].volume, 9, "0x35 mirrors 0x15");
+    }
+
+    #[test]
+    fn registers_belonging_to_no_channel_disturb_no_voice() {
+        // 0x00 through 0x04 and the gaps at 0x06-0x09 and 0x0B-0x0E are not
+        // voice registers. The channel arithmetic in `write` has to reject them
+        // rather than fold them onto a voice, which is the kind of thing an
+        // off-by-one in that arithmetic would do silently.
+        let mut w = wsg();
+        w.write(0x15, 5);
+        w.write(0x05, 2);
+        set_freq(&mut w, 0, [1, 2, 3, 4]);
+        let before = (
+            w.voices[0].volume,
+            w.voices[0].waveform_select,
+            w.voices[0].frequency,
+        );
+        for offset in [0x00, 0x01, 0x02, 0x03, 0x04, 0x06, 0x09, 0x0B, 0x0E] {
+            w.write(offset, 0x0F);
+        }
+        let after = (
+            w.voices[0].volume,
+            w.voices[0].waveform_select,
+            w.voices[0].frequency,
+        );
+        assert_eq!(before, after, "a non-voice register moved a voice");
+        assert_eq!(w.voices[1].volume, 0);
+        assert_eq!(w.voices[2].volume, 0);
+    }
+
+    // --- The waveform PROM ----------------------------------------------
+
+    #[test]
+    fn a_sample_is_the_proms_low_nibble_biased_to_signed() {
+        // The PROM holds an unsigned nibble and the DAC treats it as signed
+        // around its midpoint, so 0 is the most negative step and 15 the most
+        // positive. Reading it unbiased would put silence at a hard offset.
+        let mut w = wsg();
+        w.set_sound_enabled(true);
+        w.write(0x15, 1); // channel 0 at volume 1, so mixed == the sample
+        w.write(0x05, 0); // waveform 0, whose position 0 holds 0
+        assert_eq!(w.mix(), -8, "nibble 0 is the bottom of the range");
+
+        w.write(0x05, 7); // waveform 7, whose position 0 holds 7
+        assert_eq!(w.mix(), -1);
+    }
+
+    #[test]
+    fn the_waveform_select_picks_a_different_table() {
+        let mut w = wsg();
+        w.set_sound_enabled(true);
+        w.write(0x15, 1);
+        // The fixture's waveform w at position 0 holds w, so the sample is
+        // w - 8 and each selection is distinguishable from the others.
+        for wave in 0..8u8 {
+            w.write(0x05, wave);
+            w.voices[0].counter = 0;
+            assert_eq!(w.mix(), i32::from(wave) - 8, "waveform {wave}");
+        }
+    }
+
+    // --- The frequency accumulator --------------------------------------
+
+    #[test]
+    fn the_counter_advances_by_the_frequency_each_tick() {
+        let mut w = wsg();
+        w.set_sound_enabled(true);
+        w.write(0x15, 1);
+        w.write(0x10, 0x3);
+        set_freq(&mut w, 0, [0x2, 0x0, 0x0, 0x0]);
+        assert_eq!(w.voices[0].frequency, 0x23);
+
+        for n in 1..=5u32 {
+            w.tick();
+            assert_eq!(w.voices[0].counter, 0x23 * n);
+        }
+    }
+
+    #[test]
+    fn the_waveform_position_is_the_top_five_bits_of_the_counter() {
+        // F_FRACBITS of the counter are fractional; the next five index the
+        // 32-sample table, and everything above that wraps.
+        let mut w = wsg();
+        w.set_sound_enabled(true);
+        w.write(0x15, 1);
+        w.write(0x05, 0);
+
+        // Park the counter just below each position boundary and step over it.
+        for pos in 0..32u32 {
+            w.voices[0].counter = pos << F_FRACBITS;
+            // Waveform 0 position p holds p & 0x0F, biased by -8.
+            let want = ((pos & 0x0F) as i32) - 8;
+            assert_eq!(w.mix(), want, "position {pos}");
+        }
+
+        // Position 32 is position 0 again: the table is 32 samples long.
+        w.voices[0].counter = 32 << F_FRACBITS;
+        assert_eq!(w.mix(), -8);
+    }
+
+    #[test]
+    fn a_voice_at_volume_zero_contributes_nothing() {
+        let mut w = wsg();
+        w.set_sound_enabled(true);
+        w.write(0x05, 7); // a waveform whose samples are not zero
+        w.write(0x15, 0);
+        assert_eq!(w.mix(), 0);
+        w.write(0x15, 1);
+        assert_eq!(w.mix(), -1);
+    }
+
+    #[test]
+    fn volume_scales_the_sample_linearly() {
+        let mut w = wsg();
+        w.set_sound_enabled(true);
+        w.write(0x05, 7); // position 0 holds 7, so the sample is -1
+        for vol in 1..=15u8 {
+            w.write(0x15, vol);
+            assert_eq!(w.mix(), -i32::from(vol), "volume {vol}");
+        }
+    }
+
+    #[test]
+    fn the_three_voices_sum() {
+        let mut w = wsg();
+        w.set_sound_enabled(true);
+        // Waveform 7 at position 0 is -1, waveform 6 is -2, waveform 5 is -3.
+        w.write(0x05, 7);
+        w.write(0x0A, 6);
+        w.write(0x0F, 5);
+        w.write(0x15, 1);
+        w.write(0x1A, 1);
+        w.write(0x1F, 1);
+        assert_eq!(w.mix(), -6);
+    }
+
+    // --- The sound-enable gate -------------------------------------------
+
+    #[test]
+    fn the_sound_enable_gate_silences_every_voice() {
+        let mut w = wsg();
+        w.write(0x05, 7);
+        w.write(0x15, 15);
+        w.write(0x10, 0x8);
+        set_freq(&mut w, 0, [0, 0, 0, 0x8]);
+
+        // Disabled from reset: nothing comes out however loud the voice is.
+        assert!(!w.sound_enabled);
+        let mut buf = [0i16; 256];
+        for _ in 0..8000 {
+            w.tick();
+        }
+        let n = w.fill_audio(&mut buf);
+        assert!(n > 0, "the resampler produced no samples to judge");
+        assert!(
+            buf[..n].iter().all(|&s| s == 0),
+            "a disabled WSG emitted a nonzero sample"
+        );
+
+        // Enabled, the same voice reaches the output.
+        w.set_sound_enabled(true);
+        for _ in 0..8000 {
+            w.tick();
+        }
+        let n = w.fill_audio(&mut buf);
+        assert!(
+            buf[..n].iter().any(|&s| s != 0),
+            "an enabled WSG with a loud voice emitted only silence"
+        );
+    }
+
+    // --- Reset ------------------------------------------------------------
+
+    #[test]
+    fn reset_clears_every_voice_and_the_register_file() {
+        let mut w = wsg();
+        w.set_sound_enabled(true);
+        for offset in 0..0x20u16 {
+            w.write(offset, 0x0F);
+        }
+        for _ in 0..100 {
+            w.tick();
+        }
+        assert!(w.voices[0].counter > 0, "the fixture did not actually run");
+
+        w.reset();
+        assert!(!w.sound_enabled);
+        assert_eq!(w.sound_regs, [0; 32]);
+        for (i, v) in w.voices.iter().enumerate() {
+            assert_eq!(v.frequency, 0, "voice {i} frequency");
+            assert_eq!(v.counter, 0, "voice {i} counter");
+            assert_eq!(v.volume, 0, "voice {i} volume");
+            assert_eq!(v.waveform_select, 0, "voice {i} waveform");
+        }
+    }
+
+    #[test]
+    fn reset_leaves_the_waveform_prom_alone() {
+        // The PROM is a part on the board, not state: a reset line does not
+        // erase it, and `#[save_skip]` on it says the same thing about a save
+        // state. A reset that cleared it would silence the machine until
+        // something reloaded the ROM, which nothing does.
+        let mut w = wsg();
+        let before = w.waveform_rom;
+        w.reset();
+        assert_eq!(w.waveform_rom, before);
+    }
+
+    // --- A divergence worth having written down ---------------------------
+
+    #[test]
+    fn a_silenced_voice_freezes_its_counter_rather_than_running_on() {
+        // THIS DOCUMENTS CURRENT BEHAVIOR AND IS NOT AN ENDORSEMENT OF IT.
+        //
+        // `tick` skips a voice whose volume is zero, so its phase accumulator
+        // stops. On the board the counters are clocked continuously and the
+        // volume is applied downstream at the DAC, so a voice that is silenced
+        // and then brought back should resume at the phase it would have
+        // reached, not the one it left.
+        //
+        // The audible difference is a phase discontinuity where the hardware
+        // has none. Whether that is worth the per-tick cost of advancing a
+        // muted voice is a fidelity question with a measurement attached, and
+        // it is filed rather than guessed at here.
+        let mut w = wsg();
+        w.set_sound_enabled(true);
+        w.write(0x10, 0x8);
+        w.write(0x15, 1);
+        for _ in 0..10 {
+            w.tick();
+        }
+        let running = w.voices[0].counter;
+        assert!(running > 0);
+
+        w.write(0x15, 0);
+        for _ in 0..10 {
+            w.tick();
+        }
+        assert_eq!(
+            w.voices[0].counter, running,
+            "a muted voice's counter moved, so this test is stale and the \
+             behavior it documents has changed"
+        );
     }
 }
