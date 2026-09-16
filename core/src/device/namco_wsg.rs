@@ -604,9 +604,26 @@ mod tests {
         // reached, not the one it left.
         //
         // The audible difference is a phase discontinuity where the hardware
-        // has none. Whether that is worth the per-tick cost of advancing a
-        // muted voice is a fidelity question with a measurement attached, and
-        // it is filed rather than guessed at here.
+        // has none. **It has been priced and it is inaudible on every machine
+        // that uses the part**, so this stays as it is; see
+        // phosphor-emulator-hszj for the survey.
+        //
+        // A phase discontinuity can only be heard across a gap short enough
+        // that the ear joins the two segments into one tone, which is at most a
+        // waveform period or two. Over the five committed movies (Pac-Man,
+        // Ms. Pac-Man, Dig Dug, Galaga, Xevious; 12,505 frames, about 208
+        // seconds of attract, a coin and real play) there were 689 resumes from
+        // volume zero and the shortest gap of any kind was 7.53 ms. Only 78
+        // resumes kept the same frequency and waveform across the gap, which is
+        // the only case where the board's phase would line up with anything,
+        // and the shortest of those was 40.88 ms: tens of periods of silence,
+        // heard as an articulation rather than a glitch, and re-onset from
+        // silence in either model.
+        //
+        // Advancing muted voices also costs 1 to 2 percent of emulation time on
+        // these machines (phosphor-bench, release, best of 9: Galaga 0.957 to
+        // 0.976 ms/frame, Xevious 1.216 to 1.227, Pac-Man 0.467 to 0.473), so
+        // the trade is a measurable slowdown for no audible gain.
         let mut w = wsg();
         w.set_sound_enabled(true);
         w.write(0x10, 0x8);

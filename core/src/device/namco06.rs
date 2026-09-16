@@ -430,9 +430,20 @@ mod tests {
         // That is a property of the compensation rather than of the part: on
         // hardware the select and the NMI assert together, and the delay exists
         // only because our per-cycle model would otherwise let the MCU win a
-        // race the real timeslice scheduler gives to the Z80. Whether any game
-        // uses this divider is unmeasured, which is why this is written down
-        // rather than either fixed or dismissed.
+        // race the real timeslice scheduler gives to the Z80.
+        //
+        // **No game reaches this setting**, so the starved phase is unreachable
+        // and this stays as it is; see phosphor-emulator-hszj for the survey.
+        // The 06XX is on the Galaga board alone, so the machines are Galaga, Dig
+        // Dug and Xevious, and across their committed movies (8,115 frames of
+        // attract, a coin and real play) all 16,934 control writes carried a
+        // divider field of 0, 3, 5, 6 or 7. Fields 1 and 2 were never written.
+        // The values are the same handful every time: 0x10 to stop the timer,
+        // 0x71 for the 51XX at field 3, 0xD2 for the 53XX at field 6.
+        //
+        // Field 3 is therefore the fastest divider any game uses, and there the
+        // active phase is four base ticks against a one-tick head start, so 192
+        // of its 256 cycles carry a select.
         let mut c = chip();
         c.ctrl_write(0x21, 0); // chip 0, divider field 1
         assert_eq!(c.timer_period(), DIV, "the active phase is one base tick");
