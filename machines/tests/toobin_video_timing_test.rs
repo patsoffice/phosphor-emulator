@@ -259,6 +259,16 @@ fn word(m: &dyn FrontendMachine, addr: u32) -> u16 {
 
 /// Build a ROM-less machine, poke the program, run it to completion.
 fn run() -> Run {
+    run_machine().1
+}
+
+/// The same run, keeping the machine so a caller can render the picture it left
+/// standing.
+///
+/// The program idles after writing its magic word, strobing the watchdog and
+/// waiting on vblank and touching nothing else, so the sweep it painted stays on
+/// screen indefinitely and can be read at leisure.
+fn run_machine() -> (Box<dyn FrontendMachine>, Run) {
     // The registry lookup is kept even though the machine is built by hand: it
     // is what fails if the name this file is about stops being registered.
     registry::find(MACHINE).unwrap_or_else(|| panic!("{MACHINE} is not registered"));
@@ -292,7 +302,7 @@ fn run() -> Run {
     }
 
     let results = (0..RESLEN).map(|i| peek(&*m, RES + i)).collect();
-    Run { results, frames }
+    (m, Run { results, frames })
 }
 
 impl Run {
@@ -786,6 +796,241 @@ fn a_rendered_pixel_reports_which_layer_won() {
         0x200 + 1,
         "an opaque alpha pen should win, and should report in the alpha's own \
          range of the color RAM"
+    );
+}
+
+// --- The layer-priority sweep -----------------------------------------------
+//
+// Phase 9 paints [`SWEEP_CELLS`] test cells, one per combination of the four
+// live inputs to the priority PAL at 7E, and the palette is loaded so that a
+// rendered pixel reports which color RAM address the compositor chose. This
+// reads one pixel per cell back and tabulates it.
+//
+// **What this is and is not.** Every expectation below is derived from our own
+// merge rule, so as it stands this is a regression guard: it pins what the
+// compositor does, in a form a reader can check cell by cell. It becomes a
+// correctness guard only against an oracle that is not us, and for this board
+// there is no good one. The 16L8A at 7E was never dumped, in any of the three
+// ROM sets, so MAME's priority is somebody's reverse engineering of the same
+// sheet we have rather than the part's own contents.
+//
+// **What it adds over watching the game.** Measured over 3000 frames of
+// recorded play, the whole playfield-priority mechanism touches 0.016% of
+// pixels and `LBPIX3` 0.004%, and `PFPRI` never leaves 0 and 2. A sweep drives
+// all four priority values and both object pens deliberately, so the behavior
+// is documented at a resolution the game cannot reach.
+
+const SWEEP_CELLS: usize = 96;
+const SWEEP_COLS: usize = 12;
+const SWEEP_PITCH: usize = 16;
+
+/// One cell's inputs, unpacked from its index the way the assembly packs them.
+struct Cell {
+    /// 0 transparent, 1 opaque with pen bit 3 clear, 2 with it set.
+    object: usize,
+    pfpri: usize,
+    pfpix3: usize,
+    anpix: usize,
+}
+
+impl Cell {
+    fn at(index: usize) -> Self {
+        Self {
+            anpix: index & 3,
+            pfpix3: index >> 2 & 1,
+            pfpri: index >> 3 & 3,
+            object: index >> 5,
+        }
+    }
+
+    /// The palette index the shipped merge rule predicts for this cell.
+    ///
+    /// Written out as the rule reads rather than as a table, so the two cannot
+    /// drift: object over playfield unless the playfield claims priority and
+    /// its pen has bit 3 set, then alpha over everything it is not transparent
+    /// on. `LBPIX3` does not appear, which is the point.
+    fn predicted(&self) -> u16 {
+        let pf_pen = if self.pfpix3 == 1 {
+            PF_PEN_HI
+        } else {
+            PF_PEN_LO
+        };
+        let mo_pen = if self.object == 2 {
+            MO_PEN_HI
+        } else {
+            MO_PEN_LO
+        };
+        let pf_blocks = self.pfpri != 0 && pf_pen & 0x08 != 0;
+        let mut index = pf_pen;
+        if self.object != 0 && !pf_blocks {
+            index = 0x100 + mo_pen;
+        }
+        if self.anpix != 0 {
+            index = 0x200 + self.anpix as u16;
+        }
+        index
+    }
+
+    /// Which layer that index belongs to, by the range it falls in.
+    fn layer(index: u16) -> &'static str {
+        match index {
+            0x000..=0x0FF => "playfield",
+            0x100..=0x1FF => "object",
+            _ => "alpha",
+        }
+    }
+}
+
+/// Run to completion, then read one pixel from the middle of each sweep cell.
+fn sweep() -> Vec<u16> {
+    let (m, run) = run_machine();
+    // A wedge must fail on the magic word rather than on 96 assertions about a
+    // blank screen, exactly as the signal tests do.
+    run.assert_completed();
+    let (w, h) = m.display_size();
+    let mut rgb = vec![0u8; w as usize * h as usize * 3];
+    m.render_frame(&mut rgb);
+    (0..SWEEP_CELLS)
+        .map(|c| {
+            let (col, row) = (c % SWEEP_COLS, c / SWEEP_COLS);
+            let x = col * SWEEP_PITCH + SWEEP_PITCH / 2;
+            let y = row * SWEEP_PITCH + SWEEP_PITCH / 2;
+            let o = (y * w as usize + x) * 3;
+            decode_index(rgb[o], rgb[o + 1])
+        })
+        .collect()
+}
+
+#[test]
+fn every_sweep_cell_selects_the_layer_the_merge_rule_says_it_should() {
+    let got = sweep();
+    let mut wrong = Vec::new();
+    for (c, &index) in got.iter().enumerate() {
+        let cell = Cell::at(c);
+        let want = cell.predicted();
+        if index != want {
+            wrong.push(format!(
+                "cell {c:2} object {} PFPRI {} PFPIX3 {} ANPIX {}: got {:#05X} \
+                 ({}), expected {:#05X} ({})",
+                cell.object,
+                cell.pfpri,
+                cell.pfpix3,
+                cell.anpix,
+                index,
+                Cell::layer(index),
+                want,
+                Cell::layer(want)
+            ));
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "{} of {SWEEP_CELLS} sweep cells disagree with the merge rule:\n{}",
+        wrong.len(),
+        wrong.join("\n")
+    );
+}
+
+#[test]
+fn the_alpha_covers_every_cell_it_is_not_transparent_on() {
+    let got = sweep();
+    for (c, &index) in got.iter().enumerate() {
+        let cell = Cell::at(c);
+        if cell.anpix == 0 {
+            continue;
+        }
+        assert_eq!(
+            index,
+            0x200 + cell.anpix as u16,
+            "cell {c} has alpha pen {} over object {} and playfield priority {}, \
+             and something other than the alpha reached the screen. The shipped \
+             rule draws the alpha last with pen 0 transparent, so an opaque \
+             alpha pen wins everywhere.",
+            cell.anpix,
+            cell.object,
+            cell.pfpri
+        );
+    }
+}
+
+#[test]
+fn the_object_pens_bit_3_changes_nothing_but_the_pen() {
+    let got = sweep();
+    // LBPIX3 is a PAL input the shipped merge ignores. Pairs of cells differing
+    // only in it must therefore pick the same LAYER; the index differs, because
+    // the two object tiles carry different pens, and that is not the question.
+    for c in 0..SWEEP_CELLS {
+        let cell = Cell::at(c);
+        if cell.object != 1 {
+            continue;
+        }
+        let paired = c + 32; // the same inputs with the bit-3-set object tile
+        assert_eq!(
+            Cell::layer(got[c]),
+            Cell::layer(got[paired]),
+            "cells {c} and {paired} differ only in the object pen's bit 3, \
+             which is LBPIX3, and they selected different layers ({:#05X} \
+             against {:#05X}). The shipped rule does not read that input, so \
+             this is a real change in behavior rather than a different pen.",
+            got[c],
+            got[paired]
+        );
+    }
+}
+
+#[test]
+fn the_playfield_only_beats_an_opaque_object_where_it_claims_priority() {
+    let got = sweep();
+    for (c, &index) in got.iter().enumerate() {
+        let cell = Cell::at(c);
+        if cell.object == 0 || cell.anpix != 0 {
+            continue; // the object is not there, or the alpha hides the answer
+        }
+        let pf_wins = Cell::layer(index) == "playfield";
+        let should = cell.pfpri != 0 && cell.pfpix3 == 1;
+        assert_eq!(
+            pf_wins,
+            should,
+            "cell {c}: an opaque object over playfield priority {} with PFPIX3 \
+             {}. The playfield {} but the rule says it {}.",
+            cell.pfpri,
+            cell.pfpix3,
+            if pf_wins { "won" } else { "lost" },
+            if should { "should win" } else { "should lose" }
+        );
+    }
+}
+
+#[test]
+fn the_sweep_actually_drove_all_four_priority_values() {
+    // The guard against a vacuous pass. If the grid were not painted at all
+    // every cell would read the same index, and every assertion above that
+    // compares a cell to the rule would still have something to say about a
+    // blank screen. This is what says the experiment happened.
+    let got = sweep();
+    let distinct: std::collections::BTreeSet<u16> = got.iter().copied().collect();
+    assert!(
+        distinct.len() >= 5,
+        "the sweep produced only {} distinct palette indices ({:#05X?}). It \
+         should reach both playfield pens, both object pens and three alpha \
+         pens; this few means the grid was not painted.",
+        distinct.len(),
+        distinct
+    );
+    // And the playfield-wins case has to actually occur, or the priority half
+    // of the sweep proved nothing.
+    let pf_wins = got
+        .iter()
+        .enumerate()
+        .filter(|&(c, &i)| {
+            let cell = Cell::at(c);
+            cell.object != 0 && cell.anpix == 0 && Cell::layer(i) == "playfield"
+        })
+        .count();
+    assert!(
+        pf_wins > 0,
+        "no cell had the playfield beat an opaque object, so the priority \
+         mechanism was never exercised"
     );
 }
 

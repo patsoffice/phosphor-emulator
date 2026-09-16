@@ -158,6 +158,15 @@ HB_LINES    equ 64
 ; margin.
 T2BOUND     equ $3FFF
 
+; The priority sweep: 3 object states x 4 PFPRI x 2 PFPIX3 x 4 ANPIX, laid out
+; twelve blocks across so the grid is 192 by 128 pixels in the top left of a
+; 512 by 384 screen. Sixteen pixels a block is exactly one object tile, so each
+; cell's object fills its block and the sample point at the center is clear of
+; every edge.
+SWEEP_CELLS equ 96
+SWEEP_COLS  equ 12
+SWEEP_PITCH equ 16
+
 ; --- Variables (FFC100, work RAM, above the result block) -------------------
 ;
 ; Everything the interrupt handlers touch lives here rather than in registers,
@@ -471,6 +480,213 @@ T2Blank
             move.w  V_IRQ1CNT,R_T4_CNT
 
             move.w  #8,R_PHASE
+
+; ===========================================================================
+; Phase 9 -- the layer-priority sweep
+;
+; SWEEP_CELLS test cells, laid out 12 across and 8 down as 16x16 blocks at the
+; screen origin, each driving one combination of the four live inputs to the
+; priority PAL at 7E:
+;
+;   cell = ((object * 4 + PFPRI) * 2 + PFPIX3) * 4 + ANPIX
+;
+;   object  0 transparent, 1 opaque with pen bit 3 clear, 2 with it set
+;   PFPRI   the playfield's two priority bits, all four values
+;   PFPIX3  the playfield pen's bit 3
+;   ANPIX   the alpha pen, 0 to 3, where 0 is transparent
+;
+; The two object priority bits are the fifth PAL input and are not swept: the
+; game never drives them (measured, 1507 list entries over 3000 frames) and this
+; ROM leaves them at zero for the same reason it leaves the scroll at zero,
+; which is that a sweep of an input nothing sets is a sweep of our own code.
+;
+; PFPRI IS SWEPT OVER ALL FOUR VALUES EVEN THOUGH TOOBIN' ONLY EVER USES 0 AND 2.
+; That is the whole point of driving the board rather than watching it: a
+; measurement over the recorded game cannot say anything about priority 1 or 3,
+; and this can.
+;
+; The readout is the palette itself. Every entry is loaded with its own index
+; encoded as a color, so a rendered pixel hands back WHICH COLOR RAM ADDRESS the
+; compositor chose, which is exactly what this PAL selects: its outputs drive the
+; multiplexers that pick one layer's color and pen as that address. Reading the
+; index back reads the PAL's output rather than a proxy for it.
+; ===========================================================================
+
+; The palette, as an identity code rather than as colors. Bit 15 exempts each
+; entry from the global intensity control, so the readout cannot be scaled.
+            lea     PAL,a0
+            moveq   #0,d0
+PalLoop
+            move.w  d0,d1
+            andi.w  #$1F,d1
+            lsl.w   #8,d1
+            lsl.w   #2,d1               ; the low five bits into red
+            move.w  d0,d2
+            lsr.w   #5,d2
+            andi.w  #$1F,d2
+            lsl.w   #5,d2               ; the next five into green
+            or.w    d2,d1
+            ori.w   #$8000,d1
+            move.w  d1,(a0)+
+            addq.w  #1,d0
+            cmpi.w  #1024,d0
+            bne.s   PalLoop
+            bsr     PetDog
+
+; Clear both tilemaps, so only the test blocks carry anything and the rest of
+; the screen is one known state rather than whatever was there.
+            lea     PF,a0
+            move.w  #(128*64)-1,d0
+ClrPfMap
+            clr.w   (a0)+               ; color 0, priority 0
+            clr.w   (a0)+               ; tile 0, which is solid pen 0
+            dbra    d0,ClrPfMap
+            bsr     PetDog
+
+            lea     ALPHA,a0
+            move.w  #(64*48)-1,d0
+ClrAlMap
+            clr.w   (a0)+               ; tile 0, the transparent one
+            dbra    d0,ClrAlMap
+            bsr     PetDog
+
+            moveq   #0,d7               ; the cell index
+CellLoop
+; Unpack the cell's four inputs from its index.
+            move.w  d7,d0
+            andi.w  #3,d0               ; d0 = ANPIX
+            move.w  d7,d1
+            lsr.w   #2,d1
+            andi.w  #1,d1               ; d1 = PFPIX3
+            move.w  d7,d2
+            lsr.w   #3,d2
+            andi.w  #3,d2               ; d2 = PFPRI
+            move.w  d7,d3
+            lsr.w   #5,d3               ; d3 = object, which is also its tile
+
+; Its place on screen: twelve blocks across, sixteen pixels each.
+            moveq   #0,d4
+            move.w  d7,d4
+            divu    #SWEEP_COLS,d4
+            move.l  d4,d5
+            clr.w   d5
+            swap    d5                  ; d5 = column, the remainder
+            andi.l  #$FFFF,d4           ; d4 = row, the quotient
+
+; The playfield, four 8x8 cells of two words each. Cell n+1 is four bytes on
+; and cell n+128 is the row below, which is 512.
+            lea     PF,a0
+            moveq   #0,d6
+            move.w  d4,d6
+            lsl.l   #8,d6
+            lsl.l   #2,d6               ; row * 2 cells * 128 wide * 4 bytes
+            adda.l  d6,a0
+            moveq   #0,d6
+            move.w  d5,d6
+            lsl.l   #3,d6               ; column * 2 cells * 4 bytes
+            adda.l  d6,a0
+            move.w  d2,d6
+            lsl.w   #4,d6               ; priority into bits 5-4, color 0
+            move.w  d6,0(a0)
+            move.w  d6,4(a0)
+            move.w  d6,512(a0)
+            move.w  d6,516(a0)
+            move.w  d1,d6
+            addq.w  #1,d6               ; tile 1 has pen bit 3 clear, tile 2 set
+            move.w  d6,2(a0)
+            move.w  d6,6(a0)
+            move.w  d6,514(a0)
+            move.w  d6,518(a0)
+
+; The alpha, four 8x8 cells of one word. Its tile set is one solid tile per pen,
+; so the cell's tile code IS its ANPIX and pen 0 is the transparent tile.
+            lea     ALPHA,a0
+            moveq   #0,d6
+            move.w  d4,d6
+            lsl.l   #8,d6               ; row * 2 cells * 64 wide * 2 bytes
+            adda.l  d6,a0
+            moveq   #0,d6
+            move.w  d5,d6
+            lsl.l   #2,d6               ; column * 2 cells * 2 bytes
+            adda.l  d6,a0
+            move.w  d0,0(a0)
+            move.w  d0,2(a0)
+            move.w  d0,128(a0)
+            move.w  d0,130(a0)
+
+; The object: one entry per cell, one 16x16 tile, placed absolutely.
+            lea     MOB,a0
+            moveq   #0,d6
+            move.w  d7,d6
+            lsl.l   #3,d6               ; four words an entry
+            adda.l  d6,a0
+
+; Word 0 is the size, the Y position and the absolute-coordinate flag. The
+; board computes the object's top line as -(Y) - height*16 wrapped to nine bits,
+; so naming a line means solving that for Y: with the flag set no scroll is
+; subtracted, and with height 1 the constant is 16.
+            moveq   #0,d6
+            move.w  d4,d6
+            lsl.w   #4,d6               ; the block's top line
+            neg.w   d6
+            subi.w  #16,d6
+            andi.w  #$1FF,d6
+            lsl.w   #6,d6               ; Y into bits 14-6
+            ori.w   #$8000,d6           ; absolute, width 1, height 1
+            move.w  d6,0(a0)
+
+; Word 1 is the tile, and the object index is the tile code directly: 0 is the
+; all-transparent tile, 1 has pen bit 3 clear and 2 has it set.
+            move.w  d3,2(a0)
+
+; Word 2 is the link. The last entry points back at the first, which the walk
+; has already visited, so the chain terminates there rather than running on
+; through 160 entries of whatever the list held.
+            move.w  d7,d6
+            addq.w  #1,d6
+            cmpi.w  #SWEEP_CELLS,d6
+            bne.s   CellLink
+            moveq   #0,d6
+CellLink
+            move.w  d6,4(a0)
+
+; Word 3 is the X position in bits 15-6, with the palette in the low nibble.
+            moveq   #0,d6
+            move.w  d5,d6
+            lsl.w   #4,d6               ; the block's left edge
+            lsl.w   #6,d6
+            move.w  d6,6(a0)
+
+            addq.w  #1,d7
+            cmpi.w  #SWEEP_CELLS,d7
+            bne     CellLoop
+
+            move.w  #0,SLIP             ; start the chain at entry 0
+            bsr     PetDog
+
+; TWO VBLANK EDGES, NOT ONE, and the difference is a whole frame of the picture.
+;
+; This board composites each row at its own scanline boundary, and the loop above
+; takes about half a frame to paint 96 blocks. So the CPU is drawing while the
+; beam is reading, and a cell is captured correctly only if it was written before
+; its own row was composited. One edge is not enough: it ends the frame the
+; drawing raced, which holds whatever each row happened to contain as the beam
+; passed it.
+;
+; That failure is worth describing because it does not look like a race. The
+; blocks that came out blank were 81, 82, 83 and then 87 through 95, with 84, 85
+; and 86 painted correctly in between. A partial draw would leave a blank SUFFIX;
+; a hole in the middle instead is the two orders crossing, since the drawing runs
+; left to right through the cell index while the beam runs top to bottom through
+; the rows, and row 7 is composited sixteen scanlines later than row 6.
+;
+; The first edge ends the raced frame. The second returns after a frame that was
+; composited from scanline 0 with every block already standing, which is the one
+; the harness reads.
+            bsr     WaitVblank
+            bsr     PetDog
+            bsr     WaitVblank
+            bsr     PetDog
 
 ; ===========================================================================
 ; Done

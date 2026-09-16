@@ -3,9 +3,12 @@
 A synthetic 68010 program, poked into a ROM-less Toobin' and run, that measures
 the board it is running on and writes its verdict into work RAM.
 
-Status: **the loader and the signals are in the tree and passing. The two
-questions this was started for are not answered yet**, and the last section says
-exactly what is left.
+Status: **the loader, the signals and the layer-priority sweep are in the tree
+and passing.** The sweep documents the compositor's behavior across all 96
+combinations of the PAL's live inputs and found nothing wrong, which was the
+expected outcome; the second jg18.2 question, the object sampling lead, is not
+answered. The last section says exactly what is left and what the sweep can and
+cannot be worth without a PAL dump.
 
 ## Why this board
 
@@ -92,7 +95,8 @@ program counter vectors to the stray handler.
 | 6 | T2, the HBLANK level and its share of a line |
 | 7 | T3, the scanline interrupt at line 100 |
 | 8 | T4, the same at line 300 |
-| 9 | complete, `$5A5A` written |
+| 9 | the layer-priority sweep is painted and a frame has been composited with it |
+| 10 | complete, `$5A5A` written |
 
 Every wait polls hardware state, never a cycle count, and every position is
 counted in iterations of one shared poll loop whose rate T1 measures in the same
@@ -187,6 +191,102 @@ numerical: the handler's own counter is what gets polled, through the same
 `WaitSet` the calibration was measured with, so the count is on T1's scale by
 construction.
 
+## The layer-priority sweep
+
+Phase 9 paints 96 test cells, twelve across and eight down as 16x16 blocks at
+the screen origin, one per combination of the four live PAL inputs:
+
+    cell = ((object * 4 + PFPRI) * 2 + PFPIX3) * 4 + ANPIX
+
+`object` is 0 transparent, 1 opaque with pen bit 3 clear, 2 with it set. The
+fifth input, the two object priority bits, is not swept: the game never drives
+it, measured over 1507 list entries, so sweeping it would sweep our own code.
+
+**`PFPRI` is swept over all four values even though Toobin' only ever uses 0 and
+2.** That is the whole point of driving the board rather than watching it.
+
+### Synthetic graphics, and what the encoder does not prove
+
+A ROM-less board has no tiles, so every pixel decodes to pen 0. The harness
+builds three solid-pen tile sets with an encoder that is **the exact inverse of
+`decode_gfx`**, walking the same plane, x and y offsets and setting the bit where
+the decoder reads it.
+
+That guarantees pixel `(x, y)` of tile `N` decodes to the pen asked for, which is
+the only property the sweep needs, because what is under test is the
+*compositor*. It cannot catch an error in `decode_gfx` or in the three layout
+constants, since encoding and decoding would cancel. Those are pinned by the
+golden frame against the real ROM set. Writing the bytes out by hand would not
+fix that and would add a second place for the layout to drift from.
+
+### The readout is the color RAM address, not a color
+
+The palette is loaded with an identity code rather than with colors: entry `i`
+carries the low five bits of `i` in red and the next five in green, with bit 15
+set so the intensity control cannot scale it. A rendered pixel therefore hands
+back **which palette index the compositor chose**, and that is exactly what this
+PAL decides: its outputs drive the multiplexers that pick one layer's color and
+pen as the color RAM address. A test that only asked "is the object on top" would
+read back less than the hardware decides. The layer is the range: playfield below
+`0x100`, object `0x100-0x1FF`, alpha above.
+
+The component scaling is `(c * 224) >> 5` with a 38 pedestal on everything but
+zero, so the 32 steps land on 0 and then 45 to 255 in sevens. Injective, which
+makes the inverse exact rather than a nearest match, and a test checks the round
+trip for all 1024 indices before any of it reads a picture.
+
+### Two vblank edges, not one
+
+The cell loop takes about half a frame, and this board composites each row at its
+own scanline boundary, so the CPU is drawing while the beam is reading.
+
+The first attempt waited one vblank edge and produced a result that did not look
+like a race at all: blocks 81, 82 and 83 came out blank, 84, 85 and 86 were
+correct, and 87 through 95 were blank again. A partial draw leaves a blank
+*suffix*; a hole in the middle is the two orders crossing, because the drawing
+runs left to right through the cell index while the beam runs top to bottom
+through the rows, and row 7 is composited sixteen scanlines after row 6. Cells
+drawn before their own row was composited survived; the rest did not.
+
+Two edges fix it. The first ends the raced frame; the second returns after a
+frame composited from scanline 0 with every block already standing.
+
+### What it found
+
+Nothing wrong, which was the expected outcome and is worth stating as a result
+rather than as an absence. All 96 cells match the shipped merge rule. The
+behavior it documents, for the 24 cells where the alpha is transparent and the
+decision is therefore visible:
+
+| object | PFPIX3 | PFPRI 0 | 1 | 2 | 3 |
+|---|---|---|---|---|---|
+| transparent | 0 | playfield | playfield | playfield | playfield |
+| transparent | 1 | playfield | playfield | playfield | playfield |
+| opaque | 0 | object | object | object | object |
+| opaque | 1 | object | playfield | playfield | playfield |
+
+The other 72 cells are the alpha winning, in every one of them.
+
+Three things that are now measured rather than assumed:
+
+- **`LBPIX3` changes the pen and never the layer.** Every pair of cells differing
+  only in the object pen's bit 3 selected the same layer. The shipped rule
+  ignores that PAL input and the sweep says so out loud.
+- **An opaque alpha pen wins everywhere**, over both object pens and all four
+  playfield priorities. `ANPIX` does nothing here beyond its own transparency,
+  which was the likelier of the two readings in `jg18.2` and is now the recorded
+  one.
+- **Priority 1 and 3 behave as 2 does**, which no measurement over the game could
+  have said, because the game never produces them.
+
+**This is a regression guard, not a correctness guard.** Every expectation is
+derived from our own merge rule. It becomes a correctness guard only against an
+oracle that is not us, and for this board there is no good one: the 16L8A at 7E
+was never dumped in any of the three ROM sets, so MAME's priority is somebody's
+reverse engineering of the same sheet we have rather than the part's contents.
+What the sweep adds today is that the behavior is written down at a resolution
+the game cannot reach, in a form a reader can check cell by cell.
+
 ## The harness
 
 `machines/tests/toobin_video_timing_test.rs`, ROM-less, one machine, in CI.
@@ -200,43 +300,56 @@ The drift guard re-assembles the source and byte-compares, and fails rather than
 skips when `PHOSPHOR_ASM` is set, which the dev shell exports. CI has no dev
 shell and skips with a printed note.
 
-## What is left, which is everything this was started for
+## What is left
 
-The instrument works. Neither jg18.2 question is answered yet, and both need the
-same two things.
+The instrument works, the graphics are in, and the priority sweep runs. Two
+things remain.
 
-1. **Synthetic graphics.** A ROM-less board has no tiles at all, so every
-   playfield, object and alpha pixel decodes to pen 0 and the compositor has
-   nothing to draw. Road Runner's harness solved this by installing a synthetic
-   font and tile set through the same entry points the real loader uses;
-   `load_playfield_gfx`, `load_mo_gfx` and `load_alpha_gfx` are the equivalents
-   here. Still no arcade ROMs, still CI-safe.
-2. **The MAME second opinion.** Every expectation above is derived from the
-   board's own geometry, which makes this a regression guard immediately and a
-   correctness guard only where the derivation is independent of us. For the
-   PAL there is no derivation available at all, so the comparison against
-   something that is not us **is** the measurement.
+1. **The object sampling lead**, the second jg18.2 question, still untouched.
+   The pieces for it exist now: place an object at a known Y and use the
+   scanline interrupt, known good to a fifth of a line, to change something the
+   object's row depends on at a chosen line. Whether the change lands on that row
+   or the one after it is the one-line delay, measured rather than assumed. Do
+   not add a lead on a guess: `machines/CLAUDE.md` warns that some boards' sprite
+   Y constants fold the delay in already.
+2. **The MAME second opinion.** Everything the sweep asserts is derived from our
+   own merge rule, so it guards against regression and not against being wrong.
    `tools/mame_roadrunner_conformance.lua` is the pattern: write the image into
    MAME's `maincpu` region, soft-reset so the 68010 re-fetches its vectors, and
-   guard against the autoboot script re-running on its own reset.
+   guard against the autoboot script re-running on its own reset. The ROM was
+   built for this, which is why it addresses `FFC000` and `FF8000` rather than
+   the masked space our debug bus uses.
 
-Then the two questions, as picture phases:
+**Be honest about what that second opinion can be worth here.** There is no PAL
+dump in any of the three ROM sets, so MAME's rule is a reverse engineering of the
+same sheet we have. Agreement means two independent readings concur, which is
+real evidence and is not verification; disagreement means one of us is wrong and
+the picture says which. The only thing that would be ground truth is a dump of
+the 7E PAL, and it does not exist.
 
-- **The priority sweep.** The PAL's inputs are `LBPRI1:0`, `LBPIX3`, an
-  object-transparent term, `ANPIX1:0`, `PFPIX3D` and `PFPRI1:0`. Toobin' never
-  drives `LBPRI`, which is measured, so the live sweep is `PFPRI` (4) x `PFPIX3`
-  (2) x `LBPIX3` (2) x object-transparent (2) x alpha pen (4): 128 cells, each
-  recording the color index that comes out. Ours against MAME's, cell by cell.
-  **Our compositor reads three of those inputs and ignores `LBPIX3` entirely**,
-  which jg18.2 did not call out and which the sweep would settle either way.
-- **The object sampling lead.** Place an object at a known Y and use the
-  scanline interrupt, now known good to a fifth of a line, to change something
-  the object's row depends on at a chosen line. Whether the change lands on that
-  row or the one after it is the one-line delay, measured rather than assumed.
+**And the stakes are small, which was measured before any of this was built.**
+Over 3000 frames of recorded play, mutating the merge rule and counting changed
+pixels gives:
 
-Both are tracked on jg18.2. Neither should be turned into a code change until
-the MAME half exists, because for the PAL our own answer is the thing under
-test.
+| candidate | pixels changed | share |
+|---|---|---|
+| control: `PFPRI >= 2` instead of `!= 0` | 0 | 0.00000% |
+| `LBPIX3` set forces the object in front | 26,057 | 0.00442% |
+| `LBPIX3` set keeps the object behind | 6,770,082 | 1.14781% |
+| the object beats the alpha | 919,221 | 0.15585% |
+
+The control coming out at exactly zero is what makes the rest trustworthy, and it
+also closes an axis: since `PFPRI` only ever takes 0 and 2, any rule that
+distinguishes priority 1 from 2 is unobservable on this game. The whole
+playfield-priority mechanism touches 0.016% of pixels and `LBPIX3` 0.004%, about
+nine pixels a frame. The third row is excluded by inspection rather than by
+measurement: 1.15% would delete half of every sprite over priority playfield, and
+the picture is not that.
+
+So this is not a defect hiding in plain sight, and the sweep should be read as
+documentation of behavior rather than as a bug hunt. One caveat worth keeping: a
+small pixel count is not the same as an invisible one, and nobody has checked
+whether those 26,057 pixels cluster on one object's outline or scatter.
 
 ## References
 
