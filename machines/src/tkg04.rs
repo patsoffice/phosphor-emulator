@@ -16,7 +16,7 @@
 //! | DK Jr. | `Donkey Kong Junior CPU P.C. Board`, sheet 5 | [dkjr.pdf] | pp30-31, read |
 //! | DK Jr. | `Donkey Kong Junior Video P.C. Board`, sheet 4 | [dkjr.pdf] | pp28-29, unread |
 //! | Mario Bros. | `TMA1-CPU` | [marioborspak.pdf] | p39, read |
-//! | Mario Bros. | `TMA1-VIDEO` | [marioborspak.pdf] | p40, unread |
+//! | Mario Bros. | `TMA1-VIDEO` | [marioborspak.pdf] | p40 unread; read as sheet F from [MarioBros.pdf] p48 |
 //!
 //! Read 2026-08-30. Every package also carries power supply sheets, which are
 //! omitted here because nothing on this board needs them.
@@ -50,13 +50,22 @@
 //!   selecting counter taps, and an LS123 one-shot at 4K, with only Q1/Q3/Q4
 //!   2SC1815 and small RC slewing the control voltages. Same DAC-08 at 8K and
 //!   MB8884 at 7H, but one 2732 at 3H behind an LS373 at 3F.
-//! - Mario Bros.: 74LS629 again, different circuit. Both halves in one package
-//!   at 4K, control voltages slewed by R64 20 kΩ / C43 3.3 µF and R65 10 kΩ /
-//!   C44 3.3 µF, timing caps C39 4.7 nF and C40 22 nF, driven by a 4020B at 3H
-//!   and a 74123 at 4L (C41 4.7 µF, R61 47 kΩ). Its filter chain is two LM3900
-//!   Norton sections at 3M rather than an MB3614, and its music DAC is a
-//!   discrete resistor ladder (MXR1 / RM7) off a 374 latch at 3K, not a DAC-08.
-//!   These are the walk/skid oscillators [`crate::mario_bros`] currently defers.
+//! - Mario Bros.: 74LS629 again, but **three voices** and a different filter and
+//!   DAC. The two footsteps are four oscillator halves split ACROSS the 1J and 2J
+//!   packages, one half of each per voice and XORed: Mario on C6 3.9 nF + C17
+//!   22 nF, Luigi on C5 39 nF + C16 6.8 nF. So they are genuinely different sounds
+//!   rather than one voice on two lines, and the board's `1 WALK` / `2 WALK` output
+//!   labels name those two lines. The skid is a separate voice and is the whole of
+//!   the 4K package plus the 4020B at 3H, slewed by R64 20 kΩ / C43 3.3 µF and
+//!   R65 10 kΩ / C44 3.3 µF, timing caps C39 4.7 nF and C40 22 nF, triggered
+//!   through a 74123 at 4L (C41 4.7 µF, R61 47 kΩ). Its filter chain is two LM3900
+//!   Norton sections at 3M rather than an MB3614, and those shape the **music
+//!   alone**: the three voices reach the summing node through their own resistors.
+//!   Its music DAC is a discrete resistor ladder (MXR1 / RM7) off a 374 latch at
+//!   3K, not a DAC-08. Fully transcribed in
+//!   [`docs/schematics/mario-sound-sources.md`](../../docs/schematics/mario-sound-sources.md),
+//!   which is authoritative for designators on this board; these are the walk/skid
+//!   oscillators [`crate::mario_bros`] currently defers.
 //!
 //! Common to all three: an MB3712 power amplifier with VR1 10 kΩ into SPEAKER
 //! P11, a TV Audio tap, and a dashed box around the amplifier meaning optional

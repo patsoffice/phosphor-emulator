@@ -1,12 +1,31 @@
 //! Atari Asteroids Deluxe (1980).
 //!
-//! # Documentation
+//! # Schematics
+//!
+//! | Drawing | Source | Pages |
+//! |---|---|---|
+//! | `OPTIONS INPUT CIRCUITRY`, sheet 2 side B, `Asteroids Deluxe Cabaret` drawing package supplement | `arcade-museum.com/manuals-videogames/A/AstDlx-Cabaret-sp.pdf` | PDF p7 of 8 sheets, read |
+//! | A second `Asteroids Deluxe` drawing supplement | `arcade-museum.com/manuals-videogames/A/asteroids_deluxe_1a.pdf` | located 2026-09-16, **unread** |
+//!
+//! Only that one block of the Cabaret package has been read. It is the source for
+//! R5: eight switches shorting to ground against 10k pull-ups into a P5 LS253, so
+//! a closed R5 toggle reads low. **That sense does not transfer to L8**, which is
+//! wired to the POKEY pot lines instead; see
+//! [`refresh_dip_pots`](AsteroidsDeluxeSystem::refresh_dip_pots).
+//!
+//! **The second supplement is the place to look for L8**, which appears on no
+//! sheet of the Cabaret package. Its contents are unverified: nobody has opened
+//! it, so no sheet numbering, page offsets or scan quality are recorded here, and
+//! its row should not be read as implying otherwise. A second package for the same
+//! game is where a switch the first omits would be drawn, and L8 is currently the
+//! one bank on this board modeled from the manual's option tables below rather
+//! than from a decode anyone has read.
+//!
+//! # Manual
 //!
 //! | Document | Source | Pages |
 //! |---|---|---|
 //! | `Asteroids Deluxe` operator manual TM-143, 1st printing | `arcade-museum.com/manuals-videogames/A/AsteroidsDeluxe.man.pdf` | 46 pages; see the figure list below |
-//! | `Asteroids Deluxe Cabaret` drawing package supplement | `arcade-museum.com/manuals-videogames/A/AstDlx-Cabaret-sp.pdf` | 8 sheets |
-//! | A second `Asteroids Deluxe` drawing supplement | `arcade-museum.com/manuals-videogames/A/asteroids_deluxe_1a.pdf` | located 2026-09-16, **unread** |
 //!
 //! **The manual's printed page numbers run four behind its PDF pages**, so
 //! Figure 8 is printed page 11 and PDF page 15. PDF pages are used throughout
@@ -24,21 +43,10 @@
 //! its own it would only support modeling the bank as opaque byte recipes. See
 //! [`ASTDELUX_L8_DERIVATION`].
 //!
-//! The drawing package is a different PDF and does **not** show L8 anywhere. Its
-//! Sheet 2 Side B (PDF p7) has `OPTIONS INPUT CIRCUITRY`, which is R5: eight
-//! switches shorting to ground against 10k pull-ups into a P5 LS253, so a closed
-//! R5 toggle reads low. That sense does not transfer to L8, which is wired to the
-//! POKEY pot lines instead; see
-//! [`refresh_dip_pots`](AsteroidsDeluxeSystem::refresh_dip_pots).
-//!
-//! **The second supplement above is the place to look for L8.** Its contents are
-//! unverified: nobody has opened it, so no sheet numbering, page offsets or scan
-//! quality are recorded here, and its row should not be read as implying
-//! otherwise. What makes it worth opening is that the reading above came from the
-//! **Cabaret** package, and L8 appears on no sheet in that one. A second package
-//! for the same game is where a switch the first omits would be drawn, and L8 is
-//! currently the one bank on this board modeled from the manual's option tables
-//! rather than from a decode anyone has read.
+//! So the two documents answer different questions and this board needs both: the
+//! drawing package gives the decode (which toggle reaches which data line, and in
+//! what sense) and the manual gives the semantics (which toggle carries which
+//! option, and the factory settings). Neither alone was sufficient.
 
 use phosphor_core::audio::SampleRing;
 use phosphor_core::core::bus::InterruptState;

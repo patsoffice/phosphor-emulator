@@ -30,13 +30,11 @@
 //! `OCOL0`..`OCOL3` onto the `OBJ` path.
 //!
 //! **This board is drawn in the TKG-04 family's packages, and the family table
-//! lives in [`crate::tkg04`].** Two cautions when reading across: that table's
-//! Mario Bros. sound row describes the **skid** oscillator only (both halves of
-//! the 4K 74LS629 plus the 4020 at 3H are one voice), while the two players'
-//! footsteps are the separate 1J and 2J packages, four oscillator halves between
-//! them; and its `TMA1-VIDEO` row is marked unread because that scan's page was
-//! not opened, not because the drawing was not read. `mario-sound-sources.md` and
-//! `sprite-list-scan.md` are authoritative for designators on this board.
+//! lives in [`crate::tkg04`],** alongside the finding that the three games' sound
+//! sections are three different designs rather than revisions of one. That table
+//! is the place to compare this board against Donkey Kong's and Donkey Kong Jr.'s;
+//! the two transcriptions linked above are authoritative for designators on this
+//! one.
 //!
 //! NOT READ: the music DAC's own ladder beyond its designators (`MXR1` / `RM7` off
 //! a 374 latch at 3K), and the power supply sheets in either package.
