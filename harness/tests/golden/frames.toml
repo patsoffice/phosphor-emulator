@@ -55,6 +55,15 @@ size = [256, 232]
 frame = "sha256:39ff4e58f61aeaaf8d92f89627fca75ad94e9ed258b786885fd42667f99c14ab"
 
 [[frame]]
+machine = "ccastles"
+id = "gameplay"
+frames = 1600
+shows = "Level 3 in play at score 140,105 with three lives in reserve: the isometric castle in gray and green, Bentley Bear on the left-hand walkway, the HIDDEN RAMP / LEVEL 3 panel at the top right, and gem dots still lining most of the paths. Replayed from a recorded trackball session, so this pins scoring, the level indicator and a player-driven sprite position, none of which the attract castle reaches."
+movie = "movies/ccastles-1787707168.phmi"
+size = [256, 232]
+frame = "sha256:1df3a38c86de02c95a097054d0c5e296b9d6b57f1ddedd73e9e2c2ce8791840c"
+
+[[frame]]
 machine = "congobongo"
 frames = 1800
 shows = "Attract demo: stage 1's isometric hill with the gorilla at the top right, the blue river, and the ape hopping between the burrows."
@@ -170,6 +179,15 @@ size = [336, 240]
 frame = "sha256:e7289330dcc74eec9733a9bb78751236dfec977a40290fb9a7235acea34044f9"
 
 [[frame]]
+machine = "marble"
+id = "gameplay"
+frames = 2100
+shows = "A race in play at score 6,890 with 51 left on the countdown: the marble on the gray course where the two diagonal ramps cross, over the blue vertical-striped void, with three white cones and two small green pickups on the terrace below. Replayed from a recorded trackball session, so this pins the score, the countdown and a player-driven marble position, which the MARBLE MADNESS logo screen cannot reach."
+movie = "movies/marble-1787708076.phmi"
+size = [336, 240]
+frame = "sha256:c0f5232a34d42ebe06048297441784eb05de893474cf188ee86481db7373e347"
+
+[[frame]]
 machine = "mariobros"
 frames = 1800
 shows = "Attract demo: the platform level with Mario and Luigi mid-run, the POW block, a shellcreeper on the top floor, and the two pipes."
@@ -182,6 +200,15 @@ frames = 1800
 shows = "Attract demo: incoming ICBM trails and three red explosions above the six cities and the DEFEND CITIES prompt."
 size = [256, 231]
 frame = "sha256:b585a3dc7bbfa1f901bc0f08adb7d3189e5b07ee10d82115d87488fa6e14d2dc"
+
+[[frame]]
+machine = "missile"
+id = "gameplay"
+frames = 1200
+shows = "A wave in play at score 125: three red ICBM trails descending, a blue anti-ballistic missile in flight with its crosshair marker on the right, and all six cities plus the bases still standing on the yellow terrain. The missile in flight is the part the attract demo cannot produce, since aiming and launching it is trackball and fire input."
+movie = "movies/missile-1787708195.phmi"
+size = [256, 231]
+frame = "sha256:0a23ffdf95e79f8ed8cf819bdde572a3dbaa5d98390497ec6b4b2cae88167970"
 
 [[frame]]
 machine = "mooncrst"
@@ -292,6 +319,16 @@ shows = "Attract mode: the blue tube seen head-on with a yellow flipper on its r
 size = [727, 714]
 frame = "sha256:adfa670a794b101015c946ffd5eed7fc9a9b73bab89407efa45d1ad4a37aaae5"
 vectors = "sha256:6f5aab44070094d67771c8c423afcc6ab61238776b2f7ea7411ada9c5f5d9373"
+
+[[frame]]
+machine = "tempest"
+id = "gameplay"
+frames = 2800
+shows = "Level 10 in play at score 61,924 with two lives in reserve: the blue V-shaped web seen from outside, the yellow claw on its upper-left rim, red flippers climbing three of the lanes, green spikers near the vertex and a shot bursting white mid-web. The vector display list is pinned beside the raster frame, so this guards both the geometry and its rasterization under player control."
+movie = "movies/tempest-1787710135.phmi"
+size = [727, 714]
+frame = "sha256:8db009386935cb3b3b33a8fab1bcf322f8d4928a6e6d817824f0b947092b05f1"
+vectors = "sha256:acc3851aa0fe73ee4354a0376983ec82d069a07f213f98c0cb1e21d48d1a778f"
 
 [[frame]]
 machine = "toobin"

@@ -69,12 +69,14 @@ fn frames_toml() -> PathBuf {
     golden_dir().join("frames.toml")
 }
 
-fn reference_png(machine: &str) -> PathBuf {
-    golden_dir().join(format!("{machine}.png"))
+/// Both PNG paths are keyed on an entry's [`Entry::slug`] rather than its
+/// machine, which is what lets one machine carry more than one pin.
+fn reference_png(slug: &str) -> PathBuf {
+    golden_dir().join(format!("{slug}.png"))
 }
 
-fn actual_png(machine: &str) -> PathBuf {
-    golden_dir().join("actual").join(format!("{machine}.png"))
+fn actual_png(slug: &str) -> PathBuf {
+    golden_dir().join("actual").join(format!("{slug}.png"))
 }
 
 // ---------------------------------------------------------------------------
@@ -92,6 +94,21 @@ struct Press {
 /// fingerprints it has to keep reproducing.
 struct Entry {
     machine: String,
+    /// Distinguishes several pins on one machine. `None` is the machine's
+    /// primary pin, which is its attract-mode one everywhere today.
+    ///
+    /// **This exists so a gameplay pin adds coverage instead of trading it
+    /// away.** The file allowed exactly one entry per machine, and the reference
+    /// PNG was named for the machine, so pinning a frame of play meant deleting
+    /// that machine's attract pin. On Marble Madness that pin records the
+    /// rolling marbles moving when CPU cycle accounting changed, and on Tempest
+    /// it is the standing guard on the double-rotation bug; spending either to
+    /// buy gameplay coverage would be a trade, and the point of the movie work
+    /// was coverage.
+    ///
+    /// An entry's PNG is `{machine}.png` without an id and `{machine}-{id}.png`
+    /// with one, so adding ids to new entries renames nothing that exists.
+    id: Option<String>,
     /// Frames from reset before the frame is sampled.
     frames: usize,
     /// What the pinned frame depicts, in prose. Mandatory: the pin is only
@@ -123,6 +140,17 @@ struct Entry {
     frame: String,
     /// SHA-256 of the vector display list, for vector machines only.
     vectors: Option<String>,
+}
+
+impl Entry {
+    /// How this entry is named on disk and in failure messages: the machine on
+    /// its own, or the machine and its id.
+    fn slug(&self) -> String {
+        match &self.id {
+            Some(id) => format!("{}-{}", self.machine, id),
+            None => self.machine.clone(),
+        }
+    }
 }
 
 /// Parse `frames.toml`. Every malformed field is a panic, not a skip: the file
@@ -234,6 +262,24 @@ fn parse_entries(text: &str, origin: &str) -> Vec<Entry> {
                         .unwrap_or_else(|| panic!("{machine}: `nvram` is not a string"))
                         .to_string()
                 }),
+                // The id becomes a filename, so it is held to something that
+                // cannot escape the golden directory or collide with a machine
+                // name by accident.
+                id: t.get("id").map(|v| {
+                    let id = v
+                        .as_str()
+                        .unwrap_or_else(|| panic!("{machine}: `id` is not a string"))
+                        .to_string();
+                    assert!(
+                        !id.is_empty()
+                            && id
+                                .chars()
+                                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'),
+                        "{machine}: `id` must be lowercase letters, digits and \
+                         hyphens, since it becomes part of a PNG filename: {id:?}"
+                    );
+                    id
+                }),
                 machine,
                 frames,
                 press,
@@ -311,7 +357,9 @@ fn load_unpinned() -> Vec<Unpinned> {
 /// Render `entries` back to the canonical `frames.toml` text, sorted by machine.
 fn render_frames_toml(entries: &[Entry], unpinned: &[Unpinned]) -> String {
     let mut sorted: Vec<&Entry> = entries.iter().collect();
-    sorted.sort_by(|a, b| a.machine.cmp(&b.machine));
+    // Sorted by slug rather than machine, so a machine's several pins keep a
+    // stable order in the file instead of depending on their input order.
+    sorted.sort_by_key(|e| e.slug());
     let mut unpinned: Vec<&Unpinned> = unpinned.iter().collect();
     unpinned.sort_by(|a, b| a.machine.cmp(&b.machine));
 
@@ -325,6 +373,9 @@ fn render_frames_toml(entries: &[Entry], unpinned: &[Unpinned]) -> String {
     for e in sorted {
         out.push_str("\n[[frame]]\n");
         let _ = writeln!(out, "machine = {}", quote(&e.machine));
+        if let Some(id) = &e.id {
+            let _ = writeln!(out, "id = {}", quote(id));
+        }
         let _ = writeln!(out, "frames = {}", e.frames);
         let _ = writeln!(out, "shows = {}", quote(&e.shows));
         if !e.press.is_empty() {
@@ -384,7 +435,21 @@ fn build_for(entry: &Entry, name: &str, dir: &Path) -> Result<Harness, String> {
         let harness = Harness::build_with_movie(dir.to_str().unwrap(), &path)?;
         // `build_with_movie` takes the machine from the movie, so a mislabelled
         // entry would silently pin a different game against this machine's hash.
-        let actual = harness.machine().machine_id();
+        //
+        // COMPARED AGAINST THE MOVIE'S OWN RECORDED NAME, NOT `machine_id()`.
+        // Those are two different namespaces and they are not the same string on
+        // every board: Missile Command registers as "missile" and reports a
+        // `machine_id()` of "missile_command". This read `machine_id()` until the
+        // first movie entry was added, and then rejected a correct entry, which
+        // is the direction that gets noticed. The other direction is the reason
+        // to fix it properly rather than to special-case the name.
+        let actual = harness
+            .movie()
+            .expect("build_with_movie always binds a movie")
+            .movie()
+            .header
+            .machine
+            .clone();
         assert_eq!(
             actual, name,
             "{name}: `movie = {mv:?}` was recorded against '{actual}'"
@@ -583,6 +648,8 @@ fn every_pinned_machine_still_draws_its_frame() {
             eprintln!("discovered {machine}: capturing at {DEFAULT_FRAMES} frames");
             entries.push(Entry {
                 machine,
+                // A discovered machine gets the primary pin, never an id.
+                id: None,
                 frames: DEFAULT_FRAMES,
                 shows: TODO_SHOWS.to_string(),
                 press: Vec::new(),
@@ -607,7 +674,11 @@ fn every_pinned_machine_still_draws_its_frame() {
     let selected: Vec<usize> = entries
         .iter()
         .enumerate()
-        .filter(|(_, e)| only.as_deref().is_none_or(|m| m == e.machine))
+        // A machine name selects every pin on that machine; a slug selects one.
+        .filter(|(_, e)| {
+            only.as_deref()
+                .is_none_or(|m| m == e.machine || m == e.slug())
+        })
         .map(|(i, _)| i)
         .collect();
     let caps: Vec<Option<Capture>> = {
@@ -617,7 +688,7 @@ fn every_pinned_machine_still_draws_its_frame() {
 
     for (&index, cap) in selected.iter().zip(caps) {
         let entry = &mut entries[index];
-        let name = entry.machine.clone();
+        let name = entry.slug();
         let Some(cap) = cap else {
             skipped.push(name);
             continue;
@@ -814,7 +885,9 @@ fn every_entry_is_described() {
          having compared nothing"
     );
 
-    let mut seen: BTreeMap<&str, usize> = BTreeMap::new();
+    // Keyed on the slug: one machine may carry several pins, but two entries
+    // that resolve to the same PNG filename would overwrite each other.
+    let mut seen: BTreeMap<String, usize> = BTreeMap::new();
     for e in &entries {
         assert!(
             registry::find(&e.machine).is_some(),
@@ -822,7 +895,7 @@ fn every_entry_is_described() {
              left this entry behind",
             e.machine
         );
-        *seen.entry(e.machine.as_str()).or_default() += 1;
+        *seen.entry(e.slug()).or_default() += 1;
         assert_ne!(
             e.shows, TODO_SHOWS,
             "{}: still carries the placeholder description. Look at \
@@ -843,14 +916,15 @@ fn every_entry_is_described() {
             e.frame
         );
     }
-    let dupes: Vec<&&str> = seen
+    let dupes: Vec<&String> = seen
         .iter()
         .filter(|(_, n)| **n > 1)
         .map(|(m, _)| m)
         .collect();
     assert!(
         dupes.is_empty(),
-        "duplicate [[frame]] entries for {dupes:?}"
+        "duplicate [[frame]] entries for {dupes:?}. Two pins on one machine need \
+         different `id` values, since the id is what names the reference PNG"
     );
 }
 
@@ -864,7 +938,7 @@ fn reference_pngs_match_their_hashes() {
     let entries = load_entries();
     let mut checked = 0;
     for e in &entries {
-        let path = reference_png(&e.machine);
+        let path = reference_png(&e.slug());
         assert!(
             path.exists(),
             "{}: no reference PNG at {}. Recapture with PHOSPHOR_GOLDEN_UPDATE=1.",
@@ -911,6 +985,7 @@ fn reference_pngs_match_their_hashes() {
 fn a_movie_entry_round_trips_through_frames_toml() {
     let entries = vec![Entry {
         machine: "marble".into(),
+        id: Some("gameplay".into()),
         frames: 6000,
         shows: "Level 1, ball on the second ramp".into(),
         press: Vec::new(),
@@ -926,10 +1001,76 @@ fn a_movie_entry_round_trips_through_frames_toml() {
         "the writer dropped `movie`:\n{text}"
     );
 
+    assert!(
+        text.contains("id = \"gameplay\""),
+        "the writer dropped `id`, which would collapse a gameplay pin onto its \
+         machine's attract pin and overwrite that PNG:\n{text}"
+    );
+
     let back = parse_entries(&text, "<round trip>");
     assert_eq!(back.len(), 1);
     assert_eq!(back[0].movie.as_deref(), Some("movies/marble-level1.phmi"));
     assert_eq!(back[0].frames, 6000);
+    assert_eq!(back[0].id.as_deref(), Some("gameplay"));
+    assert_eq!(back[0].slug(), "marble-gameplay");
+}
+
+/// One machine may carry several pins, distinguished by `id`, and they must
+/// land on different reference PNGs.
+///
+/// This is the property the `id` field exists for: before it, pinning a frame
+/// of gameplay meant *replacing* a machine's attract pin, because the file
+/// allowed one entry per machine and the PNG was named for the machine. Trading
+/// one kind of coverage for another is not what the movie work was for.
+#[test]
+fn a_machine_can_carry_both_an_attract_pin_and_a_gameplay_pin() {
+    let mk = |id: Option<&str>| Entry {
+        machine: "marble".into(),
+        id: id.map(str::to_string),
+        frames: 1800,
+        shows: "whatever this frame shows, described at length for the guard".into(),
+        press: Vec::new(),
+        movie: None,
+        nvram: None,
+        size: (336, 240),
+        frame: "sha256:abc".into(),
+        vectors: None,
+    };
+
+    let attract = mk(None);
+    let gameplay = mk(Some("gameplay"));
+    assert_eq!(attract.slug(), "marble");
+    assert_eq!(gameplay.slug(), "marble-gameplay");
+    assert_ne!(
+        reference_png(&attract.slug()),
+        reference_png(&gameplay.slug()),
+        "two pins on one machine resolved to the same reference PNG, so \
+         capturing one would silently overwrite the other"
+    );
+
+    // Both survive the file together, in a stable order.
+    let text = render_frames_toml(&[gameplay, attract], &[]);
+    let back = parse_entries(&text, "<two pins>");
+    assert_eq!(back.len(), 2);
+    assert_eq!(back[0].slug(), "marble");
+    assert_eq!(back[1].slug(), "marble-gameplay");
+}
+
+/// An `id` that is not a safe filename fragment is refused, because it names a
+/// PNG. A path separator in it would write outside the golden directory.
+#[test]
+#[should_panic(expected = "`id` must be lowercase letters")]
+fn an_id_that_could_escape_the_golden_directory_is_refused() {
+    parse_entries(
+        "[[frame]]\n\
+         machine = \"marble\"\n\
+         id = \"../../etc\"\n\
+         frames = 1800\n\
+         shows = \"whatever this frame shows, described at length for the guard\"\n\
+         size = [336, 240]\n\
+         frame = \"sha256:abc\"\n",
+        "<bad id>",
+    );
 }
 
 /// A `movie` entry must actually replay: the captured frame has to differ from
@@ -993,6 +1134,7 @@ fn a_movie_entry_replays_and_is_reproducible() {
     let rel = format!("actual/{name}-mechanism.phmi");
     let with_movie = Entry {
         machine: name.to_string(),
+        id: None,
         frames: FRAMES,
         shows: "mechanism test".into(),
         press: Vec::new(),
@@ -1005,6 +1147,7 @@ fn a_movie_entry_replays_and_is_reproducible() {
     let without_movie = Entry {
         movie: None,
         machine: name.to_string(),
+        id: None,
         frames: FRAMES,
         shows: "mechanism test".into(),
         press: Vec::new(),
