@@ -8,6 +8,45 @@
 //! video pipeline. The reset vectors live in the shared motherboard BIOS at
 //! `0x000000`, which jumps into the cartridge's banked program ROMs.
 //!
+//! # Schematics
+//!
+//! | Drawing | Source | Pages |
+//! |---|---|---|
+//! | `System I Main PCB Schematic Diagram`, SP-277 1st printing, sheet 9A | `arcade-museum.com/manuals-videogames/A/Atari-System-1-SP277-1st-Printing.pdf` | PDF p17, read |
+//! | same package, sheet 8B | same | PDF p16, read at the block level |
+//!
+//! Read 2026-08-28 from a 400 dpi render. Transcribed in the `atari_system1`
+//! section of
+//! [`docs/schematics/sprite-list-scan.md`](../../docs/schematics/sprite-list-scan.md).
+//!
+//! **Name these two sheets by their block labels.** Every sheet from 4B to 9B
+//! carries the same generic title block, so "System I Main PCB Schematic Diagram"
+//! identifies nothing. Sheet 9A is drawn as `Motion Object Horizontal Line
+//! Buffer`; sheet 8B carries `Motion Object Horizontal Line Buffer Control`
+//! beside `Motion Object/Playfield Graphic Address Generator`.
+//!
+//! **SP-276 is the wrong package, and it costs a pass.** The Marble Madness
+//! operator's manual carries schematic supplement SP-276, which covers the
+//! **cartridge PCB only**: program ROM, video microprocessor ROM, bank-switch ROM
+//! and speech, graphic palette select, and the playfield/motion-object graphic
+//! data multiplexer. The motion-object engine is not in it. It is on the System 1
+//! motherboard, and the motherboard is SP-277.
+//!
+//! What the two sheets settle, and why this file behaves as it does: the motion
+//! object path is a **doubled horizontal line buffer** (two 1K x 8 2149-2 pairs
+//! with separate chip selects, load and clear lines and address counters, one
+//! written while the other is read), so there is no frame store and no vblank
+//! snapshot of the list. Horizontal placement is a counter loaded from the
+//! object's X through 3J. See the `draw_row` comment below for the consequence.
+//!
+//! NOT READ, so nothing here covers it: the motion-object list RAM's own address
+//! path (sheet 8B's graphic address generator was seen at the block level only,
+//! and that the list is read per line follows from the buffer having to be filled
+//! per line rather than from a mux anyone traced); the SLIP scanline-pointer
+//! mechanism, which is what makes the list per-band rather than flat and is on
+//! neither sheet; **the buffers' phase**, which is why no sprite sampling lead is
+//! applied here; and the rest of the package, including all of the sound board.
+//!
 //! This module owns everything that is identical across the catalog (Marble
 //! Madness, Road Runner, …). A per-game wrapper (see [`crate::marble`]) holds
 //! only the cartridge ROM manifest, the slapstic chip id, and the game's own

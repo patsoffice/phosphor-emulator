@@ -1,5 +1,46 @@
 //! Nintendo Mario Bros. (1983).
 //!
+//! # Schematics
+//!
+//! | Drawing | Source | Pages |
+//! |---|---|---|
+//! | `TMA1-CPU SCHEMATIC`, (c) 1983 Nintendo of America | `arcade-museum.com/manuals-videogames/M/marioborspak.pdf` | PDF p39, read |
+//! | `TMA1-VIDEO SCHEMATIC`, sheet F | `arcade-museum.com/manuals-videogames/M/MarioBros.pdf` | PDF p48, read |
+//!
+//! Read 2026-08-28 (video) and 2026-08-30 (CPU). Transcriptions:
+//! [`docs/schematics/mario-sound-sources.md`](../../docs/schematics/mario-sound-sources.md)
+//! for the effect voices and the audio output, and the `mario_bros` section of
+//! [`docs/schematics/sprite-list-scan.md`](../../docs/schematics/sprite-list-scan.md)
+//! for the object and video counters.
+//!
+//! **There are two scans and the choice matters.** Prefer `marioborspak.pdf`:
+//! whole sheets, one per page, 600 dpi, and every designator in the audio reading
+//! was legible without ambiguity. `MarioBros.pdf` is the same drawings at roughly
+//! 430 dpi with each sheet cut across two pages, which puts the walk oscillators
+//! (its p51) on a different page from the filter chain they feed (p52). The video
+//! reading above was nevertheless taken from `MarioBros.pdf` p48; the same drawing
+//! is `marioborspak.pdf` p40. Both sheets are drawn in landscape on a portrait
+//! page, so each has to be rendered and rotated 90 degrees to be read at all.
+//!
+//! What the video sheet settles for this file: the object horizontal position is a
+//! pair of 74LS163 counters at 5M and 4M **loaded from `HPO0`..`HPO7`**, the same
+//! shape as Burger Time and Atari System 1 rather than a comparator. 5J and 5K are
+//! the vertical counter, 7J and 6J an LS175 holding the flipped vertical count
+//! `1VFC`..`128VFC`, and 4S and 5S an LS157 pair selecting `OVID0`..`OVID2` and
+//! `OCOL0`..`OCOL3` onto the `OBJ` path.
+//!
+//! **This board is drawn in the TKG-04 family's packages, and the family table
+//! lives in [`crate::tkg04`].** Two cautions when reading across: that table's
+//! Mario Bros. sound row describes the **skid** oscillator only (both halves of
+//! the 4K 74LS629 plus the 4020 at 3H are one voice), while the two players'
+//! footsteps are the separate 1J and 2J packages, four oscillator halves between
+//! them; and its `TMA1-VIDEO` row is marked unread because that scan's page was
+//! not opened, not because the drawing was not read. `mario-sound-sources.md` and
+//! `sprite-list-scan.md` are authoritative for designators on this board.
+//!
+//! NOT READ: the music DAC's own ladder beyond its designators (`MXR1` / `RM7` off
+//! a 374 latch at 3K), and the power supply sheets in either package.
+//!
 //! Hardware (per MAME `src/mame/nintendo/mario.cpp`):
 //! - Main CPU: Z80 @ 4 MHz (8 MHz XTAL / 2)
 //! - Sound CPU: Mitsubishi M58715 (8049-clone, runs from external ROM ⇒

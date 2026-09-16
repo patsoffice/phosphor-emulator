@@ -19,10 +19,57 @@
 //! The cabinet monitor is mounted rotated, so the native 512×384 framebuffer
 //! this module fills is presented through [`Orientation::ROT270`].
 //!
-//! The sound board (a 6502 with an FM chip and a stereo pair of POKEYs) is not
-//! modeled yet: this board is silent, and the command latch reports itself
-//! drained so the main program's handshake never stalls. See the module's
-//! `sound_w`/`sound_r` for exactly what is stubbed.
+//! The sound board is Atari's Stand-Alone Audio PCB (a 6502 with a YM2151, a
+//! POKEY and a speech socket), modeled in [`crate::atari_jsa`] as [`AtariJsa1`]
+//! and driven from this board's `sound_w`/`sound_r`.
+//!
+//! # Schematics
+//!
+//! One package, `arcade-museum.com/manuals-videogames/T/Toobin.pdf`, carrying
+//! Atari SP-320 1st printing, (c) Atari Games Corporation 1988.
+//!
+//! | Sheet | What it settles | Pages |
+//! |---|---|---|
+//! | 7 | vertical match: LS283 adders computing `V + MOV` against a constant gated with `/384V` | pp76-77, read |
+//! | 9 | playfield priority latched from `PFD5`/`PFD4` through 6D, 2 bits and not 4 | pp80-81, read |
+//! | 13 | motion-object line buffers 13J and 14J, controls gated by `1V` and `/1V`, an F398 selecting the read side | pp88-89, read |
+//! | 15 | the priority 16L8A PAL at 7E and the 4-to-1 color RAM address muxes | pp92-93, read |
+//! | 20 | the audio board's address decode | pp102-103, read |
+//! | 21 | Stand-Alone Audio PCB sheet 3, drawing `045713-xx B` | pp104-105, read |
+//! | 22 | Stand-Alone Audio PCB sheet 4, `/RDIO` and coin counters | pp106-107, read |
+//!
+//! Read 2026-09-14 (audio) and later for the video sheets. The audio half is
+//! transcribed in
+//! [`docs/schematics/toobin-audio-output.md`](../../docs/schematics/toobin-audio-output.md);
+//! the video sheets are read in place, at the `merge` and `draw_row` comments
+//! below.
+//!
+//! **How the scan is laid out**, because it is not guessable. There is **no text
+//! layer at all**, so nothing is searchable, and each schematic sheet is spread
+//! across two PDF pages. The package starts at PDF p62 with its contents on p63,
+//! and sheet `n` is pages `62 + 2n` and `63 + 2n`. That formula is confirmed
+//! against the independently recorded pages for sheets 15, 20, 21 and 22; the
+//! pages given for 7, 9 and 13 follow from it. `poppler-utils` is in the dev shell
+//! for this: `pdftoppm -r 300` with its `-x -y -W -H` crop flags reads one block of
+//! a sheet where a whole sheet at 100 dpi does not.
+//!
+//! TWO THINGS THESE SHEETS CANNOT SETTLE, both load-bearing here.
+//!
+//! - **The priority rule itself.** The 16L8A at 7E is a programmed part, so its
+//!   equations are not on sheet 15 and cannot be read off it. What the sheet
+//!   settles is everything around them, which is enough to fix the *shape*: the
+//!   PAL drives mux SELECT lines, so the merge is a selection of one layer per
+//!   pixel and never a blend.
+//! - **Whether sheet 7's match constant already absorbs the line-buffer swap.**
+//!   Sheet 13 proves the swap is real, so the beam shows a line that was scanned
+//!   during the line before it; but the constant is not legible at the resolution
+//!   available, and adding a lead on top of one already folded in would move every
+//!   object pixel the wrong way. The lead this renderer applies is measured rather
+//!   than read, and it is zero. See `draw_row`.
+//!
+//! NOT READ: every other sheet in the package, including the 68010 bus, the
+//! graphics ROM addressing and the coin door, and the contents page beyond
+//! locating the sheets above.
 
 use phosphor_core::audio::{DcBlocker, SampleRing};
 use phosphor_core::core::bus::InterruptState;

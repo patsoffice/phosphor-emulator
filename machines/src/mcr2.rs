@@ -1,3 +1,68 @@
+//! Bally Midway MCR II board (1981-83), with the Super Sound I/O sound board.
+//! Satan's Hollow is the set in the catalog.
+//!
+//! # Schematics
+//!
+//! | Drawing | Source | Pages |
+//! |---|---|---|
+//! | Video Gen `A084-91399-A941`, sheet 9-8 | Satan's Hollow Parts and Operating Manual | PDF p104, read |
+//! | Clock tree, sheet 9-6 | same | read |
+//! | Super CPU `A084-90010-C000`, sheet 9-11 | `arcade-museum.com/manuals-videogames/T/Tron.pdf` | PDF pp115-116, read |
+//! | Video Gen `A084-91399-A941`, as Tron's sheet 9-13 | same | pp121-122, searched |
+//! | Super Sound I/O `A084-90913-E000`, as Tron's sheet 9-15 | same | p128, read |
+//!
+//! Read 2026-08-27 through 2026-08-31. Transcriptions:
+//! [`docs/schematics/mcr-video-timing.md`](../../docs/schematics/mcr-video-timing.md)
+//! for the counters,
+//! [`docs/schematics/ssio-audio-output.md`](../../docs/schematics/ssio-audio-output.md)
+//! for the sound board's output, and the `mcr2` section of
+//! [`docs/schematics/sprite-list-scan.md`](../../docs/schematics/sprite-list-scan.md)
+//! for the object path.
+//!
+//! **No URL is recorded for the Satan's Hollow scan**, only its title and the
+//! page. The first two rows above are therefore not findable the way the issue
+//! that asked for this section (`phosphor-emulator-aih3`) requires, and supplying
+//! that link is outstanding work rather than an omission here.
+//!
+//! **Name a drawing by its part number, not its sheet number.** Sheet numbers in
+//! these manuals are per package: the Video Gen drawing is sheet 9-8 in Satan's
+//! Hollow's and sheet 9-13 in Tron's, and the Super Sound I/O is 9-10 in Satan's
+//! Hollow's and 9-15 in Tron's. Two rows above are the same drawing.
+//!
+//! **Read from Tron's manual where Satan's Hollow's lacks the sheet.** The Super
+//! CPU and Super Sound I/O boards are shared across MCR II, so any manual
+//! carrying them carries the same drawing. Also in Tron's package and NOT part of
+//! this board: sheet 9-7, a separate `DUAL POWER AMP` assembly
+//! `A082-90910-E000`, which is the cabinet amplifier downstream of everything
+//! here.
+//!
+//! ## The blanking phase is on no drawing, and cannot be
+//!
+//! The negative result worth more than the pointers, recorded so nobody searches
+//! for it a third time. The horizontal and vertical counters and both blanking
+//! decodes are inside two Midway custom LSIs on the Super CPU board: G12 `MMC02`
+//! emits `DV0`..`DV8` and `VBLNK` from one package, B12 `MMC03` emits the `H`
+//! series and `HBLNK`. There is no discrete logic to draw, so **where the 480
+//! visible lines sit inside the 512-line frame is not readable from any sheet in
+//! any MCR manual**, and neither is which field a given framebuffer row belongs
+//! to. Searched and clean of counters: the Video Gen sheet in both packages, and
+//! the Super CPU sheet's left half (Tron PDF p115), which carries the 19.968 MHz
+//! crystal and the `MCLK` dividers but no counter chain. `H0`..`H9` and
+//! `DV0`..`DV8` reach the Video Gen board over the connector, already counted.
+//! The reference driver does not know the phase either and says so in a comment,
+//! settling for a 2500 microsecond vblank it marks as not accurate, so there is
+//! nothing to copy from it. If the phase is ever needed it has to come from
+//! somewhere that is not a drawing: a logic capture on a live board, or a
+//! die-level teardown of the custom.
+//!
+//! Two smaller limits of the same kind. `MMC03`'s output labels are cut off at
+//! the right edge of the p116 scan, so that they are the `H` series is inferred
+//! from what the Video Gen board consumes rather than read. And on the CTC, the
+//! single zero-count-to-trigger loopback is legible as a wire but not as pin
+//! numbers: the scan's numbering does not match a Z80 CTC pinout, so which
+//! channels it joins follows the reference driver (see the comment on
+//! `Mcr2Board::begin_cycle_inner`).
+
 use phosphor_core::core::{AccessKind, AddressSpace16};
 use phosphor_core::core::{ClockDomainName as Clk, ClockTree, DomainId, TimingConfig};
 use phosphor_core::cpu::z80::Z80;
