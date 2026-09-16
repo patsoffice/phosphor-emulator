@@ -1434,3 +1434,60 @@ fn ls629_control_capacitor_slews_without_moving_the_settled_pitch() {
          {settled_slewed:.0} Hz"
     );
 }
+
+/// The invariant that the two Nintendo boards' broadband noise turned out to be.
+///
+/// Stage one of the output resampler is a box from `sim_rate` down to
+/// `output_rate * fir::DECIMATION`. A ratio that is not a whole number makes the
+/// box alternate between two window lengths on a jittering timebase, which is an
+/// amplitude modulation plus timing jitter and sprays noise that rises toward
+/// Nyquist. `with_sim_rate` takes a floor and rounds up precisely so no caller
+/// can express that, and this asserts the rounding on built circuits rather than
+/// on arithmetic restating the formula.
+///
+/// The first row is the case that shipped: three boards asked for 192000 against
+/// a 176400 intermediate rate, a ratio of 1.088.
+#[test]
+fn with_sim_rate_always_lands_on_a_whole_multiple_of_the_intermediate_rate() {
+    const DEC: u64 = crate::audio::fir::DECIMATION as u64;
+    for output_rate in [44_100u64, 48_000, 22_050, 96_000] {
+        let intermediate = output_rate * DEC;
+        for requested in [1, 192_000u64, 176_400, 352_800, 384_000, 768_000, 1] {
+            let c = DiscreteCircuitBuilder::new(output_rate, output_rate)
+                .with_sim_rate(requested)
+                .build();
+            let sim = c.sim_rate();
+            assert_eq!(
+                sim % intermediate,
+                0,
+                "sim rate {sim} is not a whole multiple of {intermediate} \
+                 (output {output_rate}, requested {requested})"
+            );
+            assert!(
+                sim >= requested,
+                "sim rate {sim} fell below the requested floor {requested}"
+            );
+            assert!(
+                sim - intermediate < requested.max(intermediate),
+                "sim rate {sim} overshot the floor {requested} by more than one \
+                 intermediate period"
+            );
+        }
+    }
+}
+
+/// A board that never calls `with_sim_rate` is commensurate the other way round,
+/// and this pins that the default is not quietly broken by the rounding above.
+///
+/// There the simulation runs *at* the output rate, so the box is upsampling and
+/// emits exactly `DECIMATION` stage-one samples per input. That is a whole ratio
+/// too, which is why only the three `with_sim_rate` callers were ever affected.
+#[test]
+fn the_default_sim_rate_is_commensurate_in_the_other_direction() {
+    const DEC: u64 = crate::audio::fir::DECIMATION as u64;
+    for rate in [44_100u64, 48_000] {
+        let c = DiscreteCircuitBuilder::new(rate, rate).build();
+        assert_eq!(c.sim_rate(), rate);
+        assert_eq!((c.output_sample_rate() * DEC) % c.sim_rate(), 0);
+    }
+}

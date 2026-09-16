@@ -703,4 +703,73 @@ mod tests {
             );
         }
     }
+
+    /// Total energy in a block, for splitting a tone from everything else.
+    fn total_energy(samples: &[f32]) -> f64 {
+        samples.iter().map(|&s| (s as f64) * (s as f64)).sum()
+    }
+
+    /// Energy the tone itself accounts for, from its measured bin amplitude.
+    fn tone_energy(samples: &[f32], rate: f64, hz: f64) -> f64 {
+        let a = bin_amplitude(samples, rate, hz);
+        // A sine of amplitude a carries a^2 / 2 per sample.
+        a * a / 2.0 * samples.len() as f64
+    }
+
+    #[test]
+    fn an_input_rate_commensurate_with_the_intermediate_rate_adds_no_broadband_noise() {
+        // THE DEFECT THAT COST TWO BOARDS THEIR SPECTRUM, in isolation and
+        // without a board. See `phosphor-emulator-6ykk` and `-tohy`.
+        //
+        // Stage one is a Bresenham box from the input rate down to
+        // `DECIMATION * output_rate`, 176400 at a 44.1 kHz host. When the two
+        // are in a whole-number ratio the box averages a fixed number of input
+        // samples and emits on an even timebase. When they are not it alternates
+        // between two window lengths at an irregular rate, which is an amplitude
+        // modulation, and each emitted sample lands at a time that jitters by up
+        // to one input period. Both spray broadband noise, and both are exactly
+        // zero at a whole ratio.
+        //
+        // **Every other spectral test in this file picks a commensurate input
+        // rate** (1_764_000 is exactly 10x the intermediate rate), which is why
+        // the suite was blind to this for as long as it was.
+        const OUTPUT: f64 = 44_100.0;
+        const TONE: f64 = 19_000.0; // below output Nyquist, high enough to bite
+
+        // 352800 is 2x the intermediate rate; 192000 is the 1.088x ratio all
+        // three boards shipped with.
+        let clean = resample_tone(TONE, 352_800);
+        let dirty = resample_tone(TONE, 192_000);
+
+        let stray = |s: &[f32]| {
+            let total = total_energy(s);
+            ((total - tone_energy(s, OUTPUT, TONE)) / total).max(0.0)
+        };
+        let (clean_stray, dirty_stray) = (stray(&clean), stray(&dirty));
+
+        assert!(
+            clean_stray < 1e-3,
+            "a commensurate input rate left {:.4}% of the output energy off the \
+             tone; it should be nothing",
+            clean_stray * 100.0
+        );
+
+        // THIS HALF DOCUMENTS A DEFECT THAT IS STILL PRESENT AND IS NOT AN
+        // ENDORSEMENT OF IT. `with_sim_rate` now rounds so no discrete circuit
+        // can ask for an incommensurate rate, but `AudioResampler::new` is
+        // public and every device driven from a raw CPU clock still passes one.
+        // Those ratios are large (3.072 MHz over 176400 is 17.4, a window of 17
+        // or 18 samples) so the modulation is a few percent rather than the
+        // 100% swing a near-1 ratio gives, which is why only these boards showed
+        // it. Fixing stage one to handle any ratio is the open half of 6ykk and
+        // needs benching, since it is the per-cycle path of every board here.
+        // When that lands this assertion is what should fail.
+        assert!(
+            dirty_stray > clean_stray * 10.0,
+            "the incommensurate rate no longer looks worse ({:.4}% against \
+             {:.4}%), so stage one has been fixed and this test is stale",
+            dirty_stray * 100.0,
+            clean_stray * 100.0
+        );
+    }
 }

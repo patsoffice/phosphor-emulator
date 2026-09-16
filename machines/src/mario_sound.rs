@@ -51,7 +51,15 @@ fn sample_rate() -> u64 {
     phosphor_core::audio::host_sample_rate() as u64
 }
 
-/// Internal simulation rate.
+/// Minimum internal simulation rate, a **floor** that
+/// [`with_sim_rate`](phosphor_core::device::discrete::DiscreteCircuitBuilder::with_sim_rate)
+/// rounds up to the next whole multiple of the resampler's intermediate rate.
+/// At a 44.1 kHz host that lands on 352800.
+///
+/// Do not turn this back into an exact rate. Rounding is what keeps stage one of
+/// the output resampler commensurate; this board shipped at a flat 192000
+/// against a 176400 intermediate rate and the resulting box jitter, not the
+/// circuit, was the whole of its spectral residual. See `phosphor-emulator-6ykk`.
 ///
 /// NOT high enough to render this board's oscillators cleanly, and that is a
 /// deliberate, measured trade rather than an oversight. The walk oscillators
@@ -65,7 +73,7 @@ fn sample_rate() -> u64 {
 /// rate still has the right mean and the right envelope; what it gains is alias
 /// products that the same corner attenuates. The comparison against the board is
 /// what justifies the choice, and it is recorded in the issue.
-const SIM_RATE: u64 = 192_000;
+const MIN_SIM_RATE: u64 = 192_000;
 
 /// Supply rail.
 const VCC: f64 = 5.0;
@@ -314,7 +322,7 @@ fn walk_voice(
 
 fn build_circuit() -> (DiscreteCircuit, MarioInputs) {
     let rate = sample_rate();
-    let mut b = DiscreteCircuitBuilder::new(rate, rate).with_sim_rate(SIM_RATE);
+    let mut b = DiscreteCircuitBuilder::new(rate, rate).with_sim_rate(MIN_SIM_RATE);
 
     let dac = b.external_source("DAC");
     let walk1_trig = b.pulse_input("WALK1_STROBE");

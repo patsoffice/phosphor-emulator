@@ -52,12 +52,20 @@ fn sample_rate() -> u64 {
     phosphor_core::audio::host_sample_rate() as u64
 }
 
-/// Internal simulation rate. The fastest node needing a *waveform* is the 5K
-/// pin 7 tone at up to 14 kHz, which this carries with room to spare. The
-/// board's fastest oscillator is four times that, but it exists only to clock
-/// the 4020 and is modelled as a rate rather than a square precisely so that it
-/// does not set this number.
-const SIM_RATE: u64 = 192_000;
+/// Minimum internal simulation rate, a **floor** that `with_sim_rate` rounds up
+/// to the next whole multiple of the resampler's intermediate rate. At a
+/// 44.1 kHz host that lands on 352800.
+///
+/// Do not turn this back into an exact rate: rounding is what keeps stage one of
+/// the output resampler commensurate, and a flat 192000 against a 176400
+/// intermediate rate is where this board's fall voice got its broadband noise.
+/// See `phosphor-emulator-6ykk`.
+///
+/// The fastest node needing a *waveform* is the 5K pin 7 tone at up to 14 kHz,
+/// which this carries with room to spare. The board's fastest oscillator is four
+/// times that, but it exists only to clock the 4020 and is modeled as a rate
+/// rather than a square precisely so that it does not set this number.
+const MIN_SIM_RATE: u64 = 192_000;
 
 /// Supply rail.
 const VCC: f64 = 5.0;
@@ -257,7 +265,7 @@ struct DkongJrInputs {
 
 fn build_circuit() -> (DiscreteCircuit, DkongJrInputs) {
     let rate = sample_rate();
-    let mut b = DiscreteCircuitBuilder::new(rate, rate).with_sim_rate(SIM_RATE);
+    let mut b = DiscreteCircuitBuilder::new(rate, rate).with_sim_rate(MIN_SIM_RATE);
 
     let dac = b.external_source("DAC");
     let walk_en = b.logic_input("WALK_EN");

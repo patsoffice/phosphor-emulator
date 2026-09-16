@@ -426,11 +426,35 @@ impl DiscreteCircuitBuilder {
         }
     }
 
-    /// Override the internal simulation step rate (Hz). Must be high enough to
-    /// represent the fastest node; the output is resampled down to the audio
-    /// rate. Components that model analog state see `dt = 1 / sim_rate`.
-    pub fn with_sim_rate(mut self, sim_rate: u64) -> Self {
-        self.sim_rate = sim_rate;
+    /// Raise the internal simulation step rate to at least `min_sim_rate` Hz.
+    ///
+    /// This is a **floor, not an exact setting**, and the rate actually used is
+    /// the next whole multiple of the output resampler's intermediate rate
+    /// (`output_sample_rate * fir::DECIMATION`). Components that model analog
+    /// state then see `dt = 1 / ` that value.
+    ///
+    /// **Why it rounds.** [`AudioResampler`](crate::audio::AudioResampler)'s
+    /// stage one is a Bresenham box from this rate down to its intermediate
+    /// rate. When the two are in a whole-number ratio the box averages a fixed
+    /// number of samples and emits on an even timebase. When they are not, it
+    /// alternates between two window lengths at an irregular rate, which is both
+    /// an amplitude modulation and up to a full input period of timing jitter,
+    /// and it sprays broadband noise that rises toward Nyquist.
+    ///
+    /// The damage is worst when the ratio is near 1, because the window then
+    /// alternates between one sample and two: a 100 % swing. All three callers
+    /// asked for 192000 against a 176400 intermediate rate, a ratio of 1.088,
+    /// and the boards that suffered were the ones with ultrasonic content for
+    /// the jitter to scramble. Taking a floor instead of an exact value means a
+    /// board states the resolution its fastest node needs and cannot express the
+    /// artifact at all. See `phosphor-emulator-6ykk` and `-tohy`.
+    pub fn with_sim_rate(mut self, min_sim_rate: u64) -> Self {
+        let intermediate = self.output_sample_rate * crate::audio::fir::DECIMATION as u64;
+        self.sim_rate = if intermediate == 0 {
+            min_sim_rate
+        } else {
+            min_sim_rate.div_ceil(intermediate).max(1) * intermediate
+        };
         self
     }
 
@@ -1618,6 +1642,20 @@ pub struct DiscreteCircuit {
 }
 
 impl DiscreteCircuit {
+    /// The simulation step rate actually in use, which
+    /// [`with_sim_rate`](DiscreteCircuitBuilder::with_sim_rate) rounded up from
+    /// the floor a board asked for. Exposed so a test can assert the resampler's
+    /// commensurability invariant on a real built circuit rather than on
+    /// arithmetic that restates it.
+    pub fn sim_rate(&self) -> u64 {
+        self.sim_rate
+    }
+
+    /// The audio rate this circuit resamples down to.
+    pub fn output_sample_rate(&self) -> u64 {
+        self.output_sample_rate
+    }
+
     /// Advance the circuit by `board_cycles` of board-clock time, producing
     /// `sim_rate / board_clock_hz * board_cycles` simulation steps (Bresenham).
     pub fn tick(&mut self, board_cycles: u64) {

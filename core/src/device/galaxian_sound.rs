@@ -61,9 +61,14 @@ pub const SOUND_CLOCK: f64 = 18_432_000.0 / 6.0 / 2.0; // 1.536 MHz
 /// such as a comparison harness, can work out how many cycles make one output
 /// sample without guessing (or reaching for [`SOUND_CLOCK`]).
 pub const CPU_CLOCK_HZ: u64 = 3_072_000;
-/// Internal simulation rate. High enough for the few-kHz tones and the
-/// band-pass filters; the output is resampled down from here.
-const SIM_RATE: u64 = 192_000;
+/// Minimum internal simulation rate, a **floor** that `with_sim_rate` rounds up
+/// to the next whole multiple of the resampler's intermediate rate. High enough
+/// for the few-kHz tones and the band-pass filters; the output is resampled down
+/// from here.
+///
+/// Do not turn this back into an exact rate: rounding is what keeps stage one of
+/// the output resampler commensurate. See `phosphor-emulator-6ykk`.
+const MIN_SIM_RATE: u64 = 192_000;
 /// Noise flip-flop sample rate (`2V` = 60·264/2 Hz on the real board).
 const NOISE_RATE: f64 = 60.0 * 264.0 / 2.0; // 7920 Hz
 /// The logic high the latches and counter taps present to the analog side.
@@ -192,7 +197,7 @@ impl GalaxianSound {
     /// Build the device producing audio at `output_sample_rate` Hz.
     pub fn new(output_sample_rate: u32) -> Self {
         let mut b = DiscreteCircuitBuilder::new(CPU_CLOCK_HZ, output_sample_rate as u64)
-            .with_sim_rate(SIM_RATE);
+            .with_sim_rate(MIN_SIM_RATE);
 
         // --- Inputs ---------------------------------------------------------
         let pitch_in = b.data_input("pitch", 1.0);
