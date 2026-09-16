@@ -400,3 +400,43 @@ fn test_pure_tone_period_1_79mhz() {
         "1.79 MHz pure tone should divide by AUDF + 4 (~100 toggles), got {transitions}"
     );
 }
+
+#[test]
+fn skctl_fast_pot_scan_steps_every_clock_instead_of_every_114() {
+    // SKCTL bit 2 picks the pot conversion rate: clear, one step per 15 kHz
+    // tick, so a full scan is 228 scanlines; set, one step per clock, so the
+    // same scan is about two. Every board in this tree that reads switches
+    // through the pot lines sets it.
+    let mut slow = Pokey::new(44100);
+    let mut fast = Pokey::new(44100);
+    for p in [&mut slow, &mut fast] {
+        p.set_pot_input(0, 128);
+    }
+    slow.write(0x0F, 0x03); // SKCTL, counters running, fast-scan bit CLEAR
+    fast.write(0x0F, 0x07); // SKCTL, counters running, fast-scan bit SET
+    slow.write(0x0B, 0); // POTGO
+    fast.write(0x0B, 0);
+
+    // Both must still read "scanning" immediately after POTGO, which is how a
+    // board tells a closed switch from an open one.
+    assert_eq!(slow.read(0x08) & 0x01, 0x01);
+    assert_eq!(fast.read(0x08) & 0x01, 0x01);
+
+    // 695 clocks is the window Asteroids Deluxe's self-test allows between
+    // strobing POTGO and demanding the scan be finished.
+    for _ in 0..695 {
+        slow.tick();
+        fast.tick();
+    }
+
+    assert_eq!(
+        fast.read(0x08) & 0x01,
+        0,
+        "with the fast-scan bit set a 128-count pot must finish inside 695 clocks"
+    );
+    assert_eq!(
+        slow.read(0x08) & 0x01,
+        0x01,
+        "without it the same pot needs ~114x longer and is still scanning"
+    );
+}

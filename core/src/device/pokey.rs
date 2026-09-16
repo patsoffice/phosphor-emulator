@@ -166,6 +166,15 @@ const SKSTAT_RESET_MASK: u8 = SKSTAT_FRAME_ERR | SKSTAT_OVERRUN | SKSTAT_DATA_RE
 /// (one NTSC frame's worth of scanlines at the 15 kHz rate).
 const POT_SCAN_MAX: u8 = 228;
 
+/// SKCTL bit 2: fast pot scan.
+///
+/// Clear, a pot step happens once per 15 kHz tick, so a full scan takes 228
+/// scanlines. Set, the step happens on **every** clock instead, so the same scan
+/// finishes in about two scanlines. Every board here that reads switches through
+/// the pot lines sets it, and one of them fails its self-test without it: see
+/// [`Pokey::tick`].
+const SKCTL_FAST_POT: u8 = 0x04;
+
 impl Pokey {
     /// Create a new POKEY with all registers cleared and polynomial counters
     /// seeded to their maximum values. The `output_sample_rate` determines
@@ -547,8 +556,19 @@ impl Pokey {
         // 5. Resample
         self.resampler.tick(mixed_sample);
 
-        // 6. Pot scanning (runs at 15 kHz, stops after POT_SCAN_MAX ticks)
-        if self.pot_scanning && tick_15k {
+        // 6. Pot scanning. One step per 15 kHz tick normally, but every clock
+        // when SKCTL's fast-scan bit is set, which is 114 times faster and is
+        // the mode every board in this tree actually uses.
+        //
+        // The difference is observable, not cosmetic. Asteroids Deluxe's
+        // self-test strobes POTGO, reads ALLPOT four cycles later to get the L8
+        // switches (a line still scanning reads 1), and then re-reads ALLPOT
+        // about 695 cycles later and requires every bit to have cleared by
+        // then, treating a bit still set as a dead audio chip. At the 15 kHz
+        // rate a closed toggle needs roughly 12,800 cycles to finish, so the
+        // second read never cleared and the test failed for any switch setting
+        // but all-open. See `phosphor-emulator-s13g`.
+        if self.pot_scanning && (tick_15k || self.skctl & SKCTL_FAST_POT != 0) {
             self.pot_scan_count = self.pot_scan_count.saturating_add(1);
             for i in 0..8 {
                 if (self.pot_done & (1 << i)) != 0 {
