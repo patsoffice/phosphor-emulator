@@ -6,6 +6,7 @@
 //! |---|---|---|
 //! | `Asteroids Deluxe` operator manual TM-143, 1st printing | `arcade-museum.com/manuals-videogames/A/AsteroidsDeluxe.man.pdf` | 46 pages; see the figure list below |
 //! | `Asteroids Deluxe Cabaret` drawing package supplement | `arcade-museum.com/manuals-videogames/A/AstDlx-Cabaret-sp.pdf` | 8 sheets |
+//! | A second `Asteroids Deluxe` drawing supplement | `arcade-museum.com/manuals-videogames/A/asteroids_deluxe_1a.pdf` | located 2026-09-16, **unread** |
 //!
 //! **The manual's printed page numbers run four behind its PDF pages**, so
 //! Figure 8 is printed page 11 and PDF page 15. PDF pages are used throughout
@@ -29,6 +30,15 @@
 //! R5 toggle reads low. That sense does not transfer to L8, which is wired to the
 //! POKEY pot lines instead; see
 //! [`refresh_dip_pots`](AsteroidsDeluxeSystem::refresh_dip_pots).
+//!
+//! **The second supplement above is the place to look for L8.** Its contents are
+//! unverified: nobody has opened it, so no sheet numbering, page offsets or scan
+//! quality are recorded here, and its row should not be read as implying
+//! otherwise. What makes it worth opening is that the reading above came from the
+//! **Cabaret** package, and L8 appears on no sheet in that one. A second package
+//! for the same game is where a switch the first omits would be drawn, and L8 is
+//! currently the one bank on this board modeled from the manual's option tables
+//! rather than from a decode anyone has read.
 
 use phosphor_core::audio::SampleRing;
 use phosphor_core::core::bus::InterruptState;
