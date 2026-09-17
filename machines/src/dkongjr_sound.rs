@@ -875,7 +875,7 @@ mod tests {
         // 20 kΩ against walking's 100 kΩ — so it is the board's balance rather
         // than a judgement here.
         //
-        // Both corrections this model needed moved these, and the pattern each
+        // Each correction this model needed moved these, and the pattern each
         // left is the evidence that it was the right correction rather than a
         // number that happened to help.
         //
@@ -887,10 +887,21 @@ mod tests {
         // short enough for its width to be most of the sound; jump's and
         // climbing's notes are set by their RC decays, which the one-shot only
         // starts.
+        //
+        // Reading the output stage off sheet 5 then moved all three the other
+        // way: walking up 39 %, climbing 9 %, jump 2 %. That correction replaced
+        // one coupling pole at 34 Hz with two at 7.9 Hz and 3.4 Hz, so the low
+        // end the old pole had been removing now reaches the output. The
+        // ordering is the one-shot widths again, for the same reason: walking's
+        // 56 ms burst is too short for the new 20 ms and 47 ms time constants to
+        // settle within, so the step at its onset survives most of the sound,
+        // while jump's and climbing's 264 ms bursts settle under any of these
+        // corners and only their envelope tails move. Sweeping a single pole
+        // from 34 Hz down to 1.7 Hz doubles walking and moves jump by 5 %.
         let measured: Vec<(u8, &str, f64, f64)> = [
-            (0u8, "walking", 367.0),
-            (1, "jump", 1921.0),
-            (2, "climbing", 3281.0),
+            (0u8, "walking", 519.0),
+            (1, "jump", 1969.5),
+            (2, "climbing", 3595.8),
         ]
         .into_iter()
         .map(|(bit, what, want)| (bit, what, want, pulse_6h(bit)))
