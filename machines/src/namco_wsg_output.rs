@@ -98,7 +98,88 @@ pub struct BoardParams {
     /// because what it is there to do is remove a DC offset and not to shape
     /// anything in the band.
     pub coupling: (f64, f64),
+    /// The 54XX explosion network summed at the same op-amp, on the boards that
+    /// have one. `None` where the board has no 54XX at all.
+    pub explosion: Option<ExplosionNetwork>,
 }
+
+/// The 54XX's three channels and how they reach the summing amplifier.
+///
+/// Transcribed in
+/// [`namco-54xx-explosion.md`](../../docs/schematics/namco-54xx-explosion.md).
+/// One constant serves Galaga and Xevious because their networks were read
+/// separately and found identical, component for component. That is worth
+/// stating rather than assuming: Galaga and Dig Dug share this board and do not
+/// share a volume law one sheet away.
+#[derive(Clone, Copy, Debug)]
+pub struct ExplosionNetwork {
+    /// The binary-weighted ladder on each channel's four output pins, MSB
+    /// first. The same four values on every channel and both boards.
+    pub ladder: [f64; 4],
+    /// Per channel: the series resistor into the filter, the shunt to the
+    /// reference, the feedback resistor, the filter capacitor, and the output
+    /// leg into the summing node.
+    pub channels: [ExplosionChannel; 3],
+    /// What the op-amp's non-inverting inputs sit at, in volts. 3.3k over 2.2k
+    /// off +5 V is about 2.0 V.
+    pub reference: f64,
+}
+
+/// One explosion channel: a DAC, a multiple-feedback band-pass, and a leg into
+/// the shared summing node.
+#[derive(Clone, Copy, Debug)]
+pub struct ExplosionChannel {
+    pub series_ohms: f64,
+    pub shunt_ohms: f64,
+    pub feedback_ohms: f64,
+    pub farads: f64,
+    pub leg_ohms: f64,
+}
+
+impl ExplosionNetwork {
+    /// Galaga's R21-R42 and Xevious's R104-R135, which are the same network.
+    pub const NAMCO_54XX: Self = Self {
+        ladder: [4_700.0, 10_000.0, 22_000.0, 47_000.0],
+        channels: [
+            ExplosionChannel {
+                series_ohms: 100_000.0,
+                shunt_ohms: 22_000.0,
+                feedback_ohms: 220_000.0,
+                farads: 1e-9,
+                leg_ohms: 33_000.0,
+            },
+            ExplosionChannel {
+                series_ohms: 47_000.0,
+                shunt_ohms: 10_000.0,
+                feedback_ohms: 150_000.0,
+                farads: 10e-9,
+                leg_ohms: 33_000.0,
+            },
+            ExplosionChannel {
+                series_ohms: 150_000.0,
+                shunt_ohms: 22_000.0,
+                feedback_ohms: 470_000.0,
+                farads: 10e-9,
+                leg_ohms: 10_000.0,
+            },
+        ],
+        reference: 2.0,
+    };
+}
+
+/// The logic supply these boards run on.
+///
+/// The WSG side of this module works in fractions of that rail, because a DAC
+/// switched between the rails is naturally unitless. The op-amp band-pass is
+/// not: it clamps to real rails, offset below the positive one the way a real
+/// single-supply part is, so the explosion path is built in volts and divided
+/// back down where it joins the summing node.
+const SUPPLY_V: f64 = 5.0;
+
+/// The summing amplifier's feedback resistor, R20 on Galaga and R125 on
+/// Xevious. Every leg's weight into the mix is this over the leg's own
+/// resistance, so the WSG's 10k enters at 0.33 and a 33k explosion leg at 0.10.
+const SUMMING_FEEDBACK: f64 = 3_300.0;
 
 impl BoardParams {
     /// Pac-Man and Ms. Pac-Man. R96 22k in series with the 10k cabinet pot is
@@ -108,6 +189,7 @@ impl BoardParams {
         bias_g: 1.0 / 31_000.0,
         shunt_c: 10e-9,
         coupling: (100_000.0, 100e-9),
+        explosion: None,
     };
 
     /// Galaga. R19 10k into the 5P LM324's virtual ground is the bias arm and
@@ -118,6 +200,7 @@ impl BoardParams {
         bias_g: 1.0 / 10_000.0,
         shunt_c: 2.2e-9,
         coupling: (100_000.0, 80e-9),
+        explosion: Some(ExplosionNetwork::NAMCO_54XX),
     };
 
     /// Xevious, read 2026-09-17 and found to be Galaga's stage resistor for
@@ -128,15 +211,19 @@ impl BoardParams {
         bias_g: 1.0 / 10_000.0,
         shunt_c: 2.2e-9,
         coupling: (100_000.0, 80e-9),
+        explosion: Some(ExplosionNetwork::NAMCO_54XX),
     };
 
     /// Dig Dug. R105 10k to +5 V and R108 10k to ground put a fixed 200 uS on
     /// the node, and C14 10 nF shunts it. C13 0.22 uF into R107 10k is the
     /// coupling, a 72 Hz corner, the one in the family the drawing does give.
+    /// Dig Dug has the 51XX and 53XX where Galaga and Xevious have the 54XX, so
+    /// there is no explosion network on it to model.
     pub const DIGDUG: Self = Self {
         bias_g: 200e-6,
         shunt_c: 10e-9,
         coupling: (10_000.0, 0.22e-6),
+        explosion: None,
     };
 }
 
@@ -300,6 +387,21 @@ struct VoiceInputs {
 struct Inputs {
     voices: [VoiceInputs; 3],
     sound: NodeId,
+    /// The 54XX's three output ports, on the boards that have one.
+    explosion: Option<[DataInputId; 3]>,
+}
+
+/// The explosion DAC's weights, LSB first, in volts: the full code drives the
+/// filter's input to the supply rail. The same ladder on all three channels.
+fn explosion_weights(net: &ExplosionNetwork) -> [f64; 4] {
+    let g = conductances(net.ladder);
+    let total: f64 = g.iter().sum();
+    [
+        SUPPLY_V * g[0] / total,
+        SUPPLY_V * g[1] / total,
+        SUPPLY_V * g[2] / total,
+        SUPPLY_V * g[3] / total,
+    ]
 }
 
 fn build_circuit(params: BoardParams, board_clock_hz: u64) -> (DiscreteCircuit, Inputs) {
@@ -356,9 +458,53 @@ fn build_circuit(params: BoardParams, board_clock_hz: u64) -> (DiscreteCircuit, 
         }),
     );
 
+    // The summing amplifier, on the boards that have one. Its inverting node
+    // takes the WSG through the same resistor that is the WSG divider's bias
+    // arm, and the 54XX's three filter legs alongside it, so each source enters
+    // at the feedback over its own leg: 0.33 for the WSG's 10k, 0.10 for a 33k
+    // explosion leg. See `docs/schematics/namco-54xx-explosion.md`, and note
+    // that this junction belongs to neither row alone.
+    let (mixed, explosion) = match params.explosion {
+        None => (filtered, None),
+        Some(net) => {
+            let wsg_leg = b.gain("WSG_LEG", filtered, SUMMING_FEEDBACK * params.bias_g);
+            let mut legs = vec![wsg_leg];
+            let mut inputs = Vec::with_capacity(3);
+            for (i, ch) in net.channels.iter().enumerate() {
+                // The MCU's four output pins, as one code this end.
+                let code = b.data_input(&format!("EXPL{i}"), 1.0);
+                let dac = b.dac_weighted(&format!("EXPL{i}_DAC"), code, &explosion_weights(&net));
+                // A multiple-feedback band-pass: the series resistor carries the
+                // signal and the shunt sits to the reference, which is where
+                // this single-supply op-amp's inputs are held.
+                let bp = b.op_amp_band_pass(
+                    &format!("EXPL{i}_BP"),
+                    dac,
+                    &[ch.series_ohms, ch.shunt_ohms],
+                    ch.feedback_ohms,
+                    ch.farads,
+                    ch.farads,
+                    net.reference,
+                    0.0,
+                    SUPPLY_V,
+                );
+                // Back to fractions of the rail, which is what the WSG side of
+                // this circuit is in.
+                legs.push(b.gain(
+                    &format!("EXPL{i}_LEG"),
+                    bp,
+                    SUMMING_FEEDBACK / ch.leg_ohms / SUPPLY_V,
+                ));
+                inputs.push(code);
+            }
+            let summed = b.add("SUM", &legs);
+            (summed, Some([inputs[0], inputs[1], inputs[2]]))
+        }
+    };
+
     // The coupling, and what removes the sample ladder's standing offset.
     let (r, c) = params.coupling;
-    let coupled = b.rc_high_pass("COUPLING", filtered, r, c);
+    let coupled = b.rc_high_pass("COUPLING", mixed, r, c);
 
     b.output(coupled, OutputGain::linear(output_gain(params)));
 
@@ -368,6 +514,7 @@ fn build_circuit(params: BoardParams, board_clock_hz: u64) -> (DiscreteCircuit, 
         Inputs {
             voices: [voices.remove(0), voices.remove(0), voices.remove(0)],
             sound,
+            explosion,
         },
     )
 }
@@ -389,7 +536,14 @@ fn output_gain(params: BoardParams) -> f64 {
 /// sample ladder.
 fn full_swing(params: BoardParams) -> f64 {
     let zero = sample_level(8);
-    3.0 * zero.max(1.0 - zero) * volume_gain(15, params)
+    let wsg = 3.0 * zero.max(1.0 - zero) * volume_gain(15, params);
+    match params.explosion {
+        // The summing amplifier scales the WSG by its own leg, so full scale
+        // has to be measured after it or the boards with one come out quiet by
+        // exactly that factor.
+        Some(_) => wsg * SUMMING_FEEDBACK * params.bias_g,
+        None => wsg,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -436,6 +590,21 @@ impl WsgOutputStage {
                 .set_data(self.ids.voices[v].volume, volume as f64);
         }
         self.circuit.tick(1);
+    }
+
+    /// Latch the 54XX's three output ports, each a four-bit code.
+    ///
+    /// A no-op on a board with no 54XX, which is Pac-Man, Ms. Pac-Man and Dig
+    /// Dug: only Galaga and Xevious have an explosion network to drive.
+    /// Nothing calls this with a non-zero code yet, because the MB8844 that
+    /// produces those codes is not modeled; see `phosphor-emulator-uxi9`.
+    pub fn set_explosion(&mut self, ports: [u8; 3]) {
+        let Some(ids) = self.ids.explosion else {
+            return;
+        };
+        for (id, code) in ids.iter().zip(ports) {
+            self.circuit.set_data(*id, (code & 0x0F) as f64);
+        }
     }
 
     /// Drain produced mono `i16` samples. Returns the number written.
@@ -615,6 +784,83 @@ mod tests {
             assert!(vs_linear(1, p) > vs_linear(8, p), "{:?}", p);
             assert!(vs_linear(8, p) > 0.0, "{:?}", p);
         }
+    }
+
+    /// Only Galaga and Xevious have a 54XX. Pac-Man's family and Dig Dug have
+    /// no explosion network to sum, and driving one at them must do nothing
+    /// rather than quietly build a circuit they do not have.
+    #[test]
+    fn only_the_boards_with_a_54xx_carry_an_explosion_network() {
+        assert!(BoardParams::GALAGA.explosion.is_some());
+        assert!(BoardParams::XEVIOUS.explosion.is_some());
+        assert!(BoardParams::PACMAN.explosion.is_none());
+        assert!(BoardParams::DIGDUG.explosion.is_none());
+
+        // Driving the ports on a board without one is a no-op, not a panic.
+        let mut out = WsgOutputStage::new(BoardParams::PACMAN, TIMING.cpu_clock_hz);
+        out.set_explosion([15, 15, 15]);
+        let mut buf = [0i16; 512];
+        for _ in 0..20_000 {
+            out.tick([(0, 0); 3]);
+            out.fill_audio(&mut buf);
+        }
+        assert!(
+            buf.iter().all(|s| *s == 0),
+            "a board with no 54XX must stay silent when one is driven at it"
+        );
+    }
+
+    /// The two networks were read separately and found identical, so they are
+    /// one constant. If a later reading ever splits them, this is the assert
+    /// that should be deleted rather than edited around.
+    #[test]
+    fn galaga_and_xevious_share_one_explosion_network() {
+        let g = BoardParams::GALAGA.explosion.unwrap();
+        let x = BoardParams::XEVIOUS.explosion.unwrap();
+        assert_eq!(g.ladder, x.ladder);
+        assert_eq!(g.reference, x.reference);
+        for (a, b) in g.channels.iter().zip(&x.channels) {
+            assert_eq!(a.series_ohms, b.series_ohms);
+            assert_eq!(a.shunt_ohms, b.shunt_ohms);
+            assert_eq!(a.feedback_ohms, b.feedback_ohms);
+            assert_eq!(a.farads, b.farads);
+            assert_eq!(a.leg_ohms, b.leg_ohms);
+        }
+    }
+
+    /// What each source is worth at the summing node, which is the number that
+    /// decides how loud an explosion is against the music. Channel 3's leg is
+    /// 10k where the other two are 33k, so it enters three times louder.
+    #[test]
+    fn the_summing_legs_carry_the_weights_the_drawing_gives() {
+        let net = BoardParams::GALAGA.explosion.unwrap();
+        let weight = |ohms: f64| SUMMING_FEEDBACK / ohms;
+        // The WSG's own leg is the same resistor as its divider's bias arm.
+        assert!((weight(1.0 / BoardParams::GALAGA.bias_g) - 0.33).abs() < 0.005);
+        assert!((weight(net.channels[0].leg_ohms) - 0.10) < 0.005);
+        assert!((weight(net.channels[1].leg_ohms) - 0.10) < 0.005);
+        assert!(
+            (weight(net.channels[2].leg_ohms) - 0.33).abs() < 0.005,
+            "channel 3's 10k leg should match the WSG's own"
+        );
+    }
+
+    /// The three band-passes are an order of magnitude apart, which is what
+    /// makes them three voices rather than one with ripple. Centers from
+    /// `1/(2*pi*sqrt(r_total*rf*c1*c2))` on the transcribed values.
+    #[test]
+    fn the_three_filters_sit_an_octave_decade_apart() {
+        let net = BoardParams::GALAGA.explosion.unwrap();
+        let center = |c: &ExplosionChannel| {
+            let r_total = 1.0 / (1.0 / c.series_ohms + 1.0 / c.shunt_ohms);
+            1.0 / (std::f64::consts::TAU * (r_total * c.feedback_ohms).sqrt() * c.farads)
+        };
+        let f: Vec<f64> = net.channels.iter().map(center).collect();
+        assert!(
+            f[0] > 5.0 * f[1],
+            "the 0.001 uF section should sit far above the others: {f:?}"
+        );
+        assert!(f[1] > f[2], "and channel 2 above channel 3: {f:?}");
     }
 
     /// Dig Dug's node passes less than half the sample swing at full volume,
