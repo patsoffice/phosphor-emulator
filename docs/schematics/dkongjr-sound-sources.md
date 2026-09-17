@@ -14,6 +14,7 @@ correct. This is the reading that says what correct would be.
 | Drawing | `Donkey Kong Junior CPU P.C. Board`, sheet 5 of 5, dated 5-31-82 |
 | Read from | `arcade-museum.com/manuals-videogames/D/DKJr.pdf`, PDF pp30-31 |
 | Transcribed | 2026-08-30, from a 400 dpi render of a 300 dpi 1-bit scan |
+| Extended | 2026-09-16, the output stage, from a 900 dpi render of p31 |
 
 The sheet is cut across two PDF pages, left half then right half, so its sheet
 number and its PDF page never agree. The voices are on the right half (p31); the
@@ -118,8 +119,48 @@ flowchart TB
   Q2 --> MIX
   NAND9 --> MIX
   DAC["DAC-08 path<br/>Q7 decay R20 10k / C32 10u,<br/>Sallen-Key 1916 Hz Q 0.74"] --> MIX
-  MIX --> AMP["MB3712"]
+  MIX --> SHUNT["C155 0.01u to GND"]
+  SHUNT --> CPL["C161 1u"]
+  CPL --> Q1["Q1 2SC1815 follower<br/>R29 100k / R38 43k bias<br/>R39 1k collector, R1 150 emitter"]
+  Q1 --> OUT["C13 4.7u -> VR1 10k"]
+  OUT --> AMP["MB3712"]
 ```
+
+## The output stage
+
+Read 2026-09-16 from a 900 dpi render of sheet 5, and added after the fact: the
+original pass through this drawing stopped at the mixer's leg resistors, which is
+one node short of everything below.
+
+**It is Mario Bros.'s output stage, part for part.** Two sibling Nintendo designs
+of the same year sharing a buffer, which is what makes the correspondence worth
+stating rather than a coincidence worth noting:
+
+| role | Donkey Kong Jr. | Mario Bros. |
+|---|---|---|
+| summing-node shunt | `C155` 0.01 uF | `C31` 0.022 uF |
+| coupling into the base | `C161` 1 uF | `C32` 1 uF |
+| bias divider | `R29` 100 k / `R38` 43 k | `R43` 100 k / `R42` 43 k |
+| transistor | `Q1` 2SC1815 | `Q10` 2SC1815 |
+| collector | `R39` 1 k | `R63` 1 k |
+| emitter | `R1` 150 | `R62` 150 |
+| coupling out of the emitter | `C13` 4.7 uF | `C47` 4.7 uF |
+| volume control | `VR1` 10 k | `VR1` 10 k |
+
+Same topology and the same values but for the shunt. `R25` 47 k is the DAC's
+mixer leg rather than a series element, so the five legs sum at the node `C155`
+shunts, and `C161` takes that node to the base.
+
+**There is no 1 kOhm amplifier input**, which `machines/src/dkongjr_sound.rs`
+modeled for a long time. `C13` comes off the emitter and feeds `VR1`, the volume
+control inside the amplifier's dashed optional-parts box.
+
+| Net | Pins |
+|---|---|
+| mixer node | {R5, R3, R6, R4, R25} -> {C155 0.01u -> GND, C161 1u} |
+| `Q1.base` | C161 -> {R29 100k -> +5, R38 43k -> GND, Q1.B} |
+| `Q1.collector` | R39 1k -> +5 |
+| `Q1.emitter` | R1 150 -> GND; -> C13 4.7u -> VR1 10k -> GND |
 
 ## Nets
 
