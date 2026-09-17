@@ -198,19 +198,34 @@ const MIX_R_PARALLEL: f64 = 1.0 / (1.0 / R20 + 1.0 / R19 + 1.0 / R40 + 1.0 / R41
 /// board's 45 ms thump came out as a 10 ms tick: right at the onset, 11 dB down
 /// by the middle of the event and gone by 100 ms where the board rings to 400.
 ///
-/// The transistor loads the first of them, and by about as much again as the
-/// bias network does, so leaving it out is not a rounding error. An emitter
+/// The transistor loads the first of them, by about half again what the bias
+/// network does, so leaving it out is not a rounding error. An emitter
 /// follower's base sees `beta·(R62 + re)`: the divider puts the base at
 /// `5·R42/(R42+R43)` = 1.50 V, so about 5.4 mA flows in the emitter, `re` is
-/// 26 mV over that, and with a 2SC1815's typical beta the base looks like
-/// roughly 31 kΩ. In parallel with the bias network that halves the coupling to
-/// about 15 ms.
+/// 26 mV over that, and at the beta below the base looks like roughly 62 kΩ. In
+/// parallel with the bias network's 30 kΩ that brings the coupling to about
+/// 20 ms, a 7.9 Hz corner.
 ///
-/// BETA IS THE ONE ESTIMATED QUANTITY IN THIS FILE. Everything else is a part on
-/// the drawing; this is a datasheet typical for a transistor whose actual gain
-/// the board never specifies, and the model is only weakly sensitive to it -
-/// doubling beta moves this coupling by a third.
-const FOLLOWER_BETA: f64 = 200.0;
+/// BETA IS THE ONE QUANTITY HERE THAT IS NOT A PART ON THE DRAWING, because the
+/// board specifies a 2SC1815 without saying which gain grade. It is taken from
+/// the Toshiba SPICE model's `Bf=400`, which is also the value the reference
+/// this board is compared against simulates with: MAME models Q10 as a real
+/// Ebers-Moll device, `QBJT_EB(Q10, "2SC1815")` in `nl_mario.cpp`, against that
+/// same model card. Comparing two models of one circuit while giving the
+/// transistor two different gains measures the disagreement rather than the
+/// board.
+///
+/// **It is not a free parameter, so do not tune it.** It carries more leverage
+/// over this board's spectrum than anything else in the file, because it sets
+/// how hard the follower loads C32 and that coupling's corner sits inside the
+/// band the voices' envelopes occupy. That makes it exactly the constant a
+/// spectral comparison would tempt someone to fit, and the value below is
+/// sourced rather than fitted: it moves the three centroids from 48.0, 63.7 and
+/// 281.6 to 37.6, 49.3 and 209.8 against references of 26.6, 31.6 and 156.6, so
+/// it closes about half the gap and plainly is not the whole answer. A value
+/// chosen to close the gap would have to be several times a 2SC1815's range.
+/// See `phosphor-emulator-qf2x`.
+const FOLLOWER_BETA: f64 = 400.0;
 const R62: f64 = 150.0;
 /// Emitter current from the bias divider, and the resulting intrinsic emitter
 /// resistance.
