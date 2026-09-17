@@ -12,6 +12,7 @@ and where the music joins them. Read for
 | Drawing | `TMA1-CPU SCHEMATIC`, (c) 1983 Nintendo of America |
 | Read from | `arcade-museum.com/manuals-videogames/M/marioborspak.pdf`, PDF p39 |
 | Transcribed | 2026-08-30, from a 500 dpi render of that page |
+| Re-checked | 2026-09-16, every value below against a 600 dpi render; all confirmed |
 
 Prefer this scan. The same drawing appears in
 `arcade-museum.com/manuals-videogames/M/MarioBros.pdf` at roughly 430 dpi and cut
@@ -146,8 +147,18 @@ flowchart TB
   do nothing; on a 45 ms pulse, which is what this board actually sends them,
   their time constants decide whether it arrives as a thump or as a pair of
   spikes.
-- **R18 reads 27 k.** An independent netlist of this board uses 30 k and notes
-  "30K in schematics". At 500 dpi both R17 and R18 read 27 k without ambiguity.
+- **R18 reads 27 k**, re-checked at 600 dpi on 2026-09-16 and unambiguous: both
+  R17 and R18 are 27 k. An independent netlist of this board uses 30 k and notes
+  "30K in schematics", and **the reference uses 30 k too**: `RES(R18, RES_K(30))`
+  in MAME's `nl_mario.cpp`, whose own comment hedges it as "20 according to parts
+  list". So the 30 k is a third-hand figure that nothing on the drawing supports.
+
+  It is not a detail. R18 with C15 4.7 uF sets Luigi's one-shot, and these voices'
+  centroids are envelope-dominated, so an 11 % longer pulse (31.7 ms against
+  28.6) moves the number this board is compared on. The reference is therefore
+  wrong in the direction that would make our walk2 look too high, and part of
+  that residual is the comparison rather than the model. See
+  `phosphor-emulator-qf2x`.
 
 ## What it does NOT establish
 
