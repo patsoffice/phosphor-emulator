@@ -108,9 +108,27 @@ phosphor-emulator-6ykk. Falling went 1417.2 to 952.9 against the board's 941.8,
 and walk-hi 302.0 to 232.3 against 209.0, both inside tolerance on the
 re-derivation that established those reference figures.
 
-Remaining residuals: climbing's onset steps where the board's does not, and the
-summing node's 0.01 uF capacitor is from an independent netlist rather than the
-drawing and wants confirming."""
+THE OUTPUT STAGE HAS SINCE BEEN READ off sheet 5, and it is an emitter follower
+identical to Mario Bros.'s: C155 0.01 uF shunting the summing node, C161 1 uF
+into Q1's base with R29 100k / R38 43k bias, R1 150 emitter and R39 1k
+collector, then C13 4.7 uF off the emitter into the 10k volume control. This
+file previously modeled all of that as one coupling into "the MB3712's 1 kOhm
+input", which is not on the drawing. That also confirms the summing node's
+0.01 uF, which used to come from an independent netlist and now comes from the
+sheet.
+
+THE REFERENCE DOES NOT MODEL THIS STAGE AND CANNOT ARBITRATE IT. MAME's
+dkongjr_discrete uses DISCRETE_CRFILTER(1000, C13), the same 1 kOhm that is not
+on the drawing, and its mixer's coupling capacitor runs against a hardcoded
+100 kOhm that its own source calls "an average final stage impedance" rather
+than anything from this board. So the two models' low-frequency responses differ
+by construction, and the centroid figures below diverge for that reason rather
+than because either is broken: falling reads 927.6 against the reference's
+941.8, and walk-hi 148.6 against 209.0. Above a few hundred hertz the two still
+agree. Treat this board's low end as unarbitrated until a capture from hardware
+exists.
+
+Remaining residual: climbing's onset steps where the board's does not."""
 
 [[target]]
 id = "galaxian-discrete"
@@ -144,8 +162,15 @@ status = "implemented-needs-validation"
 scenarios = ["mariobros/walk1", "mariobros/walk2", "mariobros/skid"]
 notes = """
 Two footsteps, the skid, and the music through two LM3900 sections. The trigger
-discipline in the scenarios is assumed rather than traced: see
-phosphor-emulator-mario-trigger-discipline-vv4z.
+discipline was traced from recorded play and the scenarios' timeline is
+confirmed correct: the skid is held exactly three frames in all 33 assertions,
+and the footsteps are write strobes with no hold to get wrong. See
+tools/script/examples/mario_sound_trace.rhai. What that trace also found is a
+coverage gap rather than a defect: the game strobes a footstep every one or two
+frames while walking, against a one-shot two frames wide, so the real walking
+voice is one continuously retriggered tone and no scenario drives that. Luigi's
+line is never written in the recording, which is single-player, so walk2's
+discipline stays unmeasured.
 
 THE CENTROID RESIDUAL IS HALVED AND STILL OPEN, and it is no longer the same
 question as Donkey Kong Jr.'s. Both boards shared one cause, the output resampler

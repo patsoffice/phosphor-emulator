@@ -185,18 +185,55 @@ const C37: f64 = 0.12e-6;
 /// values.
 const LS123_CHARGE: Ls123Charge = Ls123Charge::DiodeFed;
 
-/// The mixer's shunt capacitor at the summing node. See the comment where it is
-/// used: this is the one value here that does not come from the drawing.
+/// The mixer's shunt capacitor at the summing node: `C155` on sheet 5, read off
+/// the drawing at 900 dpi. It reached this file from an independent netlist
+/// first and the drawing has since confirmed it.
 const C_MIX: f64 = 0.01e-6;
 /// The five mixer legs in parallel, which is the resistance [`C_MIX`] works
 /// against: 9156 Ω, so the corner is 1738 Hz. Written as the reciprocal sum
 /// rather than as that number, so changing a leg moves the filter with it.
 const MIX_R_PARALLEL: f64 = 1.0 / (1.0 / R5 + 1.0 / R3 + 1.0 / R6 + 1.0 / R4 + 1.0 / R25);
 
-/// The amplifier's input coupling: C13 against the MB3712's 1 kΩ input, 34 Hz.
-/// This is what removes the DC every voice rests at, since each one idles at a
-/// gate's output level rather than at zero.
-const AMP_R: f64 = 1_000.0;
+// ---------------------------------------------------------------------------
+// Output stage: an emitter follower, read off sheet 5
+// ---------------------------------------------------------------------------
+//
+// This board's output is the SAME STAGE AS MARIO BROS.'s, part for part, which
+// is what finally made sense of it: two sibling Nintendo designs of the same
+// year sharing a buffer. It was modeled for a long time as a single coupling
+// capacitor into "the MB3712's 1 kΩ input", which is not on the drawing. `C13`
+// comes off Q1's EMITTER and feeds the 10 kΩ volume control in the amplifier's
+// optional-parts box, and between the mixer and Q1 there is a second coupling
+// nobody had read.
+//
+//   mixer node ── C155 0.01u to ground
+//              └─ C161 1u ── Q1 base, biased R29 100k to +5 and R38 43k to gnd
+//                            Q1 2SC1815, R39 1k collector, R1 150 emitter
+//                            emitter ── C13 4.7u ── VR1 10k
+//
+// Compare `mario_sound.rs`: C31/C32/R43/R42/Q10/R63/R62/C47/VR1 against
+// C155/C161/R29/R38/Q1/R39/R1/C13/VR1. Same topology and the same values but
+// for the shunt (0.022 uF there, 0.01 uF here).
+/// Q1's base bias divider, R29 100 kΩ to +5 and R38 43 kΩ to ground.
+const R29: f64 = 100_000.0;
+const R38: f64 = 43_000.0;
+/// Q1's emitter and collector resistors.
+const R1: f64 = 150.0;
+/// The volume control C13 drives, in the amplifier's optional-parts box.
+const VR1: f64 = 10_000.0;
+/// Coupling into the follower's base.
+const C161: f64 = 1e-6;
+/// Beta for Q1, the one quantity here that is not a part on the drawing. Taken
+/// from the same source as [`crate::mario_sound`]'s, the Toshiba 2SC1815 SPICE
+/// model's `Bf=400`, which is also what the reference simulates with.
+const FOLLOWER_BETA: f64 = 400.0;
+const FOLLOWER_IE: f64 = (5.0 * R38 / (R38 + R29) - 0.7) / R1;
+const FOLLOWER_RE: f64 = 0.026 / FOLLOWER_IE;
+const FOLLOWER_ZIN: f64 = FOLLOWER_BETA * (R1 + FOLLOWER_RE);
+const FOLLOWER_BIAS_R: f64 = R38 * R29 / (R38 + R29);
+/// What C161 works against: the bias divider in parallel with the base's own
+/// impedance, about 20 kΩ, so roughly an 8 Hz corner.
+const FOLLOWER_BASE_R: f64 = 1.0 / (1.0 / FOLLOWER_BIAS_R + 1.0 / FOLLOWER_ZIN);
 
 /// The DAC's signal-decay network, Q7 with R20 across C32: a sample fades with
 /// τ = 100 ms once the sound CPU drops its decay line rather than ending on a
@@ -541,10 +578,16 @@ fn build_circuit() -> (DiscreteCircuit, DkongJrInputs) {
     // filter is that its corner falls out of resistors already transcribed here,
     // and that it is one capacitor explaining five voices at once.
     let mix_lp = b.rc_low_pass("MIX_LP", mix, MIX_R_PARALLEL, C_MIX);
-    // The amplifier's input coupling, and the only thing removing the DC that
-    // every voice rests at. Each idle voice sits at a gate's high level, not at
-    // zero, so without this the mix carries a large pedestal.
-    let out = b.rc_high_pass("AMP_IN", mix_lp, AMP_R, C13);
+    // TWO couplings around an emitter follower, not one into an amplifier. See
+    // the output-stage comment above the constants: C161 into Q1's base, then
+    // C13 off its emitter into the volume control. Between them they remove the
+    // DC that every voice rests at, since each idles at a gate's high level.
+    //
+    // Q1 itself is unity and its emitter network sits far above anything this
+    // board puts through it, so the follower is present here as the load C161
+    // sees rather than as a stage of its own, exactly as Mario Bros. models Q10.
+    let base = b.rc_high_pass("FOLLOWER_BASE", mix_lp, FOLLOWER_BASE_R, C161);
+    let out = b.rc_high_pass("AMP_IN", base, VR1, C13);
     b.output(out, OutputGain::linear(OUTPUT_GAIN));
 
     let circuit = b.build();
