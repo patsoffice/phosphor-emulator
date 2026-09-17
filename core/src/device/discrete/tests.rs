@@ -1491,3 +1491,61 @@ fn the_default_sim_rate_is_commensurate_in_the_other_direction() {
         assert_eq!((c.output_sample_rate() * DEC) % c.sim_rate(), 0);
     }
 }
+
+/// What `resistor_mixer` hands the next stage, pinned because two boards' output
+/// filters depend on the answer and got it wrong in opposite directions.
+///
+/// The mixer returns the summing node's **open-circuit** voltage. It carries no
+/// source impedance of its own, so a following RC section is responsible for
+/// including the node's Thevenin resistance in its own time constant, and a load
+/// that actually draws current has to be declared through `load_ohms`.
+///
+/// See `phosphor-emulator-qf2x`: both Nintendo boards cascade this into an
+/// `rc_high_pass` that passes only the LOAD resistance, which puts their coupling
+/// corners in the wrong place. Correcting one board by that reasoning alone moves
+/// the other by a factor of ten, so the contract is worth stating before either
+/// is touched.
+#[test]
+fn the_resistor_mixer_returns_an_open_circuit_voltage_and_no_source_impedance() {
+    const RATE: u64 = 48_000;
+    // Two legs, deliberately unequal so a plain average would not pass.
+    let (v_a, r_a) = (4.0, 22_000.0);
+    let (v_b, r_b) = (1.0, 100_000.0);
+
+    let mut b = builder_1to1(RATE);
+    let a = b.constant("A", v_a);
+    let c_in = b.constant("B", v_b);
+    let unloaded = b.resistor_mixer("UNLOADED", &[(a, r_a), (c_in, r_b)], None);
+    // A load heavy enough that ignoring it would be obvious.
+    let load = 1_000.0;
+    let loaded = b.resistor_mixer("LOADED", &[(a, r_a), (c_in, r_b)], Some(load));
+    let mut c = b.build();
+    c.tick(1);
+
+    let g_a = 1.0 / r_a;
+    let g_b = 1.0 / r_b;
+    let want_open = (v_a * g_a + v_b * g_b) / (g_a + g_b);
+    let want_loaded = (v_a * g_a + v_b * g_b) / (g_a + g_b + 1.0 / load);
+
+    assert!(
+        (c.value(unloaded) - want_open).abs() < 1e-9,
+        "unloaded mixer gave {}, expected the open-circuit {want_open}",
+        c.value(unloaded)
+    );
+    assert!(
+        (c.value(loaded) - want_loaded).abs() < 1e-9,
+        "loaded mixer gave {}, expected {want_loaded}",
+        c.value(loaded)
+    );
+
+    // The point of the test: a declared load pulls the node down hard, which is
+    // only possible because the unloaded value was a source with impedance
+    // behind it rather than a stiff voltage. Nothing downstream is told that
+    // impedance, so nothing downstream can account for it on its own.
+    assert!(
+        c.value(loaded) < c.value(unloaded) * 0.2,
+        "a {load} ohm load against a ~{:.0} ohm source barely moved the node, \
+         so this test is not exercising what it claims",
+        1.0 / (g_a + g_b)
+    );
+}
