@@ -374,16 +374,24 @@ enum Command {
         /// place the same effect at different times.
         #[arg(long)]
         range_b: Option<String>,
-        /// Write `a - b` to this path instead of comparing, isolating what `a`
-        /// has that `b` does not.
+        /// Write out what this command produced: with one input the capture as
+        /// trimmed by `--range`, with two inputs `a - b`.
         ///
-        /// For two runs of one machine on one input schedule differing only in
-        /// whether a control was held: they are identical until it matters, so
-        /// the difference is that control's effect with everything else
-        /// cancelled. Needs a shared rate and sample alignment, which holds
-        /// within an emulator's own pair.
+        /// One input is the trimming case. MAME's `-wavwrite` starts at reset,
+        /// so a reference runs 23 s with the effect at 17-21 s, while a
+        /// `sndcmp capture` holds only the analysis window. The two describe
+        /// the same event at different origins, so `--range` plus this writes
+        /// them at a common one and they can be played back to back without
+        /// trimming either by hand.
+        ///
+        /// Two inputs isolate what `a` has that `b` does not, and report the
+        /// write instead of comparing: for two runs of one machine on one input
+        /// schedule differing only in whether a control was held, they are
+        /// identical until it matters, so the difference is that control's
+        /// effect and nothing else. Needs a shared rate and sample alignment,
+        /// which holds within an emulator's own pair.
         #[arg(long)]
-        subtract_to: Option<PathBuf>,
+        write_to: Option<PathBuf>,
     },
     /// Print the chunk tree of a save-state file: which component owns each
     /// chunk, how long it is, and where it starts.
@@ -662,7 +670,7 @@ fn run_command(cmd: Command) -> Result<String, String> {
             png_height,
             range,
             range_b,
-            subtract_to,
+            write_to,
         } => run_audiodiff(
             AudiodiffInputs {
                 a: &a,
@@ -680,7 +688,7 @@ fn run_command(cmd: Command) -> Result<String, String> {
             AudiodiffOutputs {
                 png: png.as_deref(),
                 png_height,
-                subtract_to: subtract_to.as_deref(),
+                write_to: write_to.as_deref(),
             },
         ),
         Command::DumpSave {
@@ -1126,8 +1134,9 @@ struct AudiodiffOutputs<'a> {
     /// stem so one flag produces both.
     png: Option<&'a Path>,
     png_height: u32,
-    /// Write `a - b` here instead of comparing them.
-    subtract_to: Option<&'a Path>,
+    /// Write the result here: the ranged capture for one input, `a - b` for
+    /// two.
+    write_to: Option<&'a Path>,
 }
 
 /// Compare two WAV captures, or describe one.
@@ -1154,7 +1163,7 @@ fn run_audiodiff(
     let AudiodiffOutputs {
         png,
         png_height,
-        subtract_to,
+        write_to,
     } = outputs;
 
     // `--range` applies to both inputs; `--range-b` overrides it for the second,
@@ -1196,6 +1205,13 @@ fn run_audiodiff(
             out.push_str(&audiodiff::spectrogram(&ca, &p, png_height)?);
             out.push('\n');
         }
+        // One input has no verdict to displace, so the description of the very
+        // window being written stands alongside the write: it is what says the
+        // range caught the effect and not the silence beside it.
+        if let Some(p) = write_to {
+            audiodiff::write_wav(p, &ca)?;
+            out.push_str(&wrote_line(&label_a, p, &ca));
+        }
         return Ok(out);
     };
 
@@ -1203,19 +1219,14 @@ fn run_audiodiff(
     let label_b = file_label(b);
 
     // Subtraction is a different job from comparison: it produces a signal
-    // rather than a verdict, so it returns instead of falling through.
-    if let Some(out) = subtract_to {
+    // rather than a verdict, so it returns instead of falling through. The
+    // verdict would also be worse than useless here, because a subtraction is
+    // fed two captures chosen to differ: it would exit non-zero on every run
+    // that wrote exactly the file asked for.
+    if let Some(out) = write_to {
         let diff = audiodiff::subtract(&ca, &cb)?;
         audiodiff::write_wav(out, &diff)?;
-        return Ok(format!(
-            "{} - {} -> {} ({} samples at {} Hz, {:.3} s)\n",
-            label_a,
-            label_b,
-            out.display(),
-            diff.samples.len(),
-            diff.sample_rate as u64,
-            diff.samples.len() as f64 / diff.sample_rate
-        ));
+        return Ok(wrote_line(&format!("{label_a} - {label_b}"), out, &diff));
     }
     let (mut report, verdict) = audiodiff::compare(&ca, &cb, &label_a, &label_b, tol);
 
@@ -1232,6 +1243,22 @@ fn run_audiodiff(
         print!("{report}");
         Err(verdict.summary())
     }
+}
+
+/// One line for a WAV `--write-to` just produced: what it is, where it went,
+/// and how long it came out.
+///
+/// The duration is the part worth printing. It is the only immediate check that
+/// a `--range` landed where it was meant to, and a range past the end of a
+/// capture silently writes a shorter file rather than failing.
+fn wrote_line(what: &str, out: &Path, capture: &audiodiff::Capture) -> String {
+    format!(
+        "{what} -> {} ({} samples at {} Hz, {:.3} s)\n",
+        out.display(),
+        capture.samples.len(),
+        capture.sample_rate as u64,
+        capture.samples.len() as f64 / capture.sample_rate
+    )
 }
 
 /// Short display name for a capture — the file stem, which is what makes a
@@ -1723,6 +1750,167 @@ mod tests {
             listed.contains("main") && listed.contains("sound"),
             "{listed}"
         );
+    }
+
+    /// A capture whose sample value states its own index, so a slice can be
+    /// checked for having come from the right place in the timeline rather than
+    /// merely being the right length.
+    fn ramp(seconds: f64, rate: f64) -> audiodiff::Capture {
+        let n = (seconds * rate) as usize;
+        audiodiff::Capture {
+            samples: (0..n).map(|i| i as f64 / n as f64 * 0.5).collect(),
+            sample_rate: rate,
+            channels: 1,
+            bits: 16,
+        }
+    }
+
+    fn temp_wav(name: &str, capture: &audiodiff::Capture) -> PathBuf {
+        let p = std::env::temp_dir().join(format!("phosphor-writeto-{name}.wav"));
+        audiodiff::write_wav(&p, capture).unwrap();
+        p
+    }
+
+    fn audiodiff_outputs(write_to: Option<&Path>) -> AudiodiffOutputs<'_> {
+        AudiodiffOutputs {
+            png: None,
+            png_height: 512,
+            write_to,
+        }
+    }
+
+    /// One input plus `--write-to` writes the window `--range` selected, which
+    /// is the whole point of the flag: a reference that starts at reset and a
+    /// capture that starts at the effect become two files at one origin.
+    #[test]
+    fn write_to_one_input_writes_the_ranged_capture() {
+        let rate = 8000.0;
+        let src = ramp(4.0, rate);
+        let input = temp_wav("ranged-in", &src);
+        let output = std::env::temp_dir().join("phosphor-writeto-ranged-out.wav");
+
+        let report = run_audiodiff(
+            AudiodiffInputs {
+                a: &input,
+                b: None,
+                range: Some("1:2"),
+                range_b: None,
+            },
+            audiodiff::ChannelPolicy::Mono,
+            audiodiff::Tolerance::default(),
+            audiodiff_outputs(Some(&output)),
+        )
+        .unwrap();
+
+        let written = audiodiff::read_wav(&output, audiodiff::ChannelPolicy::Mono).unwrap();
+        assert_eq!(written.samples.len(), 8000, "one second at 8 kHz");
+        assert_eq!(written.sample_rate, rate);
+        // The samples are the second second of the source, not its start.
+        for (i, s) in written.samples.iter().enumerate() {
+            let expect = src.samples[8000 + i];
+            assert!((s - expect).abs() < 1e-4, "sample {i}: {s} vs {expect}");
+        }
+        // The description of the window still comes back, and the write is
+        // reported with the duration that says the range landed.
+        assert!(report.contains("AC RMS"), "one-input description: {report}");
+        assert!(
+            report.contains(&format!(
+                "-> {} (8000 samples at 8000 Hz, 1.000 s)",
+                output.display()
+            )),
+            "{report}"
+        );
+    }
+
+    /// Two inputs plus `--write-to` writes `a - b` and reports the write rather
+    /// than a comparison verdict: the two captures are chosen to differ, so a
+    /// verdict would fail every run that did exactly what was asked.
+    #[test]
+    fn write_to_two_inputs_writes_the_difference() {
+        let rate = 8000.0;
+        let music: Vec<f64> = (0..8000)
+            .map(|i| 0.4 * (std::f64::consts::TAU * 300.0 * i as f64 / rate).sin())
+            .collect();
+        // `a` carries the music plus an effect in its second half; `b` carries
+        // the music alone. The difference is the effect, with the music gone.
+        let effect = |i: usize| if i >= 4000 { 0.25 } else { 0.0 };
+        let mk = |s: Vec<f64>| audiodiff::Capture {
+            samples: s,
+            sample_rate: rate,
+            channels: 1,
+            bits: 16,
+        };
+        let with = mk(music
+            .iter()
+            .enumerate()
+            .map(|(i, s)| s + effect(i))
+            .collect());
+        let without = mk(music.clone());
+        let a = temp_wav("diff-a", &with);
+        let b = temp_wav("diff-b", &without);
+        let output = std::env::temp_dir().join("phosphor-writeto-diff-out.wav");
+
+        let report = run_audiodiff(
+            AudiodiffInputs {
+                a: &a,
+                b: Some(&b),
+                range: None,
+                range_b: None,
+            },
+            audiodiff::ChannelPolicy::Mono,
+            audiodiff::Tolerance::default(),
+            audiodiff_outputs(Some(&output)),
+        )
+        .unwrap();
+
+        let written = audiodiff::read_wav(&output, audiodiff::ChannelPolicy::Mono).unwrap();
+        assert_eq!(written.samples.len(), 8000);
+        for (i, s) in written.samples.iter().enumerate() {
+            assert!(
+                (s - effect(i)).abs() < 1e-3,
+                "sample {i}: {s} should be the effect alone ({})",
+                effect(i)
+            );
+        }
+        // The write summary replaces the comparison report, exactly as
+        // `--subtract-to` did before it was folded into this flag.
+        assert!(
+            report.contains(&format!("{} - {} ->", file_label(&a), file_label(&b))),
+            "{report}"
+        );
+        assert!(
+            !report.contains("STFT distance"),
+            "a subtraction must not also compare: {report}"
+        );
+    }
+
+    /// Without `--write-to`, two inputs still compare: folding the flag in must
+    /// not have made the default path write or skip its verdict.
+    #[test]
+    fn without_write_to_two_inputs_still_compare() {
+        let rate = 8000.0;
+        let cap = audiodiff::Capture {
+            samples: (0..8000)
+                .map(|i| 0.5 * (std::f64::consts::TAU * 440.0 * i as f64 / rate).sin())
+                .collect(),
+            sample_rate: rate,
+            channels: 1,
+            bits: 16,
+        };
+        let a = temp_wav("compare-a", &cap);
+        let report = run_audiodiff(
+            AudiodiffInputs {
+                a: &a,
+                b: Some(&a),
+                range: None,
+                range_b: None,
+            },
+            audiodiff::ChannelPolicy::Mono,
+            audiodiff::Tolerance::default(),
+            audiodiff_outputs(None),
+        )
+        .unwrap();
+        assert!(report.contains("STFT distance"), "{report}");
     }
 
     #[test]
