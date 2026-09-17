@@ -132,12 +132,35 @@ flowchart TB
   so those two Norton sections shape the music alone. This is easy to read the
   other way round from a block diagram, and reading it that way puts a filter on
   the voices that is not on them and leaves the music unfiltered.
-- **The one-shots are diode-fed.** Each of D7, D8 and D10 is a 1S953 between the
-  timing resistor and the capacitor, which is not the configuration the 74LS123
-  datasheet's `tW = 0.45*R*C` describes and roughly halves the pulse. The
-  datasheet explicitly says the diode "is not needed for electrolytic capacitance
+- **The one-shots are diode-fed**, which is not the configuration the 74LS123
+  datasheet's `tW = 0.45*R*C` describes and shortens the pulse. The datasheet
+  explicitly says the diode "is not needed for electrolytic capacitance
   application and should not be used on the LS122 and LS123", and Nintendo fitted
   it anyway, here and on Donkey Kong Jr.
+
+  **Where the diode sits, corrected 2026-09-16 from a 1200 dpi render.** This
+  entry used to say the 1S953 is "between the timing resistor and the capacitor",
+  and it is not. The resistor and the capacitor meet at a node, and the diode
+  runs from that node to the chip's Rext/Cext pin, with the capacitor's other
+  plate on the Cext pin:
+
+  | Net | Pins |
+  |---|---|
+  | timing node | R18 27k from +5 -> {D8 anode, C15 `+`} |
+  | `D8` | cathode -> 2H.7 (Rext/Cext) |
+  | `C15` | other plate -> 2H.6 (Cext) |
+
+  Luigi's half is drawn above with R18/D8/C15 on pins 7 and 6, Mario's below with
+  R17/D7/C14 on pins 15 and 14. The reference's netlist has the same topology,
+  `NET_C(R17.2, D1.A, C14.1)` with `D1.K` to the `RC` pin, so this is not a
+  reading either side disputes; only this document had it wrong.
+
+  That matters because the pulse-width factor rests on it. `Ls123Charge::DiodeFed`
+  in `core/src/device/discrete/derive.rs` is a flat `k = 0.25` against the
+  datasheet's 0.45, chosen for a topology this entry described incorrectly. The
+  reference instead simulates the diode as a part and lets the width fall out,
+  guessing a 1N4148 with a `FIXME: try to identify` where the board has a 1S953.
+  Which is closer is unmeasured. See `phosphor-emulator-qf2x`.
 - **The summing node carries C31 22 nF**, which against the four legs in parallel
   (6832 ohm) is a 1059 Hz low-pass on everything. Recorded here because the
   equivalent part on the Donkey Kong Jr. sheet was missed on that reading and
@@ -154,10 +177,13 @@ flowchart TB
   list". So the 30 k is a third-hand figure that nothing on the drawing supports.
 
   It is not a detail. R18 with C15 4.7 uF sets Luigi's one-shot, and these voices'
-  centroids are envelope-dominated, so an 11 % longer pulse (31.7 ms against
-  28.6) moves the number this board is compared on. The reference is therefore
-  wrong in the direction that would make our walk2 look too high, and part of
-  that residual is the comparison rather than the model. See
+  centroids are envelope-dominated. A 74123's width is proportional to its
+  timing resistor whatever else a model gets right, so 30 k makes the reference's
+  pulse **11 % long** against the board's; on our own law the same 11 % is 35.3 ms
+  where 27 k gives 31.7. A longer envelope lowers a centroid, so the reference
+  sits below where the board would put it and the walk2 residual measured against
+  it is inflated by that much. Part of that residual is the comparison rather
+  than the model, and walk1 is unaffected because both sides have R17 right. See
   `phosphor-emulator-qf2x`.
 
 ## What it does NOT establish
