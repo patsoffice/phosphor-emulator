@@ -172,19 +172,38 @@ voice is one continuously retriggered tone and no scenario drives that. Luigi's
 line is never written in the recording, which is single-player, so walk2's
 discipline stays unmeasured.
 
-THE CENTROID RESIDUAL IS HALVED AND STILL OPEN, and it is no longer the same
-question as Donkey Kong Jr.'s. Both boards shared one cause, the output resampler
-being fed at an incommensurate rate (phosphor-emulator-tohy, fixed in
-phosphor-emulator-6ykk), and that closed Donkey Kong Jr. outright while leaving
-this board out: walk1 113.1 to 48.0 against 26.6, walk2 127.5 to 63.7 against
-31.6, skid 370.0 to 281.6 against 156.6.
+THE MODEL IS CONFIRMED AGAINST THE DRAWING, VALUE BY VALUE, at 600 dpi: every R
+and C, the diode-fed one-shots, both output couplings, and the whole emitter
+follower down to VR1. There is no component defect in it. The residual against
+the reference is 37.6, 49.3 and 209.8 against 26.6, 31.6 and 156.6, roughly
+1.4x, after the resampler fix (phosphor-emulator-6ykk) and after Q10's beta was
+sourced from the same model card the reference uses.
 
-What is left is a different shape from what was removed, a broad 2 to 3 times
-excess from 40 Hz to 5 kHz with no rise toward Nyquist, which argues for a source
-or gating difference rather than a filter one. Tracked as
-phosphor-emulator-qf2x. Note that the skid's reference figure is itself disputed
-(phosphor-emulator-87r8, 156.6 against a recorded 95), so one of those three gaps
-cannot be sized yet."""
+EVERY MECHANISM INSIDE THE MODEL IS ELIMINATED, measured rather than argued:
+resolution moves under 3 % over 4x, logic levels move the wrong way and would
+need a level above the rail, gate bandwidth sits three decades above the band,
+the one-shot width saturates, and the follower's input impedance agrees with the
+full Gummel-Poon device physics to 0.5 %.
+
+WHAT THE VOICE IS, because it is not what the metric suggests. 97.6 % of a
+footstep's energy is in the lowest band with a 21.5 Hz rolloff, while its two
+oscillators sit at 787 and 939 Hz and contribute 1.7 %. The voice is a thump: the
+gated mean of the XOR square switched on for 32 ms and differentiated by the two
+couplings. Anyone tuning tone accuracy here is working on 1.7 % of the energy.
+
+THREE DEFECTS ARE ESTABLISHED IN THE REFERENCE, all pushing the direction of the
+residual: R18 at 30k where the drawing reads 27k, making its Luigi one-shot 11 %
+long while its own comment calls 27 verified; the one-shot diode guessed as a
+1N4148 with a FIXME where the board has a 1S953, when the forward drop is the
+whole mechanism; and Vaf=6 on the transistor that sets the coupling corner, an
+order of magnitude below a real 2SC1815 and worth 13 % of that corner.
+
+So this is two models of one circuit, not a model against a board, and the one
+with errors in it is not ours. Closed as unarbitrated: settling it needs a
+capture from hardware, which nobody has, or the three defects corrected in a
+local copy of the reference netlist and the figures re-derived. See
+phosphor-emulator-qf2x for the full elimination. The skid's reference figure was
+separately disputed and settled at 156.6 (phosphor-emulator-87r8)."""
 
 [[target]]
 id = "llander-discrete"
