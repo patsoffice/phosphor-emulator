@@ -97,11 +97,20 @@ scenarios = [
 ]
 notes = """
 Four voices where the board previously played Donkey Kong's three. Walk and jump
-within tolerance on every metric. Residuals: climbing's onset steps where the
-board's does not, and falling's centroid is high for the reason in
-phosphor-emulator-discrete-square-edge-quantisation-jtn3. The summing node's
-0.01 uF capacitor is from an independent netlist rather than the drawing and
-wants confirming."""
+within tolerance on every metric.
+
+THE CENTROID RESIDUALS CLOSED, and not for the reason this row used to give. The
+falling voice was attributed to edge quantisation
+(phosphor-emulator-discrete-square-edge-quantisation-jtn3); the cause was
+actually the output resampler being fed at a rate incommensurate with its own
+intermediate rate, found in phosphor-emulator-tohy and fixed in
+phosphor-emulator-6ykk. Falling went 1417.2 to 952.9 against the board's 941.8,
+and walk-hi 302.0 to 232.3 against 209.0, both inside tolerance on the
+re-derivation that established those reference figures.
+
+Remaining residuals: climbing's onset steps where the board's does not, and the
+summing node's 0.01 uF capacitor is from an independent netlist rather than the
+drawing and wants confirming."""
 
 [[target]]
 id = "galaxian-discrete"
@@ -118,7 +127,13 @@ scenarios = [
 notes = """
 Two of its three reported residuals turned out to be the reference's own
 simulation rate rather than the model. References for this board must be
-captured at 192 kHz and band-limited afterwards."""
+captured at 192 kHz and band-limited afterwards.
+
+This board also carried the incommensurate-resampler artifact fixed in
+phosphor-emulator-6ykk, which named only the two Nintendo boards; this one calls
+`with_sim_rate` too and was missed. It is unharmed either way, all four scenarios
+staying within tolerance across the fix, because its voices are the few-kHz kind
+with little ultrasonic content for the jitter to scramble."""
 
 [[target]]
 id = "mariobros-discrete"
@@ -130,8 +145,21 @@ scenarios = ["mariobros/walk1", "mariobros/walk2", "mariobros/skid"]
 notes = """
 Two footsteps, the skid, and the music through two LM3900 sections. The trigger
 discipline in the scenarios is assumed rather than traced: see
-phosphor-emulator-mario-trigger-discipline-vv4z. Centroid residual is the same
-edge-quantisation cause as Donkey Kong Jr.'s falling voice."""
+phosphor-emulator-mario-trigger-discipline-vv4z.
+
+THE CENTROID RESIDUAL IS HALVED AND STILL OPEN, and it is no longer the same
+question as Donkey Kong Jr.'s. Both boards shared one cause, the output resampler
+being fed at an incommensurate rate (phosphor-emulator-tohy, fixed in
+phosphor-emulator-6ykk), and that closed Donkey Kong Jr. outright while leaving
+this board out: walk1 113.1 to 48.0 against 26.6, walk2 127.5 to 63.7 against
+31.6, skid 370.0 to 281.6 against 156.6.
+
+What is left is a different shape from what was removed, a broad 2 to 3 times
+excess from 40 Hz to 5 kHz with no rise toward Nyquist, which argues for a source
+or gating difference rather than a filter one. Tracked as
+phosphor-emulator-qf2x. Note that the skid's reference figure is itself disputed
+(phosphor-emulator-87r8, 156.6 against a recorded 95), so one of those three gaps
+cannot be sized yet."""
 
 [[target]]
 id = "llander-discrete"
