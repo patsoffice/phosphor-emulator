@@ -533,30 +533,52 @@ impl DebugSession {
         false
     }
 
-    /// Apply an *immediate* button edge to the control named `name`. Unknown
-    /// names are ignored. Distinct from the harness's *scheduled* presses: this
-    /// fires now, letting a script drive a timeline imperatively
-    /// (`input("coin", true); run_frames(8); input("coin", false)`).
-    pub fn input(&mut self, name: &str, pressed: bool) {
+    /// Resolve a control's stable name, or say what this machine does have.
+    ///
+    /// An unknown name is an error rather than a no-op, and the difference is
+    /// not academic. A script's whole job is to drive input that a device-level
+    /// poke cannot reach, so a press that quietly does not happen leaves the
+    /// machine sitting in attract mode, which looks exactly like a machine with
+    /// nothing to say. Galaga's coin is `coin1` and Pac-Man's is `coin`; a
+    /// script that used the wrong one ran green, captured silence, and had that
+    /// silence read as a broken audio capture.
+    fn control_id(&self, name: &str) -> Result<InputId, String> {
         if let Some(&id) = self.input_ids.get(name) {
-            self.harness
-                .machine_mut()
-                .handle_input(InputEvent::Button { id, pressed });
+            return Ok(id);
         }
+        let mut known: Vec<&str> = self.input_ids.keys().map(String::as_str).collect();
+        known.sort_unstable();
+        Err(format!(
+            "unknown control {name:?} on {}; it has: {}",
+            self.harness.machine().machine_id(),
+            known.join(", ")
+        ))
+    }
+
+    /// Apply an *immediate* button edge to the control named `name`. Distinct
+    /// from the harness's *scheduled* presses: this fires now, letting a script
+    /// drive a timeline imperatively
+    /// (`input("coin", true); run_frames(8); input("coin", false)`).
+    pub fn input(&mut self, name: &str, pressed: bool) -> Result<(), String> {
+        let id = self.control_id(name)?;
+        self.harness
+            .machine_mut()
+            .handle_input(InputEvent::Button { id, pressed });
+        Ok(())
     }
 
     /// Apply an *immediate* absolute analog value (`-1.0..=1.0`) to the control
-    /// named `name`. Unknown names are ignored.
-    pub fn input_axis(&mut self, name: &str, value: f32) {
-        if let Some(&id) = self.input_ids.get(name) {
-            self.harness
-                .machine_mut()
-                .handle_input(InputEvent::Absolute { id, value });
-        }
+    /// named `name`.
+    pub fn input_axis(&mut self, name: &str, value: f32) -> Result<(), String> {
+        let id = self.control_id(name)?;
+        self.harness
+            .machine_mut()
+            .handle_input(InputEvent::Absolute { id, value });
+        Ok(())
     }
 
     /// Apply an *immediate* relative motion delta (pointing-device units) to
-    /// the control named `name`. Unknown names are ignored.
+    /// the control named `name`.
     ///
     /// This is the only way to drive a trackball or spinner from a script.
     /// Those machines accumulate `Relative` deltas into a wrapping counter and
@@ -564,12 +586,12 @@ impl DebugSession {
     /// [`input_axis`](Self::input_axis) on Marble Madness or Crystal Castles
     /// silently does nothing. Deltas accumulate until the machine drains them,
     /// so sustained motion means one call per frame, not one large call.
-    pub fn input_relative(&mut self, name: &str, delta: f32) {
-        if let Some(&id) = self.input_ids.get(name) {
-            self.harness
-                .machine_mut()
-                .handle_input(InputEvent::Relative { id, delta });
-        }
+    pub fn input_relative(&mut self, name: &str, delta: f32) -> Result<(), String> {
+        let id = self.control_id(name)?;
+        self.harness
+            .machine_mut()
+            .handle_input(InputEvent::Relative { id, delta });
+        Ok(())
     }
 
     /// Render the current frame and write it to `path` as an 8-bit RGB PNG.
@@ -951,12 +973,10 @@ mod tests {
     #[test]
     fn input_reaches_handle_input_by_stable_name() {
         let (mut s, rec) = session(true);
-        s.input("coin", true);
-        s.input("coin", false);
-        s.input("nonexistent", true); // ignored, no panic
-        s.input_axis("coin", 0.5);
-        s.input_relative("coin", -3.0);
-        s.input_relative("nonexistent", 1.0); // ignored, no panic
+        s.input("coin", true).unwrap();
+        s.input("coin", false).unwrap();
+        s.input_axis("coin", 0.5).unwrap();
+        s.input_relative("coin", -3.0).unwrap();
         assert_eq!(
             rec.borrow().inputs,
             vec![
@@ -977,6 +997,24 @@ mod tests {
                     delta: -3.0
                 },
             ]
+        );
+    }
+
+    /// A name that matches no control is an error, and the error names the
+    /// controls that do exist. This used to be a silent no-op, and what that
+    /// cost was a capture of a machine nobody had actually coined up, read as
+    /// a broken audio path. See `phosphor-emulator-46lz`.
+    #[test]
+    fn an_unknown_control_is_an_error_not_a_silent_no_op() {
+        let (mut s, rec) = session(true);
+        let err = s.input("nonexistent", true).unwrap_err();
+        assert!(err.contains("nonexistent"), "{err}");
+        assert!(err.contains("coin"), "should list what it does have: {err}");
+        assert!(s.input_axis("nonexistent", 0.5).is_err());
+        assert!(s.input_relative("nonexistent", 1.0).is_err());
+        assert!(
+            rec.borrow().inputs.is_empty(),
+            "a rejected control must reach the machine as nothing at all"
         );
     }
 

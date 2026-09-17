@@ -93,15 +93,30 @@ fn register_machine(engine: &mut Engine) {
             m.borrow_mut().poke(cpu as usize, addr as u32, data as u8)
         },
     );
-    engine.register_fn("input", |m: &mut Machine, name: &str, on: bool| {
-        m.borrow_mut().input(name, on);
-    });
-    engine.register_fn("input_axis", |m: &mut Machine, name: &str, v: f64| {
-        m.borrow_mut().input_axis(name, v as f32);
-    });
-    engine.register_fn("input_relative", |m: &mut Machine, name: &str, d: f64| {
-        m.borrow_mut().input_relative(name, d as f32);
-    });
+    // A control name that names nothing is an error, not a quiet no-op: see
+    // `DebugSession::control_id`.
+    engine.register_fn(
+        "input",
+        |m: &mut Machine, name: &str, on: bool| -> Result<(), Box<EvalAltResult>> {
+            m.borrow_mut().input(name, on).map_err(|e| e.into())
+        },
+    );
+    engine.register_fn(
+        "input_axis",
+        |m: &mut Machine, name: &str, v: f64| -> Result<(), Box<EvalAltResult>> {
+            m.borrow_mut()
+                .input_axis(name, v as f32)
+                .map_err(|e| e.into())
+        },
+    );
+    engine.register_fn(
+        "input_relative",
+        |m: &mut Machine, name: &str, d: f64| -> Result<(), Box<EvalAltResult>> {
+            m.borrow_mut()
+                .input_relative(name, d as f32)
+                .map_err(|e| e.into())
+        },
+    );
 
     // --- Inspect (unmapped / missing → -1, matching the read-first contract) ---
     engine.register_fn("read", |m: &mut Machine, cpu: i64, addr: i64| -> i64 {
