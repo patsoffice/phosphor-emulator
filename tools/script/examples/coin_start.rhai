@@ -9,9 +9,10 @@
 //
 //   phosphor-script run examples/coin_start.rhai --machine galaga <rompath>
 
-// A pre-bound machine boots cold, and galaga runs a ~3000-frame power-on
-// self-test before it reaches the coin-ready attract screen. Warm up past it,
-// then drive the timeline.
+// A pre-bound machine boots cold, and a coin inserted during the power-on self
+// test is discarded with nothing to say so. Galaga takes one from about frame
+// 862, measured; this overshoots rather than sitting on the boundary. The wait
+// is per-machine, and the README says how to measure another one.
 m.run_frames(3100);
 
 m.input("coin1", true);    m.run_frames(8); m.input("coin1", false);

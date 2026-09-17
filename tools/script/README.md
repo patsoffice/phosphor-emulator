@@ -110,7 +110,53 @@ method maps 1:1 onto a `DebugSession` accessor. The one remaining gap is
 
 `input`/`input_axis`/`input_relative` take a machine's **stable control name**
 (e.g. galaga's `coin1`, `p1_start`); see a machine's `input_controls()` for the
-list. Unknown names are ignored.
+list. A name that matches no control is an error naming the controls the machine
+does have, not a quiet no-op: a press that silently does not happen leaves the
+machine in attract mode, which looks exactly like a machine with nothing to say.
+
+#### Warm up past the self test before coining
+
+**A coin inserted during a board's power-on self test is discarded, and nothing
+reports it.** The script runs green, the game sits in attract, and the capture
+comes out silent. Both halves of that look like a broken machine rather than a
+mistimed press, which is how one such script was filed as a broken audio capture
+in this tool.
+
+The wait is per-machine and has to be measured. Two, by bisecting a fresh boot
+per candidate frame and watching for the coin sound:
+
+| machine | coin accepted from about |
+|---|---|
+| pacman | frame 290 |
+| galaga | frame 862 |
+
+To measure another, open one machine per candidate and look for any sign the
+coin landed. A sound chip's volume registers are the cheapest:
+
+```rhai
+let roms = "/path/to/roms";
+for n in [200, 400, 800, 1600] {
+    let mm = open("galaga", roms);
+    mm.run_frames(n);
+    mm.input("coin1", true); mm.run_frames(10); mm.input("coin1", false);
+    let peak = 0;
+    for i in 0..120 {
+        mm.run_frames(3);
+        let r = mm.device_registers("Namco WSG");
+        let v = r["VOL0"] + r["VOL1"] + r["VOL2"];
+        if v > peak { peak = v; }
+    }
+    print("coin at " + n + " -> peak volume " + peak);
+}
+```
+
+When the exact number does not matter, overshoot: `run_frames(3100)` clears both
+of the above with room to spare and costs well under a second headless. It is
+not a number anyone has checked against the whole registry, so a machine that
+still will not coin up wants the measurement above rather than a larger guess.
+
+A movie sidesteps the question entirely, because it carries the timing that was
+recorded with it.
 
 Pick the one the machine actually consumes. Trackball and spinner games (Marble
 Madness, Crystal Castles, Missile Command, Quantum, Tempest) accumulate
