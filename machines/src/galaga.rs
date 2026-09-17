@@ -15,6 +15,7 @@ use phosphor_macros::{MemoryRegion, Saveable};
 use crate::namco_galaga::{
     self, GALAGA_SPRITE_LAYOUT, GalagaCpus, NamcoGalagaBoard, NamcoGalagaBus, ScanlineGame,
 };
+use crate::namco_wsg_output::BoardParams;
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
 
 // ---------------------------------------------------------------------------
@@ -440,7 +441,7 @@ pub struct GalagaSystem {
 
 impl GalagaSystem {
     pub fn new() -> Self {
-        let mut board = NamcoGalagaBoard::new();
+        let mut board = NamcoGalagaBoard::new(BoardParams::GALAGA);
         // The three CPUs share these windows; the split into four chips is the
         // sprite hardware's, which reads attributes, positions and flip/size
         // bits from three separate RAMs at a fixed 0x380 offset.

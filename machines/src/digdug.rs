@@ -18,6 +18,7 @@ use crate::namco_galaga::{
     self, GALAGA_SPRITE_LAYOUT, GalagaCpus, NamcoGalagaBoard, NamcoGalagaBus, ScanlineGame,
 };
 use crate::namco_pac::PACMAN_TILE_LAYOUT;
+use crate::namco_wsg_output::BoardParams;
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
 
 // ---------------------------------------------------------------------------
@@ -558,7 +559,7 @@ pub struct DigDugSystem {
 
 impl DigDugSystem {
     pub fn new() -> Self {
-        let mut board = NamcoGalagaBoard::new();
+        let mut board = NamcoGalagaBoard::new(BoardParams::DIGDUG);
         // All three CPUs share these windows. The split into five chips is the
         // video hardware's: the tilemap has its own RAM, and the sprite hardware
         // reads attributes, positions and flip/size bits from three separate

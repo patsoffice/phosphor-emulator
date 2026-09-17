@@ -1,58 +1,63 @@
-//! Pac-Man's analog audio output stage, built on the [`DiscreteCircuit`]
-//! runtime.
+//! The Namco WSG's analog output stage, built on the [`DiscreteCircuit`]
+//! runtime and shared by every board in the family.
 //!
 //! Transcribed in
-//! [`docs/schematics/pacman-audio-output.md`](../../docs/schematics/pacman-audio-output.md),
-//! read from the `PAC-MAN` game logic schematic at PDF p23. Tracked as
-//! `phosphor-emulator-ga9p`.
+//! [`pacman-audio-output.md`](../../docs/schematics/pacman-audio-output.md) and
+//! [`namco-galaga-audio-output.md`](../../docs/schematics/namco-galaga-audio-output.md).
+//! Tracked as `phosphor-emulator-ga9p` (Pac-Man) and `-enst` (the rest).
 //!
-//! # What this board does that the WSG does not
+//! # What these boards do that the WSG does not
 //!
-//! The chip's four-bit sample and four-bit volume leave the 74LS273 at 2M as
-//! eight separate lines, and the board multiplies them in the analog domain:
-//! 5Q-8Q drive R9 470, R8 1k, R7 2.2k and R6 4.7k into one summing node, and
-//! 1Q-4Q gate four 4066 sections that tap that node through R2 10k, R1 22k,
-//! R3 47k and R4 100k. So the product `sample * volume` that
+//! The chip's four-bit sample and four-bit volume leave one 74LS273 as eight
+//! separate lines, and the board multiplies them in the analog domain: four
+//! outputs drive 470, 1k, 2.2k and 4.7k into one summing node, and the other
+//! four gate 4066 sections that tap that node through 10k, 22k, 47k and 100k.
+//! So the product `sample * volume` that
 //! [`NamcoWsg::tick`](phosphor_core::device::namco_wsg::NamcoWsg::tick) forms
-//! is the one quantity this board never has, which is why the voices arrive
+//! is the one quantity these boards never have, which is why the voices arrive
 //! here as codes through
 //! [`tick_voices`](phosphor_core::device::namco_wsg::NamcoWsg::tick_voices).
 //!
-//! Three mechanisms come out of the resistor values, and the arithmetic behind
-//! each is in the transcription:
+//! Three mechanisms come out of the resistor values:
 //!
 //! - **The volume network is a divider**, not a sum of leg gains. A leg that is
-//!   switched out leaves the network, so the gain is
-//!   `load / (R_parallel + load)` and the law is strongly compressed: code 1
-//!   sits 11.1 dB below full scale where `code / 15` puts it at 23.5 dB. Every
-//!   decaying note decays about twice as far in dB with the multiply done in
-//!   integers.
-//! - **The sample ladder is asymmetric.** Its legs are switched between the
-//!   latch's rails, so code 8, the waveform's zero, lands at 0.5607 of full
-//!   scale rather than 0.5. The negative half-swing is 27.6 % larger than the
-//!   positive one and what that adds is even harmonics, not gain.
-//! - **C1's corner moves with the volume code**, because the code decides which
-//!   resistors are in circuit: 673 Hz at code 1 against 3.3 kHz at code 15.
-//!   A note gets darker as it decays as well as quieter.
+//!   switched out leaves the network, so the gain is `G / (G + bias)` and the
+//!   law is compressed: on Pac-Man code 1 sits 11.1 dB below full scale where
+//!   `code / 15` puts it at 23.5 dB. Every decaying note decays about twice as
+//!   far in dB with the multiply done in integers.
+//! - **The sample ladder distorts.** Code 8, the waveform's zero, lands at
+//!   0.5607 of full scale rather than 0.5. The deviation from linear is exactly
+//!   odd-symmetric about code 7.5 while the model's signed zero is code 8, and
+//!   that half-code offset is what mixes even harmonics into what would
+//!   otherwise be an odd mechanism. Measured over Galaga's eight PROM
+//!   waveforms it runs 23 to 30 dB below each waveform's own AC content.
+//! - **The shunt's corner moves with the volume code**, because the code
+//!   decides which resistors are in circuit. A note gets darker as it decays
+//!   as well as quieter, by about an octave across the code range.
 //!
-//! # The load, and what is assumed
+//! # One law, four boards
 //!
-//! [`BUS_LOAD`] is the one number here that the drawing does not settle. R5, a
-//! 22k trimmer at the output bus, was never traced, and it sets how compressed
-//! the volume law is: 31k gives a 6.1 dB RMS departure from the integer
-//! multiply, 12.9k gives 4.2 dB. **Only what was traced is modeled.** The
-//! direction and rough size hold either way, which is what makes this worth
-//! building before R5 is resolved.
+//! [`BoardParams`] is the whole difference between them: a bias conductance, a
+//! shunt capacitor and a coupling. Pac-Man, Galaga, Xevious and Dig Dug share
+//! all ten resistor values and differ in what the switched conductance divides
+//! against. **That is a reading, not a family resemblance.** Each board's bias
+//! arm was read off its own sheet, and Xevious in particular turned out to be
+//! Galaga's rather than Dig Dug's, which nobody could have predicted from the
+//! board family: the epic this belongs to has four counterexamples where a
+//! shared board loaded its DAC differently.
 //!
-//! # Where this departs from the board
+//! # Where this departs from the boards
 //!
-//! The real board time-multiplexes one latch, one DAC and one switched network
+//! The real boards time-multiplex one latch, one DAC and one switched network
 //! across the three voices, so only one voice's legs are in circuit at a time.
 //! Here the three voices have a network each and are summed, because that is
-//! the shape the WSG presents. C1 is still one capacitor: its corner is set
-//! from the conductance of every closed leg, which is what the shared node
-//! sees. What this cannot show is the per-slot corner stepping at the
-//! multiplex rate, which is above the audio band in any case.
+//! the shape the WSG presents. The shunt is still one capacitor: its corner is
+//! set from the conductance of every closed leg, which is what the shared node
+//! sees. What this cannot show is the per-slot corner stepping at the multiplex
+//! rate, which is above the audio band in any case.
+//!
+//! Both Galaga-family boards leave the PCB differentially, Dig Dug and Xevious
+//! as op-amp pairs and Galaga as a bridge amplifier. All of them are mono here.
 
 use phosphor_core::audio::host_sample_rate;
 use phosphor_core::core::save_state::{SaveError, StateReader, StateWriter};
@@ -61,24 +66,79 @@ use phosphor_core::device::discrete::{
 };
 use phosphor_macros::Saveable;
 
-use crate::namco_pac::TIMING;
-
 // ---------------------------------------------------------------------------
 // The drawing
 // ---------------------------------------------------------------------------
 
-/// R9, R8, R7, R6: the sample ladder, MSB (latch 5Q) first.
+/// The sample ladder, MSB (latch pin 12) first. Pac-Man's R9/R8/R7/R6,
+/// Galaga's R97-R100, Xevious's R59/R58/R57/R56: four boards, one set of values.
 const SAMPLE_LEGS: [f64; 4] = [470.0, 1_000.0, 2_200.0, 4_700.0];
-/// R2, R1, R3, R4: the 4066-switched volume legs, MSB (latch 1Q) first.
+/// The 4066-switched volume legs, MSB (latch pin 2) first. Also common to all
+/// four boards.
 const VOLUME_LEGS: [f64; 4] = [10_000.0, 22_000.0, 47_000.0, 100_000.0];
-/// C1 at the summing output.
-const C1: f64 = 10e-9;
-/// R96 22k in series with the 10k cabinet pot, the load the volume legs drive.
-/// See the module header: R5 is not in this and was never traced.
-const BUS_LOAD: f64 = 31_000.0;
-/// C46 into R92, the coupling ahead of the LM1877. A 15.9 Hz corner.
-const C46: f64 = 100e-9;
-const R92: f64 = 100_000.0;
+
+/// What separates one board in this family from another.
+///
+/// The volume network is a divider: the switched conductance the code selects
+/// works against one fixed conductance, and the transfer is
+/// `G / (G + bias_g)`. Every board here is that expression, and the reason
+/// Galaga's is written `1 / (R_legs + 10k)` on its drawing is that dividing a
+/// series pair through by `R_legs` gives the same thing. So a board is three
+/// numbers, each of which is a part on a sheet.
+#[derive(Clone, Copy, Debug)]
+pub struct BoardParams {
+    /// The divider's other arm, in siemens.
+    pub bias_g: f64,
+    /// The capacitor shunting the summing node, in farads. With the node's own
+    /// resistance this is the low-pass whose corner moves with the volume code.
+    pub shunt_c: f64,
+    /// The coupling that removes the ladder's standing offset, as
+    /// `(ohms, farads)`. Every board in the family has one somewhere; where the
+    /// drawing does not settle its corner, a low one is used deliberately,
+    /// because what it is there to do is remove a DC offset and not to shape
+    /// anything in the band.
+    pub coupling: (f64, f64),
+}
+
+impl BoardParams {
+    /// Pac-Man and Ms. Pac-Man. R96 22k in series with the 10k cabinet pot is
+    /// the bias arm, C1 10 nF the shunt, C46 into R92 the coupling at 15.9 Hz.
+    /// R5 is not in the bias: see `docs/schematics/pacman-audio-output.md`.
+    pub const PACMAN: Self = Self {
+        bias_g: 1.0 / 31_000.0,
+        shunt_c: 10e-9,
+        coupling: (100_000.0, 100e-9),
+    };
+
+    /// Galaga. R19 10k into the 5P LM324's virtual ground is the bias arm and
+    /// C43 2.2 nF the shunt. The coupling is the 0.1 uF at VR1's wiper, whose
+    /// corner needs the MB3730's input impedance and so is not on the drawing;
+    /// 20 Hz stands in.
+    pub const GALAGA: Self = Self {
+        bias_g: 1.0 / 10_000.0,
+        shunt_c: 2.2e-9,
+        coupling: (100_000.0, 80e-9),
+    };
+
+    /// Xevious, read 2026-09-17 and found to be Galaga's stage resistor for
+    /// resistor: R119 10k into the 8A LM324, C7 0.0022 uF at the node. Filed
+    /// separately from `GALAGA` because the two were established by two
+    /// readings, and a shared board family predicts nothing.
+    pub const XEVIOUS: Self = Self {
+        bias_g: 1.0 / 10_000.0,
+        shunt_c: 2.2e-9,
+        coupling: (100_000.0, 80e-9),
+    };
+
+    /// Dig Dug. R105 10k to +5 V and R108 10k to ground put a fixed 200 uS on
+    /// the node, and C14 10 nF shunts it. C13 0.22 uF into R107 10k is the
+    /// coupling, a 72 Hz corner, the one in the family the drawing does give.
+    pub const DIGDUG: Self = Self {
+        bias_g: 200e-6,
+        shunt_c: 10e-9,
+        coupling: (10_000.0, 0.22e-6),
+    };
+}
 
 /// The WSG's voices update at 96 kHz on this board, so the circuit has to run
 /// above twice that to carry their steps rather than alias them. A floor, not
@@ -99,7 +159,34 @@ const MIN_SIM_RATE: u64 = 176_400;
 /// at full sample and full volume come to 315, so that path saturated at 25200
 /// of 32767. An ear judgment of the new stage is about the decay and the color;
 /// it should not also be about the level.
-const LEGACY_FULL_SCALE: f64 = 315.0 * 80.0 / 32767.0;
+const LEGACY_FULL_SCALE: f64 = 315.0 * 80.0 / 32767.0 * RECONSTRUCTION_HEADROOM;
+
+/// Headroom for the overshoot the reconstruction filter adds, which neither
+/// path's arithmetic predicts.
+///
+/// A stepped 4-bit wave through a windowed-sinc resampler rings past its own
+/// steps, so a board measures hotter than its static full swing says. The
+/// integer path did this too: its own arithmetic put full scale at 0.77 of the
+/// rail and Dig Dug measured -0.91 dBFS, which is 0.90. Without an allowance
+/// the stage inherits that and lands on the rail, where Dig Dug and Xevious
+/// both measured -0.00 dBFS.
+///
+/// 0.8 is measured rather than chosen for taste, and what it is measured
+/// against is the path it replaces. With it, every machine in the family lands
+/// within about a decibel of where the integer multiply put it over the same
+/// committed movie:
+///
+/// | machine | integer path | this stage |
+/// |---|---|---|
+/// | pacman | -4.67 dBFS | -3.66 |
+/// | galaga | -4.41 | -4.07 |
+/// | digdug | -0.91 | -1.04 |
+/// | xevious | -1.21 | -0.07 |
+///
+/// The spread between boards is the games' own content and was there before:
+/// Dig Dug and Xevious have always run close to the rail. One factor for the
+/// whole family, rather than a per-board trim nobody could later tie to a part.
+const RECONSTRUCTION_HEADROOM: f64 = 0.8;
 
 // ---------------------------------------------------------------------------
 // The two ladders, as arithmetic
@@ -139,14 +226,22 @@ fn volume_conductance(code: u8) -> f64 {
     (0..4).filter(|b| code & (1 << b) != 0).map(|b| g[b]).sum()
 }
 
-/// The volume network's gain for one code: a divider into [`BUS_LOAD`], so an
-/// open leg leaves the network rather than contributing zero.
-pub fn volume_gain(code: u8) -> f64 {
+/// The volume network's gain for one code on one board: a divider against that
+/// board's bias arm, so an open leg leaves the network rather than contributing
+/// zero.
+pub fn volume_gain(code: u8, params: BoardParams) -> f64 {
     let g = volume_conductance(code);
     if g == 0.0 {
         return 0.0;
     }
-    g / (g + 1.0 / BUS_LOAD)
+    g / (g + params.bias_g)
+}
+
+/// Where the shunt capacitor's corner sits for one volume code, in Hz. The code
+/// chooses the node's resistance, so the corner is a function of the volume.
+pub fn corner_hz(code: u8, params: BoardParams) -> f64 {
+    let g = volume_conductance(code) + params.bias_g;
+    g / (std::f64::consts::TAU * params.shunt_c)
 }
 
 // ---------------------------------------------------------------------------
@@ -207,8 +302,8 @@ struct Inputs {
     sound: NodeId,
 }
 
-fn build_circuit() -> (DiscreteCircuit, Inputs) {
-    let mut b = DiscreteCircuitBuilder::new(TIMING.cpu_clock_hz, host_sample_rate() as u64)
+fn build_circuit(params: BoardParams, board_clock_hz: u64) -> (DiscreteCircuit, Inputs) {
+    let mut b = DiscreteCircuitBuilder::new(board_clock_hz, host_sample_rate() as u64)
         .with_sim_rate(MIN_SIM_RATE);
 
     let weights = sample_weights();
@@ -236,7 +331,7 @@ fn build_circuit() -> (DiscreteCircuit, Inputs) {
                 (node, *ohms, Some(sw))
             })
             .collect();
-        legs.push(b.resistor_mixer_switched(&format!("LEG{v}"), &taps, Some(BUS_LOAD)));
+        legs.push(b.resistor_mixer_switched(&format!("LEG{v}"), &taps, Some(1.0 / params.bias_g)));
 
         // What C1 sees through this voice's closed legs.
         corner_inputs.push(b.dac_weighted(
@@ -252,20 +347,20 @@ fn build_circuit() -> (DiscreteCircuit, Inputs) {
     let mut c1_inputs = vec![sound];
     c1_inputs.extend(corner_inputs);
     let filtered = b.custom(
-        "C1",
+        "SHUNT",
         c1_inputs,
         Box::new(SwitchedCornerRc {
-            farads: C1,
-            load_g: 1.0 / BUS_LOAD,
+            farads: params.shunt_c,
+            load_g: params.bias_g,
             y: 0.0,
         }),
     );
 
-    // C46 into R92: the wiper's coupling, and what removes the sample ladder's
-    // standing offset.
-    let coupled = b.rc_high_pass("C46", filtered, R92, C46);
+    // The coupling, and what removes the sample ladder's standing offset.
+    let (r, c) = params.coupling;
+    let coupled = b.rc_high_pass("COUPLING", filtered, r, c);
 
-    b.output(coupled, OutputGain::linear(output_gain()));
+    b.output(coupled, OutputGain::linear(output_gain(params)));
 
     let circuit = b.build();
     (
@@ -285,27 +380,27 @@ fn build_circuit() -> (DiscreteCircuit, Inputs) {
 ///
 /// [`OutputGain`] normalizes to +/-1 before it reaches the rail, so this is a
 /// fraction of full scale and not an `i16`.
-fn output_gain() -> f64 {
-    LEGACY_FULL_SCALE / full_swing()
+fn output_gain(params: BoardParams) -> f64 {
+    LEGACY_FULL_SCALE / full_swing(params)
 }
 
 /// The largest excursion the stage can present to [`OutputGain`], in circuit
 /// units: three voices at full volume, each swinging the larger half of the
 /// sample ladder.
-fn full_swing() -> f64 {
+fn full_swing(params: BoardParams) -> f64 {
     let zero = sample_level(8);
-    3.0 * zero.max(1.0 - zero) * volume_gain(15)
+    3.0 * zero.max(1.0 - zero) * volume_gain(15, params)
 }
 
 // ---------------------------------------------------------------------------
 // Board-facing wrapper
 // ---------------------------------------------------------------------------
 
-/// Pac-Man's output stage: the two ladders, C1 and the coupling.
+/// One board's WSG output stage: the two ladders, the shunt and the coupling.
 #[derive(Saveable)]
 #[save_version(1)]
 #[save_tlv]
-pub struct PacmanAudioOutput {
+pub struct WsgOutputStage {
     #[save(id = 1)]
     circuit: DiscreteCircuit,
     /// Input handles, fixed when the circuit is built.
@@ -313,9 +408,10 @@ pub struct PacmanAudioOutput {
     ids: Inputs,
 }
 
-impl PacmanAudioOutput {
-    pub fn new() -> Self {
-        let (circuit, ids) = build_circuit();
+impl WsgOutputStage {
+    /// Build the stage for one board, driven by a `board_clock_hz` clock.
+    pub fn new(params: BoardParams, board_clock_hz: u64) -> Self {
+        let (circuit, ids) = build_circuit(params, board_clock_hz);
         Self { circuit, ids }
     }
 
@@ -362,15 +458,16 @@ impl PacmanAudioOutput {
     }
 }
 
-impl Default for PacmanAudioOutput {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::namco_pac::TIMING;
+
+    /// The board most of these assert against. Pac-Man, because its numbers are
+    /// the ones written up in its transcription and because it is the board this
+    /// stage was first built for.
+    const P: BoardParams = BoardParams::PACMAN;
 
     fn db(ratio: f64) -> f64 {
         20.0 * ratio.log10()
@@ -424,9 +521,9 @@ mod tests {
     /// transcription's table.
     #[test]
     fn the_volume_law_is_compressed_against_an_integer_multiply() {
-        let full = volume_gain(15);
+        let full = volume_gain(15, P);
         for (code, want) in [(1u8, -11.1), (2, -6.6), (4, -3.2), (8, -1.0)] {
-            let got = db(volume_gain(code) / full);
+            let got = db(volume_gain(code, P) / full);
             assert!(
                 (got - want).abs() < 0.1,
                 "volume {code}: board should be {want} dB down, got {got:.1}"
@@ -438,7 +535,7 @@ mod tests {
                  multiply's {integer:.1} dB, got {got:.1}"
             );
         }
-        assert_eq!(volume_gain(0), 0.0, "every section open is silence");
+        assert_eq!(volume_gain(0, P), 0.0, "every section open is silence");
     }
 
     /// Opening a 4066 section removes its resistor, so the legs that are left
@@ -449,38 +546,93 @@ mod tests {
     fn a_single_leg_is_louder_than_its_share_of_the_whole() {
         // Code 8 closes only the 10k leg, which is 1 of 4 legs but carries
         // over half the network's conductance and 89 % of its gain.
-        let share = volume_gain(8) / volume_gain(15);
+        let share = volume_gain(8, P) / volume_gain(15, P);
         assert!(
             share > 0.85,
             "one leg of four should be most of it: {share}"
         );
     }
 
-    /// C1's corner follows the closed legs. The ends of that range are what
-    /// makes a note get darker as it decays.
+    /// The shunt's corner follows the closed legs. The ends of that range are
+    /// what makes a note get darker as it decays, and every board's pair is a
+    /// number its own transcription states.
     #[test]
     fn the_filter_corner_moves_with_the_volume_code() {
-        let corner = |code: u8| {
-            let g = volume_conductance(code) + 1.0 / BUS_LOAD;
-            g / (2.0 * std::f64::consts::PI * C1)
+        for (what, params, at_1, at_15) in [
+            ("pacman", BoardParams::PACMAN, 673.0, 3326.0),
+            ("digdug", BoardParams::DIGDUG, 3300.0, 6000.0),
+            ("galaga", BoardParams::GALAGA, 8000.0, 20_000.0),
+            ("xevious", BoardParams::XEVIOUS, 8000.0, 20_000.0),
+        ] {
+            let lo = corner_hz(1, params);
+            let hi = corner_hz(15, params);
+            assert!(
+                (lo - at_1).abs() < at_1 * 0.02,
+                "{what} code 1 corner {lo:.0}, expected about {at_1:.0}"
+            );
+            assert!(
+                (hi - at_15).abs() < at_15 * 0.02,
+                "{what} code 15 corner {hi:.0}, expected about {at_15:.0}"
+            );
+            assert!(hi > lo, "{what}: quieter must be darker");
+        }
+    }
+
+    /// The family is one law with one number changed, and that number is the
+    /// only thing separating these boards' volume curves. The two figures are
+    /// the ones in the Galaga transcription's table.
+    #[test]
+    fn the_boards_differ_only_in_the_bias_arm() {
+        let vs_linear = |code: u8, p: BoardParams| {
+            db((volume_gain(code, p) / volume_gain(15, p)) / (code as f64 / 15.0))
         };
         assert!(
-            (corner(1) - 673.0).abs() < 5.0,
-            "code 1 corner {:.0}",
-            corner(1)
+            (vs_linear(1, BoardParams::DIGDUG) - 3.65).abs() < 0.05,
+            "dig dug at code 1: {:.2}",
+            vs_linear(1, BoardParams::DIGDUG)
         );
         assert!(
-            (corner(15) - 3326.0).abs() < 10.0,
-            "code 15 corner {:.0}",
-            corner(15)
+            (vs_linear(1, BoardParams::GALAGA) - 6.59).abs() < 0.05,
+            "galaga at code 1: {:.2}",
+            vs_linear(1, BoardParams::GALAGA)
         );
+        // Xevious was read, not assumed, and what the reading found was
+        // Galaga's stage. If that ever stops being true here, it is because
+        // someone changed a constant rather than because a board changed.
+        assert_eq!(
+            BoardParams::XEVIOUS.bias_g,
+            BoardParams::GALAGA.bias_g,
+            "xevious's R119 10k is Galaga's R19 10k"
+        );
+        // Every board is compressed against the integer multiply, and more so
+        // the quieter the code. That is the mechanism, not a per-board quirk.
+        for p in [
+            BoardParams::PACMAN,
+            BoardParams::GALAGA,
+            BoardParams::XEVIOUS,
+            BoardParams::DIGDUG,
+        ] {
+            assert!(vs_linear(1, p) > vs_linear(8, p), "{:?}", p);
+            assert!(vs_linear(8, p) > 0.0, "{:?}", p);
+        }
+    }
+
+    /// Dig Dug's node passes less than half the sample swing at full volume,
+    /// because 176.7 uS of legs works against 200 uS of bias. That is the
+    /// divider rather than a loss to trim out, and it is the clearest case of
+    /// why the bias arm cannot be normalized away.
+    #[test]
+    fn dig_dugs_bias_costs_it_half_the_swing() {
+        let g = volume_gain(15, BoardParams::DIGDUG);
+        assert!((g - 0.469).abs() < 0.005, "{g}");
+        assert!(volume_gain(15, BoardParams::GALAGA) > 0.6);
     }
 
     /// Silence in, silence out, and no panic from a zero conductance: with
     /// every section open the cap still sees the bus load.
     #[test]
     fn silence_produces_silence() {
-        let mut out = PacmanAudioOutput::new();
+        let mut out = WsgOutputStage::new(P, TIMING.cpu_clock_hz);
         for _ in 0..10_000 {
             out.tick([(0, 0); 3]);
         }
@@ -498,7 +650,7 @@ mod tests {
     /// rail on every note.
     #[test]
     fn a_held_code_decays_away_through_the_coupling() {
-        let mut out = PacmanAudioOutput::new();
+        let mut out = WsgOutputStage::new(P, TIMING.cpu_clock_hz);
         let mut buf = [0i16; 4096];
         let mut samples = Vec::new();
         // A quarter second of the same latch contents.
@@ -530,8 +682,8 @@ mod tests {
     /// the volume law's.
     #[test]
     fn a_quiet_note_is_louder_here_than_an_integer_multiply_makes_it() {
-        let loud = sample_level(15) * volume_gain(15);
-        let quiet = sample_level(15) * volume_gain(1);
+        let loud = sample_level(15) * volume_gain(15, P);
+        let quiet = sample_level(15) * volume_gain(1, P);
         let board = db(quiet / loud);
         let integer = db((15.0 * 1.0) / (15.0 * 15.0));
         assert!(
@@ -548,7 +700,7 @@ mod tests {
     /// signal is what decides the headroom.
     #[test]
     fn the_loudest_drive_stays_off_the_rail() {
-        let mut out = PacmanAudioOutput::new();
+        let mut out = WsgOutputStage::new(P, TIMING.cpu_clock_hz);
         let mut buf = [0i16; 4096];
         let mut samples = Vec::new();
         // A 1 kHz full-swing square on every voice at full volume.
@@ -582,7 +734,7 @@ mod tests {
     /// this stage is about its decay and its color and not about its level.
     #[test]
     fn full_scale_matches_the_path_this_replaces() {
-        let peak = full_swing() * output_gain();
+        let peak = full_swing(P) * output_gain(P);
         assert!(
             (peak - LEGACY_FULL_SCALE).abs() < 1e-9,
             "full swing should render at {LEGACY_FULL_SCALE} of the rail, got {peak}"

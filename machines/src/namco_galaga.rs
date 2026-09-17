@@ -39,6 +39,8 @@ use phosphor_core::core::save_state::{SaveError, Saveable, StateReader, StateWri
 use phosphor_core::core::{Bus, BusMaster, ClockDomainName as Clk, ClockTree, DomainId};
 use phosphor_core::cpu::z80::Z80;
 use phosphor_core::device::namco_wsg::NamcoWsg;
+
+use crate::namco_wsg_output::{BoardParams, WsgOutputStage};
 use phosphor_core::device::namco06::Namco06;
 use phosphor_core::device::namco50::Namco50;
 use phosphor_core::device::namco51::Namco51;
@@ -665,6 +667,13 @@ pub struct NamcoGalagaBoard {
     // Devices
     #[save(id = 2)]
     pub(crate) wsg: NamcoWsg,
+    /// The board's analog output stage. The WSG's own summed output and its
+    /// resampler go unused: these boards multiply sample by volume in two
+    /// switched resistor networks, so the voices reach the speaker as codes.
+    /// Which board is a constructor argument because Galaga, Dig Dug and
+    /// Xevious load the same DAC differently, each read off its own sheet.
+    #[save(id = 23)]
+    pub(crate) audio_out: WsgOutputStage,
     #[save(id = 3)]
     pub(crate) namco06: Namco06,
     #[save(id = 4)]
@@ -753,11 +762,17 @@ pub struct NamcoGalagaBoard {
 }
 
 impl NamcoGalagaBoard {
-    pub fn new() -> Self {
+    /// Build the board for one of the games on it.
+    ///
+    /// `audio` is not defaulted on purpose. The three machines here load the
+    /// WSG's DAC through three different bias arms, and a default would be a
+    /// silently wrong output stage on whichever game forgot to pass its own.
+    pub fn new(audio: BoardParams) -> Self {
         let clocks = clock_tree();
         let namco51_dom = clocks.find(Clk::Mcu).expect("declared Namco 51xx domain");
         Self {
             map: Self::build_map(),
+            audio_out: WsgOutputStage::new(audio, TIMING.cpu_clock_hz),
 
             wsg: {
                 let mut wsg = NamcoWsg::new(TIMING.cpu_clock_hz);
@@ -918,8 +933,11 @@ impl NamcoGalagaBoard {
         self.namco06.tick();
         self.main_nmi_pending = self.namco06.nmi_output();
 
-        // WSG tick (runs at CPU clock rate)
-        self.wsg.tick();
+        // WSG tick (runs at CPU clock rate). The voices come out as the two
+        // latch fields rather than as a product, because the multiply is the
+        // output stage's: see `namco_wsg_output`.
+        let voices = self.wsg.tick_voices();
+        self.audio_out.tick(voices);
 
         // Sample debug attribution context (per-CPU instruction PCs) before
         // CPU execution — bus dispatch cannot read CPU state mid-tick.
@@ -1385,14 +1403,15 @@ impl NamcoGalagaBoard {
     // Audio
     // -----------------------------------------------------------------------
 
-    /// Forward the WSG, and nothing else.
+    /// Drain the board's output stage, which is what the WSG's voices reach the
+    /// cabinet through: the switched-resistor multiply, the volume-dependent
+    /// divider and the volume-dependent low-pass. See [`crate::namco_wsg_output`].
     ///
-    /// The board puts a switched-resistor multiply, a volume-dependent divider,
-    /// a volume-dependent low-pass and a differential output stage between the
-    /// WSG's latch and the cabinet; none of it is here. See the module header
-    /// and `phosphor-emulator-enst`.
+    /// Still absent: every board here leaves the PCB differentially, Dig Dug and
+    /// Xevious as op-amp pairs and Galaga as a bridge amplifier, and this is
+    /// mono. See `phosphor-emulator-enst`.
     pub fn fill_audio(&mut self, buffer: &mut [i16]) -> usize {
-        self.wsg.fill_audio(buffer)
+        self.audio_out.fill_audio(buffer)
     }
 
     // -----------------------------------------------------------------------
@@ -1403,6 +1422,7 @@ impl NamcoGalagaBoard {
     /// the CPUs and resets them against this board.
     pub fn reset_board(&mut self) {
         self.wsg.reset();
+        self.audio_out.reset();
         // Galaga-family hardware has no sound-enable latch; WSG is always
         // active. Re-enable after reset (which clears the flag).
         self.wsg.set_sound_enabled(true);
@@ -1444,12 +1464,6 @@ impl NamcoGalagaBoard {
     }
 }
 
-impl Default for NamcoGalagaBoard {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 // All board events — bus writes, interrupts, custom-I/O transactions — land in
 // the map's ring, so the trace capability is just the map's.
 crate::impl_map_debug_trace!(NamcoGalagaBoard, map);
@@ -1482,7 +1496,7 @@ mod tests {
 
         #[test]
         fn write_watch_fires_with_cpu_and_context_attribution() {
-            let mut board = NamcoGalagaBoard::new();
+            let mut board = NamcoGalagaBoard::new(BoardParams::GALAGA);
             board.clock = 1234;
             board.debug_pc = [Some(0x0100), Some(0x0200), None];
             board.map.set_watchpoint(1, 0x8800, WatchpointKind::Write);
@@ -1506,7 +1520,7 @@ mod tests {
 
         #[test]
         fn read_watch_fires_after_value_known() {
-            let mut board = NamcoGalagaBoard::new();
+            let mut board = NamcoGalagaBoard::new(BoardParams::GALAGA);
             board.map.set_watchpoint(0, 0x9000, WatchpointKind::Read);
 
             board.watch_read(BusMaster::Cpu(0), 0x9000, 0xAB);
@@ -1525,7 +1539,7 @@ mod tests {
 
         #[test]
         fn tracing_disabled_records_nothing() {
-            let mut board = NamcoGalagaBoard::new();
+            let mut board = NamcoGalagaBoard::new(BoardParams::GALAGA);
             board.watch_write_annotated(BusMaster::Cpu(0), 0x6800, 0x01, write_annotation(0x6800));
             board.write_custom_io_ctrl(0xA1);
             assert!(board.map.trace_events().is_empty());
@@ -1533,7 +1547,7 @@ mod tests {
 
         #[test]
         fn custom_io_transactions_attribute_chips() {
-            let mut board = NamcoGalagaBoard::new();
+            let mut board = NamcoGalagaBoard::new(BoardParams::GALAGA);
             board.map.set_trace_enabled(true);
             board.debug_pc[0] = Some(0x1BCC);
 
@@ -1555,7 +1569,7 @@ mod tests {
 
         #[test]
         fn bus_writes_map_to_kinds_with_multi_cpu_attribution() {
-            let mut board = NamcoGalagaBoard::new();
+            let mut board = NamcoGalagaBoard::new(BoardParams::GALAGA);
             board.map.set_trace_enabled(true);
             board.debug_pc = [Some(0x0100), Some(0x0200), Some(0x0300)];
 

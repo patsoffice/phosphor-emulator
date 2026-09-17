@@ -120,11 +120,21 @@ milder: -15.7 dB at code 1, a +7.8 dB error, 4.2 dB RMS. **The direction and the
 rough size survive either answer**, which is what makes this worth modeling
 before R5 is resolved, but the exact law does not.
 
-**The sample ladder is not a level error, it is an asymmetry.** Its four legs
+**The sample ladder is not a level error, it is a distortion.** Its four legs
 are switched between the latch's rails, so code 8, the waveform's zero, lands at
 0.5607 of full scale rather than 0.5. The negative half-swing is therefore 27.6 %
-larger than the positive one, worth 2.1 dB, and what that adds is even harmonics
-rather than gain. A full-swing waveform leaves a -0.061 offset for C46 to remove.
+larger than the positive one, worth 2.1 dB.
+
+**What that adds is not "even harmonics", as this section first claimed.** The
+ladder's deviation from linear is exactly odd-symmetric about code 7.5, and the
+model's signed zero is code 8; the half-code offset between those two is what
+mixes even terms into what would otherwise be an odd mechanism, and the
+proportions depend on the waveform. Measured over the eight waveforms Galaga's
+sound PROM holds, the residual runs -23 to -30 dB against each waveform's own
+AC content, with even/odd splits from 0/100 to 80/60. The full measurement and
+the counterpart correction are in
+[`namco-galaga-audio-output.md`](namco-galaga-audio-output.md), whose own claim
+that the same ladder is purely odd-harmonic was wrong in the mirror image. A full-swing waveform leaves a -0.061 offset for C46 to remove.
 Judged as a shape after that coupling, the codes either side of zero are the
 furthest out: code 7, one step below zero, is 5.7 dB larger than the model makes
 it, though at an amplitude where that costs little.

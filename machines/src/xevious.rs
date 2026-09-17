@@ -1,5 +1,18 @@
 //! Xevious (Namco, 1983) — runs on the shared Namco Galaga hardware.
 //!
+//! # Schematics
+//!
+//! | Drawing | Source | Pages |
+//! |---|---|---|
+//! | `Xevious CPU PCB Schematic Diagram`, Atari SP-230 1st printing | `arcarc.xmission.com/PDF_Arcade_Atari_Kee/Xevious/Xevious_SP-230_1st_Printing.pdf` | PDF p9 (sheet 5A), p10 (sheet 5B) |
+//!
+//! Sheet 5A carries the WSG's DAC and sheet 5B the audio amplifier; both are
+//! transcribed in
+//! [`docs/schematics/namco-galaga-audio-output.md`](../../docs/schematics/namco-galaga-audio-output.md)
+//! and modeled in [`crate::namco_wsg_output`]. **Prefer SP-230 to the smaller
+//! 12-page Xevious package in circulation**, whose title blocks number the same
+//! two drawings 5B and 6A and on which R57's value does not resolve.
+//!
 //! Three Z80s (main/sub/sound @ 3.072 MHz), a Namco WSG for melodic sound, and
 //! the Namco 06XX bus arbiter fronting the 50XX (score/protection), 51XX (I/O)
 //! and 54XX (explosion sound) custom MCUs. Unlike Galaga/Dig Dug, the DIP
@@ -39,6 +52,7 @@ use phosphor_macros::{MemoryRegion, Saveable};
 
 use crate::gfx_registry::GfxRegion;
 use crate::namco_galaga::{self, GalagaCpus, NamcoGalagaBoard, NamcoGalagaBus, ScanlineGame};
+use crate::namco_wsg_output::BoardParams;
 use crate::rom_loader::{RomEntry, RomLoadError, RomRegion, RomSet};
 
 // ---------------------------------------------------------------------------
@@ -455,7 +469,7 @@ pub struct XeviousSystem {
 
 impl XeviousSystem {
     pub fn new() -> Self {
-        let mut board = NamcoGalagaBoard::new();
+        let mut board = NamcoGalagaBoard::new(BoardParams::XEVIOUS);
         // All three CPUs share these eight 2KB windows. The SR trio is general
         // work RAM whose top 0x80 bytes are the sprite registers: the sprite
         // hardware reads position from SR1, flip/size/bank from SR2 and

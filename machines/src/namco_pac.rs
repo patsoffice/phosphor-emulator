@@ -8,7 +8,7 @@
 //!
 //! The audio output stage on p23 is transcribed in
 //! [`docs/schematics/pacman-audio-output.md`](../../docs/schematics/pacman-audio-output.md)
-//! and modeled in [`crate::namco_pac_sound`]: the board multiplies sample by
+//! and modeled in [`crate::namco_wsg_output`]: the board multiplies sample by
 //! volume through two switched resistor networks rather than in arithmetic, so
 //! the WSG's voices reach it as the two latch fields and `fill_audio` drains
 //! that stage instead of the chip. What is still missing is the LM1877's second
@@ -32,7 +32,7 @@ use phosphor_core::core::{Bus, BusMaster, TimingConfig};
 use phosphor_core::cpu::z80::Z80;
 use phosphor_core::device::namco_wsg::NamcoWsg;
 
-use crate::namco_pac_sound::PacmanAudioOutput;
+use crate::namco_wsg_output::{BoardParams, WsgOutputStage};
 use phosphor_core::gfx;
 use phosphor_core::gfx::decode::{GfxLayout, decode_gfx};
 use phosphor_macros::{BusDebug, DebugTrace, MemoryRegion, Saveable};
@@ -538,7 +538,7 @@ pub struct NamcoPacBoard {
     /// resampler go unused here: this board multiplies sample by volume in two
     /// switched resistor networks, so the voices reach the speaker as codes.
     #[save(id = 13)]
-    pub(crate) audio_out: PacmanAudioOutput,
+    pub(crate) audio_out: WsgOutputStage,
 
     // Pre-decoded GFX caches (from GFX ROM)
     #[save_skip]
@@ -612,7 +612,7 @@ impl NamcoPacBoard {
             map: Self::build_map(),
             sprite_coords: [0; 0x10],
             wsg: NamcoWsg::new(TIMING.cpu_clock_hz),
-            audio_out: PacmanAudioOutput::new(),
+            audio_out: WsgOutputStage::new(BoardParams::PACMAN, TIMING.cpu_clock_hz),
             tile_cache: gfx::GfxCache::new(256, 8, 8),
             sprite_cache: gfx::GfxCache::new(64, 16, 16),
             palette_prom: [0; 32],
@@ -711,7 +711,7 @@ impl NamcoPacBoard {
     fn begin_cycle_inner(&mut self, cpu: &Z80) {
         // WSG tick (runs at CPU clock rate). The voices come out as the two
         // latch fields rather than as a product, because the multiply is the
-        // output stage's: see `namco_pac_sound`.
+        // output stage's: see `namco_wsg_output`.
         let voices = self.wsg.tick_voices();
         self.audio_out.tick(voices);
 

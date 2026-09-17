@@ -19,6 +19,16 @@ not share a volume law even though they share a DAC.
 | Drawing | `Dig Dug CPU PCB Schematic Diagram`, Atari SP-203 sheet 5A, 1st printing, (c) Atari Inc. 1982 |
 | Read from | `arcade-museum.com/manuals-videogames/D/digdugsp.pdf`, PDF p18 (left half) and p17 (right half) |
 | Transcribed | 2026-08-31 |
+| Drawing | `Xevious CPU PCB Schematic Diagram`, Atari SP-230 1st printing, (c) Atari Inc. 1983 |
+| Read from | `arcarc.xmission.com/PDF_Arcade_Atari_Kee/Xevious/Xevious_SP-230_1st_Printing.pdf`, PDF p9 (sheet 5A, the DAC) and p10 (sheet 5B, the amplifier) |
+| Transcribed | 2026-09-17, for `phosphor-emulator-enst` |
+
+**Two Xevious packages, and their sheet numbers disagree.** The reading was
+started on a 12-page `xevious_schems.pdf`, where the DAC's title block says
+sheet 5B and the amplifier's says 6A; SP-230 carries the same two drawings as
+sheets 5A and 5B. Cite the package, not the sheet number, and prefer SP-230:
+it is four times the file size for seven more pages, and values that do not
+resolve on the smaller scan resolve on it.
 
 Two scans of the same design, at two resolutions and from two licensees. **The
 Dig Dug package is the one to read**: its pages carry a 300 dpi bitmap where the
@@ -108,7 +118,27 @@ differential nonlinearity of +0.82 LSB at the major carry. **That is the
 waveform's zero crossing.** The model's `wave_nibble - 8` puts the signed zero
 exactly at the code pair where the board's DAC has its one large kink, so the
 error is a step discontinuity through zero on every cycle of every voice, which
-is an odd-harmonic mechanism rather than a level error.
+is a distortion mechanism rather than a level error.
+
+**It is not purely odd-harmonic, and this file said it was.** Measured
+2026-09-17 against the eight waveforms Galaga's `prom-1.1d` actually holds, the
+deviation from linear is *exactly* odd-symmetric about code **7.5**
+(`d(c) + d(15-c)` is zero to 1e-16), but the model's signed zero is code **8**.
+That half-code offset is what mixes even harmonics in, and the split then
+depends on where a given waveform sits:
+
+| waveform | residual vs its own AC RMS | even / odd |
+|---|---|---|
+| 0 | -30.0 dB | 79 / 61 |
+| 3 | -26.2 dB | 0 / 100 |
+| 6 | -22.8 dB | 52 / 86 |
+| 7 | -24.7 dB | 80 / 60 |
+| 2 | exactly zero | two-level square |
+
+Waveform 2 is the check on the method rather than a result: it holds two codes,
+0 and 14, and a map through two points is always affine, so no ladder shape can
+show there. The Pac-Man transcription's opposite claim, that the same ladder is
+an even-harmonic mechanism, is wrong in the same way and for the same reason.
 
 The sample network's own output impedance is 263 ohms, the four legs in
 parallel.
@@ -127,6 +157,27 @@ boards.
 - **Galaga** has no shunt pair. The node runs to R19 10k into the inverting input
   of the `5P` LM324, with R20 3.3k feedback, so the switched legs and R19 are in
   series into a virtual ground and the transfer is `1 / (R_legs + 10k)`.
+- **Xevious** is Galaga's, resistor for resistor: `TONES` through R119 10k into
+  the inverting input of the `8A` LM324 with R125 3.3k feedback. See the Xevious
+  section below.
+
+**All three are the same expression.** `1 / (R_legs + R_series)` is
+`G / (G + 1/R_series)` once normalized, so every board in this family, Pac-Man
+included, divides the switched conductance against one fixed conductance and
+differs only in what that conductance is:
+
+| board | other arm | from |
+|---|---|---|
+| Pac-Man | 32.3 uS | R96 22k in series with the 10k cabinet pot |
+| Galaga | 100 uS | R19 10k into a virtual ground |
+| Xevious | 100 uS | R119 10k into a virtual ground |
+| Dig Dug | 200 uS | R105 and R108, 10k each to +5 V and ground |
+
+That is worth stating as one law rather than three, because it is what the
+drawings actually show and because a model then carries one number per board
+instead of three circuits. It is **not** an invitation to assume the fourth
+board: Xevious was read before it was added to this table, and the reading is
+what put it beside Galaga rather than beside Dig Dug.
 
 Both saturate as the volume code rises, and both are therefore louder than a
 linear multiply once normalized to full scale:
@@ -203,6 +254,39 @@ coupling capacitor, C19 0.01 uF to ground, and the `7C` MB3730 bridge amplifier,
 out to `+SPEAKER` and `-SPEAKER`. So Galaga's speaker is driven differentially
 too, from a bridge output rather than from an op-amp pair.
 
+## Xevious, read 2026-09-17
+
+Read after the rest of this file, from a scan the owner supplied, and it closes
+the largest gap the first pass left: the catalog row covers Xevious and no
+Xevious drawing had been read.
+
+**Sheet 5B carries the DAC**, and it is this circuit. The `7M` 74LS273's outputs
+12, 15, 16 and 19 drive R59 470, R58 1k, R57 2.2k and R56 4.7k into one node,
+which feeds the four inputs of the `10M` 4066. The switch outputs leave through
+R63 10k, R61 22k, R62 47k and R60 100k to a single node named `TONES`, shunted
+by C7 0.0022 uF. Same latch pins, same ten resistor values, same shunt value as
+Galaga's C43.
+
+**Sheet 6A carries the amplifier**, and it is Galaga's rather than Dig Dug's.
+`TONES` runs through R119 10k into the inverting input of the `8A` LM324 with
+R125 3.3k feedback. That inverting node is shared, exactly as Galaga's is: R124
+33k and R130 33k arrive on it from two other 324 sections, against Galaga's R21
+and R36 33k. The output then goes through R120 22k to a `10J` 324 with R121 100k
+feedback, and on through R122 100k to a second `10J` section with R123 100k, out
+as `AUDIO 1` and `AUDIO 2` on connectors G and F. R126 100k from +5 V with C86
+0.1 uF sets the reference the sections work about.
+
+So Xevious leaves differentially like Dig Dug, from a pair of op-amp sections,
+but its DAC is loaded like Galaga's. Board family predicted neither; the sheet
+settled both.
+
+**R57 is 2.2k, read.** On the first scan its label did not resolve between 2.2k
+and 22k, and 2.2k was taken as the only value keeping the ladder monotonic by
+latch pin. SP-230 settles it by reading: the decimal point is plain at 600 dpi.
+The inference was right, but it is worth recording that it was an inference
+first, because the argument from monotonicity would have been just as
+comfortable had it been wrong.
+
 ## What it establishes
 
 - The Galaga-family board's analog audio path is the Pac-Man circuit: the same
@@ -226,9 +310,9 @@ too, from a bridge output rather than from an op-amp pair.
 
 ## What it does NOT establish
 
-- **Xevious.** The catalog row covers Xevious and no Xevious drawing was read.
-  The claim above is about Galaga and Dig Dug. Whether Xevious's board loads the
-  same DAC the Galaga way, the Dig Dug way, or a third way is open.
+- **Which of Xevious's 4066 control lines carries which volume bit.** The
+  topology and the ten values were read; the control pins were not traced back
+  to the latch bit by bit, exactly as on the Galaga sheet.
 - **The polarity and bit order of the volume nibble arriving at 1D-4D.** The
   82S25 register RAM's outputs are drawn with overbars, so they are inverting,
   and the path from RAM to `1D`-`4D` was not traced through. The mapping of

@@ -556,11 +556,22 @@ phosphor-emulator-2926."""
 [[target]]
 id = "namco-galaga-output"
 machines = ["digdug", "galaga", "xevious"]
-status = "missing"
+status = "partial"
 notes = """
-EXAMINED, ON TWO DRAWINGS, AND IT IS THE PAC-MAN CIRCUIT. Off `unexamined` as
-`missing`: the model forwards the WSG and stops, so none of the analog path is
-present.
+MODELED 2026-09-17 in machines/src/namco_wsg_output.rs, the stage Pac-Man got
+first, now shared: both ladders, the node's shunt and the coupling, with each
+board's bias arm as a constant. All three machines here are wired to it and each
+carries its own parameters.
+
+EXAMINED, ON THREE DRAWINGS, AND IT IS THE PAC-MAN CIRCUIT.
+
+STILL `partial`: no adapter, no scenario, nothing compared against a reference
+capture, and every board here still leaves the PCB differentially where the
+model is mono. What the model is checked against is the drawings' arithmetic.
+
+Measured over the committed movies, against the integer multiply it replaced:
+peak -4.41 to -4.07 dBFS on Galaga, -0.91 to -1.04 on Dig Dug, -1.21 to -0.07 on
+Xevious, so the level did not move and the timbre did.
 
 THE SAMPLE-TIMES-VOLUME MULTIPLY IS ANALOG here too, and the values are
 identical to `namco-pac-output`. The 74LS273 at 1L holds two four-bit fields:
@@ -580,7 +591,11 @@ to 6.6 dB. One linear multiply cannot be right for both.
 
 The sample ladder's deviation is not a level error but a KINK AT MID-SCALE: the
 7-to-8 step is +0.82 LSB of DNL, and `wave_nibble - 8` puts the signed zero
-crossing exactly there, so it is an odd-harmonic mechanism on every cycle.
+crossing exactly there. This row first called that an odd-harmonic mechanism and
+`namco-pac-output` called the same ladder an even-harmonic one; measured against
+Galaga's eight PROM waveforms, neither is right. The deviation is exactly
+odd-symmetric about code 7.5 and the signed zero is code 8, and that half-code
+offset mixes the two. It lands 23 to 30 dB below each waveform's own AC content.
 
 Also unmodelled: a shunt capacitor at the node on each board whose corner MOVES
 WITH THE VOLUME CODE, 3.3 to 6.0 kHz on Dig Dug and 8 to 20 kHz on Galaga; a
@@ -592,10 +607,15 @@ NOTE FOR THE 54XX ROW: on Galaga the WSG and two 54XX filter outputs sum at one
 LM324 inverting node, R19 10k against R21 33k and R36 33k. The junction belongs
 to neither row alone.
 
+XEVIOUS WAS READ 2026-09-17, from Atari SP-230 sheets 5A and 5B, and it is
+GALAGA'S stage rather than Dig Dug's: R119 10k into an LM324 virtual ground with
+R125 3.3k feedback, two 33k filter legs on the same node, C7 0.0022 uF at the
+DAC. Read before it was modeled, which matters on a row where the two boards
+already examined did not agree with each other.
+
 Transcribed at docs/schematics/namco-galaga-audio-output.md, from the Galaga
-Midway CPU PC sheet and the Dig Dug Atari SP-203 sheet 5A. Tracked as
-phosphor-emulator-enst. Xevious is in this row and NO Xevious drawing was read;
-its output stage is still unexamined.
+Midway CPU PC sheet, the Dig Dug Atari SP-203 sheet 5A and the Xevious SP-230.
+Tracked as phosphor-emulator-enst.
 
 Separate from `namco-54xx-explosion`, which is about the explosion circuit on the
 same board: Galaga and Xevious were catalogued for that one path and nothing had
