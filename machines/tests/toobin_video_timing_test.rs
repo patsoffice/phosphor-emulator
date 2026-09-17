@@ -448,9 +448,11 @@ fn the_whole_image_reads_back_through_the_real_bus() {
     r.assert_completed();
     // The same sum the program computes: 4096 big-endian words with 16-bit
     // wraparound, over the committed file.
-    let expected = PROGRAM.chunks_exact(2).fold(0u16, |acc, w| {
-        acc.wrapping_add(u16::from_be_bytes([w[0], w[1]]))
-    });
+    let expected = PROGRAM
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .fold(0u16, |acc, w| acc.wrapping_add(u16::from_be_bytes(*w)));
     assert_eq!(PROGRAM.len(), IMAGE_LEN, "the committed image is not 8 KB");
     assert_eq!(
         r.word(R_CKSUM),
