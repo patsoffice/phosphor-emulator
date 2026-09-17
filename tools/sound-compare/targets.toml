@@ -606,11 +606,26 @@ appears here and not there."""
 [[target]]
 id = "namco-pac-output"
 machines = ["pacman", "mspacman"]
-status = "missing"
+status = "partial"
 notes = """
-EXAMINED AND FOUND SUBSTANTIAL. The first entry moved off `unexamined`, and it
-came off as `missing` rather than `partial`: the board's whole analog path is
-absent from the model, which forwards the WSG and stops.
+MODELED 2026-09-17 in machines/src/namco_pac_sound.rs, on the DiscreteCircuit
+runtime: both resistor ladders, C1, and the C46 coupling. The WSG's voices reach
+it as the two latch fields through `NamcoWsg::tick_voices`, because the product
+`sample * volume` is the one quantity this board never forms.
+
+STILL `partial`, not `implemented-needs-validation`: nothing has been compared
+against a reference capture, there is no adapter and no scenario, R5 is still
+untraced, and the LM1877's two speaker connectors are still one mono output.
+What the model is checked against is the drawing's own arithmetic, in the unit
+tests beside it.
+
+Measured over the committed movie, against the integer multiply it replaced: DC
+offset -0.0202 to +0.0001, peak -4.67 to -1.73 dBFS, AC RMS 0.8 dB louder, decay
+T20 0.125 s to 0.239 s, and band energy moving 10.8 pp out of 0-150 Hz and
+13.4 pp into 400-1000 Hz. The decay and the low end are the volume law and the
+coupling; the top two bands falling is C1.
+
+WHAT WAS FOUND, and why it was worth modeling.
 
 THE SAMPLE-TIMES-VOLUME MULTIPLY IS ANALOG, done with two switched resistor
 networks, and this is the same shape of finding as Lunar Lander's throttle. The
@@ -622,16 +637,25 @@ exact ladder gives 1 : 0.5 : 0.25 : 0.125, so a model computing `sample * volume
 in integer arithmetic is wrong by an amount that grows as either field gets
 small, which is most of a decaying note.
 
-Also unmodelled: C1 10 nF at the summing output, whose corner MOVES WITH THE
-VOLUME CODE because the volume code decides which resistors are in circuit; the
-22k-into-10k-pot volume network; and an LM1877 driving TWO speaker connectors,
-where the emulator is mono. `SOUND ON` is the latch's CLR, so muting zeroes the
-sample and the volume together rather than muting downstream.
+The volume network turned out to be the large mechanism, and the arithmetic for
+it is in the transcription. It is a divider into the 31k the 4066 sections
+drive, not a sum of leg gains, so code 1 sits 11.1 dB below full scale where
+`code / 15` puts it at 23.5 dB: every decaying note in the game was decaying
+about twice as far in dB as the board's does.
+
+Two more the model now carries: C1 10 nF at the summing output, whose corner
+MOVES WITH THE VOLUME CODE because the volume code decides which resistors are
+in circuit, and the sample ladder's asymmetry, whose zero sits at 0.5607 of full
+scale rather than 0.5 and which therefore adds even harmonics.
+
+Still absent: the LM1877 driving TWO speaker connectors, where the emulator is
+mono, and R5. `SOUND ON` is the latch's CLR, so muting zeroes the sample and the
+volume together rather than muting downstream, which is what
+`tick_voices` reports when sound is off.
 
 Transcribed at docs/schematics/pacman-audio-output.md, from the troubleshooting
 guide rather than the manual the board file used to cite. Tracked as
-phosphor-emulator-ga9p. The first measurement wants no reference capture at all:
-the ladder deviation is arithmetic against the transcribed table.
+phosphor-emulator-ga9p.
 
 Superseded notes, kept because the mistake in them is instructive:
 

@@ -7,11 +7,12 @@
 //! | `PAC-MAN` game logic schematic, Midway | `arcade-museum.com/manuals-videogames/P/Pacman-Troubleshooting-Guide-Part1.pdf` | PDF p22 (left), p23 (right) |
 //!
 //! The audio output stage on p23 is transcribed in
-//! [`docs/schematics/pacman-audio-output.md`](../../docs/schematics/pacman-audio-output.md).
-//! **None of it is modelled here**: `fill_audio` forwards the WSG and stops,
-//! where the board multiplies sample by volume through two switched resistor
-//! networks, filters the result, and drives two speakers off an LM1877. See
-//! `phosphor-emulator-ga9p`.
+//! [`docs/schematics/pacman-audio-output.md`](../../docs/schematics/pacman-audio-output.md)
+//! and modeled in [`crate::namco_pac_sound`]: the board multiplies sample by
+//! volume through two switched resistor networks rather than in arithmetic, so
+//! the WSG's voices reach it as the two latch fields and `fill_audio` drains
+//! that stage instead of the chip. What is still missing is the LM1877's second
+//! speaker, since this board is mono here. See `phosphor-emulator-ga9p`.
 //!
 //! PREFER THIS SCAN. `arcade-museum.com/manuals-videogames/P/pac-man_p2.pdf`,
 //! which this file used to be cited against, splits the same schematic across
@@ -30,6 +31,8 @@ use phosphor_core::core::{AccessKind, AddressSpace16};
 use phosphor_core::core::{Bus, BusMaster, TimingConfig};
 use phosphor_core::cpu::z80::Z80;
 use phosphor_core::device::namco_wsg::NamcoWsg;
+
+use crate::namco_pac_sound::PacmanAudioOutput;
 use phosphor_core::gfx;
 use phosphor_core::gfx::decode::{GfxLayout, decode_gfx};
 use phosphor_macros::{BusDebug, DebugTrace, MemoryRegion, Saveable};
@@ -531,6 +534,12 @@ pub struct NamcoPacBoard {
     #[save(id = 3)]
     pub(crate) wsg: NamcoWsg,
 
+    /// The board's analog output stage. The WSG's own summed output and its
+    /// resampler go unused here: this board multiplies sample by volume in two
+    /// switched resistor networks, so the voices reach the speaker as codes.
+    #[save(id = 13)]
+    pub(crate) audio_out: PacmanAudioOutput,
+
     // Pre-decoded GFX caches (from GFX ROM)
     #[save_skip]
     pub(crate) tile_cache: gfx::GfxCache,
@@ -603,6 +612,7 @@ impl NamcoPacBoard {
             map: Self::build_map(),
             sprite_coords: [0; 0x10],
             wsg: NamcoWsg::new(TIMING.cpu_clock_hz),
+            audio_out: PacmanAudioOutput::new(),
             tile_cache: gfx::GfxCache::new(256, 8, 8),
             sprite_cache: gfx::GfxCache::new(64, 16, 16),
             palette_prom: [0; 32],
@@ -699,8 +709,11 @@ impl NamcoPacBoard {
 
     /// Per-cycle board work, with no frame-position tests in it.
     fn begin_cycle_inner(&mut self, cpu: &Z80) {
-        // WSG tick (runs at CPU clock rate)
-        self.wsg.tick();
+        // WSG tick (runs at CPU clock rate). The voices come out as the two
+        // latch fields rather than as a product, because the multiply is the
+        // output stage's: see `namco_pac_sound`.
+        let voices = self.wsg.tick_voices();
+        self.audio_out.tick(voices);
 
         // Latch debug attribution context (cycle + instruction PC) before
         // CPU execution — bus dispatch cannot read CPU state mid-tick.
@@ -1064,7 +1077,7 @@ impl NamcoPacBoard {
     // -----------------------------------------------------------------------
 
     pub fn fill_audio(&mut self, buffer: &mut [i16]) -> usize {
-        self.wsg.fill_audio(buffer)
+        self.audio_out.fill_audio(buffer)
     }
 
     // -----------------------------------------------------------------------
@@ -1075,6 +1088,7 @@ impl NamcoPacBoard {
     /// The caller resets the CPU separately — it lives in the game wrapper.
     pub fn reset_board(&mut self) {
         self.wsg.reset();
+        self.audio_out.reset();
         self.irq_enabled = false;
         self.sound_enabled = false;
         self.flip_screen = false;

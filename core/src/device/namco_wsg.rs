@@ -157,8 +157,20 @@ impl NamcoWsg {
     /// filter and its group delay between the test and the thing under test,
     /// which is a poor way to ask what sample a waveform position holds.
     fn mix(&mut self) -> i32 {
-        let mut mixed: i32 = 0;
-        for voice in &mut self.voices {
+        self.step_voices()
+            .iter()
+            .map(|(sample, volume)| sample * *volume as i32)
+            .sum()
+    }
+
+    /// Advance every voice one step and return each one's waveform sample
+    /// (4-bit signed, -8..+7) and volume code (0-15) separately.
+    ///
+    /// A voice whose volume is zero reports `(0, 0)` and does not advance,
+    /// which is what [`Self::mix`] has always done.
+    fn step_voices(&mut self) -> [(i32, u8); 3] {
+        let mut out = [(0, 0); 3];
+        for (slot, voice) in self.voices.iter_mut().enumerate() {
             if voice.volume == 0 {
                 continue;
             }
@@ -171,9 +183,33 @@ impl NamcoWsg {
             let wave_offset = (voice.waveform_select as usize) * 32 + pos;
             let sample = (self.waveform_rom[wave_offset] & 0x0F) as i32 - 8;
 
-            mixed += sample * voice.volume as i32;
+            out[slot] = (sample, voice.volume);
         }
-        mixed
+        out
+    }
+
+    /// Advance one CPU clock and return what the board's sample-and-volume
+    /// latch holds for each voice, for a board that performs the multiply in
+    /// its own analog stage instead of taking [`Self::tick`]'s summed output.
+    ///
+    /// The multiply is not always the chip's to do. On the Pac-Man board the
+    /// two four-bit fields leave the 74LS273 as eight separate lines and are
+    /// multiplied by two switched resistor networks, and neither network is an
+    /// exact binary ladder, so the product this chip computes is the one thing
+    /// that board never forms. See `docs/schematics/pacman-audio-output.md`.
+    ///
+    /// **A board calls this or [`Self::tick`], never both**: each advances the
+    /// voices, and the internal resampler this one does not feed is the one
+    /// [`Self::fill_audio`] drains.
+    ///
+    /// Sound disabled reports `(0, 0)` for every voice, because `SOUND ON` is
+    /// the latch's CLR: the board zeroes the sample and the volume together at
+    /// the latch rather than muting anything downstream.
+    pub fn tick_voices(&mut self) -> [(i32, u8); 3] {
+        if !self.sound_enabled {
+            return [(0, 0); 3];
+        }
+        self.step_voices()
     }
 
     /// Drain audio samples into the provided buffer. Returns number of samples written.
