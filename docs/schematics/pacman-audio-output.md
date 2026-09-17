@@ -89,6 +89,57 @@ against 0.25. A model that computes `sample * volume` in integer arithmetic is
 using the exact ladder, and is therefore wrong in a way that grows as either
 field gets small -- which is most of a decaying note.
 
+## What the two ladders actually do
+
+The arithmetic the section below asks for, done 2026-09-17 for
+`phosphor-emulator-ga9p`. It needs no capture: it is the transcribed resistor
+values and nothing else. Three mechanisms come out of it, and they are not the
+same size.
+
+**The volume network is a divider, and it is the large one.** The 4066 sections
+put some subset of R2, R1, R3 and R4 in parallel between the summing node and
+the output bus, and the bus is loaded by R96 22k in series with the 10k pot,
+about 31k. A leg that is switched out leaves the network entirely, so the gain
+is `load / (R_parallel + load)` rather than a sum of leg gains, and the law that
+produces is strongly compressed:
+
+| volume code | 1 | 2 | 4 | 8 | 15 |
+|---|---|---|---|---|---|
+| board, dB below full | -11.1 | -6.6 | -3.2 | -1.0 | 0 |
+| `code / 15`, dB below full | -23.5 | -17.5 | -11.5 | -5.5 | 0 |
+| error | +12.5 | +10.9 | +8.3 | +4.5 | 0 |
+
+So the emulator's quietest volume code is 23.5 dB down where the board's is
+11.1 dB down. **Every decaying note in the game decays about twice as far in
+dB as the board's does.** Over the 225 audible (sample, volume) pairs the RMS
+error is 6.1 dB.
+
+That figure moves with R5, the untraced trimmer below. If R5 turns out to shunt
+the output bus to ground, the load is about 12.9k instead and the compression is
+milder: -15.7 dB at code 1, a +7.8 dB error, 4.2 dB RMS. **The direction and the
+rough size survive either answer**, which is what makes this worth modeling
+before R5 is resolved, but the exact law does not.
+
+**The sample ladder is not a level error, it is an asymmetry.** Its four legs
+are switched between the latch's rails, so code 8, the waveform's zero, lands at
+0.5607 of full scale rather than 0.5. The negative half-swing is therefore 27.6 %
+larger than the positive one, worth 2.1 dB, and what that adds is even harmonics
+rather than gain. A full-swing waveform leaves a -0.061 offset for C46 to remove.
+Judged as a shape after that coupling, the codes either side of zero are the
+furthest out: code 7, one step below zero, is 5.7 dB larger than the model makes
+it, though at an amplitude where that costs little.
+
+**C1's corner moves with the volume code**, because the code decides which
+resistors are in circuit. Against the 31k load it runs from 673 Hz at code 1 to
+3.3 kHz at code 15 (1.4 kHz to 4.1 kHz for the 12.9k load). A note therefore
+gets darker as it decays, on top of getting quieter. The emulator has no filter
+here at all.
+
+One caveat on all three: the 4066's on-resistance is in series with each volume
+leg and is in none of these numbers. At a nominal 80 ohms it is under 1 % of the
+10k leg and proportionally less of the others, so it moves the law less than R5
+does.
+
 ## The filter and the amplifier
 
 - **C1, 0.01 uF, at the summing output.** Against the switched legs in parallel
@@ -126,12 +177,15 @@ field gets small -- which is most of a decaying note.
 - **Whether the two amplifier sections carry the same signal.** Section two's
   input side was not followed back.
 - **Any measurement.** Nothing here has been compared against a capture; the
-  claims are all from the drawing.
+  claims are all from the drawing, and the ladder arithmetic above is derived
+  from it rather than measured against anything.
 - **The 4066's on-resistance**, which adds to each volume leg. At a nominal 80
   ohms against 10k it is under 1 %, but it is in none of the ratios above.
-- **What the emulator's WSG actually outputs**, and so how far the compressed
-  ladders would actually move the sound. That is the first measurement to make,
-  and it needs no reference capture: it is arithmetic against this table.
+- **How often the game visits the codes where the error is largest.** The
+  arithmetic above says what each code is worth; it does not say what the WSG
+  actually plays. The error is largest at low volume codes, which is where a
+  decay spends most of its time, so the weighting is unlikely to be kind, but
+  that is a prediction rather than a count.
 
 ## Confidence
 
