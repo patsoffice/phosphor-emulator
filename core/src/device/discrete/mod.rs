@@ -895,8 +895,20 @@ impl DiscreteCircuitBuilder {
     /// NE555 astable oscillator (port of MAME `dsd_555_astable`) from real
     /// component values: charge resistor `r1` (ohms), discharge resistor `r2`,
     /// timing cap `c` (farads), and supply `vcc` (volts). With `cv_src = None`
-    /// it free-runs near `1.49 / ((r1 + 2·r2)·c)` Hz; with a control-voltage
-    /// source it modulates around that. `out_high` is the square-wave high level
+    /// it free-runs at the datasheet's `1.44 / ((r1 + 2·r2)·c)` Hz; with a
+    /// control-voltage source it modulates around that.
+    ///
+    /// **Not MAME's 1.49.** `FREQ_OF_555` uses that constant and it is 3.4 %
+    /// away, which is about 60 cents on a pitched voice. It does not come from
+    /// the part: TI's `NE555, SA555, SE555` datasheet gives
+    /// `tH = 0.693·(r1+r2)·c` and `tL = 0.693·r2·c`, hence
+    /// `f = 1.44/((r1+2·r2)·c)`, and 0.693 is `ln2`, so 1.49 contradicts the
+    /// same datasheet's own constants (`1/0.693 = 1.443`). Charging 1/3 to 2/3
+    /// Vcc through `r1+r2` and discharging back through `r2` is exactly what
+    /// this node integrates, so the ideal result and the datasheet agree and
+    /// there is nothing here to correct for.
+    ///
+    /// `out_high` is the square-wave high level
     /// (MAME's desc `v_out_high`; pass `vcc - 1.2` for the chip default).
     /// `output` selects the square wave or the capacitor voltage. The
     /// charge/discharge exponents are precomputed here from `sim_rate`; the

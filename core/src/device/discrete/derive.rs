@@ -323,10 +323,16 @@ mod tests {
     /// time constants. Simulating with the derived exponents must reproduce
     /// that closely, since it is exactly the integration the node performs.
     ///
-    /// Note this is `1.4427/((R1+2R2)C)`, not the `1.49` the datasheet quotes
-    /// and the older test above compares against with a 10 % tolerance — the
-    /// real chip runs a few percent fast. The model is ideal, so pin the ideal
-    /// number here and track the discrepancy separately.
+    /// This is `1.4427/((R1+2R2)C)`, and it is also what the part specifies.
+    /// TI's `NE555, SA555, SE555` datasheet builds the period from
+    /// `tH = 0.693·(R1+R2)·C` and `tL = 0.693·R2·C` and quotes
+    /// `f = 1.44/((R1+2R2)C)`; 0.693 is `ln2`, so the datasheet's model is this
+    /// one and the rounding is the only difference.
+    ///
+    /// The `1.49` in MAME's `FREQ_OF_555` is the outlier, not us. It is 3.4 %
+    /// away and cannot be reached from the datasheet's own 0.693, since
+    /// `1/0.693 = 1.443`. There is no "the real chip runs fast" correction to
+    /// make here, which is what this was previously thought to be.
     #[test]
     fn ne555_free_runs_at_the_ideal_rc_frequency() {
         let (r1, r2, c, vcc) = (47_000.0, 27_000.0, 33e-9, 5.0);

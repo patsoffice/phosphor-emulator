@@ -661,12 +661,25 @@ const SIM: u64 = 192_000;
 
 /// Drive an astable square output and recover its frequency from rising edges.
 fn astable_freq(r1: f64, r2: f64, c: f64) -> f64 {
-    let mut b = builder_1to1(SIM);
+    astable_freq_at(SIM, 1, r1, r2, c)
+}
+
+/// The same, with the simulation rate and the measurement window as arguments.
+///
+/// Both matter when the question is the frequency itself rather than how it
+/// moves. The node checks its threshold once per step and has no sub-sample
+/// crossing loop, so a transition is caught up to one step late and the period
+/// comes out about one step long: at the shared [`SIM`] against a 4.8 kHz
+/// oscillator that is 40 steps per cycle and a 2.5 % flat reading, which is
+/// quantization rather than anything about the RC. Counting whole edges over a
+/// window puts a second floor under it, at one part in the edge count.
+fn astable_freq_at(sim: u64, seconds: usize, r1: f64, r2: f64, c: f64) -> f64 {
+    let mut b = builder_1to1(sim);
     let osc = b.ne555_astable("OSC", None, r1, r2, c, 5.0, 3.8, Output555::Square);
     let mut c_ = b.build();
     step_n(&mut c_, 1_000); // settle into steady oscillation
 
-    let steps = 192_000usize; // 1 s of simulation
+    let steps = sim as usize * seconds;
     let mut prev = c_.value(osc);
     let mut edges = 0u32;
     for _ in 0..steps {
@@ -677,18 +690,36 @@ fn astable_freq(r1: f64, r2: f64, c: f64) -> f64 {
         }
         prev = cur;
     }
-    edges as f64 / (steps as f64 / SIM as f64)
+    edges as f64 / seconds as f64
 }
 
+/// The datasheet's own free-running frequency, through the whole node rather
+/// than the exponents alone.
+///
+/// `f = 1.44/((R1+2·R2)·C)`, from the astable section of Texas Instruments'
+/// `NE555, SA555, SE555` datasheet, which reaches it from `tH = 0.693·(R1+R2)·C`
+/// and `tL = 0.693·R2·C`. Those are `ln2` time constants, so the quoted 1.44 is
+/// `1/ln2` rounded and the datasheet's model IS the ideal RC one.
+///
+/// This used to compare against MAME's `FREQ_OF_555`, which uses 1.49 and is
+/// 3.4 % away from both this model and the datasheet it cites. 1.49 cannot be
+/// derived from the datasheet's own 0.693: `1/0.693 = 1.443`. The 10 % window
+/// that inherited constant needed is why the gap sat unnoticed, so the window
+/// here is 0.5 %.
+///
+/// Donkey Kong's walk/jump values at a raised simulation rate, so that neither
+/// floor in [`astable_freq_at`] is what is being measured: 500 kHz against
+/// 432 Hz is about 1160 steps per cycle, and two seconds is about 864 edges, so
+/// both sit near a tenth of a percent.
 #[test]
-fn ne555_astable_oscillates_near_freq_of_555() {
-    let (r1, r2, c) = (1_000.0, 1_000.0, 0.1e-6);
-    // MAME's FREQ_OF_555 estimate for the classic astable.
-    let expected = 1.49 / ((r1 + 2.0 * r2) * c);
-    let measured = astable_freq(r1, r2, c);
+fn ne555_astable_oscillates_at_the_datasheet_frequency() {
+    let (r1, r2, c) = (47_000.0, 27_000.0, 33e-9);
+    let expected = 1.44 / ((r1 + 2.0 * r2) * c);
+    let measured = astable_freq_at(500_000, 2, r1, r2, c);
     assert!(
-        (measured - expected).abs() < 0.1 * expected,
-        "555 astable freq {measured:.1} Hz should be within 10% of {expected:.1} Hz"
+        (measured - expected).abs() < 0.005 * expected,
+        "555 astable freq {measured:.2} Hz should be within 0.5% of the \
+         datasheet's {expected:.2} Hz"
     );
 }
 
