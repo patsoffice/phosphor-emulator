@@ -367,11 +367,30 @@ stubbed; the POKEYs work. Phase 8 item 1."""
 [[target]]
 id = "namco-54xx-explosion"
 machines = ["galaga", "xevious"]
-status = "missing"
+status = "partial"
 notes = """
-The MB8844's digital output plus the analog DAC, filter and mixer behind it.
-Commands sent through the 06XX chip-select are discarded today and explosions
-are silent. Phase 8 item 3; see also phosphor-emulator-uxi9."""
+MODELED 2026-09-18. The MB8844 runs its own firmware (core/src/device/namco54.rs)
+and its three channels reach the summing amplifier through the ladders and
+band-passes in machines/src/namco_wsg_output.rs. Transcribed at
+docs/schematics/namco-54xx-explosion.md. Tracked as phosphor-emulator-uxi9.
+
+COMPARED AGAINST THE REFERENCE, which is what this row exists for, on Galaga's
+self-test explosion captured from reset by both: fundamental 185.4 Hz against
+182.6, centroid 296 Hz against 301, and every band within 5 pp. **Still 8.5 dB
+quiet**, which is a gain question in the summing stage rather than a spectral
+one, and is why this is not `implemented-needs-validation`: there is no adapter
+and no scenario, so nothing here is reproducible from the catalog yet.
+
+THE PORT-TO-LADDER ASSIGNMENT IS THE SOFT SPOT. The sheet shows three groups of
+four output pins and three ladders but does not say which group is which MCU
+port; the model takes that from the reference's discrete network. Assuming they
+ran in pin order, which is the natural reading, is what made the explosion thin
+and high: it puts the busy O-port channels through the 2.5 kHz filter and leaves
+the near-idle R1 driving the 168 Hz one. Worth confirming against the MB8844
+pinout.
+
+A known CPU discrepancy sits under this: phosphor-emulator-8mez. It does not
+change what this row sounds like."""
 
 [[target]]
 id = "konami-output-filters"

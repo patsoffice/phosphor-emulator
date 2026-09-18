@@ -106,6 +106,28 @@ comes from 3.3k over 2.2k off +5 V with a 10 uF cap: about 2.0 V.
   4.7k leg is the most significant. That is the same ordering the WSG's own
   ladder has on this board, but it was not traced through the MCU's port
   assignment.
+
+- **WHICH MCU PORT FEEDS WHICH LADDER.** The sheet shows three groups of four
+  output pins and three ladders; it does not say which group is which port of
+  the MB8844, because the chip is drawn as a custom block with pin numbers
+  rather than port names. The model currently takes the assignment from the
+  reference emulator's discrete network instead:
+
+  | MCU port | series leg | filter center |
+  |---|---|---|
+  | O, bit 4 clear | 150k | 168 Hz |
+  | O, bit 4 set | 47k | 452 Hz |
+  | R1 | 100k | 2.5 kHz |
+
+  **This is the one thing here that is not read off a drawing, and it is worth
+  checking.** Assuming the groups ran in pin order, which is the natural
+  reading, puts the O port's busy channels through the 2.5 kHz filter and
+  leaves the near-idle R1 driving the 168 Hz one; the explosion then comes out
+  thin and high with no body while every register in the chip reads correctly.
+  Getting it the other way round moved Galaga's self-test explosion from a
+  371 Hz fundamental to 185 Hz against the reference's 183 Hz, and every band
+  to within 5 pp. Confirming it needs the MB8844's package pinout read against
+  the pin numbers on the sheet.
 - **Bosco.** It carries a 54XX too and no Bosco drawing was read. It is not in
   the catalog row and this file makes no claim about it.
 - **The op-amp's rails in practice.** Single supply and a 2.0 V reference are

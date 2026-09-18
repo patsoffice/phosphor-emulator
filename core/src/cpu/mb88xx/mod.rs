@@ -475,10 +475,29 @@ impl Mb88xx {
         self.r_input[port & 3] = val & 0x0F;
     }
 
-    /// Signal an external IRQ (rising edge).
+    /// Drive the external interrupt pin. Latches the request on the rising
+    /// edge.
+    ///
+    /// **This does not match the reference, and the difference is known.**
+    /// MAME latches on the falling edge, when the line is released, which is
+    /// what an active-low pin implies. Tracing this core against MAME's on the
+    /// real Namco 54XX firmware shows it: both reach 0x0039 together, then this
+    /// one vectors to 0x0002 while the reference carries on to 0x003C and
+    /// writes a sound channel. Correcting the edge here makes 5687 differing
+    /// trace lines become 142, all of them a poll loop spinning an iteration
+    /// either side of the release.
+    ///
+    /// It is left alone because **the 51XX's wiring compensates for it**:
+    /// switching to the falling edge silences Dig Dug completely. The board
+    /// drives that chip's line from the 06XX chip-select, and the handshake
+    /// only works with the edge as it is here. Fixing both together is
+    /// `phosphor-emulator-8mez`, and it wants the same trace-diff treatment
+    /// pointed at the 51XX.
+    ///
+    /// The 54XX's sound does not depend on this: its explosion measures the
+    /// same either way.
     pub fn set_irq(&mut self, state: bool) {
         let new_state = state as u8;
-        // Rising edge: trigger if IRQ was low and is now high, and external IRQ is enabled
         if self.irq_pin == 0 && new_state != 0 && (self.pio & INT_CAUSE_EXTERNAL) != 0 {
             self.pending_irq |= INT_CAUSE_EXTERNAL;
         }

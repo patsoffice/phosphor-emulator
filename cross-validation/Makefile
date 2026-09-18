@@ -14,7 +14,7 @@ MAME0148_MCS48  = mame0148/src/emu/cpu/mcs48
 
 all: $(BINDIR)/validate_m6809 \
      $(BINDIR)/validate_m6800 $(BINDIR)/validate_i8035 \
-     $(BINDIR)/validate_mb88xx
+     $(BINDIR)/validate_mb88xx $(BINDIR)/trace_54xx
 
 $(BINDIR):
 	mkdir -p $(BINDIR)
@@ -40,6 +40,12 @@ $(BINDIR)/validate_mb88xx: validate_mb88xx.cpp mame0148_shim.h mb88xx/emu.h mb88
                             $(MAME0148_MB88XX)/mb88xx.c $(MAME0148_MB88XX)/mb88xx.h \
                             include/nlohmann/json.hpp | $(BINDIR)
 	$(CXX) $(CXXFLAGS) $(MAME0148_WARN) -Imb88xx -o $@ validate_mb88xx.cpp
+
+# Not a vector validator: runs the real 54XX firmware and prints a trace to
+# diff against core/tests/mb88xx_54xx_trace.rs. See that file's header.
+$(BINDIR)/trace_54xx: trace_54xx.cpp mame0148_shim.h mb88xx/emu.h mb88xx/debugger.h \
+                            $(MAME0148_MB88XX)/mb88xx.c $(MAME0148_MB88XX)/mb88xx.h | $(BINDIR)
+	$(CXX) $(CXXFLAGS) $(MAME0148_WARN) -Imb88xx -o $@ trace_54xx.cpp
 
 clean:
 	rm -rf $(BINDIR)

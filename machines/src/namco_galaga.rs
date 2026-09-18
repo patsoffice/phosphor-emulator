@@ -1009,16 +1009,11 @@ impl NamcoGalagaBoard {
         // The 54XX runs on the same machine-cycle divider as the 51XX, both
         // being MB88xx parts off the same clock tree, and its three output
         // latches are what the explosion ladders see.
-        if let Some(ref mut n54) = self.namco54 {
-            // The 06XX's chip-select line reaches this MCU's interrupt pin, and
-            // the firmware both vectors off it and then polls it inside the
-            // handler. It needs the line as the 06XX actually drives it, held
-            // for the transaction, rather than a pulse on the write.
-            n54.set_chip_select(self.namco06.chip_select_active(3));
-            if self.clocks.tick(self.namco54_dom) {
-                n54.tick();
-                self.audio_out.set_explosion(n54.channels());
-            }
+        if let Some(ref mut n54) = self.namco54
+            && self.clocks.tick(self.namco54_dom)
+        {
+            n54.tick();
+            self.audio_out.set_explosion(n54.channels());
         }
 
         // Drive the 50XX score/protection MCU (if fitted) the same way: assert

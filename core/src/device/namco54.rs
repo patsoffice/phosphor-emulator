@@ -24,18 +24,20 @@ use phosphor_macros::Saveable;
 ///
 /// # The output ports
 ///
-/// Twelve pins in three groups of four, matching the three ladders:
+/// Three ladders, fed from two ports:
 ///
 /// ```text
-/// O[3:0] → channel 1
-/// O[7:4] → channel 2
-/// R1     → channel 3
+/// O, bit 4 clear → the 150k leg, the 168 Hz filter
+/// O, bit 4 set   → the 47k leg, the 452 Hz filter
+/// R1             → the 100k leg, the 2.5 kHz filter
 /// ```
 ///
-/// The O port is eight pins driving two ladders at once, not one port shared in
-/// time. `OUTO` writes a nibble at a time with the carry choosing the half, so
-/// each channel holds while the other is written and nothing here needs to
-/// latch it.
+/// The O port carries two of them **in time**, not as two nibbles: `OUTO` puts
+/// the level on the low four bits and the carry on bit 4, and bit 4 says which
+/// ladder the level is for, so each holds while the other is written. Which
+/// port feeds which ladder is not on the schematic and is taken from the
+/// reference; see [`Namco54Lle::channels`], which reports them in ladder order
+/// rather than port order.
 #[derive(Saveable)]
 #[save_version(1)]
 #[save_tlv]
@@ -54,7 +56,18 @@ pub struct Namco54Lle {
     /// still sitting on the port.
     #[save(id = 4)]
     last_o_seq: u32,
+    /// Machine cycles left holding the interrupt line down for this command.
+    #[save(id = 5)]
+    irq_hold: u8,
 }
+
+/// How long the board holds the 54XX's interrupt line down after a command.
+///
+/// The 06XX's interface clock is 64H, which is 18.432 MHz over 6 over 64, or
+/// 48 kHz, so one of its cycles is about 21 us. At the MCU's 256 kHz machine
+/// cycle that is five, and it has to be long enough for the firmware to see
+/// the line with `TSTI` before it is released.
+const IRQ_HOLD_CYCLES: u8 = 5;
 
 impl Namco54Lle {
     pub fn new() -> Self {
@@ -63,6 +76,7 @@ impl Namco54Lle {
             latched_cmd: 0,
             channels: [0; 3],
             last_o_seq: 0,
+            irq_hold: 0,
         }
     }
 
@@ -74,34 +88,39 @@ impl Namco54Lle {
     /// Accept a command byte from the Z80 through the 06XX.
     ///
     /// The nibbles land on two different ports because the MB8844's K port is
-    /// four bits wide. Nothing here raises the interrupt: see
-    /// [`set_chip_select`](Self::set_chip_select) for why the firmware needs a
-    /// held line rather than an edge.
+    /// four bits wide, and the interrupt line is asserted here and released
+    /// [`IRQ_HOLD_CYCLES`] later, the way the board's 06XX drives it. The hold
+    /// is what lets the firmware see the line with `TSTI`, which it polls
+    /// inside its own handler rather than relying on the vector alone.
+    ///
+    /// Which edge of that pulse the MCU latches on is a known discrepancy
+    /// against the reference; see [`Mb88xx::set_irq`]. It does not change this
+    /// chip's sound either way.
     pub fn write(&mut self, data: u8) {
         self.latched_cmd = data;
         self.mcu.set_k(data >> 4);
         self.mcu.set_r_input(0, data & 0x0F);
-    }
-
-    /// Follow the 06XX's chip-select line into the MCU's interrupt pin.
-    ///
-    /// **The firmware polls this pin rather than taking an interrupt from it.**
-    /// It disables interrupts and sits in a two-instruction loop, `TSTI` then a
-    /// conditional jump back, until the line reads high; only then does it
-    /// fetch the command and start a sound. So the line has to be *held* for
-    /// as long as the 06XX asserts it, and a one-cycle pulse on a write is
-    /// invisible: the chip stays in that loop forever, running, with every
-    /// register looking healthy.
-    pub fn set_chip_select(&mut self, asserted: bool) {
-        self.mcu.set_irq(asserted);
+        self.mcu.set_irq(true);
+        self.irq_hold = IRQ_HOLD_CYCLES;
     }
 
     /// Advance the MCU by one machine cycle and latch whatever it put on its
     /// output ports.
     pub fn tick(&mut self) {
+        // Release the line once the hold has run out, so the next command can
+        // pulse it again. The hold is what gives the firmware time to see the
+        // line with `TSTI` while it finishes the routine it was in.
+        if self.irq_hold > 0 {
+            self.irq_hold -= 1;
+            if self.irq_hold == 0 {
+                self.mcu.set_irq(false);
+            }
+        }
+
         self.mcu.execute_cycle();
 
-        // Channel 3 is its own port and can simply be read.
+        // R1 drives the ladder with the 100k series resistor, which is the
+        // highest of the three filters.
         self.channels[2] = self.mcu.read_r_output(1) & 0x0F;
 
         // Channels 1 and 2 share the O port in time: `OUTO` puts the level on
@@ -121,9 +140,23 @@ impl Namco54Lle {
         }
     }
 
-    /// The three channel codes, in the order the schematic numbers the ladders.
+    /// The three channel codes **in ladder order**: the 100k series leg first,
+    /// then the 47k, then the 150k, matching the order
+    /// `docs/schematics/namco-54xx-explosion.md` tabulates them.
+    ///
+    /// The ports do not arrive in that order. Which output pin group feeds
+    /// which ladder is not on the sheet, which shows only that there are three
+    /// groups of four; the assignment comes from the reference's own discrete
+    /// network, where the O port's two halves drive the 150k and 47k legs and
+    /// R1 drives the 100k one.
+    ///
+    /// **Getting this backwards is most of what a wrong explosion sounds like.**
+    /// It puts the busy, loud O-port channel through the 2.5 kHz filter and
+    /// leaves the mostly-idle R1 port driving the 168 Hz one, so the sound
+    /// comes out thin and high with no body, while every register in the chip
+    /// reads correctly.
     pub fn channels(&self) -> [u8; 3] {
-        self.channels
+        [self.channels[2], self.channels[1], self.channels[0]]
     }
 
     /// Reset the MCU to power-on state. ROM content is preserved.
@@ -132,6 +165,7 @@ impl Namco54Lle {
         self.latched_cmd = 0;
         self.channels = [0; 3];
         self.last_o_seq = 0;
+        self.irq_hold = 0;
     }
 }
 
@@ -161,7 +195,9 @@ impl Debuggable for Namco54Lle {
             value: self.latched_cmd as u64,
             width: 8,
         });
-        for (i, code) in self.channels.iter().enumerate() {
+        // Ladder order, matching `channels`, so a debugger row and the mixer
+        // are talking about the same leg.
+        for (i, code) in self.channels().iter().enumerate() {
             regs.push(DebugRegister {
                 name: ["EXPL0", "EXPL1", "EXPL2"][i],
                 value: *code as u64,
@@ -198,19 +234,20 @@ mod tests {
     }
 
     #[test]
-    fn the_chip_select_line_reaches_the_interrupt_pin_and_is_held() {
-        // The firmware vectors off this line and then polls it with `TSTI`
-        // inside the handler, so it has to be a level the board holds, not an
-        // edge synthesized on a write. Pulsing it instead leaves the chip
-        // spinning in that loop forever, running, with every register healthy.
+    fn a_command_holds_the_interrupt_line_then_releases_it() {
+        // The board pulses this line rather than holding it: asserted on the
+        // write, released about 21 us later. Dropping the hold would leave the
+        // firmware's `TSTI` poll with nothing to see.
         let mut c = chip();
         assert_eq!(c.mcu.irq_pin, 0);
         c.write(0x10);
-        assert_eq!(c.mcu.irq_pin, 0, "a write alone must not assert it");
-        c.set_chip_select(true);
-        assert_ne!(c.mcu.irq_pin, 0);
-        c.set_chip_select(false);
-        assert_eq!(c.mcu.irq_pin, 0);
+        assert_ne!(c.mcu.irq_pin, 0, "the write should assert the line");
+        for _ in 0..IRQ_HOLD_CYCLES - 1 {
+            c.tick();
+            assert_ne!(c.mcu.irq_pin, 0, "released early");
+        }
+        c.tick();
+        assert_eq!(c.mcu.irq_pin, 0, "the line should be back up by now");
     }
 
     // --- The output latches ------------------------------------------------
@@ -224,29 +261,37 @@ mod tests {
     }
 
     #[test]
-    fn bit_four_of_an_o_write_selects_which_channel_it_is_for() {
-        // Channels 1 and 2 share the port in time, and the carry says which one
-        // the level belongs to. Treating the byte as two nibbles instead gives
-        // both ladders a number neither channel ever had.
+    fn the_o_port_drives_the_two_lower_ladders_and_r1_the_top_one() {
+        // `channels` reports in ladder order, 100k series first. The O port's
+        // two halves are the 150k and 47k legs, the low and middle filters,
+        // and R1 is the 100k leg at the top. Wiring these in port order
+        // instead puts the busy channels through the 2.5 kHz filter and leaves
+        // the quiet one driving 168 Hz, which sounds thin with nothing wrong
+        // anywhere a register can show it.
         let mut c = chip();
         outo(&mut c, false, 5);
-        assert_eq!(c.channels(), [5, 0, 0]);
+        assert_eq!(
+            c.channels(),
+            [0, 0, 5],
+            "O with bit 4 clear is the 150k leg"
+        );
         outo(&mut c, true, 0xC);
         assert_eq!(
             c.channels(),
-            [5, 0xC, 0],
-            "writing channel 2 must not disturb channel 1"
+            [0, 0xC, 5],
+            "O with bit 4 set is the 47k leg, and must not disturb the other"
         );
-        outo(&mut c, false, 3);
-        assert_eq!(c.channels(), [3, 0xC, 0]);
+        c.mcu.r_output[1] = 0x9;
+        c.tick();
+        assert_eq!(c.channels(), [9, 0xC, 5], "R1 is the 100k leg");
     }
 
     #[test]
-    fn channel_three_comes_off_its_own_port() {
+    fn the_top_ladder_comes_off_its_own_port() {
         let mut c = chip();
         c.mcu.r_output[1] = 0x09;
         c.tick();
-        assert_eq!(c.channels()[2], 9);
+        assert_eq!(c.channels()[0], 9, "R1 is the 100k leg, reported first");
     }
 
     // --- Reset --------------------------------------------------------------
